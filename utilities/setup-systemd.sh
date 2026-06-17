@@ -105,11 +105,12 @@ WHAT install DOES:
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-    3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
+    3. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
+       using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
-    5. Copies systemd/*.{service,timer} -> /etc/systemd/system/
+    5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     6. systemctl daemon-reload
-    7. systemctl enable --now for all 6 timers
+    7. systemctl enable --now for all 6 timers and enables vaultwarden-startup.service
     8. Verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
@@ -866,6 +867,17 @@ remove_units() {
             fi
         fi
     done
+
+    if systemctl is-enabled "$STARTUP_SERVICE" &>/dev/null || systemctl is-active "$STARTUP_SERVICE" &>/dev/null; then
+        if _run systemctl disable --now "$STARTUP_SERVICE"; then
+            log_success "Disabled: $STARTUP_SERVICE"
+        else
+            log_warn "Failed to disable $STARTUP_SERVICE -- it may already be inactive or masked."
+            log_warn "  Check: systemctl status $STARTUP_SERVICE"
+        fi
+    elif [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would check and disable $STARTUP_SERVICE if enabled or active"
+    fi
 
     for unit in "${TIMERS[@]}" "${SERVICES[@]}" "$STARTUP_SERVICE"; do
         local dest="$UNIT_DEST_DIR/$unit"

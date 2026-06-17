@@ -209,21 +209,6 @@ resolve_secrets_file() {
     export SECRETS_FILE
 }
 
-_read_env_value_awk() {
-    local key="$1" file="$2"
-    [[ -f "$file" ]] || return 0
-    awk -F= -v k="$key" '
-        $1 == k {
-            value = substr($0, index($0, "=") + 1)
-            gsub(/^["'\''"]|["'\''"]$/, "", value)
-            found = value
-        }
-        END {
-            if (found != "") print found
-        }
-    ' "$file"
-}
-
 load_project_environment() {
     local override_state="${_VW_CALLER_PROJECT_STATE_DIR:-}"
     local override_device="${_VW_CALLER_DATA_VOLUME_DEVICE:-}"
@@ -233,17 +218,32 @@ load_project_environment() {
     local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
     local repo_env="${root}/.env"
-    local installed_env="/etc/vaultwarden/vaultwarden.env"
+    local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
     local bootstrap_state="$default_state_dir"
+
+    local _read_project_state_dir
+    _read_project_state_dir() {
+        local file="$1"
+        [[ -f "$file" ]] || return 0
+        awk -F= '$1 == "PROJECT_STATE_DIR" {
+            value = substr($0, index($0, "=") + 1)
+            gsub(/^["'"'"']|["'"'"']$/, "", value)
+            if (value != "") found = value
+        }
+        END { if (found != "") print found }' "$file"
+    }
 
     if [[ -n "$override_state" ]]; then
         bootstrap_state="$override_state"
-    elif [[ -f "$repo_env" ]]; then
-        bootstrap_state="$(_read_env_value_awk PROJECT_STATE_DIR "$repo_env")"
-        bootstrap_state="${bootstrap_state:-$default_state_dir}"
-    elif [[ -f "$installed_env" ]]; then
-        bootstrap_state="$(_read_env_value_awk PROJECT_STATE_DIR "$installed_env")"
-        bootstrap_state="${bootstrap_state:-$default_state_dir}"
+    else
+        local repo_state installed_state
+        repo_state="$(_read_project_state_dir "$repo_env")"
+        installed_state="$(_read_project_state_dir "$installed_env")"
+        if [[ -n "$repo_state" ]]; then
+            bootstrap_state="$repo_state"
+        elif [[ -n "$installed_state" ]]; then
+            bootstrap_state="$installed_state"
+        fi
     fi
 
     PROJECT_STATE_DIR="$bootstrap_state"
