@@ -68,7 +68,7 @@ setup_directories() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -gn "$real_user")
 
-    local secrets_dirs=("secrets" "secrets/keys" "secrets/.docker_secrets")
+    local secrets_dirs=("secrets" "secrets/keys" "config")
     for dir in "${secrets_dirs[@]}"; do
         ensure_dir "$dir" 700 || return 1
         chown "$real_user:$real_group" "$dir" || return 1
@@ -143,6 +143,46 @@ setup_directories() {
     return 0
 }
 
+
+_update_install_env_after_storage() {
+    [[ "${DRY_RUN}" == "true" ]] && return 0
+
+    local env_file="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env"
+    if [[ ! -f "$env_file" ]]; then
+        log_warn "Persistent install.env not found; skipping storage identity update: $env_file"
+        return 0
+    fi
+
+    if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
+        log_info "Boot-volume mode detected; preserving existing PROJECT_STATE_DIR in install.env"
+        return 0
+    fi
+
+    if ! mountpoint -q "${DATA_VOLUME_MOUNT}"; then
+        log_warn "Data volume mount is not active; skipping storage identity update: ${DATA_VOLUME_MOUNT}"
+        return 0
+    fi
+
+    local source_dev uuid device_path intended_key
+    if ! source_dev="$(findmnt -n -o SOURCE --target "${DATA_VOLUME_MOUNT}" 2>/dev/null)" || [[ -z "$source_dev" ]]; then
+        log_warn "Could not resolve mounted source for ${DATA_VOLUME_MOUNT}; skipping storage identity update"
+        return 0
+    fi
+
+    uuid="$(blkid -s UUID -o value "$source_dev" 2>/dev/null || true)"
+    device_path="$source_dev"
+    [[ -n "$uuid" && -e "/dev/disk/by-uuid/$uuid" ]] && device_path="/dev/disk/by-uuid/$uuid"
+
+    _set_env_var PROJECT_STATE_DIR "${DATA_VOLUME_MOUNT}" "$env_file"
+    _set_env_var DATA_VOLUME_MOUNT "${DATA_VOLUME_MOUNT}" "$env_file"
+    _set_env_var DATA_VOLUME_DEVICE "$device_path" "$env_file"
+
+    intended_key="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+    if [[ -f "$intended_key" ]]; then
+        _set_env_var SOPS_AGE_KEY_FILE "$intended_key" "$env_file"
+    fi
+}
+
 _mode_setup() {
     log_info "Mode: setup — provisioning data volume and directories"
 
@@ -154,6 +194,7 @@ _mode_setup() {
     # data volume is mounted. No-op when DATA_VOLUME_DEVICE is unset.
     install_docker_mount_guard || log_warn "Docker mount guard setup had a non-fatal issue"
     setup_directories || return 1
+    _update_install_env_after_storage || return 1
 
     log_success "Storage setup complete."
 }

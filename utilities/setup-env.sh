@@ -289,6 +289,52 @@ create_env_file() {
     return 0
 }
 
+
+refresh_state_artifacts() {
+    [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would refresh state-volume install.env, manifest, and recovery card"; return 0; }
+
+    local env_file="$PROJECT_ROOT/.env"
+    local rendered_domain rendered_state_dir repo_commit recovery_repo_url existing_offline_recipient
+    rendered_domain="$(_read_env_value DOMAIN "$env_file")"
+    rendered_state_dir="$(_read_env_value PROJECT_STATE_DIR "$env_file")"
+    [[ "$rendered_domain" == https://* ]] || rendered_domain="https://${rendered_domain#http://}"
+    [[ "$rendered_state_dir" == /* ]] || { log_error "PROJECT_STATE_DIR must be absolute: $rendered_state_dir"; return 1; }
+    repo_commit="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+    [[ "$repo_commit" =~ ^[0-9a-f]{40}$ ]] || { log_error "Unable to resolve 40-character repository commit"; return 1; }
+    recovery_repo_url="https://github.com/killer23d/VaultWarden-OCI.git"
+    local manifest_dir="$rendered_state_dir/config"
+    local manifest_file="$manifest_dir/dr-manifest.env"
+    existing_offline_recipient=""
+    if [[ -f "$manifest_file" ]]; then
+        existing_offline_recipient="$(_read_env_value OFFLINE_AGE_RECIPIENT "$manifest_file")"
+        [[ "$existing_offline_recipient" =~ ^age1[a-z0-9]{58}$ ]] || existing_offline_recipient=""
+    fi
+    export PROJECT_STATE_DIR="$rendered_state_dir"
+    mkdir -p "$manifest_dir" "$rendered_state_dir/secrets" || return 1
+
+    local owner group tmp install_env
+    owner=$(stat -c '%u' "$env_file"); group=$(stat -c '%g' "$env_file")
+    install_env="$manifest_dir/install.env"
+    tmp=$(mktemp -p "$manifest_dir" install.env.XXXXXX) || return 1
+    cp "$env_file" "$tmp" && chown "$owner:$group" "$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$install_env" || { rm -f "$tmp"; return 1; }
+
+    tmp=$(mktemp -p "$manifest_dir" dr-manifest.env.XXXXXX) || return 1
+    {
+        printf 'DOMAIN=%s\n' "$rendered_domain"
+        printf 'REPO_URL=%s\n' "$recovery_repo_url"
+        printf 'REPO_COMMIT=%s\n' "$repo_commit"
+        printf 'OFFLINE_AGE_RECIPIENT=%s\n' "$existing_offline_recipient"
+        printf 'STATE_LAYOUT_VERSION=1\n'
+        printf 'MANIFEST_UPDATED_AT=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } > "$tmp" && chmod 0644 "$tmp" && mv "$tmp" "$manifest_file" || { rm -f "$tmp"; return 1; }
+
+    if [[ -f "$PROJECT_ROOT/docs/recovery-card.md" ]]; then
+        tmp=$(mktemp -p "$manifest_dir" recovery-card.md.XXXXXX) || return 1
+        sed -e "s|<DOMAIN>|$rendered_domain|g" -e "s|<REPO_URL>|$recovery_repo_url|g" -e "s|<REPO_COMMIT>|$repo_commit|g" \
+            "$PROJECT_ROOT/docs/recovery-card.md" > "$tmp" && chmod 0644 "$tmp" && mv "$tmp" "$manifest_dir/recovery-card.md" || { rm -f "$tmp"; return 1; }
+    fi
+}
+
 create_docker_compose() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would create docker-compose.yml"
@@ -368,6 +414,7 @@ main() {
     [[ "$DRY_RUN" == "true" ]] && log_info "DRY RUN mode — no changes will be made"
 
     create_env_file       || { log_error "Failed to create .env";               exit 1; }
+    refresh_state_artifacts || { log_error "Failed to refresh state artifacts"; exit 1; }
     create_docker_compose || { log_error "Failed to create docker-compose.yml"; exit 1; }
 
     log_success "Environment configuration complete"

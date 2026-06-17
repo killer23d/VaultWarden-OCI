@@ -1,6 +1,14 @@
 # Configuration Reference — VaultWarden-OCI
 
-All configuration is split between two files: **`.env`** (non-sensitive settings) and **`$SECRETS_FILE`** (encrypted with Age + SOPS, default: `secrets/secrets.yaml`, edited via `./utilities/secrets-edit.sh`). Both are generated from `.example` templates by `setup.sh` — never edit generated files directly.
+Configuration is split by lifetime and sensitivity:
+
+- `${PROJECT_STATE_DIR}/config/install.env` is the authoritative persistent non-secret environment on the state volume.
+- Repository `.env` is a compatibility/bootstrap fallback generated from `.env.example` by setup.
+- `/etc/vaultwarden/vaultwarden.env` is the installed systemd bootstrap fallback.
+- `${PROJECT_STATE_DIR}/secrets/secrets.yaml` is the persistent encrypted SOPS file edited through `./utilities/secrets-edit.sh`.
+- `/run/vaultwarden-oci/secrets/` contains transient runtime Docker secret source files recreated at startup.
+
+SOPS uses the operational Age recipient and may include an optional offline USB Age recipient for recovery. Never edit generated files directly unless a utility explicitly instructs you to do so.
 
 Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [SECURITY.md](SECURITY.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
 
@@ -492,3 +500,12 @@ docker compose logs vaultwarden | grep -i push
 ## Email routing
 
 See [EMAIL.md](EMAIL.md) for the canonical email routing matrix, Direct SMTP fallback semantics, recovery-kit attachment behavior, and `host` deprecation notes.
+
+
+## Resilient state and recovery architecture
+
+VaultWarden-OCI treats `${PROJECT_STATE_DIR}/config/install.env` as the authoritative persistent non-secret environment on the state volume. The repository `.env` remains a compatibility/bootstrap fallback, and `/etc/vaultwarden/vaultwarden.env` is the installed systemd bootstrap fallback.
+
+Persistent encrypted secrets live at `${PROJECT_STATE_DIR}/secrets/secrets.yaml`. Runtime Docker secret source files are transient and recreated under `/run/vaultwarden-oci/secrets/` by `vaultwarden-startup.service` on boot. They are not persistent state.
+
+SOPS uses the operational Age recipient first and may include a second offline recovery Age recipient whose private key should be kept on USB only. Reboot recovery depends on `vaultwarden-startup.service`, which waits for the state volume and then recreates runtime secrets before reconciling containers.

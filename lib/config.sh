@@ -2,9 +2,9 @@
 # lib/config.sh — Environment and configuration loading helpers for VaultWarden-OCI.
 #
 # Provides:
-#   Load    : load_env_file
+#   Load    : load_env_file, load_project_environment
 #   Query   : get_config_value, require_config
-#   Helpers : _get_file_perms, _set_env_var, _read_env_value
+#   Helpers : _get_file_perms, _set_env_var, _read_env_value, resolve_secrets_file
 #
 # Depends on / Load order:
 #   lib/log.sh is auto-loaded if it has not already been sourced.
@@ -16,6 +16,14 @@
 
 [[ -n "${VW_CONFIG_LIB_LOADED:-}" ]] && return 0
 readonly VW_CONFIG_LIB_LOADED=1
+
+if [[ -z "${_VW_CALLER_OVERRIDES_CAPTURED:-}" ]]; then
+    _VW_CALLER_PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-}"
+    _VW_CALLER_DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
+    _VW_CALLER_DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-}"
+    _VW_CALLER_SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-}"
+    _VW_CALLER_OVERRIDES_CAPTURED=1
+fi
 
 # Self-load log.sh if not already loaded so this lib can be sourced standalone.
 _VW_CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -184,6 +192,86 @@ require_config() {
     return 0
 }
 
+resolve_secrets_file() {
+    local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
+    local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    local persistent="${PROJECT_STATE_DIR:-$default_state_dir}/secrets/secrets.yaml"
+    local legacy="${root}/secrets/secrets.yaml"
+
+    if [[ -f "$persistent" ]]; then
+        SECRETS_FILE="$persistent"
+    elif [[ -f "$legacy" ]]; then
+        SECRETS_FILE="$legacy"
+        log_warn "Using repository-local secrets file — migrate to ${persistent}"
+    else
+        SECRETS_FILE="$persistent"
+    fi
+    export SECRETS_FILE
+}
+
+load_project_environment() {
+    local override_state="${_VW_CALLER_PROJECT_STATE_DIR:-}"
+    local override_device="${_VW_CALLER_DATA_VOLUME_DEVICE:-}"
+    local override_mount="${_VW_CALLER_DATA_VOLUME_MOUNT:-}"
+    local override_key="${_VW_CALLER_SOPS_AGE_KEY_FILE:-}"
+
+    local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
+    local repo_env="${root}/.env"
+    local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
+    local bootstrap_state="$default_state_dir"
+
+    local _read_project_state_dir
+    _read_project_state_dir() {
+        local file="$1"
+        [[ -f "$file" ]] || return 0
+        awk -F= '$1 == "PROJECT_STATE_DIR" {
+            value = substr($0, index($0, "=") + 1)
+            gsub(/^["'"'"']|["'"'"']$/, "", value)
+            if (value != "") found = value
+        }
+        END { if (found != "") print found }' "$file"
+    }
+
+    if [[ -n "$override_state" ]]; then
+        bootstrap_state="$override_state"
+    else
+        local repo_state installed_state
+        repo_state="$(_read_project_state_dir "$repo_env")"
+        installed_state="$(_read_project_state_dir "$installed_env")"
+        if [[ -n "$repo_state" ]]; then
+            bootstrap_state="$repo_state"
+        elif [[ -n "$installed_state" ]]; then
+            bootstrap_state="$installed_state"
+        fi
+    fi
+
+    PROJECT_STATE_DIR="$bootstrap_state"
+    export PROJECT_STATE_DIR
+
+    local persistent_env="${PROJECT_STATE_DIR}/config/install.env"
+    if [[ -f "$persistent_env" ]]; then
+        load_env_file "$persistent_env" || return 1
+    elif [[ -f "$repo_env" ]]; then
+        log_warn "Using repository .env — migrate to ${persistent_env} for production use"
+        load_env_file "$repo_env" || return 1
+    elif [[ -f "$installed_env" ]]; then
+        log_warn "Using installed systemd environment — migrate to ${persistent_env} for production use"
+        load_env_file "$installed_env" || return 1
+    else
+        log_error "No project environment found. Expected ${persistent_env}, ${repo_env}, or ${installed_env}."
+        return 1
+    fi
+
+    [[ -n "$override_state" ]] && PROJECT_STATE_DIR="$override_state"
+    [[ -n "$override_device" ]] && DATA_VOLUME_DEVICE="$override_device"
+    [[ -n "$override_mount" ]] && DATA_VOLUME_MOUNT="$override_mount"
+    [[ -n "$override_key" ]] && SOPS_AGE_KEY_FILE="$override_key"
+    export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
+
+    resolve_secrets_file
+}
+
 _set_env_var() {
     local key="$1" value="$2" file="$3"
     local escaped_key
@@ -219,7 +307,7 @@ _read_env_value() {
         | tail -1 | cut -d= -f2- | tr -d "\"'" || true
 }
 
-export -f load_env_file get_config_value require_config
+export -f load_env_file get_config_value require_config resolve_secrets_file load_project_environment
 export -f _get_file_perms _set_env_var _read_env_value
 
 # ---------------------------------------------------------------------------

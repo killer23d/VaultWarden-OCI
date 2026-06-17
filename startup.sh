@@ -33,7 +33,7 @@ SKIP_EGRESS_FIX=false
 
 _STARTUP_WARNINGS=()
 
-DOCKER_SECRETS_DIR="${PROJECT_ROOT}/secrets/.docker_secrets"
+DOCKER_SECRETS_DIR="/run/vaultwarden-oci/secrets"
 
 show_help() {
 cat << 'EOF'
@@ -188,8 +188,6 @@ load_environment() {
     real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
     env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
 
-    # Auto-remediate a root-owned .env when startup is invoked by a non-root
-    # user, such as via sudo. This keeps non-root tooling functional.
     if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
       if _maybe_sudo chown "${real_user}:${real_group}" ".env" \
         && _maybe_sudo chmod 600 ".env"; then
@@ -199,22 +197,17 @@ load_environment() {
       fi
     fi
 
-    # Fail early when .env is unreadable so non-root tooling does not break later.
     if [[ ! -r ".env" ]]; then
       log_error ".env is not readable by the current user ($(id -un))."
       log_error "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
       return 1
     fi
-    set -a
-    # shellcheck disable=SC1091
-    source ".env"
-    set +a
-    log_success "Environment loaded from .env"
-  else
-    log_error ".env file not found!"
-    log_info "Copy .env.example to .env and configure it first"
-    return 1
   fi
+
+  load_project_environment || return 1
+  DOCKER_SECRETS_DIR="/run/vaultwarden-oci/secrets"
+  export DOCKER_SECRETS_DIR
+  log_success "Environment loaded"
 }
 
 # Required commands are declared in _VW_DEFAULT_REQUIRED_COMMANDS (lib/defaults.sh).
@@ -343,10 +336,6 @@ prepare_log_directories() {
 prepare_push_secret_placeholders() {
   local secrets_dir="$DOCKER_SECRETS_DIR"
 
-  local puid pgid
-  puid=$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")
-  pgid=$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")
-
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would enforce push secret placeholder permissions in ${secrets_dir}"
     return 0
@@ -358,12 +347,12 @@ prepare_push_secret_placeholders() {
   local dir_owner dir_mode
   dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
   dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
-  if [[ "$dir_owner" != "0:${pgid}" ]]; then
-    _maybe_sudo chown root:"${pgid}" "$secrets_dir" || return 1
+  if [[ "$dir_owner" != "0:0" ]]; then
+    _maybe_sudo chown root:root "$secrets_dir" || return 1
     changed=true
   fi
-  if [[ "$dir_mode" != "755" ]]; then
-    _maybe_sudo chmod 755 "$secrets_dir" || return 1
+  if [[ "$dir_mode" != "700" ]]; then
+    _maybe_sudo chmod 700 "$secrets_dir" || return 1
     changed=true
   fi
 
@@ -371,14 +360,14 @@ prepare_push_secret_placeholders() {
   for key in push_installation_id push_installation_key; do
     path="${secrets_dir}/${key}"
     if [[ ! -f "$path" ]]; then
-      _maybe_sudo touch "$path" || return 1
+      _maybe_sudo install -m 0444 -o root -g root /dev/null "$path" || return 1
       changed=true
     fi
 
     owner=$(stat -c '%u:%g' "$path" 2>/dev/null || echo "")
     mode=$(stat -c '%a' "$path" 2>/dev/null || echo "")
-    if [[ "$owner" != "${puid}:${pgid}" ]]; then
-      _maybe_sudo chown "${puid}:${pgid}" "$path" || return 1
+    if [[ "$owner" != "0:0" ]]; then
+      _maybe_sudo chown root:root "$path" || return 1
       changed=true
     fi
     if [[ "$mode" != "444" ]]; then
@@ -387,10 +376,17 @@ prepare_push_secret_placeholders() {
     fi
   done
 
+  dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
+  dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
+  if [[ "$dir_owner" != "0:0" || "$dir_mode" != "700" ]]; then
+    log_error "Runtime secret directory must remain root:root 0700: ${secrets_dir}"
+    return 1
+  fi
+
   if [[ "$changed" == "true" ]]; then
-    log_success "Push secret placeholders remediated for VaultWarden readability"
+    log_success "Push secret placeholders remediated with host-private permissions"
   else
-    log_success "Push secret placeholders already readable for VaultWarden"
+    log_success "Push secret placeholders already host-private"
   fi
 }
 

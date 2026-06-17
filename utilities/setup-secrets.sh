@@ -9,14 +9,14 @@ cd "${PROJECT_ROOT}"
 
 old_umask=$(umask)
 umask 077
-TMP_WORKDIR=$(mktemp -d -p "${PROJECT_ROOT}" vw_secrets_tmp.XXXXXXXXXX) || {
+TMP_WORKDIR=$(mktemp -d -p "${PROJECT_ROOT}" vw_tmp.XXXXXXXXXX) || {
     echo "ERROR: Failed to create secure temporary directory" >&2
     exit 1
 }
 umask "$old_umask"
-trap 'rm -rf "${TMP_WORKDIR:-}"' EXIT
-trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
-trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
+trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"' EXIT
+trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
+trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
 for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
@@ -33,6 +33,8 @@ init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
+export SOPS_CONFIG_FILE
 
 show_help() {
     cat << 'EOF'
@@ -280,19 +282,13 @@ HELP
                         log_error "Re-generate the Age key and retry."
                         return 1
                     fi
-                    cat > .sops.yaml << SOPS_EOF
-creation_rules:
-  - path_regex: .*\.yaml$
-    age: $age_public_key
-SOPS_EOF
-                    chmod 640 .sops.yaml
-                    chown "$(get_real_user):$(id -g -n "$(get_real_user)")" .sops.yaml 2>/dev/null || true
+                    _write_sops_config "$age_public_key" ".sops.yaml" || return 1
                     log_success "SOPS configuration created: .sops.yaml"
                     ;;
                 directories)
                     log_info "Creating directory structure..."
-                    mkdir -p secrets/keys secrets/.docker_secrets
-                    chmod 700 secrets/keys secrets/.docker_secrets
+                    mkdir -p secrets/keys /run/vaultwarden-oci/secrets
+                    chmod 700 secrets/keys /run/vaultwarden-oci/secrets
                     log_success "Directories created"
                     ;;
             esac
@@ -859,22 +855,16 @@ BACKUP_BANNER
 
         log_info "Writing secrets to encrypted YAML file..."
 
-        if ! mkdir -p "$PROJECT_ROOT/secrets"; then
-            log_error "Failed to create secrets directory: $PROJECT_ROOT/secrets"
-            log_error "Check permissions on $PROJECT_ROOT and retry."
+        if ! mkdir -p "$(dirname "$SECRETS_FILE")"; then
+            log_error "Failed to create secrets directory: $(dirname "$SECRETS_FILE")"
             return 1
         fi
 
-        local _saved_umask
-        _saved_umask=$(umask)
-        umask 077
         local temp_file
-        temp_file=$(mktemp -p "$PROJECT_ROOT/secrets" vwsecrets.XXXXXXXXXX.yaml) || {
-            umask "$_saved_umask"
-            log_error "mktemp failed in $PROJECT_ROOT/secrets"
+        temp_file="$(_ss_make_plaintext_temp)" || {
+            log_error "Failed to create protected plaintext staging file"
             return 1
         }
-        umask "$_saved_umask"
 
         # shellcheck disable=SC2064  # intentional — $temp_file must expand NOW
         _ss_register_cleanup "rm -f ${temp_file}"
@@ -915,15 +905,14 @@ BACKUP_BANNER
         fi
 
         log_info "Encrypting secrets with SOPS + Age..."
-        if ! sops --encrypt --in-place "$temp_file" 2>&1; then
-            log_error "Failed to encrypt secrets file"
+        local _operational_key _operational_recipient
+        _operational_key="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-}}"
+        _operational_recipient="$(get_age_public_key "$_operational_key")" || return 1
+        if ! _ss_commit_ciphertext_transaction "$temp_file" "$_operational_key" "$_operational_recipient" "$SECRETS_FILE" "$SOPS_CONFIG_FILE" plaintext "$(_ss_desired_recipients_csv "$_operational_recipient")"; then
+            log_error "Failed to stage, validate, and promote encrypted secrets"
             return 1
         fi
-
-        if ! mv "$temp_file" "$SECRETS_FILE"; then
-            log_error "Failed to move encrypted secrets to final location"
-            return 1
-        fi
+        rm -f "$temp_file"
 
         if ! secure_secrets_file; then
             log_error "Failed to secure secrets file permissions"
@@ -932,14 +921,14 @@ BACKUP_BANNER
 
         log_success "Secrets encrypted and written to: $SECRETS_FILE"
 
-        local docker_secrets_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/secrets/.docker_secrets"
+        local docker_secrets_dir="/run/vaultwarden-oci/secrets"
         if [[ ! -d "$docker_secrets_dir" ]]; then
             mkdir -p "$docker_secrets_dir"
             chmod 700 "$docker_secrets_dir"
             log_info "Created Docker secrets directory: $docker_secrets_dir"
         fi
 
-        if ! export_docker_secrets "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/secrets/.docker_secrets"; then
+        if ! export_docker_secrets "/run/vaultwarden-oci/secrets"; then
             log_error "Failed to export Docker secret files — run sudo utilities/setup-secrets.sh configure again"
             return 1
         fi
@@ -1013,7 +1002,7 @@ BACKUP_BANNER
             log_success "✅ Caddy admin hash in htpasswd format: admin:\$2y\$14\$..."
             log_success "✅ VaultWarden admin hash in Argon2id format"
             log_success "✅ All secrets protected with Age encryption"
-            log_success "✅ Docker secret files written to: secrets/.docker_secrets/"
+            log_success "✅ Docker secret files written to: /run/vaultwarden-oci/secrets/"
             echo ""
             echo "📋 Next Steps:"
             echo "   1. Verify .env settings:      nano .env"
@@ -1847,6 +1836,291 @@ EOF
     return 1
 }
 
+_ss_plain_tmp_dir() {
+    printf '%s' "${VW_SETUP_SECRETS_TMP_DIR:-/run/vaultwarden-oci/tmp}"
+}
+
+_ss_prepare_plain_tmp_dir() {
+    local dir
+    dir="$(_ss_plain_tmp_dir)"
+    if [[ "$dir" == "/run/vaultwarden-oci/tmp" ]]; then
+        install -d -m 0700 -o root -g root "$dir"
+    else
+        mkdir -p "$dir" && chmod 0700 "$dir"
+    fi
+}
+
+_ss_make_plaintext_temp() {
+    local dir tmp
+    _ss_prepare_plain_tmp_dir || return 1
+    dir="$(_ss_plain_tmp_dir)"
+    tmp=$(mktemp -p "$dir" vwsecrets.XXXXXXXXXX.yaml) || return 1
+    chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+    printf '%s' "$tmp"
+}
+
+_ss_valid_age_recipient() {
+    [[ "${1:-}" =~ ^age1[a-z0-9]{58}$ ]]
+}
+
+_ss_policy_recipients() {
+    local file="$1" age_value=""
+    [[ -f "$file" ]] || return 0
+    if command -v yq >/dev/null 2>&1; then
+        age_value="$(yq -r '.creation_rules[0].age // ""' "$file" 2>/dev/null || true)"
+    else
+        age_value="$(awk -F: '/^[[:space:]]*age:/ { gsub(/[ "'"'"']/, "", $2); print $2; exit }' "$file")"
+    fi
+    tr ',' '\n' <<< "$age_value" | sed '/^$/d'
+}
+
+_ss_cipher_recipients() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    if command -v yq >/dev/null 2>&1; then
+        yq -r '.sops.age[]?.recipient // empty' "$file" 2>/dev/null | sed '/^$/d'
+    else
+        awk '/^[[:space:]]*-[[:space:]]*recipient:/ { print $NF }' "$file"
+    fi
+}
+
+_ss_manifest_file() {
+    printf '%s' "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env"
+}
+
+_ss_manifest_offline_recipient() {
+    local manifest
+    manifest="$(_ss_manifest_file)"
+    [[ -f "$manifest" ]] || return 0
+    _read_env_value OFFLINE_AGE_RECIPIENT "$manifest"
+}
+
+_ss_desired_recipients_csv() {
+    local operational="$1" offline="" recipient unknown=() seen=""
+    _ss_valid_age_recipient "$operational" || { log_error "Invalid operational Age recipient: $operational"; return 1; }
+
+    if [[ -n "${OFFLINE_AGE_RECIPIENT:-}" ]]; then
+        _ss_valid_age_recipient "$OFFLINE_AGE_RECIPIENT" || { log_error "Invalid OFFLINE_AGE_RECIPIENT format"; return 1; }
+        offline="$OFFLINE_AGE_RECIPIENT"
+    else
+        offline="$(_ss_manifest_offline_recipient)"
+        if [[ -n "$offline" ]]; then
+            _ss_valid_age_recipient "$offline" || { log_error "Invalid OFFLINE_AGE_RECIPIENT in manifest"; return 1; }
+        fi
+    fi
+
+    if [[ -z "$offline" ]]; then
+        while IFS= read -r recipient; do
+            recipient="${recipient// /}"
+            [[ -z "$recipient" || "$recipient" == "$operational" ]] && continue
+            _ss_valid_age_recipient "$recipient" && unknown+=("$recipient")
+        done < <(_ss_policy_recipients "${PROJECT_ROOT}/.sops.yaml")
+        if (( ${#unknown[@]} == 1 )); then
+            offline="${unknown[0]}"
+        elif (( ${#unknown[@]} > 1 )); then
+            log_error "Multiple unknown non-operational Age recipients in .sops.yaml; review manually."
+            return 1
+        fi
+    fi
+
+    if [[ -z "$offline" && -t 0 ]]; then
+        read -r -p "Enter offline recovery Age public key (press Enter to skip): " offline
+        if [[ -n "$offline" ]]; then
+            _ss_valid_age_recipient "$offline" || { log_error "Invalid offline Age recipient format"; return 1; }
+        fi
+    fi
+
+    printf '%s' "$operational"
+    seen=",${operational},"
+    if [[ -n "$offline" && "$seen" != *",${offline},"* ]]; then
+        printf ',%s' "$offline"
+    fi
+}
+
+_ss_recipients_match() {
+    local desired_csv="$1" file="$2" mode="$3" desired sorted_desired found sorted_found
+    desired=$(tr ',' '\n' <<< "$desired_csv" | sed '/^$/d' | sort -u | paste -sd, -)
+    if [[ "$mode" == "policy" ]]; then
+        found=$(_ss_policy_recipients "$file" | sort -u | paste -sd, -)
+    else
+        found=$(_ss_cipher_recipients "$file" | sort -u | paste -sd, -)
+    fi
+    sorted_desired="$desired"
+    sorted_found="$found"
+    [[ -n "$sorted_found" && "$sorted_found" == "$sorted_desired" ]]
+}
+
+_ss_write_policy_file() {
+    local dest="$1" desired_csv="$2"
+    {
+        printf 'creation_rules:\n'
+        printf "  - path_regex: '.*\\.yaml$'\n"
+        if [[ "$desired_csv" == *,* ]]; then
+            printf '    # Offline recovery key — USB only, never stored on server\n'
+        fi
+        printf '    age: "%s"\n' "$desired_csv"
+    } > "$dest"
+    chmod 0640 "$dest"
+}
+
+_ss_set_env_var_in_file() {
+    local key="$1" value="$2" file="$3"
+    local escaped_key tmp_file escaped_value
+    escaped_key=$(printf '%s' "$key" | sed 's/[]\/$*.^[]/\\&/g')
+    tmp_file="$(dirname "$file")/.env.tmp.$$"
+    if grep -q "^${escaped_key}=" "$file" 2>/dev/null; then
+        escaped_value="${value//\\/\\\\}"
+        escaped_value="${escaped_value//&/\\&}"
+        escaped_value="${escaped_value//|/\\|}"
+        sed "s|^${escaped_key}=.*|${key}=${escaped_value}|" "$file" > "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+    else
+        cp "$file" "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+        printf '%s=%s\n' "$key" "$value" >> "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+    fi
+    chmod --reference="$file" "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" "$file" || { rm -f "$tmp_file"; return 1; }
+}
+
+_ss_stage_manifest_update() {
+    local desired_csv="$1" manifest_stage="$2" manifest_dir manifest offline=""
+    if [[ "$desired_csv" == *,* ]]; then
+        offline="${desired_csv#*,}"
+    fi
+    [[ -n "$offline" ]] || return 0
+    manifest="$(_ss_manifest_file)"
+    manifest_dir="$(dirname "$manifest")"
+    mkdir -p "$manifest_dir" || return 1
+    if [[ -f "$manifest" ]]; then
+        cp "$manifest" "$manifest_stage" || return 1
+    else
+        : > "$manifest_stage" || return 1
+    fi
+    _ss_set_env_var_in_file OFFLINE_AGE_RECIPIENT "$offline" "$manifest_stage" || return 1
+    _ss_set_env_var_in_file MANIFEST_UPDATED_AT "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$manifest_stage" || return 1
+}
+
+_ss_restore_or_remove() {
+    local existed="$1" backup="$2" target="$3"
+    if [[ "$existed" == "true" ]]; then
+        cp "$backup" "$target"
+    else
+        rm -f "$target"
+    fi
+}
+
+_ss_commit_ciphertext_transaction() {
+    local plaintext_file="$1" operational_key="$2" operational_recipient="$3" final_file="$4" policy_file="$5" mode="${6:-plaintext}" desired_csv="${7:-}"
+    local policy_stage ciphertext_stage manifest_stage backup_dir ciphertext_backup policy_backup manifest_backup manifest_file caller_return_trap caller_int_trap caller_term_trap
+    local ciphertext_existed=false policy_existed=false manifest_existed=false ciphertext_promoted=false policy_promoted=false manifest_promoted=false
+
+    if [[ -z "$desired_csv" ]]; then
+        desired_csv="$(_ss_desired_recipients_csv "$operational_recipient")" || return 1
+    fi
+    manifest_file="$(_ss_manifest_file)"
+    caller_return_trap="$(trap -p RETURN)"
+    caller_int_trap="$(trap -p INT)"
+    caller_term_trap="$(trap -p TERM)"
+
+    if [[ "$mode" == "rekey" && -f "$final_file" ]] \
+        && _ss_recipients_match "$desired_csv" "$policy_file" policy \
+        && _ss_recipients_match "$desired_csv" "$final_file" cipher; then
+        log_info "SOPS policy and ciphertext recipients already current"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$final_file")" "$(dirname "$policy_file")" "$(dirname "$manifest_file")" || return 1
+    backup_dir=$(mktemp -d) || return 1
+    policy_stage=$(mktemp -p "$(dirname "$policy_file")" .sops.yaml.XXXXXXXXXX) || { rm -rf "$backup_dir"; return 1; }
+    ciphertext_stage=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$final_file")") || { rm -rf "$backup_dir"; rm -f "$policy_stage"; return 1; }
+    manifest_stage=$(mktemp -p "$(dirname "$manifest_file")" dr-manifest.env.XXXXXXXXXX) || { rm -rf "$backup_dir"; rm -f "$policy_stage" "$ciphertext_stage"; return 1; }
+    ciphertext_backup="$backup_dir/secrets.yaml.bak"
+    policy_backup="$backup_dir/sops.yaml.bak"
+    manifest_backup="$backup_dir/dr-manifest.env.bak"
+    _ss_tx_restore_traps() {
+        if [[ -n "$caller_return_trap" ]]; then eval "$caller_return_trap"; else trap - RETURN; fi
+        if [[ -n "$caller_int_trap" ]]; then eval "$caller_int_trap"; else trap - INT; fi
+        if [[ -n "$caller_term_trap" ]]; then eval "$caller_term_trap"; else trap - TERM; fi
+    }
+    _ss_tx_cleanup() { rm -f "${policy_stage:-}" "${ciphertext_stage:-}" "${manifest_stage:-}"; rm -rf "${backup_dir:-}"; }
+    _ss_tx_rollback() {
+        [[ "$ciphertext_promoted" == "true" ]] && _ss_restore_or_remove "$ciphertext_existed" "$ciphertext_backup" "$final_file"
+        [[ "$policy_promoted" == "true" ]] && _ss_restore_or_remove "$policy_existed" "$policy_backup" "$policy_file"
+        [[ "$manifest_promoted" == "true" ]] && _ss_restore_or_remove "$manifest_existed" "$manifest_backup" "$manifest_file"
+    }
+    _ss_tx_fail() { local code="${1:-1}"; _ss_tx_rollback; _ss_tx_cleanup; _ss_tx_restore_traps; return "$code"; }
+    _ss_tx_signal() { local code="$1"; _ss_tx_fail "$code"; return "$code"; }
+    trap '_ss_tx_signal 130; return 130' INT
+    trap '_ss_tx_signal 143; return 143' TERM
+
+    if [[ -f "$final_file" ]]; then cp "$final_file" "$ciphertext_backup"; ciphertext_existed=true; fi
+    if [[ -f "$policy_file" ]]; then cp "$policy_file" "$policy_backup"; policy_existed=true; fi
+    if [[ -f "$manifest_file" ]]; then cp "$manifest_file" "$manifest_backup"; manifest_existed=true; fi
+
+    _ss_write_policy_file "$policy_stage" "$desired_csv" || { _ss_tx_fail 1; return 1; }
+    _ss_stage_manifest_update "$desired_csv" "$manifest_stage" || { _ss_tx_fail 1; return 1; }
+
+    if [[ "$mode" == "rekey" ]]; then
+        cp "$final_file" "$ciphertext_stage" || { _ss_tx_fail 1; return 1; }
+    else
+        SOPS_AGE_KEY_FILE="$operational_key" sops --config "$policy_stage" --encrypt --output "$ciphertext_stage" "$plaintext_file" || { _ss_tx_fail 1; return 1; }
+    fi
+
+    SOPS_AGE_KEY_FILE="$operational_key" sops --config "$policy_stage" updatekeys --yes "$ciphertext_stage" || { _ss_tx_fail 1; return 1; }
+    SOPS_AGE_KEY_FILE="$operational_key" sops -d "$ciphertext_stage" >/dev/null || { _ss_tx_fail 1; return 1; }
+    _ss_recipients_match "$desired_csv" "$policy_stage" policy || { log_error "Staged policy recipients do not match desired recipient set"; _ss_tx_fail 1; return 1; }
+    _ss_recipients_match "$desired_csv" "$ciphertext_stage" cipher || { log_error "Staged ciphertext recipients do not match desired recipient set"; _ss_tx_fail 1; return 1; }
+
+    if ! mv "$ciphertext_stage" "$final_file"; then
+        _ss_tx_fail 1
+        return 1
+    fi
+    ciphertext_promoted=true
+    if [[ "${SETUP_SECRETS_TEST_TERM_AFTER_CIPHERTEXT_PROMOTION:-}" == "1" ]]; then
+        kill -TERM $$
+    fi
+
+    if ! mv "$policy_stage" "$policy_file"; then
+        _ss_tx_fail 1
+        return 1
+    fi
+    policy_promoted=true
+
+    if [[ -s "$manifest_stage" ]]; then
+        if ! mv "$manifest_stage" "$manifest_file"; then
+            _ss_tx_fail 1
+            return 1
+        fi
+        manifest_promoted=true
+    else
+        rm -f "$manifest_stage"
+    fi
+
+    if ! SOPS_AGE_KEY_FILE="$operational_key" sops -d "$final_file" >/dev/null; then
+        _ss_tx_fail 1
+        return 1
+    fi
+
+    _ss_tx_cleanup
+    _ss_tx_restore_traps
+}
+
+_ss_update_manifest_after_validation() {
+    local desired_csv="$1" manifest_dir manifest manifest_stage
+    manifest="$(_ss_manifest_file)"
+    manifest_dir="$(dirname "$manifest")"
+    mkdir -p "$manifest_dir" || return 1
+    manifest_stage=$(mktemp -p "$manifest_dir" dr-manifest.env.XXXXXXXXXX) || return 1
+    if ! _ss_stage_manifest_update "$desired_csv" "$manifest_stage"; then
+        rm -f "$manifest_stage"
+        return 1
+    fi
+    if [[ -s "$manifest_stage" ]]; then
+        mv "$manifest_stage" "$manifest"
+    else
+        rm -f "$manifest_stage"
+    fi
+}
+
 # Bootstrap the Age key, SOPS config, and placeholder secrets file.
 # Run setup-secrets.sh configure after editing .env to add real credentials.
 _cmd_bootstrap() {
@@ -1888,8 +2162,8 @@ EOF
     fi
 
     # Create the directory structure.
-    mkdir -p "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
-    chmod 700 "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
+    mkdir -p "${PROJECT_ROOT}/secrets/keys" "/run/vaultwarden-oci/secrets" || return 1
+    chmod 700 "${PROJECT_ROOT}/secrets/keys" "/run/vaultwarden-oci/secrets" || return 1
 
     # Create or validate the repository Age key.
     if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
@@ -1949,42 +2223,43 @@ EOF
         log_success "SOPS_AGE_KEY_FILE set to $canonical_key in .env"
     fi
 
-    # Write .sops.yaml.
-    local age_public_key
+    # Resolve the complete desired recipient set before deciding whether the
+    # existing ciphertext can be left untouched. A decryptable file alone is
+    # not proof that the policy and ciphertext metadata are current.
+    local age_public_key desired_recipients
     age_public_key=$(get_age_public_key "$age_key_file") || return 1
     if [[ -z "$age_public_key" ]] || ! [[ "$age_public_key" =~ ^age1[a-z0-9]{58}$ ]]; then
         log_error "Age public key has unexpected format: '${age_public_key}'"
         return 1
     fi
-    if [[ -f "$sops_config" ]] && [[ "$FORCE" != "true" ]]; then
-        if grep -qF "$age_public_key" "$sops_config" 2>/dev/null \
-           && grep -q "creation_rules:" "$sops_config" 2>/dev/null; then
-            log_info "SOPS config already up-to-date (skipping)"
-        else
-            log_warn "SOPS config exists but public key differs — rewriting"
-            _write_sops_config "$age_public_key" "$sops_config" || return 1
-        fi
-    else
-        _write_sops_config "$age_public_key" "$sops_config" || return 1
-    fi
+    desired_recipients="$(_ss_desired_recipients_csv "$age_public_key")" || return 1
 
-    # Create the placeholder encrypted secrets structure.
+    # Create or rekey the placeholder encrypted secrets structure.
     if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
-        local decrypt_ok=false
-        ( export SOPS_AGE_KEY_FILE="$age_key_file"; \
-          sops -d "$secrets_file" >/dev/null 2>&1 ) && decrypt_ok=true
-        if [[ "$decrypt_ok" == "true" ]]; then
-            log_info "Placeholder secrets.yaml already present and decryptable (skipping)"
-            log_success "Bootstrap complete — run './setup.sh secrets' to configure credentials"
-            return 0
-        else
+        if ! SOPS_AGE_KEY_FILE="$age_key_file" sops -d "$secrets_file" >/dev/null 2>&1; then
             log_error "secrets.yaml unreadable with current key. Use --force to overwrite."
             return 1
         fi
+        if _ss_recipients_match "$desired_recipients" "$sops_config" policy \
+            && _ss_recipients_match "$desired_recipients" "$secrets_file" cipher; then
+            log_info "Placeholder secrets.yaml recipient state already current (skipping)"
+            log_success "Bootstrap complete — run './setup.sh secrets' to configure credentials"
+            return 0
+        fi
+        log_info "Existing secrets.yaml decrypts but recipient state is not current; staging rekey"
+        if ! _ss_commit_ciphertext_transaction "" "$age_key_file" "$age_public_key" "$secrets_file" "$sops_config" rekey "$desired_recipients"; then
+            log_error "Failed to rekey existing secrets.yaml"
+            return 1
+        fi
+        log_success "Existing secrets.yaml recipient state updated"
+        return 0
     fi
 
     local tmp_secrets
-    tmp_secrets=$(mktemp "${PROJECT_ROOT}/secrets/vwsecrets.XXXXXXXXXX.yaml") || return 1
+    tmp_secrets="$(_ss_make_plaintext_temp)" || return 1
+    trap 'rm -f "$tmp_secrets"' RETURN
+    trap 'rm -f "$tmp_secrets"; exit 130' INT
+    trap 'rm -f "$tmp_secrets"; exit 143' TERM
     # Build placeholder YAML body from secrets-schema.yaml so that every key
     # defined in the schema is bootstrapped automatically — no lines here need
     # to change when a key is added or renamed.
@@ -2001,9 +2276,10 @@ EOF
         done <<< "$_bkeys"
     } > "$tmp_secrets"
     chmod 600 "$tmp_secrets"
-    ( export SOPS_AGE_KEY_FILE="$age_key_file"; \
-      sops --encrypt --output "$secrets_file" "$tmp_secrets" ) \
-        || { rm -f "$tmp_secrets"; return 1; }
+    if ! _ss_commit_ciphertext_transaction "$tmp_secrets" "$age_key_file" "$age_public_key" "$secrets_file" "$sops_config" plaintext "$desired_recipients"; then
+        rm -f "$tmp_secrets"
+        return 1
+    fi
     rm -f "$tmp_secrets"
     chmod 600 "$secrets_file" || return 1
     local real_user; real_user=$(get_real_user)
@@ -2014,18 +2290,104 @@ EOF
     return 0
 }
 
+
+_valid_age_recipient() {
+    [[ "${1:-}" =~ ^age1[a-z0-9]{58}$ ]]
+}
+
+_policy_recipients() {
+    local file="$1" age_value=""
+    [[ -f "$file" ]] || return 0
+    if command -v yq >/dev/null 2>&1; then
+        age_value="$(yq -r '.creation_rules[0].age // ""' "$file" 2>/dev/null || true)"
+    else
+        age_value="$(awk -F: '/^[[:space:]]*age:/ { gsub(/[ "'"'"']/, "", $2); print $2; exit }' "$file")"
+    fi
+    tr ',' '\n' <<< "$age_value" | sed '/^$/d'
+}
+
+_resolve_offline_recipient() {
+    local operational="$1" manifest="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env"
+    local candidate="" unknown=() recipient
+
+    if [[ -n "${OFFLINE_AGE_RECIPIENT:-}" ]]; then
+        _valid_age_recipient "$OFFLINE_AGE_RECIPIENT" || { log_error "Invalid OFFLINE_AGE_RECIPIENT format"; return 1; }
+        printf '%s' "$OFFLINE_AGE_RECIPIENT"
+        return 0
+    fi
+
+    if [[ -f "$manifest" ]]; then
+        candidate="$(_read_env_value OFFLINE_AGE_RECIPIENT "$manifest")"
+        if [[ -n "$candidate" ]]; then
+            _valid_age_recipient "$candidate" || { log_error "Invalid OFFLINE_AGE_RECIPIENT in $manifest"; return 1; }
+            printf '%s' "$candidate"
+            return 0
+        fi
+    fi
+
+    while IFS= read -r recipient; do
+        recipient="${recipient// /}"
+        [[ -z "$recipient" || "$recipient" == "$operational" ]] && continue
+        _valid_age_recipient "$recipient" && unknown+=("$recipient")
+    done < <(_policy_recipients "$PROJECT_ROOT/.sops.yaml")
+
+    if (( ${#unknown[@]} == 1 )); then
+        printf '%s' "${unknown[0]}"
+        return 0
+    fi
+    if (( ${#unknown[@]} > 1 )); then
+        log_error "Multiple unknown recipients in .sops.yaml — review manually before continuing."
+        return 1
+    fi
+
+    if [[ -t 0 ]]; then
+        read -r -p "Enter offline recovery Age public key (press Enter to skip): " candidate
+        if [[ -n "$candidate" ]]; then
+            _valid_age_recipient "$candidate" || { log_error "Invalid offline Age recipient format"; return 1; }
+            printf '%s' "$candidate"
+        fi
+    fi
+}
+
+_update_dr_manifest_offline_recipient() {
+    local recipient="$1"
+    local manifest_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config"
+    local manifest="$manifest_dir/dr-manifest.env"
+    mkdir -p "$manifest_dir" || return 1
+    [[ -f "$manifest" ]] || : > "$manifest"
+    _set_env_var OFFLINE_AGE_RECIPIENT "$recipient" "$manifest"
+    _set_env_var MANIFEST_UPDATED_AT "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$manifest"
+}
+
 _write_sops_config() {
-    local age_pub="$1" dest="$2"
-    cat > "$dest" << SOPS_EOF
-creation_rules:
-  - path_regex: .*\.yaml$
-    age: $age_pub
-SOPS_EOF
-    chmod 640 "$dest"
+    local age_pub="$1" dest="$2" offline_recipient="${3:-}"
+    local recipients="$age_pub"
+    local tmp
+
+    if [[ -z "$offline_recipient" ]]; then
+        offline_recipient="$(_resolve_offline_recipient "$age_pub")" || return 1
+    fi
+    if [[ -n "$offline_recipient" && "$offline_recipient" != "$age_pub" ]]; then
+        recipients="${age_pub},${offline_recipient}"
+    fi
+
+    tmp=$(mktemp -p "$(dirname "$dest")" .sops.yaml.XXXXXXXXXX) || return 1
+    {
+        printf 'creation_rules:\n'
+        printf "  - path_regex: '.*\\.yaml$'\n"
+        if [[ -n "$offline_recipient" ]]; then
+            printf '    # Offline recovery key — USB only, never stored on server\n'
+        fi
+        printf '    age: "%s"\n' "$recipients"
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 640 "$tmp"
     local real_user; real_user=$(get_real_user)
-    chown "${real_user}:$(id -g -n "$real_user")" "$dest" 2>/dev/null || true
+    chown "${real_user}:$(id -g -n "$real_user")" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$dest"
+    [[ -n "$offline_recipient" ]] && _update_dr_manifest_offline_recipient "$offline_recipient"
     log_success "SOPS config written: $dest"
 }
+
 
 main() {
     local subcmd="${1:-}"
@@ -2037,16 +2399,25 @@ main() {
     shift || true
 
     case "$subcmd" in
+        help|--help|-h)      show_help; exit 0 ;;
+        --version|-V)        print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
+        "")  log_error "Subcommand required. Use --help for usage."; show_help; exit 1 ;;
+    esac
+
+    load_project_environment || exit 1
+
+    case "$subcmd" in
         bootstrap)           _cmd_bootstrap "$@" ;;
         configure)           _cmd_configure "$@" ;;
         rotate)              _cmd_rotate "$@" ;;
         export-recovery-kit) _cmd_export_recovery_kit "$@" ;;
         breakglass)          _cmd_breakglass "$@" ;;
-        help|--help|-h)      show_help; exit 0 ;;
-        --version|-V)        print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
-        "")  log_error "Subcommand required. Use --help for usage."; show_help; exit 1 ;;
         *)   log_error "Unknown subcommand: ${subcmd}"; show_help; exit 1 ;;
     esac
 }
+
+if [[ "${SETUP_SECRETS_TRANSACTION_TESTING:-}" == "source-only" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 main "$@"
