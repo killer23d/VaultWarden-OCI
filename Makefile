@@ -879,6 +879,7 @@ test: ## Run all tests (secrets, config validation)
 test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-architecture-helpers.sh
 	@tests/test-security-helpers.sh
+	@tests/test-secrets-cli-help.sh
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)

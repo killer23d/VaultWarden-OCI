@@ -8,19 +8,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-source "${PROJECT_ROOT}/lib/log.sh"
-source "${PROJECT_ROOT}/lib/config.sh"
-if [[ -f "${PROJECT_ROOT}/.env" ]]; then
-    load_env_file "${PROJECT_ROOT}/.env"
-fi
-source "${PROJECT_ROOT}/lib/common.sh"
-init_common_lib "$0"
-source "${PROJECT_ROOT}/lib/crypto.sh"
-source "${PROJECT_ROOT}/lib/secrets.sh"
-load_project_environment || exit 1
-
-trap perform_cleanup EXIT
-
 show_help() {
     cat << 'EOF'
 VaultWarden Secrets — export-recovery-kit subcommand
@@ -47,6 +34,29 @@ EXAMPLES:
     ./edit-secrets.sh export-recovery-kit
 EOF
 }
+
+dispatch_information_request() {
+    if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        show_help
+        exit 0
+    fi
+}
+
+dispatch_information_request "$@"
+
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
+if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+    load_env_file "${PROJECT_ROOT}/.env"
+fi
+source "${PROJECT_ROOT}/lib/common.sh"
+init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/crypto.sh"
+source "${PROJECT_ROOT}/lib/secrets.sh"
+load_project_environment || exit 1
+
+trap perform_cleanup EXIT
 
 check_prerequisites() {
     local missing=()

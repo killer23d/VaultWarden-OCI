@@ -650,25 +650,114 @@ DESCRIPTION:
 ### secrets-export-recovery-kit.sh
 
 ```
-(--help not available or requires root)
+VaultWarden Secrets — export-recovery-kit subcommand
+
+USAGE:
+    ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]
+    ./edit-secrets.sh export-recovery-kit [OPTIONS]
+
+DESCRIPTION:
+    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, then
+    exports a plaintext recovery document containing the Age private key and
+    all credentials. The output file is written to a tmpfs-backed directory
+    (e.g. /dev/shm) with mode 0600 and an auto-delete scheduled after 30
+    minutes via at(1).
+
+    This is the canonical standalone entry point for recovery kit export.
+    setup-secrets.sh delegates its post-setup export prompt here.
+
+FLAGS:
+    --help, -h    Show this help
+
+EXAMPLES:
+    ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
+    ./edit-secrets.sh export-recovery-kit
 ```
 
 ### secrets-list.sh
 
 ```
-(--help not available or requires root)
+VaultWarden Secrets — list subcommand
+
+USAGE:
+    ./utilities/secrets-list.sh list [OPTIONS]
+    ./edit-secrets.sh list
+
+DESCRIPTION:
+    Lists secret key names only — no values are decrypted or displayed.
+
+FLAGS:
+    --help, -h    Show this help
+
+EXAMPLES:
+    ./utilities/secrets-list.sh list
+    ./edit-secrets.sh list
 ```
 
 ### secrets-rotate.sh
 
 ```
-(--help not available or requires root)
+VaultWarden Secrets — rotate subcommand
+
+USAGE:
+    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
+    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
+    ./edit-secrets.sh rotate FIELD [OPTIONS]
+
+DESCRIPTION:
+    Re-collects and re-hashes a single named credential, then atomically
+    re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
+
+SUPPORTED FIELDS:
+    Derived at runtime from secrets-schema.yaml.
+    Run after setup.sh install for the full schema list, or inspect:
+      secrets/secrets-schema.yaml
+
+EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
+    EMAIL_MODE=auto   — tries API → Postfix sidecar → direct upstream SMTP in order
+    EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
+    EMAIL_MODE=smtp   — Postfix sidecar → direct SMTP (rotate: smtp_password)
+    EMAIL_MODE=direct — direct SMTP only (rotate: smtp_password)
+    EMAIL_MODE=host   — deprecated alias for direct (rotate: smtp_password)
+    EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
+        → selects which HTTP driver is used at runtime;
+          the token is always stored as "email_api_token" in secrets.yaml.
+
+FLAGS:
+    --dry-run     Preview what would change without writing
+    --no-backup   Skip creating backup before rotation
+    --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    ./utilities/secrets-rotate.sh admin_token
+    ./utilities/secrets-rotate.sh cf_worker_bouncer_token
+    ./utilities/secrets-rotate.sh email_api_token --dry-run
+    ./edit-secrets.sh rotate smtp_password
+    ./edit-secrets.sh rotate backup_passphrase --no-backup
 ```
 
 ### secrets-view.sh
 
 ```
-(--help not available or requires root)
+VaultWarden Secrets — view subcommand
+
+USAGE:
+    ./utilities/secrets-view.sh [OPTIONS]
+    ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
+    ./edit-secrets.sh view [OPTIONS]
+
+DESCRIPTION:
+    Decrypts and displays secrets in read-only mode. No changes are saved.
+
+FLAGS:
+    --editor EDITOR    Override pager/viewer (default: less, then $EDITOR -R)
+    --help, -h         Show this help
+
+EXAMPLES:
+    ./utilities/secrets-view.sh
+    ./utilities/secrets-view.sh --editor vim
+    ./edit-secrets.sh view
 ```
 
 ### setup-crowdsec.sh
