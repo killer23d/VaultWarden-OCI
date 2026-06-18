@@ -229,13 +229,16 @@ sudo ./recover.sh \
 
 sudo ./setup.sh systemd install
 
+sudo systemctl start vaultwarden-startup.service
+
 sudo ./utilities/smoke-test.sh
 ```
 
 `recover.sh` restores and starts the stack directly. Then
 `setup.sh systemd install` installs and enables the production startup unit and
-timers. Run the smoke test last because it validates that installed systemd
-unit and its active service state.
+timers, but enables `vaultwarden-startup.service` without starting it. The
+explicit `systemctl start` makes the oneshot startup service active before the
+smoke test runs last and verifies its state.
 
 Confirm and record that:
 
