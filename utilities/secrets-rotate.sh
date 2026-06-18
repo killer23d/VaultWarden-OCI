@@ -8,20 +8,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-source "${PROJECT_ROOT}/lib/log.sh"
-source "${PROJECT_ROOT}/lib/config.sh"
-source "${PROJECT_ROOT}/lib/common.sh"
-init_common_lib "$0"
-source "${PROJECT_ROOT}/lib/crypto.sh"
-source "${PROJECT_ROOT}/lib/secrets.sh"
-load_project_environment || exit 1
-SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
-export SOPS_CONFIG_FILE
-
-log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
-
-trap perform_cleanup EXIT
-
 show_help() {
     cat << 'EOF'
 VaultWarden Secrets — rotate subcommand
@@ -65,6 +51,61 @@ EXAMPLES:
 
 EOF
 }
+
+show_version() {
+    local version
+    version=$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo "unknown")
+    printf 'VaultWarden-OCI %s\n' "${version:-unknown}"
+}
+
+dispatch_information_request() {
+    local -a args=("$@")
+    local index=0
+
+    if [[ "${args[0]:-}" == "rotate" ]]; then
+        index=1
+    fi
+
+    if [[ $index -lt ${#args[@]} && "${args[$index]}" != --* &&
+          "${args[$index]}" != "-h" && "${args[$index]}" != "-V" ]]; then
+        index=$((index + 1))
+    fi
+
+    while [[ $index -lt ${#args[@]} ]]; do
+        case "${args[$index]}" in
+            --dry-run|--no-backup)
+                index=$((index + 1))
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --version|-V)
+                show_version
+                exit 0
+                ;;
+            *)
+                return
+                ;;
+        esac
+    done
+}
+
+dispatch_information_request "$@"
+
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
+source "${PROJECT_ROOT}/lib/common.sh"
+init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/crypto.sh"
+source "${PROJECT_ROOT}/lib/secrets.sh"
+load_project_environment || exit 1
+SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
+export SOPS_CONFIG_FILE
+
+log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
+
+trap perform_cleanup EXIT
 
 DRY_RUN=false
 SKIP_BACKUP=false

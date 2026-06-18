@@ -8,16 +8,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-source "${PROJECT_ROOT}/lib/log.sh"
-source "${PROJECT_ROOT}/lib/config.sh"
-source "${PROJECT_ROOT}/lib/common.sh"
-init_common_lib "$0"
-source "${PROJECT_ROOT}/lib/crypto.sh"
-source "${PROJECT_ROOT}/lib/secrets.sh"
-load_project_environment || exit 1
-
-trap perform_cleanup EXIT
-
 show_help() {
     cat << 'EOF'
 VaultWarden Secrets — view subcommand
@@ -40,6 +30,46 @@ EXAMPLES:
     ./edit-secrets.sh view
 EOF
 }
+
+dispatch_information_request() {
+    local -a args=("$@")
+    local index=0
+
+    if [[ "${args[0]:-}" == "view" ]]; then
+        index=1
+    fi
+
+    while [[ $index -lt ${#args[@]} ]]; do
+        case "${args[$index]}" in
+            --editor)
+                if [[ $((index + 1)) -ge ${#args[@]} || -z "${args[$((index + 1))]}" ||
+                      "${args[$((index + 1))]}" == --* ]]; then
+                    return
+                fi
+                index=$((index + 2))
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            *)
+                return
+                ;;
+        esac
+    done
+}
+
+dispatch_information_request "$@"
+
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
+source "${PROJECT_ROOT}/lib/common.sh"
+init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/crypto.sh"
+source "${PROJECT_ROOT}/lib/secrets.sh"
+load_project_environment || exit 1
+
+trap perform_cleanup EXIT
 
 # Parse EDITOR into an array so values like 'code --wait' keep their flags.
 read -ra EDITOR_CMD <<< "${EDITOR:-nano}"

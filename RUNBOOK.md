@@ -64,6 +64,61 @@ Workers bouncer setup guide.
 
 ---
 
+## Post-deployment and post-recovery VM smoke check
+
+From the repository root on the Ubuntu VM, use the smoke test as the normal
+verification path after deployment or recovery:
+
+```bash
+sudo ./utilities/smoke-test.sh
+```
+
+If a check fails, run this compact troubleshooting sequence:
+
+```bash
+docker compose -f docker-compose.yml config --quiet
+
+sudo systemd-analyze verify \
+  /etc/systemd/system/vaultwarden-startup.service
+
+# Operator remediation when the startup service is inactive; the smoke test
+# reports this command but never starts the service itself.
+sudo systemctl start vaultwarden-startup.service
+
+sudo test \
+  "$(stat -c '%U:%G %a' /run/vaultwarden-oci/secrets)" \
+  = "root:root 700"
+
+sudo find /run/vaultwarden-oci/secrets \
+  -maxdepth 1 \
+  -type f \
+  \( ! -user root -o ! -group root -o ! -perm 0444 \) \
+  -print
+
+sudo bash -c '
+  set -euo pipefail
+  export PROJECT_ROOT="$PWD"
+  source "$PROJECT_ROOT/lib/config.sh"
+  load_project_environment
+  SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" \
+    sops -d "$SECRETS_FILE" >/dev/null
+'
+
+curl -fsS "https://vault.example.com/api/alive"
+```
+
+Replace `vault.example.com` with the actual Vaultwarden hostname.
+
+No output from `find` means it found no runtime secret file with an incorrect
+owner, group, or mode. Successful SOPS verification intentionally sends all
+plaintext to `/dev/null`; none of these checks should print secret values.
+`/run/vaultwarden-oci/secrets` is transient and is expected to be recreated
+after reboot by `vaultwarden-startup.service`. The documented `systemctl start`
+command is an operator action and is never performed automatically by the smoke
+test.
+
+---
+
 ## Updates
 
 | Task | Command |

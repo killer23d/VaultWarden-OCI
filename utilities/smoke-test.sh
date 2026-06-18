@@ -70,6 +70,7 @@ declare -a _CHECK_DETAILS=()
 _PASS=0
 _FAIL=0
 _SKIP=0
+PROJECT_ENVIRONMENT_LOADED=false
 
 _record() {
     local name="$1" result="$2" detail="${3:-}"
@@ -84,15 +85,18 @@ _record() {
 }
 
 _check_pass() { local name="$1" detail="${2:-}"; _record "$name" PASS "$detail"
-    [[ "$QUIET" == false ]] && log_success "  [PASS] $name${detail:+: $detail}"; }
+    [[ "$QUIET" == false ]] && log_success "  [PASS] $name${detail:+: $detail}"
+    return 0; }
 
 _check_fail() { local name="$1" detail="${2:-}"; _record "$name" FAIL "$detail"
     log_warn   "  [FAIL] $name${detail:+: $detail}"
     # Clear the EXIT trap before printing so the summary appears exactly once.
-    [[ "$FAIL_FAST" == true ]] && { trap - EXIT; log_error "Stopping on first failure (--fail-fast)."; _print_summary; exit 1; }; }
+    [[ "$FAIL_FAST" == true ]] && { trap - EXIT; log_error "Stopping on first failure (--fail-fast)."; _print_summary; exit 1; }
+    return 0; }
 
 _check_skip() { local name="$1" detail="${2:-}"; _record "$name" SKIP "$detail"
-    [[ "$QUIET" == false ]] && log_info   "  [SKIP] $name${detail:+: $detail}"; }
+    [[ "$QUIET" == false ]] && log_info   "  [SKIP] $name${detail:+: $detail}"
+    return 0; }
 
 _http_status() {
     curl -sk --max-time 10 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo "000"
@@ -102,22 +106,56 @@ _container_running() {
     docker compose ps --services --filter status=running 2>/dev/null | grep -qx "$1"
 }
 
-check_env_file() {
-    [[ "$QUIET" == false ]] && log_info "Checking environment file..."
-    if load_env_file 2>/dev/null; then
-        _check_pass "env-file" ".env loaded and permissions OK"
+_require_project_environment() {
+    local check_name="$1"
+    if [[ "$PROJECT_ENVIRONMENT_LOADED" != true ]]; then
+        _check_skip "$check_name" "project environment unavailable"
+        return 1
+    fi
+    return 0
+}
+
+load_smoke_test_environment() {
+    [[ "$QUIET" == false ]] && log_info "Loading canonical project environment..."
+    if load_project_environment; then
+        PROJECT_ENVIRONMENT_LOADED=true
+        _check_pass "project-environment" "canonical project environment loaded"
     else
-        _check_fail "env-file" ".env missing or insecure permissions"
+        _check_fail "project-environment" \
+            "load_project_environment failed; environment-dependent checks will be skipped"
     fi
 }
 
 check_domain_configured() {
     [[ "$QUIET" == false ]] && log_info "Checking DOMAIN configuration..."
+    _require_project_environment "domain-configured" || return 0
     local domain="${DOMAIN:-}"
     if [[ -z "$domain" || "$domain" == *"example.com"* ]]; then
         _check_fail "domain-configured" "DOMAIN is unset or still set to example.com"
     else
         _check_pass "domain-configured" "$domain"
+    fi
+}
+
+check_compose_config() {
+    [[ "$QUIET" == false ]] && log_info "Checking Docker Compose configuration..."
+    if ! has_command docker; then
+        _check_skip "compose-config" "Docker is unavailable"
+        return
+    fi
+    if ! docker compose version >/dev/null 2>&1; then
+        _check_skip "compose-config" "Docker Compose plugin is unavailable"
+        return
+    fi
+
+    local compose_file="${SCRIPT_DIR}/docker-compose.yml"
+    if [[ ! -f "$compose_file" ]]; then
+        _check_fail "compose-config" "configuration not found: $compose_file"
+    elif docker compose -f "$compose_file" config --quiet >/dev/null 2>&1; then
+        _check_pass "compose-config" "docker-compose.yml is valid"
+    else
+        _check_fail "compose-config" \
+            "docker compose -f docker-compose.yml config --quiet failed"
     fi
 }
 
@@ -145,6 +183,7 @@ check_containers_running() {
 
 check_tls_certificate() {
     [[ "$QUIET" == false ]] && log_info "Checking TLS certificate..."
+    _require_project_environment "tls-cert" || return 0
     local domain="${DOMAIN:-}"
     [[ -z "$domain" ]] && { _check_skip "tls-cert" "DOMAIN not set"; return; }
     local host="${domain#https://}"
@@ -177,6 +216,7 @@ check_tls_certificate() {
 
 check_http_endpoints() {
     [[ "$QUIET" == false ]] && log_info "Checking HTTP endpoints..."
+    _require_project_environment "http-endpoints" || return 0
     local domain="${DOMAIN:-}"
     [[ -z "$domain" ]] && { _check_skip "http-endpoints" "DOMAIN not set"; return; }
 
@@ -208,9 +248,10 @@ check_http_endpoints() {
 
 check_age_key() {
     [[ "$QUIET" == false ]] && log_info "Checking age key health..."
-    # resolve_age_key_path() inside check_age_key_health reads AGE_KEY_FILE, not
-    # SOPS_AGE_KEY_FILE — pass the correct variable name as the env prefix.
-    local key_file="${AGE_KEY_FILE:-${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
+    _require_project_environment "age-key" || return 0
+    # check_age_key_health reads AGE_KEY_FILE, so pass it the key path resolved
+    # by the canonical project environment.
+    local key_file="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
     if [[ ! -f "$key_file" ]]; then
         _check_fail "age-key" "key file not found: $key_file"
         return
@@ -232,22 +273,28 @@ check_age_key() {
 
 check_secrets_decryptable() {
     [[ "$QUIET" == false ]] && log_info "Checking secrets decryptable..."
-    local secrets_file="${SECRETS_FILE:-${SCRIPT_DIR}/secrets/secrets.yaml}"
+    _require_project_environment "secrets-decryptable" || return 0
+    local secrets_file="${SECRETS_FILE:-}"
+    local key_file="${SOPS_AGE_KEY_FILE:-}"
     if [[ ! -f "$secrets_file" ]]; then
         _check_fail "secrets-file" "secrets file not found: $secrets_file"
         return
     fi
-    local key_file="${AGE_KEY_FILE:-${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
+    if [[ ! -f "$key_file" ]]; then
+        _check_fail "secrets-key" "SOPS Age key not found: $key_file"
+        return
+    fi
     if SOPS_AGE_KEY_FILE="$key_file" sops -d "$secrets_file" >/dev/null 2>&1; then
-        _check_pass "secrets-decryptable" "SOPS decryption succeeded"
+        _check_pass "secrets-decryptable" "SOPS decryption succeeded: $secrets_file"
     else
-        _check_fail "secrets-decryptable" "SOPS decryption failed — check age key and secrets.yaml"
+        _check_fail "secrets-decryptable" \
+            "SOPS decryption failed for $secrets_file using key $key_file"
     fi
 }
 
 check_docker_secrets_materialized() {
     [[ "$QUIET" == false ]] && log_info "Checking Docker secrets materialized..."
-    local secrets_dir="$SCRIPT_DIR/secrets/.docker_secrets"
+    local secrets_dir="${DOCKER_SECRETS_DIR:-/run/vaultwarden-oci/secrets}"
     # All secrets defined in the compose 'secrets:' top-level block.
     local required_secrets=(
         admin_token
@@ -257,23 +304,106 @@ check_docker_secrets_materialized() {
         push_installation_id
         push_installation_key
     )
+
+    if [[ ! -d "$secrets_dir" ]]; then
+        if [[ -f /etc/systemd/system/vaultwarden-startup.service ]]; then
+            _check_fail "runtime-secrets-dir" \
+                "missing: $secrets_dir — run: sudo systemctl start vaultwarden-startup.service"
+        else
+            _check_fail "runtime-secrets-dir" \
+                "missing: $secrets_dir — run: sudo ./setup.sh systemd install"
+        fi
+        return
+    fi
+
+    local dir_stat
+    dir_stat=$(stat -c '%U:%G %a' "$secrets_dir" 2>/dev/null \
+        || stat -f '%Su:%Sg %OLp' "$secrets_dir" 2>/dev/null \
+        || echo "unknown")
+    if [[ "$dir_stat" == "root:root 700" ]]; then
+        _check_pass "runtime-secrets-dir" "$secrets_dir (root:root mode 0700)"
+    else
+        _check_fail "runtime-secrets-dir" \
+            "$secrets_dir has ${dir_stat}, expected root:root 700"
+    fi
+
     for secret in "${required_secrets[@]}"; do
         local secret_file="$secrets_dir/$secret"
-        if [[ ! -f "$secret_file" || ! -s "$secret_file" ]]; then
-            _check_fail "secret-$secret" "missing or empty: $secret_file"
+        if [[ ! -f "$secret_file" ]]; then
+            _check_fail "secret-$secret" "missing: $secret_file"
             continue
         fi
+        if [[ ! -s "$secret_file" ]]; then
+            _check_fail "secret-$secret" "empty: $secret_file"
+            continue
+        fi
+
+        local file_stat
+        file_stat=$(stat -c '%U:%G %a' "$secret_file" 2>/dev/null \
+            || stat -f '%Su:%Sg %OLp' "$secret_file" 2>/dev/null \
+            || echo "unknown")
+        if [[ "$file_stat" == "root:root 444" ]]; then
+            _check_pass "secret-$secret-permissions" \
+                "$secret_file (root:root mode 0444)"
+        else
+            _check_fail "secret-$secret-permissions" \
+                "$secret_file has ${file_stat}, expected root:root 444"
+        fi
+
         # Detect CHANGE_ME placeholder values left in materialized secret files.
         if grep -qF 'CHANGE_ME' "$secret_file" 2>/dev/null; then
-            _check_fail "secret-$secret" "contains CHANGE_ME placeholder — rotate with: sudo ./edit-secrets.sh rotate $secret"
+            _check_fail "secret-$secret-content" \
+                "$secret_file contains CHANGE_ME — rotate with: sudo ./edit-secrets.sh rotate $secret"
         else
-            _check_pass "secret-$secret" "materialized"
+            _check_pass "secret-$secret-content" "$secret_file is non-empty and has no CHANGE_ME placeholder"
         fi
     done
 }
 
+check_startup_unit() {
+    [[ "$QUIET" == false ]] && log_info "Checking installed startup unit..."
+    local unit_file="/etc/systemd/system/vaultwarden-startup.service"
+
+    if ! has_command systemd-analyze; then
+        _check_skip "startup-unit" "systemd-analyze is unavailable"
+        return
+    fi
+    if [[ ! -f "$unit_file" ]]; then
+        _check_fail "startup-unit" \
+            "installed production unit missing: $unit_file — run: sudo ./setup.sh systemd install"
+        return
+    fi
+    if systemd-analyze verify "$unit_file" >/dev/null 2>&1; then
+        _check_pass "startup-unit" "$unit_file validates"
+    else
+        local diagnostic
+        diagnostic=$(systemd-analyze verify "$unit_file" 2>&1 | head -5 | tr '\n' '; ' || true)
+        _check_fail "startup-unit" "validation failed: ${diagnostic:-no diagnostic output}"
+    fi
+}
+
+check_startup_service() {
+    [[ "$QUIET" == false ]] && log_info "Checking startup service state..."
+    if ! has_command systemctl; then
+        _check_skip "startup-service" "systemctl is unavailable"
+        return
+    fi
+    if [[ ! -f /etc/systemd/system/vaultwarden-startup.service ]]; then
+        _check_fail "startup-service" \
+            "unit is not installed — run: sudo ./setup.sh systemd install"
+        return
+    fi
+    if systemctl is-active --quiet vaultwarden-startup.service 2>/dev/null; then
+        _check_pass "startup-service" "vaultwarden-startup.service is active"
+    else
+        _check_fail "startup-service" \
+            "inactive or failed — run: sudo systemctl start vaultwarden-startup.service"
+    fi
+}
+
 check_backup_exists() {
     [[ "$QUIET" == false ]] && log_info "Checking recent backup exists..."
+    _require_project_environment "backup-recent" || return 0
     local base_dir
     base_dir="$(get_config_value "BACKUP_DIR" "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/backups")")"
 
@@ -333,6 +463,7 @@ check_crowdsec() {
 
 check_disk_space() {
     [[ "$QUIET" == false ]] && log_info "Checking disk space..."
+    _require_project_environment "disk-space" || return 0
     local state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     local avail_kb
     avail_kb=$(df "$state_dir" 2>/dev/null | awk 'END {print $4}')
@@ -382,10 +513,11 @@ main() {
 
     [[ "$QUIET" == false ]] && log_header "VaultWarden-OCI Smoke Test"
 
-    load_env_file 2>/dev/null || true
-
-    check_env_file
+    load_smoke_test_environment
     check_domain_configured
+    check_compose_config
+    check_startup_unit
+    check_startup_service
     check_containers_running
     check_tls_certificate
     check_http_endpoints
