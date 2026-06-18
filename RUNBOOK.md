@@ -104,8 +104,10 @@ sudo bash -c '
     sops -d "$SECRETS_FILE" >/dev/null
 '
 
-curl -fsS https://<vault-domain>/api/alive
+curl -fsS "https://vault.example.com/api/alive"
 ```
+
+Replace `vault.example.com` with the actual Vaultwarden hostname.
 
 No output from `find` means it found no runtime secret file with an incorrect
 owner, group, or mode. Successful SOPS verification intentionally sends all

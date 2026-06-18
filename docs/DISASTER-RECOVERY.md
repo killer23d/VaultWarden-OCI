@@ -226,13 +226,16 @@ On the isolated VM, run:
 sudo ./recover.sh \
   --state-dir <copied-state-path> \
   --key <copied-usb-key-path>
-```
 
-After recovery, run the standard verification:
+sudo ./setup.sh systemd install
 
-```bash
 sudo ./utilities/smoke-test.sh
 ```
+
+`recover.sh` restores and starts the stack directly. Then
+`setup.sh systemd install` installs and enables the production startup unit and
+timers. Run the smoke test last because it validates that installed systemd
+unit and its active service state.
 
 Confirm and record that:
 

@@ -306,8 +306,13 @@ check_docker_secrets_materialized() {
     )
 
     if [[ ! -d "$secrets_dir" ]]; then
-        _check_fail "runtime-secrets-dir" \
-            "missing: $secrets_dir — run: sudo systemctl start vaultwarden-startup.service"
+        if [[ -f /etc/systemd/system/vaultwarden-startup.service ]]; then
+            _check_fail "runtime-secrets-dir" \
+                "missing: $secrets_dir — run: sudo systemctl start vaultwarden-startup.service"
+        else
+            _check_fail "runtime-secrets-dir" \
+                "missing: $secrets_dir — run: sudo ./setup.sh systemd install"
+        fi
         return
     fi
 
@@ -364,7 +369,8 @@ check_startup_unit() {
         return
     fi
     if [[ ! -f "$unit_file" ]]; then
-        _check_fail "startup-unit" "installed production unit missing: $unit_file"
+        _check_fail "startup-unit" \
+            "installed production unit missing: $unit_file — run: sudo ./setup.sh systemd install"
         return
     fi
     if systemd-analyze verify "$unit_file" >/dev/null 2>&1; then
@@ -380,6 +386,11 @@ check_startup_service() {
     [[ "$QUIET" == false ]] && log_info "Checking startup service state..."
     if ! has_command systemctl; then
         _check_skip "startup-service" "systemctl is unavailable"
+        return
+    fi
+    if [[ ! -f /etc/systemd/system/vaultwarden-startup.service ]]; then
+        _check_fail "startup-service" \
+            "unit is not installed — run: sudo ./setup.sh systemd install"
         return
     fi
     if systemctl is-active --quiet vaultwarden-startup.service 2>/dev/null; then
