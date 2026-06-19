@@ -83,6 +83,13 @@ The Postfix service in `docker-compose.yml.example` accepts mail from the stack 
 
 Postfix provides queueing and retry behavior that direct SMTP does not. It should remain enabled for the normal appliance path.
 
+### Advanced Postfix safety notes
+
+- `ALLOWED_SENDER_DOMAINS` must stay narrow. Use your sending domain(s), not `*`, so the sidecar cannot be abused by other containers on the Docker network.
+- `boky/postfix` writes the upstream relay credential to `/etc/postfix/sasl_passwd` inside the container at startup. This is a Postfix SASL requirement; the file is not bind-mounted to the host, but anyone with Docker socket access can inspect it with `docker exec`. Restrict Docker access to trusted operators.
+- Keep the Postfix container capabilities from `docker-compose.yml.example`. In particular, do not remove `DAC_OVERRIDE` or `FOWNER`; mail spool access can fail silently without them.
+- The sidecar is not an MX server and should not be exposed publicly. It relays stack mail to your authenticated external SMTP provider.
+
 ---
 
 ## Advanced API Provider Mode

@@ -154,7 +154,9 @@ These rules:
 #### Verify Cloudflare Firewall Token
 
 ```bash
-# Verify the token can access the WAF Custom Rules endpoint (Rulesets API)
+# Verify the token can access the WAF Custom Rules endpoint (Rulesets API).
+# Set this from the SOPS `cloudflare_zone_id` secret; do not add it to .env.
+CF_ZONE_ID="your_zone_id_from_cloudflare_zone_id_secret"
 curl -s -X GET \
   "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
   -H "Authorization: Bearer YOUR_FIREWALL_TOKEN" \
@@ -185,10 +187,12 @@ admin_token: "48-char-alphanumeric-string"
 admin_basic_auth_hash: "admin $2b$14$bcrypt_hash"
 caddy_cloudflare_dns_token: "cloudflare_dns_token"
 cf_worker_bouncer_token: "cloudflare_firewall_token"  # used by crowdsec-cloudflare-worker-bouncer
+cloudflare_zone_id: "cloudflare_zone_id"
+cf_account_id: "cloudflare_account_id"
 smtp_password: "smtp_password"
 push_installation_id: "optional"
 push_installation_key: "optional"
-backup_passphrase: "optional"
+backup_passphrase: "auto-generated backup encryption passphrase"
 file_integrity_hmac_key: "auto-generated checksum authentication key"
 ```
 
@@ -1079,6 +1083,8 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
      -H "Content-Type: application/json"
 
 # Test Firewall token against the current WAF Custom Rules endpoint
+# Set this from the SOPS `cloudflare_zone_id` secret; do not add it to .env.
+CF_ZONE_ID="your_zone_id_from_cloudflare_zone_id_secret"
 curl -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN" \
      -H "Content-Type: application/json"
