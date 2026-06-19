@@ -2240,7 +2240,8 @@ EOF
             log_error "secrets.yaml unreadable with current key. Use --force to overwrite."
             return 1
         fi
-        if _ss_recipients_match "$desired_recipients" "$sops_config" policy \
+        if [[ -f "$sops_config" ]] \
+            && _ss_recipients_match "$desired_recipients" "$sops_config" policy \
             && _ss_recipients_match "$desired_recipients" "$secrets_file" cipher; then
             log_info "Placeholder secrets.yaml recipient state already current (skipping)"
             log_success "Bootstrap complete — run './setup.sh secrets' to configure credentials"
@@ -2254,7 +2255,7 @@ EOF
         log_success "Existing secrets.yaml recipient state updated"
         return 0
     fi
-
+    
     local tmp_secrets
     tmp_secrets="$(_ss_make_plaintext_temp)" || return 1
     trap 'rm -f "$tmp_secrets"' RETURN
