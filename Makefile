@@ -10,7 +10,8 @@
 #   make status              — Show service status
 #   make health              — Run health checks
 #   make logs                — Follow service logs
-#   make help                — Show all available targets
+#   make help                — Show normal admin/day-2 targets
+#   make help-all            — Show every target, including dashboard/API/dev targets
 # ===========================================================================
 
 # ── Colour helpers ──────────────────────────────────────────────────────────
@@ -39,7 +40,7 @@ BACKUP_FILE ?=
 DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
-.PHONY: help \
+.PHONY: help help-all \
         setup init-secrets edit-secrets test-secrets test-email test-unit \
         up down restart start stop safe-restart status \
         health health-quick health-report test-email smoke-test drill \
@@ -101,28 +102,70 @@ endef
 ##@ Help
 # ===========================================================================
 
-help: ## Show this help message
+# Dashboard compatibility note:
+# Several targets in this Makefile are consumed by dashboard and automation
+# flows as a stable command API. Do not rename or remove targets without first
+# searching dashboard.sh, docs, workflows, and any external dashboard config.
+# Prefer hiding advanced/developer targets from `make help` and keeping full
+# discovery in `make help-all`.
+
+help: ## Show normal admin/day-2 commands
 	@echo ""
-	@echo "$(BLUE)VaultWarden-OCI — Available Targets$(NC)"
+	@echo "$(BLUE)VaultWarden-OCI — Normal Admin Commands$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Service lifecycle$(NC)"
+	@echo "  $(GREEN)start$(NC)                    Start all services through startup.sh"
+	@echo "  $(GREEN)stop$(NC)                     Stop all services gracefully"
+	@echo "  $(GREEN)restart$(NC)                  Restart all services"
+	@echo "  $(GREEN)status$(NC)                   Show service, backup, disk, and CrowdSec summary"
+	@echo "  $(GREEN)logs$(NC)                     View logs (SERVICE=caddy|vaultwarden|postfix)"
+	@echo ""
+	@echo "$(YELLOW)Health and diagnostics$(NC)"
+	@echo "  $(GREEN)health$(NC)                   Full health check (AUTO_RECOVER=true enables safe fixes)"
+	@echo "  $(GREEN)health-quick$(NC)             Concise health check"
+	@echo "  $(GREEN)test-email$(NC)               Test Postfix-backed operational alert channel"
+	@echo "  $(GREEN)test-secrets$(NC)             Verify SOPS/Age secret decryption"
+	@echo "  $(GREEN)diagnose$(NC)                 Collect versions, status, key state, disk, and logs"
+	@echo ""
+	@echo "$(YELLOW)Backup and restore$(NC)"
+	@echo "  $(GREEN)backup$(NC)                   Run database backup"
+	@echo "  $(GREEN)backup-full$(NC)              Run full backup"
+	@echo "  $(GREEN)backup-status$(NC)            Show backup health summary"
+	@echo "  $(GREEN)list-backups$(NC)             List local backups"
+	@echo "  $(GREEN)restore$(NC)                  Guided restore"
+	@echo "  $(GREEN)restore-remote$(NC)           Restore from rclone remote"
+	@echo "  $(GREEN)restore-db$(NC)               Restore database only"
+	@echo ""
+	@echo "$(YELLOW)Operations$(NC)"
+	@echo "  $(GREEN)maintenance$(NC)              Run routine maintenance"
+	@echo "  $(GREEN)update$(NC)                   Update container images and restart"
+	@echo "  $(GREEN)timers$(NC)                   Show systemd timers"
+	@echo "  $(GREEN)systemd-status$(NC)           Show systemd unit status"
+	@echo "  $(GREEN)breakglass-create$(NC)        Create emergency admin account"
+	@echo "  $(GREEN)breakglass-status$(NC)        Check emergency admin account"
+	@echo ""
+	@echo "$(CYAN)Need everything? Run $(GREEN)make help-all$(NC) for dashboard/stable API, advanced admin, developer/test, and legacy targets.$(NC)"
+	@echo ""
+
+help-all: ## Show every target, including dashboard/API, advanced, dev, and legacy commands
+	@echo ""
+	@echo "$(BLUE)VaultWarden-OCI — All Targets$(NC)"
 	@echo ""
 	@awk 'BEGIN {FS = ":.*##"; printf ""} \
 	     /^##@/ { printf "\n$(YELLOW)%s$(NC)\n", substr($$0, 5) } \
 	     /^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-24s$(NC) %s\n", $$1, $$2 }' \
 	    $(MAKEFILE_LIST)
 	@echo ""
-	@echo "$(CYAN)Examples:$(NC)"
-	@echo "  $(GREEN)make up$(NC)                          Start with secrets initialization"
-	@echo "  $(GREEN)make logs SERVICE=caddy$(NC)          View caddy logs"
-	@echo "  $(GREEN)make health AUTO_RECOVER=true$(NC)    Health check with auto-recovery"
-	@echo "  $(GREEN)make safe-restart$(NC)                Restart with automatic rollback"
-	@echo "  $(GREEN)make restore$(NC)                     Interactive restore"
-	@echo "  $(GREEN)make diagnose$(NC)                    Full diagnostic dump"
-	@echo "  $(GREEN)make backup-status$(NC)               Backup health summary"
-	@echo "  $(GREEN)make lint$(NC)                        Shellcheck all scripts"
+	@echo "$(CYAN)Classification guide:$(NC)"
+	@echo "  normal admin        shown by make help"
+	@echo "  dashboard/stable API retained for dashboard and automation compatibility"
+	@echo "  advanced admin      powerful or specialized operations"
+	@echo "  developer/test      local validation and docs generation"
+	@echo "  legacy/deprecated   backward-compatible aliases"
 	@echo ""
 
 # ===========================================================================
-##@ Setup & Installation
+##@ Advanced Admin — Setup & Installation
 # ===========================================================================
 
 setup: ## Run initial setup (requires sudo)
@@ -261,7 +304,7 @@ test-email: ## Send a test operational alert email (health/backup notification c
 	@./maintenance.sh test-email --verbose
 
 # ===========================================================================
-##@ Service Management
+##@ Normal Admin + Dashboard Stable API — Service Management
 # ===========================================================================
 
 # up / down / restart do NOT require root. The invoking user must be a member
@@ -402,7 +445,7 @@ status: ## Show service status, backup health, disk usage, and CrowdSec ban summ
 	fi
 
 # ===========================================================================
-##@ Health & Monitoring
+##@ Normal Admin + Advanced Admin — Health & Monitoring
 # ===========================================================================
 
 health: ## Run health checks (set AUTO_RECOVER=true to auto-recover)
@@ -458,7 +501,7 @@ unban: ## Unban an IP from CrowdSec (IP=<address> required)
 		|| echo "$(YELLOW)⚠ $(IP) was not found in CrowdSec ban list (may have already expired)$(NC)"
 
 # ===========================================================================
-##@ Logs
+##@ Normal Admin + Dashboard Stable API — Logs
 # ===========================================================================
 
 SERVICE ?= vaultwarden
@@ -508,7 +551,7 @@ security-report: ## Single-command security event summary (last 1h)
 	@docker logs vaultwarden_app 2>&1 | grep -i "fail\|error\|unauthorized\|invalid" | tail -20
 
 # ===========================================================================
-##@ Backup & Restore
+##@ Normal Admin + Dashboard Stable API — Backup & Restore
 # ===========================================================================
 
 backup: ## Run incremental database backup
@@ -556,7 +599,7 @@ restore-remote: ## Restore from remote storage (rclone)
 	@./restore.sh interactive --remote
 
 # ===========================================================================
-##@ Key Management
+##@ Advanced Admin — Key Management
 # ===========================================================================
 
 .PHONY: key-path
@@ -743,7 +786,7 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 	    	rotate_age_key"
 
 # ===========================================================================
-##@ Updates
+##@ Normal Admin + Advanced Admin — Updates
 # ===========================================================================
 
 update: ## Update all container images and restart
@@ -773,7 +816,7 @@ update-dns: ## Update Cloudflare DNS records
 	@./maintenance.sh update-dns
 
 # ===========================================================================
-##@ Maintenance
+##@ Normal Admin + Advanced Admin — Maintenance
 # ===========================================================================
 
 maintenance: ## Run routine maintenance tasks
@@ -797,7 +840,7 @@ db-backup: ## Quick database backup
 	@./backup.sh run db
 
 # ===========================================================================
-##@ Systemd Integration
+##@ Normal Admin + Advanced Admin — Systemd Integration
 # ===========================================================================
 
 install-systemd: ## Install systemd service units and timers
@@ -847,7 +890,7 @@ schedule: ## Show vaultwarden timer schedules (next/last run times)
 	fi
 
 # ===========================================================================
-##@ Break-Glass Admin
+##@ Normal Admin — Break-Glass Admin
 # ===========================================================================
 
 breakglass-create: ## Create emergency break-glass admin account
@@ -866,7 +909,7 @@ breakglass-remove: ## Remove break-glass admin account
 	@sudo utilities/setup-secrets.sh breakglass remove --force
 
 # ===========================================================================
-##@ Testing & Development
+##@ Developer/Test — Testing & Development
 # ===========================================================================
 
 test: ## Run all tests (secrets, config validation)
@@ -905,7 +948,7 @@ lint: ## Run shellcheck on all shell scripts
 shellcheck: lint ## Alias for lint
 
 # ===========================================================================
-##@ Information & Diagnostics
+##@ Normal Admin + Dashboard Stable API — Information & Diagnostics
 # ===========================================================================
 
 info: ## Show deployment information
@@ -979,7 +1022,7 @@ diagnose: ## Full diagnostic dump (versions, status, health, key, logs tail)
 	@$(DOCKER_COMP) logs --tail=20 2>/dev/null || true
 
 # ===========================================================================
-##@ Cleanup
+##@ Advanced Admin — Cleanup
 # ===========================================================================
 
 clean: ## Remove generated files (logs, temp files)
@@ -988,7 +1031,7 @@ clean: ## Remove generated files (logs, temp files)
 	@echo "$(GREEN)Clean complete.$(NC)"
 
 # ===========================================================================
-##@ ⚠ Destructive Operations
+##@ Advanced Admin — ⚠ Destructive Operations
 # ===========================================================================
 
 clean-all: ## Remove secrets cache and log files — services will re-init secrets on next start
@@ -1035,7 +1078,7 @@ uninstall-dry-run: ## Preview what uninstall would remove without making any cha
 	@utilities/uninstall-vaultwarden.sh run --dry-run
 
 # ===========================================================================
-##@ Documentation
+##@ Developer/Test — Documentation
 # ===========================================================================
 
 docs: ## Regenerate docs/COMMAND-REFERENCE.md from live script --help and Makefile targets

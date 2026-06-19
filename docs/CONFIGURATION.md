@@ -144,170 +144,62 @@ Manage secrets with `./utilities/secrets-edit.sh`. They are encrypted with Age +
 
 ## 📧 Email Configuration
 
-Email delivery is handled by **`lib/email.sh`** — a Bash + curl multi-provider chain. See [EMAIL.md](EMAIL.md) for the canonical routing matrix; `host` is only a deprecated alias for `direct`.
-
-### Delivery Chain
-
-```
-EMAIL_MODE=smtp  →  Postfix sidecar → external SMTP relay (default)
-EMAIL_MODE=auto  →  HTTP API → SMTP/direct fallback (advanced alternative)
-```
-
-`EMAIL_MODE` controls which path(s) are attempted:
-
-| Value | Behaviour |
-| :-- | :-- |
-| `auto` | Try API → SMTP → direct SMTP in order (advanced alternative) |
-| `api` | HTTP API only; fail loudly if token not set |
-| `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) |
-| `host` | Deprecated alias for direct |
-
-### Tier 1 — HTTP API Provider
+The normal production path is **Postfix-first SMTP**. Vaultwarden, operational scripts, systemd failure notifications, and recovery-kit attachment emails all use the Postfix sidecar as the reliable relay path to your external SMTP provider. See [EMAIL.md](EMAIL.md) for provider-specific API mode and troubleshooting.
 
 ```bash
-EMAIL_MODE=auto
-EMAIL_PROVIDER=mailersend   # mailersend | sendgrid | mailgun | postmark | resend
-```
-
-`lib/common.sh` (email functions) automatically resolves the API token from `email_api_token` in secrets — you do not need to set `EMAIL_API_TOKEN` separately:
-
-| `EMAIL_PROVIDER` | Secret key to set via `./utilities/secrets-edit.sh` |
-| :-- | :-- |
-| `mailersend` | `email_api_token` |
-| `sendgrid` | `email_api_token` |
-| `mailgun` | `email_api_token` |
-| `postmark` | `email_api_token` |
-| `resend` | `email_api_token` |
-
-```bash
-# Mailgun only — must match your Mailgun account region
-MAILGUN_REGION=us   # us (default) or eu
-                    # EU-hosted accounts must set eu — all API calls return HTTP 404 otherwise
-```
-
-### Tier 2 — SMTP Relay (curl, no daemon)
-
-Used when `EMAIL_MODE=auto` and the API path fails, or when `EMAIL_MODE=smtp`.
-
-```bash
-SMTP_HOST=smtp.mailersend.net
+EMAIL_MODE=smtp
+EMAIL_PROVIDER=
+SMTP_HOST=smtp.yourmailprovider.com
 SMTP_PORT=587
-SMTP_SECURITY=starttls              # starttls or on (SSL/TLS)
+SMTP_SECURITY=starttls
 SMTP_USERNAME=your-smtp-username
-# SMTP_PASSWORD stored in secrets via ./utilities/secrets-rotate.sh smtp_password
 SMTP_FROM=noreply@vault.yourdomain.com
 SMTP_FROM_NAME=VaultWarden
-SMTP_TIMEOUT=30
+ALLOWED_SENDER_DOMAINS=yourdomain.com
 ```
 
-### Postfix Sidecar and Host-MTA Fallback
-
-The `postfix` service in `docker-compose.yml` runs `boky/postfix` as a containerised SMTP relay bound to `127.0.0.1:587`. `EMAIL_MODE=smtp` uses it whenever `SMTP_PASSWORD` is blank, and VaultWarden relies on it for its own SMTP traffic.
-
-**How it works:**
-
-- `lib/common.sh` connects to `127.0.0.1:587` for the SMTP sidecar path when `SMTP_PASSWORD` is blank.
-- The Postfix container authenticates upstream using the same `smtp_password` secret as tier 2.
-- Postfix forwards mail through `RELAYHOST` (your upstream SMTP provider) — it is a relay, not a standalone mail server. It does **not** send mail directly to recipient MX records.
-
-**Key Postfix variables in `.env`:**
+Store the SMTP password in SOPS secrets:
 
 ```bash
-# These are consumed by the postfix container via docker-compose.yml
-SMTP_HOST=smtp.mailersend.net        # Upstream relay host (RELAYHOST)
-SMTP_PORT=587                        # Upstream relay port
-SMTP_USERNAME=your-smtp-username     # Upstream relay username (RELAYHOST_USERNAME)
-ALLOWED_SENDER_DOMAINS=yourdomain.com # Restrict which From: domains Postfix accepts
-                                      # Prevents open relay abuse — set to your domain
-POSTFIX_MYHOSTNAME=postfix           # Postfix FQDN / helo name (optional)
-POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt  # encrypt (recommended) or may (opportunistic)
-POSTFIX_MESSAGE_SIZE_LIMIT=10240000  # Max message size in bytes (default: ~10 MB)
+./utilities/secrets-rotate.sh smtp_password
 ```
 
-> **`ALLOWED_SENDER_DOMAINS` is critical.** If left blank, Postfix becomes an open relay for other containers on the Docker network. Set it to your mail domain.
-
-**SMTP password note:** `boky/postfix` writes the relay password to `/etc/postfix/sasl_passwd` inside the container at startup — this is a Postfix SASL requirement and cannot be avoided at the protocol level. The file is not bind-mounted to the host, but is readable via `docker exec vaultwarden_postfix cat /etc/postfix/sasl_passwd`. Restrict Docker socket access to trusted operators.
-
-**Container capabilities required by Postfix:**
-
-```yaml
-cap_add:
-  - CHOWN
-  - SETUID
-  - SETGID
-  - NET_BIND_SERVICE
-  - DAC_OVERRIDE   # required for mail spool access
-  - FOWNER         # required for mail spool access
-```
-
-Do not remove `DAC_OVERRIDE` or `FOWNER` — mail delivery will fail silently.
-
-**Enabling / disabling the Postfix sidecar:**
-
-The `postfix` service is defined in `docker-compose.yml.example` and active by default. If you are using `EMAIL_MODE=api` or `EMAIL_MODE=smtp` exclusively and want to remove the MTA fallback:
-
-```yaml
-# docker-compose.override.yml — disable Postfix sidecar
-services:
-  postfix:
-    deploy:
-      replicas: 0
-```
-
-Or comment out the entire `postfix:` service block in `docker-compose.yml.example` before running `setup.sh`.
-
-**Verifying Postfix is working:**
-
-```bash
-# Check Postfix container is healthy
-docker compose ps postfix
-
-# Tail Postfix logs
-docker compose logs -f postfix
-
-# Send a test message through the full chain (hits all three tiers in auto mode)
-./maintenance.sh test-email --verbose
-
-# Send a test message forcing the MTA tier only
-EMAIL_MODE=host ./maintenance.sh test-email --verbose
-
-# Inspect the relay configuration inside the container
-docker exec vaultwarden_postfix postconf relayhost
-docker exec vaultwarden_postfix postconf smtp_tls_security_level
-```
+`ALLOWED_SENDER_DOMAINS` is critical safety configuration. Set it to the domain(s) the appliance may send as; the sidecar is a private relay to your upstream SMTP provider, not a public mail server.
 
 ### VaultWarden Container SMTP
 
-The VaultWarden container does **not** connect directly to the external SMTP relay. Instead, it talks to the **Postfix sidecar** at hostname `postfix`, port `587`, with no authentication — Postfix handles the authenticated relay upstream.
-
-Docker Compose maps the `SMTP_*` variables into the VaultWarden container environment via `${VAR}` expansion in the Compose YAML, so these `VW_SMTP_*` variables are the values injected into VaultWarden's environment:
+Vaultwarden must point at the internal Postfix sidecar, not the upstream SMTP relay:
 
 ```bash
-VW_SMTP_HOST=postfix          # Always the Postfix sidecar hostname — not the external relay
+VW_SMTP_HOST=postfix
 VW_SMTP_PORT=587
-VW_SMTP_SECURITY=off          # Plain connection to sidecar — Postfix handles TLS upstream
-VW_SMTP_AUTH_MECHANISM=none   # No auth on the internal sidecar link
-VW_SMTP_EXPLICIT_TLS=false    # Do not attempt STARTTLS on the internal link
+VW_SMTP_SECURITY=off
+VW_SMTP_AUTH_MECHANISM=none
+VW_SMTP_EXPLICIT_TLS=false
 ```
 
-> **⚠️ `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` are critical.** Without `AUTH_MECHANISM=none`, VaultWarden defaults to `Plain` and attempts SASL authentication against the Postfix sidecar. The sidecar has no AUTH configured for the internal network link — the connection hangs or fails with "authentication required", blocking all outgoing VaultWarden email. `VW_SMTP_EXPLICIT_TLS=false` prevents VaultWarden from attempting STARTTLS on the plain internal link.
+`VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` are required because the internal Docker link to Postfix is plain and unauthenticated; Postfix handles TLS/authentication only on the upstream relay connection.
 
-> **Admin UI (SMTP Settings):** Host = `postfix`, Port = `587`, Security = `Off`, Authentication mechanism = `None`, Username/Password = empty.
+### Advanced API Provider Mode
+
+Provider-specific HTTP APIs are optional. Use them only after the normal Postfix path is understood and configured:
+
+```bash
+EMAIL_MODE=auto
+EMAIL_PROVIDER=mailersend   # sendgrid | mailgun | postmark | resend
+./utilities/secrets-rotate.sh email_api_token
+```
+
+`EMAIL_PROVIDER=smtp` is not valid; SMTP is selected with `EMAIL_MODE=smtp` and a blank `EMAIL_PROVIDER`.
 
 ### Testing Email Delivery
 
 ```bash
-# Test full chain (auto mode — tries API → SMTP → MTA in order)
 ./maintenance.sh test-email --verbose
-
-# Force a specific tier for targeted testing
-EMAIL_MODE=api  ./maintenance.sh test-email --verbose
-EMAIL_MODE=smtp ./maintenance.sh test-email --verbose
-EMAIL_MODE=host ./maintenance.sh test-email --verbose
-
-# Makefile shortcut
 make test-email
 ```
+
+This verifies the operational alert channel used by health, backup, maintenance, systemd failure notification, and recovery-kit email paths.
 
 ---
 

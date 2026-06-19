@@ -167,7 +167,7 @@ Provider-specific HTTP APIs (`mailersend`, `sendgrid`, `mailgun`, `postmark`, `r
 | :-- | :-- |
 | **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit). Now requires **Caddy 2.11.4 by default**; uses `encode zstd gzip`, `roll_compression zstd`, connection timeouts in the global `servers` block, `request_body` size limits on admin/auth handlers, and health-check log suppression. |
 | **VaultWarden** | Password manager application (512 MB limit) |
-| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/email.sh`; binds `127.0.0.1:587` (256 MB limit) |
+| **Postfix** | Containerised private SMTP relay for Vaultwarden and operational alerts; forwards to your external SMTP provider (256 MB limit) |
 | **CrowdSec** | Host systemd service — threat detection with Cloudflare edge banning and host iptables |
 
 > The `docker-compose.yml.example` template now enforces `read_only` filesystems, `tmpfs` mounts, `ulimits` (nofile), `no-new-privileges:true`, and tightened Caddy log rotation. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for override details.
@@ -268,9 +268,12 @@ make test-email / test-secrets         # Diagnostics
 make logs [SERVICE=name]               # Container logs (follows single service, default: vaultwarden)
 make diagnose                          # One-command debug dump: versions, key status, disk, containers, logs
 make backup-status                     # Last backup times, directory size, retention window
-make lint                              # shellcheck all *.sh scripts
-make version                           # Stack version from VERSION file
+make timers / systemd-status            # Automation status
+make help                              # Normal admin/day-2 commands
+make help-all                          # Full target list (advanced/dev/dashboard API)
 ```
+
+> Several Makefile targets are used by the dashboard as a stable command API. Do not rename targets without checking dashboard integration. Developer/test commands such as linting and formatting are still available through `make help-all`.
 
 > Several Makefile fixes landed in v1.0.0: `safe-restart` now rolls back on health-check failure; `key-rotate` invokes `bash` explicitly (fixes dash compatibility) and runs a `key-health` pre-flight; `restore-db` no longer passes `--force` so the Age key prompt runs as intended; `watch` uses `health-quick` to avoid hammering the HTTPS endpoint. See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
@@ -282,7 +285,7 @@ make version                           # Stack version from VERSION file
 | :-- | :-- |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Detailed deployment walkthrough |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Every `.env` and secrets variable |
-| [EMAIL.md](docs/EMAIL.md) | Email setup: API providers, SMTP relay, Postfix MTA |
+| [EMAIL.md](docs/EMAIL.md) | Email setup: Postfix-first SMTP default and advanced API providers |
 | [SECURITY.md](docs/SECURITY.md) | Security hardening deep-dive |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Day-to-day ops, update/rollback phases |
 | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) | Backup strategy and restore procedures |

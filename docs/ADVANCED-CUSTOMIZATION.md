@@ -396,51 +396,16 @@ docker compose run --rm -e DEBUG_ENTRYPOINT=true caddy
 
 ## 📧 Email Customisation
 
-Email delivery is handled by **`lib/email.sh`**. See [EMAIL.md](EMAIL.md) for the canonical routing matrix and Direct SMTP fallback semantics; `host` is only a deprecated alias for `direct`.
+The normal appliance path is Postfix-first SMTP: Vaultwarden, scripts, alerts, systemd failure notifications, and recovery-kit attachment emails submit to the Postfix sidecar, which relays to your external SMTP provider. Keep Postfix enabled for production reliability.
 
-### Delivery Chain
+See [EMAIL.md](EMAIL.md) for the full reference. Advanced options in that document include:
 
-```
-EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER + API token via curl)
-                    2. SMTP        (direct relay or Postfix sidecar)
-                    3. Direct SMTP    (configured upstream provider)
-```
+- API-first operational alerts with `EMAIL_MODE=auto` and `EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend`.
+- Mailgun region overrides.
+- Direct SMTP emergency fallback semantics.
+- Postfix queue/log troubleshooting.
 
-Set `EMAIL_MODE` in `.env` to control which paths are attempted:
-
-| `EMAIL_MODE` | Behaviour |
-| :-- | :-- |
-| `auto` | Try API → SMTP → direct SMTP in order (recommended) |
-| `api` | HTTP API only; fails loudly if token missing |
-| `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) |
-| `direct` | Direct upstream SMTP only |
-| `host` | Deprecated alias for `direct` |
-
-### Tier 1 — Switching Email Provider
-
-Change `EMAIL_PROVIDER` in `.env` and rotate the matching token in secrets:
-
-```bash
-# In .env:
-EMAIL_PROVIDER=sendgrid
-
-# In secrets (rotate the matching key):
-./utilities/secrets-rotate.sh email_api_token
-```
-
-Supported providers and their secret key names:
-
-| Provider | `.env` value | Secret key |
-| :-- | :-- | :-- |
-| MailerSend | `mailersend` | `email_api_token` |
-| SendGrid | `sendgrid` | `email_api_token` |
-| Mailgun | `mailgun` | `email_api_token` |
-| Postmark | `postmark` | `email_api_token` |
-| Resend | `resend` | `email_api_token` |
-
-### Tier 2 — SMTP Relay Override
-
-To use a different SMTP provider for the relay fallback, update these values in `.env`:
+When switching upstream SMTP relays, change only the external relay settings:
 
 ```bash
 SMTP_HOST=smtp.sendgrid.net
@@ -448,93 +413,18 @@ SMTP_PORT=587
 SMTP_SECURITY=starttls
 SMTP_USERNAME=apikey
 SMTP_FROM=noreply@vault.yourdomain.com
-SMTP_FROM_NAME=VaultWarden
-SMTP_TIMEOUT=30
-```
-
-Set the SMTP password via secrets (shared with the Postfix sidecar):
-
-```bash
+ALLOWED_SENDER_DOMAINS=yourdomain.com
 ./utilities/secrets-rotate.sh smtp_password
 ```
 
-> **Do not point VaultWarden directly at the external relay.** Keep `VW_SMTP_HOST=postfix`, `VW_SMTP_SECURITY=off`, `VW_SMTP_AUTH_MECHANISM=none`, and `VW_SMTP_EXPLICIT_TLS=false`; only the `SMTP_*` block above changes when you switch upstream relay providers.
-
-### Postfix Sidecar
-
-The `postfix` service runs `boky/postfix` as a containerised SMTP relay. It is **not** a standalone MX mail server — it forwards all outbound mail through an upstream relay (`RELAYHOST`). This means it still requires a valid upstream SMTP provider and credentials.
-
-**Configure the Postfix relay in `.env`:**
+Do not point Vaultwarden directly at the external relay in normal production. Keep:
 
 ```bash
-SMTP_HOST=smtp.mailersend.net      # Upstream relay (RELAYHOST in Postfix)
-SMTP_PORT=587                      # Relay port
-SMTP_USERNAME=your-smtp-username   # Relay auth username
-ALLOWED_SENDER_DOMAINS=yourdomain.com  # REQUIRED — prevents open relay abuse
-POSTFIX_MYHOSTNAME=postfix             # HELO/EHLO hostname (optional)
-POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt  # encrypt (required) or may (opportunistic)
-POSTFIX_MESSAGE_SIZE_LIMIT=10240000    # Max message size in bytes (~10 MB)
-```
-
-> **`ALLOWED_SENDER_DOMAINS` must be set.** Leaving it blank permits any sender domain, turning the container into an open relay accessible to every container on the Docker network. Set it to your bare domain (e.g. `yourdomain.com`, not `vault.yourdomain.com`).
-
-**Security note — SASL password file:** `boky/postfix` writes the relay password to `/etc/postfix/sasl_passwd` inside the container at startup. This is a Postfix SASL protocol requirement and cannot be avoided. The file is not bind-mounted to the host, but it is accessible via `docker exec`:
-
-```bash
-docker exec vaultwarden_postfix cat /etc/postfix/sasl_passwd
-```
-
-Restrict the Docker socket to trusted operators to prevent unauthorised inspection.
-
-**Postfix capabilities:** The container requires exactly six Linux capabilities. Do not remove `DAC_OVERRIDE` or `FOWNER` — mail spool access will fail:
-
-```yaml
-cap_add:
-  - CHOWN
-  - SETUID
-  - SETGID
-  - NET_BIND_SERVICE
-  - DAC_OVERRIDE   # required — mail spool access
-  - FOWNER         # required — mail spool access
-```
-
-Verify capabilities are present after any image update:
-
-```bash
-docker inspect vaultwarden_postfix | grep -A 20 CapAdd
-```
-
-**Verify Postfix is healthy:**
-
-```bash
-docker compose ps postfix
-docker compose logs -f postfix
-docker exec vaultwarden_postfix postconf relayhost
-docker exec vaultwarden_postfix postconf smtp_tls_security_level
-docker exec vaultwarden_postfix postconf smtp_sasl_auth_enable
-```
-
-### Disabling the Postfix Sidecar
-
-If you use `EMAIL_MODE=api` or `EMAIL_MODE=smtp` exclusively and want to remove the MTA fallback entirely:
-
-**Option A — docker-compose override (preferred, non-destructive):**
-
-```yaml
-# docker-compose.override.yml
-services:
-  postfix:
-    deploy:
-      replicas: 0
-```
-
-**Option B — remove from template:**
-
-Comment out or delete the entire `postfix:` service block in `docker-compose.yml.example`, then regenerate:
-
-```bash
-sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --force
-./startup.sh --force
+VW_SMTP_HOST=postfix
+VW_SMTP_PORT=587
+VW_SMTP_SECURITY=off
+VW_SMTP_AUTH_MECHANISM=none
+VW_SMTP_EXPLICIT_TLS=false
 ```
 
 ### Decoupled VaultWarden Email Override
@@ -546,19 +436,17 @@ cp docker-compose.override.yml.example docker-compose.override.yml
 nano docker-compose.override.yml   # customise VaultWarden SMTP overrides
 ```
 
-### Testing Each Tier
+### Testing Email Modes
 
 ```bash
-# Full chain (auto — tests API → SMTP → MTA in order)
+# Normal Postfix-backed operational alert path
 ./maintenance.sh test-email --verbose
+make test-email
 
-# Force a specific tier
+# Advanced API-mode checks only when EMAIL_MODE=auto/api is configured
 EMAIL_MODE=api  ./maintenance.sh test-email --verbose
 EMAIL_MODE=smtp ./maintenance.sh test-email --verbose
-EMAIL_MODE=host ./maintenance.sh test-email --verbose
-
-# Makefile shortcut
-make test-email
+EMAIL_MODE=host ./maintenance.sh test-email --verbose  # legacy direct-SMTP alias
 ```
 
 ---
