@@ -479,7 +479,7 @@ SECRET SOURCE PRIORITY:
 
     cloudflare_zone_id — resolved in order:
         1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. CLOUDFLARE_ZONE_ID environment variable / .env
+        2. Legacy CLOUDFLARE_ZONE_ID shell variable fallback (do not add to .env)
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully

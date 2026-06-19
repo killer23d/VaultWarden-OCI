@@ -281,7 +281,8 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com --f
 cat .env | grep -v "^#"
 
 # Verify critical variables are set
-grep -E "DOMAIN|CLOUDFLARE_ZONE_ID|SMTP_HOST|ADMIN_EMAIL" .env
+grep -E "DOMAIN|SMTP_HOST|ADMIN_EMAIL" .env
+./utilities/secrets-view.sh | grep cloudflare_zone_id
 
 # Check if services are using environment
 docker compose config | grep -A 5 environment
@@ -471,11 +472,12 @@ echo "DNS IP:    $(dig +short vault.example.com @1.1.1.1 | head -1)"
 make update-dns
 
 # Verify Cloudflare API token works
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID" \
+CF_ZONE_ID=$(./utilities/secrets-view.sh | awk -F: '/cloudflare_zone_id/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')
+curl -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}" \
      -H "Authorization: Bearer YOUR_DNS_TOKEN"
 
-# Check CLOUDFLARE_ZONE_ID in .env
-grep CLOUDFLARE_ZONE_ID .env
+# Check cloudflare_zone_id in SOPS secrets
+./utilities/secrets-view.sh | grep cloudflare_zone_id
 ```
 
 ## Email Issues
@@ -783,7 +785,7 @@ sudo systemctl restart crowdsec
 # Check: cf_worker_bouncer_token (used by crowdsec-cloudflare-worker-bouncer)
 
 # Test Cloudflare firewall token against the WAF Custom Rules endpoint
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" \
+curl -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN"
 
 # Check acquis.yaml log paths

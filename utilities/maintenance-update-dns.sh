@@ -46,7 +46,7 @@ SECRET SOURCE PRIORITY:
 
     cloudflare_zone_id — resolved in order:
         1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. CLOUDFLARE_ZONE_ID environment variable / .env
+        2. Legacy CLOUDFLARE_ZONE_ID shell variable fallback (do not add to .env)
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully
@@ -110,7 +110,7 @@ _resolve_cf_token() {
 }
 
 # _resolve_zone_id
-# Priority: decrypt_secret → CLOUDFLARE_ZONE_ID env / .env.
+# Priority: decrypt_secret → legacy CLOUDFLARE_ZONE_ID shell variable fallback.
 _resolve_zone_id() {
     local zone_id
 
@@ -121,14 +121,14 @@ _resolve_zone_id() {
         return 0
     fi
 
-    # 2. Environment variable (set by .env or systemd EnvironmentFile).
+    # 2. Legacy shell environment variable fallback; do not add it to .env for new installs.
     if [[ -n "${CLOUDFLARE_ZONE_ID:-}" ]]; then
         log_debug "Cloudflare zone_id loaded from CLOUDFLARE_ZONE_ID environment variable"
         printf '%s' "${CLOUDFLARE_ZONE_ID}"
         return 0
     fi
 
-    log_error "cloudflare_zone_id not found in encrypted secrets or CLOUDFLARE_ZONE_ID env var"
+    log_error "cloudflare_zone_id not found in encrypted secrets (legacy CLOUDFLARE_ZONE_ID shell fallback also empty)"
     log_error "Fix: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
     return 1
 }

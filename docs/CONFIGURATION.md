@@ -45,8 +45,8 @@ DOMAIN=https://vault.yourdomain.com
 # Admin contact for notifications
 ADMIN_EMAIL=admin@yourdomain.com
 
-# Cloudflare Zone ID — find in Cloudflare dashboard → Overview → right sidebar
-CLOUDFLARE_ZONE_ID=your_zone_id_here
+# Cloudflare Zone ID is stored in SOPS secrets, not .env:
+# sudo ./edit-secrets.sh rotate cloudflare_zone_id
 ```
 
 > **⚠️** `DOMAIN` must include `https://`. The Caddy entrypoint derives the bare hostname internally, so `.env` only needs `DOMAIN`.
@@ -103,24 +103,15 @@ See [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md) before moving existing production
 
 ## 📦 Container Versions
 
-```bash
-VAULTWARDEN_VERSION=1.35.4   # Pin for stability; blank = latest
-                              # 1.35.4 is a security release (2026-02-23):
-                              # fixes GHSA-w9f8-m526-h7fh, GHSA-h4hq-rgvh-wh27,
-                              # GHSA-r32r-j5jq-3w4m — upgrade strongly advised
-CADDY_VERSION=2.11.2          # Built locally via caddy/Dockerfile with mholt/caddy-ratelimit module
-                              # >= 2.11.2: current stable; fixes TLS ACME renewal
-                              # regression introduced in 2.11.1
-POSTFIX_VERSION=4.3.0         # boky/postfix — SMTP sidecar for VaultWarden and SMTP fallback
-```
-
-> **Note on Postfix:** the Postfix sidecar (`boky/postfix`) is the repo-managed SMTP sidecar. VaultWarden uses it for outbound email.
-
-To override versions at runtime without editing files:
+Current default image pins are defined in `.env.example`, which is the authoritative template used by setup generation. At the time of this update the production defaults are:
 
 ```bash
-VAULTWARDEN_VERSION=1.35.4 sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com
+VAULTWARDEN_VERSION=1.36.0
+CADDY_VERSION=2.11.4
+POSTFIX_VERSION=5.1.0
 ```
+
+Keep production versions pinned for predictable appliance behavior. To change pins, edit `.env` deliberately and run the normal update flow after taking an emergency backup.
 
 See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for version pinning details.
 
@@ -158,16 +149,15 @@ Email delivery is handled by **`lib/email.sh`** — a Bash + curl multi-provider
 ### Delivery Chain
 
 ```
-EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER, curl)
-                    2. SMTP        (direct relay or Postfix sidecar)
-                    3. Direct upstream SMTP
+EMAIL_MODE=smtp  →  Postfix sidecar → external SMTP relay (default)
+EMAIL_MODE=auto  →  HTTP API → SMTP/direct fallback (advanced alternative)
 ```
 
 `EMAIL_MODE` controls which path(s) are attempted:
 
 | Value | Behaviour |
 | :-- | :-- |
-| `auto` | Try API → SMTP → direct SMTP in order (recommended) |
+| `auto` | Try API → SMTP → direct SMTP in order (advanced alternative) |
 | `api` | HTTP API only; fail loudly if token not set |
 | `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) |
 | `host` | Deprecated alias for direct |

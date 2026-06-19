@@ -218,12 +218,12 @@ The SMTP password is injected via Docker secret — store it with:
 ### Postfix container versions
 
 `POSTFIX_VERSION` is **optional** in `.env`. If unset, Docker Compose uses the
-default pinned in `docker-compose.yml.example` (currently `boky/postfix:4.3.0`).
+default pinned in `docker-compose.yml.example` (currently `boky/postfix:5.1.0`).
 To override:
 
 ```bash
 # In .env
-POSTFIX_VERSION=4.3.0
+POSTFIX_VERSION=5.1.0
 ```
 
 Check for the latest release at https://hub.docker.com/r/boky/postfix/tags

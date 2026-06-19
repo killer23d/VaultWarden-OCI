@@ -156,7 +156,7 @@ These rules:
 ```bash
 # Verify the token can access the WAF Custom Rules endpoint (Rulesets API)
 curl -s -X GET \
-  "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
+  "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
   -H "Authorization: Bearer YOUR_FIREWALL_TOKEN" \
   -H "Content-Type: application/json" | jq .result.id
 ```
@@ -1079,7 +1079,7 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
      -H "Content-Type: application/json"
 
 # Test Firewall token against the current WAF Custom Rules endpoint
-curl -X GET "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
+curl -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN" \
      -H "Content-Type: application/json"
 ```
