@@ -12,7 +12,8 @@ output. Do not edit manually; run `make docs` to regenerate.
 
 | Target | Description |
 |--------|-------------|
-| `make help` |  Show this help message |
+| `make help` |  Show normal admin/day-2 commands |
+| `make help-all` |  Show every target, including dashboard/API, advanced, dev, and legacy commands |
 | `make setup` |  Run initial setup (requires sudo) |
 | `make dev-setup` |  Set up development environment (.env + docker-compose.override.yml) |
 | `make fix-permissions` |  Fix file ownership after sudo operations leave root-owned files |
@@ -479,7 +480,7 @@ SECRET SOURCE PRIORITY:
 
     cloudflare_zone_id — resolved in order:
         1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. CLOUDFLARE_ZONE_ID environment variable / .env
+        2. Legacy CLOUDFLARE_ZONE_ID shell variable fallback (do not add to .env)
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully

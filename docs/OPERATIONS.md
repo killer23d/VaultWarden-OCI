@@ -327,9 +327,9 @@ make update-system
 
 ```bash
 # .env (set by setup.sh install --auto)
-VAULTWARDEN_VERSION=1.35.4
-CADDY_VERSION=2.11.2
-POSTFIX_VERSION=4.3.0
+VAULTWARDEN_VERSION=1.36.0
+CADDY_VERSION=2.11.4
+POSTFIX_VERSION=5.1.0
 ```
 
 **Development mode — latest versions:**
@@ -341,7 +341,7 @@ Comment out version pins in `.env` to allow `docker compose pull` to fetch `late
 ```bash
 # Edit .env
 nano .env
-# e.g. VAULTWARDEN_VERSION=1.35.4
+# e.g. VAULTWARDEN_VERSION=1.36.0
 
 # Create emergency backup first
 ./backup.sh run emergency

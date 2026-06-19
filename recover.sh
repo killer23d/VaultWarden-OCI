@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#recover.sh - disaster-recovery bootstrap script for restoring a VaultWarden-OCI instance from an attached state/block volume plus an offline Age key.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

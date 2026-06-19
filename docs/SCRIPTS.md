@@ -653,7 +653,7 @@ journalctl -u vaultwarden-notify-failure.service -n 30
 docker compose logs postfix --tail=30
 ```
 
-> **Email delivery prerequisite:** The notification unit calls `send_email()` from `lib/email.sh` (sourced after `lib/common.sh`), which uses the `EMAIL_MODE` and `EMAIL_PROVIDER` chain configured in `.env`. If email is not yet working, run `make test-email` first to diagnose the delivery path before testing failure notifications.
+> **Email delivery prerequisite:** The notification unit calls `send_email()` from `lib/email.sh` (sourced after `lib/common.sh`). The normal path is `EMAIL_MODE=smtp` with the Postfix sidecar relaying to your external SMTP provider. If email is not yet working, run `make test-email` first to diagnose the delivery path before testing failure notifications.
 
 ---
 
@@ -746,18 +746,19 @@ sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate --directio
 
 ## 🏗️ Makefile Reference
 
-All common operations have Makefile shortcuts. Run `make help` to see the full target list.
+All common operations have Makefile shortcuts. Run `make help` for the normal admin/day-2 set and `make help-all` for the full target list.
 
 ### Complete Target Table
 
 | Target | Equivalent command | Notes |
 | :-- | :-- | :-- |
-| `make help` | — | Print all targets with descriptions |
+| `make help` | — | Print normal admin/day-2 targets |
+| `make help-all` | — | Print all targets with descriptions, including dashboard/API, advanced, developer/test, and legacy commands |
 | `make setup` | `sudo ./setup.sh` | Requires `sudo make setup` |
 | `make init-secrets` | `./setup.sh secrets` | Interactive secrets initialisation |
 | `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor (dispatcher) |
 | `make test-secrets` | `./utilities/secrets-list.sh` | Verify secrets decrypt correctly |
-| `make test-email` | `./maintenance.sh test-email` | Test full email delivery chain |
+| `make test-email` | `./maintenance.sh test-email` | Test the Postfix-backed operational alert channel |
 | `make up` / `make start` | `./startup.sh` | Start all services |
 | `make down` / `make stop` | `docker compose down` | Graceful shutdown |
 | `make restart` | `sudo ./startup.sh --force` | Force restart all services |
@@ -1013,7 +1014,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 
 ### Makefile Usage
 1. **Prefer Makefile shortcuts** — they handle quoting and flags consistently
-2. **Run `make help`** to see all available targets
+2. **Run `make help`** for normal admin commands or `make help-all` for every target
 3. **Use `make test-config`** to validate docker-compose config before deployment
 
 ### Security

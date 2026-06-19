@@ -19,289 +19,129 @@ This is a **template-based, hardened deployment** built for small teams who want
 
 ---
 
-## ⚡ Quick Start (~15 Minutes)
+## ⚡ Quick Start — Supported Golden Path
 
-### Step 0 — Prepare Ingress Before Setup
+VaultWarden-OCI is an opinionated, secure appliance for a small team. The normal production path is **Ubuntu + Cloudflare DNS/proxy/WAF + Caddy DNS-01 + Vaultwarden + Postfix + CrowdSec + SOPS/Age + rclone + systemd timers**. See [docs/PROJECT-BOUNDARY.md](docs/PROJECT-BOUNDARY.md) for the project boundary.
 
-Open the provider firewall, security group, router, or upstream network ACL before running setup. The host-level firewall rules installed by this project cannot receive traffic that your infrastructure provider has already dropped.
+### 1. Prepare Cloudflare and your provider firewall
 
-1. Allow inbound TCP `443` to the Ubuntu host.
-2. Allow inbound TCP `80` if you use direct `acme_http` TLS or want HTTP-to-HTTPS redirects.
-3. Allow inbound TCP `22` only from your administrator IP range where practical.
-4. If you use Cloudflare proxying, restrict provider-side web ingress to current Cloudflare IP ranges after initial validation.
+Before setup, prepare the public path:
 
-Cloudflare IPv4 ranges (verify the current list at <https://www.cloudflare.com/ips-v4>):
+- Create `vault.yourdomain.com` in Cloudflare and start it as **DNS Only (Grey Cloud)** for initial certificate provisioning.
+- Allow inbound TCP `443` to the Ubuntu host. Allow TCP `80` only if you intentionally use the advanced direct `acme_http` fallback or want HTTP redirects.
+- Limit SSH (`22`) to your administrator IP range where possible.
+- After validation, switch the DNS record to **Proxied (Orange Cloud)** and set Cloudflare SSL/TLS to **Full (Strict)**.
+- If your provider supports it, restrict web ingress to Cloudflare IP ranges after the first successful deployment.
 
-```
-173.245.48.0/20   103.21.244.0/22   103.22.200.0/22   103.31.4.0/22
-141.101.64.0/18   108.162.192.0/18  190.93.240.0/20   188.114.96.0/20
-197.234.240.0/22  198.41.128.0/17   162.158.0.0/15    104.16.0.0/13
-104.24.0.0/14     172.64.0.0/13     131.0.72.0/22
-```
+> OCI note: OCI Security Lists drop packets before Ubuntu sees them. Add ingress rules under **Compute → Instances → Primary VNIC → Subnet → Default Security List**.
 
-> **OCI note:** OCI Security Lists drop packets before the VM's network stack. On OCI, add ingress rules under **Compute → Instances → Primary VNIC → Subnet → Default Security List**. OCI does not support comma-separated CIDRs, so add one Cloudflare range per rule.
-
----
-
-### Step 1 — Choose TLS and DNS Mode
-
-Default mode is `TLS_PROVIDER=cloudflare`: set your Cloudflare DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy uses the **DNS-01 challenge** via your Cloudflare API token, so Let's Encrypt does not need inbound HTTP access for certificate issuance. Enable the orange proxy cloud after the stack is healthy.
-
-Direct mode is `TLS_PROVIDER=acme_http`: Caddy uses HTTP-01 on port `80`, so your DNS record must point directly at the host and inbound TCP `80` must reach Caddy during certificate issuance.
-
----
-
-### Step 2 — Clone & Run Setup
+### 2. Clone the repository
 
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
-
-# Make top-level scripts executable — do NOT use -R here.
-# lib/*.sh are sourced libraries, not standalone executables.
-# utilities/*.sh are set +x automatically by setup.sh.
 chmod +x *.sh
+```
 
-# Automated setup — installs deps, generates config files, auto-generates
-# VaultWarden admin password, Caddy admin password, and backup passphrase.
-# External credentials (CF tokens, SMTP, push keys) are left as
-# CHANGE_ME placeholders — the post-install summary lists the exact
-# ./utilities/secrets-rotate.sh commands to fill them in.
-# Full install — explicit subcommand form (recommended)
+### 3. Run setup
+
+```bash
 sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --auto
+```
 
-# All setup.sh entry points:
-sudo ./setup.sh install --domain DOMAIN --email EMAIL [--auto] [--use-latest] [--skip-deps] [--force] [--dry-run] [--data-device DEV] [--data-mount PATH]
-sudo ./setup.sh secrets           # Configure/rotate secrets interactively
-sudo ./setup.sh systemd install   # Install and enable all systemd timers
-sudo ./setup.sh systemd status    # Show timer status
-sudo ./setup.sh systemd validate  # Detect stale install paths
-sudo ./setup.sh systemd remove    # Disable and remove all timers
-./setup.sh help                   # Full usage reference
+`--auto` installs dependencies, generates `.env` and `docker-compose.yml`, provisions local generated secrets, configures the host firewall, and adds your user to the `docker` group while preserving pinned container versions from `.env.example`.
 
-# Re-login so your user picks up the docker group
+### 4. Re-login for Docker group membership
+
+```bash
 exit
 # SSH back in, then:
 cd VaultWarden-OCI
 ```
 
-> **`--auto` vs `--use-latest`:** `setup.sh install --auto` is fully non-interactive and preserves version pins. Pass `--use-latest` separately to opt into live upstream container and CrowdSec component versions instead of the pinned values in `.env`.
+### 5. Configure required secrets and `.env`
 
-> **Separate data volume:** If you have a dedicated block device or mounted filesystem for VaultWarden state, verify it first with `lsblk`, `findmnt`, and `blkid`. Then pass `--data-device DEV` and optionally `--data-mount PATH` to setup. See [Separate Data Volume (Optional)](#separate-data-volume-optional) below.
-
----
-
-### Step 3 — Configure Environment & External Credentials
-
-**Edit `.env` first** — set non-secret email/runtime values, then configure Cloudflare CrowdSec secrets in `${PROJECT_STATE_DIR}/secrets/secrets.yaml`.
+Edit non-secret values first:
 
 ```bash
 nano .env
-# ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME
-# ► Set: EMAIL_MODE=auto, EMAIL_PROVIDER=mailersend (or your provider)
-# ► Set: ALLOWED_SENDER_DOMAINS=vault.yourdomain.com  (for Postfix sidecar)
-# ► Verify: DOMAIN and ADMIN_EMAIL are correct
 ```
 
-Then supply the external credentials that `--auto` cannot generate for you:
+Set or verify:
+
+- `DOMAIN=https://vault.yourdomain.com`
+- `ADMIN_EMAIL=admin@yourdomain.com`
+- `EMAIL_MODE=smtp` and `EMAIL_PROVIDER=` for the Postfix-first default
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_FROM`, and `ALLOWED_SENDER_DOMAINS`
+- `RCLONE_REMOTE_NAME`, `RCLONE_CONFIG`, and `RCLONE_REMOTE_PATH` if enabling offsite backup immediately
+- `ADMIN_ALLOW_CIDR` so `/admin` is limited to your LAN, VPN, or admin egress range
+
+Then rotate the external credentials that setup cannot generate:
 
 ```bash
-# Cloudflare tokens (required — Caddy TLS + CrowdSec edge blocking)
 sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
 sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
 sudo ./edit-secrets.sh rotate cloudflare_zone_id
 sudo ./edit-secrets.sh rotate cf_account_id
-
-## Email API token (required for Tier 1)
-sudo ./edit-secrets.sh rotate email_api_token
-# Single canonical key used for all providers (selected by EMAIL_PROVIDER)
-
-# SMTP password (required for Tier 2 relay and Postfix sidecar)
 sudo ./edit-secrets.sh rotate smtp_password
-
-# Push notification keys (optional — mobile app push alerts)
-./utilities/secrets-rotate.sh push_installation_id
-./utilities/secrets-rotate.sh push_installation_key
 ```
 
-**Interactive install (no `--auto`):** `setup.sh` creates the skeleton and displays a next-steps screen. Follow the steps printed on screen — edit `.env` first, then run `./setup.sh secrets` to be prompted for all credentials at once.
+> `cloudflare_zone_id` is stored in SOPS secrets, not as `CLOUDFLARE_ZONE_ID` in `.env`.
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable and [docs/EMAIL.md](docs/EMAIL.md) for a full email setup walkthrough.
-
----
-
-### Step 4 — Start & Verify
+### 6. Start and verify
 
 ```bash
-./startup.sh          # start all services  (or: make start)
-./maintenance.sh health  # verify everything is healthy  (or: make health)
+./startup.sh
+./maintenance.sh health
+./maintenance.sh test-email --verbose
 ```
 
-Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set SSL/TLS encryption to **Full (Strict)**.
+When health checks pass, switch the Cloudflare record to **Proxied (Orange Cloud)** and verify Cloudflare SSL/TLS is **Full (Strict)**.
 
-> **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./maintenance.sh health` in verbose mode so full diagnostics are always visible to the operator.
-
----
-
-### Step 5 — Finish Up (Recommended)
+### 7. Install automation
 
 ```bash
-# Set up automated backups, updates, health checks, and maintenance via systemd timers
 sudo ./setup.sh systemd install
+```
 
-# Export a plaintext recovery kit to your password manager
-# Run this AFTER all secrets are configured so everything is included
+This installs the appliance automation: health self-healing, database and full backups, maintenance, DNS refresh, firewall refresh, locking, and failure notifications. For the full schedule and customization points, see [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md).
+
+### 8. Export the recovery kit
+
+```bash
 ./utilities/secrets-export-recovery-kit.sh
-
-# Create emergency admin for serial-console or local recovery
-sudo utilities/setup-secrets.sh breakglass create    # or: make breakglass-create
 ```
 
-> **`setup.sh systemd` improvement:** `setup.sh systemd install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
+Store the recovery kit in your password manager and offline backup location. It is your break-glass bundle for rebuilding or decrypting secrets during recovery.
 
-The installed systemd timer schedule:
+**🎉 Your vault is live at `https://vault.yourdomain.com`.**
 
-| Timer | Schedule | Protection |
-| :-- | :-- | :-- |
-| `vaultwarden-maintenance.timer` | 2:05 AM daily | `flock` — skips + logs if already running |
-| `vaultwarden-full-backup.timer` | 3 AM Sunday | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
-| `vaultwarden-db-backup.timer` | 4 AM daily | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
-| `vaultwarden-health.timer` | Every 5 min | `maintenance.sh health --fix`; self-heals, failures notify via `OnFailure=` |
-| `vaultwarden-dns-update.timer` | Every hour | `flock` — skips + logs if already running |
-| `vaultwarden-firewall-update.timer` | Saturday 4 AM | `flock` — skips + logs if already running |
+### Advanced setup pointers
 
-> **Note on timer persistence:** The health, DNS, firewall-update, and DB-backup timers are installed with `Persistent=true` — if the system reboots while one was due to fire, systemd will run the missed job once on next boot. The full-backup and maintenance timers use `Persistent=false` to avoid a catch-up I/O storm after extended downtime. This replaces the flock lock-directory recreation step that cron required.
+Keep first install on the golden path unless you have a specific reason to diverge:
 
-> **Runtime user model:** Backup, health, and DNS automation run as the service user (`ubuntu` by default). Root execution is reserved for explicitly privileged jobs (for example firewall rule updates).
-
-> **Viewing timer status:** `systemctl list-timers --all | grep vaultwarden` shows next fire time and last run for every timer.
-
-> **Failure notifications:** Every service unit has `OnFailure=vaultwarden-notify-failure.service`. If any backup, health, or maintenance job fails, an email alert is sent automatically without requiring a separate monitoring tool.
-
-**🎉 Your vault is live at `https://vault.yourdomain.com`**
-
-For day-2 operations and incident handling, keep [RUNBOOK.md](RUNBOOK.md) open in a second terminal session.
-
----
-
-### Separate Data Volume (Optional)
-
-Dedicated block storage keeps vault data independent of the boot volume, making snapshots, resizes, and host replacement safer. Provider-side provisioning and attachment happen outside this repository. Ubuntu must see the attached device before setup can use it.
-
-1. Provision and attach storage through your chosen provider or hypervisor.
-2. On Ubuntu, identify the new device and confirm it is not the OS disk:
-   ```bash
-   lsblk -o NAME,PATH,SIZE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL
-   findmnt /
-   ```
-3. Inspect the selected device before any destructive step:
-   ```bash
-   sudo blkid /dev/disk/by-id/your-volume || true
-   sudo wipefs --no-act --all /dev/disk/by-id/your-volume
-   ```
-4. If the device already has an ext4 or xfs filesystem that you intend to adopt, setup will ask for explicit confirmation before mounting it.
-5. If the device is blank and you want setup to format it as ext4, set an explicit one-command environment flag:
-   ```bash
-   sudo DATA_VOLUME_FORCE_FORMAT=true ./setup.sh install \
-     --domain vault.yourdomain.com \
-     --email admin@yourdomain.com \
-     --auto \
-     --data-device /dev/disk/by-id/your-volume \
-     --data-mount /mnt/vw-data
-   ```
-
-> **⚠️ Formatting destroys existing data.** Use `DATA_VOLUME_FORCE_FORMAT=true` only after confirming the selected device is the intended empty data volume. The setup script never infers permission to format from `--auto` or `--data-device`.
-
-For a pre-formatted ext4/xfs volume:
-
-```bash
-sudo ./setup.sh install \
-  --domain vault.yourdomain.com \
-  --email admin@yourdomain.com \
-  --auto \
-  --data-device /dev/disk/by-id/your-volume \
-  --data-mount /mnt/vw-data
-```
-
-`setup.sh` handles the full provisioning cycle:
-
-- Validates that `DATA_VOLUME_DEVICE` is a real block device and not already mounted
-- Adopts existing ext4/xfs filesystems only after confirmation
-- Formats blank devices as ext4 only when `DATA_VOLUME_FORCE_FORMAT=true` is set
-- Adds a UUID-based entry to `/etc/fstab` with `nofail` (no duplicate entries on re-run)
-- Mounts the volume and writes a sentinel file (`.vw-data-volume`) to confirm identity
-- Writes `DATA_VOLUME_DEVICE`, `DATA_VOLUME_MOUNT`, and `PROJECT_STATE_DIR=/mnt/vw-data` into `.env` so all persistent state lands on the data volume
-- Installs a systemd drop-in (`/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf`) with `RequiresMountsFor=` to prevent Docker from starting until the volume is mounted — eliminating silent data writes to the boot volume on reboot
-
-After setup, verify the mount and available space:
-
-```bash
-findmnt /mnt/vw-data
-df -h /mnt/vw-data
-grep -E '^(DATA_VOLUME_DEVICE|DATA_VOLUME_MOUNT|PROJECT_STATE_DIR)=' .env
-```
-
-Provider examples:
-
-- **OCI:** attach a Block Volume in the OCI Console before setup, then identify its Ubuntu path with `lsblk`. It may appear as `/dev/sdb`, `/dev/nvme1n1`, a partition such as `/dev/sdb1`, or a stable `/dev/disk/by-id/...` symlink.
-- **Other providers / VMs / physical hosts:** attach or expose the disk using that platform's tooling, then use the same Ubuntu discovery and setup commands above.
-
-**Reverting to boot-only mode:** Re-run setup without `--data-device`. The drop-in is removed automatically and `PROJECT_STATE_DIR` reverts to `/var/lib/vaultwarden`.
-
-> **⚠️ Fail-closed guarantee:** In separate-volume mode, `startup.sh`, `backup.sh`, `restore.sh`, and `maintenance.sh` all exit immediately with a clear diagnostic error if the expected data volume is not mounted. Data is never silently written to the boot volume.
-
-> **Restore safety note:** `restore.sh` now re-validates the mounted data-volume identity marker (`.vw-data-volume`) after restore promotion, so separate-volume guards continue to work even when restoring older archives.
-
-**`.env` variables (set automatically by setup, verify if editing manually):**
-
-```bash
-# Boot-only mode (default)
-DATA_VOLUME_DEVICE=
-DATA_VOLUME_MOUNT=/mnt/vw-data
-PROJECT_STATE_DIR=/var/lib/vaultwarden
-
-# Separate-volume mode
-DATA_VOLUME_DEVICE=/dev/disk/by-id/your-volume
-DATA_VOLUME_MOUNT=/mnt/vw-data
-PROJECT_STATE_DIR=/mnt/vw-data   # MUST equal DATA_VOLUME_MOUNT
-```
-
-Detailed storage migration and rollback guidance lives in [docs/VOLUME-MIGRATION.md](docs/VOLUME-MIGRATION.md). Backup, restore, and full host recovery guidance lives in [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) and [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md).
+- Direct `acme_http` TLS is an advanced fallback; Cloudflare DNS-01 is the supported production default.
+- Dedicated data volumes are optional. See [docs/VOLUME-MIGRATION.md](docs/VOLUME-MIGRATION.md) before adopting or moving production data.
+- Push notifications are optional and require additional outbound networking and Bitwarden push credentials. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+- Provider-specific email APIs are optional alternatives; the default path is Postfix-first SMTP.
 
 ---
 
 ## 📧 Email Delivery
 
-Email is handled by **`lib/email.sh`** (email functions) — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
+The default operator path is **Postfix-first SMTP**: Vaultwarden sends to the internal `postfix` sidecar, and Postfix relays to your external SMTP provider. This keeps mail reliable without requiring a host mail daemon.
 
-```
-Tier 1 ─ HTTP API       →  MailerSend, SendGrid, Mailgun, Postmark, Resend
-           │ fail
-           ▼
-Tier 2 ─ SMTP           →  direct relay or the Postfix sidecar on 127.0.0.1:587
-           │ fail
-           ▼
-Tier 3 ─ Direct SMTP    →  configured upstream SMTP provider
-```
-
-The VaultWarden container also talks to the internal `postfix`
-service via `VW_SMTP_*`; only the `SMTP_*` block changes when you switch
-upstream relays.
-
-**Minimum setup for operational alerts (all three tiers):**
+Minimum `.env` settings:
 
 ```bash
-# .env
-EMAIL_MODE=auto
-EMAIL_PROVIDER=mailersend           # or your chosen provider
-SMTP_HOST=smtp.mailersend.net
+EMAIL_MODE=smtp
+EMAIL_PROVIDER=
+SMTP_HOST=smtp.yourmailprovider.com
 SMTP_PORT=587
 SMTP_SECURITY=starttls
 SMTP_USERNAME=your-smtp-username
 SMTP_FROM=noreply@vault.yourdomain.com
-ALLOWED_SENDER_DOMAINS=vault.yourdomain.com
-
-# VaultWarden -> Postfix sidecar (internal Docker network; no auth/TLS here):
+ALLOWED_SENDER_DOMAINS=yourdomain.com
 VW_SMTP_HOST=postfix
 VW_SMTP_PORT=587
 VW_SMTP_SECURITY=off
@@ -309,18 +149,13 @@ VW_SMTP_AUTH_MECHANISM=none
 VW_SMTP_EXPLICIT_TLS=false
 ```
 
+Store the relay password in SOPS secrets:
+
 ```bash
-# Secrets
-./utilities/secrets-rotate.sh email_api_token
 ./utilities/secrets-rotate.sh smtp_password
 ```
 
-```bash
-# Test end-to-end
-./maintenance.sh test-email --verbose
-```
-
-Full details, provider setup, Postfix MTA configuration, and troubleshooting: **[docs/EMAIL.md](docs/EMAIL.md)**
+Provider-specific HTTP APIs (`mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`) remain available as advanced alternatives via `EMAIL_MODE=auto` or `EMAIL_MODE=api`; see [docs/EMAIL.md](docs/EMAIL.md).
 
 ---
 
@@ -330,9 +165,9 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 
 | Container | Role |
 | :-- | :-- |
-| **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit). Now requires **Caddy ≥ 2.11.2**; uses `encode zstd gzip`, `roll_compression zstd`, connection timeouts in the global `servers` block, `request_body` size limits on admin/auth handlers, and health-check log suppression. |
+| **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit). Now requires **Caddy 2.11.4 by default**; uses `encode zstd gzip`, `roll_compression zstd`, connection timeouts in the global `servers` block, `request_body` size limits on admin/auth handlers, and health-check log suppression. |
 | **VaultWarden** | Password manager application (512 MB limit) |
-| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/email.sh`; binds `127.0.0.1:587` (256 MB limit) |
+| **Postfix** | Containerised private SMTP relay for Vaultwarden and operational alerts; forwards to your external SMTP provider (256 MB limit) |
 | **CrowdSec** | Host systemd service — threat detection with Cloudflare edge banning and host iptables |
 
 > The `docker-compose.yml.example` template now enforces `read_only` filesystems, `tmpfs` mounts, `ulimits` (nofile), `no-new-privileges:true`, and tightened Caddy log rotation. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for override details.
@@ -433,9 +268,12 @@ make test-email / test-secrets         # Diagnostics
 make logs [SERVICE=name]               # Container logs (follows single service, default: vaultwarden)
 make diagnose                          # One-command debug dump: versions, key status, disk, containers, logs
 make backup-status                     # Last backup times, directory size, retention window
-make lint                              # shellcheck all *.sh scripts
-make version                           # Stack version from VERSION file
+make timers / systemd-status            # Automation status
+make help                              # Normal admin/day-2 commands
+make help-all                          # Full target list (advanced/dev/dashboard API)
 ```
+
+> Several Makefile targets are used by the dashboard as a stable command API. Do not rename targets without checking dashboard integration. Developer/test commands such as linting and formatting are still available through `make help-all`.
 
 > Several Makefile fixes landed in v1.0.0: `safe-restart` now rolls back on health-check failure; `key-rotate` invokes `bash` explicitly (fixes dash compatibility) and runs a `key-health` pre-flight; `restore-db` no longer passes `--force` so the Age key prompt runs as intended; `watch` uses `health-quick` to avoid hammering the HTTPS endpoint. See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
@@ -447,7 +285,7 @@ make version                           # Stack version from VERSION file
 | :-- | :-- |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Detailed deployment walkthrough |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Every `.env` and secrets variable |
-| [EMAIL.md](docs/EMAIL.md) | Email setup: API providers, SMTP relay, Postfix MTA |
+| [EMAIL.md](docs/EMAIL.md) | Email setup: Postfix-first SMTP default and advanced API providers |
 | [SECURITY.md](docs/SECURITY.md) | Security hardening deep-dive |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Day-to-day ops, update/rollback phases |
 | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) | Backup strategy and restore procedures |

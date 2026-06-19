@@ -130,7 +130,7 @@ Complete Cloudflare dashboard setup (Part 1) first, then:
 cp .env.example .env
 # Set at minimum:
 #   DOMAIN, ADMIN_EMAIL
-#   CLOUDFLARE_ZONE_ID, CF_ACCOUNT_ID
+#   cloudflare_zone_id and cf_account_id in SOPS secrets
 #   CLOUDFLARE_PROXY_ENABLED=true
 #   CF_FREE_PLAN=true          (keep true on free Cloudflare plan)
 #   CF_AUTONOMOUS_MODE=false   (keep false for daemon mode)
@@ -391,8 +391,8 @@ sudo systemctl restart crowdsec
 | Variable | Default | Purpose |
 |---|---|---|
 | `CLOUDFLARE_PROXY_ENABLED` | `true` | Master switch; bouncer skips all phases if `false` |
-| `CLOUDFLARE_ZONE_ID` | _(required)_ | Your Cloudflare zone ID |
-| `CF_ACCOUNT_ID` | _(required)_ | Your Cloudflare account ID |
+| `cloudflare_zone_id` | _(required)_ | Your Cloudflare zone ID in SOPS secrets |
+| `cf_account_id` | _(required)_ | Your Cloudflare account ID in SOPS secrets |
 | `CF_FREE_PLAN` | `true` | Enables `only_include_decisions_from` KV write guard |
 | `CF_AUTONOMOUS_MODE` | `false` | `true` = autonomous mode (no persistent daemon) |
 | `CROWDSEC_VERSION` | `1.7.8` | Pin CrowdSec engine version |
