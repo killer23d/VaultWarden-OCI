@@ -47,6 +47,7 @@ SERVICES=(
     vaultwarden-dns-update.service
     vaultwarden-firewall-update.service
     vaultwarden-notify-failure.service
+    vaultwarden-notify-failure@.service
     vaultwarden-iptables.service
 )
 
@@ -58,6 +59,7 @@ _VW_DROPIN_UNITS=(
     vaultwarden-dns-update.service
     vaultwarden-firewall-update.service
     vaultwarden-notify-failure.service
+    vaultwarden-notify-failure@.service
     vaultwarden-maintenance.timer
     vaultwarden-db-backup.timer
     vaultwarden-full-backup.timer
@@ -99,7 +101,7 @@ WHAT install DOES:
          utilities/maintenance-run.sh      utilities/maintenance-health.sh
          utilities/maintenance-update.sh   utilities/maintenance-db-maint.sh
          utilities/maintenance-email.sh    utilities/maintenance-update-dns.sh
-         utilities/maintenance-update-firewall.sh
+         utilities/notify-failure.sh       utilities/maintenance-update-firewall.sh
          utilities/backup-run.sh           utilities/restore-run.sh
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
@@ -360,6 +362,8 @@ _ROOT_REQUIRED_UNITS=(
     vaultwarden-firewall-update.service
     vaultwarden-iptables.service
     vaultwarden-startup.service
+    vaultwarden-notify-failure.service
+    vaultwarden-notify-failure@.service
 )
 
 # _install_service_identity_dropin SERVICE_USER SERVICE_GROUP
@@ -405,6 +409,24 @@ DROPIN
 
 _cleanup_stale_identity_dropins() {
     local unit dropin_dir dropin_file
+
+    local -a stale_files=(
+        "vaultwarden-db-backup.service.d/30-run-as-root.conf"
+        "vaultwarden-full-backup.service.d/30-run-as-root.conf"
+    )
+    local stale_rel
+    for stale_rel in "${stale_files[@]}"; do
+        dropin_file="${UNIT_DEST_DIR}/${stale_rel}"
+        dropin_dir="$(dirname "$dropin_file")"
+        if [[ -f "$dropin_file" ]]; then
+            _run rm -f "$dropin_file"
+            log_success "Removed stale root identity drop-in: $dropin_file"
+        fi
+        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+            _run rmdir "$dropin_dir"
+            log_success "Removed empty drop-in dir: $dropin_dir"
+        fi
+    done
 
     for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
         dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
@@ -638,6 +660,7 @@ install_units() {
         utilities/maintenance-db-maint.sh
         utilities/maintenance-email.sh
         utilities/maintenance-update-dns.sh
+        utilities/notify-failure.sh
         utilities/maintenance-update-firewall.sh
         utilities/backup-run.sh
         utilities/restore-run.sh
@@ -1025,6 +1048,7 @@ validate_installation() {
         utilities/maintenance-db-maint.sh
         utilities/maintenance-email.sh
         utilities/maintenance-update-dns.sh
+        utilities/notify-failure.sh
         utilities/maintenance-update-firewall.sh
         utilities/backup-run.sh
         utilities/restore-run.sh
@@ -1132,23 +1156,58 @@ validate_installation() {
         fi
     done
     for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
-        local dropin="$UNIT_DEST_DIR/${unit}.d/20-identity.conf"
-        if [[ -f "$dropin" ]]; then
-            local user_value
-            user_value=$(awk -F= '/^[[:space:]]*User[[:space:]]*=/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$dropin")
-            if [[ -n "$user_value" && "$user_value" != "root" ]]; then
-                log_error "  CONFLICT: $unit has User=$user_value but this unit currently requires root."
-                log_error "  Fix: sudo utilities/setup-systemd.sh install"
-                (( errors++ )) || true
-            elif [[ "$user_value" == "root" ]]; then
-                log_warn "  REDUNDANT: $dropin sets User=root; preferred state is no identity drop-in."
-                (( warnings++ )) || true
-            else
-                log_warn "  REDUNDANT: $dropin exists for root-required unit; preferred state is no identity drop-in."
-                (( warnings++ )) || true
-            fi
-        fi
+        local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
+        [[ -d "$dropin_dir" ]] || continue
+        local dropin
+        while IFS= read -r -d '' dropin; do
+            local user_values group_values value
+            user_values=$(awk -F= '/^[[:space:]]*User[[:space:]]*=/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' "$dropin")
+            group_values=$(awk -F= '/^[[:space:]]*Group[[:space:]]*=/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' "$dropin")
+            while IFS= read -r value; do
+                [[ -n "$value" ]] || continue
+                if [[ "$value" != "root" ]]; then
+                    log_error "  CONFLICT: $unit has User=$value in $dropin but this unit currently requires root."
+                    log_error "  Fix: sudo utilities/setup-systemd.sh install"
+                    (( errors++ )) || true
+                else
+                    log_warn "  REDUNDANT: $dropin sets User=root; preferred state is no identity drop-in."
+                    (( warnings++ )) || true
+                fi
+            done <<< "$user_values"
+            while IFS= read -r value; do
+                [[ -n "$value" ]] || continue
+                if [[ "$value" != "root" ]]; then
+                    log_error "  CONFLICT: $unit has Group=$value in $dropin but this unit currently requires root."
+                    log_error "  Fix: sudo utilities/setup-systemd.sh install"
+                    (( errors++ )) || true
+                else
+                    log_warn "  REDUNDANT: $dropin sets Group=root; preferred state is no identity drop-in."
+                    (( warnings++ )) || true
+                fi
+            done <<< "$group_values"
+        done < <(find "$dropin_dir" -mindepth 1 -maxdepth 1 -type f -name '*.conf' -print0 2>/dev/null)
     done
+
+    local notify_helper="$OPT_SCRIPTS_DIR/utilities/notify-failure.sh"
+    if [[ ! -x "$notify_helper" ]]; then
+        log_error "  MISSING/NOT EXECUTABLE: $notify_helper"
+        (( errors++ )) || true
+    else
+        log_success "  OK: $notify_helper is installed and executable"
+    fi
+    local notify_unit="$UNIT_DEST_DIR/vaultwarden-notify-failure@.service"
+    if [[ -f "$notify_unit" ]]; then
+        if grep -q '^ExecStart=/opt/vaultwarden-scripts/utilities/notify-failure.sh %i' "$notify_unit" \
+           && ! grep -q 'ExecStart=/bin/bash -c' "$notify_unit"; then
+            log_success "  OK: notifier template uses notify-failure.sh helper"
+        else
+            log_error "  NOTIFIER DRIFT: $notify_unit must ExecStart the notify-failure.sh helper, not inline bash"
+            (( errors++ )) || true
+        fi
+    else
+        log_error "  MISSING: $notify_unit"
+        (( errors++ )) || true
+    fi
 
     # Validate ReadWritePaths drop-ins only if a separate data volume is in use.
     # Mirrors the guard in _install_rwpaths_dropin so boot-only installs are not

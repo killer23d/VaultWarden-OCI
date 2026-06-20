@@ -21,7 +21,8 @@ unset _SAVE_SCRIPT_DIR
 trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
 # Configuration defaults.
-UPDATE_DNS=true
+UPDATE_DNS="${UPDATE_DNS:-}"
+DNS_UPDATE_REQUIRED="${DNS_UPDATE_REQUIRED:-false}"
 DRY_RUN=false
 EMAIL_NOTIFY=false
 
@@ -35,6 +36,7 @@ USAGE:
 
 OPTIONS:
     --email       Send email notification if the DNS record is updated
+    --require-dns  Treat missing DNS automation config as a failure
     --dry-run     Preview what would be done without making changes
     --help, -h    Show this help
 
@@ -43,6 +45,10 @@ SECRET SOURCE PRIORITY:
         1. decrypt_secret() from encrypted $SECRETS_FILE
         2. Host file: $CF_TOKEN_FILE or secrets/.docker_secrets/caddy_cloudflare_dns_token
         3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
+
+    DNS_UPDATE_REQUIRED=true or --require-dns makes missing config fail.
+    UPDATE_DNS=false skips cleanly. When UPDATE_DNS is unset, missing or
+    placeholder Cloudflare config logs a warning and exits 0.
 
     cloudflare_zone_id — resolved in order:
         1. decrypt_secret() from encrypted $SECRETS_FILE
@@ -133,8 +139,77 @@ _resolve_zone_id() {
     return 1
 }
 
+_is_placeholder_value() {
+    local value="${1:-}"
+    [[ -z "$value" || "$value" == PLACEHOLDER* || "$value" == CHANGE_ME* || "$value" == *YOUR_* || "$value" == "changeme" ]]
+}
+
+_dns_strict_required() {
+    [[ "${DNS_UPDATE_REQUIRED:-false}" == "true" || "${UPDATE_DNS:-}" == "true" ]]
+}
+
+_dns_optional_skip() {
+    local reason="$1"
+    if _dns_strict_required; then
+        log_error "$reason"
+        log_error "DNS update is required (UPDATE_DNS=true or DNS_UPDATE_REQUIRED=true); configure Cloudflare DNS secrets."
+        return 1
+    fi
+    log_warn "DNS automation not configured: $reason"
+    log_warn "Skipping DNS update successfully. Set UPDATE_DNS=true or DNS_UPDATE_REQUIRED=true to make this a hard failure."
+    return 0
+}
+
+_check_optional_dns_config() {
+    if [[ "${UPDATE_DNS:-}" == "false" ]]; then
+        log_info "UPDATE_DNS=false; skipping DNS update."
+        return 0
+    fi
+
+    local domain="${DOMAIN:-}"
+    domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
+    if [[ -z "$domain" || "$domain" == example.* || "$domain" == *CHANGE_ME* || "$domain" == *PLACEHOLDER* ]]; then
+        _dns_optional_skip "DOMAIN is missing or still a placeholder"
+        return $?
+    fi
+
+    local zone_id=""
+    if zone_id=$(_resolve_zone_id 2>/dev/null); then
+        if _is_placeholder_value "$zone_id"; then
+            _dns_optional_skip "cloudflare_zone_id is missing or still a placeholder"
+            return $?
+        fi
+    else
+        _dns_optional_skip "cloudflare_zone_id is not configured"
+        return $?
+    fi
+
+    local cf_token=""
+    if cf_token=$(_resolve_cf_token 2>/dev/null); then
+        if _is_placeholder_value "$cf_token"; then
+            _dns_optional_skip "Cloudflare DNS token is missing or still a placeholder"
+            return $?
+        fi
+    else
+        _dns_optional_skip "Cloudflare DNS token is not configured"
+        return $?
+    fi
+
+    DNS_ZONE_ID="$zone_id"
+    DNS_CF_TOKEN="$cf_token"
+    export DNS_ZONE_ID DNS_CF_TOKEN
+    return 2
+}
+
 update_dns_record() {
-    if [[ "$UPDATE_DNS" != "true" ]]; then log_info "Skipping DNS update"; return 0; fi
+    local cfg_status=0
+    _check_optional_dns_config || cfg_status=$?
+    case "$cfg_status" in
+        0) return 0 ;;
+        1) return 1 ;;
+        2) ;;
+        *) return "$cfg_status" ;;
+    esac
     if [[ "$DRY_RUN"    == "true" ]]; then log_info "[DRY RUN] Would check and update Cloudflare DNS A record"; return 0; fi
 
     local domain="${DOMAIN:-}"
@@ -169,8 +244,9 @@ update_dns_record() {
     }
 
     local zone_id cf_token
-    zone_id=$(_resolve_zone_id)   || return 1
-    cf_token=$(_resolve_cf_token) || return 1
+    zone_id="${DNS_ZONE_ID:-}"
+    cf_token="${DNS_CF_TOKEN:-}"
+    [[ -z "$zone_id" ]] && { log_error "Cloudflare zone ID is empty"; return 1; }
     [[ -z "$cf_token" ]] && { log_error "Cloudflare API token is empty"; return 1; }
 
     local cf_response record_id stored_ip
@@ -227,6 +303,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --email)           EMAIL_NOTIFY=true; shift ;;
         --dry-run)         DRY_RUN=true;      shift ;;
+        --require-dns)     DNS_UPDATE_REQUIRED=true; shift ;;
         --help|-h|help)    show_help; exit 0 ;;
         *) log_error "Unknown option for 'update-dns': $1"; show_help; exit 1 ;;
     esac

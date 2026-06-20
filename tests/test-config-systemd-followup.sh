@@ -115,6 +115,48 @@ SYSTEMCTL
 backup_repo_env
 run_test 'repo .env without PROJECT_STATE_DIR falls through to installed environment' test_config_falls_through_empty_repo_state
 run_test 'explicit caller overrides survive loading and repeated calls' test_config_caller_override_wins
+test_notify_failure_systemd_uses_helper() {
+    grep -q '^ExecStart=/opt/vaultwarden-scripts/utilities/notify-failure.sh %i' "$ROOT/systemd/vaultwarden-notify-failure@.service" \
+        || fail "notifier template does not call helper with %i"
+    ! grep -q 'notify_failure_.*PROJECT_STATE_DIR' "$ROOT/systemd/vaultwarden-notify-failure@.service" \
+        || fail "notifier unit still contains cooldown shell logic"
+    ! grep -q '/notify_failure_' "$ROOT/systemd/vaultwarden-notify-failure@.service" \
+        || fail "notifier unit can write cooldown under /"
+}
+
+test_notify_failure_helper_defaults_state_dir() {
+    grep -q 'PROJECT_STATE_DIR=/var/lib/vaultwarden' "$ROOT/utilities/notify-failure.sh" \
+        || fail "notify helper does not default PROJECT_STATE_DIR safely"
+    grep -q '\${PROJECT_STATE_DIR}/.vw-health-alert' "$ROOT/utilities/notify-failure.sh" \
+        || fail "notify helper does not write cooldowns under PROJECT_STATE_DIR"
+    grep -q 'Refusing unsafe cooldown directory' "$ROOT/utilities/notify-failure.sh" \
+        || fail "notify helper lacks unsafe cooldown guard"
+}
+
+test_dns_optional_and_strict_modes() {
+    grep -q 'UPDATE_DNS=false; skipping DNS update' "$ROOT/utilities/maintenance-update-dns.sh" \
+        || fail "DNS updater does not skip cleanly when UPDATE_DNS=false"
+    grep -q 'DNS automation not configured' "$ROOT/utilities/maintenance-update-dns.sh" \
+        || fail "DNS updater does not warn for optional missing DNS config"
+    grep -q 'DNS update is required' "$ROOT/utilities/maintenance-update-dns.sh" \
+        || fail "DNS updater does not fail strict missing DNS config"
+}
+
+test_stale_root_dropin_cleanup_preserves_state_dir() {
+    grep -q 'vaultwarden-db-backup.service.d/30-run-as-root.conf' "$ROOT/utilities/setup-systemd.sh" \
+        || fail "db backup stale root drop-in cleanup missing"
+    grep -q 'vaultwarden-full-backup.service.d/30-run-as-root.conf' "$ROOT/utilities/setup-systemd.sh" \
+        || fail "full backup stale root drop-in cleanup missing"
+    grep -q '10-state-dir.conf' "$ROOT/utilities/setup-systemd.sh" \
+        || fail "10-state-dir.conf handling unexpectedly missing"
+    ! grep -q '30-run-as-root.conf.*10-state-dir.conf' "$ROOT/utilities/setup-systemd.sh" \
+        || fail "stale root cleanup appears to target 10-state-dir.conf"
+}
+
 run_test 'systemd remove requests startup disable and daemon reload' test_systemd_remove_disables_startup_service
-[[ "$TESTS_RUN" -eq 3 ]] || fail "expected 3 tests, ran $TESTS_RUN"
+run_test 'notify-failure systemd uses helper and no root cooldown path' test_notify_failure_systemd_uses_helper
+run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
+run_test 'DNS update optional and strict modes are represented' test_dns_optional_and_strict_modes
+run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
+[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
