@@ -30,7 +30,10 @@ grep -Fq 'sudo make init-secrets' "$UP_SNIP" || fail "make up missing init-secre
 pass "make up privilege contract is explicit"
 
 # Static gate: no hidden self-escalation in operational shell scripts.
-if find . -path './tests' -prune -o -name '*.sh' -type f -print0 \
+if find . \
+    -path './tests' -prune -o \
+    -path './.rate-limit' -prune -o \
+    -name '*.sh' -type f -print0 2>/dev/null \
   | xargs -0 grep -nE 'exec sudo|sudo -n "\$0"|sudo "\$0"|sudo '\''\$\{0\}'\''|sudo "\$\{BASH_SOURCE\[0\]\}"' >/tmp/vw-hidden-sudo.$$; then
     cat /tmp/vw-hidden-sudo.$$ >&2
     rm -f /tmp/vw-hidden-sudo.$$
@@ -58,10 +61,13 @@ grep -Fq 'VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health' start
 grep -Fq 'VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" health' utilities/safe-restart.sh || fail "safe-restart does not mark internal health check"
 pass "internal root health checks use explicit bypass"
 
-# Dashboard must match displayed command labels and avoid sudo for quick health.
+# Dashboard must match displayed command labels and drop to the normal user for guarded commands.
 grep -Fq 'run_sudo_cmd "sudo make restart"' dashboard.sh || fail "dashboard restart label missing"
 grep -Fq 'make -C "${REPO_ROOT}" restart' dashboard.sh || fail "dashboard restart does not execute make restart"
-grep -Fq 'run_cmd "make health" make -C "${REPO_ROOT}" health' dashboard.sh || fail "dashboard quick health should not use sudo"
+grep -Fq 'run_user_cmd "make health" make -C "${REPO_ROOT}" health' dashboard.sh || fail "dashboard quick health should drop to normal user"
+grep -Fq 'run_user_cmd "make test-email" make -C "${REPO_ROOT}" test-email' dashboard.sh || fail "dashboard test-email should drop to normal user"
+grep -Fq 'run_user_cmd "./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should drop to normal user"
+grep -Fq 'run_user_cmd "./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"' dashboard.sh || fail "dashboard recovery-kit export should drop to normal user"
 pass "dashboard command labels match execution"
 
 # Legacy CF token preservation must use root-side file install, not shell value arguments.
