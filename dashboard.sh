@@ -864,7 +864,7 @@ handle_secrets_menu() {
         2)
             local edit_sh="${REPO_ROOT}/utilities/secrets-edit.sh"
             _check_script "${edit_sh}" || return
-            run_cmd "./utilities/secrets-edit.sh" "${edit_sh}"
+            run_user_cmd "./utilities/secrets-edit.sh" "${edit_sh}"
             ;;
         3)
             run_cmd "make key-escrow" make -C "${REPO_ROOT}" key-escrow
@@ -907,7 +907,7 @@ handle_advanced_menu() {
         1)
             local kit_sh="${REPO_ROOT}/utilities/secrets-export-recovery-kit.sh"
             _check_script "${kit_sh}" || return
-            run_cmd "./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"
+            run_user_cmd "./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"
             ;;
         2)
             run_cmd "make update" make -C "${REPO_ROOT}" update
@@ -977,7 +977,7 @@ handle_identity_menu() {
     local opt="$1"
     case "${opt}" in
         1)
-            run_cmd "make test-email" make -C "${REPO_ROOT}" test-email
+            run_user_cmd "make test-email" make -C "${REPO_ROOT}" test-email
             ;;
         2)
             echo ""
