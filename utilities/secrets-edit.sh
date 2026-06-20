@@ -299,12 +299,18 @@ do_edit() {
         rm -f "$encrypted_temp"
         return 1
     fi
-    if ! SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops -d "$encrypted_temp" >/dev/null; then
-        log_error "Staged encrypted secrets failed validation"
+    if ! ensure_sops_env; then
+        log_error "Failed to re-setup SOPS environment for validation"
         rm -f "$encrypted_temp"
         return 1
     fi
-
+    if ! sops -d "$encrypted_temp" >/dev/null; then
+        log_error "Staged encrypted secrets failed validation"
+        cleanup_secrets_environment
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+    cleanup_secrets_environment
     if ! mv "$encrypted_temp" "$SECRETS_FILE"; then
         log_error "Atomic mv failed — encrypted output left at: $encrypted_temp"
         return 1
