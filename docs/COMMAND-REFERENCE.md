@@ -181,7 +181,7 @@ SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
 
 STARTUP OPTIONS:
-  --force          Force restart of all services
+  --force          Recreate containers so compose/.env metadata is regenerated
   --skip-health    Skip post-startup health check
   --skip-pull      Skip docker compose pull (use for systemd restarts
                    or when images are already current)
@@ -197,7 +197,7 @@ GLOBAL OPTIONS:
 EXAMPLES:
   ./startup.sh                    # Normal startup (pulls latest images)
   ./startup.sh --skip-pull        # Restart without pulling (fast path)
-  ./startup.sh --force            # Force restart all services
+  ./startup.sh --force            # Recreate containers after .env/compose changes
   ./startup.sh --background       # Start in daemon mode
   ./startup.sh stop               # Stop all services
 ```
@@ -807,38 +807,7 @@ EXAMPLES:
 ### setup-env.sh
 
 ```
-VaultWarden-OCI Environment Setup
-
-USAGE:
-    sudo utilities/setup-env.sh --domain DOMAIN --email EMAIL [OPTIONS]
-
-DESCRIPTION:
-    Creates or updates .env and docker-compose.yml from project templates.
-    Safe to re-run (idempotent) — existing files are not overwritten unless
-    --force is passed. Called automatically by setup.sh during phase 3.
-
-OPTIONS:
-    --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
-    --email EMAIL         Admin email address (required)
-    --use-latest          Set container and CrowdSec component versions to 'latest'
-    --data-device DEV     Data volume block device path
-    --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
-    --force               Overwrite existing .env/docker-compose.yml
-    --dry-run             Preview actions without executing
-    --help, -h            Show this help
-    --version, -V         Print the VaultWarden-OCI version and exit
-
-DOMAIN REQUIREMENTS:
-    - Must be a bare hostname with no scheme (not https://vault.example.com)
-    - Must be a fully-qualified domain name with at least one dot
-    - Must not include a port number or a path
-    - Must not be a placeholder (e.g. vault.example.com, CHANGE_ME)
-    - Must not be a bare IP address (Caddy ACME requires a DNS name)
-
-EXAMPLES:
-    sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com
-    sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com --force
-    sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com --dry-run
+(--help not available or requires root)
 ```
 
 ### setup-firewall.sh
