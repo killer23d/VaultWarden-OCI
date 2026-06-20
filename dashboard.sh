@@ -131,28 +131,38 @@ run_sudo_cmd() {
 }
 
 # ---------------------------------------------------------------------------
+# Utility: run a normal-user command from a root-launched dashboard.
+# If the dashboard was launched with sudo, drop back to SUDO_USER.
+# ---------------------------------------------------------------------------
+run_user_cmd() {
+    local label="$1"; shift
+    echo ""
+    echo -e "${BLD} Running: ${label}${NC}"
+    echo -e "${CYN}${DIVIDER}${NC}"
+
+    local rc=0
+    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        sudo -u "$SUDO_USER" -- "$@" || rc=$?
+    else
+        "$@" || rc=$?
+    fi
+
+    if (( rc == 0 )); then
+        echo -e "${CYN}${DIVIDER}${NC}"
+        echo -e "${GRN} Command completed successfully.${NC}"
+    else
+        echo -e "${CYN}${DIVIDER}${NC}"
+        echo -e "${YLW} Command exited with status ${rc}.${NC}"
+    fi
+    _press_enter
+}
+
+# ---------------------------------------------------------------------------
 # Utility: reverse-video "Press Enter" anchor
 # ---------------------------------------------------------------------------
 _press_enter() {
     echo ""
     press_enter_to_continue " Press [Enter] to return to the menu..."
-}
-
-# ---------------------------------------------------------------------------
-# Utility: confirm before a destructive action
-#
-# Uses tr '[:upper:]' '[:lower:]' for case-folding instead of ${answer,,}
-# to remain POSIX-portable across all bash versions and OCI image locales.
-# ---------------------------------------------------------------------------
-_confirm_destructive() {
-    local action="$1"
-    local answer answer_lc
-    echo ""
-    echo -e "${RED}${BLD}Caution:${NC} ${YLW}${action}${NC}"
-    printf " Are you sure? [y/N]: "
-    read -r answer
-    answer_lc="$(printf '%s' "${answer}" | tr '[:upper:]' '[:lower:]')"
-    [[ "${answer_lc}" == "y" || "${answer_lc}" == "yes" ]]
 }
 
 # ---------------------------------------------------------------------------
