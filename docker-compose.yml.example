@@ -334,8 +334,7 @@ services:
 
     healthcheck:
       # Confirm both the Postfix process and the upstream relay socket respond.
-      # Use `echo QUIT | nc` because the BusyBox nc in this image does not support `-q`.
-      test: ["CMD-SHELL", "postfix status 2>/dev/null && (echo QUIT | nc -w 3 ${SMTP_HOST:-localhost} ${SMTP_PORT:-587} 2>/dev/null | grep -q '^2') || exit 1"]
+      test: ["CMD-SHELL", "postfix status 2>/dev/null && (exec 3<>/dev/tcp/${SMTP_HOST:-smtp.mailgun.org}/${SMTP_PORT:-587} && read -t 5 banner <&3 && echo \"$banner\" | grep -q '^220') || exit 1"]
       interval: 120s
       timeout: 15s
       retries: 5
