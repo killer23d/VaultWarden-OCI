@@ -7,7 +7,7 @@ Requires=docker.service
 Wants=vaultwarden-health.service
 After=vaultwarden-health.service
 ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
-OnFailure=vaultwarden-notify-failure.service
+OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot

@@ -4,7 +4,7 @@ Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
-OnFailure=vaultwarden-notify-failure.service
+OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot

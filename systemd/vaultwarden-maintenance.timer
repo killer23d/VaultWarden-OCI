@@ -5,7 +5,7 @@ After=
 Conflicts=shutdown.target
 # OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
-OnFailure=vaultwarden-notify-failure.service
+OnFailure=vaultwarden-notify-failure@%n.service
 
 [Timer]
 # Run after the hourly boundary so DNS updates can finish first.
