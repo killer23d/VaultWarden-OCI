@@ -28,7 +28,9 @@ COMPOSE_FILE         ?= docker-compose.yml
 COMPOSE_PROJECT_NAME ?= vaultwarden-oci
 DOCKER_COMP          ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 # Resolve SECRETS_FILE from lib/config.sh at make-time; operator may override.
-SECRETS_FILE         ?= $(shell PROJECT_ROOT="$(PROJECT_ROOT)" bash -c '. "$(PROJECT_ROOT)/lib/config.sh" >/dev/null 2>&1; printf "%s" "$$SECRETS_FILE"')
+_STATE_DIR           := $(shell grep -E '^PROJECT_STATE_DIR=' "$(PROJECT_ROOT)/.env" 2>/dev/null | cut -d= -f2- | tr -d "'\"" )
+_STATE_DIR           := $(if $(_STATE_DIR),$(_STATE_DIR),/var/lib/vaultwarden)
+SECRETS_FILE         ?= $(_STATE_DIR)/secrets/secrets.yaml
 
 SERVICES          = vaultwarden caddy postfix
 CORE_SERVICES     = vaultwarden caddy
