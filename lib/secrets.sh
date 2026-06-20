@@ -60,9 +60,24 @@ ensure_sops_env() {
     if ! age_key=$(resolve_age_key_path); then
         return 1
     fi
+
     export SOPS_AGE_KEY_FILE="$age_key"
-    export SOPS_CONFIG="${PROJECT_ROOT:-$(pwd)}/.sops.yaml"
-    log_debug "SOPS env set: key=$SOPS_AGE_KEY_FILE  config=$SOPS_CONFIG"
+
+    local candidate_config=""
+    if [[ -n "${SOPS_CONFIG:-}" && -f "${SOPS_CONFIG}" ]]; then
+        candidate_config="$SOPS_CONFIG"
+    elif [[ -f "${PROJECT_ROOT:-$(pwd)}/.sops.yaml" ]]; then
+        candidate_config="${PROJECT_ROOT:-$(pwd)}/.sops.yaml"
+    fi
+
+    if [[ -n "$candidate_config" ]]; then
+        export SOPS_CONFIG="$candidate_config"
+        log_debug "SOPS env set: key=$SOPS_AGE_KEY_FILE  config=$SOPS_CONFIG"
+    else
+        unset SOPS_CONFIG
+        log_debug "SOPS env set: key=$SOPS_AGE_KEY_FILE  config=<unset; no .sops.yaml found>"
+    fi
+
     return 0
 }
 
