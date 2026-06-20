@@ -629,7 +629,7 @@ handle_main_menu() {
             fi
             ;;
         3)
-            run_cmd "make health" make -C "${REPO_ROOT}" health
+            run_user_cmd "make health" make -C "${REPO_ROOT}" health
             ;;
         4)
             # Subshell + INT trap: Ctrl-C stops the tail, returns to menu (ux.md #33).
