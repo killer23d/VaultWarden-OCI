@@ -231,24 +231,26 @@ _storage_confirm_existing_fs() {
 #
 # Returns 0 on success, 1 on any failure. Callers should treat 1 as fatal.
 # ---------------------------------------------------------------------------
-require_project_state_ready() {
+check_project_state_ready() {
     local state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     local data_device="${DATA_VOLUME_DEVICE:-}"
     local data_mount="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 
     if [[ -z "$data_device" ]]; then
-        is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
-        local _real_user
-        _real_user="$(get_real_user)"
-        install -d -m 750 "$state_dir" 2>/dev/null || {
-            log_error "require_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
-            return 1
-        }
-        if [[ -n "$_real_user" && "$_real_user" != "root" ]]; then
-            chown "$_real_user" "$state_dir" 2>/dev/null || \
-                log_warn "require_project_state_ready: could not set owner of $state_dir to $_real_user"
+        if [[ -d "$state_dir" ]]; then
+            [[ -r "$state_dir" && -x "$state_dir" ]] || {
+                log_error "check_project_state_ready: PROJECT_STATE_DIR is not accessible by $(id -un): $state_dir"
+                log_error "Run setup once as root: sudo make setup (or ask an administrator to fix ownership)."
+                return 1
+            }
+            return 0
         fi
-        return 0
+        if is_root; then
+            return 0
+        fi
+        log_error "check_project_state_ready: PROJECT_STATE_DIR does not exist: $state_dir"
+        log_error "Run the root setup step first: sudo make setup"
+        return 1
     fi
 
     _storage_validate_paths "$data_device" "$data_mount" || return 1
@@ -272,34 +274,44 @@ require_project_state_ready() {
         log_error "Expected data volume is NOT mounted: $data_mount"
         log_error "Refusing to continue — writing VaultWarden data onto the boot volume"
         log_error "would silently corrupt your persistent state."
-        log_error "Remediation:"
-        log_error "  sudo mount $data_mount"
-        log_error "  (or check /etc/fstab and: sudo systemctl daemon-reload)"
+        log_error "Remediation: sudo mount $data_mount"
         return 1
     fi
 
     if [[ ! -f "$data_mount/.vw-data-volume" ]]; then
         log_error "Data volume sentinel missing: $data_mount/.vw-data-volume"
-        log_error "The filesystem at $data_mount cannot be positively identified"
-        log_error "as the VaultWarden data volume. Refusing to continue."
-        log_error "Remediation (only if this IS the correct data disk):"
-        log_error "  sudo touch $data_mount/.vw-data-volume"
+        log_error "The filesystem at $data_mount cannot be positively identified as the VaultWarden data volume."
+        log_error "Remediation (only if this IS the correct data disk): sudo touch $data_mount/.vw-data-volume"
         return 1
     fi
 
-    is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
+    [[ -d "$state_dir" ]] || { log_error "check_project_state_ready: PROJECT_STATE_DIR missing: $state_dir"; return 1; }
+    [[ -r "$state_dir" && -x "$state_dir" ]] || {
+        log_error "check_project_state_ready: PROJECT_STATE_DIR is not accessible by $(id -un): $state_dir"
+        return 1
+    }
+    return 0
+}
+
+ensure_project_state_ready() {
+    is_root || { log_error "ensure_project_state_ready: must be run as root"; return 1; }
+    local state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
+    check_project_state_ready || return 1
     local _real_user
     _real_user="$(get_real_user)"
     install -d -m 750 "$state_dir" 2>/dev/null || {
-        log_error "require_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
+        log_error "ensure_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
         return 1
     }
     if [[ -n "$_real_user" && "$_real_user" != "root" ]]; then
         chown "$_real_user" "$state_dir" 2>/dev/null || \
-            log_warn "require_project_state_ready: could not set owner of $state_dir to $_real_user"
+            log_warn "ensure_project_state_ready: could not set owner of $state_dir to $_real_user"
     fi
-
     return 0
+}
+
+require_project_state_ready() {
+    ensure_project_state_ready
 }
 
 # ---------------------------------------------------------------------------

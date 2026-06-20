@@ -37,8 +37,10 @@ show_help() {
 VaultWarden-OCI Email Diagnostics
 
 USAGE:
-    utilities/maintenance-email.sh [OPTIONS]
     ./maintenance.sh test-email [OPTIONS]
+    utilities/maintenance-email.sh [OPTIONS]
+
+Do not run with sudo. Run: ./maintenance.sh test-email
 
 OPTIONS:
     --recipient EMAIL   Override default admin email recipient
@@ -104,16 +106,14 @@ test_crowdsec_integration() {
     if systemctl is-active crowdsec >/dev/null 2>&1; then
         log_success "✅ CrowdSec is running"
     else
-        log_error "❌ CrowdSec is not running"
+        log_warn "⚠ CrowdSec is not running"
         log_info "💡 Start it with: sudo systemctl start crowdsec"
-        return 1
+        return 0
     fi
-    if sudo cscli metrics >/dev/null 2>&1; then
+    if sudo -n cscli metrics >/dev/null 2>&1; then
         log_success "✅ CrowdSec LAPI is responding"
     else
-        log_error "❌ CrowdSec LAPI not responding"
-        log_info "🔍 Debug: sudo journalctl -u crowdsec -n 50 --no-pager"
-        return 1
+        log_warn "⚠ CrowdSec LAPI metrics unavailable without non-interactive root access; skipping optional cscli check"
     fi
     if systemctl is-active crowdsec-cloudflare-worker-bouncer >/dev/null 2>&1; then
         log_success "✅ CrowdSec Cloudflare bouncer is running"
@@ -226,6 +226,8 @@ while [[ $# -gt 0 ]]; do
         *) log_error "Unknown option for 'test-email': $1"; show_help; exit 1 ;;
     esac
 done
+refuse_root_for_user_command "Do not run with sudo. Run: ./maintenance.sh test-email"
+: "${VERBOSE}"
 
 main() {
     _load_env

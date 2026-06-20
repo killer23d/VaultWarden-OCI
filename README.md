@@ -79,11 +79,11 @@ Set or verify:
 Then rotate the external credentials that setup cannot generate:
 
 ```bash
-sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
-sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
-sudo ./edit-secrets.sh rotate cloudflare_zone_id
-sudo ./edit-secrets.sh rotate cf_account_id
-sudo ./edit-secrets.sh rotate smtp_password
+./edit-secrets.sh rotate caddy_cloudflare_dns_token
+./edit-secrets.sh rotate cf_worker_bouncer_token
+./edit-secrets.sh rotate cloudflare_zone_id
+./edit-secrets.sh rotate cf_account_id
+./edit-secrets.sh rotate smtp_password
 ```
 
 > `cloudflare_zone_id` is stored in SOPS secrets, not as `CLOUDFLARE_ZONE_ID` in `.env`.
@@ -267,7 +267,7 @@ make breakglass-create / status        # Emergency admin
 make test-email / test-secrets         # Diagnostics
 make logs [SERVICE=name]               # Container logs (follows single service, default: vaultwarden)
 make diagnose                          # One-command debug dump: versions, key status, disk, containers, logs
-make backup-status                     # Last backup times, directory size, retention window
+sudo make backup-status                # Last backup times, directory size, retention window
 make timers / systemd-status            # Automation status
 make help                              # Normal admin/day-2 commands
 make help-all                          # Full target list (advanced/dev/dashboard API)

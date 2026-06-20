@@ -613,9 +613,8 @@ handle_main_menu() {
     local opt="$1"
     case "${opt}" in
         1)
-            _check_script "${REPO_ROOT}/startup.sh" || return
-            run_sudo_cmd "sudo ./startup.sh --force" \
-                "${REPO_ROOT}/startup.sh" --force
+            run_sudo_cmd "sudo make restart" \
+                make -C "${REPO_ROOT}" restart
             # Force live-stats redraw so container state is fresh (ux.md #3).
             ACTIVE_MENU="main"
             ;;
@@ -630,9 +629,7 @@ handle_main_menu() {
             fi
             ;;
         3)
-            _check_script "${REPO_ROOT}/maintenance.sh" || return
-            run_sudo_cmd "sudo ./maintenance.sh health" \
-                "${REPO_ROOT}/maintenance.sh" health
+            run_cmd "make health" make -C "${REPO_ROOT}" health
             ;;
         4)
             # Subshell + INT trap: Ctrl-C stops the tail, returns to menu (ux.md #33).
@@ -704,7 +701,7 @@ handle_backup_menu() {
                 "${REPO_ROOT}/restore.sh" interactive
             ;;
         4)
-            run_cmd "make backup-status" make -C "${REPO_ROOT}" backup-status
+            run_sudo_cmd "sudo make backup-status" make -C "${REPO_ROOT}" backup-status
             ;;
         5)
             # Sync the most recent backup archive to the configured rclone remote.

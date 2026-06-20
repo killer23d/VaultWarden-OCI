@@ -692,7 +692,8 @@ run_health_check() {
   # cleanly.
   log_info "Invoking: ${_health_script} health"
   local health_exit=0
-  "$_health_script" health || health_exit=$?
+  # Internal root/systemd path; direct health commands still refuse root.
+  VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health || health_exit=$?
 
   case "$health_exit" in
     0)
@@ -751,7 +752,7 @@ main() {
 
   load_environment || exit 1
   auto_fix_critical_permissions "$PROJECT_ROOT"
-  require_project_state_ready || exit 1
+  check_project_state_ready || exit 1
   validate_prerequisites || exit 1
   prepare_directories || exit 1
   prepare_log_directories || exit 1

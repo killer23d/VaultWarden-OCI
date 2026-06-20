@@ -11,6 +11,7 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+refuse_root_for_user_command "Do not run with sudo. Run: ./edit-secrets.sh"
 load_project_environment || exit 1
 
 show_help() {
@@ -69,7 +70,7 @@ case "$_TASK" in
             log_error "Diagnostic:"
             log_error "  ls -la '${PROJECT_ROOT}/secrets/' 2>/dev/null || echo '  (secrets/ dir absent)'"
             log_error "  ls -la '${SECRETS_FILE:-${PROJECT_ROOT}/secrets/secrets.yaml}' 2>/dev/null || echo '  (secrets file absent)'"
-            log_error "If secrets have not been created yet, run: ./setup.sh secrets"
+            log_error "If secrets have not been created yet, run: sudo ./setup.sh secrets"
             exit 1
         fi
         ;;

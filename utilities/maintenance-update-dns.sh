@@ -144,7 +144,7 @@ _resolve_zone_id() {
     fi
 
     log_error "cloudflare_zone_id not found in encrypted secrets (legacy CLOUDFLARE_ZONE_ID shell fallback also empty)"
-    log_error "Fix: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+    log_error "Fix: ./edit-secrets.sh rotate cloudflare_zone_id"
     return 1
 }
 

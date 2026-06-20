@@ -74,13 +74,13 @@ DATA_DEVICE ?=
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup fix-permissions \
+	setup init-secrets restart safe-restart fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
 	key-backup key-escrow key-rotate key-install \
 	update update-system update-dns maintenance maintenance-full db-maint db-backup \
 	install-systemd remove-systemd systemd-validate \
-	unban \
+	unban smoke-test drill \
 	breakglass-create breakglass-status breakglass-remove \
 	uninstall uninstall-dry-run
 
@@ -152,7 +152,7 @@ help: ## Show normal admin/day-2 commands
 	@echo "$(YELLOW)Service lifecycle$(NC)"
 	@echo "  $(GREEN)start$(NC)                    Start all services through startup.sh"
 	@echo "  $(GREEN)stop$(NC)                     Stop all services gracefully"
-	@echo "  $(GREEN)restart$(NC)                  Restart all services"
+	@echo "  $(GREEN)restart$(NC)                  Restart all services (run: sudo make restart)"
 	@echo "  $(GREEN)status$(NC)                   Show service, backup, disk, and CrowdSec summary"
 	@echo "  $(GREEN)logs$(NC)                     View logs (SERVICE=caddy|vaultwarden|postfix)"
 	@echo ""
@@ -166,8 +166,8 @@ help: ## Show normal admin/day-2 commands
 	@echo "$(YELLOW)Backup and restore$(NC)"
 	@echo "  $(GREEN)backup$(NC)                   Run database backup"
 	@echo "  $(GREEN)backup-full$(NC)              Run full backup"
-	@echo "  $(GREEN)backup-status$(NC)            Show backup health summary"
-	@echo "  $(GREEN)list-backups$(NC)             List local backups"
+	@echo "  $(GREEN)backup-status$(NC)            Show backup health summary (run with sudo)"
+	@echo "  $(GREEN)list-backups$(NC)             List local backups (run with sudo)"
 	@echo "  $(GREEN)restore$(NC)                  Guided restore"
 	@echo "  $(GREEN)restore-remote$(NC)           Restore from rclone remote"
 	@echo "  $(GREEN)restore-db$(NC)               Restore database only"
@@ -313,7 +313,8 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	echo "$(CYAN)Note: secrets/.docker_secrets/ is intentionally left restricted (root:root 444).$(NC)"; \
 	echo "$(CYAN)      /etc/vaultwarden/ is intentionally root:root 700 for root-run services.$(NC)"
 
-init-secrets: ## Initialize secrets file (interactive)
+init-secrets: ## Initialize secrets file (interactive; root required)
+	$(call require-root)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
 	@if [ ! -f "$(SECRETS_FILE)" ]; then \
 		echo "$(BLUE)No secrets file found. Running setup.sh secrets...$(NC)"; \
@@ -343,8 +344,8 @@ test-email: ## Send a test operational alert email (health/backup notification c
 ##@ Normal Admin + Dashboard Stable API — Service Management
 # ===========================================================================
 
-# up / down / restart do NOT require root. The invoking user must be a member
-# of the `docker` group. If not, `check-docker` prints a clear fix command.
+# up/down do not require root; restart is root-required in this PR.
+# Normal-user service targets rely on Docker group access.
 # startup.sh handles secrets initialisation, secrets pre-flight checks, and
 # the post-start health poll — do not replace it with a bare `docker compose up`.
 
@@ -362,10 +363,6 @@ up: ## Start all services (runs startup.sh for health checks)
 		echo "$(RED)       re-run: make up$(NC)"; \
 		exit 1; \
 	fi
-	@if [ ! -f "$(SECRETS_FILE)" ]; then \
-		echo "$(YELLOW)No secrets file found. Initializing...$(NC)"; \
-		./setup.sh secrets; \
-	fi
 # ── Pre-flight: admin_token decoded-secret guard. ───────────────────────────
 # MAKEFILE-UP1 FIX [MEDIUM]: startup.sh's prepare_docker_secrets() is the
 # authoritative component that creates secrets/.docker_secrets/ from the
@@ -376,21 +373,22 @@ up: ## Start all services (runs startup.sh for health checks)
 #
 # New behaviour:
 #   - If secrets.yaml is ABSENT → secrets were never initialised; abort and
-#     direct the operator to ./setup.sh secrets  (unchanged intent).
+#     direct the operator to the root init-secrets target.
 #   - If secrets.yaml is PRESENT but admin_token is missing/empty → warn and
 #     continue; startup.sh will decrypt and regenerate the docker-secret files.
 #     If decryption itself fails (wrong/missing Age key), startup.sh's own
 #     check_age_key_health_preflight() provides the actionable error message.
 	@if ! test -f "$(SECRETS_FILE)"; then \
-		echo "$(RED)ERROR: $(SECRETS_FILE) not found — secrets have never been initialised.$(NC)"; \
-		echo "$(RED)       Run: ./setup.sh secrets  (or: make init-secrets)$(NC)"; \
+		echo "$(RED)ERROR: secrets/secrets.yaml not found — secrets have not been initialized.$(NC)"; \
+		echo "$(RED)       Run: sudo make init-secrets$(NC)"; \
+		echo "$(RED)       Then re-run: make up$(NC)"; \
 		exit 1; \
 	elif ! test -s "secrets/.docker_secrets/admin_token"; then \
 		echo "$(YELLOW)WARN: secrets/.docker_secrets/admin_token is absent or empty.$(NC)"; \
 		echo "$(YELLOW)      startup.sh will attempt to decrypt secrets.yaml and create it now.$(NC)"; \
 		echo "$(YELLOW)      If this fails, run: make key-health  for diagnostics.$(NC)"; \
 	fi
-	@sudo ./startup.sh || { \
+	@./startup.sh || { \
 		echo "$(RED)Startup failed!$(NC)"; \
 		$(MAKE) status; \
 		echo ""; \
@@ -414,10 +412,10 @@ down: ## Stop all services gracefully
 
 stop: down ## Alias for down
 
-restart: ## Restart all services (via startup.sh)
-	$(call check-docker)
+restart: ## Restart all services (via startup.sh; root required)
+	$(call require-root)
 	@echo "$(BLUE)Restarting VaultWarden services...$(NC)"
-	@sudo ./startup.sh --force || { \
+	@./startup.sh --force || { \
 		echo "$(RED)Restart failed!$(NC)"; \
 		$(MAKE) status; \
 		echo "$(YELLOW)If restart failed due to a key issue, run: make key-health$(NC)"; \
@@ -425,10 +423,10 @@ restart: ## Restart all services (via startup.sh)
 	}
 	@echo "$(GREEN)Services restarted.$(NC)"
 
-safe-restart: ## Restart with automatic rollback on failure
-	$(call check-docker)
+safe-restart: ## Restart with automatic rollback on failure (root required)
+	$(call require-root)
 	@echo "$(BLUE)Safe restart with rollback capability...$(NC)"
-	@sudo ./utilities/safe-restart.sh
+	@./utilities/safe-restart.sh
 
 status: ## Show service status, backup health, disk usage, and CrowdSec ban summary
 	$(call check-docker)
@@ -474,7 +472,7 @@ status: ## Show service status, backup health, disk usage, and CrowdSec ban summ
 	@echo ""
 	@echo "$(CYAN)CrowdSec bans:$(NC)"
 	@if systemctl is-active crowdsec >/dev/null 2>&1; then \
-		COUNT=$$(sudo cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0); \
+		COUNT=$$(sudo -n cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0); \
 		echo "  Active bans: $$COUNT"; \
 	else \
 		echo "  $(YELLOW)CrowdSec is not running$(NC)"; \
@@ -486,23 +484,25 @@ status: ## Show service status, backup health, disk usage, and CrowdSec ban summ
 
 health: ## Run health checks (set AUTO_RECOVER=true to auto-recover)
 	@echo "$(BLUE)Running health checks...$(NC)"
-	@sudo ./maintenance.sh health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
+	@./maintenance.sh health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
 
 health-quick: ## Quick health check (concise output)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@sudo ./maintenance.sh health --quiet
+	@./maintenance.sh health --quiet
 
 health-report: ## Run health check and write a timestamped report file
 	@echo "$(BLUE)Running health checks with report output...$(NC)"
-	@sudo ./maintenance.sh health --report
+	@./maintenance.sh health --report
 
 health-email: test-email ## Backward-compatible alias for test-email
 
-smoke-test: ## Run pre-production smoke test against the live stack
-	@sudo utilities/smoke-test.sh
+smoke-test: ## Run pre-production smoke test against the live stack (root required)
+	$(call require-root)
+	@utilities/smoke-test.sh
 
-drill: ## Run non-destructive pre-production dry-run drill
-	@sudo utilities/pre-production-drill.sh
+drill: ## Run non-destructive pre-production dry-run drill (root required)
+	$(call require-root)
+	@utilities/pre-production-drill.sh
 
 watch: ## Watch service logs in real-time (Ctrl+C to stop)
 	$(call check-docker)
@@ -605,12 +605,12 @@ backup-emergency: ## Create emergency backup kit
 	@echo "$(BLUE)Creating emergency backup...$(NC)"
 	@./backup.sh run emergency
 
-list-backups: ## List available backups with sizes
+list-backups: ## List available backups with sizes (root required via Makefile)
 	$(call require-root)
 	@echo "$(BLUE)Available backups:$(NC)"
 	@./backup.sh list
 
-backup-status: ## Show backup health summary
+backup-status: ## Show backup health summary (root required via Makefile)
 	$(call require-root)
 	@./backup.sh list
 
@@ -696,7 +696,7 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 #   1. Reads SOPS_AGE_KEY_FILE from .env.
 #   2. Self-referential path check (CONFIGURED == REPO_KEY):
 #      - File exists  → informational message, exit 0 (no install needed).
-#      - File missing → actionable error directing to ./setup.sh secrets, exit 1.
+#      - File missing → actionable error directing to sudo make init-secrets, exit 1.
 #   3. If target already exists and is non-empty, exits without changes.
 #   4. Creates the parent directory (mode 700, root:root).
 #   5. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).
@@ -729,7 +729,7 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 		else \
 			echo "$(RED)  ✗ Key file NOT FOUND at $$CONFIGURED_KEY$(NC)"; \
 			echo "$(RED)    Secrets have not been initialised on this host yet.$(NC)"; \
-			echo "$(RED)    Run: ./setup.sh secrets  (or: make init-secrets)$(NC)"; \
+			echo "$(RED)    Run: sudo make init-secrets$(NC)"; \
 			exit 1; \
 		fi; \
 	fi; \
@@ -928,17 +928,17 @@ schedule: ## Show vaultwarden timer schedules (next/last run times)
 breakglass-create: ## Create emergency break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Creating break-glass admin account...$(NC)"
-	@sudo utilities/setup-secrets.sh breakglass create
+	@utilities/setup-secrets.sh breakglass create
 
 breakglass-status: ## Check break-glass admin account status
 	$(call require-root)
 	@echo "$(BLUE)Break-glass admin status:$(NC)"
-	@sudo utilities/setup-secrets.sh breakglass status
+	@utilities/setup-secrets.sh breakglass status
 
 breakglass-remove: ## Remove break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Removing break-glass admin account...$(NC)"
-	@sudo utilities/setup-secrets.sh breakglass remove --force
+	@utilities/setup-secrets.sh breakglass remove --force
 
 # ===========================================================================
 ##@ Developer/Test — Testing & Development
@@ -955,6 +955,7 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-architecture-helpers.sh
 	@tests/test-security-helpers.sh
 	@tests/test-secrets-cli-help.sh
+	@tests/test-privilege-contracts.sh
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)

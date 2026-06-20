@@ -17,7 +17,7 @@ show_help() {
 VaultWarden-OCI Safe Restart
 
 USAGE:
-    sudo ./utilities/safe-restart.sh
+    sudo make safe-restart
 
 DESCRIPTION:
     Captures the resolved Compose model and current local image IDs, restarts
@@ -43,10 +43,7 @@ case "${1:-}" in
 esac
 
 if [[ $EUID -ne 0 ]]; then
-    if command -v sudo >/dev/null 2>&1; then
-        exec sudo -n "$0" "$@"
-    fi
-    log_error "safe-restart must run as root."
+    log_error "safe-restart requires root. Run: sudo make safe-restart"
     exit 1
 fi
 
@@ -109,7 +106,8 @@ if [[ "$rollback_failed" == "true" ]]; then
     exit 2
 fi
 
-if "${PROJECT_ROOT}/utilities/maintenance-health.sh" health; then
+# Internal rollback validation; direct health commands still refuse root.
+if VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" health; then
     log_warn "Rollback succeeded and the previous stack is healthy."
 else
     log_error "Rollback containers started, but the health check still reports failures."

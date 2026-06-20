@@ -52,6 +52,7 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
 fi
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+refuse_root_for_user_command "Do not run with sudo. Run: ./utilities/secrets-export-recovery-kit.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 load_project_environment || exit 1
@@ -66,7 +67,7 @@ check_prerequisites() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing prerequisites:"
         for item in "${missing[@]}"; do log_error "  - $item"; done
-        log_info "To create secrets, run: ./setup.sh secrets"
+        log_info "To create secrets, run: sudo ./setup.sh secrets"
         return 1
     fi
     return 0

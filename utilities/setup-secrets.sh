@@ -2241,7 +2241,7 @@ EOF
             && _ss_recipients_match "$desired_recipients" "$sops_config" policy \
             && _ss_recipients_match "$desired_recipients" "$secrets_file" cipher; then
             log_info "Placeholder secrets.yaml recipient state already current (skipping)"
-            log_success "Bootstrap complete — run './setup.sh secrets' to configure credentials"
+            log_success "Bootstrap complete — run 'sudo ./setup.sh secrets' to configure credentials"
             return 0
         fi
         log_info "Existing secrets.yaml decrypts but recipient state is not current; staging rekey"
@@ -2284,7 +2284,7 @@ EOF
     chown "${real_user}:$(id -g -n "$real_user")" "$secrets_file" || return 1
 
     log_success "Placeholder secrets.yaml created and encrypted"
-    log_success "Bootstrap complete — run './setup.sh secrets' to configure credentials"
+    log_success "Bootstrap complete — run 'sudo ./setup.sh secrets' to configure credentials"
     return 0
 }
 

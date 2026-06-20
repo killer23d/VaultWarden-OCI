@@ -374,6 +374,16 @@ get_real_user() {
     printf '%s\n' "$effective_user"
 }
 
+refuse_root_for_user_command() {
+    local recommended="${1:-Run this command as your normal user, without sudo.}"
+    if (( EUID == 0 )); then
+        log_error "This command should not be run as root or with sudo."
+        log_error "$recommended"
+        log_error "Running it as root can create root-owned files in the checkout and cause later permission errors."
+        exit 1
+    fi
+}
+
 # _maybe_sudo COMMAND [ARGS...]
 # Run a command as root, with automatic privilege escalation when needed.
 # - Already root: executes directly.
@@ -392,7 +402,9 @@ _maybe_sudo() {
         return $?
     fi
 
-    if [[ -t 0 ]]; then
+    if [[ "${VAULTWARDEN_NONINTERACTIVE_SUDO:-false}" == "true" ]]; then
+        sudo -n "$@"
+    elif [[ -t 0 ]]; then
         sudo "$@"
     else
         sudo -n "$@"

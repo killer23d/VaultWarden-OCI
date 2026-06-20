@@ -249,8 +249,10 @@ _health_show_help() {
 VaultWarden-OCI Health Check (subcommand)
 
 USAGE:
-    sudo utilities/maintenance-health.sh [OPTIONS]
     ./maintenance.sh health [OPTIONS]
+    utilities/maintenance-health.sh [OPTIONS]
+
+Do not run with sudo. Run: ./maintenance.sh health
 
 DESCRIPTION:
     Runs all health checks and optionally sends alert emails when thresholds
@@ -521,10 +523,10 @@ _check_crowdsec() {
         _fail "crowdsec:service" "CrowdSec service is not running (start: sudo systemctl start crowdsec)"
         return
     fi
-    if sudo cscli metrics >/dev/null 2>&1; then
+    if sudo -n cscli metrics >/dev/null 2>&1; then
         _pass "crowdsec:lapi" "CrowdSec LAPI is responding"
     else
-        _warn "crowdsec:lapi" "CrowdSec LAPI not responding (debug: sudo journalctl -u crowdsec -n 50 --no-pager)"
+        log_warn "CrowdSec LAPI metrics unavailable without non-interactive root access; skipping optional cscli check."
     fi
 
     # Bouncer check priority: prefer crowdsec-firewall-bouncer, then
@@ -556,8 +558,11 @@ _check_crowdsec() {
 
     if $COMPREHENSIVE; then
         local decision_count
-        decision_count=$(sudo cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0)
-        _pass "crowdsec:decisions" "CrowdSec has ${decision_count} active ban decision(s)"
+        if decision_count=$(sudo -n cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l); then
+            _pass "crowdsec:decisions" "CrowdSec has ${decision_count} active ban decision(s)"
+        else
+            log_warn "CrowdSec decisions unavailable without non-interactive root access; skipping optional cscli check."
+        fi
     fi
 }
 
@@ -782,7 +787,7 @@ _check_config() {
             "cloudflare_zone_id is configured in secrets.yaml"
     else
         _warn "config:cloudflare_zone_id" \
-            "cloudflare_zone_id not set or is a placeholder — run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+            "cloudflare_zone_id not set or is a placeholder — run: ./edit-secrets.sh rotate cloudflare_zone_id"
     fi
     unset _cf_zone_id
     local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
@@ -1079,8 +1084,10 @@ show_help() {
 VaultWarden-OCI Health Check
 
 USAGE:
-    sudo utilities/maintenance-health.sh [OPTIONS]
     ./maintenance.sh health [OPTIONS]
+    utilities/maintenance-health.sh [OPTIONS]
+
+Do not run with sudo. Run: ./maintenance.sh health
 
 OPTIONS:
     --comprehensive     Run all checks including extended diagnostics
@@ -1104,6 +1111,9 @@ EOF
 
 # Strip the leading 'health' token when the dispatcher prepends the subcommand.
 [[ "${1:-}" == "health" ]] && shift
+if [[ "${VAULTWARDEN_INTERNAL_HEALTH_CHECK:-false}" != "true" ]]; then
+    refuse_root_for_user_command "Do not run with sudo. Run: ./maintenance.sh health"
+fi
 
 main() {
     local arg
