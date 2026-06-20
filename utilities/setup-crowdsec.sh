@@ -97,6 +97,10 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     fi
 fi
 
+if declare -f resolve_secrets_file >/dev/null 2>&1; then
+    resolve_secrets_file
+fi
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
