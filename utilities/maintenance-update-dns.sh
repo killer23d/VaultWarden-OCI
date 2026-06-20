@@ -61,8 +61,17 @@ EOF
 }
 
 _load_env() {
-    if load_env_file 2>/dev/null; then return 0; fi
-    log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
+    if load_project_environment 2>/dev/null; then
+        return 0
+    fi
+
+    if load_env_file /etc/vaultwarden/vaultwarden.env 2>/dev/null; then
+        resolve_secrets_file
+        return 0
+    fi
+
+    log_warn "No project environment found — relying on environment already set."
+    resolve_secrets_file
     return 0
 }
 
