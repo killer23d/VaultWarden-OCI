@@ -34,8 +34,8 @@ ProtectHome=read-only
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat <unit>
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
-# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ with the
-# correct service user ownership before ExecStart runs.
+# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ as a
+# root-owned runtime directory before ExecStart runs.
 RuntimeDirectory=vaultwarden
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
