@@ -590,15 +590,23 @@ update_dns_on_startup() {
 _startup_start_services() {
   log_info "Starting VaultWarden services..."
 
-  local compose_args=(up -d)
+  local compose_args=(up -d --remove-orphans)
 
   if [[ "$FORCE_RESTART" == "true" ]]; then
     compose_args+=(--force-recreate)
   fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
+    if [[ "$FORCE_RESTART" == "true" ]]; then
+      log_info "[DRY RUN] Would run: docker compose rm -sf"
+    fi
     log_info "[DRY RUN] Would run: docker compose ${compose_args[*]}"
     return 0
+  fi
+
+  if [[ "$FORCE_RESTART" == "true" ]]; then
+    log_info "Force restart requested; removing existing containers so Docker metadata is regenerated."
+    docker compose rm -sf
   fi
 
   docker compose "${compose_args[@]}"
