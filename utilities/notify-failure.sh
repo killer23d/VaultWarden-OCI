@@ -10,6 +10,8 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib notify-failure
+source "${PROJECT_ROOT}/lib/crypto.sh"
+source "${PROJECT_ROOT}/lib/secrets.sh"
 source "${PROJECT_ROOT}/lib/email.sh"
 
 FAILED_UNIT="${1:-unknown.service}"

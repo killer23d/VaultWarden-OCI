@@ -133,6 +133,19 @@ test_notify_failure_helper_defaults_state_dir() {
         || fail "notify helper lacks unsafe cooldown guard"
 }
 
+test_notify_failure_helper_loads_secret_resolution() {
+    local helper="$ROOT/utilities/notify-failure.sh"
+    local crypto_line secrets_line email_line
+    crypto_line=$(awk '/source "\$\{PROJECT_ROOT\}\/lib\/crypto\.sh"/{print NR; exit}' "$helper")
+    secrets_line=$(awk '/source "\$\{PROJECT_ROOT\}\/lib\/secrets\.sh"/{print NR; exit}' "$helper")
+    email_line=$(awk '/source "\$\{PROJECT_ROOT\}\/lib\/email\.sh"/{print NR; exit}' "$helper")
+    [[ -n "$crypto_line" ]] || fail "notify helper does not source lib/crypto.sh"
+    [[ -n "$secrets_line" ]] || fail "notify helper does not source lib/secrets.sh"
+    [[ -n "$email_line" ]] || fail "notify helper does not source lib/email.sh"
+    (( crypto_line < email_line )) || fail "notify helper must source crypto before email"
+    (( secrets_line < email_line )) || fail "notify helper must source secrets before email"
+}
+
 test_dns_optional_and_strict_modes() {
     grep -q 'UPDATE_DNS=false; skipping DNS update' "$ROOT/utilities/maintenance-update-dns.sh" \
         || fail "DNS updater does not skip cleanly when UPDATE_DNS=false"
@@ -156,7 +169,8 @@ test_stale_root_dropin_cleanup_preserves_state_dir() {
 run_test 'systemd remove requests startup disable and daemon reload' test_systemd_remove_disables_startup_service
 run_test 'notify-failure systemd uses helper and no root cooldown path' test_notify_failure_systemd_uses_helper
 run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
+run_test 'notify-failure helper loads encrypted-secret resolution before email' test_notify_failure_helper_loads_secret_resolution
 run_test 'DNS update optional and strict modes are represented' test_dns_optional_and_strict_modes
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
-[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 8 ]] || fail "expected 8 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"

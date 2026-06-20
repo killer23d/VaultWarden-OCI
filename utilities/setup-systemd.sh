@@ -907,6 +907,7 @@ install_units() {
         [[ "$svc" == *"@"* ]] && continue  # skip template unit
         _run systemctl reset-failed "$svc" 2>/dev/null || true
     done
+    _run systemctl reset-failed 'vaultwarden-notify-failure@*.service' 2>/dev/null || true
     log_success "Stale failed states cleared."
 
     log_success "Installation complete."
