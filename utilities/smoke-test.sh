@@ -353,7 +353,7 @@ check_docker_secrets_materialized() {
         # Detect CHANGE_ME placeholder values left in materialized secret files.
         if grep -qF 'CHANGE_ME' "$secret_file" 2>/dev/null; then
             _check_fail "secret-$secret-content" \
-                "$secret_file contains CHANGE_ME — rotate with: sudo ./edit-secrets.sh rotate $secret"
+                "$secret_file contains CHANGE_ME — rotate with: ./edit-secrets.sh rotate $secret"
         else
             _check_pass "secret-$secret-content" "$secret_file is non-empty and has no CHANGE_ME placeholder"
         fi

@@ -11,7 +11,6 @@ source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
-refuse_root_for_user_command "Do not run with sudo. Run: ./maintenance.sh test-email"
 source "$PROJECT_ROOT/lib/email.sh"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
@@ -227,6 +226,8 @@ while [[ $# -gt 0 ]]; do
         *) log_error "Unknown option for 'test-email': $1"; show_help; exit 1 ;;
     esac
 done
+refuse_root_for_user_command "Do not run with sudo. Run: ./maintenance.sh test-email"
+: "${VERBOSE}"
 
 main() {
     _load_env

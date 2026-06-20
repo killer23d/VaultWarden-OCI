@@ -70,7 +70,7 @@ case "$_TASK" in
             log_error "Diagnostic:"
             log_error "  ls -la '${PROJECT_ROOT}/secrets/' 2>/dev/null || echo '  (secrets/ dir absent)'"
             log_error "  ls -la '${SECRETS_FILE:-${PROJECT_ROOT}/secrets/secrets.yaml}' 2>/dev/null || echo '  (secrets file absent)'"
-            log_error "If secrets have not been created yet, run: ./setup.sh secrets"
+            log_error "If secrets have not been created yet, run: sudo ./setup.sh secrets"
             exit 1
         fi
         ;;

@@ -65,7 +65,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com [OP
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
 
 # Run secrets phase only (e.g. after a partial setup failure)
-./setup.sh secrets
+sudo ./setup.sh secrets
 
 # Install systemd units
 sudo ./setup.sh systemd install
@@ -81,7 +81,7 @@ sudo ./setup.sh systemd install
 **Purpose:** Secrets configuration phase — interactive or automated secrets bootstrap.
 
 ```bash
-./setup.sh secrets [OPTIONS]
+sudo ./setup.sh secrets [OPTIONS]
 ```
 
 **Called automatically by `setup.sh install --auto`.** Run the secrets phase standalone when you need to re-initialise secrets without re-running full setup — for example, after a partial setup failure, on a cloned deployment, or when rotating all secrets at once.
@@ -103,10 +103,10 @@ sudo ./setup.sh systemd install
 
 ```bash
 # Re-initialise secrets interactively (e.g. after partial setup failure)
-./setup.sh secrets
+sudo ./setup.sh secrets
 
 # Non-interactive — same as what setup.sh install --auto calls internally
-./setup.sh secrets --auto
+sudo ./setup.sh secrets --auto
 
 # Confirm the result
 ./utilities/secrets-view.sh
@@ -267,8 +267,8 @@ sudo ./backup.sh run db --keep 30
 make backup              # Database backup
 make backup-full         # Full backup
 make backup-emergency    # Emergency kit
-make list-backups        # List all available backups
-make backup-status       # Show backup health summary (last run, size, retention, count per type)
+sudo make list-backups   # List all available backups
+sudo make backup-status  # Show backup health summary (last run, size, retention, count per type)
 ```
 
 > **`zstd` dependency:** Full backups require `zstd` for compression. `setup.sh` installs it automatically. If you installed before this was added to the package list, run `sudo apt install zstd`.
@@ -755,7 +755,7 @@ All common operations have Makefile shortcuts. Run `make help` for the normal ad
 | `make help` | — | Print normal admin/day-2 targets |
 | `make help-all` | — | Print all targets with descriptions, including dashboard/API, advanced, developer/test, and legacy commands |
 | `make setup` | `sudo ./setup.sh` | Requires `sudo make setup` |
-| `make init-secrets` | `./setup.sh secrets` | Interactive secrets initialisation |
+| `sudo make init-secrets` | `sudo ./setup.sh secrets` | Interactive secrets initialisation |
 | `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor (dispatcher) |
 | `make test-secrets` | `./utilities/secrets-list.sh` | Verify secrets decrypt correctly |
 | `make test-email` | `./maintenance.sh test-email` | Test the Postfix-backed operational alert channel |
@@ -777,8 +777,8 @@ All common operations have Makefile shortcuts. Run `make help` for the normal ad
 | `make backup` | `./backup.sh run db` | DB backup |
 | `make backup-full` | `./backup.sh run full` | Full system backup |
 | `make backup-emergency` | `./backup.sh run emergency` | Emergency backup (same archive contents as full; excludes `secrets/` and Age key) |
-| `make list-backups` | `./backup.sh list` | List all available backups with metadata |
-| `make backup-status` | — | Backup health summary: last run, size, retention, count per type |
+| `sudo make list-backups` | `./backup.sh list` | List all available backups with metadata |
+| `sudo make backup-status` | — | Backup health summary: last run, size, retention, count per type |
 | `make restore` | `./restore.sh interactive` | Interactive restore (recommended) |
 | `make restore-db` | `./restore.sh latest db` | Restore latest database backup (runs key prompt + confirmation) |
 | `make restore-remote` | `./restore.sh interactive --remote` | Restore from a remote (rclone) backup — interactive selection |
@@ -898,7 +898,7 @@ Backup-specific helpers.
 | `format_backup_size BYTES` | Human-readable size formatting |
 
 ### `lib/secrets.sh`
-Secrets collection, generation, hashing, validation, and recovery kit export. Used by `setup.sh secrets` and `utilities/secrets-edit.sh`.
+Secrets collection, generation, hashing, validation, and recovery kit export. Used by `sudo ./setup.sh secrets` and `utilities/secrets-edit.sh`.
 
 | Function | Description |
 | :-- | :-- |

@@ -67,7 +67,7 @@ check_prerequisites() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing prerequisites:"
         for item in "${missing[@]}"; do log_error "  - $item"; done
-        log_info "To create secrets, run: ./setup.sh secrets"
+        log_info "To create secrets, run: sudo ./setup.sh secrets"
         return 1
     fi
     return 0

@@ -1306,9 +1306,9 @@ EOF
 
    OPTION B: From Secrets Above (Manual Rebuild)
    [ ] Run secrets setup (interactive — enter values from SECTION 2 when prompted):
-       ./setup.sh secrets
+       sudo ./setup.sh secrets
    [ ] Rotate any CHANGE_ME placeholders:
-       sudo ./edit-secrets.sh rotate <field>
+       ./edit-secrets.sh rotate <field>
 
 4. FINALIZATION
    [ ] Start services:
@@ -1566,7 +1566,7 @@ _validate_no_placeholders() {
         while IFS= read -r key; do
             log_error "  - $key"
         done <<< "$offending"
-        log_error "Run './setup.sh secrets' or './utilities/secrets-rotate.sh <field>' to configure these fields first."
+        log_error "Run 'sudo ./setup.sh secrets' or './utilities/secrets-rotate.sh <field>' to configure these fields first."
         return 1
     fi
 
@@ -1653,6 +1653,7 @@ export_docker_secrets() {
     _eds_cache="${_eds_tmpdir}/secrets.yaml"
     install -m 600 /dev/null "$_eds_cache" 2>/dev/null || true
 
+    # shellcheck disable=SC2064  # intentional: temp path is captured for RETURN cleanup
     trap "{ rm -rf '$_eds_tmpdir' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
 
     if ! ensure_sops_env; then
@@ -1759,14 +1760,18 @@ PYEOF
     done
 
     local _cf_flat="/run/vaultwarden-oci/secrets/crowdsec_cf_firewall_token"
-    if [[ -r "$_cf_flat" ]]; then
-        local _cf_value _cf_stage
-        _cf_value=$(tr -d '[:space:]' < "$_cf_flat" 2>/dev/null || true)
-        if [[ -n "$_cf_value" && "$_cf_value" != CHANGE_ME* && "$_cf_value" != PLACEHOLDER* ]]; then
-            _cf_stage="${_eds_tmpdir}/crowdsec_cf_firewall_token"
-            write_secret_file "$_cf_stage" "$_cf_value" || return 1
-            VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0444 -o root -g root "$_cf_stage" "${docker_dir}/crowdsec_cf_firewall_token" || return 1
+    local _cf_dest="${docker_dir}/crowdsec_cf_firewall_token"
+    if [[ "$_cf_flat" != "$_cf_dest" ]]; then
+        if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -s "$_cf_flat"; then
+            if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0444 -o root -g root "$_cf_flat" "$_cf_dest"; then
+                log_warn "export_docker_secrets: could not preserve existing CrowdSec CF token from root-owned runtime secrets directory"
+            fi
+        elif VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -e "$_cf_flat"; then
+            log_warn "export_docker_secrets: existing CrowdSec CF token is empty; not mirroring it"
         fi
+    elif VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -e "$_cf_flat" \
+        && ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -s "$_cf_flat"; then
+        log_warn "export_docker_secrets: existing CrowdSec CF token is empty"
     fi
 
     log_success "Docker secrets exported to: $docker_dir"

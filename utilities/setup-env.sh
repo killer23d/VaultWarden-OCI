@@ -179,6 +179,7 @@ create_env_file() {
                grep -qE '^CF_WORKER_BOUNCER_VERSION=latest' "$env_file" && \
                grep -qE '^FIREWALL_BOUNCER_VERSION=latest'  "$env_file"; then
                 latest_matches=true
+            fi
         else
             grep -qE '^(VAULTWARDEN|CADDY|POSTFIX|BUSYBOX)_VERSION=latest' "$env_file" \
                 || latest_matches=true

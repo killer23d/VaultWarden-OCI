@@ -294,9 +294,9 @@ check_project_state_ready() {
 }
 
 ensure_project_state_ready() {
+    is_root || { log_error "ensure_project_state_ready: must be run as root"; return 1; }
     local state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     check_project_state_ready || return 1
-    is_root || { log_error "ensure_project_state_ready: must be run as root"; return 1; }
     local _real_user
     _real_user="$(get_real_user)"
     install -d -m 750 "$state_dir" 2>/dev/null || {

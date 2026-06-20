@@ -106,7 +106,8 @@ if [[ "$rollback_failed" == "true" ]]; then
     exit 2
 fi
 
-if "${PROJECT_ROOT}/utilities/maintenance-health.sh" health; then
+# Internal rollback validation; direct health commands still refuse root.
+if VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" health; then
     log_warn "Rollback succeeded and the previous stack is healthy."
 else
     log_error "Rollback containers started, but the health check still reports failures."

@@ -12,7 +12,6 @@ source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
-refuse_root_for_user_command "Do not run with sudo. Run: ./maintenance.sh health"
 source "$PROJECT_ROOT/lib/email.sh"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$PROJECT_ROOT/lib/docker.sh"
@@ -788,7 +787,7 @@ _check_config() {
             "cloudflare_zone_id is configured in secrets.yaml"
     else
         _warn "config:cloudflare_zone_id" \
-            "cloudflare_zone_id not set or is a placeholder — run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+            "cloudflare_zone_id not set or is a placeholder — run: ./edit-secrets.sh rotate cloudflare_zone_id"
     fi
     unset _cf_zone_id
     local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
@@ -1112,6 +1111,9 @@ EOF
 
 # Strip the leading 'health' token when the dispatcher prepends the subcommand.
 [[ "${1:-}" == "health" ]] && shift
+if [[ "${VAULTWARDEN_INTERNAL_HEALTH_CHECK:-false}" != "true" ]]; then
+    refuse_root_for_user_command "Do not run with sudo. Run: ./maintenance.sh health"
+fi
 
 main() {
     local arg

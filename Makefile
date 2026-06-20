@@ -152,7 +152,7 @@ help: ## Show normal admin/day-2 commands
 	@echo "$(YELLOW)Service lifecycle$(NC)"
 	@echo "  $(GREEN)start$(NC)                    Start all services through startup.sh"
 	@echo "  $(GREEN)stop$(NC)                     Stop all services gracefully"
-	@echo "  $(GREEN)restart$(NC)                  Restart all services"
+	@echo "  $(GREEN)restart$(NC)                  Restart all services (run: sudo make restart)"
 	@echo "  $(GREEN)status$(NC)                   Show service, backup, disk, and CrowdSec summary"
 	@echo "  $(GREEN)logs$(NC)                     View logs (SERVICE=caddy|vaultwarden|postfix)"
 	@echo ""
@@ -166,8 +166,8 @@ help: ## Show normal admin/day-2 commands
 	@echo "$(YELLOW)Backup and restore$(NC)"
 	@echo "  $(GREEN)backup$(NC)                   Run database backup"
 	@echo "  $(GREEN)backup-full$(NC)              Run full backup"
-	@echo "  $(GREEN)backup-status$(NC)            Show backup health summary"
-	@echo "  $(GREEN)list-backups$(NC)             List local backups"
+	@echo "  $(GREEN)backup-status$(NC)            Show backup health summary (run with sudo)"
+	@echo "  $(GREEN)list-backups$(NC)             List local backups (run with sudo)"
 	@echo "  $(GREEN)restore$(NC)                  Guided restore"
 	@echo "  $(GREEN)restore-remote$(NC)           Restore from rclone remote"
 	@echo "  $(GREEN)restore-db$(NC)               Restore database only"
@@ -344,8 +344,8 @@ test-email: ## Send a test operational alert email (health/backup notification c
 ##@ Normal Admin + Dashboard Stable API — Service Management
 # ===========================================================================
 
-# up / down / restart do NOT require root. The invoking user must be a member
-# of the `docker` group. If not, `check-docker` prints a clear fix command.
+# up/down do not require root; restart is root-required in this PR.
+# Normal-user service targets rely on Docker group access.
 # startup.sh handles secrets initialisation, secrets pre-flight checks, and
 # the post-start health poll — do not replace it with a bare `docker compose up`.
 
@@ -605,12 +605,12 @@ backup-emergency: ## Create emergency backup kit
 	@echo "$(BLUE)Creating emergency backup...$(NC)"
 	@./backup.sh run emergency
 
-list-backups: ## List available backups with sizes
+list-backups: ## List available backups with sizes (root required via Makefile)
 	$(call require-root)
 	@echo "$(BLUE)Available backups:$(NC)"
 	@./backup.sh list
 
-backup-status: ## Show backup health summary
+backup-status: ## Show backup health summary (root required via Makefile)
 	$(call require-root)
 	@./backup.sh list
 
@@ -696,7 +696,7 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 #   1. Reads SOPS_AGE_KEY_FILE from .env.
 #   2. Self-referential path check (CONFIGURED == REPO_KEY):
 #      - File exists  → informational message, exit 0 (no install needed).
-#      - File missing → actionable error directing to ./setup.sh secrets, exit 1.
+#      - File missing → actionable error directing to sudo make init-secrets, exit 1.
 #   3. If target already exists and is non-empty, exits without changes.
 #   4. Creates the parent directory (mode 700, root:root).
 #   5. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).

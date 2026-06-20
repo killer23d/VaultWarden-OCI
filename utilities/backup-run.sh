@@ -281,7 +281,7 @@ _load_integrity_hmac_key() {
 
         if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
             log_error "Authenticated backup integrity is required, but file_integrity_hmac_key is unavailable."
-            log_error "Run: sudo ./edit-secrets.sh rotate file_integrity_hmac_key"
+            log_error "Run: ./edit-secrets.sh rotate file_integrity_hmac_key"
             return 1
         fi
 

@@ -13,9 +13,9 @@ For first-time setup on a new host:
 2. Copy `.env.example` to `.env` and set at minimum: `DOMAIN`, `ADMIN_EMAIL`,
    your email settings.
    Before running CrowdSec setup, inject the Cloudflare credentials into secrets:
-   `sudo ./edit-secrets.sh rotate cloudflare_zone_id`,
-   `sudo ./edit-secrets.sh rotate cf_account_id`, and
-   `sudo ./edit-secrets.sh rotate cf_worker_bouncer_token`.
+   `./edit-secrets.sh rotate cloudflare_zone_id`,
+   `./edit-secrets.sh rotate cf_account_id`, and
+   `./edit-secrets.sh rotate cf_worker_bouncer_token`.
 3. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`
    (or `sudo make setup` if `.env` is already prepared).
 4. Re-login so your user picks up `docker` group membership.
@@ -137,8 +137,8 @@ test.
 | Run incremental backup now | `make backup` |
 | Run full backup (DB + attachments + config) | `make backup-full` |
 | Create emergency backup kit | `make backup-emergency` |
-| List available backups | `make list-backups` |
-| Show backup health summary | `make backup-status` |
+| List available backups | `sudo make list-backups` |
+| Show backup health summary | `sudo make backup-status` |
 | Copy all retained local backups to rclone | `sudo ./backup.sh sync` |
 | Interactive restore (guided) | `make restore` |
 | Restore from remote storage | `make restore-remote` |

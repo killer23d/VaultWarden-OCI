@@ -427,9 +427,9 @@ ENVIRONMENT:
     CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
 
     Cloudflare credentials (in encrypted secrets, not .env):
-        sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
-        sudo ./edit-secrets.sh rotate cloudflare_zone_id
-        sudo ./edit-secrets.sh rotate cf_account_id
+        ./edit-secrets.sh rotate cf_worker_bouncer_token
+        ./edit-secrets.sh rotate cloudflare_zone_id
+        ./edit-secrets.sh rotate cf_account_id
 
 EXAMPLES:
     sudo utilities/setup-crowdsec.sh
@@ -1034,37 +1034,37 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             cloudflare_zone_id="CHANGE_ME_CLOUDFLARE_ZONE_ID"
             cf_account_id="CHANGE_ME_CF_ACCOUNT_ID"
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
-            log_warn "Set CrowdSec Cloudflare secrets with: sudo ./edit-secrets.sh rotate <field>"
+            log_warn "Set CrowdSec Cloudflare secrets with: ./edit-secrets.sh rotate <field>"
         else
             log_debug "setup-crowdsec Phase 6: SECRETS_FILE resolved to: ${SECRETS_FILE:-<unset>}"
             cf_worker_bouncer_token=$(decrypt_secret "cf_worker_bouncer_token") || {
                 log_error "Failed to read cf_worker_bouncer_token from secrets."
-                log_error "Run: sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
+                log_error "Run: ./edit-secrets.sh rotate cf_worker_bouncer_token"
                 exit 1
             }
             if [[ -z "$cf_worker_bouncer_token" || "$cf_worker_bouncer_token" == PLACEHOLDER* || "$cf_worker_bouncer_token" == CHANGE_ME* ]]; then
                 log_error "cf_worker_bouncer_token is not configured."
-                log_error "Run: sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
+                log_error "Run: ./edit-secrets.sh rotate cf_worker_bouncer_token"
                 exit 1
             fi
             cloudflare_zone_id=$(decrypt_secret "cloudflare_zone_id") || {
                 log_error "Failed to read cloudflare_zone_id from secrets."
-                log_error "Run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+                log_error "Run: ./edit-secrets.sh rotate cloudflare_zone_id"
                 exit 1
             }
             if [[ -z "$cloudflare_zone_id" || "$cloudflare_zone_id" == PLACEHOLDER* || "$cloudflare_zone_id" == CHANGE_ME* ]]; then
                 log_error "cloudflare_zone_id is not configured."
-                log_error "Run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+                log_error "Run: ./edit-secrets.sh rotate cloudflare_zone_id"
                 exit 1
             fi
             cf_account_id=$(decrypt_secret "cf_account_id") || {
                 log_error "Failed to read cf_account_id from secrets."
-                log_error "Run: sudo ./edit-secrets.sh rotate cf_account_id"
+                log_error "Run: ./edit-secrets.sh rotate cf_account_id"
                 exit 1
             }
             if [[ -z "$cf_account_id" || "$cf_account_id" == PLACEHOLDER* || "$cf_account_id" == CHANGE_ME* ]]; then
                 log_error "cf_account_id is not configured."
-                log_error "Run: sudo ./edit-secrets.sh rotate cf_account_id"
+                log_error "Run: ./edit-secrets.sh rotate cf_account_id"
                 exit 1
             fi
             cleanup_secrets_environment
@@ -1408,9 +1408,9 @@ fi
 log_info "── ROTATING CLOUDFLARE CREDENTIALS ────────────────────"
 log_info "  Credentials live in secrets (not .env)."
 log_info "  To rotate any value and re-apply:"
-log_info "    sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
-log_info "    sudo ./edit-secrets.sh rotate cloudflare_zone_id"
-log_info "    sudo ./edit-secrets.sh rotate cf_account_id"
+log_info "    ./edit-secrets.sh rotate cf_worker_bouncer_token"
+log_info "    ./edit-secrets.sh rotate cloudflare_zone_id"
+log_info "    ./edit-secrets.sh rotate cf_account_id"
 log_info "    sudo ./utilities/setup-crowdsec.sh --force"
 log_info ""
 log_info "════════════════════════════════════════════════════════"

@@ -135,7 +135,7 @@ check_prerequisites() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing prerequisites:"
         for item in "${missing[@]}"; do log_error "  - $item"; done
-        log_info "To create secrets, run: ./setup.sh secrets"
+        log_info "To create secrets, run: sudo ./setup.sh secrets"
         return 1
     fi
     return 0
@@ -166,7 +166,7 @@ _print_rotation_receipt() {
             "$(printf '%s✔ Resynced%s' "${COLOR_GREEN}" "${COLOR_RESET}")"
     else
         printf '  %-22s %s\n' "Docker secrets:" \
-            "$(printf '%s✖ Not synced — run: ./startup.sh or ./setup.sh secrets%s' \
+            "$(printf '%s✖ Not synced — run: ./startup.sh or sudo ./setup.sh secrets%s' \
                 "${COLOR_YELLOW}" "${COLOR_RESET}")"
     fi
 
@@ -424,7 +424,7 @@ PYEOF
         log_success "Docker secret files updated"
         _docker_synced="true"
     else
-        log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh secrets"
+        log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or sudo ./setup.sh secrets"
     fi
 
     _print_rotation_receipt \

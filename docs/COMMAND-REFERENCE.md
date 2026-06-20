@@ -17,7 +17,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make setup` |  Run initial setup (requires sudo) |
 | `make dev-setup` |  Set up development environment (.env + docker-compose.override.yml) |
 | `make fix-permissions` |  Fix file ownership after sudo operations leave root-owned files |
-| `make init-secrets` |  Initialize secrets file (interactive) |
+| `make init-secrets` |  Initialize secrets file (interactive; root required) |
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
 | `make test-email` |  Send a test operational alert email (health/backup notification channel) |
@@ -25,15 +25,15 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully |
 | `make stop` |  Alias for down |
-| `make restart` |  Restart all services (via startup.sh) |
-| `make safe-restart` |  Restart with automatic rollback on failure |
+| `make restart` |  Restart all services (via startup.sh; root required) |
+| `make safe-restart` |  Restart with automatic rollback on failure (root required) |
 | `make status` |  Show service status, backup health, disk usage, and CrowdSec ban summary |
 | `make health` |  Run health checks (set AUTO_RECOVER=true to auto-recover) |
 | `make health-quick` |  Quick health check (concise output) |
 | `make health-report` |  Run health check and write a timestamped report file |
 | `make health-email` |  Backward-compatible alias for test-email |
-| `make smoke-test` |  Run pre-production smoke test against the live stack |
-| `make drill` |  Run non-destructive pre-production dry-run drill |
+| `make smoke-test` |  Run pre-production smoke test against the live stack (root required) |
+| `make drill` |  Run non-destructive pre-production dry-run drill (root required) |
 | `make watch` |  Watch service logs in real-time (Ctrl+C to stop) |
 | `make monitor` |  Continuous health monitoring (30s intervals, Ctrl+C to stop) |
 | `make unban` |  Unban an IP from CrowdSec (IP=<address> required) |
@@ -49,8 +49,8 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make backup` |  Run incremental database backup |
 | `make backup-full` |  Run full backup (database + attachments + config) |
 | `make backup-emergency` |  Create emergency backup kit |
-| `make list-backups` |  List available backups with sizes |
-| `make backup-status` |  Show backup health summary |
+| `make list-backups` |  List available backups with sizes (root required via Makefile) |
+| `make backup-status` |  Show backup health summary (root required via Makefile) |
 | `make restore` |  Interactive restore (guided) |
 | `make restore-preflight` |  Preview restore prerequisites without executing |
 | `make restore-db` |  Restore database only from latest backup |
@@ -157,11 +157,11 @@ EXAMPLES:
     sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
 
     # ── Secrets configuration ─────────────────────────────────────
-    ./setup.sh secrets                   # Interactive credential setup
-    ./setup.sh secrets --auto            # Automated with generated passwords
-    ./setup.sh secrets --force           # Reconfigure without prompting
-    ./setup.sh secrets --skip-optional   # Skip push notification keys
-    ./setup.sh secrets --export-recovery-kit
+    sudo ./setup.sh secrets              # Interactive credential setup
+    sudo ./setup.sh secrets --auto       # Automated with generated passwords
+    sudo ./setup.sh secrets --force      # Reconfigure without prompting
+    sudo ./setup.sh secrets --skip-optional   # Skip push notification keys
+    sudo ./setup.sh secrets --export-recovery-kit
 
     # ── Systemd timer management ──────────────────────────────────
     sudo ./setup.sh systemd install      # Install and enable all timers
@@ -380,8 +380,10 @@ EXIT CODES:
 VaultWarden-OCI Email Diagnostics
 
 USAGE:
-    utilities/maintenance-email.sh [OPTIONS]
     ./maintenance.sh test-email [OPTIONS]
+    utilities/maintenance-email.sh [OPTIONS]
+
+Do not run with sudo. Run: ./maintenance.sh test-email
 
 OPTIONS:
     --recipient EMAIL   Override default admin email recipient
@@ -400,8 +402,10 @@ EXIT CODES:
 VaultWarden-OCI Health Check
 
 USAGE:
-    sudo utilities/maintenance-health.sh [OPTIONS]
     ./maintenance.sh health [OPTIONS]
+    utilities/maintenance-health.sh [OPTIONS]
+
+Do not run with sudo. Run: ./maintenance.sh health
 
 OPTIONS:
     --comprehensive     Run all checks including extended diagnostics
@@ -546,8 +550,8 @@ EXAMPLES:
 ### notify-failure.sh
 
 ```
-[2026-06-20T20:25:21+0000] [notify-failure] WARN No VaultWarden environment file found; using process environment only.
-[2026-06-20T20:25:21+0000] [notify-failure] WARN ADMIN_EMAIL is not configured; no failure email sent for --help.
+[TIMESTAMP] [notify-failure] WARN No VaultWarden environment file found; using process environment only.
+[TIMESTAMP] [notify-failure] INFO Failure notification cooldown active for --help; skipping.
 ```
 
 ### pre-production-drill.sh
@@ -806,9 +810,9 @@ ENVIRONMENT:
     CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
 
     Cloudflare credentials (in encrypted secrets, not .env):
-        sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
-        sudo ./edit-secrets.sh rotate cloudflare_zone_id
-        sudo ./edit-secrets.sh rotate cf_account_id
+        ./edit-secrets.sh rotate cf_worker_bouncer_token
+        ./edit-secrets.sh rotate cloudflare_zone_id
+        ./edit-secrets.sh rotate cf_account_id
 
 EXAMPLES:
     sudo utilities/setup-crowdsec.sh
@@ -819,7 +823,38 @@ EXAMPLES:
 ### setup-env.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Environment Setup
+
+USAGE:
+    sudo utilities/setup-env.sh --domain DOMAIN --email EMAIL [OPTIONS]
+
+DESCRIPTION:
+    Creates or updates .env and docker-compose.yml from project templates.
+    Safe to re-run (idempotent) — existing files are not overwritten unless
+    --force is passed. Called automatically by setup.sh during phase 3.
+
+OPTIONS:
+    --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
+    --email EMAIL         Admin email address (required)
+    --use-latest          Set container and CrowdSec component versions to 'latest'
+    --data-device DEV     Data volume block device path
+    --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
+    --force               Overwrite existing .env/docker-compose.yml
+    --dry-run             Preview actions without executing
+    --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
+
+DOMAIN REQUIREMENTS:
+    - Must be a bare hostname with no scheme (not https://vault.example.com)
+    - Must be a fully-qualified domain name with at least one dot
+    - Must not include a port number or a path
+    - Must not be a placeholder (e.g. vault.example.com, CHANGE_ME)
+    - Must not be a bare IP address (Caddy ACME requires a DNS name)
+
+EXAMPLES:
+    sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com
+    sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com --force
+    sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com --dry-run
 ```
 
 ### setup-firewall.sh
