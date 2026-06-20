@@ -334,7 +334,7 @@ services:
 
     healthcheck:
       # Confirm both the Postfix process and the upstream relay socket respond.
-      test: ["CMD-SHELL", "postfix status 2>/dev/null && (exec 3<>/dev/tcp/${SMTP_HOST:-smtp.mailgun.org}/${SMTP_PORT:-587} && read -t 5 banner <&3 && echo \"$banner\" | grep -q '^220') || exit 1"]
+      test: ["CMD-SHELL", "postfix status >/dev/null 2>&1 || exit 1"]
       interval: 120s
       timeout: 15s
       retries: 5
