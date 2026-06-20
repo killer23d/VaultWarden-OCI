@@ -146,6 +146,26 @@ test_notify_failure_helper_loads_secret_resolution() {
     (( secrets_line < email_line )) || fail "notify helper must source secrets before email"
 }
 
+test_installed_runtime_secret_resolution() {
+    grep -q 'load_project_environment' "$ROOT/utilities/maintenance-update-dns.sh" \
+        || fail "DNS updater does not use load_project_environment"
+
+    grep -q 'resolve_secrets_file' "$ROOT/utilities/maintenance-update-dns.sh" \
+        || fail "DNS updater does not resolve SECRETS_FILE after env load"
+
+    grep -q 'load_project_environment' "$ROOT/utilities/notify-failure.sh" \
+        || fail "notify-failure helper does not use load_project_environment"
+
+    grep -q 'resolve_secrets_file' "$ROOT/utilities/notify-failure.sh" \
+        || fail "notify-failure helper does not resolve SECRETS_FILE after env load"
+
+    grep -q 'unset SOPS_CONFIG' "$ROOT/lib/secrets.sh" \
+        || fail "ensure_sops_env does not unset missing SOPS_CONFIG"
+
+    grep -q 'config=<unset; no .sops.yaml found>' "$ROOT/lib/secrets.sh" \
+        || fail "ensure_sops_env does not document missing .sops.yaml fallback"
+}
+
 test_dns_optional_and_strict_modes() {
     grep -q 'UPDATE_DNS=false; skipping DNS update' "$ROOT/utilities/maintenance-update-dns.sh" \
         || fail "DNS updater does not skip cleanly when UPDATE_DNS=false"
@@ -171,6 +191,7 @@ run_test 'notify-failure systemd uses helper and no root cooldown path' test_not
 run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
 run_test 'notify-failure helper loads encrypted-secret resolution before email' test_notify_failure_helper_loads_secret_resolution
 run_test 'DNS update optional and strict modes are represented' test_dns_optional_and_strict_modes
+run_test 'installed runtime secret resolution is guarded' test_installed_runtime_secret_resolution
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
-[[ "$TESTS_RUN" -eq 8 ]] || fail "expected 8 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 9 ]] || fail "expected 9 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
