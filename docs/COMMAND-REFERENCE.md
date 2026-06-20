@@ -469,6 +469,7 @@ USAGE:
 
 OPTIONS:
     --email       Send email notification if the DNS record is updated
+    --require-dns  Treat missing DNS automation config as a failure
     --dry-run     Preview what would be done without making changes
     --help, -h    Show this help
 
@@ -477,6 +478,10 @@ SECRET SOURCE PRIORITY:
         1. decrypt_secret() from encrypted $SECRETS_FILE
         2. Host file: $CF_TOKEN_FILE or secrets/.docker_secrets/caddy_cloudflare_dns_token
         3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
+
+    DNS_UPDATE_REQUIRED=true or --require-dns makes missing config fail.
+    UPDATE_DNS=false skips cleanly. When UPDATE_DNS is unset, missing or
+    placeholder Cloudflare config logs a warning and exits 0.
 
     cloudflare_zone_id — resolved in order:
         1. decrypt_secret() from encrypted $SECRETS_FILE
@@ -536,6 +541,13 @@ EXAMPLES:
     sudo ./maintenance.sh update --images        # Update Docker images only
     sudo ./maintenance.sh update --all           # Full system + image update
     sudo ./maintenance.sh update --all --email   # Full update with email notification
+```
+
+### notify-failure.sh
+
+```
+[2026-06-20T20:25:21+0000] [notify-failure] WARN No VaultWarden environment file found; using process environment only.
+[2026-06-20T20:25:21+0000] [notify-failure] WARN ADMIN_EMAIL is not configured; no failure email sent for --help.
 ```
 
 ### pre-production-drill.sh
@@ -999,7 +1011,7 @@ WHAT install DOES:
          utilities/maintenance-run.sh      utilities/maintenance-health.sh
          utilities/maintenance-update.sh   utilities/maintenance-db-maint.sh
          utilities/maintenance-email.sh    utilities/maintenance-update-dns.sh
-         utilities/maintenance-update-firewall.sh
+         utilities/notify-failure.sh       utilities/maintenance-update-firewall.sh
          utilities/backup-run.sh           utilities/restore-run.sh
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
