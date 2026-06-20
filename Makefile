@@ -63,6 +63,40 @@ DATA_DEVICE ?=
         uninstall uninstall-dry-run \
         docs backup-manifest
 
+# ── Root invocation policy ────────────────────────────────────────────────────
+# Most Make targets should run as the normal login user to avoid repository
+# ownership drift from accidental `sudo make ...`.
+#
+# Only targets listed here are allowed to be invoked as root/sudo. This guard is
+# intentionally target-aware: it blocks accidental `sudo make up`, `sudo make test`,
+# `sudo make status`, etc. without breaking root-required admin operations.
+#
+# Recursive make calls are exempt so root-required targets can safely call helper
+# targets internally, for example `sudo make key-rotate` calling `make key-health`.
+ROOT_ALLOWED_TARGETS := \
+	setup fix-permissions \
+	backup backup-full backup-emergency list-backups backup-status \
+	restore restore-preflight restore-db restore-remote \
+	key-backup key-escrow key-rotate key-install \
+	update update-system update-dns maintenance maintenance-full db-maint db-backup \
+	install-systemd remove-systemd systemd-validate \
+	unban \
+	breakglass-create breakglass-status breakglass-remove \
+	uninstall uninstall-dry-run
+
+ROOT_NEUTRAL_TARGETS := help help-all version
+
+_REQUESTED_TARGETS := $(if $(MAKECMDGOALS),$(MAKECMDGOALS),help)
+_ROOT_DISALLOWED_TARGETS := $(filter-out $(ROOT_ALLOWED_TARGETS) $(ROOT_NEUTRAL_TARGETS),$(_REQUESTED_TARGETS))
+
+ifeq ($(MAKELEVEL),0)
+ifneq ($(strip $(_ROOT_DISALLOWED_TARGETS)),)
+ifeq ($(shell id -u),0)
+$(error Do not run these make target(s) as root/sudo: $(_ROOT_DISALLOWED_TARGETS). Run as your normal user: make $(_ROOT_DISALLOWED_TARGETS))
+endif
+endif
+endif
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 # require-root: used for targets that genuinely need elevated privileges
 # (setup, backup, restore, key operations, maintenance, systemd, uninstall).
@@ -809,7 +843,7 @@ update-system: ## Update host OS packages
 	fi
 
 update-dns: ## Update Cloudflare DNS records
-	$(call check-env-readable)
+	$(call require-root)
 	@echo "$(BLUE)Updating DNS records...$(NC)"
 	@./maintenance.sh update-dns
 
