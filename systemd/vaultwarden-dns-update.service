@@ -18,10 +18,13 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh update-dns
-# User/Group are NOT set here. They are injected at install time via
-# a systemd drop-in written by: sudo utilities/setup-systemd.sh install
-# Running units without the drop-in will cause them to execute as root,
-# which is intentionally unsafe. Always run setup-systemd.sh install.
+# This unit intentionally runs as root because the current backup/maintenance
+# implementation requires root for storage readiness checks, root-owned secrets,
+# Docker/system access, or repair operations. Least privilege is enforced through
+# systemd sandboxing such as NoNewPrivileges, ProtectSystem=strict,
+# ReadWritePaths, PrivateTmp, and RuntimeDirectory.
+# Do not add User=/Group= drop-ins unless the called script has been redesigned
+# and validated to be non-root-safe.
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-dns-update
@@ -38,8 +41,8 @@ ProtectHome=read-only
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat <unit>
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
-# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ with the
-# correct service user ownership before ExecStart runs.
+# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ as a
+# root-owned runtime directory before ExecStart runs.
 RuntimeDirectory=vaultwarden
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
