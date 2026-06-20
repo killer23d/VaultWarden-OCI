@@ -1446,6 +1446,12 @@ offer_recovery_kit_export() {
         log_info "Securely deleting persistent on-disk recovery kit..."
         _secure_shred "$recovery_file"
         log_success "On-disk recovery kit deleted: $recovery_file"
+    else
+        # User declined the interactive export — shred the on-disk copy now
+        # rather than waiting for the EXIT trap to fire at session end.
+        log_info "Securely deleting on-disk recovery kit (export declined)..."
+        _secure_shred "$recovery_file"
+        log_success "On-disk recovery kit deleted: $recovery_file"
     fi
 }
 
