@@ -47,7 +47,7 @@ SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
 
 STARTUP OPTIONS:
-  --force          Force restart of all services
+  --force          Recreate containers so compose/.env metadata is regenerated
   --skip-health    Skip post-startup health check
   --skip-pull      Skip docker compose pull (use for systemd restarts
                    or when images are already current)
@@ -63,7 +63,7 @@ GLOBAL OPTIONS:
 EXAMPLES:
   ./startup.sh                    # Normal startup (pulls latest images)
   ./startup.sh --skip-pull        # Restart without pulling (fast path)
-  ./startup.sh --force            # Force restart all services
+  ./startup.sh --force            # Recreate containers after .env/compose changes
   ./startup.sh --background       # Start in daemon mode
   ./startup.sh stop               # Stop all services
 EOF
@@ -208,6 +208,8 @@ load_environment() {
   DOCKER_SECRETS_DIR="/run/vaultwarden-oci/secrets"
   export DOCKER_SECRETS_DIR
   log_success "Environment loaded"
+
+  log_info "Note: changes to compose/.env values are applied to containers only when they are recreated."
 }
 
 # Required commands are declared in _VW_DEFAULT_REQUIRED_COMMANDS (lib/defaults.sh).
