@@ -47,10 +47,7 @@ if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
 fi
 
 if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && "${1:-}" != "help" && "${EUID}" -ne 0 ]]; then
-    if command -v sudo >/dev/null 2>&1; then
-        exec sudo -n "$0" "$@"
-    fi
-    echo "ERROR: run as root (or install/configure sudo)" >&2
+    echo "ERROR: setup-crowdsec requires root. Run: sudo ./utilities/setup-crowdsec.sh $*" >&2
     exit 1
 fi
 

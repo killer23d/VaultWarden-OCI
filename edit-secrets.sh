@@ -11,6 +11,7 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+refuse_root_for_user_command "Do not run with sudo. Run: ./edit-secrets.sh"
 load_project_environment || exit 1
 
 show_help() {

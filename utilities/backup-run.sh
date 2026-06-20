@@ -181,6 +181,12 @@ fi
 backup_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
 backup_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }
 backup_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
+backup_require_root() {
+    if (( EUID != 0 )); then
+        log_error "backup ${_SUBCMD} requires root. Run: sudo ./backup.sh ${_SUBCMD}"
+        exit 1
+    fi
+}
 
 TMPDIR_BACKUP=""
 LOCK_FILE=""
@@ -1178,11 +1184,19 @@ _log_backup_size() {
 main() {
     trap cleanup EXIT HUP INT TERM ERR
 
+    if [[ "$_SUBCMD" != "list" ]]; then
+        backup_require_root
+    fi
+
     if [[ "$LIST_ONLY" == "true" ]]; then
         load_env_file 2>/dev/null || true
         auto_fix_critical_permissions "$PROJECT_ROOT"
         local list_base_dir
         list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+        if [[ -d "$list_base_dir" && ! -r "$list_base_dir" ]]; then
+            log_error "Backup archive directory is not readable by $(id -un): $list_base_dir"
+            exit 1
+        fi
         list_backups "$list_base_dir" "$JSON_OUTPUT" || true
         exit 0
     fi

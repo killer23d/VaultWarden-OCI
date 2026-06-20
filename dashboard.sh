@@ -604,7 +604,7 @@ handle_main_menu() {
     case "${opt}" in
         1)
             _check_script "${REPO_ROOT}/startup.sh" || return
-            run_sudo_cmd "sudo ./startup.sh --force" \
+            run_sudo_cmd "sudo make restart" \
                 "${REPO_ROOT}/startup.sh" --force
             # Force live-stats redraw so container state is fresh (ux.md #3).
             ACTIVE_MENU="main"
@@ -621,7 +621,7 @@ handle_main_menu() {
             ;;
         3)
             _check_script "${REPO_ROOT}/maintenance.sh" || return
-            run_sudo_cmd "sudo ./maintenance.sh health" \
+            run_sudo_cmd "make health" \
                 "${REPO_ROOT}/maintenance.sh" health
             ;;
         4)

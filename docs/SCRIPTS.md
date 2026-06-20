@@ -761,8 +761,8 @@ All common operations have Makefile shortcuts. Run `make help` for the normal ad
 | `make test-email` | `./maintenance.sh test-email` | Test the Postfix-backed operational alert channel |
 | `make up` / `make start` | `./startup.sh` | Start all services |
 | `make down` / `make stop` | `docker compose down` | Graceful shutdown |
-| `make restart` | `sudo ./startup.sh --force` | Force restart all services |
-| `make safe-restart` | `sudo ./utilities/safe-restart.sh` | Restarts without pulling and restores the captured Compose model/image IDs on failure |
+| `make restart` | `sudo make restart` | Force restart all services |
+| `make safe-restart` | `sudo make safe-restart` | Restarts without pulling and restores the captured Compose model/image IDs on failure |
 | `make status` | `docker compose ps` | Show service status table |
 | `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true` passes `--fix`) |
 | `make health-quick` | `./maintenance.sh health --quiet` | Quick health check — concise output, non-zero exit on failure |

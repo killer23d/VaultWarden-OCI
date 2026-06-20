@@ -293,7 +293,7 @@ _ensure_lock_group() {
 
     log_info "NOTE: New group membership takes effect in the NEXT login session."
     log_info "  systemd services pick it up immediately (new process per run)."
-    log_info "  Interactive sudo sessions need: exec sudo -i  (or re-login)"
+    log_info "  Interactive sudo sessions need: sudo -i  (or re-login)"
 }
 
 _ensure_runtime_lock_files() {

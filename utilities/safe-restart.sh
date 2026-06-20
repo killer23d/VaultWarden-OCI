@@ -17,7 +17,7 @@ show_help() {
 VaultWarden-OCI Safe Restart
 
 USAGE:
-    sudo ./utilities/safe-restart.sh
+    sudo make safe-restart
 
 DESCRIPTION:
     Captures the resolved Compose model and current local image IDs, restarts
@@ -43,10 +43,7 @@ case "${1:-}" in
 esac
 
 if [[ $EUID -ne 0 ]]; then
-    if command -v sudo >/dev/null 2>&1; then
-        exec sudo -n "$0" "$@"
-    fi
-    log_error "safe-restart must run as root."
+    log_error "safe-restart requires root. Run: sudo make safe-restart"
     exit 1
 fi
 

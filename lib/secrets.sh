@@ -1610,8 +1610,8 @@ _warn_if_stack_unavailable() {
 # export_docker_secrets DOCKER_DIR [SECRETS_FILE]
 #
 # Decrypt SECRETS_FILE (defaults to $SECRETS_FILE / secrets/secrets.yaml) and
-# write one flat file per known secret key into DOCKER_DIR (mode 0700).
-# Each output file is created mode 444 (via write_secret_file). Placeholder
+# stage one flat file per known secret key, then install it into DOCKER_DIR.
+# Each output file is installed root:root mode 0444. Placeholder
 # values (CHANGE_ME*, NOT_USED*, null) are skipped with a warning so that
 # genuinely-empty optional secrets do not overwrite populated files.
 #
@@ -1640,25 +1640,20 @@ export_docker_secrets() {
         return 0
     fi
 
-    if ! mkdir -p "$docker_dir"; then
-        log_error "export_docker_secrets: failed to create $docker_dir"
-        return 1
-    fi
-    chmod 0700 "$docker_dir"
-
-    # Create the SOPS cache file inside the docker_dir (mode 0700, not
-    # world-listable /tmp), eliminating the TOCTOU
-    # window between mktemp and the subsequent chmod on a shared host.
-    local _eds_cache
-    _eds_cache=$(mktemp --tmpdir="$docker_dir" .sops-cache.XXXXXXXXXX) || {
-        log_error "export_docker_secrets: failed to create secure temp file in $docker_dir"
+    local _eds_tmpdir _eds_cache
+    _eds_tmpdir=$(mktemp -d -t vaultwarden-secrets.XXXXXXXXXX) || {
+        log_error "export_docker_secrets: failed to create secure staging directory"
         return 1
     }
+    chmod 0700 "$_eds_tmpdir" || {
+        log_error "export_docker_secrets: failed to secure staging directory"
+        rm -rf "$_eds_tmpdir"
+        return 1
+    }
+    _eds_cache="${_eds_tmpdir}/secrets.yaml"
     install -m 600 /dev/null "$_eds_cache" 2>/dev/null || true
 
-    # Guarantee cache file cleanup and SOPS_CONFIG unset on any return path.
-    # shellcheck disable=SC2064  # intentional: $_eds_cache expands at registration
-    trap "{ _secure_shred '$_eds_cache' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
+    trap "{ rm -rf '$_eds_tmpdir' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
 
     if ! ensure_sops_env; then
         log_error "export_docker_secrets: failed to set up SOPS environment"
@@ -1679,8 +1674,6 @@ export_docker_secrets() {
         return 1
     fi
 
-    # Load schema keys into an associative array for O(1) lookup during
-    # the parse loop — avoids a nested for-loop per secret key.
     declare -A _eds_allowed_keys=()
     while IFS= read -r _sk; do
         [[ -z "$_sk" ]] && continue
@@ -1688,16 +1681,12 @@ export_docker_secrets() {
     done <<< "$_schema_keys_str"
 
     local _failed=0
-    local _key _value
+    local _key _value _staged
 
     while IFS='=' read -r _key _value; do
         [[ -z "$_key" ]] && continue
-
-        # Only export keys that are defined in the schema; ignore any stale or
-        # unexpected YAML keys that may exist in older secrets.yaml files.
         [[ -n "${_eds_allowed_keys[$_key]+set}" ]] || continue
 
-        # Skip placeholder or null values; warn so the admin can act.
         if [[ -z "$_value" ]] \
             || [[ "$_value" == "CHANGE_ME"* ]] \
             || [[ "$_value" == "NOT_USED"* ]] \
@@ -1707,8 +1696,9 @@ export_docker_secrets() {
             continue
         fi
 
-        if ! write_secret_file "${docker_dir}/${_key}" "$_value"; then
-            log_error "export_docker_secrets: failed to write ${docker_dir}/${_key}"
+        _staged="${_eds_tmpdir}/${_key}"
+        if ! write_secret_file "$_staged" "$_value"; then
+            log_error "export_docker_secrets: failed to stage ${_key}"
             _failed=$(( _failed + 1 ))
         fi
         unset _value
@@ -1725,15 +1715,11 @@ PYEOF
     unset _key
     unset _eds_allowed_keys
 
-    find "$docker_dir" -maxdepth 1 -type f -exec chmod 0444 {} + 2>/dev/null || true
-
-    # Sanity-check: if any output file starts with "ENC[", SOPS produced
-    # raw ciphertext — fail loudly before containers start.
     local _bad_secrets=()
     local _f _head
-    for _f in "$docker_dir"/*; do
+    for _f in "$_eds_tmpdir"/*; do
         [[ -f "$_f" ]] || continue
-        [[ "$(basename "$_f")" == .sops-cache.* ]] && continue
+        [[ "$(basename "$_f")" == "secrets.yaml" ]] && continue
         if read -r -n 4 _head < "$_f" 2>/dev/null && [[ "$_head" == "ENC[" ]]; then
             _bad_secrets+=("$(basename "$_f")")
             _secure_shred "$_f" 2>/dev/null || rm -f "$_f"
@@ -1745,31 +1731,42 @@ PYEOF
         for _s in "${_bad_secrets[@]}"; do
             log_error "  ${docker_dir}/${_s}"
         done
-        log_error "Remediation:"
-        log_error "  1. Run: make key-health  (verify age key is present and readable)"
-        log_error "  2. Run: sudo rm -f ${docker_dir}/*  (clear stale files)"
-        log_error "  3. Run: make up  (re-decrypt and restart)"
+        log_error "Remediation: run make key-health, clear stale files as root, then re-run make up."
         return 1
-    fi
-
-    # crowdsec_cf_firewall_token is intentionally not part of secrets.yaml.
-    # Canonical location is a flat file at:
-    #   /run/vaultwarden-oci/secrets/crowdsec_cf_firewall_token
-    # Mirror it into the active docker secret directory when present.
-    local _project_state_dir _cf_flat
-    _project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
-    _cf_flat="/run/vaultwarden-oci/secrets/crowdsec_cf_firewall_token"
-    if [[ -f "$_cf_flat" ]]; then
-        local _cf_value
-        _cf_value=$(tr -d '[:space:]' < "$_cf_flat" 2>/dev/null || true)
-        if [[ -n "$_cf_value" && "$_cf_value" != CHANGE_ME* && "$_cf_value" != PLACEHOLDER* ]]; then
-            write_secret_file "${docker_dir}/crowdsec_cf_firewall_token" "$_cf_value" || return 1
-        fi
     fi
 
     if [[ $_failed -gt 0 ]]; then
         log_error "export_docker_secrets: $_failed key(s) failed to export"
         return 1
+    fi
+
+    if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -d -m 0700 -o root -g root "$docker_dir"; then
+        log_error "export_docker_secrets: cannot prepare root-owned runtime secret directory: $docker_dir"
+        log_error "For make up: run sudo make init-secrets, then re-run make up"
+        log_error "For direct scripts: run sudo ./setup.sh secrets"
+        return 1
+    fi
+
+    for _f in "$_eds_tmpdir"/*; do
+        [[ -f "$_f" ]] || continue
+        [[ "$(basename "$_f")" == "secrets.yaml" ]] && continue
+        if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0444 -o root -g root "$_f" "${docker_dir}/$(basename "$_f")"; then
+            log_error "export_docker_secrets: failed to install ${docker_dir}/$(basename "$_f")"
+            log_error "For make up: run sudo make init-secrets, then re-run make up"
+            log_error "For direct scripts: run sudo ./setup.sh secrets"
+            return 1
+        fi
+    done
+
+    local _cf_flat="/run/vaultwarden-oci/secrets/crowdsec_cf_firewall_token"
+    if [[ -r "$_cf_flat" ]]; then
+        local _cf_value _cf_stage
+        _cf_value=$(tr -d '[:space:]' < "$_cf_flat" 2>/dev/null || true)
+        if [[ -n "$_cf_value" && "$_cf_value" != CHANGE_ME* && "$_cf_value" != PLACEHOLDER* ]]; then
+            _cf_stage="${_eds_tmpdir}/crowdsec_cf_firewall_token"
+            write_secret_file "$_cf_stage" "$_cf_value" || return 1
+            VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0444 -o root -g root "$_cf_stage" "${docker_dir}/crowdsec_cf_firewall_token" || return 1
+        fi
     fi
 
     log_success "Docker secrets exported to: $docker_dir"

@@ -52,6 +52,7 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
 fi
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+refuse_root_for_user_command "Do not run with sudo. Run: ./utilities/secrets-export-recovery-kit.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 load_project_environment || exit 1

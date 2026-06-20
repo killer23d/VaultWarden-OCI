@@ -649,7 +649,7 @@ EXAMPLES:
 VaultWarden-OCI Safe Restart
 
 USAGE:
-    sudo ./utilities/safe-restart.sh
+    sudo make safe-restart
 
 DESCRIPTION:
     Captures the resolved Compose model and current local image IDs, restarts
