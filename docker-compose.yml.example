@@ -317,6 +317,9 @@ services:
       - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
       - POSTFIX_alias_maps=
       - POSTFIX_alias_database=
+      - POSTFIX_mydestination=
+      - POSTFIX_local_recipient_maps=
+      - POSTFIX_relay_domains=${ALLOWED_SENDER_DOMAINS:-}
 
     secrets:
       - smtp_password
