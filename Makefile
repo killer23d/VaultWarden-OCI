@@ -263,21 +263,19 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	    echo "$(GREEN)  ✓ secrets/keys/ → $$REAL_USER:$$REAL_GROUP (keys 600)$(NC)"; \
 	fi; \
 	if [ -d "/etc/vaultwarden" ]; then \
-	    SERVICE_USER=$${SERVICE_USER:-$${BACKUP_USER:-ubuntu}}; \
-	    SERVICE_GROUP=$$(id -gn "$$SERVICE_USER" 2>/dev/null || echo "$$SERVICE_USER"); \
-	    chmod 750 /etc/vaultwarden; \
-	    chown root:$$SERVICE_GROUP /etc/vaultwarden; \
+	    chmod 700 /etc/vaultwarden; \
+	    chown root:root /etc/vaultwarden; \
 	    if [ -f "/etc/vaultwarden/age-key.txt" ]; then \
 	        chmod 600 /etc/vaultwarden/age-key.txt; \
-	        chown $$SERVICE_USER:$$SERVICE_GROUP /etc/vaultwarden/age-key.txt; \
-	        echo "$(GREEN)  ✓ /etc/vaultwarden/age-key.txt → $$SERVICE_USER:$$SERVICE_GROUP 600$(NC)"; \
+	        chown root:root /etc/vaultwarden/age-key.txt; \
+	        echo "$(GREEN)  ✓ /etc/vaultwarden/age-key.txt → root:root 600$(NC)"; \
 	    fi; \
-	    echo "$(GREEN)  ✓ /etc/vaultwarden/ → root:$$SERVICE_GROUP 750$(NC)"; \
+	    echo "$(GREEN)  ✓ /etc/vaultwarden/ → root:root 700$(NC)"; \
 	fi; \
 	echo ""; \
 	echo "$(GREEN)File ownership fixed for user $$REAL_USER.$(NC)"; \
 	echo "$(CYAN)Note: secrets/.docker_secrets/ is intentionally left restricted (root:root 444).$(NC)"; \
-	echo "$(CYAN)      /etc/vaultwarden/ is intentionally root:<service-group> 750 for service-key access.$(NC)"
+	echo "$(CYAN)      /etc/vaultwarden/ is intentionally root:root 700 for root-run services.$(NC)"
 
 init-secrets: ## Initialize secrets file (interactive)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
@@ -638,8 +636,8 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	           echo \"$(YELLOW)  Or install manually:$(NC)\"; \
 	           echo \"$(YELLOW)       sudo install -d -m 700 /etc/vaultwarden$(NC)\"; \
 	           echo \"$(YELLOW)       sudo install -m 600 secrets/keys/age-key.txt /etc/vaultwarden/age-key.txt$(NC)\"; \
-	           echo \"$(YELLOW)       sudo chown ubuntu:ubuntu /etc/vaultwarden/age-key.txt$(NC)\"; \
-	           echo \"$(YELLOW)       sudo chgrp ubuntu /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden$(NC)\"; \
+	           echo \"$(YELLOW)       sudo chown root:root /etc/vaultwarden/age-key.txt$(NC)\"; \
+	           echo \"$(YELLOW)       sudo chown root:root /etc/vaultwarden && sudo chmod 700 /etc/vaultwarden$(NC)\"; \
 	           echo \"$(YELLOW)       # Set SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in .env$(NC)\"; \
 	           echo \"$(YELLOW)       make key-health$(NC)\"; \
 	           exit 1; \
@@ -664,8 +662,8 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 #      - File exists  → informational message, exit 0 (no install needed).
 #      - File missing → actionable error directing to ./setup.sh secrets, exit 1.
 #   3. If target already exists and is non-empty, exits without changes.
-#   4. Creates the parent directory (mode 750, root:<service-group>).
-#   5. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, service-user owned).
+#   4. Creates the parent directory (mode 700, root:root).
+#   5. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).
 #   6. Runs make key-health to confirm the install succeeded.
 #
 # Important:
@@ -710,15 +708,11 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 		exit 1; \
 	fi; \
 	TARGET_DIR=$$(dirname "$$CONFIGURED_KEY"); \
-	SERVICE_USER=$${SERVICE_USER:-$${BACKUP_USER:-ubuntu}}; \
-	SERVICE_GROUP=$$(id -gn "$$SERVICE_USER" 2>/dev/null || echo "$$SERVICE_USER"); \
 	echo "$(BLUE)  Creating parent directory: $$TARGET_DIR$(NC)"; \
-	install -d -m 750 "$$TARGET_DIR"; \
-	chown root:$$SERVICE_GROUP "$$TARGET_DIR"; \
+	install -d -m 700 -o root -g root "$$TARGET_DIR"; \
 	echo "$(BLUE)  Copying key to: $$CONFIGURED_KEY$(NC)"; \
-	install -m 600 "$$REPO_KEY" "$$CONFIGURED_KEY"; \
-	chown $$SERVICE_USER:$$SERVICE_GROUP "$$CONFIGURED_KEY"; \
-	echo "$(GREEN)  ✓ Key installed at $$CONFIGURED_KEY (mode 600, $$SERVICE_USER:$$SERVICE_GROUP)$(NC)"; \
+	install -m 600 -o root -g root "$$REPO_KEY" "$$CONFIGURED_KEY"; \
+	echo "$(GREEN)  ✓ Key installed at $$CONFIGURED_KEY (mode 600, root:root)$(NC)"; \
 	echo ""
 	@echo "$(BLUE)Verifying installation with key-health...$(NC)"
 	@$(MAKE) key-health

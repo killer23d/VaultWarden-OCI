@@ -173,8 +173,10 @@ _sha256() {
 
 # _resolve_service_user
 #
-# Determines the non-root user that the backup/health/DNS systemd services
-# should run as. Detection order (first match wins):
+# Determines the non-root user retained for vaultwarden lock-group membership
+# only. Current managed operational systemd services run as root; this user is
+# not used for /etc/vaultwarden secret ownership or service privileges.
+# Detection order (first match wins):
 #   1. SERVICE_USER env var (explicit operator override)
 #   2. SUDO_USER env var   (the human who invoked sudo — most common case)
 #   3. First UID≥1000 account with a real login shell from getent passwd
@@ -335,29 +337,47 @@ _ensure_runtime_lock_files() {
     done
 }
 
-# Services that run as the detected service user (not root). These get a
-# User=/Group= drop-in so that the identity resolved at install time is written
-# into the unit rather than being baked into the base unit files.
-# Base unit files deliberately omit User= / Group= and carry a comment
-# instructing operators to run setup-systemd.sh install.
-_IDENTITY_DROPIN_UNITS=(
-    vaultwarden-health.service
+# No current managed service is safe to run as the detected non-root service user.
+# The vaultwarden group is retained only for shared lock-file coordination; it is
+# not a general systemd privilege delegation group. Root-run services still use
+# systemd sandboxing such as ProtectSystem=strict, ReadWritePaths,
+# NoNewPrivileges, PrivateTmp, and RuntimeDirectory.
+#
+# Future candidates:
+#   - vaultwarden-dns-update.service only after maintenance-update-dns.sh no
+#     longer calls require_root, no longer calls auto_fix_critical_permissions
+#     for non-root callers, and secret access is proven non-root-safe.
+#   - vaultwarden-health.service only after read-only health checks are split
+#     from health --fix.
+_IDENTITY_DROPIN_UNITS=()
+
+_ROOT_REQUIRED_UNITS=(
     vaultwarden-db-backup.service
     vaultwarden-full-backup.service
+    vaultwarden-health.service
     vaultwarden-dns-update.service
+    vaultwarden-maintenance.service
+    vaultwarden-firewall-update.service
+    vaultwarden-iptables.service
+    vaultwarden-startup.service
 )
 
 # _install_service_identity_dropin SERVICE_USER SERVICE_GROUP
 #
-# Writes a 20-identity.conf drop-in for every service that runs as the service
-# user, overriding the User= / Group= values baked into the base unit files.
-# This ensures that non-standard Ubuntu installs (or custom service accounts)
-# work correctly without editing the shipped unit files.
+# Writes a 20-identity.conf drop-in for any future service that is explicitly
+# approved to run as the detected service user. The current list is empty
+# because managed operational services still require root.
 #
 # Dry-run mode: logs what would be written without touching the filesystem.
 _install_service_identity_dropin() {
     local service_user="$1" service_group="$2"
     local unit dropin_dir dropin_file
+
+    if [[ ${#_IDENTITY_DROPIN_UNITS[@]} -eq 0 ]]; then
+        log_info "No non-root identity drop-ins configured — all managed services run as root."
+        return 0
+    fi
+
     log_info "Installing service identity drop-ins (User=${service_user} Group=${service_group}) ..."
     for unit in "${_IDENTITY_DROPIN_UNITS[@]}"; do
         dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
@@ -372,15 +392,31 @@ _install_service_identity_dropin() {
 # Regenerate: sudo utilities/setup-systemd.sh install
 #
 # Sets the service identity detected at install time (SERVICE_USER env var,
-# SUDO_USER, or first UID≥1000 account). Base unit files deliberately omit
-# User= / Group= so that running without this drop-in fails visibly rather
-# than silently executing as root.
+# SUDO_USER, or first UID≥1000 account) for an explicitly approved non-root
+# unit. Root-required units must not use this drop-in.
 [Service]
 User=${service_user}
 Group=${service_group}
 DROPIN
         chmod 644 "$dropin_file"
         log_success "Installed identity drop-in: $dropin_file (${service_user}:${service_group})"
+    done
+}
+
+_cleanup_stale_identity_dropins() {
+    local unit dropin_dir dropin_file
+
+    for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
+        dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
+        dropin_file="${dropin_dir}/20-identity.conf"
+        if [[ -f "$dropin_file" ]]; then
+            _run rm -f "$dropin_file"
+            log_success "Removed stale identity drop-in from root-required unit: $dropin_file"
+        fi
+        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+            _run rmdir "$dropin_dir"
+            log_success "Removed empty drop-in dir: $dropin_dir"
+        fi
     done
 }
 
@@ -479,6 +515,9 @@ _resolve_environment_source() {
 _install_environment_file() {
     local source_file="$1"
     local service_group="$2"
+    # service_group is accepted for compatibility with older call sites but
+    # /etc/vaultwarden contains root-only secrets and is always root:root 700.
+    : "$service_group"
 
     log_info "Installing EnvironmentFile from $source_file -> $ENV_FILE"
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -486,7 +525,7 @@ _install_environment_file() {
         return 0
     fi
 
-    install -d -m 750 -o root -g "$service_group" "$ENV_DIR"
+    install -d -m 700 -o root -g root "$ENV_DIR"
     local tmp
     tmp=$(mktemp -p "$ENV_DIR" vaultwarden.env.XXXXXXXXXX) || return 1
     if ! install -m 600 -o root -g root "$source_file" "$tmp"; then
@@ -630,6 +669,10 @@ install_units() {
     service_identity=$(_resolve_service_identity)
     service_user="${service_identity%%:*}"
     service_group="${service_identity##*:}"
+    # service_user is retained for lock-group membership only so root-run
+    # services and sudo callers can coordinate through shared flock files. It
+    # is not used for ownership of /etc/vaultwarden secrets; current managed
+    # operational units run as root.
 
     local environment_source
     environment_source="$(_resolve_environment_source)" || return 1
@@ -642,7 +685,7 @@ install_units() {
     local age_key_src="$PROJECT_ROOT/secrets/keys/age-key.txt"
     if [[ "$DRY_RUN" == "true" ]]; then
         if [[ -f "$age_key_src" ]]; then
-            log_info "[DRY RUN] Would copy $age_key_src -> $AGE_KEY_DEST (600 ${service_user}:${service_group})"
+            log_info "[DRY RUN] Would copy $age_key_src -> $AGE_KEY_DEST (600 root:root)"
             log_info "[DRY RUN] Would set SOPS_AGE_KEY_FILE=$AGE_KEY_DEST in $ENV_FILE"
         else
             log_warn "[DRY RUN] Age key source not found: $age_key_src"
@@ -654,8 +697,8 @@ install_units() {
         fi
     else
         if [[ -f "$age_key_src" ]]; then
-            install -m 600 -o "$service_user" -g "$service_group" "$age_key_src" "$AGE_KEY_DEST"
-            log_success "Installed age key: $AGE_KEY_DEST (${service_user}:${service_group})"
+            install -m 600 -o root -g root "$age_key_src" "$AGE_KEY_DEST"
+            log_success "Installed age key: $AGE_KEY_DEST (root:root 600)"
             _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
             log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST set in $ENV_FILE"
         else
@@ -666,7 +709,7 @@ install_units() {
             # persist across subsequent install runs, causing backup.sh to fail with
             # "Age key file not found: /opt/vaultwarden-scripts/secrets/keys/age-key.txt".
             if [[ -f "$AGE_KEY_DEST" ]]; then
-                chown "${service_user}:${service_group}" "$AGE_KEY_DEST" 2>/dev/null || true
+                chown root:root "$AGE_KEY_DEST" 2>/dev/null || true
                 chmod 600 "$AGE_KEY_DEST" 2>/dev/null || true
                 _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
                 log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST corrected in $ENV_FILE"
@@ -674,7 +717,7 @@ install_units() {
             else
                 log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
                 log_warn "After placing your age-key.txt, run:"
-                log_warn "  sudo install -m 600 -o ${service_user} -g ${service_group} /path/to/age-key.txt $AGE_KEY_DEST"
+                log_warn "  sudo install -m 600 -o root -g root /path/to/age-key.txt $AGE_KEY_DEST"
                 log_warn "  sudo utilities/setup-systemd.sh install"
             fi
         fi
@@ -690,7 +733,7 @@ install_units() {
 
     if [[ -n "$existing_rclone_cfg" && "$existing_rclone_cfg" == "$rclone_dest" && -f "$rclone_dest" ]]; then
         if [[ "$DRY_RUN" == "false" ]]; then
-            chown "${service_user}:${service_group}" "$rclone_dest" 2>/dev/null || true
+            chown root:root "$rclone_dest" 2>/dev/null || true
             chmod 600 "$rclone_dest" 2>/dev/null || true
         fi
         log_success "rclone config already at $rclone_dest (RCLONE_CONFIG in env is correct)"
@@ -717,10 +760,10 @@ install_units() {
 
         if [[ -n "$rclone_src" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
-                log_info "[DRY RUN] Would copy $rclone_src -> $rclone_dest (600 ${service_user}:${service_group})"
+                log_info "[DRY RUN] Would copy $rclone_src -> $rclone_dest (600 root:root)"
                 log_info "[DRY RUN] Would set RCLONE_CONFIG=$rclone_dest in $ENV_FILE"
             else
-                install -m 600 -o "$service_user" -g "$service_group" "$rclone_src" "$rclone_dest"
+                install -m 600 -o root -g root "$rclone_src" "$rclone_dest"
                 _set_env_var "RCLONE_CONFIG" "$rclone_dest" "$ENV_FILE"
                 log_success "Installed rclone config: $rclone_dest (source: $rclone_src)"
                 log_success "RCLONE_CONFIG=$rclone_dest set in $ENV_FILE"
@@ -735,7 +778,7 @@ install_units() {
             log_warn "  1. Run: rclone config   (configure your remote)"
             log_warn "  2. Run: sudo utilities/setup-systemd.sh install  (copies conf to $rclone_dest)"
             log_warn "  Or manually:"
-            log_warn "    sudo install -m 600 -o ${service_user} -g ${service_group} ~/.config/rclone/rclone.conf $rclone_dest"
+            log_warn "    sudo install -m 600 -o root -g root ~/.config/rclone/rclone.conf $rclone_dest"
             log_warn "    echo RCLONE_CONFIG=$rclone_dest | sudo tee -a $ENV_FILE"
         fi
     fi
@@ -763,6 +806,7 @@ install_units() {
     _ensure_runtime_lock_files "$service_user" "$service_group"
     _install_service_identity_dropin "$service_user" "$service_group"
     _install_rwpaths_dropin
+    _cleanup_stale_identity_dropins
 
     log_info "Reloading systemd daemon ..."
     _run systemctl daemon-reload
@@ -907,6 +951,29 @@ remove_units() {
         fi
     done
 
+    # Clean up service identity drop-ins written by historical or current
+    # setup-systemd.sh versions. Remove only the managed 20-identity.conf file
+    # and remove .d/ directories only when they are empty.
+    local -A _seen_identity_units=()
+    local -a _IDENTITY_CLEANUP_UNITS=()
+    for unit in "${_ROOT_REQUIRED_UNITS[@]}" "${_IDENTITY_DROPIN_UNITS[@]}"; do
+        [[ -n "${_seen_identity_units[$unit]:-}" ]] && continue
+        _seen_identity_units[$unit]=1
+        _IDENTITY_CLEANUP_UNITS+=("$unit")
+    done
+    for unit in "${_IDENTITY_CLEANUP_UNITS[@]}"; do
+        local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
+        local dropin_file="$dropin_dir/20-identity.conf"
+        if [[ -f "$dropin_file" ]]; then
+            _run rm -f "$dropin_file"
+            log_success "Removed identity drop-in: $dropin_file"
+        fi
+        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+            _run rmdir "$dropin_dir"
+            log_success "Removed empty drop-in dir: $dropin_dir"
+        fi
+    done
+
     _run systemctl daemon-reload
     log_success "All timer units removed and daemon reloaded."
     log_info "Scripts remain in $OPT_SCRIPTS_DIR -- remove manually if desired."
@@ -930,6 +997,21 @@ validate_installation() {
     log_header "VaultWarden-OCI Installation Validation"
     local errors=0
     local warnings=0
+
+    _validate_root_owned_path() {
+        local path="$1" expected_mode="$2" type_label="$3"
+        local owner group mode
+        owner=$(stat -c '%U' "$path" 2>/dev/null || echo "unknown")
+        group=$(stat -c '%G' "$path" 2>/dev/null || echo "unknown")
+        mode=$(stat -c '%a' "$path" 2>/dev/null || echo "unknown")
+        if [[ "$owner" != "root" || "$group" != "root" || "$mode" != "$expected_mode" ]]; then
+            log_error "  PERMISSIONS: $type_label $path is ${owner}:${group} mode $mode (expected root:root $expected_mode)"
+            log_error "  Fix: sudo chown root:root $path && sudo chmod $expected_mode $path"
+            (( errors++ )) || true
+        else
+            log_success "  OK: $path (root:root $expected_mode)"
+        fi
+    }
 
     log_info "[1/9] Checking installed scripts ..."
     local scripts_to_check=(
@@ -1049,6 +1131,24 @@ validate_installation() {
             log_success "  OK: $dropin"
         fi
     done
+    for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
+        local dropin="$UNIT_DEST_DIR/${unit}.d/20-identity.conf"
+        if [[ -f "$dropin" ]]; then
+            local user_value
+            user_value=$(awk -F= '/^[[:space:]]*User[[:space:]]*=/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$dropin")
+            if [[ -n "$user_value" && "$user_value" != "root" ]]; then
+                log_error "  CONFLICT: $unit has User=$user_value but this unit currently requires root."
+                log_error "  Fix: sudo utilities/setup-systemd.sh install"
+                (( errors++ )) || true
+            elif [[ "$user_value" == "root" ]]; then
+                log_warn "  REDUNDANT: $dropin sets User=root; preferred state is no identity drop-in."
+                (( warnings++ )) || true
+            else
+                log_warn "  REDUNDANT: $dropin exists for root-required unit; preferred state is no identity drop-in."
+                (( warnings++ )) || true
+            fi
+        fi
+    done
 
     # Validate ReadWritePaths drop-ins only if a separate data volume is in use.
     # Mirrors the guard in _install_rwpaths_dropin so boot-only installs are not
@@ -1074,20 +1174,18 @@ validate_installation() {
     fi
 
     log_info "[5/9] Checking EnvironmentFile ..."
+    if [[ ! -d "$ENV_DIR" ]]; then
+        log_error "  MISSING: $ENV_DIR"
+        (( errors++ )) || true
+    else
+        _validate_root_owned_path "$ENV_DIR" "700" "directory"
+    fi
     if [[ ! -f "$ENV_FILE" ]]; then
         log_error "  MISSING: $ENV_FILE"
         log_error "  Run: sudo utilities/setup-systemd.sh install  (or create it manually)"
         (( errors++ )) || true
     else
-        local env_perms
-        env_perms=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo "unknown")
-        if [[ "$env_perms" != "600" ]]; then
-            log_warn "  PERMISSIONS: $ENV_FILE is mode $env_perms (expected 600)"
-            log_warn "  Fix: sudo chmod 600 $ENV_FILE"
-            (( warnings++ )) || true
-        else
-            log_success "  OK: $ENV_FILE (mode 600)"
-        fi
+        _validate_root_owned_path "$ENV_FILE" "600" "file"
     fi
 
     log_info "[6/9] Checking age key installation ..."
@@ -1097,15 +1195,11 @@ validate_installation() {
         log_error "  Fix: sudo utilities/setup-systemd.sh install  (requires secrets/keys/age-key.txt)"
         (( errors++ )) || true
     else
-        local key_perms
-        key_perms=$(stat -c '%a' "$AGE_KEY_DEST" 2>/dev/null || stat -f '%Lp' "$AGE_KEY_DEST" 2>/dev/null || echo "unknown")
-        if [[ "$key_perms" != "600" ]]; then
-            log_warn "  PERMISSIONS: $AGE_KEY_DEST is mode $key_perms (expected 600)"
-            log_warn "  Fix: sudo chmod 600 $AGE_KEY_DEST"
-            (( warnings++ )) || true
-        else
-            log_success "  OK: $AGE_KEY_DEST (mode 600)"
-        fi
+        _validate_root_owned_path "$AGE_KEY_DEST" "600" "file"
+    fi
+    local rclone_dest="$ENV_DIR/rclone.conf"
+    if [[ -f "$rclone_dest" ]]; then
+        _validate_root_owned_path "$rclone_dest" "600" "file"
     fi
     if [[ -f "$ENV_FILE" ]]; then
         if grep -q "^SOPS_AGE_KEY_FILE=" "$ENV_FILE" 2>/dev/null; then

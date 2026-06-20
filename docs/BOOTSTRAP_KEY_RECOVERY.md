@@ -14,7 +14,7 @@ location found**, in this order:
 | Priority | Path | When it applies |
 | :-- | :-- | :-- |
 | 1 | `$AGE_KEY_FILE` env var | Explicit operator override; always wins when set |
-| 2 | `/etc/vaultwarden/age-key.txt` | Runtime/production path — installed by `setup.sh`, owned by the service user |
+| 2 | `/etc/vaultwarden/age-key.txt` | Runtime/production path — installed by `setup.sh`, owned by root (`root:root` mode `600`) |
 | 3 | `secrets/keys/age-key.txt` | Repo-local fallback — used during initial setup and on dev machines |
 
 **You never need to track which path is active.** Run `make key-path` to
