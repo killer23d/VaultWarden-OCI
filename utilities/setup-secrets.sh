@@ -2249,12 +2249,35 @@ EOF
     fi
     desired_recipients="$(_ss_desired_recipients_csv "$age_public_key")" || return 1
 
+    _repair_encrypted_secrets_ownership() {
+        local target_file="$1"
+        local target_dir real_user real_group
+
+        target_dir="$(dirname "$target_file")"
+        real_user=$(get_real_user)
+        real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
+
+        chown "$real_user:$real_group" "$target_dir" || return 1
+        chmod 700 "$target_dir" || return 1
+
+        if [[ -f "$target_file" ]]; then
+            chown "$real_user:$real_group" "$target_file" || return 1
+            chmod 600 "$target_file" || return 1
+        fi
+    }
+    
     # Create or rekey the placeholder encrypted secrets structure.
     if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
         if ! SOPS_AGE_KEY_FILE="$age_key_file" sops -d "$secrets_file" >/dev/null 2>&1; then
             log_error "secrets.yaml unreadable with current key. Use --force to overwrite."
             return 1
         fi
+
+        # Repair ownership even when no ciphertext changes are needed. This
+        # handles hosts that previously ended up with root-owned persistent
+        # encrypted secrets before returning through the idempotent fast path.
+        _repair_encrypted_secrets_ownership "$secrets_file" || return 1
+
         if [[ -f "$sops_config" ]] \
             && _ss_recipients_match "$desired_recipients" "$sops_config" policy \
             && _ss_recipients_match "$desired_recipients" "$secrets_file" cipher; then
@@ -2262,11 +2285,13 @@ EOF
             log_success "Bootstrap complete — run 'sudo ./setup.sh secrets' to configure credentials"
             return 0
         fi
+
         log_info "Existing secrets.yaml decrypts but recipient state is not current; staging rekey"
         if ! _ss_commit_ciphertext_transaction "" "$age_key_file" "$age_public_key" "$secrets_file" "$sops_config" rekey "$desired_recipients"; then
             log_error "Failed to rekey existing secrets.yaml"
             return 1
         fi
+        _repair_encrypted_secrets_ownership "$secrets_file" || return 1
         log_success "Existing secrets.yaml recipient state updated"
         return 0
     fi
@@ -2297,12 +2322,7 @@ EOF
         return 1
     fi
     rm -f "$tmp_secrets"
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
-    chown "$real_user:$real_group" "$(dirname "$secrets_file")" || return 1
-    chmod 700 "$(dirname "$secrets_file")" || return 1
-    chown "$real_user:$real_group" "$secrets_file" || return 1
-    chmod 600 "$secrets_file" || return 1
+    _repair_encrypted_secrets_ownership "$secrets_file" || return 1
 
     log_success "Placeholder secrets.yaml created and encrypted"
     log_success "Bootstrap complete — run 'sudo ./setup.sh secrets' to configure credentials"
