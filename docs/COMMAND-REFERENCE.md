@@ -43,9 +43,9 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make logs-caddy` |  Tail caddy logs (root required) |
 | `make logs-postfix` |  Tail postfix logs (root required) |
 | `make logs-crowdsec` |  Tail CrowdSec logs (root required) |
-| `make crowdsec-status` |  Show CrowdSec metrics and active bans |
-| `make crowdsec-alerts` |  Show recent CrowdSec alerts (last 24h) |
-| `make security-report` |  Single-command security event summary (last 1h) |
+| `make crowdsec-status` |  Show CrowdSec metrics and active bans (root required) |
+| `make crowdsec-alerts` |  Show recent CrowdSec alerts (last 24h; root required) |
+| `make security-report` |  Single-command security event summary (last 1h; root required) |
 | `make backup` |  Run incremental database backup |
 | `make backup-full` |  Run full backup (database + attachments + config) |
 | `make backup-emergency` |  Create emergency backup kit |
@@ -551,9 +551,7 @@ EXAMPLES:
 ### notify-failure.sh
 
 ```
-[TIMESTAMP] [notify-failure] WARN No VaultWarden environment file found; using process environment only.
-utilities/notify-failure.sh: line 63: /run/lock/vw-notify---help.lock: Permission denied
-[TIMESTAMP] [notify-failure] WARN Cannot open notify lock /run/lock/vw-notify---help.lock; skipping notification.
+(--help not available or requires root)
 ```
 
 ### pre-production-drill.sh
@@ -901,7 +899,39 @@ EXAMPLES:
 ### setup-secrets.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Secrets Management
+
+USAGE:
+    sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
+
+DESCRIPTION:
+    Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
+    credentials interactively or automatically, rotate fields, and export
+    recovery kits. Delegates to specialized scripts.
+
+SUBCOMMANDS:
+    bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
+                        (called automatically by setup.sh install phase)
+    configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
+    rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
+    export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
+    breakglass [FLAGS]  Emergency break-glass admin account management
+    help, --help, -h    Show this help
+
+OPTIONS:
+    --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
+
+Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
+
+EXAMPLES:
+    sudo utilities/setup-secrets.sh bootstrap
+    sudo utilities/setup-secrets.sh configure
+    sudo utilities/setup-secrets.sh configure --auto
+    ./utilities/secrets-rotate.sh email_api_token
+    sudo utilities/setup-secrets.sh export-recovery-kit
+    sudo utilities/setup-secrets.sh breakglass create
+    sudo utilities/setup-secrets.sh breakglass status
 ```
 
 ### setup-storage.sh
@@ -954,7 +984,32 @@ EXAMPLES:
 ### setup-system.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI System Preparation
+
+USAGE:
+    sudo utilities/setup-system.sh [OPTIONS]
+
+DESCRIPTION:
+    Prepares the host system for VaultWarden-OCI: installs dependencies
+    (Docker, Age, SOPS, rclone, sqlite3), configures user permissions, and
+    sets script execute bits. Called automatically by setup.sh phase 1.
+
+OPTIONS:
+    --skip-deps           Skip package installation (assume already installed)
+    --auto                Non-interactive mode
+    --use-latest          Override pinned versions with 'latest'
+    --sops-version VER    Pin SOPS to a specific version (e.g. v3.9.4)
+    --dry-run             Preview actions without executing
+    --force               Skip confirmations
+    --data-device DEV     Data volume device path
+    --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
+    --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    sudo utilities/setup-system.sh
+    sudo utilities/setup-system.sh --dry-run
+    sudo utilities/setup-system.sh --skip-deps
 ```
 
 ### setup-systemd.sh

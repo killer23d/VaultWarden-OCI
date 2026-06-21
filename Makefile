@@ -81,7 +81,7 @@ ROOT_ALLOWED_TARGETS := \
 	key-backup key-escrow key-rotate key-health key-install \
 	update update-system update-dns maintenance maintenance-full db-maint db-backup \
 	install-systemd remove-systemd systemd-validate \
-	unban smoke-test drill \
+	unban crowdsec-status crowdsec-alerts security-report smoke-test drill \
 	breakglass-create breakglass-status breakglass-remove \
 	uninstall uninstall-dry-run
 
@@ -561,20 +561,23 @@ logs-crowdsec: ## Tail CrowdSec logs (root required)
 	$(call require-root)
 	@journalctl -u crowdsec -f --no-pager
 
-crowdsec-status: ## Show CrowdSec metrics and active bans
-	@sudo cscli metrics
+crowdsec-status: ## Show CrowdSec metrics and active bans (root required)
+	$(call require-root)
+	@cscli metrics
 	@echo ""
-	@sudo cscli decisions list
+	@cscli decisions list
 
-crowdsec-alerts: ## Show recent CrowdSec alerts (last 24h)
-	@sudo cscli alerts list --since 24h
+crowdsec-alerts: ## Show recent CrowdSec alerts (last 24h; root required)
+	$(call require-root)
+	@cscli alerts list --since 24h
 
-security-report: ## Single-command security event summary (last 1h)
+security-report: ## Single-command security event summary (last 1h; root required)
+	$(call require-root)
 	@echo "=== Active Bans ==="
-	@sudo cscli decisions list
+	@cscli decisions list
 	@echo ""
 	@echo "=== Recent Alerts (1h) ==="
-	@sudo cscli alerts list --since 1h
+	@cscli alerts list --since 1h
 	@echo ""
 	@echo "=== Caddy Auth Failures ==="
 	@docker logs vaultwarden_caddy 2>&1 | grep -i "401\|403\|rate" | tail -20

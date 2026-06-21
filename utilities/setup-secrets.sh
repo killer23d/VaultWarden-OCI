@@ -67,7 +67,7 @@ EXAMPLES:
     sudo utilities/setup-secrets.sh bootstrap
     sudo utilities/setup-secrets.sh configure
     sudo utilities/setup-secrets.sh configure --auto
-    sudo utilities/setup-secrets.sh rotate email_api_token
+    ./utilities/secrets-rotate.sh email_api_token
     sudo utilities/setup-secrets.sh export-recovery-kit
     sudo utilities/setup-secrets.sh breakglass create
     sudo utilities/setup-secrets.sh breakglass status
@@ -183,8 +183,8 @@ EXAMPLES:
     sudo utilities/setup-secrets.sh configure --export-recovery-kit  # Prompt for kit after setup
 
 SEE ALSO:
-    sudo utilities/setup-secrets.sh rotate list     # Show existing secret key names
-    sudo utilities/setup-secrets.sh rotate FIELD    # Rotate a single secret
+    ./utilities/secrets-rotate.sh list     # Show existing secret key names
+    ./utilities/secrets-rotate.sh FIELD    # Rotate a single secret
     sudo utilities/setup-secrets.sh export-recovery-kit
 HELP
     }
@@ -624,7 +624,7 @@ HELP
                         else
                             smtp_pass="CHANGE_ME_SMTP_PASSWORD"
                             log_info "SMTP password skipped — rotate later with:"
-                            log_info "  sudo utilities/setup-secrets.sh rotate smtp_password"
+                            log_info "  ./utilities/secrets-rotate.sh smtp_password"
                         fi
                     fi
                     _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
@@ -652,7 +652,7 @@ HELP
                 echo ""
                 log_info "One token key (email_api_token) works for ALL providers."
                 log_info "To switch providers: change EMAIL_PROVIDER in .env only."
-                log_info "To rotate the token: sudo utilities/setup-secrets.sh rotate email_api_token"
+                log_info "To rotate the token: ./utilities/secrets-rotate.sh email_api_token"
                 echo ""
 
                 if [[ "$_email_mode" == "api" || "$_email_mode" == "auto" ]]; then
@@ -666,7 +666,7 @@ HELP
                     if [[ "$AUTO_MODE" == "true" ]]; then
                         email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
                         log_warn "[AUTO] email_api_token → placeholder; rotate with:"
-                        log_warn "  sudo utilities/setup-secrets.sh rotate email_api_token"
+                        log_warn "  ./utilities/secrets-rotate.sh email_api_token"
                     else
                         local skip_api
                         if ! read -r -t 30 -p "Enter email_api_token now? (yes/no): " skip_api; then
@@ -690,7 +690,7 @@ HELP
                         else
                             email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
                             log_info "API token skipped — rotate later with:"
-                            log_info "  sudo utilities/setup-secrets.sh rotate email_api_token"
+                            log_info "  ./utilities/secrets-rotate.sh email_api_token"
                         fi
                     fi
                     _COLLECTED_SECRETS["email_api_token"]="$email_api_token"
@@ -768,7 +768,7 @@ BACKUP_BANNER
                         else
                             _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
                             _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
-                            log_info "Push notifications skipped - configure later with: sudo utilities/setup-secrets.sh rotate push_installation_id"
+                            log_info "Push notifications skipped - configure later with: ./utilities/secrets-rotate.sh push_installation_id"
                         fi
                     fi
                 else
@@ -816,7 +816,7 @@ BACKUP_BANNER
                     cloudflare_zone_id="CHANGE_ME_CLOUDFLARE_ZONE_ID"
                     cf_account_id="CHANGE_ME_CF_ACCOUNT_ID"
                     log_warn "[AUTO] Cloudflare CrowdSec bouncer credentials set to placeholders."
-                    log_warn "Rotate after setup with: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+                    log_warn "Rotate after setup with: ./utilities/secrets-rotate.sh cf_worker_bouncer_token"
                 else
                     cf_worker_bouncer_token=$(_get_field "cf_worker_bouncer_token") || { log_error "Failed to collect cf_worker_bouncer_token"; return 1; }
                     cloudflare_zone_id=$(_get_field "cloudflare_zone_id") || { log_error "Failed to collect cloudflare_zone_id"; return 1; }
@@ -855,10 +855,16 @@ BACKUP_BANNER
 
         log_info "Writing secrets to encrypted YAML file..."
 
-        if ! mkdir -p "$(dirname "$SECRETS_FILE")"; then
-            log_error "Failed to create secrets directory: $(dirname "$SECRETS_FILE")"
+        local secrets_dir real_user real_group
+        secrets_dir="$(dirname "$SECRETS_FILE")"
+        real_user=$(get_real_user)
+        real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
+        if ! mkdir -p "$secrets_dir"; then
+            log_error "Failed to create secrets directory: $secrets_dir"
             return 1
         fi
+        chown "$real_user:$real_group" "$secrets_dir" || return 1
+        chmod 700 "$secrets_dir" || return 1
 
         local temp_file
         temp_file="$(_ss_make_plaintext_temp)" || {
@@ -923,8 +929,7 @@ BACKUP_BANNER
 
         local docker_secrets_dir="/run/vaultwarden-oci/secrets"
         if [[ ! -d "$docker_secrets_dir" ]]; then
-            mkdir -p "$docker_secrets_dir"
-            chmod 700 "$docker_secrets_dir"
+            install -d -m 700 -o root -g root "$docker_secrets_dir" || return 1
             log_info "Created Docker secrets directory: $docker_secrets_dir"
         fi
 
@@ -962,7 +967,7 @@ BACKUP_BANNER
 
         if ! check_reconfiguration; then
             log_info "Keeping existing secrets - no changes made"
-            log_info "Tip: to rotate a single field run: sudo utilities/setup-secrets.sh rotate FIELD"
+            log_info "Tip: to rotate a single field run: ./utilities/secrets-rotate.sh FIELD"
             log_info "Tip: to export a recovery kit run:  sudo utilities/setup-secrets.sh export-recovery-kit"
             return 0
         fi
@@ -1012,8 +1017,8 @@ BACKUP_BANNER
             echo "   3. Setup automation:          sudo ./setup.sh systemd install"
             echo "   4. Export recovery kit:       sudo utilities/setup-secrets.sh export-recovery-kit"
             echo "   5. Test health:               ./maintenance.sh health"
-            echo "   6. To rotate a single field:  sudo utilities/setup-secrets.sh rotate FIELD"
-            echo "   7. To list secret keys:       sudo utilities/setup-secrets.sh rotate list"
+            echo "   6. To rotate a single field:  ./utilities/secrets-rotate.sh FIELD"
+            echo "   7. To list secret keys:       ./utilities/secrets-rotate.sh list"
             echo ""
             echo "📧 Email mode reference (set EMAIL_MODE in .env):"
             echo "   auto  — API → Postfix sidecar → direct upstream SMTP fallback chain (recommended)"
@@ -2162,8 +2167,9 @@ EOF
     fi
 
     # Create the directory structure.
-    mkdir -p "${PROJECT_ROOT}/secrets/keys" "/run/vaultwarden-oci/secrets" || return 1
-    chmod 700 "${PROJECT_ROOT}/secrets/keys" "/run/vaultwarden-oci/secrets" || return 1
+    mkdir -p "${PROJECT_ROOT}/secrets/keys" || return 1
+    chmod 700 "${PROJECT_ROOT}/secrets/keys" || return 1
+    install -d -m 700 -o root -g root "/run/vaultwarden-oci/secrets" || return 1
 
     # Create or validate the repository Age key.
     if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
@@ -2291,9 +2297,12 @@ EOF
         return 1
     fi
     rm -f "$tmp_secrets"
-    chmod 600 "$secrets_file" || return 1
     local real_user; real_user=$(get_real_user)
-    chown "${real_user}:$(id -g -n "$real_user")" "$secrets_file" || return 1
+    local real_group; real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
+    chown "$real_user:$real_group" "$(dirname "$secrets_file")" || return 1
+    chmod 700 "$(dirname "$secrets_file")" || return 1
+    chown "$real_user:$real_group" "$secrets_file" || return 1
+    chmod 600 "$secrets_file" || return 1
 
     log_success "Placeholder secrets.yaml created and encrypted"
     log_success "Bootstrap complete — run 'sudo ./setup.sh secrets' to configure credentials"

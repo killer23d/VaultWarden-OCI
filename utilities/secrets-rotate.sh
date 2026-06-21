@@ -165,8 +165,8 @@ _print_rotation_receipt() {
         printf '  %-22s %s\n' "Runtime secrets sync:" \
             "$(printf '%s✔ Resynced%s' "${COLOR_GREEN}" "${COLOR_RESET}")"
     else
-        printf '  %-22s %s\n' "Docker secrets:" \
-            "$(printf '%sbest-effort sync skipped — refresh with: sudo make up or sudo ./setup.sh secrets%s' \
+        printf '  %-22s %s\n' "Runtime secrets sync:" \
+            "$(printf '%sRuntime secret sync is best-effort. Refresh runtime secrets with: sudo make up or sudo ./setup.sh secrets%s' \
                 "${COLOR_YELLOW}" "${COLOR_RESET}")"
     fi
 
@@ -424,7 +424,10 @@ PYEOF
         log_success "Runtime secret files updated"
         _docker_synced="true"
     else
-        log_warn "Best-effort runtime secret sync skipped or failed. Refresh with: sudo make up or sudo ./setup.sh secrets"
+        log_warn "Runtime secret sync is best-effort. Refresh runtime secrets with:"
+        log_warn "  sudo make up"
+        log_warn "or:"
+        log_warn "  sudo ./setup.sh secrets"
     fi
 
     _print_rotation_receipt \

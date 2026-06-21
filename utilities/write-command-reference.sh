@@ -121,6 +121,12 @@ generate_script_help() {
     echo "### ${name}"
     echo ""
     echo '```'
+    if [[ "$name" == "notify-failure.sh" ]]; then
+        echo '(--help not available or requires root)'
+        echo '```'
+        echo ""
+        return 0
+    fi
     # Try --help first; if that fails (non-zero exit or empty output), fall back
     # to the 'help' subcommand used by subcommand-driven scripts. Capture the
     # command status before truncating output so a successful help page longer

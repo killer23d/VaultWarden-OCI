@@ -835,12 +835,21 @@ prompt_password_with_confirmation() {
 
 secure_secrets_file() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    if [[ ! -f "$secrets_file" ]]; then return 0; fi
-    chmod 600 "$secrets_file"
+    local secrets_dir
+    secrets_dir="$(dirname "$secrets_file")"
+
     local real_user real_group
     real_user=$(get_real_user)
     real_group=$(id -gn "$real_user" 2>/dev/null || printf '%s' "$real_user")
+
+    if [[ -d "$secrets_dir" ]]; then
+        chown "$real_user:$real_group" "$secrets_dir"
+        chmod 700 "$secrets_dir"
+    fi
+
+    if [[ ! -f "$secrets_file" ]]; then return 0; fi
     chown "$real_user:$real_group" "$secrets_file"
+    chmod 600 "$secrets_file"
     return 0
 }
 
