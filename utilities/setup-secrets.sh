@@ -2210,14 +2210,26 @@ EOF
     # Update .env to use the canonical key path.
     local env_file="${PROJECT_ROOT}/.env"
     if [[ -f "$env_file" ]]; then
-        local temp_env
+        local temp_env env_uid env_gid env_mode real_user real_group
+        env_uid=$(stat -c '%u' "$env_file" 2>/dev/null || echo "")
+        env_gid=$(stat -c '%g' "$env_file" 2>/dev/null || echo "")
+        env_mode=$(stat -c '%a' "$env_file" 2>/dev/null || echo "600")
+        if [[ -z "$env_uid" || -z "$env_gid" ]]; then
+            real_user=$(get_real_user)
+            real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
+            env_uid=$(id -u "$real_user")
+            env_gid=$(getent group "$real_group" | cut -d: -f3)
+            env_mode="600"
+        fi
         temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
         awk '{
             sub(/^SOPS_AGE_KEY_FILE=.*/, "SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt");
             print;
         }' "$env_file" > "$temp_env"
+        chown "$env_uid:$env_gid" "$temp_env" || { rm -f "$temp_env"; return 1; }
+        chmod "$env_mode" "$temp_env" || { rm -f "$temp_env"; return 1; }
         mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
-        log_success "SOPS_AGE_KEY_FILE set to $canonical_key in .env"
+        log_success "SOPS_AGE_KEY_FILE set to $canonical_key in .env (owner/mode preserved)"
     fi
 
     # Resolve the complete desired recipient set before deciding whether the

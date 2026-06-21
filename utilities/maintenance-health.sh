@@ -94,8 +94,9 @@ ENV_FILE="$(_resolve_env_file || true)"
 
 if [[ -n "${ENV_FILE}" ]]; then
     if [[ ! -r "${ENV_FILE}" ]]; then
-        log_error "maintenance.sh health: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
+        log_error "maintenance.sh health: '${ENV_FILE}' is not readable by $(id -un); refusing to continue with unset runtime config."
         log_error "Run health through the root-operated path: sudo make health"
+        return 3
     else
         # load_env_file returns 1 when run as root and the file has permissions
         # wider than 0600, such as 640 or 644. That is a warning, not a fatal
@@ -106,8 +107,10 @@ if [[ -n "${ENV_FILE}" ]]; then
                  "Continuing with inherited environment only."
     fi
 else
-    log_warn "maintenance.sh health: no .env file found at '/etc/vaultwarden/vaultwarden.env', '${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env', or '${PROJECT_ROOT}/.env' — relying on inherited environment"
+    log_error "maintenance.sh health: no runtime env file found at '/etc/vaultwarden/vaultwarden.env', '${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env', or '${PROJECT_ROOT}/.env'."
+    log_error "Run setup first, then use: sudo make health"
     ENV_FILE="/etc/vaultwarden/vaultwarden.env"
+    return 3
 fi
 
 local HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-10}

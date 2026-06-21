@@ -78,7 +78,7 @@ ROOT_ALLOWED_TARGETS := \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
-	key-backup key-escrow key-rotate key-install \
+	key-backup key-escrow key-rotate key-health key-install \
 	update update-system update-dns maintenance maintenance-full db-maint db-backup \
 	install-systemd remove-systemd systemd-validate \
 	unban smoke-test drill \
@@ -378,7 +378,7 @@ up: ## Start all services (runs startup.sh for health checks; root required)
 		$(MAKE) status; \
 		echo ""; \
 		echo "$(YELLOW)If startup failed due to a missing or misconfigured Age key:$(NC)"; \
-		echo "$(YELLOW)  Diagnose: make key-health$(NC)"; \
+		echo "$(YELLOW)  Diagnose: sudo make key-health$(NC)"; \
 		echo "$(YELLOW)  Auto-fix: sudo make key-install$(NC)"; \
 		CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 		[ -n "$$CONFIGURED_KEY" ] && echo "$(YELLOW)  Configured key path (from .env): $$CONFIGURED_KEY$(NC)"; \
@@ -404,7 +404,7 @@ restart: ## Restart all services (via startup.sh; root required)
 	@./startup.sh --force || { \
 		echo "$(RED)Restart failed!$(NC)"; \
 		$(MAKE) status; \
-		echo "$(YELLOW)If restart failed due to a key issue, run: make key-health$(NC)"; \
+		echo "$(YELLOW)If restart failed due to a key issue, run: sudo make key-health$(NC)"; \
 		exit 1; \
 	}
 	@echo "$(GREEN)Services restarted.$(NC)"
@@ -415,6 +415,7 @@ safe-restart: ## Restart with automatic rollback on failure (root required)
 	@./utilities/safe-restart.sh
 
 status: ## Show service status, backup health, disk usage, and CrowdSec ban summary
+	$(call require-root)
 	$(call check-docker)
 	@echo "$(BLUE)VaultWarden Service Status:$(NC)"
 	@$(DOCKER_COMP) ps
@@ -468,15 +469,18 @@ status: ## Show service status, backup health, disk usage, and CrowdSec ban summ
 ##@ Normal Admin + Advanced Admin — Health & Monitoring
 # ===========================================================================
 
-health: ## Run health checks (set AUTO_RECOVER=true to auto-recover; root supported)
+health: ## Run health checks (set AUTO_RECOVER=true to auto-recover; root required)
+	$(call require-root)
 	@echo "$(BLUE)Running health checks...$(NC)"
 	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh $(if $(filter true,$(AUTO_RECOVER)),--fix,)
 
-health-quick: ## Quick health check (concise output; root supported)
+health-quick: ## Quick health check (concise output; root required)
+	$(call require-root)
 	@echo "$(BLUE)Running quick health check...$(NC)"
 	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh --quiet
 
-health-report: ## Run health check and write a timestamped report file (root supported)
+health-report: ## Run health check and write a timestamped report file (root required)
+	$(call require-root)
 	@echo "$(BLUE)Running health checks with report output...$(NC)"
 	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh --report
 
@@ -528,28 +532,34 @@ unban: ## Unban an IP from CrowdSec (IP=<address> required)
 
 SERVICE ?= vaultwarden
 
-logs: ## View service logs (SERVICE=<name> to filter, default: vaultwarden)
+logs: ## View service logs (SERVICE=<name> to filter, default: vaultwarden; root required)
+	$(call require-root)
 	$(call check-docker)
 	@$(DOCKER_COMP) logs -f $(SERVICE)
 
-logs-tail: ## Tail last 100 lines of all service logs
+logs-tail: ## Tail last 100 lines of all service logs (root required)
+	$(call require-root)
 	$(call check-docker)
 	@$(DOCKER_COMP) logs --tail=100
 
-logs-vaultwarden: ## Tail vaultwarden logs
+logs-vaultwarden: ## Tail vaultwarden logs (root required)
+	$(call require-root)
 	$(call check-docker)
 	@$(DOCKER_COMP) logs -f vaultwarden
 
-logs-caddy: ## Tail caddy logs
+logs-caddy: ## Tail caddy logs (root required)
+	$(call require-root)
 	$(call check-docker)
 	@$(DOCKER_COMP) logs -f caddy
 
-logs-postfix: ## Tail postfix logs
+logs-postfix: ## Tail postfix logs (root required)
+	$(call require-root)
 	$(call check-docker)
 	@$(DOCKER_COMP) logs -f postfix
 
-logs-crowdsec: ## Tail CrowdSec logs
-	@sudo journalctl -u crowdsec -f --no-pager
+logs-crowdsec: ## Tail CrowdSec logs (root required)
+	$(call require-root)
+	@journalctl -u crowdsec -f --no-pager
 
 crowdsec-status: ## Show CrowdSec metrics and active bans
 	@sudo cscli metrics
@@ -635,6 +645,7 @@ key-path: ## Show which age key path is currently active
 	    || printf "ERROR: No readable age key found.\nSet AGE_KEY_FILE or run setup.sh to place key at /etc/vaultwarden/age-key.txt\n"'
 
 key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
+	$(call require-root)
 	$(call check-env-readable)
 	@echo "$(BLUE)Age Key Health Check:$(NC)"
 	@echo ""
@@ -653,15 +664,13 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	           echo \"\"; \
 	           echo \"$(YELLOW)  Remediation:$(NC)\"; \
 	           echo \"$(YELLOW)       sudo make key-install$(NC)\"; \
-	           echo \"$(YELLOW)       make key-health$(NC)\"; \
+	           echo \"$(YELLOW)       sudo make key-health$(NC)\"; \
 	           echo \"\"; \
 	           echo \"$(YELLOW)  Or install manually:$(NC)\"; \
-	           echo \"$(YELLOW)       sudo install -d -m 700 /etc/vaultwarden$(NC)\"; \
-	           echo \"$(YELLOW)       sudo install -m 600 secrets/keys/age-key.txt /etc/vaultwarden/age-key.txt$(NC)\"; \
-	           echo \"$(YELLOW)       sudo chown root:root /etc/vaultwarden/age-key.txt$(NC)\"; \
-	           echo \"$(YELLOW)       sudo chown root:root /etc/vaultwarden && sudo chmod 700 /etc/vaultwarden$(NC)\"; \
+	           echo \"$(YELLOW)       sudo install -d -m 700 -o root -g root /etc/vaultwarden$(NC)\"; \
+	           echo \"$(YELLOW)       sudo install -m 600 -o root -g root secrets/keys/age-key.txt /etc/vaultwarden/age-key.txt$(NC)\"; \
 	           echo \"$(YELLOW)       # Set SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in .env$(NC)\"; \
-	           echo \"$(YELLOW)       make key-health$(NC)\"; \
+	           echo \"$(YELLOW)       sudo make key-health$(NC)\"; \
 	           exit 1; \
 	         fi"
 
@@ -686,7 +695,7 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 #   3. If target already exists and is non-empty, exits without changes.
 #   4. Creates the parent directory (mode 700, root:root).
 #   5. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).
-#   6. Runs make key-health to confirm the install succeeded.
+#   6. Runs sudo make key-health to confirm the install succeeded.
 #
 # Important:
 #   - Requires sudo (modifies /etc or another system path).
@@ -710,7 +719,7 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 		echo ""; \
 		if [ -s "$$CONFIGURED_KEY" ]; then \
 			echo "$(GREEN)  ✓ Key file exists and is non-empty at $$CONFIGURED_KEY$(NC)"; \
-			echo "$(GREEN)    Run 'make key-health' to verify decryption integrity.$(NC)"; \
+			echo "$(GREEN)    Run 'sudo make key-health' to verify decryption integrity.$(NC)"; \
 			exit 0; \
 		else \
 			echo "$(RED)  ✗ Key file NOT FOUND at $$CONFIGURED_KEY$(NC)"; \
@@ -721,7 +730,7 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 	fi; \
 	if [ -s "$$CONFIGURED_KEY" ]; then \
 		echo "$(GREEN)  ✓ Key already present at $$CONFIGURED_KEY — no action needed.$(NC)"; \
-		echo "$(GREEN)    Run 'make key-health' to verify integrity.$(NC)"; \
+		echo "$(GREEN)    Run 'sudo make key-health' to verify integrity.$(NC)"; \
 		exit 0; \
 	fi; \
 	if [ ! -f "$$REPO_KEY" ]; then \

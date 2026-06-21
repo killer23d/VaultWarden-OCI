@@ -408,10 +408,6 @@ check_age_key_health_preflight() {
   local canonical_key="${AGE_KEY_FILE}"
 
   if [[ -f "$repo_local_key" ]] && check_age_key_health "$repo_local_key" 2>/dev/null; then
-    local _vw_real_user _vw_real_group
-    _vw_real_user=$(get_real_user)
-    _vw_real_group=$(id -gn "${_vw_real_user}" 2>/dev/null || echo "${_vw_real_user}")
-
     log_warn "=========================================================="
     log_warn "ACTION REQUIRED — Age key path mismatch detected"
     log_warn "=========================================================="
@@ -424,15 +420,13 @@ check_age_key_health_preflight() {
     log_warn "This is a temporary workaround. Before the next restart, do ONE of:"
     log_warn ""
     log_warn "  Option A — Install key to canonical system path (recommended for production):"
-    log_warn "    sudo install -d -m 750 /etc/vaultwarden"
-    log_warn "    sudo install -m 600 ${repo_local_key} ${canonical_key}"
-    log_warn "    sudo chown ${_vw_real_user}:${_vw_real_group} ${canonical_key}"
-    log_warn "    sudo chgrp ${_vw_real_group} /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden"
-    log_warn "    # Verify: make key-health"
+    log_warn "    sudo install -d -m 700 -o root -g root /etc/vaultwarden"
+    log_warn "    sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}"
+    log_warn "    # Verify: sudo make key-health"
     log_warn ""
     log_warn "  Option B — Update .env to point at the repo-local key (local/dev only):"
     log_warn "    sed -i 's|^SOPS_AGE_KEY_FILE=.*|SOPS_AGE_KEY_FILE=${repo_local_key}|' .env"
-    log_warn "    # Verify: make key-health"
+    log_warn "    # Verify: sudo make key-health"
     log_warn ""
     log_warn "  Option C — Run setup again to reinstall everything cleanly:"
     log_warn "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
@@ -453,17 +447,12 @@ check_age_key_health_preflight() {
     log_error "  Re-run setup to install it:"
     log_error "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
     if [[ -f "$repo_local_key" ]]; then
-      local _vw_real_user _vw_real_group
-      _vw_real_user=$(get_real_user)
-      _vw_real_group=$(id -gn "${_vw_real_user}" 2>/dev/null || echo "${_vw_real_user}")
       log_error ""
       log_warn "  A repo-local key was detected at: ${repo_local_key}"
       log_warn "  If this is the correct production key, install it with:"
-      log_warn "    sudo install -d -m 750 /etc/vaultwarden"
-      log_warn "    sudo install -m 600 ${repo_local_key} ${canonical_key}"
-      log_warn "    sudo chown ${_vw_real_user}:${_vw_real_group} ${canonical_key}"
-      log_warn "    sudo chgrp ${_vw_real_group} /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden"
-      log_warn "  Then run: make key-health to verify before retrying startup."
+      log_warn "    sudo install -d -m 700 -o root -g root /etc/vaultwarden"
+      log_warn "    sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}"
+      log_warn "  Then run: sudo make key-health to verify before retrying startup."
     fi
     return 1
   fi
@@ -476,14 +465,14 @@ check_age_key_health_preflight() {
     log_warn "  A key exists at the canonical production path (${canonical_key})."
     log_warn "  .env currently points elsewhere. To fix:"
     log_warn "    1. Update SOPS_AGE_KEY_FILE in .env to: ${canonical_key}"
-    log_warn "    2. Verify with: make key-health"
+    log_warn "    2. Verify with: sudo make key-health"
     log_warn "    3. Retry: sudo make up  (or sudo ./startup.sh)"
   else
     log_error "  No key was found at any known path. Run: sudo make setup"
   fi
 
   log_error ""
-  log_error "Run 'make key-health' for a detailed key status report."
+  log_error "Run 'sudo make key-health' for a detailed key status report."
   return 1
 }
 
@@ -761,7 +750,7 @@ main() {
   if [[ "$BACKGROUND" != "true" && "$DRY_RUN" != "true" ]]; then
     wait_for_services || true
     run_health_check || {
-      log_error "Startup tip: if the failure is key-related, run: make key-health"
+      log_error "Startup tip: if the failure is key-related, run: sudo make key-health"
       log_error "Canonical production key path: ${AGE_KEY_FILE}"
       # Emit warnings before exiting so operators see them even on failure.
       _show_startup_warnings

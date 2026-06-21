@@ -162,11 +162,11 @@ _print_rotation_receipt() {
 
     # Docker secrets sync status
     if [[ "$docker_synced" == "true" ]]; then
-        printf '  %-22s %s\n' "Docker secrets:" \
+        printf '  %-22s %s\n' "Runtime secrets sync:" \
             "$(printf '%s✔ Resynced%s' "${COLOR_GREEN}" "${COLOR_RESET}")"
     else
         printf '  %-22s %s\n' "Docker secrets:" \
-            "$(printf '%s✖ Not synced — run: sudo ./startup.sh or sudo ./setup.sh secrets%s' \
+            "$(printf '%sbest-effort sync skipped — refresh with: sudo make up or sudo ./setup.sh secrets%s' \
                 "${COLOR_YELLOW}" "${COLOR_RESET}")"
     fi
 
@@ -417,14 +417,14 @@ PYEOF
 
     local _affected_service="${_FIELD_SERVICES[$field]:-}"
 
-    log_info "Redeploying Docker secret files..."
+    log_info "Attempting best-effort runtime secret sync..."
     local docker_dir="/run/vaultwarden-oci/secrets"
     local _docker_synced="false"
     if export_docker_secrets "$docker_dir" "$SECRETS_FILE" 2>/dev/null; then
-        log_success "Docker secret files updated"
+        log_success "Runtime secret files updated"
         _docker_synced="true"
     else
-        log_warn "Could not auto-redeploy Docker secret files. Run: sudo ./startup.sh or sudo ./setup.sh secrets"
+        log_warn "Best-effort runtime secret sync skipped or failed. Refresh with: sudo make up or sudo ./setup.sh secrets"
     fi
 
     _print_rotation_receipt \

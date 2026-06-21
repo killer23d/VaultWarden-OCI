@@ -17,11 +17,19 @@ extract_make_target() {
 }
 
 # Root-operated lifecycle contract.
-grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
-for target in up down start stop restart health status logs; do
-    grep -Eq "(^|[[:space:]])${target}([[:space:]]|\\|$)" Makefile || fail "${target} is not root-allowed"
+grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
+for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec; do
+    grep -Eq "(^|[[:space:]])${target}([[:space:]]|\|$)" Makefile || fail "${target} is not root-allowed"
 done
 pass "root-supported lifecycle/day-2 targets are allowed under sudo make"
+
+for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec; do
+    _snip="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
+    extract_make_target "$target" Makefile > "$_snip" || fail "could not extract make ${target} target"
+    grep -Fq '$(call require-root)' "$_snip" || { cat "$_snip" >&2; rm -f "$_snip"; fail "make ${target} does not require root"; }
+    rm -f "$_snip"
+done
+pass "health/status/logs targets enforce the root-operated policy"
 
 UP_SNIP="$(mktemp -t vw-priv-up.XXXXXXXXXX)"
 trap 'rm -f "$UP_SNIP"' EXIT
@@ -61,11 +69,26 @@ done
 grep -Fq 'local secrets_dir="${DOCKER_SECRETS_DIR:-/run/vaultwarden-oci/secrets}"' utilities/maintenance-health.sh || fail "health does not inspect runtime secret directory"
 pass "live startup/health paths use /run runtime secrets"
 
+# Startup key remediation must preserve the root-operated Age key contract.
+! grep -Eq 'chown[[:space:]].*/etc/vaultwarden/age-key\.txt|chgrp[[:space:]].*/etc/vaultwarden|chmod[[:space:]]+750[[:space:]]+/etc/vaultwarden|install[[:space:]]+-d[[:space:]]+-m[[:space:]]+750[[:space:]]+/etc/vaultwarden' startup.sh \
+    || fail "startup.sh contains stale non-root Age key remediation"
+grep -Fq 'sudo install -d -m 700 -o root -g root /etc/vaultwarden' startup.sh || fail "startup.sh missing root-owned /etc/vaultwarden install remediation"
+grep -Fq 'sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}' startup.sh || fail "startup.sh missing root-owned age key install remediation"
+grep -Fq 'sudo make key-health' startup.sh || fail "startup.sh key verification guidance must use sudo make key-health"
+pass "startup key remediation stays root-owned"
+
 # Runtime env ownership contract.
 grep -Fq 'chown root:root "$manifest_dir"' utilities/setup-env.sh || fail "state config dir is not root-owned"
 grep -Fq 'chmod 0700 "$manifest_dir"' utilities/setup-env.sh || fail "state config dir is not mode 0700"
 grep -Fq 'chown root:root "$tmp" && chmod 0600 "$tmp"' utilities/setup-env.sh || fail "install.env is not installed root:root 0600"
 pass "persistent install.env is installed root:root 0600"
+
+# setup-secrets bootstrap must preserve repo .env owner/group/mode across atomic replacement.
+grep -Fq 'env_uid=$(stat -c '\''%u'\'' "$env_file"' utilities/setup-secrets.sh || fail "setup-secrets does not capture .env owner"
+grep -Fq 'env_mode=$(stat -c '\''%a'\'' "$env_file"' utilities/setup-secrets.sh || fail "setup-secrets does not capture .env mode"
+grep -Fq 'chown "$env_uid:$env_gid" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env owner/group on temp file"
+grep -Fq 'chmod "$env_mode" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env mode on temp file"
+pass "setup-secrets bootstrap preserves repo .env ownership and mode"
 
 # Operator-facing production next steps.
 grep -Fq 'sudo make up' setup.sh || fail "setup next steps do not mention sudo make up"
@@ -83,3 +106,17 @@ pass "dashboard command labels match root-operated lifecycle"
 grep -Fq 'install -m 0444 -o root -g root "$_cf_flat" "$_cf_dest"' lib/secrets.sh || fail "CF token mirror does not use root-side install"
 ! grep -Fq '_cf_value' lib/secrets.sh || fail "CF token value should not be read into shell variables"
 pass "CF token mirror avoids command-line secret values"
+
+# Generated command reference must be current.
+if [[ -f docs/COMMAND-REFERENCE.md ]]; then
+    _cmd_ref_before="$(mktemp -t vw-command-reference.XXXXXXXXXX)"
+    cp docs/COMMAND-REFERENCE.md "$_cmd_ref_before"
+    bash utilities/write-command-reference.sh >/dev/null
+    if ! diff -q docs/COMMAND-REFERENCE.md "$_cmd_ref_before" >/dev/null 2>&1; then
+        diff -u "$_cmd_ref_before" docs/COMMAND-REFERENCE.md >&2 || true
+        rm -f "$_cmd_ref_before"
+        fail "docs/COMMAND-REFERENCE.md is stale; run make docs"
+    fi
+    rm -f "$_cmd_ref_before"
+    pass "COMMAND-REFERENCE.md is generated/current"
+fi
