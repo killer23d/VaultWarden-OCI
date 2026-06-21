@@ -75,8 +75,9 @@ _resolve_backup_base_dir() {
 run_health_check() {
 _resolve_env_file() {
     local candidates=(
-        "${PROJECT_ROOT}/.env"
         "/etc/vaultwarden/vaultwarden.env"
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env"
+        "${PROJECT_ROOT}/.env"
     )
     for candidate in "${candidates[@]}"; do
         if [[ -f "$candidate" ]]; then
@@ -94,7 +95,7 @@ ENV_FILE="$(_resolve_env_file || true)"
 if [[ -n "${ENV_FILE}" ]]; then
     if [[ ! -r "${ENV_FILE}" ]]; then
         log_error "maintenance.sh health: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
-        log_error "Fix ownership: sudo chown $(id -un):$(id -gn) '${ENV_FILE}'"
+        log_error "Run health through the root-operated path: sudo make health"
     else
         # load_env_file returns 1 when run as root and the file has permissions
         # wider than 0600, such as 640 or 644. That is a warning, not a fatal
@@ -105,7 +106,7 @@ if [[ -n "${ENV_FILE}" ]]; then
                  "Continuing with inherited environment only."
     fi
 else
-    log_warn "maintenance.sh health: no .env file found at '${PROJECT_ROOT}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
+    log_warn "maintenance.sh health: no .env file found at '/etc/vaultwarden/vaultwarden.env', '${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env', or '${PROJECT_ROOT}/.env' — relying on inherited environment"
     ENV_FILE="/etc/vaultwarden/vaultwarden.env"
 fi
 
@@ -760,7 +761,7 @@ _check_config() {
     if [[ ! -f "$ENV_FILE" ]]; then
         config_issues+=("Missing env file: $ENV_FILE")
     elif [[ ! -r "$ENV_FILE" ]]; then
-        config_issues+=("$ENV_FILE is not readable by $(id -un) — run: sudo chown $(id -un):$(id -gn) $ENV_FILE")
+        config_issues+=("$ENV_FILE is not readable by $(id -un) — run health through sudo make health and verify root-owned runtime env permissions")
     else
         local env_mode
         env_mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo "unknown")
@@ -790,7 +791,7 @@ _check_config() {
             "cloudflare_zone_id not set or is a placeholder — run: ./edit-secrets.sh rotate cloudflare_zone_id"
     fi
     unset _cf_zone_id
-    local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
+    local secrets_dir="${DOCKER_SECRETS_DIR:-/run/vaultwarden-oci/secrets}"
     if [[ -d "$secrets_dir" ]]; then
         local required_secrets=("admin_token" "caddy_cloudflare_dns_token")
         for secret in "${required_secrets[@]}"; do
@@ -1087,7 +1088,8 @@ USAGE:
     ./maintenance.sh health [OPTIONS]
     utilities/maintenance-health.sh [OPTIONS]
 
-Do not run with sudo. Run: ./maintenance.sh health
+Root-operated path: sudo make health
+Direct non-root path: ./maintenance.sh health
 
 OPTIONS:
     --comprehensive     Run all checks including extended diagnostics
@@ -1112,7 +1114,7 @@ EOF
 # Strip the leading 'health' token when the dispatcher prepends the subcommand.
 [[ "${1:-}" == "health" ]] && shift
 if [[ "${VAULTWARDEN_INTERNAL_HEALTH_CHECK:-false}" != "true" ]]; then
-    refuse_root_for_user_command "Do not run with sudo. Run: ./maintenance.sh health"
+    true # root is allowed for direct/internal health checks under the root-operated contract
 fi
 
 main() {

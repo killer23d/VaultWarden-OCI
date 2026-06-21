@@ -1312,7 +1312,7 @@ EOF
 
 4. FINALIZATION
    [ ] Start services:
-       make up
+       sudo make up
    [ ] Wait for containers to initialise, then check health:
        sleep 10 && ./maintenance.sh health
 
@@ -1732,7 +1732,7 @@ PYEOF
         for _s in "${_bad_secrets[@]}"; do
             log_error "  ${docker_dir}/${_s}"
         done
-        log_error "Remediation: run make key-health, clear stale files as root, then re-run make up."
+        log_error "Remediation: run make key-health, clear stale files as root, then re-run sudo make up."
         return 1
     fi
 
@@ -1743,7 +1743,7 @@ PYEOF
 
     if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -d -m 0700 -o root -g root "$docker_dir"; then
         log_error "export_docker_secrets: cannot prepare root-owned runtime secret directory: $docker_dir"
-        log_error "For make up: run sudo make init-secrets, then re-run make up"
+        log_error "For sudo make up: run sudo make init-secrets, then re-run sudo make up"
         log_error "For direct scripts: run sudo ./setup.sh secrets"
         return 1
     fi
@@ -1753,7 +1753,7 @@ PYEOF
         [[ "$(basename "$_f")" == "secrets.yaml" ]] && continue
         if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0444 -o root -g root "$_f" "${docker_dir}/$(basename "$_f")"; then
             log_error "export_docker_secrets: failed to install ${docker_dir}/$(basename "$_f")"
-            log_error "For make up: run sudo make init-secrets, then re-run make up"
+            log_error "For sudo make up: run sudo make init-secrets, then re-run sudo make up"
             log_error "For direct scripts: run sudo ./setup.sh secrets"
             return 1
         fi

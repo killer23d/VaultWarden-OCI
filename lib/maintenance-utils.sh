@@ -273,8 +273,8 @@ optimize_database() {
 validate_system_health() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    log_info "Invoking: ${PROJECT_ROOT}/utilities/maintenance-health.sh --quiet"
-    if "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quiet; then
+    log_info "Invoking: VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ${PROJECT_ROOT}/utilities/maintenance-health.sh --quiet"
+    if VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quiet; then
         log_success "System health validation passed"
         return 0
     else

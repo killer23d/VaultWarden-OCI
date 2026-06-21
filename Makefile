@@ -3,9 +3,9 @@
 # ===========================================================================
 # Usage:
 #   sudo make setup          — First-time installation
-#   make up                  — Start services (user must be in `docker` group)
-#   make down                — Stop services
-#   make restart             — Restart services
+#   sudo make up             — Start services (root-operated production path)
+#   sudo make down           — Stop services
+#   sudo make restart        — Restart services
 #   make safe-restart        — Restart with automatic rollback on failure
 #   make status              — Show service status
 #   make health              — Run health checks
@@ -64,17 +64,18 @@ DATA_DEVICE ?=
         docs backup-manifest
 
 # ── Root invocation policy ────────────────────────────────────────────────────
-# Most Make targets should run as the normal login user to avoid repository
+# Most developer/test targets should run as the normal login user to avoid repository
 # ownership drift from accidental `sudo make ...`.
 #
-# Only targets listed here are allowed to be invoked as root/sudo. This guard is
-# intentionally target-aware: it blocks accidental `sudo make up`, `sudo make test`,
-# `sudo make status`, etc. without breaking root-required admin operations.
+# Production/admin lifecycle and day-2 operations are root-operated. This guard is
+# intentionally target-aware: it allows `sudo make up` / `sudo make restart` while
+# still blocking accidental root execution of developer/test targets.
 #
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup init-secrets restart safe-restart fix-permissions \
+	setup init-secrets up down start stop restart safe-restart status \
+	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
 	key-backup key-escrow key-rotate key-install \
@@ -100,8 +101,7 @@ endif
 # ── Helpers ──────────────────────────────────────────────────────────────────
 # require-root: used for targets that genuinely need elevated privileges
 # (setup, backup, restore, key operations, maintenance, systemd, uninstall).
-# Service management targets (up, down, restart) rely on the user being in
-# the `docker` group instead.
+# Production service management targets are root-operated.
 define require-root
 	@if [ "$$(id -u)" -ne 0 ]; then \
 		echo "$(RED)Error: Run with sudo: sudo make $@$(NC)"; \
@@ -109,13 +109,12 @@ define require-root
 	fi
 endef
 
-# check-docker: lightweight guard used by `up` and `down`.
-# Verifies the Docker daemon is reachable without requiring root.
+# check-docker: lightweight guard used after privilege checks.
+# Verifies the Docker daemon is reachable.
 define check-docker
 	@if ! docker info > /dev/null 2>&1; then \
 		echo "$(RED)Error: Cannot connect to the Docker daemon.$(NC)"; \
-		echo "$(RED)       Either Docker is not running, or your user is not in the docker group.$(NC)"; \
-		echo "$(YELLOW)       Fix: sudo usermod -aG docker $$USER  then log out and back in.$(NC)"; \
+		echo "$(RED)       Docker may not be running or root cannot reach it.$(NC)"; \
 		echo "$(YELLOW)       Or start Docker: sudo systemctl start docker$(NC)"; \
 		exit 1; \
 	fi
@@ -310,7 +309,7 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	fi; \
 	echo ""; \
 	echo "$(GREEN)File ownership fixed for user $$REAL_USER.$(NC)"; \
-	echo "$(CYAN)Note: secrets/.docker_secrets/ is intentionally left restricted (root:root 444).$(NC)"; \
+	echo "$(CYAN)Note: runtime decoded secrets are under /run/vaultwarden-oci/secrets (root:root 0700).$(NC)"; \
 	echo "$(CYAN)      /etc/vaultwarden/ is intentionally root:root 700 for root-run services.$(NC)"
 
 init-secrets: ## Initialize secrets file (interactive; root required)
@@ -344,12 +343,13 @@ test-email: ## Send a test operational alert email (health/backup notification c
 ##@ Normal Admin + Dashboard Stable API — Service Management
 # ===========================================================================
 
-# up/down do not require root; restart is root-required in this PR.
-# Normal-user service targets rely on Docker group access.
+# Production lifecycle targets are root-operated. Non-root invocations fail
+# fast with an explicit sudo make command.
 # startup.sh handles secrets initialisation, secrets pre-flight checks, and
 # the post-start health poll — do not replace it with a bare `docker compose up`.
 
-up: ## Start all services (runs startup.sh for health checks)
+up: ## Start all services (runs startup.sh for health checks; root required)
+	$(call require-root)
 	$(call check-docker)
 	@echo "$(BLUE)Starting VaultWarden services...$(NC)"
 # ── Pre-flight: refuse to start with the dev-only override present. ─────────
@@ -360,33 +360,18 @@ up: ## Start all services (runs startup.sh for health checks)
 		echo "$(RED)ERROR: docker-compose.override.yml exists.$(NC)"; \
 		echo "$(RED)       This file is for local development only and must not$(NC)"; \
 		echo "$(RED)       be present on a production host. Remove it, then$(NC)"; \
-		echo "$(RED)       re-run: make up$(NC)"; \
+		echo "$(RED)       re-run: sudo make up$(NC)"; \
 		exit 1; \
 	fi
-# ── Pre-flight: admin_token decoded-secret guard. ───────────────────────────
-# MAKEFILE-UP1 FIX [MEDIUM]: startup.sh's prepare_docker_secrets() is the
-# authoritative component that creates secrets/.docker_secrets/ from the
-# SOPS-encrypted secrets.yaml.  Running a hard abort here (before startup.sh)
-# created a chicken-and-egg failure on fresh clones and re-provisions: the
-# decoded files cannot exist until startup.sh decrypts them, but the old
-# guard refused to call startup.sh until the decoded files existed.
-#
-# New behaviour:
-#   - If secrets.yaml is ABSENT → secrets were never initialised; abort and
-#     direct the operator to the root init-secrets target.
-#   - If secrets.yaml is PRESENT but admin_token is missing/empty → warn and
-#     continue; startup.sh will decrypt and regenerate the docker-secret files.
-#     If decryption itself fails (wrong/missing Age key), startup.sh's own
-#     check_age_key_health_preflight() provides the actionable error message.
+# ── Pre-flight: encrypted secrets guard. ────────────────────────────────────
+# startup.sh is responsible for decrypting secrets.yaml into
+# /run/vaultwarden-oci/secrets. Do not require decoded runtime secret files
+# here; they are created during root startup.
 	@if ! test -f "$(SECRETS_FILE)"; then \
 		echo "$(RED)ERROR: secrets/secrets.yaml not found — secrets have not been initialized.$(NC)"; \
 		echo "$(RED)       Run: sudo make init-secrets$(NC)"; \
-		echo "$(RED)       Then re-run: make up$(NC)"; \
+		echo "$(RED)       Then re-run: sudo make up$(NC)"; \
 		exit 1; \
-	elif ! test -s "secrets/.docker_secrets/admin_token"; then \
-		echo "$(YELLOW)WARN: secrets/.docker_secrets/admin_token is absent or empty.$(NC)"; \
-		echo "$(YELLOW)      startup.sh will attempt to decrypt secrets.yaml and create it now.$(NC)"; \
-		echo "$(YELLOW)      If this fails, run: make key-health  for diagnostics.$(NC)"; \
 	fi
 	@./startup.sh || { \
 		echo "$(RED)Startup failed!$(NC)"; \
@@ -404,7 +389,8 @@ up: ## Start all services (runs startup.sh for health checks)
 
 start: up ## Alias for up
 
-down: ## Stop all services gracefully
+down: ## Stop all services gracefully (root required)
+	$(call require-root)
 	$(call check-docker)
 	@echo "$(BLUE)Stopping VaultWarden services...$(NC)"
 	@$(DOCKER_COMP) down
@@ -482,17 +468,17 @@ status: ## Show service status, backup health, disk usage, and CrowdSec ban summ
 ##@ Normal Admin + Advanced Admin — Health & Monitoring
 # ===========================================================================
 
-health: ## Run health checks (set AUTO_RECOVER=true to auto-recover)
+health: ## Run health checks (set AUTO_RECOVER=true to auto-recover; root supported)
 	@echo "$(BLUE)Running health checks...$(NC)"
-	@./maintenance.sh health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
+	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh $(if $(filter true,$(AUTO_RECOVER)),--fix,)
 
-health-quick: ## Quick health check (concise output)
+health-quick: ## Quick health check (concise output; root supported)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@./maintenance.sh health --quiet
+	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh --quiet
 
-health-report: ## Run health check and write a timestamped report file
+health-report: ## Run health check and write a timestamped report file (root supported)
 	@echo "$(BLUE)Running health checks with report output...$(NC)"
-	@./maintenance.sh health --report
+	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh --report
 
 health-email: test-email ## Backward-compatible alias for test-email
 
@@ -1067,14 +1053,13 @@ clean: ## Remove generated files (logs, temp files)
 ##@ Advanced Admin — ⚠ Destructive Operations
 # ===========================================================================
 
-clean-all: ## Remove secrets cache and log files — services will re-init secrets on next start
-	@echo "$(YELLOW)WARNING: This will remove the decoded secrets cache.$(NC)"
-	@echo "$(YELLOW)         Run 'make up' afterwards to regenerate it from secrets.yaml.$(NC)"
+clean-all: ## Remove generated logs/temp files — services will re-init runtime secrets on next start
+	@echo "$(YELLOW)WARNING: This will remove generated logs/temp files.$(NC)"
+	@echo "$(YELLOW)         Run 'sudo make up' afterwards to regenerate runtime secrets from secrets.yaml.$(NC)"
 	@printf "Continue? (yes/no): "; \
 	read -r confirm; \
 	if [ "$$confirm" = "yes" ]; then \
 		rm -f setup.log; \
-		rm -rf secrets/.docker_secrets; \
 		echo "$(GREEN)Full clean complete.$(NC)"; \
 	else \
 		echo "Cancelled."; \

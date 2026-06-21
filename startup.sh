@@ -40,8 +40,8 @@ cat << 'EOF'
 VaultWarden-OCI Startup Script
 
 USAGE:
-  ./startup.sh [OPTIONS]         # Start all services (normal path)
-  ./startup.sh stop              # Stop all services
+  sudo ./startup.sh [OPTIONS]    # Start all services (root-operated path)
+  sudo ./startup.sh stop         # Stop all services
 
 SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
@@ -61,11 +61,11 @@ GLOBAL OPTIONS:
   --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-  ./startup.sh                    # Normal startup (pulls latest images)
-  ./startup.sh --skip-pull        # Restart without pulling (fast path)
-  ./startup.sh --force            # Recreate containers after .env/compose changes
-  ./startup.sh --background       # Start in daemon mode
-  ./startup.sh stop               # Stop all services
+  sudo ./startup.sh               # Normal startup (pulls latest images)
+  sudo ./startup.sh --skip-pull   # Restart without pulling (fast path)
+  sudo ./startup.sh --force       # Recreate containers after .env/compose changes
+  sudo ./startup.sh --background  # Start in daemon mode
+  sudo ./startup.sh stop          # Stop all services
 EOF
 }
 
@@ -106,6 +106,12 @@ while [[ $# -gt 0 ]]; do
     *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
   esac
 done
+
+# Real startup/stop operations are root-operated. Keep harmless metadata/help
+# paths above this guard so users can inspect usage/version without sudo.
+if [[ "${DRY_RUN}" != "true" ]]; then
+  require_root "Startup and stop operations require root. Run: sudo make up"
+fi
 
 if [[ "$DO_DOWN" == "true" ]]; then
   if ! command -v docker >/dev/null 2>&1; then
@@ -182,26 +188,10 @@ check_email_config_consistency() {
 load_environment() {
   log_info "Loading environment configuration..."
 
-  if [[ -f ".env" ]]; then
-    local real_user real_group env_owner
-    real_user=$(get_real_user)
-    real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
-    env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
-
-    if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
-      if _maybe_sudo chown "${real_user}:${real_group}" ".env" \
-        && _maybe_sudo chmod 600 ".env"; then
-        log_success ".env ownership corrected to ${real_user}:${real_group} (mode 600)"
-      else
-        log_warn "Could not auto-correct .env ownership to ${real_user}:${real_group}"
-      fi
-    fi
-
-    if [[ ! -r ".env" ]]; then
-      log_error ".env is not readable by the current user ($(id -un))."
-      log_error "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
-      return 1
-    fi
+  if [[ -f ".env" && ! -r ".env" ]]; then
+    log_error ".env is not readable by the current user ($(id -un))."
+    log_error "Run startup through the root-operated path: sudo make up"
+    return 1
   fi
 
   load_project_environment || return 1
@@ -487,7 +477,7 @@ check_age_key_health_preflight() {
     log_warn "  .env currently points elsewhere. To fix:"
     log_warn "    1. Update SOPS_AGE_KEY_FILE in .env to: ${canonical_key}"
     log_warn "    2. Verify with: make key-health"
-    log_warn "    3. Retry: make up  (or ./startup.sh)"
+    log_warn "    3. Retry: sudo make up  (or sudo ./startup.sh)"
   else
     log_error "  No key was found at any known path. Run: sudo make setup"
   fi
@@ -706,7 +696,7 @@ run_health_check() {
       # Exit 2 means one or more critical failures; exit 3+ means the health
       # script crashed.
       log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
-      log_error "Startup aborted. Investigate the failures above, then re-run ./startup.sh"
+      log_error "Startup aborted. Investigate the failures above, then re-run sudo ./startup.sh"
       log_error "To skip this gate during recovery: ./startup.sh --skip-health"
       return 1
       ;;

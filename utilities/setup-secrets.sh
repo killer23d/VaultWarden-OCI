@@ -162,7 +162,7 @@ NOTES:
         2. nano .env           (set EMAIL_MODE, EMAIL_PROVIDER,
                                 SMTP_HOST, etc.)
         3. sudo utilities/setup-secrets.sh configure
-        4. make up
+        4. sudo make up
 
 FEATURES:
     ✅ Idempotent - Safe to re-run multiple times
@@ -472,7 +472,7 @@ HELP
         _email_provider=$(   _read_dotenv_value "EMAIL_PROVIDER" .env)
         if [[ -z "$_email_mode" && -f ".env" && ! -r ".env" ]]; then
             log_warn "setup-secrets.sh configure: .env is not readable by $(id -un); EMAIL_MODE/EMAIL_PROVIDER defaulting to 'auto'/'mailersend'."
-            log_warn "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
+            log_warn "Run setup/secrets through the root-operated path or make .env operator-readable before configuring secrets"
         fi
         _email_mode="${_email_mode:-auto}"
         _email_provider="${_email_provider:-mailersend}"
@@ -1008,7 +1008,7 @@ BACKUP_BANNER
             echo "   1. Verify .env settings:      nano .env"
             echo "      ► Confirm: EMAIL_MODE, EMAIL_PROVIDER,"
             echo "                 SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
-            echo "   2. Start services:            make up"
+            echo "   2. Start services:            sudo make up"
             echo "   3. Setup automation:          sudo ./setup.sh systemd install"
             echo "   4. Export recovery kit:       sudo utilities/setup-secrets.sh export-recovery-kit"
             echo "   5. Test health:               ./maintenance.sh health"

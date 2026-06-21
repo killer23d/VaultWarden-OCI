@@ -344,7 +344,7 @@ CRED_BANNER
         printf '\n%s--- CREDENTIALS REQUIRING MANUAL CONFIGURATION ---%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf 'These fields still contain CHANGE_ME placeholders.\n'
-        printf 'Set them BEFORE running %smake up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf 'Set them BEFORE running %ssudo make up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '  %s./edit-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '  %s./edit-secrets.sh rotate smtp_password%s         (if using SMTP)\n' \
@@ -368,7 +368,7 @@ CRED_BANNER
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
         printf '     from secrets.yaml — those three must be set (step 3) before running this.\n'
-        printf '5. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '5. Start services:      %ssudo make up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '7. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
@@ -391,7 +391,7 @@ CRED_BANNER
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
         printf '     from secrets.yaml — those three must be set (step 3) before running this.\n'
-        printf '5. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '5. Start services:      %ssudo make up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '7. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
