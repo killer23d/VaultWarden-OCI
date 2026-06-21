@@ -89,6 +89,7 @@ sanitize_help_output() {
         | sed \
             -e '/^docker\.sh:.*auto-detect/d' \
             -e '/^lib\/docker\.sh:.*auto-detect/d' \
+            -e 's|/[^[:space:]]*/utilities/notify-failure\.sh|utilities/notify-failure.sh|g' \
             -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
             -e 's/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\([+-][0-9]\{4\}\|Z\)/TIMESTAMP/g' \
             -e 's/\b[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\b/DATE/g' \
@@ -100,11 +101,13 @@ run_help_command() {
     local script="$1"
     shift
 
-    local raw_out rc
+    local raw_out rc tmp_state
+    tmp_state=$(mktemp -d)
     set +e
-    raw_out="$(timeout 5 bash "$script" "$@" 2>&1)"
+    raw_out="$(PROJECT_STATE_DIR="$tmp_state" timeout 5 bash "$script" "$@" 2>&1)"
     rc=$?
     set -e
+    rm -rf "$tmp_state"
 
     HELP_COMMAND_OUTPUT="$(printf '%s\n' "$raw_out" | sanitize_help_output)"
     return "$rc"
@@ -118,6 +121,12 @@ generate_script_help() {
     echo "### ${name}"
     echo ""
     echo '```'
+    if [[ "$name" == "notify-failure.sh" ]]; then
+        echo '(--help not available or requires root)'
+        echo '```'
+        echo ""
+        return 0
+    fi
     # Try --help first; if that fails (non-zero exit or empty output), fall back
     # to the 'help' subcommand used by subcommand-driven scripts. Capture the
     # command status before truncating output so a successful help page longer
@@ -190,6 +199,7 @@ write_command_reference > "$tmp_file"
 # Keep the generated Markdown clean for git diff --check.
 perl -0pi -e 's/\n+\z/\n/' "$tmp_file"
 
+chmod 0644 "$tmp_file"
 mv "$tmp_file" "$OUTPUT_FILE"
 trap - EXIT
 

@@ -40,8 +40,8 @@ cat << 'EOF'
 VaultWarden-OCI Startup Script
 
 USAGE:
-  ./startup.sh [OPTIONS]         # Start all services (normal path)
-  ./startup.sh stop              # Stop all services
+  sudo ./startup.sh [OPTIONS]    # Start all services (root-operated path)
+  sudo ./startup.sh stop         # Stop all services
 
 SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
@@ -61,11 +61,11 @@ GLOBAL OPTIONS:
   --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-  ./startup.sh                    # Normal startup (pulls latest images)
-  ./startup.sh --skip-pull        # Restart without pulling (fast path)
-  ./startup.sh --force            # Recreate containers after .env/compose changes
-  ./startup.sh --background       # Start in daemon mode
-  ./startup.sh stop               # Stop all services
+  sudo ./startup.sh               # Normal startup (pulls latest images)
+  sudo ./startup.sh --skip-pull   # Restart without pulling (fast path)
+  sudo ./startup.sh --force       # Recreate containers after .env/compose changes
+  sudo ./startup.sh --background  # Start in daemon mode
+  sudo ./startup.sh stop          # Stop all services
 EOF
 }
 
@@ -106,6 +106,12 @@ while [[ $# -gt 0 ]]; do
     *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
   esac
 done
+
+# Real startup/stop operations are root-operated. Keep harmless metadata/help
+# paths above this guard so users can inspect usage/version without sudo.
+if [[ "${DRY_RUN}" != "true" ]]; then
+  require_root "Startup and stop operations require root. Run: sudo make up"
+fi
 
 if [[ "$DO_DOWN" == "true" ]]; then
   if ! command -v docker >/dev/null 2>&1; then
@@ -182,26 +188,10 @@ check_email_config_consistency() {
 load_environment() {
   log_info "Loading environment configuration..."
 
-  if [[ -f ".env" ]]; then
-    local real_user real_group env_owner
-    real_user=$(get_real_user)
-    real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
-    env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
-
-    if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
-      if _maybe_sudo chown "${real_user}:${real_group}" ".env" \
-        && _maybe_sudo chmod 600 ".env"; then
-        log_success ".env ownership corrected to ${real_user}:${real_group} (mode 600)"
-      else
-        log_warn "Could not auto-correct .env ownership to ${real_user}:${real_group}"
-      fi
-    fi
-
-    if [[ ! -r ".env" ]]; then
-      log_error ".env is not readable by the current user ($(id -un))."
-      log_error "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
-      return 1
-    fi
+  if [[ -f ".env" && ! -r ".env" ]]; then
+    log_error ".env is not readable by the current user ($(id -un))."
+    log_error "Run startup through the root-operated path: sudo make up"
+    return 1
   fi
 
   load_project_environment || return 1
@@ -418,10 +408,6 @@ check_age_key_health_preflight() {
   local canonical_key="${AGE_KEY_FILE}"
 
   if [[ -f "$repo_local_key" ]] && check_age_key_health "$repo_local_key" 2>/dev/null; then
-    local _vw_real_user _vw_real_group
-    _vw_real_user=$(get_real_user)
-    _vw_real_group=$(id -gn "${_vw_real_user}" 2>/dev/null || echo "${_vw_real_user}")
-
     log_warn "=========================================================="
     log_warn "ACTION REQUIRED — Age key path mismatch detected"
     log_warn "=========================================================="
@@ -434,15 +420,13 @@ check_age_key_health_preflight() {
     log_warn "This is a temporary workaround. Before the next restart, do ONE of:"
     log_warn ""
     log_warn "  Option A — Install key to canonical system path (recommended for production):"
-    log_warn "    sudo install -d -m 750 /etc/vaultwarden"
-    log_warn "    sudo install -m 600 ${repo_local_key} ${canonical_key}"
-    log_warn "    sudo chown ${_vw_real_user}:${_vw_real_group} ${canonical_key}"
-    log_warn "    sudo chgrp ${_vw_real_group} /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden"
-    log_warn "    # Verify: make key-health"
+    log_warn "    sudo install -d -m 700 -o root -g root /etc/vaultwarden"
+    log_warn "    sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}"
+    log_warn "    # Verify: sudo make key-health"
     log_warn ""
     log_warn "  Option B — Update .env to point at the repo-local key (local/dev only):"
     log_warn "    sed -i 's|^SOPS_AGE_KEY_FILE=.*|SOPS_AGE_KEY_FILE=${repo_local_key}|' .env"
-    log_warn "    # Verify: make key-health"
+    log_warn "    # Verify: sudo make key-health"
     log_warn ""
     log_warn "  Option C — Run setup again to reinstall everything cleanly:"
     log_warn "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
@@ -463,17 +447,12 @@ check_age_key_health_preflight() {
     log_error "  Re-run setup to install it:"
     log_error "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
     if [[ -f "$repo_local_key" ]]; then
-      local _vw_real_user _vw_real_group
-      _vw_real_user=$(get_real_user)
-      _vw_real_group=$(id -gn "${_vw_real_user}" 2>/dev/null || echo "${_vw_real_user}")
       log_error ""
       log_warn "  A repo-local key was detected at: ${repo_local_key}"
       log_warn "  If this is the correct production key, install it with:"
-      log_warn "    sudo install -d -m 750 /etc/vaultwarden"
-      log_warn "    sudo install -m 600 ${repo_local_key} ${canonical_key}"
-      log_warn "    sudo chown ${_vw_real_user}:${_vw_real_group} ${canonical_key}"
-      log_warn "    sudo chgrp ${_vw_real_group} /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden"
-      log_warn "  Then run: make key-health to verify before retrying startup."
+      log_warn "    sudo install -d -m 700 -o root -g root /etc/vaultwarden"
+      log_warn "    sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}"
+      log_warn "  Then run: sudo make key-health to verify before retrying startup."
     fi
     return 1
   fi
@@ -486,14 +465,14 @@ check_age_key_health_preflight() {
     log_warn "  A key exists at the canonical production path (${canonical_key})."
     log_warn "  .env currently points elsewhere. To fix:"
     log_warn "    1. Update SOPS_AGE_KEY_FILE in .env to: ${canonical_key}"
-    log_warn "    2. Verify with: make key-health"
-    log_warn "    3. Retry: make up  (or ./startup.sh)"
+    log_warn "    2. Verify with: sudo make key-health"
+    log_warn "    3. Retry: sudo make up  (or sudo ./startup.sh)"
   else
     log_error "  No key was found at any known path. Run: sudo make setup"
   fi
 
   log_error ""
-  log_error "Run 'make key-health' for a detailed key status report."
+  log_error "Run 'sudo make key-health' for a detailed key status report."
   return 1
 }
 
@@ -706,7 +685,7 @@ run_health_check() {
       # Exit 2 means one or more critical failures; exit 3+ means the health
       # script crashed.
       log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
-      log_error "Startup aborted. Investigate the failures above, then re-run ./startup.sh"
+      log_error "Startup aborted. Investigate the failures above, then re-run sudo ./startup.sh"
       log_error "To skip this gate during recovery: ./startup.sh --skip-health"
       return 1
       ;;
@@ -771,7 +750,7 @@ main() {
   if [[ "$BACKGROUND" != "true" && "$DRY_RUN" != "true" ]]; then
     wait_for_services || true
     run_health_check || {
-      log_error "Startup tip: if the failure is key-related, run: make key-health"
+      log_error "Startup tip: if the failure is key-related, run: sudo make key-health"
       log_error "Canonical production key path: ${AGE_KEY_FILE}"
       # Emit warnings before exiting so operators see them even on failure.
       _show_startup_warnings

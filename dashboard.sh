@@ -620,7 +620,7 @@ handle_main_menu() {
             ;;
         2)
             if _confirm_destructive "Stop all VaultWarden services"; then
-                run_cmd "make down" make -C "${REPO_ROOT}" down
+                run_sudo_cmd "sudo make down" make -C "${REPO_ROOT}" down
                 # Force live-stats redraw so container state is fresh (ux.md #3).
                 ACTIVE_MENU="main"
             else
@@ -629,7 +629,7 @@ handle_main_menu() {
             fi
             ;;
         3)
-            run_user_cmd "make health" make -C "${REPO_ROOT}" health
+            run_sudo_cmd "sudo make health" make -C "${REPO_ROOT}" health
             ;;
         4)
             # Subshell + INT trap: Ctrl-C stops the tail, returns to menu (ux.md #33).

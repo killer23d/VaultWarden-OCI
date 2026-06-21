@@ -835,12 +835,21 @@ prompt_password_with_confirmation() {
 
 secure_secrets_file() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    if [[ ! -f "$secrets_file" ]]; then return 0; fi
-    chmod 600 "$secrets_file"
+    local secrets_dir
+    secrets_dir="$(dirname "$secrets_file")"
+
     local real_user real_group
     real_user=$(get_real_user)
     real_group=$(id -gn "$real_user" 2>/dev/null || printf '%s' "$real_user")
+
+    if [[ -d "$secrets_dir" ]]; then
+        chown "$real_user:$real_group" "$secrets_dir"
+        chmod 700 "$secrets_dir"
+    fi
+
+    if [[ ! -f "$secrets_file" ]]; then return 0; fi
     chown "$real_user:$real_group" "$secrets_file"
+    chmod 600 "$secrets_file"
     return 0
 }
 
@@ -1312,7 +1321,7 @@ EOF
 
 4. FINALIZATION
    [ ] Start services:
-       make up
+       sudo make up
    [ ] Wait for containers to initialise, then check health:
        sleep 10 && ./maintenance.sh health
 
@@ -1732,7 +1741,7 @@ PYEOF
         for _s in "${_bad_secrets[@]}"; do
             log_error "  ${docker_dir}/${_s}"
         done
-        log_error "Remediation: run make key-health, clear stale files as root, then re-run make up."
+        log_error "Remediation: run make key-health, clear stale files as root, then re-run sudo make up."
         return 1
     fi
 
@@ -1743,7 +1752,7 @@ PYEOF
 
     if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -d -m 0700 -o root -g root "$docker_dir"; then
         log_error "export_docker_secrets: cannot prepare root-owned runtime secret directory: $docker_dir"
-        log_error "For make up: run sudo make init-secrets, then re-run make up"
+        log_error "For sudo make up: run sudo make init-secrets, then re-run sudo make up"
         log_error "For direct scripts: run sudo ./setup.sh secrets"
         return 1
     fi
@@ -1753,7 +1762,7 @@ PYEOF
         [[ "$(basename "$_f")" == "secrets.yaml" ]] && continue
         if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0444 -o root -g root "$_f" "${docker_dir}/$(basename "$_f")"; then
             log_error "export_docker_secrets: failed to install ${docker_dir}/$(basename "$_f")"
-            log_error "For make up: run sudo make init-secrets, then re-run make up"
+            log_error "For sudo make up: run sudo make init-secrets, then re-run sudo make up"
             log_error "For direct scripts: run sudo ./setup.sh secrets"
             return 1
         fi

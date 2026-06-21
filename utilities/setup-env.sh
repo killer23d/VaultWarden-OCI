@@ -312,12 +312,13 @@ refresh_state_artifacts() {
     fi
     export PROJECT_STATE_DIR="$rendered_state_dir"
     mkdir -p "$manifest_dir" "$rendered_state_dir/secrets" || return 1
+    chown root:root "$manifest_dir" || return 1
+    chmod 0700 "$manifest_dir" || return 1
 
-    local owner group tmp install_env
-    owner=$(stat -c '%u' "$env_file"); group=$(stat -c '%g' "$env_file")
+    local tmp install_env
     install_env="$manifest_dir/install.env"
     tmp=$(mktemp -p "$manifest_dir" install.env.XXXXXX) || return 1
-    cp "$env_file" "$tmp" && chown "$owner:$group" "$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$install_env" || { rm -f "$tmp"; return 1; }
+    cp "$env_file" "$tmp" && chown root:root "$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$install_env" || { rm -f "$tmp"; return 1; }
 
     tmp=$(mktemp -p "$manifest_dir" dr-manifest.env.XXXXXX) || return 1
     {

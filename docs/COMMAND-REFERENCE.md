@@ -21,31 +21,31 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
 | `make test-email` |  Send a test operational alert email (health/backup notification channel) |
-| `make up` |  Start all services (runs startup.sh for health checks) |
+| `make up` |  Start all services (runs startup.sh for health checks; root required) |
 | `make start` |  Alias for up |
-| `make down` |  Stop all services gracefully |
+| `make down` |  Stop all services gracefully (root required) |
 | `make stop` |  Alias for down |
 | `make restart` |  Restart all services (via startup.sh; root required) |
 | `make safe-restart` |  Restart with automatic rollback on failure (root required) |
 | `make status` |  Show service status, backup health, disk usage, and CrowdSec ban summary |
-| `make health` |  Run health checks (set AUTO_RECOVER=true to auto-recover) |
-| `make health-quick` |  Quick health check (concise output) |
-| `make health-report` |  Run health check and write a timestamped report file |
+| `make health` |  Run health checks (set AUTO_RECOVER=true to auto-recover; root required) |
+| `make health-quick` |  Quick health check (concise output; root required) |
+| `make health-report` |  Run health check and write a timestamped report file (root required) |
 | `make health-email` |  Backward-compatible alias for test-email |
 | `make smoke-test` |  Run pre-production smoke test against the live stack (root required) |
 | `make drill` |  Run non-destructive pre-production dry-run drill (root required) |
 | `make watch` |  Watch service logs in real-time (Ctrl+C to stop) |
 | `make monitor` |  Continuous health monitoring (30s intervals, Ctrl+C to stop) |
 | `make unban` |  Unban an IP from CrowdSec (IP=<address> required) |
-| `make logs` |  View service logs (SERVICE=<name> to filter, default: vaultwarden) |
-| `make logs-tail` |  Tail last 100 lines of all service logs |
-| `make logs-vaultwarden` |  Tail vaultwarden logs |
-| `make logs-caddy` |  Tail caddy logs |
-| `make logs-postfix` |  Tail postfix logs |
-| `make logs-crowdsec` |  Tail CrowdSec logs |
-| `make crowdsec-status` |  Show CrowdSec metrics and active bans |
-| `make crowdsec-alerts` |  Show recent CrowdSec alerts (last 24h) |
-| `make security-report` |  Single-command security event summary (last 1h) |
+| `make logs` |  View service logs (SERVICE=<name> to filter, default: vaultwarden; root required) |
+| `make logs-tail` |  Tail last 100 lines of all service logs (root required) |
+| `make logs-vaultwarden` |  Tail vaultwarden logs (root required) |
+| `make logs-caddy` |  Tail caddy logs (root required) |
+| `make logs-postfix` |  Tail postfix logs (root required) |
+| `make logs-crowdsec` |  Tail CrowdSec logs (root required) |
+| `make crowdsec-status` |  Show CrowdSec metrics and active bans (root required) |
+| `make crowdsec-alerts` |  Show recent CrowdSec alerts (last 24h; root required) |
+| `make security-report` |  Single-command security event summary (last 1h; root required) |
 | `make backup` |  Run incremental database backup |
 | `make backup-full` |  Run full backup (database + attachments + config) |
 | `make backup-emergency` |  Create emergency backup kit |
@@ -92,7 +92,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make config` |  Show current docker-compose config (resolved) |
 | `make diagnose` |  Full diagnostic dump (versions, status, health, key, logs tail) |
 | `make clean` |  Remove generated files (logs, temp files) |
-| `make clean-all` |  Remove secrets cache and log files — services will re-init secrets on next start |
+| `make clean-all` |  Remove generated logs/temp files — services will re-init runtime secrets on next start |
 | `make prune` |  Remove unused Docker resources (images, containers, networks) — cannot be undone |
 | `make uninstall` |  Remove VaultWarden-OCI, all data, secrets, and containers from this host |
 | `make uninstall-dry-run` |  Preview what uninstall would remove without making any changes |
@@ -174,8 +174,8 @@ EXAMPLES:
 VaultWarden-OCI Startup Script
 
 USAGE:
-  ./startup.sh [OPTIONS]         # Start all services (normal path)
-  ./startup.sh stop              # Stop all services
+  sudo ./startup.sh [OPTIONS]    # Start all services (root-operated path)
+  sudo ./startup.sh stop         # Stop all services
 
 SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
@@ -195,11 +195,11 @@ GLOBAL OPTIONS:
   --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-  ./startup.sh                    # Normal startup (pulls latest images)
-  ./startup.sh --skip-pull        # Restart without pulling (fast path)
-  ./startup.sh --force            # Recreate containers after .env/compose changes
-  ./startup.sh --background       # Start in daemon mode
-  ./startup.sh stop               # Stop all services
+  sudo ./startup.sh               # Normal startup (pulls latest images)
+  sudo ./startup.sh --skip-pull   # Restart without pulling (fast path)
+  sudo ./startup.sh --force       # Recreate containers after .env/compose changes
+  sudo ./startup.sh --background  # Start in daemon mode
+  sudo ./startup.sh stop          # Stop all services
 ```
 
 ### backup.sh
@@ -405,7 +405,8 @@ USAGE:
     ./maintenance.sh health [OPTIONS]
     utilities/maintenance-health.sh [OPTIONS]
 
-Do not run with sudo. Run: ./maintenance.sh health
+Root-operated path: sudo make health
+Direct non-root path: ./maintenance.sh health
 
 OPTIONS:
     --comprehensive     Run all checks including extended diagnostics
@@ -480,7 +481,7 @@ OPTIONS:
 SECRET SOURCE PRIORITY:
     caddy_cloudflare_dns_token — resolved in order:
         1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. Host file: $CF_TOKEN_FILE or secrets/.docker_secrets/caddy_cloudflare_dns_token
+        2. Host file: $CF_TOKEN_FILE or /run/vaultwarden-oci/secrets/caddy_cloudflare_dns_token
         3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
 
     DNS_UPDATE_REQUIRED=true or --require-dns makes missing config fail.
@@ -550,8 +551,7 @@ EXAMPLES:
 ### notify-failure.sh
 
 ```
-[TIMESTAMP] [notify-failure] WARN No VaultWarden environment file found; using process environment only.
-[TIMESTAMP] [notify-failure] INFO Failure notification cooldown active for --help; skipping.
+(--help not available or requires root)
 ```
 
 ### pre-production-drill.sh
@@ -928,7 +928,7 @@ EXAMPLES:
     sudo utilities/setup-secrets.sh bootstrap
     sudo utilities/setup-secrets.sh configure
     sudo utilities/setup-secrets.sh configure --auto
-    sudo utilities/setup-secrets.sh rotate email_api_token
+    ./utilities/secrets-rotate.sh email_api_token
     sudo utilities/setup-secrets.sh export-recovery-kit
     sudo utilities/setup-secrets.sh breakglass create
     sudo utilities/setup-secrets.sh breakglass status

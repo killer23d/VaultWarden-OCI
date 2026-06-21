@@ -168,15 +168,10 @@ press_enter_to_continue() {
 # This is intentionally non-fatal and safe to call repeatedly.
 auto_fix_critical_permissions() {
     local project_root="${1:-$PROJECT_ROOT}"
-    local real_user real_group
-    real_user=$(get_real_user 2>/dev/null || id -un)
-    real_group=$(id -gn "$real_user" 2>/dev/null || id -gn)
 
-    local env_file="${project_root}/.env"
-    if [[ -f "$env_file" ]]; then
-        chmod 600 "$env_file" 2>/dev/null || true
-        chown "${real_user}:${real_group}" "$env_file" 2>/dev/null || true
-    fi
+    # Do not mutate repository .env ownership during normal root startup.
+    # Repo-local .env is an operator-editable source/fallback; persistent
+    # runtime env is installed under ${PROJECT_STATE_DIR}/config/install.env.
 
     local age_key_file="${SOPS_AGE_KEY_FILE:-}"
     if [[ -z "$age_key_file" ]]; then
@@ -370,7 +365,7 @@ get_real_user() {
 
     local effective_user
     effective_user=$(id -un 2>/dev/null) || effective_user="root"
-    log_warn "get_real_user: could not resolve a non-root user; using '${effective_user}'. If unexpected, verify sudo invocation context (use: sudo ./setup.sh, not sudo make setup)."
+    log_warn "get_real_user: could not resolve a non-root user; using '${effective_user}'. If unexpected, verify sudo invocation context (use: sudo ./setup.sh install --domain ... --email ... or sudo make setup)."
     printf '%s\n' "$effective_user"
 }
 

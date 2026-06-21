@@ -43,7 +43,7 @@ OPTIONS:
 SECRET SOURCE PRIORITY:
     caddy_cloudflare_dns_token — resolved in order:
         1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. Host file: $CF_TOKEN_FILE or secrets/.docker_secrets/caddy_cloudflare_dns_token
+        2. Host file: $CF_TOKEN_FILE or /run/vaultwarden-oci/secrets/caddy_cloudflare_dns_token
         3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
 
     DNS_UPDATE_REQUIRED=true or --require-dns makes missing config fail.
@@ -89,7 +89,7 @@ _resolve_cf_token() {
 
     # 2. Host-side Docker secret file.
     local token_file
-    token_file="${CF_TOKEN_FILE:-${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token}"
+    token_file="${CF_TOKEN_FILE:-/run/vaultwarden-oci/secrets/caddy_cloudflare_dns_token}"
     if [[ -f "$token_file" ]]; then
         local token_perms
         token_perms=$(stat -c%a "$token_file" 2>/dev/null \

@@ -250,14 +250,13 @@ load_project_environment() {
     export PROJECT_STATE_DIR
 
     local persistent_env="${PROJECT_STATE_DIR}/config/install.env"
-    if [[ -f "$persistent_env" ]]; then
+    if [[ -f "$installed_env" ]]; then
+        load_env_file "$installed_env" || return 1
+    elif [[ -f "$persistent_env" ]]; then
         load_env_file "$persistent_env" || return 1
     elif [[ -f "$repo_env" ]]; then
         log_warn "Using repository .env — migrate to ${persistent_env} for production use"
         load_env_file "$repo_env" || return 1
-    elif [[ -f "$installed_env" ]]; then
-        log_warn "Using installed systemd environment — migrate to ${persistent_env} for production use"
-        load_env_file "$installed_env" || return 1
     else
         log_error "No project environment found. Expected ${persistent_env}, ${repo_env}, or ${installed_env}."
         return 1
