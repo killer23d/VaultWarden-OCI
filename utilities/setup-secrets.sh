@@ -2250,19 +2250,19 @@ EOF
     desired_recipients="$(_ss_desired_recipients_csv "$age_public_key")" || return 1
 
     _repair_encrypted_secrets_ownership() {
-        local target_file="$1"
-        local target_dir real_user real_group
+        local secrets_file="$1"
+        local secrets_dir real_user real_group
 
-        target_dir="$(dirname "$target_file")"
+        secrets_dir="$(dirname "$secrets_file")"
         real_user=$(get_real_user)
         real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
 
-        chown "$real_user:$real_group" "$target_dir" || return 1
-        chmod 700 "$target_dir" || return 1
+        chown "$real_user:$real_group" "$secrets_dir" || return 1
+        chmod 700 "$secrets_dir" || return 1
 
-        if [[ -f "$target_file" ]]; then
-            chown "$real_user:$real_group" "$target_file" || return 1
-            chmod 600 "$target_file" || return 1
+        if [[ -f "$secrets_file" ]]; then
+            chown "$real_user:$real_group" "$secrets_file" || return 1
+            chmod 600 "$secrets_file" || return 1
         fi
     }
     
