@@ -866,7 +866,7 @@ BACKUP_BANNER
         chown "$real_user:$real_group" "$secrets_dir" || return 1
         chmod 700 "$secrets_dir" || return 1
 
-        local temp_file
+        local temp_file=""
         temp_file="$(_ss_make_plaintext_temp)" || {
             log_error "Failed to create protected plaintext staging file"
             return 1
@@ -2296,11 +2296,12 @@ EOF
         return 0
     fi
     
-    local tmp_secrets
+    local tmp_secrets=""
     tmp_secrets="$(_ss_make_plaintext_temp)" || return 1
-    trap 'rm -f "$tmp_secrets"' RETURN
-    trap 'rm -f "$tmp_secrets"; exit 130' INT
-    trap 'rm -f "$tmp_secrets"; exit 143' TERM
+    # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
+    trap "rm -f \"${tmp_secrets}\"" RETURN
+    trap "rm -f \"${tmp_secrets}\"; exit 130" INT
+    trap "rm -f \"${tmp_secrets}\"; exit 143" TERM
     # Build placeholder YAML body from secrets-schema.yaml so that every key
     # defined in the schema is bootstrapped automatically — no lines here need
     # to change when a key is added or renamed.
