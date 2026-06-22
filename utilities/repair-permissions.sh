@@ -46,7 +46,9 @@ if [[ "$MODE" == "repair" && $EUID -ne 0 ]]; then
 fi
 
 # Best effort: load environment if present; continue with defaults otherwise.
-load_project_environment >/dev/null 2>&1 || true
+if ! load_project_environment >/dev/null 2>&1; then
+    log_warn "repair-permissions: could not load project environment; checking default paths only"
+fi
 SECRETS_FILE="${SECRETS_FILE:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/secrets.yaml}"
 PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 

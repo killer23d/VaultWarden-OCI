@@ -2298,7 +2298,9 @@ EOF
     tmp_secrets="$(_ss_make_plaintext_temp)" || return 1
     # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"" RETURN
+    # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"; exit 130" INT
+    # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"; exit 143" TERM
     # Build placeholder YAML body from secrets-schema.yaml so that every key
     # defined in the schema is bootstrapped automatically — no lines here need
@@ -2439,6 +2441,8 @@ main() {
     local subcmd="${1:-}"
     case "$subcmd" in
         help|--help|-h|--version|-V) ;;
+        rotate)              _cmd_user_secret_stub rotate; exit $? ;;
+        export-recovery-kit) _cmd_user_secret_stub export-recovery-kit; exit $? ;;
         *) (( EUID == 0 )) || { log_error "Must run as root."; exit 1; } ;;
     esac
 
@@ -2448,8 +2452,6 @@ main() {
         help|--help|-h)      show_help; exit 0 ;;
         --version|-V)        print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         "")  log_error "Subcommand required. Use --help for usage."; show_help; exit 1 ;;
-        rotate)              _cmd_user_secret_stub rotate; exit $? ;;
-        export-recovery-kit) _cmd_user_secret_stub export-recovery-kit; exit $? ;;
     esac
 
     load_project_environment || exit 1
