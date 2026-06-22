@@ -41,7 +41,7 @@ FORCE=false
 DRY_RUN=false
 
 show_help() {
-    cat <<'EOF'
+    cat <<'EOH'
 VaultWarden-OCI Uninstall
 
 USAGE:
@@ -68,8 +68,9 @@ OPTIONS (used after 'run'):
         Show what would be removed without changing the system.
 
     --force
-        Skip all Age-key safety prompts. Intended only for CI/automation where
-        key preservation has been verified externally. WARNING: destructive.
+        Non-interactive destructive mode. Skips uninstall confirmation,
+        backup prompt, and Age-key prompts. Intended only after recovery data
+        has been verified outside this host.
 
     --version, -V
         Print the VaultWarden-OCI version and exit.
@@ -77,7 +78,8 @@ OPTIONS (used after 'run'):
 EXAMPLES:
     sudo bash ./utilities/uninstall-vaultwarden.sh run --dry-run
     sudo bash ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
-EOF
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --force
+EOH
 }
 
 if [[ $# -eq 0 ]]; then
@@ -91,7 +93,7 @@ case "$1" in
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true; shift ;;
-                --force) FORCE=true; shift ;;
+                --force) FORCE=true; I_HAVE_SAVED_RECOVERY_KIT=true; shift ;;
                 --dry-run) DRY_RUN=true; shift ;;
                 --version|-V)
                     if command -v print_project_version >/dev/null 2>&1; then
@@ -157,6 +159,7 @@ _env_candidates_for_bootstrap() {
     for state in "$repo_state" "$installed_state" "$DEFAULT_STATE_DIR" "$DEFAULT_DATA_MOUNT"; do
         [[ -n "$state" && -f "$state/config/install.env" ]] && printf '%s\n' "$state/config/install.env"
     done
+    return 0
 }
 
 _unique_lines() { awk 'NF && !seen[$0]++'; }
@@ -172,12 +175,12 @@ resolve_paths() {
 
     while IFS= read -r env_file; do
         [[ -f "$env_file" ]] || continue
-        [[ -z "$PROJECT_STATE_DIR" ]] && PROJECT_STATE_DIR="$(_read_env_value PROJECT_STATE_DIR "$env_file")"
-        [[ -z "$DATA_VOLUME_MOUNT" ]] && DATA_VOLUME_MOUNT="$(_read_env_value DATA_VOLUME_MOUNT "$env_file")"
-        [[ -z "$DATA_VOLUME_DEVICE" ]] && DATA_VOLUME_DEVICE="$(_read_env_value DATA_VOLUME_DEVICE "$env_file")"
-        [[ -z "$SOPS_AGE_KEY_FILE_ENV" ]] && SOPS_AGE_KEY_FILE_ENV="$(_read_env_value SOPS_AGE_KEY_FILE "$env_file")"
-        [[ -z "$AGE_KEY_FILE_ENV" ]] && AGE_KEY_FILE_ENV="$(_read_env_value AGE_KEY_FILE "$env_file")"
-        [[ -z "$BACKUP_DIR" ]] && BACKUP_DIR="$(_read_env_value BACKUP_DIR "$env_file")"
+        if [[ -z "$PROJECT_STATE_DIR" ]]; then PROJECT_STATE_DIR="$(_read_env_value PROJECT_STATE_DIR "$env_file")"; fi
+        if [[ -z "$DATA_VOLUME_MOUNT" ]]; then DATA_VOLUME_MOUNT="$(_read_env_value DATA_VOLUME_MOUNT "$env_file")"; fi
+        if [[ -z "$DATA_VOLUME_DEVICE" ]]; then DATA_VOLUME_DEVICE="$(_read_env_value DATA_VOLUME_DEVICE "$env_file")"; fi
+        if [[ -z "$SOPS_AGE_KEY_FILE_ENV" ]]; then SOPS_AGE_KEY_FILE_ENV="$(_read_env_value SOPS_AGE_KEY_FILE "$env_file")"; fi
+        if [[ -z "$AGE_KEY_FILE_ENV" ]]; then AGE_KEY_FILE_ENV="$(_read_env_value AGE_KEY_FILE "$env_file")"; fi
+        if [[ -z "$BACKUP_DIR" ]]; then BACKUP_DIR="$(_read_env_value BACKUP_DIR "$env_file")"; fi
     done < <(_env_candidates_for_bootstrap | _unique_lines)
 
     if [[ -z "$PROJECT_STATE_DIR" && -n "$DATA_VOLUME_MOUNT" ]]; then
@@ -205,7 +208,10 @@ resolve_paths() {
 
     DOCKER_SENTINEL="${PROJECT_STATE_DIR}/.docker_installed_by_setup"
     DOCKER_SENTINEL_PRESENT=false
-    [[ -f "$DOCKER_SENTINEL" ]] && DOCKER_SENTINEL_PRESENT=true
+    if [[ -f "$DOCKER_SENTINEL" ]]; then
+        DOCKER_SENTINEL_PRESENT=true
+    fi
+    return 0
 }
 
 _dry_run_line() { echo "  - $*"; }
@@ -246,6 +252,7 @@ _existing_age_keys() {
     for key in "${MANAGED_AGE_KEY_PATHS[@]}"; do
         [[ -f "$key" ]] && printf '%s\n' "$key"
     done | _unique_lines
+    return 0
 }
 
 _show_age_keys() {
@@ -270,7 +277,7 @@ _confirm_age_key_safety() {
     fi
 
     if [[ "$FORCE" == "true" ]]; then
-        warn "--force active — skipping all Age-key checks. Managed Age keys will be deleted."
+        warn "--force active — skipping Age-key checks. Managed Age keys will be deleted."
         _show_age_keys
         return 0
     fi
@@ -386,6 +393,7 @@ disable_systemd_units() {
     fi
 
     systemctl daemon-reload 2>/dev/null || true
+    return 0
 }
 
 remove_docker_stack() {
@@ -439,6 +447,7 @@ remove_docker_stack() {
         [[ -n "$net" ]] || continue
         docker network rm "$net" 2>/dev/null && success "Removed Docker network: $net" || true
     done < <(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E "vaultwarden|${project_name}" || true)
+    return 0
 }
 
 remove_runtime_artifacts() {
@@ -463,6 +472,7 @@ remove_runtime_artifacts() {
             && success "Removed system group: vaultwarden" \
             || warn "Could not remove system group 'vaultwarden'. Remove manually if unused: sudo groupdel vaultwarden"
     fi
+    return 0
 }
 
 remove_installed_files() {
@@ -478,6 +488,7 @@ remove_installed_files() {
     else
         warn "Project directory does not look like a VaultWarden-OCI checkout; leaving in place: $PROJECT_DIR"
     fi
+    return 0
 }
 
 _remove_fstab_mount() {
@@ -497,6 +508,7 @@ _remove_fstab_mount() {
         rm -f "$tmp" 2>/dev/null || true
         warn "Could not remove fstab entry for $mountpoint. Remove it manually."
     fi
+    return 0
 }
 
 remove_state_and_mount() {
@@ -536,6 +548,7 @@ remove_state_and_mount() {
                 || warn "Mountpoint still exists/non-empty: $unmount_target"
         fi
     fi
+    return 0
 }
 
 remove_sops_and_packages() {
@@ -570,6 +583,7 @@ remove_sops_and_packages() {
         fi
     done
     apt-get autoremove -y 2>/dev/null || true
+    return 0
 }
 
 remove_crowdsec() {
@@ -615,6 +629,7 @@ remove_crowdsec() {
 
     apt-get update -qq 2>/dev/null || true
     apt-get autoremove -y 2>/dev/null || true
+    return 0
 }
 
 remove_firewall_rules() {
@@ -648,6 +663,7 @@ remove_firewall_rules() {
             fi
         done
     fi
+    return 0
 }
 
 remove_swap_and_apt_sources() {
@@ -676,6 +692,7 @@ remove_swap_and_apt_sources() {
 
     rm -f /etc/apt/sources.list.d/ubuntu-universe.list 2>/dev/null || true
     apt-get update -qq 2>/dev/null || true
+    return 0
 }
 
 _docker_has_unrelated_containers() {
@@ -728,6 +745,7 @@ remove_docker_packages_if_safe() {
 
     apt-get update -qq 2>/dev/null || true
     apt-get autoremove -y 2>/dev/null || true
+    return 0
 }
 
 remove_group_memberships() {
@@ -746,6 +764,7 @@ remove_group_memberships() {
             groupdel docker 2>/dev/null && success "Removed empty docker group." || true
         fi
     fi
+    return 0
 }
 
 show_summary() {
@@ -757,6 +776,7 @@ show_summary() {
     echo "   Data mount        : ${DATA_VOLUME_MOUNT:-<unset>}"
     echo "   Running as        : $(whoami)  (real user: ${REAL_USER})"
     [[ "$DRY_RUN" == "true" ]] && echo "   Mode              : DRY RUN — no changes will be made"
+    [[ "$FORCE" == "true" ]] && echo "   Mode              : FORCE — non-interactive destructive cleanup"
     echo "════════════════════════════════════════════════════════════"
     echo ""
 
@@ -784,9 +804,15 @@ show_summary() {
         info "DRY RUN complete — no changes made."
         exit 0
     fi
+    return 0
 }
 
 offer_final_backup() {
+    if [[ "$FORCE" == "true" ]]; then
+        warn "--force active — skipping final backup prompt."
+        return 0
+    fi
+
     if [[ ! -f "${PROJECT_DIR}/backup.sh" ]]; then
         return 0
     fi
@@ -812,19 +838,29 @@ offer_final_backup() {
     else
         warn "Skipping final backup."
     fi
+    return 0
+}
+
+confirm_uninstall() {
+    warn "This will PERMANENTLY DELETE VaultWarden-OCI data, secrets, containers, and configuration."
+    warn "This action cannot be undone."
+    echo ""
+
+    if [[ "$FORCE" == "true" ]]; then
+        warn "--force active — skipping interactive uninstall confirmation."
+        return 0
+    fi
+
+    local confirm
+    read -r -p "Type 'UNINSTALL' to confirm, or anything else to abort: " confirm
+    [[ "$confirm" == "UNINSTALL" ]] || { info "Aborted — nothing changed."; exit 0; }
+    return 0
 }
 
 main() {
     resolve_paths
     show_summary
-
-    warn "This will PERMANENTLY DELETE VaultWarden-OCI data, secrets, containers, and configuration."
-    warn "This action cannot be undone."
-    echo ""
-    local confirm
-    read -r -p "Type 'UNINSTALL' to confirm, or anything else to abort: " confirm
-    [[ "$confirm" == "UNINSTALL" ]] || { info "Aborted — nothing changed."; exit 0; }
-
+    confirm_uninstall
     offer_final_backup
     _confirm_age_key_safety
 
