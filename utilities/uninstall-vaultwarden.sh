@@ -34,7 +34,12 @@ info()    { log_info "$@"; }
 success() { log_success "$@"; }
 warn()    { log_warn "$@"; }
 
-trap 'rc=$?; log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit ${rc})"; exit "$rc"' ERR
+_uninstall_err_trap() {
+    local rc=$?
+    log_error "${BASH_SOURCE[0]}: failed at line ${BASH_LINENO[0]} (exit ${rc})"
+    exit "$rc"
+}
+trap _uninstall_err_trap ERR
 
 I_HAVE_SAVED_RECOVERY_KIT=false
 FORCE=false
@@ -639,8 +644,8 @@ remove_firewall_rules() {
         ufw delete allow 80/tcp 2>/dev/null || true
         ufw delete allow 443/tcp 2>/dev/null || true
 
-        local i rule_num
-        for i in {1..30}; do
+        local rule_num
+        for _ in {1..30}; do
             rule_num="$(ufw status numbered 2>/dev/null \
                 | awk '/(^|[[:space:]])(80|443)\/tcp([[:space:]]|$)/ { gsub(/\[|\]/, "", $1); print $1; exit }')"
             [[ -n "$rule_num" ]] || break

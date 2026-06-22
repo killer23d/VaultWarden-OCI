@@ -45,15 +45,13 @@ USAGE:
 
 DESCRIPTION:
     Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
-    credentials interactively or automatically, rotate fields, and export
-    recovery kits. Delegates to specialized scripts.
+    credentials interactively or automatically. Interactive view/list/rotate
+    and recovery-kit export are normal-operator commands via edit-secrets.sh.
 
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
                         (called automatically by setup.sh install phase)
     configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
-    rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
-    export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
     breakglass [FLAGS]  Emergency break-glass admin account management
     help, --help, -h    Show this help
 
@@ -67,8 +65,8 @@ EXAMPLES:
     sudo utilities/setup-secrets.sh bootstrap
     sudo utilities/setup-secrets.sh configure
     sudo utilities/setup-secrets.sh configure --auto
-    ./utilities/secrets-rotate.sh email_api_token
-    sudo utilities/setup-secrets.sh export-recovery-kit
+    ./edit-secrets.sh rotate email_api_token
+    ./edit-secrets.sh export-recovery-kit
     sudo utilities/setup-secrets.sh breakglass create
     sudo utilities/setup-secrets.sh breakglass status
 EOF
@@ -967,8 +965,8 @@ BACKUP_BANNER
 
         if ! check_reconfiguration; then
             log_info "Keeping existing secrets - no changes made"
-            log_info "Tip: to rotate a single field run: ./utilities/secrets-rotate.sh FIELD"
-            log_info "Tip: to export a recovery kit run:  sudo utilities/setup-secrets.sh export-recovery-kit"
+            log_info "Tip: to rotate a single field run: ./edit-secrets.sh rotate FIELD"
+            log_info "Tip: to export a recovery kit run:  ./edit-secrets.sh export-recovery-kit"
             return 0
         fi
 
@@ -1015,10 +1013,10 @@ BACKUP_BANNER
             echo "                 SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
             echo "   2. Start services:            sudo make up"
             echo "   3. Setup automation:          sudo ./setup.sh systemd install"
-            echo "   4. Export recovery kit:       sudo utilities/setup-secrets.sh export-recovery-kit"
+            echo "   4. Export recovery kit:       ./edit-secrets.sh export-recovery-kit"
             echo "   5. Test health:               ./maintenance.sh health"
-            echo "   6. To rotate a single field:  ./utilities/secrets-rotate.sh FIELD"
-            echo "   7. To list secret keys:       ./utilities/secrets-rotate.sh list"
+            echo "   6. To rotate a single field:  ./edit-secrets.sh rotate FIELD"
+            echo "   7. To list secret keys:       ./edit-secrets.sh list"
             echo ""
             echo "📧 Email mode reference (set EMAIL_MODE in .env):"
             echo "   auto  — API → Postfix sidecar → direct upstream SMTP fallback chain (recommended)"
@@ -1039,23 +1037,15 @@ BACKUP_BANNER
     _ss_main "$@"
 }
 
-# Delegate rotate subcommands to utilities/secrets-edit.sh.
-_cmd_rotate() {
-    local key="${1:-}"
-    local edit_sh="${PROJECT_ROOT}/utilities/secrets-edit.sh"
-    _require_script "$edit_sh"
-    if [[ -n "$key" ]]; then
-        exec "$edit_sh" rotate "$key"
-    else
-        exec "$edit_sh" rotate
-    fi
-}
-
-# Delegate recovery-kit export to utilities/secrets-edit.sh.
-_cmd_export_recovery_kit() {
-    local edit_sh="${PROJECT_ROOT}/utilities/secrets-edit.sh"
-    _require_script "$edit_sh"
-    exec "$edit_sh" export-recovery-kit
+_cmd_user_secret_stub() {
+    local subcmd="$1"
+    log_error "'utilities/setup-secrets.sh ${subcmd}' is not a root setup command."
+    log_error "Run interactive secrets commands as your normal user, without sudo:"
+    case "$subcmd" in
+        rotate) log_error "  ./edit-secrets.sh rotate FIELD" ;;
+        export-recovery-kit) log_error "  ./edit-secrets.sh export-recovery-kit" ;;
+    esac
+    return 1
 }
 
 # Manage the emergency break-glass admin account.
@@ -1973,7 +1963,7 @@ _ss_write_policy_file() {
         fi
         printf '    age: "%s"\n' "$desired_csv"
     } > "$dest"
-    chmod 0640 "$dest"
+    chmod 0644 "$dest"
 }
 
 _ss_set_env_var_in_file() {
@@ -2308,7 +2298,9 @@ EOF
     tmp_secrets="$(_ss_make_plaintext_temp)" || return 1
     # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"" RETURN
+    # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"; exit 130" INT
+    # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"; exit 143" TERM
     # Build placeholder YAML body from secrets-schema.yaml so that every key
     # defined in the schema is bootstrapped automatically — no lines here need
@@ -2436,7 +2428,7 @@ _write_sops_config() {
         fi
         printf '    age: "%s"\n' "$recipients"
     } > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod 640 "$tmp"
+    chmod 644 "$tmp"
     local real_user; real_user=$(get_real_user)
     chown "${real_user}:$(id -g -n "$real_user")" "$tmp" 2>/dev/null || true
     mv "$tmp" "$dest"
@@ -2449,6 +2441,8 @@ main() {
     local subcmd="${1:-}"
     case "$subcmd" in
         help|--help|-h|--version|-V) ;;
+        rotate)              _cmd_user_secret_stub rotate; exit $? ;;
+        export-recovery-kit) _cmd_user_secret_stub export-recovery-kit; exit $? ;;
         *) (( EUID == 0 )) || { log_error "Must run as root."; exit 1; } ;;
     esac
 
@@ -2465,8 +2459,6 @@ main() {
     case "$subcmd" in
         bootstrap)           _cmd_bootstrap "$@" ;;
         configure)           _cmd_configure "$@" ;;
-        rotate)              _cmd_rotate "$@" ;;
-        export-recovery-kit) _cmd_export_recovery_kit "$@" ;;
         breakglass)          _cmd_breakglass "$@" ;;
         *)   log_error "Unknown subcommand: ${subcmd}"; show_help; exit 1 ;;
     esac

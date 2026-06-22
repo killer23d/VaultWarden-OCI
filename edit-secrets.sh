@@ -48,6 +48,7 @@ EXAMPLES:
     ./edit-secrets.sh export-recovery-kit
 
 Run './edit-secrets.sh <subcommand> --help' for subcommand-specific options.
+If SOPS reports permission drift, run: sudo utilities/repair-permissions.sh
 HELP
 }
 
