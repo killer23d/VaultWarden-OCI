@@ -583,6 +583,30 @@ EXAMPLES:
     sudo ./utilities/pre-production-drill.sh --skip-email --skip-restore
 ```
 
+### repair-permissions.sh
+
+```
+VaultWarden-OCI permission repair
+
+USAGE:
+    sudo utilities/repair-permissions.sh        Repair known permission drift
+    utilities/repair-permissions.sh --check     Report drift without changing files
+    sudo utilities/repair-permissions.sh --dry-run
+    utilities/repair-permissions.sh --help
+
+Checks/repairs explicit project paths only:
+  .sops.yaml -> 0644 (public SOPS policy/Age recipients; owner preserved)
+  repo Age key -> operator-owned 0600 when present
+  /etc/vaultwarden and installed key/env/rclone files -> root:root private
+  PROJECT_STATE_DIR config env/manifest files -> non-world-readable private state
+  encrypted secrets.yaml and containing directory -> operator-accessible/private
+  /run/vaultwarden-oci/secrets -> root:root 0700
+  known recovery-kit outputs under the project root -> not world-readable
+
+Does not recursively chmod broad directories and never makes private keys,
+env files, encrypted secrets, backups, or recovery kits world-readable.
+```
+
 ### restore-run.sh
 
 ```
@@ -906,15 +930,13 @@ USAGE:
 
 DESCRIPTION:
     Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
-    credentials interactively or automatically, rotate fields, and export
-    recovery kits. Delegates to specialized scripts.
+    credentials interactively or automatically. Interactive view/list/rotate
+    and recovery-kit export are normal-operator commands via edit-secrets.sh.
 
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
                         (called automatically by setup.sh install phase)
     configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
-    rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
-    export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
     breakglass [FLAGS]  Emergency break-glass admin account management
     help, --help, -h    Show this help
 
@@ -928,8 +950,8 @@ EXAMPLES:
     sudo utilities/setup-secrets.sh bootstrap
     sudo utilities/setup-secrets.sh configure
     sudo utilities/setup-secrets.sh configure --auto
-    ./utilities/secrets-rotate.sh email_api_token
-    sudo utilities/setup-secrets.sh export-recovery-kit
+    ./edit-secrets.sh rotate email_api_token
+    ./edit-secrets.sh export-recovery-kit
     sudo utilities/setup-secrets.sh breakglass create
     sudo utilities/setup-secrets.sh breakglass status
 ```
@@ -1105,49 +1127,37 @@ USAGE:
     sudo bash ./utilities/uninstall-vaultwarden.sh run [OPTIONS]
 
 DESCRIPTION:
-    Performs a full idempotent uninstall of VaultWarden-OCI: stops and removes
-    containers, Docker secrets, systemd units, and the project directory.
-    Requires interactive confirmation at each critical step.
+    Fully removes VaultWarden-OCI managed artifacts from this host:
+      - Docker compose stack, managed containers, networks, volumes, and runtime secrets
+      - systemd timers/services/drop-ins, /opt scripts, and /etc/vaultwarden
+      - persistent VaultWarden state directory and optional data-volume fstab/mount wiring
+      - CrowdSec services/packages/config/state, project firewall rules, swapfile
+      - project-installed helper packages where safe
 
 SUBCOMMANDS:
-    run    Perform the full idempotent uninstall (interactive confirmation required)
+    run    Perform the idempotent uninstall
     help   Show this help
 
 OPTIONS (used after 'run'):
-    --version, -V
-        Print the VaultWarden-OCI version and exit.
-
     --i-have-saved-my-recovery-kit
-        Pre-confirm that you have saved secrets/keys/age-key.txt
-        to a location OUTSIDE this host before running.
-        Without this flag the script refuses to continue when
-        the age key is present on disk.
+        Confirm that all Age keys shown by this script have been saved outside
+        this host. Required when any managed Age key exists, unless --force is used.
 
     --dry-run
-        Show what would be removed without deleting anything.
-        Prints each step that would execute and exits without changes.
+        Show what would be removed without changing the system.
 
     --force
-        Skip ALL AGE key checks (both the CLI flag pre-check and the
-        interactive fingerprint confirmation). Use only in automated/CI
-        pipelines where the key is confirmed saved by external means.
-        WARNING: destructive — implies --i-have-saved-my-recovery-kit.
+        Non-interactive destructive mode. Skips uninstall confirmation,
+        backup prompt, and Age-key prompts. Intended only after recovery data
+        has been verified outside this host.
 
-SAFETY MODEL:
-    Two-prompt model for age key destruction:
-      1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check).
-      2. Interactive fingerprint confirmation immediately before
-         the project directory (and key) is deleted. You must type
-         the exact Age public key shown on screen.
-         This second prompt cannot be skipped without --force.
-
-    Without the age key ALL encrypted backups are permanently
-    unrecoverable. Export a recovery kit first:
-        ./utilities/secrets-export-recovery-kit.sh
+    --version, -V
+        Print the VaultWarden-OCI version and exit.
 
 EXAMPLES:
     sudo bash ./utilities/uninstall-vaultwarden.sh run --dry-run
     sudo bash ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --force
 ```
 
 ### write-command-reference.sh

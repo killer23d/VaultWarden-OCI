@@ -71,6 +71,13 @@ ensure_sops_env() {
     fi
 
     if [[ -n "$candidate_config" ]]; then
+        if [[ ! -r "$candidate_config" ]]; then
+            log_error "SOPS config exists but is not readable by the current user: $candidate_config"
+            log_error ".sops.yaml contains public SOPS policy and Age public recipients, not private key material."
+            log_error "Recommended repair: sudo utilities/repair-permissions.sh"
+            log_error "Direct fallback: sudo chmod 0644 .sops.yaml"
+            return 1
+        fi
         export SOPS_CONFIG="$candidate_config"
         log_debug "SOPS env set: key=$SOPS_AGE_KEY_FILE  config=$SOPS_CONFIG"
     else
