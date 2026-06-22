@@ -61,15 +61,23 @@ trap perform_cleanup EXIT
 
 check_prerequisites() {
     local missing=()
-    [[ ! -f "$AGE_KEY_FILE" ]] && missing+=("Age encryption key: $AGE_KEY_FILE")
+    local resolved_age_key=""
+
+    if ! resolved_age_key="$(resolve_age_key_path 2>/dev/null)"; then
+        missing+=("Age encryption key: readable key not found at \$AGE_KEY_FILE, /etc/vaultwarden/age-key.txt, or secrets/keys/age-key.txt")
+    fi
+
     [[ ! -f ".sops.yaml" ]]    && missing+=("SOPS configuration: .sops.yaml")
     [[ ! -f "$SECRETS_FILE" ]] && missing+=("Secrets file: $SECRETS_FILE")
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing prerequisites:"
         for item in "${missing[@]}"; do log_error "  - $item"; done
         log_info "To create secrets, run: sudo ./setup.sh secrets"
         return 1
     fi
+
+    log_debug "Recovery kit export will use Age key: $resolved_age_key"
     return 0
 }
 
