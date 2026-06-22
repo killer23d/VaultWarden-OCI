@@ -1929,10 +1929,18 @@ _ss_desired_recipients_csv() {
     fi
 
     if [[ -z "$offline" && -t 0 ]]; then
-        read -r -p "Enter offline recovery Age public key (press Enter to skip): " offline
-        if [[ -n "$offline" ]]; then
-            _ss_valid_age_recipient "$offline" || { log_error "Invalid offline Age recipient format"; return 1; }
-        fi
+        while true; do
+            read -r -p "Enter offline recovery Age public key (press Enter to skip): " offline
+            [[ -z "$offline" ]] && break
+            if _ss_valid_age_recipient "$offline"; then
+                break
+            else
+                log_warn "Invalid format — expected: age1<58 lowercase alphanumeric chars>"
+                log_warn "Example:  age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgp..."
+                log_warn "Press Enter with no input to skip."
+                offline=""
+            fi
+        done
     fi
 
     printf '%s' "$operational"
@@ -2381,11 +2389,19 @@ _resolve_offline_recipient() {
     fi
 
     if [[ -t 0 ]]; then
-        read -r -p "Enter offline recovery Age public key (press Enter to skip): " candidate
-        if [[ -n "$candidate" ]]; then
-            _valid_age_recipient "$candidate" || { log_error "Invalid offline Age recipient format"; return 1; }
-            printf '%s' "$candidate"
-        fi
+        while true; do
+            read -r -p "Enter offline recovery Age public key (press Enter to skip): " candidate
+            [[ -z "$candidate" ]] && break
+            if _valid_age_recipient "$candidate"; then
+                printf '%s' "$candidate"
+                break
+            else
+                log_warn "Invalid format — expected: age1<58 lowercase alphanumeric chars>"
+                log_warn "Example:  age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgp..."
+                log_warn "Press Enter with no input to skip."
+                candidate=""
+            fi
+        done
     fi
 }
 
