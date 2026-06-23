@@ -12,7 +12,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 PROJECT_STATE_DIR="$TMP/state"
 PROJECT_ROOT="$TMP/repo"
-export PROJECT_STATE_DIR PROJECT_ROOT SUDO_USER="$(id -un)" SUDO_GID="$(id -g)"
+SUDO_USER="$(id -un)"
+SUDO_GID="$(id -g)"
+export PROJECT_STATE_DIR PROJECT_ROOT SUDO_USER SUDO_GID
 mkdir -p "$PROJECT_ROOT/secrets/keys" "$PROJECT_STATE_DIR/config" "$PROJECT_STATE_DIR/secrets" "$TMP/etc" "$TMP/run/secrets"
 
 operator="$(get_real_user)"

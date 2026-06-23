@@ -161,7 +161,9 @@ press_enter_to_continue() {
     else
         printf '%s\n' "$msg"
     fi
-    [[ -t 0 ]] && read -r _dummy || true
+    if [[ -t 0 ]]; then
+        read -r _dummy || true
+    fi
 }
 
 # Best-effort remediation for common operational file permission drift.
@@ -257,7 +259,8 @@ expected_mode_for_path() {
 }
 
 fix_known_path_permissions() {
-    local path="$(_canonical_permission_path "$1")" owner group mode
+    local path owner group mode
+    path="$(_canonical_permission_path "$1")"
     [[ -e "$path" ]] || return 0
     owner="$(expected_owner_for_path "$path")" || return 0
     group="$(expected_group_for_path "$path")" || return 0
@@ -277,7 +280,8 @@ fix_known_path_permissions() {
 }
 
 assert_known_path_permissions() {
-    local path="$(_canonical_permission_path "$1")" owner group mode actual_owner actual_group actual_mode
+    local path owner group mode actual_owner actual_group actual_mode
+    path="$(_canonical_permission_path "$1")"
     [[ -e "$path" ]] || return 0
     owner="$(expected_owner_for_path "$path")" || return 0
     group="$(expected_group_for_path "$path")" || return 0
@@ -426,9 +430,11 @@ _fix_rclone_ownership() {
     owner=$(stat -c '%U' "$rclone_conf" 2>/dev/null || echo "")
     if [[ -n "$owner" && "$owner" != "$real_user" ]]; then
         log_warn "_fix_rclone_ownership: '${rclone_conf}' owned by '${owner}' — correcting to '${real_user}'"
-        chown "${real_user}:$(id -gn "$real_user" 2>/dev/null || id -gn)" "$rclone_conf" 2>/dev/null && \
-            log_info "_fix_rclone_ownership: ownership corrected → ${rclone_conf}" || \
+        if chown "${real_user}:$(id -gn "$real_user" 2>/dev/null || id -gn)" "$rclone_conf" 2>/dev/null; then
+            log_info "_fix_rclone_ownership: ownership corrected → ${rclone_conf}"
+        else
             log_warn "_fix_rclone_ownership: chown failed — rclone.conf may still be root-owned"
+        fi
     fi
 }
 

@@ -163,7 +163,7 @@ _update_install_env_after_storage() {
         return 0
     fi
 
-    local source_dev uuid device_path intended_key
+    local source_dev uuid device_path
     if ! source_dev="$(findmnt -n -o SOURCE --target "${DATA_VOLUME_MOUNT}" 2>/dev/null)" || [[ -z "$source_dev" ]]; then
         log_warn "Could not resolve mounted source for ${DATA_VOLUME_MOUNT}; skipping storage identity update"
         return 0
@@ -212,8 +212,11 @@ _mode_verify() {
             log_success "OK: ${project_state_dir}/${dir}"
         fi
     done
-    (( errors == 0 )) && log_success "Storage verification passed" \
-        || log_warn "Storage verification: ${errors} issue(s) found"
+    if (( errors == 0 )); then
+        log_success "Storage verification passed"
+    else
+        log_warn "Storage verification: ${errors} issue(s) found"
+    fi
     return 0
 }
 
