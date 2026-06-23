@@ -145,10 +145,6 @@ _email_http_common() {
             printf 'user = %s\n' "$(_email_curl_quote "${username}:${token}")" >"$cfg" || return 1
             ;;
         header)
-            if _email_has_control "$username"; then
-                rm -f "$body_file" "$cfg"
-                return 1
-            fi
             printf 'header = %s\n' "$(_email_curl_quote "${username}: ${token}")" >"$cfg" || return 1
             ;;
         *)
@@ -370,7 +366,7 @@ _rate_limit_reset_message() {
             || printf 'unknown time')
         printf 'resets in %dm %02ds (at %s)' "$mins" "$secs" "$reset_at"
     else
-        printf 'window may have already reset — try ./maintenance.sh test-email'
+        printf 'window may have already reset — try sudo ./maintenance.sh test-email'
     fi
 }
 
@@ -393,9 +389,15 @@ _rate_limit_check() {
     printf '%s\n' "$last_email_file"
 }
 
+_email_host() {
+    hostname -f 2>/dev/null || hostname
+}
+
 _build_email_metadata_body() {
-    printf '%s\n\nEmail delivery metadata:\nHost:      %s\nTimestamp: %s\nMode:      %s\nProvider:  %s\nMethod:    SMTP fallback chain' \
-        "$1" "$2" "$3" "$4" "$5"
+    local body="$1" host="$2" timestamp="$3" mode="$4" provider="$5" method="$6"
+    [[ -n "$provider" ]] || provider="none"
+    printf '%s\n\nEmail delivery metadata:\nHost:      %s\nTimestamp: %s\nMode:      %s\nProvider:  %s\nMethod:    %s' \
+        "$body" "$host" "$timestamp" "$mode" "$provider" "$method"
 }
 
 _email_date() {
@@ -403,7 +405,7 @@ _email_date() {
 }
 
 _email_msgid() {
-    printf '<%s.%s.%s@%s>' "$(date +%s)" "$$" "$RANDOM" "$(hostname -f 2>/dev/null || hostname)"
+    printf '<%s.%s.%s@%s>' "$(date +%s)" "$$" "$RANDOM" "$(_email_host)"
 }
 
 _email_write_text_crlf() {
@@ -576,7 +578,7 @@ _smtp_fallback_chain() {
 
 send_smtp_attachment() {
     local to="$1" subject="$2" body="$3" attachment_path="$4" attachment_name="$5"
-    local from filename message_file boundary msgid rc sender_name
+    local from filename message_file boundary msgid rc sender_name metadata_body
 
     _email_validate_addr TO "$to" || return 1
     _email_validate_header Subject "$subject" || return 1
@@ -601,6 +603,13 @@ send_smtp_attachment() {
     _email_register_cleanup_file "$message_file"
     boundary="vw-$(date +%s)-$$-${RANDOM}"
     msgid=$(_email_msgid)
+    metadata_body=$(_build_email_metadata_body \
+        "$body" \
+        "$(_email_host)" \
+        "$(date -Iseconds)" \
+        "${EMAIL_MODE:-smtp}" \
+        "${EMAIL_PROVIDER:-smtp}" \
+        "SMTP fallback chain")
 
     {
         printf 'From: %s <%s>\r\n' "$sender_name" "$from"
@@ -613,7 +622,7 @@ send_smtp_attachment() {
         printf -- '--%s\r\n' "$boundary"
         printf 'Content-Type: text/plain; charset=UTF-8\r\n'
         printf 'Content-Transfer-Encoding: 8bit\r\n\r\n'
-        printf '%s\n' "$body" | _email_write_text_crlf
+        printf '%s\n' "$metadata_body" | _email_write_text_crlf
         printf '\r\n--%s\r\n' "$boundary"
         printf 'Content-Type: application/octet-stream; name="%s"\r\n' "$filename"
         printf 'Content-Transfer-Encoding: base64\r\n'
@@ -651,10 +660,14 @@ send_email() {
 
     local mode="${EMAIL_MODE:-auto}" provider="${EMAIL_PROVIDER:-mailersend}"
     local driver fn from message_file msgid metadata_body rate_dir rate_file rc=1
+    local host timestamp
     case "$mode" in
         auto|api|smtp|direct|host) ;;
         *) log_error "Unknown EMAIL_MODE='${mode}'. Valid values: auto api smtp direct host"; return 1 ;;
     esac
+
+    host=$(_email_host)
+    timestamp=$(date -Iseconds)
 
     if rate_dir=$(_resolve_rate_limit_dir); then
         rate_file=$(_rate_limit_check "$subject" "$rate_dir") || return 0
@@ -665,7 +678,9 @@ send_email() {
     if [[ "$mode" == auto || "$mode" == api ]]; then
         if driver=$(_email_driver_lookup "$provider"); then
             fn="_email_driver_${driver}"
-            if declare -f "$fn" >/dev/null && "$fn" "$to" "$subject" "$body"; then
+            metadata_body=$(_build_email_metadata_body \
+                "$body" "$host" "$timestamp" "$mode" "$provider" "HTTP API provider ${driver}")
+            if declare -f "$fn" >/dev/null && "$fn" "$to" "$subject" "$metadata_body"; then
                 [[ "$rate_file" != /dev/null ]] && date +%s >"$rate_file"
                 log_info "Email sent via HTTP API provider ${driver}"
                 return 0
@@ -691,12 +706,25 @@ send_email() {
     chmod 600 "$message_file" || { rm -f "$message_file"; return 1; }
     _email_register_cleanup_file "$message_file"
     msgid=$(_email_msgid)
-    metadata_body=$(_build_email_metadata_body \
-        "$body" \
-        "$(hostname -f 2>/dev/null || hostname)" \
-        "$(date -Iseconds)" \
-        "$mode" \
-        "$provider")
+
+    case "$mode" in
+        auto|smtp)
+            metadata_body=$(_build_email_metadata_body \
+                "$body" "$host" "$timestamp" "$mode" "$provider" "SMTP fallback chain")
+            ;;
+        direct)
+            metadata_body=$(_build_email_metadata_body \
+                "$body" "$host" "$timestamp" "$mode" "$provider" "Direct upstream SMTP")
+            ;;
+        host)
+            metadata_body=$(_build_email_metadata_body \
+                "$body" "$host" "$timestamp" "$mode" "$provider" "Direct upstream SMTP (host alias)")
+            ;;
+        api)
+            rc=1
+            ;;
+    esac
+
     _build_plain_message "$message_file" "$from" "$to" "$subject" "$metadata_body" "$msgid" || {
         rm -f "$message_file"
         return 1
