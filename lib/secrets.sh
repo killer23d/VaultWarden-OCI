@@ -36,11 +36,16 @@ _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # directly without going through common.sh or a caller that pre-loads log.sh.
 # NOTE: _SECRETS_LIB_DIR is intentionally NOT unset here; it is reused two
 # lines below to source crypto.sh, then unset after that call.
+# shellcheck disable=SC1091 # sourced relative to this library at runtime
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_SECRETS_LIB_DIR}/log.sh"
+# shellcheck disable=SC1091 # sourced relative to this library at runtime
 [[ -n "${VAULTWARDEN_DEFAULTS_LOADED:-}" ]] || source "${_SECRETS_LIB_DIR}/defaults.sh"
 
+# shellcheck disable=SC1091 # sourced relative to this library at runtime
 source "${_SECRETS_LIB_DIR}/crypto.sh"
+# shellcheck disable=SC1091 # sourced relative to this library at runtime
 source "${_SECRETS_LIB_DIR}/schema.sh"
+# shellcheck disable=SC1091 # sourced relative to this library at runtime
 source "${_SECRETS_LIB_DIR}/email.sh"
 unset _SECRETS_LIB_DIR
 
@@ -1067,7 +1072,7 @@ auto_generate_secret_field() {
 
         email_api_token)
             # Placeholder for the email provider API token.
-            # Must be set via: ./utilities/secrets-rotate.sh email_api_token
+            # Must be set via: sudo ./edit-secrets.sh rotate email_api_token
             log_warn "Auto mode: Using placeholder for email API token - configure via rotate email_api_token" >&2
             printf '%s' "CHANGE_ME_EMAIL_API_TOKEN"
             ;;
@@ -1318,7 +1323,7 @@ EOF
    [ ] Run secrets setup (interactive — enter values from SECTION 2 when prompted):
        sudo ./setup.sh secrets
    [ ] Rotate any CHANGE_ME placeholders:
-       ./edit-secrets.sh rotate <field>
+       sudo ./edit-secrets.sh rotate <field>
 
 4. FINALIZATION
    [ ] Start services:
@@ -1576,7 +1581,7 @@ _validate_no_placeholders() {
         while IFS= read -r key; do
             log_error "  - $key"
         done <<< "$offending"
-        log_error "Run 'sudo ./setup.sh secrets' or './utilities/secrets-rotate.sh <field>' to configure these fields first."
+        log_error "Run 'sudo ./setup.sh secrets' or 'sudo ./edit-secrets.sh rotate <field>' to configure these fields first."
         return 1
     fi
 
@@ -1702,7 +1707,7 @@ export_docker_secrets() {
             || [[ "$_value" == "CHANGE_ME"* ]] \
             || [[ "$_value" == "NOT_USED"* ]] \
             || [[ "$_value" == "null" ]]; then
-            log_warn "export_docker_secrets: '$_key' skipped (placeholder/empty — rotate with: ./utilities/secrets-rotate.sh ${_key})"
+            log_warn "export_docker_secrets: '$_key' skipped (placeholder/empty — rotate with: sudo ./edit-secrets.sh rotate ${_key})"
             unset _value
             continue
         fi

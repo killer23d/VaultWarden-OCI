@@ -20,11 +20,13 @@ RUN_DIR="${TEST_ROOT}/run"
 mkdir -p "${ISOLATED_ROOT}/utilities" "$TEST_HOME" "$RUN_DIR"
 cp -R "${PROJECT_ROOT}/lib" "$ISOLATED_ROOT/"
 cp "${PROJECT_ROOT}/VERSION" "$ISOLATED_ROOT/"
+cp "${PROJECT_ROOT}/edit-secrets.sh" "$ISOLATED_ROOT/"
 for script in \
     secrets-view.sh \
     secrets-list.sh \
     secrets-rotate.sh \
-    secrets-export-recovery-kit.sh; do
+    secrets-export-recovery-kit.sh \
+    secrets-edit.sh; do
     cp "${PROJECT_ROOT}/utilities/${script}" "${ISOLATED_ROOT}/utilities/"
 done
 
@@ -59,12 +61,18 @@ assert_help() {
     shift 2
 
     local output
-    output="$(run_clean "${ISOLATED_ROOT}/utilities/${script}" "$@")" ||
-        fail "${script} $* exited non-zero"
+    if [[ "$script" == edit-secrets.sh ]]; then
+        output="$(run_clean "${ISOLATED_ROOT}/${script}" "$@")" ||
+            fail "${script} $* exited non-zero"
+    else
+        output="$(run_clean "${ISOLATED_ROOT}/utilities/${script}" "$@")" ||
+            fail "${script} $* exited non-zero"
+    fi
     [[ -n "$output" ]] || fail "${script} $* produced no output"
     [[ "$output" == *"$heading"* ]] || fail "${script} $* omitted heading: $heading"
     [[ "$output" == *"USAGE:"* ]] || fail "${script} $* omitted USAGE"
     assert_no_initialization_error "$output"
+    [[ "$output" == *"sudo ./edit-secrets.sh"* || "$script" == secrets-list.sh ]] || fail "${script} help lacks sudo edit-secrets examples"
 }
 
 assert_version() {
@@ -85,6 +93,8 @@ for option in --help -h; do
     assert_help secrets-rotate.sh "VaultWarden Secrets — rotate subcommand" "$option"
     assert_help secrets-export-recovery-kit.sh \
         "VaultWarden Secrets — export-recovery-kit subcommand" "$option"
+    assert_help secrets-edit.sh "VaultWarden Secrets — edit subcommand" "$option"
+    assert_help edit-secrets.sh "VaultWarden-OCI Secrets Editor" "$option"
 done
 
 assert_help secrets-view.sh "VaultWarden Secrets — view subcommand" view --help
@@ -92,6 +102,8 @@ assert_help secrets-list.sh "VaultWarden Secrets — list subcommand" list --hel
 assert_help secrets-rotate.sh "VaultWarden Secrets — rotate subcommand" rotate --help
 assert_help secrets-export-recovery-kit.sh \
     "VaultWarden Secrets — export-recovery-kit subcommand" export-recovery-kit --help
+assert_help secrets-edit.sh "VaultWarden Secrets — edit subcommand" edit --help
+assert_help edit-secrets.sh "VaultWarden-OCI Secrets Editor" help
 
 assert_version --version
 assert_version -V

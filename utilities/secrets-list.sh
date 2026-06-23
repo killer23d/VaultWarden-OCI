@@ -13,8 +13,8 @@ show_help() {
 VaultWarden Secrets — list subcommand
 
 USAGE:
-    ./utilities/secrets-list.sh list [OPTIONS]
-    ./edit-secrets.sh list
+    sudo ./utilities/secrets-list.sh list [OPTIONS]
+    sudo ./edit-secrets.sh list
 
 DESCRIPTION:
     Lists secret key names only — no values are decrypted or displayed.
@@ -23,8 +23,8 @@ FLAGS:
     --help, -h    Show this help
 
 EXAMPLES:
-    ./utilities/secrets-list.sh list
-    ./edit-secrets.sh list
+    sudo ./utilities/secrets-list.sh list
+    sudo ./edit-secrets.sh list
 EOF
 }
 
@@ -42,7 +42,7 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
-refuse_root_for_user_command "Do not run with sudo. Run: ./utilities/secrets-list.sh"
+require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 load_project_environment || exit 1
@@ -87,19 +87,21 @@ do_list_keys() {
     if [[ ${#_hashed_keys[@]} -gt 0 ]]; then
         log_warn "⚠  Hashed fields: ${_hashed_keys[*]} are one-way hashes."
         log_warn "   Decrypting the secrets file will show the hash, not the original password."
-        log_warn "   To change them: ./edit-secrets.sh rotate ${_hashed_keys[0]}"
+        log_warn "   To change them: sudo ./edit-secrets.sh rotate ${_hashed_keys[0]}"
     fi
 
     echo ""
     log_info "Canonical production key path: /etc/vaultwarden/age-key.txt (installed by setup.sh)"
-    log_info "Run './edit-secrets.sh rotate email_api_token' to set or rotate the provider API key."
-    log_info "Run './edit-secrets.sh rotate <field>' to update any other specific key."
+    log_info "Run 'sudo ./edit-secrets.sh rotate email_api_token' to set or rotate the provider API key."
+    log_info "Run 'sudo ./edit-secrets.sh rotate <field>' to update any other specific key."
     return 0
 }
 
 check_prerequisites() {
     local missing=()
-    [[ ! -f "$AGE_KEY_FILE" ]] && missing+=("Age encryption key: $AGE_KEY_FILE")
+    if ! resolve_age_key_path >/dev/null 2>&1; then
+        missing+=("Age encryption key (not found at /etc/vaultwarden/age-key.txt or secrets/keys/age-key.txt)")
+    fi
     [[ ! -f ".sops.yaml" ]]    && missing+=("SOPS configuration: .sops.yaml")
     [[ ! -f "$SECRETS_FILE" ]] && missing+=("Secrets file: $SECRETS_FILE")
     if [[ ${#missing[@]} -gt 0 ]]; then

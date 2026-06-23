@@ -46,7 +46,7 @@ USAGE:
 DESCRIPTION:
     Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
     credentials interactively or automatically. Interactive view/list/rotate
-    and recovery-kit export are normal-operator commands via edit-secrets.sh.
+    and recovery-kit export are root-operated commands via sudo ./edit-secrets.sh.
 
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
@@ -65,8 +65,8 @@ EXAMPLES:
     sudo utilities/setup-secrets.sh bootstrap
     sudo utilities/setup-secrets.sh configure
     sudo utilities/setup-secrets.sh configure --auto
-    ./edit-secrets.sh rotate email_api_token
-    ./edit-secrets.sh export-recovery-kit
+    sudo ./edit-secrets.sh rotate email_api_token
+    sudo ./edit-secrets.sh export-recovery-kit
     sudo utilities/setup-secrets.sh breakglass create
     sudo utilities/setup-secrets.sh breakglass status
 EOF
@@ -153,7 +153,7 @@ NOTES:
     --export-recovery-kit triggers the recovery-kit prompt that already
     appears after a successful setup run. To export a recovery kit
     independently (without running setup), use:
-        sudo utilities/setup-secrets.sh export-recovery-kit
+        sudo ./edit-secrets.sh export-recovery-kit
 
     The intended standalone order is:
         1. sudo ./setup.sh --domain DOMAIN --email EMAIL
@@ -161,7 +161,7 @@ NOTES:
                                 SMTP_HOST, etc.)
         3. sudo utilities/setup-secrets.sh configure
         4. sudo make up
-
+        
 FEATURES:
     ✅ Idempotent - Safe to re-run multiple times
     ✅ Auto-fixes missing prerequisites (Age keys, SOPS config)
@@ -181,9 +181,9 @@ EXAMPLES:
     sudo utilities/setup-secrets.sh configure --export-recovery-kit  # Prompt for kit after setup
 
 SEE ALSO:
-    ./utilities/secrets-rotate.sh list     # Show existing secret key names
-    ./utilities/secrets-rotate.sh FIELD    # Rotate a single secret
-    sudo utilities/setup-secrets.sh export-recovery-kit
+    sudo ./edit-secrets.sh list                  # Show existing secret key names
+    sudo ./edit-secrets.sh rotate FIELD          # Rotate a single secret
+    sudo ./edit-secrets.sh export-recovery-kit   # Export recovery kit
 HELP
     }
 
@@ -328,7 +328,7 @@ HELP
 
         if [[ "$FORCE" == "true" ]]; then
             log_info "Force mode - reconfiguring secrets"
-            [[ "$DRY_RUN" != "true" ]] && create_secrets_backup
+            [[ "$DRY_RUN" != "true" ]] && create_secrets_backup "$SECRETS_FILE" "$SECRETS_BACKUP_DIR"
             return 0
         fi
 
@@ -347,7 +347,7 @@ HELP
         fi
 
         if [[ "$confirm" == "yes" ]]; then
-            create_secrets_backup
+            create_secrets_backup "$SECRETS_FILE" "$SECRETS_BACKUP_DIR"
             return 0
         fi
 
@@ -853,15 +853,13 @@ BACKUP_BANNER
 
         log_info "Writing secrets to encrypted YAML file..."
 
-        local secrets_dir real_user real_group
+        local secrets_dir
         secrets_dir="$(dirname "$SECRETS_FILE")"
-        real_user=$(get_real_user)
-        real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
         if ! mkdir -p "$secrets_dir"; then
             log_error "Failed to create secrets directory: $secrets_dir"
             return 1
         fi
-        chown "$real_user:$real_group" "$secrets_dir" || return 1
+        chown root:root "$secrets_dir" || return 1
         chmod 700 "$secrets_dir" || return 1
 
         local temp_file=""
@@ -918,7 +916,7 @@ BACKUP_BANNER
         fi
         rm -f "$temp_file"
 
-        if ! secure_secrets_file; then
+        if ! secure_secrets_file "$SECRETS_FILE"; then
             log_error "Failed to secure secrets file permissions"
             return 1
         fi
@@ -965,8 +963,8 @@ BACKUP_BANNER
 
         if ! check_reconfiguration; then
             log_info "Keeping existing secrets - no changes made"
-            log_info "Tip: to rotate a single field run: ./edit-secrets.sh rotate FIELD"
-            log_info "Tip: to export a recovery kit run:  ./edit-secrets.sh export-recovery-kit"
+            log_info "Tip: to rotate a single field run: sudo ./edit-secrets.sh rotate FIELD"
+            log_info "Tip: to export a recovery kit run:  sudo ./edit-secrets.sh export-recovery-kit"
             return 0
         fi
 
@@ -1013,10 +1011,10 @@ BACKUP_BANNER
             echo "                 SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
             echo "   2. Start services:            sudo make up"
             echo "   3. Setup automation:          sudo ./setup.sh systemd install"
-            echo "   4. Export recovery kit:       ./edit-secrets.sh export-recovery-kit"
+            echo "   4. Export recovery kit:       sudo ./edit-secrets.sh export-recovery-kit"
             echo "   5. Test health:               ./maintenance.sh health"
-            echo "   6. To rotate a single field:  ./edit-secrets.sh rotate FIELD"
-            echo "   7. To list secret keys:       ./edit-secrets.sh list"
+            echo "   6. To rotate a single field:  sudo ./edit-secrets.sh rotate FIELD"
+            echo "   7. To list secret keys:       sudo ./edit-secrets.sh list"
             echo ""
             echo "📧 Email mode reference (set EMAIL_MODE in .env):"
             echo "   auto  — API → Postfix sidecar → direct upstream SMTP fallback chain (recommended)"
@@ -1040,10 +1038,10 @@ BACKUP_BANNER
 _cmd_user_secret_stub() {
     local subcmd="$1"
     log_error "'utilities/setup-secrets.sh ${subcmd}' is not a root setup command."
-    log_error "Run interactive secrets commands as your normal user, without sudo:"
+    log_error "Run root-operated secrets commands with sudo:"
     case "$subcmd" in
-        rotate) log_error "  ./edit-secrets.sh rotate FIELD" ;;
-        export-recovery-kit) log_error "  ./edit-secrets.sh export-recovery-kit" ;;
+        rotate) log_error "  sudo ./edit-secrets.sh rotate FIELD" ;;
+        export-recovery-kit) log_error "  sudo ./edit-secrets.sh export-recovery-kit" ;;
     esac
     return 1
 }
@@ -2249,17 +2247,15 @@ EOF
 
     _repair_encrypted_secrets_ownership() {
         local secrets_file="$1"
-        local secrets_dir real_user real_group
+        local secrets_dir
 
         secrets_dir="$(dirname "$secrets_file")"
-        real_user=$(get_real_user)
-        real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
 
-        chown "$real_user:$real_group" "$secrets_dir" || return 1
+        chown root:root "$secrets_dir" || return 1
         chmod 700 "$secrets_dir" || return 1
 
         if [[ -f "$secrets_file" ]]; then
-            chown "$real_user:$real_group" "$secrets_file" || return 1
+            chown root:root "$secrets_file" || return 1
             chmod 600 "$secrets_file" || return 1
         fi
     }
@@ -2465,6 +2461,7 @@ main() {
 }
 
 if [[ "${SETUP_SECRETS_TRANSACTION_TESTING:-}" == "source-only" ]]; then
+    # shellcheck disable=SC2317 # valid when this file is sourced instead of executed
     return 0 2>/dev/null || exit 0
 fi
 

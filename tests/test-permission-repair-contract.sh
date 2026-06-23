@@ -95,12 +95,12 @@ if utilities/setup-secrets.sh rotate example > "$rotate_out" 2>&1; then
     cat "$rotate_out" >&2
     fail "setup-secrets rotate stub should fail"
 fi
-grep -Fq './edit-secrets.sh rotate FIELD' "$rotate_out" || { cat "$rotate_out" >&2; fail "rotate stub lacks non-root guidance"; }
+grep -Fq 'sudo ./edit-secrets.sh rotate FIELD' "$rotate_out" || { cat "$rotate_out" >&2; fail "rotate stub lacks sudo guidance"; }
 
 kit_out="${TMP_DIR}/kit-stub.out"
 if utilities/setup-secrets.sh export-recovery-kit > "$kit_out" 2>&1; then
     cat "$kit_out" >&2
     fail "setup-secrets export-recovery-kit stub should fail"
 fi
-grep -Fq './edit-secrets.sh export-recovery-kit' "$kit_out" || { cat "$kit_out" >&2; fail "export-recovery-kit stub lacks non-root guidance"; }
-pass "root-facing setup-secrets secret-authoring paths are non-root guidance stubs"
+grep -Fq 'sudo ./edit-secrets.sh export-recovery-kit' "$kit_out" || { cat "$kit_out" >&2; fail "export-recovery-kit stub lacks sudo guidance"; }
+pass "setup-secrets secret-authoring paths provide sudo guidance"

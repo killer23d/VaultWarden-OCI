@@ -13,8 +13,8 @@ show_help() {
 VaultWarden Secrets — export-recovery-kit subcommand
 
 USAGE:
-    ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]
-    ./edit-secrets.sh export-recovery-kit [OPTIONS]
+    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]
+    sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
     Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, then
@@ -30,8 +30,8 @@ FLAGS:
     --help, -h    Show this help
 
 EXAMPLES:
-    ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
-    ./edit-secrets.sh export-recovery-kit
+    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
+    sudo ./edit-secrets.sh export-recovery-kit
 EOF
 }
 
@@ -52,7 +52,7 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
 fi
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
-refuse_root_for_user_command "Do not run with sudo. Run: ./utilities/secrets-export-recovery-kit.sh"
+require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 load_project_environment || exit 1

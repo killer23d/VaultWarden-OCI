@@ -13,9 +13,9 @@ show_help() {
 VaultWarden Secrets — view subcommand
 
 USAGE:
-    ./utilities/secrets-view.sh [OPTIONS]
-    ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
-    ./edit-secrets.sh view [OPTIONS]
+    sudo ./utilities/secrets-view.sh [OPTIONS]
+    sudo ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
+    sudo ./edit-secrets.sh view [OPTIONS]
 
 DESCRIPTION:
     Decrypts and displays secrets in read-only mode. No changes are saved.
@@ -25,9 +25,9 @@ FLAGS:
     --help, -h         Show this help
 
 EXAMPLES:
-    ./utilities/secrets-view.sh
-    ./utilities/secrets-view.sh --editor vim
-    ./edit-secrets.sh view
+    sudo ./utilities/secrets-view.sh
+    sudo ./utilities/secrets-view.sh --editor vim
+    sudo ./edit-secrets.sh view
 EOF
 }
 
@@ -65,7 +65,7 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
-refuse_root_for_user_command "Do not run with sudo. Run: ./utilities/secrets-view.sh"
+require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 load_project_environment || exit 1
@@ -77,7 +77,9 @@ read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
 
 check_prerequisites() {
     local missing=()
-    [[ ! -f "$AGE_KEY_FILE" ]] && missing+=("Age encryption key: $AGE_KEY_FILE")
+    if ! resolve_age_key_path >/dev/null 2>&1; then
+        missing+=("Age encryption key (not found at /etc/vaultwarden/age-key.txt or secrets/keys/age-key.txt)")
+    fi
     [[ ! -f ".sops.yaml" ]]    && missing+=("SOPS configuration: .sops.yaml")
     [[ ! -f "$SECRETS_FILE" ]] && missing+=("Secrets file: $SECRETS_FILE")
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -92,11 +94,11 @@ check_prerequisites() {
 validate_secrets() {
     log_info "Validating secrets file..."
     if ! ensure_sops_env; then return 1; fi
-    if ! validate_secrets_decryption; then
+    if ! validate_secrets_decryption "$SECRETS_FILE"; then
         log_error "Cannot decrypt secrets file - Age key may be incorrect or file corrupted"
         return 1
     fi
-    if ! validate_secrets_yaml; then
+    if ! validate_secrets_yaml "$SECRETS_FILE"; then
         log_warn "Secrets file has invalid YAML structure (continuing - you may be fixing it)"
     fi
     log_success "Secrets validation passed"

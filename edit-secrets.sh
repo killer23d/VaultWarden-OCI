@@ -11,15 +11,13 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
-refuse_root_for_user_command "Do not run with sudo. Run: ./edit-secrets.sh"
-load_project_environment || exit 1
 
 show_help() {
 cat <<'HELP'
 VaultWarden-OCI Secrets Editor
 
 USAGE:
-    ./edit-secrets.sh <subcommand> [options]
+    sudo ./edit-secrets.sh <subcommand> [options]
 
 DESCRIPTION:
     Thin dispatcher for VaultWarden secrets management operations. Delegates
@@ -39,15 +37,15 @@ OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    ./edit-secrets.sh edit
-    ./edit-secrets.sh edit --editor vim
-    ./edit-secrets.sh view
-    ./edit-secrets.sh list
-    ./edit-secrets.sh rotate admin_token
-    ./edit-secrets.sh rotate email_api_token --dry-run
-    ./edit-secrets.sh export-recovery-kit
+    sudo ./edit-secrets.sh edit
+    sudo ./edit-secrets.sh edit --editor vim
+    sudo ./edit-secrets.sh view
+    sudo ./edit-secrets.sh list
+    sudo ./edit-secrets.sh rotate admin_token
+    sudo ./edit-secrets.sh rotate email_api_token --dry-run
+    sudo ./edit-secrets.sh export-recovery-kit
 
-Run './edit-secrets.sh <subcommand> --help' for subcommand-specific options.
+Run 'sudo ./edit-secrets.sh <subcommand> --help' for subcommand-specific options.
 If SOPS reports permission drift, run: sudo utilities/repair-permissions.sh
 HELP
 }
@@ -58,6 +56,14 @@ if [[ $# -eq 0 ]]; then
 fi
 
 _TASK="${1}"
+
+case "$_TASK" in
+    help|--help|-h|--version|-V) ;;
+    *)
+        require_root "$@"
+        load_project_environment || exit 1
+        ;;
+esac
 
 # Pre-flight: verify the secrets file exists before dispatching to any
 # subcommand that reads or writes it. 'help' variants are exempt.
@@ -104,7 +110,7 @@ case "$_TASK" in
     *)
         log_error "Unknown subcommand: '$_TASK'"
         log_error "Valid subcommands: edit | view | list | rotate FIELD | export-recovery-kit | help"
-        log_error "Run './edit-secrets.sh help' for usage."
+        log_error "Run 'sudo ./edit-secrets.sh help' for usage."
         exit 1
         ;;
 esac
