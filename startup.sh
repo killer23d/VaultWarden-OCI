@@ -53,7 +53,7 @@ STARTUP OPTIONS:
                    or when images are already current)
   --background     Start services in background (daemon mode)
   --skip-egress-fix  Skip automatic egress NAT remediation for
-                     non-internal VaultWarden Docker bridge networks
+                      non-internal VaultWarden Docker bridge networks
   --dry-run        Show what would be done without executing
 
 GLOBAL OPTIONS:
@@ -185,6 +185,17 @@ check_email_config_consistency() {
   return 0
 }
 
+validate_caddy_version_pin() {
+  if [[ "${CADDY_VERSION:-}" == "latest" ]]; then
+    log_error "CADDY_VERSION=latest is invalid for this stack's custom Caddy build."
+    log_error "The Dockerfile uses caddy:\${CADDY_VERSION}-builder; caddy:latest-builder is not published."
+    log_error "Fix .env and installed env files by setting: CADDY_VERSION=2.11.4"
+    log_error "Then rerun setup-env or startup. Example: sudo sed -i 's/^CADDY_VERSION=.*/CADDY_VERSION=2.11.4/' .env"
+    return 1
+  fi
+  return 0
+}
+
 load_environment() {
   log_info "Loading environment configuration..."
 
@@ -195,6 +206,7 @@ load_environment() {
   fi
 
   load_project_environment || return 1
+  validate_caddy_version_pin || return 1
   DOCKER_SECRETS_DIR="/run/vaultwarden-oci/secrets"
   export DOCKER_SECRETS_DIR
   log_success "Environment loaded"
@@ -537,8 +549,32 @@ _startup_pull_images() {
     return 0
   fi
 
-  docker compose pull --quiet
+  if ! docker compose pull --quiet; then
+    log_error "docker compose pull failed"
+    return 1
+  fi
+
   log_success "Images pulled successfully"
+  return 0
+}
+
+ensure_lock_group_for_startup() {
+  local lock_group="vaultwarden"
+
+  if getent group "$lock_group" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if (( EUID == 0 )) && command -v groupadd >/dev/null 2>&1; then
+    if groupadd --system "$lock_group"; then
+      log_info "Created system group '${lock_group}' for shared lock-file coordination."
+      log_info "Run 'sudo utilities/setup-systemd.sh install' later to add the operator user to this group for non-root maintenance commands."
+      return 0
+    fi
+  fi
+
+  log_warn "System group '${lock_group}' is missing; lock helpers may use a temporary fallback."
+  log_warn "Run 'sudo utilities/setup-systemd.sh install' to create it permanently."
   return 0
 }
 
@@ -554,6 +590,8 @@ update_dns_on_startup() {
     log_info "[DRY RUN] Would run: ${dns_script} update-dns"
     return 0
   fi
+
+  ensure_lock_group_for_startup
 
   if _maybe_sudo "$dns_script" update-dns; then
     log_success "Startup DNS reconciliation completed"
@@ -587,10 +625,17 @@ _startup_start_services() {
 
   if [[ "$FORCE_RESTART" == "true" ]]; then
     log_info "Force restart requested; removing existing containers so Docker metadata is regenerated."
-    docker compose rm -sf
+    if ! docker compose rm -sf; then
+      log_error "docker compose rm failed during forced restart"
+      return 1
+    fi
   fi
 
-  docker compose "${compose_args[@]}"
+  if ! docker compose "${compose_args[@]}"; then
+    log_error "docker compose ${compose_args[*]} failed"
+    return 1
+  fi
+
   log_success "Services started"
   return 0
 }
