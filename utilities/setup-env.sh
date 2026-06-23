@@ -242,7 +242,7 @@ create_env_file() {
             sub(/^DATA_VOLUME_DEVICE=.*/,     "DATA_VOLUME_DEVICE="     ENVIRON["AWK_DATA_DEVICE"]);
             sub(/^DATA_VOLUME_MOUNT=.*/,      "DATA_VOLUME_MOUNT="      ENVIRON["AWK_DATA_MOUNT"]);
             sub(/^PROJECT_STATE_DIR=.*/,      "PROJECT_STATE_DIR="      ENVIRON["AWK_STATE_DIR"]);
-            sub(/^SOPS_AGE_KEY_FILE=.*/,      "SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt");
+            sub(/^SOPS_AGE_KEY_FILE=.*/,      "SOPS_AGE_KEY_FILE=");
             print;
         }
     ' "$env_template" > "$temp_env" || { rm -f "$temp_env"; return 1; }
