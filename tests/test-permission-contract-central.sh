@@ -62,6 +62,20 @@ repo_secret="$PROJECT_ROOT/secrets/secrets.yaml"
 printf 'repo-stale\n' > "$repo_secret"
 printf 'PROJECT_STATE_DIR=%s\n' "$PROJECT_STATE_DIR" > "$PROJECT_STATE_DIR/config/install.env"
 chmod 0600 "$PROJECT_STATE_DIR/config/install.env"
+
+if (( EUID != 0 )); then
+    set +e
+    (
+        _VW_CALLING_SCRIPT=maintenance-health.sh
+        export _VW_CALLING_SCRIPT
+        load_env_file "$PROJECT_STATE_DIR/config/install.env" >/dev/null 2>&1
+    )
+    health_guard_rc=$?
+    set -e
+    [[ "$health_guard_rc" -eq 3 ]] || fail 'maintenance-health non-root env guard did not exit 3'
+    pass 'maintenance-health direct env load is root-guarded'
+fi
+
 SECRETS_FILE="$repo_secret"
 export SECRETS_FILE
 load_env_file "$PROJECT_STATE_DIR/config/install.env" || fail 'load_env_file failed for persistent secrets resolution regression'
