@@ -721,6 +721,7 @@ install_units() {
     else
         if [[ -f "$age_key_src" ]]; then
             install -m 600 -o root -g root "$age_key_src" "$AGE_KEY_DEST"
+            fix_known_path_permissions "$AGE_KEY_DEST"
             log_success "Installed age key: $AGE_KEY_DEST (root:root 600)"
             _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
             log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST set in $ENV_FILE"
@@ -732,8 +733,7 @@ install_units() {
             # persist across subsequent install runs, causing backup.sh to fail with
             # "Age key file not found: /opt/vaultwarden-scripts/secrets/keys/age-key.txt".
             if [[ -f "$AGE_KEY_DEST" ]]; then
-                chown root:root "$AGE_KEY_DEST" 2>/dev/null || true
-                chmod 600 "$AGE_KEY_DEST" 2>/dev/null || true
+                fix_known_path_permissions "$AGE_KEY_DEST"
                 _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
                 log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST corrected in $ENV_FILE"
                 log_info "  Key already present at $AGE_KEY_DEST -- no copy needed."
@@ -756,8 +756,7 @@ install_units() {
 
     if [[ -n "$existing_rclone_cfg" && "$existing_rclone_cfg" == "$rclone_dest" && -f "$rclone_dest" ]]; then
         if [[ "$DRY_RUN" == "false" ]]; then
-            chown root:root "$rclone_dest" 2>/dev/null || true
-            chmod 600 "$rclone_dest" 2>/dev/null || true
+            fix_known_path_permissions "$rclone_dest"
         fi
         log_success "rclone config already at $rclone_dest (RCLONE_CONFIG in env is correct)"
     else
