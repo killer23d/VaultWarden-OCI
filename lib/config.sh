@@ -155,7 +155,7 @@ load_env_file() {
         for malformed in "${malformed_lines[@]}"; do
             log_warn "  ${malformed}"
         done
-        log_hint "Valid format: KEY=value or KEY="value with spaces""
+        log_hint "Valid format: KEY=value or KEY=\"value with spaces\""
         log_hint "Common mistakes: spaces around '=', an 'export ' prefix, or invalid variable names."
     fi
 
@@ -178,6 +178,13 @@ load_env_file() {
         SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
         export SOPS_AGE_KEY_FILE
         log_debug "load_env_file: SOPS_AGE_KEY_FILE was blank; using ${SOPS_AGE_KEY_FILE}"
+    fi
+
+    # Keep direct env-file callers aligned with the split-permission secrets
+    # layout. load_project_environment already does this, but scripts such as
+    # maintenance-health.sh call load_env_file directly.
+    if declare -F resolve_secrets_file >/dev/null 2>&1; then
+        resolve_secrets_file
     fi
 
     log_debug "Environment loaded successfully from: $env_file"
