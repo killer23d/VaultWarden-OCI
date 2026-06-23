@@ -674,12 +674,25 @@ elif [[ ! -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would write firewall bouncer config with DOCKER-USER chain"
 else
     # Fresh install path — config file does not exist yet.
-    if ! cscli bouncers list 2>/dev/null | grep -q 'firewall-bouncer'; then
+    # If LAPI has a stale bouncer registration but the local config is missing,
+    # generate a fresh key instead of trying to read from a non-existent file.
+    if ! cscli bouncers list 2>/dev/null | grep -q 'firewall-bouncer' \
+        || [[ ! -f "$_FW_BOUNCER_CONFIG" ]]; then
         log_info "Registering firewall bouncer in CrowdSec LAPI..."
         _fw_key="$(openssl rand -hex 32)"
+        cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
+        cscli bouncers delete firewall-bouncer 2>/dev/null || true
         cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_key" 2>/dev/null || true
     else
         _fw_key="$(grep 'api_key:' "$_FW_BOUNCER_CONFIG" 2>/dev/null | awk '{print $2}' | head -1 || true)"
+    fi
+
+    if [[ -z "${_fw_key:-}" ]]; then
+        log_warn "Firewall bouncer key could not be recovered — generating a fresh key."
+        _fw_key="$(openssl rand -hex 32)"
+        cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
+        cscli bouncers delete firewall-bouncer 2>/dev/null || true
+        cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_key" 2>/dev/null || true
     fi
 
     # Detect whether iptables is using the nf_tables backend (Ubuntu 22.04+/Noble)
@@ -695,13 +708,15 @@ else
   - DOCKER-USER"
     fi
 
+    install -d -m 750 -o root -g root "$(dirname "$_FW_BOUNCER_CONFIG")"
+
     cat > "$_FW_BOUNCER_CONFIG" <<FWCONFIG
 mode: ${_fw_mode}
 update_frequency: 10s
 log_mode: stdout
 log_level: info
 api_url: http://127.0.0.1:${_LAPI_PORT}/
-api_key: ${_fw_key:-CHANGE_ME_FW_BOUNCER_KEY}
+api_key: ${_fw_key}
 
 origins: []
 
