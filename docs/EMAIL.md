@@ -61,7 +61,7 @@ Test the complete default path after setup:
 
 ```bash
 sudo ./maintenance.sh test-email --verbose
-# or: sudo make test-email
+sudo utilities/maintenance-email.sh --dry-run
 ```
 
 ---
@@ -186,7 +186,7 @@ Secrets:
 
 ```bash
 sudo ./maintenance.sh test-email --verbose
-sudo make test-email
+sudo utilities/maintenance-email.sh --dry-run
 ```
 
 Useful checks:
