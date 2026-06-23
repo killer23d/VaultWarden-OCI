@@ -57,6 +57,17 @@ fix_known_path_permissions "$PROJECT_STATE_DIR/secrets"
 [[ "$(stat -c '%a' "$PROJECT_STATE_DIR/secrets")" == 700 ]] || fail 'persistent secrets dir was not repaired to 0700'
 pass 'persistent state secrets are repaired by central helper'
 
+source lib/config.sh
+repo_secret="$PROJECT_ROOT/secrets/secrets.yaml"
+printf 'repo-stale\n' > "$repo_secret"
+printf 'PROJECT_STATE_DIR=%s\n' "$PROJECT_STATE_DIR" > "$PROJECT_STATE_DIR/config/install.env"
+chmod 0600 "$PROJECT_STATE_DIR/config/install.env"
+SECRETS_FILE="$repo_secret"
+export SECRETS_FILE
+load_env_file "$PROJECT_STATE_DIR/config/install.env" || fail 'load_env_file failed for persistent secrets resolution regression'
+[[ "$SECRETS_FILE" == "$persistent_secret" ]] || fail 'load_env_file did not resolve persistent secrets.yaml for direct health-style callers'
+pass 'load_env_file resolves persistent secrets.yaml for direct health-style callers'
+
 age_warn_pattern="Age key ownership was .*expected.*ubunt""u"
 ! grep -RIn "$age_warn_pattern" . --exclude-dir=.git >/tmp/vw-age-warn.$$ || { cat /tmp/vw-age-warn.$$ >&2; rm -f /tmp/vw-age-warn.$$; fail 'stale ubuntu age-key warning found'; }
 rm -f /tmp/vw-age-warn.$$
