@@ -79,11 +79,11 @@ Set or verify:
 Then rotate the external credentials that setup cannot generate:
 
 ```bash
-./edit-secrets.sh rotate caddy_cloudflare_dns_token
-./edit-secrets.sh rotate cf_worker_bouncer_token
-./edit-secrets.sh rotate cloudflare_zone_id
-./edit-secrets.sh rotate cf_account_id
-./edit-secrets.sh rotate smtp_password
+sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
+sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+sudo ./edit-secrets.sh rotate cloudflare_zone_id
+sudo ./edit-secrets.sh rotate cf_account_id
+sudo ./edit-secrets.sh rotate smtp_password
 ```
 
 > `cloudflare_zone_id` is stored in SOPS secrets, not as `CLOUDFLARE_ZONE_ID` in `.env`.
@@ -91,9 +91,9 @@ Then rotate the external credentials that setup cannot generate:
 ### 6. Start and verify
 
 ```bash
-./startup.sh
-./maintenance.sh health
-./maintenance.sh test-email --verbose
+sudo ./startup.sh
+sudo ./maintenance.sh health
+sudo ./maintenance.sh test-email --verbose
 ```
 
 When health checks pass, switch the Cloudflare record to **Proxied (Orange Cloud)** and verify Cloudflare SSL/TLS is **Full (Strict)**.

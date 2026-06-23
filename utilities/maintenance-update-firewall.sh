@@ -29,7 +29,7 @@ VaultWarden-OCI Firewall Range Updater
 
 USAGE:
     sudo utilities/maintenance-update-firewall.sh [OPTIONS]
-    ./maintenance.sh update-firewall [OPTIONS]
+    sudo ./maintenance.sh update-firewall [OPTIONS]
 
 DESCRIPTION:
     Fetches the current Cloudflare IP ranges (IPv4 + IPv6) and adds any new

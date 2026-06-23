@@ -1590,7 +1590,6 @@ main() {
     # list subcommand and the rclone availability checks — can read config values
     # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
     load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
-    auto_fix_critical_permissions "$PROJECT_ROOT"
 
     # Resolve the backup storage root from .env using the same
     # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path

@@ -278,7 +278,7 @@ EXAMPLES:
 VaultWarden-OCI Maintenance Script
 
 USAGE:
-    ./maintenance.sh <subcommand> [options]
+    sudo ./maintenance.sh <subcommand> [options]
 
 DESCRIPTION:
     Thin dispatcher that routes maintenance subcommands to their dedicated
@@ -301,10 +301,10 @@ OPTIONS:
     --version, -V     Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    ./maintenance.sh run
-    ./maintenance.sh health
-    ./maintenance.sh run --comprehensive
-    ./maintenance.sh health --help
+    sudo ./maintenance.sh run
+    sudo ./maintenance.sh health
+    sudo ./maintenance.sh run --comprehensive
+    ./maintenance.sh --help
 
 Run './maintenance.sh <subcommand> --help' for subcommand-specific options.
 ```
@@ -412,10 +412,8 @@ EXIT CODES:
 VaultWarden-OCI Email Diagnostics
 
 USAGE:
-    ./maintenance.sh test-email [OPTIONS]
-    utilities/maintenance-email.sh [OPTIONS]
-
-Do not run with sudo. Run: ./maintenance.sh test-email
+    sudo ./maintenance.sh test-email [OPTIONS]
+    sudo utilities/maintenance-email.sh [OPTIONS]
 
 OPTIONS:
     --recipient EMAIL   Override default admin email recipient
@@ -502,7 +500,7 @@ VaultWarden-OCI DNS Updater
 
 USAGE:
     sudo utilities/maintenance-update-dns.sh [OPTIONS]
-    ./maintenance.sh update-dns [OPTIONS]
+    sudo ./maintenance.sh update-dns [OPTIONS]
 
 OPTIONS:
     --email       Send email notification if the DNS record is updated
@@ -536,7 +534,7 @@ VaultWarden-OCI Firewall Range Updater
 
 USAGE:
     sudo utilities/maintenance-update-firewall.sh [OPTIONS]
-    ./maintenance.sh update-firewall [OPTIONS]
+    sudo ./maintenance.sh update-firewall [OPTIONS]
 
 DESCRIPTION:
     Fetches the current Cloudflare IP ranges (IPv4 + IPv6) and adds any new
@@ -630,9 +628,9 @@ Checks/repairs explicit project paths only:
   .sops.yaml -> 0644 (public SOPS policy/Age recipients; owner preserved)
   repo Age key -> operator-owned 0600 when present
   /etc/vaultwarden and installed key/env/rclone files -> root:root private
-  PROJECT_STATE_DIR config env/manifest files -> non-world-readable private state
-  encrypted secrets.yaml and containing directory -> operator-accessible/private
-  /run/vaultwarden-oci/secrets -> root:root 0700
+  PROJECT_STATE_DIR config/secrets env/manifest files -> root:root private state
+  encrypted persistent secrets.yaml and containing directory -> root:root private state
+  /run/vaultwarden-oci/secrets and files inside -> root:root runtime secrets
   known recovery-kit outputs under the project root -> not world-readable
 
 Does not recursively chmod broad directories and never makes private keys,
@@ -866,9 +864,9 @@ ENVIRONMENT:
     CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
 
     Cloudflare credentials (in encrypted secrets, not .env):
-        ./edit-secrets.sh rotate cf_worker_bouncer_token
-        ./edit-secrets.sh rotate cloudflare_zone_id
-        ./edit-secrets.sh rotate cf_account_id
+        sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+        sudo ./edit-secrets.sh rotate cloudflare_zone_id
+        sudo ./edit-secrets.sh rotate cf_account_id
 
 EXAMPLES:
     sudo utilities/setup-crowdsec.sh

@@ -27,9 +27,9 @@ Checks/repairs explicit project paths only:
   .sops.yaml -> 0644 (public SOPS policy/Age recipients; owner preserved)
   repo Age key -> operator-owned 0600 when present
   /etc/vaultwarden and installed key/env/rclone files -> root:root private
-  PROJECT_STATE_DIR config env/manifest files -> non-world-readable private state
-  encrypted secrets.yaml and containing directory -> operator-accessible/private
-  /run/vaultwarden-oci/secrets -> root:root 0700
+  PROJECT_STATE_DIR config/secrets env/manifest files -> root:root private state
+  encrypted persistent secrets.yaml and containing directory -> root:root private state
+  /run/vaultwarden-oci/secrets and files inside -> root:root runtime secrets
   known recovery-kit outputs under the project root -> not world-readable
 
 Does not recursively chmod broad directories and never makes private keys,
@@ -82,13 +82,16 @@ _apply_chmod() {
     fi
 }
 
-_apply_owner_mode() {
-    local owner="$1" group="$2" mode="$3" path="$4" label="$5" expected actual ok=true
+_apply_known_path() {
+    local path="$1" label="$2" owner group mode expected actual ok=true
     [[ -e "$path" ]] || return 0
+    owner="$(expected_owner_for_path "$path")" || return 0
+    group="$(expected_group_for_path "$path")" || return 0
+    mode="$(expected_mode_for_path "$path")" || return 0
     expected="owner ${owner}:${group}, mode $mode"
     actual="mode $(_mode_of "$path"), owner $(_owner_of "$path")"
     [[ "$(_owner_of "$path")" == "${owner}:${group}" ]] || ok=false
-    [[ "$(_mode_of "$path")" == "${mode#0}" || "$(_mode_of "$path")" == "$mode" ]] || ok=false
+    [[ "$(_mode_of "$path")" == "$mode" ]] || ok=false
     if [[ "$ok" == "true" ]]; then
         _report OK "$label" "$path" "$expected" "$actual" "action: none"
         return 0
@@ -97,9 +100,8 @@ _apply_owner_mode() {
         STATUS=1
         _report ERROR "$label" "$path" "$expected" "$actual" "fix: sudo utilities/repair-permissions.sh"
     else
-        chown "${owner}:${group}" "$path"
-        chmod "$mode" "$path"
-        _report FIXED "$label" "$path" "$expected" "$actual" "action: chown ${owner}:${group}; chmod $mode"
+        fix_known_path_permissions "$path"
+        _report FIXED "$label" "$path" "$expected" "$actual" "action: fix_known_path_permissions"
     fi
 }
 
@@ -126,27 +128,30 @@ _apply_not_world() {
 
 # Public metadata: operator-readable, owner preserved.
 if [[ -e "${PROJECT_ROOT}/.sops.yaml" ]]; then
-    _apply_chmod 0644 "${PROJECT_ROOT}/.sops.yaml" ".sops.yaml SOPS policy"
+    _apply_known_path "${PROJECT_ROOT}/.sops.yaml" ".sops.yaml SOPS policy"
 else
     _report WARN ".sops.yaml SOPS policy" "${PROJECT_ROOT}/.sops.yaml" "mode 0644 when present" "missing" "action: none"
 fi
 
 # Repo/operator-managed private authoring files.
-if [[ -d "${PROJECT_ROOT}/secrets" ]]; then
-    _apply_owner_mode "$OPERATOR_USER" "$OPERATOR_GROUP" 0700 "${PROJECT_ROOT}/secrets/keys" "repo Age key directory"
-fi
-_apply_owner_mode "$OPERATOR_USER" "$OPERATOR_GROUP" 0600 "${PROJECT_ROOT}/secrets/keys/age-key.txt" "repo Age private key"
-_apply_owner_mode "$OPERATOR_USER" "$OPERATOR_GROUP" 0700 "$(dirname "$SECRETS_FILE")" "encrypted secrets directory"
-_apply_owner_mode "$OPERATOR_USER" "$OPERATOR_GROUP" 0600 "$SECRETS_FILE" "encrypted secrets.yaml"
+_apply_known_path "${PROJECT_ROOT}/secrets/keys/age-key.txt" "repo Age private key"
 
 # Installed/root-managed private state.
-_apply_owner_mode root root 0700 /etc/vaultwarden "installed config directory"
-_apply_owner_mode root root 0600 /etc/vaultwarden/age-key.txt "installed Age private key"
-_apply_owner_mode root root 0600 /etc/vaultwarden/vaultwarden.env "installed Vaultwarden env"
-_apply_owner_mode root root 0600 /etc/vaultwarden/rclone.conf "installed rclone config"
-_apply_owner_mode root root 0600 "${PROJECT_STATE_DIR}/config/install.env" "installed state env"
-_apply_not_world "${PROJECT_STATE_DIR}/config/dr-manifest.env" "DR manifest"
-_apply_owner_mode root root 0700 /run/vaultwarden-oci/secrets "runtime Docker secrets directory"
+_apply_known_path /etc/vaultwarden "installed config directory"
+_apply_known_path /etc/vaultwarden/age-key.txt "installed Age private key"
+_apply_known_path /etc/vaultwarden/vaultwarden.env "installed Vaultwarden env"
+_apply_known_path /etc/vaultwarden/rclone.conf "installed rclone config"
+_apply_known_path "${PROJECT_STATE_DIR}/config" "state config directory"
+_apply_known_path "${PROJECT_STATE_DIR}/config/install.env" "installed state env"
+_apply_known_path "${PROJECT_STATE_DIR}/config/dr-manifest.env" "DR manifest"
+_apply_known_path "${PROJECT_STATE_DIR}/secrets" "persistent secrets directory"
+_apply_known_path "${PROJECT_STATE_DIR}/secrets/secrets.yaml" "persistent secrets.yaml"
+_apply_known_path /run/vaultwarden-oci/secrets "runtime Docker secrets directory"
+if [[ -d /run/vaultwarden-oci/secrets ]]; then
+    while IFS= read -r -d '' runtime_secret; do
+        _apply_known_path "$runtime_secret" "runtime Docker secret file"
+    done < <(find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
+fi
 
 # Known recovery kit outputs in the checkout only; no broad filesystem scan.
 shopt -s nullglob
