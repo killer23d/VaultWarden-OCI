@@ -59,6 +59,16 @@ load_env_file() {
         return 1
     fi
 
+    # maintenance-health.sh is root-operated. It intentionally tolerates some
+    # env-load warnings, so use a hard exit here instead of return; otherwise a
+    # direct non-root invocation could continue with partial inherited config.
+    if [[ "${_VW_CALLING_SCRIPT:-}" == "maintenance-health.sh" && $EUID -ne 0 ]]; then
+        log_error "maintenance-health.sh must be run as root under the root-operated contract."
+        log_error "Run: sudo make health"
+        log_error "Direct: sudo ./utilities/maintenance-health.sh"
+        exit 3
+    fi
+
     local file_perms
     file_perms=$(_get_file_perms "$env_file")
 
