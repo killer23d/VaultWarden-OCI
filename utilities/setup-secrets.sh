@@ -153,7 +153,7 @@ NOTES:
     --export-recovery-kit triggers the recovery-kit prompt that already
     appears after a successful setup run. To export a recovery kit
     independently (without running setup), use:
-        sudo utilities/setup-secrets.sh export-recovery-kit
+        sudo ./edit-secrets.sh export-recovery-kit
 
     The intended standalone order is:
         1. sudo ./setup.sh --domain DOMAIN --email EMAIL
@@ -161,7 +161,7 @@ NOTES:
                                 SMTP_HOST, etc.)
         3. sudo utilities/setup-secrets.sh configure
         4. sudo make up
-
+        
 FEATURES:
     ✅ Idempotent - Safe to re-run multiple times
     ✅ Auto-fixes missing prerequisites (Age keys, SOPS config)
@@ -181,9 +181,9 @@ EXAMPLES:
     sudo utilities/setup-secrets.sh configure --export-recovery-kit  # Prompt for kit after setup
 
 SEE ALSO:
-    ./utilities/secrets-rotate.sh list     # Show existing secret key names
-    ./utilities/secrets-rotate.sh FIELD    # Rotate a single secret
-    sudo utilities/setup-secrets.sh export-recovery-kit
+    sudo ./edit-secrets.sh list                  # Show existing secret key names
+    sudo ./edit-secrets.sh rotate FIELD          # Rotate a single secret
+    sudo ./edit-secrets.sh export-recovery-kit   # Export recovery kit
 HELP
     }
 
