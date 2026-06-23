@@ -51,8 +51,8 @@ EOF
 }
 
 _load_env() {
-    if load_env_file 2>/dev/null; then return 0; fi
-    log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
+    if load_project_environment 2>/dev/null; then return 0; fi
+    log_warn "No project environment found — relying on environment already set (e.g. systemd EnvironmentFile)"
     return 0
 }
 
