@@ -187,7 +187,7 @@ STARTUP OPTIONS:
                    or when images are already current)
   --background     Start services in background (daemon mode)
   --skip-egress-fix  Skip automatic egress NAT remediation for
-                     non-internal VaultWarden Docker bridge networks
+                      non-internal VaultWarden Docker bridge networks
   --dry-run        Show what would be done without executing
 
 GLOBAL OPTIONS:
@@ -860,7 +860,9 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Set container and CrowdSec component versions to 'latest'
+    --use-latest          Set compatible mutable image/component versions to 'latest';
+                          Caddy remains pinned because xcaddy builder tags do not
+                          support caddy:latest-builder.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --force               Overwrite existing .env/docker-compose.yml

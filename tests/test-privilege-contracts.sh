@@ -102,10 +102,8 @@ grep -Fq 'chmod 700 "$secrets_dir"' utilities/setup-secrets.sh || fail "setup-se
 grep -Fq 'chown "$real_user:$real_group" "$secrets_file"' utilities/setup-secrets.sh || fail "setup-secrets does not keep secrets.yaml operator-owned"
 grep -Fq 'chmod 600 "$secrets_file"' utilities/setup-secrets.sh || fail "setup-secrets does not keep secrets.yaml 0600"
 grep -Fq 'install -d -m 700 -o root -g root "/run/vaultwarden-oci/secrets"' utilities/setup-secrets.sh || fail "setup-secrets does not keep runtime secret dir root-owned"
-grep -Fq 'chown "$real_user:$real_group" "$secrets_dir"' lib/secrets.sh || fail "secure_secrets_file does not restore persistent secrets dir owner"
-grep -Fq 'chmod 700 "$secrets_dir"' lib/secrets.sh || fail "secure_secrets_file does not restore persistent secrets dir mode"
-grep -Fq 'chown "$real_user:$real_group" "$secrets_file"' lib/secrets.sh || fail "secure_secrets_file does not restore secrets.yaml owner"
-grep -Fq 'chmod 600 "$secrets_file"' lib/secrets.sh || fail "secure_secrets_file does not restore secrets.yaml mode"
+grep -Fq 'fix_known_path_permissions "$secrets_dir"' lib/secrets.sh || fail "secure_secrets_file does not defer secrets dir to central permission helper"
+grep -Fq 'fix_known_path_permissions "$secrets_file"' lib/secrets.sh || fail "secure_secrets_file does not defer secrets.yaml to central permission helper"
 pass "encrypted secrets stay operator-owned and runtime secrets stay root-owned"
 
 # Operator-facing production next steps.

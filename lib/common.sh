@@ -161,16 +161,140 @@ press_enter_to_continue() {
     else
         printf '%s\n' "$msg"
     fi
-    [[ -t 0 ]] && read -r _dummy || true
+    if [[ -t 0 ]]; then
+        read -r _dummy || true
+    fi
 }
 
 # Best-effort remediation for common operational file permission drift.
 # This is intentionally non-fatal and safe to call repeatedly.
+_common_stat_mode() {
+    if stat --version >/dev/null 2>&1; then stat -c '%a' "$1" 2>/dev/null; else stat -f '%OLp' "$1" 2>/dev/null; fi
+}
+
+_common_stat_owner() {
+    if stat --version >/dev/null 2>&1; then stat -c '%U' "$1" 2>/dev/null; else stat -f '%Su' "$1" 2>/dev/null; fi
+}
+
+_common_stat_group() {
+    if stat --version >/dev/null 2>&1; then stat -c '%G' "$1" 2>/dev/null; else stat -f '%Sg' "$1" 2>/dev/null; fi
+}
+
+_canonical_permission_path() {
+    local path="$1"
+    case "$path" in
+        .env|.sops.yaml|secrets/*) printf '%s/%s' "$PROJECT_ROOT" "$path" ;;
+        *) printf '%s' "$path" ;;
+    esac
+}
+
+_operator_user_group() {
+    local real_user real_group
+    real_user=$(get_real_user 2>/dev/null || id -un)
+    real_group=$(id -gn "$real_user" 2>/dev/null || id -gn)
+    printf '%s:%s' "$real_user" "$real_group"
+}
+
+_is_operator_permission_path() {
+    local path state_dir
+    path="$(_canonical_permission_path "$1")"
+    state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    case "$path" in
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+expected_owner_for_path() {
+    local path state_dir
+    path="$(_canonical_permission_path "$1")"
+    state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    case "$path" in
+        /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
+        "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
+        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*)
+            printf 'root' ;;
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
+            _operator_user_group | cut -d: -f1 ;;
+        *) return 1 ;;
+    esac
+}
+
+expected_group_for_path() {
+    local path state_dir
+    path="$(_canonical_permission_path "$1")"
+    state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    case "$path" in
+        /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
+        "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
+        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*)
+            printf 'root' ;;
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
+            _operator_user_group | cut -d: -f2 ;;
+        *) return 1 ;;
+    esac
+}
+
+expected_mode_for_path() {
+    local path state_dir
+    path="$(_canonical_permission_path "$1")"
+    state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    case "$path" in
+        /run/vaultwarden-oci/secrets) printf '700' ;;
+        "$PROJECT_ROOT/secrets") printf '700' ;;
+        "$state_dir"/secrets) printf '700' ;;
+        /run/vaultwarden-oci/secrets/*) printf '444' ;;
+        "$PROJECT_ROOT/.sops.yaml") printf '644' ;;
+        /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
+        "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$state_dir"/secrets/secrets.yaml)
+            printf '600' ;;
+        *) return 1 ;;
+    esac
+}
+
+fix_known_path_permissions() {
+    local path owner group mode
+    path="$(_canonical_permission_path "$1")"
+    [[ -e "$path" ]] || return 0
+    owner="$(expected_owner_for_path "$path")" || return 0
+    group="$(expected_group_for_path "$path")" || return 0
+    mode="$(expected_mode_for_path "$path")" || return 0
+    if [[ "$(_common_stat_owner "$path"):$(_common_stat_group "$path")" != "${owner}:${group}" ]]; then
+        if [[ "$owner" == "root" && -z "${SUDO_USER:-}" ]] && _is_operator_permission_path "$path"; then
+            log_warn "Skipping ownership correction for operator-owned ${path}: non-root operator could not be resolved"
+        else
+            log_warn "Correcting ownership for ${path}: expected ${owner}:${group}"
+            chown "${owner}:${group}" "$path" 2>/dev/null || true
+        fi
+    fi
+    if [[ "$(_common_stat_mode "$path")" != "$mode" ]]; then
+        log_warn "Correcting mode for ${path}: expected ${mode}"
+        chmod "$mode" "$path" 2>/dev/null || true
+    fi
+}
+
+assert_known_path_permissions() {
+    local path owner group mode actual_owner actual_group actual_mode
+    path="$(_canonical_permission_path "$1")"
+    [[ -e "$path" ]] || return 0
+    owner="$(expected_owner_for_path "$path")" || return 0
+    group="$(expected_group_for_path "$path")" || return 0
+    mode="$(expected_mode_for_path "$path")" || return 0
+    actual_owner="$(_common_stat_owner "$path")"; actual_group="$(_common_stat_group "$path")"; actual_mode="$(_common_stat_mode "$path")"
+    [[ "$actual_owner:$actual_group" == "$owner:$group" && "$actual_mode" == "$mode" ]]
+}
+
 auto_fix_critical_permissions() {
     local project_root="${1:-$PROJECT_ROOT}"
 
-    # Do not mutate repository .env ownership during normal root startup.
-    # Repo-local .env is an operator-editable source/fallback; persistent
+    # Repo .env is never chowned to root. It may be repaired back to the
+    # real operator owner/group when that owner can be resolved; persistent
     # runtime env is installed under ${PROJECT_STATE_DIR}/config/install.env.
 
     local age_key_file="${SOPS_AGE_KEY_FILE:-}"
@@ -178,7 +302,27 @@ auto_fix_critical_permissions() {
         age_key_file="/etc/vaultwarden/age-key.txt"
     fi
     if [[ -f "$age_key_file" ]]; then
-        chmod 600 "$age_key_file" 2>/dev/null || true
+        fix_known_path_permissions "$age_key_file"
+    fi
+
+    for _vw_path in \
+        /etc/vaultwarden/vaultwarden.env \
+        /etc/vaultwarden/rclone.conf \
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env" \
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env" \
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets" \
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/secrets.yaml" \
+        "${project_root}/.env" \
+        "${project_root}/secrets/keys/age-key.txt" \
+        "${project_root}/.sops.yaml" \
+        "${project_root}/secrets/secrets.yaml" \
+        /run/vaultwarden-oci/secrets; do
+        [[ -e "$_vw_path" ]] && fix_known_path_permissions "$_vw_path"
+    done
+    if [[ -d /run/vaultwarden-oci/secrets ]]; then
+        while IFS= read -r -d '' _vw_secret_path; do
+            fix_known_path_permissions "$_vw_secret_path"
+        done < <(find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
     fi
 
     local caddy_ep="${project_root}/caddy/entrypoint.sh"
@@ -286,9 +430,11 @@ _fix_rclone_ownership() {
     owner=$(stat -c '%U' "$rclone_conf" 2>/dev/null || echo "")
     if [[ -n "$owner" && "$owner" != "$real_user" ]]; then
         log_warn "_fix_rclone_ownership: '${rclone_conf}' owned by '${owner}' — correcting to '${real_user}'"
-        chown "${real_user}:$(id -gn "$real_user" 2>/dev/null || id -gn)" "$rclone_conf" 2>/dev/null && \
-            log_info "_fix_rclone_ownership: ownership corrected → ${rclone_conf}" || \
+        if chown "${real_user}:$(id -gn "$real_user" 2>/dev/null || id -gn)" "$rclone_conf" 2>/dev/null; then
+            log_info "_fix_rclone_ownership: ownership corrected → ${rclone_conf}"
+        else
             log_warn "_fix_rclone_ownership: chown failed — rclone.conf may still be root-owned"
+        fi
     fi
 }
 
@@ -691,6 +837,7 @@ export -f wait_for_entropy
 
 export -f _require_script
 export -f has_command require_commands retry_with_backoff is_root require_root press_enter_to_continue project_version print_project_version get_real_user _maybe_sudo
+export -f expected_owner_for_path expected_group_for_path expected_mode_for_path fix_known_path_permissions assert_known_path_permissions
 export -f auto_fix_critical_permissions
 export -f _ensure_lock_file _fix_rclone_ownership _run_rclone _check_sudo_requirement
 export -f register_cleanup perform_cleanup

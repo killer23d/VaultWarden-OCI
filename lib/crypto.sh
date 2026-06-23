@@ -996,31 +996,29 @@ simple_verify_age_key() {
         return 1
     fi
 
-    local perms
+    local expected_owner expected_group expected_mode perms
+    expected_owner=$(expected_owner_for_path "$age_key" 2>/dev/null || printf '')
+    expected_group=$(expected_group_for_path "$age_key" 2>/dev/null || printf '')
+    expected_mode=$(expected_mode_for_path "$age_key" 2>/dev/null || printf '600')
+
     perms=$(_stat_octal_perms "$age_key" 2>/dev/null || echo "")
-    if [[ "$perms" != "600" ]]; then
-        log_warn "Age key permissions were ${perms:-<unreadable>} (expected 600) — auto-correcting to 600"
-        chmod 600 "$age_key"
+    if [[ "$perms" != "$expected_mode" ]]; then
+        log_warn "Age key permissions for ${age_key} were ${perms:-<unreadable>} (expected ${expected_mode}) — auto-correcting"
+        chmod "$expected_mode" "$age_key"
     fi
 
-    local real_user real_group
-    real_user=$(get_real_user 2>/dev/null || echo "root")
-    real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
     local current_owner current_group current_owner_group
     current_owner=$(_stat_owner "$age_key" 2>/dev/null || echo "")
     current_group=$(_stat_group "$age_key" 2>/dev/null || echo "")
     current_owner_group="${current_owner}:${current_group}"
-    if [[ -n "$current_owner" && "$current_owner_group" != "${real_user}:${real_group}" ]]; then
-        # If real_user resolved to "root" (fallback), skip chown to
-        # avoid locking out the service user by setting ownership to root:root.
-        if [[ "$real_user" == "root" ]]; then
-            log_warn "Real user resolved to 'root' — skipping chown to avoid locking out the service account."
-            log_warn "       Re-run as the service user or with SUDO_USER set to fix ownership manually."
+    if [[ -n "$expected_owner" && -n "$current_owner" && "$current_owner_group" != "${expected_owner}:${expected_group}" ]]; then
+        if [[ "$expected_owner" == "root" && -z "${SUDO_USER:-}" ]] && _is_operator_permission_path "$age_key"; then
+            log_warn "Skipping ownership correction for operator-owned age key ${age_key}: non-root operator could not be resolved"
         else
-            log_warn "Age key ownership was '${current_owner_group}' (expected '${real_user}:${real_group}') — auto-correcting"
+            log_warn "Age key ownership for ${age_key} was '${current_owner_group}' (expected '${expected_owner}:${expected_group}') — auto-correcting"
             if [[ "$(id -u)" -eq 0 ]]; then
-                chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
-                    log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+                chown "${expected_owner}:${expected_group}" "$age_key" 2>/dev/null || \
+                    log_warn "Could not restore ownership of $age_key to ${expected_owner}:${expected_group}"
             else
                 log_warn "Cannot correct ownership of $age_key — re-run with sudo (sudo make key-health)"
             fi
@@ -1028,13 +1026,7 @@ simple_verify_age_key() {
     elif [[ -n "$current_owner" ]]; then
         :
     else
-        # Could not read ownership at all — attempt chown only if root and real_user is not root.
-        if [[ "$(id -u)" -eq 0 && "$real_user" != "root" ]]; then
-            chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
-                log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
-        else
-            log_warn "Cannot verify ownership of $age_key — re-run with sudo for full check"
-        fi
+        log_warn "Cannot verify ownership of $age_key — re-run with sudo for full check"
     fi
 
     local test_data
