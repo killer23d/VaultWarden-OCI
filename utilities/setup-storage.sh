@@ -177,10 +177,9 @@ _update_install_env_after_storage() {
     _set_env_var DATA_VOLUME_MOUNT "${DATA_VOLUME_MOUNT}" "$env_file"
     _set_env_var DATA_VOLUME_DEVICE "$device_path" "$env_file"
 
-    intended_key="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
-    if [[ -f "$intended_key" ]]; then
-        _set_env_var SOPS_AGE_KEY_FILE "$intended_key" "$env_file"
-    fi
+    # Installed/root-operated runtime config always uses the canonical root-owned Age key.
+    # Do not preserve repo-local/operator key paths into persistent install.env.
+    _set_env_var SOPS_AGE_KEY_FILE "/etc/vaultwarden/age-key.txt" "$env_file"
 }
 
 _mode_setup() {
