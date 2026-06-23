@@ -246,9 +246,9 @@ load_project_environment() {
     _read_project_state_dir() {
         local file="$1"
         [[ -f "$file" ]] || return 0
-        awk -F= '$1 == "PROJECT_STATE_DIR" {
+        awk -F= -v sq="'" '$1 == "PROJECT_STATE_DIR" {
             value = substr($0, index($0, "=") + 1)
-            gsub(/^["'"']|["'"']$/, "", value)
+            gsub("^[\"" sq "]|[\"" sq "]$", "", value)
             if (value != "") found = value
         }
         END { if (found != "") print found }' "$file"
