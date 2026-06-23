@@ -37,10 +37,8 @@ show_help() {
 VaultWarden-OCI Email Diagnostics
 
 USAGE:
-    ./maintenance.sh test-email [OPTIONS]
-    utilities/maintenance-email.sh [OPTIONS]
-
-Do not run with sudo. Run: ./maintenance.sh test-email
+    sudo ./maintenance.sh test-email [OPTIONS]
+    sudo utilities/maintenance-email.sh [OPTIONS]
 
 OPTIONS:
     --recipient EMAIL   Override default admin email recipient
@@ -226,7 +224,7 @@ while [[ $# -gt 0 ]]; do
         *) log_error "Unknown option for 'test-email': $1"; show_help; exit 1 ;;
     esac
 done
-refuse_root_for_user_command "Do not run with sudo. Run: ./maintenance.sh test-email"
+require_root "$@"
 : "${VERBOSE}"
 
 main() {
