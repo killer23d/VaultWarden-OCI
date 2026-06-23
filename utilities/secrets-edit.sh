@@ -23,50 +23,26 @@ trap perform_cleanup EXIT
 
 show_help() {
     cat << 'EOF'
-VaultWarden Secrets — rotate subcommand
+VaultWarden Secrets — edit subcommand
 
 USAGE:
-    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
-    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
-    ./edit-secrets.sh rotate FIELD [OPTIONS]
+    ./utilities/secrets-edit.sh [OPTIONS]
+    ./utilities/secrets-edit.sh edit [OPTIONS]  # 'edit' accepted as alias
+    ./edit-secrets.sh edit [OPTIONS]
 
 DESCRIPTION:
-    Re-collects and re-hashes a single named credential, then atomically
-    re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
-
-SUPPORTED FIELDS:
-    (yq not installed — install with: sudo apt install yq  or  snap install yq)
-    admin_token                         (auto-generated admin token)
-    caddy_admin_password                (bcrypt hash for Caddy)
-    backup_passphrase                   (backup encryption passphrase)
-    caddy_cloudflare_dns_token          (Cloudflare DNS API token)
-    smtp_password                       (SMTP relay password)
-    email_api_token                     (email API key)
-    ... run after setup.sh install for the full schema list
-
-EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
-    EMAIL_MODE=auto   — tries API → Postfix sidecar → direct upstream SMTP in order
-    EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
-    EMAIL_MODE=smtp   — Postfix sidecar → direct SMTP (rotate: smtp_password)
-    EMAIL_MODE=direct — direct SMTP only (rotate: smtp_password)
-    EMAIL_MODE=host   — deprecated alias for direct (rotate: smtp_password)
-    EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
-        → selects which HTTP driver is used at runtime;
-          the token is always stored as "email_api_token" in secrets.yaml.
+    Decrypts secrets.yaml to a protected temporary file, opens it in your
+    editor, validates YAML after save, then atomically re-encrypts it.
 
 FLAGS:
-    --dry-run    Preview what would change without writing
-    --no-backup  Skip creating backup before rotation
-    --help, -h   Show this help
-    --version, -V Print the VaultWarden-OCI version and exit
+    --editor EDITOR Override editor for this run
+    --no-backup     Skip creating backup before edit
+    --help, -h      Show this help
 
 EXAMPLES:
-    ./utilities/secrets-rotate.sh admin_token
-    ./utilities/secrets-rotate.sh cf_worker_bouncer_token
-    ./utilities/secrets-rotate.sh email_api_token --dry-run
-    ./edit-secrets.sh rotate smtp_password
-    ./edit-secrets.sh rotate backup_passphrase --no-backup
-
+    ./utilities/secrets-edit.sh
+    ./utilities/secrets-edit.sh --editor vim
+    EDITOR='code --wait' ./edit-secrets.sh edit
 EOF
 }
 # Parse EDITOR into an array so flag-bearing values such as EDITOR='code --wait' work.
@@ -289,29 +265,28 @@ do_edit() {
     fi
     cp "$temp_file" "$encrypted_temp"
 
-    if ! encrypt_sops_file "$encrypted_temp"; then
+    local _age_key_path
+    if ! _age_key_path=$(resolve_age_key_path 2>/dev/null); then
+        log_error "Cannot resolve Age key path for re-encryption"
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+    if ! encrypt_sops_file "$encrypted_temp" "$_age_key_path"; then
         log_error "Failed to encrypt secrets"
         rm -f "$encrypted_temp"
         return 1
     fi
 
-    if ! sops --config "$SOPS_CONFIG_FILE" updatekeys --yes "$encrypted_temp"; then
+    if ! SOPS_AGE_KEY_FILE="$_age_key_path" sops --config "$SOPS_CONFIG_FILE" updatekeys --yes "$encrypted_temp"; then
         log_error "Failed to synchronize SOPS recipients"
         rm -f "$encrypted_temp"
         return 1
     fi
-    if ! ensure_sops_env; then
-        log_error "Failed to re-setup SOPS environment for validation"
-        rm -f "$encrypted_temp"
-        return 1
-    fi
-    if ! sops -d "$encrypted_temp" >/dev/null; then
+    if ! SOPS_AGE_KEY_FILE="$_age_key_path" sops -d "$encrypted_temp" >/dev/null; then
         log_error "Staged encrypted secrets failed validation"
-        cleanup_secrets_environment
         rm -f "$encrypted_temp"
         return 1
     fi
-    cleanup_secrets_environment
     if ! mv "$encrypted_temp" "$SECRETS_FILE"; then
         log_error "Atomic mv failed — encrypted output left at: $encrypted_temp"
         return 1
