@@ -51,7 +51,9 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Set container and CrowdSec component versions to 'latest'
+    --use-latest          Set compatible mutable image/component versions to 'latest';
+                          Caddy remains pinned because xcaddy builder tags do not
+                          support caddy:latest-builder.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --force               Overwrite existing .env/docker-compose.yml
@@ -174,7 +176,7 @@ create_env_file() {
             if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
                grep -qE '^POSTFIX_VERSION=latest'     "$env_file" && \
                grep -qE '^BUSYBOX_VERSION=latest'     "$env_file" && \
-               grep -qE '^CADDY_VERSION=latest'       "$env_file" && \
+               ! grep -qE '^CADDY_VERSION=latest'     "$env_file" && \
                grep -qE '^CROWDSEC_VERSION=latest'    "$env_file" && \
                grep -qE '^CF_WORKER_BOUNCER_VERSION=latest' "$env_file" && \
                grep -qE '^FIREWALL_BOUNCER_VERSION=latest'  "$env_file"; then
@@ -247,9 +249,9 @@ create_env_file() {
         }
     ' "$env_template" > "$temp_env" || { rm -f "$temp_env"; return 1; }
 
-    # Pass 2 optionally pins all image versions to 'latest'.
-    # Use a second pre-owned temp file, then replace temp_env on success so the
-    # remainder of the function always works against a single variable.
+    # Pass 2 optionally sets compatible mutable image versions to 'latest'.
+    # Caddy intentionally stays pinned because the custom xcaddy build uses tags
+    # like caddy:2.11.4-builder; caddy:latest-builder is not published.
     if [[ "$USE_LATEST" == "true" ]]; then
         local temp2
         temp2=$(_make_owned_temp "$env_dir" "$real_user" "$real_group") \
@@ -257,7 +259,6 @@ create_env_file() {
 
         awk '{
             sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
-            sub(/^CADDY_VERSION=.*/,       "CADDY_VERSION=latest");
             sub(/^POSTFIX_VERSION=.*/,     "POSTFIX_VERSION=latest");
             sub(/^BUSYBOX_VERSION=.*/,     "BUSYBOX_VERSION=latest");
             sub(/^CROWDSEC_VERSION=.*/,    "CROWDSEC_VERSION=latest");
