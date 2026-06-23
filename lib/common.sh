@@ -194,9 +194,12 @@ _operator_user_group() {
 }
 
 _is_operator_permission_path() {
-    local path="$(_canonical_permission_path "$1")"
+    local path state_dir
+    path="$(_canonical_permission_path "$1")"
+    state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     case "$path" in
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             return 0 ;;
         *) return 1 ;;
     esac
@@ -211,7 +214,8 @@ expected_owner_for_path() {
         "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
         /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*)
             printf 'root' ;;
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             _operator_user_group | cut -d: -f1 ;;
         *) return 1 ;;
     esac
@@ -226,7 +230,8 @@ expected_group_for_path() {
         "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
         /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*)
             printf 'root' ;;
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             _operator_user_group | cut -d: -f2 ;;
         *) return 1 ;;
     esac
@@ -239,11 +244,13 @@ expected_mode_for_path() {
     case "$path" in
         /run/vaultwarden-oci/secrets) printf '700' ;;
         "$PROJECT_ROOT/secrets") printf '700' ;;
+        "$state_dir"/secrets) printf '700' ;;
         /run/vaultwarden-oci/secrets/*) printf '444' ;;
         "$PROJECT_ROOT/.sops.yaml") printf '644' ;;
         /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
         "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/secrets/secrets.yaml")
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$state_dir"/secrets/secrets.yaml)
             printf '600' ;;
         *) return 1 ;;
     esac
@@ -282,8 +289,8 @@ assert_known_path_permissions() {
 auto_fix_critical_permissions() {
     local project_root="${1:-$PROJECT_ROOT}"
 
-    # Do not mutate repository .env ownership during normal root startup.
-    # Repo-local .env is an operator-editable source/fallback; persistent
+    # Repo .env is never chowned to root. It may be repaired back to the
+    # real operator owner/group when that owner can be resolved; persistent
     # runtime env is installed under ${PROJECT_STATE_DIR}/config/install.env.
 
     local age_key_file="${SOPS_AGE_KEY_FILE:-}"
@@ -299,6 +306,8 @@ auto_fix_critical_permissions() {
         /etc/vaultwarden/rclone.conf \
         "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env" \
         "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env" \
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets" \
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/secrets.yaml" \
         "${project_root}/.env" \
         "${project_root}/secrets/keys/age-key.txt" \
         "${project_root}/.sops.yaml" \
