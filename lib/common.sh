@@ -200,8 +200,7 @@ _is_operator_permission_path() {
     path="$(_canonical_permission_path "$1")"
     state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     case "$path" in
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
-        "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
             return 0 ;;
         *) return 1 ;;
     esac

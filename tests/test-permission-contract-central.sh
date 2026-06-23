@@ -47,6 +47,8 @@ for p in "$PROJECT_STATE_DIR/secrets" "$PROJECT_STATE_DIR/secrets/secrets.yaml";
 done
 [[ "$(expected_mode_for_path "$PROJECT_STATE_DIR/secrets/secrets.yaml")" == 600 ]] || fail 'persistent secrets.yaml mode is not 0600'
 [[ "$(expected_mode_for_path "$PROJECT_STATE_DIR/secrets")" == 700 ]] || fail 'persistent secrets dir mode is not 0700'
+! _is_operator_permission_path "$PROJECT_STATE_DIR/secrets" || fail 'persistent secrets dir is still classified as operator path'
+! _is_operator_permission_path "$PROJECT_STATE_DIR/secrets/secrets.yaml" || fail 'persistent secrets.yaml is still classified as operator path'
 [[ "$(expected_mode_for_path "$PROJECT_ROOT/.sops.yaml")" == 644 ]] || fail '.sops.yaml mode is not 0644'
 pass 'repo editable files remain operator-owned and persistent secrets are root-owned'
 
