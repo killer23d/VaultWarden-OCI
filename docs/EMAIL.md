@@ -55,13 +55,13 @@ Do not replace these with your upstream relay hostname. When you change mail pro
 
 ### Operational alerts and failure notifications
 
-`maintenance.sh test-email --verbose`, backup/health/maintenance alerts, systemd `OnFailure` notifications, and recovery-kit email attachments use the same SMTP relay configuration and `smtp_password` secret. Attachment sends bypass HTTP API providers and use SMTP so recovery-kit exports continue to work.
+`sudo ./maintenance.sh test-email --verbose`, backup/health/maintenance alerts, systemd `OnFailure` notifications, and recovery-kit email attachments use the same SMTP relay configuration and `smtp_password` secret. Attachment sends bypass HTTP API providers and use SMTP so recovery-kit exports continue to work.
 
 Test the complete default path after setup:
 
 ```bash
-./maintenance.sh test-email --verbose
-# or: make test-email
+sudo ./maintenance.sh test-email --verbose
+# or: sudo make test-email
 ```
 
 ---
@@ -185,8 +185,8 @@ Secrets:
 ## Testing and Troubleshooting
 
 ```bash
-./maintenance.sh test-email --verbose
-make test-email
+sudo ./maintenance.sh test-email --verbose
+sudo make test-email
 ```
 
 Useful checks:
