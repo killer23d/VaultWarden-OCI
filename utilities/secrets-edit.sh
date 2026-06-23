@@ -287,7 +287,7 @@ do_edit() {
         log_error "Failed to secure temp file: $encrypted_temp"
         return 1
     fi
-        cp "$temp_file" "$encrypted_temp"
+    cp "$temp_file" "$encrypted_temp"
 
     if ! encrypt_sops_file "$encrypted_temp"; then
         log_error "Failed to encrypt secrets"
