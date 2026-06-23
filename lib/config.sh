@@ -159,6 +159,27 @@ load_env_file() {
         log_hint "Common mistakes: spaces around '=', an 'export ' prefix, or invalid variable names."
     fi
 
+    # A blank SOPS_AGE_KEY_FILE in repo .env is intentional: it keeps operator
+    # editable config portable. Do not pass that blank value through to SOPS;
+    # resolve a concrete key path for the current caller instead.
+    if [[ -z "${SOPS_AGE_KEY_FILE:-}" ]]; then
+        local _config_project_root _age_candidate
+        _config_project_root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+        for _age_candidate in \
+            "${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" \
+            "/etc/vaultwarden/age-key.txt" \
+            "${_config_project_root}/secrets/keys/age-key.txt"; do
+            [[ -z "$_age_candidate" ]] && continue
+            if [[ -r "$_age_candidate" ]]; then
+                SOPS_AGE_KEY_FILE="$_age_candidate"
+                break
+            fi
+        done
+        SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
+        export SOPS_AGE_KEY_FILE
+        log_debug "load_env_file: SOPS_AGE_KEY_FILE was blank; using ${SOPS_AGE_KEY_FILE}"
+    fi
+
     log_debug "Environment loaded successfully from: $env_file"
     return 0
 }
@@ -227,7 +248,7 @@ load_project_environment() {
         [[ -f "$file" ]] || return 0
         awk -F= '$1 == "PROJECT_STATE_DIR" {
             value = substr($0, index($0, "=") + 1)
-            gsub(/^["'"'"']|["'"'"']$/, "", value)
+            gsub(/^["'"']|["'"']$/, "", value)
             if (value != "") found = value
         }
         END { if (found != "") print found }' "$file"
