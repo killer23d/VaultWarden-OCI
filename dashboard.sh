@@ -864,7 +864,7 @@ handle_secrets_menu() {
         2)
             local edit_sh="${REPO_ROOT}/utilities/secrets-edit.sh"
             _check_script "${edit_sh}" || return
-            run_user_cmd "./utilities/secrets-edit.sh" "${edit_sh}"
+            run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"
             ;;
         3)
             run_cmd "make key-escrow" make -C "${REPO_ROOT}" key-escrow

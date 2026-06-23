@@ -83,11 +83,44 @@ grep -Fq 'chmod 0700 "$manifest_dir"' utilities/setup-env.sh || fail "state conf
 grep -Fq 'chown root:root "$tmp" && chmod 0600 "$tmp"' utilities/setup-env.sh || fail "install.env is not installed root:root 0600"
 pass "persistent install.env is installed root:root 0600"
 
-# Encrypted secret authoring remains a normal-user flow.
-for f in edit-secrets.sh utilities/secrets-edit.sh utilities/secrets-list.sh utilities/secrets-rotate.sh; do
-    grep -Fq 'refuse_root_for_user_command' "$f" || fail "$f no longer refuses root"
+# Encrypted secret authoring is root-operated.
+for f in edit-secrets.sh utilities/secrets-edit.sh utilities/secrets-list.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh; do
+    grep -Fq 'require_root "$@"' "$f" || fail "$f does not require root"
 done
-pass "encrypted secret authoring scripts still refuse root"
+pass "encrypted secret authoring scripts require root"
+
+
+if (( EUID == 0 )) && command -v runuser >/dev/null 2>&1; then
+    for cmd in \
+        "utilities/secrets-list.sh list" \
+        "utilities/secrets-view.sh view" \
+        "utilities/secrets-edit.sh edit" \
+        "utilities/secrets-rotate.sh rotate email_api_token --dry-run" \
+        "utilities/secrets-export-recovery-kit.sh export-recovery-kit"; do
+        _out="$(mktemp -t vw-nonroot-secret.XXXXXXXXXX)"
+        if runuser -u nobody -- bash -c "cd '$ROOT' && bash $cmd" >"$_out" 2>&1; then
+            cat "$_out" >&2
+            rm -f "$_out"
+            fail "$cmd should reject non-root execution"
+        fi
+        grep -Fq 'Re-run with: sudo' "$_out" || { cat "$_out" >&2; rm -f "$_out"; fail "$cmd rejection lacks sudo hint"; }
+        rm -f "$_out"
+    done
+    pass "secrets subcommands reject non-root execution with sudo guidance"
+else
+    pass "secrets non-root rejection test skipped (requires root test runner with runuser)"
+fi
+
+for f in utilities/secrets-list.sh utilities/secrets-view.sh utilities/secrets-edit.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh; do
+    grep -Fq '/etc/vaultwarden/age-key.txt' "$f" || fail "$f diagnostics do not mention canonical Age key path"
+done
+grep -Fq 'resolve_age_key_path >/dev/null 2>&1' utilities/secrets-list.sh || fail "secrets-list does not resolve active Age key"
+grep -Fq 'resolve_age_key_path >/dev/null 2>&1' utilities/secrets-view.sh || fail "secrets-view does not resolve active Age key"
+pass "secrets prerequisite checks use active Age key resolver and canonical diagnostics"
+
+grep -Fq '"/etc/vaultwarden/age-key.txt"' lib/crypto.sh || fail "Age key resolver does not include installed canonical path"
+grep -Fq '"/etc/vaultwarden/vaultwarden.env"' lib/config.sh || fail "environment loader does not include installed env path"
+pass "root execution can resolve installed Age key and env defaults"
 
 # setup-secrets bootstrap must preserve repo .env owner/group/mode across atomic replacement.
 grep -Fq 'env_uid=$(stat -c '\''%u'\'' "$env_file"' utilities/setup-secrets.sh || fail "setup-secrets does not capture .env owner"
@@ -96,26 +129,26 @@ grep -Fq 'chown "$env_uid:$env_gid" "$temp_env"' utilities/setup-secrets.sh || f
 grep -Fq 'chmod "$env_mode" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env mode on temp file"
 pass "setup-secrets bootstrap preserves repo .env ownership and mode"
 
-# Encrypted secrets live under operator-owned persistent state, while runtime secrets stay root-owned.
-grep -Fq 'chown "$real_user:$real_group" "$secrets_dir"' utilities/setup-secrets.sh || fail "setup-secrets does not chown persistent secrets dir to operator"
+# Encrypted secrets live under root-owned persistent state, and runtime secrets stay root-owned.
+grep -Fq 'chown root:root "$secrets_dir"' utilities/setup-secrets.sh || fail "setup-secrets does not chown persistent secrets dir to root"
 grep -Fq 'chmod 700 "$secrets_dir"' utilities/setup-secrets.sh || fail "setup-secrets does not chmod persistent secrets dir 0700"
-grep -Fq 'chown "$real_user:$real_group" "$secrets_file"' utilities/setup-secrets.sh || fail "setup-secrets does not keep secrets.yaml operator-owned"
+grep -Fq 'chown root:root "$secrets_file"' utilities/setup-secrets.sh || fail "setup-secrets does not keep secrets.yaml root-owned"
 grep -Fq 'chmod 600 "$secrets_file"' utilities/setup-secrets.sh || fail "setup-secrets does not keep secrets.yaml 0600"
 grep -Fq 'install -d -m 700 -o root -g root "/run/vaultwarden-oci/secrets"' utilities/setup-secrets.sh || fail "setup-secrets does not keep runtime secret dir root-owned"
 grep -Fq 'fix_known_path_permissions "$secrets_dir"' lib/secrets.sh || fail "secure_secrets_file does not defer secrets dir to central permission helper"
 grep -Fq 'fix_known_path_permissions "$secrets_file"' lib/secrets.sh || fail "secure_secrets_file does not defer secrets.yaml to central permission helper"
-pass "encrypted secrets stay operator-owned and runtime secrets stay root-owned"
+pass "encrypted secrets stay root-owned and runtime secrets stay root-owned"
 
 # Operator-facing production next steps.
 grep -Fq 'sudo make up' setup.sh || fail "setup next steps do not mention sudo make up"
 grep -Fq 'sudo make up' utilities/setup-secrets.sh || fail "setup-secrets next steps do not mention sudo make up"
 pass "operator-facing production next steps use sudo make up"
 
-# Dashboard should use root-operated lifecycle/health commands, while keeping user-only secret edit flows non-root.
+# Dashboard should use root-operated lifecycle/health/secrets commands.
 grep -Fq 'run_sudo_cmd "sudo make restart"' dashboard.sh || fail "dashboard restart label missing"
 grep -Fq 'run_sudo_cmd "sudo make down"' dashboard.sh || fail "dashboard stop label missing"
 grep -Fq 'run_sudo_cmd "sudo make health"' dashboard.sh || fail "dashboard health label missing"
-grep -Fq 'run_user_cmd "./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should remain normal-user"
+grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should use sudo"
 pass "dashboard command labels match root-operated lifecycle"
 
 # Legacy CF token preservation must use root-side file install, not shell value arguments.

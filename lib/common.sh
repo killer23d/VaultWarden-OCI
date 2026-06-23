@@ -214,10 +214,10 @@ expected_owner_for_path() {
     case "$path" in
         /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
         "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
-        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*)
-            printf 'root' ;;
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|\
         "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
+            printf 'root' ;;
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
             _operator_user_group | cut -d: -f1 ;;
         *) return 1 ;;
     esac
@@ -230,10 +230,10 @@ expected_group_for_path() {
     case "$path" in
         /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
         "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
-        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*)
-            printf 'root' ;;
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|\
         "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
+            printf 'root' ;;
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
             _operator_user_group | cut -d: -f2 ;;
         *) return 1 ;;
     esac

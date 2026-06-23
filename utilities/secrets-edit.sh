@@ -8,27 +8,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-source "${PROJECT_ROOT}/lib/log.sh"
-source "${PROJECT_ROOT}/lib/config.sh"
-source "${PROJECT_ROOT}/lib/common.sh"
-init_common_lib "$0"
-refuse_root_for_user_command "Do not run with sudo. Run: ./utilities/secrets-edit.sh"
-source "${PROJECT_ROOT}/lib/crypto.sh"
-source "${PROJECT_ROOT}/lib/secrets.sh"
-load_project_environment || exit 1
-SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
-export SOPS_CONFIG_FILE
-
-trap perform_cleanup EXIT
-
 show_help() {
     cat << 'EOF'
 VaultWarden Secrets — edit subcommand
 
 USAGE:
-    ./utilities/secrets-edit.sh [OPTIONS]
-    ./utilities/secrets-edit.sh edit [OPTIONS]  # 'edit' accepted as alias
-    ./edit-secrets.sh edit [OPTIONS]
+    sudo ./utilities/secrets-edit.sh [OPTIONS]
+    sudo ./utilities/secrets-edit.sh edit [OPTIONS]  # 'edit' accepted as alias
+    sudo ./edit-secrets.sh edit [OPTIONS]
 
 DESCRIPTION:
     Decrypts secrets.yaml to a protected temporary file, opens it in your
@@ -40,11 +27,36 @@ FLAGS:
     --help, -h      Show this help
 
 EXAMPLES:
-    ./utilities/secrets-edit.sh
-    ./utilities/secrets-edit.sh --editor vim
-    EDITOR='code --wait' ./edit-secrets.sh edit
+    sudo ./utilities/secrets-edit.sh
+    sudo ./utilities/secrets-edit.sh --editor vim
+    EDITOR='code --wait' sudo ./edit-secrets.sh edit
 EOF
 }
+
+if [[ "${1:-}" == "edit" ]]; then
+    _help_candidate="${2:-}"
+else
+    _help_candidate="${1:-}"
+fi
+if [[ "$_help_candidate" == "--help" || "$_help_candidate" == "-h" ]]; then
+    show_help
+    exit 0
+fi
+unset _help_candidate
+
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
+source "${PROJECT_ROOT}/lib/common.sh"
+init_common_lib "$0"
+require_root "$@"
+source "${PROJECT_ROOT}/lib/crypto.sh"
+source "${PROJECT_ROOT}/lib/secrets.sh"
+load_project_environment || exit 1
+SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
+export SOPS_CONFIG_FILE
+
+trap perform_cleanup EXIT
+
 # Parse EDITOR into an array so flag-bearing values such as EDITOR='code --wait' work.
 read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
 SKIP_BACKUP=false
@@ -74,11 +86,11 @@ check_prerequisites() {
 validate_secrets() {
     log_info "Validating secrets file..."
     if ! ensure_sops_env; then return 1; fi
-    if ! validate_secrets_decryption; then
+    if ! validate_secrets_decryption "$SECRETS_FILE"; then
         log_error "Cannot decrypt secrets file - Age key may be incorrect or file corrupted"
         return 1
     fi
-    if ! validate_secrets_yaml; then
+    if ! validate_secrets_yaml "$SECRETS_FILE"; then
         log_warn "Secrets file has invalid YAML structure (continuing - you may be fixing it)"
     fi
     log_success "Secrets validation passed"
@@ -292,7 +304,7 @@ do_edit() {
         return 1
     fi
 
-    secure_secrets_file
+    secure_secrets_file "$SECRETS_FILE"
     log_success "Secrets updated successfully"
 
     offer_recovery_kit_export "true"

@@ -37,15 +37,18 @@ for p in /etc/vaultwarden/vaultwarden.env /etc/vaultwarden/rclone.conf "$PROJECT
 done
 pass 'installed env/key config files remain root-owned 0600'
 
-for p in "$PROJECT_ROOT/.env" "$PROJECT_ROOT/secrets/secrets.yaml" "$PROJECT_STATE_DIR/secrets/secrets.yaml"; do
+for p in "$PROJECT_ROOT/.env" "$PROJECT_ROOT/secrets/secrets.yaml"; do
     [[ "$(expected_owner_for_path "$p")" == "$operator" ]] || fail "$p owner is not operator"
     [[ "$(expected_mode_for_path "$p")" == 600 ]] || fail "$p mode is not 600"
 done
-[[ "$(expected_owner_for_path "$PROJECT_STATE_DIR/secrets")" == "$operator" ]] || fail 'persistent secrets dir owner is not operator'
-[[ "$(expected_group_for_path "$PROJECT_STATE_DIR/secrets")" == "$operator_group" ]] || fail 'persistent secrets dir group is not operator group'
+for p in "$PROJECT_STATE_DIR/secrets" "$PROJECT_STATE_DIR/secrets/secrets.yaml"; do
+    [[ "$(expected_owner_for_path "$p")" == root ]] || fail "$p owner is not root"
+    [[ "$(expected_group_for_path "$p")" == root ]] || fail "$p group is not root"
+done
+[[ "$(expected_mode_for_path "$PROJECT_STATE_DIR/secrets/secrets.yaml")" == 600 ]] || fail 'persistent secrets.yaml mode is not 0600'
 [[ "$(expected_mode_for_path "$PROJECT_STATE_DIR/secrets")" == 700 ]] || fail 'persistent secrets dir mode is not 0700'
 [[ "$(expected_mode_for_path "$PROJECT_ROOT/.sops.yaml")" == 644 ]] || fail '.sops.yaml mode is not 0644'
-pass 'repo editable files remain operator-owned with expected modes'
+pass 'repo editable files remain operator-owned and persistent secrets are root-owned'
 
 persistent_secret="$PROJECT_STATE_DIR/secrets/secrets.yaml"
 printf 'secrets: {}\n' > "$persistent_secret"

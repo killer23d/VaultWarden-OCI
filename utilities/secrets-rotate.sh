@@ -13,9 +13,9 @@ show_help() {
 VaultWarden Secrets — rotate subcommand
 
 USAGE:
-    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
-    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
-    ./edit-secrets.sh rotate FIELD [OPTIONS]
+    sudo ./utilities/secrets-rotate.sh FIELD [OPTIONS]
+    sudo ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
+    sudo ./edit-secrets.sh rotate FIELD [OPTIONS]
 
 DESCRIPTION:
     Re-collects and re-hashes a single named credential, then atomically
@@ -43,11 +43,11 @@ FLAGS:
     --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    ./utilities/secrets-rotate.sh admin_token
-    ./utilities/secrets-rotate.sh cf_worker_bouncer_token
-    ./utilities/secrets-rotate.sh email_api_token --dry-run
-    ./edit-secrets.sh rotate smtp_password
-    ./edit-secrets.sh rotate backup_passphrase --no-backup
+    sudo ./utilities/secrets-rotate.sh admin_token
+    sudo ./utilities/secrets-rotate.sh cf_worker_bouncer_token
+    sudo ./utilities/secrets-rotate.sh email_api_token --dry-run
+    sudo ./edit-secrets.sh rotate smtp_password
+    sudo ./edit-secrets.sh rotate backup_passphrase --no-backup
 
 EOF
 }
@@ -97,7 +97,7 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
-refuse_root_for_user_command "Do not run with sudo. Run: ./utilities/secrets-rotate.sh <field>"
+require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 load_project_environment || exit 1
@@ -412,7 +412,7 @@ PYEOF
         return 1
     fi
 
-    secure_secrets_file
+    secure_secrets_file "$SECRETS_FILE"
     log_success "Secret '${actual_field}' rotated successfully"
 
     local _affected_service="${_FIELD_SERVICES[$field]:-}"
@@ -468,7 +468,7 @@ main() {
 
     if [[ -z "$rotate_field" ]]; then
         log_error "'rotate' requires a FIELD argument."
-        log_error "Example: ./edit-secrets.sh rotate admin_token"
+        log_error "Example: sudo ./edit-secrets.sh rotate admin_token"
         log_error "Supported fields: ${_ROTATE_FIELDS[*]}"
         exit 1
     fi
