@@ -396,12 +396,12 @@ PYEOF
         return 1
     fi
 
-    if ! sops --config "$SOPS_CONFIG_FILE" updatekeys --yes "$temp_enc"; then
+    if ! SOPS_AGE_KEY_FILE="$_age_key_path" sops --config "$SOPS_CONFIG_FILE" updatekeys --yes "$temp_enc"; then
         log_error "Failed to synchronize SOPS recipients"
         rm -f "$temp_enc"
         return 1
     fi
-    if ! SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops -d "$temp_enc" >/dev/null; then
+    if ! SOPS_AGE_KEY_FILE="$_age_key_path" sops -d "$temp_enc" >/dev/null; then
         log_error "Staged encrypted secrets failed validation"
         rm -f "$temp_enc"
         return 1
