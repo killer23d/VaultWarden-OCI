@@ -258,34 +258,35 @@ update_dns_record() {
     [[ -z "$zone_id" ]] && { log_error "Cloudflare zone ID is empty"; return 1; }
     [[ -z "$cf_token" ]] && { log_error "Cloudflare API token is empty"; return 1; }
 
-    local cf_response record_id stored_ip
+    local cf_response record_id stored_ip proxied
     cf_response=$(curl -s --max-time 15 \
         -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
         -H "Authorization: Bearer $cf_token" \
         -H "Content-Type: application/json") \
         || { log_error "Cloudflare API request failed (network error)"; return 1; }
 
-    record_id=$(echo "$cf_response" | jq -r '.result[0].id   // empty' 2>/dev/null)
+    record_id=$(echo "$cf_response" | jq -r '.result[0].id      // empty' 2>/dev/null)
     stored_ip=$(echo "$cf_response" | jq -r '.result[0].content // empty' 2>/dev/null)
+    proxied=$(echo "$cf_response"   | jq -r '.result[0].proxied // true'  2>/dev/null)
 
     [[ -z "$record_id" ]] && { log_error "Cannot find DNS record ID for $domain"; return 1; }
 
     if [[ "$current_ip" == "$stored_ip" ]]; then
-        log_success "DNS record up to date: $domain -> $current_ip (CF record content matches, proxy state irrelevant)"
+        log_success "DNS record up to date: $domain -> $current_ip (proxied=$proxied)"
         return 0
     fi
 
-    log_info "DNS update needed: stored_ip=$stored_ip -> current_ip=$current_ip"
+    log_info "DNS update needed: stored_ip=$stored_ip -> current_ip=$current_ip (proxied=$proxied)"
 
     local response
     response=$(curl -s --max-time 15 \
         -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
         -H "Authorization: Bearer $cf_token" \
         -H "Content-Type: application/json" \
-        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":300}")
+        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":1,\"proxied\":$proxied}")
 
     if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
-        log_success "DNS updated successfully: $domain -> $current_ip"
+        log_success "DNS updated successfully: $domain -> $current_ip (proxied=$proxied)"
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
             local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
             if [[ -n "$admin_email" ]]; then
@@ -293,6 +294,7 @@ update_dns_record() {
 "Old IP: $stored_ip
 New IP: $current_ip
 Domain: $domain
+Proxied: $proxied
 DNS record updated automatically."; then
                     log_info "DNS change notification sent"
                 else
