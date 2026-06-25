@@ -116,7 +116,7 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
 **Solutions**:
 ```bash
 # Verify Cloudflare DNS token in secrets
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 # Ensure caddy_cloudflare_dns_token is set
 
 # Restart Caddy to retry
@@ -151,7 +151,7 @@ grep admin_basic_auth_hash "${SECRETS_FILE:-secrets/secrets.yaml}"   # encrypted
 docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
 
 # Update the hash in secrets
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 # Set admin_basic_auth_hash to the new hash string
 
 # Restart Caddy
@@ -222,11 +222,11 @@ make up
 **Solutions**:
 ```bash
 # Rotate each placeholder secret with real values
-./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
-./utilities/secrets-rotate.sh smtp_password
+sudo ./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
+sudo ./utilities/secrets-rotate.sh smtp_password
 
 # provider-specific token example
-./utilities/secrets-rotate.sh email_api_token
+sudo ./utilities/secrets-rotate.sh email_api_token
 
 make restart
 make health
@@ -338,7 +338,7 @@ sops -d "${SECRETS_FILE:-secrets/secrets.yaml}"
 ### Secrets Environment Leaking to Child Processes
 
 **Symptoms**:
-- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./utilities/secrets-edit.sh`, or `./setup.sh secrets`
+- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `sudo ./utilities/secrets-edit.sh`, or `./setup.sh secrets`
 - Docker or rclone subprocesses inherit the Age key file path (visible via `ps aux`)
 
 **Diagnosis**:
@@ -362,7 +362,7 @@ unset SOPS_AGE_KEY_FILE
 unset SOPS_CONFIG
 
 # Re-run the affected script
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 ```
 
 ## Network and Connectivity Issues
@@ -398,13 +398,13 @@ sudo ufw status
 ./startup.sh --force
 
 # Update DNS if IP changed (targeted mode — no cleanup)
-./maintenance.sh update-dns
+sudo ./maintenance.sh update-dns
 
 # Verify Cloudflare proxy is enabled
 # Check Cloudflare dashboard: DNS → Proxied (orange cloud)
 
 # Update firewall if Cloudflare IPs changed
-./maintenance.sh update-firewall
+sudo ./maintenance.sh update-firewall
 ```
 
 ### Firewall Blocking Access
@@ -429,7 +429,7 @@ curl -I https://vault.example.com
 **Solutions**:
 ```bash
 # Safely update Cloudflare IP ranges (adds new rules before removing old)
-./maintenance.sh update-firewall
+sudo ./maintenance.sh update-firewall
 
 # If firewall is blocking everything, check UFW
 sudo ufw status
@@ -466,7 +466,7 @@ echo "DNS IP:    $(dig +short vault.example.com @1.1.1.1 | head -1)"
 **Solutions**:
 ```bash
 # Manual DNS update (targeted mode — no routine cleanup)
-./maintenance.sh update-dns
+sudo ./maintenance.sh update-dns
 
 # Or via Makefile
 make update-dns
@@ -503,15 +503,15 @@ docker compose logs postfix
 make logs-postfix                    # shortcut with timestamps
 
 # Run full email diagnostic (4 tests)
-./maintenance.sh test-email
+sudo ./maintenance.sh test-email
 # or via Makefile:
 make test-email
 
 # Verbose diagnostic output
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 
 # Preview without sending
-./maintenance.sh test-email --dry-run
+sudo ./maintenance.sh test-email --dry-run
 
 # Check postfix relay configuration
 docker compose exec postfix postconf relayhost
@@ -525,7 +525,7 @@ nano .env
 # Check: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, ALLOWED_SENDER_DOMAINS
 
 # Verify SMTP password in secrets
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 # Check: smtp_password
 
 # Restart postfix
@@ -551,13 +551,13 @@ docker compose restart postfix
 docker compose logs postfix | grep -i "auth\|error\|fatal"
 
 # Run verbose email diagnostic
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 ```
 
 **Solutions**:
 ```bash
 # Update SMTP password
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 # Set correct smtp_password
 
 # Verify SMTP settings
@@ -599,7 +599,7 @@ docker compose ps vaultwarden
 **Solutions**:
 ```bash
 # Free up disk space
-./maintenance.sh run --comprehensive
+sudo ./maintenance.sh run --comprehensive
 
 # If Age key missing, regenerate
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
@@ -781,7 +781,7 @@ sudo cscli bouncers list
 sudo systemctl restart crowdsec
 
 # Verify Cloudflare firewall token
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 # Check: cf_worker_bouncer_token (used by crowdsec-cloudflare-worker-bouncer)
 
 # Test Cloudflare firewall token against the WAF Custom Rules endpoint
@@ -847,7 +847,7 @@ docker compose logs caddy | grep admin
 docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
 
 # Update secrets with new hash
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 # Set: admin_basic_auth_hash (paste bcrypt hash)
 
 # Restart Caddy to apply new hash
@@ -954,7 +954,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com --f
 ./startup.sh --force
 
 # Run comprehensive maintenance to free resources
-./maintenance.sh run --comprehensive
+sudo ./maintenance.sh run --comprehensive
 ```
 
 ### Slow Database Performance

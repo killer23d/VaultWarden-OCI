@@ -46,7 +46,7 @@ cd VaultWarden-OCI
 chmod +x *.sh
 
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 nano .env
 ```
 
@@ -123,7 +123,7 @@ bw export --output vault-export.json --format json
 **2. Set up target:**
 ```bash
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 nano .env
 ./startup.sh
 ```
@@ -157,7 +157,7 @@ bw export --output bitwarden-export.json --format json
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 nano .env
 ./startup.sh
 ```
@@ -267,7 +267,7 @@ scp vaultwarden-backup.tar.gz user@new-server:/tmp/
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 nano .env
 
 # 4. Migrate data
@@ -297,7 +297,7 @@ cd /path/to/VaultWarden-OCI
 - ✅ **2FA** — test two-factor authentication
 - ✅ **Attachments** — verify file downloads work
 - ✅ **Sends** — test Send functionality
-- ✅ **Email** — test email notifications (`./maintenance.sh test-email`)
+- ✅ **Email** — test email notifications (`sudo ./maintenance.sh test-email`)
 - ✅ **Admin panel** — verify admin access works
 - ✅ **Systemd timers** — confirm scheduled jobs are active: `sudo systemctl list-timers 'vaultwarden-*'`
 
@@ -305,10 +305,10 @@ cd /path/to/VaultWarden-OCI
 
 ```bash
 # Rotate the bcrypt hash for admin basic auth
-./utilities/secrets-rotate.sh admin_basic_auth_hash
+sudo ./utilities/secrets-rotate.sh admin_basic_auth_hash
 
 # Update secrets
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 # Set: admin_basic_auth_hash (and admin_token if desired)
 
 # Restart services to apply
@@ -332,10 +332,10 @@ sudo systemctl list-timers 'vaultwarden-*'
 ./backup.sh list
 
 # Test email (uses lib/common.sh multi-provider chain)
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 ```
 
-> **Email migration note:** `lib/common.sh` (email functions) provides API → SMTP → direct SMTP fallback for script-driven alerts. The Postfix sidecar handles VaultWarden container mail, so keep the `postfix` service enabled unless you have deliberately removed those paths. Set `EMAIL_PROVIDER` in `.env`, store `email_api_token` with `./utilities/secrets-rotate.sh email_api_token`, and see [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
+> **Email migration note:** `lib/common.sh` (email functions) provides API → SMTP → direct SMTP fallback for script-driven alerts. The Postfix sidecar handles VaultWarden container mail, so keep the `postfix` service enabled unless you have deliberately removed those paths. Set `EMAIL_PROVIDER` in `.env`, store `email_api_token` with `sudo ./utilities/secrets-rotate.sh email_api_token`, and see [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
 
 ### Update Client Applications
 
@@ -359,7 +359,7 @@ If migration fails:
 ```bash
 # Point DNS back to old server IP (update Cloudflare manually)
 # Or trigger an immediate DNS update if old IP still valid:
-./maintenance.sh update-dns
+sudo ./maintenance.sh update-dns
 
 # Notify users to switch back
 # Restore old system from backup if needed
@@ -411,7 +411,7 @@ curl -I https://vault.example.com/admin
 
 ```bash
 # Full email diagnostics
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 
 # Check configured email mode and provider
 grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env

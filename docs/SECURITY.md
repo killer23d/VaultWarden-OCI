@@ -214,10 +214,10 @@ The secrets management layer (`lib/secrets.sh`, `utilities/secrets-edit.sh`, `se
 
 ```bash
 # Edit secrets securely (recommended)
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 
 # Specify editor
-./utilities/secrets-edit.sh --editor vim
+sudo ./utilities/secrets-edit.sh --editor vim
 
 # Validate secrets without editing
 ./utilities/secrets-list.sh
@@ -286,7 +286,7 @@ sudo ufw allow from 2400:cb00::/32 to any port 443 proto tcp
 
 > **OPERATOR ACTION REQUIRED**: During initial setup, `setup.sh` opens ports 80 and 443
 > to all sources. You must restrict those rules to Cloudflare CIDRs after deployment using
-> `./maintenance.sh update-firewall` or by running the UFW commands in
+> `sudo ./maintenance.sh update-firewall` or by running the UFW commands in
 > `docker-compose.yml.example` comments.
 
 ### SSH Protection
@@ -303,7 +303,7 @@ old ones to eliminate race conditions:
 
 ```bash
 # Safe update (targeted mode — skips routine cleanup)
-./maintenance.sh update-firewall
+sudo ./maintenance.sh update-firewall
 
 # Features:
 # 1. Fetches current Cloudflare IPv4 + IPv6 ranges
@@ -1002,7 +1002,7 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Create initial encrypted backup
 - ✅ Configure email notifications and run `make test-email`
 - ✅ Verify all health checks pass: `./maintenance.sh health --comprehensive`
-- ✅ Restrict UFW ports 80/443 to Cloudflare CIDRs: `./maintenance.sh update-firewall`
+- ✅ Restrict UFW ports 80/443 to Cloudflare CIDRs: `sudo ./maintenance.sh update-firewall`
 - ✅ Confirm `internal: true` is active on the Docker network (unless push is enabled)
 
 ### Ongoing Operations
@@ -1062,7 +1062,7 @@ If you detect suspicious activity:
 4. **Recovery**:
    ```bash
    # If compromised, rotate all secrets
-   ./utilities/secrets-edit.sh
+   sudo ./utilities/secrets-edit.sh
 
    # Update admin token and hash
    # Restart services
@@ -1118,22 +1118,22 @@ docker compose logs postfix          # live output
 make logs-postfix                    # shortcut
 
 # Run full email diagnostic (4 tests)
-./maintenance.sh test-email
+sudo ./maintenance.sh test-email
 
 # Verbose output for detailed diagnosis
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 
 # Test with specific recipient
-./maintenance.sh test-email --recipient admin@example.com
+sudo ./maintenance.sh test-email --recipient admin@example.com
 
 # Preview without sending (dry-run)
-./maintenance.sh test-email --dry-run
+sudo ./maintenance.sh test-email --dry-run
 
 # Verify SMTP settings in .env
 grep -E 'SMTP|POSTFIX|ALLOWED_SENDER' .env
 
 # Verify SMTP password in secrets
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 ```
 
 ## Compliance and Hardening

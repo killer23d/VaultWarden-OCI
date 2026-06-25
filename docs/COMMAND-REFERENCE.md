@@ -133,7 +133,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       WARNING: Also regenerates the Age encryption key. All
                       existing encrypted secrets become permanently unrecoverable
                       without a prior recovery kit export. Run
-                      './utilities/secrets-export-recovery-kit.sh' BEFORE using
+                      'sudo ./utilities/secrets-export-recovery-kit.sh' BEFORE using
                       --force on a running installation. To confirm you understand,
                       set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
                       environment (or answer 'yes' at the interactive prompt).

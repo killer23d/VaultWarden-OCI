@@ -5,7 +5,7 @@ Configuration is split by lifetime and sensitivity:
 - `${PROJECT_STATE_DIR}/config/install.env` is the authoritative persistent non-secret environment on the state volume.
 - Repository `.env` is a compatibility/bootstrap fallback generated from `.env.example` by setup.
 - `/etc/vaultwarden/vaultwarden.env` is the installed systemd bootstrap fallback.
-- `${PROJECT_STATE_DIR}/secrets/secrets.yaml` is the persistent encrypted SOPS file edited through `./utilities/secrets-edit.sh`.
+- `${PROJECT_STATE_DIR}/secrets/secrets.yaml` is the persistent encrypted SOPS file edited through `sudo ./utilities/secrets-edit.sh`.
 - `/run/vaultwarden-oci/secrets/` contains transient runtime Docker secret source files recreated at startup.
 
 SOPS uses the operational Age recipient and may include an optional offline USB Age recipient for recovery. Never edit generated files directly unless a utility explicitly instructs you to do so.
@@ -24,7 +24,7 @@ sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.c
 nano .env
 
 # Edit sensitive secrets (encrypted)
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 
 # Validate
 docker compose config
@@ -119,7 +119,7 @@ See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for version pinning d
 
 ## 🔒 Secrets (Encrypted)
 
-Manage secrets with `./utilities/secrets-edit.sh`. They are encrypted with Age + SOPS; never stored in plaintext.
+Manage secrets with `sudo ./utilities/secrets-edit.sh`. They are encrypted with Age + SOPS; never stored in plaintext.
 
 ### Auto-generated Required Secrets
 
@@ -177,7 +177,7 @@ ALLOWED_SENDER_DOMAINS=yourdomain.com
 Store the SMTP password in SOPS secrets:
 
 ```bash
-./utilities/secrets-rotate.sh smtp_password
+sudo ./utilities/secrets-rotate.sh smtp_password
 ```
 
 `ALLOWED_SENDER_DOMAINS` is critical safety configuration. Set it to the domain(s) the appliance may send as; the sidecar is a private relay to your upstream SMTP provider, not a public mail server.
@@ -203,7 +203,7 @@ Provider-specific HTTP APIs are optional. Use them only after the normal Postfix
 ```bash
 EMAIL_MODE=auto
 EMAIL_PROVIDER=mailersend   # sendgrid | mailgun | postmark | resend
-./utilities/secrets-rotate.sh email_api_token
+sudo ./utilities/secrets-rotate.sh email_api_token
 ```
 
 `EMAIL_PROVIDER=smtp` is not valid; SMTP is selected with `EMAIL_MODE=smtp` and a blank `EMAIL_PROVIDER`.
@@ -211,7 +211,7 @@ EMAIL_PROVIDER=mailersend   # sendgrid | mailgun | postmark | resend
 ### Testing Email Delivery
 
 ```bash
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 make test-email
 ```
 
@@ -236,7 +236,7 @@ SHOW_PASSWORD_HINT=false
 LOG_LEVEL=warn                    # trace | debug | info | warn | error
 ADMIN_TOKEN=                      # Must be an Argon2id hash — never plaintext.
                                   # Generate: docker run --rm -it vaultwarden/server /vaultwarden hash --preset owasp
-                                  # Use ./utilities/secrets-edit.sh for production; never commit a real token.
+                                  # Use sudo ./utilities/secrets-edit.sh for production; never commit a real token.
 DISABLE_ADMIN_TOKEN=false         # Set true to completely disable /admin panel
 DISABLE_ICON_DOWNLOAD=false
 
@@ -276,7 +276,7 @@ PUSH_RELAY_URI=https://push.bitwarden.com
 PUSH_IDENTITY_URI=https://identity.bitwarden.com
 ```
 
-Add `push_installation_id` and `push_installation_key` via `./utilities/secrets-edit.sh`.
+Add `push_installation_id` and `push_installation_key` via `sudo ./utilities/secrets-edit.sh`.
 
 > **⚠️ Network Constraint:** Push relay requires outbound internet access from the VaultWarden container. The `vaultwarden` network is marked `internal: true` in `docker-compose.yml`, which blocks all outbound traffic. If you enable push notifications, you must either remove `internal: true` from the network definition or route push traffic through an external proxy. Mismatching these settings causes silent push failures on every sync cycle. See [DEPLOYMENT.md](DEPLOYMENT.md) for details.
 
@@ -368,15 +368,15 @@ sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.c
 
 ```bash
 ls -l secrets/keys/age-key.txt   # must exist and be mode 600
-./utilities/secrets-edit.sh                 # verify decryption works
+sudo ./utilities/secrets-edit.sh                 # verify decryption works
 ```
 
 **Email issues:**
 
 ```bash
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
-./utilities/secrets-edit.sh   # verify the correct API token key is set for EMAIL_PROVIDER
+sudo ./utilities/secrets-edit.sh   # verify the correct API token key is set for EMAIL_PROVIDER
 
 # Postfix MTA sidecar specifically
 docker compose ps postfix

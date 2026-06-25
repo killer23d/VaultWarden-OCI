@@ -52,8 +52,6 @@ fi
 SECRETS_FILE="${SECRETS_FILE:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/secrets.yaml}"
 PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
-OPERATOR_USER="$(get_real_user 2>/dev/null || printf '%s' "${SUDO_USER:-${USER:-root}}")"
-OPERATOR_GROUP="$(id -g -n "$OPERATOR_USER" 2>/dev/null || id -gn 2>/dev/null || printf '%s' "$OPERATOR_USER")"
 STATUS=0
 
 _mode_of() { stat -c '%a' "$1" 2>/dev/null || printf 'unknown'; }
@@ -62,24 +60,6 @@ _owner_of() { stat -c '%U:%G' "$1" 2>/dev/null || printf 'unknown'; }
 _report() {
     local level="$1" label="$2" path="$3" expected="$4" actual="$5" action="$6"
     printf '%s %s\n  path: %s\n  expected: %s\n  actual: %s\n  %s\n' "$level" "$label" "$path" "$expected" "$actual" "$action"
-}
-
-_apply_chmod() {
-    local mode="$1" path="$2" label="$3" expected actual
-    expected="mode $mode"
-    [[ -e "$path" ]] || return 0
-    actual="mode $(_mode_of "$path"), owner $(_owner_of "$path")"
-    if [[ "$(_mode_of "$path")" == "${mode#0}" || "$(_mode_of "$path")" == "$mode" ]]; then
-        _report OK "$label" "$path" "$expected" "$actual" "action: none"
-        return 0
-    fi
-    if [[ "$MODE" == "check" ]]; then
-        STATUS=1
-        _report ERROR "$label" "$path" "$expected" "$actual" "fix: sudo utilities/repair-permissions.sh"
-    else
-        chmod "$mode" "$path"
-        _report FIXED "$label" "$path" "$expected" "$actual" "action: chmod $mode"
-    fi
 }
 
 _apply_known_path() {

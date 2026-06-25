@@ -34,7 +34,7 @@ ALLOWED_SENDER_DOMAINS=yourdomain.com
 Store the SMTP relay password in SOPS secrets, never in `.env`:
 
 ```bash
-./utilities/secrets-rotate.sh smtp_password
+sudo ./utilities/secrets-rotate.sh smtp_password
 ```
 
 `ALLOWED_SENDER_DOMAINS` is required safety configuration. Set it to the domain(s) your vault is allowed to send as, for example `yourdomain.com` or `vault.yourdomain.com`. Leaving it broad makes the sidecar easier to misuse.
@@ -116,7 +116,7 @@ EMAIL_PROVIDER=mailersend   # sendgrid | mailgun | postmark | resend
 Store the API token in the canonical SOPS secret key used for all providers:
 
 ```bash
-./utilities/secrets-rotate.sh email_api_token
+sudo ./utilities/secrets-rotate.sh email_api_token
 ```
 
 `EMAIL_MODE=auto` tries the selected API provider first and then falls back to SMTP paths. Keep Postfix configured even in API mode because Vaultwarden container mail and attachment-based messages still rely on SMTP.

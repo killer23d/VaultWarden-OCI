@@ -109,7 +109,7 @@ This installs the appliance automation: health self-healing, database and full b
 ### 8. Export the recovery kit
 
 ```bash
-./utilities/secrets-export-recovery-kit.sh
+sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
 Store the recovery kit in your password manager and offline backup location. It is your break-glass bundle for rebuilding or decrypting secrets during recovery.
@@ -152,7 +152,7 @@ VW_SMTP_EXPLICIT_TLS=false
 Store the relay password in SOPS secrets:
 
 ```bash
-./utilities/secrets-rotate.sh smtp_password
+sudo ./utilities/secrets-rotate.sh smtp_password
 ```
 
 Provider-specific HTTP APIs (`mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`) remain available as advanced alternatives via `EMAIL_MODE=auto` or `EMAIL_MODE=api`; see [docs/EMAIL.md](docs/EMAIL.md).
@@ -249,7 +249,7 @@ sudo ./backup.sh sync                  # copy all retained local backups to rclo
 
 The restore flow now includes an interactive Age decryption key prompt, a pre-restore key round-trip validation, and automatic post-restore key rotation. Pass `--key-file <path>` or set `RESTORE_AGE_KEY_FILE` for non-interactive/CI restores. See [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) for the full 12-step restore procedure.
 
-> **⚠️ Keep a separate copy of `secrets/keys/age-key.txt`** — it is required to decrypt all backups on a new server. Run `./utilities/secrets-export-recovery-kit.sh` after setup to store it in your password manager alongside all other credentials.
+> **⚠️ Keep a separate copy of `secrets/keys/age-key.txt`** — it is required to decrypt all backups on a new server. Run `sudo ./utilities/secrets-export-recovery-kit.sh` after setup to store it in your password manager alongside all other credentials.
 
 Full procedures: [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)
 

@@ -12,19 +12,19 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 | File | Dispatcher subcommand | sudo required | Description |
 |---|---|---|---|
 | `backup-run.sh` | `./backup.sh` (all subcommands) | No (`run/list`), Yes (`verify/rotate`) | Full backup engine |
-| `maintenance-db-maint.sh` | `./maintenance.sh db-maint` | Yes | Deep database optimizations |
-| `maintenance-email.sh` | `./maintenance.sh test-email` | Yes | Email alert diagnostics |
+| `maintenance-db-maint.sh` | `sudo ./maintenance.sh db-maint` | Yes | Deep database optimizations |
+| `maintenance-email.sh` | `sudo ./maintenance.sh test-email` | Yes | Email alert diagnostics |
 | `maintenance-health.sh` | `./maintenance.sh health` | No | System health probes |
-| `maintenance-run.sh` | `./maintenance.sh run` | Yes | Routine maintenance cycle |
-| `maintenance-update-dns.sh` | `./maintenance.sh update-dns` | No | Cloudflare A record updates |
-| `maintenance-update-firewall.sh` | `./maintenance.sh update-firewall` | Yes | Cloudflare IP → UFW sync |
-| `maintenance-update.sh` | `./maintenance.sh update` | Yes | System/package/docker updates |
+| `maintenance-run.sh` | `sudo ./maintenance.sh run` | Yes | Routine maintenance cycle |
+| `maintenance-update-dns.sh` | `sudo ./maintenance.sh update-dns` | Yes | Cloudflare A record updates |
+| `maintenance-update-firewall.sh` | `sudo ./maintenance.sh update-firewall` | Yes | Cloudflare IP → UFW sync |
+| `maintenance-update.sh` | `sudo ./maintenance.sh update` | Yes | System/package/docker updates |
 | `pre-production-drill.sh` | `make drill` | Yes | Non-destructive pre-production dry-run drill |
 | `restore-run.sh` | `./restore.sh` (all subcommands) | Yes / No (`list`) | Full restore engine |
-| `secrets-edit.sh` | `./utilities/secrets-edit.sh` | No | Interactive encrypted secrets editor |
-| `secrets-export-recovery-kit.sh` | `./utilities/secrets-export-recovery-kit.sh` | No | Export plaintext recovery document |
+| `secrets-edit.sh` | `sudo ./utilities/secrets-edit.sh` | Yes | Interactive encrypted secrets editor |
+| `secrets-export-recovery-kit.sh` | `sudo ./utilities/secrets-export-recovery-kit.sh` | Yes | Export plaintext recovery document |
 | `secrets-list.sh` | `./utilities/secrets-list.sh` | No | List secret key names (no values) |
-| `secrets-rotate.sh` | `./utilities/secrets-rotate.sh FIELD` | No | Rotate a single credential |
+| `secrets-rotate.sh` | `sudo ./utilities/secrets-rotate.sh FIELD` | Yes | Rotate a single credential |
 | `secrets-view.sh` | `./utilities/secrets-view.sh` | No | View decrypted secrets read-only |
 | `setup-crowdsec.sh` | *(Standalone)* | Yes | CrowdSec installation |
 | `setup-env.sh` | *(Setup phase)* | Yes | Environment file generation |
@@ -68,13 +68,13 @@ but is not required.
 
 Decrypts, opens in `$EDITOR`, validates YAML, re-encrypts, and backs up on
 every save. Offers recovery kit export after modifications.
-Also invocable via `./utilities/secrets-edit.sh`.
+Also invocable via `sudo ./utilities/secrets-edit.sh`.
 
 ```bash
-./utilities/secrets-edit.sh edit
-./utilities/secrets-edit.sh edit --editor vim
-./utilities/secrets-edit.sh edit --no-backup
-./utilities/secrets-edit.sh --editor 'code --wait'
+sudo ./utilities/secrets-edit.sh edit
+sudo ./utilities/secrets-edit.sh edit --editor vim
+sudo ./utilities/secrets-edit.sh edit --no-backup
+sudo ./utilities/secrets-edit.sh --editor 'code --wait'
 ```
 
 ---
@@ -87,14 +87,14 @@ Pass the field name directly as the first argument. The leading `rotate`
 keyword is accepted as an alias for backward compatibility but is not required.
 
 ```bash
-./utilities/secrets-rotate.sh admin_token
-./utilities/secrets-rotate.sh email_api_token --dry-run
-./utilities/secrets-rotate.sh smtp_password --no-backup
-./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
-./utilities/secrets-rotate.sh cloudflare_zone_id
-./utilities/secrets-rotate.sh cf_account_id
-./utilities/secrets-rotate.sh cf_worker_bouncer_token
-./utilities/secrets-rotate.sh backup_passphrase
+sudo ./utilities/secrets-rotate.sh admin_token
+sudo ./utilities/secrets-rotate.sh email_api_token --dry-run
+sudo ./utilities/secrets-rotate.sh smtp_password --no-backup
+sudo ./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
+sudo ./utilities/secrets-rotate.sh cloudflare_zone_id
+sudo ./utilities/secrets-rotate.sh cf_account_id
+sudo ./utilities/secrets-rotate.sh cf_worker_bouncer_token
+sudo ./utilities/secrets-rotate.sh backup_passphrase
 ```
 
 Supported fields: `admin_token`, `admin_basic_auth_hash`,
@@ -110,11 +110,11 @@ Supported fields: `admin_token`, `admin_basic_auth_hash`,
 Decrypts secrets, validates no placeholder values remain, then exports a
 full recovery document (Age private key + all credentials) to a tmpfs-backed
 file (mode 0600) with a 30-minute auto-delete via `at(1)`.
-Also invocable via `./utilities/secrets-export-recovery-kit.sh`.
+Also invocable via `sudo ./utilities/secrets-export-recovery-kit.sh`.
 
 ```bash
-./utilities/secrets-export-recovery-kit.sh export-recovery-kit
-./utilities/secrets-export-recovery-kit.sh
+sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
+sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
 ---
@@ -242,7 +242,7 @@ sudo utilities/uninstall-vaultwarden.sh run --force   # CI/automation only
 ### `maintenance-run.sh` — Routine maintenance cycle
 
 Full maintenance cycle: cleanup (logs, backups, Docker) → DB optimisation → health validation.
-Also invocable via `./maintenance.sh run`.
+Also invocable via `sudo ./maintenance.sh run`.
 
 ```bash
 sudo utilities/maintenance-run.sh run
@@ -266,7 +266,7 @@ sudo utilities/maintenance-health.sh health --report
 
 ### `maintenance-update.sh` — System/package/docker updates
 
-Pulls new images and optionally updates OS packages. Also invocable via `./maintenance.sh update`.
+Pulls new images and optionally updates OS packages. Also invocable via `sudo ./maintenance.sh update`.
 
 ```bash
 sudo utilities/maintenance-update.sh update --system
@@ -278,7 +278,7 @@ sudo utilities/maintenance-update.sh update --all --email
 
 ### `maintenance-db-maint.sh` — Deep database optimizations
 
-Stops VaultWarden, creates a pre-maintenance encrypted backup, runs `VACUUM + wal_checkpoint(TRUNCATE) + ANALYZE`, verifies integrity, restarts. Also invocable via `./maintenance.sh db-maint`.
+Stops VaultWarden, creates a pre-maintenance encrypted backup, runs `VACUUM + wal_checkpoint(TRUNCATE) + ANALYZE`, verifies integrity, restarts. Also invocable via `sudo ./maintenance.sh db-maint`.
 
 ```bash
 sudo utilities/maintenance-db-maint.sh db-maint
@@ -290,7 +290,7 @@ sudo utilities/maintenance-db-maint.sh db-maint --dry-run
 
 ### `maintenance-email.sh` — Email alert diagnostics
 
-Sends test emails to verify the configured delivery chain. Also invocable via `./maintenance.sh test-email`.
+Sends test emails to verify the configured delivery chain. Also invocable via `sudo ./maintenance.sh test-email`.
 
 ```bash
 sudo utilities/maintenance-email.sh test-email
@@ -302,7 +302,7 @@ sudo utilities/maintenance-email.sh test-email --dry-run
 
 ### `maintenance-update-dns.sh` — Cloudflare A record updates
 
-Updates Cloudflare DNS A record with the current public IP. Also invocable via `./maintenance.sh update-dns`.
+Updates Cloudflare DNS A record with the current public IP. Also invocable via `sudo ./maintenance.sh update-dns`.
 
 ```bash
 sudo utilities/maintenance-update-dns.sh update-dns
@@ -313,7 +313,7 @@ sudo utilities/maintenance-update-dns.sh update-dns --email --dry-run
 
 ### `maintenance-update-firewall.sh` — Cloudflare IP → UFW sync
 
-Syncs Cloudflare IP ranges into UFW. Also invocable via `./maintenance.sh update-firewall`.
+Syncs Cloudflare IP ranges into UFW. Also invocable via `sudo ./maintenance.sh update-firewall`.
 
 ```bash
 sudo utilities/maintenance-update-firewall.sh update-firewall

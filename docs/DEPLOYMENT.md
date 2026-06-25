@@ -87,7 +87,7 @@ sudo ./edit-secrets.sh rotate smtp_password
 ```bash
 ./startup.sh
 ./maintenance.sh health
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 ```
 
 Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and confirm SSL/TLS is **Full (Strict)**.
@@ -105,7 +105,7 @@ The runtime stack remains:
 
 ```bash
 sudo ./setup.sh systemd install
-./utilities/secrets-export-recovery-kit.sh
+sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
 Systemd automation covers health self-healing, backups, maintenance, DNS refresh, firewall refresh, locking, and failure notifications. See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for the full timer schedule and overrides.
