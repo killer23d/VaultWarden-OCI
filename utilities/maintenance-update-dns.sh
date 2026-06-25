@@ -210,6 +210,40 @@ _check_optional_dns_config() {
     return 2
 }
 
+# _cf_patch_proxied — issue a PATCH to flip proxied:true without touching the IP or TTL.
+_cf_patch_proxied() {
+    local zone_id="$1" cf_token="$2" record_id="$3"
+    local patch_response
+    patch_response=$(curl -s --max-time 15 \
+        -X PATCH "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records/${record_id}" \
+        -H "Authorization: Bearer ${cf_token}" \
+        -H "Content-Type: application/json" \
+        --data '{"proxied":true}')
+
+    if echo "$patch_response" | jq -e '.success' >/dev/null 2>&1; then
+        return 0
+    fi
+    log_error "Cloudflare PATCH (proxied) failed: $patch_response"
+    return 1
+}
+
+# _cf_put_record — issue a PUT to update IP and enforce proxied:true.
+_cf_put_record() {
+    local zone_id="$1" cf_token="$2" record_id="$3" domain="$4" ip="$5"
+    local put_response
+    put_response=$(curl -s --max-time 15 \
+        -X PUT "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records/${record_id}" \
+        -H "Authorization: Bearer ${cf_token}" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"A\",\"name\":\"${domain}\",\"content\":\"${ip}\",\"ttl\":1,\"proxied\":true}")
+
+    if echo "$put_response" | jq -e '.success' >/dev/null 2>&1; then
+        return 0
+    fi
+    log_error "Cloudflare PUT (IP+proxied) failed: $put_response"
+    return 1
+}
+
 update_dns_record() {
     local cfg_status=0
     _check_optional_dns_config || cfg_status=$?
@@ -219,7 +253,10 @@ update_dns_record() {
         2) ;;
         *) return "$cfg_status" ;;
     esac
-    if [[ "$DRY_RUN"    == "true" ]]; then log_info "[DRY RUN] Would check and update Cloudflare DNS A record"; return 0; fi
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would check and update Cloudflare DNS A record"
+        return 0
+    fi
 
     local domain="${DOMAIN:-}"
     domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
@@ -237,7 +274,7 @@ update_dns_record() {
         return 0
     fi
 
-    log_info "Checking if DNS update needed for $domain..."
+    log_info "Checking DNS record for $domain..."
 
     local current_ip
     current_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null | tr -d '\n\r ') || true
@@ -255,63 +292,111 @@ update_dns_record() {
     local zone_id cf_token
     zone_id="${DNS_ZONE_ID:-}"
     cf_token="${DNS_CF_TOKEN:-}"
-    [[ -z "$zone_id" ]] && { log_error "Cloudflare zone ID is empty"; return 1; }
+    [[ -z "$zone_id" ]]  && { log_error "Cloudflare zone ID is empty"; return 1; }
     [[ -z "$cf_token" ]] && { log_error "Cloudflare API token is empty"; return 1; }
 
-    local cf_response record_id stored_ip proxied
+    local cf_response
     cf_response=$(curl -s --max-time 15 \
-        -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
-        -H "Authorization: Bearer $cf_token" \
+        -X GET "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records?type=A&name=${domain}" \
+        -H "Authorization: Bearer ${cf_token}" \
         -H "Content-Type: application/json") \
         || { log_error "Cloudflare API request failed (network error)"; return 1; }
 
-    record_id=$(echo "$cf_response" | jq -r '.result[0].id      // empty' 2>/dev/null)
-    stored_ip=$(echo "$cf_response" | jq -r '.result[0].content // empty' 2>/dev/null)
-    proxied=$(echo "$cf_response"   | jq -r '.result[0].proxied // true'  2>/dev/null)
+    # Validate the GET response itself succeeded.
+    if ! echo "$cf_response" | jq -e '.success' >/dev/null 2>&1; then
+        log_error "Cloudflare GET DNS records failed: $cf_response"
+        return 1
+    fi
 
-    [[ -z "$record_id" ]] && { log_error "Cannot find DNS record ID for $domain"; return 1; }
+    local record_id stored_ip proxied_raw
+    record_id=$(echo "$cf_response"   | jq -r '.result[0].id      // empty')
+    stored_ip=$(echo "$cf_response"   | jq -r '.result[0].content // empty')
+    proxied_raw=$(echo "$cf_response" | jq -r '.result[0].proxied // empty')
 
-    # Check whether an update is needed: IP changed OR proxy state is wrong.
-    local ip_changed=false proxy_wrong=false
-    [[ "$current_ip" != "$stored_ip" ]] && ip_changed=true
-    [[ "$proxied" == "false" ]]         && proxy_wrong=true
+    [[ -z "$record_id" ]] && { log_error "Cannot find DNS A record for $domain in zone"; return 1; }
 
+    # Treat missing/null proxied field as false (needs fixing).
+    local is_proxied="false"
+    if [[ "$proxied_raw" == "true" ]]; then
+        is_proxied="true"
+    fi
+
+    log_debug "CF record state: ip=$stored_ip proxied=$is_proxied record_id=$record_id"
+
+    # Determine what needs fixing using if/then to be safe under set -e.
+    local ip_changed="false"
+    if [[ "$current_ip" != "$stored_ip" ]]; then
+        ip_changed="true"
+    fi
+
+    local proxy_wrong="false"
+    if [[ "$is_proxied" != "true" ]]; then
+        proxy_wrong="true"
+    fi
+
+    # Nothing to do.
     if [[ "$ip_changed" == "false" && "$proxy_wrong" == "false" ]]; then
-        log_success "DNS record up to date: $domain -> $current_ip (proxied=$proxied)"
+        log_success "DNS record up to date: $domain -> $current_ip (proxied=true)"
         return 0
     fi
 
-    [[ "$ip_changed"  == "true" ]] && log_info "DNS update needed: stored_ip=$stored_ip -> current_ip=$current_ip"
-    [[ "$proxy_wrong" == "true" ]] && log_info "Proxy state incorrect (proxied=false); re-applying proxied=true"
+    # IP changed — PUT the full record with proxied:true.
+    if [[ "$ip_changed" == "true" ]]; then
+        log_info "IP changed: $stored_ip -> $current_ip. Updating record (proxied=true)..."
+        _cf_put_record "$zone_id" "$cf_token" "$record_id" "$domain" "$current_ip" \
+            || return 1
+        log_success "DNS updated: $domain -> $current_ip (proxied=true)"
 
-    local response
-    response=$(curl -s --max-time 15 \
-        -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
-        -H "Authorization: Bearer $cf_token" \
-        -H "Content-Type: application/json" \
-        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":1,\"proxied\":true}")
-
-    if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
-        log_success "DNS updated successfully: $domain -> $current_ip (proxied=true)"
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-            local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
+            local admin_email
+            admin_email=$(get_config_value "ADMIN_EMAIL" "")
             if [[ -n "$admin_email" ]]; then
-                local change_summary=""
-                [[ "$ip_changed"  == "true" ]] && change_summary+="Old IP: $stored_ip\nNew IP: $current_ip\n"
-                [[ "$proxy_wrong" == "true" ]] && change_summary+="Proxy state corrected: DNS Only -> Proxied\n"
-                if send_notification_email "VaultWarden DNS Record Updated" \
-"Domain: $domain
-${change_summary}DNS record updated automatically."; then
+                local body="Domain: $domain
+Old IP: $stored_ip
+New IP: $current_ip
+Proxied: true
+DNS record updated automatically."
+                if [[ "$proxy_wrong" == "true" ]]; then
+                    body="Domain: $domain
+Old IP: $stored_ip
+New IP: $current_ip
+Proxy state corrected: DNS Only -> Proxied
+DNS record updated automatically."
+                fi
+                if send_notification_email "VaultWarden DNS Record Updated" "$body"; then
                     log_info "DNS change notification sent"
                 else
                     log_warn "Failed to send DNS change notification email"
                 fi
             fi
         fi
-    else
-        log_error "DNS update failed: $response"; return 1
+        return 0
     fi
-    return 0
+
+    # IP is the same but proxy is wrong — PATCH only the proxied field.
+    if [[ "$proxy_wrong" == "true" ]]; then
+        log_info "IP unchanged ($current_ip) but proxied=false. Correcting proxy state..."
+        _cf_patch_proxied "$zone_id" "$cf_token" "$record_id" \
+            || return 1
+        log_success "Proxy state corrected: $domain -> $current_ip (proxied=true)"
+
+        if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+            local admin_email
+            admin_email=$(get_config_value "ADMIN_EMAIL" "")
+            if [[ -n "$admin_email" ]]; then
+                if send_notification_email "VaultWarden DNS Proxy State Corrected" \
+"Domain: $domain
+IP: $current_ip
+Proxy state corrected: DNS Only -> Proxied
+DNS record updated automatically."; then
+                    log_info "DNS change notification sent"
+                else
+                    log_warn "Failed to send DNS change notification email"
+                fi
+            fi
+        fi
+        return 0
+    fi
 }
 
 [[ "${1:-}" == "update-dns" ]] && shift
