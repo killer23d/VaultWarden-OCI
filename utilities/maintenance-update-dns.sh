@@ -271,31 +271,37 @@ update_dns_record() {
 
     [[ -z "$record_id" ]] && { log_error "Cannot find DNS record ID for $domain"; return 1; }
 
-    if [[ "$current_ip" == "$stored_ip" ]]; then
+    # Check whether an update is needed: IP changed OR proxy state is wrong.
+    local ip_changed=false proxy_wrong=false
+    [[ "$current_ip" != "$stored_ip" ]] && ip_changed=true
+    [[ "$proxied" == "false" ]]         && proxy_wrong=true
+
+    if [[ "$ip_changed" == "false" && "$proxy_wrong" == "false" ]]; then
         log_success "DNS record up to date: $domain -> $current_ip (proxied=$proxied)"
         return 0
     fi
 
-    log_info "DNS update needed: stored_ip=$stored_ip -> current_ip=$current_ip (proxied=$proxied)"
+    [[ "$ip_changed"  == "true" ]] && log_info "DNS update needed: stored_ip=$stored_ip -> current_ip=$current_ip"
+    [[ "$proxy_wrong" == "true" ]] && log_info "Proxy state incorrect (proxied=false); re-applying proxied=true"
 
     local response
     response=$(curl -s --max-time 15 \
         -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
         -H "Authorization: Bearer $cf_token" \
         -H "Content-Type: application/json" \
-        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":1,\"proxied\":$proxied}")
+        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":1,\"proxied\":true}")
 
     if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
-        log_success "DNS updated successfully: $domain -> $current_ip (proxied=$proxied)"
+        log_success "DNS updated successfully: $domain -> $current_ip (proxied=true)"
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
             local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
             if [[ -n "$admin_email" ]]; then
-                if send_notification_email "VaultWarden IP Address Changed" \
-"Old IP: $stored_ip
-New IP: $current_ip
-Domain: $domain
-Proxied: $proxied
-DNS record updated automatically."; then
+                local change_summary=""
+                [[ "$ip_changed"  == "true" ]] && change_summary+="Old IP: $stored_ip\nNew IP: $current_ip\n"
+                [[ "$proxy_wrong" == "true" ]] && change_summary+="Proxy state corrected: DNS Only -> Proxied\n"
+                if send_notification_email "VaultWarden DNS Record Updated" \
+"Domain: $domain
+${change_summary}DNS record updated automatically."; then
                     log_info "DNS change notification sent"
                 else
                     log_warn "Failed to send DNS change notification email"
