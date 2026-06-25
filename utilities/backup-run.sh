@@ -1190,7 +1190,6 @@ main() {
 
     if [[ "$LIST_ONLY" == "true" ]]; then
         load_env_file 2>/dev/null || true
-        auto_fix_critical_permissions "$PROJECT_ROOT"
         local list_base_dir
         list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
         if [[ -d "$list_base_dir" && ! -r "$list_base_dir" ]]; then

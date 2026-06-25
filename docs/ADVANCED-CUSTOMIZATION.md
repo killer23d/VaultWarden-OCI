@@ -414,7 +414,7 @@ SMTP_SECURITY=starttls
 SMTP_USERNAME=apikey
 SMTP_FROM=noreply@vault.yourdomain.com
 ALLOWED_SENDER_DOMAINS=yourdomain.com
-./utilities/secrets-rotate.sh smtp_password
+sudo ./utilities/secrets-rotate.sh smtp_password
 ```
 
 Do not point Vaultwarden directly at the external relay in normal production. Keep:
@@ -440,13 +440,13 @@ nano docker-compose.override.yml   # customise VaultWarden SMTP overrides
 
 ```bash
 # Normal Postfix-backed operational alert path
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 make test-email
 
 # Advanced API-mode checks only when EMAIL_MODE=auto/api is configured
-EMAIL_MODE=api  ./maintenance.sh test-email --verbose
-EMAIL_MODE=smtp ./maintenance.sh test-email --verbose
-EMAIL_MODE=host ./maintenance.sh test-email --verbose  # legacy direct-SMTP alias
+EMAIL_MODE=api  sudo ./maintenance.sh test-email --verbose
+EMAIL_MODE=smtp sudo ./maintenance.sh test-email --verbose
+EMAIL_MODE=host sudo ./maintenance.sh test-email --verbose  # legacy direct-SMTP alias
 ```
 
 ---

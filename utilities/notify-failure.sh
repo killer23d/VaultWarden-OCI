@@ -39,6 +39,7 @@ _write_delivery_sentinel() {
 }
 
 main() {
+    require_root "$@"
     _load_notify_env || log_warn "Could not load /etc/vaultwarden/vaultwarden.env; continuing with defaults."
 
     PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-}"

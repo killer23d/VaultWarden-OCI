@@ -78,8 +78,7 @@ grep -Fq 'sudo make key-health' startup.sh || fail "startup.sh key verification 
 pass "startup key remediation stays root-owned"
 
 # Runtime env ownership contract.
-grep -Fq 'chown root:root "$manifest_dir"' utilities/setup-env.sh || fail "state config dir is not root-owned"
-grep -Fq 'chmod 0700 "$manifest_dir"' utilities/setup-env.sh || fail "state config dir is not mode 0700"
+grep -Fq 'install -d -m 0700 -o root -g root "$manifest_dir" "$rendered_state_dir/secrets"' utilities/setup-env.sh || fail "state config/secrets dirs are not created root:root 0700"
 grep -Fq 'chown root:root "$tmp" && chmod 0600 "$tmp"' utilities/setup-env.sh || fail "install.env is not installed root:root 0600"
 pass "persistent install.env is installed root:root 0600"
 
@@ -169,3 +168,18 @@ if [[ -f docs/COMMAND-REFERENCE.md ]]; then
     rm -f "$_cmd_ref_before"
     pass "COMMAND-REFERENCE.md is generated/current"
 fi
+
+grep -Fq 'require_root "$@"' utilities/notify-failure.sh || fail "notify-failure lacks explicit root guard"
+pass "notify-failure explicitly requires root"
+
+_backup_list_snip="$(awk '/if \[\[ "\$LIST_ONLY" == "true" \]\]/{flag=1} flag{print} /exit 0/{if(flag){exit}}' utilities/backup-run.sh)"
+! grep -Fq 'auto_fix_critical_permissions' <<<"$_backup_list_snip" || fail "backup list-only path mutates permissions"
+_restore_pre_root_snip="$(awk '/load_env_file 2>\/dev\/null/{flag=1} /require_root "\$@"/{if(flag){exit}} flag{print}' utilities/restore-run.sh)"
+! grep -Fq 'auto_fix_critical_permissions' <<<"$_restore_pre_root_snip" || fail "restore list-only/pre-root path mutates permissions"
+pass "backup/restore list-only paths avoid mutating permission repair"
+
+grep -Fq 'sudo ./maintenance.sh <subcommand>' maintenance.sh || fail "maintenance help does not show sudo usage"
+grep -Fq 'sudo ./maintenance.sh update-dns' utilities/maintenance-update-dns.sh || fail "DNS updater help lacks sudo dispatcher example"
+grep -Fq 'sudo ./maintenance.sh update-firewall' utilities/maintenance-update-firewall.sh || fail "firewall updater help lacks sudo dispatcher example"
+! grep -Fq 'Run: ./edit-secrets.sh rotate' utilities/setup-crowdsec.sh || fail "setup post-install guidance advertises non-sudo edit-secrets"
+pass "help text uses sudo for root-operated maintenance/secret commands"

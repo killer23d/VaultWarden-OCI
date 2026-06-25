@@ -181,7 +181,7 @@ make key-show
 
 > **Update your escrow after every restore.** The new key must be exported to your password manager before the old bootstrap copy becomes stale:
 > ```bash
-> ./utilities/secrets-export-recovery-kit.sh
+> sudo ./utilities/secrets-export-recovery-kit.sh
 > shred -fuz ~/vaultwarden-age-key-escrow.txt   # delete after copying
 > ```
 
@@ -197,7 +197,7 @@ Run through these items after every bare-metal restore to confirm the stack is f
 | 2 | VaultWarden responds on HTTPS | `curl -sI https://vault.yourdomain.com` |
 | 3 | Age key path resolved correctly | `make key-path` |
 | 4 | Age key is healthy | `make key-health` |
-| 5 | New recovery kit saved to password manager | `./utilities/secrets-export-recovery-kit.sh` |
+| 5 | New recovery kit saved to password manager | `sudo ./utilities/secrets-export-recovery-kit.sh` |
 | 6 | Old recovery kit deleted from `/root/` | `shred -fuz /root/vaultwarden-recovery-kit-*.txt` |
 | 7 | Systemd timers active | `make timers` |
 | 8 | First automated backup succeeds | `sudo ./backup.sh run db --rclone` |

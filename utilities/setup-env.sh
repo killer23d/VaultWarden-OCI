@@ -312,9 +312,7 @@ refresh_state_artifacts() {
         [[ "$existing_offline_recipient" =~ ^age1[a-z0-9]{58}$ ]] || existing_offline_recipient=""
     fi
     export PROJECT_STATE_DIR="$rendered_state_dir"
-    mkdir -p "$manifest_dir" "$rendered_state_dir/secrets" || return 1
-    chown root:root "$manifest_dir" || return 1
-    chmod 0700 "$manifest_dir" || return 1
+    install -d -m 0700 -o root -g root "$manifest_dir" "$rendered_state_dir/secrets" || return 1
 
     local tmp install_env
     install_env="$manifest_dir/install.env"
@@ -334,7 +332,9 @@ refresh_state_artifacts() {
         printf 'OFFLINE_AGE_RECIPIENT=%s\n' "$existing_offline_recipient"
         printf 'STATE_LAYOUT_VERSION=1\n'
         printf 'MANIFEST_UPDATED_AT=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    } > "$tmp" && chmod 0644 "$tmp" && mv "$tmp" "$manifest_file" || { rm -f "$tmp"; return 1; }
+    } > "$tmp" && chown root:root "$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$manifest_file" || { rm -f "$tmp"; return 1; }
+    chown root:root "$manifest_file" || return 1
+    chmod 0600 "$manifest_file" || return 1
 
     if [[ -f "$PROJECT_ROOT/docs/recovery-card.md" ]]; then
         tmp=$(mktemp -p "$manifest_dir" recovery-card.md.XXXXXX) || return 1

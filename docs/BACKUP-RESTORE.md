@@ -149,7 +149,7 @@ Exports a formatted plain-text document containing the Age private key, public k
 
 ```bash
 # Export the Age key escrow document via utilities/secrets-edit.sh:
-./utilities/secrets-export-recovery-kit.sh
+sudo ./utilities/secrets-export-recovery-kit.sh
 
 # ⚠️ Copy contents to your password manager NOW, then securely delete:
 shred -fuz ~/vaultwarden-age-key-escrow.txt
@@ -333,7 +333,7 @@ The operator must type `SAVED` (all caps) to confirm they have saved the key bef
 **After restore, re-run the Tier 2 escrow** to update your password manager with the new key:
 
 ```bash
-./utilities/secrets-export-recovery-kit.sh
+sudo ./utilities/secrets-export-recovery-kit.sh
 # Copy to password manager, then:
 shred -fuz ~/vaultwarden-age-key-escrow.txt
 ```
@@ -433,7 +433,7 @@ df -h
 
 ```bash
 docker compose logs vaultwarden
-./maintenance.sh db-maint   # offline SQLite VACUUM + WAL checkpoint
+sudo ./maintenance.sh db-maint   # offline SQLite VACUUM + WAL checkpoint
 ./backup.sh run db
 ```
 
@@ -448,7 +448,7 @@ docker compose stop vaultwarden
 docker compose start vaultwarden
 
 # Option 2: Run offline maintenance to force a clean checkpoint
-./maintenance.sh db-maint
+sudo ./maintenance.sh db-maint
 ./backup.sh run db
 ```
 

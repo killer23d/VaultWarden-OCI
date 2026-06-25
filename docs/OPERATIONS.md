@@ -306,15 +306,15 @@ make restore-remote
 
 ```bash
 # Update container images only (respects version pins in .env)
-./maintenance.sh update --images
+sudo ./maintenance.sh update --images
 make update
 
 # Update OS packages only
-./maintenance.sh update --system
+sudo ./maintenance.sh update --system
 make update-system
 
 # Update containers + system packages
-./maintenance.sh update --all
+sudo ./maintenance.sh update --all
 ```
 
 > **`make update-system` scope:** Updates OS packages only. For a full update (containers + system), use `make update`.
@@ -363,15 +363,15 @@ docker compose up -d vaultwarden
 
 ```bash
 # Full maintenance: cleanup + Docker prune + DB optimisation + DNS + firewall
-./maintenance.sh run --comprehensive
+sudo ./maintenance.sh run --comprehensive
 make maintenance
 
 # With email summary
-./maintenance.sh run --comprehensive --email
+sudo ./maintenance.sh run --comprehensive --email
 make maintenance-full
 
 # Dry run — preview without changes
-./maintenance.sh run --comprehensive --dry-run
+sudo ./maintenance.sh run --comprehensive --dry-run
 ```
 
 ### Targeted Tasks
@@ -381,10 +381,10 @@ When called with only a targeted flag, routine cleanup is **skipped entirely**:
 ```bash
 # Update Cloudflare IP ranges in UFW firewall
 # (adds new rules BEFORE removing old ones — no race condition)
-./maintenance.sh update-firewall        # Automated weekly via systemd (Saturday 4 AM)
+sudo ./maintenance.sh update-firewall        # Automated weekly via systemd (Saturday 4 AM)
 
 # Check and update Cloudflare DNS A record
-./maintenance.sh update-dns             # Automated hourly via systemd
+sudo ./maintenance.sh update-dns             # Automated hourly via systemd
 make update-dns
 ```
 
@@ -417,17 +417,17 @@ sudo ./maintenance.sh db-maint --force
 
 ```bash
 # Run full email diagnostic suite
-./maintenance.sh test-email
+sudo ./maintenance.sh test-email
 make test-email
 
 # Verbose diagnostics
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 
 # Override recipient
-./maintenance.sh test-email --recipient admin@example.com
+sudo ./maintenance.sh test-email --recipient admin@example.com
 
 # Dry run (reports system state, does not send)
-./maintenance.sh test-email --dry-run
+sudo ./maintenance.sh test-email --dry-run
 
 # Tests performed:
 #  1. Postfix container running and port 587 responding
@@ -462,7 +462,7 @@ sudo systemctl status crowdsec-cloudflare-worker-bouncer
 
 ```bash
 # Edit secrets interactively
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 make edit-secrets
 
 # View decrypted secrets without editing
@@ -471,7 +471,7 @@ make test-secrets
 
 # Rotate secrets:
 # 1. Edit
-./utilities/secrets-edit.sh
+sudo ./utilities/secrets-edit.sh
 # 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
 # 3. Restart to apply
 ./startup.sh --force
@@ -572,7 +572,7 @@ All notifications use the containerised Postfix relay (`bokysan/docker-postfix`,
 
 ```bash
 # Full diagnostic
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 
 # Check Postfix logs
 docker compose logs postfix
@@ -621,7 +621,7 @@ du -sh /var/lib/vaultwarden/logs/*
 ls -lh /var/lib/vaultwarden/backups/
 
 # 3. Run maintenance
-./maintenance.sh run --comprehensive
+sudo ./maintenance.sh run --comprehensive
 
 # 4. Adjust resource limits if needed
 # Edit docker-compose.yml.example then:
@@ -669,14 +669,14 @@ docker compose logs <container> --tail=100
 du -sh /var/lib/vaultwarden/logs/*
 
 # 4. Run maintenance
-./maintenance.sh run --comprehensive
+sudo ./maintenance.sh run --comprehensive
 ```
 
 ### Email Not Working
 
 ```bash
 # Full diagnostic
-./maintenance.sh test-email --verbose
+sudo ./maintenance.sh test-email --verbose
 
 # Individual checks
 docker compose ps postfix
@@ -743,7 +743,7 @@ docker compose -f docker-compose.yml.example config
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 
 # 5. Re-apply Cloudflare firewall CIDRs (setup --force resets UFW rules)
-./maintenance.sh update-firewall
+sudo ./maintenance.sh update-firewall
 
 # 6. Restart and verify
 ./startup.sh --force
@@ -782,7 +782,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com --f
 
 ### Quarterly
 - ✅ Test emergency procedures (break-glass admin)
-- ✅ Update Cloudflare IP ranges (`./maintenance.sh update-firewall`) — also automated weekly via systemd
+- ✅ Update Cloudflare IP ranges (`sudo ./maintenance.sh update-firewall`) — also automated weekly via systemd
 - ✅ Review and update documentation
 - ✅ Audit user accounts and permissions
 - ✅ Test complete system rebuild from backup

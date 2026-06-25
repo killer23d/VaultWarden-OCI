@@ -32,7 +32,7 @@ VaultWarden-OCI DNS Updater
 
 USAGE:
     sudo utilities/maintenance-update-dns.sh [OPTIONS]
-    ./maintenance.sh update-dns [OPTIONS]
+    sudo ./maintenance.sh update-dns [OPTIONS]
 
 OPTIONS:
     --email       Send email notification if the DNS record is updated

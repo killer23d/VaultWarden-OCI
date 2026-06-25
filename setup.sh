@@ -95,7 +95,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       WARNING: Also regenerates the Age encryption key. All
                       existing encrypted secrets become permanently unrecoverable
                       without a prior recovery kit export. Run
-                      './utilities/secrets-export-recovery-kit.sh' BEFORE using
+                      'sudo ./utilities/secrets-export-recovery-kit.sh' BEFORE using
                       --force on a running installation. To confirm you understand,
                       set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
                       environment (or answer 'yes' at the interactive prompt).
@@ -231,7 +231,7 @@ _warn_force_destructive() {
     printf "%s║  %-${inner_width}s  ║%s\n" \
         "${COLOR_BOLD_RED}" "unless you export a recovery kit FIRST." "${COLOR_RESET}"
     printf "%s║  %-${inner_width}s  ║%s\n" \
-        "${COLOR_BOLD_RED}" "Run first: ./utilities/secrets-export-recovery-kit.sh" "${COLOR_RESET}"
+        "${COLOR_BOLD_RED}" "Run first: sudo ./utilities/secrets-export-recovery-kit.sh" "${COLOR_RESET}"
     printf '%s╚%s╝%s\n\n' "${COLOR_BOLD_RED}" "${border}" "${COLOR_RESET}"
 }
 
@@ -250,7 +250,7 @@ _phase_failed() {
 if [[ "$FORCE" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
     if [[ "${VW_FORCE_ACK:-}" != "I_UNDERSTAND_LOSING_OLD_BACKUPS" ]]; then
         _warn_force_destructive
-        log_hint "Export your recovery kit first: ./utilities/secrets-export-recovery-kit.sh"
+        log_hint "Export your recovery kit first: sudo ./utilities/secrets-export-recovery-kit.sh"
         log_hint "Then re-run with VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS if automation is required."
         exit 2
     fi
@@ -291,7 +291,7 @@ show_post_install_summary() {
 CRED_BANNER
     printf '%s' "${COLOR_RESET}"
 
-    local _na="(not configured yet — run sudo ./setup.sh secrets, then ./utilities/secrets-export-recovery-kit.sh)"
+    local _na="(not configured yet — run sudo ./setup.sh secrets, then sudo ./utilities/secrets-export-recovery-kit.sh)"
     local vw_admin_plain="${_na}" caddy_admin_plain="${_na}" backup_pass_plain="${_na}"
     [[ -f "${VW_ADMIN_PLAIN_FILE:-}" ]] && [[ -s "${VW_ADMIN_PLAIN_FILE:-}" ]] && \
         vw_admin_plain=$(cat "${VW_ADMIN_PLAIN_FILE}")
@@ -326,7 +326,7 @@ CRED_BANNER
     [[ "$env_owner" == "root" ]] && env_edit_cmd="sudo nano .env"
 
     local _cf_cmds
-    _cf_cmds="$(printf '   %s./edit-secrets.sh rotate cloudflare_zone_id%s\n   %s./edit-secrets.sh rotate cf_account_id%s\n   %s./edit-secrets.sh rotate cf_worker_bouncer_token%s' \
+    _cf_cmds="$(printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s' \
         "${COLOR_YELLOW}" "${COLOR_RESET}" \
         "${COLOR_YELLOW}" "${COLOR_RESET}" \
         "${COLOR_YELLOW}" "${COLOR_RESET}")"
@@ -345,22 +345,22 @@ CRED_BANNER
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf 'These fields still contain CHANGE_ME placeholders.\n'
         printf 'Set them BEFORE running %ssudo make up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate smtp_password%s         (if using SMTP)\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate smtp_password%s         (if using SMTP)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate email_api_token%s       (if using API-based email)\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate email_api_token%s       (if using API-based email)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate push_installation_id%s  (optional — mobile push)\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate push_installation_id%s  (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate push_installation_key%s (optional — mobile push)\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate push_installation_key%s (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '2. Set external tokens: %s(use ./edit-secrets.sh rotate <field> commands above)%s\n' \
+        printf '2. Set external tokens: %s(use sudo ./edit-secrets.sh rotate <field> commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
         printf '%s\n' "$_cf_cmds"
@@ -371,7 +371,7 @@ CRED_BANNER
         printf '5. Start services:      %ssudo make up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '7. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
+        printf '7. Export recovery kit: %ssudo ./edit-secrets.sh export-recovery-kit%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   %s(Run AFTER steps 2-3 so all secrets are included in the kit)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
@@ -394,7 +394,7 @@ CRED_BANNER
         printf '5. Start services:      %ssudo make up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '7. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
+        printf '7. Export recovery kit: %ssudo ./edit-secrets.sh export-recovery-kit%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   %s(Run AFTER steps 2-3 so all secrets are included in the kit)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
@@ -533,9 +533,9 @@ main() {
         log_info "════════════════════════════════════════════════"
         log_info "Before running setup-crowdsec.sh, inject the CF secrets:"
         log_info ""
-        log_info "  ./edit-secrets.sh rotate cloudflare_zone_id"
-        log_info "  ./edit-secrets.sh rotate cf_account_id"
-        log_info "  ./edit-secrets.sh rotate cf_worker_bouncer_token"
+        log_info "  sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+        log_info "  sudo ./edit-secrets.sh rotate cf_account_id"
+        log_info "  sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
         log_info ""
         log_info "Then run the CrowdSec setup:"
         log_info ""
@@ -546,9 +546,9 @@ main() {
         unset _cs_prompt_ack
     else
         log_info "Next step: inject CF secrets first, then run sudo ./utilities/setup-crowdsec.sh"
-        log_info "  ./edit-secrets.sh rotate cloudflare_zone_id"
-        log_info "  ./edit-secrets.sh rotate cf_account_id"
-        log_info "  ./edit-secrets.sh rotate cf_worker_bouncer_token"
+        log_info "  sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+        log_info "  sudo ./edit-secrets.sh rotate cf_account_id"
+        log_info "  sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
         log_info "  sudo ./utilities/setup-crowdsec.sh"
     fi
 

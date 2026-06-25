@@ -10,7 +10,7 @@ show_help() {
 VaultWarden-OCI Maintenance Script
 
 USAGE:
-    ./maintenance.sh <subcommand> [options]
+    sudo ./maintenance.sh <subcommand> [options]
 
 DESCRIPTION:
     Thin dispatcher that routes maintenance subcommands to their dedicated
@@ -33,10 +33,10 @@ OPTIONS:
     --version, -V     Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    ./maintenance.sh run
-    ./maintenance.sh health
-    ./maintenance.sh run --comprehensive
-    ./maintenance.sh health --help
+    sudo ./maintenance.sh run
+    sudo ./maintenance.sh health
+    sudo ./maintenance.sh run --comprehensive
+    ./maintenance.sh --help
 
 Run './maintenance.sh <subcommand> --help' for subcommand-specific options.
 EOF

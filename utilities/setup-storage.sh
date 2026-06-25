@@ -99,12 +99,19 @@ setup_directories() {
         } || return 1
     done
 
-    find "${project_state_dir}" -type d -exec chmod 750 {} + 2>/dev/null || return 1
-    find "${project_state_dir}" -type f -exec chmod 640 {} + 2>/dev/null || true
+    # Only normalize non-sensitive mutable data trees.  Never broad-chmod
+    # ${project_state_dir}/config or ${project_state_dir}/secrets; those are
+    # root-operated state and have stricter central permissions.
+    for _dir in data logs backups; do
+        if [[ -d "${project_state_dir}/${_dir}" ]]; then
+            find "${project_state_dir}/${_dir}" -type d -exec chmod 750 {} + 2>/dev/null || return 1
+            find "${project_state_dir}/${_dir}" -type f -exec chmod 640 {} + 2>/dev/null || true
+        fi
+    done
 
     # Caddy runs as root inside its container and writes
     # access logs to ${project_state_dir}/logs/caddy/access.log via a bind-mount.
-    # The broad 'find chmod 750' above sets this directory to 750:
+    # The logs normalization above sets this directory to 750:
     #   owner=PUID  group=PGID  other=---
     # On OCI Compute, Docker maps container UID 0 to an unprivileged host UID
     # (userns-remap or equivalent hypervisor isolation). Container root is NOT

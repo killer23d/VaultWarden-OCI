@@ -104,3 +104,20 @@ if utilities/setup-secrets.sh export-recovery-kit > "$kit_out" 2>&1; then
 fi
 grep -Fq 'sudo ./edit-secrets.sh export-recovery-kit' "$kit_out" || { cat "$kit_out" >&2; fail "export-recovery-kit stub lacks sudo guidance"; }
 pass "setup-secrets secret-authoring paths provide sudo guidance"
+
+# Drift prevention: storage setup must not recursively chmod root-operated config/secrets state.
+! grep -Fq 'find "${project_state_dir}" -type d -exec chmod 750 {} +' utilities/setup-storage.sh || fail "setup-storage still broad-chmods all state directories"
+! grep -Fq 'find "${project_state_dir}" -type f -exec chmod 640 {} +' utilities/setup-storage.sh || fail "setup-storage still broad-chmods all state files"
+grep -Fq 'Never broad-chmod' utilities/setup-storage.sh || fail "setup-storage lacks sensitive state chmod guard"
+pass "setup-storage avoids broad chmod over config/secrets state"
+
+grep -Fq 'install -d -m 0700 -o root -g root "$manifest_dir" "$rendered_state_dir/secrets"' utilities/setup-env.sh || fail "setup-env does not create config/secrets dirs root:root 0700"
+grep -Fq 'chown root:root "$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$manifest_file"' utilities/setup-env.sh || fail "setup-env does not stage dr-manifest.env root:root 0600"
+grep -Fq 'chmod 0600 "$manifest_file"' utilities/setup-env.sh || fail "setup-env does not enforce dr-manifest.env 0600 after atomic mv"
+pass "setup-env creates persistent manifest/private state with root-operated permissions"
+
+grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/secrets" "persistent secrets directory"' utilities/repair-permissions.sh || fail "repair does not cover persistent secrets dir"
+grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/secrets/secrets.yaml" "persistent secrets.yaml"' utilities/repair-permissions.sh || fail "repair does not cover persistent secrets.yaml"
+grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/config/dr-manifest.env" "DR manifest"' utilities/repair-permissions.sh || fail "repair does not use central contract for dr-manifest.env"
+grep -Fq 'find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0' utilities/repair-permissions.sh || fail "repair does not cover runtime secret files"
+pass "repair fallback covers persistent and runtime secret drift through central helpers"

@@ -211,8 +211,8 @@ expected_owner_for_path() {
     path="$(_canonical_permission_path "$1")"
     state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     case "$path" in
-        /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
-        "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
+        /etc/vaultwarden|/etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
+        "$state_dir"/config|"$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
         /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|\
         "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             printf 'root' ;;
@@ -227,8 +227,8 @@ expected_group_for_path() {
     path="$(_canonical_permission_path "$1")"
     state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     case "$path" in
-        /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
-        "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
+        /etc/vaultwarden|/etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
+        "$state_dir"/config|"$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
         /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|\
         "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             printf 'root' ;;
@@ -243,8 +243,10 @@ expected_mode_for_path() {
     path="$(_canonical_permission_path "$1")"
     state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     case "$path" in
+        /etc/vaultwarden) printf '700' ;;
         /run/vaultwarden-oci/secrets) printf '700' ;;
         "$PROJECT_ROOT/secrets") printf '700' ;;
+        "$state_dir"/config) printf '700' ;;
         "$state_dir"/secrets) printf '700' ;;
         /run/vaultwarden-oci/secrets/*) printf '444' ;;
         "$PROJECT_ROOT/.sops.yaml") printf '644' ;;
@@ -305,8 +307,10 @@ auto_fix_critical_permissions() {
     fi
 
     for _vw_path in \
+        /etc/vaultwarden \
         /etc/vaultwarden/vaultwarden.env \
         /etc/vaultwarden/rclone.conf \
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config" \
         "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env" \
         "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env" \
         "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets" \
