@@ -314,16 +314,9 @@ refresh_state_artifacts() {
     export PROJECT_STATE_DIR="$rendered_state_dir"
     install -d -m 0700 -o root -g root "$manifest_dir" "$rendered_state_dir/secrets" || return 1
 
-    local tmp install_env
-    install_env="$manifest_dir/install.env"
-    tmp=$(mktemp -p "$manifest_dir" install.env.XXXXXX) || return 1
-    cp "$env_file" "$tmp" && chown root:root "$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$install_env" || { rm -f "$tmp"; return 1; }
+    "${PROJECT_ROOT}/utilities/env-edit.sh" sync || return 1
 
-    # Installed/root-operated runtime config uses the canonical root-owned Age key.
-    _set_env_var SOPS_AGE_KEY_FILE "/etc/vaultwarden/age-key.txt" "$install_env"
-    chown root:root "$install_env" || return 1
-    chmod 0600 "$install_env" || return 1
-
+    local tmp
     tmp=$(mktemp -p "$manifest_dir" dr-manifest.env.XXXXXX) || return 1
     {
         printf 'DOMAIN=%s\n' "$rendered_domain"

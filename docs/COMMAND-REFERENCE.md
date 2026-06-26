@@ -18,6 +18,8 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make dev-setup` |  Set up development environment (.env + docker-compose.override.yml) |
 | `make fix-permissions` |  Fix file ownership after sudo operations leave root-owned files |
 | `make init-secrets` |  Initialize secrets file (interactive; root required) |
+| `make sync-env` |  Sync repo .env to generated runtime env files (root required) |
+| `make edit-env` |  Edit repo .env and sync generated runtime env files (root required) |
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
 | `make test-email` |  Send a test operational alert email (health/backup notification channel) |
@@ -380,6 +382,25 @@ EXAMPLES:
 
 ```
 (--help not available or requires root)
+```
+
+### env-edit.sh
+
+```
+VaultWarden-OCI Environment Manager
+
+USAGE:
+  sudo utilities/env-edit.sh sync
+  sudo utilities/env-edit.sh edit
+  sudo utilities/env-edit.sh status
+
+DESCRIPTION:
+  sync copies the operator-edited repository .env to
+  ${PROJECT_STATE_DIR}/config/install.env, applies root-runtime-only overrides,
+  then installs /etc/vaultwarden/vaultwarden.env from that generated install.env.
+
+  Edit repo .env only. Do not manually edit ${PROJECT_STATE_DIR}/config/install.env
+  or /etc/vaultwarden/vaultwarden.env; they are generated runtime artifacts.
 ```
 
 ### maintenance-db-maint.sh
