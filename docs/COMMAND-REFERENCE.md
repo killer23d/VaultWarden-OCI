@@ -1190,21 +1190,6 @@ EXAMPLES:
     sudo ./utilities/smoke-test.sh --json
 ```
 
-### sync-env.sh
-
-```
-VaultWarden-OCI sync-env compatibility shim
-
-USAGE:
-  sudo utilities/sync-env.sh
-
-This legacy command delegates to:
-  sudo utilities/env-edit.sh sync
-
-For the full environment manager help, run:
-  utilities/env-edit.sh --help
-```
-
 ### uninstall-vaultwarden.sh
 
 ```
