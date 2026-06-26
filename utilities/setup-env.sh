@@ -314,7 +314,7 @@ refresh_state_artifacts() {
     export PROJECT_STATE_DIR="$rendered_state_dir"
     install -d -m 0700 -o root -g root "$manifest_dir" "$rendered_state_dir/secrets" || return 1
 
-    "${PROJECT_ROOT}/utilities/sync-env.sh" || return 1
+    "${PROJECT_ROOT}/utilities/env-edit.sh" sync || return 1
 
     local tmp
     tmp=$(mktemp -p "$manifest_dir" dr-manifest.env.XXXXXX) || return 1
