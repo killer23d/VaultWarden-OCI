@@ -245,73 +245,9 @@ dev-setup: ## Set up development environment (.env + docker-compose.override.yml
 	@if [ ! -f ".env" ]; then cp .env.example .env; echo "$(YELLOW)Created .env from example. Please configure it.$(NC)"; fi
 	@if [ ! -f "docker-compose.override.yml" ]; then cp docker-compose.override.yml.example docker-compose.override.yml; echo "$(YELLOW)Created development override file.$(NC)"; fi
 
-fix-permissions: ## Fix file ownership after sudo operations leave root-owned files
+fix-permissions: ## Repair known VaultWarden-OCI permission drift
 	$(call require-root)
-	@echo "$(BLUE)Fixing file ownership...$(NC)"
-	@REAL_USER=$$(logname 2>/dev/null || echo "$${SUDO_USER:-ubuntu}"); \
-	REAL_GROUP=$$(id -gn "$$REAL_USER" 2>/dev/null || echo "$$REAL_USER"); \
-	echo "$(CYAN)  Target user : $$REAL_USER:$$REAL_GROUP$(NC)"; \
-	echo ""; \
-	for item in \
-	    CHANGELOG.md Makefile README.md RUNBOOK.md VERSION \
-	    backup.sh edit-secrets.sh \
-	    maintenance.sh restore.sh \
-	    setup.sh startup.sh \
-	    backups caddy crowdsec docs lib logs ssl systemd utilities \
-	    docker-compose.yml.example docker-compose.override.yml.example .env.example .sops.yaml \
-	    .gitattributes .gitignore .locks .rate-limit; \
-	do \
-	    [ -e "$$item" ] && chown -R "$$REAL_USER:$$REAL_GROUP" "$$item" 2>/dev/null && \
-	        echo "$(GREEN)  ✓ $$item$(NC)" || true; \
-	done; \
-	if [ -f "$(SECRETS_FILE)" ]; then \
-	    chown "$$REAL_USER:$$REAL_GROUP" "$(SECRETS_FILE)"; \
-	    chmod 600 "$(SECRETS_FILE)"; \
-	    echo "$(GREEN)  ✓ $(SECRETS_FILE) → $$REAL_USER:$$REAL_GROUP (mode 600)$(NC)"; \
-	fi; \
-	find . -maxdepth 1 -name "recovery-kit-*.txt" -exec chown "$$REAL_USER:$$REAL_GROUP" {} \; -exec chmod 600 {} \; 2>/dev/null; \
-	if ls recovery-kit-*.txt 1> /dev/null 2>&1; then \
-	    echo "$(GREEN)  ✓ recovery-kit files → $$REAL_USER:$$REAL_GROUP (mode 600)$(NC)"; \
-	fi; \
-	if [ -f ".env" ]; then \
-	    chown "$$REAL_USER:$$REAL_GROUP" .env; \
-	    chmod 600 .env; \
-	    echo "$(GREEN)  ✓ .env → $$REAL_USER:$$REAL_GROUP (mode 600)$(NC)"; \
-	fi; \
-	if [ -f "docker-compose.yml" ]; then \
-	    chown "$$REAL_USER:$$REAL_GROUP" docker-compose.yml; \
-	    echo "$(GREEN)  ✓ docker-compose.yml$(NC)"; \
-	fi; \
-	if [ -f "docker-compose.override.yml" ]; then \
-	    chown "$$REAL_USER:$$REAL_GROUP" docker-compose.override.yml; \
-	    echo "$(GREEN)  ✓ docker-compose.override.yml$(NC)"; \
-	fi; \
-	if [ -f "caddy/entrypoint.sh" ] && [ ! -x "caddy/entrypoint.sh" ]; then \
-	    chmod +x "caddy/entrypoint.sh"; \
-	    echo "$(GREEN)  ✓ caddy/entrypoint.sh → +x$(NC)"; \
-	fi; \
-	if [ -d "secrets/keys" ]; then \
-	    chown "$$REAL_USER:$$REAL_GROUP" secrets/keys; \
-	    find secrets/keys -maxdepth 1 -name "*.txt" -exec chown "$$REAL_USER:$$REAL_GROUP" {} \; \
-	              -exec chmod 600 {} \; 2>/dev/null; \
-	    echo "$(GREEN)  ✓ secrets/keys/ → $$REAL_USER:$$REAL_GROUP (keys 600)$(NC)"; \
-	fi; \
-	if [ -d "/etc/vaultwarden" ]; then \
-	    chmod 700 /etc/vaultwarden; \
-	    chown root:root /etc/vaultwarden; \
-	    for secret_file in /etc/vaultwarden/vaultwarden.env /etc/vaultwarden/age-key.txt /etc/vaultwarden/rclone.conf; do \
-	        if [ -f "$$secret_file" ]; then \
-	            chmod 600 "$$secret_file"; \
-	            chown root:root "$$secret_file"; \
-	            echo "$(GREEN)  ✓ $$secret_file → root:root 600$(NC)"; \
-	        fi; \
-	    done; \
-	    echo "$(GREEN)  ✓ /etc/vaultwarden/ → root:root 700$(NC)"; \
-	fi; \
-	echo ""; \
-	echo "$(GREEN)File ownership fixed for user $$REAL_USER.$(NC)"; \
-	echo "$(CYAN)Note: runtime decoded secrets are under /run/vaultwarden-oci/secrets (root:root 0700).$(NC)"; \
-	echo "$(CYAN)      /etc/vaultwarden/ is intentionally root:root 700 for root-run services.$(NC)"
+	@utilities/repair-permissions.sh
 
 init-secrets: ## Initialize secrets file (interactive; root required)
 	$(call require-root)
