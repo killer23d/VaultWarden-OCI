@@ -2209,7 +2209,12 @@ EOF
         log_success "Age key installed: $canonical_key (mode 600, root:root)"
     fi
 
-    # Update .env to use the canonical key path.
+    # Ensure repo .env keeps SOPS_AGE_KEY_FILE blank.
+    # The canonical path (/etc/vaultwarden/age-key.txt) belongs in the
+    # installed runtime config at ${PROJECT_STATE_DIR}/config/install.env,
+    # which setup-env.sh refresh_state_artifacts writes during environment setup.
+    # Repo .env must stay blank so the resolver can pick the correct readable
+    # key path depending on caller context.
     local env_file="${PROJECT_ROOT}/.env"
     if [[ -f "$env_file" ]]; then
         local temp_env env_uid env_gid env_mode real_user real_group
@@ -2225,13 +2230,13 @@ EOF
         fi
         temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
         awk '{
-            sub(/^SOPS_AGE_KEY_FILE=.*/, "SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt");
+            sub(/^SOPS_AGE_KEY_FILE=.*/, "SOPS_AGE_KEY_FILE=");
             print;
         }' "$env_file" > "$temp_env"
         chown "$env_uid:$env_gid" "$temp_env" || { rm -f "$temp_env"; return 1; }
         chmod "$env_mode" "$temp_env" || { rm -f "$temp_env"; return 1; }
         mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
-        log_success "SOPS_AGE_KEY_FILE set to $canonical_key in .env (owner/mode preserved)"
+        log_success "SOPS_AGE_KEY_FILE cleared in repo .env (owner/mode preserved)"
     fi
 
     # Resolve the complete desired recipient set before deciding whether the
