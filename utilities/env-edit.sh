@@ -139,6 +139,39 @@ _print_effective_email_sender() {
   printf 'Effective email sender: %s <%s>\n' "${name:-}" "${from:-}"
 }
 
+
+# Known GUI/forking editors that often return before changes are saved unless a
+# wait/no-fork flag is supplied. Keep in sync with utilities/secrets-edit.sh.
+_FORKING_EDITORS=("gvim" "mvim" "code" "atom" "subl" "sublime_text" "gedit" "kate" "mousepad")
+
+_check_editor_forks() {
+  local -n _cmd_ref=$1
+  local editor_str="${_cmd_ref[*]}"
+  case "$editor_str" in
+    *--wait*|*--nofork*|-f|*\ -f\ *|*\ -f|*--block*|*--foreground*) return 0 ;;
+  esac
+
+  local editor_bin
+  editor_bin="$(basename "${_cmd_ref[0]}")"
+
+  local forking
+  for forking in "${_FORKING_EDITORS[@]}"; do
+    if [[ "$editor_bin" == "$forking" ]]; then
+      log_warn "EDITOR '$editor_bin' is known to fork and return immediately."
+      log_warn "env-edit may sync before your changes are saved."
+      case "$editor_bin" in
+        code)      log_warn "Use:  EDITOR='code --wait' sudo utilities/env-edit.sh edit" ;;
+        gvim|mvim) log_warn "Use:  EDITOR='gvim --nofork' sudo utilities/env-edit.sh edit" ;;
+        atom)      log_warn "Use:  EDITOR='atom --wait' sudo utilities/env-edit.sh edit" ;;
+        *)         log_warn "Pass a '--wait', '--nofork', or equivalent foreground flag to your editor." ;;
+      esac
+      log_warn "Proceeding anyway — verify your changes are saved before this script exits."
+      return 0
+    fi
+  done
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Storage safety preflight
 # ---------------------------------------------------------------------------
@@ -261,13 +294,23 @@ _cmd_edit() {
   local checksum_before checksum_after
   checksum_before="$(sha256sum "$repo_env" | cut -d' ' -f1)"
 
-  # Preserve owner/permissions; editors may create swap or temp files under root.
-  local stat_before
-  stat_before="$(stat -c '%u:%g %a' "$repo_env" 2>/dev/null || true)"
+  local owner_uid group_gid
+  owner_uid="$(stat -c '%u' "$repo_env")"
+  group_gid="$(stat -c '%g' "$repo_env")"
 
-  "${EDITOR:-nano}" "$repo_env"
+  local -a EDITOR_CMD
+  read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
+  if [[ ${#EDITOR_CMD[@]} -eq 0 ]]; then
+    EDITOR_CMD=(nano)
+  fi
 
-  # Restore mode 0600 if the editor widened permissions.
+  log_info "Opening repo .env with: ${EDITOR_CMD[*]}"
+  _check_editor_forks EDITOR_CMD
+  "${EDITOR_CMD[@]}" "$repo_env"
+
+  if ! chown "${owner_uid}:${group_gid}" "$repo_env" 2>/dev/null; then
+    log_warn "Could not restore repo .env ownership to ${owner_uid}:${group_gid}; please fix manually if needed."
+  fi
   chmod 0600 "$repo_env"
 
   checksum_after="$(sha256sum "$repo_env" | cut -d' ' -f1)"

@@ -19,9 +19,10 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 3 | `backup.sh` | Dispatcher for backups | — |
 | 4 | `restore.sh` | Dispatcher for restores | — |
 | 5 | `edit-secrets.sh` | Dispatcher for secrets editing | — |
-| 6 | `utilities/secrets-edit.sh` | Interactive encrypted secrets editor (standalone) | — |
-| 7 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
-| 8 | `utilities/*.sh` | 22 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
+| 6 | `utilities/env-edit.sh` | Environment sync/edit/status manager | sync/edit ✅; status — |
+| 7 | `utilities/secrets-edit.sh` | Interactive encrypted secrets editor (standalone) | — |
+| 8 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
+| 9 | `utilities/*.sh` | Standalone admin/engine scripts (see `utilities/README.md`) | varies |
 
 **Utility libraries (8):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`, `lib/storage.sh`, `lib/email.sh`, `lib/maintenance-utils.sh`
 
@@ -29,6 +30,22 @@ Complete reference for all management scripts and utility libraries in VaultWard
 
 ---
 
+
+### `utilities/env-edit.sh` — Environment sync/edit/status
+
+Manages the non-secret environment workflow. Repository `.env` is the operator-editable source of truth; `${PROJECT_STATE_DIR}/config/install.env` and `/etc/vaultwarden/vaultwarden.env` are generated runtime artifacts and should not be edited directly.
+
+```bash
+sudo make sync-env
+sudo make edit-env
+sudo utilities/env-edit.sh sync
+sudo utilities/env-edit.sh edit
+utilities/env-edit.sh status
+```
+
+`sync` is non-interactive for `make up`, `make restart`, and systemd installation. `edit` opens repo `.env` in `$EDITOR` and syncs only when the checksum changes. `status` is read-only and reports env paths, drift, migration state, and storage mismatch information. `utilities/sync-env.sh` remains only as a compatibility shim to no-argument sync.
+
+---
 ## 🔧 Core Management Scripts
 
 ### 1. `setup.sh`
