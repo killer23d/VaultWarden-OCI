@@ -68,16 +68,6 @@ rm -f "$ETC/rclone.conf"
 assert_not_contains "$STATE/config/install.env" "RCLONE_CONFIG=$ETC/rclone.conf" 'RCLONE_CONFIG injected when rclone.conf absent'
 pass 'RCLONE_CONFIG is injected only when rclone.conf exists'
 
-# sync-env shim behavior.
-REPO_SHIM="$TMP/repo-shim"; copy_repo "$REPO_SHIM"; write_env "$REPO_SHIM" "$TMP/shim-state" "" ""
-( cd "$REPO_SHIM" && VW_SYNC_ETC_DIR="$TMP/shim-etc" ./utilities/sync-env.sh >/dev/null ) || fail 'sync-env.sh no-arg delegation failed'
-[[ -f "$TMP/shim-state/config/install.env" ]] || fail 'sync-env.sh no args did not delegate to sync'
-( cd "$REPO_SHIM" && VW_SYNC_ETC_DIR="$TMP/help-etc" ./utilities/sync-env.sh --help >"$TMP/shim-help.out" ) || fail 'sync-env.sh --help failed'
-[[ ! -e "$TMP/help-etc/vaultwarden.env" ]] || fail 'sync-env.sh --help ran sync'
-( cd "$REPO_SHIM" && VW_SYNC_ETC_DIR="$TMP/version-etc" ./utilities/sync-env.sh --version >"$TMP/shim-version.out" ) || fail 'sync-env.sh --version failed'
-[[ ! -e "$TMP/version-etc/vaultwarden.env" ]] || fail 'sync-env.sh --version ran sync'
-( cd "$REPO_SHIM" && ! ./utilities/sync-env.sh --bogus >"$TMP/shim-bogus.out" 2>&1 ) || fail 'sync-env.sh unknown arg should fail'
-pass 'sync-env shim delegates only no-arg sync and keeps help/version non-syncing'
 
 # Data-volume fail-closed cases.
 for case in missing-device mismatch not-mounted; do

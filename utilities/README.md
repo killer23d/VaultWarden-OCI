@@ -13,7 +13,6 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 |---|---|---|---|
 | `backup-run.sh` | `./backup.sh` (all subcommands) | No (`run/list`), Yes (`verify/rotate`) | Full backup engine |
 | `env-edit.sh` | `make sync-env`, `make edit-env` | Yes (`sync/edit`), No (`status`) | Sync/edit/status for repo `.env` and generated runtime env files |
-| `sync-env.sh` | *(Compatibility shim)* | Yes | Legacy no-arg shim to `env-edit.sh sync` |
 | `maintenance-db-maint.sh` | `sudo ./maintenance.sh db-maint` | Yes | Deep database optimizations |
 | `maintenance-email.sh` | `sudo ./maintenance.sh test-email` | Yes | Email alert diagnostics |
 | `maintenance-health.sh` | `./maintenance.sh health` | No | System health probes |
@@ -52,8 +51,6 @@ sudo utilities/env-edit.sh sync
 sudo utilities/env-edit.sh edit
 utilities/env-edit.sh status
 ```
-
-`utilities/sync-env.sh` remains as a compatibility shim for legacy no-argument sync calls; use `utilities/env-edit.sh` for new automation.
 
 ---
 ### `secrets-list.sh` — List secret key names

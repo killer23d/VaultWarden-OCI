@@ -43,7 +43,7 @@ sudo utilities/env-edit.sh edit
 utilities/env-edit.sh status
 ```
 
-`sync` is non-interactive for `make up`, `make restart`, and systemd installation. `edit` opens repo `.env` in `$EDITOR` and syncs only when the checksum changes. `status` is read-only and reports env paths, drift, migration state, and storage mismatch information. `utilities/sync-env.sh` remains only as a compatibility shim to no-argument sync.
+`sync` is non-interactive for `make up`, `make restart`, and systemd installation. `edit` opens repo `.env` in `$EDITOR` and syncs only when the checksum changes. `status` is read-only and reports env paths, drift, migration state, and storage mismatch information.
 
 ---
 ## 🔧 Core Management Scripts
