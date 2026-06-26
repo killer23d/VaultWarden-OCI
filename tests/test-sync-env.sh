@@ -27,6 +27,24 @@ done
 awk '/warn_env_drift\(\)/,/^}/' "$ROOT/startup.sh" | grep -Eq 'PASSWORD|TOKEN|SECRET' \
   && fail 'startup drift warning appears to include secret keys'
 pass 'startup drift warning covers only requested non-secret keys'
+grep -Fq '/etc/vaultwarden/vaultwarden.env' "$ROOT/startup.sh" \
+  || fail 'startup drift warning does not compare the systemd EnvironmentFile'
+grep -Fq '/config/install.env' "$ROOT/startup.sh" \
+  || fail 'startup drift warning does not compare generated install.env'
+pass 'startup drift warning compares both generated env files when present'
+
+# setup-systemd may install/correct root-only support files, but env mutation
+# must flow back through sync-env so install.env and vaultwarden.env do not
+# diverge.
+setup_systemd_env_block="$(awk '/Installing age key to/,/Installing systemd unit files/' "$ROOT/utilities/setup-systemd.sh")"
+! grep -Eq '_set_env_var[[:space:]]+"(SOPS_AGE_KEY_FILE|RCLONE_CONFIG)"' <<< "$setup_systemd_env_block" \
+  || fail 'setup-systemd directly mutates runtime-only env overrides instead of using sync-env'
+grep -Fq '_sync_runtime_environment_files || return 1' <<< "$setup_systemd_env_block" \
+  || fail 'setup-systemd does not resync generated env files after age/rclone setup'
+awk '/Setting up rclone config/,/_sync_runtime_environment_files/' "$ROOT/utilities/setup-systemd.sh" \
+  | awk 'BEGIN{r=0;s=0} /Setting up rclone config/{r=NR} /_sync_runtime_environment_files/{s=NR} END{exit !(r && s && r < s)}' \
+  || fail 'setup-systemd must call sync-env after rclone config handling'
+pass 'setup-systemd centralizes runtime-only env overrides through sync-env'
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo 'SKIP: sync-env filesystem behavior requires root'

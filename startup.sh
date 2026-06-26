@@ -187,9 +187,12 @@ check_email_config_consistency() {
 
 warn_env_drift() {
   local repo_env="${PROJECT_ROOT}/.env"
-  local installed_env="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env"
+  local installed_envs=(
+    "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env"
+    "${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
+  )
 
-  [[ -r "$repo_env" && -r "$installed_env" ]] || return 0
+  [[ -r "$repo_env" ]] || return 0
 
   local keys=(
     SMTP_FROM
@@ -203,18 +206,21 @@ warn_env_drift() {
     SMTP_SECURITY
   )
 
-  local key repo_value installed_value drift_found=false
-  for key in "${keys[@]}"; do
-    repo_value="$(_read_env_value "$key" "$repo_env")"
-    installed_value="$(_read_env_value "$key" "$installed_env")"
-    if [[ "$repo_value" != "$installed_value" ]]; then
-      if [[ "$drift_found" == "false" ]]; then
-        log_warn "Repository .env differs from generated install.env for non-secret email settings."
-        log_warn "Run: sudo make sync-env  (or sudo make restart, which syncs first)"
-        drift_found=true
+  local installed_env key repo_value installed_value drift_found=false
+  for installed_env in "${installed_envs[@]}"; do
+    [[ -r "$installed_env" ]] || continue
+    for key in "${keys[@]}"; do
+      repo_value="$(_read_env_value "$key" "$repo_env")"
+      installed_value="$(_read_env_value "$key" "$installed_env")"
+      if [[ "$repo_value" != "$installed_value" ]]; then
+        if [[ "$drift_found" == "false" ]]; then
+          log_warn "Repository .env differs from generated runtime env file(s) for non-secret email settings."
+          log_warn "Run: sudo make sync-env  (or sudo make restart, which syncs first)"
+          drift_found=true
+        fi
+        log_warn "  ${installed_env}: ${key}: repo='${repo_value}' installed='${installed_value}'"
       fi
-      log_warn "  ${key}: repo='${repo_value}' installed='${installed_value}'"
-    fi
+    done
   done
 }
 
