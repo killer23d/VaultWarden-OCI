@@ -43,7 +43,7 @@ DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
-        setup init-secrets edit-secrets test-secrets test-email test-unit \
+        setup sync-env init-secrets edit-secrets test-secrets test-email test-unit \
         up down restart start stop safe-restart status \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
@@ -74,7 +74,7 @@ DATA_DEVICE ?=
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup init-secrets up down start stop restart safe-restart status \
+	setup sync-env init-secrets up down start stop restart safe-restart status \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
@@ -172,6 +172,7 @@ help: ## Show normal admin/day-2 commands
 	@echo "  $(GREEN)restore-db$(NC)               Restore database only"
 	@echo ""
 	@echo "$(YELLOW)Operations$(NC)"
+	@echo "  $(GREEN)sync-env$(NC)                 Sync repo .env to generated installed runtime env files"
 	@echo "  $(GREEN)maintenance$(NC)              Run routine maintenance"
 	@echo "  $(GREEN)update$(NC)                   Update container images and restart"
 	@echo "  $(GREEN)timers$(NC)                   Show systemd timers"
@@ -322,6 +323,10 @@ init-secrets: ## Initialize secrets file (interactive; root required)
 		echo "$(YELLOW)Secrets file already exists. Use 'make edit-secrets' to modify.$(NC)"; \
 	fi
 
+sync-env: ## Sync repo .env to generated runtime env files (root required)
+	$(call require-root)
+	@./utilities/sync-env.sh
+
 edit-secrets: ## Edit encrypted secrets file
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
 	@./utilities/secrets-edit.sh
@@ -352,6 +357,7 @@ up: ## Start all services (runs startup.sh for health checks; root required)
 	$(call require-root)
 	$(call check-docker)
 	@echo "$(BLUE)Starting VaultWarden services...$(NC)"
+	@$(MAKE) sync-env
 # ── Pre-flight: refuse to start with the dev-only override present. ─────────
 # docker-compose.override.yml is the local-development override.
 # Production hosts must not carry it; if present, abort before compose
@@ -401,6 +407,7 @@ stop: down ## Alias for down
 restart: ## Restart all services (via startup.sh; root required)
 	$(call require-root)
 	@echo "$(BLUE)Restarting VaultWarden services...$(NC)"
+	@$(MAKE) sync-env
 	@./startup.sh --force || { \
 		echo "$(RED)Restart failed!$(NC)"; \
 		$(MAKE) status; \
@@ -956,6 +963,7 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-privilege-contracts.sh
 	@tests/test-permission-repair-contract.sh
 	@tests/test-permission-contract-central.sh
+	@tests/test-sync-env.sh
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)

@@ -185,6 +185,39 @@ check_email_config_consistency() {
   return 0
 }
 
+warn_env_drift() {
+  local repo_env="${PROJECT_ROOT}/.env"
+  local installed_env="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env"
+
+  [[ -r "$repo_env" && -r "$installed_env" ]] || return 0
+
+  local keys=(
+    SMTP_FROM
+    SMTP_FROM_NAME
+    ALLOWED_SENDER_DOMAINS
+    MAILGUN_DOMAIN
+    EMAIL_MODE
+    EMAIL_PROVIDER
+    SMTP_HOST
+    SMTP_PORT
+    SMTP_SECURITY
+  )
+
+  local key repo_value installed_value drift_found=false
+  for key in "${keys[@]}"; do
+    repo_value="$(_read_env_value "$key" "$repo_env")"
+    installed_value="$(_read_env_value "$key" "$installed_env")"
+    if [[ "$repo_value" != "$installed_value" ]]; then
+      if [[ "$drift_found" == "false" ]]; then
+        log_warn "Repository .env differs from generated install.env for non-secret email settings."
+        log_warn "Run: sudo make sync-env  (or sudo make restart, which syncs first)"
+        drift_found=true
+      fi
+      log_warn "  ${key}: repo='${repo_value}' installed='${installed_value}'"
+    fi
+  done
+}
+
 validate_caddy_version_pin() {
   if [[ "${CADDY_VERSION:-}" == "latest" ]]; then
     log_error "CADDY_VERSION=latest is invalid for this stack's custom Caddy build."
@@ -207,6 +240,7 @@ load_environment() {
 
   load_project_environment || return 1
   validate_caddy_version_pin || return 1
+  warn_env_drift || true
   DOCKER_SECRETS_DIR="/run/vaultwarden-oci/secrets"
   export DOCKER_SECRETS_DIR
   log_success "Environment loaded"

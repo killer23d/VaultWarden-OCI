@@ -18,6 +18,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make dev-setup` |  Set up development environment (.env + docker-compose.override.yml) |
 | `make fix-permissions` |  Fix file ownership after sudo operations leave root-owned files |
 | `make init-secrets` |  Initialize secrets file (interactive; root required) |
+| `make sync-env` |  Sync repo .env to generated runtime env files (root required) |
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
 | `make test-email` |  Send a test operational alert email (health/backup notification channel) |
@@ -1148,6 +1149,23 @@ EXAMPLES:
     sudo ./utilities/smoke-test.sh
     sudo ./utilities/smoke-test.sh --quiet
     sudo ./utilities/smoke-test.sh --json
+```
+
+### sync-env.sh
+
+```
+VaultWarden-OCI Environment Sync
+
+USAGE:
+  sudo utilities/sync-env.sh
+
+DESCRIPTION:
+  Copies the operator-edited repository .env to
+  ${PROJECT_STATE_DIR}/config/install.env, applies root-runtime-only overrides,
+  then installs /etc/vaultwarden/vaultwarden.env from that generated install.env.
+
+  Edit repo .env only. Do not manually edit ${PROJECT_STATE_DIR}/config/install.env
+  or /etc/vaultwarden/vaultwarden.env; they are generated runtime artifacts.
 ```
 
 ### uninstall-vaultwarden.sh
