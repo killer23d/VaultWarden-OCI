@@ -6,6 +6,11 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ---
 ## [Unreleased]
 
+- Add `utilities/env-edit.sh` as the owned environment workflow for non-interactive sync, interactive repo `.env` edits, and read-only status reporting.
+- Add `make edit-env` and keep `make sync-env`/startup paths syncing generated runtime env artifacts before service starts.
+- Make env sync fail closed when configured data-volume storage is missing, mismatched, unmounted, or blocked by an incomplete migration state.
+- Retain `utilities/sync-env.sh` as a compatibility shim for legacy no-argument sync calls.
+
 - Add resilient persistent state and disaster recovery: authoritative state-volume `install.env`, persistent SOPS ciphertext, transient `/run` Docker secret files, operational plus offline Age recipients, standalone recovery, and a printable recovery card.
 
 
