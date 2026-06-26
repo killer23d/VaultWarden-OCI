@@ -12,6 +12,7 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 | File | Dispatcher subcommand | sudo required | Description |
 |---|---|---|---|
 | `backup-run.sh` | `./backup.sh` (all subcommands) | No (`run/list`), Yes (`verify/rotate`) | Full backup engine |
+| `env-edit.sh` | `make sync-env`, `make edit-env` | Yes (`sync/edit`), No (`status`) | Sync/edit/status for repo `.env` and generated runtime env files |
 | `maintenance-db-maint.sh` | `sudo ./maintenance.sh db-maint` | Yes | Deep database optimizations |
 | `maintenance-email.sh` | `sudo ./maintenance.sh test-email` | Yes | Email alert diagnostics |
 | `maintenance-health.sh` | `./maintenance.sh health` | No | System health probes |
@@ -38,6 +39,20 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 
 ---
 
+
+### `env-edit.sh` — Environment sync, edit, and status
+
+Repository `.env` is the operator-editable source of truth. `${PROJECT_STATE_DIR}/config/install.env` and `/etc/vaultwarden/vaultwarden.env` are generated root-owned runtime artifacts; do not edit generated env files directly. `make up` and `make restart` run sync before `startup.sh`.
+
+```bash
+sudo make sync-env
+sudo make edit-env
+sudo utilities/env-edit.sh sync
+sudo utilities/env-edit.sh edit
+utilities/env-edit.sh status
+```
+
+---
 ### `secrets-list.sh` — List secret key names
 
 Lists all secret key names in `secrets/secrets.yaml` without decrypting any values.

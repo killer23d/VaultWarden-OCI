@@ -402,7 +402,17 @@ See [EMAIL.md](EMAIL.md) for the canonical email routing matrix, Direct SMTP fal
 
 ## Resilient state and recovery architecture
 
-VaultWarden-OCI treats `${PROJECT_STATE_DIR}/config/install.env` as the authoritative persistent non-secret environment on the state volume. The repository `.env` remains a compatibility/bootstrap fallback, and `/etc/vaultwarden/vaultwarden.env` is the installed systemd bootstrap fallback.
+VaultWarden-OCI treats the repository `.env` as the operator-editable source of truth for non-secret settings. Do not edit `${PROJECT_STATE_DIR}/config/install.env` or `/etc/vaultwarden/vaultwarden.env` by hand; they are generated root-owned runtime artifacts.
+
+Use `sudo make edit-env` or `sudo utilities/env-edit.sh edit` for interactive edits, `sudo make sync-env` or `sudo utilities/env-edit.sh sync` for non-interactive propagation, and `sudo utilities/env-edit.sh status` for read-only drift/storage reporting. `make up` and `make restart` run sync before `startup.sh`, so generated runtime env files are refreshed before services start. The sync path is:
+
+```text
+repo .env
+  -> ${PROJECT_STATE_DIR}/config/install.env
+  -> /etc/vaultwarden/vaultwarden.env
+```
+
+The sync step applies root-runtime-only overrides only to the installed env files: `SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt`, and `RCLONE_CONFIG=/etc/vaultwarden/rclone.conf` only when that installed rclone config exists. These root-only paths are never written back to repo `.env`.
 
 Persistent encrypted secrets live at `${PROJECT_STATE_DIR}/secrets/secrets.yaml`. Runtime Docker secret source files are transient and recreated under `/run/vaultwarden-oci/secrets/` by `vaultwarden-startup.service` on boot. They are not persistent state.
 

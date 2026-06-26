@@ -18,6 +18,8 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make dev-setup` |  Set up development environment (.env + docker-compose.override.yml) |
 | `make fix-permissions` |  Fix file ownership after sudo operations leave root-owned files |
 | `make init-secrets` |  Initialize secrets file (interactive; root required) |
+| `make sync-env` |  Sync repo .env to generated runtime env files (root required) |
+| `make edit-env` |  Interactively edit repo .env and sync on change (root required) |
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
 | `make test-email` |  Send a test operational alert email (health/backup notification channel) |
@@ -380,6 +382,44 @@ EXAMPLES:
 
 ```
 (--help not available or requires root)
+```
+
+### env-edit.sh
+
+```
+VaultWarden-OCI Environment Management
+
+USAGE:
+  sudo utilities/env-edit.sh [sync]     Sync repo .env → runtime env files (default)
+  sudo utilities/env-edit.sh edit       Edit repo .env interactively; sync on change
+       utilities/env-edit.sh status     Show env drift and storage state (read-only)
+
+SUBCOMMANDS:
+  sync    Copies repo .env to ${PROJECT_STATE_DIR}/config/install.env, applies
+          root-runtime-only overrides, then installs /etc/vaultwarden/vaultwarden.env.
+          Fails closed when DATA_VOLUME_DEVICE is configured but the volume is not
+          mounted or the sentinel is missing.
+
+  edit    Opens repo .env in ${EDITOR:-nano}. Detects whether the file was changed
+          (sha256sum comparison) and runs sync only when a change is detected.
+          Exits 0 and prints a "no changes" notice when the file is unchanged.
+
+  status  Reports drift between repo .env and installed runtime env files for
+          non-secret configuration keys. Checks storage mount state and whether
+          a volume migration is in progress. Read-only; makes no changes.
+
+ENVIRONMENT:
+  EDITOR              Editor used by the edit subcommand (default: nano)
+  VW_SYNC_ETC_DIR     Override /etc/vaultwarden (useful for testing)
+
+SOURCE-OF-TRUTH CONTRACT:
+  repo .env is the only operator-edited file.
+  ${PROJECT_STATE_DIR}/config/install.env and /etc/vaultwarden/vaultwarden.env
+  are generated runtime artifacts. Do not edit them directly.
+
+  Runtime-only overrides (never written back to repo .env):
+    SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt        (always injected)
+    RCLONE_CONFIG=/etc/vaultwarden/rclone.conf            (only when rclone.conf exists)
 ```
 
 ### maintenance-db-maint.sh
