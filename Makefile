@@ -43,7 +43,7 @@ DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
-        setup sync-env init-secrets edit-secrets test-secrets test-email test-unit \
+        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email test-unit \
         up down restart start stop safe-restart status \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
@@ -74,7 +74,7 @@ DATA_DEVICE ?=
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup sync-env init-secrets up down start stop restart safe-restart status \
+	setup sync-env edit-env init-secrets up down start stop restart safe-restart status \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
@@ -325,7 +325,11 @@ init-secrets: ## Initialize secrets file (interactive; root required)
 
 sync-env: ## Sync repo .env to generated runtime env files (root required)
 	$(call require-root)
-	@./utilities/sync-env.sh
+	@./utilities/env-edit.sh sync
+
+edit-env: ## Interactively edit repo .env and sync on change (root required)
+	$(call require-root)
+	@./utilities/env-edit.sh edit
 
 edit-secrets: ## Edit encrypted secrets file
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
@@ -963,7 +967,7 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-privilege-contracts.sh
 	@tests/test-permission-repair-contract.sh
 	@tests/test-permission-contract-central.sh
-	@tests/test-sync-env.sh
+	@tests/test-env-edit.sh
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)
