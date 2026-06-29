@@ -868,7 +868,7 @@ _load_recovery_kit() {
 # that cleanup() always wipes it — the private key never persists on disk
 # beyond the lifetime of this process.
 #
-# Sets global AGE_KEY_FILE to the path of the resolved key file.
+# Sets global RESTORE_DECRYPT_AGE_KEY_FILE to the path of the resolved key file.
 # Returns 0 on success, 1 on validation failure.
 #
 # Validation is delegated to simple_verify_age_key() from
@@ -898,14 +898,14 @@ _prompt_age_key() {
             log_error "Supplied age key failed validation: $supplied_path"
             return 1
         fi
-        AGE_KEY_FILE="$supplied_path"
+        RESTORE_DECRYPT_AGE_KEY_FILE="$supplied_path"
         log_success "Age key validated."
         return 0
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would prompt for age private key (using configured key: $configured_key)"
-        AGE_KEY_FILE="$configured_key"
+        RESTORE_DECRYPT_AGE_KEY_FILE="$configured_key"
         return 0
     fi
 
@@ -914,10 +914,11 @@ _prompt_age_key() {
     log_info  "  Age Decryption Key Required"
     log_info  "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_info  "  The selected backup was encrypted with an age private key."
-    log_info  "  Paste or type the full AGE-SECRET-KEY-1... value below."
+    log_info  "  For normal same-server restore, press Enter to use the currently configured key."
+    log_info  "  Only paste an AGE-SECRET-KEY-1... value if this backup was encrypted"
+    log_info  "  with a different old/offline key."
     echo      ""
-    log_info  "  Press Enter with no input to use the currently configured"
-    log_info  "  key:  $configured_key"
+    log_info  "  Currently configured key:  $configured_key"
     echo      ""
     log_warn  "  IMPORTANT: Do NOT press Ctrl-C here — if the key is wrong"
     log_warn  "  decryption will fail AFTER backup selection, not silently."
@@ -941,7 +942,7 @@ _prompt_age_key() {
     if [[ -z "$key_input" ]]; then
         log_info "  No key entered — using configured key: $configured_key"
         [[ -f "$configured_key" ]] || { log_error "Configured key not found: $configured_key"; return 1; }
-        AGE_KEY_FILE="$configured_key"
+        RESTORE_DECRYPT_AGE_KEY_FILE="$configured_key"
         return 0
     fi
 
@@ -971,7 +972,7 @@ _prompt_age_key() {
         return 1
     fi
 
-    AGE_KEY_FILE="$staged_key_file"
+    RESTORE_DECRYPT_AGE_KEY_FILE="$staged_key_file"
     log_success "Age key accepted and staged for decryption."
     return 0
 }
@@ -1136,7 +1137,7 @@ _rotate_age_key() {
             fi
         } > "$policy_tmp" || { log_error "Failed to stage SOPS policy."; return 1; }
         chmod 600 "$policy_tmp" 2>/dev/null || true
-        if ! SOPS_AGE_KEY_FILE="$AGE_KEY_FILE" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp"; then
+        if ! SOPS_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp"; then
             log_error "SOPS rekey failed — live key paths were not changed."
             return 1
         fi
@@ -1388,19 +1389,42 @@ verify_sqlite() {
 
 purge_wal_shm() { local db="$1"; rm -f "${db}-wal" "${db}-shm" 2>/dev/null || true; }
 
+_preflight_operational_sops_key_for_snapshot() {
+    local operational_key="$1" state_dir secrets_file
+    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    secrets_file="${SECRETS_FILE:-${state_dir}/secrets/secrets.yaml}"
+
+    [[ -f "$secrets_file" && -f "$operational_key" ]] || return 0
+    command -v sops >/dev/null 2>&1 || return 0
+
+    if ! SOPS_AGE_KEY_FILE="$operational_key" sops -d "$secrets_file" >/dev/null 2>&1; then
+        log_error "Pre-restore snapshot preflight failed: current secrets.yaml cannot be decrypted with the live SOPS key."
+        log_error "  secrets.yaml: $secrets_file"
+        log_error "  live SOPS key: $operational_key"
+        log_error "  selected backup decrypt key: ${RESTORE_DECRYPT_AGE_KEY_FILE:-<not resolved>}"
+        log_error "The selected backup key and current live SOPS key are separate."
+        log_error "The pre-restore emergency snapshot must decrypt current live SOPS secrets before restore."
+        log_error "Fix current SOPS decryptability, or intentionally skip the safety snapshot with --no-backup."
+        return 1
+    fi
+    return 0
+}
+
 create_pre_restore_snapshot() {
+    local operational_sops_age_key_file="${1:-${OPERATIONAL_SOPS_AGE_KEY_FILE:-}}"
     [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
     [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: utilities/backup-run.sh run emergency"; return 0; }
     local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local db_path="$state_dir/data/db.sqlite3"
+    _preflight_operational_sops_key_for_snapshot "$operational_sops_age_key_file" || return 1
     # Best-effort WAL checkpoint; swallow all failures intentionally.
     # shellcheck disable=SC2015
     [[ -f "$db_path" ]] && command -v sqlite3 >/dev/null 2>&1 && \
         sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
     if [[ -x "${PROJECT_ROOT}/utilities/backup-run.sh" ]]; then
         log_info "Creating pre-restore emergency snapshot..."
-        log_info "Invoking: ${PROJECT_ROOT}/utilities/backup-run.sh run emergency --quiet"
-        if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run emergency --quiet; then
+        log_info "Invoking with live SOPS key: ${PROJECT_ROOT}/utilities/backup-run.sh run emergency --quiet"
+        if ! SOPS_AGE_KEY_FILE="$operational_sops_age_key_file" "${PROJECT_ROOT}/utilities/backup-run.sh" run emergency --quiet; then
             if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
                 log_error "Pre-restore snapshot FAILED (hard-fail)."
                 log_error "Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to skip."
@@ -1787,7 +1811,8 @@ main() {
     # that have not explicitly set BACKUP_DIR still resolve to the correct volume.
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${STATE_DIR}/backups")"
-    local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
+    local OPERATIONAL_SOPS_AGE_KEY_FILE; OPERATIONAL_SOPS_AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
+    RESTORE_DECRYPT_AGE_KEY_FILE=""
     local PUID PGID
     PUID="$(get_config_value "PUID" "")"
     PGID="$(get_config_value "PGID" "")"
@@ -1862,7 +1887,7 @@ main() {
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    _prompt_age_key "$AGE_KEY_FILE" || exit 1
+    _prompt_age_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
     
     local sha256_sidecar="${BACKUP_FILE}.sha256"
     if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
@@ -1906,7 +1931,7 @@ main() {
     log_info "  Type:        $RESTORE_TYPE"
     log_info "  Archive ver: $archive_version (format: $archive_format)"
     log_info "  State dir:   $STATE_DIR"
-    log_info "  Decrypt key: $AGE_KEY_FILE"
+    log_info "  Decrypt key: $RESTORE_DECRYPT_AGE_KEY_FILE"
 
     _require_selected_archive_tools "$BACKUP_FILE" || exit 1
     if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ -n "$(get_config_value "DATA_VOLUME_DEVICE" "")" ]]; then
@@ -1923,7 +1948,7 @@ main() {
         [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
     fi
 
-    create_pre_restore_snapshot || exit 1
+    create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
 
     _restore_safety_net() {
         local rc=$?
@@ -1943,10 +1968,10 @@ main() {
 
     case "$RESTORE_TYPE" in
         db)
-            restore_db "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE"
+            restore_db "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE"
             ;;
         full|emergency)
-            restore_full "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE" "$archive_format"
+            restore_full "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE" "$archive_format"
             ;;
         *)
             log_error "Unknown restore type: $RESTORE_TYPE"; exit 1 ;;
