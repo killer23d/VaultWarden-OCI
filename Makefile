@@ -904,6 +904,7 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-permission-repair-contract.sh
 	@tests/test-permission-contract-central.sh
 	@tests/test-env-edit.sh
+	@tests/test-migrate-followup.sh
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)
