@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 pass(){ echo "PASS: $*"; }
-
-source_migrate(){
-  PROJECT_ROOT="$ROOT"
-  _VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
-  _VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
-  DRY_RUN=false
-  log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }; log_success(){ :; }; log_debug(){ :; }
-  require_commands(){ :; }
-  source "$ROOT/lib/migrate.sh"
-}
 
 out=$(bash <<'PROBE'
 set -euo pipefail
@@ -112,8 +101,10 @@ _MV_SKIP_STACK_STOP=false
 printf '0' > "$DOCKER_STATE_FILE"
 _mv_step_rsync
 PROBE
-marker="$(cat "$TGT/.vw-data-volume")"
+marker_mode="$(stat -c '%a' "$TGT/.vw-data-volume")"
 chmod 600 "$TGT/.vw-data-volume"
+marker="$(cat "$TGT/.vw-data-volume")"
+[[ "$marker_mode" == '0' || "$marker_mode" == '000' ]] || fail ".vw-data-volume permissions changed unexpectedly: $marker_mode"
 [[ "$marker" == 'target marker' ]] || fail ".vw-data-volume was overwritten or deleted"
 [[ -f "$TGT/db.sqlite3" ]] || fail "included file was not copied by rsync"
 pass '.vw-data-volume is protected without rsync code 23'
