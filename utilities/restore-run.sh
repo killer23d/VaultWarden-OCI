@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # utilities/restore-run.sh — Restores VaultWarden data from local or remote encrypted backups.
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -1564,7 +1564,7 @@ restore_full() {
         log_success "Archive traversal check passed (legacy format)."
         [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would tar -xf to /"; return 0; }
         # shellcheck disable=SC2086
-        tar $tar_filter -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --no-overwrite-dir --no-unlink --delay-directory-restore
+        tar $tar_filter -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --no-overwrite-dir --delay-directory-restore
         # shellcheck disable=SC2015  # best-effort chown; intentionally swallows failure
         [[ -d "$state_dir" ]] && chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || true
         purge_wal_shm "$state_dir/data/db.sqlite3" || true
@@ -1579,7 +1579,7 @@ restore_full() {
     mkdir -p "$staging"
     log_info "Extracting archive to staging directory..."
     # shellcheck disable=SC2086
-    tar $tar_filter -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --no-overwrite-dir --no-unlink --delay-directory-restore
+    tar $tar_filter -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --no-overwrite-dir --delay-directory-restore
 
     local rel_state="${state_dir#/}"
     if [[ ! -d "$staging/$rel_state" ]]; then

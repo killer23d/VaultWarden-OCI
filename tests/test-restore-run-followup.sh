@@ -5,17 +5,23 @@ SCRIPT="$ROOT/utilities/restore-run.sh"
 fail(){ echo "not ok - $*" >&2; exit 1; }
 pass(){ echo "ok - $*"; }
 
-require_pattern(){ local pat="$1" msg="$2"; grep -Eq "$pat" "$SCRIPT" || fail "$msg"; }
-reject_pattern(){ local pat="$1" msg="$2"; ! grep -Eq "$pat" "$SCRIPT" || fail "$msg"; }
+require_pattern(){ local pat="$1" msg="$2"; grep -Eq -- "$pat" "$SCRIPT" || fail "$msg"; }
+reject_pattern(){ local pat="$1" msg="$2"; ! grep -Eq -- "$pat" "$SCRIPT" || fail "$msg"; }
 
 require_pattern 'get_config_value "DATA_VOLUME_DEVICE" ""' 'restore-run must inspect DATA_VOLUME_DEVICE before readiness skip'
 require_pattern 'FORCE.*USE_REMOTE.*-z "\$_configured_data_device"' 'force remote skip must be limited to no data device'
 require_pattern 'require_project_state_ready \|\| exit 1' 'storage readiness must still be enforced'
 pass 'restore-run refuses to skip storage readiness when DATA_VOLUME_DEVICE is configured'
 
+require_pattern '^set -E[[:alpha:]-]*[[:space:]]+pipefail' 'restore-run must enable ERR trap inheritance for restore functions'
+require_pattern 'trap _restore_safety_net ERR HUP INT TERM' 'restore-run must arm safety-net trap around stopped-service restore work'
 require_pattern 'bash "\$\{PROJECT_ROOT\}/startup.sh" --skip-pull' 'restore-run must invoke startup.sh --skip-pull'
 reject_pattern 'docker compose up -d --remove-orphans' 'restore-run must not directly start docker compose'
 pass 'restore-run invokes startup path instead of direct docker compose up'
+pass 'restore-run enables safety-net restart path for restore function failures'
+
+reject_pattern '-{2}no-unlink' 'restore-run must not pass unsupported tar no-unlink option'
+pass 'restore-run avoids unsupported tar no-unlink option'
 
 require_pattern 'local install_env="\$\{STATE_DIR\}/config/install.env"' 'restore-run must target persistent install.env'
 require_pattern 'SOPS_AGE_KEY_FILE=\$\{canonical_key\}.*\$install_env|written to \$install_env' 'restore-run must update SOPS_AGE_KEY_FILE in install.env'
@@ -47,4 +53,4 @@ pass 'restore-run selects post-restore rekey source by restore type'
 
 bash -n "$SCRIPT"
 pass 'bash -n utilities/restore-run.sh'
-printf '1..8\n'
+printf '1..10\n'
