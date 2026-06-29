@@ -24,12 +24,17 @@ source "${PROJECT_ROOT}/lib/docker.sh"
 source "${PROJECT_ROOT}/lib/backup-utils.sh"
 source "${PROJECT_ROOT}/lib/migrate.sh"
 
-[[ -f "${PROJECT_ROOT}/.env" ]] && load_env_file "${PROJECT_ROOT}/.env"
+if [[ -f "${PROJECT_ROOT}/.env" || -f "/etc/vaultwarden/vaultwarden.env" || -f "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env" ]]; then
+    load_project_environment || {
+        # setup-storage also supports first-run bootstrapping before runtime env exists.
+        [[ -f "${PROJECT_ROOT}/.env" ]] && load_env_file "${PROJECT_ROOT}/.env" || true
+    }
+fi
 export DRY_RUN=false   # overridden by arg parsing; exported for lib functions
 
 _SS_MODE="setup"
-_SS_DATA_DEVICE=""
-_SS_DATA_MOUNT="/mnt/vw-data"
+_SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
+_SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 _SS_AUTO=false
 _SS_FORCE=false
 TMP_WORKDIR=""
@@ -68,8 +73,8 @@ setup_directories() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -gn "$real_user")
 
-    local secrets_dirs=("secrets" "secrets/keys" "config")
-    for dir in "${secrets_dirs[@]}"; do
+    local authoring_dirs=("secrets" "secrets/keys" "config")
+    for dir in "${authoring_dirs[@]}"; do
         ensure_dir "$dir" 700 || return 1
         chown "$real_user:$real_group" "$dir" || return 1
     done
@@ -77,6 +82,10 @@ setup_directories() {
     local puid; puid=$(id -u "$real_user")
     local pgid; pgid=$(id -g "$real_user")
     local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
+
+    install -d -m 0700 -o root -g root "${project_state_dir}/config" "${project_state_dir}/secrets" || return 1
+    [[ -e "${project_state_dir}/config/install.env" ]] && fix_known_path_permissions "${project_state_dir}/config/install.env"
+    [[ -e "${project_state_dir}/secrets/secrets.yaml" ]] && fix_known_path_permissions "${project_state_dir}/secrets/secrets.yaml"
 
     # Create the backup directory tree that backup.sh and restore.sh require.
     local backup_base_dir="${BACKUP_DIR:-${project_state_dir}/backups}"
@@ -109,21 +118,7 @@ setup_directories() {
         fi
     done
 
-    # Caddy runs as root inside its container and writes
-    # access logs to ${project_state_dir}/logs/caddy/access.log via a bind-mount.
-    # The logs normalization above sets this directory to 750:
-    #   owner=PUID  group=PGID  other=---
-    # On OCI Compute, Docker maps container UID 0 to an unprivileged host UID
-    # (userns-remap or equivalent hypervisor isolation). Container root is NOT
-    # host root. Any chmod/chown attempted inside the container on this
-    # bind-mount fails with EPERM. The definitive fix: set 755 here, running
-    # as real host root (setup.sh is always invoked via 'sudo ./setup.sh').
-    # 755 rationale: Caddy's container UID falls into 'other' (it is neither
-    # PUID nor PGID). 'other' needs at least r-x (5) to enter the directory
-    # and rw- (6) on the log file itself. 755 grants r-x to 'other', and
-    # Caddy creates access.log with mode 0644 (rw-r--r--), satisfying both.
-    chmod 755 "${project_state_dir}/logs/caddy" || return 1
-    log_info "Set ${project_state_dir}/logs/caddy to 755 (Caddy runs as root in container)"
+    ensure_caddy_log_permissions "${project_state_dir}/logs/caddy" || return 1
 
     # Caddy's TLS storage directories must be owned by root:root and
     # traversable (755) so Caddy can write certificate material during the
@@ -193,7 +188,10 @@ _mode_setup() {
     log_info "Mode: setup — provisioning data volume and directories"
 
     export DATA_VOLUME_DEVICE="${_SS_DATA_DEVICE}"
-    export DATA_VOLUME_MOUNT="${_SS_DATA_MOUNT}"
+    export DATA_VOLUME_MOUNT="${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
+        export PROJECT_STATE_DIR="${DATA_VOLUME_MOUNT}"
+    fi
 
     setup_data_volume || return 1
     # Install a Docker systemd drop-in that delays Docker start until the
@@ -203,6 +201,41 @@ _mode_setup() {
     _update_install_env_after_storage || return 1
 
     log_success "Storage setup complete."
+}
+
+_ss_check_known_path() {
+    local path="$1" label="${2:-$1}"
+    if [[ ! -e "$path" ]]; then
+        log_warn "Missing: ${label} (${path})"
+        return 1
+    fi
+    if ! assert_known_path_permissions "$path"; then
+        local owner group mode actual
+        owner="$(expected_owner_for_path "$path" 2>/dev/null || printf '?')"
+        group="$(expected_group_for_path "$path" 2>/dev/null || printf '?')"
+        mode="$(expected_mode_for_path "$path" 2>/dev/null || printf '?')"
+        actual="$(_common_stat_owner "$path"):$(_common_stat_group "$path") $(_common_stat_mode "$path")"
+        log_warn "Permission drift: ${label} (${path}) actual=${actual} expected=${owner}:${group} ${mode}"
+        return 1
+    fi
+    log_success "OK: ${label} (${path})"
+}
+
+_ss_check_mode_owner() {
+    local path="$1" type="$2" owner="$3" group="$4" mode="$5"
+    if [[ "$type" == "dir" && ! -d "$path" ]] || [[ "$type" == "file" && ! -f "$path" ]]; then
+        log_warn "Missing ${type}: ${path}"
+        return 1
+    fi
+    local actual_owner actual_group actual_mode
+    actual_owner="$(_common_stat_owner "$path")"
+    actual_group="$(_common_stat_group "$path")"
+    actual_mode="$(_common_stat_mode "$path")"
+    if [[ "${actual_owner}:${actual_group}" != "${owner}:${group}" || "${actual_mode}" != "$mode" ]]; then
+        log_warn "Permission drift: ${path} actual=${actual_owner}:${actual_group} ${actual_mode} expected=${owner}:${group} ${mode}"
+        return 1
+    fi
+    log_success "OK: ${path}"
 }
 
 _mode_verify() {
@@ -219,16 +252,33 @@ _mode_verify() {
             log_success "OK: ${project_state_dir}/${dir}"
         fi
     done
+
+    _ss_check_known_path "${project_state_dir}/config" "persistent config dir" || (( errors++ )) || true
+    _ss_check_known_path "${project_state_dir}/secrets" "persistent secrets dir" || (( errors++ )) || true
+    if [[ -e "${project_state_dir}/config/install.env" ]]; then _ss_check_known_path "${project_state_dir}/config/install.env" "install.env" || (( errors++ )) || true; fi
+    if [[ -e "${project_state_dir}/config/dr-manifest.env" ]]; then _ss_check_known_path "${project_state_dir}/config/dr-manifest.env" "dr-manifest.env" || (( errors++ )) || true; fi
+    if [[ -e "${project_state_dir}/secrets/secrets.yaml" ]]; then _ss_check_known_path "${project_state_dir}/secrets/secrets.yaml" "persistent secrets.yaml" || (( errors++ )) || true; fi
+
+    _ss_check_mode_owner "${project_state_dir}/logs/caddy" dir root root 755 || (( errors++ )) || true
+    _ss_check_mode_owner "${project_state_dir}/logs/caddy/access.log" file root root 644 || (( errors++ )) || true
+    _ss_check_mode_owner "${project_state_dir}/logs/caddy/security.log" file root root 644 || (( errors++ )) || true
+
+    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
+        [[ "${PROJECT_STATE_DIR:-}" == "${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}" ]] || { log_warn "PROJECT_STATE_DIR/DATA_VOLUME_MOUNT mismatch"; (( errors++ )) || true; }
+        mountpoint -q "${DATA_VOLUME_MOUNT}" 2>/dev/null || { log_warn "Data volume is not mounted: ${DATA_VOLUME_MOUNT}"; (( errors++ )) || true; }
+        [[ -f "${DATA_VOLUME_MOUNT}/.vw-data-volume" ]] || { log_warn "Missing data-volume sentinel: ${DATA_VOLUME_MOUNT}/.vw-data-volume"; (( errors++ )) || true; }
+    fi
+
     if (( errors == 0 )); then
         log_success "Storage verification passed"
-    else
-        log_warn "Storage verification: ${errors} issue(s) found"
+        return 0
     fi
-    return 0
+    log_error "Storage verification failed: ${errors} issue(s) found"
+    return 1
 }
 
 show_help() {
-cat << 'EOF'
+cat << 'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
 VaultWarden-OCI Storage Setup and Migration
 
 USAGE:
@@ -247,7 +297,7 @@ MODES:
 OPTIONS:
     --mode MODE           Mode to run: setup|migrate|verify (default: setup)
     --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
-    --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
+    --data-mount PATH     Mount point for data volume (default: @DEFAULT_DATA_MOUNT@)
     --auto                Non-interactive mode
     --dry-run             Preview actions without executing
     --force               Skip confirmations
@@ -261,7 +311,7 @@ EXAMPLES:
     # Setup with a dedicated data volume
     sudo utilities/setup-storage.sh \
       --data-device /dev/disk/by-id/your-volume \
-      --data-mount /mnt/vw-data
+      --data-mount @DEFAULT_DATA_MOUNT@
 
     # Dry run setup
     sudo utilities/setup-storage.sh --dry-run
@@ -359,10 +409,6 @@ _parse_outer_args() {
 }
 
 main() {
-    if [[ $# -eq 0 ]]; then
-        show_help
-        exit 0
-    fi
     _parse_outer_args "$@"
 
     (( EUID == 0 )) || {

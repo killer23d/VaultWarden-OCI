@@ -19,7 +19,7 @@ readonly VAULTWARDEN_DEFAULTS_LOADED=1
 # Filesystem paths
 # ---------------------------------------------------------------------------
 readonly _VW_DEFAULT_STATE_DIR="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
-readonly _VW_DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/opt/vaultwarden/data}"
+readonly _VW_DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/mnt/vw-data}"
 
 # ---------------------------------------------------------------------------
 # Service user identity

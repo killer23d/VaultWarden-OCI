@@ -99,7 +99,7 @@ DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 export USE_LATEST FORCE
 
 show_help() {
-    cat <<'EOF'
+    cat <<'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
 VaultWarden-OCI System Preparation
 
 USAGE:
@@ -118,7 +118,7 @@ OPTIONS:
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --data-device DEV     Data volume device path
-    --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
+    --data-mount PATH     Data volume mount point (default: @DEFAULT_DATA_MOUNT@)
     --help, -h            Show this help
     --version, -V         Print the VaultWarden-OCI version and exit
 

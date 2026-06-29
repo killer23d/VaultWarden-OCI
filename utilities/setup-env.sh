@@ -37,7 +37,7 @@ FORCE=false
 DRY_RUN=false
 
 show_help() {
-    cat <<'EOF'
+    cat <<'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
 VaultWarden-OCI Environment Setup
 
 USAGE:
@@ -55,7 +55,7 @@ OPTIONS:
                           Caddy remains pinned because xcaddy builder tags do not
                           support caddy:latest-builder.
     --data-device DEV     Data volume block device path
-    --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
+    --data-mount PATH     Data volume mount point (default: @DEFAULT_DATA_MOUNT@)
     --force               Overwrite existing .env/docker-compose.yml
     --dry-run             Preview actions without executing
     --help, -h            Show this help
