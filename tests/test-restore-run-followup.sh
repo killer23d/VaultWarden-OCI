@@ -39,6 +39,12 @@ require_pattern 'Fix current SOPS decryptability, or intentionally skip the safe
 reject_pattern 'local AGE_KEY_FILE; AGE_KEY_FILE="\$\(get_config_value "SOPS_AGE_KEY_FILE"' 'restore main must not use AGE_KEY_FILE for selected backup decrypt key'
 pass 'restore-run separates restore decrypt key from operational SOPS key'
 
+require_pattern 'SOPS_AGE_KEY_FILE="\$RESTORE_REKEY_SOURCE_AGE_KEY_FILE" sops --config "\$policy_tmp" updatekeys --yes "\$cipher_tmp"' 'SOPS updatekeys must use the restore rekey source selector'
+require_pattern 'db\) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="\$OPERATIONAL_SOPS_AGE_KEY_FILE"' 'DB restore rekey source must be the live operational key'
+require_pattern 'full\|emergency\) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="\$RESTORE_DECRYPT_AGE_KEY_FILE"' 'full/emergency restore rekey source may be the selected backup decrypt key'
+reject_pattern 'SOPS_AGE_KEY_FILE="\$RESTORE_DECRYPT_AGE_KEY_FILE" sops --config "\$policy_tmp" updatekeys' 'DB restore with different restore key must not unconditionally use restore decrypt key for updatekeys'
+pass 'restore-run selects post-restore rekey source by restore type'
+
 bash -n "$SCRIPT"
 pass 'bash -n utilities/restore-run.sh'
-printf '1..7\n'
+printf '1..8\n'

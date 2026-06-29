@@ -1137,7 +1137,11 @@ _rotate_age_key() {
             fi
         } > "$policy_tmp" || { log_error "Failed to stage SOPS policy."; return 1; }
         chmod 600 "$policy_tmp" 2>/dev/null || true
-        if ! SOPS_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp"; then
+        if [[ -z "${RESTORE_REKEY_SOURCE_AGE_KEY_FILE:-}" ]]; then
+            log_error "Restore rekey source Age key was not resolved; refusing to update SOPS keys."
+            return 1
+        fi
+        if ! SOPS_AGE_KEY_FILE="$RESTORE_REKEY_SOURCE_AGE_KEY_FILE" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp"; then
             log_error "SOPS rekey failed — live key paths were not changed."
             return 1
         fi
@@ -1813,6 +1817,7 @@ main() {
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${STATE_DIR}/backups")"
     local OPERATIONAL_SOPS_AGE_KEY_FILE; OPERATIONAL_SOPS_AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
     RESTORE_DECRYPT_AGE_KEY_FILE=""
+    RESTORE_REKEY_SOURCE_AGE_KEY_FILE=""
     local PUID PGID
     PUID="$(get_config_value "PUID" "")"
     PGID="$(get_config_value "PGID" "")"
@@ -2020,6 +2025,17 @@ main() {
                 ;;
         esac
     fi
+
+    # Choose the key that can decrypt secrets.yaml at the moment post-restore
+    # SOPS updatekeys/rekey runs. DB restores do not restore secrets.yaml, so
+    # the live operational key remains the correct source. Full/emergency
+    # restores may have restored secrets.yaml from the selected archive, so the
+    # selected backup decrypt key is the correct source for those modes.
+    case "$RESTORE_TYPE" in
+        db) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE" ;;
+        full|emergency) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE" ;;
+        *) log_error "Unknown restore type for rekey source: $RESTORE_TYPE"; exit 1 ;;
+    esac
 
     if ! _rotate_age_key; then
         log_error "Age key rotation FAILED."
