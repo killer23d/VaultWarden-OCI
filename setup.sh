@@ -67,7 +67,7 @@ DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 SETUP_LOCK_FILE=""
 
 show_help() {
-    cat << 'EOF'
+    cat << 'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
 VaultWarden-OCI Setup Tool — Security Hardened Edition
 
 USAGE:
@@ -106,7 +106,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       DATA_VOLUME_FORCE_FORMAT=true is set. A Docker systemd
                       drop-in ensures the stack never starts without this mount.
                       Example: --data-device /dev/disk/by-id/your-volume
-  --data-mount PATH   Mount point for the data volume (default: /mnt/vw-data).
+  --data-mount PATH   Mount point for the data volume (default: @DEFAULT_DATA_MOUNT@).
                       Must match PROJECT_STATE_DIR when DATA_VOLUME_DEVICE is set.
 
 GLOBAL OPTIONS:

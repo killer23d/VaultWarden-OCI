@@ -207,7 +207,7 @@ _storage_preflight() {
   # migration-in-progress writes (e.g. _update_install_env_after_storage or
   # _mv_step_update_env which update repo .env and install.env independently).
   local migrate_state="${PROJECT_ROOT}/.migrate-volume.state"
-  if [[ -f "$migrate_state" ]]; then
+  if [[ -f "$migrate_state" && "${VW_ENV_EDIT_ALLOW_MIGRATION_SYNC:-false}" != "true" ]]; then
     local migration_complete
     migration_complete="$(grep '^MIGRATION_COMPLETE=' "$migrate_state" 2>/dev/null \
                           | cut -d= -f2- | tr -d '[:space:]' || true)"

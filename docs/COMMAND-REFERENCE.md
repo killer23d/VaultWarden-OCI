@@ -16,7 +16,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make help-all` |  Show every target, including dashboard/API, advanced, dev, and legacy commands |
 | `make setup` |  Run initial setup (requires sudo) |
 | `make dev-setup` |  Set up development environment (.env + docker-compose.override.yml) |
-| `make fix-permissions` |  Fix file ownership after sudo operations leave root-owned files |
+| `make fix-permissions` |  Repair known VaultWarden-OCI permission drift |
 | `make init-secrets` |  Initialize secrets file (interactive; root required) |
 | `make sync-env` |  Sync repo .env to generated runtime env files (root required) |
 | `make edit-env` |  Interactively edit repo .env and sync on change (root required) |

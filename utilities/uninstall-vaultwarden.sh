@@ -10,6 +10,11 @@ set -euo pipefail
 
 PROJECT_ROOT_FALLBACK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/defaults.sh" ]]; then
+    # shellcheck source=../lib/defaults.sh
+    source "${PROJECT_ROOT_FALLBACK}/lib/defaults.sh"
+fi
+
 if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/log.sh" ]]; then
     # shellcheck source=../lib/log.sh
     source "${PROJECT_ROOT_FALLBACK}/lib/log.sh"
@@ -137,8 +142,8 @@ PROJECT_DIR="${PROJECT_ROOT_FALLBACK}"
 PROJECT_BASENAME="$(basename "$PROJECT_DIR")"
 
 INSTALLED_ENV="/etc/vaultwarden/vaultwarden.env"
-DEFAULT_STATE_DIR="/var/lib/vaultwarden"
-DEFAULT_DATA_MOUNT="/mnt/vw-data"
+DEFAULT_STATE_DIR="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
+DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/mnt/vw-data}"
 
 _read_env_value() {
     local key="$1" file="$2"
