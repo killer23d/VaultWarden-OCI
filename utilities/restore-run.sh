@@ -66,7 +66,7 @@ _require_env_for_live_restore() {
 
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
-    local -a soft=(sops zstd rclone rsync)  # rsync required for separate-volume (OCI block volume) restores
+    local -a soft=(sops zstd rclone rsync)
     local missing_hard=() missing_soft=()
     for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
     for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
@@ -91,7 +91,7 @@ check_dependencies() {
         local _cmd
         for _cmd in "${missing_soft[@]}"; do
             case "$_cmd" in
-                rclone) echo "  Hint [rclone]: curl https://rclone.org/install.sh | sudo bash" >&2 ;;
+                rclone) echo "  Hint [rclone]: apt install rclone" >&2 ;;
             esac
         done
     fi
@@ -147,8 +147,8 @@ SUBCOMMANDS:
     key that was used to encrypt that backup.  Press Enter to use the key
     already configured in .env (SOPS_AGE_KEY_FILE).
 
-    Once the restore lands, a NEW age key is automatically generated,
-    installed to all configured locations, and displayed prominently.
+    Once the restore lands, the restored SOPS secrets are rekeyed to a NEW
+    age key, installed to configured locations, and displayed prominently.
     Save it before pressing Enter to start the services.
 
 OPTIONS (used after a subcommand):
@@ -1053,6 +1053,54 @@ _rotate_age_key() {
         return 1
     fi
 
+    _require_sops_for_rekey || return 1
+
+    local secrets_file="${STATE_DIR}/secrets/secrets.yaml"
+    if [[ -f "$secrets_file" ]]; then
+        local new_recipient offline_recipient policy_tmp cipher_tmp
+        new_recipient="$(age-keygen -y "$new_key_tmp" 2>/dev/null || true)"
+        [[ "$new_recipient" =~ ^age1[a-z0-9]{58}$ ]] || {
+            log_error "New age key did not produce a valid public recipient."
+            return 1
+        }
+        offline_recipient=""
+        if [[ -f "${STATE_DIR}/config/dr-manifest.env" ]]; then
+            offline_recipient="$(grep -m1 '^OFFLINE_AGE_RECIPIENT=' "${STATE_DIR}/config/dr-manifest.env" | cut -d= -f2- | tr -d "\"'" || true)"
+        fi
+        if [[ -z "$offline_recipient" && -f "${PROJECT_ROOT}/.sops.yaml" ]]; then
+            offline_recipient="$(grep -Eo 'age1[a-z0-9]{58}' "${PROJECT_ROOT}/.sops.yaml" | grep -vF "$new_recipient" | head -1 || true)"
+        fi
+        [[ -z "$offline_recipient" || "$offline_recipient" =~ ^age1[a-z0-9]{58}$ ]] || offline_recipient=""
+
+        policy_tmp="$TMPDIR_RESTORE/.sops-rekey.yaml"
+        cipher_tmp="$TMPDIR_RESTORE/secrets.rekeyed.yaml"
+        cp -f "$secrets_file" "$cipher_tmp"
+        chmod 600 "$cipher_tmp"
+        {
+            echo "creation_rules:"
+            echo "  - path_regex: '.*\\.yaml$'"
+            if [[ -n "$offline_recipient" ]]; then
+                echo "    age: \"${new_recipient},${offline_recipient}\""
+            else
+                echo "    age: \"${new_recipient}\""
+            fi
+        } > "$policy_tmp"
+        chmod 600 "$policy_tmp"
+        if ! SOPS_AGE_KEY_FILE="$AGE_KEY_FILE" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp"; then
+            log_error "SOPS rekey failed — live key paths were not changed."
+            return 1
+        fi
+        if ! SOPS_AGE_KEY_FILE="$new_key_tmp" sops -d "$cipher_tmp" >/dev/null; then
+            log_error "Rekey validation failed — live key paths were not changed."
+            return 1
+        fi
+        install -m 600 -o root -g root "$cipher_tmp" "$secrets_file" || return 1
+        install -m 644 "$policy_tmp" "${PROJECT_ROOT}/.sops.yaml" || return 1
+        log_success "  Restored secrets rekeyed for the new operational key."
+    else
+        log_warn "  No restored secrets.yaml found at $secrets_file; rotating key paths only."
+    fi
+
     # 2. Install to secrets/keys/age-key.txt (atomic)
     local local_key_dir="$PROJECT_ROOT/secrets/keys"
     local local_key_file="$local_key_dir/age-key.txt"
@@ -1108,18 +1156,16 @@ _rotate_age_key() {
         ROTATED_KIT_FILE=""
     fi
 
-    # 3. Install to systemd location /etc/vaultwarden/age-key.txt
+    # 3. Install to root-operated location /etc/vaultwarden/age-key.txt
     local systemd_key="/etc/vaultwarden/age-key.txt"
-    local canonical_key="$local_key_file"
+    local canonical_key="$systemd_key"
 
-    if [[ -f "$systemd_key" ]]; then
-        install -m 600 -o root -g root "$new_key_tmp" "$systemd_key" || {
-            log_error "Failed to install new key to $systemd_key"
-            return 1
-        }
-        canonical_key="$systemd_key"
-        log_success "  New key installed (systemd): $systemd_key"
-    fi
+    install -d -m 700 -o root -g root "$(dirname "$systemd_key")" || return 1
+    install -m 600 -o root -g root "$new_key_tmp" "$systemd_key" || {
+        log_error "Failed to install new key to $systemd_key"
+        return 1
+    }
+    log_success "  New key installed: $systemd_key"
 
     # 4. Update SOPS_AGE_KEY_FILE in .env
     local env_file="$PROJECT_ROOT/.env"
@@ -1141,6 +1187,18 @@ _rotate_age_key() {
             echo "SOPS_AGE_KEY_FILE=${canonical_key}" >> "$systemd_env"
         fi
         log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to $systemd_env"
+    fi
+
+    local install_env="${STATE_DIR}/config/install.env"
+    if [[ -f "$install_env" ]]; then
+        if grep -q '^SOPS_AGE_KEY_FILE=' "$install_env"; then
+            sed -i "s|^SOPS_AGE_KEY_FILE=.*|SOPS_AGE_KEY_FILE=${canonical_key}|" "$install_env"
+        else
+            echo "SOPS_AGE_KEY_FILE=${canonical_key}" >> "$install_env"
+        fi
+        chmod 600 "$install_env" 2>/dev/null || true
+        chown root:root "$install_env" 2>/dev/null || true
+        log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to $install_env"
     fi
 
     # 6. Derive public key for display
@@ -1236,6 +1294,28 @@ _tar_filter_for_file() {
         *.tar.xz)        echo "-J"      ;;
         *)               echo ""        ;;
     esac
+}
+
+_require_command_for_path() {
+    local cmd="$1" reason="$2" package="${3:-$1}"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        log_error "$cmd is required for ${reason} but is not installed."
+        log_error "Install on Ubuntu 22.04/24.04 with: sudo apt-get install -y ${package}"
+        return 1
+    fi
+}
+
+_require_selected_archive_tools() {
+    local path="$1"
+    case "$path" in
+        *.tar.zst|*.zst|*.tar.zst.age|*.zst.age)
+            _require_command_for_path zstd "restoring zstd-compressed archives" zstd || return 1
+            ;;
+    esac
+}
+
+_require_sops_for_rekey() {
+    _require_command_for_path sops "post-restore SOPS key rotation/rekey" sops
 }
 
 tar_validate_members() {
@@ -1663,16 +1743,14 @@ main() {
     fi
     auto_fix_critical_permissions "$PROJECT_ROOT"
 
-    # Fail closed if the expected data volume is not mounted.
-    # Exceptions:
-    #   1. Bootstrap/emergency-restore mode (--remote without .env): DATA_VOLUME_DEVICE
-    #      will be unset, so the guard is already a no-op.
-    #   2. --force with a remote source: operator is explicitly driving a DR restore
-    #      and may be targeting an unmounted block volume that will be populated by
-    #      this very restore run. Blocking here defeats the DR flow.
-    if [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" ]]; then
-        log_warn "Skipping project-state-ready check (--force --remote DR mode)."
-        log_warn "Ensure the target volume is mounted before restore writes begin."
+    # Fail closed if a block/data volume is configured.  --force --remote may
+    # skip this check only for boot-volume/bootstrap mode where no block device
+    # is configured; it must never permit writes to an unmounted block-volume path.
+    local _configured_data_device
+    _configured_data_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
+    if [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" && -z "$_configured_data_device" ]]; then
+        log_warn "Skipping project-state-ready check (--force --remote boot-volume/bootstrap mode)."
+        log_warn "No DATA_VOLUME_DEVICE is configured; block-volume safety checks remain required when a data volume is configured."
     else
         require_project_state_ready || exit 1
     fi
@@ -1802,6 +1880,11 @@ main() {
     log_info "  State dir:   $STATE_DIR"
     log_info "  Decrypt key: $AGE_KEY_FILE"
 
+    _require_selected_archive_tools "$BACKUP_FILE" || exit 1
+    if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ -n "$(get_config_value "DATA_VOLUME_DEVICE" "")" ]]; then
+        _require_command_for_path rsync "block-volume full/emergency restores" rsync || exit 1
+    fi
+
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         echo ""
         log_warn "WARNING: This will overwrite current data."
@@ -1818,8 +1901,8 @@ main() {
         local rc=$?
         if [[ $rc -ne 0 ]]; then
             log_warn "Restore encountered an error (exit $rc) — attempting to restart services..."
-            docker compose up -d --remove-orphans 2>/dev/null || \
-                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: docker compose up -d"
+            bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
+                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: sudo ./startup.sh --skip-pull"
         fi
         # Preserve the cleanup contract: remove decrypted temp material.
         cleanup
@@ -1897,8 +1980,9 @@ main() {
     _display_new_key
 
     if [[ "$DRY_RUN" != "true" ]]; then
+        auto_fix_critical_permissions "$PROJECT_ROOT"
         log_info "Starting services..."
-        if ! docker compose up -d --remove-orphans; then
+        if ! bash "${PROJECT_ROOT}/startup.sh" --skip-pull; then
             log_error "Failed to start services after restore."
             log_error "Investigate with: docker compose logs --tail=50"
             exit 1

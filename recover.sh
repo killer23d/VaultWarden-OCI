@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-#recover.sh - disaster-recovery bootstrap script for restoring a VaultWarden-OCI instance from an attached state/block volume plus an offline Age key.
+#recover.sh - disaster-recovery bootstrap script for restoring a VaultWarden instance from a state directory or attached data volume plus an offline Age key.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$SCRIPT_DIR"
+source "${SCRIPT_DIR}/lib/log.sh"
+source "${SCRIPT_DIR}/lib/config.sh"
+source "${SCRIPT_DIR}/lib/common.sh"
+init_common_lib "$0"
+source "${SCRIPT_DIR}/lib/storage.sh"
 SOPS_CONFIG_FILE="${SCRIPT_DIR}/.sops.yaml"
 VW_ETC_DIR="${VW_RECOVER_ETC_DIR:-/etc/vaultwarden}"
 VW_STARTUP_SCRIPT="${VW_RECOVER_STARTUP_SCRIPT:-${SCRIPT_DIR}/startup.sh}"
 ACTIVE_KEY="${VW_ETC_DIR}/age-key.txt"
 
 STATE_DIR=""
+STORAGE_MODE="auto"
+EFFECTIVE_STORAGE_MODE=""
 KEY_FILE=""
 DOMAIN=""
 REPO_COMMIT=""
@@ -39,7 +47,7 @@ POLICY_PROMOTED=false
 ROLLBACK_DONE=false
 
 usage() {
-    echo "Usage: ./recover.sh --state-dir DIR --key FILE"
+    echo "Usage: ./recover.sh --state-dir DIR --key FILE [--storage-mode auto|boot|block]"
 }
 
 fatal() {
@@ -95,6 +103,11 @@ parse_args() {
                 [[ $# -gt 0 && -n "${1:-}" ]] || fatal "Option --key requires a value."
                 KEY_FILE="$1"
                 ;;
+            --storage-mode)
+                shift
+                [[ "${1:-}" =~ ^(auto|boot|block)$ ]] || fatal "Option --storage-mode requires one of: auto, boot, block."
+                STORAGE_MODE="$1"
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -119,7 +132,16 @@ check_prerequisites() {
     done
 
     docker compose version >/dev/null 2>&1 || fatal "Missing required command: docker compose version"
-    mountpoint -q "$STATE_DIR" || fatal "State directory is not a mounted volume. Attach the OCI block volume first."
+    case "$STORAGE_MODE" in
+        auto)
+            if mountpoint -q "$STATE_DIR"; then EFFECTIVE_STORAGE_MODE="block"; else EFFECTIVE_STORAGE_MODE="boot"; fi
+            ;;
+        boot) EFFECTIVE_STORAGE_MODE="boot" ;;
+        block)
+            mountpoint -q "$STATE_DIR" || fatal "State directory is not a mounted data/block volume. Attach and mount the data volume first."
+            EFFECTIVE_STORAGE_MODE="block"
+            ;;
+    esac
 
     MANIFEST="$STATE_DIR/config/dr-manifest.env"
     INSTALL_ENV="$STATE_DIR/config/install.env"
@@ -163,7 +185,7 @@ parse_manifest() {
 
 create_backups() {
     WORKDIR="$(mktemp -d)"
-    install -d -m 0700 "$VW_ETC_DIR"
+    install -d -m 0700 -o root -g root "$VW_ETC_DIR"
     CIPHERTEXT_STAGING="$(mktemp -p "$(dirname "$SECRETS_FILE")" secrets.XXXXXXXXXX.yaml)"
     POLICY_STAGING="$(mktemp -p "$SCRIPT_DIR" .sops.yaml.XXXXXXXXXX)"
     NEW_PRIVATE_KEY="$WORKDIR/new-age-key.txt"
@@ -261,27 +283,48 @@ promote_artifacts() {
         rollback
         fatal "Post-promotion decryption failed — recovery artifacts were rolled back."
     fi
+    chmod 0600 "$ACTIVE_KEY" "$SECRETS_FILE" 2>/dev/null || true
+    chown root:root "$ACTIVE_KEY" "$SECRETS_FILE" 2>/dev/null || true
+    chmod 0644 "$SOPS_CONFIG_FILE" 2>/dev/null || true
 }
 
 update_env_files() {
     local source_dev uuid
-    source_dev="$(findmnt -n -o SOURCE --target "$STATE_DIR")"
-    uuid="$(blkid -s UUID -o value "$source_dev" 2>/dev/null || true)"
-    DEVICE_PATH="$source_dev"
-    [[ -n "$uuid" && -e "/dev/disk/by-uuid/$uuid" ]] && DEVICE_PATH="/dev/disk/by-uuid/$uuid"
+    DEVICE_PATH=""
+    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
+        source_dev="$(findmnt -n -o SOURCE --target "$STATE_DIR")"
+        uuid="$(blkid -s UUID -o value "$source_dev" 2>/dev/null || true)"
+        DEVICE_PATH="$source_dev"
+        [[ -n "$uuid" && -e "/dev/disk/by-uuid/$uuid" ]] && DEVICE_PATH="/dev/disk/by-uuid/$uuid"
+    fi
 
     atomic_set_env "$INSTALL_ENV" PROJECT_STATE_DIR "$STATE_DIR"
-    atomic_set_env "$INSTALL_ENV" DATA_VOLUME_MOUNT "$STATE_DIR"
-    atomic_set_env "$INSTALL_ENV" DATA_VOLUME_DEVICE "$DEVICE_PATH"
+    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
+        atomic_set_env "$INSTALL_ENV" DATA_VOLUME_MOUNT "$STATE_DIR"
+        atomic_set_env "$INSTALL_ENV" DATA_VOLUME_DEVICE "$DEVICE_PATH"
+    else
+        atomic_set_env "$INSTALL_ENV" DATA_VOLUME_MOUNT ""
+        atomic_set_env "$INSTALL_ENV" DATA_VOLUME_DEVICE ""
+    fi
     atomic_set_env "$INSTALL_ENV" SOPS_AGE_KEY_FILE "$ACTIVE_KEY"
 
     atomic_set_env "$MANIFEST" OFFLINE_AGE_RECIPIENT "$USB_PUBLIC_RECIPIENT"
     atomic_set_env "$MANIFEST" MANIFEST_UPDATED_AT "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    chmod 0600 "$INSTALL_ENV" "$MANIFEST" "$SECRETS_FILE" "$ACTIVE_KEY" 2>/dev/null || true
+    chown root:root "$INSTALL_ENV" "$MANIFEST" "$SECRETS_FILE" "$ACTIVE_KEY" 2>/dev/null || true
+    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
+        touch "$STATE_DIR/.vw-data-volume"
+    fi
 }
 
 run_startup_health() {
     [[ -f "$SCRIPT_DIR/docker-compose.yml" ]] || cp "$SCRIPT_DIR/docker-compose.yml.example" "$SCRIPT_DIR/docker-compose.yml"
-    export PROJECT_STATE_DIR="$STATE_DIR" DATA_VOLUME_MOUNT="$STATE_DIR" DATA_VOLUME_DEVICE="$DEVICE_PATH" SOPS_AGE_KEY_FILE="$ACTIVE_KEY"
+    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
+        export PROJECT_STATE_DIR="$STATE_DIR" DATA_VOLUME_MOUNT="$STATE_DIR" DATA_VOLUME_DEVICE="$DEVICE_PATH" SOPS_AGE_KEY_FILE="$ACTIVE_KEY"
+    else
+        export PROJECT_STATE_DIR="$STATE_DIR" DATA_VOLUME_MOUNT="" DATA_VOLUME_DEVICE="" SOPS_AGE_KEY_FILE="$ACTIVE_KEY"
+    fi
+    auto_fix_critical_permissions "$SCRIPT_DIR"
     bash "$VW_STARTUP_SCRIPT"
 
     if curl -sf "${DOMAIN%/}/alive" >/dev/null; then
@@ -294,6 +337,10 @@ run_startup_health() {
 }
 
 cleanup() {
+    local rc=$?
+    if [[ $rc -ne 0 && "$ROLLBACK_DONE" != "true" ]] && { [[ "$CIPHERTEXT_PROMOTED" == "true" ]] || [[ "$KEY_PROMOTED" == "true" ]] || [[ "$POLICY_PROMOTED" == "true" ]]; }; then
+        rollback || true
+    fi
     rm -rf "${WORKDIR:-}"
     [[ -n "${CIPHERTEXT_STAGING:-}" && -f "$CIPHERTEXT_STAGING" ]] && rm -f "$CIPHERTEXT_STAGING"
     [[ -n "${POLICY_STAGING:-}" && -f "$POLICY_STAGING" ]] && rm -f "$POLICY_STAGING"

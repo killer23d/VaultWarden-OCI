@@ -230,8 +230,8 @@ SUBCOMMANDS:
     key that was used to encrypt that backup.  Press Enter to use the key
     already configured in .env (SOPS_AGE_KEY_FILE).
 
-    Once the restore lands, a NEW age key is automatically generated,
-    installed to all configured locations, and displayed prominently.
+    Once the restore lands, the restored SOPS secrets are rekeyed to a NEW
+    age key, installed to configured locations, and displayed prominently.
     Save it before pressing Enter to start the services.
 
 OPTIONS (used after a subcommand):
@@ -697,8 +697,8 @@ SUBCOMMANDS:
     key that was used to encrypt that backup.  Press Enter to use the key
     already configured in .env (SOPS_AGE_KEY_FILE).
 
-    Once the restore lands, a NEW age key is automatically generated,
-    installed to all configured locations, and displayed prominently.
+    Once the restore lands, the restored SOPS secrets are rekeyed to a NEW
+    age key, installed to configured locations, and displayed prominently.
     Save it before pressing Enter to start the services.
 
 OPTIONS (used after a subcommand):

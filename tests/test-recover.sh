@@ -48,6 +48,7 @@ make_case() {
     local dir="$TEST_ROOT/case-$TESTS_RUN"
     mkdir -p "$dir/state/config" "$dir/state/secrets" "$dir/state/data" "$dir/repo" "$dir/etc" "$dir/mockbin"
     cp "$ROOT/recover.sh" "$dir/repo/recover.sh"
+    cp -a "$ROOT/lib" "$dir/repo/lib"
     cp "$ROOT/docker-compose.yml.example" "$dir/repo/docker-compose.yml.example"
     chmod +x "$dir/repo/recover.sh"
     cat > "$dir/state/config/dr-manifest.env" <<EOF_MANIFEST
@@ -189,7 +190,7 @@ run_recover() {
         MOCK_MOUNTPOINT_FAIL="${MOCK_MOUNTPOINT_FAIL:-false}" \
         MOCK_SOPS_FAIL_OP="${MOCK_SOPS_FAIL_OP:-}" \
         MOCK_MV_FAIL_DEST="${MOCK_MV_FAIL_DEST:-}" \
-        bash "$dir/repo/recover.sh" --state-dir "$dir/state" --key "$dir/usb-key.txt" > "$dir/out" 2>&1
+        bash "$dir/repo/recover.sh" --state-dir "$dir/state" --key "$dir/usb-key.txt" "$@" > "$dir/out" 2>&1
     rc=$?
     set -e
     return "$rc"
@@ -218,8 +219,45 @@ test_missing_key() {
 
 test_non_mounted() {
     local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
-    if MOCK_MOUNTPOINT_FAIL=true run_recover "$dir"; then fail 'non-mounted should fail'; fi
-    grep -q 'ERROR: State directory is not a mounted volume. Attach the OCI block volume first.' "$dir/out" || fail 'mount error mismatch'
+    if MOCK_MOUNTPOINT_FAIL=true run_recover "$dir" --storage-mode block; then fail 'non-mounted block should fail'; fi
+    grep -q 'ERROR: State directory is not a mounted data/block volume. Attach and mount the data volume first.' "$dir/out" || fail 'mount error mismatch'
+}
+
+test_boot_mode_clears_block_env() {
+    local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    if ! MOCK_MOUNTPOINT_FAIL=true run_recover "$dir" --storage-mode boot; then cat "$dir/out"; fail 'boot mode should not require mountpoint'; fi
+    grep -q "PROJECT_STATE_DIR=$dir/state" "$dir/state/config/install.env" || fail 'project state not set'
+    grep -q '^DATA_VOLUME_MOUNT=$' "$dir/state/config/install.env" || fail 'data mount not cleared'
+    grep -q '^DATA_VOLUME_DEVICE=$' "$dir/state/config/install.env" || fail 'data device not cleared'
+}
+
+test_block_mode_uuid_device() {
+    local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    mkdir -p /dev/disk/by-uuid
+    touch /dev/mock-source
+    ln -sf /dev/mock-source /dev/disk/by-uuid/1111-2222
+    if ! run_recover "$dir" --storage-mode block; then cat "$dir/out"; fail 'block mode should succeed'; fi
+    grep -q '^DATA_VOLUME_DEVICE=/dev/disk/by-uuid/1111-2222$' "$dir/state/config/install.env" || fail 'uuid device path not used'
+    [[ -e "$dir/state/.vw-data-volume" ]] || fail 'sentinel missing'
+    rm -f /dev/disk/by-uuid/1111-2222
+    rm -f /dev/mock-source
+}
+
+test_final_permissions() {
+    local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    chmod 0777 "$dir/state/config/install.env" "$dir/state/config/dr-manifest.env" "$dir/state/secrets/secrets.yaml" "$dir/repo/.sops.yaml" "$dir/etc/age-key.txt"
+    if ! run_recover "$dir" --storage-mode boot; then cat "$dir/out"; fail 'permissions case failed'; fi
+    [[ "$(stat -c '%a' "$dir/repo/.sops.yaml")" == "644" ]] || fail '.sops mode mismatch'
+    [[ "$(stat -c '%a' "$dir/etc/age-key.txt")" == "600" ]] || fail 'active key mode mismatch'
+    [[ "$(stat -c '%a' "$dir/state/config/install.env")" == "600" ]] || fail 'install env mode mismatch'
+    [[ "$(stat -c '%a' "$dir/state/config/dr-manifest.env")" == "600" ]] || fail 'manifest mode mismatch'
+    [[ "$(stat -c '%a' "$dir/state/secrets/secrets.yaml")" == "600" ]] || fail 'secrets mode mismatch'
+}
+
+test_cleanup_removes_staged_key() {
+    local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    if MOCK_SOPS_FAIL_OP=updatekeys run_recover "$dir" --storage-mode boot; then fail 'updatekeys failure should fail'; fi
+    if find "$dir" -name 'new-age-key.txt' -type f | grep -q .; then fail 'staged private key leaked'; fi
 }
 
 test_updatekeys_failure() {
@@ -275,11 +313,15 @@ test_success_fresh_clone() {
 run_test 'missing --state-dir prints usage and fails' test_missing_state_dir
 run_test 'missing --key prints usage and fails' test_missing_key
 run_test 'non-mounted state directory prints exact message' test_non_mounted
+run_test 'boot storage mode clears block-volume env values' test_boot_mode_clears_block_env
+run_test 'block storage mode writes UUID device path and sentinel' test_block_mode_uuid_device
+run_test 'final permissions match split contract' test_final_permissions
+run_test 'cleanup removes staged private key on failure' test_cleanup_removes_staged_key
 run_test 'sops updatekeys failure leaves artifacts unchanged' test_updatekeys_failure
 run_test 'active-key promotion failure rolls back artifacts' test_active_key_promotion_failure
 run_test 'policy promotion failure rolls back artifacts' test_policy_promotion_failure
 run_test 'final live-decryption failure restores absent artifacts' test_final_decrypt_failure_no_prior_artifacts
 run_test 'successful fresh-clone recovery updates all artifacts' test_success_fresh_clone
 
-[[ "$TESTS_RUN" -eq 8 ]] || fail "expected 8 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 12 ]] || fail "expected 12 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
