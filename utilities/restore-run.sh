@@ -66,7 +66,7 @@ _require_env_for_live_restore() {
 
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
-    local -a soft=(sops zstd rclone rsync)  # rsync required for separate-volume (OCI block volume) restores
+    local -a soft=(sops zstd rclone rsync)
     local missing_hard=() missing_soft=()
     for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
     for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
@@ -91,7 +91,7 @@ check_dependencies() {
         local _cmd
         for _cmd in "${missing_soft[@]}"; do
             case "$_cmd" in
-                rclone) echo "  Hint [rclone]: curl https://rclone.org/install.sh | sudo bash" >&2 ;;
+                rclone) echo "  Hint [rclone]: apt install rclone" >&2 ;;
             esac
         done
     fi
@@ -147,8 +147,8 @@ SUBCOMMANDS:
     key that was used to encrypt that backup.  Press Enter to use the key
     already configured in .env (SOPS_AGE_KEY_FILE).
 
-    Once the restore lands, a NEW age key is automatically generated,
-    installed to all configured locations, and displayed prominently.
+    Once the restore lands, the restored SOPS secrets are rekeyed to a NEW
+    age key, installed to configured locations, and displayed prominently.
     Save it before pressing Enter to start the services.
 
 OPTIONS (used after a subcommand):
@@ -1053,42 +1053,164 @@ _rotate_age_key() {
         return 1
     fi
 
-    # 2. Install to secrets/keys/age-key.txt (atomic)
+    _require_sops_for_rekey || return 1
+
+    local secrets_file="${STATE_DIR}/secrets/secrets.yaml"
     local local_key_dir="$PROJECT_ROOT/secrets/keys"
     local local_key_file="$local_key_dir/age-key.txt"
+    local systemd_key="/etc/vaultwarden/age-key.txt"
+    local canonical_key="$systemd_key"
+    local env_file="$PROJECT_ROOT/.env"
+    local systemd_env="/etc/vaultwarden/vaultwarden.env"
+    local install_env="${STATE_DIR}/config/install.env"
+    local sops_policy_file="${PROJECT_ROOT}/.sops.yaml"
+    local staged_dir="$TMPDIR_RESTORE/age-rotation-staged"
+    local backup_dir="$TMPDIR_RESTORE/age-rotation-backups"
+    local new_recipient="" offline_recipient="" policy_tmp="" cipher_tmp=""
+    local staged_local_key="" staged_systemd_key="" staged_env="" staged_systemd_env="" staged_install_env=""
+    local promoted_any=false rotation_committed=false
 
-    local old_umask2; old_umask2=$(umask)
-    umask 077
-    mkdir -p "$local_key_dir"
-    umask "$old_umask2"
-    chmod 700 "$local_key_dir" 2>/dev/null || true
+    _restore_rotation_backup() {
+        local existed_file="$1" backup_file="$2" target_file="$3"
+        if [[ -f "$existed_file" ]]; then
+            cp -f "$backup_file" "$target_file" 2>/dev/null || rm -f "$target_file" 2>/dev/null || true
+        else
+            rm -f "$target_file" 2>/dev/null || true
+        fi
+    }
+
+    _rollback_rotation() {
+        [[ "$promoted_any" == "true" && "$rotation_committed" != "true" ]] || return 0
+        log_warn "Rolling back post-restore Age/SOPS rotation artifacts..."
+        _restore_rotation_backup "$backup_dir/secrets.exists" "$backup_dir/secrets.yaml" "$secrets_file"
+        _restore_rotation_backup "$backup_dir/policy.exists" "$backup_dir/sops.yaml" "$sops_policy_file"
+        _restore_rotation_backup "$backup_dir/systemd-key.exists" "$backup_dir/systemd-age-key.txt" "$systemd_key"
+        _restore_rotation_backup "$backup_dir/local-key.exists" "$backup_dir/local-age-key.txt" "$local_key_file"
+        _restore_rotation_backup "$backup_dir/repo-env.exists" "$backup_dir/repo.env" "$env_file"
+        _restore_rotation_backup "$backup_dir/systemd-env.exists" "$backup_dir/vaultwarden.env" "$systemd_env"
+        _restore_rotation_backup "$backup_dir/install-env.exists" "$backup_dir/install.env" "$install_env"
+        auto_fix_critical_permissions "$PROJECT_ROOT" || true
+    }
+
+    _stage_env_with_key() {
+        local source_file="$1" staged_file="$2" key_path="$3"
+        [[ -f "$source_file" ]] || return 0
+        awk -F= -v k="SOPS_AGE_KEY_FILE" -v v="$key_path" '
+            BEGIN { done = 0 }
+            $1 == k { print k "=" v; done = 1; next }
+            { print }
+            END { if (!done) print k "=" v }
+        ' "$source_file" > "$staged_file" || return 1
+        chmod --reference="$source_file" "$staged_file" 2>/dev/null || chmod 600 "$staged_file" || return 1
+        chown --reference="$source_file" "$staged_file" 2>/dev/null || true
+    }
+
+    mkdir -p "$staged_dir" "$backup_dir" || { log_error "Failed to create key rotation staging directory."; return 1; }
+    chmod 700 "$staged_dir" "$backup_dir" 2>/dev/null || true
+
+    if [[ -f "$secrets_file" ]]; then
+        new_recipient="$(age-keygen -y "$new_key_tmp" 2>/dev/null || true)"
+        [[ "$new_recipient" =~ ^age1[a-z0-9]{58}$ ]] || {
+            log_error "New age key did not produce a valid public recipient."
+            return 1
+        }
+        if [[ -f "${STATE_DIR}/config/dr-manifest.env" ]]; then
+            offline_recipient="$(grep -m1 '^OFFLINE_AGE_RECIPIENT=' "${STATE_DIR}/config/dr-manifest.env" | cut -d= -f2- | tr -d "\"'" || true)"
+        fi
+        if [[ -z "$offline_recipient" && -f "$sops_policy_file" ]]; then
+            offline_recipient="$(grep -Eo 'age1[a-z0-9]{58}' "$sops_policy_file" | grep -vF "$new_recipient" | head -1 || true)"
+        fi
+        [[ -z "$offline_recipient" || "$offline_recipient" =~ ^age1[a-z0-9]{58}$ ]] || offline_recipient=""
+
+        policy_tmp="$staged_dir/.sops.yaml"
+        cipher_tmp="$staged_dir/secrets.yaml"
+        cp -f "$secrets_file" "$cipher_tmp" || { log_error "Failed to stage restored secrets for rekey."; return 1; }
+        chmod 600 "$cipher_tmp" 2>/dev/null || true
+        {
+            echo "creation_rules:"
+            echo "  - path_regex: '.*\\.yaml$'"
+            if [[ -n "$offline_recipient" ]]; then
+                echo "    age: \"${new_recipient},${offline_recipient}\""
+            else
+                echo "    age: \"${new_recipient}\""
+            fi
+        } > "$policy_tmp" || { log_error "Failed to stage SOPS policy."; return 1; }
+        chmod 600 "$policy_tmp" 2>/dev/null || true
+        if ! SOPS_AGE_KEY_FILE="$AGE_KEY_FILE" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp"; then
+            log_error "SOPS rekey failed — live key paths were not changed."
+            return 1
+        fi
+        if ! SOPS_AGE_KEY_FILE="$new_key_tmp" sops -d "$cipher_tmp" >/dev/null; then
+            log_error "Rekey validation failed — live key paths were not changed."
+            return 1
+        fi
+    else
+        log_warn "  No restored secrets.yaml found at $secrets_file; rotating key paths only."
+        policy_tmp=""
+        cipher_tmp=""
+    fi
+
+    staged_local_key="$staged_dir/local-age-key.txt"
+    staged_systemd_key="$staged_dir/systemd-age-key.txt"
+    staged_env="$staged_dir/repo.env"
+    staged_systemd_env="$staged_dir/vaultwarden.env"
+    staged_install_env="$staged_dir/install.env"
+
+    install -d -m 700 "$local_key_dir" || { log_error "Failed to prepare repo-local key directory."; return 1; }
+    install -d -m 700 -o root -g root "$(dirname "$systemd_key")" || { log_error "Failed to prepare /etc/vaultwarden."; return 1; }
+    install -m 600 "$new_key_tmp" "$staged_local_key" || { log_error "Failed to stage repo-local key."; return 1; }
+    install -m 600 -o root -g root "$new_key_tmp" "$staged_systemd_key" || { log_error "Failed to stage root-operated key."; return 1; }
+    _stage_env_with_key "$env_file" "$staged_env" "$canonical_key" || { log_error "Failed to stage repo .env update."; return 1; }
+    _stage_env_with_key "$systemd_env" "$staged_systemd_env" "$canonical_key" || { log_error "Failed to stage /etc/vaultwarden/vaultwarden.env update."; return 1; }
+    _stage_env_with_key "$install_env" "$staged_install_env" "$canonical_key" || { log_error "Failed to stage install.env update."; return 1; }
+
+    [[ -f "$secrets_file" ]] && { cp -f "$secrets_file" "$backup_dir/secrets.yaml" || return 1; : > "$backup_dir/secrets.exists"; }
+    [[ -f "$sops_policy_file" ]] && { cp -f "$sops_policy_file" "$backup_dir/sops.yaml" || return 1; : > "$backup_dir/policy.exists"; }
+    [[ -f "$systemd_key" ]] && { cp -f "$systemd_key" "$backup_dir/systemd-age-key.txt" || return 1; : > "$backup_dir/systemd-key.exists"; }
+    [[ -f "$local_key_file" ]] && { cp -f "$local_key_file" "$backup_dir/local-age-key.txt" || return 1; : > "$backup_dir/local-key.exists"; }
+    [[ -f "$env_file" ]] && { cp -f "$env_file" "$backup_dir/repo.env" || return 1; : > "$backup_dir/repo-env.exists"; }
+    [[ -f "$systemd_env" ]] && { cp -f "$systemd_env" "$backup_dir/vaultwarden.env" || return 1; : > "$backup_dir/systemd-env.exists"; }
+    [[ -f "$install_env" ]] && { cp -f "$install_env" "$backup_dir/install.env" || return 1; : > "$backup_dir/install-env.exists"; }
 
     if [[ -f "$local_key_file" ]]; then
         local backup_ts; backup_ts=$(date +%Y%m%d-%H%M%S)
-        cp -f "$local_key_file" "${local_key_file}.pre-rotate-${backup_ts}"
-        chmod 600 "${local_key_file}.pre-rotate-${backup_ts}"
-        log_info "  Previous key backed up: age-key.txt.pre-rotate-${backup_ts}"
+        if cp -f "$local_key_file" "${local_key_file}.pre-rotate-${backup_ts}"; then
+            chmod 600 "${local_key_file}.pre-rotate-${backup_ts}" 2>/dev/null || true
+            log_info "  Previous key backed up: age-key.txt.pre-rotate-${backup_ts}"
+        else
+            log_warn "  Could not create pre-rotate repo-local key backup; transactional rollback backup is still staged."
+        fi
     fi
 
-    # Atomic install: cp then chmod, not cp with implied 644 window
-    local tmp_install
-    local _saved_umask3; _saved_umask3=$(umask)
-    umask 077
-    tmp_install=$(mktemp "${local_key_file}.install.XXXXXX")
-    umask "$_saved_umask3"
-    chmod 600 "$tmp_install"
-    cp -f "$new_key_tmp" "$tmp_install"
-    mv -f "$tmp_install" "$local_key_file"
-    chmod 600 "$local_key_file"
+    if ! cp -f "$staged_local_key" "$local_key_file"; then _rollback_rotation; return 1; fi
+    promoted_any=true
+    chmod 600 "$local_key_file" 2>/dev/null || true
+    if ! install -m 600 -o root -g root "$staged_systemd_key" "$systemd_key"; then _rollback_rotation; return 1; fi
+    if [[ -f "$staged_env" ]] && ! cp -f "$staged_env" "$env_file"; then _rollback_rotation; return 1; fi
+    if [[ -f "$staged_systemd_env" ]] && ! install -m 600 -o root -g root "$staged_systemd_env" "$systemd_env"; then _rollback_rotation; return 1; fi
+    if [[ -f "$staged_install_env" ]] && ! install -m 600 -o root -g root "$staged_install_env" "$install_env"; then _rollback_rotation; return 1; fi
+    if [[ -n "$cipher_tmp" ]] && ! install -m 600 -o root -g root "$cipher_tmp" "$secrets_file"; then _rollback_rotation; return 1; fi
+    if [[ -n "$policy_tmp" ]] && ! install -m 644 "$policy_tmp" "$sops_policy_file"; then _rollback_rotation; return 1; fi
+    if [[ -n "$cipher_tmp" ]] && ! SOPS_AGE_KEY_FILE="$systemd_key" sops -d "$secrets_file" >/dev/null; then
+        log_error "Post-promotion SOPS validation failed."
+        _rollback_rotation
+        return 1
+    fi
+    rotation_committed=true
     log_success "  New key installed: $local_key_file"
+    log_success "  New key installed: $systemd_key"
+    [[ -f "$staged_env" ]] && log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to .env"
+    [[ -f "$staged_systemd_env" ]] && log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to $systemd_env"
+    [[ -f "$staged_install_env" ]] && log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to $install_env"
+    [[ -n "$cipher_tmp" ]] && log_success "  Restored secrets rekeyed for the new operational key."
 
     ROTATED_KEY_FILE="$local_key_file"
 
-    # 2b. Write a local recovery-kit file so the operator has a copy
-    #     that survives independently of secrets/keys/
+    # Write a local recovery-kit file so the operator has a copy
+    # that survives independently of secrets/keys/
     local kit_ts; kit_ts=$(date +%Y%m%d-%H%M%S)
     local kit_file="/root/vaultwarden-recovery-kit-${kit_ts}.txt"
-    {
+    if {
         echo "# VaultWarden-OCI Recovery Kit"
         echo "# Generated: $(date -u)"
         echo "# Host:      $(hostname -f 2>/dev/null || hostname)"
@@ -1097,8 +1219,7 @@ _rotate_age_key() {
         echo "#            Delete this file from /root/ once safely copied offline."
         echo ""
         cat "$new_key_tmp"
-    } > "$kit_file" 2>/dev/null || true
-    if [[ -f "$kit_file" ]]; then
+    } > "$kit_file" 2>/dev/null; then
         chmod 600 "$kit_file" 2>/dev/null || true
         ROTATED_KIT_FILE="$kit_file"
         log_warn "  Recovery kit saved: $kit_file"
@@ -1106,41 +1227,6 @@ _rotate_age_key() {
     else
         log_warn "  Could not write recovery kit to /root/ — save the key manually."
         ROTATED_KIT_FILE=""
-    fi
-
-    # 3. Install to systemd location /etc/vaultwarden/age-key.txt
-    local systemd_key="/etc/vaultwarden/age-key.txt"
-    local canonical_key="$local_key_file"
-
-    if [[ -f "$systemd_key" ]]; then
-        install -m 600 -o root -g root "$new_key_tmp" "$systemd_key" || {
-            log_error "Failed to install new key to $systemd_key"
-            return 1
-        }
-        canonical_key="$systemd_key"
-        log_success "  New key installed (systemd): $systemd_key"
-    fi
-
-    # 4. Update SOPS_AGE_KEY_FILE in .env
-    local env_file="$PROJECT_ROOT/.env"
-    if [[ -f "$env_file" ]]; then
-        if grep -q '^SOPS_AGE_KEY_FILE=' "$env_file"; then
-            sed -i "s|^SOPS_AGE_KEY_FILE=.*|SOPS_AGE_KEY_FILE=${canonical_key}|" "$env_file"
-        else
-            echo "SOPS_AGE_KEY_FILE=${canonical_key}" >> "$env_file"
-        fi
-        log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to .env"
-    fi
-
-    # 5. Update SOPS_AGE_KEY_FILE in /etc/vaultwarden/vaultwarden.env (systemd)
-    local systemd_env="/etc/vaultwarden/vaultwarden.env"
-    if [[ -f "$systemd_env" ]]; then
-        if grep -q '^SOPS_AGE_KEY_FILE=' "$systemd_env"; then
-            sed -i "s|^SOPS_AGE_KEY_FILE=.*|SOPS_AGE_KEY_FILE=${canonical_key}|" "$systemd_env"
-        else
-            echo "SOPS_AGE_KEY_FILE=${canonical_key}" >> "$systemd_env"
-        fi
-        log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to $systemd_env"
     fi
 
     # 6. Derive public key for display
@@ -1236,6 +1322,28 @@ _tar_filter_for_file() {
         *.tar.xz)        echo "-J"      ;;
         *)               echo ""        ;;
     esac
+}
+
+_require_command_for_path() {
+    local cmd="$1" reason="$2" package="${3:-$1}"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        log_error "$cmd is required for ${reason} but is not installed."
+        log_error "Install on Ubuntu 22.04/24.04 with: sudo apt-get install -y ${package}"
+        return 1
+    fi
+}
+
+_require_selected_archive_tools() {
+    local path="$1"
+    case "$path" in
+        *.tar.zst|*.zst|*.tar.zst.age|*.zst.age)
+            _require_command_for_path zstd "restoring zstd-compressed archives" zstd || return 1
+            ;;
+    esac
+}
+
+_require_sops_for_rekey() {
+    _require_command_for_path sops "post-restore SOPS key rotation/rekey" sops
 }
 
 tar_validate_members() {
@@ -1663,16 +1771,14 @@ main() {
     fi
     auto_fix_critical_permissions "$PROJECT_ROOT"
 
-    # Fail closed if the expected data volume is not mounted.
-    # Exceptions:
-    #   1. Bootstrap/emergency-restore mode (--remote without .env): DATA_VOLUME_DEVICE
-    #      will be unset, so the guard is already a no-op.
-    #   2. --force with a remote source: operator is explicitly driving a DR restore
-    #      and may be targeting an unmounted block volume that will be populated by
-    #      this very restore run. Blocking here defeats the DR flow.
-    if [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" ]]; then
-        log_warn "Skipping project-state-ready check (--force --remote DR mode)."
-        log_warn "Ensure the target volume is mounted before restore writes begin."
+    # Fail closed if a block/data volume is configured.  --force --remote may
+    # skip this check only for boot-volume/bootstrap mode where no block device
+    # is configured; it must never permit writes to an unmounted block-volume path.
+    local _configured_data_device
+    _configured_data_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
+    if [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" && -z "$_configured_data_device" ]]; then
+        log_warn "Skipping project-state-ready check (--force --remote boot-volume/bootstrap mode)."
+        log_warn "No DATA_VOLUME_DEVICE is configured; block-volume safety checks remain required when a data volume is configured."
     else
         require_project_state_ready || exit 1
     fi
@@ -1802,6 +1908,11 @@ main() {
     log_info "  State dir:   $STATE_DIR"
     log_info "  Decrypt key: $AGE_KEY_FILE"
 
+    _require_selected_archive_tools "$BACKUP_FILE" || exit 1
+    if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ -n "$(get_config_value "DATA_VOLUME_DEVICE" "")" ]]; then
+        _require_command_for_path rsync "block-volume full/emergency restores" rsync || exit 1
+    fi
+
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         echo ""
         log_warn "WARNING: This will overwrite current data."
@@ -1818,8 +1929,8 @@ main() {
         local rc=$?
         if [[ $rc -ne 0 ]]; then
             log_warn "Restore encountered an error (exit $rc) — attempting to restart services..."
-            docker compose up -d --remove-orphans 2>/dev/null || \
-                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: docker compose up -d"
+            bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
+                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: sudo ./startup.sh --skip-pull"
         fi
         # Preserve the cleanup contract: remove decrypted temp material.
         cleanup
@@ -1887,18 +1998,17 @@ main() {
 
     if ! _rotate_age_key; then
         log_error "Age key rotation FAILED."
-        log_error "The data restore itself succeeded, but the stack may not be able"
-        log_error "to create new encrypted backups until the key is fixed."
-        log_error "Run: age-keygen -o $PROJECT_ROOT/secrets/keys/age-key.txt"
-        log_error "Then: sudo ./setup.sh systemd install  (to sync /etc/vaultwarden/)"
-        # Non-fatal: continue to start services so VaultWarden is available.
+        log_error "The data restore itself succeeded, but key rotation/rekey did not complete safely."
+        log_error "Live key artifacts were rolled back where needed; refusing to start services automatically."
+        exit 1
     fi
 
     _display_new_key
 
     if [[ "$DRY_RUN" != "true" ]]; then
+        auto_fix_critical_permissions "$PROJECT_ROOT"
         log_info "Starting services..."
-        if ! docker compose up -d --remove-orphans; then
+        if ! bash "${PROJECT_ROOT}/startup.sh" --skip-pull; then
             log_error "Failed to start services after restore."
             log_error "Investigate with: docker compose logs --tail=50"
             exit 1
