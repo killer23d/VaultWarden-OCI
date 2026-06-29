@@ -181,7 +181,9 @@ run_recover() {
     set +e
     env PATH="$dir/mockbin:$PATH" \
         MOCK_FINDMNT_SOURCE="/dev/mock-source" \
+        VW_RECOVER_TEST_ALLOW_NON_ROOT=true \
         VW_RECOVER_ETC_DIR="$dir/etc" \
+        VW_RECOVER_DEV_BY_UUID_DIR="$dir/dev-by-uuid" \
         VW_RECOVER_STARTUP_SCRIPT="$dir/startup.sh" \
         MOCK_USB_KEY_PATH="$MOCK_USB_KEY_PATH" \
         MOCK_USB_RECIPIENT="$MOCK_USB_RECIPIENT" \
@@ -233,14 +235,12 @@ test_boot_mode_clears_block_env() {
 
 test_block_mode_uuid_device() {
     local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
-    mkdir -p /dev/disk/by-uuid
-    touch /dev/mock-source
-    ln -sf /dev/mock-source /dev/disk/by-uuid/1111-2222
+    mkdir -p "$dir/dev-by-uuid"
+    touch "$dir/mock-source"
+    ln -sf "$dir/mock-source" "$dir/dev-by-uuid/1111-2222"
     if ! run_recover "$dir" --storage-mode block; then cat "$dir/out"; fail 'block mode should succeed'; fi
-    grep -q '^DATA_VOLUME_DEVICE=/dev/disk/by-uuid/1111-2222$' "$dir/state/config/install.env" || fail 'uuid device path not used'
+    grep -q "^DATA_VOLUME_DEVICE=$dir/dev-by-uuid/1111-2222$" "$dir/state/config/install.env" || fail 'uuid device path not used'
     [[ -e "$dir/state/.vw-data-volume" ]] || fail 'sentinel missing'
-    rm -f /dev/disk/by-uuid/1111-2222
-    rm -f /dev/mock-source
 }
 
 test_final_permissions() {

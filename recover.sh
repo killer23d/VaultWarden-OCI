@@ -13,6 +13,7 @@ SOPS_CONFIG_FILE="${SCRIPT_DIR}/.sops.yaml"
 VW_ETC_DIR="${VW_RECOVER_ETC_DIR:-/etc/vaultwarden}"
 VW_STARTUP_SCRIPT="${VW_RECOVER_STARTUP_SCRIPT:-${SCRIPT_DIR}/startup.sh}"
 ACTIVE_KEY="${VW_ETC_DIR}/age-key.txt"
+DEV_BY_UUID_DIR="${VW_RECOVER_DEV_BY_UUID_DIR:-/dev/disk/by-uuid}"
 
 STATE_DIR=""
 STORAGE_MODE="auto"
@@ -124,7 +125,7 @@ parse_args() {
 }
 
 check_prerequisites() {
-    [[ $EUID -eq 0 ]] || fatal "Must run as root."
+    [[ $EUID -eq 0 || "${VW_RECOVER_TEST_ALLOW_NON_ROOT:-false}" == true ]] || fatal "Must run as root."
 
     local cmd
     for cmd in mountpoint findmnt sops age-keygen awk git install docker curl bash blkid mktemp cp mv rm chmod sed; do
@@ -185,7 +186,11 @@ parse_manifest() {
 
 create_backups() {
     WORKDIR="$(mktemp -d)"
-    install -d -m 0700 -o root -g root "$VW_ETC_DIR"
+    if [[ "${VW_RECOVER_TEST_ALLOW_NON_ROOT:-false}" == true && $EUID -ne 0 ]]; then
+        install -d -m 0700 "$VW_ETC_DIR"
+    else
+        install -d -m 0700 -o root -g root "$VW_ETC_DIR"
+    fi
     CIPHERTEXT_STAGING="$(mktemp -p "$(dirname "$SECRETS_FILE")" secrets.XXXXXXXXXX.yaml)"
     POLICY_STAGING="$(mktemp -p "$SCRIPT_DIR" .sops.yaml.XXXXXXXXXX)"
     NEW_PRIVATE_KEY="$WORKDIR/new-age-key.txt"
@@ -295,7 +300,7 @@ update_env_files() {
         source_dev="$(findmnt -n -o SOURCE --target "$STATE_DIR")"
         uuid="$(blkid -s UUID -o value "$source_dev" 2>/dev/null || true)"
         DEVICE_PATH="$source_dev"
-        [[ -n "$uuid" && -e "/dev/disk/by-uuid/$uuid" ]] && DEVICE_PATH="/dev/disk/by-uuid/$uuid"
+        [[ -n "$uuid" && -e "${DEV_BY_UUID_DIR}/${uuid}" ]] && DEVICE_PATH="${DEV_BY_UUID_DIR}/${uuid}"
     fi
 
     atomic_set_env "$INSTALL_ENV" PROJECT_STATE_DIR "$STATE_DIR"

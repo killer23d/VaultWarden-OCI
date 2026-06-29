@@ -5,8 +5,8 @@ SCRIPT="$ROOT/utilities/restore-run.sh"
 fail(){ echo "not ok - $*" >&2; exit 1; }
 pass(){ echo "ok - $*"; }
 
-require_pattern(){ local pat="$1" msg="$2"; rg -q "$pat" "$SCRIPT" || fail "$msg"; }
-reject_pattern(){ local pat="$1" msg="$2"; ! rg -q "$pat" "$SCRIPT" || fail "$msg"; }
+require_pattern(){ local pat="$1" msg="$2"; grep -Eq "$pat" "$SCRIPT" || fail "$msg"; }
+reject_pattern(){ local pat="$1" msg="$2"; ! grep -Eq "$pat" "$SCRIPT" || fail "$msg"; }
 
 require_pattern 'get_config_value "DATA_VOLUME_DEVICE" ""' 'restore-run must inspect DATA_VOLUME_DEVICE before readiness skip'
 require_pattern 'FORCE.*USE_REMOTE.*-z "\$_configured_data_device"' 'force remote skip must be limited to no data device'
@@ -24,6 +24,11 @@ pass 'restore-run updates state config install.env when key path changes'
 require_pattern 'auto_fix_critical_permissions "\$PROJECT_ROOT"' 'restore-run must run final permission repair'
 pass 'restore-run calls final permission repair before startup'
 
+require_pattern '_rollback_rotation' 'restore-run must define transactional key-rotation rollback'
+require_pattern 'refusing to start services automatically' 'restore-run must fail loudly before startup when key rotation fails'
+require_pattern 'Post-promotion SOPS validation failed' 'restore-run must validate promoted rekey artifacts'
+pass 'restore-run has rollback and fail-loud key rotation safeguards'
+
 bash -n "$SCRIPT"
 pass 'bash -n utilities/restore-run.sh'
-printf '1..5\n'
+printf '1..6\n'
