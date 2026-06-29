@@ -1268,7 +1268,7 @@ _mv_step_update_dropin() {
     fi
 
     _mv_log info "Regenerating systemd drop-ins from canonical runtime env..."
-    if "${PROJECT_ROOT}/utilities/setup-systemd.sh" install; then
+    if VW_ENV_EDIT_ALLOW_MIGRATION_SYNC=true "${PROJECT_ROOT}/utilities/setup-systemd.sh" install; then
         _mv_log success "Systemd drop-ins regenerated for data path: ${_MV_TARGET}"
     else
         _mv_log warn "utilities/setup-systemd.sh install did not complete successfully."
