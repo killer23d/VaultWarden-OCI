@@ -181,6 +181,7 @@ run_recover() {
     set +e
     env PATH="$dir/mockbin:$PATH" \
         MOCK_FINDMNT_SOURCE="/dev/mock-source" \
+        VW_TEST_MODE=true \
         VW_RECOVER_TEST_ALLOW_NON_ROOT=true \
         VW_RECOVER_ETC_DIR="$dir/etc" \
         VW_RECOVER_DEV_BY_UUID_DIR="$dir/dev-by-uuid" \
@@ -217,6 +218,22 @@ test_missing_key() {
     local out="$TEST_ROOT/missing-key.out"
     if bash "$ROOT/recover.sh" --state-dir /nope > "$out" 2>&1; then fail 'missing key should fail'; fi
     grep -q 'Usage: ./recover.sh --state-dir DIR --key FILE' "$out" || fail 'usage missing'
+}
+
+test_non_root_bypass_requires_test_mode() {
+    if [[ $EUID -eq 0 ]]; then
+        return 0
+    fi
+    local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    if env PATH="$dir/mockbin:$PATH" \
+        VW_RECOVER_TEST_ALLOW_NON_ROOT=true \
+        VW_RECOVER_ETC_DIR="$dir/etc" \
+        VW_RECOVER_DEV_BY_UUID_DIR="$dir/dev-by-uuid" \
+        VW_RECOVER_STARTUP_SCRIPT="$dir/startup.sh" \
+        bash "$dir/repo/recover.sh" --state-dir "$dir/state" --key "$dir/usb-key.txt" > "$dir/out" 2>&1; then
+        fail 'single-variable non-root bypass should fail'
+    fi
+    grep -q 'ERROR: Must run as root.' "$dir/out" || fail 'root error missing when VW_TEST_MODE is absent'
 }
 
 test_non_mounted() {
@@ -312,6 +329,7 @@ test_success_fresh_clone() {
 
 run_test 'missing --state-dir prints usage and fails' test_missing_state_dir
 run_test 'missing --key prints usage and fails' test_missing_key
+run_test 'non-root bypass requires VW_TEST_MODE and recover flag' test_non_root_bypass_requires_test_mode
 run_test 'non-mounted state directory prints exact message' test_non_mounted
 run_test 'boot storage mode clears block-volume env values' test_boot_mode_clears_block_env
 run_test 'block storage mode writes UUID device path and sentinel' test_block_mode_uuid_device
@@ -323,5 +341,5 @@ run_test 'policy promotion failure rolls back artifacts' test_policy_promotion_f
 run_test 'final live-decryption failure restores absent artifacts' test_final_decrypt_failure_no_prior_artifacts
 run_test 'successful fresh-clone recovery updates all artifacts' test_success_fresh_clone
 
-[[ "$TESTS_RUN" -eq 12 ]] || fail "expected 12 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 13 ]] || fail "expected 13 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"

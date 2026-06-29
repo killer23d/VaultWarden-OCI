@@ -56,6 +56,10 @@ fatal() {
     exit 1
 }
 
+allow_non_root_test_mode() {
+    [[ "${VW_TEST_MODE:-false}" == true && "${VW_RECOVER_TEST_ALLOW_NON_ROOT:-false}" == true ]]
+}
+
 read_env_value() {
     local key="$1" file="$2"
     awk -F= -v k="$key" '
@@ -125,7 +129,9 @@ parse_args() {
 }
 
 check_prerequisites() {
-    [[ $EUID -eq 0 || "${VW_RECOVER_TEST_ALLOW_NON_ROOT:-false}" == true ]] || fatal "Must run as root."
+    if [[ $EUID -ne 0 ]] && ! allow_non_root_test_mode; then
+        fatal "Must run as root."
+    fi
 
     local cmd
     for cmd in mountpoint findmnt sops age-keygen awk git install docker curl bash blkid mktemp cp mv rm chmod sed; do
@@ -186,7 +192,7 @@ parse_manifest() {
 
 create_backups() {
     WORKDIR="$(mktemp -d)"
-    if [[ "${VW_RECOVER_TEST_ALLOW_NON_ROOT:-false}" == true && $EUID -ne 0 ]]; then
+    if allow_non_root_test_mode && [[ $EUID -ne 0 ]]; then
         install -d -m 0700 "$VW_ETC_DIR"
     else
         install -d -m 0700 -o root -g root "$VW_ETC_DIR"
