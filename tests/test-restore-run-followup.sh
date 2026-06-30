@@ -23,6 +23,15 @@ pass 'restore-run enables safety-net restart path for restore function failures'
 reject_pattern '-{2}no-unlink' 'restore-run must not pass unsupported tar no-unlink option'
 pass 'restore-run avoids unsupported tar no-unlink option'
 
+reject_pattern "find \"\$state_dir\" -maxdepth 1 -mindepth 1.*! -name '\\.pre-restore-\\*'" 'separate-volume restore must not snapshot every non-pre-restore top-level entry'
+require_pattern '_restore_payload_allowlist=\(data caddy logs\)' 'separate-volume restore must use a conservative payload allowlist'
+require_pattern '\.vw-data-volume, lost\+found, backups, secrets, config' 'separate-volume restore must log protected metadata paths'
+require_pattern 'Archive backups/, secrets/, and config/.*intentionally not promoted' 'separate-volume restore must not promote protected archive directories'
+require_pattern '_moved_payload_paths=\(\)' 'separate-volume restore must track payload paths moved into the pre-restore snapshot'
+require_pattern '_rollback_payload_paths' 'separate-volume restore must attempt rollback for payload paths already moved'
+reject_pattern 'mv "\$_subdir" "\$\{_snap_dir\}/"' 'separate-volume restore must not blindly move discovered top-level entries'
+pass 'restore-run protects separate-volume metadata and rolls back payload promotion failures'
+
 require_pattern 'local install_env="\$\{STATE_DIR\}/config/install.env"' 'restore-run must target persistent install.env'
 require_pattern 'SOPS_AGE_KEY_FILE=\$\{canonical_key\}.*\$install_env|written to \$install_env' 'restore-run must update SOPS_AGE_KEY_FILE in install.env'
 pass 'restore-run updates state config install.env when key path changes'
@@ -53,4 +62,4 @@ pass 'restore-run selects post-restore rekey source by restore type'
 
 bash -n "$SCRIPT"
 pass 'bash -n utilities/restore-run.sh'
-printf '1..10\n'
+printf '1..11\n'
