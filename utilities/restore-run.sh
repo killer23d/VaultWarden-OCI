@@ -2065,12 +2065,26 @@ main() {
 
     # Choose the key that can decrypt secrets.yaml at the moment post-restore
     # SOPS updatekeys/rekey runs. DB restores do not restore secrets.yaml, so
-    # the live operational key remains the correct source. Full/emergency
-    # restores may have restored secrets.yaml from the selected archive, so the
-    # selected backup decrypt key is the correct source for those modes.
+    # use the live operational key. Separate-volume full/emergency restores
+    # intentionally do not promote secrets/, so the live operational key remains
+    # the correct rekey source. Boot-only full/emergency restores replace the
+    # whole state dir, so secrets.yaml may come from the selected archive and
+    # may require the selected backup decrypt key.
     case "$RESTORE_TYPE" in
-        db) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE" ;;
-        full|emergency) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE" ;;
+        db)
+            RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE"
+            ;;
+        full|emergency)
+            if mountpoint -q "$STATE_DIR" 2>/dev/null; then
+                # Separate-volume mode: secrets/ is intentionally not promoted.
+                # The live secrets.yaml remains encrypted with the operational key.
+                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE"
+            else
+                # Boot-only mode replaces the whole state dir, including secrets/.
+                # The restored secrets.yaml may require the selected backup decrypt key.
+                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE"
+            fi
+            ;;
         *) log_error "Unknown restore type for rekey source: $RESTORE_TYPE"; exit 1 ;;
     esac
 

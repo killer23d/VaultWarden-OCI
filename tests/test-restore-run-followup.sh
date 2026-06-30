@@ -55,10 +55,14 @@ reject_pattern 'local AGE_KEY_FILE; AGE_KEY_FILE="\$\(get_config_value "SOPS_AGE
 pass 'restore-run separates restore decrypt key from operational SOPS key'
 
 require_pattern 'SOPS_AGE_KEY_FILE="\$RESTORE_REKEY_SOURCE_AGE_KEY_FILE" sops --config "\$policy_tmp" updatekeys --yes "\$cipher_tmp"' 'SOPS updatekeys must use the restore rekey source selector'
-require_pattern 'db\) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="\$OPERATIONAL_SOPS_AGE_KEY_FILE"' 'DB restore rekey source must be the live operational key'
-require_pattern 'full\|emergency\) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="\$RESTORE_DECRYPT_AGE_KEY_FILE"' 'full/emergency restore rekey source may be the selected backup decrypt key'
+require_pattern 'DB restores do not restore secrets.yaml' 'DB restore rekey source comment must explain use of the live operational key'
+require_pattern 'RESTORE_REKEY_SOURCE_AGE_KEY_FILE="\$OPERATIONAL_SOPS_AGE_KEY_FILE"' 'DB and separate-volume restore must be able to use the live operational key'
+require_pattern 'mountpoint -q "\$STATE_DIR"' 'full/emergency rekey source must branch on separate-volume vs boot-only storage'
+require_pattern 'secrets/ is intentionally not promoted' 'separate-volume full/emergency rekey source must document that live secrets remain in place'
+require_pattern 'live secrets.yaml remains encrypted with the operational key' 'separate-volume full/emergency restore must use the live operational key'
+require_pattern 'RESTORE_REKEY_SOURCE_AGE_KEY_FILE="\$RESTORE_DECRYPT_AGE_KEY_FILE"' 'boot-only full/emergency restore must use the selected backup decrypt key'
 reject_pattern 'SOPS_AGE_KEY_FILE="\$RESTORE_DECRYPT_AGE_KEY_FILE" sops --config "\$policy_tmp" updatekeys' 'DB restore with different restore key must not unconditionally use restore decrypt key for updatekeys'
-pass 'restore-run selects post-restore rekey source by restore type'
+pass 'restore-run selects post-restore rekey source by restore type and storage mode'
 
 bash -n "$SCRIPT"
 pass 'bash -n utilities/restore-run.sh'
