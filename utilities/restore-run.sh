@@ -1600,47 +1600,84 @@ restore_full() {
             return 1
         fi
         # Separate-volume mode: state_dir is a live mountpoint — mv would fail
-        # with "Device or resource busy".  Instead, move each data subdirectory
-        # into an in-volume snapshot directory, then rsync the staged content
-        # onto the live mount.  This preserves rollback capability without
-        # needing to touch the mountpoint itself.
+        # with "Device or resource busy".  Promote only application payload
+        # directories that are safe to snapshot and replace.  Never move volume
+        # or project metadata such as .vw-data-volume, .pre-restore-*,
+        # lost+found, backups, secrets, or config during this destructive phase:
+        # those paths keep the live project recoverable if promotion fails.
         local _snap_dir="${state_dir}/.pre-restore-${ts}"
         mkdir -p "$_snap_dir"
-        log_info "Backing up existing data to in-volume snapshot: $(basename "$_snap_dir") ..."
+        log_info "Backing up replaceable payload paths to in-volume snapshot: $(basename "$_snap_dir") ..."
 
-        # Discover all non-snapshot subdirectories and top-level files so this
-        # path remains correct if new items are added to the state layout in
-        # the future.  Snapshot dirs (.pre-restore-*) are excluded to avoid
-        # nesting.
-        local _subdir
-        while IFS= read -r -d '' _subdir; do
-            mv "$_subdir" "${_snap_dir}/" || {
-                log_error "Failed to move $_subdir into snapshot — aborting."
-                log_error "Partial snapshot at: $_snap_dir"
-                return 1
-            }
-        done < <(find "$state_dir" -maxdepth 1 -mindepth 1 \
-                      \( -type d -o -type f \) \
-                      ! -name '.pre-restore-*' -print0 2>/dev/null)
-        unset _subdir
+        local -a _restore_payload_allowlist=(data caddy logs)
+        local -a _moved_payload_paths=()
+        local -a _created_payload_paths=()
+        local _payload_name _live_payload _staged_payload
 
-        log_info "Promoting staged restore to live volume..."
-        rsync -a --no-owner --no-group "$staging/$rel_state/" "$state_dir/" || {
-            log_error "rsync of staged content to $state_dir failed."
-            log_error "Attempting automatic rollback from snapshot: $_snap_dir"
-            # Attempt to restore files from the pre-restore snapshot on
-            # rsync failure. This is best-effort — if rsync of the rollback also
-            # fails, detailed manual recovery instructions are provided.
-            if rsync -a --no-owner --no-group "${_snap_dir}/" "$state_dir/" 2>/dev/null; then
-                log_warn "Automatic rollback completed. Previous data restored from: $_snap_dir"
-                log_warn "Review logs and retry the restore when the issue is resolved."
-            else
-                log_error "CRITICAL: Automatic rollback ALSO failed."
-                log_error "Manual recovery:"
-                log_error "  rsync -a '${_snap_dir}/' '$state_dir/'"
-            fi
-            return 1
+        _rollback_payload_paths() {
+            local _rollback_path _rollback_name _created_path
+            log_error "Attempting rollback of payload paths already moved into: $_snap_dir"
+            for _created_path in "${_created_payload_paths[@]}"; do
+                if [[ -e "$_created_path" ]]; then
+                    if rm -rf -- "$_created_path"; then
+                        log_warn "Rollback removed newly-created restore path: $_created_path"
+                    else
+                        log_error "Rollback failed to remove newly-created restore path: $_created_path"
+                    fi
+                fi
+            done
+            for _rollback_path in "${_moved_payload_paths[@]}"; do
+                _rollback_name="$(basename "$_rollback_path")"
+                if [[ -e "$_snap_dir/$_rollback_name" ]]; then
+                    rm -rf -- "$_rollback_path" 2>/dev/null || true
+                    if mv "$_snap_dir/$_rollback_name" "$_rollback_path"; then
+                        log_warn "Rollback restored: $_rollback_path"
+                    else
+                        log_error "Rollback failed for $_rollback_path"
+                        log_error "Manual recovery: mv '$_snap_dir/$_rollback_name' '$_rollback_path'"
+                    fi
+                fi
+            done
         }
+
+        for _payload_name in "${_restore_payload_allowlist[@]}"; do
+            _live_payload="$state_dir/$_payload_name"
+            _staged_payload="$staging/$rel_state/$_payload_name"
+
+            if [[ ! -e "$_staged_payload" ]]; then
+                log_info "  Skipping $_payload_name/ (not present in restored archive)"
+                continue
+            fi
+
+            if [[ -e "$_live_payload" ]]; then
+                log_info "  Snapshotting live $_payload_name/"
+                if mv "$_live_payload" "$_snap_dir/"; then
+                    _moved_payload_paths+=("$_live_payload")
+                else
+                    log_error "Failed to move $_live_payload into snapshot — aborting."
+                    log_error "Protected paths were not touched: .vw-data-volume, lost+found, backups, secrets, config"
+                    log_error "Partial snapshot at: $_snap_dir"
+                    _rollback_payload_paths
+                    return 1
+                fi
+            else
+                _created_payload_paths+=("$_live_payload")
+            fi
+        done
+
+        log_info "Promoting staged restore payload to live volume..."
+        for _payload_name in "${_restore_payload_allowlist[@]}"; do
+            _staged_payload="$staging/$rel_state/$_payload_name"
+            [[ -e "$_staged_payload" ]] || continue
+            if ! rsync -a --no-owner --no-group "$_staged_payload/" "$state_dir/$_payload_name/"; then
+                log_error "rsync of staged $_payload_name/ to $state_dir failed."
+                _rollback_payload_paths
+                return 1
+            fi
+            log_info "  Promoted: $_payload_name/"
+        done
+        log_warn "Archive backups/, secrets/, and config/ under $state_dir were intentionally not promoted."
+        unset -f _rollback_payload_paths
     else
         # Boot-only mode: atomic directory swap (fast path).
         [[ -d "$state_dir" ]] && mv "$state_dir" "${state_dir}.pre-restore-${ts}"
@@ -2028,12 +2065,26 @@ main() {
 
     # Choose the key that can decrypt secrets.yaml at the moment post-restore
     # SOPS updatekeys/rekey runs. DB restores do not restore secrets.yaml, so
-    # the live operational key remains the correct source. Full/emergency
-    # restores may have restored secrets.yaml from the selected archive, so the
-    # selected backup decrypt key is the correct source for those modes.
+    # use the live operational key. Separate-volume full/emergency restores
+    # intentionally do not promote secrets/, so the live operational key remains
+    # the correct rekey source. Boot-only full/emergency restores replace the
+    # whole state dir, so secrets.yaml may come from the selected archive and
+    # may require the selected backup decrypt key.
     case "$RESTORE_TYPE" in
-        db) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE" ;;
-        full|emergency) RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE" ;;
+        db)
+            RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE"
+            ;;
+        full|emergency)
+            if mountpoint -q "$STATE_DIR" 2>/dev/null; then
+                # Separate-volume mode: secrets/ is intentionally not promoted.
+                # The live secrets.yaml remains encrypted with the operational key.
+                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE"
+            else
+                # Boot-only mode replaces the whole state dir, including secrets/.
+                # The restored secrets.yaml may require the selected backup decrypt key.
+                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE"
+            fi
+            ;;
         *) log_error "Unknown restore type for rekey source: $RESTORE_TYPE"; exit 1 ;;
     esac
 
