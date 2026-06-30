@@ -23,6 +23,7 @@ DATA_VOLUME_MOUNT=""
 BACKUP_DIR=""
 SOPS_AGE_KEY_FILE=""
 REAL_USER="${SUDO_USER:-}"
+declare -a ENV_FILES=()
 
 TIMERS=(vaultwarden-maintenance.timer vaultwarden-db-backup.timer vaultwarden-full-backup.timer vaultwarden-health.timer vaultwarden-dns-update.timer vaultwarden-firewall-update.timer)
 SERVICES=(vaultwarden-maintenance.service vaultwarden-db-backup.service vaultwarden-full-backup.service vaultwarden-health.service vaultwarden-dns-update.service vaultwarden-firewall-update.service vaultwarden-notify-failure.service vaultwarden-notify-failure@.service vaultwarden-iptables.service vaultwarden-startup.service)
@@ -51,8 +52,13 @@ OPTIONS:
     --dry-run                       Preview removals without changing the host
     --force                         Non-interactive destructive cleanup
     --i-have-saved-my-recovery-kit  Confirm Age/recovery material is saved elsewhere
+    --version, -V                   Print the VaultWarden-OCI version and exit
     --help, -h                      Show this help
 USAGE
+}
+
+print_version() {
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
 }
 
 run() {
@@ -78,8 +84,18 @@ pick_env() {
 add_env_file() {
     local file="$1" seen
     [[ -f "$file" ]] || return 0
-    for seen in "${ENV_FILES[@]:-}"; do [[ "$seen" == "$file" ]] && return 0; done
+    for seen in "${ENV_FILES[@]}"; do [[ "$seen" == "$file" ]] && return 0; done
     ENV_FILES+=("$file")
+}
+
+_absolutize_project_path() {
+    local path="$1"
+    [[ -n "$path" ]] || return 0
+    if [[ "$path" == /* ]]; then
+        printf '%s\n' "$path"
+    else
+        printf '%s\n' "${PROJECT_ROOT}/${path}"
+    fi
 }
 
 resolve_context() {
@@ -105,6 +121,7 @@ resolve_context() {
     BACKUP_DIR="${BACKUP_DIR:-$(pick_env BACKUP_DIR 2>/dev/null || true)}"
     BACKUP_DIR="${BACKUP_DIR:-${PROJECT_STATE_DIR}/backups}"
     SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$(pick_env SOPS_AGE_KEY_FILE 2>/dev/null || true)}"
+    SOPS_AGE_KEY_FILE="$(_absolutize_project_path "$SOPS_AGE_KEY_FILE")"
     COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(pick_env COMPOSE_PROJECT_NAME 2>/dev/null || true)}"
     COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-vaultwarden-oci}"
 }
@@ -114,11 +131,12 @@ safe_rm_rf() {
     [[ -n "$path" && ( -e "$path" || -L "$path" ) ]] || return 0
     real="$(realpath -m -- "$path" 2>/dev/null || printf '%s' "$path")"
     case "$real" in
-        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var|/var/lib|/run/lock)
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var|/var/lib|/run/lock|/etc/systemd|/etc/systemd/system)
             warn "Refusing unsafe delete: $real"; return 1 ;;
     esac
     case "$real" in
-        "$PROJECT_ROOT"|"$PROJECT_STATE_DIR"|"$DEFAULT_STATE_DIR"|"$DATA_VOLUME_MOUNT"|"$OPT_SCRIPTS_DIR"|"$ENV_DIR"|"$RUNTIME_DIR"|/etc/crowdsec|/var/lib/crowdsec|/var/log/crowdsec|/var/lib/docker|/var/lib/containerd|/etc/docker|*/VaultWarden-OCI|*/vaultwarden-oci|*/vaultwarden_backups|*/vaultwarden-backups) ;;
+        "$PROJECT_ROOT"|"$PROJECT_STATE_DIR"|"$DEFAULT_STATE_DIR"|"$DATA_VOLUME_MOUNT"|"$OPT_SCRIPTS_DIR"|"$ENV_DIR"|"$RUNTIME_DIR"|/etc/crowdsec|/var/lib/crowdsec|/var/log/crowdsec|/var/lib/docker|/var/lib/containerd|/etc/docker|*/VaultWarden-OCI|*/vaultwarden-oci|*/vaultwarden_backups|*/vaultwarden-backups|"$UNIT_DIR"/vaultwarden-*.service.d|"$UNIT_DIR"/vaultwarden-*.timer.d)
+            ;;
         *) warn "Refusing unrecognised recursive delete target: $real"; return 1 ;;
     esac
     run rm -rf --one-file-system -- "$real"
@@ -139,8 +157,8 @@ VaultWarden-OCI uninstall target:
   compose name : $COMPOSE_PROJECT_NAME
 SUMMARY
     if [[ "$DRY_RUN" == true ]]; then
-        info "Dry-run only. Would remove current compose networks including caddy_external_network and postfix_relay_network."
-        exit 0
+        info "Dry-run only. Previewing removal steps without changing the host."
+        return 0
     fi
     [[ $EUID -eq 0 ]] || { err "Run with sudo for live uninstall."; exit 1; }
     if [[ "$FORCE" == true ]]; then
@@ -157,7 +175,7 @@ SUMMARY
 }
 
 offer_backup() {
-    [[ "$FORCE" == true || ! -f "${PROJECT_ROOT}/backup.sh" ]] && return 0
+    [[ "$DRY_RUN" == true || "$FORCE" == true || ! -f "${PROJECT_ROOT}/backup.sh" ]] && return 0
     local answer
     read -r -p "Run one final encrypted full backup before deleting data? (yes/no): " answer
     [[ "$answer" == yes ]] || return 0
@@ -233,7 +251,7 @@ cleanup_security_integrations() {
     rm_file /usr/local/bin/crowdsec-cloudflare-worker-bouncer
     rm_file /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
     rm_file /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
-    command -v apt-get >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive run apt-get remove -y --purge "${CROWDSEC_PACKAGES[@]}" 2>/dev/null || true
+    command -v apt-get >/dev/null 2>&1 && run env DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge "${CROWDSEC_PACKAGES[@]}" 2>/dev/null || true
     rm_file /etc/apt/sources.list.d/crowdsec_crowdsec.list
     rm_file /etc/apt/sources.list.d/crowdsec_crowdsec.sources
     rm_file /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg
@@ -257,7 +275,7 @@ cleanup_firewall_swap_packages() {
         sed '/^\/swapfile[[:space:]]/d' /etc/fstab > "$tmp" && run mv -f "$tmp" /etc/fstab || rm -f "$tmp"
     fi
     rm_file /usr/local/bin/sops
-    command -v apt-get >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive run apt-get remove -y --purge "${HELPER_PACKAGES[@]}" 2>/dev/null || true
+    command -v apt-get >/dev/null 2>&1 && run env DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge "${HELPER_PACKAGES[@]}" 2>/dev/null || true
     if [[ -f /etc/apt/sources.list.d/docker.sources || -f /etc/apt/sources.list.d/docker.list ]]; then
         local unmanaged="" cname
         if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -269,7 +287,7 @@ cleanup_firewall_swap_packages() {
         if [[ -n "$unmanaged" ]]; then
             warn "Leaving Docker installed because unrelated containers remain: $unmanaged"
         else
-            command -v apt-get >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive run apt-get remove -y --purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
+            command -v apt-get >/dev/null 2>&1 && run env DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
             rm_file /etc/apt/keyrings/docker.asc
             rm_file /etc/apt/keyrings/docker.gpg
             rm_file /etc/apt/sources.list.d/docker.sources
@@ -285,9 +303,9 @@ cleanup_firewall_swap_packages() {
 
 main() {
     [[ $# -gt 0 ]] || { usage; exit 0; }
-    case "$1" in run) shift ;; help|--help|-h) usage; exit 0 ;; *) err "Unknown subcommand: $1"; usage; exit 2 ;; esac
+    case "$1" in run) shift ;; help|--help|-h) usage; exit 0 ;; --version|-V) print_version; exit 0 ;; *) err "Unknown subcommand: $1"; usage; exit 2 ;; esac
     while [[ $# -gt 0 ]]; do
-        case "$1" in --dry-run) DRY_RUN=true ;; --force) FORCE=true ;; --i-have-saved-my-recovery-kit) ACK_RECOVERY_KIT=true ;; --help|-h) usage; exit 0 ;; *) err "Unknown option: $1"; exit 2 ;; esac
+        case "$1" in --dry-run) DRY_RUN=true ;; --force) FORCE=true ;; --i-have-saved-my-recovery-kit) ACK_RECOVERY_KIT=true ;; --version|-V) print_version; exit 0 ;; --help|-h) usage; exit 0 ;; *) err "Unknown option: $1"; exit 2 ;; esac
         shift
     done
     resolve_context
