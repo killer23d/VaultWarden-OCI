@@ -1042,6 +1042,10 @@ DESCRIPTION:
     Configures persistent storage directories, optional data-volume
     provisioning, and interactive data migration. Called automatically by
     setup.sh phase 4. Safe to re-run (idempotent) in setup and verify modes.
+    When setup-storage is run interactively with no --data-device or
+    DATA_VOLUME_DEVICE, setup mode asks whether to continue boot-volume mode or
+    configure block storage. --auto suppresses the prompt and keeps boot-volume
+    behavior when no DATA_VOLUME_DEVICE is set.
 
 MODES:
     setup    Create and configure storage directories (default)
@@ -1052,15 +1056,19 @@ OPTIONS:
     --mode MODE           Mode to run: setup|migrate|verify (default: setup)
     --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
     --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
-    --auto                Non-interactive mode
+    --auto                Non-interactive mode; suppresses the storage assistant and
+                          keeps boot-volume behavior when no DATA_VOLUME_DEVICE is set
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --help, -h            Show this help
     --version, -V         Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    # Boot-only setup (no separate data volume)
+    # Interactive setup: asks whether to use boot-volume or block storage
     sudo utilities/setup-storage.sh
+
+    # Non-interactive boot-only setup (no separate data volume)
+    sudo utilities/setup-storage.sh --auto
 
     # Setup with a dedicated data volume
     sudo utilities/setup-storage.sh \

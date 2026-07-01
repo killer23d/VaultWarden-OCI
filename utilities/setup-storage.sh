@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # utilities/setup-storage.sh — Configures and migrates VaultWarden-OCI storage.
+# shellcheck disable=SC1091
 
 set -euo pipefail
 
@@ -27,7 +28,9 @@ source "${PROJECT_ROOT}/lib/migrate.sh"
 if [[ -f "${PROJECT_ROOT}/.env" || -f "/etc/vaultwarden/vaultwarden.env" || -f "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env" ]]; then
     load_project_environment || {
         # setup-storage also supports first-run bootstrapping before runtime env exists.
-        [[ -f "${PROJECT_ROOT}/.env" ]] && load_env_file "${PROJECT_ROOT}/.env" || true
+        if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+            load_env_file "${PROJECT_ROOT}/.env" || true
+        fi
     }
 fi
 export DRY_RUN=false   # overridden by arg parsing; exported for lib functions
@@ -35,6 +38,7 @@ export DRY_RUN=false   # overridden by arg parsing; exported for lib functions
 _SS_MODE="setup"
 _SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
 _SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+_SS_DATA_DEVICE_PROVIDED=false
 _SS_AUTO=false
 _SS_FORCE=false
 TMP_WORKDIR=""
@@ -194,6 +198,9 @@ _mode_setup() {
     fi
 
     setup_data_volume || return 1
+    if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
+        log_info "To use block storage, re-run with --data-device /dev/disk/by-id/... or set DATA_VOLUME_DEVICE in install.env/.env."
+    fi
     # Install a Docker systemd drop-in that delays Docker start until the
     # data volume is mounted. No-op when DATA_VOLUME_DEVICE is unset.
     install_docker_mount_guard || log_warn "Docker mount guard setup had a non-fatal issue"
@@ -201,6 +208,112 @@ _mode_setup() {
     _update_install_env_after_storage || return 1
 
     log_success "Storage setup complete."
+}
+
+_ss_storage_help_text() {
+    cat <<EOF
+
+Storage setup choices
+---------------------
+Boot-volume mode stores persistent VaultWarden state under PROJECT_STATE_DIR
+(currently: ${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}).
+
+Block-storage mode uses a dedicated attached volume, normally mounted at
+DATA_VOLUME_MOUNT (currently: ${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}).
+
+If you intend to restore or migrate from attached block storage, choose
+"Configure attached block storage" and provide the attached block device path.
+
+This assistant will not auto-pick a disk and will not silently format a disk.
+Any provisioning, adoption, formatting gates, fstab updates, mount guards, and
+sentinel checks are handled later by the existing setup_data_volume safeguards.
+EOF
+}
+
+_ss_show_block_devices() {
+    log_info "Read-only block device summary:"
+    if command -v lsblk >/dev/null 2>&1; then
+        lsblk -dpno NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL 2>/dev/null || \
+            log_warn "Unable to list block devices with lsblk."
+    else
+        log_warn "lsblk not found; cannot show block device summary."
+    fi
+}
+
+_ss_prompt_block_storage() {
+    local device mount_point
+
+    _ss_show_block_devices
+    while true; do
+        read -r -p "Enter attached block device path (for example /dev/disk/by-id/...): " device
+        if [[ -z "${device}" ]]; then
+            log_error "Block device path cannot be empty."
+            continue
+        fi
+        if [[ ! -e "${device}" ]]; then
+            log_error "Path does not exist: ${device}"
+            continue
+        fi
+        if [[ ! -b "${device}" ]]; then
+            log_error "Path is not a block device: ${device}"
+            continue
+        fi
+        break
+    done
+
+    read -r -p "Enter data volume mount point [${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}]: " mount_point
+    _SS_DATA_DEVICE="${device}"
+    _SS_DATA_MOUNT="${mount_point:-${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}}"
+    log_info "Attached block storage selected; setup_data_volume will validate and provision using existing safeguards."
+}
+
+_ss_should_run_storage_assistant() {
+    [[ "${_SS_MODE}" == "setup" ]] || return 1
+    [[ -t 0 ]] || return 1
+    [[ "${DRY_RUN}" != "true" ]] || return 1
+    [[ "${_SS_AUTO}" != "true" ]] || return 1
+    [[ -z "${DATA_VOLUME_DEVICE:-}" ]] || return 1
+    [[ -z "${_SS_DATA_DEVICE:-}" ]] || return 1
+    [[ "${_SS_DATA_DEVICE_PROVIDED}" != "true" ]] || return 1
+    return 0
+}
+
+_ss_storage_assistant() {
+    local choice
+
+    _ss_storage_help_text
+    while true; do
+        cat <<'EOF'
+
+Choose storage setup mode:
+  1) Continue with boot-volume mode
+  2) Configure attached block storage
+  3) Show storage help
+  4) Exit without changes
+EOF
+        read -r -p "Selection [1-4]: " choice
+        case "${choice}" in
+            1)
+                log_info "Operator selected boot-volume mode; DATA_VOLUME_DEVICE remains unset."
+                return 0
+                ;;
+            2)
+                _ss_prompt_block_storage
+                return 0
+                ;;
+            3)
+                show_help
+                _ss_storage_help_text
+                ;;
+            4)
+                log_info "Storage setup cancelled by operator."
+                exit 0
+                ;;
+            *)
+                log_error "Invalid selection. Choose 1, 2, 3, or 4."
+                ;;
+        esac
+    done
 }
 
 _ss_check_known_path() {
@@ -288,6 +401,10 @@ DESCRIPTION:
     Configures persistent storage directories, optional data-volume
     provisioning, and interactive data migration. Called automatically by
     setup.sh phase 4. Safe to re-run (idempotent) in setup and verify modes.
+    When setup-storage is run interactively with no --data-device or
+    DATA_VOLUME_DEVICE, setup mode asks whether to continue boot-volume mode or
+    configure block storage. --auto suppresses the prompt and keeps boot-volume
+    behavior when no DATA_VOLUME_DEVICE is set.
 
 MODES:
     setup    Create and configure storage directories (default)
@@ -298,15 +415,19 @@ OPTIONS:
     --mode MODE           Mode to run: setup|migrate|verify (default: setup)
     --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
     --data-mount PATH     Mount point for data volume (default: @DEFAULT_DATA_MOUNT@)
-    --auto                Non-interactive mode
+    --auto                Non-interactive mode; suppresses the storage assistant and
+                          keeps boot-volume behavior when no DATA_VOLUME_DEVICE is set
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --help, -h            Show this help
     --version, -V         Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    # Boot-only setup (no separate data volume)
+    # Interactive setup: asks whether to use boot-volume or block storage
     sudo utilities/setup-storage.sh
+
+    # Non-interactive boot-only setup (no separate data volume)
+    sudo utilities/setup-storage.sh --auto
 
     # Setup with a dedicated data volume
     sudo utilities/setup-storage.sh \
@@ -377,6 +498,7 @@ _parse_outer_args() {
         case "$1" in
             --data-device)
                 _SS_DATA_DEVICE="$2"
+                _SS_DATA_DEVICE_PROVIDED=true
                 shift 2
                 ;;
             --data-mount)
@@ -417,6 +539,10 @@ main() {
     }
 
     TMP_WORKDIR="$(mktemp -d -p "${PROJECT_ROOT}" vw_storage_tmp.XXXXXXXXXX)"
+
+    if _ss_should_run_storage_assistant; then
+        _ss_storage_assistant
+    fi
 
     case "${_SS_MODE}" in
         setup)   _mode_setup   ;;

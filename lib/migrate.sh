@@ -43,6 +43,7 @@ _MV_CURRENT_STEP=""             # tracks active pipeline step for error messages
 _MV_SKIP_STACK_STOP=false
 _MV_DELETE_SOURCE=false
 _MV_FORCE=false
+_MV_FORCE_FORMAT=false
 _MV_YES=false
 _MV_LOG_FILE=""
 _MV_BACKUP_DIR_CUSTOM_WARNING=""
@@ -458,6 +459,7 @@ _mv_print_preflight_summary() {
     printf '  %-20s %s\n'  "Device:"        "${_MV_DEVICE:-(none — dir-to-dir)}"
     printf '  %-20s %s\n'  "Stack stop:"    "$( [[ "${_MV_SKIP_STACK_STOP}" == 'true' ]] && echo 'SKIPPED (--skip-stack-stop)' || echo 'yes' )"
     printf '  %-20s %s\n'  "Delete source:" "$( [[ "${_MV_DELETE_SOURCE}" == 'true' ]] && echo 'yes (will prompt)' || echo 'no' )"
+    printf '  %-20s %s\n'  "Format blank device:" "$( [[ "${_MV_FORCE_FORMAT}" == 'true' ]] && echo 'yes' || echo 'no' )"
     printf '  %-20s %s\n'  "Dry run:"       "${DRY_RUN}"
     printf '  %-20s %s\n'  "Log file:"      "${_MV_LOG_FILE}"
     printf '╚═══════════════════════════════════════════════════════════════╝\n'
@@ -646,6 +648,8 @@ OPTIONS (run / resume):
                      Always requires typing the path to confirm.
   --dry-run          Print all actions without executing them.
   --force            Skip the pre-migration backup confirmation prompt.
+  --force-format     Authorize formatting a blank/signature-free target block
+                     device during migrate mode. Does not skip backup prompts.
   --yes              Answer yes to all confirmations (except --delete-source).
                      Requires --target when used (non-interactive mode).
                      Cannot be combined with --skip-stack-stop.
@@ -661,6 +665,7 @@ EXAMPLES:
     --source /var/lib/vaultwarden \
     --target @DEFAULT_DATA_MOUNT@ \
     --device /dev/sdb \
+    --force-format \
     --yes
 
   # Reverse migration: move data from block volume back to boot volume
@@ -700,6 +705,7 @@ _mv_parse_args() {
     _MV_SKIP_STACK_STOP=false
     _MV_DELETE_SOURCE=false
     _MV_FORCE=false
+    _MV_FORCE_FORMAT=false
     _MV_YES=false
     _MV_LOG_FILE=""
 
@@ -740,6 +746,10 @@ _mv_parse_args() {
                 ;;
             --force)
                 _MV_FORCE=true
+                shift
+                ;;
+            --force-format)
+                _MV_FORCE_FORMAT=true
                 shift
                 ;;
             --yes)
@@ -822,6 +832,36 @@ _mv_parse_args() {
     fi
 }
 
+_mv_device_has_no_fs_or_signatures() {
+    local device="$1" fs_type wipefs_out wipefs_rc sig_count
+
+    fs_type="$(blkid -o value -s TYPE "$device" 2>/dev/null || true)"
+    [[ -z "${fs_type}" ]] || return 1
+
+    wipefs_out="$(_storage_device_has_data_signatures "$device")"
+    wipefs_rc=$?
+    (( wipefs_rc == 0 )) || return 1
+
+    sig_count="$(printf '%s\n' "$wipefs_out" \
+        | grep -v '^#' \
+        | grep -c '[^[:space:]]' 2>/dev/null || true)"
+    (( sig_count == 0 ))
+}
+
+_mv_require_force_format_for_blank_device() {
+    [[ "${_MV_DIRECTION}" == "boot-to-block" ]] || return 0
+    [[ -n "${_MV_DEVICE:-}" ]] || return 0
+    mountpoint -q "${_MV_TARGET}" 2>/dev/null && return 0
+    [[ "${_MV_FORCE_FORMAT}" != "true" ]] || return 0
+    _mv_device_has_no_fs_or_signatures "${_MV_DEVICE}" || return 0
+
+    _mv_log error "Blank target device requires --force-format."
+    _mv_log error "Formatting remains explicitly gated and is never inferred from selecting the device."
+    _mv_log error "Re-run with a sudo-safe command such as:"
+    _mv_log error "  sudo utilities/setup-storage.sh --mode migrate run --device ${_MV_DEVICE} --target ${_MV_TARGET} --force-format"
+    return 1
+}
+
 _mv_step_validate() {
     _mv_log info "── validate ──────────────────────────────────────────────────────"
 
@@ -900,6 +940,7 @@ _mv_step_validate() {
                 _mv_log error "Unmount it first or omit --device if the target is already mounted."
                 return 1
             fi
+            _mv_require_force_format_for_blank_device || return 1
         fi
     fi
 
@@ -955,6 +996,7 @@ _mv_step_validate() {
         _mv_state_write MV_LOG_FILE         "${_MV_LOG_FILE}"
         _mv_state_write MV_SKIP_STACK_STOP  "${_MV_SKIP_STACK_STOP}"
         _mv_state_write MV_DELETE_SOURCE    "${_MV_DELETE_SOURCE}"
+        _mv_state_write MV_FORCE_FORMAT     "${_MV_FORCE_FORMAT}"
     fi
 
     _mv_log success "Pre-flight validation passed."
@@ -1044,6 +1086,10 @@ _mv_step_format() {
     DATA_VOLUME_DEVICE="${_MV_DEVICE}"
     DATA_VOLUME_MOUNT="${_MV_TARGET}"
     export DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT
+    if [[ "${_MV_FORCE_FORMAT}" == "true" ]]; then
+        DATA_VOLUME_FORCE_FORMAT=true
+        export DATA_VOLUME_FORCE_FORMAT
+    fi
 
     setup_data_volume   # from lib/storage.sh
     _mv_log success "Target volume formatted and mounted: ${_MV_DEVICE} → ${_MV_TARGET}"
@@ -1490,6 +1536,7 @@ _mv_print_status() {
     printf '  %-20s %s\n' "Source:"   "${src:-unknown}"
     printf '  %-20s %s\n' "Target:"   "${tgt:-unknown}"
     printf '  %-20s %s\n' "Device:"   "${device:-none}"
+    printf '  %-20s %s\n' "Format blank:" "$([[ "$(_mv_state_read MV_FORCE_FORMAT)" == "true" ]] && echo yes || echo no)"
     printf '  %-20s %s\n' "Started:"  \
         "$(date -d "@${start_ts}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "${start_ts}")"
     printf '  %-20s %s\n' "Complete:" "${complete:-no}"
@@ -1652,9 +1699,11 @@ _mv_do_abort() {
             local _umount_reply
             read -r -p "  Unmount ${_abort_tgt} now? [y/N] " _umount_reply
             if [[ "${_umount_reply}" =~ ^[Yy]$ ]]; then
-                umount "${_abort_tgt}" \
-                    && log_success "Unmounted ${_abort_tgt}." \
-                    || log_warn "umount failed — unmount manually: sudo umount ${_abort_tgt}"
+                if umount "${_abort_tgt}"; then
+                    log_success "Unmounted ${_abort_tgt}."
+                else
+                    log_warn "umount failed — unmount manually: sudo umount ${_abort_tgt}"
+                fi
             else
                 log_info "Leaving ${_abort_tgt} mounted. Unmount manually when ready."
             fi
@@ -1689,12 +1738,24 @@ _mv_run_pipeline() {
             log_error "Run: sudo utilities/setup-storage.sh --mode migrate run ..."
             exit 1
         }
+        local _resume_cli_force_format="${_MV_FORCE_FORMAT}"
         _MV_SOURCE="$(_mv_state_read MV_SOURCE)"
         _MV_TARGET="$(_mv_state_read MV_TARGET)"
         _MV_DEVICE="$(_mv_state_read MV_DEVICE)"
         [[ "${_MV_DEVICE}" == "none" ]] && _MV_DEVICE=""
         _MV_SKIP_STACK_STOP="$(_mv_state_read MV_SKIP_STACK_STOP)"
         _MV_DELETE_SOURCE="$(_mv_state_read MV_DELETE_SOURCE)"
+        local _saved_force_format
+        _saved_force_format="$(_mv_state_read MV_FORCE_FORMAT)"
+
+        # Preserve a prior force-format authorization, but also allow a resume-time
+        # --force-format to upgrade an older/incomplete state that saved false.
+        if [[ "${_saved_force_format}" == "true" || "${_resume_cli_force_format}" == "true" ]]; then
+            _MV_FORCE_FORMAT=true
+            [[ "${DRY_RUN}" == "true" ]] || _mv_state_write MV_FORCE_FORMAT true
+        else
+            _MV_FORCE_FORMAT=false
+        fi
         # Always restore direction from state — never require the operator to re-specify.
         # Default to boot-to-block for backwards compatibility with pre-direction state files.
         local _saved_direction

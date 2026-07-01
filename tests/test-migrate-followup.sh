@@ -45,6 +45,134 @@ PROBE
 [[ "$out" == "/custom/target" ]] || fail "explicit --target did not win: $out"
 pass 'explicit migration target still wins over prompt default'
 
+out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }; log_success(){ :; }; log_debug(){ :; }
+require_commands(){ :; }
+source lib/migrate.sh
+_mv_parse_args run --source /var/lib/vaultwarden --target /mnt/vw-data --device /dev/sdb --force --force-format
+printf 'force=%s force_format=%s\n' "$_MV_FORCE" "$_MV_FORCE_FORMAT"
+PROBE
+)
+grep -Fxq 'force=true force_format=true' <<< "$out" || fail "--force-format parser did not preserve separate force flags: $out"
+pass 'migrate parser keeps --force and --force-format separate'
+
+help_out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+source lib/migrate.sh
+_mv_usage
+PROBE
+)
+grep -Fq -- '--force-format' <<< "$help_out" || fail "migrate help does not document --force-format"
+grep -Fq 'Authorize formatting a blank/signature-free target block' <<< "$help_out" || fail "migrate help missing --force-format meaning"
+pass 'migrate help documents --force-format'
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }; log_success(){ :; }; log_debug(){ :; }
+require_commands(){ :; }
+source lib/migrate.sh
+setup_data_volume(){ printf 'DATA_VOLUME_FORCE_FORMAT=%s\n' "${DATA_VOLUME_FORCE_FORMAT:-unset}"; }
+mountpoint(){ return 1; }
+_mv_check_disk_space(){ :; }
+_MV_LOG_FILE=/dev/null
+_MV_DIRECTION=boot-to-block
+_MV_DEVICE=/dev/fake
+_MV_TARGET=/mnt/vw-data
+_MV_SOURCE=/var/lib/vaultwarden
+_MV_FORCE_FORMAT=false
+unset DATA_VOLUME_FORCE_FORMAT
+_mv_step_format
+_MV_FORCE_FORMAT=true
+unset DATA_VOLUME_FORCE_FORMAT
+_mv_step_format
+PROBE
+)
+grep -Fxq 'DATA_VOLUME_FORCE_FORMAT=unset' <<< "$out" || fail "_mv_step_format unexpectedly exports force-format when false: $out"
+grep -Fxq 'DATA_VOLUME_FORCE_FORMAT=true' <<< "$out" || fail "_mv_step_format does not export force-format when true: $out"
+pass '_mv_step_format exports DATA_VOLUME_FORCE_FORMAT only for --force-format'
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+log_info(){ echo "INFO:$*"; }; log_warn(){ :; }; log_error(){ echo "ERR:$*"; }; log_success(){ :; }; log_debug(){ :; }
+require_commands(){ :; }
+source lib/migrate.sh
+_MV_LOG_FILE=/dev/null
+_MV_DIRECTION=boot-to-block
+_MV_DEVICE=/dev/sdb
+_MV_TARGET=/mnt/vw-data
+_MV_SOURCE=/var/lib/vaultwarden
+_MV_FORCE_FORMAT=false
+mountpoint(){ return 1; }
+_mv_device_has_no_fs_or_signatures(){ return 0; }
+if _mv_require_force_format_for_blank_device; then
+  echo unexpected-success
+else
+  echo failed-as-expected
+fi
+PROBE
+)
+grep -Fq 'Blank target device requires --force-format.' <<< "$out" || fail "blank-device validation lacks clear force-format error: $out"
+grep -Fq 'sudo utilities/setup-storage.sh --mode migrate run --device /dev/sdb --target /mnt/vw-data --force-format' <<< "$out" || fail "blank-device validation lacks sudo-safe example: $out"
+grep -Fq 'failed-as-expected' <<< "$out" || fail "blank-device validation did not fail without --force-format: $out"
+pass 'blank target device requires --force-format before migration proceeds'
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+
+REPO_ROOT="$PWD"
+state_dir="$(mktemp -d)"
+trap 'rm -rf "$state_dir"' EXIT
+
+PROJECT_ROOT="$state_dir"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+
+log_info(){ :; }
+log_warn(){ :; }
+log_error(){ :; }
+log_success(){ :; }
+log_debug(){ :; }
+require_commands(){ :; }
+
+source "$REPO_ROOT/lib/migrate.sh"
+
+mkdir -p "$PROJECT_ROOT/src" "$PROJECT_ROOT/target"
+: > "$PROJECT_ROOT/docker-compose.yml"
+
+_mv_state_write MV_SOURCE "$PROJECT_ROOT/src"
+_mv_state_write MV_TARGET "$PROJECT_ROOT/target"
+_mv_state_write MV_DEVICE none
+_mv_state_write MV_SKIP_STACK_STOP false
+_mv_state_write MV_DELETE_SOURCE false
+_mv_state_write MV_FORCE_FORMAT false
+_mv_state_write MV_DIRECTION boot-to-block
+
+_mv_parse_args resume --force-format
+_mv_run_step(){ :; }
+_mv_run_pipeline --resume
+
+printf 'force_format=%s state=%s\n' "$_MV_FORCE_FORMAT" "$(_mv_state_read MV_FORCE_FORMAT)"
+PROBE
+)
+grep -Fxq 'force_format=true state=true' <<< "$out" || fail "resume --force-format did not override saved false state: $out"
+pass 'resume --force-format upgrades saved false force-format state'
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 BIN="$TMP/bin"; mkdir -p "$BIN"
