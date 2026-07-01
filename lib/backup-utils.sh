@@ -758,6 +758,43 @@ EOF
     return 0
 }
 
+_repair_sudo_user_rclone_config_permissions() {
+    local cfg_path="$1"
+    local sudo_user="$2"
+    local sudo_user_home="$3"
+
+    [[ $EUID -eq 0 ]] || return 0
+    [[ -n "$sudo_user" && "$sudo_user" != "root" ]] || return 0
+    [[ -n "$sudo_user_home" ]] || return 0
+    [[ "$cfg_path" == "$sudo_user_home/.config/rclone/rclone.conf" ]] || return 0
+    [[ -f "$cfg_path" && ! -L "$cfg_path" ]] || return 0
+
+    local sudo_group cfg_dir actual_uid actual_gid actual_mode expected_uid expected_gid
+    sudo_group="$(id -gn "$sudo_user" 2>/dev/null || true)"
+    [[ -n "$sudo_group" ]] || return 0
+
+    expected_uid="$(id -u "$sudo_user" 2>/dev/null || true)"
+    expected_gid="$(id -g "$sudo_user" 2>/dev/null || true)"
+    actual_uid="$(stat -c '%u' "$cfg_path" 2>/dev/null || echo "")"
+    actual_gid="$(stat -c '%g' "$cfg_path" 2>/dev/null || echo "")"
+    actual_mode="$(stat -c '%a' "$cfg_path" 2>/dev/null || echo "")"
+
+    if [[ "$actual_uid" != "$expected_uid" || "$actual_gid" != "$expected_gid" || "$actual_mode" != "600" ]]; then
+        log_warn "Correcting rclone config permissions for $cfg_path: expected ${sudo_user}:${sudo_group} 0600"
+        chown "$sudo_user:$sudo_group" "$cfg_path" || {
+            log_warn "Could not chown rclone config: $cfg_path"
+            return 0
+        }
+        chmod 0600 "$cfg_path" || log_warn "Could not chmod 0600 rclone config: $cfg_path"
+    fi
+
+    cfg_dir="$(dirname "$cfg_path")"
+    if [[ -d "$cfg_dir" && ! -L "$cfg_dir" ]]; then
+        chown "$sudo_user:$sudo_group" "$cfg_dir" 2>/dev/null || true
+        chmod 0700 "$cfg_dir" 2>/dev/null || true
+    fi
+}
+
 _resolve_rclone_config() {
     local cfg_from_env
     cfg_from_env="$(get_config_value "RCLONE_CONFIG" "")"
@@ -768,10 +805,13 @@ _resolve_rclone_config() {
     fi
 
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-        local sudo_user_home
+        local sudo_user_home sudo_user_cfg
         sudo_user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
-        if [[ -n "$sudo_user_home" && -f "$sudo_user_home/.config/rclone/rclone.conf" ]]; then
-            echo "$sudo_user_home/.config/rclone/rclone.conf"
+        sudo_user_cfg="$sudo_user_home/.config/rclone/rclone.conf"
+
+        if [[ -n "$sudo_user_home" && -f "$sudo_user_cfg" ]]; then
+            _repair_sudo_user_rclone_config_permissions "$sudo_user_cfg" "$SUDO_USER" "$sudo_user_home"
+            echo "$sudo_user_cfg"
             return 0
         fi
     fi
@@ -851,6 +891,6 @@ export -f cleanup_old_backups get_backup_statistics
 # definition for create_backup_metadata" during apt/dpkg subprocess execution.
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
 export -f _backup_filename_age_days _format_bytes_human _json_escape _resolve_rclone_config validate_rclone_config_path
-export -f _backup_age_color
+export -f _repair_sudo_user_rclone_config_permissions _backup_age_color
 
 log_debug "Backup utilities library loaded successfully - standardized error handling" 2>/dev/null || true
