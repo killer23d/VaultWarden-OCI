@@ -2,8 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
-require(){ rg -n -- "$1" "$2" >/dev/null || fail "$3"; }
-reject(){ ! rg -n -- "$1" "$2" >/dev/null || fail "$3"; }
+require(){ grep -Eq -- "$1" "$2" || fail "$3"; }
+reject(){ ! grep -Eq -- "$1" "$2" || fail "$3"; }
 RESTORE="$ROOT/utilities/restore-run.sh"
 MIGRATE="$ROOT/lib/migrate.sh"
 SYSTEMD="$ROOT/utilities/setup-systemd.sh"
