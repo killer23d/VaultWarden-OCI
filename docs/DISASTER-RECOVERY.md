@@ -333,3 +333,21 @@ sudo ./restore.sh inspect --remote
 The report shows the backup source layout, current target layout, live DB presence, snapshot-only DBs, required block-volume directories, and the recommended next action. A block-storage source archive should be restored only after the attached data volume is mounted and prepared; it is not silently restored to boot storage.
 
 If you only need Vaultwarden database contents, prefer the latest DB backup because DB restore is storage-layout independent. Full/emergency archives without a live `data/db.sqlite3` are unsafe for normal full restore; choose another archive, restore a DB backup, or inspect the tar manually. Older encrypted backups may require the Age key that was active when they were created, supplied with `--key-file`, or an offline recovery kit supplied with `--from-recovery-kit`.
+
+### 2026 backup tier model
+
+VaultWarden-OCI has three deliberately different backup tiers:
+
+| Tier | Use | Contents | Key handling |
+| --- | --- | --- | --- |
+| `db` | Quick database rollback | A single encrypted, integrity-checked SQLite snapshot (`.sqlite3.age`) | Encrypted to the operational Age recipient. |
+| `full` | Normal fresh-VM disaster recovery | Project root, state directory, persistent config, encrypted SOPS `secrets.yaml`, sidecars/metadata, and a verified DB injected at `${PROJECT_STATE_DIR}/data/db.sqlite3` | Excludes `/etc/vaultwarden/age-key.txt`; restore requires the operator's offline Age key. |
+| `emergency` | Fastest clone-style recovery | Everything in `full`, plus staged persistent `/etc/vaultwarden` key/config material such as `age-key.txt`, `vaultwarden.env`, and `rclone.conf` when present | Protected independently with `age -p` passphrase mode or `EMERGENCY_BACKUP_AGE_RECIPIENT`; it is never encrypted only to the operational key it contains. |
+
+All tiers contain a complete verified SQLite database snapshot. Backups first try the SQLite Online Backup API (`sqlite3 .backup`). If that fails, Vaultwarden is stopped, the WAL is checkpointed, `db.sqlite3` is copied, integrity is verified, and Vaultwarden is restarted. No backup reports success with an unverified or partial database.
+
+Full and emergency archives exclude live `db.sqlite3`, WAL/SHM files, backup directories, logs, temp files, sockets/locks, `.pre-restore-*` snapshots, decrypted runtime secrets, and `/run/vaultwarden-oci/secrets/*`. The verified staged DB is then added back to the archive at the normal live path, so `.pre-restore-*` databases never satisfy archive validation.
+
+> **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`). Do not store passphrases in shell history, environment variables, logs, or metadata.
+
+Choose `db` for quick DB rollback, `full` for a fresh VM restore when you have the offline Age key, and `emergency` when the fastest clone-style recovery is worth carrying key material inside the sealed capsule.

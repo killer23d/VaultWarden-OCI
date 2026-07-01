@@ -74,6 +74,7 @@ EXAMPLES:
     sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
     sudo ./backup.sh run db             # Database-only backup
     sudo ./backup.sh run full           # Full state backup
+    sudo ./backup.sh run emergency      # Clone-grade sealed capsule; prompts for age -p unless EMERGENCY_BACKUP_AGE_RECIPIENT is set
     sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
     ./backup.sh list                              # List existing backups (no sudo)
     ./backup.sh list --json                       # Machine-readable backup inventory
@@ -412,6 +413,11 @@ create_db_snapshot_host() {
     return 0
 }
 
+_vaultwarden_container_running() {
+    local service="$1"
+    docker compose ps --services --filter status=running 2>/dev/null | grep -qx "$service"
+}
+
 wait_for_container_stopped() {
     local service="$1"
     local max_wait="${2:-30}"
@@ -447,6 +453,64 @@ wait_for_container_stopped() {
     return 1
 }
 
+create_consistent_db_snapshot() {
+    local state_dir="$1" dest="$2" mode_label="$3"
+    local db_file="${state_dir}/data/db.sqlite3"
+    DB_SNAPSHOT_METHOD=""
+    [[ -f "$db_file" ]] || { log_error "Database not found: $db_file" >&2; return 1; }
+    mkdir -p "$(dirname "$dest")"
+    rm -f "$dest" 2>/dev/null || true
+
+    backup_log_info "Creating ${mode_label} DB snapshot with SQLite Online Backup API..."
+    if create_db_snapshot_host "$state_dir" "$dest" 2>/dev/null && verify_sqlite "$dest"; then
+        DB_SNAPSHOT_METHOD="sqlite-online-backup"
+        backup_log_info "DB snapshot method: ${DB_SNAPSHOT_METHOD}"
+        return 0
+    fi
+
+    backup_log_warn "SQLite Online Backup API failed — attempting safe offline fallback"
+    rm -f "$dest" 2>/dev/null || true
+    local vw_container_name container_was_running=false
+    vw_container_name="$(get_config_value "COMPOSE_SERVICE_NAME" "vaultwarden")"
+
+    if _vaultwarden_container_running "$vw_container_name"; then
+        container_was_running=true
+        backup_log_warn "Stopping $vw_container_name before offline DB snapshot..."
+        docker compose stop "$vw_container_name" >/dev/null || true
+        if ! wait_for_container_stopped "$vw_container_name" 30; then
+            log_error "Cannot safely copy db.sqlite3: container did not reach stopped state." >&2
+            return 1
+        fi
+    fi
+
+    _restart_snapshot_container() {
+        if [[ "$container_was_running" == "true" ]]; then
+            backup_log_info "Restarting $vw_container_name after offline DB snapshot..."
+            docker compose start "$vw_container_name" >/dev/null 2>&1 || \
+                backup_log_warn "Failed to restart $vw_container_name — restart manually"
+        fi
+    }
+    trap '_restart_snapshot_container; cleanup' EXIT HUP INT TERM ERR
+
+    local wal_result
+    wal_result=$(sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1) || {
+        log_error "WAL checkpoint failed; refusing to produce an inconsistent DB snapshot: $wal_result" >&2
+        return 1
+    }
+    if [[ -n "$wal_result" ]] && ! awk -F'|' '$2!=0 || $3!=0 {exit 1}' <<<"$wal_result"; then
+        log_error "WAL checkpoint incomplete — unincorporated pages remain (result: $wal_result)" >&2
+        return 1
+    fi
+    cp -f "$db_file" "$dest"
+    [[ -s "$dest" ]] || { log_error "Offline DB snapshot copy is empty or missing" >&2; return 1; }
+    verify_sqlite "$dest" || return 1
+    DB_SNAPSHOT_METHOD="offline-checkpoint-copy"
+    backup_log_info "DB snapshot method: ${DB_SNAPSHOT_METHOD}"
+    _restart_snapshot_container
+    trap cleanup EXIT HUP INT TERM ERR
+    return 0
+}
+
 verify_backup_full() {
     local enc_file="$1"
     local backup_type="$2"
@@ -472,7 +536,19 @@ verify_backup_full() {
     local dec_out
     dec_out="$shared_tmpdir/verify_$(basename "$enc_file" .age)"
 
-    if ! age -d -i "$age_key_file" -o "$dec_out" "$enc_file"; then
+    local encryption_mode
+    encryption_mode="$(awk -F= '$1=="encryption_mode"{print $2; exit}' "${enc_file}.meta" 2>/dev/null || true)"
+    if [[ "$backup_type" == "emergency" && "$encryption_mode" == "age-passphrase" ]]; then
+        if ! age -d -o "$dec_out" "$enc_file"; then
+            log_error "Full verification FAILED: could not decrypt passphrase-sealed emergency backup" >&2
+            return 1
+        fi
+    elif [[ "$backup_type" == "emergency" && "$encryption_mode" == "age-recipient" && -n "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}" ]]; then
+        if ! age -d -i "$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" -o "$dec_out" "$enc_file"; then
+            log_error "Full verification FAILED: could not decrypt emergency backup with EMERGENCY_BACKUP_AGE_IDENTITY_FILE" >&2
+            return 1
+        fi
+    elif ! age -d -i "$age_key_file" -o "$dec_out" "$enc_file"; then
         log_error "Full verification FAILED: could not decrypt $enc_file" >&2
         return 1
     fi
@@ -913,75 +989,9 @@ perform_db_backup() {
         return 0
     fi
 
-    local db_file="$state_dir/data/db.sqlite3"
-    [[ -f "$db_file" ]] || { log_error "Database not found: $db_file" >&2; return 1; }
-
     local snap="$shared_tmpdir/db.sqlite3"
-
-    backup_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
-    if ! create_db_snapshot_host "$state_dir" "$snap"; then
-        backup_log_warn "Host sqlite3 snapshot failed — attempting offline fallback with WAL checkpoint"
-
-        local vw_container_name
-        vw_container_name="$(get_config_value "COMPOSE_SERVICE_NAME" "vaultwarden")"
-        local container_was_running=false
-
-        if docker compose ps --services --filter status=running 2>/dev/null \
-                | grep -qx "$vw_container_name"; then
-            container_was_running=true
-            backup_log_warn "Stopping $vw_container_name before fallback copy..."
-            docker compose stop "$vw_container_name" 2>/dev/null || true
-
-            if ! wait_for_container_stopped "$vw_container_name" 30; then
-                log_error "Cannot safely copy db.sqlite3: container did not reach stopped state." >&2
-                log_error "Fix sqlite3 .backup or stop the container manually, then retry." >&2
-                return 1
-            fi
-        fi
-
-        local wal_result
-        wal_result=$(sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1) || {
-            backup_log_warn "WAL checkpoint command failed — copy may be missing recent transactions"
-            backup_log_warn "For guaranteed consistency, stop VaultWarden before backup or fix sqlite3 .backup"
-        }
-        if [[ -n "$wal_result" ]]; then
-            if ! echo "$wal_result" | awk -F'|' '$2!=0 || $3!=0 {exit 1}'; then
-                log_error "WAL checkpoint incomplete — unincorporated pages remain (result: $wal_result)" >&2
-                log_error "Aborting fallback copy to avoid backing up an inconsistent database." >&2
-                log_error "Stop VaultWarden fully, then retry, or fix sqlite3 .backup." >&2
-                return 1
-            fi
-            backup_log_info "WAL checkpoint succeeded (result: $wal_result)"
-        fi
-
-        if command -v lsof >/dev/null 2>&1; then
-            local open_procs
-            open_procs=$(lsof "$db_file" 2>/dev/null | grep -vc "^COMMAND")
-            if (( open_procs > 0 )); then
-                log_error "lsof reports $open_procs process(es) still have $db_file open." >&2
-                log_error "Cannot safely copy WAL database. Stop all processes first, then retry." >&2
-                return 1
-            fi
-            backup_log_info "lsof check passed: no open handles on $db_file"
-        else
-            backup_log_warn "lsof not available — cannot verify file handles before WAL fallback copy"
-        fi
-
-        cp "$db_file" "$snap"
-
-        if [[ "$container_was_running" == "true" ]]; then
-            backup_log_info "Restarting $vw_container_name after fallback copy..."
-            docker compose start "$vw_container_name" 2>/dev/null || \
-                backup_log_warn "Failed to restart $vw_container_name — restart manually"
-        fi
-
-        if [[ ! -s "$snap" ]]; then
-            log_error "Fallback snapshot copy failed or produced empty file" >&2
-            return 1
-        fi
-    fi
-
-    verify_sqlite "$snap" || return 1
+    create_consistent_db_snapshot "$state_dir" "$snap" "db backup" || return 1
+    local db_snapshot_method="$DB_SNAPSHOT_METHOD"
 
     backup_log_info "Encrypting DB snapshot..."
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
@@ -1004,10 +1014,15 @@ perform_db_backup() {
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"; return 1; }
 
-    local orig_size
+    local db_file="$state_dir/data/db.sqlite3" orig_size
     orig_size=$(stat -c%s "$db_file" 2>/dev/null || stat -f%z "$db_file" 2>/dev/null || echo 0)
     if ! create_backup_metadata "$enc" "db" \
-            "$(printf 'original_size=%s\narchive_format=relative\nversion=2' "$orig_size")"; then
+            "$(printf 'original_size=%s
+archive_format=relative
+version=2
+db_snapshot_method=%s
+encryption_mode=age-recipient
+emergency_contains_key_material=false' "$orig_size" "$db_snapshot_method")"; then
         log_error "Failed to write backup metadata: ${enc}.meta" >&2
         return 1
     fi
@@ -1045,16 +1060,10 @@ perform_full_backup() {
     mkdir -p "$(dirname "$snap_db")"
 
     local db_file="$state_dir/data/db.sqlite3"
-    local db_snapshot_ok=false
-
-    if [[ -f "$db_file" ]]; then
-        backup_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
-        if create_db_snapshot_host "$state_dir" "$snap_db" 2>/dev/null; then
-            db_snapshot_ok=true
-        else
-            backup_log_warn "Host sqlite3 snapshot failed — will use live DB file in archive"
-        fi
-    fi
+    [[ -f "$db_file" ]] || { log_error "Database not found: $db_file" >&2; return 1; }
+    create_consistent_db_snapshot "$state_dir" "$snap_db" "${backup_label} backup" || return 1
+    local db_snapshot_method="$DB_SNAPSHOT_METHOD"
+    verify_sqlite "$snap_db" || return 1
 
     backup_log_info "Archiving state (relative paths, safe for staged restore)..."
 
@@ -1065,7 +1074,6 @@ perform_full_backup() {
         "backups"
         "logs"
         ".rate-limit"
-        "secrets"
         "*.sock"
         "*.lock"
         "*.tmp"
@@ -1091,21 +1099,39 @@ perform_full_backup() {
     tar_excludes+=(
         "--exclude=${state_dir#/}/.pre-restore-*"
         "--exclude=${state_dir#/}/*/.pre-restore-*"
+        "--exclude=${state_dir#/}/data/db.sqlite3"
+        "--exclude=${state_dir#/}/data/db.sqlite3-wal"
+        "--exclude=${state_dir#/}/data/db.sqlite3-shm"
+        "--exclude=run/vaultwarden-oci/secrets/*"
+        "--exclude=${SCRIPT_DIR#/}/secrets/keys/age-key.txt"
+        "--exclude=${state_dir#/}/secrets/keys/age-key.txt"
     )
 
     local tar_sources=()
 
     tar_sources+=("${SCRIPT_DIR#/}")
 
-    if [[ "$db_snapshot_ok" == "true" ]]; then
-        tar_excludes+=(
-            "--exclude=${state_dir#/}/data/db.sqlite3"
-            "--exclude=${state_dir#/}/data/db.sqlite3-wal"
-            "--exclude=${state_dir#/}/data/db.sqlite3-shm"
-        )
-        tar_sources+=("${state_dir#/}")
-    else
-        tar_sources+=("${state_dir#/}")
+    tar_sources+=("${state_dir#/}")
+
+    local encryption_mode="age-recipient"
+    local emergency_contains_key_material=false
+    if [[ "$backup_label" == "emergency" ]]; then
+        emergency_contains_key_material=true
+        mkdir -p "$snap_dir/etc/vaultwarden" "$snap_dir/METADATA"
+        chmod 700 "$snap_dir/etc/vaultwarden"
+        local etc_file
+        for etc_file in /etc/vaultwarden/age-key.txt /etc/vaultwarden/vaultwarden.env /etc/vaultwarden/rclone.conf; do
+            if [[ -f "$etc_file" ]]; then
+                install -m 600 "$etc_file" "$snap_dir/etc/vaultwarden/$(basename "$etc_file")"
+            fi
+        done
+        cat > "$snap_dir/METADATA/emergency-permissions.txt" <<'EOF'
+/etc/vaultwarden root:root 0700
+/etc/vaultwarden/age-key.txt root:root 0600
+/etc/vaultwarden/vaultwarden.env root:root 0600
+/etc/vaultwarden/rclone.conf root:root 0600
+EOF
+        tar_sources+=(-C "$snap_dir" "etc/vaultwarden" "METADATA/emergency-permissions.txt")
     fi
 
     local -a tar_cmd_args=(
@@ -1115,15 +1141,9 @@ perform_full_backup() {
         "${tar_excludes[@]}"
         "${tar_sources[@]}"
     )
-    if [[ "$db_snapshot_ok" == "true" ]]; then
-        if [[ ! -f "$snap_db" ]]; then
-            backup_log_warn "DB snapshot not found at: $snap_db — falling back to live DB"
-            db_snapshot_ok=false
-        else
-            backup_log_info "Including clean DB snapshot in initial archive pass..."
-            tar_cmd_args+=(-C "$snap_dir" "${state_dir#/}/data/db.sqlite3")
-        fi
-    fi
+    [[ -s "$snap_db" ]] || { log_error "Verified staged DB snapshot is missing; refusing raw live DB fallback" >&2; return 1; }
+    backup_log_info "Injecting verified DB snapshot at ${state_dir#/}/data/db.sqlite3..."
+    tar_cmd_args+=(-C "$snap_dir" "${state_dir#/}/data/db.sqlite3")
 
     local tar_exit=0
     tar "${tar_cmd_args[@]}" 2>/dev/null || tar_exit=$?
@@ -1147,7 +1167,33 @@ perform_full_backup() {
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
 
-    if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>/dev/null; then
+    if [[ "$backup_label" == "emergency" ]]; then
+        local emergency_recipient
+        emergency_recipient="$(get_config_value "EMERGENCY_BACKUP_AGE_RECIPIENT" "${EMERGENCY_BACKUP_AGE_RECIPIENT:-}")"
+        if [[ -n "$emergency_recipient" ]]; then
+            encryption_mode="age-recipient"
+            if [[ "$emergency_recipient" == "$age_pub_key" ]]; then
+                log_error "Emergency backup includes key material and cannot be encrypted only to the operational Age recipient." >&2
+                rm -f "$enc_tmp"
+                return 1
+            fi
+            age -r "$emergency_recipient" -o "$enc_tmp" "$temp_tar" 2>/dev/null || {
+                log_error "Emergency encryption failed with EMERGENCY_BACKUP_AGE_RECIPIENT." >&2
+                rm -f "$enc_tmp"; return 1
+            }
+        else
+            if [[ ! -t 0 ]]; then
+                log_error "Emergency backup includes key material and requires either a TTY passphrase prompt or EMERGENCY_BACKUP_AGE_RECIPIENT." >&2
+                rm -f "$enc_tmp"
+                return 1
+            fi
+            encryption_mode="age-passphrase"
+            age -p -o "$enc_tmp" "$temp_tar" || {
+                log_error "Emergency passphrase encryption failed." >&2
+                rm -f "$enc_tmp"; return 1
+            }
+        fi
+    elif ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>/dev/null; then
         log_error "Encryption failed (check disk space: df -h $(dirname "$enc"); verify Age key: make key-health)" >&2
         rm -f "$enc_tmp"
         return 1
@@ -1169,7 +1215,7 @@ perform_full_backup() {
     state_dir_is_mountpoint=false; mountpoint -q "$state_dir" 2>/dev/null && state_dir_is_mountpoint=true
     storage_mode="$(_backup_storage_mode "$state_dir" "$data_volume_mount" "$data_volume_device")"
     if ! create_backup_metadata "$enc" "$backup_label" \
-            "$(printf 'project_state_dir=%s\nstorage_mode=%s\ndata_volume_mount=%s\ndata_volume_device=%s\nstate_dir_is_mountpoint=%s\nrepo_root=%s\narchive_format=relative\nversion=2' "$state_dir" "$storage_mode" "$data_volume_mount" "$data_volume_device" "$state_dir_is_mountpoint" "$SCRIPT_DIR")"; then
+            "$(printf 'project_state_dir=%s\nstorage_mode=%s\ndata_volume_mount=%s\ndata_volume_device=%s\nstate_dir_is_mountpoint=%s\nrepo_root=%s\narchive_format=relative\nversion=2\ndb_snapshot_method=%s\nencryption_mode=%s\nemergency_contains_key_material=%s' "$state_dir" "$storage_mode" "$data_volume_mount" "$data_volume_device" "$state_dir_is_mountpoint" "$SCRIPT_DIR" "$db_snapshot_method" "$encryption_mode" "$emergency_contains_key_material")"; then
         log_error "Failed to write backup metadata: ${enc}.meta" >&2
         return 1
     fi
@@ -1186,7 +1232,6 @@ print_backup_manifest() {
         "backups"
         "logs"
         ".rate-limit"
-        "secrets"
         "*.sock"
         "*.lock"
         "*.tmp"

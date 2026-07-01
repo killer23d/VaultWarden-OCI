@@ -1945,6 +1945,18 @@ restore_full() {
     chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || log_warn "Could not set ownership on $state_dir/data"
     purge_wal_shm "$state_dir/data/db.sqlite3" || true
 
+    if [[ "$RESTORE_TYPE" == "emergency" && -d "$staging/etc/vaultwarden" ]]; then
+        log_info "Emergency capsule restore phase: installing staged /etc/vaultwarden key/config material..."
+        install -d -o root -g root -m 700 /etc/vaultwarden
+        local _emergency_file
+        for _emergency_file in age-key.txt vaultwarden.env rclone.conf; do
+            if [[ -f "$staging/etc/vaultwarden/$_emergency_file" ]]; then
+                install -o root -g root -m 600 "$staging/etc/vaultwarden/$_emergency_file" "/etc/vaultwarden/$_emergency_file"
+                log_info "  Installed /etc/vaultwarden/$_emergency_file (0600)"
+            fi
+        done
+    fi
+
     local rel_project="${PROJECT_ROOT#/}"
 
     # Predictive warning: if the archive does not contain project config files
