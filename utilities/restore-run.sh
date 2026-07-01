@@ -117,6 +117,7 @@ USE_REMOTE=false
 KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
 RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
 INSPECT_ONLY=false
+RESTORE_PREFLIGHT_SOURCE_ROOT=""
 
 # Declare this here so set -u never fires before main() initialises it via
 # get_config_value(). Every function that references BACKUP_BASE_DIR is called
@@ -1419,9 +1420,11 @@ _restore_inspect_archive_layout() {
     local filter; filter="$(_tar_filter_for_file "$dec_tar")"
     RESTORE_PREFLIGHT_MEMBERS="$(tar $filter -tf "$dec_tar")" || return 1
     RESTORE_PREFLIGHT_FIRST30="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | head -30)"
-    mapfile -t RESTORE_PREFLIGHT_LIVE_DBS < <(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | grep -E '(^|/)data/db\.sqlite3$' | grep -Ev '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
-    mapfile -t RESTORE_PREFLIGHT_SNAPSHOT_DBS < <(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | grep -E '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
-    mapfile -t RESTORE_PREFLIGHT_CONFIGS < <(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | grep -E '(^|/)config/install\.env$' || true)
+    local normalized_members
+    normalized_members="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | sed 's#^\./##')"
+    mapfile -t RESTORE_PREFLIGHT_LIVE_DBS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)data/db\.sqlite3$' | grep -Ev '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
+    mapfile -t RESTORE_PREFLIGHT_SNAPSHOT_DBS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
+    mapfile -t RESTORE_PREFLIGHT_CONFIGS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)config/install\.env$' || true)
     RESTORE_PREFLIGHT_SOURCE_ROOT=""
     RESTORE_PREFLIGHT_LIVE_DB=""
     if (( ${#RESTORE_PREFLIGHT_LIVE_DBS[@]} == 1 )); then
@@ -1500,13 +1503,19 @@ restore_full_preflight() {
         compatible=false; verdict="Legacy repo-local source detected; explicit --force confirmation is required."
         recommended="Re-run with --force only after confirming this legacy archive is intended."
     fi
-    if [[ "$target_mode" == "block" && "$compatible" == "true" && "$INSPECT_ONLY" != "true" ]]; then
-        _restore_prepare_block_target "$state_dir" "$puid" "$pgid" "$dec_tar" || { compatible=false; verdict="Target block/data volume is not mounted and ready."; recommended="Run: sudo ./utilities/setup-storage.sh"; }
-    elif [[ "$target_mode" == "block" && "$compatible" == "true" && "$INSPECT_ONLY" == "true" ]]; then
+    if [[ "$target_mode" == "block" && "$compatible" == "true" ]]; then
         if ! _path_is_mountpoint "$state_dir"; then
             compatible=false; verdict="Target block/data volume is configured but not mounted at: $state_dir"; recommended="Run: sudo ./utilities/setup-storage.sh"
         elif [[ ! -w "$state_dir" ]]; then
             compatible=false; verdict="Target block/data volume is mounted but not writable by root: $state_dir"; recommended="Fix mount/permissions, then re-run inspect."
+        else
+            local missing_dirs=() d
+            for d in $(_restore_required_dirs); do
+                [[ -d "$state_dir/$d" ]] || missing_dirs+=("$d")
+            done
+            if (( ${#missing_dirs[@]} > 0 )); then
+                recommended="After confirmation, restore will create missing mounted block-volume directories: ${missing_dirs[*]}"
+            fi
         fi
     fi
     echo ""
@@ -1661,10 +1670,15 @@ restore_db() {
     local dec_db="$tmpdir/db.sqlite3"
 
     log_info "Decrypting database backup..."
-    age -d -i "$age_key_file" -o "$dec_db" "$backup_file" || {
-        log_error "Decryption failed — verify the age key is correct."
-        log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
-        log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+    local age_err="$tmpdir/db-age-decrypt.err"
+    age -d -i "$age_key_file" -o "$dec_db" "$backup_file" 2>"$age_err" || {
+        if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
+            _restore_age_no_identity_guidance
+        else
+            log_error "Decryption failed — verify the age key is correct."
+            log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+            log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+        fi
         return 1
     }
     [[ "$SKIP_VERIFICATION" != "true" ]] && { verify_sqlite "$dec_db" || return 1; }
@@ -1779,9 +1793,10 @@ restore_full() {
     # shellcheck disable=SC2086
     tar $tar_filter -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --no-overwrite-dir --delay-directory-restore
 
-    local rel_state="${state_dir#/}"
-    if [[ ! -d "$staging/$rel_state" ]]; then
-        log_error "Staging validation failed: expected directory not found: $staging/$rel_state"
+    local source_root="${RESTORE_PREFLIGHT_SOURCE_ROOT:-$state_dir}"
+    local rel_source="${source_root#/}"
+    if [[ ! -d "$staging/$rel_source" ]]; then
+        log_error "Staging validation failed: expected source directory not found: $staging/$rel_source"
         # shellcheck disable=SC2086
         tar $tar_filter -tf "$dec_tar" | head -20 >&2 || true
         return 1
@@ -1840,7 +1855,7 @@ restore_full() {
 
         for _payload_name in "${_restore_payload_allowlist[@]}"; do
             _live_payload="$state_dir/$_payload_name"
-            _staged_payload="$staging/$rel_state/$_payload_name"
+            _staged_payload="$staging/$rel_source/$_payload_name"
 
             if [[ ! -e "$_staged_payload" ]]; then
                 log_info "  Skipping $_payload_name/ (not present in restored archive)"
@@ -1865,7 +1880,7 @@ restore_full() {
 
         log_info "State payload restore phase: promoting allowlisted directories only (data, caddy, logs)."
         for _payload_name in "${_restore_payload_allowlist[@]}"; do
-            _staged_payload="$staging/$rel_state/$_payload_name"
+            _staged_payload="$staging/$rel_source/$_payload_name"
             [[ -e "$_staged_payload" ]] || continue
             if ! rsync -a --no-owner --no-group "$_staged_payload/" "$state_dir/$_payload_name/"; then
                 log_error "rsync of staged $_payload_name/ to $state_dir failed."
@@ -1877,11 +1892,30 @@ restore_full() {
         log_warn "Archive backups/, secrets/, and config/ under $state_dir were intentionally not promoted."
         unset -f _rollback_payload_paths
     else
-        # Boot-only mode: atomic directory swap (fast path).
-        [[ -d "$state_dir" ]] && mv "$state_dir" "${state_dir}.pre-restore-${ts}"
+        if [[ "$source_root" == "$state_dir" ]]; then
+            # Boot-only same-layout mode: atomic directory swap (fast path).
+            [[ -d "$state_dir" ]] && mv "$state_dir" "${state_dir}.pre-restore-${ts}"
 
-        log_info "State payload restore phase: promoting staged state directory to live path..."
-        mv "$staging/$rel_state" "$state_dir"
+            log_info "State payload restore phase: promoting staged state directory to live path..."
+            mv "$staging/$rel_source" "$state_dir"
+        else
+            # Cross-layout mode: never move arbitrary source-root contents into
+            # the target. Promote only the same conservative state payload
+            # allowlist used for mounted block volumes.
+            mkdir -p "$state_dir"
+            local -a _restore_payload_allowlist=(data caddy logs)
+            local _payload_name _live_payload _staged_payload
+            for _payload_name in "${_restore_payload_allowlist[@]}"; do
+                _live_payload="$state_dir/$_payload_name"
+                _staged_payload="$staging/$rel_source/$_payload_name"
+                [[ -e "$_staged_payload" ]] || { log_info "  Skipping $_payload_name/ (not present in restored archive)"; continue; }
+                [[ -e "$_live_payload" ]] && mv "$_live_payload" "${_live_payload}.pre-restore-${ts}"
+                mkdir -p "$_live_payload"
+                cp -a "$_staged_payload/." "$_live_payload/"
+                log_info "  Promoted: $_payload_name/"
+            done
+            log_warn "Cross-layout restore did not promote backups/, secrets/, config/, .pre-restore-*, repo files, or scripts."
+        fi
     fi
 
     # Ensure storage sentinel survives restores in separate-volume mode.
@@ -2039,7 +2073,9 @@ main() {
     # is configured; it must never permit writes to an unmounted block-volume path.
     local _configured_data_device
     _configured_data_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
-    if [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" && -z "$_configured_data_device" ]]; then
+    if [[ "$INSPECT_ONLY" == "true" ]]; then
+        log_warn "Inspect mode: skipping live project-state readiness enforcement; storage readiness will be reported by restore preflight."
+    elif [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" && -z "$_configured_data_device" ]]; then
         log_warn "Skipping project-state-ready check (--force --remote boot-volume/bootstrap mode)."
         log_warn "No DATA_VOLUME_DEVICE is configured; block-volume safety checks remain required when a data volume is configured."
     else
@@ -2215,6 +2251,15 @@ main() {
         echo ""
         read -r -p "Type 'yes' to proceed: " confirm
         [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
+    fi
+
+    if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ "$DRY_RUN" != "true" ]]; then
+        local _target_mode_for_prepare
+        _target_mode_for_prepare="$(_detect_storage_mode "$STATE_DIR" "$(get_config_value "DATA_VOLUME_MOUNT" "")" "$(get_config_value "DATA_VOLUME_DEVICE" "")")"
+        if [[ "$_target_mode_for_prepare" == "block" ]]; then
+            log_info "Target preparation phase: verifying and repairing mounted block-storage directories..."
+            _restore_prepare_block_target "$STATE_DIR" "$PUID" "$PGID" "$_preflight_tar" || exit 1
+        fi
     fi
 
     create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1

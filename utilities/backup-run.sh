@@ -370,11 +370,12 @@ _validate_full_archive_payload() {
     local expected_db="${state_dir#/}/data/db.sqlite3"
     local live_db="${state_dir}/data/db.sqlite3"
     local members
-    members="$(tar --use-compress-program='zstd -d -T0' -tf "$temp_tar" 2>/dev/null)" || {
+    members="$(tar --use-compress-program='zstd -d -T0' -tf "$temp_tar" 2>/dev/null || tar -tf "$temp_tar" 2>/dev/null)" || {
         log_error "Backup validation failed: cannot list tar members." >&2
         rm -f "$temp_tar"
         return 1
     }
+    members="$(printf '%s\n' "$members" | sed 's#^\./##')"
     if [[ -f "$live_db" ]]; then
         local count
         count="$(printf '%s\n' "$members" | grep -Fx "$expected_db" | wc -l | tr -d ' ')"
@@ -1086,6 +1087,10 @@ perform_full_backup() {
                 ;;
         esac
     done
+    tar_excludes+=(
+        "--exclude=${state_dir#/}/.pre-restore-*"
+        "--exclude=${state_dir#/}/*/.pre-restore-*"
+    )
 
     local tar_sources=()
 
