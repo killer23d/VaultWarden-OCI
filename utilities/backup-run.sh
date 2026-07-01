@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # utilities/backup-run.sh — Creates, verifies, and optionally syncs VaultWarden backups.
+# shellcheck disable=SC1091,SC2317
 
 set -euo pipefail
 
@@ -351,6 +352,51 @@ verify_sqlite() {
         return 1
     fi
     backup_log_info "SQLite integrity check passed"
+    return 0
+}
+
+_backup_storage_mode() {
+    local state_dir="$1" data_mount="${2:-}" data_device="${3:-}"
+    if [[ "$state_dir" == "/var/lib/vaultwarden" ]]; then
+        if mountpoint -q "$state_dir" 2>/dev/null || [[ -f "$state_dir/.vw-data-volume" ]]; then echo "block"; else echo "boot"; fi
+    elif [[ -n "$data_mount" && "$state_dir" == "$data_mount" ]] || [[ -n "$data_device" ]] || [[ "$state_dir" == /mnt/* ]]; then
+        echo "block"
+    else
+        echo "unknown"
+    fi
+}
+
+_validate_full_archive_payload() {
+    local temp_tar="$1" state_dir="$2" script_dir="$3" backup_label="$4"
+    local expected_db="${state_dir#/}/data/db.sqlite3"
+    local live_db="${state_dir}/data/db.sqlite3"
+    local members
+    members="$(tar --use-compress-program='zstd -d -T0' -tf "$temp_tar" 2>/dev/null || tar -tf "$temp_tar" 2>/dev/null)" || {
+        log_error "Backup validation failed: cannot list tar members." >&2
+        rm -f "$temp_tar"
+        return 1
+    }
+    members="$(printf '%s\n' "$members" | sed 's#^\./##')"
+    if [[ -f "$live_db" ]]; then
+        local count
+        count="$(printf '%s\n' "$members" | grep -Fxc "$expected_db" || true)"
+        if [[ "$count" != "1" ]]; then
+            log_error "Backup validation failed before encryption/upload: live DB is missing from ${backup_label} archive." >&2
+            log_error "  PROJECT_STATE_DIR: $state_dir" >&2
+            log_error "  SCRIPT_DIR: $script_dir" >&2
+            log_error "  Expected DB member path: $expected_db" >&2
+            log_error "  First 30 tar members:" >&2
+            printf '%s\n' "$members" | head -30 | sed 's/^/    /' >&2
+            rm -f "$temp_tar"
+            return 1
+        fi
+    fi
+    if ! printf '%s\n' "$members" | grep -Eq "^${script_dir#/}/?$"; then
+        backup_log_warn "Backup validation warning: project config root ${script_dir#/}/ was not visible in archive member list."
+    fi
+    if printf '%s\n' "$members" | grep -Eq '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$'; then
+        backup_log_warn "Backup validation: ignored pre-restore snapshot DBs; they do not satisfy live DB validation."
+    fi
     return 0
 }
 
@@ -1024,6 +1070,8 @@ perform_full_backup() {
         "*.lock"
         "*.tmp"
         "*.age.tmp"
+        ".pre-restore-*"
+        "*/.pre-restore-*"
     )
     local -a tar_excludes=()
     local excl
@@ -1040,6 +1088,10 @@ perform_full_backup() {
                 ;;
         esac
     done
+    tar_excludes+=(
+        "--exclude=${state_dir#/}/.pre-restore-*"
+        "--exclude=${state_dir#/}/*/.pre-restore-*"
+    )
 
     local tar_sources=()
 
@@ -1089,6 +1141,8 @@ perform_full_backup() {
         return 1
     fi
 
+    _validate_full_archive_payload "$temp_tar" "$state_dir" "$SCRIPT_DIR" "$backup_label" || return 1
+
     backup_log_info "Encrypting ${backup_label} archive..."
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
@@ -1109,8 +1163,13 @@ perform_full_backup() {
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"; return 1; }
 
+    local data_volume_mount data_volume_device state_dir_is_mountpoint storage_mode
+    data_volume_mount="$(get_config_value "DATA_VOLUME_MOUNT" "")"
+    data_volume_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
+    state_dir_is_mountpoint=false; mountpoint -q "$state_dir" 2>/dev/null && state_dir_is_mountpoint=true
+    storage_mode="$(_backup_storage_mode "$state_dir" "$data_volume_mount" "$data_volume_device")"
     if ! create_backup_metadata "$enc" "$backup_label" \
-            "$(printf 'archive_format=relative\nversion=2')"; then
+            "$(printf 'project_state_dir=%s\nstorage_mode=%s\ndata_volume_mount=%s\ndata_volume_device=%s\nstate_dir_is_mountpoint=%s\nrepo_root=%s\narchive_format=relative\nversion=2' "$state_dir" "$storage_mode" "$data_volume_mount" "$data_volume_device" "$state_dir_is_mountpoint" "$SCRIPT_DIR")"; then
         log_error "Failed to write backup metadata: ${enc}.meta" >&2
         return 1
     fi
@@ -1132,6 +1191,8 @@ print_backup_manifest() {
         "*.lock"
         "*.tmp"
         "*.age.tmp"
+        ".pre-restore-*"
+        "*/.pre-restore-*"
     )
     echo "=== Full Backup Contents ==="
     echo "Included: Project root + state directory"

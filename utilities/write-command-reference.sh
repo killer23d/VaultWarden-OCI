@@ -207,7 +207,7 @@ trap - EXIT
 # If this script was invoked via sudo, the output file is now owned by root.
 # Chown it back to the real invoking user so the next non-root `make docs`
 # run (and git operations) are not blocked by a permission error.
-if [[ -n "${SUDO_USER:-}" ]]; then
+if [[ ${EUID:-$(id -u)} -eq 0 && -n "${SUDO_USER:-}" ]]; then
     real_uid="$(id -u "${SUDO_USER}")"
     real_gid="$(id -g "${SUDO_USER}")"
     chown "${real_uid}:${real_gid}" "${OUTPUT_FILE}"

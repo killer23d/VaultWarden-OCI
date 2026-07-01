@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # utilities/restore-run.sh — Restores VaultWarden data from local or remote encrypted backups.
+# shellcheck disable=SC1091
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,12 +39,14 @@ _require_env_for_live_restore() {
         esac
     done
 
-    local has_interactive=false has_remote=false
+    local has_interactive=false has_inspect=false has_remote=false
     for arg in "$@"; do
         [[ "$arg" == "interactive" ]] && has_interactive=true
+        [[ "$arg" == "inspect" ]] && has_inspect=true
         [[ "$arg" == "--remote"    ]] && has_remote=true
     done
     [[ "$has_interactive" == "true" && "$has_remote" == "true" ]] && return 0
+    [[ "$has_inspect" == "true" && "$has_remote" == "true" ]] && return 0
 
     if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
         echo "" >&2
@@ -97,7 +100,7 @@ check_dependencies() {
     fi
 }
 case "${1:-}" in
-    latest|list|interactive) check_dependencies ;;
+    latest|list|interactive|inspect) check_dependencies ;;
 esac
 
 BACKUP_FILE=""
@@ -114,6 +117,8 @@ RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
 USE_REMOTE=false
 KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
 RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
+INSPECT_ONLY=false
+RESTORE_PREFLIGHT_SOURCE_ROOT=""
 
 # Declare this here so set -u never fires before main() initialises it via
 # get_config_value(). Every function that references BACKUP_BASE_DIR is called
@@ -140,6 +145,7 @@ SUBCOMMANDS:
     list              List available local backups (no root required)
     list --remote     List available remote backups (no root required)
     interactive       Interactive guided restore — shows a numbered backup menu.
+    inspect           Non-destructive backup layout/storage preflight only.
                       If rclone is configured, you are first asked whether to
                       restore from a LOCAL or REMOTE backup.
 
@@ -166,6 +172,7 @@ OPTIONS (used after a subcommand):
     --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
+    --inspect               Non-destructive inspect mode (same as inspect subcommand)
     --force                 Skip confirmation prompts
 
 GLOBAL SUBCOMMAND:
@@ -233,9 +240,13 @@ case "$1" in
     interactive)
         shift
         ;;
+    inspect)
+        shift
+        INSPECT_ONLY=true
+        ;;
     *)
         log_error "Unknown subcommand: '$1'"
-        log_error "Valid subcommands: latest [TYPE] | list [--remote] | interactive"
+        log_error "Valid subcommands: latest [TYPE] | list [--remote] | interactive | inspect"
         log_error "Run './restore.sh help' for usage."
         show_help
         exit 1
@@ -255,6 +266,7 @@ while [[ $# -gt 0 ]]; do
         --skip-verification)   SKIP_VERIFICATION=true;   shift ;;
         --skip-env)            RESTORE_ENV=false;        shift ;;
         --dry-run)             DRY_RUN=true;             shift ;;
+        --inspect)             INSPECT_ONLY=true;        shift ;;
         --force)               FORCE=true;               shift ;;
         *)                     log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac
@@ -1351,6 +1363,200 @@ _require_sops_for_rekey() {
     _require_command_for_path sops "post-restore SOPS key rotation/rekey" sops
 }
 
+_path_is_mountpoint() { mountpoint -q "$1" 2>/dev/null; }
+
+_detect_storage_mode() {
+    local root="${1:-}" data_mount="${2:-}" data_device="${3:-}"
+    if [[ "$root" == "/var/lib/vaultwarden" ]]; then
+        if [[ -f "$root/.vw-data-volume" ]] || _path_is_mountpoint "$root"; then echo "block"; else echo "boot"; fi
+    elif [[ -n "$root" && ( "$root" == /mnt/* || "$root" == /media/* || "$root" == /srv/* ) ]]; then
+        echo "block"
+    elif [[ -n "$data_mount" && "$root" == "$data_mount" ]] || [[ -n "$data_device" ]]; then
+        echo "block"
+    elif [[ "$root" == *"/VaultWarden-OCI" ]]; then
+        echo "repo-local"
+    else
+        echo "unknown"
+    fi
+}
+
+_restore_required_dirs() { printf '%s\n' data caddy logs config secrets backups; }
+
+_restore_age_no_identity_guidance() {
+    log_error "The current configured Age key cannot decrypt this selected backup."
+    log_error "The selected backup may have been encrypted with an older operational key or offline recovery key."
+    log_error "The current live key and backup decrypt key may be different."
+    log_error "Retry with:"
+    log_error "  sudo ./restore.sh interactive --remote --key-file /path/to/old-age-key.txt"
+    log_error "or:"
+    log_error "  sudo ./restore.sh latest --from-recovery-kit /path/to/recovery-kit.txt --force"
+}
+
+_decrypt_restore_archive_for_preflight() {
+    local backup_file="$1" age_key_file="$2" tmpdir="$3"
+    local inner_name="${backup_file%.age}"
+    case "$inner_name" in
+        *.tar.zst|*.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tbz) : ;;
+        *) inner_name="${inner_name}.tar.gz" ;;
+    esac
+    local dec_tar
+    dec_tar="$tmpdir/$(basename "$inner_name")"
+    [[ -s "$dec_tar" ]] && { printf '%s\n' "$dec_tar"; return 0; }
+    log_info "Decrypting archive for non-destructive preflight inspection..." >&2
+    local age_err="$tmpdir/age-decrypt.err"
+    if ! age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" 2>"$age_err"; then
+        if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
+            _restore_age_no_identity_guidance
+        else
+            log_error "Decryption failed — verify the age key is correct."
+            log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+            log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+        fi
+        return 1
+    fi
+    printf '%s\n' "$dec_tar"
+}
+
+_restore_inspect_archive_layout() {
+    local dec_tar="$1" archive_format="$3"
+    local filter; filter="$(_tar_filter_for_file "$dec_tar")"
+    local -a filter_args=()
+    [[ -n "$filter" ]] && read -r -a filter_args <<< "$filter"
+    RESTORE_PREFLIGHT_MEMBERS="$(tar "${filter_args[@]}" -tf "$dec_tar")" || return 1
+    RESTORE_PREFLIGHT_FIRST30="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | head -30)"
+    local normalized_members
+    normalized_members="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | sed 's#^\./##')"
+    mapfile -t RESTORE_PREFLIGHT_LIVE_DBS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)data/db\.sqlite3$' | grep -Ev '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
+    mapfile -t RESTORE_PREFLIGHT_SNAPSHOT_DBS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
+    mapfile -t RESTORE_PREFLIGHT_CONFIGS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)config/install\.env$' || true)
+    RESTORE_PREFLIGHT_SOURCE_ROOT=""
+    RESTORE_PREFLIGHT_LIVE_DB=""
+    if (( ${#RESTORE_PREFLIGHT_LIVE_DBS[@]} == 1 )); then
+        RESTORE_PREFLIGHT_LIVE_DB="${RESTORE_PREFLIGHT_LIVE_DBS[0]}"
+        RESTORE_PREFLIGHT_SOURCE_ROOT="/${RESTORE_PREFLIGHT_LIVE_DB%/data/db.sqlite3}"
+    elif (( ${#RESTORE_PREFLIGHT_LIVE_DBS[@]} == 0 && ${#RESTORE_PREFLIGHT_CONFIGS[@]} > 0 )); then
+        RESTORE_PREFLIGHT_SOURCE_ROOT="/${RESTORE_PREFLIGHT_CONFIGS[0]%/config/install.env}"
+    elif (( ${#RESTORE_PREFLIGHT_LIVE_DBS[@]} == 0 && ${#RESTORE_PREFLIGHT_SNAPSHOT_DBS[@]} > 0 )); then
+        local snap="${RESTORE_PREFLIGHT_SNAPSHOT_DBS[0]}"
+        RESTORE_PREFLIGHT_SOURCE_ROOT="/${snap%%/.pre-restore-*}"
+    fi
+    RESTORE_PREFLIGHT_SOURCE_MODE="$(_detect_storage_mode "$RESTORE_PREFLIGHT_SOURCE_ROOT" "" "")"
+    RESTORE_PREFLIGHT_SOURCE_MOUNT=""
+    [[ "$RESTORE_PREFLIGHT_SOURCE_MODE" == "block" ]] && RESTORE_PREFLIGHT_SOURCE_MOUNT="$RESTORE_PREFLIGHT_SOURCE_ROOT"
+    [[ "$archive_format" == "absolute" ]] && RESTORE_PREFLIGHT_SOURCE_MODE="unknown"
+    return 0
+}
+
+_restore_prepare_block_target() {
+    local state_dir="$1" puid="$2" pgid="$3" archive_path="${4:-}"
+    local ok=true
+    if [[ ! -d "$state_dir" ]]; then log_error "Target block mount path does not exist: $state_dir"; ok=false; fi
+    if ! _path_is_mountpoint "$state_dir"; then
+        log_error "Target block storage is configured but not mounted at: $state_dir"
+        [[ -n "${DATA_VOLUME_DEVICE:-}" ]] && log_error "Configured DATA_VOLUME_DEVICE: ${DATA_VOLUME_DEVICE}"
+        log_error "Suggested next action: sudo ./utilities/setup-storage.sh"
+        command -v lsblk >/dev/null 2>&1 && { log_warn "Detected block devices:"; lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null | sed 's/^/  /' >&2 || true; }
+        return 1
+    fi
+    [[ -w "$state_dir" ]] || { log_error "Target block mount is not writable by root: $state_dir"; ok=false; }
+    if [[ -n "$archive_path" && -f "$archive_path" ]]; then
+        local need avail
+        need=$(stat -c '%s' "$archive_path" 2>/dev/null || echo 0)
+        avail=$(df -PB1 "$state_dir" 2>/dev/null | awk 'NR==2 {print $4+0}')
+        if [[ "$need" =~ ^[0-9]+$ && "$avail" =~ ^[0-9]+$ ]] && (( avail < need * 2 )); then
+            log_error "Target block mount may not have enough free space (available ${avail} bytes, archive ${need} bytes)."
+            ok=false
+        fi
+    fi
+    [[ "$ok" == "true" ]] || return 1
+    local d
+    for d in $(_restore_required_dirs); do
+        if [[ ! -e "$state_dir/$d" ]]; then
+            mkdir -p "$state_dir/$d" || return 1
+            log_info "Created missing block-storage directory: $state_dir/$d"
+        elif [[ ! -d "$state_dir/$d" ]]; then
+            log_error "Required target path exists but is not a directory: $state_dir/$d"; return 1
+        fi
+    done
+    touch "$state_dir/.vw-data-volume" || return 1
+    chown -R "${puid}:${pgid}" "$state_dir/data" "$state_dir/backups" 2>/dev/null || true
+    chmod 700 "$state_dir/secrets" 2>/dev/null || true
+    return 0
+}
+
+restore_full_preflight() {
+    local backup_file="$1" dec_tar="$2" state_dir="$3" puid="$4" pgid="$5" archive_format="$6" archive_version="$7"
+    _restore_inspect_archive_layout "$dec_tar" "$state_dir" "$archive_format" || { log_error "Cannot inspect archive members."; return 1; }
+    local target_mount="${DATA_VOLUME_MOUNT:-$(get_config_value "DATA_VOLUME_MOUNT" "")}"
+    local target_device="${DATA_VOLUME_DEVICE:-$(get_config_value "DATA_VOLUME_DEVICE" "")}"
+    local state_is_mountpoint="no"; _path_is_mountpoint "$state_dir" && state_is_mountpoint="yes"
+    local target_mode; target_mode="$(_detect_storage_mode "$state_dir" "$target_mount" "$target_device")"
+    local live_db="${RESTORE_PREFLIGHT_LIVE_DB:-missing}"
+    local verdict="Compatible"; local recommended="Continue with restore if this is the intended backup."
+    local compatible=true
+    if (( ${#RESTORE_PREFLIGHT_LIVE_DBS[@]} > 1 )); then
+        compatible=false; verdict="Multiple live source DB roots detected; inspect archive manually."
+        recommended="Choose another backup or inspect archive manually."
+    elif [[ -z "$RESTORE_PREFLIGHT_LIVE_DB" ]]; then
+        compatible=false; verdict="No live state DB found for full/emergency restore."
+        recommended="Restore latest DB backup, choose another full/emergency backup, or inspect archive manually."
+    elif [[ "$RESTORE_PREFLIGHT_SOURCE_MODE" == "block" && "$target_mode" == "boot" ]]; then
+        compatible=false; verdict="Storage mismatch: backup appears to be from block storage, but this VM is currently targeting boot storage."
+        recommended="Attach/mount/configure block storage first, or restore the latest DB backup if only Vaultwarden data is needed."
+    elif [[ "$RESTORE_PREFLIGHT_SOURCE_MODE" == "repo-local" && "$FORCE" != "true" ]]; then
+        compatible=false; verdict="Legacy repo-local source detected; explicit --force confirmation is required."
+        recommended="Re-run with --force only after confirming this legacy archive is intended."
+    fi
+    if [[ "$target_mode" == "block" && "$compatible" == "true" ]]; then
+        if ! _path_is_mountpoint "$state_dir"; then
+            compatible=false; verdict="Target block/data volume is configured but not mounted at: $state_dir"; recommended="Run: sudo ./utilities/setup-storage.sh"
+        elif [[ ! -w "$state_dir" ]]; then
+            compatible=false; verdict="Target block/data volume is mounted but not writable by root: $state_dir"; recommended="Fix mount/permissions, then re-run inspect."
+        else
+            local missing_dirs=() d
+            for d in $(_restore_required_dirs); do
+                [[ -d "$state_dir/$d" ]] || missing_dirs+=("$d")
+            done
+            if (( ${#missing_dirs[@]} > 0 )); then
+                recommended="After confirmation, restore will create missing mounted block-volume directories: ${missing_dirs[*]}"
+            fi
+        fi
+    fi
+    echo ""
+    log_info "Restore preflight report (non-destructive):"
+    echo "Backup source:"
+    echo "  Selected file:      $backup_file"
+    echo "  Type:               $RESTORE_TYPE"
+    echo "  Archive format:     ${archive_format} v${archive_version}"
+    echo "  Source state root:  ${RESTORE_PREFLIGHT_SOURCE_ROOT:-unknown}"
+    echo "  Source storage:     ${RESTORE_PREFLIGHT_SOURCE_MODE:-unknown}"
+    echo "  Source mount path:  ${RESTORE_PREFLIGHT_SOURCE_MOUNT:-unset}"
+    echo "  Config paths:       ${RESTORE_PREFLIGHT_CONFIGS[*]:-missing}"
+    echo "  Live DB:            ${live_db}"
+    echo "  Snapshot DBs:       ${RESTORE_PREFLIGHT_SNAPSHOT_DBS[*]:-none}"
+    echo ""
+    echo "Current target:"
+    echo "  PROJECT_STATE_DIR:  $state_dir"
+    echo "  DATA_VOLUME_MOUNT:  ${target_mount:-unset}"
+    echo "  DATA_VOLUME_DEVICE: ${target_device:-unset}"
+    echo "  Is mountpoint:      $state_is_mountpoint"
+    echo "  Target storage:     $target_mode"
+    echo "  Required dirs:      $(_restore_required_dirs | paste -sd' ' -)"
+    echo ""
+    echo "Verdict:"
+    echo "  $verdict"
+    echo "  Recommended next action: $recommended"
+    if [[ "$compatible" != "true" ]]; then
+        echo ""
+        echo "Archive members (first 30):"
+        while IFS= read -r _member; do
+            printf '  %s\n' "$_member"
+        done <<< "$RESTORE_PREFLIGHT_FIRST30"
+        return 1
+    fi
+    return 0
+}
+
 tar_validate_members() {
     local tarfile="$1" filter
     filter="$(_tar_filter_for_file "$tarfile")"
@@ -1470,10 +1676,15 @@ restore_db() {
     local dec_db="$tmpdir/db.sqlite3"
 
     log_info "Decrypting database backup..."
-    age -d -i "$age_key_file" -o "$dec_db" "$backup_file" || {
-        log_error "Decryption failed — verify the age key is correct."
-        log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
-        log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+    local age_err="$tmpdir/db-age-decrypt.err"
+    age -d -i "$age_key_file" -o "$dec_db" "$backup_file" 2>"$age_err" || {
+        if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
+            _restore_age_no_identity_guidance
+        else
+            log_error "Decryption failed — verify the age key is correct."
+            log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+            log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+        fi
         return 1
     }
     [[ "$SKIP_VERIFICATION" != "true" ]] && { verify_sqlite "$dec_db" || return 1; }
@@ -1541,13 +1752,20 @@ restore_full() {
     dec_tar="$tmpdir/$(basename "$inner_name")"
     local tar_filter; tar_filter="$(_tar_filter_for_file "$dec_tar")"
 
-    log_info "Decrypting archive..."
-    age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" || {
-        log_error "Decryption failed — verify the age key is correct."
-        log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
-        log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
-        return 1
-    }
+    if [[ ! -s "$dec_tar" ]]; then
+        log_info "Decrypting archive..."
+        local age_err="$tmpdir/age-decrypt.err"
+        if ! age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" 2>"$age_err"; then
+            if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
+                _restore_age_no_identity_guidance
+            else
+                log_error "Decryption failed — verify the age key is correct."
+                log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+                log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+            fi
+            return 1
+        fi
+    fi
 
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying archive structure..."
@@ -1581,9 +1799,10 @@ restore_full() {
     # shellcheck disable=SC2086
     tar $tar_filter -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --no-overwrite-dir --delay-directory-restore
 
-    local rel_state="${state_dir#/}"
-    if [[ ! -d "$staging/$rel_state" ]]; then
-        log_error "Staging validation failed: expected directory not found: $staging/$rel_state"
+    local source_root="${RESTORE_PREFLIGHT_SOURCE_ROOT:-$state_dir}"
+    local rel_source="${source_root#/}"
+    if [[ ! -d "$staging/$rel_source" ]]; then
+        log_error "Staging validation failed: expected source directory not found: $staging/$rel_source"
         # shellcheck disable=SC2086
         tar $tar_filter -tf "$dec_tar" | head -20 >&2 || true
         return 1
@@ -1642,7 +1861,7 @@ restore_full() {
 
         for _payload_name in "${_restore_payload_allowlist[@]}"; do
             _live_payload="$state_dir/$_payload_name"
-            _staged_payload="$staging/$rel_state/$_payload_name"
+            _staged_payload="$staging/$rel_source/$_payload_name"
 
             if [[ ! -e "$_staged_payload" ]]; then
                 log_info "  Skipping $_payload_name/ (not present in restored archive)"
@@ -1665,9 +1884,9 @@ restore_full() {
             fi
         done
 
-        log_info "Promoting staged restore payload to live volume..."
+        log_info "State payload restore phase: promoting allowlisted directories only (data, caddy, logs)."
         for _payload_name in "${_restore_payload_allowlist[@]}"; do
-            _staged_payload="$staging/$rel_state/$_payload_name"
+            _staged_payload="$staging/$rel_source/$_payload_name"
             [[ -e "$_staged_payload" ]] || continue
             if ! rsync -a --no-owner --no-group "$_staged_payload/" "$state_dir/$_payload_name/"; then
                 log_error "rsync of staged $_payload_name/ to $state_dir failed."
@@ -1679,11 +1898,30 @@ restore_full() {
         log_warn "Archive backups/, secrets/, and config/ under $state_dir were intentionally not promoted."
         unset -f _rollback_payload_paths
     else
-        # Boot-only mode: atomic directory swap (fast path).
-        [[ -d "$state_dir" ]] && mv "$state_dir" "${state_dir}.pre-restore-${ts}"
+        if [[ "$source_root" == "$state_dir" ]]; then
+            # Boot-only same-layout mode: atomic directory swap (fast path).
+            [[ -d "$state_dir" ]] && mv "$state_dir" "${state_dir}.pre-restore-${ts}"
 
-        log_info "Promoting staged restore to live path..."
-        mv "$staging/$rel_state" "$state_dir"
+            log_info "State payload restore phase: promoting staged state directory to live path..."
+            mv "$staging/$rel_source" "$state_dir"
+        else
+            # Cross-layout mode: never move arbitrary source-root contents into
+            # the target. Promote only the same conservative state payload
+            # allowlist used for mounted block volumes.
+            mkdir -p "$state_dir"
+            local -a _restore_payload_allowlist=(data caddy logs)
+            local _payload_name _live_payload _staged_payload
+            for _payload_name in "${_restore_payload_allowlist[@]}"; do
+                _live_payload="$state_dir/$_payload_name"
+                _staged_payload="$staging/$rel_source/$_payload_name"
+                [[ -e "$_staged_payload" ]] || { log_info "  Skipping $_payload_name/ (not present in restored archive)"; continue; }
+                [[ -e "$_live_payload" ]] && mv "$_live_payload" "${_live_payload}.pre-restore-${ts}"
+                mkdir -p "$_live_payload"
+                cp -a "$_staged_payload/." "$_live_payload/"
+                log_info "  Promoted: $_payload_name/"
+            done
+            log_warn "Cross-layout restore did not promote backups/, secrets/, config/, .pre-restore-*, repo files, or scripts."
+        fi
     fi
 
     # Ensure storage sentinel survives restores in separate-volume mode.
@@ -1718,7 +1956,7 @@ restore_full() {
     fi
 
     if [[ -d "$staging/$rel_project" ]]; then
-        log_info "Restoring project config files from archive..."
+        log_info "Project config restore phase: restoring explicit config files from archive (scripts and secrets excluded)."
         local config_files=(docker-compose.yml docker-compose.override.yml .env.example)
         [[ "$RESTORE_ENV" == "true" ]] && config_files=(.env "${config_files[@]}")
         for f in "${config_files[@]}"; do
@@ -1841,7 +2079,9 @@ main() {
     # is configured; it must never permit writes to an unmounted block-volume path.
     local _configured_data_device
     _configured_data_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
-    if [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" && -z "$_configured_data_device" ]]; then
+    if [[ "$INSPECT_ONLY" == "true" ]]; then
+        log_warn "Inspect mode: skipping live project-state readiness enforcement; storage readiness will be reported by restore preflight."
+    elif [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" && -z "$_configured_data_device" ]]; then
         log_warn "Skipping project-state-ready check (--force --remote boot-volume/bootstrap mode)."
         log_warn "No DATA_VOLUME_DEVICE is configured; block-volume safety checks remain required when a data volume is configured."
     else
@@ -1980,6 +2220,35 @@ main() {
         _require_command_for_path rsync "block-volume full/emergency restores" rsync || exit 1
     fi
 
+    if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]]; then
+        log_warn "Full/emergency restore replaces application state/config and may require the same expected storage class."
+        local _preflight_tar
+        _preflight_tar="$(_decrypt_restore_archive_for_preflight "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$TMPDIR_RESTORE")" || exit 1
+        restore_full_preflight "$BACKUP_FILE" "$_preflight_tar" "$STATE_DIR" "$PUID" "$PGID" "$archive_format" "$archive_version" || exit 1
+        if [[ "$INSPECT_ONLY" == "true" ]]; then
+            log_success "Inspect mode complete — no services stopped, no files restored, no key rotation, no health check."
+            exit 0
+        fi
+    elif [[ "$RESTORE_TYPE" == "db" ]]; then
+        log_info "DB restore is storage-layout independent and is the safest path when only Vaultwarden data is needed."
+        if [[ "$INSPECT_ONLY" == "true" ]]; then
+            local _inspect_db="$TMPDIR_RESTORE/db-inspect.sqlite3" _db_err="$TMPDIR_RESTORE/db-age.err"
+            if age -d -i "$RESTORE_DECRYPT_AGE_KEY_FILE" -o "$_inspect_db" "$BACKUP_FILE" 2>"$_db_err"; then
+                if sqlite3 "$_inspect_db" 'PRAGMA integrity_check;' 2>/dev/null | grep -qx ok; then
+                    log_success "Inspect mode: DB backup integrity check passed."
+                else
+                    log_warn "Inspect mode: DB backup decrypted, but sqlite integrity check did not return ok."
+                fi
+            elif grep -qi 'no identity matched any of the recipients' "$_db_err" 2>/dev/null; then
+                _restore_age_no_identity_guidance; exit 1
+            else
+                log_error "Inspect mode: DB backup decryption failed."; exit 1
+            fi
+            log_success "Inspect mode complete — no services stopped, no files restored, no key rotation, no health check."
+            exit 0
+        fi
+    fi
+
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         echo ""
         log_warn "WARNING: This will overwrite current data."
@@ -1990,29 +2259,58 @@ main() {
         [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
     fi
 
+    if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ "$DRY_RUN" != "true" ]]; then
+        local _target_mode_for_prepare
+        _target_mode_for_prepare="$(_detect_storage_mode "$STATE_DIR" "$(get_config_value "DATA_VOLUME_MOUNT" "")" "$(get_config_value "DATA_VOLUME_DEVICE" "")")"
+        if [[ "$_target_mode_for_prepare" == "block" ]]; then
+            log_info "Target preparation phase: verifying and repairing mounted block-storage directories..."
+            _restore_prepare_block_target "$STATE_DIR" "$PUID" "$PGID" "$_preflight_tar" || exit 1
+        fi
+    fi
+
     create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
 
-    _restore_safety_net() {
-        local rc=$?
-        if [[ $rc -ne 0 ]]; then
-            log_warn "Restore encountered an error (exit $rc) — attempting to restart services..."
-            bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
-                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: sudo ./startup.sh --skip-pull"
-        fi
-        # Preserve the cleanup contract: remove decrypted temp material.
+    RESTORE_DESTRUCTIVE_PHASE_STARTED=false
+    _RESTORE_SAFETY_NET_RUNNING=false
+    _RESTORE_CLEANUP_DONE=false
+    _restore_cleanup_once() {
+        [[ "$_RESTORE_CLEANUP_DONE" == "true" ]] && return 0
+        _RESTORE_CLEANUP_DONE=true
         cleanup
     }
+    _restore_safety_net() {
+        local rc=$?
+        trap - ERR HUP INT TERM
+        if [[ "${_RESTORE_SAFETY_NET_RUNNING:-false}" == "true" ]]; then
+            exit "$rc"
+        fi
+        _RESTORE_SAFETY_NET_RUNNING=true
+        [[ $rc -eq 130 ]] && log_warn "Restore interrupted by operator (Ctrl-C)."
+        if [[ $rc -ne 0 ]]; then
+            if [[ "${RESTORE_DESTRUCTIVE_PHASE_STARTED:-false}" == "true" ]]; then
+                log_warn "Restore encountered an error (exit $rc) after destructive phase — attempting one service restart..."
+                bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
+                    log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: sudo ./startup.sh --skip-pull"
+            else
+                log_warn "Restore failed before destructive phase (exit $rc); services were not stopped and startup.sh will not be run."
+            fi
+        fi
+        _restore_cleanup_once
+        exit "$rc"
+    }
 
+    trap _restore_safety_net ERR HUP INT TERM
     if [[ "$DRY_RUN" != "true" ]]; then
         docker compose stop
+        RESTORE_DESTRUCTIVE_PHASE_STARTED=true
     fi
-    trap _restore_safety_net ERR HUP INT TERM
 
     case "$RESTORE_TYPE" in
         db)
             restore_db "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE"
             ;;
         full|emergency)
+            RESTORE_DESTRUCTIVE_PHASE_STARTED=true
             restore_full "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE" "$archive_format"
             ;;
         *)

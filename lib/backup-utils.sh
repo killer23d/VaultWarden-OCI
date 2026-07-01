@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # lib/backup-utils.sh — Backup and restore helpers for VaultWarden-OCI.
+# shellcheck disable=SC1091
 #
 # Provides:
 #   Listing    : list_backups, get_backup_statistics, get_backup_size
@@ -730,26 +731,29 @@ create_backup_metadata() {
 
     local vw_version="unknown"
     if require_docker >/dev/null 2>&1; then
-        vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
+        vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | awk 'NF {print; exit}' || true)
     fi
+    vw_version="${vw_version//$'\r'/ }"
+    vw_version="${vw_version//$'\n'/ }"
+    [[ -n "$vw_version" ]] || vw_version="unknown"
+    additional_info="$(printf '%s\n' "$additional_info" | awk -F= 'NF == 0 {next} /^#/ {print; next} /^[A-Za-z_][A-Za-z0-9_]*=/ {gsub(/\r/,""); print}')"
 
     install -m 600 /dev/null "$metadata_file" || {
         log_error "Failed to secure metadata file: $metadata_file"
         return 1
     }
 
-    if ! cat > "$metadata_file" <<EOF
-# VaultWarden Backup Metadata
-backup_type=$backup_type
-timestamp=$timestamp
-hostname=$hostname
-file_size=$file_size
-sha256=$checksum
-vaultwarden_version=$vw_version
-creator=VaultWarden-OCI-NG
-$additional_info
-EOF
-    then
+    if ! {
+        printf '# VaultWarden Backup Metadata\n'
+        printf 'backup_type=%s\n' "$backup_type"
+        printf 'timestamp=%s\n' "$timestamp"
+        printf 'hostname=%s\n' "${hostname//$'\n'/ }"
+        printf 'file_size=%s\n' "$file_size"
+        printf 'sha256=%s\n' "$checksum"
+        printf 'vaultwarden_version=%s\n' "$vw_version"
+        printf 'creator=VaultWarden-OCI-NG\n'
+        [[ -n "$additional_info" ]] && printf '%s\n' "$additional_info"
+    } > "$metadata_file"; then
         log_error "Failed to create metadata file: $metadata_file"
         return 1
     fi
@@ -885,10 +889,8 @@ validate_rclone_config_path() {
 
 export -f list_backups validate_backup_integrity check_backup_disk_space
 export -f cleanup_old_backups get_backup_statistics
-# NOTE: create_backup_metadata uses a heredoc; exporting this function can
-# produce malformed imported function definitions in child bash processes.
-# Keep it local to the current shell to avoid "error importing function
-# definition for create_backup_metadata" during apt/dpkg subprocess execution.
+# NOTE: keep create_backup_metadata local to this shell; older exported
+# versions caused noisy imported-function errors during apt/dpkg subprocesses.
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
 export -f _backup_filename_age_days _format_bytes_human _json_escape _resolve_rclone_config validate_rclone_config_path
 export -f _repair_sudo_user_rclone_config_permissions _backup_age_color
