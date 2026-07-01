@@ -1747,7 +1747,15 @@ _mv_run_pipeline() {
         _MV_DELETE_SOURCE="$(_mv_state_read MV_DELETE_SOURCE)"
         local _saved_force_format
         _saved_force_format="$(_mv_state_read MV_FORCE_FORMAT)"
-        _MV_FORCE_FORMAT="${_saved_force_format:-${_resume_cli_force_format}}"
+
+        # Preserve a prior force-format authorization, but also allow a resume-time
+        # --force-format to upgrade an older/incomplete state that saved false.
+        if [[ "${_saved_force_format}" == "true" || "${_resume_cli_force_format}" == "true" ]]; then
+            _MV_FORCE_FORMAT=true
+            [[ "${DRY_RUN}" == "true" ]] || _mv_state_write MV_FORCE_FORMAT true
+        else
+            _MV_FORCE_FORMAT=false
+        fi
         # Always restore direction from state — never require the operator to re-specify.
         # Default to boot-to-block for backwards compatibility with pre-direction state files.
         local _saved_direction
