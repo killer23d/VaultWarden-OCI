@@ -252,6 +252,11 @@ OPTIONS (used after a subcommand):
     --dry-run               Show what would happen without making changes
     --inspect               Non-destructive inspect mode (same as inspect subcommand)
     --force                 Skip confirmation prompts
+    --start-policy MODE     Service start policy after restore: auto | ask | manual
+    --start                 Alias for --start-policy auto
+    --no-start              Alias for --start-policy manual
+    --rotate-age-key        Rotate Age key after restore (secure default)
+    --no-rotate-age-key     Skip post-restore Age rotation after explicit operator choice
 
 GLOBAL SUBCOMMAND:
     help                    Show this help
@@ -268,11 +273,6 @@ ENVIRONMENT:
     RCLONE_REMOTE_NAME                 Read from .env when available
 
 EXAMPLES:
-    # ── QUICK START (most common) ────────────────────────────────
-    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
-    sudo ./restore.sh latest db          # Restore newest DB backup
-    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
-    ./restore.sh list                    # List local backups (no sudo)
 ```
 
 ### maintenance.sh
@@ -720,6 +720,11 @@ OPTIONS (used after a subcommand):
     --dry-run               Show what would happen without making changes
     --inspect               Non-destructive inspect mode (same as inspect subcommand)
     --force                 Skip confirmation prompts
+    --start-policy MODE     Service start policy after restore: auto | ask | manual
+    --start                 Alias for --start-policy auto
+    --no-start              Alias for --start-policy manual
+    --rotate-age-key        Rotate Age key after restore (secure default)
+    --no-rotate-age-key     Skip post-restore Age rotation after explicit operator choice
 
 GLOBAL SUBCOMMAND:
     help                    Show this help
@@ -736,11 +741,6 @@ ENVIRONMENT:
     RCLONE_REMOTE_NAME                 Read from .env when available
 
 EXAMPLES:
-    # ── QUICK START (most common) ────────────────────────────────
-    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
-    sudo ./restore.sh latest db          # Restore newest DB backup
-    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
-    ./restore.sh list                    # List local backups (no sudo)
 ```
 
 ### safe-restart.sh
@@ -1123,7 +1123,7 @@ VaultWarden-OCI systemd Timer Installer
 
 USAGE:
     sudo utilities/setup-systemd.sh <action> [OPTIONS]
-    sudo utilities/setup-systemd.sh install    # Install and enable all timers
+    sudo utilities/setup-systemd.sh install    # Install timers; ask before starting them on a TTY
     sudo utilities/setup-systemd.sh remove     # Disable and remove all timers
     sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
     sudo utilities/setup-systemd.sh status     # Show timer and service status
@@ -1140,6 +1140,10 @@ ACTIONS:
 
 OPTIONS:
     --dry-run     Print actions without executing
+    --start-policy MODE  Timer activation policy: auto | ask | manual
+    --enable-now         Alias for --start-policy auto
+    --no-enable-now      Alias for --start-policy manual
+    --no-start           Alias for --start-policy manual
     --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
@@ -1160,11 +1164,12 @@ WHAT install DOES:
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     6. systemctl daemon-reload
-    7. systemctl enable --now for all 6 timers and enables vaultwarden-startup.service
+    7. Enables vaultwarden-startup.service and enables/starts timers according to start policy
     8. Verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install
+    sudo utilities/setup-systemd.sh install --no-enable-now
     sudo utilities/setup-systemd.sh install --dry-run
     sudo utilities/setup-systemd.sh validate
     sudo utilities/setup-systemd.sh status
@@ -1261,21 +1266,3 @@ DESCRIPTION:
 OPTIONS:
     --help, -h      Show this help without rewriting docs
 ```
-
-### 2026 backup tier model
-
-VaultWarden-OCI has three deliberately different backup tiers:
-
-| Tier | Use | Contents | Key handling |
-| --- | --- | --- | --- |
-| `db` | Quick database rollback | A single encrypted, integrity-checked SQLite snapshot (`.sqlite3.age`) | Encrypted to the operational Age recipient. |
-| `full` | Normal fresh-VM disaster recovery | Project root, state directory, persistent config, encrypted SOPS `secrets.yaml`, sidecars/metadata, and a verified DB injected at `${PROJECT_STATE_DIR}/data/db.sqlite3` | Excludes `/etc/vaultwarden/age-key.txt`; restore requires the operator's offline Age key. |
-| `emergency` | Fastest clone-style recovery | Everything in `full`, plus staged persistent `/etc/vaultwarden` key/config material such as `age-key.txt`, `vaultwarden.env`, and `rclone.conf` when present | Protected independently with `age -p` passphrase mode or `EMERGENCY_BACKUP_AGE_RECIPIENT`; it is never encrypted only to the operational key it contains. |
-
-All tiers contain a complete verified SQLite database snapshot. Backups first try the SQLite Online Backup API (`sqlite3 .backup`). If that fails, Vaultwarden is stopped, the WAL is checkpointed, `db.sqlite3` is copied, integrity is verified, and Vaultwarden is restarted. No backup reports success with an unverified or partial database.
-
-Full and emergency archives exclude live `db.sqlite3`, WAL/SHM files, backup directories, logs, temp files, sockets/locks, `.pre-restore-*` snapshots, decrypted runtime secrets, and `/run/vaultwarden-oci/secrets/*`. The verified staged DB is then added back to the archive at the normal live path, so `.pre-restore-*` databases never satisfy archive validation.
-
-> **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`). Do not store passphrases in shell history, environment variables, logs, or metadata.
-
-Choose `db` for quick DB rollback, `full` for a fresh VM restore when you have the offline Age key, and `emergency` when the fastest clone-style recovery is worth carrying key material inside the sealed capsule.

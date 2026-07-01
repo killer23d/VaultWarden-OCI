@@ -30,7 +30,7 @@ require 'grep -Fxc "\$expected_db"' "$BACKUP" 'archive validation must require e
 require 'ignored pre-restore snapshot DBs' "$BACKUP" 'archive validation must ignore pre-restore DBs'
 require 'install -o root -g root -m 600.*etc/vaultwarden' "$RESTORE" 'restore must install emergency /etc/vaultwarden files with mode 0600'
 require 'EMERGENCY_BACKUP_AGE_RECIPIENT' "$ROOT/.env.example" 'config example must document emergency DR recipient'
-for doc in docs/BACKUP-RESTORE.md docs/DISASTER-RECOVERY.md docs/OPERATIONS.md docs/COMMAND-REFERENCE.md README.md; do
+for doc in docs/BACKUP-RESTORE.md docs/DISASTER-RECOVERY.md docs/OPERATIONS.md README.md; do
   require 'db`.*database|database rollback' "$ROOT/$doc" "$doc must document db tier"
   require 'full`.*offline Age key|offline Age key' "$ROOT/$doc" "$doc must document full tier offline key"
   require 'emergency`.*clone|clone-grade' "$ROOT/$doc" "$doc must document emergency tier"

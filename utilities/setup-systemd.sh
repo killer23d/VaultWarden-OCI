@@ -6,10 +6,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# shellcheck disable=SC1091
 # shellcheck source=../lib/log.sh
 source "${PROJECT_ROOT}/lib/log.sh"
+# shellcheck disable=SC1091
 # shellcheck source=../lib/config.sh
 source "${PROJECT_ROOT}/lib/config.sh"
+# shellcheck disable=SC1091
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
@@ -21,6 +24,7 @@ REMOVE=false
 STATUS=false
 VALIDATE=false
 DRY_RUN=false
+START_POLICY=""
 
 UNIT_SOURCE_DIR="${PROJECT_ROOT}/systemd"
 UNIT_DEST_DIR="/etc/systemd/system"
@@ -74,7 +78,7 @@ VaultWarden-OCI systemd Timer Installer
 
 USAGE:
     sudo utilities/setup-systemd.sh <action> [OPTIONS]
-    sudo utilities/setup-systemd.sh install    # Install and enable all timers
+    sudo utilities/setup-systemd.sh install    # Install timers; ask before starting them on a TTY
     sudo utilities/setup-systemd.sh remove     # Disable and remove all timers
     sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
     sudo utilities/setup-systemd.sh status     # Show timer and service status
@@ -91,6 +95,10 @@ ACTIONS:
 
 OPTIONS:
     --dry-run     Print actions without executing
+    --start-policy MODE  Timer activation policy: auto | ask | manual
+    --enable-now         Alias for --start-policy auto
+    --no-enable-now      Alias for --start-policy manual
+    --no-start           Alias for --start-policy manual
     --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
@@ -111,11 +119,12 @@ WHAT install DOES:
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     6. systemctl daemon-reload
-    7. systemctl enable --now for all 6 timers and enables vaultwarden-startup.service
+    7. Enables vaultwarden-startup.service and enables/starts timers according to start policy
     8. Verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install
+    sudo utilities/setup-systemd.sh install --no-enable-now
     sudo utilities/setup-systemd.sh install --dry-run
     sudo utilities/setup-systemd.sh validate
     sudo utilities/setup-systemd.sh status
@@ -129,11 +138,20 @@ while [[ $# -gt 0 ]]; do
         validate)     VALIDATE=true;  shift ;;
         status)       STATUS=true;    shift ;;
         --dry-run)    DRY_RUN=true;   shift ;;
+        --start-policy) START_POLICY="$2"; shift 2 ;;
+        --enable-now) START_POLICY="auto"; shift ;;
+        --no-enable-now|--no-start) START_POLICY="manual"; shift ;;
         help|--help|-h) show_help; exit 0 ;;
         --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown sub-action: $1"; show_help; exit 1 ;;
     esac
 done
+
+case "${START_POLICY}" in
+    "" ) if [[ -t 0 ]]; then START_POLICY="ask"; else START_POLICY="auto"; fi ;;
+    auto|ask|manual) ;;
+    *) log_error "Invalid --start-policy: ${START_POLICY}"; exit 1 ;;
+esac
 
 _run() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -802,19 +820,40 @@ install_units() {
         done
     fi
 
-    log_info "Enabling and starting timers ..."
-    for timer in "${TIMERS[@]}"; do
-        _run systemctl enable --now "$timer"
-        log_success "Enabled: $timer"
-    done
     _run systemctl enable "$STARTUP_SERVICE"
     log_success "Enabled: $STARTUP_SERVICE"
+
+    local _enable_now=false
+    case "$START_POLICY" in
+        auto) _enable_now=true ;;
+        ask)
+            local _answer
+            read -r -p "Enable and start backup/maintenance timers now? [y/N] " _answer
+            case "$_answer" in y|Y|yes|YES) _enable_now=true ;; esac
+            ;;
+        manual) _enable_now=false ;;
+    esac
+    if [[ "$_enable_now" == "true" ]]; then
+        log_info "Enabling and starting timers ..."
+        for timer in "${TIMERS[@]}"; do
+            _run systemctl enable --now "$timer"
+            log_success "Enabled and started: $timer"
+        done
+    else
+        log_warn "Timers installed but not started by operator start policy."
+        log_info "Start later with: sudo utilities/setup-systemd.sh install --enable-now"
+        log_info "Or run: sudo systemctl enable --now ${TIMERS[*]}"
+        for timer in "${TIMERS[@]}"; do
+            _run systemctl enable "$timer"
+            log_success "Enabled: $timer"
+        done
+    fi
 
     # Verify managed timers are healthy after enablement.
     # list-timers output can lag briefly right after daemon-reload/enable.
     # Check each managed timer state directly and allow a short settle period.
     # Healthy = timer unit is active AND has a next trigger scheduled.
-    if [[ "$DRY_RUN" == "false" ]]; then
+    if [[ "$DRY_RUN" == "false" && "$_enable_now" == "true" ]]; then
         log_info "Verifying timers are scheduled ..."
         local expected_count="${#TIMERS[@]}"
         local healthy_count=0

@@ -418,6 +418,18 @@ _vaultwarden_container_running() {
     docker compose ps --services --filter status=running 2>/dev/null | grep -qx "$service"
 }
 
+DB_SNAPSHOT_RESTART_SERVICE=""
+DB_SNAPSHOT_STOPPED_CONTAINER=false
+DB_SNAPSHOT_RESTARTED=false
+_db_snapshot_restart_if_needed() {
+    if [[ "${DB_SNAPSHOT_STOPPED_CONTAINER:-false}" == "true" && "${DB_SNAPSHOT_RESTARTED:-false}" != "true" ]]; then
+        DB_SNAPSHOT_RESTARTED=true
+        backup_log_info "Restarting ${DB_SNAPSHOT_RESTART_SERVICE} after offline DB snapshot..."
+        docker compose start "$DB_SNAPSHOT_RESTART_SERVICE" >/dev/null 2>&1 || \
+            backup_log_warn "Failed to restart ${DB_SNAPSHOT_RESTART_SERVICE} — restart manually"
+    fi
+}
+
 wait_for_container_stopped() {
     local service="$1"
     local max_wait="${2:-30}"
@@ -470,11 +482,15 @@ create_consistent_db_snapshot() {
 
     backup_log_warn "SQLite Online Backup API failed — attempting safe offline fallback"
     rm -f "$dest" 2>/dev/null || true
-    local vw_container_name container_was_running=false
+    local vw_container_name
     vw_container_name="$(get_config_value "COMPOSE_SERVICE_NAME" "vaultwarden")"
+    DB_SNAPSHOT_RESTART_SERVICE="$vw_container_name"
+    DB_SNAPSHOT_STOPPED_CONTAINER=false
+    DB_SNAPSHOT_RESTARTED=false
+    trap '_db_snapshot_restart_if_needed; cleanup' EXIT HUP INT TERM ERR
 
     if _vaultwarden_container_running "$vw_container_name"; then
-        container_was_running=true
+        DB_SNAPSHOT_STOPPED_CONTAINER=true
         backup_log_warn "Stopping $vw_container_name before offline DB snapshot..."
         docker compose stop "$vw_container_name" >/dev/null || true
         if ! wait_for_container_stopped "$vw_container_name" 30; then
@@ -482,15 +498,6 @@ create_consistent_db_snapshot() {
             return 1
         fi
     fi
-
-    _restart_snapshot_container() {
-        if [[ "$container_was_running" == "true" ]]; then
-            backup_log_info "Restarting $vw_container_name after offline DB snapshot..."
-            docker compose start "$vw_container_name" >/dev/null 2>&1 || \
-                backup_log_warn "Failed to restart $vw_container_name — restart manually"
-        fi
-    }
-    trap '_restart_snapshot_container; cleanup' EXIT HUP INT TERM ERR
 
     local wal_result
     wal_result=$(sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1) || {
@@ -506,7 +513,7 @@ create_consistent_db_snapshot() {
     verify_sqlite "$dest" || return 1
     DB_SNAPSHOT_METHOD="offline-checkpoint-copy"
     backup_log_info "DB snapshot method: ${DB_SNAPSHOT_METHOD}"
-    _restart_snapshot_container
+    _db_snapshot_restart_if_needed
     trap cleanup EXIT HUP INT TERM ERR
     return 0
 }

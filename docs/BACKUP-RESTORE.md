@@ -570,3 +570,22 @@ Full and emergency archives exclude live `db.sqlite3`, WAL/SHM files, backup dir
 > **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`). Do not store passphrases in shell history, environment variables, logs, or metadata.
 
 Choose `db` for quick DB rollback, `full` for a fresh VM restore when you have the offline Age key, and `emergency` when the fastest clone-style recovery is worth carrying key material inside the sealed capsule.
+
+### Operator-controlled service start after restore, DR, and migration
+
+Restore and migration workflows support an explicit start policy so operators can inspect the host before VaultWarden is started:
+
+- `--start-policy auto` or `--start`: start services automatically after successful restore/migration.
+- `--start-policy ask`: prompt before starting. Interactive restores default to this and ask `Start VaultWarden services now? [y/N]`.
+- `--start-policy manual` or `--no-start`: do not start services; print the manual checklist instead.
+
+After a full or emergency restore, use the manual inspection window to verify `.env`, `/etc/vaultwarden/*`, mounted storage, Cloudflare/DNS, and firewall state. Start manually with:
+
+```bash
+sudo ./startup.sh --skip-pull
+docker compose ps
+docker compose logs --tail=100
+sudo ./utilities/maintenance-health.sh
+```
+
+Emergency restores may install clone-grade `/etc/vaultwarden` material, but the operator still controls when services start. Systemd timer installation similarly supports `utilities/setup-systemd.sh install --no-enable-now` for installing units without immediately starting backup/maintenance timers.
