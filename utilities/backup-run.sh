@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # utilities/backup-run.sh — Creates, verifies, and optionally syncs VaultWarden backups.
+# shellcheck disable=SC1091,SC2317
 
 set -euo pipefail
 
@@ -378,7 +379,7 @@ _validate_full_archive_payload() {
     members="$(printf '%s\n' "$members" | sed 's#^\./##')"
     if [[ -f "$live_db" ]]; then
         local count
-        count="$(printf '%s\n' "$members" | grep -Fx "$expected_db" | wc -l | tr -d ' ')"
+        count="$(printf '%s\n' "$members" | grep -Fxc "$expected_db" || true)"
         if [[ "$count" != "1" ]]; then
             log_error "Backup validation failed before encryption/upload: live DB is missing from ${backup_label} archive." >&2
             log_error "  PROJECT_STATE_DIR: $state_dir" >&2

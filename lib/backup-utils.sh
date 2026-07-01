@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # lib/backup-utils.sh — Backup and restore helpers for VaultWarden-OCI.
+# shellcheck disable=SC1091
 #
 # Provides:
 #   Listing    : list_backups, get_backup_statistics, get_backup_size

@@ -223,6 +223,7 @@ SUBCOMMANDS:
     list              List available local backups (no root required)
     list --remote     List available remote backups (no root required)
     interactive       Interactive guided restore — shows a numbered backup menu.
+    inspect           Non-destructive backup layout/storage preflight only.
                       If rclone is configured, you are first asked whether to
                       restore from a LOCAL or REMOTE backup.
 
@@ -249,6 +250,7 @@ OPTIONS (used after a subcommand):
     --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
+    --inspect               Non-destructive inspect mode (same as inspect subcommand)
     --force                 Skip confirmation prompts
 
 GLOBAL SUBCOMMAND:
@@ -271,7 +273,6 @@ EXAMPLES:
     sudo ./restore.sh latest db          # Restore newest DB backup
     sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
     ./restore.sh list                    # List local backups (no sudo)
-    ./restore.sh list --remote           # List remote backups (no sudo)
 ```
 
 ### maintenance.sh
@@ -690,6 +691,7 @@ SUBCOMMANDS:
     list              List available local backups (no root required)
     list --remote     List available remote backups (no root required)
     interactive       Interactive guided restore — shows a numbered backup menu.
+    inspect           Non-destructive backup layout/storage preflight only.
                       If rclone is configured, you are first asked whether to
                       restore from a LOCAL or REMOTE backup.
 
@@ -716,6 +718,7 @@ OPTIONS (used after a subcommand):
     --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
+    --inspect               Non-destructive inspect mode (same as inspect subcommand)
     --force                 Skip confirmation prompts
 
 GLOBAL SUBCOMMAND:
@@ -738,7 +741,6 @@ EXAMPLES:
     sudo ./restore.sh latest db          # Restore newest DB backup
     sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
     ./restore.sh list                    # List local backups (no sudo)
-    ./restore.sh list --remote           # List remote backups (no sudo)
 ```
 
 ### safe-restart.sh

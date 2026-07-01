@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESTORE="$ROOT/utilities/restore-run.sh"
@@ -36,8 +37,10 @@ purge_wal_shm(){ :; }; tar_validate_members(){ :; }; check_traversal_only(){ :; 
 SCRIPT_DIR="/home/ubuntu/VaultWarden-OCI"; PROJECT_ROOT="/home/ubuntu/VaultWarden-OCI"
 RESTORE_TYPE="full"; FORCE="false"; INSPECT_ONLY="false"; SKIP_VERIFICATION="true"; RESTORE_ENV="false"; DRY_RUN="false"; DATA_VOLUME_MOUNT="${TEST_DATA_VOLUME_MOUNT:-}"; DATA_VOLUME_DEVICE="${TEST_DATA_VOLUME_DEVICE:-}"; PUID="$(id -u)"; PGID="$(id -g)"
 HARNESS
-sed -n '/^_tar_filter_for_file()/,/^tar_validate_members()/p' "$RESTORE" | sed '$d' >> "$HARNESS"
-sed -n '/^restore_full()/,/^main()/p' "$RESTORE" | sed '$d' >> "$HARNESS"
+{
+    sed -n '/^_tar_filter_for_file()/,/^tar_validate_members()/p' "$RESTORE" | sed '$d'
+    sed -n '/^restore_full()/,/^main()/p' "$RESTORE" | sed '$d'
+} >> "$HARNESS"
 cat >> "$HARNESS" <<'HARNESS'
 _path_is_mountpoint(){ [[ "${TEST_MOUNTPOINTS:-}" == *":$1:"* ]]; }
 make_tar(){ local root="$1" out="$2"; (cd "$root" && tar -czf "$out" .); }
@@ -72,10 +75,10 @@ log_error(){ echo "$*" >&2; }; backup_log_warn(){ :; }
 BH
 sed -n '/^_validate_full_archive_payload()/,/^create_db_snapshot_host()/p' "$BACKUP" | sed '$d' >> "$BH"
 state="$TMP/state"; mkdir -p "$state/data"; : > "$state/data/db.sqlite3"
-badroot="$TMP/badroot"; mkdir -p "$badroot/${state#/}/.pre-restore-x/data"; : > "$badroot/${state#/}/.pre-restore-x/data/db.sqlite3"; (cd "$badroot" && tar -cf "$TMP/bad.tar" .)
-if bash -c "source '$BH'; _validate_full_archive_payload '$TMP/bad.tar' '$state' '$ROOT' full" >/dev/null 2>&1; then fail 'snapshot-only DB must not satisfy backup validation'; fi
-goodroot="$TMP/goodroot"; mkdir -p "$goodroot/${state#/}/data"; : > "$goodroot/${state#/}/data/db.sqlite3"; mkdir -p "$goodroot/${ROOT#/}"; (cd "$goodroot" && tar -cf "$TMP/good.tar" .)
-bash -c "source '$BH'; _validate_full_archive_payload '$TMP/good.tar' '$state' '$ROOT' full" || fail 'live DB archive should pass backup validation'
+badroot="$TMP/badroot"; mkdir -p "$badroot/${state#/}/.pre-restore-x/data"; : > "$badroot/${state#/}/.pre-restore-x/data/db.sqlite3"; (cd "$badroot" && tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$TMP/bad.tar.zst" .)
+if bash -c "source '$BH'; _validate_full_archive_payload '$TMP/bad.tar.zst' '$state' '$ROOT' full" >/dev/null 2>&1; then fail 'snapshot-only DB must not satisfy backup validation'; fi
+goodroot="$TMP/goodroot"; mkdir -p "$goodroot/${state#/}/data"; : > "$goodroot/${state#/}/data/db.sqlite3"; mkdir -p "$goodroot/${ROOT#/}"; (cd "$goodroot" && tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$TMP/good.tar.zst" .)
+bash -c "source '$BH'; _validate_full_archive_payload '$TMP/good.tar.zst' '$state' '$ROOT' full" || fail 'live DB archive should pass backup validation'
 
 # Metadata generation: create a sidecar and assert no malformed lines.
 MH="$TMP/meta-harness.sh"

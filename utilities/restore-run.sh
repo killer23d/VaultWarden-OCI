@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # utilities/restore-run.sh — Restores VaultWarden data from local or remote encrypted backups.
+# shellcheck disable=SC1091
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1398,7 +1399,8 @@ _decrypt_restore_archive_for_preflight() {
         *.tar.zst|*.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tbz) : ;;
         *) inner_name="${inner_name}.tar.gz" ;;
     esac
-    local dec_tar="$tmpdir/$(basename "$inner_name")"
+    local dec_tar
+    dec_tar="$tmpdir/$(basename "$inner_name")"
     [[ -s "$dec_tar" ]] && { printf '%s\n' "$dec_tar"; return 0; }
     log_info "Decrypting archive for non-destructive preflight inspection..." >&2
     local age_err="$tmpdir/age-decrypt.err"
@@ -1416,9 +1418,11 @@ _decrypt_restore_archive_for_preflight() {
 }
 
 _restore_inspect_archive_layout() {
-    local dec_tar="$1" target_state="$2" archive_format="$3"
+    local dec_tar="$1" archive_format="$3"
     local filter; filter="$(_tar_filter_for_file "$dec_tar")"
-    RESTORE_PREFLIGHT_MEMBERS="$(tar $filter -tf "$dec_tar")" || return 1
+    local -a filter_args=()
+    [[ -n "$filter" ]] && read -r -a filter_args <<< "$filter"
+    RESTORE_PREFLIGHT_MEMBERS="$(tar "${filter_args[@]}" -tf "$dec_tar")" || return 1
     RESTORE_PREFLIGHT_FIRST30="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | head -30)"
     local normalized_members
     normalized_members="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | sed 's#^\./##')"
@@ -1545,7 +1549,9 @@ restore_full_preflight() {
     if [[ "$compatible" != "true" ]]; then
         echo ""
         echo "Archive members (first 30):"
-        printf '  %s\n' $RESTORE_PREFLIGHT_FIRST30
+        while IFS= read -r _member; do
+            printf '  %s\n' "$_member"
+        done <<< "$RESTORE_PREFLIGHT_FIRST30"
         return 1
     fi
     return 0
