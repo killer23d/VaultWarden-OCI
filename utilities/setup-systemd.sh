@@ -138,7 +138,11 @@ while [[ $# -gt 0 ]]; do
         validate)     VALIDATE=true;  shift ;;
         status)       STATUS=true;    shift ;;
         --dry-run)    DRY_RUN=true;   shift ;;
-        --start-policy) START_POLICY="$2"; shift 2 ;;
+        --start-policy)
+            if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                log_error "--start-policy requires a value: auto | ask | manual"; show_help; exit 2
+            fi
+            START_POLICY="$2"; shift 2 ;;
         --enable-now) START_POLICY="auto"; shift ;;
         --no-enable-now|--no-start) START_POLICY="manual"; shift ;;
         help|--help|-h) show_help; exit 0 ;;

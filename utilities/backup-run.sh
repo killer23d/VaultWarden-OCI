@@ -495,6 +495,7 @@ create_consistent_db_snapshot() {
         docker compose stop "$vw_container_name" >/dev/null || true
         if ! wait_for_container_stopped "$vw_container_name" 30; then
             log_error "Cannot safely copy db.sqlite3: container did not reach stopped state." >&2
+            _db_snapshot_restart_if_needed
             return 1
         fi
     fi
@@ -502,15 +503,17 @@ create_consistent_db_snapshot() {
     local wal_result
     wal_result=$(sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1) || {
         log_error "WAL checkpoint failed; refusing to produce an inconsistent DB snapshot: $wal_result" >&2
+        _db_snapshot_restart_if_needed
         return 1
     }
     if [[ -n "$wal_result" ]] && ! awk -F'|' '$2!=0 || $3!=0 {exit 1}' <<<"$wal_result"; then
         log_error "WAL checkpoint incomplete — unincorporated pages remain (result: $wal_result)" >&2
+        _db_snapshot_restart_if_needed
         return 1
     fi
     cp -f "$db_file" "$dest"
-    [[ -s "$dest" ]] || { log_error "Offline DB snapshot copy is empty or missing" >&2; return 1; }
-    verify_sqlite "$dest" || return 1
+    [[ -s "$dest" ]] || { log_error "Offline DB snapshot copy is empty or missing" >&2; _db_snapshot_restart_if_needed; return 1; }
+    verify_sqlite "$dest" || { _db_snapshot_restart_if_needed; return 1; }
     DB_SNAPSHOT_METHOD="offline-checkpoint-copy"
     backup_log_info "DB snapshot method: ${DB_SNAPSHOT_METHOD}"
     _db_snapshot_restart_if_needed

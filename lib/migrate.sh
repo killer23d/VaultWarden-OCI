@@ -763,6 +763,11 @@ _mv_parse_args() {
                 shift
                 ;;
             --start-policy)
+                if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                    log_error "--start-policy requires a value: auto | ask | manual"
+                    _mv_usage
+                    exit 2
+                fi
                 _MV_START_POLICY="$2"
                 shift 2
                 ;;

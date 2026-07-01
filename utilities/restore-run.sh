@@ -100,7 +100,7 @@ check_dependencies() {
     fi
 }
 case "${1:-}" in
-    latest|list|interactive|inspect) check_dependencies ;;
+    latest|list|interactive|inspect) : ;;
 esac
 
 BACKUP_FILE=""
@@ -260,8 +260,6 @@ case "$1" in
         ;;
 esac
 
-_require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
-
 # Parse remaining options (apply to interactive mode, 'latest', or 'list')
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -275,7 +273,11 @@ while [[ $# -gt 0 ]]; do
         --dry-run)             DRY_RUN=true;             shift ;;
         --inspect)             INSPECT_ONLY=true;        shift ;;
         --force)               FORCE=true;               shift ;;
-        --start-policy)         START_POLICY="$2";        shift 2 ;;
+        --start-policy)
+            if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                log_error "--start-policy requires a value: auto | ask | manual"; show_help; exit 2
+            fi
+            START_POLICY="$2";        shift 2 ;;
         --start)                START_POLICY="auto";      shift ;;
         --no-start)             START_POLICY="manual";    shift ;;
         --rotate-age-key)       ROTATE_AGE_KEY_POLICY="rotate"; shift ;;
@@ -293,6 +295,9 @@ case "$ROTATE_AGE_KEY_POLICY" in
     ""|rotate|skip) ;;
     *) log_error "Invalid Age rotation policy: $ROTATE_AGE_KEY_POLICY"; exit 1 ;;
 esac
+
+_require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
+check_dependencies
 
 # Handle the list + --remote combination.
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
@@ -1463,6 +1468,22 @@ _restore_age_no_identity_guidance() {
     log_error "  sudo ./restore.sh latest --from-recovery-kit /path/to/recovery-kit.txt --force"
 }
 
+_restore_backup_encryption_mode() {
+    read_meta_field "${BACKUP_FILE}.meta" "encryption_mode" ""
+}
+
+_age_decrypt_restore_backup() {
+    local backup_file="$1" age_key_file="$2" output_file="$3" age_err="$4"
+    local encryption_mode="${5:-}"
+    if [[ "$RESTORE_TYPE" == "emergency" && "$encryption_mode" == "age-passphrase" ]]; then
+        age -d -o "$output_file" "$backup_file" 2>"$age_err"
+    elif [[ "$RESTORE_TYPE" == "emergency" && "$encryption_mode" == "age-recipient" && -n "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}" ]]; then
+        age -d -i "$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" -o "$output_file" "$backup_file" 2>"$age_err"
+    else
+        age -d -i "$age_key_file" -o "$output_file" "$backup_file" 2>"$age_err"
+    fi
+}
+
 _decrypt_restore_archive_for_preflight() {
     local backup_file="$1" age_key_file="$2" tmpdir="$3"
     local inner_name="${backup_file%.age}"
@@ -1475,7 +1496,7 @@ _decrypt_restore_archive_for_preflight() {
     [[ -s "$dec_tar" ]] && { printf '%s\n' "$dec_tar"; return 0; }
     log_info "Decrypting archive for non-destructive preflight inspection..." >&2
     local age_err="$tmpdir/age-decrypt.err"
-    if ! age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" 2>"$age_err"; then
+    if ! _age_decrypt_restore_backup "$backup_file" "$age_key_file" "$dec_tar" "$age_err" "$(_restore_backup_encryption_mode)"; then
         if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
             _restore_age_no_identity_guidance
         else
@@ -1826,7 +1847,7 @@ restore_full() {
     if [[ ! -s "$dec_tar" ]]; then
         log_info "Decrypting archive..."
         local age_err="$tmpdir/age-decrypt.err"
-        if ! age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" 2>"$age_err"; then
+        if ! _age_decrypt_restore_backup "$backup_file" "$age_key_file" "$dec_tar" "$age_err" "$(_restore_backup_encryption_mode)"; then
             if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
                 _restore_age_no_identity_guidance
             else
@@ -2272,8 +2293,6 @@ main() {
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    _prompt_age_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
-    
     local sha256_sidecar="${BACKUP_FILE}.sha256"
     if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying backup checksum before decryption..."
@@ -2297,6 +2316,14 @@ main() {
     local meta_file="${BACKUP_FILE}.meta"
     local archive_version; archive_version="$(read_meta_field "$meta_file" "version" "")"
     local archive_format;  archive_format="$(read_meta_field  "$meta_file" "archive_format" "")"
+    local backup_encryption_mode; backup_encryption_mode="$(read_meta_field "$meta_file" "encryption_mode" "")"
+
+    if [[ "$RESTORE_TYPE" == "emergency" && "$backup_encryption_mode" == "age-passphrase" ]]; then
+        RESTORE_DECRYPT_AGE_KEY_FILE=""
+        log_info "Emergency backup is passphrase-sealed; age will prompt for the archive passphrase during decryption."
+    else
+        _prompt_age_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
+    fi
 
     if [[ -z "$archive_format" ]]; then
         if   [[ "$BACKUP_FILE" == *.tar.zst.age || "$BACKUP_FILE" == *.zst.age ]]; then
@@ -2479,7 +2506,11 @@ main() {
             RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE"
             ;;
         full|emergency)
-            RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE"
+            if [[ "$RESTORE_TYPE" == "emergency" && "$(read_meta_field "${BACKUP_FILE}.meta" "encryption_mode" "")" == "age-passphrase" && -f /etc/vaultwarden/age-key.txt ]]; then
+                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
+            else
+                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE"
+            fi
             ;;
         *) log_error "Unknown restore type for rekey source: $RESTORE_TYPE"; exit 1 ;;
     esac
