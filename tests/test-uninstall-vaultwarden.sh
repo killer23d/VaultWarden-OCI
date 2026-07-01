@@ -68,6 +68,16 @@ assert_contains "$SCRIPT" "postfix_relay_network"
 assert_not_contains "$SCRIPT" "name=caddy"
 assert_not_contains "$SCRIPT" "name=postfix"
 
+
+# External BACKUP_DIR preservation must run before checkout deletion can remove its parent.
+assert_contains "$SCRIPT" "_backup_dir_is_external_to_state()"
+assert_contains "$SCRIPT" "Preserving project checkout because external BACKUP_DIR is inside it"
+assert_contains "$SCRIPT" "Move/delete the backup directory manually"
+state_line="$(awk '/^main\(\)/{in_main=1} in_main && /remove_state_and_mount/{print NR; exit}' "$SCRIPT")"
+installed_line="$(awk '/^main\(\)/{in_main=1} in_main && /remove_installed_files/{print NR; exit}' "$SCRIPT")"
+[[ -n "$state_line" && -n "$installed_line" ]] || fail "could not locate cleanup order in main"
+(( state_line < installed_line )) || fail "remove_state_and_mount must run before remove_installed_files"
+
 # _safe_rm_rf broad-path denylist contract.
 assert_contains "$SCRIPT" "Refusing to remove unsafe broad path"
 assert_contains "$SCRIPT" "/|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var|/var/lib"

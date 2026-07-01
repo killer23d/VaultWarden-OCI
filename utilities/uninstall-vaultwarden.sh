@@ -506,6 +506,16 @@ remove_runtime_artifacts() {
     return 0
 }
 
+_path_is_inside() {
+    local child="$1" parent="$2"
+    [[ "$child" == "$parent" || "$child" == "$parent"/* ]]
+}
+
+_backup_dir_is_external_to_state() {
+    [[ -n "${BACKUP_DIR:-}" ]] || return 1
+    ! _path_is_inside "$BACKUP_DIR" "$PROJECT_STATE_DIR"
+}
+
 remove_installed_files() {
     info "Step 4: Removing installed files and repository checkout..."
 
@@ -515,16 +525,16 @@ remove_installed_files() {
     cd /
 
     if [[ "$PROJECT_DIR" == */VaultWarden-OCI || "$PROJECT_BASENAME" == "VaultWarden-OCI" ]]; then
+        if _backup_dir_is_external_to_state && _path_is_inside "$BACKUP_DIR" "$PROJECT_DIR"; then
+            warn "Preserving project checkout because external BACKUP_DIR is inside it: $BACKUP_DIR"
+            warn "Move/delete the backup directory manually, then remove the checkout manually if desired: $PROJECT_DIR"
+            return 0
+        fi
         _safe_rm_rf "$PROJECT_DIR" || true
     else
         warn "Project directory does not look like a VaultWarden-OCI checkout; leaving in place: $PROJECT_DIR"
     fi
     return 0
-}
-
-_path_is_inside() {
-    local child="$1" parent="$2"
-    [[ "$child" == "$parent" || "$child" == "$parent"/* ]]
 }
 
 _confirm_external_backup_delete() {
@@ -890,8 +900,8 @@ main() {
     disable_systemd_units
     remove_docker_stack
     remove_runtime_artifacts
-    remove_installed_files
     remove_state_and_mount
+    remove_installed_files
     remove_sops_and_packages
     remove_crowdsec
     remove_firewall_rules
