@@ -131,6 +131,39 @@ grep -Fq 'sudo utilities/setup-storage.sh --mode migrate run --device /dev/sdb -
 grep -Fq 'failed-as-expected' <<< "$out" || fail "blank-device validation did not fail without --force-format: $out"
 pass 'blank target device requires --force-format before migration proceeds'
 
+out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }; log_success(){ :; }; log_debug(){ :; }
+require_commands(){ :; }
+source lib/migrate.sh
+
+state_dir="$(mktemp -d)"
+trap 'rm -rf "$state_dir"' EXIT
+_MV_STATE_FILE="${state_dir}/.migrate-volume.state"
+
+_mv_state_write MV_SOURCE /var/lib/vaultwarden
+_mv_state_write MV_TARGET /mnt/vw-data
+_mv_state_write MV_DEVICE /dev/sdb
+_mv_state_write MV_SKIP_STACK_STOP false
+_mv_state_write MV_DELETE_SOURCE false
+_mv_state_write MV_FORCE_FORMAT false
+_mv_state_write MV_DIRECTION boot-to-block
+
+_mv_parse_args resume --force-format
+_mv_acquire_lock(){ :; }
+_mv_run_step(){ :; }
+_mv_run_pipeline --resume
+
+printf 'force_format=%s state=%s\n' "$_MV_FORCE_FORMAT" "$(_mv_state_read MV_FORCE_FORMAT)"
+PROBE
+)
+grep -Fxq 'force_format=true state=true' <<< "$out" || fail "resume --force-format did not override saved false state: $out"
+pass 'resume --force-format upgrades saved false force-format state'
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 BIN="$TMP/bin"; mkdir -p "$BIN"
