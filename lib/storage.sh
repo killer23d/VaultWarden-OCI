@@ -470,10 +470,10 @@ setup_data_volume() {
                 if [[ "$force_format" != "true" ]]; then
                     log_error "Cannot perform a deep signature scan of $device (wipefs unavailable or failed)."
                     log_error "Refusing to format without confirmation to avoid accidental data loss."
-                    log_error "If you are certain $device is blank and safe to format, set:"
-                    log_error "  export DATA_VOLUME_FORCE_FORMAT=true"
-                    log_error "then re-run setup. This flag must be set explicitly — it is never"
-                    log_error "inferred from any other option."
+                    log_error "If you are certain $device is blank and safe to format, re-run setup with:"
+                    log_error "  sudo env DATA_VOLUME_FORCE_FORMAT=true utilities/setup-storage.sh --mode setup --data-device $device"
+                    log_error "For migrate mode, use: --force-format"
+                    log_error "This authorization must be explicit — it is never inferred from any other option."
                     return 1
                 fi
                 log_warn "wipefs scan skipped (tool unavailable). Proceeding because DATA_VOLUME_FORCE_FORMAT=true."
@@ -493,10 +493,10 @@ setup_data_volume() {
                         log_error "This device may contain data (LVM PV, RAID member, swap, prior filesystem, …)."
                         log_error "Review the signatures above with:"
                         log_error "  sudo wipefs --all $device"
-                        log_error "If you are certain the device is safe to erase, set:"
-                        log_error "  export DATA_VOLUME_FORCE_FORMAT=true"
-                        log_error "then re-run setup. This flag must be set explicitly — it is never"
-                        log_error "inferred from any other option."
+                        log_error "If you are certain the device is safe to erase, re-run setup with:"
+                        log_error "  sudo env DATA_VOLUME_FORCE_FORMAT=true utilities/setup-storage.sh --mode setup --data-device $device"
+                        log_error "For migrate mode, use: --force-format"
+                        log_error "This authorization must be explicit — it is never inferred from any other option."
                         return 1
                     fi
                     log_warn "DATA_VOLUME_FORCE_FORMAT=true — proceeding despite detected signatures."
@@ -505,9 +505,10 @@ setup_data_volume() {
                     if [[ "$force_format" != "true" ]]; then
                         log_error "No filesystem or data signatures found on $device."
                         log_error "To format this device as ext4 and use it as the VaultWarden data volume,"
-                        log_error "set the following and re-run setup:"
-                        log_error "  export DATA_VOLUME_FORCE_FORMAT=true"
-                        log_error "This flag must be set explicitly — it is never inferred from any other option."
+                        log_error "re-run setup with:"
+                        log_error "  sudo env DATA_VOLUME_FORCE_FORMAT=true utilities/setup-storage.sh --mode setup --data-device $device"
+                        log_error "For migrate mode, use: --force-format"
+                        log_error "This authorization must be explicit — it is never inferred from any other option."
                         log_error "This safeguard prevents accidental data loss when a device that was"
                         log_error "previously wiped appears blank to blkid."
                         return 1
