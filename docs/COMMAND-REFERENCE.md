@@ -1216,12 +1216,13 @@ OPTIONS (used after 'run'):
         this host. Required when any managed Age key exists, unless --force is used.
 
     --dry-run
-        Show what would be removed without changing the system.
+        Show what would be removed without changing the system. Does not require root.
 
     --force
-        Non-interactive destructive mode. Skips uninstall confirmation,
-        backup prompt, and Age-key prompts. Intended only after recovery data
-        has been verified outside this host.
+        DANGEROUS: non-interactive destructive mode. Skips uninstall confirmation,
+        backup prompt, external backup-dir prompt, and Age-key prompts. This can
+        permanently delete VaultWarden data and key material; use only after
+        recovery data has been verified outside this host.
 
     --version, -V
         Print the VaultWarden-OCI version and exit.
