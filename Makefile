@@ -907,6 +907,7 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-migrate-followup.sh
 	@tests/test-recover.sh
 	@tests/test-restore-run-followup.sh
+	@tests/test-uninstall-vaultwarden.sh
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)
