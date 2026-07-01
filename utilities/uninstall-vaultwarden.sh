@@ -243,12 +243,6 @@ resolve_paths() {
         tmp+=("$p")
     done < <(printf '%s\n' "${MANAGED_AGE_KEY_PATHS[@]}" | _unique_lines)
     MANAGED_AGE_KEY_PATHS=("${tmp[@]}")
-
-    DOCKER_SENTINEL="${PROJECT_STATE_DIR}/.docker_installed_by_setup"
-    DOCKER_SENTINEL_PRESENT=false
-    if [[ -f "$DOCKER_SENTINEL" ]]; then
-        DOCKER_SENTINEL_PRESENT=true
-    fi
     return 0
 }
 
@@ -468,10 +462,7 @@ remove_docker_stack() {
         docker rm -f "$cid" 2>/dev/null && success "Removed compose-labelled container: $cid" || true
     done < <(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" 2>/dev/null || true)
 
-    local secret
-    for secret in admin_token admin_basic_auth_hash smtp_password push_installation_id push_installation_key caddy_cloudflare_dns_token; do
-        docker secret rm "$secret" >/dev/null 2>&1 || true
-    done
+    info "Skipping Docker Swarm secret deletion; current compose secrets are file-backed under /run/vaultwarden-oci/secrets."
 
     local vol
     while IFS= read -r vol; do
