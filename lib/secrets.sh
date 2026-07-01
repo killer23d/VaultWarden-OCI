@@ -1279,7 +1279,7 @@ EOF
 
     unset _grk_values
 
-    cat >> "$output_file" << 'EOF'
+        cat >> "$output_file" << 'EOF'
 
 ════════════════════════════════════════════════════════════════════════
 SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
@@ -1288,48 +1288,79 @@ SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
 TO RESTORE THIS SERVER ON NEW HARDWARE:
 
 1. PREPARATION
-   [ ] Install Git, Docker, and SOPS on new server.
+   [ ] Install Git, Docker, SOPS, Age, and required restore tools on the new server.
    [ ] Clone the repository:
 EOF
     printf '       git clone %s\n' "$repo_clone_url" >> "$output_file"
     local repo_basename
     repo_basename=$(basename "$repo_clone_url" .git)
     {
-        printf '   [ ] Run setup (installs Docker, SOPS, and configures environment):\n'
         printf '       cd %s\n' "$repo_basename"
+        printf '\n'
+        printf '   [ ] For a fresh install only, run setup:\n'
         printf '       sudo ./setup.sh install --domain %s --email %s\n' "$domain" "$admin_email"
     } >> "$output_file"
     cat >> "$output_file" << 'EOF'
 
-2. RESTORE KEYS
-   [ ] Create key directory:
-       mkdir -p secrets/keys
-   [ ] Restore Age Key:
-       Paste the [AGE PRIVATE KEY] above into: secrets/keys/age-key.txt
-   [ ] Set permissions:
-       chmod 600 secrets/keys/age-key.txt
+2. PRIMARY RECOVERY PATH: EXISTING STATE DIRECTORY OR ATTACHED DATA/BLOCK VOLUME
+   Use this when /var/lib/vaultwarden or the dedicated VaultWarden data volume is available.
 
-3. RESTORE DATA (Choose Option A or B)
+   [ ] Mount or attach the state directory/volume.
+       Default state directory:
+       /var/lib/vaultwarden
 
-   OPTION A: From Remote Backup (Rclone/S3)
-   [ ] Configure Rclone:
+   [ ] Place the offline Age private key on removable media, for example:
+       /mnt/usb/offline-age-key.txt
+
+   [ ] Run recover.sh:
+       sudo ./recover.sh --state-dir /var/lib/vaultwarden --key /mnt/usb/offline-age-key.txt --storage-mode auto
+
+       For an explicit boot-volume state directory:
+       sudo ./recover.sh --state-dir /var/lib/vaultwarden --key /mnt/usb/offline-age-key.txt --storage-mode boot
+
+       For an explicit mounted block/data volume:
+       sudo ./recover.sh --state-dir /var/lib/vaultwarden --key /mnt/usb/offline-age-key.txt --storage-mode block
+
+   [ ] Save the new operational Age key generated during recovery.
+       The server-installed operational key should live at:
+       /etc/vaultwarden/age-key.txt
+
+3. ALTERNATE RECOVERY PATH: ENCRYPTED BACKUP RESTORE
+   Use this when restoring from local or remote encrypted backups.
+
+   [ ] For remote backups, configure rclone if needed:
        rclone config
-   [ ] Download latest backup:
-       rclone copy remote:bucket/backup.tar.gz.age ./backups/
-   [ ] Run Restore (full restore from latest backup):
-       sudo ./restore.sh latest
 
-   OPTION B: From Secrets Above (Manual Rebuild)
-   [ ] Run secrets setup (interactive — enter values from SECTION 2 when prompted):
+   [ ] Prefer the guided remote restore:
+       sudo ./restore.sh interactive --remote
+
+   [ ] If using this plaintext recovery kit as the only credential source:
+       sudo ./restore.sh latest --from-recovery-kit /path/to/recovery-kit.txt --force
+
+   [ ] If using a specific Age key file instead:
+       sudo ./restore.sh interactive --key-file /path/to/age-key.txt
+
+4. MANUAL REBUILD ONLY
+   Use this only if no usable state directory or encrypted backup exists.
+
+   [ ] Re-enter values from SECTION 2:
        sudo ./setup.sh secrets
-   [ ] Rotate any CHANGE_ME placeholders:
-       sudo ./edit-secrets.sh rotate <field>
 
-4. FINALIZATION
+   [ ] Rotate or edit any missing/placeholder secrets:
+       sudo ./edit-secrets.sh rotate <field>
+       sudo ./edit-secrets.sh edit
+
+5. FINALIZATION
    [ ] Start services:
        sudo make up
-   [ ] Wait for containers to initialise, then check health:
-       sleep 10 && ./maintenance.sh health
+
+   [ ] Check health:
+       sudo make health
+
+   [ ] Confirm Docker services:
+       sudo docker compose ps
+
+   [ ] Store the recovery kit, offline Age key, and any new operational Age key outside the server.
 
 ════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT
