@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # setup.sh — Install and configure VaultWarden-OCI.
+# shellcheck disable=SC1091
 
 set -euo pipefail
 
@@ -492,7 +493,7 @@ main() {
 
     log_phase 2 6 "Storage setup"
     "${SCRIPT_DIR}/utilities/setup-storage.sh" --mode setup \
-        "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
+        "${_auto[@]}" "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
         || _phase_failed 2 "Storage setup"             "Verify data devices and mounts: lsblk && findmnt"             "Re-run this phase: sudo ./utilities/setup-storage.sh --mode setup"
 
     log_phase 3 6 "Environment configuration"
