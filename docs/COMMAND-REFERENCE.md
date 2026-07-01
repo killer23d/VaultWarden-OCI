@@ -252,6 +252,11 @@ OPTIONS (used after a subcommand):
     --dry-run               Show what would happen without making changes
     --inspect               Non-destructive inspect mode (same as inspect subcommand)
     --force                 Skip confirmation prompts
+    --start-policy MODE     Service start policy after restore: auto | ask | manual
+    --start                 Alias for --start-policy auto
+    --no-start              Alias for --start-policy manual
+    --rotate-age-key        Rotate Age key after restore (secure default)
+    --no-rotate-age-key     Skip post-restore Age rotation after explicit operator choice
 
 GLOBAL SUBCOMMAND:
     help                    Show this help
@@ -268,11 +273,6 @@ ENVIRONMENT:
     RCLONE_REMOTE_NAME                 Read from .env when available
 
 EXAMPLES:
-    # ── QUICK START (most common) ────────────────────────────────
-    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
-    sudo ./restore.sh latest db          # Restore newest DB backup
-    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
-    ./restore.sh list                    # List local backups (no sudo)
 ```
 
 ### maintenance.sh
@@ -720,6 +720,11 @@ OPTIONS (used after a subcommand):
     --dry-run               Show what would happen without making changes
     --inspect               Non-destructive inspect mode (same as inspect subcommand)
     --force                 Skip confirmation prompts
+    --start-policy MODE     Service start policy after restore: auto | ask | manual
+    --start                 Alias for --start-policy auto
+    --no-start              Alias for --start-policy manual
+    --rotate-age-key        Rotate Age key after restore (secure default)
+    --no-rotate-age-key     Skip post-restore Age rotation after explicit operator choice
 
 GLOBAL SUBCOMMAND:
     help                    Show this help
@@ -736,11 +741,6 @@ ENVIRONMENT:
     RCLONE_REMOTE_NAME                 Read from .env when available
 
 EXAMPLES:
-    # ── QUICK START (most common) ────────────────────────────────
-    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
-    sudo ./restore.sh latest db          # Restore newest DB backup
-    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
-    ./restore.sh list                    # List local backups (no sudo)
 ```
 
 ### safe-restart.sh
@@ -1123,7 +1123,7 @@ VaultWarden-OCI systemd Timer Installer
 
 USAGE:
     sudo utilities/setup-systemd.sh <action> [OPTIONS]
-    sudo utilities/setup-systemd.sh install    # Install and enable all timers
+    sudo utilities/setup-systemd.sh install    # Install timers; ask before starting them on a TTY
     sudo utilities/setup-systemd.sh remove     # Disable and remove all timers
     sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
     sudo utilities/setup-systemd.sh status     # Show timer and service status
@@ -1140,6 +1140,10 @@ ACTIONS:
 
 OPTIONS:
     --dry-run     Print actions without executing
+    --start-policy MODE  Timer activation policy: auto | ask | manual
+    --enable-now         Alias for --start-policy auto
+    --no-enable-now      Alias for --start-policy manual
+    --no-start           Alias for --start-policy manual
     --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
@@ -1160,11 +1164,12 @@ WHAT install DOES:
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     6. systemctl daemon-reload
-    7. systemctl enable --now for all 6 timers and enables vaultwarden-startup.service
+    7. Enables vaultwarden-startup.service and enables/starts timers according to start policy
     8. Verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install
+    sudo utilities/setup-systemd.sh install --no-enable-now
     sudo utilities/setup-systemd.sh install --dry-run
     sudo utilities/setup-systemd.sh validate
     sudo utilities/setup-systemd.sh status

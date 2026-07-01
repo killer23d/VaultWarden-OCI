@@ -908,6 +908,9 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-recover.sh
 	@tests/test-restore-run-followup.sh
 	@tests/test-restore-backup-preflight-safety.sh
+	@tests/test-backup-architecture-policy.sh
+	@tests/test-backup-restore-behavior.sh
+	@tests/test-start-policy.sh
 	@tests/test-uninstall-vaultwarden.sh
 	@tests/test-setup-storage-ux.sh
 

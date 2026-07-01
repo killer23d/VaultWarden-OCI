@@ -100,7 +100,7 @@ check_dependencies() {
     fi
 }
 case "${1:-}" in
-    latest|list|interactive|inspect) check_dependencies ;;
+    latest|list|interactive|inspect) : ;;
 esac
 
 BACKUP_FILE=""
@@ -111,6 +111,8 @@ LIST_REMOTE=false
 DRY_RUN=false
 FORCE=false
 NO_PRE_BACKUP=false
+START_POLICY=""
+ROTATE_AGE_KEY_POLICY=""
 SKIP_VERIFICATION=false
 RESTORE_ENV=true
 RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
@@ -174,6 +176,11 @@ OPTIONS (used after a subcommand):
     --dry-run               Show what would happen without making changes
     --inspect               Non-destructive inspect mode (same as inspect subcommand)
     --force                 Skip confirmation prompts
+    --start-policy MODE     Service start policy after restore: auto | ask | manual
+    --start                 Alias for --start-policy auto
+    --no-start              Alias for --start-policy manual
+    --rotate-age-key        Rotate Age key after restore (secure default)
+    --no-rotate-age-key     Skip post-restore Age rotation after explicit operator choice
 
 GLOBAL SUBCOMMAND:
     help                    Show this help
@@ -253,8 +260,6 @@ case "$1" in
         ;;
 esac
 
-_require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
-
 # Parse remaining options (apply to interactive mode, 'latest', or 'list')
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -268,9 +273,31 @@ while [[ $# -gt 0 ]]; do
         --dry-run)             DRY_RUN=true;             shift ;;
         --inspect)             INSPECT_ONLY=true;        shift ;;
         --force)               FORCE=true;               shift ;;
+        --start-policy)
+            if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                log_error "--start-policy requires a value: auto | ask | manual"; show_help; exit 2
+            fi
+            START_POLICY="$2";        shift 2 ;;
+        --start)                START_POLICY="auto";      shift ;;
+        --no-start)             START_POLICY="manual";    shift ;;
+        --rotate-age-key)       ROTATE_AGE_KEY_POLICY="rotate"; shift ;;
+        --no-rotate-age-key)    ROTATE_AGE_KEY_POLICY="skip"; shift ;;
         *)                     log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac
 done
+
+case "$START_POLICY" in
+    "" ) if [[ -t 0 ]]; then START_POLICY="ask"; else START_POLICY="auto"; fi ;;
+    auto|ask|manual) ;;
+    *) log_error "Invalid --start-policy: $START_POLICY (expected auto, ask, or manual)"; exit 1 ;;
+esac
+case "$ROTATE_AGE_KEY_POLICY" in
+    ""|rotate|skip) ;;
+    *) log_error "Invalid Age rotation policy: $ROTATE_AGE_KEY_POLICY"; exit 1 ;;
+esac
+
+_require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
+check_dependencies
 
 # Handle the list + --remote combination.
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
@@ -278,6 +305,55 @@ done
 TMPDIR_RESTORE=""
 cleanup() {
     if [[ -n "$TMPDIR_RESTORE" ]]; then rm -rf "$TMPDIR_RESTORE" 2>/dev/null; fi
+}
+
+_restore_print_manual_start_checklist() {
+    log_warn "Services may be stopped. Review state before starting."
+    log_info "Manual start checklist:"
+    log_info "  1. Verify .env"
+    log_info "  2. Verify /etc/vaultwarden/*"
+    log_info "  3. Verify mounted storage"
+    log_info "  4. Verify Cloudflare/DNS and firewall state"
+    log_info "  5. sudo ./startup.sh --skip-pull"
+    log_info "  6. docker compose ps"
+    log_info "  7. docker compose logs --tail=100"
+    log_info "  8. sudo ./utilities/maintenance-health.sh"
+}
+
+_restore_should_start_services() {
+    case "$START_POLICY" in
+        auto) return 0 ;;
+        manual)
+            _restore_print_manual_start_checklist
+            return 1
+            ;;
+        ask)
+            local answer
+            read -r -p "Start VaultWarden services now? [y/N] " answer
+            case "$answer" in
+                y|Y|yes|YES) return 0 ;;
+                *) _restore_print_manual_start_checklist; return 1 ;;
+            esac
+            ;;
+    esac
+}
+
+_restore_should_rotate_age_key() {
+    case "$ROTATE_AGE_KEY_POLICY" in
+        rotate|"") ;;
+        skip)
+            log_warn "Skipping post-restore Age key rotation by explicit operator request."
+            return 1
+            ;;
+    esac
+    if [[ "$RESTORE_TYPE" == "emergency" && -t 0 && "$FORCE" != "true" && -z "$ROTATE_AGE_KEY_POLICY" ]]; then
+        local answer
+        read -r -p "Emergency capsule contains operational key material. Rotate Age key after restore? [Y/n] " answer
+        case "$answer" in
+            n|N|no|NO) log_warn "Operator chose not to rotate Age key after emergency restore."; return 1 ;;
+        esac
+    fi
+    return 0
 }
 trap cleanup EXIT HUP INT TERM ERR
 
@@ -1392,6 +1468,22 @@ _restore_age_no_identity_guidance() {
     log_error "  sudo ./restore.sh latest --from-recovery-kit /path/to/recovery-kit.txt --force"
 }
 
+_restore_backup_encryption_mode() {
+    read_meta_field "${BACKUP_FILE}.meta" "encryption_mode" ""
+}
+
+_age_decrypt_restore_backup() {
+    local backup_file="$1" age_key_file="$2" output_file="$3" age_err="$4"
+    local encryption_mode="${5:-}"
+    if [[ "$RESTORE_TYPE" == "emergency" && "$encryption_mode" == "age-passphrase" ]]; then
+        age -d -o "$output_file" "$backup_file" 2>"$age_err"
+    elif [[ "$RESTORE_TYPE" == "emergency" && "$encryption_mode" == "age-recipient" && -n "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}" ]]; then
+        age -d -i "$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" -o "$output_file" "$backup_file" 2>"$age_err"
+    else
+        age -d -i "$age_key_file" -o "$output_file" "$backup_file" 2>"$age_err"
+    fi
+}
+
 _decrypt_restore_archive_for_preflight() {
     local backup_file="$1" age_key_file="$2" tmpdir="$3"
     local inner_name="${backup_file%.age}"
@@ -1404,7 +1496,7 @@ _decrypt_restore_archive_for_preflight() {
     [[ -s "$dec_tar" ]] && { printf '%s\n' "$dec_tar"; return 0; }
     log_info "Decrypting archive for non-destructive preflight inspection..." >&2
     local age_err="$tmpdir/age-decrypt.err"
-    if ! age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" 2>"$age_err"; then
+    if ! _age_decrypt_restore_backup "$backup_file" "$age_key_file" "$dec_tar" "$age_err" "$(_restore_backup_encryption_mode)"; then
         if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
             _restore_age_no_identity_guidance
         else
@@ -1755,7 +1847,7 @@ restore_full() {
     if [[ ! -s "$dec_tar" ]]; then
         log_info "Decrypting archive..."
         local age_err="$tmpdir/age-decrypt.err"
-        if ! age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" 2>"$age_err"; then
+        if ! _age_decrypt_restore_backup "$backup_file" "$age_key_file" "$dec_tar" "$age_err" "$(_restore_backup_encryption_mode)"; then
             if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
                 _restore_age_no_identity_guidance
             else
@@ -1924,6 +2016,25 @@ restore_full() {
         fi
     fi
 
+    if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]]; then
+        log_info "Skipped runtime decrypted secrets (/run/vaultwarden-oci/secrets)."
+        local _staged_secret="$staging/$rel_source/secrets/secrets.yaml"
+        local _live_secret="${SECRETS_FILE:-$state_dir/secrets/secrets.yaml}"
+        [[ "$_live_secret" != /* ]] && _live_secret="$PROJECT_ROOT/$_live_secret"
+        if [[ -f "$_staged_secret" ]]; then
+            install -d -m 700 "$(dirname "$_live_secret")"
+            install -m 600 "$_staged_secret" "$_live_secret"
+            chown root:root "$_live_secret" 2>/dev/null || true
+            log_info "Promoted encrypted SOPS secrets: $_live_secret"
+        elif [[ -f "$_live_secret" ]]; then
+            chmod 600 "$_live_secret" 2>/dev/null || true
+            chown root:root "$_live_secret" 2>/dev/null || true
+            log_info "Promoted encrypted SOPS secrets: $_live_secret"
+        else
+            log_warn "Encrypted SOPS secrets not present in archive at $rel_source/secrets/secrets.yaml"
+        fi
+    fi
+
     # Ensure storage sentinel survives restores in separate-volume mode.
     # Primary path: DATA_VOLUME_MOUNT is populated (normal operation).
     # Fallback path: DATA_VOLUME_MOUNT was not exported (partial env load) but
@@ -1944,6 +2055,19 @@ restore_full() {
 
     chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || log_warn "Could not set ownership on $state_dir/data"
     purge_wal_shm "$state_dir/data/db.sqlite3" || true
+
+    if [[ "$RESTORE_TYPE" == "emergency" && -d "$staging/etc/vaultwarden" ]]; then
+        log_info "Installed emergency /etc/vaultwarden material"
+        log_info "Emergency capsule restore phase: installing staged /etc/vaultwarden key/config material..."
+        install -d -o root -g root -m 700 /etc/vaultwarden
+        local _emergency_file
+        for _emergency_file in age-key.txt vaultwarden.env rclone.conf; do
+            if [[ -f "$staging/etc/vaultwarden/$_emergency_file" ]]; then
+                install -o root -g root -m 600 "$staging/etc/vaultwarden/$_emergency_file" "/etc/vaultwarden/$_emergency_file"
+                log_info "  Installed /etc/vaultwarden/$_emergency_file (0600)"
+            fi
+        done
+    fi
 
     local rel_project="${PROJECT_ROOT#/}"
 
@@ -2169,8 +2293,6 @@ main() {
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    _prompt_age_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
-    
     local sha256_sidecar="${BACKUP_FILE}.sha256"
     if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying backup checksum before decryption..."
@@ -2194,6 +2316,14 @@ main() {
     local meta_file="${BACKUP_FILE}.meta"
     local archive_version; archive_version="$(read_meta_field "$meta_file" "version" "")"
     local archive_format;  archive_format="$(read_meta_field  "$meta_file" "archive_format" "")"
+    local backup_encryption_mode; backup_encryption_mode="$(read_meta_field "$meta_file" "encryption_mode" "")"
+
+    if [[ "$RESTORE_TYPE" == "emergency" && "$backup_encryption_mode" == "age-passphrase" ]]; then
+        RESTORE_DECRYPT_AGE_KEY_FILE=""
+        log_info "Emergency backup is passphrase-sealed; age will prompt for the archive passphrase during decryption."
+    else
+        _prompt_age_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
+    fi
 
     if [[ -z "$archive_format" ]]; then
         if   [[ "$BACKUP_FILE" == *.tar.zst.age || "$BACKUP_FILE" == *.zst.age ]]; then
@@ -2288,9 +2418,14 @@ main() {
         [[ $rc -eq 130 ]] && log_warn "Restore interrupted by operator (Ctrl-C)."
         if [[ $rc -ne 0 ]]; then
             if [[ "${RESTORE_DESTRUCTIVE_PHASE_STARTED:-false}" == "true" ]]; then
-                log_warn "Restore encountered an error (exit $rc) after destructive phase — attempting one service restart..."
-                bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
-                    log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: sudo ./startup.sh --skip-pull"
+                if [[ "${START_POLICY:-auto}" == "auto" ]]; then
+                    log_warn "Restore encountered an error (exit $rc) after destructive phase — attempting one service restart..."
+                    bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
+                        log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: sudo ./startup.sh --skip-pull"
+                else
+                    log_warn "Restore encountered an error (exit $rc) after destructive phase. Services may be stopped. Review state before starting."
+                    _restore_print_manual_start_checklist
+                fi
             else
                 log_warn "Restore failed before destructive phase (exit $rc); services were not stopped and startup.sh will not be run."
             fi
@@ -2363,40 +2498,42 @@ main() {
 
     # Choose the key that can decrypt secrets.yaml at the moment post-restore
     # SOPS updatekeys/rekey runs. DB restores do not restore secrets.yaml, so
-    # use the live operational key. Separate-volume full/emergency restores
-    # intentionally do not promote secrets/, so the live operational key remains
-    # the correct rekey source. Boot-only full/emergency restores replace the
-    # whole state dir, so secrets.yaml may come from the selected archive and
-    # may require the selected backup decrypt key.
+    # use the live operational key. Full/emergency restores promote the encrypted
+    # SOPS secrets from the archive, so secrets.yaml may require the selected
+    # backup decrypt key regardless of storage layout.
     case "$RESTORE_TYPE" in
         db)
             RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE"
             ;;
         full|emergency)
-            if mountpoint -q "$STATE_DIR" 2>/dev/null; then
-                # Separate-volume mode: secrets/ is intentionally not promoted.
-                # The live secrets.yaml remains encrypted with the operational key.
-                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE"
+            if [[ "$RESTORE_TYPE" == "emergency" && "$(read_meta_field "${BACKUP_FILE}.meta" "encryption_mode" "")" == "age-passphrase" && -f /etc/vaultwarden/age-key.txt ]]; then
+                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
             else
-                # Boot-only mode replaces the whole state dir, including secrets/.
-                # The restored secrets.yaml may require the selected backup decrypt key.
                 RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE"
             fi
             ;;
         *) log_error "Unknown restore type for rekey source: $RESTORE_TYPE"; exit 1 ;;
     esac
 
-    if ! _rotate_age_key; then
-        log_error "Age key rotation FAILED."
-        log_error "The data restore itself succeeded, but key rotation/rekey did not complete safely."
-        log_error "Live key artifacts were rolled back where needed; refusing to start services automatically."
-        exit 1
+    if _restore_should_rotate_age_key; then
+        if ! _rotate_age_key; then
+            log_error "Age key rotation FAILED."
+            log_error "The data restore itself succeeded, but key rotation/rekey did not complete safely."
+            log_error "Live key artifacts were rolled back where needed; refusing to start services automatically."
+            exit 1
+        fi
+        _display_new_key
+    else
+        log_warn "Age key rotation was skipped; confirm this is intentional before starting services."
     fi
-
-    _display_new_key
 
     if [[ "$DRY_RUN" != "true" ]]; then
         auto_fix_critical_permissions "$PROJECT_ROOT"
+        if ! _restore_should_start_services; then
+            trap - ERR
+            log_success "Restore complete; services were not started."
+            return 0
+        fi
         log_info "Starting services..."
         if ! bash "${PROJECT_ROOT}/startup.sh" --skip-pull; then
             log_error "Failed to start services after restore."

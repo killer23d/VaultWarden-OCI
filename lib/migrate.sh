@@ -47,6 +47,7 @@ _MV_FORCE_FORMAT=false
 _MV_YES=false
 _MV_LOG_FILE=""
 _MV_BACKUP_DIR_CUSTOM_WARNING=""
+_MV_START_POLICY=""
 # Mutable copy of the original run timestamp; updated from state on resume.
 _MV_RUN_TIMESTAMP="${_MV_TIMESTAMP}"
 
@@ -653,6 +654,10 @@ OPTIONS (run / resume):
   --yes              Answer yes to all confirmations (except --delete-source).
                      Requires --target when used (non-interactive mode).
                      Cannot be combined with --skip-stack-stop.
+  --start-policy <mode>
+                     Service start policy after migration: auto | ask | manual.
+  --start            Alias for --start-policy auto.
+  --no-start         Alias for --start-policy manual.
   --log-file <path>  Override default log file path.
   --help             Show this help and exit.
 
@@ -708,6 +713,7 @@ _mv_parse_args() {
     _MV_FORCE_FORMAT=false
     _MV_YES=false
     _MV_LOG_FILE=""
+    _MV_START_POLICY=""
 
     if [[ $# -gt 0 && "${1}" != --* ]]; then
         _MV_SUBCOMMAND="$1"
@@ -754,6 +760,23 @@ _mv_parse_args() {
                 ;;
             --yes)
                 _MV_YES=true
+                shift
+                ;;
+            --start-policy)
+                if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                    log_error "--start-policy requires a value: auto | ask | manual"
+                    _mv_usage
+                    exit 2
+                fi
+                _MV_START_POLICY="$2"
+                shift 2
+                ;;
+            --start)
+                _MV_START_POLICY="auto"
+                shift
+                ;;
+            --no-start)
+                _MV_START_POLICY="manual"
                 shift
                 ;;
             --direction)
@@ -812,6 +835,11 @@ _mv_parse_args() {
             _mv_usage
             exit 1
             ;;
+    esac
+    case "${_MV_START_POLICY}" in
+        "" ) if [[ "${_MV_YES:-false}" == "true" || ! -t 0 ]]; then _MV_START_POLICY="auto"; else _MV_START_POLICY="ask"; fi ;;
+        auto|ask|manual) ;;
+        *) log_error "Invalid --start-policy: ${_MV_START_POLICY}"; exit 1 ;;
     esac
 
     _MV_SOURCE="$(realpath -m "${_MV_SOURCE}")"
@@ -1405,6 +1433,25 @@ _mv_step_start() {
         _mv_log info "[DRY RUN] would: start VaultWarden stack (start_services)"
         return 0
     fi
+    case "${_MV_START_POLICY:-auto}" in
+        manual)
+            _mv_log warn "Start policy manual: not starting VaultWarden stack after migration."
+            _mv_log info "Manual command: sudo ./startup.sh --skip-pull"
+            return 0
+            ;;
+        ask)
+            local _answer
+            read -r -p "Start VaultWarden stack now on the migrated storage? [Y/n] " _answer
+            case "$_answer" in
+                n|N|no|NO)
+                    _mv_log warn "Operator chose not to start VaultWarden stack after migration."
+                    _mv_log info "Manual command: sudo ./startup.sh --skip-pull"
+                    _MV_START_POLICY="manual"
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
 
     if ! start_services; then   # from lib/docker.sh
         _mv_log error "start_services failed — health check will surface the failure explicitly."
@@ -1419,6 +1466,11 @@ _mv_step_healthcheck() {
     if [[ "${DRY_RUN}" == "true" ]]; then
         _mv_log info "[DRY RUN] would: poll 'docker compose ps --status running --quiet' for healthy state (up to 120s)"
         _mv_log info "[DRY RUN] would: write MIGRATION_COMPLETE=true to state file"
+        _mv_print_checklist
+        return 0
+    fi
+    if [[ "${_MV_START_POLICY:-auto}" == "manual" ]]; then
+        _mv_log warn "Start policy manual: skipping post-migration health check because services were not started."
         _mv_print_checklist
         return 0
     fi
