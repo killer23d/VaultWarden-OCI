@@ -4,8 +4,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP="$ROOT/utilities/backup-run.sh"
 RESTORE="$ROOT/utilities/restore-run.sh"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
-require(){ local pat="$1" file="$2" msg="$3"; rg -n -- "$pat" "$file" >/dev/null || fail "$msg"; }
-reject(){ local pat="$1" file="$2" msg="$3"; ! rg -n -- "$pat" "$file" >/dev/null || fail "$msg"; }
+require(){ local pat="$1" file="$2" msg="$3"; grep -Eq -- "$pat" "$file" || fail "$msg"; }
+reject(){ local pat="$1" file="$2" msg="$3"; ! grep -Eq -- "$pat" "$file" || fail "$msg"; }
 
 require 'create_consistent_db_snapshot\(\)' "$BACKUP" 'shared DB snapshot helper missing'
 require 'perform_db_backup\(\)' "$BACKUP" 'db backup function missing'
