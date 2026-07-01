@@ -730,8 +730,12 @@ create_backup_metadata() {
 
     local vw_version="unknown"
     if require_docker >/dev/null 2>&1; then
-        vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
+        vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | awk 'NF {print; exit}' || true)
     fi
+    vw_version="${vw_version//$'\r'/ }"
+    vw_version="${vw_version//$'\n'/ }"
+    [[ -n "$vw_version" ]] || vw_version="unknown"
+    additional_info="$(printf '%s\n' "$additional_info" | awk -F= 'NF == 0 {next} /^#/ {print; next} /^[A-Za-z_][A-Za-z0-9_]*=/ {gsub(/\r/,""); print}')"
 
     install -m 600 /dev/null "$metadata_file" || {
         log_error "Failed to secure metadata file: $metadata_file"

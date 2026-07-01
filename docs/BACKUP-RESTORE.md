@@ -532,3 +532,23 @@ sudo make install-systemd         # re-sync /opt scripts and reload timers
 **Weekly:** Full backup with `--full-verification`; offsite sync verified
 **Monthly:** Emergency kit created; `restore.sh` tested; Tier 2 escrow refreshed if Age key was rotated (`make key-show` to confirm)
 **Quarterly:** Full disaster recovery drill on a fresh instance; verify `make timers` shows expected schedules
+
+## Restore storage-layout preflight
+
+Before a destructive full or emergency restore, inspect the backup and the target storage layout:
+
+```bash
+sudo ./restore.sh inspect --remote
+# or
+sudo ./restore.sh interactive --remote --inspect
+```
+
+Database backups are storage-layout independent and are the safest option when only Vaultwarden data is needed. Full and emergency backups restore broader application state/config and require a compatible, prepared target storage layout.
+
+Block-storage backups should be restored to a mounted block/data-volume target, not silently into boot storage. If a backup expects `/mnt/vw-data` (or another data-volume root) and the current host targets `/var/lib/vaultwarden` on boot storage, restore stops before services are stopped. Attach and configure the data volume first, or restore the latest DB backup.
+
+A normal full/emergency restore requires a live `data/db.sqlite3` under the detected source state root. Databases found only below `.pre-restore-*` snapshots are reported for manual recovery but are not restored automatically.
+
+Prepared block-storage targets must provide these entries under `PROJECT_STATE_DIR` / `DATA_VOLUME_MOUNT`: `data`, `caddy`, `logs`, `config`, `secrets`, `backups`, and the `.vw-data-volume` sentinel. When the volume is already mounted and writable, restore may safely recreate missing directories and the sentinel. It will not format, partition, or guess block devices.
+
+If decryption fails because no Age identity matches, the backup may have been encrypted with an older operational key or an offline recovery key. Retry with `--key-file /path/to/old-age-key.txt` or `--from-recovery-kit /path/to/recovery-kit.txt`.

@@ -321,3 +321,15 @@ The recovery kit contains your offline credential. Treat it with extreme care.
 | [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md) | Age key recovery procedures when the bootstrap key is lost |
 | [OPERATIONS.md](OPERATIONS.md) | Day-to-day ops, update/rollback phases |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Common issues and fixes |
+
+## Full/emergency restore readiness
+
+Use non-destructive inspect mode before restoring a full or emergency archive on a replacement VM:
+
+```bash
+sudo ./restore.sh inspect --remote
+```
+
+The report shows the backup source layout, current target layout, live DB presence, snapshot-only DBs, required block-volume directories, and the recommended next action. A block-storage source archive should be restored only after the attached data volume is mounted and prepared; it is not silently restored to boot storage.
+
+If you only need Vaultwarden database contents, prefer the latest DB backup because DB restore is storage-layout independent. Full/emergency archives without a live `data/db.sqlite3` are unsafe for normal full restore; choose another archive, restore a DB backup, or inspect the tar manually. Older encrypted backups may require the Age key that was active when they were created, supplied with `--key-file`, or an offline recovery kit supplied with `--from-recovery-kit`.
