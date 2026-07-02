@@ -741,26 +741,7 @@ key-escrow: ## Generate encrypted escrow package (requires GPG or another age ke
 key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 	$(call require-root)
 	$(call check-env-readable)
-	@echo "$(BLUE)Age Key Rotation$(NC)"
-	@echo "$(YELLOW)WARNING: This will generate a new age key and re-encrypt all secrets.$(NC)"
-	@echo "$(YELLOW)Ensure you have a backup of the current key before proceeding.$(NC)"
-	@echo ""
-	@echo "$(BLUE)Running key health pre-flight check...$(NC)"
-	@$(MAKE) key-health || { \
-		echo "$(RED)Key health check failed. Aborting rotation to prevent data loss.$(NC)"; \
-		echo "$(RED)Fix the key issue first: sudo make key-install$(NC)"; \
-		exit 1; \
-	}
-	@echo ""
-	@printf "Continue with key rotation? (yes/no): "; \
-	read -r confirm; \
-	if [ "$$confirm" != "yes" ]; then \
-		echo "$(YELLOW)Key rotation cancelled.$(NC)"; \
-		exit 0; \
-	fi
-	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
-        	source lib/secrets.sh; \
-	    	rotate_age_key"
+	@./utilities/key-rotate.sh
 
 # ===========================================================================
 ##@ Normal Admin + Advanced Admin — Updates
