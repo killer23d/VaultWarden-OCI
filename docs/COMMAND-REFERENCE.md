@@ -519,6 +519,7 @@ OPTIONS:
     --update-firewall       Include firewall update in this run
     --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
+    --skip-ops-lock         Internal/systemd: caller already holds operations lock
     --help, -h              Show this help
     --version, -V           Print the VaultWarden-OCI version and exit
 
