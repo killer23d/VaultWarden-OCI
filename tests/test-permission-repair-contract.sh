@@ -121,3 +121,17 @@ grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/secrets/secrets.yaml" "persist
 grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/config/dr-manifest.env" "DR manifest"' utilities/repair-permissions.sh || fail "repair does not use central contract for dr-manifest.env"
 grep -Fq 'find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0' utilities/repair-permissions.sh || fail "repair does not cover runtime secret files"
 pass "repair fallback covers persistent and runtime secret drift through central helpers"
+
+
+# Post-restore runtime permissions: emergency/full archives strip ownership for
+# portability, so restore must re-apply target-host service contracts explicitly.
+grep -Fq 'repair_runtime_state_permissions()' lib/runtime-permissions.sh || fail "runtime permission library lacks repair helper"
+grep -Fq 'Caddy runtime data' lib/runtime-permissions.sh || fail "runtime repair does not cover Caddy data"
+grep -Fq 'Caddy runtime config' lib/runtime-permissions.sh || fail "runtime repair does not cover Caddy config"
+grep -Fq 'Caddy logs' lib/runtime-permissions.sh || fail "runtime repair does not cover Caddy logs"
+grep -Fq 'Removed restored init-permissions sentinel' lib/runtime-permissions.sh || fail "runtime repair does not invalidate restored init-permissions sentinel"
+grep -Fq '_source_lib "lib/runtime-permissions.sh"' utilities/restore-run.sh || fail "restore-run does not source runtime permission helper"
+grep -Fq 'repair_runtime_state_permissions "$STATE_DIR" "$PUID" "$PGID"' utilities/restore-run.sh || fail "restore-run does not repair runtime state before startup"
+grep -Fq '_check_caddy_storage_permissions' utilities/maintenance-health.sh || fail "health check does not detect Caddy storage drift"
+grep -Fq 'Caddy runtime data root' utilities/repair-permissions.sh || fail "repair-permissions --check does not report Caddy runtime data drift"
+pass "restore/repair/health cover Caddy post-restore runtime permission drift"

@@ -423,6 +423,33 @@ SOURCE-OF-TRUTH CONTRACT:
     RCLONE_CONFIG=/etc/vaultwarden/rclone.conf            (only when rclone.conf exists)
 ```
 
+### key-rotate.sh
+
+```
+VaultWarden-OCI Age Key Rotation
+
+USAGE:
+    sudo ./utilities/key-rotate.sh [OPTIONS]
+    sudo make key-rotate
+
+DESCRIPTION:
+    Generates a new operational Age key, rekeys secrets.yaml to the new
+    recipient, updates SOPS_AGE_KEY_FILE references, and writes a root-only
+    recovery kit that must be copied offline.
+
+OPTIONS:
+    --yes, -y     Do not prompt before rotation
+    --dry-run     Validate inputs and show what would change
+    --extra-recipient AGE_PUBLIC_KEY
+                  Preserve an additional explicit Age recipient
+    --help, -h    Show this help
+
+NOTES:
+    This rotates the Age/SOPS encryption key. It does not rotate individual
+    Vaultwarden, Cloudflare, SMTP, or push credentials. Use
+    sudo ./edit-secrets.sh rotate FIELD for individual secret values.
+```
+
 ### maintenance-db-maint.sh
 
 ```
@@ -673,6 +700,8 @@ Checks/repairs explicit project paths only:
   PROJECT_STATE_DIR config/secrets env/manifest files -> root:root private state
   encrypted persistent secrets.yaml and containing directory -> root:root private state
   /run/vaultwarden-oci/secrets and files inside -> root:root runtime secrets
+  PROJECT_STATE_DIR/caddy data/config paths -> UID/GID 2000, Caddy-writable
+  PROJECT_STATE_DIR/logs/caddy -> UID/GID 2000, Caddy-writable
   known recovery-kit outputs under the project root -> not world-readable
 
 Does not recursively chmod broad directories and never makes private keys,

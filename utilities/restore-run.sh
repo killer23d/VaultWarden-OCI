@@ -27,6 +27,7 @@ _source_lib "lib/docker.sh"
 _source_lib "lib/backup-utils.sh"
 _source_lib "lib/crypto.sh"
 _source_lib "lib/storage.sh"
+_source_lib "lib/runtime-permissions.sh"
 unset -f _source_lib
 
 # Require a real .env before any live restore so a fresh host never restores
@@ -2594,7 +2595,17 @@ main() {
     fi
 
     if [[ "$DRY_RUN" != "true" ]]; then
+        # Full/emergency archives are extracted with --no-same-owner and
+        # promoted with --no-owner/--no-group for cross-host safety. Re-apply
+        # the target host runtime permission contract before service startup.
         auto_fix_critical_permissions "$PROJECT_ROOT"
+        if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]]; then
+            log_info "Post-restore phase: repairing runtime state permissions..."
+            if ! repair_runtime_state_permissions "$STATE_DIR" "$PUID" "$PGID"; then
+                log_warn "Post-restore runtime permission repair reported issues."
+                log_warn "Manual remediation: sudo utilities/repair-permissions.sh"
+            fi
+        fi
         if ! _restore_should_start_services; then
             trap - ERR
             log_success "Restore complete; services were not started."

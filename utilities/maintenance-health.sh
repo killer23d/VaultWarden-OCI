@@ -519,6 +519,66 @@ _check_vaultwarden_server_info() {
     fi
 }
 
+_check_caddy_storage_permissions() {
+    log_info "Checking Caddy storage permissions..."
+    local state_dir caddy_uid caddy_gid
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    caddy_uid="${CADDY_UID:-2000}"
+    caddy_gid="${CADDY_GID:-2000}"
+
+    local issues=()
+
+    _check_caddy_dir_contract() {
+        local path="$1" label="$2"
+        if [[ ! -d "$path" ]]; then
+            issues+=("${label} missing: ${path}")
+            return 0
+        fi
+        local uid gid mode
+        uid="$(stat -c '%u' "$path" 2>/dev/null || echo unknown)"
+        gid="$(stat -c '%g' "$path" 2>/dev/null || echo unknown)"
+        mode="$(stat -c '%a' "$path" 2>/dev/null || echo unknown)"
+        if [[ "$uid" != "$caddy_uid" || "$gid" != "$caddy_gid" || "$mode" != "750" ]]; then
+            issues+=("${label} drift: ${path} is ${uid}:${gid} mode ${mode}; expected ${caddy_uid}:${caddy_gid} mode 750")
+        fi
+    }
+
+    _check_caddy_file_contract() {
+        local path="$1" label="$2"
+        if [[ ! -f "$path" ]]; then
+            issues+=("${label} missing: ${path}")
+            return 0
+        fi
+        local uid gid mode
+        uid="$(stat -c '%u' "$path" 2>/dev/null || echo unknown)"
+        gid="$(stat -c '%g' "$path" 2>/dev/null || echo unknown)"
+        mode="$(stat -c '%a' "$path" 2>/dev/null || echo unknown)"
+        if [[ "$uid" != "$caddy_uid" || "$gid" != "$caddy_gid" || "$mode" != "640" ]]; then
+            issues+=("${label} drift: ${path} is ${uid}:${gid} mode ${mode}; expected ${caddy_uid}:${caddy_gid} mode 640")
+        fi
+    }
+
+    _check_caddy_dir_contract "${state_dir}/caddy/data" "Caddy /data mount root"
+    _check_caddy_dir_contract "${state_dir}/caddy/data/caddy" "Caddy /data/caddy storage"
+    _check_caddy_dir_contract "${state_dir}/caddy/config" "Caddy /config mount root"
+    _check_caddy_dir_contract "${state_dir}/caddy/config/caddy" "Caddy /config/caddy storage"
+    _check_caddy_dir_contract "${state_dir}/logs/caddy" "Caddy /var/log/caddy mount root"
+    _check_caddy_file_contract "${state_dir}/logs/caddy/access.log" "Caddy access log"
+    _check_caddy_file_contract "${state_dir}/logs/caddy/security.log" "Caddy security log"
+
+    unset -f _check_caddy_dir_contract _check_caddy_file_contract
+
+    if [[ ${#issues[@]} -eq 0 ]]; then
+        _pass "permissions:caddy-storage" "Caddy storage/log permissions are correct"
+    else
+        local i=0
+        for issue in "${issues[@]}"; do
+            _warn "permissions:caddy-storage:${i}" "${issue} — run: sudo utilities/repair-permissions.sh"
+            (( i++ )) || true
+        done
+    fi
+}
+
 _check_crowdsec() {
     log_info "Checking CrowdSec..."
     if systemctl is-active crowdsec >/dev/null 2>&1; then
@@ -1056,6 +1116,7 @@ _health_main() {
     _check_ssl
     _check_vaultwarden_alive
     _check_vaultwarden_server_info
+    _check_caddy_storage_permissions
     _check_crowdsec
     _check_disk
     _check_memory

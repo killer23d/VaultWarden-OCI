@@ -8,6 +8,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
+source "${PROJECT_ROOT}/lib/runtime-permissions.sh"
 init_common_lib "$0"
 
 MODE="repair"
@@ -30,6 +31,8 @@ Checks/repairs explicit project paths only:
   PROJECT_STATE_DIR config/secrets env/manifest files -> root:root private state
   encrypted persistent secrets.yaml and containing directory -> root:root private state
   /run/vaultwarden-oci/secrets and files inside -> root:root runtime secrets
+  PROJECT_STATE_DIR/caddy data/config paths -> UID/GID 2000, Caddy-writable
+  PROJECT_STATE_DIR/logs/caddy -> UID/GID 2000, Caddy-writable
   known recovery-kit outputs under the project root -> not world-readable
 
 Does not recursively chmod broad directories and never makes private keys,
@@ -51,6 +54,11 @@ if ! load_project_environment >/dev/null 2>&1; then
 fi
 SECRETS_FILE="${SECRETS_FILE:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/secrets.yaml}"
 PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+
+PUID="${PUID:-$(get_config_value "PUID" "" 2>/dev/null || true)}"
+PGID="${PGID:-$(get_config_value "PGID" "" 2>/dev/null || true)}"
+PUID="${PUID//$'\r'/}"; PUID="${PUID%%[[:space:]#]*}"; PUID="${PUID//[[:space:]]/}"
+PGID="${PGID//$'\r'/}"; PGID="${PGID%%[[:space:]#]*}"; PGID="${PGID//[[:space:]]/}"
 
 STATUS=0
 
@@ -83,6 +91,35 @@ _apply_known_path() {
         fix_known_path_permissions "$path"
         _report FIXED "$label" "$path" "$expected" "$actual" "action: fix_known_path_permissions"
     fi
+}
+
+_apply_numeric_path() {
+    local path="$1" label="$2" owner="$3" group="$4" mode="$5" expected actual ok=true
+    [[ -e "$path" ]] || return 0
+    expected="owner ${owner}:${group}, mode $mode"
+    actual="mode $(_mode_of "$path"), owner $(stat -c '%u:%g' "$path" 2>/dev/null || printf 'unknown')"
+    [[ "$(stat -c '%u:%g' "$path" 2>/dev/null || printf 'unknown')" == "${owner}:${group}" ]] || ok=false
+    [[ "$(_mode_of "$path")" == "$mode" ]] || ok=false
+    if [[ "$ok" == "true" ]]; then
+        _report OK "$label" "$path" "$expected" "$actual" "action: none"
+        return 0
+    fi
+    if [[ "$MODE" == "check" ]]; then
+        STATUS=1
+        _report ERROR "$label" "$path" "$expected" "$actual" "fix: sudo utilities/repair-permissions.sh"
+    else
+        chown "${owner}:${group}" "$path" 2>/dev/null || true
+        chmod "$mode" "$path" 2>/dev/null || true
+        _report FIXED "$label" "$path" "$expected" "$actual" "action: chown/chmod"
+    fi
+}
+
+_apply_caddy_check_paths() {
+    _apply_numeric_path "${PROJECT_STATE_DIR}/caddy/data" "Caddy runtime data root" 2000 2000 750
+    _apply_numeric_path "${PROJECT_STATE_DIR}/caddy/config" "Caddy runtime config root" 2000 2000 750
+    _apply_numeric_path "${PROJECT_STATE_DIR}/logs/caddy" "Caddy log directory" 2000 2000 750
+    _apply_numeric_path "${PROJECT_STATE_DIR}/logs/caddy/access.log" "Caddy access log" 2000 2000 640
+    _apply_numeric_path "${PROJECT_STATE_DIR}/logs/caddy/security.log" "Caddy security log" 2000 2000 640
 }
 
 _apply_not_world() {
@@ -131,6 +168,17 @@ if [[ -d /run/vaultwarden-oci/secrets ]]; then
     while IFS= read -r -d '' runtime_secret; do
         _apply_known_path "$runtime_secret" "runtime Docker secret file"
     done < <(find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
+fi
+
+if [[ "$MODE" == "check" ]]; then
+    _apply_caddy_check_paths
+elif [[ -d "$PROJECT_STATE_DIR" ]]; then
+    if ! repair_runtime_state_permissions "$PROJECT_STATE_DIR" "$PUID" "$PGID"; then
+        STATUS=1
+        _report WARN "runtime state permissions" "$PROJECT_STATE_DIR" "known service-specific contract" "repair reported warnings" "action: inspect output above"
+    fi
+else
+    _report OK "runtime state permissions" "$PROJECT_STATE_DIR" "installed state directory when present" "state directory missing; skipped" "action: none"
 fi
 
 # Known recovery kit outputs in the checkout only; no broad filesystem scan.
