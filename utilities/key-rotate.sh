@@ -28,6 +28,8 @@ DESCRIPTION:
 OPTIONS:
     --yes, -y     Do not prompt before rotation
     --dry-run     Validate inputs and show what would change
+    --extra-recipient AGE_PUBLIC_KEY
+                  Preserve an additional explicit Age recipient
     --help, -h    Show this help
 
 NOTES:
@@ -39,11 +41,17 @@ EOF
 
 ASSUME_YES=false
 DRY_RUN=false
+EXTRA_RECIPIENTS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --yes|-y) ASSUME_YES=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --extra-recipient)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --extra-recipient requires an Age public key" >&2; exit 1; }
+            EXTRA_RECIPIENTS+=("$2")
+            shift 2
+            ;;
         --help|-h) show_help; exit 0 ;;
         *) echo "Unknown option: $1" >&2; show_help; exit 1 ;;
     esac
@@ -106,10 +114,13 @@ _join_recipients_csv() {
 }
 
 _collect_preserved_recipients() {
-    local current_pub="$1" new_pub="$2" policy_file="$3" manifest_file="$4"
+    local current_pub="$1" new_pub="$2" manifest_file="$4"
     local seen=" ${new_pub} ${current_pub} "
     local candidate
 
+    # Preserve only the explicitly recorded offline recovery recipient.
+    # Do NOT scrape .sops.yaml for old recipients: that can accidentally keep
+    # a retired or exposed operational key authorized after rotation.
     if [[ -f "$manifest_file" ]]; then
         candidate="$(grep -m1 '^OFFLINE_AGE_RECIPIENT=' "$manifest_file" 2>/dev/null | cut -d= -f2- | tr -d "\"'" || true)"
         if [[ "$candidate" =~ ^age1[a-z0-9]{58}$ && "$seen" != *" $candidate "* ]]; then
@@ -118,14 +129,41 @@ _collect_preserved_recipients() {
         fi
     fi
 
-    if [[ -f "$policy_file" ]]; then
-        while IFS= read -r candidate; do
-            [[ "$candidate" =~ ^age1[a-z0-9]{58}$ ]] || continue
-            [[ "$seen" == *" $candidate "* ]] && continue
-            printf '%s\n' "$candidate"
-            seen="${seen}${candidate} "
-        done < <(grep -Eo 'age1[a-z0-9]{58}' "$policy_file" 2>/dev/null || true)
-    fi
+    for candidate in "${EXTRA_RECIPIENTS[@]}"; do
+        if [[ ! "$candidate" =~ ^age1[a-z0-9]{58}$ ]]; then
+            log_error "Invalid --extra-recipient value: $candidate"
+            return 1
+        fi
+        [[ "$seen" == *" $candidate "* ]] && continue
+        printf '%s\n' "$candidate"
+        seen="${seen}${candidate} "
+    done
+}
+
+_display_rotated_age_key_summary() {
+    local key_file="$1" public_key="$2" kit_file="$3"
+    local private_key_line=""
+
+    { set +x; } 2>/dev/null
+    private_key_line="$(grep -m1 '^AGE-SECRET-KEY-1' "$key_file" 2>/dev/null || true)"
+
+    printf '\n%s' "${COLOR_RED:-}"
+    cat <<'CRED_BANNER'
+  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
+  !                                                                       !
+  !       🚨 CRITICAL: SAVE THIS NEW AGE KEY FOR DISASTER RECOVERY 🚨      !
+  !     Future backups and secrets require this new private key.          !
+  !                                                                       !
+  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
+CRED_BANNER
+    printf '%s\n' "${COLOR_RESET:-}"
+
+    printf '\n%s[1] SOPS AGE SECRET KEY%s\n' "${COLOR_CYAN:-}" "${COLOR_RESET:-}"
+    printf '    Public key:  %s%s%s\n' "${COLOR_GREEN:-}" "$public_key" "${COLOR_RESET:-}"
+    printf '%s%s%s\n' "${COLOR_GREEN:-}" "${private_key_line:-ERROR: could not read private key}" "${COLOR_RESET:-}"
+
+    printf '\n%sRecovery kit:%s %s\n' "${COLOR_CYAN:-}" "${COLOR_RESET:-}" "$kit_file"
+    printf '\n%s!!! TYPE SAVED ONLY AFTER SAVING THIS KEY OFFLINE !!!%s\n' "${COLOR_RED:-}" "${COLOR_RESET:-}"
 }
 
 log_header "VaultWarden-OCI Age Key Rotation"
@@ -199,7 +237,7 @@ install -d -m 700 -o root -g root "$backup_dir"
 new_key_tmp="${workdir}/new-age-key.txt"
 old_umask="$(umask)"
 umask 077
-age-keygen -o "$new_key_tmp" >/dev/null
+age-keygen -o "$new_key_tmp" >/dev/null 2>&1
 umask "$old_umask"
 chmod 600 "$new_key_tmp"
 
@@ -214,7 +252,11 @@ new_pub="$(age-keygen -y "$new_key_tmp")"
     exit 1
 }
 
-mapfile -t preserved_recipients < <(_collect_preserved_recipients "$current_pub" "$new_pub" "$sops_policy_file" "$manifest_file")
+preserved_recipients_file="${workdir}/preserved-recipients.txt"
+if ! _collect_preserved_recipients "$current_pub" "$new_pub" "$sops_policy_file" "$manifest_file" > "$preserved_recipients_file"; then
+    exit 1
+fi
+mapfile -t preserved_recipients < "$preserved_recipients_file"
 recipients_csv="$(_join_recipients_csv "$new_pub" "${preserved_recipients[@]:-}")"
 
 policy_tmp="${workdir}/.sops.yaml"
@@ -231,7 +273,23 @@ cp -f "$secrets_file" "$cipher_tmp"
 chmod 600 "$cipher_tmp"
 
 log_info "Rekeying staged secrets.yaml to the new Age recipient..."
-SOPS_AGE_KEY_FILE="$current_key" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp"
+log_info "SOPS recipients:"
+log_info "  + new operational recipient: $new_pub"
+if [[ ${#preserved_recipients[@]} -gt 0 ]]; then
+    for recipient in "${preserved_recipients[@]}"; do
+        log_info "  = preserved explicit/offline recipient: $recipient"
+    done
+    unset recipient
+else
+    log_info "  = no extra/offline recipients preserved"
+fi
+log_info "  - previous operational recipient will be removed: $current_pub"
+
+sops_updatekeys_log="${backup_dir}/sops-updatekeys.log"
+if ! SOPS_AGE_KEY_FILE="$current_key" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp" >"$sops_updatekeys_log" 2>&1; then
+    log_error "SOPS updatekeys failed. Details: $sops_updatekeys_log"
+    exit 1
+fi
 SOPS_AGE_KEY_FILE="$new_key_tmp" sops -d "$cipher_tmp" >/dev/null
 
 repo_env_tmp="${workdir}/repo.env"
@@ -294,7 +352,7 @@ log_warn "COPY THIS FILE OFFLINE NOW, then delete it from /root/."
 log_warn "Refresh runtime secrets/services with: sudo make restart"
 
 if [[ "$ASSUME_YES" != "true" ]]; then
-    echo ""
+    _display_rotated_age_key_summary "$system_key" "$new_pub" "$kit_file"
     saved=""
     while [[ "$saved" != "SAVED" ]]; do
         read -r -p "Type SAVED after copying the recovery kit offline: " saved
