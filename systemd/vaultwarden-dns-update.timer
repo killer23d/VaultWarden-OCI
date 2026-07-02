@@ -10,13 +10,11 @@ OnFailure=vaultwarden-notify-failure@%n.service
 [Timer]
 # Use explicit hourly form to avoid ambiguity across docs/distributions.
 OnCalendar=*-*-* *:00:00
-Persistent=true
-# Ensure Docker is healthy before any boot-triggered catch-up fires.
-# Without this, Persistent=true causes an immediate activation on reboot
-# which may race against the Docker daemon still starting up.
-OnBootSec=2min
-# RandomizedDelaySec spreads post-reboot catch-up burst and prevents
-# simultaneous --update-dns invocations competing for the operations lock.
+# Calendar-only scheduling avoids immediate DNS update jobs during systemd unit
+# installation. The next update naturally runs at the next hourly boundary.
+Persistent=false
+# RandomizedDelaySec spreads routine DNS updates and prevents simultaneous
+# --update-dns invocations competing for the operations lock.
 RandomizedDelaySec=120
 
 [Install]
