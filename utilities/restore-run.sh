@@ -1762,10 +1762,28 @@ _preflight_operational_sops_key_for_snapshot() {
 
 create_pre_restore_snapshot() {
     local operational_sops_age_key_file="${1:-${OPERATIONAL_SOPS_AGE_KEY_FILE:-}}"
+    local restore_type="${2:-${RESTORE_TYPE:-}}"
     [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
-    [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: utilities/backup-run.sh run emergency"; return 0; }
+
     local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local db_path="$state_dir/data/db.sqlite3"
+
+    # Fresh full/emergency DR target:
+    # If there is no current live database, there is nothing meaningful to
+    # snapshot before replacing the target state. Treat this as a safe bootstrap
+    # condition, not as a backup failure. Existing live installs still retain
+    # the hard-fail snapshot behavior below.
+    if [[ "$restore_type" =~ ^(full|emergency)$ && ! -f "$db_path" ]]; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] No current live DB found at $db_path — would skip pre-restore snapshot."
+        else
+            log_warn "No current live DB found at $db_path — fresh restore target; skipping pre-restore snapshot."
+            log_warn "There is no current Vaultwarden database to preserve before restoring the selected archive."
+        fi
+        return 0
+    fi
+
+    [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would run: utilities/backup-run.sh run emergency"; return 0; }
     _preflight_operational_sops_key_for_snapshot "$operational_sops_age_key_file" || return 1
     # Best-effort WAL checkpoint; swallow all failures intentionally.
     # shellcheck disable=SC2015
@@ -2446,7 +2464,7 @@ main() {
         fi
     fi
 
-    create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
+    create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" "$RESTORE_TYPE" || exit 1
 
     RESTORE_DESTRUCTIVE_PHASE_STARTED=false
     _RESTORE_SAFETY_NET_RUNNING=false
