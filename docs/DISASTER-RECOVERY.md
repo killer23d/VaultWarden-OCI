@@ -1,372 +1,250 @@
-# Disaster Recovery
+# Disaster Recovery — VaultWarden-OCI
 
-This guide provides a complete, minimal-touchpoint, bare-metal disaster recovery (DR) procedure for restoring VaultWarden from an encrypted remote backup. It covers dependency installation, repository checkout, and single-command restore. The `secrets/` directory is excluded from backup archives. The Age key must be backed up separately.
+This guide is the bare-metal recovery runbook for rebuilding VaultWarden-OCI on a replacement Ubuntu host from encrypted backups. It reflects the current 2026 backup tier model, root-operated lifecycle, block/boot storage preflight, operator-controlled service start, and post-restore runtime permission repair.
 
-> **See also:** [README.md](../README.md) — project overview, quick-start, and links to all other docs.
+Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md) · [OPERATIONS.md](OPERATIONS.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+
+---
+
+## Recovery Goals
+
+Use the smallest backup tier that solves the incident:
+
+| Tier | Best use | DR role |
+| :-- | :-- | :-- |
+| `db` | Quick database rollback | Restores Vaultwarden database contents only; storage-layout independent. |
+| `full` | Normal fresh-VM disaster recovery | Primary scheduled DR artifact when you have the offline Age key or the key that encrypted the selected backup. |
+| `emergency` | Fastest clone-style recovery | Clone-grade sealed capsule that can include staged `/etc/vaultwarden` key/config material. |
+
+> **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`).
+
+Choose `db` for database rollback, `full` for normal DR with the offline Age key, and `emergency` when fastest recovery is worth carrying key material inside the sealed capsule.
+
+---
 
 ## Prerequisites
 
-- Fresh hardware or VM provisioned and OS installed.
-- The Recovery Kit file path (containing your offline age credential).
-- The rclone remote name where your full backup is stored.
-- `git` installed on the target system.
+Before beginning a full or emergency DR restore, have:
 
-## What a Full Backup Contains
+- a fresh or replacement Ubuntu 22.04/24.04 host;
+- provider ingress prepared for SSH and HTTPS;
+- Cloudflare DNS/proxy/WAF access;
+- the rclone remote containing the backups, if using offsite restore;
+- the Age key, recovery kit, emergency passphrase, or emergency recipient identity that decrypts the selected backup;
+- the storage layout decision: boot storage (`/var/lib/vaultwarden`) or attached block/data volume such as `/mnt/vw-data`.
 
-Full backups are your scheduled DR artifact. They contain exactly what is needed to restore your VaultWarden instance, excluding security-sensitive files.
+For block storage recovery, attach and mount the target data volume before running a destructive full/emergency restore. The restore preflight will not silently restore a block-volume backup into boot storage.
 
-| Included in Full Backup | Excluded from Full Backup |
-| :-- | :-- |
-| Project root files (`docker-compose.yml`, `.env`, scripts, docs, `lib/`, systemd files, etc.) | `secrets/` directory |
-| Caddy configuration (`caddy/`) | Age key |
-| Crowdsec configuration (`crowdsec/`) | `backups/` and `logs/` directories |
-| State directory (including `db.sqlite3` and attachments) | `.git`, `.rate-limit`, `*.sock`, `*.lock`, `*.tmp`, `*.age.tmp` |
+---
 
-> **Why are secrets excluded?** Keeping secrets out of the archive limits the blast radius if a backup file is ever exfiltrated. Furthermore, the `restore.sh` process generates a *new* Age encryption key upon success. If the old key was included in the backup, it would be stale the moment the restore completes.
-
-## Step 1 — Install System Dependencies
-
-Install the required tools for the restore scripts to function. Note that `age-keygen` is bundled with the `age` package.
-
-**Ubuntu / Debian:**
+## Step 1 — Install Dependencies
 
 ```bash
 sudo apt update
-sudo apt install git docker.io docker-compose-plugin age sqlite3 zstd rclone
+sudo apt install -y git docker.io docker-compose-plugin age sqlite3 zstd rclone
+sudo systemctl enable --now docker
 ```
 
-**Oracle Linux / RHEL variants:**
+Log out and back in if Docker group membership is changed by setup later.
 
-```bash
-sudo dnf install git docker docker-compose-plugin age sqlite3 zstd rclone
-```
+---
 
 ## Step 2 — Clone the Repository
 
-Clone the VaultWarden-OCI repository, then check out the **exact branch or tag that was running when the backup was taken**.
+Clone the repository and check out the branch or tag that matches the backup metadata when possible.
 
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
+git checkout delta   # or the git_ref recorded in the backup .meta sidecar
+chmod +x *.sh utilities/*.sh
 ```
 
-> **IMPORTANT:** You must check out the exact branch or tag that was running when the backup was taken to ensure full script compatibility. Using a different revision can cause silent behavioural differences in `restore.sh`, `backup.sh`, and the shared libraries.
-
-**How to find what was running:**
-
-1. **Check the backup `.meta` sidecar file** — every backup archive ships a `*.meta` file that records the `git_ref` (branch/tag) and `git_sha` at the time the backup was created. Inspect it with:
-   ```bash
-   cat full_backup_YYYYMMDD_HHMMSS.meta
-   # Look for: git_ref, git_sha, version fields
-   ```
-2. **Check your systemd unit or cron job** — the working directory is the cloned repo; `git -C /path/to/VaultWarden-OCI describe --tags --exact-match 2>/dev/null || git -C /path/to/VaultWarden-OCI rev-parse --abbrev-ref HEAD` shows the active ref.
-3. **Fall back to the VERSION file** — if the meta sidecar is unavailable, inspect `VERSION` in the repo root to match the version tag closest to your backup date.
-
-Once you have the ref, check it out:
+Every full/emergency backup has a `.meta` sidecar. Check it when available:
 
 ```bash
-# By tag (recommended for production):
-git checkout v1.2.3
-
-# By branch:
-git checkout Beta
+cat full_backup_YYYYMMDD_HHMMSS.tar.zst.age.meta
+# Look for: git_ref, git_sha, archive_format, storage_mode, project_state_dir
 ```
 
-## Step 3 — Configure rclone (if not pre-configured)
-
-Configure the rclone remote where your backups are stored.
-
-```bash
-rclone config
-```
-
-> Reference: If `RCLONE_REMOTE_NAME` is absent from your environment, `restore.sh interactive --remote` will gracefully prompt you for the remote name interactively.
-
-## Step 4 — Run the DR Restore
-
-Run the following single command to trigger the bare-metal restore:
-
-```bash
-sudo ./restore.sh interactive --remote --from-recovery-kit /path/to/recovery-kit.txt
-```
-
-**What happens automatically:**
-- `.env` is restored from the backup.
-- `docker-compose.yml` and `caddy`/`crowdsec` configs are restored.
-- `db.sqlite3` and attachments are restored.
-- A **NEW** age key is generated; operator must type `SAVED` to confirm.
-- Services are started automatically.
-- A post-restore health check runs.
-
-## Step 5 — Sync systemd (if using systemd mode)
-
-Sync the newly generated age key and update the systemd timers.
-
-```bash
-sudo ./setup.sh systemd install
-```
-
-> **Why?** This step syncs the new age key to `/etc/vaultwarden/age-key.txt` and updates the `SOPS_AGE_KEY_FILE` reference in your systemd unit files. Without this, automated tasks like scheduled backups will fail.
-
-## Step 6 — Save the New Recovery Kit
-
-The restore process generates a new recovery kit at `/root/vaultwarden-recovery-kit-<timestamp>.txt`.
-
-You must copy this file to your offline storage and delete it from `/root/`.
-
-> **WARNING:** Loss of this file equals the inability to decrypt future backups.
-
-## Step 7 — Verify the Restore
-
-Verify that the restore was completely successful and backups are functioning.
-
-```bash
-sudo ./backup.sh verify
-sudo ./maintenance.sh health --comprehensive
-```
-
-Expected output indicators should show that services are running, the database is intact, and backups can be successfully created.
+Using a very different repo revision can cause restore behavior to differ from the backup's expected format.
 
 ---
 
-## Archive Format Reference
+## Step 3 — Prepare Storage
 
-Full backups use the `.tar.zst.age` extension: a **zstd-compressed tar archive encrypted with Age**. Each backup also ships two sidecar files:
+### Boot-storage target
 
-| File | Purpose |
-| :-- | :-- |
-| `*.age` | Encrypted backup archive |
-| `*.sha256` | Post-encryption SHA-256 checksum |
-| `*.meta` | Metadata: type, timestamp, archive format, version, git_ref |
-
-### Manual decompression pipeline
+Boot-only recovery uses the default state directory:
 
 ```bash
-# Full / emergency backup (.tar.zst.age)
-age -d -i /path/to/age-key.txt full_backup_YYYYMMDD_HHMMSS.tar.zst.age \
-  | zstd -d -T0 -c \
-  | tar -xf -
-
-# Database-only backup (.sqlite3.age) — no tar wrapper
-age -d -i /path/to/age-key.txt db_backup_YYYYMMDD_HHMMSS.sqlite3.age \
-  > db.sqlite3
+PROJECT_STATE_DIR=/var/lib/vaultwarden
 ```
 
-> **Legacy format:** Backups created before the zstd migration use `.tar.gz.age`. Replace `zstd -d -T0 -c` with `gunzip -c` for those files.
-
----
-
-## Age Key Quick Reference
-
-The `restore.sh` process generates a **new** age key after every successful restore. The key is resolved from the first readable location in this order:
-
-| Priority | Path | When it applies |
-| :-- | :-- | :-- |
-| 1 | `$AGE_KEY_FILE` env var | Explicit operator override |
-| 2 | `/etc/vaultwarden/age-key.txt` | Post-install production path |
-| 3 | `secrets/keys/age-key.txt` | Repo-local fallback (dev / pre-install) |
-
-After `setup.sh systemd install` runs (Step 5 above), the active path is `/etc/vaultwarden/age-key.txt`. Use the following commands to inspect it:
+Run setup normally before restore so the host has baseline config and dependencies:
 
 ```bash
-# Show which age key file is currently resolving
-make key-path
-
-# Full health check: permissions, decodability, SOPS_AGE_KEY_FILE alignment
-make key-health
-
-# Display path, permissions, and public key fingerprint
-make key-show
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
 ```
 
-> **Update your escrow after every restore.** The new key must be exported to your password manager before the old bootstrap copy becomes stale:
-> ```bash
-> sudo ./utilities/secrets-export-recovery-kit.sh
-> shred -fuz ~/vaultwarden-age-key-escrow.txt   # delete after copying
-> ```
+### Block-storage target
 
----
+If the old host used block storage, attach and mount the replacement data volume first. Then run setup with the data-device options or restore only after the mounted state root is ready.
 
-## Post-Recovery Checklist
-
-Run through these items after every bare-metal restore to confirm the stack is fully operational:
-
-| # | Check | Command |
-| :-- | :-- | :-- |
-| 1 | Services are running | `make status` |
-| 2 | VaultWarden responds on HTTPS | `curl -sI https://vault.yourdomain.com` |
-| 3 | Age key path resolved correctly | `make key-path` |
-| 4 | Age key is healthy | `make key-health` |
-| 5 | New recovery kit saved to password manager | `sudo ./utilities/secrets-export-recovery-kit.sh` |
-| 6 | Old recovery kit deleted from `/root/` | `shred -fuz /root/vaultwarden-recovery-kit-*.txt` |
-| 7 | Systemd timers active | `make timers` |
-| 8 | First automated backup succeeds | `sudo ./backup.sh run db --rclone` |
-| 9 | Backup verification passes | `sudo ./backup.sh verify` |
-| 10 | Comprehensive health report clean | `sudo ./maintenance.sh health --comprehensive` |
-
-## Non-production USB recovery rehearsal
-
-Perform one recovery rehearsal during a planned maintenance or testing window
-using a disposable Ubuntu VM or another isolated test VM. Attach only a
-snapshot or copy of the production state volume: never mount or modify the live
-production state volume. Use a copy of the offline USB Age key, never its only
-existing copy.
-
-Keep the rehearsal isolated from production DNS and inbound production traffic.
-Do not use the production hostname unless DNS resolution and network routing
-are safely overridden so no test traffic can reach or replace production.
-
-> **Warning:** `recover.sh` may rekey and modify the state supplied to it. A
-> disposable state-volume copy is mandatory; this procedure is not safe against
-> the live production state directory.
-
-On the isolated VM, run:
-
-```bash
-sudo ./recover.sh \
-  --state-dir <copied-state-path> \
-  --key <copied-usb-key-path>
-
-sudo ./setup.sh systemd install
-
-sudo systemctl start vaultwarden-startup.service
-
-sudo ./utilities/smoke-test.sh
-```
-
-`recover.sh` restores and starts the stack directly. Then
-`setup.sh systemd install` installs and enables the production startup unit and
-timers, but enables `vaultwarden-startup.service` without starting it. The
-explicit `systemctl start` makes the oneshot startup service active before the
-smoke test runs last and verifies its state.
-
-Confirm and record that:
-
-- Docker Compose configuration is valid;
-- `/etc/systemd/system/vaultwarden-startup.service` validates;
-- `vaultwarden-startup.service` is active;
-- `/run/vaultwarden-oci/secrets` is owned by `root:root` with mode `0700`;
-- each runtime secret file is owned by `root:root` with mode `0444`;
-- the persistent SOPS ciphertext decrypts successfully without displaying
-  plaintext;
-- the Vaultwarden `/api/alive` endpoint responds successfully;
-- the copied state volume, not production state, was used; and
-- production state and production availability remained untouched.
-
-After recording a non-secret date and pass/fail result, stop the isolated test
-VM. Securely erase or destroy the copied Age key, destroy the copied state
-volume or snapshot clone, and destroy the disposable VM when it is no longer
-needed. Confirm that no plaintext recovery output remains on the VM. This is a
-manual, isolated rehearsal—not automated recovery CI.
-
-## Backup Type Reference
-
-Both **Full** and **Emergency** backups call `perform_full_backup()` identically. The only difference is when and why they are triggered — their archive contents are the same. Neither type includes the `secrets/` directory or the Age key.
-
-| Type | Contents | Purpose | Valid DR Artifact? | When Created |
-| :-- | :-- | :-- | :-- | :-- |
-| **Full** | Project root (including scripts, docs, `lib/`, and systemd files) + state dir, excluding `secrets/` and the Age key | Scheduled DR artifact | **Yes** | Weekly (via systemd timer) |
-| **Emergency** | Same contents as full backup; also excludes `secrets/` and the Age key | Pre-restore safety snapshot | **No*** | Automatically before running `restore.sh` |
-| **Database** | `db.sqlite3` only | Quick rollback of vault state | **No** | Daily (via systemd timer) |
-
-> \* Emergency backups are **not** a DR artifact because they are taken mid-restore on the *old* system state — they exist solely as a rollback safety net. They have the same archive format and contents as a full backup (`secrets/` excluded from both). Use a **scheduled full backup** as your primary DR source.
-
-## Non-Obvious Pitfalls
-
-- **Cloning a different branch/tag:** Cloning a different branch/tag than the original install can lead to script incompatibilities.
-- **Re-running setup after a restore:** Use `sudo ./setup.sh install --domain DOMAIN --email EMAIL` if you need to regenerate config on the recovered host.
-- **rclone remote name not configured and `.env` absent:** The interactive prompt handles this seamlessly.
-- **Recovery kit has wrong permissions:** Ensure the file has strict permissions (chmod `600`).
-- **Forgetting `setup.sh systemd install`:** Failing to run this after a restore leaves the old key in systemd, breaking automated tasks.
-- **Age key mismatch after fresh `setup.sh` before restore:** Running `setup.sh install --force` before restoring creates a new age key that doesn't match the one that encrypted your backup. Always supply the key from your bootstrap escrow (`RESTORE_AGE_KEY_FILE`) or let `restore.sh` prompt you.
-- **Emergency kit key vs full-backup key:** Emergency and full backups use the same `perform_full_backup()` code path and exclude `secrets/` identically. Neither embeds an age key inside the archive. You must always supply the age key separately from your bootstrap escrow — regardless of backup type.
-- **`make key-path` shows wrong path after restore:** Confirm `setup.sh systemd install` has been run; the systemd service environment may still reference the old repo-local path.
-
-## Troubleshooting
-
-| Symptom | Likely Cause | Fix |
-| :-- | :-- | :-- |
-| `age: no identity matched any recipient` | Wrong age key for this backup | Supply the key that was active when the backup was taken; use bootstrap escrow if lost |
-| `restore.sh: .env not found` | Restore ran before `.env` was populated | Run `./setup.sh install` first, then re-run the restore |
-| `rclone: no remote named X` | Remote not configured on new host | Run `rclone config` and create the remote with the same name |
-| `make key-health` fails after restore | `SOPS_AGE_KEY_FILE` in `.env` points to old path | Verify with `make key-path`; re-run `setup.sh systemd install` |
-| `make key-path` prints `ERROR: No readable age key found` | Key absent at all three resolution locations | Place key via `sudo install -m 600 age-key.txt /etc/vaultwarden/age-key.txt` |
-| Services start but backups fail | Systemd unit still uses old key path | Re-run `sudo ./setup.sh systemd install` to resync the key reference |
-| `zstd: error 70` or `tar: unexpected EOF` | Wrong decompressor or truncated download | Confirm extension is `.tar.zst.age` and re-download; use `zstd -d`, not `gunzip` |
-| Permission/ownership errors after restore | UID/GID differences or stale generated config on the new host | Re-run `sudo ./setup.sh install --domain DOMAIN --email EMAIL` |
-| `db.sqlite3: disk I/O error` | SQLite WAL not fully checkpointed in backup | Use a full or emergency backup instead of a db-only backup for this restore |
-
-## Recovery Kit Best Practices
-
-The recovery kit contains your offline credential. Treat it with extreme care.
-
-**Where to store it:**
-- A secure password manager (e.g., Bitwarden, 1Password)
-- An encrypted offline USB drive
-- Printed on paper and stored in a physical fireproof safe
-
-**What NOT to do:**
-- Do NOT store it on the same server.
-- Do NOT store it in the same cloud storage bucket as the backups.
-- Do NOT send it via unencrypted email or messaging apps.
-
----
-
-## Related Documentation
-
-| Doc | Contents |
-| :-- | :-- |
-| [README.md](../README.md) | Project overview, quick-start, and full documentation index |
-| [BACKUP-RESTORE.md](BACKUP-RESTORE.md) | Full backup strategy, retention policy, and the 12-step restore procedure |
-| [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md) | Age key recovery procedures when the bootstrap key is lost |
-| [OPERATIONS.md](OPERATIONS.md) | Day-to-day ops, update/rollback phases |
-| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Common issues and fixes |
-
-## Full/emergency restore readiness
-
-Use non-destructive inspect mode before restoring a full or emergency archive on a replacement VM:
+Use inspect mode before destructive restore:
 
 ```bash
 sudo ./restore.sh inspect --remote
 ```
 
-The report shows the backup source layout, current target layout, live DB presence, snapshot-only DBs, required block-volume directories, and the recommended next action. A block-storage source archive should be restored only after the attached data volume is mounted and prepared; it is not silently restored to boot storage.
+The target should be mounted and writable, and the report should show the expected required directories: `data`, `caddy`, `logs`, `config`, `secrets`, `backups`, plus the `.vw-data-volume` sentinel when in separate-volume mode.
 
-If you only need Vaultwarden database contents, prefer the latest DB backup because DB restore is storage-layout independent. Full/emergency archives without a live `data/db.sqlite3` are unsafe for normal full restore; choose another archive, restore a DB backup, or inspect the tar manually. Older encrypted backups may require the Age key that was active when they were created, supplied with `--key-file`, or an offline recovery kit supplied with `--from-recovery-kit`.
+---
 
-### 2026 backup tier model
+## Step 4 — Select the Restore Tier
 
-VaultWarden-OCI has three deliberately different backup tiers:
+### DB rollback
 
-| Tier | Use | Contents | Key handling |
-| --- | --- | --- | --- |
-| `db` | Quick database rollback | A single encrypted, integrity-checked SQLite snapshot (`.sqlite3.age`) | Encrypted to the operational Age recipient. |
-| `full` | Normal fresh-VM disaster recovery | Project root, state directory, persistent config, encrypted SOPS `secrets.yaml`, sidecars/metadata, and a verified DB injected at `${PROJECT_STATE_DIR}/data/db.sqlite3` | Excludes `/etc/vaultwarden/age-key.txt`; restore requires the operator's offline Age key. |
-| `emergency` | Fastest clone-style recovery | Everything in `full`, plus staged persistent `/etc/vaultwarden` key/config material such as `age-key.txt`, `vaultwarden.env`, and `rclone.conf` when present | Protected independently with `age -p` passphrase mode or `EMERGENCY_BACKUP_AGE_RECIPIENT`; it is never encrypted only to the operational key it contains. |
+Use this when the host and services are otherwise intact:
 
-All tiers contain a complete verified SQLite database snapshot. Backups first try the SQLite Online Backup API (`sqlite3 .backup`). If that fails, Vaultwarden is stopped, the WAL is checkpointed, `db.sqlite3` is copied, integrity is verified, and Vaultwarden is restarted. No backup reports success with an unverified or partial database.
+```bash
+sudo ./restore.sh latest db
+sudo ./maintenance.sh health
+```
 
-Full and emergency archives exclude live `db.sqlite3`, WAL/SHM files, backup directories, logs, temp files, sockets/locks, `.pre-restore-*` snapshots, decrypted runtime secrets, and `/run/vaultwarden-oci/secrets/*`. The verified staged DB is then added back to the archive at the normal live path, so `.pre-restore-*` databases never satisfy archive validation.
+### Full DR restore
 
-> **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`). Do not store passphrases in shell history, environment variables, logs, or metadata.
+Use this for normal fresh-VM recovery:
 
-Choose `db` for quick DB rollback, `full` for a fresh VM restore when you have the offline Age key, and `emergency` when the fastest clone-style recovery is worth carrying key material inside the sealed capsule.
+```bash
+sudo ./restore.sh inspect --remote
+sudo ./restore.sh interactive --remote --key-file /path/to/offline-age-key.txt --start-policy ask
+```
 
-### Operator-controlled service start after restore, DR, and migration
+### Emergency clone-style restore
 
-Restore and migration workflows support an explicit start policy so operators can inspect the host before VaultWarden is started:
+Use this when you need the sealed clone-grade capsule:
 
-- `--start-policy auto` or `--start`: start services automatically after successful restore/migration.
-- `--start-policy ask`: prompt before starting. Interactive restores default to this and ask `Start VaultWarden services now? [y/N]`.
-- `--start-policy manual` or `--no-start`: do not start services; print the manual checklist instead.
+```bash
+sudo ./restore.sh inspect --remote
+sudo ./restore.sh interactive --remote --start-policy ask
+```
 
-After a full or emergency restore, use the manual inspection window to verify `.env`, `/etc/vaultwarden/*`, mounted storage, Cloudflare/DNS, and firewall state. Start manually with:
+If the emergency backup is passphrase-sealed, `age` will prompt for the emergency passphrase. If it uses an emergency recipient, provide the matching identity through the supported restore key/recovery-kit path.
+
+---
+
+## Step 5 — Inspect Before Starting Services
+
+Interactive full/emergency restores default to `--start-policy ask`. Answer `n` when you want to inspect the recovered host before starting containers.
+
+Checklist before start:
+
+```bash
+sudo utilities/repair-permissions.sh
+sudo docker compose config --quiet
+sudo ls -ld /etc/vaultwarden ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/{data,caddy,logs,config,secrets}
+sudo ./maintenance.sh health --json || true
+```
+
+The runtime permission repair is safe and idempotent. It normalizes root-operated config/secrets and Caddy's UID/GID `2000:2000` runtime paths. See [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md).
+
+Start manually after inspection:
 
 ```bash
 sudo ./startup.sh --skip-pull
 docker compose ps
-docker compose logs --tail=100
-sudo ./utilities/maintenance-health.sh
+sudo ./maintenance.sh health
 ```
 
-Emergency restores may install clone-grade `/etc/vaultwarden` material, but the operator still controls when services start. Systemd timer installation similarly supports `utilities/setup-systemd.sh install --no-enable-now` for installing units without immediately starting backup/maintenance timers.
+---
+
+## Step 6 — Install / Sync Systemd
+
+After a successful restore, install or refresh systemd integration so `/opt` scripts, units, timers, env references, and Age key paths match the recovered host:
+
+```bash
+sudo ./setup.sh systemd install
+sudo ./setup.sh systemd validate
+sudo make timers
+```
+
+If you want units installed but not timers started immediately, use the setup-systemd start-policy/no-enable-now support documented in the command reference.
+
+---
+
+## Step 7 — Save the New Key / Recovery Kit
+
+A successful restore may rotate or re-promote the operational Age key and re-key SOPS secrets for the recovered host. Export the recovery kit after restore:
+
+```bash
+sudo ./utilities/secrets-export-recovery-kit.sh
+```
+
+Store the result in your password manager and offline storage. Delete any plaintext copy left on the host after saving it.
+
+---
+
+## Step 8 — Verify the Recovery
+
+```bash
+sudo ./maintenance.sh health
+sudo ./backup.sh verify
+sudo ./backup.sh run db --rclone
+sudo make key-health
+sudo make timers
+```
+
+For public-path verification through local Caddy SNI:
+
+```bash
+DOMAIN="vault.example.com"
+
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/alive" \
+  -o /dev/null -w "local HTTPS /alive: HTTP %{http_code}\n"
+
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/config" \
+  -o /dev/null -w "local HTTPS /api/config: HTTP %{http_code}\n"
+```
+
+Expected result: both local HTTPS probes return HTTP `200`, and health reports Caddy storage/log permissions as correct.
+
+---
+
+## Common Pitfalls
+
+| Pitfall | Fix |
+| :-- | :-- |
+| Restoring a block-storage backup into boot storage | Attach/mount the data volume first or restore a `db` backup instead. |
+| Wrong Age key | Use the key that encrypted the selected backup, not necessarily the key currently installed on the replacement host. |
+| Emergency passphrase unavailable | Use a different backup or the emergency recipient identity if configured. |
+| Caddy returns Cloudflare 525 after restore | Run `sudo utilities/repair-permissions.sh`, restart Caddy, and re-run health. |
+| Services start before inspection | Use `--start-policy ask`, answer `n`, or use `--no-start`. |
+| Systemd timers fail after restore | Re-run `sudo ./setup.sh systemd install` and `sudo ./setup.sh systemd validate`. |
+
+---
+
+## Non-Production Recovery Rehearsal
+
+Rehearse recovery only on a disposable VM or copied state volume. Never mount or modify the live production state volume for a drill.
+
+Suggested drill:
+
+```bash
+sudo ./restore.sh inspect --remote
+sudo ./restore.sh interactive --remote --start-policy manual
+sudo utilities/repair-permissions.sh
+sudo ./startup.sh --skip-pull
+sudo ./maintenance.sh health
+```
+
+Confirm and record that:
+
+- Docker Compose configuration validates;
+- `/run/vaultwarden-oci/secrets` is `root:root 0700` and runtime secret files are `0444`;
+- Caddy storage/log paths are `2000:2000` and writable by the Caddy container;
+- the persistent SOPS ciphertext decrypts without exposing plaintext in logs;
+- Vaultwarden `/alive` and `/api/config` respond over local SNI HTTPS;
+- the copied state volume, not production state, was used.
+
+Destroy the disposable VM, copied state volume, and copied key material after the drill.
