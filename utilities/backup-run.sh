@@ -620,7 +620,9 @@ verify_backup_full() {
 verify_backup_quick() {
     local enc_file="$1"
     local age_key_file="$2"
+    local backup_type="${3:-}"
     local _quick_verify_hash_skipped=false
+    local _quick_verify_decrypt_skipped=false
 
     backup_log_info "Running quick verification (SHA256 + decrypt probe)..."
 
@@ -635,24 +637,69 @@ verify_backup_quick() {
         _quick_verify_hash_skipped=true
     fi
 
-    if [[ ! -f "$age_key_file" ]]; then
-        log_error "Quick verify FAILED: Age key file not found ($age_key_file)" >&2
-        log_error "Cannot perform decrypt probe — refusing to report verification success." >&2
-        return 1
+    if [[ "$backup_type" == "emergency" ]]; then
+        local encryption_mode emergency_identity
+        encryption_mode="$(awk -F= '$1=="encryption_mode"{print $2; exit}' "${enc_file}.meta" 2>/dev/null || true)"
+        emergency_identity="$(get_config_value "EMERGENCY_BACKUP_AGE_IDENTITY_FILE" "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}")"
+
+        case "$encryption_mode" in
+            age-passphrase)
+                if [[ -t 0 ]]; then
+                    backup_log_info "Emergency backup is passphrase-sealed; enter the emergency passphrase for decrypt probe..."
+                    if ! age -d -o /dev/null "$enc_file"; then
+                        log_error "Quick verify FAILED: could not decrypt passphrase-sealed emergency backup." >&2
+                        return 1
+                    fi
+                    backup_log_info "Emergency passphrase decrypt probe passed"
+                else
+                    backup_log_warn "Emergency backup is passphrase-sealed; decrypt probe skipped because no TTY is available."
+                    _quick_verify_decrypt_skipped=true
+                fi
+                ;;
+            age-recipient)
+                if [[ -n "$emergency_identity" && -r "$emergency_identity" ]]; then
+                    if ! age -d -i "$emergency_identity" -o /dev/null "$enc_file" 2>/dev/null; then
+                        log_error "Quick verify FAILED: emergency recipient decrypt probe failed for $(basename "$enc_file")" >&2
+                        return 1
+                    fi
+                    backup_log_info "Emergency recipient decrypt probe passed"
+                else
+                    backup_log_warn "Emergency backup uses a separate recipient; decrypt probe skipped because EMERGENCY_BACKUP_AGE_IDENTITY_FILE is not configured/readable."
+                    _quick_verify_decrypt_skipped=true
+                fi
+                ;;
+            *)
+                backup_log_warn "Emergency backup encryption mode is unknown or missing; operational Age decrypt probe skipped."
+                _quick_verify_decrypt_skipped=true
+                ;;
+        esac
+    else
+        if [[ ! -f "$age_key_file" ]]; then
+            log_error "Quick verify FAILED: Age key file not found ($age_key_file)" >&2
+            log_error "Cannot perform decrypt probe — refusing to report verification success." >&2
+            return 1
+        fi
+
+        if ! age -d -i "$age_key_file" -o /dev/null "$enc_file" 2>/dev/null; then
+            log_error "Quick verify FAILED: age --decrypt probe failed for $(basename "$enc_file")" >&2
+            log_error "The ciphertext may be corrupt even though the SHA256 matched." >&2
+            return 1
+        fi
+        backup_log_info "Decrypt probe passed"
     fi
 
-    if ! age -d -i "$age_key_file" -o /dev/null "$enc_file" 2>/dev/null; then
-        log_error "Quick verify FAILED: age --decrypt probe failed for $(basename "$enc_file")" >&2
-        log_error "The ciphertext may be corrupt even though the SHA256 matched." >&2
-        return 1
-    fi
-    backup_log_info "Decrypt probe passed"
-
-    if [[ "$_quick_verify_hash_skipped" == "true" ]]; then
-        backup_log_info "Quick verification passed (no .sha256 sidecar — hash check skipped): $(basename "$enc_file")"
+    if [[ "$_quick_verify_decrypt_skipped" == "true" ]]; then
+        if [[ "$_quick_verify_hash_skipped" == "true" ]]; then
+            backup_log_warn "Quick verification completed with limited checks: no SHA256 sidecar and emergency decrypt probe skipped."
+        else
+            backup_log_info "Quick verification passed for emergency backup integrity sidecars; decrypt probe skipped by design."
+        fi
+    elif [[ "$_quick_verify_hash_skipped" == "true" ]]; then
+        backup_log_info "Quick verification passed (decrypt probe only; no .sha256 sidecar): $(basename "$enc_file")"
     else
         backup_log_info "Quick verification passed (SHA256 + decrypt probe): $(basename "$enc_file")"
     fi
+
     return 0
 }
 
@@ -1583,7 +1630,7 @@ main() {
                 exit 1
             fi
         else
-            if ! verify_backup_quick "$backup_file" "$age_key_file"; then
+            if ! verify_backup_quick "$backup_file" "$age_key_file" "$actual_type"; then
                 verify_failed=true
                 log_error "Quick verification failed — backup may be corrupt."
                 if [[ "$EMAIL_NOTIFY" == "true" ]]; then
