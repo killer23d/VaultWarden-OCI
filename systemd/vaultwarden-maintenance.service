@@ -14,9 +14,11 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # setup.sh systemd install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# Must run as root because --comprehensive includes update-firewall, and
-# utilities/maintenance-update-firewall.sh safely enforces root for UFW changes.
-ExecStart=/opt/vaultwarden-scripts/maintenance.sh run --comprehensive --email
+# Scheduled runs hold the shared operations lock before delegating to
+# maintenance.sh. Expected lock contention means another restore/backup/update
+# is active, so this timer run exits 75 and is treated as a clean skip.
+# Real maintenance failures still use the script's normal non-zero exits.
+ExecStart=/bin/bash -c 'umask 117; touch /run/lock/vaultwarden-operations.lock; chgrp vaultwarden /run/lock/vaultwarden-operations.lock 2>/dev/null || true; chmod 0660 /run/lock/vaultwarden-operations.lock 2>/dev/null || true; exec 9>/run/lock/vaultwarden-operations.lock; if ! flock -n 9; then echo "Scheduled maintenance skipped: another VaultWarden operation is active."; exit 75; fi; exec /opt/vaultwarden-scripts/maintenance.sh run --comprehensive --email --skip-ops-lock'
 User=root
 Group=root
 StandardOutput=journal
@@ -41,6 +43,9 @@ RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 TimeoutStartSec=1800
 TimeoutStopSec=60
+# Exit code 75 means a scheduled run skipped cleanly because another operation
+# held the shared lock. All other non-zero exits remain failures.
+SuccessExitStatus=75
 
 [Install]
 WantedBy=multi-user.target
