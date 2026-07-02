@@ -9,13 +9,11 @@ OnFailure=vaultwarden-notify-failure@%n.service
 
 [Timer]
 OnCalendar=Sat *-*-* 04:00:00
-Persistent=true
-# Ensure Docker is healthy before any boot-triggered catch-up fires.
-# Without this, Persistent=true causes an immediate activation on reboot
-# which may race against the Docker daemon still starting up.
-OnBootSec=2min
-# RandomizedDelaySec spreads post-reboot catch-up burst and prevents
-# simultaneous --update-firewall invocations competing for the operations lock.
+# Calendar-only scheduling avoids immediate firewall update jobs during systemd
+# unit installation. The next update naturally runs at the Saturday window.
+Persistent=false
+# RandomizedDelaySec spreads routine firewall updates and prevents simultaneous
+# --update-firewall invocations competing for the operations lock.
 RandomizedDelaySec=120
 
 [Install]

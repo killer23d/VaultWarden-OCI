@@ -15,12 +15,12 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # Start even if /etc/vaultwarden/vaultwarden.env is not installed yet; backup.sh
 # reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# Skip this run if maintenance is active so backup and maintenance never overlap.
-# Uses /run/lock (not /tmp) so the file is visible across PrivateTmp= namespaces.
-ExecCondition=/bin/bash -c '! test -f /run/lock/vaultwarden-maintenance.lock'
-# Keep locking in backup.sh so manual and timer-driven backups share one guard.
-# --email stays disabled until the admin configures alert delivery.
-ExecStart=/opt/vaultwarden-scripts/backup.sh run db --rclone --full-verification
+# Scheduled runs hold the shared operations lock before delegating to backup.sh.
+# Expected lock contention means another maintenance/restore/backup operation is
+# active, so this timer run exits 75 and is treated as a clean skip by systemd.
+# backup.sh still owns the backup-specific lock and real backup/rclone failures
+# continue to fail the service.
+ExecStart=/bin/bash -c 'umask 117; touch /run/lock/vaultwarden-operations.lock; chgrp vaultwarden /run/lock/vaultwarden-operations.lock 2>/dev/null || true; chmod 0660 /run/lock/vaultwarden-operations.lock 2>/dev/null || true; exec 9>/run/lock/vaultwarden-operations.lock; if ! flock -n 9; then echo "Scheduled DB backup skipped: another VaultWarden operation is active."; exit 75; fi; exec /opt/vaultwarden-scripts/backup.sh run db --rclone --full-verification --skip-ops-lock'
 # This unit intentionally runs as root because the current backup/maintenance
 # implementation requires root for storage readiness checks, root-owned secrets,
 # Docker/system access, or repair operations. Least privilege is enforced through
@@ -59,13 +59,11 @@ RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 TimeoutStartSec=3600
 TimeoutStopSec=60
-# Exit code contract (matches backup.sh):
-#   exit 0 = success (backup created, rclone synced)
-#   exit 2 = partial success / rclone-skipped (non-fatal; local backup intact)
-#            treated as success so OnFailure= is silent
-#   exit 1 = fatal (env load failed, age key missing/corrupt, backup or
-#            encryption failed) -- triggers OnFailure=
-SuccessExitStatus=0 2
+# Exit code contract for scheduled runs:
+#   exit 0  = success
+#   exit 75 = clean skip because another VaultWarden operation holds the lock
+#   any other non-zero exit = real failure and triggers OnFailure=
+SuccessExitStatus=0 75
 
 [Install]
 WantedBy=multi-user.target

@@ -78,7 +78,7 @@ VaultWarden-OCI systemd Timer Installer
 
 USAGE:
     sudo utilities/setup-systemd.sh <action> [OPTIONS]
-    sudo utilities/setup-systemd.sh install    # Install timers; ask before starting them on a TTY
+    sudo utilities/setup-systemd.sh install    # Install/enable timers; non-interactive default does not start them
     sudo utilities/setup-systemd.sh remove     # Disable and remove all timers
     sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
     sudo utilities/setup-systemd.sh status     # Show timer and service status
@@ -88,7 +88,7 @@ DESCRIPTION:
     systemd timers. Run after every 'git pull' to keep /opt/ in sync.
 
 ACTIONS:
-    install   Install and enable all systemd timer units
+    install   Install and enable all systemd timer units; start only by policy
     remove    Disable and remove all systemd timer units
     validate  Verify installed state matches repo; detect split-brain
     status    Show timer and service status
@@ -96,9 +96,23 @@ ACTIONS:
 OPTIONS:
     --dry-run     Print actions without executing
     --start-policy MODE  Timer activation policy: auto | ask | manual
-    --enable-now         Alias for --start-policy auto
-    --no-enable-now      Alias for --start-policy manual
-    --no-start           Alias for --start-policy manual
+                          manual: install and enable timer units, but do not start them now
+                          auto:   enable and start timers now with systemctl enable --now
+                          ask:    interactive TTY prompt before immediate timer start
+    --enable-now         Alias for --start-policy auto (enable/start timers now)
+    --no-enable-now      Alias for --start-policy manual (install-only/manual: enable timers without immediate execution)
+    --no-start           Alias for --start-policy manual (install-only/manual: enable timers without immediate execution)
+
+START POLICY SAFETY:
+    Non-interactive installs default to manual/install-only: units are installed
+    and timers are enabled for future boots, but backup/maintenance jobs are not
+    started immediately. Interactive TTY installs ask before starting timers.
+    Use --enable-now or --start-policy auto only when you are ready to run jobs.
+
+    Disaster-recovery/new-VM restores should avoid starting backup/maintenance
+    jobs until the operator verifies mounted data, secrets, rclone config, DNS,
+    firewall state, and VaultWarden service readiness. This prevents a restored
+    host from immediately running scheduled jobs against incomplete state.
     --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
@@ -119,12 +133,13 @@ WHAT install DOES:
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     6. systemctl daemon-reload
-    7. Enables vaultwarden-startup.service and enables/starts timers according to start policy
-    8. Verifies all managed timers are active and have a next trigger
+    7. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
+    8. If timers were started now, verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install
-    sudo utilities/setup-systemd.sh install --no-enable-now
+    sudo utilities/setup-systemd.sh install --no-enable-now   # install-only/manual; enable timers without immediate execution
+    sudo utilities/setup-systemd.sh install --enable-now      # enable/start timers now
     sudo utilities/setup-systemd.sh install --dry-run
     sudo utilities/setup-systemd.sh validate
     sudo utilities/setup-systemd.sh status
@@ -152,7 +167,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${START_POLICY}" in
-    "" ) if [[ -t 0 ]]; then START_POLICY="ask"; else START_POLICY="auto"; fi ;;
+    "" ) if [[ -t 0 ]]; then START_POLICY="ask"; else START_POLICY="manual"; fi ;;
     auto|ask|manual) ;;
     *) log_error "Invalid --start-policy: ${START_POLICY}"; exit 1 ;;
 esac
@@ -173,16 +188,58 @@ _timer_has_next_trigger() {
     [[ -n "$next_elapse" && "$next_elapse" != "n/a" ]]
 }
 
-# Return the number of managed timers that are active and scheduled.
-_count_healthy_managed_timers() {
-    local healthy_count=0
+# Return success when a managed timer is active and has a next trigger.
+_timer_is_healthy() {
+    local timer="$1"
+    systemctl is-active --quiet "$timer" && _timer_has_next_trigger "$timer"
+}
+
+# Print unhealthy managed timer names, one per line.
+_list_unhealthy_managed_timers() {
     local timer
     for timer in "${TIMERS[@]}"; do
-        if systemctl is-active --quiet "$timer" && _timer_has_next_trigger "$timer"; then
-            ((healthy_count++))
+        if ! _timer_is_healthy "$timer"; then
+            printf '%s\n' "$timer"
         fi
     done
-    printf '%s\n' "$healthy_count"
+}
+
+# Return the number of managed timers that are active and scheduled.
+_count_healthy_managed_timers() {
+    local unhealthy_count
+    unhealthy_count="$(_list_unhealthy_managed_timers | wc -l | awk '{print $1}')"
+    printf '%s\n' "$((${#TIMERS[@]} - unhealthy_count))"
+}
+
+# Shared install/validate timer diagnostics. Prints each unhealthy timer and the
+# exact systemctl probes operators need for root-cause analysis.
+_report_unhealthy_managed_timers() {
+    local context="${1:-timer health check}"
+    local -a unhealthy_timers=()
+    local timer active_state next_elapse
+    mapfile -t unhealthy_timers < <(_list_unhealthy_managed_timers)
+
+    if [[ "${#unhealthy_timers[@]}" -eq 0 ]]; then
+        log_success "${context}: all managed timers are active and scheduled (${#TIMERS[@]}/${#TIMERS[@]})."
+        return 0
+    fi
+
+    log_warn "${context}: unhealthy managed timers detected (${#unhealthy_timers[@]} of ${#TIMERS[@]}):"
+    for timer in "${unhealthy_timers[@]}"; do
+        log_warn "  UNHEALTHY TIMER: ${timer}"
+
+        log_warn "    systemctl is-active ${timer}"
+        active_state="$(systemctl is-active "$timer" 2>&1 || true)"
+        log_warn "      ${active_state:-<no output>}"
+
+        log_warn "    systemctl show ${timer} --property=NextElapseUSecRealtime --value"
+        next_elapse="$(systemctl show "$timer" --property=NextElapseUSecRealtime --value 2>&1 || true)"
+        log_warn "      ${next_elapse:-<empty>}"
+
+        log_warn "    systemctl status ${timer} --no-pager -l"
+        systemctl status "$timer" --no-pager -l 2>&1 | sed 's/^/      /' >&2 || true
+    done
+    return 1
 }
 
 # Print the sha256 digest of a file.
@@ -873,20 +930,16 @@ install_units() {
         done
 
         if [[ "$healthy_count" -eq "$expected_count" ]]; then
-            log_success "All managed timers are healthy ($healthy_count/$expected_count)."
+            _report_unhealthy_managed_timers "Post-install timer health"
         else
             log_warn "────────────────────────────────────────────────────────────────"
             log_warn "WARNING: Not all managed timers are healthy after enablement"
-            log_warn "         (healthy: $healthy_count/$expected_count)."
             log_warn "Possible causes:"
             log_warn "  - A timer unit has an invalid setting (e.g. bad OnCalendar)"
             log_warn "  - A timer is being stopped by a conflicting unit relationship"
             log_warn "  - A timer is active but has no next trigger (NEXT='-')"
             log_warn "  - systemd daemon has stale unit state (retry daemon-reload)"
-            log_warn "Investigate with:"
-            log_warn "  systemctl list-timers --all | grep vaultwarden"
-            log_warn "  systemctl status ${TIMERS[0]}"
-            log_warn "  journalctl -xe --unit vaultwarden-health.timer"
+            _report_unhealthy_managed_timers "Post-install timer health" || true
             log_warn "────────────────────────────────────────────────────────────────"
         fi
     else
@@ -1318,18 +1371,8 @@ validate_installation() {
     # the timer unit is currently active in systemd nor that it has a future
     # trigger time.
     log_info "[9/9] Checking timers are scheduled (systemctl list-timers) ..."
-    local expected_count="${#TIMERS[@]}"
-    local healthy_count
-    healthy_count=$(_count_healthy_managed_timers)
-    if [[ "$healthy_count" -eq "$expected_count" ]]; then
-        log_success "  All managed timers are healthy ($healthy_count/$expected_count)."
-    else
-        log_warn "  WARNING: Managed timers healthy: $healthy_count/$expected_count."
-        log_warn "  One or more timers are enabled but unhealthy (inactive or NEXT='-') — check:"
-        log_warn "    systemctl list-timers --all | grep vaultwarden"
-        log_warn "    systemctl status vaultwarden-db-backup.timer"
-        log_warn "    journalctl -xe --unit vaultwarden-health.timer"
-        log_warn "  Try: sudo systemctl restart vaultwarden-db-backup.timer vaultwarden-health.timer"
+    if ! _report_unhealthy_managed_timers "Validation timer health"; then
+        log_warn "  Try: sudo systemctl restart ${TIMERS[*]}"
         (( warnings++ )) || true
     fi
 

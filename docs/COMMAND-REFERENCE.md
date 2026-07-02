@@ -519,6 +519,7 @@ OPTIONS:
     --update-firewall       Include firewall update in this run
     --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
+    --skip-ops-lock         Internal/systemd: caller already holds operations lock
     --help, -h              Show this help
     --version, -V           Print the VaultWarden-OCI version and exit
 
@@ -1123,7 +1124,7 @@ VaultWarden-OCI systemd Timer Installer
 
 USAGE:
     sudo utilities/setup-systemd.sh <action> [OPTIONS]
-    sudo utilities/setup-systemd.sh install    # Install timers; ask before starting them on a TTY
+    sudo utilities/setup-systemd.sh install    # Install/enable timers; non-interactive default does not start them
     sudo utilities/setup-systemd.sh remove     # Disable and remove all timers
     sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
     sudo utilities/setup-systemd.sh status     # Show timer and service status
@@ -1133,7 +1134,7 @@ DESCRIPTION:
     systemd timers. Run after every 'git pull' to keep /opt/ in sync.
 
 ACTIONS:
-    install   Install and enable all systemd timer units
+    install   Install and enable all systemd timer units; start only by policy
     remove    Disable and remove all systemd timer units
     validate  Verify installed state matches repo; detect split-brain
     status    Show timer and service status
@@ -1141,9 +1142,23 @@ ACTIONS:
 OPTIONS:
     --dry-run     Print actions without executing
     --start-policy MODE  Timer activation policy: auto | ask | manual
-    --enable-now         Alias for --start-policy auto
-    --no-enable-now      Alias for --start-policy manual
-    --no-start           Alias for --start-policy manual
+                          manual: install and enable timer units, but do not start them now
+                          auto:   enable and start timers now with systemctl enable --now
+                          ask:    interactive TTY prompt before immediate timer start
+    --enable-now         Alias for --start-policy auto (enable/start timers now)
+    --no-enable-now      Alias for --start-policy manual (install-only/manual: enable timers without immediate execution)
+    --no-start           Alias for --start-policy manual (install-only/manual: enable timers without immediate execution)
+
+START POLICY SAFETY:
+    Non-interactive installs default to manual/install-only: units are installed
+    and timers are enabled for future boots, but backup/maintenance jobs are not
+    started immediately. Interactive TTY installs ask before starting timers.
+    Use --enable-now or --start-policy auto only when you are ready to run jobs.
+
+    Disaster-recovery/new-VM restores should avoid starting backup/maintenance
+    jobs until the operator verifies mounted data, secrets, rclone config, DNS,
+    firewall state, and VaultWarden service readiness. This prevents a restored
+    host from immediately running scheduled jobs against incomplete state.
     --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
@@ -1164,15 +1179,7 @@ WHAT install DOES:
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     6. systemctl daemon-reload
-    7. Enables vaultwarden-startup.service and enables/starts timers according to start policy
-    8. Verifies all managed timers are active and have a next trigger
-
-EXAMPLES:
-    sudo utilities/setup-systemd.sh install
-    sudo utilities/setup-systemd.sh install --no-enable-now
-    sudo utilities/setup-systemd.sh install --dry-run
-    sudo utilities/setup-systemd.sh validate
-    sudo utilities/setup-systemd.sh status
+    7. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
 ```
 
 ### smoke-test.sh

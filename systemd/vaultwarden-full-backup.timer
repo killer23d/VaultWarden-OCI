@@ -11,18 +11,14 @@ OnFailure=vaultwarden-notify-failure@%n.service
 [Timer]
 # Weekday-prefixed form: "Sun *-*-* 03:00:00" is valid systemd calendar syntax.
 OnCalendar=Sun *-*-* 03:00:00
-# Set to false: a missed weekly full backup is not worth triggering a
-# boot-time I/O storm. When Persistent=true and multiple timers fire at
-# once after downtime, the Conflicts= rejection on the service units
-# triggers spurious OnFailure= notifications for jobs that were not broken.
-# Only the daily DB backup warrants persistent catch-up (see db-backup.timer).
+# Predictable calendar-only scheduling: do not use OnBootSec on calendar timers.
+# OnBootSec can fire immediately during `systemctl enable --now` on already-booted
+# systems and create noisy install-time backup/maintenance bursts.
+# A missed weekly full backup waits for the next Sunday window; manual DR/new-VM
+# restores should start backup jobs only after the operator confirms readiness.
 Persistent=false
-# Ensure Docker is healthy before any boot-triggered catch-up fires.
-# Without this, Persistent=true causes an immediate activation on reboot
-# which may race against the Docker daemon still starting up.
-OnBootSec=2min
-# Extended RandomizedDelaySec to 300 s (5 min) for the heaviest job (full
-# backup) to give maximum spread after an unclean reboot burst.
+# Extended RandomizedDelaySec to 300 s (5 min) for the heaviest job (full backup)
+# while preserving the weekly calendar window.
 RandomizedDelaySec=300
 
 [Install]
