@@ -1458,6 +1458,46 @@ _detect_storage_mode() {
 
 _restore_required_dirs() { printf '%s\n' data caddy logs config secrets backups; }
 
+_restore_ensure_volume_sentinel() {
+    local mount_point="$1"
+    local device="${2:-${DATA_VOLUME_DEVICE:-}}"
+    local sentinel="$mount_point/.vw-data-volume"
+
+    if [[ -f "$sentinel" ]]; then
+        log_info "Data volume sentinel already present: $sentinel"
+        return 0
+    fi
+
+    local sentinel_tmp
+    sentinel_tmp="$(mktemp "$mount_point/vw-data-volume-tmp.XXXXXX")" || {
+        log_error "Failed to create temp file for sentinel: $mount_point"
+        return 1
+    }
+
+    if ! printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
+        "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel_tmp"; then
+        rm -f "$sentinel_tmp" 2>/dev/null || true
+        log_error "Failed to write sentinel temp file"
+        return 1
+    fi
+
+    chmod 444 "$sentinel_tmp" 2>/dev/null || true
+
+    if ! mv -- "$sentinel_tmp" "$sentinel"; then
+        rm -f "$sentinel_tmp" 2>/dev/null || true
+        log_error "Failed to move sentinel into place: $sentinel"
+        return 1
+    fi
+
+    if command -v chattr >/dev/null 2>&1; then
+        chattr +i "$sentinel" 2>/dev/null \
+            || log_warn "chattr +i failed on sentinel — immutability not set (non-fatal; sentinel is still 444)"
+    fi
+
+    log_success "Data volume sentinel written and protected: $sentinel"
+    return 0
+}
+
 _restore_age_no_identity_guidance() {
     log_error "The current configured Age key cannot decrypt this selected backup."
     log_error "The selected backup may have been encrypted with an older operational key or offline recovery key."
@@ -1561,6 +1601,14 @@ _restore_prepare_block_target() {
         fi
     fi
     [[ "$ok" == "true" ]] || return 1
+
+    local write_probe
+    write_probe="$(mktemp "$state_dir/.restore-write-probe.XXXXXX")" || {
+        log_error "Target block mount is mounted but not writable by root: $state_dir"
+        return 1
+    }
+    rm -f "$write_probe" 2>/dev/null || true
+
     local d
     for d in $(_restore_required_dirs); do
         if [[ ! -e "$state_dir/$d" ]]; then
@@ -1570,7 +1618,7 @@ _restore_prepare_block_target() {
             log_error "Required target path exists but is not a directory: $state_dir/$d"; return 1
         fi
     done
-    touch "$state_dir/.vw-data-volume" || return 1
+    _restore_ensure_volume_sentinel "$state_dir" "${DATA_VOLUME_DEVICE:-}" || return 1
     chown -R "${puid}:${pgid}" "$state_dir/data" "$state_dir/backups" 2>/dev/null || true
     chmod 700 "$state_dir/secrets" 2>/dev/null || true
     return 0
@@ -2048,8 +2096,8 @@ restore_full() {
         _sentinel_dir="${state_dir}"
     fi
     if [[ -n "$_sentinel_dir" ]]; then
-        touch "${_sentinel_dir}/.vw-data-volume" 2>/dev/null || \
-            log_warn "Could not re-touch volume sentinel at ${_sentinel_dir}/.vw-data-volume"
+        _restore_ensure_volume_sentinel "$_sentinel_dir" "${DATA_VOLUME_DEVICE:-}" || \
+            log_warn "Could not ensure volume sentinel at ${_sentinel_dir}/.vw-data-volume"
     fi
     unset _sentinel_dir
 
