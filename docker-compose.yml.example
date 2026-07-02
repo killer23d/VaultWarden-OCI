@@ -1,6 +1,13 @@
-# VaultWarden-OCI production compose
-# Service order: init-permissions -> vaultwarden + caddy -> postfix
-# Finish .env and secrets setup before starting the stack.
+# VaultWarden-OCI Production Compose
+# Core flow: init-permissions -> vaultwarden + caddy -> postfix -> fail2ban
+# Fill .env mandatory section first, then run setup secrets.
+
+# ─── Storage mode note ─────────────────────────────────────────────────────────────────────────────────
+# All persistent bind mounts below are rooted at PROJECT_STATE_DIR.
+#
+# Boot-only mode (DATA_VOLUME_DEVICE blank in .env):
+#   PROJECT_STATE_DIR defaults to /var/lib/vaultwarden on the boot volume.
+#   No special mount ordering is required.
 #
 # Storage note:
 # All persistent bind mounts live under PROJECT_STATE_DIR.
