@@ -253,7 +253,7 @@ do_edit() {
         log_error "Invalid YAML structure after editing:"
         log_error "  $yaml_err"
         local discard
-        if ! read -r -t 30 -p "Discard changes? (yes/no): " discard; then
+        if ! read -r -t 30 -p "Discard changes? [yes/no]: " discard; then
             log_warn "No input received (30s timeout). Discarding changes."
             discard="yes"
         fi

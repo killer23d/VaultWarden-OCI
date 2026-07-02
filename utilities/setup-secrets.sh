@@ -341,7 +341,7 @@ HELP
 
         echo ""
         local confirm
-        if ! read -r -t 30 -p "Reconfigure secrets? (yes/no): " confirm; then
+        if ! read -r -t 30 -p "Reconfigure secrets? [yes/no] (default: no): " confirm; then
             _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
             confirm="no"
         fi
@@ -365,7 +365,7 @@ HELP
 
         if [[ "$AUTO_MODE" != "true" ]]; then
             local install_it
-            if ! read -r -t 30 -p "Install Python argon2-cffi? (yes/no): " install_it; then
+            if ! read -r -t 30 -p "Install Python argon2-cffi? [yes/no] (default: no): " install_it; then
                 _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
                 install_it="no"
             fi
@@ -612,7 +612,7 @@ HELP
                         smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
                     else
                         local enable_smtp
-                        if ! read -r -t 30 -p "Enter smtp_password now? (yes/no): " enable_smtp; then
+                        if ! read -r -t 30 -p "Enter smtp_password now? [yes/no] (default: no): " enable_smtp; then
                             _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
                             enable_smtp="no"
                         fi
@@ -667,7 +667,7 @@ HELP
                         log_warn "  ./utilities/secrets-rotate.sh email_api_token"
                     else
                         local skip_api
-                        if ! read -r -t 30 -p "Enter email_api_token now? (yes/no): " skip_api; then
+                        if ! read -r -t 30 -p "Enter email_api_token now? [yes/no] (default: no): " skip_api; then
                             _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
                             skip_api="no"
                         fi
@@ -755,7 +755,7 @@ BACKUP_BANNER
                         log_warn "Rotate both push fields before startup."
                     else
                         local do_push
-                        if ! read -r -t 30 -p "Configure push notifications? (yes/no): " do_push; then
+                        if ! read -r -t 30 -p "Configure push notifications? [yes/no] (default: no): " do_push; then
                             _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
                             do_push="no"
                         fi
@@ -1486,7 +1486,7 @@ EOF
             log_warn "This will permanently remove the break-glass admin account."
             log_warn "You will lose emergency console access capability."
             echo ""
-            read -r -p "Continue with removal? (yes/no): " confirm
+            read -r -p "Continue with removal? [yes/no] (default: no): " confirm
             if [[ "$confirm" != "yes" ]]; then
                 log_info "Removal cancelled by user"
                 return 0

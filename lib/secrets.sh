@@ -677,7 +677,7 @@ SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password must
 be configured.
 PROMPT
     printf '\n' >/dev/tty
-    printf 'Email an encrypted backup of this document via SMTP? (yes/no): ' >/dev/tty
+    printf 'Email an encrypted backup of this document via SMTP? [yes/no] (default: no): ' >/dev/tty
     read -r -t 30 _yn </dev/tty 2>/dev/null || _yn="no"
     if [[ "${_yn,,}" != "yes" ]]; then
         return 0
@@ -1499,7 +1499,7 @@ offer_recovery_kit_export() {
     fi
 
     echo ""
-    read -r -p "Export a plaintext Recovery Kit? (yes/no): " export_kit
+    read -r -p "Export a plaintext Recovery Kit? [yes/no] (default: no): " export_kit
     if [[ "$export_kit" == "yes" ]]; then
         _ork_generate_and_secure "$output_file"
         # Shred the persistent on-disk copy now that the user has confirmed

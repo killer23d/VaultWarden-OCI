@@ -202,8 +202,8 @@ _mv_confirm() {
     # Skipped when --yes is set.
     [[ "${_MV_YES:-false}" == "true" ]] && return 0
     local reply
-    read -r -p "${1} [y/N] " reply
-    [[ "${reply}" =~ ^[Yy]$ ]] || { log_error "Aborted by operator."; exit 1; }
+    read -r -p "${1} [yes/no] (default: no): " reply
+    [[ "${reply,,}" =~ ^y(es)?$ ]] || { log_error "Aborted by operator."; exit 1; }
 }
 
 _mv_confirm_by_typing() {
@@ -1441,7 +1441,7 @@ _mv_step_start() {
             ;;
         ask)
             local _answer
-            read -r -p "Start VaultWarden stack now on the migrated storage? [Y/n] " _answer
+            read -r -p "Start VaultWarden stack now on the migrated storage? [yes/no] (default: yes): " _answer
             case "$_answer" in
                 n|N|no|NO)
                     _mv_log warn "Operator chose not to start VaultWarden stack after migration."
@@ -1749,8 +1749,8 @@ _mv_do_abort() {
             log_warn "  To unmount: sudo umount ${_abort_tgt}"
             log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             local _umount_reply
-            read -r -p "  Unmount ${_abort_tgt} now? [y/N] " _umount_reply
-            if [[ "${_umount_reply}" =~ ^[Yy]$ ]]; then
+            read -r -p "  Unmount ${_abort_tgt} now? [yes/no] (default: no): " _umount_reply
+            if [[ "${_umount_reply,,}" =~ ^y(es)?$ ]]; then
                 if umount "${_abort_tgt}"; then
                     log_success "Unmounted ${_abort_tgt}."
                 else
@@ -1838,8 +1838,8 @@ _mv_run_pipeline() {
                     log_warn "    ${_sentinel_mount}"
                     log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     local _fix_reply
-                    read -r -p "  Update the state file to use '${_sentinel_mount}' and continue? [y/N] " _fix_reply
-                    if [[ "${_fix_reply}" =~ ^[Yy]$ ]]; then
+                    read -r -p "  Update the state file to use '${_sentinel_mount}' and continue? [yes/no] (default: no): " _fix_reply
+                    if [[ "${_fix_reply,,}" =~ ^y(es)?$ ]]; then
                         local _old_target="${_MV_TARGET}"
                         _MV_TARGET="${_sentinel_mount}"
                         _mv_state_write MV_TARGET "${_MV_TARGET}"

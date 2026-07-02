@@ -858,14 +858,14 @@ offer_final_backup() {
     echo ""
 
     local answer continue_anyway
-    read -r -p "Run a final encrypted backup now? (yes/no): " answer
+    read -r -p "Run a final encrypted backup now? [yes/no] (default: no): " answer
     if [[ "$answer" == "yes" ]]; then
         info "Running final full backup..."
         if bash "${PROJECT_DIR}/backup.sh" run full 2>&1; then
             success "Final backup completed. Review the output above for the backup location."
         else
             warn "Backup exited with errors. Review the output above."
-            read -r -p "Continue with uninstall despite backup failure? (yes/no): " continue_anyway
+            read -r -p "Continue with uninstall despite backup failure? [yes/no] (default: no): " continue_anyway
             [[ "$continue_anyway" == "yes" ]] || { info "Aborted — nothing changed."; exit 0; }
         fi
     else

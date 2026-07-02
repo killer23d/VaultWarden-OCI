@@ -889,7 +889,7 @@ install_units() {
         auto) _enable_now=true ;;
         ask)
             local _answer
-            read -r -p "Enable and start backup/maintenance timers now? [y/N] " _answer
+            read -r -p "Enable and start backup/maintenance timers now? [yes/no] (default: no): " _answer
             case "$_answer" in y|Y|yes|YES) _enable_now=true ;; esac
             ;;
         manual) _enable_now=false ;;

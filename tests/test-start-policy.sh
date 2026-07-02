@@ -14,7 +14,7 @@ MAINT_SERVICE="$ROOT/systemd/vaultwarden-maintenance.service"
 MAINT_RUN="$ROOT/utilities/maintenance-run.sh"
 
 require '--start-policy MODE' "$RESTORE" 'restore help must document --start-policy'
-require 'Start VaultWarden services now\? \[y/N\]' "$RESTORE" 'restore ask prompt missing'
+require 'Start VaultWarden services now\? \[yes/no\] \(default: no\):' "$RESTORE" 'restore ask prompt missing'
 require '--no-start' "$RESTORE" 'restore --no-start missing'
 require '_restore_should_start_services' "$RESTORE" 'restore start-policy gate missing'
 require 'START_POLICY:-auto.*auto|START_POLICY.*== "auto"' "$RESTORE" 'restore safety net must respect auto policy'
@@ -23,13 +23,13 @@ require 'sudo ./startup\.sh --skip-pull' "$RESTORE" 'restore manual checklist mi
 require 'docker compose logs --tail=100' "$RESTORE" 'restore manual checklist missing log command'
 require '--rotate-age-key' "$RESTORE" 'restore rotate-age-key flag missing'
 require '--no-rotate-age-key' "$RESTORE" 'restore no-rotate-age-key flag missing'
-require 'Emergency capsule contains operational key material\. Rotate Age key after restore\? \[Y/n\]' "$RESTORE" 'emergency key rotation prompt missing'
+require 'Emergency capsule contains operational key material\. Rotate Age key after restore\? \[yes/no\] \(default: yes\):' "$RESTORE" 'emergency key rotation prompt missing'
 require 'Promoted encrypted SOPS secrets' "$RESTORE" 'restore must log promoted SOPS secrets'
 require 'Skipped runtime decrypted secrets' "$RESTORE" 'restore must log skipped runtime secrets'
 require 'Installed emergency /etc/vaultwarden material' "$RESTORE" 'restore must log emergency etc install'
 
 require '--start-policy <mode>' "$MIGRATE" 'migrate help must document --start-policy'
-require 'Start VaultWarden stack now on the migrated storage\? \[Y/n\]' "$MIGRATE" 'migrate ask prompt missing'
+require 'Start VaultWarden stack now on the migrated storage\? \[yes/no\] \(default: yes\):' "$MIGRATE" 'migrate ask prompt missing'
 require '_MV_START_POLICY="manual"' "$MIGRATE" 'migrate no answer must convert to manual policy'
 require 'skipping post-migration health check because services were not started' "$MIGRATE" 'migrate manual policy must skip healthcheck'
 
@@ -40,7 +40,7 @@ require 'auto:   enable and start timers now' "$SYSTEMD" 'systemd help must defi
 require 'enable timers without immediate execution' "$SYSTEMD" 'systemd help must document enable without immediate execution'
 require 'Disaster-recovery/new-VM restores should avoid starting backup/maintenance' "$SYSTEMD" 'systemd help must document DR/new VM safety'
 require 'START_POLICY="manual"' "$SYSTEMD" 'systemd non-interactive default must be manual'
-require 'Enable and start backup/maintenance timers now\? \[y/N\]' "$SYSTEMD" 'systemd ask prompt missing'
+require 'Enable and start backup/maintenance timers now\? \[yes/no\] \(default: no\):' "$SYSTEMD" 'systemd ask prompt missing'
 require 'systemctl enable --now "\$timer"' "$SYSTEMD" 'systemd auto policy must preserve enable --now path'
 require 'systemctl enable "\$timer"' "$SYSTEMD" 'systemd manual policy must enable without now'
 require '_report_unhealthy_managed_timers\(\) \{' "$SYSTEMD" 'shared timer health diagnostic helper missing'

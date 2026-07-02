@@ -891,6 +891,7 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-restore-backup-preflight-safety.sh
 	@tests/test-backup-architecture-policy.sh
 	@tests/test-backup-restore-behavior.sh
+	@tests/test-confirmation-prompt-format.sh
 	@tests/test-start-policy.sh
 	@tests/test-uninstall-vaultwarden.sh
 	@tests/test-setup-storage-ux.sh
@@ -1008,7 +1009,7 @@ clean: ## Remove generated files (logs, temp files)
 clean-all: ## Remove generated logs/temp files — services will re-init runtime secrets on next start
 	@echo "$(YELLOW)WARNING: This will remove generated logs/temp files.$(NC)"
 	@echo "$(YELLOW)         Run 'sudo make up' afterwards to regenerate runtime secrets from secrets.yaml.$(NC)"
-	@printf "Continue? (yes/no): "; \
+	@printf "Continue? [yes/no] (default: no): "; \
 	read -r confirm; \
 	if [ "$$confirm" = "yes" ]; then \
 		rm -f setup.log; \
@@ -1028,7 +1029,7 @@ prune: ## Remove unused Docker resources (images, containers, networks) — cann
 			exit 1; \
 		fi; \
 		echo "$(YELLOW)WARNING: This will permanently remove unused Docker resources.$(NC)"; \
-		printf "Continue? (yes/no): "; \
+		printf "Continue? [yes/no] (default: no): "; \
 		read -r confirm; \
 		if [ "$$confirm" != "yes" ]; then \
 			echo "Cancelled."; \

@@ -576,7 +576,7 @@ main() {
         log_info ""
         log_info "Secrets can be configured now so all four credentials are shown in the final summary."
         local _secrets_ans
-        read -r -p "Run interactive secrets setup now? [Y/n] " _secrets_ans
+        read -r -p "Run interactive secrets setup now? [yes/no] (default: yes): " _secrets_ans
         if [[ -z "$_secrets_ans" || "$_secrets_ans" =~ ^[Yy] ]]; then
             if ! "${SCRIPT_DIR}/utilities/setup-secrets.sh" configure --quiet-summary; then
                 log_warn "Secrets configuration encountered issues — run 'sudo ./setup.sh secrets' to retry"

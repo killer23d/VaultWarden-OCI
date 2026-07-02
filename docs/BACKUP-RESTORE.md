@@ -159,7 +159,7 @@ Restore and migration workflows support an explicit start policy:
 | Option | Behavior |
 | :-- | :-- |
 | `--start-policy auto` or `--start` | Start services automatically after successful restore/migration. |
-| `--start-policy ask` | Prompt before starting. Interactive restores default to this and ask `Start VaultWarden services now? [y/N]`. |
+| `--start-policy ask` | Prompt before starting. Interactive restores default to this and ask `Start VaultWarden services now? [yes/no] (default: no):`. |
 | `--start-policy manual` or `--no-start` | Do not start services; print the manual checklist instead. |
 
 Use `manual` or `ask` when you want to inspect `.env`, `/etc/vaultwarden/*`, mounted storage, Cloudflare/DNS, and firewall state before the stack starts.

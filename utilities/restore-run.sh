@@ -330,7 +330,7 @@ _restore_should_start_services() {
             ;;
         ask)
             local answer
-            read -r -p "Start VaultWarden services now? [y/N] " answer
+            read -r -p "Start VaultWarden services now? [yes/no] (default: no): " answer
             case "$answer" in
                 y|Y|yes|YES) return 0 ;;
                 *) _restore_print_manual_start_checklist; return 1 ;;
@@ -349,7 +349,7 @@ _restore_should_rotate_age_key() {
     esac
     if [[ "$RESTORE_TYPE" == "emergency" && -t 0 && "$FORCE" != "true" && -z "$ROTATE_AGE_KEY_POLICY" ]]; then
         local answer
-        read -r -p "Emergency capsule contains operational key material. Rotate Age key after restore? [Y/n] " answer
+        read -r -p "Emergency capsule contains operational key material. Rotate Age key after restore? [yes/no] (default: yes): " answer
         case "$answer" in
             n|N|no|NO) log_warn "Operator chose not to rotate Age key after emergency restore."; return 1 ;;
         esac

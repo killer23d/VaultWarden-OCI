@@ -498,7 +498,7 @@ print(n.get('name', '${net}_network'))
             _do_install=true
         else
             local _reply
-            read -r -p "Install netfilter-persistent and iptables-persistent now? [y/N] " _reply
+            read -r -p "Install netfilter-persistent and iptables-persistent now? [yes/no] (default: no): " _reply
             [[ "${_reply,,}" == "y" || "${_reply,,}" == "yes" ]] && _do_install=true
         fi
 

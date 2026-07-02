@@ -367,7 +367,7 @@ PYEOF
     printf '  %-10s %s\n' "after:"  "$new_fingerprint"
     if [[ -t 0 ]]; then
         local confirm_rotate
-        read -r -p "Apply this rotation? [y/N] " confirm_rotate
+        read -r -p "Apply this rotation? [yes/no] (default: no): " confirm_rotate
         if [[ ! "${confirm_rotate,,}" =~ ^y(es)?$ ]]; then
             log_info "Rotation cancelled by operator."
             return 0
