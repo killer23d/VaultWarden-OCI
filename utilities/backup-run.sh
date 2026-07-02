@@ -1064,10 +1064,14 @@ perform_full_backup() {
     require_commands zstd || return 1
 
     local snap_dir="$shared_tmpdir/stage"
-    local snap_db="$snap_dir/${state_dir#/}/data/db.sqlite3"
+    local snap_payload_dir="$shared_tmpdir/db-snapshot-payload"
+    local snap_payload_name="__vaultwarden_verified_db_snapshot.sqlite3"
+    local snap_payload_regex="__vaultwarden_verified_db_snapshot\\.sqlite3"
+    local snap_db="$snap_payload_dir/$snap_payload_name"
+    local db_archive_member="${state_dir#/}/data/db.sqlite3"
     local temp_tar="$shared_tmpdir/${backup_label}_backup_$timestamp.tar.zst"
 
-    mkdir -p "$(dirname "$snap_db")"
+    mkdir -p "$snap_payload_dir"
 
     local db_file="$state_dir/data/db.sqlite3"
     [[ -f "$db_file" ]] || { log_error "Database not found: $db_file" >&2; return 1; }
@@ -1152,8 +1156,12 @@ EOF
         "${tar_sources[@]}"
     )
     [[ -s "$snap_db" ]] || { log_error "Verified staged DB snapshot is missing; refusing raw live DB fallback" >&2; return 1; }
-    backup_log_info "Injecting verified DB snapshot at ${state_dir#/}/data/db.sqlite3..."
-    tar_cmd_args+=(-C "$snap_dir" "${state_dir#/}/data/db.sqlite3")
+    backup_log_info "Injecting verified DB snapshot at ${db_archive_member}..."
+    tar_cmd_args+=(
+        "--transform=s#^${snap_payload_regex}\$#${db_archive_member}#"
+        -C "$snap_payload_dir"
+        "$snap_payload_name"
+    )
 
     local tar_exit=0
     tar "${tar_cmd_args[@]}" 2>/dev/null || tar_exit=$?
