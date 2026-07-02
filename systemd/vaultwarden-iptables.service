@@ -6,7 +6,7 @@
 Description=VaultWarden iptables NAT and DOCKER-USER rules
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=network-online.target docker.service
-Requires=docker.service
+Wants=docker.service
 Wants=network-online.target
 # On failure wait 10 s then retry up to 3 times, in case Docker is still
 # initialising its bridge networks during a race at boot.
@@ -24,7 +24,7 @@ RemainAfterExit=yes
 # so WorkingDirectory must point to the repo root. The script is installed
 # flat to /opt/vaultwarden-scripts/ by 'sudo ./setup.sh systemd install'.
 WorkingDirectory=/opt/vaultwarden-scripts
-ExecStart=/opt/vaultwarden-scripts/setup-firewall.sh --phase iptables
+ExecStart=/bin/bash /opt/vaultwarden-scripts/setup-firewall.sh --phase iptables
 ExecStop=/bin/true
 
 Restart=on-failure

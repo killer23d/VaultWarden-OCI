@@ -34,9 +34,23 @@ require '_MV_START_POLICY="manual"' "$MIGRATE" 'migrate no answer must convert t
 require 'skipping post-migration health check because services were not started' "$MIGRATE" 'migrate manual policy must skip healthcheck'
 
 require '--no-enable-now' "$SYSTEMD" 'systemd help must document --no-enable-now'
+require 'Non-interactive installs default to manual/install-only' "$SYSTEMD" 'systemd help must document safe non-interactive manual default'
+require 'manual: install and enable timer units, but do not start them now' "$SYSTEMD" 'systemd help must define manual install-only behavior'
+require 'auto:   enable and start timers now' "$SYSTEMD" 'systemd help must define auto enable/start behavior'
+require 'enable timers without immediate execution' "$SYSTEMD" 'systemd help must document enable without immediate execution'
+require 'Disaster-recovery/new-VM restores should avoid starting backup/maintenance' "$SYSTEMD" 'systemd help must document DR/new VM safety'
+require 'START_POLICY="manual"' "$SYSTEMD" 'systemd non-interactive default must be manual'
 require 'Enable and start backup/maintenance timers now\? \[y/N\]' "$SYSTEMD" 'systemd ask prompt missing'
 require 'systemctl enable --now "\$timer"' "$SYSTEMD" 'systemd auto policy must preserve enable --now path'
 require 'systemctl enable "\$timer"' "$SYSTEMD" 'systemd manual policy must enable without now'
+require '_report_unhealthy_managed_timers\(\) \{' "$SYSTEMD" 'shared timer health diagnostic helper missing'
+require '_list_unhealthy_managed_timers\(\) \{' "$SYSTEMD" 'unhealthy timer listing helper missing'
+require 'UNHEALTHY TIMER:' "$SYSTEMD" 'timer diagnostics must print unhealthy timer names'
+require 'systemctl is-active \${timer}' "$SYSTEMD" 'timer diagnostics must print is-active command'
+require 'systemctl show \${timer} --property=NextElapseUSecRealtime --value' "$SYSTEMD" 'timer diagnostics must print next elapse command'
+require 'systemctl status \"\$timer\" --no-pager -l' "$SYSTEMD" 'timer diagnostics must run detailed status command'
+require '_report_unhealthy_managed_timers "Post-install timer health"' "$SYSTEMD" 'install must use shared timer diagnostic helper'
+require '_report_unhealthy_managed_timers "Validation timer health"' "$SYSTEMD" 'validate must use shared timer diagnostic helper'
 
 # Calendar timers must not also carry OnBootSec catch-up triggers. OnBootSec
 # fires during systemctl enable --now on an already-booted host and can create
