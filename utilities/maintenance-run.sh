@@ -135,10 +135,11 @@ main() {
     fi
     register_cleanup rm -f "$_MAINT_LOCK"
     # Explicitly close lock FDs on exit for clean resource release.
+    # shellcheck disable=SC2086
     _cleanup_locks() {
-        exec "${_MAINT_LOCK_FD}">&- 2>/dev/null || true
+        exec ${_MAINT_LOCK_FD}>&- 2>/dev/null || true
         if [[ -n "${_OPS_LOCK_FD:-}" ]]; then
-            exec "${_OPS_LOCK_FD}">&- 2>/dev/null || true
+            exec ${_OPS_LOCK_FD}>&- 2>/dev/null || true
         fi
         perform_cleanup
     }
