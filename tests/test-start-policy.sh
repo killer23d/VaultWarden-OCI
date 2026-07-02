@@ -34,9 +34,23 @@ require '_MV_START_POLICY="manual"' "$MIGRATE" 'migrate no answer must convert t
 require 'skipping post-migration health check because services were not started' "$MIGRATE" 'migrate manual policy must skip healthcheck'
 
 require '--no-enable-now' "$SYSTEMD" 'systemd help must document --no-enable-now'
+require 'install only / manual' "$SYSTEMD" 'systemd help must explain install-only/manual policy'
+require 'enable timers without immediate execution' "$SYSTEMD" 'systemd help must document enable-without-start behavior'
+require 'enable/start timers now' "$SYSTEMD" 'systemd help must document enable/start behavior'
+require 'DR/new VM restore' "$SYSTEMD" 'systemd help must warn DR/new VM restores to avoid immediate jobs'
+require 'START_POLICY="manual"' "$SYSTEMD" 'systemd non-interactive default must be manual'
 require 'Enable and start backup/maintenance timers now\? \[y/N\]' "$SYSTEMD" 'systemd ask prompt missing'
 require 'systemctl enable --now "\$timer"' "$SYSTEMD" 'systemd auto policy must preserve enable --now path'
 require 'systemctl enable "\$timer"' "$SYSTEMD" 'systemd manual policy must enable without now'
+require '_report_unhealthy_managed_timers' "$SYSTEMD" 'systemd detailed unhealthy timer reporter missing'
+require '_check_managed_timer_health' "$SYSTEMD" 'systemd shared timer health helper missing'
+require '_wait_for_managed_timer_health' "$SYSTEMD" 'systemd install timer health wait helper missing'
+require 'UNHEALTHY TIMER:' "$SYSTEMD" 'systemd diagnostics must print unhealthy timer names'
+require 'systemctl is-active "\$timer"' "$SYSTEMD" 'systemd diagnostics must print is-active command per timer'
+require 'systemctl show "\$timer" --property=NextElapseUSecRealtime --value' "$SYSTEMD" 'systemd diagnostics must print NextElapseUSecRealtime command per timer'
+require 'systemctl status "\$timer" --no-pager -l' "$SYSTEMD" 'systemd diagnostics must print full systemctl status per timer'
+require '_wait_for_managed_timer_health "after enablement" 10 1' "$SYSTEMD" 'install must use shared timer health helper'
+require '_check_managed_timer_health "during validation"' "$SYSTEMD" 'validate must use shared timer health helper'
 
 # Calendar timers must not also carry OnBootSec catch-up triggers. OnBootSec
 # fires during systemctl enable --now on an already-booted host and can create
