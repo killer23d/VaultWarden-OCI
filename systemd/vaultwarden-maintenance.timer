@@ -12,17 +12,13 @@ OnFailure=vaultwarden-notify-failure@%n.service
 # Daily maintenance is safe because the service unit still blocks overlap with
 # backup jobs.
 OnCalendar=*-*-* 02:05:00
-# Set to false: maintenance is not critical to catch-up on reboot. When
-# Persistent=true, a reboot after extended downtime causes all timers with
-# OnBootSec=2min to fire within a narrow window, competing for disk I/O and
-# triggering spurious Conflicts= rejections — which fire OnFailure= on services
-# that were not actually broken. A missed maintenance window is acceptable.
+# Predictable calendar-only scheduling: do not use OnBootSec on calendar timers.
+# OnBootSec can fire immediately during `systemctl enable --now` on already-booted
+# systems and create noisy install-time backup/maintenance bursts.
+# A missed maintenance run waits for the next daily window; this is safer for
+# DR/new-VM restores than automatic boot catch-up.
 Persistent=false
-# Ensure Docker is healthy before any boot-triggered catch-up fires.
-# Without this, Persistent=true causes an immediate activation on reboot
-# which may race against the Docker daemon still starting up.
-OnBootSec=2min
-# RandomizedDelaySec spreads post-reboot catch-up burst.
+# RandomizedDelaySec spreads routine maintenance within the calendar window.
 RandomizedDelaySec=30
 
 [Install]
