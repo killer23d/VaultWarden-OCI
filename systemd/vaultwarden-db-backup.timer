@@ -13,14 +13,13 @@ OnFailure=vaultwarden-notify-failure@%n.service
 # Use a single explicit timestamp expression; do not combine shorthand
 # calendar aliases with an explicit time in the same OnCalendar directive.
 OnCalendar=*-*-* 04:00:00
-Persistent=true
-# Ensure Docker is healthy before any boot-triggered catch-up fires.
-# Without this, Persistent=true causes an immediate activation on reboot
-# which may race against the Docker daemon still starting up.
-OnBootSec=2min
-# RandomizedDelaySec spreads post-reboot catch-up burst.
-# db-backup fires at 04:00 (+0-60s jitter), maintenance at 02:05 (+0-30s) —
-# the 2 h nominal gap prevents Sunday overlap without explicit After= ordering.
+# Predictable calendar-only scheduling: do not use OnBootSec or persistent
+# catch-up on this timer. Either can fire immediately during `systemctl enable
+# --now` on an already-booted host and collide with maintenance/full backups.
+# A missed DB backup waits for the next 04:00 window; the operator can run a
+# manual backup after DR/new-VM restore once storage and services are ready.
+Persistent=false
+# RandomizedDelaySec spreads routine jobs inside the daily backup window.
 RandomizedDelaySec=60
 
 [Install]
