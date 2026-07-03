@@ -126,6 +126,8 @@ parse_args() {
 
     [[ -n "$STATE_DIR" ]] || { usage; exit 1; }
     [[ -n "$KEY_FILE" ]] || { usage; exit 1; }
+    STATE_DIR="$(realpath -e "$STATE_DIR" 2>/dev/null)" || fatal "--state-dir path does not exist or is invalid: $STATE_DIR"
+    KEY_FILE="$(realpath -e "$KEY_FILE" 2>/dev/null)" || fatal "--key path does not exist or is invalid: $KEY_FILE"
 }
 
 check_prerequisites() {
@@ -134,7 +136,7 @@ check_prerequisites() {
     fi
 
     local cmd
-    for cmd in mountpoint findmnt sops age-keygen awk git install docker curl bash blkid mktemp cp mv rm chmod sed; do
+    for cmd in mountpoint findmnt sops age-keygen awk git install docker curl bash blkid mktemp cp mv rm chmod sed realpath; do
         command -v "$cmd" >/dev/null 2>&1 || fatal "Missing required command: $cmd"
     done
 
