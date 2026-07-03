@@ -70,7 +70,8 @@ _require_env_for_live_restore() {
 
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
-    local -a soft=(sops zstd rclone rsync)
+    local -a soft=(sops zstd rclone)
+    [[ -n "$(get_config_value "DATA_VOLUME_DEVICE" "")" ]] && hard+=(rsync)
     local missing_hard=() missing_soft=()
     for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
     for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
@@ -85,7 +86,10 @@ check_dependencies() {
                 age)       echo "  Hint [age]:       apt install age  OR  snap install age" >&2 ;;
                 age-keygen) echo "  Hint [age-keygen]: installed with 'age' — apt install age" >&2 ;;
                 sqlite3)   echo "  Hint [sqlite3]:   apt install sqlite3" >&2 ;;
-                sha256sum) echo "  Hint [sha256sum]: apt install coreutils  (should be pre-installed)" >&2 ;;
+                sha256sum) echo "  Hint [sha256sum]: apt install coreutils" >&2 ;;
+                tar)       echo "  Hint [tar]:       apt install tar" >&2 ;;
+                rsync)     echo "  Hint [rsync]:     apt install rsync" >&2 ;;
+                zstd)      echo "  Hint [zstd]:      apt install zstd" >&2 ;;
             esac
         done
         exit 1
@@ -96,6 +100,8 @@ check_dependencies() {
         for _cmd in "${missing_soft[@]}"; do
             case "$_cmd" in
                 rclone) echo "  Hint [rclone]: apt install rclone" >&2 ;;
+                sops)   echo "  Hint [sops]: apt install sops  OR  snap install sops" >&2 ;;
+                zstd)   echo "  Hint [zstd]: apt install zstd" >&2 ;;
             esac
         done
     fi
@@ -196,6 +202,7 @@ ENVIRONMENT:
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
     RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
     RCLONE_REMOTE_NAME                 Read from .env when available
+    RESTORE_HEALTH_TIMEOUT=<seconds>    Service health wait timeout (30-600; default: 60)
 
 EXAMPLES:
     # ── QUICK START (most common) ────────────────────────────────
@@ -298,7 +305,6 @@ case "$ROTATE_AGE_KEY_POLICY" in
 esac
 
 _require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
-check_dependencies
 
 # Handle the list + --remote combination.
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
@@ -349,10 +355,14 @@ _restore_should_rotate_age_key() {
     esac
     if [[ "$RESTORE_TYPE" == "emergency" && -t 0 && "$FORCE" != "true" && -z "$ROTATE_AGE_KEY_POLICY" ]]; then
         local answer
-        read -r -p "Emergency capsule contains operational key material. Rotate Age key after restore? [yes/no] (default: yes): " answer
-        case "$answer" in
-            n|N|no|NO) log_warn "Operator chose not to rotate Age key after emergency restore."; return 1 ;;
-        esac
+        while true; do
+            read -r -p "Emergency capsule: Rotate Age key after restore? Type 'yes' to rotate (recommended) or 'no' to skip: " answer
+            case "$answer" in
+                yes|YES) return 0 ;;
+                no|NO)   log_warn "Operator chose not to rotate Age key."; return 1 ;;
+                *) log_warn "Type 'yes' or 'no' (no implicit default)." ;;
+            esac
+        done
     fi
     return 0
 }
@@ -529,7 +539,6 @@ list_backups() {
     # or when --remote is explicitly requested.
     local show_remote=false
     [[ "${1:-}" == "--remote" ]] && show_remote=true
-    _rclone_is_available && show_remote=true
 
     if [[ "$show_remote" == "false" ]]; then
         # Local only
@@ -999,71 +1008,70 @@ _prompt_age_key() {
     fi
 
     echo ""
-    log_info  "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    log_info  "  Age Decryption Key Required"
-    log_info  "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    log_info  "  The selected backup was encrypted with an age private key."
-    log_info  "  For normal same-server restore, press Enter to use the currently configured key."
-    log_info  "  Only paste an AGE-SECRET-KEY-1... value if this backup was encrypted"
-    log_info  "  with a different old/offline key."
-    echo      ""
-    log_info  "  Currently configured key:  $configured_key"
-    echo      ""
-    log_warn  "  IMPORTANT: Do NOT press Ctrl-C here — if the key is wrong"
-    log_warn  "  decryption will fail AFTER backup selection, not silently."
-    log_info  "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo      ""
+    log_info "── Age Key Required ──────────────────────────────────────────────"
+    log_info "Configured key: $configured_key"
+    log_info "• Enter = use configured key above (normal same-server restore)"
+    log_info "• Paste AGE-SECRET-KEY-1... only if this backup used a different key"
+    log_info "──────────────────────────────────────────────────────────────────"
+    echo ""
 
-    local key_input=""
-    if [[ -t 0 ]]; then
-        # Interactive terminal: suppress echo with a 300s timeout.
-        if ! IFS= read -r -s -t 300 -p "  Age private key (hidden): " key_input; then
-            echo "" >&2
-            log_error "Timed out waiting for AGE key input (300s). Re-run restore.sh to retry."
-            exit 1
+    local key_input="" attempt
+    for attempt in 1 2 3; do
+        key_input=""
+        if [[ -t 0 ]]; then
+            _age_key_countdown &
+            local _countdown_pid=$!
+            IFS= read -r -s -t 300 -p "  Age private key (hidden): " key_input
+            local _read_rc=$?
+            kill "$_countdown_pid" 2>/dev/null || true
+            wait "$_countdown_pid" 2>/dev/null || true
+            printf '\r%80s\r' '' >&2
+            echo ""
+            if (( _read_rc != 0 )); then
+                log_error "Timed out waiting for Age key (300s). Re-run restore.sh to retry."
+                exit 1
+            fi
+        else
+            key_input=""
         fi
-        echo ""   # newline after silent input
-    else
-        IFS= read -r key_input || true
-    fi
 
-    # Priority 4: blank input → use configured key
-    if [[ -z "$key_input" ]]; then
-        log_info "  No key entered — using configured key: $configured_key"
-        [[ -f "$configured_key" ]] || { log_error "Configured key not found: $configured_key"; return 1; }
-        RESTORE_DECRYPT_AGE_KEY_FILE="$configured_key"
-        return 0
-    fi
+        if [[ -z "$key_input" ]]; then
+            log_info "  No key entered — using configured key: $configured_key"
+            [[ -f "$configured_key" ]] || { log_error "Configured key not found: $configured_key"; return 1; }
+            RESTORE_DECRYPT_AGE_KEY_FILE="$configured_key"
+            return 0
+        fi
 
-    key_input="${key_input#"${key_input%%[![:space:]]*}"}"
-    key_input="${key_input%"${key_input##*[![:space:]]}"}"
+        key_input="${key_input#"${key_input%%[![:space:]]*}"}"
+        key_input="${key_input%"${key_input##*[![:space:]]}"}"
 
-    if [[ "$key_input" != AGE-SECRET-KEY-1* ]]; then
-        log_error "Input does not look like an age private key (must start with AGE-SECRET-KEY-1)."
-        log_error "Tip: paste the full private key line from your saved age-key.txt."
-        return 1
-    fi
+        if [[ "$key_input" != AGE-SECRET-KEY-1* ]]; then
+            log_error "Input does not look like an age private key (must start with AGE-SECRET-KEY-1)."
+        else
+            local key_staging_dir="$TMPDIR_RESTORE/key_stage"
+            mkdir -p "$key_staging_dir"
+            chmod 700 "$key_staging_dir"
+            local staged_key_file="$key_staging_dir/restore-age-key.txt"
+            printf '%s\n' "$key_input" > "$staged_key_file"
+            chmod 600 "$staged_key_file"
+            if SOPS_AGE_KEY_FILE="$staged_key_file" simple_verify_age_key; then
+                RESTORE_DECRYPT_AGE_KEY_FILE="$staged_key_file"
+                log_success "Age key accepted and staged for decryption."
+                return 0
+            fi
+            rm -f "$staged_key_file"
+        fi
 
-    # Write to a secure temp file inside the already-chmod-700 TMPDIR_RESTORE
-    local key_staging_dir="$TMPDIR_RESTORE/key_stage"
-    mkdir -p "$key_staging_dir"
-    chmod 700 "$key_staging_dir"
+        if (( attempt < 3 )); then
+            log_warn "Key validation failed (attempt ${attempt}/3). Press Enter for configured key"
+            log_warn "or paste a different AGE-SECRET-KEY-1... key:"
+        fi
+    done
 
-    local staged_key_file="$key_staging_dir/restore-age-key.txt"
+    log_error "3 failed key attempts. Re-run restore.sh to start over."
+    exit 1
 
-    printf '%s\n' "$key_input" > "$staged_key_file"
-    chmod 600 "$staged_key_file"
 
-    if ! SOPS_AGE_KEY_FILE="$staged_key_file" simple_verify_age_key; then
-        rm -f "$staged_key_file"
-        log_error "Age key validation failed — wrong key or corrupted input."
-        log_error "Ensure you pasted the complete AGE-SECRET-KEY-1... line."
-        return 1
-    fi
-
-    RESTORE_DECRYPT_AGE_KEY_FILE="$staged_key_file"
-    log_success "Age key accepted and staged for decryption."
-    return 0
 }
 
 #
@@ -1406,6 +1414,88 @@ read_meta_field() {
     else
         echo "$default"
     fi
+}
+
+# Checks archive-specific restore tools once the selected backup path is known.
+check_archive_dependencies() {
+    local backup_file="$1"
+    local -a hard=()
+    local missing_hard=()
+    case "$backup_file" in
+        *.tar.zst.age|*.zst.age|*.tar.zst) hard+=(zstd) ;;
+    esac
+    if [[ "${ROTATE_AGE_KEY_POLICY:-}" != "skip" && -f "${STATE_DIR}/secrets/secrets.yaml" ]]; then
+        hard+=(sops)
+    fi
+    local _cmd
+    for _cmd in "${hard[@]}"; do command -v "$_cmd" >/dev/null 2>&1 || missing_hard+=("$_cmd"); done
+    if [[ ${#missing_hard[@]} -gt 0 ]]; then
+        echo "ERROR: restore.sh: the following required tools are not installed: ${missing_hard[*]}" >&2
+        for _cmd in "${missing_hard[@]}"; do
+            case "$_cmd" in
+                sops) echo "  Hint [sops]: apt install sops  OR  snap install sops" >&2 ;;
+                zstd) echo "  Hint [zstd]:      apt install zstd" >&2 ;;
+            esac
+        done
+        exit 1
+    fi
+}
+
+# Prints a compact restore plan before destructive confirmation.
+_print_restore_plan_summary() {
+    local backup_name backup_size enc_mode
+    backup_name="$(basename "${BACKUP_FILE:-unknown}")"
+    backup_size="$(du -sh "${BACKUP_FILE:-}" 2>/dev/null | awk '{print $1}' || echo "unknown")"
+    enc_mode="${backup_encryption_mode:-inferred age-recipient}"
+    echo "  ╔══════════════════════════════════════════════════════╗"
+    echo "  ║  RESTORE PLAN SUMMARY                               ║"
+    echo "  ╠══════════════════════════════════════════════════════╣"
+    printf '  ║  Mode:         %-38s ║\n' "${RESTORE_TYPE:-unknown}"
+    printf '  ║  Backup:       %-38s ║\n' "$backup_name"
+    printf '  ║  Size:         %-38s ║\n' "$backup_size"
+    printf '  ║  Target dir:   %-38s ║\n' "${STATE_DIR:-unknown}"
+    echo "  ║  Docker:       will be STOPPED                      ║"
+    echo "  ║  Pre-backup:   emergency snapshot (--no-backup=off) ║"
+    printf '  ║  Age key:      %-38s ║\n' "${OPERATIONAL_SOPS_AGE_KEY_FILE:-unknown}"
+    if [[ "${RESTORE_TYPE:-}" == "emergency" ]]; then
+        printf '  ║  Enc mode:     %-38s ║\n' "$enc_mode"
+    fi
+    echo "  ╚══════════════════════════════════════════════════════╝"
+}
+
+# Emits a countdown while waiting for the interactive Age key prompt.
+_age_key_countdown() {
+    local secs=300
+    while (( secs > 0 )); do
+        sleep 60 || return
+        (( secs -= 60 ))
+        printf '\r  [Age key] %ds remaining — press Enter for default key  ' "$secs" >&2
+    done
+}
+
+# Verifies the restored database is good enough for automatic safety restart.
+_can_safe_restart() {
+    local db="$STATE_DIR/data/db.sqlite3"
+    [[ -f "$db" ]] || return 1
+    sqlite3 "$db" "PRAGMA integrity_check;" 2>/dev/null | grep -qx ok
+}
+
+# Prints the always-on post-restore operator checklist.
+_print_post_restore_summary() {
+    local backup_name; backup_name="$(basename "${BACKUP_FILE:-unknown}")"
+    log_info "─────────────────────────────────────────────────────────────"
+    log_info "  Post-restore summary"
+    log_info "─────────────────────────────────────────────────────────────"
+    log_info "  Backup restored: $backup_name"
+    log_info "  Restore type:    ${RESTORE_TYPE:-unknown}"
+    if [[ -n "${ROTATED_KEY_FILE:-}" ]]; then
+        log_info "  New Age key at:  $ROTATED_KEY_FILE"
+        [[ -n "${ROTATED_KIT_FILE:-}" ]] && \
+            log_warn "  Recovery kit:    $ROTATED_KIT_FILE  ← DELETE AFTER COPYING OFFLINE"
+    fi
+    log_info "  → Check health:  sudo ./utilities/maintenance-health.sh"
+    log_info "  → Check logs:    docker compose logs --tail=50"
+    log_info "─────────────────────────────────────────────────────────────"
 }
 
 _tar_filter_for_file() {
@@ -1847,6 +1937,12 @@ restore_db() {
         return 1
     }
     [[ "$SKIP_VERIFICATION" != "true" ]] && { verify_sqlite "$dec_db" || return 1; }
+    local _schema_count
+    _schema_count=$(sqlite3 "$dec_db" "SELECT count(*) FROM sqlite_master;" 2>/dev/null || echo 0)
+    if [[ "$_schema_count" =~ ^[0-9]+$ ]] && (( _schema_count == 0 )); then
+        log_warn "Restored DB has an empty schema (0 objects in sqlite_master)."
+        log_warn "Verify this is the intended backup — an empty Vaultwarden DB has no tables."
+    fi
 
     local db_dir="$state_dir/data" db_path
     db_path="$db_dir/db.sqlite3"
@@ -1870,6 +1966,11 @@ restore_db() {
     fi
 
     log_info "Restoring database..."
+    if docker compose ps --status running 2>/dev/null | grep -q vaultwarden_app; then
+        log_warn "vaultwarden_app container still running — attempting WAL checkpoint on live DB..."
+        sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || \
+            log_warn "Live WAL checkpoint failed (non-fatal; continuing restore)."
+    fi
     # Write to a temp file on the same filesystem as db_path, then
     # atomically rename. This avoids leaving db_path in a partial-write state
     # if the process is interrupted mid-copy.
@@ -2192,6 +2293,7 @@ main() {
     # list subcommand and the rclone availability checks — can read config values
     # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
     load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
+    check_dependencies
 
     # Resolve the backup storage root from .env using the same
     # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path
@@ -2347,6 +2449,7 @@ main() {
 
     resolve_backup_file || exit 1
     [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
+    check_archive_dependencies "$BACKUP_FILE"
 
     echo ""
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2385,13 +2488,6 @@ main() {
     local archive_format;  archive_format="$(read_meta_field  "$meta_file" "archive_format" "")"
     local backup_encryption_mode; backup_encryption_mode="$(read_meta_field "$meta_file" "encryption_mode" "")"
 
-    if [[ "$RESTORE_TYPE" == "emergency" && "$backup_encryption_mode" == "age-passphrase" ]]; then
-        RESTORE_DECRYPT_AGE_KEY_FILE=""
-        log_info "Emergency backup is passphrase-sealed; age will prompt for the archive passphrase during decryption."
-    else
-        _prompt_age_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
-    fi
-
     if [[ -z "$archive_format" ]]; then
         if   [[ "$BACKUP_FILE" == *.tar.zst.age || "$BACKUP_FILE" == *.zst.age ]]; then
             archive_format="relative"
@@ -2405,12 +2501,45 @@ main() {
     fi
     [[ -z "$archive_version" ]] && archive_version="unknown"
 
-    log_info "Restore plan:"
-    log_info "  File:        $BACKUP_FILE"
-    log_info "  Type:        $RESTORE_TYPE"
-    log_info "  Archive ver: $archive_version (format: $archive_format)"
-    log_info "  State dir:   $STATE_DIR"
-    log_info "  Decrypt key: $RESTORE_DECRYPT_AGE_KEY_FILE"
+    if [[ "$RESTORE_TYPE" == "emergency" ]]; then
+        log_info "Emergency backup encryption mode: ${backup_encryption_mode:-age-recipient (inferred)}"
+        if [[ -n "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}" && ! -f "$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" ]]; then
+            log_error "EMERGENCY_BACKUP_AGE_IDENTITY_FILE is set but file not found: $EMERGENCY_BACKUP_AGE_IDENTITY_FILE"
+            log_error "Fix the path in .env or unset it to use the standard key prompt."
+            exit 1
+        fi
+        if [[ ( -z "$backup_encryption_mode" || "$backup_encryption_mode" == "age-recipient" ) \
+              && -z "$KEY_FILE_ARG" && -z "$RECOVERY_KIT_FILE" && -z "${RESTORE_AGE_KEY_FILE:-}" ]]; then
+            log_warn "No explicit key supplied; will use configured key:"
+            log_warn "  $OPERATIONAL_SOPS_AGE_KEY_FILE"
+            log_warn "If this backup was encrypted with an older key, re-run with:"
+            log_warn "  --key-file /path/to/old-key.txt"
+            log_warn "  --from-recovery-kit /path/to/recovery-kit.txt"
+        fi
+    fi
+
+    _print_restore_plan_summary
+
+    if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]; then
+        echo ""
+        log_warn "WARNING: This will overwrite current data."
+        log_warn "Services will be stopped during the restore."
+        log_warn "A NEW age key will be generated after the restore."
+        echo ""
+        if [[ ! -t 0 ]]; then
+            log_error "Cannot confirm restore: stdin is not a TTY. Re-run with --force for non-interactive restore."
+            exit 1
+        fi
+        read -r -p "Type 'yes' to proceed: " confirm
+        [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
+    fi
+
+    if [[ "$RESTORE_TYPE" == "emergency" && "$backup_encryption_mode" == "age-passphrase" ]]; then
+        RESTORE_DECRYPT_AGE_KEY_FILE=""
+        log_info "Emergency backup is passphrase-sealed; age will prompt for the archive passphrase during decryption."
+    else
+        _prompt_age_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
+    fi
 
     _require_selected_archive_tools "$BACKUP_FILE" || exit 1
     if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ -n "$(get_config_value "DATA_VOLUME_DEVICE" "")" ]]; then
@@ -2446,16 +2575,6 @@ main() {
         fi
     fi
 
-    if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        echo ""
-        log_warn "WARNING: This will overwrite current data."
-        log_warn "Services will be stopped during the restore."
-        log_warn "A NEW age key will be generated after the restore."
-        echo ""
-        read -r -p "Type 'yes' to proceed: " confirm
-        [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
-    fi
-
     if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ "$DRY_RUN" != "true" ]]; then
         local _target_mode_for_prepare
         _target_mode_for_prepare="$(_detect_storage_mode "$STATE_DIR" "$(get_config_value "DATA_VOLUME_MOUNT" "")" "$(get_config_value "DATA_VOLUME_DEVICE" "")")"
@@ -2486,9 +2605,16 @@ main() {
         if [[ $rc -ne 0 ]]; then
             if [[ "${RESTORE_DESTRUCTIVE_PHASE_STARTED:-false}" == "true" ]]; then
                 if [[ "${START_POLICY:-auto}" == "auto" ]]; then
-                    log_warn "Restore encountered an error (exit $rc) after destructive phase — attempting one service restart..."
-                    bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
-                        log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: sudo ./startup.sh --skip-pull"
+                    if _can_safe_restart; then
+                        log_warn "Integrity check passed — attempting one service restart..."
+                        bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
+                            log_error "CRITICAL: Service restart failed. Manual: sudo ./startup.sh --skip-pull"
+                    else
+                        log_error "DB integrity check failed or DB not found after restore error."
+                        log_error "Refusing automatic restart. Investigate before starting services."
+                        log_error "Manual start checklist:"
+                        _restore_print_manual_start_checklist
+                    fi
                 else
                     log_warn "Restore encountered an error (exit $rc) after destructive phase. Services may be stopped. Review state before starting."
                     _restore_print_manual_start_checklist
@@ -2503,7 +2629,11 @@ main() {
 
     trap _restore_safety_net ERR HUP INT TERM
     if [[ "$DRY_RUN" != "true" ]]; then
-        docker compose stop
+        log_info "Stopping services (up to 30s grace period)..."
+        if ! timeout 35 docker compose stop --timeout 30; then
+            log_warn "docker compose stop did not complete cleanly within 35s — forcing..."
+            docker compose kill 2>/dev/null || true
+        fi
         RESTORE_DESTRUCTIVE_PHASE_STARTED=true
     fi
 
@@ -2573,8 +2703,19 @@ main() {
             RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$OPERATIONAL_SOPS_AGE_KEY_FILE"
             ;;
         full|emergency)
-            if [[ "$RESTORE_TYPE" == "emergency" && "$(read_meta_field "${BACKUP_FILE}.meta" "encryption_mode" "")" == "age-passphrase" && -f /etc/vaultwarden/age-key.txt ]]; then
-                RESTORE_REKEY_SOURCE_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
+            if [[ "$RESTORE_TYPE" == "emergency" && "$backup_encryption_mode" == "age-passphrase" ]]; then
+                # Check for restored key in staging first (restore_full installs it
+                # to /etc/vaultwarden/age-key.txt mid-run); check both before giving up.
+                if [[ -f /etc/vaultwarden/age-key.txt ]]; then
+                    RESTORE_REKEY_SOURCE_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
+                elif [[ -f "$TMPDIR_RESTORE/stage/etc/vaultwarden/age-key.txt" ]]; then
+                    RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$TMPDIR_RESTORE/stage/etc/vaultwarden/age-key.txt"
+                else
+                    log_error "Passphrase emergency restore: cannot locate installed Age key for rekey."
+                    log_error "Emergency archive did not contain /etc/vaultwarden/age-key.txt."
+                    log_error "This archive may be malformed or incomplete."
+                    exit 1
+                fi
             else
                 RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_DECRYPT_AGE_KEY_FILE"
             fi
@@ -2598,7 +2739,6 @@ main() {
         # Full/emergency archives are extracted with --no-same-owner and
         # promoted with --no-owner/--no-group for cross-host safety. Re-apply
         # the target host runtime permission contract before service startup.
-        auto_fix_critical_permissions "$PROJECT_ROOT"
         if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]]; then
             log_info "Post-restore phase: repairing runtime state permissions..."
             if ! repair_runtime_state_permissions "$STATE_DIR" "$PUID" "$PGID"; then
@@ -2608,6 +2748,8 @@ main() {
         fi
         if ! _restore_should_start_services; then
             trap - ERR
+            auto_fix_critical_permissions "$PROJECT_ROOT"
+            _print_post_restore_summary
             log_success "Restore complete; services were not started."
             return 0
         fi
@@ -2621,11 +2763,16 @@ main() {
         # errors in the post-startup health check do not trigger a restart.
         trap - ERR
 
-        log_info "Waiting for services to initialize (up to 60s)..."
-        if docker_wait_healthy vaultwarden_app 60 5; then
+        local _health_timeout
+        _health_timeout="${RESTORE_HEALTH_TIMEOUT:-$(get_config_value "RESTORE_HEALTH_TIMEOUT" "60")}"
+        [[ "$_health_timeout" =~ ^[0-9]+$ ]] || _health_timeout=60
+        (( _health_timeout < 30 )) && _health_timeout=30
+        (( _health_timeout > 600 )) && _health_timeout=600
+        log_info "Waiting for services to initialize (up to ${_health_timeout}s)..."
+        if docker_wait_healthy vaultwarden_app "$_health_timeout" 5; then
             log_success "Service is healthy."
         else
-            log_warn "Service did not reach healthy state within 60s — check logs."
+            log_warn "Service did not reach healthy state within ${_health_timeout}s — check logs."
         fi
 
         if [[ -x "${PROJECT_ROOT}/utilities/maintenance-health.sh" ]]; then
@@ -2639,6 +2786,8 @@ main() {
     fi
 
     echo ""
+    auto_fix_critical_permissions "$PROJECT_ROOT"
+    _print_post_restore_summary
     log_success "Restore complete."
     if [[ -n "$ROTATED_KEY_FILE" && "$DRY_RUN" != "true" ]]; then
         log_info  "New age key is live at: $ROTATED_KEY_FILE"
