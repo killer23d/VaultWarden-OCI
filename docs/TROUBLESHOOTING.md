@@ -299,7 +299,7 @@ sudo make key-health
 sudo ./utilities/secrets-edit.sh
 ```
 
-Do not make persistent secrets world-readable. The expected production contract is root-operated private state.
+Do not render persistent secrets world-readable. The expected production contract is root-operated private state.
 
 ---
 

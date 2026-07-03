@@ -271,8 +271,7 @@ ENVIRONMENT:
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
     RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
     RCLONE_REMOTE_NAME                 Read from .env when available
-
-EXAMPLES:
+    RESTORE_HEALTH_TIMEOUT=<seconds>    Service health wait timeout (30-600; default: 60)
 ```
 
 ### maintenance.sh
@@ -769,8 +768,7 @@ ENVIRONMENT:
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
     RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
     RCLONE_REMOTE_NAME                 Read from .env when available
-
-EXAMPLES:
+    RESTORE_HEALTH_TIMEOUT=<seconds>    Service health wait timeout (30-600; default: 60)
 ```
 
 ### safe-restart.sh

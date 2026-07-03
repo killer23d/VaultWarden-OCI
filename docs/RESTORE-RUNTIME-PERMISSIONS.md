@@ -92,4 +92,4 @@ sudo chown -R 2000:2000 "$PROJECT_STATE_DIR"
 sudo chmod -R 777 "$PROJECT_STATE_DIR"
 ```
 
-Those commands can expose root-operated secrets, break encrypted SOPS state, or make later restores harder to reason about. Use the explicit repair helper instead.
+Those commands can expose root-operated secrets, break encrypted SOPS state, or cause later restores to be harder to reason about. Use the explicit repair helper instead.
