@@ -227,13 +227,19 @@ SUBCOMMANDS:
                       If rclone is configured, you are first asked whether to
                       restore from a LOCAL or REMOTE backup.
 
-    After the backup is selected you will be prompted for the age private
-    key that was used to encrypt that backup.  Press Enter to use the key
-    already configured in .env (SOPS_AGE_KEY_FILE).
+    After the backup is selected you will be prompted for the Age private
+    key that decrypts the selected backup. Press Enter to use the operational
+    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+
+    Before overwrite, restore creates a pre-restore emergency snapshot unless
+    --no-backup is used. If that snapshot is passphrase-sealed, its emergency
+    passphrase prompt protects the safety snapshot of the current VM; it is not
+    the decryption prompt for the selected DB/full backup.
 
     Once the restore lands, the restored SOPS secrets are rekeyed to a NEW
-    age key, installed to configured locations, and displayed prominently.
-    Save it before pressing Enter to start the services.
+    operational Age key, installed to configured locations, and displayed
+    prominently. Save the new key/recovery kit before considering future
+    backups recoverable.
 
 OPTIONS (used after a subcommand):
     --file FILE             Restore a specific backup file (.age)
@@ -246,7 +252,9 @@ OPTIONS (used after a subcommand):
                             automatically and used for decryption — no manual
                             key entry required.  Intended for bare-metal DR
                             where the kit file is the only credential available.
-    --no-backup             Skip pre-restore emergency snapshot
+    --no-backup             Skip pre-restore emergency snapshot. Use only when
+                            current local state is disposable, such as a fresh
+                            VM restoring a remote DB backup.
     --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
@@ -265,13 +273,6 @@ GLOBAL OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 ENVIRONMENT:
-    BACKUP_DIR=<path>                  Override backup storage root
-                                       (default: $PROJECT_STATE_DIR/backups)
-    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
-    RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
-    RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
-    RCLONE_REMOTE_NAME                 Read from .env when available
-    RESTORE_HEALTH_TIMEOUT=<seconds>    Service health wait timeout (30-600; default: 60)
 ```
 
 ### maintenance.sh
@@ -724,13 +725,19 @@ SUBCOMMANDS:
                       If rclone is configured, you are first asked whether to
                       restore from a LOCAL or REMOTE backup.
 
-    After the backup is selected you will be prompted for the age private
-    key that was used to encrypt that backup.  Press Enter to use the key
-    already configured in .env (SOPS_AGE_KEY_FILE).
+    After the backup is selected you will be prompted for the Age private
+    key that decrypts the selected backup. Press Enter to use the operational
+    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+
+    Before overwrite, restore creates a pre-restore emergency snapshot unless
+    --no-backup is used. If that snapshot is passphrase-sealed, its emergency
+    passphrase prompt protects the safety snapshot of the current VM; it is not
+    the decryption prompt for the selected DB/full backup.
 
     Once the restore lands, the restored SOPS secrets are rekeyed to a NEW
-    age key, installed to configured locations, and displayed prominently.
-    Save it before pressing Enter to start the services.
+    operational Age key, installed to configured locations, and displayed
+    prominently. Save the new key/recovery kit before considering future
+    backups recoverable.
 
 OPTIONS (used after a subcommand):
     --file FILE             Restore a specific backup file (.age)
@@ -743,7 +750,9 @@ OPTIONS (used after a subcommand):
                             automatically and used for decryption — no manual
                             key entry required.  Intended for bare-metal DR
                             where the kit file is the only credential available.
-    --no-backup             Skip pre-restore emergency snapshot
+    --no-backup             Skip pre-restore emergency snapshot. Use only when
+                            current local state is disposable, such as a fresh
+                            VM restoring a remote DB backup.
     --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
@@ -762,13 +771,6 @@ GLOBAL OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 ENVIRONMENT:
-    BACKUP_DIR=<path>                  Override backup storage root
-                                       (default: $PROJECT_STATE_DIR/backups)
-    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
-    RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
-    RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
-    RCLONE_REMOTE_NAME                 Read from .env when available
-    RESTORE_HEALTH_TIMEOUT=<seconds>    Service health wait timeout (30-600; default: 60)
 ```
 
 ### safe-restart.sh
@@ -1025,37 +1027,7 @@ EXAMPLES:
 ### setup-secrets.sh
 
 ```
-VaultWarden-OCI Secrets Management
-
-USAGE:
-    sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
-
-DESCRIPTION:
-    Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
-    credentials interactively or automatically. Interactive view/list/rotate
-    and recovery-kit export are root-operated commands via sudo ./edit-secrets.sh.
-
-SUBCOMMANDS:
-    bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
-                        (called automatically by setup.sh install phase)
-    configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
-    breakglass [FLAGS]  Emergency break-glass admin account management
-    help, --help, -h    Show this help
-
-OPTIONS:
-    --help, -h          Show this help
-    --version, -V       Print the VaultWarden-OCI version and exit
-
-Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
-
-EXAMPLES:
-    sudo utilities/setup-secrets.sh bootstrap
-    sudo utilities/setup-secrets.sh configure
-    sudo utilities/setup-secrets.sh configure --auto
-    sudo ./edit-secrets.sh rotate email_api_token
-    sudo ./edit-secrets.sh export-recovery-kit
-    sudo utilities/setup-secrets.sh breakglass create
-    sudo utilities/setup-secrets.sh breakglass status
+(--help not available or requires root)
 ```
 
 ### setup-storage.sh
@@ -1116,32 +1088,7 @@ EXAMPLES:
 ### setup-system.sh
 
 ```
-VaultWarden-OCI System Preparation
-
-USAGE:
-    sudo utilities/setup-system.sh [OPTIONS]
-
-DESCRIPTION:
-    Prepares the host system for VaultWarden-OCI: installs dependencies
-    (Docker, Age, SOPS, rclone, sqlite3), configures user permissions, and
-    sets script execute bits. Called automatically by setup.sh phase 1.
-
-OPTIONS:
-    --skip-deps           Skip package installation (assume already installed)
-    --auto                Non-interactive mode
-    --use-latest          Override pinned versions with 'latest'
-    --sops-version VER    Pin SOPS to a specific version (e.g. v3.9.4)
-    --dry-run             Preview actions without executing
-    --force               Skip confirmations
-    --data-device DEV     Data volume device path
-    --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
-    --help, -h            Show this help
-    --version, -V         Print the VaultWarden-OCI version and exit
-
-EXAMPLES:
-    sudo utilities/setup-system.sh
-    sudo utilities/setup-system.sh --dry-run
-    sudo utilities/setup-system.sh --skip-deps
+(--help not available or requires root)
 ```
 
 ### setup-systemd.sh
