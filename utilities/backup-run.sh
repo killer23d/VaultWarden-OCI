@@ -44,6 +44,11 @@ USAGE:
 
 SUBCOMMANDS:
     run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
+                      db: encrypted SQLite snapshot only; storage-layout independent
+                      full: normal DR backup; excludes /etc/vaultwarden/age-key.txt
+                      emergency: clone-grade sealed capsule; can include /etc/vaultwarden
+                      key/config material and must use an independent emergency
+                      passphrase or EMERGENCY_BACKUP_AGE_RECIPIENT
     list [--json]     List existing backups (no root required; JSON optional)
     verify            Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
@@ -74,7 +79,7 @@ EXAMPLES:
     sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
     sudo ./backup.sh run db             # Database-only backup
     sudo ./backup.sh run full           # Full state backup
-    sudo ./backup.sh run emergency      # Clone-grade sealed capsule; prompts for age -p unless EMERGENCY_BACKUP_AGE_RECIPIENT is set
+    sudo ./backup.sh run emergency      # Clone-grade sealed capsule; prompts for emergency passphrase unless EMERGENCY_BACKUP_AGE_RECIPIENT is set
     sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
     ./backup.sh list                              # List existing backups (no sudo)
     ./backup.sh list --json                       # Machine-readable backup inventory

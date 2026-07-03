@@ -35,7 +35,7 @@ require 'install -o root -g root -m 600.*etc/vaultwarden' "$RESTORE" 'restore mu
 require 'EMERGENCY_BACKUP_AGE_RECIPIENT' "$ROOT/.env.example" 'config example must document emergency DR recipient'
 for doc in docs/BACKUP-RESTORE.md docs/DISASTER-RECOVERY.md docs/OPERATIONS.md README.md; do
   require 'db`.*database|database rollback' "$ROOT/$doc" "$doc must document db tier"
-  require 'full`.*offline Age key|offline Age key' "$ROOT/$doc" "$doc must document full tier offline key"
+  require 'full`.*offline Age (key|recipient)|offline Age (key|recipient)' "$ROOT/$doc" "$doc must document full tier offline key/recipient"
   require 'emergency`.*clone|clone-grade' "$ROOT/$doc" "$doc must document emergency tier"
   require 'Emergency backups are clone-grade secrets-bearing artifacts' "$ROOT/$doc" "$doc must warn about emergency artifacts"
 done

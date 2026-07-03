@@ -4,7 +4,7 @@
      Fill in CONTACT_NAME and CONTACT_PHONE before printing.
 -->
 # Vaultwarden Recovery Card
-Store this card with the offline Age key USB drive.
+Store this card with the offline Age recipient private-key USB drive.
 
 ## Before you start
 - This printed card with contact details filled in
