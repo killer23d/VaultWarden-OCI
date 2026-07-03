@@ -85,7 +85,7 @@ sudo make timers
 sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
-Store the recovery kit in your password manager and offline backup location. Re-export after setup, restore, or Age key rotation.
+A recovery kit is the plaintext operator handoff containing the Age private key and generated credentials needed for recovery. Store it in your password manager and offline backup location, then remove plaintext copies from the server. Re-export after setup, restore, or Age key rotation.
 
 ---
 
@@ -114,14 +114,14 @@ VaultWarden-OCI has three deliberately different backup tiers:
 | Tier | Use | Contents | Key handling |
 | --- | --- | --- | --- |
 | `db` | Quick database rollback | A single encrypted, integrity-checked SQLite snapshot (`.sqlite3.age`) | Encrypted to the operational Age recipient. |
-| `full` | Normal fresh-VM disaster recovery | Project root, state directory, persistent config, encrypted SOPS `secrets.yaml`, sidecars/metadata, and a verified DB injected at `${PROJECT_STATE_DIR}/data/db.sqlite3` | Excludes `/etc/vaultwarden/age-key.txt`; restore requires the operator's offline Age key or the key that encrypted that backup. |
+| `full` | Normal fresh-VM disaster recovery | Project root, state directory, persistent config, encrypted SOPS `secrets.yaml`, sidecars/metadata, and a verified DB injected at `${PROJECT_STATE_DIR}/data/db.sqlite3` | Excludes `/etc/vaultwarden/age-key.txt`; restore requires the offline Age recipient's private key or the operational Age key that encrypted that backup. |
 | `emergency` | Fastest clone-style recovery | Everything in `full`, plus staged persistent `/etc/vaultwarden` key/config material such as `age-key.txt`, `vaultwarden.env`, and `rclone.conf` when present | Protected independently with `age -p` passphrase mode or `EMERGENCY_BACKUP_AGE_RECIPIENT`; it is never encrypted only to the operational key it contains. |
 
 All tiers contain a complete verified SQLite database snapshot. Full and emergency archives exclude live `db.sqlite3`, WAL/SHM files, backup directories, logs, temp files, sockets/locks, `.pre-restore-*` snapshots, decrypted runtime secrets, and `/run/vaultwarden-oci/secrets/*`. The verified staged DB is added back to the archive at the normal live path.
 
 > **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`).
 
-Choose `db` for quick database rollback, `full` for a fresh VM restore when you have the offline Age key, and `emergency` when fastest clone-style recovery is worth carrying key material inside the sealed capsule.
+Choose `db` for quick database rollback, `full` for a fresh VM restore when you have the offline Age recipient's private key or the operational Age key that encrypted the backup, and `emergency` when fastest clone-style recovery is worth carrying key material inside the sealed capsule. The offline Age recipient is an optional extra Age public recipient for SOPS recovery; it is not the emergency passphrase for a passphrase-sealed emergency backup.
 
 ---
 

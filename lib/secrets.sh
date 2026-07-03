@@ -1360,7 +1360,7 @@ EOF
    [ ] Confirm Docker services:
        sudo docker compose ps
 
-   [ ] Store the recovery kit, offline Age key, and any new operational Age key outside the server.
+   [ ] Store the recovery kit, offline Age recipient private key, and any new operational Age key outside the server.
 
 ════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT

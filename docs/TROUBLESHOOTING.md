@@ -206,7 +206,7 @@ Remember the tier model:
 | Tier | Restore meaning |
 | :-- | :-- |
 | `db` | Quick database rollback; storage-layout independent. |
-| `full` | Normal DR restore that needs the offline Age key or the key that encrypted the backup. |
+| `full` | Normal DR restore that needs the offline Age recipient's private key or the operational Age key that encrypted the backup. |
 | `emergency` | Clone-grade sealed restore that may carry `/etc/vaultwarden` key/config material. |
 
 > **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export and protect the passphrase or emergency recipient identity separately.

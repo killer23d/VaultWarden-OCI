@@ -158,13 +158,19 @@ SUBCOMMANDS:
                       If rclone is configured, you are first asked whether to
                       restore from a LOCAL or REMOTE backup.
 
-    After the backup is selected you will be prompted for the age private
-    key that was used to encrypt that backup.  Press Enter to use the key
-    already configured in .env (SOPS_AGE_KEY_FILE).
+    After the backup is selected you will be prompted for the Age private
+    key that decrypts the selected backup. Press Enter to use the operational
+    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+
+    Before overwrite, restore creates a pre-restore emergency snapshot unless
+    --no-backup is used. If that snapshot is passphrase-sealed, its emergency
+    passphrase prompt protects the safety snapshot of the current VM; it is not
+    the decryption prompt for the selected DB/full backup.
 
     Once the restore lands, the restored SOPS secrets are rekeyed to a NEW
-    age key, installed to configured locations, and displayed prominently.
-    Save it before pressing Enter to start the services.
+    operational Age key, installed to configured locations, and displayed
+    prominently. Save the new key/recovery kit before considering future
+    backups recoverable.
 
 OPTIONS (used after a subcommand):
     --file FILE             Restore a specific backup file (.age)
@@ -177,7 +183,9 @@ OPTIONS (used after a subcommand):
                             automatically and used for decryption — no manual
                             key entry required.  Intended for bare-metal DR
                             where the kit file is the only credential available.
-    --no-backup             Skip pre-restore emergency snapshot
+    --no-backup             Skip pre-restore emergency snapshot. Use only when
+                            current local state is disposable, such as a fresh
+                            VM restoring a remote DB backup.
     --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
@@ -214,14 +222,16 @@ EXAMPLES:
 
     # ── INTERACTIVE MENU ─────────────────────────────────────────
     sudo ./restore.sh interactive                    # Select from local backups
-    sudo ./restore.sh interactive --remote           # Select from remote backups
+    sudo ./restore.sh interactive --remote --start-policy ask  # Remote restore; ask before service start
 
     # ── TARGETED RESTORE ──────────────────────────────────────────
     sudo ./restore.sh interactive --file "/var/lib/vaultwarden/backups/full/full_20260101.tar.zst.age"
     sudo ./restore.sh interactive --key-file /tmp/old-age-key.txt  # Supply key non-interactively
 
     # ── BARE-METAL DISASTER RECOVERY ──────────────────────────────
-    sudo ./restore.sh latest --from-recovery-kit /mnt/usb/recovery-kit.txt --force
+    sudo ./restore.sh inspect --remote
+    sudo ./restore.sh interactive --remote --from-recovery-kit /mnt/usb/recovery-kit.txt --start-policy ask
+    sudo ./restore.sh interactive --remote --no-backup  # Fresh disposable VM DB restore only
 EOF
 }
 
@@ -324,7 +334,7 @@ _restore_print_manual_start_checklist() {
     log_info "  5. sudo ./startup.sh --skip-pull"
     log_info "  6. docker compose ps"
     log_info "  7. docker compose logs --tail=100"
-    log_info "  8. sudo ./utilities/maintenance-health.sh"
+    log_info "  8. sudo ./maintenance.sh health"
 }
 
 _restore_should_start_services() {
@@ -1458,8 +1468,13 @@ _print_restore_plan_summary() {
     printf '  ║  Size:         %-38s ║\n' "$backup_size"
     printf '  ║  Target dir:   %-38s ║\n' "${STATE_DIR:-unknown}"
     echo "  ║  Docker:       will be STOPPED                      ║"
-    echo "  ║  Pre-backup:   emergency snapshot (--no-backup=off) ║"
-    printf '  ║  Age key:      %-38s ║\n' "${OPERATIONAL_SOPS_AGE_KEY_FILE:-unknown}"
+    if [[ "${NO_PRE_BACKUP:-false}" == "true" ]]; then
+        echo "  ║  Pre-backup:   skipped (--no-backup)                 ║"
+    else
+        echo "  ║  Pre-backup:   pre-restore emergency snapshot        ║"
+    fi
+    printf '  ║  Backup key:   %-38s ║\n' "selected backup decrypt key"
+    printf '  ║  Live SOPS key:%-38s ║\n' " ${OPERATIONAL_SOPS_AGE_KEY_FILE:-unknown}"
     if [[ "${RESTORE_TYPE:-}" == "emergency" ]]; then
         printf '  ║  Enc mode:     %-38s ║\n' "$enc_mode"
     fi
@@ -1496,7 +1511,7 @@ _print_post_restore_summary() {
         [[ -n "${ROTATED_KIT_FILE:-}" ]] && \
             log_warn "  Recovery kit:    $ROTATED_KIT_FILE  ← DELETE AFTER COPYING OFFLINE"
     fi
-    log_info "  → Check health:  sudo ./utilities/maintenance-health.sh"
+    log_info "  → Check health:  sudo ./maintenance.sh health"
     log_info "  → Check logs:    docker compose logs --tail=50"
     log_info "─────────────────────────────────────────────────────────────"
 }
@@ -1849,6 +1864,7 @@ _preflight_operational_sops_key_for_snapshot() {
         log_error "The selected backup key and current live SOPS key are separate."
         log_error "The pre-restore emergency snapshot must decrypt current live SOPS secrets before restore."
         log_error "Fix current SOPS decryptability, or intentionally skip the safety snapshot with --no-backup."
+        log_error "Use --no-backup only when current local state is disposable (for example a fresh VM restoring a remote DB backup)."
         return 1
     fi
     return 0
@@ -1889,7 +1905,7 @@ create_pre_restore_snapshot() {
         if ! SOPS_AGE_KEY_FILE="$operational_sops_age_key_file" "${PROJECT_ROOT}/utilities/backup-run.sh" run emergency --quiet; then
             if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
                 log_error "Pre-restore snapshot FAILED (hard-fail)."
-                log_error "Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to skip."
+                log_error "Use --no-backup only if current local state is disposable, or set RESTORE_SNAPSHOT_HARD_FAIL=false to continue."
                 return 1
             fi
             log_warn "Pre-restore snapshot failed (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
@@ -1898,7 +1914,7 @@ create_pre_restore_snapshot() {
         local msg="backup-run.sh not executable — cannot create pre-restore snapshot"
         if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
             log_error "$msg"
-            log_error "Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to skip."
+            log_error "Use --no-backup only if current local state is disposable, or set RESTORE_SNAPSHOT_HARD_FAIL=false to continue."
             return 1
         fi
         log_warn "$msg (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
@@ -2539,7 +2555,7 @@ main() {
 
     if [[ "$RESTORE_TYPE" == "emergency" && "$backup_encryption_mode" == "age-passphrase" ]]; then
         RESTORE_DECRYPT_AGE_KEY_FILE=""
-        log_info "Emergency backup is passphrase-sealed; age will prompt for the archive passphrase during decryption."
+        log_info "Emergency backup is passphrase-sealed; age will prompt for the emergency passphrase that decrypts the selected archive."
     else
         _prompt_age_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
     fi

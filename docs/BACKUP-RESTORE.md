@@ -6,14 +6,14 @@ Related docs: [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) · [RESTORE-RUNTIME-P
 
 ---
 
-## 2026 Backup Tier Model
+## 💾 Backup Tiers
 
 VaultWarden-OCI has three deliberately different backup tiers:
 
 | Tier | Use | Contents | Key handling |
 | --- | --- | --- | --- |
 | `db` | Quick database rollback | A single encrypted, integrity-checked SQLite snapshot (`.sqlite3.age`) | Encrypted to the operational Age recipient. |
-| `full` | Normal fresh-VM disaster recovery | Project root, state directory, persistent config, encrypted SOPS `secrets.yaml`, sidecars/metadata, and a verified DB injected at `${PROJECT_STATE_DIR}/data/db.sqlite3` | Excludes `/etc/vaultwarden/age-key.txt`; restore requires the operator's offline Age key or the Age key that encrypted that backup. |
+| `full` | Normal fresh-VM disaster recovery | Project root, state directory, persistent config, encrypted SOPS `secrets.yaml`, sidecars/metadata, and a verified DB injected at `${PROJECT_STATE_DIR}/data/db.sqlite3` | Excludes `/etc/vaultwarden/age-key.txt`; restore requires the offline Age recipient's private key or the operational Age key that encrypted that backup. |
 | `emergency` | Fastest clone-style recovery | Everything in `full`, plus staged persistent `/etc/vaultwarden` key/config material such as `age-key.txt`, `vaultwarden.env`, and `rclone.conf` when present | Protected independently with `age -p` passphrase mode or `EMERGENCY_BACKUP_AGE_RECIPIENT`; it is never encrypted only to the operational key it contains. |
 
 All tiers contain a complete verified SQLite database snapshot. Backups first try the SQLite Online Backup API (`sqlite3 .backup`). If that is unavailable or fails, Vaultwarden is stopped, the WAL is checkpointed, `db.sqlite3` is copied, integrity is verified, and Vaultwarden is restarted. No backup should report success with an unverified or partial database.
@@ -22,11 +22,11 @@ Full and emergency archives exclude live `db.sqlite3`, WAL/SHM files, backup dir
 
 > **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`). Do not store passphrases in shell history, environment variables, logs, or metadata.
 
-Choose `db` for quick database rollback, `full` for a fresh VM restore when you have the offline Age key, and `emergency` when the fastest clone-style recovery is worth carrying key material inside the sealed capsule.
+Choose `db` for quick database rollback, `full` for a fresh VM restore when you have the offline Age recipient's private key or the operational Age key that encrypted the backup, and `emergency` when the fastest clone-style recovery is worth carrying key material inside the sealed capsule. The offline Age recipient is an optional extra Age public recipient for SOPS recovery; it is not the emergency passphrase for a passphrase-sealed emergency backup.
 
 ---
 
-## Creating Backups
+## 📦 Creating Backups
 
 All production backup operations are root-operated because they read state, encrypted secrets, and root-owned runtime config.
 
@@ -85,7 +85,7 @@ sudo ./backup.sh run full --keep 30
 
 ---
 
-## Restore Storage-Layout Preflight
+## 🔎 Restore Storage-Layout Preflight
 
 Before a destructive full or emergency restore, inspect the selected archive and the target storage layout:
 
@@ -105,7 +105,7 @@ Prepared block-storage targets must provide these entries under `PROJECT_STATE_D
 
 ---
 
-## Restore Flow
+## 🔄 Restore Flow
 
 `restore.sh` follows an auditable root-operated sequence:
 
@@ -128,7 +128,7 @@ Full and emergency restores extract with portable ownership/mode handling first,
 
 ---
 
-## Supplying the Decryption Key
+## 🔐 Supplying the Decryption Key
 
 Use the key that can decrypt the selected backup, not necessarily the key currently installed on the server.
 
@@ -146,13 +146,26 @@ RESTORE_AGE_KEY_FILE=/path/to/old-age-key.txt sudo ./restore.sh latest db
 sudo ./restore.sh interactive --remote --from-recovery-kit /path/to/recovery-kit.txt
 ```
 
-If decryption fails because no Age identity matches, the backup may have been encrypted with an older operational key or an offline recovery key. Retry with the key that was active when the backup was created.
+If decryption fails because no Age identity matches, the backup may have been encrypted with an older operational Age key or an offline Age recipient's private key. Retry with the key that was active when the backup was created.
 
-Emergency backups may be passphrase-sealed (`age -p`) or encrypted to `EMERGENCY_BACKUP_AGE_RECIPIENT`. A passphrase-sealed emergency backup will prompt for that passphrase during decrypt/verification.
+Emergency backups may be passphrase-sealed (`age -p`) or encrypted to `EMERGENCY_BACKUP_AGE_RECIPIENT`. A passphrase-sealed emergency backup will prompt for that emergency passphrase during decrypt/verification.
+
+### Restore-time passphrase prompts
+
+Two different prompts can appear during restore:
+
+- The selected `db` or `full` backup is decrypted with the Age private key prompt. Use the Age private key that matches the Age public recipient used when that backup was created.
+- A separate emergency passphrase prompt can appear because `restore.sh` creates a pre-restore emergency snapshot of the current VM before overwrite. That emergency passphrase protects the safety snapshot, not the selected `db`/`full` backup.
+
+Keep the pre-restore emergency snapshot on existing/live VMs unless you understand the rollback risk. On a freshly rebuilt VM where the current local state has no value and only a remote DB backup is being restored, `sudo ./restore.sh interactive --remote --no-backup` is an intentional shortcut.
+
+### Fresh-server rclone prompts
+
+On a fresh server without `.env`, `sudo ./restore.sh interactive --remote` and `sudo ./restore.sh inspect --remote` can ask for the rclone remote name and remote path. Enter the configured rclone remote name (for example `b2`, `gdrive`, or `s3`) and the backup subfolder (default: `vaultwarden_backups`). These values are session-scoped so restore can find the remote backup; they are not written to `.env` unless you save them separately.
 
 ---
 
-## Operator-Controlled Service Start
+## 🚦 Operator-Controlled Service Start
 
 Restore and migration workflows support an explicit start policy:
 
@@ -176,7 +189,7 @@ sudo ./maintenance.sh health
 
 ---
 
-## Post-Restore Runtime Permission Repair
+## 🧰 Post-Restore Runtime Permission Repair
 
 Full and emergency restores automatically call the runtime permission repair helper before the service-start gate.
 
@@ -206,7 +219,7 @@ Do not repair restore drift with broad commands such as `chmod -R 777` or `chown
 
 ---
 
-## Common Restore Scenarios
+## 🧭 Common Restore Scenarios
 
 ### Database rollback
 
@@ -226,7 +239,7 @@ sudo ./setup.sh systemd install
 sudo ./maintenance.sh health
 ```
 
-Use this for normal DR when you have the offline Age key or the key that encrypted the selected full backup.
+Use this for normal DR when you have the offline Age recipient's private key or the operational Age key that encrypted the selected full backup. The offline Age recipient is an optional extra recipient for decrypting/recovering SOPS material; it is not the emergency passphrase used for a passphrase-sealed emergency backup.
 
 ### Emergency clone-style restore
 

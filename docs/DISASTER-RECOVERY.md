@@ -13,12 +13,12 @@ Use the smallest backup tier that solves the incident:
 | Tier | Best use | DR role |
 | :-- | :-- | :-- |
 | `db` | Quick database rollback | Restores Vaultwarden database contents only; storage-layout independent. |
-| `full` | Normal fresh-VM disaster recovery | Primary scheduled DR artifact when you have the offline Age key or the key that encrypted the selected backup. |
+| `full` | Normal fresh-VM disaster recovery | Primary scheduled DR artifact when you have the offline Age recipient's private key or the operational Age key that encrypted the selected backup. |
 | `emergency` | Fastest clone-style recovery | Clone-grade sealed capsule that can include staged `/etc/vaultwarden` key/config material. |
 
 > **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`).
 
-Choose `db` for database rollback, `full` for normal DR with the offline Age key, and `emergency` when fastest recovery is worth carrying key material inside the sealed capsule.
+Choose `db` for database rollback, `full` for normal DR with the offline Age recipient's private key or the operational Age key that encrypted the selected backup, and `emergency` when fastest recovery is worth carrying key material inside the sealed capsule.
 
 ---
 
@@ -130,7 +130,9 @@ sudo ./restore.sh inspect --remote
 sudo ./restore.sh interactive --remote --start-policy ask
 ```
 
-If the emergency backup is passphrase-sealed, `age` will prompt for the emergency passphrase. If it uses an emergency recipient, provide the matching identity through the supported restore key/recovery-kit path.
+If the emergency backup is passphrase-sealed, `age` will prompt for the emergency passphrase that decrypts the selected archive. If it uses an emergency recipient, provide the matching Age private key through the supported restore key/recovery-kit path.
+
+> **Restore prompt note:** The selected `db` or `full` backup is decrypted by the Age private key prompt. A separate emergency passphrase prompt can also appear because restore creates a pre-restore emergency snapshot of the current VM before overwrite. That passphrase protects the pre-restore emergency snapshot, not the selected DB/full backup. On a rebuilt VM where current state is disposable and only a remote DB backup is being restored, `sudo ./restore.sh interactive --remote --no-backup` is acceptable; on an existing/live VM, keep the safety snapshot unless you understand the rollback risk.
 
 ---
 
@@ -181,7 +183,9 @@ A successful restore may rotate or re-promote the operational Age key and re-key
 sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
-Store the result in your password manager and offline storage. Delete any plaintext copy left on the host after saving it.
+A recovery kit is the plaintext operator handoff containing the Age private key and generated credentials needed for recovery. Setup and explicit export flows temporarily write it as `./recovery-kit-<timestamp>.txt` and/or under a tmpfs path such as `/run/.../vaultwarden-recovery-kit-<timestamp>.txt` while displaying it to the operator. Store the result in your password manager and offline storage, then remove plaintext recovery kit files from the server.
+
+If you configured an offline Age recipient, remember it is an optional extra Age public recipient for decrypting/recovering SOPS material. It is not the same thing as the emergency passphrase for a passphrase-sealed emergency backup.
 
 ---
 
