@@ -361,6 +361,16 @@ services:
       - DAC_OVERRIDE
       - FOWNER
 
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /var/spool/postfix:size=64m,mode=0755
+      - /var/lib/postfix:size=16m,mode=0755
+      - /run:size=16m,mode=0755
+
+    mem_limit: 256M
+    memswap_limit: 256M
+
     logging:
       driver: "json-file"
       options:
@@ -417,7 +427,7 @@ networks:
     internal: false  # explicit: outbound-only internet path for vaultwarden_app
     ipam:
       config:
-        - subnet: 172.21.0.0/16
+        - subnet: 172.21.0.0/28
 
   # caddy_external — inbound + outbound path for the Caddy reverse proxy.
   # Named *_external (not *_egress) because traffic is bidirectional: inbound
@@ -432,7 +442,7 @@ networks:
     internal: false  # explicit: inbound (80/443) + outbound (ACME, CF DNS) for Caddy
     ipam:
       config:
-        - subnet: 172.22.0.0/16
+        - subnet: 172.22.0.0/28
 
   # Dedicated non-internal bridge for postfix host port-binding.
   postfix_relay:
@@ -441,4 +451,4 @@ networks:
     internal: false
     ipam:
       config:
-        - subnet: 172.23.0.0/16
+        - subnet: 172.23.0.0/28

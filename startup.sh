@@ -109,7 +109,7 @@ done
 
 # Real startup/stop operations are root-operated. Keep harmless metadata/help
 # paths above this guard so users can inspect usage/version without sudo.
-if [[ "${DRY_RUN}" != "true" ]]; then
+if [[ "${DRY_RUN}" != "true" || "${DO_DOWN}" == "true" ]]; then
   require_root "Startup and stop operations require root. Run: sudo make up"
 fi
 

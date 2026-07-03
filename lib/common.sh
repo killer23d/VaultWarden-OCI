@@ -351,7 +351,7 @@ auto_fix_critical_permissions() {
 # Security model:
 #   Lock files are coordination primitives, not secrets. They hold no data.
 #   0660 root:vaultwarden in /run/lock/ (sticky drwxrwxrwt) means:
-#     - Only group members can acquire/interfere with the lock (not 0666)
+#     - Only vaultwarden group members can acquire/interfere with the lock
 #     - Sticky bit prevents other users deleting the file
 #     - AppArmor allows root to open files it created (root:vaultwarden)
 _ensure_lock_file() {
@@ -383,17 +383,17 @@ _ensure_lock_file() {
         # window where the file exists but has wrong permissions.
         if ! install -m 0660 -o root -g vaultwarden /dev/null "$lockpath" 2>/dev/null; then
             # Fallback: 'vaultwarden' group may not exist yet (pre-setup).
-            # Use 0666 temporarily so the operation proceeds; setup-systemd.sh
-            # will correct ownership on next install run.
+            # Use root:root until setup-systemd.sh creates the shared group.
             touch "$lockpath" 2>/dev/null || {
                 log_error "_ensure_lock_file: cannot create '${lockpath}'"
                 log_error "  Check: ls -la ${lockdir}"
                 log_error "  Fix:   sudo touch ${lockpath} && sudo chmod 0660 ${lockpath}"
                 return 1
             }
-            chmod 0666 "$lockpath" 2>/dev/null || true
-            log_warn "_ensure_lock_file: 'vaultwarden' group not found — using 0666 temporarily."
-            log_warn "  Run 'sudo utilities/setup-systemd.sh install' to fix permanently."
+            chown root:root "$lockpath" 2>/dev/null || true
+            chmod 0660 "$lockpath" 2>/dev/null || true
+            log_warn "_ensure_lock_file: 'vaultwarden' group not found — using root:root 0660 temporarily."
+            log_warn "  Run 'sudo utilities/setup-systemd.sh install' to create the group and fix permanently."
             return 0
         fi
     fi
