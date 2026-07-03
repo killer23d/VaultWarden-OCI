@@ -1027,7 +1027,37 @@ EXAMPLES:
 ### setup-secrets.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Secrets Management
+
+USAGE:
+    sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
+
+DESCRIPTION:
+    Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
+    credentials interactively or automatically. Interactive view/list/rotate
+    and recovery-kit export are root-operated commands via sudo ./edit-secrets.sh.
+
+SUBCOMMANDS:
+    bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
+                        (called automatically by setup.sh install phase)
+    configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
+    breakglass [FLAGS]  Emergency break-glass admin account management
+    help, --help, -h    Show this help
+
+OPTIONS:
+    --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
+
+Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
+
+EXAMPLES:
+    sudo utilities/setup-secrets.sh bootstrap
+    sudo utilities/setup-secrets.sh configure
+    sudo utilities/setup-secrets.sh configure --auto
+    sudo ./edit-secrets.sh rotate email_api_token
+    sudo ./edit-secrets.sh export-recovery-kit
+    sudo utilities/setup-secrets.sh breakglass create
+    sudo utilities/setup-secrets.sh breakglass status
 ```
 
 ### setup-storage.sh
@@ -1088,7 +1118,32 @@ EXAMPLES:
 ### setup-system.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI System Preparation
+
+USAGE:
+    sudo utilities/setup-system.sh [OPTIONS]
+
+DESCRIPTION:
+    Prepares the host system for VaultWarden-OCI: installs dependencies
+    (Docker, Age, SOPS, rclone, sqlite3), configures user permissions, and
+    sets script execute bits. Called automatically by setup.sh phase 1.
+
+OPTIONS:
+    --skip-deps           Skip package installation (assume already installed)
+    --auto                Non-interactive mode
+    --use-latest          Override pinned versions with 'latest'
+    --sops-version VER    Pin SOPS to a specific version (e.g. v3.9.4)
+    --dry-run             Preview actions without executing
+    --force               Skip confirmations
+    --data-device DEV     Data volume device path
+    --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
+    --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    sudo utilities/setup-system.sh
+    sudo utilities/setup-system.sh --dry-run
+    sudo utilities/setup-system.sh --skip-deps
 ```
 
 ### setup-systemd.sh
