@@ -33,6 +33,44 @@ grep -q -- "-i \$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" "$TMP/age.args" || exit 5
 EOF_PROBE
 bash "$TMP/decrypt-probe.sh" || fail 'emergency decrypt helper did not implement passphrase/DR recipient behavior'
 
+
+# Operator UI closure: restore plan summary must not use fixed-width box borders or padded printf columns.
+restore_plan_func="$(_extract_func "$ROOT/utilities/restore-run.sh" _print_restore_plan_summary)"
+! grep -q '╔\|╠\|╚\|║' <<< "$restore_plan_func" || fail 'restore plan summary still uses fixed-width box drawing'
+! grep -q '%-38s' <<< "$restore_plan_func" || fail 'restore plan summary still pads values to a fixed width'
+grep -q 'operator_attention warn "Restore plan summary"' <<< "$restore_plan_func" || fail 'restore plan summary does not use operator attention block'
+
+# Behavior: long backup names/paths are printed untruncated in plain summary lines.
+cat > "$TMP/restore-plan-probe.sh" <<EOF_PROBE
+set -euo pipefail
+ROOT="$ROOT"
+TMP="$TMP"
+source "\$ROOT/lib/log.sh"
+source "\$ROOT/lib/common.sh"
+init_common_lib restore-plan-probe
+RESTORE_TYPE=full
+STATE_DIR="\$TMP/state-with-a-deliberately-long-path-component-that-must-not-be-truncated"
+OPERATIONAL_SOPS_AGE_KEY_FILE="\$TMP/keys/live-operational-age-key-with-a-deliberately-long-name.txt"
+NO_PRE_BACKUP=false
+backup_encryption_mode=age-recipient
+BACKUP_FILE="\$TMP/vaultwarden-full-backup-with-a-deliberately-long-name-that-would-overflow-the-old-box.tar.zst.age"
+touch "\$BACKUP_FILE"
+$restore_plan_func
+_print_restore_plan_summary >"\$TMP/restore-plan.out" 2>&1
+EOF_PROBE
+bash "$TMP/restore-plan-probe.sh" || fail 'restore plan summary probe failed'
+grep -q 'vaultwarden-full-backup-with-a-deliberately-long-name-that-would-overflow-the-old-box.tar.zst.age' "$TMP/restore-plan.out" || fail 'restore plan summary truncated or hid long backup name'
+grep -q 'live-operational-age-key-with-a-deliberately-long-name.txt' "$TMP/restore-plan.out" || fail 'restore plan summary truncated or hid long key path'
+! grep -q '╔\|╠\|╚\|║' "$TMP/restore-plan.out" || fail 'restore plan output still contains fixed-width box borders'
+
+# Restore destructive confirmation must use shared default-no helper and preserve automation/non-interactive gates.
+grep -Fq 'operator_attention warn "Destructive restore confirmation"' "$ROOT/utilities/restore-run.sh" || fail 'restore destructive context does not use operator_attention'
+grep -Fq 'operator_confirm_yes_no "Proceed with destructive restore?" "no" 0' "$ROOT/utilities/restore-run.sh" || fail 'restore destructive confirmation is not explicit default-no yes/no helper'
+grep -Fq 'if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer preserves force/dry-run/inspect bypass gate'
+grep -Fq 'stdin is not a TTY' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer fails closed for non-TTY stdin'
+grep -Fq 'Re-run with --force for non-interactive restore' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer documents --force automation path'
+grep -Fq 'Restore cancelled' "$ROOT/utilities/restore-run.sh" || fail 'restore cancellation message missing'
+
 # Behavior: --start-policy missing value fails cleanly, not with an unbound variable.
 set +e
 bash "$ROOT/utilities/restore-run.sh" latest --start-policy >"$TMP/restore-missing.out" 2>&1

@@ -470,3 +470,35 @@ Constraints:
 - Run available relevant tests. Run shellcheck/shfmt only if already installed; do not apply shfmt formatting unless explicitly requested.
 - End with git status --short.
 ```
+
+# Implementation Status
+
+Final closure pass reviewed the post-PR #219/#220 `delta` branch and treats this preliminary scan as closed after the incremental changes in this pass, unless later testing exposes a regression.
+
+| Finding | Status | Addressed by | Remaining intentional limitation |
+| --- | --- | --- | --- |
+| UI-01 | Complete | PR #219 recovery wording and health-check closure work in `recover.sh` | None identified in this closure pass. |
+| UI-02 | Complete | PR #219 deep-maintenance default-no prompt behavior in `utilities/maintenance-db-maint.sh` | None identified in this closure pass. |
+| UI-03 | Complete with intentional limits | PR #220 introduced the small shared helpers in `lib/common.sh`; this pass reused them for restore confirmation only where equivalently safe | No broad prompt migration. Exact-token gates remain intentionally specialized. |
+| UI-04 | Complete with intentional limits | PR #220 clarified key/passphrase role wording in recovery, backup, setup-secrets, and restore-adjacent paths | No new secret-prompt abstraction was added; existing clear prompts remain local. |
+| UI-05 | Complete with intentional limits | PR #220 added focused final-summary/next-step improvements; this pass left the specialized setup summary unchanged | No broad final-summary normalization. Long, security-sensitive setup output remains specialized. |
+
+## Remaining Observation Resolution
+
+| Observation | Decision | Resolution |
+| --- | --- | --- |
+| `make update-system` | Intentionally unchanged | Kept as a direct host OS package update. The managed `maintenance.sh update --system` path performs Age-key checks and a pre-update backup, but still reaches the shared `apply_updates_and_restart` path, which can restart the Compose stack even for system-only updates. To avoid changing operational semantics in a final closure pass, the Make target now clearly says it performs only direct host package updates and does not create a VaultWarden pre-update backup or restart the Compose stack. Operators who want the managed workflow should use `sudo make update`. |
+| `make breakglass-remove` | Fixed | The Make target no longer passes `--force`; normal operator use now preserves the utility's warning that break-glass emergency console access capability will be lost. The direct utility still supports `--force` for intentional automation. |
+| Restore plan width | Fixed | `_print_restore_plan_summary` no longer uses a fixed-width box or padded columns. It now prints a compact operator attention block with plain label/value lines, preserving long backup names and paths without truncation. |
+| Restore destructive confirmation | Fixed | The final destructive restore gate now uses `operator_attention warn` and `operator_confirm_yes_no` with default `no`, while preserving `--force`, `--dry-run`, `--inspect`, and non-TTY fail-closed behavior. Cancellation remains a clean operator cancellation before service stop or restore mutation. |
+| `setup.sh` final summary | Intentionally unchanged | No change — existing specialized setup summary is stronger than a generic helper conversion. It highlights disaster-recovery credentials, requires a human pause, distinguishes automatic/manual setup paths, provides detailed next steps, and keeps `VW_FORCE_ACK` separate. |
+| Raw dispatcher `echo` in early-failure paths | Intentionally unchanged | These are thin pre-library failure paths. No concrete operator-safety or correctness bug was found, and changing them would be cosmetic. |
+| General `log_phase` density | Intentionally unchanged | Existing phase output is readable enough for the current small-team workflow. No high-confidence failure or misleading operator state was found. |
+| Exact-token policy | Intentionally unchanged | Ordinary reversible decisions should use visible `yes/no` prompts with explicit defaults and fail-closed behavior where appropriate. Irreversible deletion, destructive format, key-loss/custody, and similar high-consequence acknowledgements should keep existing exact typed tokens such as `YES`, `UNINSTALL`, `DELETE-BACKUPS`, `SAVED`, `VW_FORCE_ACK`, `DATA_VOLUME_FORCE_FORMAT`, and `DATA_VOLUME_EXISTING_FS_OK`. Automation remains behind explicit `--force` flags or environment gates. |
+| Broad migration of startup/uninstall/storage prompts | Intentionally unchanged | Existing specialized exact-token confirmations are stronger than generic visual consistency for their risk class. No broad migration was performed. |
+| Exact-confirm helper idea | Deferred with reason | Not added. There are not enough newly touched call sites in this closure pass to justify another helper, and existing exact-token gates should not be churned merely for uniformity. |
+| Secret-prompt helper idea | Deferred with reason | Not added. The remaining prompts have context-specific key/passphrase explanations; no current multi-call-site correctness bug requires a new abstraction. |
+
+## Closure Conclusion
+
+No remaining Critical, High, or Medium operator-UI finding from this preliminary scan is intentionally left unresolved. The broader prompt/log rewrite was intentionally not performed because it would add churn without a demonstrated security, restore, backup, or junior-operator safety benefit. This report should be considered closed after the final closure PR, assuming the associated tests pass.

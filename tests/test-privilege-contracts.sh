@@ -155,6 +155,24 @@ grep -Fq 'install -m 0444 -o root -g root "$_cf_flat" "$_cf_dest"' lib/secrets.s
 ! grep -Fq '_cf_value' lib/secrets.sh || fail "CF token value should not be read into shell variables"
 pass "CF token mirror avoids command-line secret values"
 
+
+# Operator-facing breakglass-remove must preserve the utility confirmation by default.
+BREAKGLASS_REMOVE_SNIP="$(mktemp -t vw-breakglass-remove.XXXXXXXXXX)"
+extract_make_target breakglass-remove Makefile > "$BREAKGLASS_REMOVE_SNIP" || fail "could not extract make breakglass-remove target"
+grep -Fq 'utilities/setup-secrets.sh breakglass remove' "$BREAKGLASS_REMOVE_SNIP" || fail "make breakglass-remove does not call setup-secrets breakglass remove"
+! grep -Fq -- '--force' "$BREAKGLASS_REMOVE_SNIP" || fail "make breakglass-remove must not bypass the utility confirmation with --force"
+rm -f "$BREAKGLASS_REMOVE_SNIP"
+pass "make breakglass-remove preserves break-glass removal confirmation"
+
+# update-system intentionally remains a direct host package update, with wording that distinguishes it from the managed update workflow.
+UPDATE_SYSTEM_SNIP="$(mktemp -t vw-update-system.XXXXXXXXXX)"
+extract_make_target update-system Makefile > "$UPDATE_SYSTEM_SNIP" || fail "could not extract make update-system target"
+grep -Fq 'Updating host OS packages directly' "$UPDATE_SYSTEM_SNIP" || fail "make update-system does not clearly describe direct host package semantics"
+grep -Fq 'does not create a VaultWarden pre-update backup or restart the Compose stack' "$UPDATE_SYSTEM_SNIP" || fail "make update-system missing managed-workflow distinction"
+! grep -Fq './maintenance.sh update --system' "$UPDATE_SYSTEM_SNIP" || fail "make update-system should not route through managed maintenance update without restart semantic changes"
+rm -f "$UPDATE_SYSTEM_SNIP"
+pass "make update-system direct package-update semantics are explicit"
+
 # Generated command reference must be current.
 if [[ -f docs/COMMAND-REFERENCE.md ]]; then
     _cmd_ref_before="$(mktemp -t vw-command-reference.XXXXXXXXXX)"
