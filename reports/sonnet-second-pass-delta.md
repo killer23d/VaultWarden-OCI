@@ -3,8 +3,8 @@
 ## Verdict
 
 - **Recommendation: Green**
-- **Current production-readiness status:** All eight findings from the first PRR (F-01 through F-08) are confirmed fixed. `docker compose config` validates cleanly. `bash -n` and `shellcheck --severity=warning` are both clean. One new Low finding (S2-01) and one Low finding (S2-02) were identified; neither is blocking.
-- **Highest remaining risk:** Postfix `read_only: true` runtime compatibility cannot be proven from static review alone — this is a runtime validation limit, not a confirmed defect. The second-highest concern is the CI path-filter gap for `docker-compose.yml.example` (Low, no functional code defect, simple one-line fix).
+- **Current production-readiness status:** All eight findings from the first PRR (F-01 through F-08) are confirmed fixed. `docker compose config` validates cleanly. `bash -n` and `shellcheck --severity=warning` are both clean. Two Low findings (S2-01 and S2-02) were identified and remediated in PR #217; neither was blocking.
+- **Highest remaining risk:** Postfix `read_only: true` runtime compatibility cannot be proven from static review alone — this is a runtime validation limit, not a confirmed defect. The CI path-filter gap for `docker-compose.yml.example` was remediated in PR #217; Postfix runtime compatibility remains the highest validation-only risk.
 - **Is the original PRR now stale after PR #216?** Partially. It accurately describes the pre-remediation state of commit `95e16776` and remains a valid historical record. Its F-01 through F-08 findings have been remediated. A small remediation note is recommended.
 
 ---
@@ -352,21 +352,19 @@ The original PRR noted that emergency backups explicitly reject encrypting solel
 
 All eight PRR findings (F-01 through F-08) are confirmed fixed with direct evidence from the post-remediation code. No Critical, High, or Medium findings were identified in this second pass.
 
-Two new Low findings were raised:
-1. **S2-01** — `docker-compose.yml.example` absent from CI path filter. One-line workflow fix. No functional code impact.
-2. **S2-02** — macOS Bash 3.2 test isolation issue. Developer ergonomics only; CI is unaffected.
+Two new Low findings were raised and remediated in PR #217:
+1. **S2-01** — `docker-compose.yml.example` absent from CI path filter. Fixed by adding it to the workflow path filter. No functional code impact.
+2. **S2-02** — macOS Bash 3.2 test isolation issue. Fixed by allowing Homebrew Bash paths in the isolated test `PATH`. Developer ergonomics only; CI is unaffected.
 
 The remaining gaps are **runtime validation recommendations**, not code defects:
 
 - Postfix `read_only: true` runtime compatibility should be verified with a container smoke test on the Ubuntu target before the first production deployment (RVL-01).
 - An end-to-end emergency backup passphrase round-trip test remains a future CI coverage improvement (RVL-02).
 
-No functional code was changed in this review pass.
+No runtime behavior was changed in this review pass.
 
 **Recommended pre-production actions (in order of priority):**
 
 1. Run the Postfix runtime smoke test (RVL-01) on a disposable Ubuntu environment.
-2. Optionally add `docker-compose.yml.example` to the CI path filter (S2-01, one-line change).
-3. Optionally fix the macOS test isolation PATH (S2-02, follow-up improvement).
 
 None of these are blocking for production deployment.
