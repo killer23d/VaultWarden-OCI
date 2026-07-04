@@ -757,9 +757,12 @@ check-updates: ## Check for available container image updates (no restart)
 	@echo "$(BLUE)Checking for container updates...$(NC)"
 	@$(DOCKER_COMP) pull --dry-run 2>/dev/null || $(DOCKER_COMP) pull
 
-update-system: ## Update host OS packages
+update-system: ## Direct host OS package update (not full managed VaultWarden update)
 	$(call require-root)
-	@echo "$(BLUE)Updating system packages...$(NC)"
+	@echo "$(BLUE)Updating host OS packages directly...$(NC)"
+	@echo "$(YELLOW)This target runs the host package manager directly; it does not create a VaultWarden pre-update backup or run the managed Compose restart/health workflow.$(NC)"
+	@echo "$(YELLOW)Host package updates may still restart system services or require a reboot.$(NC)"
+	@echo "$(YELLOW)For the managed VaultWarden update workflow, use: sudo make update$(NC)"
 	@if command -v apt-get >/dev/null 2>&1; then \
 		apt-get update && apt-get upgrade -y; \
 	elif command -v yum >/dev/null 2>&1; then \
@@ -864,7 +867,7 @@ breakglass-status: ## Check break-glass admin account status
 breakglass-remove: ## Remove break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Removing break-glass admin account...$(NC)"
-	@utilities/setup-secrets.sh breakglass remove --force
+	@utilities/setup-secrets.sh breakglass remove
 
 # ===========================================================================
 ##@ Developer/Test — Testing & Development

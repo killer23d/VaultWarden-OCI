@@ -66,7 +66,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make key-rotate` |  Rotate age encryption key (re-encrypts all secrets) |
 | `make update` |  Update all container images and restart |
 | `make check-updates` |  Check for available container image updates (no restart) |
-| `make update-system` |  Update host OS packages |
+| `make update-system` |  Direct host OS package update (not full managed VaultWarden update) |
 | `make update-dns` |  Update Cloudflare DNS records |
 | `make maintenance` |  Run routine maintenance tasks |
 | `make maintenance-full` |  Run full maintenance with all checks |

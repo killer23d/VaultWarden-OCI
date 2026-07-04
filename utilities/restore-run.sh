@@ -1456,29 +1456,28 @@ check_archive_dependencies() {
 
 # Prints a compact restore plan before destructive confirmation.
 _print_restore_plan_summary() {
-    local backup_name backup_size enc_mode
+    local backup_name backup_size enc_mode pre_backup
     backup_name="$(basename "${BACKUP_FILE:-unknown}")"
     backup_size="$(du -sh "${BACKUP_FILE:-}" 2>/dev/null | awk '{print $1}' || echo "unknown")"
     enc_mode="${backup_encryption_mode:-inferred age-recipient}"
-    echo "  ╔══════════════════════════════════════════════════════╗"
-    echo "  ║  RESTORE PLAN SUMMARY                               ║"
-    echo "  ╠══════════════════════════════════════════════════════╣"
-    printf '  ║  Mode:         %-38s ║\n' "${RESTORE_TYPE:-unknown}"
-    printf '  ║  Backup:       %-38s ║\n' "$backup_name"
-    printf '  ║  Size:         %-38s ║\n' "$backup_size"
-    printf '  ║  Target dir:   %-38s ║\n' "${STATE_DIR:-unknown}"
-    echo "  ║  Docker:       will be STOPPED                      ║"
     if [[ "${NO_PRE_BACKUP:-false}" == "true" ]]; then
-        echo "  ║  Pre-backup:   skipped (--no-backup)                 ║"
+        pre_backup="skipped (--no-backup)"
     else
-        echo "  ║  Pre-backup:   pre-restore emergency snapshot        ║"
+        pre_backup="pre-restore emergency snapshot"
     fi
-    printf '  ║  Backup key:   %-38s ║\n' "selected backup decrypt key"
-    printf '  ║  Live SOPS key:%-38s ║\n' " ${OPERATIONAL_SOPS_AGE_KEY_FILE:-unknown}"
+
+    operator_attention warn "Restore plan summary" \
+        "Mode: ${RESTORE_TYPE:-unknown}" \
+        "Backup: ${backup_name}" \
+        "Size: ${backup_size}" \
+        "Target directory: ${STATE_DIR:-unknown}" \
+        "Docker: will be STOPPED" \
+        "Pre-backup: ${pre_backup}" \
+        "Backup decrypt key role: selected backup decrypt key" \
+        "Live operational SOPS Age key: ${OPERATIONAL_SOPS_AGE_KEY_FILE:-unknown}"
     if [[ "${RESTORE_TYPE:-}" == "emergency" ]]; then
-        printf '  ║  Enc mode:     %-38s ║\n' "$enc_mode"
+        printf '  - Emergency encryption mode: %s\n' "$enc_mode" >&2
     fi
-    echo "  ╚══════════════════════════════════════════════════════╝"
 }
 
 # Emits a countdown while waiting for the interactive Age key prompt.
@@ -2540,17 +2539,18 @@ main() {
     _print_restore_plan_summary
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]; then
-        echo ""
-        log_warn "WARNING: This will overwrite current data."
-        log_warn "Services will be stopped during the restore."
-        log_warn "A NEW age key will be generated after the restore."
-        echo ""
+        operator_attention warn "Destructive restore confirmation" \
+            "Current VaultWarden data will be overwritten." \
+            "Services will be stopped during the restore." \
+            "A NEW Age key will be generated after the restore."
         if [[ ! -t 0 ]]; then
             log_error "Cannot confirm restore: stdin is not a TTY. Re-run with --force for non-interactive restore."
             exit 1
         fi
-        read -r -p "Type 'yes' to proceed: " confirm
-        [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
+        if ! operator_confirm_yes_no "Proceed with destructive restore?" "no" 0; then
+            log_info "Restore cancelled."
+            exit 0
+        fi
     fi
 
     if [[ "$RESTORE_TYPE" == "emergency" && "$backup_encryption_mode" == "age-passphrase" ]]; then
