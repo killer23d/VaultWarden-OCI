@@ -886,6 +886,7 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-permission-contract-central.sh
 	@tests/test-env-edit.sh
 	@tests/test-migrate-followup.sh
+	@tests/test-operator-ui.sh
 	@tests/test-recover.sh
 	@tests/test-restore-run-followup.sh
 	@tests/test-restore-backup-preflight-safety.sh

@@ -166,6 +166,101 @@ press_enter_to_continue() {
     fi
 }
 
+operator_attention() {
+    local severity="${1:-info}" title="${2:-Attention}" level label color fd line
+    if (( $# >= 2 )); then
+        shift 2
+    else
+        shift "$#"
+    fi
+
+    case "${severity,,}" in
+        error)
+            level="ERROR"; label="ERROR"; color="${COLOR_BOLD_RED:-}"; fd=2 ;;
+        warn|warning)
+            level="WARN"; label="WARNING"; color="${COLOR_YELLOW:-}"; fd=2 ;;
+        *)
+            level="INFO"; label="NOTICE"; color="${COLOR_CYAN:-}"; fd=1 ;;
+    esac
+
+    _should_log "$level" || return 0
+    if [[ "${LOG_COLORS:-true}" == "true" && -n "$color" ]]; then
+        printf '\n%s[%s] %s%s\n' "$color" "$label" "$title" "${COLOR_RESET:-}" >&"$fd"
+    else
+        printf '\n[%s] %s\n' "$label" "$title" >&"$fd"
+    fi
+    for line in "$@"; do
+        printf '  - %s\n' "$line" >&"$fd"
+    done
+}
+
+operator_confirm_yes_no() {
+    local prompt="$1" default="${2:-no}" timeout="${3:-0}" reply status prompt_text
+    default="${default,,}"
+    case "$default" in
+        yes|no) ;;
+        *)
+            log_error "operator_confirm_yes_no: default must be 'yes' or 'no'"
+            return 2
+            ;;
+    esac
+
+    prompt_text="${prompt} [yes/no] (default: ${default}): "
+    if [[ "${LOG_COLORS:-true}" == "true" && -t 2 ]]; then
+        printf '%s%s%s' "${COLOR_BOLD:-}" "$prompt_text" "${COLOR_RESET:-}" >&2
+    else
+        printf '%s' "$prompt_text" >&2
+    fi
+
+    if [[ "$timeout" =~ ^[0-9]+([.][0-9]+)?$ && "$timeout" != "0" ]]; then
+        if read -r -t "$timeout" reply; then
+            :
+        else
+            status=$?
+            [[ -t 2 ]] && printf '\n' >&2
+            if (( status > 128 )); then
+                log_warn "No confirmation received within ${timeout}s; failing closed."
+            else
+                log_warn "No confirmation received; failing closed."
+            fi
+            return 1
+        fi
+    else
+        if ! read -r reply; then
+            [[ -t 2 ]] && printf '\n' >&2
+            log_warn "No confirmation received; failing closed."
+            return 1
+        fi
+    fi
+
+    [[ -z "$reply" ]] && reply="$default"
+    case "${reply,,}" in
+        yes) return 0 ;;
+        no) return 1 ;;
+        *)
+            log_warn "Invalid response; please answer yes or no."
+            return 1
+            ;;
+    esac
+}
+
+operator_next_steps() {
+    local title="${1:-Next steps}" item
+    if (( $# > 0 )); then
+        shift
+    fi
+
+    _should_log "INFO" || return 0
+    if [[ "${LOG_COLORS:-true}" == "true" && -n "${COLOR_BOLD:-}" ]]; then
+        printf '\n%s%s%s\n' "${COLOR_BOLD:-}" "$title" "${COLOR_RESET:-}"
+    else
+        printf '\n%s\n' "$title"
+    fi
+    for item in "$@"; do
+        printf '  - %s\n' "$item"
+    done
+}
+
 # Best-effort remediation for common operational file permission drift.
 # This is intentionally non-fatal and safe to call repeatedly.
 _common_stat_mode() {
@@ -839,7 +934,8 @@ wait_for_entropy() {
 export -f wait_for_entropy
 
 export -f _require_script
-export -f has_command require_commands retry_with_backoff is_root require_root press_enter_to_continue project_version print_project_version get_real_user _maybe_sudo
+export -f has_command require_commands retry_with_backoff is_root require_root press_enter_to_continue operator_attention operator_confirm_yes_no operator_next_steps
+export -f project_version print_project_version get_real_user _maybe_sudo
 export -f expected_owner_for_path expected_group_for_path expected_mode_for_path fix_known_path_permissions assert_known_path_permissions
 export -f auto_fix_critical_permissions
 export -f _ensure_lock_file _fix_rclone_ownership _run_rclone _check_sudo_requirement
