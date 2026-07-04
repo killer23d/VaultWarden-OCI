@@ -75,7 +75,12 @@ run_deep_db_maintenance() {
         log_warn "This will stop the VaultWarden container temporarily. (Caddy stays up)"
         log_info "Database: $db_file  |  Current Size: $original_size"
         echo ""
-        read -r -t 30 -p "Continue with deep database maintenance? [yes/no]: " confirm || confirm="yes"
+        if ! read -r -t 30 -p "Continue with deep database maintenance? [yes/no] (default: no): " confirm; then
+            echo ""
+            log_info "Deep maintenance cancelled because confirmation was not received."
+            return 0
+        fi
+        [[ -z "${confirm//[[:space:]]/}" ]] && { log_info "Deep maintenance cancelled because confirmation was not received."; return 0; }
         [[ "${confirm,,}" != "yes" ]] && { log_info "Deep maintenance cancelled"; return 0; }
     fi
     local safety_backup_file=""

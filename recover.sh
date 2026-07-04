@@ -192,6 +192,18 @@ parse_manifest() {
     fi
 }
 
+print_recovery_preflight_plan() {
+    echo ""
+    echo "Recovery preflight plan:"
+    echo "  State directory: $STATE_DIR"
+    echo "  Offline recovery Age key: $KEY_FILE"
+    echo "  Recovery manifest: $MANIFEST"
+    echo "  Live operational Age key target: $ACTIVE_KEY"
+    echo "  A new operational Age key will be generated and installed at the live key target."
+    echo "  The offline recovery key will not be installed as the live operational key."
+    echo ""
+}
+
 create_backups() {
     WORKDIR="$(mktemp -d)"
     if allow_non_root_test_mode && [[ $EUID -ne 0 ]]; then
@@ -331,6 +343,8 @@ update_env_files() {
 }
 
 run_startup_health() {
+    local alive_url="${DOMAIN%/}/alive"
+
     [[ -f "$SCRIPT_DIR/docker-compose.yml" ]] || cp "$SCRIPT_DIR/docker-compose.yml.example" "$SCRIPT_DIR/docker-compose.yml"
     if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
         export PROJECT_STATE_DIR="$STATE_DIR" DATA_VOLUME_MOUNT="$STATE_DIR" DATA_VOLUME_DEVICE="$DEVICE_PATH" SOPS_AGE_KEY_FILE="$ACTIVE_KEY"
@@ -340,13 +354,17 @@ run_startup_health() {
     auto_fix_critical_permissions "$SCRIPT_DIR"
     bash "$VW_STARTUP_SCRIPT"
 
-    if curl -sf "${DOMAIN%/}/alive" >/dev/null; then
+    if curl -sf "$alive_url" >/dev/null; then
         echo "Health check: PASS"
+        echo "Recovery complete. Vaultwarden passed health check at $alive_url"
     else
         echo "Health check: FAIL"
+        echo "Recovery artifacts were promoted, but Vaultwarden did not pass the health check."
+        echo "Do not treat the service as healthy until the checks below pass."
+        echo "Inspect service status: docker compose -f ${SCRIPT_DIR}/docker-compose.yml ps"
         echo "Inspect logs: docker compose -f ${SCRIPT_DIR}/docker-compose.yml logs --tail=200"
+        echo "Failed health URL: $alive_url"
     fi
-    echo "Recovery complete. Vaultwarden is running at $DOMAIN"
 }
 
 cleanup() {
@@ -366,6 +384,7 @@ main() {
     parse_args "$@"
     check_prerequisites
     parse_manifest
+    print_recovery_preflight_plan
     create_backups
     generate_new_key
     run_staged_rekey

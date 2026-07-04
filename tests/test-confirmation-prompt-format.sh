@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAINT_DB="$ROOT/utilities/maintenance-db-maint.sh"
 
 patterns=(
     "y""/N"
@@ -58,5 +59,16 @@ for pattern in "${patterns[@]}"; do
         exit "$status"
     fi
 done
+
+grep -Fq 'Continue with deep database maintenance? [yes/no] (default: no): ' "$MAINT_DB" \
+    || { echo "FAIL: deep maintenance prompt must disclose default: no" >&2; exit 1; }
+
+if grep -Fq 'confirm="yes"' "$MAINT_DB"; then
+    echo "FAIL: deep maintenance confirmation timeout must not default to yes" >&2
+    exit 1
+fi
+
+grep -Fq 'Deep maintenance cancelled because confirmation was not received.' "$MAINT_DB" \
+    || { echo "FAIL: deep maintenance timeout cancellation message missing" >&2; exit 1; }
 
 echo "OK: confirmation prompts use full yes/no display text"
