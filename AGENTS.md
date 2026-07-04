@@ -1,83 +1,177 @@
-# AGENTS.md — VaultWarden-OCI Agent Instructions
+# AGENTS.md — VaultWarden-OCI Independent Operator-Safety Review
+
+## Purpose
+
+This agent session is an independent, read-only post-implementation review of recent operator UI and operator-safety changes in VaultWarden-OCI.
+
+The review follows PRs #219, #220, and #221 and the closure of:
+
+```text
+reports/operator-ui-preliminary-scan.md
+```
+
+The prior report and those PRs are evidence and historical context.
+
+They are not ground truth.
+
+Assume the previous audit may have been competently implemented but may still contain:
+
+* incomplete assumptions
+* missed execution paths
+* semantic regressions
+* overly narrow findings
+* tests that validate source text without validating behavior
+* final status messages that do not truthfully represent runtime state
+
+The objective is not to confirm that the prior report was completed.
+
+The objective is to independently determine whether the current `delta` branch still contains meaningful operator-safety problems or regressions that the original scan and PRs #219–#221 missed.
+
+---
 
 ## Project context
 
-This repository is a small-team, self-hosted Vaultwarden deployment for Oracle Cloud Infrastructure on Ubuntu.
+VaultWarden-OCI is a small-team, self-hosted Vaultwarden deployment for Oracle Cloud Infrastructure on Ubuntu.
 
-The intended production user is a small workgroup, not an enterprise platform team. The operator may be a junior Linux/Docker administrator. Favor simple, explicit, recoverable procedures over clever abstractions.
+The intended production environment is a small workgroup of approximately 10 users.
+
+The primary operator may be a junior Linux or Docker administrator.
+
+The system is intended to be largely "set and forget" and may only receive close operator attention during an incident, restore, recovery, key operation, or maintenance event.
 
 Project priorities, in order:
 
-1. Security first
-2. Reliable backup and restore
-3. Clear junior-operator UX
-4. Minimal moving parts
-5. Avoid enterprise-style complexity unless clearly justified
+1. Security
+2. Reliable backup, restore, and disaster recovery
+3. Truthful and clear operator guidance
+4. Simple junior-operator workflows
+5. Minimal moving parts
+6. Avoid enterprise-style complexity unless clearly justified
 
-## Current branch focus
+A few hours of downtime may be acceptable.
 
-Primary working branch: `delta`
+Silent data loss, misleading recovery success, lost key custody, incomplete backups presented as complete, or operator guidance that causes an unsafe action are not acceptable.
 
-Recent context:
+---
 
-* A Production Readiness Review already exists at:
+## Branch and review baseline
 
-```text
-reports/production-readiness-review-delta.md
-```
-
-* That report reviewed the pre-remediation `delta` commit:
+Primary working branch:
 
 ```text
-95e16776f4597df73f5ea860a44397e433414cbc
+delta
 ```
 
-* PR #216 was merged into `delta` after that report.
-* PR #216 addressed findings F-01 through F-08 from the original report.
-* The current second-pass task should use the existing report as prior work, not repeat a full audit from scratch.
+Historical review baseline:
 
-## How to use prior reports
+```text
+reports/operator-ui-preliminary-scan.md
+```
 
-When a review report already exists under `reports/`, treat it as a baseline.
+Relevant implementation sequence:
 
-Do:
+```text
+PR #219
+PR #220
+PR #221
+```
 
-* Read the prior report first.
-* Reuse its scope, findings, validation notes, and known limitations.
-* Identify what the first audit already covered.
-* Identify what the first audit could not validate.
-* Focus on likely missed issues, stale assumptions, and post-remediation regressions.
-* Prefer targeted checks over broad re-audit.
+PR #219 addressed the first concrete operator-safety findings.
 
-Do not:
+PR #220 introduced a deliberately small shared operator UI helper layer and selectively adopted it.
 
-* Re-audit every file from scratch unless a serious issue points there.
-* Restate all prior findings in detail.
-* Rewrite the original report wholesale.
-* Treat a historical report as wrong just because the code has since been fixed.
-* Create noisy Low/Note findings unless they are useful.
+PR #221 performed a closure pass, addressed remaining selected observations, and recorded intentional limitations in the preliminary report.
 
-## Important architecture assumptions
+Read the current preliminary report first, including:
 
-Preserve these unless the user explicitly asks for a design change:
+```text
+# Implementation Status
+## Remaining Observation Resolution
+## Closure Conclusion
+```
 
-* Lifecycle is root-operated.
-* `sudo make up`, `sudo make restart`, and related lifecycle commands are expected.
-* SOPS + Age is the secrets model.
-* The offline Age key must never be stored on the server.
-* Runtime Docker secrets are staged under:
+Inspect the current `delta` implementation after reading the report.
+
+Use PRs #219–#221 and relevant git history to understand why code changed.
+
+Do not simply walk the report finding-by-finding and mark each item complete.
+
+The report is prior evidence, not the audit checklist.
+
+---
+
+## Review mode: read-only
+
+This is a report-only audit.
+
+Do not modify functional code.
+
+Do not fix findings.
+
+Do not refactor scripts.
+
+Do not rewrite documentation.
+
+Do not regenerate generated files unless required only to validate drift; restore any generated output before finishing.
+
+Do not create a pull request.
+
+The only intended repository change is the new review report:
+
+```text
+reports/operator-ui-independent-post-closure-review.md
+```
+
+Code changes proposed in the report are suggestions only.
+
+Provide practical remediation snippets or minimal pseudodiffs, but do not apply them.
+
+---
+
+## Architecture and operational invariants
+
+Preserve these assumptions unless direct current-code evidence demonstrates a defect.
+
+### Privilege model
+
+Lifecycle and maintenance are root-operated.
+
+Commands such as:
+
+```text
+sudo make up
+sudo make restart
+```
+
+are expected.
+
+Do not recommend converting the project back to a normal-user-operated lifecycle merely for convention.
+
+### Secrets model
+
+SOPS + Age is the intended secrets model.
+
+The live operational Age private key is distinct from the offline recovery Age key.
+
+The offline recovery Age private key must never be stored persistently on the server.
+
+Runtime Docker secrets are staged under:
 
 ```text
 /run/vaultwarden-oci/secrets
 ```
 
-* Persistent state defaults to:
+Persistent state normally resides under:
 
 ```text
 /var/lib/vaultwarden
 ```
 
-* Backup tiers are:
+Do not weaken key-custody warnings, explicit save acknowledgements, or exact-token gates.
+
+### Backup model
+
+Backup tiers are:
 
 ```text
 db
@@ -85,148 +179,543 @@ full
 emergency
 ```
 
-* Emergency backups may contain recovery material and must be independently protected.
-* Cloudflare and CrowdSec are part of the intended security model.
-* The project is for a small team and should avoid enterprise plugin frameworks, registries, or broad abstractions.
+Emergency backups may contain sensitive recovery material and require independent protection.
 
-## Review style
+The project expects a 3-2-1 backup strategy.
 
-When reviewing:
+Do not assume that "archive created" means:
 
-* Be skeptical, but do not invent theoretical issues.
-* Prefer evidence from files, commands, and line references.
-* Distinguish confirmed findings from low-confidence notes.
-* Do not recommend large refactors for style alone.
-* Do not change behavior unless it fixes a real bug, security issue, restore issue, backup issue, or operator confusion.
-* Preserve existing shell style, logging style, comments, and yes/no prompt conventions.
-* Keep changes small and targeted.
-* If a finding is low confidence, document it as a note, not as a required fix.
+* verified
+* synced offsite
+* restorable
+* complete disaster recovery coverage
 
-## High-confidence findings
+Those states must be distinguished where operator output claims them.
 
-Only call something a finding when there is enough evidence to say it is a real issue.
+### Security model
 
-A high-confidence finding should have most of the following:
+Cloudflare and CrowdSec are intentional components.
 
-1. Direct file, test, config, or command-output evidence
-2. A clear explanation of why the behavior is wrong or risky for this project
-3. A realistic impact on security, backup, restore, operations, CI, or junior-operator UX
-4. A narrow, practical fix
-5. A validation command or smoke test
+Do not recommend removing them merely to simplify the stack.
 
-Examples of high-confidence findings:
+### Scope model
 
-* A workflow path filter omits an important file, allowing future changes to skip CI.
-* A script uses an unsafe permission mode.
-* A compose service has a documented hardening gap.
-* A static placeholder could become a real credential.
-* A command path is misleading for a junior operator.
+This is a small deployment.
 
-Examples that are not high-confidence findings:
+Do not recommend:
 
-* “This might fail at runtime” without evidence.
-* “This script is long and should be refactored.”
-* “Maybe Ubuntu behaves differently” without target evidence.
-* “A future test would be nice” without a present defect.
+* plugin frameworks
+* provider registries
+* generalized terminal UI frameworks
+* broad command frameworks
+* new services
+* large dependency additions
+* enterprise orchestration
 
-Uncertain items should be classified as Notes or Runtime Validation Limits, not Findings.
+unless a demonstrated current defect cannot reasonably be solved with a narrow change.
 
-## Second-pass review expectations
+---
 
-A second-pass review should not be a full production-readiness audit.
+## Existing operator UI direction
 
-Its job is to answer:
+The current branch contains shared helpers including:
 
-1. What did the first PRR miss?
-2. What did the first PRR explicitly not validate?
-3. Did PR #216 fix F-01 through F-08 cleanly?
-4. Did PR #216 introduce any obvious regression?
-5. Are there any remaining Critical, High, or Medium issues before `delta` can be considered production-ready?
-6. Are there stale report statements that need clarification in the new report?
-7. Are there CI/process gaps that could let future important changes bypass validation?
+```text
+operator_attention
+operator_confirm_yes_no
+operator_next_steps
+```
 
-## Change discipline
+Existing exact typed confirmations may include tokens such as:
 
-Do not make broad changes.
+```text
+YES
+UNINSTALL
+DELETE-BACKUPS
+SAVED
+VW_FORCE_ACK
+DATA_VOLUME_FORCE_FORMAT
+DATA_VOLUME_EXISTING_FS_OK
+```
 
-Allowed changes during review/report tasks:
+Do not assume visual uniformity is more important than safety.
 
-* Add this `AGENTS.md` if missing.
-* Add a second-pass report under `reports/`.
-* Make small code fixes only if there is a clear Critical or High issue.
+Ordinary reversible choices may use explicit `yes/no` prompts.
 
-Do not do the following unless explicitly requested:
+Irreversible deletion, destructive format, key-loss, key-custody, and comparable high-consequence actions may intentionally use exact typed acknowledgements.
 
-* Rewrite documentation wholesale.
-* Change the root-operated model.
-* Introduce new dependencies.
-* Add enterprise plugin registries or large abstractions.
-* Remove safety prompts unless they are demonstrably wrong.
-* Change backup, restore, or recovery semantics without strong evidence.
-* Treat local macOS-only validation failures as project bugs unless Ubuntu target behavior is also affected.
+Do not raise a finding merely because a specialized confirmation does not use the shared helper.
+
+There must be a real operator-safety, semantic, reliability, or truthfulness problem.
+
+---
+
+## Primary review questions
+
+Independently answer the following.
+
+### 1. Were PRs #219–#221 semantically appropriate?
+
+Inspect the implemented behavior rather than only the PR descriptions.
+
+Look for changes to:
+
+* return codes
+* control flow
+* `set -e` interactions
+* cancellation semantics
+* EOF handling
+* blank input
+* invalid input
+* timeout behavior
+* TTY checks
+* stdout versus stderr
+* quiet or JSON output
+* automation paths
+* `--force`
+* dry-run or inspect behavior
+* service stop/start sequencing
+* health-check interpretation
+
+A UI helper conversion must not silently alter a stronger existing safety contract.
+
+### 2. Did the new shared helper layer introduce subtle problems?
+
+Review the helpers and their call sites.
+
+Specifically consider:
+
+```text
+operator_attention
+operator_confirm_yes_no
+operator_next_steps
+```
+
+Inspect interactions with:
+
+```text
+_should_log
+LOG_LEVEL
+LOG_COLORS
+TTY detection
+stdin
+stdout
+stderr
+set -e
+set -u
+set -o pipefail
+command substitution
+pipelines
+functions used in conditional expressions
+```
+
+Ask whether helper return codes can accidentally terminate a script or change behavior depending on caller context.
+
+Ask whether messages can disappear because of logging level even when operator action is required.
+
+Ask whether prompts can run in paths intended to be machine-readable or non-interactive.
+
+Do not invent a theoretical issue. Trace a realistic execution path.
+
+### 3. Did the original scan miss an adjacent high-risk operator flow?
+
+Prioritize:
+
+```text
+backup
+restore
+recover
+Age key rotation
+secrets setup or rekey
+storage setup or migration
+break-glass operations
+maintenance that stops or restarts services
+host and container update paths
+destructive Make targets
+final health or success reporting
+```
+
+Use targeted inspection.
+
+Do not re-audit every shell file from scratch.
+
+Follow call graphs and shared helpers where evidence points.
+
+### 4. Are final status messages truthful?
+
+This is a primary audit theme.
+
+Search for execution paths resembling:
+
+```text
+operation partially failed
+    ->
+final output says success
+```
+
+Examples to challenge:
+
+* health check failed but service described as running or healthy
+* backup archive exists but verification failed
+* offsite sync failed or was skipped but backup protection is implied complete
+* restart command returned but service health was not checked
+* disaster-recovery material was skipped but summary implies independent recovery protection
+* a restore or recovery step partially promoted state but final output presents complete success
+* notification failed but operator is told alerting is configured
+* required manual Cloudflare or CrowdSec action remains but setup is described as fully complete
+
+Distinguish:
+
+```text
+created
+promoted
+configured
+started
+running
+healthy
+verified
+synced
+restorable
+complete
+```
+
+These are not interchangeable states.
+
+### 5. Do tests validate behavior strongly enough?
+
+Review tests added or changed around PRs #219–#221.
+
+Source-pattern and `grep` policy tests are allowed and can be useful.
+
+However, ask whether a dangerous regression can occur while the test remains green.
+
+Look for tests that prove only:
+
+```text
+a helper call exists
+a string exists
+a success phrase is absent from source
+a particular literal command appears
+```
+
+when the important contract is runtime behavior.
+
+Prefer realistic shell harness tests for high-risk state transitions when existing project patterns make them practical.
+
+Do not demand end-to-end infrastructure testing for every message.
+
+Raise a test-gap finding only when a meaningful current behavior is insufficiently protected.
+
+### 6. Did the closure report make an incorrect assumption?
+
+Challenge the decisions recorded in:
+
+```text
+## Remaining Observation Resolution
+```
+
+Do not reopen an item merely because another implementation style is possible.
+
+Reopen an item only when current code evidence shows:
+
+* an unsafe execution path
+* misleading operator state
+* weaker confirmation semantics
+* automation regression
+* backup/restore/recovery reliability risk
+* a practical junior-operator trap
+
+---
+
+## Finding threshold
+
+Be skeptical.
+
+Do not create findings to fill the report.
+
+A clean review with zero Critical, High, or Medium findings is acceptable.
+
+Only call something a finding when there is direct, reproducible, or strongly traceable evidence.
+
+A confirmed finding should normally have:
+
+1. Exact file and function or target
+2. Relevant execution path
+3. Current behavior
+4. Evidence from current code or a focused command
+5. Realistic operator impact
+6. Explanation of why the preliminary scan or PRs #219–#221 did not already resolve it
+7. Narrow suggested remediation
+8. Practical code snippet or pseudodiff
+9. Focused validation recommendation
+
+Do not raise findings for:
+
+* visual inconsistency alone
+* personal wording preference
+* script length
+* missing abstraction
+* duplicated presentation code
+* hypothetical unsupported operating systems
+* a macOS-only validation limitation when Ubuntu production behavior is unaffected
+* enterprise-grade hardening outside this project's threat model
+* broad "best practice" claims without a current defect
+
+---
 
 ## Severity scale
 
-Use this severity scale:
+### Critical
 
-* Critical: likely data loss, secret exposure, restore failure, or production outage
-* High: security, backup, restore, or recovery issue that should be fixed before production-ready release
-* Medium: real hardening, reliability, CI, or UX issue worth fixing soon
-* Low: cleanup, polish, defense-in-depth, or minor consistency issue
-* Note: observation only, no action required
+A realistic path to:
 
-## Remediation snippet expectations
+* data loss
+* secret or private-key exposure
+* unrecoverable restore failure
+* loss of required recovery material
+* major production outage caused by current behavior
 
-When raising a finding, include a practical remediation suggestion.
+### High
 
-For each Critical, High, or Medium finding, provide:
+A concrete security, backup, restore, recovery, or destructive-operation problem that should be corrected before treating `delta` as production-ready.
 
-1. Target file
-2. Target function, service, workflow, or section
-3. Minimal suggested change
-4. A code snippet, YAML snippet, shell snippet, or diff-style example
-5. Validation command to confirm the fix
+### Medium
 
-Prefer small, reviewable snippets over broad rewrites.
+A real operator-safety, reliability, semantic, or test-protection defect worth correcting soon.
 
-Use this format:
+The impact must be practical for this project.
+
+### Low
+
+Minor but worthwhile safety or clarity improvement.
+
+Only include Low findings when unusually useful.
+
+Do not flood the report with polish items.
+
+### Note
+
+Observation or runtime validation limit.
+
+Not a required fix.
+
+---
+
+## Mandatory remediation snippets
+
+Every Critical, High, or Medium finding must include a practical proposed fix.
+
+Do not merely say:
+
+```text
+improve error handling
+add validation
+make the wording clearer
+use the helper
+add a test
+```
+
+Show what should change.
+
+For each Critical, High, or Medium finding include:
+
+```text
+### Suggested remediation
+```
+
+Then provide:
+
+```text
+Target
+Suggested change
+Why this is minimal
+Suggested patch
+Validation
+```
+
+Preferred format:
 
 ````markdown
 ### Suggested remediation
 
-Target:
+**Target**
 
-`path/to/file`
+`path/to/file` — `function_name`
 
-Suggested change:
+**Suggested change**
+
+Briefly describe the narrow behavioral change.
+
+**Why this is minimal**
+
+Explain why this fixes the demonstrated defect without changing unrelated semantics.
+
+**Suggested patch**
 
 ```diff
-- old line
-+ new line
-````
-
-Validation:
-
-```bash
-command-that-confirms-the-fix
+@@
+- existing behavior
++ proposed narrow behavior
 ```
 
+**Validation**
+
+```bash
+focused-test-or-command
+```
 ````
 
-Rules:
+The patch does not need to apply byte-for-byte if surrounding current code makes a compact pseudodiff clearer.
 
-- Snippets are suggestions unless the task explicitly asks to patch code.
-- Do not apply functional code changes during a report-only review unless a clear Critical or High issue is found.
-- For Low findings, snippets are optional but helpful.
-- For Notes or runtime validation limits, provide a validation command or smoke-test suggestion instead of pretending there is a confirmed code fix.
-- If a safe snippet cannot be proposed without runtime testing, say so clearly.
-- Never provide a broad rewrite when a narrow patch would solve the issue.
+However:
+
+* use real current variable names where known
+* use real current helper names
+* preserve existing project style
+* preserve existing operational gates
+* do not invent a new framework for a one-call-site issue
+* show enough code that another coding agent can understand the intended implementation
+
+When a finding requires a test change, also provide a focused test snippet when practical.
+
+Example:
+
+````markdown
+**Suggested regression test**
+
+```bash
+test_partial_failure_does_not_report_success() {
+    ...
+}
+```
+````
+
+For Low findings, snippets are optional.
+
+For Notes and runtime validation limits, provide a focused validation approach instead of pretending a code fix is confirmed.
+
+Do not apply these snippets to the repository during this review.
+
+---
+
+## Review strategy
+
+Use the following order.
+
+### Phase 1 — establish current state
+
+Record:
+
+```bash
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git log --oneline --decorate -20
+```
+
+Confirm the review is against current `delta`.
+
+Record the exact commit in the report.
+
+### Phase 2 — read prior evidence
+
+Read:
+
+```text
+reports/operator-ui-preliminary-scan.md
+```
+
+Pay special attention to its closure section.
+
+Inspect the changes and history associated with PRs #219, #220, and #221.
+
+Build a concise mental map of:
+
+```text
+problem
+    ->
+implemented change
+    ->
+new helper or call path
+    ->
+test coverage
+```
+
+Do not write a report section that simply repeats all five original UI findings.
+
+### Phase 3 — inspect helper semantics
+
+Review the shared operator helpers in their actual library context.
+
+Identify all current meaningful call sites.
+
+Trace caller behavior.
+
+Pay special attention to prompts used inside:
+
+```bash
+if ...
+if ! ...
+command || ...
+set -e
+```
+
+and paths with non-TTY stdin.
+
+### Phase 4 — truthful-state audit
+
+Target final status and summary output in high-risk workflows.
+
+Trace the state variable or command result that justifies each important success claim.
+
+Where wording says:
+
+```text
+healthy
+verified
+complete
+running
+synced
+configured
+```
+
+confirm the preceding code actually established that state.
+
+### Phase 5 — adjacent missed-item hunt
+
+Use the prior report to avoid repeating already settled cosmetic questions.
+
+Inspect nearby high-risk paths not fully exercised by the original findings.
+
+Follow evidence.
+
+Stop broadening scope when there is no realistic operator impact.
+
+### Phase 6 — test quality review
+
+Map the important behavior changed by PRs #219–#221 to the current regression tests.
+
+Identify only meaningful protection gaps.
+
+Where practical, run focused tests and controlled shell harnesses.
+
+### Phase 7 — report
+
+Create:
+
+```text
+reports/operator-ui-independent-post-closure-review.md
+```
+
+Do not modify functional code.
+
+---
 
 ## Validation expectations
 
-Run what is available in the environment.
+Run checks appropriate to the inspected areas.
 
-Minimum useful checks:
+At minimum:
 
 ```bash
 git status --short
@@ -234,54 +723,152 @@ git branch --show-current
 git rev-parse HEAD
 bash -n backup.sh restore.sh startup.sh recover.sh maintenance.sh setup.sh edit-secrets.sh
 find utilities lib -name '*.sh' -print0 | xargs -0 bash -n
-git grep '0666' lib/common.sh || true
-grep -n 'Restart=' systemd/vaultwarden-startup.service || true
-grep -n '^ADMIN_TOKEN=' .env.example
-grep -n 'subnet:' docker-compose.yml.example
-````
+```
 
-If available, also run:
+Run the focused tests associated with operator UI, recovery, restore, backup, and privilege behavior when available.
+
+Examples may include:
+
+```bash
+tests/test-operator-ui.sh
+tests/test-confirmation-prompt-format.sh
+tests/test-recover.sh
+tests/test-backup-restore-behavior.sh
+tests/test-restore-run-followup.sh
+tests/test-privilege-contracts.sh
+```
+
+Run:
 
 ```bash
 make test-unit
-docker compose -f docker-compose.yml.example config
-shellcheck -x --severity=warning $(find . -name '*.sh' -not -path './.git/*')
 ```
 
-If a command cannot run because a tool is missing or because the environment is not Ubuntu-compatible, state that clearly.
+when the environment supports it.
 
-## Missed-issue hunting guidance
+Run focused ShellCheck on inspected or implicated shell files when ShellCheck is installed.
 
-For second-pass reviews, prioritize areas the prior report did not fully validate:
+Do not perform a broad `shfmt` rewrite.
 
-* Docker runtime behavior
-* Compose parsing and service hardening interaction
-* Postfix read-only filesystem compatibility
-* Backup/restore behavior that requires real tools or state
-* Emergency backup passphrase round-trip
-* Systemd install/runtime behavior
-* CI path filters and whether important files trigger validation
-* Stale report conclusions after remediation
-* Assumptions that depend on Ubuntu behavior but were reviewed on macOS
+Do not alter files simply to make ShellCheck or formatting output quieter.
 
-Avoid broad style comments.
+If a validation command cannot run because:
 
-## Reporting expectations
+* a dependency is missing
+* Docker is unavailable
+* the environment is not Ubuntu
+* privileged runtime state is unavailable
 
-A review report should be concise and evidence-based.
+record the limitation precisely.
 
-A useful report answers:
+Do not convert the limitation into a confirmed finding.
 
-1. What prior report was used as baseline?
-2. What branch and commit were reviewed?
-3. Which files were inspected and why?
-4. Which prior findings were verified as fixed?
-5. What areas were intentionally not re-audited?
-6. What likely missed issues were checked?
-7. Which commands were run?
-8. Which commands could not be run and why?
-9. Are there any Critical, High, or Medium findings?
-10. What exact file/line evidence supports each finding?
-11. What is the recommended next action?
+---
 
-Avoid speculation. If runtime validation is required, say so directly.
+## Report structure
+
+Use this structure:
+
+```markdown
+# Independent Operator UI Post-Closure Review
+
+## Executive Summary
+
+## Review Baseline
+
+## Scope and Method
+
+## Prior Closure Decisions Challenged
+
+## Findings
+
+### F-01: ...
+
+Severity:
+Confidence:
+
+Affected path:
+Execution path:
+
+Current behavior:
+
+Evidence:
+
+Operator impact:
+
+Why the prior scan / PR closure missed this:
+
+Suggested remediation:
+
+Suggested regression test:
+
+Validation:
+
+## Low-Severity Opportunities
+
+## Runtime Validation Limits
+
+## Tests and Commands Run
+
+## Final Assessment
+```
+
+If there are no confirmed findings, say so clearly.
+
+Do not manufacture findings.
+
+For each finding, state confidence as:
+
+```text
+High
+Medium
+Low
+```
+
+Only Critical, High, and Medium severity items belong in the primary Findings section.
+
+Exceptionally useful Low items may appear under:
+
+```text
+## Low-Severity Opportunities
+```
+
+Keep that section small.
+
+---
+
+## Final assessment
+
+The report must directly answer:
+
+1. Were the changes in PRs #219–#221 appropriate?
+2. Did they introduce a semantic or operator-safety regression?
+3. Did the preliminary scan miss any confirmed Critical, High, or Medium issue?
+4. Are any closure decisions in the report incorrect based on current code?
+5. Are current tests protecting the important behavior rather than only the source wording?
+6. Is additional operator UI remediation justified?
+7. What exact findings, if any, should be handed to a coding agent?
+
+End with one recommendation:
+
+```text
+NO FURTHER UI REMEDIATION NEEDED
+```
+
+or:
+
+```text
+TARGETED FOLLOW-UP RECOMMENDED
+```
+
+or:
+
+```text
+BLOCK PRODUCTION-READY STATUS
+```
+
+For `TARGETED FOLLOW-UP RECOMMENDED`, list only the finding IDs that should be implemented.
+
+For `BLOCK PRODUCTION-READY STATUS`, identify the blocking finding IDs.
+
+Do not implement the fixes.
