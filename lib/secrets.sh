@@ -1325,20 +1325,33 @@ EOF
        The server-installed operational key should live at:
        /etc/vaultwarden/age-key.txt
 
-3. ALTERNATE RECOVERY PATH: ENCRYPTED BACKUP RESTORE
-   Use this when restoring from local or remote encrypted backups.
+3. ENCRYPTED BACKUP RESTORE: LOCAL OR REMOTE
+   Use this when restoring from a local or remote encrypted backup.
 
-   [ ] For remote backups, configure rclone if needed:
+   [ ] Keep the [AGE PRIVATE KEY] from SECTION 1 ready in your password manager.
+       You do not need to create an Age key file or attach removable media.
+
+   [ ] For a local backup, start the guided restore:
+       sudo ./restore.sh interactive
+
+   [ ] For a remote backup, configure rclone if needed:
        rclone config
 
-   [ ] Prefer the guided remote restore:
+       Then start the guided remote restore:
        sudo ./restore.sh interactive --remote
 
-   [ ] If using this plaintext recovery kit as the only credential source:
-       sudo ./restore.sh latest --from-recovery-kit /path/to/recovery-kit.txt --force
+   [ ] Select the backup to restore.
 
-   [ ] If using a specific Age key file instead:
-       sudo ./restore.sh interactive --key-file /path/to/age-key.txt
+   [ ] At the "Age private key (hidden):" prompt, copy and paste the full
+       AGE-SECRET-KEY-1... private key from SECTION 1, then press Enter.
+
+       The pasted key is hidden and staged only for this restore session.
+       You do not need to save the Age private key as a file on the server.
+
+   [ ] Complete the guided restore prompts.
+
+   [ ] Save the new operational Age key and updated recovery kit after restore.
+       The restored secrets are rekeyed to the new operational Age key.
 
 4. MANUAL REBUILD ONLY
    Use this only if no usable state directory or encrypted backup exists.
@@ -1360,7 +1373,8 @@ EOF
    [ ] Confirm Docker services:
        sudo docker compose ps
 
-   [ ] Store the recovery kit, offline Age recipient private key, and any new operational Age key outside the server.
+   [ ] Store the recovery kit and any new operational Age key outside the server.
+   
 
 ════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT
