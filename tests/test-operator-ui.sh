@@ -130,16 +130,16 @@ exit 0
 MOCK_SQLITE3
     chmod +x "$tmpdir/bin/docker" "$tmpdir/bin/sqlite3"
 
-    output="$((
+    output="$( (
         set +e
         # shellcheck source=/dev/null
         source "$harness"
         PROJECT_ROOT="$tmpdir/project"
         PROJECT_STATE_DIR="$tmpdir/state"
         BACKUP_DIR="$tmpdir/backups"
-        export BACKUP_DIR
         DB_DEEP_FORCE=true
         DRY_RUN=false
+        export PROJECT_ROOT PROJECT_STATE_DIR BACKUP_DIR DB_DEEP_FORCE DRY_RUN
         PATH="$tmpdir/bin:$PATH"
         is_root() { return 0; }
         require_commands() { return 0; }

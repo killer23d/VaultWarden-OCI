@@ -126,22 +126,22 @@ silently suppressed by log level.
 
 ### UI-04: Key/passphrase role wording — **Closure upheld**
 
-`recover.sh` now includes a `recover.sh:195-205`
-distinguishing the offline recovery key, the manifest, the live key target,
-and the new operational key.
+The preflight plan at `recover.sh:195-205` distinguishes the offline recovery
+key, the manifest, the live key target, and the new operational key.
 
-`backup-run.sh` includes the `utilities/backup-run.sh:1262-1264`:
+The emergency passphrase wording at `utilities/backup-run.sh:1262-1264` states:
 `"This passphrase protects only the emergency backup capsule."`
 
-`setup-secrets.sh` includes `utilities/setup-secrets.sh:1892-1899`.
+The offline-recipient skip wording at `utilities/setup-secrets.sh:1892-1899`
+explains the recovery consequence.
 
 ### UI-05: Final summaries — **Closure upheld with one adjacent gap**
 
-`backup-run.sh` has a structured `utilities/backup-run.sh:1365-1373`
-reporting type, file, verification, and offsite status.
+The structured summary at `utilities/backup-run.sh:1365-1373` reports type,
+file, verification, and offsite status.
 
-`setup-crowdsec.sh` has a `utilities/setup-crowdsec.sh:1431-1443`
-using `operator_next_steps` with a `log_info` fallback.
+The manual Cloudflare action block at `utilities/setup-crowdsec.sh:1431-1443`
+uses `operator_next_steps` with a `log_info` fallback.
 
 One adjacent gap was found in `maintenance-db-maint.sh` (see F-01 below).
 This was not part of UI-05 itself but is in the same class of truthful
@@ -149,13 +149,13 @@ final-status reporting.
 
 ### Observation: `make breakglass-remove` — **Closure upheld**
 
-The Make target `Makefile:867-870`,
-preserving the utility's interactive confirmation.
+The `breakglass-remove` target at `Makefile:867-870` no longer passes
+`--force`, preserving the utility's interactive confirmation.
 
 ### Observation: `make update-system` — **Closure upheld**
 
-The Make target now includes `Makefile:760-772`
-distinguishing it from the managed workflow and warning about service restarts.
+The `update-system` target at `Makefile:760-772` clearly distinguishes the
+direct host update from the managed workflow and warns about service restarts.
 
 ## Findings
 
