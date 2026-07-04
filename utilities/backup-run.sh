@@ -1258,6 +1258,11 @@ EOF
                 return 1
             fi
             encryption_mode="age-passphrase"
+            if [[ "$QUIET" != "true" ]]; then
+                operator_attention warn "Emergency backup passphrase" \
+                    "This passphrase protects only the emergency backup capsule." \
+                    "It is not the live operational Age key or a Vaultwarden account password."
+            fi
             age -p -o "$enc_tmp" "$temp_tar" || {
                 log_error "Emergency passphrase encryption failed." >&2
                 rm -f "$enc_tmp"; return 1
@@ -1355,6 +1360,16 @@ _log_backup_size() {
     if [[ "$size_bytes" =~ ^[0-9]+$ ]] && (( size_bytes < 4096 )); then
         backup_log_warn "Backup file is unusually small (${size_human}) — verify integrity: sudo ./backup.sh verify"
     fi
+}
+
+_print_backup_run_summary() {
+    local backup_type="$1" backup_file="$2" verification_status="$3" offsite_status="$4"
+    [[ "$QUIET" == "true" ]] && return 0
+    operator_next_steps "Backup summary" \
+        "Type: ${backup_type}" \
+        "Local backup: ${backup_file}" \
+        "Verification: ${verification_status}" \
+        "Offsite sync: ${offsite_status}" >&2
 }
 
 main() {
@@ -1627,6 +1642,8 @@ main() {
 
         local verify_failed=false
         local rclone_failed=false
+        local verification_status="not run"
+        local offsite_status="not requested"
 
         if [[ "$FULL_VERIFY" == "true" ]]; then
             if ! verify_backup_full "$backup_file" "$actual_type" "$TMPDIR_BACKUP"; then
@@ -1634,9 +1651,11 @@ main() {
                 rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256" "${backup_file}.sha256.hmac"
                 exit 1
             fi
+            verification_status="full verification passed"
         else
             if ! verify_backup_quick "$backup_file" "$age_key_file" "$actual_type"; then
                 verify_failed=true
+                verification_status="quick verification FAILED"
                 log_error "Quick verification failed — backup may be corrupt."
                 if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                     local warn_subj="[VaultWarden] WARNING: Backup verify FAILED: $actual_type ($timestamp)"
@@ -1649,6 +1668,9 @@ main() {
                 fi
                 log_error "Skipping offsite sync due to verification failure."
                 RCLONE_SYNC=false
+                offsite_status="skipped because verification failed"
+            else
+                verification_status="quick verification passed"
             fi
         fi
 
@@ -1656,9 +1678,11 @@ main() {
             local _sync_rc=0
             sync_to_rclone "$backup_file" "$actual_type" || _sync_rc=$?
             if (( _sync_rc == 2 )); then
+                offsite_status="synced with sidecar warnings"
                 log_warn "Offsite sync completed with partial sidecar failures — primary backup was delivered."
             elif (( _sync_rc != 0 )); then
                 rclone_failed=true
+                offsite_status="failed; local backup is safe"
                 if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                     local subj="[VaultWarden] Offsite sync FAILED: $actual_type ($timestamp)"
                     local bdy
@@ -1669,7 +1693,10 @@ main() {
                     send_notification_email "$subj" "$bdy" 2>/dev/null || true
                 fi
                 log_error "Offsite sync failed — see above. Local backup is safe."
+                _print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"
                 exit 2
+            else
+                offsite_status="synced"
             fi
         fi
 
@@ -1712,6 +1739,7 @@ main() {
                 backup_log_warn "Email notification failed (backup still succeeded)"
         fi
 
+        _print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"
         backup_log_success "Backup completed successfully"
         exit 0
     elif [[ "$DRY_RUN" == "true" ]]; then

@@ -1428,4 +1428,18 @@ log_info "    sudo ./edit-secrets.sh rotate cloudflare_zone_id"
 log_info "    sudo ./edit-secrets.sh rotate cf_account_id"
 log_info "    sudo ./utilities/setup-crowdsec.sh --force"
 log_info ""
+if [[ "$_CF_PROXY_ENABLED" == "true" ]]; then
+    if declare -f operator_next_steps >/dev/null 2>&1; then
+        operator_next_steps "Manual Cloudflare action required" \
+            "Set Worker route failure mode to Fail open." \
+            "Cloudflare dashboard -> Websites -> <your domain> -> Workers Routes -> Edit -> Failure mode: Fail open" \
+            "Verify Worker route: ${_worker_route:-<domain>/*}"
+    else
+        log_info "Manual Cloudflare action required:"
+        log_info "  Set Worker route failure mode to Fail open."
+        log_info "  Cloudflare dashboard -> Websites -> <your domain> -> Workers Routes -> Edit -> Failure mode: Fail open"
+        log_info "  Verify Worker route: ${_worker_route:-<domain>/*}"
+        log_info ""
+    fi
+fi
 log_info "════════════════════════════════════════════════════════"

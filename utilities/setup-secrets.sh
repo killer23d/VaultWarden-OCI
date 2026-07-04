@@ -1888,6 +1888,17 @@ _ss_manifest_offline_recipient() {
     _read_env_value OFFLINE_AGE_RECIPIENT "$manifest"
 }
 
+_ss_explain_offline_recovery_recipient() {
+    operator_attention warn "Offline recovery Age recipient" \
+        "This optional public key adds a separate offline recipient for encrypted secrets." \
+        "If you skip it, disaster recovery depends on the operational Age key or an exported recovery kit."
+}
+
+_ss_warn_offline_recovery_recipient_skipped() {
+    log_warn "Offline recovery Age public key skipped; encrypted secrets will not have a separate offline recovery recipient."
+    log_warn "Export and store a recovery kit offline so disaster recovery does not depend on this server."
+}
+
 _ss_desired_recipients_csv() {
     local operational="$1" offline="" recipient unknown=() seen=""
     _ss_valid_age_recipient "$operational" || { log_error "Invalid operational Age recipient: $operational"; return 1; }
@@ -1917,9 +1928,13 @@ _ss_desired_recipients_csv() {
     fi
 
     if [[ -z "$offline" && -t 0 ]]; then
+        _ss_explain_offline_recovery_recipient
         while true; do
             read -r -p "Enter offline recovery Age public key (press Enter to skip): " offline
-            [[ -z "$offline" ]] && break
+            if [[ -z "$offline" ]]; then
+                _ss_warn_offline_recovery_recipient_skipped
+                break
+            fi
             if _ss_valid_age_recipient "$offline"; then
                 break
             else
@@ -2382,9 +2397,13 @@ _resolve_offline_recipient() {
     fi
 
     if [[ -t 0 ]]; then
+        _ss_explain_offline_recovery_recipient
         while true; do
             read -r -p "Enter offline recovery Age public key (press Enter to skip): " candidate
-            [[ -z "$candidate" ]] && break
+            if [[ -z "$candidate" ]]; then
+                _ss_warn_offline_recovery_recipient_skipped
+                break
+            fi
             if _valid_age_recipient "$candidate"; then
                 printf '%s' "$candidate"
                 break

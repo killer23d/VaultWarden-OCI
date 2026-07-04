@@ -215,13 +215,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 if [[ "$ASSUME_YES" != "true" ]]; then
-    echo ""
-    log_warn "This will generate a NEW operational Age key and re-encrypt secrets.yaml."
-    log_warn "Backups created after this point require the new private key."
-    log_warn "A root-only recovery kit will be written under /root/ and must be copied offline."
-    echo ""
-    read -r -p "Continue with Age key rotation? Type yes to proceed: " confirm
-    if [[ "$confirm" != "yes" ]]; then
+    operator_attention warn "Age key rotation" \
+        "This will generate a NEW operational Age key and re-encrypt secrets.yaml." \
+        "Backups created after this point require the new private key." \
+        "A root-only recovery kit will be written under /root/ and must be copied offline."
+    if ! operator_confirm_yes_no "Continue with Age key rotation?" "no" 30; then
         log_warn "Age key rotation cancelled."
         exit 0
     fi
