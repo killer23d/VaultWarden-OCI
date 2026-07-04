@@ -47,7 +47,7 @@ No Critical or High findings were identified.
 
 3. **Inspect helper semantics** — reviewed `operator_attention`,
    `operator_confirm_yes_no`, and `operator_next_steps` in
-   [lib/common.sh](file:///Users/Shared/git/VaultWarden-OCI/lib/common.sh#L169-L262).
+   `lib/common.sh:169-262`.
    Traced all call sites.  Analysed `_should_log` gating, `set -e`
    interactions, EOF handling, timeout behavior, non-TTY fallback, and
    return-code semantics.
@@ -93,14 +93,14 @@ independently reviewed against current code.
 
 ### UI-01: `recover.sh` health-check wording — **Closure upheld**
 
-Current [recover.sh:345–367](file:///Users/Shared/git/VaultWarden-OCI/recover.sh#L345-L367)
+Current `recover.sh:345-367`
 correctly branches:
 
 - On health-check success: `"Recovery complete. Vaultwarden passed health check at $alive_url"`
 - On health-check failure: `"Recovery artifacts were promoted, but Vaultwarden did not pass the health check."` plus actionable next commands.
 
 The test at
-[test-recover.sh:351–363](file:///Users/Shared/git/VaultWarden-OCI/tests/test-recover.sh#L351-L363)
+`tests/test-recover.sh:351-363`
 validates both paths, including assertions that "is running" never appears on
 health failure.
 
@@ -111,14 +111,14 @@ rekeying and promoting secrets — succeeded.
 
 ### UI-02: Deep-maintenance timeout default — **Closure upheld**
 
-Current [maintenance-db-maint.sh:78–84](file:///Users/Shared/git/VaultWarden-OCI/utilities/maintenance-db-maint.sh#L78-L84)
+Current `utilities/maintenance-db-maint.sh:78-84`
 correctly fails closed on timeout and empty input.  The prompt shows
 `(default: no)`.  The secondary "proceed without safety backup" prompt at
 line 107 also correctly fails closed on timeout via `|| confirm_no_backup="no"`.
 
 ### UI-03: Shared helper layer — **Closure upheld**
 
-The helpers in [lib/common.sh:169–262](file:///Users/Shared/git/VaultWarden-OCI/lib/common.sh#L169-L262)
+The helpers in `lib/common.sh:169-262`
 are minimal, well-scoped, and correctly integrated.  `operator_confirm_yes_no`
 does not gate on `_should_log` — it always displays the prompt and always reads
 input.  This is the correct semantic: a confirmation prompt must never be
@@ -126,22 +126,22 @@ silently suppressed by log level.
 
 ### UI-04: Key/passphrase role wording — **Closure upheld**
 
-`recover.sh` now includes a [preflight plan](file:///Users/Shared/git/VaultWarden-OCI/recover.sh#L195-L205)
-distinguishing the offline recovery key, the manifest, the live key target,
-and the new operational key.
+The preflight plan at `recover.sh:195-205` distinguishes the offline recovery
+key, the manifest, the live key target, and the new operational key.
 
-`backup-run.sh` includes the [emergency passphrase role wording](file:///Users/Shared/git/VaultWarden-OCI/utilities/backup-run.sh#L1262-L1264):
+The emergency passphrase wording at `utilities/backup-run.sh:1262-1264` states:
 `"This passphrase protects only the emergency backup capsule."`
 
-`setup-secrets.sh` includes [offline-recipient skip consequence wording](file:///Users/Shared/git/VaultWarden-OCI/utilities/setup-secrets.sh#L1892-L1899).
+The offline-recipient skip wording at `utilities/setup-secrets.sh:1892-1899`
+explains the recovery consequence.
 
 ### UI-05: Final summaries — **Closure upheld with one adjacent gap**
 
-`backup-run.sh` has a structured [summary function](file:///Users/Shared/git/VaultWarden-OCI/utilities/backup-run.sh#L1365-L1373)
-reporting type, file, verification, and offsite status.
+The structured summary at `utilities/backup-run.sh:1365-1373` reports type,
+file, verification, and offsite status.
 
-`setup-crowdsec.sh` has a [manual Cloudflare action block](file:///Users/Shared/git/VaultWarden-OCI/utilities/setup-crowdsec.sh#L1431-L1443)
-using `operator_next_steps` with a `log_info` fallback.
+The manual Cloudflare action block at `utilities/setup-crowdsec.sh:1431-1443`
+uses `operator_next_steps` with a `log_info` fallback.
 
 One adjacent gap was found in `maintenance-db-maint.sh` (see F-01 below).
 This was not part of UI-05 itself but is in the same class of truthful
@@ -149,13 +149,13 @@ final-status reporting.
 
 ### Observation: `make breakglass-remove` — **Closure upheld**
 
-The Make target [no longer passes `--force`](file:///Users/Shared/git/VaultWarden-OCI/Makefile#L867-L870),
-preserving the utility's interactive confirmation.
+The `breakglass-remove` target at `Makefile:867-870` no longer passes
+`--force`, preserving the utility's interactive confirmation.
 
 ### Observation: `make update-system` — **Closure upheld**
 
-The Make target now includes [clear direct-update wording](file:///Users/Shared/git/VaultWarden-OCI/Makefile#L760-L772)
-distinguishing it from the managed workflow and warning about service restarts.
+The `update-system` target at `Makefile:760-772` clearly distinguishes the
+direct host update from the managed workflow and warns about service restarts.
 
 ## Findings
 
@@ -165,7 +165,7 @@ distinguishing it from the managed workflow and warning about service restarts.
 **Confidence:** High
 
 **Affected path:**
-[utilities/maintenance-db-maint.sh](file:///Users/Shared/git/VaultWarden-OCI/utilities/maintenance-db-maint.sh) — `run_deep_db_maintenance`
+`utilities/maintenance-db-maint.sh` — `run_deep_db_maintenance`
 
 **Execution path:**
 
@@ -184,8 +184,8 @@ run_deep_db_maintenance
 
 **Current behavior:**
 
-Lines [164](file:///Users/Shared/git/VaultWarden-OCI/utilities/maintenance-db-maint.sh#L164)
-and [166](file:///Users/Shared/git/VaultWarden-OCI/utilities/maintenance-db-maint.sh#L166)
+Lines `utilities/maintenance-db-maint.sh:164`
+and `utilities/maintenance-db-maint.sh:166`
 unconditionally print success messages after `docker compose up -d`, regardless
 of whether the subsequent `wait_for_service_ready` health check passed.
 
@@ -206,7 +206,7 @@ immediately after:
 
 **Evidence:**
 
-From current code at [lines 157–166](file:///Users/Shared/git/VaultWarden-OCI/utilities/maintenance-db-maint.sh#L157-L166):
+From current code at `utilities/maintenance-db-maint.sh:157-166`:
 
 ```bash
 if wait_for_service_ready "vaultwarden" 45; then
@@ -328,7 +328,7 @@ test_db_maint_health_failure_no_false_success() {
 ### L-01: `operator_next_steps` is silently suppressed when `LOG_LEVEL=WARN`
 
 `operator_next_steps` at
-[lib/common.sh:253](file:///Users/Shared/git/VaultWarden-OCI/lib/common.sh#L253)
+`lib/common.sh:253`
 gates on `_should_log "INFO"`.  If a caller sets `LOG_LEVEL=WARN` (or
 higher), the entire next-steps block is suppressed with `return 0`.
 
@@ -355,7 +355,7 @@ suppression case).
 
 ### L-02: `key-rotate.sh` SAVED loop exits uncleanly on EOF
 
-The SAVED gate at [key-rotate.sh:354–358](file:///Users/Shared/git/VaultWarden-OCI/utilities/key-rotate.sh#L354-L358):
+The SAVED gate at `utilities/key-rotate.sh:354-358`:
 
 ```bash
 while [[ "$saved" != "SAVED" ]]; do
