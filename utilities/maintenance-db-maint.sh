@@ -157,13 +157,15 @@ run_deep_db_maintenance() {
     if wait_for_service_ready "vaultwarden" 45; then
         log_success "All critical services are healthy"
         maintenance_successful=true
+        log_success "VaultWarden is back online"
+        echo ""
+        log_success "Deep database maintenance complete!"
     else
         log_error "vaultwarden did not become healthy in time"
         log_info "Check logs: docker compose logs vaultwarden"
+        log_warn "VaultWarden was restarted but did not pass the health check."
+        log_warn "Do not treat the service as healthy until: docker compose ps shows healthy."
     fi
-    log_success "VaultWarden is back online"
-    echo ""
-    log_success "Deep database maintenance complete!"
     if [[ "$original_bytes" -gt 0 && "$new_bytes" -gt 0 && "$original_bytes" -ge "$new_bytes" ]]; then
         local saved_bytes=$((original_bytes - new_bytes))
         local saved_percent=$(( (saved_bytes * 100) / original_bytes ))

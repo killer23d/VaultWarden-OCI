@@ -93,4 +93,19 @@ assert_contains "$CROWDSEC" "Manual Cloudflare action required" \
 assert_contains "$CROWDSEC" "Failure mode: Fail open" \
     "CrowdSec fail-open manual action wording missing"
 
+# Verify F-01: Deep db maintenance success output must be inside wait_for_service_ready success branch.
+wait_block="$(awk '/if wait_for_service_ready/,/fi/' "$ROOT/utilities/maintenance-db-maint.sh")"
+then_part="$(awk '/if wait_for_service_ready/,/else/' <<< "$wait_block")"
+else_part="$(awk '/else/,/fi/' <<< "$wait_block")"
+
+if ! grep -q 'log_success "VaultWarden is back online"' <<< "$then_part"; then
+    fail "db-maint success message 'VaultWarden is back online' is not inside the wait_for_service_ready then-block"
+fi
+if ! grep -q 'log_success "Deep database maintenance complete!"' <<< "$then_part"; then
+    fail "db-maint success message 'Deep database maintenance complete!' is not inside the wait_for_service_ready then-block"
+fi
+if ! grep -q 'log_warn "VaultWarden was restarted but did not pass the health check."' <<< "$else_part"; then
+    fail "db-maint warning message is not inside the wait_for_service_ready else-block"
+fi
+
 printf 'Operator UI tests passed.\n'
