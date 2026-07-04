@@ -33,8 +33,10 @@ done
 run_clean() {
     (
         cd "$RUN_DIR"
+        # Keep the environment isolated while allowing macOS developers to
+        # use Homebrew Bash 4+ instead of the system Bash 3.2.
         env -i \
-            PATH="/usr/bin:/bin" \
+            PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin" \
             HOME="$TEST_HOME" \
             bash "$@"
     ) 2>&1

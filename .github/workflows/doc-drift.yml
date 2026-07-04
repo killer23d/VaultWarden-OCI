@@ -11,6 +11,7 @@ on:
       - 'tests/**'
       - 'secrets-schema.yaml'
       - '.env.example'
+      - 'docker-compose.yml.example'
       - '.gitignore'
 
 # Global permissions
