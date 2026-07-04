@@ -1666,9 +1666,11 @@ main() {
                         "$(hostname -f 2>/dev/null || hostname)")"
                     send_notification_email "$warn_subj" "$warn_body" 2>/dev/null || true
                 fi
-                log_error "Skipping offsite sync due to verification failure."
-                RCLONE_SYNC=false
-                offsite_status="skipped because verification failed"
+                if [[ "$RCLONE_SYNC" == "true" ]]; then
+                    log_error "Skipping offsite sync due to verification failure."
+                    RCLONE_SYNC=false
+                    offsite_status="skipped because verification failed"
+                fi
             else
                 verification_status="quick verification passed"
             fi
@@ -1740,7 +1742,12 @@ main() {
         fi
 
         _print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"
-        backup_log_success "Backup completed successfully"
+        if [[ "$verify_failed" == "true" ]]; then
+            log_warn "Backup archive was created, but quick verification failed; do not treat it as verified."
+            log_warn "Manual inspection required before using this backup for disaster recovery."
+        else
+            backup_log_success "Backup completed successfully"
+        fi
         exit 0
     elif [[ "$DRY_RUN" == "true" ]]; then
         backup_log_success "Dry run completed"

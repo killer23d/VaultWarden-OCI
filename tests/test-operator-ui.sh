@@ -18,7 +18,9 @@ assert_contains() {
     grep -Fq -- "$text" "$file" || fail "$label"
 }
 
+# shellcheck source=../lib/log.sh
 source "$ROOT/lib/log.sh"
+# shellcheck source=../lib/common.sh
 source "$COMMON"
 init_common_lib "$0"
 
@@ -55,10 +57,30 @@ assert_contains "$BACKUP" '[[ "$QUIET" == "true" ]] && return 0' \
     "backup summary is not quiet-aware"
 assert_contains "$BACKUP" 'Offsite sync: ${offsite_status}' \
     "backup summary does not report offsite sync"
+assert_contains "$BACKUP" 'if [[ "$RCLONE_SYNC" == "true" ]]; then' \
+    "backup verification failure must only mark offsite skipped when rclone was requested"
+assert_contains "$BACKUP" 'offsite_status="skipped because verification failed"' \
+    "backup summary missing verification-failure offsite skip state"
+assert_contains "$BACKUP" "Backup archive was created, but quick verification failed; do not treat it as verified." \
+    "backup verification partial-success warning missing"
+assert_contains "$BACKUP" 'backup_log_success "Backup completed successfully"' \
+    "backup success completion message missing"
 
 list_block="$(awk '/if \[\[ "\$LIST_ONLY" == "true" \]\]/,/exit 0/' "$BACKUP")"
 if grep -Fq 'operator_next_steps' <<< "$list_block"; then
     fail "backup list or JSON path should not emit operator summary"
+fi
+
+verify_failure_block="$(awk '/if ! verify_backup_quick/,/else/' "$BACKUP")"
+if ! grep -Fq 'if [[ "$RCLONE_SYNC" == "true" ]]; then' <<< "$verify_failure_block"; then
+    fail "backup verification failure should not change offsite status when rclone was not requested"
+fi
+success_tail="$(awk '/_print_backup_run_summary "\$actual_type"/,/exit 0/' "$BACKUP")"
+if ! grep -Fq 'if [[ "$verify_failed" == "true" ]]; then' <<< "$success_tail"; then
+    fail "backup completion must branch on verification failure"
+fi
+if ! grep -Fq 'else' <<< "$success_tail" || ! grep -Fq 'backup_log_success "Backup completed successfully"' <<< "$success_tail"; then
+    fail "backup success message should remain only on the verified success branch"
 fi
 
 assert_contains "$SETUP_SECRETS" "If you skip it, disaster recovery depends on the operational Age key or an exported recovery kit." \
