@@ -760,7 +760,8 @@ check-updates: ## Check for available container image updates (no restart)
 update-system: ## Direct host OS package update (not full managed VaultWarden update)
 	$(call require-root)
 	@echo "$(BLUE)Updating host OS packages directly...$(NC)"
-	@echo "$(YELLOW)This target runs the host package manager only; it does not create a VaultWarden pre-update backup or restart the Compose stack.$(NC)"
+	@echo "$(YELLOW)This target runs the host package manager directly; it does not create a VaultWarden pre-update backup or run the managed Compose restart/health workflow.$(NC)"
+	@echo "$(YELLOW)Host package updates may still restart system services or require a reboot.$(NC)"
 	@echo "$(YELLOW)For the managed VaultWarden update workflow, use: sudo make update$(NC)"
 	@if command -v apt-get >/dev/null 2>&1; then \
 		apt-get update && apt-get upgrade -y; \
