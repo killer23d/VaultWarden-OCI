@@ -44,6 +44,14 @@ assert_file_missing() {
     [[ ! -e "$1" ]] || fail "expected missing: $1"
 }
 
+file_mode() {
+    if stat -c '%a' "$1" >/dev/null 2>&1; then
+        stat -c '%a' "$1"
+    else
+        stat -f '%Lp' "$1"
+    fi
+}
+
 make_case() {
     local dir="$TEST_ROOT/case-$TESTS_RUN"
     mkdir -p "$dir/state/config" "$dir/state/secrets" "$dir/state/data" "$dir/repo" "$dir/etc" "$dir/mockbin"
@@ -88,6 +96,17 @@ FINDMNT
 #!/usr/bin/env bash
 printf '%s\n' "${MOCK_BLKID_UUID:-1111-2222}"
 BLKID
+    cat > "$mock/realpath" <<'REALPATH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-e" ]]; then
+    shift
+    [[ $# -eq 1 && -e "${1:-}" ]] || exit 1
+    cd "$(dirname "$1")" || exit 1
+    printf '%s/%s\n' "$(pwd)" "$(basename "$1")"
+    exit 0
+fi
+exec /bin/realpath "$@"
+REALPATH
     cat > "$mock/docker" <<'DOCKER'
 #!/usr/bin/env bash
 if [[ "${1:-}" == compose && "${2:-}" == version ]]; then
@@ -98,7 +117,7 @@ exit 0
 DOCKER
     cat > "$mock/curl" <<'CURL'
 #!/usr/bin/env bash
-exit 0
+exit "${MOCK_CURL_EXIT:-0}"
 CURL
     cat > "$mock/git" <<'GIT'
 #!/usr/bin/env bash
@@ -193,6 +212,7 @@ run_recover() {
         MOCK_MOUNTPOINT_FAIL="${MOCK_MOUNTPOINT_FAIL:-false}" \
         MOCK_SOPS_FAIL_OP="${MOCK_SOPS_FAIL_OP:-}" \
         MOCK_MV_FAIL_DEST="${MOCK_MV_FAIL_DEST:-}" \
+        MOCK_CURL_EXIT="${MOCK_CURL_EXIT:-0}" \
         bash "$dir/repo/recover.sh" --state-dir "$dir/state" --key "$dir/usb-key.txt" "$@" > "$dir/out" 2>&1
     rc=$?
     set -e
@@ -264,11 +284,11 @@ test_final_permissions() {
     local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
     chmod 0777 "$dir/state/config/install.env" "$dir/state/config/dr-manifest.env" "$dir/state/secrets/secrets.yaml" "$dir/repo/.sops.yaml" "$dir/etc/age-key.txt"
     if ! run_recover "$dir" --storage-mode boot; then cat "$dir/out"; fail 'permissions case failed'; fi
-    [[ "$(stat -c '%a' "$dir/repo/.sops.yaml")" == "644" ]] || fail '.sops mode mismatch'
-    [[ "$(stat -c '%a' "$dir/etc/age-key.txt")" == "600" ]] || fail 'active key mode mismatch'
-    [[ "$(stat -c '%a' "$dir/state/config/install.env")" == "600" ]] || fail 'install env mode mismatch'
-    [[ "$(stat -c '%a' "$dir/state/config/dr-manifest.env")" == "600" ]] || fail 'manifest mode mismatch'
-    [[ "$(stat -c '%a' "$dir/state/secrets/secrets.yaml")" == "600" ]] || fail 'secrets mode mismatch'
+    [[ "$(file_mode "$dir/repo/.sops.yaml")" == "644" ]] || fail '.sops mode mismatch'
+    [[ "$(file_mode "$dir/etc/age-key.txt")" == "600" ]] || fail 'active key mode mismatch'
+    [[ "$(file_mode "$dir/state/config/install.env")" == "600" ]] || fail 'install env mode mismatch'
+    [[ "$(file_mode "$dir/state/config/dr-manifest.env")" == "600" ]] || fail 'manifest mode mismatch'
+    [[ "$(file_mode "$dir/state/secrets/secrets.yaml")" == "600" ]] || fail 'secrets mode mismatch'
 }
 
 test_cleanup_removes_staged_key() {
@@ -325,6 +345,22 @@ test_success_fresh_clone() {
     grep -q "SOPS_AGE_KEY_FILE=$dir/etc/age-key.txt" "$dir/state/config/install.env" || fail 'install.env not updated'
     grep -q "OFFLINE_AGE_RECIPIENT=$USB_RECIPIENT" "$dir/state/config/dr-manifest.env" || fail 'manifest recipient not updated'
     grep -q '^MANIFEST_UPDATED_AT=' "$dir/state/config/dr-manifest.env" || fail 'manifest timestamp missing'
+    grep -q 'Recovery complete. Vaultwarden passed health check at https://vault.example.test/alive' "$dir/out" || fail 'health success message missing'
+}
+
+test_health_failure_reports_partial_success_without_rollback() {
+    local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    if ! MOCK_CURL_EXIT=22 run_recover "$dir"; then cat "$dir/out"; fail 'health failure should preserve existing zero exit behavior'; fi
+    if grep -q 'Vaultwarden is running' "$dir/out"; then fail 'health failure must not say Vaultwarden is running'; fi
+    grep -q 'Health check: FAIL' "$dir/out" || fail 'health failure marker missing'
+    grep -q 'Recovery artifacts were promoted, but Vaultwarden did not pass the health check.' "$dir/out" || fail 'partial-success message missing'
+    grep -q 'Do not treat the service as healthy until the checks below pass.' "$dir/out" || fail 'operator warning missing'
+    grep -q "docker compose -f $dir/repo/docker-compose.yml ps" "$dir/out" || fail 'compose ps next step missing'
+    grep -q "docker compose -f $dir/repo/docker-compose.yml logs --tail=200" "$dir/out" || fail 'compose logs next step missing'
+    grep -q 'Failed health URL: https://vault.example.test/alive' "$dir/out" || fail 'failed alive URL missing'
+    grep -q "# mock-age=$NEW_RECIPIENT,$USB_RECIPIENT" "$dir/state/secrets/secrets.yaml" || fail 'cipher artifacts rolled back after health failure'
+    grep -q 'new-private-key' "$dir/etc/age-key.txt" || fail 'active key rolled back after health failure'
+    grep -q "$NEW_RECIPIENT,$USB_RECIPIENT" "$dir/repo/.sops.yaml" || fail 'policy rolled back after health failure'
 }
 
 run_test 'missing --state-dir prints usage and fails' test_missing_state_dir
@@ -340,6 +376,7 @@ run_test 'active-key promotion failure rolls back artifacts' test_active_key_pro
 run_test 'policy promotion failure rolls back artifacts' test_policy_promotion_failure
 run_test 'final live-decryption failure restores absent artifacts' test_final_decrypt_failure_no_prior_artifacts
 run_test 'successful fresh-clone recovery updates all artifacts' test_success_fresh_clone
+run_test 'health-check failure reports partial success without rollback' test_health_failure_reports_partial_success_without_rollback
 
-[[ "$TESTS_RUN" -eq 13 ]] || fail "expected 13 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 14 ]] || fail "expected 14 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
