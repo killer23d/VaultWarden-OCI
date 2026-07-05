@@ -36,9 +36,40 @@ source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 # shellcheck disable=SC1091
 source "${PROJECT_ROOT}/lib/storage.sh"
+# shellcheck disable=SC1091
+source "${PROJECT_ROOT}/lib/operations.sh"
 
 ENV_DIR="${VW_SYNC_ETC_DIR:-/etc/vaultwarden}"
 ENV_FILE="${ENV_DIR}/vaultwarden.env"
+ENV_EDIT_GUARD_HELD=false
+
+_env_edit_acquire_guard() {
+  local label="$1" phase="$2"
+  if [[ "$ENV_EDIT_GUARD_HELD" == "true" ]]; then
+    operation_set_phase "$phase" "$label"
+    return 0
+  fi
+
+  local policy="fail"
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    policy="skip"
+  fi
+  operation_acquire \
+    --id env-sync \
+    --label "$label" \
+    --specific-lock /run/lock/vaultwarden-env.lock \
+    --non-interactive "$policy" || return $?
+  ENV_EDIT_GUARD_HELD=true
+  _env_edit_cleanup() {
+    local rc=$?
+    operation_release "$rc"
+    return "$rc"
+  }
+  trap _env_edit_cleanup EXIT
+  trap 'operation_release 130; exit 130' INT
+  trap 'operation_release 143; exit 143' HUP TERM
+  operation_set_phase "$phase" "$label"
+}
 
 show_help() {
   cat <<'EOF'
@@ -260,6 +291,8 @@ _cmd_sync() {
     return 1
   fi
 
+  _env_edit_acquire_guard "Environment sync" "sync" || return $?
+
   _storage_preflight "$repo_env" || return 1
 
   local config_dir="${PROJECT_STATE_DIR}/config"
@@ -290,6 +323,8 @@ _cmd_edit() {
     log_error "Run 'sudo make setup' to create the initial environment."
     return 1
   fi
+
+  _env_edit_acquire_guard "Environment edit" "edit" || return $?
 
   local checksum_before checksum_after
   checksum_before="$(sha256sum "$repo_env" | cut -d' ' -f1)"

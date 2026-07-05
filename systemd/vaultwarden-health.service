@@ -36,7 +36,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 # NOTE: SOPS_AGE_KEY_FILE must reside under /etc/vaultwarden/ (or another
 # ReadWritePaths entry). Paths under /home/ are read-only with ProtectHome=read-only.
-# /run/lock is needed for flock() lock files and /run/vaultwarden* for runtime operation state.
+# /run/lock is needed for flock() lock files and /run/vaultwarden-oci for runtime operation state.
 #
 # The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
 # mode this is /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:
@@ -48,12 +48,12 @@ ProtectHome=read-only
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
 # only and must not be writable at runtime (defence-in-depth against a
 # compromised script overwriting its siblings).
-ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
-# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ as a
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
+# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
 # root-owned runtime directory before ExecStart runs. Scripts detect
-# RUNTIME_DIRECTORY (set automatically by systemd) and prefer lock files under
-# /run/vaultwarden/ over /run/lock/ for timer-driven invocations.
-RuntimeDirectory=vaultwarden
+# RUNTIME_DIRECTORY (set automatically by systemd) and use it only for
+# health-specific coordination, not as global operation metadata.
+RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 TimeoutStartSec=120
@@ -68,7 +68,7 @@ TimeoutStopSec=30
 # exits 1 for advisory warnings that do not require immediate action.
 # Exit 2 (hard failures: container down, DB corrupt, key missing) still
 # triggers OnFailure= and delivers an alert.
-SuccessExitStatus=0 1 3
+SuccessExitStatus=0 1 3 75
 
 [Install]
 WantedBy=multi-user.target

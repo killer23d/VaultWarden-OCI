@@ -318,6 +318,10 @@ _require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
 
 TMPDIR_RESTORE=""
+RESTORE_PREVENT_AUTOSTART=false
+: "${RESTORE_PROMPT_TIMEOUT:=300}"
+: "${RESTORE_SAVED_ACK_TIMEOUT:=300}"
+: "${RESTORE_SAVED_ACK_ATTEMPTS:=3}"
 cleanup() {
     local rc=$?
     operation_release "$rc" 2>/dev/null || true
@@ -347,7 +351,7 @@ _restore_should_start_services() {
             ;;
         ask)
             local answer
-            read -r -t 300 -p "Start VaultWarden services now? [yes/no] (default: no): " answer || answer="no"
+            read -r -t "$RESTORE_PROMPT_TIMEOUT" -p "Start VaultWarden services now? [yes/no] (default: no): " answer || answer="no"
             case "$answer" in
                 y|Y|yes|YES) return 0 ;;
                 *) _restore_print_manual_start_checklist; return 1 ;;
@@ -368,7 +372,13 @@ _restore_should_rotate_age_key() {
         local answer
         # Legacy prompt text: Emergency capsule contains operational key material. Rotate Age key after restore? [yes/no] (default: yes):
         while true; do
-            read -r -t 300 -p "Emergency capsule: Rotate Age key after restore? Type 'yes' to rotate (recommended) or 'no' to skip: " answer || answer="no"
+            if ! read -r -t "$RESTORE_PROMPT_TIMEOUT" -p "Emergency capsule: Rotate Age key after restore? Type 'yes' to rotate (recommended) or 'no' to skip: " answer; then
+                RESTORE_PREVENT_AUTOSTART=true
+                log_error "No explicit Age key rotation decision was received before the prompt closed or timed out."
+                log_error "Restore will stop for manual review; timeout/EOF is not treated as 'no'."
+                _restore_print_manual_start_checklist
+                return 2
+            fi
             case "$answer" in
                 yes|YES) return 0 ;;
                 no|NO)   log_warn "Operator chose not to rotate Age key."; return 1 ;;
@@ -1411,15 +1421,35 @@ _display_new_key() {
             log_warn "  Copy it offline NOW, then delete it: rm -f '$ROTATED_KIT_FILE'"
             echo ""
         fi
-        local _confirm=""
-        while [[ "$_confirm" != "SAVED" ]]; do
-            read -r -t 300 -p "  Type SAVED (all caps) to confirm the key is recorded and start services: " _confirm || _confirm=""
-            if [[ "$_confirm" != "SAVED" ]]; then
-                log_warn "  Please type exactly: SAVED"
+        local _confirm="" _attempt=1
+        while (( _attempt <= RESTORE_SAVED_ACK_ATTEMPTS )); do
+            if ! read -r -t "$RESTORE_SAVED_ACK_TIMEOUT" -p "  Type SAVED (all caps) to confirm the key is recorded and start services: " _confirm; then
+                _restore_print_key_ack_abort_guidance
+                return 1
             fi
+            if [[ "$_confirm" == "SAVED" ]]; then
+                echo ""
+                return 0
+            fi
+            log_warn "  Please type exactly: SAVED"
+            _attempt=$(( _attempt + 1 ))
         done
+        _restore_print_key_ack_abort_guidance
+        return 1
     fi
     echo ""
+}
+
+_restore_print_key_ack_abort_guidance() {
+    RESTORE_PREVENT_AUTOSTART=true
+    log_error "The new Age key was not acknowledged with SAVED."
+    log_error "Restore/key work may already have completed, so services will remain stopped for manual review."
+    log_info "New Age key path: ${ROTATED_KEY_FILE:-unknown}"
+    if [[ -n "${ROTATED_KIT_FILE:-}" ]]; then
+        log_info "Recovery kit path: ${ROTATED_KIT_FILE}"
+    fi
+    log_warn "Save and verify the new key before starting services."
+    _restore_print_manual_start_checklist
 }
 
 read_meta_field() {
@@ -2609,7 +2639,11 @@ main() {
         [[ $rc -eq 130 ]] && log_warn "Restore interrupted by operator (Ctrl-C)."
         if [[ $rc -ne 0 ]]; then
             if [[ "${RESTORE_DESTRUCTIVE_PHASE_STARTED:-false}" == "true" ]]; then
-                if [[ "${START_POLICY:-auto}" == "auto" ]]; then
+                if [[ "${RESTORE_PREVENT_AUTOSTART:-false}" == "true" ]]; then
+                    log_error "Restore stopped after confirmation-channel loss or manual-review requirement."
+                    log_error "Automatic service startup is disabled for this failure."
+                    _restore_print_manual_start_checklist
+                elif [[ "${START_POLICY:-auto}" == "auto" ]]; then
                     if _can_safe_restart; then
                         log_warn "Integrity check passed — attempting one service restart..."
                         bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
@@ -2731,16 +2765,25 @@ main() {
         *) log_error "Unknown restore type for rekey source: $RESTORE_TYPE"; exit 1 ;;
     esac
 
-    if _restore_should_rotate_age_key; then
+    local _rotate_decision_rc=0
+    _restore_should_rotate_age_key
+    _rotate_decision_rc=$?
+    if (( _rotate_decision_rc == 0 )); then
         if ! _rotate_age_key; then
             log_error "Age key rotation FAILED."
             log_error "The data restore itself succeeded, but key rotation/rekey did not complete safely."
             log_error "Live key artifacts were rolled back where needed; refusing to start services automatically."
+            RESTORE_PREVENT_AUTOSTART=true
             exit 1
         fi
-        _display_new_key
-    else
+        if ! _display_new_key; then
+            exit 1
+        fi
+    elif (( _rotate_decision_rc == 1 )); then
         log_warn "Age key rotation was skipped; confirm this is intentional before starting services."
+    else
+        log_error "Restore requires manual review before services are started."
+        exit 1
     fi
 
     if [[ "$DRY_RUN" != "true" ]]; then

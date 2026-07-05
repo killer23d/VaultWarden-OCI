@@ -11,6 +11,7 @@ cd "$PROJECT_ROOT"
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/operations.sh"
 
 show_help() {
     cat <<'EOF'
@@ -47,6 +48,25 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+_safe_restart_policy="fail"
+if [[ ! -t 0 || ! -t 1 ]]; then
+    _safe_restart_policy="skip"
+fi
+operation_acquire \
+    --id startup \
+    --label "Safe restart" \
+    --non-interactive "$_safe_restart_policy" || exit $?
+_safe_restart_operation_cleanup() {
+    local rc=$?
+    operation_release "$rc"
+    rm -rf "${rollback_dir:-}" 2>/dev/null || true
+    exit "$rc"
+}
+trap _safe_restart_operation_cleanup EXIT
+trap 'operation_release 130; rm -rf "${rollback_dir:-}" 2>/dev/null || true; exit 130' INT
+trap 'operation_release 143; rm -rf "${rollback_dir:-}" 2>/dev/null || true; exit 143' HUP TERM
+operation_set_phase "snapshot" "Capturing safe-restart rollback state"
+
 command -v docker >/dev/null 2>&1 || {
     log_error "docker is not installed."
     exit 1
@@ -60,7 +80,6 @@ rollback_dir=$(mktemp -d -p /dev/shm 2>/dev/null \
 chmod 700 "$rollback_dir"
 compose_snapshot="${rollback_dir}/compose.yaml"
 image_snapshot="${rollback_dir}/images.tsv"
-trap 'rm -rf "$rollback_dir"' EXIT HUP INT TERM
 
 log_info "Capturing the current resolved Compose model and local image IDs..."
 docker compose config > "$compose_snapshot" || {
@@ -78,12 +97,14 @@ done < <(docker compose config --images | sort -u)
 chmod 600 "$image_snapshot"
 
 log_info "Restarting with the existing image set (--skip-pull)..."
+operation_set_phase "startup" "Running guarded startup"
 if "${PROJECT_ROOT}/startup.sh" --force --skip-pull; then
     log_success "Safe restart completed successfully."
     exit 0
 fi
 
 log_error "Restart failed; restoring the pre-restart image tags and Compose model."
+operation_set_phase "rollback" "Restoring pre-restart Compose state"
 rollback_failed=false
 while IFS=$'\t' read -r image_ref image_id; do
     [[ -n "$image_ref" && -n "$image_id" ]] || continue

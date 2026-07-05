@@ -12,6 +12,7 @@ VaultWarden-OCI is an opinionated, security-first deployment for teams of 10 or 
 
 - **Set-and-forget operations** — health checks, backups, maintenance, DNS/firewall refresh, and failure notifications via systemd.
 - **Root-operated lifecycle** — production commands use `sudo make up`, `sudo make restart`, `sudo make health`, and root-owned runtime state.
+- **Shared operation guard** — mutating lifecycle, restore, backup, config, secrets, setup, and systemd install paths serialize through one recoverable guard.
 - **Cloudflare-first edge** — Cloudflare DNS/proxy/WAF with Caddy DNS-01 certificates and CrowdSec-driven edge blocking.
 - **Encrypted secrets** — SOPS + Age with root-operated persistent secrets and transient `/run` Docker secret files.
 - **3-tier backup model** — database rollback, full DR, and clone-grade emergency capsules.
@@ -134,7 +135,7 @@ Before full or emergency restore, inspect storage compatibility:
 sudo ./restore.sh inspect --remote
 ```
 
-Interactive full/emergency restores default to an operator start prompt. Use the manual inspection window when you want to verify storage, `/etc/vaultwarden`, Cloudflare/DNS, firewall, and config before starting services:
+Interactive full/emergency restores default to an operator start prompt. Use the manual inspection window when you want to verify storage, `/etc/vaultwarden`, Cloudflare/DNS, firewall, and config before starting services. If the confirmation channel is lost during emergency Age-key rotation or the new-key `SAVED` acknowledgement, restore fails safe, leaves services stopped, and prints the manual startup checklist.
 
 ```bash
 sudo ./restore.sh interactive --remote --start-policy ask

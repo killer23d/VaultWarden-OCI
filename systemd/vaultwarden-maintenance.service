@@ -27,17 +27,17 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-# /run/lock is needed for flock() lock files and /run/vaultwarden* for runtime operation state.
+# /run/lock is needed for flock() lock files and /run/vaultwarden-oci for runtime operation state.
 # The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
 # mode this is /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:
 #   /etc/systemd/system/<unit>.d/10-state-dir.conf
 # that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat <unit>
-ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
-# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ as a
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
+# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
 # root-owned runtime directory before ExecStart runs.
-RuntimeDirectory=vaultwarden
+RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 TimeoutStartSec=1800

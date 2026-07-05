@@ -11,6 +11,7 @@ RemainAfterExit=yes
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 WorkingDirectory=@PROJECT_ROOT@
 ExecStart=/bin/bash @PROJECT_ROOT@/startup.sh --skip-pull
+SuccessExitStatus=0 75
 # Restart is intentionally omitted for this oneshot unit.
 # After startup.sh succeeds, RemainAfterExit=yes marks the unit active;
 # Docker container recovery is handled by vaultwarden-health.timer
@@ -19,6 +20,10 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
 NoNewPrivileges=true
+ReadWritePaths=@PROJECT_STATE_DIR@ /etc/vaultwarden /run/lock /run/vaultwarden-oci
+RuntimeDirectory=vaultwarden-oci
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 
 [Install]
 WantedBy=multi-user.target

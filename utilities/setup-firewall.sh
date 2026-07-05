@@ -541,7 +541,11 @@ print(n.get('name', '${net}_network'))
 main() {
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
     if [[ "$DRY_RUN" != "true" ]]; then
-        operation_acquire --id setup --label "Setup" || exit $?
+        local _ops_policy="fail"
+        if [[ "$AUTO_MODE" == "true" || ! -t 0 || ! -t 1 ]]; then
+            _ops_policy="skip"
+        fi
+        operation_acquire --id setup --label "Setup" --non-interactive "$_ops_policy" || exit $?
         _setup_firewall_main_cleanup() {
             local exit_rc=$?
             operation_release "$exit_rc"

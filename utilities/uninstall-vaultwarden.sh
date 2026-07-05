@@ -507,8 +507,12 @@ remove_runtime_artifacts() {
         /run/lock/vaultwarden-backup.lock \
         /run/lock/vaultwarden-operations.lock \
         /run/lock/vaultwarden-dns-update.lock \
+        /run/lock/vaultwarden-env.lock \
         /run/lock/vaultwarden-firewall-update.lock \
-        /run/lock/vaultwarden-health.lock; do
+        /run/lock/vaultwarden-health.lock \
+        /run/lock/vaultwarden-secrets.lock \
+        /run/lock/vaultwarden-startup.lock \
+        /run/lock/vaultwarden-systemd.lock; do
         rm -f "$lock" 2>/dev/null || true
     done
     success "Removed VaultWarden runtime lock files."

@@ -16,6 +16,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+# shellcheck source=../lib/operations.sh
+source "${PROJECT_ROOT}/lib/operations.sh"
 
 trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
@@ -33,6 +35,7 @@ ENV_DIR="/etc/vaultwarden"
 ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
 STARTUP_SERVICE="vaultwarden-startup.service"
+SETUP_SYSTEMD_GUARD_HELD=false
 
 TIMERS=(
     vaultwarden-maintenance.timer
@@ -71,6 +74,32 @@ _VW_DROPIN_UNITS=(
     vaultwarden-dns-update.timer
     vaultwarden-firewall-update.timer
 )
+
+_setup_systemd_acquire_guard() {
+    local label="$1" phase="$2"
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    [[ "$SETUP_SYSTEMD_GUARD_HELD" == "true" ]] && return 0
+
+    local policy="fail"
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        policy="skip"
+    fi
+    operation_acquire \
+        --id systemd-install \
+        --label "$label" \
+        --specific-lock /run/lock/vaultwarden-systemd.lock \
+        --non-interactive "$policy" || return $?
+    SETUP_SYSTEMD_GUARD_HELD=true
+    _setup_systemd_cleanup() {
+        local rc=$?
+        operation_release "$rc"
+        return "$rc"
+    }
+    trap _setup_systemd_cleanup EXIT
+    trap 'operation_release 130; exit 130' INT
+    trap 'operation_release 143; exit 143' HUP TERM
+    operation_set_phase "$phase" "$label"
+}
 
 show_help() {
     cat <<'EOF'
@@ -388,13 +417,17 @@ _ensure_runtime_lock_files() {
         "/run/lock/vaultwarden-operations.lock"
         "/run/lock/vaultwarden-crowdsec-setup.lock"
         "/run/lock/vaultwarden-dns-update.lock"
+        "/run/lock/vaultwarden-env.lock"
         "/run/lock/vaultwarden-firewall-update.lock"
         "/run/lock/vaultwarden-health.lock"
         "/run/lock/vaultwarden-key-rotate.lock"
         "/run/lock/vaultwarden-maintenance.lock"
         "/run/lock/vaultwarden-permission-repair.lock"
         "/run/lock/vaultwarden-restore.lock"
+        "/run/lock/vaultwarden-secrets.lock"
         "/run/lock/vaultwarden-setup.lock"
+        "/run/lock/vaultwarden-startup.lock"
+        "/run/lock/vaultwarden-systemd.lock"
         "/run/lock/vaultwarden-uninstall.lock"
         "/run/lock/vaultwarden-update.lock"
     )
@@ -633,6 +666,7 @@ _render_startup_service() {
 
 install_units() {
     if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
+    _setup_systemd_acquire_guard "Systemd install" "install" || exit $?
     log_header "VaultWarden-OCI systemd Timer Installation"
 
     if [[ ! -d "$UNIT_SOURCE_DIR" ]]; then
@@ -700,10 +734,10 @@ install_units() {
         log_success "Installed: $dest"
     done
 
-    # Preserve the utilities/ subdirectory for these scripts, except for
-    # setup-firewall.sh, which must stay flat for iptables.service.
+    # Preserve the utilities/ subdirectory for these scripts so each utility's
+    # BASH_SOURCE-based PROJECT_ROOT resolution matches the repository layout.
     local structured_scripts_to_install=(
-        utilities/setup-firewall.sh   # ← flat-installed (basename only) for iptables.service compatibility
+        utilities/setup-firewall.sh
         utilities/maintenance-run.sh
         utilities/maintenance-health.sh
         utilities/maintenance-update.sh
@@ -718,12 +752,7 @@ install_units() {
     for script in "${structured_scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
         local dest
-        # setup-firewall.sh must remain at the flat path for iptables.service
-        if [[ "$script" == "utilities/setup-firewall.sh" ]]; then
-            dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
-        else
-            dest="$OPT_SCRIPTS_DIR/$script"
-        fi
+        dest="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$src" ]]; then
             log_warn "Script not found, skipping: $src"
             continue
@@ -969,6 +998,7 @@ install_units() {
 
 remove_units() {
     if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
+    _setup_systemd_acquire_guard "Systemd remove" "remove" || exit $?
     log_header "VaultWarden-OCI systemd Timer Removal"
 
     for timer in "${TIMERS[@]}"; do
@@ -1089,7 +1119,7 @@ validate_installation() {
         maintenance.sh
         backup.sh
         restore.sh
-        utilities/setup-firewall.sh   # flat-installed for iptables.service compatibility
+        utilities/setup-firewall.sh
         utilities/maintenance-run.sh
         utilities/maintenance-health.sh
         utilities/maintenance-update.sh
@@ -1102,12 +1132,7 @@ validate_installation() {
         utilities/restore-run.sh
     )
     for script in "${scripts_to_check[@]}"; do
-        local installed
-        if [[ "$script" == "utilities/setup-firewall.sh" ]]; then
-            installed="$OPT_SCRIPTS_DIR/$(basename "$script")"
-        else
-            installed="$OPT_SCRIPTS_DIR/$script"
-        fi
+        local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$installed" ]]; then
             log_error "  MISSING:        $installed"
             (( errors++ )) || true
@@ -1345,12 +1370,7 @@ validate_installation() {
     log_info "[8/9] Checking for split-brain (sha256 repo vs installed) ..."
     for script in "${scripts_to_check[@]}"; do
         local repo_src="$PROJECT_ROOT/$script"
-        local installed
-        if [[ "$script" == "utilities/setup-firewall.sh" ]]; then
-            installed="$OPT_SCRIPTS_DIR/$(basename "$script")"
-        else
-            installed="$OPT_SCRIPTS_DIR/$script"
-        fi
+        local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$repo_src" || ! -f "$installed" ]]; then
             continue
         fi

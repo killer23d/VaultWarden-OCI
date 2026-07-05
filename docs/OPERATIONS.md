@@ -35,6 +35,8 @@ sudo make up
 
 Startup renders runtime secrets under `/run/vaultwarden-oci/secrets`, syncs environment state, prepares runtime directories, starts Docker Compose, updates DNS when configured, and runs health checks.
 
+Startup, stop, restart, and systemd startup acquire the shared operation guard plus a lifecycle-specific lock before mutating runtime secrets or Docker state. Non-interactive contention exits `75` before mutation, and lifecycle env sync runs inside the same effective guard.
+
 ### Stop
 
 ```bash
@@ -51,7 +53,7 @@ sudo ./startup.sh --force
 sudo make restart
 ```
 
-Use `sudo make safe-restart` when you want the guarded restart flow with rollback of compose/runtime startup state on health failure.
+Use `sudo make safe-restart` when you want the guarded restart flow with rollback of compose/runtime startup state on health failure. The snapshot, startup, and rollback path run under one global operation scope.
 
 ### Status and logs
 
@@ -80,6 +82,8 @@ sudo ./maintenance.sh health --comprehensive
 ```
 
 Health checks cover container status, HTTPS/Vaultwarden endpoints, CrowdSec, disk/memory/network, SMTP, DNS, backups, configuration, notification dead letters, and Caddy storage/log permissions.
+
+Read-only health uses a narrow health-specific duplicate lock and does not require global operation metadata. `health --fix` and the systemd health unit use the shared global guard; expected contention is a clean skip, while guard infrastructure failure remains a real failure.
 
 A healthy restored host should include:
 
@@ -172,6 +176,8 @@ Start policy options:
 | `--start-policy ask` | Prompt before starting; interactive restores default to this. |
 | `--start-policy manual` or `--no-start` | Do not start services; print the manual checklist. |
 
+Emergency Age-key rotation and new-key `SAVED` prompts require explicit operator input. Timeout, EOF, or lost SSH input fails safe, prevents automatic startup, preserves the generated key material, and prints the manual review/start checklist.
+
 Manual post-restore checklist:
 
 ```bash
@@ -242,21 +248,32 @@ When called with a targeted flag, routine cleanup is skipped and only the target
 ## Operation Guards
 
 Mutating workflows use a shared `flock` guard and runtime metadata under
-`/run/vaultwarden-oci/operations`. Check active or interrupted work with:
+`/run/vaultwarden-oci/operations`. This includes lifecycle/startup, backup,
+restore, maintenance/update, storage, secrets mutation, env sync/edit,
+setup-env, setup-systemd install/remove, and other state-changing setup paths.
+Check active or interrupted work with:
 
 ```bash
 sudo make operations
 ```
 
 Lock file existence alone does not mean an operation is active; the kernel
-`flock` is the authority. Do not delete lock files to bypass a running process.
+`flock` is the authority. `sudo make operations` attributes a global owner only
+when the owner metadata is verifiable. If the global lock is held without
+verified owner metadata, the status and conflict UI treat it as unverified and
+do not offer stop or force actions.
+
+Do not delete lock files to bypass a running process. Systemd jobs that hit
+expected contention may exit `75` as a clean skip. Interactive conflict prompts
+are bounded; timeout or EOF leaves the active operation untouched and tells the
+operator to inspect with `sudo make operations`.
 
 After an SSH disconnect during a long-running VaultWarden operation:
 
 1. Run `sudo make operations`.
 2. If the original operation is still active, inspect its phase and wait or use
    the guarded stop flow where available. VaultWarden-OCI will not
-   automatically kill `apt` or `dpkg`.
+   automatically kill `apt`, `dpkg`, or repository-helper package work.
 3. If the original operation is no longer active, rerun the original command
    without adding `--force` unless a reset is specifically required. The
    workflow will inspect current state, reconcile completed work, and continue.
@@ -318,6 +335,10 @@ After key rotation or restore, export and save a recovery kit:
 sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
+Secrets configure/bootstrap, edit, rotate, and mutating break-glass actions use
+the shared operation guard. Read-only view/list paths remain diagnostic and do
+not acquire the global mutation guard.
+
 Existing backups remain decryptable only with the key that encrypted them. Keep old keys offline until their backup retention windows have expired.
 
 ---
@@ -331,6 +352,10 @@ sudo ./setup.sh systemd install
 sudo ./setup.sh systemd validate
 sudo make timers
 ```
+
+`install` and `remove` acquire or inherit the shared operation guard before
+replacing `/opt` scripts, installed env/config, or unit files. `status`,
+`validate`, and dry-run paths remain read-only diagnostics.
 
 Remove timers:
 

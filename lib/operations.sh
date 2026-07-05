@@ -13,6 +13,7 @@ readonly VW_OPERATIONS_LIB_LOADED=1
 : "${VW_PACKAGE_WAIT_ATTEMPTS:=12}"
 : "${VW_OPERATIONS_STOP_GRACE:=10}"
 : "${VW_OPERATIONS_FORCE_GRACE:=5}"
+: "${VW_OPERATIONS_PROMPT_TIMEOUT:=300}"
 
 OPERATION_ID=""
 OPERATION_LABEL=""
@@ -112,6 +113,7 @@ _operation_write_state() {
         printf 'phase=%s\n' "$(_operation_safe_value "$OPERATION_PHASE")"
         printf 'phase_name=%s\n' "$(_operation_safe_value "$OPERATION_PHASE_NAME")"
         printf 'lock_path=%s\n' "$(_operation_safe_value "$VW_OPERATIONS_LOCK")"
+        printf 'global_lock_owned=%s\n' "$(_operation_safe_value "$OPERATION_OWNS_GLOBAL")"
         printf 'specific_lock=%s\n' "$(_operation_safe_value "$OPERATION_SPECIFIC_LOCK")"
         printf 'token=%s\n' "$(_operation_safe_value "$OPERATION_TOKEN")"
         [[ -n "$completed" ]] && printf 'completed=%s\n' "$(_operation_safe_value "$completed")"
@@ -177,6 +179,12 @@ _operation_try_lock_into() {
     return 1
 }
 
+_operation_state_global_owned() {
+    local file="$1" owned
+    owned="$(_operation_state_get "$file" global_lock_owned 2>/dev/null || true)"
+    [[ "$owned" == "true" ]]
+}
+
 _operation_find_state_for_lock() {
     local lock_path="$1" file state stored_lock
     [[ -d "$VW_OPERATIONS_STATE_DIR" ]] || return 1
@@ -185,14 +193,7 @@ _operation_find_state_for_lock() {
         state="$(_operation_state_get "$file" state 2>/dev/null || true)"
         stored_lock="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
         [[ "$state" == "running" && "$stored_lock" == "$lock_path" ]] || continue
-        _operation_verify_owner "$file" || continue
-        printf '%s\n' "$file"
-        return 0
-    done
-    for file in "$VW_OPERATIONS_STATE_DIR"/*.state; do
-        [[ -f "$file" ]] || continue
-        state="$(_operation_state_get "$file" state 2>/dev/null || true)"
-        [[ "$state" == "running" ]] || continue
+        _operation_state_global_owned "$file" || continue
         _operation_verify_owner "$file" || continue
         printf '%s\n' "$file"
         return 0
@@ -383,12 +384,24 @@ _operation_wait_for_lock_clear() {
     return 0
 }
 
+_operation_pid_cmdline() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/cmdline" ]] || return 1
+    tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null
+}
+
 _operation_has_package_manager_child() {
-    local file="$1" pid comm
+    local file="$1" pid _pid _ppid _etime _stat comm cmdline
     pid="$(_operation_state_get "$file" pid 2>/dev/null || true)"
     while read -r _pid _ppid _etime _stat comm; do
         case "$comm" in
-            apt|apt-get|dpkg|unattended-upgrade|unattended-upgr)
+            apt|apt-get|dpkg|unattended-upgrade|unattended-upgr|add-apt-repository|apt-add-repository)
+                return 0
+                ;;
+        esac
+        cmdline="$(_operation_pid_cmdline "$_pid" 2>/dev/null || true)"
+        case "$cmdline" in
+            *add-apt-repository*|*apt-add-repository*)
                 return 0
                 ;;
         esac
@@ -558,7 +571,11 @@ _operation_force_stop() {
         return 1
     }
     printf 'Type KILL to force terminate this VaultWarden operation: ' >&2
-    IFS= read -r reply || return 1
+    if ! IFS= read -r -t "$VW_OPERATIONS_PROMPT_TIMEOUT" reply; then
+        _operation_log warn "Force termination cancelled because no confirmation was received."
+        _operation_log info "Inspect the host before retrying. Check later with: sudo make operations"
+        return 1
+    fi
     [[ "$reply" == "KILL" ]] || {
         _operation_log warn "Force termination cancelled."
         return 1
@@ -589,7 +606,11 @@ operation_conflict_prompt() {
             printf '  [1] Wait for the active operation\n'
             printf '  [2] Exit and inspect manually\n\n'
             printf 'Selection [1-2] (default: 2): '
-            IFS= read -r choice || choice=2
+            if ! IFS= read -r -t "$VW_OPERATIONS_PROMPT_TIMEOUT" choice; then
+                _operation_log warn "No selection received; leaving the active operation untouched."
+                _operation_log info "Inspect the host before retrying. Check later with: sudo make operations"
+                return 1
+            fi
             [[ -z "$choice" ]] && choice=2
             case "$choice" in
                 1) _operation_wait_for_release "$lock_path" "" "" && return 0 ;;
@@ -606,7 +627,11 @@ operation_conflict_prompt() {
             printf '  [1] Wait for the active operation\n'
             printf '  [2] Exit and leave it running\n\n'
             printf 'Selection [1-2] (default: 2): '
-            IFS= read -r choice || choice=2
+            if ! IFS= read -r -t "$VW_OPERATIONS_PROMPT_TIMEOUT" choice; then
+                _operation_log warn "No selection received; leaving package manager activity untouched."
+                _operation_log info "Inspect the host before retrying. Check later with: sudo make operations"
+                return 1
+            fi
             [[ -z "$choice" ]] && choice=2
             case "$choice" in
                 1) _operation_wait_for_release "$lock_path" "$state_file" "$label" && return 0 ;;
@@ -622,7 +647,11 @@ operation_conflict_prompt() {
         printf '  [3] Request the VaultWarden operation to stop\n'
         printf '  [4] Force terminate the VaultWarden operation\n\n'
         printf 'Selection [1-4] (default: 2): '
-        IFS= read -r choice || choice=2
+        if ! IFS= read -r -t "$VW_OPERATIONS_PROMPT_TIMEOUT" choice; then
+            _operation_log warn "No selection received; leaving the active operation untouched."
+            _operation_log info "Inspect the host before retrying. Check later with: sudo make operations"
+            return 1
+        fi
         [[ -z "$choice" ]] && choice=2
         case "$choice" in
             1) _operation_wait_for_release "$lock_path" "$state_file" "$label" && return 0 ;;
@@ -655,7 +684,7 @@ _operation_validate_inherited_global() {
 
 operation_acquire() {
     local id="" label="" specific_lock="" no_global=false policy="fail" skip_code=75
-    local arg fd rc
+    local arg fd rc should_claim_state=false
     while [[ $# -gt 0 ]]; do
         arg="$1"; shift
         case "$arg" in
@@ -685,6 +714,8 @@ operation_acquire() {
     OPERATION_STARTED_EPOCH="$(_operation_epoch)"
     OPERATION_TOKEN="${id}.$$.$RANDOM.$RANDOM.${OPERATION_STARTED_EPOCH}"
     OPERATION_STATE_FILE="${VW_OPERATIONS_STATE_DIR}/${id}.state"
+    OPERATION_OWNS_GLOBAL=false
+    OPERATION_OWNS_STATE=false
     OPERATION_RELEASED=false
 
     _operation_prepare_state_dir || {
@@ -704,7 +735,7 @@ operation_acquire() {
                 if _operation_try_lock_into "$VW_OPERATIONS_LOCK" fd; then
                     OPERATION_LOCK_FD="$fd"
                     OPERATION_OWNS_GLOBAL=true
-                    OPERATION_OWNS_STATE=true
+                    should_claim_state=true
                     break
                 fi
                 rc=$?
@@ -719,27 +750,48 @@ operation_acquire() {
             done
         fi
     else
-        OPERATION_OWNS_STATE=true
+        should_claim_state=true
     fi
 
     if [[ -n "$specific_lock" ]]; then
         if ! _operation_try_lock_into "$specific_lock" fd; then
             _operation_log error "Another ${label} operation is already running."
-            operation_release 1 >/dev/null 2>&1 || true
+            if [[ -n "${OPERATION_LOCK_FD:-}" && "$OPERATION_OWNS_GLOBAL" == "true" ]]; then
+                { eval "exec ${OPERATION_LOCK_FD}>&-"; } 2>/dev/null || true
+                OPERATION_LOCK_FD=""
+                OPERATION_OWNS_GLOBAL=false
+            fi
             return 1
         fi
         OPERATION_SPECIFIC_LOCK_FD="$fd"
     fi
 
-    if [[ "$OPERATION_OWNS_STATE" == "true" ]]; then
+    if [[ "$should_claim_state" == "true" ]]; then
+        OPERATION_OWNS_STATE=true
         OPERATION_PHASE="start"
         OPERATION_PHASE_NAME="Starting"
-        _operation_write_state running || return 1
-        export VW_OPERATION_INHERITED_FD="$OPERATION_LOCK_FD"
-        export VW_OPERATION_PARENT_STATE="$OPERATION_STATE_FILE"
-        export VW_OPERATION_PARENT_TOKEN="$OPERATION_TOKEN"
-        export VW_OPERATION_PARENT_ID="$OPERATION_ID"
+        if ! _operation_write_state running; then
+            OPERATION_OWNS_STATE=false
+            if [[ -n "${OPERATION_SPECIFIC_LOCK_FD:-}" ]]; then
+                flock -u "$OPERATION_SPECIFIC_LOCK_FD" 2>/dev/null || true
+                { eval "exec ${OPERATION_SPECIFIC_LOCK_FD}>&-"; } 2>/dev/null || true
+                OPERATION_SPECIFIC_LOCK_FD=""
+            fi
+            if [[ -n "${OPERATION_LOCK_FD:-}" && "$OPERATION_OWNS_GLOBAL" == "true" ]]; then
+                { eval "exec ${OPERATION_LOCK_FD}>&-"; } 2>/dev/null || true
+                OPERATION_LOCK_FD=""
+                OPERATION_OWNS_GLOBAL=false
+            fi
+            return 1
+        fi
+        if [[ "$OPERATION_OWNS_GLOBAL" == "true" ]]; then
+            export VW_OPERATION_INHERITED_FD="$OPERATION_LOCK_FD"
+            export VW_OPERATION_PARENT_STATE="$OPERATION_STATE_FILE"
+            export VW_OPERATION_PARENT_TOKEN="$OPERATION_TOKEN"
+            export VW_OPERATION_PARENT_ID="$OPERATION_ID"
+        fi
     fi
+    return 0
 }
 
 operation_set_phase() {
@@ -768,7 +820,9 @@ operation_release() {
         OPERATION_SPECIFIC_LOCK_FD=""
     fi
     if [[ "$OPERATION_OWNS_GLOBAL" == "true" && -n "${OPERATION_LOCK_FD:-}" ]]; then
-        flock -u "$OPERATION_LOCK_FD" 2>/dev/null || true
+        # The global lock FD is intentionally inherited by nested mutating
+        # children. Close our descriptor and let the kernel release the flock
+        # only when the last inherited descriptor closes.
         { eval "exec ${OPERATION_LOCK_FD}>&-"; } 2>/dev/null || true
         OPERATION_LOCK_FD=""
     fi
@@ -779,14 +833,19 @@ _operation_known_label() {
         backup) printf 'Backup' ;;
         crowdsec-setup) printf 'CrowdSec setup' ;;
         dns-update) printf 'DNS update' ;;
+        env-sync) printf 'Environment sync' ;;
         firewall-update) printf 'Firewall update' ;;
+        health-check) printf 'Health check' ;;
         key-rotate) printf 'Age key rotation' ;;
         maintenance) printf 'Maintenance' ;;
         maintenance-db) printf 'Database maintenance' ;;
         permission-repair) printf 'Permission repair' ;;
         setup) printf 'Setup' ;;
+        secrets) printf 'Secrets' ;;
+        startup) printf 'Startup' ;;
         storage-migration) printf 'Storage migration' ;;
         storage-setup) printf 'Storage setup' ;;
+        systemd-install) printf 'Systemd install' ;;
         restore) printf 'Restore' ;;
         uninstall) printf 'Uninstall' ;;
         update) printf 'Update' ;;
@@ -798,7 +857,7 @@ _operation_known_label() {
 _operation_list_one() {
     local id="$1" label="$2"
     local file="${VW_OPERATIONS_STATE_DIR}/${id}.state"
-    local state pid started_epoch phase phase_name lock_path status
+    local state pid started_epoch phase phase_name lock_path specific_lock global_owned status
     printf '\n%s\n' "$label"
     if [[ ! -r "$file" ]]; then
         printf '  State   : idle\n'
@@ -810,9 +869,15 @@ _operation_list_one() {
     phase="$(_operation_state_get "$file" phase 2>/dev/null || true)"
     phase_name="$(_operation_state_get "$file" phase_name 2>/dev/null || true)"
     lock_path="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
+    specific_lock="$(_operation_state_get "$file" specific_lock 2>/dev/null || true)"
+    global_owned="$(_operation_state_get "$file" global_lock_owned 2>/dev/null || true)"
     status="$state"
     if [[ "$state" == "running" ]]; then
-        if [[ -n "$lock_path" ]] && _operation_lock_is_held "$lock_path" && _operation_verify_owner "$file"; then
+        if [[ "$global_owned" == "true" && -n "$lock_path" ]] && \
+           _operation_lock_is_held "$lock_path" && _operation_verify_owner "$file"; then
+            status="running"
+        elif [[ "$global_owned" != "true" && -n "$specific_lock" ]] && \
+             _operation_lock_is_held "$specific_lock" && _operation_verify_owner "$file"; then
             status="running"
         else
             status="interrupted"
@@ -830,7 +895,7 @@ _operation_list_one() {
 }
 
 operation_list() {
-    local ids=(crowdsec-setup maintenance backup restore setup storage-migration update key-rotate uninstall health-repair dns-update firewall-update permission-repair)
+    local ids=(crowdsec-setup maintenance maintenance-db backup restore setup startup secrets env-sync systemd-install storage-migration storage-setup update key-rotate uninstall health-check health-repair dns-update firewall-update permission-repair)
     local seen="" id file label
     printf 'VaultWarden-OCI Operations\n'
     for id in "${ids[@]}"; do
@@ -861,7 +926,7 @@ operation_package_run() {
     for ((attempt=1; attempt<=VW_PACKAGE_WAIT_ATTEMPTS; attempt++)); do
         : > "$tmp"
         set +e
-        "$@" 2>&1 | tee "$tmp"
+        LC_ALL=C "$@" 2>&1 | tee "$tmp"
         rc=${PIPESTATUS[0]}
         if [[ "$had_errexit" == "true" ]]; then
             set -e

@@ -52,6 +52,15 @@ file_mode() {
     fi
 }
 
+canonical_path() {
+    /usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+env_value() {
+    local key="$1" file="$2"
+    awk -F= -v k="$key" '$1 == k { print substr($0, index($0, "=") + 1); found = 1 } END { exit found ? 0 : 1 }' "$file"
+}
+
 make_case() {
     local dir="$TEST_ROOT/case-$TESTS_RUN"
     mkdir -p "$dir/state/config" "$dir/state/secrets" "$dir/state/data" "$dir/repo" "$dir/etc" "$dir/mockbin"
@@ -131,7 +140,7 @@ GIT
 #!/usr/bin/env bash
 if [[ "${1:-}" == -y ]]; then
     [[ -n "${MOCK_USB_KEY_PATH:-}" ]] || exit 2
-    if [[ "${2:-}" == "$MOCK_USB_KEY_PATH" ]]; then
+    if [[ "$(basename "${2:-}")" == "usb-key.txt" ]]; then
         printf '%s\n' "$MOCK_USB_RECIPIENT"
     else
         printf '%s\n' "$MOCK_NEW_RECIPIENT"
@@ -170,8 +179,9 @@ case "$mode" in
         printf '# mock-age=%s,%s\n' "$MOCK_NEW_RECIPIENT" "$MOCK_USB_RECIPIENT" >> "$target"
         ;;
     decrypt)
-        if [[ "${MOCK_SOPS_FAIL_OP:-}" == decrypt_staged && "$target" == "${MOCK_CIPHER_STAGING:-}" ]]; then exit 1; fi
-        if [[ "${MOCK_SOPS_FAIL_OP:-}" == decrypt_live && "$target" == "${MOCK_LIVE_CIPHER:-}" ]]; then exit 1; fi
+        canon(){ /usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+        if [[ "${MOCK_SOPS_FAIL_OP:-}" == decrypt_staged && -n "${MOCK_CIPHER_STAGING:-}" && "$(canon "$target")" == "$(canon "$MOCK_CIPHER_STAGING")" ]]; then exit 1; fi
+        if [[ "${MOCK_SOPS_FAIL_OP:-}" == decrypt_live && -n "${MOCK_LIVE_CIPHER:-}" && "$(canon "$target")" == "$(canon "$MOCK_LIVE_CIPHER")" ]]; then exit 1; fi
         cat "$target" >/dev/null
         ;;
     *) exit 1 ;;
@@ -180,7 +190,8 @@ SOPS
     cat > "$mock/mv" <<'MV'
 #!/usr/bin/env bash
 last="${@: -1}"
-if [[ -n "${MOCK_MV_FAIL_DEST:-}" && "$last" == "$MOCK_MV_FAIL_DEST" ]]; then
+canon(){ /usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+if [[ -n "${MOCK_MV_FAIL_DEST:-}" && "$(canon "$last")" == "$(canon "$MOCK_MV_FAIL_DEST")" ]]; then
     exit 1
 fi
 exec /bin/mv "$@"
@@ -265,7 +276,7 @@ test_non_mounted() {
 test_boot_mode_clears_block_env() {
     local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
     if ! MOCK_MOUNTPOINT_FAIL=true run_recover "$dir" --storage-mode boot; then cat "$dir/out"; fail 'boot mode should not require mountpoint'; fi
-    grep -q "PROJECT_STATE_DIR=$dir/state" "$dir/state/config/install.env" || fail 'project state not set'
+    [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/state/config/install.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'project state not set'
     grep -q '^DATA_VOLUME_MOUNT=$' "$dir/state/config/install.env" || fail 'data mount not cleared'
     grep -q '^DATA_VOLUME_DEVICE=$' "$dir/state/config/install.env" || fail 'data device not cleared'
 }
@@ -342,7 +353,7 @@ test_success_fresh_clone() {
     [[ -f "$dir/etc/age-key.txt" ]] || fail 'new operational key missing'
     grep -q "# mock-age=$NEW_RECIPIENT,$USB_RECIPIENT" "$dir/state/secrets/secrets.yaml" || fail 'cipher metadata missing mock recipients'
     grep -q "$NEW_RECIPIENT,$USB_RECIPIENT" "$dir/repo/.sops.yaml" || fail 'policy recipients missing'
-    grep -q "SOPS_AGE_KEY_FILE=$dir/etc/age-key.txt" "$dir/state/config/install.env" || fail 'install.env not updated'
+    [[ "$(canonical_path "$(env_value SOPS_AGE_KEY_FILE "$dir/state/config/install.env")")" == "$(canonical_path "$dir/etc/age-key.txt")" ]] || fail 'install.env not updated'
     grep -q "OFFLINE_AGE_RECIPIENT=$USB_RECIPIENT" "$dir/state/config/dr-manifest.env" || fail 'manifest recipient not updated'
     grep -q '^MANIFEST_UPDATED_AT=' "$dir/state/config/dr-manifest.env" || fail 'manifest timestamp missing'
     grep -q 'Recovery complete. Vaultwarden passed health check at https://vault.example.test/alive' "$dir/out" || fail 'health success message missing'
@@ -355,8 +366,8 @@ test_health_failure_reports_partial_success_without_rollback() {
     grep -q 'Health check: FAIL' "$dir/out" || fail 'health failure marker missing'
     grep -q 'Recovery artifacts were promoted, but Vaultwarden did not pass the health check.' "$dir/out" || fail 'partial-success message missing'
     grep -q 'Do not treat the service as healthy until the checks below pass.' "$dir/out" || fail 'operator warning missing'
-    grep -q "docker compose -f $dir/repo/docker-compose.yml ps" "$dir/out" || fail 'compose ps next step missing'
-    grep -q "docker compose -f $dir/repo/docker-compose.yml logs --tail=200" "$dir/out" || fail 'compose logs next step missing'
+    grep -Eq 'docker compose -f .*docker-compose\.yml ps' "$dir/out" || fail 'compose ps next step missing'
+    grep -Eq 'docker compose -f .*docker-compose\.yml logs --tail=200' "$dir/out" || fail 'compose logs next step missing'
     grep -q 'Failed health URL: https://vault.example.test/alive' "$dir/out" || fail 'failed alive URL missing'
     grep -q "# mock-age=$NEW_RECIPIENT,$USB_RECIPIENT" "$dir/state/secrets/secrets.yaml" || fail 'cipher artifacts rolled back after health failure'
     grep -q 'new-private-key' "$dir/etc/age-key.txt" || fail 'active key rolled back after health failure'

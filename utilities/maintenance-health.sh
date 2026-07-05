@@ -80,12 +80,20 @@ _resolve_env_file() {
         "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env"
         "${PROJECT_ROOT}/.env"
     )
+    local first_existing=""
     for candidate in "${candidates[@]}"; do
         if [[ -f "$candidate" ]]; then
-            echo "$candidate"
-            return 0
+            [[ -n "$first_existing" ]] || first_existing="$candidate"
+            if [[ -r "$candidate" ]]; then
+                echo "$candidate"
+                return 0
+            fi
         fi
     done
+    if [[ -n "$first_existing" ]]; then
+        echo "$first_existing"
+        return 0
+    fi
     echo ""
     return 1
 }
@@ -130,6 +138,44 @@ local MEM_WARN_THRESHOLD=${MEM_WARN_THRESHOLD:-80}
 local MEM_CRIT_THRESHOLD=${MEM_CRIT_THRESHOLD:-90}
 local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
+local HEALTH_LOCK_FD=""
+
+_health_readonly_lock_path() {
+    if [[ -n "${VW_HEALTH_LOCK_FILE:-}" ]]; then
+        printf '%s\n' "$VW_HEALTH_LOCK_FILE"
+    elif [[ $EUID -eq 0 ]]; then
+        printf '%s\n' "/run/lock/vaultwarden-health.lock"
+    elif [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR:-}" && -w "${XDG_RUNTIME_DIR:-}" ]]; then
+        printf '%s\n' "${XDG_RUNTIME_DIR}/vaultwarden-health.lock"
+    else
+        printf '%s\n' "${TMPDIR:-/tmp}/vaultwarden-health-${EUID}.lock"
+    fi
+}
+
+_acquire_readonly_health_lock() {
+    local lock_path lock_dir fd
+    lock_path="$(_health_readonly_lock_path)"
+    lock_dir="$(dirname "$lock_path")"
+    if ! mkdir -p "$lock_dir" 2>/dev/null; then
+        log_error "Cannot prepare health coordination directory: $lock_dir"
+        return 3
+    fi
+    if ! : >> "$lock_path" 2>/dev/null; then
+        log_error "Cannot open health coordination lock: $lock_path"
+        return 3
+    fi
+    chmod 0600 "$lock_path" 2>/dev/null || true
+    if ! { exec {fd}>"$lock_path"; } 2>/dev/null; then
+        log_error "Cannot open health coordination lock: $lock_path"
+        return 3
+    fi
+    if ! flock -n "$fd" 2>/dev/null; then
+        { eval "exec ${fd}>&-"; } 2>/dev/null || true
+        log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
+        return 75
+    fi
+    HEALTH_LOCK_FD="$fd"
+}
 
 _acquire_run_lock() {
     if [[ "$FIX_MODE" == "true" ]]; then
@@ -139,24 +185,25 @@ _acquire_run_lock() {
             --specific-lock /run/lock/vaultwarden-health.lock \
             --non-interactive skip || {
                 local rc=$?
-                (( rc == 75 )) && exit 0
-                return "$rc"
+                (( rc == 75 )) && return 75
+                log_error "Health repair operation guard failed before checks could run."
+                return 4
             }
         operation_set_phase "repair" "Health check with auto-repair"
     else
-        operation_acquire \
-            --id health-check \
-            --label "Health check" \
-            --specific-lock /run/lock/vaultwarden-health.lock \
-            --no-global \
-            --non-interactive skip || exit 0
-        operation_set_phase "check" "Health inspection"
+        _acquire_readonly_health_lock
     fi
 }
 
 _release_run_lock() {
     local rc=$?
-    operation_release "$rc"
+    if [[ "$FIX_MODE" == "true" ]]; then
+        operation_release "$rc"
+    elif [[ -n "${HEALTH_LOCK_FD:-}" ]]; then
+        flock -u "$HEALTH_LOCK_FD" 2>/dev/null || true
+        { eval "exec ${HEALTH_LOCK_FD}>&-"; } 2>/dev/null || true
+        HEALTH_LOCK_FD=""
+    fi
     return "$rc"
 }
 
@@ -247,12 +294,12 @@ USAGE:
     ./maintenance.sh health [OPTIONS]
     utilities/maintenance-health.sh [OPTIONS]
 
-Do not run with sudo. Run: ./maintenance.sh health
+Read-only path: ./maintenance.sh health
+Repair path:    sudo ./maintenance.sh health --fix
 
 DESCRIPTION:
-    Runs all health checks and optionally sends alert emails when thresholds
-    are breached. Called automatically by the vaultwarden-health systemd
-    timer, or manually on demand.
+    Runs health checks with narrow duplicate-run coordination. --fix is a
+    root-operated repair mode and uses the shared operation guard.
 
 OPTIONS:
     --comprehensive     Run all checks including extended diagnostics
@@ -281,11 +328,14 @@ EXIT CODES:
     1 — One or more warnings
     2 — One or more failures
     3 — Critical failure (cannot run checks)
+    4 — Operation guard infrastructure failure in --fix mode
+    75 — Clean skip because another health or repair operation is active
 
 EXAMPLES:
-    sudo ./maintenance.sh health
-    sudo ./maintenance.sh health --comprehensive
-    sudo ./maintenance.sh health --json
+    ./maintenance.sh health
+    ./maintenance.sh health --comprehensive
+    ./maintenance.sh health --json
+    sudo ./maintenance.sh health --fix
 EOF
 }
 
@@ -1098,8 +1148,18 @@ _print_results() {
 
 _health_main() {
     set +e   # Bash 5.2 aarch64: nested function set -e propagation bug
+    local lock_rc
     _health_parse_args "$@"
-    _acquire_run_lock || return 1
+    if [[ "$FIX_MODE" == "true" && $EUID -ne 0 ]]; then
+        log_error "health --fix requires root because it may restart containers and uses the shared operation guard."
+        log_error "Run: sudo ./maintenance.sh health --fix"
+        return 3
+    fi
+    _acquire_run_lock
+    lock_rc=$?
+    if (( lock_rc != 0 )); then
+        return "$lock_rc"
+    fi
     trap '_release_run_lock' EXIT HUP INT TERM
     log_info "Starting VaultWarden health check..."
     if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
@@ -1143,8 +1203,8 @@ USAGE:
     ./maintenance.sh health [OPTIONS]
     utilities/maintenance-health.sh [OPTIONS]
 
-Root-operated path: sudo make health
-Direct non-root path: ./maintenance.sh health
+Root-operated repair path: sudo make health
+Direct read-only path: ./maintenance.sh health
 
 OPTIONS:
     --comprehensive     Run all checks including extended diagnostics
@@ -1160,6 +1220,8 @@ EXIT CODES:
     1 — One or more warnings
     2 — One or more failures
     3 — Critical failure (cannot run checks)
+    4 — Operation guard infrastructure failure in --fix mode
+    75 — Clean skip because another health or repair operation is active
 EOF
 }
 
