@@ -263,6 +263,75 @@ _operation_descendant_pids() {
         }' | sort -rn | awk '{print $2}'
 }
 
+_operation_pid_identity() {
+    local pid="$1" start
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    (( pid > 1 )) || return 1
+    (( pid == $$ )) && return 1
+    [[ -d "/proc/${pid}" ]] || return 1
+    start="$(_operation_pid_start "$pid" 2>/dev/null || true)"
+    [[ "$start" =~ ^[0-9]+$ ]] || return 1
+    printf '%s:%s\n' "$pid" "$start"
+}
+
+_operation_capture_descendant_identities() {
+    local root_pid="$1" pid identity
+    while IFS= read -r pid; do
+        identity="$(_operation_pid_identity "$pid" 2>/dev/null || true)"
+        [[ -n "$identity" ]] || continue
+        printf '%s\n' "$identity"
+    done < <(_operation_descendant_pids "$root_pid")
+}
+
+_operation_identity_is_live() {
+    local identity="$1" pid expected_start current_start
+    pid="${identity%%:*}"
+    expected_start="${identity#*:}"
+    [[ "$pid" != "$identity" && "$pid" =~ ^[0-9]+$ && "$expected_start" =~ ^[0-9]+$ ]] || return 1
+    (( pid > 1 )) || return 1
+    (( pid == $$ )) && return 1
+    [[ -d "/proc/${pid}" ]] || return 1
+    current_start="$(_operation_pid_start "$pid" 2>/dev/null || true)"
+    [[ -n "$current_start" && "$current_start" == "$expected_start" ]] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+_operation_live_identity_pids() {
+    local identity pid
+    for identity in "$@"; do
+        _operation_identity_is_live "$identity" || continue
+        pid="${identity%%:*}"
+        printf '%s\n' "$pid"
+    done
+}
+
+_operation_signal_identities() {
+    local signal="$1" identity pid
+    shift || true
+    for identity in "$@"; do
+        _operation_identity_is_live "$identity" || continue
+        pid="${identity%%:*}"
+        kill "-${signal}" "$pid" 2>/dev/null || true
+    done
+}
+
+_operation_wait_for_identities_exit() {
+    local timeout="$1"
+    shift || true
+    local start now live
+    start="$(_operation_epoch)"
+    while true; do
+        live="$(_operation_live_identity_pids "$@" | paste -sd' ' -)"
+        [[ -z "$live" ]] && return 0
+        now="$(_operation_epoch)"
+        (( now - start >= timeout )) && {
+            printf '%s\n' "$live"
+            return 1
+        }
+        sleep 1
+    done
+}
+
 _operation_live_pids() {
     local pid
     for pid in "$@"; do
@@ -400,7 +469,7 @@ _operation_wait_for_release() {
 
 _operation_stop_scope() {
     local file="$1" mode="${2:-graceful}"
-    local pid lock_path descendants remaining root_remaining all_remaining
+    local pid pid_start root_identity lock_path child_identities child_pids remaining
     _operation_verify_owner "$file" || {
         _operation_log error "Cannot verify the active VaultWarden operation owner; refusing to signal."
         return 1
@@ -410,13 +479,16 @@ _operation_stop_scope() {
         return 1
     fi
     pid="$(_operation_state_get "$file" pid 2>/dev/null || true)"
+    pid_start="$(_operation_state_get "$file" pid_start 2>/dev/null || true)"
+    root_identity="${pid}:${pid_start}"
     lock_path="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
 
-    mapfile -t descendants < <(_operation_descendant_pids "$pid")
-    if (( ${#descendants[@]} > 0 )); then
-        _operation_log warn "Requesting graceful stop for VaultWarden operation child process(es): ${descendants[*]}"
-        _operation_signal_pids TERM "${descendants[@]}"
-        remaining="$(_operation_wait_for_pids_exit "$VW_OPERATIONS_STOP_GRACE" "${descendants[@]}" || true)"
+    mapfile -t child_identities < <(_operation_capture_descendant_identities "$pid")
+    if (( ${#child_identities[@]} > 0 )); then
+        child_pids="$(_operation_live_identity_pids "${child_identities[@]}" | paste -sd' ' -)"
+        _operation_log warn "Requesting graceful stop for VaultWarden operation child process(es): ${child_pids}"
+        _operation_signal_identities TERM "${child_identities[@]}"
+        remaining="$(_operation_wait_for_identities_exit "$VW_OPERATIONS_STOP_GRACE" "${child_identities[@]}" || true)"
         if [[ -n "$remaining" && "$mode" != "force" ]]; then
             _operation_log error "Operation child process(es) still running after TERM: ${remaining}"
             _operation_log error "Leaving the operation wrapper running so the shared lock is not released prematurely."
@@ -424,14 +496,16 @@ _operation_stop_scope() {
         fi
         if [[ -n "$remaining" ]]; then
             _operation_log warn "Force terminating verified operation child process(es): ${remaining}"
-            # shellcheck disable=SC2086 # remaining is a whitespace-separated PID list produced by _operation_live_pids.
-            _operation_signal_pids KILL $remaining
-            # shellcheck disable=SC2086
-            _operation_wait_for_pids_exit "$VW_OPERATIONS_FORCE_GRACE" $remaining >/dev/null || true
+            _operation_signal_identities KILL "${child_identities[@]}"
+            remaining="$(_operation_wait_for_identities_exit "$VW_OPERATIONS_FORCE_GRACE" "${child_identities[@]}" || true)"
+            if [[ -n "$remaining" ]]; then
+                _operation_log error "Operation child process(es) still running after KILL: ${remaining}"
+                return 1
+            fi
         fi
     fi
 
-    if kill -0 "$pid" 2>/dev/null; then
+    if _operation_identity_is_live "$root_identity"; then
         _operation_verify_owner "$file" || {
             _operation_log error "Cannot re-verify the active VaultWarden operation owner; refusing to signal wrapper."
             return 1
@@ -440,10 +514,9 @@ _operation_stop_scope() {
         kill -TERM "$pid" 2>/dev/null || return 1
     fi
 
-    if ! _operation_wait_for_pids_exit "$VW_OPERATIONS_STOP_GRACE" "$pid" >/dev/null; then
-        root_remaining="$(_operation_live_pids "$pid" | paste -sd' ' -)"
+    if ! _operation_wait_for_identities_exit "$VW_OPERATIONS_STOP_GRACE" "$root_identity" >/dev/null; then
         if [[ "$mode" != "force" ]]; then
-            _operation_log error "Operation wrapper is still running after TERM: ${root_remaining}"
+            _operation_log error "Operation wrapper is still running after TERM: ${pid}"
             return 1
         fi
         _operation_verify_owner "$file" || {
@@ -452,13 +525,20 @@ _operation_stop_scope() {
         }
         _operation_log warn "Force terminating verified operation wrapper: ${pid}"
         kill -KILL "$pid" 2>/dev/null || true
-        _operation_wait_for_pids_exit "$VW_OPERATIONS_FORCE_GRACE" "$pid" >/dev/null || true
+        remaining="$(_operation_wait_for_identities_exit "$VW_OPERATIONS_FORCE_GRACE" "$root_identity" || true)"
+        if [[ -n "$remaining" ]]; then
+            _operation_log error "Operation wrapper is still running after KILL: ${remaining}"
+            return 1
+        fi
     fi
 
-    mapfile -t descendants < <(_operation_descendant_pids "$pid")
-    all_remaining="$(_operation_live_pids "$pid" "${descendants[@]}" | paste -sd' ' -)"
-    if [[ -n "$all_remaining" ]]; then
-        _operation_log error "Operation-owned process(es) still running: ${all_remaining}"
+    remaining="$(_operation_live_identity_pids "${child_identities[@]}" | paste -sd' ' -)"
+    if [[ -n "$remaining" ]]; then
+        _operation_log error "Operation-owned child process(es) still running: ${remaining}"
+        return 1
+    fi
+    if _operation_identity_is_live "$root_identity"; then
+        _operation_log error "Operation wrapper is still running: ${pid}"
         return 1
     fi
     _operation_wait_for_lock_clear "$lock_path" "$VW_OPERATIONS_STOP_GRACE" || {
@@ -767,11 +847,6 @@ operation_list() {
             _operation_list_one "$id" "${label:-$id}"
         done
     fi
-}
-
-operation_package_wait() {
-    _operation_log info "Package-manager waits are output-driven; no process-name preflight is used."
-    return 0
 }
 
 _operation_output_is_package_lock_error() {

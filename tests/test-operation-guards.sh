@@ -363,10 +363,13 @@ EOF_STATE
     child_ready="$tmpdir/child-ready"
     child_pid_file="$tmpdir/child.pid"
     child_marker="$tmpdir/child-contender-entered"
+    child_fifo="$tmpdir/child.fifo"
+    mkfifo "$child_fifo"
     VW_OPERATIONS_STATE_DIR="$state_dir" \
     VW_OPERATIONS_LOCK="$ops_lock" \
     CHILD_READY="$child_ready" \
     CHILD_PID_FILE="$child_pid_file" \
+    CHILD_FIFO="$child_fifo" \
     "${BASH}" -c '
         set -euo pipefail
         source "$0/lib/log.sh"
@@ -375,11 +378,23 @@ EOF_STATE
         source "$0/lib/operations.sh"
         operation_acquire --id orphan --label "Orphan child lock"
         operation_set_phase "4" "Child inherited lock"
-        "${BASH}" -c '"'"'trap "" TERM; printf "%s\n" "$$" > "$CHILD_PID_FILE"; : > "$CHILD_READY"; sleep 20'"'"' &
-        for _ in {1..50}; do
-            [[ -f "$CHILD_READY" ]] && break
+        "${BASH}" -c '"'"'
+            child_pid_file="$1"
+            child_ready="$2"
+            child_fifo="$3"
+            trap "" HUP TERM
+            exec 9<> "$child_fifo"
+            printf "%s\n" "$$" > "$child_pid_file"
+            : > "$child_ready"
+            while :; do
+                read -r -t 1 _ <&9 || true
+            done
+        '"'"' _ "$CHILD_PID_FILE" "$CHILD_READY" "$CHILD_FIFO" &
+        for _ in {1..100}; do
+            [[ -s "$CHILD_PID_FILE" && -f "$CHILD_READY" ]] && break
             sleep 0.1
         done
+        [[ -s "$CHILD_PID_FILE" && -f "$CHILD_READY" ]] || exit 1
         kill -KILL "$$"
     ' "$ROOT" >/dev/null 2>&1 &
     orphan_parent=$!
@@ -420,12 +435,48 @@ EOF_STATE
     wait "$orphan_child" 2>/dev/null || true
     cleanup_pids=("${cleanup_pids[@]/$orphan_child}")
 
+    sleep 20 &
+    reuse_pid=$!
+    cleanup_pids+=("$reuse_pid")
+    wrong_identity="${reuse_pid}:0"
+    "${BASH}" -c '
+        set -euo pipefail
+        source "$0/lib/operations.sh"
+        _operation_signal_identities TERM "$1"
+    ' "$ROOT" "$wrong_identity"
+    sleep 0.2
+    kill -0 "$reuse_pid" 2>/dev/null \
+        || fail "mismatched PID identity must not be signalled by numeric PID alone"
+    correct_identity="$(
+        "${BASH}" -c '
+            set -euo pipefail
+            source "$0/lib/operations.sh"
+            _operation_pid_identity "$1"
+        ' "$ROOT" "$reuse_pid"
+    )" || fail "could not capture controlled PID identity"
+    "${BASH}" -c '
+        set -euo pipefail
+        source "$0/lib/operations.sh"
+        _operation_signal_identities TERM "$1"
+    ' "$ROOT" "$correct_identity"
+    for _ in {1..50}; do
+        ! kill -0 "$reuse_pid" 2>/dev/null && break
+        sleep 0.1
+    done
+    kill -0 "$reuse_pid" 2>/dev/null \
+        && fail "matching PID identity should be signalled"
+    wait "$reuse_pid" 2>/dev/null || true
+    cleanup_pids=("${cleanup_pids[@]/$reuse_pid}")
+
     stop_ready="$tmpdir/stop-ready"
     stop_child_pid_file="$tmpdir/stop-child.pid"
+    stop_fifo="$tmpdir/stop.fifo"
+    mkfifo "$stop_fifo"
     VW_OPERATIONS_STATE_DIR="$state_dir" \
     VW_OPERATIONS_LOCK="$ops_lock" \
     STOP_READY="$stop_ready" \
     STOP_CHILD_PID_FILE="$stop_child_pid_file" \
+    STOP_FIFO="$stop_fifo" \
     "${BASH}" -c '
         set -euo pipefail
         source "$0/lib/log.sh"
@@ -433,7 +484,18 @@ EOF_STATE
         init_common_lib stop-holder
         source "$0/lib/operations.sh"
         operation_acquire --id stoptest --label "Stop test operation"
-        "${BASH}" -c '"'"'trap "" TERM; printf "%s\n" "$$" > "$STOP_CHILD_PID_FILE"; : > "$STOP_READY"; sleep 20'"'"' &
+        "${BASH}" -c '"'"'
+            stop_child_pid_file="$1"
+            stop_ready="$2"
+            stop_fifo="$3"
+            trap "" TERM
+            exec 9<> "$stop_fifo"
+            printf "%s\n" "$$" > "$stop_child_pid_file"
+            : > "$stop_ready"
+            while :; do
+                read -r -t 1 _ <&9 || true
+            done
+        '"'"' _ "$STOP_CHILD_PID_FILE" "$STOP_READY" "$STOP_FIFO" &
         wait "$!"
     ' "$ROOT" &
     stop_parent=$!
@@ -445,6 +507,13 @@ EOF_STATE
     [[ -s "$stop_child_pid_file" && -f "$stop_ready" ]] || fail "stop test child did not start"
     stop_child="$(cat "$stop_child_pid_file")"
     cleanup_pids+=("$stop_child")
+    stop_child_identity="$(
+        "${BASH}" -c '
+            set -euo pipefail
+            source "$0/lib/operations.sh"
+            _operation_pid_identity "$1"
+        ' "$ROOT" "$stop_child"
+    )" || fail "could not capture stop child identity"
 
     set +e
     VW_OPERATIONS_STATE_DIR="$state_dir" \
@@ -461,7 +530,12 @@ EOF_STATE
     rc=$?
     set -e
     [[ "$rc" -ne 0 ]] || fail "graceful stop should fail when an operation child ignores TERM"
-    kill -0 "$stop_child" 2>/dev/null || fail "graceful stop must leave TERM-ignoring child running"
+    "${BASH}" -c '
+        set -euo pipefail
+        source "$0/lib/operations.sh"
+        _operation_identity_is_live "$1"
+    ' "$ROOT" "$stop_child_identity" \
+        || fail "graceful stop must leave TERM-ignoring child identity running"
     kill -0 "$stop_parent" 2>/dev/null || fail "graceful stop must leave wrapper running while child remains"
 
     set +e
