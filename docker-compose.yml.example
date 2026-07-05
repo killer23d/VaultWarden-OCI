@@ -361,7 +361,10 @@ services:
       - DAC_OVERRIDE
       - FOWNER
 
-    read_only: true
+    # boky/postfix mutates its packaged /scripts directory during startup
+    # (chmod +x /scripts/*.sh), so a read-only root filesystem is incompatible
+    # with the upstream image. Retain the remaining container hardening and
+    # tmpfs mounts for transient writable runtime paths.
     tmpfs:
       - /tmp:size=16m,mode=1777
       - /var/spool/postfix:size=64m,mode=0755

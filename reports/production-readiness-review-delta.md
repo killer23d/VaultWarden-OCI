@@ -302,6 +302,15 @@ grep -A2 'read_only' docker-compose.yml.example | grep -c postfix  # verify pres
 docker compose -f docker-compose.yml.example config 2>&1 | grep -c 'read_only'
 ```
 
+### PR #216 Correction
+
+* PR #216 implemented the original `read_only: true` recommendation.
+* Real Ubuntu/OCI runtime validation showed `boky/postfix` mutates `/scripts` during startup (via `chmod +x /scripts/*.sh`).
+* The container crash-looped with `Read-only file system`.
+* `read_only: true` is therefore intentionally removed only from Postfix.
+* `tmpfs`, `no-new-privileges`, capability restrictions, loopback SMTP binding, network controls, and resource limits remain.
+* This is a strongest-compatible/best-effort container hardening decision.
+
 ---
 
 ## F-05: Docker network subnets use overly large /16 ranges

@@ -137,4 +137,15 @@ if command -v age-keygen >/dev/null 2>&1 && command -v sops >/dev/null 2>&1; the
     [[ "$decrypted" == "roundtrip-ok" ]] || fail "SOPS decrypted value mismatch"
 fi
 
+test_postfix_read_only_regression() {
+    local compose_file="${PROJECT_ROOT}/docker-compose.yml.example"
+    if awk '/^  postfix:/{p=1} /^  [a-zA-Z0-9_-]+:/{if($1!="postfix:")p=0} p && /^[[:space:]]+read_only:[[:space:]]*true/{f=1} END{exit f}' "$compose_file"; then
+        :
+    else
+        fail "postfix must not use read_only: true; boky/postfix mutates /scripts at startup"
+    fi
+}
+
+test_postfix_read_only_regression
+
 printf 'Security helper tests passed.\n'
