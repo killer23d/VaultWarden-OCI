@@ -7,13 +7,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-VW_LOCK_DIR="${PROJECT_ROOT}/.locks"
-VW_OPERATIONS_LOCK="${VW_LOCK_DIR}/operations.lock"
-
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/operations.sh"
 _source_lib() {
     local lib="$1"
     # shellcheck source=/dev/null
@@ -321,7 +319,10 @@ _require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
 
 TMPDIR_RESTORE=""
 cleanup() {
+    local rc=$?
+    operation_release "$rc" 2>/dev/null || true
     if [[ -n "$TMPDIR_RESTORE" ]]; then rm -rf "$TMPDIR_RESTORE" 2>/dev/null; fi
+    return "$rc"
 }
 
 _restore_print_manual_start_checklist() {
@@ -346,7 +347,7 @@ _restore_should_start_services() {
             ;;
         ask)
             local answer
-            read -r -p "Start VaultWarden services now? [yes/no] (default: no): " answer
+            read -r -t 300 -p "Start VaultWarden services now? [yes/no] (default: no): " answer || answer="no"
             case "$answer" in
                 y|Y|yes|YES) return 0 ;;
                 *) _restore_print_manual_start_checklist; return 1 ;;
@@ -367,7 +368,7 @@ _restore_should_rotate_age_key() {
         local answer
         # Legacy prompt text: Emergency capsule contains operational key material. Rotate Age key after restore? [yes/no] (default: yes):
         while true; do
-            read -r -p "Emergency capsule: Rotate Age key after restore? Type 'yes' to rotate (recommended) or 'no' to skip: " answer
+            read -r -t 300 -p "Emergency capsule: Rotate Age key after restore? Type 'yes' to rotate (recommended) or 'no' to skip: " answer || answer="no"
             case "$answer" in
                 yes|YES) return 0 ;;
                 no|NO)   log_warn "Operator chose not to rotate Age key."; return 1 ;;
@@ -377,7 +378,9 @@ _restore_should_rotate_age_key() {
     fi
     return 0
 }
-trap cleanup EXIT HUP INT TERM ERR
+trap cleanup EXIT ERR
+trap 'operation_release 130; cleanup; exit 130' INT
+trap 'operation_release 143; cleanup; exit 143' HUP TERM
 
 # Mirrors backup.sh by auto-discovering rclone.conf across five priority locations.
 
@@ -1410,7 +1413,7 @@ _display_new_key() {
         fi
         local _confirm=""
         while [[ "$_confirm" != "SAVED" ]]; do
-            read -r -p "  Type SAVED (all caps) to confirm the key is recorded and start services: " _confirm
+            read -r -t 300 -p "  Type SAVED (all caps) to confirm the key is recorded and start services: " _confirm || _confirm=""
             if [[ "$_confirm" != "SAVED" ]]; then
                 log_warn "  Please type exactly: SAVED"
             fi
@@ -2345,31 +2348,13 @@ main() {
     require_root "$@"
     auto_fix_critical_permissions "$PROJECT_ROOT"
 
-    ensure_dir "$VW_LOCK_DIR" 700 "$(get_real_user)" || {
-        log_error "Failed to initialize operations lock directory: $VW_LOCK_DIR"; exit 1
-    }
-
-    # Use bash 4.1+ automatic FD allocation instead of hardcoded
-    # FD for the operations lock, preventing silent clobber of any open FD.
-    local OPS_LOCK_FD
-    exec {OPS_LOCK_FD}>"$VW_OPERATIONS_LOCK"
-    flock -n "$OPS_LOCK_FD" || {
-        log_error "Another update/restore/maintenance/backup operation is already running."
-        log_error "Lock file: $VW_OPERATIONS_LOCK"
-        exit 1
-    }
-
-    local RESTORE_LOCK_FILE="/run/lock/vaultwarden-restore.lock"
-    _ensure_lock_file "$RESTORE_LOCK_FILE" || exit 1
-    local RESTORE_LOCK_FD
-    exec {RESTORE_LOCK_FD}>"$RESTORE_LOCK_FILE"
-    flock -n "$RESTORE_LOCK_FD" || {
-        log_error "Another restore is already running."
-        log_error "Lock file: ${RESTORE_LOCK_FILE}"
-        log_error "If you are certain no restore is active, remove it and retry:"
-        log_error "  sudo rm -f ${RESTORE_LOCK_FILE}"
-        exit 1
-    }
+    if [[ "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]; then
+        operation_acquire \
+            --id restore \
+            --label "Restore" \
+            --specific-lock /run/lock/vaultwarden-restore.lock || exit $?
+        operation_set_phase "prepare" "Preparing restore"
+    fi
 
     # Re-load .env strictly now that we are root (surfaces hard errors).
     # When USE_REMOTE=true and .env is absent (emergency restore on a fresh
@@ -2547,7 +2532,7 @@ main() {
             log_error "Cannot confirm restore: stdin is not a TTY. Re-run with --force for non-interactive restore."
             exit 1
         fi
-        if ! operator_confirm_yes_no "Proceed with destructive restore?" "no" 0; then
+        if ! operator_confirm_yes_no "Proceed with destructive restore?" "no" 300; then
             log_info "Restore cancelled."
             exit 0
         fi
@@ -2604,6 +2589,7 @@ main() {
     fi
 
     create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" "$RESTORE_TYPE" || exit 1
+    operation_set_phase "snapshot" "Created pre-restore snapshot"
 
     RESTORE_DESTRUCTIVE_PHASE_STARTED=false
     _RESTORE_SAFETY_NET_RUNNING=false
@@ -2648,6 +2634,7 @@ main() {
 
     trap _restore_safety_net ERR HUP INT TERM
     if [[ "$DRY_RUN" != "true" ]]; then
+        operation_set_phase "stop" "Stopping VaultWarden services"
         log_info "Stopping services (up to 30s grace period)..."
         if ! timeout 35 docker compose stop --timeout 30; then
             log_warn "docker compose stop did not complete cleanly within 35s — forcing..."
@@ -2658,10 +2645,12 @@ main() {
 
     case "$RESTORE_TYPE" in
         db)
+            operation_set_phase "restore-db" "Restoring database backup"
             restore_db "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE"
             ;;
         full|emergency)
             RESTORE_DESTRUCTIVE_PHASE_STARTED=true
+            operation_set_phase "restore-full" "Restoring full application state"
             restore_full "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE" "$archive_format"
             ;;
         *)

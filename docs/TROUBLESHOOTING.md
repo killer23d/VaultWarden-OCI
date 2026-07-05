@@ -21,12 +21,19 @@ Then narrow by symptom:
 
 | Symptom | First command |
 | :-- | :-- |
+| SSH disconnected during setup/backup/restore/update | `sudo make operations` |
 | Vault inaccessible | `sudo ./maintenance.sh health` |
 | Cloudflare 525 | local SNI curl + Caddy logs |
 | Backup failed | `sudo ./backup.sh list` and service journal |
 | Restore failed | inspect backup metadata and key used |
 | Secrets unavailable | `sudo make key-health` and SOPS decrypt check |
 | Timer failed | `journalctl -u <unit> -n 100 --no-pager` |
+
+If `sudo make operations` shows the original operation is still active, inspect
+its phase and wait or use the guarded stop flow if it is offered. The project
+will not automatically terminate `apt` or `dpkg`. If the operation is no longer
+active, rerun the original command without adding `--force` unless a reset is
+specifically required.
 
 ---
 

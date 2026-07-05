@@ -14,9 +14,8 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # Start even if /etc/vaultwarden/vaultwarden.env is not installed yet;
 # maintenance.sh reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# Skip health checks during maintenance so the timer does not raise false failures.
-# Uses /run/lock (not /tmp) so the file is visible across PrivateTmp= namespaces.
-ExecCondition=/bin/bash -c '! test -f /run/lock/vaultwarden-maintenance.lock'
+# maintenance.sh health owns duplicate-run protection. With --fix, it also uses
+# the shared operation guard and exits cleanly if another operation is active.
 # Add --email only after alert delivery is configured.
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh health --fix
 # This unit intentionally runs as root because the current backup/maintenance
@@ -37,7 +36,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 # NOTE: SOPS_AGE_KEY_FILE must reside under /etc/vaultwarden/ (or another
 # ReadWritePaths entry). Paths under /home/ are read-only with ProtectHome=read-only.
-# /run/lock is needed for the flock() lock file (ProtectSystem=strict makes /var/lock read-only).
+# /run/lock is needed for flock() lock files and /run/vaultwarden* for runtime operation state.
 #
 # The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
 # mode this is /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:

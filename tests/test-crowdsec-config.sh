@@ -75,4 +75,13 @@ assert_file_contains "$acquis_file" 'avoid'
 assert_file_contains "$compose_example" 'LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S.%3f%z"'
 assert_file_contains "$compose_example" 'IP_HEADER: ${IP_HEADER:-CF-Connecting-IP}'
 
+cf_bouncer_install_block="$(awk '/Attempting apt install of crowdsec-cloudflare-worker-bouncer/,/Installed crowdsec-cloudflare-worker-bouncer via apt/' "$setup_script")"
+grep -Fq 'Dpkg::Options::=--force-confdef' <<< "$cf_bouncer_install_block" \
+    || fail "Cloudflare Workers bouncer apt install must include --force-confdef"
+grep -Fq 'Dpkg::Options::=--force-confold' <<< "$cf_bouncer_install_block" \
+    || fail "Cloudflare Workers bouncer apt install must preserve the project-created stub config with --force-confold"
+if grep -Fq 'apt-get install -y crowdsec-cloudflare-worker-bouncer' "$setup_script"; then
+    fail "Cloudflare Workers bouncer apt install regressed to bare noninteractive apt without dpkg conffile policy"
+fi
+
 printf 'CrowdSec configuration tests passed.\n'

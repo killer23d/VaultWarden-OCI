@@ -386,21 +386,23 @@ _ensure_runtime_lock_files() {
     local -a lock_files=(
         "/run/lock/vaultwarden-backup.lock"
         "/run/lock/vaultwarden-operations.lock"
+        "/run/lock/vaultwarden-crowdsec-setup.lock"
         "/run/lock/vaultwarden-dns-update.lock"
         "/run/lock/vaultwarden-firewall-update.lock"
         "/run/lock/vaultwarden-health.lock"
+        "/run/lock/vaultwarden-key-rotate.lock"
+        "/run/lock/vaultwarden-maintenance.lock"
+        "/run/lock/vaultwarden-permission-repair.lock"
+        "/run/lock/vaultwarden-restore.lock"
+        "/run/lock/vaultwarden-setup.lock"
+        "/run/lock/vaultwarden-uninstall.lock"
+        "/run/lock/vaultwarden-update.lock"
     )
     local lock_file
     for lock_file in "${lock_files[@]}"; do
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would ensure lock file: ${lock_file} -> ${lock_owner}:${lock_group} 0660"
             continue
-        fi
-        # Self-heal: remove stale locks not actively held before recreating.
-        if [[ -e "$lock_file" ]]; then
-            if flock -n "$lock_file" true 2>/dev/null; then
-                rm -f "$lock_file" 2>/dev/null || true
-            fi
         fi
         if [[ ! -e "$lock_file" ]]; then
             install -m 0660 -o "$lock_owner" -g "$lock_group" /dev/null "$lock_file" 2>/dev/null || {
@@ -410,7 +412,8 @@ _ensure_runtime_lock_files() {
                 continue
             }
         else
-            # File is actively held — correct permissions in place without removing.
+            # Correct permissions in place without removing the file. The active
+            # lock owner is determined by flock(), not pathname existence.
             chown "${lock_owner}:${lock_group}" "$lock_file" 2>/dev/null || true
             chmod 0660 "$lock_file" 2>/dev/null || true
         fi
@@ -889,7 +892,7 @@ install_units() {
         auto) _enable_now=true ;;
         ask)
             local _answer
-            read -r -p "Enable and start backup/maintenance timers now? [yes/no] (default: no): " _answer
+            read -r -t 300 -p "Enable and start backup/maintenance timers now? [yes/no] (default: no): " _answer || _answer="no"
             case "$_answer" in y|Y|yes|YES) _enable_now=true ;; esac
             ;;
         manual) _enable_now=false ;;

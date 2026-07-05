@@ -65,7 +65,7 @@ grep -q 'live-operational-age-key-with-a-deliberately-long-name.txt' "$TMP/resto
 
 # Restore destructive confirmation must use shared default-no helper and preserve automation/non-interactive gates.
 grep -Fq 'operator_attention warn "Destructive restore confirmation"' "$ROOT/utilities/restore-run.sh" || fail 'restore destructive context does not use operator_attention'
-grep -Fq 'operator_confirm_yes_no "Proceed with destructive restore?" "no" 0' "$ROOT/utilities/restore-run.sh" || fail 'restore destructive confirmation is not explicit default-no yes/no helper'
+grep -Fq 'operator_confirm_yes_no "Proceed with destructive restore?" "no" 300' "$ROOT/utilities/restore-run.sh" || fail 'restore destructive confirmation is not explicit default-no timed yes/no helper'
 grep -Fq 'if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer preserves force/dry-run/inspect bypass gate'
 grep -Fq 'stdin is not a TTY' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer fails closed for non-TTY stdin'
 grep -Fq 'Re-run with --force for non-interactive restore' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer documents --force automation path'

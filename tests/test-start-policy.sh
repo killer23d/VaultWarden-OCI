@@ -77,17 +77,19 @@ awk '
 # skip without hiding real backup/rclone failures.
 for svc in "$DB_BACKUP_SERVICE" "$FULL_BACKUP_SERVICE"; do
     reject 'vaultwarden-maintenance\.lock' "$svc" "backup service must not use stale maintenance lock: $svc"
-    require 'vaultwarden-operations\.lock' "$svc" "backup service must use shared operations lock: $svc"
-    require '--skip-ops-lock' "$svc" "backup service must delegate with --skip-ops-lock: $svc"
-    require 'exit 75' "$svc" "backup service must cleanly skip expected lock contention: $svc"
+    reject '/bin/bash -c .*flock|flock -n' "$svc" "backup service must not duplicate script-owned flock wrapper: $svc"
+    reject '--skip-ops-lock' "$svc" "backup service must not pass public lock bypass flag: $svc"
+    require 'backup\.sh run (db|full) --rclone --full-verification' "$svc" "backup service must delegate directly to backup.sh: $svc"
+    require 'exits 75' "$svc" "backup service must document clean lock-contention skip: $svc"
     require '^SuccessExitStatus=0 75$' "$svc" "backup service must treat only success/skip as success: $svc"
     reject '^SuccessExitStatus=.* 2' "$svc" "backup service must not hide real rclone/backup failures as success: $svc"
 done
 
-require '--skip-ops-lock' "$MAINT_RUN" 'maintenance runner must support inherited operations lock contract'
-require 'SKIP_OPS_LOCK=true' "$MAINT_RUN" 'maintenance runner must parse --skip-ops-lock'
-require 'vaultwarden-maintenance-run\.lock' "$MAINT_RUN" 'maintenance runner must keep canonical maintenance lock filename'
-require 'vaultwarden-operations\.lock' "$MAINT_SERVICE" 'maintenance service must use shared operations lock'
-require '--skip-ops-lock' "$MAINT_SERVICE" 'maintenance service must delegate with --skip-ops-lock'
-require 'exit 75' "$MAINT_SERVICE" 'maintenance service must cleanly skip expected lock contention'
+reject '--skip-ops-lock' "$MAINT_RUN" 'maintenance runner must not expose public lock bypass flag'
+reject 'SKIP_OPS_LOCK=true' "$MAINT_RUN" 'maintenance runner must not parse public lock bypass flag'
+require 'vaultwarden-maintenance\.lock' "$MAINT_RUN" 'maintenance runner must keep canonical maintenance lock filename'
+reject '/bin/bash -c .*flock|flock -n' "$MAINT_SERVICE" 'maintenance service must not duplicate script-owned flock wrapper'
+reject '--skip-ops-lock' "$MAINT_SERVICE" 'maintenance service must not pass public lock bypass flag'
+require 'maintenance\.sh run --comprehensive --email' "$MAINT_SERVICE" 'maintenance service must delegate directly to maintenance.sh'
+require 'exits[[:space:]]+75' "$MAINT_SERVICE" 'maintenance service must document clean lock-contention skip'
 require '^SuccessExitStatus=75$' "$MAINT_SERVICE" 'maintenance service must treat lock-contention skip as success'

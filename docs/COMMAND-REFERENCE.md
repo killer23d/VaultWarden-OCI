@@ -30,6 +30,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make restart` |  Restart all services (via startup.sh; root required) |
 | `make safe-restart` |  Restart with automatic rollback on failure (root required) |
 | `make status` |  Show service status, backup health, disk usage, and CrowdSec ban summary |
+| `make operations` |  Show active or interrupted VaultWarden operations |
 | `make health` |  Run health checks (set AUTO_RECOVER=true to auto-recover; root required) |
 | `make health-quick` |  Quick health check (concise output; root required) |
 | `make health-report` |  Run health check and write a timestamped report file (root required) |
@@ -546,7 +547,6 @@ OPTIONS:
     --update-firewall       Include firewall update in this run
     --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
-    --skip-ops-lock         Internal/systemd: caller already holds operations lock
     --help, -h              Show this help
     --version, -V           Print the VaultWarden-OCI version and exit
 
@@ -648,6 +648,12 @@ EXAMPLES:
 ```
 
 ### notify-failure.sh
+
+```
+(--help not available or requires root)
+```
+
+### operations-status.sh
 
 ```
 (--help not available or requires root)

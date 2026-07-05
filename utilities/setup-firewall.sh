@@ -13,6 +13,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+# shellcheck source=../lib/operations.sh
+source "${PROJECT_ROOT}/lib/operations.sh"
 # shellcheck source=../lib/defaults.sh
 source "${PROJECT_ROOT}/lib/defaults.sh"
 
@@ -304,9 +306,21 @@ _phase_iptables() {
                 rm -f "$_ipt_backup_v6"; _ipt_backup_v6=""
             }
         fi
-        trap '_ipt_cleanup' ERR INT TERM
+        _setup_firewall_error_cleanup() {
+            local exit_rc=$?
+            _ipt_cleanup
+            operation_release "$exit_rc"
+            exit "$exit_rc"
+        }
+        trap _setup_firewall_error_cleanup ERR INT TERM
+        _setup_firewall_exit_cleanup() {
+            local exit_rc=$?
+            rm -f "${_ipt_backup_v4:-}" "${_ipt_backup_v6:-}"
+            operation_release "$exit_rc"
+            exit "$exit_rc"
+        }
         # On success, clean up backup files without performing a rollback.
-        trap 'rm -f "${_ipt_backup_v4:-}" "${_ipt_backup_v6:-}"' EXIT
+        trap _setup_firewall_exit_cleanup EXIT
     fi
 
     local compose_file="${COMPOSE_FILE:-docker-compose.yml}"
@@ -498,14 +512,14 @@ print(n.get('name', '${net}_network'))
             _do_install=true
         else
             local _reply
-            read -r -p "Install netfilter-persistent and iptables-persistent now? [yes/no] (default: no): " _reply
+            read -r -t 300 -p "Install netfilter-persistent and iptables-persistent now? [yes/no] (default: no): " _reply || _reply="no"
             [[ "${_reply,,}" == "y" || "${_reply,,}" == "yes" ]] && _do_install=true
         fi
 
         if [[ "$_do_install" == "true" ]]; then
             log_info "Installing netfilter-persistent iptables-persistent..."
-            DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                netfilter-persistent iptables-persistent >/dev/null 2>&1 || {
+            operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                netfilter-persistent iptables-persistent || {
                 log_warn "apt-get install netfilter-persistent failed — rules will not persist across reboots."
                 return 0
             }
@@ -526,6 +540,21 @@ print(n.get('name', '${net}_network'))
 
 main() {
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
+    if [[ "$DRY_RUN" != "true" ]]; then
+        operation_acquire --id setup --label "Setup" || exit $?
+        _setup_firewall_main_cleanup() {
+            local exit_rc=$?
+            operation_release "$exit_rc"
+            _ipt_cleanup
+            exit "$exit_rc"
+        }
+        trap _setup_firewall_main_cleanup EXIT
+        trap 'operation_release 130; _ipt_cleanup; exit 130' INT
+        trap 'operation_release 143; _ipt_cleanup; exit 143' HUP TERM
+        operation_set_phase "firewall" "Firewall setup"
+    else
+        trap _ipt_cleanup EXIT
+    fi
 
     [[ "$AUTO_MODE" == "true" ]] && log_info "Running in non-interactive (auto) mode (--yes implied)."
     [[ "$AUTO_MODE" != "true" && "$YES" == "true" ]] && log_info "Auto-confirm (--yes) enabled."

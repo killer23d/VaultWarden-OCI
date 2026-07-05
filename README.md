@@ -95,6 +95,7 @@ A recovery kit is the plaintext operator handoff containing the Age private key 
 sudo make up                 # start stack through startup.sh
 sudo make restart            # restart stack through startup.sh
 sudo make health             # health check
+sudo make operations         # active/interrupted operation status
 sudo make backup             # db backup
 sudo make backup-full        # full DR backup
 sudo make backup-emergency   # clone-grade emergency backup

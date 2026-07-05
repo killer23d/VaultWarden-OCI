@@ -34,6 +34,16 @@ else
     log_dry_run()  { printf '[%s] [%s] [DRY RUN] %s\n'  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$*"; }
 fi
 
+if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/common.sh" ]]; then
+    # shellcheck source=../lib/common.sh
+    source "${PROJECT_ROOT_FALLBACK}/lib/common.sh"
+    init_common_lib "$0"
+fi
+if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/operations.sh" ]]; then
+    # shellcheck source=../lib/operations.sh
+    source "${PROJECT_ROOT_FALLBACK}/lib/operations.sh"
+fi
+
 die() { log_error "$*"; exit 1; }
 info()    { log_info "$@"; }
 success() { log_success "$@"; }
@@ -342,11 +352,11 @@ _confirm_age_key_safety() {
     first_pub="$(_extract_age_public_key "$first_key" 2>/dev/null || true)"
     if [[ -n "$first_pub" ]]; then
         warn "Type the first Age public key shown above to continue."
-        read -r -p "Age public key: " typed
+        read -r -t 300 -p "Age public key: " typed || typed=""
         [[ "$typed" == "$first_pub" ]] || die "Confirmation mismatch — uninstall aborted before destructive changes."
     else
         warn "Could not extract a public key automatically."
-        read -r -p "Type DELETE-MY-KEYS to continue: " typed
+        read -r -t 300 -p "Type DELETE-MY-KEYS to continue: " typed || typed=""
         [[ "$typed" == "DELETE-MY-KEYS" ]] || die "Confirmation not given — uninstall aborted before destructive changes."
     fi
     success "Age-key preservation confirmed."
@@ -546,7 +556,7 @@ _confirm_external_backup_delete() {
         return 1
     fi
     local answer
-    read -r -p "Delete external BACKUP_DIR '$BACKUP_DIR'? Type DELETE-BACKUPS to confirm, anything else to preserve: " answer
+    read -r -t 300 -p "Delete external BACKUP_DIR '$BACKUP_DIR'? Type DELETE-BACKUPS to confirm, anything else to preserve: " answer || answer=""
     [[ "$answer" == "DELETE-BACKUPS" ]]
 }
 
@@ -677,7 +687,7 @@ remove_crowdsec() {
     local pkg
     for pkg in "${pkgs[@]}"; do
         if dpkg -s "$pkg" >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge "$pkg" 2>/dev/null \
+            operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge "$pkg" \
                 && success "Removed package: $pkg" \
                 || warn "Could not remove package: $pkg"
         fi
@@ -692,8 +702,8 @@ remove_crowdsec() {
     _safe_rm_rf /var/lib/crowdsec || true
     _safe_rm_rf /var/log/crowdsec || true
 
-    apt-get update -qq 2>/dev/null || true
-    apt-get autoremove -y 2>/dev/null || true
+    operation_package_run apt-get update -qq || true
+    operation_package_run apt-get autoremove -y || true
     return 0
 }
 
@@ -756,7 +766,7 @@ remove_swap_and_apt_sources() {
     fi
 
     rm -f /etc/apt/sources.list.d/ubuntu-universe.list 2>/dev/null || true
-    apt-get update -qq 2>/dev/null || true
+    operation_package_run apt-get update -qq || true
     return 0
 }
 
@@ -858,14 +868,14 @@ offer_final_backup() {
     echo ""
 
     local answer continue_anyway
-    read -r -p "Run a final encrypted backup now? [yes/no] (default: no): " answer
+    read -r -t 300 -p "Run a final encrypted backup now? [yes/no] (default: no): " answer || answer="no"
     if [[ "$answer" == "yes" ]]; then
         info "Running final full backup..."
         if bash "${PROJECT_DIR}/backup.sh" run full 2>&1; then
             success "Final backup completed. Review the output above for the backup location."
         else
             warn "Backup exited with errors. Review the output above."
-            read -r -p "Continue with uninstall despite backup failure? [yes/no] (default: no): " continue_anyway
+            read -r -t 300 -p "Continue with uninstall despite backup failure? [yes/no] (default: no): " continue_anyway || continue_anyway="no"
             [[ "$continue_anyway" == "yes" ]] || { info "Aborted — nothing changed."; exit 0; }
         fi
     else
@@ -885,23 +895,40 @@ confirm_uninstall() {
     fi
 
     local confirm
-    read -r -p "Type 'UNINSTALL' to confirm, or anything else to abort: " confirm
+    if ! read -r -t 300 -p "Type 'UNINSTALL' to confirm, or anything else to abort: " confirm; then
+        printf '\n' >&2
+        die "No confirmation received within 5 minutes. The uninstall was not performed."
+    fi
     [[ "$confirm" == "UNINSTALL" ]] || { info "Aborted — nothing changed."; exit 0; }
     return 0
 }
 
 main() {
+    if [[ "$DRY_RUN" != "true" ]] && declare -f operation_acquire >/dev/null 2>&1; then
+        operation_acquire \
+            --id uninstall \
+            --label "Uninstall" \
+            --specific-lock /run/lock/vaultwarden-uninstall.lock || exit $?
+        trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT
+        trap 'operation_release 130; exit 130' INT
+        trap 'operation_release 143; exit 143' HUP TERM
+        operation_set_phase "1" "Resolving uninstall paths"
+    fi
     resolve_paths
+    operation_set_phase "2" "Confirming uninstall" 2>/dev/null || true
     show_summary
     confirm_uninstall
     offer_final_backup
     _confirm_age_key_safety
 
+    operation_set_phase "3" "Removing services and runtime artifacts" 2>/dev/null || true
     disable_systemd_units
     remove_docker_stack
     remove_runtime_artifacts
+    operation_set_phase "4" "Removing persistent state and installed files" 2>/dev/null || true
     remove_state_and_mount
     remove_installed_files
+    operation_set_phase "5" "Removing packages and integrations" 2>/dev/null || true
     remove_sops_and_packages
     remove_crowdsec
     remove_firewall_rules

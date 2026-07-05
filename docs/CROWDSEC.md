@@ -171,6 +171,12 @@ The script runs 9 phases:
 | 8 | Enables and starts all services (firewall bouncer + CF bouncer) |
 | 9 | Writes your admin IP to the CrowdSec allowlist |
 
+If SSH disconnects during setup, run `sudo make operations`. If CrowdSec setup
+is still active, wait or use the guarded conflict flow. If it is no longer
+active, rerun `sudo ./utilities/setup-crowdsec.sh` with the same non-force
+options and let it reconcile the current installation state. Use `--force` only
+when you intentionally want to reset CrowdSec state.
+
 The top-level collection set is intentionally limited to `crowdsecurity/caddy`,
 `crowdsecurity/linux`, `crowdsecurity/iptables`, and
 `Dominic-Wagner/vaultwarden`. AppSec collections are not installed because this
@@ -269,7 +275,7 @@ To disable the CF bouncer guard (paid plan only):
 # .env
 CF_FREE_PLAN=false
 ```
-Then re-run: `sudo ./utilities/setup-crowdsec.sh --force`
+Then re-run: `sudo ./utilities/setup-crowdsec.sh`
 
 ---
 
@@ -346,7 +352,7 @@ sudo ./utilities/setup-crowdsec.sh --admin-ip <your-ip>
 # 2. Store it in secrets
 sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
 # 3. Re-run setup to apply
-sudo ./utilities/setup-crowdsec.sh --force
+sudo ./utilities/setup-crowdsec.sh
 ```
 
 ### Checking CrowdSec hub updates
@@ -427,7 +433,7 @@ routes_to_protect:
 
 Fix: re-render from the fixed template:
 ```bash
-sudo ./utilities/setup-crowdsec.sh --force
+sudo ./utilities/setup-crowdsec.sh
 ```
 
 ### "failed to send metrics: 200 OK" warning
@@ -448,7 +454,7 @@ sudo journalctl -u crowdsec-cloudflare-worker-bouncer -n 100 --no-pager
 
 Common causes:
 - **`lapi_key` rejected** — the key in the bouncer config doesn't match the one
-  registered in CrowdSec. Re-run: `sudo ./utilities/setup-crowdsec.sh --force`
+  registered in CrowdSec. Re-run: `sudo ./utilities/setup-crowdsec.sh`
 - **`api_token` error** — the Cloudflare token has wrong permissions or was
   revoked. Rotate: `sudo ./edit-secrets.sh rotate cf_worker_bouncer_token`
 - **`account_id` not found** — ensure `CF_ACCOUNT_ID` in `.env` matches your
@@ -465,8 +471,8 @@ grep CF_FREE_PLAN .env
 # Check what's in only_include_decisions_from
 sudo grep only_include /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
 
-# If community lists are slipping through, force-rewrite the config
-sudo ./utilities/setup-crowdsec.sh --force
+# If community lists are slipping through, re-render the config
+sudo ./utilities/setup-crowdsec.sh
 ```
 
 ### Worker not enforcing decisions
@@ -526,7 +532,7 @@ sudo systemctl disable crowdsec-cloudflare-worker-bouncer || true
 sudo cscli bouncers delete cloudflare-bouncer || true
 
 # 3. Run the new setup (handles everything else)
-sudo ./utilities/setup-crowdsec.sh --force
+sudo ./utilities/setup-crowdsec.sh
 
 # 4. Set Worker route to Fail Open in Cloudflare dashboard (section 1.3)
 ```

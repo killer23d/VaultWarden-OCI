@@ -12,6 +12,7 @@ source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
+source "$PROJECT_ROOT/lib/operations.sh"
 source "$PROJECT_ROOT/lib/email.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
 source "$PROJECT_ROOT/lib/secrets.sh"
@@ -262,18 +263,7 @@ update_dns_record() {
     domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
     [[ -z "$domain" ]] && { log_error "DOMAIN not set in .env"; return 1; }
 
-    local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
-    local _DNS_LOCK_FD=""
-    _ensure_lock_file "$DNS_LOCK"
-    exec {_DNS_LOCK_FD}>"$DNS_LOCK" 2>/dev/null || {
-        log_error "Cannot open DNS run-lock: ${DNS_LOCK}"
-        return 1
-    }
-    if ! flock -n "$_DNS_LOCK_FD"; then
-        log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."
-        return 0
-    fi
-
+    operation_set_phase "check" "Checking Cloudflare DNS record" 2>/dev/null || true
     log_info "Checking DNS record for $domain..."
 
     local current_ip
@@ -412,7 +402,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 main() {
+    local rc
     require_root "$@"
+    if [[ "$DRY_RUN" != "true" ]]; then
+        operation_acquire \
+            --id dns-update \
+            --label "DNS update" \
+            --specific-lock /run/lock/vaultwarden-dns-update.lock \
+            --non-interactive skip || {
+                rc=$?
+                (( rc == 75 )) && exit 0
+                exit "$rc"
+            }
+        trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT
+        trap 'operation_release 130; exit 130' INT
+        trap 'operation_release 143; exit 143' HUP TERM
+    fi
     _load_env
     auto_fix_critical_permissions "$PROJECT_ROOT"
     update_dns_record

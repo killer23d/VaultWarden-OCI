@@ -14,11 +14,10 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # setup.sh systemd install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# Scheduled runs hold the shared operations lock before delegating to
-# maintenance.sh. Expected lock contention means another restore/backup/update
-# is active, so this timer run exits 75 and is treated as a clean skip.
-# Real maintenance failures still use the script's normal non-zero exits.
-ExecStart=/bin/bash -c 'umask 117; touch /run/lock/vaultwarden-operations.lock; chgrp vaultwarden /run/lock/vaultwarden-operations.lock 2>/dev/null || true; chmod 0660 /run/lock/vaultwarden-operations.lock 2>/dev/null || true; exec 9>/run/lock/vaultwarden-operations.lock; if ! flock -n 9; then echo "Scheduled maintenance skipped: another VaultWarden operation is active."; exit 75; fi; exec /opt/vaultwarden-scripts/maintenance.sh run --comprehensive --email --skip-ops-lock'
+# maintenance.sh owns the shared operation guard. Expected lock contention exits 75
+# and is treated as a clean skip. Real maintenance failures still use the
+# script's normal non-zero exits.
+ExecStart=/opt/vaultwarden-scripts/maintenance.sh run --comprehensive --email
 User=root
 Group=root
 StandardOutput=journal
@@ -28,7 +27,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-# /run/lock needed for the maintenance lock file.
+# /run/lock is needed for flock() lock files and /run/vaultwarden* for runtime operation state.
 # The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
 # mode this is /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:
 #   /etc/systemd/system/<unit>.d/10-state-dir.conf

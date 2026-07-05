@@ -218,7 +218,7 @@ optimize_database() {
     # Call utilities/backup-run.sh directly (not the backup.sh dispatcher) so
     # this lib function does not depend on the caller's working directory and
     # cannot create a circular dispatcher loop.
-    if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db --skip-ops-lock; then
+    if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db; then
         log_error "Pre-optimization backup FAILED — aborting to avoid an unsafe rollback point"
         [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
         return 1

@@ -11,6 +11,7 @@ source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
+source "$PROJECT_ROOT/lib/operations.sh"
 source "$PROJECT_ROOT/lib/email.sh"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
@@ -100,7 +101,7 @@ run_deep_db_maintenance() {
     local backup_ts_marker
     backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
     log_info "Invoking: ${PROJECT_ROOT}/utilities/backup-run.sh run db"
-    if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db --skip-ops-lock; then
+    if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db; then
         rm -f "$backup_ts_marker"
         log_error "Pre-maintenance safety backup failed — aborting deep maintenance"
         if [[ "$DB_DEEP_FORCE" == "false" ]]; then
@@ -205,34 +206,17 @@ done
 main() {
     require_root
 
-    local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
-    local _OPS_LOCK_FD
-
-    # Create lock file with relaxed perms so non-root service users can acquire it.
-    _ensure_lock_file "$OPS_LOCK"
-
-    exec {_OPS_LOCK_FD}>"$OPS_LOCK"
-    if ! flock -n "$_OPS_LOCK_FD"; then
-        log_error "Another operation (update/restore/maintenance) is already running. Aborting."
-        exit 1
-    fi
-
-    # Maintenance presence lock — same flock pattern as maintenance-run.sh.
-    # Also adds the missing `trap 'perform_cleanup'` so the file is actually
-    # removed on all exit paths (previously the register_cleanup was registered
-    # but no trap wired it to EXIT/signals, so the file was never cleaned up).
-    local _MAINT_LOCK="/run/lock/vaultwarden-maintenance.lock"
-    local _MAINT_LOCK_FD
-    _ensure_lock_file "$_MAINT_LOCK"
-    exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
-    if ! flock -n "$_MAINT_LOCK_FD"; then
-        log_error "Another maintenance operation is already running. Exiting."
-        exit 1
-    fi
-    register_cleanup rm -f "$_MAINT_LOCK"
-    # shellcheck disable=SC2064
-    trap "exec ${_MAINT_LOCK_FD}>&- 2>/dev/null; exec ${_OPS_LOCK_FD}>&- 2>/dev/null; perform_cleanup" EXIT HUP INT TERM
+    operation_acquire \
+        --id maintenance-db \
+        --label "Database maintenance" \
+        --specific-lock /run/lock/vaultwarden-maintenance.lock \
+        --non-interactive skip || exit $?
+    trap 'rc=$?; operation_release "$rc"; perform_cleanup; exit "$rc"' EXIT
+    trap 'operation_release 130; perform_cleanup; exit 130' INT
+    trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
+    operation_set_phase "1" "Preparing database maintenance"
     _load_env
+    operation_set_phase "2" "Running deep database maintenance"
     run_deep_db_maintenance
     exit $?
 }

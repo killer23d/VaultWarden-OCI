@@ -8,6 +8,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
+source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/runtime-permissions.sh"
 init_common_lib "$0"
 
@@ -46,6 +47,17 @@ esac
 if [[ "$MODE" == "repair" && $EUID -ne 0 ]]; then
     echo "ERROR repair requires root: sudo utilities/repair-permissions.sh" >&2
     exit 1
+fi
+
+if [[ "$MODE" == "repair" ]]; then
+    operation_acquire \
+        --id permission-repair \
+        --label "Permission repair" \
+        --specific-lock /run/lock/vaultwarden-permission-repair.lock || exit $?
+    operation_set_phase "repair" "Repairing known permission drift"
+    trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT
+    trap 'operation_release 130; exit 130' INT
+    trap 'operation_release 143; exit 143' HUP TERM
 fi
 
 # Best effort: load environment if present; continue with defaults otherwise.

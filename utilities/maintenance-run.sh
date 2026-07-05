@@ -11,6 +11,7 @@ source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
+source "$PROJECT_ROOT/lib/operations.sh"
 source "$PROJECT_ROOT/lib/email.sh"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$PROJECT_ROOT/lib/docker.sh"
@@ -34,7 +35,6 @@ DRY_RUN=false
 EMAIL_NOTIFY=false
 COMPREHENSIVE=false
 TARGETED_MODE=false
-SKIP_OPS_LOCK=false
 LOG_RETENTION_DAYS=30
 DB_BACKUP_RETENTION_DAYS=14
 FULL_BACKUP_RETENTION_DAYS=30
@@ -64,7 +64,6 @@ OPTIONS:
     --update-firewall       Include firewall update in this run
     --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
-    --skip-ops-lock         Internal/systemd: caller already holds operations lock
     --help, -h              Show this help
     --version, -V           Print the VaultWarden-OCI version and exit
 
@@ -102,7 +101,6 @@ while [[ $# -gt 0 ]]; do
         --update-firewall) UPDATE_FIREWALL=true;    shift ;;
         --dry-run)         DRY_RUN=true;            shift ;;
         --email)           EMAIL_NOTIFY=true;       shift ;;
-        --skip-ops-lock)   SKIP_OPS_LOCK=true;      shift ;;
         --help|-h|help)    show_help; exit 0 ;;
         --version|-V)      print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option for 'run': $1"; show_help; exit 1 ;;
@@ -112,38 +110,20 @@ done
 main() {
     require_root
 
-    local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
-    local _OPS_LOCK_FD=""
-    local _MAINT_LOCK="/run/lock/vaultwarden-maintenance-run.lock"
-    local _MAINT_LOCK_FD
-
-    # Idempotently create lock file with correct ownership and relaxed perms so
-    # non-root service users (injected by setup-systemd.sh) can acquire it.
-    if [[ "$SKIP_OPS_LOCK" != "true" ]]; then
-        _ensure_lock_file "$OPS_LOCK"
-        exec {_OPS_LOCK_FD}>"$OPS_LOCK"
-        if ! flock -n "$_OPS_LOCK_FD"; then
-            log_error "Another operation (update/restore/maintenance) is already running. Aborting."
-            exit 1
-        fi
-    fi
-    _ensure_lock_file "$_MAINT_LOCK"
-    exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
-    if ! flock -n "$_MAINT_LOCK_FD"; then
-        log_error "Another maintenance operation is already running. Exiting."
-        exit 1
-    fi
-    register_cleanup rm -f "$_MAINT_LOCK"
-    # Explicitly close lock FDs on exit for clean resource release.
-    # shellcheck disable=SC2086
+    operation_acquire \
+        --id maintenance \
+        --label "Maintenance" \
+        --specific-lock /run/lock/vaultwarden-maintenance.lock \
+        --non-interactive skip || exit $?
     _cleanup_locks() {
-        exec ${_MAINT_LOCK_FD}>&- 2>/dev/null || true
-        if [[ -n "${_OPS_LOCK_FD:-}" ]]; then
-            exec ${_OPS_LOCK_FD}>&- 2>/dev/null || true
-        fi
+        local rc=$?
+        operation_release "$rc"
         perform_cleanup
+        return "$rc"
     }
-    trap _cleanup_locks EXIT HUP INT TERM
+    trap _cleanup_locks EXIT
+    trap 'operation_release 130; perform_cleanup; exit 130' INT
+    trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
 
     log_header "VaultWarden-OCI Maintenance Manager"
     [[ "$DRY_RUN"      == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
@@ -161,6 +141,7 @@ main() {
     local db_optimization_result=0 firewall_update_result=1 dns_update_result=1
     local health_validation_result=0
 
+    operation_set_phase "1" "System cleanup"
     log_header "Phase 1/4 — System cleanup"
     cleanup_logs    || log_cleanup_result=$?
     cleanup_backups || backup_cleanup_result=$?
@@ -170,10 +151,12 @@ main() {
         docker_cleanup_result=$?
     fi
 
+    operation_set_phase "2" "Database optimization"
     log_header "Phase 2/4 — Database optimization"
     optimize_database || db_optimization_result=$?
 
     if [[ "$UPDATE_FIREWALL" == "true" || "$UPDATE_DNS" == "true" ]]; then
+        operation_set_phase "3" "Security and network maintenance"
         log_header "Phase 3/4 — Security and network maintenance"
         if [[ "$UPDATE_FIREWALL" == "true" ]]; then
             local _fw_args=("${SCRIPT_DIR}/utilities/maintenance-update-firewall.sh" update-firewall)
@@ -188,6 +171,7 @@ main() {
         fi
     fi
 
+    operation_set_phase "4" "Health validation"
     log_header "Phase 4/4 — Health validation"
     validate_system_health || health_validation_result=$?
 

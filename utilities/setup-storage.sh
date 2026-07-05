@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # one level up from utilities/
 cd "${PROJECT_ROOT}"
 
-REQUIRED_LIBS=(lib/log.sh lib/config.sh lib/common.sh lib/storage.sh lib/docker.sh lib/backup-utils.sh lib/migrate.sh)
+REQUIRED_LIBS=(lib/log.sh lib/config.sh lib/common.sh lib/operations.sh lib/storage.sh lib/docker.sh lib/backup-utils.sh lib/migrate.sh)
 for _lib in "${REQUIRED_LIBS[@]}"; do
     [[ -f "${PROJECT_ROOT}/${_lib}" ]] || {
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
@@ -19,6 +19,7 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/storage.sh"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "${PROJECT_ROOT}/lib/docker.sh"
@@ -245,7 +246,11 @@ _ss_prompt_block_storage() {
 
     _ss_show_block_devices
     while true; do
-        read -r -p "Enter attached block device path (for example /dev/disk/by-id/...): " device
+        if ! read -r -t 300 -p "Enter attached block device path (for example /dev/disk/by-id/...): " device; then
+            printf '\n' >&2
+            log_error "No block device path received within 5 minutes. Storage setup was not changed."
+            exit 1
+        fi
         if [[ -z "${device}" ]]; then
             log_error "Block device path cannot be empty."
             continue
@@ -261,7 +266,7 @@ _ss_prompt_block_storage() {
         break
     done
 
-    read -r -p "Enter data volume mount point [${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}]: " mount_point
+    read -r -t 300 -p "Enter data volume mount point [${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}]: " mount_point || mount_point=""
     _SS_DATA_DEVICE="${device}"
     _SS_DATA_MOUNT="${mount_point:-${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}}"
     log_info "Attached block storage selected; setup_data_volume will validate and provision using existing safeguards."
@@ -291,7 +296,7 @@ Choose storage setup mode:
   3) Show storage help
   4) Exit without changes
 EOF
-        read -r -p "Selection [1-4]: " choice
+        read -r -t 300 -p "Selection [1-4]: " choice || choice="4"
         case "${choice}" in
             1)
                 log_info "Operator selected boot-volume mode; DATA_VOLUME_DEVICE remains unset."
@@ -537,6 +542,22 @@ main() {
         log_error "This script must be run as root: sudo utilities/setup-storage.sh $*"
         exit 1
     }
+
+    if [[ "$DRY_RUN" != "true" ]]; then
+        case "${_SS_MODE}" in
+            setup)
+                operation_acquire --id storage-setup --label "Storage setup" || exit $?
+                operation_set_phase "setup" "Storage setup"
+                ;;
+            migrate)
+                operation_acquire --id storage-migration --label "Storage migration" || exit $?
+                operation_set_phase "migrate" "Storage migration"
+                ;;
+        esac
+        trap 'rc=$?; operation_release "$rc"; _ss_cleanup; exit "$rc"' EXIT
+        trap 'operation_release 130; _ss_cleanup; exit 130' INT
+        trap 'operation_release 143; _ss_cleanup; exit 143' HUP TERM
+    fi
 
     TMP_WORKDIR="$(mktemp -d -p "${PROJECT_ROOT}" vw_storage_tmp.XXXXXXXXXX)"
 

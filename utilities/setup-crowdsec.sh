@@ -57,7 +57,7 @@ cd "${PROJECT_ROOT}"
 # Library loading
 # ---------------------------------------------------------------------------
 _LIBS_LOADED=false
-for _lib in log.sh config.sh common.sh storage.sh secrets.sh; do
+for _lib in log.sh config.sh common.sh operations.sh storage.sh secrets.sh; do
     _lib_path="${PROJECT_ROOT}/lib/${_lib}"
     if [[ -f "$_lib_path" ]]; then
         # shellcheck disable=SC1090
@@ -302,14 +302,15 @@ _cs_start_service() {
 # Reset all CrowdSec components installed by a previous run.
 # ---------------------------------------------------------------------------
 _cs_reset_components() {
+    operation_set_phase "0" "Resetting installed CrowdSec components" 2>/dev/null || true
     log_info "=== PHASE 0: Resetting installed CrowdSec components (--force) ==="
 
     # If the CF bouncer package is in a broken dpkg half-configured state,
     # purge it now so apt doesn't abort on the next install attempt.
     if dpkg -l crowdsec-cloudflare-worker-bouncer 2>/dev/null | grep -qE '^(iF|iU|hF)'; then
         log_info "Detected broken dpkg state for crowdsec-cloudflare-worker-bouncer — purging."
-        DEBIAN_FRONTEND=noninteractive dpkg --purge --force-remove-reinstreq \
-            crowdsec-cloudflare-worker-bouncer 2>/dev/null || true
+        operation_package_run env DEBIAN_FRONTEND=noninteractive dpkg --purge --force-remove-reinstreq \
+            crowdsec-cloudflare-worker-bouncer || true
         log_info "Purge complete — package will be re-installed cleanly."
     fi
 
@@ -481,6 +482,49 @@ fi
 [[ "${CF_WORKER_BOUNCER_VERSION:-}" == "latest" ]] && CF_WORKER_BOUNCER_VERSION=""
 [[ "${FIREWALL_BOUNCER_VERSION:-}"  == "latest" ]] && FIREWALL_BOUNCER_VERSION=""
 
+_cs_previous_state=""
+_cs_previous_phase=""
+_cs_previous_phase_name=""
+_cs_state_file="${VW_OPERATIONS_STATE_DIR:-/run/vaultwarden-oci/operations}/crowdsec-setup.state"
+if declare -f _operation_state_get >/dev/null 2>&1 && [[ -r "$_cs_state_file" ]]; then
+    _cs_previous_state="$(_operation_state_get "$_cs_state_file" state 2>/dev/null || true)"
+    _cs_previous_phase="$(_operation_state_get "$_cs_state_file" phase 2>/dev/null || true)"
+    _cs_previous_phase_name="$(_operation_state_get "$_cs_state_file" phase_name 2>/dev/null || true)"
+fi
+
+if [[ "$DRY_RUN" != "true" ]] && declare -f operation_acquire >/dev/null 2>&1; then
+    operation_acquire \
+        --id crowdsec-setup \
+        --label "CrowdSec setup" \
+        --specific-lock /run/lock/vaultwarden-crowdsec-setup.lock || exit $?
+    _cs_operation_cleanup() {
+        local rc=$?
+        operation_release "$rc"
+        return "$rc"
+    }
+    trap _cs_operation_cleanup EXIT
+    trap 'operation_release 130; exit 130' INT
+    trap 'operation_release 143; exit 143' HUP TERM
+fi
+
+if [[ "$FORCE" == "true" && -n "$_cs_previous_state" && "$_cs_previous_state" != "complete" ]]; then
+    log_warn "Previous CrowdSec setup did not complete."
+    if [[ -n "$_cs_previous_phase$_cs_previous_phase_name" ]]; then
+        log_warn "Last recorded phase: ${_cs_previous_phase:-?}${_cs_previous_phase_name:+ - }${_cs_previous_phase_name}"
+    fi
+    log_warn "A normal re-run can inspect and reconcile the existing installation."
+    log_warn "Recommended: sudo ./utilities/setup-crowdsec.sh --use-latest"
+    log_warn "--force will reset CrowdSec state again."
+    if [[ ! -t 0 ]]; then
+        log_error "Refusing non-interactive --force after an incomplete CrowdSec setup record."
+        exit 1
+    fi
+    if ! operator_confirm_yes_no "Continue with force reset?" "no" 300; then
+        log_info "CrowdSec force reset cancelled."
+        exit 0
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Execution wrapper
 # ---------------------------------------------------------------------------
@@ -539,6 +583,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 1: CrowdSec base installation
 # ---------------------------------------------------------------------------
+operation_set_phase "1" "CrowdSec base installation" 2>/dev/null || true
 log_info "=== PHASE 1: CrowdSec base installation ==="
 
 _legacy_notify_unit="/etc/systemd/system/vaultwarden-notify-failure.service"
@@ -570,7 +615,7 @@ else
         rm -f "$_repo_script"
         return 1
     fi
-    bash "$_repo_script"
+    operation_package_run bash "$_repo_script"
     rm -f "$_repo_script"
 
     _cs_pkg="crowdsec"
@@ -599,11 +644,11 @@ else
         log_info "Firewall bouncer version: installing latest from packagecloud repository"
     fi
 
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$_cs_pkg"
+    operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y "$_cs_pkg"
     log_info "Installing CrowdSec firewall bouncer package..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$_fw_pkg"
+    operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y "$_fw_pkg"
     log_info "Installing ipset (required by crowdsec-firewall-bouncer iptables backend)..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ipset
+    operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y ipset
 
     # --- CRITICAL: rewrite upstream default port (8080) to 8090 immediately
     # after package install, before the service is ever started. This prevents
@@ -630,6 +675,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 1b: Firewall bouncer config (DOCKER-USER chain + key registration)
 # ---------------------------------------------------------------------------
+operation_set_phase "1b" "Firewall bouncer config" 2>/dev/null || true
 log_info "=== PHASE 1b: Firewall bouncer config ==="
 
 _FW_BOUNCER_CONFIG="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
@@ -638,7 +684,7 @@ _LAPI_PORT="$(_cs_resolve_lapi_port)"
 if [[ "$DRY_RUN" != "true" ]]; then
     if ! command -v ipset >/dev/null 2>&1; then
         log_warn "ipset not found — installing now (required by crowdsec-firewall-bouncer iptables backend)."
-        DEBIAN_FRONTEND=noninteractive apt-get install -y ipset \
+        operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y ipset \
             && log_success "ipset installed successfully." \
             || log_error "Failed to install ipset — crowdsec-firewall-bouncer may not start."
     fi
@@ -738,6 +784,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 2: Cloudflare Workers bouncer installation
 # ---------------------------------------------------------------------------
+operation_set_phase "2" "Cloudflare Workers bouncer installation" 2>/dev/null || true
 log_info "=== PHASE 2: Cloudflare Workers bouncer installation ==="
 
 _CF_PROXY_ENABLED="${CLOUDFLARE_PROXY_ENABLED:-false}"
@@ -785,7 +832,10 @@ STUB
         fi
 
         log_info "Attempting apt install of crowdsec-cloudflare-worker-bouncer..."
-        if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
+        if operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::=--force-confdef \
+            -o Dpkg::Options::=--force-confold \
+            crowdsec-cloudflare-worker-bouncer; then
             log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
             _installed_via_deb=true
             _apt_bin="$(command -v crowdsec-cloudflare-worker-bouncer 2>/dev/null || true)"
@@ -929,6 +979,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 3: CrowdSec hub collections
 # ---------------------------------------------------------------------------
+operation_set_phase "3" "CrowdSec hub collections" 2>/dev/null || true
 log_info "=== PHASE 3: CrowdSec hub collections ==="
 
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -955,6 +1006,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 4: Acquisition config
 # ---------------------------------------------------------------------------
+operation_set_phase "4" "Acquisition config" 2>/dev/null || true
 log_info "=== PHASE 4: Acquisition config ==="
 
 _project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
@@ -978,6 +1030,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 5: Bouncer API key
 # ---------------------------------------------------------------------------
+operation_set_phase "5" "Bouncer API key" 2>/dev/null || true
 log_info "=== PHASE 5: Bouncer API key ==="
 
 _CF_BOUNCER_KEY=""
@@ -1030,6 +1083,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 6: Cloudflare Workers bouncer config
 # ---------------------------------------------------------------------------
+operation_set_phase "6" "Cloudflare Workers bouncer config" 2>/dev/null || true
 log_info "=== PHASE 6: Cloudflare Workers bouncer config ==="
 
 _CF_WORKER_BOUNCER_CONFIG_SRC="${PROJECT_ROOT}/crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example"
@@ -1179,6 +1233,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 7: CrowdSec profiles
 # ---------------------------------------------------------------------------
+operation_set_phase "7" "CrowdSec profiles" 2>/dev/null || true
 log_info "=== PHASE 7: CrowdSec profiles ==="
 
 _PROFILES_SRC="${PROJECT_ROOT}/crowdsec/profiles.yaml"
@@ -1214,6 +1269,7 @@ _cs_wait_for_lapi() {
 # ---------------------------------------------------------------------------
 # PHASE 8: Enable and start services
 # ---------------------------------------------------------------------------
+operation_set_phase "8" "Enable and start services" 2>/dev/null || true
 log_info "=== PHASE 8: Enable and start services ==="
 
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -1274,6 +1330,7 @@ fi
 # ---------------------------------------------------------------------------
 # PHASE 9: Admin IP allowlist
 # ---------------------------------------------------------------------------
+operation_set_phase "9" "Admin IP allowlist" 2>/dev/null || true
 log_info "=== PHASE 9: Admin IP allowlist ==="
 
 _cs_whitelist_dir="/etc/crowdsec/parsers/s02-enrich"
@@ -1289,8 +1346,13 @@ if [[ -z "$_cs_resolved_ip" ]]; then
             _cs_resolved_ip="$_cs_ssh_ip"
         else
             _cs_prompt_reply=""
-            read -r -p "Add SSH client IP (${_cs_ssh_ip}) to CrowdSec allowlist? [Enter=yes, type CIDR to use instead, 'skip' to skip]: " \
-                _cs_prompt_reply || true
+            if ! read -r -t 300 -p "Add SSH client IP (${_cs_ssh_ip}) to CrowdSec allowlist? [Enter=yes, type CIDR to use instead, 'skip' to skip]: " \
+                _cs_prompt_reply; then
+                printf '\n' >&2
+                log_warn "No admin IP received within 5 minutes. Skipping optional admin allowlist."
+                log_warn "Configure it later with: sudo ./utilities/setup-crowdsec.sh --admin-ip YOUR_IP"
+                _cs_prompt_reply="skip"
+            fi
             case "${_cs_prompt_reply,,}" in
                 ""|yes)  _cs_resolved_ip="$_cs_ssh_ip" ;;
                 skip|no) _cs_resolved_ip="" ;;
@@ -1299,8 +1361,13 @@ if [[ -z "$_cs_resolved_ip" ]]; then
         fi
     elif [[ "$AUTO_MODE" != "true" ]]; then
         _cs_prompt_reply=""
-        read -r -p "Enter admin IP or CIDR to allowlist in CrowdSec (or press Enter to skip): " \
-            _cs_prompt_reply || true
+        if ! read -r -t 300 -p "Enter admin IP or CIDR to allowlist in CrowdSec (or press Enter to skip): " \
+            _cs_prompt_reply; then
+            printf '\n' >&2
+            log_warn "No admin IP received within 5 minutes. Skipping optional admin allowlist."
+            log_warn "Configure it later with: sudo ./utilities/setup-crowdsec.sh --admin-ip YOUR_IP"
+            _cs_prompt_reply=""
+        fi
         _cs_resolved_ip="$_cs_prompt_reply"
     fi
 fi

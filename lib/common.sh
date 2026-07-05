@@ -439,15 +439,14 @@ auto_fix_critical_permissions() {
 #        root, allowing both systemd-launched services AND sudo invocations
 #        to open the fd without AppArmor interference.
 #      - setup-systemd.sh install creates this group and adds both users.
-#   3. Self-heals stale locks from crashed processes: if the file exists but
-#      is not actively held by flock, removes and recreates it cleanly.
-#   4. Returns 1 with a loud, actionable error — never silently fails.
+#   3. Returns 1 with a loud, actionable error — never silently fails.
 #
 # Security model:
 #   Lock files are coordination primitives, not secrets. They hold no data.
+#   Lock ownership is determined by flock(), never by pathname existence.
 #   0660 root:vaultwarden in /run/lock/ (sticky drwxrwxrwt) means:
 #     - Only vaultwarden group members can acquire/interfere with the lock
-#     - Sticky bit prevents other users deleting the file
+#     - Sticky bit prevents other users from deleting the file
 #     - AppArmor allows root to open files it created (root:vaultwarden)
 _ensure_lock_file() {
     local lockpath="$1"
@@ -463,16 +462,8 @@ _ensure_lock_file() {
         }
     fi
 
-    # Self-heal: remove stale lock files left by crashed processes.
-    if [[ -f "$lockpath" ]]; then
-        if flock -n "$lockpath" true 2>/dev/null; then
-            # Not held by anyone — safe to recreate cleanly.
-            rm -f "$lockpath" 2>/dev/null || true
-        fi
-        # If flock -n fails, a live process holds it — leave it alone.
-    fi
-
-    # Create fresh if it doesn't exist (first run or just removed above).
+    # Create if it doesn't exist. Do not delete a lock file merely because it
+    # appears old; flock state, not pathname existence, is the authority.
     if [[ ! -f "$lockpath" ]]; then
         # install atomically sets owner+mode in one syscall, avoiding a
         # window where the file exists but has wrong permissions.

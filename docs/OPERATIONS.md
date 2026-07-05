@@ -239,6 +239,30 @@ When called with a targeted flag, routine cleanup is skipped and only the target
 
 ---
 
+## Operation Guards
+
+Mutating workflows use a shared `flock` guard and runtime metadata under
+`/run/vaultwarden-oci/operations`. Check active or interrupted work with:
+
+```bash
+sudo make operations
+```
+
+Lock file existence alone does not mean an operation is active; the kernel
+`flock` is the authority. Do not delete lock files to bypass a running process.
+
+After an SSH disconnect during a long-running VaultWarden operation:
+
+1. Run `sudo make operations`.
+2. If the original operation is still active, inspect its phase and wait or use
+   the guarded stop flow where available. VaultWarden-OCI will not
+   automatically kill `apt` or `dpkg`.
+3. If the original operation is no longer active, rerun the original command
+   without adding `--force` unless a reset is specifically required. The
+   workflow will inspect current state, reconcile completed work, and continue.
+
+---
+
 ## Update Operations
 
 Container image update:

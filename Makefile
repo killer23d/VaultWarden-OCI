@@ -44,7 +44,7 @@ DATA_DEVICE ?=
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
         setup sync-env edit-env init-secrets edit-secrets test-secrets test-email test-unit \
-        up down restart start stop safe-restart status \
+        up down restart start stop safe-restart status operations \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
         watch monitor \
@@ -74,7 +74,7 @@ DATA_DEVICE ?=
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup sync-env edit-env init-secrets up down start stop restart safe-restart status \
+	setup sync-env edit-env init-secrets up down start stop restart safe-restart status operations \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
@@ -411,6 +411,10 @@ status: ## Show service status, backup health, disk usage, and CrowdSec ban summ
 	else \
 		echo "  $(YELLOW)CrowdSec is not running$(NC)"; \
 	fi
+
+operations: ## Show active or interrupted VaultWarden operations
+	$(call require-root)
+	@./utilities/operations-status.sh
 
 # ===========================================================================
 ##@ Normal Admin + Advanced Admin — Health & Monitoring
@@ -763,13 +767,7 @@ update-system: ## Direct host OS package update (not full managed VaultWarden up
 	@echo "$(YELLOW)This target runs the host package manager directly; it does not create a VaultWarden pre-update backup or run the managed Compose restart/health workflow.$(NC)"
 	@echo "$(YELLOW)Host package updates may still restart system services or require a reboot.$(NC)"
 	@echo "$(YELLOW)For the managed VaultWarden update workflow, use: sudo make update$(NC)"
-	@if command -v apt-get >/dev/null 2>&1; then \
-		apt-get update && apt-get upgrade -y; \
-	elif command -v yum >/dev/null 2>&1; then \
-		yum update -y; \
-	elif command -v dnf >/dev/null 2>&1; then \
-		dnf update -y; \
-	fi
+	@./maintenance.sh update --system --skip-backup
 
 update-dns: ## Update Cloudflare DNS records
 	$(call require-root)
@@ -896,6 +894,7 @@ test-unit: ## Run non-destructive shell unit and integration tests
 	@tests/test-backup-architecture-policy.sh
 	@tests/test-backup-restore-behavior.sh
 	@tests/test-confirmation-prompt-format.sh
+	@tests/test-operation-guards.sh
 	@tests/test-start-policy.sh
 	@tests/test-uninstall-vaultwarden.sh
 	@tests/test-setup-storage-ux.sh

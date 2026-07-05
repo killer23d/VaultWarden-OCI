@@ -1782,7 +1782,7 @@ EOF
     trap 'rm -f "${_BG_LOCK_FILE:-}"' RETURN
     if ! flock -n "$_BG_LOCK_FD"; then
         log_error "Another breakglass operation is already running."
-        log_error "If the lock is stale, remove: ${_BG_LOCK_FILE}"
+        log_error "Check active operations with: sudo make operations"
         return 1
     fi
 
