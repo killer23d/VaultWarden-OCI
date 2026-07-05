@@ -83,8 +83,7 @@ _mv_acquire_lock() {
     flock -n "${lock_fd}" || {
         log_error "Another migration is already running (lock held: ${_MV_LOCK_FILE})."
         log_error "Run: sudo utilities/setup-storage.sh --mode migrate status"
-        log_error "If you are sure no migration is active, remove the lock file and retry:"
-        log_error "  sudo rm -f ${_MV_LOCK_FILE}"
+        log_error "Check active operations with: sudo make operations"
         exit 1
     }
     _MV_LOCK_FD="${lock_fd}"
@@ -202,7 +201,11 @@ _mv_confirm() {
     # Skipped when --yes is set.
     [[ "${_MV_YES:-false}" == "true" ]] && return 0
     local reply
-    read -r -p "${1} [yes/no] (default: no): " reply
+    if ! read -r -t 300 -p "${1} [yes/no] (default: no): " reply; then
+        printf '\n' >&2
+        log_error "No confirmation received within 5 minutes. Aborted."
+        exit 1
+    fi
     [[ "${reply,,}" =~ ^y(es)?$ ]] || { log_error "Aborted by operator."; exit 1; }
 }
 
@@ -210,7 +213,11 @@ _mv_confirm_by_typing() {
     # Usage: _mv_confirm_by_typing "Prompt" "expected string"
     # Always interactive — --yes does NOT bypass this.
     local prompt="$1" expected="$2" reply
-    read -r -p "${prompt} Type exactly '${expected}' to confirm: " reply
+    if ! read -r -t 300 -p "${prompt} Type exactly '${expected}' to confirm: " reply; then
+        printf '\n' >&2
+        log_error "No confirmation received within 5 minutes. Aborted."
+        exit 1
+    fi
     [[ "${reply}" == "${expected}" ]] || {
         log_error "Confirmation did not match. Aborted."
         exit 1
@@ -1749,7 +1756,7 @@ _mv_do_abort() {
             log_warn "  To unmount: sudo umount ${_abort_tgt}"
             log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             local _umount_reply
-            read -r -p "  Unmount ${_abort_tgt} now? [yes/no] (default: no): " _umount_reply
+            read -r -t 300 -p "  Unmount ${_abort_tgt} now? [yes/no] (default: no): " _umount_reply || _umount_reply="no"
             if [[ "${_umount_reply,,}" =~ ^y(es)?$ ]]; then
                 if umount "${_abort_tgt}"; then
                     log_success "Unmounted ${_abort_tgt}."
@@ -1775,6 +1782,7 @@ _mv_run_step() {
         return 0
     fi
     _MV_CURRENT_STEP="${fn#_mv_step_}"
+    operation_set_phase "${_MV_CURRENT_STEP}" "Storage migration: ${_MV_CURRENT_STEP//_/ }" 2>/dev/null || true
     "${fn}"
     _MV_CURRENT_STEP=""
     [[ "${DRY_RUN}" == "true" ]] || _mv_state_write "${token}"

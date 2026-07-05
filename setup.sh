@@ -28,7 +28,7 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
+REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/operations.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "${SCRIPT_DIR}/${lib}" ]]; then
         echo "ERROR: Required library not found: ${SCRIPT_DIR}/${lib}" >&2
@@ -41,6 +41,7 @@ source "${SCRIPT_DIR}/lib/validate.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
+source "${SCRIPT_DIR}/lib/operations.sh"
 source "${SCRIPT_DIR}/lib/crypto.sh"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "${SCRIPT_DIR}/lib/docker.sh"
@@ -65,7 +66,6 @@ CLEAN_DOMAIN=""
 # or by DATA_VOLUME_DEVICE/DATA_VOLUME_MOUNT already set in the environment.
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
 DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
-SETUP_LOCK_FILE=""
 
 show_help() {
     cat << 'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
@@ -257,7 +257,11 @@ if [[ "$FORCE" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
     fi
     if [[ -t 0 ]]; then
         _warn_force_destructive
-        read -r -p "Type YES to confirm you have exported a recovery kit: " _force_answer
+            if ! read -r -t 300 -p "Type YES to confirm you have exported a recovery kit: " _force_answer; then
+                printf '\n' >&2
+                log_error "No confirmation received within 5 minutes. The destructive setup --force operation was not performed."
+                exit 1
+            fi
         if [[ "$_force_answer" != "YES" ]]; then
             log_info "Aborting setup --force at operator request."
             exit 1
@@ -441,26 +445,20 @@ main() {
 
     if ! is_root; then log_error "Must run as root."; exit 1; fi
 
-    SETUP_LOCK_FILE="/run/lock/vaultwarden-setup.lock"
-    # Use automatic FD allocation instead of a hardcoded descriptor.
-    # /run/lock is the FHS-correct transient lock location; /var/lock is a
-    # legacy symlink that ProtectSystem=strict makes read-only in systemd units.
-    # A trap removes the lock file on EXIT so a crash does not leave a stale lock.
-    local SETUP_LOCK_FD
-    _ensure_lock_file "$SETUP_LOCK_FILE"
-    exec {SETUP_LOCK_FD}>"$SETUP_LOCK_FILE"
-    if ! flock -n "$SETUP_LOCK_FD"; then
-        log_error "Another setup instance is already running (could not acquire lock)."
-        log_error "Wait for it to complete, then retry."
-        log_error "If the lock is stale, remove: ${SETUP_LOCK_FILE}"
-        exit 1
-    fi
+    operation_acquire \
+        --id setup \
+        --label "Setup" \
+        --specific-lock /run/lock/vaultwarden-setup.lock || exit $?
     _setup_cleanup() {
-        rm -f "$SETUP_LOCK_FILE" 2>/dev/null || true
+        local rc=$?
+        operation_release "$rc"
         # Clean TMP_WORKDIR here because this trap overrides the earlier trap.
         rm -rf "$TMP_WORKDIR" 2>/dev/null || true
+        return "$rc"
     }
-    trap _setup_cleanup EXIT HUP INT TERM
+    trap _setup_cleanup EXIT
+    trap 'operation_release 130; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 130' INT
+    trap 'operation_release 143; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 143' HUP TERM
 
     _verify_required_utilities
 
@@ -485,23 +483,27 @@ main() {
     local _sops_flags=()
     [[ -n "${SOPS_VERSION:-}" ]] && _sops_flags=(--sops-version "$SOPS_VERSION")
 
+    operation_set_phase "1" "System setup"
     log_phase 1 6 "System setup"
     "${SCRIPT_DIR}/utilities/setup-system.sh" \
         "${_auto[@]}" "${_skip_deps[@]}" "${_dry[@]}" "${_force[@]}" \
         "${_dev_flags[@]}" "${_sops_flags[@]}" \
         || _phase_failed 1 "System setup"             "Check missing packages: sudo apt-get update && sudo apt-get install -y docker.io age sops"             "Re-run this phase: sudo ./utilities/setup-system.sh"             "If dependencies are already installed, re-run setup with --skip-deps"
 
+    operation_set_phase "2" "Storage setup"
     log_phase 2 6 "Storage setup"
     "${SCRIPT_DIR}/utilities/setup-storage.sh" --mode setup \
         "${_auto[@]}" "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
         || _phase_failed 2 "Storage setup"             "Verify data devices and mounts: lsblk && findmnt"             "Re-run this phase: sudo ./utilities/setup-storage.sh --mode setup"
 
+    operation_set_phase "3" "Environment configuration"
     log_phase 3 6 "Environment configuration"
     "${SCRIPT_DIR}/utilities/setup-env.sh" \
         --domain "$DOMAIN" --email "$ADMIN_EMAIL" \
         "${_use_latest[@]}" "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
         || _phase_failed 3 "Environment configuration"             "Verify domain/email values and .env permissions."             "Re-run this phase: sudo ./utilities/setup-env.sh --domain ${DOMAIN} --email ${ADMIN_EMAIL}"
 
+    operation_set_phase "4" "Secrets bootstrap"
     log_phase 4 6 "Secrets bootstrap"
     # Wait for sufficient kernel entropy before generating cryptographic keys (ux.md #34).
     wait_for_entropy "${ENTROPY_THRESHOLD:-200}" "${ENTROPY_MAX_WAIT:-60}" || true
@@ -511,6 +513,7 @@ main() {
             "Check the Age key and SOPS config: make key-health" \
             "Re-run this phase: sudo ./utilities/setup-secrets.sh bootstrap"
 
+    operation_set_phase "5" "Firewall setup"
     log_phase 5 6 "Firewall setup"
     "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase ufw \
         "${_auto[@]}" "${_dry[@]}" "${_force[@]}" \
@@ -561,6 +564,7 @@ main() {
     export BACKUP_PLAIN_FILE="${TMP_WORKDIR}/backup_plain"
 
     if [[ "$AUTO_MODE" == "true" ]]; then
+        operation_set_phase "6" "Secrets configuration"
         log_phase 6 6 "Secrets configuration"
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would create plaintext credential capture files in ${TMP_WORKDIR}"
@@ -576,7 +580,7 @@ main() {
         log_info ""
         log_info "Secrets can be configured now so all four credentials are shown in the final summary."
         local _secrets_ans
-        read -r -p "Run interactive secrets setup now? [yes/no] (default: yes): " _secrets_ans
+        read -r -t 300 -p "Run interactive secrets setup now? [yes/no] (default: yes): " _secrets_ans || _secrets_ans="no"
         if [[ -z "$_secrets_ans" || "$_secrets_ans" =~ ^[Yy] ]]; then
             if ! "${SCRIPT_DIR}/utilities/setup-secrets.sh" configure --quiet-summary; then
                 log_warn "Secrets configuration encountered issues — run 'sudo ./setup.sh secrets' to retry"
@@ -590,6 +594,7 @@ main() {
     if [[ "$AUTO_MODE" == "true" ]]; then
         show_post_install_summary "auto"
     else
+        operation_set_phase "6" "Secrets configuration"
         log_phase 6 6 "Secrets configuration"
         show_post_install_summary "interactive"
     fi

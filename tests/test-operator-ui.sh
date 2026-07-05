@@ -101,7 +101,8 @@ run_db_maintenance_health_failure_behavior_test() {
     mkdir -p "$tmpdir/repo/utilities"
     ln -s "$ROOT/lib" "$tmpdir/repo/lib"
     cp "$ROOT/utilities/maintenance-db-maint.sh" "$harness"
-    sed -i 's/^main "\$@"$/: # test harness: do not auto-run main/' "$harness"
+    sed -i.bak 's/^main "\$@"$/: # test harness: do not auto-run main/' "$harness"
+    rm -f "$harness.bak"
 
     mkdir -p "$tmpdir/project/utilities" "$tmpdir/state/data" "$tmpdir/backups/db" "$tmpdir/bin"
     printf 'SQLite format 3\000' > "$tmpdir/state/data/db.sqlite3"
@@ -110,7 +111,7 @@ run_db_maintenance_health_failure_behavior_test() {
 set -euo pipefail
 mkdir -p "${BACKUP_DIR}/db"
 printf 'safety backup\n' > "${BACKUP_DIR}/db/vaultwarden-db-test.age"
-touch -d '+1 minute' "${BACKUP_DIR}/db/vaultwarden-db-test.age"
+touch "${BACKUP_DIR}/db/vaultwarden-db-test.age"
 printf 'mock backup created\n'
 MOCK_BACKUP
     chmod +x "$tmpdir/project/utilities/backup-run.sh"

@@ -262,7 +262,7 @@ make health-quick                  # Quick check — concise output
 | `--keep N` | Retention period in days (default: 14); **must be a positive integer** |
 | `--email` | Send email notification on completion/failure |
 | `--quiet` | Suppress non-error output |
-| `--force` | Ignore locks and force backup |
+| `--force` | Compatibility flag; does not bypass active operation guards |
 | `--dry-run` | Preview operations without executing |
 
 ```bash
@@ -781,6 +781,7 @@ All common operations have Makefile shortcuts. Run `make help` for the normal ad
 | `make restart` | `sudo make restart` | Force restart all services |
 | `make safe-restart` | `sudo make safe-restart` | Restarts without pulling and restores the captured Compose model/image IDs on failure |
 | `make status` | `docker compose ps` | Show service status table |
+| `make operations` | `sudo utilities/operations-status.sh` | Show active or interrupted VaultWarden operations |
 | `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true` passes `--fix`) |
 | `make health-quick` | `./maintenance.sh health --quiet` | Quick health check — concise output, non-zero exit on failure |
 | `make health-report` | `./maintenance.sh health --report` | Health check that writes a timestamped report file |
@@ -1011,13 +1012,29 @@ source "lib/crypto.sh"
 # … additional libraries as needed
 ```
 
-### Flock-Based Mutual Exclusion
+### Operation Guards
 
-All scripts use `flock -n` on a dedicated lock file per operation type. If a lock file cannot be opened or written, scripts now fail fast with a clear remediation message (they do not continue unguarded).
-Lock file descriptors use **bash 4.1+ automatic FD allocation** (`exec {FD}>file`)
-so that no hardcoded FD number can silently clobber an open file descriptor
-inherited from the calling process or a library. The kernel releases the lock
-automatically on any process exit, including SIGKILL and OOM kill.
+Mutating operator workflows coordinate through the shared operation guard in
+`lib/operations.sh`. The canonical global lock is
+`/run/lock/vaultwarden-operations.lock`; workflows such as backup, restore,
+setup, CrowdSec setup, maintenance, updates, key rotation, and uninstall also
+use operation-specific `flock` locks where duplicate copies are unsafe.
+
+Lock ownership is determined by `flock`, not by the lock file merely existing
+on disk. Do not delete lock files to bypass a running operation. Check the
+current owner and phase with:
+
+```bash
+sudo make operations
+```
+
+If an SSH session disconnects during a long-running operation, run
+`sudo make operations`. If the original operation is still active, inspect its
+phase and wait or use the guarded stop flow when offered. VaultWarden-OCI does
+not automatically kill `apt` or `dpkg`. If the original operation is no longer
+active, rerun the original command without adding `--force` unless that workflow
+specifically needs a reset; the workflow will inspect current state and
+reconcile completed work.
 
 ---
 

@@ -11,6 +11,7 @@ source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
+source "$PROJECT_ROOT/lib/operations.sh"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
@@ -158,10 +159,25 @@ while [[ $# -gt 0 ]]; do
 done
 
 main() {
+    local rc
     require_root "$@"
+    if [[ "$DRY_RUN" != "true" ]]; then
+        operation_acquire \
+            --id firewall-update \
+            --label "Firewall update" \
+            --specific-lock /run/lock/vaultwarden-firewall-update.lock \
+            --non-interactive skip || {
+                rc=$?
+                (( rc == 75 )) && exit 0
+                exit "$rc"
+            }
+        operation_set_phase "update" "Updating Cloudflare firewall ranges"
+    fi
     _load_env
     auto_fix_critical_permissions "$PROJECT_ROOT"
-    trap 'perform_cleanup' EXIT HUP INT TERM
+    trap 'rc=$?; operation_release "$rc"; perform_cleanup; exit "$rc"' EXIT
+    trap 'operation_release 130; perform_cleanup; exit 130' INT
+    trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
     update_firewall_ranges
     exit $?
 }

@@ -69,7 +69,7 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh"; do
+for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/operations.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
@@ -83,6 +83,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+# shellcheck source=../lib/operations.sh
+source "${PROJECT_ROOT}/lib/operations.sh"
 # shellcheck source=../lib/defaults.sh
 source "${PROJECT_ROOT}/lib/defaults.sh"
 
@@ -251,12 +253,12 @@ Architectures: ${arch}
 Signed-By: ${keyfile}
 EOF
 
-    if ! apt-get update; then
+    if ! operation_package_run apt-get update; then
         log_error "setup" "apt-get update failed after adding Docker repo"
         return 1
     fi
 
-    if ! apt-get install -y \
+    if ! operation_package_run apt-get install -y \
         docker-ce \
         docker-ce-cli \
         containerd.io \
@@ -380,7 +382,7 @@ install_dependencies() {
                 archive_url=$(_ubuntu_archive_url_for_arch "$arch")
                 echo "deb ${archive_url} ${codename} universe" \
                     > /etc/apt/sources.list.d/ubuntu-universe.list
-                apt-get update -qq || return 1
+                operation_package_run apt-get update -qq || return 1
             }
         else
             local arch; arch=$(dpkg --print-architecture)
@@ -390,7 +392,7 @@ install_dependencies() {
             archive_url=$(_ubuntu_archive_url_for_arch "$arch")
             echo "deb ${archive_url} ${codename} universe" \
                 > /etc/apt/sources.list.d/ubuntu-universe.list
-            apt-get update -qq || return 1
+            operation_package_run apt-get update -qq || return 1
         fi
         log_success "Universe repository enabled"
     fi
@@ -398,7 +400,7 @@ install_dependencies() {
     local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "yq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron" "p7zip-full")
 
     log_info "Refreshing apt package index..."
-    apt-get update -qq || return 1
+    operation_package_run apt-get update -qq || return 1
 
     declare -A pkg_to_cmd=(
         [age]=age
@@ -437,7 +439,7 @@ install_dependencies() {
 
     if [[ ${#missing_packages[@]} -gt 0 ]]; then
         log_info "Installing missing packages: ${missing_packages[*]}"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}" || return 1
+        operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}" || return 1
     fi
 
     if ! systemctl is-active --quiet haveged; then
@@ -450,7 +452,7 @@ install_dependencies() {
     fi
 
     if ! docker compose version >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || return 1
+        operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || return 1
     fi
 
     if ! command -v sops >/dev/null 2>&1; then
@@ -644,7 +646,7 @@ validate_ssh_config() {
 cleanup_setup_deps() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would cleanup dependencies"; return 0; fi
 
-    apt-get autoremove -y >/dev/null 2>&1 || true
+    operation_package_run apt-get autoremove -y || true
     return 0
 }
 
@@ -652,6 +654,13 @@ main() {
     _parse_args "$@"
 
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
+    if [[ "$DRY_RUN" != "true" ]]; then
+        operation_acquire --id setup --label "Setup" || exit $?
+        trap 'rc=$?; operation_release "$rc"; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit "$rc"' EXIT
+        trap 'operation_release 130; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 130' INT
+        trap 'operation_release 143; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 143' TERM
+        operation_set_phase "1" "System setup"
+    fi
 
     [[ "$AUTO_MODE" == "true" ]] && log_info "Auto mode enabled"
     [[ "$DRY_RUN" == "true" ]] && log_info "DRY RUN mode — no changes will be made"

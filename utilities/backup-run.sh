@@ -12,6 +12,7 @@ source "$SCRIPT_DIR/lib/log.sh"
 source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
+source "$SCRIPT_DIR/lib/operations.sh"
 source "$SCRIPT_DIR/lib/email.sh"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$SCRIPT_DIR/lib/docker.sh"
@@ -30,8 +31,6 @@ EMAIL_NOTIFY=false   # Set by --email; send_notification_email() runs on complet
 LIST_ONLY=false      # Set by the list subcommand; prints backups and exits without root.
 RCLONE_SYNC=false    # Set by --rclone; syncs the encrypted backup after creation.
 FULL_VERIFY=false    # Set by --full-verification; decrypts and integrity-checks before sync.
-LOCK_FD=""   # Assigned by exec {LOCK_FD}>file (Bash 4.1+ automatic FD allocation).
-SKIP_OPS_LOCK=false  # Set by --skip-ops-lock; caller (maintenance-run) already holds OPS_LOCK.
 JSON_OUTPUT=false
 
 show_help() {
@@ -57,7 +56,7 @@ SUBCOMMANDS:
 RUN OPTIONS (used after 'run'):
     --keep N                 Override configured retention for this run
     --quiet                  Suppress non-error output
-    --force                  Ignore locks and force backup
+    --force                  Compatibility flag; does not bypass operation guards
     --email                  Send email notification on completion/failure
     --rclone                 Sync encrypted backup to rclone remote after creation
     --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
@@ -128,7 +127,6 @@ case "$_SUBCMD" in
                 --full-verification)      FULL_VERIFY=true;  shift ;;
                 --skip-full-verification) FULL_VERIFY=false; shift ;;
                 --dry-run)                DRY_RUN=true;      shift ;;
-                --skip-ops-lock)          SKIP_OPS_LOCK=true; shift ;;
                 *) log_error "Unknown option for run: $1"; show_help; exit 2 ;;
             esac
         done
@@ -196,10 +194,20 @@ backup_require_root() {
 }
 
 TMPDIR_BACKUP=""
-LOCK_FILE=""
 cleanup() {
+    local rc=$?
+    operation_release "$rc" 2>/dev/null || true
     if [[ -n "$TMPDIR_BACKUP" ]]; then rm -rf "$TMPDIR_BACKUP" 2>/dev/null; fi
-    if [[ -n "${LOCK_FILE:-}" ]]; then rm -f "$LOCK_FILE" 2>/dev/null; fi
+    return "$rc"
+}
+
+_acquire_backup_guard() {
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    operation_acquire \
+        --id backup \
+        --label "Backup" \
+        --specific-lock /run/lock/vaultwarden-backup.lock \
+        --non-interactive skip || exit $?
 }
 
 
@@ -1373,7 +1381,9 @@ _print_backup_run_summary() {
 }
 
 main() {
-    trap cleanup EXIT HUP INT TERM ERR
+    trap cleanup EXIT ERR
+    trap 'operation_release 130; rm -rf "${TMPDIR_BACKUP:-}" 2>/dev/null || true; exit 130' INT
+    trap 'operation_release 143; rm -rf "${TMPDIR_BACKUP:-}" 2>/dev/null || true; exit 143' HUP TERM
 
     if [[ "$_SUBCMD" != "list" ]]; then
         backup_require_root
@@ -1464,6 +1474,8 @@ main() {
     if [[ "$_SUBCMD" == "sync" ]]; then
         require_root "$@"
         auto_fix_critical_permissions "$PROJECT_ROOT"
+        _acquire_backup_guard
+        operation_set_phase "sync" "Syncing retained backups"
         local sync_dry_label=""
         [[ "$DRY_RUN" == "true" ]] && sync_dry_label=" [DRY RUN]"
         log_header "VaultWarden-OCI Rclone Backup Copy${sync_dry_label}"
@@ -1486,6 +1498,8 @@ main() {
     if [[ "$_SUBCMD" == "rotate" ]]; then
         require_root "$@"
         auto_fix_critical_permissions "$PROJECT_ROOT"
+        _acquire_backup_guard
+        operation_set_phase "rotate" "Rotating retained backups"
 
         local rotate_dry_label=""
         [[ "$DRY_RUN" == "true" ]] && rotate_dry_label=" [DRY RUN]"
@@ -1537,29 +1551,9 @@ main() {
 
     _check_backup_deps
 
-    LOCK_FILE="/run/lock/vaultwarden-backup.lock"
-    local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
-
-    if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        if [[ "$SKIP_OPS_LOCK" != "true" ]]; then
-            _ensure_lock_file "$OPS_LOCK"
-            exec {OPS_LOCK_FD}>"$OPS_LOCK"
-            if ! flock -n "$OPS_LOCK_FD"; then
-                log_error "Another operation (maintenance/restore) is already running. Aborting."
-                log_info  "Wait for it to finish or use --force to override."
-                exit 1
-            fi
-        fi
-
-        _ensure_lock_file "$LOCK_FILE"
-        exec {LOCK_FD}>"$LOCK_FILE"
-        if ! flock -n "$LOCK_FD"; then
-            log_error "Another backup is already running (could not acquire lock)."
-            log_info  "Wait for it to finish or use --force if you are certain it is stuck."
-            log_error "If the lock is stale, remove: ${LOCK_FILE}"
-            exit 1
-        fi
-    fi
+    [[ "$FORCE" == "true" ]] && backup_log_warn "--force does not bypass active VaultWarden operation guards."
+    _acquire_backup_guard
+    operation_set_phase "run" "Creating ${BACKUP_TYPE} backup"
 
     local old_umask
     old_umask=$(umask)

@@ -11,6 +11,7 @@ source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
+source "$PROJECT_ROOT/lib/operations.sh"
 source "$PROJECT_ROOT/lib/email.sh"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
@@ -102,8 +103,8 @@ update_system_packages() {
         log_info "[DRY RUN] Would run: apt-get update && apt-get upgrade -y"
         return 0
     fi
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+    operation_package_run apt-get update -qq
+    operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold"
     if systemctl is-active docker >/dev/null 2>&1; then
@@ -348,6 +349,14 @@ done
 
 main() {
     require_root
+    operation_acquire \
+        --id update \
+        --label "Update" \
+        --specific-lock /run/lock/vaultwarden-update.lock || exit $?
+    trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT
+    trap 'operation_release 130; exit 130' INT
+    trap 'operation_release 143; exit 143' HUP TERM
+    operation_set_phase "1" "Pre-update checks"
     auto_fix_critical_permissions "$PROJECT_ROOT"
     load_env_file || { log_error "Failed to load .env"; exit 1; }
     auto_fix_critical_permissions "$PROJECT_ROOT"
@@ -357,11 +366,14 @@ main() {
     fi
     log_header "VaultWarden-OCI Update"
     check_age_key_health_for_update
+    operation_set_phase "2" "Pre-update safety backup"
     run_pre_update_backup || exit 1
     if [[ "$UPDATE_SYSTEM" == "true" ]]; then
+        operation_set_phase "3" "System package update"
         update_system_packages
     fi
     if [[ "$UPDATE_IMAGES" == "true" ]] || [[ "$FORCE" == "true" ]]; then
+        operation_set_phase "4" "Container image update"
         snapshot_image_digests
         local pull_rc=0
         check_image_updates || pull_rc=$?

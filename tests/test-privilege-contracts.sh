@@ -164,13 +164,15 @@ grep -Fq 'utilities/setup-secrets.sh breakglass remove' "$BREAKGLASS_REMOVE_SNIP
 rm -f "$BREAKGLASS_REMOVE_SNIP"
 pass "make breakglass-remove preserves break-glass removal confirmation"
 
-# update-system intentionally remains a direct host package update, with wording that distinguishes it from the managed update workflow.
+# update-system intentionally remains a direct host package update, with wording that
+# distinguishes it from the managed container update workflow while routing through
+# the maintenance runner for the shared operation guard and package-manager retry path.
 UPDATE_SYSTEM_SNIP="$(mktemp -t vw-update-system.XXXXXXXXXX)"
 extract_make_target update-system Makefile > "$UPDATE_SYSTEM_SNIP" || fail "could not extract make update-system target"
 grep -Fq 'Updating host OS packages directly' "$UPDATE_SYSTEM_SNIP" || fail "make update-system does not clearly describe direct host package semantics"
 grep -Fq 'does not create a VaultWarden pre-update backup or run the managed Compose restart/health workflow' "$UPDATE_SYSTEM_SNIP" || fail "make update-system missing managed-workflow distinction"
 grep -Fq 'Host package updates may still restart system services or require a reboot' "$UPDATE_SYSTEM_SNIP" || fail "make update-system missing package-manager side-effect warning"
-! grep -Fq './maintenance.sh update --system' "$UPDATE_SYSTEM_SNIP" || fail "make update-system should not route through managed maintenance update without restart semantic changes"
+grep -Fq './maintenance.sh update --system --skip-backup' "$UPDATE_SYSTEM_SNIP" || fail "make update-system must use guarded maintenance system-update path"
 rm -f "$UPDATE_SYSTEM_SNIP"
 pass "make update-system direct package-update semantics are explicit"
 

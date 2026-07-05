@@ -12,6 +12,7 @@ source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
+source "$PROJECT_ROOT/lib/operations.sh"
 source "$PROJECT_ROOT/lib/email.sh"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$PROJECT_ROOT/lib/docker.sh"
@@ -130,43 +131,33 @@ local MEM_CRIT_THRESHOLD=${MEM_CRIT_THRESHOLD:-90}
 local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 
-local _HEALTH_RUN_LOCK_FILE="/run/lock/vaultwarden-health.lock"
-local _HEALTH_LOCK_FD=""
-local _HEALTH_OPS_LOCK="/run/lock/vaultwarden-operations.lock"
-local _HEALTH_OPS_LOCK_FD=""
-
 _acquire_run_lock() {
-    # Acquire shared operations lock to prevent concurrent health + maintenance
-    _ensure_lock_file "$_HEALTH_OPS_LOCK"
-    exec {_HEALTH_OPS_LOCK_FD}>"$_HEALTH_OPS_LOCK" 2>/dev/null || {
-        log_error "Cannot open operations lock: ${_HEALTH_OPS_LOCK}"
-        return 1
-    }
-    if ! flock -n "$_HEALTH_OPS_LOCK_FD" 2>/dev/null; then
-        log_info "Another operation (maintenance/backup) is already running — skipping health check"
-        exit 0
-    fi
-
-    _ensure_lock_file "$_HEALTH_RUN_LOCK_FILE"
-
-    exec {_HEALTH_LOCK_FD}>"$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || {
-        log_error "Cannot open health run-lock: ${_HEALTH_RUN_LOCK_FILE}"
-        return 1
-    }
-    if ! flock -n "$_HEALTH_LOCK_FD" 2>/dev/null; then
-        log_info "Another health check is already running — exiting"
-        exit 0
+    if [[ "$FIX_MODE" == "true" ]]; then
+        operation_acquire \
+            --id health-repair \
+            --label "Health repair" \
+            --specific-lock /run/lock/vaultwarden-health.lock \
+            --non-interactive skip || {
+                local rc=$?
+                (( rc == 75 )) && exit 0
+                return "$rc"
+            }
+        operation_set_phase "repair" "Health check with auto-repair"
+    else
+        operation_acquire \
+            --id health-check \
+            --label "Health check" \
+            --specific-lock /run/lock/vaultwarden-health.lock \
+            --no-global \
+            --non-interactive skip || exit 0
+        operation_set_phase "check" "Health inspection"
     fi
 }
 
 _release_run_lock() {
-    [[ -n "${_HEALTH_LOCK_FD:-}" ]] || return 0
-    flock -u "$_HEALTH_LOCK_FD" 2>/dev/null || true
-    eval "exec ${_HEALTH_LOCK_FD}>&-" 2>/dev/null || true
-    if [[ -n "${_HEALTH_OPS_LOCK_FD:-}" ]]; then
-        flock -u "$_HEALTH_OPS_LOCK_FD" 2>/dev/null || true
-        eval "exec ${_HEALTH_OPS_LOCK_FD}>&-" 2>/dev/null || true
-    fi
+    local rc=$?
+    operation_release "$rc"
+    return "$rc"
 }
 
 local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-$(_default_alert_state_dir)}"
@@ -1107,9 +1098,9 @@ _print_results() {
 
 _health_main() {
     set +e   # Bash 5.2 aarch64: nested function set -e propagation bug
+    _health_parse_args "$@"
     _acquire_run_lock || return 1
     trap '_release_run_lock' EXIT HUP INT TERM
-    _health_parse_args "$@"
     log_info "Starting VaultWarden health check..."
     if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
     _check_containers

@@ -104,7 +104,11 @@ run_help_command() {
     local raw_out rc tmp_state
     tmp_state=$(mktemp -d)
     set +e
-    raw_out="$(PROJECT_STATE_DIR="$tmp_state" timeout 5 bash "$script" "$@" 2>&1)"
+    if command -v timeout >/dev/null 2>&1; then
+        raw_out="$(PROJECT_STATE_DIR="$tmp_state" timeout 5 bash "$script" "$@" 2>&1)"
+    else
+        raw_out="$(PROJECT_STATE_DIR="$tmp_state" bash "$script" "$@" 2>&1)"
+    fi
     rc=$?
     set -e
     rm -rf "$tmp_state"

@@ -61,6 +61,7 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/operations.sh"
 require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 
@@ -214,6 +215,22 @@ if [[ "$DRY_RUN" == "true" ]]; then
     exit 0
 fi
 
+workdir=""
+operation_acquire \
+    --id key-rotate \
+    --label "Age key rotation" \
+    --specific-lock /run/lock/vaultwarden-key-rotate.lock || exit $?
+operation_set_phase "1" "Validating current Age key"
+_key_rotate_cleanup() {
+    local rc=$?
+    operation_release "$rc"
+    [[ -n "${workdir:-}" ]] && _secure_rm "$workdir"
+    return "$rc"
+}
+trap _key_rotate_cleanup EXIT
+trap 'operation_release 130; [[ -n "${workdir:-}" ]] && _secure_rm "$workdir"; exit 130' INT
+trap 'operation_release 143; [[ -n "${workdir:-}" ]] && _secure_rm "$workdir"; exit 143' HUP TERM
+
 if [[ "$ASSUME_YES" != "true" ]]; then
     operator_attention warn "Age key rotation" \
         "This will generate a NEW operational Age key and re-encrypt secrets.yaml." \
@@ -227,7 +244,7 @@ fi
 
 ts="$(date +%Y%m%d-%H%M%S)"
 workdir="$(mktemp -d -p /dev/shm vw-age-rotate.XXXXXXXX 2>/dev/null || mktemp -d -t vw-age-rotate.XXXXXXXX)"
-trap '_secure_rm "$workdir"' EXIT
+operation_set_phase "2" "Generating and installing new Age key"
 
 backup_dir="/root/vw-age-rotation-backups/${ts}"
 install -d -m 700 -o root -g root "$backup_dir"
@@ -284,6 +301,7 @@ fi
 log_info "  - previous operational recipient will be removed: $current_pub"
 
 sops_updatekeys_log="${backup_dir}/sops-updatekeys.log"
+operation_set_phase "3" "Re-encrypting secrets with new Age key"
 if ! SOPS_AGE_KEY_FILE="$current_key" sops --config "$policy_tmp" updatekeys --yes "$cipher_tmp" >"$sops_updatekeys_log" 2>&1; then
     log_error "SOPS updatekeys failed. Details: $sops_updatekeys_log"
     exit 1
@@ -307,6 +325,7 @@ log_info "Backing up current key, policy, secrets, and env files to: $backup_dir
 [[ -f "$system_env" ]] && install -m 600 -o root -g root "$system_env" "${backup_dir}/vaultwarden.env"
 [[ -f "$install_env" ]] && install -m 600 -o root -g root "$install_env" "${backup_dir}/install.env"
 
+operation_set_phase "4" "Promoting new key and rekeyed secrets"
 log_info "Promoting new key and rekeyed secrets..."
 install -d -m 700 -o root -g root /etc/vaultwarden
 install -d -m 700 "$(dirname "$repo_key")"
@@ -353,7 +372,11 @@ if [[ "$ASSUME_YES" != "true" ]]; then
     _display_rotated_age_key_summary "$system_key" "$new_pub" "$kit_file"
     saved=""
     while [[ "$saved" != "SAVED" ]]; do
-        read -r -p "Type SAVED after copying the recovery kit offline: " saved
+        if ! read -r -t 300 -p "Type SAVED after copying the recovery kit offline: " saved; then
+            printf '\n' >&2
+            log_error "No confirmation received within 5 minutes. Recovery-kit acknowledgement failed closed."
+            exit 1
+        fi
         [[ "$saved" == "SAVED" ]] || log_warn "Please type exactly: SAVED"
     done
 fi
