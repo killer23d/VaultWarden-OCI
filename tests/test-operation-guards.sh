@@ -85,6 +85,8 @@ state_dir="$tmpdir/state"
 ops_lock="$tmpdir/vaultwarden-operations.lock"
 specific_lock="$tmpdir/test-operation.lock"
 ready_file="$tmpdir/ready"
+holder_fifo="$tmpdir/holder.fifo"
+mkfifo "$holder_fifo"
 
 require 'VW_OPERATIONS_LOCK:=/run/lock/vaultwarden-operations\.lock' "$OPS" \
     "canonical global operations lock must be /run/lock/vaultwarden-operations.lock"
@@ -95,6 +97,7 @@ VW_OPERATIONS_STATE_DIR="$state_dir" \
 VW_OPERATIONS_LOCK="$ops_lock" \
 SPECIFIC_LOCK="$specific_lock" \
 READY_FILE="$ready_file" \
+HOLDER_FIFO="$holder_fifo" \
 "${BASH}" -c '
     set -euo pipefail
     source "$0/lib/log.sh"
@@ -104,7 +107,10 @@ READY_FILE="$ready_file" \
     operation_acquire --id holder --label "Held operation" --specific-lock "$SPECIFIC_LOCK"
     operation_set_phase "1" "Holding test lock"
     : > "$READY_FILE"
-    sleep 20
+    exec 9<> "$HOLDER_FIFO"
+    while :; do
+        read -r -t 1 _ <&9 || true
+    done
 ' "$ROOT" &
 holder_pid=$!
 
@@ -313,9 +319,12 @@ EOF_STATE
     chmod 600 "$stale_file"
 
     live_ready="$tmpdir/live-ready"
+    live_fifo="$tmpdir/live.fifo"
+    mkfifo "$live_fifo"
     VW_OPERATIONS_STATE_DIR="$state_dir" \
     VW_OPERATIONS_LOCK="$ops_lock" \
     LIVE_READY="$live_ready" \
+    LIVE_FIFO="$live_fifo" \
     "${BASH}" -c '
         set -euo pipefail
         source "$0/lib/log.sh"
@@ -325,7 +334,10 @@ EOF_STATE
         operation_acquire --id backup --label "Live backup operation"
         operation_set_phase "3" "Actually holding the lock"
         : > "$LIVE_READY"
-        sleep 20
+        exec 9<> "$LIVE_FIFO"
+        while :; do
+            read -r -t 1 _ <&9 || true
+        done
     ' "$ROOT" &
     live_pid=$!
     cleanup_pids+=("$live_pid")
