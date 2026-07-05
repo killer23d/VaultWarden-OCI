@@ -394,7 +394,7 @@ EOF_STATE
             child_pid_file="$1"
             child_ready="$2"
             child_fifo="$3"
-            trap "" HUP TERM
+            trap "" HUP
             exec 9<> "$child_fifo"
             printf "%s\n" "$$" > "$child_pid_file"
             : > "$child_ready"
@@ -444,7 +444,12 @@ EOF_STATE
     [[ "$orphan_output" != *"Orphan child lock"* ]] \
         || fail "dead parent metadata must not be reported as the verified active owner"
     kill "$orphan_child" 2>/dev/null || true
-    wait "$orphan_child" 2>/dev/null || true
+    for _ in {1..50}; do
+        ! kill -0 "$orphan_child" 2>/dev/null && break
+        sleep 0.1
+    done
+    kill -0 "$orphan_child" 2>/dev/null \
+        && fail "inherited-lock child did not stop during cleanup"
     cleanup_pids=("${cleanup_pids[@]/$orphan_child}")
 
     sleep 20 &
