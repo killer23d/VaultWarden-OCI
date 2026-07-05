@@ -297,7 +297,6 @@ up: ## Start all services (runs startup.sh for health checks; root required)
 	$(call require-root)
 	$(call check-docker)
 	@echo "$(BLUE)Starting VaultWarden services...$(NC)"
-	@$(MAKE) sync-env
 # ── Pre-flight: refuse to start with the dev-only override present. ─────────
 # docker-compose.override.yml is the local-development override.
 # Production hosts must not carry it; if present, abort before compose
@@ -339,7 +338,7 @@ down: ## Stop all services gracefully (root required)
 	$(call require-root)
 	$(call check-docker)
 	@echo "$(BLUE)Stopping VaultWarden services...$(NC)"
-	@$(DOCKER_COMP) down
+	@./startup.sh stop
 	@echo "$(GREEN)Services stopped.$(NC)"
 
 stop: down ## Alias for down
@@ -347,7 +346,6 @@ stop: down ## Alias for down
 restart: ## Restart all services (via startup.sh; root required)
 	$(call require-root)
 	@echo "$(BLUE)Restarting VaultWarden services...$(NC)"
-	@$(MAKE) sync-env
 	@./startup.sh --force || { \
 		echo "$(RED)Restart failed!$(NC)"; \
 		$(MAKE) status; \

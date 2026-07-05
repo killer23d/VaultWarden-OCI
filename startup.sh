@@ -19,6 +19,7 @@ source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/crypto.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
+source "${SCRIPT_DIR}/lib/operations.sh"
 
 FORCE_RESTART=false
 SKIP_HEALTH_CHECK=false
@@ -113,7 +114,36 @@ if [[ "${DRY_RUN}" != "true" || "${DO_DOWN}" == "true" ]]; then
   require_root "Startup and stop operations require root. Run: sudo make up"
 fi
 
+_startup_acquire_operation_guard() {
+  local _ops_policy="fail"
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    _ops_policy="skip"
+  fi
+
+  local _label="Startup"
+  [[ "$DO_DOWN" == "true" ]] && _label="Startup stop"
+  operation_acquire \
+    --id startup \
+    --label "$_label" \
+    --specific-lock /run/lock/vaultwarden-startup.lock \
+    --non-interactive "$_ops_policy" || exit $?
+
+  _startup_operation_cleanup() {
+    local rc=$?
+    operation_release "$rc"
+    return "$rc"
+  }
+  trap _startup_operation_cleanup EXIT
+  trap 'operation_release 130; exit 130' INT
+  trap 'operation_release 143; exit 143' HUP TERM
+}
+
+if [[ "${DRY_RUN}" != "true" || "${DO_DOWN}" == "true" ]]; then
+  _startup_acquire_operation_guard
+fi
+
 if [[ "$DO_DOWN" == "true" ]]; then
+  operation_set_phase "stop" "Stopping VaultWarden services"
   if ! command -v docker >/dev/null 2>&1; then
     log_error "docker not found — cannot stop services."
     exit 1
@@ -811,9 +841,15 @@ main() {
 
   # Add INT/TERM traps so cleanup still runs and the exit code correctly
   # reflects termination (130 for INT, 143 for TERM).
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap 'operation_release 130; exit 130' INT
+  trap 'operation_release 143; exit 143' HUP TERM
 
+  if [[ "$DRY_RUN" != "true" ]]; then
+    operation_set_phase "env-sync" "Synchronizing runtime environment"
+    "${SCRIPT_DIR}/utilities/env-edit.sh" sync || exit $?
+  fi
+
+  operation_set_phase "startup" "Preparing runtime and starting services"
   load_environment || exit 1
   auto_fix_critical_permissions "$PROJECT_ROOT"
   check_project_state_ready || exit 1

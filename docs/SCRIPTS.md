@@ -43,7 +43,7 @@ sudo utilities/env-edit.sh edit
 utilities/env-edit.sh status
 ```
 
-`sync` is non-interactive for `make up`, `make restart`, and systemd installation. `edit` opens repo `.env` in `$EDITOR` and syncs only when the checksum changes. `status` is read-only and reports env paths, drift, migration state, and storage mismatch information.
+`sync` is non-interactive for `make up`, `make restart`, and systemd installation. Direct `sync` and `edit` acquire or inherit the shared operation guard; startup-owned sync runs inside the lifecycle guard so config and service mutation are one continuous operation. `edit` opens repo `.env` in `$EDITOR` and syncs only when the checksum changes. `status` is read-only and reports env paths, drift, migration state, and storage mismatch information.
 
 ---
 ## 🔧 Core Management Scripts
@@ -101,7 +101,7 @@ sudo ./setup.sh systemd install
 sudo ./setup.sh secrets [OPTIONS]
 ```
 
-**Called automatically by `setup.sh install --auto`.** Run the secrets phase standalone when you need to re-initialise secrets without re-running full setup — for example, after a partial setup failure, on a cloned deployment, or when rotating all secrets at once.
+**Called automatically by `setup.sh install --auto`.** Run the secrets phase standalone when you need to re-initialise secrets without re-running full setup — for example, after a partial setup failure, on a cloned deployment, or when rotating all secrets at once. Mutating secrets bootstrap/configure paths acquire or inherit the shared operation guard before changing SOPS ciphertext, Age policy, or runtime secret state.
 
 **Key features:**
 - Interactive prompts for all required secrets (`admin_token`, `admin_basic_auth_hash`, Cloudflare tokens, SMTP password, push notification keys)
@@ -142,11 +142,13 @@ sudo ./setup.sh secrets --auto
 ```
 
 **What it does:**
-1. Decrypts `$SECRETS_FILE` (default: `secrets/secrets.yaml`) once and writes individual Docker secret files to `secrets/.docker_secrets/` (600 permissions)
-2. Creates `${PROJECT_STATE_DIR}/logs/` subdirectories with correct ownership
-3. Starts all containers with `docker compose up -d`
-4. Updates Cloudflare DNS A record
-5. Runs `./maintenance.sh health` post-startup
+1. Acquires the shared operation guard and lifecycle-specific startup lock
+2. Syncs generated env state inside that same lifecycle operation
+3. Decrypts `$SECRETS_FILE` once and writes transient Docker secret files under `/run/vaultwarden-oci/secrets/`
+4. Creates `${PROJECT_STATE_DIR}/logs/` subdirectories with correct ownership
+5. Starts all containers with `docker compose up -d`
+6. Updates Cloudflare DNS A record
+7. Runs `./maintenance.sh health` post-startup
 
 > **Push notifications note:** If `PUSH_ENABLED=true` is set in `.env`, the VaultWarden network must **not** be marked `internal: true` in `docker-compose.yml`. Push relay requires outbound HTTPS access to `push.bitwarden.com`. `startup.sh` will exit with an error if it detects `PUSH_ENABLED=true` while the network is internal.
 
@@ -213,6 +215,8 @@ make health-quick                  # Quick check — concise output
 ```
 
 > **Systemd note:** The `vaultwarden-health.service` unit runs `maintenance.sh health --fix` by default.
+
+Read-only health uses only a health-specific duplicate lock and reaches real checks without global operation metadata. `--fix` uses the shared global guard; expected contention exits cleanly, while guard infrastructure failure is not treated as a healthy advisory result.
 
 ---
 
@@ -363,6 +367,8 @@ standalone scripts. Admins may invoke the dispatcher or the utilities directly.
 - Creates automatic backup before editing — backup file is created atomically at mode 600 (no world-readable window)
 - Validates secrets after editing
 - Plaintext output (passwords, recovery kit) is routed exclusively to `/dev/tty`, never to stderr or the systemd journal
+
+Mutating `edit` and `rotate` paths acquire or inherit the shared operation guard before decrypting, promoting ciphertext, updating recipients, or exporting runtime secrets. `view` and `list` remain read-only diagnostics.
 
 **Managed secrets:**
 `admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `cf_worker_bouncer_token` (used by CrowdSec cloudflare-bouncer), `backup_passphrase`
@@ -575,6 +581,8 @@ sudo ./setup.sh systemd <install|remove|validate|status> [--dry-run]
 ```
 
 > **Note:** This phase replaces the former `cron-setup.sh`. If you have an older deployment that used `cron-setup.sh`, remove those cron entries (`sudo crontab -r`) and install the systemd units with `sudo ./setup.sh systemd install`.
+
+`install` and `remove` acquire or inherit the shared operation guard before replacing `/opt/vaultwarden-scripts`, installed env/config, or unit files. `status`, `validate`, and `--dry-run` remain read-only diagnostics.
 
 **Key features:**
 - Copies scripts to `/opt/vaultwarden-scripts/` with `root:root 700` permissions
@@ -1016,13 +1024,16 @@ source "lib/crypto.sh"
 
 Mutating operator workflows coordinate through the shared operation guard in
 `lib/operations.sh`. The canonical global lock is
-`/run/lock/vaultwarden-operations.lock`; workflows such as backup, restore,
-setup, CrowdSec setup, maintenance, updates, key rotation, and uninstall also
-use operation-specific `flock` locks where duplicate copies are unsafe.
+`/run/lock/vaultwarden-operations.lock`; workflows such as startup/stop/restart,
+backup, restore, setup, env sync/edit, secrets mutation, systemd install/remove,
+CrowdSec setup, maintenance, updates, key rotation, and uninstall also use
+operation-specific `flock` locks where duplicate copies are unsafe.
 
 Lock ownership is determined by `flock`, not by the lock file merely existing
-on disk. Do not delete lock files to bypass a running operation. Check the
-current owner and phase with:
+on disk. `sudo make operations` attributes a global owner only when matching
+owner metadata is verifiable; if the flock is held without verified global-owner
+metadata, stop and force actions are not offered. Do not delete lock files to
+bypass a running operation. Check the current owner and phase with:
 
 ```bash
 sudo make operations
@@ -1031,10 +1042,11 @@ sudo make operations
 If an SSH session disconnects during a long-running operation, run
 `sudo make operations`. If the original operation is still active, inspect its
 phase and wait or use the guarded stop flow when offered. VaultWarden-OCI does
-not automatically kill `apt` or `dpkg`. If the original operation is no longer
-active, rerun the original command without adding `--force` unless that workflow
-specifically needs a reset; the workflow will inspect current state and
-reconcile completed work.
+not automatically kill `apt`, `dpkg`, or repository-helper package work.
+Expected non-interactive contention may exit `75` as a clean skip. If the
+original operation is no longer active, rerun the original command without
+adding `--force` unless that workflow specifically needs a reset; the workflow
+will inspect current state and reconcile completed work.
 
 ---
 

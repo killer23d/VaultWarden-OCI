@@ -77,8 +77,8 @@ if (( EUID != 0 )); then
     )
     health_guard_rc=$?
     set -e
-    [[ "$health_guard_rc" -eq 3 ]] || fail 'maintenance-health non-root env guard did not exit 3'
-    pass 'maintenance-health direct env load is root-guarded'
+    [[ "$health_guard_rc" -eq 0 ]] || fail 'maintenance-health non-root env load did not reach read-only checks'
+    pass 'maintenance-health direct env load is allowed for read-only checks'
 fi
 
 SECRETS_FILE="$repo_secret"

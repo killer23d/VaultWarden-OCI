@@ -187,6 +187,27 @@ else
 fi
 EOF_DOCKER
 chmod +x "$BIN/docker"
+cat > "$BIN/rsync" <<'EOF_RSYNC'
+#!/usr/bin/env bash
+set -euo pipefail
+dry_run=false
+positional=()
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry_run=true ;;
+    --*) ;;
+    -*) ;;
+    *) positional+=("$arg") ;;
+  esac
+done
+"$dry_run" && exit 0
+(( ${#positional[@]} >= 2 )) || exit 2
+src="${positional[$((${#positional[@]} - 2))]%/}"
+dest="${positional[$((${#positional[@]} - 1))]}"
+mkdir -p "$dest"
+[[ ! -f "$src/db.sqlite3" ]] || cp "$src/db.sqlite3" "$dest/db.sqlite3"
+EOF_RSYNC
+chmod +x "$BIN/rsync"
 out=$(PATH="$BIN:$PATH" DOCKER_STATE_FILE="$TMP/docker-state" bash <<'PROBE'
 set -euo pipefail
 PROJECT_ROOT="$PWD"

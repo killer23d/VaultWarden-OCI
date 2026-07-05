@@ -31,8 +31,8 @@ ProtectHome=read-only
 #   systemctl cat <unit>
 TimeoutStartSec=60
 TimeoutStopSec=30
-ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
-RuntimeDirectory=vaultwarden
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
+RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 

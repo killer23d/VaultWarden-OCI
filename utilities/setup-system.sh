@@ -373,7 +373,7 @@ install_dependencies() {
             /etc/apt/sources.list.d/*.sources 2>/dev/null; then
         log_info "Enabling Ubuntu 'universe' repository (required for python3-argon2 and yq)..."
         if command -v add-apt-repository >/dev/null 2>&1; then
-            add-apt-repository -y universe 2>/dev/null || {
+            operation_package_run add-apt-repository -y universe || {
                 log_warn "add-apt-repository failed — adding universe source manually"
                 local arch; arch=$(dpkg --print-architecture)
                 local archive_url

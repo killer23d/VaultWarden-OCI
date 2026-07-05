@@ -27,6 +27,8 @@ init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 # shellcheck source=../lib/defaults.sh
 source "${PROJECT_ROOT}/lib/defaults.sh"
+# shellcheck source=../lib/operations.sh
+source "${PROJECT_ROOT}/lib/operations.sh"
 
 DOMAIN=""
 ADMIN_EMAIL=""
@@ -35,6 +37,31 @@ DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
 DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 FORCE=false
 DRY_RUN=false
+SETUP_ENV_GUARD_HELD=false
+
+_setup_env_acquire_guard() {
+    [[ "$DRY_RUN" == "true" ]] && return 0
+    [[ "$SETUP_ENV_GUARD_HELD" == "true" ]] && return 0
+
+    local policy="fail"
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        policy="skip"
+    fi
+    operation_acquire \
+        --id env-sync \
+        --label "Environment setup" \
+        --non-interactive "$policy" || return $?
+    SETUP_ENV_GUARD_HELD=true
+    _setup_env_cleanup() {
+        local rc=$?
+        operation_release "$rc"
+        return "$rc"
+    }
+    trap _setup_env_cleanup EXIT
+    trap 'operation_release 130; exit 130' INT
+    trap 'operation_release 143; exit 143' HUP TERM
+    operation_set_phase "setup-env" "Generating environment configuration"
+}
 
 show_help() {
     cat <<'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
@@ -413,6 +440,7 @@ main() {
     fi
 
     [[ "$DRY_RUN" == "true" ]] && log_info "DRY RUN mode — no changes will be made"
+    _setup_env_acquire_guard || exit $?
 
     create_env_file       || { log_error "Failed to create .env";               exit 1; }
     refresh_state_artifacts || { log_error "Failed to refresh state artifacts"; exit 1; }

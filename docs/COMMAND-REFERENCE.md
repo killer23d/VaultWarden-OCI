@@ -504,8 +504,8 @@ USAGE:
     ./maintenance.sh health [OPTIONS]
     utilities/maintenance-health.sh [OPTIONS]
 
-Root-operated path: sudo make health
-Direct non-root path: ./maintenance.sh health
+Root-operated repair path: sudo make health
+Direct read-only path: ./maintenance.sh health
 
 OPTIONS:
     --comprehensive     Run all checks including extended diagnostics
@@ -521,6 +521,8 @@ EXIT CODES:
     1 — One or more warnings
     2 — One or more failures
     3 — Critical failure (cannot run checks)
+    4 — Operation guard infrastructure failure in --fix mode
+    75 — Clean skip because another health or repair operation is active
 ```
 
 ### maintenance-run.sh

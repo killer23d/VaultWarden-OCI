@@ -18,7 +18,7 @@ trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanu
 trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh"; do
+for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh" "lib/operations.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
@@ -30,11 +30,69 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
+
+SETUP_SECRETS_GUARD_HELD=false
+
+_setup_secrets_cleanup_all() {
+    local rc=$?
+    operation_release "$rc"
+    if declare -F _ss_perform_cleanup >/dev/null 2>&1; then
+        _ss_perform_cleanup
+    fi
+    rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true
+    exit "$rc"
+}
+
+_setup_secrets_should_guard() {
+    local subcmd="$1"
+    shift || true
+    case "$subcmd" in
+        bootstrap|configure)
+            return 0
+            ;;
+        breakglass)
+            local action="${1:-}"
+            case "$action" in
+                create|remove|reset-password)
+                    local arg
+                    for arg in "$@"; do
+                        [[ "$arg" == "--dry-run" ]] && return 1
+                    done
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
+_setup_secrets_acquire_guard() {
+    local subcmd="$1"
+    shift || true
+    _setup_secrets_should_guard "$subcmd" "$@" || return 0
+    [[ "$SETUP_SECRETS_GUARD_HELD" == "true" ]] && return 0
+
+    local policy="fail"
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        policy="skip"
+    fi
+    operation_acquire \
+        --id secrets \
+        --label "Secrets" \
+        --specific-lock /run/lock/vaultwarden-secrets.lock \
+        --non-interactive "$policy" || return $?
+    SETUP_SECRETS_GUARD_HELD=true
+    trap _setup_secrets_cleanup_all EXIT
+    trap 'operation_release 130; if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 130' INT
+    trap 'operation_release 143; if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 143' HUP TERM
+    operation_set_phase "$subcmd" "Secrets ${subcmd}"
+}
 
 show_help() {
     cat << 'EOF'
@@ -1871,7 +1929,7 @@ _ss_cipher_recipients() {
     local file="$1"
     [[ -f "$file" ]] || return 0
     if command -v yq >/dev/null 2>&1; then
-        yq -r '.sops.age[]?.recipient // empty' "$file" 2>/dev/null | sed '/^$/d'
+        yq -r '.sops.age[]?.recipient // ""' "$file" 2>/dev/null | sed '/^$/d'
     else
         awk '/^[[:space:]]*-[[:space:]]*recipient:/ { print $NF }' "$file"
     fi
@@ -2475,6 +2533,7 @@ main() {
     esac
 
     load_project_environment || exit 1
+    _setup_secrets_acquire_guard "$subcmd" "$@" || exit $?
 
     case "$subcmd" in
         bootstrap)           _cmd_bootstrap "$@" ;;

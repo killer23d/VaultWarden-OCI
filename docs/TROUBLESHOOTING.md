@@ -207,6 +207,7 @@ Common causes and fixes:
 | Backup has only `.pre-restore-*` DBs | Choose a different full/emergency archive or restore a DB backup. |
 | Caddy permissions drift after restore | Run `sudo utilities/repair-permissions.sh` and restart Caddy. |
 | Operator does not want immediate service start | Use `--start-policy ask` or `--no-start`. |
+| Restore prompt timed out or SSH input was lost | Save any printed new Age key/recovery-kit path, review restore state, then use the manual startup checklist. |
 
 Remember the tier model:
 
@@ -217,6 +218,8 @@ Remember the tier model:
 | `emergency` | Clone-grade sealed restore that may carry `/etc/vaultwarden` key/config material. |
 
 > **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export and protect the passphrase or emergency recipient identity separately.
+
+Restore confirmation timeout or EOF is not treated as an implicit "no". If the emergency Age-key rotation prompt or new-key `SAVED` acknowledgement loses input, restore fails safe, leaves services stopped, preserves generated key material, and prints manual recovery/start guidance.
 
 ---
 

@@ -49,13 +49,33 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 require_root "$@"
+source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+
+_secrets_edit_policy="fail"
+if [[ ! -t 0 || ! -t 1 ]]; then
+    _secrets_edit_policy="skip"
+fi
+operation_acquire \
+    --id secrets \
+    --label "Secrets edit" \
+    --specific-lock /run/lock/vaultwarden-secrets.lock \
+    --non-interactive "$_secrets_edit_policy" || exit $?
+_secrets_edit_cleanup() {
+    local rc=$?
+    operation_release "$rc"
+    perform_cleanup
+    exit "$rc"
+}
+trap _secrets_edit_cleanup EXIT
+trap 'operation_release 130; perform_cleanup; exit 130' INT
+trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
+operation_set_phase "edit" "Editing encrypted secrets"
+
 load_project_environment || exit 1
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
-
-trap perform_cleanup EXIT
 
 # Parse EDITOR into an array so flag-bearing values such as EDITOR='code --wait' work.
 read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
