@@ -832,7 +832,10 @@ STUB
         fi
 
         log_info "Attempting apt install of crowdsec-cloudflare-worker-bouncer..."
-        if operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-worker-bouncer; then
+        if operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::=--force-confdef \
+            -o Dpkg::Options::=--force-confold \
+            crowdsec-cloudflare-worker-bouncer; then
             log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
             _installed_via_deb=true
             _apt_bin="$(command -v crowdsec-cloudflare-worker-bouncer 2>/dev/null || true)"

@@ -11,6 +11,8 @@ readonly VW_OPERATIONS_LIB_LOADED=1
 : "${VW_OPERATIONS_WAIT_LIMIT:=120}"
 : "${VW_PACKAGE_WAIT_INTERVAL:=10}"
 : "${VW_PACKAGE_WAIT_ATTEMPTS:=12}"
+: "${VW_OPERATIONS_STOP_GRACE:=10}"
+: "${VW_OPERATIONS_FORCE_GRACE:=5}"
 
 OPERATION_ID=""
 OPERATION_LABEL=""
@@ -183,6 +185,7 @@ _operation_find_state_for_lock() {
         state="$(_operation_state_get "$file" state 2>/dev/null || true)"
         stored_lock="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
         [[ "$state" == "running" && "$stored_lock" == "$lock_path" ]] || continue
+        _operation_verify_owner "$file" || continue
         printf '%s\n' "$file"
         return 0
     done
@@ -190,6 +193,7 @@ _operation_find_state_for_lock() {
         [[ -f "$file" ]] || continue
         state="$(_operation_state_get "$file" state 2>/dev/null || true)"
         [[ "$state" == "running" ]] || continue
+        _operation_verify_owner "$file" || continue
         printf '%s\n' "$file"
         return 0
     done
@@ -233,6 +237,83 @@ _operation_related_rows() {
         }' | sort -n
 }
 
+_operation_descendant_pids() {
+    local root_pid="$1"
+    [[ "$root_pid" =~ ^[0-9]+$ ]] || return 0
+    ps -eo pid=,ppid= 2>/dev/null | awk -v root="$root_pid" '
+        {
+            pid=$1; ppid=$2; parent[pid]=ppid
+        }
+        END {
+            depth[root]=0
+            changed=1
+            while (changed) {
+                changed=0
+                for (pid in parent) {
+                    if (pid == root) continue
+                    if ((parent[pid] == root || depth[parent[pid]] != "") && depth[pid] == "") {
+                        depth[pid]=depth[parent[pid]] + 1
+                        changed=1
+                    }
+                }
+            }
+            for (pid in depth) {
+                if (pid != root) print depth[pid], pid
+            }
+        }' | sort -rn | awk '{print $2}'
+}
+
+_operation_live_pids() {
+    local pid
+    for pid in "$@"; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        (( pid > 1 )) || continue
+        (( pid == $$ )) && continue
+        kill -0 "$pid" 2>/dev/null || continue
+        printf '%s\n' "$pid"
+    done
+}
+
+_operation_signal_pids() {
+    local signal="$1" pid
+    shift || true
+    for pid in "$@"; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        (( pid > 1 )) || continue
+        (( pid == $$ )) && continue
+        kill "-${signal}" "$pid" 2>/dev/null || true
+    done
+}
+
+_operation_wait_for_pids_exit() {
+    local timeout="$1"
+    shift || true
+    local start now live
+    start="$(_operation_epoch)"
+    while true; do
+        live="$(_operation_live_pids "$@" | paste -sd' ' -)"
+        [[ -z "$live" ]] && return 0
+        now="$(_operation_epoch)"
+        (( now - start >= timeout )) && {
+            printf '%s\n' "$live"
+            return 1
+        }
+        sleep 1
+    done
+}
+
+_operation_wait_for_lock_clear() {
+    local lock_path="$1" timeout="$2" start now
+    [[ -n "$lock_path" ]] || return 0
+    start="$(_operation_epoch)"
+    while _operation_lock_is_held "$lock_path"; do
+        now="$(_operation_epoch)"
+        (( now - start >= timeout )) && return 1
+        sleep 1
+    done
+    return 0
+}
+
 _operation_has_package_manager_child() {
     local file="$1" pid comm
     pid="$(_operation_state_get "$file" pid 2>/dev/null || true)"
@@ -263,9 +344,13 @@ _operation_print_related() {
 _operation_describe_state() {
     local file="$1" label operation started started_epoch pid phase phase_name elapsed
     [[ -r "$file" ]] || {
-        printf 'Another VaultWarden operation is currently active, but no readable operation metadata was found.\n'
+        printf 'The VaultWarden operations lock is active, but the owning operation metadata could not be verified.\n'
         return 0
     }
+    if ! _operation_verify_owner "$file"; then
+        printf 'The VaultWarden operations lock is active, but the owning operation metadata could not be verified.\n'
+        return 0
+    fi
     operation="$(_operation_state_get "$file" operation 2>/dev/null || true)"
     label="$(_operation_state_get "$file" label 2>/dev/null || true)"
     started="$(_operation_state_get "$file" started 2>/dev/null || true)"
@@ -313,20 +398,81 @@ _operation_wait_for_release() {
     return 0
 }
 
-_operation_request_stop() {
-    local file="$1" pid
+_operation_stop_scope() {
+    local file="$1" mode="${2:-graceful}"
+    local pid lock_path descendants remaining root_remaining all_remaining
     _operation_verify_owner "$file" || {
         _operation_log error "Cannot verify the active VaultWarden operation owner; refusing to signal."
         return 1
     }
+    if _operation_has_package_manager_child "$file"; then
+        _operation_log error "Package manager activity is still active; refusing automated stop."
+        return 1
+    fi
     pid="$(_operation_state_get "$file" pid 2>/dev/null || true)"
-    _operation_log warn "Requesting graceful stop for VaultWarden operation PID ${pid}."
-    kill -TERM "$pid" 2>/dev/null || return 1
-    return 0
+    lock_path="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
+
+    mapfile -t descendants < <(_operation_descendant_pids "$pid")
+    if (( ${#descendants[@]} > 0 )); then
+        _operation_log warn "Requesting graceful stop for VaultWarden operation child process(es): ${descendants[*]}"
+        _operation_signal_pids TERM "${descendants[@]}"
+        remaining="$(_operation_wait_for_pids_exit "$VW_OPERATIONS_STOP_GRACE" "${descendants[@]}" || true)"
+        if [[ -n "$remaining" && "$mode" != "force" ]]; then
+            _operation_log error "Operation child process(es) still running after TERM: ${remaining}"
+            _operation_log error "Leaving the operation wrapper running so the shared lock is not released prematurely."
+            return 1
+        fi
+        if [[ -n "$remaining" ]]; then
+            _operation_log warn "Force terminating verified operation child process(es): ${remaining}"
+            # shellcheck disable=SC2086 # remaining is a whitespace-separated PID list produced by _operation_live_pids.
+            _operation_signal_pids KILL $remaining
+            # shellcheck disable=SC2086
+            _operation_wait_for_pids_exit "$VW_OPERATIONS_FORCE_GRACE" $remaining >/dev/null || true
+        fi
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+        _operation_verify_owner "$file" || {
+            _operation_log error "Cannot re-verify the active VaultWarden operation owner; refusing to signal wrapper."
+            return 1
+        }
+        _operation_log warn "Requesting graceful stop for VaultWarden operation PID ${pid}."
+        kill -TERM "$pid" 2>/dev/null || return 1
+    fi
+
+    if ! _operation_wait_for_pids_exit "$VW_OPERATIONS_STOP_GRACE" "$pid" >/dev/null; then
+        root_remaining="$(_operation_live_pids "$pid" | paste -sd' ' -)"
+        if [[ "$mode" != "force" ]]; then
+            _operation_log error "Operation wrapper is still running after TERM: ${root_remaining}"
+            return 1
+        fi
+        _operation_verify_owner "$file" || {
+            _operation_log error "Cannot re-verify the active VaultWarden operation owner before force termination."
+            return 1
+        }
+        _operation_log warn "Force terminating verified operation wrapper: ${pid}"
+        kill -KILL "$pid" 2>/dev/null || true
+        _operation_wait_for_pids_exit "$VW_OPERATIONS_FORCE_GRACE" "$pid" >/dev/null || true
+    fi
+
+    mapfile -t descendants < <(_operation_descendant_pids "$pid")
+    all_remaining="$(_operation_live_pids "$pid" "${descendants[@]}" | paste -sd' ' -)"
+    if [[ -n "$all_remaining" ]]; then
+        _operation_log error "Operation-owned process(es) still running: ${all_remaining}"
+        return 1
+    fi
+    _operation_wait_for_lock_clear "$lock_path" "$VW_OPERATIONS_STOP_GRACE" || {
+        _operation_log error "Operation lock is still held after stop request; inspect with: sudo make operations"
+        return 1
+    }
+}
+
+_operation_request_stop() {
+    _operation_stop_scope "$1" graceful
 }
 
 _operation_force_stop() {
-    local file="$1" pid reply
+    local file="$1" reply
     _operation_verify_owner "$file" || {
         _operation_log error "Cannot verify the active VaultWarden operation owner; refusing to signal."
         return 1
@@ -337,11 +483,7 @@ _operation_force_stop() {
         _operation_log warn "Force termination cancelled."
         return 1
     }
-    pid="$(_operation_state_get "$file" pid 2>/dev/null || true)"
-    kill -TERM "$pid" 2>/dev/null || true
-    sleep 10
-    _operation_verify_owner "$file" || return 0
-    kill -KILL "$pid" 2>/dev/null || true
+    _operation_stop_scope "$file" force
 }
 
 operation_conflict_prompt() {
@@ -362,7 +504,22 @@ operation_conflict_prompt() {
 
     while true; do
         _operation_describe_state "$state_file"
-        if [[ -n "$state_file" ]] && _operation_has_package_manager_child "$state_file"; then
+        if [[ -z "$state_file" || ! -r "$state_file" ]] || ! _operation_verify_owner "$state_file"; then
+            printf '\nChoose an action:\n\n'
+            printf '  [1] Wait for the active operation\n'
+            printf '  [2] Exit and inspect manually\n\n'
+            printf 'Selection [1-2] (default: 2): '
+            IFS= read -r choice || choice=2
+            [[ -z "$choice" ]] && choice=2
+            case "$choice" in
+                1) _operation_wait_for_release "$lock_path" "" "" && return 0 ;;
+                2) _operation_log info "Inspect the host before retrying. Check later with: sudo make operations"; return 1 ;;
+                *) _operation_log warn "Invalid selection." ;;
+            esac
+            continue
+        fi
+
+        if _operation_has_package_manager_child "$state_file"; then
             printf '\nPackage manager activity is still active.\n'
             printf 'VaultWarden-OCI will not automatically terminate apt/dpkg because doing so may leave package configuration incomplete.\n'
             printf '\nChoose an action:\n\n'
@@ -575,7 +732,7 @@ _operation_list_one() {
     lock_path="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
     status="$state"
     if [[ "$state" == "running" ]]; then
-        if [[ -n "$lock_path" ]] && _operation_lock_is_held "$lock_path"; then
+        if [[ -n "$lock_path" ]] && _operation_lock_is_held "$lock_path" && _operation_verify_owner "$file"; then
             status="running"
         else
             status="interrupted"
@@ -612,31 +769,9 @@ operation_list() {
     fi
 }
 
-operation_package_manager_processes() {
-    ps -eo pid=,etime=,comm= 2>/dev/null | awk '
-        $3 == "apt" || $3 == "apt-get" || $3 == "dpkg" ||
-        $3 == "unattended-upgrade" || $3 == "unattended-upgr" {
-            print
-        }'
-}
-
 operation_package_wait() {
-    local attempt rows
-    for ((attempt=1; attempt<=VW_PACKAGE_WAIT_ATTEMPTS; attempt++)); do
-        rows="$(operation_package_manager_processes || true)"
-        [[ -z "$rows" ]] && return 0
-        _operation_log warn "Package manager is busy."
-        printf 'Detected process:\n%s\n' "$rows" >&2
-        if (( attempt == VW_PACKAGE_WAIT_ATTEMPTS )); then
-            _operation_log error "Package manager remained busy."
-            _operation_log error "The active process was not terminated."
-            _operation_log error "Check: ps -eo pid,ppid,etime,stat,comm | grep -E 'apt|dpkg|unattended'"
-            _operation_log error "Then re-run the original VaultWarden command."
-            return 75
-        fi
-        _operation_log info "Waiting ${VW_PACKAGE_WAIT_INTERVAL}s before retry ${attempt}/${VW_PACKAGE_WAIT_ATTEMPTS}..."
-        sleep "$VW_PACKAGE_WAIT_INTERVAL"
-    done
+    _operation_log info "Package-manager waits are output-driven; no process-name preflight is used."
+    return 0
 }
 
 _operation_output_is_package_lock_error() {
@@ -649,7 +784,6 @@ operation_package_run() {
     tmp="$(mktemp -t vw-package.XXXXXXXXXX)" || return 1
     [[ $- == *e* ]] && had_errexit=true
     for ((attempt=1; attempt<=VW_PACKAGE_WAIT_ATTEMPTS; attempt++)); do
-        operation_package_wait || { rm -f "$tmp"; return 75; }
         : > "$tmp"
         set +e
         "$@" 2>&1 | tee "$tmp"
@@ -673,6 +807,7 @@ operation_package_run() {
             return "$rc"
         fi
         _operation_log warn "Package manager lock contention detected; retrying after ${VW_PACKAGE_WAIT_INTERVAL}s."
+        _operation_log warn "The active apt/dpkg process was not terminated and no lock files were removed."
         sleep "$VW_PACKAGE_WAIT_INTERVAL"
     done
     rm -f "$tmp"

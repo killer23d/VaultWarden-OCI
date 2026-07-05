@@ -306,9 +306,21 @@ _phase_iptables() {
                 rm -f "$_ipt_backup_v6"; _ipt_backup_v6=""
             }
         fi
-        trap 'rc=$?; _ipt_cleanup; operation_release "$rc"; exit "$rc"' ERR INT TERM
+        _setup_firewall_error_cleanup() {
+            local exit_rc=$?
+            _ipt_cleanup
+            operation_release "$exit_rc"
+            exit "$exit_rc"
+        }
+        trap _setup_firewall_error_cleanup ERR INT TERM
+        _setup_firewall_exit_cleanup() {
+            local exit_rc=$?
+            rm -f "${_ipt_backup_v4:-}" "${_ipt_backup_v6:-}"
+            operation_release "$exit_rc"
+            exit "$exit_rc"
+        }
         # On success, clean up backup files without performing a rollback.
-        trap 'rc=$?; rm -f "${_ipt_backup_v4:-}" "${_ipt_backup_v6:-}"; operation_release "$rc"; exit "$rc"' EXIT
+        trap _setup_firewall_exit_cleanup EXIT
     fi
 
     local compose_file="${COMPOSE_FILE:-docker-compose.yml}"
@@ -530,7 +542,13 @@ main() {
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
     if [[ "$DRY_RUN" != "true" ]]; then
         operation_acquire --id setup --label "Setup" || exit $?
-        trap 'rc=$?; operation_release "$rc"; _ipt_cleanup; exit "$rc"' EXIT
+        _setup_firewall_main_cleanup() {
+            local exit_rc=$?
+            operation_release "$exit_rc"
+            _ipt_cleanup
+            exit "$exit_rc"
+        }
+        trap _setup_firewall_main_cleanup EXIT
         trap 'operation_release 130; _ipt_cleanup; exit 130' INT
         trap 'operation_release 143; _ipt_cleanup; exit 143' HUP TERM
         operation_set_phase "firewall" "Firewall setup"

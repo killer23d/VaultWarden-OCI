@@ -656,7 +656,13 @@ main() {
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
     if [[ "$DRY_RUN" != "true" ]]; then
         operation_acquire --id setup --label "Setup" || exit $?
-        trap 'rc=$?; operation_release "$rc"; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit "$rc"' EXIT
+        _setup_system_cleanup() {
+            local exit_rc=$?
+            operation_release "$exit_rc"
+            rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true
+            exit "$exit_rc"
+        }
+        trap _setup_system_cleanup EXIT
         trap 'operation_release 130; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 130' INT
         trap 'operation_release 143; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 143' TERM
         operation_set_phase "1" "System setup"
