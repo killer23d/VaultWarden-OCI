@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 source "$SCRIPT_DIR/lib/log.sh"
+source "$SCRIPT_DIR/lib/defaults.sh"
 source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
@@ -140,11 +141,11 @@ check_domain_configured() {
 check_compose_config() {
     [[ "$QUIET" == false ]] && log_info "Checking Docker Compose configuration..."
     if ! has_command docker; then
-        _check_skip "compose-config" "Docker is unavailable"
+        _check_fail "compose-config" "Docker is unavailable"
         return
     fi
     if ! docker compose version >/dev/null 2>&1; then
-        _check_skip "compose-config" "Docker Compose plugin is unavailable"
+        _check_fail "compose-config" "Docker Compose plugin is unavailable"
         return
     fi
 
@@ -161,17 +162,27 @@ check_compose_config() {
 
 check_containers_running() {
     [[ "$QUIET" == false ]] && log_info "Checking container health..."
-    local services=(vaultwarden caddy postfix)
+    if ! has_command docker; then
+        _check_fail "container-readiness" "Docker is unavailable"
+        return
+    fi
+    if ! docker compose version >/dev/null 2>&1; then
+        _check_fail "container-readiness" "Docker Compose plugin is unavailable"
+        return
+    fi
+    local services=("${_VW_DEFAULT_CRITICAL_SERVICES[@]}")
     for svc in "${services[@]}"; do
         if _container_running "$svc"; then
             local health
             health=$(docker inspect --format '{{.State.Health.Status}}' \
                 "$(docker compose ps -q "$svc" 2>/dev/null)" 2>/dev/null || echo "none")
             case "$health" in
-                healthy|none)
+                healthy)
                     _check_pass "container-$svc" "running (health: $health)" ;;
                 starting)
                     _check_skip "container-$svc" "still starting — re-run after warmup" ;;
+                none)
+                    _check_fail "container-$svc" "running but no healthcheck status reported" ;;
                 *)
                     _check_fail "container-$svc" "running but health=$health" ;;
             esac
@@ -230,11 +241,11 @@ check_http_endpoints() {
         _check_fail "http-root" "unexpected HTTP ${status} from ${base}/"
     fi
 
-    status=$(_http_status "${base}/api/alive")
+    status=$(_http_status "${base}/alive")
     if [[ "$status" == "200" ]]; then
-        _check_pass "http-api-alive" "VaultWarden API responding (HTTP 200)"
+        _check_pass "http-alive" "VaultWarden readiness responding (HTTP 200)"
     else
-        _check_fail "http-api-alive" "unexpected HTTP ${status} from /api/alive"
+        _check_fail "http-alive" "unexpected HTTP ${status} from /alive"
     fi
 
     # /admin should be protected: 401 or 403 is correct, and 200 means it is unprotected.
@@ -360,47 +371,6 @@ check_docker_secrets_materialized() {
     done
 }
 
-check_startup_unit() {
-    [[ "$QUIET" == false ]] && log_info "Checking installed startup unit..."
-    local unit_file="/etc/systemd/system/vaultwarden-startup.service"
-
-    if ! has_command systemd-analyze; then
-        _check_skip "startup-unit" "systemd-analyze is unavailable"
-        return
-    fi
-    if [[ ! -f "$unit_file" ]]; then
-        _check_fail "startup-unit" \
-            "installed production unit missing: $unit_file — run: sudo ./setup.sh systemd install"
-        return
-    fi
-    if systemd-analyze verify "$unit_file" >/dev/null 2>&1; then
-        _check_pass "startup-unit" "$unit_file validates"
-    else
-        local diagnostic
-        diagnostic=$(systemd-analyze verify "$unit_file" 2>&1 | head -5 | tr '\n' '; ' || true)
-        _check_fail "startup-unit" "validation failed: ${diagnostic:-no diagnostic output}"
-    fi
-}
-
-check_startup_service() {
-    [[ "$QUIET" == false ]] && log_info "Checking startup service state..."
-    if ! has_command systemctl; then
-        _check_skip "startup-service" "systemctl is unavailable"
-        return
-    fi
-    if [[ ! -f /etc/systemd/system/vaultwarden-startup.service ]]; then
-        _check_fail "startup-service" \
-            "unit is not installed — run: sudo ./setup.sh systemd install"
-        return
-    fi
-    if systemctl is-active --quiet vaultwarden-startup.service 2>/dev/null; then
-        _check_pass "startup-service" "vaultwarden-startup.service is active"
-    else
-        _check_fail "startup-service" \
-            "inactive or failed — run: sudo systemctl start vaultwarden-startup.service"
-    fi
-}
-
 check_backup_exists() {
     [[ "$QUIET" == false ]] && log_info "Checking recent backup exists..."
     _require_project_environment "backup-recent" || return 0
@@ -430,31 +400,36 @@ check_backup_exists() {
     fi
 }
 
-check_systemd_timers() {
-    [[ "$QUIET" == false ]] && log_info "Checking systemd backup timers..."
+check_systemd_automation() {
+    [[ "$QUIET" == false ]] && log_info "Checking installed systemd automation..."
     if ! has_command systemctl; then
-        _check_skip "systemd-timers" "systemctl not available"
+        _check_fail "systemd-automation" "systemctl not available"
         return
     fi
-    local timers=(vaultwarden-db-backup.timer vaultwarden-full-backup.timer)
-    for timer in "${timers[@]}"; do
-        if systemctl is-active --quiet "$timer" 2>/dev/null; then
-            _check_pass "timer-$timer" "active"
-        else
-            _check_fail "timer-$timer" "not active — run: sudo make install-systemd"
-        fi
-    done
+    if "${SCRIPT_DIR}/utilities/setup-systemd.sh" validate >/dev/null 2>&1; then
+        _check_pass "systemd-automation" "setup-systemd validation passed"
+    else
+        _check_fail "systemd-automation" "run: sudo ./utilities/setup-systemd.sh validate"
+    fi
 }
 
 check_crowdsec() {
     [[ "$QUIET" == false ]] && log_info "Checking CrowdSec..."
     if ! has_command cscli; then
-        _check_skip "crowdsec" "cscli not installed"
+        _check_fail "crowdsec" "cscli not installed"
+        return
+    fi
+    if ! has_command systemctl; then
+        _check_fail "crowdsec" "systemctl not available"
         return
     fi
     if systemctl is-active --quiet crowdsec 2>/dev/null; then
-        local decisions
-        decisions=$(cscli decisions list 2>/dev/null | wc -l || echo "0")
+        local decisions_output decisions
+        if ! decisions_output="$(cscli decisions list -o raw 2>&1)"; then
+            _check_fail "crowdsec" "cscli decisions query failed"
+            return
+        fi
+        decisions="$(printf '%s\n' "$decisions_output" | tail -n +2 | grep -c . || true)"
         _check_pass "crowdsec" "active (${decisions} decision(s) in effect)"
     else
         _check_fail "crowdsec" "crowdsec service not running"
@@ -502,6 +477,8 @@ _print_summary() {
     printf '\n'
     if (( _FAIL > 0 )); then
         log_error "Smoke test FAILED — resolve the issues above before production deployment."
+    elif (( _SKIP > 0 )); then
+        log_error "NOT READY — one or more checks were not completed."
     else
         log_success "All checks passed — stack is ready for production."
     fi
@@ -516,8 +493,6 @@ main() {
     load_smoke_test_environment
     check_domain_configured
     check_compose_config
-    check_startup_unit
-    check_startup_service
     check_containers_running
     check_tls_certificate
     check_http_endpoints
@@ -525,11 +500,11 @@ main() {
     check_secrets_decryptable
     check_docker_secrets_materialized
     check_backup_exists
-    check_systemd_timers
+    check_systemd_automation
     check_crowdsec
     check_disk_space
 
-    (( _FAIL == 0 ))
+    (( _FAIL == 0 && _SKIP == 0 ))
 }
 
 main "$@"

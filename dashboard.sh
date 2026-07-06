@@ -131,33 +131,6 @@ run_sudo_cmd() {
 }
 
 # ---------------------------------------------------------------------------
-# Utility: run a normal-user command from a root-launched dashboard.
-# If the dashboard was launched with sudo, drop back to SUDO_USER.
-# ---------------------------------------------------------------------------
-run_user_cmd() {
-    local label="$1"; shift
-    echo ""
-    echo -e "${BLD} Running: ${label}${NC}"
-    echo -e "${CYN}${DIVIDER}${NC}"
-
-    local rc=0
-    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-        sudo -u "$SUDO_USER" -- "$@" || rc=$?
-    else
-        "$@" || rc=$?
-    fi
-
-    if (( rc == 0 )); then
-        echo -e "${CYN}${DIVIDER}${NC}"
-        echo -e "${GRN} Command completed successfully.${NC}"
-    else
-        echo -e "${CYN}${DIVIDER}${NC}"
-        echo -e "${YLW} Command exited with status ${rc}.${NC}"
-    fi
-    _press_enter
-}
-
-# ---------------------------------------------------------------------------
 # Utility: reverse-video "Press Enter" anchor
 # ---------------------------------------------------------------------------
 _press_enter() {
@@ -322,7 +295,7 @@ _secrets_health() {
     local env_file="${REPO_ROOT}/.env"
 
     if [[ ! -f "${env_file}" || ! -r "${env_file}" ]]; then
-        printf "${RED}Secrets file missing (.env)${NC}"
+        printf "${RED}.env missing${NC}"
         return
     fi
 
@@ -341,69 +314,15 @@ _secrets_health() {
 
     local count=${#unset_keys[@]}
     if   (( count == 0 )); then
-        printf "${GRN}All secrets configured${NC}"
+        printf "${GRN}No placeholders found${NC}"
     elif (( count == 1 )); then
-        printf "${YLW}1 secret needs attention: %s${NC}" "${unset_keys[0]}"
+        printf "${YLW}1 placeholder remains: %s${NC}" "${unset_keys[0]}"
     elif (( count <= 4 )); then
-        printf "${YLW}%d secrets need attention: %s${NC}" \
+        printf "${YLW}%d placeholders remain: %s${NC}" \
             "${count}" "${unset_keys[*]}"
     else
-        printf "${YLW}%d secrets need attention — run: grep CHANGE_ME .env${NC}" \
+        printf "${YLW}%d placeholders remain — run: grep CHANGE_ME .env${NC}" \
             "${count}"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# _last_backup_result
-#
-# Derives the result of the most recent backup run from the artefacts that
-# backup-run.sh always writes alongside each encrypted archive:
-#
-#   PASS       — .age + .sha256 + .meta all present  (successful, verified)
-#   WARN       — .age + .sha256 present, .meta absent (completed, no metadata)
-#   INCOMPLETE — .age present but no .sha256 sidecar  (may be a partial write)
-#   N/A        — no .age archives found anywhere under BACKUP_DIR
-#
-# Search covers all backup-type subdirectories (db/, full/, emergency/) so
-# it always reflects the single newest archive regardless of type.
-#
-# No external log file is required; this is entirely artefact-driven and will
-# update on every dashboard refresh after each backup run.
-# ---------------------------------------------------------------------------
-_last_backup_result() {
-    local newest_file="" newest_mtime=0
-
-    # Walk every type subdirectory that may exist under BACKUP_DIR.
-    local type_dir file file_mtime
-    for type_dir in "${BACKUP_DIR}/db" "${BACKUP_DIR}/full" "${BACKUP_DIR}/emergency"; do
-        [[ -d "${type_dir}" ]] || continue
-        while IFS= read -r -d '' file; do
-            file_mtime="$(stat -c '%Y' "${file}" 2>/dev/null \
-                || stat -f '%m' "${file}" 2>/dev/null \
-                || echo 0)"
-            if (( file_mtime > newest_mtime )); then
-                newest_mtime=${file_mtime}
-                newest_file=${file}
-            fi
-        done < <(find "${type_dir}" -maxdepth 1 -name '*.age' -type f -print0 2>/dev/null)
-    done
-
-    # No archives found at all.
-    if [[ -z "${newest_file}" ]]; then
-        printf '%s(N/A — no backups found)%s' "${YLW}" "${NC}"
-        return
-    fi
-
-    # Determine result from sidecar artefacts.
-    local sha256_file="${newest_file}.sha256"
-    local meta_file="${newest_file}.meta"
-
-    if [[ -f "${sha256_file}" && -f "${meta_file}" ]]; then
-        printf '%sPASS%s' "${GRN}" "${NC}"
-    elif [[ -f "${sha256_file}" ]]; then
-        printf '%sWARN (no .meta sidecar)%s' "${YLW}" "${NC}"
-    else
-        printf '%sINCOMPLETE (no .sha256 sidecar)%s' "${RED}" "${NC}"
     fi
 }
 
@@ -412,7 +331,7 @@ _last_backup_result() {
 #
 # Returns a single color-coded status line describing rclone availability:
 #
-#   Ready      — binary present + RCLONE_REMOTE_NAME set in .env
+#   Configured (not probed) — binary present + RCLONE_REMOTE_NAME set in .env
 #   Not configured  — binary present but RCLONE_REMOTE_NAME is missing/placeholder
 #   Not installed   — rclone binary not found on PATH
 #
@@ -443,7 +362,7 @@ _rclone_status() {
         return
     fi
 
-    printf '%sReady%s  (remote: %s)' "${GRN}" "${NC}" "${remote_name}"
+    printf '%sConfigured (not probed)%s  (remote: %s)' "${GRN}" "${NC}" "${remote_name}"
 }
 
 # ---------------------------------------------------------------------------
@@ -476,10 +395,14 @@ draw_live_stats() {
     echo -e " ${BLD}Disk:${NC}   ${disk_info}"
 
     # --- CrowdSec bans ---
-    local ban_count ban_color
+    local ban_count ban_color cscli_output cscli_rc=0
     if systemctl is-active --quiet crowdsec 2>/dev/null; then
-        ban_count="$(sudo cscli decisions list -o raw 2>/dev/null \
-            | tail -n +2 | wc -l || echo 0)"
+        cscli_output="$(cscli decisions list -o raw 2>/dev/null)" || cscli_rc=$?
+        if (( cscli_rc == 0 )); then
+            ban_count="$(printf '%s\n' "${cscli_output}" | tail -n +2 | grep -c . || true)"
+        else
+            ban_count="Unknown"
+        fi
     else
         ban_count="N/A (CrowdSec inactive)"
     fi
@@ -501,31 +424,31 @@ draw_live_stats() {
     echo -e " ${BLD}CrowdSec status:${NC}  ${cs_stat}"
     echo -e " ${BLD}CF Worker status:${NC}  ${cf_stat}"
 
-    # --- Secrets Health (ux.md #23) ---
+    # --- Config placeholder scan (ux.md #23) ---
     local secrets_stat
     secrets_stat="$(_secrets_health)"
-    echo -e " ${BLD}Secrets health:${NC}   ${secrets_stat}"
+    echo -e " ${BLD}Config placeholders:${NC}   ${secrets_stat}"
 
     # --- Last Backup ---
-    local last_backup_str newest_age
-    newest_age="$(find "${BACKUP_DIR}" -name '*.age' -type f 2>/dev/null \
-        | sort | tail -1 || true)"
-    if [[ -n "${newest_age}" ]]; then
+    local last_backup_str newest_backup="" newest_mtime=0
+    while IFS= read -r -d '' backup_file; do
+        local backup_mtime
+        backup_mtime="$(stat -c '%Y' "${backup_file}" 2>/dev/null \
+            || stat -f '%m' "${backup_file}" 2>/dev/null || echo 0)"
+        if [[ "$backup_mtime" =~ ^[0-9]+$ ]] && (( backup_mtime > newest_mtime )); then
+            newest_mtime="$backup_mtime"
+            newest_backup="$backup_file"
+        fi
+    done < <(find "${BACKUP_DIR}" -name '*.age' -type f -print0 2>/dev/null)
+    if [[ -n "${newest_backup}" ]]; then
         local mtime
-        mtime="$(stat -c '%Y' "${newest_age}" 2>/dev/null \
-            || stat -f '%m' "${newest_age}" 2>/dev/null || echo 0)"
-        last_backup_str="$(_epoch_to_pt "${mtime}")"
+        mtime="$(stat -c '%Y' "${newest_backup}" 2>/dev/null \
+            || stat -f '%m' "${newest_backup}" 2>/dev/null || echo 0)"
+        last_backup_str="$(_epoch_to_pt "${mtime}") ($(basename "${newest_backup}"))"
     else
         last_backup_str="${YLW}No backups found${NC}"
     fi
     echo -e " ${BLD}Last backup:${NC}  ${last_backup_str}"
-
-    # --- Last Backup Result ---
-    # Derived from .sha256 / .meta sidecar artefacts written by backup-run.sh.
-    # Does not rely on any external log file.
-    local last_result_str
-    last_result_str="$(_last_backup_result)"
-    echo -e " ${BLD}Last result:${NC}  ${last_result_str}"
 
     # --- Rclone Status ---
     local rclone_stat
@@ -533,54 +456,37 @@ draw_live_stats() {
     echo -e " ${BLD}Rclone:${NC}  ${rclone_stat}"
 
     # --- Systemd Timers ---
-    local _timer_output
-    _timer_output=$(systemctl list-timers --no-pager 2>/dev/null \
-        | grep vaultwarden || true)
-    if [[ -n "${_timer_output}" ]]; then
+    local _timer_output _timer_rc=0
+    _timer_output=$(systemctl list-timers --no-pager 2>/dev/null) || _timer_rc=$?
+    if (( _timer_rc != 0 )); then
+        echo -e " ${BLD}Timers:${NC}  ${YLW}Unknown${NC}"
+    elif grep -q vaultwarden <<< "${_timer_output}"; then
         echo -e " ${BLD}Timers:${NC}"
-        printf '%s\n' "${_timer_output}" \
+        grep vaultwarden <<< "${_timer_output}" \
             | awk '{printf "    %-40s → %s %s\n", $NF, $1, $2}'
     else
-        echo -e " ${BLD}Timers:${NC}  ${YLW}(systemd not available)${NC}"
+        echo -e " ${BLD}Timers:${NC}  ${YLW}No VaultWarden timers listed${NC}"
     fi
 
     # --- Email Queue ---
-    local queue_count=0 queue_str
+    local queue_count="" queue_str mailq_output mailq_rc=0
     if docker ps --format '{{.Names}}' 2>/dev/null \
             | grep -qx "${CONTAINER_POSTFIX}"; then
-        queue_count="$(docker exec "${CONTAINER_POSTFIX}" mailq 2>/dev/null \
-            | grep -c '^[0-9A-F]' || true)"
-        queue_count="${queue_count:-0}"
+        mailq_output="$(docker exec "${CONTAINER_POSTFIX}" mailq 2>/dev/null)" || mailq_rc=$?
+        if (( mailq_rc == 0 )); then
+            queue_count="$(printf '%s\n' "${mailq_output}" | grep -c '^[0-9A-F]' || true)"
+        fi
     fi
-    if   [[ "${queue_count}" -eq 0 ]]; then
-        queue_str="${GRN}Healthy${NC}"
+    if [[ -z "${queue_count}" ]]; then
+        queue_str="${YLW}Unknown${NC}"
+    elif [[ "${queue_count}" -eq 0 ]]; then
+        queue_str="${GRN}0 queued${NC}"
     elif [[ "${queue_count}" -lt 5 ]]; then
-        queue_str="${YLW}${queue_count} message(s) queued${NC}"
+        queue_str="${YLW}${queue_count} queued${NC}"
     else
-        queue_str="${RED}${queue_count} message(s) queued${NC}"
+        queue_str="${RED}${queue_count} queued${NC}"
     fi
     echo -e " ${BLD}Email Queue:${NC}  ${queue_str}"
-
-    # --- Recent Auth Failures (last 1h) ---
-    local auth_fails=0 auth_color since_ts
-    since_ts="$(date -d '1 hour ago' '+%Y-%m-%dT%H:%M:%S' 2>/dev/null \
-        || date -v-1H '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)"
-    if docker ps --format '{{.Names}}' 2>/dev/null \
-            | grep -qE "${CONTAINER_VW}|${CONTAINER_CADDY}"; then
-        auth_fails="$(docker logs "${CONTAINER_VW}" --since "${since_ts}" \
-            2>&1 | grep -ciE 'invalid|fail' || true)"
-        auth_fails="${auth_fails:-0}"
-        local caddy_fails
-        caddy_fails="$(docker logs "${CONTAINER_CADDY}" --since "${since_ts}" \
-            2>&1 | grep -ciE 'invalid|fail' || true)"
-        caddy_fails="${caddy_fails:-0}"
-        auth_fails=$(( auth_fails + caddy_fails ))
-    fi
-    if   (( auth_fails ==  0 )); then auth_color="${GRN}"
-    elif (( auth_fails <  10 )); then auth_color="${YLW}"
-    else                              auth_color="${RED}"
-    fi
-    echo -e " ${BLD}Recent Auth Fails (1h):${NC}  ${auth_color}${auth_fails}${NC}"
 
     draw_divider
 }
@@ -591,7 +497,7 @@ draw_live_stats() {
 draw_main_menu() {
     echo -e " ${BLD}Main Menu${NC}"
     echo ""
-    echo -e "  [ ${GRN}1${NC} ] Start/Restart Stack     (safe)"
+    echo -e "  [ ${GRN}1${NC} ] Start/Restart Stack"
     echo -e "  [ ${RED}2${NC} ] Stop Stack              (destructive)"
     echo -e "  [ ${GRN}3${NC} ] Quick Health Check      (status)"
     echo -e "  [ ${GRN}4${NC} ] View App Logs           (tail)"
@@ -666,13 +572,13 @@ handle_main_menu() {
 draw_backup_menu() {
     echo -e " ${BLD}Backup & Restore${NC}"
     echo ""
-    echo -e "  [ ${GRN}1${NC} ] Incremental DB Backup"
+    echo -e "  [ ${GRN}1${NC} ] DB Snapshot Backup"
     echo -e "  [ ${GRN}2${NC} ] Full System Backup"
     echo -e "  [ ${GRN}3${NC} ] Interactive Restore"
-    echo -e "  [ ${GRN}4${NC} ] Backup Status / Health"
+    echo -e "  [ ${GRN}4${NC} ] Backup Inventory"
     draw_divider
-    echo -e "  [ ${GRN}5${NC} ] Sync Latest Backup to Rclone Remote"
-    echo -e "  [ ${GRN}6${NC} ] Full Verify + Sync to Rclone Remote"
+    echo -e "  [ ${GRN}5${NC} ] Create + Sync New DB Backup"
+    echo -e "  [ ${GRN}6${NC} ] Create + Fully Verify + Sync DB Backup"
     echo -e "  [ ${GRN}7${NC} ] Copy All Local Backups to Rclone Remote"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
@@ -804,21 +710,8 @@ handle_security_menu() {
                 _press_enter
                 return
             fi
-            if ! validate_ip "${ip_to_unban}" 2>/dev/null; then
-                echo -e "${RED} Invalid IP address format: '${ip_to_unban}'${NC}"
-                echo -e "${YLW} Expected dotted-quad IPv4, for example 192.0.2.10${NC}"
-                _press_enter
-                return
-            fi
-            echo ""
-            echo -e "${BLD} Running: sudo cscli decisions delete --ip ${ip_to_unban}${NC}"
-            draw_divider
-            if sudo cscli decisions delete --ip "${ip_to_unban}"; then
-                echo -e "${GRN} Unbanned: ${ip_to_unban}${NC}"
-            else
-                echo -e "${YLW} IP not found or cscli error.${NC}"
-            fi
-            _press_enter
+            run_sudo_cmd "sudo make unban IP=${ip_to_unban}" \
+                make -C "${REPO_ROOT}" unban "IP=${ip_to_unban}"
             ;;
         3)
             run_cmd "make security-report" make -C "${REPO_ROOT}" security-report
@@ -907,7 +800,7 @@ handle_advanced_menu() {
         1)
             local kit_sh="${REPO_ROOT}/utilities/secrets-export-recovery-kit.sh"
             _check_script "${kit_sh}" || return
-            run_user_cmd "./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"
+            run_sudo_cmd "sudo ./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"
             ;;
         2)
             run_cmd "make update" make -C "${REPO_ROOT}" update
@@ -977,7 +870,7 @@ handle_identity_menu() {
     local opt="$1"
     case "${opt}" in
         1)
-            run_user_cmd "make test-email" make -C "${REPO_ROOT}" test-email
+            run_sudo_cmd "sudo make test-email" make -C "${REPO_ROOT}" test-email
             ;;
         2)
             echo ""

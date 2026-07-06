@@ -304,6 +304,42 @@ sudo ./maintenance.sh update --all
 
 Rollback scope: `restore.sh` covers application data/config. OS packages, Docker engine, and provider-level changes are not rolled back automatically. Use a provider/VM snapshot before system-level updates when possible.
 
+### Repository Code Update
+
+For an existing healthy production host, activate repository-code changes with:
+
+```bash
+cd ~/VaultWarden-OCI
+git pull --ff-only
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+`git pull` updates the repository checkout. The systemd install step copies and
+activates managed repository code under `/opt/vaultwarden-scripts` and current
+unit files under `/etc/systemd/system`. Validation proves the installed runtime
+matches the checkout and all managed timers are healthy. Smoke proves live
+readiness. Treat the host as production-ready only after both validation and
+smoke pass.
+
+For a replacement or recovery host that is not ready for scheduled jobs, keep
+the manual-inspection window:
+
+```bash
+sudo ./setup.sh systemd install --no-enable-now
+```
+
+That install-only state may succeed without active timers, but it is not
+production-ready. After storage, secrets, rclone, DNS/firewall, and Vaultwarden
+readiness have been inspected, activate with:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
 ---
 
 ## Secrets and Age Key Operations

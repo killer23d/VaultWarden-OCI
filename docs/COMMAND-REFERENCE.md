@@ -14,7 +14,6 @@ output. Do not edit manually; run `make docs` to regenerate.
 |--------|-------------|
 | `make help` |  Show normal admin/day-2 commands |
 | `make help-all` |  Show every target, including dashboard/API, advanced, dev, and legacy commands |
-| `make setup` |  Run initial setup (requires sudo) |
 | `make dev-setup` |  Set up development environment (.env + docker-compose.override.yml) |
 | `make fix-permissions` |  Repair known VaultWarden-OCI permission drift |
 | `make init-secrets` |  Initialize secrets file (interactive; root required) |
@@ -29,7 +28,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make stop` |  Alias for down |
 | `make restart` |  Restart all services (via startup.sh; root required) |
 | `make safe-restart` |  Restart with automatic rollback on failure (root required) |
-| `make status` |  Show service status, backup health, disk usage, and CrowdSec ban summary |
+| `make status` |  Show service status, backup inventory, disk usage, and CrowdSec ban summary |
 | `make operations` |  Show active or interrupted VaultWarden operations |
 | `make health` |  Run health checks (set AUTO_RECOVER=true to auto-recover; root required) |
 | `make health-quick` |  Quick health check (concise output; root required) |
@@ -49,21 +48,20 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make crowdsec-status` |  Show CrowdSec metrics and active bans (root required) |
 | `make crowdsec-alerts` |  Show recent CrowdSec alerts (last 24h; root required) |
 | `make security-report` |  Single-command security event summary (last 1h; root required) |
-| `make backup` |  Run incremental database backup |
+| `make backup` |  Run DB snapshot backup |
 | `make backup-full` |  Run full backup (database + attachments + config) |
 | `make backup-emergency` |  Create emergency backup kit |
 | `make list-backups` |  List available backups with sizes (root required via Makefile) |
-| `make backup-status` |  Show backup health summary (root required via Makefile) |
+| `make backup-status` |  Show backup inventory (root required via Makefile) |
 | `make restore` |  Interactive restore (guided) |
 | `make restore-preflight` |  Preview restore prerequisites without executing |
 | `make restore-db` |  Restore database only from latest backup |
 | `make restore-remote` |  Restore from remote storage (rclone) |
-| `make key-path` |  Show which age key path is currently active |
 | `make key-health` |  Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE) |
 | `make key-install` |  Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_FILE |
 | `make key-show` |  Show current age public key and key file path/status |
-| `make key-backup` |  Backup age key to a secure offline location (interactive) |
-| `make key-escrow` |  Generate encrypted escrow package (requires GPG or another age key) |
+| `make key-backup` |  Create local Age key copy for manual offline transfer |
+| `make key-escrow` |  Generate password-manager Age key escrow file |
 | `make key-rotate` |  Rotate age encryption key (re-encrypts all secrets) |
 | `make update` |  Update all container images and restart |
 | `make check-updates` |  Check for available container image updates (no restart) |
@@ -82,7 +80,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make breakglass-create` |  Create emergency break-glass admin account |
 | `make breakglass-status` |  Check break-glass admin account status |
 | `make breakglass-remove` |  Remove break-glass admin account |
-| `make test` |  Run all tests (secrets, config validation) |
+| `make test` |  Run local tests and docker-compose config validation |
 | `make test-unit` |  Run non-destructive shell unit and integration tests |
 | `make test-config` |  Validate docker-compose configuration |
 | `make dry-run` |  Show what startup would do without executing |
@@ -208,7 +206,56 @@ EXAMPLES:
 ### backup.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Backup Script
+
+USAGE:
+    sudo ./backup.sh <subcommand> [options]
+    ./backup.sh list                                    # No root required
+
+SUBCOMMANDS:
+    run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
+                      db: encrypted SQLite snapshot only; storage-layout independent
+                      full: normal DR backup; excludes /etc/vaultwarden/age-key.txt
+                      emergency: clone-grade sealed capsule; can include /etc/vaultwarden
+                      key/config material and must use an independent emergency
+                      passphrase or EMERGENCY_BACKUP_AGE_RECIPIENT
+    list [--json]     List existing backups (no root required; JSON optional)
+    verify            Verify the most recent backup's integrity
+    rotate            Apply retention policy and prune old backups
+    sync               Copy all retained local backups to rclone by type
+
+RUN OPTIONS (used after 'run'):
+    --keep N                 Override configured retention for this run
+    --quiet                  Suppress non-error output
+    --force                  Compatibility flag; does not bypass operation guards
+    --email                  Send email notification on completion/failure
+    --rclone                 Sync encrypted backup to rclone remote after creation
+    --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
+    --skip-full-verification Fast checksum only — explicit default
+    --dry-run                Show what would be done without executing
+
+SYNC / ROTATE OPTIONS:
+    --keep N                 Override configured retention for every backup type
+    --quiet                  Suppress non-error output
+    --dry-run                Preview copy or pruning operations
+
+GLOBAL SUBCOMMAND:
+    help                     Show this help
+
+GLOBAL OPTIONS:
+    --version, -V            Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
+    sudo ./backup.sh run db             # Database-only backup
+    sudo ./backup.sh run full           # Full state backup
+    sudo ./backup.sh run emergency      # Clone-grade sealed capsule; prompts for emergency passphrase unless EMERGENCY_BACKUP_AGE_RECIPIENT is set
+    sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
+    ./backup.sh list                              # List existing backups (no sudo)
+    ./backup.sh list --json                       # Machine-readable backup inventory
+    sudo ./backup.sh verify                       # Verify the latest backup
+    sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
+    sudo ./backup.sh sync                         # Upload db/full/emergency backups
 ```
 
 ### restore.sh
@@ -383,7 +430,56 @@ EXAMPLES:
 ### backup-run.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Backup Script
+
+USAGE:
+    sudo ./backup.sh <subcommand> [options]
+    ./backup.sh list                                    # No root required
+
+SUBCOMMANDS:
+    run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
+                      db: encrypted SQLite snapshot only; storage-layout independent
+                      full: normal DR backup; excludes /etc/vaultwarden/age-key.txt
+                      emergency: clone-grade sealed capsule; can include /etc/vaultwarden
+                      key/config material and must use an independent emergency
+                      passphrase or EMERGENCY_BACKUP_AGE_RECIPIENT
+    list [--json]     List existing backups (no root required; JSON optional)
+    verify            Verify the most recent backup's integrity
+    rotate            Apply retention policy and prune old backups
+    sync               Copy all retained local backups to rclone by type
+
+RUN OPTIONS (used after 'run'):
+    --keep N                 Override configured retention for this run
+    --quiet                  Suppress non-error output
+    --force                  Compatibility flag; does not bypass operation guards
+    --email                  Send email notification on completion/failure
+    --rclone                 Sync encrypted backup to rclone remote after creation
+    --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
+    --skip-full-verification Fast checksum only — explicit default
+    --dry-run                Show what would be done without executing
+
+SYNC / ROTATE OPTIONS:
+    --keep N                 Override configured retention for every backup type
+    --quiet                  Suppress non-error output
+    --dry-run                Preview copy or pruning operations
+
+GLOBAL SUBCOMMAND:
+    help                     Show this help
+
+GLOBAL OPTIONS:
+    --version, -V            Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
+    sudo ./backup.sh run db             # Database-only backup
+    sudo ./backup.sh run full           # Full state backup
+    sudo ./backup.sh run emergency      # Clone-grade sealed capsule; prompts for emergency passphrase unless EMERGENCY_BACKUP_AGE_RECIPIENT is set
+    sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
+    ./backup.sh list                              # List existing backups (no sudo)
+    ./backup.sh list --json                       # Machine-readable backup inventory
+    sudo ./backup.sh verify                       # Verify the latest backup
+    sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
+    sudo ./backup.sh sync                         # Upload db/full/emergency backups
 ```
 
 ### env-edit.sh
@@ -670,9 +766,9 @@ USAGE:
     sudo ./utilities/pre-production-drill.sh [OPTIONS]
 
 DESCRIPTION:
-    Non-destructive rehearsal of all critical operational paths.
+    Non-destructive pre-production check of critical operational paths.
     No production state is modified. Validates secrets, backups, email
-    delivery, and stack restart sequence before go-live.
+    delivery, and Compose restart preflight before go-live.
 
 OPTIONS:
     --skip-email    Skip email delivery test (if MTA not configured yet)
@@ -681,7 +777,7 @@ OPTIONS:
     --version, -V   Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0  All steps passed
+    0  All non-skipped steps passed
     1  One or more steps failed
 
 EXAMPLES:

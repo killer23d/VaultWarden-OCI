@@ -2,14 +2,14 @@
 # VaultWarden-OCI — Makefile
 # ===========================================================================
 # Usage:
-#   sudo make setup          — First-time installation
+#   sudo ./setup.sh install --domain <domain> --email <email> — First-time installation
 #   sudo make up             — Start services (root-operated production path)
 #   sudo make down           — Stop services
 #   sudo make restart        — Restart services
-#   make safe-restart        — Restart with automatic rollback on failure
-#   make status              — Show service status
-#   make health              — Run health checks
-#   make logs                — Follow service logs
+#   sudo make safe-restart   — Restart with automatic rollback on failure
+#   sudo make status         — Show service status
+#   sudo make health         — Run health checks
+#   sudo make logs           — Follow service logs
 #   make help                — Show normal admin/day-2 targets
 #   make help-all            — Show every target, including dashboard/API/dev targets
 # ===========================================================================
@@ -38,7 +38,7 @@ CORE_SERVICES     = vaultwarden caddy
 # Override on the command line to target a specific archive, e.g.:
 #   sudo make restore BACKUP_FILE=backups/db/vaultwarden-db-20250101-120000.age
 BACKUP_FILE ?=
-# Optional: sudo make setup DATA_DEVICE=/dev/sdb
+# Optional first install data volume: sudo ./setup.sh install --domain <domain> --email <email> --data-device /dev/sdb
 DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
@@ -50,7 +50,7 @@ DATA_DEVICE ?=
         watch monitor \
         backup backup-full backup-emergency list-backups backup-status \
         restore restore-preflight restore-db restore-remote \
-        key-path key-health key-backup key-escrow key-rotate key-show key-install \
+        key-health key-backup key-escrow key-rotate key-show key-install \
         update check-updates update-system update-dns \
         maintenance maintenance-full \
         db-maint db-backup \
@@ -74,16 +74,16 @@ DATA_DEVICE ?=
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup sync-env edit-env init-secrets up down start stop restart safe-restart status operations \
+	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email health-email up down start stop restart safe-restart status operations \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
-	key-backup key-escrow key-rotate key-health key-install \
+	key-backup key-escrow key-rotate key-health key-show key-install \
 	update update-system update-dns maintenance maintenance-full db-maint db-backup \
-	install-systemd remove-systemd systemd-validate \
+	install-systemd remove-systemd systemd-status systemd-validate \
 	unban crowdsec-status crowdsec-alerts security-report smoke-test drill \
 	breakglass-create breakglass-status breakglass-remove \
-	uninstall uninstall-dry-run
+	uninstall uninstall-dry-run diagnose prune
 
 ROOT_NEUTRAL_TARGETS := help help-all version
 
@@ -163,9 +163,9 @@ help: ## Show normal admin/day-2 commands
 	@echo "  $(GREEN)diagnose$(NC)                 Collect versions, status, key state, disk, and logs"
 	@echo ""
 	@echo "$(YELLOW)Backup and restore$(NC)"
-	@echo "  $(GREEN)backup$(NC)                   Run database backup"
+	@echo "  $(GREEN)backup$(NC)                   Run DB snapshot backup"
 	@echo "  $(GREEN)backup-full$(NC)              Run full backup"
-	@echo "  $(GREEN)backup-status$(NC)            Show backup health summary (run with sudo)"
+	@echo "  $(GREEN)backup-status$(NC)            Show backup inventory (run with sudo)"
 	@echo "  $(GREEN)list-backups$(NC)             List local backups (run with sudo)"
 	@echo "  $(GREEN)restore$(NC)                  Guided restore"
 	@echo "  $(GREEN)restore-remote$(NC)           Restore from rclone remote"
@@ -204,41 +204,11 @@ help-all: ## Show every target, including dashboard/API, advanced, dev, and lega
 ##@ Advanced Admin — Setup & Installation
 # ===========================================================================
 
-setup: ## Run initial setup (requires sudo)
-	@echo "$(BLUE)Setting up VaultWarden-OCI...$(NC)"
-	@if [ "$$(id -u)" -eq 0 ] && [ -z "$$SUDO_USER" ]; then \
-		echo "$(RED)Error: Do not run as root directly. Use: sudo make setup$(NC)"; \
-		exit 1; \
-	fi
-	@if [ "$$(id -u)" -ne 0 ]; then \
-		echo "$(RED)Error: Run with sudo: sudo make setup$(NC)"; \
-		exit 1; \
-	fi
-	@if [ ! -f ".env" ]; then echo "$(RED)Error: .env missing. Usage: sudo ./setup.sh --domain <domain> --email <email>$(NC)"; exit 1; fi
-	@# ux.md #15: catch all placeholder DOMAIN variants — scheme-prefixed, bare, and CHANGE_ME.
-	@if grep -qE '^DOMAIN=((https?://)?(vault\.example\.com/?|CHANGE_ME))$$' .env 2>/dev/null || \
-   		grep -qE '^DOMAIN=[[:space:]]*$$' .env 2>/dev/null; then \
-		echo "$(RED)Error: DOMAIN is still a placeholder in .env$(NC)"; \
-		echo "$(YELLOW)Run setup directly with your real domain:$(NC)"; \
-		echo "$(GREEN)  sudo ./setup.sh install --domain your.real.domain --email you@example.com$(NC)"; \
-		exit 1; \
-	fi
-	@if grep -qE '^ADMIN_EMAIL=(admin@example\.com|CHANGE_ME)$$' .env 2>/dev/null; then \
-		echo "$(RED)Error: ADMIN_EMAIL is still a placeholder in .env$(NC)"; \
-		echo "$(YELLOW)Run setup directly with your real email:$(NC)"; \
-		echo "$(GREEN)  sudo ./setup.sh install --domain your.real.domain --email you@example.com$(NC)"; \
-		exit 1; \
-	fi
-	@echo "$(BLUE)==> Running setup.sh$(NC)" | tee -a setup.log
-	@SETUP_ARGS=""; \
-	[ -n "$(DATA_DEVICE)" ] && SETUP_ARGS="$$SETUP_ARGS --data-device $(DATA_DEVICE)"; \
-	if ./setup.sh $$SETUP_ARGS 2>&1 | tee -a setup.log; then \
-		echo "$(GREEN)==> setup.sh completed$(NC)" | tee -a setup.log; \
-	else \
-		echo "$(RED)==> FAILED: setup.sh — check setup.log for details; re-run: sudo make setup$(NC)" | tee -a setup.log; \
-		exit 1; \
-	fi
-	@echo "$(GREEN)Setup completed successfully!$(NC)" | tee -a setup.log
+setup:
+	@echo "$(YELLOW)The supported first-install command is:$(NC)"
+	@echo "$(GREEN)  sudo ./setup.sh install --domain <your-domain> --email <your-email>$(NC)"
+	@echo "$(YELLOW)This Make target is guidance only and does not perform installation.$(NC)"
+	@exit 1
 
 dev-setup: ## Set up development environment (.env + docker-compose.override.yml)
 	@echo "$(BLUE)Setting up development environment...$(NC)"
@@ -268,10 +238,12 @@ edit-env: ## Interactively edit repo .env and sync on change (root required)
 	@./utilities/env-edit.sh edit
 
 edit-secrets: ## Edit encrypted secrets file
+	$(call require-root)
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
 	@./utilities/secrets-edit.sh
 
 test-secrets: ## Test secrets decryption
+	$(call require-root)
 	@echo "$(BLUE)Testing secrets decryption...$(NC)"
 	@if ./utilities/secrets-list.sh > /dev/null 2>&1; then \
 		echo "$(GREEN)Secrets decryption: OK$(NC)"; \
@@ -281,6 +253,7 @@ test-secrets: ## Test secrets decryption
 	fi
 
 test-email: ## Send a test operational alert email (health/backup notification channel)
+	$(call require-root)
 	@echo "$(BLUE)Sending a test operational alert email...$(NC)"
 	@./maintenance.sh test-email --verbose
 
@@ -359,7 +332,7 @@ safe-restart: ## Restart with automatic rollback on failure (root required)
 	@echo "$(BLUE)Safe restart with rollback capability...$(NC)"
 	@./utilities/safe-restart.sh
 
-status: ## Show service status, backup health, disk usage, and CrowdSec ban summary
+status: ## Show service status, backup inventory, disk usage, and CrowdSec ban summary
 	$(call require-root)
 	$(call check-docker)
 	@echo "$(BLUE)VaultWarden Service Status:$(NC)"
@@ -404,8 +377,15 @@ status: ## Show service status, backup health, disk usage, and CrowdSec ban summ
 	@echo ""
 	@echo "$(CYAN)CrowdSec bans:$(NC)"
 	@if systemctl is-active crowdsec >/dev/null 2>&1; then \
-		COUNT=$$(sudo -n cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0); \
-		echo "  Active bans: $$COUNT"; \
+		CSCLI_OUT=$$(cscli decisions list -o raw 2>&1); \
+		CSCLI_RC=$$?; \
+		if [ "$$CSCLI_RC" -eq 0 ]; then \
+			COUNT=$$(printf '%s\n' "$$CSCLI_OUT" | tail -n +2 | grep -c . || true); \
+			echo "  Active bans: $$COUNT"; \
+		else \
+			echo "  Active bans: $(YELLOW)unknown (cscli query failed)$(NC)"; \
+			printf '%s\n' "$$CSCLI_OUT" | head -5 | sed 's/^/    /'; \
+		fi; \
 	else \
 		echo "  $(YELLOW)CrowdSec is not running$(NC)"; \
 	fi
@@ -471,9 +451,17 @@ unban: ## Unban an IP from CrowdSec (IP=<address> required)
 		echo "$(YELLOW)Start it first: sudo systemctl start crowdsec$(NC)"; \
 		exit 1; \
 	fi
-	@sudo cscli decisions delete --ip '$(IP)' \
-		&& echo "$(GREEN)✓ Unbanned $(IP) from CrowdSec$(NC)" \
-		|| echo "$(YELLOW)⚠ $(IP) was not found in CrowdSec ban list (may have already expired)$(NC)"
+	@CSCLI_OUT=$$(cscli decisions delete --ip '$(IP)' 2>&1); \
+	CSCLI_RC=$$?; \
+	printf '%s\n' "$$CSCLI_OUT"; \
+	if [ "$$CSCLI_RC" -eq 0 ]; then \
+		echo "$(GREEN)Unbanned $(IP) from CrowdSec$(NC)"; \
+	elif printf '%s\n' "$$CSCLI_OUT" | grep -Eiq 'not found|no decisions?|0 decisions?|0 deleted'; then \
+		echo "$(YELLOW)$(IP) was not found in CrowdSec ban list or may have already expired.$(NC)"; \
+	else \
+		echo "$(RED)CrowdSec unban failed; see cscli output above.$(NC)"; \
+		exit "$$CSCLI_RC"; \
+	fi
 
 # ===========================================================================
 ##@ Normal Admin + Dashboard Stable API — Logs
@@ -538,7 +526,7 @@ security-report: ## Single-command security event summary (last 1h; root require
 ##@ Normal Admin + Dashboard Stable API — Backup & Restore
 # ===========================================================================
 
-backup: ## Run incremental database backup
+backup: ## Run DB snapshot backup
 	$(call require-root)
 	@echo "$(BLUE)Running database backup...$(NC)"
 	@./backup.sh run db
@@ -558,7 +546,7 @@ list-backups: ## List available backups with sizes (root required via Makefile)
 	@echo "$(BLUE)Available backups:$(NC)"
 	@./backup.sh list
 
-backup-status: ## Show backup health summary (root required via Makefile)
+backup-status: ## Show backup inventory (root required via Makefile)
 	$(call require-root)
 	@./backup.sh list
 
@@ -586,30 +574,18 @@ restore-remote: ## Restore from remote storage (rclone)
 ##@ Advanced Admin — Key Management
 # ===========================================================================
 
-.PHONY: key-path
-key-path: ## Show which age key path is currently active
-	@bash -c ' \
-	  source lib/log.sh 2>/dev/null || true; \
-	  source lib/common.sh 2>/dev/null || true; \
-	  source lib/crypto.sh; \
-	  p=$$(resolve_age_key_path 2>/dev/null) \
-	    && printf "Active age key: %s\n" "$$p" \
-	    || printf "ERROR: No readable age key found.\nSet AGE_KEY_FILE or run setup.sh to place key at /etc/vaultwarden/age-key.txt\n"'
-
 key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
 	$(call require-root)
 	$(call check-env-readable)
 	@echo "$(BLUE)Age Key Health Check:$(NC)"
 	@echo ""
-	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
-	echo "$(CYAN)  Configured key path (SOPS_AGE_KEY_FILE): $$CONFIGURED_KEY$(NC)"; \
-	echo "$(CYAN)  Canonical production path:                /etc/vaultwarden/age-key.txt$(NC)"
-	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
-	bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
-                 source lib/crypto.sh; \
-	         if check_age_key_health \"$$CONFIGURED_KEY\"; then \
+	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
+	         source lib/crypto.sh; \
+	         load_project_environment >/dev/null 2>&1 || true; \
+	         KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
+	         echo \"$(CYAN)  Resolved active key path: \$$KEY_FILE$(NC)\"; \
+	         echo \"$(CYAN)  Canonical production path: /etc/vaultwarden/age-key.txt$(NC)\"; \
+	         if check_age_key_health; then \
 	           echo \"$(GREEN)  ✓ Age key is healthy$(NC)\"; \
 	         else \
 	           echo \"$(RED)  ✗ Age key health check FAILED$(NC)\"; \
@@ -652,7 +628,7 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 # Important:
 #   - Requires sudo (modifies /etc or another system path).
 #   - Does NOT generate a new key — it only installs an existing one.
-#   - If secrets/keys/age-key.txt is also missing, run: sudo make setup
+#   - If secrets/keys/age-key.txt is also missing, run the supported setup.sh install command.
 # ---------------------------------------------------------------------------
 key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_FILE
 	$(call require-root)
@@ -687,7 +663,7 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 	fi; \
 	if [ ! -f "$$REPO_KEY" ]; then \
 		echo "$(RED)ERROR: Source key not found at $$REPO_KEY$(NC)"; \
-		echo "$(RED)       No key to install. Run: sudo make setup to generate one.$(NC)"; \
+		echo "$(RED)       No key to install. Run: sudo ./setup.sh install --domain <domain> --email <email>$(NC)"; \
 		exit 1; \
 	fi; \
 	TARGET_DIR=$$(dirname "$$CONFIGURED_KEY"); \
@@ -701,44 +677,48 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 	@$(MAKE) key-health
 
 key-show: ## Show current age public key and key file path/status
+	$(call require-root)
 	$(call check-env-readable)
 	@echo "$(BLUE)Age Key Status:$(NC)"
-	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	echo "  Key file : $$KEY_FILE"; \
-	if [ -f "$$KEY_FILE" ]; then \
-		echo "  Status   : $(GREEN)present$(NC)"; \
-		echo "  Perms    : $$(stat -c '%a' "$$KEY_FILE" 2>/dev/null || stat -f '%A' "$$KEY_FILE" 2>/dev/null)"; \
-		PUB=$$(grep '# public key:' "$$KEY_FILE" 2>/dev/null | awk '{print $$NF}'); \
-		[ -n "$$PUB" ] && echo "  Public   : $$PUB" || echo "  Public   : $(YELLOW)(not found in key file)$(NC)"; \
-	else \
-		echo "  Status   : $(RED)MISSING$(NC)"; \
-		echo "  Run: sudo make key-install  (or: sudo make setup)"; \
-	fi
+	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib key-show; \
+	         source lib/crypto.sh; \
+	         load_project_environment >/dev/null 2>&1 || true; \
+	         KEY_FILE=\$$(resolve_age_key_path 2>/dev/null || true); \
+	         if [[ -z \"\$$KEY_FILE\" ]]; then KEY_DISPLAY='<not resolved>'; else KEY_DISPLAY=\"\$$KEY_FILE\"; fi; \
+	         echo \"  Key file : \$$KEY_DISPLAY\"; \
+	         if [[ -n \"\$$KEY_FILE\" && -f \"\$$KEY_FILE\" ]]; then \
+	           echo \"  Status   : $(GREEN)present$(NC)\"; \
+	           echo \"  Perms    : \$$(stat -c '%a' \"\$$KEY_FILE\" 2>/dev/null || stat -f '%A' \"\$$KEY_FILE\" 2>/dev/null || echo unknown)\"; \
+	           PUB=\$$(age-keygen -y \"\$$KEY_FILE\" 2>/dev/null || grep '# public key:' \"\$$KEY_FILE\" 2>/dev/null | awk '{print \$$NF}' || true); \
+	           [ -n \"\$$PUB\" ] && echo \"  Public   : \$$PUB\" || echo \"  Public   : $(YELLOW)(not available)$(NC)\"; \
+	           echo \"  Health   : use sudo make key-health for authoritative validation\"; \
+	         else \
+	           echo \"  Status   : $(RED)MISSING$(NC)\"; \
+	           echo \"  Run: sudo make key-install\"; \
+	         fi"
 
-key-backup: ## Backup age key to a secure offline location (interactive)
+key-backup: ## Create local Age key copy for manual offline transfer
 	$(call require-root)
-	@echo "$(BLUE)Age Key Backup$(NC)"
-	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	if [ ! -f "$$KEY_FILE" ]; then \
-		echo "$(RED)ERROR: Key file not found at $$KEY_FILE$(NC)"; \
-		exit 1; \
-	fi; \
-	BACKUP_DEST="$$HOME/age-key-backup-$$(date +%Y%m%d-%H%M%S).txt"; \
-	cp "$$KEY_FILE" "$$BACKUP_DEST"; \
-	chmod 600 "$$BACKUP_DEST"; \
-	echo "$(GREEN)Key backed up to: $$BACKUP_DEST$(NC)"; \
-	echo "$(YELLOW)Store this file securely offline!$(NC)"
+	@echo "$(BLUE)Create local Age key copy for manual offline transfer$(NC)"
+	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib key-backup; \
+	         source lib/crypto.sh; \
+	         load_project_environment >/dev/null 2>&1 || true; \
+	         KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
+	         BACKUP_DEST=\"\$$HOME/age-key-backup-\$$(date +%Y%m%d-%H%M%S).txt\"; \
+	         cp \"\$$KEY_FILE\" \"\$$BACKUP_DEST\"; \
+	         chmod 600 \"\$$BACKUP_DEST\"; \
+	         echo \"$(GREEN)Local key copy created at: \$$BACKUP_DEST$(NC)\"; \
+	         echo \"$(YELLOW)NOT OFFLINE YET: move this copy to offline custody, verify it, then remove the local transfer copy.$(NC)\""
 
-key-escrow: ## Generate encrypted escrow package (requires GPG or another age key)
+key-escrow: ## Generate password-manager Age key escrow file
 	$(call require-root)
 	@echo "$(BLUE)Age Key Escrow$(NC)"
 	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
-        	source lib/crypto.sh; \
-	        KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	        KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	        create_key_escrow \"$$KEY_FILE\""
+	        source lib/crypto.sh; \
+	        load_project_environment >/dev/null 2>&1 || true; \
+	        KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
+	        ESCROW_DEST=\"\$$HOME/age-key-escrow-\$$(date +%Y%m%d-%H%M%S).txt\"; \
+	        AGE_KEY_FILE=\"\$$KEY_FILE\" create_password_manager_escrow \"\$$ESCROW_DEST\""
 
 key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 	$(call require-root)
@@ -811,20 +791,8 @@ remove-systemd: ## Remove systemd service units
 	@./setup.sh systemd remove
 
 systemd-status: ## Show systemd unit status
-	@echo "$(BLUE)Systemd Unit Status:$(NC)"
-	@for unit in \
-		vaultwarden-db-backup.timer \
-		vaultwarden-full-backup.timer \
-		vaultwarden-health.timer \
-		vaultwarden-maintenance.timer \
-		vaultwarden-dns-update.timer \
-		vaultwarden-firewall-update.timer \
-		vaultwarden-iptables.service \
-		vaultwarden-notify-failure.service; do \
-		systemctl status "$$unit" --no-pager -l 2>/dev/null \
-			|| echo "  $$unit: not found"; \
-		echo ""; \
-	done
+	$(call require-root)
+	@./setup.sh systemd status
 
 systemd-validate: ## Validate systemd unit files
 	$(call require-root)
@@ -869,33 +837,14 @@ breakglass-remove: ## Remove break-glass admin account
 ##@ Developer/Test — Testing & Development
 # ===========================================================================
 
-test: ## Run all tests (secrets, config validation)
+test: ## Run local tests and docker-compose config validation
 	@echo "$(BLUE)Running test suite...$(NC)"
 	@$(MAKE) test-unit
-	@$(MAKE) test-secrets
 	@$(MAKE) test-config
 	@echo "$(GREEN)All tests passed.$(NC)"
 
 test-unit: ## Run non-destructive shell unit and integration tests
-	@tests/test-architecture-helpers.sh
-	@tests/test-security-helpers.sh
-	@tests/test-secrets-cli-help.sh
-	@tests/test-privilege-contracts.sh
-	@tests/test-permission-repair-contract.sh
-	@tests/test-permission-contract-central.sh
-	@tests/test-env-edit.sh
-	@tests/test-migrate-followup.sh
-	@tests/test-operator-ui.sh
-	@tests/test-recover.sh
-	@tests/test-restore-run-followup.sh
-	@tests/test-restore-backup-preflight-safety.sh
-	@tests/test-backup-architecture-policy.sh
-	@tests/test-backup-restore-behavior.sh
-	@tests/test-confirmation-prompt-format.sh
-	@tests/test-operation-guards.sh
-	@tests/test-start-policy.sh
-	@tests/test-uninstall-vaultwarden.sh
-	@tests/test-setup-storage-ux.sh
+	@./tests/run-tests.sh all
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)
@@ -957,6 +906,7 @@ config: ## Show current docker-compose config (resolved)
 	@$(DOCKER_COMP) config
 
 diagnose: ## Full diagnostic dump (versions, status, health, key, logs tail)
+	$(call require-root)
 	@echo "$(BLUE)========================================$(NC)"
 	@echo "$(BLUE)VaultWarden-OCI Diagnostic Report$(NC)"
 	@echo "$(BLUE)========================================$(NC)"
@@ -1020,6 +970,7 @@ clean-all: ## Remove generated logs/temp files — services will re-init runtime
 	fi
 
 prune: ## Remove unused Docker resources (images, containers, networks) — cannot be undone
+	$(call require-root)
 	$(call check-docker)
 	@# Allow dashboard.sh (which already confirmed) to bypass the interactive prompt.
 	@# Direct terminal invocations still require explicit confirmation.

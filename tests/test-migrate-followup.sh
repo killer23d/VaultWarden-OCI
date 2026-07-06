@@ -250,7 +250,7 @@ _MV_SKIP_STACK_STOP=false
 printf '0' > "$DOCKER_STATE_FILE"
 _mv_step_rsync
 PROBE
-marker_mode="$(stat -c '%a' "$TGT/.vw-data-volume")"
+marker_mode="$(stat -c '%a' "$TGT/.vw-data-volume" 2>/dev/null || stat -f '%OLp' "$TGT/.vw-data-volume")"
 chmod 600 "$TGT/.vw-data-volume"
 marker="$(cat "$TGT/.vw-data-volume")"
 [[ "$marker_mode" == '0' || "$marker_mode" == '000' ]] || fail ".vw-data-volume permissions changed unexpectedly: $marker_mode"

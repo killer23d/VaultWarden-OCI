@@ -27,9 +27,9 @@ USAGE:
     sudo ./utilities/pre-production-drill.sh [OPTIONS]
 
 DESCRIPTION:
-    Non-destructive rehearsal of all critical operational paths.
+    Non-destructive pre-production check of critical operational paths.
     No production state is modified. Validates secrets, backups, email
-    delivery, and stack restart sequence before go-live.
+    delivery, and Compose restart preflight before go-live.
 
 OPTIONS:
     --skip-email    Skip email delivery test (if MTA not configured yet)
@@ -38,7 +38,7 @@ OPTIONS:
     --version, -V   Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0  All steps passed
+    0  All non-skipped steps passed
     1  One or more steps failed
 
 EXAMPLES:
@@ -193,37 +193,14 @@ drill_backup_dryrun() {
 drill_backup_verify() {
     _step_header "Backup Verification (latest backup)"
 
-    local base_dir
-    base_dir="$(get_config_value "BACKUP_DIR" \
-        "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/backups")")"
-
-    local newest="" newest_age=999 newest_type=""
-    for type in db full emergency; do
-        local type_dir="$base_dir/$type"
-        [[ -d "$type_dir" ]] || continue
-        while IFS= read -r -d '' f; do
-            local age_days
-            age_days=$(_backup_filename_age_days "$f")
-            [[ -z "$age_days" ]] && continue
-            if (( age_days < newest_age )); then
-                newest_age=$age_days
-                newest=$f
-                newest_type=$type
-            fi
-        done < <(find "$type_dir" -name "*.age" -type f -print0 2>/dev/null)
-    done
-
-    if [[ -z "${newest:-}" ]]; then
-        _step_fail "backup-verify" "no backups found in $base_dir — create one first: sudo ./backup.sh run full"
-        return
-    fi
-    _step_pass "backup-found: $(basename "$newest") [${newest_type}, ${newest_age}d old]"
-
-    log_info "  Running full verification (decrypt + integrity check)..."
-    if bash "$SCRIPT_DIR/utilities/backup-run.sh" verify 2>/dev/null; then
-        _step_pass "backup-verify: full verification passed"
+    log_info "  Running canonical full verification (decrypt + integrity check)..."
+    local verify_out
+    if verify_out="$(bash "$SCRIPT_DIR/utilities/backup-run.sh" verify 2>&1)"; then
+        local target_line
+        target_line="$(printf '%s\n' "$verify_out" | grep -m1 'Target:' || true)"
+        _step_pass "backup-verify: full verification passed${target_line:+ — ${target_line}}"
     else
-        _step_fail "backup-verify" "verification failed — run: sudo ./backup.sh verify for details"
+        _step_fail "backup-verify" "verification failed — tail: $(printf '%s\n' "$verify_out" | tail -5 | tr '\n' '; ')"
     fi
 }
 
@@ -247,7 +224,7 @@ drill_restore_path() {
     fi
 
     if [[ -z "${db_backup:-}" ]]; then
-        _step_skip "restore-path-db" "no db backup found — run a backup first"
+        _step_fail "restore-path-db" "no db backup found — run a backup first or pass --skip-restore"
         return
     fi
 
@@ -281,7 +258,7 @@ drill_restore_path() {
         schema_ver=$(sqlite3 "$dec_db" "PRAGMA user_version;" 2>/dev/null || echo "unknown")
         _step_pass "restore-schema: user_version=${schema_ver}"
     else
-        _step_skip "restore-sqlite-check" "sqlite3 not installed"
+        _step_fail "restore-sqlite-check" "sqlite3 not installed — install sqlite3 or pass --skip-restore"
     fi
 
     rm -rf "$restore_tmp"
@@ -319,7 +296,7 @@ drill_email() {
 }
 
 drill_stack_restart_sequence() {
-    _step_header "Stack Restart Sequence (non-destructive)"
+    _step_header "Compose restart preflight (non-destructive)"
 
     log_info "  Verifying 'docker compose config' is valid..."
     if docker compose config --quiet 2>/dev/null; then
@@ -354,7 +331,7 @@ drill_full_backup_restore_smoketest() {
 
     local full_dir="$base_dir/full"
     if [[ ! -d "$full_dir" ]]; then
-        _step_skip "restore-smoketest" "no full backup directory found at $full_dir"
+        _step_fail "restore-smoketest" "no full backup directory found at $full_dir — run a full backup or pass --skip-restore"
         return
     fi
 
@@ -363,7 +340,7 @@ drill_full_backup_restore_smoketest() {
         | sort | tail -1 || true)
 
     if [[ -z "${backup_file:-}" ]]; then
-        _step_skip "restore-smoketest" "no .age files found in $full_dir"
+        _step_fail "restore-smoketest" "no .age files found in $full_dir — run a full backup or pass --skip-restore"
         return
     fi
     _step_pass "restore-smoketest-found: $(basename "$backup_file")"
@@ -440,15 +417,29 @@ _print_drill_summary() {
         log_info  "Re-run after fixing: sudo ./utilities/pre-production-drill.sh"
     else
         printf '\n'
-        log_success "Drill PASSED — all rehearsed paths are operational."
+        if (( _STEPS_SKIPPED > 0 )); then
+            log_success "Drill PASSED — all non-skipped steps passed."
+        else
+            log_success "Drill PASSED — all steps passed."
+        fi
         log_info    "Next step: sudo ./utilities/smoke-test.sh (live stack check)"
     fi
+}
+
+_handle_signal() {
+    local rc="$1"
+    trap - EXIT HUP INT TERM
+    perform_cleanup
+    exit "$rc"
 }
 
 main() {
     _DRILL_START=$(date +%s)
     require_root
-    trap 'perform_cleanup' EXIT HUP INT TERM
+    trap 'perform_cleanup' EXIT
+    trap '_handle_signal 129' HUP
+    trap '_handle_signal 130' INT
+    trap '_handle_signal 143' TERM
 
     DRILL_TMPDIR=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_drill_main.XXXXXXXXXX)
     register_cleanup rm -rf "$DRILL_TMPDIR"

@@ -18,12 +18,12 @@ extract_make_target() {
 
 # Root-operated lifecycle contract.
 grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
-for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report; do
+for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email health-email diagnose systemd-status prune key-show; do
     grep -Eq "(^|[[:space:]])${target}([[:space:]]|\|$)" Makefile || fail "${target} is not root-allowed"
 done
 pass "root-supported lifecycle/day-2 targets are allowed under sudo make"
 
-for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report; do
+for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email diagnose systemd-status prune key-show; do
     _snip="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
     extract_make_target "$target" Makefile > "$_snip" || fail "could not extract make ${target} target"
     grep -Fq '$(call require-root)' "$_snip" || { cat "$_snip" >&2; rm -f "$_snip"; fail "make ${target} does not require root"; }
@@ -32,7 +32,7 @@ done
 pass "health/status/logs/CrowdSec security targets enforce the root-operated policy"
 
 UP_SNIP="$(mktemp -t vw-priv-up.XXXXXXXXXX)"
-trap 'rm -f "$UP_SNIP"' EXIT
+trap 'rm -f "$UP_SNIP"; rm -rf "${KEY_TMP:-}"' EXIT
 extract_make_target up Makefile > "$UP_SNIP" || fail "could not extract make up target"
 [[ -s "$UP_SNIP" ]] || fail "make up snippet is empty"
 grep -Fq '$(call require-root)' "$UP_SNIP" || fail "make up does not require root"
@@ -148,7 +148,117 @@ grep -Fq 'run_sudo_cmd "sudo make restart"' dashboard.sh || fail "dashboard rest
 grep -Fq 'run_sudo_cmd "sudo make down"' dashboard.sh || fail "dashboard stop label missing"
 grep -Fq 'run_sudo_cmd "sudo make health"' dashboard.sh || fail "dashboard health label missing"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should use sudo"
+grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"' dashboard.sh || fail "dashboard recovery-kit export should stay root-operated"
+grep -Fq 'run_sudo_cmd "sudo make test-email" make -C "${REPO_ROOT}" test-email' dashboard.sh || fail "dashboard email diagnostic should stay root-operated"
+! grep -Fq 'run_user_cmd' dashboard.sh || fail "dashboard should not drop root for root-operated actions"
 pass "dashboard command labels match root-operated lifecycle"
+
+grep -Fq 'sudo ./setup.sh install --domain <your-domain> --email <your-email>' Makefile \
+    || fail "Makefile setup guidance must advertise supported first-install command"
+SETUP_SNIP="$(mktemp -t vw-setup-guidance.XXXXXXXXXX)"
+extract_make_target setup Makefile > "$SETUP_SNIP" || fail "could not extract setup target"
+grep -Fq 'guidance only' "$SETUP_SNIP" || fail "make setup should be guidance only"
+grep -Fq '@exit 1' "$SETUP_SNIP" || fail "make setup guidance target must exit non-zero"
+rm -f "$SETUP_SNIP"
+pass "make setup is no longer advertised as a working first-install parser"
+
+! grep -Eq '^key-path:' Makefile || fail "redundant key-path target should be removed"
+grep -Fq 'Create local Age key copy for manual offline transfer' Makefile || fail "key-backup wording must say local transfer copy"
+grep -Fq 'NOT OFFLINE YET' Makefile || fail "key-backup must warn local copy is not offline custody"
+pass "key inspection/backup targets avoid misleading production status"
+
+KEY_TMP="$(mktemp -d -t vw-key-contract.XXXXXXXXXX)"
+KEY_REPO="$KEY_TMP/repo"
+KEY_BIN="$KEY_TMP/bin"
+mkdir -p "$KEY_REPO/secrets/keys" "$KEY_REPO/lib" "$KEY_BIN" "$KEY_TMP/home"
+cp Makefile "$KEY_REPO/Makefile"
+cp -a lib/. "$KEY_REPO/lib/"
+PROD_KEY="$KEY_TMP/prod-age-key.txt"
+REPO_KEY="$KEY_REPO/secrets/keys/age-key.txt"
+PROD_RECIPIENT="age1prod000000000000000000000000000000000000000000000000000000"
+REPO_RECIPIENT="age1repo000000000000000000000000000000000000000000000000000000"
+printf '# public key: %s\nAGE-SECRET-KEY-1PRODUCTION-ACTIVE-KEY\n' "$PROD_RECIPIENT" > "$PROD_KEY"
+printf '# public key: %s\nAGE-SECRET-KEY-1REPO-LOCAL-KEY\n' "$REPO_RECIPIENT" > "$REPO_KEY"
+chmod 0600 "$PROD_KEY" "$REPO_KEY"
+cat > "$KEY_REPO/.sops.yaml" <<EOF_KEY_POLICY
+creation_rules:
+  - path_regex: '.*\.yaml$'
+    age: "$PROD_RECIPIENT"
+EOF_KEY_POLICY
+cat > "$KEY_BIN/id" <<'EOF_ID'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -u) printf '0\n' ;;
+  -un) printf 'root\n' ;;
+  -g) printf '0\n' ;;
+  -gn) printf 'root\n' ;;
+  *) /usr/bin/id "$@" ;;
+esac
+EOF_ID
+cat > "$KEY_BIN/age-keygen" <<EOF_AGE_KEYGEN
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-y" ]]; then
+  case "\$(cat "\${2:-}" 2>/dev/null)" in
+    *PRODUCTION-ACTIVE-KEY*) printf '%s\n' "$PROD_RECIPIENT" ;;
+    *REPO-LOCAL-KEY*) printf '%s\n' "$REPO_RECIPIENT" ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+exit 1
+EOF_AGE_KEYGEN
+cat > "$KEY_BIN/age" <<'EOF_AGE'
+#!/usr/bin/env bash
+cat
+EOF_AGE
+chmod +x "$KEY_BIN"/*
+run_key_make() {
+    local target="$1" out="$2"
+    PATH="$KEY_BIN:/opt/homebrew/bin:$PATH" \
+        AGE_KEY_FILE="$PROD_KEY" \
+        SOPS_CONFIG_FILE="$KEY_REPO/.sops.yaml" \
+        HOME="$KEY_TMP/home" \
+        make -C "$KEY_REPO" "$target" > "$out" 2>&1
+}
+
+KEY_SHOW_OUT="$KEY_TMP/key-show.out"
+run_key_make key-show "$KEY_SHOW_OUT" || { cat "$KEY_SHOW_OUT" >&2; fail "key-show target failed"; }
+grep -Fq "$PROD_KEY" "$KEY_SHOW_OUT" || { cat "$KEY_SHOW_OUT" >&2; fail "key-show did not report production active key"; }
+grep -Fq "$PROD_RECIPIENT" "$KEY_SHOW_OUT" || { cat "$KEY_SHOW_OUT" >&2; fail "key-show did not derive production public recipient"; }
+! grep -Fq "$REPO_KEY" "$KEY_SHOW_OUT" || fail "key-show fell back to repo-local key"
+
+KEY_HEALTH_OUT="$KEY_TMP/key-health.out"
+run_key_make key-health "$KEY_HEALTH_OUT" || { cat "$KEY_HEALTH_OUT" >&2; fail "key-health target failed"; }
+grep -Fq "$PROD_KEY" "$KEY_HEALTH_OUT" || { cat "$KEY_HEALTH_OUT" >&2; fail "key-health did not resolve production active key"; }
+grep -Fq 'Age key is healthy' "$KEY_HEALTH_OUT" || { cat "$KEY_HEALTH_OUT" >&2; fail "key-health did not complete active-key health check"; }
+
+KEY_BACKUP_OUT="$KEY_TMP/key-backup.out"
+run_key_make key-backup "$KEY_BACKUP_OUT" || { cat "$KEY_BACKUP_OUT" >&2; fail "key-backup target failed"; }
+backup_copy="$(find "$KEY_TMP/home" -name 'age-key-backup-*.txt' -type f -print | head -1)"
+[[ -n "$backup_copy" ]] || fail "key-backup did not create a transfer copy"
+grep -Fq 'PRODUCTION-ACTIVE-KEY' "$backup_copy" || fail "key-backup copied repo-local key instead of production active key"
+! grep -Fq 'REPO-LOCAL-KEY' "$backup_copy" || fail "key-backup transfer copy contains repo-local key"
+
+KEY_ESCROW_OUT="$KEY_TMP/key-escrow.out"
+run_key_make key-escrow "$KEY_ESCROW_OUT" || { cat "$KEY_ESCROW_OUT" >&2; fail "key-escrow target failed"; }
+escrow_copy="$(find "$KEY_TMP/home" -name 'age-key-escrow-*.txt' -type f -print | head -1)"
+[[ -n "$escrow_copy" ]] || { cat "$KEY_ESCROW_OUT" >&2; fail "key-escrow did not create an escrow file"; }
+grep -Fq 'PRODUCTION-ACTIVE-KEY' "$escrow_copy" || fail "key-escrow wrote escrow from the wrong key"
+! grep -Fq 'REPO-LOCAL-KEY' "$escrow_copy" || fail "key-escrow escrow contains repo-local key"
+pass "retained key targets resolve production active key before repo-local fallback"
+
+STATUS_SNIP="$(mktemp -t vw-status-contract.XXXXXXXXXX)"
+extract_make_target status Makefile > "$STATUS_SNIP" || fail "could not extract status target"
+grep -Fq 'CSCLI_RC=$$?' "$STATUS_SNIP" || fail "make status must capture cscli exit status"
+grep -Fq 'unknown (cscli query failed)' "$STATUS_SNIP" || fail "make status must not turn cscli failure into zero bans"
+rm -f "$STATUS_SNIP"
+UNBAN_SNIP="$(mktemp -t vw-unban-contract.XXXXXXXXXX)"
+extract_make_target unban Makefile > "$UNBAN_SNIP" || fail "could not extract unban target"
+grep -Fq 'CSCLI_RC=$$?' "$UNBAN_SNIP" || fail "make unban must capture cscli exit status"
+grep -Fq 'CrowdSec unban failed; see cscli output above.' "$UNBAN_SNIP" || fail "make unban must preserve generic cscli errors"
+! grep -Fq '&& echo "$(GREEN)' "$UNBAN_SNIP" || fail "make unban must not use command && success || benign fallback"
+rm -f "$UNBAN_SNIP"
+pass "CrowdSec status and unban preserve real cscli failures"
 
 # Legacy CF token preservation must use root-side file install, not shell value arguments.
 grep -Fq 'install -m 0444 -o root -g root "$_cf_flat" "$_cf_dest"' lib/secrets.sh || fail "CF token mirror does not use root-side install"

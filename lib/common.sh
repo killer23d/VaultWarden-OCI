@@ -600,7 +600,7 @@ get_real_user() {
 
     local effective_user
     effective_user=$(id -un 2>/dev/null) || effective_user="root"
-    log_warn "get_real_user: could not resolve a non-root user; using '${effective_user}'. If unexpected, verify sudo invocation context (use: sudo ./setup.sh install --domain ... --email ... or sudo make setup)."
+    log_warn "get_real_user: could not resolve a non-root user; using '${effective_user}'. If unexpected, verify sudo invocation context (use: sudo ./setup.sh install --domain ... --email ...)."
     printf '%s\n' "$effective_user"
 }
 
@@ -854,13 +854,18 @@ init_common_lib() {
     cd "$PROJECT_ROOT"
 
     # Resolve _LOG_CURRENT_WEIGHT once now that LOG_LEVEL is known.
-    if [[ -n "${_LOG_LEVEL_WEIGHT[${LOG_LEVEL^^}]+_}" ]]; then
-        _LOG_CURRENT_WEIGHT=${_LOG_LEVEL_WEIGHT[${LOG_LEVEL^^}]}
-    else
+    local _log_level_upper
+    _log_level_upper="$(printf '%s' "$LOG_LEVEL" | tr '[:lower:]' '[:upper:]')"
+    case "$_log_level_upper" in
+        DEBUG|INFO|WARN|ERROR)
+            _LOG_CURRENT_WEIGHT="$(_log_level_weight "$_log_level_upper")"
+            ;;
+        *)
         printf '[WARN] LOG_LEVEL="%s" is not recognised (valid: DEBUG INFO WARN ERROR) — defaulting to INFO\n' \
             "$LOG_LEVEL" >&2
         _LOG_CURRENT_WEIGHT=1
-    fi
+            ;;
+    esac
 
     log_debug "Common library initialized for: $script_name"
     log_debug "Project root: $PROJECT_ROOT"

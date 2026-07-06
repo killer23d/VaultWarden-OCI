@@ -1095,15 +1095,16 @@ VaultWarden Age Key Backup - $date_val
 📝 Recovery Instructions (choose one path):
 
    Production server:
-   1. sudo install -m 600 -o \$(logname) age-key.txt /etc/vaultwarden/age-key.txt
-   2. Verify: make key-path
+   1. sudo install -d -m 700 -o root -g root /etc/vaultwarden
+   2. sudo install -m 600 -o root -g root age-key.txt /etc/vaultwarden/age-key.txt
+   3. Verify: sudo make key-health
 
    Dev / fresh clone:
    1. mkdir -p secrets/keys
    2. cp age-key.txt secrets/keys/age-key.txt && chmod 600 secrets/keys/age-key.txt
-   3. Verify: make key-path
+   3. Verify: sudo make key-health
 
-   Both paths are checked automatically (run: make key-path to confirm).
+   Both paths are checked automatically (run: sudo make key-show to confirm).
    Decrypt backups: age -d -i <resolved-key-path> backup.age
 
 ⚠️  If you lose this key, ALL backups are unrecoverable!
@@ -1399,10 +1400,10 @@ create_printable_key_backup() {
     <div class="box">
         <h3>Recovery</h3>
         <strong>Production server:</strong><br>
-        <code>sudo install -m 600 -o &lt;service-user&gt; age-key.txt /etc/vaultwarden/age-key.txt</code><br><br>
+        <code>sudo install -d -m 700 -o root -g root /etc/vaultwarden &amp;&amp; sudo install -m 600 -o root -g root age-key.txt /etc/vaultwarden/age-key.txt</code><br><br>
         <strong>Dev / fresh clone:</strong><br>
         <code>mkdir -p secrets/keys &amp;&amp; cp age-key.txt secrets/keys/age-key.txt &amp;&amp; chmod 600 secrets/keys/age-key.txt</code><br><br>
-        Verify active path: <code>make key-path</code>
+        Verify active path: <code>sudo make key-show</code>
     </div>
 
     <div class="delete-reminder">

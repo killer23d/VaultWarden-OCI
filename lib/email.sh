@@ -114,7 +114,7 @@ _email_http_common() {
     local url="$1" cfg_kind="$2" payload="${3:-}" username="${4:-}"
     shift 4 || true
     local form_args=("$@")
-    local token cfg body_file payload_file code rc
+    local token cfg body_file payload_file stderr_file code rc
 
     _ECURL_CODE=000
     _ECURL_BODY=""
@@ -178,17 +178,24 @@ _email_http_common() {
         curl_args+=(-H 'Content-Type: application/json' --data-binary "@${payload_file}")
     fi
 
+    stderr_file=$(_email_tmpfile vw-email-http-stderr) || { rm -f "$body_file" "$cfg" "${payload_file:-}"; return 1; }
+    chmod 600 "$stderr_file" 2>/dev/null || { rm -f "$body_file" "$cfg" "${payload_file:-}" "$stderr_file"; return 1; }
+    _email_register_cleanup_file "$stderr_file"
+
     local errexit_set=0
     case $- in
         *e*) errexit_set=1; set +e ;;
     esac
-    code=$("${curl_args[@]}" 2> >(sed -E 's/(Authorization: Bearer )[[:graph:]]+/\1[REDACTED]/g' >&2))
+    code=$("${curl_args[@]}" 2>"$stderr_file")
     rc=$?
     (( errexit_set )) && set -e
+    if [[ -s "$stderr_file" ]]; then
+        sed -E 's/(Authorization: Bearer )[[:graph:]]+/\1[REDACTED]/g' "$stderr_file" >&2 || true
+    fi
     [[ -n "${payload_file:-}" ]] && rm -f "$payload_file"
     _ECURL_CODE="${code:-000}"
     _ECURL_BODY=$(head -c 300 "$body_file" 2>/dev/null | tr -d '\r\n')
-    rm -f "$body_file" "$cfg"
+    rm -f "$body_file" "$cfg" "$stderr_file"
 
     (( rc == 0 )) && [[ "$_ECURL_CODE" =~ ^2[0-9][0-9]$ ]]
 }
@@ -412,6 +419,15 @@ _email_write_text_crlf() {
     sed 's/\r$//' | awk '{printf "%s\r\n", $0}'
 }
 
+_email_base64_wrap() {
+    local file="$1"
+    if base64 --help 2>&1 | grep -q -- '-w'; then
+        base64 -w 76 "$file"
+    else
+        base64 <"$file" | fold -w 76
+    fi
+}
+
 _build_plain_message() {
     local file="$1" from="$2" to="$3" subject="$4" body="$5" msgid="$6" name
     name=$(_email_sender_name) || return 1
@@ -627,7 +643,7 @@ send_smtp_attachment() {
         printf 'Content-Type: application/octet-stream; name="%s"\r\n' "$filename"
         printf 'Content-Transfer-Encoding: base64\r\n'
         printf 'Content-Disposition: attachment; filename="%s"\r\n\r\n' "$filename"
-        base64 -w 76 "$attachment_path" | _email_write_text_crlf
+        _email_base64_wrap "$attachment_path" | _email_write_text_crlf
         printf '\r\n--%s--\r\n' "$boundary"
     } >"$message_file" || { rm -f "$message_file"; return 1; }
 

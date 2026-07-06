@@ -5,7 +5,7 @@
 #
 # Provides:
 #   Colors      : COLOR_* variables (exported; available to sourcing scripts)
-#   Level gate  : _LOG_LEVEL_WEIGHT, _LOG_CURRENT_WEIGHT, _should_log
+#   Level gate  : _log_level_weight, _LOG_CURRENT_WEIGHT, _should_log
 #   Functions   : log_info, log_success, log_warn, log_error, log_debug,
 #                 log_rollback, log_dry_run, log_hint, log_phase, spinner_start,
 #                 spinner_stop, log_header, set_log_prefix, _get_timestamp
@@ -47,13 +47,21 @@ fi
 readonly COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD COLOR_INVERT
 
 # Log level filtering for production environments.
-# Static associative array maps level names to numeric weights;
-# _LOG_CURRENT_WEIGHT is set once in init_common_lib() for O(1) comparison.
-declare -gA _LOG_LEVEL_WEIGHT=([DEBUG]=0 [INFO]=1 [WARN]=2 [ERROR]=3)
+# _LOG_CURRENT_WEIGHT is set once in init_common_lib().
 _LOG_CURRENT_WEIGHT=1
 
+_log_level_weight() {
+    case "$1" in
+        DEBUG) printf '0' ;;
+        INFO)  printf '1' ;;
+        WARN)  printf '2' ;;
+        ERROR) printf '3' ;;
+        *)     printf '1' ;;
+    esac
+}
+
 _should_log() {
-    (( ${_LOG_LEVEL_WEIGHT[$1]:-0} >= _LOG_CURRENT_WEIGHT ))
+    (( $(_log_level_weight "$1") >= _LOG_CURRENT_WEIGHT ))
 }
 
 set_log_prefix() {

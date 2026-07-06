@@ -18,11 +18,18 @@ FAILED_UNIT="${1:-unknown.service}"
 COOLDOWN_SECONDS=3600
 
 _load_notify_env() {
-    if [[ -f /etc/vaultwarden/vaultwarden.env ]]; then
-        load_env_file /etc/vaultwarden/vaultwarden.env || return 1
-    else
-        load_env_file 2>/dev/null || log_warn "No VaultWarden environment file found; using process environment only."
+    if load_project_environment 2>/dev/null; then
+        return 0
     fi
+
+    if load_env_file /etc/vaultwarden/vaultwarden.env 2>/dev/null; then
+        resolve_secrets_file
+        return 0
+    fi
+
+    log_warn "No VaultWarden environment file found; using process environment only."
+    resolve_secrets_file
+    return 0
 }
 
 _sanitize_unit_name() {

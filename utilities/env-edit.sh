@@ -320,7 +320,7 @@ _cmd_edit() {
   local repo_env="${PROJECT_ROOT}/.env"
   if [[ ! -f "$repo_env" ]]; then
     log_error "Repository .env not found: $repo_env"
-    log_error "Run 'sudo make setup' to create the initial environment."
+    log_error "Run 'sudo ./setup.sh install --domain <your-domain> --email <your-email>' to create the initial environment."
     return 1
   fi
 

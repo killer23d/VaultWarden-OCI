@@ -32,20 +32,29 @@ SECRETS_FILE=""
 WORKDIR=""
 CIPHERTEXT_STAGING=""
 POLICY_STAGING=""
+INSTALL_ENV_STAGING=""
+MANIFEST_STAGING=""
 NEW_PRIVATE_KEY=""
 STAGED_ACTIVE_KEY=""
 CIPHERTEXT_BACKUP=""
 ACTIVE_KEY_BACKUP=""
 POLICY_BACKUP=""
+INSTALL_ENV_BACKUP=""
 MANIFEST_BACKUP=""
 CIPHERTEXT_EXISTED=false
 ACTIVE_KEY_EXISTED=false
 POLICY_EXISTED=false
+INSTALL_ENV_EXISTED=false
 MANIFEST_EXISTED=false
 CIPHERTEXT_PROMOTED=false
 KEY_PROMOTED=false
 POLICY_PROMOTED=false
+INSTALL_ENV_PROMOTED=false
+MANIFEST_PROMOTED=false
+RECOVERY_COMMITTED=false
 ROLLBACK_DONE=false
+SENTINEL_PATH=""
+SENTINEL_CREATED=false
 
 usage() {
     echo "Usage: ./recover.sh --state-dir DIR --key FILE [--storage-mode auto|boot|block]"
@@ -84,6 +93,26 @@ atomic_set_env() {
     chmod --reference="$file" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
     chown --reference="$file" "$tmp" 2>/dev/null || true
     mv "$tmp" "$file"
+}
+
+atomic_copy_operator_env() {
+    local source="$1" dest="$2" tmp dest_dir
+    dest_dir="$(dirname "$dest")"
+    tmp=$(mktemp -p "$dest_dir" .env.XXXXXXXXXX) || return 1
+
+    awk -F= '
+        $1 == "SOPS_AGE_KEY_FILE" { next }
+        $1 == "RCLONE_CONFIG" { next }
+        { print }
+    ' "$source" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+    if [[ -f "$dest" ]]; then
+        chmod --reference="$dest" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+        chown --reference="$dest" "$tmp" 2>/dev/null || true
+    else
+        chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+    mv "$tmp" "$dest"
 }
 
 restore_or_remove() {
@@ -213,12 +242,16 @@ create_backups() {
     fi
     CIPHERTEXT_STAGING="$(mktemp -p "$(dirname "$SECRETS_FILE")" secrets.XXXXXXXXXX.yaml)"
     POLICY_STAGING="$(mktemp -p "$SCRIPT_DIR" .sops.yaml.XXXXXXXXXX)"
+    INSTALL_ENV_STAGING="$(mktemp -p "$(dirname "$INSTALL_ENV")" install.env.XXXXXXXXXX)"
+    MANIFEST_STAGING="$(mktemp -p "$(dirname "$MANIFEST")" dr-manifest.env.XXXXXXXXXX)"
     NEW_PRIVATE_KEY="$WORKDIR/new-age-key.txt"
     STAGED_ACTIVE_KEY="$(mktemp -p "$VW_ETC_DIR" .age-key.txt.XXXXXXXXXX)"
     CIPHERTEXT_BACKUP="$WORKDIR/secrets.yaml.bak"
     ACTIVE_KEY_BACKUP="$WORKDIR/age-key.bak"
     POLICY_BACKUP="$WORKDIR/sops.yaml.bak"
+    INSTALL_ENV_BACKUP="$WORKDIR/install.env.bak"
     MANIFEST_BACKUP="$WORKDIR/dr-manifest.env.bak"
+    SENTINEL_PATH="$STATE_DIR/.vw-data-volume"
 
     cp "$SECRETS_FILE" "$CIPHERTEXT_STAGING"
     cp "$SECRETS_FILE" "$CIPHERTEXT_BACKUP"
@@ -231,6 +264,10 @@ create_backups() {
         cp "$SOPS_CONFIG_FILE" "$POLICY_BACKUP"
         POLICY_EXISTED=true
     fi
+    cp "$INSTALL_ENV" "$INSTALL_ENV_STAGING"
+    cp "$INSTALL_ENV" "$INSTALL_ENV_BACKUP"
+    INSTALL_ENV_EXISTED=true
+    cp "$MANIFEST" "$MANIFEST_STAGING"
     cp "$MANIFEST" "$MANIFEST_BACKUP"
     MANIFEST_EXISTED=true
 }
@@ -281,39 +318,122 @@ rollback() {
     if [[ "$POLICY_PROMOTED" == "true" ]]; then
         restore_or_remove "$POLICY_EXISTED" "$POLICY_BACKUP" "$SOPS_CONFIG_FILE"
     fi
-    if [[ "$MANIFEST_EXISTED" == "true" && -f "$MANIFEST_BACKUP" ]]; then
-        cp "$MANIFEST_BACKUP" "$MANIFEST"
+    if [[ "$INSTALL_ENV_PROMOTED" == "true" ]]; then
+        restore_or_remove "$INSTALL_ENV_EXISTED" "$INSTALL_ENV_BACKUP" "$INSTALL_ENV"
+    fi
+    if [[ "$MANIFEST_PROMOTED" == "true" ]]; then
+        restore_or_remove "$MANIFEST_EXISTED" "$MANIFEST_BACKUP" "$MANIFEST"
+    fi
+    if [[ "$SENTINEL_CREATED" == "true" && "$RECOVERY_COMMITTED" != "true" ]]; then
+        rm -f "$SENTINEL_PATH"
     fi
 }
 
-promote_artifacts() {
-    if ! mv "$CIPHERTEXT_STAGING" "$SECRETS_FILE"; then
-        fatal "Ciphertext promotion failed."
+validate_promoted_identity_config() {
+    if ! SOPS_AGE_KEY_FILE="$ACTIVE_KEY" sops -d "$SECRETS_FILE" >/dev/null; then
+        log_error "Post-promotion decryption failed."
+        return 1
     fi
-    CIPHERTEXT_PROMOTED=true
 
+    [[ "$(read_env_value PROJECT_STATE_DIR "$INSTALL_ENV")" == "$STATE_DIR" ]] || {
+        log_error "Post-promotion validation failed: PROJECT_STATE_DIR does not match recovered state."
+        return 1
+    }
+    [[ "$(read_env_value SOPS_AGE_KEY_FILE "$INSTALL_ENV")" == "$ACTIVE_KEY" ]] || {
+        log_error "Post-promotion validation failed: SOPS_AGE_KEY_FILE does not match active key."
+        return 1
+    }
+    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
+        [[ "$(read_env_value DATA_VOLUME_MOUNT "$INSTALL_ENV")" == "$STATE_DIR" ]] || {
+            log_error "Post-promotion validation failed: DATA_VOLUME_MOUNT does not match recovered state."
+            return 1
+        }
+        [[ "$(read_env_value DATA_VOLUME_DEVICE "$INSTALL_ENV")" == "$DEVICE_PATH" ]] || {
+            log_error "Post-promotion validation failed: DATA_VOLUME_DEVICE does not match recovered device."
+            return 1
+        }
+    else
+        [[ -z "$(read_env_value DATA_VOLUME_MOUNT "$INSTALL_ENV")" ]] || {
+            log_error "Post-promotion validation failed: DATA_VOLUME_MOUNT should be empty in boot mode."
+            return 1
+        }
+        [[ -z "$(read_env_value DATA_VOLUME_DEVICE "$INSTALL_ENV")" ]] || {
+            log_error "Post-promotion validation failed: DATA_VOLUME_DEVICE should be empty in boot mode."
+            return 1
+        }
+    fi
+    [[ "$(read_env_value OFFLINE_AGE_RECIPIENT "$MANIFEST")" == "$USB_PUBLIC_RECIPIENT" ]] || {
+        log_error "Post-promotion validation failed: manifest offline recipient does not match recovery key."
+        return 1
+    }
+}
+
+promote_artifacts() {
+    CIPHERTEXT_PROMOTED=true
+    if ! mv "$CIPHERTEXT_STAGING" "$SECRETS_FILE"; then
+        rollback
+        fatal "Ciphertext promotion failed — recovery artifacts were rolled back."
+    fi
+
+    KEY_PROMOTED=true
     if ! mv "$STAGED_ACTIVE_KEY" "$ACTIVE_KEY"; then
         rollback
         fatal "Operational key promotion failed — recovery artifacts were rolled back."
     fi
-    KEY_PROMOTED=true
 
+    POLICY_PROMOTED=true
     if ! mv "$POLICY_STAGING" "$SOPS_CONFIG_FILE"; then
         rollback
         fatal "SOPS policy promotion failed — recovery artifacts were rolled back."
     fi
-    POLICY_PROMOTED=true
 
-    if ! SOPS_AGE_KEY_FILE="$ACTIVE_KEY" sops -d "$SECRETS_FILE" >/dev/null; then
+    INSTALL_ENV_PROMOTED=true
+    if ! mv "$INSTALL_ENV_STAGING" "$INSTALL_ENV"; then
         rollback
-        fatal "Post-promotion decryption failed — recovery artifacts were rolled back."
+        fatal "Install environment promotion failed — recovery artifacts were rolled back."
+    fi
+
+    MANIFEST_PROMOTED=true
+    if ! mv "$MANIFEST_STAGING" "$MANIFEST"; then
+        rollback
+        fatal "Recovery manifest promotion failed — recovery artifacts were rolled back."
+    fi
+
+    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" && ! -e "$SENTINEL_PATH" ]]; then
+        SENTINEL_CREATED=true
+        if ! touch "$SENTINEL_PATH"; then
+            rollback
+            fatal "Data-volume sentinel creation failed — recovery artifacts were rolled back."
+        fi
+    fi
+
+    if ! validate_promoted_identity_config; then
+        rollback
+        fatal "Post-promotion recovery identity/config validation failed — recovery artifacts were rolled back."
     fi
     chmod 0600 "$ACTIVE_KEY" "$SECRETS_FILE" 2>/dev/null || true
     chown root:root "$ACTIVE_KEY" "$SECRETS_FILE" 2>/dev/null || true
     chmod 0644 "$SOPS_CONFIG_FILE" 2>/dev/null || true
+    chmod 0600 "$INSTALL_ENV" "$MANIFEST" 2>/dev/null || true
+    chown root:root "$INSTALL_ENV" "$MANIFEST" 2>/dev/null || true
+    RECOVERY_COMMITTED=true
 }
 
-update_env_files() {
+reconcile_repo_env_from_recovery() {
+    local repo_env="${SCRIPT_DIR}/.env"
+    if atomic_copy_operator_env "$INSTALL_ENV" "$repo_env"; then
+        return 0
+    fi
+
+    echo "Recovery activation: FAIL"
+    echo "Committed recovery identity/config remains installed."
+    echo "Could not reconcile repository .env from recovered install environment."
+    echo "Fix repo .env manually from: $INSTALL_ENV"
+    echo "Then run: sudo ./utilities/env-edit.sh sync && sudo make up"
+    return 1
+}
+
+stage_env_files() {
     local source_dev uuid
     DEVICE_PATH=""
     if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
@@ -323,23 +443,18 @@ update_env_files() {
         [[ -n "$uuid" && -e "${DEV_BY_UUID_DIR}/${uuid}" ]] && DEVICE_PATH="${DEV_BY_UUID_DIR}/${uuid}"
     fi
 
-    atomic_set_env "$INSTALL_ENV" PROJECT_STATE_DIR "$STATE_DIR"
+    atomic_set_env "$INSTALL_ENV_STAGING" PROJECT_STATE_DIR "$STATE_DIR"
     if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
-        atomic_set_env "$INSTALL_ENV" DATA_VOLUME_MOUNT "$STATE_DIR"
-        atomic_set_env "$INSTALL_ENV" DATA_VOLUME_DEVICE "$DEVICE_PATH"
+        atomic_set_env "$INSTALL_ENV_STAGING" DATA_VOLUME_MOUNT "$STATE_DIR"
+        atomic_set_env "$INSTALL_ENV_STAGING" DATA_VOLUME_DEVICE "$DEVICE_PATH"
     else
-        atomic_set_env "$INSTALL_ENV" DATA_VOLUME_MOUNT ""
-        atomic_set_env "$INSTALL_ENV" DATA_VOLUME_DEVICE ""
+        atomic_set_env "$INSTALL_ENV_STAGING" DATA_VOLUME_MOUNT ""
+        atomic_set_env "$INSTALL_ENV_STAGING" DATA_VOLUME_DEVICE ""
     fi
-    atomic_set_env "$INSTALL_ENV" SOPS_AGE_KEY_FILE "$ACTIVE_KEY"
+    atomic_set_env "$INSTALL_ENV_STAGING" SOPS_AGE_KEY_FILE "$ACTIVE_KEY"
 
-    atomic_set_env "$MANIFEST" OFFLINE_AGE_RECIPIENT "$USB_PUBLIC_RECIPIENT"
-    atomic_set_env "$MANIFEST" MANIFEST_UPDATED_AT "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    chmod 0600 "$INSTALL_ENV" "$MANIFEST" "$SECRETS_FILE" "$ACTIVE_KEY" 2>/dev/null || true
-    chown root:root "$INSTALL_ENV" "$MANIFEST" "$SECRETS_FILE" "$ACTIVE_KEY" 2>/dev/null || true
-    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
-        touch "$STATE_DIR/.vw-data-volume"
-    fi
+    atomic_set_env "$MANIFEST_STAGING" OFFLINE_AGE_RECIPIENT "$USB_PUBLIC_RECIPIENT"
+    atomic_set_env "$MANIFEST_STAGING" MANIFEST_UPDATED_AT "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 
 run_startup_health() {
@@ -352,35 +467,62 @@ run_startup_health() {
         export PROJECT_STATE_DIR="$STATE_DIR" DATA_VOLUME_MOUNT="" DATA_VOLUME_DEVICE="" SOPS_AGE_KEY_FILE="$ACTIVE_KEY"
     fi
     auto_fix_critical_permissions "$SCRIPT_DIR"
-    bash "$VW_STARTUP_SCRIPT"
+    if ! bash "$VW_STARTUP_SCRIPT"; then
+        echo "Startup: FAIL"
+        echo "Recovery artifacts were promoted, but Vaultwarden startup failed."
+        echo "Committed recovery identity/config remains installed."
+        echo "Inspect service status: docker compose -f ${SCRIPT_DIR}/docker-compose.yml ps"
+        echo "Inspect logs: docker compose -f ${SCRIPT_DIR}/docker-compose.yml logs --tail=200"
+        return 1
+    fi
 
     if curl -sf "$alive_url" >/dev/null; then
         echo "Health check: PASS"
         echo "Recovery complete. Vaultwarden passed health check at $alive_url"
+        return 0
     else
         echo "Health check: FAIL"
         echo "Recovery artifacts were promoted, but Vaultwarden did not pass the health check."
+        echo "Committed recovery identity/config remains installed."
         echo "Do not treat the service as healthy until the checks below pass."
         echo "Inspect service status: docker compose -f ${SCRIPT_DIR}/docker-compose.yml ps"
         echo "Inspect logs: docker compose -f ${SCRIPT_DIR}/docker-compose.yml logs --tail=200"
         echo "Failed health URL: $alive_url"
+        return 1
     fi
 }
 
 cleanup() {
-    local rc=$?
-    if [[ $rc -ne 0 && "$ROLLBACK_DONE" != "true" ]] && { [[ "$CIPHERTEXT_PROMOTED" == "true" ]] || [[ "$KEY_PROMOTED" == "true" ]] || [[ "$POLICY_PROMOTED" == "true" ]]; }; then
+    local rc="${1:-$?}"
+    if [[ $rc -ne 0 && "$RECOVERY_COMMITTED" != "true" && "$ROLLBACK_DONE" != "true" ]]; then
         rollback || true
     fi
     rm -rf "${WORKDIR:-}"
     [[ -n "${CIPHERTEXT_STAGING:-}" && -f "$CIPHERTEXT_STAGING" ]] && rm -f "$CIPHERTEXT_STAGING"
     [[ -n "${POLICY_STAGING:-}" && -f "$POLICY_STAGING" ]] && rm -f "$POLICY_STAGING"
+    [[ -n "${INSTALL_ENV_STAGING:-}" && -f "$INSTALL_ENV_STAGING" ]] && rm -f "$INSTALL_ENV_STAGING"
+    [[ -n "${MANIFEST_STAGING:-}" && -f "$MANIFEST_STAGING" ]] && rm -f "$MANIFEST_STAGING"
     [[ -n "${STAGED_ACTIVE_KEY:-}" && -f "$STAGED_ACTIVE_KEY" ]] && rm -f "$STAGED_ACTIVE_KEY"
-    return 0
+    return "$rc"
+}
+
+on_exit() {
+    local rc=$?
+    cleanup "$rc"
+    return "$rc"
+}
+
+on_signal() {
+    local rc="$1"
+    trap - EXIT INT TERM
+    cleanup "$rc"
+    exit "$rc"
 }
 
 main() {
-    trap cleanup EXIT INT TERM
+    trap on_exit EXIT
+    trap 'on_signal 130' INT
+    trap 'on_signal 143' TERM
     parse_args "$@"
     check_prerequisites
     parse_manifest
@@ -389,8 +531,9 @@ main() {
     generate_new_key
     run_staged_rekey
     validate_staged
+    stage_env_files
     promote_artifacts
-    update_env_files
+    reconcile_repo_env_from_recovery
     run_startup_health
 }
 
