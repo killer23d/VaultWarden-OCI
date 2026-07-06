@@ -1558,6 +1558,22 @@ _tar_filter_for_file() {
     esac
 }
 
+_tar_supports_option() {
+    local option="$1"
+    tar --help 2>&1 | grep -Fq -- "$option"
+}
+
+_tar_extract_archive() {
+    local archive="$1" dest="$2" tar_filter="$3"
+    local -a extract_opts=(-xf "$archive" -C "$dest" --no-same-owner --no-same-permissions)
+
+    _tar_supports_option --no-overwrite-dir && extract_opts+=(--no-overwrite-dir)
+    _tar_supports_option --delay-directory-restore && extract_opts+=(--delay-directory-restore)
+
+    # shellcheck disable=SC2086
+    tar $tar_filter "${extract_opts[@]}"
+}
+
 _require_command_for_path() {
     local cmd="$1" reason="$2" package="${3:-$1}"
     if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -2092,8 +2108,7 @@ restore_full() {
         check_traversal_only "$dec_tar" || return 1
         log_success "Archive traversal check passed (legacy format)."
         [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would tar -xf to /"; return 0; }
-        # shellcheck disable=SC2086
-        tar $tar_filter -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --no-overwrite-dir --delay-directory-restore
+        _tar_extract_archive "$dec_tar" / "$tar_filter"
         # shellcheck disable=SC2015  # best-effort chown; intentionally swallows failure
         [[ -d "$state_dir" ]] && chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || true
         purge_wal_shm "$state_dir/data/db.sqlite3" || true
@@ -2107,8 +2122,7 @@ restore_full() {
     local staging="$tmpdir/stage"
     mkdir -p "$staging"
     log_info "Extracting archive to staging directory..."
-    # shellcheck disable=SC2086
-    tar $tar_filter -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --no-overwrite-dir --delay-directory-restore
+    _tar_extract_archive "$dec_tar" "$staging" "$tar_filter"
 
     local source_root="${RESTORE_PREFLIGHT_SOURCE_ROOT:-$state_dir}"
     local rel_source="${source_root#/}"

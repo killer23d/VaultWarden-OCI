@@ -74,6 +74,55 @@ _mv_fmt_bytes() {
     }'
 }
 
+_mv_du_bytes() {
+    local path="$1" bytes
+
+    bytes="$(du -sb "$path" 2>/dev/null | awk 'NR == 1 {print $1}')" || bytes=""
+    if [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$bytes"
+        return 0
+    fi
+
+    find "$path" -type f -exec sh -c '
+        for file do
+            stat -c %s "$file" 2>/dev/null \
+                || stat -f %z "$file" 2>/dev/null \
+                || printf "0\n"
+        done
+    ' sh {} + | awk '{sum += $1} END {printf "%.0f\n", sum}'
+}
+
+_mv_realpath() {
+    local path="$1" part
+    local -a parts=() stack=()
+
+    if command realpath -m "$path" >/dev/null 2>&1; then
+        command realpath -m "$path"
+        return 0
+    fi
+
+    [[ "$path" == /* ]] || path="$PWD/$path"
+    IFS='/' read -r -a parts <<< "$path"
+    for part in "${parts[@]}"; do
+        case "$part" in
+            ""|.) ;;
+            ..)
+                if (( ${#stack[@]} > 0 )); then
+                    unset 'stack[${#stack[@]}-1]'
+                fi
+                ;;
+            *) stack+=("$part") ;;
+        esac
+    done
+
+    if (( ${#stack[@]} == 0 )); then
+        printf '/\n'
+    else
+        local IFS=/
+        printf '/%s\n' "${stack[*]}"
+    fi
+}
+
 _mv_acquire_lock() {
     local lock_fd
     mkdir -p "$(dirname "${_MV_LOCK_FILE}")"
@@ -444,7 +493,7 @@ _mv_prompt_target() {
     printf '\n'
     read -r -p "  Enter target path [${default_mount}]: " reply
     _MV_TARGET="${reply:-${default_mount}}"
-    _MV_TARGET="$(realpath -m "${_MV_TARGET}")"
+    _MV_TARGET="$(_mv_realpath "${_MV_TARGET}")"
     log_info "Using target path: ${_MV_TARGET}"
     printf '\n'
 }
@@ -549,7 +598,7 @@ _mv_check_disk_space() {
     local source="$1" target="$2"
     local src_bytes avail_bytes required_bytes
 
-    src_bytes="$(du -sb "${source}/" | awk '{print $1}')"
+    src_bytes="$(_mv_du_bytes "${source}/")"
     avail_bytes="$(df -Pk "${target}" | awk 'NR==2 {print $4 * 1024}')"
     required_bytes=$(( src_bytes + src_bytes / 10 ))
 
@@ -730,11 +779,11 @@ _mv_parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --source)
-                _MV_SOURCE="$(realpath -m "$2")"
+                _MV_SOURCE="$(_mv_realpath "$2")"
                 shift 2
                 ;;
             --target)
-                _MV_TARGET="$(realpath -m "$2")"
+                _MV_TARGET="$(_mv_realpath "$2")"
                 shift 2
                 ;;
             --device)
@@ -849,9 +898,9 @@ _mv_parse_args() {
         *) log_error "Invalid --start-policy: ${_MV_START_POLICY}"; exit 1 ;;
     esac
 
-    _MV_SOURCE="$(realpath -m "${_MV_SOURCE}")"
+    _MV_SOURCE="$(_mv_realpath "${_MV_SOURCE}")"
     if [[ -n "${_MV_TARGET}" ]]; then
-        _MV_TARGET="$(realpath -m "${_MV_TARGET}")"
+        _MV_TARGET="$(_mv_realpath "${_MV_TARGET}")"
     fi
 
     local _mv_unsafe_re=$'[^a-zA-Z0-9/._-]'
@@ -929,8 +978,8 @@ _mv_step_validate() {
     fi
 
     local canon_src canon_tgt
-    canon_src="$(realpath -m "${_MV_SOURCE}")"
-    canon_tgt="$(realpath -m "${_MV_TARGET}")"
+    canon_src="$(_mv_realpath "${_MV_SOURCE}")"
+    canon_tgt="$(_mv_realpath "${_MV_TARGET}")"
     [[ "${canon_src}" != "${canon_tgt}" ]] || {
         _mv_log error "Source and target are the same path: ${canon_src}"
         return 1
@@ -1180,14 +1229,14 @@ _mv_step_verify() {
 
     if [[ "${DRY_RUN}" == "true" ]]; then
         _mv_log info "[DRY RUN] would: verify included files with rsync --checksum --dry-run"
-        _mv_log info "[DRY RUN] would: report informational du -sb byte counts"
+        _mv_log info "[DRY RUN] would: report informational byte counts"
         return 0
     fi
 
     local src_bytes tgt_bytes delta pct_x100
 
-    src_bytes="$(du -sb "${_MV_SOURCE}/" | awk '{print $1}')"
-    tgt_bytes="$(du -sb "${_MV_TARGET}/" | awk '{print $1}')"
+    src_bytes="$(_mv_du_bytes "${_MV_SOURCE}/")"
+    tgt_bytes="$(_mv_du_bytes "${_MV_TARGET}/")"
 
     _mv_log info "Source size : $(_mv_fmt_bytes "${src_bytes}")"
     _mv_log info "Target size : $(_mv_fmt_bytes "${tgt_bytes}")"

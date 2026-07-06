@@ -29,9 +29,9 @@ DRY_RUN=false
 START_POLICY=""
 
 UNIT_SOURCE_DIR="${PROJECT_ROOT}/systemd"
-UNIT_DEST_DIR="/etc/systemd/system"
-OPT_SCRIPTS_DIR="/opt/vaultwarden-scripts"
-ENV_DIR="/etc/vaultwarden"
+UNIT_DEST_DIR="${VW_SYSTEMD_UNIT_DEST_DIR:-/etc/systemd/system}"
+OPT_SCRIPTS_DIR="${VW_SYSTEMD_OPT_SCRIPTS_DIR:-/opt/vaultwarden-scripts}"
+ENV_DIR="${VW_SYSTEMD_ENV_DIR:-/etc/vaultwarden}"
 ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
 STARTUP_SERVICE="vaultwarden-startup.service"
@@ -934,6 +934,7 @@ install_units() {
         done
     else
         log_warn "Timers installed but not started by operator start policy."
+        log_warn "Install-only/manual state is not production-ready until timers are activated and validation passes."
         log_info "Start later with: sudo utilities/setup-systemd.sh install --enable-now"
         log_info "Or run: sudo systemctl enable --now ${TIMERS[*]}"
         for timer in "${TIMERS[@]}"; do
@@ -973,6 +974,7 @@ install_units() {
             log_warn "  - systemd daemon has stale unit state (retry daemon-reload)"
             _report_unhealthy_managed_timers "Post-install timer health" || true
             log_warn "────────────────────────────────────────────────────────────────"
+            return 1
         fi
     else
         log_info "[DRY RUN] Would check: systemctl is-active + NextElapseUSecRealtime for all managed timers"
@@ -1111,6 +1113,40 @@ validate_installation() {
             (( errors++ )) || true
         else
             log_success "  OK: $path (root:root $expected_mode)"
+        fi
+    }
+
+    _report_stale_artifact() {
+        local installed="$1" repo_src="$2" expected_sum="$3" actual_sum="$4"
+        log_error "  STALE: $installed does not match repo source"
+        log_error "         repo source: $repo_src"
+        log_error "         repo      sha256: $expected_sum"
+        log_error "         installed sha256: $actual_sum"
+        log_error "         Re-run: sudo utilities/setup-systemd.sh install"
+        (( errors++ )) || true
+    }
+
+    _compare_repo_artifact() {
+        local repo_src="$1" installed="$2"
+        if [[ ! -f "$repo_src" ]]; then
+            log_error "  MISSING REPO SOURCE: $repo_src"
+            (( errors++ )) || true
+            return 0
+        fi
+        if [[ ! -f "$installed" ]]; then
+            log_error "  MISSING: $installed"
+            log_error "         Re-run: sudo utilities/setup-systemd.sh install"
+            (( errors++ )) || true
+            return 0
+        fi
+
+        local expected_sum actual_sum
+        expected_sum=$(_sha256 "$repo_src")
+        actual_sum=$(_sha256 "$installed")
+        if [[ "$expected_sum" != "$actual_sum" ]]; then
+            _report_stale_artifact "$installed" "$repo_src" "$expected_sum" "$actual_sum"
+        else
+            log_success "  UP-TO-DATE: $installed"
         fi
     }
 
@@ -1371,22 +1407,18 @@ validate_installation() {
     for script in "${scripts_to_check[@]}"; do
         local repo_src="$PROJECT_ROOT/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
-        if [[ ! -f "$repo_src" || ! -f "$installed" ]]; then
-            continue
-        fi
+        _compare_repo_artifact "$repo_src" "$installed"
+    done
 
-        local expected_sum actual_sum
-        expected_sum=$(_sha256 "$repo_src")
-        actual_sum=$(_sha256 "$installed")
-        if [[ "$expected_sum" != "$actual_sum" ]]; then
-            log_warn "  STALE: $installed does not match repo source"
-            log_warn "         repo      sha256: $expected_sum"
-            log_warn "         installed sha256: $actual_sum"
-            log_warn "         Re-run: sudo utilities/setup-systemd.sh install"
-            (( warnings++ )) || true
-        else
-            log_success "  UP-TO-DATE: $script (sha256 match)"
-        fi
+    while IFS= read -r -d '' repo_lib; do
+        local rel_path installed_lib
+        rel_path="${repo_lib#$PROJECT_ROOT/}"
+        installed_lib="$OPT_SCRIPTS_DIR/$rel_path"
+        _compare_repo_artifact "$repo_lib" "$installed_lib"
+    done < <(find "$PROJECT_ROOT/lib" -type f -print0 2>/dev/null)
+
+    for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
+        _compare_repo_artifact "$UNIT_SOURCE_DIR/$unit" "$UNIT_DEST_DIR/$unit"
     done
 
     # Verify timers are healthy.
@@ -1396,7 +1428,7 @@ validate_installation() {
     log_info "[9/9] Checking timers are scheduled (systemctl list-timers) ..."
     if ! _report_unhealthy_managed_timers "Validation timer health"; then
         log_warn "  Try: sudo systemctl restart ${TIMERS[*]}"
-        (( warnings++ )) || true
+        (( errors++ )) || true
     fi
 
     echo ""

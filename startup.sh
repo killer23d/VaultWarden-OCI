@@ -527,7 +527,7 @@ check_age_key_health_preflight() {
     log_error "Remediation:"
     log_error "  The canonical key file does not exist or is not readable."
     log_error "  Re-run setup to install it:"
-    log_error "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
+    log_error "    sudo ./setup.sh install --domain <your-domain> --email <your-email>"
     if [[ -f "$repo_local_key" ]]; then
       log_error ""
       log_warn "  A repo-local key was detected at: ${repo_local_key}"
@@ -550,7 +550,7 @@ check_age_key_health_preflight() {
     log_warn "    2. Verify with: sudo make key-health"
     log_warn "    3. Retry: sudo make up  (or sudo ./startup.sh)"
   else
-    log_error "  No key was found at any known path. Run: sudo make setup"
+    log_error "  No key was found at any known path. Run: sudo ./setup.sh install --domain <your-domain> --email <your-email>"
   fi
 
   log_error ""
@@ -880,7 +880,7 @@ main() {
     show_status || true
   fi
 
-  # Re-emit the key-path advisory immediately before the final success line
+  # Re-emit the key-health advisory immediately before the final success line
   # so it is not missed in the log stream.
   if [[ "${SOPS_AGE_KEY_FILE:-}" == "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
     local cfg_key

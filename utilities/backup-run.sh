@@ -19,7 +19,6 @@ source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
-load_project_environment || exit 1
 
 BACKUP_TYPE="auto"    # Backup mode: auto, db, full, or emergency.
 DRY_RUN=false
@@ -1650,11 +1649,11 @@ main() {
             if ! verify_backup_quick "$backup_file" "$age_key_file" "$actual_type"; then
                 verify_failed=true
                 verification_status="quick verification FAILED"
-                log_error "Quick verification failed — backup may be corrupt."
+                log_error "Quick verification failed — backup is being discarded."
                 if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                     local warn_subj="[VaultWarden] WARNING: Backup verify FAILED: $actual_type ($timestamp)"
                     local warn_body
-                    warn_body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n\nQuick verification (SHA256 + decrypt probe) FAILED.\nThe encrypted archive may be corrupt. Manual inspection required.\n' \
+                    warn_body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n\nQuick verification (SHA256 + decrypt probe) FAILED.\nThe encrypted archive and sidecars were discarded and are not eligible for restore.\nOlder backups were preserved; retention and offsite sync were skipped.\n' \
                         "$actual_type" "$timestamp" \
                         "$(basename "${backup_file:-unknown}")" \
                         "$(hostname -f 2>/dev/null || hostname)")"
@@ -1662,9 +1661,14 @@ main() {
                 fi
                 if [[ "$RCLONE_SYNC" == "true" ]]; then
                     log_error "Skipping offsite sync due to verification failure."
-                    RCLONE_SYNC=false
                     offsite_status="skipped because verification failed"
                 fi
+                _print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"
+                log_error "Discarding failed archive and sidecars:"
+                log_error "  $backup_file"
+                rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256" "${backup_file}.sha256.hmac"
+                log_error "Backup failed: quick verification did not complete successfully."
+                exit 1
             else
                 verification_status="quick verification passed"
             fi

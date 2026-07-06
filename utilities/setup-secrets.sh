@@ -2105,7 +2105,7 @@ _ss_commit_ciphertext_transaction() {
     mkdir -p "$(dirname "$final_file")" "$(dirname "$policy_file")" "$(dirname "$manifest_file")" || return 1
     backup_dir=$(mktemp -d) || return 1
     policy_stage=$(mktemp -p "$(dirname "$policy_file")" .sops.yaml.XXXXXXXXXX) || { rm -rf "$backup_dir"; return 1; }
-    ciphertext_stage=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$final_file")") || { rm -rf "$backup_dir"; rm -f "$policy_stage"; return 1; }
+    ciphertext_stage=$(mktemp -p "$(dirname "$final_file")" secrets.XXXXXXXXXX.yaml) || { rm -rf "$backup_dir"; rm -f "$policy_stage"; return 1; }
     manifest_stage=$(mktemp -p "$(dirname "$manifest_file")" dr-manifest.env.XXXXXXXXXX) || { rm -rf "$backup_dir"; rm -f "$policy_stage" "$ciphertext_stage"; return 1; }
     ciphertext_backup="$backup_dir/secrets.yaml.bak"
     policy_backup="$backup_dir/sops.yaml.bak"

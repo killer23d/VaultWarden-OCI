@@ -240,7 +240,7 @@ check_project_state_ready() {
         if [[ -d "$state_dir" ]]; then
             [[ -r "$state_dir" && -x "$state_dir" ]] || {
                 log_error "check_project_state_ready: PROJECT_STATE_DIR is not accessible by $(id -un): $state_dir"
-                log_error "Run setup once as root: sudo make setup (or ask an administrator to fix ownership)."
+                log_error "Run setup once as root: sudo ./setup.sh install --domain <your-domain> --email <your-email> (or ask an administrator to fix ownership)."
                 return 1
             }
             return 0
@@ -249,7 +249,7 @@ check_project_state_ready() {
             return 0
         fi
         log_error "check_project_state_ready: PROJECT_STATE_DIR does not exist: $state_dir"
-        log_error "Run the root setup step first: sudo make setup"
+        log_error "Run the root setup step first: sudo ./setup.sh install --domain <your-domain> --email <your-email>"
         return 1
     fi
 
