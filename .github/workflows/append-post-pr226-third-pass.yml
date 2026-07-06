@@ -1,0 +1,419 @@
+name: Append post-PR226 third-pass report
+
+on:
+  push:
+    branches:
+      - delta
+    paths:
+      - '.github/workflows/append-post-pr226-third-pass.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  append-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: delta
+          fetch-depth: 0
+
+      - name: Append validated third-pass audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          report='reports/post-pr226-production-simplicity-audit.md'
+          test "$(git hash-object "$report")" = '48c9bbc9f5d013f56f1d643f5681e7502d8eba4b'
+          cat >> "$report" <<'VW_THIRD_PASS_ADDENDUM'
+          ---
+          
+          ## Third-Pass Validation Addendum
+          
+          Date: 2026-07-05
+          
+          This is a closure pass over the same post-PR #226 `delta` state. It re-validates
+          the original findings and checks only adjacent operator/maintenance contracts:
+          Make privilege forms, dashboard truthfulness, recovery exit semantics, test
+          inventory, CI callers, and operator docs. It does **not** reopen the shared
+          `flock` architecture or recommend enterprise tooling.
+          
+          ### Third-Pass Verdict
+          
+          F-01 through F-06 remain valid. F-01/F-02/F-03 are broader than originally
+          reported, and the original journey matrix overstates fresh-install and recovery
+          coherence.
+          
+          **READY AFTER FOCUSED FIXES — one bounded atomic simplification PR remains the
+          recommended path. No new architecture phase is warranted.**
+          
+          ### Validation of Original Findings
+          
+          | Finding | Verdict | Third-pass adjustment |
+          |---|---|---|
+          | F-01 Make privilege drift | **VALID** | Expand to `key-path` and `key-show`; decide whether both key-status targets are useful. |
+          | F-02 broken dashboard actions | **VALID** | Recovery-kit export is confirmed broken; after email/export fixes, `run_user_cmd` may have no valid caller. |
+          | F-03 false-green / over-strong dashboard status | **VALID** | Expand to timer unknown state, `mailq` failure, broad auth heuristic, restart labelled `safe`, and backup/status labels. |
+          | F-04 test inventory drift | **VALID** | Add a definitive disposition for all 30 tests; `test-email-refactor.sh` is also historical naming and has a hard `rg` dependency. |
+          | F-05 dead workflow autofix job | **VALID** | Delete the job; do not build a generic workflow semantic linter for one workflow. |
+          | F-06 stale `docs/SCRIPTS.md` rows | **VALID** | RUNBOOK root/ordering drift is higher priority and deserves a Medium finding. |
+          
+          ## Additional High-Confidence Findings
+          
+          ### TP-01 - CI path filters miss workflow, README, and RUNBOOK changes
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact file: `.github/workflows/doc-drift.yml`
+          
+          The PR path filter omits `.github/workflows/**`, `README.md`, and `RUNBOOK.md`.
+          The job nevertheless scans `README.md`, while `RUNBOOK.md` is not included in
+          the stale-term or Make-target scans. A workflow-only or README-only PR can bypass
+          checks that claim to cover those surfaces, and RUNBOOK command drift is invisible.
+          
+          Minimal fix: add the three paths and include `RUNBOOK.md` in the existing docs
+          scans. Preserve workflow/job names and permissions. Delete the dead autofix job.
+          Do not add reusable workflows or a generic YAML/workflow linter.
+          
+          ### TP-02 - Fresh-install RUNBOOK orders secret rotation before secrets exist
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `RUNBOOK.md`, `edit-secrets.sh`, `setup.sh`
+          
+          RUNBOOK tells a first-time operator to run Cloudflare `edit-secrets.sh rotate`
+          commands before the full setup step. `edit-secrets.sh` requires root and refuses
+          operational subcommands until `SECRETS_FILE` exists. Full setup creates env in
+          phase 3 and bootstraps encrypted secrets in phase 4; `setup.sh` itself prints the
+          Cloudflare rotation commands only after bootstrap.
+          
+          Minimal fix: document setup/bootstrap first, then `sudo ./edit-secrets.sh rotate
+          ...`, then CrowdSec setup, then root-operated start/health verification. Reuse
+          `setup.sh`'s existing sequence; do not add another setup orchestrator.
+          
+          ### TP-03 - Dashboard recovery-kit export is definitely broken from normal launch
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `dashboard.sh`, `utilities/secrets-export-recovery-kit.sh`
+          
+          The dashboard requires root and documents `sudo ./dashboard.sh`. Its
+          `run_user_cmd` drops to `SUDO_USER`, and recovery-kit export is routed through
+          that helper. The export utility explicitly requires root. Normal sudo dashboard
+          launch therefore drops privileges and the visible export action fails.
+          
+          Minimal fix: execute recovery-kit export in the root context. Email diagnostic is
+          also root-operated. After those actions are corrected, delete `run_user_cmd` if
+          it has no legitimate caller. Do not add an execution-policy registry.
+          
+          ### TP-04 - `key-path` and `key-show` have no truthful production privilege form
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `Makefile`, `lib/crypto.sh`, command docs
+          
+          `key-path` resolves only readable keys. The canonical production key is
+          `/etc/vaultwarden/age-key.txt`, root-owned `0600` under a root-owned directory.
+          `key-path` is not root-allowed, so non-root can fail to resolve the real key while
+          `sudo make key-path` is rejected. `key-show` can similarly report `MISSING` to a
+          normal user and is also rejected under sudo.
+          
+          Minimal fix: keep `key-health` authoritative. Prefer removing redundant
+          `key-path` and retaining at most one root-correct lightweight `key-show` for
+          path/public-recipient status. Keep decryptability claims in `key-health`.
+          
+          ### TP-05 - `recover.sh` returns zero after failed post-recovery health
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `recover.sh`, `tests/test-recover.sh`
+          
+          On `/alive` failure, recovery prints `Health check: FAIL`, says not to treat the
+          service as healthy, and prints next steps. The branch ends with successful
+          `echo`s, so `run_startup_health` returns zero and the script exits successfully.
+          The existing recovery test explicitly preserves this zero-exit behavior.
+          
+          Minimal fix: return non-zero for failed post-recovery health while preserving
+          successfully promoted recovery artifacts. Do **not** simply add `return 1`: the
+          current EXIT cleanup rolls promoted artifacts back on non-zero. Add one small
+          committed-artifacts state after promotion/env update, exclude committed state
+          from rollback, then return non-zero on health failure. Update the test to require
+          non-zero plus preserved ciphertext/key/policy/manifest and the current next-step
+          text.
+          
+          ### TP-06 - `systemd-status` duplicates canonical status and mislabels unit states
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `Makefile`, `utilities/setup-systemd.sh`
+          
+          The Make target owns a smaller hard-coded unit list and does `systemctl status ...
+          || echo "unit: not found"`. `systemctl status` is non-zero for inactive/failed as
+          well as missing units, so installed failed units can be reported as `not found`.
+          The loop also omits startup and managed service units. `setup-systemd.sh` already
+          owns the canonical timer/service/startup arrays and status action.
+          
+          Minimal fix: route `make systemd-status` to the existing root-operated systemd
+          status action and delete the duplicate Make loop. Do not build another unit
+          registry.
+          
+          ### TP-07 - `make unban` masks all `cscli` delete errors as harmless success
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `Makefile`, `dashboard.sh`
+          
+          `make unban` uses `cscli ... && success || "not found/may have expired"`. The
+          fallback echo succeeds, so permission/LAPI/database/command errors become exit 0
+          and benign not-found wording. The dashboard separately duplicates unban and only
+          validates IPv4.
+          
+          Minimal fix: preserve generic `cscli` failure as non-zero and print its failure
+          output. Use not-found wording only when positively identified. Route dashboard
+          unban through the corrected canonical target and let `cscli` validate supported
+          IP forms; do not build a custom IPv4/IPv6 parser.
+          
+          ### TP-08 - Backup/status labels claim health or incrementality not performed
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `Makefile`, `dashboard.sh`, `utilities/backup-run.sh`, `lib/backup-utils.sh`
+          
+          DB backup mode is an encrypted standalone SQLite snapshot, but Make/dashboard
+          call it `incremental`. `backup-status` is described as a health summary but only
+          calls `backup.sh list`; the list path inventories type/file/size/age/metadata and
+          does not verify/decrypt. Main `status` likewise says backup health while showing
+          inventory/age. Dashboard `Sync Latest Backup` creates a new DB backup and syncs
+          it, and `Full Verify + Sync` fully verifies a new **DB** backup, not a full-system
+          backup.
+          
+          Minimal fix: rename rather than add work: `DB snapshot backup`, `Backup
+          Inventory`, `Create + Sync New DB Backup`, and `Create + Fully Verify + Sync DB
+          Backup`. Keep decrypt/integrity checks in `backup.sh verify` or comprehensive
+          health; do not make dashboard refresh perform live decrypts.
+          
+          ### TP-09 - `make status` can print `Active bans: 0` when `cscli` failed
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact file: `Makefile`
+          
+          The active-CrowdSec path counts a `cscli | tail | wc -l` pipeline with stderr
+          discarded. The recipe shell has no `pipefail`; failed `cscli` can still leave the
+          last pipeline command successful with zero. `0` is a successful query result, not
+          an unknown query state.
+          
+          Minimal fix: capture `cscli` output and status before counting. Print a numeric
+          count only on query success; otherwise print `unknown (cscli query failed)`.
+          Do not add a status cache or monitoring backend.
+          
+          ### TP-10 - `key-backup` says offline while creating another local file
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `Makefile`, `RUNBOOK.md`, command docs
+          
+          The target says it backs up the Age key offline, but copies it to
+          `$HOME/age-key-backup-<timestamp>.txt` on the same host and only then tells the
+          operator to store it offline. This is a local transfer copy, not completed
+          offline custody.
+          
+          Minimal fix: remove the target in favor of the recovery-kit/offline-recipient
+          flow, or rename it to `Create local Age key copy for manual offline transfer` and
+          end with a prominent `NOT OFFLINE YET` warning. Do not add USB detection or
+          removable-media automation.
+          
+          ### TP-11 - Dashboard status/safety wording still overstates several probes
+          
+          - Severity: Medium
+          - Confidence: High
+          - Exact files: `dashboard.sh`, `Makefile`
+          
+          - Main `Start/Restart Stack (safe)` executes ordinary `make restart`; the repo has
+            a distinct `safe-restart` rollback workflow.
+          - Timers says `(systemd not available)` whenever no VaultWarden timer lines are
+            returned; absent units and query failure are different states.
+          - Email Queue calls zero `Healthy`; even a successful empty queue proves only
+            `0 queued`, not end-to-end mail health. A failed `mailq` must also be Unknown.
+          - Recent Auth Fails greps broad `invalid|fail` text from app/Caddy logs, which is
+            not a reliable authentication-failure classifier.
+          
+          Minimal fix: remove `(safe)` or route to `safe-restart`; use no-timers/Unknown
+          states; show `0 queued`/`N queued`/Unknown; remove the auth counter or rename it to
+          a generic failure-match count. For this small project, removal is preferable to
+          building a log-classification parser.
+          
+          ### TP-12 - `backup.sh --help` loads project environment before help/version parsing
+          
+          - Severity: Low
+          - Confidence: High
+          - Exact files: `utilities/backup-run.sh`, `backup.sh`, generated command reference
+          
+          `backup-run.sh` calls `load_project_environment || exit 1` before parsing help or
+          version. The generated command reference therefore records backup help as
+          unavailable/requiring environment. Harmless information requests should not need
+          production state.
+          
+          Minimal fix: parse help/version first, then load project environment only for
+          operational subcommands; regenerate command reference.
+          
+          ## Corrected Journey Classifications
+          
+          | Journey | Original result | Third-pass result |
+          |---|---|---|
+          | Fresh installation | Coherent | **Broken docs order** — secret rotation precedes secrets bootstrap and omits sudo. |
+          | Mounted-state recovery | Coherent | **Misleading exit status** — failed health returns success. |
+          | Troubleshoot failed stack | Broken via `diagnose` | **Wider status drift** — duplicate systemd status and false-zero CrowdSec count. |
+          | CrowdSec unban | Coherent | **Broken failure semantics** — generic delete errors become benign success. |
+          | Database backup | Coherent | **Implementation coherent; label misleading** — snapshot, not incremental. |
+          | Backup status | Coherent | **Inventory only, not health**. |
+          | Key inspection | Not separately flagged | **Privilege form broken/redundant**. |
+          
+          All other original journey conclusions remain unchanged.
+          
+          ## Definitive 30-Test Disposition Map
+          
+          | Current test | Action / final destination |
+          |---|---|
+          | `test-architecture-helpers.sh` | KEEP |
+          | `test-security-helpers.sh` | KEEP |
+          | `test-secrets-cli-help.sh` | KEEP; add backup help/version assertions if convenient |
+          | `test-privilege-contracts.sh` | KEEP + EXTEND for Make/key/dashboard privilege contracts |
+          | `test-permission-repair-contract.sh` | KEEP |
+          | `test-permission-contract-central.sh` | KEEP |
+          | `test-env-edit.sh` | KEEP |
+          | `test-migrate-followup.sh` | RENAME -> `test-storage-migration-contracts.sh` |
+          | `test-operator-ui.sh` | KEEP; MERGE confirmation-prompt format assertions |
+          | `test-recover.sh` | KEEP + UPDATE health-failure exit/artifact assertions |
+          | `test-restore-run-followup.sh` | MERGE/RENAME -> `test-restore-contracts.sh` |
+          | `test-restore-backup-preflight-safety.sh` | KEEP |
+          | `test-backup-architecture-policy.sh` | KEEP |
+          | `test-backup-restore-behavior.sh` | KEEP |
+          | `test-confirmation-prompt-format.sh` | MERGE -> `test-operator-ui.sh` |
+          | `test-operation-guards.sh` | KEEP |
+          | `test-start-policy.sh` | KEEP |
+          | `test-uninstall-vaultwarden.sh` | KEEP |
+          | `test-setup-storage-ux.sh` | KEEP |
+          | `test-crowdsec-config.sh` | KEEP; canonical runner owns it, not workflow YAML |
+          | `test-config-systemd-followup.sh` | RENAME -> `test-config-systemd-contracts.sh` |
+          | `test-email-refactor.sh` | RENAME -> `test-email-contracts.sh`; add `rg` -> `grep` fallback |
+          | `test-health-operation-contract.sh` | KEEP |
+          | `test-maintenance-email-root.sh` | MERGE -> `test-email-contracts.sh` |
+          | `test-post-pr224-operation-contracts.sh` | RENAME -> `test-operation-lock-contracts.sh` |
+          | `test-restore-confirmation-safety.sh` | MERGE -> `test-restore-contracts.sh` |
+          | `test-secrets-env-systemd-guards.sh` | RENAME -> `test-secrets-env-systemd-operation-contracts.sh` |
+          | `test-setup-secrets-transaction.sh` | KEEP |
+          | `test-startup-lifecycle-guards.sh` | KEEP |
+          | `test-systemd-operation-runtime-paths.sh` | MERGE -> `test-operation-lock-contracts.sh` |
+          
+          `test-email-refactor.sh` now protects permanent routing/fallback/TLS/attachment,
+          header-injection, rate-limit, secret-resolution, and trap contracts; `refactor`
+          is historical naming. Its hard `rg` call should use the existing prompt-format
+          test's `rg`-then-`grep` fallback pattern before the new runner makes it a normal
+          local/CI test.
+          
+          ### Canonical runner recommendation
+          
+          Start with exactly one supported invocation:
+          
+          ```bash
+          ./tests/run-tests.sh all
+          ```
+          
+          Use one explicit ordered inventory. The runner should preserve child output,
+          print concise RUN/PASS/FAIL wrappers, propagate non-zero failures, and compare the
+          explicit list against `tests/test-*.sh` so an unlisted or duplicate permanent
+          test fails immediately. Individual tests keep their own visible SKIP messages;
+          do not invent a new skip protocol merely for the runner.
+          
+          Keep strict ShellCheck as its existing direct workflow job.
+          
+          Do **not** initially add domain selectors, metadata/YAML/JSON manifests, a test
+          registration API, Bats/pytest solely for organization, or a second tests Makefile.
+          Add a suite selector only when CI or a real debugging workflow has an actual
+          caller for it.
+          
+          ## Corrected GitHub Actions Migration
+          
+          1. Add `.github/workflows/**`, `README.md`, and `RUNBOOK.md` to PR path filters.
+          2. Include `RUNBOOK.md` in stale-term and Make-target reference scans.
+          3. Change `functional-tests` from `make test-unit` plus direct CrowdSec execution
+             to:
+          
+             ```bash
+             ./tests/run-tests.sh all
+             ```
+          
+          4. Keep the direct strict ShellCheck job unchanged.
+          5. Delete `shellcheck-autofix`; do not add a push trigger to preserve a dead
+             auto-write job.
+          6. Preserve workflow/job names, read permission, and PR trigger model apart from
+             path-filter expansion.
+          7. Do not list individual permanent tests in workflow YAML once the runner owns
+             inventory.
+          
+          No reusable workflow, composite action, generated matrix, or CI framework is
+          needed.
+          
+          ## Corrected Final Production Fix Scope
+          
+          ### Must fix before production
+          
+          1. Valid privilege forms for retained operator targets, including the F-01/F-02
+             targets and `key-path`/`key-show` decision.
+          2. Broken dashboard diagnostics, systemd status, prune, email, and recovery-kit
+             actions.
+          3. Failed post-recovery health returns non-zero without rolling back committed
+             recovery artifacts.
+          4. Preserve real `cscli` unban/query failures; no benign success or false ban zero.
+          5. Correct RUNBOOK sudo forms and fresh-install bootstrap/secret-rotation order.
+          6. Add `tests/run-tests.sh all` as the single permanent regression inventory and
+             migrate GitHub Actions atomically, including path-filter coverage.
+          7. Correct dashboard unknown/false-health semantics and make last backup/result
+             use the same selected archive.
+          
+          ### Worth fixing in the same simplification PR
+          
+          - Delete `run_user_cmd` if unused after root-correct dashboard actions.
+          - Correct ordinary restart `(safe)` wording and backup/inventory/create+sync labels.
+          - Rename/merge historical tests per the disposition map; remove hard `rg` from
+            the newly canonical email contract test.
+          - Make backup help/version side-effect-free and regenerate command reference.
+          - Correct `key-backup` offline-custody wording or remove the redundant target.
+          - Remove `test`, `test-unit`, `fmt`, `lint`, and `shellcheck` from the operator
+            Makefile after callers migrate; retain/reclassify only real admin diagnostics.
+          - Delete duplicate status loops/dead helpers rather than keeping compatibility
+            layers without a real caller.
+          
+          ### Leave alone
+          
+          - PR #224/#226 shared `flock` operation-guard architecture.
+          - The replacement-VM standalone DR model for `recover.sh`; no recovery daemon,
+            state machine, or second lock framework.
+          - Docker Compose/systemd/SOPS/Age architecture.
+          - Bash tests and large focused restore/recovery harnesses where merging hurts
+            diagnosis.
+          - Existing workflow/job names and direct strict ShellCheck job.
+          
+          ## Third-Pass Final Recommendation
+          
+          **READY AFTER FOCUSED FIXES — one bounded atomic simplification PR recommended.**
+          
+          The third pass found no reason for an enterprise redesign or another broad lock
+          audit. Remaining work is concrete integration cleanup: valid privilege forms,
+          truthful exit/status/labels, correct first-run docs, one regression inventory
+          owner, and CI that runs when those contracts change.
+          
+          Implementation bias:
+          
+          > route to an existing canonical path, rename an over-strong label, preserve a
+          > real error, or delete a duplicate surface before adding any new abstraction.
+          
+          VW_THIRD_PASS_ADDENDUM
+          test "$(git hash-object "$report")" = '100982d0a59e3008d7aae0aa969facca67569821'
+          rm -f .github/workflows/append-post-pr226-third-pass.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$report" .github/workflows/append-post-pr226-third-pass.yml
+          git commit -m 'docs: append third-pass production simplicity audit'
+          git push origin HEAD:delta
