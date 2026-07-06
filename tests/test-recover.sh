@@ -58,7 +58,13 @@ canonical_path() {
 
 env_value() {
     local key="$1" file="$2"
-    awk -F= -v k="$key" '$1 == k { print substr($0, index($0, "=") + 1); found = 1 } END { exit found ? 0 : 1 }' "$file"
+    if [[ -r "$file" ]]; then
+        awk -F= -v k="$key" '$1 == k { print substr($0, index($0, "=") + 1); found = 1 } END { exit found ? 0 : 1 }' "$file"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        sudo -n awk -F= -v k="$key" '$1 == k { print substr($0, index($0, "=") + 1); found = 1 } END { exit found ? 0 : 1 }' "$file"
+    else
+        return 1
+    fi
 }
 
 make_case() {
@@ -66,8 +72,10 @@ make_case() {
     mkdir -p "$dir/state/config" "$dir/state/secrets" "$dir/state/data" "$dir/repo" "$dir/etc" "$dir/mockbin"
     cp "$ROOT/recover.sh" "$dir/repo/recover.sh"
     cp -a "$ROOT/lib" "$dir/repo/lib"
+    mkdir -p "$dir/repo/utilities"
+    cp "$ROOT/utilities/env-edit.sh" "$dir/repo/utilities/env-edit.sh"
     cp "$ROOT/docker-compose.yml.example" "$dir/repo/docker-compose.yml.example"
-    chmod +x "$dir/repo/recover.sh"
+    chmod +x "$dir/repo/recover.sh" "$dir/repo/utilities/env-edit.sh"
     cat > "$dir/state/config/dr-manifest.env" <<EOF_MANIFEST
 DOMAIN=https://vault.example.test
 REPO_URL=https://example.test/repo.git
@@ -205,8 +213,27 @@ canon(){ /usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1])
 if [[ -n "${MOCK_MV_FAIL_DEST:-}" && "$(canon "$last")" == "$(canon "$MOCK_MV_FAIL_DEST")" ]]; then
     exit 1
 fi
+if [[ -n "${MOCK_MV_SIGNAL_DEST:-}" && "$(canon "$last")" == "$(canon "$MOCK_MV_SIGNAL_DEST")" ]]; then
+    /bin/mv "$@" || exit $?
+    kill "-${MOCK_MV_SIGNAL_NAME:-TERM}" "$PPID"
+    sleep 1
+    exit 0
+fi
 exec /bin/mv "$@"
 MV
+    cat > "$mock/touch" <<'TOUCH'
+#!/usr/bin/env bash
+canon(){ /usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+for arg in "$@"; do
+    if [[ -n "${MOCK_TOUCH_SIGNAL_PATH:-}" && "$(canon "$arg")" == "$(canon "$MOCK_TOUCH_SIGNAL_PATH")" ]]; then
+        /usr/bin/touch "$@" || exit $?
+        kill "-${MOCK_TOUCH_SIGNAL_NAME:-TERM}" "$PPID"
+        sleep 1
+        exit 0
+    fi
+done
+exec /usr/bin/touch "$@"
+TOUCH
     chmod +x "$mock"/*
 }
 
@@ -237,6 +264,10 @@ run_recover() {
         MOCK_SOPS_PAUSE="${MOCK_SOPS_PAUSE:-}" \
         MOCK_SIGNAL_READY="${MOCK_SIGNAL_READY:-}" \
         MOCK_MV_FAIL_DEST="${MOCK_MV_FAIL_DEST:-}" \
+        MOCK_MV_SIGNAL_DEST="${MOCK_MV_SIGNAL_DEST:-}" \
+        MOCK_MV_SIGNAL_NAME="${MOCK_MV_SIGNAL_NAME:-}" \
+        MOCK_TOUCH_SIGNAL_PATH="${MOCK_TOUCH_SIGNAL_PATH:-}" \
+        MOCK_TOUCH_SIGNAL_NAME="${MOCK_TOUCH_SIGNAL_NAME:-}" \
         MOCK_CURL_EXIT="${MOCK_CURL_EXIT:-0}" \
         bash "$dir/repo/recover.sh" --state-dir "$dir/state" --key "$dir/usb-key.txt" "$@" > "$dir/out" 2>&1
     rc=$?
@@ -268,6 +299,10 @@ run_recover_async() {
         MOCK_SOPS_PAUSE="${MOCK_SOPS_PAUSE:-}" \
         MOCK_SIGNAL_READY="${MOCK_SIGNAL_READY:-}" \
         MOCK_MV_FAIL_DEST="${MOCK_MV_FAIL_DEST:-}" \
+        MOCK_MV_SIGNAL_DEST="${MOCK_MV_SIGNAL_DEST:-}" \
+        MOCK_MV_SIGNAL_NAME="${MOCK_MV_SIGNAL_NAME:-}" \
+        MOCK_TOUCH_SIGNAL_PATH="${MOCK_TOUCH_SIGNAL_PATH:-}" \
+        MOCK_TOUCH_SIGNAL_NAME="${MOCK_TOUCH_SIGNAL_NAME:-}" \
         MOCK_CURL_EXIT="${MOCK_CURL_EXIT:-0}" \
         bash "$dir/repo/recover.sh" --state-dir "$dir/state" --key "$dir/usb-key.txt" "$@" > "$dir/out" 2>&1 &
     printf '%s\n' "$!"
@@ -277,6 +312,22 @@ setup_startup() {
     local dir="$1"
     cat > "$dir/startup.sh" <<'START'
 #!/usr/bin/env bash
+echo 'mock startup: OK'
+START
+    chmod +x "$dir/startup.sh"
+}
+
+setup_startup_with_env_sync() {
+    local dir="$1"
+    cat > "$dir/startup.sh" <<START
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n env VW_SYNC_ETC_DIR="$dir/etc" "$dir/repo/utilities/env-edit.sh" sync
+    echo 'env-sync: ran'
+else
+    echo 'env-sync: skipped'
+fi
 echo 'mock startup: OK'
 START
     chmod +x "$dir/startup.sh"
@@ -433,6 +484,90 @@ test_precommit_signals_exit_and_do_not_continue() {
     done
 }
 
+assert_recovery_state_unchanged() {
+    local dir="$1" label="$2"
+    assert_file_equals "$dir/cipher.before" "$dir/state/secrets/secrets.yaml" "cipher changed after $label"
+    assert_file_equals "$dir/key.before" "$dir/etc/age-key.txt" "key changed after $label"
+    assert_file_equals "$dir/policy.before" "$dir/repo/.sops.yaml" "policy changed after $label"
+    assert_file_equals "$dir/install.before" "$dir/state/config/install.env" "install.env changed after $label"
+    assert_file_equals "$dir/manifest.before" "$dir/state/config/dr-manifest.env" "manifest changed after $label"
+}
+
+snapshot_recovery_state() {
+    local dir="$1"
+    cp "$dir/state/secrets/secrets.yaml" "$dir/cipher.before"
+    cp "$dir/etc/age-key.txt" "$dir/key.before"
+    cp "$dir/repo/.sops.yaml" "$dir/policy.before"
+    cp "$dir/state/config/install.env" "$dir/install.before"
+    cp "$dir/state/config/dr-manifest.env" "$dir/manifest.before"
+}
+
+test_signal_after_live_cipher_mutation_rolls_back() {
+    local dir rc
+    dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"; snapshot_recovery_state "$dir"
+    set +e
+    ( MOCK_MV_SIGNAL_DEST="$dir/state/secrets/secrets.yaml" MOCK_MV_SIGNAL_NAME=TERM run_recover "$dir" )
+    rc=$?
+    set -e
+    [[ "$rc" -eq 143 ]] || fail "live cipher mutation signal expected 143, got $rc"
+    ! grep -q 'mock startup: OK' "$dir/out" || fail 'continued into startup after live cipher signal'
+    assert_recovery_state_unchanged "$dir" 'live cipher signal'
+}
+
+test_signal_after_new_sentinel_mutation_rolls_back() {
+    local dir rc
+    dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"; snapshot_recovery_state "$dir"
+    set +e
+    ( MOCK_TOUCH_SIGNAL_PATH="$dir/state/.vw-data-volume" MOCK_TOUCH_SIGNAL_NAME=TERM run_recover "$dir" --storage-mode block )
+    rc=$?
+    set -e
+    [[ "$rc" -eq 143 ]] || fail "sentinel mutation signal expected 143, got $rc"
+    ! grep -q 'mock startup: OK' "$dir/out" || fail 'continued into startup after sentinel signal'
+    assert_recovery_state_unchanged "$dir" 'sentinel signal'
+    assert_file_missing "$dir/state/.vw-data-volume"
+}
+
+test_reconciles_absent_repo_env_before_startup_sync() {
+    local dir
+    dir=$(make_case); write_mocks "$dir"; setup_startup_with_env_sync "$dir"
+    rm -f "$dir/repo/.env"
+    if ! run_recover "$dir" --storage-mode boot; then cat "$dir/out"; fail 'absent repo env recovery failed'; fi
+    [[ -f "$dir/repo/.env" ]] || fail 'repo .env was not created'
+    [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/repo/.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'repo .env PROJECT_STATE_DIR not recovered'
+    grep -q '^DATA_VOLUME_MOUNT=$' "$dir/repo/.env" || fail 'repo .env boot DATA_VOLUME_MOUNT not blank'
+    grep -q '^DATA_VOLUME_DEVICE=$' "$dir/repo/.env" || fail 'repo .env boot DATA_VOLUME_DEVICE not blank'
+    ! grep -q '^SOPS_AGE_KEY_FILE=' "$dir/repo/.env" || fail 'runtime SOPS_AGE_KEY_FILE leaked into repo .env'
+    ! grep -q '^RCLONE_CONFIG=' "$dir/repo/.env" || fail 'runtime RCLONE_CONFIG leaked into repo .env'
+    if grep -q 'env-sync: ran' "$dir/out"; then
+        [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/state/config/install.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'env sync undid recovered PROJECT_STATE_DIR'
+        grep -q '^DATA_VOLUME_MOUNT=$' "$dir/state/config/install.env" || fail 'env sync undid boot DATA_VOLUME_MOUNT'
+        grep -q '^DATA_VOLUME_DEVICE=$' "$dir/state/config/install.env" || fail 'env sync undid boot DATA_VOLUME_DEVICE'
+    fi
+}
+
+test_reconciles_stale_repo_env_before_startup_sync() {
+    local dir
+    dir=$(make_case); write_mocks "$dir"; setup_startup_with_env_sync "$dir"
+    cat > "$dir/repo/.env" <<EOF_STALE
+PROJECT_STATE_DIR=$dir/stale-state
+DATA_VOLUME_MOUNT=$dir/stale-mount
+DATA_VOLUME_DEVICE=/dev/stale
+SOPS_AGE_KEY_FILE=$dir/stale-key.txt
+RCLONE_CONFIG=$dir/stale-rclone.conf
+EOF_STALE
+    if ! run_recover "$dir" --storage-mode boot; then cat "$dir/out"; fail 'stale repo env recovery failed'; fi
+    [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/repo/.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'stale repo .env PROJECT_STATE_DIR was not reconciled'
+    grep -q '^DATA_VOLUME_MOUNT=$' "$dir/repo/.env" || fail 'stale repo .env DATA_VOLUME_MOUNT was not reconciled'
+    grep -q '^DATA_VOLUME_DEVICE=$' "$dir/repo/.env" || fail 'stale repo .env DATA_VOLUME_DEVICE was not reconciled'
+    ! grep -q '^SOPS_AGE_KEY_FILE=' "$dir/repo/.env" || fail 'stale runtime SOPS_AGE_KEY_FILE persisted into repo .env'
+    ! grep -q '^RCLONE_CONFIG=' "$dir/repo/.env" || fail 'stale runtime RCLONE_CONFIG persisted into repo .env'
+    if grep -q 'env-sync: ran' "$dir/out"; then
+        [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/state/config/install.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'env sync restored stale PROJECT_STATE_DIR'
+        grep -q '^DATA_VOLUME_MOUNT=$' "$dir/state/config/install.env" || fail 'env sync restored stale DATA_VOLUME_MOUNT'
+        grep -q '^DATA_VOLUME_DEVICE=$' "$dir/state/config/install.env" || fail 'env sync restored stale DATA_VOLUME_DEVICE'
+    fi
+}
+
 test_success_fresh_clone() {
     local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
     rm -f "$dir/repo/.sops.yaml"
@@ -494,9 +629,13 @@ run_test 'install.env promotion failure rolls back full recovery scope' test_ins
 run_test 'final live-decryption failure restores absent artifacts' test_final_decrypt_failure_no_prior_artifacts
 run_test 'pre-existing block sentinel survives pre-commit failure' test_existing_sentinel_survives_precommit_failure
 run_test 'pre-commit INT and TERM exit with signal status and stop execution' test_precommit_signals_exit_and_do_not_continue
+run_test 'signal after live ciphertext mutation rolls back' test_signal_after_live_cipher_mutation_rolls_back
+run_test 'signal after new sentinel mutation rolls back' test_signal_after_new_sentinel_mutation_rolls_back
+run_test 'fresh recovery creates repo env before startup sync' test_reconciles_absent_repo_env_before_startup_sync
+run_test 'stale repo env is reconciled before startup sync' test_reconciles_stale_repo_env_before_startup_sync
 run_test 'successful fresh-clone recovery updates all artifacts' test_success_fresh_clone
 run_test 'startup failure after commit exits non-zero without rollback' test_startup_failure_returns_nonzero_without_rollback
 run_test 'health-check failure after commit exits non-zero without rollback' test_health_failure_reports_nonzero_without_rollback
 
-[[ "$TESTS_RUN" -eq 18 ]] || fail "expected 18 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 22 ]] || fail "expected 22 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"

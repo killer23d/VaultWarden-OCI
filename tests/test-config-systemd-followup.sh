@@ -6,7 +6,15 @@ TMP="$(mktemp -d)"
 TESTS_RUN=0
 
 cleanup() {
-    rm -rf "$TMP"
+    if [[ -d "$TMP" ]]; then
+        if (( EUID == 0 )); then
+            rm -rf "$TMP"
+        elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+            sudo -n rm -rf "$TMP"
+        else
+            rm -rf "$TMP"
+        fi
+    fi
 }
 trap cleanup EXIT
 
@@ -176,28 +184,182 @@ test_stale_root_dropin_cleanup_preserves_state_dir() {
         || fail "stale root cleanup appears to target 10-state-dir.conf"
 }
 
+can_run_systemd_behavioral_tests() {
+    [[ "$(uname -s)" == "Linux" ]] || return 1
+    if (( EUID == 0 )); then
+        return 0
+    fi
+    command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1
+}
+
+run_root_env_capture() {
+    local out="$1"
+    shift
+    if (( EUID == 0 )); then
+        env "$@" > "$out" 2>&1
+    else
+        # shellcheck disable=SC2024 # The output file is owned by the test runner, not the sudo command.
+        sudo -n env "$@" > "$out" 2>&1
+    fi
+}
+
+write_healthy_systemctl_mock() {
+    local bin="$1"
+    mkdir -p "$bin"
+    cat > "$bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+case "${1:-}" in
+    is-enabled)
+        exit 0
+        ;;
+    is-active)
+        if [[ "${2:-}" == "--quiet" ]]; then
+            exit 0
+        fi
+        printf 'active\n'
+        exit 0
+        ;;
+    show)
+        printf 'Mon 2026-07-06 12:00:00 UTC\n'
+        exit 0
+        ;;
+    status)
+        printf 'mock status %s\n' "${2:-}"
+        exit 0
+        ;;
+    *)
+        printf 'systemctl %s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+        exit 0
+        ;;
+esac
+SYSTEMCTL
+    chmod +x "$bin/systemctl"
+}
+
+prepare_systemd_validation_fixture() {
+    local unit_dir="$1" opt_dir="$2" env_dir="$3" state_dir="$4"
+    mkdir -p "$unit_dir" "$opt_dir" "$env_dir" "$state_dir/config"
+
+    cp -a "$ROOT/lib" "$opt_dir/lib"
+    find "$opt_dir/lib" -type d -exec chmod 755 {} +
+    find "$opt_dir/lib" -type f -name '*.sh' -exec chmod 644 {} +
+
+    local script
+    for script in maintenance.sh backup.sh restore.sh; do
+        cp "$ROOT/$script" "$opt_dir/$script"
+        chmod 700 "$opt_dir/$script"
+    done
+    for script in \
+        utilities/setup-firewall.sh \
+        utilities/maintenance-run.sh \
+        utilities/maintenance-health.sh \
+        utilities/maintenance-update.sh \
+        utilities/maintenance-db-maint.sh \
+        utilities/maintenance-email.sh \
+        utilities/maintenance-update-dns.sh \
+        utilities/notify-failure.sh \
+        utilities/maintenance-update-firewall.sh \
+        utilities/backup-run.sh \
+        utilities/restore-run.sh; do
+        mkdir -p "$opt_dir/$(dirname "$script")"
+        cp "$ROOT/$script" "$opt_dir/$script"
+        chmod 700 "$opt_dir/$script"
+    done
+
+    cp "$ROOT"/systemd/vaultwarden-*.service "$unit_dir/"
+    cp "$ROOT"/systemd/vaultwarden-*.timer "$unit_dir/"
+    chmod 644 "$unit_dir"/vaultwarden-*.service "$unit_dir"/vaultwarden-*.timer
+    sed -e "s|@PROJECT_ROOT@|$ROOT|g" \
+        -e "s|@PROJECT_STATE_DIR@|$state_dir|g" \
+        "$ROOT/systemd/vaultwarden-startup.service" > "$unit_dir/vaultwarden-startup.service"
+    chmod 644 "$unit_dir/vaultwarden-startup.service"
+
+    cat > "$env_dir/vaultwarden.env" <<EOF_ENV
+PROJECT_STATE_DIR=$state_dir
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=$state_dir
+SOPS_AGE_KEY_FILE=$env_dir/age-key.txt
+EOF_ENV
+    cat > "$env_dir/age-key.txt" <<'EOF_KEY'
+# public key: age1systemdvalidation000000000000000000000000000000000000000
+AGE-SECRET-KEY-1SYSTEMDVALIDATION
+EOF_KEY
+    chmod 700 "$env_dir"
+    chmod 600 "$env_dir/vaultwarden.env" "$env_dir/age-key.txt"
+    if (( EUID == 0 )); then
+        chown root:root "$env_dir" "$env_dir/vaultwarden.env" "$env_dir/age-key.txt"
+    else
+        sudo -n chown root:root "$env_dir" "$env_dir/vaultwarden.env" "$env_dir/age-key.txt"
+    fi
+}
+
+run_systemd_validate_fixture() {
+    local out="$1" bin="$2" unit_dir="$3" opt_dir="$4" env_dir="$5" state_dir="$6"
+    run_root_env_capture "$out" \
+        PATH="$bin:$PATH" \
+        SYSTEMCTL_LOG="$TMP/systemctl.log" \
+        PROJECT_STATE_DIR="$state_dir" \
+        VW_CONFIG_INSTALLED_ENV_FILE="$env_dir/vaultwarden.env" \
+        VW_SYSTEMD_UNIT_DEST_DIR="$unit_dir" \
+        VW_SYSTEMD_OPT_SCRIPTS_DIR="$opt_dir" \
+        VW_SYSTEMD_ENV_DIR="$env_dir" \
+        bash "$ROOT/utilities/setup-systemd.sh" validate
+}
+
 test_systemd_validation_fails_on_stale_installed_runtime() {
-    local systemd="$ROOT/utilities/setup-systemd.sh"
-    grep -Fq 'UNIT_DEST_DIR="${VW_SYSTEMD_UNIT_DEST_DIR:-/etc/systemd/system}"' "$systemd" \
-        || fail "systemd unit destination is not temp-testable"
-    grep -Fq 'OPT_SCRIPTS_DIR="${VW_SYSTEMD_OPT_SCRIPTS_DIR:-/opt/vaultwarden-scripts}"' "$systemd" \
-        || fail "installed script destination is not temp-testable"
-    grep -Fq '_report_stale_artifact()' "$systemd" \
-        || fail "stale artifact error helper missing"
-    grep -Fq 'log_error "  STALE: $installed does not match repo source"' "$systemd" \
-        || fail "stale artifact should be a validation error"
-    grep -Fq 'log_error "         Re-run: sudo utilities/setup-systemd.sh install"' "$systemd" \
-        || fail "stale artifact output must tell operator to rerun install"
-    grep -Fq '_compare_repo_artifact "$repo_src" "$installed"' "$systemd" \
-        || fail "installed scripts are not compared against repo sources"
-    grep -Fq 'find "$PROJECT_ROOT/lib" -type f -print0' "$systemd" \
-        || fail "repo lib files are not inventoried for installed-runtime drift"
-    grep -Fq 'installed_lib="$OPT_SCRIPTS_DIR/$rel_path"' "$systemd" \
-        || fail "repo lib relative path is not mapped into installed tree"
-    grep -Fq '_compare_repo_artifact "$UNIT_SOURCE_DIR/$unit" "$UNIT_DEST_DIR/$unit"' "$systemd" \
-        || fail "managed systemd units are not compared against repo unit sources"
-    grep -Fq '(( errors++ )) || true' "$systemd" \
-        || fail "stale artifacts and unhealthy timers must increment validation errors"
+    if ! can_run_systemd_behavioral_tests; then
+        printf 'SKIP: systemd validation behavioral test requires Linux root or passwordless sudo\n'
+        return 0
+    fi
+
+    local unit_dir="$TMP/systemd-units" opt_dir="$TMP/opt-scripts" env_dir="$TMP/etc-vaultwarden" state_dir="$TMP/state"
+    local bin="$TMP/bin" clean_out="$TMP/validate-clean.out" stale_out
+    write_healthy_systemctl_mock "$bin"
+    prepare_systemd_validation_fixture "$unit_dir" "$opt_dir" "$env_dir" "$state_dir"
+
+    run_systemd_validate_fixture "$clean_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || { cat "$clean_out" >&2; fail "clean temp-installed systemd tree did not validate"; }
+
+    local installed
+    installed="$opt_dir/utilities/backup-run.sh"
+    printf '\n# stale backup-run fixture\n' >> "$installed"
+    stale_out="$TMP/validate-stale-backup-run.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with stale installed backup-run.sh"
+    grep -Fq "STALE: $installed does not match repo source" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "stale backup-run.sh was not named"; }
+    grep -Fq 'Re-run: sudo utilities/setup-systemd.sh install' "$stale_out" \
+        || fail "stale backup-run.sh output did not tell operator to rerun install"
+    cp "$ROOT/utilities/backup-run.sh" "$installed"
+    chmod 700 "$installed"
+
+    installed="$opt_dir/lib/backup-utils.sh"
+    printf '\n# stale backup-utils fixture\n' >> "$installed"
+    stale_out="$TMP/validate-stale-backup-utils.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with stale installed backup-utils.sh"
+    grep -Fq "STALE: $installed does not match repo source" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "stale backup-utils.sh was not named"; }
+    cp "$ROOT/lib/backup-utils.sh" "$installed"
+    chmod 644 "$installed"
+
+    installed="$unit_dir/vaultwarden-db-backup.service"
+    printf '\n# stale db backup unit fixture\n' >> "$installed"
+    stale_out="$TMP/validate-stale-db-backup-service.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with stale installed vaultwarden-db-backup.service"
+    grep -Fq "STALE: $installed does not match repo source" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "stale vaultwarden-db-backup.service was not named"; }
+    cp "$ROOT/systemd/vaultwarden-db-backup.service" "$installed"
+    chmod 644 "$installed"
+
+    installed="$unit_dir/vaultwarden-startup.service"
+    printf '\n# stale rendered startup unit fixture\n' >> "$installed"
+    stale_out="$TMP/validate-stale-startup-service.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with stale rendered vaultwarden-startup.service"
+    grep -Fq "DRIFT: $installed does not match freshly rendered template" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "stale rendered startup service was not named"; }
 }
 
 run_test 'systemd remove requests startup disable and daemon reload' test_systemd_remove_disables_startup_service

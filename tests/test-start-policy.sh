@@ -69,7 +69,271 @@ require '_report_unhealthy_managed_timers "Validation timer health"' "$SYSTEMD" 
 require '\(\( errors\+\+ \)\)' "$SYSTEMD" 'validation timer health failure must increment errors'
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+cleanup(){
+  if [[ -d "$TMP" ]]; then
+    if (( EUID == 0 )); then
+      rm -rf "$TMP"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo -n rm -rf "$TMP"
+    else
+      rm -rf "$TMP"
+    fi
+  fi
+}
+trap cleanup EXIT
+
+can_run_systemd_behavioral_tests(){
+  [[ "$(uname -s)" == "Linux" ]] || return 1
+  if (( EUID == 0 )); then
+    return 0
+  fi
+  command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1
+}
+
+run_root_env_capture(){
+  local out="$1"
+  shift
+  if (( EUID == 0 )); then
+    env "$@" > "$out" 2>&1
+  else
+    # shellcheck disable=SC2024 # The output file is owned by the test runner, not the sudo command.
+    sudo -n env "$@" > "$out" 2>&1
+  fi
+}
+
+write_systemd_install_fakes(){
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+mode="${VW_TEST_SYSTEMCTL_MODE:-healthy}"
+cmd="${1:-}"
+case "$cmd" in
+  is-enabled)
+    exit 0
+    ;;
+  is-active)
+    quiet=false
+    unit="${2:-}"
+    if [[ "$unit" == "--quiet" ]]; then
+      quiet=true
+      unit="${3:-}"
+    fi
+    if [[ "$mode" == "unhealthy" && "$unit" == "vaultwarden-maintenance.timer" ]]; then
+      [[ "$quiet" == "true" ]] && exit 3
+      printf 'inactive\n'
+      exit 3
+    fi
+    [[ "$quiet" == "true" ]] && exit 0
+    printf 'active\n'
+    exit 0
+    ;;
+  show)
+    if [[ "$mode" == "unhealthy" && "${2:-}" == "vaultwarden-db-backup.timer" ]]; then
+      printf 'n/a\n'
+    else
+      printf 'Mon 2026-07-06 12:00:00 UTC\n'
+    fi
+    exit 0
+    ;;
+  status)
+    printf 'mock status %s\n' "${2:-}"
+    exit 0
+    ;;
+  enable|disable|daemon-reload|reset-failed|start|restart)
+    printf 'systemctl %s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+    exit 0
+    ;;
+  *)
+    printf 'systemctl %s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+    exit 0
+    ;;
+esac
+SYSTEMCTL
+  cat > "$bin/systemd-analyze" <<'SYSTEMD_ANALYZE'
+#!/usr/bin/env bash
+exit 0
+SYSTEMD_ANALYZE
+  cat > "$bin/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+exit 0
+SLEEP
+  cat > "$bin/getent" <<'GETENT'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  group:vaultwarden)
+    printf 'vaultwarden:x:997:root,%s\n' "${VW_TEST_SERVICE_USER:-vwtest}"
+    exit 0
+    ;;
+  passwd:*)
+    user="${2:-${VW_TEST_SERVICE_USER:-vwtest}}"
+    printf '%s:x:1000:1000:Test User:/home/%s:/bin/bash\n' "$user" "$user"
+    exit 0
+    ;;
+esac
+exec /usr/bin/getent "$@"
+GETENT
+  cat > "$bin/id" <<'ID'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -u) printf '0\n'; exit 0 ;;
+  -un) printf 'root\n'; exit 0 ;;
+  -g) printf '0\n'; exit 0 ;;
+  -gn) printf '%s\n' "${2:-root}"; exit 0 ;;
+  -nG) printf '%s vaultwarden\n' "${2:-root}"; exit 0 ;;
+  root|"${VW_TEST_SERVICE_USER:-vwtest}") exit 0 ;;
+esac
+exec /usr/bin/id "$@"
+ID
+  cat > "$bin/groupadd" <<'GROUPADD'
+#!/usr/bin/env bash
+exit 0
+GROUPADD
+  cat > "$bin/usermod" <<'USERMOD'
+#!/usr/bin/env bash
+exit 0
+USERMOD
+  cat > "$bin/install" <<'INSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
+make_dirs=false
+mode=""
+pos=()
+while (($#)); do
+  case "$1" in
+    -d) make_dirs=true ;;
+    -m) mode="${2:-}"; shift ;;
+    -o|-g) shift ;;
+    --) ;;
+    *) pos+=("$1") ;;
+  esac
+  shift || true
+done
+if [[ "$make_dirs" == "true" ]]; then
+  for dest in "${pos[@]}"; do
+    mkdir -p "$dest"
+    [[ -n "$mode" ]] && /bin/chmod "$mode" "$dest"
+  done
+  exit 0
+fi
+if ((${#pos[@]} < 2)); then
+  exit 1
+fi
+src="${pos[${#pos[@]}-2]}"
+dest="${pos[${#pos[@]}-1]}"
+if [[ "$dest" == /run/lock/* ]]; then
+  mkdir -p "${VW_TEST_RUN_LOCK_DIR:?}"
+  : > "${VW_TEST_RUN_LOCK_DIR}/$(basename "$dest")"
+  [[ -n "$mode" ]] && /bin/chmod "$mode" "${VW_TEST_RUN_LOCK_DIR}/$(basename "$dest")"
+  exit 0
+fi
+if [[ -d "$dest" ]]; then
+  dest="$dest/$(basename "$src")"
+fi
+mkdir -p "$(dirname "$dest")"
+/bin/cp "$src" "$dest"
+[[ -n "$mode" ]] && /bin/chmod "$mode" "$dest"
+INSTALL
+  cat > "$bin/chown" <<'CHOWN'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [[ "$arg" == /run/lock/* ]] && exit 0
+done
+exec /usr/bin/chown "$@"
+CHOWN
+  cat > "$bin/chmod" <<'CHMOD'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [[ "$arg" == /run/lock/* ]] && exit 0
+done
+exec /bin/chmod "$@"
+CHMOD
+  chmod +x "$bin"/*
+}
+
+copy_systemd_install_repo(){
+  local repo="$1" state="$2"
+  mkdir -p "$repo/secrets/keys"
+  cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$repo/"
+  cp "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" "$repo/"
+  cat > "$repo/.env" <<EOF_ENV
+DOMAIN=https://systemd-policy.example.test
+ADMIN_EMAIL=admin@example.test
+PROJECT_STATE_DIR=$state
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=$state
+SOPS_AGE_KEY_FILE=
+EOF_ENV
+  chmod 600 "$repo/.env"
+  cat > "$repo/secrets/keys/age-key.txt" <<'EOF_KEY'
+# public key: age1systemdpolicy000000000000000000000000000000000000000000
+AGE-SECRET-KEY-1SYSTEMDPOLICY
+EOF_KEY
+  chmod 600 "$repo/secrets/keys/age-key.txt"
+}
+
+run_systemd_install_fixture(){
+  local out="$1" repo="$2" bin="$3" unit_dir="$4" opt_dir="$5" env_dir="$6" state="$7" mode="$8"
+  shift 8
+  mkdir -p "$unit_dir" "$opt_dir" "$env_dir" "$state" "$TMP/run-locks"
+  run_root_env_capture "$out" \
+    PATH="$bin:$PATH" \
+    SYSTEMCTL_LOG="$TMP/systemctl-install.log" \
+    VW_TEST_RUN_LOCK_DIR="$TMP/run-locks" \
+    VW_TEST_SERVICE_USER="vwtest" \
+    SERVICE_USER="vwtest" \
+    VW_TEST_SYSTEMCTL_MODE="$mode" \
+    PROJECT_STATE_DIR="$state" \
+    VW_CONFIG_INSTALLED_ENV_FILE="$env_dir/vaultwarden.env" \
+    VW_SYSTEMD_UNIT_DEST_DIR="$unit_dir" \
+    VW_SYSTEMD_OPT_SCRIPTS_DIR="$opt_dir" \
+    VW_SYSTEMD_ENV_DIR="$env_dir" \
+    VW_SYNC_ETC_DIR="$env_dir" \
+    bash "$repo/utilities/setup-systemd.sh" install "$@"
+}
+
+test_systemd_install_timer_policy_behavior(){
+  if ! can_run_systemd_behavioral_tests; then
+    printf 'SKIP: systemd install behavioral test requires Linux root or passwordless sudo\n'
+    return 0
+  fi
+
+  local bin="$TMP/install-bin" repo state unit_dir opt_dir env_dir out
+  write_systemd_install_fakes "$bin"
+
+  repo="$TMP/repo-auto"
+  state="$TMP/state-auto"
+  unit_dir="$TMP/units-auto"
+  opt_dir="$TMP/opt-auto"
+  env_dir="$TMP/etc-auto"
+  copy_systemd_install_repo "$repo" "$state"
+  out="$TMP/install-auto-unhealthy.out"
+  ! run_systemd_install_fixture "$out" "$repo" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state" unhealthy --enable-now \
+    || { cat "$out" >&2; fail 'systemd install --enable-now succeeded with unhealthy timers'; }
+  grep -Fq 'UNHEALTHY TIMER: vaultwarden-db-backup.timer' "$out" \
+    || { cat "$out" >&2; fail 'auto install did not name no-next timer'; }
+  grep -Fq 'systemctl show vaultwarden-db-backup.timer --property=NextElapseUSecRealtime --value' "$out" \
+    || fail 'auto install did not print next-trigger diagnostic'
+  grep -Fq 'UNHEALTHY TIMER: vaultwarden-maintenance.timer' "$out" \
+    || { cat "$out" >&2; fail 'auto install did not name inactive timer'; }
+  grep -Fq 'systemctl is-active vaultwarden-maintenance.timer' "$out" \
+    || fail 'auto install did not print active-state diagnostic'
+
+  repo="$TMP/repo-manual"
+  state="$TMP/state-manual"
+  unit_dir="$TMP/units-manual"
+  opt_dir="$TMP/opt-manual"
+  env_dir="$TMP/etc-manual"
+  copy_systemd_install_repo "$repo" "$state"
+  out="$TMP/install-manual.out"
+  run_systemd_install_fixture "$out" "$repo" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state" unhealthy --no-enable-now \
+    || { cat "$out" >&2; fail 'systemd install --no-enable-now should succeed in manual state'; }
+  grep -Fq 'Install-only/manual state is not production-ready' "$out" \
+    || { cat "$out" >&2; fail 'manual install did not warn that state is not production-ready'; }
+  grep -Fq 'Enabled: vaultwarden-db-backup.timer' "$out" \
+    || fail 'manual install did not enable timer without starting it'
+}
+
 cat > "$TMP/timer-helper-probe.sh" <<EOF_PROBE
 set -euo pipefail
 TIMERS=(active-no-next.timer inactive.timer healthy.timer)
@@ -104,6 +368,8 @@ grep -Fxq 'inactive.timer' "$TMP/unhealthy.out" || fail 'inactive timer not list
 ! grep -Fxq 'healthy.timer' "$TMP/unhealthy.out" || fail 'healthy timer incorrectly listed unhealthy'
 grep -Fq 'UNHEALTHY TIMER: active-no-next.timer' "$TMP/report.out" || fail 'diagnostic did not name no-next timer'
 grep -Fq 'UNHEALTHY TIMER: inactive.timer' "$TMP/report.out" || fail 'diagnostic did not name inactive timer'
+
+test_systemd_install_timer_policy_behavior
 
 # Calendar timers must not also carry OnBootSec catch-up triggers. OnBootSec
 # fires during systemctl enable --now on an already-booted host and can create

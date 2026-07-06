@@ -66,10 +66,17 @@ Store **2–3 copies** in different locations:
 ## 🔒 Creating a Bootstrap-Protected Age Key
 
 ```bash
-# GPG-encrypt your Age key with a strong passphrase
+# Production: copy the active root-owned key to a temporary user-owned file,
+# then GPG-encrypt it with a strong passphrase.
+KEY_WRAP_SOURCE="$HOME/age-key-for-bootstrap.txt"
+sudo install -m 600 -o "$(id -u)" -g "$(id -g)" \
+    /etc/vaultwarden/age-key.txt "$KEY_WRAP_SOURCE"
+
 gpg --symmetric --cipher-algo AES256 \
     --output ~/age-key-$(date +%Y%m%d).gpg \
-    secrets/keys/age-key.txt
+    "$KEY_WRAP_SOURCE"
+
+shred -u "$KEY_WRAP_SOURCE"
 
 # Copy to your bootstrap storage location(s)
 cp ~/age-key-$(date +%Y%m%d).gpg /path/to/usb/
@@ -83,14 +90,16 @@ gpg --export-secret-keys --armor YOUR_GPG_KEY_ID > gpg-private-key-backup.asc
 Before encrypting the key for offsite storage, confirm it is valid and the roundtrip works:
 
 ```bash
-# Check key structure and perform encrypt/decrypt roundtrip (lib/crypto.sh)
+# Check the active key path and perform the production health check.
+sudo make key-health
+
+# Manually verify the production key format (private key must start with AGE-SECRET-KEY-1)
+sudo grep '^AGE-SECRET-KEY-1' /etc/vaultwarden/age-key.txt
+sudo grep '^# public key:' /etc/vaultwarden/age-key.txt
+
+# Dev/pre-install fallback only, before /etc/vaultwarden exists:
 source lib/crypto.sh
 check_age_key secrets/keys/age-key.txt
-
-# Or use the Makefile shortcut
-make key-health
-
-# Manually verify the key format (private key must start with AGE-SECRET-KEY-1)
 grep '^AGE-SECRET-KEY-1' secrets/keys/age-key.txt
 grep '^# public key:' secrets/keys/age-key.txt
 ```
@@ -117,10 +126,11 @@ age -d -i age-key.txt full_backup_YYYYMMDD_HHMMSS.tar.zst.age | zstd -d -T0 -c |
 # 3. Place the Age key — use the path matching your target environment
 
 # Production / post-install (preferred):
-sudo install -m 600 -o <service-user> -g <service-user> \
+sudo install -d -m 700 -o root -g root /etc/vaultwarden
+sudo install -m 600 -o root -g root \
     age-key.txt /etc/vaultwarden/age-key.txt
 
-# OR — dev machine / pre-install (repo-local fallback):
+# OR — dev machine / pre-install only (repo-local fallback):
 mkdir -p VaultWarden-OCI/secrets/keys
 mv age-key.txt VaultWarden-OCI/secrets/keys/age-key.txt
 chmod 600 VaultWarden-OCI/secrets/keys/age-key.txt
@@ -174,7 +184,7 @@ RESTORE_AGE_KEY_FILE=secrets/keys/age-key.txt \
   ./restore.sh latest --file ../emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age --force
 
 # 7. Verify
-make health
+sudo make health
 ```
 
 ---
@@ -252,7 +262,7 @@ echo "✅ All recovery tests passed"
 | Monthly | Create new emergency kit: `./backup.sh run emergency` |
 | Quarterly | Full recovery test (procedure above) |
 | After any Age key rotation | Re-run Tier 2 escrow (`create_password_manager_escrow`) and re-wrap with GPG |
-| After any Age key rotation | `make key-rotate` triggers the built-in key rotation workflow |
+| After any Age key rotation | `sudo make key-rotate` triggers the built-in key rotation workflow |
 | Yearly | Optionally rotate GPG bootstrap passphrase |
 
 ---
@@ -264,4 +274,4 @@ echo "✅ All recovery tests passed"
 - Store bootstrap key and backups in **different** locations and cloud accounts
 - Label files clearly: `"VaultWarden Bootstrap Key — Required for Recovery"`
 - Never leave the Age key unencrypted on any networked system
-- Verify the Age key is structurally valid (`check_age_key` or `make key-health`) before wrapping it for offsite storage
+- Verify the Age key is structurally valid (`check_age_key` or `sudo make key-health`) before wrapping it for offsite storage

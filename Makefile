@@ -579,15 +579,13 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	$(call check-env-readable)
 	@echo "$(BLUE)Age Key Health Check:$(NC)"
 	@echo ""
-	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
-	echo "$(CYAN)  Configured key path (SOPS_AGE_KEY_FILE): $$CONFIGURED_KEY$(NC)"; \
-	echo "$(CYAN)  Canonical production path:                /etc/vaultwarden/age-key.txt$(NC)"
-	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
-	bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
-                 source lib/crypto.sh; \
-	         if check_age_key_health \"$$CONFIGURED_KEY\"; then \
+	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
+	         source lib/crypto.sh; \
+	         load_project_environment >/dev/null 2>&1 || true; \
+	         KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
+	         echo \"$(CYAN)  Resolved active key path: \$$KEY_FILE$(NC)\"; \
+	         echo \"$(CYAN)  Canonical production path: /etc/vaultwarden/age-key.txt$(NC)\"; \
+	         if check_age_key_health; then \
 	           echo \"$(GREEN)  ✓ Age key is healthy$(NC)\"; \
 	         else \
 	           echo \"$(RED)  ✗ Age key health check FAILED$(NC)\"; \
@@ -682,42 +680,45 @@ key-show: ## Show current age public key and key file path/status
 	$(call require-root)
 	$(call check-env-readable)
 	@echo "$(BLUE)Age Key Status:$(NC)"
-	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	echo "  Key file : $$KEY_FILE"; \
-	if [ -f "$$KEY_FILE" ]; then \
-		echo "  Status   : $(GREEN)present$(NC)"; \
-		echo "  Perms    : $$(stat -c '%a' "$$KEY_FILE" 2>/dev/null || stat -f '%A' "$$KEY_FILE" 2>/dev/null)"; \
-		PUB=$$(grep '# public key:' "$$KEY_FILE" 2>/dev/null | awk '{print $$NF}'); \
-		[ -n "$$PUB" ] && echo "  Public   : $$PUB" || echo "  Public   : $(YELLOW)(not found in key file)$(NC)"; \
-	else \
-		echo "  Status   : $(RED)MISSING$(NC)"; \
-		echo "  Run: sudo make key-install"; \
-	fi
+	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib key-show; \
+	         source lib/crypto.sh; \
+	         load_project_environment >/dev/null 2>&1 || true; \
+	         KEY_FILE=\$$(resolve_age_key_path 2>/dev/null || true); \
+	         if [[ -z \"\$$KEY_FILE\" ]]; then KEY_DISPLAY='<not resolved>'; else KEY_DISPLAY=\"\$$KEY_FILE\"; fi; \
+	         echo \"  Key file : \$$KEY_DISPLAY\"; \
+	         if [[ -n \"\$$KEY_FILE\" && -f \"\$$KEY_FILE\" ]]; then \
+	           echo \"  Status   : $(GREEN)present$(NC)\"; \
+	           echo \"  Perms    : \$$(stat -c '%a' \"\$$KEY_FILE\" 2>/dev/null || stat -f '%A' \"\$$KEY_FILE\" 2>/dev/null || echo unknown)\"; \
+	           PUB=\$$(age-keygen -y \"\$$KEY_FILE\" 2>/dev/null || grep '# public key:' \"\$$KEY_FILE\" 2>/dev/null | awk '{print \$$NF}' || true); \
+	           [ -n \"\$$PUB\" ] && echo \"  Public   : \$$PUB\" || echo \"  Public   : $(YELLOW)(not available)$(NC)\"; \
+	           echo \"  Health   : use sudo make key-health for authoritative validation\"; \
+	         else \
+	           echo \"  Status   : $(RED)MISSING$(NC)\"; \
+	           echo \"  Run: sudo make key-install\"; \
+	         fi"
 
 key-backup: ## Create local Age key copy for manual offline transfer
 	$(call require-root)
 	@echo "$(BLUE)Create local Age key copy for manual offline transfer$(NC)"
-	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	if [ ! -f "$$KEY_FILE" ]; then \
-		echo "$(RED)ERROR: Key file not found at $$KEY_FILE$(NC)"; \
-		exit 1; \
-	fi; \
-	BACKUP_DEST="$$HOME/age-key-backup-$$(date +%Y%m%d-%H%M%S).txt"; \
-	cp "$$KEY_FILE" "$$BACKUP_DEST"; \
-	chmod 600 "$$BACKUP_DEST"; \
-	echo "$(GREEN)Local key copy created at: $$BACKUP_DEST$(NC)"; \
-	echo "$(YELLOW)NOT OFFLINE YET: move this copy to offline custody, verify it, then remove the local transfer copy.$(NC)"
+	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib key-backup; \
+	         source lib/crypto.sh; \
+	         load_project_environment >/dev/null 2>&1 || true; \
+	         KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
+	         BACKUP_DEST=\"\$$HOME/age-key-backup-\$$(date +%Y%m%d-%H%M%S).txt\"; \
+	         cp \"\$$KEY_FILE\" \"\$$BACKUP_DEST\"; \
+	         chmod 600 \"\$$BACKUP_DEST\"; \
+	         echo \"$(GREEN)Local key copy created at: \$$BACKUP_DEST$(NC)\"; \
+	         echo \"$(YELLOW)NOT OFFLINE YET: move this copy to offline custody, verify it, then remove the local transfer copy.$(NC)\""
 
-key-escrow: ## Generate encrypted escrow package (requires GPG or another age key)
+key-escrow: ## Generate password-manager Age key escrow file
 	$(call require-root)
 	@echo "$(BLUE)Age Key Escrow$(NC)"
 	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
-        	source lib/crypto.sh; \
-	        KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	        KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	        create_key_escrow \"$$KEY_FILE\""
+	        source lib/crypto.sh; \
+	        load_project_environment >/dev/null 2>&1 || true; \
+	        KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
+	        ESCROW_DEST=\"\$$HOME/age-key-escrow-\$$(date +%Y%m%d-%H%M%S).txt\"; \
+	        AGE_KEY_FILE=\"\$$KEY_FILE\" create_password_manager_escrow \"\$$ESCROW_DEST\""
 
 key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 	$(call require-root)

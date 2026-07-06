@@ -95,6 +95,26 @@ atomic_set_env() {
     mv "$tmp" "$file"
 }
 
+atomic_copy_operator_env() {
+    local source="$1" dest="$2" tmp dest_dir
+    dest_dir="$(dirname "$dest")"
+    tmp=$(mktemp -p "$dest_dir" .env.XXXXXXXXXX) || return 1
+
+    awk -F= '
+        $1 == "SOPS_AGE_KEY_FILE" { next }
+        $1 == "RCLONE_CONFIG" { next }
+        { print }
+    ' "$source" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+    if [[ -f "$dest" ]]; then
+        chmod --reference="$dest" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+        chown --reference="$dest" "$tmp" 2>/dev/null || true
+    else
+        chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+    mv "$tmp" "$dest"
+}
+
 restore_or_remove() {
     local existed="$1" backup="$2" target="$3"
     if [[ "$existed" == "true" ]]; then
@@ -349,41 +369,42 @@ validate_promoted_identity_config() {
 }
 
 promote_artifacts() {
-    if ! mv "$CIPHERTEXT_STAGING" "$SECRETS_FILE"; then
-        fatal "Ciphertext promotion failed."
-    fi
     CIPHERTEXT_PROMOTED=true
+    if ! mv "$CIPHERTEXT_STAGING" "$SECRETS_FILE"; then
+        rollback
+        fatal "Ciphertext promotion failed — recovery artifacts were rolled back."
+    fi
 
+    KEY_PROMOTED=true
     if ! mv "$STAGED_ACTIVE_KEY" "$ACTIVE_KEY"; then
         rollback
         fatal "Operational key promotion failed — recovery artifacts were rolled back."
     fi
-    KEY_PROMOTED=true
 
+    POLICY_PROMOTED=true
     if ! mv "$POLICY_STAGING" "$SOPS_CONFIG_FILE"; then
         rollback
         fatal "SOPS policy promotion failed — recovery artifacts were rolled back."
     fi
-    POLICY_PROMOTED=true
 
+    INSTALL_ENV_PROMOTED=true
     if ! mv "$INSTALL_ENV_STAGING" "$INSTALL_ENV"; then
         rollback
         fatal "Install environment promotion failed — recovery artifacts were rolled back."
     fi
-    INSTALL_ENV_PROMOTED=true
 
+    MANIFEST_PROMOTED=true
     if ! mv "$MANIFEST_STAGING" "$MANIFEST"; then
         rollback
         fatal "Recovery manifest promotion failed — recovery artifacts were rolled back."
     fi
-    MANIFEST_PROMOTED=true
 
     if [[ "$EFFECTIVE_STORAGE_MODE" == "block" && ! -e "$SENTINEL_PATH" ]]; then
+        SENTINEL_CREATED=true
         if ! touch "$SENTINEL_PATH"; then
             rollback
             fatal "Data-volume sentinel creation failed — recovery artifacts were rolled back."
         fi
-        SENTINEL_CREATED=true
     fi
 
     if ! validate_promoted_identity_config; then
@@ -396,6 +417,20 @@ promote_artifacts() {
     chmod 0600 "$INSTALL_ENV" "$MANIFEST" 2>/dev/null || true
     chown root:root "$INSTALL_ENV" "$MANIFEST" 2>/dev/null || true
     RECOVERY_COMMITTED=true
+}
+
+reconcile_repo_env_from_recovery() {
+    local repo_env="${SCRIPT_DIR}/.env"
+    if atomic_copy_operator_env "$INSTALL_ENV" "$repo_env"; then
+        return 0
+    fi
+
+    echo "Recovery activation: FAIL"
+    echo "Committed recovery identity/config remains installed."
+    echo "Could not reconcile repository .env from recovered install environment."
+    echo "Fix repo .env manually from: $INSTALL_ENV"
+    echo "Then run: sudo ./utilities/env-edit.sh sync && sudo make up"
+    return 1
 }
 
 stage_env_files() {
@@ -498,6 +533,7 @@ main() {
     validate_staged
     stage_env_files
     promote_artifacts
+    reconcile_repo_env_from_recovery
     run_startup_health
 }
 

@@ -162,7 +162,7 @@ test.
 | Show current age public key | `sudo make key-show` |
 | Check age key health | `sudo make key-health` |
 | Create local Age key copy for manual offline transfer | `sudo make key-backup` |
-| Generate encrypted escrow package | `sudo make key-escrow` |
+| Generate password-manager Age key escrow file | `sudo make key-escrow` |
 | Rotate age key (re-encrypts secrets) | `sudo make key-rotate` |
 | Install age key from `secrets/keys/` | `sudo make key-install` |
 
@@ -289,8 +289,8 @@ sudo ./utilities/setup-crowdsec.sh --force
 
 | Task | Command |
 |------|---------|
-| Preview uninstall (dry run) | `make uninstall-dry-run` |
-| Full uninstall (interactive) | `make uninstall` |
+| Preview uninstall (dry run) | `sudo make uninstall-dry-run` |
+| Full uninstall (interactive) | `sudo make uninstall` |
 
 ## Resilient recovery quick reference
 
@@ -300,6 +300,8 @@ Run recovery on the replacement VM after attaching and mounting the data volume:
 sudo ./recover.sh --state-dir /mnt/vw-data --key /media/usb/age-key.txt
 ```
 
+Recovery commits the recovered identity/config into `${PROJECT_STATE_DIR}/config/install.env`, then reconciles the repository `.env` from that recovered install environment before normal startup. This keeps the next `sudo ./utilities/env-edit.sh sync` or `sudo make up` from restoring stale repo configuration over the recovered state. Runtime-only paths such as `SOPS_AGE_KEY_FILE` and `RCLONE_CONFIG` stay in the installed runtime env and are not written back to repo `.env`.
+
 Environment precedence is persistent install env, repository `.env`, then installed systemd env. Runtime secrets are regenerated in `/run/vaultwarden-oci/secrets/` on startup by `vaultwarden-startup.service`; they are not persistent and disappear on reboot.
 
-Offline-key resolution is environment, manifest, existing policy, TTY prompt, then deliberate skip. To remove an offline recipient, make a staged ciphertext copy, update `.sops.yaml` deliberately, run `sops --config "$PWD/.sops.yaml" updatekeys --yes "$staging"`, validate decryption, then promote with `mv`.
+Offline-key resolution is environment, manifest, existing policy, TTY prompt, then deliberate skip. To remove an offline recipient, create a staged ciphertext copy, update `.sops.yaml` deliberately, run `sops --config "$PWD/.sops.yaml" updatekeys --yes "$staging"`, validate decryption, then promote with `mv`.

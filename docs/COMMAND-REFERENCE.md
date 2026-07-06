@@ -61,7 +61,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make key-install` |  Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_FILE |
 | `make key-show` |  Show current age public key and key file path/status |
 | `make key-backup` |  Create local Age key copy for manual offline transfer |
-| `make key-escrow` |  Generate encrypted escrow package (requires GPG or another age key) |
+| `make key-escrow` |  Generate password-manager Age key escrow file |
 | `make key-rotate` |  Rotate age encryption key (re-encrypts all secrets) |
 | `make update` |  Update all container images and restart |
 | `make check-updates` |  Check for available container image updates (no restart) |
