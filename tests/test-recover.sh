@@ -10,7 +10,13 @@ USB_RECIPIENT="age1usb0000000000000000000000000000000000000000000000000000000"
 NEW_RECIPIENT="age1new0000000000000000000000000000000000000000000000000000000"
 
 cleanup_all() {
-    rm -rf "$TEST_ROOT" "$REAL_ETC_SNAPSHOT"
+    if (( EUID == 0 )); then
+        rm -rf "$TEST_ROOT" "$REAL_ETC_SNAPSHOT"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        sudo -n rm -rf "$TEST_ROOT" "$REAL_ETC_SNAPSHOT"
+    else
+        rm -rf "$TEST_ROOT" "$REAL_ETC_SNAPSHOT"
+    fi
 }
 trap cleanup_all EXIT
 
@@ -65,6 +71,13 @@ env_value() {
     else
         return 1
     fi
+}
+
+env_has_value() {
+    local key="$1" expected="$2" file="$3"
+    local actual
+    actual="$(env_value "$key" "$file")" || return 1
+    [[ "$actual" == "$expected" ]]
 }
 
 make_case() {
@@ -534,14 +547,14 @@ test_reconciles_absent_repo_env_before_startup_sync() {
     if ! run_recover "$dir" --storage-mode boot; then cat "$dir/out"; fail 'absent repo env recovery failed'; fi
     [[ -f "$dir/repo/.env" ]] || fail 'repo .env was not created'
     [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/repo/.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'repo .env PROJECT_STATE_DIR not recovered'
-    grep -q '^DATA_VOLUME_MOUNT=$' "$dir/repo/.env" || fail 'repo .env boot DATA_VOLUME_MOUNT not blank'
-    grep -q '^DATA_VOLUME_DEVICE=$' "$dir/repo/.env" || fail 'repo .env boot DATA_VOLUME_DEVICE not blank'
+    env_has_value DATA_VOLUME_MOUNT "" "$dir/repo/.env" || fail 'repo .env boot DATA_VOLUME_MOUNT not blank'
+    env_has_value DATA_VOLUME_DEVICE "" "$dir/repo/.env" || fail 'repo .env boot DATA_VOLUME_DEVICE not blank'
     ! grep -q '^SOPS_AGE_KEY_FILE=' "$dir/repo/.env" || fail 'runtime SOPS_AGE_KEY_FILE leaked into repo .env'
     ! grep -q '^RCLONE_CONFIG=' "$dir/repo/.env" || fail 'runtime RCLONE_CONFIG leaked into repo .env'
     if grep -q 'env-sync: ran' "$dir/out"; then
         [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/state/config/install.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'env sync undid recovered PROJECT_STATE_DIR'
-        grep -q '^DATA_VOLUME_MOUNT=$' "$dir/state/config/install.env" || fail 'env sync undid boot DATA_VOLUME_MOUNT'
-        grep -q '^DATA_VOLUME_DEVICE=$' "$dir/state/config/install.env" || fail 'env sync undid boot DATA_VOLUME_DEVICE'
+        env_has_value DATA_VOLUME_MOUNT "" "$dir/state/config/install.env" || fail 'env sync undid boot DATA_VOLUME_MOUNT'
+        env_has_value DATA_VOLUME_DEVICE "" "$dir/state/config/install.env" || fail 'env sync undid boot DATA_VOLUME_DEVICE'
     fi
 }
 
@@ -557,14 +570,14 @@ RCLONE_CONFIG=$dir/stale-rclone.conf
 EOF_STALE
     if ! run_recover "$dir" --storage-mode boot; then cat "$dir/out"; fail 'stale repo env recovery failed'; fi
     [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/repo/.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'stale repo .env PROJECT_STATE_DIR was not reconciled'
-    grep -q '^DATA_VOLUME_MOUNT=$' "$dir/repo/.env" || fail 'stale repo .env DATA_VOLUME_MOUNT was not reconciled'
-    grep -q '^DATA_VOLUME_DEVICE=$' "$dir/repo/.env" || fail 'stale repo .env DATA_VOLUME_DEVICE was not reconciled'
+    env_has_value DATA_VOLUME_MOUNT "" "$dir/repo/.env" || fail 'stale repo .env DATA_VOLUME_MOUNT was not reconciled'
+    env_has_value DATA_VOLUME_DEVICE "" "$dir/repo/.env" || fail 'stale repo .env DATA_VOLUME_DEVICE was not reconciled'
     ! grep -q '^SOPS_AGE_KEY_FILE=' "$dir/repo/.env" || fail 'stale runtime SOPS_AGE_KEY_FILE persisted into repo .env'
     ! grep -q '^RCLONE_CONFIG=' "$dir/repo/.env" || fail 'stale runtime RCLONE_CONFIG persisted into repo .env'
     if grep -q 'env-sync: ran' "$dir/out"; then
         [[ "$(canonical_path "$(env_value PROJECT_STATE_DIR "$dir/state/config/install.env")")" == "$(canonical_path "$dir/state")" ]] || fail 'env sync restored stale PROJECT_STATE_DIR'
-        grep -q '^DATA_VOLUME_MOUNT=$' "$dir/state/config/install.env" || fail 'env sync restored stale DATA_VOLUME_MOUNT'
-        grep -q '^DATA_VOLUME_DEVICE=$' "$dir/state/config/install.env" || fail 'env sync restored stale DATA_VOLUME_DEVICE'
+        env_has_value DATA_VOLUME_MOUNT "" "$dir/state/config/install.env" || fail 'env sync restored stale DATA_VOLUME_MOUNT'
+        env_has_value DATA_VOLUME_DEVICE "" "$dir/state/config/install.env" || fail 'env sync restored stale DATA_VOLUME_DEVICE'
     fi
 }
 
