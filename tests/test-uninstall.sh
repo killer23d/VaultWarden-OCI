@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Consolidated uninstall regression suite.
+set -euo pipefail
+
+check_uninstall_contracts() (
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -83,3 +87,7 @@ assert_contains "$SCRIPT" "Refusing to remove unsafe broad path"
 assert_contains "$SCRIPT" "/|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var|/var/lib"
 
 echo "test-uninstall-vaultwarden: ok"
+
+)
+
+check_uninstall_contracts

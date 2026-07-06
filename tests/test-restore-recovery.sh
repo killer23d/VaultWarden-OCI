@@ -1,4 +1,246 @@
 #!/usr/bin/env bash
+# Consolidated restore and recovery regression suite.
+set -euo pipefail
+
+check_restore_run_contracts() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$ROOT/utilities/restore-run.sh"
+fail(){ echo "not ok - $*" >&2; exit 1; }
+pass(){ echo "ok - $*"; }
+
+require_pattern(){ local pat="$1" msg="$2"; grep -Eq -- "$pat" "$SCRIPT" || fail "$msg"; }
+reject_pattern(){ local pat="$1" msg="$2"; ! grep -Eq -- "$pat" "$SCRIPT" || fail "$msg"; }
+
+require_pattern 'get_config_value "DATA_VOLUME_DEVICE" ""' 'restore-run must inspect DATA_VOLUME_DEVICE before readiness skip'
+require_pattern 'FORCE.*USE_REMOTE.*-z "\$_configured_data_device"' 'force remote skip must be limited to no data device'
+require_pattern 'require_project_state_ready \|\| exit 1' 'storage readiness must still be enforced'
+pass 'restore-run refuses to skip storage readiness when DATA_VOLUME_DEVICE is configured'
+
+require_pattern '^set -E[[:alpha:]-]*[[:space:]]+pipefail' 'restore-run must enable ERR trap inheritance for restore functions'
+require_pattern 'trap _restore_safety_net ERR HUP INT TERM' 'restore-run must arm safety-net trap around stopped-service restore work'
+require_pattern 'bash "\$\{PROJECT_ROOT\}/startup.sh" --skip-pull' 'restore-run must invoke startup.sh --skip-pull'
+reject_pattern 'docker compose up -d --remove-orphans' 'restore-run must not directly start docker compose'
+pass 'restore-run invokes startup path instead of direct docker compose up'
+pass 'restore-run enables safety-net restart path for restore function failures'
+
+reject_pattern '-{2}no-unlink' 'restore-run must not pass unsupported tar no-unlink option'
+pass 'restore-run avoids unsupported tar no-unlink option'
+
+reject_pattern "find \"\$state_dir\" -maxdepth 1 -mindepth 1.*! -name '\\.pre-restore-\\*'" 'separate-volume restore must not snapshot every non-pre-restore top-level entry'
+require_pattern '_restore_payload_allowlist=\(data caddy logs\)' 'separate-volume restore must use a conservative payload allowlist'
+require_pattern '\.vw-data-volume, lost\+found, backups, secrets, config' 'separate-volume restore must log protected metadata paths'
+require_pattern 'Archive backups/, secrets/, and config/.*intentionally not promoted|Promoted encrypted SOPS secrets' 'separate-volume restore must explicitly handle protected archive directories and SOPS secrets'
+require_pattern '_moved_payload_paths=\(\)' 'separate-volume restore must track payload paths moved into the pre-restore snapshot'
+require_pattern '_rollback_payload_paths' 'separate-volume restore must attempt rollback for payload paths already moved'
+reject_pattern 'mv "\$_subdir" "\$\{_snap_dir\}/"' 'separate-volume restore must not blindly move discovered top-level entries'
+pass 'restore-run protects separate-volume metadata and rolls back payload promotion failures'
+
+require_pattern 'local install_env="\$\{STATE_DIR\}/config/install.env"' 'restore-run must target persistent install.env'
+require_pattern 'SOPS_AGE_KEY_FILE=\$\{canonical_key\}.*\$install_env|written to \$install_env' 'restore-run must update SOPS_AGE_KEY_FILE in install.env'
+pass 'restore-run updates state config install.env when key path changes'
+
+require_pattern 'auto_fix_critical_permissions "\$PROJECT_ROOT"' 'restore-run must run final permission repair'
+pass 'restore-run calls final permission repair before startup'
+
+require_pattern '_rollback_rotation' 'restore-run must define transactional key-rotation rollback'
+require_pattern 'refusing to start services automatically' 'restore-run must fail loudly before startup when key rotation fails'
+require_pattern 'Post-promotion SOPS validation failed' 'restore-run must validate promoted rekey artifacts'
+pass 'restore-run has rollback and fail-loud key rotation safeguards'
+
+require_pattern 'RESTORE_DECRYPT_AGE_KEY_FILE="\$supplied_path"' 'restore-supplied key must be stored in restore-scoped variable'
+require_pattern 'RESTORE_DECRYPT_AGE_KEY_FILE="\$configured_key"' 'blank Age prompt must use configured key as restore decrypt key'
+require_pattern 'For normal same-server restore, press Enter to use the currently configured key' 'Age prompt must document Enter as same-server path'
+require_pattern 'Only paste an AGE-SECRET-KEY-1\.\.\. value if this backup was encrypted' 'Age prompt must reserve pasted keys for old/offline keys'
+require_pattern 'SOPS_AGE_KEY_FILE="\$operational_sops_age_key_file" "\$\{PROJECT_ROOT\}/utilities/backup-run\.sh" run emergency --quiet' 'pre-restore emergency snapshot must receive operational SOPS key explicitly'
+require_pattern 'selected backup decrypt key: \$\{RESTORE_DECRYPT_AGE_KEY_FILE:-<not resolved>\}' 'preflight diagnostic must identify selected backup decrypt key separately'
+require_pattern 'Fix current SOPS decryptability, or intentionally skip the safety snapshot with --no-backup' 'preflight diagnostic must explain --no-backup escape hatch'
+reject_pattern 'local AGE_KEY_FILE; AGE_KEY_FILE="\$\(get_config_value "SOPS_AGE_KEY_FILE"' 'restore main must not use AGE_KEY_FILE for selected backup decrypt key'
+pass 'restore-run separates restore decrypt key from operational SOPS key'
+
+require_pattern 'SOPS_AGE_KEY_FILE="\$RESTORE_REKEY_SOURCE_AGE_KEY_FILE" sops --config "\$policy_tmp" updatekeys --yes "\$cipher_tmp"' 'SOPS updatekeys must use the restore rekey source selector'
+require_pattern 'DB restores do not restore secrets.yaml' 'DB restore rekey source comment must explain use of the live operational key'
+require_pattern 'RESTORE_REKEY_SOURCE_AGE_KEY_FILE="\$OPERATIONAL_SOPS_AGE_KEY_FILE"' 'DB and separate-volume restore must be able to use the live operational key'
+require_pattern 'Full/emergency restores promote the encrypted' 'full/emergency rekey source comment must document promoted SOPS secrets'
+require_pattern 'RESTORE_REKEY_SOURCE_AGE_KEY_FILE="\$RESTORE_DECRYPT_AGE_KEY_FILE"' 'full/emergency restore must use the selected backup decrypt key'
+reject_pattern 'SOPS_AGE_KEY_FILE="\$RESTORE_DECRYPT_AGE_KEY_FILE" sops --config "\$policy_tmp" updatekeys' 'DB restore with different restore key must not unconditionally use restore decrypt key for updatekeys'
+pass 'restore-run selects post-restore rekey source by restore type and storage mode'
+
+bash -n "$SCRIPT"
+pass 'bash -n utilities/restore-run.sh'
+printf '1..11\n'
+
+)
+
+check_restore_run_contracts
+check_restore_confirmation_safety() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RESTORE="$ROOT/utilities/restore-run.sh"
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+require() {
+  grep -Eq -- "$1" "$2" || fail "$3"
+}
+
+reject_function() {
+  local func="$1" pattern="$2" message="$3"
+  ! awk -v fname="$func" -v pat="$pattern" '
+    BEGIN { func_re = "^" fname "[(][)]" }
+    $0 ~ func_re { in_func=1 }
+    in_func && $0 ~ pat { found=1 }
+    in_func && /^}/ { in_func=0 }
+    END { exit found ? 0 : 1 }
+  ' "$RESTORE" || fail "$message"
+}
+
+require 'RESTORE_PREVENT_AUTOSTART=false' "$RESTORE" \
+  "restore must have a local flag that prevents automatic startup after prompt loss"
+require 'RESTORE_PROMPT_TIMEOUT' "$RESTORE" \
+  "restore confirmation prompts must use configurable bounded timeout"
+require 'RESTORE_SAVED_ACK_ATTEMPTS' "$RESTORE" \
+  "SAVED acknowledgement must have bounded retries"
+require 'timeout/EOF is not treated as '\''no'\''' "$RESTORE" \
+  "Age rotation timeout/EOF guidance must be explicit"
+require '_restore_print_key_ack_abort_guidance' "$RESTORE" \
+  "SAVED timeout/EOF must print manual key/startup guidance"
+require 'Automatic service startup is disabled' "$RESTORE" \
+  "restore safety net must honor prompt-loss no-autostart flag"
+reject_function '_restore_should_rotate_age_key' 'answer="no"' \
+  "Age rotation decision must not map timeout/EOF to no"
+reject_function '_display_new_key' 'while \[\[ "\$_confirm" != "SAVED" \]\]' \
+  "SAVED acknowledgement must not loop indefinitely"
+require 'RESTORE_SAVED_ACK_TIMEOUT.*Type SAVED' "$RESTORE" \
+  "SAVED acknowledgement must use bounded timeout"
+
+printf 'PASS: restore confirmation safety\n'
+
+)
+
+check_restore_confirmation_safety
+check_restore_preflight_and_cross_layout_safety() (
+# shellcheck disable=SC2016
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RESTORE="$ROOT/utilities/restore-run.sh"
+BACKUP="$ROOT/utilities/backup-run.sh"
+UTILS="$ROOT/lib/backup-utils.sh"
+fail(){ echo "not ok - $*" >&2; exit 1; }
+pass(){ echo "ok - $*"; }
+require(){ local pat="$1" file="$2" msg="$3"; grep -Eq -- "$pat" "$file" || fail "$msg"; }
+reject(){ local pat="$1" file="$2" msg="$3"; ! grep -Eq -- "$pat" "$file" || fail "$msg"; }
+require 'inspect\)' "$RESTORE" 'restore must expose inspect subcommand'
+require 'Inspect mode: skipping live project-state readiness enforcement' "$RESTORE" 'inspect must bypass live storage readiness enforcement'
+require 'RESTORE_PREFLIGHT_SOURCE_ROOT' "$RESTORE" 'restore must retain preflight source root'
+require 'source_root="\$\{RESTORE_PREFLIGHT_SOURCE_ROOT:-\$state_dir\}"' "$RESTORE" 'restore_full must use detected source root'
+require 'Target preparation phase' "$RESTORE" 'target repair must run after confirmation as a separate phase'
+require '_RESTORE_SAFETY_NET_RUNNING' "$RESTORE" 'safety net must be non-reentrant'
+require 'Restore interrupted by operator \(Ctrl-C\)' "$RESTORE" 'Ctrl-C message must be explicit'
+require 'older operational key or offline recovery key' "$RESTORE" 'age diagnostics must mention old/recovery key'
+require 'db-age-decrypt.err' "$RESTORE" 'DB restore must capture age stderr'
+require 'Cross-layout restore did not promote backups' "$RESTORE" 'cross-layout restore must keep allowlist conservative'
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+HARNESS="$TMP/harness.sh"
+cat > "$HARNESS" <<'HARNESS'
+set -euo pipefail
+log_info(){ :; }; log_warn(){ :; }; log_error(){ echo "$*" >&2; }; log_hint(){ :; }; log_success(){ :; }
+get_config_value(){ case "$1" in DATA_VOLUME_MOUNT) printf '%s' "${TEST_DATA_VOLUME_MOUNT:-}";; DATA_VOLUME_DEVICE) printf '%s' "${TEST_DATA_VOLUME_DEVICE:-}";; *) printf '%s' "${2:-}";; esac; }
+purge_wal_shm(){ :; }; tar_validate_members(){ :; }; check_traversal_only(){ :; }
+SCRIPT_DIR="/home/ubuntu/VaultWarden-OCI"; PROJECT_ROOT="/home/ubuntu/VaultWarden-OCI"
+RESTORE_TYPE="full"; FORCE="false"; INSPECT_ONLY="false"; SKIP_VERIFICATION="true"; RESTORE_ENV="false"; DRY_RUN="false"; DATA_VOLUME_MOUNT="${TEST_DATA_VOLUME_MOUNT:-}"; DATA_VOLUME_DEVICE="${TEST_DATA_VOLUME_DEVICE:-}"; PUID="$(id -u)"; PGID="$(id -g)"
+HARNESS
+{
+    sed -n '/^_tar_filter_for_file()/,/^tar_validate_members()/p' "$RESTORE" | sed '$d'
+    sed -n '/^restore_full()/,/^main()/p' "$RESTORE" | sed '$d'
+} >> "$HARNESS"
+cat >> "$HARNESS" <<'HARNESS'
+_path_is_mountpoint(){ [[ "${TEST_MOUNTPOINTS:-}" == *":$1:"* ]]; }
+make_tar(){ local root="$1" out="$2"; (cd "$root" && tar -czf "$out" .); }
+run_preflight(){ local tarfile="$1" target="$2"; restore_full_preflight "$tarfile" "$tarfile" "$target" "$PUID" "$PGID" "relative" "2"; }
+HARNESS
+
+make_archive(){ local name="$1" member="$2"; local dir="$TMP/$name.root"; mkdir -p "$dir/$(dirname "$member")"; : > "$dir/$member"; bash -c "source '$HARNESS'; make_tar '$dir' '$TMP/$name.tar.gz'"; printf '%s' "$TMP/$name.tar.gz"; }
+boot_tar=$(make_archive boot var/lib/vaultwarden/data/db.sqlite3)
+block_tar=$(make_archive block mnt/vw-data/data/db.sqlite3)
+snap_tar=$(make_archive snap mnt/vw-data/.pre-restore-20260630-050137/data/db.sqlite3)
+config_tar=$(make_archive config mnt/vw-data/config/install.env)
+repo_tar=$(make_archive repo home/ubuntu/VaultWarden-OCI/README.md)
+
+bash -c "source '$HARNESS'; run_preflight '$boot_tar' /var/lib/vaultwarden" || fail 'same-layout boot preflight should pass'
+if bash -c "source '$HARNESS'; run_preflight '$block_tar' /var/lib/vaultwarden" >"$TMP/blockboot.out" 2>&1; then fail 'block-source to boot-target must fail'; fi
+grep -q 'Storage mismatch: backup appears to be from block storage' "$TMP/blockboot.out" || fail 'block-source failure must explain mismatch'
+TEST_DATA_VOLUME_MOUNT="$TMP/mnt/vw-data" TEST_MOUNTPOINTS=":$TMP/mnt/vw-data:" bash -c "mkdir -p '$TMP/mnt/vw-data'; source '$HARNESS'; run_preflight '$boot_tar' '$TMP/mnt/vw-data'" || fail 'boot-source to mounted block target should pass preflight'
+for t in "$snap_tar" "$config_tar" "$repo_tar"; do if bash -c "source '$HARNESS'; run_preflight '$t' /var/lib/vaultwarden" >/dev/null 2>&1; then fail "unsafe archive unexpectedly passed: $t"; fi; done
+
+# Prove cross-layout restore reads from detected source root, not target path inside archive.
+restore_root="$TMP/restore-root"; mkdir -p "$restore_root"
+mkdir -p "$TMP/work"; cp "$boot_tar" "$TMP/work/$(basename "$boot_tar")"
+TEST_DATA_VOLUME_MOUNT="$restore_root" TEST_MOUNTPOINTS=":$restore_root:" bash -c "source '$HARNESS'; RESTORE_PREFLIGHT_SOURCE_ROOT=/var/lib/vaultwarden; restore_full '$boot_tar' unused '$restore_root' '$UID' '$(id -g)' '$TMP/work' relative" || fail 'cross-layout restore should use source root and write target STATE_DIR'
+[[ -f "$restore_root/data/db.sqlite3" ]] || fail 'cross-layout restore did not write data/db.sqlite3 into target state dir'
+[[ ! -e "$restore_root/secrets" && ! -e "$restore_root/config" ]] || fail 'cross-layout restore promoted protected directories'
+
+bash -n "$RESTORE" "$BACKUP" "$UTILS"
+pass 'restore/backup preflight safety functional checks'
+
+)
+
+check_restore_preflight_and_cross_layout_safety
+check_restore_behavior_contracts() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+# Behavior: passphrase emergency decrypt must not pass -i; DR recipient identity may.
+cat > "$TMP/decrypt-probe.sh" <<EOF_PROBE
+set -euo pipefail
+RESTORE_TYPE=emergency
+BACKUP_FILE="$TMP/emergency.tar.zst.age"
+EMERGENCY_BACKUP_AGE_IDENTITY_FILE="$TMP/dr-key.txt"
+age(){ printf '%s\n' "\$*" > "$TMP/age.args"; : > "\$4" 2>/dev/null || true; }
+$(_extract_func "$ROOT/utilities/restore-run.sh" _age_decrypt_restore_backup)
+: > "\$BACKUP_FILE"; : > "\$EMERGENCY_BACKUP_AGE_IDENTITY_FILE"
+_age_decrypt_restore_backup "\$BACKUP_FILE" ignored "$TMP/out.tar.zst" "$TMP/err" age-passphrase || exit 1
+! grep -q -- ' -i ' "$TMP/age.args" || exit 2
+grep -q -- '-o ' "$TMP/age.args" || exit 3
+_age_decrypt_restore_backup "\$BACKUP_FILE" ignored "$TMP/out2.tar.zst" "$TMP/err2" age-recipient || exit 4
+grep -q -- "-i \$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" "$TMP/age.args" || exit 5
+EOF_PROBE
+bash "$TMP/decrypt-probe.sh" || fail 'emergency decrypt helper did not implement passphrase/DR recipient behavior'
+
+# Restore destructive confirmation must use shared default-no helper and preserve automation/non-interactive gates.
+grep -Fq 'operator_attention warn "Destructive restore confirmation"' "$ROOT/utilities/restore-run.sh" || fail 'restore destructive context does not use operator_attention'
+grep -Fq 'operator_confirm_yes_no "Proceed with destructive restore?" "no" 300' "$ROOT/utilities/restore-run.sh" || fail 'restore destructive confirmation is not explicit default-no timed yes/no helper'
+grep -Fq 'if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer preserves force/dry-run/inspect bypass gate'
+grep -Fq 'stdin is not a TTY' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer fails closed for non-TTY stdin'
+grep -Fq 'Re-run with --force for non-interactive restore' "$ROOT/utilities/restore-run.sh" || fail 'restore confirmation no longer documents --force automation path'
+grep -Fq 'Restore cancelled' "$ROOT/utilities/restore-run.sh" || fail 'restore cancellation message missing'
+
+# Behavior-ish: restore code promotes SOPS secrets and skips runtime secrets explicitly.
+grep -q 'Promoted encrypted SOPS secrets' "$ROOT/utilities/restore-run.sh" || fail 'restore lacks SOPS promotion log'
+grep -q 'Skipped runtime decrypted secrets' "$ROOT/utilities/restore-run.sh" || fail 'restore lacks runtime secret skip log'
+
+)
+
+check_restore_behavior_contracts
+check_recovery_contracts() (
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -652,3 +894,7 @@ run_test 'health-check failure after commit exits non-zero without rollback' tes
 
 [[ "$TESTS_RUN" -eq 22 ]] || fail "expected 22 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
+
+)
+
+check_recovery_contracts
