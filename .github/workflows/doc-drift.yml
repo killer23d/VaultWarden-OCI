@@ -2,7 +2,10 @@ name: Doc Drift Check
 on:
   pull_request:
     paths:
+      - '.github/workflows/**'
       - 'docs/**'
+      - 'README.md'
+      - 'RUNBOOK.md'
       - 'utilities/**'
       - 'lib/**'
       - '*.sh'
@@ -61,7 +64,7 @@ jobs:
           )
           FAIL=0
           for term in "${STALE_TERMS[@]}"; do
-            matches=$(grep -rn "$term" docs/ README.md 2>/dev/null || true)
+            matches=$(grep -rn "$term" docs/ README.md RUNBOOK.md 2>/dev/null || true)
             if [[ -n "$matches" ]]; then
               echo "STALE TERM FOUND: $term"
               echo "$matches"
@@ -78,7 +81,7 @@ jobs:
               echo "MISSING MAKEFILE TARGET referenced in docs: make $target"
               FAIL=1
             fi
-          done < <(grep -roh 'make [a-z_-]\+' docs/ README.md | sed 's/make //' | sort -u)
+          done < <(grep -roh 'make [a-z_-]\+' docs/ README.md RUNBOOK.md | sed 's/make //' | sort -u)
           [[ $FAIL -eq 0 ]] || exit 1
 
       - name: Verify script flags referenced in docs exist
@@ -188,37 +191,4 @@ jobs:
 
       - name: Run focused tests
         run: |
-          make test-unit
-          tests/test-crowdsec-config.sh
-
-  # ── Shellcheck auto-fix (contents: write, runs only on default branch) ──
-  # Separated from the PR check job so untrusted PR code never runs with
-  # write permission. Auto-fixes are committed only after code is merged.
-  shellcheck-autofix:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Apply Shellcheck auto-fixes
-        run: |
-          find . -type f -name '*.sh' \
-            | xargs shellcheck -x -f diff > shellcheck-fixes.patch 2>/dev/null || true
-          if [ -s shellcheck-fixes.patch ]; then
-            echo "Applying Shellcheck auto-fixes..."
-            git apply --allow-empty shellcheck-fixes.patch
-          else
-            echo "No safe auto-fixes available or scripts are clean."
-          fi
-          rm -f shellcheck-fixes.patch
-
-      - name: Commit and push auto-fixes
-        uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403
-        with:
-          commit_message: "chore: apply safe shellcheck auto-fixes"
-          file_pattern: >-
-            *.sh
-            utilities/*.sh
-            lib/*.sh
+          ./tests/run-tests.sh all

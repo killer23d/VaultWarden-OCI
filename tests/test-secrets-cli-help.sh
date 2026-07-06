@@ -110,4 +110,9 @@ assert_help edit-secrets.sh "VaultWarden-OCI Secrets Editor" help
 assert_version --version
 assert_version -V
 
+backup_load_line="$(awk '/load_project_environment \|\| exit 1/{print NR; exit}' "${PROJECT_ROOT}/utilities/backup-run.sh")"
+backup_parse_line="$(awk '/^case "\$1" in/{print NR; exit}' "${PROJECT_ROOT}/utilities/backup-run.sh")"
+[[ -z "$backup_load_line" ]] || fail "backup-run.sh should not load production project environment before help/version parsing"
+[[ -n "$backup_parse_line" ]] || fail "backup-run.sh help/version parser not found"
+
 printf 'Standalone secrets CLI help tests passed.\n'

@@ -4,6 +4,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 require(){ grep -Eq -- "$1" "$2" || fail "$3"; }
 reject(){ ! grep -Eq -- "$1" "$2" || fail "$3"; }
+extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
 RESTORE="$ROOT/utilities/restore-run.sh"
 MIGRATE="$ROOT/lib/migrate.sh"
 SYSTEMD="$ROOT/utilities/setup-systemd.sh"
@@ -51,6 +62,48 @@ require 'systemctl show \${timer} --property=NextElapseUSecRealtime --value' "$S
 require 'systemctl status \"\$timer\" --no-pager -l' "$SYSTEMD" 'timer diagnostics must run detailed status command'
 require '_report_unhealthy_managed_timers "Post-install timer health"' "$SYSTEMD" 'install must use shared timer diagnostic helper'
 require '_report_unhealthy_managed_timers "Validation timer health"' "$SYSTEMD" 'validate must use shared timer diagnostic helper'
+require 'Post-install timer health.*\|\| true' "$SYSTEMD" 'install must still print timer diagnostics before failing'
+require 'return 1' "$SYSTEMD" 'auto enable-now timer failure must return non-zero'
+require 'Install-only/manual state is not production-ready' "$SYSTEMD" 'manual systemd install must not claim production readiness'
+require '_report_unhealthy_managed_timers "Validation timer health"' "$SYSTEMD" 'validate must report unhealthy timers'
+require '\(\( errors\+\+ \)\)' "$SYSTEMD" 'validation timer health failure must increment errors'
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+cat > "$TMP/timer-helper-probe.sh" <<EOF_PROBE
+set -euo pipefail
+TIMERS=(active-no-next.timer inactive.timer healthy.timer)
+log_success(){ printf 'SUCCESS %s\n' "\$*"; }
+log_warn(){ printf 'WARN %s\n' "\$*"; }
+systemctl(){
+  case "\${1:-}" in
+    is-active)
+      if [[ "\${2:-}" == "--quiet" ]]; then
+        case "\${3:-}" in active-no-next.timer|healthy.timer) return 0 ;; *) return 3 ;; esac
+      fi
+      case "\${2:-}" in active-no-next.timer|healthy.timer) printf 'active\n'; return 0 ;; inactive.timer) printf 'inactive\n'; return 3 ;; esac
+      ;;
+    show)
+      case "\${2:-}" in active-no-next.timer|inactive.timer) printf 'n/a\n' ;; healthy.timer) printf 'Mon 2026-07-06 12:00:00 UTC\n' ;; esac
+      ;;
+    status)
+      printf 'mock status %s\n' "\${2:-}"
+      ;;
+  esac
+}
+$(extract_func "$SYSTEMD" _timer_has_next_trigger)
+$(extract_func "$SYSTEMD" _timer_is_healthy)
+$(extract_func "$SYSTEMD" _list_unhealthy_managed_timers)
+$(extract_func "$SYSTEMD" _report_unhealthy_managed_timers)
+_list_unhealthy_managed_timers > "$TMP/unhealthy.out"
+_report_unhealthy_managed_timers "probe" > "$TMP/report.out" 2>&1 || true
+EOF_PROBE
+bash "$TMP/timer-helper-probe.sh" || fail 'timer helper probe failed'
+grep -Fxq 'active-no-next.timer' "$TMP/unhealthy.out" || fail 'active timer with no next trigger not listed unhealthy'
+grep -Fxq 'inactive.timer' "$TMP/unhealthy.out" || fail 'inactive timer not listed unhealthy'
+! grep -Fxq 'healthy.timer' "$TMP/unhealthy.out" || fail 'healthy timer incorrectly listed unhealthy'
+grep -Fq 'UNHEALTHY TIMER: active-no-next.timer' "$TMP/report.out" || fail 'diagnostic did not name no-next timer'
+grep -Fq 'UNHEALTHY TIMER: inactive.timer' "$TMP/report.out" || fail 'diagnostic did not name inactive timer'
 
 # Calendar timers must not also carry OnBootSec catch-up triggers. OnBootSec
 # fires during systemctl enable --now on an already-booted host and can create

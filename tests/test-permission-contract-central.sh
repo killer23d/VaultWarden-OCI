@@ -58,8 +58,8 @@ chmod 0755 "$PROJECT_STATE_DIR/secrets"
 chmod 0644 "$persistent_secret"
 fix_known_path_permissions "$persistent_secret"
 fix_known_path_permissions "$PROJECT_STATE_DIR/secrets"
-[[ "$(stat -c '%a' "$persistent_secret")" == 600 ]] || fail 'persistent secrets.yaml was not repaired to 0600'
-[[ "$(stat -c '%a' "$PROJECT_STATE_DIR/secrets")" == 700 ]] || fail 'persistent secrets dir was not repaired to 0700'
+[[ "$(_common_stat_mode "$persistent_secret")" == 600 ]] || fail 'persistent secrets.yaml was not repaired to 0600'
+[[ "$(_common_stat_mode "$PROJECT_STATE_DIR/secrets")" == 700 ]] || fail 'persistent secrets dir was not repaired to 0700'
 pass 'persistent state secrets are repaired by central helper'
 
 source lib/config.sh

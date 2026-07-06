@@ -61,8 +61,12 @@ assert_contains "$BACKUP" 'if [[ "$RCLONE_SYNC" == "true" ]]; then' \
     "backup verification failure must only mark offsite skipped when rclone was requested"
 assert_contains "$BACKUP" 'offsite_status="skipped because verification failed"' \
     "backup summary missing verification-failure offsite skip state"
-assert_contains "$BACKUP" "Backup archive was created, but quick verification failed; do not treat it as verified." \
-    "backup verification partial-success warning missing"
+assert_contains "$BACKUP" "Quick verification failed — backup is being discarded." \
+    "backup verification discard warning missing"
+assert_contains "$BACKUP" 'rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256" "${backup_file}.sha256.hmac"' \
+    "backup verification failure does not discard archive and sidecars"
+assert_contains "$BACKUP" "Backup failed: quick verification did not complete successfully." \
+    "backup verification failure summary missing"
 assert_contains "$BACKUP" 'backup_log_success "Backup completed successfully"' \
     "backup success completion message missing"
 
@@ -71,17 +75,18 @@ if grep -Fq 'operator_next_steps' <<< "$list_block"; then
     fail "backup list or JSON path should not emit operator summary"
 fi
 
-verify_failure_block="$(awk '/if ! verify_backup_quick/,/else/' "$BACKUP")"
+verify_failure_block="$(awk '/if ! verify_backup_quick/,/exit 1/' "$BACKUP")"
 if ! grep -Fq 'if [[ "$RCLONE_SYNC" == "true" ]]; then' <<< "$verify_failure_block"; then
     fail "backup verification failure should not change offsite status when rclone was not requested"
 fi
-success_tail="$(awk '/_print_backup_run_summary "\$actual_type"/,/exit 0/' "$BACKUP")"
-if ! grep -Fq 'if [[ "$verify_failed" == "true" ]]; then' <<< "$success_tail"; then
-    fail "backup completion must branch on verification failure"
-fi
-if ! grep -Fq 'else' <<< "$success_tail" || ! grep -Fq 'backup_log_success "Backup completed successfully"' <<< "$success_tail"; then
-    fail "backup success message should remain only on the verified success branch"
-fi
+grep -Fq 'exit 1' <<< "$verify_failure_block" || fail "backup quick-verification failure must exit non-zero before retention"
+! grep -Fq 'cleanup_old_backups' <<< "$verify_failure_block" || fail "backup quick-verification failure must not run local retention before exit"
+quick_fail_line="$(grep -n 'Backup failed: quick verification did not complete successfully.' "$BACKUP" | cut -d: -f1 | head -1)"
+retention_line="$(grep -n 'cleanup_old_backups "$backup_dir"' "$BACKUP" | cut -d: -f1 | head -1)"
+success_line="$(grep -n 'backup_log_success "Backup completed successfully"' "$BACKUP" | cut -d: -f1 | head -1)"
+[[ -n "$quick_fail_line" && -n "$retention_line" && -n "$success_line" ]] || fail "backup verification ordering markers missing"
+(( quick_fail_line < retention_line )) || fail "quick verification failure must be handled before retention"
+(( quick_fail_line < success_line )) || fail "quick verification failure must be handled before success line"
 
 assert_contains "$SETUP_SECRETS" "If you skip it, disaster recovery depends on the operational Age key or an exported recovery kit." \
     "offline recovery skip consequence wording missing"
@@ -92,6 +97,53 @@ assert_contains "$CROWDSEC" "Manual Cloudflare action required" \
     "CrowdSec final manual action block missing"
 assert_contains "$CROWDSEC" "Failure mode: Fail open" \
     "CrowdSec fail-open manual action wording missing"
+
+grep -Fq 'Config placeholders:' "$ROOT/dashboard.sh" || fail 'dashboard must label placeholder scan truthfully'
+grep -Fq 'Configured (not probed)' "$ROOT/dashboard.sh" || fail 'dashboard rclone status must not claim Ready without probing'
+grep -Fq 'No VaultWarden timers listed' "$ROOT/dashboard.sh" || fail 'dashboard timer empty state must distinguish successful empty query'
+grep -Fq 'queue_str="${YLW}Unknown${NC}"' "$ROOT/dashboard.sh" || fail 'dashboard email queue failure state must be Unknown'
+grep -Fq '0 queued' "$ROOT/dashboard.sh" || fail 'dashboard email queue empty state must say queued, not Healthy'
+grep -Fq 'DB Snapshot Backup' "$ROOT/dashboard.sh" || fail 'dashboard DB backup label must not say incremental'
+grep -Fq 'Backup Inventory' "$ROOT/dashboard.sh" || fail 'dashboard backup list label must not say health'
+grep -Fq 'Create + Sync New DB Backup' "$ROOT/dashboard.sh" || fail 'dashboard rclone create/sync label missing'
+grep -Fq 'Create + Fully Verify + Sync DB Backup' "$ROOT/dashboard.sh" || fail 'dashboard verified DB sync label missing'
+! grep -Fq 'Last result' "$ROOT/dashboard.sh" || fail 'dashboard must not infer Last result from sidecars'
+! grep -Fq '_last_backup_result' "$ROOT/dashboard.sh" || fail 'dashboard weak backup result helper should be deleted'
+! grep -Fq 'Recent Auth Fails' "$ROOT/dashboard.sh" || fail 'dashboard broad auth failure counter should be removed'
+! grep -Fq 'Start/Restart Stack     (safe)' "$ROOT/dashboard.sh" || fail 'dashboard ordinary restart must not be labeled safe'
+! grep -Fq 'validate_ip' "$ROOT/dashboard.sh" || fail 'dashboard unban should let cscli validate address forms through make unban'
+grep -Fq 'make -C "${REPO_ROOT}" unban "IP=${ip_to_unban}"' "$ROOT/dashboard.sh" || fail 'dashboard unban must route through make unban'
+printf 'Dashboard truthfulness tests passed.\n'
+
+SMOKE="$ROOT/utilities/smoke-test.sh"
+grep -Fq 'source "$SCRIPT_DIR/lib/defaults.sh"' "$SMOKE" || fail 'smoke test must source canonical defaults'
+grep -Fq 'local services=("${_VW_DEFAULT_CRITICAL_SERVICES[@]}")' "$SMOKE" || fail 'smoke test must use canonical critical service list'
+grep -Fq 'status=$(_http_status "${base}/alive")' "$SMOKE" || fail 'smoke test must probe /alive'
+! grep -Fq '/api/alive' "$SMOKE" || fail 'smoke test must not probe /api/alive'
+grep -Fq '"${SCRIPT_DIR}/utilities/setup-systemd.sh" validate' "$SMOKE" || fail 'smoke test must call canonical systemd validator'
+! grep -Fq 'check_startup_unit()' "$SMOKE" || fail 'smoke test should not duplicate startup unit validation'
+! grep -Fq 'check_startup_service()' "$SMOKE" || fail 'smoke test should not require startup oneshot to be active'
+grep -Fq 'none)' "$SMOKE" || fail 'smoke test must handle health=none explicitly'
+grep -Fq '_check_fail "container-$svc" "running but no healthcheck status reported"' "$SMOKE" || fail 'critical container health=none must fail'
+grep -Fq 'cscli decisions list -o raw' "$SMOKE" || fail 'CrowdSec readiness must perform cscli/LAPI query'
+grep -Fq 'cscli decisions query failed' "$SMOKE" || fail 'CrowdSec query failure must not become PASS'
+grep -Fq 'NOT READY — one or more checks were not completed.' "$SMOKE" || fail 'smoke skipped checks must produce NOT READY'
+grep -Fq '(( _FAIL == 0 && _SKIP == 0 ))' "$SMOKE" || fail 'smoke zero exit must require no FAIL and no SKIP'
+! grep -Fq 'local services=(vaultwarden caddy postfix)' "$SMOKE" || fail 'Postfix must not be hard-coded as critical readiness container'
+printf 'Smoke readiness tests passed.\n'
+
+DRILL="$ROOT/utilities/pre-production-drill.sh"
+grep -Fq 'Compose restart preflight' "$DRILL" || fail 'drill must label compose check as preflight'
+! grep -Fq 'Stack Restart Sequence' "$DRILL" || fail 'drill must not claim restart sequence rehearsal'
+grep -Fq 'backup-run.sh" verify' "$DRILL" || fail 'drill must delegate latest backup verification to canonical verifier'
+! grep -Fq 'backup-found:' "$DRILL" || fail 'drill must not preselect and name a different latest backup'
+grep -Fq 'no db backup found — run a backup first or pass --skip-restore' "$DRILL" || fail 'missing DB restore backup must fail unless explicitly skipped'
+grep -Fq 'sqlite3 not installed — install sqlite3 or pass --skip-restore' "$DRILL" || fail 'missing sqlite3 restore prerequisite must fail unless explicitly skipped'
+grep -Fq 'no full backup directory found' "$DRILL" || fail 'missing full restore artifact must be checked'
+grep -Fq 'all non-skipped steps passed' "$DRILL" || fail 'drill summary must be truthful when explicit skips exist'
+grep -Fq "trap '_handle_signal 130' INT" "$DRILL" || fail 'drill INT handler must exit 130'
+grep -Fq "trap '_handle_signal 143' TERM" "$DRILL" || fail 'drill TERM handler must exit 143'
+printf 'Drill truthfulness tests passed.\n'
 
 
 run_db_maintenance_health_failure_behavior_test() {

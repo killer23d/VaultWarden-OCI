@@ -18,12 +18,12 @@ extract_make_target() {
 
 # Root-operated lifecycle contract.
 grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
-for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report; do
+for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email health-email diagnose systemd-status prune key-show; do
     grep -Eq "(^|[[:space:]])${target}([[:space:]]|\|$)" Makefile || fail "${target} is not root-allowed"
 done
 pass "root-supported lifecycle/day-2 targets are allowed under sudo make"
 
-for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report; do
+for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email diagnose systemd-status prune key-show; do
     _snip="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
     extract_make_target "$target" Makefile > "$_snip" || fail "could not extract make ${target} target"
     grep -Fq '$(call require-root)' "$_snip" || { cat "$_snip" >&2; rm -f "$_snip"; fail "make ${target} does not require root"; }
@@ -148,7 +148,37 @@ grep -Fq 'run_sudo_cmd "sudo make restart"' dashboard.sh || fail "dashboard rest
 grep -Fq 'run_sudo_cmd "sudo make down"' dashboard.sh || fail "dashboard stop label missing"
 grep -Fq 'run_sudo_cmd "sudo make health"' dashboard.sh || fail "dashboard health label missing"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should use sudo"
+grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"' dashboard.sh || fail "dashboard recovery-kit export should stay root-operated"
+grep -Fq 'run_sudo_cmd "sudo make test-email" make -C "${REPO_ROOT}" test-email' dashboard.sh || fail "dashboard email diagnostic should stay root-operated"
+! grep -Fq 'run_user_cmd' dashboard.sh || fail "dashboard should not drop root for root-operated actions"
 pass "dashboard command labels match root-operated lifecycle"
+
+grep -Fq 'sudo ./setup.sh install --domain <your-domain> --email <your-email>' Makefile \
+    || fail "Makefile setup guidance must advertise supported first-install command"
+SETUP_SNIP="$(mktemp -t vw-setup-guidance.XXXXXXXXXX)"
+extract_make_target setup Makefile > "$SETUP_SNIP" || fail "could not extract setup target"
+grep -Fq 'guidance only' "$SETUP_SNIP" || fail "make setup should be guidance only"
+grep -Fq '@exit 1' "$SETUP_SNIP" || fail "make setup guidance target must exit non-zero"
+rm -f "$SETUP_SNIP"
+pass "make setup is no longer advertised as a working first-install parser"
+
+! grep -Eq '^key-path:' Makefile || fail "redundant key-path target should be removed"
+grep -Fq 'Create local Age key copy for manual offline transfer' Makefile || fail "key-backup wording must say local transfer copy"
+grep -Fq 'NOT OFFLINE YET' Makefile || fail "key-backup must warn local copy is not offline custody"
+pass "key inspection/backup targets avoid misleading production status"
+
+STATUS_SNIP="$(mktemp -t vw-status-contract.XXXXXXXXXX)"
+extract_make_target status Makefile > "$STATUS_SNIP" || fail "could not extract status target"
+grep -Fq 'CSCLI_RC=$$?' "$STATUS_SNIP" || fail "make status must capture cscli exit status"
+grep -Fq 'unknown (cscli query failed)' "$STATUS_SNIP" || fail "make status must not turn cscli failure into zero bans"
+rm -f "$STATUS_SNIP"
+UNBAN_SNIP="$(mktemp -t vw-unban-contract.XXXXXXXXXX)"
+extract_make_target unban Makefile > "$UNBAN_SNIP" || fail "could not extract unban target"
+grep -Fq 'CSCLI_RC=$$?' "$UNBAN_SNIP" || fail "make unban must capture cscli exit status"
+grep -Fq 'CrowdSec unban failed; see cscli output above.' "$UNBAN_SNIP" || fail "make unban must preserve generic cscli errors"
+! grep -Fq '&& echo "$(GREEN)' "$UNBAN_SNIP" || fail "make unban must not use command && success || benign fallback"
+rm -f "$UNBAN_SNIP"
+pass "CrowdSec status and unban preserve real cscli failures"
 
 # Legacy CF token preservation must use root-side file install, not shell value arguments.
 grep -Fq 'install -m 0444 -o root -g root "$_cf_flat" "$_cf_dest"' lib/secrets.sh || fail "CF token mirror does not use root-side install"

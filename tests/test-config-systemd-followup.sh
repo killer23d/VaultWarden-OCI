@@ -4,16 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 TESTS_RUN=0
-ORIG_ENV_BACKUP=""
-ORIG_ENV_EXISTS=false
 
 cleanup() {
-    if [[ "$ORIG_ENV_EXISTS" == true ]]; then
-        mv "$ORIG_ENV_BACKUP" "$ROOT/.env"
-    else
-        rm -f "$ROOT/.env"
-        [[ -n "$ORIG_ENV_BACKUP" ]] && rm -f "$ORIG_ENV_BACKUP"
-    fi
     rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -21,17 +13,6 @@ trap cleanup EXIT
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 run_test() { local name="$1"; shift; TESTS_RUN=$((TESTS_RUN + 1)); "$@"; pass "$name"; }
-
-backup_repo_env() {
-    if [[ -f "$ROOT/.env" ]]; then
-        ORIG_ENV_EXISTS=true
-        ORIG_ENV_BACKUP="$TMP/repo.env.backup"
-        cp "$ROOT/.env" "$ORIG_ENV_BACKUP"
-    else
-        ORIG_ENV_EXISTS=false
-        ORIG_ENV_BACKUP="$TMP/repo.env.backup"
-    fi
-}
 
 write_env() {
     local file="$1"; shift
@@ -46,14 +27,15 @@ run_config_probe() {
 }
 
 test_config_falls_through_empty_repo_state() {
-    local installed="$TMP/installed.env" installed_state="$TMP/installed-state"
-    write_env "$ROOT/.env" 'DOMAIN=https://repo.example.test' 'ADMIN_EMAIL=repo@example.test'
+    local fake_repo="$TMP/fake-repo-fallthrough" installed="$TMP/installed.env" installed_state="$TMP/installed-state"
+    mkdir -p "$fake_repo"
+    write_env "$fake_repo/.env" 'DOMAIN=https://repo.example.test' 'ADMIN_EMAIL=repo@example.test'
     write_env "$installed" "PROJECT_STATE_DIR=$installed_state" 'DATA_VOLUME_MOUNT=/from-installed' 'SOPS_AGE_KEY_FILE=/installed/key.txt'
 
     local output
-    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$ROOT" bash <<'PROBE'
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
 set -euo pipefail
-source "$PROJECT_ROOT/lib/config.sh"
+source "$REAL_CONFIG"
 load_project_environment
 printf 'PROJECT_STATE_DIR=%s\n' "$PROJECT_STATE_DIR"
 PROBE
@@ -62,16 +44,17 @@ PROBE
 }
 
 test_config_caller_override_wins() {
-    local installed="$TMP/installed-override.env" installed_state="$TMP/installed-other" override_state="$TMP/override-state"
+    local fake_repo="$TMP/fake-repo-override" installed="$TMP/installed-override.env" installed_state="$TMP/installed-other" override_state="$TMP/override-state"
+    mkdir -p "$fake_repo"
     mkdir -p "$override_state/config"
-    write_env "$ROOT/.env" 'DOMAIN=https://repo.example.test'
+    write_env "$fake_repo/.env" 'DOMAIN=https://repo.example.test'
     write_env "$installed" "PROJECT_STATE_DIR=$installed_state"
     write_env "$override_state/config/install.env" "PROJECT_STATE_DIR=$TMP/wrong-loaded-state" 'DATA_VOLUME_MOUNT=/loaded-mount' 'SOPS_AGE_KEY_FILE=/loaded/key.txt'
 
     local output
-    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$ROOT" PROJECT_STATE_DIR="$override_state" DATA_VOLUME_MOUNT=/caller-mount SOPS_AGE_KEY_FILE=/caller/key.txt bash <<'PROBE'
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" PROJECT_STATE_DIR="$override_state" DATA_VOLUME_MOUNT=/caller-mount SOPS_AGE_KEY_FILE=/caller/key.txt bash <<'PROBE'
 set -euo pipefail
-source "$PROJECT_ROOT/lib/config.sh"
+source "$REAL_CONFIG"
 load_project_environment
 load_project_environment
 printf 'PROJECT_STATE_DIR=%s\n' "$PROJECT_STATE_DIR"
@@ -85,6 +68,14 @@ PROBE
 }
 
 test_systemd_remove_disables_startup_service() {
+    if (( EUID != 0 )); then
+        grep -Fq 'systemctl disable --now "$STARTUP_SERVICE"' "$ROOT/utilities/setup-systemd.sh" \
+            || fail "setup-systemd remove does not disable startup service"
+        grep -Fq 'systemctl daemon-reload' "$ROOT/utilities/setup-systemd.sh" \
+            || fail "setup-systemd remove does not reload daemon"
+        return
+    fi
+
     local state="$TMP/systemd-state" bin="$TMP/bin" out="$TMP/systemd-remove.out" installed="$TMP/systemd-installed.env"
     mkdir -p "$state/config" "$bin"
     write_env "$state/config/install.env" "PROJECT_STATE_DIR=$state"
@@ -112,7 +103,6 @@ SYSTEMCTL
     grep -q '\[DRY RUN\] systemctl daemon-reload' "$out" || fail "daemon-reload dry-run was not requested"
 }
 
-backup_repo_env
 run_test 'repo .env without PROJECT_STATE_DIR falls through to installed environment' test_config_falls_through_empty_repo_state
 run_test 'explicit caller overrides survive loading and repeated calls' test_config_caller_override_wins
 test_notify_failure_systemd_uses_helper() {
@@ -186,6 +176,30 @@ test_stale_root_dropin_cleanup_preserves_state_dir() {
         || fail "stale root cleanup appears to target 10-state-dir.conf"
 }
 
+test_systemd_validation_fails_on_stale_installed_runtime() {
+    local systemd="$ROOT/utilities/setup-systemd.sh"
+    grep -Fq 'UNIT_DEST_DIR="${VW_SYSTEMD_UNIT_DEST_DIR:-/etc/systemd/system}"' "$systemd" \
+        || fail "systemd unit destination is not temp-testable"
+    grep -Fq 'OPT_SCRIPTS_DIR="${VW_SYSTEMD_OPT_SCRIPTS_DIR:-/opt/vaultwarden-scripts}"' "$systemd" \
+        || fail "installed script destination is not temp-testable"
+    grep -Fq '_report_stale_artifact()' "$systemd" \
+        || fail "stale artifact error helper missing"
+    grep -Fq 'log_error "  STALE: $installed does not match repo source"' "$systemd" \
+        || fail "stale artifact should be a validation error"
+    grep -Fq 'log_error "         Re-run: sudo utilities/setup-systemd.sh install"' "$systemd" \
+        || fail "stale artifact output must tell operator to rerun install"
+    grep -Fq '_compare_repo_artifact "$repo_src" "$installed"' "$systemd" \
+        || fail "installed scripts are not compared against repo sources"
+    grep -Fq 'find "$PROJECT_ROOT/lib" -type f -print0' "$systemd" \
+        || fail "repo lib files are not inventoried for installed-runtime drift"
+    grep -Fq 'installed_lib="$OPT_SCRIPTS_DIR/$rel_path"' "$systemd" \
+        || fail "repo lib relative path is not mapped into installed tree"
+    grep -Fq '_compare_repo_artifact "$UNIT_SOURCE_DIR/$unit" "$UNIT_DEST_DIR/$unit"' "$systemd" \
+        || fail "managed systemd units are not compared against repo unit sources"
+    grep -Fq '(( errors++ )) || true' "$systemd" \
+        || fail "stale artifacts and unhealthy timers must increment validation errors"
+}
+
 run_test 'systemd remove requests startup disable and daemon reload' test_systemd_remove_disables_startup_service
 run_test 'notify-failure systemd uses helper and no root cooldown path' test_notify_failure_systemd_uses_helper
 run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
@@ -193,5 +207,6 @@ run_test 'notify-failure helper loads encrypted-secret resolution before email' 
 run_test 'DNS update optional and strict modes are represented' test_dns_optional_and_strict_modes
 run_test 'installed runtime secret resolution is guarded' test_installed_runtime_secret_resolution
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
-[[ "$TESTS_RUN" -eq 9 ]] || fail "expected 9 tests, ran $TESTS_RUN"
+run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
+[[ "$TESTS_RUN" -eq 10 ]] || fail "expected 10 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
