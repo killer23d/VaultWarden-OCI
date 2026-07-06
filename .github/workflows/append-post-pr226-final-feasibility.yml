@@ -1,0 +1,430 @@
+name: Append post-PR226 final feasibility audit
+
+on:
+  push:
+    branches:
+      - delta
+    paths:
+      - '.github/workflows/append-post-pr226-final-feasibility.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  append-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: delta
+          fetch-depth: 0
+
+      - name: Append final implementation feasibility audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          report='reports/post-pr226-production-simplicity-audit.md'
+          test "$(git hash-object "$report")" = 'ba9d9b917d02197f422cb70d1b80a45c2ea2618c'
+          cat >> "$report" <<'VW_FINAL_FEASIBILITY_ADDENDUM'
+          
+          ---
+          
+          ## Final Implementation Feasibility and Activation Addendum
+          
+          Date: 2026-07-05
+          
+          This final pass asks a narrower question than the prior audits:
+          
+          > If the bounded fix PR implements this report, will the corrected behavior
+          > actually be the behavior used by CI and by an already-installed production
+          > host, or are there hidden deployment/caller gaps that would leave old code
+          > running after merge?
+          
+          The answer is **yes after one explicit supported activation step, but not from a
+          Git commit alone**. That distinction is important and is now part of the report's
+          acceptance contract.
+          
+          ### Final Feasibility Verdict
+          
+          The report's implementation scope is technically feasible as one bounded atomic
+          PR. The proposed fixes do not require a new framework or architectural phase.
+          
+          Two final corrections are required to make the implementation specification
+          exact:
+          
+          1. TP-17 must discard a quick-verification-failed archive and sidecars before
+             retention/success notification logic, rather than preserve the failed archive
+             in the normal backup tree.
+          2. Installed systemd runtime split-brain must become a validation error, and the
+             post-merge activation command must be explicit. Systemd services run root-owned
+             copies under `/opt/vaultwarden-scripts`; `git pull` does not update those files.
+          
+          With those corrections, the findings and minimal fix directions are internally
+          coherent and should work through existing Bash/Make/systemd paths.
+          
+          **NOT READY at the audited commit — READY AFTER ONE BOUNDED ATOMIC FIX PR AND THE
+          DOCUMENTED POST-PULL SYSTEMD ACTIVATION STEP.**
+          
+          ## Correction to TP-17 - Failed quick-verification archives must not remain eligible as normal backups
+          
+          - Severity: High
+          - Confidence: High
+          - Exact files: `utilities/backup-run.sh`, `lib/backup-utils.sh`,
+            `utilities/restore-run.sh`, `tests/test-operator-ui.sh`
+          - Supersedes the fourth-pass TP-17 recommendation to preserve the failed archive
+          
+          The fourth pass correctly found that quick verification failure returns zero, but
+          its proposed archive-preservation direction was too permissive.
+          
+          Current execution order after a quick verification failure is:
+          
+          1. set `verify_failed=true`;
+          2. send the verification warning email when `--email` was requested;
+          3. disable requested rclone sync;
+          4. continue through backup size reporting;
+          5. run local retention cleanup;
+          6. potentially prune remote backups when sync remains enabled for other paths;
+          7. enter the normal completion-email block, whose subject is
+             `[VaultWarden] Backup completed: ...` even when its body says
+             `quick (FAILED — see warning email)`;
+          8. print the failed-verification summary and warning; and
+          9. exit `0`.
+          
+          Keeping the failed `.age` file in the normal `db/full/emergency` directory also
+          leaves it visible to ordinary `*.age` inventory and restore selection. Interactive
+          restore lists every matching `.age` archive, and `latest` selection uses the normal
+          backup directories. A known failed-verification archive must not remain eligible
+          as an ordinary restore candidate.
+          
+          The local retention step is the more serious automatic interaction: a failed new
+          backup can still run retention and delete older archives before the command finally
+          reports the verification warning. That is the opposite of the desired failure
+          contract.
+          
+          ### Correct minimal fix
+          
+          Match the existing full-verification failure philosophy:
+          
+          - on quick verification failure, set the failed verification/offsite summary
+            state and send the existing warning notification if requested;
+          - print one truthful failed-verification summary;
+          - log that the failed archive is being discarded;
+          - delete the archive and all normal sidecars:
+            `.meta`, `.sha256`, and `.sha256.hmac`;
+          - return ordinary non-zero failure immediately;
+          - do not run local retention;
+          - do not run remote pruning;
+          - do not send the later `Backup completed` email; and
+          - do not emit the verified-success completion line.
+          
+          No quarantine directory, failed-backup registry, or new backup state taxonomy is
+          justified for this project. If a quick checksum/decrypt probe failed, preserve the
+          warning/log evidence and keep older verified backups; discard the unusable new
+          archive.
+          
+          ### Correct focused regression test
+          
+          Mock quick verification failure and assert all of the following in one harness:
+          
+          - process exit is non-zero;
+          - failed archive and all normal sidecars are absent;
+          - rclone sync was not called;
+          - local retention cleanup was not called;
+          - remote pruning was not called;
+          - the verification-warning notification may be sent once when email is enabled;
+          - no `[VaultWarden] Backup completed:` notification is sent;
+          - no `Backup completed successfully` line is emitted; and
+          - the summary says verification failed and offsite sync was skipped when requested.
+          
+          This supersedes the TP-17 regression wording that required archive preservation.
+          
+          ## TP-21 - Repository updates do not activate corrected systemd runtime code, and split-brain validation can still return zero
+          
+          - Severity: High
+          - Confidence: High
+          - Exact files: `utilities/setup-systemd.sh`, `Makefile`, systemd units,
+            deployment/update documentation
+          
+          ### Current deployment contract
+          
+          `setup-systemd.sh` already documents the important fact:
+          
+          > Run after every `git pull` to keep `/opt/` in sync.
+          
+          Installation copies these runtime artifacts from the repository:
+          
+          - `maintenance.sh`, `backup.sh`, and `restore.sh`;
+          - selected `utilities/*.sh`, including `maintenance-health.sh`,
+            `backup-run.sh`, and `restore-run.sh`;
+          - the entire `lib/` tree; and
+          - managed service/timer unit files into `/etc/systemd/system`.
+          
+          The timer/service units execute `/opt/vaultwarden-scripts/...` copies. Therefore:
+          
+          - merging a PR changes Git;
+          - `git pull` changes the repository checkout;
+          - direct repo commands use the new scripts; but
+          - already-installed systemd jobs continue using their old `/opt` copies until the
+            systemd installer is re-run.
+          
+          `make update` is not a repository updater or installed-script synchronizer. It
+          updates host packages and Docker images through the maintenance update path. It
+          must not be treated as activation for a newly merged code change.
+          
+          ### Current validation gap
+          
+          `validate_installation` has an existing repo-vs-installed SHA check for its
+          `scripts_to_check` list, but a mismatch is only a warning. Warning-only validation
+          returns `0`.
+          
+          The validator also does not content-compare:
+          
+          - repository `lib/` files against their installed `/opt/.../lib/` counterparts;
+          - ordinary managed service files against the repository unit source; or
+          - managed timer files against the repository unit source.
+          
+          Only the rendered startup service has a full expected-vs-installed content
+          comparison.
+          
+          This means a host can run stale timer code and still receive a zero exit from a
+          command whose help says `Verify installed state matches repo; detect split-brain`.
+          It also means the final PR could correctly fix `backup-run.sh` in Git while the
+          daily systemd backup keeps executing the pre-fix installed copy.
+          
+          ### Minimal fix direction
+          
+          Strengthen the existing validator; do not add a self-updater.
+          
+          1. Change repo-vs-installed SHA mismatch for every item in the existing
+             `scripts_to_check` list from warning to validation error.
+          2. For every regular file present under repository `lib/`, compare it with the
+             same relative path under `/opt/vaultwarden-scripts/lib/`:
+             - missing installed counterpart = error;
+             - content mismatch = error.
+             Extra unreferenced historical files under installed `lib/` do not need to fail
+             validation in this PR; the active scripts and expected repository libraries are
+             the material contract.
+          3. For every unit in the existing `SERVICES` and `TIMERS` arrays, compare the
+             repository source file with `/etc/systemd/system/<unit>`:
+             - missing = existing error;
+             - content mismatch = error.
+          4. Keep the existing freshly rendered comparison for
+             `vaultwarden-startup.service`.
+          5. Keep TP-20's requirement that unhealthy managed timers are validation errors.
+          6. A zero `validate` exit must now mean:
+             - expected managed scripts are installed and executable;
+             - expected repository libraries match installed libraries;
+             - expected managed unit files match repository unit files;
+             - the rendered startup service matches current repo/state configuration;
+             - required env/key permissions pass; and
+             - all six managed timers are enabled, active, and have a next trigger.
+          
+          Reuse `scripts_to_check`, `SERVICES`, `TIMERS`, and the existing SHA helper. Do not
+          create an install manifest, package manager, updater daemon, or artifact registry.
+          
+          ### Focused regression test
+          
+          In the existing systemd contract harness, create a temporary repo and installed
+          tree and assert:
+          
+          - stale installed `utilities/backup-run.sh` makes validation non-zero;
+          - stale installed `lib/backup-utils.sh` makes validation non-zero;
+          - stale installed `vaultwarden-db-backup.service` makes validation non-zero;
+          - a freshly rendered stale startup unit remains non-zero as today;
+          - all matching artifacts plus healthy timers returns zero; and
+          - the output names the exact stale artifact and says to re-run systemd install.
+          
+          ## Exact automatic-execution contract after the final PR
+          
+          The project should distinguish repository automation from host activation.
+          
+          | Event | Expected automatic behavior after final PR |
+          |---|---|
+          | Commit pushed to an **open implementation PR** | Existing `pull_request` workflow runs automatically; path filters must include all final migration surfaces. |
+          | Functional CI job | Runs exactly `./tests/run-tests.sh all`; the runner owns individual permanent test inventory. |
+          | Strict ShellCheck job | Continues to run directly and independently. |
+          | Merge to `delta` | Repository contains corrected code; no claim that Git can directly mutate an installed production host. |
+          | `git pull --ff-only` on an existing host | Direct repo commands use new code immediately; existing systemd services/timers may still use old `/opt` copies. |
+          | `sudo ./setup.sh systemd install --enable-now` on a healthy existing production host | Copies current managed scripts/libs/units, regenerates runtime env, daemon-reloads, enables/starts timer units, and—after TP-20—fails if any managed timer remains unhealthy. |
+          | `sudo ./setup.sh systemd validate` | After TP-20/TP-21, returns zero only when installed runtime matches repo and managed timers are healthy. |
+          | Future timer/service runs | Automatically execute the newly installed `/opt` code. |
+          | Boot | Enabled startup/timer units continue normal automatic behavior; no new updater daemon is required. |
+          
+          ### Important GitHub Actions scope note
+          
+          The current workflow trigger is `pull_request`, not `push`.
+          
+          Therefore the statement `CI runs automatically on commit` is accurate only when
+          the commit is pushed to an open PR and causes a pull-request synchronize event.
+          Direct commits to `delta` are not covered by this workflow trigger.
+          
+          The final fix is already specified as a PR, so no push trigger is required for
+          this bounded work. Do not redesign CI merely to cover direct-to-branch development.
+          The implementation agent must create/update the PR and wait for its checks rather
+          than treating a local commit as automatically validated.
+          
+          ## Precise smoke-test integration after TP-20 and TP-21
+          
+          The fourth pass said the smoke test should represent all six managed timers. The
+          final feasibility pass narrows the implementation so test inventory does not drift
+          again.
+          
+          Do **not** add a second six-timer array to `smoke-test.sh`.
+          
+          After TP-20 and TP-21, the existing systemd validator becomes the canonical
+          automation-readiness contract. Replace the narrow DB/full timer smoke check with a
+          required systemd automation validation check that invokes the repository's
+          existing systemd validator, for example the equivalent of:
+          
+          ```bash
+          "${SCRIPT_DIR}/utilities/setup-systemd.sh" validate
+          ```
+          
+          The smoke test should capture that command's success/failure and record:
+          
+          - PASS only on validator exit `0`;
+          - FAIL on any non-zero result, with a concise instruction to run the validator
+            directly for full diagnostics.
+          
+          This one call covers:
+          
+          - installed `/opt` split-brain after TP-21;
+          - managed unit/source drift after TP-21;
+          - env/key/install permissions already checked by the validator; and
+          - all six timer health contracts after TP-20.
+          
+          Keep the smoke test's separate container/TLS/HTTP/secrets/backup/CrowdSec/disk
+          checks because those are live stack readiness probes rather than installation
+          consistency checks.
+          
+          Also apply TP-15 exactly:
+          
+          - readiness URL is `/alive`;
+          - required project environment, Docker/Compose, systemd automation validation, and
+            CrowdSec availability are FAIL when unavailable;
+          - explicit optional checks may remain SKIP; and
+          - `_FAIL == 0` may produce `ready for production` only when no required check was
+            left unperformed.
+          
+          No readiness registry is needed.
+          
+          ## Precise drill backup-verification integration
+          
+          The fourth pass correctly found that `pre-production-drill.sh` selects and names
+          one archive, then calls `backup-run.sh verify`, whose verifier independently
+          selects the newest archive by mtime.
+          
+          Do not add a new `--file` API solely for the drill.
+          
+          The existing backup verifier already owns canonical latest-backup selection and
+          prints its exact `Target: <file> [type: ...]` before performing full verification.
+          The drill should remove its independent `newest/newest_age/newest_type` selection
+          in `drill_backup_verify` and invoke the canonical verifier directly.
+          
+          On success, the drill may record the verifier's target line or simply report that
+          canonical latest-backup full verification passed. On failure, preserve the
+          verifier's concise tail in the failed-step detail.
+          
+          This gives one selection path and avoids another backup-selection helper.
+          
+          The separate full-archive restore smoke-test may continue selecting one exact full
+          backup and decrypting/listing that exact file itself because that function actually
+          operates on the same file it names.
+          
+          ## Post-Merge Activation Procedure for an Existing Healthy Host
+          
+          A Git commit cannot update root-owned `/opt` and `/etc/systemd/system` on a remote
+          VM. The supported post-merge activation is therefore explicit and short.
+          
+          After the final fix PR is merged to `delta`, on an **existing healthy production
+          host**:
+          
+          ```bash
+          cd ~/VaultWarden-OCI
+          git pull --ff-only
+          sudo ./setup.sh systemd install --enable-now
+          sudo ./setup.sh systemd validate
+          sudo ./utilities/smoke-test.sh
+          ```
+          
+          Expected contract after the final PR:
+          
+          1. install copies the merged managed runtime to `/opt` and current units to
+             `/etc/systemd/system`;
+          2. install returns non-zero if auto-started managed timers are not healthy;
+          3. validate returns non-zero if installed runtime is stale or timers are unhealthy;
+          4. smoke returns non-zero for a missing required subsystem, stale automation
+             install, wrong readiness endpoint response, or live production failure; and
+          5. only then may the host be treated as production-ready.
+          
+          `--enable-now` is appropriate here because this sequence is specifically for an
+          already-healthy production host that is ready for scheduled jobs. It is **not** the
+          DR/manual-inspection sequence.
+          
+          ## Recovery or Manual-Inspection Host Activation
+          
+          Preserve the existing restore safety choice. On a replacement/recovery host that
+          is not yet ready to run scheduled jobs:
+          
+          ```bash
+          sudo ./setup.sh systemd install --no-enable-now
+          ```
+          
+          That install may succeed while timers are intentionally not active. Do not call a
+          successful manual install `production ready`.
+          
+          After storage, secrets, rclone, DNS/firewall, and Vaultwarden readiness have been
+          inspected:
+          
+          ```bash
+          sudo ./setup.sh systemd install --enable-now
+          sudo ./setup.sh systemd validate
+          sudo ./utilities/smoke-test.sh
+          ```
+          
+          This preserves operator-controlled DR startup while giving normal production a
+          deterministic activation gate.
+          
+          ## Final Implementation Acceptance Matrix
+          
+          | Contract | Exact acceptance condition |
+          |---|---|
+          | Recovery pre-commit failure | Old ciphertext/key/policy/manifest/install.env/sentinel state restored; signal handlers exit and do not continue. |
+          | Recovery post-commit startup or `/alive` failure | New committed recovery artifacts remain; command exits non-zero with next steps. |
+          | Quick backup verification failure | Failed archive/sidecars discarded; no retention, remote pruning, success email, or offsite sync; command exits non-zero. |
+          | Systemd auto-start install | All six managed timers active with next trigger or install exits non-zero. |
+          | Systemd validation | Installed managed scripts/libs/units match repo and all production timers are healthy or validation exits non-zero. |
+          | Smoke readiness | `/alive` used; required unavailable checks are failures; canonical systemd validation passes; zero means genuinely ready. |
+          | Drill | Only explicit skip flags produce normal skips; no restart claim without a restart; canonical verifier owns latest-backup selection. |
+          | CI | Open-PR commits automatically run canonical all-tests runner plus direct strict ShellCheck; workflow YAML does not own individual test inventory. |
+          | Existing production host after merge | One explicit `systemd install --enable-now` activation copies merged runtime; validate + smoke prove the activated state. |
+          
+          ## Final Final Recommendation
+          
+          **The report is now sufficiently precise to implement. Stop auditing and execute
+          one bounded atomic fix PR.**
+          
+          The final feasibility pass found no need for enterprise complexity. It found one
+          deployment truth that must remain explicit:
+          
+          > Git commits update the repository; the existing systemd installer activates
+          > managed runtime code on the host. Do not hide that privilege boundary behind a
+          > self-updater.
+          
+          After TP-20/TP-21, the activation path is fail-closed and self-checking. After the
+          corrected TP-17, a failed backup verification cannot prune older backups or remain
+          eligible as a normal restore candidate. After TP-14/TP-15/TP-16, recovery and the
+          two pre-production confidence tools have truthful failure semantics.
+          
+          One PR, one canonical test inventory, one supported systemd installer, and one
+          explicit post-pull activation step are enough for this project.
+          
+          VW_FINAL_FEASIBILITY_ADDENDUM
+          test "$(grep -c '^## Final Implementation Feasibility and Activation Addendum$' "$report")" -eq 1
+          grep -Fq '**The report is now sufficiently precise to implement. Stop auditing and execute' "$report"
+          rm -f .github/workflows/append-post-pr226-final-feasibility.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$report" .github/workflows/append-post-pr226-final-feasibility.yml
+          git commit -m 'docs: append final implementation feasibility audit'
+          git push origin HEAD:delta
