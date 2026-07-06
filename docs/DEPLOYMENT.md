@@ -50,7 +50,7 @@ cd VaultWarden-OCI
 Edit `.env` for non-secret values:
 
 ```bash
-nano .env
+sudo make edit-env
 ```
 
 Set or verify:
@@ -67,7 +67,7 @@ SMTP_FROM=noreply@yourdomain.com
 ALLOWED_SENDER_DOMAINS=yourdomain.com
 ADMIN_ALLOW_CIDR=your-admin-cidr
 RCLONE_REMOTE_NAME=your_rclone_remote   # if offsite backup is enabled now
-RCLONE_CONFIG=/etc/rclone/rclone.conf   # recommended for systemd backups
+RCLONE_CONFIG=/etc/vaultwarden/rclone.conf   # installed runtime path for systemd backups
 ```
 
 Rotate required external credentials into SOPS secrets:
@@ -85,8 +85,8 @@ sudo ./edit-secrets.sh rotate smtp_password
 ## Phase 4 — Start and verify
 
 ```bash
-./startup.sh
-./maintenance.sh health
+sudo make up
+sudo make health
 sudo ./maintenance.sh test-email --verbose
 ```
 
@@ -104,11 +104,15 @@ The runtime stack remains:
 ## Phase 5 — Install automation and recovery kit
 
 ```bash
-sudo ./setup.sh systemd install
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
 sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
 Systemd automation covers health self-healing, backups, maintenance, DNS refresh, firewall refresh, locking, and failure notifications. See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for the full timer schedule and overrides.
+
+Use `rclone config` as the source-generation step for remote credentials, then re-run `sudo ./setup.sh systemd install --enable-now` to copy the current config into `/etc/vaultwarden/rclone.conf`.
 
 Store the recovery kit in a password manager and offline backup location.
 

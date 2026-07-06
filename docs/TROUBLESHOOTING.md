@@ -268,7 +268,7 @@ A backup cannot be considered verified if the decrypt probe cannot find the Age 
 Diagnosis:
 
 ```bash
-sudo make key-path
+sudo make key-show
 sudo make key-health
 sudo ./backup.sh verify
 ```

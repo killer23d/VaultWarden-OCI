@@ -17,8 +17,9 @@ location found**, in this order:
 | 2 | `/etc/vaultwarden/age-key.txt` | Runtime/production path — installed by `setup.sh`, owned by root (`root:root` mode `600`) |
 | 3 | `secrets/keys/age-key.txt` | Repo-local fallback — used during initial setup and on dev machines |
 
-**You never need to track which path is active.** Run `make key-path` to
-see which path is currently resolving, or `make key-health` to validate it.
+**You never need to track which path is active.** Run `sudo make key-show` for
+path/public-recipient information, or `sudo make key-health` to validate
+decryptability.
 
 > **After first install**, `/etc/vaultwarden/age-key.txt` is the live key.
 > The repo-local path is only valid before `setup.sh` has run, or on a
@@ -125,12 +126,11 @@ mv age-key.txt VaultWarden-OCI/secrets/keys/age-key.txt
 chmod 600 VaultWarden-OCI/secrets/keys/age-key.txt
 
 # Verify whichever path you used:
-cd VaultWarden-OCI && make key-path
+cd VaultWarden-OCI && sudo make key-health
 
 # 4. Start services
 cd VaultWarden-OCI
-./startup.sh
-# or: make start
+sudo make up
 ```
 
 > **Archive format note:** Full and emergency backups use `.tar.zst.age` (zstd compression). The previous format was `.tar.gz.age` (gzip). If you have older backups from before the zstd migration, use `tar -xzf -` instead of `zstd -d -T0 -c | tar -xf -` for those specific files.

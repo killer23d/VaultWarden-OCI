@@ -285,11 +285,11 @@ sudo ./backup.sh run emergency --rclone
 # Keep 30 days of backups
 sudo ./backup.sh run db --keep 30
 
-make backup              # Database backup
-make backup-full         # Full backup
-make backup-emergency    # Emergency kit
+sudo make backup         # DB snapshot backup
+sudo make backup-full    # Full backup
+sudo make backup-emergency # Emergency kit
 sudo make list-backups   # List all available backups
-sudo make backup-status  # Show backup health summary (last run, size, retention, count per type)
+sudo make backup-status  # Show backup inventory
 ```
 
 > **`zstd` dependency:** Full backups require `zstd` for compression. `setup.sh` installs it automatically. If you installed before this was added to the package list, run `sudo apt install zstd`.
@@ -779,62 +779,62 @@ All common operations have Makefile shortcuts. Run `make help` for the normal ad
 | :-- | :-- | :-- |
 | `make help` | — | Print normal admin/day-2 targets |
 | `make help-all` | — | Print all targets with descriptions, including dashboard/API, advanced, developer/test, and legacy commands |
-| `make setup` | `sudo ./setup.sh` | Requires `sudo make setup` |
+| `sudo ./setup.sh install --domain <domain> --email <email>` | `sudo ./setup.sh install --domain <domain> --email <email>` | Supported first-install command |
 | `sudo make init-secrets` | `sudo ./setup.sh secrets` | Interactive secrets initialisation |
-| `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor (dispatcher) |
-| `make test-secrets` | `./utilities/secrets-list.sh` | Verify secrets decrypt correctly |
-| `make test-email` | `sudo ./maintenance.sh test-email` | Test the Postfix-backed operational alert channel |
-| `make up` / `make start` | `./startup.sh` | Start all services |
-| `make down` / `make stop` | `docker compose down` | Graceful shutdown |
-| `make restart` | `sudo make restart` | Force restart all services |
-| `make safe-restart` | `sudo make safe-restart` | Restarts without pulling and restores the captured Compose model/image IDs on failure |
-| `make status` | `docker compose ps` | Show service status table |
+| `sudo make edit-secrets` | `./utilities/secrets-edit.sh` | Open SOPS secrets editor |
+| `sudo make test-secrets` | `./utilities/secrets-list.sh` | Verify secrets decrypt correctly |
+| `sudo make test-email` | `sudo ./maintenance.sh test-email` | Test the Postfix-backed operational alert channel |
+| `sudo make up` / `sudo make start` | `./startup.sh` | Start all services |
+| `sudo make down` / `sudo make stop` | `./startup.sh stop` | Graceful shutdown |
+| `sudo make restart` | `./startup.sh --force` | Force restart all services |
+| `sudo make safe-restart` | `sudo make safe-restart` | Restarts without pulling and restores the captured Compose model/image IDs on failure |
+| `sudo make status` | `docker compose ps` | Show service status and backup inventory |
 | `make operations` | `sudo utilities/operations-status.sh` | Show active or interrupted VaultWarden operations |
-| `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true` passes `--fix`) |
-| `make health-quick` | `./maintenance.sh health --quiet` | Quick health check — concise output, non-zero exit on failure |
-| `make health-report` | `./maintenance.sh health --report` | Health check that writes a timestamped report file |
-| `make health-email` | alias for `make test-email` | Send a test operational alert email |
-| `make logs` | `docker compose logs -f $(SERVICE)` | follows logs for one service |
-| `make logs-tail` | `docker compose logs --tail=100` | last 100 lines, non-following |
-| `make logs-vaultwarden` | `docker compose logs -f -t --tail=100 vaultwarden` | Tail VaultWarden application logs |
-| `make logs-caddy` | `docker compose logs -f -t --tail=100 caddy` | Tail Caddy reverse-proxy logs |
-| `make logs-postfix` | `docker compose logs -f -t --tail=100 postfix` | Postfix email logs shortcut |
-| `make logs-crowdsec` | `sudo journalctl -u crowdsec -f` | Tail CrowdSec threat detection logs |
-| `make backup` | `./backup.sh run db` | DB backup |
+| `sudo make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true` passes `--fix`) |
+| `sudo make health-quick` | `./maintenance.sh health --quiet` | Quick health check — concise output, non-zero exit on failure |
+| `sudo make health-report` | `./maintenance.sh health --report` | Health check that writes a timestamped report file |
+| `sudo make health-email` | alias for `sudo make test-email` | Send a test operational alert email |
+| `sudo make logs` | `docker compose logs -f $(SERVICE)` | follows logs for one service |
+| `sudo make logs-tail` | `docker compose logs --tail=100` | last 100 lines, non-following |
+| `sudo make logs-vaultwarden` | `docker compose logs -f vaultwarden` | Tail VaultWarden application logs |
+| `sudo make logs-caddy` | `docker compose logs -f caddy` | Tail Caddy reverse-proxy logs |
+| `sudo make logs-postfix` | `docker compose logs -f postfix` | Postfix email logs shortcut |
+| `sudo make logs-crowdsec` | `sudo journalctl -u crowdsec -f` | Tail CrowdSec threat detection logs |
+| `sudo make backup` | `./backup.sh run db` | DB snapshot backup |
 | `make backup-full` | `./backup.sh run full` | Full system backup |
 | `make backup-emergency` | `./backup.sh run emergency` | Emergency backup (same archive contents as full; excludes `secrets/` and Age key) |
 | `sudo make list-backups` | `./backup.sh list` | List all available backups with metadata |
-| `sudo make backup-status` | — | Backup health summary: last run, size, retention, count per type |
-| `make restore` | `./restore.sh interactive` | Interactive restore (recommended) |
-| `make restore-db` | `./restore.sh latest db` | Restore latest database backup (runs key prompt + confirmation) |
-| `make restore-remote` | `./restore.sh interactive --remote` | Restore from a remote (rclone) backup — interactive selection |
+| `sudo make backup-status` | `./backup.sh list` | Backup inventory |
+| `sudo make restore` | `./restore.sh interactive` | Interactive restore (recommended) |
+| `sudo make restore-db` | `./restore.sh latest db` | Restore latest database backup (runs key prompt + confirmation) |
+| `sudo make restore-remote` | `./restore.sh interactive --remote` | Restore from a remote (rclone) backup — interactive selection |
 | `make update` | `sudo ./maintenance.sh update --all` | Full update (containers + system packages) |
 | `make update-system` | `sudo ./maintenance.sh update --system` | Update host OS packages only |
 | `make maintenance` | `sudo ./maintenance.sh run` | Routine maintenance run |
 | `make maintenance-full` | `sudo ./maintenance.sh run --comprehensive` | Comprehensive maintenance run |
 | `make update-dns` | `sudo ./maintenance.sh update-dns` | Update Cloudflare DNS A record |
 | `make db-maint` | `sudo ./maintenance.sh db-maint` | Deep DB VACUUM (stops VaultWarden; confirms before running) |
-| `make db-backup` | `./backup.sh run db` | Quick database backup |
-| `make key-rotate` | `lib/crypto.sh rotate_age_key` | Rotate the Age encryption key (generates new key, updates all locations) |
-| `make key-show` | — | Show current Age public key and key file path/status |
-| `make key-health` | `lib/crypto.sh check_age_key_health` | Check Age key health (permissions, decodability) |
-| `make breakglass-create` | `sudo utilities/setup-secrets.sh breakglass create` | Create emergency OS admin account |
-| `make breakglass-status` | `sudo utilities/setup-secrets.sh breakglass status` | Show break-glass admin status |
-| `make breakglass-remove` | `sudo utilities/setup-secrets.sh breakglass remove --force` | Remove break-glass admin account |
-| `make install-systemd` | `sudo ./setup.sh systemd install` | Install systemd units and sync scripts to `/opt` |
-| `make remove-systemd` | `sudo ./setup.sh systemd remove` | Remove all vaultwarden systemd timer units |
-| `make systemd-status` | `sudo ./setup.sh systemd status` | Show status of all vaultwarden systemd units |
-| `make systemd-validate` | `sudo ./setup.sh systemd validate` | Validate installed units match current repo scripts |
+| `sudo make db-backup` | `./backup.sh run db` | DB snapshot backup |
+| `sudo make key-rotate` | `lib/crypto.sh rotate_age_key` | Rotate the Age encryption key (generates new key, updates all locations) |
+| `sudo make key-show` | — | Show current Age public key and key file path/status |
+| `sudo make key-health` | `lib/crypto.sh check_age_key_health` | Check Age key health (permissions, decodability) |
+| `sudo make breakglass-create` | `sudo utilities/setup-secrets.sh breakglass create` | Create emergency OS admin account |
+| `sudo make breakglass-status` | `sudo utilities/setup-secrets.sh breakglass status` | Show break-glass admin status |
+| `sudo make breakglass-remove` | `sudo utilities/setup-secrets.sh breakglass remove` | Remove break-glass admin account |
+| `sudo make install-systemd` | `sudo ./setup.sh systemd install` | Install systemd units and sync scripts to `/opt` |
+| `sudo make remove-systemd` | `sudo ./setup.sh systemd remove` | Remove all vaultwarden systemd timer units |
+| `sudo make systemd-status` | `sudo ./setup.sh systemd status` | Show status of all vaultwarden systemd units |
+| `sudo make systemd-validate` | `sudo ./setup.sh systemd validate` | Validate installed units match current repo scripts |
 | `make timers` | `systemctl list-timers` | Show all vaultwarden timers (next trigger + last run + `.env` schedule) |
 | `make uninstall-dry-run` | `sudo utilities/uninstall-vaultwarden.sh run --dry-run` | Preview what uninstall would remove (no changes) |
 | `make uninstall` | `sudo utilities/uninstall-vaultwarden.sh run` | Full uninstall — removes containers, data, systemd units (DESTRUCTIVE) |
 | `make dev-setup` | Copy `.env.example` and override template | Prepare local development environment |
-| `make test` | `test-secrets` + `test-email` + `docker compose config` | Run all tests |
+| `make test` | `./tests/run-tests.sh all` + `docker compose config` | Run local tests |
 | `make test-config` | `docker compose config > /dev/null` | Validate merged Docker Compose config (exits non-zero on error) |
-| `make dry-run` | All scripts with `--dry-run` | Preview all operations without executing |
-| `make clean` | `docker compose rm -f --stop` + `docker system prune -f` | Remove stopped containers and unused Docker resources |
-| `make clean-all` | `docker compose down -v` + `docker system prune -af --volumes` | **Destructive** — requires interactive TTY and `yes` confirmation |
-| `make prune` | `docker system prune -f` | Remove unused Docker resources only |
+| `make dry-run` | `./startup.sh --dry-run` | Preview startup without executing |
+| `make clean` | `rm -f setup.log` | Remove generated setup log |
+| `make clean-all` | `rm -f setup.log` | Remove generated setup log after confirmation |
+| `sudo make prune` | `docker system prune -f` | Remove unused Docker resources only |
 | `make lint` | `shellcheck -S warning *.sh lib/*.sh` | Run shellcheck over all shell scripts (install: `sudo apt install shellcheck`) |
 | `make diagnose` | — | Full diagnostic dump: versions, key status, disk, containers, last backup, recent logs |
 | `make info` | — | Show domain, email, project state dir, service status, disk usage |
@@ -842,7 +842,7 @@ All common operations have Makefile shortcuts. Run `make help` for the normal ad
 | `make version` | — | Show version info for all containers and Docker |
 | `make watch` | `watch -n 5 make status` | Auto-refresh service status every 5 s |
 | `make monitor` | `docker compose logs -f -t` | Follow all service logs in real-time |
-| `make fmt` | `docker compose config` + `utilities/secrets-list.sh` | Validate Compose files and secrets |
+| `make fmt` | — | Informational Makefile formatting note |
 | `make config` | — | Show non-sensitive `.env` variables and service list |
 
 > **`make test-config`** is the quickest pre-deployment sanity check. It runs `docker compose config` against the merged Compose files and exits non-zero if the configuration is invalid — useful before `make up` or after editing any `.yml` file.
