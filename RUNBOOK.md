@@ -285,12 +285,45 @@ sudo ./utilities/setup-crowdsec.sh --force
 
 ---
 
-## Tear-Down
+## Tear-Down and Same-VM Test Reset
 
-| Task | Command |
-|------|---------|
-| Preview uninstall (dry run) | `sudo make uninstall-dry-run` |
-| Full uninstall (interactive) | `sudo make uninstall` |
+Use a dry run before any destructive uninstall:
+
+```bash
+sudo make uninstall-dry-run
+# or preview the checkout-preserving reset path directly
+sudo ./utilities/uninstall-vaultwarden.sh run --test-reset --dry-run
+```
+
+For repeated setup, restore, or DR acceptance testing on the **same VM**, use
+`--test-reset`. It removes VaultWarden-OCI managed state, generated local install
+artifacts, systemd integration, managed Docker resources, CrowdSec integration,
+and project firewall rules, but preserves the Git checkout so the same branch can
+be installed again immediately:
+
+```bash
+sudo ./utilities/uninstall-vaultwarden.sh run \
+  --test-reset \
+  --i-have-saved-my-recovery-kit
+```
+
+The uninstall finishes with residual verification and fails instead of reporting
+success when a known managed stack artifact remains. Docker itself,
+`/var/lib/docker`, common host tools, SSH configuration, the Docker group, and
+unrelated firewall rules are intentionally preserved. Therefore `--test-reset`
+is a **clean VaultWarden-OCI stack reset**, not a recreation of a pristine OCI
+Ubuntu image.
+
+For a normal full uninstall that may also remove the repository checkout:
+
+```bash
+sudo make uninstall
+# equivalent direct command
+sudo ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
+```
+
+Use `--force` only for deliberately disposable test data after recovery material
+has been verified outside the host; it bypasses backup and Age-key confirmations.
 
 ## Resilient recovery quick reference
 
