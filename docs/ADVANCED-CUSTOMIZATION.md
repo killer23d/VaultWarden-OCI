@@ -570,7 +570,7 @@ services:
 
 ```bash
 make dev-setup     # setup dev environment
-make test          # run all tests
+./tests/run-tests.sh all  # run regression suite
 make test-config   # validate Docker Compose config
 make dry-run       # preview all operations
 ```
