@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Consolidated CrowdSec regression suite.
+set -euo pipefail
+
+check_crowdsec_configuration() (
 # Focused checks for the CrowdSec collection set, log acquisition, and
 # Vaultwarden log format required by the CrowdSec Vaultwarden parser.
 
@@ -85,3 +89,7 @@ if grep -Fq 'apt-get install -y crowdsec-cloudflare-worker-bouncer' "$setup_scri
 fi
 
 printf 'CrowdSec configuration tests passed.\n'
+
+)
+
+check_crowdsec_configuration

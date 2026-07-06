@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Consolidated operator UI regression suite.
+set -euo pipefail
+
+check_operator_ui_contracts() (
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -241,3 +245,118 @@ if ! grep -q 'log_warn "VaultWarden was restarted but did not pass the health ch
 fi
 
 printf 'Operator UI tests passed.\n'
+
+)
+
+check_operator_ui_contracts
+check_confirmation_prompt_format() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAINT_DB="$ROOT/utilities/maintenance-db-maint.sh"
+
+patterns=(
+    "y""/N"
+    "Y""/n"
+    "[y""/n]"
+    "[Y""/N]"
+    "[Y""/n]"
+    "[y""/N]"
+)
+
+scan_prompt_pattern() {
+    local pattern="$1"
+    grep \
+        -RInF \
+        -I \
+        --exclude-dir=.git \
+        --exclude='*.png' \
+        --exclude='*.jpg' \
+        --exclude='*.jpeg' \
+        --exclude='*.gif' \
+        --exclude='*.ico' \
+        --exclude='*.pdf' \
+        -- "$pattern" "$ROOT"
+}
+
+for pattern in "${patterns[@]}"; do
+    set +e
+    matches="$(scan_prompt_pattern "$pattern")"
+    status=$?
+    set -e
+    if [[ $status -eq 0 ]]; then
+        printf '%s\n' "$matches"
+        echo "FAIL: active content contains shorthand confirmation prompt: $pattern" >&2
+        exit 1
+    fi
+    if [[ $status -ne 1 ]]; then
+        echo "FAIL: prompt shorthand scan failed for pattern: $pattern" >&2
+        exit "$status"
+    fi
+done
+
+grep -Fq 'Continue with deep database maintenance? [yes/no] (default: no): ' "$MAINT_DB" \
+    || { echo "FAIL: deep maintenance prompt must disclose default: no" >&2; exit 1; }
+
+if grep -Fq 'confirm="yes"' "$MAINT_DB"; then
+    echo "FAIL: deep maintenance confirmation timeout must not default to yes" >&2
+    exit 1
+fi
+
+grep -Fq 'Deep maintenance cancelled because confirmation was not received.' "$MAINT_DB" \
+    || { echo "FAIL: deep maintenance timeout cancellation message missing" >&2; exit 1; }
+
+echo "OK: confirmation prompts use full yes/no display text"
+
+)
+
+check_confirmation_prompt_format
+check_restore_plan_summary_operator_ui() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+# Operator UI closure: restore plan summary must not use fixed-width box borders or padded printf columns.
+restore_plan_func="$(_extract_func "$ROOT/utilities/restore-run.sh" _print_restore_plan_summary)"
+! grep -q '╔\|╠\|╚\|║' <<< "$restore_plan_func" || fail 'restore plan summary still uses fixed-width box drawing'
+! grep -q '%-38s' <<< "$restore_plan_func" || fail 'restore plan summary still pads values to a fixed width'
+grep -q 'operator_attention warn "Restore plan summary"' <<< "$restore_plan_func" || fail 'restore plan summary does not use operator attention block'
+
+# Behavior: long backup names/paths are printed untruncated in plain summary lines.
+cat > "$TMP/restore-plan-probe.sh" <<EOF_PROBE
+set -euo pipefail
+ROOT="$ROOT"
+TMP="$TMP"
+source "\$ROOT/lib/log.sh"
+source "\$ROOT/lib/common.sh"
+init_common_lib restore-plan-probe
+RESTORE_TYPE=full
+STATE_DIR="\$TMP/state-with-a-deliberately-long-path-component-that-must-not-be-truncated"
+OPERATIONAL_SOPS_AGE_KEY_FILE="\$TMP/keys/live-operational-age-key-with-a-deliberately-long-name.txt"
+NO_PRE_BACKUP=false
+backup_encryption_mode=age-recipient
+BACKUP_FILE="\$TMP/vaultwarden-full-backup-with-a-deliberately-long-name-that-would-overflow-the-old-box.tar.zst.age"
+touch "\$BACKUP_FILE"
+$restore_plan_func
+_print_restore_plan_summary >"\$TMP/restore-plan.out" 2>&1
+EOF_PROBE
+bash "$TMP/restore-plan-probe.sh" || fail 'restore plan summary probe failed'
+grep -q 'vaultwarden-full-backup-with-a-deliberately-long-name-that-would-overflow-the-old-box.tar.zst.age' "$TMP/restore-plan.out" || fail 'restore plan summary truncated or hid long backup name'
+grep -q 'live-operational-age-key-with-a-deliberately-long-name.txt' "$TMP/restore-plan.out" || fail 'restore plan summary truncated or hid long key path'
+! grep -q '╔\|╠\|╚\|║' "$TMP/restore-plan.out" || fail 'restore plan output still contains fixed-width box borders'
+
+)
+
+check_restore_plan_summary_operator_ui

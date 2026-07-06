@@ -1,4 +1,55 @@
 #!/usr/bin/env bash
+# Consolidated systemd regression suite.
+set -euo pipefail
+
+check_systemd_operation_runtime_paths() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OPS="$ROOT/lib/operations.sh"
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+canonical="$(
+  sed -n 's/^: "${VW_OPERATIONS_STATE_DIR:=\(.*\)}"$/\1/p' "$OPS"
+)"
+[[ -n "$canonical" ]] || fail "could not derive VW_OPERATIONS_STATE_DIR from lib/operations.sh"
+canonical_root="${canonical%/operations}"
+[[ "$canonical" == "/run/vaultwarden-oci/operations" ]] \
+  || fail "unexpected canonical operations state dir: $canonical"
+
+guarded_units=(
+  vaultwarden-db-backup.service
+  vaultwarden-full-backup.service
+  vaultwarden-maintenance.service
+  vaultwarden-health.service
+  vaultwarden-dns-update.service
+  vaultwarden-firewall-update.service
+  vaultwarden-iptables.service
+  vaultwarden-startup.service
+)
+
+for unit in "${guarded_units[@]}"; do
+  file="$ROOT/systemd/$unit"
+  [[ -f "$file" ]] || fail "missing unit: $unit"
+  grep -Eq "^ReadWritePaths=.*${canonical_root}" "$file" \
+    || fail "$unit does not grant writable canonical operation root $canonical_root"
+  grep -Eq "^RuntimeDirectory=.*vaultwarden-oci" "$file" \
+    || fail "$unit does not pre-create /run/vaultwarden-oci"
+  if grep -Eq '^ReadWritePaths=.* /run/vaultwarden(\s|$)' "$file"; then
+    fail "$unit still grants stale /run/vaultwarden operation path"
+  fi
+done
+
+printf 'PASS: systemd operation runtime paths\n'
+
+)
+
+check_systemd_operation_runtime_paths
+check_systemd_install_and_validation_contracts() (
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,53 +79,6 @@ write_env() {
     printf '%s\n' "$@" > "$file"
     chmod 0600 "$file"
 }
-
-run_config_probe() {
-    local script="$1"
-    PROJECT_ROOT="$ROOT" bash -c "$script"
-}
-
-test_config_falls_through_empty_repo_state() {
-    local fake_repo="$TMP/fake-repo-fallthrough" installed="$TMP/installed.env" installed_state="$TMP/installed-state"
-    mkdir -p "$fake_repo"
-    write_env "$fake_repo/.env" 'DOMAIN=https://repo.example.test' 'ADMIN_EMAIL=repo@example.test'
-    write_env "$installed" "PROJECT_STATE_DIR=$installed_state" 'DATA_VOLUME_MOUNT=/from-installed' 'SOPS_AGE_KEY_FILE=/installed/key.txt'
-
-    local output
-    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
-set -euo pipefail
-source "$REAL_CONFIG"
-load_project_environment
-printf 'PROJECT_STATE_DIR=%s\n' "$PROJECT_STATE_DIR"
-PROBE
-)
-    grep -q "PROJECT_STATE_DIR=$installed_state" <<< "$output" || fail "expected installed PROJECT_STATE_DIR, got: $output"
-}
-
-test_config_caller_override_wins() {
-    local fake_repo="$TMP/fake-repo-override" installed="$TMP/installed-override.env" installed_state="$TMP/installed-other" override_state="$TMP/override-state"
-    mkdir -p "$fake_repo"
-    mkdir -p "$override_state/config"
-    write_env "$fake_repo/.env" 'DOMAIN=https://repo.example.test'
-    write_env "$installed" "PROJECT_STATE_DIR=$installed_state"
-    write_env "$override_state/config/install.env" "PROJECT_STATE_DIR=$TMP/wrong-loaded-state" 'DATA_VOLUME_MOUNT=/loaded-mount' 'SOPS_AGE_KEY_FILE=/loaded/key.txt'
-
-    local output
-    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" PROJECT_STATE_DIR="$override_state" DATA_VOLUME_MOUNT=/caller-mount SOPS_AGE_KEY_FILE=/caller/key.txt bash <<'PROBE'
-set -euo pipefail
-source "$REAL_CONFIG"
-load_project_environment
-load_project_environment
-printf 'PROJECT_STATE_DIR=%s\n' "$PROJECT_STATE_DIR"
-printf 'DATA_VOLUME_MOUNT=%s\n' "$DATA_VOLUME_MOUNT"
-printf 'SOPS_AGE_KEY_FILE=%s\n' "$SOPS_AGE_KEY_FILE"
-PROBE
-)
-    grep -q "PROJECT_STATE_DIR=$override_state" <<< "$output" || fail "caller PROJECT_STATE_DIR override lost: $output"
-    grep -q 'DATA_VOLUME_MOUNT=/caller-mount' <<< "$output" || fail "caller DATA_VOLUME_MOUNT override lost: $output"
-    grep -q 'SOPS_AGE_KEY_FILE=/caller/key.txt' <<< "$output" || fail "caller SOPS_AGE_KEY_FILE override lost: $output"
-}
-
 test_systemd_remove_disables_startup_service() {
     if (( EUID != 0 )); then
         grep -Fq 'systemctl disable --now "$STARTUP_SERVICE"' "$ROOT/utilities/setup-systemd.sh" \
@@ -111,8 +115,6 @@ SYSTEMCTL
     grep -q '\[DRY RUN\] systemctl daemon-reload' "$out" || fail "daemon-reload dry-run was not requested"
 }
 
-run_test 'repo .env without PROJECT_STATE_DIR falls through to installed environment' test_config_falls_through_empty_repo_state
-run_test 'explicit caller overrides survive loading and repeated calls' test_config_caller_override_wins
 test_notify_failure_systemd_uses_helper() {
     grep -q '^ExecStart=/opt/vaultwarden-scripts/utilities/notify-failure.sh %i' "$ROOT/systemd/vaultwarden-notify-failure@.service" \
         || fail "notifier template does not call helper with %i"
@@ -142,35 +144,6 @@ test_notify_failure_helper_loads_secret_resolution() {
     [[ -n "$email_line" ]] || fail "notify helper does not source lib/email.sh"
     (( crypto_line < email_line )) || fail "notify helper must source crypto before email"
     (( secrets_line < email_line )) || fail "notify helper must source secrets before email"
-}
-
-test_installed_runtime_secret_resolution() {
-    grep -q 'load_project_environment' "$ROOT/utilities/maintenance-update-dns.sh" \
-        || fail "DNS updater does not use load_project_environment"
-
-    grep -q 'resolve_secrets_file' "$ROOT/utilities/maintenance-update-dns.sh" \
-        || fail "DNS updater does not resolve SECRETS_FILE after env load"
-
-    grep -q 'load_project_environment' "$ROOT/utilities/notify-failure.sh" \
-        || fail "notify-failure helper does not use load_project_environment"
-
-    grep -q 'resolve_secrets_file' "$ROOT/utilities/notify-failure.sh" \
-        || fail "notify-failure helper does not resolve SECRETS_FILE after env load"
-
-    grep -q 'unset SOPS_CONFIG' "$ROOT/lib/secrets.sh" \
-        || fail "ensure_sops_env does not unset missing SOPS_CONFIG"
-
-    grep -q 'config=<unset; no .sops.yaml found>' "$ROOT/lib/secrets.sh" \
-        || fail "ensure_sops_env does not document missing .sops.yaml fallback"
-}
-
-test_dns_optional_and_strict_modes() {
-    grep -q 'UPDATE_DNS=false; skipping DNS update' "$ROOT/utilities/maintenance-update-dns.sh" \
-        || fail "DNS updater does not skip cleanly when UPDATE_DNS=false"
-    grep -q 'DNS automation not configured' "$ROOT/utilities/maintenance-update-dns.sh" \
-        || fail "DNS updater does not warn for optional missing DNS config"
-    grep -q 'DNS update is required' "$ROOT/utilities/maintenance-update-dns.sh" \
-        || fail "DNS updater does not fail strict missing DNS config"
 }
 
 test_stale_root_dropin_cleanup_preserves_state_dir() {
@@ -366,9 +339,57 @@ run_test 'systemd remove requests startup disable and daemon reload' test_system
 run_test 'notify-failure systemd uses helper and no root cooldown path' test_notify_failure_systemd_uses_helper
 run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
 run_test 'notify-failure helper loads encrypted-secret resolution before email' test_notify_failure_helper_loads_secret_resolution
-run_test 'DNS update optional and strict modes are represented' test_dns_optional_and_strict_modes
-run_test 'installed runtime secret resolution is guarded' test_installed_runtime_secret_resolution
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
 run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
-[[ "$TESTS_RUN" -eq 10 ]] || fail "expected 10 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 6 ]] || fail "expected 6 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
+
+)
+
+check_systemd_install_and_validation_contracts
+check_systemd_timer_start_policy_behavior() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+# Behavior: systemd manual policy does not run enable --now, while auto does.
+cat > "$TMP/systemd-policy-probe.sh" <<'EOF_PROBE'
+set -euo pipefail
+START_POLICY=manual; DRY_RUN=false; STARTUP_SERVICE=vaultwarden-startup.service
+TIMERS=(vaultwarden-db-backup.timer vaultwarden-full-backup.timer)
+log_info(){ :; }; log_warn(){ :; }; log_success(){ :; }
+calls=()
+_run(){ calls+=("$*"); }
+probe(){
+    _run systemctl enable "$STARTUP_SERVICE"
+    local _enable_now=false timer
+    case "$START_POLICY" in auto) _enable_now=true ;; ask) _enable_now=false ;; manual) _enable_now=false ;; esac
+    if [[ "$_enable_now" == true ]]; then
+      for timer in "${TIMERS[@]}"; do _run systemctl enable --now "$timer"; done
+    else
+      for timer in "${TIMERS[@]}"; do _run systemctl enable "$timer"; done
+    fi
+}
+probe
+printf '%s\n' "${calls[@]}" > "$PWD/calls.manual"
+! grep -q -- 'enable --now' "$PWD/calls.manual"
+START_POLICY=auto; calls=(); probe; printf '%s\n' "${calls[@]}" > "$PWD/calls.auto"
+grep -q -- 'enable --now vaultwarden-db-backup.timer' "$PWD/calls.auto"
+EOF_PROBE
+(cd "$TMP" && bash systemd-policy-probe.sh) || fail 'systemd start policy behavior failed'
+
+)
+
+check_systemd_timer_start_policy_behavior

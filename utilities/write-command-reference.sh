@@ -15,6 +15,16 @@
 
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 5 )); then
+    for bash5 in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        if [[ -x "$bash5" ]]; then
+            exec "$bash5" "$0" "$@"
+        fi
+    done
+fi
+PATH="$(dirname "$BASH"):$PATH"
+export PATH
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_FILE="${SCRIPT_DIR}/docs/COMMAND-REFERENCE.md"
 

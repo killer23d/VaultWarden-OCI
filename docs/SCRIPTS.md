@@ -829,20 +829,18 @@ All common operations have Makefile shortcuts. Run `make help` for the normal ad
 | `make uninstall-dry-run` | `sudo utilities/uninstall-vaultwarden.sh run --dry-run` | Preview what uninstall would remove (no changes) |
 | `make uninstall` | `sudo utilities/uninstall-vaultwarden.sh run` | Full uninstall — removes containers, data, systemd units (DESTRUCTIVE) |
 | `make dev-setup` | Copy `.env.example` and override template | Prepare local development environment |
-| `make test` | `./tests/run-tests.sh all` + `docker compose config` | Run local tests |
+| `./tests/run-tests.sh all` | explicit tests inventory | Run the consolidated shell regression suite |
 | `make test-config` | `docker compose config > /dev/null` | Validate merged Docker Compose config (exits non-zero on error) |
 | `make dry-run` | `./startup.sh --dry-run` | Preview startup without executing |
 | `make clean` | `rm -f setup.log` | Remove generated setup log |
 | `make clean-all` | `rm -f setup.log` | Remove generated setup log after confirmation |
 | `sudo make prune` | `docker system prune -f` | Remove unused Docker resources only |
-| `make lint` | `shellcheck -S warning *.sh lib/*.sh` | Run shellcheck over all shell scripts (install: `sudo apt install shellcheck`) |
 | `make diagnose` | — | Full diagnostic dump: versions, key status, disk, containers, last backup, recent logs |
 | `make info` | — | Show domain, email, project state dir, service status, disk usage |
 | `make shell` | `docker compose exec [SERVICE] sh` | Open shell in a container (default: `vaultwarden`; pass `SERVICE=caddy`) |
 | `make version` | — | Show version info for all containers and Docker |
 | `make watch` | `watch -n 5 make status` | Auto-refresh service status every 5 s |
 | `make monitor` | `docker compose logs -f -t` | Follow all service logs in real-time |
-| `make fmt` | — | Informational Makefile formatting note |
 | `make config` | — | Show non-sensitive `.env` variables and service list |
 
 > **`make test-config`** is the quickest pre-deployment sanity check. It runs `docker compose config` against the merged Compose files and exits non-zero if the configuration is invalid — useful before `make up` or after editing any `.yml` file.

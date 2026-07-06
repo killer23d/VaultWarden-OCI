@@ -11,7 +11,7 @@
 #   sudo make health         — Run health checks
 #   sudo make logs           — Follow service logs
 #   make help                — Show normal admin/day-2 targets
-#   make help-all            — Show every target, including dashboard/API/dev targets
+#   make help-all            — Show every target, including dashboard/API/advanced targets
 # ===========================================================================
 
 # ── Colour helpers ──────────────────────────────────────────────────────────
@@ -43,7 +43,7 @@ DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
-        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email test-unit \
+        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email \
         up down restart start stop safe-restart status operations \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
@@ -56,7 +56,7 @@ DATA_DEVICE ?=
         db-maint db-backup \
         install-systemd remove-systemd systemd-status systemd-validate timers schedule \
         breakglass-create breakglass-status breakglass-remove \
-        dev-setup fix-permissions test test-config dry-run fmt lint shellcheck \
+        dev-setup fix-permissions test-config dry-run \
         info version shell config diagnose \
         clean clean-all prune \
         unban crowdsec-status crowdsec-alerts security-report \
@@ -64,12 +64,12 @@ DATA_DEVICE ?=
         docs backup-manifest
 
 # ── Root invocation policy ────────────────────────────────────────────────────
-# Most developer/test targets should run as the normal login user to avoid repository
-# ownership drift from accidental `sudo make ...`.
+# Most non-operator helper targets should run as the normal login user to avoid
+# repository ownership drift from accidental `sudo make ...`.
 #
 # Production/admin lifecycle and day-2 operations are root-operated. This guard is
 # intentionally target-aware: it allows `sudo make up` / `sudo make restart` while
-# still blocking accidental root execution of developer/test targets.
+# still blocking accidental root execution of targets that should stay non-root.
 #
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
@@ -180,10 +180,10 @@ help: ## Show normal admin/day-2 commands
 	@echo "  $(GREEN)breakglass-create$(NC)        Create emergency admin account"
 	@echo "  $(GREEN)breakglass-status$(NC)        Check emergency admin account"
 	@echo ""
-	@echo "$(CYAN)Need everything? Run $(GREEN)make help-all$(NC) for dashboard/stable API, advanced admin, developer/test, and legacy targets.$(NC)"
+	@echo "$(CYAN)Need everything? Run $(GREEN)make help-all$(NC) for dashboard/stable API, advanced admin, validation, and legacy targets.$(NC)"
 	@echo ""
 
-help-all: ## Show every target, including dashboard/API, advanced, dev, and legacy commands
+help-all: ## Show every target, including dashboard/API, advanced, validation, and legacy commands
 	@echo ""
 	@echo "$(BLUE)VaultWarden-OCI — All Targets$(NC)"
 	@echo ""
@@ -196,7 +196,7 @@ help-all: ## Show every target, including dashboard/API, advanced, dev, and lega
 	@echo "  normal admin        shown by make help"
 	@echo "  dashboard/stable API retained for dashboard and automation compatibility"
 	@echo "  advanced admin      powerful or specialized operations"
-	@echo "  developer/test      local validation and docs generation"
+	@echo "  validation/docs     operator diagnostics and generated documentation"
 	@echo "  legacy/deprecated   backward-compatible aliases"
 	@echo ""
 
@@ -834,17 +834,8 @@ breakglass-remove: ## Remove break-glass admin account
 	@utilities/setup-secrets.sh breakglass remove
 
 # ===========================================================================
-##@ Developer/Test — Testing & Development
+##@ Operator Validation + Development Utilities
 # ===========================================================================
-
-test: ## Run local tests and docker-compose config validation
-	@echo "$(BLUE)Running test suite...$(NC)"
-	@$(MAKE) test-unit
-	@$(MAKE) test-config
-	@echo "$(GREEN)All tests passed.$(NC)"
-
-test-unit: ## Run non-destructive shell unit and integration tests
-	@./tests/run-tests.sh all
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)
@@ -854,20 +845,6 @@ test-config: ## Validate docker-compose configuration
 dry-run: ## Show what startup would do without executing
 	@echo "$(BLUE)Startup dry run...$(NC)"
 	@./startup.sh --dry-run
-
-fmt: ## Format Makefile (check only — no auto-format tool available)
-	@echo "$(YELLOW)Note: No auto-formatter for Makefiles. Use consistent tab indentation.$(NC)"
-
-lint: ## Run shellcheck on all shell scripts
-	@echo "$(BLUE)Running shellcheck...$(NC)"
-	@if command -v shellcheck >/dev/null 2>&1; then \
-		find . -name "*.sh" -not -path "./.git/*" -exec shellcheck {} \; && \
-		echo "$(GREEN)All scripts passed shellcheck.$(NC)"; \
-	else \
-		echo "$(YELLOW)shellcheck not installed. Install with: sudo apt-get install shellcheck$(NC)"; \
-	fi
-
-shellcheck: lint ## Alias for lint
 
 # ===========================================================================
 ##@ Normal Admin + Dashboard Stable API — Information & Diagnostics

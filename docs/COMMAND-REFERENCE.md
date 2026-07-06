@@ -13,7 +13,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | Target | Description |
 |--------|-------------|
 | `make help` |  Show normal admin/day-2 commands |
-| `make help-all` |  Show every target, including dashboard/API, advanced, dev, and legacy commands |
+| `make help-all` |  Show every target, including dashboard/API, advanced, validation, and legacy commands |
 | `make dev-setup` |  Set up development environment (.env + docker-compose.override.yml) |
 | `make fix-permissions` |  Repair known VaultWarden-OCI permission drift |
 | `make init-secrets` |  Initialize secrets file (interactive; root required) |
@@ -80,13 +80,8 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make breakglass-create` |  Create emergency break-glass admin account |
 | `make breakglass-status` |  Check break-glass admin account status |
 | `make breakglass-remove` |  Remove break-glass admin account |
-| `make test` |  Run local tests and docker-compose config validation |
-| `make test-unit` |  Run non-destructive shell unit and integration tests |
 | `make test-config` |  Validate docker-compose configuration |
 | `make dry-run` |  Show what startup would do without executing |
-| `make fmt` |  Format Makefile (check only — no auto-format tool available) |
-| `make lint` |  Run shellcheck on all shell scripts |
-| `make shellcheck` |  Alias for lint |
 | `make info` |  Show deployment information |
 | `make version` |  Show current VaultWarden-OCI version |
 | `make shell` |  Open a shell in the vaultwarden container |

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Consolidated lifecycle regression suite.
+set -euo pipefail
+
+check_start_policy_contracts() (
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
@@ -412,3 +416,146 @@ reject '--skip-ops-lock' "$MAINT_SERVICE" 'maintenance service must not pass pub
 require 'maintenance\.sh run --comprehensive --email' "$MAINT_SERVICE" 'maintenance service must delegate directly to maintenance.sh'
 require 'exits[[:space:]]+75' "$MAINT_SERVICE" 'maintenance service must document clean lock-contention skip'
 require '^SuccessExitStatus=75$' "$MAINT_SERVICE" 'maintenance service must treat lock-contention skip as success'
+
+)
+
+check_start_policy_contracts
+check_startup_lifecycle_guards() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+require() {
+  grep -Eq -- "$1" "$2" || fail "$3"
+}
+
+reject() {
+  ! grep -Eq -- "$1" "$2" || fail "$3"
+}
+
+STARTUP="$ROOT/startup.sh"
+SAFE_RESTART="$ROOT/utilities/safe-restart.sh"
+MAKEFILE="$ROOT/Makefile"
+STARTUP_UNIT="$ROOT/systemd/vaultwarden-startup.service"
+
+require 'source "\$\{SCRIPT_DIR\}/lib/operations\.sh"' "$STARTUP" \
+  "startup.sh must source the operation guard library"
+require '--id startup' "$STARTUP" "startup.sh must use the startup operation id"
+require '--specific-lock /run/lock/vaultwarden-startup\.lock' "$STARTUP" \
+  "startup.sh must use the lifecycle-specific lock"
+require 'utilities/env-edit\.sh" sync' "$STARTUP" \
+  "startup.sh must run env sync inside the lifecycle operation"
+
+awk '
+  /_startup_acquire_operation_guard/ { guard=NR }
+  /if \[\[ "\$DO_DOWN" == "true" \]\]/ { stop=NR }
+  END { exit !(guard && stop && guard < stop) }
+' "$STARTUP" || fail "startup stop path must acquire guard before docker compose down"
+
+awk '
+  /^up: /,/^start:/ {
+    if (/\$\(MAKE\) sync-env/) bad=1
+    if (/\.\/startup\.sh/) startup=1
+  }
+  END { exit !(startup && !bad) }
+' "$MAKEFILE" || fail "make up must not run env sync before guarded startup.sh"
+
+awk '
+  /^restart: /,/^safe-restart:/ {
+    if (/\$\(MAKE\) sync-env/) bad=1
+    if (/\.\/startup\.sh --force/) startup=1
+  }
+  END { exit !(startup && !bad) }
+' "$MAKEFILE" || fail "make restart must not run env sync before guarded startup.sh"
+
+awk '
+  /^down: /,/^stop:/ { if (/\.\/startup\.sh stop/) found=1 }
+  END { exit !found }
+' "$MAKEFILE" || fail "make down must route through guarded startup.sh stop"
+
+require 'source "\$\{PROJECT_ROOT\}/lib/operations\.sh"' "$SAFE_RESTART" \
+  "safe-restart must source operation guards"
+require '--id startup' "$SAFE_RESTART" "safe-restart must hold the lifecycle global operation"
+require 'operation_set_phase "rollback"' "$SAFE_RESTART" \
+  "safe-restart rollback must remain inside the operation scope"
+reject '--specific-lock /run/lock/vaultwarden-startup\.lock' "$SAFE_RESTART" \
+  "safe-restart parent must not hold the startup-specific lock before nested startup.sh"
+
+require '^SuccessExitStatus=0 75$' "$STARTUP_UNIT" \
+  "startup systemd unit must treat contention exit 75 as success"
+require '^ReadWritePaths=.*@PROJECT_STATE_DIR@' "$STARTUP_UNIT" \
+  "startup systemd unit must expose project state path"
+require '^ReadWritePaths=.*/etc/vaultwarden' "$STARTUP_UNIT" \
+  "startup systemd unit must expose runtime env path"
+require '^ReadWritePaths=.*/run/lock' "$STARTUP_UNIT" \
+  "startup systemd unit must expose operation lock path"
+require '^ReadWritePaths=.*/run/vaultwarden-oci' "$STARTUP_UNIT" \
+  "startup systemd unit must expose operation state path"
+require '^RuntimeDirectory=vaultwarden-oci$' "$STARTUP_UNIT" \
+  "startup systemd unit must pre-create /run/vaultwarden-oci"
+
+printf 'PASS: startup lifecycle operation guards\n'
+
+)
+
+check_startup_lifecycle_guards
+check_start_policy_argument_and_manual_restore_behavior() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+# Behavior: --start-policy missing value fails cleanly, not with an unbound variable.
+set +e
+bash "$ROOT/utilities/restore-run.sh" latest --start-policy >"$TMP/restore-missing.out" 2>&1
+rc=$?
+set -e
+(( rc != 0 )) || fail 'restore --start-policy without value unexpectedly succeeded'
+grep -q -- '--start-policy requires a value' "$TMP/restore-missing.out" || fail 'restore missing start-policy value did not print clean error'
+
+set +e
+bash "$ROOT/utilities/setup-systemd.sh" install --start-policy >"$TMP/systemd-missing.out" 2>&1
+rc=$?
+set -e
+(( rc != 0 )) || fail 'setup-systemd --start-policy without value unexpectedly succeeded'
+grep -q -- '--start-policy requires a value' "$TMP/systemd-missing.out" || fail 'systemd missing start-policy value did not print clean error'
+
+set +e
+bash -c 'log_error(){ echo "$*" >&2; }; _VW_DEFAULT_DATA_MOUNT=/mnt/vw-data; source "$1"; _mv_parse_args run --start-policy' _ "$ROOT/lib/migrate.sh" >"$TMP/migrate-missing.out" 2>&1
+rc=$?
+set -e
+(( rc != 0 )) || fail 'migrate --start-policy without value unexpectedly succeeded'
+grep -q -- '--start-policy requires a value' "$TMP/migrate-missing.out" || fail 'migrate missing start-policy value did not print clean error'
+
+# Behavior: restore manual start policy declines startup gate and prints checklist.
+cat > "$TMP/restore-nostart-probe.sh" <<EOF_PROBE
+set -euo pipefail
+START_POLICY=manual
+log_warn(){ printf '%s\n' "\$*" >> "$TMP/restore-nostart.log"; }
+log_info(){ printf '%s\n' "\$*" >> "$TMP/restore-nostart.log"; }
+$(_extract_func "$ROOT/utilities/restore-run.sh" _restore_print_manual_start_checklist)
+$(_extract_func "$ROOT/utilities/restore-run.sh" _restore_should_start_services)
+if _restore_should_start_services; then exit 1; fi
+EOF_PROBE
+bash "$TMP/restore-nostart-probe.sh" || fail 'restore --no-start/manual policy did not skip startup gate'
+grep -q 'sudo ./startup.sh --skip-pull' "$TMP/restore-nostart.log" || fail 'restore manual start policy did not print startup command'
+
+)
+
+check_start_policy_argument_and_manual_restore_behavior

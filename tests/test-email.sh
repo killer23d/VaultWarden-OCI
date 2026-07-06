@@ -1,4 +1,38 @@
 #!/usr/bin/env bash
+# Consolidated email regression suite.
+set -euo pipefail
+
+check_maintenance_email_root_contract() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf 'PASS: %s\n' "$*"; }
+
+script="utilities/maintenance-email.sh"
+
+[[ -f "$script" ]] || fail "$script not found"
+
+grep -Fq 'require_root "$@"' "$script" \
+    || fail "maintenance email diagnostic must require root"
+
+! grep -Fq 'refuse_root_for_user_command' "$script" \
+    || fail "maintenance email diagnostic must not refuse root"
+
+grep -Fq 'sudo ./maintenance.sh test-email' "$script" \
+    || fail "dispatcher help must show sudo ./maintenance.sh test-email"
+
+grep -Fq 'sudo utilities/maintenance-email.sh' "$script" \
+    || fail "direct help must show sudo utilities/maintenance-email.sh"
+
+pass "maintenance-email.sh is root-operated"
+
+)
+
+check_maintenance_email_root_contract
+check_email_delivery_refactor_contracts() (
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS=0
@@ -54,7 +88,11 @@ run_case 'empty sender and missing attachment fail before curl' "$common_prelude
 run_case 'CR/LF header injection and invalid filename rejected' "$common_prelude; reset_env; tmp=\$(mktemp); echo hi >\"\$tmp\"; ! send_smtp_attachment \$'bad\n@example.com' subj body \"\$tmp\" good.txt; ! send_smtp_attachment admin@example.com subj body \"\$tmp\" 'bad\"name'; rm -f \"\$tmp\""
 run_case 'clear_email_rate_limit removes only targeted subject' "$common_prelude; reset_env; dir=\$(_resolve_rate_limit_dir); s1=\$(_normalise_email_subject one); s2=\$(_normalise_email_subject two); f1=\$(_rate_limit_file_for_subject \"\$s1\" \"\$dir\"); f2=\$(_rate_limit_file_for_subject \"\$s2\" \"\$dir\"); date +%s >\"\$f1\"; date +%s >\"\$f2\"; clear_email_rate_limit one; [[ ! -e \"\$f1\" && -e \"\$f2\" ]]; rm -f \"\$f2\""
 run_case 'caller EXIT trap preserved' "$common_prelude; reset_env; _smtp_upload_direct(){ return 0; }; trap 'echo caller-exit' EXIT; before=\$(trap -p EXIT); EMAIL_MODE=direct send_email admin@example.com subj body >/dev/null; after=\$(trap -p EXIT); trap - EXIT; [[ \"\$before\" == \"\$after\" ]]"
-run_case 'obsolete symbols absent from email implementation' "cd \"$ROOT\"; pattern='_email_driver_.*_attach'\"'ment|_dispatch_email_with_attach'\"'ment|_smtp_send_with_attach'\"'ment|_smtp_curl_up'\"'load|_resolve_smtp_meth'\"'od|_email_driver_post'\"'fix|mail '\"'-s|emergency API by'\"'pass'; ! rg -n \"\$pattern\" lib/email.sh"
+run_case 'obsolete symbols absent from email implementation' "cd \"$ROOT\"; pattern='_email_driver_.*_attach'\"'ment|_dispatch_email_with_attach'\"'ment|_smtp_send_with_attach'\"'ment|_smtp_curl_up'\"'load|_resolve_smtp_meth'\"'od|_email_driver_post'\"'fix|mail '\"'-s|emergency API by'\"'pass'; ! grep -En \"\$pattern\" lib/email.sh"
 
 echo "PASS=$PASS FAIL=$FAIL"
 (( FAIL == 0 ))
+
+)
+
+check_email_delivery_refactor_contracts
