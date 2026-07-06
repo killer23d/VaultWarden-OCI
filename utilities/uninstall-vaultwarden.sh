@@ -4,7 +4,7 @@
 # Destructive by design. This script removes the Docker stack, systemd units,
 # runtime secrets, installed configs, persistent state, CrowdSec integration,
 # firewall rules, optional data-volume mount wiring, and project-installed
-# helper packages where safe.
+# helper binaries where safe. Shared host tooling such as Docker is preserved.
 
 set -euo pipefail
 
@@ -44,10 +44,16 @@ if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/operations.sh" ]]; then
     source "${PROJECT_ROOT_FALLBACK}/lib/operations.sh"
 fi
 
-die() { log_error "$*"; exit 1; }
+die()     { log_error "$*"; exit 1; }
 info()    { log_info "$@"; }
 success() { log_success "$@"; }
 warn()    { log_warn "$@"; }
+
+I_HAVE_SAVED_RECOVERY_KIT=false
+FORCE=false
+DRY_RUN=false
+TEST_RESET=false
+UNINSTALL_OPERATION_HELD=false
 
 _uninstall_err_trap() {
     local rc=$?
@@ -56,9 +62,21 @@ _uninstall_err_trap() {
 }
 trap _uninstall_err_trap ERR
 
-I_HAVE_SAVED_RECOVERY_KIT=false
-FORCE=false
-DRY_RUN=false
+_release_uninstall_operation() {
+    local rc="${1:-0}"
+    [[ "$UNINSTALL_OPERATION_HELD" == "true" ]] || return 0
+    if declare -f operation_release >/dev/null 2>&1; then
+        operation_release "$rc" || true
+    fi
+    UNINSTALL_OPERATION_HELD=false
+}
+
+_uninstall_exit_trap() {
+    local rc=$?
+    trap - EXIT
+    _release_uninstall_operation "$rc"
+    exit "$rc"
+}
 
 show_help() {
     cat <<'EOH'
@@ -68,18 +86,27 @@ USAGE:
     sudo bash ./utilities/uninstall-vaultwarden.sh run [OPTIONS]
 
 DESCRIPTION:
-    Fully removes VaultWarden-OCI managed artifacts from this host:
+    Fully removes VaultWarden-OCI managed stack artifacts from this host:
       - Docker compose stack, managed containers, networks, volumes, and runtime secrets
       - systemd timers/services/drop-ins, /opt scripts, and /etc/vaultwarden
       - persistent VaultWarden state directory and optional data-volume fstab/mount wiring
-      - CrowdSec services/packages/config/state, project firewall rules, swapfile
-      - project-installed helper packages where safe
+      - CrowdSec services/packages/config/state, project firewall rules, and swapfile
+      - standalone helper binaries uniquely installed by this project where safe
+
+    Docker itself, /var/lib/docker, the docker group, common admin packages, SSH
+    configuration, and unrelated firewall rules are intentionally preserved.
 
 SUBCOMMANDS:
     run    Perform the idempotent uninstall
     help   Show this help
 
 OPTIONS (used after 'run'):
+    --test-reset
+        Remove the stack and generated local installation artifacts, but preserve
+        the Git checkout so the same branch can be installed again immediately.
+        This is intended for repeated production-host acceptance testing. It does
+        not restore the VM to a pristine OCI image or uninstall shared host tooling.
+
     --i-have-saved-my-recovery-kit
         Confirm that all Age keys shown by this script have been saved outside
         this host. Required when any managed Age key exists, unless --force is used.
@@ -98,6 +125,8 @@ OPTIONS (used after 'run'):
 
 EXAMPLES:
     sudo bash ./utilities/uninstall-vaultwarden.sh run --dry-run
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --test-reset --dry-run
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit
     sudo bash ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
     sudo bash ./utilities/uninstall-vaultwarden.sh run --force
 EOH
@@ -114,6 +143,7 @@ case "$1" in
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true; shift ;;
+                --test-reset) TEST_RESET=true; shift ;;
                 --force) FORCE=true; I_HAVE_SAVED_RECOVERY_KIT=true; shift ;;
                 --dry-run) DRY_RUN=true; shift ;;
                 --version|-V)
@@ -157,6 +187,60 @@ PROJECT_BASENAME="$(basename "$PROJECT_DIR")"
 INSTALLED_ENV="/etc/vaultwarden/vaultwarden.env"
 DEFAULT_STATE_DIR="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
 DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/mnt/vw-data}"
+
+MANAGED_TIMERS=(
+    vaultwarden-maintenance.timer
+    vaultwarden-db-backup.timer
+    vaultwarden-full-backup.timer
+    vaultwarden-health.timer
+    vaultwarden-dns-update.timer
+    vaultwarden-firewall-update.timer
+)
+
+MANAGED_SERVICES=(
+    vaultwarden-maintenance.service
+    vaultwarden-db-backup.service
+    vaultwarden-full-backup.service
+    vaultwarden-health.service
+    vaultwarden-dns-update.service
+    vaultwarden-firewall-update.service
+    vaultwarden-notify-failure.service
+    vaultwarden-notify-failure@.service
+    vaultwarden-iptables.service
+    vaultwarden-startup.service
+)
+
+MANAGED_CONTAINERS=(
+    vaultwarden_init
+    vaultwarden_app
+    vaultwarden_caddy
+    vaultwarden_postfix
+)
+
+MANAGED_NETWORKS=(
+    vaultwarden_network
+    vaultwarden_egress_network
+    caddy_external_network
+    postfix_relay_network
+)
+
+# /28 is the current compose contract. /16 entries are retained for cleanup of
+# historical installs and the setup-firewall deterministic baseline.
+MANAGED_IPV4_SUBNETS=(
+    172.21.0.0/28
+    172.22.0.0/28
+    172.23.0.0/28
+    172.21.0.0/16
+    172.22.0.0/16
+    172.23.0.0/16
+)
+
+CROWDSEC_PACKAGES=(
+    crowdsec-cloudflare-worker-bouncer
+    crowdsec-firewall-bouncer-iptables
+    crowdsec-firewall-bouncer-nftables
+    crowdsec
+)
 
 _read_env_value() {
     local key="$1" file="$2"
@@ -227,6 +311,7 @@ resolve_paths() {
     STORAGE_MODE="boot-volume"
     DATA_MOUNT_MOUNTED=false
     DATA_MOUNT_SENTINEL=false
+
     if [[ -n "$DATA_VOLUME_DEVICE" ]]; then
         STORAGE_MODE="separate block-storage"
         [[ "$DATA_VOLUME_MOUNT" == /* ]] || warn "DATA_VOLUME_MOUNT is not absolute/safe: ${DATA_VOLUME_MOUNT:-<unset>}"
@@ -367,38 +452,26 @@ _run_if_exists() {
     command -v "$cmd" >/dev/null 2>&1
 }
 
+_path_is_inside() {
+    local child="$1" parent="$2"
+    [[ "$child" == "$parent" || "$child" == "$parent"/* ]]
+}
+
+_backup_dir_is_external_to_state() {
+    [[ -n "${BACKUP_DIR:-}" ]] || return 1
+    ! _path_is_inside "$BACKUP_DIR" "$PROJECT_STATE_DIR"
+}
+
 disable_systemd_units() {
     info "Step 1: Disabling and removing VaultWarden systemd units..."
 
-    local timers=(
-        vaultwarden-maintenance.timer
-        vaultwarden-db-backup.timer
-        vaultwarden-full-backup.timer
-        vaultwarden-health.timer
-        vaultwarden-dns-update.timer
-        vaultwarden-firewall-update.timer
-    )
-    local services=(
-        vaultwarden-maintenance.service
-        vaultwarden-db-backup.service
-        vaultwarden-full-backup.service
-        vaultwarden-health.service
-        vaultwarden-dns-update.service
-        vaultwarden-firewall-update.service
-        vaultwarden-notify-failure.service
-        vaultwarden-notify-failure@.service
-        vaultwarden-iptables.service
-        vaultwarden-startup.service
-    )
-    local units=("${timers[@]}" "${services[@]}")
     local unit dest dropin
-
     if ! _run_if_exists systemctl; then
         warn "systemctl not found — skipping systemd cleanup."
         return 0
     fi
 
-    for unit in "${timers[@]}" vaultwarden-startup.service; do
+    for unit in "${MANAGED_TIMERS[@]}" vaultwarden-startup.service; do
         if systemctl is-enabled "$unit" >/dev/null 2>&1 || systemctl is-active "$unit" >/dev/null 2>&1; then
             systemctl disable --now "$unit" 2>/dev/null \
                 && success "Disabled: $unit" \
@@ -406,12 +479,12 @@ disable_systemd_units() {
         fi
     done
 
-    for unit in "${services[@]}"; do
+    for unit in "${MANAGED_SERVICES[@]}"; do
         [[ "$unit" == *"@"* ]] && continue
         systemctl stop "$unit" 2>/dev/null || true
     done
 
-    for unit in "${units[@]}"; do
+    for unit in "${MANAGED_TIMERS[@]}" "${MANAGED_SERVICES[@]}"; do
         dest="/etc/systemd/system/${unit}"
         if [[ -f "$dest" ]]; then
             rm -f "$dest" && success "Removed unit file: $dest"
@@ -429,7 +502,7 @@ disable_systemd_units() {
     done
 
     systemctl reset-failed 'vaultwarden-notify-failure@*.service' 2>/dev/null || true
-    for unit in "${services[@]}"; do
+    for unit in "${MANAGED_SERVICES[@]}"; do
         [[ "$unit" == *"@"* ]] && continue
         systemctl reset-failed "$unit" 2>/dev/null || true
     done
@@ -456,17 +529,17 @@ remove_docker_stack() {
         docker compose -f "${PROJECT_DIR}/docker-compose.yml" down \
             --volumes --remove-orphans --timeout 30 2>/dev/null \
             && success "Docker Compose stack stopped and volumes removed." \
-            || warn "docker compose down had errors (containers may already be gone)."
+            || warn "docker compose down had errors; named and labelled cleanup will continue."
     fi
 
     local project_name="${COMPOSE_PROJECT_NAME_ENV:-vaultwarden-oci}"
-    local containers=(vaultwarden_init vaultwarden_app vaultwarden_caddy vaultwarden_postfix)
     local name cid
-    for name in "${containers[@]}"; do
+    for name in "${MANAGED_CONTAINERS[@]}"; do
         cid="$(docker ps -aq --filter "name=^/${name}$" 2>/dev/null || true)"
         [[ -n "$cid" ]] || continue
         docker rm -f "$cid" 2>/dev/null && success "Removed managed container: $name" || warn "Could not remove container: $name"
     done
+
     while IFS= read -r cid; do
         [[ -n "$cid" ]] || continue
         docker rm -f "$cid" 2>/dev/null && success "Removed compose-labelled container: $cid" || true
@@ -479,75 +552,24 @@ remove_docker_stack() {
         [[ -n "$vol" ]] || continue
         docker volume rm "$vol" 2>/dev/null && success "Removed compose-labelled Docker volume: $vol" || warn "Could not remove Docker volume: $vol"
     done < <(docker volume ls -q --filter "label=com.docker.compose.project=${project_name}" 2>/dev/null || true)
+
     while IFS= read -r vol; do
         [[ -n "$vol" ]] || continue
         docker volume rm "$vol" 2>/dev/null && success "Removed safe-prefix Docker volume: $vol" || true
     done < <(docker volume ls -q 2>/dev/null | awk '/^vaultwarden-oci_/ {print}' || true)
 
     local net
-    local known_networks=(vaultwarden_network vaultwarden_egress_network caddy_external_network postfix_relay_network)
-    for net in "${known_networks[@]}"; do
+    for net in "${MANAGED_NETWORKS[@]}"; do
         docker network rm "$net" 2>/dev/null && success "Removed Docker network: $net" || true
     done
+
     while IFS= read -r net; do
         [[ -n "$net" ]] || continue
         docker network rm "$net" 2>/dev/null && success "Removed compose-labelled Docker network: $net" || true
-    done < <(docker network ls -q --filter "label=com.docker.compose.project=${project_name}" 2>/dev/null | xargs -r docker network inspect --format '{{.Name}}' 2>/dev/null || true)
-    return 0
-}
-
-remove_runtime_artifacts() {
-    info "Step 3: Removing runtime secrets and locks..."
-
-    _safe_rm_rf /run/vaultwarden-oci || true
-
-    rm -f /var/lock/vaultwarden-setup.lock /run/lock/vaultwarden-setup.lock 2>/dev/null || true
-    local lock
-    for lock in \
-        /run/lock/vaultwarden-backup.lock \
-        /run/lock/vaultwarden-operations.lock \
-        /run/lock/vaultwarden-dns-update.lock \
-        /run/lock/vaultwarden-env.lock \
-        /run/lock/vaultwarden-firewall-update.lock \
-        /run/lock/vaultwarden-health.lock \
-        /run/lock/vaultwarden-secrets.lock \
-        /run/lock/vaultwarden-startup.lock \
-        /run/lock/vaultwarden-systemd.lock; do
-        rm -f "$lock" 2>/dev/null || true
-    done
-    success "Removed VaultWarden runtime lock files."
-
-    return 0
-}
-
-_path_is_inside() {
-    local child="$1" parent="$2"
-    [[ "$child" == "$parent" || "$child" == "$parent"/* ]]
-}
-
-_backup_dir_is_external_to_state() {
-    [[ -n "${BACKUP_DIR:-}" ]] || return 1
-    ! _path_is_inside "$BACKUP_DIR" "$PROJECT_STATE_DIR"
-}
-
-remove_installed_files() {
-    info "Step 4: Removing installed files and repository checkout..."
-
-    _safe_rm_rf /opt/vaultwarden-scripts || true
-    _safe_rm_rf /etc/vaultwarden || true
-
-    cd /
-
-    if [[ "$PROJECT_DIR" == */VaultWarden-OCI || "$PROJECT_BASENAME" == "VaultWarden-OCI" ]]; then
-        if _backup_dir_is_external_to_state && _path_is_inside "$BACKUP_DIR" "$PROJECT_DIR"; then
-            warn "Preserving project checkout because external BACKUP_DIR is inside it: $BACKUP_DIR"
-            warn "Move/delete the backup directory manually, then remove the checkout manually if desired: $PROJECT_DIR"
-            return 0
-        fi
-        _safe_rm_rf "$PROJECT_DIR" || true
-    else
-        warn "Project directory does not look like a VaultWarden-OCI checkout; leaving in place: $PROJECT_DIR"
-    fi
+    done < <(
+        docker network ls -q --filter "label=com.docker.compose.project=${project_name}" 2>/dev/null \
+            | xargs -r docker network inspect --format '{{.Name}}' 2>/dev/null || true
+    )
     return 0
 }
 
@@ -575,17 +597,19 @@ _remove_fstab_mount() {
 
     local tmp
     tmp="$(mktemp /etc/fstab.vw-uninstall.XXXXXXXXXX)" || return 1
-    if awk -v mp="$mountpoint" -v src="$source" '!(($2 == mp) || (src != "" && $1 == src)) { print }' /etc/fstab > "$tmp" && mv -f "$tmp" /etc/fstab; then
+    if awk -v mp="$mountpoint" -v src="$source" '!(($2 == mp) || (src != "" && $1 == src)) { print }' /etc/fstab > "$tmp" \
+        && mv -f "$tmp" /etc/fstab; then
         success "Removed fstab entry for data volume: $mountpoint"
     else
         rm -f "$tmp" 2>/dev/null || true
         warn "Could not remove fstab entry for $mountpoint. Remove it manually."
+        return 1
     fi
     return 0
 }
 
 remove_state_and_mount() {
-    info "Step 5: Removing persistent state and optional data-volume mount..."
+    info "Step 3: Removing persistent state and optional data-volume mount..."
 
     if [[ -z "$DATA_VOLUME_DEVICE" ]]; then
         if [[ -d "$PROJECT_STATE_DIR" ]]; then
@@ -616,6 +640,7 @@ remove_state_and_mount() {
     fi
 
     _remove_fstab_mount "$DATA_VOLUME_MOUNT" "$source"
+
     local docker_dropin="/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
     if [[ -f "$docker_dropin" ]]; then
         rm -f "$docker_dropin" && success "Removed Docker mount-guard drop-in: $docker_dropin"
@@ -624,20 +649,22 @@ remove_state_and_mount() {
     _run_if_exists systemctl && systemctl daemon-reload 2>/dev/null || true
 
     if [[ "$mounted" == "true" && "$sentinel" == "true" ]]; then
-        if [[ -f "$DATA_VOLUME_MOUNT/.vw-data-volume" ]] && command -v chattr >/dev/null 2>&1; then
+        if command -v chattr >/dev/null 2>&1; then
             chattr -i "$DATA_VOLUME_MOUNT/.vw-data-volume" 2>/dev/null || true
         fi
-        # Delete contents of the mounted data filesystem, not the mountpoint itself.
+        # Delete contents of the managed filesystem, not the block device itself.
         find "$DATA_VOLUME_MOUNT" -mindepth 1 -maxdepth 1 -xdev -exec rm -rf --one-file-system -- {} +
         success "Removed project data from mounted data volume: $DATA_VOLUME_MOUNT"
     elif [[ "$mounted" == "true" ]]; then
         if [[ "$FORCE" == "true" ]]; then
-            warn "Mounted data volume lacks .vw-data-volume sentinel; --force active, but contents are preserved for safety. Remove manually after verifying identity: $DATA_VOLUME_MOUNT"
-        else
-            die "Mounted $DATA_VOLUME_MOUNT lacks .vw-data-volume sentinel. Aborting before deleting mounted contents. Re-run with --force only after manual verification; contents will still be preserved by default."
+            warn "Mounted data volume lacks .vw-data-volume sentinel; --force active, but contents are preserved for safety."
         fi
+        die "Mounted $DATA_VOLUME_MOUNT lacks .vw-data-volume sentinel. Refusing to delete unknown mounted contents."
     else
         warn "$DATA_VOLUME_MOUNT is not mounted; refusing to recursively delete mountpoint contents."
+        if [[ -d "$DATA_VOLUME_MOUNT" ]] && [[ -n "$(find "$DATA_VOLUME_MOUNT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+            die "Unmounted data mount path is non-empty. Refusing to report a complete uninstall: $DATA_VOLUME_MOUNT"
+        fi
     fi
 
     if [[ "$mounted" == "true" ]]; then
@@ -646,11 +673,99 @@ remove_state_and_mount() {
             success "Unmounted $DATA_VOLUME_MOUNT"
         else
             warn "Normal unmount failed; attempting lazy unmount. Check for open files."
-            umount -l "$DATA_VOLUME_MOUNT" 2>/dev/null && success "Lazy-unmounted $DATA_VOLUME_MOUNT" || warn "Could not unmount $DATA_VOLUME_MOUNT. Run manually after checking open files."
+            umount -l "$DATA_VOLUME_MOUNT" 2>/dev/null \
+                && success "Lazy-unmounted $DATA_VOLUME_MOUNT" \
+                || die "Could not unmount $DATA_VOLUME_MOUNT. Inspect open files and unmount it manually."
         fi
     fi
+
     if [[ -d "$DATA_VOLUME_MOUNT" ]]; then
-        rmdir "$DATA_VOLUME_MOUNT" 2>/dev/null && success "Removed empty mountpoint directory: $DATA_VOLUME_MOUNT" || warn "Mountpoint still exists/non-empty; preserved: $DATA_VOLUME_MOUNT"
+        rmdir "$DATA_VOLUME_MOUNT" 2>/dev/null \
+            && success "Removed empty mountpoint directory: $DATA_VOLUME_MOUNT" \
+            || die "Mountpoint still exists/non-empty after cleanup: $DATA_VOLUME_MOUNT"
+    fi
+    return 0
+}
+
+_repo_artifact_is_preserved_backup() {
+    local path="$1"
+    [[ -n "${BACKUP_DIR:-}" ]] || return 1
+    [[ "$path" == "$BACKUP_DIR" ]] || return 1
+    [[ -d "$BACKUP_DIR" ]] || return 1
+    _backup_dir_is_external_to_state
+}
+
+remove_repo_local_install_artifacts() {
+    [[ "$TEST_RESET" == "true" ]] || return 0
+    info "Step 4: Resetting generated checkout-local installation artifacts..."
+
+    local rel path
+    local artifacts=(
+        .env
+        .sops.yaml
+        docker-compose.yml
+        docker-compose.override.yml
+        docker-compose.override.dev.yml
+        rclone.conf
+        secrets
+        backups
+        logs
+        data
+        caddy/data
+        caddy/config
+    )
+
+    for rel in "${artifacts[@]}"; do
+        path="${PROJECT_DIR}/${rel}"
+        if _repo_artifact_is_preserved_backup "$path"; then
+            warn "Preserving explicitly retained external BACKUP_DIR inside checkout: $path"
+            continue
+        fi
+        [[ -e "$path" || -L "$path" ]] || continue
+        _safe_rm_rf "$path"
+        success "Removed checkout-local install artifact: $rel"
+    done
+
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        _safe_rm_rf "$path"
+        success "Removed checkout-local temporary workspace: $(basename "$path")"
+    done < <(
+        find "$PROJECT_DIR" -mindepth 1 -maxdepth 1 -type d \
+            \( -name '.restore-tmp*' -o -name '.backup-tmp*' \) -print 2>/dev/null || true
+    )
+
+    success "Git checkout preserved for immediate reinstall: $PROJECT_DIR"
+}
+
+remove_installed_files() {
+    info "Step 5: Removing installed scripts and configuration..."
+
+    _safe_rm_rf /opt/vaultwarden-scripts || true
+    _safe_rm_rf /etc/vaultwarden || true
+
+    if [[ "$TEST_RESET" == "true" ]]; then
+        remove_repo_local_install_artifacts
+    fi
+    return 0
+}
+
+remove_project_checkout() {
+    [[ "$TEST_RESET" == "true" ]] && return 0
+
+    info "Step 11: Removing the project checkout after host cleanup..."
+    cd /
+    if [[ "$PROJECT_DIR" == */VaultWarden-OCI || "$PROJECT_BASENAME" == "VaultWarden-OCI" ]]; then
+        if _backup_dir_is_external_to_state && _path_is_inside "$BACKUP_DIR" "$PROJECT_DIR" && [[ -d "$BACKUP_DIR" ]]; then
+            warn "Preserving project checkout because external BACKUP_DIR is inside it: $BACKUP_DIR"
+            warn "Move/delete the backup directory manually"
+            warn "Then remove the checkout manually if desired: $PROJECT_DIR"
+            return 0
+        fi
+        _safe_rm_rf "$PROJECT_DIR" || true
+        success "Removed project checkout: $PROJECT_DIR"
+    else
+        warn "Project directory does not look like a VaultWarden-OCI checkout; leaving in place: $PROJECT_DIR"
     fi
     return 0
 }
@@ -683,55 +798,71 @@ remove_crowdsec() {
     rm -f /usr/local/bin/crowdsec-cloudflare-worker-bouncer 2>/dev/null || true
     _run_if_exists systemctl && systemctl daemon-reload 2>/dev/null || true
 
-    local pkgs=(
-        crowdsec-cloudflare-worker-bouncer
-        crowdsec-firewall-bouncer-iptables
-        crowdsec
-    )
     local pkg
-    for pkg in "${pkgs[@]}"; do
+    for pkg in "${CROWDSEC_PACKAGES[@]}"; do
         if dpkg -s "$pkg" >/dev/null 2>&1; then
             operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge "$pkg" \
                 && success "Removed package: $pkg" \
-                || warn "Could not remove package: $pkg"
+                || die "Could not purge CrowdSec package: $pkg"
         fi
     done
 
-    rm -f /etc/apt/sources.list.d/crowdsec_crowdsec.list \
-          /etc/apt/sources.list.d/crowdsec_crowdsec_crowdsec.list \
-          /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg \
-          /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.asc 2>/dev/null || true
+    rm -f \
+        /etc/apt/sources.list.d/crowdsec_crowdsec.list \
+        /etc/apt/sources.list.d/crowdsec_crowdsec_crowdsec.list \
+        /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg \
+        /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.asc \
+        2>/dev/null || true
 
     _safe_rm_rf /etc/crowdsec || true
     _safe_rm_rf /var/lib/crowdsec || true
     _safe_rm_rf /var/log/crowdsec || true
 
-    operation_package_run apt-get update -qq || true
-    operation_package_run apt-get autoremove -y || true
+    operation_package_run apt-get update -qq || warn "apt-get update failed after CrowdSec repository removal."
+    operation_package_run apt-get autoremove -y || warn "apt-get autoremove reported errors."
     return 0
+}
+
+_remove_all_managed_ufw_rules() {
+    local rule_num removed=0 max_removals=500
+
+    while true; do
+        rule_num="$(
+            ufw status numbered 2>/dev/null \
+                | awk '/(^|[[:space:]])(80|443)\/tcp([[:space:]]|$)/ {
+                    gsub(/\[|\]/, "", $1)
+                    print $1
+                    exit
+                }'
+        )"
+        [[ -n "$rule_num" ]] || break
+
+        if ! yes | ufw delete "$rule_num" >/dev/null 2>&1; then
+            die "Could not delete UFW HTTP/HTTPS rule number $rule_num"
+        fi
+        removed=$((removed + 1))
+        if (( removed >= max_removals )); then
+            die "UFW cleanup exceeded ${max_removals} managed-rule deletions; refusing a possible infinite cleanup loop."
+        fi
+    done
+
+    success "Removed all detected UFW HTTP/HTTPS rules (${removed} numbered rule(s)); SSH rules preserved."
 }
 
 remove_firewall_rules() {
     info "Step 8: Removing UFW and iptables rules managed by VaultWarden-OCI..."
 
     if command -v ufw >/dev/null 2>&1; then
+        # Delete broad historical rules first, then exhaust every numbered
+        # Cloudflare-specific 80/443 rule added by setup-firewall.sh.
         ufw delete allow 80/tcp 2>/dev/null || true
         ufw delete allow 443/tcp 2>/dev/null || true
-
-        local rule_num
-        for _ in {1..30}; do
-            rule_num="$(ufw status numbered 2>/dev/null \
-                | awk '/(^|[[:space:]])(80|443)\/tcp([[:space:]]|$)/ { gsub(/\[|\]/, "", $1); print $1; exit }')"
-            [[ -n "$rule_num" ]] || break
-            yes | ufw delete "$rule_num" 2>/dev/null || break
-        done
-        success "Removed UFW HTTP/HTTPS rules; SSH rules preserved."
+        _remove_all_managed_ufw_rules
     fi
 
     if command -v iptables >/dev/null 2>&1; then
-        local subnets=(172.21.0.0/16 172.22.0.0/16 172.23.0.0/16)
         local subnet
-        for subnet in "${subnets[@]}"; do
+        for subnet in "${MANAGED_IPV4_SUBNETS[@]}"; do
             while iptables -t nat -D POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE 2>/dev/null; do
                 success "Removed NAT MASQUERADE for $subnet"
             done
@@ -741,6 +872,14 @@ remove_firewall_rules() {
                 done
             fi
         done
+
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            if netfilter-persistent save >/dev/null 2>&1; then
+                success "Persisted cleaned netfilter ruleset."
+            else
+                die "Live VaultWarden iptables rules were removed, but netfilter-persistent save failed. Stale rules could return after reboot."
+            fi
+        fi
     fi
     return 0
 }
@@ -749,9 +888,11 @@ remove_swap_and_apt_sources() {
     info "Step 9: Removing swapfile and project-added apt source files..."
 
     if swapon --show 2>/dev/null | grep -q '^/swapfile[[:space:]]'; then
-        swapoff /swapfile 2>/dev/null || warn "swapoff /swapfile failed"
+        swapoff /swapfile 2>/dev/null || die "swapoff /swapfile failed"
     fi
-    rm -f /swapfile 2>/dev/null && success "Removed /swapfile" || true
+    if [[ -e /swapfile ]]; then
+        rm -f /swapfile && success "Removed /swapfile"
+    fi
 
     if [[ -f /etc/fstab ]] && grep -q '^/swapfile[[:space:]]' /etc/fstab 2>/dev/null; then
         local tmp
@@ -760,37 +901,187 @@ remove_swap_and_apt_sources() {
             success "Removed /swapfile fstab entry"
         else
             rm -f "$tmp" 2>/dev/null || true
-            warn "Could not remove /swapfile fstab entry"
+            die "Could not remove /swapfile fstab entry"
         fi
     fi
 
     if grep -q '^vm\.swappiness' /etc/sysctl.conf 2>/dev/null; then
-        sed -i '/^vm\.swappiness/d' /etc/sysctl.conf || true
+        sed -i '/^vm\.swappiness/d' /etc/sysctl.conf || die "Could not remove vm.swappiness from /etc/sysctl.conf"
         sysctl -q vm.swappiness=60 2>/dev/null || true
     fi
 
     rm -f /etc/apt/sources.list.d/ubuntu-universe.list 2>/dev/null || true
-    operation_package_run apt-get update -qq || true
-    return 0
-}
-
-remove_docker_packages_if_safe() {
-    info "Step 10: Docker package cleanup is conservative by default..."
-    warn "Leaving Docker packages, /var/lib/docker, docker group, and docker memberships in place; uninstall only removes project resources."
+    operation_package_run apt-get update -qq || warn "apt-get update failed after apt source cleanup."
     return 0
 }
 
 remove_group_memberships() {
-    info "Step 11: Removing VaultWarden-specific group metadata..."
+    info "Step 10: Removing VaultWarden-specific group metadata..."
 
     if getent group vaultwarden >/dev/null 2>&1; then
         groupdel vaultwarden 2>/dev/null \
             && success "Removed system group: vaultwarden" \
-            || warn "Could not remove system group 'vaultwarden' (likely still in use)."
+            || die "Could not remove system group 'vaultwarden'; inspect processes or memberships still using it."
     fi
 
-    warn "Leaving docker group and operator memberships unchanged; Docker is shared host infrastructure unless proven otherwise."
+    warn "Leaving Docker packages, /var/lib/docker, docker group, and operator Docker membership unchanged."
     return 0
+}
+
+remove_runtime_artifacts() {
+    info "Step 12: Removing runtime secrets and operation state..."
+
+    # This runs only after the final operation phase is recorded. Do not unlink
+    # /run/lock/vaultwarden-operations.lock or the uninstall-specific lock while
+    # their flock FDs are held: unlinking a live lock path creates a second inode
+    # and can split coordination. Empty /run/lock files are harmless, ephemeral,
+    # and reusable by the next install.
+    _safe_rm_rf /run/vaultwarden-oci || true
+
+    success "Removed VaultWarden runtime secrets and operation state."
+    info "Reusable empty coordination lock files under /run/lock are intentionally preserved."
+}
+
+_residual() {
+    local message="$1"
+    warn "RESIDUAL: $message"
+    UNINSTALL_RESIDUALS=$((UNINSTALL_RESIDUALS + 1))
+}
+
+verify_uninstall_complete() {
+    info "Step 13: Verifying managed stack artifacts are gone..."
+    UNINSTALL_RESIDUALS=0
+
+    local unit dropin path pkg subnet project_name="${COMPOSE_PROJECT_NAME_ENV:-vaultwarden-oci}"
+
+    for unit in "${MANAGED_TIMERS[@]}" "${MANAGED_SERVICES[@]}"; do
+        [[ ! -e "/etc/systemd/system/${unit}" ]] || _residual "/etc/systemd/system/${unit}"
+        for dropin in 10-state-dir.conf 20-identity.conf 30-run-as-root.conf; do
+            [[ ! -e "/etc/systemd/system/${unit}.d/${dropin}" ]] \
+                || _residual "/etc/systemd/system/${unit}.d/${dropin}"
+        done
+    done
+    [[ ! -e /etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf ]] \
+        || _residual "/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
+
+    for path in \
+        /opt/vaultwarden-scripts \
+        /etc/vaultwarden \
+        /run/vaultwarden-oci \
+        /usr/local/bin/sops \
+        /usr/local/bin/crowdsec-cloudflare-worker-bouncer \
+        /etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service \
+        /etc/crowdsec \
+        /var/lib/crowdsec \
+        /var/log/crowdsec \
+        /swapfile; do
+        [[ ! -e "$path" ]] || _residual "$path"
+    done
+
+    if [[ -z "$DATA_VOLUME_DEVICE" ]]; then
+        [[ ! -e "$PROJECT_STATE_DIR" ]] || _residual "managed state directory $PROJECT_STATE_DIR"
+    else
+        if mountpoint -q "$DATA_VOLUME_MOUNT" 2>/dev/null; then
+            _residual "data volume still mounted at $DATA_VOLUME_MOUNT"
+        fi
+        if [[ -d "$DATA_VOLUME_MOUNT" ]] && [[ -n "$(find "$DATA_VOLUME_MOUNT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+            _residual "data mount path remains non-empty: $DATA_VOLUME_MOUNT"
+        fi
+        if [[ -f /etc/fstab ]] \
+            && awk -v mp="$DATA_VOLUME_MOUNT" -v src="$DATA_VOLUME_DEVICE" '($2 == mp) || ($1 == src) { found=1 } END { exit(found ? 0 : 1) }' /etc/fstab; then
+            _residual "fstab still references data volume mount/device"
+        fi
+    fi
+
+    if [[ "$TEST_RESET" == "true" ]]; then
+        [[ -d "$PROJECT_DIR/.git" ]] || _residual "test-reset checkout is not preserved as a Git checkout: $PROJECT_DIR"
+        for path in \
+            "$PROJECT_DIR/.env" \
+            "$PROJECT_DIR/.sops.yaml" \
+            "$PROJECT_DIR/docker-compose.yml" \
+            "$PROJECT_DIR/docker-compose.override.yml" \
+            "$PROJECT_DIR/docker-compose.override.dev.yml" \
+            "$PROJECT_DIR/rclone.conf" \
+            "$PROJECT_DIR/secrets" \
+            "$PROJECT_DIR/logs" \
+            "$PROJECT_DIR/data" \
+            "$PROJECT_DIR/caddy/data" \
+            "$PROJECT_DIR/caddy/config"; do
+            [[ ! -e "$path" ]] || _residual "checkout-local install artifact $path"
+        done
+    elif [[ "$PROJECT_DIR" == */VaultWarden-OCI || "$PROJECT_BASENAME" == "VaultWarden-OCI" ]]; then
+        if ! (_backup_dir_is_external_to_state && _path_is_inside "$BACKUP_DIR" "$PROJECT_DIR" && [[ -d "$BACKUP_DIR" ]]); then
+            [[ ! -e "$PROJECT_DIR" ]] || _residual "project checkout $PROJECT_DIR"
+        fi
+    fi
+
+    if _run_if_exists docker; then
+        local name cid vol net
+        for name in "${MANAGED_CONTAINERS[@]}"; do
+            cid="$(docker ps -aq --filter "name=^/${name}$" 2>/dev/null || true)"
+            [[ -z "$cid" ]] || _residual "managed Docker container $name"
+        done
+        cid="$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" 2>/dev/null || true)"
+        [[ -z "$cid" ]] || _residual "compose-labelled container(s) for project ${project_name}"
+
+        vol="$(docker volume ls -q --filter "label=com.docker.compose.project=${project_name}" 2>/dev/null || true)"
+        [[ -z "$vol" ]] || _residual "compose-labelled Docker volume(s) for project ${project_name}"
+        vol="$(docker volume ls -q 2>/dev/null | awk '/^vaultwarden-oci_/ {print}' || true)"
+        [[ -z "$vol" ]] || _residual "safe-prefix VaultWarden Docker volume(s)"
+
+        for net in "${MANAGED_NETWORKS[@]}"; do
+            docker network inspect "$net" >/dev/null 2>&1 && _residual "managed Docker network $net"
+        done
+        net="$(
+            docker network ls -q --filter "label=com.docker.compose.project=${project_name}" 2>/dev/null \
+                | xargs -r docker network inspect --format '{{.Name}}' 2>/dev/null || true
+        )"
+        [[ -z "$net" ]] || _residual "compose-labelled Docker network(s) for project ${project_name}"
+    fi
+
+    for pkg in "${CROWDSEC_PACKAGES[@]}"; do
+        dpkg -s "$pkg" >/dev/null 2>&1 && _residual "CrowdSec package $pkg"
+    done
+
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw status numbered 2>/dev/null \
+            | awk '/(^|[[:space:]])(80|443)\/tcp([[:space:]]|$)/ { found=1 } END { exit(found ? 0 : 1) }'; then
+            _residual "UFW still has HTTP/HTTPS rules"
+        fi
+    fi
+
+    if command -v iptables >/dev/null 2>&1; then
+        for subnet in "${MANAGED_IPV4_SUBNETS[@]}"; do
+            if iptables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE 2>/dev/null; then
+                _residual "live NAT MASQUERADE rule for $subnet"
+            fi
+            if iptables -t filter -S DOCKER-USER >/dev/null 2>&1 \
+                && iptables -t filter -C DOCKER-USER -s "$subnet" -j ACCEPT 2>/dev/null; then
+                _residual "live DOCKER-USER ACCEPT rule for $subnet"
+            fi
+        done
+    fi
+
+    if [[ -f /etc/iptables/rules.v4 ]]; then
+        for subnet in "${MANAGED_IPV4_SUBNETS[@]}"; do
+            if grep -F "$subnet" /etc/iptables/rules.v4 2>/dev/null \
+                | grep -Eq 'MASQUERADE|DOCKER-USER'; then
+                _residual "persisted netfilter rule for $subnet in /etc/iptables/rules.v4"
+            fi
+        done
+    fi
+
+    if [[ -f /etc/fstab ]] && grep -q '^/swapfile[[:space:]]' /etc/fstab 2>/dev/null; then
+        _residual "/etc/fstab still references /swapfile"
+    fi
+
+    getent group vaultwarden >/dev/null 2>&1 && _residual "system group vaultwarden"
+
+    if (( UNINSTALL_RESIDUALS > 0 )); then
+        die "Uninstall incomplete — ${UNINSTALL_RESIDUALS} managed artifact(s) remain. Review RESIDUAL lines above."
+    fi
+
+    success "Residual verification passed: no managed stack artifacts remain."
 }
 
 show_summary() {
@@ -806,6 +1097,7 @@ show_summary() {
         echo "   Mount status      : mounted=${DATA_MOUNT_MOUNTED} sentinel=${DATA_MOUNT_SENTINEL}"
     fi
     echo "   Running as        : $(whoami)  (real user: ${REAL_USER})"
+    [[ "$TEST_RESET" == "true" ]] && echo "   Reset mode        : TEST RESET — preserve Git checkout; remove generated install artifacts"
     [[ "$DRY_RUN" == "true" ]] && echo "   Mode              : DRY RUN — no changes will be made"
     [[ "$FORCE" == "true" ]] && echo "   Mode              : FORCE — non-interactive destructive cleanup"
     echo "════════════════════════════════════════════════════════════"
@@ -813,15 +1105,22 @@ show_summary() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         warn "DRY RUN MODE — would remove:"
-        _dry_run_line "systemd timers: vaultwarden-maintenance.timer vaultwarden-db-backup.timer vaultwarden-full-backup.timer vaultwarden-health.timer vaultwarden-dns-update.timer vaultwarden-firewall-update.timer"
-        _dry_run_line "systemd services: vaultwarden-maintenance.service vaultwarden-db-backup.service vaultwarden-full-backup.service vaultwarden-health.service vaultwarden-dns-update.service vaultwarden-firewall-update.service vaultwarden-notify-failure.service vaultwarden-notify-failure@.service vaultwarden-iptables.service vaultwarden-startup.service"
+        _dry_run_line "systemd timers: ${MANAGED_TIMERS[*]}"
+        _dry_run_line "systemd services: ${MANAGED_SERVICES[*]}"
         _dry_run_line "systemd managed drop-ins: 10-state-dir.conf 20-identity.conf 30-run-as-root.conf"
-        _dry_run_line "Docker compose stack via docker-compose.yml; containers: vaultwarden_init vaultwarden_app vaultwarden_caddy vaultwarden_postfix"
-        _dry_run_line "Docker networks: vaultwarden_network vaultwarden_egress_network caddy_external_network postfix_relay_network; compose-labelled/safe-prefix volumes"
-        _dry_run_line "runtime secrets and locks: /run/vaultwarden-oci, /run/lock/vaultwarden-*.lock"
+        _dry_run_line "Docker compose stack via docker-compose.yml; containers: ${MANAGED_CONTAINERS[*]}"
+        _dry_run_line "Docker networks: ${MANAGED_NETWORKS[*]}; compose-labelled/safe-prefix volumes"
+        _dry_run_line "runtime secrets/state: /run/vaultwarden-oci; inactive VaultWarden-specific locks"
         _dry_run_line "installed config and key dir: /etc/vaultwarden"
         _dry_run_line "installed scripts: /opt/vaultwarden-scripts"
-        _dry_run_line "project checkout: ${PROJECT_DIR}"
+
+        if [[ "$TEST_RESET" == "true" ]]; then
+            _dry_run_line "preserve Git checkout: ${PROJECT_DIR}"
+            _dry_run_line "remove generated checkout-local config/secrets/compose/runtime artifacts for a clean reinstall"
+        else
+            _dry_run_line "project checkout: ${PROJECT_DIR}"
+        fi
+
         if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
             _dry_run_line "boot-volume managed state directory: ${PROJECT_STATE_DIR}"
             if [[ -n "${BACKUP_DIR:-}" && "${BACKUP_DIR}" != "${PROJECT_STATE_DIR}"/* && "${BACKUP_DIR}" != "${PROJECT_STATE_DIR}" ]]; then
@@ -830,23 +1129,26 @@ show_summary() {
         else
             _dry_run_line "separate block-storage mode: device=${DATA_VOLUME_DEVICE} mount=${DATA_VOLUME_MOUNT:-<unset>} mounted=${DATA_MOUNT_MOUNTED} sentinel=${DATA_MOUNT_SENTINEL}"
             if [[ "${DATA_MOUNT_MOUNTED}" != "true" ]]; then
-                _dry_run_line "unmounted mountpoint contents will NOT be recursively deleted; only empty mountpoint may be removed after fstab/drop-in cleanup"
+                _dry_run_line "unmounted mountpoint contents will NOT be recursively deleted"
             elif [[ "${DATA_MOUNT_SENTINEL}" != "true" ]]; then
-                _dry_run_line "mounted volume lacks .vw-data-volume sentinel; contents will NOT be deleted by default"
+                _dry_run_line "mounted volume lacks .vw-data-volume sentinel; contents will NOT be deleted"
             else
                 _dry_run_line "mounted data-volume contents under ${DATA_VOLUME_MOUNT} would be removed (block device itself preserved)"
             fi
             _dry_run_line "fstab entry and Docker mount guard: /etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
         fi
+
         _dry_run_line "Age key paths:"
         local key
         for key in "${MANAGED_AGE_KEY_PATHS[@]}"; do _dry_run_line "  ${key}"; done
-        _dry_run_line "CrowdSec services/packages/config/state including Cloudflare and firewall bouncers"
-        _dry_run_line "UFW 80/443 rules and VaultWarden iptables bridge rules"
+        _dry_run_line "CrowdSec services/packages/config/state including Cloudflare and both firewall-bouncer backends"
+        _dry_run_line "all UFW 80/443 rules and VaultWarden iptables /28 + historical /16 bridge rules"
+        _dry_run_line "persist cleaned iptables rules with netfilter-persistent when installed"
         _dry_run_line "swapfile /swapfile and vm.swappiness entry"
-        _dry_run_line "standalone helper binary: /usr/local/bin/sops when present (shared distro packages preserved)"
+        _dry_run_line "standalone helper binary: /usr/local/bin/sops when present"
         _dry_run_line "Docker packages/runtime data are preserved by default"
-        _dry_run_line "vaultwarden group best-effort; docker group/memberships preserved"
+        _dry_run_line "vaultwarden group; docker group/memberships preserved"
+        _dry_run_line "post-cleanup residual verification"
         echo ""
         info "DRY RUN complete — no changes made."
         exit 0
@@ -890,6 +1192,11 @@ offer_final_backup() {
 
 confirm_uninstall() {
     warn "This will PERMANENTLY DELETE VaultWarden-OCI data, secrets, containers, and configuration."
+    if [[ "$TEST_RESET" == "true" ]]; then
+        warn "Test-reset mode preserves the Git checkout but removes generated local install artifacts."
+    else
+        warn "The project checkout is also removed unless an external backup directory inside it must be preserved."
+    fi
     warn "This action cannot be undone."
     echo ""
 
@@ -907,17 +1214,32 @@ confirm_uninstall() {
     return 0
 }
 
+_finalize_successful_operation_guard() {
+    # remove_runtime_artifacts already deleted the current operation state path.
+    # Prevent operation_release from recreating /run/vaultwarden-oci on success,
+    # then close the held FDs so flock is released by descriptor close.
+    if [[ "$UNINSTALL_OPERATION_HELD" == "true" ]] && declare -f operation_release >/dev/null 2>&1; then
+        OPERATION_OWNS_STATE=false
+        OPERATION_STATE_FILE=""
+        operation_release 0
+        UNINSTALL_OPERATION_HELD=false
+        unset VW_OPERATION_INHERITED_FD VW_OPERATION_PARENT_STATE VW_OPERATION_PARENT_TOKEN VW_OPERATION_PARENT_ID
+    fi
+}
+
 main() {
     if [[ "$DRY_RUN" != "true" ]] && declare -f operation_acquire >/dev/null 2>&1; then
         operation_acquire \
             --id uninstall \
             --label "Uninstall" \
             --specific-lock /run/lock/vaultwarden-uninstall.lock || exit $?
-        trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT
-        trap 'operation_release 130; exit 130' INT
-        trap 'operation_release 143; exit 143' HUP TERM
+        UNINSTALL_OPERATION_HELD=true
+        trap _uninstall_exit_trap EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' HUP TERM
         operation_set_phase "1" "Resolving uninstall paths"
     fi
+
     resolve_paths
     operation_set_phase "2" "Confirming uninstall" 2>/dev/null || true
     show_summary
@@ -925,29 +1247,39 @@ main() {
     offer_final_backup
     _confirm_age_key_safety
 
-    operation_set_phase "3" "Removing services and runtime artifacts" 2>/dev/null || true
+    operation_set_phase "3" "Removing services and Docker stack" 2>/dev/null || true
     disable_systemd_units
     remove_docker_stack
-    remove_runtime_artifacts
-    operation_set_phase "4" "Removing persistent state and installed files" 2>/dev/null || true
+
+    operation_set_phase "4" "Removing persistent and installed state" 2>/dev/null || true
     remove_state_and_mount
     remove_installed_files
-    operation_set_phase "5" "Removing packages and integrations" 2>/dev/null || true
+
+    operation_set_phase "5" "Removing integrations and host mutations" 2>/dev/null || true
     remove_sops_and_packages
     remove_crowdsec
     remove_firewall_rules
     remove_swap_and_apt_sources
-    warn "Leaving Docker packages and /var/lib/docker installed by default; project ownership is not assumed."
     remove_group_memberships
+    remove_project_checkout
+
+    operation_set_phase "6" "Final runtime cleanup and residual verification" 2>/dev/null || true
+    remove_runtime_artifacts
+    verify_uninstall_complete
+    _finalize_successful_operation_guard
 
     echo ""
     echo "════════════════════════════════════════════════════════════"
     success "Uninstall complete."
-    info "Intentionally preserved:"
+    if [[ "$TEST_RESET" == "true" ]]; then
+        info "Git checkout preserved for immediate clean reinstall: $PROJECT_DIR"
+    fi
+    info "Intentionally preserved shared host infrastructure:"
+    info "  • Docker packages, /var/lib/docker, docker group, and operator Docker membership"
     info "  • SSH/UFW access rules not related to HTTP/HTTPS"
     info "  • Common admin tools not uniquely owned by this project: curl, wget, git, jq, sqlite3, ufw, gpg, rsync, python3, make, nano"
     info "  • /etc/ssh/sshd_config"
-    info "Review any remaining OCI block volume attachment separately if you used a dedicated data volume."
+    info "The OCI block device itself remains attached; only managed mount wiring and verified project contents are removed."
     echo "════════════════════════════════════════════════════════════"
     echo ""
 }
