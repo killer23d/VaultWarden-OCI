@@ -1,0 +1,545 @@
+name: Append post-PR226 final scope-pressure audit
+
+on:
+  push:
+    branches:
+      - delta
+    paths:
+      - '.github/workflows/append-post-pr226-scope-pressure.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  append-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: delta
+          fetch-depth: 0
+
+      - name: Append final small-team realism audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          report='reports/post-pr226-production-simplicity-audit.md'
+          test "$(git hash-object "$report")" = '8c36680c1d0de39fed6ca1750224d6a622317fc8'
+          cat >> "$report" <<'VW_SCOPE_PRESSURE_ADDENDUM'
+          
+          ---
+          
+          ## Final Scope-Pressure and Small-Team Realism Addendum
+          
+          Date: 2026-07-05
+          
+          This pass audits the **report itself** for overreach.
+          
+          The question is not whether more cleanup can be imagined. The question is:
+          
+          > Which changes are necessary to make this ten-user, set-and-forget appliance
+          > truthful and fail-closed, and which recommendations merely increase diff size,
+          > review risk, or long-term abstraction surface?
+          
+          The pressure test used these rejection rules:
+          
+          - reject a second source of truth when an existing canonical path can be called;
+          - reject generic transaction/readiness/install abstractions for one caller;
+          - reject test-file churn that changes no protected behavior;
+          - reject developer-surface deletion merely to make the Makefile shorter; and
+          - prefer deleting a weak derived status over building a parser to make it look
+            authoritative.
+          
+          ### Scope-Pressure Verdict
+          
+          **The production blockers remain valid, but the previous report over-scoped the
+          cleanup portion of the final PR.**
+          
+          The final PR is realistic as one bounded PR **only after the scope cuts and
+          implementation clarifications below supersede the earlier rename/merge and broad
+          Makefile-cleanup recommendations**.
+          
+          No new production architecture is justified. The shared operation guard,
+          Bash/Make/systemd/Compose/SOPS/Age model, and explicit post-pull systemd activation
+          remain correct.
+          
+          **Current code is still NOT READY. The report is implementation-ready after this
+          scope trim. One bounded PR with a few coherent commits is sufficient.**
+          
+          ## Scope Cut SP-01 - Defer the historical test rename/merge map
+          
+          The third-pass `Definitive 30-Test Disposition Map` was useful for understanding
+          overlap, but it is too prescriptive as acceptance criteria for the production fix
+          PR.
+          
+          Renaming historical files such as:
+          
+          - `test-migrate-followup.sh`;
+          - `test-config-systemd-followup.sh`;
+          - `test-email-refactor.sh`;
+          - `test-post-pr224-operation-contracts.sh`; and
+          - `test-secrets-env-systemd-guards.sh`
+          
+          does not repair a runtime contract.
+          
+          Merging prompt/email/restore/operation test pairs in the same PR also increases
+          diff size and makes review blame harder exactly when recovery, backup, systemd, and
+          production-readiness semantics are changing.
+          
+          ### Superseding direction
+          
+          - Keep the current permanent `tests/test-*.sh` filenames in this final PR.
+          - Add focused assertions to the existing closest contract tests.
+          - Let `./tests/run-tests.sh all` explicitly inventory the current filenames.
+          - Keep the runner self-check that fails when a permanent `test-*.sh` file is
+            unlisted or listed twice.
+          - Defer historical rename/merge cleanup to a future no-behavior-change PR, or never
+            do it if the names are not causing real maintenance cost.
+          
+          The earlier 30-test rename/merge map remains analysis history, **not final-PR
+          acceptance criteria**.
+          
+          Recommended existing test homes for the final fixes:
+          
+          - TP-14 recovery: extend `tests/test-recover.sh`.
+          - TP-17 backup failure semantics: extend the existing backup/operator behavior
+            coverage, preferably `tests/test-operator-ui.sh` or
+            `tests/test-backup-restore-behavior.sh` based on the harness reused.
+          - TP-20 start policy/timer health: extend `tests/test-start-policy.sh`.
+          - TP-21 installed runtime drift: extend
+            `tests/test-config-systemd-followup.sh`.
+          - Make/dashboard privilege truth: extend `tests/test-privilege-contracts.sh` and
+            `tests/test-operator-ui.sh`.
+          
+          Do not create one test file per TP finding number.
+          
+          ## SP-02 - Canonical `all` is feasible, but one current test must stop rewriting the checkout's real `.env`
+          
+          The fourth/final passes recommended making all 30 permanent Bash tests part of the
+          canonical runner. The scope-pressure pass inspected the currently unrun tests for
+          host mutation, package/systemd side effects, root requirements, and CI assumptions.
+          
+          Result:
+          
+          - the previously unrun operation, restore, secrets, health, systemd-path, email,
+            and startup tests are static checks or temporary harnesses;
+          - they do not justify suite selectors or another test framework; and
+          - `./tests/run-tests.sh all` remains realistic.
+          
+          One hygiene issue must be fixed first:
+          
+          - `tests/test-config-systemd-followup.sh` backs up the checkout's actual `.env`;
+          - writes test content to `$ROOT/.env`; and
+          - relies on its EXIT trap to restore the operator file.
+          
+          A normal failure is cleaned up, but SIGKILL, host interruption, or an external
+          termination that prevents the EXIT trap can leave a real checkout's operator
+          configuration replaced by test data.
+          
+          ### Minimal fix
+          
+          Do not add a new production config override.
+          
+          `lib/config.sh` already derives repo `.env` from `PROJECT_ROOT` at source/load
+          time and already supports `VW_CONFIG_INSTALLED_ENV_FILE` for the installed env
+          path.
+          
+          Update the test harness to:
+          
+          1. create a temporary fake repo root containing the test `.env`;
+          2. export `PROJECT_ROOT` to that temporary root before sourcing the real
+             `lib/config.sh` by its explicit original path; and
+          3. continue using `VW_CONFIG_INSTALLED_ENV_FILE` for the temporary installed env.
+          
+          The canonical runner must never transiently rewrite a production checkout's real
+          `.env`.
+          
+          ## Scope Cut SP-03 - Keep `test-unit` as a thin alias; do not delete developer conveniences wholesale
+          
+          The earlier report recommended removing `test`, `test-unit`, `fmt`, `lint`, and
+          `shellcheck` from the Makefile after CI migration.
+          
+          That is broader than the production problem.
+          
+          The Makefile already places these under `Developer/Test — Testing & Development`.
+          A developer alias is not operator complexity when it does not own duplicate state.
+          
+          ### Superseding direction
+          
+          - `./tests/run-tests.sh all` is the only permanent test inventory owner.
+          - Keep `make test-unit` as a thin delegating alias:
+            `./tests/run-tests.sh all`.
+          - The workflow must call the runner directly, not the Make alias.
+          - `lint`/`shellcheck` may remain as developer conveniences.
+          - `fmt` may be removed if naturally touched because it is informational/no-op, but
+            its removal is not production acceptance criteria.
+          - `test` may remain if its broader local semantics are truthful; it must not carry
+            another individual permanent-test list.
+          
+          The final PR must remove **duplicate inventory**, not developer convenience for its
+          own sake.
+          
+          ## SP-04 - Simplify TP-14 implementation: behavior-level recovery transaction, not prescribed per-key failure choreography
+          
+          TP-14 remains a production blocker. The current facts are unchanged:
+          
+          - direct `cleanup` INT/TERM traps can return and allow execution to continue;
+          - rollback does not cover `install.env`;
+          - live `install.env` is mutated one key at a time;
+          - the block-mode sentinel may be created before a later failure; and
+          - post-promotion startup/health failure needs a non-zero exit without rolling back
+            a valid new recovery identity.
+          
+          However, the earlier regression wording `inject failure after the first
+          atomic_set_env` dictates too much implementation shape.
+          
+          ### Preferred minimal implementation shape
+          
+          Keep the transaction local to `recover.sh`:
+          
+          - create staged copies of `install.env` and the recovery manifest;
+          - apply all env/manifest edits to those staged files;
+          - create staging files in the target directories so final `mv` promotion remains
+            same-filesystem and atomic per file;
+          - back up the old live files as the current code already does for other artifacts;
+          - promote ciphertext, key, policy, staged install env, and staged manifest under
+            the existing rollback scope;
+          - create/confirm the block-volume sentinel before startup when block mode requires
+            it, remembering only whether recovery itself created it;
+          - set one `RECOVERY_COMMITTED=true` boundary after the promoted recovery identity
+            and env/manifest references validate together;
+          - before that boundary, any failure restores the old live artifacts and removes a
+            sentinel created by this run;
+          - after that boundary, startup or `/alive` failure returns non-zero but preserves
+            the committed recovery artifacts; and
+          - use explicit INT/TERM handlers that clean/rollback as appropriate and exit
+            `130`/`143`.
+          
+          A few booleans and staged files inside `recover.sh` are enough.
+          
+          Do **not** add:
+          
+          - an operation journal;
+          - a recovery state database;
+          - a generic transaction library;
+          - a recovery state machine; or
+          - a dependency on the setup-secrets transaction internals.
+          
+          ### Superseding recovery test acceptance
+          
+          Test observable behavior rather than an exact internal line:
+          
+          1. a signal before commit exits `130`/`143`, does not continue, and restores the
+             old recovery identity/config state;
+          2. an injected pre-commit env/manifest promotion failure restores old
+             ciphertext/key/policy/install.env/manifest and removes only a sentinel created
+             by that run;
+          3. post-commit startup failure returns non-zero and preserves the new committed
+             artifacts;
+          4. post-commit `/alive` failure returns non-zero and preserves the new committed
+             artifacts plus existing operator next steps.
+          
+          ### Sentinel concern inspected and not elevated
+          
+          `recover.sh` currently touches `.vw-data-volume` in block mode and does not remove
+          an existing sentinel in boot mode.
+          
+          This pass traced `lib/storage.sh`: boot mode is selected by blank
+          `DATA_VOLUME_DEVICE`, and the boot-mode readiness path does not inspect the
+          sentinel. The sentinel is authoritative only in separate-volume mode after a
+          configured device/mount passes validation.
+          
+          Therefore **do not add generic boot-mode sentinel cleanup**. An operator may
+          explicitly choose boot semantics for a mounted path, and automatically deleting a
+          pre-existing marker is unnecessary/destructive policy. Track/remove only a
+          sentinel that the current recovery run itself created before commit.
+          
+          ## SP-05 - Simplify smoke readiness: zero means no FAIL and no SKIP
+          
+          TP-15 remains valid, but the prior `required versus optional` implementation
+          wording invites a readiness classification layer that this project does not need.
+          
+          `smoke-test.sh` exposes no explicit skip flags. Yet current code can record SKIP
+          for:
+          
+          - unavailable project environment dependent checks;
+          - Docker/Compose unavailable;
+          - a container still starting;
+          - unavailable `systemd-analyze`/`systemctl`;
+          - unexpected admin endpoint status;
+          - missing `cscli`; and
+          - unreadable disk free-space information.
+          
+          The final result currently checks only `_FAIL == 0`.
+          
+          ### Superseding minimal contract
+          
+          Keep the existing PASS/FAIL/SKIP result shape for readable diagnostics, but:
+          
+          > production-ready exit `0` requires `_FAIL == 0` **and** `_SKIP == 0`.
+          
+          There is no need for a readiness registry or per-check required/optional metadata.
+          If a future operator skip flag is intentionally added, its final summary can be
+          designed then. Today there are no smoke skip flags, so an unperformed check must
+          not coexist with `ready for production`.
+          
+          Also apply these small corrections:
+          
+          1. Use `/alive`, not `/api/alive`.
+          2. Replace the narrow two-timer check with one call to the corrected canonical
+             `utilities/setup-systemd.sh validate` from TP-20/TP-21.
+          3. Remove `check_startup_unit` and `check_startup_service` from smoke once canonical
+             systemd validation is used. They duplicate install validation, and requiring
+             `vaultwarden-startup.service` to be currently active can falsely fail a fresh
+             healthy install: the installer enables the boot oneshot but does not start it
+             during a normal systemd install.
+          4. Required container readiness must reuse
+             `_VW_DEFAULT_CRITICAL_SERVICES` from `lib/defaults.sh`, which currently contains
+             only `vaultwarden` and `caddy`. Do not hard-code a second service-policy array.
+          5. For those expected critical services, `healthy` is PASS, `starting` is SKIP
+             (therefore not ready yet), and `none`/unhealthy/not-running is FAIL. Both current
+             critical services define Compose healthchecks, so `health=none` is not a valid
+             production-ready state.
+          6. Postfix is deliberately absent from the canonical critical-service list.
+             Do not make an optional/best-effort relay sidecar a production-readiness blocker
+             when direct/API email paths may be valid. Actual email delivery belongs in the
+             existing drill/email diagnostic path.
+          7. CrowdSec PASS requires its service to be active **and** an actual `cscli`/LAPI
+             query to succeed. A CLI/query failure is not `0 decisions` and not PASS.
+          
+          The smoke summary may keep a Skipped count. When any skip exists, print a concise
+          `NOT READY — one or more checks were not completed` result and exit non-zero.
+          
+          ## SP-06 - Simplify dashboard truthfulness by deleting weak derived status
+          
+          F-03/TP-11 correctly identified false-green dashboard language. The earlier
+          recommendation to make `Last backup` and `Last result` use the same archive still
+          preserves a weak derived status: `.sha256`/`.meta` sidecar presence is not proof of
+          a successful current verification, and pre-fix failed archives may still exist.
+          
+          Do not build a backup-result parser or status cache.
+          
+          ### Superseding dashboard direction
+          
+          - Delete `_last_backup_result` and remove the `Last result` line entirely.
+          - Keep one `Last backup` timestamp/name chosen by actual mtime.
+          - Rename `Secrets health` to `Config placeholders`; the current code only scans
+            repo `.env` for placeholder text.
+          - Label rclone `Configured (not probed)` when binary/config naming is present;
+            preserve `Not configured`/`Not installed` states.
+          - Email queue output is `0 queued`, `N queued`, or `Unknown`. Never call an empty
+            queue `Healthy`, and do not turn a failed/missing `mailq` check into zero.
+          - Remove `Recent Auth Fails (1h)` completely. The broad `invalid|fail` grep is not
+            an authentication classifier and is not worth replacing with a log parser in this
+            project.
+          - CrowdSec decision query failure displays `Unknown`; capture the `cscli` result
+            before counting.
+          - A failed systemd timer query displays `Unknown`. A successful query with no
+            VaultWarden timer lines may say `No VaultWarden timers listed`.
+          - Remove `(safe)` from the ordinary restart menu label. Do not reroute normal
+            restart to `safe-restart` merely to preserve the adjective.
+          - Correct the backup menu labels to DB snapshot/inventory/create+sync semantics
+            already identified in TP-08.
+          - Route dashboard unban through the corrected `make unban` target and let `cscli`
+            validate supported address forms; remove the dashboard-only IPv4 parser.
+          - Run recovery-kit export and email diagnostics in root context. Delete
+            `run_user_cmd` if those fixes leave no caller.
+          
+          This is a net code deletion/simplification, not a dashboard subsystem redesign.
+          
+          ## SP-07 - Keep Make developer conveniences; fix only broken operator contracts and duplicate implementations
+          
+          The final Makefile scope should be smaller than the earlier report proposed.
+          
+          ### Required
+          
+          - Fix F-01/F-02 root policy for retained root-operated targets used by help or the
+            dashboard.
+          - Route `systemd-status` to the existing `setup-systemd.sh status` action; delete
+            the duplicate hard-coded unit loop.
+          - Fix `unban` so a real `cscli` error remains non-zero. Do not convert every
+            failure into `not found/may have expired` success.
+          - Fix the `status` CrowdSec query so numeric zero is printed only after a successful
+            `cscli` query; otherwise print Unknown.
+          - Remove `key-path` and keep `key-health` authoritative; retain at most one
+            root-correct lightweight `key-show` if still useful.
+          - Correct `key-backup` wording or remove the target. A copy under `$HOME` is not
+            offline custody.
+          - Remove `make setup` from advertised first-install documentation/help. Keep one
+            real golden path:
+            `sudo ./setup.sh install --domain ... --email ...`.
+          - After caller search, either delete the broken `setup` target or keep only a
+            hidden guidance target that prints the exact `setup.sh install` usage and exits
+            non-zero. Do not build an interactive Make setup parser or another config layer.
+          - While the Makefile is already touched, correct the top usage examples for
+            root-operated `safe-restart`, `status`, `health`, and `logs` to use `sudo`.
+          
+          ### Explicitly not required
+          
+          - wholesale deletion of `lint`/`shellcheck`;
+          - historical test target renaming;
+          - a Make privilege registry or policy file;
+          - a new command router; or
+          - compatibility aliases for every removed descriptive label.
+          
+          ## SP-08 - Drill semantics need truthful explicit-skip wording, not more orchestration
+          
+          TP-16 remains valid and its non-destructive boundary should remain.
+          
+          Implement the smallest correction:
+          
+          - rename `Stack Restart Sequence` to `Compose restart preflight`;
+          - remove help/summary claims that an actual restart was rehearsed;
+          - let canonical `backup-run.sh verify` own latest-backup selection and remove the
+            drill's independent latest archive selector;
+          - if `--skip-restore` was not passed, missing DB/full restore prerequisites or
+            missing `sqlite3` are failures;
+          - `--skip-email` and `--skip-restore` remain explicit supported SKIPs; and
+          - when explicit skips exist and no failure occurred, say `all non-skipped steps
+            passed` rather than `all steps passed` or `all rehearsed paths are operational`.
+          
+          Do not make the non-destructive drill restart production. Do not add a drill
+          workflow engine or another backup verification API.
+          
+          ## SP-09 - Day-2 operations docs must name repository-code activation explicitly
+          
+          TP-21 is technically correct, and `setup-systemd.sh --help` already says to run it
+          after every `git pull` to keep `/opt/` in sync.
+          
+          The operator-facing day-2 guide still has a gap: `docs/OPERATIONS.md` has an
+          `Update Operations` section for container images and host packages, but no
+          repository-code update procedure.
+          
+          Add one small `Repository code update` subsection for an existing healthy
+          production host:
+          
+          ```bash
+          cd ~/VaultWarden-OCI
+          git pull --ff-only
+          sudo ./setup.sh systemd install --enable-now
+          sudo ./setup.sh systemd validate
+          sudo ./utilities/smoke-test.sh
+          ```
+          
+          State explicitly that:
+          
+          - `git pull` updates the checkout;
+          - systemd install activates managed repo code in `/opt` and current unit files;
+          - validate proves installed runtime matches the checkout and timers are healthy;
+          - smoke proves live readiness; and
+          - recovery/manual-inspection hosts keep the existing `--no-enable-now` safety
+            window until ready.
+          
+          Do not add `make update-code`, a git-pull daemon, unattended repository updates,
+          or a self-updater.
+          
+          ## Final Scope After Pressure Testing
+          
+          ### Production correctness — must be in the final PR
+          
+          1. F-01/F-02/TP-03 root-policy and broken dashboard root-action contracts.
+          2. TP-14 recovery pre-commit rollback, signal exits, one explicit commit boundary,
+             and non-zero post-commit startup/health failure without rollback.
+          3. Corrected TP-17 quick-verification failure: discard failed archive/sidecars
+             immediately; no retention/pruning/success email/offsite work; non-zero exit.
+          4. TP-20 systemd auto-start install and validation fail on unhealthy/no-next-trigger
+             managed timers.
+          5. TP-21 installed runtime validation fails on stale managed scripts, expected repo
+             libraries, or managed units.
+          6. TP-15/SP-05 smoke readiness: `/alive`, canonical systemd validation, canonical
+             critical services, successful CrowdSec query, and no READY with any FAIL/SKIP.
+          7. TP-07/TP-09 real CrowdSec command failures remain errors/Unknown rather than
+             benign success or numeric zero.
+          8. TP-13/TP-02/TP-18 first-install command/order/root/rclone path corrections.
+          9. F-04/TP-01 canonical Bash runner, checkout-safe test harness, direct workflow
+             call, workflow/docs path filters, RUNBOOK/DEPLOYMENT scan coverage, and dead
+             autofix-job deletion.
+          10. F-03/TP-08/TP-11/SP-06 dashboard and backup/status wording simplification by
+              deletion/renaming rather than stronger unsupported claims.
+          
+          ### Tiny same-file cleanup — acceptable when already touching the file
+          
+          - backup help/version before environment loading;
+          - dead `run_user_cmd` deletion after caller removal;
+          - `key-backup` truthful custody wording/removal;
+          - Makefile top usage sudo examples;
+          - `setup-secrets --skip-validation` removal **only if setup-secrets is already
+            materially touched for another required change**; otherwise defer it;
+          - no-op `fmt` removal if naturally adjacent, otherwise defer it.
+          
+          ### Explicitly deferred from this production PR
+          
+          - all historical test renames and test-file merges;
+          - wholesale removal of developer Make targets;
+          - a generic recovery transaction library;
+          - readiness metadata/registries;
+          - an install manifest or package manager for `/opt`;
+          - a self-updater or git-pull daemon;
+          - a status cache/monitoring database;
+          - a dashboard/TUI framework;
+          - a test framework migration; and
+          - further repo-wide architecture audits before implementing the known blockers.
+          
+          ## Recommended One-PR Commit Shape
+          
+          One PR remains realistic, but one giant undifferentiated commit is not required.
+          Prefer a few coherent commits inside the same bounded PR:
+          
+          1. **Fail-closed runtime contracts** — recovery, backup verification, CrowdSec
+             command status, systemd install/validate split-brain and timer health.
+          2. **Operator truthfulness** — smoke, drill, dashboard, Make routing/labels/root
+             policy.
+          3. **Canonical regression execution** — runner, existing focused test extensions,
+             `.env`-safe test harness, workflow caller/path migration, dead CI job removal.
+          4. **Golden-path documentation** — RUNBOOK/DEPLOYMENT/OPERATIONS/SCRIPTS and
+             regenerated command reference as required by actual code changes.
+          
+          These are review boundaries, not architecture phases or separate PRs.
+          
+          ## Final Small-Team Implementation Guardrail
+          
+          For the implementation agent:
+          
+          > Do not introduce a new generic abstraction unless at least two existing
+          > production callers in this PR demonstrably need the same behavior and routing to
+          > an existing canonical helper is insufficient.
+          
+          In particular, prefer:
+          
+          - a local boolean over a state model;
+          - a staged file over a transaction framework;
+          - a direct `cmp`/existing SHA loop over an install manifest;
+          - a thin Make alias over duplicate inventory;
+          - one canonical validator call over copied readiness lists; and
+          - deleting a misleading dashboard field over building a parser to justify it.
+          
+          ## Final Scope-Pressure Recommendation
+          
+          **REPORT READY — ONE BOUNDED PR IS REALISTIC AFTER THIS SCOPE TRIM.**
+          
+          The additional pass did not uncover an enterprise-scale design problem. It did the
+          opposite: it identified where the audit itself was starting to ask for unnecessary
+          renames, merges, target deletion, and classification machinery.
+          
+          The remaining production work is concrete and finite:
+          
+          - truthful exit status;
+          - complete local recovery rollback before one commit boundary;
+          - installed-runtime activation/validation;
+          - one canonical regression inventory;
+          - no false READY/Healthy/PASS claims; and
+          - correct first-install/day-2 documentation.
+          
+          Stop broad auditing after this addendum. Implement the bounded scope above, review
+          the resulting PR against the final acceptance conditions, activate it with the
+          documented systemd install step, then validate and smoke-test the actual host.
+          
+          VW_SCOPE_PRESSURE_ADDENDUM
+          test "$(grep -c '^## Final Scope-Pressure and Small-Team Realism Addendum$' "$report")" -eq 1
+          grep -Fq '**REPORT READY — ONE BOUNDED PR IS REALISTIC AFTER THIS SCOPE TRIM.**' "$report"
+          rm -f .github/workflows/append-post-pr226-scope-pressure.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$report" .github/workflows/append-post-pr226-scope-pressure.yml
+          git commit -m 'docs: append final small-team scope-pressure audit'
+          git push origin HEAD:delta
