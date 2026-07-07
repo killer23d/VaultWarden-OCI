@@ -475,6 +475,71 @@ _require_cli_value() {
     fi
 }
 
+_ss_dispatch_metadata() {
+    case "${1-}" in
+        --help|-h|help)
+            show_help
+            exit 0
+            ;;
+        --version|-V)
+            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+            exit 0
+            ;;
+        setup|verify)
+            case "${2-}" in
+                --help|-h|help)
+                    show_help
+                    exit 0
+                    ;;
+                --version|-V)
+                    print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                    exit 0
+                    ;;
+            esac
+            ;;
+        migrate)
+            case "${2-}" in
+                --help|-h|help)
+                    _mv_usage
+                    exit 0
+                    ;;
+                --version|-V)
+                    print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                    exit 0
+                    ;;
+            esac
+            ;;
+        --mode)
+            case "${2-}" in
+                setup|verify)
+                    case "${3-}" in
+                        --help|-h|help)
+                            show_help
+                            exit 0
+                            ;;
+                        --version|-V)
+                            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                            exit 0
+                            ;;
+                    esac
+                    ;;
+                migrate)
+                    case "${3-}" in
+                        --help|-h|help)
+                            _mv_usage
+                            exit 0
+                            ;;
+                        --version|-V)
+                            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                            exit 0
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
+}
+
 _parse_outer_args() {
     local -a remaining=()
     local mode_seen=false
@@ -588,28 +653,9 @@ _parse_setup_args() {
 }
 
 main() {
-    _parse_outer_args "$@"
-
-    if [[ "${_SS_MODE}" == "migrate" ]]; then
-        local _ss_migrate_arg
-        for _ss_migrate_arg in "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"; do
-            case "$_ss_migrate_arg" in
-                help|--help|-h|--version|-V)
-                    case "$_ss_migrate_arg" in
-                        help|--help|-h)
-                            _mv_usage
-                            ;;
-                        --version|-V)
-                            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
-                            ;;
-                    esac
-                    exit $?
-                    ;;
-            esac
-        done
-    fi
-
+    _ss_dispatch_metadata "$@"
     _ss_load_runtime_environment
+    _parse_outer_args "$@"
 
     if [[ "${_SS_MODE}" == "migrate" ]]; then
         _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
