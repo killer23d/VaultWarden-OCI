@@ -69,7 +69,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com [OP
 | :-- | :-- |
 | `install --domain DOMAIN --email EMAIL` | Run the full install |
 | `--auto` | Automated setup with minimal prompts |
-| `--use-latest` | Use live upstream container and CrowdSec component versions instead of pinned values |
+| `--use-latest` | Use live upstream container/CrowdSec component versions and resolve the latest SOPS release instead of pinned defaults |
 | `--skip-deps` | Skip dependency installation |
 | `--force` | Overwrite existing configuration files |
 | `--dry-run` | Show what would be done without executing |

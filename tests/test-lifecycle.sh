@@ -384,7 +384,7 @@ for timer in "$ROOT"/systemd/vaultwarden-*.timer; do
     require '^Persistent=false$' "$timer" "timer must avoid persistent install/boot catch-up: $timer"
 done
 
-# StartLimit directives belong in [Unit], not [Service], on Ubuntu 22.04/24.04
+# StartLimit directives belong in [Unit], not [Service], on Ubuntu 24.04 Noble
 # systemd. This catches the warning: Unknown key name 'StartLimitIntervalSec' in
 # section 'Service'.
 require '^StartLimitIntervalSec=60s$' "$IPTABLES" 'iptables service must set StartLimitIntervalSec'

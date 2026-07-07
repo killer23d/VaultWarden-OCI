@@ -340,7 +340,7 @@ _resolve_service_user() {
         log_warn "SERVICE_USER='${SERVICE_USER}' does not exist on this system — trying detection."
     fi
 
-    # 2. The human who invoked sudo is the most reliable signal on Ubuntu cloud
+    # 2. The human who invoked sudo is the most reliable signal on Ubuntu Noble cloud
     #    images and developer workstations alike (sudo always sets SUDO_USER).
     if [[ -n "${SUDO_USER:-}" ]] && id "$SUDO_USER" &>/dev/null; then
         echo "$SUDO_USER"

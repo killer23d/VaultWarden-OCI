@@ -9,10 +9,10 @@ Store this card with the offline Age recipient private-key USB drive.
 ## Before you start
 - This printed card with contact details filled in
 - USB drive containing `age-key.txt`
-- OCI console access
+- provider console access for the replacement VM and firewall/security-group rules
 
 ## Step 1 — Create a supported Ubuntu LTS VM
-Use Ubuntu 24.04 LTS where available. Ubuntu 22.04 or later is supported.
+Use Ubuntu 24.04 LTS Noble on amd64 or arm64.
 
 ## Step 2 — Attach the data volume and identify the device
 ```bash

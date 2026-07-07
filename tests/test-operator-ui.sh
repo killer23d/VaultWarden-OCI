@@ -359,6 +359,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAINT_DB="$ROOT/utilities/maintenance-db-maint.sh"
+TMP_PROMPT_PROSE=""
+TMP_PROMPT_RUNTIME=""
+cleanup_prompt_fixtures() {
+    [[ -n "$TMP_PROMPT_PROSE" ]] && rm -f "$TMP_PROMPT_PROSE"
+    [[ -n "$TMP_PROMPT_RUNTIME" ]] && rm -f "$TMP_PROMPT_RUNTIME"
+    return 0
+}
+trap cleanup_prompt_fixtures EXIT
 
 patterns=(
     "y""/N"
@@ -369,20 +377,37 @@ patterns=(
     "[y""/N]"
 )
 
+confirmation_prompt_scan_targets() {
+    find "$ROOT" -maxdepth 1 -type f -name "*.sh" -print
+    find "$ROOT/utilities" -maxdepth 1 -type f -name "*.sh" -print
+    find "$ROOT/lib" -maxdepth 1 -type f -name "*.sh" -print
+}
+
 scan_prompt_pattern() {
     local pattern="$1"
-    grep \
-        -RInF \
-        -I \
-        --exclude-dir=.git \
-        --exclude='*.png' \
-        --exclude='*.jpg' \
-        --exclude='*.jpeg' \
-        --exclude='*.gif' \
-        --exclude='*.ico' \
-        --exclude='*.pdf' \
-        -- "$pattern" "$ROOT"
+    local targets=()
+    while IFS= read -r target; do
+        targets+=("$target")
+    done < <(confirmation_prompt_scan_targets)
+    ((${#targets[@]} > 0)) || return 1
+    grep -nF -I -- "$pattern" "${targets[@]}"
 }
+
+TMP_PROMPT_PROSE="$(mktemp "$ROOT/reports/operator-ui-prose.XXXXXX.md")"
+printf 'Historical prose may mention Continue? [y/N] without being a runtime prompt.\n' > "$TMP_PROMPT_PROSE"
+if scan_prompt_pattern "[y""/N]" | grep -Fq "$(basename "$TMP_PROMPT_PROSE")"; then
+    echo "FAIL: prompt scan must not inspect reports prose" >&2
+    exit 1
+fi
+
+TMP_PROMPT_RUNTIME="$(mktemp "$ROOT/utilities/operator-ui-runtime.XXXXXX.sh")"
+printf 'read -r -p "Continue? [y/N] " answer\n' > "$TMP_PROMPT_RUNTIME"
+if ! scan_prompt_pattern "[y""/N]" | grep -Fq "$(basename "$TMP_PROMPT_RUNTIME")"; then
+    echo "FAIL: prompt scan must reject shorthand prompts in runtime shell surfaces" >&2
+    exit 1
+fi
+rm -f "$TMP_PROMPT_RUNTIME"
+TMP_PROMPT_RUNTIME=""
 
 for pattern in "${patterns[@]}"; do
     set +e

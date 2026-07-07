@@ -50,7 +50,7 @@ The intended normal production host matrix is:
 
 | Dimension            | Supported normal production path                                         |
 | -------------------- | ------------------------------------------------------------------------ |
-| Operating system     | Ubuntu 22.04 LTS Jammy or Ubuntu 24.04 LTS Noble                         |
+| Operating system     | Ubuntu 24.04 LTS Noble                                                   |
 | CPU architecture     | amd64 or arm64                                                           |
 | Host type            | Cloud VM, virtual machine, or physical host                              |
 | Cloud provider       | Provider-neutral                                                         |
@@ -59,13 +59,11 @@ The intended normal production host matrix is:
 | Edge provider        | Cloudflare                                                               |
 | Storage              | Boot-volume state or an explicitly configured attached block/data volume |
 
-The project must be designed and reviewed against all four primary OS/CPU combinations:
+The project must be designed and reviewed against both supported OS/CPU combinations:
 
 ```text
-Ubuntu 22.04 amd64
-Ubuntu 22.04 arm64
-Ubuntu 24.04 amd64
-Ubuntu 24.04 arm64
+Ubuntu 24.04 Noble amd64
+Ubuntu 24.04 Noble arm64
 ```
 
 Do not describe the project as fully "CPU agnostic".
@@ -94,30 +92,25 @@ The full-stack support boundary is determined by the narrowest required producti
 
 # Ubuntu version portability contract
 
-The normal production path must work on both:
+The normal production path must work on:
 
 ```text
-Ubuntu 22.04 LTS Jammy
 Ubuntu 24.04 LTS Noble
 ```
 
-Host setup code must not silently assume one Ubuntu release.
+Host setup code must not silently assume support for any other Ubuntu release.
 
 Where Ubuntu release information is required:
 
 1. read `/etc/os-release`;
 2. require `ID=ubuntu`;
 3. derive the actual version/codename from the host;
-4. support the explicitly accepted Ubuntu versions;
-5. fail clearly on an unsupported or unresolved release.
+4. require `VERSION_ID=24.04`;
+5. require codename `noble` from `VERSION_CODENAME` and/or `UBUNTU_CODENAME`;
+6. fail if the version and codename are missing, unresolved, or inconsistent;
+7. fail clearly on an unsupported or unresolved release.
 
 Do not silently default to:
-
-```text
-jammy
-```
-
-or:
 
 ```text
 noble
@@ -127,7 +120,7 @@ when host release detection fails.
 
 A fallback that configures repositories for the wrong Ubuntu release is not acceptable.
 
-Repository, package, and dependency installation paths must be checked for Jammy/Noble differences.
+Repository, package, and dependency installation paths must be checked against the Noble-only production contract.
 
 Pay particular attention to:
 
@@ -136,7 +129,7 @@ Pay particular attention to:
 * deb822 `.sources` versus traditional `.list` files;
 * Docker apt repository setup;
 * package names;
-* package availability;
+* package availability on Ubuntu 24.04 Noble;
 * package implementation differences;
 * systemd semantics;
 * iptables versus nftables backend behavior;
@@ -148,7 +141,7 @@ Pay particular attention to:
 * CrowdSec packages and repositories;
 * firewall bouncer packages.
 
-Do not infer compatibility merely because the same package name exists on both releases.
+Do not infer compatibility merely because the same package name exists in another Ubuntu release or distribution.
 
 If the project requires a specific command implementation or major version, validate that implementation explicitly.
 
@@ -718,13 +711,11 @@ CI and local developer wrappers must not maintain separate permanent test invent
 Repository changes affecting host installation, dependencies, images, storage, networking, or systemd must be reviewed against the supported matrix:
 
 ```text
-Jammy amd64
-Jammy arm64
-Noble amd64
-Noble arm64
+Ubuntu 24.04 Noble amd64
+Ubuntu 24.04 Noble arm64
 ```
 
-This does not require destructive CI on four real production hosts for every change.
+This does not require destructive CI on two real production hosts for every change.
 
 Use the lowest-cost useful validation layer.
 
@@ -805,7 +796,7 @@ The following are not acceptable:
 * an SSH disconnect leaving unsafe key or startup guidance;
 * direct supported script invocation silently having weaker safety than the Make path;
 * a skipped or unavailable required readiness check presented as healthy;
-* unsupported Ubuntu release fallback silently using Jammy or Noble repositories;
+* unsupported Ubuntu release fallback silently using Noble repositories;
 * unsupported CPU architecture silently receiving another architecture's binary;
 * a cloud-provider-specific assumption hidden in the normal provider-neutral path.
 
@@ -929,7 +920,7 @@ These are not interchangeable.
 Documentation must reflect the supported normal production matrix:
 
 ```text
-Ubuntu 22.04 LTS or Ubuntu 24.04 LTS
+Ubuntu 24.04 LTS Noble
 amd64 or arm64
 provider-neutral host
 Cloudflare-first edge

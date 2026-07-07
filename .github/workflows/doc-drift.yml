@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/**'
+      - 'AGENTS.md'
+      - 'caddy/**'
       - 'docs/**'
       - 'README.md'
       - 'RUNBOOK.md'
@@ -32,12 +34,12 @@ jobs:
       # COMMAND-REFERENCE.md is identical to what was committed (which was
       # produced on a machine that had yq installed).
       #
-      # NOTE: 'apt-get install yq' installs python-yq (a jq wrapper), NOT the
-      # mikefarah/yq Go binary. lib/schema.sh uses mikefarah yq syntax
-      # (e.g. 'yq eval'), so we must install the correct binary directly.
+      # NOTE: 'apt-get install yq' installs python-yq (a jq wrapper), NOT
+      # the Mike Farah yq v4 binary required by production setup and
+      # lib/schema.sh. Keep this pin in sync with utilities/setup-system.sh.
       - name: Install yq
         run: |
-          # Pinned to v4.53.3 — do NOT change to /releases/latest (violates
+          # Pinned to v4.53.3 -- do NOT change to /releases/latest (violates
           # the unpinned-version check this same workflow enforces).
           # To upgrade: update YQ_VERSION and YQ_SHA256 together.
           # SHA-256 source: https://github.com/mikefarah/yq/releases/tag/v4.53.3
@@ -112,12 +114,29 @@ jobs:
             echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"
             FAIL=1
           fi
-          # Guard against unintended /releases/latest calls in any OTHER script
-          # under utilities/ — setup-crowdsec.sh legitimately uses the endpoint
-          # when no version pin is configured (runtime-guarded by USE_LATEST /
-          # empty CF_WORKER_BOUNCER_VERSION), so it is excluded here.
-          if grep -n '/releases/latest' setup.sh 2>/dev/null; then
-            echo "UNPINNED: /releases/latest GitHub API call found in setup.sh"
+          # Guard against unintended /releases/latest calls. setup-system.sh
+          # may resolve SOPS latest only behind explicit --use-latest;
+          # setup-crowdsec.sh has its own explicit latest-mode contract.
+          if grep -rn '/releases/latest' setup.sh utilities/ lib/ --include='*.sh' 2>/dev/null \
+               | grep -v 'utilities/setup-system.sh:' \
+               | grep -v 'utilities/setup-crowdsec.sh:'; then
+            echo "UNPINNED: unexpected /releases/latest GitHub API call"
+            FAIL=1
+          fi
+          if ! grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.2"' utilities/setup-system.sh; then
+            echo "UNPINNED: setup-system.sh must define the pinned SOPS default"
+            FAIL=1
+          fi
+          if ! awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq 'USE_LATEST'; then
+            echo "UNPINNED: SOPS latest resolution must be owned by explicit --use-latest"
+            FAIL=1
+          fi
+          if grep -En '^[[:space:]]*--with[[:space:]]+github.com/[^[:space:]@]+([[:space:]\\]|$)' caddy/Dockerfile; then
+            echo "UNPINNED: direct xcaddy module reference lacks an @version"
+            FAIL=1
+          fi
+          if grep -En '^[[:space:]]*--with[[:space:]]+github.com/.*@(latest|main|master|HEAD)([[:space:]\\]|$)' caddy/Dockerfile; then
+            echo "UNPINNED: direct xcaddy module uses a mutable ref"
             FAIL=1
           fi
           if grep -Eq '^(CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
@@ -181,12 +200,12 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y age apache2-utils python3-argon2
+          sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
           echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64 -o /tmp/sops
-          echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /tmp/sops" | sha256sum --check --status
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
       - name: Run focused tests

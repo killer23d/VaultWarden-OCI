@@ -1,6 +1,6 @@
 # VaultWarden-OCI
 
-**Production-ready VaultWarden for small teams on Ubuntu.**
+**Production-ready VaultWarden for small teams on Ubuntu 24.04 LTS Noble.**
 
 VaultWarden-OCI is an opinionated, security-first deployment for teams of 10 or fewer users. It combines Vaultwarden, Caddy, Cloudflare DNS/proxy/WAF, CrowdSec, Postfix SMTP relay, SOPS/Age secrets, encrypted backups, rclone offsite sync, and systemd automation into a small-team appliance.
 
@@ -27,7 +27,7 @@ VaultWarden-OCI is an opinionated, security-first deployment for teams of 10 or 
 
 - Create `vault.yourdomain.com` in Cloudflare.
 - Start DNS as **DNS Only** until origin certificate issuance succeeds.
-- Allow inbound TCP `443` to the Ubuntu host. Allow `80` only if you intentionally use HTTP/ACME fallback or redirects.
+- Allow inbound TCP `443` to the Ubuntu 24.04 Noble host through your provider firewall, security group, or network firewall. Allow `80` only if you intentionally use HTTP/ACME fallback or redirects.
 - Limit SSH to administrator IP ranges where possible.
 - After validation, switch Cloudflare to **Proxied** and use SSL/TLS **Full (Strict)**.
 

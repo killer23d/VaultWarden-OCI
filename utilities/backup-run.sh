@@ -892,7 +892,7 @@ sync_to_rclone() {
 # the caller's array (passed by nameref) with the --config argument pair.
 # NAMEREF_ARRAY is the caller's variable name without a leading dollar sign.
 # Returns 1 and logs an error when resolution or validation fails.
-# Requires Bash 5.0+ (the project baseline is Ubuntu 22.04 LTS).
+# Requires Bash 5.0+ (the production baseline is Ubuntu 24.04 LTS Noble).
 _resolve_rclone_config_arg() {
     local -n _rca_out="$1"
     local cfg

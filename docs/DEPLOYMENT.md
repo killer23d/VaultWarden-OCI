@@ -1,6 +1,6 @@
 # Deployment Guide — VaultWarden-OCI
 
-This guide follows the supported golden path: Ubuntu host, Cloudflare DNS/proxy/WAF, Caddy DNS-01 with Cloudflare, Vaultwarden, Postfix sidecar mail, CrowdSec with Cloudflare edge enforcement, SOPS+Age secrets, rclone/offsite backup, and systemd automation. For the project boundary, see [PROJECT-BOUNDARY.md](PROJECT-BOUNDARY.md).
+This guide follows the supported golden path: Ubuntu 24.04 LTS Noble host on amd64 or arm64, Cloudflare DNS/proxy/WAF, Caddy DNS-01 with Cloudflare, Vaultwarden, Postfix sidecar mail, CrowdSec with Cloudflare edge enforcement, SOPS+Age secrets, rclone/offsite backup, and systemd automation. For the project boundary, see [PROJECT-BOUNDARY.md](PROJECT-BOUNDARY.md).
 
 Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md) · [OPERATIONS.md](OPERATIONS.md) · [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md)
 

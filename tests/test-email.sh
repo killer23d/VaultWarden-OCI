@@ -96,3 +96,78 @@ echo "PASS=$PASS FAIL=$FAIL"
 )
 
 check_email_delivery_refactor_contracts
+check_recovery_kit_attachment_passphrase_argv_contract() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+if grep -En 'zip[[:space:]].*--password|7z[[:space:]].*-p\$\(|cat "\$_pass_file"|vw-enc-pass' "$ROOT/lib/secrets.sh" >/tmp/vw-recovery-argv.$$; then
+    cat /tmp/vw-recovery-argv.$$ >&2
+    rm -f /tmp/vw-recovery-argv.$$
+    fail 'recovery-kit attachment helper must not construct secret-bearing archiver argv'
+fi
+rm -f /tmp/vw-recovery-argv.$$
+grep -Fq '7z a -tzip -mem=ZipCrypto -mx=0 \' "$ROOT/lib/secrets.sh" \
+    || fail '7z attachment path missing expected archive command'
+grep -Fq -- '-p \' "$ROOT/lib/secrets.sh" \
+    || fail '7z attachment path must use bare interactive -p switch'
+grep -Fq 'zip -0 --encrypt \' "$ROOT/lib/secrets.sh" \
+    || fail 'zip attachment path must use interactive --encrypt mode'
+
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/7z" <<'MOCK_7Z'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$MOCK_ARGV_FILE"
+touch "$6"
+MOCK_7Z
+cat > "$TMP/bin/zip" <<'MOCK_ZIP'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$MOCK_ARGV_FILE"
+touch "$3"
+MOCK_ZIP
+chmod +x "$TMP/bin/7z" "$TMP/bin/zip"
+
+plaintext="$TMP/recovery-kit.txt"
+printf 'test recovery kit\n' > "$plaintext"
+
+(
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH"
+    export PATH
+    # shellcheck source=../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    MOCK_ARGV_FILE="$TMP/7z.argv"
+    export MOCK_ARGV_FILE
+    _encrypt_recovery_kit_attachment "$plaintext" "$TMP/kit-7z.zip" 7z
+)
+! grep -Fq 'TEST_ATTACHMENT_SECRET' "$TMP/7z.argv" \
+    || fail '7z argv contains sentinel secret'
+grep -Fxq -- '-p' "$TMP/7z.argv" \
+    || fail '7z argv did not include the bare interactive -p switch'
+! grep -Eq '^-p.+' "$TMP/7z.argv" \
+    || fail '7z argv used an inline password form'
+
+(
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH"
+    export PATH
+    # shellcheck source=../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    MOCK_ARGV_FILE="$TMP/zip.argv"
+    export MOCK_ARGV_FILE
+    _encrypt_recovery_kit_attachment "$plaintext" "$TMP/kit-zip.zip" zip
+)
+! grep -Fq 'TEST_ATTACHMENT_SECRET' "$TMP/zip.argv" \
+    || fail 'zip argv contains sentinel secret'
+grep -Fxq -- '--encrypt' "$TMP/zip.argv" \
+    || fail 'zip argv did not include interactive --encrypt'
+! grep -Fxq -- '--password' "$TMP/zip.argv" \
+    || fail 'zip argv must not include --password'
+
+printf 'Recovery-kit attachment argv secrecy tests passed.\n'
+)
+
+check_recovery_kit_attachment_passphrase_argv_contract

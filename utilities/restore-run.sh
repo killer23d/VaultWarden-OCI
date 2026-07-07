@@ -1652,7 +1652,7 @@ _require_command_for_path() {
     local cmd="$1" reason="$2" package="${3:-$1}"
     if ! command -v "$cmd" >/dev/null 2>&1; then
         log_error "$cmd is required for ${reason} but is not installed."
-        log_error "Install on Ubuntu 22.04/24.04 with: sudo apt-get install -y ${package}"
+        log_error "Install on Ubuntu 24.04 LTS Noble with: sudo apt-get install -y ${package}"
         return 1
     fi
 }

@@ -331,7 +331,7 @@ validate_required_secrets() {
         while IFS= read -r _ck; do
             [[ -z "$_ck" ]] && continue
             _cf_keys+=("$_ck")
-        done < <(yq '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' \
+        done < <(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' \
                     "${SECRETS_SCHEMA_FILE:-${PROJECT_ROOT}/secrets-schema.yaml}" 2>/dev/null)
         if [[ ${#_cf_keys[@]} -eq 0 ]]; then
             # Fallback: static list guards against yq unavailability at this stage.
@@ -571,9 +571,9 @@ _check_recovery_kit_email_deps() {
 # _encrypt_recovery_kit_attachment PLAINTEXT_FILE OUTPUT_FILE TOOL
 #
 # Encrypts PLAINTEXT_FILE into OUTPUT_FILE using the given TOOL (7z or zip).
-# Passphrase is collected via prompt_password_with_confirmation (min 16 chars).
-# The passphrase is never passed as a CLI argument — it is staged through a
-# mode-600 temp file on tmpfs and shredded immediately after use.
+# The selected archiver prompts for and confirms the attachment passphrase
+# interactively. Bash never reads the passphrase, so it is not placed in argv,
+# environment variables, logs, xtrace output, or temporary filenames/files.
 # Returns 0 on success, 1 on failure. Shreds OUTPUT_FILE on failure.
 # ---------------------------------------------------------------------------
 _encrypt_recovery_kit_attachment() {
@@ -581,60 +581,32 @@ _encrypt_recovery_kit_attachment() {
     local output_file="$2"
     local tool="$3"
 
-    local _enc_pass
-    { set +x; } 2>/dev/null
-    _enc_pass=$(prompt_password_with_confirmation \
-        "Passphrase to encrypt emailed attachment" 16) || {
-        unset _enc_pass
-        log_error "Passphrase entry failed or aborted"
-        return 1
-    }
-
     local _rc=0
+    rm -f "$output_file"
+    if [[ -w /dev/tty ]]; then
+        printf 'When prompted by %s, enter a unique attachment passphrase of at least 16 characters.\n' "$tool" >/dev/tty 2>/dev/null || true
+    fi
     case "$tool" in
         7z)
-            # 7z does not support reading the passphrase from a file descriptor;
-            # use a tmpfs-backed mode-600 temp file and shred it immediately.
-            local _pass_file
-            _pass_file=$(mktemp -p /dev/shm vw-enc-pass.XXXXXX 2>/dev/null \
-                || mktemp vw-enc-pass.XXXXXX)
-            install -m 600 /dev/null "$_pass_file"
-            { set +x; } 2>/dev/null
-            printf '%s' "$_enc_pass" > "$_pass_file"
-            unset _enc_pass
-
             # -tzip       : ZIP container (universally openable — WinZip, 7-Zip, macOS, Linux)
             # -mem=ZipCrypto : ZipCrypto encryption — the only cipher supported by p7zip 23.01
             #                  on ARM64 Ubuntu 24.04. AES-256 + -mhe=on are 7z-format-only
             #                  features; both produce exit 2 when combined with -tzip.
             # -mx=0       : store only (no compression); plaintext is already uncompressible
-            # -p@FILE     : read passphrase from file rather than expanding it into argv,
-            #               preventing the secret from appearing in /proc/$$/cmdline.
-            # Remove the pre-created 0-byte placeholder so 7z can create the archive fresh;
-            # 7z a refuses to overwrite a non-archive file and exits 2.
-            rm -f "$output_file"
+            # -p          : prompt interactively; do not append the passphrase.
             7z a -tzip -mem=ZipCrypto -mx=0 \
-                "-p$(cat "$_pass_file")" \
+                -p \
                 "$output_file" "$plaintext_file" >/dev/null 2>&1
             _rc=$?
-            _secure_shred "$_pass_file"
             ;;
         zip)
-            local _pass_file
-            _pass_file=$(mktemp -p /dev/shm vw-enc-pass.XXXXXX 2>/dev/null \
-                || mktemp vw-enc-pass.XXXXXX)
-            install -m 600 /dev/null "$_pass_file"
-            { set +x; } 2>/dev/null
-            printf '%s' "$_enc_pass" > "$_pass_file"
-            unset _enc_pass
-
-            zip --encrypt --password "$(cat "$_pass_file")" \
+            # Info-ZIP prompts interactively when --encrypt is used without
+            # --password VALUE; keep the attachment passphrase out of argv.
+            zip -0 --encrypt \
                 "$output_file" "$plaintext_file" >/dev/null 2>&1
             _rc=$?
-            _secure_shred "$_pass_file"
             ;;
         *)
-            unset _enc_pass
             log_error "_encrypt_recovery_kit_attachment: unknown tool '$tool'"
             return 1
             ;;

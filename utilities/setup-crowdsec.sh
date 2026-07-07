@@ -741,7 +741,7 @@ else
         cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_key" 2>/dev/null || true
     fi
 
-    # Detect whether iptables is using the nf_tables backend (Ubuntu 22.04+/Noble)
+    # Detect whether iptables is using the nf_tables backend on Ubuntu 24.04 Noble.
     if iptables -V 2>/dev/null | grep -q 'nf_tables'; then
         _fw_mode="nftables"
         _fw_chains_block="nftables_hooks:

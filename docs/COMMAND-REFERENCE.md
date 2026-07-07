@@ -123,7 +123,9 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Use live upstream container and CrowdSec versions in .env.
+  --use-latest        Use live upstream container and CrowdSec versions in .env,
+                      and resolve the latest SOPS release instead of the pinned
+                      production default.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       WARNING: Also regenerates the Age encryption key. All
@@ -160,8 +162,6 @@ EXAMPLES:
     sudo ./setup.sh secrets --export-recovery-kit
 
     # ── Systemd timer management ──────────────────────────────────
-    sudo ./setup.sh systemd install      # Install and enable all timers
-    sudo ./setup.sh systemd validate     # Detect split-brain vs /opt/
 ```
 
 ### startup.sh
@@ -1314,8 +1314,8 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --use-latest          Override pinned versions with 'latest'
-    --sops-version VER    Pin SOPS to a specific version (e.g. v3.9.4)
+    --use-latest          Resolve the latest SOPS release instead of the pinned default
+    --sops-version VER    Use a specific SOPS version (default: v3.13.2)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --data-device DEV     Data volume device path
