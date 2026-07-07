@@ -19,6 +19,7 @@ VaultWarden-OCI Safe Restart
 
 USAGE:
     sudo make safe-restart
+    sudo utilities/safe-restart.sh [OPTIONS]
 
 DESCRIPTION:
     Captures the resolved Compose model and current local image IDs, restarts
@@ -27,12 +28,20 @@ DESCRIPTION:
 
     This restores container configuration and images only. It does not reverse
     database migrations, host package changes, or operator-edited data.
+
+OPTIONS:
+    --help, -h       Show this help
+    --version, -V    Print the VaultWarden-OCI version and exit
 EOF
 }
 
 case "${1:-}" in
     --help|-h|help)
         show_help
+        exit 0
+        ;;
+    --version|-V)
+        print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
         exit 0
         ;;
     "") ;;

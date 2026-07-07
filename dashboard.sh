@@ -904,10 +904,13 @@ handle_identity_menu() {
 # Main event loop
 # ===========================================================================
 main() {
-    case "${1:-}" in
-        --help|-h|help) show_help; exit 0 ;;
-        --version|-V) print_project_version "VaultWarden-OCI" "${REPO_ROOT}"; exit 0 ;;
-    esac
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h|help) show_help; exit 0 ;;
+            --version|-V) print_project_version "VaultWarden-OCI" "${REPO_ROOT}"; exit 0 ;;
+            *) log_error "Unknown argument: $1"; show_help; exit 1 ;;
+        esac
+    done
 
     if [[ ! -t 0 || ! -t 1 ]]; then
         log_error "dashboard.sh requires an interactive terminal."

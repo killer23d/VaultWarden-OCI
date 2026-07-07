@@ -131,7 +131,7 @@ fi
 PROBE
 )
 grep -Fq 'Blank target device requires --force-format.' <<< "$out" || fail "blank-device validation lacks clear force-format error: $out"
-grep -Fq 'sudo utilities/setup-storage.sh --mode migrate run --device /dev/sdb --target /mnt/vw-data --force-format' <<< "$out" || fail "blank-device validation lacks sudo-safe example: $out"
+grep -Fq 'sudo utilities/setup-storage.sh migrate run --device /dev/sdb --target /mnt/vw-data --force-format' <<< "$out" || fail "blank-device validation lacks sudo-safe example: $out"
 grep -Fq 'failed-as-expected' <<< "$out" || fail "blank-device validation did not fail without --force-format: $out"
 pass 'blank target device requires --force-format before migration proceeds'
 
@@ -336,7 +336,7 @@ grep -Fq 'To use block storage, re-run with --data-device /dev/disk/by-id/... or
 pass 'non-interactive boot-only path retains existing behavior with helpful block-storage hint'
 
 # setup.sh install --auto must propagate --auto into phase 2 storage setup.
-awk '/setup-storage\.sh" --mode setup/,/\|\| _phase_failed 2/' "$SETUP" | grep -Fq '"${_auto[@]}"' \
+awk '/setup-storage\.sh" setup/,/\|\| _phase_failed 2/' "$SETUP" | grep -Fq '"${_auto[@]}"' \
     || fail 'setup.sh phase 2 does not pass --auto to setup-storage'
 pass 'setup.sh install --auto suppresses the storage assistant in phase 2'
 
@@ -348,6 +348,33 @@ grep -Fq 'setup-storage is run interactively' "$STORAGE" \
 grep -Fq -- '--auto suppresses the prompt' "$STORAGE" \
     || fail 'help text must mention --auto prompt suppression'
 pass 'setup-storage help and unknown-option contracts remain documented'
+
+run_storage() {
+    set +e
+    out="$(PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH" bash "$STORAGE" "$@" 2>&1)"
+    status=$?
+    set -e
+}
+
+run_storage setup --help
+[[ "$status" -eq 0 && "$out" == *'sudo utilities/setup-storage.sh setup [OPTIONS]'* ]] \
+    || fail "canonical setup help failed: $out"
+run_storage verify --help
+[[ "$status" -eq 0 && "$out" == *'sudo utilities/setup-storage.sh verify [OPTIONS]'* ]] \
+    || fail "canonical verify help failed: $out"
+run_storage migrate --help
+[[ "$status" -eq 0 && "$out" == *'setup-storage.sh migrate <subcommand>'* ]] \
+    || fail "canonical migrate help failed: $out"
+run_storage --mode migrate --help
+[[ "$status" -eq 0 && "$out" == *'setup-storage.sh migrate <subcommand>'* ]] \
+    || fail "compatibility --mode migrate help failed: $out"
+run_storage setup verify
+[[ "$status" -ne 0 && "$out" == *'Exactly one setup-storage mode is allowed'* ]] \
+    || fail "setup-storage accepted multiple modes: $out"
+run_storage setup --data-mount --force
+[[ "$status" -ne 0 && "$out" == *'--data-mount requires a value'* ]] \
+    || fail "setup-storage accepted missing --data-mount value: $out"
+pass 'setup-storage canonical and compatibility CLI grammar is enforced'
 
 )
 

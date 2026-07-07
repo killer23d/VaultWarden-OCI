@@ -1,12 +1,12 @@
 # Volume Migration Guide — VaultWarden-OCI
 
-Reference guide for `utilities/setup-storage.sh --mode migrate` — the interactive tool for moving Vaultwarden data between storage volumes (boot volume ↔ block volume, or directory to directory).
+Reference guide for `utilities/setup-storage.sh migrate` — the interactive tool for moving Vaultwarden data between storage volumes (boot volume ↔ block volume, or directory to directory).
 
 ---
 
 ## 📋 Overview
 
-`setup-storage.sh --mode migrate` is a cloud-agnostic, interactive script that safely moves the Vaultwarden data directory from one storage location to another. It wraps a robust pipeline of steps — format, rsync, byte-count verify — around interactive device selection so the admin never has to specify raw block device paths manually.
+`setup-storage.sh migrate` is a cloud-agnostic, interactive script that safely moves the Vaultwarden data directory from one storage location to another. It wraps a robust pipeline of steps — format, rsync, byte-count verify — around interactive device selection so the admin never has to specify raw block device paths manually.
 
 Typical use cases:
 
@@ -39,7 +39,7 @@ Before running the script:
 Run with no arguments and the script will prompt for everything:
 
 ```bash
-sudo utilities/setup-storage.sh --mode migrate run
+sudo utilities/setup-storage.sh migrate run
 ```
 
 You will be shown a numbered device table (like the one below) and prompted to select the target block device and mount point:
@@ -61,7 +61,7 @@ You will be shown a numbered device table (like the one below) and prompted to s
 Pass all required flags explicitly. `--yes` is required for non-interactive mode and enforces that `--target` is also provided:
 
 ```bash
-sudo utilities/setup-storage.sh --mode migrate run \
+sudo utilities/setup-storage.sh migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
   --device /dev/disk/by-id/your-volume \
@@ -78,10 +78,10 @@ The standard path — moves data from the default location on the OS disk to a f
 
 ```bash
 # Interactive (prompts for device and mount point)
-sudo utilities/setup-storage.sh --mode migrate run
+sudo utilities/setup-storage.sh migrate run
 
 # Non-interactive
-sudo utilities/setup-storage.sh --mode migrate run \
+sudo utilities/setup-storage.sh migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
   --device /dev/disk/by-id/your-volume \
@@ -103,7 +103,7 @@ The script will:
 Use the same interactive or non-interactive flow. Attach the new volume, run the script, and select the new device. The source volume path should be the current mount point:
 
 ```bash
-sudo utilities/setup-storage.sh --mode migrate run \
+sudo utilities/setup-storage.sh migrate run \
   --source /mnt/vw-data \
   --target /mnt/vw-data2 \
   --device /dev/disk/by-id/your-new-volume \
@@ -115,7 +115,7 @@ sudo utilities/setup-storage.sh --mode migrate run \
 Pass `--target` without `--device`. The script skips `_mv_select_device` entirely — no block device is needed and **no formatting occurs**:
 
 ```bash
-sudo utilities/setup-storage.sh --mode migrate run \
+sudo utilities/setup-storage.sh migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data2
 ```
@@ -127,7 +127,7 @@ This is also the correct mode for **reversing a migration** (see below).
 To move data back from a block volume to the boot volume, use directory-to-directory mode. Set `--source` to the current mount point and `--target` to the original path on the boot disk:
 
 ```bash
-sudo utilities/setup-storage.sh --mode migrate run \
+sudo utilities/setup-storage.sh migrate run \
   --source /mnt/vw-data \
   --target /var/lib/vaultwarden
 ```
@@ -186,7 +186,7 @@ Be aware of the following edge cases before running a migration.
 The interactive device picker uses `lsblk` (without `-d`) so both **whole-disk** devices and their **partitions** appear in the numbered list. Devices that belong to the boot disk are tagged `[boot]` — this includes the root disk itself **and any of its partitions** (the guard uses a prefix match, so `/dev/nvme0n1p2` is blocked when `/dev/nvme0n1` is the boot disk). If your target block volume is partition-based, select it directly from the interactive list or pass that partition path explicitly on the CLI:
 
 ```bash
-sudo utilities/setup-storage.sh --mode migrate run \
+sudo utilities/setup-storage.sh migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
   --device /dev/disk/by-id/your-volume-part1
@@ -217,7 +217,7 @@ In directory-to-directory mode (no `--device` flag), the format step is skipped 
 Use `--dry-run` first to inspect what will be synced and deleted:
 
 ```bash
-sudo utilities/setup-storage.sh --mode migrate run \
+sudo utilities/setup-storage.sh migrate run \
   --source /mnt/vw-data \
   --target /var/lib/vaultwarden \
   --dry-run
@@ -246,7 +246,7 @@ The boot device guard checks the mountpoint (`== /`), the physical disk identity
 Always run with `--dry-run` first on production systems to preview every action without making changes:
 
 ```bash
-sudo utilities/setup-storage.sh --mode migrate run \
+sudo utilities/setup-storage.sh migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
   --device /dev/disk/by-id/your-volume \
@@ -256,7 +256,7 @@ sudo utilities/setup-storage.sh --mode migrate run \
 After a migration completes, re-run verification at any time without triggering another full migration. The verify subcommand performs both a byte-count delta check (≤ 1% tolerance) and a full content integrity check (`rsync --checksum --dry-run`), which catches silent block-level corruption that byte totals cannot detect:
 
 ```bash
-sudo utilities/setup-storage.sh --mode verify
+sudo utilities/setup-storage.sh verify
 ```
 
 ---
@@ -265,8 +265,8 @@ sudo utilities/setup-storage.sh --mode verify
 
 If a migration fails or produces unexpected results:
 
-1. **Check status** — `sudo utilities/setup-storage.sh --mode migrate status`
-2. **Abort if stuck** — `sudo utilities/setup-storage.sh --mode migrate abort`
+1. **Check status** — `sudo utilities/setup-storage.sh migrate status`
+2. **Abort if stuck** — `sudo utilities/setup-storage.sh migrate abort`
 3. **Restore from backup** — run `sudo ./restore.sh interactive --file <archive>` (see [BACKUP-RESTORE.md](BACKUP-RESTORE.md))
 4. **Reverse via dir-to-dir** — if the rsync completed but you want to revert, use the [block volume → boot volume reversal](#block-volume--boot-volume-reversal) flow described above
 5. **Update `.env`** — revert `DATA_VOLUME_MOUNT` to the original path and restart: `./startup.sh --force`
@@ -291,20 +291,20 @@ sudo udevadm trigger
 
 ```bash
 # Check current state
-sudo utilities/setup-storage.sh --mode migrate status
+sudo utilities/setup-storage.sh migrate status
 
 # Resume from the last completed step
-sudo utilities/setup-storage.sh --mode migrate resume
+sudo utilities/setup-storage.sh migrate resume
 ```
 
 ### Byte count mismatch after verify
 
 ```bash
 # Inspect the migration log for rsync errors
-sudo utilities/setup-storage.sh --mode migrate status
+sudo utilities/setup-storage.sh migrate status
 
 # Re-run full verification (byte-count + checksum)
-sudo utilities/setup-storage.sh --mode verify
+sudo utilities/setup-storage.sh verify
 
 # Re-run rsync manually to check for errors
 sudo rsync -av --checksum /var/lib/vaultwarden/ /mnt/vw-data/
@@ -321,7 +321,7 @@ sudo sqlite3 /var/lib/vaultwarden/data/db.sqlite3 'PRAGMA wal_checkpoint(FULL);'
 sudo ./maintenance.sh db-maint
 
 # Then re-run the migration (or resume if interrupted):
-sudo utilities/setup-storage.sh --mode migrate resume
+sudo utilities/setup-storage.sh migrate resume
 ```
 
 ### Stack fails to start after migration
@@ -351,7 +351,7 @@ sudo chmod -R 750       /mnt/vw-data
 
 1. **Always back up before migrating** — run `./backup.sh run full` and verify the archive
 2. **Dry run first** — use `--dry-run` to preview actions on production systems
-3. **Verify after migration** — re-run `utilities/setup-storage.sh --mode verify` after any migration (byte-count + checksum)
+3. **Verify after migration** — re-run `utilities/setup-storage.sh verify` after any migration (byte-count + checksum)
 4. **Checkpoint the database** — if WAL files are found after stop, run `sudo ./maintenance.sh db-maint` before proceeding
 5. **Use dir-to-dir for reversal** — never pass `--device` when moving data back to the boot volume
 6. **Confirm boot device visually** — cross-check the `[boot]` label against your cloud provider's attached volume list
@@ -370,7 +370,7 @@ For migration assistance:
    - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — general troubleshooting
 2. Search GitHub Issues for similar volume migration reports
 3. Open a new issue with:
-   - Output of `lsblk` and `sudo utilities/setup-storage.sh --mode migrate status`
+   - Output of `lsblk` and `sudo utilities/setup-storage.sh migrate status`
    - Migration mode used (interactive / non-interactive / dir-to-dir)
    - Error messages and the migration log path shown by the script
    - Steps already attempted

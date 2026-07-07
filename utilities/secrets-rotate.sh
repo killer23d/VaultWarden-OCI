@@ -61,6 +61,7 @@ show_version() {
 dispatch_information_request() {
     local -a args=("$@")
     local index=0
+    local field_seen=false
 
     if [[ "${args[0]:-}" == "rotate" ]]; then
         index=1
@@ -68,6 +69,7 @@ dispatch_information_request() {
 
     if [[ $index -lt ${#args[@]} && "${args[$index]}" != --* &&
           "${args[$index]}" != "-h" && "${args[$index]}" != "-V" ]]; then
+        field_seen=true
         index=$((index + 1))
     fi
 
@@ -85,10 +87,19 @@ dispatch_information_request() {
                 exit 0
                 ;;
             *)
-                return
+                echo "ERROR: Unknown option: '${args[$index]}'" >&2
+                show_help >&2
+                exit 1
                 ;;
         esac
     done
+
+    if [[ "$field_seen" != "true" ]]; then
+        echo "ERROR: 'rotate' requires a FIELD argument." >&2
+        echo "Example: sudo ./edit-secrets.sh rotate admin_token" >&2
+        show_help >&2
+        exit 1
+    fi
 }
 
 dispatch_information_request "$@"

@@ -45,11 +45,21 @@ OPTIONS:
     --verbose           Show detailed diagnostic output
     --dry-run           Preview without sending
     --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — all email tests passed
     1 — one or more tests failed
 EOF
+}
+
+_require_cli_value() {
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "$opt requires an argument"
+        show_help
+        exit 2
+    fi
 }
 
 _load_env() {
@@ -217,10 +227,11 @@ run_email_diagnostics() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --recipient) TEST_RECIPIENT="$2"; shift 2 ;;
+        --recipient) _require_cli_value "$1" "${2-}"; TEST_RECIPIENT="$2"; shift 2 ;;
         --verbose)   VERBOSE=true;        shift   ;;
         --dry-run)   DRY_RUN=true;        shift   ;;
         --help|-h|help) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option for 'test-email': $1"; show_help; exit 1 ;;
     esac
 done

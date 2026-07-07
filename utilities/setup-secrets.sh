@@ -1790,7 +1790,13 @@ EOF
 
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --user)    BREAKGLASS_USER="$2"; shift 2 ;;
+            --user)
+                if [[ -z "${2-}" || "${2}" == --* ]]; then
+                    log_error "--user requires a username"
+                    _bg_show_help
+                    return 1
+                fi
+                BREAKGLASS_USER="$2"; shift 2 ;;
             --force)   FORCE=true;           shift ;;
             --dry-run) DRY_RUN=true;         shift ;;
             --help|-h) _bg_show_help; return 0 ;;
@@ -2517,6 +2523,28 @@ _write_sops_config() {
 
 main() {
     local subcmd="${1:-}"
+    case "$subcmd:${2:-}" in
+        configure:--help|configure:-h)
+            shift
+            _cmd_configure "$@"
+            exit $?
+            ;;
+        bootstrap:--help|bootstrap:-h)
+            shift
+            _cmd_bootstrap "$@"
+            exit $?
+            ;;
+        breakglass:--help|breakglass:-h|breakglass:help)
+            shift
+            _cmd_breakglass "$@"
+            exit $?
+            ;;
+        configure:--version|configure:-V|bootstrap:--version|bootstrap:-V|breakglass:--version|breakglass:-V)
+            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+            exit 0
+            ;;
+    esac
+
     case "$subcmd" in
         help|--help|-h|--version|-V) ;;
         rotate)              _cmd_user_secret_stub rotate; exit $? ;;

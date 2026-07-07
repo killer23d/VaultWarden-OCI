@@ -95,17 +95,25 @@ if [[ $# -gt 0 ]]; then
 fi
 
 while [[ $# -gt 0 ]]; do
-  case $1 in
-    --force)           FORCE_RESTART=true;   shift ;;
-    --skip-health)     SKIP_HEALTH_CHECK=true; shift ;;
-    --skip-pull)       SKIP_PULL=true;        shift ;;
-    --background)      BACKGROUND=true;       shift ;;
-    --skip-egress-fix) SKIP_EGRESS_FIX=true;  shift ;;
-    --dry-run)         DRY_RUN=true;          shift ;;
-    --help|-h)         show_help; exit 0 ;;
-    --version|-V)      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
-    *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
-  esac
+  if [[ "$DO_DOWN" == "true" ]]; then
+    case $1 in
+      --help|-h)         show_help; exit 0 ;;
+      --version|-V)      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
+      *) log_error "Unknown option for 'stop': '$1'"; log_error "Usage: sudo ./startup.sh stop"; show_help; exit 1 ;;
+    esac
+  else
+    case $1 in
+      --force)           FORCE_RESTART=true;   shift ;;
+      --skip-health)     SKIP_HEALTH_CHECK=true; shift ;;
+      --skip-pull)       SKIP_PULL=true;        shift ;;
+      --background)      BACKGROUND=true;       shift ;;
+      --skip-egress-fix) SKIP_EGRESS_FIX=true;  shift ;;
+      --dry-run)         DRY_RUN=true;          shift ;;
+      --help|-h)         show_help; exit 0 ;;
+      --version|-V)      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
+      *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
+    esac
+  fi
 done
 
 # Real startup/stop operations are root-operated. Keep harmless metadata/help

@@ -42,6 +42,7 @@ DESCRIPTION:
 OPTIONS:
     --dry-run     Preview what would be done without making changes
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — Firewall ranges updated successfully (or skipped)
@@ -219,6 +220,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --dry-run)         DRY_RUN=true; shift ;;
         --help|-h|help)    show_help; exit 0 ;;
+        --version|-V)      print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option for 'update-firewall': $1"; show_help; exit 1 ;;
     esac
 done

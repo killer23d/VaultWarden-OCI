@@ -25,6 +25,7 @@ FLAGS:
     --editor EDITOR Override editor for this run
     --no-backup     Skip creating backup before edit
     --help, -h      Show this help
+    --version, -V   Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     sudo ./utilities/secrets-edit.sh
@@ -33,16 +34,50 @@ EXAMPLES:
 EOF
 }
 
-if [[ "${1:-}" == "edit" ]]; then
-    _help_candidate="${2:-}"
-else
-    _help_candidate="${1:-}"
-fi
-if [[ "$_help_candidate" == "--help" || "$_help_candidate" == "-h" ]]; then
-    show_help
-    exit 0
-fi
-unset _help_candidate
+show_version() {
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
+}
+
+dispatch_information_request() {
+    local -a args=("$@")
+    local index=0
+
+    if [[ "${args[0]:-}" == "edit" ]]; then
+        index=1
+    fi
+
+    while [[ $index -lt ${#args[@]} ]]; do
+        case "${args[$index]}" in
+            --editor)
+                if [[ $((index + 1)) -ge ${#args[@]} || -z "${args[$((index + 1))]}" ||
+                      "${args[$((index + 1))]}" == --* ]]; then
+                    echo "ERROR: --editor requires an argument (e.g. --editor vim)" >&2
+                    show_help >&2
+                    exit 1
+                fi
+                index=$((index + 2))
+                ;;
+            --no-backup)
+                index=$((index + 1))
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --version|-V)
+                show_version
+                exit 0
+                ;;
+            *)
+                echo "ERROR: Unknown option: '${args[$index]}'" >&2
+                show_help >&2
+                exit 1
+                ;;
+        esac
+    done
+}
+
+dispatch_information_request "$@"
 
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
@@ -347,6 +382,7 @@ main() {
                 ;;
             --no-backup) SKIP_BACKUP=true; shift ;;
             --help|-h)   show_help; exit 0 ;;
+            --version|-V) show_version; exit 0 ;;
             *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
         esac
     done

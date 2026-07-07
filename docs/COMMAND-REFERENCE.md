@@ -215,7 +215,8 @@ SUBCOMMANDS:
                       key/config material and must use an independent emergency
                       passphrase or EMERGENCY_BACKUP_AGE_RECIPIENT
     list [--json]     List existing backups (no root required; JSON optional)
-    verify            Verify the most recent backup's integrity
+    verify [--type TYPE] [--quiet]
+                      Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
     sync               Copy all retained local backups to rclone by type
 
@@ -234,10 +235,15 @@ SYNC / ROTATE OPTIONS:
     --quiet                  Suppress non-error output
     --dry-run                Preview copy or pruning operations
 
+VERIFY OPTIONS:
+    --type TYPE              Backup type to verify: auto | db | full | emergency
+    --quiet                  Suppress non-error output
+
 GLOBAL SUBCOMMAND:
     help                     Show this help
 
 GLOBAL OPTIONS:
+    --help, -h               Show this help and exit
     --version, -V            Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
@@ -249,6 +255,7 @@ EXAMPLES:
     ./backup.sh list                              # List existing backups (no sudo)
     ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
+    sudo ./backup.sh verify --type db --quiet     # Verify latest DB backup quietly
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
     sudo ./backup.sh sync                         # Upload db/full/emergency backups
 ```
@@ -313,9 +320,8 @@ GLOBAL SUBCOMMAND:
     help                    Show this help
 
 GLOBAL OPTIONS:
+    --help, -h              Show this help and exit
     --version, -V           Print the VaultWarden-OCI version and exit
-
-ENVIRONMENT:
 ```
 
 ### maintenance.sh
@@ -420,6 +426,20 @@ EXAMPLES:
     ./dashboard.sh --help        # Show this help
 ```
 
+### recover.sh
+
+```
+Usage: ./recover.sh --state-dir DIR --key FILE [--storage-mode auto|boot|block]
+
+Options:
+  --state-dir DIR              Restored PROJECT_STATE_DIR or mounted data volume
+  --key FILE                   Offline Age private key file
+  --storage-mode auto|boot|block
+                               Recovery storage layout (default: auto)
+  --help, -h                   Show this help
+  --version, -V                Print the VaultWarden-OCI version and exit
+```
+
 ## Utility Scripts
 
 ### backup-run.sh
@@ -439,7 +459,8 @@ SUBCOMMANDS:
                       key/config material and must use an independent emergency
                       passphrase or EMERGENCY_BACKUP_AGE_RECIPIENT
     list [--json]     List existing backups (no root required; JSON optional)
-    verify            Verify the most recent backup's integrity
+    verify [--type TYPE] [--quiet]
+                      Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
     sync               Copy all retained local backups to rclone by type
 
@@ -458,10 +479,15 @@ SYNC / ROTATE OPTIONS:
     --quiet                  Suppress non-error output
     --dry-run                Preview copy or pruning operations
 
+VERIFY OPTIONS:
+    --type TYPE              Backup type to verify: auto | db | full | emergency
+    --quiet                  Suppress non-error output
+
 GLOBAL SUBCOMMAND:
     help                     Show this help
 
 GLOBAL OPTIONS:
+    --help, -h               Show this help and exit
     --version, -V            Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
@@ -473,6 +499,7 @@ EXAMPLES:
     ./backup.sh list                              # List existing backups (no sudo)
     ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
+    sudo ./backup.sh verify --type db --quiet     # Verify latest DB backup quietly
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
     sudo ./backup.sh sync                         # Upload db/full/emergency backups
 ```
@@ -535,6 +562,7 @@ OPTIONS:
     --extra-recipient AGE_PUBLIC_KEY
                   Preserve an additional explicit Age recipient
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 NOTES:
     This rotates the Age/SOPS encryption key. It does not rotate individual
@@ -560,6 +588,8 @@ OPTIONS:
     --force     Skip confirmation prompt
     --dry-run   Preview what would be done without executing
     --help, -h  Show this help
+    --version, -V
+                Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — maintenance completed successfully
@@ -580,6 +610,7 @@ OPTIONS:
     --verbose           Show detailed diagnostic output
     --dry-run           Preview without sending
     --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — all email tests passed
@@ -669,6 +700,7 @@ OPTIONS:
     --require-dns  Treat missing DNS automation config as a failure
     --dry-run     Preview what would be done without making changes
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 SECRET SOURCE PRIORITY:
     caddy_cloudflare_dns_token — resolved in order:
@@ -708,6 +740,7 @@ DESCRIPTION:
 OPTIONS:
     --dry-run     Preview what would be done without making changes
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — Firewall ranges updated successfully (or skipped)
@@ -732,6 +765,7 @@ OPTIONS:
     --skip-backup    Skip pre-update safety backup
     --email          Send email notification on completion/failure
     --help, -h       Show this help
+    --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     sudo ./maintenance.sh update --system        # Update system packages only
@@ -740,16 +774,22 @@ EXAMPLES:
     sudo ./maintenance.sh update --all --email   # Full update with email notification
 ```
 
-### notify-failure.sh
-
-```
-(--help not available or requires root)
-```
-
 ### operations-status.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Operation Status
+
+USAGE:
+    sudo utilities/operations-status.sh [OPTIONS]
+    sudo make operations
+
+DESCRIPTION:
+    Shows active VaultWarden operation-guard state. Runtime operation metadata
+    is root-only, so the status command itself must run with sudo.
+
+OPTIONS:
+    --help, -h       Show this help
+    --version, -V    Print the VaultWarden-OCI version and exit
 ```
 
 ### pre-production-drill.sh
@@ -791,6 +831,7 @@ USAGE:
     utilities/repair-permissions.sh --check     Report drift without changing files
     sudo utilities/repair-permissions.sh --dry-run
     utilities/repair-permissions.sh --help
+    utilities/repair-permissions.sh --version
 
 Checks/repairs explicit project paths only:
   .sops.yaml -> 0644 (public SOPS policy/Age recipients; owner preserved)
@@ -805,6 +846,11 @@ Checks/repairs explicit project paths only:
 
 Does not recursively chmod broad directories and never makes private keys,
 env files, encrypted secrets, backups, or recovery kits world-readable.
+
+OPTIONS:
+  --check, --dry-run  Report drift without changing files
+  --help, -h          Show this help
+  --version, -V       Print the VaultWarden-OCI version and exit
 ```
 
 ### restore-run.sh
@@ -867,9 +913,8 @@ GLOBAL SUBCOMMAND:
     help                    Show this help
 
 GLOBAL OPTIONS:
+    --help, -h              Show this help and exit
     --version, -V           Print the VaultWarden-OCI version and exit
-
-ENVIRONMENT:
 ```
 
 ### safe-restart.sh
@@ -879,6 +924,7 @@ VaultWarden-OCI Safe Restart
 
 USAGE:
     sudo make safe-restart
+    sudo utilities/safe-restart.sh [OPTIONS]
 
 DESCRIPTION:
     Captures the resolved Compose model and current local image IDs, restarts
@@ -887,6 +933,36 @@ DESCRIPTION:
 
     This restores container configuration and images only. It does not reverse
     database migrations, host package changes, or operator-edited data.
+
+OPTIONS:
+    --help, -h       Show this help
+    --version, -V    Print the VaultWarden-OCI version and exit
+```
+
+### secrets-edit.sh
+
+```
+VaultWarden Secrets — edit subcommand
+
+USAGE:
+    sudo ./utilities/secrets-edit.sh [OPTIONS]
+    sudo ./utilities/secrets-edit.sh edit [OPTIONS]  # 'edit' accepted as alias
+    sudo ./edit-secrets.sh edit [OPTIONS]
+
+DESCRIPTION:
+    Decrypts secrets.yaml to a protected temporary file, opens it in your
+    editor, validates YAML after save, then atomically re-encrypts it.
+
+FLAGS:
+    --editor EDITOR Override editor for this run
+    --no-backup     Skip creating backup before edit
+    --help, -h      Show this help
+    --version, -V   Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    sudo ./utilities/secrets-edit.sh
+    sudo ./utilities/secrets-edit.sh --editor vim
+    EDITOR='code --wait' sudo ./edit-secrets.sh edit
 ```
 
 ### secrets-export-recovery-kit.sh
@@ -895,7 +971,8 @@ DESCRIPTION:
 VaultWarden Secrets — export-recovery-kit subcommand
 
 USAGE:
-    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]
+    sudo ./utilities/secrets-export-recovery-kit.sh [OPTIONS]
+    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]  # alias
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
@@ -910,9 +987,10 @@ DESCRIPTION:
 
 FLAGS:
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
+    sudo ./utilities/secrets-export-recovery-kit.sh
     sudo ./edit-secrets.sh export-recovery-kit
 ```
 
@@ -922,7 +1000,8 @@ EXAMPLES:
 VaultWarden Secrets — list subcommand
 
 USAGE:
-    sudo ./utilities/secrets-list.sh list [OPTIONS]
+    sudo ./utilities/secrets-list.sh [OPTIONS]
+    sudo ./utilities/secrets-list.sh list [OPTIONS]  # 'list' accepted as alias
     sudo ./edit-secrets.sh list
 
 DESCRIPTION:
@@ -930,9 +1009,10 @@ DESCRIPTION:
 
 FLAGS:
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    sudo ./utilities/secrets-list.sh list
+    sudo ./utilities/secrets-list.sh
     sudo ./edit-secrets.sh list
 ```
 
@@ -995,6 +1075,7 @@ DESCRIPTION:
 FLAGS:
     --editor EDITOR    Override pager/viewer (default: less, then $EDITOR -R)
     --help, -h         Show this help
+    --version, -V      Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     sudo ./utilities/secrets-view.sh
@@ -1165,7 +1246,10 @@ EXAMPLES:
 VaultWarden-OCI Storage Setup and Migration
 
 USAGE:
-    sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]
+    sudo utilities/setup-storage.sh setup [OPTIONS]
+    sudo utilities/setup-storage.sh verify [OPTIONS]
+    sudo utilities/setup-storage.sh migrate <subcommand> [OPTIONS]
+    sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]  # compatibility
 
 DESCRIPTION:
     Configures persistent storage directories, optional data-volume
@@ -1182,7 +1266,7 @@ MODES:
     verify   Re-check layout and permissions only (no changes, safe for cron)
 
 OPTIONS:
-    --mode MODE           Mode to run: setup|migrate|verify (default: setup)
+    --mode MODE           Compatibility alias for setup|migrate|verify
     --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
     --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
     --auto                Non-interactive mode; suppresses the storage assistant and
@@ -1194,24 +1278,24 @@ OPTIONS:
 
 EXAMPLES:
     # Interactive setup: asks whether to use boot-volume or block storage
-    sudo utilities/setup-storage.sh
+    sudo utilities/setup-storage.sh setup
 
     # Non-interactive boot-only setup (no separate data volume)
-    sudo utilities/setup-storage.sh --auto
+    sudo utilities/setup-storage.sh setup --auto
 
     # Setup with a dedicated data volume
-    sudo utilities/setup-storage.sh \
+    sudo utilities/setup-storage.sh setup \
       --data-device /dev/disk/by-id/your-volume \
       --data-mount /mnt/vw-data
 
     # Dry run setup
-    sudo utilities/setup-storage.sh --dry-run
+    sudo utilities/setup-storage.sh setup --dry-run
 
     # Verify current layout (safe for cron)
-    sudo utilities/setup-storage.sh --mode verify
+    sudo utilities/setup-storage.sh verify
 
     # Interactive migration
-    sudo utilities/setup-storage.sh --mode migrate run
+    sudo utilities/setup-storage.sh migrate run
 ```
 
 ### setup-system.sh
@@ -1413,4 +1497,5 @@ DESCRIPTION:
 
 OPTIONS:
     --help, -h      Show this help without rewriting docs
+    --version, -V   Print the VaultWarden-OCI version and exit
 ```
