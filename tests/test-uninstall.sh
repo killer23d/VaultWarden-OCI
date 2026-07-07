@@ -195,6 +195,30 @@ if [[ "${1:-}" == "delete" && "${2:-}" == "allow" && "${3:-}" == "from" ]]; then
   remove_line "${8:-}" "${4:-}"
   exit $?
 fi
+if [[ "${1:-}" == "--force" && "${2:-}" == "delete" && "${3:-}" =~ ^[0-9]+$ ]]; then
+  num="$3"
+  tmp="${UFW_STATE}.tmp"
+  awk -v num="$num" '
+    {
+      if ($0 ~ "^\\[ *" num "\\]") { next }
+      print
+    }
+  ' "$UFW_STATE" > "$tmp"
+  mv -f "$tmp" "$UFW_STATE"
+  exit 0
+fi
+if [[ "${1:-}" == "allow" && "${2:-}" == "proto" && "${3:-}" == "tcp" && "${4:-}" == "from" ]]; then
+  cidr="$5"
+  port="$9"
+  comment="${11:-}"
+  next_num=$(( $(wc -l < "$UFW_STATE" 2>/dev/null || echo 0) + 1 ))
+  printf '[ %d] %s/tcp                     ALLOW IN    %s            # %s\n' "$next_num" "$port" "$cidr" "$comment" >> "$UFW_STATE"
+  exit 0
+fi
+if [[ "${1:-}" == "status" ]]; then
+  cat "$UFW_STATE"
+  exit 0
+fi
 exit 0
 MOCK
   chmod +x "$bin/ufw"
@@ -255,7 +279,7 @@ MOCK
   assert_contains "$TMP/storage.out" "lacks .vw-data-volume sentinel"
 )
 
-# UFW cleanup removes only cached Cloudflare CIDRs plus historical broad rules.
+# UFW cleanup removes cached Cloudflare CIDRs, explicitly commented managed rules, and historical broad rules.
 (
   source_uninstaller_for_behavior
   bin="$TMP/ufw-bin"
@@ -264,12 +288,17 @@ MOCK
   write_noop_iptables_mock "$bin"
   PATH="$bin:$PATH"
   export UFW_STATE="$TMP/ufw-state" UFW_LOG="$TMP/ufw.log"
+
+  # A = 173.245.48.0/20 (cached managed)
+  # B = 104.16.0.0/12 (commented managed, absent from cache)
+  # C = 203.0.113.77 (unrelated)
   cat > "$UFW_STATE" <<EOF_UFW
-[ 1] 80/tcp                     ALLOW IN    173.245.48.0/20
-[ 2] 443/tcp                    ALLOW IN    173.245.48.0/20
-[ 3] 443/tcp                    ALLOW IN    203.0.113.77
-[ 4] 80/tcp                     ALLOW IN    Anywhere
-[ 5] 443/tcp                    ALLOW IN    Anywhere
+[ 1] 80/tcp                     ALLOW IN    173.245.48.0/20            # CF-IPv4
+[ 2] 443/tcp                    ALLOW IN    173.245.48.0/20            # CF-IPv4
+[ 3] 80/tcp                     ALLOW IN    104.16.0.0/12              # CF-IPv4-NEW
+[ 4] 443/tcp                    ALLOW IN    104.16.0.0/12              # CF-IPv4-NEW
+[ 5] 443/tcp                    ALLOW IN    203.0.113.77
+[ 6] 22/tcp                     ALLOW IN    Anywhere                   # SSH
 EOF_UFW
   : > "$UFW_LOG"
   PROJECT_STATE_DIR="$TMP/ufw-project-state"
@@ -277,13 +306,16 @@ EOF_UFW
   mkdir -p "$PROJECT_STATE_DIR"
   printf '173.245.48.0/20\n' > "$PROJECT_STATE_DIR/cf-cidrs.cache"
   _capture_managed_cloudflare_cidrs
+
   remove_firewall_rules
   remove_firewall_rules
+
   assert_not_contains "$UFW_STATE" "173.245.48.0/20"
-  assert_not_contains "$UFW_STATE" "Anywhere"
+  assert_not_contains "$UFW_STATE" "104.16.0.0/12"
   assert_contains "$UFW_STATE" "203.0.113.77"
+  assert_contains "$UFW_STATE" "22/tcp"
+  assert_contains "$UFW_STATE" "SSH"
   assert_contains "$UFW_LOG" "delete allow from 173.245.48.0/20 to any port 80 proto tcp"
-  assert_contains "$UFW_LOG" "delete allow 80/tcp"
 )
 
 # Netfilter cleanup removes managed current subnet rules, preserves unrelated rules, then persists.
@@ -392,6 +424,19 @@ EOF_IPT
     fail "managed UFW residual should fail verification"
   fi
   assert_contains "$TMP/residual-managed.out" "RESIDUAL: UFW still has managed Cloudflare HTTP/HTTPS rule for 173.245.48.0/20"
+
+  printf '[ 1] 80/tcp                     ALLOW IN    104.16.0.0/12              # CF-IPv4\n' > "$UFW_STATE"
+  if ( verify_uninstall_complete ) > "$TMP/residual-managed-b.out" 2>&1; then
+    fail "managed UFW residual with explicit comment should fail verification"
+  fi
+  assert_contains "$TMP/residual-managed-b.out" "RESIDUAL"
+  assert_contains "$TMP/residual-managed-b.out" "104.16.0.0/12"
+
+  printf '[ 1] 443/tcp                    ALLOW IN    203.0.113.77\n' > "$UFW_STATE"
+  if ! verify_uninstall_complete > "$TMP/residual-clean-c.out" 2>&1; then
+    cat "$TMP/residual-clean-c.out" >&2
+    fail "clean mocked residual state with unrelated rule should pass verification"
+  fi
 )
 
 # Final runtime cleanup must not recreate runtime state and must preserve lock pathnames.
@@ -487,6 +532,72 @@ MOCK
   remove_sops_and_packages > "$TMP/sops.out" 2>&1
   [[ -f "$SOPS_BIN" ]] || fail "ambiguous SOPS binary was removed"
   assert_contains "$TMP/sops.out" "Preserving $SOPS_BIN"
+)
+
+# Maintenance lifecycle test: create rule, remove stale, verify uninstall
+(
+  export UPDATE_FIREWALL=true DRY_RUN=false CLOUDFLARE_PROXY_ENABLED=true
+  bin="$TMP/maint-bin"
+  write_basic_command_mocks "$bin"
+  cat > "$bin/curl" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "$*" =~ ips-v4 ]]; then
+    printf '104.16.0.0/12\n' > "$6"
+    exit 0
+elif [[ "$*" =~ ips-v6 ]]; then
+    printf '2606:4700::/32\n' > "$6"
+    exit 0
+fi
+exit 1
+MOCK
+  write_ufw_mock "$bin"
+  chmod +x "$bin/curl" "$bin/ufw"
+  PATH="$bin:$PATH"
+  export UFW_STATE="$TMP/maint-ufw-state" UFW_LOG="$TMP/maint-ufw.log"
+  : > "$UFW_STATE"
+  : > "$UFW_LOG"
+
+  # 1. Update firewall - creates new rules
+  cp "$ROOT/utilities/maintenance-update-firewall.sh" "$TMP/maint-mock.sh"
+  sed -i.bak 's/main "$@"//' "$TMP/maint-mock.sh"
+  sed -i.bak 's|PROJECT_ROOT=.*|PROJECT_ROOT="'"$ROOT"'"|g' "$TMP/maint-mock.sh"
+  source "$TMP/maint-mock.sh"
+  require_root() { return 0; }
+  UPDATE_FIREWALL=true
+  DRY_RUN=false
+  CLOUDFLARE_PROXY_ENABLED=true
+
+  update_firewall_ranges > "$TMP/maint1.out" 2>&1 || fail "maintenance update failed"
+  assert_contains "$UFW_STATE" "104.16.0.0/12"
+  assert_contains "$UFW_STATE" "CF-IPv4"
+  assert_contains "$UFW_STATE" "2606:4700::/32"
+  assert_contains "$UFW_STATE" "CF-IPv6"
+
+  # 2. Update firewall again with different CIDRs - should remove stale rules
+  cat > "$bin/curl" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "$*" =~ ips-v4 ]]; then
+    printf '173.245.48.0/20\n' > "$6"
+    exit 0
+elif [[ "$*" =~ ips-v6 ]]; then
+    printf '2803:f800::/32\n' > "$6"
+    exit 0
+fi
+exit 1
+MOCK
+  update_firewall_ranges > "$TMP/maint2.out" 2>&1 || fail "second maintenance update failed"
+  assert_not_contains "$UFW_STATE" "104.16.0.0/12"
+  assert_not_contains "$UFW_STATE" "2606:4700::/32"
+  assert_contains "$UFW_STATE" "173.245.48.0/20"
+  assert_contains "$UFW_STATE" "2803:f800::/32"
+
+  # 3. Uninstall should remove the dynamically created explicitly commented rules
+  source_uninstaller_for_behavior
+  write_noop_iptables_mock "$bin"
+  export MANAGED_CLOUDFLARE_CIDRS=()
+  remove_firewall_rules
+  assert_not_contains "$UFW_STATE" "173.245.48.0/20"
+  assert_not_contains "$UFW_STATE" "2803:f800::/32"
 )
 
 echo "test-uninstall-vaultwarden: ok"

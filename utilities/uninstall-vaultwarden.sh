@@ -952,19 +952,39 @@ _remove_historical_broad_ufw_rules() {
 }
 
 _remove_managed_cloudflare_ufw_rules() {
-    if (( ${#MANAGED_CLOUDFLARE_CIDRS[@]} == 0 )); then
-        warn "No managed Cloudflare CIDR cache found; preserving source-specific UFW 80/443 rules unless they are exact historical broad rules."
-        return 0
+    local removed=0
+    local cidr port
+
+    if (( ${#MANAGED_CLOUDFLARE_CIDRS[@]} > 0 )); then
+        for cidr in "${MANAGED_CLOUDFLARE_CIDRS[@]}"; do
+            for port in 80 443; do
+                if ufw delete allow from "$cidr" to any port "$port" proto tcp >/dev/null 2>&1; then
+                    removed=$((removed + 1))
+                fi
+            done
+        done
+    else
+        warn "No managed Cloudflare CIDR cache found; preserving source-specific UFW 80/443 rules unless explicitly commented."
     fi
 
-    local cidr port removed=0
-    for cidr in "${MANAGED_CLOUDFLARE_CIDRS[@]}"; do
-        for port in 80 443; do
-            if ufw delete allow from "$cidr" to any port "$port" proto tcp >/dev/null 2>&1; then
-                removed=$((removed + 1))
+    local -a old_rule_nums=()
+    local ufw_status; ufw_status="$(ufw status numbered 2>/dev/null || true)"
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
+            local rule_num="${BASH_REMATCH[1]}"
+            if [[ "$line" =~ CF-IPv[46] ]]; then
+                old_rule_nums+=("$rule_num")
             fi
+        fi
+    done <<< "$ufw_status"
+
+    if (( ${#old_rule_nums[@]} > 0 )); then
+        mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | sort -rn)
+        for rule_num in "${old_rule_nums[@]}"; do
+            [[ -n "$rule_num" ]] && ufw --force delete "$rule_num" >/dev/null 2>&1 && removed=$((removed + 1))
         done
-    done
+    fi
 
     success "Requested removal of managed Cloudflare UFW HTTP/HTTPS rules (${removed} deletion command(s) matched)."
 }
@@ -1206,6 +1226,21 @@ verify_uninstall_complete() {
                 _residual "UFW still has managed Cloudflare HTTP/HTTPS rule for $cidr"
             fi
         done
+        local ufw_status; ufw_status="$(ufw status numbered 2>/dev/null || true)"
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
+                if [[ "$line" =~ CF-IPv[46] ]]; then
+                    local matched_cidr="unknown" word
+                    for word in $line; do
+                        if [[ "$word" =~ ^[0-9a-fA-F:\.]+/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:\.]+$ ]]; then
+                            matched_cidr="$word"
+                            break
+                        fi
+                    done
+                    _residual "UFW still has managed Cloudflare HTTP/HTTPS rule for $matched_cidr"
+                fi
+            fi
+        done <<< "$ufw_status"
     fi
 
     if command -v iptables >/dev/null 2>&1; then

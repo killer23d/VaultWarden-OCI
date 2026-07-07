@@ -97,12 +97,14 @@ update_firewall_ranges() {
 
     local ranges_added=false
     local _ufw_result=false
+    local -a current_cidrs=()
 
     if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
         log_info "Adding new Cloudflare IPv4 ranges..."
         while IFS= read -r range; do
             if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-                _ufw_allow_range "$range" "CF-IPv4-NEW"
+                current_cidrs+=("$range")
+                _ufw_allow_range "$range" "CF-IPv4"
                 if [[ "$_ufw_result" == "true" ]]; then
                     ranges_added=true
                     log_debug "Added IPv4 range: $range"
@@ -115,7 +117,8 @@ update_firewall_ranges() {
         log_info "Adding new Cloudflare IPv6 ranges..."
         while IFS= read -r range; do
             if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
-                _ufw_allow_range "$range" "CF-IPv6-NEW"
+                current_cidrs+=("$range")
+                _ufw_allow_range "$range" "CF-IPv6"
                 if [[ "$_ufw_result" == "true" ]]; then
                     ranges_added=true
                     log_debug "Added IPv6 range: $range"
@@ -133,16 +136,43 @@ update_firewall_ranges() {
     log_info "Removing outdated Cloudflare IP ranges..."
     local removed_count=0
     local -a old_rule_nums=()
-    mapfile -t old_rule_nums < <(
-        ufw status numbered \
-        | grep -E "CF-IPv[46]" \
-        | grep -v "CF-IPv[46]-NEW" \
-        | sed -n 's/^\[\s*\([0-9]\+\)\].*/\1/p' \
-        | sort -rn
-    )
-    for rule_num in "${old_rule_nums[@]}"; do
-        [[ -n "$rule_num" ]] && ufw --force delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
-    done
+    local ufw_status; ufw_status="$(ufw status numbered 2>/dev/null || true)"
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
+            local rule_num="${BASH_REMATCH[1]}"
+            if [[ "$line" =~ CF-IPv[46] ]]; then
+                local cidr="" word
+                for word in $line; do
+                    if [[ "$word" =~ ^[0-9a-fA-F:\.]+/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:\.]+$ ]]; then
+                        cidr="$word"
+                        break
+                    fi
+                done
+
+                local keep=false
+                if [[ -n "$cidr" ]]; then
+                    for c in "${current_cidrs[@]}"; do
+                        if [[ "$c" == "$cidr" ]]; then
+                            keep=true
+                            break
+                        fi
+                    done
+                fi
+
+                if [[ "$keep" == "false" ]]; then
+                    old_rule_nums+=("$rule_num")
+                fi
+            fi
+        fi
+    done <<< "$ufw_status"
+
+    if (( ${#old_rule_nums[@]} > 0 )); then
+        mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | sort -rn)
+        for rule_num in "${old_rule_nums[@]}"; do
+            [[ -n "$rule_num" ]] && ufw --force delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
+        done
+    fi
     [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count outdated firewall rules"
     log_success "Firewall IP ranges updated safely"
     return 0
