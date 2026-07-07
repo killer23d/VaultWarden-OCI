@@ -90,8 +90,8 @@ DESCRIPTION:
       - Docker compose stack, managed containers, networks, volumes, and runtime secrets
       - systemd timers/services/drop-ins, /opt scripts, and /etc/vaultwarden
       - persistent VaultWarden state directory and optional data-volume fstab/mount wiring
-      - CrowdSec services/packages/config/state, project firewall rules, and swapfile
-      - standalone helper binaries uniquely installed by this project where safe
+      - CrowdSec services/packages/config/state and project firewall rules
+      - setup-managed swap path only in --test-reset mode
 
     Docker itself, /var/lib/docker, the docker group, common admin packages, SSH
     configuration, and unrelated firewall rules are intentionally preserved.
@@ -106,6 +106,8 @@ OPTIONS (used after 'run'):
         the Git checkout so the same branch can be installed again immediately.
         This is intended for repeated production-host acceptance testing. It does
         not restore the VM to a pristine OCI image or uninstall shared host tooling.
+        On a dedicated acceptance-test VM, this intentionally removes /swapfile
+        so the next setup run can exercise the no-swap/create-swap path again.
 
     --i-have-saved-my-recovery-kit
         Confirm that all Age keys shown by this script have been saved outside
@@ -187,6 +189,23 @@ PROJECT_BASENAME="$(basename "$PROJECT_DIR")"
 INSTALLED_ENV="/etc/vaultwarden/vaultwarden.env"
 DEFAULT_STATE_DIR="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
 DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/mnt/vw-data}"
+FSTAB_FILE="${VW_UNINSTALL_FSTAB:-/etc/fstab}"
+SYSCTL_CONF="${VW_UNINSTALL_SYSCTL_CONF:-/etc/sysctl.conf}"
+SWAPFILE_PATH="${VW_UNINSTALL_SWAPFILE:-/swapfile}"
+SOPS_BIN="${VW_UNINSTALL_SOPS_BIN:-/usr/local/bin/sops}"
+SYSTEMD_SYSTEM_DIR="${VW_UNINSTALL_SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+DOCKER_MOUNT_GUARD_DIR="${SYSTEMD_SYSTEM_DIR}/docker.service.d"
+DOCKER_MOUNT_GUARD="${DOCKER_MOUNT_GUARD_DIR}/10-vaultwarden-data-volume.conf"
+RUNTIME_DIR="${VW_UNINSTALL_RUNTIME_DIR:-/run/vaultwarden-oci}"
+IPTABLES_RULES_V4="${VW_UNINSTALL_IPTABLES_RULES_V4:-/etc/iptables/rules.v4}"
+APT_SOURCE_UNIVERSE="${VW_UNINSTALL_APT_SOURCE_UNIVERSE:-/etc/apt/sources.list.d/ubuntu-universe.list}"
+OPT_SCRIPTS_DIR="${VW_UNINSTALL_OPT_SCRIPTS_DIR:-/opt/vaultwarden-scripts}"
+ETC_VAULTWARDEN_DIR="${VW_UNINSTALL_ETC_VAULTWARDEN_DIR:-/etc/vaultwarden}"
+CROWDSEC_BOUNCER_BIN="${VW_UNINSTALL_CROWDSEC_BOUNCER_BIN:-/usr/local/bin/crowdsec-cloudflare-worker-bouncer}"
+CROWDSEC_BOUNCER_SERVICE="${VW_UNINSTALL_CROWDSEC_BOUNCER_SERVICE:-${SYSTEMD_SYSTEM_DIR}/crowdsec-cloudflare-worker-bouncer.service}"
+CROWDSEC_ETC_DIR="${VW_UNINSTALL_CROWDSEC_ETC_DIR:-/etc/crowdsec}"
+CROWDSEC_STATE_DIR="${VW_UNINSTALL_CROWDSEC_STATE_DIR:-/var/lib/crowdsec}"
+CROWDSEC_LOG_DIR="${VW_UNINSTALL_CROWDSEC_LOG_DIR:-/var/log/crowdsec}"
 
 MANAGED_TIMERS=(
     vaultwarden-maintenance.timer
@@ -242,6 +261,8 @@ CROWDSEC_PACKAGES=(
     crowdsec
 )
 
+MANAGED_CLOUDFLARE_CIDRS=()
+
 _read_env_value() {
     local key="$1" file="$2"
     [[ -f "$file" ]] || return 0
@@ -279,6 +300,42 @@ _env_candidates_for_bootstrap() {
 }
 
 _unique_lines() { awk 'NF && !seen[$0]++'; }
+
+_valid_cidr_literal() {
+    local cidr="$1"
+    [[ "$cidr" =~ ^[0-9A-Fa-f:.]+/[0-9]+$ ]]
+}
+
+_capture_managed_cloudflare_cidrs() {
+    MANAGED_CLOUDFLARE_CIDRS=()
+
+    local cache candidate cidr
+    local -a candidates=()
+    [[ -n "${PROJECT_STATE_DIR:-}" ]] && candidates+=("${PROJECT_STATE_DIR}/cf-cidrs.cache")
+    [[ -n "${DATA_VOLUME_MOUNT:-}" && "${DATA_VOLUME_MOUNT}" != "${PROJECT_STATE_DIR:-}" ]] \
+        && candidates+=("${DATA_VOLUME_MOUNT}/cf-cidrs.cache")
+
+    local tmp=()
+    for cache in "${candidates[@]}"; do
+        [[ -s "$cache" ]] || continue
+        while IFS= read -r cidr; do
+            [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+            if _valid_cidr_literal "$cidr"; then
+                tmp+=("$cidr")
+            else
+                warn "Ignoring invalid Cloudflare CIDR cache entry during uninstall: $cidr"
+            fi
+        done < "$cache"
+    done
+
+    while IFS= read -r candidate; do
+        MANAGED_CLOUDFLARE_CIDRS+=("$candidate")
+    done < <(printf '%s\n' "${tmp[@]}" | _unique_lines)
+
+    if (( ${#MANAGED_CLOUDFLARE_CIDRS[@]} > 0 )); then
+        info "Captured ${#MANAGED_CLOUDFLARE_CIDRS[@]} managed Cloudflare CIDR(s) for firewall cleanup."
+    fi
+}
 
 resolve_paths() {
     local env_file p
@@ -338,6 +395,7 @@ resolve_paths() {
         tmp+=("$p")
     done < <(printf '%s\n' "${MANAGED_AGE_KEY_PATHS[@]}" | _unique_lines)
     MANAGED_AGE_KEY_PATHS=("${tmp[@]}")
+    _capture_managed_cloudflare_cidrs
     return 0
 }
 
@@ -485,11 +543,11 @@ disable_systemd_units() {
     done
 
     for unit in "${MANAGED_TIMERS[@]}" "${MANAGED_SERVICES[@]}"; do
-        dest="/etc/systemd/system/${unit}"
+        dest="${SYSTEMD_SYSTEM_DIR}/${unit}"
         if [[ -f "$dest" ]]; then
             rm -f "$dest" && success "Removed unit file: $dest"
         fi
-        dropin="/etc/systemd/system/${unit}.d"
+        dropin="${SYSTEMD_SYSTEM_DIR}/${unit}.d"
         if [[ -d "$dropin" ]]; then
             local managed_dropin
             for managed_dropin in 10-state-dir.conf 20-identity.conf 30-run-as-root.conf; do
@@ -506,12 +564,6 @@ disable_systemd_units() {
         [[ "$unit" == *"@"* ]] && continue
         systemctl reset-failed "$unit" 2>/dev/null || true
     done
-
-    local docker_dropin="/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
-    if [[ -f "$docker_dropin" ]]; then
-        rm -f "$docker_dropin" && success "Removed Docker mount-guard drop-in: $docker_dropin"
-        rmdir /etc/systemd/system/docker.service.d 2>/dev/null || true
-    fi
 
     systemctl daemon-reload 2>/dev/null || true
     return 0
@@ -545,7 +597,7 @@ remove_docker_stack() {
         docker rm -f "$cid" 2>/dev/null && success "Removed compose-labelled container: $cid" || true
     done < <(docker ps -aq --filter "label=com.docker.compose.project=${project_name}" 2>/dev/null || true)
 
-    info "Skipping Docker Swarm secret deletion; current compose secrets are file-backed under /run/vaultwarden-oci/secrets."
+    info "Skipping Docker Swarm secret deletion; current compose secrets are file-backed under ${RUNTIME_DIR}/secrets."
 
     local vol
     while IFS= read -r vol; do
@@ -586,26 +638,98 @@ _confirm_external_backup_delete() {
     [[ "$answer" == "DELETE-BACKUPS" ]]
 }
 
-_remove_fstab_mount() {
-    local mountpoint="$1" source="${2:-}"
-    [[ -n "$mountpoint" && -f /etc/fstab ]] || return 0
+_data_volume_uuid() {
+    [[ -n "${DATA_VOLUME_DEVICE:-}" ]] || return 0
+    blkid -o value -s UUID "$DATA_VOLUME_DEVICE" 2>/dev/null || true
+}
 
-    if ! awk -v mp="$mountpoint" -v src="$source" '($2 == mp) || (src != "" && $1 == src) { found=1 } END { exit(found ? 0 : 1) }' /etc/fstab; then
-        info "No fstab entry found for mount point/source: $mountpoint ${source:-}"
-        return 0
-    fi
+_fstab_has_mount_entry() {
+    local mountpoint="$1"
+    [[ -n "$mountpoint" && -f "$FSTAB_FILE" ]] || return 1
+    awk -v mp="$mountpoint" '
+        /^[[:space:]]*($|#)/ { next }
+        $2 == mp { found=1 }
+        END { exit(found ? 0 : 1) }
+    ' "$FSTAB_FILE"
+}
+
+_fstab_has_configured_volume_entry() {
+    local mountpoint="$1" source="$2" uuid="${3:-}"
+    [[ -f "$FSTAB_FILE" ]] || return 1
+    awk -v mp="$mountpoint" -v src="$source" -v uuid="$uuid" '
+        /^[[:space:]]*($|#)/ { next }
+        $2 == mp && ((src != "" && $1 == src) || (uuid != "" && $1 == "UUID=" uuid)) { found=1 }
+        END { exit(found ? 0 : 1) }
+    ' "$FSTAB_FILE"
+}
+
+_fstab_has_configured_source_entry() {
+    local source="$1" uuid="${2:-}"
+    [[ -f "$FSTAB_FILE" ]] || return 1
+    awk -v src="$source" -v uuid="$uuid" '
+        /^[[:space:]]*($|#)/ { next }
+        (src != "" && $1 == src) || (uuid != "" && $1 == "UUID=" uuid) { found=1 }
+        END { exit(found ? 0 : 1) }
+    ' "$FSTAB_FILE"
+}
+
+_remove_fstab_mount() {
+    local mountpoint="$1" source="${2:-}" require_configured_identity="${3:-false}"
+    local uuid="${4:-}"
+    [[ -n "$mountpoint" && -f "$FSTAB_FILE" ]] || return 0
 
     local tmp
-    tmp="$(mktemp /etc/fstab.vw-uninstall.XXXXXXXXXX)" || return 1
-    if awk -v mp="$mountpoint" -v src="$source" '!(($2 == mp) || (src != "" && $1 == src)) { print }' /etc/fstab > "$tmp" \
-        && mv -f "$tmp" /etc/fstab; then
-        success "Removed fstab entry for data volume: $mountpoint"
+    tmp="$(mktemp "${FSTAB_FILE}.vw-uninstall.XXXXXXXXXX")" || return 1
+
+    if [[ "$require_configured_identity" == "true" ]]; then
+        if ! _fstab_has_configured_volume_entry "$mountpoint" "$source" "$uuid"; then
+            rm -f "$tmp" 2>/dev/null || true
+            if _fstab_has_mount_entry "$mountpoint" || _fstab_has_configured_source_entry "$source" "$uuid"; then
+                warn "Preserving ambiguous fstab entry for $mountpoint."
+                warn "Manual check required: verify DATA_VOLUME_DEVICE='${DATA_VOLUME_DEVICE:-<unset>}' has UUID='${uuid:-<unknown>}' and only then remove the matching fstab line."
+                warn "Suggested inspection: grep -nE '[[:space:]]${mountpoint//\//\\/}[[:space:]]|${DATA_VOLUME_DEVICE:-NO_DEVICE}|UUID=${uuid:-NO_UUID}' $FSTAB_FILE"
+                return 1
+            fi
+            info "No positively identified fstab entry found for configured data volume source/UUID."
+            return 0
+        fi
+
+        if awk -v mp="$mountpoint" -v src="$source" -v uuid="$uuid" '
+            !(($2 == mp) && ((src != "" && $1 == src) || (uuid != "" && $1 == "UUID=" uuid))) { print }
+        ' "$FSTAB_FILE" > "$tmp" && mv -f "$tmp" "$FSTAB_FILE"; then
+            success "Removed fstab entry for configured data volume."
+            return 0
+        fi
     else
-        rm -f "$tmp" 2>/dev/null || true
-        warn "Could not remove fstab entry for $mountpoint. Remove it manually."
-        return 1
+        if ! awk -v mp="$mountpoint" -v src="$source" '
+            /^[[:space:]]*($|#)/ { next }
+            ($2 == mp) || (src != "" && $1 == src) { found=1 }
+            END { exit(found ? 0 : 1) }
+        ' "$FSTAB_FILE"; then
+            rm -f "$tmp" 2>/dev/null || true
+            info "No fstab entry found for mount point/source: $mountpoint ${source:-}"
+            return 0
+        fi
+
+        if awk -v mp="$mountpoint" -v src="$source" '
+            !(($2 == mp) || (src != "" && $1 == src)) { print }
+        ' "$FSTAB_FILE" > "$tmp" && mv -f "$tmp" "$FSTAB_FILE"; then
+            success "Removed fstab entry for data volume: $mountpoint"
+            return 0
+        fi
     fi
-    return 0
+
+    rm -f "$tmp" 2>/dev/null || true
+    warn "Could not remove fstab entry for $mountpoint. Remove it manually after verifying volume identity."
+    return 1
+}
+
+_remove_docker_mount_guard() {
+    if [[ -f "$DOCKER_MOUNT_GUARD" ]]; then
+        rm -f "$DOCKER_MOUNT_GUARD" && success "Removed Docker mount-guard drop-in: $DOCKER_MOUNT_GUARD"
+        rmdir "$DOCKER_MOUNT_GUARD_DIR" 2>/dev/null || true
+    fi
+    _run_if_exists systemctl && systemctl daemon-reload 2>/dev/null || true
 }
 
 remove_state_and_mount() {
@@ -624,6 +748,7 @@ remove_state_and_mount() {
                 warn "Preserved external backup directory: $BACKUP_DIR"
             fi
         fi
+        _remove_docker_mount_guard
         return 0
     fi
 
@@ -632,23 +757,16 @@ remove_state_and_mount() {
         warn "PROJECT_STATE_DIR does not match DATA_VOLUME_MOUNT; deleting only safely identified mounted data-volume contents."
     fi
 
-    local mounted=false sentinel=false source=""
+    local mounted=false sentinel=false source="" uuid=""
     mountpoint -q "$DATA_VOLUME_MOUNT" 2>/dev/null && mounted=true
     [[ -f "$DATA_VOLUME_MOUNT/.vw-data-volume" ]] && sentinel=true
     if [[ "$mounted" == "true" ]]; then
         source="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT" 2>/dev/null || true)"
     fi
 
-    _remove_fstab_mount "$DATA_VOLUME_MOUNT" "$source"
-
-    local docker_dropin="/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
-    if [[ -f "$docker_dropin" ]]; then
-        rm -f "$docker_dropin" && success "Removed Docker mount-guard drop-in: $docker_dropin"
-        rmdir /etc/systemd/system/docker.service.d 2>/dev/null || true
-    fi
-    _run_if_exists systemctl && systemctl daemon-reload 2>/dev/null || true
-
     if [[ "$mounted" == "true" && "$sentinel" == "true" ]]; then
+        _remove_fstab_mount "$DATA_VOLUME_MOUNT" "$source"
+        _remove_docker_mount_guard
         if command -v chattr >/dev/null 2>&1; then
             chattr -i "$DATA_VOLUME_MOUNT/.vw-data-volume" 2>/dev/null || true
         fi
@@ -665,6 +783,10 @@ remove_state_and_mount() {
         if [[ -d "$DATA_VOLUME_MOUNT" ]] && [[ -n "$(find "$DATA_VOLUME_MOUNT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
             die "Unmounted data mount path is non-empty. Refusing to report a complete uninstall: $DATA_VOLUME_MOUNT"
         fi
+        uuid="$(_data_volume_uuid)"
+        _remove_fstab_mount "$DATA_VOLUME_MOUNT" "$DATA_VOLUME_DEVICE" true "$uuid" \
+            || die "Preserved ambiguous data-volume fstab entry. Verify the configured OCI volume manually, then remove the matching fstab line and rerun uninstall."
+        _remove_docker_mount_guard
     fi
 
     if [[ "$mounted" == "true" ]]; then
@@ -741,8 +863,8 @@ remove_repo_local_install_artifacts() {
 remove_installed_files() {
     info "Step 5: Removing installed scripts and configuration..."
 
-    _safe_rm_rf /opt/vaultwarden-scripts || true
-    _safe_rm_rf /etc/vaultwarden || true
+    _safe_rm_rf "$OPT_SCRIPTS_DIR" || true
+    _safe_rm_rf "$ETC_VAULTWARDEN_DIR" || true
 
     if [[ "$TEST_RESET" == "true" ]]; then
         remove_repo_local_install_artifacts
@@ -771,12 +893,12 @@ remove_project_checkout() {
 }
 
 remove_sops_and_packages() {
-    info "Step 6: Removing project-installed standalone helper binaries..."
+    info "Step 6: Preserving shared standalone helper binaries..."
 
-    if [[ -f /usr/local/bin/sops ]]; then
-        rm -f /usr/local/bin/sops && success "Removed /usr/local/bin/sops"
+    if [[ -f "$SOPS_BIN" ]]; then
+        warn "Preserving $SOPS_BIN; setup may have reused a pre-existing SOPS binary and no project ownership marker is present."
     else
-        info "No standalone /usr/local/bin/sops found."
+        info "No standalone SOPS binary found at $SOPS_BIN."
     fi
 
     warn "Leaving shared distro packages installed by default (cron, git, curl, jq, sqlite3, ufw, python3, etc.)."
@@ -794,8 +916,8 @@ remove_crowdsec() {
         fi
     done
 
-    rm -f /etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service 2>/dev/null || true
-    rm -f /usr/local/bin/crowdsec-cloudflare-worker-bouncer 2>/dev/null || true
+    rm -f "$CROWDSEC_BOUNCER_SERVICE" 2>/dev/null || true
+    rm -f "$CROWDSEC_BOUNCER_BIN" 2>/dev/null || true
     _run_if_exists systemctl && systemctl daemon-reload 2>/dev/null || true
 
     local pkg
@@ -814,50 +936,45 @@ remove_crowdsec() {
         /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.asc \
         2>/dev/null || true
 
-    _safe_rm_rf /etc/crowdsec || true
-    _safe_rm_rf /var/lib/crowdsec || true
-    _safe_rm_rf /var/log/crowdsec || true
+    _safe_rm_rf "$CROWDSEC_ETC_DIR" || true
+    _safe_rm_rf "$CROWDSEC_STATE_DIR" || true
+    _safe_rm_rf "$CROWDSEC_LOG_DIR" || true
 
     operation_package_run apt-get update -qq || warn "apt-get update failed after CrowdSec repository removal."
     operation_package_run apt-get autoremove -y || warn "apt-get autoremove reported errors."
     return 0
 }
 
-_remove_all_managed_ufw_rules() {
-    local rule_num removed=0 max_removals=500
+_remove_historical_broad_ufw_rules() {
+    ufw delete allow 80/tcp 2>/dev/null || true
+    ufw delete allow 443/tcp 2>/dev/null || true
+    success "Requested removal of historical broad UFW HTTP/HTTPS allow rules."
+}
 
-    while true; do
-        rule_num="$(
-            ufw status numbered 2>/dev/null \
-                | awk '/(^|[[:space:]])(80|443)\/tcp([[:space:]]|$)/ {
-                    gsub(/\[|\]/, "", $1)
-                    print $1
-                    exit
-                }'
-        )"
-        [[ -n "$rule_num" ]] || break
+_remove_managed_cloudflare_ufw_rules() {
+    if (( ${#MANAGED_CLOUDFLARE_CIDRS[@]} == 0 )); then
+        warn "No managed Cloudflare CIDR cache found; preserving source-specific UFW 80/443 rules unless they are exact historical broad rules."
+        return 0
+    fi
 
-        if ! yes | ufw delete "$rule_num" >/dev/null 2>&1; then
-            die "Could not delete UFW HTTP/HTTPS rule number $rule_num"
-        fi
-        removed=$((removed + 1))
-        if (( removed >= max_removals )); then
-            die "UFW cleanup exceeded ${max_removals} managed-rule deletions; refusing a possible infinite cleanup loop."
-        fi
+    local cidr port removed=0
+    for cidr in "${MANAGED_CLOUDFLARE_CIDRS[@]}"; do
+        for port in 80 443; do
+            if ufw delete allow from "$cidr" to any port "$port" proto tcp >/dev/null 2>&1; then
+                removed=$((removed + 1))
+            fi
+        done
     done
 
-    success "Removed all detected UFW HTTP/HTTPS rules (${removed} numbered rule(s)); SSH rules preserved."
+    success "Requested removal of managed Cloudflare UFW HTTP/HTTPS rules (${removed} deletion command(s) matched)."
 }
 
 remove_firewall_rules() {
     info "Step 8: Removing UFW and iptables rules managed by VaultWarden-OCI..."
 
     if command -v ufw >/dev/null 2>&1; then
-        # Delete broad historical rules first, then exhaust every numbered
-        # Cloudflare-specific 80/443 rule added by setup-firewall.sh.
-        ufw delete allow 80/tcp 2>/dev/null || true
-        ufw delete allow 443/tcp 2>/dev/null || true
-        _remove_all_managed_ufw_rules
+        _remove_historical_broad_ufw_rules
+        _remove_managed_cloudflare_ufw_rules
     fi
 
     if command -v iptables >/dev/null 2>&1; then
@@ -887,30 +1004,45 @@ remove_firewall_rules() {
 remove_swap_and_apt_sources() {
     info "Step 9: Removing swapfile and project-added apt source files..."
 
-    if swapon --show 2>/dev/null | grep -q '^/swapfile[[:space:]]'; then
-        swapoff /swapfile 2>/dev/null || die "swapoff /swapfile failed"
-    fi
-    if [[ -e /swapfile ]]; then
-        rm -f /swapfile && success "Removed /swapfile"
-    fi
+    if [[ "$TEST_RESET" == "true" ]]; then
+        if swapon --show 2>/dev/null | awk -v swap="$SWAPFILE_PATH" '$1 == swap { found=1 } END { exit(found ? 0 : 1) }'; then
+            swapoff "$SWAPFILE_PATH" 2>/dev/null || die "swapoff $SWAPFILE_PATH failed"
+        fi
+        if [[ -e "$SWAPFILE_PATH" ]]; then
+            rm -f "$SWAPFILE_PATH" && success "Removed $SWAPFILE_PATH for test-reset setup-path coverage"
+        fi
 
-    if [[ -f /etc/fstab ]] && grep -q '^/swapfile[[:space:]]' /etc/fstab 2>/dev/null; then
-        local tmp
-        tmp="$(mktemp /etc/fstab.vw-swap.XXXXXXXXXX)" || return 1
-        if sed '/^\/swapfile[[:space:]]/d' /etc/fstab > "$tmp" && mv -f "$tmp" /etc/fstab; then
-            success "Removed /swapfile fstab entry"
-        else
-            rm -f "$tmp" 2>/dev/null || true
-            die "Could not remove /swapfile fstab entry"
+        if [[ -f "$FSTAB_FILE" ]] && awk -v swap="$SWAPFILE_PATH" '$1 == swap { found=1 } END { exit(found ? 0 : 1) }' "$FSTAB_FILE"; then
+            local tmp
+            tmp="$(mktemp "${FSTAB_FILE}.vw-swap.XXXXXXXXXX")" || return 1
+            if awk -v swap="$SWAPFILE_PATH" '$1 != swap { print }' "$FSTAB_FILE" > "$tmp" && mv -f "$tmp" "$FSTAB_FILE"; then
+                success "Removed $SWAPFILE_PATH fstab entry"
+            else
+                rm -f "$tmp" 2>/dev/null || true
+                die "Could not remove $SWAPFILE_PATH fstab entry"
+            fi
+        fi
+    else
+        if [[ -e "$SWAPFILE_PATH" ]]; then
+            warn "Preserving ambiguous existing $SWAPFILE_PATH; no project ownership marker is available."
+        fi
+        if [[ -f "$FSTAB_FILE" ]] && awk -v swap="$SWAPFILE_PATH" '$1 == swap { found=1 } END { exit(found ? 0 : 1) }' "$FSTAB_FILE"; then
+            warn "Preserving ambiguous $SWAPFILE_PATH fstab entry during normal uninstall."
         fi
     fi
 
-    if grep -q '^vm\.swappiness' /etc/sysctl.conf 2>/dev/null; then
-        sed -i '/^vm\.swappiness/d' /etc/sysctl.conf || die "Could not remove vm.swappiness from /etc/sysctl.conf"
-        sysctl -q vm.swappiness=60 2>/dev/null || true
+    if [[ -f "$SYSCTL_CONF" ]] && grep -Fxq 'vm.swappiness=10' "$SYSCTL_CONF" 2>/dev/null; then
+        local sysctl_tmp
+        sysctl_tmp="$(mktemp "${SYSCTL_CONF}.vw-swappiness.XXXXXXXXXX")" || return 1
+        if awk '$0 != "vm.swappiness=10" { print }' "$SYSCTL_CONF" > "$sysctl_tmp" && mv -f "$sysctl_tmp" "$SYSCTL_CONF"; then
+            success "Removed project swappiness line: vm.swappiness=10"
+        else
+            rm -f "$sysctl_tmp" 2>/dev/null || true
+            die "Could not remove project swappiness line from $SYSCTL_CONF"
+        fi
     fi
 
-    rm -f /etc/apt/sources.list.d/ubuntu-universe.list 2>/dev/null || true
+    rm -f "$APT_SOURCE_UNIVERSE" 2>/dev/null || true
     operation_package_run apt-get update -qq || warn "apt-get update failed after apt source cleanup."
     return 0
 }
@@ -936,7 +1068,7 @@ remove_runtime_artifacts() {
     # their flock FDs are held: unlinking a live lock path creates a second inode
     # and can split coordination. Empty /run/lock files are harmless, ephemeral,
     # and reusable by the next install.
-    _safe_rm_rf /run/vaultwarden-oci || true
+    _safe_rm_rf "$RUNTIME_DIR" || true
 
     success "Removed VaultWarden runtime secrets and operation state."
     info "Reusable empty coordination lock files under /run/lock are intentionally preserved."
@@ -948,6 +1080,20 @@ _residual() {
     UNINSTALL_RESIDUALS=$((UNINSTALL_RESIDUALS + 1))
 }
 
+_ufw_has_historical_broad_http_rule() {
+    ufw status numbered 2>/dev/null \
+        | awk '/(^|[[:space:]])(80|443)\/tcp([[:space:]]|$)/ && /Anywhere/ { found=1 } END { exit(found ? 0 : 1) }'
+}
+
+_ufw_has_managed_cloudflare_http_rule() {
+    local cidr="$1"
+    ufw status numbered 2>/dev/null \
+        | awk -v cidr="$cidr" '
+            /(^|[[:space:]])(80|443)\/tcp([[:space:]]|$)/ && index($0, cidr) { found=1 }
+            END { exit(found ? 0 : 1) }
+        '
+}
+
 verify_uninstall_complete() {
     info "Step 13: Verifying managed stack artifacts are gone..."
     UNINSTALL_RESIDUALS=0
@@ -955,28 +1101,30 @@ verify_uninstall_complete() {
     local unit dropin path pkg subnet project_name="${COMPOSE_PROJECT_NAME_ENV:-vaultwarden-oci}"
 
     for unit in "${MANAGED_TIMERS[@]}" "${MANAGED_SERVICES[@]}"; do
-        [[ ! -e "/etc/systemd/system/${unit}" ]] || _residual "/etc/systemd/system/${unit}"
+        [[ ! -e "${SYSTEMD_SYSTEM_DIR}/${unit}" ]] || _residual "${SYSTEMD_SYSTEM_DIR}/${unit}"
         for dropin in 10-state-dir.conf 20-identity.conf 30-run-as-root.conf; do
-            [[ ! -e "/etc/systemd/system/${unit}.d/${dropin}" ]] \
-                || _residual "/etc/systemd/system/${unit}.d/${dropin}"
+            [[ ! -e "${SYSTEMD_SYSTEM_DIR}/${unit}.d/${dropin}" ]] \
+                || _residual "${SYSTEMD_SYSTEM_DIR}/${unit}.d/${dropin}"
         done
     done
-    [[ ! -e /etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf ]] \
-        || _residual "/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
+    [[ ! -e "$DOCKER_MOUNT_GUARD" ]] \
+        || _residual "$DOCKER_MOUNT_GUARD"
 
     for path in \
-        /opt/vaultwarden-scripts \
-        /etc/vaultwarden \
-        /run/vaultwarden-oci \
-        /usr/local/bin/sops \
-        /usr/local/bin/crowdsec-cloudflare-worker-bouncer \
-        /etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service \
-        /etc/crowdsec \
-        /var/lib/crowdsec \
-        /var/log/crowdsec \
-        /swapfile; do
+        "$OPT_SCRIPTS_DIR" \
+        "$ETC_VAULTWARDEN_DIR" \
+        "$RUNTIME_DIR" \
+        "$CROWDSEC_BOUNCER_BIN" \
+        "$CROWDSEC_BOUNCER_SERVICE" \
+        "$CROWDSEC_ETC_DIR" \
+        "$CROWDSEC_STATE_DIR" \
+        "$CROWDSEC_LOG_DIR"; do
         [[ ! -e "$path" ]] || _residual "$path"
     done
+
+    if [[ "$TEST_RESET" == "true" ]]; then
+        [[ ! -e "$SWAPFILE_PATH" ]] || _residual "$SWAPFILE_PATH"
+    fi
 
     if [[ -z "$DATA_VOLUME_DEVICE" ]]; then
         [[ ! -e "$PROJECT_STATE_DIR" ]] || _residual "managed state directory $PROJECT_STATE_DIR"
@@ -987,8 +1135,13 @@ verify_uninstall_complete() {
         if [[ -d "$DATA_VOLUME_MOUNT" ]] && [[ -n "$(find "$DATA_VOLUME_MOUNT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
             _residual "data mount path remains non-empty: $DATA_VOLUME_MOUNT"
         fi
-        if [[ -f /etc/fstab ]] \
-            && awk -v mp="$DATA_VOLUME_MOUNT" -v src="$DATA_VOLUME_DEVICE" '($2 == mp) || ($1 == src) { found=1 } END { exit(found ? 0 : 1) }' /etc/fstab; then
+        local data_uuid
+        data_uuid="$(_data_volume_uuid)"
+        if [[ -f "$FSTAB_FILE" ]] \
+            && awk -v mp="$DATA_VOLUME_MOUNT" -v src="$DATA_VOLUME_DEVICE" -v uuid="$data_uuid" '
+                ($2 == mp) || (src != "" && $1 == src) || (uuid != "" && $1 == "UUID=" uuid) { found=1 }
+                END { exit(found ? 0 : 1) }
+            ' "$FSTAB_FILE"; then
             _residual "fstab still references data volume mount/device"
         fi
     fi
@@ -1044,10 +1197,15 @@ verify_uninstall_complete() {
     done
 
     if command -v ufw >/dev/null 2>&1; then
-        if ufw status numbered 2>/dev/null \
-            | awk '/(^|[[:space:]])(80|443)\/tcp([[:space:]]|$)/ { found=1 } END { exit(found ? 0 : 1) }'; then
-            _residual "UFW still has HTTP/HTTPS rules"
+        if _ufw_has_historical_broad_http_rule; then
+            _residual "UFW still has historical broad HTTP/HTTPS allow rule"
         fi
+        local cidr
+        for cidr in "${MANAGED_CLOUDFLARE_CIDRS[@]}"; do
+            if _ufw_has_managed_cloudflare_http_rule "$cidr"; then
+                _residual "UFW still has managed Cloudflare HTTP/HTTPS rule for $cidr"
+            fi
+        done
     fi
 
     if command -v iptables >/dev/null 2>&1; then
@@ -1062,17 +1220,19 @@ verify_uninstall_complete() {
         done
     fi
 
-    if [[ -f /etc/iptables/rules.v4 ]]; then
+    if [[ -f "$IPTABLES_RULES_V4" ]]; then
         for subnet in "${MANAGED_IPV4_SUBNETS[@]}"; do
-            if grep -F "$subnet" /etc/iptables/rules.v4 2>/dev/null \
+            if grep -F "$subnet" "$IPTABLES_RULES_V4" 2>/dev/null \
                 | grep -Eq 'MASQUERADE|DOCKER-USER'; then
-                _residual "persisted netfilter rule for $subnet in /etc/iptables/rules.v4"
+                _residual "persisted netfilter rule for $subnet in $IPTABLES_RULES_V4"
             fi
         done
     fi
 
-    if [[ -f /etc/fstab ]] && grep -q '^/swapfile[[:space:]]' /etc/fstab 2>/dev/null; then
-        _residual "/etc/fstab still references /swapfile"
+    if [[ "$TEST_RESET" == "true" ]] \
+        && [[ -f "$FSTAB_FILE" ]] \
+        && awk -v swap="$SWAPFILE_PATH" '$1 == swap { found=1 } END { exit(found ? 0 : 1) }' "$FSTAB_FILE"; then
+        _residual "$FSTAB_FILE still references $SWAPFILE_PATH"
     fi
 
     getent group vaultwarden >/dev/null 2>&1 && _residual "system group vaultwarden"
@@ -1110,9 +1270,9 @@ show_summary() {
         _dry_run_line "systemd managed drop-ins: 10-state-dir.conf 20-identity.conf 30-run-as-root.conf"
         _dry_run_line "Docker compose stack via docker-compose.yml; containers: ${MANAGED_CONTAINERS[*]}"
         _dry_run_line "Docker networks: ${MANAGED_NETWORKS[*]}; compose-labelled/safe-prefix volumes"
-        _dry_run_line "runtime secrets/state: /run/vaultwarden-oci; inactive VaultWarden-specific locks"
-        _dry_run_line "installed config and key dir: /etc/vaultwarden"
-        _dry_run_line "installed scripts: /opt/vaultwarden-scripts"
+        _dry_run_line "runtime secrets/state: ${RUNTIME_DIR}; inactive VaultWarden-specific locks"
+        _dry_run_line "installed config and key dir: ${ETC_VAULTWARDEN_DIR}"
+        _dry_run_line "installed scripts: ${OPT_SCRIPTS_DIR}"
 
         if [[ "$TEST_RESET" == "true" ]]; then
             _dry_run_line "preserve Git checkout: ${PROJECT_DIR}"
@@ -1135,17 +1295,21 @@ show_summary() {
             else
                 _dry_run_line "mounted data-volume contents under ${DATA_VOLUME_MOUNT} would be removed (block device itself preserved)"
             fi
-            _dry_run_line "fstab entry and Docker mount guard: /etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
+            _dry_run_line "fstab entry and Docker mount guard: ${DOCKER_MOUNT_GUARD}"
         fi
 
         _dry_run_line "Age key paths:"
         local key
         for key in "${MANAGED_AGE_KEY_PATHS[@]}"; do _dry_run_line "  ${key}"; done
         _dry_run_line "CrowdSec services/packages/config/state including Cloudflare and both firewall-bouncer backends"
-        _dry_run_line "all UFW 80/443 rules and VaultWarden iptables /28 + historical /16 bridge rules"
+        _dry_run_line "exact historical broad UFW 80/443 rules and cached Cloudflare CIDR HTTP/HTTPS rules"
         _dry_run_line "persist cleaned iptables rules with netfilter-persistent when installed"
-        _dry_run_line "swapfile /swapfile and vm.swappiness entry"
-        _dry_run_line "standalone helper binary: /usr/local/bin/sops when present"
+        if [[ "$TEST_RESET" == "true" ]]; then
+            _dry_run_line "test-reset swap path ${SWAPFILE_PATH}, its fstab entry, and exact vm.swappiness=10 line"
+        else
+            _dry_run_line "exact vm.swappiness=10 line; ambiguous ${SWAPFILE_PATH} is preserved in normal uninstall"
+        fi
+        _dry_run_line "shared SOPS binary preserved when present: ${SOPS_BIN}"
         _dry_run_line "Docker packages/runtime data are preserved by default"
         _dry_run_line "vaultwarden group; docker group/memberships preserved"
         _dry_run_line "post-cleanup residual verification"
@@ -1273,11 +1437,15 @@ main() {
     success "Uninstall complete."
     if [[ "$TEST_RESET" == "true" ]]; then
         info "Git checkout preserved for immediate clean reinstall: $PROJECT_DIR"
+        info "Test-reset intentionally reset ${SWAPFILE_PATH} on this dedicated test VM."
+    else
+        info "Ambiguous existing ${SWAPFILE_PATH} is preserved unless project ownership can be proven."
     fi
     info "Intentionally preserved shared host infrastructure:"
     info "  • Docker packages, /var/lib/docker, docker group, and operator Docker membership"
-    info "  • SSH/UFW access rules not related to HTTP/HTTPS"
+    info "  • SSH/UFW access rules not matching cached Cloudflare HTTP/HTTPS rules or historical broad project rules"
     info "  • Common admin tools not uniquely owned by this project: curl, wget, git, jq, sqlite3, ufw, gpg, rsync, python3, make, nano"
+    info "  • Shared SOPS binary when present at ${SOPS_BIN}"
     info "  • /etc/ssh/sshd_config"
     info "The OCI block device itself remains attached; only managed mount wiring and verified project contents are removed."
     echo "════════════════════════════════════════════════════════════"

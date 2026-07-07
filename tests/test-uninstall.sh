@@ -83,8 +83,11 @@ assert_contains "$SCRIPT" "172.21.0.0/28"
 assert_contains "$SCRIPT" "172.22.0.0/28"
 assert_contains "$SCRIPT" "172.23.0.0/28"
 assert_contains "$SCRIPT" "172.21.0.0/16"
-assert_contains "$SCRIPT" "max_removals=500"
+assert_contains "$SCRIPT" "MANAGED_CLOUDFLARE_CIDRS"
+assert_contains "$SCRIPT" "_remove_managed_cloudflare_ufw_rules"
+assert_contains "$SCRIPT" "ufw delete allow from"
 assert_not_contains "$SCRIPT" "{1..30}"
+assert_not_contains "$SCRIPT" "yes | ufw delete"
 assert_contains "$SCRIPT" "netfilter-persistent save"
 
 # Both firewall-bouncer backends can be installed by setup-crowdsec and must be purged.
@@ -121,6 +124,370 @@ assert_contains "$SCRIPT" "/|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/p
 assert_contains "$SCRIPT" "verify_uninstall_complete()"
 assert_contains "$SCRIPT" "Uninstall incomplete —"
 assert_contains "$SCRIPT" "Residual verification passed: no managed stack artifacts remain."
+
+source_uninstaller_for_behavior() {
+  set -- run --dry-run
+  # shellcheck source=../utilities/uninstall-vaultwarden.sh
+  source "$SCRIPT"
+  DRY_RUN=false
+  FORCE=false
+  operation_package_run() { return 0; }
+}
+
+write_basic_command_mocks() {
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/systemctl" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+  cat > "$bin/chattr" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+  cat > "$bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+  network\ inspect*) exit 1 ;;
+  *) exit 0 ;;
+esac
+MOCK
+  cat > "$bin/dpkg" <<'MOCK'
+#!/usr/bin/env bash
+exit 1
+MOCK
+  cat > "$bin/getent" <<'MOCK'
+#!/usr/bin/env bash
+exit 2
+MOCK
+  chmod +x "$bin/systemctl" "$bin/chattr" "$bin/docker" "$bin/dpkg" "$bin/getent"
+}
+
+write_ufw_mock() {
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/ufw" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${UFW_LOG:?}"
+remove_line() {
+  local port="$1" source="$2" before after tmp
+  tmp="${UFW_STATE}.tmp"
+  before="$(wc -l < "$UFW_STATE")"
+  awk -v port="${port}/tcp" -v source="$source" '!(index($0, port) && index($0, source)) { print }' "$UFW_STATE" > "$tmp"
+  mv -f "$tmp" "$UFW_STATE"
+  after="$(wc -l < "$UFW_STATE")"
+  [[ "$before" != "$after" ]]
+}
+if [[ "${1:-}" == "status" && "${2:-}" == "numbered" ]]; then
+  cat "$UFW_STATE"
+  exit 0
+fi
+if [[ "${1:-}" == "delete" && "${2:-}" == "allow" && "${3:-}" == "80/tcp" ]]; then
+  remove_line 80 Anywhere
+  exit $?
+fi
+if [[ "${1:-}" == "delete" && "${2:-}" == "allow" && "${3:-}" == "443/tcp" ]]; then
+  remove_line 443 Anywhere
+  exit $?
+fi
+if [[ "${1:-}" == "delete" && "${2:-}" == "allow" && "${3:-}" == "from" ]]; then
+  remove_line "${8:-}" "${4:-}"
+  exit $?
+fi
+exit 0
+MOCK
+  chmod +x "$bin/ufw"
+}
+
+write_noop_iptables_mock() {
+  local bin="$1"
+  mkdir -p "$bin"
+  cat > "$bin/iptables" <<'MOCK'
+#!/usr/bin/env bash
+exit 1
+MOCK
+  cat > "$bin/netfilter-persistent" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+  chmod +x "$bin/iptables" "$bin/netfilter-persistent"
+}
+
+# Mounted block-storage without the sentinel must fail before fstab or guard mutation.
+(
+  source_uninstaller_for_behavior
+  bin="$TMP/storage-bin"
+  write_basic_command_mocks "$bin"
+  cat > "$bin/mountpoint" <<'MOCK'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-q" && "${2:-}" == "${MOCK_MOUNTPOINT:?}" ]]
+MOCK
+  cat > "$bin/findmnt" <<'MOCK'
+#!/usr/bin/env bash
+printf '/dev/mock-volume\n'
+MOCK
+  cat > "$bin/umount" <<'MOCK'
+#!/usr/bin/env bash
+printf 'umount %s\n' "$*" >> "${UMOUNT_LOG:?}"
+exit 0
+MOCK
+  chmod +x "$bin/mountpoint" "$bin/findmnt" "$bin/umount"
+  PATH="$bin:$PATH"
+  export MOCK_MOUNTPOINT="$TMP/mounted-data" UMOUNT_LOG="$TMP/storage-umount.log"
+  DATA_VOLUME_DEVICE="/dev/mock-volume"
+  DATA_VOLUME_MOUNT="$MOCK_MOUNTPOINT"
+  PROJECT_STATE_DIR="$DATA_VOLUME_MOUNT"
+  mkdir -p "$DATA_VOLUME_MOUNT" "$TMP/systemd/docker.service.d"
+  FSTAB_FILE="$TMP/storage-fstab"
+  printf '/dev/mock-volume\t%s\text4\tdefaults\t0\t2\n' "$DATA_VOLUME_MOUNT" > "$FSTAB_FILE"
+  cp "$FSTAB_FILE" "$TMP/storage-fstab.before"
+  SYSTEMD_SYSTEM_DIR="$TMP/systemd"
+  DOCKER_MOUNT_GUARD_DIR="$SYSTEMD_SYSTEM_DIR/docker.service.d"
+  DOCKER_MOUNT_GUARD="$DOCKER_MOUNT_GUARD_DIR/10-vaultwarden-data-volume.conf"
+  : > "$DOCKER_MOUNT_GUARD"
+  if ( remove_state_and_mount ) > "$TMP/storage.out" 2>&1; then
+    fail "mounted data volume without sentinel should fail closed"
+  fi
+  cmp -s "$FSTAB_FILE" "$TMP/storage-fstab.before" || fail "fstab changed before mounted sentinel validation"
+  [[ -f "$DOCKER_MOUNT_GUARD" ]] || fail "docker mount guard removed before mounted sentinel validation"
+  [[ ! -s "$UMOUNT_LOG" ]] || fail "unknown mounted volume was unmounted"
+  assert_contains "$TMP/storage.out" "lacks .vw-data-volume sentinel"
+)
+
+# UFW cleanup removes only cached Cloudflare CIDRs plus historical broad rules.
+(
+  source_uninstaller_for_behavior
+  bin="$TMP/ufw-bin"
+  write_basic_command_mocks "$bin"
+  write_ufw_mock "$bin"
+  write_noop_iptables_mock "$bin"
+  PATH="$bin:$PATH"
+  export UFW_STATE="$TMP/ufw-state" UFW_LOG="$TMP/ufw.log"
+  cat > "$UFW_STATE" <<EOF_UFW
+[ 1] 80/tcp                     ALLOW IN    173.245.48.0/20
+[ 2] 443/tcp                    ALLOW IN    173.245.48.0/20
+[ 3] 443/tcp                    ALLOW IN    203.0.113.77
+[ 4] 80/tcp                     ALLOW IN    Anywhere
+[ 5] 443/tcp                    ALLOW IN    Anywhere
+EOF_UFW
+  : > "$UFW_LOG"
+  PROJECT_STATE_DIR="$TMP/ufw-project-state"
+  DATA_VOLUME_MOUNT=""
+  mkdir -p "$PROJECT_STATE_DIR"
+  printf '173.245.48.0/20\n' > "$PROJECT_STATE_DIR/cf-cidrs.cache"
+  _capture_managed_cloudflare_cidrs
+  remove_firewall_rules
+  remove_firewall_rules
+  assert_not_contains "$UFW_STATE" "173.245.48.0/20"
+  assert_not_contains "$UFW_STATE" "Anywhere"
+  assert_contains "$UFW_STATE" "203.0.113.77"
+  assert_contains "$UFW_LOG" "delete allow from 173.245.48.0/20 to any port 80 proto tcp"
+  assert_contains "$UFW_LOG" "delete allow 80/tcp"
+)
+
+# Netfilter cleanup removes managed current subnet rules, preserves unrelated rules, then persists.
+(
+  source_uninstaller_for_behavior
+  bin="$TMP/netfilter-bin"
+  write_basic_command_mocks "$bin"
+  cat > "$bin/ufw" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+  cat > "$bin/iptables" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'iptables %s\n' "$*" >> "${IPTABLES_LOG:?}"
+remove_rule() {
+  local kind="$1" subnet="$2" before after tmp
+  tmp="${IPTABLES_STATE}.tmp"
+  before="$(wc -l < "$IPTABLES_STATE")"
+  awk -v kind="$kind" -v subnet="$subnet" '!(($1 == kind) && ($2 == subnet)) { print }' "$IPTABLES_STATE" > "$tmp"
+  mv -f "$tmp" "$IPTABLES_STATE"
+  after="$(wc -l < "$IPTABLES_STATE")"
+  [[ "$before" != "$after" ]]
+}
+if [[ "$*" == "-t filter -S DOCKER-USER" ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == "-t" && "${2:-}" == "nat" && "${3:-}" == "-D" ]]; then
+  remove_rule nat "${6:-}"
+  exit $?
+fi
+if [[ "${1:-}" == "-t" && "${2:-}" == "filter" && "${3:-}" == "-D" ]]; then
+  remove_rule filter "${6:-}"
+  exit $?
+fi
+exit 1
+MOCK
+  cat > "$bin/netfilter-persistent" <<'MOCK'
+#!/usr/bin/env bash
+printf 'netfilter-persistent %s\n' "$*" >> "${IPTABLES_LOG:?}"
+exit 0
+MOCK
+  chmod +x "$bin/ufw" "$bin/iptables" "$bin/netfilter-persistent"
+  PATH="$bin:$PATH"
+  export IPTABLES_STATE="$TMP/iptables-state" IPTABLES_LOG="$TMP/iptables.log"
+  cat > "$IPTABLES_STATE" <<'EOF_IPT'
+nat 172.21.0.0/28
+filter 172.21.0.0/28
+nat 10.77.0.0/16
+EOF_IPT
+  : > "$IPTABLES_LOG"
+  MANAGED_CLOUDFLARE_CIDRS=()
+  remove_firewall_rules
+  assert_not_contains "$IPTABLES_STATE" "172.21.0.0/28"
+  assert_contains "$IPTABLES_STATE" "10.77.0.0/16"
+  [[ "$(tail -n 1 "$IPTABLES_LOG")" == "netfilter-persistent save" ]] || fail "netfilter save did not happen after cleanup"
+  assert_contains "$IPTABLES_LOG" "iptables -t nat -D POSTROUTING -s 172.21.0.0/28"
+)
+
+# Residual verifier accepts clean mocked state with unrelated HTTPS and retained shared SOPS.
+(
+  source_uninstaller_for_behavior
+  bin="$TMP/residual-bin"
+  write_basic_command_mocks "$bin"
+  write_ufw_mock "$bin"
+  write_noop_iptables_mock "$bin"
+  PATH="$bin:$PATH"
+  export UFW_STATE="$TMP/residual-ufw-state" UFW_LOG="$TMP/residual-ufw.log"
+  printf '[ 1] 443/tcp                    ALLOW IN    203.0.113.77\n' > "$UFW_STATE"
+  : > "$UFW_LOG"
+  TEST_RESET=true
+  PROJECT_DIR="$TMP/mock-clean-checkout"
+  PROJECT_BASENAME="VaultWarden-OCI"
+  DATA_VOLUME_DEVICE=""
+  PROJECT_STATE_DIR="$TMP/no-state"
+  BACKUP_DIR="$PROJECT_STATE_DIR/backups"
+  SYSTEMD_SYSTEM_DIR="$TMP/residual-systemd"
+  DOCKER_MOUNT_GUARD_DIR="$SYSTEMD_SYSTEM_DIR/docker.service.d"
+  DOCKER_MOUNT_GUARD="$DOCKER_MOUNT_GUARD_DIR/10-vaultwarden-data-volume.conf"
+  OPT_SCRIPTS_DIR="$TMP/no-opt-scripts"
+  ETC_VAULTWARDEN_DIR="$TMP/no-etc-vaultwarden"
+  CROWDSEC_BOUNCER_BIN="$TMP/no-crowdsec-bouncer"
+  CROWDSEC_BOUNCER_SERVICE="$SYSTEMD_SYSTEM_DIR/crowdsec-cloudflare-worker-bouncer.service"
+  CROWDSEC_ETC_DIR="$TMP/no-etc-crowdsec"
+  CROWDSEC_STATE_DIR="$TMP/no-var-lib-crowdsec"
+  CROWDSEC_LOG_DIR="$TMP/no-var-log-crowdsec"
+  RUNTIME_DIR="$TMP/no-runtime"
+  SWAPFILE_PATH="$TMP/no-swapfile"
+  SOPS_BIN="$TMP/shared-sops"
+  FSTAB_FILE="$TMP/residual-fstab"
+  IPTABLES_RULES_V4="$TMP/rules.v4"
+  MANAGED_CLOUDFLARE_CIDRS=(173.245.48.0/20)
+  mkdir -p "$PROJECT_DIR/.git"
+  mkdir -p "$SYSTEMD_SYSTEM_DIR"
+  : > "$FSTAB_FILE"
+  : > "$IPTABLES_RULES_V4"
+  : > "$SOPS_BIN"
+  if ! verify_uninstall_complete > "$TMP/residual-clean.out" 2>&1; then
+    cat "$TMP/residual-clean.out" >&2
+    fail "clean mocked residual state should pass verification"
+  fi
+  assert_contains "$TMP/residual-clean.out" "Residual verification passed"
+
+  printf '[ 1] 443/tcp                    ALLOW IN    173.245.48.0/20\n' > "$UFW_STATE"
+  if ( verify_uninstall_complete ) > "$TMP/residual-managed.out" 2>&1; then
+    fail "managed UFW residual should fail verification"
+  fi
+  assert_contains "$TMP/residual-managed.out" "RESIDUAL: UFW still has managed Cloudflare HTTP/HTTPS rule for 173.245.48.0/20"
+)
+
+# Final runtime cleanup must not recreate runtime state and must preserve lock pathnames.
+(
+  source_uninstaller_for_behavior
+  _safe_rm_rf() { rm -rf "$1"; }
+  RUNTIME_DIR="$TMP/final-runtime"
+  mkdir -p "$RUNTIME_DIR"
+  global_lock="$TMP/vaultwarden-operations.lock"
+  uninstall_lock="$TMP/vaultwarden-uninstall.lock"
+  : > "$global_lock"
+  : > "$uninstall_lock"
+  operation_release() {
+    if [[ "${OPERATION_OWNS_STATE:-true}" != "false" || -n "${OPERATION_STATE_FILE:-}" ]]; then
+      mkdir -p "$RUNTIME_DIR"
+    fi
+    return 0
+  }
+  UNINSTALL_OPERATION_HELD=true
+  OPERATION_OWNS_STATE=true
+  OPERATION_STATE_FILE="$RUNTIME_DIR/state.json"
+  remove_runtime_artifacts
+  _finalize_successful_operation_guard
+  [[ ! -e "$RUNTIME_DIR" ]] || fail "finalization recreated runtime state"
+  [[ -e "$global_lock" && -e "$uninstall_lock" ]] || fail "lock pathnames were unlinked"
+)
+
+# Swap cleanup preserves ambiguous swap in normal uninstall but resets it for test-reset.
+(
+  source_uninstaller_for_behavior
+  bin="$TMP/swap-bin"
+  write_basic_command_mocks "$bin"
+  cat > "$bin/swapon" <<'MOCK'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--show" ]] && printf '%s\n' "${SWAPON_OUTPUT:-}"
+MOCK
+  cat > "$bin/swapoff" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SWAPOFF_LOG:?}"
+exit 0
+MOCK
+  cat > "$bin/sysctl" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSCTL_LOG:?}"
+exit 0
+MOCK
+  chmod +x "$bin/swapon" "$bin/swapoff" "$bin/sysctl"
+  PATH="$bin:$PATH"
+  export SWAPOFF_LOG="$TMP/swapoff.log" SYSCTL_LOG="$TMP/sysctl.log"
+  : > "$SWAPOFF_LOG"
+  : > "$SYSCTL_LOG"
+
+  TEST_RESET=false
+  SWAPFILE_PATH="$TMP/swapfile-normal"
+  FSTAB_FILE="$TMP/swap-normal-fstab"
+  SYSCTL_CONF="$TMP/swap-normal-sysctl.conf"
+  APT_SOURCE_UNIVERSE="$TMP/ubuntu-universe.list"
+  : > "$SWAPFILE_PATH"
+  printf '%s none swap sw 0 0\n' "$SWAPFILE_PATH" > "$FSTAB_FILE"
+  printf 'vm.swappiness=10\nvm.swappiness=60\nvm.swappiness = 10\n' > "$SYSCTL_CONF"
+  remove_swap_and_apt_sources > "$TMP/swap-normal.out" 2>&1
+  [[ -e "$SWAPFILE_PATH" ]] || fail "normal uninstall removed ambiguous swapfile"
+  assert_contains "$FSTAB_FILE" "$SWAPFILE_PATH"
+  assert_not_contains "$SYSCTL_CONF" "vm.swappiness=10"
+  assert_contains "$SYSCTL_CONF" "vm.swappiness=60"
+  assert_contains "$SYSCTL_CONF" "vm.swappiness = 10"
+  [[ ! -s "$SWAPOFF_LOG" ]] || fail "normal uninstall called swapoff for ambiguous swapfile"
+  [[ ! -s "$SYSCTL_LOG" ]] || fail "uninstall forced runtime swappiness"
+
+  TEST_RESET=true
+  SWAPFILE_PATH="$TMP/swapfile-reset"
+  FSTAB_FILE="$TMP/swap-reset-fstab"
+  SYSCTL_CONF="$TMP/swap-reset-sysctl.conf"
+  export SWAPON_OUTPUT="$SWAPFILE_PATH file 1048572 0 -2"
+  : > "$SWAPFILE_PATH"
+  : > "$SWAPOFF_LOG"
+  printf '%s none swap sw 0 0\n/dev/other none swap sw 0 0\n' "$SWAPFILE_PATH" > "$FSTAB_FILE"
+  printf 'vm.swappiness=10\nvm.swappiness=5\n' > "$SYSCTL_CONF"
+  remove_swap_and_apt_sources > "$TMP/swap-reset.out" 2>&1
+  [[ ! -e "$SWAPFILE_PATH" ]] || fail "test-reset preserved setup swap path"
+  assert_not_contains "$FSTAB_FILE" "$SWAPFILE_PATH"
+  assert_contains "$FSTAB_FILE" "/dev/other"
+  assert_not_contains "$SYSCTL_CONF" "vm.swappiness=10"
+  assert_contains "$SYSCTL_CONF" "vm.swappiness=5"
+  assert_contains "$SWAPOFF_LOG" "$SWAPFILE_PATH"
+)
+
+# Ambiguous pre-existing SOPS is retained and does not fail clean reset verification.
+(
+  source_uninstaller_for_behavior
+  SOPS_BIN="$TMP/operator-sops"
+  : > "$SOPS_BIN"
+  remove_sops_and_packages > "$TMP/sops.out" 2>&1
+  [[ -f "$SOPS_BIN" ]] || fail "ambiguous SOPS binary was removed"
+  assert_contains "$TMP/sops.out" "Preserving $SOPS_BIN"
+)
 
 echo "test-uninstall-vaultwarden: ok"
 
