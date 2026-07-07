@@ -44,6 +44,7 @@ DESCRIPTION:
 
 OPTIONS:
     --help, -h      Show this help without rewriting docs
+    --version, -V   Print the VaultWarden-OCI version and exit
 HELP
 }
 
@@ -51,6 +52,10 @@ if [[ $# -gt 0 ]]; then
     case "$1" in
         --help|-h|help)
             show_help
+            exit 0
+            ;;
+        --version|-V)
+            printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo unknown)"
             exit 0
             ;;
         *)
@@ -136,7 +141,7 @@ generate_script_help() {
     echo ""
     echo '```'
     if [[ "$name" == "notify-failure.sh" ]]; then
-        echo '(--help not available or requires root)'
+        echo '(internal systemd OnFailure helper; not a direct operator command)'
         echo '```'
         echo ""
         return 0
@@ -190,7 +195,8 @@ HEADER
         "${SCRIPT_DIR}/restore.sh" \
         "${SCRIPT_DIR}/maintenance.sh" \
         "${SCRIPT_DIR}/edit-secrets.sh" \
-        "${SCRIPT_DIR}/dashboard.sh"; do
+        "${SCRIPT_DIR}/dashboard.sh" \
+        "${SCRIPT_DIR}/recover.sh"; do
         [[ -f "$script" ]] && generate_script_help "$script"
     done
 
@@ -201,7 +207,7 @@ HEADER
     while IFS= read -r script; do
         [[ -f "$script" ]] && generate_script_help "$script"
     done < <(find "${SCRIPT_DIR}/utilities" -maxdepth 1 -name '*.sh' -type f \
-        | grep -v 'secrets-edit\.sh' \
+        | grep -v 'notify-failure\.sh' \
         | sort)
 }
 

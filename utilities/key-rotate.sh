@@ -31,6 +31,7 @@ OPTIONS:
     --extra-recipient AGE_PUBLIC_KEY
                   Preserve an additional explicit Age recipient
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 NOTES:
     This rotates the Age/SOPS encryption key. It does not rotate individual
@@ -48,11 +49,15 @@ while [[ $# -gt 0 ]]; do
         --yes|-y) ASSUME_YES=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --extra-recipient)
-            [[ -n "${2:-}" ]] || { echo "ERROR: --extra-recipient requires an Age public key" >&2; exit 1; }
+            [[ -n "${2:-}" && "${2:-}" != --* ]] || { echo "ERROR: --extra-recipient requires an Age public key" >&2; exit 1; }
             EXTRA_RECIPIENTS+=("$2")
             shift 2
             ;;
         --help|-h) show_help; exit 0 ;;
+        --version|-V)
+            printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
+            exit 0
+            ;;
         *) echo "Unknown option: $1" >&2; show_help; exit 1 ;;
     esac
 done

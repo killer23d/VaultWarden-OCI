@@ -32,8 +32,7 @@ cd /opt/VaultWarden-OCI
 sudo ./utilities/setup-system.sh --auto \
   --data-mount /mnt/vw-data
 sudo DATA_VOLUME_EXISTING_FS_OK=true \
-  ./utilities/setup-storage.sh \
-    --mode setup \
+  ./utilities/setup-storage.sh setup \
     --data-device /dev/sdb \
     --data-mount /mnt/vw-data
 ```

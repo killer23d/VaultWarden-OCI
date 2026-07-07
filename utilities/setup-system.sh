@@ -132,6 +132,14 @@ EOF
 }
 
 _parse_args() {
+    _require_cli_value() {
+        local opt="$1" value="${2-}"
+        if [[ -z "$value" || "$value" == --* ]]; then
+            log_error "$opt requires an argument"
+            exit 1
+        fi
+    }
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --skip-deps)    SKIP_DEPS=true ;;
@@ -145,17 +153,17 @@ _parse_args() {
                 ;;
             --sops-version)
                 shift
-                [[ $# -gt 0 ]] || { log_error "--sops-version requires an argument"; exit 1; }
+                _require_cli_value "--sops-version" "${1-}"
                 SOPS_VERSION="$1"
                 ;;
             --data-device)
                 shift
-                [[ $# -gt 0 ]] || { log_error "--data-device requires an argument"; exit 1; }
+                _require_cli_value "--data-device" "${1-}"
                 DATA_VOLUME_DEVICE="$1"
                 ;;
             --data-mount)
                 shift
-                [[ $# -gt 0 ]] || { log_error "--data-mount requires an argument"; exit 1; }
+                _require_cli_value "--data-mount" "${1-}"
                 DATA_VOLUME_MOUNT="$1"
                 ;;
             --help|-h) show_help; exit 0 ;;

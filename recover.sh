@@ -57,7 +57,17 @@ SENTINEL_PATH=""
 SENTINEL_CREATED=false
 
 usage() {
-    echo "Usage: ./recover.sh --state-dir DIR --key FILE [--storage-mode auto|boot|block]"
+    cat <<'EOF'
+Usage: ./recover.sh --state-dir DIR --key FILE [--storage-mode auto|boot|block]
+
+Options:
+  --state-dir DIR              Restored PROJECT_STATE_DIR or mounted data volume
+  --key FILE                   Offline Age private key file
+  --storage-mode auto|boot|block
+                               Recovery storage layout (default: auto)
+  --help, -h                   Show this help
+  --version, -V                Print the VaultWarden-OCI version and exit
+EOF
 }
 
 fatal() {
@@ -129,12 +139,12 @@ parse_args() {
         case "$1" in
             --state-dir)
                 shift
-                [[ $# -gt 0 && -n "${1:-}" ]] || fatal "Option --state-dir requires a value."
+                [[ $# -gt 0 && -n "${1:-}" && "${1:-}" != --* ]] || fatal "Option --state-dir requires a value."
                 STATE_DIR="$1"
                 ;;
             --key)
                 shift
-                [[ $# -gt 0 && -n "${1:-}" ]] || fatal "Option --key requires a value."
+                [[ $# -gt 0 && -n "${1:-}" && "${1:-}" != --* ]] || fatal "Option --key requires a value."
                 KEY_FILE="$1"
                 ;;
             --storage-mode)
@@ -144,6 +154,10 @@ parse_args() {
                 ;;
             --help|-h)
                 usage
+                exit 0
+                ;;
+            --version|-V)
+                print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
                 exit 0
                 ;;
             *)

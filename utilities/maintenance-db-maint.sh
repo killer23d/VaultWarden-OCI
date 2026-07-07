@@ -44,6 +44,8 @@ OPTIONS:
     --force     Skip confirmation prompt
     --dry-run   Preview what would be done without executing
     --help, -h  Show this help
+    --version, -V
+                Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — maintenance completed successfully
@@ -199,6 +201,7 @@ while [[ $# -gt 0 ]]; do
         --force)       DB_DEEP_FORCE=true; shift ;;
         --dry-run)     DRY_RUN=true;       shift ;;
         --help|-h|help) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option for 'db-maint': $1"; show_help; exit 1 ;;
     esac
 done

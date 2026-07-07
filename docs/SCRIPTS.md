@@ -742,7 +742,7 @@ make uninstall           # Full uninstall (requires interactive TTY + 'yes' conf
 **Purpose:** Interactive pipeline that migrates VaultWarden data between the boot disk and a dedicated block volume or directory target (and back).
 
 ```bash
-sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate [OPTIONS]
+sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh migrate [OPTIONS]
 ```
 
 #### `--direction` flag
@@ -756,13 +756,13 @@ sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate [OPTIONS]
 
 ```bash
 # Forward migration (boot → block volume) — direction defaults to boot-to-block
-sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate
+sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh migrate
 
 # Explicit forward migration
-sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate --direction boot-to-block
+sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh migrate --direction boot-to-block
 
 # Reverse migration (block volume → boot disk)
-sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate --direction block-to-boot
+sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh migrate --direction block-to-boot
 ```
 
 > See `docs/VOLUME-MIGRATION.md` for the complete migration runbook, including resume instructions.

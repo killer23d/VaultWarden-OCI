@@ -26,23 +26,17 @@ source "${PROJECT_ROOT}/lib/docker.sh"
 source "${PROJECT_ROOT}/lib/backup-utils.sh"
 source "${PROJECT_ROOT}/lib/migrate.sh"
 
-if [[ -f "${PROJECT_ROOT}/.env" || -f "/etc/vaultwarden/vaultwarden.env" || -f "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env" ]]; then
-    load_project_environment || {
-        # setup-storage also supports first-run bootstrapping before runtime env exists.
-        if [[ -f "${PROJECT_ROOT}/.env" ]]; then
-            load_env_file "${PROJECT_ROOT}/.env" || true
-        fi
-    }
-fi
 export DRY_RUN=false   # overridden by arg parsing; exported for lib functions
 
 _SS_MODE="setup"
 _SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
 _SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 _SS_DATA_DEVICE_PROVIDED=false
+_SS_DATA_MOUNT_PROVIDED=false
 _SS_AUTO=false
 _SS_FORCE=false
 TMP_WORKDIR=""
+declare -a _SS_MODE_ARGS=()
 declare -a _SS_MIGRATE_ARGS=()
 
 _ss_on_err() {
@@ -54,6 +48,25 @@ _ss_cleanup() {
     rm -rf "${TMP_WORKDIR:-}"
 }
 trap '_ss_cleanup' EXIT
+
+_ss_load_runtime_environment() {
+    local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
+    if [[ -f "${PROJECT_ROOT}/.env" || -f "${installed_env}" || -f "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env" ]]; then
+        load_project_environment || {
+            # setup-storage also supports first-run bootstrapping before runtime env exists.
+            if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+                load_env_file "${PROJECT_ROOT}/.env" || true
+            fi
+        }
+    fi
+
+    if [[ "${_SS_DATA_DEVICE_PROVIDED}" != "true" ]]; then
+        _SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-${_SS_DATA_DEVICE:-}}"
+    fi
+    if [[ "${_SS_DATA_MOUNT_PROVIDED}" != "true" ]]; then
+        _SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}}"
+    fi
+}
 
 _MV_SCRIPT_NAME="utilities/setup-storage.sh"
 readonly _MV_SCRIPT_NAME
@@ -400,7 +413,10 @@ cat << 'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
 VaultWarden-OCI Storage Setup and Migration
 
 USAGE:
-    sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]
+    sudo utilities/setup-storage.sh setup [OPTIONS]
+    sudo utilities/setup-storage.sh verify [OPTIONS]
+    sudo utilities/setup-storage.sh migrate <subcommand> [OPTIONS]
+    sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]  # compatibility
 
 DESCRIPTION:
     Configures persistent storage directories, optional data-volume
@@ -417,7 +433,7 @@ MODES:
     verify   Re-check layout and permissions only (no changes, safe for cron)
 
 OPTIONS:
-    --mode MODE           Mode to run: setup|migrate|verify (default: setup)
+    --mode MODE           Compatibility alias for setup|migrate|verify
     --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
     --data-mount PATH     Mount point for data volume (default: @DEFAULT_DATA_MOUNT@)
     --auto                Non-interactive mode; suppresses the storage assistant and
@@ -429,33 +445,130 @@ OPTIONS:
 
 EXAMPLES:
     # Interactive setup: asks whether to use boot-volume or block storage
-    sudo utilities/setup-storage.sh
+    sudo utilities/setup-storage.sh setup
 
     # Non-interactive boot-only setup (no separate data volume)
-    sudo utilities/setup-storage.sh --auto
+    sudo utilities/setup-storage.sh setup --auto
 
     # Setup with a dedicated data volume
-    sudo utilities/setup-storage.sh \
+    sudo utilities/setup-storage.sh setup \
       --data-device /dev/disk/by-id/your-volume \
       --data-mount @DEFAULT_DATA_MOUNT@
 
     # Dry run setup
-    sudo utilities/setup-storage.sh --dry-run
+    sudo utilities/setup-storage.sh setup --dry-run
 
     # Verify current layout (safe for cron)
-    sudo utilities/setup-storage.sh --mode verify
+    sudo utilities/setup-storage.sh verify
 
     # Interactive migration
-    sudo utilities/setup-storage.sh --mode migrate run
+    sudo utilities/setup-storage.sh migrate run
 EOF
+}
+
+_require_cli_value() {
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "$opt requires a value."
+        show_help
+        exit 2
+    fi
+}
+
+_ss_dispatch_metadata() {
+    case "${1-}" in
+        --help|-h|help)
+            show_help
+            exit 0
+            ;;
+        --version|-V)
+            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+            exit 0
+            ;;
+        setup|verify)
+            case "${2-}" in
+                --help|-h|help)
+                    show_help
+                    exit 0
+                    ;;
+                --version|-V)
+                    print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                    exit 0
+                    ;;
+            esac
+            ;;
+        migrate)
+            case "${2-}" in
+                --help|-h|help)
+                    _mv_usage
+                    exit 0
+                    ;;
+                --version|-V)
+                    print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                    exit 0
+                    ;;
+            esac
+            ;;
+        --mode)
+            case "${2-}" in
+                setup|verify)
+                    case "${3-}" in
+                        --help|-h|help)
+                            show_help
+                            exit 0
+                            ;;
+                        --version|-V)
+                            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                            exit 0
+                            ;;
+                    esac
+                    ;;
+                migrate)
+                    case "${3-}" in
+                        --help|-h|help)
+                            _mv_usage
+                            exit 0
+                            ;;
+                        --version|-V)
+                            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                            exit 0
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
 }
 
 _parse_outer_args() {
     local -a remaining=()
+    local mode_seen=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            setup|verify|migrate)
+                if [[ "$mode_seen" == "true" && "${_SS_MODE}" == "migrate" ]]; then
+                    remaining+=("$1")
+                    shift
+                    continue
+                fi
+                if [[ "$mode_seen" == "true" || ${#remaining[@]} -gt 0 ]]; then
+                    log_error "Exactly one setup-storage mode is allowed: setup | verify | migrate"
+                    show_help
+                    exit 2
+                fi
+                _SS_MODE="$1"
+                mode_seen=true
+                shift
+                ;;
             --mode)
+                _require_cli_value "$1" "${2-}"
+                if [[ "$mode_seen" == "true" || ${#remaining[@]} -gt 0 ]]; then
+                    log_error "Exactly one setup-storage mode is allowed: setup | verify | migrate"
+                    show_help
+                    exit 2
+                fi
                 _SS_MODE="$2"
+                mode_seen=true
                 shift 2
                 ;;
             --help|-h)
@@ -493,21 +606,25 @@ _parse_outer_args() {
             ;;
     esac
 
-    if [[ "${_SS_MODE}" == "migrate" ]]; then
-        _SS_MIGRATE_ARGS=("${remaining[@]+"${remaining[@]}"}")
-        return 0
-    fi
+    _SS_MODE_ARGS=("${remaining[@]+"${remaining[@]}"}")
+    [[ "${_SS_MODE}" == "migrate" ]] && _SS_MIGRATE_ARGS=("${_SS_MODE_ARGS[@]+"${_SS_MODE_ARGS[@]}"}")
+    return 0
+}
 
-    set -- "${remaining[@]+"${remaining[@]}"}"
+_parse_setup_args() {
+    set -- "${_SS_MODE_ARGS[@]+"${_SS_MODE_ARGS[@]}"}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --data-device)
+                _require_cli_value "$1" "${2-}"
                 _SS_DATA_DEVICE="$2"
                 _SS_DATA_DEVICE_PROVIDED=true
                 shift 2
                 ;;
             --data-mount)
+                _require_cli_value "$1" "${2-}"
                 _SS_DATA_MOUNT="$2"
+                _SS_DATA_MOUNT_PROVIDED=true
                 shift 2
                 ;;
             --auto)
@@ -536,7 +653,15 @@ _parse_outer_args() {
 }
 
 main() {
+    _ss_dispatch_metadata "$@"
+    _ss_load_runtime_environment
     _parse_outer_args "$@"
+
+    if [[ "${_SS_MODE}" == "migrate" ]]; then
+        _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
+    else
+        _parse_setup_args
+    fi
 
     (( EUID == 0 )) || {
         log_error "This script must be run as root: sudo utilities/setup-storage.sh $*"
@@ -568,7 +693,10 @@ main() {
     case "${_SS_MODE}" in
         setup)   _mode_setup   ;;
         verify)  _mode_verify  ;;
-        migrate) migrate_mode_main "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}" ;;
+        migrate)
+            _mv_resolve_args
+            migrate_mode_main
+            ;;
         *)
             log_error "Unknown mode: ${_SS_MODE}"
             show_help

@@ -40,6 +40,7 @@ OPTIONS:
     --require-dns  Treat missing DNS automation config as a failure
     --dry-run     Preview what would be done without making changes
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 SECRET SOURCE PRIORITY:
     caddy_cloudflare_dns_token — resolved in order:
@@ -397,6 +398,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)         DRY_RUN=true;      shift ;;
         --require-dns)     DNS_UPDATE_REQUIRED=true; shift ;;
         --help|-h|help)    show_help; exit 0 ;;
+        --version|-V)      print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option for 'update-dns': $1"; show_help; exit 1 ;;
     esac
 done

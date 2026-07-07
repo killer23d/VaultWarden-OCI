@@ -194,6 +194,7 @@ while [[ $# -gt 0 ]]; do
         --data-device)  _require_cli_value "$1" "${2-}"; DATA_VOLUME_DEVICE="$2";   shift 2 ;;
         --data-mount)   _require_cli_value "$1" "${2-}"; DATA_VOLUME_MOUNT="$2";    shift 2 ;;
         --help|-h)      show_help; exit 0 ;;
+        --version|-V)   printf 'VaultWarden-OCI %s\n' "$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "unknown")"; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
@@ -492,9 +493,9 @@ main() {
 
     operation_set_phase "2" "Storage setup"
     log_phase 2 6 "Storage setup"
-    "${SCRIPT_DIR}/utilities/setup-storage.sh" --mode setup \
+    "${SCRIPT_DIR}/utilities/setup-storage.sh" setup \
         "${_auto[@]}" "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
-        || _phase_failed 2 "Storage setup"             "Verify data devices and mounts: lsblk && findmnt"             "Re-run this phase: sudo ./utilities/setup-storage.sh --mode setup"
+        || _phase_failed 2 "Storage setup"             "Verify data devices and mounts: lsblk && findmnt"             "Re-run this phase: sudo ./utilities/setup-storage.sh setup"
 
     operation_set_phase "3" "Environment configuration"
     log_phase 3 6 "Environment configuration"

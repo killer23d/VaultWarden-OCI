@@ -175,28 +175,62 @@ EXAMPLES:
 EOF
 }
 
+_require_cli_value() {
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "$opt requires a value."
+        show_help
+        exit 2
+    fi
+}
+
+_ACTION=""
+_START_POLICY_EXPLICIT=false
 while [[ $# -gt 0 ]]; do
     case $1 in
-        install)      INSTALL=true;   shift ;;
-        remove)       REMOVE=true;    shift ;;
-        validate)     VALIDATE=true;  shift ;;
-        status)       STATUS=true;    shift ;;
+        install|remove|validate|status)
+            if [[ -n "$_ACTION" ]]; then
+                log_error "Exactly one action is required: install | remove | validate | status"
+                log_error "Received both '${_ACTION}' and '$1'."
+                show_help
+                exit 2
+            fi
+            _ACTION="$1"
+            case "$1" in
+                install)  INSTALL=true ;;
+                remove)   REMOVE=true ;;
+                validate) VALIDATE=true ;;
+                status)   STATUS=true ;;
+            esac
+            shift ;;
         --dry-run)    DRY_RUN=true;   shift ;;
         --start-policy)
-            if [[ $# -lt 2 || "${2:-}" == --* ]]; then
-                log_error "--start-policy requires a value: auto | ask | manual"; show_help; exit 2
-            fi
-            START_POLICY="$2"; shift 2 ;;
-        --enable-now) START_POLICY="auto"; shift ;;
-        --no-enable-now|--no-start) START_POLICY="manual"; shift ;;
+            _require_cli_value "$1" "${2-}"
+            START_POLICY="$2"; _START_POLICY_EXPLICIT=true; shift 2 ;;
+        --enable-now) START_POLICY="auto"; _START_POLICY_EXPLICIT=true; shift ;;
+        --no-enable-now|--no-start) START_POLICY="manual"; _START_POLICY_EXPLICIT=true; shift ;;
         help|--help|-h) show_help; exit 0 ;;
         --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
-        *) log_error "Unknown sub-action: $1"; show_help; exit 1 ;;
+        *) log_error "Unknown argument: $1"; show_help; exit 1 ;;
     esac
 done
 
+if [[ "$_START_POLICY_EXPLICIT" == "true" && "$INSTALL" != "true" ]]; then
+    log_error "Timer start-policy options are only valid for 'install'."
+    log_error "Usage: sudo utilities/setup-systemd.sh install [--start-policy auto|ask|manual]"
+    exit 2
+fi
+
+if [[ "$DRY_RUN" == "true" && "$INSTALL" != "true" && "$REMOVE" != "true" ]]; then
+    log_error "--dry-run is only valid for 'install' or 'remove'."
+    log_error "Usage: sudo utilities/setup-systemd.sh install --dry-run"
+    exit 2
+fi
+
 case "${START_POLICY}" in
-    "" ) if [[ -t 0 ]]; then START_POLICY="ask"; else START_POLICY="manual"; fi ;;
+    "" ) if [[ "$INSTALL" == "true" ]]; then
+             if [[ -t 0 ]]; then START_POLICY="ask"; else START_POLICY="manual"; fi
+         fi ;;
     auto|ask|manual) ;;
     *) log_error "Invalid --start-policy: ${START_POLICY}"; exit 1 ;;
 esac

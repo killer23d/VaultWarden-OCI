@@ -13,7 +13,8 @@ show_help() {
 VaultWarden Secrets — list subcommand
 
 USAGE:
-    sudo ./utilities/secrets-list.sh list [OPTIONS]
+    sudo ./utilities/secrets-list.sh [OPTIONS]
+    sudo ./utilities/secrets-list.sh list [OPTIONS]  # 'list' accepted as alias
     sudo ./edit-secrets.sh list
 
 DESCRIPTION:
@@ -21,19 +22,26 @@ DESCRIPTION:
 
 FLAGS:
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    sudo ./utilities/secrets-list.sh list
+    sudo ./utilities/secrets-list.sh
     sudo ./edit-secrets.sh list
 EOF
 }
 
+show_version() {
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
+}
+
 dispatch_information_request() {
     if [[ "${1:-}" == "list" ]]; then shift; fi
-    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        show_help
-        exit 0
-    fi
+    case "${1:-}" in
+        --help|-h) show_help; exit 0 ;;
+        --version|-V) show_version; exit 0 ;;
+        "") ;;
+        *) echo "ERROR: Unknown option: '$1'" >&2; show_help >&2; exit 1 ;;
+    esac
 }
 
 dispatch_information_request "$@"
@@ -118,6 +126,7 @@ main() {
 
     case "${1:-}" in
         --help|-h) show_help; exit 0 ;;
+        --version|-V) show_version; exit 0 ;;
         "")        ;;
         *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac

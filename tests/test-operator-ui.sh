@@ -249,6 +249,111 @@ printf 'Operator UI tests passed.\n'
 )
 
 check_operator_ui_contracts
+check_operator_cli_argument_contracts() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+CLI_STATUS=0
+CLI_OUTPUT=""
+
+run_cli() {
+    local script="$1"
+    shift
+    set +e
+    CLI_OUTPUT="$(
+        PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH" \
+        HOME="$TMP/home" \
+        DOCKER_PROJECT_LABEL=ci \
+        bash "$ROOT/$script" "$@" 2>&1
+    )"
+    CLI_STATUS=$?
+    set -e
+}
+
+expect_success_contains() {
+    local script="$1" expected="$2"
+    shift 2
+    run_cli "$script" "$@"
+    [[ "$CLI_STATUS" -eq 0 ]] || fail "$script $* exited $CLI_STATUS; output: $CLI_OUTPUT"
+    [[ "$CLI_OUTPUT" == *"$expected"* ]] || fail "$script $* output missing '$expected': $CLI_OUTPUT"
+}
+
+expect_failure_contains() {
+    local script="$1" expected="$2"
+    shift 2
+    run_cli "$script" "$@"
+    [[ "$CLI_STATUS" -ne 0 ]] || fail "$script $* unexpectedly succeeded"
+    [[ "$CLI_OUTPUT" == *"$expected"* ]] || fail "$script $* output missing '$expected': $CLI_OUTPUT"
+}
+
+expect_failure_contains utilities/setup-systemd.sh \
+    "Exactly one action is required: install | remove | validate | status" \
+    install status
+expect_failure_contains restore.sh "Unknown option for 'list': --force" list --force
+expect_failure_contains restore.sh "Unknown option for 'list': --no-backup" list --no-backup
+expect_failure_contains restore.sh "Unknown option for 'list': --start-policy" list --start-policy manual
+expect_failure_contains restore.sh "Unknown option for 'list': --no-rotate-age-key" list --no-rotate-age-key
+expect_failure_contains startup.sh "Unknown option for 'stop': '--background'" stop --background
+expect_failure_contains startup.sh "Unknown option for 'stop': '--skip-health'" stop --skip-health
+expect_failure_contains startup.sh "Unknown option for 'stop': '--skip-pull'" stop --skip-pull
+expect_failure_contains startup.sh "Unknown option for 'stop': '--force'" stop --force
+expect_failure_contains startup.sh "Unknown option for 'stop': '--skip-egress-fix'" stop --skip-egress-fix
+expect_failure_contains utilities/env-edit.sh "Unknown argument for 'sync': --bogus" sync --bogus
+expect_failure_contains utilities/env-edit.sh "Unknown argument for 'edit': unexpected" edit unexpected
+expect_failure_contains utilities/env-edit.sh "Unknown argument for 'status': --force" status --force
+expect_failure_contains dashboard.sh "Unknown argument: --bogus" --bogus
+expect_failure_contains dashboard.sh "Unknown argument: foo" foo
+expect_success_contains utilities/operations-status.sh "VaultWarden-OCI Operation Status" --help
+expect_success_contains utilities/operations-status.sh "VaultWarden-OCI " --version
+expect_failure_contains utilities/operations-status.sh "Unknown argument: --bogus" --bogus
+expect_success_contains backup.sh "VERIFY OPTIONS:" verify --help
+expect_success_contains backup.sh "--type TYPE" verify --help
+expect_success_contains backup.sh "--quiet" verify --help
+expect_success_contains backup.sh "VaultWarden-OCI " verify --version
+expect_success_contains restore.sh "VaultWarden-OCI " list --version
+expect_success_contains startup.sh "VaultWarden-OCI " stop --version
+expect_success_contains utilities/setup-systemd.sh "VaultWarden-OCI systemd Timer Installer" install --help
+expect_success_contains utilities/env-edit.sh "VaultWarden-OCI Environment Management" status --help
+
+expected_version="VaultWarden-OCI $(tr -d '[:space:]' < "$ROOT/VERSION")"
+run_cli setup.sh install --version
+[[ "$CLI_STATUS" -eq 0 && "$CLI_OUTPUT" == "$expected_version" ]] \
+    || fail "setup.sh install --version did not print normal version output: $CLI_OUTPUT"
+run_cli setup.sh install -V
+[[ "$CLI_STATUS" -eq 0 && "$CLI_OUTPUT" == "$expected_version" ]] \
+    || fail "setup.sh install -V did not print normal version output: $CLI_OUTPUT"
+
+expect_failure_contains backup.sh "--keep requires a value" run --keep
+expect_failure_contains backup.sh "--type requires a value" verify --type
+expect_failure_contains restore.sh "--start-policy requires a value" interactive --start-policy
+expect_failure_contains restore.sh "--file requires a value" interactive --file --force
+expect_failure_contains utilities/secrets-view.sh "--editor requires an argument" --editor --help
+expect_failure_contains utilities/setup-env.sh "--domain requires an argument" --domain --email admin@example.test
+expect_failure_contains utilities/setup-system.sh "--data-device requires an argument" --data-device --force
+expect_failure_contains utilities/setup-storage.sh "--data-device requires a value" setup --data-device --force
+expect_failure_contains utilities/key-rotate.sh "--extra-recipient requires an Age public key" --extra-recipient --dry-run
+expect_failure_contains utilities/maintenance-email.sh "--recipient requires an argument" --recipient --dry-run
+expect_failure_contains recover.sh "Option --state-dir requires a value" --state-dir --key "$TMP/key.txt"
+
+grep -Fq '### recover.sh' "$ROOT/docs/COMMAND-REFERENCE.md" \
+    || fail 'COMMAND-REFERENCE must include recover.sh'
+grep -Fq '### secrets-edit.sh' "$ROOT/docs/COMMAND-REFERENCE.md" \
+    || fail 'COMMAND-REFERENCE must include public secrets-edit.sh utility'
+! grep -Fq '### notify-failure.sh' "$ROOT/docs/COMMAND-REFERENCE.md" \
+    || fail 'COMMAND-REFERENCE must not expose internal notify-failure.sh utility'
+
+printf 'Operator CLI argument contract tests passed.\n'
+)
+
+check_operator_cli_argument_contracts
 check_confirmation_prompt_format() (
 set -euo pipefail
 

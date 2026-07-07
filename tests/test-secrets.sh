@@ -82,14 +82,45 @@ assert_help() {
 }
 
 assert_version() {
-    local option="$1"
+    local script="$1"
+    local option="$2"
     local expected output
     expected="VaultWarden-OCI $(tr -d '[:space:]' < "${ISOLATED_ROOT}/VERSION")"
-    output="$(run_clean "${ISOLATED_ROOT}/utilities/secrets-rotate.sh" "$option")" ||
-        fail "secrets-rotate.sh $option exited non-zero"
-    [[ -n "$output" ]] || fail "secrets-rotate.sh $option produced no output"
+    if [[ "$script" == edit-secrets.sh ]]; then
+        output="$(run_clean "${ISOLATED_ROOT}/${script}" "$option")" ||
+            fail "${script} $option exited non-zero"
+    else
+        output="$(run_clean "${ISOLATED_ROOT}/utilities/${script}" "$option")" ||
+            fail "${script} $option exited non-zero"
+    fi
+    [[ -n "$output" ]] || fail "${script} $option produced no output"
     [[ "$output" == "$expected" ]] ||
-        fail "secrets-rotate.sh $option output '$output', expected '$expected'"
+        fail "${script} $option output '$output', expected '$expected'"
+    assert_no_initialization_error "$output"
+}
+
+assert_wrapper_subcommand_version() {
+    local subcommand="$1"
+    local option="$2"
+    local expected output
+    expected="VaultWarden-OCI $(tr -d '[:space:]' < "${ISOLATED_ROOT}/VERSION")"
+    output="$(run_clean "${ISOLATED_ROOT}/edit-secrets.sh" "$subcommand" "$option")" ||
+        fail "edit-secrets.sh $subcommand $option exited non-zero"
+    [[ "$output" == "$expected" ]] ||
+        fail "edit-secrets.sh $subcommand $option output '$output', expected '$expected'"
+    assert_no_initialization_error "$output"
+}
+
+assert_failure_contains() {
+    local expected="$1"
+    shift
+    local output status
+    set +e
+    output="$(run_clean "$@")"
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "$* unexpectedly succeeded"
+    [[ "$output" == *"$expected"* ]] || fail "$* output missing '$expected': $output"
     assert_no_initialization_error "$output"
 }
 
@@ -111,8 +142,25 @@ assert_help secrets-export-recovery-kit.sh \
 assert_help secrets-edit.sh "VaultWarden Secrets — edit subcommand" edit --help
 assert_help edit-secrets.sh "VaultWarden-OCI Secrets Editor" help
 
-assert_version --version
-assert_version -V
+for option in --version -V; do
+    assert_version secrets-view.sh "$option"
+    assert_version secrets-list.sh "$option"
+    assert_version secrets-rotate.sh "$option"
+    assert_version secrets-export-recovery-kit.sh "$option"
+    assert_version secrets-edit.sh "$option"
+    assert_version edit-secrets.sh "$option"
+    assert_wrapper_subcommand_version edit "$option"
+    assert_wrapper_subcommand_version view "$option"
+    assert_wrapper_subcommand_version list "$option"
+    assert_wrapper_subcommand_version rotate "$option"
+    assert_wrapper_subcommand_version export-recovery-kit "$option"
+done
+
+assert_failure_contains "Unknown option: '--bogus'" "${ISOLATED_ROOT}/utilities/secrets-list.sh" --bogus
+assert_failure_contains "Unknown option: '--bogus'" "${ISOLATED_ROOT}/utilities/secrets-export-recovery-kit.sh" --bogus
+assert_failure_contains "Unknown option: '--bogus'" "${ISOLATED_ROOT}/utilities/secrets-edit.sh" edit --bogus
+assert_failure_contains "'rotate' requires a FIELD argument" "${ISOLATED_ROOT}/utilities/secrets-rotate.sh" --dry-run
+assert_failure_contains "--editor requires an argument" "${ISOLATED_ROOT}/utilities/secrets-edit.sh" --editor --help
 
 backup_load_line="$(awk '/load_project_environment \|\| exit 1/{print NR; exit}' "${PROJECT_ROOT}/utilities/backup-run.sh")"
 backup_parse_line="$(awk '/^case "\$1" in/{print NR; exit}' "${PROJECT_ROOT}/utilities/backup-run.sh")"

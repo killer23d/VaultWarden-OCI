@@ -241,11 +241,18 @@ grep -Fq 'install -d -m 0700 -o root -g root "$manifest_dir" "$rendered_state_di
 grep -Fq 'chown root:root "$tmp" && chmod 0600 "$tmp"' utilities/setup-env.sh || fail "install.env is not installed root:root 0600"
 pass "persistent install.env is installed root:root 0600"
 
-# Encrypted secret authoring is root-operated.
-for f in edit-secrets.sh utilities/secrets-edit.sh utilities/secrets-list.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh; do
+# Encrypted secret authoring leaf utilities are root-operated. The top-level
+# edit-secrets.sh dispatcher stays metadata-friendly and delegates to these
+# utilities for real work.
+for f in utilities/secrets-edit.sh utilities/secrets-list.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh; do
     grep -Fq 'require_root "$@"' "$f" || fail "$f does not require root"
 done
-pass "encrypted secret authoring scripts require root"
+grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-edit.sh" "$@"' edit-secrets.sh || fail "edit dispatcher does not delegate to root-enforcing edit utility"
+grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-view.sh" "$@"' edit-secrets.sh || fail "edit dispatcher does not delegate to root-enforcing view utility"
+grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-list.sh" "$@"' edit-secrets.sh || fail "edit dispatcher does not delegate to root-enforcing list utility"
+grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-rotate.sh" "$@"' edit-secrets.sh || fail "edit dispatcher does not delegate to root-enforcing rotate utility"
+grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-export-recovery-kit.sh" "$@"' edit-secrets.sh || fail "edit dispatcher does not delegate to root-enforcing export utility"
+pass "encrypted secret authoring utilities require root and dispatcher delegates"
 
 
 if (( EUID == 0 )) && command -v runuser >/dev/null 2>&1; then

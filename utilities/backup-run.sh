@@ -48,7 +48,8 @@ SUBCOMMANDS:
                       key/config material and must use an independent emergency
                       passphrase or EMERGENCY_BACKUP_AGE_RECIPIENT
     list [--json]     List existing backups (no root required; JSON optional)
-    verify            Verify the most recent backup's integrity
+    verify [--type TYPE] [--quiet]
+                      Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
     sync               Copy all retained local backups to rclone by type
 
@@ -67,10 +68,15 @@ SYNC / ROTATE OPTIONS:
     --quiet                  Suppress non-error output
     --dry-run                Preview copy or pruning operations
 
+VERIFY OPTIONS:
+    --type TYPE              Backup type to verify: auto | db | full | emergency
+    --quiet                  Suppress non-error output
+
 GLOBAL SUBCOMMAND:
     help                     Show this help
 
 GLOBAL OPTIONS:
+    --help, -h               Show this help and exit
     --version, -V            Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
@@ -82,9 +88,19 @@ EXAMPLES:
     ./backup.sh list                              # List existing backups (no sudo)
     ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
+    sudo ./backup.sh verify --type db --quiet     # Verify latest DB backup quietly
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
     sudo ./backup.sh sync                         # Upload db/full/emergency backups
 EOF
+}
+
+_require_cli_value() {
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "$opt requires a value."
+        show_help
+        exit 2
+    fi
 }
 
 _SUBCMD=""
@@ -118,7 +134,7 @@ case "$_SUBCMD" in
         fi
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --keep)                   KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
+                --keep)                   _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
                 --quiet)                  QUIET=true;        shift ;;
                 --force)                  FORCE=true;        shift ;;
                 --email)                  EMAIL_NOTIFY=true; shift ;;
@@ -126,6 +142,8 @@ case "$_SUBCMD" in
                 --full-verification)      FULL_VERIFY=true;  shift ;;
                 --skip-full-verification) FULL_VERIFY=false; shift ;;
                 --dry-run)                DRY_RUN=true;      shift ;;
+                --help|-h)                show_help; exit 0 ;;
+                --version|-V)             print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
                 *) log_error "Unknown option for run: $1"; show_help; exit 2 ;;
             esac
         done
@@ -135,6 +153,8 @@ case "$_SUBCMD" in
         while [[ $# -gt 0 ]]; do
             case $1 in
                 --json) JSON_OUTPUT=true; shift ;;
+                --help|-h) show_help; exit 0 ;;
+                --version|-V) print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
                 *) log_error "Unknown option for list: $1"; show_help; exit 2 ;;
             esac
         done
@@ -143,8 +163,10 @@ case "$_SUBCMD" in
         FULL_VERIFY=true
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --type) BACKUP_TYPE="$2"; shift 2 ;;
+                --type) _require_cli_value "$1" "${2-}"; BACKUP_TYPE="$2"; shift 2 ;;
                 --quiet) QUIET=true; shift ;;
+                --help|-h) show_help; exit 0 ;;
+                --version|-V) print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
                 *) log_error "Unknown option for verify: $1"; show_help; exit 2 ;;
             esac
         done
@@ -153,9 +175,11 @@ case "$_SUBCMD" in
         LIST_ONLY=false
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --keep)  KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
+                --keep)  _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
                 --quiet) QUIET=true;     shift ;;
                 --dry-run) DRY_RUN=true; shift ;;
+                --help|-h) show_help; exit 0 ;;
+                --version|-V) print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
                 *) log_error "Unknown option for rotate: $1"; show_help; exit 2 ;;
             esac
         done
@@ -163,9 +187,11 @@ case "$_SUBCMD" in
     sync)
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --keep)  KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
+                --keep)  _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
                 --quiet) QUIET=true; shift ;;
                 --dry-run) DRY_RUN=true; shift ;;
+                --help|-h) show_help; exit 0 ;;
+                --version|-V) print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
                 *) log_error "Unknown option for sync: $1"; show_help; exit 2 ;;
             esac
         done
@@ -181,6 +207,11 @@ if [[ "$_SUBCMD" == "run" || "$_SUBCMD" == "rotate" || "$_SUBCMD" == "sync" ]]; 
         exit 2
     fi
 fi
+
+case "$BACKUP_TYPE" in
+    auto|db|full|emergency) ;;
+    *) log_error "Invalid backup type: ${BACKUP_TYPE} (expected auto, db, full, or emergency)"; exit 2 ;;
+esac
 
 backup_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
 backup_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }

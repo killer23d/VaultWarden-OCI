@@ -65,6 +65,112 @@ PROBE
 grep -Fxq 'force=true force_format=true' <<< "$out" || fail "--force-format parser did not preserve separate force flags: $out"
 pass 'migrate parser keeps --force and --force-format separate'
 
+extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+migrate_main_body="$(extract_func lib/migrate.sh migrate_mode_main)"
+! grep -Fq '_mv_parse_args' <<< "$migrate_main_body" \
+    || fail 'migrate_mode_main must not parse migration CLI arguments'
+! grep -Fq '_mv_resolve_args' <<< "$migrate_main_body" \
+    || fail 'migrate_mode_main must not resolve migration CLI arguments'
+[[ "$(grep -c '_mv_parse_args' utilities/setup-storage.sh)" == "1" ]] \
+    || fail 'setup-storage migration entry path must call _mv_parse_args exactly once'
+metadata_line="$(grep -n '^[[:space:]]*_ss_dispatch_metadata ' utilities/setup-storage.sh | cut -d: -f1)"
+load_line="$(grep -n '^[[:space:]]*_ss_load_runtime_environment$' utilities/setup-storage.sh | cut -d: -f1)"
+outer_parse_line="$(grep -n '^[[:space:]]*_parse_outer_args ' utilities/setup-storage.sh | cut -d: -f1)"
+parse_line="$(grep -n '^[[:space:]]*_mv_parse_args ' utilities/setup-storage.sh | cut -d: -f1)"
+resolve_line="$(grep -n '^[[:space:]]*_mv_resolve_args$' utilities/setup-storage.sh | cut -d: -f1)"
+execute_line="$(grep -n '^[[:space:]]*migrate_mode_main$' utilities/setup-storage.sh | cut -d: -f1)"
+[[ -n "$metadata_line" && -n "$load_line" && -n "$outer_parse_line" && -n "$resolve_line" && -n "$execute_line" \
+    && "$metadata_line" -lt "$load_line" && "$load_line" -lt "$outer_parse_line" \
+    && "$outer_parse_line" -lt "$parse_line" && "$parse_line" -lt "$resolve_line" && "$resolve_line" -lt "$execute_line" ]] \
+    || fail 'setup-storage must dispatch metadata, load env defaults, parse outer CLI, parse migration once, resolve, then execute'
+pass 'migration parse/resolve/execute ownership is explicit'
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }; log_success(){ :; }; log_debug(){ :; }
+require_commands(){ :; }
+source lib/migrate.sh
+_MV_DIRECTION=block-to-boot
+_mv_parse_args run --source /var/lib/vaultwarden --target /mnt/vw-data
+printf 'direction=%s source=%s target=%s\n' "$_MV_DIRECTION" "$_MV_SOURCE" "$_MV_TARGET"
+PROBE
+)
+grep -Fxq 'direction=boot-to-block source=/var/lib/vaultwarden target=/mnt/vw-data' <<< "$out" \
+    || fail "_MV_DIRECTION was not reset by parser initialization: $out"
+pass 'migrate parser resets direction to boot-to-block'
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }; log_success(){ :; }; log_debug(){ :; }
+require_commands(){ :; }
+source lib/migrate.sh
+_mv_parse_args run --direction block-to-boot --source /mnt/vw-data --target /var/lib/vaultwarden
+printf 'direction=%s\n' "$_MV_DIRECTION"
+PROBE
+)
+grep -Fxq 'direction=block-to-boot' <<< "$out" \
+    || fail "--direction block-to-boot did not parse correctly: $out"
+pass 'migrate parser preserves explicit block-to-boot direction'
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+PROJECT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }; log_success(){ :; }; log_debug(){ :; }
+require_commands(){ :; }
+source lib/migrate.sh
+_mv_parse_args run --target /mnt/vw-data --yes
+_mv_resolve_args
+printf 'source=%s target=%s start=%s\n' "$_MV_SOURCE" "$_MV_TARGET" "$_MV_START_POLICY"
+PROBE
+)
+grep -Fxq 'source=/var/lib/vaultwarden target=/mnt/vw-data start=auto' <<< "$out" \
+    || fail "runtime resolver did not derive default source/start policy: $out"
+pass 'runtime resolver derives source and start policy after parsing'
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+PROJECT_ROOT="$PWD"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+DRY_RUN=false
+log_info(){ :; }; log_warn(){ :; }; log_error(){ :; }; log_success(){ :; }; log_debug(){ :; }
+require_commands(){ :; }
+findmnt(){
+  [[ "$*" == "-n -o TARGET --source /dev/sdb" ]] && printf '/mnt/vw-data\n'
+}
+source lib/migrate.sh
+_mv_parse_args run --direction block-to-boot --device /dev/sdb --target /var/lib/vaultwarden
+_mv_resolve_args
+printf 'source=%s direction=%s\n' "$_MV_SOURCE" "$_MV_DIRECTION"
+PROBE
+)
+grep -Fxq 'source=/mnt/vw-data direction=block-to-boot' <<< "$out" \
+    || fail "runtime resolver did not detect block-to-boot source mount: $out"
+pass 'runtime resolver owns block-to-boot source mount detection'
+
 help_out=$(bash <<'PROBE'
 set -euo pipefail
 PROJECT_ROOT="$PWD"
@@ -131,7 +237,7 @@ fi
 PROBE
 )
 grep -Fq 'Blank target device requires --force-format.' <<< "$out" || fail "blank-device validation lacks clear force-format error: $out"
-grep -Fq 'sudo utilities/setup-storage.sh --mode migrate run --device /dev/sdb --target /mnt/vw-data --force-format' <<< "$out" || fail "blank-device validation lacks sudo-safe example: $out"
+grep -Fq 'sudo utilities/setup-storage.sh migrate run --device /dev/sdb --target /mnt/vw-data --force-format' <<< "$out" || fail "blank-device validation lacks sudo-safe example: $out"
 grep -Fq 'failed-as-expected' <<< "$out" || fail "blank-device validation did not fail without --force-format: $out"
 pass 'blank target device requires --force-format before migration proceeds'
 
@@ -298,6 +404,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass(){ printf 'PASS: %s\n' "$*"; }
+TMP="$(mktemp -d)"
+metadata_env_created=false
+cleanup_storage_setup_test(){
+    rm -rf "$TMP"
+    [[ "$metadata_env_created" != "true" ]] || rm -f "$ROOT/.env"
+}
+trap cleanup_storage_setup_test EXIT
 
 STORAGE="utilities/setup-storage.sh"
 SETUP="setup.sh"
@@ -336,7 +449,7 @@ grep -Fq 'To use block storage, re-run with --data-device /dev/disk/by-id/... or
 pass 'non-interactive boot-only path retains existing behavior with helpful block-storage hint'
 
 # setup.sh install --auto must propagate --auto into phase 2 storage setup.
-awk '/setup-storage\.sh" --mode setup/,/\|\| _phase_failed 2/' "$SETUP" | grep -Fq '"${_auto[@]}"' \
+awk '/setup-storage\.sh" setup/,/\|\| _phase_failed 2/' "$SETUP" | grep -Fq '"${_auto[@]}"' \
     || fail 'setup.sh phase 2 does not pass --auto to setup-storage'
 pass 'setup.sh install --auto suppresses the storage assistant in phase 2'
 
@@ -348,6 +461,204 @@ grep -Fq 'setup-storage is run interactively' "$STORAGE" \
 grep -Fq -- '--auto suppresses the prompt' "$STORAGE" \
     || fail 'help text must mention --auto prompt suppression'
 pass 'setup-storage help and unknown-option contracts remain documented'
+
+run_storage() {
+    set +e
+    out="$(PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH" bash "$STORAGE" "$@" 2>&1)"
+    status=$?
+    set -e
+}
+
+run_storage setup --help
+[[ "$status" -eq 0 && "$out" == *'sudo utilities/setup-storage.sh setup [OPTIONS]'* ]] \
+    || fail "canonical setup help failed: $out"
+run_storage verify --help
+[[ "$status" -eq 0 && "$out" == *'sudo utilities/setup-storage.sh verify [OPTIONS]'* ]] \
+    || fail "canonical verify help failed: $out"
+run_storage migrate --help
+[[ "$status" -eq 0 && "$out" == *'setup-storage.sh migrate <subcommand>'* ]] \
+    || fail "canonical migrate help failed: $out"
+run_storage --mode migrate --help
+[[ "$status" -eq 0 && "$out" == *'setup-storage.sh migrate <subcommand>'* ]] \
+    || fail "compatibility --mode migrate help failed: $out"
+expected_version="VaultWarden-OCI $(tr -d '[:space:]' < "$ROOT/VERSION")"
+run_storage migrate --version
+[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
+    || fail "canonical migrate --version failed: $out"
+run_storage migrate -V
+[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
+    || fail "canonical migrate -V failed: $out"
+run_storage --mode migrate --version
+[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
+    || fail "compatibility --mode migrate --version failed: $out"
+run_storage --mode migrate -V
+[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
+    || fail "compatibility --mode migrate -V failed: $out"
+run_storage setup verify
+[[ "$status" -ne 0 && "$out" == *'Exactly one setup-storage mode is allowed'* ]] \
+    || fail "setup-storage accepted multiple modes: $out"
+run_storage setup --data-mount --force
+[[ "$status" -ne 0 && "$out" == *'--data-mount requires a value'* ]] \
+    || fail "setup-storage accepted missing --data-mount value: $out"
+run_storage migrate status --target /tmp/foo
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'status': --target"* && "$out" != *'This script must be run as root'* ]] \
+    || fail "migrate status accepted --target: $out"
+run_storage --mode migrate status --target /tmp/foo
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'status': --target"* && "$out" != *'This script must be run as root'* ]] \
+    || fail "compatibility migrate status accepted --target before parser contract: $out"
+run_storage migrate status --force
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'status': --force"* ]] \
+    || fail "migrate status accepted --force: $out"
+run_storage migrate abort --source /tmp/foo
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'abort': --source"* ]] \
+    || fail "migrate abort accepted --source: $out"
+run_storage migrate verify --direction block-to-boot
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'verify': --direction"* ]] \
+    || fail "migrate verify accepted --direction: $out"
+run_storage migrate resume --force-format --dry-run
+[[ "$status" -ne 0 && "$out" == *'This script must be run as root'* && "$out" != *'Unknown option'* ]] \
+    || fail "migrate resume rejected legitimate resume options before root guard: $out"
+run_storage --mode migrate resume --force-format --dry-run
+[[ "$status" -ne 0 && "$out" == *'This script must be run as root'* && "$out" != *'Unknown option'* ]] \
+    || fail "compatibility --mode migrate rejected legitimate resume options before root guard: $out"
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+REPO_ROOT="$PWD"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+PROJECT_ROOT="$tmp/repo"
+mkdir -p "$PROJECT_ROOT"
+chmod 700 "$PROJECT_ROOT"
+cat > "$PROJECT_ROOT/.env" <<'EOF_ENV'
+_SS_MODE=verify
+_SS_MODE_ARGS=environment-garbage
+_SS_MIGRATE_ARGS=environment-garbage
+DRY_RUN=false
+_MV_DIRECTION=boot-to-block
+_MV_FORCE=false
+_MV_YES=false
+DATA_VOLUME_DEVICE=/dev/disk/by-id/env-default
+DATA_VOLUME_MOUNT=/mnt/env-default
+EOF_ENV
+chmod 600 "$PROJECT_ROOT/.env"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+source "$REPO_ROOT/lib/config.sh"
+source "$REPO_ROOT/lib/migrate.sh"
+_SS_MODE=setup
+_SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
+_SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+_SS_DATA_DEVICE_PROVIDED=false
+_SS_DATA_MOUNT_PROVIDED=false
+_SS_AUTO=false
+_SS_FORCE=false
+DRY_RUN=false
+declare -a _SS_MODE_ARGS=()
+declare -a _SS_MIGRATE_ARGS=()
+log_error(){ printf 'ERR:%s\n' "$*" >&2; }
+show_help(){ :; }
+print_project_version(){ :; }
+_require_cli_value(){
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "$opt requires a value."
+        exit 2
+    fi
+}
+eval "$(awk '
+  /^_ss_load_runtime_environment\(\)/ {p=1}
+  /^_MV_SCRIPT_NAME=/ {p=0}
+  p {print}
+' "$REPO_ROOT/utilities/setup-storage.sh")"
+eval "$(awk '
+  /^_ss_dispatch_metadata\(\)/ {p=1}
+  /^main\(\)/ {p=0}
+  p {print}
+' "$REPO_ROOT/utilities/setup-storage.sh")"
+
+_ss_dispatch_metadata migrate status
+_ss_load_runtime_environment
+_parse_outer_args migrate status
+_mv_parse_args "${_SS_MIGRATE_ARGS[@]}"
+printf 'migrate-status mode=%s sub=%s args=%s\n' \
+    "$_SS_MODE" "$_MV_SUBCOMMAND" "${_SS_MIGRATE_ARGS[*]}"
+
+_SS_MODE=setup
+_SS_MODE_ARGS=()
+_SS_MIGRATE_ARGS=()
+DRY_RUN=false
+cat > "$PROJECT_ROOT/.env" <<'EOF_ENV'
+_SS_MODE=verify
+_SS_MODE_ARGS=environment-garbage
+_SS_MIGRATE_ARGS=environment-garbage
+DRY_RUN=false
+_MV_DIRECTION=boot-to-block
+_MV_FORCE=false
+_MV_YES=false
+DATA_VOLUME_DEVICE=/dev/disk/by-id/env-default
+DATA_VOLUME_MOUNT=/mnt/env-default
+EOF_ENV
+_ss_dispatch_metadata migrate run --target /mnt/vw-data --dry-run --direction block-to-boot --force --yes
+_ss_load_runtime_environment
+_parse_outer_args migrate run --target /mnt/vw-data --dry-run --direction block-to-boot --force --yes
+_mv_parse_args "${_SS_MIGRATE_ARGS[@]}"
+printf 'migrate mode=%s sub=%s dry=%s direction=%s force=%s yes=%s target=%s\n' \
+    "$_SS_MODE" "$_MV_SUBCOMMAND" "$DRY_RUN" "$_MV_DIRECTION" "$_MV_FORCE" "$_MV_YES" "$_MV_TARGET"
+
+_SS_MODE=setup
+_SS_MODE_ARGS=()
+_SS_MIGRATE_ARGS=()
+_SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
+_SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+_SS_DATA_DEVICE_PROVIDED=false
+_SS_DATA_MOUNT_PROVIDED=false
+DRY_RUN=false
+cat > "$PROJECT_ROOT/.env" <<'EOF_ENV'
+_SS_MODE=migrate
+_SS_MODE_ARGS=environment-garbage
+_SS_MIGRATE_ARGS=environment-garbage
+DRY_RUN=false
+DATA_VOLUME_DEVICE=/dev/disk/by-id/env-default
+DATA_VOLUME_MOUNT=/mnt/env-default
+EOF_ENV
+_ss_dispatch_metadata setup --data-device /dev/disk/by-id/cli-device --data-mount /mnt/cli --dry-run --auto --force
+_ss_load_runtime_environment
+_parse_outer_args setup --data-device /dev/disk/by-id/cli-device --data-mount /mnt/cli --dry-run --auto --force
+_parse_setup_args
+printf 'setup mode=%s dry=%s auto=%s force=%s device=%s mount=%s\n' \
+    "$_SS_MODE" "$DRY_RUN" "$_SS_AUTO" "$_SS_FORCE" "$_SS_DATA_DEVICE" "$_SS_DATA_MOUNT"
+PROBE
+)
+grep -Fxq 'migrate-status mode=migrate sub=status args=status' <<< "$out" \
+    || fail "migrate status CLI mode/subcommand did not win over loaded environment mode collisions: $out"
+grep -Fxq 'migrate mode=migrate sub=run dry=true direction=block-to-boot force=true yes=true target=/mnt/vw-data' <<< "$out" \
+    || fail "migration CLI did not win over loaded environment defaults or mode collisions: $out"
+grep -Fxq 'setup mode=setup dry=true auto=true force=true device=/dev/disk/by-id/cli-device mount=/mnt/cli' <<< "$out" \
+    || fail "setup CLI did not win over loaded environment defaults or mode collisions: $out"
+pass 'explicit setup-storage CLI state wins over loaded environment defaults'
+
+[[ ! -e "$ROOT/.env" ]] || fail 'metadata environment-load regression needs no pre-existing .env'
+metadata_env_created=true
+printf 'PATH=/tmp/unsafe\n' > "$ROOT/.env"
+run_storage migrate --help
+[[ "$status" -eq 0 && "$out" == *'setup-storage.sh migrate <subcommand>'* && "$out" != *'refusing to overwrite dangerous variable'* ]] \
+    || fail "migrate metadata loaded runtime environment: $out"
+run_storage setup --version
+[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
+    || fail "setup metadata loaded runtime environment: $out"
+run_storage --mode setup --help
+[[ "$status" -eq 0 && "$out" == *'MODES:'* && "$out" != *'refusing to overwrite dangerous variable'* ]] \
+    || fail "compatibility setup metadata loaded runtime environment: $out"
+run_storage --mode migrate --version
+[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
+    || fail "compatibility migrate metadata loaded runtime environment: $out"
+run_storage --mode verify -V
+[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
+    || fail "compatibility verify metadata loaded runtime environment: $out"
+rm -f "$ROOT/.env"
+metadata_env_created=false
+pass 'setup-storage canonical and compatibility CLI grammar is enforced'
 
 )
 

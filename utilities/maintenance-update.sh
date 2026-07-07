@@ -48,6 +48,7 @@ OPTIONS:
     --skip-backup    Skip pre-update safety backup
     --email          Send email notification on completion/failure
     --help, -h       Show this help
+    --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     sudo ./maintenance.sh update --system        # Update system packages only
@@ -343,6 +344,7 @@ while [[ $# -gt 0 ]]; do
         --skip-backup) SKIP_BACKUP=true;                 shift ;;
         --email)       EMAIL_NOTIFY=true;                shift ;;
         --help|-h|help) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done

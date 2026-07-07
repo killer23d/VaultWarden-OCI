@@ -23,12 +23,17 @@ DESCRIPTION:
 FLAGS:
     --editor EDITOR    Override pager/viewer (default: less, then $EDITOR -R)
     --help, -h         Show this help
+    --version, -V      Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     sudo ./utilities/secrets-view.sh
     sudo ./utilities/secrets-view.sh --editor vim
     sudo ./edit-secrets.sh view
 EOF
+}
+
+show_version() {
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
 }
 
 dispatch_information_request() {
@@ -44,7 +49,9 @@ dispatch_information_request() {
             --editor)
                 if [[ $((index + 1)) -ge ${#args[@]} || -z "${args[$((index + 1))]}" ||
                       "${args[$((index + 1))]}" == --* ]]; then
-                    return
+                    echo "ERROR: --editor requires an argument (e.g. --editor vim)" >&2
+                    show_help >&2
+                    exit 1
                 fi
                 index=$((index + 2))
                 ;;
@@ -52,8 +59,14 @@ dispatch_information_request() {
                 show_help
                 exit 0
                 ;;
+            --version|-V)
+                show_version
+                exit 0
+                ;;
             *)
-                return
+                echo "ERROR: Unknown option: '${args[$index]}'" >&2
+                show_help >&2
+                exit 1
                 ;;
         esac
     done
@@ -159,6 +172,7 @@ main() {
                 shift 2
                 ;;
             --help|-h) show_help; exit 0 ;;
+            --version|-V) show_version; exit 0 ;;
             *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
         esac
     done

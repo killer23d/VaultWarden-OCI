@@ -13,7 +13,8 @@ show_help() {
 VaultWarden Secrets — export-recovery-kit subcommand
 
 USAGE:
-    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]
+    sudo ./utilities/secrets-export-recovery-kit.sh [OPTIONS]
+    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]  # alias
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
@@ -28,19 +29,26 @@ DESCRIPTION:
 
 FLAGS:
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
+    sudo ./utilities/secrets-export-recovery-kit.sh
     sudo ./edit-secrets.sh export-recovery-kit
 EOF
 }
 
+show_version() {
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
+}
+
 dispatch_information_request() {
     if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
-    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        show_help
-        exit 0
-    fi
+    case "${1:-}" in
+        --help|-h) show_help; exit 0 ;;
+        --version|-V) show_version; exit 0 ;;
+        "") ;;
+        *) echo "ERROR: Unknown option: '$1'" >&2; show_help >&2; exit 1 ;;
+    esac
 }
 
 dispatch_information_request "$@"
@@ -131,6 +139,7 @@ main() {
 
     case "${1:-}" in
         --help|-h) show_help; exit 0 ;;
+        --version|-V) show_version; exit 0 ;;
         "")        ;;
         *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac

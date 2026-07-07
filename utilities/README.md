@@ -171,12 +171,12 @@ adopted only after confirmation; blank devices are formatted only when
 migration helper into this script.
 
 ```bash
-sudo utilities/setup-storage.sh --mode setup           # create layout (first run)
-sudo DATA_VOLUME_FORCE_FORMAT=true utilities/setup-storage.sh \
-  --mode setup --data-device /dev/disk/by-id/your-volume
-sudo utilities/setup-storage.sh --mode verify          # re-check permissions only
-sudo utilities/setup-storage.sh --mode migrate         # interactive block-device migration
-sudo utilities/setup-storage.sh --mode migrate status  # migration status
+sudo utilities/setup-storage.sh setup           # create layout (first run)
+sudo DATA_VOLUME_FORCE_FORMAT=true utilities/setup-storage.sh setup \
+  --data-device /dev/disk/by-id/your-volume
+sudo utilities/setup-storage.sh verify          # re-check permissions only
+sudo utilities/setup-storage.sh migrate         # interactive block-device migration
+sudo utilities/setup-storage.sh migrate status  # migration status
 ```
 
 ---

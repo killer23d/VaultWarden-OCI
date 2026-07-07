@@ -13,9 +13,10 @@ source "${PROJECT_ROOT}/lib/runtime-permissions.sh"
 init_common_lib "$0"
 
 MODE="repair"
-case "${1:-}" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
     --check|--dry-run) MODE="check"; shift ;;
-    --help|-h)
+    --help|-h|help)
         cat <<HELP
 VaultWarden-OCI permission repair
 
@@ -24,6 +25,7 @@ USAGE:
     utilities/repair-permissions.sh --check     Report drift without changing files
     sudo utilities/repair-permissions.sh --dry-run
     utilities/repair-permissions.sh --help
+    utilities/repair-permissions.sh --version
 
 Checks/repairs explicit project paths only:
   .sops.yaml -> 0644 (public SOPS policy/Age recipients; owner preserved)
@@ -38,11 +40,17 @@ Checks/repairs explicit project paths only:
 
 Does not recursively chmod broad directories and never makes private keys,
 env files, encrypted secrets, backups, or recovery kits world-readable.
+
+OPTIONS:
+  --check, --dry-run  Report drift without changing files
+  --help, -h          Show this help
+  --version, -V       Print the VaultWarden-OCI version and exit
 HELP
         exit 0 ;;
-    "") ;;
+    --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
     *) echo "ERROR unknown option: $1" >&2; exit 2 ;;
-esac
+    esac
+done
 
 if [[ "$MODE" == "repair" && $EUID -ne 0 ]]; then
     echo "ERROR repair requires root: sudo utilities/repair-permissions.sh" >&2

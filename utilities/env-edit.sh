@@ -245,8 +245,8 @@ _storage_preflight() {
     if [[ "$migration_complete" != "true" ]]; then
       log_error "A volume migration is in progress (.migrate-volume.state exists and is incomplete)."
       log_error "env-edit sync is blocked to prevent overwriting migration-in-progress state."
-      log_error "Resume with: sudo utilities/setup-storage.sh --mode migrate resume"
-      log_error "Abort with:  sudo utilities/setup-storage.sh --mode migrate abort"
+      log_error "Resume with: sudo utilities/setup-storage.sh migrate resume"
+      log_error "Abort with:  sudo utilities/setup-storage.sh migrate abort"
       return 1
     fi
   fi
@@ -495,12 +495,30 @@ main() {
 
   case "$subcommand" in
     sync)
+      case "${1:-}" in
+        --help|-h) show_help; return 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; return 0 ;;
+        "") ;;
+        *) log_error "Unknown argument for 'sync': $1"; log_error "Usage: sudo utilities/env-edit.sh sync"; show_help; return 1 ;;
+      esac
       _cmd_sync "$@"
       ;;
     edit)
+      case "${1:-}" in
+        --help|-h) show_help; return 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; return 0 ;;
+        "") ;;
+        *) log_error "Unknown argument for 'edit': $1"; log_error "Usage: sudo utilities/env-edit.sh edit"; show_help; return 1 ;;
+      esac
       _cmd_edit "$@"
       ;;
     status)
+      case "${1:-}" in
+        --help|-h) show_help; return 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; return 0 ;;
+        "") ;;
+        *) log_error "Unknown argument for 'status': $1"; log_error "Usage: utilities/env-edit.sh status"; show_help; return 1 ;;
+      esac
       _cmd_status "$@"
       ;;
     --help|-h)

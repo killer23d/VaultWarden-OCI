@@ -131,7 +131,7 @@ _mv_acquire_lock() {
     exec {lock_fd}>"${_MV_LOCK_FILE}"
     flock -n "${lock_fd}" || {
         log_error "Another migration is already running (lock held: ${_MV_LOCK_FILE})."
-        log_error "Run: sudo utilities/setup-storage.sh --mode migrate status"
+        log_error "Run: sudo utilities/setup-storage.sh migrate status"
         log_error "Check active operations with: sudo make operations"
         exit 1
     }
@@ -153,7 +153,7 @@ _mv_cleanup() {
 
 _mv_require_root() {
     [[ "${EUID}" -eq 0 ]] || {
-        log_error "This script must be run as root: sudo utilities/setup-storage.sh --mode migrate $*"
+        log_error "This script must be run as root: sudo utilities/setup-storage.sh migrate $*"
         exit 1
     }
 }
@@ -176,8 +176,8 @@ _mv_on_err() {
     local _step_ctx=""
     [[ -n "${_MV_CURRENT_STEP:-}" ]] && _step_ctx=" during [${_MV_CURRENT_STEP}] step"
     _mv_log error "Unexpected error${_step_ctx} at line ${lineno} (exit ${rc}). Migration halted."
-    _mv_log error "Resume with: sudo utilities/setup-storage.sh --mode migrate resume"
-    _mv_log error "Abort with:  sudo utilities/setup-storage.sh --mode migrate abort"
+    _mv_log error "Resume with: sudo utilities/setup-storage.sh migrate resume"
+    _mv_log error "Abort with:  sudo utilities/setup-storage.sh migrate abort"
     # Do NOT call _mv_cleanup here — EXIT trap fires after ERR trap.
 }
 
@@ -672,12 +672,22 @@ _mv_set_env_var() {
     _mv_log info ".env updated: ${key}=${value}"
 }
 
+_mv_require_value() {
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "$opt requires a value."
+        _mv_usage
+        exit 2
+    fi
+}
+
 _mv_usage() {
 cat << 'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
-VaultWarden-OCI Volume Migration (via setup-storage.sh --mode migrate)
+VaultWarden-OCI Volume Migration (via setup-storage.sh migrate)
 
 USAGE:
-  sudo utilities/setup-storage.sh --mode migrate <subcommand> [OPTIONS]
+  sudo utilities/setup-storage.sh migrate <subcommand> [OPTIONS]
+  sudo utilities/setup-storage.sh --mode migrate <subcommand> [OPTIONS]  # compatibility
 
 SUBCOMMANDS:
   run      Execute the full migration pipeline (default)
@@ -686,7 +696,7 @@ SUBCOMMANDS:
   abort    Roll back an in-progress migration
   verify   Re-run byte-count verification only (non-destructive)
 
-OPTIONS (run / resume):
+OPTIONS (run):
   --source  <path>   Source directory  (default: current PROJECT_STATE_DIR from .env)
   --target  <path>   Destination path  (prompted interactively if omitted)
   --device  <dev>    Block device (e.g. /dev/sdb)
@@ -717,12 +727,26 @@ OPTIONS (run / resume):
   --log-file <path>  Override default log file path.
   --help             Show this help and exit.
 
+OPTIONS (resume):
+  --dry-run          Print resume actions without executing them.
+  --force            Skip the backup confirmation if that step has not completed.
+  --force-format     Preserve or upgrade authorization for formatting a blank target.
+  --yes              Answer yes to confirmations that are safe to automate.
+  --start-policy <mode>
+                     Service start policy if resume reaches the start step.
+  --start            Alias for --start-policy auto.
+  --no-start         Alias for --start-policy manual.
+
+NOTE:
+  status, abort, and verify read the recorded migration state and do not accept
+  behavior options.
+
 EXAMPLES:
   # Interactive (prompts for device and mount point)
-  sudo utilities/setup-storage.sh --mode migrate run
+  sudo utilities/setup-storage.sh migrate run
 
   # Non-interactive: boot volume → dedicated data volume
-  sudo utilities/setup-storage.sh --mode migrate run \
+  sudo utilities/setup-storage.sh migrate run \
     --source /var/lib/vaultwarden \
     --target @DEFAULT_DATA_MOUNT@ \
     --device /dev/sdb \
@@ -730,31 +754,31 @@ EXAMPLES:
     --yes
 
   # Reverse migration: move data from block volume back to boot volume
-  sudo utilities/setup-storage.sh --mode migrate run \
+  sudo utilities/setup-storage.sh migrate run \
     --direction block-to-boot \
     --target /var/lib/vaultwarden \
     --device /dev/sdb
 
   # Directory-to-directory (no device, no format step)
-  sudo utilities/setup-storage.sh --mode migrate run \
+  sudo utilities/setup-storage.sh migrate run \
     --source /var/lib/vaultwarden \
     --target /mnt/vw-data2
 
   # Dry run first
-  sudo utilities/setup-storage.sh --mode migrate run \
+  sudo utilities/setup-storage.sh migrate run \
     --source /var/lib/vaultwarden \
     --target @DEFAULT_DATA_MOUNT@ \
     --device /dev/sdb \
     --dry-run
 
   # Resume after interruption
-  sudo utilities/setup-storage.sh --mode migrate resume
+  sudo utilities/setup-storage.sh migrate resume
 
   # Check status
-  sudo utilities/setup-storage.sh --mode migrate status
+  sudo utilities/setup-storage.sh migrate status
 
   # Abort and roll back
-  sudo utilities/setup-storage.sh --mode migrate abort
+  sudo utilities/setup-storage.sh migrate abort
 EOF
 }
 
@@ -763,6 +787,7 @@ _mv_parse_args() {
     _MV_SOURCE=""
     _MV_TARGET=""
     _MV_DEVICE=""
+    _MV_DIRECTION="boot-to-block"
     _MV_SKIP_STACK_STOP=false
     _MV_DELETE_SOURCE=false
     _MV_FORCE=false
@@ -770,6 +795,7 @@ _mv_parse_args() {
     _MV_YES=false
     _MV_LOG_FILE=""
     _MV_START_POLICY=""
+    local -a _mv_seen_options=()
 
     if [[ $# -gt 0 && "${1}" != --* ]]; then
         _MV_SUBCOMMAND="$1"
@@ -779,46 +805,61 @@ _mv_parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --source)
-                _MV_SOURCE="$(_mv_realpath "$2")"
+                _mv_seen_options+=("$1")
+                _mv_require_value "$1" "${2-}"
+                _MV_SOURCE="$2"
                 shift 2
                 ;;
             --target)
-                _MV_TARGET="$(_mv_realpath "$2")"
+                _mv_seen_options+=("$1")
+                _mv_require_value "$1" "${2-}"
+                _MV_TARGET="$2"
                 shift 2
                 ;;
             --device)
+                _mv_seen_options+=("$1")
+                _mv_require_value "$1" "${2-}"
                 _MV_DEVICE="$2"
                 shift 2
                 ;;
             --log-file)
+                _mv_seen_options+=("$1")
+                _mv_require_value "$1" "${2-}"
                 _MV_LOG_FILE="$2"
                 shift 2
                 ;;
             --skip-stack-stop)
+                _mv_seen_options+=("$1")
                 _MV_SKIP_STACK_STOP=true
                 shift
                 ;;
             --delete-source)
+                _mv_seen_options+=("$1")
                 _MV_DELETE_SOURCE=true
                 shift
                 ;;
             --dry-run)
+                _mv_seen_options+=("$1")
                 DRY_RUN=true
                 shift
                 ;;
             --force)
+                _mv_seen_options+=("$1")
                 _MV_FORCE=true
                 shift
                 ;;
             --force-format)
+                _mv_seen_options+=("$1")
                 _MV_FORCE_FORMAT=true
                 shift
                 ;;
             --yes)
+                _mv_seen_options+=("$1")
                 _MV_YES=true
                 shift
                 ;;
             --start-policy)
+                _mv_seen_options+=("$1")
                 if [[ $# -lt 2 || "${2:-}" == --* ]]; then
                     log_error "--start-policy requires a value: auto | ask | manual"
                     _mv_usage
@@ -828,14 +869,18 @@ _mv_parse_args() {
                 shift 2
                 ;;
             --start)
+                _mv_seen_options+=("$1")
                 _MV_START_POLICY="auto"
                 shift
                 ;;
             --no-start)
+                _mv_seen_options+=("$1")
                 _MV_START_POLICY="manual"
                 shift
                 ;;
             --direction)
+                _mv_seen_options+=("$1")
+                _mv_require_value "$1" "${2-}"
                 case "$2" in
                     boot-to-block|block-to-boot)
                         _MV_DIRECTION="$2"
@@ -860,18 +905,6 @@ _mv_parse_args() {
         esac
     done
 
-    if [[ -z "${_MV_SOURCE}" ]]; then
-        if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
-            if [[ -n "${_MV_DEVICE}" ]]; then
-                local _detected_src
-                _detected_src="$(findmnt -n -o TARGET --source "${_MV_DEVICE}" 2>/dev/null || true)"
-                [[ -n "${_detected_src}" ]] && _MV_SOURCE="${_detected_src}"
-            fi
-        else
-            _MV_SOURCE="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
-        fi
-    fi
-
     case "${_MV_SUBCOMMAND}" in
         run)
             if [[ "${_MV_YES:-false}" == "true" && -z "${_MV_TARGET}" ]]; then
@@ -892,6 +925,46 @@ _mv_parse_args() {
             exit 1
             ;;
     esac
+
+    local _mv_seen_option
+    for _mv_seen_option in "${_mv_seen_options[@]+"${_mv_seen_options[@]}"}"; do
+        case "${_MV_SUBCOMMAND}:${_mv_seen_option}" in
+            run:*) ;;
+            resume:--dry-run|resume:--force|resume:--force-format|resume:--yes|\
+            resume:--start-policy|resume:--start|resume:--no-start) ;;
+            *)
+                log_error "Unknown option for '${_MV_SUBCOMMAND}': ${_mv_seen_option}"
+                case "${_MV_SUBCOMMAND}" in
+                    status) log_error "Usage: sudo utilities/setup-storage.sh migrate status" ;;
+                    abort)  log_error "Usage: sudo utilities/setup-storage.sh migrate abort" ;;
+                    verify) log_error "Usage: sudo utilities/setup-storage.sh migrate verify" ;;
+                    resume) log_error "Usage: sudo utilities/setup-storage.sh migrate resume [--dry-run] [--force] [--force-format] [--yes] [--start-policy MODE]" ;;
+                    *)      _mv_usage ;;
+                esac
+                exit 2
+                ;;
+        esac
+    done
+
+    case "${_MV_START_POLICY}" in
+        ""|auto|ask|manual) ;;
+        *) log_error "Invalid --start-policy: ${_MV_START_POLICY}"; exit 1 ;;
+    esac
+}
+
+_mv_resolve_args() {
+    if [[ -z "${_MV_SOURCE}" ]]; then
+        if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
+            if [[ -n "${_MV_DEVICE}" ]]; then
+                local _detected_src
+                _detected_src="$(findmnt -n -o TARGET --source "${_MV_DEVICE}" 2>/dev/null || true)"
+                [[ -n "${_detected_src}" ]] && _MV_SOURCE="${_detected_src}"
+            fi
+        else
+            _MV_SOURCE="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
+        fi
+    fi
+
     case "${_MV_START_POLICY}" in
         "" ) if [[ "${_MV_YES:-false}" == "true" || ! -t 0 ]]; then _MV_START_POLICY="auto"; else _MV_START_POLICY="ask"; fi ;;
         auto|ask|manual) ;;
@@ -942,7 +1015,7 @@ _mv_require_force_format_for_blank_device() {
     _mv_log error "Blank target device requires --force-format."
     _mv_log error "Formatting remains explicitly gated and is never inferred from selecting the device."
     _mv_log error "Re-run with a sudo-safe command such as:"
-    _mv_log error "  sudo utilities/setup-storage.sh --mode migrate run --device ${_MV_DEVICE} --target ${_MV_TARGET} --force-format"
+    _mv_log error "  sudo utilities/setup-storage.sh migrate run --device ${_MV_DEVICE} --target ${_MV_TARGET} --force-format"
     return 1
 }
 
@@ -1217,7 +1290,7 @@ _mv_step_rsync() {
 
     if (( rsync_rc != 0 )); then
         _mv_log error "rsync failed with exit code ${rsync_rc}. Investigate the output above."
-        _mv_log error "Resume the migration once resolved: sudo utilities/setup-storage.sh --mode migrate resume"
+        _mv_log error "Resume the migration once resolved: sudo utilities/setup-storage.sh migrate resume"
         return 1
     fi
 
@@ -1277,7 +1350,7 @@ _mv_step_verify() {
         _mv_log error "Items with discrepancies:"
         printf '%s\n' "${_chk_out}" | awk 'NF && $1 !~ /^\.d/ { $1=""; sub(/^ /, ""); print }' | \
             while IFS= read -r _f; do _mv_log error "  ${_f}"; done
-        _mv_log error "Investigate before proceeding. Resume with: sudo utilities/setup-storage.sh --mode migrate resume"
+        _mv_log error "Investigate before proceeding. Resume with: sudo utilities/setup-storage.sh migrate resume"
         return 1
     fi
 
@@ -1684,7 +1757,7 @@ _mv_print_status() {
         log_success "Migration completed successfully."
     else
         log_warn "Migration is incomplete. Resume with:"
-        log_warn "  sudo utilities/setup-storage.sh --mode migrate resume"
+        log_warn "  sudo utilities/setup-storage.sh migrate resume"
     fi
 }
 
@@ -1844,7 +1917,7 @@ _mv_run_pipeline() {
     if [[ "${resuming}" == "true" ]]; then
         [[ -f "${_MV_STATE_FILE}" ]] || {
             log_error "No state file found. Cannot resume."
-            log_error "Run: sudo utilities/setup-storage.sh --mode migrate run ..."
+            log_error "Run: sudo utilities/setup-storage.sh migrate run ..."
             exit 1
         }
         local _resume_cli_force_format="${_MV_FORCE_FORMAT}"
@@ -1906,7 +1979,7 @@ _mv_run_pipeline() {
                         log_error "Resume aborted. To fix the target path manually:"
                         log_error "  sudo sed -i 's|MV_TARGET=${_MV_TARGET}|MV_TARGET=/correct/path|' \\"
                         log_error "    ${_MV_STATE_FILE}"
-                        log_error "  sudo utilities/setup-storage.sh --mode migrate resume"
+                        log_error "  sudo utilities/setup-storage.sh migrate resume"
                         _resume_ok=false
                     fi
                 else
@@ -1916,7 +1989,7 @@ _mv_run_pipeline() {
                     log_error "To fix a stale path in the state file manually:"
                     log_error "  sudo sed -i 's|MV_TARGET=${_MV_TARGET}|MV_TARGET=/correct/path|' \\"
                     log_error "    ${_MV_STATE_FILE}"
-                    log_error "  sudo utilities/setup-storage.sh --mode migrate resume"
+                    log_error "  sudo utilities/setup-storage.sh migrate resume"
                     _resume_ok=false
                 fi
             elif [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
@@ -1977,9 +2050,6 @@ _mv_run_pipeline() {
 
 migrate_mode_main() {
     _MV_START_TIME="${SECONDS}"
-
-    _mv_require_root "$@"
-    _mv_parse_args "$@"
 
     # On resume, restore the original run's log file path and run timestamp
     # from state before opening the log, so resume output appends to the same

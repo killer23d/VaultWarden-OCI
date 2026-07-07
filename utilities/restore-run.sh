@@ -199,6 +199,7 @@ GLOBAL SUBCOMMAND:
     help                    Show this help
 
 GLOBAL OPTIONS:
+    --help, -h              Show this help and exit
     --version, -V           Print the VaultWarden-OCI version and exit
 
 ENVIRONMENT:
@@ -240,6 +241,28 @@ if [[ $# -gt 0 ]]; then
     esac
 fi
 
+_require_cli_value() {
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "$opt requires a value."
+        show_help
+        exit 2
+    fi
+}
+
+_reject_restore_option() {
+    local subcmd="$1" opt="$2"
+    log_error "Unknown option for '${subcmd}': ${opt}"
+    case "$subcmd" in
+        list) log_error "Usage: ./restore.sh list [--remote]" ;;
+        latest) log_error "Usage: sudo ./restore.sh latest [TYPE] [OPTIONS]" ;;
+        interactive) log_error "Usage: sudo ./restore.sh interactive [OPTIONS]" ;;
+        inspect) log_error "Usage: sudo ./restore.sh inspect [--remote] [--file FILE] [OPTIONS]" ;;
+    esac
+    show_help
+    exit 2
+}
+
 _ORIGINAL_ARGS=("$@")
 
 if [[ $# -eq 0 ]]; then
@@ -276,31 +299,82 @@ case "$1" in
         ;;
 esac
 
-# Parse remaining options (apply to interactive mode, 'latest', or 'list')
+# Parse remaining options with subcommand-specific scope. Do not accept restore
+# mutating flags for read-only inventory commands.
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --file)                BACKUP_FILE="$2";        shift 2 ;;
+        --help|-h)             show_help; exit 0 ;;
+        --version|-V)          print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
+        --file)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            _require_cli_value "$1" "${2-}"
+            BACKUP_FILE="$2";        shift 2 ;;
         --remote)              USE_REMOTE=true;          shift ;;
-        --key-file)            KEY_FILE_ARG="$2";        shift 2 ;;
-        --from-recovery-kit)   RECOVERY_KIT_FILE="$2";   shift 2 ;;
-        --no-backup)           NO_PRE_BACKUP=true;       shift ;;
-        --skip-verification)   SKIP_VERIFICATION=true;   shift ;;
-        --skip-env)            RESTORE_ENV=false;        shift ;;
-        --dry-run)             DRY_RUN=true;             shift ;;
-        --inspect)             INSPECT_ONLY=true;        shift ;;
-        --force)               FORCE=true;               shift ;;
+        --key-file)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            _require_cli_value "$1" "${2-}"
+            KEY_FILE_ARG="$2";        shift 2 ;;
+        --from-recovery-kit)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            _require_cli_value "$1" "${2-}"
+            RECOVERY_KIT_FILE="$2";   shift 2 ;;
+        --no-backup)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
+            NO_PRE_BACKUP=true;       shift ;;
+        --skip-verification)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            SKIP_VERIFICATION=true;   shift ;;
+        --skip-env)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
+            RESTORE_ENV=false;        shift ;;
+        --dry-run)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
+            DRY_RUN=true;             shift ;;
+        --inspect)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            INSPECT_ONLY=true;        shift ;;
+        --force)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
+            FORCE=true;               shift ;;
         --start-policy)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
             if [[ $# -lt 2 || "${2:-}" == --* ]]; then
                 log_error "--start-policy requires a value: auto | ask | manual"; show_help; exit 2
             fi
             START_POLICY="$2";        shift 2 ;;
-        --start)                START_POLICY="auto";      shift ;;
-        --no-start)             START_POLICY="manual";    shift ;;
-        --rotate-age-key)       ROTATE_AGE_KEY_POLICY="rotate"; shift ;;
-        --no-rotate-age-key)    ROTATE_AGE_KEY_POLICY="skip"; shift ;;
-        *)                     log_error "Unknown option: '$1'"; show_help; exit 1 ;;
+        --start)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
+            START_POLICY="auto";      shift ;;
+        --no-start)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
+            START_POLICY="manual";    shift ;;
+        --rotate-age-key)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
+            ROTATE_AGE_KEY_POLICY="rotate"; shift ;;
+        --no-rotate-age-key)
+            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
+            [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
+            ROTATE_AGE_KEY_POLICY="skip"; shift ;;
+        *)                     _reject_restore_option "${_ORIGINAL_ARGS[0]}" "$1" ;;
     esac
 done
+
+if [[ "$INSPECT_ONLY" == "true" && "$LIST_ONLY" != "true" ]]; then
+    [[ "$NO_PRE_BACKUP" == "true" ]] && _reject_restore_option inspect "--no-backup"
+    [[ "$RESTORE_ENV" != "true" ]] && _reject_restore_option inspect "--skip-env"
+    [[ "$DRY_RUN" == "true" ]] && _reject_restore_option inspect "--dry-run"
+    [[ "$FORCE" == "true" ]] && _reject_restore_option inspect "--force"
+    [[ -n "$START_POLICY" ]] && _reject_restore_option inspect "--start-policy"
+    [[ -n "$ROTATE_AGE_KEY_POLICY" ]] && _reject_restore_option inspect "--rotate-age-key"
+fi
 
 case "$START_POLICY" in
     "" ) if [[ -t 0 ]]; then START_POLICY="ask"; else START_POLICY="auto"; fi ;;
