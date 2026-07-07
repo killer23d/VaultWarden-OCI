@@ -98,6 +98,14 @@ update_firewall_ranges() {
     local ranges_added=false
     local _ufw_result=false
     local -a current_cidrs=()
+    local -a cached_cidrs=()
+    local cf_cidr_cache="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache"
+
+    if [[ -f "$cf_cidr_cache" ]]; then
+        while IFS= read -r cidr; do
+            [[ -n "$cidr" ]] && cached_cidrs+=("$cidr")
+        done < "$cf_cidr_cache"
+    fi
 
     if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
         log_info "Adding new Cloudflare IPv4 ranges..."
@@ -141,15 +149,33 @@ update_firewall_ranges() {
     while IFS= read -r line; do
         if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
             local rule_num="${BASH_REMATCH[1]}"
+            local is_managed=false
+            local cidr=""
+
             if [[ "$line" =~ CF-IPv[46] ]]; then
-                local cidr="" word
-                for word in $line; do
-                    if [[ "$word" =~ ^[0-9a-fA-F:\.]+/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:\.]+$ ]]; then
-                        cidr="$word"
+                is_managed=true
+            fi
+
+            local -a words
+            read -ra words <<< "$line"
+            local word
+            for word in "${words[@]}"; do
+                if [[ "$word" =~ ^[0-9a-fA-F:\.]+/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:\.]+$ ]]; then
+                    cidr="$word"
+                    break
+                fi
+            done
+
+            if [[ "$is_managed" == "false" && -n "$cidr" ]]; then
+                for c in "${cached_cidrs[@]}"; do
+                    if [[ "$c" == "$cidr" ]]; then
+                        is_managed=true
                         break
                     fi
                 done
+            fi
 
+            if [[ "$is_managed" == "true" ]]; then
                 local keep=false
                 if [[ -n "$cidr" ]]; then
                     for c in "${current_cidrs[@]}"; do
@@ -170,10 +196,19 @@ update_firewall_ranges() {
     if (( ${#old_rule_nums[@]} > 0 )); then
         mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | sort -rn)
         for rule_num in "${old_rule_nums[@]}"; do
-            [[ -n "$rule_num" ]] && ufw --force delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
+            if [[ -n "$rule_num" ]] && ufw --force delete "$rule_num" >/dev/null 2>&1; then
+                removed_count=$((removed_count + 1))
+            fi
         done
     fi
     [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count outdated firewall rules"
+
+    if (( ${#current_cidrs[@]} > 0 )); then
+        mkdir -p "$(dirname "$cf_cidr_cache")" 2>/dev/null || true
+        printf '%s\n' "${current_cidrs[@]}" > "$cf_cidr_cache" 2>/dev/null || true
+        chmod 640 "$cf_cidr_cache" 2>/dev/null || true
+    fi
+
     log_success "Firewall IP ranges updated safely"
     return 0
 }

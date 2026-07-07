@@ -1230,8 +1230,11 @@ verify_uninstall_complete() {
         while IFS= read -r line; do
             if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
                 if [[ "$line" =~ CF-IPv[46] ]]; then
-                    local matched_cidr="unknown" word
-                    for word in $line; do
+                    local matched_cidr="unknown"
+                    local -a words
+                    read -ra words <<< "$line"
+                    local word
+                    for word in "${words[@]}"; do
                         if [[ "$word" =~ ^[0-9a-fA-F:\.]+/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:\.]+$ ]]; then
                             matched_cidr="$word"
                             break

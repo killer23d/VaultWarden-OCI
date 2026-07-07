@@ -534,46 +534,33 @@ MOCK
   assert_contains "$TMP/sops.out" "Preserving $SOPS_BIN"
 )
 
-# Maintenance lifecycle test: create rule, remove stale, verify uninstall
+# Maintenance lifecycle and set -e regression test
 (
   export UPDATE_FIREWALL=true DRY_RUN=false CLOUDFLARE_PROXY_ENABLED=true
   bin="$TMP/maint-bin"
   write_basic_command_mocks "$bin"
-  cat > "$bin/curl" <<'MOCK'
-#!/usr/bin/env bash
-if [[ "$*" =~ ips-v4 ]]; then
-    printf '104.16.0.0/12\n' > "$6"
-    exit 0
-elif [[ "$*" =~ ips-v6 ]]; then
-    printf '2606:4700::/32\n' > "$6"
-    exit 0
-fi
-exit 1
-MOCK
   write_ufw_mock "$bin"
-  chmod +x "$bin/curl" "$bin/ufw"
+  chmod +x "$bin/ufw"
   PATH="$bin:$PATH"
   export UFW_STATE="$TMP/maint-ufw-state" UFW_LOG="$TMP/maint-ufw.log"
+  export PROJECT_STATE_DIR="$TMP/state-dir"
+  mkdir -p "$PROJECT_STATE_DIR"
   : > "$UFW_STATE"
   : > "$UFW_LOG"
 
-  # 1. Update firewall - creates new rules
-  cp "$ROOT/utilities/maintenance-update-firewall.sh" "$TMP/maint-mock.sh"
-  sed -i.bak 's/main "$@"//' "$TMP/maint-mock.sh"
-  sed -i.bak 's|PROJECT_ROOT=.*|PROJECT_ROOT="'"$ROOT"'"|g' "$TMP/maint-mock.sh"
-  source "$TMP/maint-mock.sh"
-  require_root() { return 0; }
-  UPDATE_FIREWALL=true
-  DRY_RUN=false
-  CLOUDFLARE_PROXY_ENABLED=true
+  # 1. Previous cache contains CIDR A (104.16.0.0/12 and 2606:4700::/32)
+  printf '104.16.0.0/12\n2606:4700::/32\n' > "$PROJECT_STATE_DIR/cf-cidrs.cache"
 
-  update_firewall_ranges > "$TMP/maint1.out" 2>&1 || fail "maintenance update failed"
-  assert_contains "$UFW_STATE" "104.16.0.0/12"
-  assert_contains "$UFW_STATE" "CF-IPv4"
-  assert_contains "$UFW_STATE" "2606:4700::/32"
-  assert_contains "$UFW_STATE" "CF-IPv6"
+  # 2. UFW contains un-commented port 80 and 443 rules for A, representing the existing setup-firewall.sh contract
+  ufw allow proto tcp from 104.16.0.0/12 to any port 80 >/dev/null
+  ufw allow proto tcp from 104.16.0.0/12 to any port 443 >/dev/null
+  ufw allow proto tcp from 2606:4700::/32 to any port 80 >/dev/null
+  ufw allow proto tcp from 2606:4700::/32 to any port 443 >/dev/null
 
-  # 2. Update firewall again with different CIDRs - should remove stale rules
+  # Add an unrelated HTTPS rule C
+  ufw allow proto tcp from 1.2.3.4 to any port 443 >/dev/null
+
+  # 3. current Cloudflare fetch returns CIDR B instead
   cat > "$bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 if [[ "$*" =~ ips-v4 ]]; then
@@ -585,19 +572,52 @@ elif [[ "$*" =~ ips-v6 ]]; then
 fi
 exit 1
 MOCK
-  update_firewall_ranges > "$TMP/maint2.out" 2>&1 || fail "second maintenance update failed"
+  chmod +x "$bin/curl"
+
+  cp "$ROOT/utilities/maintenance-update-firewall.sh" "$TMP/maint-mock.sh"
+  sed -i.bak 's/main "$@"//' "$TMP/maint-mock.sh"
+  sed -i.bak 's|PROJECT_ROOT=.*|PROJECT_ROOT="'"$ROOT"'"|g' "$TMP/maint-mock.sh"
+  cat << 'EOF' >> "$TMP/maint-mock.sh"
+require_root() { return 0; }
+update_firewall_ranges
+EOF
+
+  # 4 & 5. execute the maintenance update in a fresh Bash process with set -euo pipefail
+  bash -euo pipefail "$TMP/maint-mock.sh" > "$TMP/maint1.out" 2>&1 || fail "maintenance update failed under set -e"
+
+  # Assert maintenance exits zero (done above via || fail)
+  # Assert all stale managed rules (un-commented A) are removed
   assert_not_contains "$UFW_STATE" "104.16.0.0/12"
   assert_not_contains "$UFW_STATE" "2606:4700::/32"
+
+  # Assert current rules remain (actually new B installed with stable comment)
   assert_contains "$UFW_STATE" "173.245.48.0/20"
   assert_contains "$UFW_STATE" "2803:f800::/32"
+  assert_contains "$UFW_STATE" "CF-IPv4"
+  assert_contains "$UFW_STATE" "CF-IPv6"
 
-  # 3. Uninstall should remove the dynamically created explicitly commented rules
+  # Assert unrelated rule C survives
+  assert_contains "$UFW_STATE" "1.2.3.4"
+
+  # 6. the cache is updated to B
+  assert_contains "$PROJECT_STATE_DIR/cf-cidrs.cache" "173.245.48.0/20"
+  assert_contains "$PROJECT_STATE_DIR/cf-cidrs.cache" "2803:f800::/32"
+  assert_not_contains "$PROJECT_STATE_DIR/cf-cidrs.cache" "104.16.0.0/12"
+
+  # 7. uninstall can subsequently recognize and remove B
   source_uninstaller_for_behavior
   write_noop_iptables_mock "$bin"
   export MANAGED_CLOUDFLARE_CIDRS=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && MANAGED_CLOUDFLARE_CIDRS+=("$line")
+  done < "$PROJECT_STATE_DIR/cf-cidrs.cache"
+  
   remove_firewall_rules
   assert_not_contains "$UFW_STATE" "173.245.48.0/20"
   assert_not_contains "$UFW_STATE" "2803:f800::/32"
+
+  # 8. unrelated HTTPS rule C survives
+  assert_contains "$UFW_STATE" "1.2.3.4"
 )
 
 echo "test-uninstall-vaultwarden: ok"
