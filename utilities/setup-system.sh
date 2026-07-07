@@ -159,6 +159,35 @@ _validate_yq_contract() {
     return 0
 }
 
+_validate_sops_version_format() {
+    [[ "${1:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+_sops_normalize_version_output() {
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^sops[[:space:]]+(version[[:space:]]+)?v?([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$|\() ]]; then
+            printf 'v%s\n' "${BASH_REMATCH[2]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_sops_resolved_version() {
+    local sops_bin="${1:-}"
+    [[ -n "$sops_bin" ]] || sops_bin="$(command -v sops 2>/dev/null || true)"
+    [[ -n "$sops_bin" && -x "$sops_bin" ]] || return 1
+
+    local version_output
+    version_output=$("$sops_bin" --version 2>&1) || return 1
+    _sops_normalize_version_output <<<"$version_output"
+}
+
+_validate_sops_contract() {
+    _sops_resolved_version "${1:-}" >/dev/null
+}
+
 if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
     case "${1:-}" in
         ubuntu-archive-url)
@@ -185,8 +214,16 @@ if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
         validate-yq)
             _validate_yq_contract "${2:-}"
             ;;
+        sops-version)
+            _sops_resolved_version "${2:-}"
+            ;;
+        sops-version-equals)
+            [[ -n "${2:-}" && -n "${3:-}" ]] || exit 2
+            actual="$(_sops_resolved_version "${2:-}")" || exit 1
+            [[ "$actual" == "$3" ]]
+            ;;
         *)
-            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch|yq-release-asset|yq-release-sha256|supported-host|sops-default-version|yq-version|validate-yq} [ARG...]\n' "$0" >&2
+            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch|yq-release-asset|yq-release-sha256|supported-host|sops-default-version|yq-version|validate-yq|sops-version|sops-version-equals} [ARG...]\n' "$0" >&2
             exit 2
             ;;
     esac
@@ -349,7 +386,7 @@ resolve_github_latest() {
 
     tag=$(jq -r '.tag_name // empty' "$api_tmpfile")
 
-    if [[ -z "$tag" ]] || [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9] ]]; then
+    if [[ -z "$tag" ]] || ! _validate_sops_version_format "$tag"; then
         log_error "Could not resolve a valid release tag for ${repo}."
         log_error "Set SOPS_VERSION=vX.Y.Z via --sops-version or the environment to bypass."
         return 1
@@ -589,8 +626,31 @@ install_yq() {
 }
 
 install_sops() {
-    if command -v sops >/dev/null 2>&1; then
-        return 0
+    local sops_ver="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
+    if [[ "$USE_LATEST" == "true" ]]; then
+        log_info "SOPS --use-latest requested — resolving latest release from GitHub..."
+        sops_ver=$(resolve_github_latest "getsops/sops") || return 1
+    elif [[ -n "$sops_ver" ]]; then
+        log_info "Using SOPS version: ${sops_ver}"
+    else
+        log_error "Internal error: SOPS version is empty; expected pinned default ${SOPS_DEFAULT_VERSION}."
+        return 1
+    fi
+
+    if ! _validate_sops_version_format "$sops_ver"; then
+        log_error "SOPS_VERSION '${sops_ver}' does not match expected format vX.Y.Z — aborting."
+        return 1
+    fi
+
+    local installed_sops_ver=""
+    if installed_sops_ver=$(_sops_resolved_version 2>/dev/null); then
+        if [[ "$installed_sops_ver" == "$sops_ver" ]]; then
+            log_info "SOPS ${installed_sops_ver} already installed and matches selected version."
+            return 0
+        fi
+        log_warn "Installed SOPS ${installed_sops_ver} does not match selected ${sops_ver}; replacing it."
+    else
+        log_info "No usable SOPS binary matching the repository contract was found; installing ${sops_ver}."
     fi
 
     local dpkg_arch arch
@@ -599,21 +659,6 @@ install_sops() {
         log_error "Unsupported CPU architecture for automatic SOPS binary install: ${dpkg_arch}"
         log_error "Supported automatic SOPS install architectures: amd64, arm64"
         log_error "Install sops from a supported release artifact, then re-run setup."
-        return 1
-    fi
-
-    local sops_ver="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
-    if [[ "$USE_LATEST" == "true" ]]; then
-        log_info "SOPS --use-latest requested — resolving latest release from GitHub..."
-        sops_ver=$(resolve_github_latest "getsops/sops") || return 1
-    elif [[ -n "$sops_ver" ]]; then
-        if [[ ! "$sops_ver" =~ ^v[0-9]+\.[0-9]+\.[0-9] ]]; then
-            log_error "SOPS_VERSION '${sops_ver}' does not match expected format vX.Y.Z — aborting."
-            return 1
-        fi
-        log_info "Using SOPS version: ${sops_ver}"
-    else
-        log_error "Internal error: SOPS version is empty; expected pinned default ${SOPS_DEFAULT_VERSION}."
         return 1
     fi
 
@@ -634,7 +679,7 @@ install_sops() {
     }
 
     local expected actual
-    expected=$(grep "${sops_filename}$" "$sops_checksums" | awk '{print $1}')
+    expected=$(awk -v file="$sops_filename" '$2 == file {print $1; exit}' "$sops_checksums")
     actual=$(sha256sum "$sops_bin" | awk '{print $1}')
 
     if [[ -z "$expected" ]]; then
@@ -655,6 +700,19 @@ install_sops() {
 
     log_success "SOPS checksum verified: $expected"
     install -m 755 "$sops_bin" /usr/local/bin/sops || return 1
+    hash -r
+
+    local final_sops_ver
+    if ! final_sops_ver=$(_sops_resolved_version); then
+        log_error "Installed SOPS binary does not report a usable version after install."
+        return 1
+    fi
+    if [[ "$final_sops_ver" != "$sops_ver" ]]; then
+        log_error "Resolved SOPS version after install is ${final_sops_ver}, expected ${sops_ver}."
+        log_error "Ensure /usr/local/bin appears before older SOPS binaries in PATH."
+        return 1
+    fi
+    log_success "Installed SOPS: ${final_sops_ver}"
 }
 
 # Install the required system packages, Docker, and SOPS.
@@ -764,6 +822,10 @@ verify_dependencies() {
     fi
 
     require_commands "${required_commands[@]}" || return 1
+    if ! _validate_sops_contract; then
+        log_error "Resolved sops command does not satisfy the required repository SOPS interface."
+        return 1
+    fi
     if ! _validate_yq_contract; then
         log_error "Resolved yq does not satisfy the required Mike Farah v4 schema interface."
         return 1

@@ -163,6 +163,42 @@ env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-good
 assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-python"
 assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-v3"
 
+make_sops_stub() {
+    local path="$1" version_output="$2"
+    cat > "$path" <<EOF_STUB
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "--version" ]]; then
+    cat <<'EOF_VERSION'
+${version_output}
+EOF_VERSION
+    exit 0
+fi
+exit 1
+EOF_STUB
+    chmod +x "$path"
+}
+make_sops_stub "$tmpdir/sops-good" 'sops 3.13.2'
+make_sops_stub "$tmpdir/sops-good-v-prefix" 'sops version v3.13.2'
+make_sops_stub "$tmpdir/sops-good-warn" 'sops 3.13.2
+[warning] failed to retrieve latest version from upstream'
+make_sops_stub "$tmpdir/sops-newer-patch" 'sops 3.13.20'
+make_sops_stub "$tmpdir/sops-prerelease" 'sops 3.13.2-dev'
+make_sops_stub "$tmpdir/sops-bad" 'not-sops 3.13.2'
+assert_output "v3.13.2" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-good"
+assert_output "v3.13.2" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-good-v-prefix"
+assert_output "v3.13.2" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-good-warn"
+assert_output "v3.13.20" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-newer-patch"
+env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version-equals "$tmpdir/sops-newer-patch" v3.13.20 \
+    || fail "exact SOPS version comparison rejected the real installed version"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version-equals "$tmpdir/sops-newer-patch" v3.13.2
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-prerelease"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-bad"
+
 assert_output "amd64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" amd64
 assert_output "amd64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" x86_64
 assert_output "arm64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" arm64
@@ -241,6 +277,16 @@ grep -Fq '[[ "$SOPS_VERSION_ENV_SET" == "true" ]] && _sops_flags=(--sops-version
     || fail 'setup.sh must pass explicit SOPS_VERSION overrides to setup-system'
 awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq 'if [[ "$USE_LATEST" == "true" ]]' \
     || fail 'SOPS latest resolution must be owned by explicit --use-latest'
+awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '_sops_resolved_version' \
+    || fail 'install_sops must inspect the actual installed SOPS version before reuse'
+awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '[[ "$installed_sops_ver" == "$sops_ver" ]]' \
+    || fail 'install_sops must reuse only an exact selected-version match'
+awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '[[ "$final_sops_ver" != "$sops_ver" ]]' \
+    || fail 'install_sops must verify the final resolved SOPS version after install'
+! awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq 'if command -v sops >/dev/null 2>&1; then' \
+    || fail 'install_sops must not bypass selected-version ownership with command -v sops'
+awk '/verify_dependencies\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '_validate_sops_contract' \
+    || fail 'verify_dependencies must validate the existing sops interface for --skip-deps'
 ! grep -Fq 'SOPS_VERSION not pinned' utilities/setup-system.sh \
     || fail 'normal setup must not resolve latest merely because SOPS_VERSION is blank'
 
