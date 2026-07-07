@@ -185,7 +185,7 @@ _sops_resolved_version() {
 }
 
 _validate_sops_contract() {
-    _sops_resolved_version "${1:-}" >/dev/null
+    _sops_resolved_version >/dev/null
 }
 
 if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
