@@ -2,243 +2,318 @@
 
 ## Executive Summary
 
-YELLOW - targeted fixes are required before this branch should be treated as production-ready or before a final production-host acceptance run is considered meaningful.
+YELLOW - targeted fixes are required before this branch should be treated as production-ready or before final production-host acceptance is meaningful.
 
-The current `delta` branch is materially stronger than the historical audit baseline. The post-PR #230 code has consolidated the permanent shell test suite, tightened CLI parsing, improved storage/migration mode precedence, preserved operation-lock semantics, made recovery commit boundaries explicit, and kept generated command reference output deterministic.
+This correction pass did not restart the full repository audit. It started from the existing final report, refreshed `delta`, confirmed that no production code changed after the original audit baseline, then re-inspected the specific missed-scope items requested for the Noble-only support decision.
 
-However, this final static audit found three medium-severity blockers and one low-severity documentation drift item:
+The supported production host contract is now:
+
+> Supported on Ubuntu 24.04 LTS Noble, on amd64 and arm64, on a provider-neutral Ubuntu host meeting the documented networking and storage prerequisites.
+
+Cloudflare remains mandatory as the edge/DNS/proxy/WAF provider. Ubuntu 22.04 is no longer a supported production target for this report. The current `AGENTS.md` operating-system matrix is stale and must be corrected in the bounded follow-up PR; this report intentionally does not edit it.
+
+The corrected audit found four medium-severity blockers and one low-severity documentation/support-contract drift item:
 
 | ID | Severity | Summary |
 | --- | --- | --- |
-| F-01 | Medium | The canonical `bash tests/run-tests.sh all` suite fails on current `delta` because the operator prompt-format scan treats `Jammy/Noble` in `AGENTS.md` as a `y/N` prompt. |
-| F-02 | Medium | The Ubuntu `universe` fallback can silently default an unresolved host codename to `noble`, which violates the Jammy/Noble support contract. |
-| F-03 | Medium | The Caddy base image is pinned, but the `xcaddy --with` plugin modules are unpinned, so production rebuilds are not reproducible. |
-| F-04 | Low | The quick runbook still presents "OCI Security List" as the universal first-time firewall step, despite the provider-neutral support contract. |
+| F-01 | Medium | The canonical readiness runner fails because the prompt-format scan recursively scans prose and reports, not just operator prompt surfaces. |
+| F-02 | Medium | Noble-only host setup is not fail-closed: unsupported or unresolved hosts can still enter Docker/universe apt repository rendering. |
+| F-03 | Medium | Required production dependency outputs are not reproducible: unpinned `xcaddy` modules and default-latest SOPS can change without a repository commit. |
+| F-04 | Medium | The production schema dependency contract is split across apt `python-yq`, CI Mike Farah `yq`, and unowned PyYAML installation. |
+| F-05 | Low | Active operator guidance still contains stale OS/provider support-contract wording. |
 
-No critical or high-severity defects were found in the static review. Security/secrets, backup/restore/recovery structure, operation guard behavior, storage safety, uninstall reset coverage, systemd hardening checks, and command-reference determinism are all in substantially better shape than in the earlier reports.
+No critical or high-severity defects were found. The final static verdict is still YELLOW because F-01 through F-04 block a truthful readiness/support claim before host acceptance.
 
 ## Final Static Ship Recommendation
 
-Do not ship the current `delta` HEAD as "production-ready" yet. Fix F-01 through F-03 first, rerun the full local validation suite, and then perform production-host acceptance on the supported host matrix. F-04 should be fixed before publishing operator-facing docs, but it does not by itself block a technical acceptance drill.
+Do not ship current `delta` as production-ready yet. Make one bounded follow-up PR that closes the Noble host dependency and readiness-gate contract:
+
+- fail closed on Ubuntu host detection before apt repository mutation;
+- make required dependency versions and implementations deterministic enough for production acceptance;
+- align production and CI for `yq`, SOPS, PyYAML, and Caddy module checks;
+- narrow the prompt-format scan to real operator prompt surfaces;
+- update active support-contract docs for Noble-only, amd64/arm64, provider-neutral host, and Cloudflare-first edge wording.
+
+After that PR, rerun the canonical local validation suite and perform production-host acceptance on Noble amd64 and Noble arm64.
 
 | Area | Static recommendation | Reason |
 | --- | --- | --- |
-| Security and secrets | Green | SOPS/Age model, transient Docker secret files, container hardening, and secret docs are coherent in static review. |
-| Backup, restore, recovery | Green with host validation required | Recovery commit boundary and failure messaging are now explicit; real restore/recover drills remain mandatory. |
-| Operation guard and interruption | Green | Shared lock release and package-manager child detection reflect the post-PR fixes. |
-| Storage, migration, uninstall | Green/Yellow | Storage and uninstall logic look sound, but F-02 affects first-run host setup portability. |
-| Systemd and automation | Green with host validation required | Static tests pass; actual timers/services still need Ubuntu validation. |
-| Operator CLI, Make, dashboard | Green/Yellow | CLI contract work is strong, but the operator UI test suite currently fails due F-01. |
-| Tests and CI | Yellow | Local canonical suite fails; GitHub Actions has no run for audited HEAD. |
-| Documentation/generated reference | Yellow | Command reference is deterministic; provider-neutral quick-runbook wording needs correction. |
-| Host portability | Yellow | Published image manifests support amd64/arm64, but Ubuntu codename fallback and unpinned Caddy plugins block a final portability claim. |
+| Security and secrets | Yellow | SOPS/Age structure remains coherent, but the yq/PyYAML dependency contract is not owned consistently. |
+| Backup, restore, recovery | Green with host validation required | Code distinguishes emergency passphrase, emergency recipient, and offline SOPS/Age recovery; the report acceptance checklist was corrected. |
+| Operation guard and interruption | Green | No new shared-lock or interruption defect was found. |
+| Storage, migration, uninstall | Green/Yellow | Storage and uninstall logic remain strong; Noble host setup and dependency install still need closure. |
+| Systemd and automation | Green with host validation required | Static evidence is good; real Noble service/timer validation remains mandatory. |
+| Operator CLI, Make, dashboard | Yellow | CLI contracts are strong, but the canonical readiness runner is blocked by an overbroad prompt scan. |
+| Tests and CI | Yellow | PR #230 exact head passed CI; later guidance/report commits did not have Actions runs, and local canonical validation currently stops in `test-operator-ui.sh`. |
+| Documentation/generated reference | Yellow | Generated reference is not the blocker; active OS/provider support wording needs a bounded update. |
+| Host portability | Yellow | Noble amd64/arm64 shape is plausible, but OS fail-closed behavior and dependency contracts block a final support claim. |
 
 ## Audit Baseline
 
 - Repository: `https://github.com/killer23d/VaultWarden-OCI`
 - Branch audited: `delta`
-- Audited HEAD: `2837fc1cddb7dda4ce6e156e4e95c5355d506f3a`
-- HEAD subject: `Update AGENTS.md`
-- PR #230 merge commit present in history: `2d15153 Merge pull request #230 from killer23d/codex/cli-contract-consistency`
-- Local branch state was fast-forwarded from `origin/delta` before audit validation.
-- Baseline worktree was clean before validation; transient validation artifacts were cleaned before this report was written.
-- Current audit date: 2026-07-07.
+- Current report-correction HEAD: `bd8a5e773db7d3f97bc9c364918e6ca8b560c815`
+- Current HEAD subject: `Add final production readiness audit`
+- Original executable audit HEAD recorded by the previous report: `2837fc1cddb7dda4ce6e156e4e95c5355d506f3a`
+- Original executable audit HEAD subject: `Update AGENTS.md`
+- PR #230 merge commit: `2d151534c441cf857f6a8fa49f6c685f7d10b451`
+- PR #230 final head SHA: `096e25f8e60dd286217e5b5270f6a8e6241bfb3b`
+- Report correction date: 2026-07-07.
 
-Audited after reading `AGENTS.md` in full and reading the existing reports under `reports/`, including the production-readiness review, the Sonnet second-pass review, the operator UI scans, the post-PR224 contract audit, and the post-PR226 production-simplicity audit.
+Baseline refresh performed:
 
-## Recent Change Pressure Map
+```text
+git fetch origin delta
+git checkout delta
+git pull --ff-only origin delta
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git log --oneline --decorate -20
+```
 
-The diff from the historical pre-PR227 neighborhood through current `HEAD` is large enough that a final integration audit was warranted even though the individual changes are mostly focused.
+Result:
 
-| Pressure area | Representative changed paths | Production risk pressure |
-| --- | --- | --- |
-| CLI contract normalization | `setup.sh`, `startup.sh`, `restore.sh`, `recover.sh`, `utilities/*.sh`, `docs/COMMAND-REFERENCE.md` | Callers, generated docs, and help/version behavior must stay aligned. |
-| Storage and migration parsing | `utilities/setup-storage.sh`, `lib/migrate.sh`, `tests/test-storage-setup.sh`, `docs/VOLUME-MIGRATION.md` | Mode precedence, destructive gates, and volume ownership checks are safety-critical. |
-| Recovery behavior | `recover.sh`, `utilities/restore-run.sh`, `tests/test-restore-recovery.sh` | Recovery must distinguish rollback-safe failures from post-commit health failures. |
-| Operation guard behavior | `lib/operations.sh`, `utilities/operations-status.sh`, lifecycle/backup/restore tests | Lock inheritance, child detection, and operator conflict messages must remain coherent. |
-| Test consolidation | `tests/run-tests.sh`, consolidated `tests/test-*.sh`, `.github/workflows/doc-drift.yml` | Historical follow-up tests were merged into the permanent suite; CI must call the right suite. |
-| Make/dashboard/operator UI | `Makefile`, `dashboard.sh`, `tests/test-operator-ui.sh`, docs | Normal operations must remain discoverable without stale wrappers or misleading success output. |
-| Uninstall and test reset | `utilities/uninstall-vaultwarden.sh`, `tests/test-uninstall.sh`, `RUNBOOK.md` | Destructive removal and test reset must remain explicitly gated and complete. |
-| Documentation boundary | `AGENTS.md`, `README.md`, `RUNBOOK.md`, `docs/*` | Provider-neutral, amd64/arm64, Jammy/Noble, and junior-admin claims must match executable behavior. |
+- `git status --short`: clean before report edits.
+- `git branch --show-current`: `delta`.
+- `git rev-parse HEAD`: `bd8a5e773db7d3f97bc9c364918e6ca8b560c815`.
+- `git diff --name-status 2837fc1cddb7dda4ce6e156e4e95c5355d506f3a..HEAD`: only `reports/post-pr230-final-production-readiness-audit.md` was added.
+- `git diff --stat 2837fc1cddb7dda4ce6e156e4e95c5355d506f3a..HEAD`: one report file, 740 inserted lines.
+- `git log --oneline --decorate 2837fc1cddb7dda4ce6e156e4e95c5355d506f3a..HEAD`: only `bd8a5e7 Add final production readiness audit`.
+
+Production code changed since original audit: no.
+
+Exact report-correction baseline:
+
+```text
+current report-correction HEAD: bd8a5e773db7d3f97bc9c364918e6ca8b560c815
+original executable audit HEAD: 2837fc1cddb7dda4ce6e156e4e95c5355d506f3a
+production code changed since original audit: no
+report-correction scope: report-only update to reports/post-pr230-final-production-readiness-audit.md
+```
+
+The diff from the PR #230 merge commit to the original audit HEAD changed only `AGENTS.md`. Therefore PR #230 executable-head CI evidence and later audited/report HEAD evidence must be kept separate.
 
 ## Architecture and Production Contracts Reconstructed from Current Code
 
-The current repository implements a small-team, root-operated Vaultwarden appliance rather than a generic deployment framework. The normal production path is:
+The current repository remains a small-team, root-operated Vaultwarden appliance rather than a generic deployment framework.
 
-- Ubuntu 22.04 Jammy or Ubuntu 24.04 Noble.
+The corrected normal production path is:
+
+- Ubuntu 24.04 LTS Noble only.
 - amd64 or arm64.
+- Provider-neutral Ubuntu host execution.
 - Cloudflare DNS/proxy/WAF and Caddy DNS-01 through Cloudflare.
 - Vaultwarden, custom Caddy, Postfix sidecar, CrowdSec, SOPS/Age, rclone/offsite backup, and systemd timers/services.
 - Root-operated lifecycle with operator-authored repo files and root-owned runtime state under `/var/lib/vaultwarden`, `/etc/vaultwarden`, and `/run/vaultwarden-oci`.
 - Shared operation guard for mutating workflows.
-- Provider-neutral host execution: no OCI CLI, OCI metadata, OCI APIs, provider IAM, or provider-specific device path should be required.
 - Storage modes are boot-volume state or an explicitly configured attached block/data volume with stable operator-supplied paths.
-- Documentation can include provider examples, but universal prerequisites should be phrased generically.
 
-These contracts are explicit in `AGENTS.md` and are mostly reflected in the current shell code. The gaps are in release/codename failure handling, custom Caddy reproducibility, and a quick-runbook wording path.
+The corrected Noble-only host detection contract is:
+
+```text
+read /etc/os-release
+require ID=ubuntu
+require VERSION_ID=24.04 and/or codename noble
+continue only after that succeeds
+```
+
+Any non-Ubuntu host, unresolved host, or unsupported Ubuntu release must fail clearly before writing apt repositories or performing meaningful host mutation.
 
 ## Scope and Method
 
-This was a static, report-only audit. No tracked project file was modified except this report.
+This was a focused correction and missed-scope pass on the existing report. It was report-only work.
 
 Performed:
 
-- Read current repository guidance and historical audit reports.
-- Reviewed post-PR #230 integration surfaces across setup, storage, migration, restore/recover, backup, operations, systemd, Make/dashboard, tests, docs, generated reference, and compose.
-- Ran required local validations where safe.
-- Inspected container image manifests without pulling or running production containers.
-- Checked GitHub Actions visibility for the audited branch/commit.
-- Avoided real setup, restore, recovery, migration, sudo production workflows, production secrets, and destructive host operations.
+- Refreshed `delta` to `origin/delta`.
+- Read the existing report in full.
+- Compared the original audit baseline to current `delta`.
+- Re-inspected the requested dependency contracts for yq, PyYAML, and SOPS.
+- Re-inspected Noble-only host release handling.
+- Re-inspected emergency backup acceptance wording against implementation.
+- Re-inspected active OS/provider support-contract documentation drift.
+- Re-evaluated F-01 through F-04.
+- Completed direct execution of the two test suites that the canonical runner does not reach.
+- Added PR #230 exact-head GitHub Actions evidence.
 
 Not performed:
 
-- No real Ubuntu host setup.
-- No real Docker image build.
-- No real Caddy plugin compilation.
-- No real Vaultwarden, Caddy, Postfix, CrowdSec, rclone, Cloudflare, or SMTP live integration.
-- No real block-volume formatting, mounting, migration, restore, or recovery.
-- No production secrets were used.
+- No production code fixes.
+- No test fixes.
+- No documentation edits outside this report.
+- No branch, commit, push, or pull request.
+- No real setup, restore, recovery, migration, sudo production workflow, production secret use, production Docker stack operation, storage formatting, systemd install/remove, rclone sync, or host firewall mutation.
 
 ## Validation Performed
 
 | Validation | Result | Notes |
 | --- | --- | --- |
-| `git fetch origin delta` and `git pull --ff-only origin delta` | Pass | Local branch was current with `origin/delta` at `2837fc1cddb7dda4ce6e156e4e95c5355d506f3a`. |
-| PR #230 merge present | Pass | `git log --grep='#230' --all` found `2d15153`. |
-| `git diff --check` | Pass | No whitespace/error output. |
-| `find . -type f -name '*.sh' ... bash -n` | Pass | All shell scripts parsed. |
-| `find . -type f -name '*.sh' ... shellcheck -x --severity=warning` | Pass | No warning-or-higher ShellCheck output. |
-| `docker compose --env-file .env.example -f docker-compose.yml.example config --quiet` | Pass | Example compose renders. |
-| `bash tests/run-tests.sh all` | Fail | Fails in `tests/test-operator-ui.sh` because `AGENTS.md:130` contains `Jammy/Noble`, which matches the raw `y/N` substring scan. See F-01. |
-| Command reference generation determinism | Pass | `DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh` produced no diff on first or second run; hash remained `47a90f5a06481d610359992c4cfbe15d14abf7f0ef9700a9a7a913078829811e`. |
-| Image manifest inspection | Pass for base images | `vaultwarden:1.36.0`, `busybox:1.36.1`, `boky/postfix:5.1.0`, `caddy:2.11.4-builder`, and `caddy:2.11.4-alpine` expose amd64 and arm64 variants. This does not prove the unpinned Caddy plugin build chain; see F-03. |
-| GitHub Actions branch status | Informational | Recent visible branch runs were for older commits. `gh run list --commit 2837fc1cddb7dda4ce6e156e4e95c5355d506f3a` returned no runs. |
+| `git fetch origin delta` | Pass | Required network approval; `origin/delta` advanced to `bd8a5e7`. |
+| `git checkout delta` | Pass | Worktree was clean before checkout. |
+| `git pull --ff-only origin delta` | Pass | Required network approval; fast-forwarded local `delta`. |
+| Baseline diff from `2837fc1...` to current HEAD | Pass | Only the report file was added; no production code changed. |
+| PR #230 exact-head CI lookup | Pass | Run `28847717269`, workflow `Doc Drift Check`, event `pull_request`, head `096e25f8...`, conclusion `success`. |
+| PR #230 jobs | Pass | `doc-drift`, `shellcheck`, and `functional-tests` all concluded `success`. |
+| Runs for `2837fc1...` | None | `gh run list --commit 2837fc1...` returned no runs. |
+| Runs for current `bd8a5e7...` | None | `gh run list --commit bd8a5e7...` returned no runs. |
+| Official Noble package metadata | Pass | Ubuntu Noble `yq` package is `3.1.0-3`, architecture `all`, Homepage `https://github.com/kislyuk/yq`, depends on `python3-yaml`; same package paragraph observed for amd64 and arm64 metadata. |
+| Disposable python-yq compatibility check | Mixed | `yq 3.1.0` ran current core schema filters successfully, but a direct call without raw output emits quoted Cloudflare conditional keys. |
+| `PATH=/opt/homebrew/bin:$PATH /opt/homebrew/bin/bash tests/run-tests.sh all` | Fail | Stopped in `tests/test-operator-ui.sh` prompt-format scan before `tests/test-crowdsec.sh` and `tests/test-uninstall.sh`. |
+| Direct `tests/test-crowdsec.sh` | Pass | `CrowdSec configuration tests passed.` |
+| Direct `tests/test-uninstall.sh` | Pass with Bash 5 PATH | Initial invocation allowed a child `bash` to resolve to macOS Bash 3.2; rerun as `PATH=/opt/homebrew/bin:$PATH /opt/homebrew/bin/bash tests/test-uninstall.sh` passed. |
 
-Observed local tool versions:
-
-- Docker: `Docker version 29.6.1`
-- ShellCheck: `0.11.0`
-- `yq`: `v4.53.3`
-- `sops`: `3.13.2`
-- `age`: `v1.3.1`
-- `gh`: `2.96.0`
-
-The failing test output included:
+Canonical runner precision:
 
 ```text
-AGENTS.md:130:Repository, package, and dependency installation paths must be checked for Jammy/Noble differences.
-FAIL: active content contains shorthand confirmation prompt: y/N
-FAIL tests/test-operator-ui.sh (exit 1)
+tests/run-tests.sh order:
+...
+tests/test-restore-recovery.sh
+tests/test-operator-ui.sh
+tests/test-crowdsec.sh
+tests/test-uninstall.sh
 ```
 
-Image manifest platform summaries:
+The canonical runner stopped in `tests/test-operator-ui.sh`; it did not execute CrowdSec or uninstall as part of that canonical run. Direct suite execution after the stop point:
 
-| Image tag | Manifest platforms observed |
-| --- | --- |
-| `ghcr.io/dani-garcia/vaultwarden:1.36.0` | `amd64`, `arm/v6`, `arm/v7`, `arm64` |
-| `busybox:1.36.1` | `386`, `amd64`, `arm/v5`, `arm/v6`, `arm/v7`, `arm64/v8`, `ppc64le`, `riscv64`, `s390x` |
-| `boky/postfix:5.1.0` | `386`, `amd64`, `arm/v7`, `arm64`, `ppc64le`, `s390x` |
-| `caddy:2.11.4-builder` | `amd64`, `arm/v6`, `arm/v7`, `arm64/v8`, `ppc64le`, `riscv64`, `s390x` |
-| `caddy:2.11.4-alpine` | `amd64`, `arm/v6`, `arm/v7`, `arm64/v8`, `ppc64le`, `riscv64`, `s390x` |
+```text
+tests/test-crowdsec.sh: PASS
+tests/test-uninstall.sh: PASS with Bash 5 PATH
+```
+
+The current prompt scan failure listed matches in both `AGENTS.md` and the old audit report itself under `reports/`, confirming that the root cause is the scan scope, not only a missing workflow path filter.
+
+Package evidence source:
+
+- `https://archive.ubuntu.com/ubuntu/dists/noble/universe/binary-amd64/Packages.xz`
+- `https://ports.ubuntu.com/ubuntu-ports/dists/noble/universe/binary-arm64/Packages.xz`
+- `https://packages.ubuntu.com/noble/python3-yaml`
 
 ## Environment and Runtime Validation Limits
 
-This audit ran from a local Codex workspace, not from a fresh Ubuntu production host. Static shell tests and compose rendering are valuable, but they cannot prove:
+This correction pass ran from a local Codex workspace, not from a fresh Ubuntu 24.04 production host.
 
-- Apt repository behavior on Jammy and Noble.
-- Docker CE repository behavior on amd64 and arm64.
-- Caddy custom image build success across architectures.
-- systemd unit behavior across reboots.
-- UFW/nftables/iptables behavior on real Ubuntu kernels.
-- CrowdSec package/bouncer behavior on real hosts.
-- rclone remote behavior and failure email delivery.
-- Real backup/restore/recover correctness with production-sized data.
-- Real block-volume formatting, mount ordering, and migration interruption behavior.
+Useful evidence gathered:
 
-Because this repo is a production appliance, final acceptance must include real host drills after F-01 through F-03 are fixed.
+- current repository code;
+- GitHub Actions metadata through `gh`;
+- official Ubuntu Noble package metadata;
+- disposable python-yq compatibility check;
+- local Bash test execution with Bash 5.
+
+Still not proven by this pass:
+
+- real Noble apt behavior on clean amd64 and arm64 hosts;
+- Docker CE repository behavior after fail-closed OS detection;
+- custom Caddy image build success on both architectures;
+- systemd service/timer behavior across reboot;
+- UFW/nftables behavior on real Ubuntu kernels;
+- CrowdSec package and bouncer behavior on real hosts;
+- real backup, restore, emergency restore, storage migration, key rotation, and failure notification drills.
 
 ## Supported Host Matrix Assessment
 
-| Supported host | Static confidence at this HEAD | Blocking concern | Required acceptance validation |
+| Supported host | Static confidence | Known blocker | Production-host validation required |
 | --- | --- | --- | --- |
-| Ubuntu 22.04 Jammy amd64 | Medium | F-01, F-02, F-03 | Fresh setup, Docker apt repo, universe enablement, custom Caddy build, systemd install, backup/restore/recover drill. |
-| Ubuntu 22.04 Jammy arm64 | Medium-low | F-01, F-02, F-03 | Same as above, plus arm64 Caddy custom build and CrowdSec bouncer validation. |
-| Ubuntu 24.04 Noble amd64 | Medium | F-01, F-03 | Fresh setup, custom Caddy build, systemd install, backup/restore/recover drill. |
-| Ubuntu 24.04 Noble arm64 | Medium-low | F-01, F-03 | Same as above, plus arm64 Caddy custom build and CrowdSec bouncer validation. |
+| Ubuntu 24.04 Noble amd64 | Medium | F-01, F-02, F-03, F-04 | Full production-host acceptance after targeted fixes. |
+| Ubuntu 24.04 Noble arm64 | Medium-low | F-01, F-02, F-03, F-04 | Focused arm64 acceptance for architecture-sensitive dependencies plus at least one real backup/restore path. |
 
-The static review supports the shape of the matrix but not a final green claim. Published base image manifests support amd64 and arm64, but the full stack is only as reproducible as the custom build and host setup paths.
+Ubuntu 22.04 is not part of the supported production matrix for this corrected report.
 
-## Ubuntu 22.04 / 24.04 Portability Assessment
+The static review supports the intended shape of Noble amd64 and Noble arm64, but not an unconditional production support claim yet. The blockers are dependency contract and readiness-gate issues, not evidence that the project should expand or preserve another OS target.
 
-The repo explicitly defines Jammy and Noble as the supported Ubuntu path. Most setup code follows host-derived values, but the `universe` fallback in `utilities/setup-system.sh` still uses `lsb_release -cs || echo "noble"` and writes an apt source from that value. That can configure the wrong repository on a minimal Jammy host where `lsb_release` is unavailable or broken.
+## Ubuntu 24.04 Noble Support Assessment
 
-This is the only Ubuntu-release portability blocker found in static review, but it is significant because it sits on first-run dependency installation. The correct contract is fail-closed release detection from `/etc/os-release` with explicit support for only Ubuntu 22.04/Jammy and 24.04/Noble.
+The old F-02 framing was obsolete. The defect is no longer that Jammy might receive a Noble repository. The corrected question is whether unsupported or unresolved hosts can be silently treated as Noble and enter production setup.
+
+Current code does not satisfy the Noble-only fail-closed contract:
+
+- `install_docker` reads `VERSION_CODENAME` from `/etc/os-release` but does not verify `ID=ubuntu`.
+- `install_docker` does not verify `VERSION_ID=24.04` or codename `noble`.
+- The Docker repository renderer can write a Docker Ubuntu source for whatever codename was present.
+- The universe fallback uses `lsb_release -cs` and falls back to `noble` if that command is absent or fails.
+- `ID`, `VERSION_ID`, `UBUNTU_CODENAME`, and unsupported Ubuntu versions are not coherently validated before apt repository mutation.
+
+This is still a Medium blocker because a provider-neutral appliance should fail clearly before mutating apt state on non-Ubuntu, unsupported Ubuntu, or unresolved hosts.
+
+The smallest correct fix direction is a local release-detection helper in `utilities/setup-system.sh` that reads `/etc/os-release`, accepts only Ubuntu 24.04/Noble, and is used by both Docker repository setup and universe repository fallback before apt writes occur.
 
 ## amd64 / arm64 Portability Assessment
 
 Positive static signals:
 
-- `docker-compose.yml.example` contains no `platform:` pin that would force amd64 on arm64.
-- Published base image manifests for Vaultwarden, BusyBox, Postfix, and Caddy include amd64 and arm64 variants.
-- SOPS artifact selection in `utilities/setup-system.sh` returns `amd64` and `arm64` directly and fails for unsupported release architectures.
-- Cloudflare Worker bouncer tarball mapping in `utilities/setup-crowdsec.sh` supports `amd64`/`x86_64` and `arm64`/`aarch64`, and skips tarball fallback rather than silently downloading the wrong architecture.
+- `docker-compose.yml.example` contains no `platform: linux/amd64` pin in the supported path.
+- Existing architecture helpers explicitly map SOPS artifacts for `amd64` and `arm64`.
+- Cloudflare Worker bouncer mapping in `utilities/setup-crowdsec.sh` has explicit amd64/x86_64 and arm64/aarch64 handling.
+- Official Noble package metadata shows the apt `yq` package is architecture `all`, with the same package paragraph for amd64 and arm64 indexes.
 
-Blocking static signal:
+Blocking static signals:
 
-- The custom Caddy Dockerfile pins `CADDY_VERSION=2.11.4`, but the `xcaddy --with` module specs are unversioned. The base image is multi-arch; the custom module build graph is not pinned or proven for amd64/arm64. See F-03.
+- F-03: Caddy plugin module resolution and SOPS default installation are not reproducible.
+- F-04: production setup and CI use different yq implementations, and PyYAML is not explicitly owned.
+
+Arm64 support cannot be claimed solely from static `case arm64)` mappings and image manifest expectations. It needs at least one real Noble arm64 host drill that covers architecture-sensitive packages, downloaded binaries, custom Caddy build, CrowdSec/bouncers, systemd startup, basic health, and one real backup/restore path.
 
 ## Cloud-Provider Neutrality Assessment
 
-No executable dependency on OCI CLI, OCI APIs, OCI instance principals, OCI metadata endpoints, OCI security-list APIs, AWS metadata, Azure metadata, Google metadata, or provider IAM was found in the production scripts.
+No executable dependency on OCI CLI, OCI APIs, OCI instance principals, OCI metadata endpoints, provider IAM, or provider-specific block-device paths was found in the focused pass.
 
-Provider-neutral positives:
+Provider-neutrality remains structurally plausible:
 
-- Storage code uses operator-supplied/stable paths and does not require `/dev/oracleoci/...`.
-- The main deployment guide uses provider-neutral firewall wording and demotes OCI Security Lists to an explicit note.
-- The firewall script has a conditional cleanup for an OCI-style host `FORWARD REJECT` rule, but it only checks/removes a local iptables rule if present. It does not call OCI APIs or make OCI a runtime prerequisite.
-- `maintenance-update-dns.sh` uses `https://checkip.amazonaws.com` as a public IP echo endpoint, not AWS metadata or IAM.
+- storage uses operator-supplied or stable paths rather than requiring OCI device names;
+- Cloudflare is correctly treated as mandatory edge infrastructure, not as a cloud provider;
+- host firewall automation is local to the Ubuntu host.
 
-Provider-neutral drift:
-
-- `RUNBOOK.md` line 12 says "Configure OCI Security List" as a universal first-time setup step. See F-04.
+The remaining provider-neutrality issue is documentation/support-contract drift, not a runtime provider API dependency. See F-05.
 
 ## Repository-Wide Entry Point Inventory
 
-| Entry point category | Representative paths | Static assessment |
+| Entry point category | Representative paths | Corrected static assessment |
 | --- | --- | --- |
-| Root setup | `setup.sh`, `utilities/setup-system.sh`, `utilities/setup-env.sh`, `utilities/setup-secrets.sh`, `utilities/setup-firewall.sh`, `utilities/setup-storage.sh` | Coherent overall; F-02 blocks release-portable dependency setup. |
-| Lifecycle | `startup.sh`, `Makefile`, `utilities/safe-restart.sh`, `utilities/maintenance-health.sh` | Operation guard integration and health semantics look sound in static review. |
-| Backup | `backup.sh`, `utilities/backup-run.sh`, `lib/backup-utils.sh` | Three-tier model and metadata handling are coherent; real restore validation still required. |
-| Restore/recovery | `restore.sh`, `recover.sh`, `utilities/restore-run.sh` | Recovery commit boundary and post-commit failure messaging are explicit. |
-| Secrets/key management | `edit-secrets.sh`, `utilities/secrets-*.sh`, `utilities/key-rotate.sh`, `lib/secrets.sh`, `lib/crypto.sh` | Static structure is strong; no production secrets used. |
-| Storage/migration | `utilities/setup-storage.sh`, `lib/storage.sh`, `lib/migrate.sh` | Parser and safety tests are consolidated and pass before the later operator UI failure. |
-| Systemd | `utilities/setup-systemd.sh`, `systemd/*.service`, `systemd/*.timer` | Static hardening checks and tests pass; real systemd validation remains mandatory. |
-| CrowdSec/firewall | `utilities/setup-crowdsec.sh`, `utilities/setup-firewall.sh`, `utilities/maintenance-update-firewall.sh`, `crowdsec/*` | Architecture mapping is fail-closed; live package/bouncer/firewall behavior requires host testing. |
-| Operator UI/docs | `Makefile`, `dashboard.sh`, `RUNBOOK.md`, `docs/*`, `docs/COMMAND-REFERENCE.md` | Command reference deterministic; F-01 and F-04 affect final confidence. |
+| Root setup | `setup.sh`, `utilities/setup-system.sh`, `utilities/setup-env.sh`, `utilities/setup-secrets.sh`, `utilities/setup-firewall.sh`, `utilities/setup-storage.sh` | F-02, F-03, and F-04 block final setup confidence. |
+| Lifecycle | `startup.sh`, `Makefile`, `utilities/safe-restart.sh`, `utilities/maintenance-health.sh` | Structure remains sound; startup later validates PyYAML but setup does not own it. |
+| Backup | `backup.sh`, `utilities/backup-run.sh`, `lib/backup-utils.sh` | Emergency protection modes are coherent; report acceptance wording corrected. |
+| Restore/recovery | `restore.sh`, `recover.sh`, `utilities/restore-run.sh` | Offline SOPS/Age recovery is separate from emergency backup passphrase/recipient handling. |
+| Secrets/key management | `edit-secrets.sh`, `utilities/secrets-*.sh`, `utilities/key-rotate.sh`, `lib/secrets.sh`, `lib/schema.sh` | yq/PyYAML contract needs closure. |
+| Storage/migration | `utilities/setup-storage.sh`, `lib/storage.sh`, `lib/migrate.sh` | Migration acceptance must cover both boot-to-block and block-to-boot. |
+| Systemd | `utilities/setup-systemd.sh`, `systemd/*.service`, `systemd/*.timer` | Host validation still required. |
+| CrowdSec/firewall | `utilities/setup-crowdsec.sh`, `utilities/setup-firewall.sh`, `utilities/maintenance-update-firewall.sh` | Static mapping is promising; direct CrowdSec tests pass. |
+| Operator UI/docs | `Makefile`, `dashboard.sh`, `RUNBOOK.md`, `docs/*`, `docs/COMMAND-REFERENCE.md` | F-01 and F-05 remain. |
 
 ## Cross-PR Integration Review
 
-Historical concerns that appear closed in the current code:
+PR #230 exact-head evidence:
 
-- Operation global lock release no longer explicitly unlocks the inherited global FD. `operation_release` closes the descriptor and lets the kernel release the flock after the last inherited descriptor closes.
-- Package-manager child detection includes `add-apt-repository` and `apt-add-repository`.
-- Recovery now sets `RECOVERY_COMMITTED=true` only after promoted identity/config validation and file mode normalization.
-- Recovery startup/health failures after commit are reported as committed-but-unhealthy states, not rolled-back successes.
-- `maintenance-db-maint.sh` places success messages inside the positive health branch and warns when the restarted service does not become healthy.
-- Storage setup/migration parsing now has explicit tests proving CLI arguments win over loaded environment defaults.
-- Permanent tests are consolidated under `tests/run-tests.sh all`; stale PR-named top-level tests have been removed.
-- Command-reference generation is deterministic in this workspace.
-- Postfix no longer claims a read-only root filesystem; the compose file documents that upstream `boky/postfix` mutates `/scripts` and keeps other hardening controls.
+- PR: `https://github.com/killer23d/VaultWarden-OCI/pull/230`
+- Final PR head: `096e25f8e60dd286217e5b5270f6a8e6241bfb3b`
+- Merge commit: `2d151534c441cf857f6a8fa49f6c685f7d10b451`
+- GitHub Actions run: `https://github.com/killer23d/VaultWarden-OCI/actions/runs/28847717269`
+- Workflow: `Doc Drift Check`
+- Event: `pull_request`
+- Run conclusion: `success`
+- Job conclusions: `doc-drift=success`, `shellcheck=success`, `functional-tests=success`
 
-Cross-component risks that remain:
+Regression boundary:
 
-- A docs-only `AGENTS.md` update can break the canonical local test suite while bypassing current workflow path filters. See F-01.
-- First-run host setup still has release fallback behavior that conflicts with the newly explicit Jammy/Noble contract. See F-02.
-- The Caddy pinning docs and compose comments imply reproducibility that the Dockerfile does not fully implement. See F-03.
+```text
+PR #230 exact executable head
+  -> required CI passed
+
+later AGENTS-only guidance commit
+  -> no Actions run for 2837fc1...
+
+later report-only commit
+  -> no Actions run for bd8a5e7...
+
+local canonical runner today
+  -> stops in operator prompt scan because it scans prose/report content
+```
+
+This means PR #230's executable head had successful CI, while the current report-correction baseline has local readiness-gate failure caused by later prose/report content and overbroad scan scope.
 
 ## Findings
 
-### F-01 - Canonical test runner fails because prompt-format scan treats `Jammy/Noble` as `y/N`
+### F-01 - Canonical readiness runner fails because prompt-format scan recursively scans prose and reports
 
 Severity: Medium
 
@@ -249,293 +324,389 @@ Area: Tests, CI, operator UI regression coverage
 Affected files:
 
 - `tests/test-operator-ui.sh:357-401`
-- `AGENTS.md:130`
-- `tests/run-tests.sh:26-42`
 - `.github/workflows/doc-drift.yml:3-18`
 - `.github/workflows/doc-drift.yml:174-194`
+- `AGENTS.md`
+- `reports/post-pr230-final-production-readiness-audit.md`
 
 Affected supported entry point(s):
 
 - `bash tests/run-tests.sh all`
 - GitHub Actions `functional-tests` job when triggered
-- Any final production-readiness gate that requires the canonical test runner
+- Any final readiness gate that treats the canonical runner as mandatory
 
 Execution path:
 
 1. `bash tests/run-tests.sh all`
 2. `tests/test-operator-ui.sh`
 3. `check_confirmation_prompt_format`
-4. Raw fixed-string recursive grep for `y/N`
-5. Match on `AGENTS.md:130` text `Jammy/Noble`
-6. Test exits 1
+4. Recursive fixed-string scan from repository root
+5. Scan includes durable guidance and historical/current audit prose
+6. Prose matches a shorthand yes/no token or a substring that looks like one
+7. Test exits 1 before reaching CrowdSec and uninstall suites
 
-Contract expected:
+Expected contract:
 
-The permanent test suite should reject actual shorthand confirmation prompts while allowing unrelated words or support-matrix terms. A docs-only change should not create a false prompt failure, and CI should cover files that the test intentionally scans.
+The prompt-format test should reject actual runtime/operator confirmation prompts that use shorthand defaults, while allowing prose, historical audit text, support-matrix text, fixtures, and report discussion that cannot present a runtime prompt.
 
 Current behavior:
 
-Current `delta` HEAD fails the canonical required validation command. The failure is not caused by macOS, Docker, ShellCheck, or missing test dependencies. It is caused by the repository's own raw substring scan matching `y/N` inside `Jammy/Noble`.
+The scan traverses the full repository root, excluding only `.git` and binary/image/PDF suffixes. It scans `AGENTS.md`, `reports/`, historical prose, and other content that cannot be runtime confirmation prompts.
 
 Evidence:
 
-- `tests/test-operator-ui.sh:363-370` builds fixed-string patterns including `y/N`.
-- `tests/test-operator-ui.sh:374-384` scans the full repository root.
-- `tests/test-operator-ui.sh:392-395` treats any match as failure.
-- `AGENTS.md:130` contains `Repository, package, and dependency installation paths must be checked for Jammy/Noble differences.`
-- `tests/run-tests.sh:39` includes `tests/test-operator-ui.sh` in the canonical suite.
-- `.github/workflows/doc-drift.yml:192-194` calls `./tests/run-tests.sh all`.
-- `.github/workflows/doc-drift.yml:3-18` does not include `AGENTS.md` in the pull-request path filter.
-- `gh run list --commit 2837fc1cddb7dda4ce6e156e4e95c5355d506f3a` returned no workflow runs.
+- `tests/test-operator-ui.sh:363-370` builds fixed-string shorthand prompt patterns.
+- `tests/test-operator-ui.sh:374-384` scans `"$ROOT"` recursively.
+- `tests/test-operator-ui.sh:392-395` fails on any match.
+- The local runner failed today in `tests/test-operator-ui.sh` and printed matches from both `AGENTS.md` and the existing report under `reports/`.
+- `tests/run-tests.sh:39-41` places `tests/test-crowdsec.sh` and `tests/test-uninstall.sh` after `tests/test-operator-ui.sh`.
+- `.github/workflows/doc-drift.yml:3-18` omits both `AGENTS.md` and `reports/**` from the pull-request path filter.
 
 Realistic trigger:
 
-Any future support-matrix documentation using `Jammy/Noble`, or any other word containing one of the raw substrings, can fail the full suite even when no shorthand confirmation prompt exists. Conversely, an AGENTS-only change can bypass GitHub Actions but leave the canonical suite broken on `delta`.
+Any future guidance, report, or non-operator prose containing a false-positive substring can block the canonical local runner. Because the workflow path filter omits some scanned paths, such a change can also miss CI.
 
 Production/operator impact:
 
-This does not directly break a production host, but it blocks the final validation gate and undermines confidence in the consolidated test suite. A branch that cannot pass its own permanent runner should not be labeled production-ready.
+This is not a production runtime defect. It does not directly break a running Vaultwarden host. It is a canonical readiness-gate defect: a branch that cannot pass its own permanent runner should not be labeled production-ready.
 
-Cross-PR or cross-component interaction:
+Cross-component interaction:
 
-PR #230 and nearby work consolidated tests and made `tests/run-tests.sh all` the canonical entry point. The later `AGENTS.md` update introduced a support-matrix phrase that the broad operator prompt scan treats as a failure. The workflow path filter then allowed the final commit to have no validating Actions run.
+PR #230 consolidated tests under `tests/run-tests.sh all`. Later guidance/report-only content can break that runner because the operator prompt scan reaches beyond operator prompt surfaces.
 
-Why existing tests/CI did not prevent or expose it:
+Why current tests/CI missed it:
 
-The test itself exposes the issue locally, but CI did not run for the audited `AGENTS.md`-only HEAD because the pull-request path filter omits `AGENTS.md`. The test also lacks a fixture proving that allowed support-matrix text such as `Jammy/Noble` is not a prompt.
+The test exposes the issue locally, but its scan scope is too broad and the workflow path filter does not include all scanned prose paths.
 
 Minimal fix direction:
 
-Make the prompt-format scan context-aware. For example, scan only operator-facing scripts/docs that can actually present prompts, or use a regex that matches real prompt syntax such as bracketed/default prompt contexts rather than arbitrary substrings inside words. If the test intentionally scans `AGENTS.md`, include `AGENTS.md` in the workflow path filter.
+Narrow the scan to actual operator-facing shell scripts and intentionally rendered operator documentation where prompts are shown. Add explicit allow/reject fixtures: allow the old support-matrix slash phrase as prose, and reject a real "Continue?" prompt using a shorthand default. Include any intentionally scanned prose paths in CI path filters.
 
 Focused regression recommendation:
 
-Add a focused test fixture or inline check that allows `Jammy/Noble` and rejects an actual prompt such as `Continue? [y/N]`. Then rerun `bash tests/run-tests.sh all` and confirm the suite passes on current content.
+Add one test fixture for allowed prose and one for a rejected runtime prompt. Rerun `bash tests/run-tests.sh all` and confirm the runner reaches and passes CrowdSec and uninstall in canonical order.
 
 Scope-pressure note:
 
-Do not replace the shell test suite or add a test framework for this. This is a narrow scan/fixture correction.
+Do not add a new test framework. This is a narrow scan-target and fixture correction.
 
-### F-02 - Ubuntu `universe` fallback silently defaults unresolved codename to `noble`
+### F-02 - Noble-only host setup is not fail-closed before apt repository rendering
 
 Severity: Medium
 
 Confidence: High
 
-Area: Host setup, Ubuntu 22.04/24.04 portability, dependency installation
+Area: Host setup, Noble support contract, dependency installation
 
 Affected files:
 
 - `utilities/setup-system.sh:214-216`
 - `utilities/setup-system.sh:377-405`
 - `tests/test-architecture.sh:35-48`
-- `AGENTS.md:95-105`
+- `AGENTS.md` operating-system matrix and Ubuntu portability text
 
 Affected supported entry point(s):
 
 - `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`
 - Direct use of `sudo ./utilities/setup-system.sh`
-- First-run setup on minimal Jammy/Noble hosts
+- First-run dependency installation on a new host
 
 Execution path:
 
-1. First-run dependency installation enters `install_dependencies`.
-2. `universe` is not already present.
-3. `add-apt-repository` is absent or fails.
-4. Fallback runs `codename=$(lsb_release -cs 2>/dev/null || echo "noble")`.
-5. The script writes `deb ${archive_url} ${codename} universe` to `/etc/apt/sources.list.d/ubuntu-universe.list`.
-6. `apt-get update` runs against the potentially wrong Ubuntu release.
+1. First-run setup enters `install_dependencies`.
+2. Docker setup reads `VERSION_CODENAME` from `/etc/os-release` without checking `ID` or `VERSION_ID`.
+3. Universe setup falls back to `lsb_release -cs`.
+4. If `lsb_release` fails, the fallback emits `noble`.
+5. Apt repository files can be written before a clear supported-host decision.
 
-Contract expected:
+Expected contract:
 
-Host setup must support both Ubuntu 22.04 Jammy and Ubuntu 24.04 Noble, must not silently assume one release, and must fail clearly when release detection is unavailable or unsupported.
+For the corrected support policy, setup must read `/etc/os-release`, require Ubuntu, require Ubuntu 24.04/Noble, and fail clearly on anything else before writing apt repositories or performing meaningful host mutation.
 
 Current behavior:
 
-The fallback path can configure a Noble universe source when the actual host is Jammy or when the host release is unresolved. `install_docker` uses `/etc/os-release` for Docker codename, but the universe fallback uses `lsb_release` and defaults to `noble`.
+`install_docker` uses only `VERSION_CODENAME`. The universe fallback uses `lsb_release` and a literal Noble fallback. There is no shared helper that validates `ID=ubuntu`, `VERSION_ID=24.04`, `VERSION_CODENAME=noble`, or `UBUNTU_CODENAME=noble` coherently.
 
 Evidence:
 
-- `AGENTS.md:97-104` states the normal path must work on Jammy and Noble and must not silently assume one release.
-- `utilities/setup-system.sh:214-216` reads Docker codename from `/etc/os-release`.
-- `utilities/setup-system.sh:389` and `utilities/setup-system.sh:399` default unresolved `lsb_release -cs` to `noble`.
+- `utilities/setup-system.sh:215` renders Docker codename from `VERSION_CODENAME`.
+- `utilities/setup-system.sh:389` and `utilities/setup-system.sh:399` fall back to `noble` when `lsb_release -cs` fails.
 - `utilities/setup-system.sh:391-392` and `utilities/setup-system.sh:401-402` write the resulting codename into an apt source.
-- `tests/test-architecture.sh:35-48` covers archive URL and SOPS artifact arch helpers, but not Jammy/Noble release detection or the `lsb_release` fallback.
+- `tests/test-architecture.sh:35-48` covers archive URL and SOPS architecture helpers but not `/etc/os-release` fixture behavior or unsupported-host failure.
 
 Realistic trigger:
 
-A minimal Ubuntu 22.04 host lacks `lsb_release`, has a broken `lsb_release`, or hits the manual fallback after `add-apt-repository` fails. The script then writes a Noble repository on a Jammy system.
+A non-Ubuntu host with Ubuntu-like fields, an unsupported Ubuntu release, a minimal host without `lsb_release`, or a broken release-detection environment can enter repository rendering instead of failing first.
 
 Production/operator impact:
 
-Wrong-release apt sources can break setup, mix repositories, or create a host state that is difficult for a junior operator to diagnose. This directly blocks a truthful Jammy/Noble production support claim.
+Wrong or unsupported apt repository state can break setup or leave a confusing partially mutated host. This blocks a truthful Noble-only production support claim.
 
-Cross-PR or cross-component interaction:
+Cross-component interaction:
 
-The final `AGENTS.md` update made the Jammy/Noble portability contract more explicit, while the setup fallback still carries a Noble default. The test suite added architecture checks but did not add release fixture coverage.
+Host release detection feeds Docker repository setup, universe repository setup, apt package availability, yq/PyYAML installation, SOPS prerequisites, Docker Compose installation, and CrowdSec later in the setup path.
 
-Why existing tests/CI did not prevent or expose it:
+Why current tests/CI missed it:
 
-The current tests exercise architecture mapping but not supported Ubuntu release detection. There is no fixture for `/etc/os-release`, no fixture for absent `lsb_release`, and no assertion that unsupported or unresolved releases fail closed.
+There are no `/etc/os-release` fixtures for supported Noble, non-Ubuntu, unsupported Ubuntu, missing codename, or absent `lsb_release`. CI does not run setup on a disposable Noble host.
 
 Minimal fix direction:
 
-Add a small local helper in `utilities/setup-system.sh` that reads `/etc/os-release`, verifies `ID=ubuntu`, accepts only `VERSION_ID=22.04`/`VERSION_CODENAME=jammy` or `VERSION_ID=24.04`/`VERSION_CODENAME=noble`, and fails closed when unresolved. Use that helper for Docker repository setup and universe fallback. Avoid a broad OS abstraction.
+Add a small local helper in `utilities/setup-system.sh` that reads `/etc/os-release`, validates Ubuntu 24.04/Noble, and returns the canonical codename. Use it for Docker and universe repository setup. Fail closed on unsupported/unresolved values.
 
 Focused regression recommendation:
 
-Add tests with fixture data for Jammy, Noble, missing codename, unsupported Ubuntu release, and absent `lsb_release`. Assert that Jammy renders Jammy, Noble renders Noble, and unresolved/unsupported releases fail rather than defaulting.
+Add fixture tests for Noble, unsupported Ubuntu, non-Ubuntu, missing codename, and `lsb_release` absence. Assert that only Noble succeeds and that repository rendering never defaults silently.
 
 Scope-pressure note:
 
-Do not expand the support matrix. The fix should enforce the existing narrow Ubuntu contract.
+Do not add a generic OS abstraction or expand the support matrix. Enforce the Noble-only appliance contract.
 
-### F-03 - Caddy base image is pinned, but `xcaddy` plugin modules are unpinned
+### F-03 - Required production dependency outputs are not fully reproducible
 
 Severity: Medium
 
 Confidence: High
 
-Area: Container build reproducibility, amd64/arm64 portability, supply-chain control
+Area: Dependency reproducibility, custom Caddy build, SOPS installation, supply-chain control
 
 Affected files:
 
 - `caddy/Dockerfile:13-23`
 - `docker-compose.yml.example:206-214`
 - `.env.example:53-58`
+- `setup.sh:7-14`
+- `utilities/setup-system.sh:180-205`
+- `utilities/setup-system.sh:466-525`
 - `.github/workflows/doc-drift.yml:105-127`
 
 Affected supported entry point(s):
 
 - `docker compose build caddy`
-- `sudo make up` or startup flows on hosts where the custom Caddy image must be built
-- Update/rebuild procedures that rebuild Caddy from the Dockerfile
+- `sudo make up` or startup/update flows that build custom Caddy
+- First-run setup on hosts without SOPS
+- Restore/recovery/secrets flows that depend on SOPS behavior
 
 Execution path:
 
-1. Compose builds service `caddy` from `./caddy/Dockerfile`.
-2. Dockerfile pins `ARG CADDY_VERSION=2.11.4`.
-3. Builder image is `caddy:${CADDY_VERSION}-builder`.
-4. `xcaddy build` runs with four `--with github.com/...` module specs that have no `@version` or commit.
-5. Future builds can resolve different module versions without any repository change.
+1. Compose builds the custom Caddy service from `caddy/Dockerfile`.
+2. Dockerfile pins `CADDY_VERSION=2.11.4`.
+3. `xcaddy build` uses unversioned module specs.
+4. Separately, `setup.sh` defaults `SOPS_VERSION` to blank.
+5. `utilities/setup-system.sh` resolves a blank SOPS version through GitHub `releases/latest`.
+6. Same repository commit can install/build different required production outputs on a later date.
 
-Contract expected:
+Expected contract:
 
-A production appliance should produce reproducible custom Caddy builds. The pinned Caddy base image and the module graph should be versioned together, and the amd64/arm64 support claim should apply to the actual custom binary build, not only the upstream base images.
+Required production dependency outputs should be reproducible enough that the same repository commit does not silently produce a different Caddy binary or SOPS version later. Integrity checks are necessary but not sufficient for reproducibility.
 
 Current behavior:
 
-The base Caddy image is pinned, but the plugin modules float at whatever module versions resolve at build time. The compose comment says `xcaddy builds must be pinned`, but the Dockerfile only pins the base Caddy version.
+Caddy base image is pinned, but four `xcaddy --with` modules are unpinned. SOPS binary downloads are checksum-verified, but the default version is resolved at install time unless the operator overrides `SOPS_VERSION`.
 
 Evidence:
 
-- `caddy/Dockerfile:13` pins `ARG CADDY_VERSION=2.11.4`.
-- `caddy/Dockerfile:15` uses `caddy:${CADDY_VERSION}-builder`.
-- `caddy/Dockerfile:17-21` uses unversioned `--with github.com/caddy-dns/cloudflare`, `github.com/WeidiDeng/caddy-cloudflare-ip`, `github.com/fvbommel/caddy-combine-ip-ranges`, and `github.com/mholt/caddy-ratelimit`.
-- `docker-compose.yml.example:210-214` says the version is pinned and `xcaddy builds must be pinned`.
-- `.env.example:53-58` pins image tags including `CADDY_VERSION=2.11.4`.
-- `.github/workflows/doc-drift.yml:105-127` checks some unpinned shell references but does not reject unversioned `xcaddy --with` module specs.
-- Manifest inspection showed `caddy:2.11.4-builder` and `caddy:2.11.4-alpine` support amd64 and arm64/v8, but that does not pin or build the plugin graph.
+- `caddy/Dockerfile:13` pins the base Caddy version.
+- `caddy/Dockerfile:17-21` uses unversioned Caddy module specs.
+- `docker-compose.yml.example:210-214` says `xcaddy` builds must be pinned, but the Dockerfile module graph floats.
+- `setup.sh:7-14` documents blank `SOPS_VERSION` as resolving latest at runtime.
+- `utilities/setup-system.sh:484-485` resolves latest from `getsops/sops` when blank.
+- `utilities/setup-system.sh:490-525` verifies the downloaded binary against the current upstream checksum file, which protects integrity for the chosen release but does not pin which release is chosen.
+- `.github/workflows/doc-drift.yml:105-127` checks selected unpinned references but scans `setup.sh` for the latest-release endpoint, not the `utilities/setup-system.sh` resolver that actually calls it.
 
 Realistic trigger:
 
-A production host rebuilds Caddy days or weeks after the audit. A plugin module changes, removes compatibility, changes transitive dependencies, or fails on arm64. The repository commit is unchanged, but the resulting Caddy binary differs from the audited behavior or fails to build.
+A production host rebuilds Caddy or installs SOPS after upstream module or SOPS releases change. The repository commit is unchanged, but the built/installed binary differs from what was audited.
 
 Production/operator impact:
 
-Setup or update can fail during Caddy build, or can produce an unreviewed Caddy binary. This weakens both reproducibility and the amd64/arm64 support claim for the actual reverse-proxy component.
+Setup or update can fail, or produce an unreviewed dependency behavior change. This weakens both recovery-sensitive dependency confidence and amd64/arm64 support claims.
 
-Cross-PR or cross-component interaction:
+Cross-component interaction:
 
-Recent work improved version pinning and command reference determinism. The Caddy Dockerfile still has a floating module graph, while docs/comments imply that the custom build is pinned. CI does not build the image or statically reject unversioned module specs.
+Caddy is the TLS/reverse-proxy front door. SOPS is on the secrets, restore, recovery, key rotation, and backup path. Both are required for the normal appliance.
 
-Why existing tests/CI did not prevent or expose it:
+Why current tests/CI missed it:
 
-The unpinned-version CI check scans shell scripts and selected `.env.example` CrowdSec values, but not `caddy/Dockerfile`. The local compose config check renders YAML only; it does not build Caddy. Manifest inspection proves base-image availability, not custom plugin build reproducibility.
+CI renders compose and performs static shell checks, but does not build the custom Caddy image. The unpinned-version check omits `caddy/Dockerfile` and misses the actual SOPS latest-release resolver.
 
 Minimal fix direction:
 
-Pin each `xcaddy --with` module to a tag or commit known to work with Caddy `2.11.4`, document the update procedure, and add a lightweight static CI/test guard that rejects unversioned `--with github.com/...` module specs.
+Pin each existing Caddy module to a known tag or commit. Set a pinned repository default for SOPS while retaining an explicit `SOPS_VERSION` override. Keep checksum verification. Add narrow static checks for both invariants.
 
 Focused regression recommendation:
 
-Add a test that parses `caddy/Dockerfile` and fails if any `xcaddy --with github.com/...` argument lacks `@<version-or-commit>`. For production acceptance, build the Caddy image on amd64 and arm64 and run `caddy list-modules` or equivalent to confirm expected modules are present.
+Add a test that rejects unversioned `xcaddy --with github.com/...` specs. Extend the unpinned-release check to the actual SOPS resolver path. In production acceptance, build Caddy on Noble amd64 and Noble arm64 and confirm expected modules are present.
 
 Scope-pressure note:
 
-Do not add a plugin registry, dependency dashboard, or generic build orchestration. Pin the four existing modules and test the narrow invariant.
+Do not add a dependency manager, plugin registry, or broad build framework. Pin the few required artifacts and test those invariants.
 
-### F-04 - Quick runbook presents OCI Security List as universal first-time prerequisite
+### F-04 - Production schema dependency contract is split across apt yq, CI yq, and unowned PyYAML
+
+Severity: Medium
+
+Confidence: Medium-high
+
+Area: Dependency installation contract, schema/secrets tooling, CI coverage
+
+Affected files:
+
+- `utilities/setup-system.sh:408-450`
+- `utilities/setup-system.sh:530-543`
+- `startup.sh:313-317`
+- `lib/schema.sh:7-10`
+- `lib/schema.sh:49-53`
+- `lib/secrets.sh:313-340`
+- `.github/workflows/doc-drift.yml:30-52`
+- `.github/workflows/doc-drift.yml:181-190`
+- `tests/test-secrets.sh`
+
+Affected supported entry point(s):
+
+- `sudo ./setup.sh install`
+- `sudo ./startup.sh` / `sudo make up`
+- `sudo ./utilities/setup-secrets.sh`
+- `sudo ./utilities/secrets-edit.sh`
+- `sudo ./utilities/secrets-rotate.sh`
+- `sudo ./backup.sh run`
+- generated command-reference workflow and local tests
+
+Execution path:
+
+1. Normal Noble setup installs apt package `yq`.
+2. Official Noble metadata shows that package is kislyuk/python-yq `3.1.0-3`, architecture `all`, depending on `python3-yaml`.
+3. `lib/schema.sh` says Mike Farah `yq` v4+ is required and tells operators it is installed by apt.
+4. CI deliberately avoids apt `yq` and installs Mike Farah `yq v4.53.3`.
+5. Setup verifies only that `yq` exists, not implementation or interface.
+6. Setup does not explicitly install `python3-yaml` and does not verify `python3 -c "import yaml"`.
+7. Startup later hard-fails if PyYAML is unavailable.
+
+Expected contract:
+
+Production setup, dependency validation, schema consumers, tests, and CI should agree on the required yq implementation and Python YAML module ownership. If a specific yq implementation is required, setup should install/validate it. If apt python-yq is intended, CI and comments should test that implementation and all direct calls should use compatible flags.
+
+Current behavior:
+
+Production and CI intentionally use different yq implementations. The current core schema helper filters are jq-style and passed a disposable python-yq `3.1.0` compatibility check, but the declared contract and CI are Mike Farah. A direct conditional Cloudflare-key query in `lib/secrets.sh` omits raw output; python-yq emits quoted strings for that query. That function currently has no active callers, so this is not being reported as an immediate startup failure, but it demonstrates real implementation divergence.
+
+PyYAML is currently installed on a fresh Noble apt path only incidentally through apt `yq`. If production moves to a standalone Mike Farah yq binary, or if a host already has a non-apt `yq`, setup can declare dependencies ready while startup later fails on missing PyYAML.
+
+Evidence:
+
+- Official Noble amd64 and arm64 metadata: `Package: yq`, `Version: 3.1.0-3`, `Homepage: https://github.com/kislyuk/yq`, `Depends: ... python3-yaml ...`.
+- `lib/schema.sh:9-10` declares yq v4+ and says apt installs it.
+- `lib/schema.sh:49-53` only checks command existence and prints a Mike Farah requirement.
+- `.github/workflows/doc-drift.yml:35-37` states apt `yq` is python-yq and CI must install Mike Farah.
+- `.github/workflows/doc-drift.yml:45-51` pins and installs Mike Farah `yq v4.53.3`.
+- `utilities/setup-system.sh:408` lists `yq` but not `python3-yaml`.
+- `utilities/setup-system.sh:533-543` verifies commands plus `python3-argon2`, not PyYAML or yq interface/version.
+- `startup.sh:313-317` later requires `python3 -c "import yaml"`.
+- Disposable python-yq `3.1.0` check: core schema filters succeeded; the Cloudflare conditional-key query without raw output emitted quoted keys.
+
+Realistic trigger:
+
+A fresh Noble host installs apt python-yq while CI tests Mike Farah. A future schema expression that uses Mike Farah-only syntax can pass CI and fail production. Conversely, switching production to the declared Mike Farah binary without explicitly installing PyYAML can make startup fail after setup reports dependencies ready.
+
+Production/operator impact:
+
+Secrets setup, secret editing, secret rotation, backup HMAC extraction, startup secret export, and command-reference generation all depend on the schema/secrets stack. A wrong accepted implementation can block setup/startup or produce misleading validation behavior.
+
+Cross-component interaction:
+
+Candidate A and Candidate B are coupled: apt `yq` currently masks the missing PyYAML ownership because it depends on `python3-yaml`. Fixing the yq implementation without adding PyYAML ownership can uncover the startup failure.
+
+Why current tests/CI missed it:
+
+CI installs Mike Farah yq directly, so it does not exercise the Noble apt yq implementation. Tests do not assert yq implementation/version or `python3 -c "import yaml"` as part of setup dependency verification. The direct python-yq divergence is not covered by `tests/test-secrets.sh`.
+
+Minimal fix direction:
+
+Choose one production contract and enforce it. Given the current comments and CI, the narrow path is to install a pinned Mike Farah yq v4 binary with explicit amd64/arm64 mapping and checksum verification, validate the required yq interface/version, explicitly install `python3-yaml`, and verify `python3 -c "import yaml"` in setup. If the project intentionally chooses apt python-yq instead, update CI/comments and add compatibility tests for that implementation.
+
+Focused regression recommendation:
+
+Add setup-system tests for yq implementation validation and PyYAML validation. Add a schema/secrets test that runs the Cloudflare conditional-key extraction under the selected yq implementation and proves unquoted key names are used.
+
+Scope-pressure note:
+
+Do not add a dependency framework. Own the few commands/modules this appliance requires.
+
+### F-05 - Active operator guidance still contains stale OS/provider support-contract wording
 
 Severity: Low
 
 Confidence: High
 
-Area: Documentation, cloud-provider neutrality, junior-operator guidance
+Area: Documentation/support-contract drift, provider-neutral operator guidance
 
 Affected files:
 
-- `RUNBOOK.md:10-13`
-- `docs/DEPLOYMENT.md:18-27`
-- `AGENTS.md:240-298`
+- `AGENTS.md`
+- `docs/DISASTER-RECOVERY.md:29`
+- `docs/RECOVERY-CARD.md:12-15`
+- `utilities/restore-run.sh:1655`
+- `RUNBOOK.md:12`
 
 Affected supported entry point(s):
 
-- Human first-time setup from `RUNBOOK.md`
-- Provider-neutral support claim
+- Human first-time setup and recovery guidance
+- Generated or runtime operator hints derived from current scripts
+- Durable repository instructions for future work
 
 Execution path:
 
-1. Operator opens the quick runbook for first-time setup.
-2. Step 1 says `Configure OCI Security List (ports 80, 443, and 22)`.
-3. A non-OCI operator sees an OCI-specific prerequisite presented as universal.
+1. Operator or future agent reads active guidance.
+2. Guidance still advertises the older two-release support contract or presents OCI-specific console/security-list wording as universal.
+3. The corrected Noble-only provider-neutral support claim becomes inconsistent across active materials.
 
-Contract expected:
+Expected contract:
 
-Universal docs should say provider firewall/security group/network firewall, with OCI details clearly marked as provider-specific notes or examples.
+Active guidance should consistently say Ubuntu 24.04 LTS Noble, amd64 or arm64, provider-neutral Ubuntu host, Cloudflare-first mandatory edge.
 
 Current behavior:
 
-The deployment guide uses the correct generic wording and an OCI note, but the quick runbook still states an OCI Security List as the first universal setup step.
+`docs/DEPLOYMENT.md` is now aligned with Ubuntu 24.04 and generic provider firewall wording. Other active guidance remains stale:
 
-Evidence:
+- `AGENTS.md` still advertises the older two-release OS matrix and portability expectations.
+- `docs/DISASTER-RECOVERY.md:29` says a fresh or replacement Ubuntu 22.04/24.04 host.
+- `docs/RECOVERY-CARD.md:12-15` references OCI console access and says Ubuntu 22.04 or later is supported.
+- `utilities/restore-run.sh:1655` emits an install hint for Ubuntu 22.04/24.04.
+- `RUNBOOK.md:12` presents "Configure OCI Security List" as the universal first setup step.
 
-- `AGENTS.md:240-254` states that the project name is historical and supported hosts include OCI, AWS, Azure, Google Cloud, other VMs, private virtualization, and physical Ubuntu.
-- `AGENTS.md:273-298` allows provider-specific examples only when clearly identified as notes.
-- `docs/DEPLOYMENT.md:18-27` uses "provider firewall/security group/router" and then has an explicit OCI note.
-- `RUNBOOK.md:10-13` says "Configure OCI Security List" without qualifying it as an OCI-specific example.
+Historical reports under `reports/` are not part of this finding and do not need rewriting for the support-policy change.
 
 Realistic trigger:
 
-A junior operator on AWS, Azure, GCP, a private VM, or a physical Ubuntu host starts with `RUNBOOK.md` and assumes OCI is required or that the runbook does not apply.
+A junior operator follows the recovery card or runbook and either provisions an unsupported host or assumes OCI-specific setup is required on every provider.
 
 Production/operator impact:
 
-This is unlikely to break code, but it weakens the support boundary and onboarding clarity.
+This is unlikely to break executable code by itself, but it weakens the support boundary and can mislead setup/recovery actions.
 
-Cross-PR or cross-component interaction:
+Cross-component interaction:
 
-The final repository instructions strengthened provider-neutrality language. Most docs already comply, but the quick runbook was not fully aligned.
+The docs drift affects the same support claim that F-02 must enforce in setup. Documentation and code should converge in the same follow-up PR so future audits do not have split contracts.
 
-Why existing tests/CI did not prevent or expose it:
+Why current tests/CI missed it:
 
-There is no documentation lint for universal OCI-specific phrasing. Existing tests include acceptable OCI examples in provider notes and CrowdSec comments, but not a runbook wording rule.
+No focused documentation check enforces Noble-only support wording or provider-neutral first-time setup phrasing. The existing stale-term checks do not cover these support-contract strings.
 
 Minimal fix direction:
 
-Change the first runbook step to "Configure your provider firewall/security group/network firewall for ports 80, 443, and restricted SSH 22" and optionally add an OCI note beneath it.
+Update only active support-contract guidance and generated/runtime hints that materially describe supported OS/provider prerequisites. Do not rewrite historical reports or broad documentation for style.
 
 Focused regression recommendation:
 
-No broad doc linter is necessary. A narrow grep-style test could reject `Configure OCI Security List` in universal quick-start sections if this drift recurs.
+Add a narrow doc/support-contract check for active docs if this drift recurs, or include this exact grep in the follow-up PR validation.
 
 Scope-pressure note:
 
-Do not add cloud-provider adapters or provider-specific automation. This is a wording fix.
+Do not add cloud-provider automation or expand OS support. This is a bounded wording and generated-hint cleanup.
 
 ## Test Consolidation Coverage Assessment
 
-The consolidation into `tests/run-tests.sh all` is directionally strong. The runner inventories 15 permanent suites:
+The permanent runner still inventories 15 suites:
 
 - `tests/test-architecture.sh`
 - `tests/test-security-privileges.sh`
@@ -553,188 +724,209 @@ The consolidation into `tests/run-tests.sh all` is directionally strong. The run
 - `tests/test-crowdsec.sh`
 - `tests/test-uninstall.sh`
 
-The runner also rejects duplicate inventory entries and unlisted top-level `test-*.sh` files. This is a good permanent-test contract.
-
 Coverage strengths:
 
-- Architecture helper tests cover amd64/arm64 SOPS and CrowdSec bouncer mappings.
-- Storage setup tests cover parse order, CLI precedence over loaded env, destructive gates, and metadata/help behavior.
-- Restore/recovery tests cover many historical restore safety contracts.
-- Operation tests cover shared guard behavior.
-- Systemd tests cover hardening and runtime path contracts.
-- Uninstall tests now cover firewall/test-reset cleanup paths.
-- Operator UI tests cover help/version and confirmation prompt conventions.
+- The runner inventory is centralized.
+- Earlier suites still pass before the current prompt-scan stop.
+- Direct `test-crowdsec.sh` and `test-uninstall.sh` execution passed after the canonical stop point.
+- Storage tests cover both migration parser directions and mode precedence.
 
 Coverage gaps:
 
-- F-01: prompt-format scan has no allowed-text fixture and scans too broadly.
-- F-02: no supported Ubuntu release detection fixtures.
-- F-03: no Dockerfile check for unpinned `xcaddy --with` modules and no CI image build.
-- CI path filters omit `AGENTS.md` despite tests scanning it.
+- F-01: prompt scan covers prose/report content rather than actual operator prompt surfaces.
+- F-02: no supported-host release fixture tests.
+- F-03: no Caddy module pin check, no SOPS default pin check, no Caddy build in CI.
+- F-04: no production-vs-CI yq implementation check and no setup-owned PyYAML validation.
+- F-05: no active support-contract wording check.
 
 ## Security and Secrets Assessment
 
-Static result: Green, with normal production-host validation still required.
+Static result: Yellow until F-04 is fixed.
 
 Positive signals:
 
-- Persistent secrets are SOPS/Age encrypted.
-- Runtime Docker secret source files live under `/run/vaultwarden-oci/secrets` and are recreated by startup.
-- Compose uses Docker secret files for sensitive values.
-- Vaultwarden and Caddy drop all capabilities except required narrow grants; both use `no-new-privileges`.
-- Vaultwarden and Caddy use `read_only: true`.
-- Postfix intentionally does not use `read_only: true` because the upstream image mutates `/scripts`, and the compose file documents the tradeoff while retaining tmpfs and capability limits.
-- Emergency/recovery key material paths are documented and tested statically.
+- SOPS/Age remains the designed persistent-secret model.
+- Runtime Docker secret source files remain transient under `/run/vaultwarden-oci/secrets`.
+- Recovery kit and offline-recipient concepts remain separate from emergency backup passphrase handling.
+- Emergency backup code refuses to encrypt key-material capsules only to the operational Age recipient.
 
-Limits:
+Remaining blocker:
 
-- No real SOPS/Age production secret rotation was performed.
-- No real Cloudflare, SMTP, or rclone secrets were injected.
-- No live container runtime inspection was performed.
+- The schema/secrets tooling dependency contract is inconsistent across production setup and CI. That is a dependency installation and coverage problem, not a finding that secrets are currently exposed.
 
 ## Backup / Restore / Recovery Assessment
 
-Static result: Green, with required live drills.
+Static result: Green with required live drills, plus corrected acceptance wording.
 
-The backup model remains a deliberate three-tier design: database rollback, full disaster recovery, and clone-grade emergency capsule. The recovery path now has a clearer transaction boundary:
+The implementation distinguishes:
 
-- `recover.sh` validates promoted identity/config before setting `RECOVERY_COMMITTED=true`.
-- Startup failures after commit are reported as committed recovery artifacts with failed startup, not as rollback-safe failures.
-- Health failures after commit explicitly tell the operator not to treat the service as healthy.
-- Signal handling exits through cleanup rather than accidentally continuing.
+- operational Age private key: the live server key used for SOPS and normal db/full backup encryption;
+- offline SOPS/Age recovery private key: kept offline, used by `recover.sh` and SOPS recovery flows;
+- offline Age public SOPS recipient: may be stored in SOPS policy/manifest;
+- emergency backup passphrase: independent passphrase for passphrase-sealed emergency capsules;
+- `EMERGENCY_BACKUP_AGE_RECIPIENT`: separate Age recipient used for recipient-sealed emergency capsules;
+- private identity for `EMERGENCY_BACKUP_AGE_RECIPIENT`: the identity needed to decrypt such emergency capsules.
 
-No new static restore/recovery defect was found. Real acceptance still needs actual db restore, full restore, emergency restore, and offline Age key recovery drills.
+Corrected acceptance behavior:
+
+- Emergency passphrase mode: create emergency backup, verify metadata says `age-passphrase`, decrypt with the operator-provided emergency backup passphrase.
+- Emergency recipient mode: set `EMERGENCY_BACKUP_AGE_RECIPIENT`, create emergency backup, verify metadata says `age-recipient`, decrypt with the corresponding private identity through `EMERGENCY_BACKUP_AGE_IDENTITY_FILE` or restore path.
+- Offline SOPS/Age recovery: validate SOPS recipient/recovery behavior through `recover.sh` disaster-recovery contract.
+
+Only claim the offline recovery Age key decrypts the emergency capsule when that same recipient was intentionally configured as `EMERGENCY_BACKUP_AGE_RECIPIENT`.
 
 ## Operation Guard and Interruption Assessment
 
 Static result: Green.
 
-Positive signals:
-
-- Shared operation lock state is centralized in `lib/operations.sh`.
-- `operation_release` closes the global lock descriptor instead of explicitly unlocking it, preserving inherited-lock semantics for nested mutating children.
-- Package-manager child detection includes `apt`, `apt-get`, `dpkg`, `unattended-upgrade`, `add-apt-repository`, and command-line checks.
-- Operation status and conflict messaging remain operator-facing and descriptive.
-- Interruption-sensitive workflows are covered by the consolidated tests.
-
-No new operation guard or interruption finding was identified.
+No new operation-guard finding was identified in this focused pass. Existing operation lock behavior, package-manager contention protection, and interruption-sensitive tests remain outside the corrected blockers.
 
 ## Storage / Migration / Uninstall Assessment
 
-Static result: Green for storage/migration/uninstall logic, Yellow for first-run host setup portability because of F-02.
+Static result: Green for storage/migration/uninstall logic; Yellow for final support claim until host dependency blockers are fixed.
 
-Positive signals:
+Direct evidence added:
 
-- Storage setup validates the configured state path before creating data directories.
-- Separate volume mode aligns `PROJECT_STATE_DIR` with the mounted data volume.
-- Existing tests prove canonical and compatibility CLI grammar, migration mode precedence, and environment-load behavior.
-- Storage guidance prefers stable operator-supplied paths such as `/dev/disk/by-id/...`.
-- Uninstall/test-reset coverage is now consolidated and broad.
+- `tests/test-uninstall.sh` passed under Bash 5 PATH after the canonical runner stopped before it.
 
-Remaining host-level concern:
+Migration acceptance must explicitly cover:
 
-- The `universe` repository fallback can still configure the wrong Ubuntu release. That is setup-system portability, not a storage migration logic defect, but it affects first-run production readiness.
+- boot-to-block migration;
+- interruption/resume where supported for boot-to-block;
+- block-to-boot migration;
+- final source/state validation after block-to-boot.
+
+Validating only the golden boot-to-block path is not enough to claim all advertised migration behavior.
 
 ## Systemd and Automation Assessment
 
 Static result: Green with host validation required.
 
-Positive signals:
-
-- Static systemd hardening tests passed as part of the runner before the later operator UI failure.
-- Units use explicit read/write paths and runtime directories where needed.
-- Root-required units are documented as root-required.
-- Service-user detection in `utilities/setup-systemd.sh` prefers explicit `SERVICE_USER`, then `SUDO_USER`, then a real non-root account, avoiding a hard-coded `ubuntu`/`opc` production dependency.
-- Failure notification services are explicitly root-operated.
-
-Limits:
-
-- No `systemctl enable`, `systemctl start`, timer run, reboot, or `systemd-analyze verify` acceptance was performed on a real Ubuntu host.
-- GitHub Actions did not validate the audited HEAD.
+No new static systemd defect was found. Real Noble amd64 and arm64 validation still must cover installed units/timers, reboot/startup, runtime secret recreation, expected contention behavior, and failure notification.
 
 ## Operator CLI / Make / Dashboard Assessment
 
-Static result: Green/Yellow.
+Static result: Yellow because of F-01.
 
-Positive signals:
+The operator CLI argument contracts ran before the prompt-scan failure and passed. Dashboard truthfulness, smoke readiness, drill truthfulness, and operator UI checks printed pass messages before the later prompt-format scan failed.
 
-- CLI help/version contracts are now inventoried in permanent tests.
-- Removed developer Make wrappers are guarded against stale references.
-- Command reference generation is deterministic.
-- `maintenance-db-maint.sh` no longer prints completion success after health failure.
-- Dashboard and Make targets are narrower than the earlier historical reports and align better with root-operated production flows.
-
-Yellow reason:
-
-- The operator UI test suite currently fails because the prompt-format scan is too broad. This is a test false positive, but it blocks the canonical gate.
+The corrected root cause is not that the operator UI behavior is bad; it is that the repository-wide grep treats prose/report content as active prompts.
 
 ## Documentation and Generated Reference Assessment
 
 Static result: Yellow.
 
-Positive signals:
+Important correction:
 
-- `docs/COMMAND-REFERENCE.md` regenerated deterministically with no diff on repeated generation.
-- Most docs now describe provider firewall/security group behavior generically.
-- Deployment guide uses an explicit OCI note instead of making OCI universal.
-- Historical PR-specific test names and stale command references were consolidated.
+- `docs/DEPLOYMENT.md` now matches the revised Ubuntu 24.04 support contract and should not be treated as stale merely because older guidance once claimed Ubuntu 22.04 support.
 
-Remaining issues:
+Remaining active drift:
 
-- F-04: quick runbook first-time setup still says "Configure OCI Security List" as universal wording.
-- CI path filters omit `AGENTS.md`, even though a test currently scans the full repo and failed on `AGENTS.md`.
+- F-05 covers stale OS support wording in active guidance and one runtime install hint.
+- F-05 retains the old F-04 provider-neutral issue for the quick runbook's universal OCI Security List wording.
+
+Generated command reference was not regenerated during this report-only pass.
 
 ## Production-Host Acceptance Validation Items
 
-Run these after F-01 through F-03 are fixed. These are practical acceptance items for an OCI VM, but the wording and pass/fail signals should apply to any supported provider.
+Run these after F-01 through F-04 are fixed. The supported matrix is Noble amd64 and Noble arm64 only.
+
+### Noble amd64
+
+Full production-host acceptance:
 
 | # | Validation item | Success signal | Failure signal |
 | --- | --- | --- | --- |
-| 1 | Fresh Ubuntu 22.04 Jammy amd64 setup | `setup.sh install` completes, apt sources use Jammy, compose renders, services start. | Wrong-release apt source, dependency install failure, Docker repo mismatch. |
-| 2 | Fresh Ubuntu 24.04 Noble amd64 setup | `setup.sh install` completes, apt sources use Noble, compose renders, services start. | Dependency install failure or unsupported release confusion. |
-| 3 | At least one fresh arm64 setup, preferably Jammy and Noble | Same as amd64, on arm64. | Wrong architecture artifact, package unavailability, compose image failure. |
-| 4 | Custom Caddy build on amd64 and arm64 | `docker compose build caddy` succeeds and expected modules are present. | `xcaddy` module resolution/build failure or missing module. |
-| 5 | systemd install and reboot smoke | Timers/services enable, reboot recreates runtime secrets, health passes. | Missing runtime dirs, permission failure, unhealthy service after boot. |
-| 6 | Operation guard contention drill | Concurrent mutating operations serialize or return expected conflict/skip result. | Overlap, stale metadata confusion, unsafe termination prompt. |
-| 7 | Database backup and verify | DB backup completes, metadata valid, restore verification passes. | Corrupt snapshot, metadata missing, verification skipped. |
-| 8 | Full backup and inspect | Full archive contains expected state and excludes live/transient secrets. | Missing required restore material or included decrypted runtime secrets. |
-| 9 | Emergency backup decrypt drill | Offline key decrypts emergency capsule in a controlled drill. | Offline key cannot decrypt or required files missing. |
-| 10 | Database restore drill | Restore completes, Vaultwarden starts, health passes, expected data present. | Incomplete restore presented as success or health failure hidden. |
-| 11 | Full restore drill on fresh VM | Fresh host recovers with documented key material and health passes. | Storage/config mismatch, missing Age key, unclear post-restore repair. |
-| 12 | `recover.sh` offline Age recovery drill | Committed recovery reaches startup/health or clearly reports committed unhealthy state. | Rollback after commit, ambiguous success, lost key/config material. |
-| 13 | Age key rotation/recovery kit export | New recipients work, old paths are handled as documented, recovery kit is usable. | Ciphertext cannot be decrypted by intended recipient. |
-| 14 | Block-volume setup/migration/resume drill | Stable device path, sentinel, fstab UUID, and mount ordering behave correctly. | Writes state to boot volume when mount missing or resumes unsafe state. |
-| 15 | Safe restart and rollback drill | Restart failure rolls back or reports exact manual action; healthy restart passes. | Service left down with success output. |
-| 16 | CrowdSec/firewall bouncer install | Package/bouncer installs on host arch, nftables/iptables path selected correctly, decisions flow. | Wrong arch, unsupported firewall backend, no LAPI/bouncer communication. |
-| 17 | Failure email/recovery kit notification | Expected message and attachment route succeeds through configured mail path. | Silent notification failure or malformed attachment. |
-| 18 | Normal uninstall and `--test-reset` clean reinstall | Uninstall removes intended project state only; reinstall succeeds from clean state. | Residual firewall/systemd/runtime state breaks reinstall or unrelated host data touched. |
+| 1 | Fresh Noble amd64 setup | `setup.sh install` completes only after validating Ubuntu 24.04/Noble; apt sources use Noble; compose renders. | Unsupported/unresolved host proceeds, wrong apt source, dependency install failure. |
+| 2 | Dependency contract | yq implementation/version, PyYAML import, SOPS pinned version, Docker/Compose, and required commands validate before setup success. | Setup declares ready but startup or schema/secrets tools fail. |
+| 3 | Custom Caddy build | `docker compose build caddy` succeeds and expected modules are present. | Unpinned module resolution failure or missing module. |
+| 4 | systemd install and reboot | Units/timers enable, reboot recreates runtime secrets, health passes. | Missing runtime dirs, permission failure, unhealthy service after boot. |
+| 5 | Operation contention | Concurrent mutating operations serialize or return expected conflict/skip result. | Overlap, stale metadata confusion, unsafe termination prompt. |
+| 6 | Database backup and verify | DB backup completes, integrity metadata valid, verification passes. | Corrupt snapshot, metadata missing, verification skipped. |
+| 7 | Full backup and inspect | Full archive contains expected state and excludes live/transient secrets. | Missing restore material or included decrypted runtime secrets. |
+| 8 | Emergency passphrase backup | Passphrase-sealed emergency archive decrypts with the emergency backup passphrase. | Passphrase cannot decrypt or required files missing. |
+| 9 | Emergency recipient backup, if configured | Recipient-sealed emergency archive decrypts with the private identity for `EMERGENCY_BACKUP_AGE_RECIPIENT`. | Wrong recipient, missing identity, or misleading acceptance claim. |
+| 10 | Database restore | Restore completes, Vaultwarden starts, health passes, expected data present. | Incomplete restore presented as success. |
+| 11 | Full restore on fresh VM | Fresh host recovers with documented key material and health passes. | Storage/config mismatch, missing Age key, unclear repair. |
+| 12 | Offline SOPS/Age recovery | `recover.sh` validates the offline recipient/private key contract and reports committed unhealthy states clearly if startup/health fails. | Rollback after commit, ambiguous success, lost key/config material. |
+| 13 | Key rotation and recovery kit | New recipients work, old paths are handled as documented, recovery kit is usable. | Ciphertext cannot be decrypted by intended recipient. |
+| 14 | Boot-to-block migration | Migration succeeds; interruption/resume behavior works where supported. | State written to wrong storage or unsafe resume. |
+| 15 | Block-to-boot migration | Focused reverse migration succeeds with final source/state validation. | Advertised direction works only one way. |
+| 16 | Safe restart | Healthy restart passes; failure rolls back or reports exact manual action. | Service left down with success output. |
+| 17 | CrowdSec and bouncers | Package/bouncer installs, local firewall path works, Cloudflare Workers bouncer communicates where enabled. | Wrong package/backend/bouncer behavior. |
+| 18 | Failure notification | Expected message and recovery-kit attachment route succeeds. | Silent notification failure or malformed attachment. |
+| 19 | Normal uninstall and test reset | Uninstall removes intended project state only; `--test-reset` clean reinstall succeeds. | Residual firewall/systemd/runtime state breaks reinstall or unrelated data touched. |
+
+### Noble arm64
+
+At minimum, perform an arm64 acceptance drill that proves the architecture-sensitive support claim:
+
+| # | Validation item | Success signal | Failure signal |
+| --- | --- | --- | --- |
+| 20 | Fresh Noble arm64 setup | Host passes Noble validation; architecture-sensitive dependencies install for arm64. | Wrong architecture artifact or unsupported package. |
+| 21 | Arm64 stack smoke plus one backup/restore path | Correct yq/PyYAML/SOPS path, Docker image availability, Caddy build/modules, CrowdSec/bouncer install, Cloudflare Workers bouncer architecture path, systemd startup, health, one real backup/restore path, uninstall/clean reinstall sanity. | Static mappings exist but real arm64 build/runtime path fails. |
+
+Do not require a full duplicate destructive disaster-recovery drill on both architectures unless it adds production value. Do not claim arm64 support based only on static mappings or image manifests.
+
+## Rejected Missed-Item Candidates and Narrow Rejections
+
+No candidate A/B/C item was rejected wholesale.
+
+Rejected or narrowed subclaims:
+
+- Lack of Ubuntu 22.04 support is not a defect under the revised product decision.
+- Candidate A is not reported as "all current schema helpers fail under apt yq"; a disposable python-yq check showed the core schema filters currently work.
+- Candidate A is still a finding because production, comments, validation, and CI disagree on the yq contract, and a direct no-raw-output query demonstrates implementation divergence.
+- Candidate B is not reported as a guaranteed fresh-Noble failure today because apt yq currently depends on `python3-yaml`; it is reported as an ownership gap that becomes real when yq is preinstalled differently or fixed to the declared Mike Farah binary.
+- The offline SOPS/Age recovery key does not generally decrypt a passphrase-sealed emergency capsule. That was a report acceptance error, not an executable defect.
+- A full duplicate destructive DR drill on both amd64 and arm64 is not required by default; arm64 needs meaningful architecture-sensitive validation plus a real backup/restore path.
 
 ## Rejected Overengineering / Scope Pressure
 
 The findings do not justify broad redesign.
 
-- Do not add a new test framework to fix F-01; make the scan precise and add a small fixture.
-- Do not expand OS support to Debian or non-LTS Ubuntu to fix F-02; fail closed to the current Jammy/Noble contract.
-- Do not add a generic plugin dependency manager for F-03; pin the four existing `xcaddy` modules and test the invariant.
-- Do not add cloud-provider automation for F-04; correct the wording and keep provider firewall setup as an operator prerequisite.
-- Do not convert the shell appliance into a framework, workflow engine, or orchestrator.
+- Do not add a new test framework for F-01; narrow the scan and add focused fixtures.
+- Do not expand support to Debian, Ubuntu 22.04, other Ubuntu releases, or other distributions for F-02.
+- Do not add a generic dependency manager for F-03/F-04; pin and validate the few required tools.
+- Do not add a cloud-provider abstraction for F-05; correct active guidance and keep provider firewall setup as an operator prerequisite.
+- Do not turn the appliance into a framework, orchestrator, or enterprise platform.
 
 ## Final Verdict
 
-Final static verdict: YELLOW.
+Current report-correction HEAD: `bd8a5e773db7d3f97bc9c364918e6ca8b560c815`
 
-The branch is close, but it is not production-ready at the audited HEAD. The current canonical test runner fails, first-run Ubuntu release fallback can violate Jammy/Noble portability, and the custom Caddy build is not reproducible because plugin modules are unpinned. Fix F-01, F-02, and F-03 before claiming production readiness or starting final host acceptance. Fix F-04 before presenting the runbook as provider-neutral operator guidance.
+Original executable audit HEAD: `2837fc1cddb7dda4ce6e156e4e95c5355d506f3a`
 
-After those fixes, rerun:
+Production code changed since original audit: no
 
-```bash
-git diff --check
-find . -type f -name '*.sh' | xargs bash -n
-find . -type f -name '*.sh' | xargs shellcheck -x --severity=warning
-bash tests/run-tests.sh all
-docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
-DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
-git diff --exit-code -- docs/COMMAND-REFERENCE.md
-```
+Supported OS: Ubuntu 24.04 LTS Noble only
 
-Then perform the production-host acceptance items above on the supported matrix before calling this ready for a real Vaultwarden deployment.
+Supported architectures:
+
+- amd64
+- arm64
+
+Cloud-provider model: provider-neutral host with mandatory Cloudflare-first edge
+
+Static readiness: YELLOW
+
+Blocking findings: 4 (`F-01`, `F-02`, `F-03`, `F-04`)
+
+Non-blocking findings: 1 (`F-05`)
+
+Report correctness items corrected:
+
+- removed Ubuntu 22.04 from the supported production matrix;
+- reframed F-02 for Noble-only fail-closed host detection;
+- corrected F-01 root cause to overbroad scan scope including reports/prose;
+- added yq/PyYAML dependency-contract evidence;
+- added SOPS reproducibility evidence;
+- corrected emergency backup acceptance behavior;
+- added direct CrowdSec/uninstall test evidence after the canonical stop point;
+- added PR #230 exact-head CI evidence;
+- revised production-host acceptance for Noble amd64 and Noble arm64 only;
+- made both migration directions explicit.
+
+Production-host acceptance items: 21
+
+Recommendation: create one bounded follow-up PR for Noble host dependency and readiness-contract closure, then rerun full validation and perform Noble amd64/arm64 host acceptance.
