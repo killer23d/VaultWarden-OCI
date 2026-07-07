@@ -84,11 +84,13 @@ migrate_main_body="$(extract_func lib/migrate.sh migrate_mode_main)"
     || fail 'migrate_mode_main must not resolve migration CLI arguments'
 [[ "$(grep -c '_mv_parse_args' utilities/setup-storage.sh)" == "1" ]] \
     || fail 'setup-storage migration entry path must call _mv_parse_args exactly once'
-parse_line="$(grep -n '_mv_parse_args' utilities/setup-storage.sh | cut -d: -f1)"
-resolve_line="$(grep -n '_mv_resolve_args' utilities/setup-storage.sh | cut -d: -f1)"
-execute_line="$(grep -n 'migrate_mode_main' utilities/setup-storage.sh | cut -d: -f1)"
-[[ -n "$resolve_line" && -n "$execute_line" && "$parse_line" -lt "$resolve_line" && "$resolve_line" -lt "$execute_line" ]] \
-    || fail 'setup-storage must parse, resolve, then execute migration in order'
+load_line="$(grep -n '^[[:space:]]*_ss_load_runtime_environment$' utilities/setup-storage.sh | cut -d: -f1)"
+parse_line="$(grep -n '^[[:space:]]*_mv_parse_args ' utilities/setup-storage.sh | cut -d: -f1)"
+resolve_line="$(grep -n '^[[:space:]]*_mv_resolve_args$' utilities/setup-storage.sh | cut -d: -f1)"
+execute_line="$(grep -n '^[[:space:]]*migrate_mode_main$' utilities/setup-storage.sh | cut -d: -f1)"
+[[ -n "$load_line" && -n "$resolve_line" && -n "$execute_line" \
+    && "$load_line" -lt "$parse_line" && "$parse_line" -lt "$resolve_line" && "$resolve_line" -lt "$execute_line" ]] \
+    || fail 'setup-storage must load env defaults, parse once, resolve, then execute migration in order'
 pass 'migration parse/resolve/execute ownership is explicit'
 
 out=$(bash <<'PROBE'
@@ -516,6 +518,85 @@ run_storage migrate resume --force-format --dry-run
 run_storage --mode migrate resume --force-format --dry-run
 [[ "$status" -ne 0 && "$out" == *'This script must be run as root'* && "$out" != *'Unknown option'* ]] \
     || fail "compatibility --mode migrate rejected legitimate resume options before root guard: $out"
+
+out=$(bash <<'PROBE'
+set -euo pipefail
+REPO_ROOT="$PWD"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+PROJECT_ROOT="$tmp/repo"
+mkdir -p "$PROJECT_ROOT"
+chmod 700 "$PROJECT_ROOT"
+cat > "$PROJECT_ROOT/.env" <<'EOF_ENV'
+DRY_RUN=false
+_MV_DIRECTION=boot-to-block
+_MV_FORCE=false
+_MV_YES=false
+DATA_VOLUME_DEVICE=/dev/disk/by-id/env-default
+DATA_VOLUME_MOUNT=/mnt/env-default
+EOF_ENV
+chmod 600 "$PROJECT_ROOT/.env"
+_VW_DEFAULT_STATE_DIR=/var/lib/vaultwarden
+_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data
+source "$REPO_ROOT/lib/config.sh"
+source "$REPO_ROOT/lib/migrate.sh"
+_SS_MODE=setup
+_SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
+_SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+_SS_DATA_DEVICE_PROVIDED=false
+_SS_DATA_MOUNT_PROVIDED=false
+_SS_AUTO=false
+_SS_FORCE=false
+DRY_RUN=false
+declare -a _SS_MODE_ARGS=()
+declare -a _SS_MIGRATE_ARGS=()
+log_error(){ printf 'ERR:%s\n' "$*" >&2; }
+show_help(){ :; }
+print_project_version(){ :; }
+_require_cli_value(){
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "$opt requires a value."
+        exit 2
+    fi
+}
+eval "$(awk '
+  /^_ss_load_runtime_environment\(\)/ {p=1}
+  /^_MV_SCRIPT_NAME=/ {p=0}
+  p {print}
+' "$REPO_ROOT/utilities/setup-storage.sh")"
+eval "$(awk '
+  /^_parse_outer_args\(\)/ {p=1}
+  /^main\(\)/ {p=0}
+  p {print}
+' "$REPO_ROOT/utilities/setup-storage.sh")"
+
+_parse_outer_args migrate run --target /mnt/vw-data --dry-run --direction block-to-boot --force --yes
+_ss_load_runtime_environment
+_mv_parse_args "${_SS_MIGRATE_ARGS[@]}"
+printf 'migrate dry=%s direction=%s force=%s yes=%s target=%s\n' \
+    "$DRY_RUN" "$_MV_DIRECTION" "$_MV_FORCE" "$_MV_YES" "$_MV_TARGET"
+
+_SS_MODE=setup
+_SS_MODE_ARGS=()
+_SS_MIGRATE_ARGS=()
+_SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
+_SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+_SS_DATA_DEVICE_PROVIDED=false
+_SS_DATA_MOUNT_PROVIDED=false
+DRY_RUN=false
+_parse_outer_args setup --data-device /dev/disk/by-id/cli-device --data-mount /mnt/cli --dry-run --auto --force
+_ss_load_runtime_environment
+_parse_setup_args
+printf 'setup dry=%s auto=%s force=%s device=%s mount=%s\n' \
+    "$DRY_RUN" "$_SS_AUTO" "$_SS_FORCE" "$_SS_DATA_DEVICE" "$_SS_DATA_MOUNT"
+PROBE
+)
+grep -Fxq 'migrate dry=true direction=block-to-boot force=true yes=true target=/mnt/vw-data' <<< "$out" \
+    || fail "migration CLI did not win over loaded environment defaults: $out"
+grep -Fxq 'setup dry=true auto=true force=true device=/dev/disk/by-id/cli-device mount=/mnt/cli' <<< "$out" \
+    || fail "setup CLI did not win over loaded environment defaults: $out"
+pass 'explicit setup-storage CLI state wins over loaded environment defaults'
 
 [[ ! -e "$ROOT/.env" ]] || fail 'metadata environment-load regression needs no pre-existing .env'
 metadata_env_created=true

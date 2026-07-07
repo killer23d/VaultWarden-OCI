@@ -36,6 +36,7 @@ _SS_DATA_MOUNT_PROVIDED=false
 _SS_AUTO=false
 _SS_FORCE=false
 TMP_WORKDIR=""
+declare -a _SS_MODE_ARGS=()
 declare -a _SS_MIGRATE_ARGS=()
 
 _ss_on_err() {
@@ -540,12 +541,13 @@ _parse_outer_args() {
             ;;
     esac
 
-    if [[ "${_SS_MODE}" == "migrate" ]]; then
-        _SS_MIGRATE_ARGS=("${remaining[@]+"${remaining[@]}"}")
-        return 0
-    fi
+    _SS_MODE_ARGS=("${remaining[@]+"${remaining[@]}"}")
+    [[ "${_SS_MODE}" == "migrate" ]] && _SS_MIGRATE_ARGS=("${_SS_MODE_ARGS[@]+"${_SS_MODE_ARGS[@]}"}")
+    return 0
+}
 
-    set -- "${remaining[@]+"${remaining[@]}"}"
+_parse_setup_args() {
+    set -- "${_SS_MODE_ARGS[@]+"${_SS_MODE_ARGS[@]}"}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --data-device)
@@ -605,10 +607,15 @@ main() {
                     ;;
             esac
         done
-        _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
     fi
 
     _ss_load_runtime_environment
+
+    if [[ "${_SS_MODE}" == "migrate" ]]; then
+        _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
+    else
+        _parse_setup_args
+    fi
 
     (( EUID == 0 )) || {
         log_error "This script must be run as root: sudo utilities/setup-storage.sh $*"
