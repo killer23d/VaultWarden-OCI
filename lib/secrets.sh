@@ -549,20 +549,16 @@ _tmpfs_dir() {
 # ---------------------------------------------------------------------------
 # _check_recovery_kit_email_deps
 #
-# Prints the encryption tool name ("7z" or "zip") if available, returns 1 if
-# neither is installed. Callers should warn and skip gracefully on failure.
+# Prints the encryption tool name ("openssl") if available, returns 1 if
+# required tools are missing. Callers should warn and skip gracefully on failure.
 # ---------------------------------------------------------------------------
 _check_recovery_kit_email_deps() {
-    if command -v 7z >/dev/null 2>&1; then
-        printf '7z'
+    if command -v openssl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        printf 'openssl'
         return 0
     fi
-    if command -v zip >/dev/null 2>&1; then
-        printf 'zip'
-        return 0
-    fi
-    log_warn "recovery-kit email: neither 7z nor zip is installed — skipping email option."
-    log_warn "  Install with: sudo apt-get install -y p7zip-full"
+    log_warn "recovery-kit email: openssl and tar are required — skipping email option."
+    log_warn "  Install with: sudo apt-get install -y openssl tar"
     return 1
 }
 
@@ -570,10 +566,14 @@ _check_recovery_kit_email_deps() {
 # ---------------------------------------------------------------------------
 # _encrypt_recovery_kit_attachment PLAINTEXT_FILE OUTPUT_FILE TOOL
 #
-# Encrypts PLAINTEXT_FILE into OUTPUT_FILE using the given TOOL (7z or zip).
-# The selected archiver prompts for and confirms the attachment passphrase
-# interactively. Bash never reads the passphrase, so it is not placed in argv,
-# environment variables, logs, xtrace output, or temporary filenames/files.
+# Encrypts PLAINTEXT_FILE into OUTPUT_FILE using OpenSSL AES-256-CBC with
+# PBKDF2. The plaintext is first wrapped as a small tar stream so file metadata
+# and content can be validated after decryption. Bash collects and validates the
+# independent attachment passphrase with prompt_password_with_confirmation
+# (minimum 16 characters, confirmation required), then passes it to OpenSSL via
+# a private file descriptor using -pass fd:3. The passphrase is never exported,
+# logged, stored in a temporary file, used in a filename, or interpolated into
+# process argv; xtrace is disabled while the secret is live.
 # Returns 0 on success, 1 on failure. Shreds OUTPUT_FILE on failure.
 # ---------------------------------------------------------------------------
 _encrypt_recovery_kit_attachment() {
@@ -581,36 +581,41 @@ _encrypt_recovery_kit_attachment() {
     local output_file="$2"
     local tool="$3"
 
-    local _rc=0
-    rm -f "$output_file"
-    if [[ -w /dev/tty ]]; then
-        printf 'When prompted by %s, enter a unique attachment passphrase of at least 16 characters.\n' "$tool" >/dev/tty 2>/dev/null || true
+    if [[ "$tool" != "openssl" ]]; then
+        log_error "_encrypt_recovery_kit_attachment: unsupported tool '$tool'"
+        return 1
     fi
-    case "$tool" in
-        7z)
-            # -tzip       : ZIP container (universally openable — WinZip, 7-Zip, macOS, Linux)
-            # -mem=ZipCrypto : ZipCrypto encryption — the only cipher supported by p7zip 23.01
-            #                  on ARM64 Ubuntu 24.04. AES-256 + -mhe=on are 7z-format-only
-            #                  features; both produce exit 2 when combined with -tzip.
-            # -mx=0       : store only (no compression); plaintext is already uncompressible
-            # -p          : prompt interactively; do not append the passphrase.
-            7z a -tzip -mem=ZipCrypto -mx=0 \
-                -p \
-                "$output_file" "$plaintext_file" >/dev/null 2>&1
-            _rc=$?
-            ;;
-        zip)
-            # Info-ZIP prompts interactively when --encrypt is used without
-            # --password VALUE; keep the attachment passphrase out of argv.
-            zip -0 --encrypt \
-                "$output_file" "$plaintext_file" >/dev/null 2>&1
-            _rc=$?
-            ;;
-        *)
-            log_error "_encrypt_recovery_kit_attachment: unknown tool '$tool'"
-            return 1
-            ;;
-    esac
+    if [[ ! -f "$plaintext_file" ]]; then
+        log_error "_encrypt_recovery_kit_attachment: plaintext file not found"
+        return 1
+    fi
+
+    local _enc_pass _xtrace_was_set=0
+    case $- in *x*) _xtrace_was_set=1 ;; esac
+    { set +x; } 2>/dev/null
+    _enc_pass=$(prompt_password_with_confirmation \
+        "Passphrase to encrypt emailed attachment" 16) || {
+        unset _enc_pass
+        [[ $_xtrace_was_set -eq 1 ]] && set -x
+        log_error "Passphrase entry failed or aborted"
+        return 1
+    }
+
+    local _rc=0 _plain_dir _plain_base
+    _plain_dir=$(dirname -- "$plaintext_file")
+    _plain_base=$(basename -- "$plaintext_file")
+    rm -f "$output_file"
+
+    # OpenSSL 3 on Ubuntu 24.04 supports -pass fd:N. The secret is supplied on
+    # fd 3, not argv or the environment; the tar stream is the only stdin data.
+    if tar -C "$_plain_dir" -cf - "$_plain_base" \
+        | openssl enc -aes-256-cbc -pbkdf2 -salt -pass fd:3 -out "$output_file" 3<<<"$_enc_pass"; then
+        _rc=0
+    else
+        _rc=$?
+    fi
+    unset _enc_pass
+    [[ $_xtrace_was_set -eq 1 ]] && set -x
 
     if [[ $_rc -ne 0 ]]; then
         _secure_shred "$output_file" 2>/dev/null || true
@@ -677,7 +682,7 @@ PROMPT
     fi
     log_info "Recovery-kit email preflight passed for non-secret SMTP settings; smtp_password will be resolved only if Direct SMTP fallback is needed."
 
-    local _ext="zip" _att_name _att_file
+    local _ext="tar.enc" _att_name _att_file
     _att_name="important-documents-$(date +%Y%m%d).${_ext}"
     _att_file=$(mktemp -p /dev/shm "vw-att.XXXXXX.${_ext}" 2>/dev/null || mktemp "vw-att.XXXXXX.${_ext}")
     install -m 600 /dev/null "$_att_file"
@@ -694,8 +699,8 @@ PROMPT
 Please keep this file somewhere safe.
 
 The attached archive contains important account documents you requested.
-Open it with 7-Zip, WinZip, or the built-in archive manager on your device
-and enter the passphrase you set when it was created.
+Decrypt it with OpenSSL using the passphrase you set when it was created,
+then extract the resulting tar archive on a trusted device.
 
 Do not share this file or the passphrase with anyone.
 If you did not request this, please disregard.

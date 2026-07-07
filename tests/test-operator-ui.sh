@@ -349,6 +349,10 @@ grep -Fq '### secrets-edit.sh' "$ROOT/docs/COMMAND-REFERENCE.md" \
     || fail 'COMMAND-REFERENCE must include public secrets-edit.sh utility'
 ! grep -Fq '### notify-failure.sh' "$ROOT/docs/COMMAND-REFERENCE.md" \
     || fail 'COMMAND-REFERENCE must not expose internal notify-failure.sh utility'
+grep -Fq 'sudo ./setup.sh systemd install' "$ROOT/docs/COMMAND-REFERENCE.md" \
+    || fail 'COMMAND-REFERENCE must include setup.sh systemd install example'
+grep -Fq 'sudo ./setup.sh systemd validate' "$ROOT/docs/COMMAND-REFERENCE.md" \
+    || fail 'COMMAND-REFERENCE must include setup.sh systemd validate example'
 
 printf 'Operator CLI argument contract tests passed.\n'
 )

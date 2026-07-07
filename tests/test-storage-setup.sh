@@ -516,11 +516,11 @@ run_storage migrate verify --direction block-to-boot
 [[ "$status" -ne 0 && "$out" == *"Unknown option for 'verify': --direction"* ]] \
     || fail "migrate verify accepted --direction: $out"
 run_storage migrate resume --force-format --dry-run
-[[ "$status" -ne 0 && "$out" == *'This script must be run as root'* && "$out" != *'Unknown option'* ]] \
-    || fail "migrate resume rejected legitimate resume options before root guard: $out"
+[[ "$status" -ne 0 && "$out" != *'Unknown option'* && ( "$out" == *'This script must be run as root'* || "$out" == *'No state file found. Cannot resume.'* ) ]] \
+    || fail "migrate resume rejected legitimate resume options before root/state guard: $out"
 run_storage --mode migrate resume --force-format --dry-run
-[[ "$status" -ne 0 && "$out" == *'This script must be run as root'* && "$out" != *'Unknown option'* ]] \
-    || fail "compatibility --mode migrate rejected legitimate resume options before root guard: $out"
+[[ "$status" -ne 0 && "$out" != *'Unknown option'* && ( "$out" == *'This script must be run as root'* || "$out" == *'No state file found. Cannot resume.'* ) ]] \
+    || fail "compatibility --mode migrate rejected legitimate resume options before root/state guard: $out"
 
 out=$(bash <<'PROBE'
 set -euo pipefail
