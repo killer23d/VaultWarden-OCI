@@ -787,6 +787,7 @@ _mv_parse_args() {
     _MV_SOURCE=""
     _MV_TARGET=""
     _MV_DEVICE=""
+    _MV_DIRECTION="boot-to-block"
     _MV_SKIP_STACK_STOP=false
     _MV_DELETE_SOURCE=false
     _MV_FORCE=false
@@ -806,13 +807,13 @@ _mv_parse_args() {
             --source)
                 _mv_seen_options+=("$1")
                 _mv_require_value "$1" "${2-}"
-                _MV_SOURCE="$(_mv_realpath "$2")"
+                _MV_SOURCE="$2"
                 shift 2
                 ;;
             --target)
                 _mv_seen_options+=("$1")
                 _mv_require_value "$1" "${2-}"
-                _MV_TARGET="$(_mv_realpath "$2")"
+                _MV_TARGET="$2"
                 shift 2
                 ;;
             --device)
@@ -904,18 +905,6 @@ _mv_parse_args() {
         esac
     done
 
-    if [[ -z "${_MV_SOURCE}" ]]; then
-        if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
-            if [[ -n "${_MV_DEVICE}" ]]; then
-                local _detected_src
-                _detected_src="$(findmnt -n -o TARGET --source "${_MV_DEVICE}" 2>/dev/null || true)"
-                [[ -n "${_detected_src}" ]] && _MV_SOURCE="${_detected_src}"
-            fi
-        else
-            _MV_SOURCE="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
-        fi
-    fi
-
     case "${_MV_SUBCOMMAND}" in
         run)
             if [[ "${_MV_YES:-false}" == "true" && -z "${_MV_TARGET}" ]]; then
@@ -956,6 +945,25 @@ _mv_parse_args() {
                 ;;
         esac
     done
+
+    case "${_MV_START_POLICY}" in
+        ""|auto|ask|manual) ;;
+        *) log_error "Invalid --start-policy: ${_MV_START_POLICY}"; exit 1 ;;
+    esac
+}
+
+_mv_resolve_args() {
+    if [[ -z "${_MV_SOURCE}" ]]; then
+        if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
+            if [[ -n "${_MV_DEVICE}" ]]; then
+                local _detected_src
+                _detected_src="$(findmnt -n -o TARGET --source "${_MV_DEVICE}" 2>/dev/null || true)"
+                [[ -n "${_detected_src}" ]] && _MV_SOURCE="${_detected_src}"
+            fi
+        else
+            _MV_SOURCE="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
+        fi
+    fi
 
     case "${_MV_START_POLICY}" in
         "" ) if [[ "${_MV_YES:-false}" == "true" || ! -t 0 ]]; then _MV_START_POLICY="auto"; else _MV_START_POLICY="ask"; fi ;;
@@ -2042,27 +2050,6 @@ _mv_run_pipeline() {
 
 migrate_mode_main() {
     _MV_START_TIME="${SECONDS}"
-
-    local _mv_arg
-    for _mv_arg in "$@"; do
-        case "$_mv_arg" in
-            help|--help|-h)
-                _mv_usage
-                exit 0
-                ;;
-            --version|-V)
-                if declare -F print_project_version >/dev/null 2>&1; then
-                    print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"
-                else
-                    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
-                fi
-                exit 0
-                ;;
-        esac
-    done
-
-    _mv_parse_args "$@"
-    _mv_require_root "$@"
 
     # On resume, restore the original run's log file path and run timestamp
     # from state before opening the log, so resume output appends to the same

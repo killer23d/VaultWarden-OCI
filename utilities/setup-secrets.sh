@@ -1432,7 +1432,7 @@ EOF
         local instructions_content
         instructions_content=$(cat << EOF
 VaultWarden Emergency Access Instructions
-========================================
+----------------------------------------
 This account has targeted emergency access for VaultWarden recovery.
 
 ACCESS VIA OCI CONSOLE:

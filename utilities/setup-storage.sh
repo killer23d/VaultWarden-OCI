@@ -26,20 +26,13 @@ source "${PROJECT_ROOT}/lib/docker.sh"
 source "${PROJECT_ROOT}/lib/backup-utils.sh"
 source "${PROJECT_ROOT}/lib/migrate.sh"
 
-if [[ -f "${PROJECT_ROOT}/.env" || -f "/etc/vaultwarden/vaultwarden.env" || -f "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env" ]]; then
-    load_project_environment || {
-        # setup-storage also supports first-run bootstrapping before runtime env exists.
-        if [[ -f "${PROJECT_ROOT}/.env" ]]; then
-            load_env_file "${PROJECT_ROOT}/.env" || true
-        fi
-    }
-fi
 export DRY_RUN=false   # overridden by arg parsing; exported for lib functions
 
 _SS_MODE="setup"
 _SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
 _SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 _SS_DATA_DEVICE_PROVIDED=false
+_SS_DATA_MOUNT_PROVIDED=false
 _SS_AUTO=false
 _SS_FORCE=false
 TMP_WORKDIR=""
@@ -54,6 +47,25 @@ _ss_cleanup() {
     rm -rf "${TMP_WORKDIR:-}"
 }
 trap '_ss_cleanup' EXIT
+
+_ss_load_runtime_environment() {
+    local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
+    if [[ -f "${PROJECT_ROOT}/.env" || -f "${installed_env}" || -f "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env" ]]; then
+        load_project_environment || {
+            # setup-storage also supports first-run bootstrapping before runtime env exists.
+            if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+                load_env_file "${PROJECT_ROOT}/.env" || true
+            fi
+        }
+    fi
+
+    if [[ "${_SS_DATA_DEVICE_PROVIDED}" != "true" ]]; then
+        _SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-${_SS_DATA_DEVICE:-}}"
+    fi
+    if [[ "${_SS_DATA_MOUNT_PROVIDED}" != "true" ]]; then
+        _SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_SS_DATA_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}}"
+    fi
+}
 
 _MV_SCRIPT_NAME="utilities/setup-storage.sh"
 readonly _MV_SCRIPT_NAME
@@ -545,6 +557,7 @@ _parse_outer_args() {
             --data-mount)
                 _require_cli_value "$1" "${2-}"
                 _SS_DATA_MOUNT="$2"
+                _SS_DATA_MOUNT_PROVIDED=true
                 shift 2
                 ;;
             --auto)
@@ -580,13 +593,22 @@ main() {
         for _ss_migrate_arg in "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"; do
             case "$_ss_migrate_arg" in
                 help|--help|-h|--version|-V)
-                    migrate_mode_main "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
+                    case "$_ss_migrate_arg" in
+                        help|--help|-h)
+                            _mv_usage
+                            ;;
+                        --version|-V)
+                            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                            ;;
+                    esac
                     exit $?
                     ;;
             esac
         done
         _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
     fi
+
+    _ss_load_runtime_environment
 
     (( EUID == 0 )) || {
         log_error "This script must be run as root: sudo utilities/setup-storage.sh $*"
@@ -618,7 +640,10 @@ main() {
     case "${_SS_MODE}" in
         setup)   _mode_setup   ;;
         verify)  _mode_verify  ;;
-        migrate) migrate_mode_main "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}" ;;
+        migrate)
+            _mv_resolve_args
+            migrate_mode_main
+            ;;
         *)
             log_error "Unknown mode: ${_SS_MODE}"
             show_help
