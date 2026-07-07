@@ -323,6 +323,14 @@ expect_success_contains startup.sh "VaultWarden-OCI " stop --version
 expect_success_contains utilities/setup-systemd.sh "VaultWarden-OCI systemd Timer Installer" install --help
 expect_success_contains utilities/env-edit.sh "VaultWarden-OCI Environment Management" status --help
 
+expected_version="VaultWarden-OCI $(tr -d '[:space:]' < "$ROOT/VERSION")"
+run_cli setup.sh install --version
+[[ "$CLI_STATUS" -eq 0 && "$CLI_OUTPUT" == "$expected_version" ]] \
+    || fail "setup.sh install --version did not print normal version output: $CLI_OUTPUT"
+run_cli setup.sh install -V
+[[ "$CLI_STATUS" -eq 0 && "$CLI_OUTPUT" == "$expected_version" ]] \
+    || fail "setup.sh install -V did not print normal version output: $CLI_OUTPUT"
+
 expect_failure_contains backup.sh "--keep requires a value" run --keep
 expect_failure_contains backup.sh "--type requires a value" verify --type
 expect_failure_contains restore.sh "--start-policy requires a value" interactive --start-policy

@@ -468,6 +468,11 @@ _parse_outer_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             setup|verify|migrate)
+                if [[ "$mode_seen" == "true" && "${_SS_MODE}" == "migrate" ]]; then
+                    remaining+=("$1")
+                    shift
+                    continue
+                fi
                 if [[ "$mode_seen" == "true" || ${#remaining[@]} -gt 0 ]]; then
                     log_error "Exactly one setup-storage mode is allowed: setup | verify | migrate"
                     show_help
@@ -580,6 +585,7 @@ main() {
                     ;;
             esac
         done
+        _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
     fi
 
     (( EUID == 0 )) || {

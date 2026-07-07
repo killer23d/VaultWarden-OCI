@@ -194,6 +194,7 @@ while [[ $# -gt 0 ]]; do
         --data-device)  _require_cli_value "$1" "${2-}"; DATA_VOLUME_DEVICE="$2";   shift 2 ;;
         --data-mount)   _require_cli_value "$1" "${2-}"; DATA_VOLUME_MOUNT="$2";    shift 2 ;;
         --help|-h)      show_help; exit 0 ;;
+        --version|-V)   printf 'VaultWarden-OCI %s\n' "$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "unknown")"; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done

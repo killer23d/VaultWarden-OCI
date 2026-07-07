@@ -374,6 +374,24 @@ run_storage setup verify
 run_storage setup --data-mount --force
 [[ "$status" -ne 0 && "$out" == *'--data-mount requires a value'* ]] \
     || fail "setup-storage accepted missing --data-mount value: $out"
+run_storage migrate status --target /tmp/foo
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'status': --target"* ]] \
+    || fail "migrate status accepted --target: $out"
+run_storage migrate status --force
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'status': --force"* ]] \
+    || fail "migrate status accepted --force: $out"
+run_storage migrate abort --source /tmp/foo
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'abort': --source"* ]] \
+    || fail "migrate abort accepted --source: $out"
+run_storage migrate verify --direction block-to-boot
+[[ "$status" -ne 0 && "$out" == *"Unknown option for 'verify': --direction"* ]] \
+    || fail "migrate verify accepted --direction: $out"
+run_storage migrate resume --force-format --dry-run
+[[ "$status" -ne 0 && "$out" == *'This script must be run as root'* && "$out" != *'Unknown option'* ]] \
+    || fail "migrate resume rejected legitimate resume options before root guard: $out"
+run_storage --mode migrate resume --force-format --dry-run
+[[ "$status" -ne 0 && "$out" == *'This script must be run as root'* && "$out" != *'Unknown option'* ]] \
+    || fail "compatibility --mode migrate rejected legitimate resume options before root guard: $out"
 pass 'setup-storage canonical and compatibility CLI grammar is enforced'
 
 )

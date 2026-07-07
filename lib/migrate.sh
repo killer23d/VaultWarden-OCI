@@ -696,7 +696,7 @@ SUBCOMMANDS:
   abort    Roll back an in-progress migration
   verify   Re-run byte-count verification only (non-destructive)
 
-OPTIONS (run / resume):
+OPTIONS (run):
   --source  <path>   Source directory  (default: current PROJECT_STATE_DIR from .env)
   --target  <path>   Destination path  (prompted interactively if omitted)
   --device  <dev>    Block device (e.g. /dev/sdb)
@@ -726,6 +726,20 @@ OPTIONS (run / resume):
   --no-start         Alias for --start-policy manual.
   --log-file <path>  Override default log file path.
   --help             Show this help and exit.
+
+OPTIONS (resume):
+  --dry-run          Print resume actions without executing them.
+  --force            Skip the backup confirmation if that step has not completed.
+  --force-format     Preserve or upgrade authorization for formatting a blank target.
+  --yes              Answer yes to confirmations that are safe to automate.
+  --start-policy <mode>
+                     Service start policy if resume reaches the start step.
+  --start            Alias for --start-policy auto.
+  --no-start         Alias for --start-policy manual.
+
+NOTE:
+  status, abort, and verify read the recorded migration state and do not accept
+  behavior options.
 
 EXAMPLES:
   # Interactive (prompts for device and mount point)
@@ -780,6 +794,7 @@ _mv_parse_args() {
     _MV_YES=false
     _MV_LOG_FILE=""
     _MV_START_POLICY=""
+    local -a _mv_seen_options=()
 
     if [[ $# -gt 0 && "${1}" != --* ]]; then
         _MV_SUBCOMMAND="$1"
@@ -789,50 +804,61 @@ _mv_parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --source)
+                _mv_seen_options+=("$1")
                 _mv_require_value "$1" "${2-}"
                 _MV_SOURCE="$(_mv_realpath "$2")"
                 shift 2
                 ;;
             --target)
+                _mv_seen_options+=("$1")
                 _mv_require_value "$1" "${2-}"
                 _MV_TARGET="$(_mv_realpath "$2")"
                 shift 2
                 ;;
             --device)
+                _mv_seen_options+=("$1")
                 _mv_require_value "$1" "${2-}"
                 _MV_DEVICE="$2"
                 shift 2
                 ;;
             --log-file)
+                _mv_seen_options+=("$1")
                 _mv_require_value "$1" "${2-}"
                 _MV_LOG_FILE="$2"
                 shift 2
                 ;;
             --skip-stack-stop)
+                _mv_seen_options+=("$1")
                 _MV_SKIP_STACK_STOP=true
                 shift
                 ;;
             --delete-source)
+                _mv_seen_options+=("$1")
                 _MV_DELETE_SOURCE=true
                 shift
                 ;;
             --dry-run)
+                _mv_seen_options+=("$1")
                 DRY_RUN=true
                 shift
                 ;;
             --force)
+                _mv_seen_options+=("$1")
                 _MV_FORCE=true
                 shift
                 ;;
             --force-format)
+                _mv_seen_options+=("$1")
                 _MV_FORCE_FORMAT=true
                 shift
                 ;;
             --yes)
+                _mv_seen_options+=("$1")
                 _MV_YES=true
                 shift
                 ;;
             --start-policy)
+                _mv_seen_options+=("$1")
                 if [[ $# -lt 2 || "${2:-}" == --* ]]; then
                     log_error "--start-policy requires a value: auto | ask | manual"
                     _mv_usage
@@ -842,14 +868,17 @@ _mv_parse_args() {
                 shift 2
                 ;;
             --start)
+                _mv_seen_options+=("$1")
                 _MV_START_POLICY="auto"
                 shift
                 ;;
             --no-start)
+                _mv_seen_options+=("$1")
                 _MV_START_POLICY="manual"
                 shift
                 ;;
             --direction)
+                _mv_seen_options+=("$1")
                 _mv_require_value "$1" "${2-}"
                 case "$2" in
                     boot-to-block|block-to-boot)
@@ -907,6 +936,27 @@ _mv_parse_args() {
             exit 1
             ;;
     esac
+
+    local _mv_seen_option
+    for _mv_seen_option in "${_mv_seen_options[@]+"${_mv_seen_options[@]}"}"; do
+        case "${_MV_SUBCOMMAND}:${_mv_seen_option}" in
+            run:*) ;;
+            resume:--dry-run|resume:--force|resume:--force-format|resume:--yes|\
+            resume:--start-policy|resume:--start|resume:--no-start) ;;
+            *)
+                log_error "Unknown option for '${_MV_SUBCOMMAND}': ${_mv_seen_option}"
+                case "${_MV_SUBCOMMAND}" in
+                    status) log_error "Usage: sudo utilities/setup-storage.sh migrate status" ;;
+                    abort)  log_error "Usage: sudo utilities/setup-storage.sh migrate abort" ;;
+                    verify) log_error "Usage: sudo utilities/setup-storage.sh migrate verify" ;;
+                    resume) log_error "Usage: sudo utilities/setup-storage.sh migrate resume [--dry-run] [--force] [--force-format] [--yes] [--start-policy MODE]" ;;
+                    *)      _mv_usage ;;
+                esac
+                exit 2
+                ;;
+        esac
+    done
+
     case "${_MV_START_POLICY}" in
         "" ) if [[ "${_MV_YES:-false}" == "true" || ! -t 0 ]]; then _MV_START_POLICY="auto"; else _MV_START_POLICY="ask"; fi ;;
         auto|ask|manual) ;;
@@ -2011,8 +2061,8 @@ migrate_mode_main() {
         esac
     done
 
-    _mv_require_root "$@"
     _mv_parse_args "$@"
+    _mv_require_root "$@"
 
     # On resume, restore the original run's log file path and run timestamp
     # from state before opening the log, so resume output appends to the same
