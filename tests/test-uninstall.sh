@@ -130,7 +130,7 @@ source_uninstaller_for_behavior() {
   # shellcheck source=../utilities/uninstall-vaultwarden.sh
   source "$SCRIPT"
   DRY_RUN=false
-  FORCE=false
+  export FORCE=false
   operation_package_run() { return 0; }
 }
 
@@ -388,20 +388,20 @@ EOF_IPT
   : > "$UFW_LOG"
   TEST_RESET=true
   PROJECT_DIR="$TMP/mock-clean-checkout"
-  PROJECT_BASENAME="VaultWarden-OCI"
-  DATA_VOLUME_DEVICE=""
+  export PROJECT_BASENAME="VaultWarden-OCI"
+  export DATA_VOLUME_DEVICE=""
   PROJECT_STATE_DIR="$TMP/no-state"
-  BACKUP_DIR="$PROJECT_STATE_DIR/backups"
+  export BACKUP_DIR="$PROJECT_STATE_DIR/backups"
   SYSTEMD_SYSTEM_DIR="$TMP/residual-systemd"
   DOCKER_MOUNT_GUARD_DIR="$SYSTEMD_SYSTEM_DIR/docker.service.d"
   DOCKER_MOUNT_GUARD="$DOCKER_MOUNT_GUARD_DIR/10-vaultwarden-data-volume.conf"
-  OPT_SCRIPTS_DIR="$TMP/no-opt-scripts"
-  ETC_VAULTWARDEN_DIR="$TMP/no-etc-vaultwarden"
-  CROWDSEC_BOUNCER_BIN="$TMP/no-crowdsec-bouncer"
-  CROWDSEC_BOUNCER_SERVICE="$SYSTEMD_SYSTEM_DIR/crowdsec-cloudflare-worker-bouncer.service"
-  CROWDSEC_ETC_DIR="$TMP/no-etc-crowdsec"
-  CROWDSEC_STATE_DIR="$TMP/no-var-lib-crowdsec"
-  CROWDSEC_LOG_DIR="$TMP/no-var-log-crowdsec"
+  export OPT_SCRIPTS_DIR="$TMP/no-opt-scripts"
+  export ETC_VAULTWARDEN_DIR="$TMP/no-etc-vaultwarden"
+  export CROWDSEC_BOUNCER_BIN="$TMP/no-crowdsec-bouncer"
+  export CROWDSEC_BOUNCER_SERVICE="$SYSTEMD_SYSTEM_DIR/crowdsec-cloudflare-worker-bouncer.service"
+  export CROWDSEC_ETC_DIR="$TMP/no-etc-crowdsec"
+  export CROWDSEC_STATE_DIR="$TMP/no-var-lib-crowdsec"
+  export CROWDSEC_LOG_DIR="$TMP/no-var-log-crowdsec"
   RUNTIME_DIR="$TMP/no-runtime"
   SWAPFILE_PATH="$TMP/no-swapfile"
   SOPS_BIN="$TMP/shared-sops"
@@ -455,6 +455,7 @@ EOF_IPT
     fi
     return 0
   }
+  # shellcheck disable=SC2034 # Consumed by sourced utilities/uninstall-vaultwarden.sh
   UNINSTALL_OPERATION_HELD=true
   OPERATION_OWNS_STATE=true
   OPERATION_STATE_FILE="$RUNTIME_DIR/state.json"
@@ -493,6 +494,7 @@ MOCK
   SWAPFILE_PATH="$TMP/swapfile-normal"
   FSTAB_FILE="$TMP/swap-normal-fstab"
   SYSCTL_CONF="$TMP/swap-normal-sysctl.conf"
+  # shellcheck disable=SC2034 # Consumed by sourced utilities/uninstall-vaultwarden.sh
   APT_SOURCE_UNIVERSE="$TMP/ubuntu-universe.list"
   : > "$SWAPFILE_PATH"
   printf '%s none swap sw 0 0\n' "$SWAPFILE_PATH" > "$FSTAB_FILE"
@@ -506,6 +508,7 @@ MOCK
   [[ ! -s "$SWAPOFF_LOG" ]] || fail "normal uninstall called swapoff for ambiguous swapfile"
   [[ ! -s "$SYSCTL_LOG" ]] || fail "uninstall forced runtime swappiness"
 
+  # shellcheck disable=SC2034 # Consumed by sourced utilities/uninstall-vaultwarden.sh
   TEST_RESET=true
   SWAPFILE_PATH="$TMP/swapfile-reset"
   FSTAB_FILE="$TMP/swap-reset-fstab"

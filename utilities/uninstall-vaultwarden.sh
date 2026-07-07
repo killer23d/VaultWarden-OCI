@@ -1421,7 +1421,9 @@ _finalize_successful_operation_guard() {
     # Prevent operation_release from recreating /run/vaultwarden-oci on success,
     # then close the held FDs so flock is released by descriptor close.
     if [[ "$UNINSTALL_OPERATION_HELD" == "true" ]] && declare -f operation_release >/dev/null 2>&1; then
+        # shellcheck disable=SC2034 # Consumed by sourced lib/operations.sh
         OPERATION_OWNS_STATE=false
+        # shellcheck disable=SC2034 # Consumed by sourced lib/operations.sh
         OPERATION_STATE_FILE=""
         operation_release 0
         UNINSTALL_OPERATION_HELD=false
