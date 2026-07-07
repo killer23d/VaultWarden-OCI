@@ -1349,18 +1349,29 @@ USAGE:
     sudo bash ./utilities/uninstall-vaultwarden.sh run [OPTIONS]
 
 DESCRIPTION:
-    Fully removes VaultWarden-OCI managed artifacts from this host:
+    Fully removes VaultWarden-OCI managed stack artifacts from this host:
       - Docker compose stack, managed containers, networks, volumes, and runtime secrets
       - systemd timers/services/drop-ins, /opt scripts, and /etc/vaultwarden
       - persistent VaultWarden state directory and optional data-volume fstab/mount wiring
-      - CrowdSec services/packages/config/state, project firewall rules, swapfile
-      - project-installed helper packages where safe
+      - CrowdSec services/packages/config/state and project firewall rules
+      - setup-managed swap path only in --test-reset mode
+
+    Docker itself, /var/lib/docker, the docker group, common admin packages, SSH
+    configuration, and unrelated firewall rules are intentionally preserved.
 
 SUBCOMMANDS:
     run    Perform the idempotent uninstall
     help   Show this help
 
 OPTIONS (used after 'run'):
+    --test-reset
+        Remove the stack and generated local installation artifacts, but preserve
+        the Git checkout so the same branch can be installed again immediately.
+        This is intended for repeated production-host acceptance testing. It does
+        not restore the VM to a pristine OCI image or uninstall shared host tooling.
+        On a dedicated acceptance-test VM, this intentionally removes /swapfile
+        so the next setup run can exercise the no-swap/create-swap path again.
+
     --i-have-saved-my-recovery-kit
         Confirm that all Age keys shown by this script have been saved outside
         this host. Required when any managed Age key exists, unless --force is used.
@@ -1379,6 +1390,8 @@ OPTIONS (used after 'run'):
 
 EXAMPLES:
     sudo bash ./utilities/uninstall-vaultwarden.sh run --dry-run
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --test-reset --dry-run
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit
     sudo bash ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
     sudo bash ./utilities/uninstall-vaultwarden.sh run --force
 ```

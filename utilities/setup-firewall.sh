@@ -217,8 +217,12 @@ _phase_ufw() {
     log_info "Validated ${#validated_cidrs[@]} of ${#cf_cidrs[@]} CIDRs"
 
     for cidr in "${validated_cidrs[@]}"; do
-        ufw allow from "$cidr" to any port 80 proto tcp  2>/dev/null || true
-        ufw allow from "$cidr" to any port 443 proto tcp 2>/dev/null || true
+        local label="CF-IPv4"
+        if [[ "$cidr" == *":"* ]]; then
+            label="CF-IPv6"
+        fi
+        ufw allow from "$cidr" to any port 80 proto tcp comment "${label}"  2>/dev/null || true
+        ufw allow from "$cidr" to any port 443 proto tcp comment "${label}" 2>/dev/null || true
     done
     log_success "Firewall: ports 80/443 restricted to ${#validated_cidrs[@]} Cloudflare CIDRs"
 
