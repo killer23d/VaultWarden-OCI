@@ -549,16 +549,16 @@ _tmpfs_dir() {
 # ---------------------------------------------------------------------------
 # _check_recovery_kit_email_deps
 #
-# Prints the encryption tool name ("openssl") if available, returns 1 if
+# Prints the encryption tool name ("gpg") if available, returns 1 if
 # required tools are missing. Callers should warn and skip gracefully on failure.
 # ---------------------------------------------------------------------------
 _check_recovery_kit_email_deps() {
-    if command -v openssl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
-        printf 'openssl'
+    if command -v gpg >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        printf 'gpg'
         return 0
     fi
-    log_warn "recovery-kit email: openssl and tar are required — skipping email option."
-    log_warn "  Install with: sudo apt-get install -y openssl tar"
+    log_warn "recovery-kit email: gpg and tar are required -- skipping email option."
+    log_warn "  Install with: sudo apt-get install -y gnupg tar"
     return 1
 }
 
@@ -566,14 +566,14 @@ _check_recovery_kit_email_deps() {
 # ---------------------------------------------------------------------------
 # _encrypt_recovery_kit_attachment PLAINTEXT_FILE OUTPUT_FILE TOOL
 #
-# Encrypts PLAINTEXT_FILE into OUTPUT_FILE using OpenSSL AES-256-CBC with
-# PBKDF2. The plaintext is first wrapped as a small tar stream so file metadata
-# and content can be validated after decryption. Bash collects and validates the
-# independent attachment passphrase with prompt_password_with_confirmation
-# (minimum 16 characters, confirmation required), then passes it to OpenSSL via
-# a private file descriptor using -pass fd:3. The passphrase is never exported,
-# logged, stored in a temporary file, used in a filename, or interpolated into
-# process argv; xtrace is disabled while the secret is live.
+# Encrypts PLAINTEXT_FILE into OUTPUT_FILE as a symmetric OpenPGP message. The
+# plaintext is first wrapped as a small tar stream so file metadata and content
+# can be validated after decryption. Bash collects and validates the independent
+# attachment passphrase with prompt_password_with_confirmation (minimum 16
+# characters, confirmation required), then passes it to GnuPG on fd 3. The
+# passphrase is never exported, logged, stored in a temporary file, used in a
+# filename, or interpolated into process argv; xtrace is disabled while the
+# secret is live.
 # Returns 0 on success, 1 on failure. Shreds OUTPUT_FILE on failure.
 # ---------------------------------------------------------------------------
 _encrypt_recovery_kit_attachment() {
@@ -581,7 +581,7 @@ _encrypt_recovery_kit_attachment() {
     local output_file="$2"
     local tool="$3"
 
-    if [[ "$tool" != "openssl" ]]; then
+    if [[ "$tool" != "gpg" ]]; then
         log_error "_encrypt_recovery_kit_attachment: unsupported tool '$tool'"
         return 1
     fi
@@ -606,10 +606,21 @@ _encrypt_recovery_kit_attachment() {
     _plain_base=$(basename -- "$plaintext_file")
     rm -f "$output_file"
 
-    # OpenSSL 3 on Ubuntu 24.04 supports -pass fd:N. The secret is supplied on
-    # fd 3, not argv or the environment; the tar stream is the only stdin data.
-    if tar -C "$_plain_dir" -cf - "$_plain_base" \
-        | openssl enc -aes-256-cbc -pbkdf2 -salt -pass fd:3 -out "$output_file" 3<<<"$_enc_pass"; then
+    # GnuPG 2.4 on Ubuntu 24.04 accepts --passphrase-fd only in batch loopback
+    # mode. The secret is supplied on fd 3; the tar stream is the only stdin data.
+    if (
+        set -o pipefail
+        tar -C "$_plain_dir" -cf - "$_plain_base" \
+            | gpg \
+                --batch \
+                --yes \
+                --pinentry-mode loopback \
+                --passphrase-fd 3 \
+                --no-symkey-cache \
+                --symmetric \
+                --output "$output_file" \
+                3<<<"$_enc_pass"
+    ); then
         _rc=0
     else
         _rc=$?
@@ -623,7 +634,11 @@ _encrypt_recovery_kit_attachment() {
         return 1
     fi
 
-    chmod 600 "$output_file"
+    if ! chmod 600 "$output_file"; then
+        _secure_shred "$output_file" 2>/dev/null || true
+        log_error "Encryption failed: could not restrict attachment permissions"
+        return 1
+    fi
     return 0
 }
 
@@ -682,7 +697,7 @@ PROMPT
     fi
     log_info "Recovery-kit email preflight passed for non-secret SMTP settings; smtp_password will be resolved only if Direct SMTP fallback is needed."
 
-    local _ext="tar.enc" _att_name _att_file
+    local _ext="tar.gpg" _att_name _att_file
     _att_name="important-documents-$(date +%Y%m%d).${_ext}"
     _att_file=$(mktemp -p /dev/shm "vw-att.XXXXXX.${_ext}" 2>/dev/null || mktemp "vw-att.XXXXXX.${_ext}")
     install -m 600 /dev/null "$_att_file"
@@ -698,9 +713,22 @@ PROMPT
     _body=$(cat <<'BODY'
 Please keep this file somewhere safe.
 
-The attached archive contains important account documents you requested.
-Decrypt it with OpenSSL using the passphrase you set when it was created,
-then extract the resulting tar archive on a trusted device.
+The attached archive contains important account documents you requested. It is
+encrypted with GnuPG using the independent attachment passphrase you selected.
+
+Recovery steps:
+1. Save the attachment on a trusted device.
+2. Decrypt it:
+   gpg --output recovery-kit.tar \
+     --decrypt important-documents-YYYYMMDD.tar.gpg
+3. GnuPG prompts for the independent attachment passphrase.
+4. Extract the decrypted TAR:
+   tar -xf recovery-kit.tar
+5. Store the recovered document securely.
+6. Delete recovery-kit.tar after the recovery document has been secured.
+
+A GnuPG-compatible GUI can also decrypt the .gpg file; open the resulting .tar
+with a normal archive manager.
 
 Do not share this file or the passphrase with anyone.
 If you did not request this, please disregard.
