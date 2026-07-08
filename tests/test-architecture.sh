@@ -130,14 +130,15 @@ fi
 rm -f /tmp/vw-sops-ambiguous.$$
 
 make_yq_stub() {
-    local path="$1" mode="$2"
+    local path="$1" mode="$2" version="${3:-v4.53.3}"
     cat > "$path" <<EOF_STUB
 #!/usr/bin/env bash
 set -euo pipefail
 mode="$mode"
+version="$version"
 if [[ "\${1:-}" == "--version" ]]; then
     case "\$mode" in
-        mikefarah4) printf 'yq (https://github.com/mikefarah/yq/) version v4.53.3\n' ;;
+        mikefarah4|broken4) printf 'yq (https://github.com/mikefarah/yq/) version %s\n' "\$version" ;;
         mikefarah3) printf 'yq (https://github.com/mikefarah/yq/) version v3.4.1\n' ;;
         python) printf 'yq 3.1.0\n' ;;
     esac
@@ -155,13 +156,30 @@ esac
 EOF_STUB
     chmod +x "$path"
 }
-make_yq_stub "$tmpdir/yq-good" mikefarah4
+make_yq_stub "$tmpdir/yq-good" mikefarah4 v4.53.3
+make_yq_stub "$tmpdir/yq-older" mikefarah4 v4.52.9
+make_yq_stub "$tmpdir/yq-newer" mikefarah4 v4.54.1
+make_yq_stub "$tmpdir/yq-prefix" mikefarah4 v4.53.30
+make_yq_stub "$tmpdir/yq-broken4" broken4 v4.53.3
 make_yq_stub "$tmpdir/yq-python" python
 make_yq_stub "$tmpdir/yq-v3" mikefarah3
 env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-good" \
     || fail "Mike Farah yq v4 contract was rejected"
+env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq-exact "$tmpdir/yq-good" \
+    || fail "exact pinned Mike Farah yq v4.53.3 contract was rejected"
+assert_output "v4.53.3" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-resolved-version "$tmpdir/yq-good"
+for compatible_non_pinned in "$tmpdir/yq-older" "$tmpdir/yq-newer"; do
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$compatible_non_pinned" \
+        || fail "--skip-deps-compatible Mike Farah yq v4 was rejected: $compatible_non_pinned"
+    assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq-exact "$compatible_non_pinned"
+done
+assert_output "v4.53.30" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-resolved-version "$tmpdir/yq-prefix"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq-exact "$tmpdir/yq-prefix"
 assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-python"
 assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-v3"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-broken4"
 
 make_sops_stub() {
     local path="$1" version_output="$2"

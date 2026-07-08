@@ -140,7 +140,7 @@ _validate_supported_host_contract() {
     printf '%s %s\n' "$codename" "$arch"
 }
 
-_validate_yq_contract() {
+_yq_resolved_version() {
     local yq_bin="${1:-}"
     [[ -n "$yq_bin" ]] || yq_bin="$(command -v yq 2>/dev/null || true)"
     [[ -n "$yq_bin" && -x "$yq_bin" ]] || return 1
@@ -148,7 +148,21 @@ _validate_yq_contract() {
     local version_output
     version_output=$("$yq_bin" --version 2>&1) || return 1
     [[ "$version_output" == *"mikefarah/yq"* ]] || return 1
-    [[ "$version_output" =~ version[[:space:]]v?4\. ]] || return 1
+    if [[ "$version_output" =~ version[[:space:]]v?([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$) ]]; then
+        printf 'v%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
+}
+
+_validate_yq_contract() {
+    local yq_bin="${1:-}"
+    [[ -n "$yq_bin" ]] || yq_bin="$(command -v yq 2>/dev/null || true)"
+    [[ -n "$yq_bin" && -x "$yq_bin" ]] || return 1
+
+    local resolved_version
+    resolved_version=$(_yq_resolved_version "$yq_bin") || return 1
+    [[ "$resolved_version" =~ ^v4\. ]] || return 1
 
     local raw_probe schema_probe
     raw_probe=$(printf 'answer: plain-value\n' | "$yq_bin" -r '.answer' - 2>/dev/null) || return 1
@@ -157,6 +171,14 @@ _validate_yq_contract() {
         | "$yq_bin" -r '.secrets[] | select(.required == true) | .key' - 2>/dev/null) || return 1
     [[ "$schema_probe" == "cloudflare_zone_id" ]] || return 1
     return 0
+}
+
+_validate_yq_exact_contract() {
+    local yq_bin="${1:-}" actual
+    [[ -n "$yq_bin" ]] || yq_bin="$(command -v yq 2>/dev/null || true)"
+    actual=$(_yq_resolved_version "$yq_bin") || return 1
+    [[ "$actual" == "$YQ_VERSION" ]] || return 1
+    _validate_yq_contract "$yq_bin"
 }
 
 _validate_sops_version_format() {
@@ -214,6 +236,12 @@ if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
         validate-yq)
             _validate_yq_contract "${2:-}"
             ;;
+        validate-yq-exact)
+            _validate_yq_exact_contract "${2:-}"
+            ;;
+        yq-resolved-version)
+            _yq_resolved_version "${2:-}"
+            ;;
         sops-version)
             _sops_resolved_version "${2:-}"
             ;;
@@ -223,7 +251,7 @@ if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
             [[ "$actual" == "$3" ]]
             ;;
         *)
-            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch|yq-release-asset|yq-release-sha256|supported-host|sops-default-version|yq-version|validate-yq|sops-version|sops-version-equals} [ARG...]\n' "$0" >&2
+            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch|yq-release-asset|yq-release-sha256|supported-host|sops-default-version|yq-version|validate-yq|validate-yq-exact|yq-resolved-version|sops-version|sops-version-equals} [ARG...]\n' "$0" >&2
             exit 2
             ;;
     esac
@@ -576,8 +604,11 @@ create_swapfile() {
 }
 
 install_yq() {
-    if _validate_yq_contract; then
-        log_info "Mike Farah yq v4 already installed: $(yq --version)"
+    # Normal dependency setup is repository-owned and deterministic: install or
+    # reuse exactly YQ_VERSION. The explicit --skip-deps path does not call this
+    # function; it only verifies operator-owned compatibility.
+    if _validate_yq_exact_contract; then
+        log_info "Pinned Mike Farah yq ${YQ_VERSION} already installed: $(yq --version)"
         return 0
     fi
 
@@ -613,12 +644,12 @@ install_yq() {
     log_success "yq checksum verified: $expected"
     install -m 755 "$yq_bin" "$YQ_INSTALL_PATH" || return 1
     hash -r
-    if ! _validate_yq_contract "$YQ_INSTALL_PATH"; then
-        log_error "Installed yq does not satisfy the required Mike Farah v4 schema interface."
+    if ! _validate_yq_exact_contract "$YQ_INSTALL_PATH"; then
+        log_error "Installed yq does not satisfy exact ${YQ_VERSION} plus the required schema interface."
         return 1
     fi
-    if ! _validate_yq_contract; then
-        log_error "Resolved yq on PATH does not satisfy the required Mike Farah v4 schema interface after install."
+    if ! _validate_yq_exact_contract; then
+        log_error "Resolved yq on PATH does not satisfy exact ${YQ_VERSION} plus the required schema interface after install."
         log_error "Ensure ${YQ_INSTALL_PATH} appears before incompatible yq implementations in PATH."
         return 1
     fi
@@ -748,7 +779,7 @@ install_dependencies() {
         log_success "Universe repository enabled"
     fi
 
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-yaml" "apache2-utils" "cron" "p7zip-full")
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-yaml" "apache2-utils" "cron" "openssl" "tar")
 
     log_info "Refreshing apt package index..."
     operation_package_run apt-get update -qq || return 1
@@ -775,7 +806,8 @@ install_dependencies() {
         [python3-yaml]=""
         [apache2-utils]=htpasswd
         [cron]=cron
-        [p7zip-full]=7z
+        [openssl]=openssl
+        [tar]=tar
     )
 
     local missing_packages=()

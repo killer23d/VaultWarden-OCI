@@ -99,8 +99,8 @@ sanitize_help_output() {
     # 6. NUL bytes — written as the \x00 escape so this source file never
     #    contains literal NUL characters.
     #
-    # Cap at 60 lines so no single script can inflate the reference file.
-    head -60 \
+    # Cap at 180 lines so expanded operator help remains complete while no single script can inflate the reference file.
+    head -180 \
         | sed \
             -e '/^docker\.sh:.*auto-detect/d' \
             -e '/^lib\/docker\.sh:.*auto-detect/d' \

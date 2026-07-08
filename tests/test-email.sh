@@ -96,7 +96,7 @@ echo "PASS=$PASS FAIL=$FAIL"
 )
 
 check_email_delivery_refactor_contracts
-check_recovery_kit_attachment_passphrase_argv_contract() (
+check_recovery_kit_attachment_passphrase_contract() (
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -104,70 +104,111 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-if grep -En 'zip[[:space:]].*--password|7z[[:space:]].*-p\$\(|cat "\$_pass_file"|vw-enc-pass' "$ROOT/lib/secrets.sh" >/tmp/vw-recovery-argv.$$; then
-    cat /tmp/vw-recovery-argv.$$ >&2
-    rm -f /tmp/vw-recovery-argv.$$
-    fail 'recovery-kit attachment helper must not construct secret-bearing archiver argv'
+if grep -En '7z[[:space:]].*-p|zip[[:space:]].*(--password|-P)|ZIP_PASSWORD|vw-enc-pass|_pass_file' "$ROOT/lib/secrets.sh" >"$TMP/source.matches"; then
+    cat "$TMP/source.matches" >&2
+    fail 'recovery-kit attachment helper must not use secret-bearing archiver argv, environment handoff, or passphrase temp files'
 fi
-rm -f /tmp/vw-recovery-argv.$$
-grep -Fq '7z a -tzip -mem=ZipCrypto -mx=0 \' "$ROOT/lib/secrets.sh" \
-    || fail '7z attachment path missing expected archive command'
-grep -Fq -- '-p \' "$ROOT/lib/secrets.sh" \
-    || fail '7z attachment path must use bare interactive -p switch'
-grep -Fq 'zip -0 --encrypt \' "$ROOT/lib/secrets.sh" \
-    || fail 'zip attachment path must use interactive --encrypt mode'
+grep -Fq 'prompt_password_with_confirmation \' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must use the existing password confirmation helper'
+grep -Fq '"Passphrase to encrypt emailed attachment" 16' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must enforce the 16-character minimum through the password helper'
+grep -Fq -- '-pass fd:3' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must pass the secret to OpenSSL through fd:3'
+! grep -Fq -- '-pass pass:' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must not use OpenSSL pass: argv form'
 
 mkdir -p "$TMP/bin"
-cat > "$TMP/bin/7z" <<'MOCK_7Z'
+cat > "$TMP/bin/openssl" <<'MOCK_OPENSSL'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$MOCK_ARGV_FILE"
-touch "$6"
-MOCK_7Z
-cat > "$TMP/bin/zip" <<'MOCK_ZIP'
-#!/usr/bin/env bash
-printf '%s\n' "$@" > "$MOCK_ARGV_FILE"
-touch "$3"
-MOCK_ZIP
-chmod +x "$TMP/bin/7z" "$TMP/bin/zip"
+export -p > "$MOCK_ENV_FILE"
+cat <&3 > "$MOCK_FD_FILE"
+out=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "-out" ]]; then
+        out="$2"
+        shift 2
+        continue
+    fi
+    shift
+done
+cat > "$out"
+MOCK_OPENSSL
+chmod +x "$TMP/bin/openssl"
 
 plaintext="$TMP/recovery-kit.txt"
 printf 'test recovery kit\n' > "$plaintext"
+sentinel='TEST_ATTACHMENT_SECRET_1234567890'
 
-(
-    cd "$ROOT"
-    PATH="$TMP/bin:$PATH"
-    export PATH
-    # shellcheck source=../lib/secrets.sh
-    source "$ROOT/lib/secrets.sh"
-    MOCK_ARGV_FILE="$TMP/7z.argv"
-    export MOCK_ARGV_FILE
-    _encrypt_recovery_kit_attachment "$plaintext" "$TMP/kit-7z.zip" 7z
+run_encrypt_with_prompt() {
+    local prompt_body="$1" out_file="$2"
+    (
+        cd "$ROOT"
+        PATH="$TMP/bin:$PATH"
+        export PATH
+        # shellcheck source=../lib/secrets.sh
+        source "$ROOT/lib/secrets.sh"
+        prompt_password_with_confirmation(){ eval "$prompt_body"; }
+        MOCK_ARGV_FILE="$TMP/openssl.argv"
+        MOCK_ENV_FILE="$TMP/openssl.env"
+        MOCK_FD_FILE="$TMP/openssl.fd"
+        export MOCK_ARGV_FILE MOCK_ENV_FILE MOCK_FD_FILE
+        _encrypt_recovery_kit_attachment "$plaintext" "$out_file" openssl
+    )
+}
+
+short_prompt='return 1'
+if run_encrypt_with_prompt "$short_prompt" "$TMP/short.enc"; then
+    fail 'short passphrase validation failure must reject before archive success'
+fi
+[[ ! -s "$TMP/short.enc" ]] || fail 'short passphrase rejection must not leave a successful archive'
+
+mismatch_prompt='return 1'
+if run_encrypt_with_prompt "$mismatch_prompt" "$TMP/mismatch.enc"; then
+    fail 'confirmation mismatch validation failure must reject before archive success'
+fi
+[[ ! -s "$TMP/mismatch.enc" ]] || fail 'confirmation mismatch must not leave a successful archive'
+
+exact16='1234567890abcdef'
+run_encrypt_with_prompt "printf %s '$exact16'" "$TMP/exact.enc" \
+    || fail 'matching 16-character passphrase should be accepted'
+longer='1234567890abcdefghi'
+run_encrypt_with_prompt "printf %s '$longer'" "$TMP/long.enc" \
+    || fail 'matching longer passphrase should be accepted'
+
+run_encrypt_with_prompt "printf %s '$sentinel'" "$TMP/sentinel.enc" \
+    || fail 'sentinel encryption should succeed'
+! grep -Fq "$sentinel" "$TMP/openssl.argv" \
+    || fail 'OpenSSL argv contains sentinel secret'
+! grep -Fq "$sentinel" "$TMP/openssl.env" \
+    || fail 'OpenSSL environment contains sentinel secret'
+grep -Fq "$sentinel" "$TMP/openssl.fd" \
+    || fail 'OpenSSL did not receive passphrase through fd capture'
+! grep -Eq -- '(^|[[:space:]])(--password|-P)([[:space:]]|$)' "$TMP/openssl.argv" \
+    || fail 'legacy archiver password argv appeared unexpectedly'
+
+if command -v openssl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    smoke_dir="$TMP/smoke"
+    mkdir -p "$smoke_dir/out"
+    printf 'real archive sentinel content\n' > "$smoke_dir/recovery-kit.txt"
+    (
+        cd "$ROOT"
+        # shellcheck source=../lib/secrets.sh
+        source "$ROOT/lib/secrets.sh"
+        prompt_password_with_confirmation(){ printf '%s' 'NonProdTestPassphrase16'; }
+        _encrypt_recovery_kit_attachment "$smoke_dir/recovery-kit.txt" "$smoke_dir/kit.tar.enc" openssl
+    )
+    openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:NonProdTestPassphrase16 -in "$smoke_dir/kit.tar.enc" -out "$smoke_dir/kit.tar" >/dev/null 2>&1 \
+        || fail 'real OpenSSL archive did not decrypt with the correct passphrase'
+    if openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:WrongNonProdPassphrase16 -in "$smoke_dir/kit.tar.enc" -out "$smoke_dir/wrong.tar" >/dev/null 2>&1; then
+        fail 'real OpenSSL archive decrypted with the wrong passphrase'
+    fi
+    tar -C "$smoke_dir/out" -xf "$smoke_dir/kit.tar"
+    cmp "$smoke_dir/recovery-kit.txt" "$smoke_dir/out/recovery-kit.txt" \
+        || fail 'real archive extracted content mismatch'
+fi
+
+printf 'Recovery-kit attachment passphrase contract tests passed.\n'
 )
-! grep -Fq 'TEST_ATTACHMENT_SECRET' "$TMP/7z.argv" \
-    || fail '7z argv contains sentinel secret'
-grep -Fxq -- '-p' "$TMP/7z.argv" \
-    || fail '7z argv did not include the bare interactive -p switch'
-! grep -Eq '^-p.+' "$TMP/7z.argv" \
-    || fail '7z argv used an inline password form'
 
-(
-    cd "$ROOT"
-    PATH="$TMP/bin:$PATH"
-    export PATH
-    # shellcheck source=../lib/secrets.sh
-    source "$ROOT/lib/secrets.sh"
-    MOCK_ARGV_FILE="$TMP/zip.argv"
-    export MOCK_ARGV_FILE
-    _encrypt_recovery_kit_attachment "$plaintext" "$TMP/kit-zip.zip" zip
-)
-! grep -Fq 'TEST_ATTACHMENT_SECRET' "$TMP/zip.argv" \
-    || fail 'zip argv contains sentinel secret'
-grep -Fxq -- '--encrypt' "$TMP/zip.argv" \
-    || fail 'zip argv did not include interactive --encrypt'
-! grep -Fxq -- '--password' "$TMP/zip.argv" \
-    || fail 'zip argv must not include --password'
-
-printf 'Recovery-kit attachment argv secrecy tests passed.\n'
-)
-
-check_recovery_kit_attachment_passphrase_argv_contract
+check_recovery_kit_attachment_passphrase_contract
