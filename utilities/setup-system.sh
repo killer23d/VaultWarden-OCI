@@ -779,7 +779,7 @@ install_dependencies() {
         log_success "Universe repository enabled"
     fi
 
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-yaml" "apache2-utils" "cron" "openssl" "tar")
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-yaml" "apache2-utils" "cron" "openssl" "tar" "zstd")
 
     log_info "Refreshing apt package index..."
     operation_package_run apt-get update -qq || return 1
@@ -808,6 +808,7 @@ install_dependencies() {
         [cron]=cron
         [openssl]=openssl
         [tar]=tar
+        [zstd]=zstd
     )
 
     local missing_packages=()
@@ -846,7 +847,7 @@ install_dependencies() {
 # Confirm that all required commands and Python modules are present.
 verify_dependencies() {
     hash -r
-    local required_commands=("age" "sops" "docker" "jq" "yq" "sqlite3" "ufw" "curl" "python3" "htpasswd")
+    local required_commands=("age" "sops" "docker" "jq" "yq" "sqlite3" "ufw" "curl" "python3" "htpasswd" "zstd")
     if ! command -v ufw >/dev/null 2>&1; then
         log_error "Missing required command: ufw"
         log_info  "Install hint: sudo apt-get update && sudo apt-get install -y ufw"
