@@ -57,6 +57,21 @@ Do not replace these with your upstream relay hostname. When you change mail pro
 
 `sudo ./maintenance.sh test-email --verbose`, backup/health/maintenance alerts, systemd `OnFailure` notifications, and recovery-kit email attachments use the same SMTP relay configuration and `smtp_password` secret. Attachment sends bypass HTTP API providers and use SMTP so recovery-kit exports continue to work.
 
+### Recovery-kit attachments
+
+Recovery-kit attachments are SMTP-only. They are sent as `important-documents-YYYYMMDD.tar.gpg`: a TAR stream encrypted with GnuPG symmetric OpenPGP encryption. The attachment passphrase is user-selected, independent from Age/SOPS/emergency backup/SMTP secrets, requires at least 16 characters, and must be confirmed before encryption.
+
+To recover the document, save the attachment on a trusted device and run:
+
+```bash
+gpg --output recovery-kit.tar \
+  --decrypt important-documents-YYYYMMDD.tar.gpg
+
+tar -xf recovery-kit.tar
+```
+
+GnuPG prompts for the independent attachment passphrase. Protect the decrypted recovery kit, then delete `recovery-kit.tar` after the recovered document has been secured.
+
 Test the complete default path after setup:
 
 ```bash

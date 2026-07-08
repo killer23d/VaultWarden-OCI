@@ -15,10 +15,10 @@ ARG CADDY_VERSION=2.11.4
 FROM caddy:${CADDY_VERSION}-builder AS builder
 
 RUN xcaddy build \
-    --with github.com/caddy-dns/cloudflare \
-    --with github.com/WeidiDeng/caddy-cloudflare-ip \
-    --with github.com/fvbommel/caddy-combine-ip-ranges \
-    --with github.com/mholt/caddy-ratelimit
+    --with github.com/caddy-dns/cloudflare@v0.2.4 \
+    --with github.com/WeidiDeng/caddy-cloudflare-ip@f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5 \
+    --with github.com/fvbommel/caddy-combine-ip-ranges@v0.0.1 \
+    --with github.com/mholt/caddy-ratelimit@v0.1.0
 
 FROM caddy:${CADDY_VERSION}-alpine
 

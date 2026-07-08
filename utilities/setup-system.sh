@@ -6,22 +6,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+SUPPORTED_UBUNTU_VERSION_ID="24.04"
+SUPPORTED_UBUNTU_CODENAME="noble"
+SUPPORTED_HOST_MESSAGE="VaultWarden-OCI supports Ubuntu 24.04 LTS Noble only."
+SOPS_DEFAULT_VERSION="v3.13.2"
+YQ_VERSION="v4.53.3"
+YQ_SHA256_AMD64="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
+YQ_SHA256_ARM64="578648e463a11c1b6db6010cbf41eafed6bee79466fcffa1bb446672cf7945ea"
+YQ_INSTALL_PATH="/usr/local/bin/yq"
+
 _ubuntu_archive_url_for_arch() {
     local arch="$1"
     case "$arch" in
-        amd64|i386)
+        amd64)
             printf '%s\n' "http://archive.ubuntu.com/ubuntu"
             ;;
-        arm64|armhf|armel|ppc64el|riscv64|s390x)
+        arm64)
             printf '%s\n' "http://ports.ubuntu.com/ubuntu-ports"
             ;;
         *)
-            if declare -f log_warn >/dev/null 2>&1; then
-                log_warn "Unrecognised Ubuntu architecture '${arch}' while enabling universe; using main Ubuntu archive."
-            else
-                printf '[WARN] Unrecognised Ubuntu architecture %s while enabling universe; using main Ubuntu archive.\n' "${arch}" >&2
-            fi
-            printf '%s\n' "http://archive.ubuntu.com/ubuntu"
+            return 1
             ;;
     esac
 }
@@ -32,13 +36,178 @@ _sops_release_arch_for_dpkg() {
         amd64|arm64)
             printf '%s\n' "$arch"
             ;;
-        armhf)
-            printf '%s\n' "arm"
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_yq_release_asset_for_dpkg() {
+    local arch="$1"
+    case "$arch" in
+        amd64)
+            printf '%s\n' "yq_linux_amd64"
+            ;;
+        arm64)
+            printf '%s\n' "yq_linux_arm64"
             ;;
         *)
             return 1
             ;;
     esac
+}
+
+_yq_release_sha256_for_dpkg() {
+    local arch="$1"
+    case "$arch" in
+        amd64)
+            printf '%s\n' "$YQ_SHA256_AMD64"
+            ;;
+        arm64)
+            printf '%s\n' "$YQ_SHA256_ARM64"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_supported_host_error() {
+    local detail="${1:-}"
+    printf '%s\n' "$SUPPORTED_HOST_MESSAGE" >&2
+    [[ -n "$detail" ]] && printf '%s\n' "$detail" >&2
+}
+
+_validate_supported_host_contract() {
+    local os_release_file="${1:-${VAULTWARDEN_OS_RELEASE_FILE:-/etc/os-release}}"
+    local arch="${2:-}"
+
+    if [[ ! -r "$os_release_file" ]]; then
+        _supported_host_error "Cannot read required release information: ${os_release_file}"
+        return 1
+    fi
+
+    local ID="" VERSION_ID="" VERSION_CODENAME="" UBUNTU_CODENAME=""
+    # shellcheck disable=SC1090
+    . "$os_release_file"
+
+    if [[ -z "$ID" ]]; then
+        _supported_host_error "Missing ID in ${os_release_file}."
+        return 1
+    fi
+    if [[ "$ID" != "ubuntu" ]]; then
+        _supported_host_error "Unsupported operating system ID: ${ID}"
+        return 1
+    fi
+    if [[ -z "$VERSION_ID" ]]; then
+        _supported_host_error "Missing VERSION_ID in ${os_release_file}."
+        return 1
+    fi
+    if [[ "$VERSION_ID" != "$SUPPORTED_UBUNTU_VERSION_ID" ]]; then
+        _supported_host_error "Unsupported Ubuntu VERSION_ID: ${VERSION_ID}"
+        return 1
+    fi
+
+    local codename=""
+    if [[ -n "$VERSION_CODENAME" && -n "$UBUNTU_CODENAME" && "$VERSION_CODENAME" != "$UBUNTU_CODENAME" ]]; then
+        _supported_host_error "VERSION_CODENAME (${VERSION_CODENAME}) and UBUNTU_CODENAME (${UBUNTU_CODENAME}) disagree."
+        return 1
+    fi
+    codename="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+    if [[ -z "$codename" ]]; then
+        _supported_host_error "Missing Ubuntu codename in ${os_release_file}."
+        return 1
+    fi
+    if [[ "$codename" != "$SUPPORTED_UBUNTU_CODENAME" ]]; then
+        _supported_host_error "Unsupported Ubuntu codename: ${codename}"
+        return 1
+    fi
+
+    if [[ -z "$arch" ]]; then
+        if ! arch=$(dpkg --print-architecture 2>/dev/null); then
+            _supported_host_error "Cannot determine host CPU architecture with dpkg --print-architecture."
+            return 1
+        fi
+    fi
+    case "$arch" in
+        amd64|arm64) ;;
+        *)
+            _supported_host_error "Unsupported CPU architecture: ${arch}. Supported architectures: amd64, arm64."
+            return 1
+            ;;
+    esac
+
+    printf '%s %s\n' "$codename" "$arch"
+}
+
+_yq_resolved_version() {
+    local yq_bin="${1:-}"
+    [[ -n "$yq_bin" ]] || yq_bin="$(command -v yq 2>/dev/null || true)"
+    [[ -n "$yq_bin" && -x "$yq_bin" ]] || return 1
+
+    local version_output
+    version_output=$("$yq_bin" --version 2>&1) || return 1
+    [[ "$version_output" == *"mikefarah/yq"* ]] || return 1
+    if [[ "$version_output" =~ version[[:space:]]v?([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$) ]]; then
+        printf 'v%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
+}
+
+_validate_yq_contract() {
+    local yq_bin="${1:-}"
+    [[ -n "$yq_bin" ]] || yq_bin="$(command -v yq 2>/dev/null || true)"
+    [[ -n "$yq_bin" && -x "$yq_bin" ]] || return 1
+
+    local resolved_version
+    resolved_version=$(_yq_resolved_version "$yq_bin") || return 1
+    [[ "$resolved_version" =~ ^v4\. ]] || return 1
+
+    local raw_probe schema_probe
+    raw_probe=$(printf 'answer: plain-value\n' | "$yq_bin" -r '.answer' - 2>/dev/null) || return 1
+    [[ "$raw_probe" == "plain-value" ]] || return 1
+    schema_probe=$(printf 'schema_version: 1\nsecrets:\n  - key: cloudflare_zone_id\n    required: true\n' \
+        | "$yq_bin" -r '.secrets[] | select(.required == true) | .key' - 2>/dev/null) || return 1
+    [[ "$schema_probe" == "cloudflare_zone_id" ]] || return 1
+    return 0
+}
+
+_validate_yq_exact_contract() {
+    local yq_bin="${1:-}" actual
+    [[ -n "$yq_bin" ]] || yq_bin="$(command -v yq 2>/dev/null || true)"
+    actual=$(_yq_resolved_version "$yq_bin") || return 1
+    [[ "$actual" == "$YQ_VERSION" ]] || return 1
+    _validate_yq_contract "$yq_bin"
+}
+
+_validate_sops_version_format() {
+    [[ "${1:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+_sops_normalize_version_output() {
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^sops[[:space:]]+(version[[:space:]]+)?v?([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$|\() ]]; then
+            printf 'v%s\n' "${BASH_REMATCH[2]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_sops_resolved_version() {
+    local sops_bin="${1:-}"
+    [[ -n "$sops_bin" ]] || sops_bin="$(command -v sops 2>/dev/null || true)"
+    [[ -n "$sops_bin" && -x "$sops_bin" ]] || return 1
+
+    local version_output
+    version_output=$("$sops_bin" --version 2>&1) || return 1
+    _sops_normalize_version_output <<<"$version_output"
+}
+
+_validate_sops_contract() {
+    _sops_resolved_version >/dev/null
 }
 
 if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
@@ -49,8 +218,40 @@ if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
         sops-release-arch)
             _sops_release_arch_for_dpkg "${2:-}"
             ;;
+        yq-release-asset)
+            _yq_release_asset_for_dpkg "${2:-}"
+            ;;
+        yq-release-sha256)
+            _yq_release_sha256_for_dpkg "${2:-}"
+            ;;
+        supported-host)
+            _validate_supported_host_contract "${2:-}" "${3:-}"
+            ;;
+        sops-default-version)
+            printf '%s\n' "$SOPS_DEFAULT_VERSION"
+            ;;
+        yq-version)
+            printf '%s\n' "$YQ_VERSION"
+            ;;
+        validate-yq)
+            _validate_yq_contract "${2:-}"
+            ;;
+        validate-yq-exact)
+            _validate_yq_exact_contract "${2:-}"
+            ;;
+        yq-resolved-version)
+            _yq_resolved_version "${2:-}"
+            ;;
+        sops-version)
+            _sops_resolved_version "${2:-}"
+            ;;
+        sops-version-equals)
+            [[ -n "${2:-}" && -n "${3:-}" ]] || exit 2
+            actual="$(_sops_resolved_version "${2:-}")" || exit 1
+            [[ "$actual" == "$3" ]]
+            ;;
         *)
-            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch} ARCH\n' "$0" >&2
+            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch|yq-release-asset|yq-release-sha256|supported-host|sops-default-version|yq-version|validate-yq|validate-yq-exact|yq-resolved-version|sops-version|sops-version-equals} [ARG...]\n' "$0" >&2
             exit 2
             ;;
     esac
@@ -88,7 +289,12 @@ source "${PROJECT_ROOT}/lib/operations.sh"
 # shellcheck source=../lib/defaults.sh
 source "${PROJECT_ROOT}/lib/defaults.sh"
 
-SOPS_VERSION="${SOPS_VERSION:-}"
+_SOPS_VERSION_ENV_SET=false
+if [[ -n "${SOPS_VERSION+x}" && -n "${SOPS_VERSION:-}" ]]; then
+    _SOPS_VERSION_ENV_SET=true
+fi
+SOPS_VERSION="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
+SOPS_VERSION_CLI_SET=false
 SKIP_DEPS=false
 AUTO_MODE=false
 USE_LATEST=false
@@ -96,6 +302,9 @@ DRY_RUN=false
 FORCE=false
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
 DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+SUPPORTED_HOST_CODENAME=""
+SUPPORTED_HOST_ARCH=""
+SUPPORTED_HOST_ARCHIVE_URL=""
 
 # Exported so that any sub-scripts invoked later can inherit these flags.
 export USE_LATEST FORCE
@@ -115,8 +324,8 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --use-latest          Override pinned versions with 'latest'
-    --sops-version VER    Pin SOPS to a specific version (e.g. v3.9.4)
+    --use-latest          Resolve the latest SOPS release instead of the pinned default
+    --sops-version VER    Use a specific SOPS version (default: v3.13.2)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --data-device DEV     Data volume device path
@@ -155,6 +364,7 @@ _parse_args() {
                 shift
                 _require_cli_value "--sops-version" "${1-}"
                 SOPS_VERSION="$1"
+                SOPS_VERSION_CLI_SET=true
                 ;;
             --data-device)
                 shift
@@ -175,6 +385,15 @@ _parse_args() {
         esac
         shift
     done
+
+    if [[ "$USE_LATEST" == "true" && "$SOPS_VERSION_CLI_SET" == "true" ]]; then
+        log_error "--use-latest cannot be combined with --sops-version; choose one SOPS version source."
+        exit 1
+    fi
+    if [[ "$USE_LATEST" == "true" && "$_SOPS_VERSION_ENV_SET" == "true" ]]; then
+        log_error "--use-latest cannot be combined with SOPS_VERSION from the environment; choose one SOPS version source."
+        exit 1
+    fi
 }
 
 # Resolve the latest release tag from the GitHub API.
@@ -195,13 +414,33 @@ resolve_github_latest() {
 
     tag=$(jq -r '.tag_name // empty' "$api_tmpfile")
 
-    if [[ -z "$tag" ]] || [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9] ]]; then
+    if [[ -z "$tag" ]] || ! _validate_sops_version_format "$tag"; then
         log_error "Could not resolve a valid release tag for ${repo}."
         log_error "Set SOPS_VERSION=vX.Y.Z via --sops-version or the environment to bypass."
         return 1
     fi
 
     echo "$tag"
+}
+
+validate_supported_host_preflight() {
+    local result
+    if ! result=$(_validate_supported_host_contract); then
+        return 1
+    fi
+    SUPPORTED_HOST_CODENAME="${result%% *}"
+    SUPPORTED_HOST_ARCH="${result##* }"
+    if ! SUPPORTED_HOST_ARCHIVE_URL=$(_ubuntu_archive_url_for_arch "$SUPPORTED_HOST_ARCH"); then
+        log_error "Unsupported CPU architecture for Ubuntu archive selection: ${SUPPORTED_HOST_ARCH}"
+        return 1
+    fi
+    log_info "Supported host validated: Ubuntu ${SUPPORTED_UBUNTU_VERSION_ID} LTS ${SUPPORTED_UBUNTU_CODENAME} (${SUPPORTED_HOST_ARCH})"
+}
+
+require_supported_host_preflight() {
+    if [[ -z "$SUPPORTED_HOST_CODENAME" || -z "$SUPPORTED_HOST_ARCH" || -z "$SUPPORTED_HOST_ARCHIVE_URL" ]]; then
+        validate_supported_host_preflight
+    fi
 }
 
 # Install Docker CE from the official apt repository with GPG key verification.
@@ -211,9 +450,10 @@ install_docker() {
         return 0
     fi
 
+    require_supported_host_preflight || return 1
     local codename arch keyfile sources_file
-    codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
-    arch=$(dpkg --print-architecture)
+    codename="$SUPPORTED_HOST_CODENAME"
+    arch="$SUPPORTED_HOST_ARCH"
     keyfile="/etc/apt/keyrings/docker.asc"
     sources_file="/etc/apt/sources.list.d/docker.sources"
 
@@ -363,6 +603,149 @@ create_swapfile() {
     return 0
 }
 
+install_yq() {
+    # Normal dependency setup is repository-owned and deterministic: install or
+    # reuse exactly YQ_VERSION. The explicit --skip-deps path does not call this
+    # function; it only verifies operator-owned compatibility.
+    if _validate_yq_exact_contract; then
+        log_info "Pinned Mike Farah yq ${YQ_VERSION} already installed: $(yq --version)"
+        return 0
+    fi
+
+    local dpkg_arch asset expected actual yq_bin base_url
+    dpkg_arch="${SUPPORTED_HOST_ARCH:-$(dpkg --print-architecture)}"
+    if ! asset=$(_yq_release_asset_for_dpkg "$dpkg_arch"); then
+        log_error "Unsupported CPU architecture for automatic yq binary install: ${dpkg_arch}"
+        log_error "Supported yq install architectures: amd64, arm64"
+        return 1
+    fi
+    if ! expected=$(_yq_release_sha256_for_dpkg "$dpkg_arch"); then
+        log_error "Missing repository-controlled yq checksum for architecture: ${dpkg_arch}"
+        return 1
+    fi
+
+    log_info "Installing Mike Farah yq ${YQ_VERSION} for ${dpkg_arch}..."
+    base_url="https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}"
+    yq_bin="$TMP_WORKDIR/${asset}"
+
+    wget -q "${base_url}/${asset}" -O "$yq_bin" || {
+        log_error "Failed to download yq binary: ${base_url}/${asset}"
+        return 1
+    }
+
+    actual=$(sha256sum "$yq_bin" | awk '{print $1}')
+    if [[ "$expected" != "$actual" ]]; then
+        log_error "yq checksum MISMATCH — refusing to install."
+        log_error "  Expected: $expected"
+        log_error "  Actual:   $actual"
+        return 1
+    fi
+
+    log_success "yq checksum verified: $expected"
+    install -m 755 "$yq_bin" "$YQ_INSTALL_PATH" || return 1
+    hash -r
+    if ! _validate_yq_exact_contract "$YQ_INSTALL_PATH"; then
+        log_error "Installed yq does not satisfy exact ${YQ_VERSION} plus the required schema interface."
+        return 1
+    fi
+    if ! _validate_yq_exact_contract; then
+        log_error "Resolved yq on PATH does not satisfy exact ${YQ_VERSION} plus the required schema interface after install."
+        log_error "Ensure ${YQ_INSTALL_PATH} appears before incompatible yq implementations in PATH."
+        return 1
+    fi
+    log_success "Installed yq: $(yq --version)"
+}
+
+install_sops() {
+    local sops_ver="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
+    if [[ "$USE_LATEST" == "true" ]]; then
+        log_info "SOPS --use-latest requested — resolving latest release from GitHub..."
+        sops_ver=$(resolve_github_latest "getsops/sops") || return 1
+    elif [[ -n "$sops_ver" ]]; then
+        log_info "Using SOPS version: ${sops_ver}"
+    else
+        log_error "Internal error: SOPS version is empty; expected pinned default ${SOPS_DEFAULT_VERSION}."
+        return 1
+    fi
+
+    if ! _validate_sops_version_format "$sops_ver"; then
+        log_error "SOPS_VERSION '${sops_ver}' does not match expected format vX.Y.Z — aborting."
+        return 1
+    fi
+
+    local installed_sops_ver=""
+    if installed_sops_ver=$(_sops_resolved_version 2>/dev/null); then
+        if [[ "$installed_sops_ver" == "$sops_ver" ]]; then
+            log_info "SOPS ${installed_sops_ver} already installed and matches selected version."
+            return 0
+        fi
+        log_warn "Installed SOPS ${installed_sops_ver} does not match selected ${sops_ver}; replacing it."
+    else
+        log_info "No usable SOPS binary matching the repository contract was found; installing ${sops_ver}."
+    fi
+
+    local dpkg_arch arch
+    dpkg_arch="${SUPPORTED_HOST_ARCH:-$(dpkg --print-architecture)}"
+    if ! arch=$(_sops_release_arch_for_dpkg "$dpkg_arch"); then
+        log_error "Unsupported CPU architecture for automatic SOPS binary install: ${dpkg_arch}"
+        log_error "Supported automatic SOPS install architectures: amd64, arm64"
+        log_error "Install sops from a supported release artifact, then re-run setup."
+        return 1
+    fi
+
+    log_info "Installing SOPS ${sops_ver} with checksum verification..."
+
+    local sops_filename="sops-${sops_ver}.linux.${arch}"
+    local base_url="https://github.com/getsops/sops/releases/download/${sops_ver}"
+    local sops_bin="$TMP_WORKDIR/${sops_filename}"
+    local sops_checksums="$TMP_WORKDIR/sops-${sops_ver}.checksums.txt"
+
+    wget -q "${base_url}/${sops_filename}"               -O "$sops_bin"       || {
+        log_error "Failed to download SOPS binary: ${base_url}/${sops_filename}"
+        return 1
+    }
+    wget -q "${base_url}/sops-${sops_ver}.checksums.txt" -O "$sops_checksums" || {
+        log_error "Failed to download SOPS checksums: ${base_url}/sops-${sops_ver}.checksums.txt"
+        return 1
+    }
+
+    local expected actual
+    expected=$(awk -v file="$sops_filename" '$2 == file {print $1; exit}' "$sops_checksums")
+    actual=$(sha256sum "$sops_bin" | awk '{print $1}')
+
+    if [[ -z "$expected" ]]; then
+        log_error "Could not find checksum entry for '${sops_filename}' in checksums file."
+        log_error "The checksums file may not include this architecture/version combination."
+        log_error "Pin SOPS_VERSION=vX.Y.Z via --sops-version and retry."
+        return 1
+    fi
+
+    if [[ "$expected" != "$actual" ]]; then
+        log_error "SOPS checksum MISMATCH — refusing to install."
+        log_error "  Expected: $expected"
+        log_error "  Actual:   $actual"
+        log_error "This may indicate a compromised download, MITM, or corrupted file."
+        log_error "Pin SOPS_VERSION=vX.Y.Z via --sops-version and retry. Releases: https://github.com/getsops/sops/releases"
+        return 1
+    fi
+
+    log_success "SOPS checksum verified: $expected"
+    install -m 755 "$sops_bin" /usr/local/bin/sops || return 1
+    hash -r
+
+    local final_sops_ver
+    if ! final_sops_ver=$(_sops_resolved_version); then
+        log_error "Installed SOPS binary does not report a usable version after install."
+        return 1
+    fi
+    if [[ "$final_sops_ver" != "$sops_ver" ]]; then
+        log_error "Resolved SOPS version after install is ${final_sops_ver}, expected ${sops_ver}."
+        log_error "Ensure /usr/local/bin appears before older SOPS binaries in PATH."
+        return 1
+    fi
+    log_success "Installed SOPS: ${final_sops_ver}"
+}
+
 # Install the required system packages, Docker, and SOPS.
 # NOTE: CrowdSec is intentionally NOT installed here. It is an optional
 # post-install step that requires Cloudflare secrets to be injected first.
@@ -371,6 +754,7 @@ create_swapfile() {
 install_dependencies() {
     if [[ "$SKIP_DEPS" == "true" ]]; then return 0; fi
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would install dependencies"; return 0; fi
+    require_supported_host_preflight || return 1
 
     log_info "Installing system dependencies..."
 
@@ -379,33 +763,23 @@ install_dependencies() {
             /etc/apt/sources.list.d/*.list 2>/dev/null && \
        ! grep -qE '^Components:.*\buniverse\b' \
             /etc/apt/sources.list.d/*.sources 2>/dev/null; then
-        log_info "Enabling Ubuntu 'universe' repository (required for python3-argon2 and yq)..."
+        log_info "Enabling Ubuntu 'universe' repository (required for python3-argon2 and python3-yaml)..."
         if command -v add-apt-repository >/dev/null 2>&1; then
             operation_package_run add-apt-repository -y universe || {
                 log_warn "add-apt-repository failed — adding universe source manually"
-                local arch; arch=$(dpkg --print-architecture)
-                local archive_url
-                local codename
-                codename=$(lsb_release -cs 2>/dev/null || echo "noble")
-                archive_url=$(_ubuntu_archive_url_for_arch "$arch")
-                echo "deb ${archive_url} ${codename} universe" \
+                echo "deb ${SUPPORTED_HOST_ARCHIVE_URL} ${SUPPORTED_HOST_CODENAME} universe" \
                     > /etc/apt/sources.list.d/ubuntu-universe.list
                 operation_package_run apt-get update -qq || return 1
             }
         else
-            local arch; arch=$(dpkg --print-architecture)
-            local archive_url
-            local codename
-            codename=$(lsb_release -cs 2>/dev/null || echo "noble")
-            archive_url=$(_ubuntu_archive_url_for_arch "$arch")
-            echo "deb ${archive_url} ${codename} universe" \
+            echo "deb ${SUPPORTED_HOST_ARCHIVE_URL} ${SUPPORTED_HOST_CODENAME} universe" \
                 > /etc/apt/sources.list.d/ubuntu-universe.list
             operation_package_run apt-get update -qq || return 1
         fi
         log_success "Universe repository enabled"
     fi
 
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "yq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron" "p7zip-full")
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-yaml" "apache2-utils" "cron" "openssl" "tar" "zstd")
 
     log_info "Refreshing apt package index..."
     operation_package_run apt-get update -qq || return 1
@@ -417,7 +791,6 @@ install_dependencies() {
         [rclone]=rclone
         [sqlite3]=sqlite3
         [jq]=jq
-        [yq]=yq
         [ufw]=ufw
         [curl]=curl
         [wget]=wget
@@ -430,9 +803,12 @@ install_dependencies() {
         [rsync]=rsync
         [python3]=python3
         [python3-argon2]=""
+        [python3-yaml]=""
         [apache2-utils]=htpasswd
         [cron]=cron
-        [p7zip-full]=7z
+        [openssl]=openssl
+        [tar]=tar
+        [zstd]=zstd
     )
 
     local missing_packages=()
@@ -463,74 +839,15 @@ install_dependencies() {
         operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || return 1
     fi
 
-    if ! command -v sops >/dev/null 2>&1; then
-        local dpkg_arch arch
-        dpkg_arch=$(dpkg --print-architecture)
-        if ! arch=$(_sops_release_arch_for_dpkg "$dpkg_arch"); then
-            log_error "Unsupported CPU architecture for automatic SOPS binary install: ${dpkg_arch}"
-            log_error "Supported automatic SOPS install architectures: amd64, arm64, armhf"
-            log_error "Install sops from an Ubuntu package or provide a supported SOPS release artifact, then re-run setup."
-            return 1
-        fi
-
-        local sops_ver="${SOPS_VERSION:-}"
-        if [[ -n "$sops_ver" ]]; then
-            if [[ ! "$sops_ver" =~ ^v[0-9]+\.[0-9]+\.[0-9] ]]; then
-                log_error "SOPS_VERSION '${sops_ver}' does not match expected format vX.Y.Z — aborting."
-                return 1
-            fi
-            log_info "Using pinned SOPS version: ${sops_ver}"
-        else
-            log_info "SOPS_VERSION not pinned — resolving latest from GitHub..."
-            sops_ver=$(resolve_github_latest "getsops/sops") || return 1
-        fi
-
-        log_info "Installing SOPS ${sops_ver} with checksum verification..."
-
-        local sops_filename="sops-${sops_ver}.linux.${arch}"
-        local base_url="https://github.com/getsops/sops/releases/download/${sops_ver}"
-        local sops_bin="$TMP_WORKDIR/${sops_filename}"
-        local sops_checksums="$TMP_WORKDIR/sops-${sops_ver}.checksums.txt"
-
-        wget -q "${base_url}/${sops_filename}"               -O "$sops_bin"       || {
-            log_error "Failed to download SOPS binary: ${base_url}/${sops_filename}"
-            return 1
-        }
-        wget -q "${base_url}/sops-${sops_ver}.checksums.txt" -O "$sops_checksums" || {
-            log_error "Failed to download SOPS checksums: ${base_url}/sops-${sops_ver}.checksums.txt"
-            return 1
-        }
-
-        local expected actual
-        expected=$(grep "${sops_filename}$" "$sops_checksums" | awk '{print $1}')
-        actual=$(sha256sum "$sops_bin" | awk '{print $1}')
-
-        if [[ -z "$expected" ]]; then
-            log_error "Could not find checksum entry for '${sops_filename}' in checksums file."
-            log_error "The checksums file may not include this architecture/version combination."
-            log_error "Pin SOPS_VERSION=vX.Y.Z via --sops-version and retry."
-            return 1
-        fi
-
-        if [[ "$expected" != "$actual" ]]; then
-            log_error "SOPS checksum MISMATCH — refusing to install."
-            log_error "  Expected: $expected"
-            log_error "  Actual:   $actual"
-            log_error "This may indicate a compromised download, MITM, or corrupted file."
-            log_error "Pin SOPS_VERSION=vX.Y.Z via --sops-version and retry. Releases: https://github.com/getsops/sops/releases"
-            return 1
-        fi
-
-        log_success "SOPS checksum verified: $expected"
-        install -m 755 "$sops_bin" /usr/local/bin/sops || return 1
-    fi
+    install_yq || return 1
+    install_sops || return 1
     return 0
 }
 
 # Confirm that all required commands and Python modules are present.
 verify_dependencies() {
     hash -r
-    local required_commands=("age" "sops" "docker" "jq" "yq" "sqlite3" "ufw" "curl" "python3" "htpasswd")
+    local required_commands=("age" "sops" "docker" "jq" "yq" "sqlite3" "ufw" "curl" "python3" "htpasswd" "zstd")
     if ! command -v ufw >/dev/null 2>&1; then
         log_error "Missing required command: ufw"
         log_info  "Install hint: sudo apt-get update && sudo apt-get install -y ufw"
@@ -538,7 +855,19 @@ verify_dependencies() {
     fi
 
     require_commands "${required_commands[@]}" || return 1
+    if ! _validate_sops_contract; then
+        log_error "Resolved sops command does not satisfy the required repository SOPS interface."
+        return 1
+    fi
+    if ! _validate_yq_contract; then
+        log_error "Resolved yq does not satisfy the required Mike Farah v4 schema interface."
+        return 1
+    fi
     python3 -c "from argon2 import PasswordHasher" 2>/dev/null || return 1
+    python3 -c "import yaml" 2>/dev/null || {
+        log_error "python3-yaml (PyYAML) is not installed — required for secrets parsing"
+        return 1
+    }
     docker compose version >/dev/null 2>&1 || return 1
     return 0
 }
@@ -662,6 +991,7 @@ main() {
     _parse_args "$@"
 
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
+    validate_supported_host_preflight || exit 1
     if [[ "$DRY_RUN" != "true" ]]; then
         operation_acquire --id setup --label "Setup" || exit $?
         _setup_system_cleanup() {

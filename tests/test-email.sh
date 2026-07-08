@@ -96,3 +96,181 @@ echo "PASS=$PASS FAIL=$FAIL"
 )
 
 check_email_delivery_refactor_contracts
+check_recovery_kit_attachment_passphrase_contract() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+if grep -En '7z[[:space:]].*-p|zip[[:space:]].*(--password|-P)|ZIP_PASSWORD|vw-enc-pass|_pass_file' "$ROOT/lib/secrets.sh" >"$TMP/source.matches"; then
+    cat "$TMP/source.matches" >&2
+    fail 'recovery-kit attachment helper must not use secret-bearing archiver argv, environment handoff, or passphrase temp files'
+fi
+if grep -En 'openssl[[:space:]]+enc|aes-256-cbc|tar\.'"enc" "$ROOT/lib/secrets.sh" >"$TMP/source.matches"; then
+    cat "$TMP/source.matches" >&2
+    fail 'recovery-kit helper must not retain the obsolete encrypted-tar format'
+fi
+grep -Fq 'prompt_password_with_confirmation \' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must use the existing password confirmation helper'
+grep -Fq '"Passphrase to encrypt emailed attachment" 16' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must enforce the 16-character minimum through the password helper'
+grep -Fq "printf 'gpg'" "$ROOT/lib/secrets.sh" \
+    || fail 'recovery-kit email dependency helper must select gpg'
+grep -Fq -- '--passphrase-fd 3' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must pass the secret to GnuPG through fd 3'
+grep -Fq -- '--no-symkey-cache' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must disable GnuPG symmetric passphrase caching'
+grep -Fq -- '3<<<"$_enc_pass"' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must feed the passphrase through fd 3'
+grep -Fq 'set +x' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must disable xtrace while the passphrase is live'
+grep -Fq 'unset _enc_pass' "$ROOT/lib/secrets.sh" \
+    || fail 'attachment helper must unset the passphrase promptly'
+! grep -En -- '(^|[[:space:]])--passphrase([=[:space:]]|$)|--passphrase-file|RECOVERY_PASSWORD|passphrase-file' "$ROOT/lib/secrets.sh" >"$TMP/source.matches" \
+    || { cat "$TMP/source.matches" >&2; fail 'attachment helper must not use argv, environment, or temp-file passphrase handoff'; }
+
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/gpg" <<'MOCK_GPG'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$MOCK_ARGV_FILE"
+export -p > "$MOCK_ENV_FILE"
+cat <&3 > "$MOCK_FD_FILE"
+out=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--output" ]]; then
+        out="$2"
+        shift 2
+        continue
+    fi
+    shift
+done
+cat > "$MOCK_STDIN_FILE"
+cp "$MOCK_STDIN_FILE" "$out"
+MOCK_GPG
+chmod +x "$TMP/bin/gpg"
+
+plaintext="$TMP/recovery-kit.txt"
+printf 'test recovery kit\n' > "$plaintext"
+sentinel='TEST_ATTACHMENT_SECRET_1234567890'
+
+run_encrypt_with_prompt() {
+    local prompt_body="$1" out_file="$2"
+    (
+        cd "$ROOT"
+        PATH="$TMP/bin:$PATH"
+        export PATH
+        # shellcheck source=../lib/secrets.sh
+        source "$ROOT/lib/secrets.sh"
+        prompt_password_with_confirmation(){ eval "$prompt_body"; }
+        MOCK_ARGV_FILE="$TMP/gpg.argv"
+        MOCK_ENV_FILE="$TMP/gpg.env"
+        MOCK_FD_FILE="$TMP/gpg.fd"
+        MOCK_STDIN_FILE="$TMP/gpg.stdin"
+        export MOCK_ARGV_FILE MOCK_ENV_FILE MOCK_FD_FILE MOCK_STDIN_FILE
+        _encrypt_recovery_kit_attachment "$plaintext" "$out_file" gpg
+    )
+}
+
+short_prompt='return 1'
+if run_encrypt_with_prompt "$short_prompt" "$TMP/short.enc"; then
+    fail 'short passphrase validation failure must reject before archive success'
+fi
+[[ ! -s "$TMP/short.enc" ]] || fail 'short passphrase rejection must not leave a successful archive'
+
+mismatch_prompt='return 1'
+if run_encrypt_with_prompt "$mismatch_prompt" "$TMP/mismatch.enc"; then
+    fail 'confirmation mismatch validation failure must reject before archive success'
+fi
+[[ ! -s "$TMP/mismatch.enc" ]] || fail 'confirmation mismatch must not leave a successful archive'
+
+exact16='1234567890abcdef'
+run_encrypt_with_prompt "printf %s '$exact16'" "$TMP/exact.enc" \
+    || fail 'matching 16-character passphrase should be accepted'
+longer='1234567890abcdefghi'
+run_encrypt_with_prompt "printf %s '$longer'" "$TMP/long.enc" \
+    || fail 'matching longer passphrase should be accepted'
+
+run_encrypt_with_prompt "printf %s '$sentinel'" "$TMP/sentinel.enc" \
+    || fail 'sentinel encryption should succeed'
+! grep -Fq "$sentinel" "$TMP/gpg.argv" \
+    || fail 'GnuPG argv contains sentinel secret'
+! grep -Fq "$sentinel" "$TMP/gpg.env" \
+    || fail 'GnuPG environment contains sentinel secret'
+grep -Fq "$sentinel" "$TMP/gpg.fd" \
+    || fail 'GnuPG did not receive passphrase through fd capture'
+tar -tf "$TMP/gpg.stdin" | grep -Fxq 'recovery-kit.txt' \
+    || fail 'tar payload was not supplied on stdin to GnuPG'
+require_gpg_arg() {
+    local arg="$1"
+    grep -Fxq -- "$arg" "$TMP/gpg.argv" || fail "GnuPG argv missing required option: $arg"
+}
+require_gpg_arg '--batch'
+require_gpg_arg '--yes'
+require_gpg_arg '--pinentry-mode'
+require_gpg_arg 'loopback'
+require_gpg_arg '--passphrase-fd'
+require_gpg_arg '3'
+require_gpg_arg '--no-symkey-cache'
+require_gpg_arg '--symmetric'
+require_gpg_arg '--output'
+! grep -Eq -- '(^|[[:space:]])(--passphrase|--passphrase-file|--password|-P)([=[:space:]]|$)' "$TMP/gpg.argv" \
+    || fail 'secret-bearing password argv appeared unexpectedly'
+
+if command -v gpg >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    smoke_dir="$TMP/smoke"
+    mkdir -p "$smoke_dir/out" "$smoke_dir/gnupg"
+    chmod 700 "$smoke_dir/gnupg"
+    printf 'real archive sentinel content\n' > "$smoke_dir/recovery-kit.txt"
+    (
+        cd "$ROOT"
+        GNUPGHOME="$smoke_dir/gnupg"
+        export GNUPGHOME
+        # shellcheck source=../lib/secrets.sh
+        source "$ROOT/lib/secrets.sh"
+        prompt_password_with_confirmation(){ printf '%s' 'NonProdTestPassphrase16'; }
+        _encrypt_recovery_kit_attachment "$smoke_dir/recovery-kit.txt" "$smoke_dir/kit.tar.gpg" gpg
+    )
+    [[ -s "$smoke_dir/kit.tar.gpg" ]] || fail 'real GnuPG archive was not created'
+    ! LC_ALL=C grep -aFq 'real archive sentinel content' "$smoke_dir/kit.tar.gpg" \
+        || fail 'real GnuPG archive contains plaintext sentinel content'
+    gpg_decrypt_with_fd() (
+        local input_file="$1" output_file="$2" passphrase="$3"
+        GNUPGHOME="$smoke_dir/gnupg"
+        export GNUPGHOME
+        gpg \
+            --batch \
+            --yes \
+            --pinentry-mode loopback \
+            --passphrase-fd 3 \
+            --no-symkey-cache \
+            --output "$output_file" \
+            --decrypt "$input_file" \
+            3<<<"$passphrase" >/dev/null 2>&1
+    )
+    gpg_decrypt_with_fd "$smoke_dir/kit.tar.gpg" "$smoke_dir/kit.tar" 'NonProdTestPassphrase16' \
+        || fail 'real GnuPG archive did not decrypt with the correct passphrase'
+    if gpg_decrypt_with_fd "$smoke_dir/kit.tar.gpg" "$smoke_dir/wrong.tar" 'WrongNonProdPassphrase16'; then
+        fail 'real GnuPG archive decrypted with the wrong passphrase'
+    fi
+    tar -C "$smoke_dir/out" -xf "$smoke_dir/kit.tar"
+    cmp "$smoke_dir/recovery-kit.txt" "$smoke_dir/out/recovery-kit.txt" \
+        || fail 'real archive extracted content mismatch'
+    tampered="$smoke_dir/kit.tampered.tar.gpg"
+    cp "$smoke_dir/kit.tar.gpg" "$tampered"
+    orig_byte=$(od -An -tx1 -j 16 -N1 "$tampered" | tr -d ' \n')
+    new_byte=00
+    [[ "$orig_byte" == "00" ]] && new_byte=ff
+    printf '%b' "\\x${new_byte}" | dd of="$tampered" bs=1 seek=16 count=1 conv=notrunc >/dev/null 2>&1
+    if gpg_decrypt_with_fd "$tampered" "$smoke_dir/tampered.tar" 'NonProdTestPassphrase16'; then
+        fail 'tampered GnuPG archive decrypted successfully'
+    fi
+else
+    printf 'Real GnuPG recovery-kit attachment smoke test skipped: gpg or tar unavailable.\n'
+fi
+
+printf 'Recovery-kit attachment passphrase contract tests passed.\n'
+)
+
+check_recovery_kit_attachment_passphrase_contract

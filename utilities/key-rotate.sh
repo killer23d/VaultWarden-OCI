@@ -76,7 +76,7 @@ _need_cmd() {
     local cmd="$1" pkg="${2:-$1}"
     if ! command -v "$cmd" >/dev/null 2>&1; then
         log_error "$cmd is required for Age key rotation but is not installed."
-        log_error "Install on Ubuntu with: sudo apt-get install -y ${pkg}"
+        log_error "Install on Ubuntu 24.04 LTS Noble with: sudo apt-get install -y ${pkg}"
         return 1
     fi
 }

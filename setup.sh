@@ -4,14 +4,20 @@
 
 set -euo pipefail
 
-# Set SOPS_VERSION to pin a specific release, or leave it blank to resolve the
-# latest release from the GitHub API at runtime.
+# Set SOPS_VERSION to use a specific release. When unset or blank, setup uses
+# the repository-pinned production default. Pass --use-latest to intentionally
+# resolve the current SOPS release from GitHub during dependency installation.
 #
 # Examples:
 #   SOPS_VERSION="v3.9.4"
 #   SOPS_VERSION=""
 #
-SOPS_VERSION="${SOPS_VERSION:-}"
+SOPS_DEFAULT_VERSION="v3.13.2"
+SOPS_VERSION_ENV_SET=false
+if [[ -n "${SOPS_VERSION+x}" && -n "${SOPS_VERSION:-}" ]]; then
+    SOPS_VERSION_ENV_SET=true
+fi
+SOPS_VERSION="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
@@ -90,7 +96,9 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Use live upstream container and CrowdSec versions in .env.
+  --use-latest        Use live upstream container and CrowdSec versions in .env,
+                      and resolve the latest SOPS release instead of the pinned
+                      production default.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       WARNING: Also regenerates the Age encryption key. All
@@ -198,6 +206,11 @@ while [[ $# -gt 0 ]]; do
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
+
+if [[ "$USE_LATEST" == "true" && "$SOPS_VERSION_ENV_SET" == "true" ]]; then
+    log_error "--use-latest cannot be combined with SOPS_VERSION from the environment; choose one SOPS version source."
+    exit 1
+fi
 
 
 # ---------------------------------------------------------------------------
@@ -463,10 +476,12 @@ main() {
 
     _verify_required_utilities
 
-    if [[ -n "${SOPS_VERSION:-}" ]]; then
-        log_info "SOPS version pinned: ${SOPS_VERSION}"
+    if [[ "$USE_LATEST" == "true" ]]; then
+        log_info "SOPS version: will resolve latest from GitHub because --use-latest was requested"
+    elif [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
+        log_info "SOPS version requested: ${SOPS_VERSION}"
     else
-        log_info "SOPS version: will resolve latest from GitHub at install time"
+        log_info "SOPS version pinned default: ${SOPS_VERSION}"
     fi
 
 
@@ -482,12 +497,12 @@ main() {
     _dev_flags+=(--data-mount "$DATA_VOLUME_MOUNT")
 
     local _sops_flags=()
-    [[ -n "${SOPS_VERSION:-}" ]] && _sops_flags=(--sops-version "$SOPS_VERSION")
+    [[ "$SOPS_VERSION_ENV_SET" == "true" ]] && _sops_flags=(--sops-version "$SOPS_VERSION")
 
     operation_set_phase "1" "System setup"
     log_phase 1 6 "System setup"
     "${SCRIPT_DIR}/utilities/setup-system.sh" \
-        "${_auto[@]}" "${_skip_deps[@]}" "${_dry[@]}" "${_force[@]}" \
+        "${_auto[@]}" "${_skip_deps[@]}" "${_use_latest[@]}" "${_dry[@]}" "${_force[@]}" \
         "${_dev_flags[@]}" "${_sops_flags[@]}" \
         || _phase_failed 1 "System setup"             "Check missing packages: sudo apt-get update && sudo apt-get install -y docker.io age sops"             "Re-run this phase: sudo ./utilities/setup-system.sh"             "If dependencies are already installed, re-run setup with --skip-deps"
 

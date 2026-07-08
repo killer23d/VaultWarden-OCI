@@ -194,11 +194,10 @@ sudo systemctl restart vaultwarden-db-backup.timer
 
 ## 📌 Dependency Version Pinning
 
-By default `setup.sh` auto-resolves the latest release of SOPS and age from the GitHub API. To pin specific versions for reproducible deployments, edit the top of `setup.sh` before running:
+By default `setup.sh` uses the repository-pinned SOPS production default and installs `age` from Ubuntu Noble packages. To request a specific SOPS release, set `SOPS_VERSION` before running setup:
 
 ```bash
 SOPS_VERSION="v3.9.4"   # pinned
-AGE_VERSION=""           # blank = auto-resolve latest
 ```
 
 Or override at runtime without editing the file:
@@ -209,10 +208,9 @@ SOPS_VERSION=v3.9.4 sudo ./setup.sh install --domain vault.yourdomain.com --emai
 
 | Variable | Default | Example |
 | :-- | :-- | :-- |
-| `SOPS_VERSION` | `""` (latest) | `"v3.9.4"` |
-| `AGE_VERSION` | `""` (latest) | `"v1.2.0"` |
+| `SOPS_VERSION` | repository-pinned default (`v3.13.2`) | `"v3.9.4"` |
 
-> `AGE_VERSION` only applies when installing age as a standalone binary. By default age is installed via `apt`.
+Pass `--use-latest` only when you intentionally want setup to resolve the current SOPS release during dependency installation.
 
 ---
 

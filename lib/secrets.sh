@@ -331,7 +331,7 @@ validate_required_secrets() {
         while IFS= read -r _ck; do
             [[ -z "$_ck" ]] && continue
             _cf_keys+=("$_ck")
-        done < <(yq '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' \
+        done < <(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' \
                     "${SECRETS_SCHEMA_FILE:-${PROJECT_ROOT}/secrets-schema.yaml}" 2>/dev/null)
         if [[ ${#_cf_keys[@]} -eq 0 ]]; then
             # Fallback: static list guards against yq unavailability at this stage.
@@ -549,20 +549,16 @@ _tmpfs_dir() {
 # ---------------------------------------------------------------------------
 # _check_recovery_kit_email_deps
 #
-# Prints the encryption tool name ("7z" or "zip") if available, returns 1 if
-# neither is installed. Callers should warn and skip gracefully on failure.
+# Prints the encryption tool name ("gpg") if available, returns 1 if
+# required tools are missing. Callers should warn and skip gracefully on failure.
 # ---------------------------------------------------------------------------
 _check_recovery_kit_email_deps() {
-    if command -v 7z >/dev/null 2>&1; then
-        printf '7z'
+    if command -v gpg >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        printf 'gpg'
         return 0
     fi
-    if command -v zip >/dev/null 2>&1; then
-        printf 'zip'
-        return 0
-    fi
-    log_warn "recovery-kit email: neither 7z nor zip is installed — skipping email option."
-    log_warn "  Install with: sudo apt-get install -y p7zip-full"
+    log_warn "recovery-kit email: gpg and tar are required -- skipping email option."
+    log_warn "  Install with: sudo apt-get install -y gnupg tar"
     return 1
 }
 
@@ -570,10 +566,14 @@ _check_recovery_kit_email_deps() {
 # ---------------------------------------------------------------------------
 # _encrypt_recovery_kit_attachment PLAINTEXT_FILE OUTPUT_FILE TOOL
 #
-# Encrypts PLAINTEXT_FILE into OUTPUT_FILE using the given TOOL (7z or zip).
-# Passphrase is collected via prompt_password_with_confirmation (min 16 chars).
-# The passphrase is never passed as a CLI argument — it is staged through a
-# mode-600 temp file on tmpfs and shredded immediately after use.
+# Encrypts PLAINTEXT_FILE into OUTPUT_FILE as a symmetric OpenPGP message. The
+# plaintext is first wrapped as a small tar stream so file metadata and content
+# can be validated after decryption. Bash collects and validates the independent
+# attachment passphrase with prompt_password_with_confirmation (minimum 16
+# characters, confirmation required), then passes it to GnuPG on fd 3. The
+# passphrase is never exported, logged, stored in a temporary file, used in a
+# filename, or interpolated into process argv; xtrace is disabled while the
+# secret is live.
 # Returns 0 on success, 1 on failure. Shreds OUTPUT_FILE on failure.
 # ---------------------------------------------------------------------------
 _encrypt_recovery_kit_attachment() {
@@ -581,64 +581,52 @@ _encrypt_recovery_kit_attachment() {
     local output_file="$2"
     local tool="$3"
 
-    local _enc_pass
+    if [[ "$tool" != "gpg" ]]; then
+        log_error "_encrypt_recovery_kit_attachment: unsupported tool '$tool'"
+        return 1
+    fi
+    if [[ ! -f "$plaintext_file" ]]; then
+        log_error "_encrypt_recovery_kit_attachment: plaintext file not found"
+        return 1
+    fi
+
+    local _enc_pass _xtrace_was_set=0
+    case $- in *x*) _xtrace_was_set=1 ;; esac
     { set +x; } 2>/dev/null
     _enc_pass=$(prompt_password_with_confirmation \
         "Passphrase to encrypt emailed attachment" 16) || {
         unset _enc_pass
+        [[ $_xtrace_was_set -eq 1 ]] && set -x
         log_error "Passphrase entry failed or aborted"
         return 1
     }
 
-    local _rc=0
-    case "$tool" in
-        7z)
-            # 7z does not support reading the passphrase from a file descriptor;
-            # use a tmpfs-backed mode-600 temp file and shred it immediately.
-            local _pass_file
-            _pass_file=$(mktemp -p /dev/shm vw-enc-pass.XXXXXX 2>/dev/null \
-                || mktemp vw-enc-pass.XXXXXX)
-            install -m 600 /dev/null "$_pass_file"
-            { set +x; } 2>/dev/null
-            printf '%s' "$_enc_pass" > "$_pass_file"
-            unset _enc_pass
+    local _rc=0 _plain_dir _plain_base
+    _plain_dir=$(dirname -- "$plaintext_file")
+    _plain_base=$(basename -- "$plaintext_file")
+    rm -f "$output_file"
 
-            # -tzip       : ZIP container (universally openable — WinZip, 7-Zip, macOS, Linux)
-            # -mem=ZipCrypto : ZipCrypto encryption — the only cipher supported by p7zip 23.01
-            #                  on ARM64 Ubuntu 24.04. AES-256 + -mhe=on are 7z-format-only
-            #                  features; both produce exit 2 when combined with -tzip.
-            # -mx=0       : store only (no compression); plaintext is already uncompressible
-            # -p@FILE     : read passphrase from file rather than expanding it into argv,
-            #               preventing the secret from appearing in /proc/$$/cmdline.
-            # Remove the pre-created 0-byte placeholder so 7z can create the archive fresh;
-            # 7z a refuses to overwrite a non-archive file and exits 2.
-            rm -f "$output_file"
-            7z a -tzip -mem=ZipCrypto -mx=0 \
-                "-p$(cat "$_pass_file")" \
-                "$output_file" "$plaintext_file" >/dev/null 2>&1
-            _rc=$?
-            _secure_shred "$_pass_file"
-            ;;
-        zip)
-            local _pass_file
-            _pass_file=$(mktemp -p /dev/shm vw-enc-pass.XXXXXX 2>/dev/null \
-                || mktemp vw-enc-pass.XXXXXX)
-            install -m 600 /dev/null "$_pass_file"
-            { set +x; } 2>/dev/null
-            printf '%s' "$_enc_pass" > "$_pass_file"
-            unset _enc_pass
-
-            zip --encrypt --password "$(cat "$_pass_file")" \
-                "$output_file" "$plaintext_file" >/dev/null 2>&1
-            _rc=$?
-            _secure_shred "$_pass_file"
-            ;;
-        *)
-            unset _enc_pass
-            log_error "_encrypt_recovery_kit_attachment: unknown tool '$tool'"
-            return 1
-            ;;
-    esac
+    # GnuPG 2.4 on Ubuntu 24.04 accepts --passphrase-fd only in batch loopback
+    # mode. The secret is supplied on fd 3; the tar stream is the only stdin data.
+    if (
+        set -o pipefail
+        tar -C "$_plain_dir" -cf - "$_plain_base" \
+            | gpg \
+                --batch \
+                --yes \
+                --pinentry-mode loopback \
+                --passphrase-fd 3 \
+                --no-symkey-cache \
+                --symmetric \
+                --output "$output_file" \
+                3<<<"$_enc_pass"
+    ); then
+        _rc=0
+    else
+        _rc=$?
+    fi
+    unset _enc_pass
+    [[ $_xtrace_was_set -eq 1 ]] && set -x
 
     if [[ $_rc -ne 0 ]]; then
         _secure_shred "$output_file" 2>/dev/null || true
@@ -646,7 +634,11 @@ _encrypt_recovery_kit_attachment() {
         return 1
     fi
 
-    chmod 600 "$output_file"
+    if ! chmod 600 "$output_file"; then
+        _secure_shred "$output_file" 2>/dev/null || true
+        log_error "Encryption failed: could not restrict attachment permissions"
+        return 1
+    fi
     return 0
 }
 
@@ -705,7 +697,7 @@ PROMPT
     fi
     log_info "Recovery-kit email preflight passed for non-secret SMTP settings; smtp_password will be resolved only if Direct SMTP fallback is needed."
 
-    local _ext="zip" _att_name _att_file
+    local _ext="tar.gpg" _att_name _att_file
     _att_name="important-documents-$(date +%Y%m%d).${_ext}"
     _att_file=$(mktemp -p /dev/shm "vw-att.XXXXXX.${_ext}" 2>/dev/null || mktemp "vw-att.XXXXXX.${_ext}")
     install -m 600 /dev/null "$_att_file"
@@ -721,9 +713,22 @@ PROMPT
     _body=$(cat <<'BODY'
 Please keep this file somewhere safe.
 
-The attached archive contains important account documents you requested.
-Open it with 7-Zip, WinZip, or the built-in archive manager on your device
-and enter the passphrase you set when it was created.
+The attached archive contains important account documents you requested. It is
+encrypted with GnuPG using the independent attachment passphrase you selected.
+
+Recovery steps:
+1. Save the attachment on a trusted device.
+2. Decrypt it:
+   gpg --output recovery-kit.tar \
+     --decrypt important-documents-YYYYMMDD.tar.gpg
+3. GnuPG prompts for the independent attachment passphrase.
+4. Extract the decrypted TAR:
+   tar -xf recovery-kit.tar
+5. Store the recovered document securely.
+6. Delete recovery-kit.tar after the recovery document has been secured.
+
+A GnuPG-compatible GUI can also decrypt the .gpg file; open the resulting .tar
+with a normal archive manager.
 
 Do not share this file or the passphrase with anyone.
 If you did not request this, please disregard.

@@ -241,8 +241,9 @@ sudo ./utilities/setup-crowdsec.sh --autonomous
 - No persistent daemon needed.
 - **Requirement:** your CrowdSec LAPI (`http://YOUR_SERVER_IP:8080`) must be
   reachable from the public internet for the scheduled Worker to pull decisions.
-  Open port 8080 in your OCI Security List (restrict to Cloudflare source IPs
-  if possible).
+  Open port 8080 in your provider firewall, security group, or network firewall
+  (restrict to Cloudflare source IPs if possible). On OCI, this means the
+  relevant Security List or Network Security Group.
 - Best suited for low-traffic deployments where 5-minute decision lag is acceptable.
 
 ---

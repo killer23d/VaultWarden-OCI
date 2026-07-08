@@ -7,10 +7,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP="$ROOT/utilities/backup-run.sh"
 RESTORE="$ROOT/utilities/restore-run.sh"
+SETUP="$ROOT/utilities/setup-system.sh"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 require(){ local pat="$1" file="$2" msg="$3"; grep -Eq -- "$pat" "$file" || fail "$msg"; }
 reject(){ local pat="$1" file="$2" msg="$3"; ! grep -Eq -- "$pat" "$file" || fail "$msg"; }
 
+require 'local basic_packages=\(.*"zstd".*\)' "$SETUP" 'normal setup must install zstd'
+require '^[[:space:]]*\[zstd\]=zstd$' "$SETUP" 'normal setup must map zstd package to zstd command'
+require 'local required_commands=\(.*"zstd".*\)' "$SETUP" 'final setup dependency verification must require zstd'
 require 'create_consistent_db_snapshot\(\)' "$BACKUP" 'shared DB snapshot helper missing'
 require 'perform_db_backup\(\)' "$BACKUP" 'db backup function missing'
 require 'create_consistent_db_snapshot "\$state_dir" "\$snap" "db backup"' "$BACKUP" 'db backup must use shared helper'

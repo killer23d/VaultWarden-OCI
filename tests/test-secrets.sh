@@ -172,6 +172,97 @@ printf 'Standalone secrets CLI help tests passed.\n'
 )
 
 check_secrets_cli_help
+check_schema_dependency_contracts() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+command -v yq >/dev/null 2>&1 || fail "yq is required for schema dependency tests"
+yq_version="$(yq --version 2>&1)"
+[[ "$yq_version" == *"mikefarah/yq"* && "$yq_version" =~ version[[:space:]]v?4\. ]] \
+    || fail "tests must run with Mike Farah yq v4, got: $yq_version"
+
+# shellcheck source=../lib/log.sh
+source "$ROOT/lib/log.sh"
+# shellcheck source=../lib/schema.sh
+source "$ROOT/lib/schema.sh"
+
+schema_keys >/dev/null || fail "schema_keys did not accept Mike Farah yq v4"
+[[ "$(schema_field cloudflare_zone_id conditional_group)" == "cloudflare_proxy" ]] \
+    || fail "schema_field raw output/schema query behavior failed"
+
+cf_keys="$(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' "$ROOT/secrets-schema.yaml")" \
+    || fail "Cloudflare conditional schema query failed"
+[[ "$cf_keys" == *"cloudflare_zone_id"* ]] || fail "Cloudflare conditional keys missing cloudflare_zone_id"
+[[ "$cf_keys" == *"cf_account_id"* ]] || fail "Cloudflare conditional keys missing cf_account_id"
+[[ "$cf_keys" == *"cf_worker_bouncer_token"* ]] || fail "Cloudflare conditional keys missing cf_worker_bouncer_token"
+[[ "$cf_keys" != *'"'* ]] || fail "Cloudflare conditional schema keys must be bare shell key names"
+
+grep -Fq 'yq -r '\''.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key'\''' "$ROOT/lib/secrets.sh" \
+    || fail "validate_required_secrets must use explicit raw yq output for Cloudflare keys"
+grep -Fq 'python3 -c "import yaml"' "$ROOT/utilities/setup-system.sh" \
+    || fail "setup dependency verification must check PyYAML import"
+grep -Fq '"python3-yaml"' "$ROOT/utilities/setup-system.sh" \
+    || fail "setup apt package ownership must include python3-yaml"
+! grep -Eq 'local basic_packages=.*"yq"' "$ROOT/utilities/setup-system.sh" \
+    || fail "setup apt package ownership must not use Ubuntu python-yq"
+
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/yq" <<'PYTHON_YQ'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'yq 3.1.0\n'
+    exit 0
+fi
+exit 1
+PYTHON_YQ
+chmod +x "$TMP/bin/yq"
+if PATH="$TMP/bin:/usr/bin:/bin" bash -c '
+    set -euo pipefail
+    cd "$1"
+    source lib/log.sh
+    source lib/schema.sh
+    schema_keys >/dev/null
+' _ "$ROOT" >/tmp/vw-wrong-yq.$$ 2>&1; then
+    rm -f /tmp/vw-wrong-yq.$$
+    fail "schema library accepted python-yq compatibility shim"
+fi
+grep -Fq "Mike Farah yq v4 is required" /tmp/vw-wrong-yq.$$ \
+    || fail "wrong-yq failure did not name the Mike Farah v4 requirement"
+rm -f /tmp/vw-wrong-yq.$$
+
+cat > "$TMP/bin/yq" <<'V3_YQ'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'yq (https://github.com/mikefarah/yq/) version v3.4.1\n'
+    exit 0
+fi
+exit 1
+V3_YQ
+chmod +x "$TMP/bin/yq"
+if PATH="$TMP/bin:/usr/bin:/bin" bash -c '
+    set -euo pipefail
+    cd "$1"
+    source lib/log.sh
+    source lib/schema.sh
+    schema_keys >/dev/null
+' _ "$ROOT" >/tmp/vw-wrong-yq-major.$$ 2>&1; then
+    rm -f /tmp/vw-wrong-yq-major.$$
+    fail "schema library accepted wrong Mike Farah yq major version"
+fi
+rm -f /tmp/vw-wrong-yq-major.$$
+
+printf 'Schema dependency contract tests passed.\n'
+)
+
+check_schema_dependency_contracts
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

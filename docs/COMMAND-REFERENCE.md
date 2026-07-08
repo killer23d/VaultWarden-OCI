@@ -123,7 +123,9 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Use live upstream container and CrowdSec versions in .env.
+  --use-latest        Use live upstream container and CrowdSec versions in .env,
+                      and resolve the latest SOPS release instead of the pinned
+                      production default.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       WARNING: Also regenerates the Age encryption key. All
@@ -162,6 +164,9 @@ EXAMPLES:
     # ── Systemd timer management ──────────────────────────────────
     sudo ./setup.sh systemd install      # Install and enable all timers
     sudo ./setup.sh systemd validate     # Detect split-brain vs /opt/
+    sudo ./setup.sh systemd status       # Show timer status
+    sudo ./setup.sh systemd remove       # Disable and remove all timers
+    sudo ./setup.sh systemd install --dry-run
 ```
 
 ### startup.sh
@@ -322,6 +327,36 @@ GLOBAL SUBCOMMAND:
 GLOBAL OPTIONS:
     --help, -h              Show this help and exit
     --version, -V           Print the VaultWarden-OCI version and exit
+
+ENVIRONMENT:
+    BACKUP_DIR=<path>                  Override backup storage root
+                                       (default: $PROJECT_STATE_DIR/backups)
+    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
+    RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
+    RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
+    RCLONE_REMOTE_NAME                 Read from .env when available
+    RESTORE_HEALTH_TIMEOUT=<seconds>    Service health wait timeout (30-600; default: 60)
+
+EXAMPLES:
+    # ── QUICK START (most common) ────────────────────────────────
+    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
+    sudo ./restore.sh latest db          # Restore newest DB backup
+    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
+    ./restore.sh list                    # List local backups (no sudo)
+    ./restore.sh list --remote           # List remote backups (no sudo)
+
+    # ── INTERACTIVE MENU ─────────────────────────────────────────
+    sudo ./restore.sh interactive                    # Select from local backups
+    sudo ./restore.sh interactive --remote --start-policy ask  # Remote restore; ask before service start
+
+    # ── TARGETED RESTORE ──────────────────────────────────────────
+    sudo ./restore.sh interactive --file "/var/lib/vaultwarden/backups/full/full_20260101.tar.zst.age"
+    sudo ./restore.sh interactive --key-file /tmp/old-age-key.txt  # Supply key non-interactively
+
+    # ── BARE-METAL DISASTER RECOVERY ──────────────────────────────
+    sudo ./restore.sh inspect --remote
+    sudo ./restore.sh interactive --remote --from-recovery-kit /mnt/usb/recovery-kit.txt --start-policy ask
+    sudo ./restore.sh interactive --remote --no-backup  # Fresh disposable VM DB restore only
 ```
 
 ### maintenance.sh
@@ -915,6 +950,36 @@ GLOBAL SUBCOMMAND:
 GLOBAL OPTIONS:
     --help, -h              Show this help and exit
     --version, -V           Print the VaultWarden-OCI version and exit
+
+ENVIRONMENT:
+    BACKUP_DIR=<path>                  Override backup storage root
+                                       (default: $PROJECT_STATE_DIR/backups)
+    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
+    RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
+    RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
+    RCLONE_REMOTE_NAME                 Read from .env when available
+    RESTORE_HEALTH_TIMEOUT=<seconds>    Service health wait timeout (30-600; default: 60)
+
+EXAMPLES:
+    # ── QUICK START (most common) ────────────────────────────────
+    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
+    sudo ./restore.sh latest db          # Restore newest DB backup
+    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
+    ./restore.sh list                    # List local backups (no sudo)
+    ./restore.sh list --remote           # List remote backups (no sudo)
+
+    # ── INTERACTIVE MENU ─────────────────────────────────────────
+    sudo ./restore.sh interactive                    # Select from local backups
+    sudo ./restore.sh interactive --remote --start-policy ask  # Remote restore; ask before service start
+
+    # ── TARGETED RESTORE ──────────────────────────────────────────
+    sudo ./restore.sh interactive --file "/var/lib/vaultwarden/backups/full/full_20260101.tar.zst.age"
+    sudo ./restore.sh interactive --key-file /tmp/old-age-key.txt  # Supply key non-interactively
+
+    # ── BARE-METAL DISASTER RECOVERY ──────────────────────────────
+    sudo ./restore.sh inspect --remote
+    sudo ./restore.sh interactive --remote --from-recovery-kit /mnt/usb/recovery-kit.txt --start-policy ask
+    sudo ./restore.sh interactive --remote --no-backup  # Fresh disposable VM DB restore only
 ```
 
 ### safe-restart.sh
@@ -1314,8 +1379,8 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --use-latest          Override pinned versions with 'latest'
-    --sops-version VER    Pin SOPS to a specific version (e.g. v3.9.4)
+    --use-latest          Resolve the latest SOPS release instead of the pinned default
+    --sops-version VER    Use a specific SOPS version (default: v3.13.2)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --data-device DEV     Data volume device path
@@ -1392,6 +1457,15 @@ WHAT install DOES:
     5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     6. systemctl daemon-reload
     7. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
+    8. If timers were started now, verifies all managed timers are active and have a next trigger
+
+EXAMPLES:
+    sudo utilities/setup-systemd.sh install
+    sudo utilities/setup-systemd.sh install --no-enable-now   # install-only/manual; enable timers without immediate execution
+    sudo utilities/setup-systemd.sh install --enable-now      # enable/start timers now
+    sudo utilities/setup-systemd.sh install --dry-run
+    sudo utilities/setup-systemd.sh validate
+    sudo utilities/setup-systemd.sh status
 ```
 
 ### smoke-test.sh

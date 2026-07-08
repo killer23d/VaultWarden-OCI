@@ -9,7 +9,7 @@ the repository root on the server. Prefix with `sudo` where indicated.
 
 For first-time setup on a new host:
 
-1. Configure OCI Security List (ports `80`, `443`, and `22`).
+1. Configure the provider firewall, security group, or network firewall for ports `443` and `22` (`80` only for the documented HTTP/ACME fallback).
 2. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`.
    This creates the initial environment and bootstraps encrypted secrets.
 3. Rotate required Cloudflare secret values:

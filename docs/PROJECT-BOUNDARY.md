@@ -6,7 +6,7 @@ VaultWarden-OCI is a secure, self-running Vaultwarden appliance for small teams,
 
 The supported golden path is:
 
-- Ubuntu host
+- Ubuntu 24.04 LTS Noble host on amd64 or arm64
 - Cloudflare DNS, proxy, and WAF
 - Caddy with DNS-01 certificates using Cloudflare
 - Vaultwarden

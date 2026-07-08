@@ -452,8 +452,11 @@ EOF_STATE
         ! kill -0 "$orphan_child" 2>/dev/null && break
         sleep 0.1
     done
-    kill -0 "$orphan_child" 2>/dev/null \
-        && fail "inherited-lock child did not stop during cleanup"
+    if kill -0 "$orphan_child" 2>/dev/null; then
+        child_state="$(ps -o stat= -p "$orphan_child" 2>/dev/null | tr -d '[:space:]' || true)"
+        [[ "$child_state" == Z* ]] \
+            || fail "inherited-lock child did not stop during cleanup"
+    fi
     cleanup_pids=("${cleanup_pids[@]/$orphan_child}")
 
     sleep 20 &
@@ -752,7 +755,10 @@ for _ in {1..100}; do
     ! kill -0 "$child_pid" 2>/dev/null && break
     sleep 0.1
 done
-kill -0 "$child_pid" 2>/dev/null && fail "inherited child did not exit"
+if kill -0 "$child_pid" 2>/dev/null; then
+    child_state="$(ps -o stat= -p "$child_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$child_state" == Z* ]] || fail "inherited child did not exit"
+fi
 child_pid=""
 
 run_ops_shell -c '

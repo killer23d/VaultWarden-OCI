@@ -1,6 +1,6 @@
 # Disaster Recovery — VaultWarden-OCI
 
-This guide is the bare-metal recovery runbook for rebuilding VaultWarden-OCI on a replacement Ubuntu host from encrypted backups. It reflects the current 2026 backup tier model, root-operated lifecycle, block/boot storage preflight, operator-controlled service start, and post-restore runtime permission repair.
+This guide is the bare-metal recovery runbook for rebuilding VaultWarden-OCI on a replacement Ubuntu 24.04 LTS Noble host from encrypted backups. It reflects the current 2026 backup tier model, root-operated lifecycle, block/boot storage preflight, operator-controlled service start, and post-restore runtime permission repair.
 
 Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md) · [OPERATIONS.md](OPERATIONS.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 
@@ -26,7 +26,7 @@ Choose `db` for database rollback, `full` for normal DR with the offline Age rec
 
 Before beginning a full or emergency DR restore, have:
 
-- a fresh or replacement Ubuntu 22.04/24.04 host;
+- a fresh or replacement Ubuntu 24.04 LTS Noble host on amd64 or arm64;
 - provider ingress prepared for SSH and HTTPS;
 - Cloudflare DNS/proxy/WAF access;
 - the rclone remote containing the backups, if using offsite restore;
