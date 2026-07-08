@@ -61,9 +61,7 @@ PGID=1000                              # Container file ownership GID
 PROJECT_STATE_DIR=/var/lib/vaultwarden # Data, logs, and config root
 TZ=UTC                                 # Timezone (affects all container logs)
 SSH_PORT=22                            # SSH port (used by CrowdSec SSH scenario)
-SSH_LOG_PATH=/var/log/auth.log         # Auto-detected by setup.sh on Ubuntu 24.04 Noble
-# Debian/Ubuntu: /var/log/auth.log
-# Oracle Linux / RHEL: /var/log/secure
+SSH_LOG_PATH=/var/log/auth.log         # Ubuntu 24.04 Noble SSH auth log
 ```
 
 ---

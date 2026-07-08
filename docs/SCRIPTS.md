@@ -57,7 +57,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com [OP
 
 **Key features:**
 - Template-based `docker-compose.yml` and `.env` generation
-- Platform-specific SSH log detection (Oracle Linux: `/var/log/secure`; Ubuntu: `/var/log/auth.log`)
+- Ubuntu Noble SSH log path handling using `/var/log/auth.log`
 - UFW firewall configured for Cloudflare-only web traffic
 - Age encryption key generation
 - SOPS configuration setup
@@ -227,7 +227,7 @@ Read-only health uses only a health-specific duplicate lock and reaches real che
 ./backup.sh <subcommand> [OPTIONS]
 ```
 
-> **Runtime user note:** Scheduled backup/health/DNS jobs are designed to run as the service user (default `ubuntu`) under systemd. `sudo` is still required for privileged setup/update/firewall/deep-maintenance operations.
+> **Runtime user note:** Managed backup/health/DNS systemd jobs are root-operated. `sudo` is still required for privileged setup/update/firewall/deep-maintenance operations.
 
 **Subcommands:**
 
