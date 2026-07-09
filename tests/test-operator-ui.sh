@@ -577,6 +577,7 @@ DRY_RUN=false
 EMAIL_NOTIFY=false
 COMPREHENSIVE=false
 TARGETED_MODE=true
+source "$ROOT/lib/maintenance-utils.sh"
 require_root(){ :; }
 operation_acquire(){ :; }
 operation_release(){ :; }
@@ -595,7 +596,6 @@ log_info(){ printf '%s\\n' "\$*"; }
 log_success(){ printf '%s\\n' "\$*"; }
 log_warn(){ printf '%s\\n' "\$*" >&2; }
 log_error(){ printf '%s\\n' "\$*" >&2; }
-source "$ROOT/lib/maintenance-utils.sh"
 $(extract_func "$ROOT/utilities/maintenance-run.sh" main)
 main
 EOF_PROBE
