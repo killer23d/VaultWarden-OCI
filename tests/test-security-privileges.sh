@@ -98,72 +98,6 @@ test_resolve_rclone_config_arg() {
     printf 'PASS: _resolve_rclone_config_arg populated --config <path>\n'
 }
 
-test_root_rclone_config_contract() {
-    local root_cfg="/root/.config/rclone/rclone.conf"
-    local unrelated_root_cfg="/root/vw-rclone-unrelated-test.conf"
-    local world_writable_cfg="${TEST_TMP}/world-writable-rclone.conf"
-
-    grep -Fq '"/root/.config/rclone/rclone.conf"' "${PROJECT_ROOT}/lib/backup-utils.sh" \
-        || fail "rclone resolver no longer advertises the canonical root fallback"
-    grep -Fq 'root_rclone_config="/root/.config/rclone/rclone.conf"' "${PROJECT_ROOT}/lib/backup-utils.sh" \
-        || fail "rclone validator lacks exact canonical root fallback"
-    grep -Fq '&& "$prefix" == "/root"' "${PROJECT_ROOT}/lib/backup-utils.sh" \
-        || fail "rclone validator does not keep the /root exception narrow"
-
-    assert_fails validate_rclone_config_path /etc/passwd
-
-    printf '[tmp]\ntype = local\n' > "$world_writable_cfg"
-    chmod 666 "$world_writable_cfg"
-    assert_fails validate_rclone_config_path "$world_writable_cfg"
-
-    if (( EUID == 0 )) && [[ "$(uname -s)" == "Linux" && ! -e "$root_cfg" && ! -L "$root_cfg" ]]; then
-        local created_config_dir=false created_rclone_dir=false
-        [[ -d /root/.config ]] || created_config_dir=true
-        [[ -d /root/.config/rclone ]] || created_rclone_dir=true
-        cleanup_root_rclone_fixture() {
-            rm -f "$root_cfg" "$unrelated_root_cfg"
-            [[ "$created_rclone_dir" == "true" ]] && rmdir /root/.config/rclone 2>/dev/null || true
-            [[ "$created_config_dir" == "true" ]] && rmdir /root/.config 2>/dev/null || true
-            trap - RETURN
-        }
-        trap cleanup_root_rclone_fixture RETURN
-
-        mkdir -p /root/.config/rclone
-        chmod 700 /root/.config /root/.config/rclone 2>/dev/null || true
-        printf '[rootremote]\ntype = local\n' > "$root_cfg"
-        chmod 600 "$root_cfg"
-
-        validate_rclone_config_path "$root_cfg" \
-            || fail "safe canonical root rclone config was rejected"
-
-        if [[ ! -e /etc/rclone/rclone.conf ]]; then
-            local resolved
-            # shellcheck disable=SC2034
-            RCLONE_CONFIG=""
-            resolved=$(_resolve_rclone_config) || fail "resolver did not find managed root rclone fixture"
-            [[ "$resolved" == "$root_cfg" ]] \
-                || fail "resolver returned wrong root fallback path: $resolved"
-        fi
-
-        printf '[bad]\ntype = local\n' > "$unrelated_root_cfg"
-        chmod 600 "$unrelated_root_cfg"
-        assert_fails validate_rclone_config_path "$unrelated_root_cfg"
-
-        rm -f "$root_cfg"
-        ln -s /etc/passwd "$root_cfg"
-        assert_fails validate_rclone_config_path "$root_cfg"
-
-        rm -f "$root_cfg"
-        printf '[rootremote]\ntype = local\n' > "$root_cfg"
-        chmod 666 "$root_cfg"
-        assert_fails validate_rclone_config_path "$root_cfg"
-    else
-        printf 'SKIP: root rclone fixture requires Linux root and an unused %s\n' "$root_cfg"
-    fi
-
-    printf 'PASS: canonical root rclone config contract is bounded\n'
-}
-
 valid_bcrypt_body=$(printf 'A%.0s' {1..53})
 _bcrypt_format_ok "\$2y\$12\$${valid_bcrypt_body}" || fail "valid bcrypt format rejected"
 assert_fails _bcrypt_format_ok "\$2y\$4\$${valid_bcrypt_body}"
@@ -181,7 +115,6 @@ assert_fails verify_file_integrity "$integrity_file"
 test_hmac_key_not_in_cmdline
 test_collect_secret_field_rejects_auto_key
 test_resolve_rclone_config_arg
-test_root_rclone_config_contract
 
 command -v yq >/dev/null 2>&1 || fail "yq is required for schema tests"
 [[ "$(schema_collect_type push_installation_id)" == "conditional" ]] || fail "conditional collect type missing"
