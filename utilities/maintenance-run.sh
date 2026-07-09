@@ -134,7 +134,7 @@ main() {
     _MAINT_START_EPOCH=$(date +%s)
 
     _load_env
-    auto_fix_critical_permissions "$PROJECT_ROOT"
+    auto_fix_critical_permissions "$SCRIPT_DIR"
     require_project_state_ready || exit 1
 
     local log_cleanup_result=0 backup_cleanup_result=0 docker_cleanup_result=0
