@@ -109,14 +109,13 @@ sudo ./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
 sudo ./utilities/secrets-rotate.sh cloudflare_zone_id
 sudo ./utilities/secrets-rotate.sh cf_account_id
 sudo ./utilities/secrets-rotate.sh cf_worker_bouncer_token
-sudo ./utilities/secrets-rotate.sh backup_passphrase
 ```
 
 Supported fields: `admin_token`, `admin_basic_auth_hash`,
 `caddy_cloudflare_dns_token`, `cf_worker_bouncer_token`,
 `cloudflare_zone_id`, `cf_account_id`,
 `email_api_token`, `smtp_password`,
-`push_installation_id`, `push_installation_key`, `backup_passphrase`.
+`push_installation_id`, `push_installation_key`, `file_integrity_hmac_key`.
 
 ---
 

@@ -42,14 +42,15 @@ sudo ./edit-secrets.sh rotate admin_basic_auth_hash
 
 | Field | Type | Required | Description |
 | :-- | :-- | :-- | :-- |
-| `key` | string | ✅ | Key name as it appears in `secrets.yaml`. Must be a valid YAML scalar. |
+| `key` | string | ✅ | Key name as it appears in `secrets.yaml`. Must match `^[a-z][a-z0-9_]*$`. |
 | `label` | string | ✅ | Human-readable prompt shown during interactive collection. |
-| `hash` | enum | ✅ | Post-collection transform applied before the value is stored. See [Hash Types](#hash-types) below. |
+| `hash` | enum | ✅ | Fixed transform contract. See [Hash Types](#hash-types) below. |
 | `placeholder` | string | ✅ | Value written by `setup-secrets.sh bootstrap` before real secrets are set. |
 | `collect` | enum | ✅ | Collection mode. See [Collect Modes](#collect-modes) below. |
-| `auto_fn` | string | ✅ | Bash function called when `collect: auto`. Empty string when not applicable. |
+| `auto_fn` | string | ✅ | Supported generator when `collect: auto`. Empty string when not applicable. |
 | `condition_fn` | string | Conditional keys | Bash predicate called before collection. It receives the key name, returns `0` to collect, and returns `1` to write the schema placeholder without prompting. |
-| `services` | list | ✅ | Docker Compose service names that must restart after this secret is rotated. |
+| `conditional_group` | string | Optional | Named runtime requirement group, currently used for Cloudflare proxy secrets. |
+| `apply` | mapping | ✅ | Closed apply contract with `type` and `targets`. Types: `compose_restart`, `systemd_restart`, `crowdsec_worker_config`, `none`. |
 | `required` | bool | ✅ | When `true`, `check_placeholder_values()` fails if this key still holds its placeholder. |
 | `hint` | string | ✅ | Comment line injected above the key in the plaintext temp file during `edit`. Empty string means no hint. |
 
@@ -75,20 +76,19 @@ sudo ./edit-secrets.sh rotate admin_basic_auth_hash
 
 ## 🔑 Key Inventory
 
-| Key | Hash | Required | Collect | Services |
+| Key | Hash | Required | Collect | Apply |
 | :-- | :-- | :-- | :-- | :-- |
 | `admin_token` | `argon2id` | ✅ | `interactive` | `vaultwarden` |
-| `admin_basic_auth_hash` | `bcrypt` | ✅ | `interactive` | `vaultwarden` |
-| `smtp_password` | `plain` | — | `interactive` | `vaultwarden` |
-| `email_api_token` | `plain` | — | `interactive` | `vaultwarden` |
-| `backup_passphrase` | `plain` | ✅ | `auto` | `vaultwarden` |
-| `file_integrity_hmac_key` | `plain` | — | `auto` | — |
+| `admin_basic_auth_hash` | `bcrypt` | ✅ | `interactive` | `caddy` |
+| `smtp_password` | `plain` | — | `interactive` | `postfix` |
+| `email_api_token` | `plain` | — | `interactive` | none |
+| `file_integrity_hmac_key` | `plain` | — | `auto` | none |
 | `push_installation_id` | `plain` | — | `conditional` | `vaultwarden` |
 | `push_installation_key` | `plain` | — | `conditional` | `vaultwarden` |
 | `caddy_cloudflare_dns_token` | `plain` | ✅ | `interactive` | `caddy` |
-| `cf_worker_bouncer_token` | `plain` | — | `interactive` | `crowdsec-cloudflare-worker-bouncer` |
-| `cloudflare_zone_id` | `plain` | — | `interactive` | `caddy`, `crowdsec-cloudflare-worker-bouncer` |
-| `cf_account_id` | `plain` | — | `interactive` | `crowdsec-cloudflare-worker-bouncer` |
+| `cf_worker_bouncer_token` | `plain` | — | `interactive` | CrowdSec Workers config apply |
+| `cloudflare_zone_id` | `plain` | — | `interactive` | CrowdSec Workers config apply |
+| `cf_account_id` | `plain` | — | `interactive` | CrowdSec Workers config apply |
 
 ---
 
@@ -158,7 +158,9 @@ An absent or unknown `condition_fn` is a hard configuration error, preventing a 
 | `schema_field_safe KEY FIELD` | Like `schema_field` but returns an empty string instead of an error for absent optional fields. |
 | `schema_required_keys` | Prints keys where `required: true`, in schema order. Used by `check_placeholder_values()`. |
 | `schema_hinted_keys` | Prints keys where `hint` is non-empty. Used by `secrets-edit.sh` for inline comment injection. |
-| `schema_services_for_key KEY` | Prints a space-separated list of service names for `KEY`. Used by `secrets-rotate.sh`. |
+| `schema_apply_type_for_key KEY` | Prints the closed apply type for `KEY`. |
+| `schema_apply_targets_for_key KEY` | Prints space-separated apply targets for `KEY`. |
+| `schema_services_for_key KEY` | Compatibility helper that prints Compose restart targets only. Non-Compose actions return empty. |
 | `schema_placeholder_for_key KEY` | Prints the placeholder string for `KEY`. Convenience wrapper around `schema_field`. |
 | `schema_key_exists KEY` | Returns 0 if `KEY` is defined in the schema, 1 otherwise. Used by `secrets-rotate.sh` to validate field arguments. |
 | `schema_collect_type KEY` | Prints the collect type: `interactive`, `auto`, `conditional`, or `skip`. |

@@ -553,9 +553,7 @@ HELP
             local _collect_type
             _collect_type=$(schema_collect_type "$_key")
 
-            # backup_passphrase retains its custom banner/plaintext-export UI.
-            # Ordinary auto keys are generated exclusively through schema auto_fn.
-            if [[ "$_collect_type" == "auto" && "$_key" != "backup_passphrase" ]]; then
+            if [[ "$_collect_type" == "auto" ]]; then
                 local _auto_value
                 if ! _auto_value=$(_dispatch_auto_fn "$_key"); then
                     log_error "collect_secrets: auto generation failed for schema key '${_key}'"
@@ -755,42 +753,6 @@ HELP
                 fi
                 ;;
 
-            # ── backup_passphrase ──────────────────────────────────────────────
-            backup_passphrase)
-                echo ""
-                log_info "Generating backup encryption passphrase..."
-                local backup_pass
-                backup_pass=$(auto_generate_secret_field "backup_passphrase") || { log_error "Failed to generate backup_passphrase"; return 1; }
-                _COLLECTED_SECRETS["backup_passphrase"]="$backup_pass"
-
-                if [[ -n "${BACKUP_PLAIN_FILE:-}" ]]; then
-                    if [[ "$DRY_RUN" == "true" ]]; then
-                        log_info "[DRY RUN] Would write backup passphrase plaintext to ${BACKUP_PLAIN_FILE}"
-                    else
-                        local _umask_bp
-                        _umask_bp=$(umask)
-                        umask 077
-                        printf '%s' "$backup_pass" > "${BACKUP_PLAIN_FILE}"
-                        umask "$_umask_bp"
-                    fi
-                fi
-
-                if [[ "$QUIET_SUMMARY" != "true" ]] && [[ -t 0 ]]; then
-                    clear
-                    printf '%s' "${COLOR_RED}"
-                    cat << 'BACKUP_BANNER'
-  ╔══════════════════════════════════════════════════════════════════╗
-  ║   🔑  BACKUP ENCRYPTION PASSPHRASE — SAVE THIS NOW             ║
-  ║   Required to decrypt all backups. Cannot be recovered.        ║
-  ╚══════════════════════════════════════════════════════════════════╝
-BACKUP_BANNER
-                    printf '%s' "${COLOR_RESET}"
-                    printf '\n  Passphrase: %s%s%s\n\n' \
-                        "${COLOR_RED}${COLOR_GREEN}" "${backup_pass}" "${COLOR_RESET}"
-                    press_enter_to_continue " Press [Enter] after saving the backup passphrase..."
-                fi
-                ;;
-
             # file_integrity_hmac_key is auto-generated via _dispatch_auto_fn()
             # above. Do not add a manual case here; it would bypass the schema.
 
@@ -891,10 +853,26 @@ BACKUP_BANNER
 
             # ── Unknown key (future-proofing) ──────────────────────────────────
             *)
-                log_warn "collect_secrets: no collection handler for schema key '${_key}' (collect=${_collect_type}) — skipping"
+                if [[ "$_collect_type" == "skip" ]]; then
+                    log_info "collect_secrets: schema key '${_key}' is collect=skip; omitting from fresh secrets"
+                else
+                    log_error "collect_secrets: no collection handler for schema key '${_key}' (collect=${_collect_type})"
+                    return 1
+                fi
                 ;;
 
             esac
+        done <<< "$_schema_keys"
+
+        while IFS= read -r _key; do
+            [[ -z "$_key" ]] && continue
+            local _collect_type
+            _collect_type=$(schema_collect_type "$_key")
+            [[ "$_collect_type" == "skip" ]] && continue
+            if [[ -z "${_COLLECTED_SECRETS[$_key]+set}" ]]; then
+                log_error "collect_secrets: schema key '${_key}' was not deliberately collected or generated"
+                return 1
+            fi
         done <<< "$_schema_keys"
 
         echo ""
@@ -944,12 +922,18 @@ BACKUP_BANNER
             }
             while IFS= read -r _wkey; do
                 [[ -z "$_wkey" ]] && continue
-                local _label
+                local _label _collect_type
+                _collect_type=$(schema_collect_type "$_wkey")
+                [[ "$_collect_type" == "skip" ]] && continue
+                if [[ -z "${_COLLECTED_SECRETS[$_wkey]+set}" ]]; then
+                    log_error "write_secrets: schema key '${_wkey}' has no collected/generated value"
+                    return 1
+                fi
                 _label=$(schema_field_safe "$_wkey" label)
                 [[ -n "$_label" ]] && printf '# %s\n' "$_label"
                 printf '%s: %s\n\n' \
                     "$_wkey" \
-                    "$(yaml_escape "${_COLLECTED_SECRETS[$_wkey]:-}")"
+                    "$(yaml_escape "${_COLLECTED_SECRETS[$_wkey]}")"
             done <<< "$_wkeys"
         } > "$temp_file"
 
@@ -991,6 +975,10 @@ BACKUP_BANNER
             log_error "Failed to export Docker secret files — run sudo utilities/setup-secrets.sh configure again"
             return 1
         fi
+        if ! prepare_push_secret_placeholders "/run/vaultwarden-oci/secrets"; then
+            log_error "Failed to prepare push secret placeholder files"
+            return 1
+        fi
 
         return 0
     }
@@ -1018,6 +1006,7 @@ BACKUP_BANNER
 
         if ! ensure_prerequisites;    then return 1; fi
         if ! ensure_argon2_available; then return 1; fi
+        schema_validate || return 1
 
         if ! check_reconfiguration; then
             log_info "Keeping existing secrets - no changes made"
@@ -1047,7 +1036,7 @@ BACKUP_BANNER
         for _cleanup_key in \
             admin_token admin_basic_auth_hash \
             caddy_cloudflare_dns_token cf_account_id cf_worker_bouncer_token cloudflare_zone_id \
-            email_api_token smtp_password backup_passphrase file_integrity_hmac_key \
+            email_api_token smtp_password file_integrity_hmac_key \
             push_installation_id push_installation_key; do
             unset "SECRET_${_cleanup_key}" 2>/dev/null || true
         done

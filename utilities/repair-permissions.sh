@@ -183,6 +183,7 @@ _apply_known_path "${PROJECT_STATE_DIR}/config/install.env" "installed state env
 _apply_known_path "${PROJECT_STATE_DIR}/config/dr-manifest.env" "DR manifest"
 _apply_known_path "${PROJECT_STATE_DIR}/secrets" "persistent secrets directory"
 _apply_known_path "${PROJECT_STATE_DIR}/secrets/secrets.yaml" "persistent secrets.yaml"
+_apply_known_path /run/vaultwarden-oci/managed-secrets "managed secret reconciliation metadata"
 _apply_known_path /run/vaultwarden-oci/secrets "runtime Docker secrets directory"
 if [[ -d /run/vaultwarden-oci/secrets ]]; then
     while IFS= read -r -d '' runtime_secret; do

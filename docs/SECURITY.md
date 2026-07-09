@@ -192,7 +192,6 @@ cf_account_id: "cloudflare_account_id"
 smtp_password: "smtp_password"
 push_installation_id: "optional"
 push_installation_key: "optional"
-backup_passphrase: "auto-generated backup encryption passphrase"
 file_integrity_hmac_key: "auto-generated checksum authentication key"
 ```
 

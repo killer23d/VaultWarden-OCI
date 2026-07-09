@@ -539,6 +539,20 @@ EXAMPLES:
     sudo ./backup.sh sync                         # Upload db/full/emergency backups
 ```
 
+### crowdsec-worker-apply.sh
+
+```
+VaultWarden CrowdSec Workers — apply config
+
+USAGE:
+    sudo ./utilities/crowdsec-worker-apply.sh
+
+DESCRIPTION:
+    Re-renders /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
+    from the current project environment and encrypted secrets, then restarts
+    and verifies crowdsec-cloudflare-worker-bouncer.
+```
+
 ### env-edit.sh
 
 ```
@@ -1121,7 +1135,6 @@ EXAMPLES:
     sudo ./utilities/secrets-rotate.sh cf_worker_bouncer_token
     sudo ./utilities/secrets-rotate.sh email_api_token --dry-run
     sudo ./edit-secrets.sh rotate smtp_password
-    sudo ./edit-secrets.sh rotate backup_passphrase --no-backup
 ```
 
 ### secrets-view.sh

@@ -310,72 +310,103 @@ validate_secrets_yaml() {
     return 0
 }
 
+_secret_value_is_inactive() {
+    local value="${1-}"
+    local placeholder="${2-}"
+    [[ -z "$value" ]] && return 0
+    [[ "$value" == "null" ]] && return 0
+    [[ "$value" == CHANGE_ME* ]] && return 0
+    [[ "$value" == NOT_USED* ]] && return 0
+    [[ "$value" == PLACEHOLDER* ]] && return 0
+    [[ -n "$placeholder" && "$value" == "$placeholder" ]] && return 0
+    return 1
+}
+
+_runtime_secret_value_is_inactive() {
+    local key="$1"
+    local value="${2-}"
+    local placeholder="${3-}"
+
+    case "$key" in
+        push_installation_id|push_installation_key)
+            [[ "${PUSH_ENABLED:-false}" != "true" ]] && return 0
+            ;;
+    esac
+
+    _secret_value_is_inactive "$value" "$placeholder"
+}
+
+_managed_secrets_manifest_path() {
+    local docker_dir="${1%/}"
+    printf '%s/managed-secrets' "$(dirname "$docker_dir")"
+}
+
+_schema_required_runtime_keys() {
+    local _required_keys
+    schema_required_keys || return 1
+
+    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
+        local _cf_keys
+        if _cf_keys=$(schema_keys_for_conditional_group "cloudflare_proxy" 2>/dev/null); then
+            printf '%s\n' "$_cf_keys"
+        else
+            printf '%s\n' "cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token"
+            log_warn "validate_required_secrets: schema conditional-group lookup unavailable — using static Cloudflare fallback"
+        fi
+    fi
+}
+
 validate_required_secrets() {
     local secrets_file="${1:-$SECRETS_FILE}"
 
-    # Derive the required-key list from secrets-schema.yaml so that adding or
-    # removing a required secret only requires editing the schema; no script
-    # changes are needed here.
     local _required_keys
-    if ! _required_keys=$(schema_required_keys 2>/dev/null); then
+    if ! _required_keys=$(_schema_required_runtime_keys 2>/dev/null); then
         log_error "validate_required_secrets: failed to read required keys from secrets-schema.yaml"
         return 1
-    fi
-
-    # CrowdSec Cloudflare keys carry required=false in the schema because they
-    # are only mandatory when CLOUDFLARE_PROXY_ENABLED=true. Append them here
-    # when that flag is set so the startup guard is complete without hardcoding
-    # the key names in two places.
-    local _cf_keys=()
-    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
-        while IFS= read -r _ck; do
-            [[ -z "$_ck" ]] && continue
-            _cf_keys+=("$_ck")
-        done < <(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' \
-                    "${SECRETS_SCHEMA_FILE:-${PROJECT_ROOT}/secrets-schema.yaml}" 2>/dev/null)
-        if [[ ${#_cf_keys[@]} -eq 0 ]]; then
-            # Fallback: static list guards against yq unavailability at this stage.
-            _cf_keys=("cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token")
-            log_warn "validate_required_secrets: schema_field unavailable for CF keys — using static fallback"
-        fi
     fi
 
     if ! ensure_sops_env; then return 1; fi
 
     local missing_secrets=()
+    local inactive_secrets=()
+    declare -A _seen_required=()
 
-    # Check schema-required keys.
     while IFS= read -r secret; do
         [[ -z "$secret" ]] && continue
+        [[ -n "${_seen_required[$secret]+set}" ]] && continue
+        _seen_required["$secret"]=1
         local sops_stderr rc=0
-        # Capture sops stderr per-key so missing vs. undecryptable secrets
-        # produce distinct diagnostic messages.
-        sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
+        local value placeholder
+        sops_stderr=$(mktemp)
+        value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>"$sops_stderr") || rc=$?
         if [[ $rc -ne 0 ]]; then
             log_error "validate_required_secrets: required secret '$secret' is missing or unreadable"
             missing_secrets+=("$secret")
-            if [[ -n "${sops_stderr:-}" ]]; then
-                log_debug "validate_required_secrets: sops error for '$secret': $sops_stderr"
+            if [[ -s "$sops_stderr" ]]; then
+                log_debug "validate_required_secrets: sops error for '$secret': $(cat "$sops_stderr")"
             fi
+            rm -f "$sops_stderr"
+            continue
         fi
+        rm -f "$sops_stderr"
+        placeholder=$(schema_placeholder_for_key "$secret" 2>/dev/null || printf '')
+        if _secret_value_is_inactive "$value" "$placeholder"; then
+            log_error "validate_required_secrets: required secret '$secret' is inactive or placeholder"
+            inactive_secrets+=("$secret")
+        fi
+        unset value
     done <<< "$_required_keys"
 
-    for secret in "${_cf_keys[@]}"; do
-        local sops_stderr rc=0
-        sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
-        if [[ $rc -ne 0 ]]; then
-            log_error "validate_required_secrets: required CF secret '$secret' is missing or unreadable"
-            missing_secrets+=("$secret")
-            if [[ -n "${sops_stderr:-}" ]]; then
-                log_debug "validate_required_secrets: sops error for '$secret': $sops_stderr"
-            fi
-        fi
-    done
-
+    unset _seen_required
     cleanup_secrets_environment
 
     if [[ ${#missing_secrets[@]} -gt 0 ]]; then
         log_warn "Missing required secrets (${#missing_secrets[@]}): ${missing_secrets[*]}"
+    fi
+    if [[ ${#inactive_secrets[@]} -gt 0 ]]; then
+        log_warn "Inactive required secrets (${#inactive_secrets[@]}): ${inactive_secrets[*]}"
+    fi
+    if [[ ${#missing_secrets[@]} -gt 0 || ${#inactive_secrets[@]} -gt 0 ]]; then
         return 1
     fi
     return 0
@@ -384,10 +415,8 @@ validate_required_secrets() {
 check_placeholder_values() {
     local secrets_file="${1:-$SECRETS_FILE}"
 
-    # Derive the required-key list from secrets-schema.yaml so no key names are
-    # hardcoded here.  Adding or removing a key only requires updating the schema.
     local _required_keys
-    if ! _required_keys=$(schema_required_keys 2>/dev/null); then
+    if ! _required_keys=$(_schema_required_runtime_keys 2>/dev/null); then
         log_error "check_placeholder_values: failed to read required keys from secrets-schema.yaml"
         return 1
     fi
@@ -395,10 +424,13 @@ check_placeholder_values() {
     if ! ensure_sops_env; then return 1; fi
     local placeholder_secrets=()
     local unreadable_secrets=()
+    declare -A _seen_required=()
 
     while IFS= read -r secret; do
         [[ -z "$secret" ]] && continue
-        local value rc=0
+        [[ -n "${_seen_required[$secret]+set}" ]] && continue
+        _seen_required["$secret"]=1
+        local value rc=0 placeholder
         { set +x; } 2>/dev/null
         local _tmp_sops_err
         _tmp_sops_err=$(mktemp)
@@ -415,13 +447,15 @@ check_placeholder_values() {
             continue
         fi
         rm -f "$_tmp_sops_err"
-        if [[ "$value" =~ ^(CHANGE_ME|PLACEHOLDER_NOT_CONFIGURED) ]] || [[ -z "$value" ]]; then
-            log_warn "check_placeholder_values: secret '$secret' is set to a placeholder or is empty"
+        placeholder=$(schema_placeholder_for_key "$secret" 2>/dev/null || printf '')
+        if _secret_value_is_inactive "$value" "$placeholder"; then
+            log_warn "check_placeholder_values: secret '$secret' is set to a placeholder, sentinel, or empty value"
             placeholder_secrets+=("$secret")
         fi
         unset value
     done <<< "$_required_keys"
 
+    unset _seen_required
     cleanup_secrets_environment
     if [[ ${#unreadable_secrets[@]} -gt 0 ]]; then
         log_error "Unreadable secrets during placeholder check (${#unreadable_secrets[@]}): ${unreadable_secrets[*]}"
@@ -871,7 +905,6 @@ _bcrypt_format_ok() {
 
 # New auto keys (fields with auto_fn declared in the schema) must NOT be added
 # here. They are dispatched through the schema to auto_generate_secret_field().
-# backup_passphrase remains only as a legacy direct-call compatibility path;
 # file_integrity_hmac_key deliberately rejects interactive collection.
 collect_secret_field() {
     local field="$1"
@@ -982,20 +1015,6 @@ collect_secret_field() {
             printf '%s' "$val"
             ;;
 
-        backup_passphrase)
-            local passphrase
-            passphrase=$(generate_secure_string 32)
-            {
-                printf '\n'
-                printf ' AUTO-GENERATED BACKUP PASSPHRASE (save if needed):\n'
-                printf '   %s\n' "$passphrase"
-                printf '\n'
-            } > /dev/tty 2>/dev/null || {
-                log_warn "Backup passphrase auto-generated (32 chars) -- retrieve from secrets store." >&2
-            }
-            printf '%s' "$passphrase"
-            ;;
-
         file_integrity_hmac_key)
             log_error "collect_secret_field: '$field' is an auto key. Call auto_generate_secret_field() instead." >&2
             return 1
@@ -1093,13 +1112,6 @@ auto_generate_secret_field() {
 
         push_installation_key)
             printf '%s' "CHANGE_ME_OR_LEAVE_EMPTY"
-            ;;
-
-        backup_passphrase)
-            local passphrase
-            passphrase=$(generate_secure_string 32)
-            log_success "Backup passphrase generated (32 characters)" >&2
-            printf '%s' "$passphrase"
             ;;
 
         # Single source of truth for this auto key.
@@ -1619,6 +1631,115 @@ _validate_yaml_no_duplicates() {
     _run_yaml_nodupcheck "$yaml_file" validate
 }
 
+validate_plaintext_secrets_schema_contract() {
+    local plain_yaml="$1"
+    local schema_file="${2:-${SECRETS_SCHEMA_FILE:-${PROJECT_ROOT}/secrets-schema.yaml}}"
+
+    schema_keys "$schema_file" >/dev/null || return 1
+
+    CLOUDFLARE_PROXY_ENABLED="${CLOUDFLARE_PROXY_ENABLED:-false}" \
+        python3 - "$plain_yaml" "$schema_file" <<'PYEOF'
+import os
+import sys
+
+try:
+    import yaml
+except Exception as exc:
+    print(f"schema contract: Python PyYAML is required: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+plain_path, schema_path = sys.argv[1], sys.argv[2]
+
+class NoDupLoader(yaml.SafeLoader):
+    pass
+
+def no_duplicate_mapping(loader, node):
+    seen = {}
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node)
+        if key in seen:
+            raise ValueError(
+                "duplicate key '{}' at line {} (first declared at line {})".format(
+                    key, key_node.start_mark.line + 1, seen[key]
+                )
+            )
+        seen[key] = key_node.start_mark.line + 1
+    return loader.construct_mapping(node, deep=True)
+
+NoDupLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    no_duplicate_mapping,
+)
+
+def load(path, label):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.load(handle, Loader=NoDupLoader)
+    except (OSError, yaml.YAMLError, ValueError) as exc:
+        print(f"schema contract: {label}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        print(f"schema contract: {label} must be a mapping", file=sys.stderr)
+        sys.exit(1)
+    return data
+
+def inactive(value, placeholder):
+    if value is None:
+        return True
+    text = str(value)
+    return (
+        text == ""
+        or text == "null"
+        or text.startswith("CHANGE_ME")
+        or text.startswith("NOT_USED")
+        or text.startswith("PLACEHOLDER")
+        or (placeholder and text == str(placeholder))
+    )
+
+plain = load(plain_path, "secrets YAML")
+schema = load(schema_path, "schema")
+entries = schema.get("secrets") or []
+schema_by_key = {entry.get("key"): entry for entry in entries if isinstance(entry, dict)}
+schema_keys = set(schema_by_key)
+legacy_keys = {"backup_passphrase"}
+errors = []
+
+for key in plain:
+    if key == "sops":
+        continue
+    if key not in schema_keys and key not in legacy_keys:
+        errors.append(f"{key}: unknown secret key not declared in schema")
+
+for key, entry in schema_by_key.items():
+    if entry.get("required") is True:
+        if key not in plain:
+            errors.append(f"{key}: required schema key is missing")
+        elif inactive(plain.get(key), entry.get("placeholder", "")):
+            errors.append(f"{key}: required schema key is inactive or placeholder")
+
+if os.environ.get("CLOUDFLARE_PROXY_ENABLED", "false").lower() == "true":
+    for key, entry in schema_by_key.items():
+        if entry.get("conditional_group") == "cloudflare_proxy":
+            if key not in plain:
+                errors.append(f"{key}: required when CLOUDFLARE_PROXY_ENABLED=true")
+            elif inactive(plain.get(key), entry.get("placeholder", "")):
+                errors.append(f"{key}: inactive while CLOUDFLARE_PROXY_ENABLED=true")
+
+for key, value in plain.items():
+    if key == "sops" or key not in schema_by_key:
+        continue
+    if isinstance(value, (dict, list)):
+        errors.append(f"{key}: secret value must be a scalar")
+
+if errors:
+    for error in errors:
+        print(f"schema contract: {error}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+}
+
 _validate_no_placeholders() {
     local plain_yaml="$1"
 
@@ -1675,10 +1796,11 @@ _warn_if_stack_unavailable() {
 # export_docker_secrets DOCKER_DIR [SECRETS_FILE]
 #
 # Decrypt SECRETS_FILE (defaults to $SECRETS_FILE / secrets/secrets.yaml) and
-# stage one flat file per known secret key, then install it into DOCKER_DIR.
-# Each output file is installed root:root mode 0444. Placeholder
-# values (CHANGE_ME*, NOT_USED*, null) are skipped with a warning so that
-# genuinely-empty optional secrets do not overwrite populated files.
+# stage one flat file per active known secret key, then install it into
+# DOCKER_DIR. Each output file is installed root:root mode 0444. Inactive
+# values (empty, CHANGE_ME*, NOT_USED*, PLACEHOLDER*, null, the schema
+# placeholder, or disabled push credentials) remove any previously exported
+# schema-managed runtime file.
 #
 # Hardening (consolidated from startup.sh::prepare_docker_secrets):
 #   1. SOPS decryption is written to a mktemp cache inside docker_dir (mode
@@ -1746,18 +1868,41 @@ export_docker_secrets() {
         _eds_allowed_keys["$_sk"]=1
     done <<< "$_schema_keys_str"
 
-    local _failed=0
-    local _key _value _staged
-
+    declare -A _eds_values=()
     while IFS='=' read -r _key _value; do
         [[ -z "$_key" ]] && continue
         [[ -n "${_eds_allowed_keys[$_key]+set}" ]] || continue
+        _eds_values["$_key"]="$_value"
+    done < <(
+        python3 - "$_eds_cache" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+if not isinstance(data, dict):
+    sys.exit(0)
+for k, v in data.items():
+    if v is None:
+        print(f"{k}=null")
+    elif isinstance(v, bool):
+        print(f"{k}={'true' if v else 'false'}")
+    elif isinstance(v, (str, int, float)):
+        print(f"{k}={v}")
+PYEOF
+    )
 
-        if [[ -z "$_value" ]] \
-            || [[ "$_value" == "CHANGE_ME"* ]] \
-            || [[ "$_value" == "NOT_USED"* ]] \
-            || [[ "$_value" == "null" ]]; then
-            log_warn "export_docker_secrets: '$_key' skipped (placeholder/empty — rotate with: sudo ./edit-secrets.sh rotate ${_key})"
+    local _failed=0
+    local _key _value _staged _placeholder
+    declare -A _eds_active_keys=()
+    declare -A _eds_inactive_keys=()
+
+    while IFS= read -r _key; do
+        [[ -z "$_key" ]] && continue
+        _value="${_eds_values[$_key]:-}"
+        _placeholder=$(schema_placeholder_for_key "$_key" 2>/dev/null || printf '')
+
+        if _runtime_secret_value_is_inactive "$_key" "$_value" "$_placeholder"; then
+            _eds_inactive_keys["$_key"]=1
+            log_warn "export_docker_secrets: '$_key' inactive (placeholder/sentinel/empty) — removing derived runtime file if present"
             unset _value
             continue
         fi
@@ -1766,20 +1911,12 @@ export_docker_secrets() {
         if ! write_secret_file "$_staged" "$_value"; then
             log_error "export_docker_secrets: failed to stage ${_key}"
             _failed=$(( _failed + 1 ))
+        else
+            _eds_active_keys["$_key"]=1
         fi
         unset _value
-    done < <(
-        python3 - "$_eds_cache" <<'PYEOF'
-import sys, yaml
-with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    data = yaml.safe_load(f) or {}
-for k, v in data.items():
-    if isinstance(v, (str, int, float)):
-        print(f"{k}={v}")
-PYEOF
-    )
+    done <<< "$_schema_keys_str"
     unset _key
-    unset _eds_allowed_keys
 
     local _bad_secrets=()
     local _f _head
@@ -1824,6 +1961,66 @@ PYEOF
         fi
     done
 
+    local _manifest
+    _manifest="$(_managed_secrets_manifest_path "$docker_dir")"
+    local _legacy_manifest="${docker_dir}/.managed-secrets"
+    local _manifest_tmp="${_eds_tmpdir}/managed-secrets"
+    declare -A _eds_remove_keys=()
+
+    for _key in "${!_eds_inactive_keys[@]}"; do
+        _eds_remove_keys["$_key"]=1
+    done
+    local -a _retired_runtime_keys=(backup_passphrase)
+    local _retired_runtime_key
+    for _retired_runtime_key in "${_retired_runtime_keys[@]}"; do
+        _eds_remove_keys["$_retired_runtime_key"]=1
+    done
+
+    local _previous_manifest=""
+    if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -f "$_manifest"; then
+        _previous_manifest=$(VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo cat "$_manifest" 2>/dev/null || true)
+    elif VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -f "$_legacy_manifest"; then
+        _previous_manifest=$(VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo cat "$_legacy_manifest" 2>/dev/null || true)
+    fi
+    while IFS= read -r _key; do
+        [[ -z "$_key" ]] && continue
+        [[ "$_key" =~ ^[a-z][a-z0-9_]*$ ]] || continue
+        [[ -n "${_eds_active_keys[$_key]+set}" ]] && continue
+        _eds_remove_keys["$_key"]=1
+    done <<< "$_previous_manifest"
+
+    for _key in "${!_eds_remove_keys[@]}"; do
+        [[ "$_key" =~ ^[a-z][a-z0-9_]*$ ]] || continue
+        if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -e "${docker_dir}/${_key}"; then
+            if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo rm -f "${docker_dir}/${_key}"; then
+                log_info "export_docker_secrets: removed inactive/stale runtime secret ${docker_dir}/${_key}"
+            else
+                log_error "export_docker_secrets: failed to remove inactive/stale runtime secret ${docker_dir}/${_key}"
+                return 1
+            fi
+        fi
+    done
+
+    : > "$_manifest_tmp"
+    for _key in "${!_eds_active_keys[@]}"; do
+        printf '%s\n' "$_key" >> "$_manifest_tmp"
+    done
+    if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -e "$_legacy_manifest"; then
+        if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo rm -f "$_legacy_manifest"; then
+            log_error "export_docker_secrets: failed to remove legacy managed manifest ${_legacy_manifest}"
+            return 1
+        fi
+    fi
+
+    if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -d -m 0700 -o root -g root "$(dirname "$_manifest")"; then
+        log_error "export_docker_secrets: failed to prepare managed runtime metadata directory: $(dirname "$_manifest")"
+        return 1
+    fi
+    if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0600 -o root -g root "$_manifest_tmp" "$_manifest"; then
+        log_error "export_docker_secrets: failed to update managed runtime secret manifest"
+        return 1
+    fi
+
     local _cf_flat="/run/vaultwarden-oci/secrets/crowdsec_cf_firewall_token"
     local _cf_dest="${docker_dir}/crowdsec_cf_firewall_token"
     if [[ "$_cf_flat" != "$_cf_dest" ]]; then
@@ -1841,4 +2038,61 @@ PYEOF
 
     log_success "Docker secrets exported to: $docker_dir"
     return 0
+}
+
+prepare_push_secret_placeholders() {
+    local secrets_dir="${1:-${DOCKER_SECRETS_DIR:-/run/vaultwarden-oci/secrets}}"
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY RUN] Would enforce push secret placeholder permissions in ${secrets_dir}"
+        return 0
+    fi
+
+    local changed=false
+    VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo mkdir -p "$secrets_dir" || return 1
+
+    local dir_owner dir_mode
+    dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
+    dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
+    if [[ "$dir_owner" != "0:0" ]]; then
+        VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo chown root:root "$secrets_dir" || return 1
+        changed=true
+    fi
+    if [[ "$dir_mode" != "700" ]]; then
+        VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo chmod 700 "$secrets_dir" || return 1
+        changed=true
+    fi
+
+    local key path owner mode
+    for key in push_installation_id push_installation_key; do
+        path="${secrets_dir}/${key}"
+        if [[ ! -f "$path" ]]; then
+            VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0444 -o root -g root /dev/null "$path" || return 1
+            changed=true
+        fi
+
+        owner=$(stat -c '%u:%g' "$path" 2>/dev/null || echo "")
+        mode=$(stat -c '%a' "$path" 2>/dev/null || echo "")
+        if [[ "$owner" != "0:0" ]]; then
+            VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo chown root:root "$path" || return 1
+            changed=true
+        fi
+        if [[ "$mode" != "444" ]]; then
+            VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo chmod 444 "$path" || return 1
+            changed=true
+        fi
+    done
+
+    dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
+    dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
+    if [[ "$dir_owner" != "0:0" || "$dir_mode" != "700" ]]; then
+        log_error "Runtime secret directory must remain root:root 0700: ${secrets_dir}"
+        return 1
+    fi
+
+    if [[ "$changed" == "true" ]]; then
+        log_success "Push secret placeholders remediated with host-private permissions"
+    else
+        log_success "Push secret placeholders already host-private"
+    fi
 }

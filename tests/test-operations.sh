@@ -9,6 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OPS="$ROOT/lib/operations.sh"
 BACKUP="$ROOT/utilities/backup-run.sh"
 CROWDSEC="$ROOT/utilities/setup-crowdsec.sh"
+CROWDSEC_APPLY="$ROOT/utilities/crowdsec-worker-apply.sh"
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -293,6 +294,26 @@ require 'operation_set_phase "0" "Resetting installed CrowdSec components"' "$CR
     "CrowdSec force reset must record Phase 0 before destructive reset"
 require 'operation_acquire' "$CROWDSEC" "CrowdSec setup must acquire an operation guard"
 require 'crowdsec-setup' "$CROWDSEC" "CrowdSec setup guard must use the crowdsec-setup operation id"
+require 'source "\$\{PROJECT_ROOT\}/lib/operations\.sh"' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must source operation guards"
+require 'operation_acquire' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must acquire an operation guard"
+require '--id crowdsec-worker-apply' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must use its own operation id"
+require '--label "CrowdSec Workers config apply"' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must expose a clear operation label"
+require '--specific-lock /run/lock/vaultwarden-crowdsec-setup\.lock' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must coordinate with full CrowdSec setup"
+require 'trap _crowdsec_worker_apply_cleanup EXIT' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must release on EXIT"
+require 'operation_release "\$rc"' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply EXIT cleanup must preserve status"
+require 'operation_release 130; exit 130' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must release on INT"
+require 'operation_release 143; exit 143' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must release on HUP/TERM"
+require 'require_root "\$@"' "$CROWDSEC_APPLY" \
+    "standalone CrowdSec Worker apply must preserve root-only mutation behavior"
 require '--force does not bypass active VaultWarden operation guards' "$BACKUP" \
     "backup --force must not bypass operation guards"
 reject 'FORCE.*flock|flock.*FORCE|SKIP_OPS_LOCK|--skip-ops-lock' "$BACKUP" \

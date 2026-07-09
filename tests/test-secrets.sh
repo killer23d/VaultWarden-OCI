@@ -205,14 +205,157 @@ cf_keys="$(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") 
 [[ "$cf_keys" == *"cf_worker_bouncer_token"* ]] || fail "Cloudflare conditional keys missing cf_worker_bouncer_token"
 [[ "$cf_keys" != *'"'* ]] || fail "Cloudflare conditional schema keys must be bare shell key names"
 
-grep -Fq 'yq -r '\''.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key'\''' "$ROOT/lib/secrets.sh" \
-    || fail "validate_required_secrets must use explicit raw yq output for Cloudflare keys"
+[[ "$(schema_apply_type_for_key admin_basic_auth_hash)" == "compose_restart" ]] \
+    || fail "admin_basic_auth_hash apply type missing"
+[[ "$(schema_apply_targets_for_key admin_basic_auth_hash)" == "caddy" ]] \
+    || fail "admin_basic_auth_hash must apply to caddy"
+[[ "$(schema_apply_targets_for_key smtp_password)" == "postfix" ]] \
+    || fail "smtp_password must apply to postfix"
+[[ "$(schema_apply_type_for_key email_api_token)" == "none" ]] \
+    || fail "email_api_token must require no restart"
+[[ "$(schema_apply_type_for_key cf_worker_bouncer_token)" == "crowdsec_worker_config" ]] \
+    || fail "CrowdSec worker token must use the narrow config apply action"
+[[ -z "$(schema_services_for_key cf_worker_bouncer_token)" ]] \
+    || fail "systemd/CrowdSec apply targets must not be exposed as compose services"
+! yq -e '.secrets[] | select(.key == "backup_passphrase")' "$ROOT/secrets-schema.yaml" >/dev/null \
+    || fail "backup_passphrase must be retired from active schema"
+grep -Fq 'legacy_keys = {"backup_passphrase"}' "$ROOT/lib/secrets.sh" \
+    || fail "legacy backup_passphrase must remain manageable in existing secrets files"
+
+grep -Fq 'schema_keys_for_conditional_group "cloudflare_proxy"' "$ROOT/lib/secrets.sh" \
+    || fail "validate_required_secrets must use the schema conditional-group accessor"
 grep -Fq 'python3 -c "import yaml"' "$ROOT/utilities/setup-system.sh" \
     || fail "setup dependency verification must check PyYAML import"
 grep -Fq '"python3-yaml"' "$ROOT/utilities/setup-system.sh" \
     || fail "setup apt package ownership must include python3-yaml"
 ! grep -Eq 'local basic_packages=.*"yq"' "$ROOT/utilities/setup-system.sh" \
     || fail "setup apt package ownership must not use Ubuntu python-yq"
+
+write_minimal_schema() {
+    local file="$1"
+    local hash="${2:-plain}"
+    local collect="${3:-interactive}"
+    local auto_fn="${4:-}"
+    local condition_fn="${5:-}"
+    local apply_type="${6:-none}"
+    local target_block="${7:-[]}"
+    cat > "$file" <<SCHEMA
+schema_version: 1
+secrets:
+  - key: admin_token
+    label: "Admin"
+    hash: ${hash}
+    placeholder: "PLACEHOLDER_NOT_CONFIGURED"
+    collect: ${collect}
+    auto_fn: "${auto_fn}"
+    condition_fn: "${condition_fn}"
+    apply:
+      type: ${apply_type}
+      targets: ${target_block}
+    required: false
+    hint: ""
+SCHEMA
+}
+
+write_single_key_schema() {
+    local file="$1"
+    local key="$2"
+    local hash="$3"
+    cat > "$file" <<SCHEMA
+schema_version: 1
+secrets:
+  - key: ${key}
+    label: "Test"
+    hash: ${hash}
+    placeholder: "PLACEHOLDER_NOT_CONFIGURED"
+    collect: interactive
+    auto_fn: ""
+    condition_fn: ""
+    apply:
+      type: none
+      targets: []
+    required: false
+    hint: ""
+SCHEMA
+}
+
+expect_schema_invalid() {
+    local file="$1"
+    local expected="$2"
+    local output status
+    set +e
+    output="$(schema_keys "$file" 2>&1)"
+    status=$?
+    set -e
+    [[ "$status" -ne 0 ]] || fail "invalid schema unexpectedly passed: $file"
+    [[ "$output" == *"$expected"* ]] || fail "invalid schema output missing '$expected': $output"
+}
+
+dup_schema="$TMP/duplicate-key.yaml"
+cat > "$dup_schema" <<'SCHEMA'
+schema_version: 1
+secrets:
+  - key: admin_token
+    label: "Admin"
+    hash: plain
+    placeholder: "PLACEHOLDER_NOT_CONFIGURED"
+    collect: interactive
+    auto_fn: ""
+    apply:
+      type: none
+      targets: []
+    required: false
+    hint: ""
+  - key: admin_token
+    label: "Admin duplicate"
+    hash: plain
+    placeholder: "PLACEHOLDER_NOT_CONFIGURED"
+    collect: interactive
+    auto_fn: ""
+    apply:
+      type: none
+      targets: []
+    required: false
+    hint: ""
+SCHEMA
+expect_schema_invalid "$dup_schema" "admin_token.key: must be unique"
+
+bad_collect="$TMP/bad-collect.yaml"; write_minimal_schema "$bad_collect" plain "sometimes"
+expect_schema_invalid "$bad_collect" "admin_token.collect"
+bad_hash="$TMP/bad-hash.yaml"; write_minimal_schema "$bad_hash" "sha512"
+expect_schema_invalid "$bad_hash" "admin_token.hash"
+bad_admin_token_hash="$TMP/bad-admin-token-hash.yaml"; write_minimal_schema "$bad_admin_token_hash" "plain"
+expect_schema_invalid "$bad_admin_token_hash" "admin_token.hash: implemented transform requires 'argon2id'"
+bad_admin_basic_hash="$TMP/bad-admin-basic-hash.yaml"; write_single_key_schema "$bad_admin_basic_hash" "admin_basic_auth_hash" "plain"
+expect_schema_invalid "$bad_admin_basic_hash" "admin_basic_auth_hash.hash: implemented transform requires 'bcrypt'"
+bad_smtp_hash="$TMP/bad-smtp-hash.yaml"; write_single_key_schema "$bad_smtp_hash" "smtp_password" "bcrypt"
+expect_schema_invalid "$bad_smtp_hash" "smtp_password.hash: 'bcrypt' has no implemented transform for this key"
+bad_apply="$TMP/bad-apply.yaml"; write_minimal_schema "$bad_apply" plain interactive "" "" "webhook"
+expect_schema_invalid "$bad_apply" "admin_token.apply.type"
+bad_auto="$TMP/bad-auto.yaml"; write_minimal_schema "$bad_auto" plain auto ""
+expect_schema_invalid "$bad_auto" "admin_token.auto_fn"
+bad_cond="$TMP/bad-condition.yaml"; write_minimal_schema "$bad_cond" plain conditional "" ""
+expect_schema_invalid "$bad_cond" "admin_token.condition_fn"
+
+grep -Fq "collect_secrets: no collection handler for schema key" "$ROOT/utilities/setup-secrets.sh" \
+    || fail "setup collection must fail on unhandled schema keys"
+grep -Fq "schema key '\${_wkey}' has no collected/generated value" "$ROOT/utilities/setup-secrets.sh" \
+    || fail "write_secrets must fail instead of writing empty missing values"
+grep -Fq 'validate_plaintext_secrets_schema_contract "$temp_file"' "$ROOT/utilities/secrets-edit.sh" \
+    || fail "raw secrets edit must validate plaintext against schema before promotion"
+grep -Fq 'export_docker_secrets "$docker_dir" "$SECRETS_FILE"' "$ROOT/utilities/secrets-edit.sh" \
+    || fail "raw secrets edit must reconcile runtime secrets after promotion"
+grep -Fq 'prepare_push_secret_placeholders "$docker_dir"' "$ROOT/utilities/secrets-edit.sh" \
+    || fail "raw secrets edit must preserve push placeholder behavior"
+grep -Fq 'No plaintext values were printed; changes were detected by fingerprints.' "$ROOT/utilities/secrets-edit.sh" \
+    || fail "raw secrets edit changed-key reporting must avoid plaintext values"
+grep -Fq 'schema_validate || return 1' "$ROOT/startup.sh" \
+    || fail "startup must validate schema once before schema-heavy secret checks"
+grep -Fq 'validate_required_secrets "$SECRETS_FILE" || return 1' "$ROOT/startup.sh" \
+    || fail "startup must use validate_required_secrets as the strict required-secret gate"
+startup_secret_block="$(awk '/prepare_docker_secrets\(\)/,/^}/' "$ROOT/startup.sh")"
+[[ "$startup_secret_block" != *'check_placeholder_values "$SECRETS_FILE"'* ]] \
+    || fail "startup should not run duplicate required-secret placeholder validation"
 
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/yq" <<'PYTHON_YQ'
@@ -263,6 +406,169 @@ printf 'Schema dependency contract tests passed.\n'
 )
 
 check_schema_dependency_contracts
+
+check_runtime_secret_reconciliation() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+mkdir -p "$TMP/bin" "$TMP/runtime"
+cat > "$TMP/bin/sops" <<'SOPS'
+#!/usr/bin/env bash
+set -euo pipefail
+target="${@: -1}"
+if [[ "${1:-}" == "-d" || "${1:-}" == "--decrypt" ]]; then
+    cat "$target"
+    exit 0
+fi
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'sops mock\n'
+    exit 0
+fi
+cat "$target"
+SOPS
+chmod +x "$TMP/bin/sops"
+
+PATH="$TMP/bin:$PATH"
+SECRETS_FILE="$TMP/secrets.yaml"
+SECRETS_SCHEMA_FILE="$ROOT/secrets-schema.yaml"
+PROJECT_ROOT="$ROOT"
+export PATH SECRETS_FILE SECRETS_SCHEMA_FILE PROJECT_ROOT
+
+# shellcheck source=../lib/log.sh
+source "$ROOT/lib/log.sh"
+# shellcheck source=../lib/config.sh
+source "$ROOT/lib/config.sh"
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+# shellcheck source=../lib/crypto.sh
+source "$ROOT/lib/crypto.sh"
+# shellcheck source=../lib/secrets.sh
+source "$ROOT/lib/secrets.sh"
+
+ensure_sops_env() { return 0; }
+cleanup_secrets_environment() { return 0; }
+_maybe_sudo() {
+    local cmd="$1"; shift
+    if [[ "$cmd" == "install" ]]; then
+        local args=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o|-g) shift 2 ;;
+                *) args+=("$1"); shift ;;
+            esac
+        done
+        command install "${args[@]}"
+    elif [[ "$cmd" == "chown" ]]; then
+        return 0
+    else
+        command "$cmd" "$@"
+    fi
+}
+stat() {
+    if [[ "${1:-}" == "-c" && "${2:-}" == "%u:%g" &&
+          ( "${3:-}" == "$TMP/runtime"* || "${3:-}" == "$TMP/managed-secrets" ) ]]; then
+        printf '0:0\n'
+        return 0
+    fi
+    command stat "$@"
+}
+
+write_secret_yaml() {
+    local smtp_value="$1"
+    local push_id="${2:-CHANGE_ME_OR_LEAVE_EMPTY}"
+    local push_key="${3:-CHANGE_ME_OR_LEAVE_EMPTY}"
+    cat > "$SECRETS_FILE" <<YAML
+smtp_password: "${smtp_value}"
+push_installation_id: "${push_id}"
+push_installation_key: "${push_key}"
+backup_passphrase: "legacy-encrypted-state-value"
+YAML
+}
+
+write_secret_yaml "real-smtp-secret"
+printf 'operator data\n' > "$TMP/runtime/operator_file"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ "$(cat "$TMP/runtime/smtp_password")" == "real-smtp-secret" ]] \
+    || fail "real smtp_password was not exported"
+[[ "$(stat -c '%a' "$TMP/runtime/smtp_password")" == "444" ]] \
+    || fail "runtime Docker secret file was not mode 0444"
+[[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file was removed"
+[[ ! -e "$TMP/runtime/.managed-secrets" ]] \
+    || fail "managed-secret metadata was written inside Docker secrets directory"
+[[ -f "$TMP/managed-secrets" ]] \
+    || fail "managed-secret metadata was not written beside Docker secrets directory"
+[[ "$(stat -c '%u:%g' "$TMP/managed-secrets")" == "0:0" ]] \
+    || fail "managed-secret metadata owner contract is not root:root"
+[[ "$(stat -c '%a' "$TMP/managed-secrets")" == "600" ]] \
+    || fail "managed-secret metadata was not mode 0600"
+write_secret_yaml "real-smtp-secret"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ "$(stat -c '%a' "$TMP/managed-secrets")" == "600" ]] \
+    || fail "repeated export changed managed-secret metadata mode"
+
+write_secret_yaml "NOT_USED_EMAIL_MODE=api"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ ! -e "$TMP/runtime/smtp_password" ]] \
+    || fail "smtp_password remained after NOT_USED transition"
+[[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file removed after NOT_USED transition"
+
+write_secret_yaml "real-smtp-secret"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+write_secret_yaml "CHANGE_ME_SMTP_PASSWORD"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ ! -e "$TMP/runtime/smtp_password" ]] \
+    || fail "smtp_password remained after CHANGE_ME transition"
+
+printf 'legacy\n' > "$TMP/runtime/retired_schema_key"
+printf 'retired_schema_key\n' > "$TMP/managed-secrets"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ ! -e "$TMP/runtime/retired_schema_key" ]] \
+    || fail "manifest-managed retired key was not removed"
+[[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file removed during stale cleanup"
+
+rm -f "$TMP/managed-secrets"
+printf 'old backup passphrase\n' > "$TMP/runtime/backup_passphrase"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ ! -e "$TMP/runtime/backup_passphrase" ]] \
+    || fail "pre-manifest legacy backup_passphrase runtime file was not removed"
+[[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file removed during legacy cleanup"
+
+PUSH_ENABLED=true
+export PUSH_ENABLED
+write_secret_yaml "real-smtp-secret" "real-push-id" "real-push-key"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ "$(cat "$TMP/runtime/push_installation_id")" == "real-push-id" ]] \
+    || fail "PUSH_ENABLED=true did not export real push_installation_id"
+[[ "$(cat "$TMP/runtime/push_installation_key")" == "real-push-key" ]] \
+    || fail "PUSH_ENABLED=true did not export real push_installation_key"
+[[ "$(stat -c '%a' "$TMP/runtime/push_installation_id")" == "444" ]] \
+    || fail "real push_installation_id was not mode 0444"
+
+PUSH_ENABLED=false
+export PUSH_ENABLED
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+prepare_push_secret_placeholders "$TMP/runtime" >/dev/null
+[[ -f "$TMP/runtime/push_installation_id" && ! -s "$TMP/runtime/push_installation_id" ]] \
+    || fail "PUSH_ENABLED=false left real push_installation_id content in runtime"
+[[ -f "$TMP/runtime/push_installation_key" && ! -s "$TMP/runtime/push_installation_key" ]] \
+    || fail "PUSH_ENABLED=false left real push_installation_key content in runtime"
+[[ "$(stat -c '%a' "$TMP/runtime/push_installation_id")" == "444" ]] \
+    || fail "disabled push_installation_id placeholder was not mode 0444"
+[[ "$(stat -c '%a' "$TMP/runtime/push_installation_key")" == "444" ]] \
+    || fail "disabled push_installation_key placeholder was not mode 0444"
+
+printf 'Runtime secret reconciliation tests passed.\n'
+)
+
+check_runtime_secret_reconciliation
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

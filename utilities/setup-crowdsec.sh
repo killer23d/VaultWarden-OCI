@@ -57,7 +57,7 @@ cd "${PROJECT_ROOT}"
 # Library loading
 # ---------------------------------------------------------------------------
 _LIBS_LOADED=false
-for _lib in log.sh config.sh common.sh operations.sh storage.sh secrets.sh; do
+for _lib in log.sh config.sh common.sh operations.sh storage.sh secrets.sh crowdsec-worker.sh; do
     _lib_path="${PROJECT_ROOT}/lib/${_lib}"
     if [[ -f "$_lib_path" ]]; then
         # shellcheck disable=SC1090
@@ -1092,139 +1092,32 @@ _CF_WORKER_BOUNCER_CONFIG_DEST="/etc/crowdsec/bouncers/crowdsec-cloudflare-worke
 if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
     if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
         log_warn "Skipping Cloudflare Workers bouncer config write — CLOUDFLARE_PROXY_ENABLED is not 'true'."
-    elif [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would write ${_CF_WORKER_BOUNCER_CONFIG_DEST} from ${_CF_WORKER_BOUNCER_CONFIG_SRC}"
     else
-        cf_worker_bouncer_token=""
-        cloudflare_zone_id=""
-        cf_account_id=""
-        if [[ "$AUTO_MODE" == "true" ]]; then
-            cf_worker_bouncer_token="CHANGE_ME_CF_WORKER_BOUNCER_TOKEN"
-            cloudflare_zone_id="CHANGE_ME_CLOUDFLARE_ZONE_ID"
-            cf_account_id="CHANGE_ME_CF_ACCOUNT_ID"
-            log_warn "Auto mode: Cloudflare values left as placeholders where missing."
-            log_warn "Set CrowdSec Cloudflare secrets with: sudo ./edit-secrets.sh rotate <field>"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            _worker_route="${DOMAIN_NAME:-<domain>}/*"
         else
-            log_debug "setup-crowdsec Phase 6: SECRETS_FILE resolved to: ${SECRETS_FILE:-<unset>}"
-            cf_worker_bouncer_token=$(decrypt_secret "cf_worker_bouncer_token") || {
-                log_error "Failed to read cf_worker_bouncer_token from secrets."
-                log_error "Run: sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
+            _domain_name="${DOMAIN_NAME:-}"
+            if [[ -z "$_domain_name" && -n "${DOMAIN:-}" ]]; then
+                _domain_name="${DOMAIN#https://}"
+                _domain_name="${_domain_name#http://}"
+                _domain_name="${_domain_name%%/*}"
+                log_info "DOMAIN_NAME not set — derived from DOMAIN: ${_domain_name}"
+            fi
+            if [[ -z "$_domain_name" ]]; then
+                log_error "Neither DOMAIN_NAME nor DOMAIN is set in .env — cannot derive routes_to_protect."
+                log_error "Set DOMAIN_NAME=yourdomain.com in .env and re-run."
+                exit 1
+            fi
+            _worker_route="${_domain_name}/*"
+        fi
+
+        CROWDSEC_CF_BOUNCER_API_KEY="${_CF_BOUNCER_KEY:-${CROWDSEC_CF_BOUNCER_API_KEY:-}}" \
+            crowdsec_worker_apply_config --allow-missing-service || {
+                log_error "Failed to render/apply Cloudflare Workers bouncer config."
+                log_error "Retry only this phase with: sudo ./utilities/crowdsec-worker-apply.sh"
                 exit 1
             }
-            if [[ -z "$cf_worker_bouncer_token" || "$cf_worker_bouncer_token" == PLACEHOLDER* || "$cf_worker_bouncer_token" == CHANGE_ME* ]]; then
-                log_error "cf_worker_bouncer_token is not configured."
-                log_error "Run: sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
-                exit 1
-            fi
-            cloudflare_zone_id=$(decrypt_secret "cloudflare_zone_id") || {
-                log_error "Failed to read cloudflare_zone_id from secrets."
-                log_error "Run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
-                exit 1
-            }
-            if [[ -z "$cloudflare_zone_id" || "$cloudflare_zone_id" == PLACEHOLDER* || "$cloudflare_zone_id" == CHANGE_ME* ]]; then
-                log_error "cloudflare_zone_id is not configured."
-                log_error "Run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
-                exit 1
-            fi
-            cf_account_id=$(decrypt_secret "cf_account_id") || {
-                log_error "Failed to read cf_account_id from secrets."
-                log_error "Run: sudo ./edit-secrets.sh rotate cf_account_id"
-                exit 1
-            }
-            if [[ -z "$cf_account_id" || "$cf_account_id" == PLACEHOLDER* || "$cf_account_id" == CHANGE_ME* ]]; then
-                log_error "cf_account_id is not configured."
-                log_error "Run: sudo ./edit-secrets.sh rotate cf_account_id"
-                exit 1
-            fi
-            cleanup_secrets_environment
         fi
-
-        _cf_free_plan="${CF_FREE_PLAN:-true}"
-        if [[ "$_cf_free_plan" == "true" ]]; then
-            _only_from_line="  only_include_decisions_from: [\"cscli\", \"crowdsec\"]"
-            log_info "Free-plan KV guard enabled: restricting decisions to cscli + crowdsec engine."
-            log_info "Set CF_FREE_PLAN=false in .env to disable this restriction."
-        else
-            _only_from_line="  only_include_decisions_from: []"
-        fi
-
-        # Resolve the account email for the account_name field.
-        # Falls back to a placeholder if not set in .env.
-        _cf_account_email="${CF_ACCOUNT_EMAIL:-CHANGE_ME_CF_ACCOUNT_EMAIL}"
-
-        mkdir -p /etc/crowdsec/bouncers
-
-        _domain_name="${DOMAIN_NAME:-}"
-        if [[ -z "$_domain_name" && -n "${DOMAIN:-}" ]]; then
-            _domain_name="${DOMAIN#https://}"
-            _domain_name="${_domain_name#http://}"
-            _domain_name="${_domain_name%%/*}"
-            log_info "DOMAIN_NAME not set — derived from DOMAIN: ${_domain_name}"
-        fi
-        if [[ -z "$_domain_name" ]]; then
-            log_error "Neither DOMAIN_NAME nor DOMAIN is set in .env — cannot derive routes_to_protect."
-            log_error "Set DOMAIN_NAME=yourdomain.com in .env and re-run."
-            exit 1
-        fi
-        _worker_route="${_domain_name}/*"
-
-        # NOTE on the only_include_decisions_from sed pattern:
-        # We match only lines where the YAML key itself starts the line
-        # (optional leading whitespace, then the key name).  This prevents
-        # comment lines that merely *mention* the key from being replaced,
-        # which previously produced a duplicate YAML key that broke the
-        # bouncer config parser and the dpkg post-install script.
-        sed \
-            -e "s|%%CLOUDFLARE_ZONE_ID%%|${cloudflare_zone_id}|g" \
-            -e "s|%%CF_ACCOUNT_ID%%|${cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-            -e "s|%%CF_WORKER_BOUNCER_TOKEN%%|${cf_worker_bouncer_token}|g" \
-            -e "s|%%CF_ACCOUNT_NAME%%|${_cf_account_email}|g" \
-            -e "s|%%CROWDSEC_LAPI_KEY%%|${_CF_BOUNCER_KEY}|g" \
-            -e "s|%%WORKER_ROUTE%%|${_worker_route}|g" \
-            -e "s|^[[:space:]]*only_include_decisions_from:.*|${_only_from_line}|g" \
-            -e "s|lapi_url: http://127\.0\.0\.1:[0-9]*/|lapi_url: http://127.0.0.1:${_LAPI_PORT}/|g" \
-            "$_CF_WORKER_BOUNCER_CONFIG_SRC" \
-            | grep -v '%%[A-Z_]*%%' \
-            | tee "$_CF_WORKER_BOUNCER_CONFIG_DEST" >/dev/null
-        chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
-        log_success "Cloudflare Workers bouncer config written to ${_CF_WORKER_BOUNCER_CONFIG_DEST} (mode 600)."
-        log_info "NOTE: The -g auto-config flag is not used — it fails on multi-zone accounts."
-        log_info "Config is fully built from secrets.yaml values (zone_id, account_id, token)."
-
-        if [[ "$AUTONOMOUS_MODE" == "true" ]]; then
-            log_info "Deploying Workers + KV to Cloudflare in autonomous mode (-S)..."
-            if "$_CF_WORKER_BOUNCER_BIN" \
-                    -S \
-                    -c "$_CF_WORKER_BOUNCER_CONFIG_DEST"; then
-                log_success "Autonomous mode deployment complete."
-                log_info "Worker route fail mode: manually set to 'Fail Open' in the Cloudflare dashboard"
-            else
-                log_warn "Autonomous mode deployment reported an error — check config and token permissions."
-            fi
-        elif _cf_worker_bouncer_service_exists; then
-            systemctl enable crowdsec-cloudflare-worker-bouncer || true
-            systemctl reset-failed crowdsec-cloudflare-worker-bouncer 2>/dev/null || true
-            systemctl restart crowdsec-cloudflare-worker-bouncer || true
-
-            _cf_worker_bouncer_ready=false
-            for _i in {1..10}; do
-                if systemctl is-active --quiet crowdsec-cloudflare-worker-bouncer; then
-                    _cf_worker_bouncer_ready=true
-                    break
-                fi
-                sleep 1
-            done
-
-            if [[ "$_cf_worker_bouncer_ready" == "true" ]]; then
-                log_success "crowdsec-cloudflare-worker-bouncer is active."
-            else
-                log_warn "crowdsec-cloudflare-worker-bouncer did not report active within 10s; continuing setup."
-            fi
-        else
-            log_warn "crowdsec-cloudflare-worker-bouncer.service unit not found after install attempt — check logs above."
-            log_warn "Once the binary is installed, run: sudo systemctl enable --now crowdsec-cloudflare-worker-bouncer"
-        fi
-    fi
 else
     log_warn "crowdsec-cloudflare-worker-bouncer.yaml.example not found in ${PROJECT_ROOT}/crowdsec — skipping bouncer config write."
     log_warn "Expected: ${_CF_WORKER_BOUNCER_CONFIG_SRC}"
@@ -1493,7 +1386,7 @@ log_info "  To rotate any value and re-apply:"
 log_info "    sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
 log_info "    sudo ./edit-secrets.sh rotate cloudflare_zone_id"
 log_info "    sudo ./edit-secrets.sh rotate cf_account_id"
-log_info "    sudo ./utilities/setup-crowdsec.sh --force"
+log_info "    sudo ./utilities/crowdsec-worker-apply.sh"
 log_info ""
 if [[ "$_CF_PROXY_ENABLED" == "true" ]]; then
     if declare -f operator_next_steps >/dev/null 2>&1; then

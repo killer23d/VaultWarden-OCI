@@ -276,11 +276,11 @@ sudo cscli decisions delete --ip <your-ip>
 sudo ./utilities/setup-crowdsec.sh --admin-ip <your-ip>
 ```
 
-### Re-run CrowdSec setup (e.g. after rotating the CF token)
+### Re-apply CrowdSec Worker config after rotating CF credentials
 
 ```bash
 ./edit-secrets.sh rotate cf_worker_bouncer_token
-sudo ./utilities/setup-crowdsec.sh --force
+sudo ./utilities/crowdsec-worker-apply.sh
 ```
 
 ---

@@ -415,63 +415,6 @@ prepare_log_directories() {
   return 0
 }
 
-prepare_push_secret_placeholders() {
-  local secrets_dir="$DOCKER_SECRETS_DIR"
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would enforce push secret placeholder permissions in ${secrets_dir}"
-    return 0
-  fi
-
-  local changed=false
-  _maybe_sudo mkdir -p "$secrets_dir" || return 1
-
-  local dir_owner dir_mode
-  dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
-  dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
-  if [[ "$dir_owner" != "0:0" ]]; then
-    _maybe_sudo chown root:root "$secrets_dir" || return 1
-    changed=true
-  fi
-  if [[ "$dir_mode" != "700" ]]; then
-    _maybe_sudo chmod 700 "$secrets_dir" || return 1
-    changed=true
-  fi
-
-  local key path owner mode
-  for key in push_installation_id push_installation_key; do
-    path="${secrets_dir}/${key}"
-    if [[ ! -f "$path" ]]; then
-      _maybe_sudo install -m 0444 -o root -g root /dev/null "$path" || return 1
-      changed=true
-    fi
-
-    owner=$(stat -c '%u:%g' "$path" 2>/dev/null || echo "")
-    mode=$(stat -c '%a' "$path" 2>/dev/null || echo "")
-    if [[ "$owner" != "0:0" ]]; then
-      _maybe_sudo chown root:root "$path" || return 1
-      changed=true
-    fi
-    if [[ "$mode" != "444" ]]; then
-      _maybe_sudo chmod 444 "$path" || return 1
-      changed=true
-    fi
-  done
-
-  dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
-  dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
-  if [[ "$dir_owner" != "0:0" || "$dir_mode" != "700" ]]; then
-    log_error "Runtime secret directory must remain root:root 0700: ${secrets_dir}"
-    return 1
-  fi
-
-  if [[ "$changed" == "true" ]]; then
-    log_success "Push secret placeholders remediated with host-private permissions"
-  else
-    log_success "Push secret placeholders already host-private"
-  fi
-}
-
 # Run check_age_key_health() before any SOPS invocation so a corrupt,
 # missing, or wrong-permissions Age key produces a clear actionable error
 # instead of an opaque decryption failure.
@@ -585,6 +528,8 @@ prepare_docker_secrets() {
   fi
 
   check_age_key_health_preflight || return 1
+  schema_validate || return 1
+  validate_required_secrets "$SECRETS_FILE" || return 1
   export_docker_secrets "$DOCKER_SECRETS_DIR" || return 1
   log_success "Docker secrets prepared"
   return 0
