@@ -249,6 +249,90 @@ printf 'Operator UI tests passed.\n'
 )
 
 check_operator_ui_contracts
+check_maintenance_summary_skip_contract() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAINT_UTILS="$ROOT/lib/maintenance-utils.sh"
+MAINT_RUN="$ROOT/utilities/maintenance-run.sh"
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+cat > "$TMP/summary-probe.sh" <<EOF_PROBE
+set -euo pipefail
+SUBJECT_FILE="$TMP/subject.out"
+log_info(){ :; }
+log_warn(){ :; }
+send_notification_email(){
+    printf '%s\n' "\$1" > "\$SUBJECT_FILE"
+    return 0
+}
+$(_extract_func "$MAINT_UTILS" _format_duration)
+$(_extract_func "$MAINT_UTILS" generate_maintenance_summary)
+CLEAN_LOGS=true
+CLEAN_BACKUPS=true
+CLEAN_DOCKER=true
+OPTIMIZE_DATABASE=true
+UPDATE_FIREWALL=true
+UPDATE_DNS=true
+TARGETED_MODE=false
+EMAIL_NOTIFY=true
+generate_maintenance_summary 0 0 0 0 "\${FW_RC}" "\${DNS_RC}" 0 5
+EOF_PROBE
+
+FW_RC=75 DNS_RC=75 bash "$TMP/summary-probe.sh" > "$TMP/skip-summary.out"
+grep -Fq 'Firewall update: Skipped (active operation)' "$TMP/skip-summary.out" \
+    || fail "firewall 75 was not rendered as skipped"
+grep -Fq 'DNS update: Skipped (active operation)' "$TMP/skip-summary.out" \
+    || fail "DNS 75 was not rendered as skipped"
+! grep -Fq 'Firewall update: OK' "$TMP/skip-summary.out" \
+    || fail "firewall 75 was rendered as OK"
+! grep -Fq 'DNS update: OK' "$TMP/skip-summary.out" \
+    || fail "DNS 75 was rendered as OK"
+! grep -Fq 'Firewall update: Failed' "$TMP/skip-summary.out" \
+    || fail "firewall 75 was rendered as failed"
+! grep -Fq 'DNS update: Failed' "$TMP/skip-summary.out" \
+    || fail "DNS 75 was rendered as failed"
+grep -Fq 'Overall Status: COMPLETED WITH SKIPS' "$TMP/skip-summary.out" \
+    || fail "clean maintenance with skips did not get skip overall status"
+! grep -Fq 'Overall Status: SUCCESS' "$TMP/skip-summary.out" \
+    || fail "clean maintenance with skips claimed full success"
+grep -Fq 'VaultWarden Maintenance: COMPLETED WITH SKIPS' "$TMP/subject.out" \
+    || fail "clean-with-skips email subject did not report skips"
+! grep -Fq 'VaultWarden Maintenance: SUCCESS' "$TMP/subject.out" \
+    || fail "clean-with-skips email subject claimed success"
+
+FW_RC=2 DNS_RC=0 bash "$TMP/summary-probe.sh" > "$TMP/failure-summary.out"
+grep -Fq 'Firewall update: Failed' "$TMP/failure-summary.out" \
+    || fail "real firewall failure was not rendered as failed"
+grep -Fq 'Overall Status: COMPLETED WITH ISSUES' "$TMP/failure-summary.out" \
+    || fail "real firewall failure did not produce issues summary"
+grep -Fq 'VaultWarden Maintenance: ISSUES DETECTED' "$TMP/subject.out" \
+    || fail "real firewall failure email subject did not report issues"
+
+grep -Fq '$firewall_update_result" != "75"' "$MAINT_RUN" \
+    || fail "aggregate maintenance still counts firewall 75 as critical"
+grep -Fq '$dns_update_result"      != "75"' "$MAINT_RUN" \
+    || fail "aggregate maintenance still counts DNS 75 as critical"
+grep -Fq 'Maintenance completed with skipped work"; exit 0' "$MAINT_RUN" \
+    || fail "aggregate maintenance clean-with-skips must exit 0"
+
+printf 'PASS: maintenance summary skip contract\n'
+
+)
+
+check_maintenance_summary_skip_contract
 check_operator_cli_argument_contracts() (
 set -euo pipefail
 

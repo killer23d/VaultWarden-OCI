@@ -11,6 +11,11 @@ Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh update-firewall
+# Exit contract:
+#   0  success
+#   75 clean contention skip
+#   other non-zero real failure
+SuccessExitStatus=0 75
 # Must run as root because UFW rule management requires elevated privileges.
 User=root
 Group=root

@@ -58,6 +58,7 @@ SECRET SOURCE PRIORITY:
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully
+    75 — skipped because another VaultWarden operation owns the lock
     1 — DNS update failed
 EOF
 }
@@ -413,7 +414,6 @@ main() {
             --specific-lock /run/lock/vaultwarden-dns-update.lock \
             --non-interactive skip || {
                 rc=$?
-                (( rc == 75 )) && exit 0
                 exit "$rc"
             }
         trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT

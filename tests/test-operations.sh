@@ -654,6 +654,84 @@ printf 'PASS: operation guard contract\n'
 )
 
 check_operation_guard_contracts
+check_dns_firewall_contention_contracts() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DNS="$ROOT/utilities/maintenance-update-dns.sh"
+FIREWALL="$ROOT/utilities/maintenance-update-firewall.sh"
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+require() {
+  grep -Eq -- "$1" "$2" || fail "$3"
+}
+
+reject() {
+  ! grep -Eq -- "$1" "$2" || fail "$3"
+}
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+_probe_leaf_acquire_rc() {
+  local script="$1" acquire_rc="$2" expected="$3" label="$4"
+  local tmp probe rc
+  tmp="$(mktemp -d)"
+  probe="$tmp/probe.sh"
+  cat > "$probe" <<EOF_PROBE
+set -euo pipefail
+DRY_RUN=false
+PROJECT_ROOT="$ROOT"
+require_root(){ :; }
+operation_acquire(){ return "$acquire_rc"; }
+operation_release(){ :; }
+operation_set_phase(){ :; }
+perform_cleanup(){ :; }
+_load_env(){ exit 91; }
+auto_fix_critical_permissions(){ exit 92; }
+update_dns_record(){ exit 93; }
+update_firewall_ranges(){ exit 94; }
+$(_extract_func "$script" main)
+main
+EOF_PROBE
+  set +e
+  bash "$probe" >/dev/null 2>&1
+  rc=$?
+  set -e
+  rm -rf "$tmp"
+  [[ "$rc" == "$expected" ]] || fail "$label exited $rc, expected $expected"
+}
+
+require '--id dns-update' "$DNS" "DNS updater must use its operation id"
+require '--id firewall-update' "$FIREWALL" "firewall updater must use its operation id"
+reject 'rc == 75.*exit 0|exit 0.*rc == 75' "$DNS" \
+  "DNS updater must not mask operation contention as success"
+reject 'rc == 75.*exit 0|exit 0.*rc == 75' "$FIREWALL" \
+  "firewall updater must not mask operation contention as success"
+
+_probe_leaf_acquire_rc "$DNS" 75 75 "DNS operation contention"
+_probe_leaf_acquire_rc "$FIREWALL" 75 75 "firewall operation contention"
+_probe_leaf_acquire_rc "$DNS" 42 42 "DNS operation acquire failure"
+_probe_leaf_acquire_rc "$FIREWALL" 42 42 "firewall operation acquire failure"
+
+printf 'PASS: DNS/firewall contention exit contracts\n'
+
+)
+
+check_dns_firewall_contention_contracts
 check_operation_descriptor_and_owner_contracts() (
 set -euo pipefail
 

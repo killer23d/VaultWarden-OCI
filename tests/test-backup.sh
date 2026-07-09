@@ -110,6 +110,169 @@ pass 'restore/backup preflight safety functional checks'
 )
 
 check_backup_preflight_and_metadata_safety
+check_backup_retention_contracts() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BACKUP="$ROOT/utilities/backup-run.sh"
+UTILS="$ROOT/lib/backup-utils.sh"
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+_write_archive_with_sidecars() {
+    local archive="$1"
+    printf 'archive\n' > "$archive"
+    printf 'sha\n' > "$archive.sha256"
+    printf 'hmac\n' > "$archive.sha256.hmac"
+    printf 'meta\n' > "$archive.meta"
+}
+
+_assert_exists() {
+    [[ -e "$1" ]] || fail "expected retained file missing: $1"
+}
+
+_assert_missing() {
+    [[ ! -e "$1" ]] || fail "expected deleted file still present: $1"
+}
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# shellcheck source=../lib/log.sh
+source "$ROOT/lib/log.sh"
+# shellcheck source=../lib/backup-utils.sh
+source "$UTILS"
+
+local_dir="$TMP/local/db"
+mkdir -p "$local_dir"
+newest="$local_dir/db-a-20010101-000000.age"
+older="$local_dir/db-z-20000101-000000.age"
+_write_archive_with_sidecars "$newest"
+_write_archive_with_sidecars "$older"
+
+cleanup_old_backups "$local_dir" db 1 > "$TMP/local-retention.out" 2>&1 \
+    || { cat "$TMP/local-retention.out" >&2; fail "local retention cleanup failed"; }
+
+for suffix in "" ".sha256" ".sha256.hmac" ".meta"; do
+    _assert_exists "$newest$suffix"
+    _assert_missing "$older$suffix"
+done
+
+unparseable="$local_dir/db-manual-before-contract.age"
+_write_archive_with_sidecars "$unparseable"
+cleanup_old_backups "$local_dir" db 1 > "$TMP/local-unparseable.out" 2>&1 \
+    || { cat "$TMP/local-unparseable.out" >&2; fail "local retention with unparseable archive failed"; }
+_assert_exists "$unparseable"
+
+no_parse_dir="$TMP/no-parse/db"
+mkdir -p "$no_parse_dir"
+no_parse_a="$no_parse_dir/db-manual-a.age"
+no_parse_b="$no_parse_dir/db-manual-b.age"
+_write_archive_with_sidecars "$no_parse_a"
+_write_archive_with_sidecars "$no_parse_b"
+cleanup_old_backups "$no_parse_dir" db 1 > "$TMP/local-no-parse.out" 2>&1 \
+    || { cat "$TMP/local-no-parse.out" >&2; fail "local no-parse retention failed"; }
+_assert_exists "$no_parse_a"
+_assert_exists "$no_parse_b"
+
+if (( BASH_VERSINFO[0] < 5 )); then
+    printf 'SKIP: remote prune mock requires Bash 5 namerefs used by production backup-run.sh\n'
+    return 0
+fi
+
+cat > "$TMP/remote-prune-probe.sh" <<EOF_PROBE
+set -euo pipefail
+ROOT="$ROOT"
+DELETE_LOG="$TMP/remote-delete.log"
+REMOTE_LOG="$TMP/remote-prune.log"
+DRY_RUN="\${REMOTE_DRY_RUN:-false}"
+backup_log_info(){ printf 'INFO:%s\n' "\$*" >> "\$REMOTE_LOG"; }
+backup_log_success(){ printf 'SUCCESS:%s\n' "\$*" >> "\$REMOTE_LOG"; }
+backup_log_warn(){ printf 'WARN:%s\n' "\$*" >> "\$REMOTE_LOG"; }
+log_warn(){ printf 'WARN:%s\n' "\$*" >> "\$REMOTE_LOG"; }
+log_error(){ printf 'ERROR:%s\n' "\$*" >> "\$REMOTE_LOG"; }
+get_config_value(){
+    case "\$1" in
+        RCLONE_REMOTE_NAME) printf '%s\n' mockremote ;;
+        RCLONE_REMOTE_PATH) printf '%s\n' vaultwarden_backups ;;
+        *) printf '%s\n' "\${2:-}" ;;
+    esac
+}
+_retention_days_for_type(){ printf '%s\n' 1; }
+_resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(); }
+rclone(){
+    local cmd="\${1:-}"
+    shift || true
+    case "\$cmd" in
+        lsf)
+            local arg
+            for arg in "\$@"; do
+                if [[ "\$arg" == "mockremote:vaultwarden_backups/db/" ]]; then
+                    printf '%s\n' \
+                        'db-z-20000101-000000.age' \
+                        'db-manual-upload.age' \
+                        'db-a-20010101-000000.age'
+                    return 0
+                fi
+            done
+            return 0
+            ;;
+        deletefile)
+            printf '%s\n' "\$*" >> "\$DELETE_LOG"
+            return 0
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+source "\$ROOT/lib/log.sh"
+source "\$ROOT/lib/backup-utils.sh"
+$(_extract_func "$BACKUP" _prune_remote_backups)
+_prune_remote_backups
+EOF_PROBE
+
+: > "$TMP/remote-delete.log"
+: > "$TMP/remote-prune.log"
+REMOTE_DRY_RUN=true bash "$TMP/remote-prune-probe.sh" \
+    || { cat "$TMP/remote-prune.log" >&2; fail "remote dry-run prune probe failed"; }
+[[ ! -s "$TMP/remote-delete.log" ]] || fail "remote dry-run called rclone deletefile"
+grep -Fq 'Would delete remote: mockremote:vaultwarden_backups/db/db-z-20000101-000000.age' "$TMP/remote-prune.log" \
+    || fail "remote dry-run did not report older stale archive"
+! grep -Fq 'Would delete remote: mockremote:vaultwarden_backups/db/db-a-20010101-000000.age' "$TMP/remote-prune.log" \
+    || fail "remote dry-run reported newest archive as deletion candidate"
+
+: > "$TMP/remote-delete.log"
+: > "$TMP/remote-prune.log"
+bash "$TMP/remote-prune-probe.sh" \
+    || { cat "$TMP/remote-prune.log" >&2; fail "remote prune probe failed"; }
+grep -Fq 'mockremote:vaultwarden_backups/db/db-z-20000101-000000.age' "$TMP/remote-delete.log" \
+    || fail "remote prune did not delete older stale archive"
+for suffix in .sha256 .sha256.hmac .meta; do
+    grep -Fq "mockremote:vaultwarden_backups/db/db-z-20000101-000000.age${suffix}" "$TMP/remote-delete.log" \
+        || fail "remote prune did not delete older sidecar ${suffix}"
+    ! grep -Fq "mockremote:vaultwarden_backups/db/db-a-20010101-000000.age${suffix}" "$TMP/remote-delete.log" \
+        || fail "remote prune deleted newest sidecar ${suffix}"
+done
+! grep -Fq 'mockremote:vaultwarden_backups/db/db-a-20010101-000000.age' "$TMP/remote-delete.log" \
+    || fail "remote prune deleted newest archive"
+! grep -Fq 'mockremote:vaultwarden_backups/db/db-manual-upload.age' "$TMP/remote-delete.log" \
+    || fail "remote prune deleted unparseable archive"
+
+printf 'PASS: backup retention preserves newest local and remote archives\n'
+
+)
+
+check_backup_retention_contracts
 check_backup_db_restart_fallback() (
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

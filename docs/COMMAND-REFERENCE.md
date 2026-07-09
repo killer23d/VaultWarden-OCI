@@ -767,6 +767,7 @@ SECRET SOURCE PRIORITY:
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully
+    75 — skipped because another VaultWarden operation owns the lock
     1 — DNS update failed
 ```
 
@@ -793,6 +794,7 @@ OPTIONS:
 
 EXIT CODES:
     0 — Firewall ranges updated successfully (or skipped)
+    75 — skipped because another VaultWarden operation owns the lock
     1 — Firewall update failed
 ```
 
