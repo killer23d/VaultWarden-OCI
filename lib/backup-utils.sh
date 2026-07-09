@@ -486,17 +486,15 @@ check_backup_disk_space() {
 }
 
 # ---------------------------------------------------------------------------
-# _backup_filename_age_days FILE
+# _backup_filename_timestamp_epoch FILE
 #
-# Primary age source for retention. Extracts the YYYYMMDD-HHMMSS
-# timestamp embedded in the backup filename (e.g.
-#   db-20240315-143022.age  → 20240315-143022)
-# and converts it to whole days elapsed since that timestamp.
+# Extracts the YYYYMMDD-HHMMSS timestamp embedded in a backup filename (e.g.
+# db-20240315-143022.age → 20240315-143022) and returns its epoch. This is the
+# canonical retention timestamp source for both local and remote archives.
 #
-# Returns the age in days on stdout. If no recognisable timestamp is found in
-# the filename, returns empty string so the caller can fall back to ctime.
+# Returns an empty string if no valid timestamp can be parsed.
 # ---------------------------------------------------------------------------
-_backup_filename_age_days() {
+_backup_filename_timestamp_epoch() {
     local file="$1"
     local basename_file
     basename_file=$(basename "$file")
@@ -518,13 +516,31 @@ _backup_filename_age_days() {
     ts_epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$ts_str" +%s 2>/dev/null) || true
 
     if [[ -z "$ts_epoch" || ! "$ts_epoch" =~ ^[0-9]+$ ]]; then
-        echo ""
+        printf '\n'
+        return
+    fi
+
+    printf '%s\n' "$ts_epoch"
+}
+
+# ---------------------------------------------------------------------------
+# _backup_filename_age_days FILE
+#
+# Primary age source for retention. Converts the canonical embedded filename
+# timestamp to whole days elapsed since that timestamp.
+# ---------------------------------------------------------------------------
+_backup_filename_age_days() {
+    local file="$1"
+    local ts_epoch
+    ts_epoch=$(_backup_filename_timestamp_epoch "$file")
+    if [[ -z "$ts_epoch" ]]; then
+        printf '\n'
         return
     fi
 
     local now_epoch
     now_epoch=$(date +%s)
-    echo $(( (now_epoch - ts_epoch) / 86400 ))
+    printf '%s\n' "$(( (now_epoch - ts_epoch) / 86400 ))"
 }
 
 _backup_ctime_age_days() {
@@ -544,8 +560,8 @@ _backup_ctime_age_days() {
 # orphaned .meta and .sha256 sidecar files whose corresponding .age primary no
 # longer exists (e.g. after a partial cleanup or manual deletion).
 #
-# Age is determined by the embedded YYYYMMDD-HHMMSS timestamp in the filename
-# when available; falls back to the file's ctime for legacy filenames.
+# Timestamped archives are evaluated by their embedded YYYYMMDD-HHMMSS value.
+# Unparseable archive names are retained conservatively.
 cleanup_old_backups() {
     local backup_dir="$1"
     local backup_type="$2"
@@ -563,35 +579,53 @@ cleanup_old_backups() {
 
     log_info "Cleaning up $backup_type backups older than $retention_days days"
 
-    # Before deleting any backups, count total .age files in the
-    # directory. If there is only one (or zero), abort deletion — otherwise the
-    # last good backup could be removed, leaving no recovery point.
-    local _total_age_files
-    _total_age_files=$(find "$backup_dir" -name "*.age" -type f 2>/dev/null | wc -l)
-    if (( _total_age_files <= 1 )); then
-        log_warn "cleanup_old_backups: only ${_total_age_files} backup file(s) found in $backup_dir —" \
-                 "skipping deletion to preserve the last available backup."
-        return 0
+    local -a primary_backups=()
+    mapfile -t primary_backups < <(find "$backup_dir" -name "*.age" -type f 2>/dev/null)
+
+    local newest_timestamp_epoch=""
+    local backup_file timestamp_epoch
+    for backup_file in "${primary_backups[@]}"; do
+        timestamp_epoch=$(_backup_filename_timestamp_epoch "$backup_file")
+        [[ -z "$timestamp_epoch" ]] && continue
+        if [[ -z "$newest_timestamp_epoch" || "$timestamp_epoch" -gt "$newest_timestamp_epoch" ]]; then
+            newest_timestamp_epoch="$timestamp_epoch"
+        fi
+    done
+
+    if [[ -z "$newest_timestamp_epoch" && ${#primary_backups[@]} -gt 0 ]]; then
+        log_warn "cleanup_old_backups: no timestamped $backup_type archives found in $backup_dir — skipping primary deletion."
     fi
 
     local deleted_count=0
 
-    while IFS= read -r backup_file; do
-        if [[ -n "$backup_file" ]]; then
-            local age_days
-            age_days=$(_backup_filename_age_days "$backup_file")
-            if [[ -z "$age_days" ]]; then
-                log_warn "Retention: $(basename "$backup_file") has no filename timestamp — skipping deletion." \
-                         " Rename the file to include YYYYMMDD-HHMMSS to enable automatic cleanup."
-                continue
+    for backup_file in "${primary_backups[@]}"; do
+        timestamp_epoch=$(_backup_filename_timestamp_epoch "$backup_file")
+        if [[ -z "$timestamp_epoch" ]]; then
+            log_warn "Retention: $(basename "$backup_file") has no filename timestamp — skipping deletion." \
+                     " Rename the file to include YYYYMMDD-HHMMSS to enable automatic cleanup."
+            continue
+        fi
+        if [[ "$timestamp_epoch" == "$newest_timestamp_epoch" ]]; then
+            local newest_age_days
+            newest_age_days=$(_backup_filename_age_days "$backup_file")
+            if [[ -n "$newest_age_days" && "$newest_age_days" -gt "$retention_days" ]]; then
+                log_info "Retention: preserving newest available $backup_type recovery point: $(basename "$backup_file")"
             fi
-            if (( age_days > retention_days )); then
+            continue
+        fi
+
+        local age_days
+        age_days=$(_backup_filename_age_days "$backup_file")
+        if [[ -n "$age_days" && "$age_days" -gt "$retention_days" ]]; then
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_info "[DRY RUN] Would remove old backup (${age_days}d > ${retention_days}d): $(basename "$backup_file") (and sidecars)"
+            else
                 log_debug "Removing old backup (${age_days}d > ${retention_days}d): $(basename "$backup_file")"
                 rm -f "$backup_file" "$backup_file.sha256" "$backup_file.sha256.hmac" "$backup_file.meta" 2>/dev/null
                 (( deleted_count++ )) || true
             fi
         fi
-    done < <(find "$backup_dir" -name "*.age" -type f 2>/dev/null)
+    done
 
     local orphan_count=0
     while IFS= read -r sidecar; do
@@ -604,14 +638,20 @@ cleanup_old_backups() {
                 *)             continue ;;
             esac
             if [[ ! -f "$primary" ]]; then
-                log_debug "Removing orphaned sidecar: $(basename "$sidecar")"
-                rm -f "$sidecar" 2>/dev/null
-                (( orphan_count++ )) || true
+                if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                    log_info "[DRY RUN] Would remove orphaned sidecar: $(basename "$sidecar")"
+                else
+                    log_debug "Removing orphaned sidecar: $(basename "$sidecar")"
+                    rm -f "$sidecar" 2>/dev/null
+                    (( orphan_count++ )) || true
+                fi
             fi
         fi
     done < <(find "$backup_dir" \( -name "*.meta" -o -name "*.sha256" -o -name "*.sha256.hmac" \) -type f 2>/dev/null)
 
-    if (( deleted_count > 0 )); then
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY RUN] $backup_type backup retention preview complete"
+    elif (( deleted_count > 0 )); then
         log_success "Cleaned up $deleted_count old $backup_type backups"
     else
         log_debug "No old $backup_type backups to clean up"
@@ -857,6 +897,9 @@ validate_rclone_config_path() {
         return 1
     }
 
+    local is_canonical_root_rclone_config=false
+    [[ "$canonical" == "/root/.config/rclone/rclone.conf" ]] && is_canonical_root_rclone_config=true
+
     local -a sensitive_prefixes=(
         "/etc/passwd"
         "/etc/shadow"
@@ -867,6 +910,7 @@ validate_rclone_config_path() {
         "/sys"
     )
     for prefix in "${sensitive_prefixes[@]}"; do
+        [[ "$prefix" == "/root" && "$is_canonical_root_rclone_config" == "true" ]] && continue
         if [[ "$canonical" == "$prefix" || "$canonical" == "$prefix/"* ]]; then
             log_error "RCLONE_CONFIG resolves to sensitive path: $canonical" >&2
             return 1
@@ -884,6 +928,15 @@ validate_rclone_config_path() {
         return 1
     fi
 
+    if [[ "$is_canonical_root_rclone_config" == "true" ]]; then
+        local file_owner
+        file_owner=$(stat -c '%u' "$canonical" 2>/dev/null || stat -f '%u' "$canonical" 2>/dev/null || echo "")
+        if [[ "$file_owner" != "0" ]]; then
+            log_error "Canonical root rclone config must be root-owned: $canonical" >&2
+            return 1
+        fi
+    fi
+
     return 0
 }
 
@@ -892,7 +945,7 @@ export -f cleanup_old_backups get_backup_statistics
 # NOTE: keep create_backup_metadata local to this shell; older exported
 # versions caused noisy imported-function errors during apt/dpkg subprocesses.
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
-export -f _backup_filename_age_days _format_bytes_human _json_escape _resolve_rclone_config validate_rclone_config_path
+export -f _backup_filename_timestamp_epoch _backup_filename_age_days _format_bytes_human _json_escape _resolve_rclone_config validate_rclone_config_path
 export -f _repair_sudo_user_rclone_config_permissions _backup_age_color
 
 log_debug "Backup utilities library loaded successfully - standardized error handling" 2>/dev/null || true

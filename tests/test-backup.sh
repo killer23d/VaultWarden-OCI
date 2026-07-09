@@ -151,3 +151,138 @@ grep -q 'docker compose stop vaultwarden' "$TMP/docker.calls" || fail 'offline f
 )
 
 check_backup_db_restart_fallback
+check_backup_retention_contracts() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/backup-utils.sh"
+
+make_archive_with_sidecars() {
+    local archive="$1"
+    : > "$archive"
+    : > "${archive}.sha256"
+    : > "${archive}.sha256.hmac"
+    : > "${archive}.meta"
+}
+
+# Create the older archive first so inventory order cannot stand in for the
+# newest timestamp. Both archives are intentionally far beyond retention.
+local_dir="$TMP/local"
+mkdir -p "$local_dir"
+older="$local_dir/full-20000101-000000.tar.zst.age"
+newest="$local_dir/full-20000102-000000.tar.zst.age"
+make_archive_with_sidecars "$older"
+make_archive_with_sidecars "$newest"
+touch -t 203001010000 "$older"
+touch -t 199901010000 "$newest"
+
+DRY_RUN=false cleanup_old_backups "$local_dir" full 1
+[[ ! -e "$older" && ! -e "${older}.sha256" && ! -e "${older}.sha256.hmac" && ! -e "${older}.meta" ]] \
+    || fail "older stale archive and sidecars must be deleted"
+for file in "$newest" "${newest}.sha256" "${newest}.sha256.hmac" "${newest}.meta"; do
+    [[ -e "$file" ]] || fail "newest archive recovery point sidecar was removed: $file"
+done
+
+unparseable_dir="$TMP/unparseable"
+mkdir -p "$unparseable_dir"
+unparseable="$unparseable_dir/legacy-backup.age"
+make_archive_with_sidecars "$unparseable"
+parseable="$unparseable_dir/db-20000101-000000.sqlite3.age"
+make_archive_with_sidecars "$parseable"
+DRY_RUN=false cleanup_old_backups "$unparseable_dir" db 1
+[[ -e "$unparseable" ]] || fail "unparseable archive must not be deleted automatically"
+
+no_timestamp_dir="$TMP/no-timestamp"
+mkdir -p "$no_timestamp_dir"
+first_unknown="$no_timestamp_dir/first-legacy.age"
+second_unknown="$no_timestamp_dir/second-legacy.age"
+make_archive_with_sidecars "$first_unknown"
+make_archive_with_sidecars "$second_unknown"
+DRY_RUN=false cleanup_old_backups "$no_timestamp_dir" emergency 1
+[[ -e "$first_unknown" && -e "$second_unknown" ]] \
+    || fail "retention must fail safe when no archive timestamps can be parsed"
+
+dry_run_dir="$TMP/dry-run"
+mkdir -p "$dry_run_dir"
+dry_run_older="$dry_run_dir/db-20000101-000000.sqlite3.age"
+dry_run_newest="$dry_run_dir/db-20000102-000000.sqlite3.age"
+make_archive_with_sidecars "$dry_run_older"
+make_archive_with_sidecars "$dry_run_newest"
+dry_run_output="$(DRY_RUN=true cleanup_old_backups "$dry_run_dir" db 1)"
+[[ -e "$dry_run_older" && -e "$dry_run_newest" ]] || fail "local retention dry-run must not delete archives"
+[[ "$dry_run_output" == *"$(basename "$dry_run_older")"* ]] || fail "dry-run did not report the stale deletion candidate"
+[[ "$dry_run_output" != *"$(basename "$dry_run_newest") (and sidecars)"* ]] \
+    || fail "dry-run reported the preserved newest archive as a deletion candidate"
+
+remote_probe="$TMP/remote-prune-probe.sh"
+remote_delete_log="$TMP/remote-delete.log"
+cat > "$remote_probe" <<EOF_PROBE
+set -euo pipefail
+ROOT="$ROOT"
+DELETE_LOG="$remote_delete_log"
+DRY_RUN="\${DRY_RUN:-false}"
+backup_log_info(){ printf '%s\\n' "\$*"; }
+backup_log_warn(){ printf '%s\\n' "\$*" >&2; }
+backup_log_success(){ printf '%s\\n' "\$*"; }
+log_warn(){ printf '%s\\n' "\$*" >&2; }
+get_config_value(){
+    case "\$1" in
+        RCLONE_REMOTE_NAME) printf '%s\\n' mock-remote ;;
+        RCLONE_REMOTE_PATH) printf '%s\\n' vaultwarden_backups ;;
+        *) printf '%s\\n' "\${2:-}" ;;
+    esac
+}
+_resolve_rclone_config_arg(){ local -n out="\$1"; out=(--config mock-rclone.conf); }
+_retention_days_for_type(){ printf '1\\n'; }
+rclone(){
+    case "\$1" in
+        lsf)
+            # Deliberately return the older archive first; rclone ordering is not a retention authority.
+            printf '%s\\n' 'db-20000101-000000.sqlite3.age' 'db-20000102-000000.sqlite3.age'
+            ;;
+        deletefile) printf '%s\\n' "\$*" >> "\$DELETE_LOG" ;;
+        *) return 0 ;;
+    esac
+}
+source "\$ROOT/lib/backup-utils.sh"
+source <(awk '
+    \$0 ~ "^_prune_remote_backups\\(\\)" {p=1}
+    p {
+        print
+        opens=gsub(/\\{/, "{")
+        closes=gsub(/\\}/, "}")
+        depth += opens - closes
+        if (depth == 0) exit
+    }
+' "\$ROOT/utilities/backup-run.sh")
+_prune_remote_backups
+EOF_PROBE
+chmod 700 "$remote_probe"
+
+: > "$remote_delete_log"
+DRY_RUN=false bash "$remote_probe" || fail "mocked remote retention failed"
+grep -Fq 'db-20000101-000000.sqlite3.age' "$remote_delete_log" \
+    || fail "remote retention did not delete the older stale archive"
+grep -Fq 'db-20000101-000000.sqlite3.age.sha256' "$remote_delete_log" \
+    || fail "remote retention did not follow existing sidecar cleanup for the older archive"
+! grep -Fq 'db-20000102-000000.sqlite3.age' "$remote_delete_log" \
+    || fail "remote retention deleted the newest embedded-timestamp archive or sidecars"
+
+: > "$remote_delete_log"
+remote_dry_run_output="$(DRY_RUN=true bash "$remote_probe")"
+[[ ! -s "$remote_delete_log" ]] || fail "remote dry-run invoked rclone deletefile"
+[[ "$remote_dry_run_output" == *"Would delete remote:"*'db-20000101-000000.sqlite3.age'* ]] \
+    || fail "remote dry-run did not report the older stale archive"
+[[ "$remote_dry_run_output" != *"Would delete remote:"*'db-20000102-000000.sqlite3.age'* ]] \
+    || fail "remote dry-run reported the newest archive as a deletion candidate"
+
+printf 'PASS: local and remote retention preserve newest timestamped recovery point\n'
+
+)
+
+check_backup_retention_contracts

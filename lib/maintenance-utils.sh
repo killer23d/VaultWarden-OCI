@@ -131,8 +131,11 @@ cleanup_logs() {
 
 cleanup_backups() {
     if [[ "${CLEAN_BACKUPS:-true}" != "true" ]]; then log_info "Skipping backup cleanup"; return 0; fi
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would clean up old backups based on retention policy"; return 0; fi
-    log_info "Managing backup retention..."
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY RUN] Previewing backup retention based on retention policy"
+    else
+        log_info "Managing backup retention..."
+    fi
     local backup_base_dir; backup_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     local had_real_error=false
     local backup_types=(
@@ -149,13 +152,21 @@ cleanup_backups() {
             continue
         fi
         if cleanup_old_backups "$backup_dir" "$backup_type" "$retention_days"; then
-            log_success "$backup_type backups cleaned (${retention_days}d retention)"
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_info "[DRY RUN] $backup_type backup retention preview complete (${retention_days}d retention)"
+            else
+                log_success "$backup_type backups cleaned (${retention_days}d retention)"
+            fi
         else
             log_error "$backup_type backup cleanup failed"
             had_real_error=true
         fi
     done
-    log_success "Backup retention management completed"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY RUN] Backup retention preview complete"
+    else
+        log_success "Backup retention management completed"
+    fi
     [[ "$had_real_error" == "true" ]] && return 1 || return 0
 }
 
@@ -338,12 +349,24 @@ generate_maintenance_summary() {
         summary+="  ⏭️  DB optimization: Skipped\n"
     fi
     if [[ "${UPDATE_FIREWALL:-false}" == "true" ]]; then
-        [[ "$firewall_update" == "0" ]] && summary+="  ✅ Firewall update: OK\n" || summary+="  ❌ Firewall update: Failed\n"
+        if [[ "$firewall_update" == "0" ]]; then
+            summary+="  ✅ Firewall update: OK\n"
+        elif [[ "$firewall_update" == "75" ]]; then
+            summary+="  ⏭️  Firewall update: Skipped (active operation)\n"
+        else
+            summary+="  ❌ Firewall update: Failed\n"
+        fi
     else
         summary+="  ⏭️  Firewall update: Skipped\n"
     fi
     if [[ "${UPDATE_DNS:-false}" == "true" ]]; then
-        [[ "$dns_update" == "0" ]] && summary+="  ✅ DNS update: OK\n" || summary+="  ❌ DNS update: Failed\n"
+        if [[ "$dns_update" == "0" ]]; then
+            summary+="  ✅ DNS update: OK\n"
+        elif [[ "$dns_update" == "75" ]]; then
+            summary+="  ⏭️  DNS update: Skipped (active operation)\n"
+        else
+            summary+="  ❌ DNS update: Failed\n"
+        fi
     else
         summary+="  ⏭️  DNS update: Skipped\n"
     fi
@@ -351,20 +374,24 @@ generate_maintenance_summary() {
         [[ "$health_validation" == "0" ]] && summary+="  ✅ Health validation: Passed\n" || summary+="  ⚠️  Health validation: Issues\n"
     fi
 
-    local critical_failures=0
-    [[ "${CLEAN_LOGS:-true}"        == "true"  && "$log_cleanup"      != "0" ]] && ((critical_failures++))
-    [[ "${CLEAN_BACKUPS:-true}"     == "true"  && "$backup_cleanup"   != "0" ]] && ((critical_failures++))
-    [[ "${CLEAN_DOCKER:-true}"      == "true"  && "$docker_cleanup"   == "2" ]] && ((critical_failures++))
-    [[ "${OPTIMIZE_DATABASE:-true}" == "true"  && "$db_optimization"  != "0" ]] && ((critical_failures++))
-    [[ "${UPDATE_FIREWALL:-false}"  == "true"  && "$firewall_update"  != "0" ]] && ((critical_failures++))
-    [[ "${UPDATE_DNS:-false}"       == "true"  && "$dns_update"       != "0" ]] && ((critical_failures++))
-    [[ "${TARGETED_MODE:-false}"    == "false" && "$health_validation" != "0" ]] && ((critical_failures++))
+    local critical_failures=0 clean_skips=0
+    [[ "${CLEAN_LOGS:-true}"        == "true"  && "$log_cleanup"      != "0" ]] && ((++critical_failures))
+    [[ "${CLEAN_BACKUPS:-true}"     == "true"  && "$backup_cleanup"   != "0" ]] && ((++critical_failures))
+    [[ "${CLEAN_DOCKER:-true}"      == "true"  && "$docker_cleanup"   == "2" ]] && ((++critical_failures))
+    [[ "${OPTIMIZE_DATABASE:-true}" == "true"  && "$db_optimization"  != "0" ]] && ((++critical_failures))
+    [[ "${UPDATE_FIREWALL:-false}"  == "true"  && "$firewall_update"  != "0" && "$firewall_update" != "75" ]] && ((++critical_failures))
+    [[ "${UPDATE_DNS:-false}"       == "true"  && "$dns_update"       != "0" && "$dns_update" != "75" ]] && ((++critical_failures))
+    [[ "${TARGETED_MODE:-false}"    == "false" && "$health_validation" != "0" ]] && ((++critical_failures))
+    [[ "${UPDATE_FIREWALL:-false}"  == "true"  && "$firewall_update"  == "75" ]] && ((++clean_skips))
+    [[ "${UPDATE_DNS:-false}"       == "true"  && "$dns_update"       == "75" ]] && ((++clean_skips))
 
     if [[ -n "$duration_seconds" && "$duration_seconds" =~ ^[0-9]+$ ]]; then
         summary+="\nDuration: $(_format_duration "$duration_seconds")\n"
     fi
 
-    if [[ $critical_failures -eq 0 ]]; then
+    if [[ $critical_failures -eq 0 && $clean_skips -gt 0 ]]; then
+        summary+="⏭️  Overall Status: COMPLETED WITH SKIPS\n"
+    elif [[ $critical_failures -eq 0 ]]; then
         summary+="🎉 Overall Status: SUCCESS\n"
     else
         summary+="⚠️  Overall Status: COMPLETED WITH ISSUES\n"
@@ -374,7 +401,9 @@ generate_maintenance_summary() {
 
     if [[ "${EMAIL_NOTIFY:-false}" == "true" ]]; then
         local subj
-        if [[ $critical_failures -eq 0 ]]; then
+        if [[ $critical_failures -eq 0 && $clean_skips -gt 0 ]]; then
+            subj="VaultWarden Maintenance: COMPLETED WITH SKIPS"
+        elif [[ $critical_failures -eq 0 ]]; then
             subj="VaultWarden Maintenance: SUCCESS"
         else
             subj="VaultWarden Maintenance: ISSUES DETECTED"

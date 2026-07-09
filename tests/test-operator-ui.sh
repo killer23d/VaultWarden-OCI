@@ -494,3 +494,133 @@ grep -q 'live-operational-age-key-with-a-deliberately-long-name.txt' "$TMP/resto
 )
 
 check_restore_plan_summary_operator_ui
+check_maintenance_contention_operator_ui() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+log_info(){ :; }
+source "$ROOT/lib/maintenance-utils.sh"
+
+CLEAN_LOGS=false
+CLEAN_BACKUPS=false
+CLEAN_DOCKER=false
+OPTIMIZE_DATABASE=false
+TARGETED_MODE=true
+UPDATE_FIREWALL=true
+UPDATE_DNS=true
+EMAIL_NOTIFY=true
+subject_file="$TMP/summary-subject"
+send_notification_email(){ printf '%s\n' "$1" > "$subject_file"; }
+
+summary="$(generate_maintenance_summary 0 0 0 0 75 75 0)"
+[[ "$summary" == *'Firewall update: Skipped (active operation)'* ]] \
+    || fail "firewall contention was not rendered as skipped"
+[[ "$summary" == *'DNS update: Skipped (active operation)'* ]] \
+    || fail "DNS contention was not rendered as skipped"
+[[ "$summary" != *'Firewall update: OK'* && "$summary" != *'Firewall update: Failed'* ]] \
+    || fail "firewall contention was rendered as success or failure"
+[[ "$summary" != *'DNS update: OK'* && "$summary" != *'DNS update: Failed'* ]] \
+    || fail "DNS contention was rendered as success or failure"
+[[ "$summary" == *'Overall Status: COMPLETED WITH SKIPS'* ]] \
+    || fail "contention summary claimed full success"
+[[ "$(<"$subject_file")" == 'VaultWarden Maintenance: COMPLETED WITH SKIPS' ]] \
+    || fail "contention email summary claimed success"
+
+summary="$(generate_maintenance_summary 0 0 0 0 42 0 0)"
+[[ "$summary" == *'Firewall update: Failed'* && "$summary" == *'Overall Status: COMPLETED WITH ISSUES'* ]] \
+    || fail "real firewall failure was not preserved in the summary"
+[[ "$(<"$subject_file")" == 'VaultWarden Maintenance: ISSUES DETECTED' ]] \
+    || fail "real firewall failure was misclassified in the email summary"
+
+extract_func() {
+    local file="$1" func="$2"
+    awk -v f="$func" '
+        $0 ~ "^" f "\\(\\)" {p=1}
+        p {
+            print
+            opens=gsub(/\{/, "{")
+            closes=gsub(/\}/, "}")
+            depth += opens - closes
+            if (depth == 0) exit
+        }
+    ' "$file"
+}
+
+stub_root="$TMP/stub-root"
+mkdir -p "$stub_root/utilities"
+cat > "$stub_root/utilities/maintenance-update-firewall.sh" <<'EOF_LEAF'
+#!/usr/bin/env bash
+exit "${FIREWALL_TEST_RC:-75}"
+EOF_LEAF
+cat > "$stub_root/utilities/maintenance-update-dns.sh" <<'EOF_LEAF'
+#!/usr/bin/env bash
+exit "${DNS_TEST_RC:-75}"
+EOF_LEAF
+chmod 700 "$stub_root/utilities/maintenance-update-firewall.sh" "$stub_root/utilities/maintenance-update-dns.sh"
+
+main_probe="$TMP/maintenance-main-probe.sh"
+cat > "$main_probe" <<EOF_PROBE
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$stub_root"
+CLEAN_LOGS=false
+CLEAN_BACKUPS=false
+CLEAN_DOCKER=false
+OPTIMIZE_DATABASE=false
+UPDATE_FIREWALL=true
+UPDATE_DNS=true
+DRY_RUN=false
+EMAIL_NOTIFY=false
+COMPREHENSIVE=false
+TARGETED_MODE=true
+require_root(){ :; }
+operation_acquire(){ :; }
+operation_release(){ :; }
+operation_set_phase(){ :; }
+perform_cleanup(){ :; }
+_load_env(){ :; }
+auto_fix_critical_permissions(){ :; }
+require_project_state_ready(){ :; }
+cleanup_logs(){ :; }
+cleanup_backups(){ :; }
+cleanup_docker_system(){ :; }
+optimize_database(){ :; }
+validate_system_health(){ :; }
+log_header(){ :; }
+log_info(){ printf '%s\\n' "\$*"; }
+log_success(){ printf '%s\\n' "\$*"; }
+log_warn(){ printf '%s\\n' "\$*" >&2; }
+log_error(){ printf '%s\\n' "\$*" >&2; }
+source "$ROOT/lib/maintenance-utils.sh"
+$(extract_func "$ROOT/utilities/maintenance-run.sh" main)
+main
+EOF_PROBE
+chmod 700 "$main_probe"
+
+set +e
+FIREWALL_TEST_RC=75 DNS_TEST_RC=75 "$BASH" "$main_probe" > "$TMP/clean-with-skips.out" 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 0 ]] || fail "clean aggregate contention run must exit 0, got $rc"
+grep -Fq 'Overall Status: COMPLETED WITH SKIPS' "$TMP/clean-with-skips.out" \
+    || fail "aggregate clean-with-skips output was not truthful"
+grep -Fq 'Maintenance completed with skipped work' "$TMP/clean-with-skips.out" \
+    || fail "aggregate completion message did not disclose skipped work"
+
+set +e
+FIREWALL_TEST_RC=42 DNS_TEST_RC=0 "$BASH" "$main_probe" > "$TMP/real-failure.out" 2>&1
+rc=$?
+set -e
+[[ "$rc" -ne 0 ]] || fail "real aggregate firewall failure must remain non-zero"
+grep -Fq 'Firewall update: Failed' "$TMP/real-failure.out" \
+    || fail "aggregate output did not retain real firewall failure"
+
+printf 'PASS: maintenance contention status is truthful in operator output\n'
+
+)
+
+check_maintenance_contention_operator_ui

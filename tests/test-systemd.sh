@@ -44,6 +44,12 @@ for unit in "${guarded_units[@]}"; do
   fi
 done
 
+for unit in vaultwarden-dns-update.service vaultwarden-firewall-update.service; do
+  file="$ROOT/systemd/$unit"
+  grep -Eq '^SuccessExitStatus=0 75$' "$file" \
+    || fail "$unit must treat operation-contention exit 75 as a clean skip"
+done
+
 printf 'PASS: systemd operation runtime paths\n'
 
 )

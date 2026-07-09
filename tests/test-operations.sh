@@ -1054,3 +1054,57 @@ printf 'PASS: secrets/env/systemd operation guards\n'
 )
 
 check_secrets_env_systemd_operation_guards
+check_maintenance_leaf_contention_exit_contract() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+extract_func() {
+    local file="$1" func="$2"
+    awk -v f="$func" '
+        $0 ~ "^" f "\\(\\)" {p=1}
+        p {
+            print
+            opens=gsub(/\{/, "{")
+            closes=gsub(/\}/, "}")
+            depth += opens - closes
+            if (depth == 0) exit
+        }
+    ' "$file"
+}
+
+for leaf in maintenance-update-dns.sh maintenance-update-firewall.sh; do
+    harness="$TMP/${leaf}.probe.sh"
+    {
+        printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'set -euo pipefail' \
+            'DRY_RUN=false' \
+            'require_root(){ :; }' \
+            'operation_acquire(){ return "${LEAF_TEST_RC:?}"; }'
+        extract_func "$ROOT/utilities/$leaf" main
+        printf '%s\n' 'main'
+    } > "$harness"
+    chmod 700 "$harness"
+
+    set +e
+    LEAF_TEST_RC=75 "$BASH" "$harness" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" -eq 75 ]] || fail "$leaf must preserve operation-contention exit 75, got $rc"
+
+    set +e
+    LEAF_TEST_RC=42 "$BASH" "$harness" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" -eq 42 ]] || fail "$leaf must preserve real operation acquisition failures, got $rc"
+done
+
+printf 'PASS: DNS and firewall leaves preserve operation acquisition exits\n'
+
+)
+
+check_maintenance_leaf_contention_exit_contract

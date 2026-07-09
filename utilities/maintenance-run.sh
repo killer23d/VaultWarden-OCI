@@ -184,16 +184,21 @@ main() {
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
         "$health_validation_result" "$_maint_duration_seconds"
 
-    local critical_failures=0
-    [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup_result"       != "0" ]] && ((critical_failures++))
-    [[ "$CLEAN_BACKUPS"     == "true"  && "$backup_cleanup_result"    != "0" ]] && ((critical_failures++))
-    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup_result"    == "2" ]] && ((critical_failures++))
-    [[ "$OPTIMIZE_DATABASE" == "true"  && "$db_optimization_result"   != "0" ]] && ((critical_failures++))
-    [[ "$UPDATE_FIREWALL"   == "true"  && "$firewall_update_result"   != "0" ]] && ((critical_failures++))
-    [[ "$UPDATE_DNS"        == "true"  && "$dns_update_result"        != "0" ]] && ((critical_failures++))
-    [[ "$TARGETED_MODE"     == "false" && "$health_validation_result" != "0" ]] && ((critical_failures++))
+    local critical_failures=0 skipped_operations=0
+    [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup_result"       != "0" ]] && ((++critical_failures))
+    [[ "$CLEAN_BACKUPS"     == "true"  && "$backup_cleanup_result"    != "0" ]] && ((++critical_failures))
+    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup_result"    == "2" ]] && ((++critical_failures))
+    [[ "$OPTIMIZE_DATABASE" == "true"  && "$db_optimization_result"   != "0" ]] && ((++critical_failures))
+    [[ "$UPDATE_FIREWALL"   == "true"  && "$firewall_update_result"   != "0" && "$firewall_update_result" != "75" ]] && ((++critical_failures))
+    [[ "$UPDATE_DNS"        == "true"  && "$dns_update_result"        != "0" && "$dns_update_result" != "75" ]] && ((++critical_failures))
+    [[ "$TARGETED_MODE"     == "false" && "$health_validation_result" != "0" ]] && ((++critical_failures))
+    [[ "$UPDATE_FIREWALL"   == "true"  && "$firewall_update_result"   == "75" ]] && ((++skipped_operations))
+    [[ "$UPDATE_DNS"        == "true"  && "$dns_update_result"        == "75" ]] && ((++skipped_operations))
 
     if [[ $critical_failures -eq 0 ]]; then
+        if [[ $skipped_operations -gt 0 ]]; then
+            log_info "Maintenance completed with skipped work"; exit 0
+        fi
         log_success "Maintenance completed successfully"; exit 0
     elif [[ $critical_failures -eq 1 ]]; then
         log_warn "Maintenance completed with minor issues"; exit 1

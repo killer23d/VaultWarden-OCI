@@ -235,7 +235,6 @@ main() {
             --specific-lock /run/lock/vaultwarden-firewall-update.lock \
             --non-interactive skip || {
                 rc=$?
-                (( rc == 75 )) && exit 0
                 exit "$rc"
             }
         operation_set_phase "update" "Updating Cloudflare firewall ranges"

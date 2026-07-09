@@ -413,7 +413,6 @@ main() {
             --specific-lock /run/lock/vaultwarden-dns-update.lock \
             --non-interactive skip || {
                 rc=$?
-                (( rc == 75 )) && exit 0
                 exit "$rc"
             }
         trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT

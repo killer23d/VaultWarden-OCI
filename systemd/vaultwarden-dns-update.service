@@ -48,6 +48,11 @@ RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 TimeoutStartSec=60
 TimeoutStopSec=30
+# Exit code contract for scheduled runs:
+#   exit 0  = success
+#   exit 75 = clean skip because another VaultWarden operation holds the lock
+#   any other non-zero exit = real failure and triggers OnFailure=
+SuccessExitStatus=0 75
 
 [Install]
 WantedBy=multi-user.target

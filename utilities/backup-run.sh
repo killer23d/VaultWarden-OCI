@@ -945,11 +945,7 @@ sync_all_backups_to_rclone() {
         local_dir="${base_dir}/${t}"
         [[ -d "$local_dir" ]] || continue
         retention=$(_retention_days_for_type "$t") || return 1
-        if [[ "$DRY_RUN" == "true" ]]; then
-            backup_log_info "[DRY RUN] Would apply ${retention}-day local retention to ${t} backups before upload."
-        else
-            cleanup_old_backups "$local_dir" "$t" "$retention" || return 1
-        fi
+        cleanup_old_backups "$local_dir" "$t" "$retention" || return 1
 
         if ! find "$local_dir" -maxdepth 1 -name '*.age' -type f -print -quit | grep -q .; then
             backup_log_info "No retained ${t} backups to upload."
@@ -1020,19 +1016,38 @@ _prune_remote_backups() {
             continue
         fi
 
-        # Always preserve at least the most recent backup, regardless of age.
-        if [[ ${#remote_files[@]} -le 1 ]]; then
-            backup_log_info "[remote] Only 1 ${t} backup on remote — preserving it regardless of age."
+        local _newest_remote_timestamp=""
+        local _file _timestamp_epoch
+        for _file in "${remote_files[@]}"; do
+            _timestamp_epoch=$(_backup_filename_timestamp_epoch "$_file")
+            [[ -z "$_timestamp_epoch" ]] && continue
+            if [[ -z "$_newest_remote_timestamp" || "$_timestamp_epoch" -gt "$_newest_remote_timestamp" ]]; then
+                _newest_remote_timestamp="$_timestamp_epoch"
+            fi
+        done
+
+        if [[ -z "$_newest_remote_timestamp" ]]; then
+            backup_log_warn "[remote] No timestamped ${t} backup archives found — skipping remote primary deletion."
             continue
         fi
 
         local _deleted_remote=0
-        local _file
         for _file in "${remote_files[@]}"; do
             local _age_days
+            _timestamp_epoch=$(_backup_filename_timestamp_epoch "$_file")
+            if [[ -z "$_timestamp_epoch" ]]; then
+                backup_log_warn "[remote] $(basename "$_file") has no filename timestamp — skipping remote deletion."
+                continue
+            fi
             _age_days=$(_backup_filename_age_days "$_file")
             if [[ -z "$_age_days" ]]; then
                 backup_log_warn "[remote] $(basename "$_file") has no filename timestamp — skipping remote deletion."
+                continue
+            fi
+            if [[ "$_timestamp_epoch" == "$_newest_remote_timestamp" ]]; then
+                if (( _age_days > retention_days )); then
+                    backup_log_info "[remote] Preserving newest available ${t} recovery point: ${_file}"
+                fi
                 continue
             fi
             if (( _age_days > retention_days )); then
@@ -1547,19 +1562,7 @@ main() {
             local retention_days
             retention_days=$(_retention_days_for_type "$t") || exit 1
 
-            if [[ "$DRY_RUN" == "true" ]]; then
-                local would_prune=0
-                while IFS= read -r -d '' f; do
-                    backup_log_info "[DRY RUN] Would remove: $(basename "$f") (and sidecars)"
-                    (( ++would_prune )) || true
-                done < <(find "$type_dir" -maxdepth 1 -name "*.age" -type f \
-                             -mtime +"$retention_days" -print0 2>/dev/null)
-                if (( would_prune == 0 )); then
-                    backup_log_info "[DRY RUN] No $t backups older than $retention_days days — nothing to prune."
-                fi
-            else
-                cleanup_old_backups "$type_dir" "$t" "$retention_days" || rotate_failed=true
-            fi
+            cleanup_old_backups "$type_dir" "$t" "$retention_days" || rotate_failed=true
         done
 
         if [[ "$rotate_failed" == "true" ]]; then

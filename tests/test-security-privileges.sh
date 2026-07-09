@@ -73,11 +73,8 @@ test_collect_secret_field_rejects_auto_key() {
 }
 
 test_resolve_rclone_config_arg() {
-    if ! command -v rclone >/dev/null 2>&1; then
-        printf 'SKIP: rclone not installed\n'
-        return 0
-    fi
-
+    # This resolver/validator path does not invoke rclone itself, so it must be
+    # testable on development hosts without the rclone binary installed.
     # Load the production helper without executing backup-run.sh's main entry.
     # shellcheck disable=SC1090  # process substitution intentionally extracts one function
     source <(sed -n '/^_resolve_rclone_config_arg()/,/^}/p' \
@@ -98,6 +95,99 @@ test_resolve_rclone_config_arg() {
     printf 'PASS: _resolve_rclone_config_arg populated --config <path>\n'
 }
 
+test_canonical_root_rclone_config_contract() {
+    local utils="${PROJECT_ROOT}/lib/backup-utils.sh"
+    local canonical_line exception_line
+    canonical_line=$(grep -nF 'canonical=$(realpath -e' "$utils" | head -1 | cut -d: -f1)
+    exception_line=$(grep -n 'is_canonical_root_rclone_config=false' "$utils" | head -1 | cut -d: -f1)
+    [[ -n "$canonical_line" && -n "$exception_line" && "$canonical_line" -lt "$exception_line" ]] \
+        || fail "root rclone exception must be applied only after canonical path resolution"
+    grep -Fq '[[ "$canonical" == "/root/.config/rclone/rclone.conf" ]]' "$utils" \
+        || fail "canonical root rclone config exception is missing"
+    grep -Fq 'Canonical root rclone config must be root-owned' "$utils" \
+        || fail "canonical root rclone config must require root ownership"
+
+    local root_probe="${TEST_TMP}/root-rclone-config-probe.sh"
+    cat > "$root_probe" <<'EOF_ROOT_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
+source "${PROJECT_ROOT}/lib/backup-utils.sh"
+
+root_dir=/root/.config/rclone
+root_parent=/root/.config
+root_config="${root_dir}/rclone.conf"
+unrelated="${root_dir}/vw-rclone-unrelated-$$.conf"
+created_root_dir=false
+created_root_parent=false
+
+# Do not touch a real operator config. The caller performs structural coverage
+# instead when this exact fixture cannot be created safely.
+[[ ! -e "$root_config" && ! -L "$root_config" ]] || exit 77
+[[ ! -e /etc/rclone/rclone.conf && ! -L /etc/rclone/rclone.conf ]] || exit 77
+unset SUDO_USER
+
+cleanup() {
+    rm -f "$unrelated" "$root_config" "${root_config}.real"
+    if [[ "$created_root_dir" == "true" ]]; then
+        rmdir "$root_dir" 2>/dev/null || true
+    fi
+    if [[ "$created_root_parent" == "true" ]]; then
+        rmdir "$root_parent" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+if [[ ! -d "$root_dir" ]]; then
+    [[ -d "$root_parent" ]] || created_root_parent=true
+    install -d -m 700 "$root_dir"
+    created_root_dir=true
+fi
+
+printf '[test]\ntype = local\n' > "$root_config"
+chmod 600 "$root_config"
+RCLONE_CONFIG=""
+resolved="$(_resolve_rclone_config)"
+[[ "$resolved" == "$root_config" ]] || exit 1
+validate_rclone_config_path "$resolved" || exit 1
+
+printf '[test]\ntype = local\n' > "$unrelated"
+chmod 600 "$unrelated"
+if validate_rclone_config_path "$unrelated"; then exit 1; fi
+if validate_rclone_config_path /etc/shadow; then exit 1; fi
+
+mv "$root_config" "${root_config}.real"
+ln -s /etc/shadow "$root_config"
+if validate_rclone_config_path "$root_config"; then exit 1; fi
+rm -f "$root_config"
+mv "${root_config}.real" "$root_config"
+
+chmod 666 "$root_config"
+if validate_rclone_config_path "$root_config"; then exit 1; fi
+chmod 600 "$root_config"
+EOF_ROOT_PROBE
+    chmod 700 "$root_probe"
+
+    local root_probe_rc=0
+    if (( EUID == 0 )); then
+        "$BASH" "$root_probe" || root_probe_rc=$?
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        sudo -n env PROJECT_ROOT="$PROJECT_ROOT" "$BASH" "$root_probe" || root_probe_rc=$?
+    else
+        root_probe_rc=77
+    fi
+
+    if (( root_probe_rc == 0 )); then
+        printf 'PASS: canonical root rclone config resolver/validator contract\n'
+    elif (( root_probe_rc == 77 )); then
+        printf 'SKIP: root rclone fixture unavailable; structural canonical-path assertion passed\n'
+    else
+        fail "canonical root rclone config probe failed (exit ${root_probe_rc})"
+    fi
+}
+
 valid_bcrypt_body=$(printf 'A%.0s' {1..53})
 _bcrypt_format_ok "\$2y\$12\$${valid_bcrypt_body}" || fail "valid bcrypt format rejected"
 assert_fails _bcrypt_format_ok "\$2y\$4\$${valid_bcrypt_body}"
@@ -115,6 +205,7 @@ assert_fails verify_file_integrity "$integrity_file"
 test_hmac_key_not_in_cmdline
 test_collect_secret_field_rejects_auto_key
 test_resolve_rclone_config_arg
+test_canonical_root_rclone_config_contract
 
 command -v yq >/dev/null 2>&1 || fail "yq is required for schema tests"
 [[ "$(schema_collect_type push_installation_id)" == "conditional" ]] || fail "conditional collect type missing"
