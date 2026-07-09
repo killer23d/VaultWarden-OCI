@@ -47,7 +47,6 @@ EXAMPLES:
     sudo ./utilities/secrets-rotate.sh cf_worker_bouncer_token
     sudo ./utilities/secrets-rotate.sh email_api_token --dry-run
     sudo ./edit-secrets.sh rotate smtp_password
-    sudo ./edit-secrets.sh rotate backup_passphrase --no-backup
 
 EOF
 }
@@ -112,6 +111,7 @@ require_root "$@"
 source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+source "${PROJECT_ROOT}/lib/crowdsec-worker.sh"
 
 _secrets_rotate_policy="fail"
 if [[ ! -t 0 || ! -t 1 ]]; then
@@ -142,16 +142,19 @@ log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
 DRY_RUN=false
 SKIP_BACKUP=false
 
-declare -A _FIELD_SERVICES=()
+declare -A _FIELD_APPLY_TYPE=()
+declare -A _FIELD_APPLY_TARGETS=()
 _ROTATE_FIELDS=()
 
-_populate_field_services() {
+_populate_field_apply_contracts() {
     local _pk
     while IFS= read -r _pk; do
         [[ -z "$_pk" ]] && continue
-        local _svcs
-        _svcs=$(schema_services_for_key "$_pk" 2>/dev/null) || _svcs=""
-        _FIELD_SERVICES["$_pk"]="$_svcs"
+        local _atype _targets
+        _atype=$(schema_apply_type_for_key "$_pk" 2>/dev/null) || _atype="none"
+        _targets=$(schema_apply_targets_for_key "$_pk" 2>/dev/null) || _targets=""
+        _FIELD_APPLY_TYPE["$_pk"]="$_atype"
+        _FIELD_APPLY_TARGETS["$_pk"]="$_targets"
     done < <(schema_keys 2>/dev/null)
 }
 
@@ -177,7 +180,9 @@ _print_rotation_receipt() {
     local old_fp="$2"
     local new_fp="$3"
     local docker_synced="$4"
-    local services_list="$5"
+    local apply_type="$5"
+    local apply_targets="$6"
+    local apply_status="${7:-not-run}"
     local rotated_at
     rotated_at=$(date '+%Y-%m-%d %H:%M:%S %Z')
 
@@ -201,20 +206,40 @@ _print_rotation_receipt() {
                 "${COLOR_YELLOW}" "${COLOR_RESET}")"
     fi
 
-    # Services restart reminder
     printf '\n'
-    if [[ -n "$services_list" ]]; then
-        printf '  %sServices requiring restart:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-        local svc
-        for svc in $services_list; do
-            printf '    %s→%s docker compose restart %s\n' \
-                "${COLOR_CYAN}" "${COLOR_RESET}" "$svc"
-        done
-    else
-        printf '  %sServices requiring restart:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-        printf '    %s→%s docker compose restart <service>\n' \
-            "${COLOR_CYAN}" "${COLOR_RESET}"
-    fi
+    printf '  %sApply action:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+    local target
+    case "$apply_type" in
+        compose_restart)
+            for target in $apply_targets; do
+                printf '    %s→%s docker compose restart %s\n' \
+                    "${COLOR_CYAN}" "${COLOR_RESET}" "$target"
+            done
+            ;;
+        systemd_restart)
+            for target in $apply_targets; do
+                printf '    %s→%s sudo systemctl restart %s\n' \
+                    "${COLOR_CYAN}" "${COLOR_RESET}" "$target"
+            done
+            ;;
+        crowdsec_worker_config)
+            if [[ "$apply_status" == "applied" ]]; then
+                printf '    %s→%s CrowdSec Workers config re-rendered and service verified active\n' \
+                    "${COLOR_CYAN}" "${COLOR_RESET}"
+            else
+                printf '    %s→%s sudo ./utilities/crowdsec-worker-apply.sh\n' \
+                    "${COLOR_CYAN}" "${COLOR_RESET}"
+            fi
+            ;;
+        none)
+            printf '    %s→%s No restart required; consumer resolves this secret on demand.\n' \
+                "${COLOR_CYAN}" "${COLOR_RESET}"
+            ;;
+        *)
+            printf '    %s→%s Unknown apply type: %s\n' \
+                "${COLOR_CYAN}" "${COLOR_RESET}" "$apply_type"
+            ;;
+    esac
 
     printf '\n'
     log_hint "Fingerprints are non-reversible — use them only to confirm the value changed."
@@ -258,8 +283,9 @@ do_rotate() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would rotate secret: $actual_field"
-        local _svc="${_FIELD_SERVICES[$field]:-<service>}"
-        log_info "[DRY RUN] After rotation, you would need to restart: $_svc"
+        local _atype="${_FIELD_APPLY_TYPE[$field]:-none}"
+        local _targets="${_FIELD_APPLY_TARGETS[$field]:-}"
+        log_info "[DRY RUN] Apply contract after rotation: ${_atype}${_targets:+ (${_targets})}"
         log_info "[DRY RUN] No changes written."
         return 0
     fi
@@ -390,6 +416,10 @@ PYEOF
         log_error "Patched YAML is invalid - aborting"
         return 1
     fi
+    if ! validate_plaintext_secrets_schema_contract "$temp_patched" 2>&1; then
+        log_error "Patched secrets do not satisfy the schema contract - aborting"
+        return 1
+    fi
 
     local new_fingerprint
     new_fingerprint=$(printf '%s' "$new_value" | sha256sum | awk '{print substr($1,1,12)}')
@@ -446,7 +476,10 @@ PYEOF
     secure_secrets_file "$SECRETS_FILE"
     log_success "Secret '${actual_field}' rotated successfully"
 
-    local _affected_service="${_FIELD_SERVICES[$field]:-}"
+    local _apply_type="${_FIELD_APPLY_TYPE[$field]:-none}"
+    local _apply_targets="${_FIELD_APPLY_TARGETS[$field]:-}"
+    local _apply_status="not-run"
+    local _apply_failed="false"
 
     log_info "Attempting best-effort runtime secret sync..."
     local docker_dir="/run/vaultwarden-oci/secrets"
@@ -454,6 +487,10 @@ PYEOF
     if export_docker_secrets "$docker_dir" "$SECRETS_FILE" 2>/dev/null; then
         log_success "Runtime secret files updated"
         _docker_synced="true"
+        if ! prepare_push_secret_placeholders "$docker_dir"; then
+            log_warn "Push placeholder preparation failed. Refresh runtime secrets with: sudo make up"
+            _docker_synced="false"
+        fi
     else
         log_warn "Runtime secret sync is best-effort. Refresh runtime secrets with:"
         log_warn "  sudo make up"
@@ -461,15 +498,32 @@ PYEOF
         log_warn "  sudo ./setup.sh secrets"
     fi
 
+    if [[ "$_apply_type" == "crowdsec_worker_config" ]]; then
+        log_info "Applying CrowdSec Workers bouncer config for rotated credential..."
+        if crowdsec_worker_apply_config --require-service; then
+            _apply_status="applied"
+        else
+            _apply_status="failed"
+            _apply_failed="true"
+            log_error "Encrypted secret state changed, but CrowdSec Workers config apply failed."
+            log_error "Retry exactly this apply step with: sudo ./utilities/crowdsec-worker-apply.sh"
+        fi
+    fi
+
     _print_rotation_receipt \
         "$actual_field"           \
         "$old_fingerprint"        \
         "$new_fingerprint"        \
         "$_docker_synced"         \
-        "${_affected_service}"
+        "$_apply_type"            \
+        "$_apply_targets"         \
+        "$_apply_status"
 
     offer_recovery_kit_export "false"
 
+    if [[ "$_apply_failed" == "true" ]]; then
+        return 1
+    fi
     return 0
 }
 
@@ -494,8 +548,8 @@ main() {
     done
 
     mapfile -t _ROTATE_FIELDS < <(schema_keys 2>/dev/null)
-    _populate_field_services
-    unset -f _populate_field_services
+    _populate_field_apply_contracts
+    unset -f _populate_field_apply_contracts
 
     if [[ -z "$rotate_field" ]]; then
         log_error "'rotate' requires a FIELD argument."

@@ -371,7 +371,7 @@ standalone scripts. Admins may invoke the dispatcher or the utilities directly.
 Mutating `edit` and `rotate` paths acquire or inherit the shared operation guard before decrypting, promoting ciphertext, updating recipients, or exporting runtime secrets. `view` and `list` remain read-only diagnostics.
 
 **Managed secrets:**
-`admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `cf_worker_bouncer_token` (used by CrowdSec cloudflare-bouncer), `backup_passphrase`
+`admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `cf_worker_bouncer_token` (used by CrowdSec cloudflare-bouncer)
 
 **Subcommands:**
 
@@ -942,7 +942,7 @@ Secrets collection, generation, hashing, validation, and recovery kit export. Us
 | `create_secrets_backup` | Timestamped backup of the encrypted secrets file — created atomically at mode 600 via `install -m 600` |
 | `generate_recovery_kit FILE` | Write a full plaintext recovery document — extracts secrets one key at a time via `sops --extract`, never materialises full plaintext JSON |
 | `offer_recovery_kit_export` | Interactive or auto prompt to export a recovery kit to tmpfs |
-| `export_docker_secrets DOCKER_DIR [SECRETS_FILE]` | Decrypt all known secrets and write one flat file per key into DOCKER_DIR (mode 444). Skips placeholder/empty values with a warning. Sanity-checks output files for raw `ENC[` ciphertext and fails loudly if detected. Canonical shared implementation used by `setup-secrets.sh` and `secrets-rotate.sh`. |
+| `export_docker_secrets DOCKER_DIR [SECRETS_FILE]` | Decrypt schema-managed secrets, write active values into DOCKER_DIR (mode 444), and remove inactive/stale managed runtime files without touching unknown operator files. Push placeholders are prepared separately. Sanity-checks output files for raw `ENC[` ciphertext and fails loudly if detected. |
 
 ### `lib/storage.sh`
 Storage and state-path lifecycle helpers (boot-volume + separate-volume) plus Caddy log permission enforcement.

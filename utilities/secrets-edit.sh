@@ -216,6 +216,99 @@ _validate_editor_saved() {
     return 0
 }
 
+_secret_fingerprints_from_plain_file() {
+    local yaml_file="$1"
+    python3 - "$yaml_file" <<'PYEOF'
+import hashlib
+import sys
+import yaml
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+if not isinstance(data, dict):
+    sys.exit(0)
+for key in sorted(data):
+    if key == "sops":
+        continue
+    value = data[key]
+    text = "" if value is None else str(value)
+    print(f"{key}\t{hashlib.sha256(text.encode()).hexdigest()[:12]}")
+PYEOF
+}
+
+_changed_keys_from_fingerprints() {
+    local before="$1"
+    local after="$2"
+    declare -A _before=()
+    declare -A _after=()
+    declare -A _all=()
+    local key fp
+
+    while IFS=$'\t' read -r key fp; do
+        [[ -z "$key" ]] && continue
+        _before["$key"]="$fp"
+        _all["$key"]=1
+    done <<< "$before"
+
+    while IFS=$'\t' read -r key fp; do
+        [[ -z "$key" ]] && continue
+        _after["$key"]="$fp"
+        _all["$key"]=1
+    done <<< "$after"
+
+    for key in "${!_all[@]}"; do
+        if [[ "${_before[$key]:-}" != "${_after[$key]:-}" ]]; then
+            printf '%s\n' "$key"
+        fi
+    done | sort
+}
+
+_print_post_edit_apply_guidance() {
+    local changed_keys=("$@")
+    [[ ${#changed_keys[@]} -gt 0 ]] || return 0
+
+    log_info "Changed secret keys: ${changed_keys[*]}"
+    log_info "No plaintext values were printed; changes were detected by fingerprints."
+    log_info "Post-edit apply guidance:"
+
+    local key apply_type targets target
+    for key in "${changed_keys[@]}"; do
+        if ! schema_key_exists "$key" 2>/dev/null; then
+            if [[ "$key" == "backup_passphrase" ]]; then
+                log_info "  ${key}: legacy key retained for compatibility; no active apply action."
+            else
+                log_warn "  ${key}: unknown key; no apply action available."
+            fi
+            continue
+        fi
+
+        apply_type=$(schema_apply_type_for_key "$key" 2>/dev/null || printf 'none')
+        targets=$(schema_apply_targets_for_key "$key" 2>/dev/null || printf '')
+        case "$apply_type" in
+            compose_restart)
+                for target in $targets; do
+                    log_info "  ${key}: docker compose restart ${target}"
+                done
+                ;;
+            systemd_restart)
+                for target in $targets; do
+                    log_info "  ${key}: sudo systemctl restart ${target}"
+                done
+                ;;
+            crowdsec_worker_config)
+                log_warn "  ${key}: CrowdSec Workers config is stale until re-rendered."
+                log_warn "  Retry/apply exactly: sudo ./utilities/crowdsec-worker-apply.sh"
+                ;;
+            none)
+                log_info "  ${key}: no restart required."
+                ;;
+            *)
+                log_warn "  ${key}: unknown apply type '${apply_type}'."
+                ;;
+        esac
+    done
+}
+
 # Interactively edit secrets with YAML validation and atomic re-encryption.
 do_edit() {
     local _depth="${1:-0}"
@@ -271,6 +364,9 @@ do_edit() {
         fi
     done < <(schema_hinted_keys 2>/dev/null)
 
+    local before_key_fingerprints
+    before_key_fingerprints="$(_secret_fingerprints_from_plain_file "$temp_file")"
+
     local before_checksum
     before_checksum=$(calculate_sha256 "$temp_file")
 
@@ -322,6 +418,31 @@ do_edit() {
         fi
     fi
 
+    local schema_err
+    if ! schema_err=$(validate_plaintext_secrets_schema_contract "$temp_file" 2>&1); then
+        log_error "Secrets schema validation failed after editing:"
+        while IFS= read -r _schema_line; do
+            [[ -n "$_schema_line" ]] && log_error "  $_schema_line"
+        done <<< "$schema_err"
+        local discard_schema
+        if ! read -r -t 30 -p "Discard changes? [yes/no]: " discard_schema; then
+            log_warn "No input received (30s timeout). Discarding changes."
+            discard_schema="yes"
+        fi
+        if [[ "$discard_schema" == "yes" ]]; then
+            log_info "Changes discarded"
+            return 1
+        else
+            log_info "Re-opening editor to fix..."
+            do_edit $(( _depth + 1 ))
+            return $?
+        fi
+    fi
+
+    local after_key_fingerprints changed_keys
+    after_key_fingerprints="$(_secret_fingerprints_from_plain_file "$temp_file")"
+    changed_keys="$(_changed_keys_from_fingerprints "$before_key_fingerprints" "$after_key_fingerprints")"
+
     log_info "Encrypting changes (atomic write)..."
     local encrypted_temp
     encrypted_temp=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
@@ -361,6 +482,26 @@ do_edit() {
 
     secure_secrets_file "$SECRETS_FILE"
     log_success "Secrets updated successfully"
+
+    local docker_dir="/run/vaultwarden-oci/secrets"
+    log_info "Synchronizing runtime secret files..."
+    if ! export_docker_secrets "$docker_dir" "$SECRETS_FILE"; then
+        log_error "Secrets were encrypted, but runtime secret reconciliation failed."
+        log_error "Retry after fixing the reported issue: sudo make up"
+        return 1
+    fi
+    if ! prepare_push_secret_placeholders "$docker_dir"; then
+        log_error "Secrets were encrypted, but push placeholder preparation failed."
+        log_error "Retry after fixing the reported issue: sudo make up"
+        return 1
+    fi
+    log_success "Runtime secret files synchronized"
+
+    if [[ -n "$changed_keys" ]]; then
+        local -a _changed_key_array
+        mapfile -t _changed_key_array <<< "$changed_keys"
+        _print_post_edit_apply_guidance "${_changed_key_array[@]}"
+    fi
 
     offer_recovery_kit_export "true"
 
