@@ -65,10 +65,11 @@ services:
 
         mkdir -p /data/caddy/certificates /data/caddy/locks /data/caddy/ocsp &&
         mkdir -p /config/caddy &&
-        chown -R 2000:2000 /data/caddy /config/caddy &&
+        chown -R 2000:2000 /data/caddy /config &&
         find /data/caddy -type d -exec chmod 750 {} + 2>/dev/null || true &&
         find /data/caddy -type f -exec chmod 640 {} + 2>/dev/null || true &&
-        chmod 750 /config/caddy &&
+        find /config -type d -exec chmod 750 {} + 2>/dev/null || true &&
+        find /config -type f -exec chmod 640 {} + 2>/dev/null || true &&
 
         touch "$$SENTINEL" &&
         echo 'Init container completed - permissions set to ${PUID}:${PGID}'
@@ -77,7 +78,8 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs:/logs
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data/caddy
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config/caddy
+      # Match the runtime Caddy mount so /config/caddy is prepared on the same host path.
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config
 
   # -------------------- Core service: VaultWarden --------------------
   vaultwarden:
