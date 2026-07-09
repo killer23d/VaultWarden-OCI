@@ -126,6 +126,18 @@ grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/config/dr-manifest.env" "DR ma
 grep -Fq 'find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0' utilities/repair-permissions.sh || fail "repair does not cover runtime secret files"
 pass "repair fallback covers persistent and runtime secret drift through central helpers"
 
+# Fresh-start Caddy config preparation must target the exact bind mount used by
+# the runtime service. Otherwise Caddy creates /config/caddy itself at mode 0700
+# and the repository's 0750 storage contract immediately reports drift.
+caddy_config_mount='- ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config'
+caddy_config_mount_count="$(grep -Fc -- "$caddy_config_mount" docker-compose.yml.example || true)"
+[[ "$caddy_config_mount_count" -eq 2 ]] || fail "init-permissions and Caddy must share the same /config bind mount target"
+! grep -Fq -- '${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config/caddy' docker-compose.yml.example || fail "init-permissions still mounts Caddy config one level too deep"
+grep -Fq 'mkdir -p /config/caddy' docker-compose.yml.example || fail "init-permissions does not pre-create Caddy /config/caddy storage"
+grep -Fq 'chown -R 2000:2000 /data/caddy /config' docker-compose.yml.example || fail "init-permissions does not own the real Caddy config tree"
+grep -Fq 'find /config -type d -exec chmod 750 {} +' docker-compose.yml.example || fail "init-permissions does not enforce 0750 on Caddy config directories"
+grep -Fq 'find /config -type f -exec chmod 640 {} +' docker-compose.yml.example || fail "init-permissions does not enforce 0640 on Caddy config files"
+pass "init-permissions prepares the runtime Caddy /config tree before first start"
 
 # Post-restore runtime permissions: emergency/full archives strip ownership for
 # portability, so restore must re-apply target-host service contracts explicitly.
