@@ -110,6 +110,127 @@ pass 'restore/backup preflight safety functional checks'
 )
 
 check_backup_preflight_and_metadata_safety
+check_rclone_config_contracts() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BACKUP="$ROOT/utilities/backup-run.sh"
+UTILS="$ROOT/lib/backup-utils.sh"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/config.sh"
+# shellcheck source=../lib/backup-utils.sh
+source "$UTILS"
+# shellcheck disable=SC1090  # process substitution intentionally extracts one function
+source <(sed -n '/^_resolve_rclone_config_arg()/,/^}/p' "$BACKUP")
+
+# The resolver/validator path does not invoke rclone. Keep this regression
+# runnable on CI and development hosts where the optional binary is absent.
+mock_cfg="$TMP/rclone.conf"
+printf '[myremote]\ntype = local\n' > "$mock_cfg"
+chmod 600 "$mock_cfg"
+result_arr=()
+rc=0
+RCLONE_CONFIG="$mock_cfg" _resolve_rclone_config_arg result_arr || rc=$?
+(( rc == 0 )) || fail "explicit rclone config resolver failed with exit $rc"
+[[ "${result_arr[0]:-}" == "--config" ]] || fail "resolver did not populate --config"
+[[ "${result_arr[1]:-}" == "$(realpath -e "$mock_cfg")" ]] \
+    || fail "resolver returned the wrong explicit config path"
+
+canonical_line=$(grep -nF 'canonical=$(realpath -e' "$UTILS" | head -1 | cut -d: -f1)
+exception_line=$(grep -nF 'local root_rclone_config="/root/.config/rclone/rclone.conf"' "$UTILS" | head -1 | cut -d: -f1)
+[[ -n "$canonical_line" && -n "$exception_line" && "$canonical_line" -lt "$exception_line" ]] \
+    || fail "root rclone exception must be evaluated only after canonical path resolution"
+grep -Fq '&& "$prefix" == "/root"' "$UTILS" \
+    || fail "root rclone validator exception is not narrowly scoped to /root"
+
+root_probe="$TMP/root-rclone-config-probe.sh"
+cat > "$root_probe" <<'EOF_ROOT_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
+source "${PROJECT_ROOT}/lib/backup-utils.sh"
+
+root_dir=/root/.config/rclone
+root_parent=/root/.config
+root_config="${root_dir}/rclone.conf"
+unrelated="${root_dir}/vw-rclone-unrelated-$$.conf"
+created_root_dir=false
+created_root_parent=false
+
+# Never overwrite a real operator config or shadow the higher-priority /etc
+# fallback. Structural assertions above remain active when a fixture is unsafe.
+[[ ! -e "$root_config" && ! -L "$root_config" ]] || exit 77
+[[ ! -e /etc/rclone/rclone.conf && ! -L /etc/rclone/rclone.conf ]] || exit 77
+unset SUDO_USER
+
+cleanup() {
+    rm -f "$unrelated" "$root_config" "${root_config}.real"
+    [[ "$created_root_dir" == "true" ]] && rmdir "$root_dir" 2>/dev/null || true
+    [[ "$created_root_parent" == "true" ]] && rmdir "$root_parent" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+if [[ ! -d "$root_dir" ]]; then
+    [[ -d "$root_parent" ]] || created_root_parent=true
+    install -d -m 700 "$root_dir"
+    created_root_dir=true
+fi
+
+printf '[test]\ntype = local\n' > "$root_config"
+chmod 600 "$root_config"
+RCLONE_CONFIG=""
+resolved="$(_resolve_rclone_config)"
+[[ "$resolved" == "$root_config" ]] || exit 1
+validate_rclone_config_path "$resolved" || exit 1
+
+printf '[test]\ntype = local\n' > "$unrelated"
+chmod 600 "$unrelated"
+if validate_rclone_config_path "$unrelated"; then exit 1; fi
+if validate_rclone_config_path /etc/shadow; then exit 1; fi
+
+mv "$root_config" "${root_config}.real"
+ln -s /etc/shadow "$root_config"
+if validate_rclone_config_path "$root_config"; then exit 1; fi
+rm -f "$root_config"
+mv "${root_config}.real" "$root_config"
+
+chmod 666 "$root_config"
+if validate_rclone_config_path "$root_config"; then exit 1; fi
+chmod 600 "$root_config"
+
+if id -u nobody >/dev/null 2>&1; then
+    chown "$(id -u nobody)" "$root_config"
+    if validate_rclone_config_path "$root_config"; then exit 1; fi
+    chown 0 "$root_config"
+fi
+EOF_ROOT_PROBE
+chmod 700 "$root_probe"
+
+root_probe_rc=0
+if (( EUID == 0 )); then
+    PROJECT_ROOT="$ROOT" "$BASH" "$root_probe" || root_probe_rc=$?
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n env PROJECT_ROOT="$ROOT" "$BASH" "$root_probe" || root_probe_rc=$?
+else
+    root_probe_rc=77
+fi
+
+if (( root_probe_rc == 0 )); then
+    printf 'PASS: canonical root rclone resolver/validator contract\n'
+elif (( root_probe_rc == 77 )); then
+    printf 'SKIP: root rclone fixture unavailable; structural canonical-path assertions passed\n'
+else
+    fail "canonical root rclone config probe failed (exit ${root_probe_rc})"
+fi
+
+)
+
+check_rclone_config_contracts
 check_backup_retention_contracts() (
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -150,6 +271,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # shellcheck source=../lib/log.sh
 source "$ROOT/lib/log.sh"
 # shellcheck source=../lib/backup-utils.sh
+# shellcheck source=../lib/backup-utils.sh
 source "$UTILS"
 
 local_dir="$TMP/local/db"
@@ -183,6 +305,33 @@ cleanup_old_backups "$no_parse_dir" db 1 > "$TMP/local-no-parse.out" 2>&1 \
     || { cat "$TMP/local-no-parse.out" >&2; fail "local no-parse retention failed"; }
 _assert_exists "$no_parse_a"
 _assert_exists "$no_parse_b"
+
+dry_run_dir="$TMP/dry-run/db"
+mkdir -p "$dry_run_dir"
+dry_run_older="$dry_run_dir/db-z-20000101-000000.age"
+dry_run_newest="$dry_run_dir/db-a-20010101-000000.age"
+orphan_sidecar="$dry_run_dir/db-orphan-19990101-000000.age.meta"
+_write_archive_with_sidecars "$dry_run_older"
+_write_archive_with_sidecars "$dry_run_newest"
+printf 'orphan\n' > "$orphan_sidecar"
+DRY_RUN=true cleanup_old_backups "$dry_run_dir" db 1 > "$TMP/local-dry-run.out" 2>&1 \
+    || { cat "$TMP/local-dry-run.out" >&2; fail "local retention dry-run failed"; }
+for file in \
+    "$dry_run_older" "$dry_run_older.sha256" "$dry_run_older.sha256.hmac" "$dry_run_older.meta" \
+    "$dry_run_newest" "$dry_run_newest.sha256" "$dry_run_newest.sha256.hmac" "$dry_run_newest.meta" \
+    "$orphan_sidecar"; do
+    _assert_exists "$file"
+done
+grep -Fq "[DRY RUN] Would remove: $(basename "$dry_run_older") (and sidecars)" "$TMP/local-dry-run.out" \
+    || fail "local dry-run did not report the stale deletion candidate"
+! grep -Fq "[DRY RUN] Would remove: $(basename "$dry_run_newest") (and sidecars)" "$TMP/local-dry-run.out" \
+    || fail "local dry-run reported the preserved newest archive as a deletion candidate"
+grep -Fq '[DRY RUN] Would clean up 1 old db backups' "$TMP/local-dry-run.out" \
+    || fail "local dry-run summary did not count the planned archive deletion"
+grep -Fq "[DRY RUN] Would remove orphaned sidecar: $(basename "$orphan_sidecar")" "$TMP/local-dry-run.out" \
+    || fail "local dry-run did not report the orphaned sidecar candidate"
+grep -Fq '[DRY RUN] Would remove 1 orphaned sidecar file(s) from db backups' "$TMP/local-dry-run.out" \
+    || fail "local dry-run summary did not count the planned orphan sidecar deletion"
 
 if (( BASH_VERSINFO[0] < 5 )); then
     printf 'SKIP: remote prune mock requires Bash 5 namerefs used by production backup-run.sh\n'
@@ -250,6 +399,10 @@ grep -Fq 'Would delete remote: mockremote:vaultwarden_backups/db/db-z-20000101-0
     || fail "remote dry-run did not report older stale archive"
 ! grep -Fq 'Would delete remote: mockremote:vaultwarden_backups/db/db-a-20010101-000000.age' "$TMP/remote-prune.log" \
     || fail "remote dry-run reported newest archive as deletion candidate"
+grep -Fq '[DRY RUN] Would prune 1 old db backup(s) from mockremote:vaultwarden_backups/db/' "$TMP/remote-prune.log" \
+    || fail "remote dry-run summary did not count the planned archive deletion"
+! grep -Fq '[remote] No old db backups to prune on remote.' "$TMP/remote-prune.log" \
+    || fail "remote dry-run contradicted its own deletion candidate"
 
 : > "$TMP/remote-delete.log"
 : > "$TMP/remote-prune.log"

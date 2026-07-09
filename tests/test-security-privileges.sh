@@ -138,8 +138,9 @@ test_root_rclone_config_contract() {
 
         if [[ ! -e /etc/rclone/rclone.conf ]]; then
             local resolved
-            RCLONE_CONFIG= resolved=$(_resolve_rclone_config) \
-                || fail "resolver did not find managed root rclone fixture"
+            # shellcheck disable=SC2034
+            RCLONE_CONFIG=""
+            resolved=$(_resolve_rclone_config) || fail "resolver did not find managed root rclone fixture"
             [[ "$resolved" == "$root_cfg" ]] \
                 || fail "resolver returned wrong root fallback path: $resolved"
         fi
