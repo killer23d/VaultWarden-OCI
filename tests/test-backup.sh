@@ -276,10 +276,10 @@ grep -Fq 'db-20000101-000000.sqlite3.age.sha256' "$remote_delete_log" \
 : > "$remote_delete_log"
 remote_dry_run_output="$(DRY_RUN=true bash "$remote_probe")"
 [[ ! -s "$remote_delete_log" ]] || fail "remote dry-run invoked rclone deletefile"
-[[ "$remote_dry_run_output" == *"Would delete remote:"*'db-20000101-000000.sqlite3.age'* ]] \
-    || fail "remote dry-run did not report the older stale archive"
-[[ "$remote_dry_run_output" != *"Would delete remote:"*'db-20000102-000000.sqlite3.age'* ]] \
-    || fail "remote dry-run reported the newest archive as a deletion candidate"
+grep -Fq '[DRY RUN] Would delete remote: mock-remote:vaultwarden_backups/db/db-20000101-000000.sqlite3.age' \
+    <<< "$remote_dry_run_output" || fail "remote dry-run did not report the older stale archive"
+! grep -Fq '[DRY RUN] Would delete remote: mock-remote:vaultwarden_backups/db/db-20000102-000000.sqlite3.age' \
+    <<< "$remote_dry_run_output" || fail "remote dry-run reported the newest archive as a deletion candidate"
 
 printf 'PASS: local and remote retention preserve newest timestamped recovery point\n'
 
