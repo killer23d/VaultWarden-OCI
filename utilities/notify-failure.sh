@@ -38,10 +38,9 @@ _sanitize_unit_name() {
 }
 
 _write_delivery_sentinel() {
-    local state_dir="$1" safe_unit="$2" sentinel_dir sentinel
-    sentinel_dir="${state_dir}/.vw-health-alert"
-    sentinel="${sentinel_dir}/NOTIFY_FAILED_${safe_unit}"
-    mkdir -p "$sentinel_dir" || return 1
+    local state_dir="$1" safe_unit="$2" sentinel
+    sentinel="${state_dir}/NOTIFY_FAILED_${safe_unit}"
+    mkdir -p "$state_dir" || return 1
     printf 'unit=%s\ntime=%s\n' "$FAILED_UNIT" "$(date -Iseconds)" > "$sentinel"
 }
 
