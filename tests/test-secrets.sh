@@ -257,6 +257,28 @@ secrets:
 SCHEMA
 }
 
+write_single_key_schema() {
+    local file="$1"
+    local key="$2"
+    local hash="$3"
+    cat > "$file" <<SCHEMA
+schema_version: 1
+secrets:
+  - key: ${key}
+    label: "Test"
+    hash: ${hash}
+    placeholder: "PLACEHOLDER_NOT_CONFIGURED"
+    collect: interactive
+    auto_fn: ""
+    condition_fn: ""
+    apply:
+      type: none
+      targets: []
+    required: false
+    hint: ""
+SCHEMA
+}
+
 expect_schema_invalid() {
     local file="$1"
     local expected="$2"
@@ -302,6 +324,12 @@ bad_collect="$TMP/bad-collect.yaml"; write_minimal_schema "$bad_collect" plain "
 expect_schema_invalid "$bad_collect" "admin_token.collect"
 bad_hash="$TMP/bad-hash.yaml"; write_minimal_schema "$bad_hash" "sha512"
 expect_schema_invalid "$bad_hash" "admin_token.hash"
+bad_admin_token_hash="$TMP/bad-admin-token-hash.yaml"; write_minimal_schema "$bad_admin_token_hash" "plain"
+expect_schema_invalid "$bad_admin_token_hash" "admin_token.hash: implemented transform requires 'argon2id'"
+bad_admin_basic_hash="$TMP/bad-admin-basic-hash.yaml"; write_single_key_schema "$bad_admin_basic_hash" "admin_basic_auth_hash" "plain"
+expect_schema_invalid "$bad_admin_basic_hash" "admin_basic_auth_hash.hash: implemented transform requires 'bcrypt'"
+bad_smtp_hash="$TMP/bad-smtp-hash.yaml"; write_single_key_schema "$bad_smtp_hash" "smtp_password" "bcrypt"
+expect_schema_invalid "$bad_smtp_hash" "smtp_password.hash: 'bcrypt' has no implemented transform for this key"
 bad_apply="$TMP/bad-apply.yaml"; write_minimal_schema "$bad_apply" plain interactive "" "" "webhook"
 expect_schema_invalid "$bad_apply" "admin_token.apply.type"
 bad_auto="$TMP/bad-auto.yaml"; write_minimal_schema "$bad_auto" plain auto ""
@@ -321,6 +349,13 @@ grep -Fq 'prepare_push_secret_placeholders "$docker_dir"' "$ROOT/utilities/secre
     || fail "raw secrets edit must preserve push placeholder behavior"
 grep -Fq 'No plaintext values were printed; changes were detected by fingerprints.' "$ROOT/utilities/secrets-edit.sh" \
     || fail "raw secrets edit changed-key reporting must avoid plaintext values"
+grep -Fq 'schema_validate || return 1' "$ROOT/startup.sh" \
+    || fail "startup must validate schema once before schema-heavy secret checks"
+grep -Fq 'validate_required_secrets "$SECRETS_FILE" || return 1' "$ROOT/startup.sh" \
+    || fail "startup must use validate_required_secrets as the strict required-secret gate"
+startup_secret_block="$(awk '/prepare_docker_secrets\(\)/,/^}/' "$ROOT/startup.sh")"
+[[ "$startup_secret_block" != *'check_placeholder_values "$SECRETS_FILE"'* ]] \
+    || fail "startup should not run duplicate required-secret placeholder validation"
 
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/yq" <<'PYTHON_YQ'
@@ -438,7 +473,8 @@ _maybe_sudo() {
     fi
 }
 stat() {
-    if [[ "${1:-}" == "-c" && "${2:-}" == "%u:%g" && "${3:-}" == "$TMP/runtime"* ]]; then
+    if [[ "${1:-}" == "-c" && "${2:-}" == "%u:%g" &&
+          ( "${3:-}" == "$TMP/runtime"* || "${3:-}" == "$TMP/managed-secrets" ) ]]; then
         printf '0:0\n'
         return 0
     fi
@@ -447,10 +483,13 @@ stat() {
 
 write_secret_yaml() {
     local smtp_value="$1"
+    local push_id="${2:-CHANGE_ME_OR_LEAVE_EMPTY}"
+    local push_key="${3:-CHANGE_ME_OR_LEAVE_EMPTY}"
     cat > "$SECRETS_FILE" <<YAML
 smtp_password: "${smtp_value}"
-push_installation_id: "CHANGE_ME_OR_LEAVE_EMPTY"
-push_installation_key: "CHANGE_ME_OR_LEAVE_EMPTY"
+push_installation_id: "${push_id}"
+push_installation_key: "${push_key}"
+backup_passphrase: "legacy-encrypted-state-value"
 YAML
 }
 
@@ -459,7 +498,21 @@ printf 'operator data\n' > "$TMP/runtime/operator_file"
 export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
 [[ "$(cat "$TMP/runtime/smtp_password")" == "real-smtp-secret" ]] \
     || fail "real smtp_password was not exported"
+[[ "$(stat -c '%a' "$TMP/runtime/smtp_password")" == "444" ]] \
+    || fail "runtime Docker secret file was not mode 0444"
 [[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file was removed"
+[[ ! -e "$TMP/runtime/.managed-secrets" ]] \
+    || fail "managed-secret metadata was written inside Docker secrets directory"
+[[ -f "$TMP/managed-secrets" ]] \
+    || fail "managed-secret metadata was not written beside Docker secrets directory"
+[[ "$(stat -c '%u:%g' "$TMP/managed-secrets")" == "0:0" ]] \
+    || fail "managed-secret metadata owner contract is not root:root"
+[[ "$(stat -c '%a' "$TMP/managed-secrets")" == "600" ]] \
+    || fail "managed-secret metadata was not mode 0600"
+write_secret_yaml "real-smtp-secret"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ "$(stat -c '%a' "$TMP/managed-secrets")" == "600" ]] \
+    || fail "repeated export changed managed-secret metadata mode"
 
 write_secret_yaml "NOT_USED_EMAIL_MODE=api"
 export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
@@ -475,17 +528,42 @@ export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
     || fail "smtp_password remained after CHANGE_ME transition"
 
 printf 'legacy\n' > "$TMP/runtime/retired_schema_key"
-printf 'retired_schema_key\n' > "$TMP/runtime/.managed-secrets"
+printf 'retired_schema_key\n' > "$TMP/managed-secrets"
 export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
 [[ ! -e "$TMP/runtime/retired_schema_key" ]] \
     || fail "manifest-managed retired key was not removed"
 [[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file removed during stale cleanup"
 
+rm -f "$TMP/managed-secrets"
+printf 'old backup passphrase\n' > "$TMP/runtime/backup_passphrase"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ ! -e "$TMP/runtime/backup_passphrase" ]] \
+    || fail "pre-manifest legacy backup_passphrase runtime file was not removed"
+[[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file removed during legacy cleanup"
+
+PUSH_ENABLED=true
+export PUSH_ENABLED
+write_secret_yaml "real-smtp-secret" "real-push-id" "real-push-key"
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
+[[ "$(cat "$TMP/runtime/push_installation_id")" == "real-push-id" ]] \
+    || fail "PUSH_ENABLED=true did not export real push_installation_id"
+[[ "$(cat "$TMP/runtime/push_installation_key")" == "real-push-key" ]] \
+    || fail "PUSH_ENABLED=true did not export real push_installation_key"
+[[ "$(stat -c '%a' "$TMP/runtime/push_installation_id")" == "444" ]] \
+    || fail "real push_installation_id was not mode 0444"
+
+PUSH_ENABLED=false
+export PUSH_ENABLED
+export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
 prepare_push_secret_placeholders "$TMP/runtime" >/dev/null
 [[ -f "$TMP/runtime/push_installation_id" && ! -s "$TMP/runtime/push_installation_id" ]] \
-    || fail "push_installation_id placeholder missing or non-empty"
+    || fail "PUSH_ENABLED=false left real push_installation_id content in runtime"
 [[ -f "$TMP/runtime/push_installation_key" && ! -s "$TMP/runtime/push_installation_key" ]] \
-    || fail "push_installation_key placeholder missing or non-empty"
+    || fail "PUSH_ENABLED=false left real push_installation_key content in runtime"
+[[ "$(stat -c '%a' "$TMP/runtime/push_installation_id")" == "444" ]] \
+    || fail "disabled push_installation_id placeholder was not mode 0444"
+[[ "$(stat -c '%a' "$TMP/runtime/push_installation_key")" == "444" ]] \
+    || fail "disabled push_installation_key placeholder was not mode 0444"
 
 printf 'Runtime secret reconciliation tests passed.\n'
 )

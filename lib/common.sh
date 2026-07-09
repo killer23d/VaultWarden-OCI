@@ -308,7 +308,7 @@ expected_owner_for_path() {
     case "$path" in
         /etc/vaultwarden|/etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
         "$state_dir"/config|"$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
-        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|\
+        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|/run/vaultwarden-oci/managed-secrets|\
         "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             printf 'root' ;;
         "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
@@ -324,7 +324,7 @@ expected_group_for_path() {
     case "$path" in
         /etc/vaultwarden|/etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
         "$state_dir"/config|"$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
-        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|\
+        /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|/run/vaultwarden-oci/managed-secrets|\
         "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             printf 'root' ;;
         "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
@@ -344,6 +344,7 @@ expected_mode_for_path() {
         "$state_dir"/config) printf '700' ;;
         "$state_dir"/secrets) printf '700' ;;
         /run/vaultwarden-oci/secrets/*) printf '444' ;;
+        /run/vaultwarden-oci/managed-secrets) printf '600' ;;
         "$PROJECT_ROOT/.sops.yaml") printf '644' ;;
         /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
         "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
@@ -414,6 +415,7 @@ auto_fix_critical_permissions() {
         "${project_root}/secrets/keys/age-key.txt" \
         "${project_root}/.sops.yaml" \
         "${project_root}/secrets/secrets.yaml" \
+        /run/vaultwarden-oci/managed-secrets \
         /run/vaultwarden-oci/secrets; do
         [[ -e "$_vw_path" ]] && fix_known_path_permissions "$_vw_path"
     done

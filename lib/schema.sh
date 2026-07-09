@@ -174,6 +174,16 @@ else:
         hash_type = entry.get("hash")
         if hash_type not in allowed_hashes:
             err(key, "hash", "must be one of: " + ", ".join(sorted(allowed_hashes)))
+        implemented_hashes = {
+            "admin_token": "argon2id",
+            "admin_basic_auth_hash": "bcrypt",
+        }
+        expected_hash = implemented_hashes.get(key)
+        if expected_hash:
+            if hash_type != expected_hash:
+                err(key, "hash", f"implemented transform requires '{expected_hash}'")
+        elif hash_type in {"argon2id", "bcrypt"}:
+            err(key, "hash", f"'{hash_type}' has no implemented transform for this key")
 
         collect = entry.get("collect")
         if collect not in allowed_collect:
@@ -295,6 +305,11 @@ _schema_check_prerequisites() {
     fi
     _schema_validate_semantics "$schema_file" || return 1
     return 0
+}
+
+schema_validate() {
+    local schema_file="${1:-${SECRETS_SCHEMA_FILE}}"
+    _schema_check_prerequisites "$schema_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -500,7 +515,7 @@ schema_keys_for_conditional_group() {
     yq -r ".secrets[] | select(.conditional_group == \"${group}\") | .key" "$schema_file"
 }
 
-export -f _schema_check_prerequisites _schema_validate_semantics
+export -f _schema_check_prerequisites _schema_validate_semantics schema_validate
 export -f schema_keys schema_field schema_field_safe
 export -f schema_required_keys schema_hinted_keys
 export -f schema_apply_type_for_key schema_apply_targets_for_key schema_services_for_key

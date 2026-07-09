@@ -199,6 +199,12 @@ grep -Fq 'crowdsec_worker_apply_config --require-service' "$PROJECT_ROOT/utiliti
     || fail "CrowdSec Workers credential rotation must invoke narrow apply helper"
 grep -Fq 'Retry exactly this apply step with: sudo ./utilities/crowdsec-worker-apply.sh' "$PROJECT_ROOT/utilities/secrets-rotate.sh" \
     || fail "rotation apply failure must print exact retry command"
+grep -Fq '_apply_status="disabled"' "$PROJECT_ROOT/utilities/secrets-rotate.sh" \
+    || fail "disabled Cloudflare proxy rotation must use a distinct disabled apply status"
+grep -Fq 'CLOUDFLARE_PROXY_ENABLED is not true' "$PROJECT_ROOT/utilities/secrets-rotate.sh" \
+    || fail "disabled Cloudflare proxy rotation must explain why Workers apply was skipped"
+grep -Fq 'no active Worker consumer was re-rendered or verified' "$PROJECT_ROOT/utilities/secrets-rotate.sh" \
+    || fail "disabled Cloudflare proxy receipt must not claim Worker render or verification"
 grep -Fq 'crowdsec_worker_apply_config --allow-missing-service' "$PROJECT_ROOT/utilities/setup-crowdsec.sh" \
     || fail "setup-crowdsec Phase 6 must reuse narrow apply helper"
 

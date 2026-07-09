@@ -322,6 +322,25 @@ _secret_value_is_inactive() {
     return 1
 }
 
+_runtime_secret_value_is_inactive() {
+    local key="$1"
+    local value="${2-}"
+    local placeholder="${3-}"
+
+    case "$key" in
+        push_installation_id|push_installation_key)
+            [[ "${PUSH_ENABLED:-false}" != "true" ]] && return 0
+            ;;
+    esac
+
+    _secret_value_is_inactive "$value" "$placeholder"
+}
+
+_managed_secrets_manifest_path() {
+    local docker_dir="${1%/}"
+    printf '%s/managed-secrets' "$(dirname "$docker_dir")"
+}
+
 _schema_required_runtime_keys() {
     local _required_keys
     schema_required_keys || return 1
@@ -1779,8 +1798,9 @@ _warn_if_stack_unavailable() {
 # Decrypt SECRETS_FILE (defaults to $SECRETS_FILE / secrets/secrets.yaml) and
 # stage one flat file per active known secret key, then install it into
 # DOCKER_DIR. Each output file is installed root:root mode 0444. Inactive
-# values (empty, CHANGE_ME*, NOT_USED*, PLACEHOLDER*, null, or the schema
-# placeholder) remove any previously exported schema-managed runtime file.
+# values (empty, CHANGE_ME*, NOT_USED*, PLACEHOLDER*, null, the schema
+# placeholder, or disabled push credentials) remove any previously exported
+# schema-managed runtime file.
 #
 # Hardening (consolidated from startup.sh::prepare_docker_secrets):
 #   1. SOPS decryption is written to a mktemp cache inside docker_dir (mode
@@ -1880,7 +1900,7 @@ PYEOF
         _value="${_eds_values[$_key]:-}"
         _placeholder=$(schema_placeholder_for_key "$_key" 2>/dev/null || printf '')
 
-        if _secret_value_is_inactive "$_value" "$_placeholder"; then
+        if _runtime_secret_value_is_inactive "$_key" "$_value" "$_placeholder"; then
             _eds_inactive_keys["$_key"]=1
             log_warn "export_docker_secrets: '$_key' inactive (placeholder/sentinel/empty) — removing derived runtime file if present"
             unset _value
@@ -1941,17 +1961,26 @@ PYEOF
         fi
     done
 
-    local _manifest="${docker_dir}/.managed-secrets"
+    local _manifest
+    _manifest="$(_managed_secrets_manifest_path "$docker_dir")"
+    local _legacy_manifest="${docker_dir}/.managed-secrets"
     local _manifest_tmp="${_eds_tmpdir}/managed-secrets"
     declare -A _eds_remove_keys=()
 
     for _key in "${!_eds_inactive_keys[@]}"; do
         _eds_remove_keys["$_key"]=1
     done
+    local -a _retired_runtime_keys=(backup_passphrase)
+    local _retired_runtime_key
+    for _retired_runtime_key in "${_retired_runtime_keys[@]}"; do
+        _eds_remove_keys["$_retired_runtime_key"]=1
+    done
 
     local _previous_manifest=""
     if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -f "$_manifest"; then
         _previous_manifest=$(VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo cat "$_manifest" 2>/dev/null || true)
+    elif VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -f "$_legacy_manifest"; then
+        _previous_manifest=$(VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo cat "$_legacy_manifest" 2>/dev/null || true)
     fi
     while IFS= read -r _key; do
         [[ -z "$_key" ]] && continue
@@ -1976,6 +2005,17 @@ PYEOF
     for _key in "${!_eds_active_keys[@]}"; do
         printf '%s\n' "$_key" >> "$_manifest_tmp"
     done
+    if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -e "$_legacy_manifest"; then
+        if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo rm -f "$_legacy_manifest"; then
+            log_error "export_docker_secrets: failed to remove legacy managed manifest ${_legacy_manifest}"
+            return 1
+        fi
+    fi
+
+    if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -d -m 0700 -o root -g root "$(dirname "$_manifest")"; then
+        log_error "export_docker_secrets: failed to prepare managed runtime metadata directory: $(dirname "$_manifest")"
+        return 1
+    fi
     if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -m 0600 -o root -g root "$_manifest_tmp" "$_manifest"; then
         log_error "export_docker_secrets: failed to update managed runtime secret manifest"
         return 1

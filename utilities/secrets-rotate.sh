@@ -136,6 +136,7 @@ operation_set_phase "rotate" "Rotating encrypted secrets"
 load_project_environment || exit 1
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
+schema_validate || exit 1
 
 log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
 
@@ -225,6 +226,9 @@ _print_rotation_receipt() {
         crowdsec_worker_config)
             if [[ "$apply_status" == "applied" ]]; then
                 printf '    %s→%s CrowdSec Workers config re-rendered and service verified active\n' \
+                    "${COLOR_CYAN}" "${COLOR_RESET}"
+            elif [[ "$apply_status" == "disabled" ]]; then
+                printf '    %s→%s Skipped: CLOUDFLARE_PROXY_ENABLED is not true; no active Worker consumer was re-rendered or verified.\n' \
                     "${COLOR_CYAN}" "${COLOR_RESET}"
             else
                 printf '    %s→%s sudo ./utilities/crowdsec-worker-apply.sh\n' \
@@ -499,14 +503,20 @@ PYEOF
     fi
 
     if [[ "$_apply_type" == "crowdsec_worker_config" ]]; then
-        log_info "Applying CrowdSec Workers bouncer config for rotated credential..."
-        if crowdsec_worker_apply_config --require-service; then
-            _apply_status="applied"
+        if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" != "true" ]]; then
+            _apply_status="disabled"
+            log_warn "CrowdSec Workers config apply skipped: CLOUDFLARE_PROXY_ENABLED is not true."
+            log_warn "Encrypted secret state changed, but no active Worker consumer was re-rendered or service-verified."
         else
-            _apply_status="failed"
-            _apply_failed="true"
-            log_error "Encrypted secret state changed, but CrowdSec Workers config apply failed."
-            log_error "Retry exactly this apply step with: sudo ./utilities/crowdsec-worker-apply.sh"
+            log_info "Applying CrowdSec Workers bouncer config for rotated credential..."
+            if crowdsec_worker_apply_config --require-service; then
+                _apply_status="applied"
+            else
+                _apply_status="failed"
+                _apply_failed="true"
+                log_error "Encrypted secret state changed, but CrowdSec Workers config apply failed."
+                log_error "Retry exactly this apply step with: sudo ./utilities/crowdsec-worker-apply.sh"
+            fi
         fi
     fi
 

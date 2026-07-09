@@ -528,8 +528,8 @@ prepare_docker_secrets() {
   fi
 
   check_age_key_health_preflight || return 1
+  schema_validate || return 1
   validate_required_secrets "$SECRETS_FILE" || return 1
-  check_placeholder_values "$SECRETS_FILE" || return 1
   export_docker_secrets "$DOCKER_SECRETS_DIR" || return 1
   log_success "Docker secrets prepared"
   return 0

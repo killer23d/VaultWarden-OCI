@@ -111,6 +111,7 @@ operation_set_phase "edit" "Editing encrypted secrets"
 load_project_environment || exit 1
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
+schema_validate || exit 1
 
 # Parse EDITOR into an array so flag-bearing values such as EDITOR='code --wait' work.
 read -ra EDITOR_CMD <<< "${EDITOR:-nano}"

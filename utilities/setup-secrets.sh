@@ -1006,6 +1006,7 @@ HELP
 
         if ! ensure_prerequisites;    then return 1; fi
         if ! ensure_argon2_available; then return 1; fi
+        schema_validate || return 1
 
         if ! check_reconfiguration; then
             log_info "Keeping existing secrets - no changes made"

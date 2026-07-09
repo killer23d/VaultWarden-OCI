@@ -45,9 +45,24 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 require_root "$@"
+source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 source "${PROJECT_ROOT}/lib/crowdsec-worker.sh"
+
+operation_acquire \
+    --id crowdsec-worker-apply \
+    --label "CrowdSec Workers config apply" \
+    --specific-lock /run/lock/vaultwarden-crowdsec-setup.lock || exit $?
+_crowdsec_worker_apply_cleanup() {
+    local rc=$?
+    operation_release "$rc"
+    exit "$rc"
+}
+trap _crowdsec_worker_apply_cleanup EXIT
+trap 'operation_release 130; exit 130' INT
+trap 'operation_release 143; exit 143' HUP TERM
+operation_set_phase "apply" "Applying CrowdSec Workers bouncer config"
 
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE

@@ -123,8 +123,10 @@ pass "setup-env creates persistent manifest/private state with root-operated per
 grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/secrets" "persistent secrets directory"' utilities/repair-permissions.sh || fail "repair does not cover persistent secrets dir"
 grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/secrets/secrets.yaml" "persistent secrets.yaml"' utilities/repair-permissions.sh || fail "repair does not cover persistent secrets.yaml"
 grep -Fq '_apply_known_path "${PROJECT_STATE_DIR}/config/dr-manifest.env" "DR manifest"' utilities/repair-permissions.sh || fail "repair does not use central contract for dr-manifest.env"
+grep -Fq '_apply_known_path /run/vaultwarden-oci/managed-secrets "managed secret reconciliation metadata"' utilities/repair-permissions.sh || fail "repair does not cover managed-secret metadata outside Docker secrets"
 grep -Fq 'find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0' utilities/repair-permissions.sh || fail "repair does not cover runtime secret files"
-pass "repair fallback covers persistent and runtime secret drift through central helpers"
+! grep -Fq '/run/vaultwarden-oci/secrets/.managed-secrets' utilities/repair-permissions.sh || fail "repair must not special-case private metadata inside Docker secrets"
+pass "repair fallback covers persistent, runtime, and managed-secret metadata drift through central helpers"
 
 # Fresh-start Caddy config preparation must target the exact bind mount used by
 # the runtime service. Otherwise Caddy creates /config/caddy itself at mode 0700
@@ -208,6 +210,15 @@ done
 ! _is_operator_permission_path "$PROJECT_STATE_DIR/secrets/secrets.yaml" || fail 'persistent secrets.yaml is still classified as operator path'
 [[ "$(expected_mode_for_path "$PROJECT_ROOT/.sops.yaml")" == 644 ]] || fail '.sops.yaml mode is not 0644'
 pass 'repo editable files remain operator-owned and persistent secrets are root-owned'
+
+[[ "$(expected_owner_for_path /run/vaultwarden-oci/managed-secrets)" == root ]] || fail 'managed-secret metadata owner is not root'
+[[ "$(expected_group_for_path /run/vaultwarden-oci/managed-secrets)" == root ]] || fail 'managed-secret metadata group is not root'
+[[ "$(expected_mode_for_path /run/vaultwarden-oci/managed-secrets)" == 600 ]] || fail 'managed-secret metadata mode is not 0600'
+[[ "$(expected_owner_for_path /run/vaultwarden-oci/secrets/example_secret)" == root ]] || fail 'runtime Docker secret file owner is not root'
+[[ "$(expected_group_for_path /run/vaultwarden-oci/secrets/example_secret)" == root ]] || fail 'runtime Docker secret file group is not root'
+[[ "$(expected_mode_for_path /run/vaultwarden-oci/secrets/example_secret)" == 444 ]] || fail 'runtime Docker secret file mode is not 0444'
+[[ "$(expected_mode_for_path /run/vaultwarden-oci/secrets)" == 700 ]] || fail 'runtime Docker secrets dir mode is not 0700'
+pass 'managed-secret metadata is outside the Docker secret wildcard contract'
 
 persistent_secret="$PROJECT_STATE_DIR/secrets/secrets.yaml"
 printf 'secrets: {}\n' > "$persistent_secret"
