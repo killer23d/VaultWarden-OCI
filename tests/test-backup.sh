@@ -153,6 +153,89 @@ printf 'PASS: backup completion ordering and discard contracts\n'
 )
 
 check_backup_completion_contracts
+check_emergency_offsite_metadata_contract() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BACKUP="$ROOT/utilities/backup-run.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+cat > "$TMP/sync-probe.sh" <<EOF_PROBE
+set -uo pipefail
+TMPDIR_BACKUP="$TMP/work"
+mkdir -p "\$TMPDIR_BACKUP"
+FAIL_SUFFIX="\${FAIL_SUFFIX:-}"
+backup_log_info(){ printf 'INFO %s\\n' "\$*"; }
+log_warn(){ printf 'WARN %s\\n' "\$*"; }
+log_error(){ printf 'ERROR %s\\n' "\$*"; }
+get_config_value(){
+  case "\$1" in
+    RCLONE_REMOTE_NAME) printf '%s\\n' mockremote ;;
+    RCLONE_REMOTE_PATH) printf '%s\\n' vaultwarden_backups ;;
+    *) printf '%s\\n' "\${2:-}" ;;
+  esac
+}
+_resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(); }
+rclone(){
+  local cmd="\$1"; shift
+  case "\$cmd" in
+    lsd) return 0 ;;
+    copy)
+      local src="\$1"
+      printf '%s\\n' "\$src" >> "$TMP/rclone-copy.calls"
+      if [[ -n "\$FAIL_SUFFIX" && "\$src" == *"\$FAIL_SUFFIX" ]]; then return 9; fi
+      return 0
+      ;;
+    size) printf 'Total size: 1234 Bytes (1.205 KiB)\\n'; return 0 ;;
+    *) return 0 ;;
+  esac
+}
+$(_extract_func "$BACKUP" sync_to_rclone)
+archive="$TMP/emergency.tar.zst.age"
+printf archive > "\$archive"
+printf 'encryption_mode=age-passphrase\\n' > "\${archive}.meta"
+printf checksum > "\${archive}.sha256"
+rc=0
+sync_to_rclone "\$archive" emergency || rc=\$?
+printf 'RC=%s\\n' "\$rc"
+exit 0
+EOF_PROBE
+
+: > "$TMP/rclone-copy.calls"
+FAIL_SUFFIX=.meta bash "$TMP/sync-probe.sh" >"$TMP/meta-fail.out" 2>&1 || fail 'emergency metadata upload probe crashed'
+grep -q '^RC=3$' "$TMP/meta-fail.out" || { cat "$TMP/meta-fail.out" >&2; fail 'emergency .meta upload failure must return distinct status 3'; }
+grep -qi 'emergency offsite delivery is incomplete\|remote emergency recovery point is incomplete' "$TMP/meta-fail.out" \
+  || fail 'emergency .meta upload failure must report incomplete recovery delivery'
+! grep -q 'The primary backup archive was delivered' "$TMP/meta-fail.out" \
+  || fail 'emergency .meta upload failure must not claim the primary is a complete delivered recovery point'
+
+: > "$TMP/rclone-copy.calls"
+FAIL_SUFFIX=.sha256 bash "$TMP/sync-probe.sh" >"$TMP/sha-fail.out" 2>&1 || fail 'checksum sidecar upload probe crashed'
+grep -q '^RC=2$' "$TMP/sha-fail.out" || { cat "$TMP/sha-fail.out" >&2; fail '.sha256 upload failure must remain warning-class status 2'; }
+grep -q 'The primary backup archive was delivered' "$TMP/sha-fail.out" \
+  || fail '.sha256 upload failure must retain warning-class primary-delivered wording'
+
+grep -Fq 'elif (( _sync_rc == 3 )); then' "$BACKUP" \
+  || fail 'backup run caller must handle emergency metadata delivery status separately'
+grep -Fq 'FAILED: emergency restore metadata missing remotely; local backup is safe' "$BACKUP" \
+  || fail 'backup run summary must mark incomplete emergency offsite delivery as failed'
+
+printf 'PASS: emergency offsite metadata is restore-critical while checksum sidecars remain warning-class\n'
+)
+
+check_emergency_offsite_metadata_contract
 check_rclone_config_contracts() (
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

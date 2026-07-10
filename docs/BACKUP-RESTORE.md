@@ -69,6 +69,8 @@ sudo ./backup.sh sync
 
 A requested offsite sync that is skipped or fails must not be described as completed offsite protection.
 
+For `emergency` backups, the matching `.meta` sidecar is restore-critical: its `encryption_mode` selects emergency passphrase or Age-recipient decryption. An emergency backup is not completely delivered offsite until both the primary archive and its matching non-empty `.meta` are present. `.sha256` and `.sha256.hmac` upload failures remain warning-class sidecar failures and do not change that emergency metadata rule.
+
 ### Retention
 
 Current defaults from `.env.example` are:
@@ -125,6 +127,8 @@ When the selected backup expects attached-volume state, restore must not silentl
 
 Prepared attached-volume targets participate in the `.vw-data-volume` sentinel contract. Restore may recreate safe missing directory/sentinel state on an already mounted writable target, but it does not format, partition, or guess block devices.
 
+The selected restore plan closes required executable dependencies before stopping services. Default rekey planning requires `sops` unless rotation is explicitly skipped, and a `full`/`emergency` restore to an actual mounted `STATE_DIR` requires `rsync` even when no `DATA_VOLUME_DEVICE` value is configured.
+
 ---
 
 ## 🔄 Restore Flow
@@ -146,6 +150,10 @@ The restore workflow is root-operated and follows these boundaries:
 | Health | verify `/alive` and the normal health path when services are started |
 
 An incomplete restore must not be presented as successful.
+
+Database-only automatic error recovery may restart only when the live database exists and passes SQLite integrity. Full/emergency automatic error recovery additionally requires broader state, configuration, and secret promotion plus the post-restore rekey or explicit-skip decision to reach its commit boundary; SQLite integrity alone is not sufficient.
+
+Supported version-1 archives with absolute member names are compatibility inputs only. Restore performs the mandatory traversal check, extracts them into the secure restore staging directory, validates the preflight-selected source root there, and promotes through the same target/layout-aware path. They are never extracted directly into `/`.
 
 Full/emergency restore extracts portable archive content without trusting stale owners/modes and then applies the target-host permission contract. See [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md).
 
@@ -334,6 +342,8 @@ sudo ./utilities/smoke-test.sh
 ```
 
 A successful browser login is useful but is not the production-readiness gate.
+
+Post-start health status controls restore completion wording. Warning-only health returns successful completion with warnings. Health failures, unavailable checks, operation-guard failures, or exit-75 active-operation contention do not roll back already committed restore artifacts, but they are not reported as a clean restore success. Follow the printed health/log investigation guidance and rerun health after any active operation clears.
 
 For local Caddy/TLS symptoms:
 

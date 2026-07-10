@@ -805,15 +805,24 @@ sync_to_rclone() {
     local meta_file="${enc_file}.meta"
     local _sidecar_warn=false
     local _sidecar_fail=0
+    local _emergency_meta_failed=false
     if [[ -f "$meta_file" ]]; then
         local _meta_exit=0
         rclone copy "${rclone_config_arg[@]}" "$meta_file" "$remote_path/" --checksum \
             2>"${rclone_stderr_tmp}" || _meta_exit=$?
         if (( _meta_exit != 0 )); then
-            log_warn "[backup] Sidecar upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — integrity metadata missing from remote." >&2
-            _sidecar_warn=true
-            (( _sidecar_fail++ )) || true
+            if [[ "$backup_type" == "emergency" ]]; then
+                log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — remote emergency recovery point is incomplete." >&2
+                _emergency_meta_failed=true
+            else
+                log_warn "[backup] Sidecar upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — integrity metadata missing from remote." >&2
+                _sidecar_warn=true
+                (( _sidecar_fail++ )) || true
+            fi
         fi
+    elif [[ "$backup_type" == "emergency" ]]; then
+        log_error "[backup] Emergency restore metadata is missing locally: $(basename "$meta_file") — remote emergency recovery point cannot be completed." >&2
+        _emergency_meta_failed=true
     fi
 
     local sha256_file="${enc_file}.sha256"
@@ -840,7 +849,10 @@ sync_to_rclone() {
         fi
     fi
 
-    if [[ "$_sidecar_warn" == "true" ]]; then
+    if [[ "$_emergency_meta_failed" == "true" ]]; then
+        log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing from ${remote_path}/." >&2
+        log_error "[backup] The local emergency backup remains valid. Do not treat the remote primary as a complete recovery point." >&2
+    elif [[ "$_sidecar_warn" == "true" ]]; then
         log_warn "[backup] One or more sidecar files could not be uploaded to ${remote_path}/." >&2
         log_warn "[backup] The primary backup archive was delivered. Remote integrity checks will" >&2
         log_warn "[backup] fall back to size-only verification until sidecars are re-uploaded." >&2
@@ -876,6 +888,10 @@ sync_to_rclone() {
     fi
 
     backup_log_info "Remote size verified: ${remote_file_path} — ${remote_size_bytes} bytes ${remote_size_human}"
+
+    if [[ "$_emergency_meta_failed" == "true" ]]; then
+        return 3
+    fi
 
     if [[ "$_sidecar_warn" == "true" ]]; then
         log_warn "[backup] Offsite sync completed with partial sidecar failures (${_sidecar_fail} file(s))"
@@ -1711,6 +1727,21 @@ main() {
             if (( _sync_rc == 2 )); then
                 offsite_status="synced with sidecar warnings"
                 log_warn "Offsite sync completed with partial sidecar failures — primary backup was delivered."
+            elif (( _sync_rc == 3 )); then
+                rclone_failed=true
+                offsite_status="FAILED: emergency restore metadata missing remotely; local backup is safe"
+                if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                    local subj="[VaultWarden] Emergency offsite delivery INCOMPLETE: $actual_type ($timestamp)"
+                    local bdy
+                    bdy="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n\nEmergency primary upload succeeded, but restore-critical .meta delivery failed.\nThe local emergency backup is intact. Do not treat the remote primary as a complete recovery point until the matching .meta is uploaded.\n' \
+                        "$actual_type" "$timestamp" \
+                        "$(basename "${backup_file:-unknown}")" \
+                        "$(hostname -f 2>/dev/null || hostname)")"
+                    send_notification_email "$subj" "$bdy" 2>/dev/null || true
+                fi
+                log_error "Emergency offsite delivery incomplete — restore metadata is missing remotely. Local backup is safe."
+                _print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"
+                exit 2
             elif (( _sync_rc != 0 )); then
                 rclone_failed=true
                 offsite_status="failed; local backup is safe"

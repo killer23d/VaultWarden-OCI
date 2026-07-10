@@ -69,7 +69,6 @@ _require_env_for_live_restore() {
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
     local -a soft=(sops zstd rclone)
-    [[ -n "$(get_config_value "DATA_VOLUME_DEVICE" "")" ]] && hard+=(rsync)
     local missing_hard=() missing_soft=()
     for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
     for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
@@ -121,6 +120,8 @@ ROTATE_AGE_KEY_POLICY=""
 SKIP_VERIFICATION=false
 RESTORE_ENV=true
 RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
+RESTORE_SNAPSHOT_RESULT="not-run"
+RESTORE_FULL_PROMOTION_COMMITTED=false
 USE_REMOTE=false
 KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
 RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
@@ -764,6 +765,12 @@ pull_remote_backup() {
     chmod 600 "$pull_dir"/*.age    2>/dev/null || true
     chmod 600 "$pull_dir"/*.sha256 2>/dev/null || true
     chmod 600 "$pull_dir"/*.meta   2>/dev/null || true
+
+    if [[ "$btype" == "emergency" && ! -s "${local_file}.meta" ]]; then
+        log_error "Remote emergency backup is incomplete: restore-critical metadata is missing for $(basename "$local_file")."
+        log_error "The matching .meta file is required to select emergency passphrase versus Age-recipient decryption."
+        return 1
+    fi
 
     local pulled_size
     pulled_size=$(stat -c%s "$local_file" 2>/dev/null || stat -f%z "$local_file" 2>/dev/null || echo 0)
@@ -1544,8 +1551,11 @@ check_archive_dependencies() {
     case "$backup_file" in
         *.tar.zst.age|*.zst.age|*.tar.zst) hard+=(zstd) ;;
     esac
-    if [[ "${ROTATE_AGE_KEY_POLICY:-}" != "skip" && -f "${STATE_DIR}/secrets/secrets.yaml" ]]; then
+    if [[ "${ROTATE_AGE_KEY_POLICY:-}" != "skip" ]]; then
         hard+=(sops)
+    fi
+    if [[ "${RESTORE_TYPE:-}" =~ ^(full|emergency)$ ]] && _path_is_mountpoint "$STATE_DIR"; then
+        hard+=(rsync)
     fi
     local _cmd
     for _cmd in "${hard[@]}"; do command -v "$_cmd" >/dev/null 2>&1 || missing_hard+=("$_cmd"); done
@@ -1553,8 +1563,9 @@ check_archive_dependencies() {
         echo "ERROR: restore.sh: the following required tools are not installed: ${missing_hard[*]}" >&2
         for _cmd in "${missing_hard[@]}"; do
             case "$_cmd" in
-                sops) echo "  Hint [sops]: apt install sops  OR  snap install sops" >&2 ;;
-                zstd) echo "  Hint [zstd]:      apt install zstd" >&2 ;;
+                rsync) echo "  Hint [rsync]:     apt install rsync" >&2 ;;
+                sops)  echo "  Hint [sops]:      apt install sops  OR  snap install sops" >&2 ;;
+                zstd)  echo "  Hint [zstd]:      apt install zstd" >&2 ;;
             esac
         done
         exit 1
@@ -1597,9 +1608,21 @@ _age_key_countdown() {
     done
 }
 
-# Verifies the restored database is good enough for automatic safety restart.
+# Verifies the selected restore transaction is committed enough for one automatic safety restart.
 _can_safe_restart() {
     local db="$STATE_DIR/data/db.sqlite3"
+
+    case "${RESTORE_TYPE:-}" in
+        db)
+            ;;
+        full|emergency)
+            [[ "${RESTORE_FULL_PROMOTION_COMMITTED:-false}" == "true" ]] || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
     [[ -f "$db" ]] || return 1
     sqlite3 "$db" "PRAGMA integrity_check;" 2>/dev/null | grep -qx ok
 }
@@ -1620,6 +1643,74 @@ _print_post_restore_summary() {
     log_info "  → Check health:  sudo ./maintenance.sh health"
     log_info "  → Check logs:    docker compose logs --tail=50"
     log_info "─────────────────────────────────────────────────────────────"
+}
+
+_complete_restore_after_health() {
+    local health_rc="$1"
+    local completion="clean"
+
+    case "$health_rc" in
+        0)
+            log_success "Post-restore health verification passed."
+            ;;
+        1)
+            log_warn "Post-restore health verification completed with warnings."
+            completion="warnings"
+            ;;
+        2)
+            log_error "Post-restore health verification found health failures."
+            log_error "Restore artifacts are committed and remain in place; no rollback was attempted."
+            log_error "Investigate with: sudo ./maintenance.sh health"
+            log_error "Then inspect: docker compose logs --tail=100"
+            _print_post_restore_summary
+            return 2
+            ;;
+        3)
+            log_error "Post-restore health checks could not run because a critical prerequisite or runtime condition failed."
+            log_error "Restore artifacts are committed and remain in place; no rollback was attempted."
+            log_error "Investigate with: sudo ./maintenance.sh health"
+            log_error "Then inspect: docker compose logs --tail=100"
+            _print_post_restore_summary
+            return 3
+            ;;
+        4)
+            log_error "Post-restore health verification failed because operation-guard infrastructure could not run."
+            log_error "Restore artifacts are committed and remain in place; no rollback was attempted."
+            log_error "Inspect active operations, then retry: sudo ./maintenance.sh health"
+            log_error "Also inspect: docker compose logs --tail=100"
+            _print_post_restore_summary
+            return 4
+            ;;
+        75)
+            log_warn "Post-restore health verification is unavailable because another health or repair operation is active."
+            log_warn "Restore artifacts are committed and remain in place; health verification was skipped."
+            log_warn "Retry after the active operation completes: sudo ./maintenance.sh health"
+            _print_post_restore_summary
+            return 75
+            ;;
+        *)
+            log_error "Post-restore health verification returned unexpected status ${health_rc}."
+            log_error "Restore artifacts are committed and remain in place; no rollback was attempted."
+            log_error "Investigate with: sudo ./maintenance.sh health"
+            _print_post_restore_summary
+            return "$health_rc"
+            ;;
+    esac
+
+    echo ""
+    auto_fix_critical_permissions "$PROJECT_ROOT" || \
+        log_warn "Final permission repair reported issues after health checks."
+    _print_post_restore_summary
+    if [[ "$completion" == "warnings" ]]; then
+        log_warn "Restore completed with warnings."
+    else
+        log_success "Restore complete."
+    fi
+    if [[ -n "$ROTATED_KEY_FILE" && "$DRY_RUN" != "true" ]]; then
+        log_info  "New age key is live at: $ROTATED_KEY_FILE"
+        log_info  "Run: sudo ./setup.sh systemd install  (to sync /etc/vaultwarden/)"
+    fi
+    return 0
 }
 
 _tar_filter_for_file() {
@@ -1746,13 +1837,32 @@ _restore_backup_encryption_mode() {
 _age_decrypt_restore_backup() {
     local backup_file="$1" age_key_file="$2" output_file="$3" age_err="$4"
     local encryption_mode="${5:-}"
-    if [[ "$RESTORE_TYPE" == "emergency" && "$encryption_mode" == "age-passphrase" ]]; then
-        age -d -o "$output_file" "$backup_file" 2>"$age_err"
-    elif [[ "$RESTORE_TYPE" == "emergency" && "$encryption_mode" == "age-recipient" && -n "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}" ]]; then
-        age -d -i "$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" -o "$output_file" "$backup_file" 2>"$age_err"
-    else
-        age -d -i "$age_key_file" -o "$output_file" "$backup_file" 2>"$age_err"
+
+    if [[ "$RESTORE_TYPE" == "emergency" ]]; then
+        case "$encryption_mode" in
+            age-passphrase)
+                age -d -o "$output_file" "$backup_file" 2>"$age_err"
+                ;;
+            age-recipient)
+                if [[ -n "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}" ]]; then
+                    age -d -i "$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" -o "$output_file" "$backup_file" 2>"$age_err"
+                else
+                    age -d -i "$age_key_file" -o "$output_file" "$backup_file" 2>"$age_err"
+                fi
+                ;;
+            "")
+                log_error "Emergency backup encryption_mode is missing; refusing ambiguous decrypt dispatch."
+                return 1
+                ;;
+            *)
+                log_error "Unsupported emergency backup encryption_mode: '$encryption_mode'"
+                return 1
+                ;;
+        esac
+        return $?
     fi
+
+    age -d -i "$age_key_file" -o "$output_file" "$backup_file" 2>"$age_err"
 }
 
 _decrypt_restore_archive_for_preflight() {
@@ -1995,17 +2105,20 @@ _preflight_operational_sops_key_for_snapshot() {
 create_pre_restore_snapshot() {
     local operational_sops_age_key_file="${1:-${OPERATIONAL_SOPS_AGE_KEY_FILE:-}}"
     local restore_type="${2:-${RESTORE_TYPE:-}}"
-    [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
+    RESTORE_SNAPSHOT_RESULT="failed"
+
+    if [[ "$NO_PRE_BACKUP" == "true" ]]; then
+        RESTORE_SNAPSHOT_RESULT="skipped"
+        log_info "Skipping pre-restore snapshot (--no-backup)"
+        return 0
+    fi
 
     local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local db_path="$state_dir/data/db.sqlite3"
 
-    # Fresh full/emergency DR target:
-    # If there is no current live database, there is nothing meaningful to
-    # snapshot before replacing the target state. Treat this as a safe bootstrap
-    # condition, not as a backup failure. Existing live installs still retain
-    # the hard-fail snapshot behavior below.
+    # Fresh full/emergency DR target: no live DB means no current generation to snapshot.
     if [[ "$restore_type" =~ ^(full|emergency)$ && ! -f "$db_path" ]]; then
+        RESTORE_SNAPSHOT_RESULT="skipped"
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] No current live DB found at $db_path — would skip pre-restore snapshot."
         else
@@ -2015,32 +2128,62 @@ create_pre_restore_snapshot() {
         return 0
     fi
 
-    [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would run: utilities/backup-run.sh run emergency"; return 0; }
+    if [[ "$DRY_RUN" == "true" ]]; then
+        RESTORE_SNAPSHOT_RESULT="skipped"
+        log_info "[DRY RUN] Would run: utilities/backup-run.sh run emergency"
+        return 0
+    fi
+
     _preflight_operational_sops_key_for_snapshot "$operational_sops_age_key_file" || return 1
     # Best-effort WAL checkpoint; swallow all failures intentionally.
     # shellcheck disable=SC2015
     [[ -f "$db_path" ]] && command -v sqlite3 >/dev/null 2>&1 && \
         sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+
     if [[ -x "${PROJECT_ROOT}/utilities/backup-run.sh" ]]; then
         log_info "Creating pre-restore emergency snapshot..."
         log_info "Invoking with live SOPS key: ${PROJECT_ROOT}/utilities/backup-run.sh run emergency --quiet"
-        if ! SOPS_AGE_KEY_FILE="$operational_sops_age_key_file" "${PROJECT_ROOT}/utilities/backup-run.sh" run emergency --quiet; then
-            if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
-                log_error "Pre-restore snapshot FAILED (hard-fail)."
-                log_error "Use --no-backup only if current local state is disposable, or set RESTORE_SNAPSHOT_HARD_FAIL=false to continue."
-                return 1
-            fi
-            log_warn "Pre-restore snapshot failed (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
+        if SOPS_AGE_KEY_FILE="$operational_sops_age_key_file" "${PROJECT_ROOT}/utilities/backup-run.sh" run emergency --quiet; then
+            RESTORE_SNAPSHOT_RESULT="created"
+            return 0
         fi
-    else
-        local msg="backup-run.sh not executable — cannot create pre-restore snapshot"
         if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
-            log_error "$msg"
+            log_error "Pre-restore snapshot FAILED (hard-fail)."
             log_error "Use --no-backup only if current local state is disposable, or set RESTORE_SNAPSHOT_HARD_FAIL=false to continue."
             return 1
         fi
-        log_warn "$msg (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
+        RESTORE_SNAPSHOT_RESULT="soft-failed"
+        log_warn "Pre-restore snapshot failed (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
+        return 0
     fi
+
+    local msg="backup-run.sh not executable — cannot create pre-restore snapshot"
+    if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
+        log_error "$msg"
+        log_error "Use --no-backup only if current local state is disposable, or set RESTORE_SNAPSHOT_HARD_FAIL=false to continue."
+        return 1
+    fi
+    RESTORE_SNAPSHOT_RESULT="soft-failed"
+    log_warn "$msg (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
+    return 0
+}
+
+_set_snapshot_operation_phase() {
+    case "${RESTORE_SNAPSHOT_RESULT:-}" in
+        created)
+            operation_set_phase "snapshot" "Created pre-restore snapshot"
+            ;;
+        skipped)
+            operation_set_phase "snapshot" "Pre-restore snapshot skipped"
+            ;;
+        soft-failed)
+            operation_set_phase "snapshot" "Pre-restore snapshot soft-failed; continuing by policy"
+            ;;
+        *)
+            log_error "Unexpected pre-restore snapshot result: ${RESTORE_SNAPSHOT_RESULT:-unset}"
+            return 1
+            ;;
+    esac
 }
 
 cleanup_pre_restore_artefacts() {
@@ -2175,28 +2318,24 @@ restore_full() {
     fi
 
     if [[ "$archive_format" == "absolute" ]]; then
-        log_warn "Legacy archive format detected (version=1, absolute paths)."
+        log_warn "Legacy archive format detected (version=1, absolute paths). Using staged extraction before live promotion."
         # Always run traversal check regardless of SKIP_VERIFICATION.
-        # Path traversal can lead to arbitrary file overwrite — this check must
-        # never be skipped, even with --skip-verification.
+        # Legacy member grammar permits leading '/', so do not apply the relative-member validator here.
         check_traversal_only "$dec_tar" || return 1
         log_success "Archive traversal check passed (legacy format)."
-        [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would tar -xf to /"; return 0; }
-        _tar_extract_archive "$dec_tar" / "$tar_filter"
-        # shellcheck disable=SC2015  # best-effort chown; intentionally swallows failure
-        [[ -d "$state_dir" ]] && chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || true
-        purge_wal_shm "$state_dir/data/db.sqlite3" || true
-        log_success "Legacy archive restored."
-        return 0
+    elif [[ "$SKIP_VERIFICATION" != "true" ]]; then
+        tar_validate_members "$dec_tar" || return 1
     fi
 
-    [[ "$SKIP_VERIFICATION" != "true" ]] && { tar_validate_members "$dec_tar" || return 1; }
-    [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would stage-extract and atomic-mv archive."; return 0; }
+    [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would extract archive into secure staging and promote the selected state/config paths."; return 0; }
 
     local staging="$tmpdir/stage"
     mkdir -p "$staging"
     log_info "Extracting archive to staging directory..."
-    _tar_extract_archive "$dec_tar" "$staging" "$tar_filter"
+    if ! _tar_extract_archive "$dec_tar" "$staging" "$tar_filter"; then
+        log_error "Archive extraction into restore staging failed; live state has not been promoted."
+        return 1
+    fi
 
     local source_root="${RESTORE_PREFLIGHT_SOURCE_ROOT:-$state_dir}"
     local rel_source="${source_root#/}"
@@ -2298,11 +2437,25 @@ restore_full() {
         unset -f _rollback_payload_paths
     else
         if [[ "$source_root" == "$state_dir" ]]; then
-            # Boot-only same-layout mode: atomic directory swap (fast path).
-            [[ -d "$state_dir" ]] && mv "$state_dir" "${state_dir}.pre-restore-${ts}"
+            # Boot-only same-layout mode: two-rename directory swap (fast path).
+            local old_state_snapshot=""
+            if [[ -d "$state_dir" ]]; then
+                old_state_snapshot="${state_dir}.pre-restore-${ts}"
+                mv "$state_dir" "$old_state_snapshot"
+            fi
 
             log_info "State payload restore phase: promoting staged state directory to live path..."
-            mv "$staging/$rel_source" "$state_dir"
+            if ! mv "$staging/$rel_source" "$state_dir"; then
+                log_error "Failed to promote staged restored state into $state_dir."
+                if [[ -n "$old_state_snapshot" && -e "$old_state_snapshot" && ! -e "$state_dir" ]]; then
+                    if mv "$old_state_snapshot" "$state_dir"; then
+                        log_warn "Restore promotion rollback succeeded: restored previous state to $state_dir."
+                    else
+                        log_error "CRITICAL: restore promotion rollback failed. Manual recovery required: move '$old_state_snapshot' to '$state_dir'."
+                    fi
+                fi
+                return 1
+            fi
         else
             # Cross-layout mode: never move arbitrary source-root contents into
             # the target. Promote only the same conservative state payload
@@ -2623,13 +2776,31 @@ main() {
     [[ -z "$archive_version" ]] && archive_version="unknown"
 
     if [[ "$RESTORE_TYPE" == "emergency" ]]; then
-        log_info "Emergency backup encryption mode: ${backup_encryption_mode:-age-recipient (inferred)}"
+        if [[ ! -s "$meta_file" ]]; then
+            log_error "Emergency restore requires a non-empty metadata sidecar: $meta_file"
+            log_error "Cannot select passphrase versus Age-recipient decryption safely."
+            exit 1
+        fi
+        case "$backup_encryption_mode" in
+            age-passphrase|age-recipient)
+                ;;
+            "")
+                log_error "Emergency backup metadata is missing encryption_mode; refusing ambiguous decrypt dispatch."
+                exit 1
+                ;;
+            *)
+                log_error "Unsupported emergency backup encryption_mode: '$backup_encryption_mode'"
+                log_error "Supported emergency modes: age-passphrase, age-recipient"
+                exit 1
+                ;;
+        esac
+        log_info "Emergency backup encryption mode: ${backup_encryption_mode}"
         if [[ -n "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}" && ! -f "$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" ]]; then
             log_error "EMERGENCY_BACKUP_AGE_IDENTITY_FILE is set but file not found: $EMERGENCY_BACKUP_AGE_IDENTITY_FILE"
             log_error "Fix the path in .env or unset it to use the standard key prompt."
             exit 1
         fi
-        if [[ ( -z "$backup_encryption_mode" || "$backup_encryption_mode" == "age-recipient" ) \
+        if [[ "$backup_encryption_mode" == "age-recipient" \
               && -z "$KEY_FILE_ARG" && -z "$RECOVERY_KIT_FILE" && -z "${RESTORE_AGE_KEY_FILE:-}" ]]; then
             log_warn "No explicit key supplied; will use configured key:"
             log_warn "  $OPERATIONAL_SOPS_AGE_KEY_FILE"
@@ -2664,9 +2835,6 @@ main() {
     fi
 
     _require_selected_archive_tools "$BACKUP_FILE" || exit 1
-    if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ -n "$(get_config_value "DATA_VOLUME_DEVICE" "")" ]]; then
-        _require_command_for_path rsync "block-volume full/emergency restores" rsync || exit 1
-    fi
 
     if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]]; then
         log_warn "Full/emergency restore replaces application state/config and may require the same expected storage class."
@@ -2707,7 +2875,7 @@ main() {
     fi
 
     create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" "$RESTORE_TYPE" || exit 1
-    operation_set_phase "snapshot" "Created pre-restore snapshot"
+    _set_snapshot_operation_phase || exit 1
 
     RESTORE_DESTRUCTIVE_PHASE_STARTED=false
     _RESTORE_SAFETY_NET_RUNNING=false
@@ -2737,7 +2905,8 @@ main() {
                         bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
                             log_error "CRITICAL: Service restart failed. Manual: sudo ./startup.sh --skip-pull"
                     else
-                        log_error "DB integrity check failed or DB not found after restore error."
+                        log_error "Restore state is not eligible for automatic safety restart."
+                        log_error "DB restores require an integrity-valid live DB; full/emergency restores also require committed promotion and rekey state."
                         log_error "Refusing automatic restart. Investigate before starting services."
                         log_error "Manual start checklist:"
                         _restore_print_manual_start_checklist
@@ -2874,6 +3043,10 @@ main() {
         exit 1
     fi
 
+    if [[ "$DRY_RUN" != "true" && "$RESTORE_TYPE" =~ ^(full|emergency)$ ]]; then
+        RESTORE_FULL_PROMOTION_COMMITTED=true
+    fi
+
     if [[ "$DRY_RUN" != "true" ]]; then
         # Full/emergency archives are extracted with --no-same-owner and
         # promoted with --no-owner/--no-group for cross-host safety. Re-apply
@@ -2886,7 +3059,7 @@ main() {
             fi
         fi
         if ! _restore_should_start_services; then
-            trap - ERR
+            trap - ERR HUP INT TERM
             auto_fix_critical_permissions "$PROJECT_ROOT"
             _print_post_restore_summary
             log_success "Restore complete; services were not started."
@@ -2898,9 +3071,9 @@ main() {
             log_error "Investigate with: docker compose logs --tail=50"
             exit 1
         fi
-        # Services are now running — clear the safety-net ERR trap so that
-        # errors in the post-startup health check do not trigger a restart.
-        trap - ERR
+        # Services have started from committed restore artifacts. The pre-commit
+        # safety net must not restart them again because of health or signal exits.
+        trap - ERR HUP INT TERM
 
         local _health_timeout
         _health_timeout="${RESTORE_HEALTH_TIMEOUT:-$(get_config_value "RESTORE_HEALTH_TIMEOUT" "60")}"
@@ -2914,23 +3087,17 @@ main() {
             log_warn "Service did not reach healthy state within ${_health_timeout}s — check logs."
         fi
 
+        local health_rc=0
         if [[ -x "${PROJECT_ROOT}/utilities/maintenance-health.sh" ]]; then
             log_info "Running post-restore health check..."
             log_info "Invoking: ${PROJECT_ROOT}/utilities/maintenance-health.sh"
-            "${PROJECT_ROOT}/utilities/maintenance-health.sh" || {
-                log_warn "Health check reported issues after restore."
-                log_warn "Investigate with: docker compose logs --tail=50"
-            }
+            "${PROJECT_ROOT}/utilities/maintenance-health.sh" || health_rc=$?
+        else
+            log_error "Post-restore health verification could not run: utilities/maintenance-health.sh is not executable."
+            health_rc=3
         fi
-    fi
-
-    echo ""
-    auto_fix_critical_permissions "$PROJECT_ROOT"
-    _print_post_restore_summary
-    log_success "Restore complete."
-    if [[ -n "$ROTATED_KEY_FILE" && "$DRY_RUN" != "true" ]]; then
-        log_info  "New age key is live at: $ROTATED_KEY_FILE"
-        log_info  "Run: sudo ./setup.sh systemd install  (to sync /etc/vaultwarden/)"
+        _complete_restore_after_health "$health_rc"
+        return $?
     fi
 }
 
