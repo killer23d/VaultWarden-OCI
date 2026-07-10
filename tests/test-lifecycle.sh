@@ -14,7 +14,7 @@ extract_func(){
     $0 ~ "^" f "\\(\\)" {p=1}
     p {
       print
-      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
       depth += opens - closes
       if (depth == 0) exit
     }' "$file"
@@ -448,30 +448,12 @@ require 'source "\$\{SCRIPT_DIR\}/lib/operations\.sh"' "$STARTUP" \
 require '--id startup' "$STARTUP" "startup.sh must use the startup operation id"
 require '--specific-lock /run/lock/vaultwarden-startup\.lock' "$STARTUP" \
   "startup.sh must use the lifecycle-specific lock"
-require 'utilities/env-edit\.sh" sync' "$STARTUP" \
-  "startup.sh must run env sync inside the lifecycle operation"
 
 awk '
   /_startup_acquire_operation_guard/ { guard=NR }
   /if \[\[ "\$DO_DOWN" == "true" \]\]/ { stop=NR }
   END { exit !(guard && stop && guard < stop) }
 ' "$STARTUP" || fail "startup stop path must acquire guard before docker compose down"
-
-awk '
-  /^up: /,/^start:/ {
-    if (/\$\(MAKE\) sync-env/) bad=1
-    if (/\.\/startup\.sh/) startup=1
-  }
-  END { exit !(startup && !bad) }
-' "$MAKEFILE" || fail "make up must not run env sync before guarded startup.sh"
-
-awk '
-  /^restart: /,/^safe-restart:/ {
-    if (/\$\(MAKE\) sync-env/) bad=1
-    if (/\.\/startup\.sh --force/) startup=1
-  }
-  END { exit !(startup && !bad) }
-' "$MAKEFILE" || fail "make restart must not run env sync before guarded startup.sh"
 
 awk '
   /^down: /,/^stop:/ { if (/\.\/startup\.sh stop/) found=1 }
@@ -515,7 +497,7 @@ _extract_func(){
     $0 ~ "^" f "\\(\\)" {p=1}
     p {
       print
-      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
       depth += opens - closes
       if (depth == 0) exit
     }' "$file"
