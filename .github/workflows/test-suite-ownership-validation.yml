@@ -1,0 +1,81 @@
+name: Test Suite Ownership Validation
+
+on:
+  push:
+    branches:
+      - test-suite-ownership-validation
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch delta baseline
+        run: git fetch origin delta --depth=1
+
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml shellcheck zstd
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Run exact requested validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '$ git diff --check origin/delta...HEAD'
+            git diff --check origin/delta...HEAD
+            echo 'RESULT: PASS'
+
+            echo '$ bash -n tests/run-tests.sh tests/test-*.sh'
+            bash -n tests/run-tests.sh tests/test-*.sh
+            echo 'RESULT: PASS'
+
+            echo "$ find . -type f -name '*.sh' | xargs shellcheck -x --severity=warning"
+            find . -type f -name '*.sh' | xargs shellcheck -x --severity=warning
+            echo 'RESULT: PASS'
+
+            echo '$ ./tests/run-tests.sh all'
+            ./tests/run-tests.sh all
+            echo 'RESULT: PASS'
+
+            echo '$ git diff -- Makefile'
+            git diff -- Makefile
+            test -z "$(git diff -- Makefile)"
+            echo 'RESULT: PASS (empty)'
+
+            echo '$ git diff origin/delta...HEAD -- Makefile'
+            git diff origin/delta...HEAD -- Makefile
+            test -z "$(git diff origin/delta...HEAD -- Makefile)"
+            echo 'RESULT: PASS (empty)'
+
+            echo '$ workflow contract checks'
+            grep -Fq 'tests/**' .github/workflows/doc-drift.yml
+            grep -Fq './tests/run-tests.sh all' .github/workflows/doc-drift.yml
+            test "$(grep -Fc './tests/run-tests.sh all' .github/workflows/doc-drift.yml)" -eq 1
+            echo 'RESULT: PASS'
+          } 2>&1 | tee /tmp/ownership-validation.log
+
+      - name: Export validated checkout
+        run: |
+          tar --exclude=.git --exclude=.github/workflows/test-suite-ownership-validation.yml -czf /tmp/ownership-checkout.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ownership-validation-checkout
+          path: |
+            /tmp/ownership-validation.log
+            /tmp/ownership-checkout.tar.gz
+          retention-days: 1
