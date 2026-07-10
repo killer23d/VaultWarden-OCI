@@ -1,307 +1,390 @@
 # Secrets Schema — VaultWarden-OCI
 
-`secrets-schema.yaml` is the **single source of truth** for every secret key managed by this project. It is committed unencrypted and contains no secret values — only structural metadata. Plain keys can usually be added in the schema alone; keys with custom collection or condition logic must also provide the referenced Bash function.
+`secrets-schema.yaml` is the single structural source of truth for secret keys managed by VaultWarden-OCI.
 
-Related docs: [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md) · [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [SCRIPTS.md](SCRIPTS.md) · [OPERATIONS.md](OPERATIONS.md)
+It contains no secret values and is safe to commit. The live values are stored in SOPS-encrypted:
 
----
-
-## ✏️ Operator Workflow
-
-### Adding or renaming a secret key
-
-1. Edit `secrets-schema.yaml` — add or rename the entry
-2. Run `./edit-secrets.sh edit` — type the value next to the key, save, and quit
-
-The key is immediately available to all consumers — bootstrap, rotation, placeholder checks, Docker secret export, and the `edit` hint layer. No script modifications required.
-
-The canonical key list is always available at runtime:
-
-```bash
-sudo utilities/setup-secrets.sh rotate list
+```text
+${PROJECT_STATE_DIR}/secrets/secrets.yaml
 ```
 
-### Changing a secret value
+Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md) · [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md)
+
+## Why the schema exists
+
+Secret setup, edit, rotation, collection, validation, apply behavior, and generated documentation must not maintain independent hard-coded key lists.
+
+The schema owns:
+
+- key name;
+- operator label;
+- fixed transform contract;
+- bootstrap placeholder;
+- collection mode;
+- supported auto/conditional function;
+- optional conditional group;
+- apply type/targets;
+- required flag;
+- editor hint.
+
+The implementation reads this metadata through `lib/schema.sh` and the owning secret utilities.
+
+## Operator workflow
+
+List key names without printing values:
+
+```bash
+sudo ./utilities/secrets-list.sh
+```
+
+Edit the encrypted file:
 
 ```bash
 sudo ./edit-secrets.sh edit
-# rename the key or overwrite the value, save, quit
-# the file is re-encrypted automatically with the same Age key
 ```
 
-Plain string secrets (anything with `hash: plain`) can be freely renamed and overwritten inline. Hashed secrets (`hash: argon2id`, `hash: bcrypt`) display an inline hint warning you not to type plaintext there — use `rotate` instead:
+Rotate one key through its schema transform/apply contract:
 
 ```bash
 sudo ./edit-secrets.sh rotate admin_token
+sudo ./edit-secrets.sh rotate smtp_password
+sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
+```
+
+Do not edit `secrets-schema.yaml` merely to change a secret value. The schema defines structure; `secrets.yaml` contains encrypted values.
+
+## Current schema fields
+
+### `key`
+
+Secret key as stored in `secrets.yaml`.
+
+Required naming pattern:
+
+```text
+^[a-z][a-z0-9_]*$
+```
+
+### `label`
+
+Human-readable collection prompt/description.
+
+### `hash`
+
+Closed transform contract:
+
+```text
+argon2id
+bcrypt
+plain
+none
+```
+
+The schema transform is not a suggestion. Rotation must use the fixed transform expected by the consumer.
+
+Examples:
+
+- `admin_token` → `argon2id`;
+- `admin_basic_auth_hash` → `bcrypt`;
+- Cloudflare/SMTP/API tokens → `plain`.
+
+### `placeholder`
+
+Value used when the bootstrap path creates the encrypted secret structure before a real value is collected/generated.
+
+Required-value validation uses the schema placeholder contract rather than a second hard-coded placeholder list.
+
+### `collect`
+
+Closed collection mode:
+
+```text
+interactive
+auto
+conditional
+skip
+```
+
+### `auto_fn`
+
+Supported generator used only with `collect: auto`.
+
+The current schema uses:
+
+```text
+auto_generate_secret_field
+```
+
+for `file_integrity_hmac_key`.
+
+Do not place arbitrary shell code/function names in the schema.
+
+### `condition_fn`
+
+Supported predicate used only with `collect: conditional`.
+
+The current push secret pair uses:
+
+```text
+condition_push_enabled
+```
+
+When push is disabled, the bootstrap/collection path writes the schema placeholder without prompting for the push pair.
+
+### `conditional_group`
+
+Optional named runtime requirement group.
+
+The current Cloudflare Workers values use:
+
+```text
+cloudflare_proxy
+```
+
+This allows the runtime/setup validation path to reason about keys that are required by a configured production feature rather than universally required for every theoretical mode.
+
+### `apply`
+
+Closed apply contract:
+
+```yaml
+apply:
+  type: compose_restart | systemd_restart | crowdsec_worker_config | none
+  targets:
+    - explicit-target
+```
+
+Current apply types are intentionally small. Do not add a generic hook/plugin engine for one new secret.
+
+### `required`
+
+When `true`, required-value validation fails while the key still contains the schema placeholder.
+
+A `false` value does not mean the secret is safe to print. It means it is not universally required by the base placeholder check.
+
+### `hint`
+
+Comment injected into the plaintext edit staging file to help the operator.
+
+Hints must not contain real secret values.
+
+## Current secret inventory
+
+| Key | Transform | Collection | Apply |
+| :-- | :-- | :-- | :-- |
+| `admin_token` | Argon2id | interactive | Compose restart: `vaultwarden` |
+| `admin_basic_auth_hash` | bcrypt | interactive | Compose restart: `caddy` |
+| `smtp_password` | plain | interactive | Compose restart: `postfix` |
+| `email_api_token` | plain | interactive | none |
+| `file_integrity_hmac_key` | plain | auto | none |
+| `push_installation_id` | plain | conditional | Compose restart: `vaultwarden` |
+| `push_installation_key` | plain | conditional | Compose restart: `vaultwarden` |
+| `caddy_cloudflare_dns_token` | plain | interactive | Compose restart: `caddy` |
+| `cf_worker_bouncer_token` | plain | interactive | CrowdSec Workers config apply |
+| `cloudflare_zone_id` | plain | interactive | CrowdSec Workers config apply |
+| `cf_account_id` | plain | interactive | CrowdSec Workers config apply |
+
+The table above reflects the current `secrets-schema.yaml`. The YAML file remains the executable source of truth if this reference ever drifts.
+
+## Required keys
+
+The current universally required schema keys are:
+
+```text
+admin_token
+admin_basic_auth_hash
+caddy_cloudflare_dns_token
+```
+
+Other keys may become operationally required by the configured feature path, such as Cloudflare proxy/Workers integration, Postfix SMTP relay, push, or API email mode.
+
+The supported golden production path requires the Cloudflare Workers and SMTP credentials described in [DEPLOYMENT.md](DEPLOYMENT.md), even when a base schema field is represented as conditional/not universally required.
+
+## Apply behavior
+
+### `compose_restart`
+
+The secret rotation path updates encrypted state/runtime secret material and applies the defined Compose service target.
+
+Examples:
+
+```text
+admin_token                 -> vaultwarden
+admin_basic_auth_hash       -> caddy
+smtp_password               -> postfix
+caddy_cloudflare_dns_token  -> caddy
+push installation pair      -> vaultwarden
+```
+
+Do not restart the whole stack when the schema already identifies the affected service unless the owning rotation workflow has another validated reason.
+
+### `crowdsec_worker_config`
+
+Used for:
+
+```text
+cf_worker_bouncer_token
+cloudflare_zone_id
+cf_account_id
+```
+
+The owning apply path renders/reconciles the Cloudflare Workers bouncer configuration. It is not a Compose restart.
+
+### `none`
+
+The schema does not prescribe an automatic service restart/apply action.
+
+This does not mean the new value is unused. The consuming workflow may read it on its next invocation.
+
+## Hashing contracts
+
+### `admin_token`
+
+The Vaultwarden admin token is stored as an Argon2id PHC string.
+
+Rotate it through:
+
+```bash
+sudo ./edit-secrets.sh rotate admin_token
+```
+
+Do not paste a plaintext admin password into `secrets.yaml` and relabel it as `admin_token`.
+
+### `admin_basic_auth_hash`
+
+The Caddy basic-auth credential uses bcrypt.
+
+Rotate it through:
+
+```bash
 sudo ./edit-secrets.sh rotate admin_basic_auth_hash
 ```
 
----
+### `plain`
 
-## 📋 Field Reference
+`plain` means SOPS stores the raw credential value inside encrypted YAML. It does not mean the value may be stored in plaintext `.env`, documentation, Git, or logs.
 
-| Field | Type | Required | Description |
-| :-- | :-- | :-- | :-- |
-| `key` | string | ✅ | Key name as it appears in `secrets.yaml`. Must match `^[a-z][a-z0-9_]*$`. |
-| `label` | string | ✅ | Human-readable prompt shown during interactive collection. |
-| `hash` | enum | ✅ | Fixed transform contract. See [Hash Types](#hash-types) below. |
-| `placeholder` | string | ✅ | Value written by `setup-secrets.sh bootstrap` before real secrets are set. |
-| `collect` | enum | ✅ | Collection mode. See [Collect Modes](#collect-modes) below. |
-| `auto_fn` | string | ✅ | Supported generator when `collect: auto`. Empty string when not applicable. |
-| `condition_fn` | string | Conditional keys | Bash predicate called before collection. It receives the key name, returns `0` to collect, and returns `1` to write the schema placeholder without prompting. |
-| `conditional_group` | string | Optional | Named runtime requirement group, currently used for Cloudflare proxy secrets. |
-| `apply` | mapping | ✅ | Closed apply contract with `type` and `targets`. Types: `compose_restart`, `systemd_restart`, `crowdsec_worker_config`, `none`. |
-| `required` | bool | ✅ | When `true`, `check_placeholder_values()` fails if this key still holds its placeholder. |
-| `hint` | string | ✅ | Comment line injected above the key in the plaintext temp file during `edit`. Empty string means no hint. |
+## Backup integrity HMAC key
 
-### Hash Types
+`file_integrity_hmac_key` authenticates backup checksum sidecars.
 
-| Value | Behaviour |
-| :-- | :-- |
-| `argon2id` | Plaintext is hashed with Argon2id before storage. Used by VaultWarden admin token. |
-| `bcrypt` | Plaintext is hashed with bcrypt and formatted as `admin <hash>` (htpasswd). Used by Caddy basic auth. |
-| `plain` | Value is stored as-is, no transform. Used for all API tokens and passphrases. |
-| `none` | Reserved. Not currently used. |
+It is auto-generated by the schema collection path.
 
-### Collect Modes
+Rotation is a compatibility event for retained backups: older `.sha256.hmac` sidecars were signed with the previous key.
 
-| Value | Behaviour |
-| :-- | :-- |
-| `interactive` | Operator is prompted at the terminal during `setup-secrets.sh configure`. |
-| `auto` | Value is generated automatically by the function named in `auto_fn`. |
-| `conditional` | The function named by `condition_fn` decides whether collection runs. See [Conditional Keys](#conditional-keys) below. |
-| `skip` | Key is never collected interactively; must be set manually via `edit` or `rotate`. |
+Before rotating:
 
----
+1. ensure recovery material containing the old key is stored off-host;
+2. identify retained backup generations signed with the old key;
+3. keep the old key available for controlled historical verification until those generations are retired.
 
-## 🔑 Key Inventory
+Do not delete old recovery material immediately after HMAC-key rotation and assume Age encryption alone proves the old sidecar's authenticity contract.
 
-| Key | Hash | Required | Collect | Apply |
-| :-- | :-- | :-- | :-- | :-- |
-| `admin_token` | `argon2id` | ✅ | `interactive` | `vaultwarden` |
-| `admin_basic_auth_hash` | `bcrypt` | ✅ | `interactive` | `caddy` |
-| `smtp_password` | `plain` | — | `interactive` | `postfix` |
-| `email_api_token` | `plain` | — | `interactive` | none |
-| `file_integrity_hmac_key` | `plain` | — | `auto` | none |
-| `push_installation_id` | `plain` | — | `conditional` | `vaultwarden` |
-| `push_installation_key` | `plain` | — | `conditional` | `vaultwarden` |
-| `caddy_cloudflare_dns_token` | `plain` | ✅ | `interactive` | `caddy` |
-| `cf_worker_bouncer_token` | `plain` | — | `interactive` | CrowdSec Workers config apply |
-| `cloudflare_zone_id` | `plain` | — | `interactive` | CrowdSec Workers config apply |
-| `cf_account_id` | `plain` | — | `interactive` | CrowdSec Workers config apply |
+## Adding a secret
 
----
+When a real production feature requires a new secret:
 
-## ⚙️ Schema Version
+1. add one entry to `secrets-schema.yaml`;
+2. choose a supported `hash` transform;
+3. choose a supported `collect` mode;
+4. use only supported `auto_fn`/`condition_fn` values;
+5. choose the smallest existing apply type that matches the consumer;
+6. add the consuming runtime path;
+7. add focused schema/secret tests;
+8. update operator docs when the key requires operator action.
 
-The file must begin with `schema_version: 1`. All scripts assert this value on load and fail fast if it does not match. This prevents silent breakage if the schema format changes in a future version.
+Do not add parallel key arrays to:
 
-```yaml
-schema_version: 1
+- `setup-secrets.sh`;
+- `secrets-rotate.sh`;
+- `secrets-edit.sh`;
+- documentation generators;
+- tests.
 
-secrets:
-  - key: admin_token
-    ...
-```
+If an existing schema accessor/closed apply type cannot express the new secret, first determine whether a small extension to the existing schema contract is enough. Do not create a generic secret plugin system.
 
----
+## Removing or renaming a secret
 
-## 🔀 Conditional Keys
+Treat removal/rename as a compatibility change.
 
-`push_installation_id` and `push_installation_key` use `condition_fn: condition_push_enabled`. The dispatcher evaluates that predicate for each key before entering key-specific collection logic:
-
-| `PUSH_ENABLED` | Behaviour |
-| :-- | :-- |
-| `true` (auto mode) | Placeholders are written with a warning because Bitwarden credentials cannot be generated automatically; rotate both fields before startup. |
-| `true` (interactive) | Operator is prompted for the installation ID and key as one atomic group. |
-| `false` or unset | Placeholder is written; push is disabled. |
-
-To add another conditional secret:
-
-1. Set `collect: conditional` and `condition_fn: your_predicate` in the schema.
-2. Define `your_predicate KEY` in `collect_secrets()` scope in `utilities/setup-secrets.sh`.
-3. Return `0` when the key should be collected and `1` when its schema placeholder should be used.
-4. Keep the predicate side-effect free; prompting and value generation belong in the key handler.
-
-An absent or unknown `condition_fn` is a hard configuration error, preventing a future conditional key from being silently skipped.
-
----
-
-## Per-installation SOPS configuration
-
-`.sops.yaml` is generated by `setup-secrets.sh bootstrap` from the deployment's Age public key and is intentionally gitignored. Committing a placeholder recipient would either dirty every installation during setup or risk encrypting to the wrong key. Re-run bootstrap or `make key-health` if the generated file is missing or stale.
-
----
-
-## 📧 Email Mode Sentinel Values
-
-`smtp_password` and `email_api_token` are gated by `EMAIL_MODE` in `.env`. When the current mode makes a key inapplicable, `collect_secrets()` writes a `NOT_USED_EMAIL_MODE=<mode>` sentinel value instead of prompting. This sentinel is distinct from a placeholder:
-
-| Value | Meaning |
-| :-- | :-- |
-| `PLACEHOLDER_NOT_CONFIGURED` | Key has never been set. `check_placeholder_values()` will warn if `required: true`. |
-| `NOT_USED_EMAIL_MODE=api` | SMTP key was skipped because `EMAIL_MODE=api`. Not an error. |
-| `NOT_USED_EMAIL_MODE=smtp` | API token was skipped because `EMAIL_MODE=smtp`. Not an error. |
-
----
-
-## 🔧 Schema Library (`lib/schema.sh`)
-
-`lib/schema.sh` is a standalone helper library. It is sourced by `lib/secrets.sh` and is transitively available to all callers without requiring a direct `source` line. It requires `yq` (v4+).
-
-### Functions
-
-| Function | Description |
-| :-- | :-- |
-| `schema_keys` | Prints all key names to stdout, one per line, in schema order. |
-| `schema_field KEY FIELD` | Prints the value of `FIELD` for `KEY`. Returns 1 if key or field is absent. |
-| `schema_field_safe KEY FIELD` | Like `schema_field` but returns an empty string instead of an error for absent optional fields. |
-| `schema_required_keys` | Prints keys where `required: true`, in schema order. Used by `check_placeholder_values()`. |
-| `schema_hinted_keys` | Prints keys where `hint` is non-empty. Used by `secrets-edit.sh` for inline comment injection. |
-| `schema_apply_type_for_key KEY` | Prints the closed apply type for `KEY`. |
-| `schema_apply_targets_for_key KEY` | Prints space-separated apply targets for `KEY`. |
-| `schema_services_for_key KEY` | Compatibility helper that prints Compose restart targets only. Non-Compose actions return empty. |
-| `schema_placeholder_for_key KEY` | Prints the placeholder string for `KEY`. Convenience wrapper around `schema_field`. |
-| `schema_key_exists KEY` | Returns 0 if `KEY` is defined in the schema, 1 otherwise. Used by `secrets-rotate.sh` to validate field arguments. |
-| `schema_collect_type KEY` | Prints the collect type: `interactive`, `auto`, `conditional`, or `skip`. |
-
-### Usage example
+Before editing the schema, search:
 
 ```bash
-source "${LIB_DIR}/log.sh"
-source "${LIB_DIR}/schema.sh"
-
-# Iterate all keys in schema order
-while IFS= read -r key; do
-    placeholder=$(schema_placeholder_for_key "$key")
-    collect_type=$(schema_collect_type "$key")
-    echo "$key → collect=$collect_type placeholder=$placeholder"
-done < <(schema_keys)
+grep -R "old_secret_key" . \
+  --exclude-dir=.git
 ```
 
-### Decrypting a single key at runtime
+Inspect:
 
-Use `decrypt_secret` from `lib/secrets.sh`. It handles `SOPS_AGE_KEY_FILE` setup and teardown, suppresses xtrace to prevent values appearing in debug logs, and captures sops stderr for actionable error messages:
+- Compose consumers;
+- Caddy/entrypoint code;
+- maintenance/email code;
+- CrowdSec setup/Workers rendering;
+- backup/recovery code;
+- tests;
+- generated command reference/help;
+- hand-maintained docs.
 
-```bash
-# Always capture via local variable — never pass directly as a command argument
-local value
-value=$(decrypt_secret "smtp_password") || return 1
-```
+After the consumer migration is complete, update the schema and encrypted secret state through the supported editor/setup path.
 
-> **Security note:** Do not pass `$(decrypt_secret ...)` directly as a positional argument to an external command. The plaintext would appear in `/proc/$$/cmdline` and be visible to other processes on the same host. Capture to a local variable first.
-
----
-
-## 🔗 Dependencies
-
-| Dependency | Purpose | Install |
-| :-- | :-- | :-- |
-| `yq` v4+ | Reads `secrets-schema.yaml` in all schema functions | `sudo snap install yq` |
-| `sops` | Encrypts and decrypts `secrets.yaml` | Installed by `setup.sh` |
-| `age` | Key management for SOPS | Installed by `setup.sh` |
-
-`yq` is validated at the top of every schema function. If it is not installed, the function emits a fatal error and returns 1 immediately.
-
----
-
-## 🛠️ Troubleshooting
-
-**`schema.sh: 'yq' is not installed`**
+Do not repair a schema mistake with branch-specific commands such as:
 
 ```bash
-sudo snap install yq
-# Verify:
-yq --version
-```
-
-**`schema.sh: schema file not found`**
-
-```bash
-ls -la secrets-schema.yaml
-# File must exist at the project root. If missing, restore from Git:
 git checkout Beta -- secrets-schema.yaml
 ```
 
-**`schema.sh: unsupported schema_version`**
-
-The `schema_version` field at the top of `secrets-schema.yaml` must be `1`. If you edited the file and changed this value, restore it:
+To restore the current branch's committed schema:
 
 ```bash
-# Check current value:
-yq '.schema_version' secrets-schema.yaml
-
-# Fix:
-# Edit secrets-schema.yaml and set schema_version: 1 as the first key.
+git restore --source=HEAD -- secrets-schema.yaml
 ```
 
-**Key added to schema but not appearing in `edit`**
+## Tool requirement
 
-After adding a key to `secrets-schema.yaml`, run bootstrap to write the placeholder into the encrypted file, then edit to set the real value:
+Schema access requires the Mike Farah `yq` v4 implementation used by the project.
+
+The supported host setup installs and validates the pinned `yq` v4 interface:
 
 ```bash
-# Bootstrap writes all schema keys with their placeholder values:
-sudo utilities/setup-secrets.sh bootstrap
-
-# Then set the real value:
-sudo ./edit-secrets.sh edit
+sudo ./utilities/setup-system.sh
 ```
 
-> **Note:** Bootstrap will not overwrite an existing `secrets.yaml`. If the file already exists, add the key placeholder manually via `edit`, then set the real value in the same session.
+Do not install Ubuntu/Python `yq` and assume it satisfies the repository syntax.
 
----
+Verify:
 
-## Rotating file_integrity_hmac_key
+```bash
+yq --version
+```
 
-### Why rotation requires a transition window
+The output must identify the Mike Farah implementation and v4 major version; the supported setup also validates the exact pinned default where required.
 
-Existing `.sha256.hmac` sidecars were signed with the old key. As soon as a new key is loaded, those legacy sidecars fail authentication even when `REQUIRE_AUTHENTICATED_INTEGRITY=false`. That flag permits SHA-256 fallback only when an HMAC sidecar is missing; it never accepts a present sidecar with an invalid HMAC.
+## Validation
 
-Keep an encrypted recovery kit containing the old key until every retained backup predates the rotation window. Legacy sidecars must be quarantined if those backups need SHA-only verification with the new key active.
+After a schema change:
 
-### Rotation procedure
+```bash
+sudo ./utilities/secrets-list.sh
+sudo make test-secrets
+./tests/run-tests.sh all
+```
 
-1. Export and securely store a recovery kit containing the current key:
+When the change affects public help text, regenerate the command reference through its owner:
 
-   ```bash
-   sudo ./edit-secrets.sh export-recovery-kit
-   ```
+```bash
+bash utilities/write-command-reference.sh
+```
 
-2. Temporarily set `REQUIRE_AUTHENTICATED_INTEGRITY=false` in `.env`. Before rotating, rename the existing local `.sha256.hmac` files to `.sha256.hmac.pre-rotation` under the configured `BACKUP_DIR`. This preserves them for authenticated recovery with the old key while allowing SHA-256 fallback during the transition:
+Do not hand-edit [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
 
-   ```bash
-   sudo find /path/from/BACKUP_DIR -type f -name '*.sha256.hmac' \
-       -exec sh -c 'for f do mv -- "$f" "$f.pre-rotation"; done' sh {} +
-   ```
+## Recovery material
 
-3. Generate and store a new 64-character key through the supported SOPS rotation path:
+Export current recovery material through:
 
-   ```bash
-   sudo ./edit-secrets.sh rotate file_integrity_hmac_key
-   ```
+```bash
+sudo ./utilities/secrets-export-recovery-kit.sh
+```
 
-4. Create fresh backups of each scheduled type and upload their newly signed sidecars:
+Re-export after material secret/key rotation according to the recovery plan.
 
-   ```bash
-   sudo ./backup.sh run db
-   sudo ./backup.sh run full
-   sudo ./backup.sh sync
-   ```
-
-5. Confirm the latest backup verifies with the new key:
-
-   ```bash
-   sudo ./backup.sh verify
-   ```
-
-6. Keep `REQUIRE_AUTHENTICATED_INTEGRITY=false` only for the quarantine window. After all pre-rotation backups have aged out under `BACKUP_RETENTION_*_DAYS` and remote pruning has removed them, delete the quarantined sidecars, discard the old recovery material, and restore:
-
-   ```dotenv
-   REQUIRE_AUTHENTICATED_INTEGRITY=true
-   ```
-
-For a legacy restore during the window, retain its quarantined HMAC and recovery kit. To use SHA-only fallback with the new key active, leave the HMAC sidecar quarantined before verification. Restoring its original name correctly requires the old key to be restored temporarily as well. Remote legacy sidecars remain until their archive is pruned; quarantine the downloaded HMAC before verifying an old remote backup with the new key active.
-
-### Emergency recovery when the key is lost
-
-If the old key is unavailable, set `REQUIRE_AUTHENTICATED_INTEGRITY=false` and quarantine the legacy `.sha256.hmac` sidecars as described above. The remaining `.sha256` files can then detect corruption but are not authenticated. Rotate `file_integrity_hmac_key`, create fresh `db` and `full` backups, run `sudo ./backup.sh sync`, and re-enable strict authenticated integrity after the legacy retention window closes.
+The recovery kit contains sensitive plaintext while exported. Store it off-host and remove plaintext server copies after confirming the external copy is usable.
