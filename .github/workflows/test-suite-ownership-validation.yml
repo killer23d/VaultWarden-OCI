@@ -1,9 +1,9 @@
 name: Test Suite Ownership Validation
 
 on:
-  push:
+  pull_request:
     branches:
-      - test-suite-ownership-validation
+      - delta
 
 permissions:
   contents: read
