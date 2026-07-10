@@ -1,305 +1,337 @@
 # VaultWarden-OCI — Ops Runbook
 
-Quick reference for the most common operations. All commands assume you are in
-the repository root on the server. Prefix with `sudo` where indicated.
+Quick reference for common production operations. Commands assume you are in the repository root on the supported Ubuntu 24.04 Noble host.
+
+The normal production lifecycle is root-operated. Use the `sudo` forms shown here.
 
 ---
 
-## First Time / Recovery
+## First-Time Deployment
 
-For first-time setup on a new host:
+1. Configure Cloudflare and the provider firewall/security group/network firewall.
+2. Run the supported first-install command:
 
-1. Configure the provider firewall, security group, or network firewall for ports `443` and `22` (`80` only for the documented HTTP/ACME fallback).
-2. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`.
-   This creates the initial environment and bootstraps encrypted secrets.
-3. Rotate required Cloudflare secret values:
-   `sudo ./edit-secrets.sh rotate cloudflare_zone_id`,
-   `sudo ./edit-secrets.sh rotate cf_account_id`, and
-   `sudo ./edit-secrets.sh rotate cf_worker_bouncer_token`.
-4. Re-login so your user picks up `docker` group membership.
-5. Start services with `sudo make up` and verify with `sudo make health`.
-6. **After CrowdSec is installed**, set the Cloudflare Worker route to
-   **Fail Open**: Cloudflare dashboard → your domain → Workers Routes → Edit
-   → Request limit failure mode → Fail open.
+   ```bash
+   sudo ./setup.sh install \
+     --domain <fqdn> \
+     --email <admin-email> \
+     --auto
+   ```
 
-See [docs/CROWDSEC.md](docs/CROWDSEC.md) for the full CrowdSec + Cloudflare
-Workers bouncer setup guide.
+3. Edit non-secret configuration and set external credentials:
 
-| Task | Command |
-|------|---------|
-| Initial setup (recommended explicit command) | `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto` |
-| Start the stack | `sudo make up` |
-| Stop the stack | `sudo make down` |
-| Restart all services | `sudo make restart` |
+   ```bash
+   sudo make edit-env
+   sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
+   sudo ./edit-secrets.sh rotate cloudflare_zone_id
+   sudo ./edit-secrets.sh rotate cf_account_id
+   sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+   sudo ./edit-secrets.sh rotate smtp_password
+   ```
+
+4. Start and verify the live stack:
+
+   ```bash
+   sudo make up
+   sudo make health
+   sudo ./maintenance.sh test-email --verbose
+   ```
+
+5. When the host is ready for scheduled work, activate and validate systemd automation:
+
+   ```bash
+   sudo ./setup.sh systemd install --enable-now
+   sudo ./setup.sh systemd validate
+   sudo ./utilities/smoke-test.sh
+   ```
+
+6. Export recovery material:
+
+   ```bash
+   sudo ./utilities/secrets-export-recovery-kit.sh
+   ```
+
+7. After the CrowdSec Workers bouncer has deployed its route, set the Cloudflare Worker route request-limit failure mode to **Fail open** as described in [docs/CROWDSEC.md](docs/CROWDSEC.md).
+
+A Docker-group re-login is not part of the production golden path. The production lifecycle uses root-operated commands.
 
 ---
 
 ## Daily Operations
 
 | Task | Command |
-|------|---------|
-| View service status | `sudo make status` |
-| View all logs (tail) | `sudo make logs-tail` |
-| View Vaultwarden logs | `sudo make logs-vaultwarden` |
-| View Caddy logs | `sudo make logs-caddy` |
-| View Postfix logs | `sudo make logs-postfix` |
-| View CrowdSec logs | `sudo make logs-crowdsec` |
-| Watch live logs | `make watch` |
+|---|---|
+| Start stack | `sudo make up` |
+| Stop stack | `sudo make down` |
+| Restart stack | `sudo make restart` |
+| Safe restart | `sudo make safe-restart` |
+| Service/status summary | `sudo make status` |
+| Active/interrupted operation status | `sudo make operations` |
+| Tail all logs | `sudo make logs-tail` |
+| Vaultwarden logs | `sudo make logs-vaultwarden` |
+| Caddy logs | `sudo make logs-caddy` |
+| Postfix logs | `sudo make logs-postfix` |
+| CrowdSec logs | `sudo make logs-crowdsec` |
 
----
-
-## Health & Monitoring
-
-| Task | Command |
-|------|---------|
-| Full health check | `sudo make health` |
-| Quick health check | `sudo make health-quick` |
-| Test email delivery | `sudo make health-email` |
-| Check age key health | `sudo make key-health` |
-| Continuous monitoring (30s) | `make monitor` |
-| Full diagnostic dump | `sudo make diagnose` |
-
----
-
-## Post-deployment and post-recovery VM smoke check
-
-From the repository root on the Ubuntu VM, use the smoke test as the normal
-verification path after deployment or recovery:
+When an SSH session drops during setup, backup, restore, update, storage migration, secrets work, or another guarded mutation, start with:
 
 ```bash
+sudo make operations
+```
+
+Kernel lock state is authoritative. If the original operation is still active, inspect its phase and wait or use the guarded conflict flow when offered. The project does not automatically kill `apt` or `dpkg` work.
+
+---
+
+## Health and Production Readiness
+
+| Task | Command |
+|---|---|
+| Full health check | `sudo make health` |
+| Quick health check | `sudo make health-quick` |
+| Test email | `sudo ./maintenance.sh test-email --verbose` |
+| Age key health | `sudo make key-health` |
+| Diagnostic dump | `sudo make diagnose` |
+| Production smoke test | `sudo ./utilities/smoke-test.sh` |
+
+The smoke test checks the canonical project environment, Docker/Compose, critical container health, TLS, `/alive`, admin protection, Age/SOPS state, materialized runtime secrets, backup recency, canonical systemd validation, CrowdSec, and disk space.
+
+A smoke-test `SKIP` is **not** production ready. Exit `0` requires no failed and no skipped checks.
+
+When the systemd automation check fails:
+
+```bash
+sudo ./setup.sh systemd validate
+```
+
+If validation reports stale installed scripts, libraries, or units, or unhealthy managed timers, activate the current repository state and revalidate:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
 ```
 
-If a check fails, run this compact troubleshooting sequence:
+Do not use `systemctl start vaultwarden-startup.service` as a generic readiness repair. The smoke test delegates installed-runtime and timer readiness to the canonical systemd validator.
+
+---
+
+## Repository Updates and Installed Runtime
+
+`git pull` updates the repository checkout. Existing systemd jobs execute root-owned copies under `/opt/vaultwarden-scripts`, so repository updates do not automatically activate new managed runtime code.
+
+After pulling changes that affect managed scripts, libraries, or units:
 
 ```bash
-docker compose -f docker-compose.yml config --quiet
-
-sudo systemd-analyze verify \
-  /etc/systemd/system/vaultwarden-startup.service
-
-# Operator remediation when the startup service is inactive; the smoke test
-# reports this command but never starts the service itself.
-sudo systemctl start vaultwarden-startup.service
-
-sudo test \
-  "$(stat -c '%U:%G %a' /run/vaultwarden-oci/secrets)" \
-  = "root:root 700"
-
-sudo find /run/vaultwarden-oci/secrets \
-  -maxdepth 1 \
-  -type f \
-  \( ! -user root -o ! -group root -o ! -perm 0444 \) \
-  -print
-
-sudo bash -c '
-  set -euo pipefail
-  export PROJECT_ROOT="$PWD"
-  source "$PROJECT_ROOT/lib/config.sh"
-  load_project_environment
-  SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" \
-    sops -d "$SECRETS_FILE" >/dev/null
-'
-
-curl -fsS "https://vault.example.com/alive"
+git pull --ff-only
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
 ```
 
-Replace `vault.example.com` with the actual Vaultwarden hostname.
-
-No output from `find` means it found no runtime secret file with an incorrect
-owner, group, or mode. Successful SOPS verification intentionally sends all
-plaintext to `/dev/null`; none of these checks should print secret values.
-`/run/vaultwarden-oci/secrets` is transient and is expected to be recreated
-after reboot by `vaultwarden-startup.service`. The documented `systemctl start`
-command is an operator action and is never performed automatically by the smoke
-test.
+`make update` is different: it updates container images through the maintenance update path. It is not a Git updater or a systemd runtime synchronizer.
 
 ---
 
-## Updates
+## Backup and Restore
 
 | Task | Command |
-|------|---------|
-| Update container images | `sudo make update` |
-| Check for image updates (no restart) | `make check-updates` |
-| Update host OS packages | `sudo make update-system` |
-| Update Cloudflare DNS records | `sudo make update-dns` |
+|---|---|
+| Database snapshot backup | `sudo make backup` |
+| Full disaster-recovery backup | `sudo make backup-full` |
+| Emergency clone-grade backup | `sudo make backup-emergency` |
+| List local backups | `sudo make list-backups` |
+| Backup inventory | `sudo make backup-status` |
+| Verify latest backup | `sudo ./backup.sh verify` |
+| Sync retained backups to rclone | `sudo ./backup.sh sync` |
+| Guided restore | `sudo make restore` |
+| Restore from remote | `sudo make restore-remote` |
+| Database-only restore | `sudo make restore-db` |
+| Restore preflight | `sudo make restore-preflight` |
+
+Backup tiers:
+
+- `db` — quick encrypted SQLite rollback;
+- `full` — normal disaster-recovery archive without the live operational Age private key;
+- `emergency` — clone-grade secrets-bearing capsule, independently sealed.
+
+Before full/emergency restore, inspect storage compatibility:
+
+```bash
+sudo ./restore.sh inspect --remote
+```
+
+For guided remote restore with an operator start gate:
+
+```bash
+sudo ./restore.sh interactive --remote --start-policy ask
+```
+
+A timeout or lost confirmation channel is not treated as an implicit yes/no success. Restore fails safe where acknowledgement is required and prints manual next steps.
+
+See [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) and [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md).
 
 ---
 
-## Backup & Restore
+## Secrets and Age Key Management
 
 | Task | Command |
-|------|---------|
-| Run DB snapshot backup now | `sudo make backup` |
-| Run full backup (DB + attachments + config) | `sudo make backup-full` |
-| Create emergency backup kit | `sudo make backup-emergency` |
-| List available backups | `sudo make list-backups` |
-| Show backup inventory | `sudo make backup-status` |
-| Copy all retained local backups to rclone | `sudo ./backup.sh sync` |
-| Interactive restore (guided) | `sudo make restore` |
-| Restore from remote storage | `sudo make restore-remote` |
-| Restore database only | `sudo make restore-db` |
-| Verify restore prerequisites | `sudo make restore-preflight` |
-| Disaster Recovery | Complete bare-metal restore from remote backup. See [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) |
-
----
-
-## Secrets Management
-
-| Task | Command |
-|------|---------|
+|---|---|
 | Edit encrypted secrets | `sudo make edit-secrets` |
-| Initialise secrets file | `sudo make init-secrets` |
-| Test secrets decryption | `sudo make test-secrets` |
+| Test SOPS decryption | `sudo make test-secrets` |
+| Rotate one secret | `sudo ./edit-secrets.sh rotate <key>` |
+| List secret key names | `sudo ./utilities/secrets-list.sh` |
+| Show current Age public recipient/path | `sudo make key-show` |
+| Check Age key health | `sudo make key-health` |
+| Create manual offline Age key copy | `sudo make key-backup` |
+| Generate password-manager escrow material | `sudo make key-escrow` |
+| Rotate operational Age/SOPS key | `sudo make key-rotate` |
+| Export recovery kit | `sudo ./utilities/secrets-export-recovery-kit.sh` |
+
+Persistent SOPS ciphertext lives under `${PROJECT_STATE_DIR}/secrets/secrets.yaml`. The live operational Age key is `/etc/vaultwarden/age-key.txt`. Transient decoded Compose secret source files live only under `/run/vaultwarden-oci/secrets` and are recreated by startup.
+
+After Age key rotation, retain recovery material for old backup generations until those backups are deliberately retired. See [docs/BOOTSTRAP_KEY_RECOVERY.md](docs/BOOTSTRAP_KEY_RECOVERY.md).
 
 ---
 
-## Age Key Management
+## Environment Configuration
 
-| Task | Command |
-|------|---------|
-| Show current age public key | `sudo make key-show` |
-| Check age key health | `sudo make key-health` |
-| Create local Age key copy for manual offline transfer | `sudo make key-backup` |
-| Generate password-manager Age key escrow file | `sudo make key-escrow` |
-| Rotate age key (re-encrypts secrets) | `sudo make key-rotate` |
-| Install age key from `secrets/keys/` | `sudo make key-install` |
+Edit non-secret configuration through:
 
----
+```bash
+sudo make edit-env
+```
 
-## User Management
+Check environment paths and drift with:
 
-| Task | Command |
-|------|---------|
-| Create break-glass admin account | `sudo make breakglass-create` |
-| Check break-glass account status | `sudo make breakglass-status` |
-| Remove break-glass admin account | `sudo make breakglass-remove` |
+```bash
+utilities/env-edit.sh status
+```
+
+The environment flow is:
+
+```text
+repository .env
+    -> env-edit sync
+${PROJECT_STATE_DIR}/config/install.env
+    -> systemd install
+/etc/vaultwarden/vaultwarden.env
+```
+
+For runtime loading, `/etc/vaultwarden/vaultwarden.env` is preferred when installed, then persistent `install.env`, then repository `.env` as a bootstrap/legacy fallback.
+
+Do not hand-edit installed runtime environment files as a normal configuration workflow.
 
 ---
 
 ## Maintenance
 
 | Task | Command |
-|------|---------|
-| Routine maintenance tasks | `sudo make maintenance` |
-| Full maintenance (all checks) | `sudo make maintenance-full` |
-| Database maintenance (VACUUM) | `sudo make db-maint` |
-| DB snapshot backup | `sudo make db-backup` |
-| Fix file permissions (post-sudo) | `sudo make fix-permissions` |
+|---|---|
+| Routine maintenance | `sudo make maintenance` |
+| Comprehensive maintenance | `sudo make maintenance-full` |
+| Database maintenance | `sudo make db-maint` |
+| Database backup | `sudo make db-backup` |
+| Check/repair known permissions | `sudo make fix-permissions` |
 | Prune unused Docker resources | `sudo make prune` |
+| Update container images | `sudo make update` |
+| Update host packages | `sudo make update-system` |
+| Update Cloudflare DNS | `sudo make update-dns` |
+
+Expected operation contention from guarded DNS/firewall jobs is a clean skip using exit `75` where the service contract defines it. A real nonzero failure must still be treated as failure.
 
 ---
 
 ## Systemd Integration
 
+The managed timer set is:
+
+- `vaultwarden-maintenance.timer`;
+- `vaultwarden-db-backup.timer`;
+- `vaultwarden-full-backup.timer`;
+- `vaultwarden-health.timer`;
+- `vaultwarden-dns-update.timer`;
+- `vaultwarden-firewall-update.timer`.
+
 | Task | Command |
-|------|---------|
-| Install systemd units & timers | `sudo make install-systemd` |
-| Show systemd unit status | `sudo make systemd-status` |
-| Show scheduled timer status | `make timers` |
-| Validate systemd unit files | `sudo make systemd-validate` |
-| Remove systemd units | `sudo make remove-systemd` |
+|---|---|
+| Install/enable, start timers now | `sudo ./setup.sh systemd install --enable-now` |
+| Install/enable without starting timers now | `sudo ./setup.sh systemd install --no-enable-now` |
+| Validate installed runtime and timers | `sudo ./setup.sh systemd validate` |
+| Show managed unit status | `sudo ./setup.sh systemd status` |
+| Show scheduled timers | `sudo make timers` |
+| Remove managed units | `sudo ./setup.sh systemd remove` |
+
+Use `--no-enable-now` on a replacement/recovery host that is not yet ready for scheduled backup, maintenance, DNS, or firewall work. Activate with `--enable-now` only after storage, secrets, rclone, networking, and live service readiness are verified.
 
 ---
 
-## SSH Break-Glass Access
+## CrowdSec Operations
 
-If you are locked out of the Vaultwarden admin panel:
-
-```bash
-# 1. Create a temporary break-glass admin account
-sudo make breakglass-create
-
-# 2. Log in at https://<your-domain>/admin with the generated credentials
-
-# 3. Remove the break-glass account after resolving the issue
-sudo make breakglass-remove
-```
-
----
-
-## 🛡️ CrowdSec Operations
-
-CrowdSec runs as a host systemd service (not a Docker container). It reads
-Vaultwarden, Caddy, and SSH logs and bans attackers via Cloudflare Workers KV
-(edge enforcement) and iptables (host-level enforcement).
-
-For full setup, Cloudflare dashboard configuration, and troubleshooting see
-[docs/CROWDSEC.md](docs/CROWDSEC.md).
-
-### Service management
+CrowdSec runs as a host service. The firewall bouncer enforces CrowdSec decisions at the host firewall layer, while the Cloudflare Workers bouncer pushes the configured locally generated decisions to Workers KV for edge enforcement.
 
 | Task | Command |
-|------|---------|
-| Check CrowdSec engine status | `sudo systemctl status crowdsec` |
-| Check Workers bouncer status | `sudo systemctl status crowdsec-cloudflare-worker-bouncer` |
-| Restart bouncer after config change | `sudo systemctl restart crowdsec-cloudflare-worker-bouncer` |
-| View bouncer logs (live) | `sudo journalctl -u crowdsec-cloudflare-worker-bouncer -f` |
-| Restart CrowdSec engine | `sudo systemctl restart crowdsec` |
+|---|---|
+| CrowdSec engine status | `sudo systemctl status crowdsec` |
+| Workers bouncer status | `sudo systemctl status crowdsec-cloudflare-worker-bouncer` |
+| Firewall bouncer status | `sudo systemctl status crowdsec-firewall-bouncer` |
+| Active decisions | `sudo cscli decisions list` |
+| Recent alerts | `sudo cscli alerts list --since 24h` |
+| Bouncer registration | `sudo cscli bouncers list` |
+| CrowdSec status helper | `sudo make crowdsec-status` |
+| Security report | `sudo make security-report` |
 
-### Decision management
-
-| Task | Command |
-|------|---------|
-| View active bans | `sudo cscli decisions list` |
-| View recent alerts | `sudo cscli alerts list --since 24h` |
-| Manually ban an IP (24 h) | `sudo cscli decisions add --ip 1.2.3.4 --duration 24h` |
-| Unban an IP | `sudo cscli decisions delete --ip 1.2.3.4` |
-| View metrics | `make crowdsec-status` |
-| Tail CrowdSec logs | `make logs-crowdsec` |
-| View security events (last 1h) | `make security-report` |
-| Check bouncer registration | `sudo cscli bouncers list` |
-
-### Self-lockout prevention
-
-Add your admin IP to the persistent CrowdSec allowlist using the setup script
-(writes a YAML parser file that survives hub updates):
+To remove a ban:
 
 ```bash
-# Single IP
-sudo ./utilities/setup-crowdsec.sh --admin-ip "$(curl -s https://ifconfig.me)"
-
-# CIDR range
-sudo ./utilities/setup-crowdsec.sh --admin-ip 203.0.113.0/24
-```
-
-### If you are locked out
-
-If your IP is banned and you cannot access the vault:
-
-```bash
-# 1. SSH to the server (vault bans do not affect SSH)
-# 2. Delete the ban immediately
 sudo cscli decisions delete --ip <your-ip>
-# 3. Add a persistent allowlist entry so it cannot recur
-sudo ./utilities/setup-crowdsec.sh --admin-ip <your-ip>
 ```
 
-### Re-apply CrowdSec Worker config after rotating CF credentials
+To configure a persistent admin allowlist entry:
 
 ```bash
-./edit-secrets.sh rotate cf_worker_bouncer_token
+sudo ./utilities/setup-crowdsec.sh --admin-ip <your-ip-or-cidr>
+```
+
+After rotating the Workers bouncer token or related Cloudflare IDs:
+
+```bash
+sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
 sudo ./utilities/crowdsec-worker-apply.sh
 ```
 
+See [docs/CROWDSEC.md](docs/CROWDSEC.md).
+
 ---
 
-## Tear-Down and Same-VM Test Reset
+## Break-Glass Admin
 
-Use a dry run before any destructive uninstall:
+```bash
+sudo make breakglass-create
+# resolve the emergency admin task
+sudo make breakglass-remove
+```
+
+Check status with:
+
+```bash
+sudo make breakglass-status
+```
+
+Remove the break-glass account after the incident.
+
+---
+
+## Same-VM Test Reset and Uninstall
+
+Preview destructive work first:
 
 ```bash
 sudo make uninstall-dry-run
-# or preview the checkout-preserving reset path directly
 sudo ./utilities/uninstall-vaultwarden.sh run --test-reset --dry-run
 ```
 
-For repeated setup, restore, or DR acceptance testing on the **same VM**, use
-`--test-reset`. It removes VaultWarden-OCI managed state, generated local install
-artifacts, systemd integration, managed Docker resources, CrowdSec integration,
-and project firewall rules, but preserves the Git checkout so the same branch can
-be installed again immediately:
+For repeated acceptance testing on the same VM while preserving the Git checkout:
 
 ```bash
 sudo ./utilities/uninstall-vaultwarden.sh run \
@@ -307,34 +339,37 @@ sudo ./utilities/uninstall-vaultwarden.sh run \
   --i-have-saved-my-recovery-kit
 ```
 
-The uninstall finishes with residual verification and fails instead of reporting
-success when a known managed stack artifact remains. Docker itself,
-`/var/lib/docker`, common host tools, SSH configuration, the Docker group, and
-unrelated firewall rules are intentionally preserved. Therefore `--test-reset`
-is a **clean VaultWarden-OCI stack reset**, not a recreation of a pristine OCI
-Ubuntu image.
+`--test-reset` removes managed VaultWarden-OCI state, generated install artifacts, managed systemd integration, managed Docker resources, CrowdSec integration, and project firewall rules, while preserving the checkout and host-wide Docker/tooling state. It is a clean project-stack reset, not a pristine-image rebuild.
 
-For a normal full uninstall that may also remove the repository checkout:
+Normal full uninstall:
 
 ```bash
-sudo make uninstall
-# equivalent direct command
-sudo ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
+sudo ./utilities/uninstall-vaultwarden.sh run \
+  --i-have-saved-my-recovery-kit
 ```
 
-Use `--force` only for deliberately disposable test data after recovery material
-has been verified outside the host; it bypasses backup and Age-key confirmations.
+Use `--force` only for deliberately disposable test state after recovery material has been verified outside the host.
 
-## Resilient recovery quick reference
+---
 
-Run recovery on the replacement VM after attaching and mounting the data volume:
+## Replacement-Host State-Volume Recovery
+
+After attaching and mounting a recovered state volume, check out the exact commit recorded by the recovery manifest and run:
 
 ```bash
-sudo ./recover.sh --state-dir /mnt/vw-data --key /media/usb/age-key.txt
+sudo ./recover.sh \
+  --state-dir /mnt/vw-data \
+  --key /secure/path/offline-age-key.txt
 ```
 
-Recovery commits the recovered identity/config into `${PROJECT_STATE_DIR}/config/install.env`, then reconciles the repository `.env` from that recovered install environment before normal startup. This keeps the next `sudo ./utilities/env-edit.sh sync` or `sudo make up` from restoring stale repo configuration over the recovered state. Runtime-only paths such as `SOPS_AGE_KEY_FILE` and `RCLONE_CONFIG` stay in the installed runtime env and are not written back to repo `.env`.
+`recover.sh` uses the offline private key in place, generates a new operational Age key, and commits the recovered ciphertext, key, SOPS policy, persistent environment, and DR manifest as one local recovery identity before startup.
 
-Environment precedence is persistent install env, repository `.env`, then installed systemd env. Runtime secrets are regenerated in `/run/vaultwarden-oci/secrets/` on startup by `vaultwarden-startup.service`; they are not persistent and disappear on reboot.
+After recovery, do not enable timers until the host is ready. Then run:
 
-Offline-key resolution is environment, manifest, existing policy, TTY prompt, then deliberate skip. To remove an offline recipient, create a staged ciphertext copy, update `.sops.yaml` deliberately, run `sops --config "$PWD/.sops.yaml" updatekeys --yes "$staging"`, validate decryption, then promote with `mv`.
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+See [docs/RECOVERY-CARD.md](docs/RECOVERY-CARD.md) and [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md).
