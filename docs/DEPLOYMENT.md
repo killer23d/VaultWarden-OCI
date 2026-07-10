@@ -1,6 +1,8 @@
 # Deployment Guide — VaultWarden-OCI
 
-This guide follows the supported golden path: Ubuntu 24.04 LTS Noble host on amd64 or arm64, Cloudflare DNS/proxy/WAF, Caddy DNS-01 with Cloudflare, Vaultwarden, Postfix sidecar mail, CrowdSec with Cloudflare edge enforcement, SOPS+Age secrets, rclone/offsite backup, and systemd automation. For the project boundary, see [PROJECT-BOUNDARY.md](PROJECT-BOUNDARY.md).
+This guide follows the supported golden path: Ubuntu 24.04 LTS Noble on amd64 or arm64, Cloudflare DNS/proxy/WAF, Caddy DNS-01 with Cloudflare, Vaultwarden, Postfix sidecar mail, CrowdSec with Cloudflare Workers enforcement, SOPS + Age secrets, rclone offsite backup support, and systemd automation.
+
+For the project boundary, see [PROJECT-BOUNDARY.md](PROJECT-BOUNDARY.md).
 
 Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md) · [OPERATIONS.md](OPERATIONS.md) · [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md)
 
@@ -8,52 +10,52 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md)
 
 | Requirement | Details |
 | :-- | :-- |
-| Server | Ubuntu 24.04 LTS VM, cloud instance, or physical host |
-| Resources | 1 vCPU, 6 GB RAM, 50 GB storage recommended |
+| Host | Ubuntu 24.04 LTS Noble on amd64 or arm64 |
+| Resources | A small production VM/host with enough memory and disk for Docker, CrowdSec, logs, and retained backups |
 | Domain | A domain you control in Cloudflare |
-| Cloudflare | DNS, proxy, WAF, API tokens, and account/zone IDs |
+| Cloudflare | DNS, proxy, WAF, required API credentials, account ID, and zone ID |
 | Email relay | SMTP relay credentials for the Postfix-first default path |
-| Backup target | rclone remote if enabling offsite backups immediately |
+| Backup target | rclone remote when enabling offsite backups |
 
-## Phase 1 — Prepare Cloudflare and provider firewall
+The host may be in OCI, AWS, Azure, Google Cloud, another VM provider, private virtualization, or on physical hardware. The runtime is provider-neutral. Provider-specific network controls remain an operator prerequisite.
+
+## Phase 1 — Prepare Cloudflare and provider ingress
 
 1. Create the DNS record, for example `vault.yourdomain.com`, in Cloudflare.
-2. Keep it **DNS Only (Grey Cloud)** for first certificate provisioning.
-3. Allow inbound TCP `443` through the provider firewall/security group/router.
-4. Allow inbound TCP `80` only if you deliberately use the advanced direct `acme_http` fallback or need redirects.
-5. Restrict SSH (`22`) to your administrator IP range where practical.
-6. After validation, switch the record to **Proxied (Orange Cloud)** and set SSL/TLS to **Full (Strict)**.
+2. Keep it **DNS Only** for initial origin certificate provisioning.
+3. Allow inbound TCP `443` through the provider firewall, security group, or network firewall.
+4. Allow inbound TCP `80` only when your documented TLS/redirect path requires it.
+5. Restrict SSH to administrator IP ranges where practical.
+6. After origin validation, switch the record to **Proxied** and set Cloudflare SSL/TLS to **Full (Strict)**.
 
-> OCI note: OCI Security Lists drop packets before Ubuntu sees them. Add rules under **Compute → Instances → Primary VNIC → Subnet → Default Security List**. OCI requires one CIDR per rule.
+The project configures the supported Ubuntu host firewall. It does not configure your provider's upstream firewall/security group for you.
 
 ## Phase 2 — Clone and run setup
 
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
-chmod +x *.sh
-sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --auto
+chmod +x *.sh utilities/*.sh
+
+sudo ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --auto
 ```
 
-`setup.sh install --auto` installs dependencies, generates `.env` and `docker-compose.yml`, configures the host firewall, creates generated local secrets, and adds your user to the `docker` group while preserving pinned versions from `.env.example`.
+`setup.sh install --auto` validates Ubuntu 24.04 Noble and the amd64/arm64 architecture boundary, installs the repository-owned dependencies, generates the deployment files, bootstraps encrypted SOPS/Age state, prepares storage, and configures the host firewall.
 
-Re-login before using Docker:
+The normal production lifecycle is root-operated. A Docker-group re-login is not a required deployment phase for the supported operator path.
 
-```bash
-exit
-# SSH back in, then:
-cd VaultWarden-OCI
-```
+## Phase 3 — Configure non-secret values and external credentials
 
-## Phase 3 — Configure required secrets and non-secrets
-
-Edit `.env` for non-secret values:
+Edit non-secret configuration through the environment workflow:
 
 ```bash
 sudo make edit-env
 ```
 
-Set or verify:
+Set or verify the values appropriate for the deployment, including:
 
 ```bash
 DOMAIN=https://vault.yourdomain.com
@@ -66,11 +68,11 @@ SMTP_USERNAME=your-relay-account
 SMTP_FROM=noreply@yourdomain.com
 ALLOWED_SENDER_DOMAINS=yourdomain.com
 ADMIN_ALLOW_CIDR=your-admin-cidr
-RCLONE_REMOTE_NAME=your_rclone_remote   # if offsite backup is enabled now
-RCLONE_CONFIG=/etc/vaultwarden/rclone.conf   # installed runtime path for systemd backups
+RCLONE_REMOTE_NAME=your_rclone_remote
+RCLONE_CONFIG=/etc/vaultwarden/rclone.conf
 ```
 
-Rotate required external credentials into SOPS secrets:
+Then rotate external credentials into the canonical SOPS secrets store:
 
 ```bash
 sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
@@ -80,9 +82,11 @@ sudo ./edit-secrets.sh rotate cf_account_id
 sudo ./edit-secrets.sh rotate smtp_password
 ```
 
-`cloudflare_zone_id` is a SOPS secret key in the current implementation. Do not add a new `CLOUDFLARE_ZONE_ID` setting to `.env` for normal deployments.
+`cloudflare_zone_id` is a SOPS secret. Do not create a second `CLOUDFLARE_ZONE_ID` `.env` source for the normal deployment path.
 
-## Phase 4 — Start and verify
+For the exact secret inventory and apply behavior, see [SECRETS-SCHEMA.md](SECRETS-SCHEMA.md).
+
+## Phase 4 — Start and verify the live stack
 
 ```bash
 sudo make up
@@ -90,39 +94,135 @@ sudo make health
 sudo ./maintenance.sh test-email --verbose
 ```
 
-Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and confirm SSL/TLS is **Full (Strict)**.
+Once origin health is good, switch Cloudflare to **Proxied** and confirm SSL/TLS **Full (Strict)**.
 
-The runtime stack remains:
+The normal runtime stack is:
 
 | Component | Role |
 | :-- | :-- |
 | Vaultwarden container | Password manager application |
 | Caddy container | TLS, reverse proxy, security headers, Cloudflare DNS-01 |
-| Postfix container | Reliable outbound SMTP sidecar |
-| CrowdSec host service | Host/app threat detection with Cloudflare edge enforcement |
+| Postfix container | Outbound SMTP relay sidecar |
+| CrowdSec host service | Threat detection |
+| CrowdSec firewall bouncer | Host firewall enforcement of CrowdSec decisions |
+| CrowdSec Cloudflare Workers bouncer | Workers KV synchronization for edge enforcement |
 
-## Phase 5 — Install automation and recovery kit
+## Phase 5 — Configure offsite backup credentials
+
+Create the rclone configuration with the normal rclone tooling:
+
+```bash
+rclone config
+```
+
+The canonical installed runtime config is:
+
+```text
+/etc/vaultwarden/rclone.conf
+```
+
+`utilities/setup-systemd.sh install` copies/installs the accepted rclone config for root-operated automation. Re-run systemd installation after changing the source rclone configuration so scheduled backup jobs receive the current installed config.
+
+Verify backup creation before enabling scheduled work:
+
+```bash
+sudo ./backup.sh run db
+sudo ./backup.sh verify
+```
+
+## Phase 6 — Activate and validate automation
+
+Only after storage, secrets, Cloudflare/DNS, rclone, and the live stack are ready:
 
 ```bash
 sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
+```
+
+The managed timer set covers:
+
+- health checks;
+- database backups;
+- full backups;
+- maintenance;
+- DNS updates;
+- Cloudflare firewall CIDR refresh.
+
+Managed services also use failure notification integration.
+
+`systemd validate` detects stale installed scripts, libraries, unit files, environment/key permission failures, rendered startup-unit drift, and unhealthy managed timers.
+
+After a future `git pull` that changes managed runtime code or units, repeat:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+Git updates the checkout. The systemd installer activates the managed runtime under `/opt/vaultwarden-scripts`.
+
+## Phase 7 — Export and store recovery material
+
+```bash
 sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
-Systemd automation covers health self-healing, backups, maintenance, DNS refresh, firewall refresh, locking, and failure notifications. See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for the full timer schedule and overrides.
+Store the recovery kit in a password manager and in a separate offline recovery location. Remove plaintext copies from the server after the kit is secured.
 
-Use `rclone config` as the source-generation step for remote credentials, then re-run `sudo ./setup.sh systemd install --enable-now` to copy the current config into `/etc/vaultwarden/rclone.conf`.
+Re-export recovery material after:
 
-Store the recovery kit in a password manager and offline backup location.
+- initial production setup;
+- operational Age key rotation;
+- restore when a new operational Age key is generated;
+- a material secret rotation that changes recovery credentials.
+
+Read [BACKUP-RESTORE.md](BACKUP-RESTORE.md), [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md), and [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) before treating the host as the only copy of production data.
+
+## Dedicated data volume during first install
+
+A separate block/data volume is optional. The boot-volume default remains supported.
+
+When using a separate volume, provide an explicit stable device path where possible:
+
+```bash
+sudo ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --data-device /dev/disk/by-id/<your-volume> \
+  --data-mount /mnt/vw-data
+```
+
+Storage code will not silently choose an unknown device. Existing filesystems, blank-device formatting, fstab ownership, mount readiness, and the `.vw-data-volume` sentinel are guarded by the storage workflow.
+
+See [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md) before adopting or moving production data.
+
+## Recovery/manual-inspection hosts
+
+A replacement or recovery host may need the managed runtime installed without starting scheduled backup/maintenance jobs immediately:
+
+```bash
+sudo ./setup.sh systemd install --no-enable-now
+```
+
+After storage, secrets, rclone, Cloudflare/DNS, firewall state, and Vaultwarden readiness have been inspected:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+Do not call an install-only recovery host production ready merely because the unit files were copied successfully.
 
 ## Advanced and optional paths
 
-These features are supported where implemented, but should not be part of a first install unless needed:
+These features are supported where implemented but should not complicate a first install unless needed:
 
-- **Direct TLS (`TLS_PROVIDER=acme_http`)**: fallback for non-Cloudflare DNS-01 environments; requires inbound TCP `80` for HTTP-01.
-- **Dedicated data volume**: useful for snapshots and host replacement. Read [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md) before adopting or moving data.
-- **Push notifications**: optional Bitwarden push relay integration; requires additional secrets and outbound networking.
-- **Provider-specific email APIs**: optional alternative to Postfix-first SMTP. See [EMAIL.md](EMAIL.md).
-- **Disaster-recovery rehearsals**: recommended after production is stable. See [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
-- **Deep CrowdSec Worker/KV tuning**: see [CROWDSEC.md](CROWDSEC.md) after the normal bouncer path is working.
+- **Alternate TLS behavior** — advanced path outside the Cloudflare-first golden path.
+- **Dedicated data volume** — storage isolation and replacement-host portability.
+- **Push notifications** — optional Bitwarden push integration.
+- **Provider-specific email APIs** — advanced operational-alert route; the Postfix SMTP path remains the normal appliance mail path.
+- **Disaster-recovery rehearsals** — use the current smoke test and pre-production drill after the normal stack is stable.
+- **Deep CrowdSec Worker/KV tuning** — see [CROWDSEC.md](CROWDSEC.md) after the default enforcement path is working.
