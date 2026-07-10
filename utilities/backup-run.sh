@@ -564,6 +564,62 @@ create_consistent_db_snapshot() {
     return 0
 }
 
+_validate_emergency_restore_metadata() {
+    local archive_or_meta="$1"
+    local mode_out_name="${2:-}"
+    local meta_file="$archive_or_meta"
+    [[ "$meta_file" == *.meta ]] || meta_file="${archive_or_meta}.meta"
+
+    if [[ ! -e "$meta_file" ]]; then
+        log_error "[backup] Emergency restore metadata is missing: $(basename "$meta_file")." >&2
+        return 1
+    fi
+    if [[ ! -f "$meta_file" ]]; then
+        log_error "[backup] Emergency restore metadata is not a regular file: $meta_file" >&2
+        return 1
+    fi
+    if [[ ! -s "$meta_file" ]]; then
+        log_error "[backup] Emergency restore metadata is empty: $(basename "$meta_file")." >&2
+        return 1
+    fi
+
+    local mode_count mode
+    mode_count="$(awk -F= '$1=="encryption_mode"{count++} END{print count+0}' "$meta_file" 2>/dev/null)" || {
+        log_error "[backup] Emergency restore metadata could not be read: $meta_file" >&2
+        return 1
+    }
+    if [[ "$mode_count" == "0" ]]; then
+        log_error "[backup] Emergency restore metadata is missing encryption_mode: $(basename "$meta_file")." >&2
+        return 1
+    fi
+    if [[ "$mode_count" != "1" ]]; then
+        log_error "[backup] Emergency restore metadata has multiple encryption_mode entries: $(basename "$meta_file")." >&2
+        return 1
+    fi
+
+    mode="$(awk -F= '$1=="encryption_mode"{print substr($0,index($0,"=")+1); exit}' "$meta_file" 2>/dev/null)" || {
+        log_error "[backup] Emergency restore metadata could not be read: $meta_file" >&2
+        return 1
+    }
+    case "$mode" in
+        age-passphrase|age-recipient)
+            ;;
+        "")
+            log_error "[backup] Emergency restore metadata has an empty encryption_mode: $(basename "$meta_file")." >&2
+            return 1
+            ;;
+        *)
+            log_error "[backup] Emergency restore metadata has unsupported encryption_mode '$mode': $(basename "$meta_file")." >&2
+            return 1
+            ;;
+    esac
+
+    if [[ -n "$mode_out_name" ]]; then
+        printf -v "$mode_out_name" '%s' "$mode"
+    fi
+    return 0
+}
+
 verify_backup_full() {
     local enc_file="$1"
     local backup_type="$2"
@@ -580,6 +636,16 @@ verify_backup_full() {
         backup_log_warn "No SHA256 sidecar found — authenticated file check skipped"
     fi
 
+    local encryption_mode=""
+    if [[ "$backup_type" == "emergency" ]]; then
+        if ! _validate_emergency_restore_metadata "$enc_file" encryption_mode; then
+            log_error "Full verification FAILED: emergency restore-critical metadata is unusable." >&2
+            return 1
+        fi
+    else
+        encryption_mode="$(awk -F= '$1=="encryption_mode"{print $2; exit}' "${enc_file}.meta" 2>/dev/null || true)"
+    fi
+
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
         log_error "Age key file not found: $age_key_file" >&2
@@ -589,8 +655,6 @@ verify_backup_full() {
     local dec_out
     dec_out="$shared_tmpdir/verify_$(basename "$enc_file" .age)"
 
-    local encryption_mode
-    encryption_mode="$(awk -F= '$1=="encryption_mode"{print $2; exit}' "${enc_file}.meta" 2>/dev/null || true)"
     if [[ "$backup_type" == "emergency" && "$encryption_mode" == "age-passphrase" ]]; then
         if ! age -d -o "$dec_out" "$enc_file"; then
             log_error "Full verification FAILED: could not decrypt passphrase-sealed emergency backup" >&2
@@ -681,8 +745,11 @@ verify_backup_quick() {
     fi
 
     if [[ "$backup_type" == "emergency" ]]; then
-        local encryption_mode emergency_identity
-        encryption_mode="$(awk -F= '$1=="encryption_mode"{print $2; exit}' "${enc_file}.meta" 2>/dev/null || true)"
+        local encryption_mode="" emergency_identity
+        if ! _validate_emergency_restore_metadata "$enc_file" encryption_mode; then
+            log_error "Quick verify FAILED: emergency restore-critical metadata is unusable." >&2
+            return 1
+        fi
         emergency_identity="$(get_config_value "EMERGENCY_BACKUP_AGE_IDENTITY_FILE" "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}")"
 
         case "$encryption_mode" in
@@ -712,8 +779,8 @@ verify_backup_quick() {
                 fi
                 ;;
             *)
-                backup_log_warn "Emergency backup encryption mode is unknown or missing; operational Age decrypt probe skipped."
-                _quick_verify_decrypt_skipped=true
+                log_error "Quick verify FAILED: emergency encryption mode validation returned an unexpected value." >&2
+                return 1
                 ;;
         esac
     else
@@ -805,14 +872,22 @@ sync_to_rclone() {
     local meta_file="${enc_file}.meta"
     local _sidecar_warn=false
     local _sidecar_fail=0
-    if [[ -f "$meta_file" ]]; then
+    local _emergency_meta_failed=false
+    if [[ "$backup_type" == "emergency" ]] && ! _validate_emergency_restore_metadata "$enc_file"; then
+        _emergency_meta_failed=true
+    elif [[ -f "$meta_file" ]]; then
         local _meta_exit=0
         rclone copy "${rclone_config_arg[@]}" "$meta_file" "$remote_path/" --checksum \
             2>"${rclone_stderr_tmp}" || _meta_exit=$?
         if (( _meta_exit != 0 )); then
-            log_warn "[backup] Sidecar upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — integrity metadata missing from remote." >&2
-            _sidecar_warn=true
-            (( _sidecar_fail++ )) || true
+            if [[ "$backup_type" == "emergency" ]]; then
+                log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — remote emergency recovery point is incomplete." >&2
+                _emergency_meta_failed=true
+            else
+                log_warn "[backup] Sidecar upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — integrity metadata missing from remote." >&2
+                _sidecar_warn=true
+                (( _sidecar_fail++ )) || true
+            fi
         fi
     fi
 
@@ -840,7 +915,10 @@ sync_to_rclone() {
         fi
     fi
 
-    if [[ "$_sidecar_warn" == "true" ]]; then
+    if [[ "$_emergency_meta_failed" == "true" ]]; then
+        log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing, unusable, or not delivered to ${remote_path}/." >&2
+        log_error "[backup] The local emergency backup remains valid. Do not treat the remote primary as a complete recovery point." >&2
+    elif [[ "$_sidecar_warn" == "true" ]]; then
         log_warn "[backup] One or more sidecar files could not be uploaded to ${remote_path}/." >&2
         log_warn "[backup] The primary backup archive was delivered. Remote integrity checks will" >&2
         log_warn "[backup] fall back to size-only verification until sidecars are re-uploaded." >&2
@@ -876,6 +954,10 @@ sync_to_rclone() {
     fi
 
     backup_log_info "Remote size verified: ${remote_file_path} — ${remote_size_bytes} bytes ${remote_size_human}"
+
+    if [[ "$_emergency_meta_failed" == "true" ]]; then
+        return 3
+    fi
 
     if [[ "$_sidecar_warn" == "true" ]]; then
         log_warn "[backup] Offsite sync completed with partial sidecar failures (${_sidecar_fail} file(s))"
@@ -953,6 +1035,17 @@ sync_all_backups_to_rclone() {
         if ! find "$local_dir" -maxdepth 1 -name '*.age' -type f -print -quit | grep -q .; then
             backup_log_info "No retained ${t} backups to upload."
             continue
+        fi
+
+        if [[ "$t" == "emergency" ]]; then
+            local emergency_archive
+            while IFS= read -r -d '' emergency_archive; do
+                if ! _validate_emergency_restore_metadata "$emergency_archive"; then
+                    log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$emergency_archive")"
+                    log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
+                    return 1
+                fi
+            done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
         fi
 
         backup_log_info "Copying retained ${t} backups to ${remote_name}:${remote_base}/${t}/"
@@ -1711,6 +1804,21 @@ main() {
             if (( _sync_rc == 2 )); then
                 offsite_status="synced with sidecar warnings"
                 log_warn "Offsite sync completed with partial sidecar failures — primary backup was delivered."
+            elif (( _sync_rc == 3 )); then
+                rclone_failed=true
+                offsite_status="FAILED: emergency restore metadata missing or unusable; local backup is safe"
+                if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                    local subj="[VaultWarden] Emergency offsite delivery INCOMPLETE: $actual_type ($timestamp)"
+                    local bdy
+                    bdy="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n\nEmergency primary upload may have succeeded, but restore-critical .meta validation or delivery failed.\nThe local emergency backup is intact. Do not treat the remote primary as a complete recovery point until matching restore-usable metadata is present.\n' \
+                        "$actual_type" "$timestamp" \
+                        "$(basename "${backup_file:-unknown}")" \
+                        "$(hostname -f 2>/dev/null || hostname)")"
+                    send_notification_email "$subj" "$bdy" 2>/dev/null || true
+                fi
+                log_error "Emergency offsite delivery incomplete — restore-critical metadata is missing, unusable, or not delivered. Local backup is safe."
+                _print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"
+                exit 2
             elif (( _sync_rc != 0 )); then
                 rclone_failed=true
                 offsite_status="failed; local backup is safe"

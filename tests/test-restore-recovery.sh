@@ -207,6 +207,7 @@ _extract_func(){
       if (depth == 0) exit
     }' "$file"
 }
+
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # Behavior: passphrase emergency decrypt must not pass -i; DR recipient identity may.
 cat > "$TMP/decrypt-probe.sh" <<EOF_PROBE
@@ -240,6 +241,636 @@ grep -q 'Skipped runtime decrypted secrets' "$ROOT/utilities/restore-run.sh" || 
 )
 
 check_restore_behavior_contracts
+check_restore_dr_transaction_contracts() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RESTORE="$ROOT/utilities/restore-run.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+_extract_nested_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^[[:space:]]*" f "\\(\\)" {p=1}
+    p {
+      sub(/^    /, "")
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+# RDR-01: emergency mode selection fails closed before age dispatch, while both explicit modes remain distinct.
+cat > "$TMP/decrypt-mode-probe.sh" <<EOF_PROBE
+set -uo pipefail
+RESTORE_TYPE=emergency
+EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""
+log_error(){ printf 'ERROR %s\\n' "\$*" >> "$TMP/decrypt.log"; }
+age(){ printf '%s\\n' "\$*" >> "$TMP/age.calls"; return 0; }
+$(_extract_func "$RESTORE" _age_decrypt_restore_backup)
+: > "$TMP/age.calls"
+if _age_decrypt_restore_backup backup.age key.txt out.tar "$TMP/age.err" ""; then exit 10; fi
+[[ ! -s "$TMP/age.calls" ]] || exit 11
+if _age_decrypt_restore_backup backup.age key.txt out.tar "$TMP/age.err" future-mode; then exit 12; fi
+[[ ! -s "$TMP/age.calls" ]] || exit 13
+_age_decrypt_restore_backup backup.age key.txt out.tar "$TMP/age.err" age-passphrase || exit 14
+! tail -1 "$TMP/age.calls" | grep -q -- ' -i ' || exit 15
+_age_decrypt_restore_backup backup.age key.txt out.tar "$TMP/age.err" age-recipient || exit 16
+tail -1 "$TMP/age.calls" | grep -q -- '-i key.txt' || exit 17
+EOF_PROBE
+bash "$TMP/decrypt-mode-probe.sh" || fail 'emergency decrypt dispatch did not fail closed for missing/unknown mode or preserve explicit modes'
+
+# RDR-01: remote emergency primary is not exposed without its matching metadata sidecar.
+cat > "$TMP/remote-meta-probe.sh" <<EOF_PROBE
+set -uo pipefail
+TMPDIR_RESTORE="$TMP/remote-work"
+RCLONE_CONFIG_ARG=()
+BACKUP_FILE=sentinel-backup
+RESTORE_TYPE=sentinel-type
+log_info(){ printf 'INFO %s\\n' "\$*"; }
+log_error(){ printf 'ERROR %s\\n' "\$*"; }
+rclone(){
+  local cmd="\$1"; shift
+  [[ "\$cmd" == copy ]] || return 0
+  local src="\$1" dest="\$2"
+  case "\$src" in
+    *.meta|*.sha256) return 1 ;;
+    *) mkdir -p "\$dest"; printf archive > "\$dest/\$(basename "\$src")"; return 0 ;;
+  esac
+}
+$(_extract_func "$RESTORE" pull_remote_backup)
+if pull_remote_backup mockremote:vaultwarden_backups/emergency/emergency-test.age emergency; then exit 20; fi
+[[ "\$BACKUP_FILE" == sentinel-backup ]] || exit 21
+[[ "\$RESTORE_TYPE" == sentinel-type ]] || exit 22
+EOF_PROBE
+bash "$TMP/remote-meta-probe.sh" >"$TMP/remote-meta.out" 2>&1 || fail 'remote emergency missing-meta probe failed'
+grep -qi 'restore-critical metadata is missing' "$TMP/remote-meta.out" || fail 'remote emergency missing .meta must explain restore-critical metadata failure'
+
+# RDR-02: safe-restart eligibility is restore-type and promotion-commit aware.
+cat > "$TMP/safe-restart-probe.sh" <<EOF_PROBE
+set -uo pipefail
+STATE_DIR="$TMP/safe-state"
+mkdir -p "\$STATE_DIR/data"; printf db > "\$STATE_DIR/data/db.sqlite3"
+sqlite3(){ printf 'ok\\n'; }
+$(_extract_func "$RESTORE" _can_safe_restart)
+RESTORE_TYPE=db; RESTORE_FULL_PROMOTION_COMMITTED=false; _can_safe_restart || exit 30
+RESTORE_TYPE=full; RESTORE_FULL_PROMOTION_COMMITTED=true; _can_safe_restart || exit 31
+RESTORE_TYPE=full; RESTORE_FULL_PROMOTION_COMMITTED=false; if _can_safe_restart; then exit 32; fi
+RESTORE_TYPE=emergency; RESTORE_FULL_PROMOTION_COMMITTED=false; if _can_safe_restart; then exit 33; fi
+RESTORE_TYPE=unknown; RESTORE_FULL_PROMOTION_COMMITTED=true; if _can_safe_restart; then exit 34; fi
+EOF_PROBE
+bash "$TMP/safe-restart-probe.sh" || fail '_can_safe_restart restore-type/commit predicate is incorrect'
+
+# RDR-04: selected dependencies fail before the modeled service-stop boundary.
+cat > "$TMP/dependency-probe.sh" <<EOF_PROBE
+set -uo pipefail
+STATE_DIR="$TMP/dependency-state"
+mkdir -p "\$STATE_DIR/data"
+RESTORE_TYPE=full
+ROTATE_AGE_KEY_POLICY="\${ROTATE_AGE_KEY_POLICY:-}"
+INSPECT_ONLY="\${INSPECT_ONLY:-false}"
+TEST_MOUNTPOINT="\${TEST_MOUNTPOINT:-false}"
+MISSING_CMD="\${MISSING_CMD:-}"
+STOP_MARKER="$TMP/docker-stop.called"
+command(){
+  if [[ "\${1:-}" == -v ]]; then
+    [[ "\${2:-}" == "\$MISSING_CMD" ]] && return 1
+    return 0
+  fi
+  builtin command "\$@"
+}
+_path_is_mountpoint(){ [[ "\$TEST_MOUNTPOINT" == true ]]; }
+docker(){ [[ "\$*" == 'compose stop' ]] && : > "\$STOP_MARKER"; }
+$(_extract_func "$RESTORE" check_archive_dependencies)
+check_archive_dependencies "$TMP/full.tar.gz.age"
+if [[ "\$INSPECT_ONLY" != true ]]; then docker compose stop; fi
+EOF_PROBE
+rm -f "$TMP/docker-stop.called"
+if MISSING_CMD=sops ROTATE_AGE_KEY_POLICY='' TEST_MOUNTPOINT=false bash "$TMP/dependency-probe.sh" >"$TMP/sops-preflight.out" 2>&1; then fail 'default rekey plan unexpectedly passed without sops'; fi
+[[ ! -e "$TMP/docker-stop.called" ]] || fail 'sops dependency failure reached docker compose stop'
+[[ ! -e "$TMP/dependency-state/secrets/secrets.yaml" ]] || fail 'sops dependency probe unexpectedly required a live secrets.yaml fixture'
+grep -q 'required tools are not installed: sops' "$TMP/sops-preflight.out" || fail 'sops dependency failure was not reported by selected archive preflight'
+
+rm -f "$TMP/docker-stop.called"
+if ! MISSING_CMD=sops ROTATE_AGE_KEY_POLICY='' INSPECT_ONLY=true TEST_MOUNTPOINT=false bash "$TMP/dependency-probe.sh" >"$TMP/inspect-sops-preflight.out" 2>&1; then fail 'inspect-only plan unexpectedly required sops'; fi
+[[ ! -e "$TMP/docker-stop.called" ]] || fail 'inspect-only dependency plan reached docker compose stop'
+! grep -q 'required tools are not installed: sops' "$TMP/inspect-sops-preflight.out" || fail 'inspect-only dependency plan reported missing sops'
+
+rm -f "$TMP/docker-stop.called"
+if ! MISSING_CMD=sops ROTATE_AGE_KEY_POLICY=skip INSPECT_ONLY=false TEST_MOUNTPOINT=false bash "$TMP/dependency-probe.sh" >"$TMP/skip-sops-preflight.out" 2>&1; then fail 'explicit no-rotate plan unexpectedly required sops'; fi
+[[ -e "$TMP/docker-stop.called" ]] || fail 'explicit no-rotate dependency plan did not continue past preflight'
+! grep -q 'required tools are not installed: sops' "$TMP/skip-sops-preflight.out" || fail 'explicit no-rotate dependency plan reported missing sops'
+
+rm -f "$TMP/docker-stop.called"
+if MISSING_CMD=rsync ROTATE_AGE_KEY_POLICY=skip TEST_MOUNTPOINT=true DATA_VOLUME_DEVICE='' bash "$TMP/dependency-probe.sh" >"$TMP/rsync-preflight.out" 2>&1; then fail 'mounted full restore unexpectedly passed without rsync'; fi
+[[ ! -e "$TMP/docker-stop.called" ]] || fail 'rsync dependency failure reached docker compose stop'
+grep -q 'required tools are not installed: rsync' "$TMP/rsync-preflight.out" || fail 'actual-mountpoint rsync dependency failure was not reported'
+dep_line="$(grep -nF 'check_archive_dependencies "$BACKUP_FILE"' "$RESTORE" | head -1 | cut -d: -f1)"
+stop_line="$(grep -nF 'docker compose stop --timeout 30' "$RESTORE" | head -1 | cut -d: -f1)"
+[[ -n "$dep_line" && -n "$stop_line" ]] && (( dep_line < stop_line )) || fail 'selected dependency preflight must remain before service stop'
+
+# RDR-04: inspect-only reaches the real archive preflight without sops, service stop, key rotation, or startup.
+inspect_state="$TMP/inspect-state"
+inspect_project="$TMP/inspect-project"
+inspect_archive="$TMP/inspect-legacy.tar.gz"
+inspect_backup="$TMP/inspect-legacy.tar.gz.age"
+mkdir -p "$inspect_state/data" "$inspect_project"
+printf inspect-db > "$inspect_state/data/db.sqlite3"
+tar -czPf "$inspect_archive" "$inspect_state"
+: > "$inspect_backup"
+printf 'version=1\narchive_format=absolute\n' > "$inspect_backup.meta"
+cat > "$inspect_project/startup.sh" <<EOF_STARTUP
+#!/usr/bin/env bash
+: > "$TMP/inspect-startup.called"
+EOF_STARTUP
+chmod +x "$inspect_project/startup.sh"
+cat > "$TMP/inspect-main-probe.sh" <<EOF_PROBE
+set -u
+TMPDIR_RESTORE=""
+trap 'rm -rf "\${TMPDIR_RESTORE:-}"' EXIT
+LIST_ONLY=false
+LIST_REMOTE=false
+INSPECT_ONLY=true
+DRY_RUN=false
+FORCE=false
+USE_REMOTE=false
+NO_PRE_BACKUP=true
+RESTORE_TYPE=full
+BACKUP_FILE="$inspect_backup"
+ROTATE_AGE_KEY_POLICY=""
+START_POLICY=auto
+RESTORE_ENV=true
+SKIP_VERIFICATION=true
+DATA_VOLUME_MOUNT=""
+DATA_VOLUME_DEVICE=""
+PROJECT_ROOT="$inspect_project"
+SCRIPT_DIR="$inspect_project"
+log_header(){ :; }
+log_info(){ printf 'INFO %s\\n' "\$*"; }
+log_warn(){ printf 'WARN %s\\n' "\$*"; }
+log_error(){ printf 'ERROR %s\\n' "\$*" >&2; }
+log_success(){ printf 'SUCCESS %s\\n' "\$*"; }
+load_env_file(){ return 0; }
+check_dependencies(){ return 0; }
+require_root(){ return 0; }
+auto_fix_critical_permissions(){ return 0; }
+require_project_state_ready(){ return 0; }
+_load_recovery_kit(){ return 0; }
+resolve_backup_file(){ return 0; }
+_print_restore_plan_summary(){ return 0; }
+_prompt_age_key(){ RESTORE_DECRYPT_AGE_KEY_FILE=unused; return 0; }
+_require_selected_archive_tools(){ return 0; }
+_rotate_age_key(){ : > "$TMP/inspect-rotate.called"; }
+_decrypt_restore_archive_for_preflight(){ printf '%s\\n' "$inspect_archive"; }
+docker(){ : > "$TMP/inspect-docker-stop.called"; }
+get_config_value(){
+  case "\$1" in
+    PROJECT_STATE_DIR) printf '%s' "$inspect_state" ;;
+    BACKUP_DIR) printf '%s' "$TMP" ;;
+    SOPS_AGE_KEY_FILE) printf '%s' "$TMP/inspect-age-key.txt" ;;
+    PUID|PGID) printf '%s' 1000 ;;
+    *) printf '%s' "\${2:-}" ;;
+  esac
+}
+command(){
+  if [[ "\${1:-}" == -v && "\${2:-}" == sops ]]; then return 1; fi
+  builtin command "\$@"
+}
+$(_extract_func "$RESTORE" read_meta_field)
+$(_extract_func "$RESTORE" check_archive_dependencies)
+$(_extract_func "$RESTORE" _tar_filter_for_file)
+$(_extract_func "$RESTORE" _path_is_mountpoint)
+$(_extract_func "$RESTORE" _detect_storage_mode)
+$(_extract_func "$RESTORE" _restore_required_dirs)
+$(_extract_func "$RESTORE" _restore_inspect_archive_layout)
+$(_extract_func "$RESTORE" restore_full_preflight)
+$(_extract_func "$RESTORE" main)
+main
+EOF_PROBE
+if ! bash "$TMP/inspect-main-probe.sh" >"$TMP/inspect-main.out" 2>&1; then cat "$TMP/inspect-main.out" >&2; fail 'inspect-only main path unexpectedly failed without sops'; fi
+grep -Fq "Source state root:  $inspect_state" "$TMP/inspect-main.out" || fail 'inspect-only path did not reach real archive preflight'
+grep -q 'Inspect mode complete — no services stopped, no files restored, no key rotation, no health check.' "$TMP/inspect-main.out" || fail 'inspect-only path did not preserve non-destructive completion'
+[[ ! -e "$TMP/inspect-docker-stop.called" ]] || fail 'inspect-only main path invoked docker'
+[[ ! -e "$TMP/inspect-rotate.called" ]] || fail 'inspect-only main path attempted key rotation'
+[[ ! -e "$TMP/inspect-startup.called" ]] || fail 'inspect-only main path invoked startup.sh'
+
+# RDR-06: snapshot state and persisted operation phase are truthful.
+cat > "$TMP/snapshot-probe.sh" <<EOF_PROBE
+set -uo pipefail
+PROJECT_ROOT="$TMP/snapshot-project"
+STATE_DIR="$TMP/snapshot-state"
+mkdir -p "\$PROJECT_ROOT/utilities" "\$STATE_DIR/data"
+cat > "\$PROJECT_ROOT/utilities/backup-run.sh" <<'BACKUP_MOCK'
+#!/usr/bin/env bash
+exit "\${MOCK_BACKUP_RC:-0}"
+BACKUP_MOCK
+chmod +x "\$PROJECT_ROOT/utilities/backup-run.sh"
+RESTORE_SNAPSHOT_HARD_FAIL=false
+RESTORE_SNAPSHOT_RESULT=not-run
+RESTORE_TYPE=full
+DRY_RUN=false
+NO_PRE_BACKUP=false
+OPERATIONAL_SOPS_AGE_KEY_FILE="$TMP/live-key.txt"
+printf key > "\$OPERATIONAL_SOPS_AGE_KEY_FILE"
+log_info(){ :; }; log_warn(){ :; }; log_error(){ printf 'ERROR %s\\n' "\$*"; }
+get_config_value(){ [[ "\$1" == PROJECT_STATE_DIR ]] && printf '%s\\n' "\$STATE_DIR" || printf '%s\\n' "\${2:-}"; }
+_preflight_operational_sops_key_for_snapshot(){ return 0; }
+sqlite3(){ return 0; }
+operation_set_phase(){ printf '%s|%s\\n' "\$1" "\$2" > "$TMP/snapshot.phase"; }
+$(_extract_func "$RESTORE" create_pre_restore_snapshot)
+$(_extract_func "$RESTORE" _set_snapshot_operation_phase)
+
+NO_PRE_BACKUP=true
+create_pre_restore_snapshot "\$OPERATIONAL_SOPS_AGE_KEY_FILE" full || exit 40
+[[ "\$RESTORE_SNAPSHOT_RESULT" == skipped ]] || exit 41
+_set_snapshot_operation_phase || exit 42
+! grep -q 'Created pre-restore snapshot' "$TMP/snapshot.phase" || exit 43
+
+NO_PRE_BACKUP=false
+rm -f "\$STATE_DIR/data/db.sqlite3"
+create_pre_restore_snapshot "\$OPERATIONAL_SOPS_AGE_KEY_FILE" full || exit 44
+[[ "\$RESTORE_SNAPSHOT_RESULT" == skipped ]] || exit 45
+_set_snapshot_operation_phase || exit 46
+! grep -q 'Created pre-restore snapshot' "$TMP/snapshot.phase" || exit 47
+
+printf db > "\$STATE_DIR/data/db.sqlite3"
+MOCK_BACKUP_RC=9
+export MOCK_BACKUP_RC
+create_pre_restore_snapshot "\$OPERATIONAL_SOPS_AGE_KEY_FILE" full || exit 48
+[[ "\$RESTORE_SNAPSHOT_RESULT" == soft-failed ]] || exit 49
+_set_snapshot_operation_phase || exit 50
+! grep -q 'Created pre-restore snapshot' "$TMP/snapshot.phase" || exit 51
+grep -q 'soft-failed' "$TMP/snapshot.phase" || exit 52
+
+MOCK_BACKUP_RC=0
+export MOCK_BACKUP_RC
+create_pre_restore_snapshot "\$OPERATIONAL_SOPS_AGE_KEY_FILE" full || exit 53
+[[ "\$RESTORE_SNAPSHOT_RESULT" == created ]] || exit 54
+_set_snapshot_operation_phase || exit 55
+grep -q 'Created pre-restore snapshot' "$TMP/snapshot.phase" || exit 56
+EOF_PROBE
+bash "$TMP/snapshot-probe.sh" || fail 'snapshot result/operation phase contract probe failed'
+
+# RDR-07: exact maintenance-health status controls completion truthfully without touching committed state.
+cat > "$TMP/health-probe.sh" <<EOF_PROBE
+set -uo pipefail
+PROJECT_ROOT="$TMP/health-project"
+ROTATED_KEY_FILE=""
+DRY_RUN=false
+LOG_FILE="$TMP/health.log"
+COMMITTED_MARKER="$TMP/committed.marker"
+printf committed > "\$COMMITTED_MARKER"
+log_info(){ printf 'INFO %s\\n' "\$*" >> "\$LOG_FILE"; }
+log_warn(){ printf 'WARN %s\\n' "\$*" >> "\$LOG_FILE"; }
+log_error(){ printf 'ERROR %s\\n' "\$*" >> "\$LOG_FILE"; }
+log_success(){ printf 'SUCCESS %s\\n' "\$*" >> "\$LOG_FILE"; }
+auto_fix_critical_permissions(){ return 0; }
+_print_post_restore_summary(){ printf 'SUMMARY committed restore\\n' >> "\$LOG_FILE"; }
+$(_extract_func "$RESTORE" _complete_restore_after_health)
+health_rc="\$1"
+: > "\$LOG_FILE"
+rc=0
+_complete_restore_after_health "\$health_rc" || rc=\$?
+[[ -f "\$COMMITTED_MARKER" ]] || exit 90
+printf 'RC=%s\\n' "\$rc"
+cat "\$LOG_FILE"
+EOF_PROBE
+
+for health_rc in 0 1 2 3 4 75; do
+  bash "$TMP/health-probe.sh" "$health_rc" >"$TMP/health-$health_rc.out" 2>&1 || fail "health completion probe crashed for exit $health_rc"
+done
+grep -q '^RC=0$' "$TMP/health-0.out" || fail 'health exit 0 must return success'
+grep -q 'SUCCESS Restore complete\.' "$TMP/health-0.out" || fail 'health exit 0 must permit clean restore success'
+grep -q '^RC=0$' "$TMP/health-1.out" || fail 'health exit 1 must return success'
+grep -q 'Restore completed with warnings' "$TMP/health-1.out" || fail 'health exit 1 must print warning completion'
+! grep -q 'SUCCESS Restore complete\.' "$TMP/health-1.out" || fail 'health exit 1 must not print clean restore success'
+for health_rc in 2 3 4; do
+  grep -q "^RC=$health_rc\$" "$TMP/health-$health_rc.out" || fail "health exit $health_rc must remain non-zero"
+  grep -q 'committed and remain in place' "$TMP/health-$health_rc.out" || fail "health exit $health_rc must report committed artifacts remain"
+  ! grep -q 'SUCCESS Restore complete\.' "$TMP/health-$health_rc.out" || fail "health exit $health_rc must not print clean restore success"
+done
+grep -q '^RC=75$' "$TMP/health-75.out" || fail 'health exit 75 must preserve expected contention status'
+grep -qi 'another health or repair operation is active' "$TMP/health-75.out" || fail 'health exit 75 must describe active-operation contention'
+! grep -qi 'critical health failure' "$TMP/health-75.out" || fail 'health exit 75 must not be mislabeled as a critical stack failure'
+! grep -q 'SUCCESS Restore complete\.' "$TMP/health-75.out" || fail 'health exit 75 must not print clean restore success'
+
+# Shared restore_full harness for RDR-02/03/05 behavioral failure injection.
+RESTORE_HARNESS="$TMP/restore-full-harness.sh"
+cat > "$RESTORE_HARNESS" <<'HARNESS'
+set -Eeuo pipefail
+log_info(){ printf 'INFO %s\n' "$*"; }
+log_warn(){ printf 'WARN %s\n' "$*"; }
+log_error(){ printf 'ERROR %s\n' "$*" >&2; }
+log_hint(){ printf 'HINT %s\n' "$*"; }
+log_success(){ printf 'SUCCESS %s\n' "$*"; }
+get_config_value(){ case "$1" in DATA_VOLUME_MOUNT|DATA_VOLUME_DEVICE) printf '%s' '';; *) printf '%s' "${2:-}";; esac; }
+purge_wal_shm(){ :; }
+tar_validate_members(){ :; }
+check_traversal_only(){ :; }
+SCRIPT_DIR="${TEST_PROJECT_ROOT:?}"
+PROJECT_ROOT="$TEST_PROJECT_ROOT"
+RESTORE_TYPE=full
+FORCE=false
+INSPECT_ONLY=false
+SKIP_VERIFICATION=true
+RESTORE_ENV=true
+DRY_RUN=false
+DATA_VOLUME_MOUNT=""
+DATA_VOLUME_DEVICE=""
+PUID="$(id -u)"
+PGID="$(id -g)"
+EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""
+SECRETS_FILE=""
+HARNESS
+{
+  sed -n '/^_can_safe_restart()/,/^}/p' "$RESTORE"
+  sed -n '/^_tar_filter_for_file()/,/^tar_validate_members()/p' "$RESTORE" | sed '$d'
+  sed -n '/^restore_full()/,/^main()/p' "$RESTORE" | sed '$d'
+} >> "$RESTORE_HARNESS"
+
+# RDR-03: materialization failure leaves the live same-layout generation untouched.
+materialize_state="$TMP/materialize-state"
+materialize_root="$TMP/materialize-root"
+materialize_work="$TMP/materialize-work"
+mkdir -p "$materialize_root/${materialize_state#/}/data" "$materialize_work" "$TMP/materialize-project"
+printf new > "$materialize_root/${materialize_state#/}/generation"
+printf db > "$materialize_root/${materialize_state#/}/data/db.sqlite3"
+(cd "$materialize_root" && tar -czf "$TMP/materialize.tar.gz" .)
+cp "$TMP/materialize.tar.gz" "$materialize_work/materialize.tar.gz"
+: > "$TMP/materialize.tar.gz.age"
+mkdir -p "$materialize_state/data"
+printf old > "$materialize_state/generation"
+printf olddb > "$materialize_state/data/db.sqlite3"
+cat > "$TMP/materialize-fail-probe.sh" <<EOF_PROBE
+source "$RESTORE_HARNESS"
+RESTORE_PREFLIGHT_SOURCE_ROOT="$materialize_state"
+STARTUP_MARKER="$TMP/materialize-startup.called"
+_can_safe_restart(){ : > "\$STARTUP_MARKER"; return 1; }
+cp(){
+  if [[ "\${1:-}" == -a && "\${2:-}" == "$materialize_work/stage/${materialize_state#/}/." && "\${3:-}" == "$materialize_state".restore-staged.* ]]; then
+    : > "$TMP/materialize-copy-failed"
+    return 66
+  fi
+  command cp "\$@"
+}
+mv(){
+  if [[ "\${1:-}" == "$materialize_state" ]]; then : > "$TMP/materialize-live-move-attempted"; fi
+  command mv "\$@"
+}
+restore_full "$TMP/materialize.tar.gz.age" unused "$materialize_state" "\$PUID" "\$PGID" "$materialize_work" relative
+EOF_PROBE
+if TEST_PROJECT_ROOT="$TMP/materialize-project" bash "$TMP/materialize-fail-probe.sh" >"$TMP/materialize.out" 2>&1; then fail 'target-filesystem materialization failure unexpectedly succeeded'; fi
+[[ -f "$TMP/materialize-copy-failed" ]] || fail 'target-filesystem materialization failure was not injected'
+grep -qx old "$materialize_state/generation" || fail 'target-filesystem materialization failure changed live generation'
+[[ ! -e "$TMP/materialize-live-move-attempted" ]] || fail 'target-filesystem materialization failure moved the live generation'
+[[ ! -e "$TMP/materialize-startup.called" ]] || fail 'target-filesystem materialization failure reached startup eligibility'
+! compgen -G "$materialize_state.restore-staged.*" >/dev/null || fail 'failed target-filesystem materialization left an unclean staging sibling'
+! grep -q 'Full restore promotion completed' "$TMP/materialize.out" || fail 'target-filesystem materialization failure printed promotion success'
+
+# RDR-03: a partial canonical destination from the second rename is removed before rollback.
+rollback_state="$TMP/rollback-state"
+rollback_root="$TMP/rollback-root"
+rollback_work="$TMP/rollback-work"
+mkdir -p "$rollback_root/${rollback_state#/}/data" "$rollback_work" "$TMP/rollback-project"
+printf new > "$rollback_root/${rollback_state#/}/generation"
+printf new-only > "$rollback_root/${rollback_state#/}/new-only.marker"
+printf db > "$rollback_root/${rollback_state#/}/data/db.sqlite3"
+(cd "$rollback_root" && tar -czf "$TMP/rollback.tar.gz" .)
+cp "$TMP/rollback.tar.gz" "$rollback_work/rollback.tar.gz"
+: > "$TMP/rollback.tar.gz.age"
+mkdir -p "$rollback_state/data"
+printf old > "$rollback_state/generation"
+printf olddb > "$rollback_state/data/db.sqlite3"
+cat > "$TMP/rollback-probe.sh" <<EOF_PROBE
+source "$RESTORE_HARNESS"
+RESTORE_PREFLIGHT_SOURCE_ROOT="$rollback_state"
+mv(){
+  if [[ "\${1:-}" == "$rollback_state".restore-staged.* && "\${2:-}" == "$rollback_state" ]]; then
+    command mkdir -p "$rollback_state"
+    local_marker="\$(find "\$1" -maxdepth 1 -name '.restore-promotion.*' -print -quit)"
+    [[ -n "\$local_marker" ]] && command cp -a "\$local_marker" "$rollback_state/"
+    printf partial > "$rollback_state/new-only.marker"
+    return 23
+  fi
+  command mv "\$@"
+}
+restore_full "$TMP/rollback.tar.gz.age" unused "$rollback_state" "\$PUID" "\$PGID" "$rollback_work" relative
+EOF_PROBE
+if TEST_PROJECT_ROOT="$TMP/rollback-project" bash "$TMP/rollback-probe.sh" >"$TMP/rollback.out" 2>&1; then fail 'same-layout staged-state second rename failure unexpectedly succeeded'; fi
+grep -qx old "$rollback_state/generation" || fail 'same-layout promotion rollback did not restore old generation at canonical STATE_DIR'
+[[ ! -e "$rollback_state/new-only.marker" ]] || fail 'failed staged generation was presented at canonical STATE_DIR'
+grep -q 'Removing incomplete canonical state created by the failed promotion attempt' "$TMP/rollback.out" || fail 'partial canonical destination was not identified and removed before rollback'
+grep -q 'Restore promotion rollback succeeded' "$TMP/rollback.out" || fail 'successful same-layout rollback was not reported truthfully'
+! grep -q 'Full restore promotion completed' "$TMP/rollback.out" || fail 'failed same-layout promotion printed successful restore completion'
+
+# RDR-05: legacy absolute archives are always staged; extraction failures/signals leave live generation unchanged.
+legacy_state="$TMP/legacy-state"
+legacy_work="$TMP/legacy-work"
+legacy_project="$TMP/legacy-project"
+mkdir -p "$legacy_state/data" "$legacy_work" "$legacy_project"
+printf new > "$legacy_state/generation"
+printf db > "$legacy_state/data/db.sqlite3"
+tar -czPf "$TMP/legacy.tar.gz" "$legacy_state"
+printf old > "$legacy_state/generation"
+printf olddb > "$legacy_state/data/db.sqlite3"
+cp "$TMP/legacy.tar.gz" "$legacy_work/legacy.tar.gz"
+: > "$TMP/legacy.tar.gz.age"
+cat > "$TMP/legacy-valid-probe.sh" <<EOF_PROBE
+source "$RESTORE_HARNESS"
+check_traversal_only(){ : > "$TMP/legacy-traversal.called"; }
+_tar_extract_archive(){
+  printf '%s\\n' "\$2" > "$TMP/legacy-extract.dest"
+  command tar -z -xf "\$1" -C "\$2" --no-same-owner --no-same-permissions
+}
+mv(){
+  if [[ "\${1:-}" == "$legacy_state".restore-staged.* && "\${2:-}" == "$legacy_state" ]]; then
+    printf '%s\\n' "\$1" > "$TMP/legacy-promotion-source"
+  fi
+  command mv "\$@"
+}
+_restore_inspect_archive_layout "$TMP/legacy.tar.gz" "$legacy_state" absolute
+printf '%s\\n' "\$RESTORE_PREFLIGHT_SOURCE_ROOT" > "$TMP/legacy-source-root"
+restore_full "$TMP/legacy.tar.gz.age" unused "$legacy_state" "\$PUID" "\$PGID" "$legacy_work" absolute
+EOF_PROBE
+TEST_PROJECT_ROOT="$legacy_project" bash "$TMP/legacy-valid-probe.sh" >"$TMP/legacy-valid.out" 2>&1 || { cat "$TMP/legacy-valid.out" >&2; fail 'valid staged legacy archive did not reach promotion path'; }
+[[ "$(cat "$TMP/legacy-source-root")" == "$legacy_state" ]] || fail 'legacy absolute preflight did not derive the canonical same-layout source root'
+[[ "$(cat "$TMP/legacy-extract.dest")" == "$legacy_work/stage" ]] || fail 'legacy archive extraction destination was not secure staging'
+[[ "$(cat "$TMP/legacy-extract.dest")" != / ]] || fail 'legacy archive was extracted directly to root'
+[[ -f "$TMP/legacy-traversal.called" ]] || fail 'legacy traversal check must run even with skip verification'
+grep -qx new "$legacy_state/generation" || fail 'valid staged legacy archive did not promote restored generation'
+legacy_promotion_source="$(cat "$TMP/legacy-promotion-source")"
+[[ "$(dirname "$legacy_promotion_source")" == "$(dirname "$legacy_state")" ]] || fail 'same-layout promotion source was not on the target filesystem'
+[[ "$legacy_promotion_source" == "$legacy_state".restore-staged.* ]] || fail 'same-layout promotion did not use a target-filesystem restore sibling'
+[[ "$legacy_promotion_source" != "$legacy_work/stage/${legacy_state#/}" ]] || fail 'same-layout promotion reused generic restore staging as rename source'
+! grep -q 'Cross-layout restore' "$TMP/legacy-valid.out" || fail 'same-layout legacy archive was incorrectly sent through cross-layout promotion'
+
+reset_legacy_live(){ rm -rf "$legacy_state" "$legacy_work/stage"; mkdir -p "$legacy_state/data"; printf old > "$legacy_state/generation"; printf olddb > "$legacy_state/data/db.sqlite3"; }
+reset_legacy_live
+cat > "$TMP/legacy-fail-probe.sh" <<EOF_PROBE
+source "$RESTORE_HARNESS"
+_tar_extract_archive(){ printf '%s\\n' "\$2" > "$TMP/legacy-fail.dest"; return 55; }
+_restore_inspect_archive_layout "$TMP/legacy.tar.gz" "$legacy_state" absolute
+restore_full "$TMP/legacy.tar.gz.age" unused "$legacy_state" "\$PUID" "\$PGID" "$legacy_work" absolute
+EOF_PROBE
+if TEST_PROJECT_ROOT="$legacy_project" bash "$TMP/legacy-fail-probe.sh" >"$TMP/legacy-fail.out" 2>&1; then fail 'legacy staged extraction failure unexpectedly succeeded'; fi
+grep -qx old "$legacy_state/generation" || fail 'legacy staged extraction failure changed live generation'
+[[ "$(cat "$TMP/legacy-fail.dest")" != / ]] || fail 'legacy failed extraction targeted root'
+
+for sig in INT TERM; do
+  reset_legacy_live
+  cat > "$TMP/legacy-signal-probe.sh" <<EOF_PROBE
+source "$RESTORE_HARNESS"
+_tar_extract_archive(){ printf '%s\\n' "\$2" > "$TMP/legacy-$sig.dest"; kill -$sig \$\$; }
+_restore_inspect_archive_layout "$TMP/legacy.tar.gz" "$legacy_state" absolute
+restore_full "$TMP/legacy.tar.gz.age" unused "$legacy_state" "\$PUID" "\$PGID" "$legacy_work" absolute
+EOF_PROBE
+  if TEST_PROJECT_ROOT="$legacy_project" bash "$TMP/legacy-signal-probe.sh" >"$TMP/legacy-$sig.out" 2>&1; then fail "legacy staged extraction $sig unexpectedly succeeded"; fi
+  grep -qx old "$legacy_state/generation" || fail "legacy staged extraction $sig changed live generation"
+  [[ "$(cat "$TMP/legacy-$sig.dest")" != / ]] || fail "legacy staged extraction $sig targeted root"
+done
+
+# RDR-02: real promotion boundaries with a valid new DB never start services before full commit.
+transaction_source="$TMP/transaction-source"
+transaction_target="$TMP/transaction-target"
+transaction_project="$TMP/transaction-project"
+transaction_root="$TMP/transaction-root"
+transaction_work="$TMP/transaction-work"
+mkdir -p "$transaction_root/${transaction_source#/}/data" "$transaction_root/${transaction_source#/}/secrets" "$transaction_root/${transaction_project#/}" "$transaction_work" "$transaction_project"
+printf newdb > "$transaction_root/${transaction_source#/}/data/db.sqlite3"
+printf encrypted-new-secret > "$transaction_root/${transaction_source#/}/secrets/secrets.yaml"
+printf restored-env > "$transaction_root/${transaction_project#/}/.env"
+(cd "$transaction_root" && tar -czf "$TMP/transaction.tar.gz" .)
+cp "$TMP/transaction.tar.gz" "$transaction_work/transaction.tar.gz"
+: > "$TMP/transaction.tar.gz.age"
+
+write_transaction_probe(){
+  local mode="$1"
+  cat > "$TMP/transaction-$mode.sh" <<EOF_PROBE
+source "$RESTORE_HARNESS"
+RESTORE_PREFLIGHT_SOURCE_ROOT="$transaction_source"
+RESTORE_FULL_PROMOTION_COMMITTED=false
+STATE_DIR="$transaction_target"
+STARTUP_MARKER="$TMP/startup-$mode.called"
+sqlite3(){ printf 'ok\\n'; }
+_handle_failure(){
+  local rc="\$1"
+  trap - ERR INT TERM
+  if _can_safe_restart; then : > "\$STARTUP_MARKER"; fi
+  exit "\$rc"
+}
+_on_err(){ local rc=\$?; _handle_failure "\$rc"; }
+_on_int(){ _handle_failure 130; }
+_on_term(){ _handle_failure 143; }
+trap _on_err ERR
+trap _on_int INT
+trap _on_term TERM
+EOF_PROBE
+  case "$mode" in
+    config-fail)
+      cat >> "$TMP/transaction-$mode.sh" <<EOF_PROBE
+cp(){
+  if [[ "\${1:-}" == -f && "\${2:-}" == "$transaction_work/stage/${transaction_project#/}/.env" && "\${3:-}" == "$transaction_project/.env" ]]; then return 88; fi
+  command cp "\$@"
+}
+EOF_PROBE
+      ;;
+    secret-int)
+      cat >> "$TMP/transaction-$mode.sh" <<EOF_PROBE
+install(){
+  if [[ "\$*" == *"$transaction_work/stage/${transaction_source#/}/secrets/secrets.yaml"* ]]; then kill -INT \$\$; fi
+  command install "\$@"
+}
+EOF_PROBE
+      ;;
+    config-term)
+      cat >> "$TMP/transaction-$mode.sh" <<EOF_PROBE
+cp(){
+  if [[ "\${1:-}" == -f && "\${2:-}" == "$transaction_work/stage/${transaction_project#/}/.env" && "\${3:-}" == "$transaction_project/.env" ]]; then kill -TERM \$\$; fi
+  command cp "\$@"
+}
+EOF_PROBE
+      ;;
+  esac
+  cat >> "$TMP/transaction-$mode.sh" <<EOF_PROBE
+restore_full "$TMP/transaction.tar.gz.age" unused "$transaction_target" "\$PUID" "\$PGID" "$transaction_work" relative
+EOF_PROBE
+}
+
+for mode in config-fail secret-int config-term; do
+  rm -rf "$transaction_target" "$transaction_work/stage" "$transaction_project/.env" "$TMP/startup-$mode.called"
+  mkdir -p "$transaction_target/data"
+  printf olddb > "$transaction_target/data/db.sqlite3"
+  write_transaction_probe "$mode"
+  if TEST_PROJECT_ROOT="$transaction_project" bash "$TMP/transaction-$mode.sh" >"$TMP/transaction-$mode.out" 2>&1; then fail "uncommitted full promotion boundary $mode unexpectedly succeeded"; fi
+  [[ -f "$transaction_target/data/db.sqlite3" ]] || fail "$mode did not reach valid DB promotion boundary"
+  [[ ! -e "$TMP/startup-$mode.called" ]] || fail "$mode invoked startup.sh eligibility before full promotion commit"
+done
+grep -q 'encrypted-new-secret' "$transaction_target/secrets/secrets.yaml" || fail 'config TERM case did not reach encrypted secret promotion before later config boundary'
+
+# RDR-02: execute the production safety net after a real full-restore promotion boundary fails.
+safety_target="$TMP/safety-target"
+safety_root="$TMP/safety-root"
+safety_work="$TMP/safety-work"
+safety_project="$TMP/safety-project"
+mkdir -p "$safety_root/${safety_target#/}/data" "$safety_root/${safety_target#/}/secrets" "$safety_work" "$safety_project"
+printf newdb > "$safety_root/${safety_target#/}/data/db.sqlite3"
+printf encrypted-new-secret > "$safety_root/${safety_target#/}/secrets/secrets.yaml"
+(cd "$safety_root" && tar -czf "$TMP/safety.tar.gz" .)
+cp "$TMP/safety.tar.gz" "$safety_work/safety.tar.gz"
+: > "$TMP/safety.tar.gz.age"
+mkdir -p "$safety_target/data"
+printf olddb > "$safety_target/data/db.sqlite3"
+cat > "$safety_project/startup.sh" <<EOF_STARTUP
+#!/usr/bin/env bash
+: > "$TMP/safety-startup.called"
+EOF_STARTUP
+chmod +x "$safety_project/startup.sh"
+cat > "$TMP/safety-net-probe.sh" <<EOF_PROBE
+source "$RESTORE_HARNESS"
+STATE_DIR="$safety_target"
+RESTORE_PREFLIGHT_SOURCE_ROOT="$safety_target"
+RESTORE_DESTRUCTIVE_PHASE_STARTED=true
+RESTORE_FULL_PROMOTION_COMMITTED=false
+RESTORE_PREVENT_AUTOSTART=false
+START_POLICY=auto
+_RESTORE_SAFETY_NET_RUNNING=false
+_RESTORE_CLEANUP_DONE=false
+cleanup(){ :; }
+sqlite3(){ printf 'ok\\n'; }
+$(_extract_func "$RESTORE" _restore_print_manual_start_checklist)
+$(_extract_nested_func "$RESTORE" _restore_cleanup_once)
+$(_extract_nested_func "$RESTORE" _restore_safety_net)
+install(){
+  if [[ "\$*" == *"$safety_work/stage/${safety_target#/}/secrets/secrets.yaml"* ]]; then return 86; fi
+  command install "\$@"
+}
+trap _restore_safety_net ERR
+restore_full "$TMP/safety.tar.gz.age" unused "$safety_target" "\$PUID" "\$PGID" "$safety_work" relative
+EOF_PROBE
+if TEST_PROJECT_ROOT="$safety_project" bash "$TMP/safety-net-probe.sh" >"$TMP/safety-net.out" 2>&1; then fail 'production safety-net probe unexpectedly succeeded'; fi
+grep -qx newdb "$safety_target/data/db.sqlite3" || fail 'safety-net probe did not reach a valid new DB before the injected promotion failure'
+grep -q 'Restore state is not eligible for automatic safety restart' "$TMP/safety-net.out" || fail 'production safety net did not refuse restart for uncommitted full restore'
+[[ ! -e "$TMP/safety-startup.called" ]] || fail 'production safety net invoked startup.sh before full promotion commit'
+! grep -q 'attempting one service restart' "$TMP/safety-net.out" || fail 'production safety net printed restart-success wording before full promotion commit'
+! grep -q 'Full restore promotion completed' "$TMP/safety-net.out" || fail 'failed production safety-net probe printed full promotion success'
+
+printf 'PASS: restore DR transaction, legacy staging, dependency, snapshot, and health contracts\n'
+)
+
+check_restore_dr_transaction_contracts
 check_recovery_contracts() (
 set -euo pipefail
 
