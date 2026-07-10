@@ -1,74 +1,138 @@
 # Configuration Reference — VaultWarden-OCI
 
-Configuration is split by lifetime and sensitivity:
+VaultWarden-OCI separates non-secret configuration, persistent encrypted secrets, installed systemd runtime state, and transient decoded runtime secrets.
 
-- `${PROJECT_STATE_DIR}/config/install.env` is the authoritative persistent non-secret environment on the state volume.
-- Repository `.env` is a compatibility/bootstrap fallback generated from `.env.example` by setup.
-- `/etc/vaultwarden/vaultwarden.env` is the installed systemd bootstrap fallback.
-- `${PROJECT_STATE_DIR}/secrets/secrets.yaml` is the persistent encrypted SOPS file edited through `sudo ./utilities/secrets-edit.sh`.
-- `/run/vaultwarden-oci/secrets/` contains transient runtime Docker secret source files recreated at startup.
+Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [SECRETS-SCHEMA.md](SECRETS-SCHEMA.md) · [SECURITY.md](SECURITY.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
 
-SOPS uses the operational Age recipient and may include an optional offline USB Age recipient for recovery. Never edit generated files directly unless a utility explicitly instructs you to do so.
+## Configuration surfaces
 
-Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [SECURITY.md](SECURITY.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
+| Surface | Purpose | Normal operator action |
+| :-- | :-- | :-- |
+| Repository `.env` | Operator-editable non-secret configuration and bootstrap source | `sudo make edit-env` |
+| `${PROJECT_STATE_DIR}/config/install.env` | Persistent root-owned runtime configuration stored with project state | Generated/synced; do not hand-edit normally |
+| `/etc/vaultwarden/vaultwarden.env` | Installed environment used by systemd-managed runtime | Installed by `setup-systemd.sh`; do not hand-edit normally |
+| `${PROJECT_STATE_DIR}/secrets/secrets.yaml` | Persistent SOPS-encrypted secret values | `sudo ./edit-secrets.sh edit` / `rotate` |
+| `/etc/vaultwarden/age-key.txt` | Live operational Age private key | Managed by setup/key rotation/recovery |
+| `/run/vaultwarden-oci/secrets/` | Transient decoded Docker secret source files | Recreated by startup; never edit |
 
----
+The optional offline recovery Age private key stays offline. Only its public recipient may be stored in SOPS policy/recovery metadata.
 
-## 📋 Configuration Workflow
+## Environment precedence
 
-```bash
-# Initial setup (generates .env and docker-compose.yml from templates)
-sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --auto
+The runtime loader first discovers `PROJECT_STATE_DIR` from:
 
-# Edit non-sensitive settings
-nano .env
+1. an explicit caller override;
+2. repository `.env`;
+3. `/etc/vaultwarden/vaultwarden.env`;
+4. the default `/var/lib/vaultwarden`.
 
-# Edit sensitive secrets (encrypted)
-sudo ./utilities/secrets-edit.sh
+After the state directory is known, one complete runtime environment is loaded in this order:
 
-# Validate
-docker compose config
+1. `/etc/vaultwarden/vaultwarden.env`, when installed;
+2. `${PROJECT_STATE_DIR}/config/install.env`;
+3. repository `.env` as the bootstrap/legacy fallback.
 
-# Apply changes
-sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --force
-./startup.sh --force
+Explicit caller overrides for state directory, data device, data mount, and the SOPS Age key path are reapplied after loading.
+
+The authoring/sync workflow is intentionally different from runtime precedence:
+
+```text
+repository .env
+    -> sudo make sync-env
+${PROJECT_STATE_DIR}/config/install.env
+    -> setup-systemd install
+/etc/vaultwarden/vaultwarden.env
 ```
 
----
+Use `utilities/env-edit.sh status` to inspect paths and drift.
 
-## 🌍 Core Settings
+## Normal configuration workflow
+
+Initial setup:
 
 ```bash
-# Your VaultWarden URL — MUST include https://
+sudo ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --auto
+```
+
+Edit non-secret values:
+
+```bash
+sudo make edit-env
+```
+
+`edit-env` opens repository `.env` in the configured editor and syncs changed values into the persistent runtime environment through the guarded environment workflow.
+
+Edit or rotate secrets:
+
+```bash
+sudo ./edit-secrets.sh edit
+sudo ./edit-secrets.sh rotate <secret-key>
+```
+
+Apply normal runtime changes through the root-operated lifecycle:
+
+```bash
+sudo make restart
+sudo make health
+```
+
+When configuration changes affect installed systemd runtime or after repository updates to managed code/units:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+Do not rerun the full `setup.sh install --force` path merely to apply an ordinary `.env` edit.
+
+---
+
+## Core settings
+
+```bash
 DOMAIN=https://vault.yourdomain.com
-
-# Admin contact for notifications
 ADMIN_EMAIL=admin@yourdomain.com
-
-# Cloudflare Zone ID is stored in SOPS secrets, not .env:
-# sudo ./edit-secrets.sh rotate cloudflare_zone_id
+TZ=UTC
+SSH_PORT=22
+SSH_LOG_PATH=/var/log/auth.log
 ```
 
-> **⚠️** `DOMAIN` must include `https://`. The Caddy entrypoint derives the bare hostname internally, so `.env` only needs `DOMAIN`.
+`DOMAIN` must include `https://`.
 
----
-
-## 📁 User & Directory
+Cloudflare zone/account identifiers used by the CrowdSec Workers integration are SOPS secret keys, not normal `.env` values:
 
 ```bash
-PUID=1000                              # Container file ownership UID
-PGID=1000                              # Container file ownership GID
-PROJECT_STATE_DIR=/var/lib/vaultwarden # Data, logs, and config root
-TZ=UTC                                 # Timezone (affects all container logs)
-SSH_PORT=22                            # SSH port (used by CrowdSec SSH scenario)
-SSH_LOG_PATH=/var/log/auth.log         # Ubuntu 24.04 Noble SSH auth log
+sudo ./edit-secrets.sh rotate cloudflare_zone_id
+sudo ./edit-secrets.sh rotate cf_account_id
 ```
 
 ---
 
-## 💾 Storage Mode
+## User and state ownership
 
-Boot-volume mode is the default: leave `DATA_VOLUME_DEVICE` blank and keep `PROJECT_STATE_DIR=/var/lib/vaultwarden`.
+```bash
+PUID=1000
+PGID=1000
+PROJECT_STATE_DIR=/var/lib/vaultwarden
+```
+
+`PUID` and `PGID` describe Vaultwarden application-data ownership. They do not change the root-operated production lifecycle.
+
+Persistent root-operated state such as `config/`, encrypted SOPS ciphertext, `/etc/vaultwarden`, and runtime secret source directories use the repository's stricter root ownership/permission contract.
+
+Caddy runs as UID/GID `2000:2000`. Restore/runtime permission repair normalizes Caddy data, config, and log bind mounts for that UID/GID.
+
+---
+
+## Storage mode
+
+### Boot-volume mode
+
+Leave `DATA_VOLUME_DEVICE` blank:
 
 ```bash
 DATA_VOLUME_DEVICE=
@@ -76,7 +140,11 @@ DATA_VOLUME_MOUNT=/mnt/vw-data
 PROJECT_STATE_DIR=/var/lib/vaultwarden
 ```
 
-Separate-volume mode points all persistent state at a dedicated block device or mounted filesystem. Prefer a stable `/dev/disk/by-id/...` path when available, and make `PROJECT_STATE_DIR` match `DATA_VOLUME_MOUNT`.
+The default persistent state directory remains on the boot volume.
+
+### Dedicated data-volume mode
+
+Use an explicit stable device path where available and make the state directory equal the mount point:
 
 ```bash
 DATA_VOLUME_DEVICE=/dev/disk/by-id/your-volume
@@ -84,80 +152,118 @@ DATA_VOLUME_MOUNT=/mnt/vw-data
 PROJECT_STATE_DIR=/mnt/vw-data
 ```
 
-`setup.sh` adopts existing ext4/xfs filesystems only after operator confirmation. In non-interactive automation, set `DATA_VOLUME_EXISTING_FS_OK=true` for that run if you intentionally want to adopt an existing filesystem. Blank devices are formatted as ext4 only when `DATA_VOLUME_FORCE_FORMAT=true` is set for that setup run.
+Storage safety rules include:
+
+- the project never silently treats an unknown device as the target disk;
+- attached-volume mode requires the expected mount to be active;
+- `.vw-data-volume` is the project ownership/safety sentinel;
+- an existing filesystem requires explicit adoption acceptance;
+- blank-device formatting requires an explicit formatting authorization.
+
+First-install example for a blank dedicated data volume:
 
 ```bash
-sudo DATA_VOLUME_FORCE_FORMAT=true ./setup.sh install \
-  --domain vault.yourdomain.com \
-  --email admin@yourdomain.com \
-  --auto \
-  --data-device /dev/disk/by-id/your-volume \
-  --data-mount /mnt/vw-data
+sudo DATA_VOLUME_FORCE_FORMAT=true \
+  ./setup.sh install \
+    --domain vault.yourdomain.com \
+    --email admin@yourdomain.com \
+    --auto \
+    --data-device /dev/disk/by-id/your-volume \
+    --data-mount /mnt/vw-data
 ```
 
-See [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md) before moving existing production data.
+To intentionally adopt an existing filesystem during setup, use the documented `DATA_VOLUME_EXISTING_FS_OK=true` gate for that run.
+
+For moving existing production state, use [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md) rather than manually changing the three storage variables and moving files.
 
 ---
 
-## 📦 Container Versions
+## Version pins
 
-Current default image pins are defined in `.env.example`, which is the authoritative template used by setup generation. At the time of this update the production defaults are:
+The authoritative defaults are in `.env.example`. Current repository pins are:
 
 ```bash
 VAULTWARDEN_VERSION=1.36.0
 CADDY_VERSION=2.11.4
 POSTFIX_VERSION=5.1.0
+BUSYBOX_VERSION=1.36.1
+
+CROWDSEC_VERSION=1.7.8
+CF_WORKER_BOUNCER_VERSION=v0.0.18
+FIREWALL_BOUNCER_VERSION=0.0.34
 ```
 
-Keep production versions pinned for predictable appliance behavior. To change pins, edit `.env` deliberately and run the normal update flow after taking an emergency backup.
+Host setup also owns pinned/default tool contracts for SOPS and Mike Farah `yq`.
 
-See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for version pinning details.
-
----
-
-## 🔒 Secrets (Encrypted)
-
-Manage secrets with `sudo ./utilities/secrets-edit.sh`. They are encrypted with Age + SOPS; never stored in plaintext.
-
-### Auto-generated Required Secrets
-
-These secrets are required at runtime, but `setup.sh install --auto` normally creates them. Rotate/regenerate them with the listed command when needed.
-
-| Secret | Purpose | Normal source | Rotate / regenerate |
-| :-- | :-- | :-- | :-- |
-| `admin_token` | Argon2id hash for the Vaultwarden `/admin` panel token | Auto-generated by setup | `sudo ./edit-secrets.sh rotate admin_token` |
-| `admin_basic_auth_hash` | Bcrypt hash for Caddy `/admin` basic auth | Auto-generated by setup | `sudo ./edit-secrets.sh rotate admin_basic_auth_hash` |
-| `file_integrity_hmac_key` | HMAC key for authenticated backup checksum sidecars | Auto-generated by setup | `sudo ./edit-secrets.sh rotate file_integrity_hmac_key` |
-
-### Operator-supplied Required Secrets for the Golden Path
-
-These are required for the supported production path. They live in the SOPS secrets file (`${PROJECT_STATE_DIR}/secrets/secrets.yaml`), not in `.env`.
-
-| Secret | Purpose | How to provide |
-| :-- | :-- | :-- |
-| `caddy_cloudflare_dns_token` | Caddy DNS-01 certificate issuance with Cloudflare | `sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token` |
-| `cf_worker_bouncer_token` | CrowdSec Cloudflare Worker/bouncer edge enforcement token | `sudo ./edit-secrets.sh rotate cf_worker_bouncer_token` |
-| `cloudflare_zone_id` | Cloudflare zone ID used by CrowdSec Worker routing | `sudo ./edit-secrets.sh rotate cloudflare_zone_id` |
-| `cf_account_id` | Cloudflare account ID used by Worker/KV automation | `sudo ./edit-secrets.sh rotate cf_account_id` |
-| `smtp_password` | External SMTP relay password for the Postfix-first email path | `sudo ./edit-secrets.sh rotate smtp_password` |
-
-Do not add `CLOUDFLARE_ZONE_ID` or Cloudflare account IDs to `.env` for new installs; use the SOPS keys above.
-
-### Advanced / Conditional Secrets
-
-| Secret | Needed when | How to provide |
-| :-- | :-- | :-- |
-| `email_api_token` | Only for advanced API email mode (`EMAIL_MODE=auto` or `EMAIL_MODE=api`) | `sudo ./edit-secrets.sh rotate email_api_token` |
-| `push_installation_id` | Only when `PUSH_ENABLED=true` | `sudo ./edit-secrets.sh rotate push_installation_id` |
-| `push_installation_key` | Only when `PUSH_ENABLED=true` | `sudo ./edit-secrets.sh rotate push_installation_key` |
-
-> **Note:** `cf_worker_bouncer_token` is used by CrowdSec cloudflare-bouncer. Without it, CrowdSec can detect attacks but cannot push bans to Cloudflare WAF.
+Keep production pins explicit. Use repository upgrade procedures and validation rather than changing production images to mutable `latest` tags.
 
 ---
 
-## 📧 Email Configuration
+## SOPS secret inventory
 
-The normal production path is **Postfix-first SMTP**. Vaultwarden, operational scripts, systemd failure notifications, and recovery-kit attachment emails all use the Postfix sidecar as the reliable relay path to your external SMTP provider. See [EMAIL.md](EMAIL.md) for provider-specific API mode and troubleshooting.
+`secrets-schema.yaml` is the canonical secret-key schema. The current keys are:
+
+| Secret | Transform | Normal apply behavior |
+| :-- | :-- | :-- |
+| `admin_token` | Argon2id | restart `vaultwarden` |
+| `admin_basic_auth_hash` | bcrypt | restart `caddy` |
+| `smtp_password` | plain | restart `postfix` |
+| `email_api_token` | plain | no automatic service restart |
+| `file_integrity_hmac_key` | plain/auto-generated | no automatic service restart |
+| `push_installation_id` | plain/conditional | restart `vaultwarden` |
+| `push_installation_key` | plain/conditional | restart `vaultwarden` |
+| `caddy_cloudflare_dns_token` | plain | restart `caddy` |
+| `cf_worker_bouncer_token` | plain | apply CrowdSec Workers config |
+| `cloudflare_zone_id` | plain | apply CrowdSec Workers config |
+| `cf_account_id` | plain | apply CrowdSec Workers config |
+
+Exact required/conditional behavior and schema fields are documented in [SECRETS-SCHEMA.md](SECRETS-SCHEMA.md).
+
+List key names without displaying values:
+
+```bash
+sudo ./utilities/secrets-list.sh
+```
+
+Edit the encrypted file:
+
+```bash
+sudo ./edit-secrets.sh edit
+```
+
+Rotate one field through its schema transform/apply contract:
+
+```bash
+sudo ./edit-secrets.sh rotate admin_token
+sudo ./edit-secrets.sh rotate admin_basic_auth_hash
+sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
+```
+
+Do not place production tokens/passwords in `.env`.
+
+---
+
+## Cloudflare configuration
+
+The supported normal path is Cloudflare-first:
+
+```bash
+TLS_PROVIDER=cloudflare
+CLOUDFLARE_PROXY_ENABLED=true
+ADMIN_ALLOW_CIDR=127.0.0.1/32
+```
+
+Set `ADMIN_ALLOW_CIDR` to the trusted administrative source range appropriate for your deployment.
+
+Cloudflare DNS-01 uses `caddy_cloudflare_dns_token`. CrowdSec Workers integration uses `cf_worker_bouncer_token`, `cloudflare_zone_id`, and `cf_account_id`.
+
+The Workers bouncer/KV architecture is documented in [CROWDSEC.md](CROWDSEC.md).
+
+---
+
+## Email configuration
+
+The normal production path is Postfix-first SMTP:
 
 ```bash
 EMAIL_MODE=smtp
@@ -171,17 +277,13 @@ SMTP_FROM_NAME=VaultWarden
 ALLOWED_SENDER_DOMAINS=yourdomain.com
 ```
 
-Store the SMTP password in SOPS secrets:
+Store the relay password in SOPS:
 
 ```bash
-sudo ./utilities/secrets-rotate.sh smtp_password
+sudo ./edit-secrets.sh rotate smtp_password
 ```
 
-`ALLOWED_SENDER_DOMAINS` is critical safety configuration. Set it to the domain(s) the appliance may send as; the sidecar is a private relay to your upstream SMTP provider, not a public mail server.
-
-### VaultWarden Container SMTP
-
-Vaultwarden must point at the internal Postfix sidecar, not the upstream SMTP relay:
+Vaultwarden itself points to the internal Postfix sidecar:
 
 ```bash
 VW_SMTP_HOST=postfix
@@ -191,81 +293,66 @@ VW_SMTP_AUTH_MECHANISM=none
 VW_SMTP_EXPLICIT_TLS=false
 ```
 
-`VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` are required because the internal Docker link to Postfix is plain and unauthenticated; Postfix handles TLS/authentication only on the upstream relay connection.
+Do not replace `VW_SMTP_HOST` with the upstream relay hostname. Postfix owns upstream authentication/TLS/queueing.
 
-### Advanced API Provider Mode
-
-Provider-specific HTTP APIs are optional. Use them only after the normal Postfix path is understood and configured:
+Optional API-first operational alert mode:
 
 ```bash
 EMAIL_MODE=auto
 EMAIL_PROVIDER=mailersend   # sendgrid | mailgun | postmark | resend
-sudo ./utilities/secrets-rotate.sh email_api_token
 ```
 
-`EMAIL_PROVIDER=smtp` is not valid; SMTP is selected with `EMAIL_MODE=smtp` and a blank `EMAIL_PROVIDER`.
-
-### Testing Email Delivery
+Then set:
 
 ```bash
-sudo ./maintenance.sh test-email --verbose
-make test-email
+sudo ./edit-secrets.sh rotate email_api_token
 ```
 
-This verifies the operational alert channel used by health, backup, maintenance, systemd failure notification, and recovery-kit email paths.
+Keep the SMTP/Postfix path configured because Vaultwarden mail and attachment-based recovery-kit messages still depend on SMTP.
+
+See [EMAIL.md](EMAIL.md).
 
 ---
 
-## 🔔 VaultWarden Application Settings
+## Vaultwarden application settings
+
+Common application settings include:
 
 ```bash
-# Registration
-SIGNUPS_ALLOWED=false             # Disable open registration (recommended)
-INVITATIONS_ALLOWED=true          # Admin-controlled invites
+SIGNUPS_ALLOWED=false
+INVITATIONS_ALLOWED=true
 EMERGENCY_ACCESS_ALLOWED=true
 SENDS_ALLOWED=true
 WEB_VAULT_ENABLED=true
+WEBSOCKET_ENABLED=true
 
-# Security
-PASSWORD_ITERATIONS=600000        # Argon2 / PBKDF2 iterations
+PASSWORD_ITERATIONS=600000
 PASSWORD_HINTS_ALLOWED=false
 SHOW_PASSWORD_HINT=false
-LOG_LEVEL=warn                    # trace | debug | info | warn | error
-ADMIN_TOKEN=                      # Must be an Argon2id hash — never plaintext.
-                                  # Generate: docker run --rm -it vaultwarden/server /vaultwarden hash --preset owasp
-                                  # Use sudo ./utilities/secrets-edit.sh for production; never commit a real token.
-DISABLE_ADMIN_TOKEN=false         # Set true to completely disable /admin panel
+LOG_LEVEL=warn
+DISABLE_ADMIN_TOKEN=false
 DISABLE_ICON_DOWNLOAD=false
 
-# Icon cache
 ICON_CACHE_TTL=2592000
 ICON_CACHE_NEGTTL=259200
 
-# Organisation & events
-ORG_CREATION_USERS=               # Blank = anyone; or comma-separated emails
+ORG_CREATION_USERS=
 ORG_EVENTS_ENABLED=false
 EVENTS_DAYS_RETAIN=365
-
-# Maintenance
 TRASH_AUTO_DELETE_DAYS=30
-# INCOMPLETE_2FA_TIME_LIMIT — VaultWarden-native setting (seconds).
-# How long a login session that has passed password authentication but has
-# NOT yet completed the 2FA step is kept alive before it is discarded.
-# The default of 3 (seconds) is intentionally short to close the window
-# between password verification and OTP entry. Raise it (e.g. to 10–30)
-# only if users are experiencing 2FA timeouts on slow connections.
 INCOMPLETE_2FA_TIME_LIMIT=3
 
-# Database
 DATABASE_MAX_CONNS=10
 DATABASE_TIMEOUT=30
 ```
 
+The admin token is not a plaintext `.env` setting in the production workflow. It is stored as the schema-defined Argon2id `admin_token` secret.
+
 ---
 
-## 📲 Push Notifications
+## Push notifications
 
-Register at <https://bitwarden.com/host> to get an installation ID and key, then set:
+Push is optional:
 
 ```bash
 PUSH_ENABLED=true
@@ -273,144 +360,118 @@ PUSH_RELAY_URI=https://push.bitwarden.com
 PUSH_IDENTITY_URI=https://identity.bitwarden.com
 ```
 
-Add `push_installation_id` and `push_installation_key` via `sudo ./utilities/secrets-edit.sh`.
+Set the two conditional SOPS secrets:
 
-> **⚠️ Network Constraint:** Push relay requires outbound internet access from the VaultWarden container. The `vaultwarden` network is marked `internal: true` in `docker-compose.yml`, which blocks all outbound traffic. If you enable push notifications, you must either remove `internal: true` from the network definition or route push traffic through an external proxy. Mismatching these settings causes silent push failures on every sync cycle. See [DEPLOYMENT.md](DEPLOYMENT.md) for details.
+```bash
+sudo ./edit-secrets.sh rotate push_installation_id
+sudo ./edit-secrets.sh rotate push_installation_key
+```
+
+The current Compose topology attaches Vaultwarden to the dedicated `vaultwarden_egress` network for outbound access. Do not copy old guidance that tells operators to remove the main `vaultwarden` network's isolation as the normal solution.
+
+After enabling push, restart and run health checks:
+
+```bash
+sudo make restart
+sudo make health
+```
 
 ---
 
-## 💾 Backup
+## Backup and offsite configuration
+
+Current `.env.example` defaults include:
 
 ```bash
-BACKUP_ENCRYPTION_ENABLED=true         # Encrypt backup archives before upload.
-                                        # Set false only if the rclone remote provides
-                                        # its own encryption. false ships raw SQLite
-                                        # in plaintext to remote storage.
-BACKUP_VERIFICATION_MODE=quick_check   # quick_check or integrity_check
-BACKUP_RETENTION_DAYS=30               # Fallback retention for all backup types (days).
-BACKUP_RETENTION_DB_DAYS=14            # Retention for db backups (overrides above)
-BACKUP_RETENTION_FULL_DAYS=60          # Retention for full backups (overrides above)
+BACKUP_ENCRYPTION_ENABLED=true
+BACKUP_VERIFICATION_MODE=quick_check
+REQUIRE_AUTHENTICATED_INTEGRITY=true
 
-# Rclone offsite backup
-RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote name (run: rclone config)
-RCLONE_CONFIG=                               # Absolute path to rclone.conf.
-                                              # Required for systemd jobs unless you copy
-                                              # rclone.conf to /etc/vaultwarden/rclone.conf.
-                                              # Leave blank to let backup.sh auto-discover.
-RCLONE_REMOTE_PATH=BW-Backup                 # Subfolder inside remote; backup type
-                                              # (db/full/emergency) is appended automatically.
+BACKUP_RETENTION_DAYS=30
+BACKUP_RETENTION_DB_DAYS=14
+BACKUP_RETENTION_FULL_DAYS=30
+BACKUP_RETENTION_EMERGENCY_DAYS=90
 
-# Age encryption key — canonical path for systemd services
-# setup.sh systemd install copies the key here so systemd units
-# (ProtectHome=yes) can access it. Do not change unless you also
-# update AGE_KEY_DEST in setup.sh.
-SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt
-
-# Non-interactive restore decryption key
-# Leave blank for normal interactive use. Set to an absolute key file path
-# only for automated / pipeline-driven restores.
-# Priority: --key-file CLI flag > RESTORE_AGE_KEY_FILE > interactive prompt > SOPS_AGE_KEY_FILE
-RESTORE_AGE_KEY_FILE=
-
-# BACKUP_SCHEDULE is a reference value only — the actual automated schedule
-# is controlled by the systemd timers (daily DB backup at 04:00 and Sunday full
-# backup at 03:00).
-# To change the schedule: sudo systemctl edit vaultwarden-db-backup.timer
-BACKUP_SCHEDULE="0 4 * * *"
+RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE
+RCLONE_CONFIG=
+RCLONE_REMOTE_PATH=BW-Backup
 ```
 
-See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for procedures.
+`BACKUP_DIR` defaults under `PROJECT_STATE_DIR` when left blank.
 
----
+The normal production path keeps backup encryption enabled. Full and emergency backup semantics are security-relevant and differ from database backups; see [BACKUP-RESTORE.md](BACKUP-RESTORE.md) before changing encryption or retention behavior.
 
-## 🔁 Automation (Systemd)
-
-Scheduled jobs are managed by systemd timers installed by `setup.sh systemd`:
-
-```bash
-sudo ./setup.sh systemd install
-```
-
-| Timer | Schedule | Script |
-| :-- | :-- | :-- |
-| `vaultwarden-db-backup.timer` | Daily 04:00 (+60 s jitter) | `backup.sh run db --rclone --full-verification` |
-| `vaultwarden-full-backup.timer` | Sunday 03:00 (+300 s jitter) | `backup.sh run full --rclone --full-verification` |
-| `vaultwarden-health.timer` | Every 5 min | `maintenance.sh health --fix` |
-| `vaultwarden-maintenance.timer` | Daily 02:05 (+30 s jitter) | `maintenance.sh run --comprehensive --email` |
-| `vaultwarden-dns-update.timer` | Every hour | `maintenance.sh update-dns` |
-| `vaultwarden-firewall-update.timer` | Saturday 04:00 | `maintenance.sh update-firewall` |
-
-All services emit `OnFailure=vaultwarden-notify-failure.service` — failures trigger an email via the notification unit.
-
-> **Legacy:** `cron-setup.sh` is **no longer present** in the repository. If you have legacy cron jobs from a prior install, remove them and migrate to `setup.sh systemd install`.
-
----
-
-## 🛠️ Troubleshooting Configuration
-
-**Validate before applying:**
-
-```bash
-docker compose config                              # validate generated compose
-docker compose -f docker-compose.yml.example config  # validate template
-```
-
-**Regenerate from templates:**
-
-```bash
-sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --force
-```
-
-**Secrets issues:**
-
-```bash
-ls -l secrets/keys/age-key.txt   # must exist and be mode 600
-sudo ./utilities/secrets-edit.sh                 # verify decryption works
-```
-
-**Email issues:**
-
-```bash
-sudo ./maintenance.sh test-email --verbose
-grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
-sudo ./utilities/secrets-edit.sh   # verify the correct API token key is set for EMAIL_PROVIDER
-
-# Postfix MTA sidecar specifically
-docker compose ps postfix
-docker compose logs postfix
-docker exec vaultwarden_postfix postconf relayhost
-docker exec vaultwarden_postfix postconf smtp_sasl_auth_enable
-```
-
-**Push notification failures (silent):**
-
-```bash
-# Check if PUSH_ENABLED=true conflicts with internal:true network
-grep PUSH_ENABLED .env
-grep 'internal:' docker-compose.yml
-docker compose logs vaultwarden | grep -i push
-```
-
-
-## Email routing
-
-See [EMAIL.md](EMAIL.md) for the canonical email routing matrix, Direct SMTP fallback semantics, recovery-kit attachment behavior, and `host` deprecation notes.
-
-
-## Resilient state and recovery architecture
-
-VaultWarden-OCI treats the repository `.env` as the operator-editable source of truth for non-secret settings. Do not edit `${PROJECT_STATE_DIR}/config/install.env` or `/etc/vaultwarden/vaultwarden.env` by hand; they are generated root-owned runtime artifacts.
-
-Use `sudo make edit-env` or `sudo utilities/env-edit.sh edit` for interactive edits, `sudo make sync-env` or `sudo utilities/env-edit.sh sync` for non-interactive propagation, and `sudo utilities/env-edit.sh status` for read-only drift/storage reporting. Direct sync/edit paths acquire the shared operation guard, while `make up` and `make restart` enter `startup.sh` first so env sync runs inside the same lifecycle guard before service mutation. The sync path is:
+For systemd jobs, the canonical installed rclone config is:
 
 ```text
-repo .env
-  -> ${PROJECT_STATE_DIR}/config/install.env
-  -> /etc/vaultwarden/vaultwarden.env
+/etc/vaultwarden/rclone.conf
 ```
 
-The sync step applies root-runtime-only overrides only to the installed env files: `SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt`, and `RCLONE_CONFIG=/etc/vaultwarden/rclone.conf` only when that installed rclone config exists. These root-only paths are never written back to repo `.env`.
+After changing rclone configuration, reinstall/validate systemd runtime:
 
-Persistent encrypted secrets live at `${PROJECT_STATE_DIR}/secrets/secrets.yaml`. Runtime Docker secret source files are transient and recreated under `/run/vaultwarden-oci/secrets/` by `vaultwarden-startup.service` on boot. They are not persistent state.
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+```
 
-SOPS uses the operational Age recipient first and may include a second offline recovery Age recipient whose private key should be kept on USB only. Reboot recovery depends on `vaultwarden-startup.service`, which waits for the state volume and then recreates runtime secrets before reconciling containers.
+---
+
+## Restore key configuration
+
+`RESTORE_AGE_KEY_FILE` is an optional non-interactive restore key-file override. Leave it blank for normal interactive use.
+
+The restore CLI also supports explicit key-file/recovery-kit selection according to its current command grammar. Use:
+
+```bash
+./restore.sh --help
+```
+
+or the generated [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) for exact option precedence and subcommand grammar.
+
+Do not confuse:
+
+- the operational Age key;
+- an offline recovery Age private identity;
+- the public offline recipient stored in policy/manifest state;
+- an emergency backup passphrase;
+- `EMERGENCY_BACKUP_AGE_RECIPIENT`.
+
+---
+
+## Operation guard configuration
+
+Mutating workflows use the shared operation guard under `/run/vaultwarden-oci/operations` with kernel `flock` state as the authority.
+
+Use:
+
+```bash
+sudo make operations
+```
+
+to inspect current operation metadata and active ownership.
+
+Do not delete lock files or operation metadata as a generic way to "unstick" the appliance. First determine whether the owning process/lock is still active.
+
+---
+
+## Applying and validating configuration changes
+
+For ordinary non-secret `.env` changes:
+
+```bash
+sudo make edit-env
+sudo make restart
+sudo make health
+```
+
+For secret changes, use `edit-secrets.sh`; schema apply behavior may restart or reconfigure the affected component.
+
+For managed systemd/runtime changes:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+For exact script options, rely on `--help` and [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md). Do not maintain a separate hand-copied option inventory in local notes.
