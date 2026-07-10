@@ -373,14 +373,14 @@ _extract_func(){
       print
       opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
       depth += opens - closes
-     if (depth == 0) exit
+      if (depth == 0) exit
     }' "$file"
 }
 
 _write_archive_with_sidecars() {
     local archive="$1"
     printf 'archive\n' > "$archive"
-    printf 'sha\\n' > "$archive.sha256"
+    printf 'sha\n' > "$archive.sha256"
     printf 'hmac\n' > "$archive.sha256.hmac"
     printf 'meta\n' > "$archive.meta"
 }

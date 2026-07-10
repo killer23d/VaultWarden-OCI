@@ -1551,11 +1551,13 @@ check_archive_dependencies() {
     case "$backup_file" in
         *.tar.zst.age|*.zst.age|*.tar.zst) hard+=(zstd) ;;
     esac
-    if [[ "${ROTATE_AGE_KEY_POLICY:-}" != "skip" ]]; then
-        hard+=(sops)
-    fi
-    if [[ "${RESTORE_TYPE:-}" =~ ^(full|emergency)$ ]] && _path_is_mountpoint "$STATE_DIR"; then
-        hard+=(rsync)
+    if [[ "${INSPECT_ONLY:-false}" != "true" ]]; then
+        if [[ "${ROTATE_AGE_KEY_POLICY:-}" != "skip" ]]; then
+            hard+=(sops)
+        fi
+        if [[ "${RESTORE_TYPE:-}" =~ ^(full|emergency)$ ]] && _path_is_mountpoint "$STATE_DIR"; then
+            hard+=(rsync)
+        fi
     fi
     local _cmd
     for _cmd in "${hard[@]}"; do command -v "$_cmd" >/dev/null 2>&1 || missing_hard+=("$_cmd"); done
@@ -1898,7 +1900,10 @@ _restore_inspect_archive_layout() {
     RESTORE_PREFLIGHT_MEMBERS="$(tar "${filter_args[@]}" -tf "$dec_tar")" || return 1
     RESTORE_PREFLIGHT_FIRST30="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | head -30)"
     local normalized_members
-    normalized_members="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | sed 's#^\./##')"
+    # Normalize archive member names only for layout analysis.  Legacy v1
+    # archives retain absolute member grammar, but the derived source root is
+    # always reconstructed below with exactly one leading slash.
+    normalized_members="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | sed -e 's#^\./##' -e 's#^/*##')"
     mapfile -t RESTORE_PREFLIGHT_LIVE_DBS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)data/db\.sqlite3$' | grep -Ev '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
     mapfile -t RESTORE_PREFLIGHT_SNAPSHOT_DBS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
     mapfile -t RESTORE_PREFLIGHT_CONFIGS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)config/install\.env$' || true)
@@ -2437,24 +2442,78 @@ restore_full() {
         unset -f _rollback_payload_paths
     else
         if [[ "$source_root" == "$state_dir" ]]; then
-            # Boot-only same-layout mode: two-rename directory swap (fast path).
-            local old_state_snapshot=""
-            if [[ -d "$state_dir" ]]; then
-                old_state_snapshot="${state_dir}.pre-restore-${ts}"
-                mv "$state_dir" "$old_state_snapshot"
+            # Boot-only same-layout mode: first materialize the selected staged
+            # state beside STATE_DIR, then use only target-filesystem renames for
+            # the destructive swap.  TMPDIR_RESTORE may be /dev/shm.
+            local old_state_snapshot="" target_staging promotion_marker
+            target_staging="$(mktemp -d "${state_dir}.restore-staged.XXXXXXXX")" || {
+                log_error "Failed to create target-filesystem restore staging sibling for $state_dir."
+                return 1
+            }
+
+            log_info "Materializing staged state on the target filesystem before promotion..."
+            if ! cp -a "$staging/$rel_source/." "$target_staging/" \
+                || ! chmod --reference="$staging/$rel_source" "$target_staging"; then
+                log_error "Failed to materialize staged state at $target_staging; live state has not been moved."
+                if ! rm -rf "$target_staging"; then
+                    log_warn "Incomplete target-filesystem restore staging retained for inspection: $target_staging"
+                fi
+                return 1
             fi
 
-            log_info "State payload restore phase: promoting staged state directory to live path..."
-            if ! mv "$staging/$rel_source" "$state_dir"; then
-                log_error "Failed to promote staged restored state into $state_dir."
-                if [[ -n "$old_state_snapshot" && -e "$old_state_snapshot" && ! -e "$state_dir" ]]; then
+            promotion_marker="$(mktemp "$target_staging/.restore-promotion.XXXXXXXX")" || {
+                log_error "Failed to mark target-filesystem restore staging; live state has not been moved."
+                if ! rm -rf "$target_staging"; then
+                    log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
+                fi
+                return 1
+            }
+            promotion_marker="$(basename "$promotion_marker")"
+
+            if [[ -d "$state_dir" ]]; then
+                old_state_snapshot="${state_dir}.pre-restore-${ts}"
+                if ! mv "$state_dir" "$old_state_snapshot"; then
+                    log_error "Failed to move live state into pre-restore snapshot; promotion was not attempted."
+                    if ! rm -rf "$target_staging"; then
+                        log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
+                    fi
+                    return 1
+                fi
+            fi
+
+            log_info "State payload restore phase: promoting target-filesystem staged state directory to live path..."
+            if ! mv "$target_staging" "$state_dir"; then
+                log_error "Failed to promote target-filesystem staged state into $state_dir."
+                [[ -e "$target_staging" ]] && log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
+                if [[ -e "$state_dir" ]]; then
+                    if [[ -e "$state_dir/$promotion_marker" ]]; then
+                        log_warn "Removing incomplete canonical state created by the failed promotion attempt: $state_dir"
+                        if ! rm -rf "$state_dir"; then
+                            log_error "CRITICAL: Failed to remove incomplete restore destination: $state_dir"
+                            if [[ -n "$old_state_snapshot" && -e "$old_state_snapshot" ]]; then
+                                log_error "Manual recovery after verifying the failed destination: rm -rf '$state_dir' && mv '$old_state_snapshot' '$state_dir'"
+                            fi
+                            return 1
+                        fi
+                    else
+                        log_error "CRITICAL: Canonical state path appeared without this promotion marker: $state_dir"
+                        if [[ -n "$old_state_snapshot" && -e "$old_state_snapshot" ]]; then
+                            log_error "Manual recovery after inspecting '$state_dir': rm -rf '$state_dir' && mv '$old_state_snapshot' '$state_dir'"
+                        fi
+                        return 1
+                    fi
+                fi
+                if [[ -n "$old_state_snapshot" && -e "$old_state_snapshot" ]]; then
                     if mv "$old_state_snapshot" "$state_dir"; then
                         log_warn "Restore promotion rollback succeeded: restored previous state to $state_dir."
                     else
-                        log_error "CRITICAL: restore promotion rollback failed. Manual recovery required: move '$old_state_snapshot' to '$state_dir'."
+                        log_error "CRITICAL: restore promotion rollback failed. Manual recovery: mv '$old_state_snapshot' '$state_dir'"
                     fi
                 fi
                 return 1
+            fi
+            if ! rm -f "$state_dir/$promotion_marker"; then
+                log_warn "Could not remove restore promotion marker: $state_dir/$promotion_marker"
             fi
         else
             # Cross-layout mode: never move arbitrary source-root contents into
@@ -2575,7 +2634,7 @@ restore_full() {
         log_warn "Project root not found in staging ($rel_project) — config files not restored."
     fi
 
-    log_success "Full restore completed (staged, atomic)."
+    log_success "Full restore promotion completed from staging."
 }
 
 main() {
