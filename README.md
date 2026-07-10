@@ -31,6 +31,8 @@ The normal production path is:
 - systemd;
 - Cloudflare DNS, proxy, and WAF;
 - Caddy with the Cloudflare-first TLS path;
+- Vaultwarden;
+- Postfix sidecar mail relay;
 - CrowdSec with Cloudflare edge enforcement;
 - SOPS + Age;
 - rclone for offsite backup support.
