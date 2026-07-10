@@ -1,8 +1,8 @@
 # Backup & Restore — VaultWarden-OCI
 
-This guide is the operator-facing reference for VaultWarden-OCI backups and restores. It reflects the current root-operated model, the 2026 backup tier model, separate boot/block storage support, post-restore Age key rotation, operator-controlled service start, and post-restore runtime permission repair.
+Operator reference for the current root-operated backup and restore model, boot/data-volume preflight, Age key handling, operator-controlled service start, and post-restore runtime permission repair.
 
-Related docs: [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) · [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md) · [OPERATIONS.md](OPERATIONS.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+Related docs: [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) · [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md) · [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md) · [OPERATIONS.md](OPERATIONS.md)
 
 ---
 
@@ -13,25 +13,25 @@ VaultWarden-OCI has three deliberately different backup tiers:
 | Tier | Use | Contents | Key handling |
 | --- | --- | --- | --- |
 | `db` | Quick database rollback | A single encrypted, integrity-checked SQLite snapshot (`.sqlite3.age`) | Encrypted to the operational Age recipient. |
-| `full` | Normal fresh-VM disaster recovery | Project root, state directory, persistent config, encrypted SOPS `secrets.yaml`, sidecars/metadata, and a verified DB injected at `${PROJECT_STATE_DIR}/data/db.sqlite3` | Excludes `/etc/vaultwarden/age-key.txt`; restore requires the offline Age recipient's private key or the operational Age key that encrypted that backup. |
-| `emergency` | Fastest clone-style recovery | Everything in `full`, plus staged persistent `/etc/vaultwarden` key/config material such as `age-key.txt`, `vaultwarden.env`, and `rclone.conf` when present | Protected independently with `age -p` passphrase mode or `EMERGENCY_BACKUP_AGE_RECIPIENT`; it is never encrypted only to the operational key it contains. |
+| `full` | Normal replacement-host disaster recovery | Project/state content required for DR, persistent config, encrypted SOPS `secrets.yaml`, metadata/sidecars, and a verified staged database | Excludes the live operational Age private key. Restore requires a private key for a recipient that encrypted the selected backup. |
+| `emergency` | Fastest clone-style recovery | Full DR content plus staged `/etc/vaultwarden` key/config material such as `age-key.txt`, `vaultwarden.env`, and `rclone.conf` when present | Independently sealed with `age -p` or `EMERGENCY_BACKUP_AGE_RECIPIENT`; never protected only by the operational key it can contain. |
 
-All tiers contain a complete verified SQLite database snapshot. Backups first try the SQLite Online Backup API (`sqlite3 .backup`). If that is unavailable or fails, Vaultwarden is stopped, the WAL is checkpointed, `db.sqlite3` is copied, integrity is verified, and Vaultwarden is restarted. No backup should report success with an unverified or partial database.
+All tiers use a complete verified SQLite snapshot. The normal snapshot path uses the SQLite Online Backup API. When the implementation must use its controlled fallback, Vaultwarden is stopped, WAL state is handled, the database is copied and integrity-checked, and service state is restored according to the owning backup path.
 
-Full and emergency archives exclude live `db.sqlite3`, WAL/SHM files, backup directories, logs, temp files, sockets/locks, `.pre-restore-*` snapshots, decrypted runtime secrets, and `/run/vaultwarden-oci/secrets/*`. The verified staged DB is then added back to the archive at the normal live path, so `.pre-restore-*` databases never satisfy archive validation.
+Full/emergency archive construction excludes the live SQLite/WAL/SHM set, backup trees, logs, transient runtime secrets, sockets/locks, temporary state, and `.pre-restore-*` snapshots. The verified staged database is inserted at the normal live database path.
 
-> **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Because they can contain the operational Age private key, they must be sealed with an independent passphrase prompt or a separate DR recipient (`EMERGENCY_BACKUP_AGE_RECIPIENT`). Do not store passphrases in shell history, environment variables, logs, or metadata.
+> **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export. Protect the emergency passphrase or separate emergency recipient identity independently from the archive.
 
-Choose `db` for quick database rollback, `full` for a fresh VM restore when you have the offline Age recipient's private key or the operational Age key that encrypted the backup, and `emergency` when the fastest clone-style recovery is worth carrying key material inside the sealed capsule. The offline Age recipient is an optional extra Age public recipient for SOPS recovery; it is not the emergency passphrase for a passphrase-sealed emergency backup.
+The optional offline Age recovery recipient is not the same thing as an emergency-backup passphrase or `EMERGENCY_BACKUP_AGE_RECIPIENT`.
 
 ---
 
 ## 📦 Creating Backups
 
-All production backup operations are root-operated because they read state, encrypted secrets, and root-owned runtime config.
+Production backup operations are root-operated:
 
 ```bash
-# Database backup
+# Database rollback backup
 sudo ./backup.sh run db
 sudo make backup
 
@@ -39,23 +39,25 @@ sudo make backup
 sudo ./backup.sh run full
 sudo make backup-full
 
-# Clone-grade emergency backup
+# Independently sealed emergency capsule
 sudo ./backup.sh run emergency
 sudo make backup-emergency
 ```
 
 ### Full verification
 
-Use full verification before major changes, after storage migration, and for periodic DR confidence checks:
+Use end-to-end verification before major changes, after storage migration, and for periodic DR confidence checks:
 
 ```bash
 sudo ./backup.sh run full --full-verification
 sudo ./backup.sh run emergency --full-verification
 ```
 
+Required verification failure is a backup failure. A newly created archive that fails required quick/full verification is discarded with its normal sidecars and is not left as a normal restore candidate. The failed backup does not run normal retention/pruning or success notification behavior.
+
 ### Offsite sync
 
-When rclone is configured, use `--rclone` to copy the encrypted backup and sidecars to the remote:
+When rclone is configured:
 
 ```bash
 sudo ./backup.sh run db --rclone
@@ -63,11 +65,13 @@ sudo ./backup.sh run full --full-verification --rclone
 sudo ./backup.sh sync
 ```
 
-`backup.sh sync` copies retained local backups to the matching remote folders. It does not mirror-delete remote backups merely because a local copy is absent.
+`backup.sh sync` copies retained local archives and sidecars to the matching remote type folders and then applies the configured remote retention contract. It is not a blind mirror-delete of every remote file absent locally.
+
+A requested offsite sync that is skipped or fails must not be described as completed offsite protection.
 
 ### Retention
 
-Retention defaults are type-specific:
+Current defaults from `.env.example` are:
 
 | Tier | Default retention |
 | :-- | :-- |
@@ -75,109 +79,139 @@ Retention defaults are type-specific:
 | `full` | 30 days |
 | `emergency` | 90 days |
 
-Override per run with `--keep N`:
+Override a run with a positive integer:
 
 ```bash
 sudo ./backup.sh run full --keep 30
 ```
 
-`--keep` accepts only positive integers. Values that are empty, non-integer, or shell-injectable are rejected during argument parsing.
+Retention always preserves the newest parseable timestamped archive for a tier, even when it is older than the retention window. Primary archives with unparseable names fail safe and are not automatically deleted.
+
+Sidecars associated with deleted primary archives are removed with the archive. Orphaned sidecars are cleaned separately.
 
 ---
 
-## 🔎 Restore Storage-Layout Preflight
+## 🔎 Backup Verification
 
-Before a destructive full or emergency restore, inspect the selected archive and the target storage layout:
+Verify the canonical latest backup selection:
+
+```bash
+sudo ./backup.sh verify
+```
+
+The verifier owns latest-backup selection and prints the exact target it verifies.
+
+Do not build operational procedures that independently name one "latest" archive and then invoke the canonical verifier without passing that exact archive; the two selection methods can disagree.
+
+When a backup was encrypted before an operational Age key rotation, verification may require the older matching private identity. Retain old recovery identities until dependent backup generations are retired.
+
+---
+
+## 🔎 Restore Storage Preflight
+
+Before destructive full/emergency restore, inspect archive and target storage compatibility:
 
 ```bash
 sudo ./restore.sh inspect --remote
-# or
-sudo ./restore.sh interactive --remote --inspect
 ```
 
-The report shows the backup source layout, current target layout, live DB presence, snapshot-only DBs, required directories, and a recommended next action.
+or use the interactive inspect mode documented by `restore.sh --help`.
 
-Database backups are storage-layout independent and are the safest option when only Vaultwarden data is needed. Full and emergency archives restore broader application state/config and require a compatible, prepared target storage layout.
+The preflight reports source/target storage layout, live database presence, snapshot-only databases, required directories, and a recommended next action.
 
-Block-storage backups should be restored to a mounted block/data-volume target, not silently into boot storage. If a backup expects `/mnt/vw-data` or another data-volume root and the current host targets `/var/lib/vaultwarden` on boot storage, restore stops before services are stopped. Attach and configure the data volume first, or restore the latest DB backup.
+Database backups are storage-layout independent. Full/emergency restores recover broader state and require a compatible prepared target layout.
 
-Prepared block-storage targets must provide these entries under `PROJECT_STATE_DIR` / `DATA_VOLUME_MOUNT`: `data`, `caddy`, `logs`, `config`, `secrets`, `backups`, and the `.vw-data-volume` sentinel. When the volume is already mounted and writable, restore may safely recreate missing directories and the sentinel. It will not format, partition, or guess block devices.
+When the selected backup expects attached-volume state, restore must not silently write that state to boot storage. Attach/mount/adopt the intended volume first or choose a database-only restore.
+
+Prepared attached-volume targets participate in the `.vw-data-volume` sentinel contract. Restore may recreate safe missing directory/sentinel state on an already mounted writable target, but it does not format, partition, or guess block devices.
 
 ---
 
 ## 🔄 Restore Flow
 
-`restore.sh` follows an auditable root-operated sequence:
+The restore workflow is root-operated and follows these boundaries:
 
-| Step | What happens |
+| Phase | Contract |
 | :-- | :-- |
-| 1 | Select backup by menu, `latest`, `--file`, or `--remote` |
-| 2 | Validate storage readiness before destructive actions |
-| 3 | Prompt for or resolve the Age identity/passphrase that decrypts this backup |
-| 4 | Verify integrity sidecars when present |
-| 5 | Parse `.meta` sidecar for type, format, version, and storage metadata |
-| 6 | Ask final confirmation unless `--force` was provided |
-| 7 | Create a pre-restore safety backup unless `--no-backup` was provided |
-| 8 | Stop services |
-| 9 | Restore `db`, `full`, or `emergency` content |
-| 10 | Re-key persistent SOPS secrets and promote the new operational Age key |
-| 11 | Re-apply runtime permissions for the target host |
-| 12 | Start services according to start policy and run health checks |
+| Selection | select local/remote archive by supported grammar |
+| Preflight | validate archive metadata and target storage before destructive work |
+| Key/protection | resolve the private Age identity or independent emergency protection needed by the selected archive |
+| Integrity | verify sidecars/metadata according to the archive contract |
+| Safety snapshot | create the configured pre-restore backup unless explicitly skipped |
+| Stop | stop the live stack |
+| Stage/promote | restore database or broader archive content through the owning transaction |
+| Re-key | reconcile persistent SOPS secrets and the operational Age key where the selected restore path requires it |
+| Permission repair | apply the target-host runtime permission contract |
+| Start policy | auto, ask, or manual |
+| Health | verify `/alive` and the normal health path when services are started |
 
-Full and emergency restores extract with portable ownership/mode handling first, then re-apply the target host's runtime permission contract. This prevents stale archive ownership from breaking a replacement VM while still keeping root-operated secrets private and Caddy writable. See [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md).
+An incomplete restore must not be presented as successful.
+
+Full/emergency restore extracts portable archive content without trusting stale owners/modes and then applies the target-host permission contract. See [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md).
 
 ---
 
-## 🔐 Supplying the Decryption Key
+## 🔐 Supplying a Decryption Identity
 
-Use the key that can decrypt the selected backup, not necessarily the key currently installed on the server.
+Use a private key that can decrypt the selected archive, which may differ from the server's current operational key:
 
 ```bash
-# Interactive prompt
+# Interactive/default key resolution
 sudo ./restore.sh latest full
 
 # Explicit key file
-sudo ./restore.sh latest full --key-file /path/to/old-age-key.txt
+sudo ./restore.sh latest full \
+  --key-file /secure/path/old-age-key.txt
 
-# Environment-based scripted restore
-RESTORE_AGE_KEY_FILE=/path/to/old-age-key.txt sudo ./restore.sh latest db
-
-# Recovery kit path when applicable
-sudo ./restore.sh interactive --remote --from-recovery-kit /path/to/recovery-kit.txt
+# Recovery kit
+sudo ./restore.sh interactive --remote \
+  --from-recovery-kit /secure/path/recovery-kit.txt
 ```
 
-If decryption fails because no Age identity matches, the backup may have been encrypted with an older operational Age key or an offline Age recipient's private key. Retry with the key that was active when the backup was created.
+For scripted restore, `RESTORE_AGE_KEY_FILE` can provide the configured non-interactive key-file override.
 
-Emergency backups may be passphrase-sealed (`age -p`) or encrypted to `EMERGENCY_BACKUP_AGE_RECIPIENT`. A passphrase-sealed emergency backup will prompt for that emergency passphrase during decrypt/verification.
+Use:
 
-### Restore-time passphrase prompts
+```bash
+./restore.sh --help
+```
 
-Two different prompts can appear during restore:
+or [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) for exact current parser grammar and option precedence.
 
-- The selected `db` or `full` backup is decrypted with the Age private key prompt. Use the Age private key that matches the Age public recipient used when that backup was created.
-- A separate emergency passphrase prompt can appear because `restore.sh` creates a pre-restore emergency snapshot of the current VM before overwrite. That emergency passphrase protects the safety snapshot, not the selected `db`/`full` backup.
+### Emergency protection
 
-Keep the pre-restore emergency snapshot on existing/live VMs unless you understand the rollback risk. On a freshly rebuilt VM where the current local state has no value and only a remote DB backup is being restored, `sudo ./restore.sh interactive --remote --no-backup` is an intentional shortcut.
+Emergency backups may be:
 
-### Fresh-server rclone prompts
+- passphrase-sealed with `age -p`; or
+- encrypted to `EMERGENCY_BACKUP_AGE_RECIPIENT`.
 
-On a fresh server without `.env`, `sudo ./restore.sh interactive --remote` and `sudo ./restore.sh inspect --remote` can ask for the rclone remote name and remote path. Enter the configured rclone remote name (for example `b2`, `gdrive`, or `s3`) and the backup subfolder (default: `vaultwarden_backups`). These values are session-scoped so restore can find the remote backup; they are not written to `.env` unless you save them separately.
+A passphrase-sealed archive prompts for the emergency passphrase during decrypt/verification.
+
+The emergency protection is independent from any operational Age key carried inside the capsule.
+
+### Pre-restore emergency snapshot prompt
+
+A separate emergency passphrase prompt can appear when restore creates a pre-restore emergency snapshot of the current host before overwrite. That passphrase protects the safety snapshot; it is not necessarily the credential for the selected `db`/`full` archive.
+
+Keep the pre-restore safety snapshot on an existing/live host unless you intentionally accept the rollback risk.
 
 ---
 
-## 🚦 Operator-Controlled Service Start
+## 🚦 Service Start Policy
 
-Restore and migration workflows support an explicit start policy:
+Restore and storage migration support explicit start behavior:
 
 | Option | Behavior |
 | :-- | :-- |
-| `--start-policy auto` or `--start` | Start services automatically after successful restore/migration. |
-| `--start-policy ask` | Prompt before starting. Interactive restores default to this and ask `Start VaultWarden services now? [yes/no] (default: no):`. |
-| `--start-policy manual` or `--no-start` | Do not start services; print the manual checklist instead. |
+| `--start-policy auto` or `--start` | start services automatically after successful mutation |
+| `--start-policy ask` | prompt before start; interactive restore normally uses an operator gate |
+| `--start-policy manual` or `--no-start` | keep services stopped and print manual next steps |
 
-Use `manual` or `ask` when you want to inspect `.env`, `/etc/vaultwarden/*`, mounted storage, Cloudflare/DNS, and firewall state before the stack starts.
+Use `ask` or `manual` when you need to inspect storage, `/etc/vaultwarden`, Cloudflare/DNS, firewall, rclone, or configuration before startup.
 
-Manual start checklist:
+Required confirmation timeout/EOF is not converted to a successful implicit answer. Restore fails safe at the current guarded acknowledgement point and prints next steps.
+
+Manual live-stack checklist:
 
 ```bash
 sudo utilities/repair-permissions.sh
@@ -187,35 +221,38 @@ docker compose logs --tail=100
 sudo ./maintenance.sh health
 ```
 
+Do not enable scheduled systemd jobs merely because the live stack starts.
+
 ---
 
 ## 🧰 Post-Restore Runtime Permission Repair
 
-Full and emergency restores automatically call the runtime permission repair helper before the service-start gate.
+Full/emergency restore calls the shared repair before the service-start gate.
 
-Manual repair command:
+Manual check/repair:
 
 ```bash
+sudo utilities/repair-permissions.sh --check
 sudo utilities/repair-permissions.sh
-sudo docker compose restart caddy
 sudo ./maintenance.sh health
 ```
 
-Expected health indicator:
+The repair normalizes:
 
-```text
-[pass] permissions:caddy-storage    Caddy storage/log permissions are correct
+- `${PROJECT_STATE_DIR}/data` and Vaultwarden logs to `PUID:PGID`;
+- `${PROJECT_STATE_DIR}/caddy/data`, `${PROJECT_STATE_DIR}/caddy/config`, and `${PROJECT_STATE_DIR}/logs/caddy` to Caddy UID/GID `2000:2000` with the defined runtime modes;
+- root-operated state under `${PROJECT_STATE_DIR}/config`, `${PROJECT_STATE_DIR}/secrets`, and `/etc/vaultwarden`;
+- transient secret source state under `/run/vaultwarden-oci/secrets`;
+- the restored init-permissions sentinel so the replacement host cannot inherit a stale skip decision.
+
+Do not use broad fixes such as:
+
+```bash
+sudo chmod -R 777 "$PROJECT_STATE_DIR"
+sudo chown -R 2000:2000 "$PROJECT_STATE_DIR"
 ```
 
-This step normalizes, among other paths:
-
-- `${PROJECT_STATE_DIR}/data` to `${PUID}:${PGID}`;
-- `${PROJECT_STATE_DIR}/caddy/data`, `${PROJECT_STATE_DIR}/caddy/config`, and `${PROJECT_STATE_DIR}/logs/caddy` to `2000:2000`;
-- root-operated config/secrets under `${PROJECT_STATE_DIR}/config`, `${PROJECT_STATE_DIR}/secrets`, `/etc/vaultwarden`, and `/run/vaultwarden-oci/secrets`.
-
-It also removes a restored `${PROJECT_STATE_DIR}/data/.permissions-initialized` sentinel so startup cannot skip a host-specific permission scan after DR.
-
-Do not repair restore drift with broad commands such as `chmod -R 777` or `chown -R 2000:2000 ${PROJECT_STATE_DIR}`. Those commands can expose root-operated secrets or break SOPS state.
+Those commands can expose root-operated secrets and break Vaultwarden application ownership.
 
 ---
 
@@ -228,85 +265,121 @@ sudo ./restore.sh latest db
 sudo ./maintenance.sh health
 ```
 
-Use this when only Vaultwarden database contents need rollback. It is storage-layout independent.
+Use this when only Vaultwarden database content needs rollback.
 
-### Full fresh-VM restore
+### Full replacement-host restore
 
 ```bash
 sudo ./restore.sh inspect --remote
-sudo ./restore.sh interactive --remote --key-file /path/to/offline-age-key.txt --start-policy ask
-sudo ./setup.sh systemd install
-sudo ./maintenance.sh health
+sudo ./restore.sh interactive --remote \
+  --key-file /secure/path/offline-age-key.txt \
+  --start-policy ask
 ```
 
-Use this for normal DR when you have the offline Age recipient's private key or the operational Age key that encrypted the selected full backup. The offline Age recipient is an optional extra recipient for decrypting/recovering SOPS material; it is not the emergency passphrase used for a passphrase-sealed emergency backup.
+After the restored live stack, storage, networking, rclone, and Cloudflare state are ready for automation:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
 
 ### Emergency clone-style restore
 
 ```bash
 sudo ./restore.sh interactive --remote --start-policy ask
-sudo utilities/repair-permissions.sh
-sudo ./startup.sh --skip-pull
+sudo utilities/repair-permissions.sh --check
 sudo ./maintenance.sh health
 ```
 
-Use this when the fastest clone-style recovery is worth restoring sealed `/etc/vaultwarden` material from the emergency capsule.
+Emergency restore may recover staged `/etc/vaultwarden` key/config material from the independently sealed capsule.
+
+Before enabling scheduled jobs:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
 
 ### Failed update rollback
 
-`maintenance.sh update` can call restore automatically when post-update health checks fail. Manual rollback remains available:
+The maintenance update path may invoke restore when its post-update health contract fails. Manual rollback remains available through the current restore grammar, for example:
 
 ```bash
 sudo ./restore.sh latest full --force --no-backup
 ```
 
+Use `--force` only when the preflight and selected archive are already understood. It does not bypass shared operation guards.
+
 ---
 
 ## Verification After Restore
 
-After any restore, verify:
+After any restore:
 
 ```bash
 sudo ./maintenance.sh health
-sudo ./backup.sh verify
 sudo make key-health
-sudo make timers
+sudo ./backup.sh verify
+sudo utilities/repair-permissions.sh --check
 ```
 
-For Caddy/TLS symptoms after a full or emergency restore:
+When the host is intended to return to automated production:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+A successful browser login is useful but is not the production-readiness gate.
+
+For local Caddy/TLS symptoms:
 
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/alive" \
-  -o /dev/null -w "local HTTPS /alive: HTTP %{http_code}\n"
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+  "https://$DOMAIN/alive" \
+  -o /dev/null \
+  -w "local HTTPS /alive: HTTP %{http_code}\n"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/config" \
-  -o /dev/null -w "local HTTPS /api/config: HTTP %{http_code}\n"
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+  "https://$DOMAIN/api/config" \
+  -o /dev/null \
+  -w "local HTTPS /api/config: HTTP %{http_code}\n"
 
 sudo docker logs vaultwarden_caddy --tail=120 2>&1 \
   | grep -Ei 'permission|certificate|tls|handshake|error|warn|storage|autosave' || true
 ```
 
-Expected result: local HTTPS `/alive` and `/api/config` return HTTP `200`, and health reports no Caddy storage drift.
+Expected healthy local endpoints return HTTP `200`, and the normal health path reports no Caddy storage permission drift.
 
 ---
 
-## Recovery Kit and Key Escrow
+## Recovery Material
 
-Export a recovery kit after initial setup and after any Age key rotation:
+Export a fresh recovery kit after initial setup and after operational Age key rotation or restore-driven replacement of the live key:
 
 ```bash
 sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
-Store the recovery kit in a password manager and an offline location. If a restore rotates the operational key, update your escrow immediately before considering the DR complete.
+Store it in a trusted password manager and a separate offline recovery location. Remove plaintext copies from the server after verifying the off-host copies.
+
+Retain historical private identities required to decrypt still-retained backup generations.
+
+See [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md).
 
 ---
 
-## Monthly / Quarterly Checklist
+## Operational Checklist
 
-- Daily: DB backup runs and offsite sync succeeds.
-- Weekly: Full backup with `--full-verification` succeeds.
-- Monthly: Emergency clone-grade backup is created and sealed independently.
-- Quarterly: Rehearse restore on a disposable VM or copied state volume; never rehearse on the live production state volume.
+- Daily: database backup succeeds and requested offsite protection completes.
+- Weekly: full backup succeeds with periodic `--full-verification`.
+- Monthly: independently sealed emergency backup is created and protected separately.
+- After storage migration: create and fully verify a fresh full backup.
+- After Age key rotation: export new recovery material and retain old identities needed by retained backups.
+- Quarterly: rehearse restore on a disposable host or copied state volume; never rehearse destructive recovery on the only live production state.
+- Before go-live or after major DR: `systemd validate` and smoke test pass without required checks skipped.
