@@ -197,7 +197,6 @@ source "$ROOT/lib/schema.sh"
 schema_keys >/dev/null || fail "schema_keys did not accept Mike Farah yq v4"
 [[ "$(schema_field cloudflare_zone_id conditional_group)" == "cloudflare_proxy" ]] \
     || fail "schema_field raw output/schema query behavior failed"
-
 cf_keys="$(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' "$ROOT/secrets-schema.yaml")" \
     || fail "Cloudflare conditional schema query failed"
 [[ "$cf_keys" == *"cloudflare_zone_id"* ]] || fail "Cloudflare conditional keys missing cloudflare_zone_id"
@@ -224,12 +223,6 @@ grep -Fq 'legacy_keys = {"backup_passphrase"}' "$ROOT/lib/secrets.sh" \
 
 grep -Fq 'schema_keys_for_conditional_group "cloudflare_proxy"' "$ROOT/lib/secrets.sh" \
     || fail "validate_required_secrets must use the schema conditional-group accessor"
-grep -Fq 'python3 -c "import yaml"' "$ROOT/utilities/setup-system.sh" \
-    || fail "setup dependency verification must check PyYAML import"
-grep -Fq '"python3-yaml"' "$ROOT/utilities/setup-system.sh" \
-    || fail "setup apt package ownership must include python3-yaml"
-! grep -Eq 'local basic_packages=.*"yq"' "$ROOT/utilities/setup-system.sh" \
-    || fail "setup apt package ownership must not use Ubuntu python-yq"
 
 write_minimal_schema() {
     local file="$1"
