@@ -372,6 +372,10 @@ for file in \
 done
 grep -Fq "[DRY RUN] Would clean up db backups older than 1 days" "$TMP/maintenance-dry-run.out" \
     || fail "maintenance dry-run did not reach canonical retention preview"
+grep -Fq 'db backup retention preview completed (1d retention)' "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run did not report successful retention preview"
+! grep -Fq 'db backups cleaned (1d retention)' "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run falsely reported backups as cleaned"
 grep -Fq "[DRY RUN] Would remove: $(basename "$maintenance_older") (and sidecars)" "$TMP/maintenance-dry-run.out" \
     || fail "maintenance dry-run did not report stale archive candidate"
 grep -Fq '[DRY RUN] Would clean up 1 old db backups' "$TMP/maintenance-dry-run.out" \

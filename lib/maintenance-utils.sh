@@ -148,7 +148,11 @@ cleanup_backups() {
             continue
         fi
         if cleanup_old_backups "$backup_dir" "$backup_type" "$retention_days"; then
-            log_success "$backup_type backups cleaned (${retention_days}d retention)"
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_success "$backup_type backup retention preview completed (${retention_days}d retention)"
+            else
+                log_success "$backup_type backups cleaned (${retention_days}d retention)"
+            fi
         else
             log_error "$backup_type backup cleanup failed"
             had_real_error=true
