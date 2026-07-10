@@ -177,6 +177,7 @@ set -uo pipefail
 TMPDIR_BACKUP="$TMP/work"
 mkdir -p "\$TMPDIR_BACKUP"
 FAIL_SUFFIX="\${FAIL_SUFFIX:-}"
+META_CASE="\${META_CASE:-age-passphrase}"
 backup_log_info(){ printf 'INFO %s\\n' "\$*"; }
 log_warn(){ printf 'WARN %s\\n' "\$*"; }
 log_error(){ printf 'ERROR %s\\n' "\$*"; }
@@ -188,6 +189,7 @@ get_config_value(){
   esac
 }
 _resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(--config "$TMP/mock-rclone.conf"); }
+age(){ : > "$TMP/age.called"; return 0; }
 rclone(){
   local cmd="\$1"; shift
   case "\$cmd" in
@@ -203,10 +205,18 @@ rclone(){
     *) return 0 ;;
   esac
 }
+$(_extract_func "$BACKUP" _validate_emergency_restore_metadata)
 $(_extract_func "$BACKUP" sync_to_rclone)
 archive="$TMP/emergency.tar.zst.age"
 printf archive > "\$archive"
-printf 'encryption_mode=age-passphrase\\n' > "\${archive}.meta"
+case "\$META_CASE" in
+  zero) : > "\${archive}.meta" ;;
+  missing-mode) printf 'version=2\\n' > "\${archive}.meta" ;;
+  unsupported) printf 'encryption_mode=future-mode\\n' > "\${archive}.meta" ;;
+  duplicate) printf 'encryption_mode=age-passphrase\\nencryption_mode=age-recipient\\n' > "\${archive}.meta" ;;
+  age-passphrase|age-recipient) printf 'encryption_mode=%s\\n' "\$META_CASE" > "\${archive}.meta" ;;
+  *) exit 90 ;;
+esac
 printf checksum > "\${archive}.sha256"
 rc=0
 sync_to_rclone "\$archive" emergency || rc=\$?
@@ -228,12 +238,139 @@ grep -q '^RC=2$' "$TMP/sha-fail.out" || { cat "$TMP/sha-fail.out" >&2; fail '.sh
 grep -q 'The primary backup archive was delivered' "$TMP/sha-fail.out" \
   || fail '.sha256 upload failure must retain warning-class primary-delivered wording'
 
+for meta_case in zero missing-mode unsupported duplicate; do
+  : > "$TMP/rclone-copy.calls"
+  rm -f "$TMP/age.called"
+  META_CASE="$meta_case" bash "$TMP/sync-probe.sh" >"$TMP/$meta_case.out" 2>&1 \
+    || fail "emergency metadata $meta_case probe crashed"
+  grep -q '^RC=3$' "$TMP/$meta_case.out" \
+    || { cat "$TMP/$meta_case.out" >&2; fail "emergency metadata $meta_case must return distinct status 3"; }
+  ! grep -q 'Offsite sync complete' "$TMP/$meta_case.out" \
+    || fail "emergency metadata $meta_case printed complete offsite wording"
+  ! grep -q 'The primary backup archive was delivered' "$TMP/$meta_case.out" \
+    || fail "emergency metadata $meta_case claimed the remote primary was delivered as a complete recovery point"
+  grep -qi 'restore-critical metadata is missing, unusable, or not delivered' "$TMP/$meta_case.out" \
+    || fail "emergency metadata $meta_case did not explain unusable restore-critical metadata"
+  [[ ! -e "$TMP/age.called" ]] || fail "emergency metadata $meta_case triggered an Age trial-decrypt fallback"
+done
+grep -qi 'metadata is empty' "$TMP/zero.out" || fail 'zero-byte emergency .meta was not identified as empty'
+grep -qi 'missing encryption_mode' "$TMP/missing-mode.out" || fail 'missing emergency encryption_mode was not reported'
+grep -qi "unsupported encryption_mode 'future-mode'" "$TMP/unsupported.out" || fail 'unsupported emergency encryption_mode was not reported truthfully'
+grep -qi 'multiple encryption_mode entries' "$TMP/duplicate.out" || fail 'duplicate emergency encryption_mode entries were not rejected as ambiguous'
+
+for meta_case in age-passphrase age-recipient; do
+  : > "$TMP/rclone-copy.calls"
+  META_CASE="$meta_case" bash "$TMP/sync-probe.sh" >"$TMP/$meta_case.out" 2>&1 \
+    || fail "supported emergency metadata $meta_case probe crashed"
+  grep -q '^RC=0$' "$TMP/$meta_case.out" || fail "supported emergency mode $meta_case did not continue through normal sync"
+  grep -q 'Offsite sync complete' "$TMP/$meta_case.out" || fail "supported emergency mode $meta_case did not reach normal sync completion"
+  grep -Fq "$TMP/emergency.tar.zst.age.meta" "$TMP/rclone-copy.calls" || fail "supported emergency mode $meta_case did not upload metadata"
+done
+
+cat > "$TMP/verify-metadata-probe.sh" <<EOF_PROBE
+set -uo pipefail
+REQUIRE_AUTHENTICATED_INTEGRITY=false
+EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""
+backup_log_info(){ printf 'INFO %s\\n' "\$*"; }
+backup_log_warn(){ printf 'WARN %s\\n' "\$*"; }
+log_error(){ printf 'ERROR %s\\n' "\$*"; }
+verify_file_integrity(){ return 0; }
+verify_sqlite(){ return 0; }
+_resolve_age_key(){ printf '%s\\n' "$TMP/key.txt"; }
+get_config_value(){ printf '%s\\n' "\${2:-}"; }
+age(){ printf '%s\\n' "\$*" >> "$TMP/verify-age.calls"; return 0; }
+$(_extract_func "$BACKUP" _validate_emergency_restore_metadata)
+$(_extract_func "$BACKUP" verify_backup_full)
+$(_extract_func "$BACKUP" verify_backup_quick)
+archive="$TMP/verify-emergency.age"
+printf archive > "\$archive"
+printf checksum > "\${archive}.sha256"
+case "\${VERIFY_META_CASE:-missing-mode}" in
+  missing-mode) printf 'version=2\\n' > "\${archive}.meta" ;;
+  unsupported) printf 'encryption_mode=future-mode\\n' > "\${archive}.meta" ;;
+  *) exit 91 ;;
+esac
+quick_rc=0
+verify_backup_quick "\$archive" "$TMP/key.txt" emergency || quick_rc=\$?
+full_rc=0
+verify_backup_full "\$archive" emergency "$TMP" || full_rc=\$?
+printf 'QUICK_RC=%s\\nFULL_RC=%s\\n' "\$quick_rc" "\$full_rc"
+EOF_PROBE
+for verify_case in missing-mode unsupported; do
+  : > "$TMP/verify-age.calls"
+  VERIFY_META_CASE="$verify_case" bash "$TMP/verify-metadata-probe.sh" >"$TMP/verify-$verify_case.out" 2>&1 \
+    || fail "emergency verification metadata $verify_case probe crashed"
+  grep -q '^QUICK_RC=1$' "$TMP/verify-$verify_case.out" || fail "quick verification accepted emergency metadata $verify_case"
+  grep -q '^FULL_RC=1$' "$TMP/verify-$verify_case.out" || fail "full verification accepted emergency metadata $verify_case"
+  [[ ! -s "$TMP/verify-age.calls" ]] || fail "emergency verification $verify_case trial-decrypted after unusable metadata"
+done
+
+cat > "$TMP/batch-sync-probe.sh" <<EOF_PROBE
+set -uo pipefail
+BASE_DIR="$TMP/retained"
+DRY_RUN=false
+BATCH_META_CASE="\${BATCH_META_CASE:-zero}"
+COPY_LOG="$TMP/batch-copy.calls"
+rm -rf "\$BASE_DIR"
+mkdir -p "\$BASE_DIR/emergency"
+archive="\$BASE_DIR/emergency/emergency-retained-20260710-120000.tar.zst.age"
+printf archive > "\$archive"
+case "\$BATCH_META_CASE" in
+  zero) : > "\${archive}.meta" ;;
+  valid) printf 'encryption_mode=age-recipient\\n' > "\${archive}.meta" ;;
+  *) exit 92 ;;
+esac
+backup_log_info(){ printf 'INFO %s\\n' "\$*"; }
+backup_log_success(){ printf 'SUCCESS %s\\n' "\$*"; }
+log_error(){ printf 'ERROR %s\\n' "\$*"; }
+get_config_value(){
+  case "\$1" in
+    RCLONE_REMOTE_NAME) printf '%s\\n' mockremote ;;
+    RCLONE_REMOTE_PATH) printf '%s\\n' vaultwarden_backups ;;
+    BACKUP_DIR) printf '%s\\n' "\$BASE_DIR" ;;
+    *) printf '%s\\n' "\${2:-}" ;;
+  esac
+}
+_default_backup_dir(){ printf '%s\\n' "\$BASE_DIR"; }
+_resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(--config "$TMP/mock-rclone.conf"); }
+_retention_days_for_type(){ printf '%s\\n' 30; }
+cleanup_old_backups(){ return 0; }
+_prune_remote_backups(){ return 0; }
+rclone(){
+  local cmd="\$1"; shift
+  case "\$cmd" in
+    lsd) return 0 ;;
+    copy) printf '%s\\n' "\$*" >> "\$COPY_LOG"; return 0 ;;
+    *) return 0 ;;
+  esac
+}
+$(_extract_func "$BACKUP" _validate_emergency_restore_metadata)
+$(_extract_func "$BACKUP" sync_all_backups_to_rclone)
+sync_all_backups_to_rclone
+EOF_PROBE
+
+: > "$TMP/batch-copy.calls"
+if BATCH_META_CASE=zero bash "$TMP/batch-sync-probe.sh" >"$TMP/batch-invalid.out" 2>&1; then
+  fail 'standalone retained sync accepted zero-byte emergency metadata'
+fi
+grep -Fq 'emergency-retained-20260710-120000.tar.zst.age' "$TMP/batch-invalid.out" \
+  || fail 'standalone retained sync did not identify the invalid emergency archive'
+grep -qi 'metadata is empty' "$TMP/batch-invalid.out" || fail 'standalone retained sync did not explain zero-byte emergency metadata'
+[[ ! -s "$TMP/batch-copy.calls" ]] || fail 'standalone retained sync invoked emergency batch upload before metadata validation'
+! grep -q 'Rclone backup copy complete' "$TMP/batch-invalid.out" || fail 'standalone retained sync printed success for invalid emergency metadata'
+
+: > "$TMP/batch-copy.calls"
+BATCH_META_CASE=valid bash "$TMP/batch-sync-probe.sh" >"$TMP/batch-valid.out" 2>&1 \
+  || { cat "$TMP/batch-valid.out" >&2; fail 'standalone retained sync rejected supported emergency metadata'; }
+grep -Fq "$TMP/retained/emergency/" "$TMP/batch-copy.calls" || fail 'valid retained emergency backup did not continue to batch copy'
+grep -q 'Rclone backup copy complete' "$TMP/batch-valid.out" || fail 'valid retained emergency backup did not reach normal batch-sync completion'
+
 grep -Fq 'elif (( _sync_rc == 3 )); then' "$BACKUP" \
   || fail 'backup run caller must handle emergency metadata delivery status separately'
-grep -Fq 'FAILED: emergency restore metadata missing remotely; local backup is safe' "$BACKUP" \
+grep -Fq 'FAILED: emergency restore metadata missing or unusable; local backup is safe' "$BACKUP" \
   || fail 'backup run summary must mark incomplete emergency offsite delivery as failed'
 
-printf 'PASS: emergency offsite metadata is restore-critical while checksum sidecars remain warning-class\n'
+printf 'PASS: emergency offsite metadata is restore-usable before sync and verification; checksum sidecars remain warning-class\n'
 )
 
 check_emergency_offsite_metadata_contract
