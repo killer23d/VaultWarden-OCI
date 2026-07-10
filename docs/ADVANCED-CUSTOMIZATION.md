@@ -284,7 +284,7 @@ Do not customize retention by replacing the canonical helper with `find ... -mti
 
 Required quick/full verification failure is backup failure. A failed new archive is discarded and does not run normal retention/pruning/success notification behavior.
 
-Do not make verification "best effort" in a way that returns success with a known failed archive.
+Do not treat verification as "best effort" in a way that returns success with a known failed archive.
 
 ### Emergency backup protection
 
@@ -316,7 +316,7 @@ sudo ./setup.sh systemd validate
 
 The backup config validator accepts the canonical `/root/.config/rclone/rclone.conf` fallback only when the resolved path is exactly that regular file, is root-owned, and is not world-writable.
 
-It does not make arbitrary `/root` paths acceptable.
+Arbitrary `/root` paths are not acceptable.
 
 Do not point `RCLONE_CONFIG` at sensitive system files or a symlink resolving into protected paths.
 

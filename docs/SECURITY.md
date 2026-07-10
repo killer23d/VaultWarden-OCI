@@ -179,7 +179,7 @@ The repository must not:
 - print production secret values into ordinary logs;
 - expose private Age keys in process arguments where avoidable;
 - persist the offline recovery private key on the server;
-- weaken root-owned key permissions to make a convenience command work.
+- weaken root-owned key permissions for a convenience command.
 
 ---
 
