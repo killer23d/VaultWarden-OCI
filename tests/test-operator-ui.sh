@@ -433,7 +433,7 @@ _extract_func(){
     $0 ~ "^" f "\\(\\)" {p=1}
     p {
       print
-      opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
       depth += opens - closes
       if (depth == 0) exit
     }' "$file"

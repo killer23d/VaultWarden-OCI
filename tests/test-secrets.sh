@@ -197,6 +197,7 @@ source "$ROOT/lib/schema.sh"
 schema_keys >/dev/null || fail "schema_keys did not accept Mike Farah yq v4"
 [[ "$(schema_field cloudflare_zone_id conditional_group)" == "cloudflare_proxy" ]] \
     || fail "schema_field raw output/schema query behavior failed"
+
 cf_keys="$(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' "$ROOT/secrets-schema.yaml")" \
     || fail "Cloudflare conditional schema query failed"
 [[ "$cf_keys" == *"cloudflare_zone_id"* ]] || fail "Cloudflare conditional keys missing cloudflare_zone_id"
