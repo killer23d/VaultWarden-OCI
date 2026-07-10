@@ -615,8 +615,7 @@ _validate_emergency_restore_metadata() {
     esac
 
     if [[ -n "$mode_out_name" ]]; then
-        local -n mode_out_ref="$mode_out_name"
-        mode_out_ref="$mode"
+        printf -v "$mode_out_name" '%s' "$mode"
     fi
     return 0
 }
