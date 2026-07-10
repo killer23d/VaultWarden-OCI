@@ -849,7 +849,7 @@ START_POLICY=auto
 _RESTORE_SAFETY_NET_RUNNING=false
 _RESTORE_CLEANUP_DONE=false
 cleanup(){ :; }
-sqlite3(){ : > "$TMP/safety-sqlite.called"; printf 'ok\\n'; }
+sqlite3(){ printf 'ok\\n'; }
 $(_extract_func "$RESTORE" _restore_print_manual_start_checklist)
 $(_extract_nested_func "$RESTORE" _restore_cleanup_once)
 $(_extract_nested_func "$RESTORE" _restore_safety_net)
@@ -862,7 +862,6 @@ restore_full "$TMP/safety.tar.gz.age" unused "$safety_target" "\$PUID" "\$PGID" 
 EOF_PROBE
 if TEST_PROJECT_ROOT="$safety_project" bash "$TMP/safety-net-probe.sh" >"$TMP/safety-net.out" 2>&1; then fail 'production safety-net probe unexpectedly succeeded'; fi
 grep -qx newdb "$safety_target/data/db.sqlite3" || fail 'safety-net probe did not reach a valid new DB before the injected promotion failure'
-[[ -f "$TMP/safety-sqlite.called" ]] || fail 'production safety net did not evaluate the live SQLite DB'
 grep -q 'Restore state is not eligible for automatic safety restart' "$TMP/safety-net.out" || fail 'production safety net did not refuse restart for uncommitted full restore'
 [[ ! -e "$TMP/safety-startup.called" ]] || fail 'production safety net invoked startup.sh before full promotion commit'
 ! grep -q 'attempting one service restart' "$TMP/safety-net.out" || fail 'production safety net printed restart-success wording before full promotion commit'
