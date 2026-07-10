@@ -1,23 +1,39 @@
 # Email Setup — VaultWarden-OCI
 
-VaultWarden-OCI treats email as part of the appliance reliability path. The normal production route is:
+VaultWarden-OCI treats outbound mail as part of appliance reliability.
+
+The normal production path is Postfix-first SMTP:
 
 ```text
-Vaultwarden user/admin mail  → Postfix sidecar → external SMTP relay
-Operational scripts/alerts   → Postfix sidecar → external SMTP relay
-systemd OnFailure notices    → existing notification script → Postfix sidecar → external SMTP relay
-Recovery-kit export email    → Postfix sidecar SMTP with attachment support
+Vaultwarden application mail
+        -> Postfix sidecar
+        -> authenticated/TLS upstream SMTP relay
+
+Operational alerts in EMAIL_MODE=smtp
+        -> Postfix sidecar
+        -> direct upstream SMTP fallback if sidecar submission fails
+
+systemd failure notifications
+        -> repository notification helper
+        -> configured operational email route
+
+Recovery-kit attachment email
+        -> SMTP fallback chain
 ```
 
-The Postfix container is a **private smart-host relay** for this stack. It is not a public mail server and should not accept arbitrary sender domains. Keep `ALLOWED_SENDER_DOMAINS` restricted to your vault/domain.
+The Postfix container is a private smart-host relay for the stack. It is not a public MX server.
 
 Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 
----
+## Default production mode — Postfix sidecar SMTP
 
-## Default Mode: Postfix Sidecar SMTP
+Configure non-secret mail settings through:
 
-Use this for first install and normal operations:
+```bash
+sudo make edit-env
+```
+
+Normal values:
 
 ```bash
 EMAIL_MODE=smtp
@@ -31,17 +47,19 @@ SMTP_FROM_NAME=VaultWarden
 ALLOWED_SENDER_DOMAINS=yourdomain.com
 ```
 
-Store the SMTP relay password in SOPS secrets, never in `.env`:
+Store the upstream relay password in SOPS:
 
 ```bash
-sudo ./utilities/secrets-rotate.sh smtp_password
+sudo ./edit-secrets.sh rotate smtp_password
 ```
 
-`ALLOWED_SENDER_DOMAINS` is required safety configuration. Set it to the domain(s) your vault is allowed to send as, for example `yourdomain.com` or `vault.yourdomain.com`. Leaving it broad makes the sidecar easier to misuse.
+`ALLOWED_SENDER_DOMAINS` is a safety boundary. Keep it limited to the sender domain or domains this appliance is expected to use.
 
-### Vaultwarden SMTP settings
+Do not put `smtp_password` in `.env`.
 
-Vaultwarden must always point at the Postfix sidecar on the internal Docker network:
+## Vaultwarden application SMTP settings
+
+Vaultwarden sends to the internal Postfix sidecar:
 
 ```bash
 VW_SMTP_HOST=postfix
@@ -51,176 +69,278 @@ VW_SMTP_AUTH_MECHANISM=none
 VW_SMTP_EXPLICIT_TLS=false
 ```
 
-Do not replace these with your upstream relay hostname. When you change mail providers, update the `SMTP_*` relay settings only; Vaultwarden continues to send to `postfix`.
+This internal Docker-network hop is deliberately different from the authenticated/TLS upstream relay hop.
 
-### Operational alerts and failure notifications
+Do not replace `VW_SMTP_HOST=postfix` with the external provider hostname as the normal configuration. When the external SMTP provider changes, update the `SMTP_*` relay settings and `smtp_password`; Vaultwarden continues to submit to the sidecar.
 
-`sudo ./maintenance.sh test-email --verbose`, backup/health/maintenance alerts, systemd `OnFailure` notifications, and recovery-kit email attachments use the same SMTP relay configuration and `smtp_password` secret. Attachment sends bypass HTTP API providers and use SMTP so recovery-kit exports continue to work.
+## How the Postfix route works
 
-### Recovery-kit attachments
+The Postfix service receives stack mail and relays it upstream using:
 
-Recovery-kit attachments are SMTP-only. They are sent as `important-documents-YYYYMMDD.tar.gpg`: a TAR stream encrypted with GnuPG symmetric OpenPGP encryption. The attachment passphrase is user-selected, independent from Age/SOPS/emergency backup/SMTP secrets, requires at least 16 characters, and must be confirmed before encryption.
-
-To recover the document, save the attachment on a trusted device and run:
-
-```bash
-gpg --output recovery-kit.tar \
-  --decrypt important-documents-YYYYMMDD.tar.gpg
-
-tar -xf recovery-kit.tar
-```
-
-GnuPG prompts for the independent attachment passphrase. Protect the decrypted recovery kit, then delete `recovery-kit.tar` after the recovered document has been secured.
-
-Test the complete default path after setup:
-
-```bash
-sudo ./maintenance.sh test-email --verbose
-sudo utilities/maintenance-email.sh --dry-run
-```
-
----
-
-## How Postfix Relays Mail
-
-The Postfix service in `docker-compose.yml.example` accepts mail from the stack and forwards it to your external SMTP provider using these values:
-
-| `.env` value | Purpose |
+| Configuration | Purpose |
 | :-- | :-- |
-| `SMTP_HOST` / `SMTP_PORT` | Upstream relay host and port |
-| `SMTP_USERNAME` | Upstream relay username |
-| `smtp_password` secret | Upstream relay password |
-| `SMTP_FROM` / `SMTP_FROM_NAME` | Sender identity for operational mail |
-| `ALLOWED_SENDER_DOMAINS` | Sender domains the sidecar accepts |
-| `POSTFIX_MYHOSTNAME` | Postfix internal hostname, normally `postfix` |
-| `POSTFIX_SMTP_TLS_SECURITY_LEVEL` | Upstream TLS policy, normally `encrypt` |
-| `POSTFIX_MESSAGE_SIZE_LIMIT` | Maximum message size |
+| `SMTP_HOST` / `SMTP_PORT` | upstream SMTP relay endpoint |
+| `SMTP_USERNAME` | upstream relay username |
+| `smtp_password` SOPS secret | upstream relay password |
+| `SMTP_FROM` / `SMTP_FROM_NAME` | sender identity for repository operational mail |
+| `ALLOWED_SENDER_DOMAINS` | sender domains accepted by the sidecar |
+| `POSTFIX_MYHOSTNAME` | Postfix hostname |
+| `POSTFIX_SMTP_TLS_SECURITY_LEVEL` | upstream Postfix TLS policy |
+| `POSTFIX_MESSAGE_SIZE_LIMIT` | message-size limit |
 
-Postfix provides queueing and retry behavior that direct SMTP does not. It should remain enabled for the normal appliance path.
+Postfix provides queueing/retry behavior for the normal appliance mail path.
 
-### Advanced Postfix safety notes
+### Postfix safety notes
 
-- `ALLOWED_SENDER_DOMAINS` must stay narrow. Use your sending domain(s), not `*`, so the sidecar cannot be abused by other containers on the Docker network.
-- `boky/postfix` writes the upstream relay credential to `/etc/postfix/sasl_passwd` inside the container at startup. This is a Postfix SASL requirement; the file is not bind-mounted to the host, but anyone with Docker socket access can inspect it with `docker exec`. Restrict Docker access to trusted operators.
-- Keep the Postfix container capabilities from `docker-compose.yml.example`. In particular, do not remove `DAC_OVERRIDE` or `FOWNER`; mail spool access can fail silently without them.
-- The sidecar is not an MX server and should not be exposed publicly. It relays stack mail to your authenticated external SMTP provider.
+- Keep `ALLOWED_SENDER_DOMAINS` narrow; do not use `*` as a convenience default.
+- Do not expose the Postfix service publicly. It is an internal relay to the configured upstream provider.
+- Restrict Docker control/socket access to trusted administrators. A user who can control Docker can inspect container state and therefore must be treated as highly privileged.
+- Preserve the capabilities in the current `docker-compose.yml.example` unless a tested image/runtime change proves a smaller set works. Mail spool/ownership operations depend on the current container contract.
+- Keep upstream relay authentication in SOPS-backed `smtp_password`, not repository configuration.
 
----
+## Operational alert routing
 
-## Advanced API Provider Mode
+Repository operational email uses `lib/email.sh`.
 
-HTTP API providers are optional alternatives for operators who already use a transactional email API. They are not the first-run default, and `EMAIL_PROVIDER=smtp` is not valid because SMTP is selected by `EMAIL_MODE=smtp`.
+Current route modes are:
 
-Supported API providers:
+| `EMAIL_MODE` | Route |
+| :-- | :-- |
+| `smtp` | Postfix sidecar SMTP, then direct upstream SMTP fallback |
+| `auto` | configured HTTP API provider first, then the SMTP fallback chain |
+| `api` | configured HTTP API provider only; no SMTP fallback |
+| `direct` | direct upstream SMTP only |
+| `host` | deprecated compatibility alias that behaves like `direct` |
 
-| Provider | Free tier | Sign-up URL |
-| :-- | :-- | :-- |
-| MailerSend | 3,000 emails/month | https://app.mailersend.com |
-| SendGrid | 100 emails/day | https://sendgrid.com |
-| Mailgun | Trial/free allowance varies | https://mailgun.com |
-| Postmark | Trial/free allowance varies | https://postmarkapp.com |
-| Resend | 3,000 emails/month | https://resend.com |
+The repository template defaults to:
 
-To enable API-first operational alerts:
+```bash
+EMAIL_MODE=smtp
+EMAIL_PROVIDER=
+```
+
+Use the default for the normal small-team production path.
+
+### SMTP fallback behavior
+
+For `smtp` and the SMTP portion of `auto`, the repository first submits to the Postfix sidecar endpoint. If sidecar submission fails, it attempts direct authenticated upstream SMTP using `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, and the SOPS `smtp_password`.
+
+Direct fallback is a delivery fallback, not a reason to remove the Postfix service from the normal architecture.
+
+### Rate limiting
+
+Non-critical operational subjects use the repository's local per-subject email rate-limit stamp to reduce repeated notification noise. Critical subjects bypass that normal rate-limit check.
+
+The default rate window is controlled by the current email helper configuration and should not be replaced with another notification database or daemon.
+
+## HTTP API provider mode
+
+HTTP API providers are optional for operational alerts.
+
+Current provider identifiers implemented by `lib/email.sh` are:
+
+```text
+mailersend
+sendgrid
+mailgun
+postmark
+resend
+cyberpersons
+```
+
+Compatibility aliases for the CyberPersons driver are also accepted by the current helper.
+
+Provider plans, trial allowances, and commercial quotas change independently of this repository. Check the selected provider's current account terms instead of relying on a copied free-tier table in project documentation.
+
+Enable API-first operational alerts:
 
 ```bash
 EMAIL_MODE=auto
-EMAIL_PROVIDER=mailersend   # sendgrid | mailgun | postmark | resend
+EMAIL_PROVIDER=mailersend
 ```
 
-Store the API token in the canonical SOPS secret key used for all providers:
+Set the common SOPS API-token secret:
 
 ```bash
-sudo ./utilities/secrets-rotate.sh email_api_token
+sudo ./edit-secrets.sh rotate email_api_token
 ```
 
-`EMAIL_MODE=auto` tries the selected API provider first and then falls back to SMTP paths. Keep Postfix configured even in API mode because Vaultwarden container mail and attachment-based messages still rely on SMTP.
+`EMAIL_MODE=auto` tries the selected API driver and falls back to the Postfix/direct-SMTP chain when the API route fails.
 
-### Mailgun region
+`EMAIL_MODE=api` does not fall back. An unknown provider or API failure returns failure.
 
-Mailgun has separate US and EU API endpoints:
+`EMAIL_PROVIDER=smtp` is not a valid API-provider selection. SMTP is selected by `EMAIL_MODE=smtp`.
+
+### Mailgun region/domain
+
+The current Mailgun driver supports:
 
 ```bash
 MAILGUN_REGION=us   # or eu
+MAILGUN_DOMAIN=mg.yourdomain.com
 ```
 
-Set `MAILGUN_REGION=eu` for EU-hosted accounts. If your Mailgun sending domain differs from the domain in `SMTP_FROM`, set `MAILGUN_DOMAIN=mg.yourdomain.com`.
+When `MAILGUN_DOMAIN` is blank, the driver derives the sending domain from `SMTP_FROM`.
 
----
+## Recovery-kit attachment email
 
-## EMAIL_MODE Reference
+Messages with attachments bypass the HTTP API provider path and use the SMTP fallback chain.
 
-| Value | Behaviour | When to use |
-| :-- | :-- | :-- |
-| `smtp` | Postfix sidecar SMTP → direct upstream SMTP fallback | Normal production default |
-| `auto` | HTTP API → Postfix sidecar SMTP → direct upstream SMTP fallback | Advanced API-first alerts while preserving SMTP fallback |
-| `api` | HTTP API only; error if token is missing | API-only diagnostics or special cases; not normal first-run |
-| `direct` | Direct upstream SMTP only | Emergency bypass when Docker/sidecar is unavailable; no queueing |
-| `host` | Deprecated alias for `direct` | Compatibility only; no host MTA is used |
+The recovery-kit export workflow may offer attachment delivery through this SMTP path. The current recovery-kit email packaging uses an independently passphrase-protected GnuPG attachment created by the recovery-kit workflow.
 
----
+That attachment passphrase is separate from:
 
-## Full Variable Reference
+- the operational Age key;
+- the offline recovery Age key;
+- an emergency backup passphrase;
+- `smtp_password`;
+- `email_api_token`.
 
-| Variable | Default | Description |
-| :-- | :-- | :-- |
-| `EMAIL_MODE` | `smtp` | Delivery chain mode |
-| `EMAIL_PROVIDER` | *(blank)* | API provider only when `EMAIL_MODE=auto` or `api` |
-| `SMTP_HOST` | `smtp.example.com` | SMTP relay hostname |
-| `SMTP_PORT` | `587` | SMTP relay port |
-| `SMTP_SECURITY` | `starttls` | `starttls`, `tls`, `on`, or `none` depending on provider |
-| `SMTP_USERNAME` | *(operator supplied)* | SMTP relay username |
-| `SMTP_FROM` | *(operator supplied)* | Sender address for scripts and Postfix relay |
-| `SMTP_FROM_NAME` | `VaultWarden` | Sender display name |
-| `SMTP_TIMEOUT` | `30` | Seconds before SMTP client timeout |
-| `VW_SMTP_HOST` | `postfix` | Vaultwarden SMTP host — keep as the sidecar service name |
-| `VW_SMTP_PORT` | `587` | Vaultwarden SMTP port — internal Postfix port |
-| `VW_SMTP_SECURITY` | `off` | Plain internal link to Postfix |
-| `VW_SMTP_AUTH_MECHANISM` | `none` | Required because the sidecar internal link has no AUTH |
-| `VW_SMTP_EXPLICIT_TLS` | `false` | Prevents STARTTLS on the plain internal link |
-| `ALLOWED_SENDER_DOMAINS` | `example.com` | Domains Postfix accepts for relay |
-| `POSTFIX_MYHOSTNAME` | `postfix` | Postfix `myhostname` value |
-| `POSTFIX_SMTP_TLS_SECURITY_LEVEL` | `encrypt` | Postfix upstream TLS level |
-| `POSTFIX_MESSAGE_SIZE_LIMIT` | `10240000` | Postfix max message bytes |
-| `POSTFIX_VERSION` | from `.env.example` | Pin for `boky/postfix` image |
-| `MAILGUN_REGION` | `us` | API mode only: Mailgun region |
-| `MAILGUN_DOMAIN` | domain from `SMTP_FROM` | API mode only: Mailgun sending domain override |
+Treat a recovery-kit attachment as extremely sensitive even while encrypted. Store the received material in the intended password manager/offline recovery location and remove temporary decrypted copies from the trusted workstation after verification.
 
-Secrets:
+Do not redesign attachment delivery around a provider API driver unless the repository implements and tests attachment support for that driver. The current generic API email route is text-message oriented.
 
-| Secret key | Used by | Description |
-| :-- | :-- | :-- |
-| `smtp_password` | Postfix sidecar and SMTP fallback | External SMTP relay password |
-| `email_api_token` | Advanced API provider mode | MailerSend/SendGrid/Mailgun/Postmark/Resend API token |
+## Secret ownership
 
-> `SMTP_FROM_EMAIL` is a deprecated compatibility alias for `SMTP_FROM`. New installs should use `SMTP_FROM`.
+Email secrets in the current schema are:
 
----
+| Secret key | Consumer |
+| :-- | :-- |
+| `smtp_password` | Postfix/upstream SMTP and direct SMTP fallback |
+| `email_api_token` | selected HTTP API email driver |
 
-## Testing and Troubleshooting
+The current secret schema apply behavior restarts Postfix when `smtp_password` rotates. `email_api_token` has no automatic service restart because the operational helper reads the secret on invocation.
+
+Use:
+
+```bash
+sudo ./edit-secrets.sh rotate smtp_password
+sudo ./edit-secrets.sh rotate email_api_token
+```
+
+Do not maintain provider-specific plaintext API token variables in `.env` for the normal project secret lifecycle.
+
+## Testing the email path
+
+Run the dedicated diagnostic:
 
 ```bash
 sudo ./maintenance.sh test-email --verbose
+```
+
+Preview the diagnostic without sending:
+
+```bash
 sudo utilities/maintenance-email.sh --dry-run
 ```
 
-Useful checks:
+Override the recipient when required:
+
+```bash
+sudo ./maintenance.sh test-email \
+  --recipient admin@example.com \
+  --verbose
+```
+
+The diagnostic checks Postfix container health, selected operational route prerequisites, CrowdSec integration context, and end-to-end email delivery.
+
+A successful send means the selected delivery chain accepted the message. It does not independently prove the external recipient's spam-folder policy or long-term provider account status.
+
+## Troubleshooting Postfix SMTP
+
+Check the container:
 
 ```bash
 docker compose ps postfix
-docker compose logs postfix --tail 50
-docker compose logs vaultwarden | grep -i smtp
+docker compose logs postfix --tail=100
+```
+
+Check the queue:
+
+```bash
 docker exec vaultwarden_postfix mailq
 docker exec vaultwarden_postfix postqueue -f
 ```
 
-Common fixes:
+Check Vaultwarden SMTP errors:
 
-| Symptom | Likely cause | Fix |
-| :-- | :-- | :-- |
-| Vaultwarden mail hangs or says auth required | `VW_SMTP_AUTH_MECHANISM` is not `none` | Restore the default `VW_SMTP_*` block |
-| Postfix rejects sender | `ALLOWED_SENDER_DOMAINS` too narrow or wrong sender domain | Set it to the domain used by `SMTP_FROM` |
-| Postfix `SASL authentication failed` | Wrong `smtp_password` secret or SMTP username | Rotate `smtp_password` and verify `SMTP_USERNAME` |
-| SMTP handshake failure | Provider requires a different `SMTP_SECURITY`/port pair | Use provider docs; most use `starttls` on `587` |
-| API provider fails | Missing `email_api_token` or wrong `EMAIL_PROVIDER` | Rotate `email_api_token` and verify provider value |
-| Recovery-kit email with attachment fails | SMTP path is not working | Fix Postfix/SMTP first; attachments do not use HTTP API |
+```bash
+docker compose logs vaultwarden --tail=150 \
+  | grep -i smtp
+```
+
+Common failures:
+
+| Symptom | Likely direction |
+| :-- | :-- |
+| Vaultwarden reports SMTP auth/STARTTLS errors to `postfix` | restore the current `VW_SMTP_*` internal-sidecar settings |
+| Postfix rejects sender | verify `SMTP_FROM` and narrow `ALLOWED_SENDER_DOMAINS` match |
+| Postfix upstream SASL auth fails | verify `SMTP_USERNAME` and rotate `smtp_password` |
+| Upstream TLS/handshake fails | verify the provider's required port and `SMTP_SECURITY`/Postfix TLS settings |
+| Queue grows | inspect upstream connectivity/provider rejection in Postfix logs |
+| Attachment email fails | fix the SMTP chain; attachment sends do not use the HTTP API driver |
+
+Edit non-secret values through:
+
+```bash
+sudo make edit-env
+```
+
+After changes:
+
+```bash
+sudo make restart
+sudo ./maintenance.sh test-email --verbose
+```
+
+## Troubleshooting API mode
+
+Check:
+
+```bash
+utilities/env-edit.sh status
+sudo ./utilities/secrets-list.sh
+sudo ./maintenance.sh test-email --verbose
+```
+
+Verify:
+
+- `EMAIL_MODE` is `auto` or `api`;
+- `EMAIL_PROVIDER` matches a currently implemented driver identifier;
+- `email_api_token` is configured and not a placeholder;
+- `SMTP_FROM` is a sender identity accepted by the selected provider;
+- provider-specific sending-domain/account configuration is valid.
+
+The HTTP helper uses bounded connection/overall timeouts and temporary mode-`0600` curl config/payload files. Do not "debug" API mode by printing the bearer/API token or authorization header.
+
+For `auto`, an API failure should log the provider failure and continue to the SMTP fallback chain. For `api`, the same failure is final.
+
+## Post-restore and post-update checks
+
+After a restore or material email configuration change:
+
+```bash
+sudo make health
+sudo ./maintenance.sh test-email --verbose
+```
+
+After repository changes that affect installed systemd notification code:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+Git updates the checkout; systemd failure notifications use the managed installed runtime under `/opt/vaultwarden-scripts`.
+
+## Security rules
+
+- Keep `smtp_password` and `email_api_token` in SOPS.
+- Keep `ALLOWED_SENDER_DOMAINS` narrow.
+- Do not expose Postfix publicly.
+- Treat Docker control as highly privileged.
+- Do not log SMTP passwords, provider tokens, or authorization headers.
+- Do not rely on provider pricing/free-tier numbers copied into repository docs.
+- Keep Postfix configured even when advanced API-first operational alerts are enabled.
+- Treat recovery-kit attachment delivery as a high-sensitivity path and use the independent attachment passphrase according to the recovery-kit workflow.
