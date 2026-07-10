@@ -649,15 +649,19 @@ _install_rwpaths_dropin() {
 #
 # [Unit]  After=  — this unit waits for the data volume to be mounted before
 #                   starting, even when triggered by a timer or dependency chain.
+[Unit]
+After=${_mount_unit}
+DROPIN
+
+        if [[ "$unit" == *.service ]]; then
+            cat >> "$dropin_file" << DROPIN
 # [Service] ReadWritePaths= — grants write access to DATA_VOLUME_MOUNT under
 #                             ProtectSystem=strict (without this, all writes to
 #                             the data volume are silently denied by the kernel).
-[Unit]
-After=${_mount_unit}
-
 [Service]
 ReadWritePaths=${data_mount}
 DROPIN
+        fi
         chmod 644 "$dropin_file"
         log_success "Installed ReadWritePaths drop-in: $dropin_file"
     done
