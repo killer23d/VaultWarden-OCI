@@ -1,277 +1,246 @@
-# Bootstrap Key Recovery — VaultWarden-OCI
+# Offline Age Key and Recovery Material — VaultWarden-OCI
 
-This guide describes how to protect your **Age encryption key** against loss, solving the circular dependency in encrypted backups: you need the Age key to decrypt a backup, but the Age key lives on the server you are trying to recover.
+This guide explains the current Age key custody and recovery model.
 
-Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [SECURITY.md](SECURITY.md) · [SCRIPTS.md](SCRIPTS.md)
+It replaces older USB/GPG-centric procedures as the primary project workflow. You may still wrap or store recovery material with independent tools, but the supported project recovery paths are built around the operational Age key, optional offline recovery recipient, recovery-kit export, backup restore, and `recover.sh` state-volume recovery.
 
-> **💡 Built-in alternatives:** Before using the manual GPG workflow below, consider the native three-tier protection in `lib/crypto.sh`: **Tier 1** (`check_age_key_health`) runs automatically on every `backup.sh` invocation — checking permissions, ownership, `.sops.yaml` recipient alignment, and performing an encrypt/decrypt roundtrip; **Tier 2** (`create_password_manager_escrow`) exports a password-manager-ready plaintext escrow; **Tier 3** (`create_printable_key_backup`) generates a printable PDF paper backup (HTML fallback if `wkhtmltopdf` is unavailable, with a 30-minute auto-delete reminder). `sudo ./utilities/secrets-export-recovery-kit.sh` also creates a full recovery document including the Age key and all secrets. See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for details on each tier. See [SCRIPTS.md](SCRIPTS.md) for the full `lib/crypto.sh` function reference. The GPG-based approach below is a supplementary option for those wanting an additional passphrase-protected layer independent of the project tooling.
+Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) · [SECURITY.md](SECURITY.md) · [ARCHITECTURE.md](ARCHITECTURE.md)
 
-## Key Path Resolution Order
+## Key concepts
 
-Every script in this project resolves the age key from the **first readable
-location found**, in this order:
+Do not confuse these values:
 
-| Priority | Path | When it applies |
+| Item | Purpose | Normal location |
 | :-- | :-- | :-- |
-| 1 | `$AGE_KEY_FILE` env var | Explicit operator override; always wins when set |
-| 2 | `/etc/vaultwarden/age-key.txt` | Runtime/production path — installed by `setup.sh`, owned by root (`root:root` mode `600`) |
-| 3 | `secrets/keys/age-key.txt` | Repo-local fallback — used during initial setup and on dev machines |
+| Operational Age private key | Live server SOPS/backup decryption identity | `/etc/vaultwarden/age-key.txt` |
+| Operational Age public recipient | Recipient derived from the operational key | SOPS policy/backup encryption metadata |
+| Offline recovery Age private key | Separate private identity kept off the server | operator-controlled offline location |
+| Offline recovery Age public recipient | Optional additional SOPS/recovery recipient | SOPS policy and DR metadata |
+| Emergency backup passphrase | Independent protection for passphrase-sealed emergency archives | operator memory/password manager |
+| `EMERGENCY_BACKUP_AGE_RECIPIENT` | Separate Age recipient for emergency archive protection | configuration when using recipient mode |
+| Recovery kit | Plaintext operator handoff containing Age key and credentials | temporary export; must be moved off-host and secured |
 
-**You never need to track which path is active.** Run `sudo make key-show` for
-path/public-recipient information, or `sudo make key-health` to validate
-decryptability.
+The offline recovery private key must not become the server's live operational key.
 
-> **After first install**, `/etc/vaultwarden/age-key.txt` is the live key.
-> The repo-local path is only valid before `setup.sh` has run, or on a
-> dev laptop clone without `/etc/vaultwarden/` present.
+## Operational key path
 
----
+The installed production key is:
 
-## 📍 The Circular Dependency Problem
-
-```
-Tier 1 — Bootstrap Passphrase (memorised or in password manager)
-  └─> Decrypts GPG-wrapped Age key
-        └─> Decrypts Age-encrypted backup archive
-              └─> Full system recovery
+```text
+/etc/vaultwarden/age-key.txt
 ```
 
-By encrypting the Age key with GPG (a separate passphrase), you can keep the Age key offsite without storing it in plaintext. Emergency kits already include the Age key inside the archive, but full and database backups do not — this procedure covers those cases.
+Expected production ownership is root-only.
 
----
-
-## 💾 Storage Strategy
-
-### Where to Keep the GPG-Wrapped Age Key
-
-Store **2–3 copies** in different locations:
-
-| Location | Notes |
-| :-- | :-- |
-| Password manager (secure note/attachment) | Primary; most accessible |
-| Encrypted USB in fireproof safe | Offline; survives cloud outage |
-| Encrypted cloud storage (separate account) | Must differ from backup storage |
-| Bank safety deposit box (optional) | For highest-risk environments |
-
-> **Never store the bootstrap key and the encrypted backups in the same location.**
-
-### Where to Keep the GPG Private Key
-
-- Password manager (highest priority secure note)
-- Encrypted copy on a separate USB drive
-- Consider a paper backup kept in a safe
-
----
-
-## 🔒 Creating a Bootstrap-Protected Age Key
+Check the active key and recipient:
 
 ```bash
-# Production: copy the active root-owned key to a temporary user-owned file,
-# then GPG-encrypt it with a strong passphrase.
-KEY_WRAP_SOURCE="$HOME/age-key-for-bootstrap.txt"
-sudo install -m 600 -o "$(id -u)" -g "$(id -g)" \
-    /etc/vaultwarden/age-key.txt "$KEY_WRAP_SOURCE"
-
-gpg --symmetric --cipher-algo AES256 \
-    --output ~/age-key-$(date +%Y%m%d).gpg \
-    "$KEY_WRAP_SOURCE"
-
-shred -u "$KEY_WRAP_SOURCE"
-
-# Copy to your bootstrap storage location(s)
-cp ~/age-key-$(date +%Y%m%d).gpg /path/to/usb/
-
-# Export your GPG private key for safekeeping
-gpg --export-secret-keys --armor YOUR_GPG_KEY_ID > gpg-private-key-backup.asc
+sudo make key-show
 ```
 
-### Verifying the Age key before wrapping it
-
-Before encrypting the key for offsite storage, confirm it is valid and the roundtrip works:
+Run the functional health check:
 
 ```bash
-# Check the active key path and perform the production health check.
 sudo make key-health
-
-# Manually verify the production key format (private key must start with AGE-SECRET-KEY-1)
-sudo grep '^AGE-SECRET-KEY-1' /etc/vaultwarden/age-key.txt
-sudo grep '^# public key:' /etc/vaultwarden/age-key.txt
-
-# Dev/pre-install fallback only, before /etc/vaultwarden exists:
-source lib/crypto.sh
-check_age_key secrets/keys/age-key.txt
-grep '^AGE-SECRET-KEY-1' secrets/keys/age-key.txt
-grep '^# public key:' secrets/keys/age-key.txt
 ```
 
-If `check_age_key` fails, do not proceed — restore the key from an existing escrow copy first.
+Key health validates the operational key, SOPS recipient alignment, and decrypt/encrypt behavior required by the current project.
 
----
+## Recovery kit — normal operator handoff
 
-## ⏪ Recovery Procedures
-
-### Standard Recovery (Bootstrap Passphrase Available)
+After initial setup, restore, or Age key rotation, export a fresh recovery kit:
 
 ```bash
-# 1. Decrypt the Age key
-gpg --decrypt age-key-TIMESTAMP.gpg > age-key.txt
-
-# 2. Use it to decrypt a backup
-#    DB backups (.sqlite3.age): raw SQLite, no compression
-age -d -i age-key.txt db_backup_YYYYMMDD_HHMMSS.sqlite3.age > db.sqlite3
-
-#    Full/emergency backups (.tar.zst.age): zstd-compressed tar
-age -d -i age-key.txt full_backup_YYYYMMDD_HHMMSS.tar.zst.age | zstd -d -T0 -c | tar -xf -
-
-# 3. Place the Age key — use the path matching your target environment
-
-# Production / post-install (preferred):
-sudo install -d -m 700 -o root -g root /etc/vaultwarden
-sudo install -m 600 -o root -g root \
-    age-key.txt /etc/vaultwarden/age-key.txt
-
-# OR — dev machine / pre-install only (repo-local fallback):
-mkdir -p VaultWarden-OCI/secrets/keys
-mv age-key.txt VaultWarden-OCI/secrets/keys/age-key.txt
-chmod 600 VaultWarden-OCI/secrets/keys/age-key.txt
-
-# Verify whichever path you used:
-cd VaultWarden-OCI && sudo make key-health
-
-# 4. Start services
-cd VaultWarden-OCI
-sudo make up
+sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
-> **Archive format note:** Full and emergency backups use `.tar.zst.age` (zstd compression). The previous format was `.tar.gz.age` (gzip). If you have older backups from before the zstd migration, use `tar -xzf -` instead of `zstd -d -T0 -c | tar -xf -` for those specific files.
+The export contains the operational Age private key and the credentials required for recovery. It is intentionally sensitive plaintext while exported.
 
-### Emergency Recovery (GPG Keyring Lost)
+Store it:
+
+- in a trusted password manager or equivalent secret store;
+- in a separate offline recovery location;
+- away from the only copy of the encrypted backups.
+
+Then remove plaintext copies from the server after confirming the off-host copies are readable.
+
+The recovery kit is not a normal backup archive and should never be committed to Git.
+
+## Optional offline recovery Age recipient
+
+The project may include a second Age public recipient in SOPS/recovery policy. The matching private key stays offline.
+
+This provides a recovery identity that is independent from the live server's operational Age key.
+
+The normal model is:
+
+```text
+operational Age public recipient
+            +
+offline recovery Age public recipient (optional)
+            |
+            v
+       SOPS recipient policy
+```
+
+The private offline key is brought to a replacement host only for recovery and is used in place. `recover.sh` generates a new operational Age key for the recovered server.
+
+Do not copy the offline private key into `/etc/vaultwarden/age-key.txt` as the normal `recover.sh` workflow.
+
+## Operational Age key rotation
+
+Rotate the live operational key with:
 
 ```bash
-# 1. Import your GPG private key backup
-gpg --import gpg-private-key-backup.asc
-
-# 2. Follow standard recovery above
+sudo make key-rotate
 ```
 
-### Full Disaster Recovery (Server Lost, Only Offsite Backup Available)
+The key-rotation workflow updates the operational key/SOPS recipient contract and verifies decryptability before success.
+
+After rotation:
+
+1. run `sudo make key-health`;
+2. export a new recovery kit;
+3. secure the new recovery material off-host;
+4. retain old recovery identities/material needed to decrypt older backup generations until those backups expire or are deliberately retired.
+
+A new Age key does not retroactively re-encrypt every historical backup.
+
+## Recovery path A — restore a backup archive
+
+Use `restore.sh` for `db`, `full`, or `emergency` backup restore.
+
+Inspect the available archive/storage contract first:
 
 ```bash
-# 1. Install dependencies on new server
-apt-get update && apt-get install -y gnupg git age zstd sqlite3
-
-# 2. Import GPG key
-gpg --import gpg-private-key-backup.asc
-
-# 3. Decrypt Age key from bootstrap key
-gpg --decrypt age-key-TIMESTAMP.gpg > age-key.txt
-
-# 4. Download encrypted backup from offsite
-rclone copy your_remote_name:vaultwarden_backups/emergency/ ./
-
-# 5. Clone repo and run setup
-git clone https://github.com/killer23d/VaultWarden-OCI.git
-cd VaultWarden-OCI
-chmod +x *.sh
-sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com
-
-# 6. Place Age key and restore
-mkdir -p secrets/keys
-mv ../age-key.txt secrets/keys/
-chmod 600 secrets/keys/age-key.txt
-# Supply the key non-interactively with RESTORE_AGE_KEY_FILE, or omit to be prompted
-RESTORE_AGE_KEY_FILE=secrets/keys/age-key.txt \
-  ./restore.sh latest --file ../emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age --force
-
-# 7. Verify
-sudo make health
+sudo ./restore.sh inspect --remote
 ```
 
----
-
-## 🧪 Quarterly Test Procedure
-
-Run this every quarter to confirm you can actually recover. The test uses `zstd` for decompression to match the current `.tar.zst.age` archive format.
+For guided remote restore:
 
 ```bash
-mkdir -p ~/bootstrap-test && cd ~/bootstrap-test
-
-# Copy bootstrap key and a recent backup
-cp /path/to/bootstrap/age-key-*.gpg .
-cp ~/VaultWarden-OCI/backups/emergency/emergency_backup_*.tar.zst.age . 2>/dev/null || \
-  cp ~/VaultWarden-OCI/backups/full/full_backup_*.tar.zst.age .
-
-# Select the backup file
-BACKUP_FILE=$(ls *.age | head -1)
-
-# Test 1: Decrypt bootstrap key
-gpg --decrypt age-key-*.gpg > age-key-test.txt
-echo "✓ Bootstrap key decryption OK"
-
-# Test 2: Verify Age key format (must contain AGE-SECRET-KEY-1 and public key comment)
-grep -q '^AGE-SECRET-KEY-1' age-key-test.txt && echo "✓ Private key format OK"
-grep -q '^# public key:' age-key-test.txt && echo "✓ Public key comment OK"
-
-# Test 3: Decrypt backup and list contents (zstd decompression)
-age -d -i age-key-test.txt "$BACKUP_FILE" | zstd -d -T0 -c | tar -tf - | head -20
-echo "✓ Backup decryption and listing OK"
-
-# Test 4: Extract and check the database
-mkdir extract
-age -d -i age-key-test.txt "$BACKUP_FILE" \
-  | zstd -d -T0 -c \
-  | tar -xf - -C extract --wildcards '*/data/db.sqlite3' 2>/dev/null || true
-DB_FILE=$(find extract -name 'db.sqlite3' | head -1)
-if [[ -n "$DB_FILE" ]]; then
-  sqlite3 "$DB_FILE" "SELECT count(*) FROM sqlite_master WHERE type='table';"
-  echo "✓ Database integrity OK"
-else
-  echo "db.sqlite3 not found in archive — is this a db-only backup? (use .sqlite3.age directly)"
-fi
-
-# Cleanup
-cd ~ && rm -rf ~/bootstrap-test
-echo "✅ All recovery tests passed"
+sudo ./restore.sh interactive --remote --start-policy ask
 ```
 
-> **DB-only backup test:** If your backup is a `db_backup_*.sqlite3.age` file (no tar wrapper), decrypt it directly:
-> ```bash
-> age -d -i age-key-test.txt db_backup_YYYYMMDD_HHMMSS.sqlite3.age > db-test.sqlite3
-> sqlite3 db-test.sqlite3 "PRAGMA integrity_check;"
-> ```
+When the selected `full` archive is not decryptable by the server's current operational key, supply a private key for one of the recipients that encrypted that archive using the current restore key-file/recovery-kit options.
 
----
+Use:
 
-## 🛠️ Troubleshooting
+```bash
+./restore.sh --help
+```
 
-| Error | Cause | Fix |
-| :-- | :-- | :-- |
-| `gpg: decryption failed: No secret key` | GPG private key not in keyring | `gpg --import gpg-private-key-backup.asc` |
-| `age: no identity matched any recipient` | Wrong or corrupted Age key file | Try alternate bootstrap key copy; verify `AGE-SECRET-KEY-1` prefix is present |
-| `Cannot decrypt — wrong passphrase` | Incorrect passphrase | Check password manager; try alternate saved passphrases |
-| `Backup file corrupted or invalid` | Partial download or disk corruption | Re-download from offsite; verify SHA256 checksum |
-| `zstd: error` or `tar: unexpected EOF` | Archive truncated or wrong decompressor | Confirm backup is `.tar.zst.age` (not `.tar.gz.age`); use `zstd -d`, not `gunzip` |
-| `check_age_key` fails on roundtrip | Private key body corrupted | Key file may have been partially overwritten; restore from escrow |
+or [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) for the exact current grammar.
 
----
+Emergency backups use independent protection. A passphrase-sealed emergency archive requires the emergency passphrase; recipient-sealed emergency mode requires the matching emergency private identity. The operational key carried inside an emergency capsule is not used as the only protection for that same capsule.
 
-## 📅 Maintenance Schedule
+## Recovery path B — recover an existing state volume
 
-| Frequency | Task |
-| :-- | :-- |
-| Monthly | Create new emergency kit: `./backup.sh run emergency` |
-| Quarterly | Full recovery test (procedure above) |
-| After any Age key rotation | Re-run Tier 2 escrow (`create_password_manager_escrow`) and re-wrap with GPG |
-| After any Age key rotation | `sudo make key-rotate` triggers the built-in key rotation workflow |
-| Yearly | Optionally rotate GPG bootstrap passphrase |
+Use `recover.sh` when you have the persistent state volume and its recovery manifest.
 
----
+The replacement host must:
 
-## ✅ Security Practices
+- run Ubuntu 24.04 LTS Noble on amd64 or arm64;
+- use the exact repository commit recorded in the recovery manifest;
+- have the state volume mounted at the intended state path;
+- have the offline Age private key matching the recovery recipient.
 
-- Use a strong, unique passphrase (15+ characters) stored in your password manager
-- Never reuse the bootstrap passphrase for any other system
-- Store bootstrap key and backups in **different** locations and cloud accounts
-- Label files clearly: `"VaultWarden Bootstrap Key — Required for Recovery"`
-- Never leave the Age key unencrypted on any networked system
-- Verify the Age key is structurally valid (`check_age_key` or `sudo make key-health`) before wrapping it for offsite storage
+Run:
+
+```bash
+sudo ./recover.sh \
+  --state-dir /mnt/vw-data \
+  --key /secure/path/offline-age-key.txt
+```
+
+`recover.sh`:
+
+1. validates the exact repository commit and recovery manifest;
+2. uses the offline key in place to decrypt the staged SOPS state;
+3. generates a replacement operational Age key;
+4. stages the new ciphertext, SOPS policy, persistent environment, and DR manifest;
+5. validates the staged recovery identity/config together;
+6. promotes the staged artifacts under one pre-commit rollback scope;
+7. preserves the committed new recovery artifacts when a later startup or `/alive` check fails.
+
+The offline private key is not persisted as the live operational key.
+
+See [RECOVERY-CARD.md](RECOVERY-CARD.md).
+
+## Recovery/manual-inspection systemd policy
+
+Do not start scheduled jobs merely because recovery copied unit files.
+
+For a replacement host still under inspection:
+
+```bash
+sudo ./setup.sh systemd install --no-enable-now
+```
+
+After storage, secrets, rclone, Cloudflare/DNS, firewall, and Vaultwarden readiness are verified:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+## Retaining old backup keys
+
+Historical encrypted backups remain decryptable only while you retain a matching private identity.
+
+Before discarding an old operational Age private key or old offline recovery key, determine whether any retained `db` or `full` archives were encrypted only to recipients derived from that key.
+
+Useful checks:
+
+```bash
+sudo ./backup.sh list
+sudo ./backup.sh verify
+```
+
+For an old archive, perform a controlled decryption/verification using the intended retained identity before destroying old key material.
+
+Do not assume key rotation rewrapped historical backup archives.
+
+## Backup integrity HMAC key rotation
+
+`file_integrity_hmac_key` authenticates backup checksum sidecars. It is separate from Age encryption.
+
+Rotating it creates a transition issue for existing `.sha256.hmac` sidecars that were signed with the old key. Retain recovery material containing the old HMAC key until old backup generations are retired or follow the documented transition procedure in [SECRETS-SCHEMA.md](SECRETS-SCHEMA.md).
+
+## Optional independent wrapping
+
+You may independently encrypt a recovery-kit file or Age key copy with GPG or another trusted offline mechanism as an additional operator-controlled layer.
+
+That wrapping is not the repository's primary restore API and does not replace:
+
+- `sudo make key-health`;
+- recovery-kit export;
+- retention of historical decryption identities;
+- backup verification;
+- the supported `restore.sh` or `recover.sh` flows.
+
+When using an independent wrapper, test the wrapper's decryption on a separate trusted system before relying on it.
+
+## Quarterly recovery check
+
+At least quarterly:
+
+1. confirm the off-host recovery kit/offline Age identity is readable;
+2. run `sudo make key-health` on the live host;
+3. run `sudo ./backup.sh verify`;
+4. run the current pre-production drill/recovery rehearsal appropriate for the host;
+5. confirm the exact repository commit or release reference needed by the DR material is still retrievable;
+6. confirm the documented provider-console and Cloudflare access is still available.
+
+A file existing in a password manager or offline disk is not proof that it can decrypt the retained backup generation. Test recovery material deliberately.
+
+## Security rules
+
+- Never commit private Age keys, recovery kits, or plaintext secrets.
+- Never persist the offline recovery private key on the production server.
+- Keep emergency backup passphrases/separate recipient identities independent from the emergency archive location.
+- Do not print private key or secret values into ordinary logs or issue reports.
+- Re-export recovery material after operational Age key rotation.
+- Keep historical private identities until all dependent backup generations are retired.
+- Treat an emergency backup and a recovery kit like a password-manager vault export.
