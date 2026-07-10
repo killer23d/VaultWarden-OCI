@@ -336,6 +336,61 @@ grep -Fq "[DRY RUN] Would remove orphaned sidecar: $(basename "$orphan_sidecar")
 grep -Fq '[DRY RUN] Would remove 1 orphaned sidecar file(s) from db backups' "$TMP/local-dry-run.out" \
     || fail "local dry-run summary did not count the planned orphan sidecar deletion"
 
+# Maintenance owns orchestration, but cleanup_old_backups remains the canonical
+# retention selector. Exercise that wrapper with DRY_RUN=true so this test
+# protects delegation rather than duplicating helper coverage above.
+source "$ROOT/lib/maintenance-utils.sh"
+maintenance_dry_run_dir="$TMP/maintenance-dry-run"
+mkdir -p "$maintenance_dry_run_dir/db"
+maintenance_older="$maintenance_dry_run_dir/db/db-z-20000101-000000.age"
+maintenance_newest="$maintenance_dry_run_dir/db/db-a-20010101-000000.age"
+maintenance_manual="$maintenance_dry_run_dir/db/db-manual-before-contract.age"
+maintenance_orphan="$maintenance_dry_run_dir/db/db-orphan-19990101-000000.age.meta"
+_write_archive_with_sidecars "$maintenance_older"
+_write_archive_with_sidecars "$maintenance_newest"
+_write_archive_with_sidecars "$maintenance_manual"
+printf 'orphan\n' > "$maintenance_orphan"
+
+vw_default_backup_dir(){ printf '%s\n' "$maintenance_dry_run_dir"; }
+get_config_value(){
+    if [[ "$1" == "BACKUP_DIR" ]]; then
+        printf '%s\n' "$maintenance_dry_run_dir"
+    else
+        printf '%s\n' "${2:-}"
+    fi
+}
+
+DRY_RUN=true CLEAN_BACKUPS=true DB_BACKUP_RETENTION_DAYS=1 \
+    cleanup_backups > "$TMP/maintenance-dry-run.out" 2>&1 \
+    || { cat "$TMP/maintenance-dry-run.out" >&2; fail "maintenance retention dry-run failed"; }
+for file in \
+    "$maintenance_older" "$maintenance_older.sha256" "$maintenance_older.sha256.hmac" "$maintenance_older.meta" \
+    "$maintenance_newest" "$maintenance_newest.sha256" "$maintenance_newest.sha256.hmac" "$maintenance_newest.meta" \
+    "$maintenance_manual" "$maintenance_manual.sha256" "$maintenance_manual.sha256.hmac" "$maintenance_manual.meta" \
+    "$maintenance_orphan"; do
+    _assert_exists "$file"
+done
+grep -Fq "[DRY RUN] Would clean up db backups older than 1 days" "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run did not reach canonical retention preview"
+grep -Fq 'db backup retention preview completed (1d retention)' "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run did not report successful retention preview"
+! grep -Fq 'db backups cleaned (1d retention)' "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run falsely reported backups as cleaned"
+grep -Fq "[DRY RUN] Would remove: $(basename "$maintenance_older") (and sidecars)" "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run did not report stale archive candidate"
+grep -Fq '[DRY RUN] Would clean up 1 old db backups' "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run did not report canonical archive cleanup summary"
+grep -Fq "[DRY RUN] Would remove orphaned sidecar: $(basename "$maintenance_orphan")" "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run did not report orphaned sidecar candidate"
+grep -Fq '[DRY RUN] Would remove 1 orphaned sidecar file(s) from db backups' "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run did not report canonical orphan cleanup summary"
+! grep -Fq "[DRY RUN] Would remove: $(basename "$maintenance_newest") (and sidecars)" "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run reported newest archive as a deletion candidate"
+! grep -Fq "[DRY RUN] Would remove: $(basename "$maintenance_manual") (and sidecars)" "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run reported manual archive as a deletion candidate"
+! grep -Fq '[DRY RUN] Would clean up old backups based on retention policy' "$TMP/maintenance-dry-run.out" \
+    || fail "maintenance dry-run used obsolete generic retention message"
+
 if (( BASH_VERSINFO[0] < 5 )); then
     printf 'SKIP: remote prune mock requires Bash 5 namerefs used by production backup-run.sh\n'
     return 0

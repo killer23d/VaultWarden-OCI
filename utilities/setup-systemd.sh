@@ -629,7 +629,7 @@ _install_rwpaths_dropin() {
     # no drop-ins.
     local -a _DROPIN_UNITS=("${_VW_DROPIN_UNITS[@]}")
 
-    log_info "Installing per-unit ReadWritePaths drop-ins for DATA_VOLUME_MOUNT=${data_mount} ..."
+    log_info "Installing per-unit state-dir drop-ins for DATA_VOLUME_MOUNT=${data_mount} ..."
     local unit dropin_dir dropin_file _mount_unit
     _mount_unit=$(systemd-escape --path --suffix=mount "$data_mount" 2>/dev/null) || {
         log_error "systemd-escape failed for DATA_VOLUME_MOUNT=$data_mount"
@@ -639,7 +639,7 @@ _install_rwpaths_dropin() {
         dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
         dropin_file="${dropin_dir}/10-state-dir.conf"
         if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would write ReadWritePaths drop-in: $dropin_file"
+            log_info "[DRY RUN] Would write state-dir drop-in: $dropin_file"
             continue
         fi
         mkdir -p "$dropin_dir" || { log_error "Cannot create drop-in dir: $dropin_dir"; return 1; }
@@ -649,17 +649,21 @@ _install_rwpaths_dropin() {
 #
 # [Unit]  After=  — this unit waits for the data volume to be mounted before
 #                   starting, even when triggered by a timer or dependency chain.
+[Unit]
+After=${_mount_unit}
+DROPIN
+
+        if [[ "$unit" == *.service ]]; then
+            cat >> "$dropin_file" << DROPIN
 # [Service] ReadWritePaths= — grants write access to DATA_VOLUME_MOUNT under
 #                             ProtectSystem=strict (without this, all writes to
 #                             the data volume are silently denied by the kernel).
-[Unit]
-After=${_mount_unit}
-
 [Service]
 ReadWritePaths=${data_mount}
 DROPIN
+        fi
         chmod 644 "$dropin_file"
-        log_success "Installed ReadWritePaths drop-in: $dropin_file"
+        log_success "Installed state-dir drop-in: $dropin_file"
     done
 }
 

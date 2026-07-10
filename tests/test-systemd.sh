@@ -84,6 +84,99 @@ write_env() {
     printf '%s\n' "$@" > "$file"
     chmod 0600 "$file"
 }
+
+extract_func() {
+    local file="$1" func="$2"
+    awk -v f="$func" '
+        $0 ~ "^" f "\\(\\)" {p=1}
+        p {
+          print
+          opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+          depth += opens - closes
+          if (depth == 0) exit
+        }' "$file"
+}
+
+test_state_dir_dropins_match_unit_type() {
+    local unit_dir="$TMP/state-dir-units" probe="$TMP/state-dir-dropin-probe.sh"
+    local service="vaultwarden-db-backup.service" timer="vaultwarden-db-backup.timer"
+    local data_mount="/mnt/vaultwarden-data" mount_unit="mnt-vaultwarden-data.mount"
+    local service_dropin="$unit_dir/${service}.d/10-state-dir.conf"
+    local timer_dropin="$unit_dir/${timer}.d/10-state-dir.conf"
+
+    mkdir -p "$unit_dir"
+    cp "$ROOT/systemd/$service" "$unit_dir/$service"
+    cp "$ROOT/systemd/$timer" "$unit_dir/$timer"
+
+    cat > "$probe" <<EOF_PROBE
+#!/usr/bin/env bash
+set -euo pipefail
+DRY_RUN=false
+ENV_FILE="$TMP/no-installed-env"
+UNIT_DEST_DIR="$unit_dir"
+DATA_VOLUME_DEVICE=/dev/disk/by-id/test-data
+DATA_VOLUME_MOUNT="$data_mount"
+_VW_DROPIN_UNITS=(
+    vaultwarden-db-backup.service
+    vaultwarden-db-backup.timer
+)
+log_info(){ :; }
+log_warn(){ :; }
+log_error(){ :; }
+log_success(){ :; }
+systemd-escape(){ printf '%s\\n' '$mount_unit'; }
+EOF_PROBE
+    extract_func "$ROOT/utilities/setup-systemd.sh" _install_rwpaths_dropin >> "$probe"
+    printf '\n_install_rwpaths_dropin\n' >> "$probe"
+    bash "$probe" || fail "state-dir drop-in fixture generation failed"
+
+    grep -Fxq '[Unit]' "$service_dropin" || fail "service state-dir drop-in lacks [Unit]"
+    grep -Fxq "After=$mount_unit" "$service_dropin" || fail "service state-dir drop-in lacks data mount ordering"
+    grep -Fxq '[Service]' "$service_dropin" || fail "service state-dir drop-in lacks [Service]"
+    grep -Fxq "ReadWritePaths=$data_mount" "$service_dropin" || fail "service state-dir drop-in lacks data mount write path"
+
+    grep -Fxq '[Unit]' "$timer_dropin" || fail "timer state-dir drop-in lacks [Unit]"
+    grep -Fxq "After=$mount_unit" "$timer_dropin" || fail "timer state-dir drop-in lacks data mount ordering"
+    ! grep -Fxq '[Service]' "$timer_dropin" || fail "timer state-dir drop-in contains service-only section"
+    ! grep -Fq 'ReadWritePaths=' "$timer_dropin" || fail "timer state-dir drop-in contains service-only write path"
+
+    if ! command -v systemd-analyze >/dev/null 2>&1; then
+        printf 'SKIP: systemd-analyze unavailable; state-dir drop-in structural assertions passed\n'
+        return 0
+    fi
+
+    # Keep the repository service and timer bodies in the fixture. Only the
+    # command and direct dependencies unrelated to drop-in parsing are made
+    # self-contained so systemd-analyze can validate this temporary unit tree.
+    sed 's|^ExecStart=.*|ExecStart=/usr/bin/true|' "$unit_dir/$service" > "$unit_dir/${service}.tmp"
+    mv "$unit_dir/${service}.tmp" "$unit_dir/$service"
+    cat > "$unit_dir/docker.service" <<'EOF_UNIT'
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
+EOF_UNIT
+    cat > "$unit_dir/vaultwarden-health.service" <<'EOF_UNIT'
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
+EOF_UNIT
+    cat > "$unit_dir/vaultwarden-notify-failure@.service" <<'EOF_UNIT'
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
+EOF_UNIT
+
+    local verify_out="$TMP/systemd-analyze-state-dir.out"
+    if ! SYSTEMD_UNIT_PATH="$unit_dir:" systemd-analyze verify "$service" "$timer" > "$verify_out" 2>&1; then
+        cat "$verify_out" >&2
+        fail "systemd-analyze could not verify generated state-dir unit fixture"
+    fi
+    if grep -Eqi 'unknown (section|lvalue|key)|invalid directive|assignment outside' "$verify_out"; then
+        cat "$verify_out" >&2
+        fail "systemd-analyze reported an invalid generated unit/drop-in directive"
+    fi
+}
+
 test_systemd_remove_disables_startup_service() {
     if (( EUID != 0 )); then
         grep -Fq 'systemctl disable --now "$STARTUP_SERVICE"' "$ROOT/utilities/setup-systemd.sh" \
@@ -345,8 +438,9 @@ run_test 'notify-failure systemd uses helper and no root cooldown path' test_not
 run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
 run_test 'notify-failure helper loads encrypted-secret resolution before email' test_notify_failure_helper_loads_secret_resolution
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
+run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dropins_match_unit_type
 run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
-[[ "$TESTS_RUN" -eq 6 ]] || fail "expected 6 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )

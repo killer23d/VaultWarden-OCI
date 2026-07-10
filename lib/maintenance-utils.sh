@@ -131,7 +131,6 @@ cleanup_logs() {
 
 cleanup_backups() {
     if [[ "${CLEAN_BACKUPS:-true}" != "true" ]]; then log_info "Skipping backup cleanup"; return 0; fi
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would clean up old backups based on retention policy"; return 0; fi
     log_info "Managing backup retention..."
     local backup_base_dir; backup_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     local had_real_error=false
@@ -149,7 +148,11 @@ cleanup_backups() {
             continue
         fi
         if cleanup_old_backups "$backup_dir" "$backup_type" "$retention_days"; then
-            log_success "$backup_type backups cleaned (${retention_days}d retention)"
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                log_success "$backup_type backup retention preview completed (${retention_days}d retention)"
+            else
+                log_success "$backup_type backups cleaned (${retention_days}d retention)"
+            fi
         else
             log_error "$backup_type backup cleanup failed"
             had_real_error=true
