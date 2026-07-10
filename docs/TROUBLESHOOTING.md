@@ -1,17 +1,16 @@
 # Troubleshooting Guide — VaultWarden-OCI
 
-Common diagnosis and recovery steps for the current root-operated VaultWarden-OCI model.
+Common diagnosis and recovery steps for the current root-operated VaultWarden-OCI appliance.
 
 Related docs: [OPERATIONS.md](OPERATIONS.md) · [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) · [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md)
 
----
-
-## General Triage Flow
+## General triage flow
 
 Start with the least destructive checks:
 
 ```bash
-sudo ./maintenance.sh health
+sudo make operations
+sudo ./maintenance.sh health || true
 docker compose ps
 docker compose logs --tail=100
 sudo ./setup.sh systemd validate || true
@@ -19,79 +18,114 @@ sudo ./setup.sh systemd validate || true
 
 Then narrow by symptom:
 
-| Symptom | First command |
+| Symptom | First check |
 | :-- | :-- |
-| SSH disconnected during setup/backup/restore/update | `sudo make operations` |
+| SSH disconnected during setup/backup/restore/update/migration | `sudo make operations` |
 | Vault inaccessible | `sudo ./maintenance.sh health` |
-| Cloudflare 525 | local SNI curl + Caddy logs |
-| Backup failed | `sudo ./backup.sh list` and service journal |
-| Restore failed | inspect backup metadata and key used |
-| Secrets unavailable | `sudo make key-health` and SOPS decrypt check |
-| Timer failed | `journalctl -u <unit> -n 100 --no-pager` |
+| Cloudflare `525` / local TLS failure | local SNI curl + Caddy logs |
+| Backup failed | backup service journal + `sudo ./backup.sh list` |
+| Restore failed | `sudo ./restore.sh inspect --remote` and selected archive/key metadata |
+| Secrets unavailable | `sudo make key-health` |
+| Timer/automation failure | `sudo ./setup.sh systemd validate` |
+| Storage/mount mismatch | `utilities/env-edit.sh status` + `sudo utilities/setup-storage.sh verify` |
+| CrowdSec enforcement missing | engine + both bouncers + decision/Worker logs |
 
-If `sudo make operations` shows the original operation is still active, inspect
-its phase and wait or use the guarded stop flow if it is offered. The project
-will not automatically terminate `apt` or `dpkg`. If the operation is no longer
-active, rerun the original command without adding `--force` unless a reset is
-specifically required.
+If `sudo make operations` shows the original operation is active, inspect its owner/phase and wait or use the guarded conflict action offered by the owning workflow.
+
+Do not delete lock files as a generic repair. The project will not automatically terminate `apt` or `dpkg` package work.
 
 ---
 
-## Services Will Not Start
+## Services will not start
 
 Symptoms:
 
-- containers exit immediately;
-- `docker compose up` fails;
-- `make up` or `startup.sh` exits non-zero.
+- `sudo make up` exits non-zero;
+- `startup.sh` exits non-zero;
+- critical containers are absent, unhealthy, or restarting.
 
 Diagnosis:
 
 ```bash
+sudo make operations
 sudo ./maintenance.sh health || true
 docker compose config --quiet
 docker compose ps
 docker compose logs --tail=120
 sudo ls -la /run/vaultwarden-oci/secrets/
+utilities/env-edit.sh status
+sudo utilities/setup-storage.sh verify
 ```
 
-Fixes:
+Check/repair known path permissions:
 
 ```bash
+sudo utilities/repair-permissions.sh --check
 sudo utilities/repair-permissions.sh
-sudo ./startup.sh --force
-sudo ./maintenance.sh health
 ```
 
-If the compose template is invalid, fix `docker-compose.yml.example`, validate it, regenerate, and restart:
+Retry the supported lifecycle path:
 
 ```bash
-docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
-sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
-sudo ./startup.sh --force
+sudo make up
+sudo make health
 ```
+
+Do not replace the production start path with `docker compose up -d` merely because Compose syntax is valid. Bare Compose bypasses project storage, secret materialization, environment, and operation-guard behavior.
+
+### Generated Compose file is stale or invalid
+
+First validate the committed template independently:
+
+```bash
+docker compose \
+  --env-file .env.example \
+  -f docker-compose.yml.example \
+  config --quiet
+```
+
+Then inspect the configured deployment:
+
+```bash
+docker compose config --quiet
+```
+
+If `docker-compose.yml` is stale relative to the current template/setup contract, correct the owning configuration/setup source and regenerate through the supported setup/environment path. Do not hand-patch a generated file while leaving its source inconsistent.
+
+For ordinary `.env` changes, use:
+
+```bash
+sudo make edit-env
+sudo make restart
+sudo make health
+```
+
+Do not rerun full `setup.sh install --force` as a generic configuration repair.
 
 ---
 
-## Cloudflare 525 / Caddy TLS Failure After Restore
+## Cloudflare `525` / Caddy TLS failure after restore
 
 Symptoms:
 
-- Cloudflare returns HTTP `525`;
-- browser cannot complete HTTPS;
-- local SNI HTTPS to `127.0.0.1` returns HTTP `000` or TLS internal error;
-- Caddy logs mention permission errors for `/data/caddy`, `/config/caddy`, `/var/log/caddy`, certificate keys, storage locks, or autosave.
+- Cloudflare returns `525`;
+- local HTTPS to the origin fails;
+- Caddy logs mention permission failures for `/data`, `/config`, `/var/log/caddy`, certificate keys, storage locks, or autosave.
 
 Diagnosis:
 
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/alive" \
-  -o /dev/null -w "local HTTPS /alive: HTTP %{http_code}\n"
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+  "https://$DOMAIN/alive" \
+  -o /dev/null \
+  -w "local HTTPS /alive: HTTP %{http_code}\n"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/config" \
-  -o /dev/null -w "local HTTPS /api/config: HTTP %{http_code}\n"
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+  "https://$DOMAIN/api/config" \
+  -o /dev/null \
+  -w "local HTTPS /api/config: HTTP %{http_code}\n"
 
 sudo docker logs vaultwarden_caddy --tail=120 2>&1 \
   | grep -Ei 'permission|certificate|tls|handshake|error|warn|storage|autosave' || true
@@ -99,7 +133,7 @@ sudo docker logs vaultwarden_caddy --tail=120 2>&1 \
 sudo utilities/repair-permissions.sh --check
 ```
 
-Fix:
+Repair:
 
 ```bash
 sudo utilities/repair-permissions.sh
@@ -107,130 +141,136 @@ sudo docker compose restart caddy
 sudo ./maintenance.sh health
 ```
 
-Expected health result:
+The post-restore runtime contract normalizes Caddy data/config/log bind mounts to UID/GID `2000:2000` while preserving root-operated private configuration/secrets.
 
-```text
-[pass] permissions:caddy-storage    Caddy storage/log permissions are correct
+Do not use:
+
+```bash
+sudo chmod -R 777 "$PROJECT_STATE_DIR"
+sudo chown -R 2000:2000 "$PROJECT_STATE_DIR"
 ```
 
-Cause: full/emergency archives are intentionally restored without trusting old archive owners/modes. After extraction, the runtime permission repair helper must normalize Caddy bind mounts to UID/GID `2000:2000`. See [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md).
-
-Do not use broad fixes such as `chmod -R 777` or `chown -R 2000:2000 ${PROJECT_STATE_DIR}`. They can expose root-operated secrets or break encrypted state.
+Those commands can expose private state or break Vaultwarden ownership.
 
 ---
 
-## Caddy Certificate / DNS-01 Problems
+## Caddy certificate / DNS-01 problems
 
 Symptoms:
 
+- DNS-01 challenge fails;
 - certificate issuance fails;
-- DNS-01 challenge errors;
-- Caddy logs mention Cloudflare token or API failures.
+- Caddy logs report Cloudflare API/token errors.
 
 Diagnosis:
 
 ```bash
-docker compose logs caddy | grep -iE 'cloudflare|dns|challenge|certificate|error'
+docker compose logs caddy --tail=150 \
+  | grep -iE 'cloudflare|dns|challenge|certificate|error'
+
 sudo ./utilities/secrets-list.sh
 sudo ./maintenance.sh health
 ```
 
-Fixes:
+Rotate the Caddy DNS token through the schema-aware secret path:
 
 ```bash
 sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
-sudo ./edit-secrets.sh rotate cloudflare_zone_id
-sudo docker compose restart caddy
 sudo ./maintenance.sh health
 ```
 
-Confirm Cloudflare SSL/TLS mode is **Full (Strict)** after the origin certificate is valid.
+`cloudflare_zone_id` belongs to the CrowdSec Workers integration; it is not the Caddy DNS-01 token.
+
+After the origin certificate is healthy, confirm Cloudflare SSL/TLS mode is **Full (Strict)**.
 
 ---
 
-## Vaultwarden Container Crashes
-
-Symptoms:
-
-- Vaultwarden exits or restarts;
-- web vault unavailable;
-- database errors in logs.
+## Vaultwarden container crashes or database errors
 
 Diagnosis:
 
 ```bash
-docker compose logs vaultwarden --tail=120
-sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/db.sqlite3" 'PRAGMA integrity_check;'
+docker compose logs vaultwarden --tail=150
+sudo sqlite3 \
+  "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/db.sqlite3" \
+  'PRAGMA integrity_check;'
+
 docker stats --no-stream
 ```
 
-Fixes:
+Run the guarded database-maintenance path only when the database is structurally healthy enough for the owning maintenance workflow:
 
 ```bash
 sudo ./maintenance.sh db-maint
 sudo ./maintenance.sh health
 ```
 
-If database corruption is confirmed and cannot be repaired, restore the latest DB backup:
+If corruption is confirmed and the live database is not a valid repair source, restore a verified database backup:
 
 ```bash
 sudo ./restore.sh latest db
 sudo ./maintenance.sh health
 ```
 
+Do not manually copy live WAL/SHM files between hosts as a recovery method.
+
 ---
 
-## Restore Fails
+## Restore fails
 
 Symptoms:
 
 - Age decrypt error;
-- preflight refuses storage layout;
+- storage preflight refuses the target;
 - restore stops before service start;
-- services do not start after restore.
+- a required key acknowledgement times out;
+- services or `/alive` fail after restore.
 
 Diagnosis:
 
 ```bash
 sudo ./restore.sh inspect --remote
-cat /path/to/backup.age.meta
-sha256sum -c /path/to/backup.age.sha256
 sudo make key-health
 ```
 
-Common causes and fixes:
+For a selected local archive, inspect its normal sidecars without printing secret contents:
 
-| Cause | Fix |
+```bash
+cat /path/to/backup.age.meta
+sha256sum -c /path/to/backup.age.sha256
+```
+
+Common causes:
+
+| Cause | Correct direction |
 | :-- | :-- |
-| Wrong Age key | Use the key that encrypted the selected backup, supplied with `--key-file`, `RESTORE_AGE_KEY_FILE`, or recovery kit. |
-| Block backup targeting boot storage | Attach/mount the data volume first, then rerun inspect. |
-| Backup has only `.pre-restore-*` DBs | Choose a different full/emergency archive or restore a DB backup. |
-| Caddy permissions drift after restore | Run `sudo utilities/repair-permissions.sh` and restart Caddy. |
-| Operator does not want immediate service start | Use `--start-policy ask` or `--no-start`. |
-| Restore prompt timed out or SSH input was lost | Save any printed new Age key/recovery-kit path, review restore state, then use the manual startup checklist. |
+| Wrong Age identity | Use a private key for a recipient that encrypted the selected backup. |
+| Emergency independent protection missing | Supply the emergency passphrase or matching `EMERGENCY_BACKUP_AGE_RECIPIENT` private identity. |
+| Attached-volume backup targeting boot storage | Prepare/mount the expected data volume, then rerun inspect. |
+| Archive lacks the required verified live-path database | Choose another full/emergency archive or a database backup. |
+| Caddy ownership drift | Run `repair-permissions.sh`, then recheck health. |
+| Operator wants inspection before startup | Use `--start-policy ask` or `--no-start`. |
+| Prompt/`SAVED` acknowledgement timed out | Treat the restore as failed-safe; preserve printed recovery material and follow the manual next steps. |
 
-Remember the tier model:
+Backup tiers remain distinct:
 
-| Tier | Restore meaning |
-| :-- | :-- |
-| `db` | Quick database rollback; storage-layout independent. |
-| `full` | Normal DR restore that needs the offline Age recipient's private key or the operational Age key that encrypted the backup. |
-| `emergency` | Clone-grade sealed restore that may carry `/etc/vaultwarden` key/config material. |
+- `db` — storage-layout-independent database rollback;
+- `full` — normal DR archive without the live operational Age private key;
+- `emergency` — independently sealed clone-grade capsule that may carry staged `/etc/vaultwarden` key/config material.
 
-> **Warning:** Emergency backups are clone-grade secrets-bearing artifacts. Treat them like a password-manager vault export and protect the passphrase or emergency recipient identity separately.
+A new operational Age key cannot decrypt a historical archive merely because it is the current server key. Retain and use the private identity matching the selected backup generation.
 
-Restore confirmation timeout or EOF is not treated as an implicit "no". If the emergency Age-key rotation prompt or new-key `SAVED` acknowledgement loses input, restore fails safe, leaves services stopped, preserves generated key material, and prints manual recovery/start guidance.
+After a successful restore that is intended to return to automated production:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
 
 ---
 
-## Backup Creation Fails
-
-Symptoms:
-
-- backup command exits non-zero;
-- SQLite integrity check fails;
-- rclone upload fails;
-- backup verification fails.
+## Backup creation or verification fails
 
 Diagnosis:
 
@@ -242,28 +282,45 @@ journalctl -u vaultwarden-db-backup.service -n 100 --no-pager
 journalctl -u vaultwarden-full-backup.service -n 100 --no-pager
 ```
 
-Fixes:
+Retry only after understanding the failure:
 
 ```bash
-sudo ./maintenance.sh run --comprehensive
 sudo ./maintenance.sh db-maint
 sudo ./backup.sh run db
 sudo ./backup.sh run full --full-verification
 ```
 
-For rclone failures:
+A required verification failure is a real backup failure. The failed new archive is not a valid restore candidate and does not justify retention/pruning of older recovery points.
+
+### rclone/offsite failure
+
+Check the intended remote and the current config source:
 
 ```bash
+rclone listremotes
 rclone lsd your_remote_name:
-rclone config show your_remote_name
+utilities/env-edit.sh status
+```
+
+The root-operated installed runtime path is normally:
+
+```text
+/etc/vaultwarden/rclone.conf
+```
+
+After fixing/recreating rclone source configuration, activate the current installed systemd runtime:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
 sudo ./backup.sh run db --rclone
 ```
 
+Do not describe a requested-but-skipped offsite sync as successful remote protection.
+
 ---
 
-## Backup Verification Fails With Missing Age Key
-
-A backup cannot be considered verified if the decrypt probe cannot find the Age key.
+## Backup verification reports no matching Age key
 
 Diagnosis:
 
@@ -273,118 +330,167 @@ sudo make key-health
 sudo ./backup.sh verify
 ```
 
-Fix:
+If the selected backup was encrypted before an operational key rotation, use the retained old operational key or offline recovery private identity that matches a recipient on that backup.
 
-```bash
-# Restore the key from offline escrow or recovery kit, then:
-sudo make key-health
-sudo ./backup.sh verify
-```
+A newly generated key will not decrypt old ciphertext.
 
-If the key is permanently lost, old backups encrypted to that key are unrecoverable. Generate a new key only after accepting that old backup set is lost.
+If every matching private identity has been lost, the affected encrypted backup generation is unrecoverable. Do not delete the archives or create misleading new sidecars while investigating key custody.
+
+See [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md).
 
 ---
 
-## Secrets Decryption Failures
-
-Symptoms:
-
-- SOPS decrypt fails;
-- secrets edit/list commands fail;
-- startup cannot render runtime secrets.
+## Secrets decryption fails
 
 Diagnosis:
 
 ```bash
 sudo make key-health
 sudo ./utilities/secrets-list.sh
-sudo sops -d "${SECRETS_FILE:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/secrets.yaml}" >/dev/null
 ```
 
-Fixes:
+A direct decrypt probe may be run without printing plaintext:
 
 ```bash
-sudo utilities/repair-permissions.sh
-sudo make key-health
-sudo ./utilities/secrets-edit.sh
+sudo bash -c '
+  set -euo pipefail
+  export PROJECT_ROOT="$PWD"
+  source "$PROJECT_ROOT/lib/config.sh"
+  load_project_environment
+  SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" \
+    sops -d "$SECRETS_FILE" >/dev/null
+'
 ```
 
-Do not render persistent secrets world-readable. The expected production contract is root-operated private state.
+Check known permissions:
+
+```bash
+sudo utilities/repair-permissions.sh --check
+sudo utilities/repair-permissions.sh
+sudo make key-health
+```
+
+Edit through the supported encrypted workflow:
+
+```bash
+sudo ./edit-secrets.sh edit
+```
+
+Do not copy decrypted values into `.env` or make persistent secret state world-readable.
 
 ---
 
-## Health Reports Placeholder Secrets
+## Health reports placeholder or missing feature secrets
 
-Symptoms:
-
-- health reports `CHANGE_ME` values;
-- Cloudflare, email, or push integration fails.
-
-Fix:
+List current key names and use the schema-aware rotation path:
 
 ```bash
+sudo ./utilities/secrets-list.sh
 sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
 sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
 sudo ./edit-secrets.sh rotate cloudflare_zone_id
+sudo ./edit-secrets.sh rotate cf_account_id
 sudo ./edit-secrets.sh rotate smtp_password
-sudo make restart
 sudo make health
 ```
 
+The exact key inventory and required/conditional behavior are owned by `secrets-schema.yaml` and documented in [SECRETS-SCHEMA.md](SECRETS-SCHEMA.md).
+
 ---
 
-## Email Not Sending
+## Email not sending
 
-Diagnosis:
+Start with the dedicated diagnostic:
+
+```bash
+sudo ./maintenance.sh test-email --verbose
+```
+
+Inspect Postfix when using the normal SMTP path:
 
 ```bash
 docker compose ps postfix
-docker compose logs postfix --tail=100
-sudo ./maintenance.sh test-email --verbose
+docker compose logs postfix --tail=120
 ```
 
-Fixes:
+Edit non-secret SMTP settings through:
 
 ```bash
-nano .env
+sudo make edit-env
+```
+
+Rotate the relay password through SOPS:
+
+```bash
 sudo ./edit-secrets.sh rotate smtp_password
-sudo docker compose restart postfix vaultwarden
+```
+
+Then:
+
+```bash
+sudo make restart
 sudo ./maintenance.sh test-email --verbose
 ```
 
-See [EMAIL.md](EMAIL.md) for provider-specific API/SMTP details.
+Do not point Vaultwarden directly at the upstream SMTP relay in the normal architecture. Vaultwarden uses the internal Postfix sidecar; Postfix owns upstream authentication/TLS/queueing.
+
+For API-mode operational alerts, inspect `EMAIL_MODE`, `EMAIL_PROVIDER`, and `email_api_token`. Keep SMTP/Postfix configured for Vaultwarden mail and attachment-based recovery-kit delivery.
+
+See [EMAIL.md](EMAIL.md).
 
 ---
 
-## CrowdSec Not Blocking
+## CrowdSec detects events but enforcement is missing
 
-Diagnosis:
+Check the engine and both bouncers:
 
 ```bash
-sudo systemctl status crowdsec
+sudo systemctl status crowdsec --no-pager -l
+sudo systemctl status crowdsec-firewall-bouncer --no-pager -l
+sudo systemctl status crowdsec-cloudflare-worker-bouncer --no-pager -l
 sudo cscli decisions list
 sudo cscli alerts list --since 24h
 sudo cscli bouncers list
-sudo journalctl -u crowdsec -n 100 --no-pager
 ```
 
-Fixes:
+Inspect logs:
 
 ```bash
-sudo systemctl restart crowdsec
-sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+sudo journalctl -u crowdsec -n 100 --no-pager
+sudo journalctl -u crowdsec-firewall-bouncer -n 100 --no-pager
+sudo journalctl -u crowdsec-cloudflare-worker-bouncer -n 150 --no-pager
+```
+
+After Workers credential/account/zone changes:
+
+```bash
+sudo ./utilities/crowdsec-worker-apply.sh
+```
+
+Refresh the separate Cloudflare-origin UFW CIDR allowlist through:
+
+```bash
 sudo ./maintenance.sh update-firewall
 ```
 
-If your own IP is banned:
+Do not confuse these controls:
+
+- CrowdSec firewall bouncer — host decision enforcement;
+- Workers bouncer/KV — edge enforcement for the configured locally generated web decision flow;
+- UFW Cloudflare CIDR refresh — origin-source allowlist for ports `80`/`443`.
+
+If your own IP has a CrowdSec decision:
 
 ```bash
 sudo cscli decisions delete --ip <your-ip>
+sudo ./utilities/setup-crowdsec.sh --admin-ip <your-ip-or-cidr>
 ```
+
+See [CROWDSEC.md](CROWDSEC.md).
 
 ---
 
-## Systemd Timers Not Running
+## systemd timers or installed automation are stale
 
 Diagnosis:
 
@@ -392,56 +498,156 @@ Diagnosis:
 sudo ./setup.sh systemd status
 sudo ./setup.sh systemd validate
 systemctl list-timers --all | grep vaultwarden
-journalctl -u vaultwarden-health.service -n 100 --no-pager
 ```
 
-Fix:
+The managed timer set contains six timers: maintenance, DB backup, full backup, health, DNS update, and firewall update.
+
+On a production host that is ready to run scheduled jobs, repair/activate the current repository runtime with:
 
 ```bash
-sudo ./setup.sh systemd install
+sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
-sudo make timers
+sudo ./utilities/smoke-test.sh
 ```
 
-After pulling repo updates that change scripts or units, reinstall systemd integration so `/opt` scripts and unit files match the repository.
+A plain non-interactive `systemd install` defaults to install/enable without starting timers immediately. That is appropriate for recovery/manual-inspection hosts, not the normal repair for "timers are not running" on an intended production host.
+
+After `git pull`, remember that systemd jobs still execute `/opt/vaultwarden-scripts` until the installer copies the current repository code.
 
 ---
 
-## Storage / Block Volume Problems
+## Storage / block volume problems
 
 Symptoms:
 
 - restore preflight refuses to proceed;
-- scripts warn about missing mountpoint or `.vw-data-volume` sentinel;
-- data appears under boot storage unexpectedly.
+- storage verification reports missing mount/sentinel;
+- data appears under boot storage unexpectedly;
+- attached-volume host writes to the wrong state path.
 
 Diagnosis:
 
 ```bash
 sudo ./restore.sh inspect --remote
-findmnt "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+utilities/env-edit.sh status
+sudo utilities/setup-storage.sh verify
+findmnt
 lsblk -f
-grep -E 'PROJECT_STATE_DIR|DATA_VOLUME' .env
 ```
 
-Fix:
+For attached-volume mode, confirm:
 
-- Attach and mount the data volume before full/emergency restore.
-- Confirm `PROJECT_STATE_DIR`, `DATA_VOLUME_MOUNT`, and `DATA_VOLUME_DEVICE` describe the intended storage model.
-- Restore a `db` backup instead if you only need Vaultwarden database contents.
+- `DATA_VOLUME_DEVICE` is the intended device identity;
+- `DATA_VOLUME_MOUNT` is the expected mount;
+- `PROJECT_STATE_DIR` matches the data mount;
+- the mount is active;
+- `.vw-data-volume` belongs to the intended VaultWarden data volume.
+
+Do not fix an ambiguity by manually touching/removing the sentinel or hand-editing `/etc/vaultwarden/vaultwarden.env`.
+
+For existing project data that must move between storage layouts, use:
+
+```bash
+sudo utilities/setup-storage.sh migrate run
+```
+
+See [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md).
 
 ---
 
-## Diagnostic Bundle
+## `setup-system.sh` rejects the host
 
-When opening an issue or reviewing a failure, collect:
+The supported normal production host is exactly:
 
-```bash
-sudo make diagnose > diagnose-report.txt
-sudo ./maintenance.sh health --comprehensive --json > health-report.json
-docker compose logs --tail=300 > service-logs.txt
-sudo ./setup.sh systemd status > systemd-status.txt
-sudo cscli decisions list >> systemd-status.txt || true
+```text
+Ubuntu 24.04 LTS Noble
+amd64 or arm64
 ```
 
-Sanitize secrets before sharing logs or configuration.
+Check:
+
+```bash
+cat /etc/os-release
+dpkg --print-architecture
+```
+
+The setup preflight fails when:
+
+- `ID` is not `ubuntu`;
+- `VERSION_ID` is not `24.04`;
+- the Ubuntu codename is missing, inconsistent, or not `noble`;
+- architecture is not `amd64` or `arm64`.
+
+Do not patch the detected codename to `noble` or force an amd64 download on an unknown architecture. Use a supported host.
+
+---
+
+## `yq` is installed but schema/setup commands fail
+
+The project requires Mike Farah `yq` v4 syntax. Ubuntu/Python `yq` is a different tool.
+
+Check:
+
+```bash
+yq --version
+```
+
+Use the repository setup path to install/validate the required implementation:
+
+```bash
+sudo ./utilities/setup-system.sh
+```
+
+Do not change schema expressions to accommodate the wrong `yq` implementation.
+
+---
+
+## Production smoke test reports `SKIP`
+
+A smoke-test skip is **not** production ready.
+
+The current smoke test returns zero only when there are no failed and no skipped checks.
+
+Run it directly:
+
+```bash
+sudo ./utilities/smoke-test.sh
+```
+
+Then fix the exact unavailable check. Common directions:
+
+```bash
+utilities/env-edit.sh status
+sudo ./setup.sh systemd validate
+sudo make key-health
+sudo ./backup.sh verify
+sudo systemctl status crowdsec
+```
+
+Do not edit the smoke test to turn an unavailable required subsystem into `PASS` or a successful `SKIP` just to clear the readiness gate.
+
+---
+
+## Diagnostic bundle and issue reporting
+
+Collect a bounded diagnostic snapshot:
+
+```bash
+sudo make diagnose > vaultwarden-diagnose.txt 2>&1
+sudo ./maintenance.sh health >> vaultwarden-diagnose.txt 2>&1 || true
+sudo ./setup.sh systemd validate >> vaultwarden-diagnose.txt 2>&1 || true
+sudo make operations >> vaultwarden-diagnose.txt 2>&1 || true
+```
+
+Before sharing, review the file and remove private material.
+
+Never include:
+
+- Age private key contents;
+- recovery-kit plaintext;
+- SOPS decrypted values;
+- SMTP/API/Cloudflare tokens;
+- backup emergency passphrases;
+- plaintext password-manager exports.
+
+When reporting a repository defect, include the exact branch/commit, failing command, exit code, concise relevant logs, and whether the failure occurred on a real Noble amd64/arm64 host or only in a mocked/local environment.
