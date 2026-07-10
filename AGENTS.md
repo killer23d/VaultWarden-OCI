@@ -50,7 +50,7 @@ The supported normal production path is:
 - Cloudflare DNS, proxy, and WAF;
 - Caddy using the repository's Cloudflare-first TLS path;
 - Vaultwarden;
-- Postfix where used by the current mail design;
+- Postfix sidecar for the supported production outbound-mail path;
 - CrowdSec with Cloudflare edge enforcement;
 - SOPS + Age encrypted secrets;
 - rclone/offsite backup support;
@@ -320,7 +320,11 @@ Treat backup, restore, and recovery as high-risk production workflows.
 
 Backup success must reflect actual verification state. A failed required verification must not be presented as a successful backup. Offsite sync not requested is different from offsite sync requested but skipped or failed.
 
+Treat a primary backup and its restore-critical companion artifacts as one recovery-point cohort. A companion artifact is restore-critical when the supported restore path requires it to determine archive format, encryption or protection mode, or another execution dispatch decision. Do not report remote delivery as complete from the primary artifact alone when a restore-critical companion is missing, unusable, or failed to transfer.
+
 Retention must preserve the repository's current recovery-point safety contract. Do not make cleanup more aggressive without tracing local and remote selection, sidecars, restore discovery, and failure behavior.
+
+For the selected restore plan, prove all knowable executable prerequisites before service stop or live-state mutation. Dependencies that can be determined from the selected archive, restore type, start policy, storage layout, or key policy belong in preflight rather than being discovered after the destructive boundary.
 
 Restore and recovery changes require end-to-end reasoning across:
 
@@ -339,6 +343,10 @@ Restore and recovery changes require end-to-end reasoning across:
 - service startup;
 - `/alive` verification;
 - final operator guidance.
+
+Archive content must be validated and staged before controlled live promotion. Do not extract supported recovery archives directly into live root or state paths merely for legacy compatibility.
+
+For full and emergency restore, SQLite integrity alone does not prove that the broader state, configuration, secrets, and key transaction is committed. Automatic safety restart requires the selected restore type's coherent promotion/commit boundary to have been reached.
 
 An incomplete restore or recovery must not be presented as success.
 
