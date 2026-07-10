@@ -271,7 +271,6 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # shellcheck source=../lib/log.sh
 source "$ROOT/lib/log.sh"
 # shellcheck source=../lib/backup-utils.sh
-# shellcheck source=../lib/backup-utils.sh
 source "$UTILS"
 
 local_dir="$TMP/local/db"

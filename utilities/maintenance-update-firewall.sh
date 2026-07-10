@@ -45,9 +45,9 @@ OPTIONS:
     --version, -V Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — Firewall ranges updated successfully (or skipped)
+    0 — Firewall ranges updated successfully or skipped by configuration
     75 — skipped because another VaultWarden operation owns the lock
-    1 — Firewall update failed
+    Other non-zero — Firewall update failed
 EOF
 }
 

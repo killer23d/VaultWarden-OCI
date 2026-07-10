@@ -68,7 +68,7 @@ OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — completed successfully
+    0 — completed without real failures; may include expected contention skips
     1 — completed with minor issues
     2 — completed with critical failures
 
