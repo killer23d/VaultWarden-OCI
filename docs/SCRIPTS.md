@@ -1,1075 +1,370 @@
-# Scripts Reference — VaultWarden-OCI
+# Scripts and Implementation Map — VaultWarden-OCI
 
-Complete reference for all management scripts and utility libraries in VaultWarden-OCI.
+This document explains the current public command surfaces and which utilities/libraries own their behavior.
 
-> **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 22 standalone administrative and engine scripts located in the `utilities/` directory.
->
-> Library consolidation: `lib/security.sh` was merged into `lib/crypto.sh`.
->
-> This dispatcher pattern keeps the public CLI surface simple while making the codebase highly modular and easier to test.
+For exact CLI grammar, options, and exit-code text, use the script's `--help` output or the generated [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md). Do not treat this file as a second hand-maintained option inventory.
 
----
+Related docs: [OPERATIONS.md](OPERATIONS.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [PROJECT-BOUNDARY.md](PROJECT-BOUNDARY.md)
 
-## 🗂️ Script Inventory
+## Public top-level entry points
 
-| # | Script | Category | sudo? |
-| :-- | :-- | :-- | :-- |
-| 1 | `setup.sh` | Dispatcher for setup phases | ✅ |
-| 2 | `startup.sh` | Service management | — |
-| 3 | `backup.sh` | Dispatcher for backups | — |
-| 4 | `restore.sh` | Dispatcher for restores | — |
-| 5 | `edit-secrets.sh` | Dispatcher for secrets editing | — |
-| 6 | `utilities/env-edit.sh` | Environment sync/edit/status manager | sync/edit ✅; status — |
-| 7 | `utilities/secrets-edit.sh` | Interactive encrypted secrets editor (standalone) | — |
-| 8 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
-| 9 | `utilities/*.sh` | Standalone admin/engine scripts (see `utilities/README.md`) | varies |
+The normal operator-facing scripts are thin dispatchers or lifecycle entry points:
 
-**Utility libraries (8):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`, `lib/storage.sh`, `lib/email.sh`, `lib/maintenance-utils.sh`
-
-> **Dispatcher count:** `edit-secrets.sh` was refactored into a thin dispatcher in this release, bringing the total dispatcher-pattern top-level scripts to 5: `setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`. `utilities/secrets-edit.sh` is the interactive editor utility invoked by the dispatcher.
-
----
-
-
-### `utilities/env-edit.sh` — Environment sync/edit/status
-
-Manages the non-secret environment workflow. Repository `.env` is the operator-editable source of truth; `${PROJECT_STATE_DIR}/config/install.env` and `/etc/vaultwarden/vaultwarden.env` are generated runtime artifacts and should not be edited directly.
-
-```bash
-sudo make sync-env
-sudo make edit-env
-sudo utilities/env-edit.sh sync
-sudo utilities/env-edit.sh edit
-utilities/env-edit.sh status
-```
-
-`sync` is non-interactive for `make up`, `make restart`, and systemd installation. Direct `sync` and `edit` acquire or inherit the shared operation guard; startup-owned sync runs inside the lifecycle guard so config and service mutation are one continuous operation. `edit` opens repo `.env` in `$EDITOR` and syncs only when the checksum changes. `status` is read-only and reports env paths, drift, migration state, and storage mismatch information.
-
----
-## 🔧 Core Management Scripts
-
-### 1. `setup.sh`
-**Purpose:** One-time system initialisation and configuration generation
-
-```bash
-sudo ./setup.sh install --domain vault.example.com --email admin@example.com [OPTIONS]
-```
-
-**Key features:**
-- Template-based `docker-compose.yml` and `.env` generation
-- Ubuntu Noble SSH log path handling using `/var/log/auth.log`
-- UFW firewall configured for Cloudflare-only web traffic
-- Age encryption key generation
-- SOPS configuration setup
-- Dependency installation (including `zstd`, required by `backup.sh run full`)
-
-**Options:**
-
-| Option | Description |
-| :-- | :-- |
-| `install --domain DOMAIN --email EMAIL` | Run the full install |
-| `--auto` | Automated setup with minimal prompts |
-| `--use-latest` | Use live upstream container/CrowdSec component versions and resolve the latest SOPS release instead of pinned defaults |
-| `--skip-deps` | Skip dependency installation |
-| `--force` | Overwrite existing configuration files |
-| `--dry-run` | Show what would be done without executing |
-| `--data-device DEV` | Use a dedicated block storage data volume; prefer `/dev/disk/by-id/...` |
-| `--data-mount PATH` | Mount point for the data volume; must match `PROJECT_STATE_DIR` in separate-volume mode |
-| `secrets` | Run ONLY the secrets configuration phase |
-| `systemd <install|remove|validate|status>` | Manage systemd timer integration |
-
-```bash
-sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
-
-# Run secrets phase only (e.g. after a partial setup failure)
-sudo ./setup.sh secrets
-
-# Install systemd units
-sudo ./setup.sh systemd install
-```
-
-> ⚠️ After `setup.sh` adds your user to the `docker` group, **log out and back in** (or start a new shell session) before running any `docker` or `make` commands.
-
-> ⚠️ After setup, open ports 80 and 443 are restricted to Cloudflare IP ranges only by the UFW rules generated by `setup.sh`. If you run `setup.sh install --force` again, re-run `sudo ./maintenance.sh update-firewall` immediately to re-apply the latest Cloudflare CIDRs.
-
----
-
-### `setup.sh secrets`
-**Purpose:** Secrets configuration phase — interactive or automated secrets bootstrap.
-
-```bash
-sudo ./setup.sh secrets [OPTIONS]
-```
-
-**Called automatically by `setup.sh install --auto`.** Run the secrets phase standalone when you need to re-initialise secrets without re-running full setup — for example, after a partial setup failure, on a cloned deployment, or when rotating all secrets at once. Mutating secrets bootstrap/configure paths acquire or inherit the shared operation guard before changing SOPS ciphertext, Age policy, or runtime secret state.
-
-**Key features:**
-- Interactive prompts for all required secrets (`admin_token`, `admin_basic_auth_hash`, Cloudflare tokens, SMTP password, push notification keys)
-- `--auto` mode generates secure defaults and `CHANGE_ME` placeholders for optional fields — no prompts
-- `--quiet-summary` suppresses verbose output in automated workflows
-- Validates all required fields and detects `CHANGE_ME` placeholder values after writing
-- bcrypt cost factor is validated to be ≥ 10 at generation time (enforced in `lib/crypto.sh`)
-
-**Options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--auto` | Non-interactive — auto-generate required secrets; set `CHANGE_ME` for optional fields |
-| `--quiet-summary` | Suppress verbose output (used internally by `setup.sh install --auto`) |
-| `--dry-run` | Show what would be generated without writing secrets |
-
-```bash
-# Re-initialise secrets interactively (e.g. after partial setup failure)
-sudo ./setup.sh secrets
-
-# Non-interactive — same as what setup.sh install --auto calls internally
-sudo ./setup.sh secrets --auto
-
-# Confirm the result
-./utilities/secrets-view.sh
-```
-
-> After the secrets phase runs, use `./edit-secrets.sh edit` for all subsequent edits — it safely decrypts, edits, re-encrypts, and backs up the secrets file.
-
----
-
-### 2. `startup.sh`
-**Purpose:** Start, stop, and restart VaultWarden services
-
-```bash
-./startup.sh [OPTIONS]
-./startup.sh stop
-```
-
-**What it does:**
-1. Acquires the shared operation guard and lifecycle-specific startup lock
-2. Syncs generated env state inside that same lifecycle operation
-3. Decrypts `$SECRETS_FILE` once and writes transient Docker secret files under `/run/vaultwarden-oci/secrets/`
-4. Creates `${PROJECT_STATE_DIR}/logs/` subdirectories with correct ownership
-5. Starts all containers with `docker compose up -d`
-6. Updates Cloudflare DNS A record
-7. Runs `./maintenance.sh health` post-startup
-
-> **Push notifications note:** If `PUSH_ENABLED=true` is set in `.env`, the VaultWarden network must **not** be marked `internal: true` in `docker-compose.yml`. Push relay requires outbound HTTPS access to `push.bitwarden.com`. `startup.sh` will exit with an error if it detects `PUSH_ENABLED=true` while the network is internal.
-
-**Subcommands:**
-
-| Subcommand | Description |
-| :-- | :-- |
-| *(none)* | Start all services (default behaviour) |
-| `stop` | Stop all containers gracefully |
-
-**Options (modifiers):**
-
-| Option | Description |
-| :-- | :-- |
-| `--force` | Force restart — stops containers then restarts |
-| `--skip-health` | Skip post-startup health check |
-| `--skip-pull` | Skip `docker compose pull` (fast path for systemd restarts) |
-| `--background` | Start in daemon mode |
-| `--skip-egress-fix` | Skip automatic egress NAT remediation |
-| `--dry-run` | Preview operations without executing |
-
-**Makefile shortcuts:**
-```bash
-make start     # Full initialisation startup (alias: make up)
-make stop      # Graceful shutdown (alias: make down)
-make restart   # Force restart
-```
-
----
-
-### 3. `maintenance.sh health` subcommand
-**Purpose:** System health monitoring — runs checks and optionally auto-recovers.
-
-```bash
-./maintenance.sh health [OPTIONS]
-```
-
-**Always-on checks:**
-- All 3 containers running (`vaultwarden`, `caddy`, `postfix`)
-- VaultWarden accessible on `localhost:8080`
-- External web access via Cloudflare
-- Disk space (warn >70%, critical >alert threshold [default 80%])
-- SSL certificate expiration (warn <30 days, critical <7 days)
-- Database size and growth rate
-- Backup age and decrypt verification (Age) — **a missing Age key is a hard failure, not a warning**
-- Email notification configuration
-
-**Options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--comprehensive` | Add resource usage, configuration, and security checks |
-| `--fix` | Attempt automatic container restart on failure |
-| `--report` | Save health report to file |
-| `--quiet` | Suppress non-error console output |
-
-```bash
-./maintenance.sh health
-./maintenance.sh health --comprehensive --fix
-
-make health                        # Basic
-make health AUTO_RECOVER=true      # With auto-recovery (passes --fix)
-make health-quick                  # Quick check — concise output
-```
-
-> **Systemd note:** The `vaultwarden-health.service` unit runs `maintenance.sh health --fix` by default.
-
-Read-only health uses only a health-specific duplicate lock and reaches real checks without global operation metadata. `--fix` uses the shared global guard; expected contention exits cleanly, while guard infrastructure failure is not treated as a healthy advisory result.
-
----
-
-### 4. `backup.sh`
-**Purpose:** Create Age-encrypted backups with integrity verification
-
-```bash
-./backup.sh <subcommand> [OPTIONS]
-```
-
-> **Runtime user note:** Managed backup/health/DNS systemd jobs are root-operated. `sudo` is still required for privileged setup/update/firewall/deep-maintenance operations.
-
-**Subcommands:**
-
-| Subcommand | Description |
-| :-- | :-- |
-| `run [TYPE]` | Create a backup. TYPE: `auto` (default), `db`, `full`, `emergency` |
-| `list` | List existing backups and exit (no root required) |
-| `verify` | Run end-to-end integrity verification on the latest backup |
-| `rotate` | Prune old backups without creating a new one |
-| `sync` | Copy every retained local backup and sidecar to the matching rclone type folder, then prune the remote by configured retention |
-
-**Backup types:**
-
-| Type | Contents | Retention |
+| Entry point | Purpose | Production privilege |
 | :-- | :-- | :-- |
-| `auto` | Auto-selects `db` or `full` based on DB age and last full backup age | — |
-| `db` | SQLite database only | 14 days |
-| `full` | Database + config + Caddy certs + logs (no secrets) | 30 days |
-| `emergency` | Same archive contents as full; secrets and the Age key remain excluded | 90 days |
+| `setup.sh` | Host/setup phase dispatcher | root |
+| `startup.sh` | Start, stop, and restart lifecycle | root |
+| `maintenance.sh` | Health, update, DNS/firewall, DB maintenance, email, routine maintenance | root for production operations |
+| `backup.sh` | Backup creation, verification, retention, sync, inventory | root for production operations; metadata/help paths may be root-free |
+| `restore.sh` | Restore inspection, listing, and mutation | root for restore mutation; metadata paths may be root-free where supported |
+| `edit-secrets.sh` | Encrypted secret edit/rotate/list/view/recovery-kit dispatcher | root for mutating secret operations |
+| `recover.sh` | Replacement-host state-volume recovery | root |
+| `dashboard.sh` | Junior-operator dashboard | follows the privilege contract of the command it invokes |
 
-**Backup integrity pipeline:**
-1. WAL checkpoint (`PRAGMA wal_checkpoint(TRUNCATE)`) — verified for completion before snapshot
-2. Atomic SQLite snapshot via `.backup` API (not `cp`)
-3. `PRAGMA integrity_check` on the snapshot copy
-4. Age encryption
-5. Quick decrypt probe — **fails the backup if the Age key is absent** (never silently skips)
-6. Optional end-to-end `--full-verification` (decrypt + extract + integrity check)
+The Makefile is the normal day-2 command surface. It is not the permanent test inventory.
 
-**Options (used after `run`):**
-
-| Option | Description |
-| :-- | :-- |
-| `--rclone` | Sync encrypted backup to rclone remote after creation (non-fatal on failure) |
-| `--full-verification` | End-to-end decrypt + integrity check before sync (fatal on failure) |
-| `--skip-full-verification` | Fast checksum only — explicit default |
-| `--keep N` | Retention period in days (default: 14); **must be a positive integer** |
-| `--email` | Send email notification on completion/failure |
-| `--quiet` | Suppress non-error output |
-| `--force` | Compatibility flag; does not bypass active operation guards |
-| `--dry-run` | Preview operations without executing |
+Common production forms are:
 
 ```bash
-# Daily
-sudo ./backup.sh run db
-
-# Daily with offsite sync
-sudo ./backup.sh run db --rclone --email
-
-# Weekly with full verification and remote sync
-sudo ./backup.sh run full --full-verification --rclone --email
-
-# Emergency kit
-sudo ./backup.sh run emergency --rclone
-
-# Keep 30 days of backups
-sudo ./backup.sh run db --keep 30
-
-sudo make backup         # DB snapshot backup
-sudo make backup-full    # Full backup
-sudo make backup-emergency # Emergency kit
-sudo make list-backups   # List all available backups
-sudo make backup-status  # Show backup inventory
-```
-
-> **`zstd` dependency:** Full backups require `zstd` for compression. `setup.sh` installs it automatically. If you installed before this was added to the package list, run `sudo apt install zstd`.
-
----
-
-### 5. `restore.sh`
-**Purpose:** Restore from an Age-encrypted backup
-
-```bash
-./restore.sh <subcommand> [OPTIONS]
-```
-
-**Subcommands:**
-
-| Subcommand | Description |
-| :-- | :-- |
-| `latest [TYPE]` | Restore the newest local backup. TYPE: `db`, `full`, `emergency` |
-| `list` | List available local backups (no root required) |
-| `list --remote` | List available remote backups (no root required) |
-| `interactive` | Interactive guided restore — shows a numbered backup selection menu |
-
-**Options (used after a subcommand):**
-
-| Option | Description |
-| :-- | :-- |
-| `--file FILE` | Specific backup file to restore |
-| `--remote` | Skip the local/remote menu; restore from rclone remote |
-| `--key-file FILE` | Path to the age private key for decrypting this backup |
-| `--from-recovery-kit FILE` | Path to a plaintext recovery-kit file; Age key extracted automatically |
-| `--force` | Skip confirmation prompts |
-| `--no-backup` | Skip pre-restore emergency snapshot |
-| `--skip-verification` | Skip integrity check |
-| `--dry-run` | Preview operations |
-
-```bash
-# Interactive menu (recommended)
-./restore.sh interactive
-make restore
-
-# Specific file
-./restore.sh latest --file /path/to/backup.age --force
-
-# Latest DB backup (non-interactive — runs age key prompt and confirmation)
-./restore.sh latest db
-make restore-db
-
-# Latest full backup, skip confirmation and pre-restore snapshot
-# (used internally by maintenance.sh update rollback)
-./restore.sh latest full --force --no-backup
-
-# Restore from a remote (rclone) backup
-./restore.sh interactive --remote
-make restore-remote
-```
-
-> **Retention note:** Backup file timestamps are embedded in filenames (`YYYYMMDD-HHMMSS`). The retention logic reads these embedded timestamps rather than filesystem `ctime`, so restored backups retain their original age and are cleaned up on the correct schedule regardless of when they were copied to the host.
-
----
-
-### 6. `edit-secrets.sh`
-**Purpose:** Dispatcher — routes subcommands to `utilities/secrets-*.sh`
-
-`edit-secrets.sh` is a ≤100-line dispatcher following the same pattern as
-`maintenance.sh`. All business logic lives in the `utilities/secrets-*.sh`
-standalone scripts. Admins may invoke the dispatcher or the utilities directly.
-
-```bash
-./edit-secrets.sh [subcommand] [OPTIONS]
-```
-
-**Key features:**
-- SOPS key path never appears in the process list
-- Decrypts to a secure temp file (shredded on exit)
-- Creates automatic backup before editing — backup file is created atomically at mode 600 (no world-readable window)
-- Validates secrets after editing
-- Plaintext output (passwords, recovery kit) is routed exclusively to `/dev/tty`, never to stderr or the systemd journal
-
-Mutating `edit` and `rotate` paths acquire or inherit the shared operation guard before decrypting, promoting ciphertext, updating recipients, or exporting runtime secrets. `view` and `list` remain read-only diagnostics.
-
-**Managed secrets:**
-`admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `cf_worker_bouncer_token` (used by CrowdSec cloudflare-bouncer)
-
-**Subcommands:**
-
-| Subcommand | Utility | Description |
-| :-- | :-- | :-- |
-| `edit` | `sudo utilities/secrets-edit.sh` | Open encrypted secrets in editor (interactive) |
-| `view` | `utilities/secrets-view.sh` | View decrypted secrets without editing |
-| `list` | `utilities/secrets-list.sh` | List all available secret key names |
-| `rotate FIELD` | `sudo utilities/secrets-rotate.sh` | Rotate (regenerate) a single secret field. Pass FIELD directly (e.g. `admin_token`); leading `rotate` accepted as alias. |
-| `export-recovery-kit` | `sudo utilities/secrets-export-recovery-kit.sh` | Export a plaintext recovery document (key + all secrets) |
-
-**Options (per subcommand):**
-
-| Option | Subcommand(s) | Description |
-| :-- | :-- | :-- |
-| `--editor EDITOR` | `edit`, `view` | Specify editor (default: nano) |
-| `--no-backup` | `edit`, `rotate` | Skip automatic backup before editing |
-| `--dry-run` | `rotate` | Preview rotation without writing |
-
-```bash
-./edit-secrets.sh
-./edit-secrets.sh --editor vim
-sudo ./utilities/secrets-rotate.sh smtp_password
-sudo ./utilities/secrets-rotate.sh admin_token --dry-run
-sudo ./utilities/secrets-export-recovery-kit.sh
-./utilities/secrets-view.sh
-./utilities/secrets-list.sh
-make edit-secrets
-make test-secrets    # runs list internally
-```
-
-> **Recovery kit security:** `export-recovery-kit` writes the plaintext kit to a tmpfs path (`/dev/shm` → `/run/user/UID` → `/tmp` priority order) and prints a `WARNING` banner to the terminal before opening the file. Copy the kit to offline storage immediately and delete the file when done. The kit is **never** written to persistent disk.
-
----
-
-### `maintenance.sh update` subcommand
-**Purpose:** Update Docker images and optionally system packages, with pre/post health checks and automatic rollback.
-
-```bash
-sudo ./maintenance.sh update [OPTIONS]
-```
-
-**Options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--images` | Update Docker images only |
-| `--system` | Update system packages (apt) and Docker engine only |
-| `--all` | Update system packages + Docker images |
-| `--force` | Force update even if images are already up to date |
-| `--skip-backup` | Skip pre-update emergency backup |
-| `--email` | Send email notification on completion |
-| `--dry-run` | Preview operations |
-
-```bash
-sudo ./maintenance.sh update --images          # Docker images only
-sudo ./maintenance.sh update --system          # System packages only
-sudo ./maintenance.sh update --all --email     # Full update with email notification
-
-make update           # Runs `sudo ./maintenance.sh update --all` (containers + system packages)
-make update-system    # Runs `sudo ./maintenance.sh update --system` (OS packages only)
-```
-
-> **`--system` scope:** When passed, the update command runs `apt-get upgrade` and updates the Docker engine in addition to pulling new container images. Rollback via `restore.sh` covers data and configuration, but not the Docker engine or OS packages — ensure you have a snapshot or can re-run the upgrade if needed.
-
----
-
-### 7. `maintenance.sh` *(merged script)*
-**Purpose:** Routine cleanup, optimisation, DNS update, deep DB maintenance, email diagnostics, health monitoring, and updates — all in one script with sub-command modes
-
-```bash
-./maintenance.sh <subcommand> [OPTIONS]
-```
-
-**Subcommands overview:**
-
-| Subcommand | Purpose | Cleanup runs? |
-| :-- | :-- | :-- |
-| `run` | Routine maintenance (pass `--comprehensive` for full run) | ✅ |
-| `update-dns` | Update Cloudflare DNS A record (targeted) | ❌ |
-| `update-firewall` | Fetch latest Cloudflare IPs and update UFW rules (targeted) | ❌ |
-| `db-maint` | Full VACUUM cycle — stops VaultWarden; prompts for confirmation | ❌ |
-| `test-email` | Run Postfix + end-to-end email diagnostics | ❌ |
-| `health` | System health monitoring | ❌ |
-| `update` | Update Docker images and optionally system packages | ❌ |
-
-**`run` options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--comprehensive` | Full routine: cleanup + DB opt + firewall + DNS + health |
-| `--no-logs` | Skip log cleanup |
-| `--no-backups` | Skip backup pruning |
-| `--no-docker` | Skip Docker resource cleanup |
-| `--no-database` | Skip scheduled DB optimisation |
-| `--email` | Send summary email on completion |
-| `--dry-run` | Preview any mode without changes |
-
-**`db-maint` options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--force` | Skip the confirmation prompt |
-
-**`test-email` options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--verbose` | Detailed output |
-| `--recipient EMAIL` | Override default `ADMIN_EMAIL` recipient |
-
-**`health` options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--comprehensive` | Add resource usage, configuration, and security checks |
-| `--fix` | Attempt automatic container restart on failure |
-| `--report` | Save health report to file |
-| `--quiet` | Suppress non-error console output |
-
-**`update` options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--images` | Update Docker images only |
-| `--system` | Update system packages (apt) and Docker engine only |
-| `--all` | Update system packages + Docker images |
-| `--force` | Force update even if images are already up to date |
-| `--skip-backup` | Skip pre-update emergency backup |
-| `--email` | Send email notification on completion |
-| `--dry-run` | Preview operations |
-
-```bash
-# Routine
-sudo ./maintenance.sh run --comprehensive
-sudo ./maintenance.sh run --comprehensive --email
-make maintenance
-make maintenance-full
-
-# Deep DB
-sudo ./maintenance.sh db-maint
-sudo ./maintenance.sh db-maint --force
-make db-maint
-
-# Email
-sudo ./maintenance.sh test-email
-sudo ./maintenance.sh test-email --verbose
-sudo ./maintenance.sh test-email --recipient admin@example.com
-make test-email
-
-# Targeted
-sudo ./maintenance.sh update-dns
-sudo ./maintenance.sh update-firewall
-make update-dns
-
-# Health check
-./maintenance.sh health
-./maintenance.sh health --comprehensive --fix
-make health
-
-# Update
-sudo ./maintenance.sh update
-sudo ./maintenance.sh update --system --email
-make update
-```
-
----
-
-### 9. `utilities/setup-secrets.sh breakglass`
-**Purpose:** Emergency OS admin account for OCI Serial Console access
-
-```bash
-utilities/setup-secrets.sh breakglass <subcommand>
-```
-
-**Key features:**
-- Creates a non-root user with `sudo` privileges
-- SSH key authentication + console password authentication
-- Comprehensive audit logging
-- Security validation via `lib/crypto.sh` (merged security functions)
-
-**Subcommands:**
-
-| Subcommand | Description |
-| :-- | :-- |
-| `create` | Create the emergency admin account |
-| `status` | Show current break-glass admin status |
-| `create --force` | Generate a new emergency password |
-| `validate` | Run security validation |
-| `remove` | Remove the emergency admin account |
-
-```bash
-utilities/setup-secrets.sh breakglass create
-
-make breakglass-create
-make breakglass-status
-make breakglass-remove
-```
-
----
-
-### `setup.sh systemd`
-**Purpose:** Systemd integration phase — installs scripts and timers, validates configuration.
-
-```bash
-sudo ./setup.sh systemd <install|remove|validate|status> [--dry-run]
-```
-
-> **Note:** This phase replaces the former `cron-setup.sh`. If you have an older deployment that used `cron-setup.sh`, remove those cron entries (`sudo crontab -r`) and install the systemd units with `sudo ./setup.sh systemd install`.
-
-`install` and `remove` acquire or inherit the shared operation guard before replacing `/opt/vaultwarden-scripts`, installed env/config, or unit files. `status`, `validate`, and `--dry-run` remain read-only diagnostics.
-
-**Key features:**
-- Copies scripts to `/opt/vaultwarden-scripts/` with `root:root 700` permissions
-- Patches `SCRIPT_DIR` and `lib/` source paths at install time (prevents local privilege escalation)
-- Split-brain detection: warns when `/opt/` scripts are older than the git repo copy
-- Installs and enables systemd `.service` + `.timer` unit pairs for each scheduled job
-- All service units include `NoNewPrivileges=yes`, `PrivateTmp=yes`, and `OnFailure=vaultwarden-notify-failure.service`
-
-**Options:**
-
-| Option | Description |
-| :-- | :-- |
-| `install` | Install systemd units and enable timers |
-| `remove` | Disable and remove units; remove `/opt/` script copies |
-| `status` | List current timers + check for split-brain |
-| `validate` | Validate security configuration of installed units |
-| `--dry-run` | Preview without executing |
-
-**Installed schedule:**
-
-| Schedule | Service unit | Job |
-| :-- | :-- | :-- |
-| Daily 02:05 + 0–30 s jitter | `vaultwarden-maintenance` | `maintenance.sh run --comprehensive --email` |
-| Daily 04:00 + 0–60 s jitter | `vaultwarden-db-backup` | `backup.sh run db --rclone --full-verification` |
-| Every 5 min | `vaultwarden-health` | `maintenance.sh health --fix` |
-| Saturday 4 AM | `vaultwarden-firewall-update` | `maintenance.sh update-firewall` |
-| Sunday 03:00 + 0–300 s jitter | `vaultwarden-full-backup` | `backup.sh run full --rclone --full-verification` |
-| Every hour | `vaultwarden-dns-update` | `maintenance.sh update-dns` |
-
-`vaultwarden-maintenance.timer` now runs every day, including Sunday, and finishes before the full backup window. `RandomizedDelaySec` spreads boot-time catch-up work so the timers do not stampede after a reboot.
-
-**Failure notifications:** Every service unit sets `OnFailure=vaultwarden-notify-failure.service`. That unit sources `lib/common.sh` and `lib/email.sh`, calls `send_email()`, and is hardened with `NoNewPrivileges=yes` and `PrivateTmp=yes`.
-
-```bash
-sudo ./setup.sh systemd install
-sudo ./setup.sh systemd status
-sudo ./setup.sh systemd validate
-sudo ./setup.sh systemd remove
-
-make install-systemd
-make systemd-status
-make systemd-validate
-make remove-systemd
-make timers          # List all vaultwarden timers (next trigger + last run)
-```
-
-#### `vaultwarden-notify-failure.service` *(failure notification service)*
-
-**Purpose:** Send an email notification whenever a VaultWarden systemd service fails. This is a shared oneshot service triggered by `OnFailure=vaultwarden-notify-failure.service`.
-
-**How specifier expansion works:**
-
-| Specifier | Resolved to | Example |
-| :-- | :-- | :-- |
-| `%n` | Full name of the *triggering* unit (used in `OnFailure=`) | `vaultwarden-health.service` |
-| `%i` | Instance name — everything between `@` and `.service` | `vaultwarden-health.service` |
-
-When `vaultwarden-health.service` fails, systemd starts `vaultwarden-notify-failure.service`, which sends a generic failure notification email.
-
-**Email output:**
-
-```
-Subject: FAILURE: vaultwarden-health.service on vault.example.com
-
-The systemd unit vaultwarden-health.service failed at Tue Mar 17 21:00:05 UTC 2026.
-Check logs with:
-  journalctl -u vaultwarden-health.service -n 50
-```
-
-The subject and body are constructed entirely inside the unit's `ExecStart` bash snippet using `printf` (not echo) to ensure `\n` newlines expand correctly. The `%%s` in the unit file is a systemd-escaped `%s` that becomes a `printf` placeholder after systemd processes its own specifiers first.
-
-**Security hardening:** The unit runs as `root` (required to read `EnvironmentFile=/etc/vaultwarden/vaultwarden.env`) and applies the same hardening flags as all other VaultWarden service units.
-
-| Setting | Value | Reason |
-| :-- | :-- | :-- |
-| `NoNewPrivileges=yes` | Prevents privilege escalation after start | Consistent with all other units |
-| `PrivateTmp=yes` | Isolates `/tmp` namespace | `send_email()` creates temp files via `mktemp`; prevents cross-unit temp file collisions |
-| `TimeoutStartSec=30` | Abort if email delivery hangs | Prevents a blocked SMTP call from holding up the systemd job queue |
-| `Type=oneshot` | Unit exits after the command completes | Correct for a single-shot notification task |
-
-**Manual testing:**
-
-To verify the notification pipeline end-to-end without waiting for a real failure, start the template unit manually with any installed service name as the instance:
-
-```bash
-# Trigger a test notification as if vaultwarden-health.service had failed
-sudo systemctl start vaultwarden-notify-failure.service
-
-# Check the notification unit's own logs
-journalctl -u vaultwarden-notify-failure.service -n 30
-
-# Verify the outgoing email in the Postfix queue / delivery log
-docker compose logs postfix --tail=30
-```
-
-> **Email delivery prerequisite:** The notification unit calls `send_email()` from `lib/email.sh` (sourced after `lib/common.sh`). The normal path is `EMAIL_MODE=smtp` with the Postfix sidecar relaying to your external SMTP provider. If email is not yet working, run `make test-email` first to diagnose the delivery path before testing failure notifications.
-
----
-
-### 10. `utilities/uninstall-vaultwarden.sh`
-**Purpose:** Full idempotent removal of all VaultWarden-OCI components, data, and system configuration installed by `setup.sh`
-
-> ⚠️ **This operation is irreversible.** All data, encrypted secrets, the Age key, Docker volumes, and the project directory are permanently deleted. Create an emergency backup first: `sudo ./backup.sh run emergency`
-
-```bash
-# Run from any directory — the script locates the project via SUDO_USER
-sudo bash ~/VaultWarden-OCI/utilities/uninstall-vaultwarden.sh run
-```
-
-**What it removes (14 steps, in order):**
-
-| Step | What is removed |
-| :-- | :-- |
-| 1 | Docker Compose stack (containers, volumes, networks) |
-| 2 | systemd timer and service units (`/etc/systemd/system/vaultwarden-*.{timer,service}`) |
-| 3 | `/opt/vaultwarden-scripts/` (installed script copies) |
-| 4 | `/etc/vaultwarden/` (EnvironmentFile and directory) |
-| 5 | `/var/lib/vaultwarden/` (database, logs, Caddy state) |
-| 6 | Project clone directory (`~/VaultWarden-OCI/`, including secrets and Age key) |
-| 7 | `/var/lock/vaultwarden-setup.lock` |
-| 8 | `/usr/local/bin/sops` |
-| 9 | Docker CE packages, APT repo, GPG key, `/var/lib/docker`, `/var/lib/containerd`, `/etc/docker` |
-| 10 | Extra packages installed by `setup.sh`: `age`, `haveged`, `rclone`, `python3-argon2` |
-| 11 | UFW rules for ports 80 and 443 (Cloudflare-CIDR rules included; SSH rules preserved) |
-| 12 | `/swapfile` and associated `/etc/fstab` + `sysctl.conf` entries |
-| 13 | `/etc/apt/sources.list.d/ubuntu-universe.list` if created by `setup.sh` |
-| 14 | Removes the real user from the `docker` group; removes the empty `docker` group |
-
-**What it preserves (intentionally left untouched):**
-
-- SSH UFW rules
-- Common system tools: `curl`, `wget`, `git`, `jq`, `sqlite3`, `ufw`, `gpg`, `rsync`, `python3`
-- `/etc/ssh/sshd_config` — no SSH configuration is modified
-
-**Confirmation prompt:**
-
-The script requires typing `UNINSTALL` (all caps) at an interactive prompt before any changes are made. It cannot be piped or automated — a direct terminal session is required.
-
-```bash
-# Safe — aborts if not run as root
-sudo bash ~/VaultWarden-OCI/utilities/uninstall-vaultwarden.sh run
-
-# The script will print a summary of what it will remove, then prompt:
-# Type 'UNINSTALL' to confirm, or anything else to abort:
-```
-
-```bash
-make uninstall-dry-run   # Preview what would be removed (no changes)
-make uninstall           # Full uninstall (requires interactive TTY + 'yes' confirmation)
-```
-
-> **No Makefile target exists for uninstall via direct script** by design — the extra friction of running the script directly is intentional for a destructive operation.
-
----
-
-### 11. `utilities/setup-storage.sh` — migrate mode
-**Purpose:** Interactive pipeline that migrates VaultWarden data between the boot disk and a dedicated block volume or directory target (and back).
-
-```bash
-sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh migrate [OPTIONS]
-```
-
-#### `--direction` flag
-
-| Value | Description |
-| :-- | :-- |
-| `boot-to-block` | **(default)** Move data from the boot disk to a dedicated block volume. The block volume is formatted, mounted, and data is rsync'd. Source data on the boot disk is deleted after confirmation. |
-| `block-to-boot` | Reverse migration — move data from a dedicated block volume back to the boot disk. Only volumes bearing the VaultWarden sentinel file (`.vw-data-volume`) are shown in the device picker. |
-
-#### Examples
-
-```bash
-# Forward migration (boot → block volume) — direction defaults to boot-to-block
-sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh migrate
-
-# Explicit forward migration
-sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh migrate --direction boot-to-block
-
-# Reverse migration (block volume → boot disk)
-sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh migrate --direction block-to-boot
-```
-
-> See `docs/VOLUME-MIGRATION.md` for the complete migration runbook, including resume instructions.
-
----
-
-## 🏗️ Makefile Reference
-
-All common operations have Makefile shortcuts. Run `make help` for the normal admin/day-2 set and `make help-all` for the full target list.
-
-### Complete Target Table
-
-| Target | Equivalent command | Notes |
-| :-- | :-- | :-- |
-| `make help` | — | Print normal admin/day-2 targets |
-| `make help-all` | — | Print all targets with descriptions, including dashboard/API, advanced, developer/test, and legacy commands |
-| `sudo ./setup.sh install --domain <domain> --email <email>` | `sudo ./setup.sh install --domain <domain> --email <email>` | Supported first-install command |
-| `sudo make init-secrets` | `sudo ./setup.sh secrets` | Interactive secrets initialisation |
-| `sudo make edit-secrets` | `./utilities/secrets-edit.sh` | Open SOPS secrets editor |
-| `sudo make test-secrets` | `./utilities/secrets-list.sh` | Verify secrets decrypt correctly |
-| `sudo make test-email` | `sudo ./maintenance.sh test-email` | Test the Postfix-backed operational alert channel |
-| `sudo make up` / `sudo make start` | `./startup.sh` | Start all services |
-| `sudo make down` / `sudo make stop` | `./startup.sh stop` | Graceful shutdown |
-| `sudo make restart` | `./startup.sh --force` | Force restart all services |
-| `sudo make safe-restart` | `sudo make safe-restart` | Restarts without pulling and restores the captured Compose model/image IDs on failure |
-| `sudo make status` | `docker compose ps` | Show service status and backup inventory |
-| `make operations` | `sudo utilities/operations-status.sh` | Show active or interrupted VaultWarden operations |
-| `sudo make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true` passes `--fix`) |
-| `sudo make health-quick` | `./maintenance.sh health --quiet` | Quick health check — concise output, non-zero exit on failure |
-| `sudo make health-report` | `./maintenance.sh health --report` | Health check that writes a timestamped report file |
-| `sudo make health-email` | alias for `sudo make test-email` | Send a test operational alert email |
-| `sudo make logs` | `docker compose logs -f $(SERVICE)` | follows logs for one service |
-| `sudo make logs-tail` | `docker compose logs --tail=100` | last 100 lines, non-following |
-| `sudo make logs-vaultwarden` | `docker compose logs -f vaultwarden` | Tail VaultWarden application logs |
-| `sudo make logs-caddy` | `docker compose logs -f caddy` | Tail Caddy reverse-proxy logs |
-| `sudo make logs-postfix` | `docker compose logs -f postfix` | Postfix email logs shortcut |
-| `sudo make logs-crowdsec` | `sudo journalctl -u crowdsec -f` | Tail CrowdSec threat detection logs |
-| `sudo make backup` | `./backup.sh run db` | DB snapshot backup |
-| `make backup-full` | `./backup.sh run full` | Full system backup |
-| `make backup-emergency` | `./backup.sh run emergency` | Emergency backup (same archive contents as full; excludes `secrets/` and Age key) |
-| `sudo make list-backups` | `./backup.sh list` | List all available backups with metadata |
-| `sudo make backup-status` | `./backup.sh list` | Backup inventory |
-| `sudo make restore` | `./restore.sh interactive` | Interactive restore (recommended) |
-| `sudo make restore-db` | `./restore.sh latest db` | Restore latest database backup (runs key prompt + confirmation) |
-| `sudo make restore-remote` | `./restore.sh interactive --remote` | Restore from a remote (rclone) backup — interactive selection |
-| `make update` | `sudo ./maintenance.sh update --all` | Full update (containers + system packages) |
-| `make update-system` | `sudo ./maintenance.sh update --system` | Update host OS packages only |
-| `make maintenance` | `sudo ./maintenance.sh run` | Routine maintenance run |
-| `make maintenance-full` | `sudo ./maintenance.sh run --comprehensive` | Comprehensive maintenance run |
-| `make update-dns` | `sudo ./maintenance.sh update-dns` | Update Cloudflare DNS A record |
-| `make db-maint` | `sudo ./maintenance.sh db-maint` | Deep DB VACUUM (stops VaultWarden; confirms before running) |
-| `sudo make db-backup` | `./backup.sh run db` | DB snapshot backup |
-| `sudo make key-rotate` | `lib/crypto.sh rotate_age_key` | Rotate the Age encryption key (generates new key, updates all locations) |
-| `sudo make key-show` | — | Show current Age public key and key file path/status |
-| `sudo make key-health` | `lib/crypto.sh check_age_key_health` | Check Age key health (permissions, decodability) |
-| `sudo make breakglass-create` | `sudo utilities/setup-secrets.sh breakglass create` | Create emergency OS admin account |
-| `sudo make breakglass-status` | `sudo utilities/setup-secrets.sh breakglass status` | Show break-glass admin status |
-| `sudo make breakglass-remove` | `sudo utilities/setup-secrets.sh breakglass remove` | Remove break-glass admin account |
-| `sudo make install-systemd` | `sudo ./setup.sh systemd install` | Install systemd units and sync scripts to `/opt` |
-| `sudo make remove-systemd` | `sudo ./setup.sh systemd remove` | Remove all vaultwarden systemd timer units |
-| `sudo make systemd-status` | `sudo ./setup.sh systemd status` | Show status of all vaultwarden systemd units |
-| `sudo make systemd-validate` | `sudo ./setup.sh systemd validate` | Validate installed units match current repo scripts |
-| `make timers` | `systemctl list-timers` | Show all vaultwarden timers (next trigger + last run + `.env` schedule) |
-| `make uninstall-dry-run` | `sudo utilities/uninstall-vaultwarden.sh run --dry-run` | Preview what uninstall would remove (no changes) |
-| `make uninstall` | `sudo utilities/uninstall-vaultwarden.sh run` | Full uninstall — removes containers, data, systemd units (DESTRUCTIVE) |
-| `make dev-setup` | Copy `.env.example` and override template | Prepare local development environment |
-| `./tests/run-tests.sh all` | explicit tests inventory | Run the consolidated shell regression suite |
-| `make test-config` | `docker compose config > /dev/null` | Validate merged Docker Compose config (exits non-zero on error) |
-| `make dry-run` | `./startup.sh --dry-run` | Preview startup without executing |
-| `make clean` | `rm -f setup.log` | Remove generated setup log |
-| `make clean-all` | `rm -f setup.log` | Remove generated setup log after confirmation |
-| `sudo make prune` | `docker system prune -f` | Remove unused Docker resources only |
-| `make diagnose` | — | Full diagnostic dump: versions, key status, disk, containers, last backup, recent logs |
-| `make info` | — | Show domain, email, project state dir, service status, disk usage |
-| `make shell` | `docker compose exec [SERVICE] sh` | Open shell in a container (default: `vaultwarden`; pass `SERVICE=caddy`) |
-| `make version` | — | Show version info for all containers and Docker |
-| `make watch` | `watch -n 5 make status` | Auto-refresh service status every 5 s |
-| `make monitor` | `docker compose logs -f -t` | Follow all service logs in real-time |
-| `make config` | — | Show non-sensitive `.env` variables and service list |
-
-> **`make test-config`** is the quickest pre-deployment sanity check. It runs `docker compose config` against the merged Compose files and exits non-zero if the configuration is invalid — useful before `make up` or after editing any `.yml` file.
-
-> **`make logs SERVICE=name`** filters output to a single service. Example: `make logs SERVICE=postfix` follows Postfix logs in real-time.
-
----
-
-## 📚 Utility Libraries
-
-All libraries live in `lib/` and are sourced at the top of every script. At install time, `setup.sh systemd` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
-
-### `lib/common.sh`
-Core functions used by every script.
-Legacy `setup.sh`-private validators (`validate_domain_secure` / `validate_email_secure`) were removed; callers use these canonical validators directly.
-
-| Function | Description |
-| :-- | :-- |
-| `init_common_lib "$0"` | Initialise library with script context |
-| `log_info/success/warn/error` | Colour-coded logging |
-| `require_commands` | Assert required binaries are present |
-| `get_config_value KEY DEFAULT` | Read a variable from `.env` |
-| `load_env_file` | Source `.env` into the environment |
-| `get_real_user` | Resolve actual user even under `sudo` |
-| `_maybe_sudo` | TTY-aware privilege escalation helper for root-required commands |
-| `ensure_dir PATH MODE` | Create directory with permissions |
-| `retry_with_backoff N DELAY CMD` | Retry with exponential backoff |
-| `validate_domain DOMAIN` | Domain validator with RFC 1035 total-length cap (253) and bare-IPv4 rejection |
-| `validate_email EMAIL` | Email validator with RFC 5321 total-length cap (254) and stricter character-class regex |
-| `validate_port PORT` | Port range validator |
-
-### `lib/docker.sh`
-Docker and Docker Compose helpers.
-
-| Function | Description |
-| :-- | :-- |
-| `require_docker` | Verify Docker daemon is accessible |
-| `is_service_running NAME` | Check if a Compose service is running |
-| `wait_for_service NAME TIMEOUT` | Poll until service is healthy |
-| `stop_service / start_service` | Service lifecycle helpers |
-| `get_container_status` | Detailed container status |
-| `docker_cleanup` | Remove unused containers, images, volumes |
-
-### `lib/crypto.sh`
-Encryption, decryption, key management, security validation, and key resilience. *(Merged from the former `lib/security.sh`.)*
-
-| Function | Description |
-| :-- | :-- |
-| `generate_age_key PATH` | Generate an Age identity key |
-| `get_age_public_key PATH` | Extract the Age public key |
-| `encrypt_data / decrypt_data` | Age encrypt / decrypt |
-| `encrypt_sops_file / decrypt_sops_file` | SOPS file operations — temp file created at mode 600 before any data is written |
-| `generate_secure_string N` | Cryptographically secure random string |
-| `calculate_sha256 FILE` | SHA-256 checksum |
-| `secure_file PATH` | Set restrictive permissions on a file |
-| `check_age_key PATH` | Validate Age key file (used by health check) — **fail-closed**: returns 1 if temp file cannot be created for round-trip test |
-| `generate_bcrypt_hash PASSWORD ROUNDS` | bcrypt hash via `htpasswd`; cost factor validated to [10–31] |
-| `rotate_age_key` | Generate a new Age key, re-encrypt all secrets, and update all references |
-| `validate_file_permissions PATH MODE OWNER GROUP` | Assert file permissions *(from security.sh)* |
-| `validate_directory_permissions PATH` | Recursive directory validation *(from security.sh)* |
-| `create_secure_file PATH CONTENT MODE OWNER GROUP` | Atomic secure file creation *(from security.sh)* |
-| `secure_cleanup PATH` | Multi-pass secure deletion *(from security.sh)* |
-| `validate_password_strength PASSWORD` | Password strength check *(from security.sh)* |
-| `generate_secure_random N` | Cryptographically secure random bytes *(from security.sh)* |
-| `check_age_key_health` | Public entry-point for Age key health checks (called by `startup.sh`, `maintenance.sh`, and `make key-health`). Validates file existence, auto-fixes permissions, performs an encrypt/decrypt roundtrip, and verifies `.sops.yaml` recipient alignment *(from `lib/crypto.sh`)* |
-| `create_password_manager_escrow OUTPUT_FILE` | Writes formatted plain-text escrow document for password manager storage *(from `lib/crypto.sh`)* |
-| `create_printable_key_backup [OUTPUT_PDF]` | Generates printable PDF or HTML paper backup with Age key + optional QR code *(from `lib/crypto.sh`)* |
-
-### `lib/backup-utils.sh`
-Backup-specific helpers.
-
-| Function | Description |
-| :-- | :-- |
-| `check_backup_disk_space DIR MIN_MB` | Verify available disk space |
-| `list_backups DIR` | List backups with metadata |
-| `get_backup_metadata FILE` | Extract metadata from a backup file |
-| `verify_backup_integrity FILE` | Verify backup integrity using SQLite Online Backup API snapshot (not `cp`) — consistent even under concurrent VaultWarden writes |
-| `cleanup_old_backups DIR TYPE DAYS` | Remove old backups per retention — age derived from filename timestamp (`YYYYMMDD-HHMMSS`), not filesystem `ctime` |
-| `format_backup_size BYTES` | Human-readable size formatting |
-
-### `lib/secrets.sh`
-Secrets collection, generation, hashing, validation, and recovery kit export. Used by `sudo ./setup.sh secrets` and `utilities/secrets-edit.sh`.
-
-| Function | Description |
-| :-- | :-- |
-| `get_secret KEY [FILE]` | **Public API** — decrypt and return a single secret value by key name. Canonical call pattern for all consuming scripts: `local val; val=$(get_secret smtp_password) \|\| return 1`. Never pass the result directly as a positional argument to an external command (value appears in `/proc/$$/cmdline`). Thin wrapper over `decrypt_secret` with identical security guarantees. |
-| `decrypt_secret KEY [FILE]` | Low-level single-key decrypt via `sops --extract`. Unsets `SOPS_AGE_KEY_FILE` immediately after the sops call. Prefer `get_secret` in new call sites — `decrypt_secret` remains available for internal library use. |
-| `collect_secret_field FIELD` | Interactive prompt, hash, and validate a single secret field — plaintext displayed via `/dev/tty` only, never stderr |
-| `auto_generate_secret_field FIELD` | Non-interactive generation or CHANGE_ME placeholder per field — plaintext routed to `/dev/tty` only |
-| `ensure_sops_env` | Set `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` for sops calls |
-| `cleanup_secrets_environment` | Unset `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` — call after all sops operations complete |
-| `write_secret_file DEST VALUE` | Write secret to file with umask 077 guard — file is born at mode 600, no world-readable window |
-| `secrets_file_exists` | Check whether `$SECRETS_FILE` (default: `secrets/secrets.yaml`) is present |
-| `validate_secrets_decryption` | Assert the secrets file can be decrypted |
-| `validate_required_secrets` | Assert all required keys are present and non-empty |
-| `check_placeholder_values` | Detect any remaining CHANGE_ME / PLACEHOLDER values |
-| `list_secret_keys` | Print all key names — decrypts key structure only via python3/yaml; secret values never transit the pipeline |
-| `generate_admin_token [LENGTH]` | Generate admin token using `pipefail` subshell; validates minimum 32-char length |
-| `create_secrets_backup` | Timestamped backup of the encrypted secrets file — created atomically at mode 600 via `install -m 600` |
-| `generate_recovery_kit FILE` | Write a full plaintext recovery document — extracts secrets one key at a time via `sops --extract`, never materialises full plaintext JSON |
-| `offer_recovery_kit_export` | Interactive or auto prompt to export a recovery kit to tmpfs |
-| `export_docker_secrets DOCKER_DIR [SECRETS_FILE]` | Decrypt schema-managed secrets, write active values into DOCKER_DIR (mode 444), and remove inactive/stale managed runtime files without touching unknown operator files. Push placeholders are prepared separately. Sanity-checks output files for raw `ENC[` ciphertext and fails loudly if detected. |
-
-### `lib/storage.sh`
-Storage and state-path lifecycle helpers (boot-volume + separate-volume) plus Caddy log permission enforcement.
-
-| Function | Description |
-| :-- | :-- |
-| `require_project_state_ready` | Fail-closed storage readiness gate before operational scripts run |
-| `setup_data_volume` | Provision, mount, and guard a dedicated data volume in separate-volume mode. Existing ext4/xfs filesystems require confirmation; blank devices require `DATA_VOLUME_FORCE_FORMAT=true`. |
-| `install_docker_mount_guard` | Install/remove docker.service mount dependency drop-in |
-| `vw_default_backup_dir` | Derive backup base path from `PROJECT_STATE_DIR` |
-| `ensure_caddy_log_permissions` | Enforce root:root 755/644 ownership/mode on Caddy log dir and files |
-
-### `lib/email.sh`
-Email delivery helpers (provider routing, SMTP/API sending, notifications, and alert rate limiting).
-
----
-
-## 🏗️ Script Design Patterns
-
-### Standardised Error Handling
-
-```bash
-function_name() {
-    # perform operation
-    return 0  # success
-    return 1  # failure
-}
-
-main() {
-    if ! function_name; then
-        log_error "Operation failed"
-        exit 1
-    fi
-    exit 0
-}
-```
-
-### Trap-Based Cleanup
-
-```bash
-# Safe: arguments serialised with a unit-separator; no eval needed.
-_CLEANUP_SEP=$'\x1f'
-
-register_cleanup() {
-    local serialised="" sep="" arg
-    for arg in "$@"; do serialised+="${sep}${arg}"; sep="$_CLEANUP_SEP"; done
-    CLEANUP_ACTIONS+=("$serialised")
-}
-
-perform_cleanup() {
-    local idx action_args=()
-    for (( idx = ${#CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx-- )); do
-        IFS="$_CLEANUP_SEP" read -r -a action_args <<< "${CLEANUP_ACTIONS[$idx]}"
-        [[ ${#action_args[@]} -gt 0 ]] && "${action_args[@]}" || true
-    done
-}
-
-CLEANUP_ACTIONS=()
-trap perform_cleanup EXIT
-```
-
-### Library Integration
-
-```bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
-cd "$PROJECT_ROOT"
-
-source "lib/common.sh"
-init_common_lib "$0"
-source "lib/docker.sh"
-source "lib/crypto.sh"
-# … additional libraries as needed
-```
-
-### Operation Guards
-
-Mutating operator workflows coordinate through the shared operation guard in
-`lib/operations.sh`. The canonical global lock is
-`/run/lock/vaultwarden-operations.lock`; workflows such as startup/stop/restart,
-backup, restore, setup, env sync/edit, secrets mutation, systemd install/remove,
-CrowdSec setup, maintenance, updates, key rotation, and uninstall also use
-operation-specific `flock` locks where duplicate copies are unsafe.
-
-Lock ownership is determined by `flock`, not by the lock file merely existing
-on disk. `sudo make operations` attributes a global owner only when matching
-owner metadata is verifiable; if the flock is held without verified global-owner
-metadata, stop and force actions are not offered. Do not delete lock files to
-bypass a running operation. Check the current owner and phase with:
-
-```bash
+sudo make up
+sudo make restart
+sudo make health
+sudo make backup
+sudo make restore
 sudo make operations
 ```
 
-If an SSH session disconnects during a long-running operation, run
-`sudo make operations`. If the original operation is still active, inspect its
-phase and wait or use the guarded stop flow when offered. VaultWarden-OCI does
-not automatically kill `apt`, `dpkg`, or repository-helper package work.
-Expected non-interactive contention may exit `75` as a clean skip. If the
-original operation is no longer active, rerun the original command without
-adding `--force` unless that workflow specifically needs a reset; the workflow
-will inspect current state and reconcile completed work.
+## Dispatcher ownership
 
----
+### `setup.sh`
 
-## ✅ Best Practices
+Owns the supported setup flow and delegates to:
 
-### Script Execution
-1. **Run from project root** — all scripts resolve paths relative to `SCRIPT_DIR`
-2. **Use `sudo` where required** — `setup.sh`, `utilities/setup-secrets.sh breakglass`, `maintenance.sh db-maint`, and direct `backup.sh` calls in production
-3. **Check `--help` first** — every script supports `--help`
-4. **Use `--dry-run`** — preview any operation before applying
+- `utilities/setup-system.sh` — Noble/architecture preflight, Docker/tool dependencies, swap/toolchain validation;
+- `utilities/setup-env.sh` — deployment file/environment generation;
+- `utilities/setup-storage.sh` — storage setup, verification, and migration dispatch;
+- `utilities/setup-firewall.sh` — supported host firewall setup;
+- `utilities/setup-secrets.sh` — SOPS/Age secret bootstrap/configuration;
+- `utilities/setup-crowdsec.sh` — CrowdSec and bouncer installation;
+- `utilities/setup-systemd.sh` — installed runtime and timer integration.
 
-### Makefile Usage
-1. **Prefer Makefile shortcuts** — they handle quoting and flags consistently
-2. **Run `make help`** for normal admin commands or `make help-all` for every target
-3. **Use `make test-config`** to validate docker-compose config before deployment
+Supported first install:
 
-### Security
-1. **Never hardcode secrets in `.env`** — use `./edit-secrets.sh` for all sensitive values
-2. **Review generated files** — inspect `docker-compose.yml` and `.env` after `setup.sh`
-3. **Scripts auto-clean temp files** — sensitive temp files are shredded on exit
-4. **All admin actions are logged** — check `journalctl -u vw-*` for systemd job output
-5. **Re-run `setup.sh systemd install` after repo updates** — keeps `/opt/` scripts in sync with the git repo
+```bash
+sudo ./setup.sh install \
+  --domain vault.example.com \
+  --email admin@example.com
+```
 
-### Operational Excellence
-1. **Install systemd timers** — `sudo ./setup.sh systemd install` for hands-off operation
-2. **Monitor regularly** — `make health` or rely on the every-5-min timer check
-3. **Test backups** — periodically run `./restore.sh interactive` to verify recoverability
-4. **Validate after updates** — `sudo ./setup.sh systemd validate` detects split-brain between `/opt/` and the repo
+`setup-system.sh` fails closed outside Ubuntu 24.04 LTS Noble and outside amd64/arm64.
+
+### `startup.sh`
+
+Owns foreground production lifecycle. Startup:
+
+1. acquires the shared global/lifecycle operation guard;
+2. synchronizes the environment inside the lifecycle operation;
+3. validates storage readiness;
+4. decrypts SOPS state and materializes transient runtime secrets under `/run/vaultwarden-oci/secrets`;
+5. reconciles the Compose stack;
+6. performs post-start DNS/health behavior required by the current implementation.
+
+Use the root-operated Make targets rather than calling bare `docker compose up` as the production lifecycle API:
+
+```bash
+sudo make up
+sudo make down
+sudo make restart
+sudo make safe-restart
+```
+
+### `maintenance.sh`
+
+Delegates to the maintenance utilities:
+
+- `maintenance-health.sh`;
+- `maintenance-run.sh`;
+- `maintenance-update.sh`;
+- `maintenance-update-dns.sh`;
+- `maintenance-update-firewall.sh`;
+- `maintenance-db-maint.sh`;
+- `maintenance-email.sh`.
+
+The health path is read-only unless repair/fix behavior is requested. Mutating health repair uses the shared operation guard.
+
+The aggregate maintenance path understands exit `75` as an expected active-operation skip for the guarded DNS/firewall leaves. A real nonzero leaf failure remains a maintenance failure.
+
+### `backup.sh`
+
+Delegates backup work to `utilities/backup-run.sh` and shared backup logic in `lib/backup-utils.sh`.
+
+The three backup tiers are intentionally different:
+
+| Tier | Contract |
+| :-- | :-- |
+| `db` | encrypted verified SQLite snapshot for quick rollback |
+| `full` | normal DR archive with persistent project state and encrypted SOPS ciphertext, but without the live operational Age private key |
+| `emergency` | clone-grade secrets-bearing capsule that may include staged `/etc/vaultwarden` key/config material and is independently sealed |
+
+All tiers use a verified SQLite snapshot. Full/emergency archive construction excludes live SQLite WAL/SHM state and transient runtime material, then injects the verified staged database at the normal live database path.
+
+Retention logic preserves the newest parseable timestamped archive even when it is older than the configured retention window. Unparseable archive names fail safe and are not automatically deleted as primary archives.
+
+Quick/full verification failure is not successful backup completion. A new archive that fails required verification is not left eligible as a normal restore candidate and must not trigger normal retention/success behavior.
+
+See [BACKUP-RESTORE.md](BACKUP-RESTORE.md).
+
+### `restore.sh`
+
+Delegates restore execution to `utilities/restore-run.sh`.
+
+Restore supports the three backup tiers and preserves the distinctions between:
+
+- archive selection;
+- storage preflight;
+- Age identity selection;
+- emergency independent protection;
+- pre-restore snapshot;
+- service stop;
+- staged extraction/promotion;
+- runtime permission repair;
+- Age key handling/rotation;
+- service start policy;
+- `/alive` verification.
+
+Interactive full/emergency restore uses an operator-controlled start policy. Timeout/EOF at required confirmation or `SAVED` acknowledgement points fails safe rather than being converted into an implicit answer.
+
+### `edit-secrets.sh`
+
+Routes secret operations to the focused utilities:
+
+- `utilities/secrets-edit.sh` — decrypt/edit/validate/re-encrypt;
+- `utilities/secrets-rotate.sh` — schema-aware field rotation and apply behavior;
+- `utilities/secrets-list.sh` — key names only;
+- `utilities/secrets-view.sh` — read-only decrypted view;
+- `utilities/secrets-export-recovery-kit.sh` — recovery document export.
+
+Mutating secret paths are root-operated and guarded.
+
+`secrets-schema.yaml` is the key/transform/apply source of truth. See [SECRETS-SCHEMA.md](SECRETS-SCHEMA.md).
+
+### `recover.sh`
+
+`recover.sh` is the state-volume replacement-host recovery path, not an ordinary backup restore wrapper.
+
+It requires:
+
+- a recovered state directory;
+- the offline Age private identity that matches the manifest/policy;
+- the exact repository commit recorded by the recovery manifest.
+
+Recovery stages ciphertext, a replacement operational Age key, SOPS policy, persistent environment, DR manifest, and required sentinel state under one local pre-commit rollback boundary. After the recovery identity/config commits, startup or `/alive` failure remains non-zero but does not revert the committed recovery artifacts.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) and [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
+
+## Environment utility
+
+### `utilities/env-edit.sh`
+
+The operator-editable non-secret environment is repository `.env`.
+
+Normal workflow:
+
+```bash
+sudo make edit-env
+sudo make sync-env
+utilities/env-edit.sh status
+```
+
+`sync` writes the current accepted operator environment into persistent runtime configuration. `setup-systemd.sh install` installs the current accepted environment into `/etc/vaultwarden/vaultwarden.env` for managed automation.
+
+Runtime environment loading prefers the installed environment when present, then persistent `install.env`, then repository `.env` as bootstrap/legacy fallback.
+
+## Storage utility
+
+### `utilities/setup-storage.sh`
+
+Modes:
+
+```bash
+sudo utilities/setup-storage.sh setup
+sudo utilities/setup-storage.sh verify
+sudo utilities/setup-storage.sh migrate <subcommand>
+```
+
+`setup` provisions/validates the state layout and optional attached volume.
+
+`verify` is read-only and checks known storage/permission contracts.
+
+`migrate` routes to `lib/migrate.sh`, which owns resumable boot-to-block/block-to-boot or directory-to-directory migration behavior.
+
+Important migration controls include explicit formatting authorization, the `.vw-data-volume` sentinel, persistent migration state, resume/abort/verify subcommands, and service start policy.
+
+See [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md).
+
+## Systemd utility
+
+### `utilities/setup-systemd.sh`
+
+Actions:
+
+```bash
+sudo utilities/setup-systemd.sh install
+sudo utilities/setup-systemd.sh validate
+sudo utilities/setup-systemd.sh status
+sudo utilities/setup-systemd.sh remove
+```
+
+Installed runtime lives under:
+
+```text
+/opt/vaultwarden-scripts/
+/etc/vaultwarden/
+/etc/systemd/system/
+```
+
+`install` enables managed timers and starts them only according to the requested start policy.
+
+Use:
+
+```bash
+sudo utilities/setup-systemd.sh install --enable-now
+```
+
+only when the host is ready for scheduled jobs.
+
+Use:
+
+```bash
+sudo utilities/setup-systemd.sh install --no-enable-now
+```
+
+for recovery/manual-inspection hosts that are not ready to run scheduled backup/maintenance work immediately.
+
+`validate` checks installed scripts, libraries, units, rendered startup service, required environment/key permissions, and managed timer readiness. Run install + validate after managed repository code changes.
+
+## CrowdSec utilities
+
+### `utilities/setup-crowdsec.sh`
+
+Owns CrowdSec, the host firewall bouncer, and the Cloudflare Workers bouncer installation/reconciliation path.
+
+### `utilities/crowdsec-worker-apply.sh`
+
+Re-renders/applies the Workers bouncer configuration from the current SOPS secret values. Use after rotating the bouncer token/account/zone values when the schema apply path directs that operation.
+
+### `utilities/maintenance-update-firewall.sh`
+
+Refreshes Cloudflare ingress ranges in the supported host firewall path. Operation contention is exit `75` where the caller/systemd contract treats active-operation overlap as a clean skip.
+
+### `utilities/maintenance-update-dns.sh`
+
+Updates the Cloudflare DNS A record from the current public IP. It also preserves the expected exit `75` contention contract.
+
+See [CROWDSEC.md](CROWDSEC.md).
+
+## Permission repair
+
+### `utilities/repair-permissions.sh`
+
+Normal repair:
+
+```bash
+sudo utilities/repair-permissions.sh
+```
+
+Read-only check:
+
+```bash
+sudo utilities/repair-permissions.sh --check
+```
+
+The helper applies explicit known-path contracts. It is not a broad `chmod -R`/`chown -R` wrapper for the entire project state.
+
+See [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md).
+
+## Production-readiness utilities
+
+### `utilities/smoke-test.sh`
+
+Runs the live production readiness checks. Exit `0` requires no failed and no skipped checks.
+
+The systemd portion delegates to the canonical installed-runtime validator instead of maintaining another timer/unit inventory.
+
+### `utilities/pre-production-drill.sh`
+
+Runs the repository's non-destructive pre-production rehearsal. Explicit skip flags are the normal source of skipped drill steps; required restore rehearsal prerequisites must not silently become a passing drill.
+
+The drill uses the canonical backup verifier for latest-backup selection rather than independently naming one archive and verifying another.
+
+## Uninstall/test reset
+
+### `utilities/uninstall-vaultwarden.sh`
+
+Owns project teardown and same-VM test reset.
+
+Use a dry run before destructive teardown:
+
+```bash
+sudo ./utilities/uninstall-vaultwarden.sh run --dry-run
+```
+
+For repeated setup/restore acceptance testing while preserving the Git checkout:
+
+```bash
+sudo ./utilities/uninstall-vaultwarden.sh run \
+  --test-reset \
+  --i-have-saved-my-recovery-kit
+```
+
+The uninstall verifies known managed residuals and fails instead of reporting success when a managed stack artifact remains.
+
+## Shared libraries
+
+| Library | Primary ownership |
+| :-- | :-- |
+| `lib/log.sh` | logging/output helpers |
+| `lib/defaults.sh` | canonical project defaults and critical service policy |
+| `lib/config.sh` | environment loading, paths, configuration resolution |
+| `lib/common.sh` | shared shell/system helpers |
+| `lib/operations.sh` | global/specific `flock` operation guard and operator metadata |
+| `lib/docker.sh` | Docker/Compose helpers |
+| `lib/crypto.sh` | SOPS/Age, hashing, key health/rotation support |
+| `lib/schema.sh` | `secrets-schema.yaml` accessors/validation |
+| `lib/secrets.sh` | SOPS secret decrypt/materialization helpers |
+| `lib/backup-utils.sh` | backup verification, metadata, retention, rclone config validation |
+| `lib/storage.sh` | storage readiness, device/mount/sentinel safety |
+| `lib/migrate.sh` | resumable storage migration pipeline |
+| `lib/runtime-permissions.sh` | post-restore runtime permission repair |
+| `lib/email.sh` | operational email provider/SMTP chain |
+| `lib/maintenance-utils.sh` | shared maintenance helpers |
+| `lib/crowdsec-worker.sh` | CrowdSec Workers configuration/application helpers |
+| `lib/validate.sh` | shared validation helpers |
+
+When changing a library contract, trace every public caller, systemd-installed caller, and test that sources it.
+
+## Tests and CI ownership
+
+The canonical permanent Bash test entry point is:
+
+```bash
+./tests/run-tests.sh all
+```
+
+`tests/run-tests.sh` owns the permanent `tests/test-*.sh` inventory and fails when a permanent test is unlisted or listed twice.
+
+GitHub Actions calls the runner directly. The Makefile and workflow YAML must not maintain a second permanent test-file inventory.
+
+Strict ShellCheck remains an independent CI check.
+
+## Generated command reference
+
+[COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) is generated by:
+
+```bash
+bash utilities/write-command-reference.sh
+```
+
+The pull-request documentation workflow regenerates it and fails when the committed copy is stale.
+
+Do not hand-edit the generated reference. Change the owning script help text, then regenerate the document.
