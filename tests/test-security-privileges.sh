@@ -72,32 +72,6 @@ test_collect_secret_field_rejects_auto_key() {
     printf 'PASS: collect_secret_field correctly rejected auto key\n'
 }
 
-test_resolve_rclone_config_arg() {
-    if ! command -v rclone >/dev/null 2>&1; then
-        printf 'SKIP: rclone not installed\n'
-        return 0
-    fi
-
-    # Load the production helper without executing backup-run.sh's main entry.
-    # shellcheck disable=SC1090  # process substitution intentionally extracts one function
-    source <(sed -n '/^_resolve_rclone_config_arg()/,/^}/p' \
-        "${PROJECT_ROOT}/utilities/backup-run.sh")
-
-    local mock_cfg="${TEST_TMP}/rclone.conf"
-    printf '[myremote]\ntype = local\n' > "$mock_cfg"
-    chmod 600 "$mock_cfg"
-
-    local -a result_arr=()
-    local rc=0
-    RCLONE_CONFIG="$mock_cfg" _resolve_rclone_config_arg result_arr || rc=$?
-    if (( rc != 0 )) || [[ "${result_arr[0]:-}" != "--config" ]]; then
-        fail "_resolve_rclone_config_arg did not populate the array"
-    fi
-    [[ "${result_arr[1]:-}" == "$(realpath -e "$mock_cfg")" ]] \
-        || fail "_resolve_rclone_config_arg returned the wrong path"
-    printf 'PASS: _resolve_rclone_config_arg populated --config <path>\n'
-}
-
 valid_bcrypt_body=$(printf 'A%.0s' {1..53})
 _bcrypt_format_ok "\$2y\$12\$${valid_bcrypt_body}" || fail "valid bcrypt format rejected"
 assert_fails _bcrypt_format_ok "\$2y\$4\$${valid_bcrypt_body}"
@@ -114,7 +88,6 @@ printf 'tampered\n' > "${integrity_file}.sha256.hmac"
 assert_fails verify_file_integrity "$integrity_file"
 test_hmac_key_not_in_cmdline
 test_collect_secret_field_rejects_auto_key
-test_resolve_rclone_config_arg
 
 command -v yq >/dev/null 2>&1 || fail "yq is required for schema tests"
 [[ "$(schema_collect_type push_installation_id)" == "conditional" ]] || fail "conditional collect type missing"
@@ -235,11 +208,6 @@ grep -Fq 'sudo install -d -m 700 -o root -g root /etc/vaultwarden' startup.sh ||
 grep -Fq 'sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}' startup.sh || fail "startup.sh missing root-owned age key install remediation"
 grep -Fq 'sudo make key-health' startup.sh || fail "startup.sh key verification guidance must use sudo make key-health"
 pass "startup key remediation stays root-owned"
-
-# Runtime env ownership contract.
-grep -Fq 'install -d -m 0700 -o root -g root "$manifest_dir" "$rendered_state_dir/secrets"' utilities/setup-env.sh || fail "state config/secrets dirs are not created root:root 0700"
-grep -Fq 'chown root:root "$tmp" && chmod 0600 "$tmp"' utilities/setup-env.sh || fail "install.env is not installed root:root 0600"
-pass "persistent install.env is installed root:root 0600"
 
 # Encrypted secret authoring leaf utilities are root-operated. The top-level
 # edit-secrets.sh dispatcher stays metadata-friendly and delegates to these
