@@ -1,376 +1,437 @@
 # Volume Migration Guide — VaultWarden-OCI
 
-Reference guide for `utilities/setup-storage.sh migrate` — the interactive tool for moving Vaultwarden data between storage volumes (boot volume ↔ block volume, or directory to directory).
+Reference for `utilities/setup-storage.sh migrate`, the guarded migration workflow for moving current VaultWarden-OCI state between boot storage, attached block/data volumes, or directories.
+
+Do not replace this workflow with manual `cp -r` plus `.env` edits for a current production deployment. The migration utility owns storage identity, resumable state, verification, environment reconciliation, and service start policy.
+
+Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [OPERATIONS.md](OPERATIONS.md) · [BACKUP-RESTORE.md](BACKUP-RESTORE.md)
+
+## Supported migration shapes
+
+- boot volume → dedicated block/data volume;
+- one data volume → another data volume;
+- block/data volume → boot volume;
+- directory → directory with no formatting step.
+
+The default direction is `boot-to-block`. Reverse migration has an explicit `block-to-boot` direction.
+
+## Safety model
+
+The migration path:
+
+- requires root;
+- acquires the shared global operation guard and a migration-specific lock;
+- keeps resumable state in the repository checkout because `PROJECT_STATE_DIR` can move during the operation;
+- never silently selects a target disk;
+- identifies boot-device candidates and refuses the detected boot device for forward block migration;
+- requires an explicit `--force-format` authorization before formatting a blank/signature-free target device;
+- does not use `--force` as formatting authorization;
+- refuses `--yes` together with `--skip-stack-stop`;
+- re-checks that the stack is stopped immediately before rsync;
+- excludes SQLite WAL/SHM files from the transfer;
+- protects the target `.vw-data-volume` sentinel;
+- verifies the transfer before completing;
+- applies a service start policy instead of always starting production automatically.
+
+## Before migration
+
+1. Create and verify a fresh full backup:
+
+   ```bash
+   sudo ./backup.sh run full --full-verification
+   sudo ./backup.sh verify
+   ```
+
+2. Confirm the current environment/storage identity:
+
+   ```bash
+   utilities/env-edit.sh status
+   sudo utilities/setup-storage.sh verify
+   findmnt
+   lsblk -f
+   ```
+
+3. Attach the target volume through your provider, hypervisor, or physical host.
+
+4. Identify the target device. Prefer stable paths such as:
+
+   ```text
+   /dev/disk/by-id/...
+   /dev/disk/by-uuid/...
+   ```
+
+5. Plan a maintenance window. The normal migration path stops the Docker stack.
+
+Do not assume `/dev/sdb` or another provider-specific device name is universal.
 
 ---
 
-## 📋 Overview
-
-`setup-storage.sh migrate` is a cloud-agnostic, interactive script that safely moves the Vaultwarden data directory from one storage location to another. It wraps a robust pipeline of steps — format, rsync, byte-count verify — around interactive device selection so the admin never has to specify raw block device paths manually.
-
-Typical use cases:
-
-- **Boot volume → dedicated block volume** — move data off the OS disk onto a separately attached block volume for isolation and persistence
-- **Block volume → another block volume** — re-platform or resize the data volume without downtime longer than a stack stop
-- **Directory to directory** — path-based move on the same disk, no formatting involved
-- **Block volume → boot volume (reversal)** — roll back to boot-volume storage using directory-to-directory mode
-
----
-
-## ✅ Pre-Migration Checklist
-
-Before running the script:
-
-- ✅ **Backup first** — run `./backup.sh run full` and verify the archive is readable
-- ✅ **Attach the target volume** — add the block device through your provider, VM manager, or physical host before running the script; the device must appear in `lsblk`
-- ✅ **Confirm device identity** — verify the target with `lsblk`, `findmnt`, `blkid`, and `wipefs --no-act`; do not assume `/dev/sdb` or any provider-specific path
-- ✅ **Confirm free space** — the target must have at least as much free space as the source data directory consumes (checked automatically after format for block-device migrations)
-- ✅ **Note your mount point** — know where the volume should be mounted (default: `/mnt/vw-data`, from `DATA_VOLUME_MOUNT` in `.env`)
-- ✅ **Verify `sudo` access** — the script requires root privileges
-- ✅ **Plan a maintenance window** — the script stops the Docker stack; budget 5–15 minutes depending on data size
-- ✅ **SQLite WAL** — the script checks for non-empty WAL files after the stack stops and warns if found; if you see this warning, run `sudo ./maintenance.sh db-maint` to checkpoint the database before proceeding
-
----
-
-## 🚀 Quick Start
-
-### Interactive (recommended)
-
-Run with no arguments and the script will prompt for everything:
+## Quick start — interactive forward migration
 
 ```bash
 sudo utilities/setup-storage.sh migrate run
 ```
 
-You will be shown a numbered device table (like the one below) and prompted to select the target block device and mount point:
+The utility displays block devices and prompts for the target path/device where required.
 
+For a blank target device, device selection alone is not formatting consent. If the preflight reports that the blank device requires explicit formatting authorization, rerun with `--force-format` after rechecking the device identity.
+
+Example:
+
+```bash
+sudo utilities/setup-storage.sh migrate run \
+  --target /mnt/vw-data \
+  --device /dev/disk/by-id/<your-volume> \
+  --force-format
 ```
-  1) /dev/sda    size: 50G      mount: /                      [boot]
-  2) /dev/disk/by-id/your-volume    size: 100G     mount: -
 
-  Select TARGET block device for migration (DO NOT choose [boot]):
-  Device number [1-2]: 2
+## Non-interactive forward migration
 
-  Enter target mount point [/mnt/vw-data]:
-```
-
-> **Warning:** Never select a device marked `[boot]`. The script will abort with an error if you do, but avoiding it in the first place is safer.
-
-### Non-interactive (scripted / automated)
-
-Pass all required flags explicitly. `--yes` is required for non-interactive mode and enforces that `--target` is also provided:
+A fully scripted boot-to-block migration to a known blank target requires an explicit target, explicit device, `--force-format`, and `--yes`:
 
 ```bash
 sudo utilities/setup-storage.sh migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
-  --device /dev/disk/by-id/your-volume \
+  --device /dev/disk/by-id/<your-volume> \
+  --force-format \
   --yes
 ```
+
+`--yes` answers confirmations that are safe to automate. It does not bypass the separate typed confirmation for `--delete-source`, and it cannot be combined with live-stack migration.
 
 ---
 
-## 🔄 Migration Scenarios
+## Forward migration: boot volume → block/data volume
 
-### Boot Volume → Block Volume
-
-The standard path — moves data from the default location on the OS disk to a freshly attached block device.
+Interactive:
 
 ```bash
-# Interactive (prompts for device and mount point)
 sudo utilities/setup-storage.sh migrate run
-
-# Non-interactive
-sudo utilities/setup-storage.sh migrate run \
-  --source /var/lib/vaultwarden \
-  --target /mnt/vw-data \
-  --device /dev/disk/by-id/your-volume \
-  --yes
 ```
 
-The script will:
-1. Stop the Docker stack (and check for non-empty SQLite WAL files — a non-empty WAL after a clean stop is warned prominently)
-2. Format the selected block device (ext4 by default) and run a disk space check against the newly mounted volume
-3. Mount it at `/mnt/vw-data`
-4. `rsync` all data from source to target (WAL and SHM files are excluded from the transfer)
-5. Verify: byte-count delta ≤ 1% **and** full rsync checksum pass
-6. Optionally rename / delete the source directory (`--delete-source` — requires typing the full absolute path)
-7. Update `.env` (PROJECT_STATE_DIR, DATA_VOLUME_MOUNT, DATA_VOLUME_DEVICE, BACKUP_DIR) and prune old `.env` backups
-8. Restart the stack and confirm all containers are running and `/alive` responds
+Explicit:
 
-### Block Volume → Another Block Volume
+```bash
+sudo utilities/setup-storage.sh migrate run \
+  --direction boot-to-block \
+  --source /var/lib/vaultwarden \
+  --target /mnt/vw-data \
+  --device /dev/disk/by-id/<your-volume> \
+  --force-format
+```
 
-Use the same interactive or non-interactive flow. Attach the new volume, run the script, and select the new device. The source volume path should be the current mount point:
+The high-level pipeline:
+
+1. validate commands, source, target, device, and storage safety;
+2. require a recent/accepted backup confirmation unless explicitly bypassed with `--force`;
+3. stop the stack unless `--skip-stack-stop` was explicitly requested and interactively accepted;
+4. re-check stack stop immediately before data transfer;
+5. prepare/mount the target according to the guarded storage contract;
+6. rsync state while excluding dead sockets/PIDs and SQLite WAL/SHM files;
+7. verify transfer size/content with the migration verification path;
+8. update persistent environment/storage identity;
+9. regenerate/synchronize installed runtime behavior required by the migration path;
+10. start services according to `--start-policy`;
+11. record completion and clean resumable state.
+
+A step failure preserves migration state so `resume`, `status`, or `abort` can reason about the partially completed workflow.
+
+---
+
+## Reverse migration: block/data volume → boot volume
+
+Use the explicit reverse direction:
+
+```bash
+sudo utilities/setup-storage.sh migrate run \
+  --direction block-to-boot \
+  --target /var/lib/vaultwarden
+```
+
+In interactive reverse mode, the device picker shows mounted volumes carrying the VaultWarden `.vw-data-volume` sentinel and lets you choose the source data volume.
+
+You may also provide the mounted source device explicitly:
+
+```bash
+sudo utilities/setup-storage.sh migrate run \
+  --direction block-to-boot \
+  --target /var/lib/vaultwarden \
+  --device /dev/disk/by-id/<your-data-volume>
+```
+
+Do not use the old guidance that tells operators to unmount the source volume before migration or simulate reversal with an unrelated directory copy. Reverse migration must read the mounted source data and has a dedicated direction contract.
+
+After a successful reverse migration, review `/etc/fstab` warnings printed by the migration utility and remove only obsolete old-source mount entries after verifying the resulting fstab.
+
+---
+
+## Data volume → another data volume
+
+Attach the new target and run a normal forward migration from the current state path:
 
 ```bash
 sudo utilities/setup-storage.sh migrate run \
   --source /mnt/vw-data \
   --target /mnt/vw-data2 \
-  --device /dev/disk/by-id/your-new-volume \
-  --yes
+  --device /dev/disk/by-id/<your-new-volume> \
+  --force-format
 ```
 
-### Directory to Directory (No Format Step)
+Use `--force-format` only when the target is intentionally blank/signature-free and you have verified the device identity.
 
-Pass `--target` without `--device`. The script skips `_mv_select_device` entirely — no block device is needed and **no formatting occurs**:
+---
+
+## Directory-to-directory migration
+
+Omit `--device` completely:
 
 ```bash
 sudo utilities/setup-storage.sh migrate run \
   --source /var/lib/vaultwarden \
-  --target /mnt/vw-data2
+  --target /srv/vaultwarden-state
 ```
 
-This is also the correct mode for **reversing a migration** (see below).
+No block-device formatting step occurs.
 
-### Block Volume → Boot Volume (Reversal)
+The migration transfer uses rsync deletion semantics to make the target match the source. A non-empty target is warned because target-only files may be removed.
 
-To move data back from a block volume to the boot volume, use directory-to-directory mode. Set `--source` to the current mount point and `--target` to the original path on the boot disk:
+Always preview an unusual directory target:
 
 ```bash
 sudo utilities/setup-storage.sh migrate run \
-  --source /mnt/vw-data \
-  --target /var/lib/vaultwarden
+  --source /var/lib/vaultwarden \
+  --target /srv/vaultwarden-state \
+  --dry-run
 ```
 
-> **Important:** Do **not** pass `--device` for reversal. Providing a device path triggers the format step, which would destroy data on whatever device you specify. Directory-to-directory mode `rsync`s without formatting.
+Do not manually clear a non-empty target with a broad `rm -rf` command merely because an older version of this guide suggested it. Confirm the target identity and use the migration dry run to understand the planned synchronization.
 
-Before the reversal, unmount the block volume if it is no longer needed:
+---
 
-```bash
-sudo umount /mnt/vw-data
+## Start policy
+
+Migration supports:
+
+```text
+auto
+ask
+manual
 ```
 
-Update `DATA_VOLUME_MOUNT` in `.env` (or remove it) to reflect the reverted path, then restart the stack:
+Options:
 
 ```bash
-./startup.sh --force
+--start-policy auto
+--start-policy ask
+--start-policy manual
+--start       # alias for auto
+--no-start    # alias for manual
+```
+
+Default behavior:
+
+- interactive TTY run: `ask`;
+- non-interactive or `--yes`: `auto`.
+
+Use `manual`/`--no-start` when you need to inspect the migrated storage, environment, systemd installation, or provider state before starting Vaultwarden.
+
+Example:
+
+```bash
+sudo utilities/setup-storage.sh migrate run \
+  --source /var/lib/vaultwarden \
+  --target /mnt/vw-data \
+  --device /dev/disk/by-id/<your-volume> \
+  --force-format \
+  --no-start
+```
+
+After inspection:
+
+```bash
+sudo make up
+sudo make health
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
 ```
 
 ---
 
-## ⚙️ All Options
+## Migration subcommands
 
-| Flag | Description | Required |
-| :-- | :-- | :-- |
-| `--source <path>` | Source directory (default: `PROJECT_STATE_DIR` from `.env`) | No |
-| `--target <path>` | Destination mount point (prompted interactively if omitted; required with `--yes`) | Conditional |
-| `--device <dev>` | Block device to format and mount (prefer a stable `/dev/disk/by-id/...` path). Prompted interactively via `lsblk` if omitted. Omit entirely for dir-to-dir migration. | No |
-| `--skip-stack-stop` | Do not stop the Docker stack before migrating. Requires explicit runtime confirmation. Use with caution. | No |
-| `--delete-source` | Delete the renamed source directory after successful verification. | No |
-| `--dry-run` | Print all actions without executing them. | No |
-| `--force` | Skip the pre-migration backup confirmation prompt. | No |
-| `--yes` | Answer yes to all confirmations (except `--delete-source`). Requires `--target`. | No |
-| `--log-file <path>` | Override default log file path. | No |
-| `--help` | Show built-in help and exit. | No |
-
----
-
-## 🔁 Subcommands
-
-| Subcommand | Description |
+| Subcommand | Purpose |
 | :-- | :-- |
-| `run` | Start a new migration (interactive or non-interactive). |
-| `resume` | Resume a previously interrupted migration from the last completed step. Re-validates that the source still exists, the target is mounted (block-device migrations), and `docker-compose.yml` is present before continuing. |
-| `status` | Show the current migration state (steps completed, source, target). |
-| `abort` | Abort an in-progress or interrupted migration and roll back: restores `.env`, renames source back, and offers to unmount the new volume if it was formatted. |
-| `verify` | Re-run byte-count **and checksum** verification only (non-destructive, safe to repeat). |
+| `run` | Start a new migration |
+| `resume` | Continue from the recorded migration state after revalidation |
+| `status` | Show recorded migration state |
+| `abort` | Roll back the in-progress migration state where the pipeline supports rollback |
+| `verify` | Re-run migration transfer verification |
 
----
-
-## ⚠️ Potential Data Folder Issues
-
-Be aware of the following edge cases before running a migration.
-
-### 1. Interactive picker lists whole disks and partitions
-
-The interactive device picker uses `lsblk` (without `-d`) so both **whole-disk** devices and their **partitions** appear in the numbered list. Devices that belong to the boot disk are tagged `[boot]` — this includes the root disk itself **and any of its partitions** (the guard uses a prefix match, so `/dev/nvme0n1p2` is blocked when `/dev/nvme0n1` is the boot disk). If your target block volume is partition-based, select it directly from the interactive list or pass that partition path explicitly on the CLI:
+Examples:
 
 ```bash
-sudo utilities/setup-storage.sh migrate run \
-  --source /var/lib/vaultwarden \
-  --target /mnt/vw-data \
-  --device /dev/disk/by-id/your-volume-part1
-```
-
-### 2. Mount point path resolution
-
-The `--target` prompt normalises the input with `realpath -m`, which resolves symlinks and relative paths before the pipeline runs. This prevents path mismatches, but it means that if you provide a relative path or a symlink, the resolved absolute path is what the pipeline will use. Verify the logged `Using mount point:` output matches your expectation before confirming.
-
-### 3. Target directory must exist or be creatable
-
-The migration pipeline (`_mv_run_pipeline`) is responsible for creating the mount point directory if it does not exist. If the parent directory is not writable by root, the pipeline will fail at the mount step. Ensure the parent path (e.g., `/mnt`) exists and is accessible:
-
-```bash
-ls -la /mnt
-```
-
-### 4. Non-empty target warns in dir-to-dir mode
-
-In directory-to-directory mode (no `--device` flag), the format step is skipped entirely. rsync always runs with `--delete`, which means any **existing files at the destination that are absent from the source are removed** before the transfer completes. The pre-flight summary will explicitly warn when the target is a non-empty directory:
-
-```
-  ⚠  WARNING: Target directory is non-empty (5 item(s)).
-     rsync --delete will REMOVE files in target that do not exist in source.
-     Run with --dry-run first to inspect changes before proceeding.
-```
-
-Use `--dry-run` first to inspect what will be synced and deleted:
-
-```bash
-sudo utilities/setup-storage.sh migrate run \
-  --source /mnt/vw-data \
-  --target /var/lib/vaultwarden \
-  --dry-run
-```
-
-If a clean destination is required, manually clear it before running the migration:
-
-```bash
-sudo rm -rf /var/lib/vaultwarden/*
-```
-
-### 5. `.env` is updated automatically after migration
-
-The script updates `.env` (PROJECT_STATE_DIR, DATA_VOLUME_MOUNT, DATA_VOLUME_DEVICE, BACKUP_DIR) as step 7 of the pipeline. A timestamped backup is created at `.env.pre-migration.<timestamp>` before any changes; only the most recent backup is retained (older ones from previous runs are pruned automatically). If the migration is aborted, `.env` is restored from the backup.
-
-If `BACKUP_DIR` was a custom path (not the default `<STATE_DIR>/backups`), the script will warn and require explicit acknowledgement — it will not auto-update custom paths.
-
-### 6. Boot guard covers the root disk and all its partitions
-
-The boot device guard checks the mountpoint (`== /`), the physical disk identity (`PKNAME` via `lsblk`), **and any partition of that disk** (prefix match). This means selecting `/dev/nvme0n1` or any of its partitions (e.g., `/dev/nvme0n1p1`, `/dev/nvme0n1p2`) is blocked when the root filesystem lives on `/dev/nvme0n1`. All such devices are tagged `[boot]` in the interactive picker. The guard only activates if device detection succeeds — if `findmnt` or `lsblk` return empty, the guard is skipped and the `[boot]` label will not appear. In that case, rely on your cloud provider console to confirm which device is the boot disk before making a selection.
-
----
-
-## 🔍 Dry Run and Verification
-
-Always run with `--dry-run` first on production systems to preview every action without making changes:
-
-```bash
-sudo utilities/setup-storage.sh migrate run \
-  --source /var/lib/vaultwarden \
-  --target /mnt/vw-data \
-  --device /dev/disk/by-id/your-volume \
-  --dry-run
-```
-
-After a migration completes, re-run verification at any time without triggering another full migration. The verify subcommand performs both a byte-count delta check (≤ 1% tolerance) and a full content integrity check (`rsync --checksum --dry-run`), which catches silent block-level corruption that byte totals cannot detect:
-
-```bash
-sudo utilities/setup-storage.sh verify
-```
-
----
-
-## 🔙 Rollback
-
-If a migration fails or produces unexpected results:
-
-1. **Check status** — `sudo utilities/setup-storage.sh migrate status`
-2. **Abort if stuck** — `sudo utilities/setup-storage.sh migrate abort`
-3. **Restore from backup** — run `sudo ./restore.sh interactive --file <archive>` (see [BACKUP-RESTORE.md](BACKUP-RESTORE.md))
-4. **Reverse via dir-to-dir** — if the rsync completed but you want to revert, use the [block volume → boot volume reversal](#block-volume--boot-volume-reversal) flow described above
-5. **Update `.env`** — revert `DATA_VOLUME_MOUNT` to the original path and restart: `./startup.sh --force`
-
----
-
-## 🔧 Troubleshooting
-
-### No block devices found
-
-```bash
-# Verify the volume is attached and visible to the OS
-lsblk
-
-# If newly attached, the kernel may not have rescanned — trigger a rescan
-sudo partprobe
-# or
-sudo udevadm trigger
-```
-
-### Migration interrupted mid-rsync
-
-```bash
-# Check current state
 sudo utilities/setup-storage.sh migrate status
-
-# Resume from the last completed step
 sudo utilities/setup-storage.sh migrate resume
+sudo utilities/setup-storage.sh migrate abort
+sudo utilities/setup-storage.sh migrate verify
 ```
 
-### Byte count mismatch after verify
+`status`, `abort`, and `verify` do not accept behavior-changing run options. `resume` accepts only the documented resume-safe options.
+
+When a migration fails, the error output prints the exact resume and abort commands.
+
+---
+
+## Important options
+
+| Option | Meaning |
+| :-- | :-- |
+| `--source PATH` | Source state directory; default is current `PROJECT_STATE_DIR` in forward mode |
+| `--target PATH` | Destination path; required with `--yes` |
+| `--device DEV` | Explicit block device; omit for directory-to-directory migration |
+| `--direction boot-to-block\|block-to-boot` | Migration direction |
+| `--skip-stack-stop` | Migrate with the stack not intentionally stopped; interactive confirmation required; incompatible with `--yes` |
+| `--delete-source` | Delete the verified renamed source; always requires typing the exact path |
+| `--dry-run` | Preview operations |
+| `--force` | Skip the pre-migration backup confirmation; does **not** authorize formatting |
+| `--force-format` | Explicitly authorize formatting a blank/signature-free forward target device |
+| `--yes` | Non-interactive confirmation for automatable prompts; requires `--target` |
+| `--start-policy MODE` | `auto`, `ask`, or `manual` service-start behavior |
+| `--start` | Alias for `--start-policy auto` |
+| `--no-start` | Alias for `--start-policy manual` |
+| `--log-file PATH` | Override migration log path |
+
+For exact parser rules:
 
 ```bash
-# Inspect the migration log for rsync errors
-sudo utilities/setup-storage.sh migrate status
-
-# Re-run full verification (byte-count + checksum)
-sudo utilities/setup-storage.sh verify
-
-# Re-run rsync manually to check for errors
-sudo rsync -av --checksum /var/lib/vaultwarden/ /mnt/vw-data/
+sudo utilities/setup-storage.sh migrate --help
 ```
 
-### Non-empty WAL files after stack stop
+---
+
+## WAL and database handling
+
+The normal migration path stops the stack and re-checks it before rsync.
+
+SQLite WAL and SHM files are excluded from the transfer:
+
+```text
+*.sqlite3-wal
+*.sqlite3-shm
+```
+
+A non-empty WAL after a clean source stop is a warning that should be investigated. You may run the guarded database-maintenance path before retrying:
 
 ```bash
-# The script warns if SQLite WAL files are non-empty after stopping the stack.
-# Checkpoint the WAL before proceeding:
-sudo sqlite3 /var/lib/vaultwarden/data/db.sqlite3 'PRAGMA wal_checkpoint(FULL);'
-
-# Or use the built-in maintenance script:
 sudo ./maintenance.sh db-maint
+```
 
-# Then re-run the migration (or resume if interrupted):
+Do not manually copy WAL/SHM files to make the target "look complete".
+
+---
+
+## `.vw-data-volume` sentinel
+
+The sentinel identifies a volume adopted/provisioned as VaultWarden data storage.
+
+Migration protects the target-owned sentinel from rsync deletion/exclusion behavior. Reverse migration uses the sentinel to identify eligible mounted VaultWarden data volumes in the interactive picker.
+
+Do not create or remove the sentinel merely to bypass a storage error. Resolve the device/mount ownership ambiguity first.
+
+---
+
+## `.env`, persistent environment, and systemd runtime
+
+Migration updates the accepted environment/storage identity as part of its pipeline. Current storage state is not represented only by repository `.env`; persistent and installed runtime configuration also matter.
+
+After migration, inspect:
+
+```bash
+utilities/env-edit.sh status
+sudo utilities/setup-storage.sh verify
+sudo ./setup.sh systemd validate
+```
+
+When the host is ready for scheduled jobs, activate the current installed runtime:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+Do not hand-edit `/etc/vaultwarden/vaultwarden.env` to conceal an environment/storage mismatch.
+
+---
+
+## Verification after migration
+
+Run:
+
+```bash
+sudo utilities/setup-storage.sh migrate verify
+sudo utilities/setup-storage.sh verify
+sudo utilities/repair-permissions.sh --check
+sudo make health
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+Create and verify a fresh backup from the new storage layout:
+
+```bash
+sudo ./backup.sh run db
+sudo ./backup.sh run full --full-verification
+sudo ./backup.sh verify
+```
+
+If offsite sync is enabled:
+
+```bash
+sudo ./backup.sh sync
+```
+
+Only detach/delete the old data source after the new layout and a fresh recovery point are verified.
+
+---
+
+## Recovery after interruption
+
+Start with operation and migration status:
+
+```bash
+sudo make operations
+sudo utilities/setup-storage.sh migrate status
+```
+
+If the migration state is valid and the utility tells you to resume:
+
+```bash
 sudo utilities/setup-storage.sh migrate resume
 ```
 
-### Stack fails to start after migration
+To roll back the migration state through the owning workflow:
 
 ```bash
-# Confirm the new path is set correctly in .env
-grep DATA_VOLUME_MOUNT .env
-
-# Confirm the mount is active
-mount | grep vw-data
-
-# Check Docker Compose logs
-docker compose logs vaultwarden
+sudo utilities/setup-storage.sh migrate abort
 ```
 
-### Permissions incorrect on migrated data
+Do not delete `.migrate-volume.state`, lock files, fstab entries, or volume sentinels as a first troubleshooting step. The recorded state is needed to reason about the partial pipeline.
+
+---
+
+## What not to do
+
+Do not:
 
 ```bash
-# VaultWarden runs as UID 1000 inside the container
+sudo cp -r /var/lib/vaultwarden /mnt/vw-data
+sudo chmod -R 777 /mnt/vw-data
 sudo chown -R 1000:1000 /mnt/vw-data
-sudo chmod -R 750       /mnt/vw-data
 ```
 
----
+and then manually rewrite `.env`/systemd environment files.
 
-## 💡 Best Practices
-
-1. **Always back up before migrating** — run `./backup.sh run full` and verify the archive
-2. **Dry run first** — use `--dry-run` to preview actions on production systems
-3. **Verify after migration** — re-run `utilities/setup-storage.sh verify` after any migration (byte-count + checksum)
-4. **Checkpoint the database** — if WAL files are found after stop, run `sudo ./maintenance.sh db-maint` before proceeding
-5. **Use dir-to-dir for reversal** — never pass `--device` when moving data back to the boot volume
-6. **Confirm boot device visually** — cross-check the `[boot]` label against your cloud provider's attached volume list
-7. **Test with dry run after volume resize** — re-validate the migration pipeline if the underlying block device has been resized
-
----
-
-## 🆘 Support
-
-For migration assistance:
-
-1. Review related guides in the `/docs` directory:
-   - [MIGRATION.md](MIGRATION.md) — moving from other VaultWarden or Bitwarden deployments
-   - [BACKUP-RESTORE.md](BACKUP-RESTORE.md) — backup and restore procedures
-   - [OPERATIONS.md](OPERATIONS.md) — day-to-day operational reference
-   - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — general troubleshooting
-2. Search GitHub Issues for similar volume migration reports
-3. Open a new issue with:
-   - Output of `lsblk` and `sudo utilities/setup-storage.sh migrate status`
-   - Migration mode used (interactive / non-interactive / dir-to-dir)
-   - Error messages and the migration log path shown by the script
-   - Steps already attempted
+Those commands bypass the project's stop/WAL, Caddy/root-owned permission, sentinel, persistent environment, installed runtime, verification, and rollback contracts.
