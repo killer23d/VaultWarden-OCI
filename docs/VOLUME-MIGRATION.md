@@ -194,7 +194,7 @@ sudo utilities/setup-storage.sh migrate run \
 
 No block-device formatting step occurs.
 
-The migration transfer uses rsync deletion semantics to make the target match the source. A non-empty target is warned because target-only files may be removed.
+The migration transfer uses rsync deletion semantics so the target matches the source. A non-empty target is warned because target-only files may be removed.
 
 Always preview an unusual directory target:
 
@@ -328,7 +328,7 @@ A non-empty WAL after a clean source stop is a warning that should be investigat
 sudo ./maintenance.sh db-maint
 ```
 
-Do not manually copy WAL/SHM files to make the target "look complete".
+Do not manually copy WAL/SHM files to force a deceptively complete-looking target.
 
 ---
 
