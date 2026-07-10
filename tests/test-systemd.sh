@@ -44,6 +44,11 @@ for unit in "${guarded_units[@]}"; do
   fi
 done
 
+grep -Eq '^SuccessExitStatus=0 75$' "$ROOT/systemd/vaultwarden-dns-update.service" \
+  || fail "DNS update unit must treat expected contention as success"
+grep -Eq '^SuccessExitStatus=0 75$' "$ROOT/systemd/vaultwarden-firewall-update.service" \
+  || fail "firewall update unit must treat expected contention as success"
+
 printf 'PASS: systemd operation runtime paths\n'
 
 )

@@ -338,12 +338,24 @@ generate_maintenance_summary() {
         summary+="  ⏭️  DB optimization: Skipped\n"
     fi
     if [[ "${UPDATE_FIREWALL:-false}" == "true" ]]; then
-        [[ "$firewall_update" == "0" ]] && summary+="  ✅ Firewall update: OK\n" || summary+="  ❌ Firewall update: Failed\n"
+        if [[ "$firewall_update" == "0" ]]; then
+            summary+="  ✅ Firewall update: OK\n"
+        elif [[ "$firewall_update" == "75" ]]; then
+            summary+="  ⏭️  Firewall update: Skipped (active operation)\n"
+        else
+            summary+="  ❌ Firewall update: Failed\n"
+        fi
     else
         summary+="  ⏭️  Firewall update: Skipped\n"
     fi
     if [[ "${UPDATE_DNS:-false}" == "true" ]]; then
-        [[ "$dns_update" == "0" ]] && summary+="  ✅ DNS update: OK\n" || summary+="  ❌ DNS update: Failed\n"
+        if [[ "$dns_update" == "0" ]]; then
+            summary+="  ✅ DNS update: OK\n"
+        elif [[ "$dns_update" == "75" ]]; then
+            summary+="  ⏭️  DNS update: Skipped (active operation)\n"
+        else
+            summary+="  ❌ DNS update: Failed\n"
+        fi
     else
         summary+="  ⏭️  DNS update: Skipped\n"
     fi
@@ -352,20 +364,26 @@ generate_maintenance_summary() {
     fi
 
     local critical_failures=0
-    [[ "${CLEAN_LOGS:-true}"        == "true"  && "$log_cleanup"      != "0" ]] && ((critical_failures++))
-    [[ "${CLEAN_BACKUPS:-true}"     == "true"  && "$backup_cleanup"   != "0" ]] && ((critical_failures++))
-    [[ "${CLEAN_DOCKER:-true}"      == "true"  && "$docker_cleanup"   == "2" ]] && ((critical_failures++))
-    [[ "${OPTIMIZE_DATABASE:-true}" == "true"  && "$db_optimization"  != "0" ]] && ((critical_failures++))
-    [[ "${UPDATE_FIREWALL:-false}"  == "true"  && "$firewall_update"  != "0" ]] && ((critical_failures++))
-    [[ "${UPDATE_DNS:-false}"       == "true"  && "$dns_update"       != "0" ]] && ((critical_failures++))
-    [[ "${TARGETED_MODE:-false}"    == "false" && "$health_validation" != "0" ]] && ((critical_failures++))
+    [[ "${CLEAN_LOGS:-true}"        == "true"  && "$log_cleanup"      != "0" ]] && ((++critical_failures))
+    [[ "${CLEAN_BACKUPS:-true}"     == "true"  && "$backup_cleanup"   != "0" ]] && ((++critical_failures))
+    [[ "${CLEAN_DOCKER:-true}"      == "true"  && "$docker_cleanup"   == "2" ]] && ((++critical_failures))
+    [[ "${OPTIMIZE_DATABASE:-true}" == "true"  && "$db_optimization"  != "0" ]] && ((++critical_failures))
+    [[ "${UPDATE_FIREWALL:-false}"  == "true"  && "$firewall_update"  != "0" && "$firewall_update" != "75" ]] && ((++critical_failures))
+    [[ "${UPDATE_DNS:-false}"       == "true"  && "$dns_update"       != "0" && "$dns_update"      != "75" ]] && ((++critical_failures))
+    [[ "${TARGETED_MODE:-false}"    == "false" && "$health_validation" != "0" ]] && ((++critical_failures))
+
+    local operation_skips=0
+    [[ "${UPDATE_FIREWALL:-false}" == "true" && "$firewall_update" == "75" ]] && ((++operation_skips))
+    [[ "${UPDATE_DNS:-false}"      == "true" && "$dns_update"      == "75" ]] && ((++operation_skips))
 
     if [[ -n "$duration_seconds" && "$duration_seconds" =~ ^[0-9]+$ ]]; then
         summary+="\nDuration: $(_format_duration "$duration_seconds")\n"
     fi
 
-    if [[ $critical_failures -eq 0 ]]; then
+    if [[ $critical_failures -eq 0 && $operation_skips -eq 0 ]]; then
         summary+="🎉 Overall Status: SUCCESS\n"
+    elif [[ $critical_failures -eq 0 ]]; then
+        summary+="⏭️  Overall Status: COMPLETED WITH SKIPS\n"
     else
         summary+="⚠️  Overall Status: COMPLETED WITH ISSUES\n"
     fi
@@ -374,8 +392,10 @@ generate_maintenance_summary() {
 
     if [[ "${EMAIL_NOTIFY:-false}" == "true" ]]; then
         local subj
-        if [[ $critical_failures -eq 0 ]]; then
+        if [[ $critical_failures -eq 0 && $operation_skips -eq 0 ]]; then
             subj="VaultWarden Maintenance: SUCCESS"
+        elif [[ $critical_failures -eq 0 ]]; then
+            subj="VaultWarden Maintenance: COMPLETED WITH SKIPS"
         else
             subj="VaultWarden Maintenance: ISSUES DETECTED"
         fi

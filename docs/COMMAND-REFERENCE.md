@@ -724,7 +724,7 @@ OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — completed successfully
+    0 — completed without real failures; may include expected contention skips
     1 — completed with minor issues
     2 — completed with critical failures
 
@@ -767,7 +767,8 @@ SECRET SOURCE PRIORITY:
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully
-    1 — DNS update failed
+    75 — skipped because another VaultWarden operation owns the lock
+    Other non-zero — DNS update failed
 ```
 
 ### maintenance-update-firewall.sh
@@ -792,8 +793,9 @@ OPTIONS:
     --version, -V Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — Firewall ranges updated successfully (or skipped)
-    1 — Firewall update failed
+    0 — Firewall ranges updated successfully or skipped by configuration
+    75 — skipped because another VaultWarden operation owns the lock
+    Other non-zero — Firewall update failed
 ```
 
 ### maintenance-update.sh
