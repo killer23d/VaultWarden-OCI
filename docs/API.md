@@ -1,181 +1,328 @@
-# API Integration — VaultWarden-OCI
+# HTTP and API Integration — VaultWarden-OCI
 
-VaultWarden implements the **Bitwarden API**, making it compatible with all official Bitwarden clients and CLIs. This guide covers authentication, common operations, and security practices for programmatic access.
+VaultWarden-OCI does not add a separate application API layer. Vaultwarden owns the password-manager HTTP/API surface; Caddy owns the public reverse-proxy/TLS boundary; Cloudflare owns the supported edge path.
 
-> **Scope of this document:** This guide covers three distinct API surfaces:
-> - **Bitwarden client API** (`/api/*`, `/identity/*`) — used by the official Bitwarden web vault, browser extension, desktop, and CLI clients
-> - **VaultWarden admin API** (`/admin/*`) — used for server administration tasks such as user management and organisation control
-> - **Management script CLI** — the project's own shell scripts (`backup.sh`, `maintenance.sh`, etc.) documented in [SCRIPTS.md](SCRIPTS.md)
->
-> The Bitwarden client and admin APIs are served by the VaultWarden container. The management CLI runs on the host and communicates with Docker, not with the VaultWarden HTTP API.
+This document describes the repository integration boundary rather than duplicating Vaultwarden's complete upstream API documentation.
 
-Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md) · [SCRIPTS.md](SCRIPTS.md)
+Related docs: [ARCHITECTURE.md](ARCHITECTURE.md) · [SECURITY.md](SECURITY.md) · [CONFIGURATION.md](CONFIGURATION.md) · [CROWDSEC.md](CROWDSEC.md)
 
----
+## Public request path
 
-## 🔐 Authentication
+The supported normal path is:
 
-### User Access Token (Password Grant)
+```text
+client
+  -> Cloudflare DNS / proxy / WAF
+  -> provider firewall / security group / network firewall
+  -> Ubuntu UFW / iptables path
+  -> Caddy
+  -> Vaultwarden
+```
+
+The normal production edge is Cloudflare-first. Do not document direct public exposure of the Vaultwarden container as the supported API path.
+
+Caddy terminates TLS, applies the repository's proxy/security policy, and forwards application traffic to Vaultwarden on the private Compose network.
+
+## Base URL
+
+The operator configures:
 
 ```bash
-curl -X POST https://vault.yourdomain.com/identity/connect/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=password" \
-  -d "username=user@example.com" \
-  -d "password=your_password" \
-  -d "scope=api offline_access" \
-  -d "client_id=web" \
-  -d "deviceType=3" \
-  -d "deviceName=api-client" \
-  -d "deviceIdentifier=$(uuidgen)"
+DOMAIN=https://vault.example.com
 ```
 
-Response:
+Clients and integrations use the configured HTTPS origin:
 
-```json
-{
-  "access_token": "eyJhbGc...",
-  "expires_in": 3600,
-  "token_type": "Bearer",
-  "refresh_token": "eyJhbGc..."
-}
+```text
+https://vault.example.com
 ```
 
-Use the token:
+Do not add a separate `DOMAIN_NAME` configuration source for normal deployments. The current Caddy/Vaultwarden configuration derives the needed hostname from `DOMAIN`.
+
+## Health and readiness endpoint
+
+The canonical application readiness path used by the current repository is:
+
+```text
+/alive
+```
+
+Examples:
 
 ```bash
-curl -X GET https://vault.yourdomain.com/api/sync \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+curl -fsS https://vault.example.com/alive
 ```
 
-### Admin Authentication
-
-The admin panel is protected by two independent layers:
-
-1. **Caddy basic auth** — `admin_basic_auth_hash` secret (bcrypt hash, **minimum cost 10**), prompted in browser
-2. **VaultWarden admin token** — Argon2id hash stored in SOPS secrets, used for direct API calls
+Local origin check with SNI:
 
 ```bash
-# Direct admin API call
-curl -X GET https://vault.yourdomain.com/admin/users \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
+DOMAIN="vault.example.com"
+
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+  "https://$DOMAIN/alive"
 ```
 
-To generate a valid bcrypt hash for `admin_basic_auth_hash`:
+The Vaultwarden Compose healthcheck and the project health/smoke tooling use `/alive`.
+
+Do not substitute `/api/alive` in repository readiness checks.
+
+A successful `/alive` response is one live-service signal. It is not, by itself, the complete production-readiness gate. Installed systemd runtime consistency, timers, secrets, backup evidence, CrowdSec, disk, and other required smoke checks still matter.
+
+## Vaultwarden API surface
+
+Vaultwarden implements the Bitwarden-compatible server API used by supported Bitwarden clients and web-vault flows.
+
+Repository operators should rely on the currently deployed Vaultwarden version and its upstream compatibility/documentation for endpoint-specific application API semantics.
+
+The repository intentionally does not maintain a hand-copied endpoint catalog because that would become a second, stale Vaultwarden API reference.
+
+Current application image pin is owned by `.env.example`, for example:
 
 ```bash
-# Using the project tooling (enforces cost >= 10)
-source lib/crypto.sh
-generate_bcrypt_hash "yourpassword" 12
-
-# Or using Caddy directly
-docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
+VAULTWARDEN_VERSION=1.36.0
 ```
 
-> ⚠️ **bcrypt cost floor:** `lib/crypto.sh:generate_bcrypt_hash()` and `caddy/entrypoint.sh` both enforce a **minimum bcrypt cost of 10** (OWASP minimum for interactive logins). A hash generated with cost < 10 will be rejected at startup with an explicit error. The valid range is **10–31**; the project default is **12**.
+When changing the pin, validate the supported clients/integrations against the new deployed Vaultwarden version.
 
-To generate an Argon2id hash for the VaultWarden admin token:
+## `/api/config`
+
+The repository uses `/api/config` as a useful application/configuration probe in selected health and troubleshooting flows.
+
+Example local origin check:
 
 ```bash
-# Using the project tooling
-source lib/crypto.sh
-generate_argon2_hash "your_admin_token"
+DOMAIN="vault.example.com"
 
-# Or directly with argon2 CLI (parameters must match: -id -t 3 -m 16 -p 4 -l 32)
-echo -n "your_admin_token" | argon2 "$(openssl rand -hex 8)" -id -t 3 -m 16 -p 4 -l 32 -e
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+  "https://$DOMAIN/api/config" \
+  -o /dev/null \
+  -w "HTTP %{http_code}\n"
 ```
 
----
+A healthy normal origin is expected to return HTTP `200` for the current probe.
 
-## 📦 Common Vault Operations
+Do not expose secret values through a custom wrapper endpoint merely to make health diagnostics easier.
 
-### Sync
+## Admin path
+
+Vaultwarden's `/admin` path is protected by separate controls:
+
+- the Vaultwarden `admin_token` secret, stored as an Argon2id value according to `secrets-schema.yaml`;
+- the Caddy administrative source-range policy using `ADMIN_ALLOW_CIDR`;
+- Caddy basic authentication using the schema-managed `admin_basic_auth_hash`.
+
+These controls are intentionally separate.
+
+Rotate the application admin token with:
 
 ```bash
-curl -X GET https://vault.yourdomain.com/api/sync \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+sudo ./edit-secrets.sh rotate admin_token
 ```
 
-### List Ciphers
+Rotate the Caddy basic-auth credential with:
 
 ```bash
-curl -X GET https://vault.yourdomain.com/api/ciphers \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+sudo ./edit-secrets.sh rotate admin_basic_auth_hash
 ```
 
-### Create Cipher
+Edit the trusted administrative source range through:
 
 ```bash
-curl -X POST https://vault.yourdomain.com/api/ciphers \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": 1,
-    "name": "Example Login",
-    "login": {
-      "username": "user@example.com",
-      "password": "secure_password",
-      "uris": [{"match": null, "uri": "https://example.com"}]
-    }
-  }'
+sudo make edit-env
 ```
 
-### Update / Delete Cipher
+Do not put a plaintext admin token in `.env` or weaken the Caddy boundary merely because a client/tool needs ordinary Vaultwarden API access.
+
+## Client IP handling
+
+The supported edge is Cloudflare. The application/proxy configuration uses the Cloudflare client IP path expected by the current Caddy/Vaultwarden integration.
+
+Current `.env.example` uses:
 
 ```bash
-# Update
-curl -X PUT https://vault.yourdomain.com/api/ciphers/$CIPHER_ID \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{...}'
-
-# Delete
-curl -X DELETE https://vault.yourdomain.com/api/ciphers/$CIPHER_ID \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+IP_HEADER=CF-Connecting-IP
 ```
 
----
+Caddy is built from the repository's pinned xcaddy image definition in `caddy/Dockerfile`; the production build must remain pinned and compatible with amd64 and arm64.
 
-## 🚫 Rate Limiting
+Do not replace the pinned build with a mutable image such as:
 
-Rate limits are enforced via **Cloudflare WAF rules** configured manually in the Cloudflare dashboard — not by Caddy middleware. See [SECURITY.md](SECURITY.md) for setup instructions.
+```text
+ghcr.io/caddybuilds/caddy-cloudflare:latest
+```
 
-| Rule | Path | Limit | Action |
-| :-- | :-- | :-- | :-- |
-| Auth endpoint protection | `/identity/connect/token*`, `/api/accounts/prelogin*` | 10 req / 1 min per IP | Block (429) |
-| Admin panel protection | `/admin*` | 5 req / 1 min per IP | Block (429) |
-| General API protection (optional) | `/api/*` | 100 req / 1 min per IP | Managed Challenge |
+in production documentation or deployment automation.
 
-CrowdSec adds a second layer — repeated auth failures trigger a **Cloudflare Edge WAF ban** (not a local iptables rule, since web traffic arrives via the Cloudflare proxy). Local `iptables` is strictly used for SSH protection (managed by `crowdsec-firewall-bouncer`).
+When changing proxy/client-IP behavior, inspect:
 
----
+- `caddy/Caddyfile`;
+- `caddy/entrypoint.sh`;
+- `caddy/Dockerfile`;
+- `docker-compose.yml.example`;
+- CrowdSec acquisition/parser behavior;
+- health/security tests.
 
-## 🛡️ Content-Security-Policy and Push Notifications
+A client-IP change can affect rate/security decisions as well as application logging.
 
-The Caddy `Content-Security-Policy` header is generated dynamically by `caddy/entrypoint.sh` based on the `PUSH_ENABLED` environment variable:
+## Cloudflare and CrowdSec edge enforcement
 
-- **`PUSH_ENABLED=false` (default):** `connect-src` does **not** include `https://push.bitwarden.com` or `https://identity.bitwarden.com`. This is the narrowest (most secure) policy.
-- **`PUSH_ENABLED=true`:** Both push relay origins are added to `connect-src` automatically.
+CrowdSec does not directly update Cloudflare WAF Custom Rules as the current normal project architecture.
 
-Do not manually edit the CSP in the Caddyfile — the `{$PUSH_CSP}` placeholder is populated at container startup from the environment. Mismatched push origins will cause silent sync failures in clients.
+The current edge-enforcement path is:
 
-> ⚠️ **`PUSH_ENABLED=true` + `internal: true` network:** push relay connections to `https://push.bitwarden.com` will silently fail. The `startup.sh` probe will reject this combination at startup and print a clear error. Set `PUSH_ENABLED=false` or remove the `internal: true` constraint from the network in `docker-compose.yml`.
+```text
+CrowdSec local decisions
+        -> crowdsec-cloudflare-worker-bouncer
+        -> Cloudflare Workers KV
+        -> deployed Worker route
+        -> edge allow/block decision
+```
 
----
+The host firewall bouncer is a separate enforcement path.
 
-## ✅ API Security Practices
+See [CROWDSEC.md](CROWDSEC.md).
 
-- Always use HTTPS — HTTP is redirected by Caddy
-- Never hardcode tokens in scripts; load from environment or SOPS secrets
-- Use dedicated service accounts rather than personal user accounts
-- Rotate tokens regularly and audit access logs
-- Implement back-off and retry logic in automation to stay within rate limits
-- Admin token must be an Argon2id hash (not plaintext); bcrypt hashes for Caddy basic auth must use cost ≥ 10
+## WebSocket and push behavior
 
----
+Current application configuration includes:
 
-## 📚 Further Resources
+```bash
+WEBSOCKET_ENABLED=true
+```
 
-- [Bitwarden API Documentation](https://bitwarden.com/help/api/)
-- [VaultWarden Wiki](https://github.com/dani-garcia/vaultwarden/wiki)
-- [Official Bitwarden CLI](https://bitwarden.com/help/cli/)
+Caddy owns proxy behavior for the current Vaultwarden web/API traffic.
+
+Push notification support is optional:
+
+```bash
+PUSH_ENABLED=true
+PUSH_RELAY_URI=https://push.bitwarden.com
+PUSH_IDENTITY_URI=https://identity.bitwarden.com
+```
+
+The two push credentials are SOPS secrets:
+
+```text
+push_installation_id
+push_installation_key
+```
+
+Vaultwarden is attached to the dedicated `vaultwarden_egress` Compose network for outbound access. Do not use old guidance that removes the private application's network isolation as the default push fix.
+
+## SMTP is not an HTTP API integration
+
+Vaultwarden application mail uses the internal Postfix sidecar in the normal architecture:
+
+```text
+Vaultwarden
+  -> postfix:587
+  -> authenticated/TLS upstream SMTP relay
+```
+
+Operational scripts may optionally use supported provider HTTP APIs for alert delivery. That API mode does not replace the Postfix path for Vaultwarden mail or attachment-based recovery-kit delivery.
+
+See [EMAIL.md](EMAIL.md).
+
+## API credentials and secrets
+
+Provider tokens, SMTP passwords, admin hashes, and push credentials belong in the SOPS secrets store:
+
+```text
+${PROJECT_STATE_DIR}/secrets/secrets.yaml
+```
+
+Manage them through:
+
+```bash
+sudo ./edit-secrets.sh edit
+sudo ./edit-secrets.sh rotate <secret-key>
+```
+
+Do not:
+
+- put API tokens in `.env`;
+- pass private keys or tokens in command arguments when avoidable;
+- log full authorization headers;
+- commit example files containing real credentials;
+- build a plaintext API-token cache outside the current secret lifecycle.
+
+Transient decoded runtime secret files belong under:
+
+```text
+/run/vaultwarden-oci/secrets/
+```
+
+and are recreated by startup.
+
+## Integrating an external client
+
+For a normal Bitwarden-compatible client:
+
+1. deploy and validate the supported host;
+2. expose the configured hostname through Cloudflare/Caddy;
+3. set the client's self-hosted server URL to the configured `DOMAIN`;
+4. use the application's normal authentication flow;
+5. verify client login/sync through the deployed Vaultwarden version.
+
+The client should not connect to the Vaultwarden Compose container address or Caddy's loopback health port.
+
+## Integrating automation
+
+Before writing custom automation against Vaultwarden:
+
+- confirm the deployed Vaultwarden version and upstream API behavior;
+- use a least-privilege application credential/session model supported by Vaultwarden/Bitwarden;
+- keep credentials outside shell history and Git;
+- handle HTTP timeouts/non-2xx responses explicitly;
+- avoid converting an unavailable API probe into a successful readiness result;
+- do not add a repository-wide API wrapper framework for one integration.
+
+When an integration needs a new project-managed secret, add it through the existing `secrets-schema.yaml` contract rather than adding a parallel plaintext environment key.
+
+## Diagnosing HTTP/API failures
+
+Start with:
+
+```bash
+sudo make health
+docker compose ps
+docker compose logs caddy --tail=120
+docker compose logs vaultwarden --tail=120
+```
+
+Probe the canonical readiness endpoint:
+
+```bash
+curl -vk https://vault.example.com/alive
+```
+
+Probe local origin routing:
+
+```bash
+DOMAIN="vault.example.com"
+
+curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+  "https://$DOMAIN/alive"
+```
+
+Check Cloudflare mode and origin certificate health before debugging application API semantics.
+
+For an installed production host after repository changes, also verify the installed runtime:
+
+```bash
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+## Scope rule
+
+The project should not create:
+
+- a generic REST API gateway;
+- an API credential database;
+- a plugin registry for external integrations;
+- a second health/readiness API;
+- an application API compatibility shim;
+- a service mesh.
+
+Use Vaultwarden's application API, Caddy's existing reverse-proxy boundary, SOPS/Age for project-managed credentials, and focused integration code only when a demonstrated production requirement needs it.
