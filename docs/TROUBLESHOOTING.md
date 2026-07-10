@@ -376,7 +376,7 @@ Edit through the supported encrypted workflow:
 sudo ./edit-secrets.sh edit
 ```
 
-Do not copy decrypted values into `.env` or make persistent secret state world-readable.
+Do not copy decrypted values into `.env` or persist decoded secret state in a world-readable form.
 
 ---
 
