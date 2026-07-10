@@ -930,3 +930,234 @@ Report correctness items corrected:
 Production-host acceptance items: 21
 
 Recommendation: create one bounded follow-up PR for Noble host dependency and readiness-contract closure, then rerun full validation and perform Noble amd64/arm64 host acceptance.
+
+## Post-PR #235 Second-Pass Static Contract Addendum — 2026-07-09
+
+### Addendum status
+
+This section is a later second-pass static contract review of the current `delta` line after the three findings in `reports/post-pr233-cross-subsystem-contract-bug-audit.md` were addressed.
+
+It does not reopen the original PR #230 F-01 through F-05 audit. Those findings remain historical evidence for the earlier executable baseline and must not be reimplemented merely because they remain documented above.
+
+The second pass confirmed that the later CT-01, CT-02, and CT-03 contract findings are represented as closed in current code and focused regressions. No additional High or Critical production-reachable cross-subsystem contract bug was confirmed.
+
+Two bounded follow-up items remain:
+
+| ID | Severity | Confidence | Summary |
+| --- | --- | --- | --- |
+| SP-01 | Low | High | The generated state-dir drop-in contract applies a `[Service]` section to `.timer` units even though that section belongs to service units. |
+| SP-02 | Low | High | Maintenance backup-retention dry-run returns before the canonical retention helper, so it cannot preview the exact archives and sidecars the real cleanup path would preserve or remove. |
+
+Static closure status: YELLOW for these two bounded second-pass items only.
+
+### SP-01 - State-dir drop-in generator emits a service-only section for timer units
+
+Severity: Low
+
+Confidence: High
+
+Area: systemd installation, generated drop-in schema, static unit validation
+
+Affected files:
+
+- `utilities/setup-systemd.sh`
+- `tests/test-systemd.sh`
+
+Affected supported entry point(s):
+
+- `sudo utilities/setup-systemd.sh install`
+- Full `sudo ./setup.sh install` path when systemd units are installed
+- Generated drop-ins under `/etc/systemd/system/vaultwarden-*.timer.d/10-state-dir.conf`
+
+Execution path:
+
+1. `setup-systemd.sh` builds `_VW_DROPIN_UNITS` with both managed `.service` and `.timer` names.
+2. `_install_rwpaths_dropin` iterates the combined list.
+3. For every item it renders one drop-in containing `[Unit] After=<mount-unit>` and `[Service] ReadWritePaths=<data-mount>`.
+4. The same service-only section is therefore written for `.timer` units.
+5. systemd ignores an inapplicable/unknown section for that unit type rather than treating it as the intended timer configuration contract.
+
+Expected contract:
+
+Generated drop-ins must use sections valid for the unit type consuming them.
+
+- Managed service drop-ins may contain `[Unit]` ordering plus `[Service] ReadWritePaths=`.
+- Managed timer drop-ins may contain the required `[Unit]` dependency/order contract, but must not receive a `[Service]` section.
+
+Current behavior:
+
+The generator uses one combined unit list and one shared drop-in body for both service and timer files.
+
+Production/operator impact:
+
+The matching service units also receive `ReadWritePaths`, so this review did not confirm a current data-volume write failure from SP-01 alone. The defect is a generated systemd schema/consumer mismatch and weakens static assurance of the installed unit tree.
+
+Cross-component interaction:
+
+The storage contract selects a separate `DATA_VOLUME_MOUNT`; `setup-systemd.sh` translates that storage state into per-unit drop-ins; systemd consumes those generated files. The producer currently emits a service section to a timer consumer.
+
+Why current tests/CI missed it:
+
+Existing systemd tests assert that the drop-in machinery exists and that runtime paths are represented, but they do not parse or semantically verify the full generated unit/drop-in tree with `systemd-analyze verify`.
+
+Minimal fix direction:
+
+Keep the existing small-project design. Split service and timer rendering locally or branch on the unit suffix while retaining the current canonical unit inventories.
+
+- Services: render `[Unit] After=<mount-unit>` and `[Service] ReadWritePaths=<data-mount>`.
+- Timers: render only the valid `[Unit]` ordering/dependency content required by the storage mount contract.
+
+Do not introduce a generic systemd generation framework, unit registry, templating engine, or new abstraction layer.
+
+Focused regression recommendation:
+
+Extend `tests/test-systemd.sh` in the closest existing systemd suite.
+
+At minimum:
+
+1. Generate the service and timer state-dir drop-ins in a temporary fixture.
+2. Assert a service drop-in contains `[Service]` and the expected `ReadWritePaths=` value.
+3. Assert a timer drop-in does not contain `[Service]` or `ReadWritePaths=`.
+4. Run `systemd-analyze verify` against the generated fixture where available and fail on generated section/directive warnings attributable to repository units/drop-ins.
+5. Keep a structural fallback assertion for environments where `systemd-analyze` is unavailable; do not silently treat parser coverage as behavioral execution.
+
+Scope-pressure note:
+
+This is a local producer/consumer schema correction. Do not redesign systemd installation.
+
+### SP-02 - Maintenance retention dry-run bypasses the canonical retention preview
+
+Severity: Low
+
+Confidence: High
+
+Area: maintenance operator truthfulness, backup retention, dry-run semantics
+
+Affected files:
+
+- `lib/maintenance-utils.sh`
+- `lib/backup-utils.sh`
+- closest existing maintenance/backup regression coverage, preferably `tests/test-backup.sh` unless the repository's current ownership clearly places the behavior elsewhere
+
+Affected supported entry point(s):
+
+- Comprehensive maintenance dry-run paths that include backup cleanup
+- Direct maintenance cleanup preview through the canonical maintenance runner
+
+Execution path:
+
+1. Maintenance enters `cleanup_backups`.
+2. `cleanup_backups` checks `DRY_RUN=true`.
+3. It prints only a generic `Would clean up old backups based on retention policy` message.
+4. It returns before iterating backup types and before calling `cleanup_old_backups`.
+5. The real cleanup path later calls the shared `cleanup_old_backups` helper.
+6. That canonical helper already has non-mutating dry-run behavior that identifies stale deletion candidates, preserves the newest timestamped archive, preserves unparseable archive names, and reports orphaned sidecar cleanup.
+
+Expected contract:
+
+A maintenance dry-run should preview the same retention selection policy that the real maintenance cleanup path will execute, while making no filesystem or remote mutation.
+
+Current behavior:
+
+Maintenance dry-run bypasses the single source of truth and provides only a generic summary. The underlying retention helper has a more precise and tested preview, but maintenance does not reach it in dry-run mode.
+
+Production/operator impact:
+
+This is not a recovery-point deletion bug because the dry-run path returns before mutation and the real cleanup path uses the corrected canonical retention helper. The impact is operator truthfulness: a dry-run cannot show the exact archives and sidecars selected by the real retention policy.
+
+Cross-component interaction:
+
+`maintenance` owns orchestration and operator output; `lib/backup-utils.sh` owns retention selection and preservation. The dry-run wrapper currently bypasses the owning policy implementation.
+
+Why current tests/CI missed it:
+
+The retention helper itself has focused local/remote dry-run regression coverage. The missing contract is one layer above it: maintenance dry-run does not delegate to that helper.
+
+Minimal fix direction:
+
+Remove the early generic dry-run return from `cleanup_backups` and let the existing per-type loop call `cleanup_old_backups` with `DRY_RUN=true` inherited/exported as it does for the normal policy path.
+
+Preserve these behaviors:
+
+- no archive deletion in dry-run;
+- no sidecar deletion in dry-run;
+- newest parseable timestamped archive is not shown as a deletion candidate;
+- unparseable legacy/manual archive names are preserved;
+- exact stale archive and orphaned-sidecar candidates are reported by the canonical helper;
+- a real helper error remains a real maintenance error.
+
+Do not duplicate retention selection logic in maintenance.
+
+Focused regression recommendation:
+
+Add one focused regression through the maintenance cleanup wrapper, not only the helper directly.
+
+Use a temporary backup tree containing:
+
+- one stale older timestamped archive with sidecars;
+- one newer timestamped archive that must be preserved;
+- one unparseable manual/legacy archive that must be preserved;
+- one orphaned sidecar.
+
+Run the maintenance cleanup path with `DRY_RUN=true` and assert:
+
+1. no fixture file is removed;
+2. the stale older archive is reported as a planned deletion;
+3. the newest archive is not reported as a deletion candidate;
+4. the unparseable archive is not reported as a deletion candidate;
+5. the orphaned sidecar is reported as planned cleanup;
+6. the output comes from the canonical retention semantics rather than a generic early-return message.
+
+Scope-pressure note:
+
+This is a delegation/truthfulness correction. Keep `cleanup_old_backups` as the retention single source of truth.
+
+### Second-pass bounded closure acceptance
+
+The follow-up implementation should close SP-01 and SP-02 only.
+
+Do not:
+
+- restart the production-readiness audit;
+- re-audit the repository broadly;
+- reimplement historical F-01 through F-05 solely because they remain in this report;
+- reopen CT-01, CT-02, or CT-03 unless current executable evidence shows a regression;
+- introduce new frameworks, registries, generic generators, policy engines, or abstraction layers;
+- perform unrelated formatting or documentation churn.
+
+Required implementation result:
+
+1. Timer state-dir drop-ins no longer contain `[Service]` or `ReadWritePaths=`.
+2. Service state-dir drop-ins retain the mount ordering and required writable data-volume path.
+3. Generated systemd unit/drop-in verification is added to the closest existing systemd regression suite, using `systemd-analyze verify` where available plus honest structural fallback coverage.
+4. Maintenance backup-retention dry-run reaches the canonical `cleanup_old_backups` preview path.
+5. Maintenance dry-run remains non-mutating and reports the same preservation/deletion selection policy as real cleanup.
+6. Focused regressions live in the existing consolidated domain suites.
+7. Existing operation guards, storage fail-closed behavior, backup retention preservation, and systemd start policy remain unchanged except where directly required for these two findings.
+
+Static validation for the closure should include the repository's canonical checks:
+
+```bash
+git diff --check
+
+find . \
+  -path './.git' -prune -o \
+  -type f -name '*.sh' -print0 \
+  | xargs -0 -n 1 bash -n
+
+find . \
+  -path './.git' -prune -o \
+  -type f -name '*.sh' -print0 \
+  | xargs -0 shellcheck -x --severity=warning
+
+./tests/run-tests.sh all
+
+docker compose \
+  --env-file .env.example \
+  -f docker-compose.yml.example \
+  config --quiet
+```
+
+In addition, the generated systemd fixture must receive focused `systemd-analyze verify` coverage where the analyzer is available.
+
+Exact-head GitHub Actions must be green before merge. After this bounded static closure, stop producing another broad readiness report and move to the pinned-SHA production-host acceptance and go-live validation record.
