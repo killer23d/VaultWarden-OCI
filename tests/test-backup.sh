@@ -187,12 +187,13 @@ get_config_value(){
     *) printf '%s\\n' "\${2:-}" ;;
   esac
 }
-_resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(); }
+_resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(--config "$TMP/mock-rclone.conf"); }
 rclone(){
   local cmd="\$1"; shift
   case "\$cmd" in
     lsd) return 0 ;;
     copy)
+      if [[ "\${1:-}" == --config ]]; then shift 2; fi
       local src="\$1"
       printf '%s\\n' "\$src" >> "$TMP/rclone-copy.calls"
       if [[ -n "\$FAIL_SUFFIX" && "\$src" == *"\$FAIL_SUFFIX" ]]; then return 9; fi
@@ -372,14 +373,14 @@ _extract_func(){
       print
       opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
       depth += opens - closes
-      if (depth == 0) exit
+     if (depth == 0) exit
     }' "$file"
 }
 
 _write_archive_with_sidecars() {
     local archive="$1"
     printf 'archive\n' > "$archive"
-    printf 'sha\n' > "$archive.sha256"
+    printf 'sha\\n' > "$archive.sha256"
     printf 'hmac\n' > "$archive.sha256.hmac"
     printf 'meta\n' > "$archive.meta"
 }
