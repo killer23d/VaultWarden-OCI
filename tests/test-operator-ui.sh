@@ -55,20 +55,10 @@ assert_contains "$KEY_ROTATE" 'while [[ "$saved" != "SAVED" ]]' \
 
 assert_contains "$BACKUP" "This passphrase protects only the emergency backup capsule." \
     "emergency backup passphrase role wording missing"
-assert_contains "$BACKUP" '_print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"' \
-    "backup final summary call missing"
-assert_contains "$BACKUP" '[[ "$QUIET" == "true" ]] && return 0' \
-    "backup summary is not quiet-aware"
 assert_contains "$BACKUP" 'Offsite sync: ${offsite_status}' \
     "backup summary does not report offsite sync"
-assert_contains "$BACKUP" 'if [[ "$RCLONE_SYNC" == "true" ]]; then' \
-    "backup verification failure must only mark offsite skipped when rclone was requested"
-assert_contains "$BACKUP" 'offsite_status="skipped because verification failed"' \
-    "backup summary missing verification-failure offsite skip state"
 assert_contains "$BACKUP" "Quick verification failed — backup is being discarded." \
     "backup verification discard warning missing"
-assert_contains "$BACKUP" 'rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256" "${backup_file}.sha256.hmac"' \
-    "backup verification failure does not discard archive and sidecars"
 assert_contains "$BACKUP" "Backup failed: quick verification did not complete successfully." \
     "backup verification failure summary missing"
 assert_contains "$BACKUP" 'backup_log_success "Backup completed successfully"' \
@@ -78,19 +68,6 @@ list_block="$(awk '/if \[\[ "\$LIST_ONLY" == "true" \]\]/,/exit 0/' "$BACKUP")"
 if grep -Fq 'operator_next_steps' <<< "$list_block"; then
     fail "backup list or JSON path should not emit operator summary"
 fi
-
-verify_failure_block="$(awk '/if ! verify_backup_quick/,/exit 1/' "$BACKUP")"
-if ! grep -Fq 'if [[ "$RCLONE_SYNC" == "true" ]]; then' <<< "$verify_failure_block"; then
-    fail "backup verification failure should not change offsite status when rclone was not requested"
-fi
-grep -Fq 'exit 1' <<< "$verify_failure_block" || fail "backup quick-verification failure must exit non-zero before retention"
-! grep -Fq 'cleanup_old_backups' <<< "$verify_failure_block" || fail "backup quick-verification failure must not run local retention before exit"
-quick_fail_line="$(grep -n 'Backup failed: quick verification did not complete successfully.' "$BACKUP" | cut -d: -f1 | head -1)"
-retention_line="$(grep -n 'cleanup_old_backups "$backup_dir"' "$BACKUP" | cut -d: -f1 | head -1)"
-success_line="$(grep -n 'backup_log_success "Backup completed successfully"' "$BACKUP" | cut -d: -f1 | head -1)"
-[[ -n "$quick_fail_line" && -n "$retention_line" && -n "$success_line" ]] || fail "backup verification ordering markers missing"
-(( quick_fail_line < retention_line )) || fail "quick verification failure must be handled before retention"
-(( quick_fail_line < success_line )) || fail "quick verification failure must be handled before success line"
 
 assert_contains "$SETUP_SECRETS" "If you skip it, disaster recovery depends on the operational Age key or an exported recovery kit." \
     "offline recovery skip consequence wording missing"

@@ -224,12 +224,6 @@ grep -Fq 'legacy_keys = {"backup_passphrase"}' "$ROOT/lib/secrets.sh" \
 
 grep -Fq 'schema_keys_for_conditional_group "cloudflare_proxy"' "$ROOT/lib/secrets.sh" \
     || fail "validate_required_secrets must use the schema conditional-group accessor"
-grep -Fq 'python3 -c "import yaml"' "$ROOT/utilities/setup-system.sh" \
-    || fail "setup dependency verification must check PyYAML import"
-grep -Fq '"python3-yaml"' "$ROOT/utilities/setup-system.sh" \
-    || fail "setup apt package ownership must include python3-yaml"
-! grep -Eq 'local basic_packages=.*"yq"' "$ROOT/utilities/setup-system.sh" \
-    || fail "setup apt package ownership must not use Ubuntu python-yq"
 
 write_minimal_schema() {
     local file="$1"

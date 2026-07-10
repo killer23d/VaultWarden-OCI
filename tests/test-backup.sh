@@ -114,6 +114,45 @@ pass 'restore/backup preflight safety functional checks'
 )
 
 check_backup_preflight_and_metadata_safety
+check_backup_completion_contracts() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BACKUP="$ROOT/utilities/backup-run.sh"
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+# Backup owns completion ordering, verification-failure discard, retention gates,
+# and internal summary state transitions. Operator UI tests only own displayed text.
+grep -Fq '_print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"' "$BACKUP" \
+    || fail "backup final summary call missing"
+grep -Fq '[[ "$QUIET" == "true" ]] && return 0' "$BACKUP" \
+    || fail "backup summary is not quiet-aware"
+
+verify_failure_block="$(awk '/if ! verify_backup_quick/,/exit 1/' "$BACKUP")"
+grep -Fq 'if [[ "$RCLONE_SYNC" == "true" ]]; then' <<< "$verify_failure_block" \
+    || fail "backup verification failure should not change offsite status when rclone was not requested"
+grep -Fq 'offsite_status="skipped because verification failed"' <<< "$verify_failure_block" \
+    || fail "backup verification failure missing rclone-specific offsite skip state"
+grep -Fq 'rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256" "${backup_file}.sha256.hmac"' <<< "$verify_failure_block" \
+    || fail "backup verification failure does not discard archive and sidecars"
+grep -Fq 'exit 1' <<< "$verify_failure_block" \
+    || fail "backup quick-verification failure must exit non-zero before retention"
+! grep -Fq 'cleanup_old_backups' <<< "$verify_failure_block" \
+    || fail "backup quick-verification failure must not run local retention before exit"
+
+quick_fail_line="$(grep -n 'Backup failed: quick verification did not complete successfully.' "$BACKUP" | cut -d: -f1 | head -1)"
+retention_line="$(grep -n 'cleanup_old_backups "$backup_dir"' "$BACKUP" | cut -d: -f1 | head -1)"
+success_line="$(grep -n 'backup_log_success "Backup completed successfully"' "$BACKUP" | cut -d: -f1 | head -1)"
+[[ -n "$quick_fail_line" && -n "$retention_line" && -n "$success_line" ]] \
+    || fail "backup verification ordering markers missing"
+(( quick_fail_line < retention_line )) \
+    || fail "quick verification failure must be handled before retention"
+(( quick_fail_line < success_line )) \
+    || fail "quick verification failure must be handled before success line"
+
+printf 'PASS: backup completion ordering and discard contracts\n'
+)
+
+check_backup_completion_contracts
 check_rclone_config_contracts() (
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
