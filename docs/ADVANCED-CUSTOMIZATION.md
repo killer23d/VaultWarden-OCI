@@ -1,613 +1,573 @@
 # Advanced Customization — VaultWarden-OCI
 
-This guide covers advanced configuration options beyond the defaults set by `setup.sh`. All customisation follows the same **template-first principle**: edit `.example` files, then regenerate.
+This guide covers supported customization outside the first-run golden path.
 
-Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [DEPLOYMENT.md](DEPLOYMENT.md) · [SECURITY.md](SECURITY.md)
+Read [PROJECT-BOUNDARY.md](PROJECT-BOUNDARY.md), [CONFIGURATION.md](CONFIGURATION.md), and [SECURITY.md](SECURITY.md) first. Advanced customization must preserve the Noble amd64/arm64 host boundary, root-operated lifecycle, SOPS/Age custody, storage safety, shared operation guard, and truthful readiness contracts.
+
+Do not turn a one-host small-team appliance into a provider framework or enterprise platform merely to add one optional feature.
+
+## Configuration ownership
+
+Not every live file is generated from a `.example` template.
+
+The current environment model is:
+
+```text
+repository .env                       operator-editable non-secret source
+        |
+        | env-edit sync
+        v
+${PROJECT_STATE_DIR}/config/install.env   persistent root-owned runtime state
+        |
+        | setup-systemd install
+        v
+/etc/vaultwarden/vaultwarden.env          installed systemd environment
+```
+
+Edit normal non-secret values through:
+
+```bash
+sudo make edit-env
+```
+
+Inspect state and drift with:
+
+```bash
+utilities/env-edit.sh status
+```
+
+Do not hand-edit `install.env` or `/etc/vaultwarden/vaultwarden.env` as the normal customization workflow.
+
+For ordinary environment changes:
+
+```bash
+sudo make edit-env
+sudo make restart
+sudo make health
+```
+
+For changes affecting installed systemd runtime:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
+```
+
+Do not rerun full setup with `--force` merely to apply a normal `.env` edit.
 
 ---
 
-## 📋 Template Workflow
+## Compose customization
 
-Every live config file is generated from a `.example` template. Never edit generated files directly — they are overwritten by `setup.sh`.
+The generated production file is:
 
+```text
+docker-compose.yml
 ```
-.example templates  →  setup.sh  →  Generated files  →  docker compose up
+
+It is generated from:
+
+```text
+docker-compose.yml.example
 ```
 
-### Apply Template Changes
+Production startup rejects the development override file when it would be implicitly loaded into the normal Compose project.
+
+The repository's development example is:
+
+```text
+docker-compose.override.dev.yml.example
+```
+
+Do not copy old instructions that refer to `docker-compose.override.yml.example`; that file is no longer the current example name.
+
+When experimenting locally, create the actual Compose override only on a non-production development checkout and remove it before using the production lifecycle.
+
+Validate Compose rendering:
 
 ```bash
-# 1. Edit the template
-nano docker-compose.yml.example
-
-# 2. Validate syntax before applying
-docker compose -f docker-compose.yml.example config
-
-# 3. Regenerate and apply
-sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --force
-
-# 4. Restart services
-./startup.sh --force
+docker compose \
+  --env-file .env.example \
+  -f docker-compose.yml.example \
+  config --quiet
 ```
+
+On a configured host:
+
+```bash
+docker compose config --quiet
+```
+
+### Do not add `platform: linux/amd64`
+
+The supported production architectures are amd64 and arm64.
+
+Do not hard-code:
+
+```yaml
+platform: linux/amd64
+```
+
+into the normal Compose path unless a demonstrated upstream limitation intentionally changes the supported architecture of a component and the project boundary is updated accordingly.
+
+### Service criticality
+
+The canonical critical-service policy is owned by `lib/defaults.sh`.
+
+Do not add another hard-coded "core services" list to a customization script, smoke check, or dashboard parser.
+
+Postfix is part of the normal mail design but is not in the same critical-container readiness list as Vaultwarden and Caddy. Email delivery is validated through the dedicated email diagnostics/drill path.
 
 ---
 
-## 🔧 Docker Compose Override File
+## Caddy customization
 
-`docker-compose.override.yml.example` is a **development-only** override template. Docker Compose automatically merges `docker-compose.override.yml` on top of `docker-compose.yml` when both files are present — no extra flags required.
+Caddy uses the repository's pinned xcaddy build in `caddy/Dockerfile`.
 
-> ⚠️ **Never use `docker-compose.override.yml.example` in production.** The VaultWarden service entrypoint will abort startup if it detects `ENVIRONMENT=production`, preventing accidental activation.
-
-### What It Contains
-
-The override file modifies every core service for local development and testing:
-
-| Service | What changes |
-| :-- | :-- |
-| `vaultwarden` | Enables `LOG_LEVEL=debug`, `SIGNUPS_ALLOWED=true`, removes resource limits, exposes port `127.0.0.1:8080:80` |
-| `caddy` | Binds admin API to loopback (`127.0.0.1:2019`), exposes ports `8081`/`8443`, removes resource limits |
-| `postfix` | Relaxes TLS to `may`, exposes submission port `127.0.0.1:1025:587`, adds SASL debug logging |
-| `email-tester` | Alpine-based SMTP test container; activated by `--profile development` or `--profile email-testing` |
-| `mailpit` | Email capture UI (`axllent/mailpit`) replacing abandoned mailhog; activated by `--profile email-capture` |
-
-All exposed ports bind to `127.0.0.1` exclusively. Use SSH port-forwarding to access them from a remote host.
-
-### When to Use It
-
-Use `docker-compose.override.yml.example` when you need to:
-
-- Test email delivery locally without sending real messages (Mailpit capture)
-- Debug container startup issues (`LOG_LEVEL=debug`, Caddy admin API)
-- Develop against a live VaultWarden instance with signups enabled
-- Test CrowdSec detection against live log output
-
-### Activating the Override
+The current production build is version-pinned through:
 
 ```bash
-# 1. Copy the template (make dev-setup does this automatically)
-cp docker-compose.override.yml.example docker-compose.override.yml
-
-# 2. Customise as needed
-nano docker-compose.override.yml
-
-# 3. Validate the merged config
-docker compose -f docker-compose.yml -f docker-compose.override.yml config
-
-# 4. Start with a profile
-docker compose --profile development up -d
+CADDY_VERSION=2.11.4
 ```
 
-`make dev-setup` copies both `.env.example → .env` and `docker-compose.override.yml.example → docker-compose.override.yml` in one step.
+Do not set `CADDY_VERSION=latest` for the production path.
 
-### Available Profiles
-
-| Profile | Services added | Use case |
-| :-- | :-- | :-- |
-| `development` | `email-tester` | Full dev environment with SMTP test utilities |
-| `email-testing` | `email-tester` | Focused SMTP integration testing |
-| `email-capture` | `mailpit` | Capture outbound email in a local UI instead of delivering it |
+After changing Caddy version or the xcaddy module list:
 
 ```bash
-# Start all core services + email capture UI
-docker compose --profile email-capture up -d
-
-# Access Mailpit (SSH tunnel required from a remote host)
-# ssh -L 8025:localhost:8025 user@host
-# Then open: http://localhost:8025
+docker compose build --pull --no-cache caddy
+sudo make restart
+sudo make health
+sudo ./utilities/smoke-test.sh
 ```
 
-### Production-Specific Overrides (Non-Dev Use Cases)
+For architecture-sensitive module changes, verify the pinned build chain on both amd64 and arm64. A multi-architecture Caddy base image does not prove every pinned xcaddy module builds on both supported architectures.
 
-The override file can also serve narrow production customisation needs without modifying the base template. Use a clean `docker-compose.override.yml` (not the example) for production overrides:
+### Caddy configuration files
 
-**Disable the Postfix sidecar** when using `EMAIL_MODE=api` or `EMAIL_MODE=smtp` exclusively:
+Current sources are:
 
-```yaml
-# docker-compose.override.yml
-services:
-  postfix:
-    deploy:
-      replicas: 0
+```text
+caddy/Caddyfile
+caddy/Caddyfile.degraded
+caddy/entrypoint.sh
+caddy/Dockerfile
 ```
 
-**Enable push notifications** when the network uses `internal: true` (requires removing the internal constraint):
+The normal production route is Cloudflare-first DNS-01.
 
-```yaml
-# docker-compose.override.yml
-networks:
-  vaultwarden:
-    internal: false
+Do not remove the `/alive` path or replace it with `/api/alive` in readiness tooling. The current Compose and production health paths use `/alive`.
+
+### Caddy state and log permissions
+
+Caddy runs as UID/GID `2000:2000`.
+
+Runtime state/log bind mounts are:
+
+```text
+${PROJECT_STATE_DIR}/caddy/data
+${PROJECT_STATE_DIR}/caddy/config
+${PROJECT_STATE_DIR}/logs/caddy
 ```
 
-> See the [Email Customisation](#-email-customisation) section for the full three-tier delivery chain and provider switching.
-
-### Removing the Override
-
-To return to the base production configuration, remove or rename the file:
+Use:
 
 ```bash
-mv docker-compose.override.yml docker-compose.override.yml.bak
-./startup.sh --force
+sudo utilities/repair-permissions.sh --check
+sudo utilities/repair-permissions.sh
 ```
+
+for target-host permission normalization. Do not broadly chown the entire project state to Caddy.
 
 ---
 
-## ⏲️ Automation — systemd Timers
+## Network customization
 
-Automation is managed by **systemd timers** (not cron). Install, validate, or remove them with:
+The Compose topology intentionally separates private application networking from explicit outbound access.
 
-```bash
-sudo ./setup.sh systemd install    # install all timers and services
-sudo ./setup.sh systemd validate   # verify installed state matches repo
-sudo ./setup.sh systemd remove     # remove all timers and services
-sudo ./setup.sh systemd status     # show status of all units
+Vaultwarden currently joins:
+
+```text
+vaultwarden
+vaultwarden_egress
 ```
 
-### Installed Timer Schedule
+Caddy joins:
 
-| Unit | Schedule | Job |
-| :-- | :-- | :-- |
-| `vaultwarden-maintenance.timer` | Daily 2:05 AM | Comprehensive maintenance |
-| `vaultwarden-full-backup.timer` | Sunday 3 AM | Full backup + verify + rclone |
-| `vaultwarden-db-backup.timer` | Daily 4 AM | DB snapshot + rclone + full verification |
-| `vaultwarden-health.timer` | Every 5 min | Health check with auto-recover + email |
-| `vaultwarden-dns-update.timer` | Every hour | Dynamic DNS update |
-| `vaultwarden-firewall-update.timer` | Saturday 4 AM | Cloudflare firewall IP list refresh |
-
-> **Note on timer overlap:** `vaultwarden-maintenance.timer` now runs every day at 02:05, leaving the Sunday 03:00 full backup window clear. If you customise the schedule, keep at least a one-hour gap before the backup timers.
-
-### Timer Persistence
-
-The health, DNS, DB-backup, and firewall-update timers use `Persistent=true` — if the system reboots while one was due to fire, systemd runs the missed job once on next boot. The full-backup and maintenance timers use `Persistent=false` to avoid a catch-up I/O storm after extended downtime.
-
-### Failure Notifications
-
-Every service unit has:
-```ini
-OnFailure=vaultwarden-notify-failure.service
-```
-If any timer-triggered job fails, an email alert is sent automatically via the shared `vaultwarden-notify-failure.service` template unit. No external monitoring tool is required for basic failure alerting.
-
-### Viewing Timer Status
-
-```bash
-# Show all VaultWarden timers, next fire time, and last result
-systemctl list-timers --all | grep vaultwarden
-
-# View logs for a specific unit
-journalctl -u vaultwarden-db-backup.service -n 50
-journalctl -u vaultwarden-health.service -n 50
+```text
+vaultwarden
+caddy_external
 ```
 
-### Modifying a Timer Schedule
+Do not use the old push-notification workaround that removes the main `vaultwarden` network's isolation. The current topology already gives Vaultwarden the dedicated `vaultwarden_egress` path for outbound requirements.
 
-Edit the `.timer` file directly (do not use `setup.sh systemd` — it would overwrite your change on next install):
+When adding an outbound integration, prefer attaching only the component that needs egress to an existing appropriate network rather than making every internal service externally reachable.
 
-```bash
-sudo systemctl edit --full vaultwarden-db-backup.timer
-# Change OnCalendar= to your preferred schedule
-sudo systemctl daemon-reload
-sudo systemctl restart vaultwarden-db-backup.timer
-```
+Do not add host networking to the application containers merely to solve a DNS or proxy mistake.
 
 ---
 
-## 📌 Dependency Version Pinning
+## Push notifications
 
-By default `setup.sh` uses the repository-pinned SOPS production default and installs `age` from Ubuntu Noble packages. To request a specific SOPS release, set `SOPS_VERSION` before running setup:
-
-```bash
-SOPS_VERSION="v3.9.4"   # pinned
-```
-
-Or override at runtime without editing the file:
+Push remains optional:
 
 ```bash
-SOPS_VERSION=v3.9.4 sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com
+PUSH_ENABLED=true
+PUSH_RELAY_URI=https://push.bitwarden.com
+PUSH_IDENTITY_URI=https://identity.bitwarden.com
 ```
 
-| Variable | Default | Example |
-| :-- | :-- | :-- |
-| `SOPS_VERSION` | repository-pinned default (`v3.13.2`) | `"v3.9.4"` |
+Set the conditional SOPS secrets:
 
-Pass `--use-latest` only when you intentionally want setup to resolve the current SOPS release during dependency installation.
+```bash
+sudo ./edit-secrets.sh rotate push_installation_id
+sudo ./edit-secrets.sh rotate push_installation_key
+```
+
+Then:
+
+```bash
+sudo make restart
+sudo make health
+```
+
+Do not place the installation ID/key in `.env`.
 
 ---
 
-## 🖥️ Resource Limits
+## Email API customization
 
-Default limits are tightly tuned for a **6 GB OCI ARM instance** (512 MB for VaultWarden and Caddy; 256 MB for Postfix) to leave ample memory for the host OS and CrowdSec. Edit `docker-compose.yml.example` to adjust if you need more resources.
+The normal appliance mail path is Postfix-first SMTP.
 
-### Larger Systems (12 GB+ RAM)
+Operational scripts may use an HTTP API provider:
 
-```yaml
-services:
-  vaultwarden:
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: '1.0'
-        reservations:
-          memory: 512M
-          cpus: '0.4'
-  caddy:
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '0.5'
+```bash
+EMAIL_MODE=auto
+EMAIL_PROVIDER=mailersend
 ```
 
-### Minimal Systems (2 GB RAM)
+Supported provider names are documented by the current script help and [EMAIL.md](EMAIL.md).
 
-```yaml
-services:
-  vaultwarden:
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.5'
-        reservations:
-          memory: 128M
+Set the API token through SOPS:
+
+```bash
+sudo ./edit-secrets.sh rotate email_api_token
 ```
+
+Keep the Postfix SMTP path configured. Vaultwarden application mail and attachment-based recovery-kit delivery still use SMTP/Postfix.
+
+Do not remove Postfix merely because `EMAIL_MODE=api` works for one operational notification.
 
 ---
 
-## 🔒 Security Customisation
+## Backup customization
 
-### CrowdSec — Tighter Thresholds
-
-CrowdSec scenario thresholds are configured via YAML overrides:
-
-```yaml
-# /etc/crowdsec/hub/scenarios/crowdsecurity/http-bf.yaml override
-type: leaky
-name: crowdsecurity/http-bf
-description: "HTTP brute force — tighter thresholds"
-capacity: 2       # reduced from default
-leakspeed: "10m"  # tightened
-blackhole: "24h"  # extended ban duration
-```
-
-> **Note:** All web-facing bans push to **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH scenario uses host iptables via `cs-firewall-bouncer`.
-
-### CrowdSec — Custom Scenarios
-
-```yaml
-# /etc/crowdsec/scenarios/vaultwarden-custom.yaml
-type: leaky
-name: local/vaultwarden-custom
-description: "Custom VaultWarden detection"
-filter: "evt.Meta.service == 'vaultwarden'"
-capacity: 3
-leakspeed: "1m"
-blackhole: "2h"
-labels:
-  type: bruteforce
-```
-
-### CrowdSec — Whitelist Configuration
-
-```yaml
-# /etc/crowdsec/whitelists/myip.yaml
-name: local/myip-whitelist
-description: "Admin IP whitelist"
-whitelist:
-  reason: "Admin IP"
-  ip:
-    - "YOUR_IP_HERE"
-```
-
-Or use `cscli` directly:
-```bash
-sudo cscli whitelists add myip "$(curl -s https://ifconfig.me)"
-```
-
-### Caddy — 4-Tier Log Architecture
-
-Caddy uses four named loggers to route traffic to independent log files with separate retention policies:
-
-| Logger | File | Retention | Purpose |
-| :-- | :-- | :-- | :-- |
-| `access_log` | `/var/log/caddy/access.log` | 30 days / 50 MB rolls | All general traffic |
-| `admin_log` | `/var/log/caddy/admin_access.log` | 90 days / 25 MB rolls | `/admin` panel requests |
-| `auth_log` | `/var/log/caddy/auth_attempts.log` | 90 days / 25 MB rolls | Login and token endpoints (CrowdSec source) |
-| `security_log` | `/var/log/caddy/security.log` | 180 days / 10 MB rolls | Catch-all and anomalous requests |
-
-To adjust retention, edit the `log` blocks in the global section of `caddy/Caddyfile`:
-
-```caddyfile
-log auth_log {
-    output file /var/log/caddy/auth_attempts.log {
-        roll_size 50MB       # increase roll size
-        roll_keep 60         # keep 60 rolled files
-        roll_keep_for 180d   # retain for 6 months
-    }
-}
-```
-
-### Caddy — Security Headers
-
-The Caddyfile ships with a hardened security header set. Key notes for customisation:
-
-- **`Cross-Origin-Embedder-Policy`** is set to `credentialless` (not `require-corp`). Changing to `require-corp` breaks WebAuthn/passkey flows because cross-origin authenticators cannot load without credentials.
-- **`Content-Security-Policy`** on the main site scopes `connect-src` to `wss://{$DOMAIN_NAME}`, `https://push.bitwarden.com`, and `https://identity.bitwarden.com`. If you disable push notifications (`PUSH_ENABLED=false` in `.env`), you can remove the two Bitwarden push URLs from `connect-src` in `caddy/Caddyfile` to tighten the policy.
-- **Admin panel CSP** retains `'unsafe-inline'` in `script-src` — this is required by VaultWarden's admin UI which renders inline `<script>` blocks. Do not remove it without testing admin panel functionality.
-
-### Additional Caddy Security Headers
-
-```caddyfile
-# Edit caddy/Caddyfile
-header {
-    Permissions-Policy "geolocation=(), microphone=(), camera=()"
-    Expect-CT          "enforce, max-age=86400"
-}
-```
-
-### Admin IP Allowlisting
-
-```caddyfile
-# Edit caddy/Caddyfile
-@admin { path /admin* }
-
-handle @admin {
-    @allowed { remote_ip 192.168.1.0/24 10.0.0.0/8 }
-    handle @allowed {
-        basic_auth {
-            {env.ADMIN_USERNAME} {env.ADMIN_HASH}
-        }
-        reverse_proxy vaultwarden:80
-    }
-    handle { respond "Access Denied" 403 }
-}
-```
-
-> **Note:** The `@malicious_ua` User-Agent blocklist that appeared in earlier versions has been removed. It was trivially bypassed by any attacker omitting a scanner User-Agent. Configure scanner/bot detection through the **Cloudflare WAF Managed Ruleset** (Cloudflare Dashboard → Security → WAF → Managed rules) for effective protection.
-
-### Bcrypt Cost Factor
-
-All bcrypt hash operations (Caddy admin credential, break-glass admin) enforce a **minimum cost factor of 10**. The validator in `lib/crypto.sh` rejects any hash or cost value below 10 at generation time. The recommended production value is 12 (the default).
-
-If you regenerate the Caddy admin credential manually:
-```bash
-# Correct: cost 12
-htpasswd -nbBC 12 admin 'yourpassword'
-
-# The entrypoint.sh validator will reject hashes with cost < 10 at startup
-```
-
-### Caddy Entrypoint Debug Mode
-
-`caddy/entrypoint.sh` supports a `DEBUG_ENTRYPOINT=true` environment variable for troubleshooting startup issues. **Never leave this enabled in production** — it logs `ADMIN_USERNAME` to Docker stdout (which is persisted to the container's `json.log` file on the host).
+Current defaults are:
 
 ```bash
-# Temporarily enable for one-off debugging only:
-docker compose run --rm -e DEBUG_ENTRYPOINT=true caddy
-
-# The entrypoint will print a visible WARNING banner when debug mode is active:
-# ⚠️  WARNING: DEBUG_ENTRYPOINT enabled — credential names will be logged — DISABLE IN PRODUCTION
-```
-
----
-
-## 📧 Email Customisation
-
-The normal appliance path is Postfix-first SMTP: Vaultwarden, scripts, alerts, systemd failure notifications, and recovery-kit attachment emails submit to the Postfix sidecar, which relays to your external SMTP provider. Keep Postfix enabled for production reliability.
-
-See [EMAIL.md](EMAIL.md) for the full reference. Advanced options in that document include:
-
-- API-first operational alerts with `EMAIL_MODE=auto` and `EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend`.
-- Mailgun region overrides.
-- Direct SMTP emergency fallback semantics.
-- Postfix queue/log troubleshooting.
-
-When switching upstream SMTP relays, change only the external relay settings:
-
-```bash
-SMTP_HOST=smtp.sendgrid.net
-SMTP_PORT=587
-SMTP_SECURITY=starttls
-SMTP_USERNAME=apikey
-SMTP_FROM=noreply@vault.yourdomain.com
-ALLOWED_SENDER_DOMAINS=yourdomain.com
-sudo ./utilities/secrets-rotate.sh smtp_password
-```
-
-Do not point Vaultwarden directly at the external relay in normal production. Keep:
-
-```bash
-VW_SMTP_HOST=postfix
-VW_SMTP_PORT=587
-VW_SMTP_SECURITY=off
-VW_SMTP_AUTH_MECHANISM=none
-VW_SMTP_EXPLICIT_TLS=false
-```
-
-### Decoupled VaultWarden Email Override
-
-The `docker-compose.override.yml.example` is provided to decouple VaultWarden's built-in SMTP from the `lib/common.sh` (email functions) chain (e.g. to route VaultWarden app emails through a different provider than maintenance/health alert emails):
-
-```bash
-cp docker-compose.override.yml.example docker-compose.override.yml
-nano docker-compose.override.yml   # customise VaultWarden SMTP overrides
-```
-
-### Testing Email Modes
-
-```bash
-# Normal Postfix-backed operational alert path
-sudo ./maintenance.sh test-email --verbose
-make test-email
-
-# Advanced API-mode checks only when EMAIL_MODE=auto/api is configured
-EMAIL_MODE=api  sudo ./maintenance.sh test-email --verbose
-EMAIL_MODE=smtp sudo ./maintenance.sh test-email --verbose
-EMAIL_MODE=host sudo ./maintenance.sh test-email --verbose  # legacy direct-SMTP alias
-```
-
----
-
-## 📦 Storage Customisation
-
-### External Database
-
-```yaml
-# Edit docker-compose.yml.example
-services:
-  vaultwarden:
-    environment:
-      - DATABASE_URL=postgresql://user:pass@pg-host:5432/vaultwarden
-      # or MySQL: mysql://user:pass@mysql-host:3306/vaultwarden
-```
-
-### NFS / Separate Volume Mounts
-
-```yaml
-services:
-  vaultwarden:
-    volumes:
-      - /mnt/nfs/vaultwarden/attachments:/data/attachments
-```
-
-> **If using NFS for Caddy logs:** ensure log line endings are consistent — `\r\n` line endings on OCI File Storage NFS mounts may require special handling in log parsers.
-
-### Multi-Destination Backups
-
-```bash
-# After running ./backup.sh, sync the entire directory to additional remotes:
-rclone copy backups/full/ gdrive:vaultwarden-backups/full/
-rclone copy backups/full/ s3:my-bucket/vaultwarden/full/
-```
-
----
-
-## 💾 Backup Retention Customisation
-
-Default retention is **30 days** for all backup types (controlled by `BACKUP_RETENTION_DAYS` in `.env`). Override at runtime or in `.env`:
-
-```bash
-# Keep 30 days of full backups
-sudo ./backup.sh run full --keep 30
-
-# Keep 7 days of DB snapshots
-sudo ./backup.sh run db --keep 7
-```
-
-The `--keep` value **must be a positive integer**. Non-integer values are rejected with an error before any backup or cleanup operation begins.
-
-To set a permanent default, edit `BACKUP_RETENTION_DAYS` in `.env`:
-```bash
+BACKUP_VERIFICATION_MODE=quick_check
+REQUIRE_AUTHENTICATED_INTEGRITY=true
 BACKUP_RETENTION_DAYS=30
+BACKUP_RETENTION_DB_DAYS=14
+BACKUP_RETENTION_FULL_DAYS=30
+BACKUP_RETENTION_EMERGENCY_DAYS=90
 ```
 
-Per-type overrides take precedence over the global default:
-```bash
-# Per-type retention (uncomment in .env to override BACKUP_RETENTION_DAYS)
-BACKUP_RETENTION_DB_DAYS=14    # retention for db backups
-BACKUP_RETENTION_FULL_DAYS=60  # retention for full backups
-```
+### Retention
 
-> **Retention on restored hosts:** Backup retention age is calculated from the **timestamp embedded in the filename** (e.g., `vaultwarden-full-20260312-030000.tar.gz.age`), not from the file's `ctime`. This means backups restored to a new host are cleaned up correctly based on their original creation date, not the date they were copied.
+Retention preserves the newest parseable timestamped primary archive for each tier even when older than the retention window.
+
+Do not customize retention by replacing the canonical helper with `find ... -mtime +N -delete`. That would bypass the newest-recovery-point and sidecar contracts.
+
+### Verification
+
+Required quick/full verification failure is backup failure. A failed new archive is discarded and does not run normal retention/pruning/success notification behavior.
+
+Do not make verification "best effort" in a way that returns success with a known failed archive.
+
+### Emergency backup protection
+
+Emergency archives can contain staged `/etc/vaultwarden` operational key/config material.
+
+They must remain independently sealed using passphrase mode or a separate `EMERGENCY_BACKUP_AGE_RECIPIENT`.
+
+Do not configure emergency archives to be encrypted only to the operational Age key they carry.
+
+See [BACKUP-RESTORE.md](BACKUP-RESTORE.md).
 
 ---
 
-## ⚡ Performance Tuning
+## rclone customization
 
-### Database (SQLite)
+The normal root-operated automation path uses:
 
-WAL mode is enabled automatically. To tune further, use `sqlite3` from the host (the VaultWarden container does not ship `sqlite3`):
-
-```bash
-# Run against the host-accessible database file
-sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata/db.sqlite3" \
-  "PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2000;"
+```text
+/etc/vaultwarden/rclone.conf
 ```
 
-> ⚠️ Only run manual PRAGMAs when VaultWarden is stopped to avoid WAL conflicts: `docker compose stop vaultwarden` first, then restart with `docker compose start vaultwarden`.
+Create/update source configuration through normal rclone tooling, then reinstall/validate systemd runtime:
 
-### Caddy — HTTP/3 and Compression
+```bash
+rclone config
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+```
 
-```caddyfile
-# Edit caddy/Caddyfile — global options block
-{
-    servers {
-        protocol { experimental_http3 }
-        idle_timeout 5m
-        read_header_timeout 10s
-    }
-}
+The backup config validator accepts the canonical `/root/.config/rclone/rclone.conf` fallback only when the resolved path is exactly that regular file, is root-owned, and is not world-writable.
 
-# Inside the site block
-encode {
-    gzip 6
-    zstd
-    minimum_length 256
-}
+It does not make arbitrary `/root` paths acceptable.
+
+Do not point `RCLONE_CONFIG` at sensitive system files or a symlink resolving into protected paths.
+
+---
+
+## Storage customization
+
+Boot-volume mode is supported. A dedicated data volume is optional.
+
+Current defaults:
+
+```bash
+PROJECT_STATE_DIR=/var/lib/vaultwarden
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=/mnt/vw-data
+```
+
+For an attached volume, `PROJECT_STATE_DIR` must match `DATA_VOLUME_MOUNT` and the `.vw-data-volume` sentinel/mount contract must pass.
+
+Use stable device paths where available:
+
+```text
+/dev/disk/by-id/...
+/dev/disk/by-uuid/...
+```
+
+Do not put a provider-specific device path into the default template.
+
+### Existing filesystem adoption
+
+Existing ext4/xfs adoption is an explicit operator decision.
+
+For non-interactive setup, use the documented `DATA_VOLUME_EXISTING_FS_OK=true` gate for the run when you intentionally adopt an existing filesystem.
+
+### Formatting
+
+First-install storage setup and migration have explicit formatting gates.
+
+Migration uses:
+
+```bash
+--force-format
+```
+
+`--force` is not formatting authorization.
+
+See [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md).
+
+---
+
+## systemd schedule customization
+
+Managed timer sources live in:
+
+```text
+systemd/*.timer
+```
+
+The canonical managed timer list is owned by `utilities/setup-systemd.sh`:
+
+```text
+vaultwarden-maintenance.timer
+vaultwarden-db-backup.timer
+vaultwarden-full-backup.timer
+vaultwarden-health.timer
+vaultwarden-dns-update.timer
+vaultwarden-firewall-update.timer
+```
+
+To change a schedule:
+
+1. edit the owning timer source under `systemd/`;
+2. keep the unit's service/operation contention contract intact;
+3. update focused tests when the schedule/managed-unit contract is protected structurally;
+4. install the current unit set;
+5. validate every managed timer.
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo make timers
+```
+
+Do not maintain a second six-timer list in smoke tests or local documentation automation. `setup-systemd.sh validate` is the canonical installed automation-readiness check.
+
+### Recovery/manual inspection
+
+For a host that is not ready to run scheduled jobs:
+
+```bash
+sudo ./setup.sh systemd install --no-enable-now
+```
+
+Enable/start only after readiness inspection:
+
+```bash
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo ./utilities/smoke-test.sh
 ```
 
 ---
 
-## 🧪 Development Environment
+## Failure notifications
 
-```yaml
-# docker-compose.override.yml — dev overrides
-services:
-  vaultwarden:
-    environment:
-      - SIGNUPS_ALLOWED=true
-      - LOG_LEVEL=debug
-      - DOMAIN=http://localhost:8080
-    ports:
-      - "8080:80"
-  caddy:
-    deploy:
-      replicas: 0
+Managed systemd services use the repository's notification integration, including the template unit where service instance context is required.
+
+Operational email delivery follows [EMAIL.md](EMAIL.md).
+
+Expected shared-operation contention must not produce a false incident. A real failure must not be converted into clean contention merely to keep a timer green.
+
+When adding a managed unit, inspect:
+
+```text
+systemd/
+utilities/setup-systemd.sh
+utilities/notify-failure.sh
 ```
 
-```bash
-make dev-setup     # setup dev environment
-./tests/run-tests.sh all  # run regression suite
-make test-config   # validate Docker Compose config
-make dry-run       # preview all operations
-```
+and add the unit to the existing canonical install/validation ownership only when it is truly a managed production unit.
 
 ---
 
-## 🔌 Integrations
+## Resource limits
 
-### SSO via OAuth2 Proxy
+The production Compose file uses explicit top-level resource controls for core containers where standalone Docker Compose enforces them, including memory/swap limits and selected CPU/PID controls.
 
-```caddyfile
-# Edit caddy/Caddyfile
-vault.yourdomain.com {
-    forward_auth oauth2-proxy:4180 {
-        uri /oauth2/auth
-        copy_headers X-Auth-Request-User X-Auth-Request-Email
-    }
-    reverse_proxy vaultwarden:80
-}
-```
+The defaults are tuned for a small production host, not specifically for OCI ARM or one cloud instance shape.
 
-### Webhook Notifications
+When changing limits:
 
-```bash
-# Call from cron or health check scripts
-curl -sX POST https://your-webhook-url/notify \
-  -H "Content-Type: application/json" \
-  -d "{\"event\":\"$1\",\"message\":\"$2\",\"timestamp\":\"$(date -Iseconds)\"}"
-```
+- preserve both amd64 and arm64 support;
+- use top-level Compose properties that standalone Compose actually enforces for the intended control;
+- remember that `deploy.resources` is primarily a Swarm construct and is not the sole enforcement source for this repository;
+- verify container health and host memory pressure after changes.
+
+Do not add a new resource scheduler or orchestration platform for a ten-user appliance.
 
 ---
 
-## ✅ Customisation Checklist
+## Dependency pin customization
 
-- Edit `.example` templates — never generated files
-- Validate with `docker compose config` before applying
-- Run `sudo ./setup.sh install --force ...` to regenerate
-- Restart with `./startup.sh --force`
-- Verify with `./maintenance.sh health` or `make health`
-- Commit template changes to version control
-- Create a backup before major changes: `./backup.sh run full`
-- After re-installing automation: `sudo ./setup.sh systemd install && systemctl list-timers --all | grep vaultwarden`
+Host setup owns pinned/default versions for architecture-sensitive downloaded tools such as SOPS and Mike Farah `yq` v4.
+
+The current setup-system defaults include:
+
+```text
+SOPS v3.13.2
+yq v4.53.3
+```
+
+The system preparation path validates the implementation/interface the repository actually needs.
+
+Do not install Ubuntu's `python-yq` and assume it satisfies the Mike Farah `yq` v4 syntax used by the project.
+
+Use the supported setup path:
+
+```bash
+sudo ./utilities/setup-system.sh
+```
+
+For an intentional SOPS override, use the current documented setup option rather than editing download URLs by hand:
+
+```bash
+sudo ./utilities/setup-system.sh --sops-version vX.Y.Z
+```
+
+`--use-latest` is an explicit advanced mode; it is not the default reproducible production path.
+
+---
+
+## Adding a new secret
+
+`secrets-schema.yaml` is the single secret-key schema source of truth.
+
+When adding a secret:
+
+1. add the key and metadata to `secrets-schema.yaml`;
+2. choose the correct fixed transform contract;
+3. choose collection mode and conditional function only from supported schema behavior;
+4. define the closed apply type/targets;
+5. update the consuming runtime path;
+6. add focused schema/secret behavior tests;
+7. regenerate/update operator documentation where the new key is user-facing.
+
+Do not add a parallel key array to setup, edit, rotate, docs generation, and tests.
+
+See [SECRETS-SCHEMA.md](SECRETS-SCHEMA.md).
+
+---
+
+## Adding a public script option or subcommand
+
+The public script interface is an operator API.
+
+Before changing grammar, search:
+
+- Makefile;
+- dashboard;
+- systemd units;
+- top-level dispatchers;
+- nested shell calls;
+- permanent domain tests;
+- command-reference generator/output;
+- hand-maintained docs.
+
+Options must validate required values before shifting. Options must apply only to the subcommands that use them. Unknown arguments should fail clearly.
+
+After changing public help text:
+
+```bash
+bash utilities/write-command-reference.sh
+```
+
+Do not hand-edit [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
+
+---
+
+## Advanced change validation
+
+Use the lowest-cost meaningful layer for the change.
+
+Common checks include:
+
+```bash
+git diff --check
+```
+
+```bash
+find . \
+  -path './.git' -prune -o \
+  -type f -name '*.sh' -print0 \
+  | xargs -0 -n 1 bash -n
+```
+
+```bash
+find . \
+  -path './.git' -prune -o \
+  -type f -name '*.sh' -print0 \
+  | xargs -0 shellcheck -x --severity=warning
+```
+
+```bash
+./tests/run-tests.sh all
+```
+
+```bash
+docker compose \
+  --env-file .env.example \
+  -f docker-compose.yml.example \
+  config --quiet
+```
+
+For destructive storage/systemd/recovery behavior, a real Noble production-host acceptance test may be required. Do not claim that macOS parser tests or repository CI prove Linux `/proc`, `flock`, systemd, apt/dpkg, iptables, or block-device behavior.
