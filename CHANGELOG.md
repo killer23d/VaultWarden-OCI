@@ -4,168 +4,79 @@ All notable changes to VaultWarden-OCI are documented in this file.
 This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
-## [Unreleased]
-
-- Add `utilities/env-edit.sh` as the owned environment workflow for non-interactive sync, interactive repo `.env` edits, and read-only status reporting.
-- Add `make edit-env` and keep `make sync-env`/startup paths syncing generated runtime env artifacts before service starts.
-- Make env sync fail closed when configured data-volume storage is missing, mismatched, unmounted, or blocked by an incomplete migration state.
-
-- Add resilient persistent state and disaster recovery: authoritative state-volume `install.env`, persistent SOPS ciphertext, transient `/run` Docker secret files, operational plus offline Age recipients, standalone recovery, and a printable recovery card.
-
-
-_(No unreleased changes yet — add entries here as work is merged.)_
-
----
-## [1.0.0] — 2026-03-26
-
----
 
 ## [Unreleased]
 
 ### Added
-- `log_phase` progress bar in `lib/log.sh`; `setup.sh` now calls it for all 6
-  install phases so operators can track progress during the 3–8 minute install
-  (ux.md #1)
-- `spinner_start` / `spinner_stop` in `lib/log.sh`; `lib/common.sh`
-  `download_file()` wraps both `curl` and `wget` attempts with a live spinner
-  (ux.md #2)
-- Dashboard live-stats forced to redraw after `Start` (option 1) and `Stop`
-  (option 2) so container state is never stale on the next render (ux.md #3)
-- `TZ_DISPLAY` in `dashboard.sh` now reads the `TZ` key from `.env` (fallback
-  `UTC`) instead of being hardcoded to `America/Vancouver` (ux.md #4)
-- Post-install summary in `setup.sh` split into two clear screens: critical
-  credentials first (with a mandatory Enter gate), next-steps second; uses the
-  shared `press_enter_to_continue` helper (ux.md #5, #10)
-- `_confirm_destructive()` in `dashboard.sh`; `Stop Stack` (option 2) and
-  `Prune Docker Resources` (option 6) now require explicit `y` confirmation
-  before executing (ux.md #6)
-- Destructive menu items color-coded: `Stop Stack` → red, `Prune` → yellow,
-  `Uninstall` → red across all dashboard menus (ux.md #7)
-- `log_header()` in `lib/log.sh` uses `wc -m` for multibyte-safe underline
-  length so emoji headers no longer render with a short underline (ux.md #8)
-- `_log_dry_prefix()` in `lib/log.sh`; all log functions prepend a blue
-  `[DRY RUN]` tag when `DRY_RUN=true` (ux.md #9)
-- `press_enter_to_continue()` added to `lib/common.sh`; all bare `read -r`
-  prompts in `setup.sh` replaced with this shared helper (ux.md #10)
-- `--version` / `-V` flag added to `setup.sh`; `draw_header()` in
-  `dashboard.sh` now shows `v<VERSION>` from the `VERSION` file (ux.md #11)
-- `draw_live_stats()` backup result now uses `grep -oE` to extract only the
-  keyword (PASS/FAIL/ERROR/SUCCESS) and color-codes it green/red/yellow;
-  prevents raw log lines from overflowing narrow terminals (ux.md #12)
-- Per-check timing shim (`_timed_check`) in `smoke-test.sh`; checks taking
-  over 2 s emit a `log_warn` with elapsed milliseconds (ux.md #13)
-- `log_hint()` added to `lib/log.sh` with a blue `HINT →` prefix; used in
-  `restore-run.sh` for decryption-failure guidance and in `lib/common.sh`
-  `require_root()` (ux.md #14)
-- `Makefile` `setup:` target now validates that `DOMAIN` and `ADMIN_EMAIL`
-  in `.env` are not still placeholder values before calling `setup.sh`
-  (ux.md #15)
-- Dashboard unban-IP prompt validates input with `validate_ip()` from
-  `lib/validate.sh` before passing to `cscli` (ux.md #16)
-- `_warn_force_destructive()` in `setup.sh` prints a prominent Unicode box
-  warning when `--force` is used; requires typed `YES` confirmation (ux.md #17)
-- `_get_timestamp()` in `lib/log.sh` emits `HH:MM:SS` on TTY and
-  `YYYY-MM-DDTHH:MM:SS±TZ` when output is a file/pipe, unambiguous for
-  overnight runs (ux.md #18)
-- `maintenance.sh` top-level `show_help` normalised; `help|--help|-h` routes
-  to `show_help; exit 0` rather than recursive `exec "$0"` (ux.md #19)
-- Dashboard main event loop uses `read -r -t 60`; on timeout the screen
-  redraws live stats automatically without user input (ux.md #20)
-- Cloudflare secrets commands in `show_post_install_summary()` deduplicated
-  into a single `_cf_cmds` variable; no longer printed twice (ux.md #21)
-- `validate_email()` in `lib/validate.sh` rewritten to enforce RFC 5321
-  length limits (254 total, 64 local-part, 253 domain), reject leading/
-  trailing dots, and support modern long TLDs (ux.md #22)
-- `_secrets_health()` in `dashboard.sh` scans `.env` for `CHANGE_ME` /
-  `CHANGEME` placeholder values and surfaces a color-coded `Secrets health`
-  line in the live-stats header (ux.md #23)
-- `_log_backup_size()` in `utilities/backup-run.sh` reports human-readable
-  file size after every backup and warns when the result is suspiciously
-  small (< 4 KB) (ux.md #24)
-- `_print_drill_summary()` in `utilities/pre-production-drill.sh` rewritten
-  with color-aware pass/fail/skip counts and a bulleted failed-step list
-  (ux.md #25)
-- `wait_for_entropy()` added to `lib/common.sh`; `setup.sh` calls it before
-  the secrets phase and shows a live countdown when entropy is low (ux.md #34)
-- `require_root()` in `lib/common.sh` uses `log_hint` for the re-run-with-
-  sudo message instead of `log_error` (ux.md #42)
-- `restore-run.sh` calls `list_backups` before the restore-file prompt so
-  operators see available backups before being asked to choose (ux.md #31)
-- Per-tool install hints added to `restore-run.sh` dependency checks; each
-  missing tool prints the appropriate `apt install` / `snap install` command
-  (ux.md #46)
-- `_container_uptime()` added to `dashboard.sh`; the `Stack` live-stats line
-  shows `(up Xd Yh)` when VaultWarden is running (ux.md #47)
-- `lib/config.sh` accumulates all malformed `.env` lines and reports them
-  together rather than failing on the first (ux.md #48)
-- `utilities/pre-production-drill.sh` summary shows elapsed wall-clock time
-  (ux.md #49)
-- `--json` output added to `backup.sh list` and `maintenance health` for
-  machine-readable consumption by monitoring tools (ux.md #50)
-- `retry_with_backoff()` in `lib/common.sh` shows a live countdown on TTY
-  between retry attempts (ux.md #32)
-- Dashboard option 4 (View App Logs) wraps the `docker logs --follow` tail
-  in a subshell with `trap 'exit 0' INT` so Ctrl-C returns to the menu
-  rather than exiting the dashboard entirely (ux.md #33)
-- `dashboard.sh` sources `lib/validate.sh` at startup for the unban-IP
-  validation path (ux.md #16)
-- `dashboard.sh` `--help` / `-h` flag added (ux.md #11)
-- `edit-secrets.sh` help text normalised to match project-wide style
-- `utilities/maintenance-run.sh` uses `log_phase` for all maintenance phases
-- `setup-env.sh` calls `validate_domain` guard before writing `.env`
-- `secrets-rotate.sh` shows a 12-char SHA-256 fingerprint preview of old and
-  new values (never the value itself) and prompts for confirmation on TTY
-- `lib/email.sh` rate-limit hit upgraded from `log_debug` to `log_warn`;
-  `_rate_limit_reset_message()` shows when the window resets
-- Makefile `help:` target lists dangerous/state-changing targets in a
-  separate coloured footer block
-- `uninstall-vaultwarden.sh` now sources `lib/log.sh` (with inline fallback
-  stubs) for consistent log output
-- `smoke-test.sh` `check_docker_secrets_materialized` expanded to cover all
-  compose-defined secrets and detect `CHANGE_ME` placeholders
-- `_phase_failed()` helper in `setup.sh` centralises per-phase error
-  messaging with actionable `log_hint` guidance
+
+- Added resilient persistent-state and disaster-recovery workflows built around the authoritative state-volume `install.env`, persistent SOPS ciphertext, transient `/run/vaultwarden-oci/secrets` material, operational and optional offline Age recipients, standalone `recover.sh`, and a printable recovery card.
+- Added a three-tier backup model for `db`, `full`, and `emergency` backups. Backup creation now stages and verifies consistent SQLite snapshots, records snapshot/encryption metadata, and keeps live database/WAL files and transient runtime secrets out of full archives.
+- Added independently protected emergency recovery material and an SMTP-only encrypted recovery-kit attachment workflow using a user-selected passphrase with a minimum-length and confirmation contract.
+- Added a repository-wide operation guard for long-running and mutating workflows, with verified runtime ownership metadata, inherited foreground lock support, operation-specific locks where needed, safe contention handling, and `sudo make operations` for operator inspection.
+- Added focused storage setup guidance for attached block storage while preserving fail-closed mount-marker, migration, and device-safety checks.
+- Added schema-owned secret `apply` metadata so runtime secret reconciliation and downstream configuration actions are driven by validated schema contracts rather than loose service-name metadata.
+- Added a canonical CrowdSec Cloudflare Workers configuration apply helper and an explicit timed `yes`/`no` prompt after relevant secrets edits so operators can immediately re-render and verify the installed bouncer configuration.
+- Added machine-readable JSON output for backup listing and maintenance health status.
 
 ### Changed
-- `lib/log.sh` TTY color guard wraps all `COLOR_*` assignments (no-op in
-  non-interactive/pipe contexts)
-- Dashboard TZ label in `_epoch_to_pt()` and `draw_header()` changed from
-  hardcoded `PT` to `%Z` (reads actual timezone abbreviation)
-- `list_backups()` output reformatted with a `TYPE / FILE / SIZE / MODIFIED`
-  column header for clarity
-- `draw_main_menu()` submenu entries annotated with option counts
-- Advanced menu option 6 (Prune) label changed from green to yellow to
-  reflect caution level
+
+- Standardized the supported production-host contract on Ubuntu 24.04 LTS Noble for `amd64` and `arm64`, with Cloudflare as the mandatory edge and a root-operated lifecycle/maintenance model.
+- Normal setup now owns and verifies production dependencies required by supported workflows, including exact repository-pinned SOPS and Mike Farah `yq` contracts and the `zstd`, GnuPG, tar, and related backup/recovery tooling used by production paths.
+- Lifecycle, secrets mutation, environment configuration, systemd installation/removal, storage migration, restore, backup, maintenance, firewall, CrowdSec, key rotation, permission repair, update, and uninstall mutation paths now coordinate through the shared operation guard where appropriate.
+- Scheduled backup and maintenance services now treat expected operation contention as a clean exit `75` skip while preserving real failures; managed calendar timers no longer perform boot/install catch-up bursts and non-interactive systemd installation defaults to a manual start policy.
+- Backup retention now preserves the newest parseable timestamped recovery point and its sidecars regardless of age, fails safe around unparseable archive names, and uses the same canonical retention selection for local, remote, and dry-run reporting paths.
+- Rclone configuration resolution now narrowly accepts the canonical root fallback at `/root/.config/rclone/rclone.conf` only when the resolved file satisfies the required ownership and permission checks.
+- Restore and recovery flows now use bounded prompts, staged and validated Age keys, explicit restore plans, pre-destructive confirmation, database integrity gates before automatic restart, configurable health waits, and truthful post-restore/recovery status messaging.
+- Operator CLI contracts were normalized across public scripts: metadata paths are root-free where appropriate, unsupported option combinations and trailing arguments fail clearly, missing option values are checked before shifting, and explicit CLI values take precedence over loaded storage/migration defaults.
+- `setup-storage.sh` now supports canonical `setup`, `verify`, and `migrate` modes while retaining compatibility aliases; migration parsing and runtime-derived argument resolution are separately owned and explicit CLI mode/options win over environment defaults.
+- Secrets runtime export now reconciles schema-managed files, revokes stale or inactive schema-managed runtime secret files, and preserves operator-owned files outside the schema contract.
+- The operator `Makefile` was simplified by removing redundant developer test/lint wrappers. `./tests/run-tests.sh all` is the canonical permanent regression entry point.
+- Permanent top-level regression tests were consolidated from 30 single-purpose/historical scripts into 15 domain suites without intentionally reducing production contract coverage.
+- Generated operator command-reference capture was expanded and kept deterministic so long help output, including systemd installation/validation and recovery commands, is not silently truncated.
+- Documentation and operator prompts were aligned with the root-operated model, the three backup tiers, offline Age recipient custody, recovery-kit terminology, restore start policies, and supported systemd workflows.
 
 ### Fixed
-- `pre-production-drill.sh` used `$SOPS_AGE_KEY_FILE` where the health-check
-  helper expects `$AGE_KEY_FILE`; variable name corrected
-- `pre-production-drill.sh` `tar` extraction used GNU-only `-I` flag;
-  replaced with portable `--use-compress-program='zstd -d -T0'`
-- `pre-production-drill.sh` `grep` called with a regex string as a literal
-  match; changed to `grep -qF`
-- `smoke-test.sh` `expiry_seconds` variable renamed `expiry_date_str` to
-  match the value it actually holds
-- `smoke-test.sh` `trap - EXIT` added in `--fail-fast` path to prevent
-  double-printing the summary
+
+- Fixed global operation-lock lifetime so parent release closes the owning descriptor without explicitly unlocking a flock that may still be inherited by active child processes.
+- Fixed gaps where startup/restart/down, safe restart, secrets mutation, environment setup/edit/sync, and systemd configuration could mutate state outside the shared operation guard.
+- Fixed systemd runtime-path and installed-utility contracts, including the structured firewall utility path and operation-state runtime directory ownership.
+- Fixed systemd state-directory drop-in rendering so service-only directives are not written into timer drop-ins; systemd regression coverage now verifies generated units with `systemd-analyze verify` when available.
+- Fixed maintenance backup dry-run reporting to delegate to the canonical retention preview instead of maintaining a separate candidate-selection contract.
+- Fixed DNS/firewall contention propagation and aggregate maintenance handling so clean skips remain skips, real nonzero failures remain failures, and Bash `set -e` does not abort on the first counter increment.
+- Fixed backup dry-run contradictions and local/remote retention selection so reported deletion candidates match the canonical retention behavior.
+- Fixed uninstall/test-reset cleanup gaps: data-volume mount guards fail closed before mutation, UFW cleanup is limited to managed/historical VaultWarden rules, ambiguous normal-uninstall swap/SOPS state is preserved, and explicit test reset handles disposable `/swapfile` cleanup.
+- Fixed restore confirmation timeout/EOF handling so automatic startup is blocked when required Age key custody acknowledgement is incomplete and generated key material is preserved for manual recovery.
+- Fixed recovery and deep database maintenance status output that could previously report success after health checks failed.
+- Fixed CrowdSec Workers secret edits that could leave the installed bouncer configuration stale without an explicit operator apply path.
+- Fixed Postfix startup compatibility by removing the upstream-incompatible read-only root filesystem setting while retaining compatible container hardening controls.
+- Fixed dependency ownership gaps for supported backup paths, including normal setup ownership and verification of `zstd`.
+
+### Security
+
+- Hardened recovery-kit attachment protection so the passphrase is validated, held only for the required shell operation with tracing disabled, passed to the encryption tool through a file descriptor, and kept out of argv, environment variables, temporary passphrase files, and logs.
+- Hardened secret and Age-key custody around root-owned persistent configuration and transient runtime secret material; runtime secrets are materialized under `/run/vaultwarden-oci/secrets` for container consumption rather than treated as persistent plaintext state.
+- Hardened operation-owner attribution and stop behavior with explicit global ownership metadata, PID/start-time verification, controlled descendant signalling, and refusal to automatically terminate or bypass active apt/dpkg/repository package work.
+- Hardened data-volume, restore, and uninstall paths to fail closed when mount identity, migration state, archive requirements, or database integrity cannot be safely established.
+- Hardened backup encryption/verification metadata and emergency backup policy so archives containing operational key material cannot rely solely on that same operational Age recipient for protection.
 
 ---
 
 ## [1.0.0] — 2026-03-26
 
 ### Added
-- Initial public release of VaultWarden-OCI
-- Docker Compose stack: VaultWarden + Caddy + Postfix
-- SOPS + Age encryption for secrets at rest
-- Automated backup system (incremental DB + full)
-- CrowdSec integration with Cloudflare Worker bouncer
-- Systemd timer units for backup and maintenance
-- Interactive `setup.sh` install wizard
-- `dashboard.sh` AMTM-style operations menu
-- `smoke-test.sh` post-install verification
-- `pre-production-drill.sh` go-live readiness checker
-- `restore-run.sh` interactive disaster-recovery tool
-- `edit-secrets.sh` SOPS-backed secrets management CLI
+
+- Initial public release of VaultWarden-OCI.
+- Docker Compose stack: VaultWarden, Caddy, and Postfix.
+- SOPS and Age encryption for secrets at rest.
+- Automated backup system with database and full backups.
+- CrowdSec integration with the Cloudflare Worker bouncer.
+- Systemd timer units for backup and maintenance.
+- Interactive `setup.sh` install wizard.
+- `dashboard.sh` operations menu.
+- `smoke-test.sh` post-install verification.
+- `pre-production-drill.sh` go-live readiness checker.
+- `restore-run.sh` interactive disaster-recovery tool.
+- `edit-secrets.sh` SOPS-backed secrets management CLI.
 
 [1.0.0]: https://github.com/killer23d/VaultWarden-OCI/releases/tag/v1.0.0
 [Unreleased]: https://github.com/killer23d/VaultWarden-OCI/compare/v1.0.0...HEAD
