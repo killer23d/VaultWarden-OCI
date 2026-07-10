@@ -193,6 +193,15 @@ Do not expose CrowdSec LAPI publicly merely to resolve a local port conflict. Th
 
 CrowdSec acquisition is configured through the repository's `crowdsec/acquis.yaml` and installed CrowdSec state.
 
+The normal setup path installs and reconciles this collection set:
+
+```text
+crowdsecurity/caddy
+crowdsecurity/linux
+crowdsecurity/iptables
+Dominic-Wagner/vaultwarden
+```
+
 The intended signal sources are the project's current Vaultwarden/Caddy logs and host SSH authentication logs.
 
 Check acquisition/metrics:

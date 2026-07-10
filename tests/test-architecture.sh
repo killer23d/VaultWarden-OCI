@@ -354,21 +354,21 @@ grep -Fq "'caddy/**'" .github/workflows/doc-drift.yml \
 grep -Fq "'AGENTS.md'" .github/workflows/doc-drift.yml \
     || fail 'AGENTS changes must trigger the permanent workflow'
 
-grep -Fq 'Ubuntu 24.04 Noble amd64' AGENTS.md \
-    || fail 'AGENTS must document the Noble amd64 production contract'
-grep -Fq 'Ubuntu 24.04 Noble arm64' AGENTS.md \
-    || fail 'AGENTS must document the Noble arm64 production contract'
+grep -Fq -- '- Ubuntu 24.04 LTS Noble;' AGENTS.md \
+    || fail 'AGENTS must document the Noble production contract'
+grep -Fq -- '- amd64 or arm64;' AGENTS.md \
+    || fail 'AGENTS must document the amd64/arm64 production contract'
 ! grep -Fq 'Ubuntu 22.04 LTS Jammy or Ubuntu 24.04 LTS Noble' AGENTS.md \
     || fail 'AGENTS must not retain the obsolete Jammy/Noble production matrix'
 grep -Fq 'Ubuntu 24.04 LTS Noble' README.md \
     || fail 'README must state the Noble production contract'
 grep -Fq 'Ubuntu 24.04 LTS Noble host on amd64 or arm64' docs/PROJECT-BOUNDARY.md \
     || fail 'PROJECT-BOUNDARY must state Noble amd64/arm64'
-grep -Fq 'Ubuntu 24.04 LTS Noble host on amd64 or arm64' docs/DISASTER-RECOVERY.md \
+grep -Fq 'Use Ubuntu 24.04 LTS Noble on amd64 or arm64.' docs/DISASTER-RECOVERY.md \
     || fail 'DISASTER-RECOVERY must state Noble amd64/arm64'
 grep -Fq 'Use Ubuntu 24.04 LTS Noble on amd64 or arm64.' docs/RECOVERY-CARD.md \
     || fail 'RECOVERY-CARD must state Noble amd64/arm64'
-grep -Fq 'provider firewall, security group, or network firewall' RUNBOOK.md \
+grep -Fq 'provider firewall/security group/network firewall' RUNBOOK.md \
     || fail 'RUNBOOK must use provider-neutral firewall wording'
 ! grep -Fq 'Configure OCI Security List' RUNBOOK.md \
     || fail 'RUNBOOK must not present OCI Security List as universal setup'

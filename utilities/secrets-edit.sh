@@ -87,6 +87,7 @@ require_root "$@"
 source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+source "${PROJECT_ROOT}/lib/crowdsec-worker.sh"
 
 _secrets_edit_policy="fail"
 if [[ ! -t 0 || ! -t 1 ]]; then
@@ -297,8 +298,8 @@ _print_post_edit_apply_guidance() {
                 done
                 ;;
             crowdsec_worker_config)
-                log_warn "  ${key}: CrowdSec Workers config is stale until re-rendered."
-                log_warn "  Retry/apply exactly: sudo ./utilities/crowdsec-worker-apply.sh"
+                # This narrow apply type is handled once after the ordinary
+                # per-key guidance, regardless of how many matching keys changed.
                 ;;
             none)
                 log_info "  ${key}: no restart required."
@@ -308,6 +309,77 @@ _print_post_edit_apply_guidance() {
                 ;;
         esac
     done
+}
+
+_changed_keys_require_crowdsec_worker_config() {
+    local key apply_type
+    for key in "$@"; do
+        schema_key_exists "$key" 2>/dev/null || continue
+        apply_type=$(schema_apply_type_for_key "$key" 2>/dev/null || printf 'none')
+        [[ "$apply_type" == "crowdsec_worker_config" ]] && return 0
+    done
+    return 1
+}
+
+_log_crowdsec_worker_config_stale() {
+    log_warn "CrowdSec Workers config remains stale."
+    log_warn "Apply the updated credentials before relying on the bouncer:"
+    log_warn "  sudo ./utilities/crowdsec-worker-apply.sh"
+}
+
+_offer_crowdsec_worker_config_apply() {
+    local changed_keys=("$@") response
+    _changed_keys_require_crowdsec_worker_config "${changed_keys[@]}" || return 0
+
+    printf '%s\n' "CrowdSec Workers credentials changed." >&2
+    if ! read -r -t 30 -p "Re-render and apply CrowdSec Cloudflare Worker bouncer config? [yes/no]: " response; then
+        log_warn "No input received within 30s or input closed; CrowdSec Workers config was not re-rendered."
+        _log_crowdsec_worker_config_stale
+        return 0
+    fi
+
+    case "$response" in
+        yes)
+            if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" != "true" ]]; then
+                log_warn "CrowdSec Workers config apply skipped: CLOUDFLARE_PROXY_ENABLED is not true."
+                log_warn "Secrets were updated, but no active Worker consumer was re-rendered or service-verified."
+                return 0
+            fi
+            if crowdsec_worker_apply_config --require-service; then
+                log_success "CrowdSec Cloudflare Worker bouncer config applied successfully."
+                return 0
+            fi
+            log_error "Secrets were updated, but CrowdSec Workers config apply failed."
+            log_warn "The installed bouncer config may still contain the previous credentials."
+            log_warn "Retry after fixing the reported issue:"
+            log_warn "  sudo ./utilities/crowdsec-worker-apply.sh"
+            return 1
+            ;;
+        no)
+            _log_crowdsec_worker_config_stale
+            return 0
+            ;;
+        *)
+            log_warn "Invalid response; CrowdSec Workers config was not re-rendered."
+            _log_crowdsec_worker_config_stale
+            return 0
+            ;;
+    esac
+}
+
+_run_post_edit_workflows() {
+    local changed_keys=("$@") crowdsec_apply_rc=0
+    if [[ ${#changed_keys[@]} -gt 0 ]]; then
+        _print_post_edit_apply_guidance "${changed_keys[@]}"
+        if _offer_crowdsec_worker_config_apply "${changed_keys[@]}"; then
+            :
+        else
+            crowdsec_apply_rc=$?
+        fi
+    fi
+
+    offer_recovery_kit_export "true"
+    return "$crowdsec_apply_rc"
 }
 
 # Interactively edit secrets with YAML validation and atomic re-encryption.
@@ -498,15 +570,11 @@ do_edit() {
     fi
     log_success "Runtime secret files synchronized"
 
+    local -a _changed_key_array=()
     if [[ -n "$changed_keys" ]]; then
-        local -a _changed_key_array
         mapfile -t _changed_key_array <<< "$changed_keys"
-        _print_post_edit_apply_guidance "${_changed_key_array[@]}"
     fi
-
-    offer_recovery_kit_export "true"
-
-    return 0
+    _run_post_edit_workflows "${_changed_key_array[@]}"
 }
 
 main() {

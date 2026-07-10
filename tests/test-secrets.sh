@@ -407,6 +407,131 @@ printf 'Schema dependency contract tests passed.\n'
 
 check_schema_dependency_contracts
 
+check_crowdsec_worker_post_edit_apply() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+sed -n '/^_changed_keys_require_crowdsec_worker_config()/,/^# Interactively edit secrets/p' \
+    "$ROOT/utilities/secrets-edit.sh" > "$TMP/post-edit-apply-functions.sh"
+# shellcheck source=/dev/null
+source "$TMP/post-edit-apply-functions.sh"
+
+schema_key_exists() { [[ "$1" != "unknown_key" ]]; }
+schema_apply_type_for_key() {
+    case "$1" in
+        custom_worker_credential|another_worker_credential) printf 'crowdsec_worker_config\n' ;;
+        *) printf 'none\n' ;;
+    esac
+}
+log_info() { printf 'INFO: %s\n' "$*"; }
+log_warn() { printf 'WARN: %s\n' "$*"; }
+log_error() { printf 'ERROR: %s\n' "$*"; }
+log_success() { printf 'SUCCESS: %s\n' "$*"; }
+
+apply_calls=0
+crowdsec_worker_apply_config() {
+    [[ "$1" == "--require-service" ]] || fail "CrowdSec apply helper did not receive --require-service"
+    apply_calls=$((apply_calls + 1))
+    return "${MOCK_APPLY_STATUS:-0}"
+}
+
+CLOUDFLARE_PROXY_ENABLED=true \
+    _offer_crowdsec_worker_config_apply custom_worker_credential another_worker_credential \
+    <<< "yes" >"$TMP/yes.out" 2>&1 || fail "yes apply offer failed"
+[[ "$apply_calls" -eq 1 ]] || fail "multiple CrowdSec worker keys did not produce exactly one apply"
+grep -Fq 'CrowdSec Workers credentials changed.' "$TMP/yes.out" \
+    || fail "CrowdSec worker credential change did not select offer path"
+
+apply_calls=0
+CLOUDFLARE_PROXY_ENABLED=false \
+    _offer_crowdsec_worker_config_apply custom_worker_credential \
+    <<< "yes" >"$TMP/disabled.out" 2>&1 || fail "disabled Cloudflare proxy must preserve successful secrets edit"
+[[ "$apply_calls" -eq 0 ]] || fail "disabled Cloudflare proxy invoked CrowdSec worker apply helper"
+grep -Fq 'CrowdSec Workers config apply skipped: CLOUDFLARE_PROXY_ENABLED is not true.' "$TMP/disabled.out" \
+    || fail "disabled Cloudflare proxy did not report skipped apply"
+grep -Fq 'no active Worker consumer was re-rendered or service-verified' "$TMP/disabled.out" \
+    || fail "disabled Cloudflare proxy did not describe unapplied Worker state"
+if grep -Fq 'CrowdSec Cloudflare Worker bouncer config applied successfully.' "$TMP/disabled.out"; then
+    fail "disabled Cloudflare proxy falsely reported successful apply"
+fi
+
+apply_calls=0
+_offer_crowdsec_worker_config_apply custom_worker_credential \
+    <<< "no" >"$TMP/no.out" 2>&1 || fail "no response must preserve successful secrets edit"
+[[ "$apply_calls" -eq 0 ]] || fail "no response invoked CrowdSec worker apply helper"
+grep -Fq 'sudo ./utilities/crowdsec-worker-apply.sh' "$TMP/no.out" \
+    || fail "no response omitted CrowdSec worker apply retry command"
+
+apply_calls=0
+_offer_crowdsec_worker_config_apply custom_worker_credential \
+    </dev/null >"$TMP/eof.out" 2>&1 || fail "EOF must preserve successful secrets edit"
+[[ "$apply_calls" -eq 0 ]] || fail "EOF invoked CrowdSec worker apply helper"
+grep -Fq 'sudo ./utilities/crowdsec-worker-apply.sh' "$TMP/eof.out" \
+    || fail "EOF omitted CrowdSec worker apply retry command"
+
+apply_calls=0
+read() { return 1; }
+_offer_crowdsec_worker_config_apply custom_worker_credential \
+    >"$TMP/timeout.out" 2>&1 || fail "timeout must preserve successful secrets edit"
+unset -f read
+[[ "$apply_calls" -eq 0 ]] || fail "timeout invoked CrowdSec worker apply helper"
+grep -Fq 'sudo ./utilities/crowdsec-worker-apply.sh' "$TMP/timeout.out" \
+    || fail "timeout omitted CrowdSec worker apply retry command"
+
+apply_calls=0
+_offer_crowdsec_worker_config_apply custom_worker_credential \
+    <<< "y" >"$TMP/invalid.out" 2>&1 || fail "invalid response must preserve successful secrets edit"
+[[ "$apply_calls" -eq 0 ]] || fail "invalid response invoked CrowdSec worker apply helper"
+grep -Fq 'Invalid response; CrowdSec Workers config was not re-rendered.' "$TMP/invalid.out" \
+    || fail "invalid response was not rejected"
+
+apply_calls=0
+if CLOUDFLARE_PROXY_ENABLED=true MOCK_APPLY_STATUS=1 \
+    _offer_crowdsec_worker_config_apply custom_worker_credential \
+    <<< "yes" >"$TMP/failure.out" 2>&1; then
+    fail "CrowdSec worker apply failure must fail the edit command"
+fi
+[[ "$apply_calls" -eq 1 ]] || fail "failed CrowdSec worker apply was not attempted exactly once"
+grep -Fq 'Secrets were updated, but CrowdSec Workers config apply failed.' "$TMP/failure.out" \
+    || fail "apply failure did not describe promoted secrets state"
+grep -Fq 'sudo ./utilities/crowdsec-worker-apply.sh' "$TMP/failure.out" \
+    || fail "apply failure omitted CrowdSec worker apply retry command"
+
+post_save_calls=0
+_print_post_edit_apply_guidance() { :; }
+offer_recovery_kit_export() { post_save_calls=$((post_save_calls + 1)); }
+apply_calls=0
+if CLOUDFLARE_PROXY_ENABLED=true MOCK_APPLY_STATUS=1 \
+    _run_post_edit_workflows custom_worker_credential \
+    <<< "yes" >"$TMP/post-save-failure.out" 2>&1; then
+    fail "post-save workflow must retain CrowdSec worker apply failure"
+fi
+[[ "$apply_calls" -eq 1 ]] || fail "post-save workflow did not attempt failed CrowdSec worker apply"
+[[ "$post_save_calls" -eq 1 ]] || fail "failed CrowdSec worker apply bypassed recovery kit offer"
+
+apply_calls=0
+_offer_crowdsec_worker_config_apply ordinary_secret unknown_key \
+    >"$TMP/non-worker.out" 2>&1 || fail "non-worker change unexpectedly failed"
+[[ "$apply_calls" -eq 0 ]] || fail "non-worker change invoked CrowdSec worker apply helper"
+[[ ! -s "$TMP/non-worker.out" ]] || fail "non-worker change showed CrowdSec worker apply prompt"
+
+grep -Fq 'read -r -t 30 -p "Re-render and apply CrowdSec Cloudflare Worker bouncer config? [yes/no]: "' \
+    "$ROOT/utilities/secrets-edit.sh" \
+    || fail "CrowdSec worker apply prompt contract must remain bounded to 30 seconds"
+
+printf 'CrowdSec worker post-edit apply tests passed.\n'
+)
+
+check_crowdsec_worker_post_edit_apply
+
 check_runtime_secret_reconciliation() (
 set -euo pipefail
 

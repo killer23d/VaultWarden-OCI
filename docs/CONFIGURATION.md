@@ -144,7 +144,7 @@ The default persistent state directory remains on the boot volume.
 
 ### Dedicated data-volume mode
 
-Use an explicit stable device path where available and make the state directory equal the mount point:
+Use an explicit stable device path where available and set the state directory equal to the mount point:
 
 ```bash
 DATA_VOLUME_DEVICE=/dev/disk/by-id/your-volume
