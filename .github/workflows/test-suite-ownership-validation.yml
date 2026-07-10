@@ -66,9 +66,10 @@ jobs:
           test "$(grep -Fc './tests/run-tests.sh all' /tmp/doc-drift-baseline.yml)" -eq 1
           printf '%s\n' '$ baseline workflow contract checks' 'RESULT: PASS' >> /tmp/ownership-validation.log
 
-      - name: Export validated checkout
+      - name: Export validated checkout and baseline
         if: always()
         run: |
+          git archive --format=tar.gz --output=/tmp/delta-baseline.tar.gz origin/delta
           git show origin/delta:.github/workflows/doc-drift.yml > .github/workflows/doc-drift.yml
           rm -f .github/workflows/test-suite-ownership-validation.yml
           tar --exclude=.git -czf /tmp/ownership-checkout.tar.gz .
@@ -80,4 +81,5 @@ jobs:
           path: |
             /tmp/ownership-validation.log
             /tmp/ownership-checkout.tar.gz
+            /tmp/delta-baseline.tar.gz
           retention-days: 1
