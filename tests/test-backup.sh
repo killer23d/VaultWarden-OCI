@@ -785,3 +785,128 @@ grep -q 'docker compose stop vaultwarden' "$TMP/docker.calls" || fail 'offline f
 )
 
 check_backup_db_restart_fallback
+
+check_deep_maintenance_safety_backup_contracts() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+prepare_case() {
+    local case_dir="$1"
+    mkdir -p "$case_dir/repo/utilities" "$case_dir/project/utilities" \
+        "$case_dir/state/data" "$case_dir/backups/db" "$case_dir/bin"
+    ln -s "$ROOT/lib" "$case_dir/repo/lib"
+    cp "$ROOT/utilities/maintenance-db-maint.sh" "$case_dir/repo/utilities/maintenance-db-maint.sh"
+    sed -i.bak 's/^main "\$@"$/: # test harness: do not auto-run main/' \
+        "$case_dir/repo/utilities/maintenance-db-maint.sh"
+    rm -f "$case_dir/repo/utilities/maintenance-db-maint.sh.bak"
+    printf 'SQLite format 3\000' > "$case_dir/state/data/db.sqlite3"
+
+    cat > "$case_dir/project/utilities/backup-run.sh" <<'MOCK_BACKUP'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "run db" ]] || exit 90
+if [[ "${BACKUP_BEHAVIOR:-success}" == "fail" ]]; then
+    printf 'mock backup failure\n' >&2
+    exit 19
+fi
+archive="${BACKUP_DIR}/db/db_backup_20990101_000000.sqlite3.age"
+printf 'new safety backup\n' > "$archive"
+printf 'sha\n' > "${archive}.sha256"
+printf 'hmac\n' > "${archive}.sha256.hmac"
+printf 'meta\n' > "${archive}.meta"
+MOCK_BACKUP
+    chmod +x "$case_dir/project/utilities/backup-run.sh"
+
+    cat > "$case_dir/bin/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >> "${ACTION_LOG:?}"
+exit 0
+MOCK_DOCKER
+    cat > "$case_dir/bin/sqlite3" <<'MOCK_SQLITE3'
+#!/usr/bin/env bash
+printf 'sqlite3 %s\n' "$*" >> "${ACTION_LOG:?}"
+case "$*" in
+    *integrity_check*) printf 'ok\n' ;;
+esac
+exit 0
+MOCK_SQLITE3
+    chmod +x "$case_dir/bin/docker" "$case_dir/bin/sqlite3"
+}
+
+run_case() {
+    local case_dir="$1" backup_behavior="$2" health_ready="$3" output_file="$4"
+    (
+        set +e
+        # shellcheck source=/dev/null
+        source "$case_dir/repo/utilities/maintenance-db-maint.sh"
+        PROJECT_ROOT="$case_dir/project"
+        PROJECT_STATE_DIR="$case_dir/state"
+        BACKUP_DIR="$case_dir/backups"
+        DB_DEEP_FORCE=true
+        DRY_RUN=false
+        BACKUP_BEHAVIOR="$backup_behavior"
+        HEALTH_READY="$health_ready"
+        ACTION_LOG="$case_dir/actions.log"
+        PATH="$case_dir/bin:$PATH"
+        export PROJECT_ROOT PROJECT_STATE_DIR BACKUP_DIR DB_DEEP_FORCE DRY_RUN
+        export BACKUP_BEHAVIOR HEALTH_READY ACTION_LOG PATH
+        is_root(){ return 0; }
+        require_commands(){ return 0; }
+        require_docker(){ return 0; }
+        is_service_running(){ return 1; }
+        _wait_wal_quiesce(){ return 0; }
+        wait_for_service_ready(){ [[ "$HEALTH_READY" == "true" ]]; }
+        run_deep_db_maintenance
+    ) >"$output_file" 2>&1
+}
+
+failure_case="$TMP/backup-failure"
+prepare_case "$failure_case"
+: > "$failure_case/actions.log"
+failure_rc=0
+run_case "$failure_case" fail true "$failure_case/output" || failure_rc=$?
+(( failure_rc != 0 )) || fail "--force deep maintenance continued after safety-backup failure"
+grep -Fq 'Pre-maintenance safety backup failed; refusing deep database maintenance.' "$failure_case/output" \
+    || fail "backup failure did not report truthful fail-closed output"
+[[ ! -s "$failure_case/actions.log" ]] \
+    || { cat "$failure_case/actions.log" >&2; fail "backup failure reached Docker or SQLite mutation under --force"; }
+
+success_case="$TMP/success"
+prepare_case "$success_case"
+old_archive="$success_case/backups/db/db_backup_20000101_000000.sqlite3.age"
+for suffix in '' .sha256 .sha256.hmac .meta; do
+    printf 'older retained backup\n' > "${old_archive}${suffix}"
+done
+: > "$success_case/actions.log"
+run_case "$success_case" success true "$success_case/output" \
+    || { cat "$success_case/output" >&2; fail "successful maintenance fixture failed"; }
+new_archive="$success_case/backups/db/db_backup_20990101_000000.sqlite3.age"
+for suffix in '' .sha256 .sha256.hmac .meta; do
+    [[ ! -e "${new_archive}${suffix}" ]] \
+        || fail "successful maintenance retained temporary safety-backup member: ${new_archive}${suffix}"
+    [[ -e "${old_archive}${suffix}" ]] \
+        || fail "successful maintenance removed older retained backup member: ${old_archive}${suffix}"
+done
+
+incomplete_case="$TMP/incomplete"
+prepare_case "$incomplete_case"
+: > "$incomplete_case/actions.log"
+incomplete_rc=0
+run_case "$incomplete_case" success false "$incomplete_case/output" || incomplete_rc=$?
+(( incomplete_rc != 0 )) || fail "unhealthy post-maintenance fixture unexpectedly succeeded"
+retained_archive="$incomplete_case/backups/db/db_backup_20990101_000000.sqlite3.age"
+for suffix in '' .sha256 .sha256.hmac .meta; do
+    [[ -e "${retained_archive}${suffix}" ]] \
+        || fail "incomplete maintenance removed safety-backup member: ${retained_archive}${suffix}"
+done
+grep -Fq 'Maintenance did not complete successfully. Retaining safety backup:' "$incomplete_case/output" \
+    || fail "incomplete maintenance did not report retained safety backup"
+
+printf 'PASS: deep maintenance fails closed and cleans only its successful safety-backup cohort\n'
+)
+
+check_deep_maintenance_safety_backup_contracts

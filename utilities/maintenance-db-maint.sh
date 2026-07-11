@@ -59,6 +59,42 @@ _load_env() {
     return 0
 }
 
+_find_new_db_safety_backup() {
+    local db_backup_dir="$1" marker="$2"
+    local -a candidates=()
+    mapfile -d '' -t candidates < <(
+        find "$db_backup_dir" -maxdepth 1 -type f \
+            -name 'db_backup_*.sqlite3.age' -newer "$marker" -print0 2>/dev/null \
+            | sort -z
+    )
+    (( ${#candidates[@]} > 0 )) || return 1
+    printf '%s\n' "${candidates[${#candidates[@]} - 1]}"
+}
+
+_remove_db_safety_backup_cohort() {
+    local archive="$1" member removed=0 failed=false
+    local -a members=(
+        "${archive}.sha256"
+        "${archive}.sha256.hmac"
+        "${archive}.meta"
+        "$archive"
+    )
+    for member in "${members[@]}"; do
+        [[ -e "$member" ]] || continue
+        if rm -f "$member"; then
+            (( removed++ )) || true
+        else
+            log_warn "Could not remove temporary safety-backup member: $member"
+            failed=true
+        fi
+    done
+    if [[ "$failed" == "true" ]]; then
+        log_warn "Temporary safety-backup cohort cleanup removed ${removed} file(s) but did not fully complete."
+        return 1
+    fi
+    log_success "Removed temporary safety-backup cohort: $(basename "$archive") (${removed} file(s))"
+}
+
 run_deep_db_maintenance() {
     log_info "VaultWarden Deep Database Maintenance"
     local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
@@ -101,22 +137,26 @@ run_deep_db_maintenance() {
     trap '_deep_db_cleanup' RETURN
     log_info "Step 1/6: Creating pre-maintenance safety backup..."
     local backup_ts_marker
-    backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
+    if ! backup_ts_marker=$(mktemp); then
+        log_error "Could not create a safety-backup marker; refusing deep maintenance."
+        return 1
+    fi
+    touch "$backup_ts_marker"
     log_info "Invoking: ${PROJECT_ROOT}/utilities/backup-run.sh run db"
     if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db; then
         rm -f "$backup_ts_marker"
-        log_error "Pre-maintenance safety backup failed — aborting deep maintenance"
-        if [[ "$DB_DEEP_FORCE" == "false" ]]; then
-            read -r -t 30 -p "Proceed without a safety backup? [yes/no] (default: no): " confirm_no_backup || confirm_no_backup="no"
-            [[ "${confirm_no_backup,,}" != "yes" ]] && { log_info "Maintenance cancelled"; return 1; }
-        else
-            log_warn "Proceeding without safety backup (--force specified)"
-        fi
+        log_error "Pre-maintenance safety backup failed; refusing deep database maintenance."
+        return 1
     else
         log_success "Pre-maintenance safety backup created"
         local backup_base; backup_base=$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")
-        safety_backup_file=$(find "${backup_base}/db" -name "vaultwarden-db-*.age" -newer "$backup_ts_marker" 2>/dev/null | sort | tail -1) || true
+        safety_backup_file="$(_find_new_db_safety_backup "${backup_base}/db" "$backup_ts_marker" || true)"
         rm -f "$backup_ts_marker"
+        if [[ -z "$safety_backup_file" || ! -f "$safety_backup_file" ]]; then
+            log_error "Safety backup command succeeded, but its new canonical DB archive could not be identified."
+            log_error "Refusing deep database maintenance; any newly created backup is being retained."
+            return 1
+        fi
     fi
     log_info "Stopping VaultWarden container..."
     if docker compose stop vaultwarden; then
@@ -179,15 +219,8 @@ run_deep_db_maintenance() {
     echo ""
     if [[ "$maintenance_successful" == "true" && -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
         log_info "Cleaning up temporary safety backup..."
-        local removed_sidecars=0
-        for sidecar in "${safety_backup_file}".*; do
-            if [[ -f "$sidecar" ]]; then rm -f "$sidecar"; (( removed_sidecars++ )) || true; fi
-        done
-        if rm -f "$safety_backup_file"; then
-            log_success "Removed safety backup: $(basename "$safety_backup_file") (+${removed_sidecars} sidecar(s))"
-        else
-            log_warn "Could not remove safety backup: $safety_backup_file"
-        fi
+        _remove_db_safety_backup_cohort "$safety_backup_file" \
+            || log_warn "Temporary safety-backup cleanup was incomplete; remove the named cohort manually."
     elif [[ -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
         log_warn "Maintenance did not complete successfully. Retaining safety backup: $safety_backup_file"
     fi
