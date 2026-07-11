@@ -146,6 +146,104 @@ _collect_preserved_recipients() {
     done
 }
 
+# Local live-generation transaction state. The backup directory remains the
+# durable rollback source until every coupled artifact is promoted and the new
+# canonical key decrypts the live ciphertext.
+_KEY_ROTATE_COMMITTED=false
+_KEY_ROTATE_PROMOTION_STARTED=false
+_KEY_ROTATE_ROLLBACK_DONE=false
+_KEY_ROTATE_OLD_KEY=""
+_KEY_ROTATE_LIVE_SECRETS=""
+_KEY_ROTATE_PROMOTED_DESTS=()
+_KEY_ROTATE_PROMOTED_BACKUPS=()
+_KEY_ROTATE_PROMOTED_EXISTED=()
+_KEY_ROTATE_PROMOTED_MODES=()
+_KEY_ROTATE_PROMOTED_OWNERS=()
+_KEY_ROTATE_PROMOTED_GROUPS=()
+
+_key_rotate_reset_transaction() {
+    _KEY_ROTATE_COMMITTED=false
+    _KEY_ROTATE_PROMOTION_STARTED=false
+    _KEY_ROTATE_ROLLBACK_DONE=false
+    _KEY_ROTATE_PROMOTED_DESTS=()
+    _KEY_ROTATE_PROMOTED_BACKUPS=()
+    _KEY_ROTATE_PROMOTED_EXISTED=()
+    _KEY_ROTATE_PROMOTED_MODES=()
+    _KEY_ROTATE_PROMOTED_OWNERS=()
+    _KEY_ROTATE_PROMOTED_GROUPS=()
+}
+
+_key_rotate_promote_file() {
+    local source_file="$1" dest_file="$2" backup_file="$3" existed="$4"
+    local mode="$5" owner="${6:-}" group="${7:-}"
+    local -a install_args=(-m "$mode")
+
+    # Track the destination before replacement so an install error or signal
+    # after a partial copy still restores/removes this member.
+    _KEY_ROTATE_PROMOTION_STARTED=true
+    _KEY_ROTATE_PROMOTED_DESTS+=("$dest_file")
+    _KEY_ROTATE_PROMOTED_BACKUPS+=("$backup_file")
+    _KEY_ROTATE_PROMOTED_EXISTED+=("$existed")
+    _KEY_ROTATE_PROMOTED_MODES+=("$mode")
+    _KEY_ROTATE_PROMOTED_OWNERS+=("$owner")
+    _KEY_ROTATE_PROMOTED_GROUPS+=("$group")
+
+    [[ -n "$owner" ]] && install_args+=(-o "$owner")
+    [[ -n "$group" ]] && install_args+=(-g "$group")
+    install "${install_args[@]}" "$source_file" "$dest_file"
+}
+
+_key_rotate_rollback_live_generation() {
+    [[ "$_KEY_ROTATE_COMMITTED" == "true" ]] && return 0
+    [[ "$_KEY_ROTATE_PROMOTION_STARTED" == "true" ]] || return 0
+    [[ "$_KEY_ROTATE_ROLLBACK_DONE" == "true" ]] && return 0
+    _KEY_ROTATE_ROLLBACK_DONE=true
+
+    local rollback_failed=false i dest backup existed mode owner group
+    local -a install_args=()
+    log_warn "Rotation did not commit; restoring the previous live Age/SOPS generation..."
+
+    for (( i=${#_KEY_ROTATE_PROMOTED_DESTS[@]} - 1; i >= 0; i-- )); do
+        dest="${_KEY_ROTATE_PROMOTED_DESTS[$i]}"
+        backup="${_KEY_ROTATE_PROMOTED_BACKUPS[$i]}"
+        existed="${_KEY_ROTATE_PROMOTED_EXISTED[$i]}"
+        mode="${_KEY_ROTATE_PROMOTED_MODES[$i]}"
+        owner="${_KEY_ROTATE_PROMOTED_OWNERS[$i]}"
+        group="${_KEY_ROTATE_PROMOTED_GROUPS[$i]}"
+        if [[ "$existed" == "true" ]]; then
+            install_args=(-m "$mode")
+            [[ -n "$owner" ]] && install_args+=(-o "$owner")
+            [[ -n "$group" ]] && install_args+=(-g "$group")
+            if ! install "${install_args[@]}" "$backup" "$dest"; then
+                log_error "Failed to restore rotation backup for: $dest"
+                rollback_failed=true
+            fi
+        elif ! rm -f "$dest"; then
+            log_error "Failed to remove newly created rotation artifact: $dest"
+            rollback_failed=true
+        fi
+    done
+
+    if [[ "$rollback_failed" == "false" ]]; then
+        if ! check_age_key "$_KEY_ROTATE_OLD_KEY" >/dev/null 2>&1 \
+            || ! SOPS_AGE_KEY_FILE="$_KEY_ROTATE_OLD_KEY" sops -d "$_KEY_ROTATE_LIVE_SECRETS" >/dev/null; then
+            log_error "Previous Age/SOPS generation was restored, but decryption validation failed."
+            rollback_failed=true
+        else
+            log_success "Previous Age/SOPS generation restored and decryptable."
+        fi
+    fi
+
+    [[ "$rollback_failed" == "false" ]]
+}
+
+_key_rotate_test_signal_after() {
+    local artifact="$1"
+    if [[ "${VW_TEST_KEY_ROTATE_SIGNAL_AFTER:-}" == "$artifact" ]]; then
+        kill -TERM "$BASHPID"
+    fi
+}
+
 _display_rotated_age_key_summary() {
     local key_file="$1" public_key="$2" kit_file="$3"
     local private_key_line=""
@@ -221,6 +319,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 workdir=""
+_key_rotate_reset_transaction
+_KEY_ROTATE_OLD_KEY="$current_key"
+_KEY_ROTATE_LIVE_SECRETS="$secrets_file"
 operation_acquire \
     --id key-rotate \
     --label "Age key rotation" \
@@ -228,13 +329,21 @@ operation_acquire \
 operation_set_phase "1" "Validating current Age key"
 _key_rotate_cleanup() {
     local rc=$?
+    local rollback_rc=0
+    if [[ "$_KEY_ROTATE_COMMITTED" != "true" && "$_KEY_ROTATE_PROMOTION_STARTED" == "true" ]]; then
+        _key_rotate_rollback_live_generation || rollback_rc=$?
+        if (( rc == 0 || rollback_rc != 0 )); then
+            (( rc == 0 )) && rc=1
+        fi
+    fi
     operation_release "$rc"
     [[ -n "${workdir:-}" ]] && _secure_rm "$workdir"
     return "$rc"
 }
 trap _key_rotate_cleanup EXIT
-trap 'operation_release 130; [[ -n "${workdir:-}" ]] && _secure_rm "$workdir"; exit 130' INT
-trap 'operation_release 143; [[ -n "${workdir:-}" ]] && _secure_rm "$workdir"; exit 143' HUP TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap 'exit 143' TERM
 
 if [[ "$ASSUME_YES" != "true" ]]; then
     operator_attention warn "Age key rotation" \
@@ -322,13 +431,24 @@ _stage_env_with_key "$system_env" "$system_env_tmp" "$canonical_key"
 _stage_env_with_key "$install_env" "$install_env_tmp" "$canonical_key"
 
 log_info "Backing up current key, policy, secrets, and env files to: $backup_dir"
-[[ -f "$secrets_file" ]] && install -m 600 -o root -g root "$secrets_file" "${backup_dir}/secrets.yaml"
-[[ -f "$sops_policy_file" ]] && install -m 644 "$sops_policy_file" "${backup_dir}/.sops.yaml"
-[[ -f "$system_key" ]] && install -m 600 -o root -g root "$system_key" "${backup_dir}/age-key.system.txt"
-[[ -f "$repo_key" ]] && install -m 600 "$repo_key" "${backup_dir}/age-key.repo.txt"
-[[ -f "$repo_env" ]] && install -m 600 "$repo_env" "${backup_dir}/.env"
-[[ -f "$system_env" ]] && install -m 600 -o root -g root "$system_env" "${backup_dir}/vaultwarden.env"
-[[ -f "$install_env" ]] && install -m 600 -o root -g root "$install_env" "${backup_dir}/install.env"
+secrets_existed=false
+policy_existed=false
+system_key_existed=false
+repo_key_existed=false
+repo_env_existed=false
+system_env_existed=false
+install_env_existed=false
+if [[ -f "$secrets_file" ]]; then install -m 600 -o root -g root "$secrets_file" "${backup_dir}/secrets.yaml"; secrets_existed=true; fi
+if [[ -f "$sops_policy_file" ]]; then install -m 644 "$sops_policy_file" "${backup_dir}/.sops.yaml"; policy_existed=true; fi
+if [[ -f "$system_key" ]]; then install -m 600 -o root -g root "$system_key" "${backup_dir}/age-key.system.txt"; system_key_existed=true; fi
+if [[ -f "$repo_key" ]]; then install -m 600 "$repo_key" "${backup_dir}/age-key.repo.txt"; repo_key_existed=true; fi
+if [[ -f "$repo_env" ]]; then install -m 600 "$repo_env" "${backup_dir}/.env"; repo_env_existed=true; fi
+if [[ -f "$system_env" ]]; then install -m 600 -o root -g root "$system_env" "${backup_dir}/vaultwarden.env"; system_env_existed=true; fi
+if [[ -f "$install_env" ]]; then install -m 600 -o root -g root "$install_env" "${backup_dir}/install.env"; install_env_existed=true; fi
+
+repo_env_mode="$(_stat_octal_perms "$repo_env" 2>/dev/null || printf '600')"
+repo_env_owner="$(_stat_owner "$repo_env" 2>/dev/null || printf 'root')"
+repo_env_group="$(_stat_group "$repo_env" 2>/dev/null || printf 'root')"
 
 operation_set_phase "4" "Promoting new key and rekeyed secrets"
 log_info "Promoting new key and rekeyed secrets..."
@@ -336,18 +456,32 @@ install -d -m 700 -o root -g root /etc/vaultwarden
 install -d -m 700 "$(dirname "$repo_key")"
 install -d -m 700 -o root -g root "$(dirname "$secrets_file")"
 
-install -m 600 -o root -g root "$new_key_tmp" "$system_key"
-install -m 600 "$new_key_tmp" "$repo_key"
-install -m 600 -o root -g root "$cipher_tmp" "$secrets_file"
-install -m 644 "$policy_tmp" "$sops_policy_file"
+_key_rotate_promote_file "$new_key_tmp" "$system_key" "${backup_dir}/age-key.system.txt" "$system_key_existed" 600 root root
+_key_rotate_test_signal_after system-key
+_key_rotate_promote_file "$new_key_tmp" "$repo_key" "${backup_dir}/age-key.repo.txt" "$repo_key_existed" 600 root root
+_key_rotate_test_signal_after repo-key
+_key_rotate_promote_file "$cipher_tmp" "$secrets_file" "${backup_dir}/secrets.yaml" "$secrets_existed" 600 root root
+_key_rotate_test_signal_after ciphertext
+_key_rotate_promote_file "$policy_tmp" "$sops_policy_file" "${backup_dir}/.sops.yaml" "$policy_existed" 644 root root
+_key_rotate_test_signal_after policy
 
-[[ -f "$repo_env_tmp" ]] && cp -f "$repo_env_tmp" "$repo_env"
-[[ -f "$system_env_tmp" ]] && install -m 600 -o root -g root "$system_env_tmp" "$system_env"
-[[ -f "$install_env_tmp" ]] && install -m 600 -o root -g root "$install_env_tmp" "$install_env"
+if [[ -f "$repo_env_tmp" ]]; then
+    _key_rotate_promote_file "$repo_env_tmp" "$repo_env" "${backup_dir}/.env" "$repo_env_existed" "$repo_env_mode" "$repo_env_owner" "$repo_env_group"
+    _key_rotate_test_signal_after repo-env
+fi
+if [[ -f "$system_env_tmp" ]]; then
+    _key_rotate_promote_file "$system_env_tmp" "$system_env" "${backup_dir}/vaultwarden.env" "$system_env_existed" 600 root root
+    _key_rotate_test_signal_after system-env
+fi
+if [[ -f "$install_env_tmp" ]]; then
+    _key_rotate_promote_file "$install_env_tmp" "$install_env" "${backup_dir}/install.env" "$install_env_existed" 600 root root
+    _key_rotate_test_signal_after install-env
+fi
 
 log_info "Validating promoted secrets with new key..."
 SOPS_AGE_KEY_FILE="$system_key" sops -d "$secrets_file" >/dev/null
 check_age_key "$system_key" >/dev/null
+_KEY_ROTATE_COMMITTED=true
 
 kit_file="/root/vaultwarden-recovery-kit-age-rotate-${ts}.txt"
 {

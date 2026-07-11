@@ -1013,3 +1013,97 @@ run_test 'TERM after ciphertext promotion rolls back artifacts and preserves tra
 run_test 'successful transaction preserves existing caller return trap' test_preserves_outer_return_trap
 [[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
+
+check_key_rotate_live_generation_transaction() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+log_warn() { printf 'WARN: %s\n' "$*" >&2; }
+log_error() { printf 'ERROR: %s\n' "$*" >&2; }
+log_success() { printf 'SUCCESS: %s\n' "$*" >&2; }
+
+sed -n '/^_KEY_ROTATE_COMMITTED=false$/,/^_display_rotated_age_key_summary()/p' \
+    "$ROOT/utilities/key-rotate.sh" | sed '$d' > "$TMP/key-rotate-transaction.sh"
+# shellcheck source=/dev/null
+source "$TMP/key-rotate-transaction.sh"
+
+check_age_key() {
+    [[ -s "$1" ]]
+}
+sops() {
+    local target="${*: -1}" key_value cipher_value
+    [[ "${1:-}" == "-d" ]] || return 2
+    key_value="$(cat "${SOPS_AGE_KEY_FILE:?}")"
+    cipher_value="$(cat "$target")"
+    [[ "$key_value" == "key-old" && "$cipher_value" == "cipher-old" ]] \
+        || [[ "$key_value" == "key-new" && "$cipher_value" == "cipher-new" ]]
+}
+
+mkdir -p "$TMP/live" "$TMP/backup" "$TMP/staged"
+chmod 700 "$TMP/live" "$TMP/backup" "$TMP/staged"
+artifacts=(system-key repo-key ciphertext policy repo-env system-env install-env)
+for artifact in "${artifacts[@]}"; do
+    case "$artifact" in
+        system-key|repo-key) old_value="key-old"; new_value="key-new" ;;
+        ciphertext) old_value="cipher-old"; new_value="cipher-new" ;;
+        *) old_value="${artifact}-old"; new_value="${artifact}-new" ;;
+    esac
+    printf '%s\n' "$old_value" > "$TMP/live/$artifact"
+    printf '%s\n' "$old_value" > "$TMP/backup/$artifact"
+    printf '%s\n' "$new_value" > "$TMP/staged/$artifact"
+    chmod 600 "$TMP/live/$artifact" "$TMP/backup/$artifact" "$TMP/staged/$artifact"
+done
+
+run_rotation_generation() (
+    set -euo pipefail
+    local signal_after="${1:-}"
+    _key_rotate_reset_transaction
+    _KEY_ROTATE_OLD_KEY="$TMP/live/system-key"
+    _KEY_ROTATE_LIVE_SECRETS="$TMP/live/ciphertext"
+    VW_TEST_KEY_ROTATE_SIGNAL_AFTER="$signal_after"
+    export VW_TEST_KEY_ROTATE_SIGNAL_AFTER
+    trap 'rc=$?; _key_rotate_rollback_live_generation || true; exit "$rc"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+    trap 'exit 143' TERM
+
+    local artifact
+    for artifact in "${artifacts[@]}"; do
+        _key_rotate_promote_file \
+            "$TMP/staged/$artifact" "$TMP/live/$artifact" \
+            "$TMP/backup/$artifact" true 600
+        _key_rotate_test_signal_after "$artifact"
+    done
+    SOPS_AGE_KEY_FILE="$TMP/live/system-key" sops -d "$TMP/live/ciphertext" >/dev/null
+    _KEY_ROTATE_COMMITTED=true
+)
+
+status=0
+run_rotation_generation policy >"$TMP/interrupted.out" 2>&1 || status=$?
+[[ "$status" -eq 143 ]] || fail "interrupted rotation returned $status instead of TERM status 143"
+for artifact in "${artifacts[@]}"; do
+    cmp -s "$TMP/backup/$artifact" "$TMP/live/$artifact" \
+        || fail "interrupted rotation did not restore $artifact"
+done
+SOPS_AGE_KEY_FILE="$TMP/live/system-key" sops -d "$TMP/live/ciphertext" >/dev/null \
+    || fail "restored old key does not decrypt restored ciphertext"
+grep -Fq 'Previous Age/SOPS generation restored and decryptable.' "$TMP/interrupted.out" \
+    || fail "interrupted rotation did not validate and report the restored generation"
+
+run_rotation_generation "" >"$TMP/retry.out" 2>&1 \
+    || { cat "$TMP/retry.out" >&2; fail "normal retry after interrupted rotation failed"; }
+[[ "$(cat "$TMP/live/system-key")" == "key-new" ]] \
+    || fail "normal retry did not promote the new canonical key"
+[[ "$(cat "$TMP/live/ciphertext")" == "cipher-new" ]] \
+    || fail "normal retry did not promote matching ciphertext"
+SOPS_AGE_KEY_FILE="$TMP/live/system-key" sops -d "$TMP/live/ciphertext" >/dev/null \
+    || fail "new canonical key does not decrypt live ciphertext after retry"
+
+printf 'Key rotation live-generation rollback and retry tests passed.\n'
+)
+
+check_key_rotate_live_generation_transaction
