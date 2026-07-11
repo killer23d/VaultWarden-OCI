@@ -142,12 +142,35 @@ _cs_clear_env_var() {
 
 
 # ---------------------------------------------------------------------------
-# Read the currently configured LAPI port from config.yaml.
-# Prints the port number; defaults to 8080 if not found.
+# Installed LAPI-port cohort transaction helpers.
 # ---------------------------------------------------------------------------
+_CS_LAPI_COHORT_ROOT="${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}"
+_CS_LAPI_COHORT_PATHS=(
+    "${_CS_LAPI_COHORT_ROOT}/config.yaml"
+    "${_CS_LAPI_COHORT_ROOT}/local_api_credentials.yaml"
+    "${_CS_LAPI_COHORT_ROOT}/bouncers/crowdsec-firewall-bouncer.yaml"
+    "${_CS_LAPI_COHORT_ROOT}/bouncers/crowdsec-cloudflare-worker-bouncer.yaml"
+)
+_CS_LAPI_COHORT_COMMITTED=true
+_CS_LAPI_COHORT_ROLLBACK_DONE=false
+_CS_LAPI_COHORT_ORIGINAL_PORT=""
+_CS_LAPI_COHORT_ORIGINALLY_COHERENT=false
+_CS_LAPI_COHORT_TMPDIR=""
+_CS_LAPI_COHORT_PREPARED_DESTS=()
+_CS_LAPI_COHORT_STAGED=()
+_CS_LAPI_COHORT_PREPARED_BACKUPS=()
+_CS_LAPI_COHORT_PREPARED_MODES=()
+_CS_LAPI_COHORT_PREPARED_UIDS=()
+_CS_LAPI_COHORT_PREPARED_GIDS=()
+_CS_LAPI_COHORT_PROMOTED=()
+_CS_LAPI_COHORT_BACKUPS=()
+_CS_LAPI_COHORT_MODES=()
+_CS_LAPI_COHORT_UIDS=()
+_CS_LAPI_COHORT_GIDS=()
+
 _cs_resolve_lapi_port() {
     grep -oP '(?<=listen_uri:\s{0,10}127\.0\.0\.1:)\d+' \
-        /etc/crowdsec/config.yaml 2>/dev/null \
+        "${_CS_LAPI_COHORT_ROOT}/config.yaml" 2>/dev/null \
         | head -1 \
         || echo "8090"
 }
@@ -169,45 +192,199 @@ _cs_find_free_port() {
     echo "$port"
 }
 
-# ---------------------------------------------------------------------------
-# Rewrite all CrowdSec config files from old_port -> new_port atomically.
-# ---------------------------------------------------------------------------
+_cs_lapi_member_port() {
+    local file="$1" member_path="${2:-$1}" field_pattern=""
+    case "$member_path" in
+        */config.yaml) field_pattern='listen_uri' ;;
+        */local_api_credentials.yaml) field_pattern='url' ;;
+        */crowdsec-firewall-bouncer.yaml) field_pattern='api_url' ;;
+        */crowdsec-cloudflare-worker-bouncer.yaml)
+            if grep -Eq '^[[:space:]]*lapi_url:' "$file"; then
+                field_pattern='lapi_url'
+            else
+                field_pattern='api_url'
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+    local -a matches=()
+    mapfile -t matches < <(
+        grep -E "^[[:space:]]*${field_pattern}:[[:space:]]*['\"]?http://127\\.0\\.0\\.1:[0-9]+/?['\"]?[[:space:]]*$|^[[:space:]]*${field_pattern}:[[:space:]]*127\\.0\\.0\\.1:[0-9]+[[:space:]]*$" "$file" 2>/dev/null
+    )
+    (( ${#matches[@]} == 1 )) || return 1
+    sed -E 's#.*127\.0\.0\.1:([0-9]+).*#\1#' <<< "${matches[0]}"
+}
+
+_cs_validate_lapi_port_cohort() {
+    local selected_port="$1" file member_port found=false
+    [[ "$selected_port" =~ ^[0-9]+$ ]] && (( selected_port >= 1 && selected_port <= 65535 )) || return 1
+    for file in "${_CS_LAPI_COHORT_PATHS[@]}"; do
+        [[ -f "$file" ]] || continue
+        found=true
+        member_port="$(_cs_lapi_member_port "$file")" || return 1
+        [[ "$member_port" == "$selected_port" ]] || return 1
+    done
+    [[ "$found" == "true" ]]
+}
+
+_cs_stage_lapi_member() {
+    local source_file="$1" staged_file="$2" selected_port="$3"
+    cp -p "$source_file" "$staged_file" || return 1
+    case "$source_file" in
+        */config.yaml)
+            sed -E -i "s#^([[:space:]]*listen_uri:[[:space:]]*127\\.0\\.0\\.1:)[0-9]+#\\1${selected_port}#" "$staged_file"
+            ;;
+        */local_api_credentials.yaml)
+            sed -E -i "s#^([[:space:]]*url:[[:space:]]*['\"]?http://127\\.0\\.0\\.1:)[0-9]+#\\1${selected_port}#" "$staged_file"
+            ;;
+        */crowdsec-firewall-bouncer.yaml)
+            sed -E -i "s#^([[:space:]]*api_url:[[:space:]]*['\"]?http://127\\.0\\.0\\.1:)[0-9]+#\\1${selected_port}#" "$staged_file"
+            ;;
+        */crowdsec-cloudflare-worker-bouncer.yaml)
+            sed -E -i \
+                -e "s#^([[:space:]]*lapi_url:[[:space:]]*['\"]?http://127\\.0\\.0\\.1:)[0-9]+#\\1${selected_port}#" \
+                -e "s#^([[:space:]]*api_url:[[:space:]]*['\"]?http://127\\.0\\.0\\.1:)[0-9]+#\\1${selected_port}#" \
+                "$staged_file"
+            ;;
+        *) return 1 ;;
+    esac
+    [[ "$(_cs_lapi_member_port "$staged_file" "$source_file")" == "$selected_port" ]]
+}
+
+_cs_lapi_cohort_cleanup() {
+    [[ -n "${_CS_LAPI_COHORT_TMPDIR:-}" ]] && rm -rf "$_CS_LAPI_COHORT_TMPDIR"
+    _CS_LAPI_COHORT_TMPDIR=""
+}
+
+_cs_lapi_cohort_rollback() {
+    [[ "$_CS_LAPI_COHORT_COMMITTED" == "true" ]] && return 0
+    [[ "$_CS_LAPI_COHORT_ROLLBACK_DONE" == "true" ]] && return 0
+    _CS_LAPI_COHORT_ROLLBACK_DONE=true
+    local failed=false i dest backup mode uid gid
+    for (( i=${#_CS_LAPI_COHORT_PROMOTED[@]} - 1; i >= 0; i-- )); do
+        dest="${_CS_LAPI_COHORT_PROMOTED[$i]}"
+        backup="${_CS_LAPI_COHORT_BACKUPS[$i]}"
+        mode="${_CS_LAPI_COHORT_MODES[$i]}"
+        uid="${_CS_LAPI_COHORT_UIDS[$i]}"
+        gid="${_CS_LAPI_COHORT_GIDS[$i]}"
+        if ! install -m "$mode" -o "$uid" -g "$gid" "$backup" "$dest"; then
+            log_error "Failed to restore CrowdSec LAPI cohort member: $dest"
+            failed=true
+        elif ! cmp -s "$backup" "$dest"; then
+            log_error "Restored CrowdSec LAPI cohort member did not match its protected backup: $dest"
+            failed=true
+        fi
+    done
+    if [[ "$failed" == "false" && "$_CS_LAPI_COHORT_ORIGINALLY_COHERENT" == "true" ]]; then
+        if ! _cs_validate_lapi_port_cohort "$_CS_LAPI_COHORT_ORIGINAL_PORT"; then
+            log_error "Restored CrowdSec LAPI port cohort is not coherent on its previous port."
+            failed=true
+        fi
+    fi
+    [[ "$failed" == "false" ]] && log_warn "Restored the previous CrowdSec LAPI port cohort."
+    [[ "$failed" == "false" ]]
+}
+
+_cs_lapi_cohort_fail() {
+    local rc="${1:-1}" rollback_rc=0
+    _cs_lapi_cohort_rollback || rollback_rc=$?
+    _cs_lapi_cohort_cleanup
+    (( rollback_rc == 0 )) || log_error "CrowdSec LAPI cohort rollback was incomplete."
+    return "$rc"
+}
+
+_cs_reconcile_lapi_port_cohort() {
+    local selected_port="$1" file staged backup mode uid gid prepared_count=0 promoted_count=0 i
+    [[ "$selected_port" =~ ^[0-9]+$ ]] && (( selected_port >= 1 && selected_port <= 65535 )) || {
+        log_error "Invalid selected CrowdSec LAPI port: $selected_port"
+        return 1
+    }
+
+    _CS_LAPI_COHORT_COMMITTED=false
+    _CS_LAPI_COHORT_ROLLBACK_DONE=false
+    _CS_LAPI_COHORT_ORIGINAL_PORT="$(_cs_resolve_lapi_port)"
+    _CS_LAPI_COHORT_ORIGINALLY_COHERENT=false
+    _cs_validate_lapi_port_cohort "$_CS_LAPI_COHORT_ORIGINAL_PORT" \
+        && _CS_LAPI_COHORT_ORIGINALLY_COHERENT=true
+    _CS_LAPI_COHORT_PREPARED_DESTS=()
+    _CS_LAPI_COHORT_STAGED=()
+    _CS_LAPI_COHORT_PREPARED_BACKUPS=()
+    _CS_LAPI_COHORT_PREPARED_MODES=()
+    _CS_LAPI_COHORT_PREPARED_UIDS=()
+    _CS_LAPI_COHORT_PREPARED_GIDS=()
+    _CS_LAPI_COHORT_PROMOTED=()
+    _CS_LAPI_COHORT_BACKUPS=()
+    _CS_LAPI_COHORT_MODES=()
+    _CS_LAPI_COHORT_UIDS=()
+    _CS_LAPI_COHORT_GIDS=()
+    _CS_LAPI_COHORT_TMPDIR="$(mktemp -d -p /dev/shm vw-crowdsec-lapi.XXXXXXXX 2>/dev/null \
+        || mktemp -d -t vw-crowdsec-lapi.XXXXXXXX)" || return 1
+    chmod 0700 "$_CS_LAPI_COHORT_TMPDIR" || { _cs_lapi_cohort_cleanup; return 1; }
+
+    for file in "${_CS_LAPI_COHORT_PATHS[@]}"; do
+        [[ -f "$file" ]] || continue
+        staged="${_CS_LAPI_COHORT_TMPDIR}/staged.${prepared_count}"
+        backup="${_CS_LAPI_COHORT_TMPDIR}/backup.${prepared_count}"
+        cp -p "$file" "$backup" || { _cs_lapi_cohort_fail 1; return 1; }
+        chmod 0600 "$backup" || { _cs_lapi_cohort_fail 1; return 1; }
+        _cs_stage_lapi_member "$file" "$staged" "$selected_port" \
+            || { log_error "Failed to stage/validate CrowdSec LAPI cohort member: $file"; _cs_lapi_cohort_fail 1; return 1; }
+        mode="$(stat -c '%a' "$file")" || { _cs_lapi_cohort_fail 1; return 1; }
+        uid="$(stat -c '%u' "$file")" || { _cs_lapi_cohort_fail 1; return 1; }
+        gid="$(stat -c '%g' "$file")" || { _cs_lapi_cohort_fail 1; return 1; }
+        _CS_LAPI_COHORT_PREPARED_DESTS+=("$file")
+        _CS_LAPI_COHORT_STAGED+=("$staged")
+        _CS_LAPI_COHORT_PREPARED_BACKUPS+=("$backup")
+        _CS_LAPI_COHORT_PREPARED_MODES+=("$mode")
+        _CS_LAPI_COHORT_PREPARED_UIDS+=("$uid")
+        _CS_LAPI_COHORT_PREPARED_GIDS+=("$gid")
+        (( prepared_count++ )) || true
+    done
+
+    for (( i=0; i<prepared_count; i++ )); do
+        file="${_CS_LAPI_COHORT_PREPARED_DESTS[$i]}"
+        staged="${_CS_LAPI_COHORT_STAGED[$i]}"
+        backup="${_CS_LAPI_COHORT_PREPARED_BACKUPS[$i]}"
+        mode="${_CS_LAPI_COHORT_PREPARED_MODES[$i]}"
+        uid="${_CS_LAPI_COHORT_PREPARED_UIDS[$i]}"
+        gid="${_CS_LAPI_COHORT_PREPARED_GIDS[$i]}"
+        _CS_LAPI_COHORT_PROMOTED+=("$file")
+        _CS_LAPI_COHORT_BACKUPS+=("$backup")
+        _CS_LAPI_COHORT_MODES+=("$mode")
+        _CS_LAPI_COHORT_UIDS+=("$uid")
+        _CS_LAPI_COHORT_GIDS+=("$gid")
+        install -m "$mode" -o "$uid" -g "$gid" "$staged" "$file" \
+            || { _cs_lapi_cohort_fail 1; return 1; }
+        (( promoted_count++ )) || true
+        if [[ "${VW_TEST_CROWDSEC_SIGNAL_AFTER_PORT_PROMOTION:-}" == "$promoted_count" ]]; then
+            kill -TERM "$BASHPID"
+        fi
+    done
+
+    if ! _cs_validate_lapi_port_cohort "$selected_port"; then
+        log_error "Promoted CrowdSec LAPI cohort does not agree on port ${selected_port}."
+        _cs_lapi_cohort_fail 1
+        return 1
+    fi
+    _CS_LAPI_COHORT_COMMITTED=true
+    _cs_lapi_cohort_cleanup
+    log_success "Existing CrowdSec LAPI port cohort converged on ${selected_port}."
+}
+
+_cs_ensure_lapi_port_cohort() {
+    local selected_port="$1"
+    if _cs_validate_lapi_port_cohort "$selected_port"; then
+        return 0
+    fi
+    log_warn "Detected a mixed or invalid CrowdSec LAPI port cohort; reconciling on ${selected_port}."
+    _cs_reconcile_lapi_port_cohort "$selected_port"
+}
+
 _cs_fix_port_conflict() {
-    local old_port="$1"
-    local new_port="$2"
-
+    local old_port="$1" new_port="$2"
     log_info "Auto-fixing LAPI port conflict: ${old_port} -> ${new_port}"
-
-    local _f
-    _f="/etc/crowdsec/config.yaml"
-    if [[ -f "$_f" ]]; then
-        sed -i "s|listen_uri: 127.0.0.1:${old_port}|listen_uri: 127.0.0.1:${new_port}|g" "$_f"
-        log_info "  Updated ${_f}"
-    fi
-
-    _f="/etc/crowdsec/local_api_credentials.yaml"
-    if [[ -f "$_f" ]]; then
-        sed -i "s|url: http://127.0.0.1:${old_port}|url: http://127.0.0.1:${new_port}|g" "$_f"
-        log_info "  Updated ${_f}"
-    fi
-
-    _f="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
-    if [[ -f "$_f" ]]; then
-        sed -i "s|api_url: http://127.0.0.1:${old_port}/|api_url: http://127.0.0.1:${new_port}/|g" "$_f"
-        log_info "  Updated ${_f}"
-    fi
-
-    _f="/etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml"
-    if [[ -f "$_f" ]]; then
-        sed -i \
-            -e "s|lapi_url: http://127.0.0.1:${old_port}|lapi_url: http://127.0.0.1:${new_port}|g" \
-            -e "s|api_url: http://127.0.0.1:${old_port}/|api_url: http://127.0.0.1:${new_port}/|g" \
-            "$_f"
-        log_info "  Updated ${_f}"
-    fi
-
-    systemctl daemon-reload 2>/dev/null || true
-    log_success "LAPI port rewritten to ${new_port} across all config files."
+    _cs_reconcile_lapi_port_cohort "$new_port" || return 1
+    log_success "LAPI port rewritten to ${new_port} across the existing config cohort."
 }
 
 # ---------------------------------------------------------------------------
@@ -249,7 +426,7 @@ _cs_start_service() {
         _cs_diagnose_port "${_lapi_port}"
         local _new_port
         _new_port="$(_cs_find_free_port 8090)"
-        _cs_fix_port_conflict "${_lapi_port}" "${_new_port}"
+        _cs_fix_port_conflict "${_lapi_port}" "${_new_port}" || return 1
         _lapi_port="$_new_port"
         log_info "Pre-flight port reassignment complete: LAPI will use ${_lapi_port}."
     fi
@@ -271,7 +448,7 @@ _cs_start_service() {
 
         local _new_port
         _new_port="$(_cs_find_free_port 8090)"
-        _cs_fix_port_conflict "${_lapi_port}" "${_new_port}"
+        _cs_fix_port_conflict "${_lapi_port}" "${_new_port}" || return 1
 
         systemctl reset-failed crowdsec 2>/dev/null || true
         if systemctl enable --now crowdsec 2>/dev/null; then
@@ -347,7 +524,10 @@ _cs_ensure_fw_bouncer_key() {
         local _fresh_key
         _fresh_key="$(openssl rand -hex 32)"
         cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
-        cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fresh_key" >/dev/null 2>&1 || true
+        if ! cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fresh_key" >/dev/null 2>&1; then
+            log_error "Failed to register the regenerated firewall bouncer key in CrowdSec LAPI."
+            return 1
+        fi
         sed -i "s|^api_key:.*|api_key: ${_fresh_key}|" "$_cfg"
         _CS_FW_BOUNCER_KEY_GENERATED="$_fresh_key"
         log_success "Firewall bouncer key regenerated and written to config."
@@ -363,7 +543,10 @@ _cs_ensure_fw_bouncer_key() {
                 log_warn "Existing key rejected by LAPI (likely revoked) — generating a fresh key..."
                 _existing_key="$(openssl rand -hex 32)"
                 cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
-                cscli bouncers add crowdsecurity/firewall-bouncer --key "$_existing_key" >/dev/null 2>&1 || true
+                if ! cscli bouncers add crowdsecurity/firewall-bouncer --key "$_existing_key" >/dev/null 2>&1; then
+                    log_error "Failed to register a fresh firewall bouncer key in CrowdSec LAPI."
+                    return 1
+                fi
                 sed -i "s|^api_key:.*|api_key: ${_existing_key}|" "$_cfg"
                 _CS_FW_BOUNCER_KEY_GENERATED="$_existing_key"
                 log_success "Fresh firewall bouncer key generated and written to config."
@@ -375,7 +558,10 @@ _cs_ensure_fw_bouncer_key() {
             local _new_key
             _new_key="$(openssl rand -hex 32)"
             cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
-            cscli bouncers add crowdsecurity/firewall-bouncer --key "$_new_key" >/dev/null 2>&1 || true
+            if ! cscli bouncers add crowdsecurity/firewall-bouncer --key "$_new_key" >/dev/null 2>&1; then
+                log_error "Failed to register a fresh firewall bouncer key in CrowdSec LAPI."
+                return 1
+            fi
             sed -i "s|^api_key:.*|api_key: ${_new_key}|" "$_cfg"
             _CS_FW_BOUNCER_KEY_GENERATED="$_new_key"
             log_success "Fresh firewall bouncer key generated and written to config."
@@ -499,12 +685,19 @@ if [[ "$DRY_RUN" != "true" ]] && declare -f operation_acquire >/dev/null 2>&1; t
         --specific-lock /run/lock/vaultwarden-crowdsec-setup.lock || exit $?
     _cs_operation_cleanup() {
         local rc=$?
+        local rollback_rc=0
+        if [[ "$_CS_LAPI_COHORT_COMMITTED" != "true" ]]; then
+            _cs_lapi_cohort_rollback || rollback_rc=$?
+            _cs_lapi_cohort_cleanup
+            if (( rc == 0 && rollback_rc != 0 )); then rc=1; fi
+        fi
         operation_release "$rc"
         return "$rc"
     }
     trap _cs_operation_cleanup EXIT
-    trap 'operation_release 130; exit 130' INT
-    trap 'operation_release 143; exit 143' HUP TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+    trap 'exit 143' TERM
 fi
 
 if [[ "$FORCE" == "true" && -n "$_cs_previous_state" && "$_cs_previous_state" != "complete" ]]; then
@@ -653,22 +846,35 @@ else
     # --- CRITICAL: rewrite upstream default port (8080) to 8090 immediately
     # after package install, before the service is ever started. This prevents
     # CrowdSec from racing Caddy for port 8080 on first boot.
-    if grep -q 'listen_uri: 127.0.0.1:8080' /etc/crowdsec/config.yaml 2>/dev/null; then
+    if grep -q 'listen_uri: 127.0.0.1:8080' "${_CS_LAPI_COHORT_ROOT}/config.yaml" 2>/dev/null; then
         log_info "Rewriting upstream default LAPI port 8080 -> 8090 in config.yaml..."
-        _cs_fix_port_conflict "8080" "8090"
+        _cs_fix_port_conflict "8080" "8090" || exit 1
         log_success "LAPI port pre-assigned to 8090 — Caddy owns 8080."
     fi
 fi
 
 if [[ "$DRY_RUN" != "true" ]]; then
+    _selected_lapi_port="$(_cs_resolve_lapi_port)"
+    _cs_ensure_lapi_port_cohort "$_selected_lapi_port" || {
+        log_error "CrowdSec LAPI port cohort reconciliation failed. Required services were not started."
+        exit 1
+    }
     if systemctl is-active --quiet crowdsec; then
         log_info "CrowdSec service already active — reloading configuration."
-        systemctl reload crowdsec 2>/dev/null || systemctl restart crowdsec 2>/dev/null || true
+        if ! systemctl reload crowdsec 2>/dev/null \
+            && ! systemctl restart crowdsec 2>/dev/null; then
+            log_error "CrowdSec configuration reload/restart failed."
+            exit 1
+        fi
     elif ! _cs_start_service; then
         log_error "Cannot continue with a stopped CrowdSec service."
         log_error "Resolve the issue above, then re-run: sudo ./utilities/setup-crowdsec.sh"
         exit 1
     fi
+    systemctl is-active --quiet crowdsec || {
+        log_error "CrowdSec engine is not active after setup."
+        exit 1
+    }
     log_success "CrowdSec service enabled and running."
 fi
 
@@ -684,9 +890,12 @@ _LAPI_PORT="$(_cs_resolve_lapi_port)"
 if [[ "$DRY_RUN" != "true" ]]; then
     if ! command -v ipset >/dev/null 2>&1; then
         log_warn "ipset not found — installing now (required by crowdsec-firewall-bouncer iptables backend)."
-        operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y ipset \
-            && log_success "ipset installed successfully." \
-            || log_error "Failed to install ipset — crowdsec-firewall-bouncer may not start."
+        if operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y ipset; then
+            log_success "ipset installed successfully."
+        else
+            log_error "Failed to install ipset; refusing setup without the required firewall bouncer dependency."
+            exit 1
+        fi
     fi
 fi
 
@@ -713,7 +922,7 @@ if [[ -f "$_FW_BOUNCER_CONFIG" ]]; then
     # Always verify the key is valid and registered in the LAPI.
     # This covers: plain re-runs, post-partial-failure runs, and --force runs.
     if [[ "$DRY_RUN" != "true" ]]; then
-        _cs_ensure_fw_bouncer_key "$_FW_BOUNCER_CONFIG"
+        _cs_ensure_fw_bouncer_key "$_FW_BOUNCER_CONFIG" || exit 1
     fi
 
 elif [[ ! -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$DRY_RUN" == "true" ]]; then
@@ -728,7 +937,10 @@ else
         _fw_key="$(openssl rand -hex 32)"
         cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
         cscli bouncers delete firewall-bouncer 2>/dev/null || true
-        cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_key" 2>/dev/null || true
+        if ! cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_key" >/dev/null 2>&1; then
+            log_error "Failed to register the firewall bouncer key in CrowdSec LAPI."
+            exit 1
+        fi
     else
         _fw_key="$(grep 'api_key:' "$_FW_BOUNCER_CONFIG" 2>/dev/null | awk '{print $2}' | head -1 || true)"
     fi
@@ -738,7 +950,10 @@ else
         _fw_key="$(openssl rand -hex 32)"
         cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
         cscli bouncers delete firewall-bouncer 2>/dev/null || true
-        cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_key" 2>/dev/null || true
+        if ! cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_key" >/dev/null 2>&1; then
+            log_error "Failed to register the replacement firewall bouncer key in CrowdSec LAPI."
+            exit 1
+        fi
     fi
 
     # Detect whether iptables is using the nf_tables backend on Ubuntu 24.04 Noble.
@@ -777,7 +992,7 @@ FWCONFIG
     # Ensure the key written above is actually registered — handles the edge
     # case where cscli bouncers add silently failed above.
     if [[ "$DRY_RUN" != "true" ]]; then
-        _cs_ensure_fw_bouncer_key "$_FW_BOUNCER_CONFIG"
+        _cs_ensure_fw_bouncer_key "$_FW_BOUNCER_CONFIG" || exit 1
     fi
 fi
 
@@ -800,8 +1015,7 @@ else
     if ! cscli bouncers list 2>/dev/null | grep -q 'cloudflare-worker-bouncer' || [[ "$FORCE" == "true" ]]; then
         log_info "Updating CrowdSec hub..."
         cscli hub update || true
-        log_info "Registering Cloudflare Workers bouncer in CrowdSec LAPI..."
-        cscli bouncers add crowdsecurity/cloudflare-worker-bouncer >/dev/null 2>&1 || true
+        log_info "Cloudflare Workers bouncer registration will be reconciled with its configured key in Phase 5."
     else
         log_info "CrowdSec Cloudflare Workers bouncer already registered — skipping."
     fi
@@ -1050,9 +1264,11 @@ else
         log_info "Generating new bouncer API key..."
         _new_key="$(openssl rand -hex 32)"
         cscli bouncers delete cloudflare-worker-bouncer 2>/dev/null || true
-        cscli bouncers add cloudflare-worker-bouncer --key "$_new_key" 2>/dev/null || {
-            log_warn "cscli bouncers add failed — CrowdSec LAPI may not be running yet. Key stored in .env for later."
-        }
+        if ! cscli bouncers add cloudflare-worker-bouncer --key "$_new_key" >/dev/null 2>&1; then
+            log_error "Failed to register the Cloudflare Workers bouncer key in CrowdSec LAPI."
+            log_error "No new Worker bouncer key was written to .env. Resolve LAPI access and re-run setup."
+            exit 1
+        fi
         _CF_BOUNCER_KEY="$_new_key"
         _cs_set_env_var "$_CF_BOUNCER_ENV_KEY" "$_CF_BOUNCER_KEY"
         log_success "Bouncer API key generated and registered. Written to .env as ${_CF_BOUNCER_ENV_KEY}."
@@ -1153,10 +1369,72 @@ _cs_wait_for_lapi() {
             return 0
         fi
         sleep 1
-        (( i++ ))
+        (( i++ )) || true
     done
     log_warn "LAPI did not respond within ${max_wait}s on port ${port} — bouncer may fail to start."
     return 1
+}
+
+_cs_wait_for_required_service() {
+    local service="$1" attempts="${2:-15}" i
+    for (( i=0; i<attempts; i++ )); do
+        systemctl is-active --quiet "$service" && return 0
+        sleep 1
+    done
+    return 1
+}
+
+_cs_activate_required_services() {
+    local lapi_port
+    systemctl is-active --quiet crowdsec || {
+        log_error "CrowdSec engine is not active; required enforcement services were not started."
+        return 1
+    }
+    lapi_port="$(_cs_resolve_lapi_port)"
+    if ! _cs_wait_for_lapi "$lapi_port"; then
+        log_error "CrowdSec LAPI is not ready on ${lapi_port}; refusing to start required bouncers."
+        return 1
+    fi
+
+    systemctl reset-failed crowdsec-firewall-bouncer 2>/dev/null || true
+    if ! systemctl enable --now crowdsec-firewall-bouncer; then
+        log_error "Failed to enable/start required crowdsec-firewall-bouncer."
+        return 1
+    fi
+    if ! _cs_wait_for_required_service crowdsec-firewall-bouncer 15; then
+        log_error "Required crowdsec-firewall-bouncer did not become active."
+        local fw_journal
+        fw_journal="$(journalctl -u crowdsec-firewall-bouncer --no-pager -n 15 2>/dev/null || true)"
+        if [[ -n "$fw_journal" ]]; then
+            log_error "Last crowdsec-firewall-bouncer journal entries:"
+            while IFS= read -r fw_line; do log_error "  ${fw_line}"; done <<< "$fw_journal"
+        fi
+        return 1
+    fi
+    log_success "crowdsec-firewall-bouncer is active."
+
+    if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
+        log_warn "Skipping crowdsec-cloudflare-worker-bouncer enable — CLOUDFLARE_PROXY_ENABLED is not 'true'."
+        return 0
+    fi
+    if [[ "$AUTONOMOUS_MODE" == "true" ]]; then
+        log_info "Autonomous mode active — Cloudflare Workers handle syncing; no persistent daemon needed."
+        return 0
+    fi
+    if ! _cf_worker_bouncer_service_exists; then
+        log_error "Required crowdsec-cloudflare-worker-bouncer.service unit is not installed."
+        return 1
+    fi
+    systemctl reset-failed crowdsec-cloudflare-worker-bouncer 2>/dev/null || true
+    if ! systemctl enable --now crowdsec-cloudflare-worker-bouncer; then
+        log_error "crowdsec-cloudflare-worker-bouncer failed to enable/start; required edge enforcement is inactive."
+        return 1
+    fi
+    if ! _cs_wait_for_required_service crowdsec-cloudflare-worker-bouncer 15; then
+        log_error "Required crowdsec-cloudflare-worker-bouncer did not become active."
+        return 1
+    fi
+    log_success "crowdsec-cloudflare-worker-bouncer enabled and started."
 }
 
 # ---------------------------------------------------------------------------
@@ -1174,49 +1452,13 @@ if [[ "$DRY_RUN" == "true" ]]; then
     fi
 else
     if systemctl is-active --quiet crowdsec; then
-        systemctl reload crowdsec 2>/dev/null || true
-    fi
-
-    # Wait for LAPI to accept connections before starting the bouncer.
-    # The bouncer exits immediately (and systemd marks it failed) if LAPI
-    # isn't ready when it first tries to authenticate.
-    _lapi_port_phase8="$(_cs_resolve_lapi_port)"
-    _cs_wait_for_lapi "$_lapi_port_phase8" || true
-
-    systemctl reset-failed crowdsec-firewall-bouncer 2>/dev/null || true
-    systemctl enable --now crowdsec-firewall-bouncer || true
-
-    _fw_ready=false
-    for _i in {1..15}; do
-        if systemctl is-active --quiet crowdsec-firewall-bouncer; then
-            _fw_ready=true; break
-        fi
-        sleep 1
-    done
-    if [[ "$_fw_ready" == "true" ]]; then
-        log_success "crowdsec-firewall-bouncer is active."
-    else
-        log_warn "crowdsec-firewall-bouncer did not report active within 15s — check: sudo journalctl -u crowdsec-firewall-bouncer"
-        _fw_journal="$(journalctl -u crowdsec-firewall-bouncer --no-pager -n 15 2>/dev/null || true)"
-        if [[ -n "$_fw_journal" ]]; then
-            log_warn "Last crowdsec-firewall-bouncer journal entries:"
-            while IFS= read -r _fw_line; do
-                log_warn "  ${_fw_line}"
-            done <<< "$_fw_journal"
+        if ! systemctl reload crowdsec 2>/dev/null \
+            && ! systemctl restart crowdsec 2>/dev/null; then
+            log_error "CrowdSec engine reload/restart failed before bouncer activation."
+            exit 1
         fi
     fi
-
-    if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
-        log_warn "Skipping crowdsec-cloudflare-worker-bouncer enable — CLOUDFLARE_PROXY_ENABLED is not 'true'."
-    elif [[ "$AUTONOMOUS_MODE" == "true" ]]; then
-        log_info "Autonomous mode active — Cloudflare Workers handle syncing; no persistent daemon needed."
-    elif _cf_worker_bouncer_service_exists; then
-        systemctl enable --now crowdsec-cloudflare-worker-bouncer \
-            || log_error "crowdsec-cloudflare-worker-bouncer failed to start — enforcement is INACTIVE. Run: journalctl -u crowdsec-cloudflare-worker-bouncer -n 30"
-        log_success "crowdsec-cloudflare-worker-bouncer enabled and started."
-    else
-        log_warn "Skipping crowdsec-cloudflare-worker-bouncer enable — service unit not installed yet."
-    fi
+    _cs_activate_required_services || exit 1
     log_success "Services enabled."
 fi
 
