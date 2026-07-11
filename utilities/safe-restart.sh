@@ -37,8 +37,7 @@ EOF
 
 _safe_restart_rollback_result() {
     local rollback_health_rc=0
-    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true \
-        "${PROJECT_ROOT}/utilities/maintenance-health.sh" health \
+    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" health \
         || rollback_health_rc=$?
 
     case "$rollback_health_rc" in

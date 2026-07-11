@@ -1066,7 +1066,9 @@ run_rotation_generation() (
     _KEY_ROTATE_LIVE_SECRETS="$TMP/live/ciphertext"
     VW_TEST_KEY_ROTATE_SIGNAL_AFTER="$signal_after"
     export VW_TEST_KEY_ROTATE_SIGNAL_AFTER
-    trap 'rc=$?; _key_rotate_rollback_live_generation || true; exit "$rc"' EXIT
+    # Bash preserves the pre-trap status after an EXIT trap, so rollback can
+    # remain status-neutral without an extra trap-local status variable.
+    trap '_key_rotate_rollback_live_generation || true' EXIT
     trap 'exit 130' INT
     trap 'exit 129' HUP
     trap 'exit 143' TERM
@@ -1083,7 +1085,7 @@ run_rotation_generation() (
 )
 
 status=0
-run_rotation_generation policy >"$TMP/interrupted.out" 2>&1 || status=$?
+run_rotation_generation system-key >"$TMP/interrupted.out" 2>&1 || status=$?
 [[ "$status" -eq 143 ]] || fail "interrupted rotation returned $status instead of TERM status 143"
 for artifact in "${artifacts[@]}"; do
     cmp -s "$TMP/backup/$artifact" "$TMP/live/$artifact" \

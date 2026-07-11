@@ -770,7 +770,7 @@ run_health_check() {
       log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
       log_error "Startup aborted. Investigate the failures above, then re-run sudo ./startup.sh"
       log_error "To skip this gate during recovery: ./startup.sh --skip-health"
-      return "$health_exit"
+      return 1
       ;;
   esac
 

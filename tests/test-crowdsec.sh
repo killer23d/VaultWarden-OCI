@@ -272,7 +272,9 @@ signal_rc=0
     set -euo pipefail
     VW_TEST_CROWDSEC_SIGNAL_AFTER_PORT_PROMOTION=1
     export VW_TEST_CROWDSEC_SIGNAL_AFTER_PORT_PROMOTION
-    trap 'rc=$?; if [[ "$_CS_LAPI_COHORT_COMMITTED" != true ]]; then _cs_lapi_cohort_rollback || true; _cs_lapi_cohort_cleanup; fi; exit "$rc"' EXIT
+    # Bash preserves the pre-trap status after an EXIT trap. Keep cleanup
+    # status-neutral so the injected TERM remains observable as 143.
+    trap 'if [[ "$_CS_LAPI_COHORT_COMMITTED" != true ]]; then _cs_lapi_cohort_rollback || true; _cs_lapi_cohort_cleanup; fi' EXIT
     trap 'exit 143' TERM
     _cs_reconcile_lapi_port_cohort 8090
 ) >"$TMP/cohort-signal.out" 2>&1 || signal_rc=$?
