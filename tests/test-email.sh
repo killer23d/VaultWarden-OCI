@@ -274,3 +274,76 @@ printf 'Recovery-kit attachment passphrase contract tests passed.\n'
 )
 
 check_recovery_kit_attachment_passphrase_contract
+
+check_recovery_notification_retry_contract() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+extract_func(){
+    local file="$1" func="$2"
+    awk -v f="$func" '
+      $0 ~ "^" f "\\(\\)" {p=1}
+      p {
+        print
+        opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+        depth += opens - closes
+        if (depth == 0) exit
+      }' "$file"
+}
+
+HEALTH="$ROOT/utilities/maintenance-health.sh"
+log_info(){ printf 'INFO: %s\n' "$*"; }
+log_warn(){ printf 'WARN: %s\n' "$*"; }
+eval "$(extract_func "$HEALTH" _ensure_alert_dir)"
+eval "$(extract_func "$HEALTH" _acquire_alert_lock)"
+eval "$(extract_func "$HEALTH" _release_recovery_lock)"
+eval "$(extract_func "$HEALTH" _send_notification)"
+eval "$(extract_func "$HEALTH" _notify_recovery)"
+
+_email_available=false
+ADMIN_EMAIL=admin@example.test
+unavailable_rc=0
+_send_notification subject body >"$TMP/unavailable.out" 2>&1 || unavailable_rc=$?
+[[ "$unavailable_rc" -ne 0 ]] \
+    || fail "email-unavailable notification path reported successful delivery"
+
+ALERT_LOCK_DIR="$TMP/alerts"
+ALERT_RECOVERY_TTL=86400
+failed=0
+warnings=0
+passed=12
+send_attempts=0
+_send_notification(){
+    send_attempts=$((send_attempts + 1))
+    if (( send_attempts == 1 )); then return 42; fi
+    return 0
+}
+
+first_rc=0
+_notify_recovery >"$TMP/first.out" 2>&1 || first_rc=$?
+[[ "$first_rc" -ne 0 ]] || fail "failed recovery delivery returned success"
+[[ "$send_attempts" -eq 1 ]] || fail "failed recovery delivery was not attempted exactly once"
+[[ ! -e "$ALERT_LOCK_DIR/recovery.cooldown" ]] \
+    || fail "failed recovery delivery retained recovery cooldown state"
+! grep -Fq 'Recovery notification sent' "$TMP/first.out" \
+    || fail "failed recovery delivery produced sent wording"
+grep -Fq 'cooldown released for retry next health cycle' "$TMP/first.out" \
+    || fail "failed recovery delivery did not report retryable cooldown release"
+
+_notify_recovery >"$TMP/second.out" 2>&1 \
+    || { cat "$TMP/second.out" >&2; fail "subsequent recovery notification attempt did not succeed"; }
+[[ "$send_attempts" -eq 2 ]] \
+    || fail "released recovery cooldown did not permit a subsequent delivery attempt"
+[[ -e "$ALERT_LOCK_DIR/recovery.cooldown" ]] \
+    || fail "successful recovery delivery did not retain its cooldown state"
+grep -Fq 'Recovery notification sent' "$TMP/second.out" \
+    || fail "successful subsequent recovery delivery omitted sent wording"
+
+printf 'Recovery notification failure remains truthful and retryable.\n'
+)
+
+check_recovery_notification_retry_contract
