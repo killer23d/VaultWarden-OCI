@@ -330,7 +330,7 @@ run_required_service_completion(){
 _CF_PROXY_ENABLED=false
 AUTONOMOUS_MODE=false
 FAIL_ENABLE_SERVICE=crowdsec-firewall-bouncer
-export FAIL_ENABLE_SERVICE
+export AUTONOMOUS_MODE FAIL_ENABLE_SERVICE
 fw_rc=0
 run_required_service_completion >"$TMP/firewall-fail.out" 2>&1 || fw_rc=$?
 (( fw_rc != 0 )) || fail "firewall-bouncer enable/start failure returned success"
@@ -349,6 +349,7 @@ run_required_service_completion >"$TMP/worker-fail.out" 2>&1 || worker_rc=$?
 
 eval "$(extract_func "$SETUP" _cs_ensure_fw_bouncer_key)"
 FORCE=true
+export FORCE
 _CS_FW_BOUNCER_KEY_GENERATED=""
 openssl(){ printf 'test-generated-key\n'; }
 cscli(){ [[ "$*" == *'bouncers add'* ]] && return 9; return 0; }

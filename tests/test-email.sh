@@ -301,13 +301,14 @@ log_warn(){ printf 'WARN: %s\n' "$*"; }
 eval "$(extract_func "$HEALTH" _ensure_alert_dir)"
 eval "$(extract_func "$HEALTH" _acquire_alert_lock)"
 eval "$(extract_func "$HEALTH" _release_recovery_lock)"
-eval "$(extract_func "$HEALTH" _send_notification)"
+eval "$(extract_func "$HEALTH" _send_notification | sed '1s/^_send_notification()/_send_notification_production()/')"
 eval "$(extract_func "$HEALTH" _notify_recovery)"
 
 _email_available=false
 ADMIN_EMAIL=admin@example.test
+export ADMIN_EMAIL
 unavailable_rc=0
-_send_notification subject body >"$TMP/unavailable.out" 2>&1 || unavailable_rc=$?
+_send_notification_production subject body >"$TMP/unavailable.out" 2>&1 || unavailable_rc=$?
 [[ "$unavailable_rc" -ne 0 ]] \
     || fail "email-unavailable notification path reported successful delivery"
 
@@ -316,6 +317,7 @@ ALERT_RECOVERY_TTL=86400
 failed=0
 warnings=0
 passed=12
+export ALERT_RECOVERY_TTL failed warnings passed
 send_attempts=0
 _send_notification(){
     send_attempts=$((send_attempts + 1))

@@ -143,8 +143,8 @@ run_db_maintenance_health_failure_behavior_test() {
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "${BACKUP_DIR}/db"
-printf 'safety backup\n' > "${BACKUP_DIR}/db/vaultwarden-db-test.age"
-touch "${BACKUP_DIR}/db/vaultwarden-db-test.age"
+printf 'safety backup\n' > "${BACKUP_DIR}/db/db_backup_20990101_000000.sqlite3.age"
+touch "${BACKUP_DIR}/db/db_backup_20990101_000000.sqlite3.age"
 printf 'mock backup created\n'
 MOCK_BACKUP
     chmod +x "$tmpdir/project/utilities/backup-run.sh"
@@ -188,7 +188,7 @@ MOCK_SQLITE3
     status="$(awk -F= '/^__STATUS__=/{print $2}' <<< "$output" | tail -1)"
     output="$(grep -v '^__STATUS__=' <<< "$output")"
 
-    safety_backup="$tmpdir/backups/db/vaultwarden-db-test.age"
+    safety_backup="$tmpdir/backups/db/db_backup_20990101_000000.sqlite3.age"
     [[ "$status" == "1" ]] || fail "db-maint health-failure path returned $status instead of non-zero; output: $output"
     [[ "$output" == *"vaultwarden did not become healthy in time"* ]] \
         || fail "db-maint health-failure output missing failed health state"

@@ -578,6 +578,7 @@ chmod +x "$TMP/startup/utilities/maintenance-health.sh"
 
 PROJECT_ROOT="$TMP/startup"
 SKIP_HEALTH_CHECK=false
+export PROJECT_ROOT SKIP_HEALTH_CHECK
 log_info(){ printf 'INFO: %s\n' "$*"; }
 log_warn(){ printf 'WARN: %s\n' "$*"; }
 log_error(){ printf 'ERROR: %s\n' "$*"; }

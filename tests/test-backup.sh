@@ -841,6 +841,9 @@ run_case() {
     local case_dir="$1" backup_behavior="$2" health_ready="$3" output_file="$4"
     (
         set +e
+        # The sourced script parses its own CLI at file scope. Clear run_case's
+        # fixture arguments so they are not mistaken for db-maint options.
+        set --
         # shellcheck source=/dev/null
         source "$case_dir/repo/utilities/maintenance-db-maint.sh"
         PROJECT_ROOT="$case_dir/project"
