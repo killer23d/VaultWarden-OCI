@@ -220,6 +220,7 @@ jobs:
 
       - name: Run ${{ matrix.suite }} suite
         run: |
+          set -o pipefail
           mkdir -p test-results
           ./tests/run-tests.sh "${{ matrix.suite }}" 2>&1 \
             | tee "test-results/${{ matrix.suite }}.log"

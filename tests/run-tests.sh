@@ -25,6 +25,10 @@ Suites:
   data-protection  Backup and restore/recovery contracts
   all              Run every suite in the order above
   list             Print the case inventory without running it
+
+Examples:
+  ./tests/run-tests.sh all
+  ./tests/run-tests.sh foundation
 USAGE
 }
 
