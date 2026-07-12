@@ -14,6 +14,12 @@ export PATH
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+TEST_CASE_TIMEOUT_SECONDS="${TEST_CASE_TIMEOUT_SECONDS:-300}"
+if [[ ! "$TEST_CASE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FAIL TEST_CASE_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 2
+fi
+
 usage() {
     cat <<'USAGE'
 Usage: ./tests/run-tests.sh all
@@ -119,20 +125,35 @@ print_cases() {
     done
 }
 
+execute_case() {
+    local case_file="$1"
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground --kill-after=10s \
+            "${TEST_CASE_TIMEOUT_SECONDS}s" "$BASH" "$case_file"
+    else
+        "$BASH" "$case_file"
+    fi
+}
+
 run_suite() {
     local suite="$1"
     shift
     local -a cases=("$@")
-    local case_file
+    local case_file rc
 
-    echo "SUITE $suite (${#cases[@]} cases)"
+    echo "SUITE $suite (${#cases[@]} cases; timeout ${TEST_CASE_TIMEOUT_SECONDS}s each)"
     for case_file in "${cases[@]}"; do
         echo "RUN   $case_file"
-        if "$BASH" "$case_file"; then
+        if execute_case "$case_file"; then
             echo "PASS  $case_file"
         else
-            local rc=$?
-            echo "FAIL  $case_file (exit $rc)" >&2
+            rc=$?
+            if (( rc == 124 )); then
+                echo "TIMEOUT $case_file after ${TEST_CASE_TIMEOUT_SECONDS}s" >&2
+            else
+                echo "FAIL  $case_file (exit $rc)" >&2
+            fi
             return "$rc"
         fi
     done
