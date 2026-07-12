@@ -35,6 +35,34 @@ OPTIONS:
 EOF
 }
 
+_safe_restart_rollback_result() {
+    local rollback_health_rc=0
+    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" health \
+        || rollback_health_rc=$?
+
+    case "$rollback_health_rc" in
+        0)
+            log_warn "Rollback restored the previous stack and it is healthy."
+            return 1
+            ;;
+        1)
+            log_warn "Rollback restored the previous stack with health warnings."
+            log_warn "Review the health output above; the rollback itself completed."
+            return 1
+            ;;
+        75)
+            log_error "Rollback restored the previous containers, but health validation remained contended."
+            log_error "Service health is unknown; manual verification and recovery are required."
+            return 2
+            ;;
+        *)
+            log_error "Rollback containers started, but health validation failed (exit ${rollback_health_rc})."
+            log_error "Manual recovery is required. Inspect: docker compose ps && docker compose logs"
+            return 2
+            ;;
+    esac
+}
+
 case "${1:-}" in
     --help|-h|help)
         show_help
@@ -137,12 +165,6 @@ if [[ "$rollback_failed" == "true" ]]; then
 fi
 
 # Internal rollback validation; direct health commands still refuse root.
-if VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" health; then
-    log_warn "Rollback succeeded and the previous stack is healthy."
-else
-    log_error "Rollback containers started, but the health check still reports failures."
-    exit 2
-fi
-
-# The requested restart did not succeed even though rollback recovered service.
-exit 1
+rollback_result=0
+_safe_restart_rollback_result || rollback_result=$?
+exit "$rollback_result"

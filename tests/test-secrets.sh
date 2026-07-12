@@ -1013,3 +1013,307 @@ run_test 'TERM after ciphertext promotion rolls back artifacts and preserves tra
 run_test 'successful transaction preserves existing caller return trap' test_preserves_outer_return_trap
 [[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
+
+check_key_rotate_live_generation_transaction() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+log_warn() { printf 'WARN: %s\n' "$*" >&2; }
+log_error() { printf 'ERROR: %s\n' "$*" >&2; }
+log_success() { printf 'SUCCESS: %s\n' "$*" >&2; }
+
+sed -n '/^_KEY_ROTATE_COMMITTED=false$/,/^_display_rotated_age_key_summary()/p' \
+    "$ROOT/utilities/key-rotate.sh" | sed '$d' > "$TMP/key-rotate-transaction.sh"
+# shellcheck source=/dev/null
+source "$TMP/key-rotate-transaction.sh"
+
+check_age_key() {
+    [[ -s "$1" ]]
+}
+sops() {
+    local target="${*: -1}" key_value cipher_value
+    [[ "${1:-}" == "-d" ]] || return 2
+    key_value="$(cat "${SOPS_AGE_KEY_FILE:?}")"
+    cipher_value="$(cat "$target")"
+    [[ "$key_value" == "key-old" && "$cipher_value" == "cipher-old" ]] \
+        || [[ "$key_value" == "key-new" && "$cipher_value" == "cipher-new" ]]
+}
+
+mkdir -p "$TMP/live" "$TMP/backup" "$TMP/staged"
+chmod 700 "$TMP/live" "$TMP/backup" "$TMP/staged"
+artifacts=(system-key repo-key ciphertext policy repo-env system-env install-env)
+for artifact in "${artifacts[@]}"; do
+    case "$artifact" in
+        system-key|repo-key) old_value="key-old"; new_value="key-new" ;;
+        ciphertext) old_value="cipher-old"; new_value="cipher-new" ;;
+        *) old_value="${artifact}-old"; new_value="${artifact}-new" ;;
+    esac
+    printf '%s\n' "$old_value" > "$TMP/live/$artifact"
+    printf '%s\n' "$old_value" > "$TMP/backup/$artifact"
+    printf '%s\n' "$new_value" > "$TMP/staged/$artifact"
+    chmod 600 "$TMP/live/$artifact" "$TMP/backup/$artifact" "$TMP/staged/$artifact"
+done
+
+run_rotation_generation() (
+    set -euo pipefail
+    local signal_after="${1:-}"
+    _key_rotate_reset_transaction
+    _KEY_ROTATE_OLD_KEY="$TMP/live/system-key"
+    _KEY_ROTATE_LIVE_SECRETS="$TMP/live/ciphertext"
+    VW_TEST_KEY_ROTATE_SIGNAL_AFTER="$signal_after"
+    export VW_TEST_KEY_ROTATE_SIGNAL_AFTER
+    # Bash preserves the pre-trap status after an EXIT trap, so rollback can
+    # remain status-neutral without an extra trap-local status variable.
+    trap '_key_rotate_rollback_live_generation || true' EXIT
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+    trap 'exit 143' TERM
+
+    local artifact
+    for artifact in "${artifacts[@]}"; do
+        _key_rotate_promote_file \
+            "$TMP/staged/$artifact" "$TMP/live/$artifact" \
+            "$TMP/backup/$artifact" true 600
+        _key_rotate_test_signal_after "$artifact"
+    done
+    SOPS_AGE_KEY_FILE="$TMP/live/system-key" sops -d "$TMP/live/ciphertext" >/dev/null
+    _KEY_ROTATE_COMMITTED=true
+)
+
+status=0
+run_rotation_generation system-key >"$TMP/interrupted.out" 2>&1 || status=$?
+[[ "$status" -eq 143 ]] || fail "interrupted rotation returned $status instead of TERM status 143"
+for artifact in "${artifacts[@]}"; do
+    cmp -s "$TMP/backup/$artifact" "$TMP/live/$artifact" \
+        || fail "interrupted rotation did not restore $artifact"
+done
+SOPS_AGE_KEY_FILE="$TMP/live/system-key" sops -d "$TMP/live/ciphertext" >/dev/null \
+    || fail "restored old key does not decrypt restored ciphertext"
+grep -Fq 'Previous Age/SOPS generation restored and decryptable.' "$TMP/interrupted.out" \
+    || fail "interrupted rotation did not validate and report the restored generation"
+
+run_rotation_generation "" >"$TMP/retry.out" 2>&1 \
+    || { cat "$TMP/retry.out" >&2; fail "normal retry after interrupted rotation failed"; }
+[[ "$(cat "$TMP/live/system-key")" == "key-new" ]] \
+    || fail "normal retry did not promote the new canonical key"
+[[ "$(cat "$TMP/live/ciphertext")" == "cipher-new" ]] \
+    || fail "normal retry did not promote matching ciphertext"
+SOPS_AGE_KEY_FILE="$TMP/live/system-key" sops -d "$TMP/live/ciphertext" >/dev/null \
+    || fail "new canonical key does not decrypt live ciphertext after retry"
+
+printf 'Key rotation live-generation rollback and retry tests passed.\n'
+)
+
+check_key_rotate_live_generation_transaction
+
+check_key_rotate_full_entrypoint_cleanup_contract() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+case_root="$TMP/key-rotate-entrypoint"
+repo="$case_root/repo"
+rootfs="$case_root/rootfs"
+mkdir -p "$repo/utilities" "$repo/lib" "$repo/secrets/keys" "$case_root/bin" \
+    "$rootfs/etc/vaultwarden" "$rootfs/state/secrets" "$rootfs/state/config" "$rootfs/root"
+
+cp "$ROOT/utilities/key-rotate.sh" "$repo/utilities/key-rotate.sh"
+# Redirect only hard-coded host roots in the disposable script copy;
+# the production control flow, traps, and cleanup functions remain intact.
+sed -i \
+    -e 's#/etc/vaultwarden#${VW_TEST_ROOT}/etc/vaultwarden#g' \
+    -e 's#/root/#${VW_TEST_ROOT}/root/#g' \
+    "$repo/utilities/key-rotate.sh"
+chmod +x "$repo/utilities/key-rotate.sh"
+
+cat > "$repo/lib/log.sh" <<'MOCK_LOG'
+log_header(){ printf 'HEADER: %s\n' "$*"; }
+log_info(){ printf 'INFO: %s\n' "$*"; }
+log_warn(){ printf 'WARN: %s\n' "$*" >&2; }
+log_error(){ printf 'ERROR: %s\n' "$*" >&2; }
+log_success(){ printf 'SUCCESS: %s\n' "$*"; }
+COLOR_RED=''; COLOR_RESET=''; COLOR_CYAN=''; COLOR_GREEN=''
+MOCK_LOG
+cat > "$repo/lib/config.sh" <<'MOCK_CONFIG'
+load_project_environment(){ return 0; }
+get_config_value(){
+    case "$1" in
+        PROJECT_STATE_DIR) printf '%s\n' "${VW_TEST_ROOT:?}/state" ;;
+        *) printf '%s\n' "${2:-}" ;;
+    esac
+}
+_stat_octal_perms(){ stat -c '%a' "$1"; }
+_stat_owner(){ stat -c '%U' "$1"; }
+_stat_group(){ stat -c '%G' "$1"; }
+MOCK_CONFIG
+cat > "$repo/lib/common.sh" <<'MOCK_COMMON'
+init_common_lib(){ :; }
+require_root(){ :; }
+operator_attention(){ :; }
+operator_confirm_yes_no(){ return 0; }
+MOCK_COMMON
+cat > "$repo/lib/operations.sh" <<'MOCK_OPERATIONS'
+operation_acquire(){ return 0; }
+operation_set_phase(){ return 0; }
+operation_release(){ printf '%s\n' "$1" >> "${VW_TEST_RELEASE_LOG:?}"; }
+MOCK_OPERATIONS
+cat > "$repo/lib/crypto.sh" <<'MOCK_CRYPTO'
+resolve_age_key_path(){ printf '%s\n' "${VW_TEST_ROOT:?}/etc/vaultwarden/age-key.txt"; }
+check_age_key(){ [[ -s "$1" ]]; }
+MOCK_CRYPTO
+
+cat > "$case_root/bin/install" <<'MOCK_INSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+while (( $# )); do
+    case "$1" in
+        -o|-g) shift 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+exec /usr/bin/install "${args[@]}"
+MOCK_INSTALL
+cat > "$case_root/bin/mktemp" <<'MOCK_MKTEMP'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *'vw-age-rotate.'* ]]; then
+    workdir="${VW_TEST_ROOT:?}/workdir"
+    rm -rf "$workdir"
+    mkdir -p "$workdir"
+    printf '%s\n' "$workdir" > "${VW_TEST_WORKDIR_RECORD:?}"
+    printf '%s\n' "$workdir"
+    exit 0
+fi
+exec /usr/bin/mktemp "$@"
+MOCK_MKTEMP
+cat > "$case_root/bin/age-keygen" <<'MOCK_AGE_KEYGEN'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+    -o)
+        printf 'AGE-SECRET-KEY-1NEW\n' > "${2:?}"
+        ;;
+    -y)
+        if grep -Fq 'OLD' "${2:?}"; then
+            printf 'age1'; printf 'a%.0s' {1..58}; printf '\n'
+        else
+            printf 'age1'; printf 'b%.0s' {1..58}; printf '\n'
+        fi
+        ;;
+    *) exit 2 ;;
+esac
+MOCK_AGE_KEYGEN
+cat > "$case_root/bin/sops" <<'MOCK_SOPS'
+#!/usr/bin/env bash
+set -euo pipefail
+target="${*: -1}"
+if [[ " $* " == *' updatekeys '* ]]; then
+    printf 'cipher-new\n' > "$target"
+    exit 0
+fi
+[[ "${1:-}" == '-d' ]] || exit 2
+key_value="$(cat "${SOPS_AGE_KEY_FILE:?}")"
+cipher_value="$(cat "$target")"
+[[ "$key_value" == 'AGE-SECRET-KEY-1OLD' && "$cipher_value" == 'cipher-old' ]] \
+    || [[ "$key_value" == 'AGE-SECRET-KEY-1NEW' && "$cipher_value" == 'cipher-new' ]]
+MOCK_SOPS
+chmod +x "$case_root/bin/"*
+
+old_pub="age1$(printf 'a%.0s' {1..58})"
+canonical_key="$rootfs/etc/vaultwarden/age-key.txt"
+secrets_file="$rootfs/state/secrets/secrets.yaml"
+printf 'AGE-SECRET-KEY-1OLD\n' > "$canonical_key"
+printf 'AGE-SECRET-KEY-1OLD\n' > "$repo/secrets/keys/age-key.txt"
+printf 'cipher-old\n' > "$secrets_file"
+printf 'creation_rules:\n  - age: "%s"\n' "$old_pub" > "$repo/.sops.yaml"
+printf 'SOPS_AGE_KEY_FILE=%s\n' "$canonical_key" > "$repo/.env"
+printf 'SOPS_AGE_KEY_FILE=%s\n' "$canonical_key" > "$rootfs/etc/vaultwarden/vaultwarden.env"
+printf 'SOPS_AGE_KEY_FILE=%s\n' "$canonical_key" > "$rootfs/state/config/install.env"
+: > "$rootfs/state/config/dr-manifest.env"
+chmod 600 "$canonical_key" "$repo/secrets/keys/age-key.txt" "$secrets_file" \
+    "$repo/.env" "$rootfs/etc/vaultwarden/vaultwarden.env" \
+    "$rootfs/state/config/install.env"
+chmod 644 "$repo/.sops.yaml"
+
+release_log="$case_root/releases.log"
+workdir_record="$case_root/workdir.path"
+run_full_rotation(){
+    local signal_after="$1" output_file="$2" rc=0
+    : > "$release_log"
+    rm -f "$workdir_record"
+    SECRETS_FILE="$secrets_file" \
+    VW_TEST_ROOT="$rootfs" \
+    VW_TEST_RELEASE_LOG="$release_log" \
+    VW_TEST_WORKDIR_RECORD="$workdir_record" \
+    VW_TEST_KEY_ROTATE_SIGNAL_AFTER="$signal_after" \
+    PATH="$case_root/bin:$PATH" \
+        bash "$repo/utilities/key-rotate.sh" --yes >"$output_file" 2>&1 || rc=$?
+    printf '%s\n' "$rc"
+}
+
+assert_old_generation(){
+    grep -Fxq 'AGE-SECRET-KEY-1OLD' "$canonical_key" \
+        || fail 'interrupted entrypoint did not restore the canonical system key'
+    grep -Fxq 'AGE-SECRET-KEY-1OLD' "$repo/secrets/keys/age-key.txt" \
+        || fail 'interrupted entrypoint changed the repository key'
+    grep -Fxq 'cipher-old' "$secrets_file" \
+        || fail 'interrupted entrypoint did not preserve old ciphertext'
+    grep -Fq "$old_pub" "$repo/.sops.yaml" \
+        || fail 'interrupted entrypoint changed the old SOPS policy'
+    for env_file in "$repo/.env" "$rootfs/etc/vaultwarden/vaultwarden.env" \
+        "$rootfs/state/config/install.env"; do
+        grep -Fxq "SOPS_AGE_KEY_FILE=$canonical_key" "$env_file" \
+            || fail "interrupted entrypoint changed canonical key reference: $env_file"
+    done
+    SOPS_AGE_KEY_FILE="$canonical_key" PATH="$case_root/bin:$PATH" \
+        sops -d "$secrets_file" >/dev/null \
+        || fail 'restored entrypoint generation is not decryptable'
+}
+
+interrupted_rc="$(run_full_rotation system-key "$case_root/interrupted.out")"
+[[ "$interrupted_rc" == '143' ]] \
+    || { cat "$case_root/interrupted.out" >&2; fail "full entrypoint returned $interrupted_rc instead of TERM status 143"; }
+assert_old_generation
+mapfile -t interrupted_releases < "$release_log"
+[[ "${#interrupted_releases[@]}" -eq 1 && "${interrupted_releases[0]}" == '143' ]] \
+    || fail "interrupted entrypoint released the operation guard ${#interrupted_releases[@]} time(s): ${interrupted_releases[*]:-none}"
+[[ -s "$workdir_record" ]] || fail 'entrypoint did not record its staging workdir'
+interrupted_workdir="$(cat "$workdir_record")"
+[[ ! -e "$interrupted_workdir" ]] \
+    || fail "entrypoint left sensitive staging workdir after TERM: $interrupted_workdir"
+grep -Fq 'Previous Age/SOPS generation restored and decryptable.' "$case_root/interrupted.out" \
+    || fail 'full entrypoint did not report validated rollback'
+
+retry_rc="$(run_full_rotation '' "$case_root/retry.out")"
+[[ "$retry_rc" == '0' ]] \
+    || { cat "$case_root/retry.out" >&2; fail "full entrypoint retry returned $retry_rc"; }
+mapfile -t retry_releases < "$release_log"
+[[ "${#retry_releases[@]}" -eq 1 && "${retry_releases[0]}" == '0' ]] \
+    || fail "successful entrypoint released the operation guard ${#retry_releases[@]} time(s): ${retry_releases[*]:-none}"
+[[ -s "$workdir_record" ]] || fail 'successful entrypoint did not record its staging workdir'
+retry_workdir="$(cat "$workdir_record")"
+[[ ! -e "$retry_workdir" ]] \
+    || fail "successful entrypoint left sensitive staging workdir: $retry_workdir"
+grep -Fxq 'AGE-SECRET-KEY-1NEW' "$canonical_key" \
+    || fail 'full entrypoint retry did not promote the new canonical key'
+grep -Fxq 'cipher-new' "$secrets_file" \
+    || fail 'full entrypoint retry did not promote matching ciphertext'
+SOPS_AGE_KEY_FILE="$canonical_key" PATH="$case_root/bin:$PATH" \
+    sops -d "$secrets_file" >/dev/null \
+    || fail 'full entrypoint retry left an undecryptable live generation'
+find "$rootfs/root" -maxdepth 1 -type f \
+    -name 'vaultwarden-recovery-kit-age-rotate-*.txt' -print -quit | grep -q . \
+    || fail 'successful full entrypoint did not write its recovery kit'
+
+printf 'Full key-rotation entrypoint rollback, cleanup, guard-release, and retry tests passed.\n'
+)
+
+check_key_rotate_full_entrypoint_cleanup_contract

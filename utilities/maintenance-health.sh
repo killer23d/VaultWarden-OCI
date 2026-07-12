@@ -1003,7 +1003,7 @@ _send_notification() {
     local subject="$1" body="$2"
     if [[ "${_email_available:-true}" == "false" ]]; then
         log_warn "Email notifications not available"
-        return
+        return 1
     fi
     if [[ -z "${ADMIN_EMAIL:-}" ]]; then
         log_warn "ADMIN_EMAIL not set — cannot send health notification"
@@ -1061,8 +1061,13 @@ _notify_recovery() {
     printf -v body \
         'All health checks passed at %s\n\nPassed : %s\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure.' \
         "$recovery_date" "$passed"
-    _send_notification "$subject" "$body" || true
-    log_info "Recovery notification sent"
+    if _send_notification "$subject" "$body"; then
+        log_info "Recovery notification sent"
+        return 0
+    fi
+    _release_recovery_lock
+    log_warn "Recovery notification delivery failed; cooldown released for retry next health cycle"
+    return 1
 }
 
 _generate_report() {

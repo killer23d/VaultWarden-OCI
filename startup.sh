@@ -739,8 +739,18 @@ run_health_check() {
   # cleanly.
   log_info "Invoking: ${_health_script} health"
   local health_exit=0
+  local health_attempt=1
+  local health_max_attempts=3
   # Internal root/systemd path; direct health commands still refuse root.
   VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health || health_exit=$?
+
+  while (( health_exit == 75 && health_attempt < health_max_attempts )); do
+    log_warn "Post-start health check is contended; retrying shortly (${health_attempt}/${health_max_attempts})..."
+    sleep 1
+    (( health_attempt++ )) || true
+    health_exit=0
+    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health || health_exit=$?
+  done
 
   case "$health_exit" in
     0)
@@ -748,6 +758,11 @@ run_health_check() {
       ;;
     1)
       log_warn "Health check completed with warnings — review output above"
+      ;;
+    75)
+      log_error "Post-start health is unknown: the health check remained contended after ${health_max_attempts} attempts."
+      log_error "Startup cannot confirm service health until the active health check completes."
+      return 75
       ;;
     *)
       # Exit 2 means one or more critical failures; exit 3+ means the health
@@ -823,13 +838,15 @@ main() {
   # Skipped in --background mode because the caller manages orchestration.
   if [[ "$BACKGROUND" != "true" && "$DRY_RUN" != "true" ]]; then
     wait_for_services || true
-    run_health_check || {
+    local health_rc=0
+    run_health_check || health_rc=$?
+    if (( health_rc != 0 )); then
       log_error "Startup tip: if the failure is key-related, run: sudo make key-health"
       log_error "Canonical production key path: ${AGE_KEY_FILE}"
       # Emit warnings before exiting so operators see them even on failure.
       _show_startup_warnings
-      exit 1
-    }
+      exit "$health_rc"
+    fi
     show_status || true
   fi
 

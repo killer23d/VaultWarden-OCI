@@ -541,3 +541,116 @@ grep -q 'sudo ./startup.sh --skip-pull' "$TMP/restore-nostart.log" || fail 'rest
 )
 
 check_start_policy_argument_and_manual_restore_behavior
+
+check_typed_lifecycle_health_results() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+mkdir -p "$TMP/startup/utilities"
+cat > "$TMP/startup/utilities/maintenance-health.sh" <<'MOCK_HEALTH'
+#!/usr/bin/env bash
+set -euo pipefail
+count=$(cat "${HEALTH_COUNT_FILE}" 2>/dev/null || printf '0')
+count=$((count + 1))
+printf '%s\n' "$count" > "$HEALTH_COUNT_FILE"
+IFS=',' read -r -a results <<< "${HEALTH_SEQUENCE:?}"
+index=$((count - 1))
+if (( index >= ${#results[@]} )); then index=$((${#results[@]} - 1)); fi
+exit "${results[$index]}"
+MOCK_HEALTH
+chmod +x "$TMP/startup/utilities/maintenance-health.sh"
+
+PROJECT_ROOT="$TMP/startup"
+SKIP_HEALTH_CHECK=false
+export PROJECT_ROOT SKIP_HEALTH_CHECK
+log_info(){ printf 'INFO: %s\n' "$*"; }
+log_warn(){ printf 'WARN: %s\n' "$*"; }
+log_error(){ printf 'ERROR: %s\n' "$*"; }
+log_success(){ printf 'SUCCESS: %s\n' "$*"; }
+sleep(){ :; }
+eval "$(extract_func "$ROOT/startup.sh" run_health_check)"
+
+HEALTH_COUNT_FILE="$TMP/health-count"
+HEALTH_SEQUENCE='75,0'
+export HEALTH_COUNT_FILE HEALTH_SEQUENCE
+: > "$HEALTH_COUNT_FILE"
+run_health_check >"$TMP/startup-clears.out" 2>&1 \
+    || { cat "$TMP/startup-clears.out" >&2; fail "startup health 75 -> 0 did not succeed"; }
+[[ "$(cat "$HEALTH_COUNT_FILE")" == "2" ]] \
+    || fail "startup did not retry health contention exactly once before success"
+grep -Fq 'Health check passed — all checks healthy' "$TMP/startup-clears.out" \
+    || fail "startup did not interpret the completed retry normally"
+
+HEALTH_SEQUENCE='75,75,75'
+export HEALTH_SEQUENCE
+: > "$HEALTH_COUNT_FILE"
+persistent_rc=0
+run_health_check >"$TMP/startup-contended.out" 2>&1 || persistent_rc=$?
+[[ "$persistent_rc" -eq 75 ]] \
+    || fail "persistent startup health contention returned $persistent_rc instead of 75"
+[[ "$(cat "$HEALTH_COUNT_FILE")" == "3" ]] \
+    || fail "persistent startup contention did not stop after three bounded attempts"
+grep -Fq 'Post-start health is unknown' "$TMP/startup-contended.out" \
+    || fail "persistent startup contention did not report unknown health"
+! grep -Fq 'CRITICAL failures' "$TMP/startup-contended.out" \
+    || fail "persistent startup contention used critical executed-health wording"
+
+mkdir -p "$TMP/safe/utilities"
+PROJECT_ROOT="$TMP/safe"
+eval "$(extract_func "$ROOT/utilities/safe-restart.sh" _safe_restart_rollback_result)"
+
+write_rollback_health(){
+    local status="$1"
+    cat > "$TMP/safe/utilities/maintenance-health.sh" <<MOCK_ROLLBACK_HEALTH
+#!/usr/bin/env bash
+exit $status
+MOCK_ROLLBACK_HEALTH
+    chmod +x "$TMP/safe/utilities/maintenance-health.sh"
+}
+
+write_rollback_health 1
+rollback_warning_rc=0
+_safe_restart_rollback_result >"$TMP/rollback-warning.out" 2>&1 || rollback_warning_rc=$?
+[[ "$rollback_warning_rc" -eq 1 ]] \
+    || fail "rollback warning health returned $rollback_warning_rc instead of warning-level 1"
+grep -Fq 'Rollback restored the previous stack with health warnings.' "$TMP/rollback-warning.out" \
+    || fail "rollback warning result did not report restored-with-warnings state"
+! grep -Eqi 'rollback was incomplete|manual recovery|required.*recovery' "$TMP/rollback-warning.out" \
+    || fail "rollback health warning was misclassified as severe/manual recovery"
+
+write_rollback_health 0
+rollback_healthy_rc=0
+_safe_restart_rollback_result >"$TMP/rollback-healthy.out" 2>&1 || rollback_healthy_rc=$?
+[[ "$rollback_healthy_rc" -eq 1 ]] \
+    || fail "healthy rollback must retain requested-restart failure status 1"
+grep -Fq 'Rollback restored the previous stack and it is healthy.' "$TMP/rollback-healthy.out" \
+    || fail "healthy rollback message does not match restored state"
+
+write_rollback_health 75
+rollback_unknown_rc=0
+_safe_restart_rollback_result >"$TMP/rollback-unknown.out" 2>&1 || rollback_unknown_rc=$?
+[[ "$rollback_unknown_rc" -eq 2 ]] \
+    || fail "contended rollback health returned $rollback_unknown_rc instead of severe status 2"
+grep -Fq 'Service health is unknown; manual verification and recovery are required.' "$TMP/rollback-unknown.out" \
+    || fail "contended rollback health omitted manual recovery classification"
+
+printf 'PASS: startup and safe-restart preserve typed health contention/warning results\n'
+)
+
+check_typed_lifecycle_health_results
