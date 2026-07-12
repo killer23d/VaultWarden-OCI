@@ -129,7 +129,7 @@ execute_case() {
     local case_file="$1"
 
     if command -v timeout >/dev/null 2>&1; then
-        timeout --foreground --kill-after=10s \
+        timeout --kill-after=10s \
             "${TEST_CASE_TIMEOUT_SECONDS}s" "$BASH" "$case_file"
     else
         "$BASH" "$case_file"
