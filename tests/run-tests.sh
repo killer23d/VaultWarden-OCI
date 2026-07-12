@@ -14,7 +14,7 @@ export PATH
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-TEST_CASE_TIMEOUT_SECONDS="${TEST_CASE_TIMEOUT_SECONDS:-300}"
+TEST_CASE_TIMEOUT_SECONDS="${TEST_CASE_TIMEOUT_SECONDS:-120}"
 if [[ ! "$TEST_CASE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     echo "FAIL TEST_CASE_TIMEOUT_SECONDS must be a positive integer" >&2
     exit 2
