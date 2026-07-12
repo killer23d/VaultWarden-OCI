@@ -194,6 +194,7 @@ jobs:
   functional-tests:
     name: Functional tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -219,11 +220,16 @@ jobs:
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
       - name: Run ${{ matrix.suite }} suite
+        shell: bash
         run: |
-          set -o pipefail
           mkdir -p test-results
-          ./tests/run-tests.sh "${{ matrix.suite }}" 2>&1 \
-            | tee "test-results/${{ matrix.suite }}.log"
+          log="test-results/${{ matrix.suite }}.log"
+          set +e
+          ./tests/run-tests.sh "${{ matrix.suite }}" >"$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          exit "$rc"
 
       - name: Upload ${{ matrix.suite }} suite log
         if: always()
