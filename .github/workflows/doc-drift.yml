@@ -219,4 +219,16 @@ jobs:
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
       - name: Run ${{ matrix.suite }} suite
-        run: ./tests/run-tests.sh "${{ matrix.suite }}"
+        run: |
+          mkdir -p test-results
+          ./tests/run-tests.sh "${{ matrix.suite }}" 2>&1 \
+            | tee "test-results/${{ matrix.suite }}.log"
+
+      - name: Upload ${{ matrix.suite }} suite log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ matrix.suite }}
+          path: test-results/${{ matrix.suite }}.log
+          if-no-files-found: error
+          retention-days: 7
