@@ -188,12 +188,22 @@ jobs:
         run: |
           # -x: follow source statements to avoid SC1091 false positives.
           # --severity=warning: fail on warning or error; info/style are logged only.
-          find . -type f -name '*.sh' | xargs shellcheck -x --severity=warning
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 shellcheck -x --severity=warning
 
   functional-tests:
+    name: Functional tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - foundation
+          - security
+          - operations
+          - data-protection
     steps:
       - uses: actions/checkout@v4
 
@@ -208,6 +218,5 @@ jobs:
           echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
-      - name: Run focused tests
-        run: |
-          ./tests/run-tests.sh all
+      - name: Run ${{ matrix.suite }} suite
+        run: ./tests/run-tests.sh "${{ matrix.suite }}"
