@@ -16,7 +16,8 @@ cd "$ROOT"
 
 usage() {
     cat <<'USAGE'
-Usage: ./tests/run-tests.sh <suite>
+Usage: ./tests/run-tests.sh all
+       ./tests/run-tests.sh <suite>
 
 Suites:
   foundation       Architecture, configuration, permissions, storage, systemd
@@ -33,7 +34,7 @@ USAGE
 }
 
 FOUNDATION_CASES=(
-    tests/case-architecture.bash
+    tests/test-architecture.sh
     tests/case-config-env.bash
     tests/case-permissions.bash
     tests/case-storage-setup.bash
@@ -100,7 +101,9 @@ validate_inventory() {
         fi
     done < <(find tests -maxdepth 1 -type f -name 'case-*.bash' -print0 | sort -z)
 
-    if find tests -maxdepth 1 -type f -name 'test-*.sh' ! -name 'run-tests.sh' -print -quit | grep -q .; then
+    if find tests -maxdepth 1 -type f -name 'test-*.sh' \
+        ! -name 'run-tests.sh' ! -name 'test-architecture.sh' \
+        -print -quit | grep -q .; then
         echo "FAIL permanent tests must be registered as case-*.bash and run through tests/run-tests.sh" >&2
         exit 1
     fi
