@@ -16,7 +16,6 @@ cd "$ROOT"
 
 TESTS_DIR="${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-tests}"
 TEST_CASE_TIMEOUT_SECONDS="${TEST_CASE_TIMEOUT_SECONDS:-120}"
-TEST_COMPAT_SOURCE_DIR="${ROOT}/tests/compat"
 if [[ ! "$TEST_CASE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     echo "FAIL TEST_CASE_TIMEOUT_SECONDS must be a positive integer" >&2
     exit 2
@@ -222,18 +221,38 @@ ensure_runner_temp_dir() {
 }
 
 prepare_test_compat_bin() {
-    local stat_adapter="${TEST_COMPAT_SOURCE_DIR}/stat"
     local compat_bin
-
-    if [[ ! -f "$stat_adapter" ]]; then
-        echo "FAIL missing test compatibility adapter: $stat_adapter" >&2
-        return 1
-    fi
 
     ensure_runner_temp_dir
     compat_bin="${RUNNER_TEMP_DIR}/compat-bin"
     mkdir -p "$compat_bin"
-    install -m 0755 "$stat_adapter" "${compat_bin}/stat"
+    cat > "${compat_bin}/stat" <<'EOF_STAT'
+#!/usr/bin/env bash
+# Test-only compatibility adapter for BSD stat format probes on GNU/Linux.
+set -euo pipefail
+
+readonly REAL_STAT="${VW_TEST_REAL_STAT:-/usr/bin/stat}"
+
+if [[ ! -x "$REAL_STAT" ]]; then
+    printf 'test stat adapter: real stat is unavailable at %s\n' "$REAL_STAT" >&2
+    exit 127
+fi
+
+if "$REAL_STAT" --version 2>/dev/null | grep -q 'GNU coreutils' \
+    && (( $# == 3 )) && [[ "$1" == "-f" ]]; then
+    case "$2" in
+        '%Lp'|'%OLp') exec "$REAL_STAT" -c '%a' "$3" ;;
+        '%u')         exec "$REAL_STAT" -c '%u' "$3" ;;
+        '%g')         exec "$REAL_STAT" -c '%g' "$3" ;;
+        '%m')         exec "$REAL_STAT" -c '%Y' "$3" ;;
+        '%Su')        exec "$REAL_STAT" -c '%U' "$3" ;;
+        '%Sg')        exec "$REAL_STAT" -c '%G' "$3" ;;
+    esac
+fi
+
+exec "$REAL_STAT" "$@"
+EOF_STAT
+    chmod 0755 "${compat_bin}/stat"
     PATH="${compat_bin}:$PATH"
     export PATH
 }
@@ -301,26 +320,30 @@ run_suite() {
 }
 
 validate_inventory
-prepare_test_compat_bin
 
 case "$1" in
     foundation)
+        prepare_test_compat_bin
         configure_timeout
         run_suite foundation "${FOUNDATION_CASES[@]}"
         ;;
     security)
+        prepare_test_compat_bin
         configure_timeout
         run_suite security "${SECURITY_CASES[@]}"
         ;;
     operations)
+        prepare_test_compat_bin
         configure_timeout
         run_suite operations "${OPERATIONS_CASES[@]}"
         ;;
     data-protection)
+        prepare_test_compat_bin
         configure_timeout
         run_suite data-protection "${DATA_PROTECTION_CASES[@]}"
         ;;
     all)
+        prepare_test_compat_bin
         configure_timeout
         run_suite foundation "${FOUNDATION_CASES[@]}"
         run_suite security "${SECURITY_CASES[@]}"
