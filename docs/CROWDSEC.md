@@ -125,19 +125,22 @@ sudo crowdsec -t
 ```
 
 Normal setup does not attempt live mail delivery and does not require Postfix
-to be running. After the application stack is up, request an end-to-end test
-explicitly:
+to be running. After the application stack is up, send an explicit test
+notification:
 
 ```bash
 sudo cscli notifications test vaultwarden_email
 ```
 
-That command submits through the same `127.0.0.1:587` Postfix route and returns
-nonzero when delivery fails. Inspect the exact failure with:
+CrowdSec 1.7.8 dispatches the test to the plugin but does not wait for or report
+SMTP delivery completion. A zero exit status confirms that the plugin was found
+and the test was dispatched; it is not proof that the message reached the
+mailbox. Confirm receipt and inspect the local services when it does not arrive:
 
 ```bash
 sudo cscli notifications inspect vaultwarden_email
 sudo journalctl -u crowdsec -n 100 --no-pager
+sudo docker compose logs --tail=100 postfix
 sudo make health
 ```
 
