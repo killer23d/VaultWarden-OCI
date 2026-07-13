@@ -16,6 +16,7 @@ cd "$ROOT"
 
 TESTS_DIR="${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-tests}"
 TEST_CASE_TIMEOUT_SECONDS="${TEST_CASE_TIMEOUT_SECONDS:-120}"
+TEST_COMPAT_SOURCE_DIR="${ROOT}/tests/compat"
 if [[ ! "$TEST_CASE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     echo "FAIL TEST_CASE_TIMEOUT_SECONDS must be a positive integer" >&2
     exit 2
@@ -220,6 +221,23 @@ ensure_runner_temp_dir() {
     fi
 }
 
+prepare_test_compat_bin() {
+    local stat_adapter="${TEST_COMPAT_SOURCE_DIR}/stat"
+    local compat_bin
+
+    if [[ ! -f "$stat_adapter" ]]; then
+        echo "FAIL missing test compatibility adapter: $stat_adapter" >&2
+        return 1
+    fi
+
+    ensure_runner_temp_dir
+    compat_bin="${RUNNER_TEMP_DIR}/compat-bin"
+    mkdir -p "$compat_bin"
+    install -m 0755 "$stat_adapter" "${compat_bin}/stat"
+    PATH="${compat_bin}:$PATH"
+    export PATH
+}
+
 execute_case() {
     local case_file="$1"
     local rc timeout_stderr
@@ -283,6 +301,7 @@ run_suite() {
 }
 
 validate_inventory
+prepare_test_compat_bin
 
 case "$1" in
     foundation)
