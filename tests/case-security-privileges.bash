@@ -449,6 +449,32 @@ grep -Fq 'sudo ./maintenance.sh update-firewall' utilities/maintenance-update-fi
 ! grep -Fq 'Run: ./edit-secrets.sh rotate' utilities/setup-crowdsec.sh || fail "setup post-install guidance advertises non-sudo edit-secrets"
 pass "help text uses sudo for root-operated maintenance/secret commands"
 
+# CrowdSec email and health incident context must remain additive to the
+# established privilege, ownership, and secret contracts.
+! grep -Fq 'CROWDSEC_EMAIL_NOTIFICATIONS' secrets-schema.yaml \
+    || fail "CrowdSec email opt-in was added to the secret schema"
+! grep -Fq 'active-incident.state' lib/common.sh \
+    || fail "health incident state was added to central known-path ownership tables"
+! grep -Fq 'active-incident.state' lib/runtime-permissions.sh \
+    || fail "health incident state was added to runtime permission repair"
+! grep -Fq 'active-incident.state' utilities/repair-permissions.sh \
+    || fail "health incident state was added to permission repair"
+_incident_snip="$(sed -n '/^_incident_sanitize()/,/^local -A check_results=/p' utilities/maintenance-health.sh)"
+! grep -Eq 'chown|chmod[[:space:]]+-R|chown[[:space:]]+-R|sudo' <<<"$_incident_snip" \
+    || fail "health incident persistence changes ownership, recurses permissions, or self-escalates"
+_crowdsec_email_snip="$(sed -n '/^_CS_EMAIL_PLUGIN_MARKER=/,/^# CLI flags/p' utilities/setup-crowdsec.sh)"
+! grep -Eq 'chmod[[:space:]]+-R|chown[[:space:]]+-R|setfacl|usermod|groupadd|useradd|setcap' <<<"$_crowdsec_email_snip" \
+    || fail "CrowdSec email reconciliation broadens permissions or identity mechanisms"
+! grep -Eq 'get_secret|decrypt_secret|smtp_password:[[:space:]]|email_api_token:[[:space:]]|\$\{SMTP_PASSWORD|\$\{EMAIL_API_TOKEN' <<<"$_crowdsec_email_snip" \
+    || fail "CrowdSec email reconciliation references a credential store"
+grep -Fq 'CADDY_UID:-2000' lib/runtime-permissions.sh \
+    || fail "Caddy UID 2000 contract changed"
+grep -Fq 'CADDY_GID:-2000' lib/runtime-permissions.sh \
+    || fail "Caddy GID 2000 contract changed"
+grep -Fq '_vw_repair_tree_permissions "$state_dir/data" "$puid" "$pgid"' lib/runtime-permissions.sh \
+    || fail "Vaultwarden PUID:PGID application-data contract changed"
+pass "CrowdSec email and incident context preserve privilege/ownership/secret contracts"
+
 )
 
 check_privilege_contracts

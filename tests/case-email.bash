@@ -313,6 +313,7 @@ _send_notification_production subject body >"$TMP/unavailable.out" 2>&1 || unava
     || fail "email-unavailable notification path reported successful delivery"
 
 ALERT_LOCK_DIR="$TMP/alerts"
+ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
 ALERT_RECOVERY_TTL=86400
 failed=0
 warnings=0
@@ -349,3 +350,159 @@ printf 'Recovery notification failure remains truthful and retryable.\n'
 )
 
 check_recovery_notification_retry_contract
+
+# Variables in this behavioral harness are consumed by dynamically extracted
+# production functions.
+# shellcheck disable=SC2034
+check_health_incident_context() (
+set -euo pipefail
+
+ROOT="${VW_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+log_info(){ :; }
+log_warn(){ printf 'WARN: %s\n' "$*"; }
+log_debug(){ :; }
+
+extract_func(){
+    local file="$1" func="$2"
+    awk -v f="$func" '
+      $0 ~ "^" f "\\(\\)" {p=1}
+      p {
+        print
+        opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
+        depth += opens - closes
+        if (depth == 0) exit
+      }' "$file"
+}
+
+HEALTH="$ROOT/utilities/maintenance-health.sh"
+eval "$(extract_func "$HEALTH" _ensure_alert_dir)"
+eval "$(extract_func "$HEALTH" _acquire_alert_lock)"
+eval "$(extract_func "$HEALTH" _release_alert_lock)"
+eval "$(extract_func "$HEALTH" _release_recovery_lock)"
+sed -n '/^_incident_sanitize()/,/^local -A check_results=/p' "$HEALTH" | sed '$d' > "$TMP/incident-functions.sh"
+# shellcheck source=/dev/null
+source "$TMP/incident-functions.sh"
+eval "$(extract_func "$HEALTH" _notify_failures)"
+eval "$(extract_func "$HEALTH" _notify_recovery)"
+
+ALERT_LOCK_DIR="$TMP/alerts"
+ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
+ALERT_COOLDOWN_SECONDS=3600
+ALERT_RECOVERY_TTL=86400
+ACTIVE_INCIDENT_AVAILABLE=false
+ACTIVE_INCIDENT_ID=""
+ACTIVE_INCIDENT_STARTED_AT=""
+ACTIVE_INCIDENT_LAST_UNHEALTHY_AT=""
+ACTIVE_INCIDENT_HOSTNAME=""
+declare -A check_results=(["docker:vaultwarden"]="fail")
+declare -A check_messages=(["docker:vaultwarden"]=$'container stopped\npassword=topsecret')
+declare -a check_order=("docker:vaultwarden")
+declare -A incident_statuses=()
+declare -A incident_details=()
+declare -a incident_check_order=()
+failed=1
+warnings=0
+passed=8
+
+_incident_update_unhealthy || fail "first unhealthy run did not create incident state"
+[[ -f "$ACTIVE_INCIDENT_FILE" ]] || fail "active incident file is missing"
+mode="$(stat -f '%Lp' "$ACTIVE_INCIDENT_FILE" 2>/dev/null || stat -c '%a' "$ACTIVE_INCIDENT_FILE")"
+[[ "$mode" == "600" ]] || fail "active incident mode is $mode instead of 600"
+first_id="$ACTIVE_INCIDENT_ID"
+first_start="$ACTIVE_INCIDENT_STARTED_AT"
+[[ -n "$first_id" && -n "$first_start" ]] || fail "incident identity metadata is missing"
+! grep -Fq 'topsecret' "$ACTIVE_INCIDENT_FILE" || fail "secret-like detail was persisted"
+grep -Fq 'password=[REDACTED]' "$ACTIVE_INCIDENT_FILE" || fail "secret-like detail was not redacted"
+
+check_results["docker:vaultwarden"]="warn"
+check_messages["docker:vaultwarden"]="container is recovering"
+failed=0
+warnings=1
+_incident_update_unhealthy || fail "subsequent unhealthy update failed"
+[[ "$ACTIVE_INCIDENT_ID" == "$first_id" ]] || fail "incident ID changed during active incident"
+[[ "$ACTIVE_INCIDENT_STARTED_AT" == "$first_start" ]] || fail "incident start changed during active incident"
+grep -Fq $'check\tdocker:vaultwarden\twarn\tcontainer is recovering' "$ACTIVE_INCIDENT_FILE" \
+    || fail "latest check status/detail was not persisted"
+
+captured_subject=""
+captured_body=""
+_send_notification(){ captured_subject="$1"; captured_body="$2"; return 0; }
+_notify_failures || fail "incident failure notification failed"
+[[ "$captured_subject" == *"Incident ${first_id}"* ]] || fail "failure subject omitted incident ID"
+[[ "$captured_body" == *"Incident: ${first_id}"* ]] || fail "failure body omitted incident ID"
+printf '123\n' > "$ALERT_LOCK_DIR/unrelated-check.cooldown"
+
+failed=0
+warnings=0
+passed=12
+captured_subject=""
+captured_body=""
+_notify_recovery || fail "incident recovery notification failed"
+[[ "$captured_subject" == *"RECOVERED [Incident ${first_id}]"* ]] || fail "recovery subject omitted incident ID"
+[[ "$captured_body" == *"docker:vaultwarden [WARN]: container is recovering"* ]] \
+    || fail "recovery body omitted preceding unhealthy check context"
+[[ "$captured_body" == *"Duration:"* && "$captured_body" == *"Current totals:"* ]] \
+    || fail "recovery body omitted duration or totals"
+[[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "successful recovery retained active incident state"
+[[ -e "$ALERT_LOCK_DIR/unrelated-check.cooldown" ]] || fail "successful recovery cleared a per-check cooldown"
+
+check_results["docker:vaultwarden"]="fail"
+check_messages["docker:vaultwarden"]="second incident"
+failed=1
+warnings=0
+_incident_update_unhealthy || fail "could not create second incident"
+second_id="$ACTIVE_INCIDENT_ID"
+_release_recovery_lock
+failed=0
+warnings=0
+_send_notification(){ return 22; }
+if _notify_recovery > "$TMP/recovery-failed.out" 2>&1; then
+    fail "failed recovery email returned success"
+fi
+[[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "failed recovery email removed incident state"
+grep -Fq "$second_id" "$ACTIVE_INCIDENT_FILE" || fail "failed recovery retained the wrong incident"
+
+blocked_parent="$TMP/not-a-directory"
+printf 'x' > "$blocked_parent"
+ALERT_LOCK_DIR="$blocked_parent"
+ACTIVE_INCIDENT_FILE="$blocked_parent/active-incident.state"
+ACTIVE_INCIDENT_AVAILABLE=false
+failed=1
+warnings=0
+before_failed="$failed"
+if _incident_update_unhealthy > "$TMP/unwritable.out" 2>&1; then
+    fail "incident persistence unexpectedly succeeded with unavailable state path"
+fi
+[[ "$failed" == "$before_failed" ]] || fail "incident persistence changed health counters"
+grep -Fq 'continuing without incident correlation' "$TMP/unwritable.out" \
+    || fail "unavailable incident state did not emit a bounded warning"
+
+ALERT_LOCK_DIR="$TMP/bounded-alerts"
+ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
+ACTIVE_INCIDENT_AVAILABLE=false
+ACTIVE_INCIDENT_ID=""
+incident_statuses=()
+incident_details=()
+incident_check_order=()
+long_detail="$(printf 'A%.0s' {1..2000})"$'\001\napi_token=verysecret'
+check_messages["docker:vaultwarden"]="$long_detail"
+_incident_update_unhealthy || fail "bounded incident write failed"
+[[ "$(wc -c < "$ACTIVE_INCIDENT_FILE")" -le 16384 ]] || fail "incident state exceeded total size cap"
+! grep -Fq 'verysecret' "$ACTIVE_INCIDENT_FILE" || fail "API token leaked into incident state"
+detail_length="$(awk -F '\t' '$1=="check" {print length($4); exit}' "$ACTIVE_INCIDENT_FILE")"
+[[ "$detail_length" -le 512 ]] || fail "incident detail exceeded per-check cap"
+
+! grep -Eq '^[[:space:]]*chown[[:space:]]' "$TMP/incident-functions.sh" \
+    || fail "health incident code hardcodes alert-directory ownership changes"
+! grep -Fq 'active-incident.state' "$ROOT/lib/common.sh" \
+    || fail "incident state was added to central known-path permissions"
+! grep -Fq 'active-incident.state' "$ROOT/lib/runtime-permissions.sh" \
+    || fail "incident state was added to runtime permission repair"
+
+printf 'Health incident context tests passed.\n'
+)
+
+check_health_incident_context

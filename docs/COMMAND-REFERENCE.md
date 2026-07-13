@@ -1194,6 +1194,9 @@ ENVIRONMENT:
                                guard. Default: 'true'.
     CROWDSEC_VERSION           Pin a specific CrowdSec version.
     CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
+    CROWDSEC_EMAIL_NOTIFICATIONS
+                               Optional security-event email through the
+                               existing 127.0.0.1:587 Postfix relay. Default: false.
 
     Cloudflare credentials (in encrypted secrets, not .env):
         sudo ./edit-secrets.sh rotate cf_worker_bouncer_token

@@ -83,6 +83,81 @@ sudo ./utilities/setup-crowdsec.sh --help
 
 for the exact current options.
 
+## Optional security-event email
+
+CrowdSec security-event email is opt-in and disabled by default:
+
+```bash
+CROWDSEC_EMAIL_NOTIFICATIONS=false
+```
+
+To enable it, edit the normal non-secret environment and run the existing
+root-operated CrowdSec reconciliation path:
+
+```bash
+sudo make edit-env
+# Set CROWDSEC_EMAIL_NOTIFICATIONS=true
+sudo ./utilities/setup-crowdsec.sh
+```
+
+The delivery route is deliberately narrow:
+
+```text
+CrowdSec host service
+        -> 127.0.0.1:587
+        -> existing VaultWarden Postfix sidecar
+        -> authenticated/TLS upstream SMTP relay
+```
+
+The generated `/etc/crowdsec/notifications/vaultwarden-email.yaml` uses
+`SMTP_FROM` and `ADMIN_EMAIL` only as addressing values. It contains no SMTP
+password, upstream relay credential, or email API token. The unauthenticated,
+unencrypted submission hop is permitted only on the existing loopback-only
+Postfix publication; do not expose port 587 on a public interface.
+
+Setup writes only the marked plugin file and the marked
+VaultWarden-OCI block in `/etc/crowdsec/profiles.yaml.local`. Operator content
+outside that block is retained. Static configuration validation uses the
+CrowdSec 1.7-supported command before the service restart:
+
+```bash
+sudo crowdsec -t
+```
+
+Normal setup does not attempt live mail delivery and does not require Postfix
+to be running. After the application stack is up, request an end-to-end test
+explicitly:
+
+```bash
+sudo cscli notifications test vaultwarden_email
+```
+
+That command submits through the same `127.0.0.1:587` Postfix route and returns
+nonzero when delivery fails. Inspect the exact failure with:
+
+```bash
+sudo cscli notifications inspect vaultwarden_email
+sudo journalctl -u crowdsec -n 100 --no-pager
+sudo make health
+```
+
+Health reports disabled, missing-plugin, missing-profile, invalid, configured,
+and statically valid states separately. A disabled optional notification is a
+healthy state and does not generate a warning. Health does not send a live
+notification test on every run.
+
+To disable the feature, set the option back to `false` and reconcile again:
+
+```bash
+sudo make edit-env
+# Set CROWDSEC_EMAIL_NOTIFICATIONS=false
+sudo ./utilities/setup-crowdsec.sh
+```
+
+Only marked VaultWarden-OCI content is removed. An unmarked file at the managed
+plugin path is treated as an operator conflict and is neither overwritten nor
+deleted.
+
 ## Secret source
 
 The CrowdSec Workers credentials are SOPS keys in:
