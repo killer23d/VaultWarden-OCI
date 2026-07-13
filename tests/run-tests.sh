@@ -84,6 +84,12 @@ DATA_PROTECTION_CASES=(
 
 # Internal fixture hooks for runner-contract tests. They are not part of the
 # supported developer CLI and never modify the repository's real tests tree.
+if [[ -n "${VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE:-}" \
+    && -z "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" ]]; then
+    echo "FAIL VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE requires VAULTWARDEN_TEST_RUNNER_TESTS_DIR fixture mode" >&2
+    exit 2
+fi
+
 if [[ -n "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" ]]; then
     for index in "${!FOUNDATION_CASES[@]}"; do
         FOUNDATION_CASES[$index]="$TESTS_DIR/${FOUNDATION_CASES[$index]#tests/}"
@@ -97,9 +103,10 @@ if [[ -n "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" ]]; then
     for index in "${!DATA_PROTECTION_CASES[@]}"; do
         DATA_PROTECTION_CASES[$index]="$TESTS_DIR/${DATA_PROTECTION_CASES[$index]#tests/}"
     done
-fi
-if [[ -n "${VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE:-}" ]]; then
-    FOUNDATION_CASES+=("$VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE")
+
+    if [[ -n "${VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE:-}" ]]; then
+        FOUNDATION_CASES+=("$VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE")
+    fi
 fi
 
 ALL_CASES=(

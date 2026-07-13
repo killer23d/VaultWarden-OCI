@@ -98,6 +98,22 @@ for registered_case in "${registered_cases[@]}"; do
 done
 
 run_output="$TMP_ROOT/run.out"
+normal_extra_case="$TMP_ROOT/normal-extra.bash"
+normal_extra_marker="$TMP_ROOT/normal-extra-ran"
+write_case "$normal_extra_case" 'printf ran > "$NORMAL_EXTRA_MARKER"'
+capture "$run_output" env \
+    "VAULTWARDEN_TEST_RUNNER_TESTS_DIR=" \
+    "VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE=$normal_extra_case" \
+    "NORMAL_EXTRA_MARKER=$normal_extra_marker" \
+    "$RUNNER" foundation
+assert_status 2 "normal-mode extra foundation case"
+assert_contains "VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE requires VAULTWARDEN_TEST_RUNNER_TESTS_DIR fixture mode" \
+    "$run_output" "normal-mode fixture-hook diagnostic"
+assert_not_contains "RUN   $normal_extra_case" \
+    "$run_output" "normal-mode fixture-hook inventory isolation"
+[[ ! -e "$normal_extra_marker" ]] \
+    || fail "normal-mode fixture hook executed the injected case"
+
 fixture_env=(env "VAULTWARDEN_TEST_RUNNER_TESTS_DIR=$FIXTURE_TESTS")
 
 capture "$run_output" "${fixture_env[@]}" "$RUNNER" unknown-suite
