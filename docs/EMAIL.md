@@ -19,6 +19,11 @@ systemd failure notifications
 
 Recovery-kit attachment email
         -> SMTP fallback chain
+
+CrowdSec security-event email (optional)
+        -> host 127.0.0.1:587
+        -> Postfix sidecar
+        -> authenticated/TLS upstream SMTP relay
 ```
 
 The Postfix container is a private smart-host relay for the stack. It is not a public MX server.
@@ -132,6 +137,36 @@ Direct fallback is a delivery fallback, not a reason to remove the Postfix servi
 Non-critical operational subjects use the repository's local per-subject email rate-limit stamp to reduce repeated notification noise. Critical subjects bypass that normal rate-limit check.
 
 The default rate window is controlled by the current email helper configuration and should not be replaced with another notification database or daemon.
+
+### Health incident and recovery context
+
+Health checks keep their existing per-check warning/failure messages and
+cooldowns. When the existing `${PROJECT_STATE_DIR}/.vw-health-alert/` path is
+writable, the first unhealthy run also creates one private `0600` active
+incident snapshot. Failure/warning mail includes its incident ID. Subsequent
+unhealthy runs retain the original ID/start time and update bounded,
+control-character-sanitized check details.
+
+The next successful recovery email includes the incident ID, start and recovery
+times, calculated duration, previously unhealthy checks and their last bounded
+details, plus current pass/warning/failure totals. After successful delivery,
+only the active incident file is removed. Per-check cooldowns and notification
+dead-letter markers are not cleared. If recovery delivery fails, the snapshot
+is retained and the existing recovery cooldown is released for the next-cycle
+retry.
+
+Incident persistence is best effort. If the existing alert-state directory is
+not writable, health logs a bounded warning and continues with the established
+health result, email, exit-code, and cooldown behavior without incident
+correlation. It does not self-escalate or change directory ownership.
+
+These notification types remain separate:
+
+- CrowdSec security-event email reports matching IP-remediation alerts through
+  the optional CrowdSec plugin.
+- Health email reports individual unhealthy checks and correlated recovery.
+- Generic systemd `OnFailure` email reports a failed unit through
+  `utilities/notify-failure.sh`.
 
 ## HTTP API provider mode
 

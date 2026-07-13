@@ -366,3 +366,198 @@ printf 'CrowdSec LAPI cohort and required-service truthfulness tests passed.\n'
 )
 
 check_crowdsec_lapi_cohort_and_required_services
+
+# Variables in this behavioral harness are consumed by dynamically extracted
+# production functions.
+# shellcheck disable=SC2034
+check_crowdsec_email_notifications() (
+set -euo pipefail
+
+ROOT="${VW_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SETUP="$ROOT/utilities/setup-crowdsec.sh"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+log_info(){ :; }
+log_warn(){ :; }
+log_success(){ :; }
+log_error(){ printf 'ERROR: %s\n' "$*" >&2; }
+
+install(){
+    local -a args=()
+    while (( $# )); do
+        case "$1" in
+            -o|-g) shift 2 ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    command install "${args[@]}"
+}
+chown(){ return 0; }
+stat(){
+    if [[ "${1:-}" == "-c" ]]; then
+        case "$2" in
+            %a) command stat -f '%Lp' "$3" ;;
+            %u) command stat -f '%u' "$3" ;;
+            %g) command stat -f '%g' "$3" ;;
+            *) return 2 ;;
+        esac
+    else
+        command stat "$@"
+    fi
+}
+
+_CS_LAPI_COHORT_ROOT="$TMP/etc-crowdsec"
+sed -n '/^_CS_EMAIL_PLUGIN_MARKER=/,/^# CLI flags/p' "$SETUP" | sed '$d' > "$TMP/email-functions.sh"
+# shellcheck source=/dev/null
+source "$TMP/email-functions.sh"
+
+VALIDATION_RC=0
+RESTART_RC=0
+crowdsec(){ [[ "${1:-}" == "-t" ]] || return 2; return "$VALIDATION_RC"; }
+systemctl(){ [[ "${1:-}" == "restart" && "${2:-}" == "crowdsec" ]] || return 0; return "$RESTART_RC"; }
+
+DRY_RUN=false
+ADMIN_EMAIL=admin@example.test
+SMTP_FROM=security@example.test
+CROWDSEC_EMAIL_NOTIFICATIONS=true
+export ADMIN_EMAIL SMTP_FROM CROWDSEC_EMAIL_NOTIFICATIONS
+mkdir -p "$_CS_LAPI_COHORT_ROOT"
+printf 'name: operator_profile\nfilters:\n  - true\non_success: continue\n' \
+    > "$_CS_LAPI_COHORT_ROOT/profiles.yaml.local"
+cp "$_CS_LAPI_COHORT_ROOT/profiles.yaml.local" "$TMP/operator.original"
+
+_cs_reconcile_email_notifications \
+    || fail "enabled CrowdSec email reconciliation failed"
+plugin="$_CS_LAPI_COHORT_ROOT/notifications/vaultwarden-email.yaml"
+profiles="$_CS_LAPI_COHORT_ROOT/profiles.yaml.local"
+grep -Fxq 'smtp_host: 127.0.0.1' "$plugin" || fail "plugin does not use loopback Postfix"
+grep -Fxq 'smtp_port: 587' "$plugin" || fail "plugin does not use loopback Postfix port"
+grep -Fxq 'auth_type: none' "$plugin" || fail "plugin unexpectedly requires authentication"
+grep -Fxq 'encryption_type: none' "$plugin" || fail "plugin unexpectedly enables encryption on loopback hop"
+grep -Fq "sender_email: 'security@example.test'" "$plugin" || fail "SMTP_FROM was not rendered"
+grep -Fq -- "- 'admin@example.test'" "$plugin" || fail "ADMIN_EMAIL was not rendered"
+! grep -Eiq 'smtp_password|smtp_username|email_api_token|authorization|api[_-]?token' "$plugin" \
+    || fail "plugin rendered a credential field"
+grep -Fxq 'on_success: continue' "$profiles" || fail "notification profile can stop remediation"
+grep -Fq 'name: operator_profile' "$profiles" || fail "operator profile content was lost"
+
+before="$(shasum -a 256 "$plugin" "$profiles")"
+_cs_reconcile_email_notifications || fail "repeat reconciliation failed"
+after="$(shasum -a 256 "$plugin" "$profiles")"
+[[ "$before" == "$after" ]] || fail "repeat reconciliation was not byte-stable"
+
+CROWDSEC_EMAIL_NOTIFICATIONS=false
+export CROWDSEC_EMAIL_NOTIFICATIONS
+_cs_reconcile_email_notifications || fail "disable reconciliation failed"
+[[ ! -e "$plugin" ]] || fail "disable retained the marked plugin"
+cmp -s "$TMP/operator.original" "$profiles" || fail "disable changed operator profile content"
+
+mkdir -p "$(dirname "$plugin")"
+printf 'type: email\nname: operator_owned\n' > "$plugin"
+if _cs_reconcile_email_notifications >"$TMP/conflict.out" 2>&1; then
+    fail "disable deleted an unmarked operator plugin"
+fi
+grep -Fq 'name: operator_owned' "$plugin" || fail "unmarked operator plugin was modified"
+rm -f "$plugin"
+
+CROWDSEC_EMAIL_NOTIFICATIONS=true
+export CROWDSEC_EMAIL_NOTIFICATIONS
+_cs_reconcile_email_notifications || fail "could not seed rollback fixture"
+cp "$plugin" "$TMP/plugin.before"
+cp "$profiles" "$TMP/profiles.before"
+printf '# local operator tail\n' >> "$profiles"
+cp "$profiles" "$TMP/profiles.validation-before"
+VALIDATION_RC=9
+if _cs_reconcile_email_notifications >"$TMP/validation.out" 2>&1; then
+    fail "static validation failure returned success"
+fi
+cmp -s "$TMP/plugin.before" "$plugin" || fail "validation failure did not restore plugin"
+cmp -s "$TMP/profiles.validation-before" "$profiles" || fail "validation failure did not restore profiles"
+grep -Fq 'crowdsec -t' "$TMP/validation.out" || fail "validation failure did not name the failing command"
+
+VALIDATION_RC=0
+RESTART_RC=7
+cp "$plugin" "$TMP/plugin.restart-before"
+cp "$profiles" "$TMP/profiles.restart-before"
+if _cs_reconcile_email_notifications >"$TMP/restart.out" 2>&1; then
+    fail "CrowdSec restart failure returned success"
+fi
+cmp -s "$TMP/plugin.restart-before" "$plugin" || fail "restart failure did not restore plugin"
+cmp -s "$TMP/profiles.restart-before" "$profiles" || fail "restart failure did not restore profiles"
+grep -Fq 'systemctl restart crowdsec' "$TMP/restart.out" || fail "restart failure did not name the failing command"
+
+grep -Fxq 'CROWDSEC_EMAIL_NOTIFICATIONS=false' "$ROOT/.env.example" \
+    || fail "CrowdSec email notifications are not disabled by default"
+! grep -Fq 'CROWDSEC_EMAIL_NOTIFICATIONS' "$ROOT/secrets-schema.yaml" \
+    || fail "non-secret CrowdSec option was added to the secret schema"
+! grep -Eq 'nc .*127\.0\.0\.1.*587|curl .*127\.0\.0\.1.*587' "$SETUP" \
+    || fail "normal setup unexpectedly requires live Postfix connectivity"
+grep -Fq 'sudo cscli notifications test vaultwarden_email' "$ROOT/docs/CROWDSEC.md" \
+    || fail "CrowdSec documentation omits the explicit notification test"
+! grep -E 'cscli notifications test vaultwarden_email.*\|\|[[:space:]]*true' "$ROOT/docs/CROWDSEC.md" \
+    || fail "documented explicit notification test hides delivery failure"
+
+printf 'CrowdSec email notification transaction tests passed.\n'
+)
+
+check_crowdsec_email_notifications
+
+check_crowdsec_email_health_visibility() (
+set -euo pipefail
+ROOT="${VW_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+HEALTH="$ROOT/utilities/maintenance-health.sh"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+extract_func(){
+    local file="$1" func="$2"
+    awk -v f="$func" '
+      $0 ~ "^" f "\\(\\)" {p=1}
+      p { print; opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}"); depth += opens-closes; if (depth==0) exit }
+    ' "$file"
+}
+eval "$(extract_func "$HEALTH" _check_crowdsec_email_notifications)"
+RESULTS=""
+_pass(){ RESULTS+="pass:$1:$2\n"; }
+_warn(){ RESULTS+="warn:$1:$2\n"; }
+crowdsec(){ return "${VALIDATION_RC:-0}"; }
+VW_CROWDSEC_ETC_DIR="$TMP/etc-crowdsec"
+export VW_CROWDSEC_ETC_DIR
+
+CROWDSEC_EMAIL_NOTIFICATIONS=false
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == pass:*disabled* ]] || fail "disabled notifications were not reported as a clean pass"
+[[ "$RESULTS" != *warn:* ]] || fail "disabled optional notifications produced a warning"
+
+CROWDSEC_EMAIL_NOTIFICATIONS=true
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == warn:*plugin*missing* ]] || fail "missing enabled plugin state was not distinct"
+
+mkdir -p "$VW_CROWDSEC_ETC_DIR/notifications"
+printf '# Managed by VaultWarden-OCI: CrowdSec email notification\n' \
+    > "$VW_CROWDSEC_ETC_DIR/notifications/vaultwarden-email.yaml"
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == warn:*profile*missing* ]] || fail "missing profile block state was not distinct"
+
+printf '# BEGIN VaultWarden-OCI CrowdSec email notifications\n# END VaultWarden-OCI CrowdSec email notifications\n' \
+    > "$VW_CROWDSEC_ETC_DIR/profiles.yaml.local"
+VALIDATION_RC=8
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == *pass:*configured* && "$RESULTS" == *warn:*validation*failed* ]] \
+    || fail "invalid configured state was not reported distinctly"
+
+VALIDATION_RC=0
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == *pass:*configured* && "$RESULTS" == *pass:*validation*valid* ]] \
+    || fail "statically valid enabled state was not reported"
+
+printf 'CrowdSec email notification health visibility tests passed.\n'
+)
+
+check_crowdsec_email_health_visibility

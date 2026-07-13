@@ -492,3 +492,31 @@ EOF_PROBE
 )
 
 check_systemd_timer_start_policy_behavior
+
+check_notification_features_preserve_systemd_contracts() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+unit_count="$(find "$ROOT/systemd" -maxdepth 1 -type f -name '*.service' | wc -l | tr -d ' ')"
+timer_count="$(find "$ROOT/systemd" -maxdepth 1 -type f -name '*.timer' | wc -l | tr -d ' ')"
+[[ "$unit_count" == "10" && "$timer_count" == "6" ]] \
+    || fail "notification work added or removed a managed unit/timer (${unit_count} services, ${timer_count} timers)"
+health_unit="$ROOT/systemd/vaultwarden-health.service"
+grep -Fxq 'ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci' "$health_unit" \
+    || fail "health ReadWritePaths contract changed"
+grep -Fxq 'SuccessExitStatus=0 1 3 75' "$health_unit" \
+    || fail "health SuccessExitStatus contract changed"
+grep -Fxq 'OnFailure=vaultwarden-notify-failure@%n.service' "$health_unit" \
+    || fail "health OnFailure contract changed"
+! grep -Fq '/etc/crowdsec' "$health_unit" \
+    || fail "health unit sandbox was broadened for CrowdSec notification config"
+grep -Fq 'utilities/maintenance-health.sh' "$ROOT/utilities/setup-systemd.sh" \
+    || fail "installed runtime no longer carries the modified health script"
+! grep -Fq 'vaultwarden-email' "$ROOT/utilities/setup-systemd.sh" \
+    || fail "CrowdSec email notification added systemd installation behavior"
+
+printf 'Notification features preserve systemd unit and sandbox contracts.\n'
+)
+
+check_notification_features_preserve_systemd_contracts

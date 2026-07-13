@@ -570,6 +570,316 @@ _cs_ensure_fw_bouncer_key() {
 }
 
 # ---------------------------------------------------------------------------
+# Optional CrowdSec email notification transaction.
+#
+# Only the marked plugin file and marked profiles.yaml.local block are owned by
+# this project.  Existing file metadata is retained; new project-generated
+# CrowdSec files use root:root 0640, matching the setup script's generated
+# /etc/crowdsec configuration convention.
+# ---------------------------------------------------------------------------
+_CS_EMAIL_PLUGIN_MARKER="# Managed by VaultWarden-OCI: CrowdSec email notification"
+_CS_EMAIL_PROFILE_BEGIN="# BEGIN VaultWarden-OCI CrowdSec email notifications"
+_CS_EMAIL_PROFILE_END="# END VaultWarden-OCI CrowdSec email notifications"
+
+_cs_email_paths() {
+    _CS_EMAIL_PLUGIN_PATH="${_CS_LAPI_COHORT_ROOT}/notifications/vaultwarden-email.yaml"
+    _CS_EMAIL_PROFILES_PATH="${_CS_LAPI_COHORT_ROOT}/profiles.yaml.local"
+}
+
+_cs_yaml_single_quote() {
+    local value="$1"
+    value="${value//\'/\'\'}"
+    printf "'%s'" "$value"
+}
+
+_cs_email_address_is_safe() {
+    local value="${1:-}"
+    [[ -n "$value" && ${#value} -le 254 && "$value" == *@* ]]
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *$'\t'* ]]
+    [[ "$value" != *[[:cntrl:]]* ]]
+}
+
+_cs_email_ensure_dir() {
+    local path="$1"
+    [[ -d "$path" ]] && return 0
+    install -d -m 750 -o root -g root "$path"
+}
+
+_cs_email_file_metadata() {
+    local path="$1" default_mode="${2:-640}"
+    if [[ -e "$path" ]]; then
+        printf '%s %s %s\n' \
+            "$(stat -c '%a' "$path")" "$(stat -c '%u' "$path")" "$(stat -c '%g' "$path")"
+    else
+        printf '%s 0 0\n' "$default_mode"
+    fi
+}
+
+_cs_email_write_plugin_stage() {
+    local output="$1" sender receiver
+    sender="$(_cs_yaml_single_quote "$SMTP_FROM")"
+    receiver="$(_cs_yaml_single_quote "$ADMIN_EMAIL")"
+    cat > "$output" <<EOF_EMAIL_PLUGIN
+${_CS_EMAIL_PLUGIN_MARKER}
+# Regenerate with: sudo ./utilities/setup-crowdsec.sh
+type: email
+name: vaultwarden_email
+log_level: info
+group_wait: 30s
+group_threshold: 10
+max_retry: 3
+timeout: 20s
+connect_timeout: 10s
+send_timeout: 10s
+format: |
+  CrowdSec security event notification (up to 10 alerts and 5 decisions per alert).
+  {{ range \$alertIndex, \$alert := . -}}
+  {{ if lt \$alertIndex 10 -}}
+  Source: {{ if \$alert.Source }}{{ \$alert.Source.Value }}{{ else }}unknown{{ end }}
+  Scenario: {{ \$alert.Scenario }}
+  Machine ID: {{ \$alert.MachineID }}
+  {{ range \$decisionIndex, \$decision := \$alert.Decisions -}}
+  {{ if lt \$decisionIndex 5 -}}
+  Decision type: {{ \$decision.Type }}
+  Decision duration: {{ \$decision.Duration }}
+  {{ end -}}
+  {{ end -}}
+  ---
+  {{ end -}}
+  {{ end -}}
+smtp_host: 127.0.0.1
+smtp_port: 587
+auth_type: none
+encryption_type: none
+sender_name: CrowdSec
+sender_email: ${sender}
+email_subject: "CrowdSec security event"
+receiver_emails:
+  - ${receiver}
+EOF_EMAIL_PLUGIN
+}
+
+_cs_email_strip_profile_block() {
+    local input="$1" output="$2"
+    awk -v begin="$_CS_EMAIL_PROFILE_BEGIN" -v end="$_CS_EMAIL_PROFILE_END" '
+        $0 == begin {
+            if (inside || seen) exit 42
+            inside=1; seen=1; next
+        }
+        $0 == end {
+            if (!inside) exit 43
+            inside=0; next
+        }
+        !inside { print }
+        END { if (inside) exit 44 }
+    ' "$input" > "$output"
+}
+
+_cs_email_append_profile_block() {
+    local output="$1"
+    cat >> "$output" <<EOF_EMAIL_PROFILE
+${_CS_EMAIL_PROFILE_BEGIN}
+---
+name: vaultwarden_email_notifications
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+notifications:
+  - vaultwarden_email
+on_success: continue
+${_CS_EMAIL_PROFILE_END}
+EOF_EMAIL_PROFILE
+}
+
+_cs_email_validate_stages() {
+    local plugin="$1" profiles="$2" enabled="$3"
+    if [[ "$enabled" == "true" ]]; then
+        grep -Fxq "$_CS_EMAIL_PLUGIN_MARKER" "$plugin" || return 1
+        grep -Fxq 'smtp_host: 127.0.0.1' "$plugin" || return 1
+        grep -Fxq 'smtp_port: 587' "$plugin" || return 1
+        grep -Fxq 'auth_type: none' "$plugin" || return 1
+        grep -Fxq 'encryption_type: none' "$plugin" || return 1
+        if grep -Eiq 'smtp_password|smtp_username|email_api_token|authorization|api[_-]?token' "$plugin"; then
+            return 1
+        fi
+        [[ "$(grep -Fxc "$_CS_EMAIL_PROFILE_BEGIN" "$profiles")" == "1" ]] || return 1
+        [[ "$(grep -Fxc "$_CS_EMAIL_PROFILE_END" "$profiles")" == "1" ]] || return 1
+        grep -Fxq 'on_success: continue' "$profiles" || return 1
+    else
+        ! grep -Fq "$_CS_EMAIL_PROFILE_BEGIN" "$profiles" || return 1
+        ! grep -Fq "$_CS_EMAIL_PROFILE_END" "$profiles" || return 1
+    fi
+}
+
+_cs_email_promote_stage() {
+    local stage="$1" destination="$2" metadata="$3" mode uid gid
+    read -r mode uid gid <<< "$metadata"
+    chmod "$mode" "$stage" || return 1
+    chown "$uid:$gid" "$stage" || return 1
+    mv -f "$stage" "$destination"
+}
+
+_cs_email_restore_path() {
+    local destination="$1" backup="$2" existed="$3" metadata="$4" restore_stage
+    if [[ "$existed" == "true" ]]; then
+        restore_stage="$(mktemp "$(dirname "$destination")/.vw-email-restore.XXXXXXXX")" || return 1
+        cp "$backup" "$restore_stage" || { rm -f "$restore_stage"; return 1; }
+        _cs_email_promote_stage "$restore_stage" "$destination" "$metadata"
+    else
+        rm -f "$destination"
+    fi
+}
+
+_cs_validate_crowdsec_config() {
+    if ! command -v crowdsec >/dev/null 2>&1; then
+        log_error "CrowdSec static validation failed: 'crowdsec' command is unavailable."
+        return 1
+    fi
+    if ! crowdsec -t; then
+        log_error "CrowdSec static validation failed: crowdsec -t"
+        return 1
+    fi
+}
+
+_cs_reconcile_email_notifications() {
+    _cs_email_paths
+    local enabled="${CROWDSEC_EMAIL_NOTIFICATIONS:-false}"
+    enabled="${enabled,,}"
+    [[ "$enabled" == "true" ]] || enabled=false
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would reconcile CrowdSec email notifications: ${enabled}"
+        return 0
+    fi
+
+    if [[ -f "$_CS_EMAIL_PLUGIN_PATH" ]] \
+        && ! grep -Fxq "$_CS_EMAIL_PLUGIN_MARKER" "$_CS_EMAIL_PLUGIN_PATH"; then
+        log_error "Refusing to overwrite unmarked operator file: $_CS_EMAIL_PLUGIN_PATH"
+        return 1
+    fi
+    if [[ "$enabled" == "true" && ( -z "${ADMIN_EMAIL:-}" || -z "${SMTP_FROM:-}" ) ]]; then
+        log_error "CROWDSEC_EMAIL_NOTIFICATIONS=true requires ADMIN_EMAIL and SMTP_FROM."
+        return 1
+    fi
+    if [[ "$enabled" == "true" ]] \
+        && { ! _cs_email_address_is_safe "$ADMIN_EMAIL" || ! _cs_email_address_is_safe "$SMTP_FROM"; }; then
+        log_error "ADMIN_EMAIL and SMTP_FROM must be bounded, single-line email addresses for CrowdSec notifications."
+        return 1
+    fi
+    if [[ "$enabled" == "false" && ! -e "$_CS_EMAIL_PLUGIN_PATH" ]] \
+        && { [[ ! -f "$_CS_EMAIL_PROFILES_PATH" ]] \
+            || { ! grep -Fq "$_CS_EMAIL_PROFILE_BEGIN" "$_CS_EMAIL_PROFILES_PATH" \
+                && ! grep -Fq "$_CS_EMAIL_PROFILE_END" "$_CS_EMAIL_PROFILES_PATH"; }; }; then
+        log_info "CrowdSec email notifications disabled; no managed notification files are present."
+        return 0
+    fi
+
+    _cs_email_ensure_dir "$(dirname "$_CS_EMAIL_PROFILES_PATH")" || return 1
+    _cs_email_ensure_dir "$(dirname "$_CS_EMAIL_PLUGIN_PATH")" || return 1
+
+    local workdir plugin_stage profiles_stage empty_input
+    local plugin_existed=false profiles_existed=false
+    local plugin_metadata profiles_metadata
+    workdir="$(mktemp -d "${_CS_LAPI_COHORT_ROOT}/.vw-email-transaction.XXXXXXXX")" || return 1
+    chmod 0700 "$workdir" || { rm -rf "$workdir"; return 1; }
+    plugin_stage="$(mktemp "$(dirname "$_CS_EMAIL_PLUGIN_PATH")/.vw-email-plugin.XXXXXXXX")" || { rm -rf "$workdir"; return 1; }
+    profiles_stage="$(mktemp "$(dirname "$_CS_EMAIL_PROFILES_PATH")/.vw-email-profiles.XXXXXXXX")" || {
+        rm -f "$plugin_stage"; rm -rf "$workdir"; return 1;
+    }
+    empty_input="${workdir}/empty"
+    : > "$empty_input"
+
+    if [[ -e "$_CS_EMAIL_PLUGIN_PATH" ]]; then
+        plugin_existed=true
+        cp -p "$_CS_EMAIL_PLUGIN_PATH" "${workdir}/plugin.backup" || {
+            rm -f "$plugin_stage" "$profiles_stage"; rm -rf "$workdir"; return 1;
+        }
+    fi
+    if [[ -e "$_CS_EMAIL_PROFILES_PATH" ]]; then
+        profiles_existed=true
+        cp -p "$_CS_EMAIL_PROFILES_PATH" "${workdir}/profiles.backup" || {
+            rm -f "$plugin_stage" "$profiles_stage"; rm -rf "$workdir"; return 1;
+        }
+    fi
+    plugin_metadata="$(_cs_email_file_metadata "$_CS_EMAIL_PLUGIN_PATH" 640)" || {
+        rm -f "$plugin_stage" "$profiles_stage"; rm -rf "$workdir"; return 1;
+    }
+    profiles_metadata="$(_cs_email_file_metadata "$_CS_EMAIL_PROFILES_PATH" 640)" || {
+        rm -f "$plugin_stage" "$profiles_stage"; rm -rf "$workdir"; return 1;
+    }
+
+    if ! _cs_email_strip_profile_block \
+        "$([[ "$profiles_existed" == "true" ]] && printf '%s' "$_CS_EMAIL_PROFILES_PATH" || printf '%s' "$empty_input")" \
+        "$profiles_stage"; then
+        log_error "Refusing malformed or duplicate VaultWarden-OCI block in $_CS_EMAIL_PROFILES_PATH"
+        rm -f "$plugin_stage" "$profiles_stage"; rm -rf "$workdir"
+        return 1
+    fi
+
+    if [[ "$enabled" == "true" ]]; then
+        _cs_email_write_plugin_stage "$plugin_stage"
+        _cs_email_append_profile_block "$profiles_stage"
+    else
+        : > "$plugin_stage"
+    fi
+
+    if ! _cs_email_validate_stages "$plugin_stage" "$profiles_stage" "$enabled"; then
+        log_error "CrowdSec email notification staged-file validation failed."
+        rm -f "$plugin_stage" "$profiles_stage"; rm -rf "$workdir"
+        return 1
+    fi
+
+    local promotion_failed=false
+    if [[ "$enabled" == "true" ]]; then
+        _cs_email_promote_stage "$plugin_stage" "$_CS_EMAIL_PLUGIN_PATH" "$plugin_metadata" \
+            || promotion_failed=true
+    else
+        rm -f "$plugin_stage"
+        [[ "$plugin_existed" == "false" ]] || rm -f "$_CS_EMAIL_PLUGIN_PATH" \
+            || promotion_failed=true
+    fi
+    if [[ "$promotion_failed" == "false" ]]; then
+        if [[ -s "$profiles_stage" ]]; then
+            _cs_email_promote_stage "$profiles_stage" "$_CS_EMAIL_PROFILES_PATH" "$profiles_metadata" \
+                || promotion_failed=true
+        else
+            rm -f "$profiles_stage"
+            [[ "$profiles_existed" == "false" ]] || rm -f "$_CS_EMAIL_PROFILES_PATH" \
+                || promotion_failed=true
+        fi
+    fi
+
+    local failing_step=""
+    [[ "$promotion_failed" == "false" ]] || failing_step="atomic file promotion"
+    if [[ -z "$failing_step" ]] && ! _cs_validate_crowdsec_config; then
+        failing_step="crowdsec -t"
+    fi
+    if [[ -z "$failing_step" ]] && ! systemctl restart crowdsec; then
+        log_error "CrowdSec restart failed: systemctl restart crowdsec"
+        failing_step="systemctl restart crowdsec"
+    fi
+
+    if [[ -n "$failing_step" ]]; then
+        log_error "CrowdSec email notification reconciliation failed at: ${failing_step}; restoring previous managed files."
+        _cs_email_restore_path "$_CS_EMAIL_PLUGIN_PATH" "${workdir}/plugin.backup" "$plugin_existed" "$plugin_metadata" \
+            || log_error "Failed to restore previous CrowdSec email plugin file."
+        _cs_email_restore_path "$_CS_EMAIL_PROFILES_PATH" "${workdir}/profiles.backup" "$profiles_existed" "$profiles_metadata" \
+            || log_error "Failed to restore previous CrowdSec profiles.yaml.local file."
+        systemctl restart crowdsec >/dev/null 2>&1 \
+            || log_error "CrowdSec restart after rollback failed; inspect: sudo systemctl status crowdsec"
+        rm -f "$plugin_stage" "$profiles_stage"; rm -rf "$workdir"
+        return 1
+    fi
+
+    rm -f "$plugin_stage" "$profiles_stage"; rm -rf "$workdir"
+    if [[ "$enabled" == "true" ]]; then
+        log_success "CrowdSec email notifications enabled through 127.0.0.1:587."
+        log_info "Delivery testing remains explicit: sudo cscli notifications test vaultwarden_email"
+    else
+        log_info "CrowdSec email notifications disabled; managed notification files removed when present."
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # CLI flags
 # ---------------------------------------------------------------------------
 AUTO_MODE=false
@@ -612,6 +922,9 @@ ENVIRONMENT:
                                guard. Default: 'true'.
     CROWDSEC_VERSION           Pin a specific CrowdSec version.
     CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
+    CROWDSEC_EMAIL_NOTIFICATIONS
+                               Optional security-event email through the
+                               existing 127.0.0.1:587 Postfix relay. Default: false.
 
     Cloudflare credentials (in encrypted secrets, not .env):
         sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
@@ -1356,6 +1669,11 @@ if [[ -f "$_PROFILES_SRC" ]]; then
     fi
 else
     log_info "No custom crowdsec/profiles.yaml found — using CrowdSec defaults."
+fi
+
+if ! _cs_reconcile_email_notifications; then
+    log_error "CrowdSec email notification reconciliation failed."
+    exit 1
 fi
 
 _cs_wait_for_lapi() {
