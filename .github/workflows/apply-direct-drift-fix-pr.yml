@@ -1,6 +1,9 @@
 name: Apply direct drift fix PR
 
 on:
+  push:
+    branches:
+      - agent/fix-caddy-crowdsec-drift
   pull_request:
     branches:
       - delta
