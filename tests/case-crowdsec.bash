@@ -621,11 +621,38 @@ assert_no_validation_logs(){
 }
 
 sanitize_log="$TMP/sanitize.log"
+assert_one_line_bounded(){
+    local value="$1" label="$2"
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] \
+        || fail "$label produced multiline output"
+    (( ${#value} <= 240 )) || fail "$label exceeded the 240-character bound"
+}
+
+assert_sensitive_redaction(){
+    local input="$1" expected="$2" label="$3"
+    shift 3
+    local detail forbidden
+    printf '%s\n' "$input" > "$sanitize_log"
+    detail="$(_crowdsec_health_sanitize_validation_log "$sanitize_log")"
+    [[ "$detail" == "$expected" ]] \
+        || fail "$label produced unexpected detail: $detail"
+    [[ "$detail" == *"[REDACTED]"* ]] \
+        || fail "$label omitted the redaction marker"
+    [[ "$detail" != *\"* && "$detail" != *"'"* ]] \
+        || fail "$label retained an unmatched credential quote"
+    for forbidden in "$@"; do
+        [[ "$detail" != *"$forbidden"* ]] \
+            || fail "$label exposed credential material: $forbidden"
+    done
+    assert_one_line_bounded "$detail" "$label"
+}
+
 long_tail="$(printf 'x%.0s' {1..400})"
 printf 'INFO ignored first line\n\033[31mFATAL\tbad\rmessage\001 SMTP_PASSWORD=supersecret API_TOKEN=token-value %s\033[0m\nERROR ignored later line\n' \
     "$long_tail" > "$sanitize_log"
 detail="$(_crowdsec_health_sanitize_validation_log "$sanitize_log")"
-[[ "$detail" == FATAL* ]] || fail "sanitizer did not prefer the first actionable severity line"
+[[ "$detail" == "FATAL bad message SMTP_PASSWORD=[REDACTED]" ]] \
+    || fail "sanitizer did not preserve the first actionable severity line and safe prefix"
 [[ "$detail" != *$'\033'* ]] || fail "sanitizer retained ANSI escapes"
 [[ "$detail" != *$'\001'* && "$detail" != *$'\r'* && "$detail" != *$'\t'* ]] \
     || fail "sanitizer retained unsafe control characters"
@@ -633,7 +660,104 @@ detail="$(_crowdsec_health_sanitize_validation_log "$sanitize_log")"
 [[ "$detail" != *"supersecret"* && "$detail" != *"token-value"* ]] \
     || fail "sanitizer exposed credential values"
 [[ "$detail" == *"[REDACTED]"* ]] || fail "sanitizer did not redact credential assignments"
+assert_one_line_bounded "$detail" "ANSI and control sanitization"
+
+assert_sensitive_redaction \
+    'FATAL Authorization: Bearer abc.def.ghi' \
+    'FATAL Authorization: [REDACTED]' \
+    'Bearer authorization' \
+    'Bearer' 'abc.def.ghi'
+assert_sensitive_redaction \
+    'ERROR Authorization: Basic dXNlcjpwYXNz' \
+    'ERROR Authorization: [REDACTED]' \
+    'Basic authorization' \
+    'Basic' 'dXNlcjpwYXNz'
+assert_sensitive_redaction \
+    'WARN authorization=Bearer abc.def.ghi' \
+    'WARN authorization=[REDACTED]' \
+    'lowercase authorization assignment' \
+    'Bearer' 'abc.def.ghi'
+assert_sensitive_redaction \
+    'FATAL SMTP_PASSWORD="secret containing spaces"' \
+    'FATAL SMTP_PASSWORD=[REDACTED]' \
+    'quoted SMTP password' \
+    'secret containing spaces' 'containing' 'spaces'
+assert_sensitive_redaction \
+    "ERROR API_TOKEN='token containing spaces'" \
+    'ERROR API_TOKEN=[REDACTED]' \
+    'quoted API token' \
+    'token containing spaces' 'containing' 'spaces'
+assert_sensitive_redaction \
+    'WARN credential: first second third' \
+    'WARN credential: [REDACTED]' \
+    'multi-token credential' \
+    'first' 'second' 'third'
+assert_sensitive_redaction \
+    'ERROR secret = unquoted value with spaces' \
+    'ERROR secret = [REDACTED]' \
+    'unquoted multi-token secret' \
+    'unquoted' 'value' 'spaces'
+assert_sensitive_redaction \
+    'FATAL message before secret=value' \
+    'FATAL message before secret=[REDACTED]' \
+    'sensitive field after useful context' \
+    'value'
+
+assert_sensitive_redaction \
+    'ERROR password=plainsecret' \
+    'ERROR password=[REDACTED]' \
+    'simple password assignment' \
+    'plainsecret'
+assert_sensitive_redaction \
+    'WARN passwd: plainpass' \
+    'WARN passwd: [REDACTED]' \
+    'passwd assignment' \
+    'plainpass'
+assert_sensitive_redaction \
+    'FATAL token=value' \
+    'FATAL token=[REDACTED]' \
+    'token assignment' \
+    'value'
+assert_sensitive_redaction \
+    'ERROR api_key=value' \
+    'ERROR api_key=[REDACTED]' \
+    'api_key assignment' \
+    'value'
+assert_sensitive_redaction \
+    'WARN api-key:value' \
+    'WARN api-key:[REDACTED]' \
+    'api-key assignment' \
+    'value'
+assert_sensitive_redaction \
+    'FATAL smtp_username=user@example.test' \
+    'FATAL smtp_username=[REDACTED]' \
+    'SMTP username assignment' \
+    'user@example.test'
+assert_sensitive_redaction \
+    'ERROR CROWDSEC_API_KEY=generic value with spaces' \
+    'ERROR CROWDSEC_API_KEY=[REDACTED]' \
+    'generic uppercase environment assignment' \
+    'generic' 'value' 'spaces'
+
+ordinary_diagnostics=(
+    'FATAL CrowdSec parser failed at line 42'
+    'WARN notification plugin exited with status 1'
+    'ERROR failed to open /etc/crowdsec/config.yaml'
+)
+for ordinary in "${ordinary_diagnostics[@]}"; do
+    printf '%s\n' "$ordinary" > "$sanitize_log"
+    detail="$(_crowdsec_health_sanitize_validation_log "$sanitize_log")"
+    [[ "$detail" == "$ordinary" ]] \
+        || fail "sanitizer unnecessarily removed ordinary diagnostic text: $ordinary"
+    [[ "$detail" != *"[REDACTED]"* ]] \
+        || fail "sanitizer unnecessarily redacted ordinary diagnostic text: $ordinary"
+    assert_one_line_bounded "$detail" "ordinary diagnostic"
+done
+
+printf 'ERROR %s\n' "$long_tail" > "$sanitize_log"
+detail="$(_crowdsec_health_sanitize_validation_log "$sanitize_log")"
 (( ${#detail} == 240 )) || fail "sanitizer did not enforce the 240-character bound"
+assert_one_line_bounded "$detail" "truncated diagnostic"
 
 printf 'first fallback\n\nlast fallback\n' > "$sanitize_log"
 [[ "$(_crowdsec_health_sanitize_validation_log "$sanitize_log")" == "last fallback" ]] \
