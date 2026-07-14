@@ -4,7 +4,7 @@
 # Do not edit the installed file directly. Edit ADMIN_EMAIL or SMTP_FROM with
 # sudo make edit-env, then re-run:
 #   sudo ./utilities/setup-crowdsec.sh
-# Each address must contain one @ and no whitespace.
+# ADMIN_EMAIL and SMTP_FROM must each contain exactly one @ and no whitespace.
 # The rendered YAML is parsed in CI and validated with crowdsec -t before install.
 type: email
 name: vaultwarden_email
