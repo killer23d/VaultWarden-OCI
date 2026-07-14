@@ -1,0 +1,61 @@
+name: Apply direct drift fix PR
+
+on:
+  pull_request:
+    branches:
+      - delta
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-caddy-crowdsec-drift
+          fetch-depth: 0
+
+      - name: Make missing reconciler conditional on installed CrowdSec
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("utilities/env-edit.sh")
+          text = path.read_text()
+          old = '''  local crowdsec_email_reconciler="${SCRIPT_DIR}/crowdsec-email-reconcile.bash"
+  if [[ ! -x "$crowdsec_email_reconciler" ]]; then
+    log_error "CrowdSec email reconciler is missing or not executable: $crowdsec_email_reconciler"
+    return 1
+  fi
+  VW_CROWDSEC_ENV_FILE="$ENV_FILE" "$crowdsec_email_reconciler"
+'''
+          new = '''  local crowdsec_email_reconciler="${SCRIPT_DIR}/crowdsec-email-reconcile.bash"
+  local crowdsec_etc_dir="${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}"
+  if [[ -x "$crowdsec_email_reconciler" ]]; then
+    VW_CROWDSEC_ENV_FILE="$ENV_FILE" "$crowdsec_email_reconciler"
+  elif [[ -d "$crowdsec_etc_dir" ]]; then
+    log_error "CrowdSec email reconciler is missing or not executable: $crowdsec_email_reconciler"
+    return 1
+  else
+    log_debug "CrowdSec is not installed; skipping email notification reconciliation."
+  fi
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f"unexpected reconcile hook count: {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          rm -f .github/workflows/apply-direct-drift-fix-pr.yml
+          rm -f .github/workflows/fix-env-reconcile-guard.yml
+          bash -n utilities/env-edit.sh
+          git diff --check
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix env sync without installed CrowdSec"
+          git push origin HEAD:agent/fix-caddy-crowdsec-drift
