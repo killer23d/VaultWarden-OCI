@@ -825,7 +825,7 @@ vw_default_backup_dir() {
 # ensure_caddy_log_permissions
 #
 # Creates the Caddy log directory and its access.log / security.log files,
-# then enforces root:root 755/644 ownership. Uses a stat-check-then-fix
+# then enforces 2000:2000 750/640 ownership, matching the Caddy service. Uses a stat-check-then-fix
 # pattern to remain idempotent. Relies on _maybe_sudo() from lib/common.sh
 # for privilege escalation when the caller is not already root.
 #
@@ -862,22 +862,23 @@ ensure_caddy_log_permissions() {
     }
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log_info "[DRY RUN] Would enforce root:root 755/644 permissions for ${caddy_log_dir}"
+        log_info "[DRY RUN] Would enforce 2000:2000 750/640 permissions for ${caddy_log_dir}"
         return 0
     fi
 
     _maybe_sudo mkdir -p "$caddy_log_dir" || return 1
-    _maybe_sudo touch "$access_log" "$security_log" || return 1
+    [[ -e "$access_log" ]] || _maybe_sudo touch "$access_log" || return 1
+    [[ -e "$security_log" ]] || _maybe_sudo touch "$security_log" || return 1
 
     local dir_owner dir_mode
     dir_owner=$(stat -c '%u:%g' "$caddy_log_dir" 2>/dev/null || echo "")
     dir_mode=$(stat  -c '%a'    "$caddy_log_dir" 2>/dev/null || echo "")
-    if [[ "$dir_owner" != "0:0" ]]; then
-        _maybe_sudo chown root:root "$caddy_log_dir" || return 1
+    if [[ "$dir_owner" != "2000:2000" ]]; then
+        _maybe_sudo chown 2000:2000 "$caddy_log_dir" || return 1
         changed=true
     fi
-    if [[ "$dir_mode" != "755" ]]; then
-        _maybe_sudo chmod 755 "$caddy_log_dir" || return 1
+    if [[ "$dir_mode" != "750" ]]; then
+        _maybe_sudo chmod 750 "$caddy_log_dir" || return 1
         changed=true
     fi
 
@@ -885,12 +886,12 @@ ensure_caddy_log_permissions() {
     for log_file in "$access_log" "$security_log"; do
         owner=$(stat -c '%u:%g' "$log_file" 2>/dev/null || echo "")
         mode=$(stat  -c '%a'    "$log_file" 2>/dev/null || echo "")
-        if [[ "$owner" != "0:0" ]]; then
-            _maybe_sudo chown root:root "$log_file" || return 1
+        if [[ "$owner" != "2000:2000" ]]; then
+            _maybe_sudo chown 2000:2000 "$log_file" || return 1
             changed=true
         fi
-        if [[ "$mode" != "644" ]]; then
-            _maybe_sudo chmod 644 "$log_file" || return 1
+        if [[ "$mode" != "640" ]]; then
+            _maybe_sudo chmod 640 "$log_file" || return 1
             changed=true
         fi
     done

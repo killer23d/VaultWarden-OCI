@@ -374,6 +374,7 @@ check_crowdsec_email_notifications() (
 set -euo pipefail
 
 ROOT="${VW_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+PROJECT_ROOT="$ROOT"
 SETUP="$ROOT/utilities/setup-crowdsec.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -412,6 +413,22 @@ sed -n '/^_CS_EMAIL_PLUGIN_MARKER=/,/^# CLI flags/p' "$SETUP" | sed '$d' > "$TMP
 # shellcheck source=/dev/null
 source "$TMP/email-functions.sh"
 
+_cs_email_address_is_safe "security.o'hara&alerts@example.test" \
+    || fail "valid special-character email address was rejected"
+unsafe_addresses=(
+    "missing-at.example.test"
+    "@example.test"
+    "admin@"
+    "admin@@example.test"
+    "admin @example.test"
+    "admin@example test"
+)
+for unsafe_address in "${unsafe_addresses[@]}"; do
+    if _cs_email_address_is_safe "$unsafe_address"; then
+        fail "unsafe email address was accepted: $unsafe_address"
+    fi
+done
+
 VALIDATION_RC=0
 RESTART_RC=0
 crowdsec(){ [[ "${1:-}" == "-t" ]] || return 2; return "$VALIDATION_RC"; }
@@ -437,6 +454,28 @@ grep -Fxq 'auth_type: none' "$plugin" || fail "plugin unexpectedly requires auth
 grep -Fxq 'encryption_type: none' "$plugin" || fail "plugin unexpectedly enables encryption on loopback hop"
 grep -Fq "sender_email: 'security@example.test'" "$plugin" || fail "SMTP_FROM was not rendered"
 grep -Fq -- "- 'admin@example.test'" "$plugin" || fail "ADMIN_EMAIL was not rendered"
+
+special_plugin="$TMP/special-addresses.yaml"
+SMTP_FROM="security.o'hara&alerts@example.test"
+ADMIN_EMAIL="admin&ops@example.test"
+_cs_email_write_plugin_stage "$special_plugin" \
+    || fail "template rendering failed for valid special-character addresses"
+grep -Fq "sender_email: 'security.o''hara&alerts@example.test'" "$special_plugin" \
+    || fail "SMTP_FROM special characters were not rendered safely"
+grep -Fq -- "- 'admin&ops@example.test'" "$special_plugin" \
+    || fail "ADMIN_EMAIL ampersand was not rendered safely"
+! grep -Eq '__SMTP_FROM__|__ADMIN_EMAIL__' "$special_plugin" \
+    || fail "special-character rendering left unresolved placeholders"
+python3 -c '
+import sys
+import yaml
+with open(sys.argv[1], encoding="utf-8") as file:
+    document = yaml.safe_load(file)
+if not isinstance(document, dict):
+    raise SystemExit("rendered CrowdSec plugin is not a YAML mapping")
+' "$special_plugin" || fail "rendered CrowdSec email plugin is not valid YAML"
+SMTP_FROM=security@example.test
+ADMIN_EMAIL=admin@example.test
 ! grep -Eiq 'smtp_password|smtp_username|email_api_token|authorization|api[_-]?token' "$plugin" \
     || fail "plugin rendered a credential field"
 grep -Fxq 'on_success: continue' "$profiles" || fail "notification profile can stop remediation"

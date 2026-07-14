@@ -157,6 +157,129 @@ pass "restore/repair/health cover Caddy post-restore runtime permission drift"
 )
 
 check_permission_repair_contract
+check_caddy_log_permission_helper() (
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+log_error(){ :; }
+log_info(){ :; }
+log_success(){ :; }
+
+declare -A SYNTHETIC_OWNERS=()
+REPAIR_CALLS=0
+TOUCH_CALLS=0
+
+_maybe_sudo() {
+    local command_name="$1"
+    shift
+    case "$command_name" in
+        chown)
+            [[ "${1:-}" == "2000:2000" && $# -eq 2 ]] \
+                || fail "unexpected Caddy chown invocation: $*"
+            SYNTHETIC_OWNERS["$2"]="2000:2000"
+            ((REPAIR_CALLS += 1))
+            ;;
+        chmod)
+            command chmod "$@" || return 1
+            ((REPAIR_CALLS += 1))
+            ;;
+        mkdir)
+            command mkdir "$@"
+            ;;
+        touch)
+            command touch "$@" || return 1
+            ((TOUCH_CALLS += 1))
+            ;;
+        *)
+            fail "unexpected privileged command: $command_name"
+            ;;
+    esac
+}
+
+stat() {
+    if [[ "${1:-}" == "-c" ]]; then
+        local format="${2:-}" path="${3:-}"
+        case "$format" in
+            %u:%g) printf '%s\n' "${SYNTHETIC_OWNERS[$path]:-1000:1000}" ;;
+            %a) command stat -c '%a' "$path" ;;
+            *) command stat "$@" ;;
+        esac
+    else
+        command stat "$@"
+    fi
+}
+
+unset VAULTWARDEN_STORAGE_LIB_LOADED
+export VW_LOG_LIB_LOADED=1
+export VAULTWARDEN_DEFAULTS_LOADED=1
+# shellcheck source=../lib/storage.sh
+source "$ROOT/lib/storage.sh"
+
+log_dir="$TMP/missing/caddy"
+ensure_caddy_log_permissions "$log_dir" \
+    || fail "Caddy permission helper failed for a missing log tree"
+[[ -d "$log_dir" ]] || fail "Caddy log directory was not created"
+[[ -f "$log_dir/access.log" ]] || fail "Caddy access log was not created"
+[[ -f "$log_dir/security.log" ]] || fail "Caddy security log was not created"
+[[ "$(command stat -c '%a' "$log_dir")" == "750" ]] \
+    || fail "Caddy log directory mode is not 0750"
+for log_file in "$log_dir/access.log" "$log_dir/security.log"; do
+    [[ "$(command stat -c '%a' "$log_file")" == "640" ]] \
+        || fail "$log_file mode is not 0640"
+    [[ "${SYNTHETIC_OWNERS[$log_file]:-}" == "2000:2000" ]] \
+        || fail "$log_file ownership was not repaired to 2000:2000"
+done
+[[ "${SYNTHETIC_OWNERS[$log_dir]:-}" == "2000:2000" ]] \
+    || fail "Caddy log directory ownership was not repaired to 2000:2000"
+[[ "$TOUCH_CALLS" -eq 2 ]] || fail "missing Caddy logs were not created exactly once"
+
+command chmod 777 "$log_dir"
+command chmod 666 "$log_dir/access.log" "$log_dir/security.log"
+SYNTHETIC_OWNERS["$log_dir"]="123:456"
+SYNTHETIC_OWNERS["$log_dir/access.log"]="123:456"
+SYNTHETIC_OWNERS["$log_dir/security.log"]="123:456"
+REPAIR_CALLS=0
+TOUCH_CALLS=0
+ensure_caddy_log_permissions "$log_dir" \
+    || fail "Caddy permission helper failed while repairing drift"
+[[ "$REPAIR_CALLS" -eq 6 ]] || fail "Caddy drift did not trigger six ownership/mode repairs"
+[[ "$TOUCH_CALLS" -eq 0 ]] || fail "existing Caddy logs were touched during repair"
+
+REPAIR_CALLS=0
+TOUCH_CALLS=0
+ensure_caddy_log_permissions "$log_dir" \
+    || fail "idempotent Caddy permission check failed"
+[[ "$REPAIR_CALLS" -eq 0 ]] || fail "second Caddy permission invocation repeated repairs"
+[[ "$TOUCH_CALLS" -eq 0 ]] || fail "second Caddy permission invocation touched log files"
+
+dry_dir="$TMP/dry-run/caddy"
+DRY_RUN=true
+REPAIR_CALLS=0
+TOUCH_CALLS=0
+ensure_caddy_log_permissions "$dry_dir" \
+    || fail "Caddy permission dry-run failed"
+[[ ! -e "$dry_dir" ]] || fail "Caddy permission dry-run changed the filesystem"
+[[ "$REPAIR_CALLS" -eq 0 && "$TOUCH_CALLS" -eq 0 ]] \
+    || fail "Caddy permission dry-run invoked mutating commands"
+DRY_RUN=false
+
+if ensure_caddy_log_permissions "" >/dev/null 2>&1; then
+    fail "Caddy permission helper accepted an empty path"
+fi
+relative_path="relative-caddy-${RANDOM}"
+if ensure_caddy_log_permissions "$relative_path" >/dev/null 2>&1; then
+    fail "Caddy permission helper accepted a relative path"
+fi
+[[ ! -e "$relative_path" ]] || fail "relative Caddy path was created"
+
+pass 'Caddy log permission helper creates, repairs, and remains idempotent'
+)
+
+check_caddy_log_permission_helper
+
 check_central_permission_contract() (
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

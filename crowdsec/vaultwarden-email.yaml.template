@@ -1,0 +1,42 @@
+# Managed by VaultWarden-OCI: CrowdSec email notification
+#
+# Source template rendered to /etc/crowdsec/notifications/vaultwarden-email.yaml.
+# Do not edit the installed file directly. Edit ADMIN_EMAIL or SMTP_FROM with
+# sudo make edit-env, then re-run:
+#   sudo ./utilities/setup-crowdsec.sh
+# ADMIN_EMAIL and SMTP_FROM must each contain exactly one @ and no whitespace.
+# The rendered YAML is parsed in CI and validated with crowdsec -t before install.
+type: email
+name: vaultwarden_email
+log_level: info
+group_wait: 30s
+group_threshold: 10
+max_retry: 3
+timeout: 20s
+connect_timeout: 10s
+send_timeout: 10s
+format: |
+  CrowdSec security event notification (up to 10 alerts and 5 decisions per alert).
+  {{ range $alertIndex, $alert := . -}}
+  {{ if lt $alertIndex 10 -}}
+  Source: {{ if $alert.Source }}{{ $alert.Source.Value }}{{ else }}unknown{{ end }}
+  Scenario: {{ $alert.Scenario }}
+  Machine ID: {{ $alert.MachineID }}
+  {{ range $decisionIndex, $decision := $alert.Decisions -}}
+  {{ if lt $decisionIndex 5 -}}
+  Decision type: {{ $decision.Type }}
+  Decision duration: {{ $decision.Duration }}
+  {{ end -}}
+  {{ end -}}
+  ---
+  {{ end -}}
+  {{ end -}}
+smtp_host: 127.0.0.1
+smtp_port: 587
+auth_type: none
+encryption_type: none
+sender_name: CrowdSec
+sender_email: __SMTP_FROM__
+email_subject: "CrowdSec security event"
+receiver_emails:
+  - __ADMIN_EMAIL__
