@@ -339,10 +339,7 @@ CRED_BANNER
     press_enter_to_continue " Press [Enter] ONLY after saving all credentials above..."
     clear
 
-    local env_owner
-    env_owner=$(stat -c '%U' "$PROJECT_ROOT/.env" 2>/dev/null || echo "root")
-    local env_edit_cmd="nano .env"
-    [[ "$env_owner" == "root" ]] && env_edit_cmd="sudo nano .env"
+    local env_edit_cmd="sudo make edit-env"
 
     local _cf_cmds
     _cf_cmds="$(printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s' \
@@ -376,7 +373,7 @@ CRED_BANNER
             "${COLOR_YELLOW}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
+        printf '1. Edit environment:   %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
         printf '2. Set external tokens: %s(use sudo ./edit-secrets.sh rotate <field> commands above)%s\n' \
@@ -400,7 +397,7 @@ CRED_BANNER
         printf '2. [ ] Admin Email:   %s%s%s\n' "${COLOR_GREEN}" "${ADMIN_EMAIL:-Not Set}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
+        printf '1. Edit environment:   %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
         printf '2. Configure secrets:   %ssudo ./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -588,7 +585,7 @@ main() {
         local secrets_args=(--auto --skip-optional --quiet-summary)
         [[ "$FORCE" == "true" ]] && secrets_args+=(--force)
         if ! "${SCRIPT_DIR}/utilities/setup-secrets.sh" configure "${secrets_args[@]}"; then
-            log_warn "Secrets auto-configuration encountered issues — run 'sudo ./setup.sh secrets' after editing .env"
+            log_warn "Secrets auto-configuration encountered issues — run 'sudo make edit-env', then retry with 'sudo ./setup.sh secrets'"
         fi
     elif [[ -t 0 ]] && [[ "$DRY_RUN" != "true" ]]; then
         # Interactive TTY: offer to run secrets configuration now so all four

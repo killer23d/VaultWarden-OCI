@@ -594,9 +594,7 @@ _cs_yaml_single_quote() {
 
 _cs_email_address_is_safe() {
     local value="${1:-}"
-    [[ -n "$value" && ${#value} -le 254 && "$value" == *@* ]]
-    [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *$'\t'* ]]
-    [[ "$value" != *[[:cntrl:]]* ]]
+    [[ -n "$value" && ${#value} -le 254 ]]         && [[ "$value" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]]         && [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *$'\t'* ]]         && [[ "$value" != *[[:cntrl:]]* ]]
 }
 
 _cs_email_ensure_dir() {
@@ -616,47 +614,33 @@ _cs_email_file_metadata() {
 }
 
 _cs_email_write_plugin_stage() {
-    local output="$1" sender receiver
+    local output="$1"
+    local template="${PROJECT_ROOT}/crowdsec/vaultwarden-email.yaml.template"
+    local sender receiver line
+
+    if [[ ! -r "$template" ]]; then
+        log_error "CrowdSec email template is missing or unreadable: $template"
+        return 1
+    fi
+    if ! grep -Fq '__SMTP_FROM__' "$template" \
+        || ! grep -Fq '__ADMIN_EMAIL__' "$template"; then
+        log_error "CrowdSec email template is missing required address placeholders: $template"
+        return 1
+    fi
+
     sender="$(_cs_yaml_single_quote "$SMTP_FROM")"
     receiver="$(_cs_yaml_single_quote "$ADMIN_EMAIL")"
-    cat > "$output" <<EOF_EMAIL_PLUGIN
-${_CS_EMAIL_PLUGIN_MARKER}
-# Regenerate with: sudo ./utilities/setup-crowdsec.sh
-type: email
-name: vaultwarden_email
-log_level: info
-group_wait: 30s
-group_threshold: 10
-max_retry: 3
-timeout: 20s
-connect_timeout: 10s
-send_timeout: 10s
-format: |
-  CrowdSec security event notification (up to 10 alerts and 5 decisions per alert).
-  {{ range \$alertIndex, \$alert := . -}}
-  {{ if lt \$alertIndex 10 -}}
-  Source: {{ if \$alert.Source }}{{ \$alert.Source.Value }}{{ else }}unknown{{ end }}
-  Scenario: {{ \$alert.Scenario }}
-  Machine ID: {{ \$alert.MachineID }}
-  {{ range \$decisionIndex, \$decision := \$alert.Decisions -}}
-  {{ if lt \$decisionIndex 5 -}}
-  Decision type: {{ \$decision.Type }}
-  Decision duration: {{ \$decision.Duration }}
-  {{ end -}}
-  {{ end -}}
-  ---
-  {{ end -}}
-  {{ end -}}
-smtp_host: 127.0.0.1
-smtp_port: 587
-auth_type: none
-encryption_type: none
-sender_name: CrowdSec
-sender_email: ${sender}
-email_subject: "CrowdSec security event"
-receiver_emails:
-  - ${receiver}
-EOF_EMAIL_PLUGIN
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line//__SMTP_FROM__/"$sender"}"
+        line="${line//__ADMIN_EMAIL__/"$receiver"}"
+        printf '%s\n' "$line"
+    done < "$template" > "$output"
+
+    if grep -Eq '__SMTP_FROM__|__ADMIN_EMAIL__' "$output"; then
+        log_error "CrowdSec email template rendering left unresolved placeholders."
+        return 1
+    fi
 }
 
 _cs_email_strip_profile_block() {
