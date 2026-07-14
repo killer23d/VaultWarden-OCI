@@ -71,6 +71,7 @@ SECURITY_CASES=(
 
 OPERATIONS_CASES=(
     tests/case-operations.bash
+    tests/case-lock-fd-hygiene.bash
     tests/case-lifecycle.bash
     tests/case-operator-ui.bash
     tests/case-crowdsec.bash
