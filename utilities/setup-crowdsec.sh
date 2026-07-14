@@ -713,13 +713,22 @@ _cs_email_restore_path() {
     fi
 }
 
+_cs_run_without_operation_guard_fds() {
+    if declare -f operation_run_without_guard_fds >/dev/null 2>&1; then
+        operation_run_without_guard_fds "$@"
+    else
+        "$@"
+    fi
+}
+
 _cs_validate_crowdsec_config() {
+    local context="${1:-managed configuration}"
     if ! command -v crowdsec >/dev/null 2>&1; then
-        log_error "CrowdSec static validation failed: 'crowdsec' command is unavailable."
+        log_error "CrowdSec static validation failed for ${context}: 'crowdsec' command is unavailable."
         return 1
     fi
-    if ! crowdsec -t; then
-        log_error "CrowdSec static validation failed: crowdsec -t"
+    if ! _cs_run_without_operation_guard_fds crowdsec -t; then
+        log_error "CrowdSec static validation failed for ${context}: crowdsec -t"
         return 1
     fi
 }
@@ -755,6 +764,23 @@ _cs_reconcile_email_notifications() {
                 && ! grep -Fq "$_CS_EMAIL_PROFILE_END" "$_CS_EMAIL_PROFILES_PATH"; }; }; then
         log_info "CrowdSec email notifications disabled; no managed notification files are present."
         return 0
+    fi
+
+    local managed_state_present=false
+    if [[ -e "$_CS_EMAIL_PLUGIN_PATH" ]] \
+        || { [[ -f "$_CS_EMAIL_PROFILES_PATH" ]] \
+            && { grep -Fq "$_CS_EMAIL_PROFILE_BEGIN" "$_CS_EMAIL_PROFILES_PATH" \
+                || grep -Fq "$_CS_EMAIL_PROFILE_END" "$_CS_EMAIL_PROFILES_PATH"; }; }; then
+        managed_state_present=true
+    fi
+
+    if [[ "$enabled" == "true" && "$managed_state_present" == "false" ]]; then
+        if ! _cs_validate_crowdsec_config \
+            "existing configuration before VaultWarden-OCI email installation"; then
+            log_error "CrowdSec configuration is already invalid before VaultWarden-OCI managed email files are installed."
+            log_error "Inspect operator-owned files under ${_CS_LAPI_COHORT_ROOT}/notifications and CrowdSec profile files, then rerun setup."
+            return 1
+        fi
     fi
 
     _cs_email_ensure_dir "$(dirname "$_CS_EMAIL_PROFILES_PATH")" || return 1
@@ -834,7 +860,8 @@ _cs_reconcile_email_notifications() {
 
     local failing_step=""
     [[ "$promotion_failed" == "false" ]] || failing_step="atomic file promotion"
-    if [[ -z "$failing_step" ]] && ! _cs_validate_crowdsec_config; then
+    if [[ -z "$failing_step" ]] \
+        && ! _cs_validate_crowdsec_config "managed CrowdSec email configuration"; then
         failing_step="crowdsec -t"
     fi
     if [[ -z "$failing_step" ]] && ! systemctl restart crowdsec; then

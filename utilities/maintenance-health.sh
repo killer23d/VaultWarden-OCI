@@ -811,6 +811,83 @@ _check_crowdsec() {
     fi
 }
 
+_crowdsec_health_sanitize_validation_log() {
+    local log_file="$1" detail
+    [[ -r "$log_file" ]] || return 0
+
+    detail="$(
+        LC_ALL=C sed -E \
+            -e $'s/\033\\[[0-?]*[ -\\/]*[@-~]//g' \
+            -e $'s/\033\\][^\a]*(\a|\033\\\\)//g' \
+            -e $'s/\033[@-_]//g' \
+            "$log_file" 2>/dev/null \
+            | tr '\r\t' '  ' \
+            | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
+            | awk '
+                {
+                    gsub(/[[:space:]]+/, " ")
+                    sub(/^ /, "")
+                    sub(/ $/, "")
+                    if ($0 == "") next
+                    fallback = $0
+                    if ($0 ~ /(^|[[:space:]])(FATAL|ERROR|WARN)([[:space:]]|:)/) {
+                        print
+                        found = 1
+                        exit
+                    }
+                }
+                END {
+                    if (!found && fallback != "") print fallback
+                }
+            '
+    )"
+    [[ -n "$detail" ]] || return 0
+
+    detail="$(
+        printf '%s\n' "$detail" \
+            | LC_ALL=C sed -E \
+                -e 's/((password|passwd|token|api[_-]?key|authorization|credential|secret|smtp_username)[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1[REDACTED]/Ig' \
+                -e 's/(Bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/Ig' \
+                -e 's/(^|[[:space:]])([A-Z][A-Z0-9_]{1,})=[^[:space:]]+/\1\2=[REDACTED]/g' \
+            | awk '{$1=$1; print}'
+    )"
+    printf '%s' "${detail:0:240}"
+}
+
+_crowdsec_health_validate_config() (
+    local validation_log="" validation_rc=0
+    local fd="${HEALTH_LOCK_FD:-}"
+
+    validation_log="$(mktemp -t vw-crowdsec-health.XXXXXXXXXX 2>/dev/null)" || return 125
+    _crowdsec_health_validation_cleanup() {
+        rm -f -- "$validation_log"
+    }
+    trap _crowdsec_health_validation_cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    if [[ "$fd" =~ ^[0-9]+$ ]] && (( fd > 2 )); then
+        { eval "exec ${fd}>&-"; } 2>/dev/null || true
+    fi
+    unset HEALTH_LOCK_FD
+
+    if declare -f operation_run_without_guard_fds >/dev/null 2>&1; then
+        if operation_run_without_guard_fds crowdsec -t >"$validation_log" 2>&1; then
+            return 0
+        else
+            validation_rc=$?
+        fi
+    elif crowdsec -t >"$validation_log" 2>&1; then
+        return 0
+    else
+        validation_rc=$?
+    fi
+
+    _crowdsec_health_sanitize_validation_log "$validation_log"
+    return "$validation_rc"
+)
+
 _check_crowdsec_email_notifications() {
     local enabled="${CROWDSEC_EMAIL_NOTIFICATIONS:-false}"
     local etc_dir="${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}"
@@ -840,13 +917,29 @@ _check_crowdsec_email_notifications() {
     fi
     _pass "crowdsec:email-notifications:configured" \
         "CrowdSec email notifications are enabled and configured through 127.0.0.1:587"
-    if ! command -v crowdsec >/dev/null 2>&1 || ! crowdsec -t >/dev/null 2>&1; then
+    if ! command -v crowdsec >/dev/null 2>&1; then
         _warn "crowdsec:email-notifications:validation" \
-            "CrowdSec email notification configuration is present but static validation failed (run: sudo crowdsec -t)"
+            "CrowdSec email notification configuration is present but the crowdsec command is unavailable"
         return 0
     fi
-    _pass "crowdsec:email-notifications:validation" \
-        "CrowdSec email notification configuration is statically valid"
+
+    local validation_detail="" validation_rc=0
+    if validation_detail="$(_crowdsec_health_validate_config)"; then
+        _pass "crowdsec:email-notifications:validation" \
+            "CrowdSec email notification configuration is statically valid"
+        return 0
+    else
+        validation_rc=$?
+    fi
+
+    if (( validation_rc == 125 )); then
+        _warn "crowdsec:email-notifications:validation" \
+            "CrowdSec email notification configuration is present but health validation could not create a temporary log"
+        return 0
+    fi
+
+    _warn "crowdsec:email-notifications:validation" \
+        "CrowdSec email notification configuration is present but static validation failed${validation_detail:+ — ${validation_detail}} (run: sudo crowdsec -t)"
 }
 
 _check_disk() {
