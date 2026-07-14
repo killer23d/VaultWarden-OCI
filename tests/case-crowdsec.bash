@@ -396,6 +396,10 @@ install(){
 }
 chown(){ return 0; }
 stat(){
+    if command stat --version >/dev/null 2>&1; then
+        command stat "$@"
+        return
+    fi
     if [[ "${1:-}" == "-c" ]]; then
         case "$2" in
             %a) command stat -f '%Lp' "$3" ;;
@@ -430,8 +434,13 @@ for unsafe_address in "${unsafe_addresses[@]}"; do
 done
 
 VALIDATION_RC=0
+VALIDATION_WRAPPER_CALLS=0
 RESTART_RC=0
 crowdsec(){ [[ "${1:-}" == "-t" ]] || return 2; return "$VALIDATION_RC"; }
+operation_run_without_guard_fds(){
+    VALIDATION_WRAPPER_CALLS=$((VALIDATION_WRAPPER_CALLS + 1))
+    "$@"
+}
 systemctl(){ [[ "${1:-}" == "restart" && "${2:-}" == "crowdsec" ]] || return 0; return "$RESTART_RC"; }
 
 DRY_RUN=false
@@ -443,11 +452,25 @@ mkdir -p "$_CS_LAPI_COHORT_ROOT"
 printf 'name: operator_profile\nfilters:\n  - true\non_success: continue\n' \
     > "$_CS_LAPI_COHORT_ROOT/profiles.yaml.local"
 cp "$_CS_LAPI_COHORT_ROOT/profiles.yaml.local" "$TMP/operator.original"
-
-_cs_reconcile_email_notifications \
-    || fail "enabled CrowdSec email reconciliation failed"
 plugin="$_CS_LAPI_COHORT_ROOT/notifications/vaultwarden-email.yaml"
 profiles="$_CS_LAPI_COHORT_ROOT/profiles.yaml.local"
+
+VALIDATION_RC=9
+if _cs_reconcile_email_notifications >"$TMP/baseline-invalid.out" 2>&1; then
+    fail "pre-existing invalid CrowdSec configuration unexpectedly reached managed promotion"
+fi
+[[ ! -e "$plugin" ]] || fail "baseline validation failure installed the managed plugin"
+cmp -s "$TMP/operator.original" "$profiles" \
+    || fail "baseline validation failure changed operator profile content"
+grep -Fq 'already invalid before VaultWarden-OCI managed email files are installed' \
+    "$TMP/baseline-invalid.out" \
+    || fail "baseline validation failure did not identify the pre-existing configuration problem"
+
+VALIDATION_RC=0
+_cs_reconcile_email_notifications \
+    || fail "enabled CrowdSec email reconciliation failed"
+(( VALIDATION_WRAPPER_CALLS >= 3 )) \
+    || fail "CrowdSec validation did not consistently use operation descriptor isolation"
 grep -Fxq 'smtp_host: 127.0.0.1' "$plugin" || fail "plugin does not use loopback Postfix"
 grep -Fxq 'smtp_port: 587' "$plugin" || fail "plugin does not use loopback Postfix port"
 grep -Fxq 'auth_type: none' "$plugin" || fail "plugin unexpectedly requires authentication"
@@ -553,17 +576,74 @@ extract_func(){
     local file="$1" func="$2"
     awk -v f="$func" '
       $0 ~ "^" f "\\(\\)" {p=1}
-      p { print; opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}"); depth += opens-closes; if (depth==0) exit }
+      p { print; opens=gsub(/\\{/ ,"{"); closes=gsub(/\\}/,"}"); depth += opens-closes; if (depth==0) exit }
     ' "$file"
 }
-eval "$(extract_func "$HEALTH" _check_crowdsec_email_notifications)"
+
+sed -n '/^_crowdsec_health_sanitize_validation_log() {/,/^_check_disk() {/p' "$HEALTH" \
+    | sed '$d' > "$TMP/health-functions.sh"
+# shellcheck source=/dev/null
+source "$TMP/health-functions.sh"
+
 RESULTS=""
 _pass(){ RESULTS+="pass:$1:$2\n"; }
 _warn(){ RESULTS+="warn:$1:$2\n"; }
-crowdsec(){ return "${VALIDATION_RC:-0}"; }
+operation_run_without_guard_fds(){ "$@"; }
+
+BIN="$TMP/bin"
+VALIDATION_TMP="$TMP/validation-tmp"
+VALIDATION_OUTPUT_FILE="$TMP/validation-output.log"
+mkdir -p "$BIN" "$VALIDATION_TMP"
+cat > "$BIN/crowdsec" <<'EOF_CROWDSEC'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "-t" ]] || exit 2
+if [[ -n "${EXPECTED_CLOSED_FD:-}" && -e "/proc/${BASHPID}/fd/${EXPECTED_CLOSED_FD}" ]]; then
+    printf 'FATAL health lock descriptor %s remained open\n' "$EXPECTED_CLOSED_FD"
+    exit 98
+fi
+[[ -r "${VALIDATION_OUTPUT_FILE:-}" ]] && cat "$VALIDATION_OUTPUT_FILE"
+if [[ -n "${VALIDATION_SIGNAL:-}" ]]; then
+    kill -s "$VALIDATION_SIGNAL" "${BASHPID}"
+    sleep 1
+fi
+exit "${VALIDATION_RC:-0}"
+EOF_CROWDSEC
+chmod +x "$BIN/crowdsec"
+export PATH="$BIN:$PATH"
+export TMPDIR="$VALIDATION_TMP"
+export VALIDATION_OUTPUT_FILE
+
+assert_no_validation_logs(){
+    if find "$VALIDATION_TMP" -maxdepth 1 -type f -name 'vw-crowdsec-health.*' -print -quit | grep -q .; then
+        fail "CrowdSec health validation left a temporary log behind"
+    fi
+}
+
+sanitize_log="$TMP/sanitize.log"
+long_tail="$(printf 'x%.0s' {1..400})"
+printf 'INFO ignored first line\n\033[31mFATAL\tbad\rmessage\001 SMTP_PASSWORD=supersecret API_TOKEN=token-value %s\033[0m\nERROR ignored later line\n' \
+    "$long_tail" > "$sanitize_log"
+detail="$(_crowdsec_health_sanitize_validation_log "$sanitize_log")"
+[[ "$detail" == FATAL* ]] || fail "sanitizer did not prefer the first actionable severity line"
+[[ "$detail" != *$'\033'* ]] || fail "sanitizer retained ANSI escapes"
+[[ "$detail" != *$'\001'* && "$detail" != *$'\r'* && "$detail" != *$'\t'* ]] \
+    || fail "sanitizer retained unsafe control characters"
+[[ "$detail" != *"ERROR ignored later line"* ]] || fail "sanitizer allowed multiline log injection"
+[[ "$detail" != *"supersecret"* && "$detail" != *"token-value"* ]] \
+    || fail "sanitizer exposed credential values"
+[[ "$detail" == *"[REDACTED]"* ]] || fail "sanitizer did not redact credential assignments"
+(( ${#detail} == 240 )) || fail "sanitizer did not enforce the 240-character bound"
+
+printf 'first fallback\n\nlast fallback\n' > "$sanitize_log"
+[[ "$(_crowdsec_health_sanitize_validation_log "$sanitize_log")" == "last fallback" ]] \
+    || fail "sanitizer did not retain the last nonempty fallback line"
+printf '\001\002\r\t\n' > "$sanitize_log"
+[[ -z "$(_crowdsec_health_sanitize_validation_log "$sanitize_log")" ]] \
+    || fail "sanitizer invented detail when no useful diagnostic line existed"
+
 VW_CROWDSEC_ETC_DIR="$TMP/etc-crowdsec"
 export VW_CROWDSEC_ETC_DIR
-
 CROWDSEC_EMAIL_NOTIFICATIONS=false
 RESULTS=""
 _check_crowdsec_email_notifications
@@ -584,18 +664,54 @@ _check_crowdsec_email_notifications
 
 printf '# BEGIN VaultWarden-OCI CrowdSec email notifications\n# END VaultWarden-OCI CrowdSec email notifications\n' \
     > "$VW_CROWDSEC_ETC_DIR/profiles.yaml.local"
+exec {HEALTH_LOCK_FD}>"$TMP/health.lock"
+EXPECTED_CLOSED_FD="$HEALTH_LOCK_FD"
+export EXPECTED_CLOSED_FD
+
 VALIDATION_RC=8
+VALIDATION_SIGNAL=""
+printf '\033[33mWARN\tCrowdSec validation failed\r SMTP_PASSWORD=do-not-print\033[0m\nsecond line\n' \
+    > "$VALIDATION_OUTPUT_FILE"
+export VALIDATION_RC VALIDATION_SIGNAL
 RESULTS=""
 _check_crowdsec_email_notifications
 [[ "$RESULTS" == *pass:*configured* && "$RESULTS" == *warn:*validation*failed* ]] \
     || fail "invalid configured state was not reported distinctly"
+[[ "$RESULTS" == *"WARN CrowdSec validation failed"* ]] \
+    || fail "health warning omitted the sanitized actionable validation detail"
+[[ "$RESULTS" != *"do-not-print"* && "$RESULTS" != *$'\033'* ]] \
+    || fail "health warning exposed unsafe validation output"
+[[ -e "/proc/${BASHPID}/fd/${HEALTH_LOCK_FD}" ]] \
+    || fail "health validation closed the caller's health lock descriptor"
+assert_no_validation_logs
 
 VALIDATION_RC=0
+: > "$VALIDATION_OUTPUT_FILE"
 RESULTS=""
 _check_crowdsec_email_notifications
 [[ "$RESULTS" == *pass:*configured* && "$RESULTS" == *pass:*validation*valid* ]] \
     || fail "statically valid enabled state was not reported"
+assert_no_validation_logs
 
+VALIDATION_RC=143
+VALIDATION_SIGNAL=TERM
+printf 'FATAL validation subprocess terminated\n' > "$VALIDATION_OUTPUT_FILE"
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == *warn:*validation*failed* ]] \
+    || fail "signal-related validation failure was not reported"
+assert_no_validation_logs
+
+VALIDATION_SIGNAL=""
+VALIDATION_RC=8
+: > "$VALIDATION_OUTPUT_FILE"
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == *"static validation failed (run: sudo crowdsec -t)"* ]] \
+    || fail "empty validation output did not use the generic bounded warning"
+assert_no_validation_logs
+
+{ eval "exec ${HEALTH_LOCK_FD}>&-"; }
 printf 'CrowdSec email notification health visibility tests passed.\n'
 )
 

@@ -171,6 +171,126 @@ VW_OPERATIONS_LOCK="$ops_lock" \
     operation_release 0
 ' "$ROOT"
 
+if [[ -r /proc/$$/stat ]]; then
+    isolation_dir="$tmpdir/isolation"
+    mkdir -p "$isolation_dir"
+    isolated_child_pid_file="$isolation_dir/child.pid"
+    isolated_specific_lock="$isolation_dir/specific.lock"
+
+    VW_OPERATIONS_STATE_DIR="$state_dir" \
+    VW_OPERATIONS_LOCK="$ops_lock" \
+    ISOLATED_CHILD_PID_FILE="$isolated_child_pid_file" \
+    ISOLATED_SPECIFIC_LOCK="$isolated_specific_lock" \
+    "${BASH}" -c '
+        set -euo pipefail
+        source "$0/lib/log.sh"
+        source "$0/lib/common.sh"
+        init_common_lib isolated-external
+        source "$0/lib/operations.sh"
+
+        operation_acquire \
+            --id isolated-parent \
+            --label "Isolated external command" \
+            --specific-lock "$ISOLATED_SPECIFIC_LOCK"
+        global_fd="$OPERATION_LOCK_FD"
+        specific_fd="$OPERATION_SPECIFIC_LOCK_FD"
+        [[ -e "/proc/${BASHPID}/fd/${global_fd}" ]]
+        [[ -e "/proc/${BASHPID}/fd/${specific_fd}" ]]
+        export OPERATION_LOCK_FD OPERATION_SPECIFIC_LOCK_FD
+
+        operation_run_without_guard_fds "$BASH" -c '\''
+            global_fd="$1"
+            specific_fd="$2"
+            child_pid_file="$3"
+            [[ -z "${OPERATION_LOCK_FD+x}" ]]
+            [[ -z "${OPERATION_SPECIFIC_LOCK_FD+x}" ]]
+            [[ -z "${VW_OPERATION_INHERITED_FD+x}" ]]
+            [[ -z "${VW_OPERATION_PARENT_STATE+x}" ]]
+            [[ -z "${VW_OPERATION_PARENT_TOKEN+x}" ]]
+            [[ -z "${VW_OPERATION_PARENT_ID+x}" ]]
+            [[ ! -e "/proc/${BASHPID}/fd/${global_fd}" ]]
+            [[ ! -e "/proc/${BASHPID}/fd/${specific_fd}" ]]
+            ( trap "" HUP; sleep 30 ) </dev/null >/dev/null 2>&1 &
+            printf "%s\n" "$!" > "$child_pid_file"
+        '\'' _ "$global_fd" "$specific_fd" "$ISOLATED_CHILD_PID_FILE"
+
+        [[ -s "$ISOLATED_CHILD_PID_FILE" ]]
+        external_pid="$(cat "$ISOLATED_CHILD_PID_FILE")"
+        kill -0 "$external_pid" 2>/dev/null
+        [[ -e "/proc/${BASHPID}/fd/${global_fd}" ]]
+        [[ -e "/proc/${BASHPID}/fd/${specific_fd}" ]]
+
+        operation_release 0
+        operation_acquire \
+            --id isolated-contender \
+            --label "Contender after isolated external command" \
+            --non-interactive fail
+        operation_release 0
+
+        kill "$external_pid" 2>/dev/null || true
+        for _ in {1..50}; do
+            ! kill -0 "$external_pid" 2>/dev/null && break
+            sleep 0.1
+        done
+        if kill -0 "$external_pid" 2>/dev/null; then
+            child_state="$(ps -o stat= -p "$external_pid" 2>/dev/null | tr -d "[:space:]" || true)"
+            [[ "$child_state" == Z* ]] || exit 1
+        fi
+    ' "$ROOT" || fail "external command child retained an operation guard descriptor after release"
+
+    (
+        set -euo pipefail
+        source "$ROOT/lib/operations.sh"
+        exec {probe_fd}>"$isolation_dir/probe.lock"
+        OPERATION_LOCK_FD="$probe_fd"
+        OPERATION_SPECIFIC_LOCK_FD="$probe_fd"
+        VW_OPERATION_INHERITED_FD="$probe_fd"
+        VW_OPERATION_PARENT_STATE="$isolation_dir/parent.state"
+        VW_OPERATION_PARENT_TOKEN="test-token"
+        VW_OPERATION_PARENT_ID="test-parent"
+        export OPERATION_LOCK_FD OPERATION_SPECIFIC_LOCK_FD
+        export VW_OPERATION_INHERITED_FD VW_OPERATION_PARENT_STATE
+        export VW_OPERATION_PARENT_TOKEN VW_OPERATION_PARENT_ID
+
+        operation_run_without_guard_fds "$BASH" -c '
+            fd="$1"
+            [[ -z "${OPERATION_LOCK_FD+x}" ]]
+            [[ -z "${OPERATION_SPECIFIC_LOCK_FD+x}" ]]
+            [[ -z "${VW_OPERATION_INHERITED_FD+x}" ]]
+            [[ -z "${VW_OPERATION_PARENT_STATE+x}" ]]
+            [[ -z "${VW_OPERATION_PARENT_TOKEN+x}" ]]
+            [[ -z "${VW_OPERATION_PARENT_ID+x}" ]]
+            [[ ! -e "/proc/${BASHPID}/fd/${fd}" ]]
+        ' _ "$probe_fd"
+        [[ -e "/proc/${BASHPID}/fd/${probe_fd}" ]]
+        { eval "exec ${probe_fd}>&-"; }
+
+        OPERATION_LOCK_FD=""
+        OPERATION_SPECIFIC_LOCK_FD="not-a-descriptor"
+        VW_OPERATION_INHERITED_FD="2"
+        VW_OPERATION_PARENT_STATE="ignored"
+        VW_OPERATION_PARENT_TOKEN="ignored"
+        VW_OPERATION_PARENT_ID="ignored"
+        export OPERATION_LOCK_FD OPERATION_SPECIFIC_LOCK_FD
+        export VW_OPERATION_INHERITED_FD VW_OPERATION_PARENT_STATE
+        export VW_OPERATION_PARENT_TOKEN VW_OPERATION_PARENT_ID
+        marker="$(
+            operation_run_without_guard_fds "$BASH" -c '
+                [[ -z "${OPERATION_LOCK_FD+x}" ]]
+                [[ -z "${OPERATION_SPECIFIC_LOCK_FD+x}" ]]
+                [[ -z "${VW_OPERATION_INHERITED_FD+x}" ]]
+                [[ -z "${VW_OPERATION_PARENT_STATE+x}" ]]
+                [[ -z "${VW_OPERATION_PARENT_TOKEN+x}" ]]
+                [[ -z "${VW_OPERATION_PARENT_ID+x}" ]]
+                [[ -e "/proc/${BASHPID}/fd/1" ]]
+                [[ -e "/proc/${BASHPID}/fd/2" ]]
+                printf isolated
+            '
+        )"
+        [[ "$marker" == "isolated" ]]
+    ) || fail "descriptor isolation mishandled duplicate, empty, invalid, or standard descriptors"
+fi
+
 cat > "$state_dir/old.state" <<EOF_STATE
 owner=VaultWarden-OCI
 operation=old
@@ -293,6 +413,10 @@ require 'operation_package_run' "$CROWDSEC" "CrowdSec apt/dpkg calls must use pa
 require 'operation_set_phase "0" "Resetting installed CrowdSec components"' "$CROWDSEC" \
     "CrowdSec force reset must record Phase 0 before destructive reset"
 require 'operation_acquire' "$CROWDSEC" "CrowdSec setup must acquire an operation guard"
+require 'operation_run_without_guard_fds' "$OPS" \
+    "operations library must provide external-command descriptor isolation"
+require '_cs_run_without_operation_guard_fds crowdsec -t' "$CROWDSEC" \
+    "CrowdSec static validation must not pass operation guard descriptors to plugins"
 require 'crowdsec-setup' "$CROWDSEC" "CrowdSec setup guard must use the crowdsec-setup operation id"
 require 'source "\$\{PROJECT_ROOT\}/lib/operations\.sh"' "$CROWDSEC_APPLY" \
     "standalone CrowdSec Worker apply must source operation guards"
