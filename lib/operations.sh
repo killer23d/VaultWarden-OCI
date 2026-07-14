@@ -794,6 +794,32 @@ operation_acquire() {
     return 0
 }
 
+# Run an external command without passing VaultWarden operation-lock file
+# descriptors or inherited-operation metadata into that command or its children.
+# The subshell keeps the parent shell's guard descriptors open while ensuring
+# daemonizing/plugin-style children cannot outlive the operation and retain the
+# kernel flock after the owning wrapper has released it.
+operation_run_without_guard_fds() (
+    (( $# > 0 )) || return 2
+    local fd
+    local -a guard_fds=(
+        "${OPERATION_SPECIFIC_LOCK_FD:-}"
+        "${OPERATION_LOCK_FD:-}"
+        "${VW_OPERATION_INHERITED_FD:-}"
+    )
+    for fd in "${guard_fds[@]}"; do
+        [[ "$fd" =~ ^[0-9]+$ ]] && (( fd > 2 )) || continue
+        { eval "exec ${fd}>&-"; } 2>/dev/null || true
+    done
+    unset OPERATION_LOCK_FD
+    unset OPERATION_SPECIFIC_LOCK_FD
+    unset VW_OPERATION_INHERITED_FD
+    unset VW_OPERATION_PARENT_STATE
+    unset VW_OPERATION_PARENT_TOKEN
+    unset VW_OPERATION_PARENT_ID
+    exec "$@"
+)
+
 operation_set_phase() {
     OPERATION_PHASE="${1:-}"
     OPERATION_PHASE_NAME="${2:-}"
