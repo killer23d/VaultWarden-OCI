@@ -825,79 +825,86 @@ vw_default_backup_dir() {
 # ensure_caddy_log_permissions
 #
 # Creates the Caddy log directory and its access.log / security.log files,
-# then enforces root:root 755/644 ownership. Uses a stat-check-then-fix
-# pattern to remain idempotent. Relies on _maybe_sudo() from lib/common.sh
-# for privilege escalation when the caller is not already root.
+# then enforces the ownership and modes required by the Caddy container and
+# the health-check contract. Compose runs Caddy as UID/GID 2000 by default;
+# CADDY_UID/CADDY_GID allow an explicit numeric override.
 #
 # Arguments:
-#   $1 — caddy_log_dir  (e.g. /var/lib/vaultwarden/logs/caddy)
-#         Must be a non-empty absolute path. The function refuses to proceed
-#         if the argument is blank or not an absolute path to prevent
-#         accidental creation of files in the filesystem root when the
-#         caller passes an unset variable.
+#   $1 — caddy_log_dir (must be a non-empty absolute path)
 #
 # Returns 0 on success, 1 on any failure.
 # ---------------------------------------------------------------------------
 ensure_caddy_log_permissions() {
-    local caddy_log_dir="$1"
+    local caddy_log_dir="${1:-}"
+    local caddy_uid="${CADDY_UID:-2000}"
+    local caddy_gid="${CADDY_GID:-2000}"
 
-    # Guard: reject blank or non-absolute paths before any filesystem operation.
     if [[ -z "$caddy_log_dir" ]]; then
         log_error "ensure_caddy_log_permissions: caddy_log_dir argument is empty."
-        log_error "Ensure CADDY_LOG_DIR (or the equivalent variable) is set before calling this function."
         return 1
     fi
     if [[ "$caddy_log_dir" != /* ]]; then
         log_error "ensure_caddy_log_permissions: caddy_log_dir must be an absolute path, got: '$caddy_log_dir'"
         return 1
     fi
+    if [[ ! "$caddy_uid" =~ ^[0-9]+$ || ! "$caddy_gid" =~ ^[0-9]+$ ]]; then
+        log_error "ensure_caddy_log_permissions: CADDY_UID and CADDY_GID must be numeric (got ${caddy_uid}:${caddy_gid})."
+        return 1
+    fi
+    if ! declare -F _maybe_sudo >/dev/null 2>&1; then
+        log_error "ensure_caddy_log_permissions requires lib/common.sh to be sourced first"
+        return 1
+    fi
 
     local access_log="${caddy_log_dir}/access.log"
     local security_log="${caddy_log_dir}/security.log"
-    local changed=false
-
-    command -v _maybe_sudo >/dev/null 2>&1 || {
-        log_error "ensure_caddy_log_permissions requires lib/common.sh to be sourced first"
-        return 1
-    }
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log_info "[DRY RUN] Would enforce root:root 755/644 permissions for ${caddy_log_dir}"
+        log_info "[DRY RUN] Would enforce ${caddy_uid}:${caddy_gid} 750/640 permissions for ${caddy_log_dir}"
         return 0
     fi
 
-    _maybe_sudo mkdir -p "$caddy_log_dir" || return 1
-    _maybe_sudo touch "$access_log" "$security_log" || return 1
+    _maybe_sudo mkdir -p -- "$caddy_log_dir" || return 1
 
-    local dir_owner dir_mode
-    dir_owner=$(stat -c '%u:%g' "$caddy_log_dir" 2>/dev/null || echo "")
-    dir_mode=$(stat  -c '%a'    "$caddy_log_dir" 2>/dev/null || echo "")
-    if [[ "$dir_owner" != "0:0" ]]; then
-        _maybe_sudo chown root:root "$caddy_log_dir" || return 1
-        changed=true
-    fi
-    if [[ "$dir_mode" != "755" ]]; then
-        _maybe_sudo chmod 755 "$caddy_log_dir" || return 1
-        changed=true
-    fi
-
-    local log_file owner mode
+    local log_file
     for log_file in "$access_log" "$security_log"; do
-        owner=$(stat -c '%u:%g' "$log_file" 2>/dev/null || echo "")
-        mode=$(stat  -c '%a'    "$log_file" 2>/dev/null || echo "")
-        if [[ "$owner" != "0:0" ]]; then
-            _maybe_sudo chown root:root "$log_file" || return 1
-            changed=true
+        if [[ -e "$log_file" && ! -f "$log_file" ]]; then
+  log_error "ensure_caddy_log_permissions: expected a regular file: $log_file"
+  return 1
         fi
-        if [[ "$mode" != "644" ]]; then
-            _maybe_sudo chmod 644 "$log_file" || return 1
-            changed=true
+        if [[ ! -e "$log_file" ]]; then
+  _maybe_sudo touch -- "$log_file" || return 1
+        fi
+    done
+
+    local changed=false owner mode
+    owner="$(stat -c '%u:%g' "$caddy_log_dir" 2>/dev/null || printf '')"
+    mode="$(stat -c '%a' "$caddy_log_dir" 2>/dev/null || printf '')"
+    if [[ "$owner" != "${caddy_uid}:${caddy_gid}" ]]; then
+        _maybe_sudo chown "${caddy_uid}:${caddy_gid}" -- "$caddy_log_dir" || return 1
+        changed=true
+    fi
+    if [[ "$mode" != "750" ]]; then
+        _maybe_sudo chmod 750 -- "$caddy_log_dir" || return 1
+        changed=true
+    fi
+
+    for log_file in "$access_log" "$security_log"; do
+        owner="$(stat -c '%u:%g' "$log_file" 2>/dev/null || printf '')"
+        mode="$(stat -c '%a' "$log_file" 2>/dev/null || printf '')"
+        if [[ "$owner" != "${caddy_uid}:${caddy_gid}" ]]; then
+  _maybe_sudo chown "${caddy_uid}:${caddy_gid}" -- "$log_file" || return 1
+  changed=true
+        fi
+        if [[ "$mode" != "640" ]]; then
+  _maybe_sudo chmod 640 -- "$log_file" || return 1
+  changed=true
         fi
     done
 
     if [[ "$changed" == "true" ]]; then
-        log_success "Caddy log permissions remediated (${caddy_log_dir})"
+        log_success "Caddy log permissions remediated (${caddy_log_dir}; ${caddy_uid}:${caddy_gid} 750/640)"
     else
-        log_success "Caddy log permissions already correct (${caddy_log_dir})"
+        log_success "Caddy log permissions already correct (${caddy_log_dir}; ${caddy_uid}:${caddy_gid} 750/640)"
     fi
 }
