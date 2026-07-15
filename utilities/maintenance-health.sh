@@ -846,9 +846,8 @@ _crowdsec_health_sanitize_validation_log() {
     detail="$(
         printf '%s\n' "$detail" \
             | LC_ALL=C sed -E \
-                -e 's/((password|passwd|token|api[_-]?key|authorization|credential|secret|smtp_username)[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1[REDACTED]/Ig' \
-                -e 's/(Bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/Ig' \
-                -e 's/(^|[[:space:]])([A-Z][A-Z0-9_]{1,})=[^[:space:]]+/\1\2=[REDACTED]/g' \
+                -e 's/((^|[[:space:]])(password|passwd|token|api[_-]?key|authorization|credential|secret|smtp_username)[[:space:]]*[:=][[:space:]]*).*/\1[REDACTED]/I' \
+                -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]{1,}[[:space:]]*=[[:space:]]*).*/\1[REDACTED]/' \
             | awk '{$1=$1; print}'
     )"
     printf '%s' "${detail:0:240}"
