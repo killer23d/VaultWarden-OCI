@@ -43,6 +43,14 @@ _crowdsec_worker_value_is_active() {
     return 0
 }
 
+_crowdsec_worker_run_without_guard_fds() {
+    if declare -F operation_run_without_guard_fds >/dev/null 2>&1; then
+        operation_run_without_guard_fds "$@"
+    else
+        "$@"
+    fi
+}
+
 crowdsec_worker_apply_config() {
     local require_service=false
     while [[ $# -gt 0 ]]; do
@@ -250,7 +258,7 @@ PYEOF
             return 1
         fi
         log_info "Deploying Workers + KV to Cloudflare in autonomous mode (-S)..."
-        if "$bouncer_bin" -S -c "$dest"; then
+        if _crowdsec_worker_run_without_guard_fds "$bouncer_bin" -S -c "$dest"; then
             log_success "Autonomous mode deployment complete."
             log_info "Worker route fail mode: manually set to 'Fail Open' in the Cloudflare dashboard"
             return 0
