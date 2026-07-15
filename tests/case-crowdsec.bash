@@ -434,11 +434,12 @@ for unsafe_address in "${unsafe_addresses[@]}"; do
 done
 
 VALIDATION_RC=0
-VALIDATION_WRAPPER_CALLS=0
+VALIDATION_WRAPPER_LOG="$TMP/validation-wrapper.log"
+: > "$VALIDATION_WRAPPER_LOG"
 RESTART_RC=0
 crowdsec(){ [[ "${1:-}" == "-t" ]] || return 2; return "$VALIDATION_RC"; }
 operation_run_without_guard_fds(){
-    VALIDATION_WRAPPER_CALLS=$((VALIDATION_WRAPPER_CALLS + 1))
+    printf 'call\n' >> "$VALIDATION_WRAPPER_LOG"
     "$@"
 }
 systemctl(){ [[ "${1:-}" == "restart" && "${2:-}" == "crowdsec" ]] || return 0; return "$RESTART_RC"; }
@@ -469,7 +470,7 @@ grep -Fq 'already invalid before VaultWarden-OCI managed email files are install
 VALIDATION_RC=0
 _cs_reconcile_email_notifications \
     || fail "enabled CrowdSec email reconciliation failed"
-(( VALIDATION_WRAPPER_CALLS >= 3 )) \
+(( $(wc -l < "$VALIDATION_WRAPPER_LOG") >= 3 )) \
     || fail "CrowdSec validation did not consistently use operation descriptor isolation"
 grep -Fxq 'smtp_host: 127.0.0.1' "$plugin" || fail "plugin does not use loopback Postfix"
 grep -Fxq 'smtp_port: 587' "$plugin" || fail "plugin does not use loopback Postfix port"
