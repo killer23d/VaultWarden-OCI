@@ -1,0 +1,44 @@
+[Unit]
+Description=VaultWarden CrowdSec notification adapter connection
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=network-online.target docker.service
+ConditionPathExists=/opt/vaultwarden-scripts/utilities/crowdsec-notify-adapter.sh
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vaultwarden-scripts
+EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/utilities/crowdsec-notify-adapter.sh
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+SyslogIdentifier=vw-crowdsec-notify
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=180
+TimeoutStopSec=10
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+# The adapter writes only bounded delivery-failure state and temporary files.
+# Separate-volume installations receive the selected PROJECT_STATE_DIR path via
+# the reconciler's generated drop-in.
+ReadWritePaths=/var/lib/vaultwarden /run/lock /run/vaultwarden-oci

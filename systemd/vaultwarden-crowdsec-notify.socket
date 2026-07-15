@@ -1,0 +1,20 @@
+[Unit]
+Description=VaultWarden CrowdSec notification adapter socket
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+ConditionPathExists=/opt/vaultwarden-scripts/utilities/crowdsec-notify-adapter.sh
+
+[Socket]
+ListenStream=/run/vaultwarden-crowdsec-notify.sock
+Accept=yes
+# CrowdSec notification plugins run as nobody:nogroup on the supported Ubuntu
+# package defaults. The socket stays off the network and grants connect access
+# only to root and the plugin's nogroup identity.
+SocketUser=root
+SocketGroup=nogroup
+SocketMode=0660
+RemoveOnStop=yes
+Backlog=16
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

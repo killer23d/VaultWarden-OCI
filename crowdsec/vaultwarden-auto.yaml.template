@@ -1,0 +1,21 @@
+# Managed by VaultWarden-OCI: CrowdSec auto notification
+#
+# Source template rendered to /etc/crowdsec/notifications/vaultwarden-auto.yaml.
+# CrowdSec submits alert JSON to a private Unix socket. The local adapter then
+# reuses lib/email.sh with EMAIL_MODE=auto:
+#   HTTP email API -> Postfix sidecar -> direct upstream SMTP.
+type: http
+name: vaultwarden_auto
+log_level: info
+group_wait: 30s
+group_threshold: 10
+max_retry: 3
+timeout: 180s
+format: |
+  {{ . | toJson }}
+url: http://localhost/notify
+unix_socket: /run/vaultwarden-crowdsec-notify.sock
+method: POST
+headers:
+  Content-Type: application/json
+skip_tls_verification: false
