@@ -539,6 +539,18 @@ EXAMPLES:
     sudo ./backup.sh sync                         # Upload db/full/emergency backups
 ```
 
+### crowdsec-email.sh
+
+```
+CrowdSec Email Notifications
+
+USAGE:
+    sudo utilities/crowdsec-email.sh enable
+    sudo utilities/crowdsec-email.sh disable
+    sudo utilities/crowdsec-email.sh status
+    sudo utilities/crowdsec-email.sh test
+```
+
 ### crowdsec-worker-apply.sh
 
 ```
@@ -1178,6 +1190,7 @@ DESCRIPTION:
 
 OPTIONS:
     --auto               Non-interactive: never prompt.
+    --reconcile-email    Reconcile only the managed email notification files.
     --dry-run            Print what would happen without changing files.
     --force              Re-run all phases even if already applied.
     --use-latest         Override version pins and use the current live upstream
@@ -1207,6 +1220,7 @@ EXAMPLES:
     sudo utilities/setup-crowdsec.sh
     sudo utilities/setup-crowdsec.sh --dry-run
     sudo utilities/setup-crowdsec.sh --force
+    sudo utilities/setup-crowdsec.sh --reconcile-email
 ```
 
 ### setup-env.sh

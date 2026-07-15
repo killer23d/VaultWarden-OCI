@@ -589,6 +589,12 @@ operation_conflict_prompt() {
     state_file="$(_operation_find_state_for_lock "$lock_path" 2>/dev/null || true)"
     label="$(_operation_state_get "$state_file" label 2>/dev/null || true)"
 
+    if [[ "$policy" == "wait" ]]; then
+        _operation_describe_state "$state_file" >&2
+        _operation_wait_for_release "$lock_path" "$state_file" "$label"
+        return $?
+    fi
+
     if [[ ! -t 0 || ! -t 1 ]]; then
         _operation_describe_state "$state_file" >&2
         if [[ "$policy" == "skip" ]]; then
@@ -808,8 +814,9 @@ operation_run_without_guard_fds() (
         "${VW_OPERATION_INHERITED_FD:-}"
     )
     for fd in "${guard_fds[@]}"; do
-        [[ "$fd" =~ ^[0-9]+$ ]] && (( fd > 2 )) || continue
-        { eval "exec ${fd}>&-"; } 2>/dev/null || true
+        if [[ "$fd" =~ ^[0-9]+$ ]] && (( fd > 2 )); then
+            { eval "exec ${fd}>&-"; } 2>/dev/null || true
+        fi
     done
     unset OPERATION_LOCK_FD
     unset OPERATION_SPECIFIC_LOCK_FD

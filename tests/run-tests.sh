@@ -75,6 +75,7 @@ OPERATIONS_CASES=(
     tests/case-lifecycle.bash
     tests/case-operator-ui.bash
     tests/case-crowdsec.bash
+    tests/case-crowdsec-notifications.bash
     tests/case-uninstall.bash
 )
 
