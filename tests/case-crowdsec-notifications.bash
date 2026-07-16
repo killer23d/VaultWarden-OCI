@@ -280,6 +280,11 @@ bash -n "$ROOT/utilities/crowdsec-email.sh"
 contains "$ROOT/utilities/crowdsec-email.sh" '--reconcile-email'
 contains "$ROOT/utilities/crowdsec-email.sh" 'operation_acquire'
 not_contains "$ROOT/utilities/crowdsec-email.sh" 'vaultwarden-crowdsec-email-control.lock'
+write_flag_body="$(sed -n '/^write_flag()/,/^}/p' "$ROOT/utilities/crowdsec-email.sh")"
+grep -Fq "awk -v value" <<< "$write_flag_body" \
+    || fail 'CrowdSec email write_flag no longer owns its specialized renderer'
+! grep -Fq '_set_env_var' <<< "$write_flag_body" \
+    || fail 'CrowdSec email write_flag was incorrectly consolidated into the generic helper'
 
 # Ordinary enable/status/test/disable behavior and metadata preservation.
 env_mode="$(stat -c '%a' "$VW_CROWDSEC_EMAIL_ENV_FILE")"
