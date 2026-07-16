@@ -39,7 +39,7 @@ Examples:
 
 Add a regression to the closest suite directory and register it in the matching array in `run-tests.sh`. Extend an existing case when it shares the same fixture and responsibility; do not create another top-level `test-*.sh` command.
 
-`ecase-runner-contracts.bash` exercises the real runner against isolated temporary fixtures. It covers command grammar, inventory validation, list output, failure propagation, timeout capability detection, ordinary exit `124` handling, and actual timeout diagnostics without modifying the repository's real `tests/` tree.
+`case-runner-contracts.bash` exercises the real runner against isolated temporary fixtures. It covers command grammar, inventory validation, list output, failure propagation, timeout capability detection, ordinary exit `124` handling, and actual timeout diagnostics without modifying the repository's real `tests/` tree.
 
 ## Per-case timeout behavior
 
