@@ -2,9 +2,12 @@
 # Consolidated backup regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_backup_architecture_policy() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 BACKUP="$ROOT/utilities/backup-run.sh"
 RESTORE="$ROOT/utilities/restore-run.sh"
 SETUP="$ROOT/utilities/setup-system.sh"
@@ -58,7 +61,7 @@ check_backup_architecture_policy
 check_backup_preflight_and_metadata_safety() (
 # shellcheck disable=SC2016
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 RESTORE="$ROOT/utilities/restore-run.sh"
 BACKUP="$ROOT/utilities/backup-run.sh"
 UTILS="$ROOT/lib/backup-utils.sh"
@@ -116,7 +119,7 @@ pass 'restore/backup preflight safety functional checks'
 check_backup_preflight_and_metadata_safety
 check_backup_completion_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 BACKUP="$ROOT/utilities/backup-run.sh"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -155,7 +158,7 @@ printf 'PASS: backup completion ordering and discard contracts\n'
 check_backup_completion_contracts
 check_emergency_offsite_metadata_contract() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 BACKUP="$ROOT/utilities/backup-run.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -376,7 +379,7 @@ printf 'PASS: emergency offsite metadata is restore-usable before sync and verif
 check_emergency_offsite_metadata_contract
 check_rclone_config_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 BACKUP="$ROOT/utilities/backup-run.sh"
 UTILS="$ROOT/lib/backup-utils.sh"
 TMP="$(mktemp -d)"
@@ -497,7 +500,7 @@ fi
 check_rclone_config_contracts
 check_backup_retention_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 BACKUP="$ROOT/utilities/backup-run.sh"
 UTILS="$ROOT/lib/backup-utils.sh"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
@@ -746,7 +749,7 @@ printf 'PASS: backup retention preserves newest local and remote archives\n'
 check_backup_retention_contracts
 check_backup_db_restart_fallback() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 
 _extract_func(){
@@ -789,7 +792,7 @@ check_backup_db_restart_fallback
 check_deep_maintenance_safety_backup_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }

@@ -2,10 +2,13 @@
 # Consolidated systemd regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_systemd_operation_runtime_paths() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 OPS="$ROOT/lib/operations.sh"
 
 fail() {
@@ -57,7 +60,7 @@ check_systemd_operation_runtime_paths
 check_systemd_install_and_validation_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 TESTS_RUN=0
 
@@ -448,7 +451,7 @@ printf '1..%s\n' "$TESTS_RUN"
 check_systemd_install_and_validation_contracts
 check_systemd_timer_start_policy_behavior() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 
 _extract_func(){
@@ -495,7 +498,7 @@ check_systemd_timer_start_policy_behavior
 
 check_notification_features_preserve_systemd_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 unit_count="$(find "$ROOT/systemd" -maxdepth 1 -type f -name '*.service' | wc -l | tr -d ' ')"

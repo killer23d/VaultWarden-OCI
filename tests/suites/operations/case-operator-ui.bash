@@ -2,10 +2,13 @@
 # Consolidated operator UI regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_operator_ui_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 COMMON="$ROOT/lib/common.sh"
 KEY_ROTATE="$ROOT/utilities/key-rotate.sh"
 BACKUP="$ROOT/utilities/backup-run.sh"
@@ -229,7 +232,7 @@ check_operator_ui_contracts
 check_operator_cli_argument_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -338,7 +341,7 @@ check_operator_cli_argument_contracts
 check_confirmation_prompt_format() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 MAINT_DB="$ROOT/utilities/maintenance-db-maint.sh"
 TMP_PROMPT_PROSE=""
 TMP_PROMPT_RUNTIME=""
@@ -424,7 +427,7 @@ echo "OK: confirmation prompts use full yes/no display text"
 check_confirmation_prompt_format
 check_restore_plan_summary_operator_ui() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 
 _extract_func(){
@@ -474,7 +477,7 @@ check_restore_plan_summary_operator_ui
 check_maintenance_contention_operator_ui() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }

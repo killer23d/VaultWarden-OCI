@@ -2,6 +2,9 @@
 # Consolidated storage and setup regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_migration_storage_contracts() (
 set -euo pipefail
 
@@ -464,7 +467,7 @@ pass 'verify passes when excluded/protected files explain byte-count delta'
 check_migration_storage_contracts
 check_setup_storage_ux_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 cd "$ROOT"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass(){ printf 'PASS: %s\n' "$*"; }

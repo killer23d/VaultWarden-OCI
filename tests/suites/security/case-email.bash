@@ -2,10 +2,13 @@
 # Consolidated email regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_maintenance_email_root_contract() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 cd "$ROOT"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -34,14 +37,16 @@ pass "maintenance-email.sh is root-operated"
 check_maintenance_email_root_contract
 check_email_delivery_refactor_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
+RATE_LIMIT_DIR="$(mktemp -d)"
+trap 'rm -rf "$RATE_LIMIT_DIR"' EXIT
 PASS=0
 FAIL=0
 
 run_case() {
     local name="$1" script="$2" out rc
     set +e
-    out=$(ROOT="$ROOT" bash -c "$script" 2>&1)
+    out=$(ROOT="$ROOT" RATE_LIMIT_DIR="$RATE_LIMIT_DIR" bash -c "$script" 2>&1)
     rc=$?
     set -e
     if (( rc == 0 )); then
@@ -54,7 +59,7 @@ run_case() {
     fi
 }
 
-common_prelude='cd "$ROOT"; source lib/log.sh >/dev/null 2>&1 || true; source lib/email.sh; log_info(){ :; }; log_warn(){ TRACE+=" warn:$*"; }; log_error(){ TRACE+=" error:$*"; }; log_success(){ :; }; log_debug(){ :; }; log_hint(){ :; }; register_cleanup(){ CLEANUPS+=("$*"); }; reset_env(){ CLEANUPS=(); TRACE=""; CURL_ARGS=""; CAPTURED=""; EMAIL_MODE=auto EMAIL_PROVIDER=mailersend ADMIN_EMAIL=admin@example.com SMTP_FROM=noreply@example.com SMTP_FROM_NAME=VaultWarden SMTP_HOST=smtp.example.com SMTP_PORT=587 SMTP_USERNAME=user SMTP_PASSWORD="p a\"s\\w" SMTP_SECURITY= EMAIL_API_TOKEN=token EMAIL_RATE_WINDOW_SECONDS=0 PROJECT_ROOT="$ROOT"; export EMAIL_MODE EMAIL_PROVIDER ADMIN_EMAIL SMTP_FROM SMTP_FROM_NAME SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_SECURITY EMAIL_API_TOKEN EMAIL_RATE_WINDOW_SECONDS PROJECT_ROOT; }'
+common_prelude='cd "$ROOT"; source lib/log.sh >/dev/null 2>&1 || true; source lib/email.sh; _resolve_rate_limit_dir(){ mkdir -p "$RATE_LIMIT_DIR"; printf "%s\n" "$RATE_LIMIT_DIR"; }; log_info(){ :; }; log_warn(){ TRACE+=" warn:$*"; }; log_error(){ TRACE+=" error:$*"; }; log_success(){ :; }; log_debug(){ :; }; log_hint(){ :; }; register_cleanup(){ CLEANUPS+=("$*"); }; reset_env(){ CLEANUPS=(); TRACE=""; CURL_ARGS=""; CAPTURED=""; EMAIL_MODE=auto EMAIL_PROVIDER=mailersend ADMIN_EMAIL=admin@example.com SMTP_FROM=noreply@example.com SMTP_FROM_NAME=VaultWarden SMTP_HOST=smtp.example.com SMTP_PORT=587 SMTP_USERNAME=user SMTP_PASSWORD="p a\"s\\w" SMTP_SECURITY= EMAIL_API_TOKEN=token EMAIL_RATE_WINDOW_SECONDS=0 PROJECT_ROOT="$ROOT"; export EMAIL_MODE EMAIL_PROVIDER ADMIN_EMAIL SMTP_FROM SMTP_FROM_NAME SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_SECURITY EMAIL_API_TOKEN EMAIL_RATE_WINDOW_SECONDS PROJECT_ROOT; }'
 
 routing_prelude="$common_prelude; _email_driver_mailersend(){ TRACE+=\" api:\$1\"; CAPTURED=\"\${3:-}\"; return \"\${API_RC:-0}\"; }; _email_driver_sendgrid(){ TRACE+=\" sendgrid:\$1\"; CAPTURED=\"\${3:-}\"; return 0; }; _email_driver_mailgun(){ TRACE+=\" mailgun:\$1\"; CAPTURED=\"\${3:-}\"; return 0; }; _email_driver_postmark(){ TRACE+=\" postmark:\$1\"; CAPTURED=\"\${3:-}\"; return 0; }; _email_driver_resend(){ TRACE+=\" resend:\$1\"; CAPTURED=\"\${3:-}\"; return 0; }; _email_driver_cyberpersons(){ TRACE+=\" cyber:\$1\"; CAPTURED=\"\${3:-}\"; return 0; }; _smtp_upload_sidecar(){ TRACE+=\" sidecar\"; CAPTURED=\$(cat \"\$1\" 2>/dev/null || true); return \"\${SIDE_RC:-0}\"; }; _smtp_upload_direct(){ TRACE+=\" direct\"; CAPTURED=\$(cat \"\$1\" 2>/dev/null || true); [[ \"\${RESOLVE_MARK:-0}\" == 1 ]] && get_secret smtp_password >/dev/null; return \"\${DIRECT_RC:-0}\"; }; get_secret(){ TRACE+=\" secret:\$1\"; printf resolved-secret; }; reset_env"
 
@@ -98,7 +103,7 @@ echo "PASS=$PASS FAIL=$FAIL"
 check_email_delivery_refactor_contracts
 check_recovery_kit_attachment_passphrase_contract() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -278,7 +283,7 @@ check_recovery_kit_attachment_passphrase_contract
 check_recovery_notification_retry_contract() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -357,7 +362,7 @@ check_recovery_notification_retry_contract
 check_health_incident_context() (
 set -euo pipefail
 
-ROOT="${VW_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ROOT="${VW_TEST_ROOT:-$VW_TEST_REPO_ROOT}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }

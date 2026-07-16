@@ -2,10 +2,13 @@
 # Consolidated uninstall regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_uninstall_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 SCRIPT="$ROOT/utilities/uninstall-vaultwarden.sh"
 TMP="$(mktemp -d)"
 ORIG_ENV_BACKUP=""

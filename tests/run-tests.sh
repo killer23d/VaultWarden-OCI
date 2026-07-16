@@ -27,18 +27,8 @@ TIMEOUT_NOTICE="NOTE: per-case timeout enforcement is unavailable; install GNU c
 TIMEOUT_COMMAND=()
 CASE_TIMED_OUT=false
 RUNNER_TEMP_DIR=""
-ACTIVE_CASE_LINK=""
-CASE_ENTRYPOINT=""
-
-cleanup_case_link() {
-    if [[ -n "$ACTIVE_CASE_LINK" ]]; then
-        rm -f -- "$ACTIVE_CASE_LINK"
-        ACTIVE_CASE_LINK=""
-    fi
-}
 
 cleanup_runner_temp() {
-    cleanup_case_link
     if [[ -n "$RUNNER_TEMP_DIR" && -d "$RUNNER_TEMP_DIR" ]]; then
         rm -rf -- "$RUNNER_TEMP_DIR"
     fi
@@ -66,7 +56,7 @@ USAGE
 
 FOUNDATION_CASES=(
     tests/test-architecture.sh
-    tests/suites/foundation/case-infrastructure.bash
+    tests/suites/foundation/case-runner-contracts.bash
     tests/suites/foundation/case-config-env.bash
     tests/suites/foundation/case-permissions.bash
     tests/suites/foundation/case-storage-setup.bash
@@ -81,6 +71,7 @@ SECURITY_CASES=(
 
 OPERATIONS_CASES=(
     tests/suites/operations/case-operations.bash
+    tests/suites/operations/case-lock-fd-hygiene.bash
     tests/suites/operations/case-lifecycle.bash
     tests/suites/operations/case-operator-ui.bash
     tests/suites/operations/case-crowdsec.bash
@@ -104,10 +95,11 @@ fi
 map_fixture_cases() {
     local array_name="$1"
     local -n cases_ref="$array_name"
-    local index
+    local index relative_path
 
     for index in "${!cases_ref[@]}"; do
-        cases_ref[$index]="$TESTS_DIR/${cases_ref[$index]##*/}"
+        relative_path="${cases_ref[$index]#tests/}"
+        cases_ref[$index]="${TESTS_DIR%/}/${relative_path}"
     done
 }
 
@@ -148,26 +140,12 @@ validate_inventory() {
         fi
     done
 
-    if [[ -n "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" ]]; then
-        while IFS= read -r -d '' discovered; do
-            listed=false
-            for case_file in "${ALL_CASES[@]}"; do
-                if [[ "$discovered" == "$case_file" ]]; then
-                    listed=true
-                    break
-                fi
-            done
-            if [[ "$listed" != true ]]; then
-                echo "FAIL unlisted permanent test case: $discovered" >&2
-                exit 1
-            fi
-        done < <(find "$TESTS_DIR" -maxdepth 1 -type f -name 'case-*.bash' -print0 | sort -z)
-    else
-        if find "$TESTS_DIR" -maxdepth 1 -type f -name 'case-*.bash' -print -quit | grep -q .; then
-            echo "FAIL permanent case files must live under tests/suites and be registered in tests/run-tests.sh" >&2
-            exit 1
-        fi
+    if find "$TESTS_DIR" -maxdepth 1 -type f -name 'case-*.bash' -print -quit | grep -q .; then
+        echo "FAIL permanent case files must live under tests/suites and be registered in tests/run-tests.sh" >&2
+        exit 1
+    fi
 
+    if [[ -d "$TESTS_DIR/suites" ]]; then
         while IFS= read -r -d '' discovered; do
             listed=false
             for case_file in "${ALL_CASES[@]}"; do
@@ -291,45 +269,17 @@ EOF_STAT
     export PATH
 }
 
-prepare_case_entrypoint() {
-    local case_file="$1"
-    local relative_target attempt
-
-    cleanup_case_link
-    CASE_ENTRYPOINT="$case_file"
-
-    if [[ -n "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" \
-        || "$case_file" != "$TESTS_DIR"/suites/* ]]; then
-        return 0
-    fi
-
-    relative_target="${case_file#"$TESTS_DIR/"}"
-    for (( attempt = 0; attempt < 20; attempt++ )); do
-        ACTIVE_CASE_LINK="$TESTS_DIR/.runner-case.$$.${RANDOM}.${attempt}.bash"
-        if ln -s -- "$relative_target" "$ACTIVE_CASE_LINK" 2>/dev/null; then
-            CASE_ENTRYPOINT="$ACTIVE_CASE_LINK"
-            return 0
-        fi
-    done
-
-    ACTIVE_CASE_LINK=""
-    echo "FAIL unable to create temporary test entrypoint for $case_file" >&2
-    return 1
-}
-
 execute_case() {
     local case_file="$1"
     local rc timeout_stderr
 
     CASE_TIMED_OUT=false
-    prepare_case_entrypoint "$case_file" || return $?
 
     if [[ "$TIMEOUT_MODE" != "gnu" ]]; then
         set +e
-        "$BASH" "$CASE_ENTRYPOINT"
+        "$BASH" "$case_file"
         rc=$?
         set -e
-        cleanup_case_link
         return "$rc"
     fi
 
@@ -340,7 +290,7 @@ execute_case() {
     set +e
     LC_ALL=C "${TIMEOUT_COMMAND[@]}" --verbose \
         "${TEST_CASE_TIMEOUT_SECONDS}s" \
-        "$BASH" -c 'exec "$@" 2>&3' _ "$BASH" "$CASE_ENTRYPOINT" \
+        "$BASH" -c 'exec "$@" 2>&3' _ "$BASH" "$case_file" \
         3>&2 2>"$timeout_stderr"
     rc=$?
     set -e
@@ -352,7 +302,6 @@ execute_case() {
         CASE_TIMED_OUT=true
     fi
 
-    cleanup_case_link
     return "$rc"
 }
 

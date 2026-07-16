@@ -2,9 +2,12 @@
 # Consolidated permissions regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_permission_repair_contract() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 cd "$ROOT"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass(){ printf 'PASS: %s\n' "$*"; }
@@ -159,7 +162,7 @@ pass "restore/repair/health cover Caddy post-restore runtime permission drift"
 check_permission_repair_contract
 check_caddy_log_permission_helper() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -282,7 +285,7 @@ check_caddy_log_permission_helper
 
 check_central_permission_contract() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 cd "$ROOT"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass(){ printf 'PASS: %s\n' "$*"; }

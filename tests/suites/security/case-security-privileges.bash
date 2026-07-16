@@ -2,14 +2,16 @@
 # Consolidated security and privilege regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_security_helpers() (
 # Focused tests for schema dispatch, password formats, SOPS round trips, and
 # authenticated file-integrity sidecars.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$VW_TEST_REPO_ROOT"
 TEST_TMP=$(mktemp -d -t vw-security-tests.XXXXXXXXXX)
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
@@ -132,7 +134,7 @@ printf 'Security helper tests passed.\n'
 check_security_helpers
 check_privilege_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 cd "$ROOT"
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass(){ printf 'PASS: %s\n' "$*"; }

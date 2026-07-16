@@ -2,13 +2,15 @@
 # Consolidated secrets regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_secrets_cli_help() (
 # Verify standalone secrets informational options need no project configuration.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$VW_TEST_REPO_ROOT"
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -175,7 +177,7 @@ check_secrets_cli_help
 check_schema_dependency_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -404,7 +406,7 @@ check_schema_dependency_contracts
 check_crowdsec_worker_post_edit_apply() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -529,7 +531,7 @@ check_crowdsec_worker_post_edit_apply
 check_runtime_secret_reconciliation() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -690,7 +692,7 @@ printf 'Runtime secret reconciliation tests passed.\n'
 check_runtime_secret_reconciliation
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 TESTS_RUN=0
 OP="age1op00000000000000000000000000000000000000000000000000000000"
@@ -1049,7 +1051,7 @@ printf '1..%s\n' "$TESTS_RUN"
 check_key_rotate_live_generation_transaction() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -1145,7 +1147,7 @@ check_key_rotate_live_generation_transaction
 check_key_rotate_full_entrypoint_cleanup_contract() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }

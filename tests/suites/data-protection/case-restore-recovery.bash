@@ -2,9 +2,12 @@
 # Consolidated restore and recovery regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_restore_run_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 SCRIPT="$ROOT/utilities/restore-run.sh"
 fail(){ echo "not ok - $*" >&2; exit 1; }
 pass(){ echo "ok - $*"; }
@@ -76,7 +79,7 @@ check_restore_run_contracts
 check_restore_confirmation_safety() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 RESTORE="$ROOT/utilities/restore-run.sh"
 
 fail() {
@@ -126,7 +129,7 @@ check_restore_confirmation_safety
 check_restore_preflight_and_cross_layout_safety() (
 # shellcheck disable=SC2016
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 RESTORE="$ROOT/utilities/restore-run.sh"
 BACKUP="$ROOT/utilities/backup-run.sh"
 UTILS="$ROOT/lib/backup-utils.sh"
@@ -193,7 +196,7 @@ pass 'restore/backup preflight safety functional checks'
 check_restore_preflight_and_cross_layout_safety
 check_restore_behavior_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 
 _extract_func(){
@@ -215,7 +218,7 @@ set -euo pipefail
 RESTORE_TYPE=emergency
 BACKUP_FILE="$TMP/emergency.tar.zst.age"
 EMERGENCY_BACKUP_AGE_IDENTITY_FILE="$TMP/dr-key.txt"
-age(){ printf '%s\n' "\$*" > "$TMP/age.args"; : > "\$4" 2>/dev/null || true; }
+age(){ local output=""; printf '%s\n' "\$*" > "$TMP/age.args"; while (( \$# )); do if [[ "\$1" == -o ]]; then output="\${2:-}"; break; fi; shift; done; [[ -n "\$output" ]] && : > "\$output"; }
 $(_extract_func "$ROOT/utilities/restore-run.sh" _age_decrypt_restore_backup)
 : > "\$BACKUP_FILE"; : > "\$EMERGENCY_BACKUP_AGE_IDENTITY_FILE"
 _age_decrypt_restore_backup "\$BACKUP_FILE" ignored "$TMP/out.tar.zst" "$TMP/err" age-passphrase || exit 1
@@ -243,7 +246,7 @@ grep -q 'Skipped runtime decrypted secrets' "$ROOT/utilities/restore-run.sh" || 
 check_restore_behavior_contracts
 check_restore_dr_transaction_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 RESTORE="$ROOT/utilities/restore-run.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -874,7 +877,7 @@ check_restore_dr_transaction_contracts
 check_recovery_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 REAL_ETC_SNAPSHOT="$(mktemp -d)"
 TEST_ROOT="$(mktemp -d)"
 TESTS_RUN=0
