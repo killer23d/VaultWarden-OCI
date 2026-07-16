@@ -2033,21 +2033,7 @@ _ss_write_policy_file() {
 }
 
 _ss_set_env_var_in_file() {
-    local key="$1" value="$2" file="$3"
-    local escaped_key tmp_file escaped_value
-    escaped_key=$(printf '%s' "$key" | sed 's/[]\/$*.^[]/\\&/g')
-    tmp_file="$(dirname "$file")/.env.tmp.$$"
-    if grep -q "^${escaped_key}=" "$file" 2>/dev/null; then
-        escaped_value="${value//\\/\\\\}"
-        escaped_value="${escaped_value//&/\\&}"
-        escaped_value="${escaped_value//|/\\|}"
-        sed "s|^${escaped_key}=.*|${key}=${escaped_value}|" "$file" > "$tmp_file" || { rm -f "$tmp_file"; return 1; }
-    else
-        cp "$file" "$tmp_file" || { rm -f "$tmp_file"; return 1; }
-        printf '%s=%s\n' "$key" "$value" >> "$tmp_file" || { rm -f "$tmp_file"; return 1; }
-    fi
-    chmod --reference="$file" "$tmp_file" 2>/dev/null || true
-    mv "$tmp_file" "$file" || { rm -f "$tmp_file"; return 1; }
+    _set_env_var "$1" "$2" "$3"
 }
 
 _ss_stage_manifest_update() {

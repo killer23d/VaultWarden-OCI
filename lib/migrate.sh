@@ -648,27 +648,13 @@ _mv_check_stale_backup() {
 _mv_set_env_var() {
     local key="$1" value="$2"
     local env_file="${PROJECT_ROOT}/.env"
-    local tmp escaped_value
 
     if [[ "${DRY_RUN}" == "true" ]]; then
         _mv_log info "[DRY RUN] would: set: ${key}=${value}"
         return 0
     fi
 
-    tmp="$(mktemp "${env_file}.XXXXXX")"
-    chmod 0600 "${tmp}"
-
-    if grep -q "^${key}=" "${env_file}" 2>/dev/null; then
-        escaped_value="${value//\\/\\\\}"
-        escaped_value="${escaped_value//&/\\&}"
-        escaped_value="${escaped_value//|/\\|}"
-        sed "s|^${key}=.*|${key}=${escaped_value}|" "${env_file}" > "${tmp}"
-    else
-        cp "${env_file}" "${tmp}"
-        printf '%s=%s\n' "${key}" "${value}" >> "${tmp}"
-    fi
-
-    mv -f "${tmp}" "${env_file}"
+    _set_env_var "$key" "$value" "$env_file" || return $?
     _mv_log info ".env updated: ${key}=${value}"
 }
 
