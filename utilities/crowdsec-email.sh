@@ -41,7 +41,9 @@ USAGE:
 HELP
 }
 
-require_root() {
+# Intentionally return to the subcommand dispatcher and retain the focused
+# non-root test bypass; lib/common.sh::require_root has a different exit contract.
+_crowdsec_email_require_root() {
     if [[ "$EUID" -ne 0 && "${VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0}" != "1" ]]; then
         error "Run with sudo: sudo ./utilities/crowdsec-email.sh $1"
         return 1
@@ -502,10 +504,10 @@ send_test() {
 
 main() {
     case "${1:-status}" in
-        enable) require_root enable; apply_state true ;;
-        disable) require_root disable; apply_state false ;;
-        status) require_root status; show_status ;;
-        test) require_root test; send_test ;;
+        enable) _crowdsec_email_require_root enable; apply_state true ;;
+        disable) _crowdsec_email_require_root disable; apply_state false ;;
+        status) _crowdsec_email_require_root status; show_status ;;
+        test) _crowdsec_email_require_root test; send_test ;;
         --help|-h|help) show_help ;;
         *) error "Unknown command: ${1:-}"; show_help; return 2 ;;
     esac

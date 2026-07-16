@@ -135,6 +135,12 @@ grep -Fq 'atomic_set_env "$INSTALL_ENV_STAGING" PROJECT_STATE_DIR' recover.sh \
     || fail 'recovery staging no longer uses its standalone env writer'
 pass 'recover.sh retains its standalone disaster-recovery env writer'
 
+defaults_line="$(grep -nF 'source "${SCRIPT_DIR}/lib/defaults.sh"' setup.sh | cut -d: -f1)"
+storage_line="$(grep -nF 'source "${SCRIPT_DIR}/lib/storage.sh"' setup.sh | cut -d: -f1)"
+[[ -n "$defaults_line" && -n "$storage_line" && "$defaults_line" -lt "$storage_line" ]] \
+    || fail 'setup.sh must explicitly source defaults.sh before storage.sh'
+pass 'setup.sh explicit defaults source precedes storage source'
+
 migrate_main_body="$(extract_func lib/migrate.sh migrate_mode_main)"
 ! grep -Fq '_mv_parse_args' <<< "$migrate_main_body" \
     || fail 'migrate_mode_main must not parse migration CLI arguments'

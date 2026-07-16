@@ -280,11 +280,55 @@ bash -n "$ROOT/utilities/crowdsec-email.sh"
 contains "$ROOT/utilities/crowdsec-email.sh" '--reconcile-email'
 contains "$ROOT/utilities/crowdsec-email.sh" 'operation_acquire'
 not_contains "$ROOT/utilities/crowdsec-email.sh" 'vaultwarden-crowdsec-email-control.lock'
+grep -Fq '_crowdsec_email_require_root()' "$ROOT/utilities/crowdsec-email.sh" \
+    || fail 'purpose-specific CrowdSec email root helper is missing'
+! grep -Eq '^require_root\(\)' "$ROOT/utilities/crowdsec-email.sh" \
+    || fail 'generic require_root name was reintroduced in CrowdSec email control'
+not_contains "$ROOT/utilities/crowdsec-email.sh" 'source "${PROJECT_ROOT}/lib/common.sh"'
+contains "$ROOT/utilities/crowdsec-email.sh" 'Intentionally return to the subcommand dispatcher'
+contains "$ROOT/utilities/crowdsec-email.sh" 'non-root test bypass'
 write_flag_body="$(sed -n '/^write_flag()/,/^}/p' "$ROOT/utilities/crowdsec-email.sh")"
 grep -Fq "awk -v value" <<< "$write_flag_body" \
     || fail 'CrowdSec email write_flag no longer owns its specialized renderer'
 ! grep -Fq '_set_env_var' <<< "$write_flag_body" \
     || fail 'CrowdSec email write_flag was incorrectly consolidated into the generic helper'
+
+root_helper_probe="$TMP/root-helper-probe.sh"
+{
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+        'error(){ printf "ERROR: %s\\n" "$*" >&2; }' \
+        'unset VAULTWARDEN_TEST_ALLOW_NON_ROOT || true'
+    sed -n '/^_crowdsec_email_require_root()/,/^}/p' "$ROOT/utilities/crowdsec-email.sh"
+    cat <<'EOF_ROOT_PROBE'
+if _crowdsec_email_require_root status; then
+    exit 90
+fi
+printf 'root helper returned to caller\n'
+VAULTWARDEN_TEST_ALLOW_NON_ROOT=1
+_crowdsec_email_require_root test
+printf 'root helper test bypass accepted\n'
+EOF_ROOT_PROBE
+} > "$root_helper_probe"
+chmod 0755 "$root_helper_probe"
+if (( EUID == 0 )) && command -v runuser >/dev/null 2>&1; then
+    runuser -u nobody -- bash "$root_helper_probe" >"$TMP/root-helper.out" 2>&1
+else
+    bash "$root_helper_probe" >"$TMP/root-helper.out" 2>&1
+fi
+contains "$TMP/root-helper.out" 'Run with sudo: sudo ./utilities/crowdsec-email.sh status'
+contains "$TMP/root-helper.out" 'root helper returned to caller'
+contains "$TMP/root-helper.out" 'root helper test bypass accepted'
+
+cp "$VW_CROWDSEC_EMAIL_ENV_FILE" "$TMP/help-env.before"
+: > "$CALLS"
+unset VAULTWARDEN_TEST_ALLOW_NON_ROOT
+run_control --help >"$TMP/help.out" 2>&1
+export VAULTWARDEN_TEST_ALLOW_NON_ROOT=1
+contains "$TMP/help.out" 'CrowdSec Email Notifications'
+cmp -s "$TMP/help-env.before" "$VW_CROWDSEC_EMAIL_ENV_FILE" \
+    || fail 'help changed the CrowdSec email environment setting'
+[[ ! -s "$CALLS" ]] || fail 'help invoked CrowdSec setup or runtime commands'
+assert_lock_free
 
 # Ordinary enable/status/test/disable behavior and metadata preservation.
 env_mode="$(stat -c '%a' "$VW_CROWDSEC_EMAIL_ENV_FILE")"
