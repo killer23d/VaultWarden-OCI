@@ -27,8 +27,18 @@ TIMEOUT_NOTICE="NOTE: per-case timeout enforcement is unavailable; install GNU c
 TIMEOUT_COMMAND=()
 CASE_TIMED_OUT=false
 RUNNER_TEMP_DIR=""
+ACTIVE_CASE_LINK=""
+CASE_ENTRYPOINT=""
+
+cleanup_case_link() {
+    if [[ -n "$ACTIVE_CASE_LINK" ]]; then
+        rm -f -- "$ACTIVE_CASE_LINK"
+        ACTIVE_CASE_LINK=""
+    fi
+}
 
 cleanup_runner_temp() {
+    cleanup_case_link
     if [[ -n "$RUNNER_TEMP_DIR" && -d "$RUNNER_TEMP_DIR" ]]; then
         rm -rf -- "$RUNNER_TEMP_DIR"
     fi
@@ -56,32 +66,32 @@ USAGE
 
 FOUNDATION_CASES=(
     tests/test-architecture.sh
-    tests/case-runner-contracts.bash
-    tests/case-config-env.bash
-    tests/case-permissions.bash
-    tests/case-storage-setup.bash
-    tests/case-systemd.bash
+    tests/suites/foundation/case-runner-contracts.bash
+    tests/suites/foundation/case-config-env.bash
+    tests/suites/foundation/case-permissions.bash
+    tests/suites/foundation/case-storage-setup.bash
+    tests/suites/foundation/case-systemd.bash
 )
 
 SECURITY_CASES=(
-    tests/case-security-privileges.bash
-    tests/case-secrets.bash
-    tests/case-email.bash
+    tests/suites/security/case-security-privileges.bash
+    tests/suites/security/case-secrets.bash
+    tests/suites/security/case-email.bash
 )
 
 OPERATIONS_CASES=(
-    tests/case-operations.bash
-    tests/case-lock-fd-hygiene.bash
-    tests/case-lifecycle.bash
-    tests/case-operator-ui.bash
-    tests/case-crowdsec.bash
-    tests/case-crowdsec-notifications.bash
-    tests/case-uninstall.bash
+    tests/suites/operations/case-operations.bash
+    tests/suites/operations/case-lock-fd-hygiene.bash
+    tests/suites/operations/case-lifecycle.bash
+    tests/suites/operations/case-operator-ui.bash
+    tests/suites/operations/case-crowdsec.bash
+    tests/suites/operations/case-crowdsec-notifications.bash
+    tests/suites/operations/case-uninstall.bash
 )
 
 DATA_PROTECTION_CASES=(
-    tests/case-backup.bash
-    tests/case-restore-recovery.bash
+    tests/suites/data-protection/case-backup.bash
+    tests/suites/data-protection/case-restore-recovery.bash
 )
 
 # Internal fixture hooks for runner-contract tests. They are not part of the
@@ -92,19 +102,21 @@ if [[ -n "${VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE:-}" \
     exit 2
 fi
 
+map_fixture_cases() {
+    local array_name="$1"
+    local -n cases_ref="$array_name"
+    local index
+
+    for index in "${!cases_ref[@]}"; do
+        cases_ref[$index]="$TESTS_DIR/${cases_ref[$index]##*/}"
+    done
+}
+
 if [[ -n "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" ]]; then
-    for index in "${!FOUNDATION_CASES[@]}"; do
-        FOUNDATION_CASES[$index]="$TESTS_DIR/${FOUNDATION_CASES[$index]#tests/}"
-    done
-    for index in "${!SECURITY_CASES[@]}"; do
-        SECURITY_CASES[$index]="$TESTS_DIR/${SECURITY_CASES[$index]#tests/}"
-    done
-    for index in "${!OPERATIONS_CASES[@]}"; do
-        OPERATIONS_CASES[$index]="$TESTS_DIR/${OPERATIONS_CASES[$index]#tests/}"
-    done
-    for index in "${!DATA_PROTECTION_CASES[@]}"; do
-        DATA_PROTECTION_CASES[$index]="$TESTS_DIR/${DATA_PROTECTION_CASES[$index]#tests/}"
-    done
+    map_fixture_cases FOUNDATION_CASES
+    map_fixture_cases SECURITY_CASES
+    map_fixture_cases OPERATIONS_CASES
+    map_fixture_cases DATA_PROTECTION_CASES
 
     if [[ -n "${VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE:-}" ]]; then
         FOUNDATION_CASES+=("$VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE")
@@ -137,19 +149,40 @@ validate_inventory() {
         fi
     done
 
-    while IFS= read -r -d '' discovered; do
-        listed=false
-        for case_file in "${ALL_CASES[@]}"; do
-            if [[ "$discovered" == "$case_file" ]]; then
-                listed=true
-                break
+    if [[ -n "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" ]]; then
+        while IFS= read -r -d '' discovered; do
+            listed=false
+            for case_file in "${ALL_CASES[@]}"; do
+                if [[ "$discovered" == "$case_file" ]]; then
+                    listed=true
+                    break
+                fi
+            done
+            if [[ "$listed" != true ]]; then
+                echo "FAIL unlisted permanent test case: $discovered" >&2
+                exit 1
             fi
-        done
-        if [[ "$listed" != true ]]; then
-            echo "FAIL unlisted permanent test case: $discovered" >&2
+        done < <(find "$TESTS_DIR" -maxdepth 1 -type f -name 'case-*.bash' -print0 | sort -z)
+    else
+        if find "$TESTS_DIR" -maxdepth 1 -type f -name 'case-*.bash' -print -quit | grep -q .; then
+            echo "FAIL permanent case files must live under tests/suites and be registered in tests/run-tests.sh" >&2
             exit 1
         fi
-    done < <(find "$TESTS_DIR" -maxdepth 1 -type f -name 'case-*.bash' -print0 | sort -z)
+
+        while IFS= read -r -d '' discovered; do
+            listed=false
+            for case_file in "${ALL_CASES[@]}"; do
+                if [[ "$discovered" == "$case_file" ]]; then
+                    listed=true
+                    break
+                fi
+            done
+            if [[ "$listed" != true ]]; then
+                echo "FAIL unlisted permanent test case: $discovered" >&2
+                exit 1
+            fi
+        done < <(find "$TESTS_DIR/suites" -type f -name 'case-*.bash' -print0 | sort -z)
+    fi
 
     if find "$TESTS_DIR" -maxdepth 1 -type f -name 'test-*.sh' \
         ! -name 'test-architecture.sh' -print -quit | grep -q .; then
@@ -259,25 +292,59 @@ EOF_STAT
     export PATH
 }
 
+prepare_case_entrypoint() {
+    local case_file="$1"
+    local relative_target attempt
+
+    cleanup_case_link
+    CASE_ENTRYPOINT="$case_file"
+
+    if [[ -n "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" \
+        || "$case_file" != "$TESTS_DIR"/suites/* ]]; then
+        return 0
+    fi
+
+    relative_target="${case_file#"$TESTS_DIR/"}"
+    for (( attempt = 0; attempt < 20; attempt++ )); do
+        ACTIVE_CASE_LINK="$TESTS_DIR/.runner-case.$$.${RANDOM}.${attempt}.bash"
+        if ln -s -- "$relative_target" "$ACTIVE_CASE_LINK" 2>/dev/null; then
+            CASE_ENTRYPOINT="$ACTIVE_CASE_LINK"
+            return 0
+        fi
+    done
+
+    ACTIVE_CASE_LINK=""
+    echo "FAIL unable to create temporary test entrypoint for $case_file" >&2
+    return 1
+}
+
 execute_case() {
     local case_file="$1"
     local rc timeout_stderr
 
     CASE_TIMED_OUT=false
+    prepare_case_entrypoint "$case_file" || return $?
+
     if [[ "$TIMEOUT_MODE" != "gnu" ]]; then
-        "$BASH" "$case_file"
-        return
+        set +e
+        "$BASH" "$CASE_ENTRYPOINT"
+        rc=$?
+        set -e
+        cleanup_case_link
+        return "$rc"
     fi
 
     ensure_runner_temp_dir
     timeout_stderr="$RUNNER_TEMP_DIR/timeout.stderr"
     : > "$timeout_stderr"
 
+    set +e
     LC_ALL=C "${TIMEOUT_COMMAND[@]}" --verbose \
         "${TEST_CASE_TIMEOUT_SECONDS}s" \
-        "$BASH" -c 'exec "$@" 2>&3' _ "$BASH" "$case_file" \
+        "$BASH" -c 'exec "$@" 2>&3' _ "$BASH" "$CASE_ENTRYPOINT" \
         3>&2 2>"$timeout_stderr"
     rc=$?
+    set -e
 
     if [[ -s "$timeout_stderr" ]]; then
         cat "$timeout_stderr" >&2
@@ -286,6 +353,7 @@ execute_case() {
         CASE_TIMED_OUT=true
     fi
 
+    cleanup_case_link
     return "$rc"
 }
 
