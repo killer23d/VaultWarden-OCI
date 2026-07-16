@@ -2,9 +2,12 @@
 # Consolidated lifecycle regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_start_policy_contracts() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 require(){ grep -Eq -- "$1" "$2" || fail "$3"; }
 reject(){ ! grep -Eq -- "$1" "$2" || fail "$3"; }
@@ -423,7 +426,7 @@ check_start_policy_contracts
 check_startup_lifecycle_guards() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -488,7 +491,7 @@ printf 'PASS: startup lifecycle operation guards\n'
 check_startup_lifecycle_guards
 check_start_policy_argument_and_manual_restore_behavior() (
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 
 _extract_func(){
@@ -545,7 +548,7 @@ check_start_policy_argument_and_manual_restore_behavior
 check_typed_lifecycle_health_results() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }

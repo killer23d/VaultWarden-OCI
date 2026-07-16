@@ -56,32 +56,32 @@ USAGE
 
 FOUNDATION_CASES=(
     tests/test-architecture.sh
-    tests/case-runner-contracts.bash
-    tests/case-config-env.bash
-    tests/case-permissions.bash
-    tests/case-storage-setup.bash
-    tests/case-systemd.bash
+    tests/suites/foundation/case-runner-contracts.bash
+    tests/suites/foundation/case-config-env.bash
+    tests/suites/foundation/case-permissions.bash
+    tests/suites/foundation/case-storage-setup.bash
+    tests/suites/foundation/case-systemd.bash
 )
 
 SECURITY_CASES=(
-    tests/case-security-privileges.bash
-    tests/case-secrets.bash
-    tests/case-email.bash
+    tests/suites/security/case-security-privileges.bash
+    tests/suites/security/case-secrets.bash
+    tests/suites/security/case-email.bash
 )
 
 OPERATIONS_CASES=(
-    tests/case-operations.bash
-    tests/case-lock-fd-hygiene.bash
-    tests/case-lifecycle.bash
-    tests/case-operator-ui.bash
-    tests/case-crowdsec.bash
-    tests/case-crowdsec-notifications.bash
-    tests/case-uninstall.bash
+    tests/suites/operations/case-operations.bash
+    tests/suites/operations/case-lock-fd-hygiene.bash
+    tests/suites/operations/case-lifecycle.bash
+    tests/suites/operations/case-operator-ui.bash
+    tests/suites/operations/case-crowdsec.bash
+    tests/suites/operations/case-crowdsec-notifications.bash
+    tests/suites/operations/case-uninstall.bash
 )
 
 DATA_PROTECTION_CASES=(
-    tests/case-backup.bash
-    tests/case-restore-recovery.bash
+    tests/suites/data-protection/case-backup.bash
+    tests/suites/data-protection/case-restore-recovery.bash
 )
 
 # Internal fixture hooks for runner-contract tests. They are not part of the
@@ -92,19 +92,22 @@ if [[ -n "${VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE:-}" \
     exit 2
 fi
 
+map_fixture_cases() {
+    local array_name="$1"
+    local -n cases_ref="$array_name"
+    local index relative_path
+
+    for index in "${!cases_ref[@]}"; do
+        relative_path="${cases_ref[$index]#tests/}"
+        cases_ref[$index]="${TESTS_DIR%/}/${relative_path}"
+    done
+}
+
 if [[ -n "${VAULTWARDEN_TEST_RUNNER_TESTS_DIR:-}" ]]; then
-    for index in "${!FOUNDATION_CASES[@]}"; do
-        FOUNDATION_CASES[$index]="$TESTS_DIR/${FOUNDATION_CASES[$index]#tests/}"
-    done
-    for index in "${!SECURITY_CASES[@]}"; do
-        SECURITY_CASES[$index]="$TESTS_DIR/${SECURITY_CASES[$index]#tests/}"
-    done
-    for index in "${!OPERATIONS_CASES[@]}"; do
-        OPERATIONS_CASES[$index]="$TESTS_DIR/${OPERATIONS_CASES[$index]#tests/}"
-    done
-    for index in "${!DATA_PROTECTION_CASES[@]}"; do
-        DATA_PROTECTION_CASES[$index]="$TESTS_DIR/${DATA_PROTECTION_CASES[$index]#tests/}"
-    done
+    map_fixture_cases FOUNDATION_CASES
+    map_fixture_cases SECURITY_CASES
+    map_fixture_cases OPERATIONS_CASES
+    map_fixture_cases DATA_PROTECTION_CASES
 
     if [[ -n "${VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE:-}" ]]; then
         FOUNDATION_CASES+=("$VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_CASE")
@@ -137,19 +140,26 @@ validate_inventory() {
         fi
     done
 
-    while IFS= read -r -d '' discovered; do
-        listed=false
-        for case_file in "${ALL_CASES[@]}"; do
-            if [[ "$discovered" == "$case_file" ]]; then
-                listed=true
-                break
+    if find "$TESTS_DIR" -maxdepth 1 -type f -name 'case-*.bash' -print -quit | grep -q .; then
+        echo "FAIL permanent case files must live under tests/suites and be registered in tests/run-tests.sh" >&2
+        exit 1
+    fi
+
+    if [[ -d "$TESTS_DIR/suites" ]]; then
+        while IFS= read -r -d '' discovered; do
+            listed=false
+            for case_file in "${ALL_CASES[@]}"; do
+                if [[ "$discovered" == "$case_file" ]]; then
+                    listed=true
+                    break
+                fi
+            done
+            if [[ "$listed" != true ]]; then
+                echo "FAIL unlisted permanent test case: $discovered" >&2
+                exit 1
             fi
-        done
-        if [[ "$listed" != true ]]; then
-            echo "FAIL unlisted permanent test case: $discovered" >&2
-            exit 1
-        fi
-    done < <(find "$TESTS_DIR" -maxdepth 1 -type f -name 'case-*.bash' -print0 | sort -z)
+        done < <(find "$TESTS_DIR/suites" -type f -name 'case-*.bash' -print0 | sort -z)
+    fi
 
     if find "$TESTS_DIR" -maxdepth 1 -type f -name 'test-*.sh' \
         ! -name 'test-architecture.sh' -print -quit | grep -q .; then
@@ -264,20 +274,26 @@ execute_case() {
     local rc timeout_stderr
 
     CASE_TIMED_OUT=false
+
     if [[ "$TIMEOUT_MODE" != "gnu" ]]; then
+        set +e
         "$BASH" "$case_file"
-        return
+        rc=$?
+        set -e
+        return "$rc"
     fi
 
     ensure_runner_temp_dir
     timeout_stderr="$RUNNER_TEMP_DIR/timeout.stderr"
     : > "$timeout_stderr"
 
+    set +e
     LC_ALL=C "${TIMEOUT_COMMAND[@]}" --verbose \
         "${TEST_CASE_TIMEOUT_SECONDS}s" \
         "$BASH" -c 'exec "$@" 2>&3' _ "$BASH" "$case_file" \
         3>&2 2>"$timeout_stderr"
     rc=$?
+    set -e
 
     if [[ -s "$timeout_stderr" ]]; then
         cat "$timeout_stderr" >&2

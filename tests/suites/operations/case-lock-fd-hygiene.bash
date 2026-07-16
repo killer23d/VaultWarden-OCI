@@ -2,7 +2,10 @@
 # Focused regression coverage for child-process lock descriptor hygiene.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
+ROOT="$VW_TEST_REPO_ROOT"
 LOG_LIB="$ROOT/lib/log.sh"
 CROWDSEC_WORKER_LIB="$ROOT/lib/crowdsec-worker.sh"
 

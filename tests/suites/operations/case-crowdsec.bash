@@ -2,14 +2,16 @@
 # Consolidated CrowdSec regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_crowdsec_configuration() (
 # Focused checks for the CrowdSec collection set, log acquisition, and
 # Vaultwarden log format required by the CrowdSec Vaultwarden parser.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$VW_TEST_REPO_ROOT"
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -97,7 +99,7 @@ check_crowdsec_configuration
 check_crowdsec_env_writer_wrapper() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 PROJECT_ROOT="$TMP/project"
@@ -149,8 +151,7 @@ check_crowdsec_env_writer_wrapper
 check_crowdsec_worker_apply_helper() (
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -268,7 +269,7 @@ check_crowdsec_worker_apply_helper
 check_crowdsec_lapi_cohort_and_required_services() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 SETUP="$ROOT/utilities/setup-crowdsec.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -425,7 +426,7 @@ check_crowdsec_lapi_cohort_and_required_services
 check_crowdsec_email_notifications() (
 set -euo pipefail
 
-ROOT="${VW_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ROOT="${VW_TEST_ROOT:-$VW_TEST_REPO_ROOT}"
 PROJECT_ROOT="$ROOT"
 SETUP="$ROOT/utilities/setup-crowdsec.sh"
 TMP="$(mktemp -d)"
@@ -781,7 +782,7 @@ check_crowdsec_email_notifications
 
 check_crowdsec_email_health_visibility() (
 set -euo pipefail
-ROOT="${VW_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ROOT="${VW_TEST_ROOT:-$VW_TEST_REPO_ROOT}"
 HEALTH="$ROOT/utilities/maintenance-health.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

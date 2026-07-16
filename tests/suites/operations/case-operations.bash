@@ -2,10 +2,13 @@
 # Consolidated operations regression suite.
 set -euo pipefail
 
+# shellcheck source=../../lib/test-root.bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+
 check_operation_guard_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 OPS="$ROOT/lib/operations.sh"
 BACKUP="$ROOT/utilities/backup-run.sh"
 CROWDSEC="$ROOT/utilities/setup-crowdsec.sh"
@@ -781,7 +784,7 @@ check_operation_guard_contracts
 check_dns_firewall_contention_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 DNS="$ROOT/utilities/maintenance-update-dns.sh"
 FIREWALL="$ROOT/utilities/maintenance-update-firewall.sh"
 
@@ -859,7 +862,7 @@ check_dns_firewall_contention_contracts
 check_operation_descriptor_and_owner_contracts() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 OPS="$ROOT/lib/operations.sh"
 
 fail() {
@@ -1117,7 +1120,7 @@ check_operation_descriptor_and_owner_contracts
 check_health_operation_contract() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 HEALTH="$ROOT/utilities/maintenance-health.sh"
 CONFIG="$ROOT/lib/config.sh"
 UNIT="$ROOT/systemd/vaultwarden-health.service"
@@ -1160,7 +1163,7 @@ check_health_operation_contract
 check_secrets_env_systemd_operation_guards() (
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$VW_TEST_REPO_ROOT"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
