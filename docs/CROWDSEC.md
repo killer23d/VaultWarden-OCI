@@ -95,10 +95,20 @@ To enable it, edit the normal non-secret environment and run the existing
 root-operated CrowdSec reconciliation path:
 
 ```bash
-sudo make edit-env
-# Set CROWDSEC_EMAIL_NOTIFICATIONS=true
-sudo ./utilities/setup-crowdsec.sh
+sudo ./utilities/crowdsec-email.sh enable
+sudo ./utilities/crowdsec-email.sh status
 ```
+
+The control command updates `CROWDSEC_EMAIL_NOTIFICATIONS` transactionally and
+delegates to the existing setup reconciliation. The full
+`sudo ./utilities/setup-crowdsec.sh` path remains valid for initial installation
+and broader CrowdSec maintenance.
+
+`crowdsec-email.sh status` reports whether the `.env` enablement flag and
+VaultWarden-OCI managed marker files are structurally consistent. It is not a
+complete validation of all CrowdSec or Postfix configuration. After manual
+operator changes, reconcile the feature and run `sudo crowdsec -t`; mailbox
+receipt still requires the explicit notification test below.
 
 The delivery route is deliberately narrow:
 
@@ -115,6 +125,18 @@ password, upstream relay credential, or email API token. The unauthenticated,
 unencrypted submission hop is permitted only on the existing loopback-only
 Postfix publication; do not expose port 587 on a public interface.
 
+Before enabling, reconciliation now fails closed unless the domain in
+`SMTP_FROM` exactly matches one space-separated entry in
+`ALLOWED_SENDER_DOMAINS`. It also refuses a second notification YAML with
+`name: vaultwarden_email` or an unmanaged CrowdSec profile that already
+references that notification name. These checks avoid Postfix sender rejection,
+CrowdSec's duplicate-name overwrite behavior, and duplicate event delivery.
+
+The project-owned notification file is installed as `root:root` mode `0640`.
+Operator-owned metadata on `profiles.yaml.local` is preserved. The email body is
+minimal HTML because CrowdSec 1.7.8 sends notification content as `text/html`;
+dynamic alert fields are escaped and wrapped in a preformatted block.
+
 Setup writes only the marked plugin file and the marked
 VaultWarden-OCI block in `/etc/crowdsec/profiles.yaml.local`. Operator content
 outside that block is retained. Static configuration validation uses the
@@ -130,6 +152,12 @@ notification:
 
 ```bash
 sudo cscli notifications test vaultwarden_email
+```
+
+The equivalent control command is:
+
+```bash
+sudo ./utilities/crowdsec-email.sh test
 ```
 
 CrowdSec 1.7.8 dispatches the test to the plugin but does not wait for or report
@@ -152,14 +180,17 @@ notification test on every run.
 To disable the feature, set the option back to `false` and reconcile again:
 
 ```bash
-sudo make edit-env
-# Set CROWDSEC_EMAIL_NOTIFICATIONS=false
-sudo ./utilities/setup-crowdsec.sh
+sudo ./utilities/crowdsec-email.sh disable
 ```
 
 Only marked VaultWarden-OCI content is removed. An unmarked file at the managed
 plugin path is treated as an operator conflict and is neither overwritten nor
 deleted.
+
+Postfix's queue remains intentionally transient in the default Compose profile.
+Mail accepted shortly before a Postfix container recreation can be lost. This is
+a documented small-team tradeoff rather than a durable security-event queue; do
+not use email as the only alerting or incident-response signal.
 
 ## Secret source
 

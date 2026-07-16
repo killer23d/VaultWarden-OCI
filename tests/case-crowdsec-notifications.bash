@@ -221,12 +221,13 @@ cat >"$VW_CROWDSEC_EMAIL_ENV_FILE" <<'EOF_ENV'
 CROWDSEC_EMAIL_NOTIFICATIONS=false
 ADMIN_EMAIL=admin@example.com
 SMTP_FROM=vaultwarden@example.com
+ALLOWED_SENDER_DOMAINS=example.com
 EOF_ENV
 chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"
 
 run_control() { bash "$FIXTURE/utilities/crowdsec-email.sh" "$@"; }
 run_setup() { bash "$FIXTURE/utilities/setup-crowdsec.sh" "$@"; }
-set_flag() { printf 'CROWDSEC_EMAIL_NOTIFICATIONS=%s\nADMIN_EMAIL=admin@example.com\nSMTP_FROM=vaultwarden@example.com\n' "$1" >"$VW_CROWDSEC_EMAIL_ENV_FILE"; chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"; }
+set_flag() { printf 'CROWDSEC_EMAIL_NOTIFICATIONS=%s\nADMIN_EMAIL=admin@example.com\nSMTP_FROM=vaultwarden@example.com\nALLOWED_SENDER_DOMAINS=example.com\n' "$1" >"$VW_CROWDSEC_EMAIL_ENV_FILE"; chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"; }
 write_plugin() { printf '# Managed by VaultWarden-OCI: CrowdSec email notification\n' >"$PLUGIN"; }
 write_profile() { printf '%s\n%s\n' "$setup_begin" "$setup_end" >"$PROFILES"; }
 clear_managed() { rm -f "$PLUGIN" "$PROFILES"; }

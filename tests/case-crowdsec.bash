@@ -447,8 +447,9 @@ systemctl(){ [[ "${1:-}" == "restart" && "${2:-}" == "crowdsec" ]] || return 0; 
 DRY_RUN=false
 ADMIN_EMAIL=admin@example.test
 SMTP_FROM=security@example.test
+ALLOWED_SENDER_DOMAINS="example.invalid EXAMPLE.TEST"
 CROWDSEC_EMAIL_NOTIFICATIONS=true
-export ADMIN_EMAIL SMTP_FROM CROWDSEC_EMAIL_NOTIFICATIONS
+export ADMIN_EMAIL SMTP_FROM ALLOWED_SENDER_DOMAINS CROWDSEC_EMAIL_NOTIFICATIONS
 mkdir -p "$_CS_LAPI_COHORT_ROOT"
 printf 'name: operator_profile\nfilters:\n  - true\non_success: continue\n' \
     > "$_CS_LAPI_COHORT_ROOT/profiles.yaml.local"
@@ -456,7 +457,134 @@ cp "$_CS_LAPI_COHORT_ROOT/profiles.yaml.local" "$TMP/operator.original"
 plugin="$_CS_LAPI_COHORT_ROOT/notifications/vaultwarden-email.yaml"
 profiles="$_CS_LAPI_COHORT_ROOT/profiles.yaml.local"
 
+_cs_email_sender_domain_is_allowed \
+    "security@example.test" "EXAMPLE.TEST other.example" \
+    || fail "case-insensitive multi-domain sender allowlist was rejected"
+
+invalid_sender_allowlists=(
+    "example.test bad_domain"
+    "example.test foo-.example"
+    "example.test foo.-example"
+    "-bad.example example.test"
+    "example.test bad..example"
+    ".example.test"
+    "example.test."
+)
+for invalid_allowlist in "${invalid_sender_allowlists[@]}"; do
+    if _cs_email_sender_domain_is_allowed "security@example.test" "$invalid_allowlist"; then
+        fail "malformed sender allowlist was accepted: $invalid_allowlist"
+    fi
+done
+
+# The matching domain appears first: validation must still inspect the later
+# malformed entry and fail before creating the managed notifications directory.
+ALLOWED_SENDER_DOMAINS="example.test bad_domain"
+cp "$profiles" "$TMP/sender-domain.profiles-before"
+if _cs_reconcile_email_notifications >"$TMP/sender-domain.out" 2>&1; then
+    fail "matching sender domain followed by malformed entry unexpectedly enabled email"
+fi
+grep -Fq 'must exactly match one space-separated ALLOWED_SENDER_DOMAINS entry' \
+    "$TMP/sender-domain.out" || fail "malformed allowlist failure did not identify ALLOWED_SENDER_DOMAINS"
+[[ ! -d "$(dirname "$plugin")" ]] \
+    || fail "malformed sender allowlist created the managed notifications directory"
+[[ ! -e "$plugin" ]] || fail "malformed sender allowlist installed the managed plugin"
+cmp -s "$TMP/sender-domain.profiles-before" "$profiles" \
+    || fail "malformed sender allowlist changed operator profile content"
+ALLOWED_SENDER_DOMAINS="example.invalid EXAMPLE.TEST"
+
+assert_plugin_yaml_conflict() {
+    local label="$1" content="$2"
+    local candidate
+    candidate="$(dirname "$plugin")/operator-${label}.yaml"
+    mkdir -p "$(dirname "$plugin")"
+    printf '%s' "$content" > "$candidate"
+    cp "$candidate" "$TMP/${label}.candidate-before"
+    cp "$profiles" "$TMP/${label}.profiles-before"
+    if _cs_reconcile_email_notifications >"$TMP/${label}.out" 2>&1; then
+        fail "operator notification conflict unexpectedly enabled email: $label"
+    fi
+    grep -Fq "$candidate" "$TMP/${label}.out" \
+        || fail "notification conflict did not identify its filename: $label"
+    [[ ! -e "$plugin" ]] || fail "notification conflict installed the managed plugin: $label"
+    cmp -s "$TMP/${label}.candidate-before" "$candidate" \
+        || fail "notification conflict modified operator YAML: $label"
+    cmp -s "$TMP/${label}.profiles-before" "$profiles" \
+        || fail "notification conflict changed operator profiles: $label"
+    rm -f -- "$candidate"
+}
+
+assert_plugin_yaml_conflict quoted-key $'type: email\n"name": vaultwarden_email\n'
+assert_plugin_yaml_conflict spaced-colon $'type: email\nname : vaultwarden_email\n'
+assert_plugin_yaml_conflict indented-root $'  type: email\n  name: vaultwarden_email\n'
+assert_plugin_yaml_conflict malformed $'type: email\nname: [\n'
+
+nested_plugin="$(dirname "$plugin")/operator-nested-name.yaml"
+cat > "$nested_plugin" <<'EOF_NESTED_PLUGIN'
+type: email
+name: operator_owned
+metadata:
+  name: vaultwarden_email
+EOF_NESTED_PLUGIN
+_cs_email_validate_unique_plugin_definition \
+    || fail "nested notification name was falsely treated as the top-level plugin name"
+rm -f -- "$nested_plugin"
+
+unreadable_plugin="$(dirname "$plugin")/operator-unreadable.yaml"
+ln -s "$TMP/missing-notification.yaml" "$unreadable_plugin"
+cp "$profiles" "$TMP/unreadable-plugin.profiles-before"
+if _cs_reconcile_email_notifications >"$TMP/unreadable-plugin.out" 2>&1; then
+    fail "unreadable notification candidate unexpectedly enabled email"
+fi
+grep -Fq "$unreadable_plugin" "$TMP/unreadable-plugin.out" \
+    || fail "unreadable notification failure did not identify its filename"
+[[ ! -e "$plugin" ]] || fail "unreadable notification candidate installed the managed plugin"
+cmp -s "$TMP/unreadable-plugin.profiles-before" "$profiles" \
+    || fail "unreadable notification candidate changed operator profiles"
+rm -f -- "$unreadable_plugin"
+
+assert_profile_yaml_conflict() {
+    local label="$1" content="$2"
+    cp "$TMP/operator.original" "$profiles"
+    printf '%s' "$content" >> "$profiles"
+    cp "$profiles" "$TMP/${label}.profiles-before"
+    if _cs_reconcile_email_notifications >"$TMP/${label}.out" 2>&1; then
+        fail "operator profile conflict unexpectedly enabled email: $label"
+    fi
+    grep -Fq "$profiles" "$TMP/${label}.out" \
+        || fail "profile conflict did not identify its filename: $label"
+    [[ ! -e "$plugin" ]] || fail "profile conflict installed the managed plugin: $label"
+    cmp -s "$TMP/${label}.profiles-before" "$profiles" \
+        || fail "profile conflict changed operator content: $label"
+}
+
+assert_profile_yaml_conflict block-list $'---\nname: operator_email_profile\nnotifications:\n  - vaultwarden_email\n'
+assert_profile_yaml_conflict inline-list $'---\nname: operator_email_profile\nnotifications: [operator_notification, vaultwarden_email]\n'
+assert_profile_yaml_conflict multiline-flow $'---\nname: operator_email_profile\nnotifications:\n  [operator_notification,\n   vaultwarden_email]\n'
+assert_profile_yaml_conflict quoted-value $'---\nname: operator_email_profile\nnotifications:\n  - operator_notification\n  - "vaultwarden_email"\n'
+assert_profile_yaml_conflict malformed-profile $'---\nname: operator_email_profile\nnotifications: [\n'
+
+cp "$TMP/operator.original" "$profiles"
+_cs_email_append_profile_block "$profiles"
+_cs_email_validate_unique_profile_reference \
+    || fail "the exact VaultWarden-OCI managed profile block was not ignored"
+cp "$TMP/operator.original" "$profiles"
+
+unreadable_profile="$_CS_LAPI_COHORT_ROOT/profiles.yaml"
+ln -s "$TMP/missing-profiles.yaml" "$unreadable_profile"
+cp "$profiles" "$TMP/unreadable-profile.profiles-before"
+if _cs_reconcile_email_notifications >"$TMP/unreadable-profile.out" 2>&1; then
+    fail "unreadable profile candidate unexpectedly enabled email"
+fi
+grep -Fq "$unreadable_profile" "$TMP/unreadable-profile.out" \
+    || fail "unreadable profile failure did not identify its filename"
+[[ ! -e "$plugin" ]] || fail "unreadable profile candidate installed the managed plugin"
+cmp -s "$TMP/unreadable-profile.profiles-before" "$profiles" \
+    || fail "unreadable profile candidate changed operator content"
+rm -f -- "$unreadable_profile"
+cp "$TMP/operator.original" "$profiles"
+
 VALIDATION_RC=9
+
 if _cs_reconcile_email_notifications >"$TMP/baseline-invalid.out" 2>&1; then
     fail "pre-existing invalid CrowdSec configuration unexpectedly reached managed promotion"
 fi
@@ -478,6 +606,39 @@ grep -Fxq 'auth_type: none' "$plugin" || fail "plugin unexpectedly requires auth
 grep -Fxq 'encryption_type: none' "$plugin" || fail "plugin unexpectedly enables encryption on loopback hop"
 grep -Fq "sender_email: 'security@example.test'" "$plugin" || fail "SMTP_FROM was not rendered"
 grep -Fq -- "- 'admin@example.test'" "$plugin" || fail "ADMIN_EMAIL was not rendered"
+
+[[ "$(stat -c '%a' "$plugin")" == "640" ]] \
+    || fail "managed CrowdSec email plugin was not normalized to mode 0640"
+python3 - "$plugin" <<'PY_HTML_TEMPLATE'
+import re
+import sys
+import yaml
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+document = yaml.safe_load(text)
+if not isinstance(document, dict):
+    raise SystemExit("rendered CrowdSec plugin is not a YAML mapping")
+if '<pre style="white-space: pre-wrap; font-family: monospace;">' not in text:
+    raise SystemExit("CrowdSec email template is missing the opening pre element")
+if '</pre>' not in text:
+    raise SystemExit("CrowdSec email template is missing the closing pre element")
+
+fields = (
+    "$alert.Source.Value",
+    "$alert.Scenario",
+    "$alert.MachineID",
+    "$decision.Type",
+    "$decision.Duration",
+)
+for field in fields:
+    pattern = re.compile(r"{{\s*" + re.escape(field) + r"\s*\|\s*html\s*}}")
+    matches = pattern.findall(text)
+    if len(matches) != 1:
+        raise SystemExit(f"expected exactly one escaped rendering for {field}, found {len(matches)}")
+    if field in pattern.sub("", text):
+        raise SystemExit(f"unescaped or duplicate rendering remains for {field}")
+PY_HTML_TEMPLATE
 
 special_plugin="$TMP/special-addresses.yaml"
 SMTP_FROM="security.o'hara&alerts@example.test"
