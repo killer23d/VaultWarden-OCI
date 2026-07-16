@@ -38,7 +38,7 @@ PROFILES="$ETC/profiles.yaml.local"
 mkdir -p "$FIXTURE/utilities" "$FIXTURE/lib" "$BIN" "$ETC/notifications"
 chmod 0755 "$TMP" "$FIXTURE" "$FIXTURE/utilities" "$FIXTURE/lib" "$ETC" "$ETC/notifications"
 cp "$ROOT/utilities/crowdsec-email.sh" "$FIXTURE/utilities/"
-cp "$ROOT/lib/operations.sh" "$FIXTURE/lib/"
+cp "$ROOT/lib/log.sh" "$ROOT/lib/common.sh" "$ROOT/lib/operations.sh" "$FIXTURE/lib/"
 chmod +x "$FIXTURE/utilities/crowdsec-email.sh"
 
 setup_begin="$(sed -n 's/^_CS_EMAIL_PROFILE_BEGIN="\(.*\)"$/\1/p' "$ROOT/utilities/setup-crowdsec.sh")"
@@ -202,6 +202,7 @@ EOF_PROD_FOOTER
 chmod +x "$PRODUCTION_SETUP"
 
 export PATH="$BIN:$PATH"
+export VW_TEST_MODE=1
 export VAULTWARDEN_TEST_ALLOW_NON_ROOT=1
 export VW_CROWDSEC_EMAIL_ENV_FILE="$FIXTURE/.env"
 export VW_CROWDSEC_SETUP_SCRIPT="$FIXTURE/utilities/setup-crowdsec.sh"
@@ -275,60 +276,120 @@ assert_partial() {
     contains "$output" 'Installed:  partial'
     contains "$output" 'Consistent: false'
 }
+run_unprivileged_control() {
+    local output="$1" test_mode="$2" allow_non_root="$3"
+    shift 3
+    local -a env_args=(
+        "PATH=$PATH"
+        "VW_CROWDSEC_EMAIL_ENV_FILE=$VW_CROWDSEC_EMAIL_ENV_FILE"
+        "VW_CROWDSEC_SETUP_SCRIPT=$VW_CROWDSEC_SETUP_SCRIPT"
+        "VW_CROWDSEC_OPERATIONS_LIB=$VW_CROWDSEC_OPERATIONS_LIB"
+        "VW_CROWDSEC_ETC_DIR=$VW_CROWDSEC_ETC_DIR"
+        "VW_OPERATIONS_LOCK=$VW_OPERATIONS_LOCK"
+        "VW_OPERATIONS_STATE_DIR=$VW_OPERATIONS_STATE_DIR"
+        "VW_TEST_SPECIFIC_LOCK=$VW_TEST_SPECIFIC_LOCK"
+        "VW_TEST_CALLS=$VW_TEST_CALLS"
+    )
+    [[ -z "$test_mode" ]] || env_args+=("VW_TEST_MODE=$test_mode")
+    [[ -z "$allow_non_root" ]] || env_args+=("VAULTWARDEN_TEST_ALLOW_NON_ROOT=$allow_non_root")
+
+    if (( EUID == 0 )) && command -v runuser >/dev/null 2>&1; then
+        runuser -u nobody -- env \
+            -u VW_TEST_MODE -u VAULTWARDEN_TEST_ALLOW_NON_ROOT \
+            "${env_args[@]}" \
+            bash "$FIXTURE/utilities/crowdsec-email.sh" "$@" >"$output" 2>&1
+    else
+        env -u VW_TEST_MODE -u VAULTWARDEN_TEST_ALLOW_NON_ROOT \
+            "${env_args[@]}" \
+            bash "$FIXTURE/utilities/crowdsec-email.sh" "$@" >"$output" 2>&1
+    fi
+}
 
 bash -n "$ROOT/utilities/crowdsec-email.sh"
 contains "$ROOT/utilities/crowdsec-email.sh" '--reconcile-email'
 contains "$ROOT/utilities/crowdsec-email.sh" 'operation_acquire'
 not_contains "$ROOT/utilities/crowdsec-email.sh" 'vaultwarden-crowdsec-email-control.lock'
-grep -Fq '_crowdsec_email_require_root()' "$ROOT/utilities/crowdsec-email.sh" \
-    || fail 'purpose-specific CrowdSec email root helper is missing'
-! grep -Eq '^require_root\(\)' "$ROOT/utilities/crowdsec-email.sh" \
-    || fail 'generic require_root name was reintroduced in CrowdSec email control'
-not_contains "$ROOT/utilities/crowdsec-email.sh" 'source "${PROJECT_ROOT}/lib/common.sh"'
-contains "$ROOT/utilities/crowdsec-email.sh" 'Intentionally return to the subcommand dispatcher'
-contains "$ROOT/utilities/crowdsec-email.sh" 'non-root test bypass'
+! grep -Eq '^[[:space:]]*(function[[:space:]]+)?(_crowdsec_email_)?require_root[[:space:]]*\(\)' \
+    "$ROOT/utilities/crowdsec-email.sh" \
+    || fail 'CrowdSec email control still defines a local root helper'
+not_contains "$ROOT/utilities/crowdsec-email.sh" '$EUID'
+not_contains "$ROOT/utilities/crowdsec-email.sh" 'is_root'
+log_source_line="$(grep -nF 'source "${PROJECT_ROOT}/lib/log.sh"' "$ROOT/utilities/crowdsec-email.sh" | cut -d: -f1)"
+common_source_line="$(grep -nF 'source "${PROJECT_ROOT}/lib/common.sh"' "$ROOT/utilities/crowdsec-email.sh" | cut -d: -f1)"
+[[ -n "$log_source_line" && -n "$common_source_line" ]] \
+    || fail 'canonical CrowdSec email library sources are missing'
+(( log_source_line < common_source_line )) \
+    || fail 'CrowdSec email control must source log.sh before common.sh'
+contains "$ROOT/utilities/crowdsec-email.sh" 'init_common_lib "$0"'
+contains "$ROOT/utilities/crowdsec-email.sh" 'require_root "$command"'
+contains "$ROOT/utilities/crowdsec-email.sh" '${VW_TEST_MODE:-0}'
+contains "$ROOT/utilities/crowdsec-email.sh" '${VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0}'
 write_flag_body="$(sed -n '/^write_flag()/,/^}/p' "$ROOT/utilities/crowdsec-email.sh")"
 grep -Fq "awk -v value" <<< "$write_flag_body" \
     || fail 'CrowdSec email write_flag no longer owns its specialized renderer'
 ! grep -Fq '_set_env_var' <<< "$write_flag_body" \
     || fail 'CrowdSec email write_flag was incorrectly consolidated into the generic helper'
 
-root_helper_probe="$TMP/root-helper-probe.sh"
-{
-    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
-        'error(){ printf "ERROR: %s\\n" "$*" >&2; }' \
-        'unset VAULTWARDEN_TEST_ALLOW_NON_ROOT || true'
-    sed -n '/^_crowdsec_email_require_root()/,/^}/p' "$ROOT/utilities/crowdsec-email.sh"
-    cat <<'EOF_ROOT_PROBE'
-if _crowdsec_email_require_root status; then
-    exit 90
-fi
-printf 'root helper returned to caller\n'
-VAULTWARDEN_TEST_ALLOW_NON_ROOT=1
-_crowdsec_email_require_root test
-printf 'root helper test bypass accepted\n'
-EOF_ROOT_PROBE
-} > "$root_helper_probe"
-chmod 0755 "$root_helper_probe"
-if (( EUID == 0 )) && command -v runuser >/dev/null 2>&1; then
-    runuser -u nobody -- bash "$root_helper_probe" >"$TMP/root-helper.out" 2>&1
-else
-    bash "$root_helper_probe" >"$TMP/root-helper.out" 2>&1
-fi
-contains "$TMP/root-helper.out" 'Run with sudo: sudo ./utilities/crowdsec-email.sh status'
-contains "$TMP/root-helper.out" 'root helper returned to caller'
-contains "$TMP/root-helper.out" 'root helper test bypass accepted'
-
-cp "$VW_CROWDSEC_EMAIL_ENV_FILE" "$TMP/help-env.before"
+cp "$VW_CROWDSEC_EMAIL_ENV_FILE" "$TMP/informational-env.before"
 : > "$CALLS"
-unset VAULTWARDEN_TEST_ALLOW_NON_ROOT
-run_control --help >"$TMP/help.out" 2>&1
-export VAULTWARDEN_TEST_ALLOW_NON_ROOT=1
-contains "$TMP/help.out" 'CrowdSec Email Notifications'
-cmp -s "$TMP/help-env.before" "$VW_CROWDSEC_EMAIL_ENV_FILE" \
+for help_arg in --help -h help; do
+    run_unprivileged_control "$TMP/help-${help_arg#-}.out" '' '' "$help_arg" \
+        || fail "$help_arg should succeed without root"
+    contains "$TMP/help-${help_arg#-}.out" 'CrowdSec Email Notifications'
+done
+cmp -s "$TMP/informational-env.before" "$VW_CROWDSEC_EMAIL_ENV_FILE" \
     || fail 'help changed the CrowdSec email environment setting'
 [[ ! -s "$CALLS" ]] || fail 'help invoked CrowdSec setup or runtime commands'
 assert_lock_free
+
+set +e
+run_unprivileged_control "$TMP/unknown.out" '' '' unknown-command
+unknown_rc=$?
+set -e
+[[ "$unknown_rc" -eq 2 ]] || fail "unknown command returned $unknown_rc instead of 2"
+contains "$TMP/unknown.out" 'Unknown command: unknown-command'
+not_contains "$TMP/unknown.out" 'This script must be run as root.'
+not_contains "$TMP/unknown.out" 'Re-run with: sudo'
+cmp -s "$TMP/informational-env.before" "$VW_CROWDSEC_EMAIL_ENV_FILE" \
+    || fail 'unknown command changed the CrowdSec email environment setting'
+[[ ! -s "$CALLS" ]] || fail 'unknown command invoked CrowdSec setup or runtime commands'
+assert_lock_free
+
+set_flag false
+clear_managed
+for privileged_command in enable disable status test; do
+    cp "$VW_CROWDSEC_EMAIL_ENV_FILE" "$TMP/${privileged_command}-nonroot.before"
+    : > "$CALLS"
+    if run_unprivileged_control "$TMP/${privileged_command}-nonroot.out" '' '' "$privileged_command"; then
+        fail "non-root $privileged_command unexpectedly succeeded"
+    fi
+    contains "$TMP/${privileged_command}-nonroot.out" 'This script must be run as root.'
+    contains "$TMP/${privileged_command}-nonroot.out" 'Re-run with: sudo'
+    cmp -s "$TMP/${privileged_command}-nonroot.before" "$VW_CROWDSEC_EMAIL_ENV_FILE" \
+        || fail "non-root $privileged_command changed the CrowdSec email environment setting"
+    [[ ! -s "$CALLS" ]] || fail "non-root $privileged_command invoked setup or runtime commands"
+    [[ ! -e "$PLUGIN" && ! -e "$PROFILES" ]] \
+        || fail "non-root $privileged_command modified CrowdSec notification configuration"
+    assert_no_backups
+    assert_lock_free
+done
+
+for bypass_case in allow-only test-mode-only; do
+    case "$bypass_case" in
+        allow-only) test_mode='' allow_non_root=1 ;;
+        test-mode-only) test_mode=1 allow_non_root='' ;;
+    esac
+    if run_unprivileged_control "$TMP/${bypass_case}.out" "$test_mode" "$allow_non_root" status; then
+        fail "$bypass_case unexpectedly bypassed the root requirement"
+    fi
+    contains "$TMP/${bypass_case}.out" 'Re-run with: sudo'
+done
+chmod 0644 "$VW_CROWDSEC_EMAIL_ENV_FILE"
+run_unprivileged_control "$TMP/both-bypass.out" 1 1 status \
+    || fail 'the narrowly gated fixture mode did not reach status'
+contains "$TMP/both-bypass.out" 'Configured: false'
+contains "$TMP/both-bypass.out" 'Installed:  false'
+chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"
 
 # Ordinary enable/status/test/disable behavior and metadata preservation.
 env_mode="$(stat -c '%a' "$VW_CROWDSEC_EMAIL_ENV_FILE")"
@@ -386,39 +447,9 @@ if run_control status >"$TMP/whitespace-flag.out" 2>&1; then fail 'whitespace-ma
 contains "$TMP/whitespace-flag.out" 'Configured: invalid'
 set_flag false
 
-# Status is root-operated; permission failures remain unknown, never healthy.
-unset VAULTWARDEN_TEST_ALLOW_NON_ROOT
-if (( EUID == 0 )) && command -v runuser >/dev/null 2>&1; then
-    if runuser -u nobody -- env \
-        PATH="$PATH" \
-        VW_CROWDSEC_EMAIL_ENV_FILE="$VW_CROWDSEC_EMAIL_ENV_FILE" \
-        VW_CROWDSEC_SETUP_SCRIPT="$VW_CROWDSEC_SETUP_SCRIPT" \
-        VW_CROWDSEC_OPERATIONS_LIB="$VW_CROWDSEC_OPERATIONS_LIB" \
-        VW_CROWDSEC_ETC_DIR="$VW_CROWDSEC_ETC_DIR" \
-        bash "$FIXTURE/utilities/crowdsec-email.sh" status >"$TMP/root-required.out" 2>&1; then
-        fail 'non-root status unexpectedly succeeded'
-    fi
-else
-    if bash "$FIXTURE/utilities/crowdsec-email.sh" status >"$TMP/root-required.out" 2>&1; then
-        fail 'non-root status unexpectedly succeeded'
-    fi
-fi
-contains "$TMP/root-required.out" 'Run with sudo'
-export VAULTWARDEN_TEST_ALLOW_NON_ROOT=1
-
+# Fixture-mode status still reports permission failures as unknown, never healthy.
 run_unprivileged_status() {
-    local output="$1"
-    if (( EUID == 0 )) && command -v runuser >/dev/null 2>&1; then
-        runuser -u nobody -- env \
-            PATH="$PATH" VAULTWARDEN_TEST_ALLOW_NON_ROOT=1 \
-            VW_CROWDSEC_EMAIL_ENV_FILE="$VW_CROWDSEC_EMAIL_ENV_FILE" \
-            VW_CROWDSEC_SETUP_SCRIPT="$VW_CROWDSEC_SETUP_SCRIPT" \
-            VW_CROWDSEC_OPERATIONS_LIB="$VW_CROWDSEC_OPERATIONS_LIB" \
-            VW_CROWDSEC_ETC_DIR="$VW_CROWDSEC_ETC_DIR" \
-            bash "$FIXTURE/utilities/crowdsec-email.sh" status >"$output" 2>&1
-    else
-        bash "$FIXTURE/utilities/crowdsec-email.sh" status >"$output" 2>&1
-    fi
+    run_unprivileged_control "$1" 1 1 status
 }
 set_flag false
 clear_managed
