@@ -16,21 +16,23 @@ timeout: 20s
 connect_timeout: 10s
 send_timeout: 10s
 format: |
+  <pre style="white-space: pre-wrap; font-family: monospace;">
   CrowdSec security event notification (up to 10 alerts and 5 decisions per alert).
   {{ range $alertIndex, $alert := . -}}
   {{ if lt $alertIndex 10 -}}
-  Source: {{ if $alert.Source }}{{ $alert.Source.Value }}{{ else }}unknown{{ end }}
-  Scenario: {{ $alert.Scenario }}
-  Machine ID: {{ $alert.MachineID }}
+  Source: {{ if $alert.Source }}{{ $alert.Source.Value | html }}{{ else }}unknown{{ end }}
+  Scenario: {{ $alert.Scenario | html }}
+  Machine ID: {{ $alert.MachineID | html }}
   {{ range $decisionIndex, $decision := $alert.Decisions -}}
   {{ if lt $decisionIndex 5 -}}
-  Decision type: {{ $decision.Type }}
-  Decision duration: {{ $decision.Duration }}
+  Decision type: {{ $decision.Type | html }}
+  Decision duration: {{ $decision.Duration | html }}
   {{ end -}}
   {{ end -}}
   ---
   {{ end -}}
-  {{ end -}}
+  {{ end }}
+  </pre>
 smtp_host: 127.0.0.1
 smtp_port: 587
 auth_type: none

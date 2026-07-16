@@ -573,9 +573,9 @@ _cs_ensure_fw_bouncer_key() {
 # Optional CrowdSec email notification transaction.
 #
 # Only the marked plugin file and marked profiles.yaml.local block are owned by
-# this project.  Existing file metadata is retained; new project-generated
-# CrowdSec files use root:root 0640, matching the setup script's generated
-# /etc/crowdsec configuration convention.
+# this project. Operator metadata on profiles.yaml.local is retained; the
+# project-owned plugin file is normalized to root:root 0640, matching the setup
+# script's generated /etc/crowdsec configuration convention.
 # ---------------------------------------------------------------------------
 _CS_EMAIL_PLUGIN_MARKER="# Managed by VaultWarden-OCI: CrowdSec email notification"
 _CS_EMAIL_PROFILE_BEGIN="# BEGIN VaultWarden-OCI CrowdSec email notifications"
@@ -635,10 +635,11 @@ _cs_email_read_env_setting() {
 }
 
 _cs_reload_email_environment() {
-    local notifications admin_email smtp_from
+    local notifications admin_email smtp_from allowed_sender_domains
     _cs_email_read_env_setting CROWDSEC_EMAIL_NOTIFICATIONS false notifications || return 1
     _cs_email_read_env_setting ADMIN_EMAIL "" admin_email || return 1
     _cs_email_read_env_setting SMTP_FROM "" smtp_from || return 1
+    _cs_email_read_env_setting ALLOWED_SENDER_DOMAINS "" allowed_sender_domains || return 1
 
     notifications="${notifications,,}"
     case "$notifications" in
@@ -652,7 +653,8 @@ _cs_reload_email_environment() {
     CROWDSEC_EMAIL_NOTIFICATIONS="$notifications"
     ADMIN_EMAIL="$admin_email"
     SMTP_FROM="$smtp_from"
-    export CROWDSEC_EMAIL_NOTIFICATIONS ADMIN_EMAIL SMTP_FROM
+    ALLOWED_SENDER_DOMAINS="$allowed_sender_domains"
+    export CROWDSEC_EMAIL_NOTIFICATIONS ADMIN_EMAIL SMTP_FROM ALLOWED_SENDER_DOMAINS
 }
 
 _cs_yaml_single_quote() {
@@ -667,6 +669,144 @@ _cs_email_address_is_safe() {
         && [[ "$value" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]] \
         && [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *$'\t'* ]] \
         && [[ "$value" != *[[:cntrl:]]* ]]
+}
+
+_cs_email_domain_is_valid() {
+    local domain="${1:-}" label
+    local -a labels=()
+
+    domain="${domain,,}"
+    [[ -n "$domain" && ${#domain} -le 253 ]] || return 1
+    [[ "$domain" != *[[:space:]]* && "$domain" != *[[:cntrl:]]* ]] || return 1
+    [[ "$domain" =~ ^[a-z0-9.-]+$ ]] || return 1
+    [[ "$domain" != .* && "$domain" != *. && "$domain" != *..* ]] || return 1
+
+    IFS='.' read -r -a labels <<< "$domain"
+    (( ${#labels[@]} > 0 )) || return 1
+    for label in "${labels[@]}"; do
+        [[ -n "$label" && ${#label} -le 63 ]] || return 1
+        [[ "$label" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || return 1
+    done
+}
+
+_cs_email_sender_domain_is_allowed() {
+    local sender="${1:-}" allowed="${2:-}"
+    local sender_domain candidate
+    local matched=false
+    local -a domains=()
+
+    _cs_email_address_is_safe "$sender" || return 1
+    [[ -n "$allowed" && "$allowed" != *[![:print:]]* ]] || return 1
+
+    sender_domain="${sender##*@}"
+    sender_domain="${sender_domain,,}"
+    _cs_email_domain_is_valid "$sender_domain" || return 1
+
+    read -r -a domains <<< "$allowed"
+    (( ${#domains[@]} > 0 )) || return 1
+
+    for candidate in "${domains[@]}"; do
+        [[ -n "$candidate" ]] || return 1
+        candidate="${candidate,,}"
+        _cs_email_domain_is_valid "$candidate" || return 1
+        [[ "$candidate" == "$sender_domain" ]] && matched=true
+    done
+
+    [[ "$matched" == true ]]
+}
+
+_cs_email_validate_unique_plugin_definition() {
+    local notifications_dir="${_CS_LAPI_COHORT_ROOT}/notifications"
+    local managed_plugin_path file matches
+    managed_plugin_path="${_CS_EMAIL_PLUGIN_PATH:-${notifications_dir}/vaultwarden-email.yaml}"
+    [[ -d "$notifications_dir" ]] || return 0
+
+    if ! command -v yq >/dev/null 2>&1; then
+        log_error "Cannot inspect CrowdSec notification YAML: required yq v4 command is unavailable."
+        return 1
+    fi
+    if [[ ! -r "$notifications_dir" || ! -x "$notifications_dir" ]]; then
+        log_error "Cannot inspect CrowdSec notification directory: $notifications_dir"
+        return 1
+    fi
+
+    while IFS= read -r -d '' file; do
+        [[ "$file" == "$managed_plugin_path" ]] && continue
+        if [[ ! -f "$file" || ! -r "$file" ]]; then
+            log_error "Cannot inspect CrowdSec notification file for duplicate names: $file"
+            return 1
+        fi
+        if ! matches="$(yq eval-all -r \
+            'select(tag == "!!map" and .name == "vaultwarden_email") | .name' \
+            "$file" 2>/dev/null)"; then
+            log_error "Malformed or unreadable CrowdSec notification YAML: $file"
+            return 1
+        fi
+        if grep -Fxq 'vaultwarden_email' <<< "$matches"; then
+            log_error "Duplicate CrowdSec notification name 'vaultwarden_email' found in operator file: $file"
+            return 1
+        fi
+    done < <(find "$notifications_dir" -maxdepth 1 \
+        \( -type f -o -type l \) \( -name '*.yaml' -o -name '*.yml' \) -print0)
+}
+
+_cs_email_profile_has_unmanaged_reference() {
+    local file="$1" parse_file="$1" stripped_file="" references=""
+    local rc=0
+
+    if [[ "$file" == "${_CS_LAPI_COHORT_ROOT}/profiles.yaml.local" ]]; then
+        stripped_file="$(mktemp "${TMPDIR:-/tmp}/vw-crowdsec-profile.XXXXXXXX")" || return 2
+        if ! _cs_email_strip_profile_block "$file" "$stripped_file"; then
+            rm -f -- "$stripped_file"
+            return 2
+        fi
+        parse_file="$stripped_file"
+    fi
+
+    references="$(yq eval-all -r '
+        select(tag == "!!map") |
+        (.notifications // []) |
+        select(tag == "!!seq") |
+        .[] |
+        select(tag == "!!str" and . == "vaultwarden_email")
+    ' "$parse_file" 2>/dev/null)" || rc=$?
+    [[ -z "$stripped_file" ]] || rm -f -- "$stripped_file"
+    (( rc == 0 )) || return 2
+
+    grep -Fxq 'vaultwarden_email' <<< "$references"
+}
+
+_cs_email_validate_unique_profile_reference() {
+    local file rc
+
+    if ! command -v yq >/dev/null 2>&1; then
+        log_error "Cannot inspect CrowdSec profile YAML: required yq v4 command is unavailable."
+        return 1
+    fi
+
+    for file in \
+        "${_CS_LAPI_COHORT_ROOT}/profiles.yaml" \
+        "${_CS_LAPI_COHORT_ROOT}/profiles.yaml.local"; do
+        [[ -e "$file" || -L "$file" ]] || continue
+        if [[ ! -f "$file" || ! -r "$file" ]]; then
+            log_error "Cannot inspect CrowdSec profile file for duplicate notification references: $file"
+            return 1
+        fi
+
+        rc=0
+        _cs_email_profile_has_unmanaged_reference "$file" || rc=$?
+        case "$rc" in
+            0)
+                log_error "Unmanaged CrowdSec profile already references 'vaultwarden_email': $file"
+                return 1
+                ;;
+            1) ;;
+            *)
+                log_error "Malformed or unreadable CrowdSec profile YAML: $file"
+                return 1
+                ;;
+        esac
+    done
 }
 
 _cs_email_ensure_dir() {
@@ -849,7 +989,7 @@ _cs_reconcile_email_notifications() (
     local transaction_changed=false rollback_failed=false success_ready=false
     local workdir="" plugin_stage="" profiles_stage="" empty_input=""
     local plugin_existed=false profiles_existed=false
-    local plugin_metadata="" profiles_metadata=""
+    local plugin_original_metadata="" plugin_target_metadata="640 0 0" profiles_metadata=""
     local plugin_backup_ref="" profiles_backup_ref=""
     local plugin_backup_fd="" profiles_backup_fd=""
 
@@ -942,11 +1082,11 @@ _cs_reconcile_email_notifications() (
         profiles_backup="${profiles_backup_ref:-${workdir}/profiles.backup}"
 
         if ! _cs_email_restore_path "$_CS_EMAIL_PLUGIN_PATH" "$plugin_backup" \
-            "$plugin_existed" "$plugin_metadata"; then
+            "$plugin_existed" "$plugin_original_metadata"; then
             log_error "Failed to restore previous CrowdSec email plugin file."
             failed=true
         elif ! _cs_email_path_matches_backup "$_CS_EMAIL_PLUGIN_PATH" "$plugin_backup" \
-            "$plugin_existed" "$plugin_metadata"; then
+            "$plugin_existed" "$plugin_original_metadata"; then
             log_error "Restored CrowdSec email plugin file did not match its protected state."
             failed=true
         fi
@@ -1062,6 +1202,15 @@ _cs_reconcile_email_notifications() (
         log_error "ADMIN_EMAIL and SMTP_FROM must be bounded, single-line email addresses for CrowdSec notifications."
         return 1
     fi
+    if [[ "$enabled" == "true" ]] \
+        && ! _cs_email_sender_domain_is_allowed "$SMTP_FROM" "${ALLOWED_SENDER_DOMAINS:-}"; then
+        log_error "SMTP_FROM domain '${SMTP_FROM##*@}' must exactly match one space-separated ALLOWED_SENDER_DOMAINS entry."
+        return 1
+    fi
+    if [[ "$enabled" == "true" ]]; then
+        _cs_email_validate_unique_plugin_definition || return 1
+        _cs_email_validate_unique_profile_reference || return 1
+    fi
     if [[ "$enabled" == "false" && ! -e "$_CS_EMAIL_PLUGIN_PATH" ]] \
         && { [[ ! -f "$_CS_EMAIL_PROFILES_PATH" ]] \
             || { ! grep -Fq "$_CS_EMAIL_PROFILE_BEGIN" "$_CS_EMAIL_PROFILES_PATH" \
@@ -1106,7 +1255,7 @@ _cs_reconcile_email_notifications() (
         profiles_existed=true
         cp -p -- "$_CS_EMAIL_PROFILES_PATH" "${workdir}/profiles.backup" || return 1
     fi
-    plugin_metadata="$(_cs_email_file_metadata "$_CS_EMAIL_PLUGIN_PATH" 640)" || return 1
+    plugin_original_metadata="$(_cs_email_file_metadata "$_CS_EMAIL_PLUGIN_PATH" 640)" || return 1
     profiles_metadata="$(_cs_email_file_metadata "$_CS_EMAIL_PROFILES_PATH" 640)" || return 1
 
     if ! _cs_email_strip_profile_block \
@@ -1130,7 +1279,7 @@ _cs_reconcile_email_notifications() (
 
     transaction_active=true
     if [[ "$enabled" == true ]]; then
-        _cs_email_promote_stage "$plugin_stage" "$_CS_EMAIL_PLUGIN_PATH" "$plugin_metadata" || return 1
+        _cs_email_promote_stage "$plugin_stage" "$_CS_EMAIL_PLUGIN_PATH" "$plugin_target_metadata" || return 1
     else
         rm -f -- "$plugin_stage" || return 1
         plugin_stage=""
