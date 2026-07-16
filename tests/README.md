@@ -22,7 +22,7 @@ Run cases through `run-tests.sh`; internal `case-*.bash` files are not standalon
 
 | Suite | Responsibility |
 | --- | --- |
-| `foundation` | Architecture, test-runner, configuration, permissions, storage/setup, and systemd contracts |
+| `foundation` | Architecture, test infrastructure, configuration, permissions, storage/setup, and systemd contracts |
 | `security` | Security/privilege, secrets, and email contracts |
 | `operations` | Operation guards, lifecycle, operator UI, CrowdSec, and uninstall contracts |
 | `data-protection` | Backup and restore/recovery contracts |
@@ -37,9 +37,11 @@ Examples:
 ./tests/run-tests.sh list
 ```
 
-Add a regression to the closest suite directory and register it in the matching array in `run-tests.sh`. Extend an existing case when it shares the same fixture and responsibility; do not create another top-level `test-*.sh` command.
+Add a regression to the closest existing case when it shares the same fixture and responsibility. Create another case only when combining it would create an oversized test body, mix unrelated fixtures, or make failures materially harder to diagnose. Do not create another top-level `test-*.sh` command.
 
-`case-runner-contracts.bash` exercises the real runner against isolated temporary fixtures. It covers command grammar, inventory validation, list output, failure propagation, timeout capability detection, ordinary exit `124` handling, and actual timeout diagnostics without modifying the repository's real `tests/` tree.
+`case-infrastructure.bash` folds the runner-contract and child-process descriptor-hygiene regressions into one cross-cutting infrastructure case. Its runner section exercises isolated temporary fixtures covering command grammar, inventory validation, list output, failure propagation, timeout capability detection, ordinary exit `124` handling, and actual timeout diagnostics without modifying the repository's real `tests/` tree.
+
+The larger subsystem cases remain separate intentionally. Several already contain hundreds to more than a thousand lines of consolidated behavioral coverage; joining them solely to reduce file count would create monolithic cases and make CI failures less actionable.
 
 ## Per-case timeout behavior
 
