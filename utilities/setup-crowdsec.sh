@@ -102,27 +102,17 @@ fi
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Write or update a KEY=VALUE line in .env using an atomic temp-file + mv.
+# Preserve the setup-specific missing-.env contract while using the canonical
+# atomic writer for an existing repository environment.
 _cs_set_env_var() {
     local key="$1" value="$2"
     local env_file="${PROJECT_ROOT}/.env"
     [[ -f "$env_file" ]] || return 0
-    local escaped_value
-    escaped_value="${value//\\/\\\\}"
-    escaped_value="${escaped_value//&/\\&}"
-    escaped_value="${escaped_value//|/\\|}"
-    local tmp_file
-    tmp_file="$(dirname "$env_file")/.env.tmp.$$"
-    # shellcheck disable=SC2064
-    trap "rm -f '$tmp_file'" RETURN
-    if grep -q "^${key}=" "$env_file" 2>/dev/null; then
-        sed "s|^${key}=.*|${key}=${escaped_value}|" "$env_file" > "$tmp_file"
-    else
-        cp "$env_file" "$tmp_file"
-        printf '%s=%s\n' "$key" "$value" >> "$tmp_file"
+    if ! declare -F _set_env_var >/dev/null 2>&1; then
+        log_error "Required configuration helper is unavailable: _set_env_var (lib/config.sh)"
+        return 1
     fi
-    chmod --reference="$env_file" "$tmp_file" 2>/dev/null || true
-    mv "$tmp_file" "$env_file"
+    _set_env_var "$key" "$value" "$env_file"
 }
 
 # Remove a KEY= line from .env using an atomic temp-file + mv.

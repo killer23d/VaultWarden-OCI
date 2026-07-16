@@ -53,8 +53,8 @@ DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=v
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/backup-utils.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
-source "${SCRIPT_DIR}/lib/storage.sh"
 source "${SCRIPT_DIR}/lib/defaults.sh"
+source "${SCRIPT_DIR}/lib/storage.sh"
 
 DOMAIN=""
 ADMIN_EMAIL=""

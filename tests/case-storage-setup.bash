@@ -8,6 +8,55 @@ set -euo pipefail
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 pass(){ echo "PASS: $*"; }
 
+out=$("$BASH" <<'PROBE'
+set -euo pipefail
+REPO_ROOT="$PWD"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+PROJECT_ROOT="$tmp/repo"
+mkdir -p "$PROJECT_ROOT"
+printf 'PROJECT_STATE_DIR=/old\n' > "$PROJECT_ROOT/.env"
+chmod 0600 "$PROJECT_ROOT/.env"
+cp "$PROJECT_ROOT/.env" "$tmp/before"
+DRY_RUN=true
+log_info(){ :; }
+log_warn(){ :; }
+log_error(){ :; }
+log_success(){ :; }
+log_debug(){ :; }
+source "$REPO_ROOT/lib/config.sh"
+source "$REPO_ROOT/lib/migrate.sh"
+_MV_LOG_FILE="$tmp/migrate.log"
+_mv_log(){ local level="$1"; shift; printf '[%s] %s\n' "$level" "$*" >> "$_MV_LOG_FILE"; }
+
+_set_env_var(){
+    printf '%s|%s|%s\n' "$1" "$2" "$3" > "$tmp/delegated"
+    printf '%s=%s\n' "$1" "$2" > "$3"
+}
+
+_mv_set_env_var PROJECT_STATE_DIR /dry-run
+cmp -s "$tmp/before" "$PROJECT_ROOT/.env"
+[[ ! -e "$tmp/delegated" ]]
+
+DRY_RUN=false
+_mv_set_env_var PROJECT_STATE_DIR /new-state
+grep -Fxq "PROJECT_STATE_DIR|/new-state|$PROJECT_ROOT/.env" "$tmp/delegated"
+grep -Fxq 'PROJECT_STATE_DIR=/new-state' "$PROJECT_ROOT/.env"
+
+updates_before="$(grep -Fc '.env updated:' "$tmp/migrate.log")"
+_set_env_var(){ return 47; }
+if _mv_set_env_var PROJECT_STATE_DIR /must-not-log; then
+    exit 91
+fi
+updates_after="$(grep -Fc '.env updated:' "$tmp/migrate.log")"
+[[ "$updates_after" == "$updates_before" ]]
+printf 'migration-env-wrapper-ok\n'
+PROBE
+)
+grep -Fxq 'migration-env-wrapper-ok' <<< "$out" \
+    || fail "migration env wrapper did not preserve dry-run or canonical delegation: $out"
+pass 'migration env wrapper preserves dry-run and delegates successful writes to the canonical helper'
+
 out=$(bash <<'PROBE'
 set -euo pipefail
 PROJECT_ROOT="$PWD"
@@ -76,6 +125,21 @@ extract_func(){
       if (depth == 0) exit
     }' "$file"
 }
+
+recover_atomic_body="$(extract_func recover.sh atomic_set_env)"
+grep -Fq "awk -F=" <<< "$recover_atomic_body" \
+    || fail 'recover.sh atomic_set_env no longer owns its standalone renderer'
+! grep -Fq '_set_env_var' <<< "$recover_atomic_body" \
+    || fail 'recover.sh atomic_set_env was consolidated into the normal configuration helper'
+grep -Fq 'atomic_set_env "$INSTALL_ENV_STAGING" PROJECT_STATE_DIR' recover.sh \
+    || fail 'recovery staging no longer uses its standalone env writer'
+pass 'recover.sh retains its standalone disaster-recovery env writer'
+
+defaults_line="$(grep -nF 'source "${SCRIPT_DIR}/lib/defaults.sh"' setup.sh | cut -d: -f1)"
+storage_line="$(grep -nF 'source "${SCRIPT_DIR}/lib/storage.sh"' setup.sh | cut -d: -f1)"
+[[ -n "$defaults_line" && -n "$storage_line" && "$defaults_line" -lt "$storage_line" ]] \
+    || fail 'setup.sh must explicitly source defaults.sh before storage.sh'
+pass 'setup.sh explicit defaults source precedes storage source'
 
 migrate_main_body="$(extract_func lib/migrate.sh migrate_mode_main)"
 ! grep -Fq '_mv_parse_args' <<< "$migrate_main_body" \

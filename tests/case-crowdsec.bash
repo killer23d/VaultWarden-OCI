@@ -94,6 +94,58 @@ printf 'CrowdSec configuration tests passed.\n'
 
 check_crowdsec_configuration
 
+check_crowdsec_env_writer_wrapper() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+PROJECT_ROOT="$TMP/project"
+mkdir -p "$PROJECT_ROOT"
+CALLS="$TMP/calls"
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+log_error(){ printf 'ERROR: %s\n' "$*" >&2; }
+extract_func(){
+    local file="$1" func="$2"
+    awk -v f="$func" '
+      $0 ~ "^" f "\\(\\)" {p=1}
+      p {
+        print
+        opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+        depth += opens - closes
+        if (depth == 0) exit
+      }' "$file"
+}
+
+eval "$(extract_func "$ROOT/utilities/setup-crowdsec.sh" _cs_set_env_var)"
+_set_env_var(){ printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$CALLS"; }
+
+_cs_set_env_var CROWDSEC_CF_BOUNCER_API_KEY absent-value
+[[ ! -e "$PROJECT_ROOT/.env" && ! -e "$CALLS" ]] \
+    || fail 'CrowdSec env wrapper changed its missing-.env success contract'
+
+printf 'CROWDSEC_CF_BOUNCER_API_KEY=old\n' > "$PROJECT_ROOT/.env"
+_cs_set_env_var CROWDSEC_CF_BOUNCER_API_KEY new-value
+grep -Fxq "CROWDSEC_CF_BOUNCER_API_KEY|new-value|$PROJECT_ROOT/.env" "$CALLS" \
+    || fail 'CrowdSec env wrapper did not delegate exact arguments to the canonical helper'
+
+unset -f _set_env_var
+if _cs_set_env_var CROWDSEC_CF_BOUNCER_API_KEY unavailable >"$TMP/missing-helper.out" 2>&1; then
+    fail 'CrowdSec env wrapper silently continued without lib/config.sh helper'
+fi
+grep -Fq 'Required configuration helper is unavailable' "$TMP/missing-helper.out" \
+    || fail 'CrowdSec env wrapper did not clearly report its missing library helper'
+
+rm -f "$PROJECT_ROOT/.env"
+_cs_set_env_var CROWDSEC_CF_BOUNCER_API_KEY still-absent \
+    || fail 'missing .env should remain a successful no-op even when the helper is unavailable'
+
+printf 'CrowdSec canonical env writer wrapper tests passed.\n'
+)
+
+check_crowdsec_env_writer_wrapper
+
 check_crowdsec_worker_apply_helper() (
 set -euo pipefail
 

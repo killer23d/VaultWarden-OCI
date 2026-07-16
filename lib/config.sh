@@ -299,33 +299,84 @@ load_project_environment() {
     resolve_secrets_file
 }
 
-_set_env_var() {
-    local key="$1" value="$2" file="$3"
-    local escaped_key
-    escaped_key=$(printf '%s' "$key" | sed 's/[]\/$*.^[]/\\&/g')
-
-    # Write via a same-directory temp file so an interrupted write never leaves
-    # the env file in a partially-updated or corrupted state.
-    local tmp_file
-    tmp_file="$(dirname "$file")/.env.tmp.$$"
-    # Ensure the temp file is removed on any unexpected exit.
-    # shellcheck disable=SC2064
-    trap "rm -f '$tmp_file'" RETURN
-
-    if grep -q "^${escaped_key}=" "$file" 2>/dev/null; then
-        local escaped_value
-        escaped_value="${value//\\/\\\\}"
-        escaped_value="${escaped_value//&/\\&}"
-        escaped_value="${escaped_value//|/\\|}"
-        sed "s|^${escaped_key}=.*|${key}=${escaped_value}|" "$file" > "$tmp_file"
-    else
-        cp "$file" "$tmp_file"
-        printf '%s=%s\n' "$key" "$value" >> "$tmp_file"
+_set_env_var() (
+    if (( $# != 3 )); then
+        printf '_set_env_var: expected KEY VALUE FILE\n' >&2
+        return 64
     fi
 
-    chmod --reference="$file" "$tmp_file" 2>/dev/null || true
-    mv "$tmp_file" "$file"
-}
+    local key="$1" value="$2" file="$3"
+    local file_dir metadata mode uid gid
+    local tmp_file=""
+
+    if [[ ! -f "$file" ]]; then
+        printf '_set_env_var: target is not an existing regular file: %s\n' "$file" >&2
+        return 1
+    fi
+
+    if [[ "$file" == */* ]]; then
+        file_dir="${file%/*}"
+        [[ -n "$file_dir" ]] || file_dir="/"
+    else
+        file_dir="."
+    fi
+
+    _set_env_var_cleanup() {
+        local rc=$?
+        trap - EXIT INT HUP TERM
+        if [[ -n "$tmp_file" && -e "$tmp_file" ]]; then
+            rm -f -- "$tmp_file" || {
+                (( rc != 0 )) || rc=1
+            }
+        fi
+        exit "$rc"
+    }
+    trap _set_env_var_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+    trap 'exit 143' TERM
+
+    if metadata="$(stat -c '%a:%u:%g' -- "$file" 2>/dev/null)"; then
+        :
+    elif metadata="$(stat -f '%Lp:%u:%g' "$file" 2>/dev/null)"; then
+        :
+    else
+        return 1
+    fi
+    IFS=: read -r mode uid gid <<< "$metadata"
+    [[ "$mode" =~ ^[0-7]+$ && "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] \
+        || return 1
+
+    umask 077
+    tmp_file="$(mktemp "${file_dir}/.env.tmp.XXXXXXXXXX")" || return 1
+
+    # Read key and value through the environment so awk receives backslashes
+    # and punctuation as literal data instead of parsing them as -v escapes.
+    if ! _VW_ENV_SET_KEY="$key" _VW_ENV_SET_VALUE="$value" awk '
+        BEGIN {
+            prefix = ENVIRON["_VW_ENV_SET_KEY"] "="
+            replacement = prefix ENVIRON["_VW_ENV_SET_VALUE"]
+        }
+        index($0, prefix) == 1 {
+            print replacement
+            found = 1
+            next
+        }
+        { print }
+        END {
+            if (!found) print replacement
+        }
+    ' < "$file" > "$tmp_file"; then
+        return 1
+    fi
+
+    # chown can clear special mode bits, so restore ownership before mode.
+    chown "${uid}:${gid}" "$tmp_file" || return 1
+    chmod "$mode" "$tmp_file" || return 1
+
+    mv -f -- "$tmp_file" "$file" || return 1
+    tmp_file=""
+)
 
 _read_env_value() {
     local key="$1" file="$2"

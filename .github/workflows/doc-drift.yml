@@ -24,6 +24,22 @@ permissions:
   contents: read
 
 jobs:
+  compose-config:
+    name: Docker Compose config
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Compose example
+        run: |
+          docker compose version
+          docker compose \
+            --env-file .env.example \
+            -f docker-compose.yml.example \
+            config --quiet
+
   doc-drift:
     runs-on: ubuntu-latest
     steps:

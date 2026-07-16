@@ -881,6 +881,37 @@ test_staged_update_failure() {
     assert_no_transaction_leftovers "$d"
 }
 
+test_manifest_helper_failure_preserves_artifacts() {
+    local d; d=$(case_dir)
+    PROJECT_STATE_DIR="$d/state"
+    export OFFLINE_AGE_RECIPIENT="$OFF"
+    local final policy plain original_set_env_var
+    final="$d/state/secrets/secrets.yaml"
+    policy="$d/policy/.sops.yaml"
+    plain="$(_ss_make_plaintext_temp)"
+    printf 'admin_token: PLACEHOLDER\n' > "$plain"
+    printf 'live-cipher\n' > "$final"
+    printf 'live-policy\n' > "$policy"
+    printf 'OFFLINE_AGE_RECIPIENT=%s\nMANIFEST_UPDATED_AT=original\n' "$OFF2" > "$d/state/config/dr-manifest.env"
+    cp "$final" "$d/final.before"
+    cp "$policy" "$d/policy.before"
+    cp "$d/state/config/dr-manifest.env" "$d/manifest.before"
+
+    original_set_env_var="$(declare -f _set_env_var)"
+    _set_env_var(){ return 47; }
+    if _ss_commit_ciphertext_transaction "$plain" "$d/key.txt" "$OP" "$final" "$policy" plaintext; then
+        eval "$original_set_env_var"
+        fail 'manifest helper failure unexpectedly succeeded'
+    fi
+    eval "$original_set_env_var"
+
+    cmp -s "$d/final.before" "$final" || fail 'live ciphertext changed after manifest helper failure'
+    cmp -s "$d/policy.before" "$policy" || fail 'live policy changed after manifest helper failure'
+    cmp -s "$d/manifest.before" "$d/state/config/dr-manifest.env" || fail 'manifest changed after helper failure'
+    rm -f "$plain"
+    assert_no_transaction_leftovers "$d"
+}
+
 test_manifest_promotion_failure_preserves_artifacts() {
     local d; d=$(case_dir)
     PROJECT_STATE_DIR="$d/state"
@@ -1007,11 +1038,12 @@ source_helpers
 run_test 'fresh bootstrap stages plaintext in tmpfs and installs recipients' test_fresh_bootstrap
 run_test 'adding offline recipient rekeys existing ciphertext metadata' test_add_offline_recipient_existing_ciphertext
 run_test 'staged update failure preserves live artifacts and cleans staging' test_staged_update_failure
+run_test 'manifest helper failure prevents partial artifact promotion' test_manifest_helper_failure_preserves_artifacts
 run_test 'manifest promotion failure preserves existing live artifacts' test_manifest_promotion_failure_preserves_artifacts
 run_test 'manifest promotion failure preserves absent manifest' test_manifest_promotion_failure_preserves_absent_manifest
 run_test 'TERM after ciphertext promotion rolls back artifacts and preserves traps' test_term_after_ciphertext_promotion_rolls_back_and_preserves_traps
 run_test 'successful transaction preserves existing caller return trap' test_preserves_outer_return_trap
-[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 8 ]] || fail "expected 8 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 check_key_rotate_live_generation_transaction() (

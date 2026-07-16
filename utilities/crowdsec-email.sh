@@ -41,12 +41,26 @@ USAGE:
 HELP
 }
 
-require_root() {
-    if [[ "$EUID" -ne 0 && "${VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0}" != "1" ]]; then
-        error "Run with sudo: sudo ./utilities/crowdsec-email.sh $1"
-        return 1
-    fi
-}
+command="${1:-status}"
+case "$command" in
+    --help|-h|help)
+        show_help
+        exit 0
+        ;;
+    enable|disable|status|test)
+        ;;
+    *)
+        error "Unknown command: $command"
+        show_help
+        exit 2
+        ;;
+esac
+
+# shellcheck source=../lib/log.sh
+source "${PROJECT_ROOT}/lib/log.sh"
+# shellcheck source=../lib/common.sh
+source "${PROJECT_ROOT}/lib/common.sh"
+init_common_lib "$0"
 
 require_runtime() {
     command -v flock >/dev/null 2>&1 || {
@@ -501,14 +515,19 @@ send_test() {
 }
 
 main() {
-    case "${1:-status}" in
-        enable) require_root enable; apply_state true ;;
-        disable) require_root disable; apply_state false ;;
-        status) require_root status; show_status ;;
-        test) require_root test; send_test ;;
-        --help|-h|help) show_help ;;
-        *) error "Unknown command: ${1:-}"; show_help; return 2 ;;
+    local command="${1:-status}"
+
+    if [[ "${VW_TEST_MODE:-0}" != "1" \
+        || "${VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0}" != "1" ]]; then
+        require_root "$command"
+    fi
+
+    case "$command" in
+        enable)  apply_state true ;;
+        disable) apply_state false ;;
+        status)  show_status ;;
+        test)    send_test ;;
     esac
 }
 
-main "$@"
+main "$command"

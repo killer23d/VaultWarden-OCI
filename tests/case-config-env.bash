@@ -148,6 +148,174 @@ pass 'status is read-only and reports env paths, migration state, and storage mi
 )
 
 check_env_edit_contracts
+check_set_env_var_contracts() (
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+file_metadata(){
+    stat -c '%a:%u:%g' -- "$1" 2>/dev/null \
+        || stat -f '%Lp:%u:%g' "$1"
+}
+file_mode(){
+    stat -c '%a' -- "$1" 2>/dev/null \
+        || stat -f '%Lp' "$1"
+}
+assert_no_env_temps(){
+    if find "$TMP" -name '.env.tmp.*' -print -quit | grep -q .; then
+        find "$TMP" -name '.env.tmp.*' -print >&2
+        fail 'temporary env mutation file was not removed'
+    fi
+}
+
+# shellcheck source=../lib/config.sh
+source "$ROOT/lib/config.sh"
+
+env_file="$TMP/environment"
+cat > "$env_file" <<'EOF_ENV'
+# leading comment
+KEY_EXTRA=unchanged
+KEY=old-one
+
+OTHER=keep/me&too|yes
+KEY=old-two
+# trailing comment
+DOTxKEY=not-the-literal-key
+DOT.KEY=old-dot
+EOF_ENV
+chmod 0640 "$env_file"
+metadata_before="$(file_metadata "$env_file")"
+
+# Inspect the already-created temp file from the ordinary rendering command.
+# This replaces no production behavior and verifies the build file is private.
+awk() {
+    local active_tmp
+    active_tmp="$(find "$TMP" -name '.env.tmp.*' -print -quit)"
+    [[ -n "$active_tmp" ]] || return 90
+    file_mode "$active_tmp" > "$TMP/temp-mode"
+    command awk "$@"
+}
+_set_env_var KEY 'value with spaces=left\right&both|pipe/slash!?.,:;' "$env_file"
+unset -f awk
+
+[[ "$(cat "$TMP/temp-mode")" == "600" ]] \
+    || fail 'temporary env mutation file was accessible to other users'
+cat > "$TMP/expected" <<'EOF_EXPECTED'
+# leading comment
+KEY_EXTRA=unchanged
+KEY=value with spaces=left\right&both|pipe/slash!?.,:;
+
+OTHER=keep/me&too|yes
+KEY=value with spaces=left\right&both|pipe/slash!?.,:;
+# trailing comment
+DOTxKEY=not-the-literal-key
+DOT.KEY=old-dot
+EOF_EXPECTED
+cmp -s "$TMP/expected" "$env_file" \
+    || fail 'exact-key update changed unrelated content, ordering, or literal value data'
+[[ "$(grep -Fxc 'KEY=value with spaces=left\right&both|pipe/slash!?.,:;' "$env_file")" -eq 2 ]] \
+    || fail 'duplicate exact key records were not all updated'
+pass 'canonical env mutation updates every exact key and preserves literal data and unrelated records'
+
+_set_env_var DOT.KEY 'literal-dot' "$env_file"
+grep -Fxq 'DOT.KEY=literal-dot' "$env_file" || fail 'literal punctuation key was not updated'
+grep -Fxq 'DOTxKEY=not-the-literal-key' "$env_file" || fail 'key punctuation was treated as a regular expression'
+_set_env_var ABSENT 'new=value\with&literal|data/path' "$env_file"
+[[ "$(tail -n 1 "$env_file")" == 'ABSENT=new=value\with&literal|data/path' ]] \
+    || fail 'absent key was not appended exactly once'
+[[ "$(grep -c '^ABSENT=' "$env_file")" -eq 1 ]] || fail 'absent key append was duplicated'
+[[ "$(file_metadata "$env_file")" == "$metadata_before" ]] \
+    || fail 'mode, UID, or GID changed after env mutation'
+assert_no_env_temps
+pass 'canonical env mutation appends absent keys and preserves mode, UID, and GID'
+
+render_file="$TMP/render-failure"
+printf 'KEY=original\nOTHER=stable\n' > "$render_file"
+chmod 0600 "$render_file"
+cp "$render_file" "$TMP/render-before"
+awk(){ return 41; }
+if _set_env_var KEY changed "$render_file"; then
+    unset -f awk
+    fail 'forced rendering failure unexpectedly succeeded'
+fi
+unset -f awk
+cmp -s "$TMP/render-before" "$render_file" || fail 'rendering failure changed the original file'
+assert_no_env_temps
+
+metadata_file="$TMP/metadata-failure"
+printf 'KEY=original\n' > "$metadata_file"
+chmod 0600 "$metadata_file"
+cp "$metadata_file" "$TMP/metadata-before"
+chown(){ return 42; }
+if _set_env_var KEY changed "$metadata_file"; then
+    unset -f chown
+    fail 'forced metadata preservation failure unexpectedly succeeded'
+fi
+unset -f chown
+cmp -s "$TMP/metadata-before" "$metadata_file" || fail 'metadata failure changed the original file'
+assert_no_env_temps
+
+promotion_file="$TMP/promotion-failure"
+printf 'KEY=original\n' > "$promotion_file"
+chmod 0600 "$promotion_file"
+cp "$promotion_file" "$TMP/promotion-before"
+mv(){ return 43; }
+if _set_env_var KEY changed "$promotion_file"; then
+    unset -f mv
+    fail 'forced promotion failure unexpectedly succeeded'
+fi
+unset -f mv
+cmp -s "$TMP/promotion-before" "$promotion_file" || fail 'promotion failure changed the original file'
+assert_no_env_temps
+pass 'canonical env mutation preserves originals and removes temporary files after failures'
+
+missing_file="$TMP/missing"
+if _set_env_var NEW value "$missing_file" 2>/dev/null; then
+    fail 'missing target unexpectedly succeeded'
+fi
+[[ ! -e "$missing_file" ]] || fail 'missing target was created'
+if _set_env_var KEY value 2>/dev/null; then
+    fail 'two-argument call unexpectedly succeeded'
+fi
+if _set_env_var KEY value "$env_file" extra 2>/dev/null; then
+    fail 'four-argument call unexpectedly succeeded'
+fi
+pass 'canonical env mutation requires exactly three arguments and an existing regular file'
+
+trap_file="$TMP/traps"
+trap_env="$TMP/trap-env"
+printf 'KEY=before\n' > "$trap_env"
+chmod 0600 "$trap_env"
+(
+    set -euo pipefail
+    set -T
+    return_hits=0
+    trap 'return_hits=$((return_hits + 1))' RETURN
+    trap 'printf "caller-exit\n" >> "$trap_file"' EXIT
+    trap 'printf "caller-term\n" >> "$trap_file"' TERM
+    return_before="$(trap -p RETURN)"
+    exit_before="$(trap -p EXIT)"
+    term_before="$(trap -p TERM)"
+    _set_env_var KEY after "$trap_env"
+    [[ "$(trap -p RETURN)" == "$return_before" ]] || fail 'caller RETURN trap was replaced'
+    [[ "$(trap -p EXIT)" == "$exit_before" ]] || fail 'caller EXIT trap was replaced'
+    [[ "$(trap -p TERM)" == "$term_before" ]] || fail 'caller TERM trap was replaced'
+    hits_before=$return_hits
+    return_probe(){ :; }
+    return_probe
+    (( return_hits > hits_before )) || fail 'caller RETURN trap was no longer functional'
+)
+grep -Fxq 'caller-exit' "$trap_file" || fail 'caller EXIT trap was no longer functional'
+grep -Fxq 'KEY=after' "$trap_env" || fail 'strict-mode env mutation did not complete'
+assert_no_env_temps
+pass 'canonical env mutation is strict-mode safe and preserves caller traps'
+)
+
+check_set_env_var_contracts
 check_config_environment_contracts() (
 set -euo pipefail
 
