@@ -66,7 +66,7 @@ USAGE
 
 FOUNDATION_CASES=(
     tests/test-architecture.sh
-    tests/suites/foundation/case-runner-contracts.bash
+    tests/suites/foundation/case-infrastructure.bash
     tests/suites/foundation/case-config-env.bash
     tests/suites/foundation/case-permissions.bash
     tests/suites/foundation/case-storage-setup.bash
@@ -81,7 +81,6 @@ SECURITY_CASES=(
 
 OPERATIONS_CASES=(
     tests/suites/operations/case-operations.bash
-    tests/suites/operations/case-lock-fd-hygiene.bash
     tests/suites/operations/case-lifecycle.bash
     tests/suites/operations/case-operator-ui.bash
     tests/suites/operations/case-crowdsec.bash
