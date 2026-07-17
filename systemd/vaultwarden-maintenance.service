@@ -14,6 +14,11 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # setup.sh systemd install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+# UFW and iptables use host-wide lock files under /run. Create them before
+# entering the strict filesystem sandbox while preserving existing lock inodes.
+ExecStartPre=+/usr/bin/touch /run/ufw.lock /run/xtables.lock
+ExecStartPre=+/usr/bin/chown root:root /run/ufw.lock /run/xtables.lock
+ExecStartPre=+/usr/bin/chmod 0600 /run/ufw.lock /run/xtables.lock
 # maintenance.sh owns the shared operation guard. Expected lock contention exits 75
 # and is treated as a clean skip. Real maintenance failures still use the
 # script's normal non-zero exits.
@@ -35,6 +40,8 @@ ProtectHome=read-only
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat <unit>
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
+# Comprehensive maintenance validates CrowdSec and updates UFW rules.
+ReadWritePaths=/var/lib/crowdsec /etc/ufw /run/ufw.lock /run/xtables.lock
 # RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
 # root-owned runtime directory before ExecStart runs.
 RuntimeDirectory=vaultwarden-oci
