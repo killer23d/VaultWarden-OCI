@@ -83,18 +83,39 @@ update_firewall_ranges() {
     _ufw_allow_range() {
         local range="$1" label="$2"
         _ufw_result=false
-        local ufw_status; ufw_status=$(ufw status 2>/dev/null)
-        local escaped_range; escaped_range=$(printf '%s' "$range" | sed 's/\./\\./g')
-        local has_80=false has_443=false
-        echo "$ufw_status" | grep -qE "^80(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" && has_80=true
-        echo "$ufw_status" | grep -qE "^443(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" && has_443=true
-        if [[ "$has_80" == "true" && "$has_443" == "true" ]]; then return 0; fi
-        if ufw allow proto tcp from "$range" to any port 80  comment "${label}" >/dev/null 2>&1 && \
-           ufw allow proto tcp from "$range" to any port 443 comment "${label}" >/dev/null 2>&1; then
-            _ufw_result=true
-        else
-            log_warn "ufw allow failed for range: $range"
+
+        local ufw_status ufw_rc=0
+        ufw_status="$(ufw status 2>&1)" || ufw_rc=$?
+        if (( ufw_rc != 0 )); then
+            log_error "Unable to read UFW status for ${range} (exit ${ufw_rc}): ${ufw_status:-no output}"
+            return "$ufw_rc"
         fi
+
+        local escaped_range
+        escaped_range=$(printf '%s' "$range" | sed 's/\./\\./g')
+        local has_80=false has_443=false
+        grep -qE "^80(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" <<< "$ufw_status" && has_80=true
+        grep -qE "^443(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" <<< "$ufw_status" && has_443=true
+        if [[ "$has_80" == "true" && "$has_443" == "true" ]]; then return 0; fi
+
+        local ufw_output
+        if [[ "$has_80" != "true" ]]; then
+            ufw_rc=0
+            ufw_output="$(ufw allow proto tcp from "$range" to any port 80 comment "$label" 2>&1)" || ufw_rc=$?
+            if (( ufw_rc != 0 )); then
+                log_error "Failed to add UFW port 80 rule for ${range} (exit ${ufw_rc}): ${ufw_output:-no output}"
+                return "$ufw_rc"
+            fi
+        fi
+        if [[ "$has_443" != "true" ]]; then
+            ufw_rc=0
+            ufw_output="$(ufw allow proto tcp from "$range" to any port 443 comment "$label" 2>&1)" || ufw_rc=$?
+            if (( ufw_rc != 0 )); then
+                log_error "Failed to add UFW port 443 rule for ${range} (exit ${ufw_rc}): ${ufw_output:-no output}"
+                return "$ufw_rc"
+            fi
+        fi
+        _ufw_result=true
     }
 
     local ranges_added=false
@@ -114,7 +135,7 @@ update_firewall_ranges() {
         while IFS= read -r range; do
             if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
                 current_cidrs+=("$range")
-                _ufw_allow_range "$range" "CF-IPv4"
+                _ufw_allow_range "$range" "CF-IPv4" || return $?
                 if [[ "$_ufw_result" == "true" ]]; then
                     ranges_added=true
                     log_debug "Added IPv4 range: $range"
@@ -128,7 +149,7 @@ update_firewall_ranges() {
         while IFS= read -r range; do
             if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
                 current_cidrs+=("$range")
-                _ufw_allow_range "$range" "CF-IPv6"
+                _ufw_allow_range "$range" "CF-IPv6" || return $?
                 if [[ "$_ufw_result" == "true" ]]; then
                     ranges_added=true
                     log_debug "Added IPv6 range: $range"
@@ -146,7 +167,12 @@ update_firewall_ranges() {
     log_info "Removing outdated Cloudflare IP ranges..."
     local removed_count=0
     local -a old_rule_nums=()
-    local ufw_status; ufw_status="$(ufw status numbered 2>/dev/null || true)"
+    local ufw_status ufw_rc=0
+    ufw_status="$(ufw status numbered 2>&1)" || ufw_rc=$?
+    if (( ufw_rc != 0 )); then
+        log_error "Unable to read numbered UFW rules (exit ${ufw_rc}): ${ufw_status:-no output}"
+        return "$ufw_rc"
+    fi
 
     while IFS= read -r line; do
         if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
@@ -169,6 +195,7 @@ update_firewall_ranges() {
             done
 
             if [[ "$is_managed" == "false" && -n "$cidr" ]]; then
+                local c
                 for c in "${cached_cidrs[@]}"; do
                     if [[ "$c" == "$cidr" ]]; then
                         is_managed=true
@@ -180,6 +207,7 @@ update_firewall_ranges() {
             if [[ "$is_managed" == "true" ]]; then
                 local keep=false
                 if [[ -n "$cidr" ]]; then
+                    local c
                     for c in "${current_cidrs[@]}"; do
                         if [[ "$c" == "$cidr" ]]; then
                             keep=true
@@ -197,10 +225,16 @@ update_firewall_ranges() {
 
     if (( ${#old_rule_nums[@]} > 0 )); then
         mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | sort -rn)
+        local rule_num ufw_output
         for rule_num in "${old_rule_nums[@]}"; do
-            if [[ -n "$rule_num" ]] && ufw --force delete "$rule_num" >/dev/null 2>&1; then
-                removed_count=$((removed_count + 1))
+            [[ -n "$rule_num" ]] || continue
+            ufw_rc=0
+            ufw_output="$(ufw --force delete "$rule_num" 2>&1)" || ufw_rc=$?
+            if (( ufw_rc != 0 )); then
+                log_error "Failed to delete UFW rule ${rule_num} (exit ${ufw_rc}): ${ufw_output:-no output}"
+                return "$ufw_rc"
             fi
+            removed_count=$((removed_count + 1))
         done
     fi
     [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count outdated firewall rules"
