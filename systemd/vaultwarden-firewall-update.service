@@ -10,6 +10,11 @@ OnFailure=vaultwarden-notify-failure@%n.service
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+# UFW and iptables use host-wide lock files under /run. Create them before
+# entering the strict filesystem sandbox while preserving existing lock inodes.
+ExecStartPre=+/usr/bin/touch /run/ufw.lock /run/xtables.lock
+ExecStartPre=+/usr/bin/chown root:root /run/ufw.lock /run/xtables.lock
+ExecStartPre=+/usr/bin/chmod 0600 /run/ufw.lock /run/xtables.lock
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh update-firewall
 # Exit contract:
 #   0  success
@@ -37,6 +42,7 @@ ProtectHome=read-only
 TimeoutStartSec=60
 TimeoutStopSec=30
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
+ReadWritePaths=/etc/ufw /run/ufw.lock /run/xtables.lock
 RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
