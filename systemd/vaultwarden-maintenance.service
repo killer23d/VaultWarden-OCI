@@ -40,8 +40,11 @@ ProtectHome=read-only
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat <unit>
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
-# Comprehensive maintenance validates CrowdSec and updates UFW rules.
-ReadWritePaths=/var/lib/crowdsec /etc/ufw /run/ufw.lock /run/xtables.lock
+# Embedded crowdsec -t may update database metadata under /var/lib/crowdsec.
+# The path is optional so maintenance still starts on hosts without CrowdSec.
+ReadWritePaths=-/var/lib/crowdsec
+# Comprehensive maintenance also reconciles UFW rules using these exact paths.
+ReadWritePaths=/etc/ufw /run/ufw.lock /run/xtables.lock
 # RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
 # root-owned runtime directory before ExecStart runs.
 RuntimeDirectory=vaultwarden-oci
