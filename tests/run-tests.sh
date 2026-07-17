@@ -74,6 +74,7 @@ OPERATIONS_CASES=(
     tests/suites/operations/case-lock-fd-hygiene.bash
     tests/suites/operations/case-lifecycle.bash
     tests/suites/operations/case-operator-ui.bash
+    tests/suites/operations/case-firewall-update.bash
     tests/suites/operations/case-crowdsec.bash
     tests/suites/operations/case-crowdsec-notifications.bash
     tests/suites/operations/case-uninstall.bash
