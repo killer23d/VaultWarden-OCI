@@ -480,3 +480,192 @@ pass "CrowdSec email and incident context preserve privilege/ownership/secret co
 )
 
 check_privilege_contracts
+
+check_setup_force_acknowledgement() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+SETUP="$ROOT/setup.sh"
+TMP="$(mktemp -d -t vw-setup-force.XXXXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+
+run_non_tty() {
+    local token="$1"
+    shift
+    set +e
+    FORCE_OUTPUT=$(env \
+        VW_TEST_MODE=true \
+        VW_SETUP_TEST_FORCE_ACK_ONLY=true \
+        VW_FORCE_ACK="$token" \
+        bash "$SETUP" "$@" </dev/null 2>&1)
+    FORCE_STATUS=$?
+    set -e
+}
+
+run_tty() {
+    local token="$1" action="$2"
+    shift 2
+    set +e
+    FORCE_OUTPUT=$(env \
+        VW_TEST_MODE=true \
+        VW_SETUP_TEST_FORCE_ACK_ONLY=true \
+        VW_SETUP_TEST_FORCE_ACK_TIMEOUT=1 \
+        VW_FORCE_ACK="$token" \
+        python3 - "$SETUP" "$action" "$@" <<'PY'
+import os
+import pty
+import select
+import signal
+import sys
+import time
+
+setup = sys.argv[1]
+action = sys.argv[2]
+setup_args = sys.argv[3:]
+pid, master = pty.fork()
+if pid == 0:
+    os.execvp("bash", ["bash", setup, *setup_args])
+
+os.set_blocking(master, False)
+output = bytearray()
+sent = action in {"none", "timeout"}
+deadline = time.monotonic() + 8
+status = None
+
+while time.monotonic() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.05)
+    if ready:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            chunk = b""
+        output.extend(chunk)
+    if not sent and b"Type YES to confirm" in output:
+        if action == "yes":
+            os.write(master, b"YES\n")
+        elif action == "no":
+            os.write(master, b"NO\n")
+        elif action == "eof":
+            os.write(master, b"\x04")
+        sent = True
+    done, child_status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        status = child_status
+        break
+
+if status is None:
+    os.kill(pid, signal.SIGKILL)
+    _, status = os.waitpid(pid, 0)
+    sys.stdout.buffer.write(output)
+    raise SystemExit(124)
+
+while True:
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    output.extend(chunk)
+
+sys.stdout.buffer.write(output)
+raise SystemExit(os.waitstatus_to_exitcode(status))
+PY
+    )
+    FORCE_STATUS=$?
+    set -e
+}
+
+run_non_tty I_UNDERSTAND_LOSING_OLD_BACKUPS --force
+[[ "$FORCE_STATUS" -eq 0 ]] || fail "non-TTY token acknowledgement failed: $FORCE_OUTPUT"
+[[ "$FORCE_OUTPUT" != *"Type YES to confirm"* ]] || fail "non-TTY token acknowledgement prompted"
+pass "non-TTY exact token is accepted without prompting"
+
+run_tty I_UNDERSTAND_LOSING_OLD_BACKUPS none --force
+[[ "$FORCE_STATUS" -eq 0 ]] || fail "TTY token acknowledgement failed: $FORCE_OUTPUT"
+[[ "$FORCE_OUTPUT" != *"Type YES to confirm"* ]] || fail "TTY token acknowledgement prompted"
+pass "TTY exact token is accepted without prompting"
+
+run_tty "" yes --force
+[[ "$FORCE_STATUS" -eq 0 ]] || fail "TTY YES acknowledgement failed: $FORCE_OUTPUT"
+[[ "$FORCE_OUTPUT" == *"Type YES to confirm"* ]] || fail "TTY YES acknowledgement did not prompt"
+pass "TTY exact YES acknowledgement is accepted"
+
+run_tty "" no --force
+[[ "$FORCE_STATUS" -eq 1 ]] || fail "TTY NO returned $FORCE_STATUS instead of 1: $FORCE_OUTPUT"
+pass "TTY wrong acknowledgement fails closed"
+
+run_tty "" eof --force
+[[ "$FORCE_STATUS" -eq 1 ]] || fail "TTY EOF returned $FORCE_STATUS instead of 1: $FORCE_OUTPUT"
+pass "TTY EOF fails closed"
+
+run_tty "" timeout --force
+[[ "$FORCE_STATUS" -eq 1 ]] || fail "TTY timeout returned $FORCE_STATUS instead of 1: $FORCE_OUTPUT"
+[[ "$FORCE_OUTPUT" == *"No confirmation received within 5 minutes"* ]] \
+    || fail "TTY timeout diagnostic missing: $FORCE_OUTPUT"
+pass "TTY timeout fails closed"
+
+run_non_tty "" --force
+[[ "$FORCE_STATUS" -eq 2 ]] || fail "non-TTY missing token returned $FORCE_STATUS instead of 2: $FORCE_OUTPUT"
+pass "non-TTY missing token returns 2"
+
+run_non_tty "" --dry-run --force
+[[ "$FORCE_STATUS" -eq 0 ]] || fail "dry-run force acknowledgement failed: $FORCE_OUTPUT"
+[[ "$FORCE_OUTPUT" != *"Type YES to confirm"* ]] || fail "dry-run force prompted"
+pass "dry-run force needs no acknowledgement"
+
+# Exercise the real setup control flow with only its dependencies stubbed.
+# The guard returns 75 before any setup utility can run; both forced and
+# unforced invocations must reach it with the same arguments.
+GUARD_ROOT="$TMP/guard-repo"
+mkdir -p "$GUARD_ROOT/lib" "$GUARD_ROOT/utilities"
+cp "$SETUP" "$ROOT/VERSION" "$GUARD_ROOT/"
+for lib in log validate config common operations crypto docker backup-utils secrets defaults storage; do
+    : >"$GUARD_ROOT/lib/${lib}.sh"
+done
+cat >"$GUARD_ROOT/lib/log.sh" <<'EOF_LOG'
+COLOR_BOLD_RED=""; COLOR_RESET=""; COLOR_YELLOW=""; COLOR_RED=""; COLOR_CYAN=""; COLOR_GREEN=""
+log_error(){ printf 'ERROR: %s\n' "$*" >&2; }
+log_hint(){ printf 'HINT: %s\n' "$*" >&2; }
+log_info(){ :; }
+log_header(){ :; }
+EOF_LOG
+cat >"$GUARD_ROOT/lib/validate.sh" <<'EOF_VALIDATE'
+validate_domain(){ return 0; }
+validate_email(){ return 0; }
+EOF_VALIDATE
+cat >"$GUARD_ROOT/lib/common.sh" <<'EOF_COMMON'
+init_common_lib(){ :; }
+is_root(){ return 0; }
+EOF_COMMON
+cat >"$GUARD_ROOT/lib/operations.sh" <<'EOF_OPERATIONS'
+operation_acquire(){ printf '%s\n' "$*" >"${VW_TEST_GUARD_MARKER:?}"; return 75; }
+EOF_OPERATIONS
+printf '_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data\n' >"$GUARD_ROOT/lib/defaults.sh"
+
+for mode in normal force; do
+    marker="$TMP/guard-$mode"
+    args=(install --domain vault.example.test --email admin@example.test)
+    env_args=(VW_TEST_GUARD_MARKER="$marker")
+    if [[ "$mode" == force ]]; then
+        args+=(--force)
+        env_args+=(VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS)
+    fi
+    set +e
+    env "${env_args[@]}" bash "$GUARD_ROOT/setup.sh" "${args[@]}" </dev/null >"$TMP/$mode.out" 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" -eq 75 ]] || fail "$mode setup guard returned $rc instead of 75"
+    [[ -s "$marker" ]] || fail "$mode setup did not invoke operation_acquire"
+    grep -Fq -- '--id setup --label Setup --specific-lock /run/lock/vaultwarden-setup.lock' "$marker" \
+        || fail "$mode setup invoked operation_acquire with unexpected arguments"
+done
+cmp -s "$TMP/guard-normal" "$TMP/guard-force" \
+    || fail "--force changed setup operation guard acquisition"
+pass "--force remains independent of the shared operation guard"
+)
+
+check_setup_force_acknowledgement
