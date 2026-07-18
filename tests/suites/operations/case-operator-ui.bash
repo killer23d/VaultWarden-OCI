@@ -605,3 +605,70 @@ printf 'PASS: maintenance contention status is truthful in operator output\n'
 )
 
 check_maintenance_contention_operator_ui
+
+check_dashboard_environment_parsing() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d -t vw-dashboard-env.XXXXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+
+extract_func() {
+    local file="$1" func="$2"
+    awk -v f="$func" '
+        $0 ~ "^" f "\\(\\)" {p=1}
+        p {
+            print
+            opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
+            depth += opens - closes
+            if (depth == 0) exit
+        }' "$file"
+}
+
+# Referenced by the extracted dashboard function evaluated below.
+# shellcheck disable=SC2034
+REPO_ROOT="$TMP"
+eval "$(extract_func "$ROOT/dashboard.sh" _read_env_var)"
+
+cat >"$TMP/.env" <<'EOF_ENV'
+PROJECT_STATE_DIR=/srv/vault=state
+BACKUP_DIR='/srv/backup=primary'
+TZ="America/Vancouver"
+TZ=UTC
+RCLONE_REMOTE_NAME=archive=nightly
+EOF_ENV
+
+STATE_DIR="$(_read_env_var PROJECT_STATE_DIR /var/lib/vaultwarden)"
+BACKUP_DIR="$(_read_env_var BACKUP_DIR "${STATE_DIR}/backups")"
+TZ_DISPLAY="$(_read_env_var TZ UTC)"
+RCLONE_REMOTE_NAME="$(_read_env_var RCLONE_REMOTE_NAME '')"
+
+[[ "$STATE_DIR" == '/srv/vault=state' ]] \
+    || fail "PROJECT_STATE_DIR did not preserve an unquoted equals-containing value: $STATE_DIR"
+[[ "$BACKUP_DIR" == '/srv/backup=primary' ]] \
+    || fail "BACKUP_DIR did not strip one matching single-quote pair: $BACKUP_DIR"
+[[ "$TZ_DISPLAY" == 'America/Vancouver' ]] \
+    || fail "TZ did not strip one matching double-quote pair or retain first match: $TZ_DISPLAY"
+[[ "$RCLONE_REMOTE_NAME" == 'archive=nightly' ]] \
+    || fail "RCLONE_REMOTE_NAME did not preserve text after the first equals: $RCLONE_REMOTE_NAME"
+pass "dashboard consumers use canonical unquoted, quoted, first-match, and equals parsing"
+
+cat >"$TMP/.env" <<'EOF_ENV'
+RCLONE_REMOTE_NAME=
+PROJECT_STATE_DIR="mismatched'
+EOF_ENV
+
+[[ "$(_read_env_var RCLONE_REMOTE_NAME fallback-remote)" == fallback-remote ]] \
+    || fail "empty dashboard value did not retain default behavior"
+[[ "$(_read_env_var BACKUP_DIR fallback-backups)" == fallback-backups ]] \
+    || fail "missing dashboard value did not use fallback"
+expected_mismatched="\"mismatched'"
+[[ "$(_read_env_var PROJECT_STATE_DIR fallback-state)" == "$expected_mismatched" ]] \
+    || fail "mismatched surrounding quotes were stripped"
+pass "dashboard empty, missing, and mismatched-quote behavior is preserved"
+)
+
+check_dashboard_environment_parsing

@@ -34,6 +34,13 @@ _read_env_var() {
         local val
         val="$(grep -E "^${var}=" "${REPO_ROOT}/.env" 2>/dev/null \
             | cut -d= -f2- | head -1 || true)"
+        if (( ${#val} >= 2 )); then
+            if [[ "${val:0:1}" == '"' && "${val: -1}" == '"' ]]; then
+                val="${val:1:${#val}-2}"
+            elif [[ "${val:0:1}" == "'" && "${val: -1}" == "'" ]]; then
+                val="${val:1:${#val}-2}"
+            fi
+        fi
         printf '%s' "${val:-${default}}"
     else
         printf '%s' "${default}"
