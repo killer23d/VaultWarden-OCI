@@ -107,7 +107,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       'sudo ./utilities/secrets-export-recovery-kit.sh' BEFORE using
                       --force on a running installation. To confirm you understand,
                       set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
-                      environment (or answer 'yes' at the interactive prompt).
+                      environment (or type YES at the interactive prompt).
   --dry-run           Print what would happen without making any changes.
   --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
                       Existing ext4/xfs filesystems require explicit operator
@@ -259,30 +259,54 @@ _phase_failed() {
     done
     exit 1
 }
+
+_confirm_force_acknowledgement() {
+    local answer="" prompt_timeout=300
+
+    [[ "$FORCE" == "true" && "$DRY_RUN" != "true" ]] || return 0
+
+    if [[ "${VW_FORCE_ACK:-}" == "I_UNDERSTAND_LOSING_OLD_BACKUPS" ]]; then
+        return 0
+    fi
+
+    _warn_force_destructive
+    if [[ -t 0 ]]; then
+        # Keep the production timeout fixed; the shorter value is available
+        # only to the focused acknowledgement test hook below.
+        if [[ "${VW_TEST_MODE:-false}" == "true" \
+            && "${VW_SETUP_TEST_FORCE_ACK_ONLY:-false}" == "true" \
+            && "${VW_SETUP_TEST_FORCE_ACK_TIMEOUT:-}" =~ ^[1-9][0-9]*$ ]]; then
+            prompt_timeout="$VW_SETUP_TEST_FORCE_ACK_TIMEOUT"
+        fi
+        if ! IFS= read -r -t "$prompt_timeout" \
+            -p "Type YES to confirm you have exported a recovery kit: " answer; then
+            printf '\n' >&2
+            log_error "No confirmation received within 5 minutes. The destructive setup --force operation was not performed."
+            return 1
+        fi
+        if [[ "$answer" != "YES" ]]; then
+            log_info "Aborting setup --force at operator request."
+            return 1
+        fi
+        return 0
+    fi
+
+    log_hint "Export your recovery kit first: sudo ./utilities/secrets-export-recovery-kit.sh"
+    log_hint "Non-interactive --force requires: VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS"
+    return 2
+}
+
 # FORCE safety gate.
 # This must run before any validation so --dry-run --force can still preview
 # without triggering the prompt.
-if [[ "$FORCE" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
-    if [[ "${VW_FORCE_ACK:-}" != "I_UNDERSTAND_LOSING_OLD_BACKUPS" ]]; then
-        _warn_force_destructive
-        log_hint "Export your recovery kit first: sudo ./utilities/secrets-export-recovery-kit.sh"
-        log_hint "Then re-run with VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS if automation is required."
-        exit 2
-    fi
-    if [[ -t 0 ]]; then
-        _warn_force_destructive
-            if ! read -r -t 300 -p "Type YES to confirm you have exported a recovery kit: " _force_answer; then
-                printf '\n' >&2
-                log_error "No confirmation received within 5 minutes. The destructive setup --force operation was not performed."
-                exit 1
-            fi
-        if [[ "$_force_answer" != "YES" ]]; then
-            log_info "Aborting setup --force at operator request."
-            exit 1
-        fi
-        unset _force_answer
-    fi
+_force_ack_rc=0
+_confirm_force_acknowledgement || _force_ack_rc=$?
+if [[ "${VW_TEST_MODE:-false}" == "true" \
+    && "${VW_SETUP_TEST_FORCE_ACK_ONLY:-false}" == "true" ]]; then
+    exit "$_force_ack_rc"
 fi
+(( _force_ack_rc == 0 )) || exit "$_force_ack_rc"
+unset _force_ack_rc
 
 if [[ -z "$PHASE" ]] && { [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; }; then show_help; exit 1; fi
 if [[ -z "$PHASE" ]] && ! validate_domain "$DOMAIN"; then log_error "Invalid domain format"; exit 1; fi
