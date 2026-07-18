@@ -939,6 +939,7 @@ _operation_known_label() {
         maintenance) printf 'Maintenance' ;;
         maintenance-db) printf 'Database maintenance' ;;
         permission-repair) printf 'Permission repair' ;;
+        recovery) printf 'Recovery' ;;
         setup) printf 'Setup' ;;
         secrets) printf 'Secrets' ;;
         startup) printf 'Startup' ;;
@@ -994,7 +995,7 @@ _operation_list_one() {
 }
 
 operation_list() {
-    local ids=(crowdsec-setup maintenance maintenance-db backup restore setup startup secrets env-sync systemd-install storage-migration storage-setup update key-rotate uninstall health-check health-repair dns-update firewall-update permission-repair)
+    local ids=(crowdsec-setup maintenance maintenance-db backup restore recovery setup startup secrets env-sync systemd-install storage-migration storage-setup update key-rotate uninstall health-check health-repair dns-update firewall-update permission-repair)
     local seen="" id file label
     printf 'VaultWarden-OCI Operations\n'
     for id in "${ids[@]}"; do
