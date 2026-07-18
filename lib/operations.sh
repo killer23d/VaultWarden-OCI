@@ -78,6 +78,78 @@ _operation_prepare_state_dir() {
     fi
 }
 
+_operation_prepare_lock_file() {
+    local lock_path="$1" lock_dir desired_group=root created=false old_umask
+    local desired_owner current_mode current_owner ownership_applied=false
+
+    lock_dir="$(dirname "$lock_path")"
+    if [[ ! -d "$lock_dir" ]]; then
+        mkdir -p "$lock_dir" 2>/dev/null || {
+            _operation_log error "Cannot create operation lock directory: ${lock_dir}"
+            _operation_log error "Fix: sudo mkdir -p '${lock_dir}' && sudo chmod 1777 '${lock_dir}'"
+            return 1
+        }
+    fi
+
+    if command -v getent >/dev/null 2>&1 \
+        && getent group vaultwarden >/dev/null 2>&1; then
+        desired_group=vaultwarden
+    fi
+
+    if [[ -e "$lock_path" || -L "$lock_path" ]]; then
+        [[ -f "$lock_path" && ! -L "$lock_path" ]] || {
+            _operation_log error "Operation lock path is not a regular file: ${lock_path}"
+            _operation_log error "Inspect it before retrying: sudo ls -la '${lock_path}'"
+            return 1
+        }
+    else
+        old_umask="$(umask)"
+        umask 0007
+        if (set -o noclobber; : >"$lock_path") 2>/dev/null; then
+            created=true
+        elif [[ ! -f "$lock_path" || -L "$lock_path" ]]; then
+            umask "$old_umask"
+            _operation_log error "Cannot create operation lock file: ${lock_path}"
+            _operation_log error "Check: sudo ls -la '${lock_dir}'"
+            _operation_log error "Fix: sudo touch '${lock_path}' && sudo chmod 0660 '${lock_path}'"
+            return 1
+        fi
+        umask "$old_umask"
+    fi
+
+    current_mode="$(stat -c '%a' "$lock_path" 2>/dev/null \
+        || stat -f '%Lp' "$lock_path" 2>/dev/null || true)"
+    if [[ "$current_mode" != 660 ]]; then
+        if ! chmod 0660 "$lock_path" 2>/dev/null; then
+            _operation_log error "Cannot set operation lock mode 0660: ${lock_path}"
+            _operation_log error "Fix: sudo chmod 0660 '${lock_path}'"
+            return 1
+        fi
+    fi
+
+    desired_owner="root:${desired_group}"
+    current_owner="$(stat -c '%U:%G' "$lock_path" 2>/dev/null \
+        || stat -f '%Su:%Sg' "$lock_path" 2>/dev/null || true)"
+    if [[ "$current_owner" == "$desired_owner" ]]; then
+        ownership_applied=true
+    elif chown "$desired_owner" "$lock_path" 2>/dev/null; then
+        ownership_applied=true
+    else
+        if (( EUID == 0 )); then
+            _operation_log error "Cannot set operation lock ownership to ${desired_owner}: ${lock_path}"
+            _operation_log error "Fix: sudo chown ${desired_owner} '${lock_path}'"
+            return 1
+        fi
+        _operation_log warn "Could not set ${lock_path} ownership to ${desired_owner} without root privileges."
+        _operation_log warn "Fix: sudo chown ${desired_owner} '${lock_path}' && sudo chmod 0660 '${lock_path}'"
+    fi
+
+    if [[ "$desired_group" == root && "$created" == true && "$ownership_applied" == true ]]; then
+        _operation_log warn "The 'vaultwarden' group is unavailable; using root:root mode 0660 for ${lock_path}."
+        _operation_log warn "Run 'sudo utilities/setup-systemd.sh install' to create the group and enforce shared ownership."
+    fi
+}
+
 _operation_state_get() {
     local file="$1" key="$2" line current value
     [[ -r "$file" ]] || return 1
@@ -163,13 +235,7 @@ _operation_lock_is_held() {
 
 _operation_try_lock_into() {
     local lock_path="$1" result_var="$2" lock_fd
-    if declare -f _ensure_lock_file >/dev/null 2>&1; then
-        _ensure_lock_file "$lock_path" || return 2
-    else
-        mkdir -p "$(dirname "$lock_path")" 2>/dev/null || return 2
-        : >> "$lock_path" 2>/dev/null || return 2
-        chmod 0600 "$lock_path" 2>/dev/null || true
-    fi
+    _operation_prepare_lock_file "$lock_path" || return 2
     { exec {lock_fd}>"$lock_path"; } 2>/dev/null || return 2
     if flock -n "$lock_fd" 2>/dev/null; then
         printf -v "$result_var" '%s' "$lock_fd"
