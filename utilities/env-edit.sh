@@ -279,7 +279,7 @@ _storage_preflight() {
 # sync subcommand — non-interactive; safe for make up / make restart / systemd
 # ---------------------------------------------------------------------------
 _cmd_sync() {
-  require_root "env-edit sync must be run as root. Run: sudo ./utilities/env-edit.sh sync"
+  require_root sync
 
   local repo_env="${PROJECT_ROOT}/.env"
   if [[ ! -f "$repo_env" ]]; then
@@ -315,7 +315,7 @@ _cmd_sync() {
 # edit subcommand — interactive; detects changes; syncs only when changed
 # ---------------------------------------------------------------------------
 _cmd_edit() {
-  require_root "env-edit edit must be run as root. Run: sudo ./utilities/env-edit.sh edit"
+  require_root edit
 
   local repo_env="${PROJECT_ROOT}/.env"
   if [[ ! -f "$repo_env" ]]; then

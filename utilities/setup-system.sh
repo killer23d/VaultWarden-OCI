@@ -990,7 +990,7 @@ cleanup_setup_deps() {
 main() {
     _parse_args "$@"
 
-    (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
+    require_root "$@"
     validate_supported_host_preflight || exit 1
     if [[ "$DRY_RUN" != "true" ]]; then
         operation_acquire --id setup --label "Setup" || exit $?
