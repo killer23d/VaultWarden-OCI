@@ -1270,13 +1270,14 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass(){ printf 'PASS: %s\n' "$*"; }
+skip(){ printf 'SKIP: %s\n' "$*"; }
 
 case_index=0
-run_policy_case() {
+run_source_order_case() {
     local source_order="$1" group_state="$2" expected_group="$3"
-    local case_dir mock_bin lock state chown_log mode output rc
+    local case_dir mock_bin lock state chown_log mode owner output rc
     case_index=$((case_index + 1))
-    case_dir="$TMP/case-$case_index"
+    case_dir="$TMP/source-order-$case_index"
     mock_bin="$case_dir/bin"
     lock="$case_dir/locks/test.lock"
     state="$case_dir/state"
@@ -1298,7 +1299,6 @@ printf '%s\n' "$*" >>"${VW_TEST_CHOWN_LOG:?}"
 EOF_CHOWN
     cat >"$mock_bin/chmod" <<EOF_CHMOD
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >>"${chown_log}.chmod"
 exec "$(command -v chmod)" "\$@"
 EOF_CHMOD
     cat >"$mock_bin/flock" <<'EOF_FLOCK'
@@ -1337,20 +1337,161 @@ EOF_FLOCK
 
     mode="$(stat -c '%a' "$lock" 2>/dev/null || stat -f '%Lp' "$lock")"
     [[ "$mode" == 660 ]] || fail "$source_order/$group_state lock mode is $mode, expected 660"
-    grep -Fq "root:${expected_group} $lock" "$chown_log" \
-        || fail "$source_order/$group_state did not apply root:${expected_group}: $(cat "$chown_log" 2>/dev/null || true)"
-    printf '%s|%s|%s\n' "$source_order" "$group_state" "$mode" >>"$TMP/policy-results"
+    owner="$(stat -c '%U:%G' "$lock" 2>/dev/null || stat -f '%Su:%Sg' "$lock")"
+    if [[ "$owner" != "root:${expected_group}" ]]; then
+        grep -Fq "root:${expected_group} $lock" "$chown_log" \
+            || fail "$source_order/$group_state did not select root:${expected_group}: $(cat "$chown_log" 2>/dev/null || true)"
+    fi
 }
 
-run_policy_case standalone available vaultwarden
-run_policy_case normal available vaultwarden
-run_policy_case standalone unavailable root
-run_policy_case normal unavailable root
+run_source_order_case standalone available vaultwarden
+run_source_order_case normal available vaultwarden
+run_source_order_case standalone unavailable root
+run_source_order_case normal unavailable root
+pass "standalone and normal source orders select the same 0660 ownership policy"
 
-[[ "$(awk -F'|' '{print $3}' "$TMP/policy-results" | sort -u)" == 660 ]] \
-    || fail "lock mode differs by source order or group availability"
-pass "standalone and normal source orders enforce the same 0660 lock policy"
-pass "group availability selects root:vaultwarden or root:root ownership"
+root_exec=()
+if [[ "$(uname -s)" == Linux ]]; then
+    if (( EUID == 0 )); then
+        root_exec=("$BASH")
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        root_exec=(sudo -n "$BASH")
+    fi
+fi
+
+if (( ${#root_exec[@]} > 0 )); then
+    root_case_script="$TMP/root-lock-cases.bash"
+    cat >"$root_case_script" <<'EOF_ROOT_CASES'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$1"
+case_root="$2"
+ops="$root/lib/operations.sh"
+mkdir -p "$case_root"
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+(
+    getent(){ return 2; }
+    source "$ops"
+    lock="$case_root/group-unavailable.lock"
+    : >"$lock"
+    chmod 0600 "$lock"
+    chown root:root "$lock"
+    _operation_prepare_lock_file "$lock"
+    actual="$(stat -c '%U:%G %a' "$lock")"
+    [[ "$actual" == 'root:root 660' ]] \
+        || fail "group-unavailable lock is '$actual', expected 'root:root 660'"
+    printf 'PASS: root group-unavailable path applies actual root:root mode 0660\n'
+)
+
+(
+    if ! getent group vaultwarden >/dev/null 2>&1; then
+        printf 'SKIP: actual root:vaultwarden assertion (safe pre-existing vaultwarden group is unavailable)\n'
+        exit 0
+    fi
+    source "$ops"
+    lock="$case_root/group-available.lock"
+    : >"$lock"
+    chmod 0600 "$lock"
+    chown root:root "$lock"
+    _operation_prepare_lock_file "$lock"
+    actual="$(stat -c '%U:%G %a' "$lock")"
+    [[ "$actual" == 'root:vaultwarden 660' ]] \
+        || fail "group-available lock is '$actual', expected 'root:vaultwarden 660'"
+    printf 'PASS: safe pre-existing vaultwarden group applies actual root:vaultwarden mode 0660\n'
+)
+
+(
+    getent(){ return 2; }
+    source "$ops"
+    lock="$case_root/chown-failure.lock"
+    : >"$lock"
+    chmod 0600 "$lock"
+    real_chown="$(type -P chown)"
+    "$real_chown" 65534:65534 "$lock"
+    chown(){ return 1; }
+    set +e
+    output="$(_operation_prepare_lock_file "$lock" 2>&1)"
+    rc=$?
+    set -e
+    [[ "$rc" -ne 0 ]] || fail "root-side chown failure unexpectedly succeeded"
+    [[ "$output" == *"Cannot set operation lock ownership to root:root"* ]] \
+        || fail "root-side chown failure omitted ownership diagnostic: $output"
+    [[ "$output" == *"Fix: sudo chown root:root"* ]] \
+        || fail "root-side chown failure omitted remediation: $output"
+    printf 'PASS: root-side chown failure rejects lock preparation with actionable diagnostics\n'
+)
+EOF_ROOT_CASES
+    chmod +x "$root_case_script"
+    root_output="$TMP/root-cases.out"
+    if ! "${root_exec[@]}" "$root_case_script" "$ROOT" "$TMP/root-cases" >"$root_output" 2>&1; then
+        cat "$root_output" >&2
+        fail "root-capable lock ownership cases failed"
+    fi
+    cat "$root_output"
+    if (( EUID != 0 )); then
+        sudo -n rm -rf "$TMP/root-cases"
+    fi
+else
+    skip "root lock ownership/mode and root-side chown-failure cases require Linux root or passwordless sudo"
+fi
+
+nonroot_runner=()
+nonroot_name=""
+if (( EUID != 0 )); then
+    nonroot_runner=("$BASH")
+    nonroot_name="$(id -un)"
+elif command -v runuser >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
+    nonroot_runner=(runuser -u nobody -- "$BASH")
+    nonroot_name=nobody
+elif command -v sudo >/dev/null 2>&1 && id nobody >/dev/null 2>&1 \
+    && sudo -n -u nobody true >/dev/null 2>&1; then
+    nonroot_runner=(sudo -n -u nobody "$BASH")
+    nonroot_name=nobody
+fi
+
+if (( ${#nonroot_runner[@]} > 0 )); then
+    chmod 0755 "$TMP"
+    nonroot_dir="$TMP/nonroot-case"
+    mkdir -p "$nonroot_dir"
+    if (( EUID == 0 )); then
+        nonroot_group="$(id -gn "$nonroot_name")"
+        chown "$nonroot_name:$nonroot_group" "$nonroot_dir"
+        chmod 0700 "$nonroot_dir"
+    fi
+    nonroot_script="$TMP/nonroot-lock-case.bash"
+    cat >"$nonroot_script" <<'EOF_NONROOT_CASE'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$1"
+case_dir="$2"
+getent(){ return 2; }
+source "$root/lib/operations.sh"
+lock="$case_dir/nonroot.lock"
+: >"$lock"
+chmod 0600 "$lock"
+set +e
+output="$(_operation_prepare_lock_file "$lock" 2>&1)"
+rc=$?
+set -e
+[[ "$rc" -eq 0 ]] || { printf 'FAIL: non-root fallback returned %s: %s\n' "$rc" "$output" >&2; exit 1; }
+mode="$(stat -c '%a' "$lock" 2>/dev/null || stat -f '%Lp' "$lock")"
+[[ "$mode" == 660 ]] || { printf 'FAIL: non-root fallback mode is %s\n' "$mode" >&2; exit 1; }
+[[ "$output" == *"without root privileges"* ]] \
+    || { printf 'FAIL: non-root ownership warning missing: %s\n' "$output" >&2; exit 1; }
+printf 'PASS: non-root lock preparation retains mode 0660 and actionable ownership warning\n'
+EOF_NONROOT_CASE
+    chmod 0755 "$nonroot_script"
+    nonroot_output="$TMP/nonroot.out"
+    if ! "${nonroot_runner[@]}" "$nonroot_script" "$ROOT" "$nonroot_dir" >"$nonroot_output" 2>&1; then
+        cat "$nonroot_output" >&2
+        fail "non-root lock preparation fallback case failed"
+    fi
+    cat "$nonroot_output"
+else
+    skip "non-root lock preparation warning case requires a non-root runner"
+fi
 
 diagnostic_dir="$TMP/not-a-directory"
 : >"$diagnostic_dir"
@@ -1376,7 +1517,7 @@ pass "standalone preparation failures emit actionable diagnostics"
     || fail "source-order lock helper remains"
 ! grep -Fq 'chmod 0600 "$lock_path"' "$OPS" \
     || fail "independent 0600 lock fallback remains"
-pass "operations owns lock preparation without a 0600 source-order fallback"
+pass "operations remains the canonical lock-file preparation owner"
 )
 
 check_operation_lock_file_preparation

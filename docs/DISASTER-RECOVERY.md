@@ -309,6 +309,14 @@ sudo ./recover.sh \
   --key /secure/path/offline-age-key.txt
 ```
 
+`recover.sh` acquires the shared VaultWarden operation guard before creating recovery backups, generating keys, staging files, or promoting artifacts. If another operation holds the guard, non-interactive recovery exits with status `75` without changing recovery artifacts. Inspect the active operation with:
+
+```bash
+sudo make operations
+```
+
+Retry recovery after the active operation finishes. The shared guard prevents conflicting VaultWarden workflows; it complements, rather than replaces, recovery's local rollback transaction.
+
 `recover.sh` validates the manifest/repository commit, uses the offline private key in place, generates a new operational Age key, and stages/promotes the new ciphertext, SOPS policy, persistent environment, and DR manifest under one local recovery transaction.
 
 Before the commit boundary, failure restores the previous recovery identity/config state. After commit, startup or `/alive` failure returns non-zero and preserves the newly committed artifacts for diagnosis.

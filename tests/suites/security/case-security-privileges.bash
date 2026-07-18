@@ -793,6 +793,16 @@ for action in install remove validate; do
     assert_hint "sudo utilities/setup-systemd.sh $action" "$ROOT" "setup-systemd $action" \
         "$BASH" utilities/setup-systemd.sh "$action"
 done
+assert_hint 'sudo utilities/setup-systemd.sh install --dry-run' "$ROOT" 'setup-systemd install --dry-run' \
+    "$BASH" utilities/setup-systemd.sh install --dry-run
+assert_hint 'sudo utilities/setup-systemd.sh install --enable-now' "$ROOT" 'setup-systemd install --enable-now' \
+    "$BASH" utilities/setup-systemd.sh install --enable-now
+assert_hint 'sudo utilities/setup-systemd.sh install --start-policy manual' "$ROOT" 'setup-systemd install --start-policy manual' \
+    "$BASH" utilities/setup-systemd.sh install --start-policy manual
+assert_hint 'sudo utilities/setup-systemd.sh install --no-enable-now' "$ROOT" 'setup-systemd install --no-enable-now' \
+    "$BASH" utilities/setup-systemd.sh install --no-enable-now
+assert_hint 'sudo utilities/setup-systemd.sh remove --dry-run' "$ROOT" 'setup-systemd remove --dry-run' \
+    "$BASH" utilities/setup-systemd.sh remove --dry-run
 assert_hint 'sudo utilities/setup-firewall.sh --phase iptables --auto' "$ROOT" 'setup-firewall' \
     "$BASH" utilities/setup-firewall.sh --phase iptables --auto
 assert_hint 'sudo utilities/setup-system.sh --skip-deps --auto' "$SYSTEM_ROOT" 'setup-system' \

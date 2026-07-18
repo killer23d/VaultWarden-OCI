@@ -46,6 +46,11 @@ _docker_resolve_project_label() {
     local compose_project_name=""
 
     [[ "$_DOCKER_PROJECT_LABEL_RESOLVED" == true ]] && return 0
+    if [[ -n "${DOCKER_PROJECT_LABEL:-}" ]]; then
+        _DOCKER_PROJECT_LABEL_RESOLVED=true
+        export DOCKER_PROJECT_LABEL
+        return 0
+    fi
     _DOCKER_PROJECT_LABEL_RESOLVED=true
 
     if command -v docker >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then

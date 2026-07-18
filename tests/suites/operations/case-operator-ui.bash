@@ -634,10 +634,12 @@ REPO_ROOT="$TMP"
 eval "$(extract_func "$ROOT/dashboard.sh" _read_env_var)"
 
 cat >"$TMP/.env" <<'EOF_ENV'
+PROJECT_STATE_DIR=/srv/obsolete-state
 PROJECT_STATE_DIR=/srv/vault=state
+BACKUP_DIR=/srv/obsolete-backups
 BACKUP_DIR='/srv/backup=primary'
-TZ="America/Vancouver"
 TZ=UTC
+TZ="America/Vancouver"
 RCLONE_REMOTE_NAME=archive=nightly
 EOF_ENV
 
@@ -651,10 +653,10 @@ RCLONE_REMOTE_NAME="$(_read_env_var RCLONE_REMOTE_NAME '')"
 [[ "$BACKUP_DIR" == '/srv/backup=primary' ]] \
     || fail "BACKUP_DIR did not strip one matching single-quote pair: $BACKUP_DIR"
 [[ "$TZ_DISPLAY" == 'America/Vancouver' ]] \
-    || fail "TZ did not strip one matching double-quote pair or retain first match: $TZ_DISPLAY"
+    || fail "TZ did not use the last assignment and strip one matching double-quote pair: $TZ_DISPLAY"
 [[ "$RCLONE_REMOTE_NAME" == 'archive=nightly' ]] \
     || fail "RCLONE_REMOTE_NAME did not preserve text after the first equals: $RCLONE_REMOTE_NAME"
-pass "dashboard consumers use canonical unquoted, quoted, first-match, and equals parsing"
+pass "dashboard consumers use exact-key, last-assignment, quoted, and equals parsing"
 
 cat >"$TMP/.env" <<'EOF_ENV'
 RCLONE_REMOTE_NAME=

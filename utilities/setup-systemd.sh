@@ -184,6 +184,7 @@ _require_cli_value() {
     fi
 }
 
+ORIGINAL_ARGS=("$@")
 _ACTION=""
 _START_POLICY_EXPLICIT=false
 while [[ $# -gt 0 ]]; do
@@ -1499,11 +1500,7 @@ main() {
         --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
     esac
     load_project_environment || exit 1
-    if [[ -n "$_ACTION" ]]; then
-        require_root "$_ACTION"
-    else
-        require_root
-    fi
+    require_root "${ORIGINAL_ARGS[@]}"
 
     if [[ "$STATUS" == "true" ]]; then
         show_status

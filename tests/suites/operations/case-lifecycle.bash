@@ -671,6 +671,7 @@ pass(){ printf 'PASS: %s\n' "$*"; }
 
 MOCK_BIN="$TMP/bin"
 DOCKER_LOG="$TMP/docker.log"
+JQ_LOG="$TMP/jq.log"
 mkdir -p "$MOCK_BIN" "$TMP/outside"
 cat >"$MOCK_BIN/docker" <<'EOF_DOCKER'
 #!/usr/bin/env bash
@@ -688,6 +689,7 @@ esac
 EOF_DOCKER
 cat >"$MOCK_BIN/jq" <<'EOF_JQ'
 #!/usr/bin/env bash
+[[ -z "${VW_TEST_JQ_LOG:-}" ]] || printf '%s\n' "$*" >>"$VW_TEST_JQ_LOG"
 input="$(cat)"
 if [[ "$input" == *'"name":"mock-project"'* ]]; then
     printf 'mock-project\n'
@@ -715,6 +717,23 @@ explicit_output=$(PATH="$MOCK_BIN:/usr/bin:/bin" \
     || fail "explicit Docker project label changed: $explicit_output"
 [[ ! -s "$DOCKER_LOG" ]] || fail "explicit Docker project label triggered resolution"
 pass "explicit Docker project label is preserved exactly"
+
+: >"$DOCKER_LOG"
+: >"$JQ_LOG"
+post_source_output=$(PATH="$MOCK_BIN:/usr/bin:/bin" \
+    VW_TEST_DOCKER_LOG="$DOCKER_LOG" VW_TEST_JQ_LOG="$JQ_LOG" \
+    "$BASH" -c '
+        set -euo pipefail
+        unset DOCKER_PROJECT_LABEL
+        source "$1"
+        DOCKER_PROJECT_LABEL="label=com.docker.compose.project=post-source-explicit"
+        _docker_prune_filter
+    ' _ "$DOCKER_LIB")
+[[ "$post_source_output" == $'--filter\nlabel=com.docker.compose.project=post-source-explicit' ]] \
+    || fail "post-source Docker project label changed: $post_source_output"
+[[ ! -s "$DOCKER_LOG" ]] || fail "post-source Docker project label invoked Docker: $(cat "$DOCKER_LOG")"
+[[ ! -s "$JQ_LOG" ]] || fail "post-source Docker project label invoked jq: $(cat "$JQ_LOG")"
+pass "Docker project label assigned after sourcing is preserved without discovery"
 
 : >"$DOCKER_LOG"
 FILTER_OUTPUT="$TMP/filter.out"
