@@ -1259,3 +1259,124 @@ printf 'PASS: secrets/env/systemd operation guards\n'
 )
 
 check_secrets_env_systemd_operation_guards
+
+check_operation_lock_file_preparation() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+OPS="$ROOT/lib/operations.sh"
+TMP="$(mktemp -d -t vw-operation-lock-policy.XXXXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+
+case_index=0
+run_policy_case() {
+    local source_order="$1" group_state="$2" expected_group="$3"
+    local case_dir mock_bin lock state chown_log mode output rc
+    case_index=$((case_index + 1))
+    case_dir="$TMP/case-$case_index"
+    mock_bin="$case_dir/bin"
+    lock="$case_dir/locks/test.lock"
+    state="$case_dir/state"
+    chown_log="$case_dir/chown.log"
+    mkdir -p "$mock_bin"
+    if [[ "$source_order" == normal && "$group_state" == available ]]; then
+        mkdir -p "$(dirname "$lock")"
+        : >"$lock"
+        chmod 0600 "$lock"
+    fi
+
+    cat >"$mock_bin/getent" <<'EOF_GETENT'
+#!/usr/bin/env bash
+[[ "${VW_TEST_GROUP_STATE:?}" == available && "${1:-}" == group && "${2:-}" == vaultwarden ]]
+EOF_GETENT
+    cat >"$mock_bin/chown" <<'EOF_CHOWN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${VW_TEST_CHOWN_LOG:?}"
+EOF_CHOWN
+    cat >"$mock_bin/chmod" <<EOF_CHMOD
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${chown_log}.chmod"
+exec "$(command -v chmod)" "\$@"
+EOF_CHMOD
+    cat >"$mock_bin/flock" <<'EOF_FLOCK'
+#!/usr/bin/env bash
+exit 0
+EOF_FLOCK
+    chmod +x "$mock_bin"/*
+
+    set +e
+    output=$(PATH="$mock_bin:$PATH" \
+        VW_TEST_GROUP_STATE="$group_state" \
+        VW_TEST_CHOWN_LOG="$chown_log" \
+        VW_OPERATIONS_STATE_DIR="$state" \
+        VW_OPERATIONS_LOCK="$case_dir/global.lock" \
+        VW_TEST_SOURCE_ORDER="$source_order" \
+        VW_TEST_LOCK="$lock" \
+        "$BASH" -c '
+            set -euo pipefail
+            root="$1"
+            if [[ "$VW_TEST_SOURCE_ORDER" == normal ]]; then
+                source "$root/lib/log.sh"
+                source "$root/lib/common.sh"
+                init_common_lib operation-lock-policy-test
+            fi
+            source "$root/lib/operations.sh"
+            operation_acquire \
+                --id "lock-policy-${VW_TEST_SOURCE_ORDER}-${VW_TEST_GROUP_STATE}" \
+                --label "Lock policy" \
+                --no-global \
+                --specific-lock "$VW_TEST_LOCK"
+            operation_release 0
+        ' _ "$ROOT" 2>&1)
+    rc=$?
+    set -e
+    [[ "$rc" -eq 0 ]] || fail "$source_order/$group_state acquisition failed: $output"
+
+    mode="$(stat -c '%a' "$lock" 2>/dev/null || stat -f '%Lp' "$lock")"
+    [[ "$mode" == 660 ]] || fail "$source_order/$group_state lock mode is $mode, expected 660"
+    grep -Fq "root:${expected_group} $lock" "$chown_log" \
+        || fail "$source_order/$group_state did not apply root:${expected_group}: $(cat "$chown_log" 2>/dev/null || true)"
+    printf '%s|%s|%s\n' "$source_order" "$group_state" "$mode" >>"$TMP/policy-results"
+}
+
+run_policy_case standalone available vaultwarden
+run_policy_case normal available vaultwarden
+run_policy_case standalone unavailable root
+run_policy_case normal unavailable root
+
+[[ "$(awk -F'|' '{print $3}' "$TMP/policy-results" | sort -u)" == 660 ]] \
+    || fail "lock mode differs by source order or group availability"
+pass "standalone and normal source orders enforce the same 0660 lock policy"
+pass "group availability selects root:vaultwarden or root:root ownership"
+
+diagnostic_dir="$TMP/not-a-directory"
+: >"$diagnostic_dir"
+set +e
+diagnostic=$(VW_OPERATIONS_STATE_DIR="$TMP/diagnostic-state" \
+    VW_OPERATIONS_LOCK="$TMP/diagnostic-global.lock" \
+    VW_TEST_LOCK="$diagnostic_dir/test.lock" \
+    "$BASH" -c '
+        set -euo pipefail
+        source "$1/lib/operations.sh"
+        _operation_prepare_lock_file "$VW_TEST_LOCK"
+    ' _ "$ROOT" 2>&1)
+diagnostic_rc=$?
+set -e
+[[ "$diagnostic_rc" -ne 0 ]] || fail "standalone lock preparation unexpectedly succeeded for an invalid parent"
+[[ "$diagnostic" == *"Cannot create operation lock directory"* ]] \
+    || fail "standalone diagnostic is not actionable: $diagnostic"
+[[ "$diagnostic" == *"Fix: sudo mkdir -p"* ]] \
+    || fail "standalone diagnostic omitted remediation: $diagnostic"
+pass "standalone preparation failures emit actionable diagnostics"
+
+! grep -Fq '_ensure_lock_file' "$ROOT/lib/operations.sh" "$ROOT/lib/common.sh" \
+    || fail "source-order lock helper remains"
+! grep -Fq 'chmod 0600 "$lock_path"' "$OPS" \
+    || fail "independent 0600 lock fallback remains"
+pass "operations owns lock preparation without a 0600 source-order fallback"
+)
+
+check_operation_lock_file_preparation
