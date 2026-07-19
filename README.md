@@ -56,7 +56,7 @@ See [docs/PROJECT-BOUNDARY.md](docs/PROJECT-BOUNDARY.md).
 ### 2. Clone the repository
 
 ```bash
-git clone https://github.com/killer23d/VaultWarden-OCI.git
+git clone --branch delta https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh utilities/*.sh
 ```
