@@ -249,7 +249,10 @@ for recovery/manual-inspection hosts that are not ready to run scheduled backup/
 
 ### `utilities/setup-crowdsec.sh`
 
-Owns CrowdSec, the host firewall bouncer, the Cloudflare Workers bouncer, and the opt-in marked CrowdSec email-plugin/profile reconciliation path. The email plugin uses the existing host-loopback Postfix relay and performs static CrowdSec validation without making live mail delivery part of normal setup.
+Owns CrowdSec, the host firewall bouncer, the Cloudflare Workers bouncer, and
+the opt-in marked CrowdSec email-plugin/profile reconciliation path. The email
+plugin uses the existing host-loopback Postfix relay and performs static
+CrowdSec validation without making live mail delivery part of normal setup.
 
 ### `utilities/crowdsec-email.sh`
 
