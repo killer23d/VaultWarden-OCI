@@ -158,6 +158,8 @@ It requires:
 - the offline Age private identity that matches the manifest/policy;
 - the exact repository commit recorded by the recovery manifest.
 
+Recovery acquires the shared operation guard before creating recovery backups, generating keys, staging files, or promoting artifacts. Non-interactive contention exits with status `75` without mutating recovery state; inspect the active owner with `sudo make operations` and retry after it finishes.
+
 Recovery stages ciphertext, a replacement operational Age key, SOPS policy, persistent environment, DR manifest, and required sentinel state under one local pre-commit rollback boundary. After the recovery identity/config commits, startup or `/alive` failure remains non-zero but does not revert the committed recovery artifacts.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) and [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
@@ -247,10 +249,20 @@ for recovery/manual-inspection hosts that are not ready to run scheduled backup/
 
 ### `utilities/setup-crowdsec.sh`
 
-Owns CrowdSec, the host firewall bouncer, the Cloudflare Workers bouncer, and
-the opt-in marked CrowdSec email-plugin/profile reconciliation path. The email
-plugin uses the existing host-loopback Postfix relay and performs static
-CrowdSec validation without making live mail delivery part of normal setup.
+Owns CrowdSec, the host firewall bouncer, the Cloudflare Workers bouncer, and the opt-in marked CrowdSec email-plugin/profile reconciliation path. The email plugin uses the existing host-loopback Postfix relay and performs static CrowdSec validation without making live mail delivery part of normal setup.
+
+### `utilities/crowdsec-email.sh`
+
+Provides the focused root-operated control surface for optional CrowdSec security-event email:
+
+```bash
+sudo ./utilities/crowdsec-email.sh enable
+sudo ./utilities/crowdsec-email.sh status
+sudo ./utilities/crowdsec-email.sh test
+sudo ./utilities/crowdsec-email.sh disable
+```
+
+`enable` and `disable` update the non-secret environment transactionally and delegate to the established CrowdSec reconciliation path. `status` checks the enablement flag and VaultWarden-OCI managed markers; `test` dispatches through the installed plugin but does not prove mailbox receipt.
 
 ### `utilities/crowdsec-worker-apply.sh`
 
@@ -354,9 +366,9 @@ The canonical permanent Bash test entry point is:
 ./tests/run-tests.sh all
 ```
 
-`tests/run-tests.sh` owns the permanent `tests/test-*.sh` inventory and fails when a permanent test is unlisted or listed twice.
+`tests/run-tests.sh` owns the registered permanent case inventory under `tests/suites/<suite>/case-*.bash` together with the architecture check, and fails when a registered case is missing or duplicated. Cases execute directly at their registered paths; the runner does not create compatibility files or symlinks in the checkout.
 
-GitHub Actions calls the runner directly. The Makefile and workflow YAML must not maintain a second permanent test-file inventory.
+GitHub Actions calls the four public suites through the runner. The Makefile and workflow YAML must not maintain a second permanent case-file inventory.
 
 Strict ShellCheck remains an independent CI check.
 
