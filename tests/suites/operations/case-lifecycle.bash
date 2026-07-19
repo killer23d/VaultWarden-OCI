@@ -657,3 +657,149 @@ printf 'PASS: startup and safe-restart preserve typed health contention/warning 
 )
 
 check_typed_lifecycle_health_results
+
+check_docker_lazy_project_label() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+DOCKER_LIB="$ROOT/lib/docker.sh"
+TMP="$(mktemp -d -t vw-docker-label.XXXXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+
+MOCK_BIN="$TMP/bin"
+DOCKER_LOG="$TMP/docker.log"
+JQ_LOG="$TMP/jq.log"
+mkdir -p "$MOCK_BIN" "$TMP/outside"
+cat >"$MOCK_BIN/docker" <<'EOF_DOCKER'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${VW_TEST_DOCKER_LOG:?}"
+case "$*" in
+    'compose config --format json')
+        [[ "${VW_TEST_COMPOSE_MODE:-success}" == success ]] || exit 1
+        printf '{"name":"mock-project"}\n'
+        ;;
+    'container prune -f --filter label=com.docker.compose.project=mock-project')
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+EOF_DOCKER
+cat >"$MOCK_BIN/jq" <<'EOF_JQ'
+#!/usr/bin/env bash
+[[ -z "${VW_TEST_JQ_LOG:-}" ]] || printf '%s\n' "$*" >>"$VW_TEST_JQ_LOG"
+input="$(cat)"
+if [[ "$input" == *'"name":"mock-project"'* ]]; then
+    printf 'mock-project\n'
+fi
+EOF_JQ
+chmod +x "$MOCK_BIN/docker" "$MOCK_BIN/jq"
+
+: >"$DOCKER_LOG"
+set +e
+source_output=$(cd "$TMP/outside" && \
+    PATH="$MOCK_BIN:/usr/bin:/bin" VW_TEST_DOCKER_LOG="$DOCKER_LOG" \
+    "$BASH" -c 'source "$1"' _ "$DOCKER_LIB" 2>&1)
+source_rc=$?
+set -e
+[[ "$source_rc" -eq 0 ]] || fail "docker library source failed: $source_output"
+[[ -z "$source_output" ]] || fail "docker library source produced output: $source_output"
+[[ ! -s "$DOCKER_LOG" ]] || fail "docker library source invoked Docker: $(cat "$DOCKER_LOG")"
+pass "sourcing docker helpers is quiet and performs no project inspection"
+
+explicit_output=$(PATH="$MOCK_BIN:/usr/bin:/bin" \
+    VW_TEST_DOCKER_LOG="$DOCKER_LOG" \
+    DOCKER_PROJECT_LABEL='label=custom.project=explicit-value' \
+    "$BASH" -c 'source "$1"; _docker_prune_filter' _ "$DOCKER_LIB")
+[[ "$explicit_output" == $'--filter\nlabel=custom.project=explicit-value' ]] \
+    || fail "explicit Docker project label changed: $explicit_output"
+[[ ! -s "$DOCKER_LOG" ]] || fail "explicit Docker project label triggered resolution"
+pass "explicit Docker project label is preserved exactly"
+
+: >"$DOCKER_LOG"
+: >"$JQ_LOG"
+post_source_output=$(PATH="$MOCK_BIN:/usr/bin:/bin" \
+    VW_TEST_DOCKER_LOG="$DOCKER_LOG" VW_TEST_JQ_LOG="$JQ_LOG" \
+    "$BASH" -c '
+        set -euo pipefail
+        unset DOCKER_PROJECT_LABEL
+        source "$1"
+        DOCKER_PROJECT_LABEL="label=com.docker.compose.project=post-source-explicit"
+        _docker_prune_filter
+    ' _ "$DOCKER_LIB")
+[[ "$post_source_output" == $'--filter\nlabel=com.docker.compose.project=post-source-explicit' ]] \
+    || fail "post-source Docker project label changed: $post_source_output"
+[[ ! -s "$DOCKER_LOG" ]] || fail "post-source Docker project label invoked Docker: $(cat "$DOCKER_LOG")"
+[[ ! -s "$JQ_LOG" ]] || fail "post-source Docker project label invoked jq: $(cat "$JQ_LOG")"
+pass "Docker project label assigned after sourcing is preserved without discovery"
+
+: >"$DOCKER_LOG"
+FILTER_OUTPUT="$TMP/filter.out"
+PATH="$MOCK_BIN:/usr/bin:/bin" \
+VW_TEST_DOCKER_LOG="$DOCKER_LOG" \
+VW_TEST_FILTER_OUTPUT="$FILTER_OUTPUT" \
+"$BASH" -c '
+    set -euo pipefail
+    source "$1"
+    _docker_prune_filter >"$VW_TEST_FILTER_OUTPUT"
+    _docker_prune_filter >>"$VW_TEST_FILTER_OUTPUT"
+' _ "$DOCKER_LIB"
+expected_filters=$'--filter\nlabel=com.docker.compose.project=mock-project\n--filter\nlabel=com.docker.compose.project=mock-project'
+[[ "$(cat "$FILTER_OUTPUT")" == "$expected_filters" ]] \
+    || fail "mock Compose name did not produce the full label filter: $(cat "$FILTER_OUTPUT")"
+[[ "$(grep -c '^compose config --format json$' "$DOCKER_LOG")" -eq 1 ]] \
+    || fail "repeated filter calls repeated project resolution: $(cat "$DOCKER_LOG")"
+pass "Compose project name resolves lazily to one complete label per shell"
+
+missing_docker_output=$("$BASH" -c '
+    command(){
+        if [[ "${1:-}" == -v && "${2:-}" == docker ]]; then return 1; fi
+        builtin command "$@"
+    }
+    source "$1"
+    _docker_prune_filter
+' _ "$DOCKER_LIB")
+[[ "$missing_docker_output" == $'--filter\nlabel=com.docker.compose.project=vaultwarden-oci' ]] \
+    || fail "missing Docker did not use the default project label: $missing_docker_output"
+
+: >"$DOCKER_LOG"
+missing_jq_output=$(PATH="$MOCK_BIN:/usr/bin:/bin" VW_TEST_DOCKER_LOG="$DOCKER_LOG" \
+    "$BASH" -c '
+        command(){
+            if [[ "${1:-}" == -v && "${2:-}" == jq ]]; then return 1; fi
+            builtin command "$@"
+        }
+        source "$1"
+        _docker_prune_filter
+    ' _ "$DOCKER_LIB")
+[[ "$missing_jq_output" == $'--filter\nlabel=com.docker.compose.project=vaultwarden-oci' ]] \
+    || fail "missing jq did not use the default project label: $missing_jq_output"
+[[ ! -s "$DOCKER_LOG" ]] || fail "missing jq still invoked Docker: $(cat "$DOCKER_LOG")"
+
+: >"$DOCKER_LOG"
+compose_failure_output=$(PATH="$MOCK_BIN:/usr/bin:/bin" \
+    VW_TEST_DOCKER_LOG="$DOCKER_LOG" VW_TEST_COMPOSE_MODE=failure \
+    "$BASH" -c 'source "$1"; _docker_prune_filter' _ "$DOCKER_LIB")
+[[ "$compose_failure_output" == $'--filter\nlabel=com.docker.compose.project=vaultwarden-oci' ]] \
+    || fail "Compose failure did not use the default project label: $compose_failure_output"
+pass "missing Docker, jq, or Compose context uses the default label"
+
+: >"$DOCKER_LOG"
+PATH="$MOCK_BIN:/usr/bin:/bin" \
+VW_TEST_DOCKER_LOG="$DOCKER_LOG" \
+"$BASH" -c '
+    set -euo pipefail
+    source "$1"
+    require_docker(){ return 0; }
+    cleanup_containers
+' _ "$DOCKER_LIB"
+grep -Fxq 'container prune -f --filter label=com.docker.compose.project=mock-project' "$DOCKER_LOG" \
+    || fail "container prune did not receive the resolved --filter argument: $(cat "$DOCKER_LOG")"
+[[ "$(grep -c '^compose config --format json$' "$DOCKER_LOG")" -eq 1 ]] \
+    || fail "cleanup consumer resolved the project more than once: $(cat "$DOCKER_LOG")"
+pass "prune consumer receives the lazily resolved filter argument"
+)
+
+check_docker_lazy_project_label
