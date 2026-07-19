@@ -33,7 +33,7 @@ The project configures the supported Ubuntu host firewall. It does not configure
 ## Phase 2 — Clone and run setup
 
 ```bash
-git clone https://github.com/killer23d/VaultWarden-OCI.git
+git clone --branch delta https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh utilities/*.sh
 
