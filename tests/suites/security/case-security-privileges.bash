@@ -480,3 +480,160 @@ pass "CrowdSec email and incident context preserve privilege/ownership/secret co
 )
 
 check_privilege_contracts
+
+check_root_remediation_hints() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d -t vw-root-hints.XXXXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+
+NONROOT_MODE=""
+NONROOT_USER=""
+if (( EUID != 0 )); then
+    NONROOT_MODE=current
+elif command -v runuser >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
+    NONROOT_MODE=runuser
+    NONROOT_USER=nobody
+elif command -v sudo >/dev/null 2>&1 && id nobody >/dev/null 2>&1 \
+    && sudo -n -u nobody true >/dev/null 2>&1; then
+    NONROOT_MODE=sudo
+    NONROOT_USER=nobody
+else
+    printf 'SKIP: CQA-003 behavioral root-hint tests require a non-root execution user\n'
+    exit 0
+fi
+
+chmod 0755 "$TMP"
+mkdir -p "$TMP/home" "$TMP/state/config"
+chmod 0755 "$TMP/home" "$TMP/state" "$TMP/state/config"
+cat >"$TMP/state/config/install.env" <<EOF_ENV
+PROJECT_STATE_DIR=$TMP/state
+SOPS_AGE_KEY_FILE=
+EOF_ENV
+chmod 0644 "$TMP/state/config/install.env"
+
+# setup-system creates its secure work directory before the root gate. Give a
+# runuser-based test an isolated writable project copy so it reaches the real
+# require_root call without weakening production setup behavior.
+SYSTEM_ROOT="$TMP/system-repo"
+mkdir -p "$SYSTEM_ROOT/utilities"
+cp "$ROOT/utilities/setup-system.sh" "$SYSTEM_ROOT/utilities/"
+cp "$ROOT/VERSION" "$SYSTEM_ROOT/"
+cp -R "$ROOT/lib" "$SYSTEM_ROOT/"
+chmod 0777 "$SYSTEM_ROOT"
+chmod -R a+rX "$SYSTEM_ROOT/lib" "$SYSTEM_ROOT/utilities" "$SYSTEM_ROOT/VERSION"
+
+NONROOT_ENV=(
+    "PATH=$PATH"
+    "HOME=$TMP/home"
+    "DOCKER_PROJECT_LABEL=label=com.docker.compose.project=vaultwarden-oci"
+    "PROJECT_STATE_DIR=$TMP/state"
+    "VW_CONFIG_INSTALLED_ENV_FILE=$TMP/state/config/install.env"
+)
+
+run_nonroot() {
+    local cwd="$1" output_file="$2"
+    shift 2
+    case "$NONROOT_MODE" in
+        current)
+            (cd "$cwd" && env "${NONROOT_ENV[@]}" "$@") >"$output_file" 2>&1
+            ;;
+        runuser)
+            runuser -u "$NONROOT_USER" -- env "${NONROOT_ENV[@]}" \
+                "$BASH" -c 'cd "$1"; shift; exec "$@"' _ "$cwd" "$@" \
+                >"$output_file" 2>&1
+            ;;
+        sudo)
+            # Redirect is intentionally owned by the test runner, not sudo.
+            # shellcheck disable=SC2024
+            sudo -n -u "$NONROOT_USER" env "${NONROOT_ENV[@]}" \
+                "$BASH" -c 'cd "$1"; shift; exec "$@"' _ "$cwd" "$@" \
+                >"$output_file" 2>&1
+            ;;
+    esac
+}
+
+assert_hint() {
+    local expected="$1" cwd="$2" label="$3"
+    shift 3
+    local output_file="$TMP/hint-$RANDOM.out" rc hint
+    set +e
+    run_nonroot "$cwd" "$output_file" "$@"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 1 ]] || {
+        cat "$output_file" >&2
+        fail "$label returned $rc instead of 1"
+    }
+    hint="$(sed -n 's/^.*Re-run with: //p' "$output_file" | tail -1)"
+    [[ "$hint" == "$expected" ]] || {
+        cat "$output_file" >&2
+        fail "$label hint '$hint' did not equal '$expected'"
+    }
+    [[ "$hint" != *"requires root"* && "$hint" != *"must be run"* ]] \
+        || fail "$label appended prose to the sudo command"
+}
+
+assert_root_free() {
+    local cwd="$1" label="$2"
+    shift 2
+    local output_file="$TMP/root-free-$RANDOM.out" rc
+    set +e
+    run_nonroot "$cwd" "$output_file" "$@"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 0 ]] || {
+        cat "$output_file" >&2
+        fail "$label returned $rc for a root-free metadata path"
+    }
+    ! grep -Fq 'Re-run with: sudo' "$output_file" \
+        || fail "$label unexpectedly reached the root gate"
+}
+
+assert_hint 'sudo startup.sh --skip-pull --background' "$ROOT" 'startup flags' \
+    "$BASH" startup.sh --skip-pull --background
+assert_hint 'sudo startup.sh stop' "$ROOT" 'startup stop' \
+    "$BASH" startup.sh stop
+assert_hint 'sudo utilities/env-edit.sh sync' "$ROOT" 'env-edit sync' \
+    "$BASH" utilities/env-edit.sh sync
+for action in install remove validate; do
+    assert_hint "sudo utilities/setup-systemd.sh $action" "$ROOT" "setup-systemd $action" \
+        "$BASH" utilities/setup-systemd.sh "$action"
+done
+assert_hint 'sudo utilities/setup-systemd.sh install --dry-run' "$ROOT" 'setup-systemd install --dry-run' \
+    "$BASH" utilities/setup-systemd.sh install --dry-run
+assert_hint 'sudo utilities/setup-systemd.sh install --enable-now' "$ROOT" 'setup-systemd install --enable-now' \
+    "$BASH" utilities/setup-systemd.sh install --enable-now
+assert_hint 'sudo utilities/setup-systemd.sh install --start-policy manual' "$ROOT" 'setup-systemd install --start-policy manual' \
+    "$BASH" utilities/setup-systemd.sh install --start-policy manual
+assert_hint 'sudo utilities/setup-systemd.sh install --no-enable-now' "$ROOT" 'setup-systemd install --no-enable-now' \
+    "$BASH" utilities/setup-systemd.sh install --no-enable-now
+assert_hint 'sudo utilities/setup-systemd.sh remove --dry-run' "$ROOT" 'setup-systemd remove --dry-run' \
+    "$BASH" utilities/setup-systemd.sh remove --dry-run
+assert_hint 'sudo utilities/setup-firewall.sh --phase iptables --auto' "$ROOT" 'setup-firewall' \
+    "$BASH" utilities/setup-firewall.sh --phase iptables --auto
+assert_hint 'sudo utilities/setup-system.sh --skip-deps --auto' "$SYSTEM_ROOT" 'setup-system' \
+    "$BASH" utilities/setup-system.sh --skip-deps --auto
+pass "root enforcement emits exact executable remediation commands"
+
+for option in --help --version; do
+    assert_root_free "$ROOT" "startup $option" "$BASH" startup.sh "$option"
+    assert_root_free "$ROOT" "env-edit $option" "$BASH" utilities/env-edit.sh "$option"
+    assert_root_free "$ROOT" "setup-systemd $option" "$BASH" utilities/setup-systemd.sh "$option"
+    assert_root_free "$ROOT" "setup-firewall $option" "$BASH" utilities/setup-firewall.sh "$option"
+    assert_root_free "$SYSTEM_ROOT" "setup-system $option" "$BASH" utilities/setup-system.sh "$option"
+done
+pass "help and version paths remain root-free"
+
+! grep -Eq 'exec sudo|sudo -n "\$0"|sudo "\$0"|sudo "\$\{BASH_SOURCE\[0\]\}"' \
+    "$ROOT/startup.sh" "$ROOT/utilities/env-edit.sh" "$ROOT/utilities/setup-systemd.sh" \
+    "$ROOT/utilities/setup-firewall.sh" "$ROOT/utilities/setup-system.sh" \
+    || fail "root normalization introduced hidden self-escalation"
+pass "root normalization does not self-escalate"
+)
+
+check_root_remediation_hints
