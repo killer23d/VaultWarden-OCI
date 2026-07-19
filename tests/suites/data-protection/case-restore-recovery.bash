@@ -961,6 +961,16 @@ make_case() {
     mkdir -p "$dir/state/config" "$dir/state/secrets" "$dir/state/data" "$dir/repo" "$dir/etc" "$dir/mockbin"
     cp "$ROOT/recover.sh" "$dir/repo/recover.sh"
     cp -a "$ROOT/lib" "$dir/repo/lib"
+    cat >> "$dir/repo/lib/operations.sh" <<'RELEASE_PROBE'
+
+if [[ -n "${VW_TEST_RELEASE_LOG:-}" ]]; then
+    eval "$(declare -f operation_release | sed '1s/operation_release/_test_operation_release/')"
+    operation_release() {
+        printf '%s\n' "${1:-0}" >> "$VW_TEST_RELEASE_LOG"
+        _test_operation_release "$@"
+    }
+fi
+RELEASE_PROBE
     mkdir -p "$dir/repo/utilities"
     cp "$ROOT/utilities/env-edit.sh" "$dir/repo/utilities/env-edit.sh"
     cp "$ROOT/docker-compose.yml.example" "$dir/repo/docker-compose.yml.example"
@@ -1035,6 +1045,7 @@ exit 0
 GIT
     cat > "$mock/age-keygen" <<'AGE'
 #!/usr/bin/env bash
+[[ -z "${MOCK_AGE_LOG:-}" ]] || printf '%s\n' "$*" >> "$MOCK_AGE_LOG"
 if [[ "${1:-}" == -y ]]; then
     [[ -n "${MOCK_USB_KEY_PATH:-}" ]] || exit 2
     if [[ "$(basename "${2:-}")" == "usb-key.txt" ]]; then
@@ -1095,6 +1106,13 @@ case "$mode" in
     *) exit 1 ;;
 esac
 SOPS
+    cat > "$mock/flock" <<'FLOCK'
+#!/usr/bin/env bash
+if [[ "${1:-}" == -n && "${MOCK_FLOCK_CONTENDED:-false}" == true ]]; then
+    exit 1
+fi
+exit 0
+FLOCK
     cat > "$mock/mv" <<'MV'
 #!/usr/bin/env bash
 last="${@: -1}"
@@ -1143,6 +1161,11 @@ run_recover() {
         VW_RECOVER_ETC_DIR="$dir/etc" \
         VW_RECOVER_DEV_BY_UUID_DIR="$dir/dev-by-uuid" \
         VW_RECOVER_STARTUP_SCRIPT="$dir/startup.sh" \
+        VW_OPERATIONS_LOCK="$dir/operations.lock" \
+        VW_OPERATIONS_STATE_DIR="$dir/operations-state" \
+        VW_TEST_RECOVERY_REPO="$dir/repo" \
+        VW_TEST_NESTED_LOCK="$dir/startup.lock" \
+        VW_TEST_RELEASE_LOG="${VW_TEST_RELEASE_LOG:-}" \
         MOCK_USB_KEY_PATH="$MOCK_USB_KEY_PATH" \
         MOCK_USB_RECIPIENT="$MOCK_USB_RECIPIENT" \
         MOCK_NEW_RECIPIENT="$MOCK_NEW_RECIPIENT" \
@@ -1152,6 +1175,8 @@ run_recover() {
         MOCK_SOPS_SIGNAL="${MOCK_SOPS_SIGNAL:-}" \
         MOCK_SOPS_PAUSE="${MOCK_SOPS_PAUSE:-}" \
         MOCK_SIGNAL_READY="${MOCK_SIGNAL_READY:-}" \
+        MOCK_FLOCK_CONTENDED="${MOCK_FLOCK_CONTENDED:-false}" \
+        MOCK_AGE_LOG="${MOCK_AGE_LOG:-}" \
         MOCK_MV_FAIL_DEST="${MOCK_MV_FAIL_DEST:-}" \
         MOCK_MV_SIGNAL_DEST="${MOCK_MV_SIGNAL_DEST:-}" \
         MOCK_MV_SIGNAL_NAME="${MOCK_MV_SIGNAL_NAME:-}" \
@@ -1178,6 +1203,11 @@ run_recover_async() {
         VW_RECOVER_ETC_DIR="$dir/etc" \
         VW_RECOVER_DEV_BY_UUID_DIR="$dir/dev-by-uuid" \
         VW_RECOVER_STARTUP_SCRIPT="$dir/startup.sh" \
+        VW_OPERATIONS_LOCK="$dir/operations.lock" \
+        VW_OPERATIONS_STATE_DIR="$dir/operations-state" \
+        VW_TEST_RECOVERY_REPO="$dir/repo" \
+        VW_TEST_NESTED_LOCK="$dir/startup.lock" \
+        VW_TEST_RELEASE_LOG="${VW_TEST_RELEASE_LOG:-}" \
         MOCK_USB_KEY_PATH="$MOCK_USB_KEY_PATH" \
         MOCK_USB_RECIPIENT="$MOCK_USB_RECIPIENT" \
         MOCK_NEW_RECIPIENT="$MOCK_NEW_RECIPIENT" \
@@ -1187,6 +1217,8 @@ run_recover_async() {
         MOCK_SOPS_SIGNAL="${MOCK_SOPS_SIGNAL:-}" \
         MOCK_SOPS_PAUSE="${MOCK_SOPS_PAUSE:-}" \
         MOCK_SIGNAL_READY="${MOCK_SIGNAL_READY:-}" \
+        MOCK_FLOCK_CONTENDED="${MOCK_FLOCK_CONTENDED:-false}" \
+        MOCK_AGE_LOG="${MOCK_AGE_LOG:-}" \
         MOCK_MV_FAIL_DEST="${MOCK_MV_FAIL_DEST:-}" \
         MOCK_MV_SIGNAL_DEST="${MOCK_MV_SIGNAL_DEST:-}" \
         MOCK_MV_SIGNAL_NAME="${MOCK_MV_SIGNAL_NAME:-}" \
@@ -1248,6 +1280,104 @@ test_non_root_bypass_requires_test_mode() {
         fail 'single-variable non-root bypass should fail'
     fi
     grep -q 'ERROR: Must run as root.' "$dir/out" || fail 'root error missing when VW_TEST_MODE is absent'
+}
+
+test_missing_flock_is_rejected() {
+    local dir noflock bash_path cmd file
+    dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    noflock="$dir/noflock-bin"
+    mkdir -p "$noflock"
+    for file in "$dir/mockbin"/*; do
+        [[ "${file##*/}" == flock ]] && continue
+        ln -s "$file" "$noflock/${file##*/}"
+    done
+    for cmd in awk bash basename dirname install tr; do
+        ln -s "$(command -v "$cmd")" "$noflock/$cmd"
+    done
+    bash_path="$(command -v bash)"
+    if env PATH="$noflock" \
+        VW_TEST_MODE=true \
+        VW_RECOVER_TEST_ALLOW_NON_ROOT=true \
+        VW_RECOVER_ETC_DIR="$dir/etc" \
+        VW_RECOVER_DEV_BY_UUID_DIR="$dir/dev-by-uuid" \
+        VW_RECOVER_STARTUP_SCRIPT="$dir/startup.sh" \
+        "$bash_path" "$dir/repo/recover.sh" --state-dir "$dir/state" --key "$dir/usb-key.txt" > "$dir/out" 2>&1; then
+        fail 'recovery without flock should fail prerequisite validation'
+    fi
+    grep -q 'ERROR: Missing required command: flock' "$dir/out" || {
+        cat "$dir/out"
+        fail 'missing flock prerequisite error not reported'
+    }
+}
+
+test_contention_prevents_recovery_mutation() {
+    local dir rc
+    dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"; snapshot_recovery_state "$dir"
+    rm -f "$dir/repo/.env"
+    set +e
+    ( MOCK_FLOCK_CONTENDED=true MOCK_AGE_LOG="$dir/age.log" run_recover "$dir" )
+    rc=$?
+    set -e
+    [[ "$rc" -eq 75 ]] || { cat "$dir/out"; fail "contention expected 75, got $rc"; }
+    assert_recovery_state_unchanged "$dir" 'operation contention'
+    assert_file_missing "$dir/repo/.env"
+    ! grep -q '^-o ' "$dir/age.log" || fail 'operational key was generated after recovery contention'
+    ! grep -q 'mock startup: OK' "$dir/out" || fail 'startup ran after recovery contention'
+    if find "$dir/state/config" "$dir/state/secrets" "$dir/repo" "$dir/etc" -type f \
+        \( -name 'secrets.*.yaml' -o -name '.sops.yaml.*' -o -name 'install.env.*' -o -name 'dr-manifest.env.*' -o -name '.age-key.txt.*' \) \
+        | grep -q .; then
+        fail 'recovery staging artifact created after contention'
+    fi
+}
+
+test_success_records_and_releases_recovery_operation() {
+    local dir list_output release_count
+    dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    if ! VW_TEST_RELEASE_LOG="$dir/release.log" run_recover "$dir"; then
+        cat "$dir/out"
+        fail 'guarded recovery should succeed'
+    fi
+    grep -qx 'operation=recovery' "$dir/operations-state/recovery.state" || fail 'recovery operation id missing from state'
+    grep -qx 'label=Recovery' "$dir/operations-state/recovery.state" || fail 'Recovery label missing from state'
+    grep -qx 'state=complete' "$dir/operations-state/recovery.state" || fail 'recovery operation was not completed during cleanup'
+    release_count="$(wc -l < "$dir/release.log" | tr -d '[:space:]')"
+    [[ "$release_count" == 1 ]] || fail "cleanup released recovery guard $release_count times"
+    grep -qx '0' "$dir/release.log" || fail 'successful recovery release status mismatch'
+    list_output="$(env VW_OPERATIONS_LOCK="$dir/operations.lock" VW_OPERATIONS_STATE_DIR="$dir/operations-state" \
+        bash -c 'source "$1"; operation_list' _ "$dir/repo/lib/operations.sh")"
+    grep -q '^Recovery$' <<< "$list_output" || fail 'Recovery missing from operation inventory'
+}
+
+test_nested_startup_inherits_recovery_operation() {
+    local dir
+    if [[ "$(uname -s)" != Linux || ! -d "/proc/$$/fd" ]] || ! command -v flock >/dev/null 2>&1; then
+        printf '# SKIP nested recovery/startup inheritance requires Linux /proc and real flock\n'
+        return 0
+    fi
+    dir=$(make_case); write_mocks "$dir"
+    rm -f "$dir/mockbin/flock"
+    cat > "$dir/startup.sh" <<'NESTED_STARTUP'
+#!/usr/bin/env bash
+set -euo pipefail
+source "${VW_TEST_RECOVERY_REPO}/lib/operations.sh"
+operation_acquire \
+    --id startup \
+    --label "Startup" \
+    --specific-lock "$VW_TEST_NESTED_LOCK" \
+    --non-interactive skip
+[[ "$OPERATION_OWNS_GLOBAL" == false ]]
+[[ "$OPERATION_OWNS_STATE" == false ]]
+[[ "$OPERATION_STATE_FILE" == "$VW_OPERATION_PARENT_STATE" ]]
+[[ "$VW_OPERATION_PARENT_ID" == recovery ]]
+printf 'nested startup inherited recovery operation\n'
+operation_release 0
+NESTED_STARTUP
+    chmod +x "$dir/startup.sh"
+    if ! run_recover "$dir"; then
+        cat "$dir/out"
+        fail 'nested startup should inherit the recovery operation'
+    fi
+    grep -q 'nested startup inherited recovery operation' "$dir/out" || fail 'nested startup inheritance marker missing'
 }
 
 test_non_mounted() {
@@ -1506,6 +1636,10 @@ test_health_failure_reports_nonzero_without_rollback() {
 run_test 'missing --state-dir prints usage and fails' test_missing_state_dir
 run_test 'missing --key prints usage and fails' test_missing_key
 run_test 'non-root bypass requires VW_TEST_MODE and recover flag' test_non_root_bypass_requires_test_mode
+run_test 'flock is a required recovery prerequisite' test_missing_flock_is_rejected
+run_test 'operation contention exits 75 before recovery mutation' test_contention_prevents_recovery_mutation
+run_test 'recovery operation is recorded, listed, and released exactly once' test_success_records_and_releases_recovery_operation
+run_test 'nested startup inherits recovery operation without self-contention' test_nested_startup_inherits_recovery_operation
 run_test 'non-mounted state directory prints exact message' test_non_mounted
 run_test 'boot storage mode clears block-volume env values' test_boot_mode_clears_block_env
 run_test 'block storage mode writes UUID device path and sentinel' test_block_mode_uuid_device
@@ -1526,7 +1660,7 @@ run_test 'successful fresh-clone recovery updates all artifacts' test_success_fr
 run_test 'startup failure after commit exits non-zero without rollback' test_startup_failure_returns_nonzero_without_rollback
 run_test 'health-check failure after commit exits non-zero without rollback' test_health_failure_reports_nonzero_without_rollback
 
-[[ "$TESTS_RUN" -eq 22 ]] || fail "expected 22 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 26 ]] || fail "expected 26 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )

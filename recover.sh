@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
+source "${SCRIPT_DIR}/lib/operations.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
 SOPS_CONFIG_FILE="${SCRIPT_DIR}/.sops.yaml"
 VW_ETC_DIR="${VW_RECOVER_ETC_DIR:-/etc/vaultwarden}"
@@ -52,6 +53,7 @@ POLICY_PROMOTED=false
 INSTALL_ENV_PROMOTED=false
 MANIFEST_PROMOTED=false
 RECOVERY_COMMITTED=false
+RECOVERY_GUARD_HELD=false
 ROLLBACK_DONE=false
 SENTINEL_PATH=""
 SENTINEL_CREATED=false
@@ -179,7 +181,7 @@ check_prerequisites() {
     fi
 
     local cmd
-    for cmd in mountpoint findmnt sops age-keygen awk git install docker curl bash blkid mktemp cp mv rm chmod sed realpath; do
+    for cmd in mountpoint findmnt sops age-keygen awk git install docker curl bash blkid flock mktemp cp mv rm chmod sed realpath; do
         command -v "$cmd" >/dev/null 2>&1 || fatal "Missing required command: $cmd"
     done
 
@@ -517,6 +519,10 @@ cleanup() {
     [[ -n "${INSTALL_ENV_STAGING:-}" && -f "$INSTALL_ENV_STAGING" ]] && rm -f "$INSTALL_ENV_STAGING"
     [[ -n "${MANIFEST_STAGING:-}" && -f "$MANIFEST_STAGING" ]] && rm -f "$MANIFEST_STAGING"
     [[ -n "${STAGED_ACTIVE_KEY:-}" && -f "$STAGED_ACTIVE_KEY" ]] && rm -f "$STAGED_ACTIVE_KEY"
+    if [[ "$RECOVERY_GUARD_HELD" == "true" ]]; then
+        RECOVERY_GUARD_HELD=false
+        operation_release "$rc"
+    fi
     return "$rc"
 }
 
@@ -541,6 +547,11 @@ main() {
     check_prerequisites
     parse_manifest
     print_recovery_preflight_plan
+    operation_acquire \
+        --id recovery \
+        --label "Recovery" \
+        --non-interactive skip
+    RECOVERY_GUARD_HELD=true
     create_backups
     generate_new_key
     run_staged_rekey
