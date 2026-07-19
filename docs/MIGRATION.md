@@ -416,7 +416,7 @@ sudo make restart
 sudo make health
 ```
 
-Do not use `chmod -R 777` or a broad hard-coded UID/GID repair.
+Do not use `chmod -R 777` or a hard-coded numeric ownership fix across the whole state directory.
 
 ### Target starts but automation fails validation
 
