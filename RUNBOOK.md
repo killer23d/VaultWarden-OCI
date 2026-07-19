@@ -280,6 +280,12 @@ CrowdSec runs as a host service. The firewall bouncer enforces CrowdSec decision
 | Bouncer registration | `sudo cscli bouncers list` |
 | CrowdSec status helper | `sudo make crowdsec-status` |
 | Security report | `sudo make security-report` |
+| Enable security-event email | `sudo ./utilities/crowdsec-email.sh enable` |
+| Inspect email integration | `sudo ./utilities/crowdsec-email.sh status` |
+| Test email plugin dispatch | `sudo ./utilities/crowdsec-email.sh test` |
+| Disable security-event email | `sudo ./utilities/crowdsec-email.sh disable` |
+
+The optional security-event email controller updates the environment and managed CrowdSec configuration through the established reconciliation path. Its test confirms plugin dispatch; confirm mailbox receipt separately.
 
 To remove a ban:
 
@@ -361,6 +367,8 @@ sudo ./recover.sh \
   --state-dir /mnt/vw-data \
   --key /secure/path/offline-age-key.txt
 ```
+
+If another guarded operation is active, non-interactive recovery exits with status `75` before creating recovery artifacts. Run `sudo make operations`, wait for the active owner to finish, and retry.
 
 `recover.sh` uses the offline private key in place, generates a new operational Age key, and commits the recovered ciphertext, key, SOPS policy, persistent environment, and DR manifest as one local recovery identity before startup.
 
