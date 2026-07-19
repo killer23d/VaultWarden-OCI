@@ -149,6 +149,9 @@ require_root() {
         # They are rendered into an executable sudo remediation command; they
         # are not a place for custom diagnostic prose.
         local caller="${BASH_SOURCE[1]:-$0}" remediation arg
+        if [[ "$caller" != */* && -f "./$caller" ]]; then
+            caller="./$caller"
+        fi
         printf -v remediation 'sudo %q' "$caller"
         for arg in "$@"; do
             printf -v remediation '%s %q' "$remediation" "$arg"
