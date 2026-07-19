@@ -41,7 +41,7 @@ For direct SQLite migration, stop the source Vaultwarden service before taking t
 Clone and install the current project:
 
 ```bash
-git clone https://github.com/killer23d/VaultWarden-OCI.git
+git clone --branch delta https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh utilities/*.sh
 
@@ -416,7 +416,7 @@ sudo make restart
 sudo make health
 ```
 
-Do not use `chmod -R 777` or a hard-coded numeric ownership fix across the whole state directory.
+Do not use `chmod -R 777` or a broad hard-coded UID/GID repair.
 
 ### Target starts but automation fails validation
 
