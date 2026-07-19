@@ -19,6 +19,7 @@ Metadata/help/read-only paths may intentionally work without root when the ownin
 | Utility | Owner/entry point | Purpose |
 | :-- | :-- | :-- |
 | `backup-run.sh` | `backup.sh` | backup creation, verify, retention, rclone sync, inventory |
+| `crowdsec-email.sh` | direct | transaction-safe enable, disable, status, and test controls for optional CrowdSec security-event email |
 | `crowdsec-worker-apply.sh` | direct/schema apply | render and apply CrowdSec Workers bouncer config |
 | `env-edit.sh` | `make edit-env`, `make sync-env` | edit/sync/status for non-secret environment state |
 | `key-rotate.sh` | `make key-rotate` | operational Age/SOPS key rotation |
@@ -166,6 +167,17 @@ The supported architecture is CrowdSec on the host with:
 
 - `crowdsec-firewall-bouncer` for host firewall enforcement;
 - `crowdsec-cloudflare-worker-bouncer` for the configured locally generated decisions synchronized to Cloudflare Workers KV.
+
+Manage the optional CrowdSec security-event email integration through its dedicated controller:
+
+```bash
+sudo utilities/crowdsec-email.sh enable
+sudo utilities/crowdsec-email.sh status
+sudo utilities/crowdsec-email.sh test
+sudo utilities/crowdsec-email.sh disable
+```
+
+`enable` and `disable` update the environment transactionally and delegate to the existing CrowdSec reconciliation path. `status` checks the environment flag and managed markers; `test` confirms dispatch to the plugin but mailbox receipt must still be verified.
 
 After rotating Workers bouncer credentials/IDs, use the normal schema apply behavior or:
 
