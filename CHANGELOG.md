@@ -17,6 +17,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Added schema-owned secret `apply` metadata so runtime secret reconciliation and downstream configuration actions are driven by validated schema contracts rather than loose service-name metadata.
 - Added a canonical CrowdSec Cloudflare Workers configuration apply helper and an explicit timed `yes`/`no` prompt after relevant secrets edits so operators can immediately re-render and verify the installed bouncer configuration.
 - Added machine-readable JSON output for backup listing and maintenance health status.
+- Added `utilities/crowdsec-email.sh` as a transaction-safe root-operated controller for enabling, disabling, inspecting, and testing the optional CrowdSec security-event email integration.
 
 ### Changed
 
@@ -31,7 +32,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `setup-storage.sh` now supports canonical `setup`, `verify`, and `migrate` modes while retaining compatibility aliases; migration parsing and runtime-derived argument resolution are separately owned and explicit CLI mode/options win over environment defaults.
 - Secrets runtime export now reconciles schema-managed files, revokes stale or inactive schema-managed runtime secret files, and preserves operator-owned files outside the schema contract.
 - The operator `Makefile` was simplified by removing redundant developer test/lint wrappers. `./tests/run-tests.sh all` is the canonical permanent regression entry point.
-- Permanent top-level regression tests were consolidated from 30 single-purpose/historical scripts into 15 domain suites without intentionally reducing production contract coverage.
+- Permanent regression cases were organized under four public domain suites and now execute directly at their registered `tests/suites/<suite>/case-*.bash` paths without creating compatibility links in the checkout.
 - Generated operator command-reference capture was expanded and kept deterministic so long help output, including systemd installation/validation and recovery commands, is not silently truncated.
 - Documentation and operator prompts were aligned with the root-operated model, the three backup tiers, offline Age recipient custody, recovery-kit terminology, restore start policies, and supported systemd workflows.
 
@@ -50,6 +51,11 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Fixed CrowdSec Workers secret edits that could leave the installed bouncer configuration stale without an explicit operator apply path.
 - Fixed Postfix startup compatibility by removing the upstream-incompatible read-only root filesystem setting while retaining compatible container hardening controls.
 - Fixed dependency ownership gaps for supported backup paths, including normal setup ownership and verification of `zstd`.
+- Fixed CrowdSec notification reconciliation to validate sender-domain policy, reject duplicate/unmanaged notification references, normalize managed-file metadata, escape dynamic HTML fields, and preserve operator-owned profile content.
+- Fixed CrowdSec validation and notification subprocesses, the shared spinner, and external bouncer execution boundaries so inherited operation-lock descriptors cannot leave stale-looking contention after the parent exits.
+- Fixed hardened systemd maintenance services so UFW and optional CrowdSec validation receive only the required writable paths while real firewall-update failures still propagate.
+- Fixed state-volume recovery so it acquires the shared operation guard before creating or promoting recovery artifacts and returns exit `75` without mutation when another operation owns the guard.
+- Fixed destructive setup acknowledgement, root-remediation command hints, read-only dashboard environment inspection, and lazy Docker project-label resolution so public operator paths remain executable and truthful.
 
 ### Security
 
