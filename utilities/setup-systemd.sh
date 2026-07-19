@@ -184,6 +184,7 @@ _require_cli_value() {
     fi
 }
 
+ORIGINAL_ARGS=("$@")
 _ACTION=""
 _START_POLICY_EXPLICIT=false
 while [[ $# -gt 0 ]]; do
@@ -703,7 +704,6 @@ _render_startup_service() {
 }
 
 install_units() {
-    if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     _setup_systemd_acquire_guard "Systemd install" "install" || exit $?
     log_header "VaultWarden-OCI systemd Timer Installation"
 
@@ -1037,7 +1037,6 @@ install_units() {
 }
 
 remove_units() {
-    if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     _setup_systemd_acquire_guard "Systemd remove" "remove" || exit $?
     log_header "VaultWarden-OCI systemd Timer Removal"
 
@@ -1134,7 +1133,6 @@ remove_units() {
 }
 
 validate_installation() {
-    if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     log_header "VaultWarden-OCI Installation Validation"
     local errors=0
     local warnings=0
@@ -1502,7 +1500,7 @@ main() {
         --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
     esac
     load_project_environment || exit 1
-    (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
+    require_root "${ORIGINAL_ARGS[@]}"
 
     if [[ "$STATUS" == "true" ]]; then
         show_status

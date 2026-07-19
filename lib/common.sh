@@ -145,9 +145,19 @@ is_root() {
 
 require_root() {
     if ! is_root; then
-        local caller="${BASH_SOURCE[1]:-$0}"
+        # Arguments are the invoking script's original command arguments.
+        # They are rendered into an executable sudo remediation command; they
+        # are not a place for custom diagnostic prose.
+        local caller="${BASH_SOURCE[1]:-$0}" remediation arg
+        if [[ "$caller" != */* && -f "./$caller" ]]; then
+            caller="./$caller"
+        fi
+        printf -v remediation 'sudo %q' "$caller"
+        for arg in "$@"; do
+            printf -v remediation '%s %q' "$remediation" "$arg"
+        done
         log_error "This script must be run as root."
-        log_hint "Re-run with: sudo ${caller} ${*:-}"
+        log_hint "Re-run with: ${remediation}"
         exit 1
     fi
 }
