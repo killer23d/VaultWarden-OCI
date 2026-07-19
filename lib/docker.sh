@@ -34,24 +34,38 @@ _VW_DOCKER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_DOCKER_LIB_DIR}/log.sh"
 unset _VW_DOCKER_LIB_DIR
 
-# Override DOCKER_PROJECT_LABEL in .env if this host uses a non-default Compose project name.
-if [[ -z "${DOCKER_PROJECT_LABEL:-}" ]]; then
-    _COMPOSE_PROJECT_NAME=""
-    if command -v jq >/dev/null 2>&1; then
-        _COMPOSE_PROJECT_NAME=$(docker compose config --format json 2>/dev/null \
-            | jq -r '.name // empty' 2>/dev/null || true)
+# Preserve explicit caller configuration without inspecting Docker or the
+# caller's current Compose context while this library is being sourced.
+_DOCKER_PROJECT_LABEL_RESOLVED=false
+if [[ -n "${DOCKER_PROJECT_LABEL:-}" ]]; then
+    _DOCKER_PROJECT_LABEL_RESOLVED=true
+    export DOCKER_PROJECT_LABEL
+fi
+
+_docker_resolve_project_label() {
+    local compose_project_name=""
+
+    [[ "$_DOCKER_PROJECT_LABEL_RESOLVED" == true ]] && return 0
+    if [[ -n "${DOCKER_PROJECT_LABEL:-}" ]]; then
+        _DOCKER_PROJECT_LABEL_RESOLVED=true
+        export DOCKER_PROJECT_LABEL
+        return 0
     fi
-    if [[ -n "${_COMPOSE_PROJECT_NAME:-}" ]]; then
-        DOCKER_PROJECT_LABEL="label=com.docker.compose.project=${_COMPOSE_PROJECT_NAME}"
+    _DOCKER_PROJECT_LABEL_RESOLVED=true
+
+    if command -v docker >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        compose_project_name="$(docker compose config --format json 2>/dev/null \
+            | jq -r '.name // empty' 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$compose_project_name" ]]; then
+        DOCKER_PROJECT_LABEL="label=com.docker.compose.project=${compose_project_name}"
     else
         DOCKER_PROJECT_LABEL="label=com.docker.compose.project=vaultwarden-oci"
-        # log_warn may not be available yet if common.sh hasn't been sourced;
-        # use a plain echo to stderr so the warning is never silently swallowed.
-        echo "docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override." >&2 || true
     fi
-    unset _COMPOSE_PROJECT_NAME
-fi
-export DOCKER_PROJECT_LABEL
+    export DOCKER_PROJECT_LABEL
+    log_debug "Docker prune project filter resolved to: ${DOCKER_PROJECT_LABEL}"
+}
 
 
 check_docker_available() {
@@ -469,6 +483,7 @@ run_in_service() {
 #
 # Emits '--filter VALUE' as separate tokens using printf '%s\n'.
 _docker_prune_filter() {
+    _docker_resolve_project_label
     if [[ -n "${DOCKER_PROJECT_LABEL:-}" ]]; then
         printf -- '--filter\n%s\n' "${DOCKER_PROJECT_LABEL}"
     fi
@@ -477,6 +492,7 @@ _docker_prune_filter() {
 cleanup_containers() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
+    _docker_resolve_project_label
     mapfile -t _prune_args < <(_docker_prune_filter)
     local docker_err
     if ! docker_err=$(docker container prune -f "${_prune_args[@]}" 2>&1 >/dev/null); then
@@ -504,6 +520,7 @@ cleanup_containers() {
 cleanup_images() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
+    _docker_resolve_project_label
     mapfile -t _prune_args < <(_docker_prune_filter)
     local docker_err
     if ! docker_err=$(docker image prune -f --filter "until=48h" "${_prune_args[@]}" 2>&1 >/dev/null); then
@@ -531,6 +548,7 @@ cleanup_volumes() {
 
     if [[ $docker_major -ge 25 ]]; then
         local _prune_args=()
+        _docker_resolve_project_label
         mapfile -t _prune_args < <(_docker_prune_filter)
         local docker_err
         # Redirect order: 2>&1 first (stderr → $() pipe), then 1>/dev/null (stdout → /dev/null).
@@ -555,6 +573,7 @@ cleanup_volumes() {
 cleanup_networks() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
+    _docker_resolve_project_label
     mapfile -t _prune_args < <(_docker_prune_filter)
     local docker_err
     if ! docker_err=$(docker network prune -f "${_prune_args[@]}" 2>&1 >/dev/null); then
