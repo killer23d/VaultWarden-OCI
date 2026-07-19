@@ -91,6 +91,7 @@ DRY_RUN=false
 FORCE=false
 FORCE_IPTABLES=false
 YES=false
+ORIGINAL_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -543,7 +544,7 @@ print(n.get('name', '${net}_network'))
 }
 
 main() {
-    (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
+    require_root "${ORIGINAL_ARGS[@]}"
     if [[ "$DRY_RUN" != "true" ]]; then
         local _ops_policy="fail"
         if [[ "$AUTO_MODE" == "true" || ! -t 0 || ! -t 1 ]]; then
