@@ -1,0 +1,88 @@
+name: Temporary CQA integration v2 validator
+
+on:
+  pull_request:
+    branches:
+      - delta
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.head_ref == 'cqa-merge-safety-export'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Merge exact remediation heads without conflict
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cqa-integration-evidence/suites
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+          test "$(git rev-parse origin/delta)" = '5cdee3c2f527e565e76e7da78da1d4f628b26041'
+          test "$(git rev-parse origin/cqa-force-ack)" = 'ae76c02f45393c13a02ede72e8c0c92157de58fc'
+          test "$(git rev-parse origin/cqa-lock-preparation)" = 'f248cb57f72cc8cba13ae00c03323f758b31a7cf'
+          test "$(git rev-parse origin/cqa-root-hints)" = 'c70000dab8d2b5e68c9ef92a7fc13aca723b1ac8'
+          test "$(git rev-parse origin/cqa-readonly-config)" = 'e1dab709af894ab28f1b7e09d223f317bcb0bfea'
+          test "$(git rev-parse origin/cqa-recovery-guard)" = '0c2d6031bca9b7c8872ba0df76ecd0133e0dbe96'
+          test "$(git rev-parse origin/cqa-remediation)" = '9a8314b4c4d1ae4217f8fee4e23f32c6fab021d1'
+          test -z "$(git ls-remote origin refs/heads/cqa-split-integration-v2)"
+
+          git config user.name OpenAI
+          git config user.email noreply@openai.com
+          git switch -C cqa-split-integration-v2 5cdee3c2f527e565e76e7da78da1d4f628b26041
+          for branch in cqa-force-ack cqa-lock-preparation cqa-root-hints cqa-readonly-config cqa-recovery-guard; do
+            echo "MERGE ${branch}" | tee -a /tmp/cqa-integration-evidence/merge-order.log
+            git merge --no-ff --no-edit "origin/${branch}" 2>&1 | tee -a /tmp/cqa-integration-evidence/merge-order.log
+          done
+          test -z "$(git status --short)"
+          git rev-parse HEAD | tee /tmp/cqa-integration-evidence/commit.txt
+          git rev-parse 'HEAD^{tree}' | tee /tmp/cqa-integration-evidence/tree.txt
+
+      - name: Run complete integration validation matrix
+        run: |
+          set -euo pipefail
+          git diff --check
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n 1 bash -n
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck -x --severity=warning
+          docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
+          DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
+          git diff --exit-code
+          ./tests/run-tests.sh list | tee /tmp/cqa-integration-evidence/list.log
+          for suite in foundation security operations data-protection; do
+            ./tests/run-tests.sh "$suite" | tee "/tmp/cqa-integration-evidence/suites/${suite}.log"
+          done
+
+      - name: Record aggregate comparison and push persistent branch
+        run: |
+          set -euo pipefail
+          git diff --name-only 9a8314b4c4d1ae4217f8fee4e23f32c6fab021d1 HEAD | tee /tmp/cqa-integration-evidence/diff-names.txt
+          test "$(cat /tmp/cqa-integration-evidence/diff-names.txt)" = $'lib/common.sh\ntests/suites/security/case-security-privileges.bash'
+          git diff 9a8314b4c4d1ae4217f8fee4e23f32c6fab021d1 HEAD -- lib/common.sh tests/suites/security/case-security-privileges.bash > /tmp/cqa-integration-evidence/old-aggregate.diff
+          git diff --stat 5cdee3c2f527e565e76e7da78da1d4f628b26041 HEAD | tee /tmp/cqa-integration-evidence/diffstat.txt
+          git push origin HEAD:refs/heads/cqa-split-integration-v2
+
+      - name: Upload persistent integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cqa-split-integration-v2-evidence
+          path: /tmp/cqa-integration-evidence
+          if-no-files-found: warn
+          retention-days: 7
