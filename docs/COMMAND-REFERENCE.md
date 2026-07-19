@@ -134,7 +134,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       'sudo ./utilities/secrets-export-recovery-kit.sh' BEFORE using
                       --force on a running installation. To confirm you understand,
                       set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
-                      environment (or answer 'yes' at the interactive prompt).
+                      environment (or type YES at the interactive prompt).
   --dry-run           Print what would happen without making any changes.
   --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
                       Existing ext4/xfs filesystems require explicit operator
