@@ -143,13 +143,7 @@ The current critical service policy is owned by `lib/defaults.sh`. Do not hard-c
 
 The health path verifies the live runtime and includes checks for storage, secrets, Docker services, HTTP/TLS behavior, backup state, and other configured integrations according to the current implementation.
 
-When the existing health alert-state path is writable, unhealthy checks are
-correlated under one active incident ID. Existing per-check alert/cooldown
-behavior is unchanged. A successful recovery email summarizes the preceding
-unhealthy checks and duration, then removes only the active incident snapshot.
-If incident persistence is unavailable, health continues without correlation;
-it does not change permissions or treat missing incident context as a health
-failure.
+When the existing health alert-state path is writable, unhealthy checks are correlated under one active incident ID. Existing per-check alert/cooldown behavior is unchanged. A successful recovery email summarizes the preceding unhealthy checks and duration, then removes only the active incident snapshot. If incident persistence is unavailable, health continues without correlation; it does not change permissions or treat missing incident context as a health failure.
 
 Repair behavior must be explicit. A failed/unavailable probe cannot be converted into a green status merely because the probe was skipped.
 
@@ -563,24 +557,18 @@ Apply current Worker config after relevant secret rotation:
 sudo ./utilities/crowdsec-worker-apply.sh
 ```
 
-Optional CrowdSec security-event email is disabled by default. Enable or disable
-`CROWDSEC_EMAIL_NOTIFICATIONS` through `sudo make edit-env`, then reconcile:
+Manage the optional CrowdSec security-event email through its dedicated controller:
 
 ```bash
-sudo ./utilities/setup-crowdsec.sh
-sudo crowdsec -t
+sudo ./utilities/crowdsec-email.sh enable
+sudo ./utilities/crowdsec-email.sh status
+sudo ./utilities/crowdsec-email.sh test
+sudo ./utilities/crowdsec-email.sh disable
 ```
 
-After the stack is running, explicitly test delivery through the existing
-loopback Postfix route:
+`enable` and `disable` update `CROWDSEC_EMAIL_NOTIFICATIONS` transactionally and delegate to the established CrowdSec reconciliation path. `status` checks the environment flag and managed markers. `test` confirms plugin dispatch through the loopback Postfix route but does not prove mailbox receipt.
 
-```bash
-sudo cscli notifications test vaultwarden_email
-```
-
-This is separate from health-check incident mail and generic systemd
-unit-failure mail. Normal CrowdSec setup performs static validation but no live
-email test.
+This is separate from health-check incident mail and generic systemd unit-failure mail. Normal CrowdSec setup performs static validation but no live email test.
 
 See [CROWDSEC.md](CROWDSEC.md).
 
