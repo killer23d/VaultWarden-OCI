@@ -29,11 +29,21 @@ NC="${COLOR_RESET}"
 
 # Read a single variable from .env without sourcing the whole file.
 _read_env_var() {
-    local var="$1" default="$2"
+    local var="$1" default="$2" line key val=""
     if [[ -f "${REPO_ROOT}/.env" && -r "${REPO_ROOT}/.env" ]]; then
-        local val
-        val="$(grep -E "^${var}=" "${REPO_ROOT}/.env" 2>/dev/null \
-            | cut -d= -f2- | head -1 || true)"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" == *=* ]] || continue
+            key="${line%%=*}"
+            [[ "$key" == "$var" ]] || continue
+            val="${line#*=}"
+        done < "${REPO_ROOT}/.env"
+        if (( ${#val} >= 2 )); then
+            if [[ "${val:0:1}" == '"' && "${val: -1}" == '"' ]]; then
+                val="${val:1:${#val}-2}"
+            elif [[ "${val:0:1}" == "'" && "${val: -1}" == "'" ]]; then
+                val="${val:1:${#val}-2}"
+            fi
+        fi
         printf '%s' "${val:-${default}}"
     else
         printf '%s' "${default}"
