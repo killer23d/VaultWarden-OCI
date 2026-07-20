@@ -29,13 +29,15 @@ jobs:
 
           path = Path("utilities/maintenance-health.sh")
           text = path.read_text()
-          start = text.index('\nif _send_notification "$subject" "$body"; then\n', text.index('_notify_recovery()')) + 1
+          start = text.index('    if _send_notification "$subject" "$body"; then\n', text.index('_notify_recovery()'))
           end = text.index('    _release_recovery_lock\n', start)
           block = text[start:end]
-          if not block.endswith('fi\n'):
+          lines = block.splitlines(keepends=True)
+          if not lines or lines[0] != '    if _send_notification "$subject" "$body"; then\n' \
+                  or lines[-1] != 'fi\n':
               raise SystemExit("unexpected recovery delivery block")
-          indented = ''.join(f'    {line}' if line.strip() else line for line in block.splitlines(keepends=True))
-          path.write_text(text[:start] + indented + text[end:])
+          aligned = lines[0] + ''.join(f'    {line}' if line.strip() else line for line in lines[1:])
+          path.write_text(text[:start] + aligned + text[end:])
           PY
 
       - name: Validate formatting-only fix
