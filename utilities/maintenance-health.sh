@@ -1331,46 +1331,46 @@ _notify_failures() {
 
 _notify_recovery() {
     [[ $failed -eq 0 && $warnings -eq 0 ]] || return 0
+
+    if [[ ! -e "$ACTIVE_INCIDENT_FILE" ]]; then
+        log_debug "No active health incident — recovery notification not applicable"
+        return 0
+    fi
+    if ! _incident_load "$ACTIVE_INCIDENT_FILE"; then
+        log_warn "Active health incident state is unreadable or invalid; preserving '${ACTIVE_INCIDENT_FILE}' and suppressing recovery notification."
+        return 0
+    fi
     if ! _acquire_alert_lock "recovery" "${ALERT_RECOVERY_TTL}"; then
         log_info "Recovery notification already sent within TTL — suppressing"
         return 0
     fi
-    local recovery_date recovery_time subject body incident_loaded=false
+
+    local recovery_date recovery_time subject body
     local started_epoch recovery_epoch duration prior_lines="" name
     recovery_date="$(date)"
     recovery_time="$(date -Iseconds)"
-    subject="VaultWarden Health RECOVERED on $(hostname)"
-    if [[ -e "$ACTIVE_INCIDENT_FILE" ]] && _incident_load "$ACTIVE_INCIDENT_FILE"; then
-        incident_loaded=true
-        started_epoch="$(date -d "$ACTIVE_INCIDENT_STARTED_AT" +%s 2>/dev/null || printf '')"
-        recovery_epoch="$(date -d "$recovery_time" +%s 2>/dev/null || date +%s)"
-        if [[ "$started_epoch" =~ ^[0-9]+$ && "$recovery_epoch" =~ ^[0-9]+$ \
-            && "$recovery_epoch" -ge "$started_epoch" ]]; then
-            duration="$(_incident_format_duration "$(( recovery_epoch - started_epoch ))")"
-        else
-            duration="unknown"
-        fi
-        for name in "${incident_check_order[@]}"; do
-            printf -v prior_lines '%s- %s [%s]: %s\n' \
-                "$prior_lines" "$name" "${incident_statuses[$name]^^}" "${incident_details[$name]}"
-        done
-        subject="VaultWarden Health RECOVERED [Incident ${ACTIVE_INCIDENT_ID}] on $(hostname)"
-        printf -v body \
-            'All health checks passed at %s\n\nIncident: %s\nIncident started: %s\nLast unhealthy observation: %s\nRecovered: %s\nDuration: %s\nHost: %s\n\nPreviously unhealthy checks:\n%s\nCurrent totals:\nPassed : %s\nWarnings: %s\nFailed : %s\n\nNo further alerts will fire until the next failure.' \
-            "$recovery_date" "$ACTIVE_INCIDENT_ID" "$ACTIVE_INCIDENT_STARTED_AT" \
-            "$ACTIVE_INCIDENT_LAST_UNHEALTHY_AT" "$recovery_time" "$duration" \
-            "$ACTIVE_INCIDENT_HOSTNAME" "$prior_lines" "$passed" "$warnings" "$failed"
+    started_epoch="$(date -d "$ACTIVE_INCIDENT_STARTED_AT" +%s 2>/dev/null || printf '')"
+    recovery_epoch="$(date -d "$recovery_time" +%s 2>/dev/null || date +%s)"
+    if [[ "$started_epoch" =~ ^[0-9]+$ && "$recovery_epoch" =~ ^[0-9]+$ \
+        && "$recovery_epoch" -ge "$started_epoch" ]]; then
+        duration="$(_incident_format_duration "$(( recovery_epoch - started_epoch ))")"
     else
-        printf -v body \
-            'All health checks passed at %s\n\nPassed : %s\nWarnings: %s\nFailed : %s\n\nNo preceding incident snapshot was available.\nNo further alerts will fire until the next failure.' \
-            "$recovery_date" "$passed" "$warnings" "$failed"
+        duration="unknown"
     fi
+    for name in "${incident_check_order[@]}"; do
+        printf -v prior_lines '%s- %s [%s]: %s\n' \
+            "$prior_lines" "$name" "${incident_statuses[$name]^^}" "${incident_details[$name]}"
+    done
+    subject="VaultWarden Health RECOVERED [Incident ${ACTIVE_INCIDENT_ID}] on $(hostname)"
+    printf -v body \
+        'All health checks passed at %s\n\nIncident: %s\nIncident started: %s\nLast unhealthy observation: %s\nRecovered: %s\nDuration: %s\nHost: %s\n\nPreviously unhealthy checks:\n%s\nCurrent totals:\nPassed : %s\nWarnings: %s\nFailed : %s\n\nNo further alerts will fire until the next failure.' \
+        "$recovery_date" "$ACTIVE_INCIDENT_ID" "$ACTIVE_INCIDENT_STARTED_AT" \
+        "$ACTIVE_INCIDENT_LAST_UNHEALTHY_AT" "$recovery_time" "$duration" \
+        "$ACTIVE_INCIDENT_HOSTNAME" "$prior_lines" "$passed" "$warnings" "$failed"
     if _send_notification "$subject" "$body"; then
         log_info "Recovery notification sent"
-        if [[ "$incident_loaded" == "true" ]]; then
-            rm -f "$ACTIVE_INCIDENT_FILE" \
-                || log_warn "Recovery email was delivered but the active incident file could not be removed: ${ACTIVE_INCIDENT_FILE}"
-        fi
+        rm -f "$ACTIVE_INCIDENT_FILE" \
+            || log_warn "Recovery email was delivered but the active incident file could not be removed: ${ACTIVE_INCIDENT_FILE}"
         return 0
     fi
     _release_recovery_lock
