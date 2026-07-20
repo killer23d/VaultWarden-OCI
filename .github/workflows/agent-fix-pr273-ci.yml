@@ -1,0 +1,207 @@
+name: Repair PR 273 CI fixtures
+
+on:
+  push:
+    branches:
+      - agent/fix-health-recovery-alerts
+
+permissions:
+  contents: write
+
+jobs:
+  repair-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-health-recovery-alerts
+          fetch-depth: 0
+
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Capture original ShellCheck diagnostics
+        shell: bash
+        run: |
+          set +e
+          shellcheck -x --severity=warning tests/suites/operations/case-health-alerts.bash 2>&1
+          rc=$?
+          set -e
+          printf 'Original focused ShellCheck exit code: %s\n' "$rc"
+
+      - name: Apply focused fixture fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          operations_path = Path("tests/suites/operations/case-health-alerts.bash")
+          operations = operations_path.read_text()
+          operations_marker = "check_health_recovery_notification_contracts() (\n"
+          operations_replacement = (
+              "# Variables in this behavioral harness are consumed by dynamically extracted\n"
+              "# production functions.\n"
+              "# shellcheck disable=SC2034\n"
+              + operations_marker
+          )
+          if operations_replacement not in operations:
+              if operations_marker not in operations:
+                  raise SystemExit("operations harness marker not found")
+              operations = operations.replace(operations_marker, operations_replacement, 1)
+              operations_path.write_text(operations)
+
+          security_path = Path("tests/suites/security/case-email.bash")
+          security = security_path.read_text()
+          security_marker = "check_recovery_notification_retry_contract() (\n"
+          security_replacement = (
+              "# Variables in this behavioral harness are consumed by dynamically extracted\n"
+              "# production functions.\n"
+              "# shellcheck disable=SC2034\n"
+              + security_marker
+          )
+          if security_replacement not in security:
+              if security_marker not in security:
+                  raise SystemExit("security retry harness marker not found")
+              security = security.replace(security_marker, security_replacement, 1)
+
+          send_block = '''send_attempts=0
+          _send_notification(){
+              send_attempts=$((send_attempts + 1))
+              if (( send_attempts == 1 )); then return 42; fi
+              return 0
+          }
+
+          first_rc=0
+          '''
+          fixture_block = '''send_attempts=0
+          _send_notification(){
+              send_attempts=$((send_attempts + 1))
+              if (( send_attempts == 1 )); then return 42; fi
+              return 0
+          }
+
+          ACTIVE_INCIDENT_ID=""
+          ACTIVE_INCIDENT_STARTED_AT=""
+          ACTIVE_INCIDENT_LAST_UNHEALTHY_AT=""
+          ACTIVE_INCIDENT_HOSTNAME=""
+          declare -a incident_check_order=()
+          declare -A incident_statuses=()
+          declare -A incident_details=()
+
+          _incident_load(){
+              ACTIVE_INCIDENT_ID="vw-test-recovery-retry"
+              ACTIVE_INCIDENT_STARTED_AT="2026-07-20T01:00:00+00:00"
+              ACTIVE_INCIDENT_LAST_UNHEALTHY_AT="2026-07-20T01:05:00+00:00"
+              ACTIVE_INCIDENT_HOSTNAME="vaultwarden-test"
+              incident_check_order=("smtp:sidecar")
+              incident_statuses["smtp:sidecar"]="fail"
+              incident_details["smtp:sidecar"]="Simulated recovery delivery failure"
+          }
+
+          _incident_format_duration(){
+              printf '5m (300s)'
+          }
+
+          mkdir -p "$ALERT_LOCK_DIR"
+          : > "$ACTIVE_INCIDENT_FILE"
+
+          first_rc=0
+          '''
+          if fixture_block not in security:
+              if send_block not in security:
+                  raise SystemExit("security retry fixture insertion point not found")
+              security = security.replace(send_block, fixture_block, 1)
+
+          first_assertion = '''[[ "$send_attempts" -eq 1 ]] || fail "failed recovery delivery was not attempted exactly once"
+          [[ ! -e "$ALERT_LOCK_DIR/recovery.cooldown" ]] \\
+              || fail "failed recovery delivery retained recovery cooldown state"
+          '''
+          first_assertion_replacement = '''[[ "$send_attempts" -eq 1 ]] || fail "failed recovery delivery was not attempted exactly once"
+          [[ -e "$ACTIVE_INCIDENT_FILE" ]] \\
+              || fail "failed recovery delivery removed active incident state"
+          [[ ! -e "$ALERT_LOCK_DIR/recovery.cooldown" ]] \\
+              || fail "failed recovery delivery retained recovery cooldown state"
+          '''
+          if first_assertion_replacement not in security:
+              if first_assertion not in security:
+                  raise SystemExit("first retry assertion anchor not found")
+              security = security.replace(first_assertion, first_assertion_replacement, 1)
+
+          success_assertion = '''[[ -e "$ALERT_LOCK_DIR/recovery.cooldown" ]] \\
+              || fail "successful recovery delivery did not retain its cooldown state"
+          grep -Fq 'Recovery notification sent' "$TMP/second.out" \\
+          '''
+          success_assertion_replacement = '''[[ -e "$ALERT_LOCK_DIR/recovery.cooldown" ]] \\
+              || fail "successful recovery delivery did not retain its cooldown state"
+          [[ ! -e "$ACTIVE_INCIDENT_FILE" ]] \\
+              || fail "successful recovery delivery retained active incident state"
+          grep -Fq 'Recovery notification sent' "$TMP/second.out" \\
+          '''
+          if success_assertion_replacement not in security:
+              if success_assertion not in security:
+                  raise SystemExit("successful retry assertion anchor not found")
+              security = security.replace(success_assertion, success_assertion_replacement, 1)
+
+          security_path.write_text(security)
+          PY
+
+      - name: Run required validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n utilities/maintenance-health.sh
+          bash -n tests/suites/operations/case-health-alerts.bash
+          bash -n tests/suites/security/case-email.bash
+          bash -n tests/run-tests.sh
+
+          ./tests/run-tests.sh operations
+          ./tests/run-tests.sh security
+          ./tests/run-tests.sh foundation
+          ./tests/run-tests.sh data-protection
+          ./tests/run-tests.sh all
+
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 shellcheck -x --severity=warning
+
+          git diff --check
+
+      - name: Commit focused fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          base_sha='${{ github.event.before }}'
+          workflow_sha='${{ github.sha }}'
+          branch='agent/fix-health-recovery-alerts'
+
+          git reset --soft "$base_sha"
+          git rm .github/workflows/agent-fix-pr273-ci.yml
+          git add \
+            tests/suites/operations/case-health-alerts.bash \
+            tests/suites/security/case-email.bash
+
+          expected=$'tests/suites/operations/case-health-alerts.bash\ntests/suites/security/case-email.bash'
+          actual="$(git diff --cached --name-only | sort)"
+          if [[ "$actual" != "$expected" ]]; then
+              printf 'Unexpected staged files:\n%s\n' "$actual" >&2
+              exit 1
+          fi
+
+          git diff --cached --check
+          git commit -m "test: align recovery fixtures with incident guard"
+          git push \
+            --force-with-lease="refs/heads/${branch}:${workflow_sha}" \
+            origin "HEAD:${branch}"
