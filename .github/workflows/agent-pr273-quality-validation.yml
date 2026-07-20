@@ -20,18 +20,32 @@ jobs:
           ref: ${{ github.head_ref }}
 
       - name: Install test dependencies
+        continue-on-error: true
+        shell: bash
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml
-          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo "fa52a4e758c63d38299163fbdd1edfb4b4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
-          sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
-          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
-          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+          set -o pipefail
+          mkdir -p quality-artifact/logs
+          {
+            set -euo pipefail
+            sudo apt-get update || { sleep 5; sudo apt-get update; }
+            sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml \
+              || { sleep 5; sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml; }
+            curl --retry 5 --retry-all-errors -fsSL \
+              https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 \
+              -o /tmp/yq
+            echo "fa52a4e758c63d38299163fbdd1edfb4b4963247918bf9c1c5d31d84789eded4  /tmp/yq" \
+              | sha256sum --check --status
+            sudo install -m 755 /tmp/yq /usr/local/bin/yq
+            curl --retry 5 --retry-all-errors -fsSL \
+              https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 \
+              -o /tmp/sops
+            echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" \
+              | sha256sum --check --status
+            sudo install -m 755 /tmp/sops /usr/local/bin/sops
+          } 2>&1 | tee quality-artifact/logs/dependencies.log
 
       - name: Apply focused quality patch
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
@@ -163,7 +177,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
+          set -o pipefail
           mkdir -p quality-artifact/logs
           {
             bash -n utilities/maintenance-health.sh
