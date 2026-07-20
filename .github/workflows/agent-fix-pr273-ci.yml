@@ -36,10 +36,21 @@ jobs:
         shell: bash
         run: |
           set +e
-          shellcheck -x --severity=warning tests/suites/operations/case-health-alerts.bash 2>&1
+          mkdir -p test-results
+          shellcheck -x --severity=warning tests/suites/operations/case-health-alerts.bash \
+            >test-results/shellcheck-before.txt 2>&1
           rc=$?
           set -e
+          cat test-results/shellcheck-before.txt
           printf 'Original focused ShellCheck exit code: %s\n' "$rc"
+
+      - name: Upload original ShellCheck diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr273-shellcheck-before
+          path: test-results/shellcheck-before.txt
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Apply focused fixture fixes
         shell: bash
@@ -185,17 +196,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          base_sha='306c704b6ae776b303dacda76aac9fd5590a3541'
-          workflow_sha='${{ github.event.pull_request.head.sha }}'
           branch='agent/fix-health-recovery-alerts'
-
-          git reset --soft "$base_sha"
           git rm .github/workflows/agent-fix-pr273-ci.yml
           git add \
             tests/suites/operations/case-health-alerts.bash \
             tests/suites/security/case-email.bash
 
-          expected=$'tests/suites/operations/case-health-alerts.bash\ntests/suites/security/case-email.bash'
+          expected=$'.github/workflows/agent-fix-pr273-ci.yml\ntests/suites/operations/case-health-alerts.bash\ntests/suites/security/case-email.bash'
           actual="$(git diff --cached --name-only | sort)"
           if [[ "$actual" != "$expected" ]]; then
               printf 'Unexpected staged files:\n%s\n' "$actual" >&2
@@ -204,6 +211,4 @@ jobs:
 
           git diff --cached --check
           git commit -m "test: align recovery fixtures with incident guard"
-          git push \
-            --force-with-lease="refs/heads/${branch}:${workflow_sha}" \
-            origin "HEAD:${branch}"
+          git push origin "HEAD:${branch}"
