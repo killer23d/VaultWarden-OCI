@@ -27,7 +27,7 @@ jobs:
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
           echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux-amd64 -o /tmp/sops
           echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
@@ -37,136 +37,117 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
+          from textwrap import dedent
 
           health_path = Path("utilities/maintenance-health.sh")
           health = health_path.read_text()
-          old_health = '''    local recovery_date recovery_time subject body
-              local started_epoch recovery_epoch duration prior_lines="" name
-          '''
-          new_health = '''    local recovery_date recovery_time subject body recovered_file
-              local started_epoch recovery_epoch duration prior_lines="" name
-          '''
-          if old_health not in health:
+          old_locals = '    local recovery_date recovery_time subject body\n    local started_epoch recovery_epoch duration prior_lines="" name\n'
+          new_locals = '    local recovery_date recovery_time subject body recovered_file\n    local started_epoch recovery_epoch duration prior_lines="" name\n'
+          if old_locals not in health:
               raise SystemExit("recovery local declaration anchor not found")
-          health = health.replace(old_health, new_health, 1)
+          health = health.replace(old_locals, new_locals, 1)
 
-          old_cleanup = '''    if _send_notification "$subject" "$body"; then
-              log_info "Recovery notification sent"
-              rm -f "$ACTIVE_INCIDENT_FILE" \\
-                  || log_warn "Recovery email was delivered but the active incident file could not be removed: ${ACTIVE_INCIDENT_FILE}"
-              return 0
-          fi
-          '''
-          new_cleanup = '''    if _send_notification "$subject" "$body"; then
-              log_info "Recovery notification sent"
-              recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
-              if mv -f -- "$ACTIVE_INCIDENT_FILE" "$recovered_file"; then
-                  chmod 0600 "$recovered_file" 2>/dev/null || true
-                  if ! rm -f -- "$recovered_file"; then
-                      log_warn "Recovery email was delivered and the active incident was closed, but recovered incident cleanup failed; stale evidence remains at '${recovered_file}'. Review and remove this file manually."
+          notify_start = health.index('    if _send_notification "$subject" "$body"; then\n', health.index('_notify_recovery()'))
+          notify_end = health.index('    _release_recovery_lock\n', notify_start)
+          old_cleanup = health[notify_start:notify_end]
+          if 'active incident file could not be removed' not in old_cleanup:
+              raise SystemExit("unexpected recovery cleanup implementation")
+          new_cleanup = dedent('''\
+              if _send_notification "$subject" "$body"; then
+                  log_info "Recovery notification sent"
+                  recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
+                  if mv -f -- "$ACTIVE_INCIDENT_FILE" "$recovered_file"; then
+                      chmod 0600 "$recovered_file" 2>/dev/null || true
+                      if ! rm -f -- "$recovered_file"; then
+                          log_warn "Recovery email was delivered and the active incident was closed, but recovered incident cleanup failed; stale evidence remains at '${recovered_file}'. Review and remove this file manually."
+                      fi
+                  else
+                      log_warn "Recovery email was delivered, but the active incident could not be archived from '${ACTIVE_INCIDENT_FILE}' to '${recovered_file}'. Stale active incident state may require operator action; the recovery cooldown remains active."
                   fi
-              else
-                  log_warn "Recovery email was delivered, but the active incident could not be archived from '${ACTIVE_INCIDENT_FILE}' to '${recovered_file}'. Stale active incident state may require operator action; the recovery cooldown remains active."
+                  return 0
               fi
-              return 0
-          fi
-          '''
-          if old_cleanup not in health:
-              raise SystemExit("recovery cleanup anchor not found")
-          health = health.replace(old_cleanup, new_cleanup, 1)
+          ''')
+          health = health[:notify_start] + new_cleanup + health[notify_end:]
           health_path.write_text(health)
 
           test_path = Path("tests/suites/operations/case-health-alerts.bash")
           test = test_path.read_text()
-          reset_anchor = '''    CAPTURED_SUBJECT=""
-              CAPTURED_BODY=""
-              ACTIVE_INCIDENT_ID=""
-          '''
-          reset_replacement = '''    CAPTURED_SUBJECT=""
-              CAPTURED_BODY=""
-              ACTIVE_INCIDENT_AVAILABLE=false
-              ACTIVE_INCIDENT_ID=""
-          '''
+          reset_anchor = '    CAPTURED_SUBJECT=""\n    CAPTURED_BODY=""\n    ACTIVE_INCIDENT_ID=""\n'
+          reset_replacement = '    CAPTURED_SUBJECT=""\n    CAPTURED_BODY=""\n    ACTIVE_INCIDENT_AVAILABLE=false\n    ACTIVE_INCIDENT_ID=""\n'
           if reset_anchor not in test:
               raise SystemExit("fixture reset anchor not found")
           test = test.replace(reset_anchor, reset_replacement, 1)
 
-          insertion_anchor = '''[[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "failed recovery delivery must preserve incident state for retry"
+          failed_assertion = '[[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "failed recovery delivery must preserve incident state for retry"\n'
+          insert_at = test.index('\n! grep -Fq \'No preceding incident snapshot was available.\' "$HEALTH"', test.index(failed_assertion))
+          regression_block = dedent('''\
 
-          ! grep -Fq 'No preceding incident snapshot was available.' "$HEALTH" \\
-          '''
-          insertion = '''[[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "failed recovery delivery must preserve incident state for retry"
+              reset_fixture
+              : > "$ACTIVE_INCIDENT_FILE"
+              recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
+              rm() {
+                  local arg
+                  for arg in "$@"; do
+                      [[ "$arg" == "$recovered_file" ]] && return 1
+                  done
+                  command rm "$@"
+              }
+              _notify_recovery || fail "successful recovery returned nonzero when archive cleanup failed"
+              unset -f rm
+              (( SEND_COUNT == 1 )) || fail "cleanup failure changed the successful delivery count"
+              (( RELEASE_COUNT == 0 )) || fail "cleanup failure released a successful recovery cooldown"
+              [[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "cleanup failure left the incident active after successful delivery"
+              [[ -e "$recovered_file" ]] || fail "cleanup failure did not preserve bounded recovered incident evidence"
+              [[ "$TRACE" == *"Recovery notification sent"* ]] || fail "cleanup failure obscured successful delivery"
+              [[ "$TRACE" == *"active incident was closed"* && "$TRACE" == *"$recovered_file"* ]] \
+                  || fail "cleanup failure warning was not truthful or actionable"
+              _notify_recovery
+              (( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) \
+                  || fail "closed incident cleanup failure permitted duplicate recovery delivery"
+              command rm -f "$recovered_file"
 
-          reset_fixture
-          : > "$ACTIVE_INCIDENT_FILE"
-          recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
-          rm() {
-              local arg
-              for arg in "$@"; do
-                  [[ "$arg" == "$recovered_file" ]] && return 1
-              done
-              command rm "$@"
-          }
-          _notify_recovery || fail "successful recovery returned nonzero when archive cleanup failed"
-          unset -f rm
-          (( SEND_COUNT == 1 )) || fail "cleanup failure changed the successful delivery count"
-          (( RELEASE_COUNT == 0 )) || fail "cleanup failure released a successful recovery cooldown"
-          [[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "cleanup failure left the incident active after successful delivery"
-          [[ -e "$recovered_file" ]] || fail "cleanup failure did not preserve bounded recovered incident evidence"
-          [[ "$TRACE" == *"Recovery notification sent"* ]] || fail "cleanup failure obscured successful delivery"
-          [[ "$TRACE" == *"active incident was closed"* && "$TRACE" == *"$recovered_file"* ]] \\
-              || fail "cleanup failure warning was not truthful or actionable"
-          _notify_recovery
-          (( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) \\
-              || fail "closed incident cleanup failure permitted duplicate recovery delivery"
-          command rm -f "$recovered_file"
+              # Replace the focused parser stubs with the real production parser helpers.
+              eval "$(extract_func "$HEALTH" _incident_sanitize)"
+              eval "$(extract_func "$HEALTH" _incident_set_check)"
+              eval "$(extract_func "$HEALTH" _incident_load)"
+              eval "$(extract_func "$HEALTH" _incident_format_duration)"
 
-          # Replace the focused parser stubs with the real production parser helpers.
-          eval "$(extract_func "$HEALTH" _incident_sanitize)"
-          eval "$(extract_func "$HEALTH" _incident_set_check)"
-          eval "$(extract_func "$HEALTH" _incident_load)"
-          eval "$(extract_func "$HEALTH" _incident_format_duration)"
+              reset_fixture
+              cat > "$ACTIVE_INCIDENT_FILE" <<'INVALID_INCIDENT'
+              meta\tincident_id\tvw-invalid-parser
+              meta\tstarted_at\t2026-07-20T01:00:00+00:00
+              check\tcontainer:vaultwarden_app\tpass\tInvalid persisted status
+              INVALID_INCIDENT
+              chmod 0600 "$ACTIVE_INCIDENT_FILE"
+              _notify_recovery
+              (( ACQUIRE_COUNT == 0 )) || fail "real parser invalid state acquired a recovery cooldown"
+              (( SEND_COUNT == 0 )) || fail "real parser invalid state attempted delivery"
+              [[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "real parser invalid state was not preserved"
 
-          reset_fixture
-          cat > "$ACTIVE_INCIDENT_FILE" <<'INVALID_INCIDENT'
-          meta\tincident_id\tvw-invalid-parser
-          meta\tstarted_at\t2026-07-20T01:00:00+00:00
-          check\tcontainer:vaultwarden_app\tpass\tInvalid persisted status
-          INVALID_INCIDENT
-          chmod 0600 "$ACTIVE_INCIDENT_FILE"
-          _notify_recovery
-          (( ACQUIRE_COUNT == 0 )) || fail "real parser invalid state acquired a recovery cooldown"
-          (( SEND_COUNT == 0 )) || fail "real parser invalid state attempted delivery"
-          [[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "real parser invalid state was not preserved"
-
-          reset_fixture
-          cat > "$ACTIVE_INCIDENT_FILE" <<'VALID_INCIDENT'
-          meta\tincident_id\tvw-real-parser-recovery
-          meta\tstarted_at\t2026-07-20T01:00:00+00:00
-          meta\tlast_unhealthy_at\t2026-07-20T01:05:00+00:00
-          meta\thostname\tvaultwarden-test
-          check\tcontainer:vaultwarden_app\tfail\tContainer was not running
-          check\tbackup:age\twarn\tLatest backup was stale
-          VALID_INCIDENT
-          chmod 0600 "$ACTIVE_INCIDENT_FILE"
-          _notify_recovery || fail "real serialized incident recovery failed"
-          (( ACQUIRE_COUNT == 1 )) || fail "real serialized incident did not acquire recovery cooldown"
-          (( SEND_COUNT == 1 )) || fail "real serialized incident did not send exactly one recovery email"
-          [[ "$CAPTURED_SUBJECT" == *"RECOVERED [Incident vw-real-parser-recovery]"* ]] \\
-              || fail "real parser recovery subject omitted incident ID"
-          [[ "$CAPTURED_BODY" == *"container:vaultwarden_app [FAIL]: Container was not running"* \\
-              && "$CAPTURED_BODY" == *"backup:age [WARN]: Latest backup was stale"* ]] \\
-              || fail "real parser recovery body omitted persisted unhealthy checks"
-          [[ "$CAPTURED_BODY" == *"Duration:"* && "$CAPTURED_BODY" != *"Duration: unknown"* ]] \\
-              || fail "real parser recovery did not produce a valid duration"
-          [[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "real parser recovery retained active incident state"
-          [[ ! -e "${ACTIVE_INCIDENT_FILE}.recovered" ]] || fail "normal recovery retained recovered archive state"
-
-          ! grep -Fq 'No preceding incident snapshot was available.' "$HEALTH" \\
-          '''
-          if insertion_anchor not in test:
-              raise SystemExit("operations regression insertion anchor not found")
-          test = test.replace(insertion_anchor, insertion, 1)
+              reset_fixture
+              cat > "$ACTIVE_INCIDENT_FILE" <<'VALID_INCIDENT'
+              meta\tincident_id\tvw-real-parser-recovery
+              meta\tstarted_at\t2026-07-20T01:00:00+00:00
+              meta\tlast_unhealthy_at\t2026-07-20T01:05:00+00:00
+              meta\thostname\tvaultwarden-test
+              check\tcontainer:vaultwarden_app\tfail\tContainer was not running
+              check\tbackup:age\twarn\tLatest backup was stale
+              VALID_INCIDENT
+              chmod 0600 "$ACTIVE_INCIDENT_FILE"
+              _notify_recovery || fail "real serialized incident recovery failed"
+              (( ACQUIRE_COUNT == 1 )) || fail "real serialized incident did not acquire recovery cooldown"
+              (( SEND_COUNT == 1 )) || fail "real serialized incident did not send exactly one recovery email"
+              [[ "$CAPTURED_SUBJECT" == *"RECOVERED [Incident vw-real-parser-recovery]"* ]] \
+                  || fail "real parser recovery subject omitted incident ID"
+              [[ "$CAPTURED_BODY" == *"container:vaultwarden_app [FAIL]: Container was not running"* \
+                  && "$CAPTURED_BODY" == *"backup:age [WARN]: Latest backup was stale"* ]] \
+                  || fail "real parser recovery body omitted persisted unhealthy checks"
+              [[ "$CAPTURED_BODY" == *"Duration:"* && "$CAPTURED_BODY" != *"Duration: unknown"* ]] \
+                  || fail "real parser recovery did not produce a valid duration"
+              [[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "real parser recovery retained active incident state"
+              [[ ! -e "${ACTIVE_INCIDENT_FILE}.recovered" ]] || fail "normal recovery retained recovered archive state"
+          ''')
+          test = test[:insert_at] + regression_block + test[insert_at:]
           test_path.write_text(test)
           PY
 
