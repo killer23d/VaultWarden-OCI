@@ -214,7 +214,7 @@ The installed environment/key material is under:
 Therefore:
 
 ```text
-git pull
+git pull --ff-only origin main
     !=
 systemd runtime activation
 ```
@@ -222,7 +222,7 @@ systemd runtime activation
 After pulling repository changes that affect managed scripts, libraries, or units:
 
 ```bash
-git pull --ff-only
+git pull --ff-only origin main
 sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
@@ -678,7 +678,7 @@ It intentionally preserves host-wide Docker/tooling state and the Git checkout. 
 For a healthy existing host after repository updates:
 
 ```bash
-git pull --ff-only
+git pull --ff-only origin main
 sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
