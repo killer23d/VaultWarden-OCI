@@ -5,8 +5,8 @@ set -euo pipefail
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
 
-# Variables in this behavioral harness are consumed by dynamically extracted
-# production functions.
+# The dynamically extracted production function consumes these fixture variables
+# through eval, which static analysis cannot observe.
 # shellcheck disable=SC2034
 check_health_recovery_notification_contracts() (
 set -euo pipefail
