@@ -118,12 +118,12 @@ Do not use `systemctl start vaultwarden-startup.service` as a generic readiness 
 
 ## Repository Updates and Installed Runtime
 
-`git pull` updates the repository checkout. Existing systemd jobs execute root-owned copies under `/opt/vaultwarden-scripts`, so repository updates do not automatically activate new managed runtime code.
+`git pull --ff-only origin main` updates the repository checkout from `main`. Existing systemd jobs execute root-owned copies under `/opt/vaultwarden-scripts`, so repository updates do not automatically activate new managed runtime code.
 
 After pulling changes that affect managed scripts, libraries, or units:
 
 ```bash
-git pull --ff-only
+git pull --ff-only origin main
 sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
