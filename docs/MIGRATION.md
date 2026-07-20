@@ -41,7 +41,7 @@ For direct SQLite migration, stop the source Vaultwarden service before taking t
 Clone and install the current project:
 
 ```bash
-git clone --branch delta https://github.com/killer23d/VaultWarden-OCI.git
+git clone --branch main https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh utilities/*.sh
 
