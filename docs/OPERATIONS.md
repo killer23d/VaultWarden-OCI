@@ -214,7 +214,7 @@ The installed environment/key material is under:
 Therefore:
 
 ```text
-git pull
+git pull --ff-only origin main
     !=
 systemd runtime activation
 ```
@@ -222,7 +222,7 @@ systemd runtime activation
 After pulling repository changes that affect managed scripts, libraries, or units:
 
 ```bash
-git pull --ff-only
+git pull --ff-only origin main
 sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
@@ -563,20 +563,19 @@ Apply current Worker config after relevant secret rotation:
 sudo ./utilities/crowdsec-worker-apply.sh
 ```
 
-Optional CrowdSec security-event email is disabled by default. Enable or disable
-`CROWDSEC_EMAIL_NOTIFICATIONS` through `sudo make edit-env`, then reconcile:
+Manage the optional CrowdSec security-event email through its dedicated controller:
 
 ```bash
-sudo ./utilities/setup-crowdsec.sh
-sudo crowdsec -t
+sudo ./utilities/crowdsec-email.sh enable
+sudo ./utilities/crowdsec-email.sh status
+sudo ./utilities/crowdsec-email.sh test
+sudo ./utilities/crowdsec-email.sh disable
 ```
 
-After the stack is running, explicitly test delivery through the existing
-loopback Postfix route:
-
-```bash
-sudo cscli notifications test vaultwarden_email
-```
+`enable` and `disable` update `CROWDSEC_EMAIL_NOTIFICATIONS` transactionally and
+delegate to the established CrowdSec reconciliation path. `status` checks the
+environment flag and managed markers. `test` confirms plugin dispatch through
+the loopback Postfix route but does not prove mailbox receipt.
 
 This is separate from health-check incident mail and generic systemd
 unit-failure mail. Normal CrowdSec setup performs static validation but no live
@@ -679,7 +678,7 @@ It intentionally preserves host-wide Docker/tooling state and the Git checkout. 
 For a healthy existing host after repository updates:
 
 ```bash
-git pull --ff-only
+git pull --ff-only origin main
 sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh

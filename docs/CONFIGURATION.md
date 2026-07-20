@@ -295,27 +295,22 @@ VW_SMTP_EXPLICIT_TLS=false
 
 Do not replace `VW_SMTP_HOST` with the upstream relay hostname. Postfix owns upstream authentication/TLS/queueing.
 
-Optional CrowdSec security-event mail is ordinary non-secret configuration and
-is disabled by default:
+Optional CrowdSec security-event mail is ordinary non-secret configuration and is disabled by default:
 
 ```bash
 CROWDSEC_EMAIL_NOTIFICATIONS=false
 ```
 
-When enabled, `utilities/setup-crowdsec.sh` configures CrowdSec to submit to the
-existing host-loopback Postfix publication at `127.0.0.1:587`. It uses
-`SMTP_FROM` and `ADMIN_EMAIL` for addressing and does not place `smtp_password`
-or an API token in CrowdSec configuration. Apply changes with:
+Manage and reconcile it through the dedicated controller:
 
 ```bash
-sudo make edit-env
-sudo ./utilities/setup-crowdsec.sh
-sudo crowdsec -t
+sudo ./utilities/crowdsec-email.sh enable
+sudo ./utilities/crowdsec-email.sh status
+sudo ./utilities/crowdsec-email.sh test
+sudo ./utilities/crowdsec-email.sh disable
 ```
 
-Run `sudo cscli notifications test vaultwarden_email` only after the stack is
-running when an explicit end-to-end delivery test is wanted. Normal setup does
-not require live Postfix connectivity.
+`enable` and `disable` update the option transactionally and delegate to the established CrowdSec reconciliation path. After changing `ADMIN_EMAIL`, `SMTP_FROM`, or `ALLOWED_SENDER_DOMAINS`, rerun `enable` to regenerate and validate the managed configuration. `status` checks the environment flag and managed markers; `test` confirms plugin dispatch but not mailbox receipt. The broader `sudo ./utilities/setup-crowdsec.sh` path remains valid for initial installation and general CrowdSec maintenance.
 
 Optional API-first operational alert mode:
 

@@ -56,7 +56,7 @@ See [docs/PROJECT-BOUNDARY.md](docs/PROJECT-BOUNDARY.md).
 ### 2. Clone the repository
 
 ```bash
-git clone https://github.com/killer23d/VaultWarden-OCI.git
+git clone --branch main https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh utilities/*.sh
 ```
@@ -110,7 +110,7 @@ sudo ./utilities/smoke-test.sh
 
 A zero `systemd validate` result means the expected installed scripts, libraries, managed units, environment/key permissions, and timer readiness match the current repository contract. A zero smoke-test result requires every smoke check to complete without `FAIL` or `SKIP`.
 
-After every `git pull` that changes managed scripts, libraries, or units, repeat the three commands above. Git updates the checkout; the systemd installer activates the current repository code under `/opt/vaultwarden-scripts`.
+After updating from `main` with `git pull --ff-only origin main`, repeat the three commands above when managed scripts, libraries, or units changed. Git updates the checkout; the systemd installer activates the current repository code under `/opt/vaultwarden-scripts`.
 
 ### 7. Export recovery material
 

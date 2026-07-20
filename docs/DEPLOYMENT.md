@@ -33,7 +33,7 @@ The project configures the supported Ubuntu host firewall. It does not configure
 ## Phase 2 — Clone and run setup
 
 ```bash
-git clone https://github.com/killer23d/VaultWarden-OCI.git
+git clone --branch main https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh utilities/*.sh
 
@@ -153,7 +153,7 @@ Managed services also use failure notification integration.
 
 `systemd validate` detects stale installed scripts, libraries, unit files, environment/key permission failures, rendered startup-unit drift, and unhealthy managed timers.
 
-After a future `git pull` that changes managed runtime code or units, repeat:
+After updating from `main` with `git pull --ff-only origin main`, repeat:
 
 ```bash
 sudo ./setup.sh systemd install --enable-now
