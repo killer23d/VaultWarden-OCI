@@ -1,0 +1,149 @@
+name: Finalize validated PR 273 artifact
+
+on:
+  pull_request:
+    branches:
+      - delta
+    types: [synchronize]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  finalize-validated-artifact:
+    if: github.head_ref == 'agent/fix-health-recovery-alerts'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Download validated focused files
+        uses: actions/download-artifact@v4
+        with:
+          name: pr273-focused-files
+          path: /tmp/pr273-focused
+          github-token: ${{ github.token }}
+          repository: killer23d/VaultWarden-OCI
+          run-id: 29772976993
+
+      - name: Polish validated files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/pr273-focused/utilities/maintenance-health.sh utilities/maintenance-health.sh
+          cp /tmp/pr273-focused/tests/suites/operations/case-health-alerts.bash \
+            tests/suites/operations/case-health-alerts.bash
+          python3 <<'PY'
+          from pathlib import Path
+
+          health_path = Path("utilities/maintenance-health.sh")
+          health = health_path.read_text()
+          old = '''if _send_notification "$subject" "$body"; then
+              log_info "Recovery notification sent"
+              recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
+              if mv -f -- "$ACTIVE_INCIDENT_FILE" "$recovered_file"; then
+                  chmod 0600 "$recovered_file" 2>/dev/null || true
+                  if ! rm -f -- "$recovered_file"; then
+                      log_warn "Recovery email was delivered and the active incident was closed, but recovered incident cleanup failed; stale evidence remains at '${recovered_file}'. Review and remove this file manually."
+                  fi
+              else
+                  log_warn "Recovery email was delivered, but the active incident could not be archived from '${ACTIVE_INCIDENT_FILE}' to '${recovered_file}'. Stale active incident state may require operator action; the recovery cooldown remains active."
+              fi
+              return 0
+          fi
+          '''
+          new = '''    if _send_notification "$subject" "$body"; then
+              log_info "Recovery notification sent"
+              recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
+              if mv -f -- "$ACTIVE_INCIDENT_FILE" "$recovered_file"; then
+                  chmod 0600 "$recovered_file" 2>/dev/null || true
+                  if ! rm -f -- "$recovered_file"; then
+                      log_warn "Recovery email was delivered and the active incident was closed, but recovered incident cleanup failed; stale evidence remains at '${recovered_file}'. Review and remove this file manually."
+                  fi
+              else
+                  log_warn "Recovery email was delivered, but the active incident could not be archived from '${ACTIVE_INCIDENT_FILE}' to '${recovered_file}'. Stale active incident state may require operator action; the recovery cooldown remains active."
+              fi
+              return 0
+          fi
+          '''
+          if old not in health:
+              raise SystemExit("validated recovery block not found")
+          health_path.write_text(health.replace(old, new, 1))
+
+          test_path = Path("tests/suites/operations/case-health-alerts.bash")
+          test = test_path.read_text()
+          replacements = {
+              '[[ "$TRACE" == *"active incident was closed"* && "$TRACE" == *"$recovered_file"* ]]         || fail "cleanup failure warning was not truthful or actionable"\n':
+                  '[[ "$TRACE" == *"active incident was closed"* && "$TRACE" == *"$recovered_file"* ]] \\\n    || fail "cleanup failure warning was not truthful or actionable"\n',
+              '(( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 ))         || fail "closed incident cleanup failure permitted duplicate recovery delivery"\n':
+                  '(( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) \\\n    || fail "closed incident cleanup failure permitted duplicate recovery delivery"\n',
+              'eval "$(extract_func "$HEALTH" _incident_sanitize)"\n':
+                  '# Exercise the real parser against the on-disk format emitted by _incident_write.\n'
+                  'eval "$(extract_func "$HEALTH" _incident_sanitize)"\n',
+              '[[ "$CAPTURED_SUBJECT" == *"RECOVERED [Incident vw-real-parser-recovery]"* ]]         || fail "real parser recovery subject omitted incident ID"\n':
+                  '[[ "$CAPTURED_SUBJECT" == *"RECOVERED [Incident vw-real-parser-recovery]"* ]] \\\n    || fail "real parser recovery subject omitted incident ID"\n',
+              '[[ "$CAPTURED_BODY" == *"container:vaultwarden_app [FAIL]: Container was not running"*         && "$CAPTURED_BODY" == *"backup:age [WARN]: Latest backup was stale"* ]]         || fail "real parser recovery body omitted persisted unhealthy checks"\n':
+                  '[[ "$CAPTURED_BODY" == *"container:vaultwarden_app [FAIL]: Container was not running"* \\\n    && "$CAPTURED_BODY" == *"backup:age [WARN]: Latest backup was stale"* ]] \\\n    || fail "real parser recovery body omitted persisted unhealthy checks"\n',
+              '[[ "$CAPTURED_BODY" == *"Duration:"* && "$CAPTURED_BODY" != *"Duration: unknown"* ]]         || fail "real parser recovery did not produce a valid duration"\n':
+                  '[[ "$CAPTURED_BODY" == *"Duration:"* && "$CAPTURED_BODY" != *"Duration: unknown"* ]] \\\n    || fail "real parser recovery did not produce a valid duration"\n',
+          }
+          for old_text, new_text in replacements.items():
+              if old_text not in test:
+                  raise SystemExit(f"validated test formatting anchor missing: {old_text[:60]}")
+              test = test.replace(old_text, new_text, 1)
+
+          evidence_anchor = '[[ -e "$recovered_file" ]] || fail "cleanup failure did not preserve bounded recovered incident evidence"\n'
+          evidence_check = '''[[ -e "$recovered_file" ]] || fail "cleanup failure did not preserve bounded recovered incident evidence"
+          if stat -c '%a' "$recovered_file" >/dev/null 2>&1; then
+              recovered_mode="$(stat -c '%a' "$recovered_file")"
+          else
+              recovered_mode="$(stat -f '%Lp' "$recovered_file")"
+          fi
+          [[ "$recovered_mode" == "600" ]] || fail "recovered incident evidence mode is $recovered_mode instead of 600"
+          '''
+          if evidence_anchor not in test:
+              raise SystemExit("recovered evidence assertion anchor missing")
+          test_path.write_text(test.replace(evidence_anchor, evidence_check, 1))
+          PY
+
+      - name: Validate polished patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n utilities/maintenance-health.sh
+          bash -n tests/suites/operations/case-health-alerts.bash
+          bash -n tests/suites/security/case-email.bash
+          bash -n tests/run-tests.sh
+          timeout 120 bash tests/suites/operations/case-health-alerts.bash
+          shellcheck -x --severity=warning \
+            utilities/maintenance-health.sh \
+            tests/suites/operations/case-health-alerts.bash
+          git diff --check
+
+      - name: Commit focused changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm \
+            .github/workflows/agent-pr273-finalize-artifact.yml \
+            .github/workflows/agent-pr273-focused-validation.yml \
+            .github/workflows/agent-pr273-quality-validation.yml
+          git add \
+            utilities/maintenance-health.sh \
+            tests/suites/operations/case-health-alerts.bash
+
+          expected=$'.github/workflows/agent-pr273-finalize-artifact.yml\n.github/workflows/agent-pr273-focused-validation.yml\n.github/workflows/agent-pr273-quality-validation.yml\ntests/suites/operations/case-health-alerts.bash\nutilities/maintenance-health.sh'
+          actual="$(git diff --cached --name-only | sort)"
+          [[ "$actual" == "$expected" ]] || {
+              printf 'Unexpected staged files:\n%s\n' "$actual" >&2
+              exit 1
+          }
+          git diff --cached --check
+          git commit -m "fix: close delivered recovery incidents atomically"
+          git push origin HEAD:agent/fix-health-recovery-alerts
