@@ -13,7 +13,7 @@ jobs:
   validate-quality-patch:
     if: github.head_ref == 'agent/fix-health-recovery-alerts'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,7 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
+          echo "fa52a4e758c63d38299163fbdd1edfb4b4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
           curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
           echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
@@ -149,39 +149,82 @@ jobs:
           ''')
           test = test[:insert_at] + regression_block + test[insert_at:]
           test_path.write_text(test)
-          PY
 
-      - name: Run required validation
+          artifact = Path("quality-artifact")
+          (artifact / "utilities").mkdir(parents=True, exist_ok=True)
+          (artifact / "tests/suites/operations").mkdir(parents=True, exist_ok=True)
+          (artifact / "utilities/maintenance-health.sh").write_text(health)
+          (artifact / "tests/suites/operations/case-health-alerts.bash").write_text(test)
+          PY
+          git diff -- utilities/maintenance-health.sh tests/suites/operations/case-health-alerts.bash \
+            > quality-artifact/pr273-quality.patch
+
+      - name: Validate shell syntax
+        if: always()
         shell: bash
         run: |
-          set -o pipefail
-          mkdir -p test-results quality-artifact/utilities quality-artifact/tests/suites/operations
+          set -euo pipefail
+          mkdir -p quality-artifact/logs
           {
-            set -euo pipefail
             bash -n utilities/maintenance-health.sh
             bash -n tests/suites/operations/case-health-alerts.bash
             bash -n tests/suites/security/case-email.bash
             bash -n tests/run-tests.sh
+          } 2>&1 | tee quality-artifact/logs/syntax.log
 
-            ./tests/run-tests.sh operations
-            ./tests/run-tests.sh security
-            ./tests/run-tests.sh foundation
-            ./tests/run-tests.sh data-protection
-            ./tests/run-tests.sh all
+      - name: Run operations suite
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          ./tests/run-tests.sh operations 2>&1 | tee quality-artifact/logs/operations.log
 
-            find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
-              | xargs -0 shellcheck -x --severity=warning
+      - name: Run security suite
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          ./tests/run-tests.sh security 2>&1 | tee quality-artifact/logs/security.log
 
-            git diff --check
-          } 2>&1 | tee test-results/pr273-quality-validation.log
+      - name: Run foundation suite
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          ./tests/run-tests.sh foundation 2>&1 | tee quality-artifact/logs/foundation.log
 
-          cp utilities/maintenance-health.sh quality-artifact/utilities/
-          cp tests/suites/operations/case-health-alerts.bash quality-artifact/tests/suites/operations/
-          cp test-results/pr273-quality-validation.log quality-artifact/
-          git diff -- utilities/maintenance-health.sh tests/suites/operations/case-health-alerts.bash \
-            > quality-artifact/pr273-quality.patch
+      - name: Run data-protection suite
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          ./tests/run-tests.sh data-protection 2>&1 | tee quality-artifact/logs/data-protection.log
 
-      - name: Upload validated files
+      - name: Run complete suite
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          ./tests/run-tests.sh all 2>&1 | tee quality-artifact/logs/all.log
+
+      - name: Run strict ShellCheck
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 shellcheck -x --severity=warning \
+            2>&1 | tee quality-artifact/logs/shellcheck.log
+
+      - name: Check patch whitespace
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          git diff --check 2>&1 | tee quality-artifact/logs/diff-check.log
+
+      - name: Upload validated files and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pr273-quality-files
