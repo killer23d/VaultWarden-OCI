@@ -52,6 +52,7 @@ reset_fixture() {
     TRACE=""
     CAPTURED_SUBJECT=""
     CAPTURED_BODY=""
+    ACTIVE_INCIDENT_AVAILABLE=false
     ACTIVE_INCIDENT_ID=""
     ACTIVE_INCIDENT_STARTED_AT=""
     ACTIVE_INCIDENT_LAST_UNHEALTHY_AT=""
@@ -151,6 +152,77 @@ if _notify_recovery; then
 fi
 (( RELEASE_COUNT == 1 )) || fail "failed recovery delivery must release its cooldown"
 [[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "failed recovery delivery must preserve incident state for retry"
+
+reset_fixture
+: > "$ACTIVE_INCIDENT_FILE"
+recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
+rm() {
+    local arg
+    for arg in "$@"; do
+        [[ "$arg" == "$recovered_file" ]] && return 1
+    done
+    command rm "$@"
+}
+_notify_recovery || fail "successful recovery returned nonzero when archive cleanup failed"
+unset -f rm
+(( SEND_COUNT == 1 )) || fail "cleanup failure changed the successful delivery count"
+(( RELEASE_COUNT == 0 )) || fail "cleanup failure released a successful recovery cooldown"
+[[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "cleanup failure left the incident active after successful delivery"
+[[ -e "$recovered_file" ]] || fail "cleanup failure did not preserve bounded recovered incident evidence"
+if stat -c '%a' "$recovered_file" >/dev/null 2>&1; then
+    recovered_mode="$(stat -c '%a' "$recovered_file")"
+else
+    recovered_mode="$(stat -f '%Lp' "$recovered_file")"
+fi
+[[ "$recovered_mode" == "600" ]] || fail "recovered incident evidence mode is $recovered_mode instead of 600"
+[[ "$TRACE" == *"Recovery notification sent"* ]] || fail "cleanup failure obscured successful delivery"
+[[ "$TRACE" == *"active incident was closed"* && "$TRACE" == *"$recovered_file"* ]] \
+    || fail "cleanup failure warning was not truthful or actionable"
+_notify_recovery
+(( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) \
+    || fail "closed incident cleanup failure permitted duplicate recovery delivery"
+command rm -f "$recovered_file"
+
+# Exercise the real parser against the on-disk format emitted by _incident_write.
+eval "$(extract_func "$HEALTH" _incident_sanitize)"
+eval "$(extract_func "$HEALTH" _incident_set_check)"
+eval "$(extract_func "$HEALTH" _incident_load)"
+eval "$(extract_func "$HEALTH" _incident_format_duration)"
+
+reset_fixture
+cat > "$ACTIVE_INCIDENT_FILE" <<'INVALID_INCIDENT'
+meta	incident_id	vw-invalid-parser
+meta	started_at	2026-07-20T01:00:00+00:00
+check	container:vaultwarden_app	pass	Invalid persisted status
+INVALID_INCIDENT
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+_notify_recovery
+(( ACQUIRE_COUNT == 0 )) || fail "real parser invalid state acquired a recovery cooldown"
+(( SEND_COUNT == 0 )) || fail "real parser invalid state attempted delivery"
+[[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "real parser invalid state was not preserved"
+
+reset_fixture
+cat > "$ACTIVE_INCIDENT_FILE" <<'VALID_INCIDENT'
+meta	incident_id	vw-real-parser-recovery
+meta	started_at	2026-07-20T01:00:00+00:00
+meta	last_unhealthy_at	2026-07-20T01:05:00+00:00
+meta	hostname	vaultwarden-test
+check	container:vaultwarden_app	fail	Container was not running
+check	backup:age	warn	Latest backup was stale
+VALID_INCIDENT
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+_notify_recovery || fail "real serialized incident recovery failed"
+(( ACQUIRE_COUNT == 1 )) || fail "real serialized incident did not acquire recovery cooldown"
+(( SEND_COUNT == 1 )) || fail "real serialized incident did not send exactly one recovery email"
+[[ "$CAPTURED_SUBJECT" == *"RECOVERED [Incident vw-real-parser-recovery]"* ]] \
+    || fail "real parser recovery subject omitted incident ID"
+[[ "$CAPTURED_BODY" == *"container:vaultwarden_app [FAIL]: Container was not running"* \
+    && "$CAPTURED_BODY" == *"backup:age [WARN]: Latest backup was stale"* ]] \
+    || fail "real parser recovery body omitted persisted unhealthy checks"
+[[ "$CAPTURED_BODY" == *"Duration:"* && "$CAPTURED_BODY" != *"Duration: unknown"* ]] \
+    || fail "real parser recovery did not produce a valid duration"
+[[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "real parser recovery retained active incident state"
+[[ ! -e "${ACTIVE_INCIDENT_FILE}.recovered" ]] || fail "normal recovery retained recovered archive state"
 
 ! grep -Fq 'No preceding incident snapshot was available.' "$HEALTH" \
     || fail "generic no-incident recovery email path must not exist"

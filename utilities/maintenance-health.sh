@@ -1345,7 +1345,7 @@ _notify_recovery() {
         return 0
     fi
 
-    local recovery_date recovery_time subject body
+    local recovery_date recovery_time subject body recovered_file
     local started_epoch recovery_epoch duration prior_lines="" name
     recovery_date="$(date)"
     recovery_time="$(date -Iseconds)"
@@ -1368,11 +1368,18 @@ _notify_recovery() {
         "$ACTIVE_INCIDENT_LAST_UNHEALTHY_AT" "$recovery_time" "$duration" \
         "$ACTIVE_INCIDENT_HOSTNAME" "$prior_lines" "$passed" "$warnings" "$failed"
     if _send_notification "$subject" "$body"; then
-        log_info "Recovery notification sent"
-        rm -f "$ACTIVE_INCIDENT_FILE" \
-            || log_warn "Recovery email was delivered but the active incident file could not be removed: ${ACTIVE_INCIDENT_FILE}"
-        return 0
+    log_info "Recovery notification sent"
+    recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
+    if mv -f -- "$ACTIVE_INCIDENT_FILE" "$recovered_file"; then
+        chmod 0600 "$recovered_file" 2>/dev/null || true
+        if ! rm -f -- "$recovered_file"; then
+            log_warn "Recovery email was delivered and the active incident was closed, but recovered incident cleanup failed; stale evidence remains at '${recovered_file}'. Review and remove this file manually."
+        fi
+    else
+        log_warn "Recovery email was delivered, but the active incident could not be archived from '${ACTIVE_INCIDENT_FILE}' to '${recovered_file}'. Stale active incident state may require operator action; the recovery cooldown remains active."
     fi
+    return 0
+fi
     _release_recovery_lock
     log_warn "Recovery notification delivery failed; cooldown released for retry next health cycle"
     return 1
