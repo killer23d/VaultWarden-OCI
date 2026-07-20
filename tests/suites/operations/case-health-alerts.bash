@@ -183,7 +183,7 @@ _notify_recovery
     || fail "closed incident cleanup failure permitted duplicate recovery delivery"
 command rm -f "$recovered_file"
 
-# Exercise the real parser against the on-disk format emitted by _incident_write.
+# Exercise the real parser against valid and invalid on-disk records emitted by _incident_write.
 eval "$(extract_func "$HEALTH" _incident_sanitize)"
 eval "$(extract_func "$HEALTH" _incident_set_check)"
 eval "$(extract_func "$HEALTH" _incident_load)"
