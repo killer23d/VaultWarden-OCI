@@ -1,21 +1,23 @@
 name: Repair PR 273 CI fixtures
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/fix-health-recovery-alerts
+      - delta
+    types: [synchronize]
 
 permissions:
   contents: write
 
 jobs:
   repair-and-validate:
+    if: github.head_ref == 'agent/fix-health-recovery-alerts'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: agent/fix-health-recovery-alerts
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
 
       - name: Install test dependencies
@@ -183,8 +185,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          base_sha='${{ github.event.before }}'
-          workflow_sha='${{ github.sha }}'
+          base_sha='306c704b6ae776b303dacda76aac9fd5590a3541'
+          workflow_sha='${{ github.event.pull_request.head.sha }}'
           branch='agent/fix-health-recovery-alerts'
 
           git reset --soft "$base_sha"
