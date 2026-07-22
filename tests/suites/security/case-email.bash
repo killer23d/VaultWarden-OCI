@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Consolidated email regression suite.
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR/../../..
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
@@ -280,9 +281,6 @@ printf 'Recovery-kit attachment passphrase contract tests passed.\n'
 
 check_recovery_kit_attachment_passphrase_contract
 
-# Variables in this behavioral harness are consumed by dynamically extracted
-# production functions.
-# shellcheck disable=SC2034
 check_recovery_notification_retry_contract() (
 set -euo pipefail
 
@@ -291,44 +289,36 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-extract_func(){
-    local file="$1" func="$2"
-    awk -v f="$func" '
-      $0 ~ "^" f "\\(\\)" {p=1}
-      p {
-        print
-        opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
-        depth += opens - closes
-        if (depth == 0) exit
-      }' "$file"
-}
-
-HEALTH="$ROOT/utilities/maintenance-health.sh"
+# shellcheck source=lib/health-alerts.sh
+source "$ROOT/lib/health-alerts.sh"
+source "$ROOT/lib/email.sh"
 log_info(){ printf 'INFO: %s\n' "$*"; }
 log_warn(){ printf 'WARN: %s\n' "$*"; }
-eval "$(extract_func "$HEALTH" _ensure_alert_dir)"
-eval "$(extract_func "$HEALTH" _acquire_alert_lock)"
-eval "$(extract_func "$HEALTH" _release_recovery_lock)"
-eval "$(extract_func "$HEALTH" _send_notification | sed '1s/^_send_notification()/_send_notification_production()/')"
-eval "$(extract_func "$HEALTH" _notify_recovery)"
 
 _email_available=false
 ADMIN_EMAIL=admin@example.test
 export ADMIN_EMAIL
 unavailable_rc=0
-_send_notification_production subject body >"$TMP/unavailable.out" 2>&1 || unavailable_rc=$?
+_send_notification subject body >"$TMP/unavailable.out" 2>&1 || unavailable_rc=$?
 [[ "$unavailable_rc" -ne 0 ]] \
     || fail "email-unavailable notification path reported successful delivery"
 
 ALERT_LOCK_DIR="$TMP/alerts"
 ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
+RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
 ALERT_RECOVERY_TTL=86400
+ALERT_RECOVERY_PENDING_TTL=30
+HEALTH_ALERT_STATE_LOCK_FD=""
+RECOVERY_DELIVERY_PHASE=""
+RECOVERY_DELIVERY_INCIDENT_ID=""
+RECOVERY_DELIVERY_UPDATED_AT=""
 failed=0
 warnings=0
 passed=12
 export ALERT_RECOVERY_TTL failed warnings passed
 send_attempts=0
-_send_notification(){
+_email_available=true
+send_email(){
     send_attempts=$((send_attempts + 1))
     if (( send_attempts == 1 )); then return 42; fi
     return 0
@@ -388,9 +378,6 @@ printf 'Recovery notification failure remains truthful and retryable.\n'
 
 check_recovery_notification_retry_contract
 
-# Variables in this behavioral harness are consumed by dynamically extracted
-# production functions.
-# shellcheck disable=SC2034
 check_health_incident_context() (
 set -euo pipefail
 
@@ -402,33 +389,19 @@ log_info(){ :; }
 log_warn(){ printf 'WARN: %s\n' "$*"; }
 log_debug(){ :; }
 
-extract_func(){
-    local file="$1" func="$2"
-    awk -v f="$func" '
-      $0 ~ "^" f "\\(\\)" {p=1}
-      p {
-        print
-        opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
-        depth += opens - closes
-        if (depth == 0) exit
-      }' "$file"
-}
-
-HEALTH="$ROOT/utilities/maintenance-health.sh"
-eval "$(extract_func "$HEALTH" _ensure_alert_dir)"
-eval "$(extract_func "$HEALTH" _acquire_alert_lock)"
-eval "$(extract_func "$HEALTH" _release_alert_lock)"
-eval "$(extract_func "$HEALTH" _release_recovery_lock)"
-sed -n '/^_incident_sanitize()/,/^local -A check_results=/p' "$HEALTH" | sed '$d' > "$TMP/incident-functions.sh"
-# shellcheck source=/dev/null
-source "$TMP/incident-functions.sh"
-eval "$(extract_func "$HEALTH" _notify_failures)"
-eval "$(extract_func "$HEALTH" _notify_recovery)"
+# shellcheck source=lib/health-alerts.sh
+source "$ROOT/lib/health-alerts.sh"
 
 ALERT_LOCK_DIR="$TMP/alerts"
 ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
+RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
 ALERT_COOLDOWN_SECONDS=3600
 ALERT_RECOVERY_TTL=86400
+ALERT_RECOVERY_PENDING_TTL=30
+HEALTH_ALERT_STATE_LOCK_FD=""
+RECOVERY_DELIVERY_PHASE=""
+RECOVERY_DELIVERY_INCIDENT_ID=""
+RECOVERY_DELIVERY_UPDATED_AT=""
 ACTIVE_INCIDENT_AVAILABLE=false
 ACTIVE_INCIDENT_ID=""
 ACTIVE_INCIDENT_STARTED_AT=""
@@ -446,7 +419,7 @@ passed=8
 
 _incident_update_unhealthy || fail "first unhealthy run did not create incident state"
 [[ -f "$ACTIVE_INCIDENT_FILE" ]] || fail "active incident file is missing"
-mode="$(stat -f '%Lp' "$ACTIVE_INCIDENT_FILE" 2>/dev/null || stat -c '%a' "$ACTIVE_INCIDENT_FILE")"
+mode="$(stat -c '%a' "$ACTIVE_INCIDENT_FILE" 2>/dev/null || stat -f '%Lp' "$ACTIVE_INCIDENT_FILE")"
 [[ "$mode" == "600" ]] || fail "active incident mode is $mode instead of 600"
 first_id="$ACTIVE_INCIDENT_ID"
 first_start="$ACTIVE_INCIDENT_STARTED_AT"
@@ -492,7 +465,7 @@ failed=1
 warnings=0
 _incident_update_unhealthy || fail "could not create second incident"
 second_id="$ACTIVE_INCIDENT_ID"
-_release_recovery_lock
+_release_recovery_cooldown
 failed=0
 warnings=0
 _send_notification(){ return 22; }
@@ -514,7 +487,7 @@ if _incident_update_unhealthy > "$TMP/unwritable.out" 2>&1; then
     fail "incident persistence unexpectedly succeeded with unavailable state path"
 fi
 [[ "$failed" == "$before_failed" ]] || fail "incident persistence changed health counters"
-grep -Fq 'continuing without incident correlation' "$TMP/unwritable.out" \
+grep -Fq 'is not a real directory; health alert state tracking is disabled' "$TMP/unwritable.out" \
     || fail "unavailable incident state did not emit a bounded warning"
 
 ALERT_LOCK_DIR="$TMP/bounded-alerts"
@@ -532,7 +505,7 @@ _incident_update_unhealthy || fail "bounded incident write failed"
 detail_length="$(awk -F '\t' '$1=="check" {print length($4); exit}' "$ACTIVE_INCIDENT_FILE")"
 [[ "$detail_length" -le 512 ]] || fail "incident detail exceeded per-check cap"
 
-! grep -Eq '^[[:space:]]*chown[[:space:]]' "$TMP/incident-functions.sh" \
+! grep -Eq '^[[:space:]]*chown[[:space:]]' "$ROOT/lib/health-alerts.sh" \
     || fail "health incident code hardcodes alert-directory ownership changes"
 ! grep -Fq 'active-incident.state' "$ROOT/lib/common.sh" \
     || fail "incident state was added to central known-path permissions"
