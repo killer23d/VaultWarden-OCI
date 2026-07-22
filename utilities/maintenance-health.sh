@@ -212,6 +212,7 @@ local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-$(_default_alert_state_dir)}"
 local ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-3600}
 local ALERT_RECOVERY_TTL=${ALERT_RECOVERY_TTL:-86400}
 local ALERT_RECOVERY_PENDING_TTL=${ALERT_RECOVERY_PENDING_TTL:-900}
+local ALERT_STATE_LOCK_WAIT_SECONDS=${ALERT_STATE_LOCK_WAIT_SECONDS:-5}
 local ACTIVE_INCIDENT_FILE="${ALERT_LOCK_DIR}/active-incident.state"
 local RECOVERY_DELIVERY_STATE_FILE="${ALERT_LOCK_DIR}/recovery-delivery.state"
 local ACTIVE_INCIDENT_AVAILABLE=false
@@ -222,7 +223,7 @@ local ACTIVE_INCIDENT_HOSTNAME=""
 local RECOVERY_DELIVERY_PHASE=""
 local RECOVERY_DELIVERY_INCIDENT_ID=""
 local RECOVERY_DELIVERY_UPDATED_AT=""
-local RECOVERY_LOCK_FD=""
+local HEALTH_ALERT_STATE_LOCK_FD=""
 local -A incident_statuses=()
 local -A incident_details=()
 local -a incident_check_order=()
@@ -1095,66 +1096,6 @@ _check_container_resources() {
     }
     log_debug "Container resource stats:\n${stats}"
     _pass "resources:stats" "Container resource stats retrieved"
-}
-
-_send_notification() {
-    local subject="$1" body="$2"
-    if [[ "${_email_available:-true}" == "false" ]]; then
-        log_warn "Email notifications not available"
-        return 1
-    fi
-    if [[ -z "${ADMIN_EMAIL:-}" ]]; then
-        log_warn "ADMIN_EMAIL not set — cannot send health notification"
-        return 1
-    fi
-    if ! send_email "$ADMIN_EMAIL" "$subject" "$body" 2>/dev/null; then
-        log_warn "Failed to send health notification email"
-        return 1
-    fi
-    return 0
-}
-
-_notify_failures() {
-    local alerted_any=false
-    for name in "${check_order[@]}"; do
-        local status="${check_results[$name]:-}"
-        [[ "$status" == "fail" || "$status" == "warn" ]] || continue
-        if ! _acquire_alert_lock "$name"; then
-            log_info "Alert cooldown active for '${name}' — suppressing repeat notification"
-            continue
-        fi
-        local message="${check_messages[$name]:-}"
-        local alert_date subject body
-        alert_date="$(date)"
-        if [[ "$ACTIVE_INCIDENT_AVAILABLE" == "true" && -n "$ACTIVE_INCIDENT_ID" ]]; then
-            message="$(_incident_sanitize "$message" 512)"
-            subject="VaultWarden Health [${status^^}] [Incident ${ACTIVE_INCIDENT_ID}]: ${name} on $(hostname)"
-            printf -v body \
-                'Health check alert at %s\n\nIncident: %s\nIncident started: %s\nCheck: %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nFor the full live status, run: ./maintenance.sh health\nTo also write a report file, run: ./maintenance.sh health --report' \
-                "$alert_date" "$ACTIVE_INCIDENT_ID" "$ACTIVE_INCIDENT_STARTED_AT" \
-                "$name" "${status^^}" "$message" \
-                "$ALERT_COOLDOWN_SECONDS" "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
-        else
-            subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
-            printf -v body \
-                'Health check alert at %s\n\nCheck: %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nFor the full live status, run: ./maintenance.sh health\nTo also write a report file, run: ./maintenance.sh health --report' \
-                "$alert_date" "$name" "${status^^}" "$message" \
-                "$ALERT_COOLDOWN_SECONDS" "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
-        fi
-        if ! _send_notification "$subject" "$body"; then
-            log_warn "_notify_failures: delivery failed for '${name}' — releasing cooldown for retry next cycle"
-            _release_alert_lock "$name"
-            continue
-        fi
-        alerted_any=true
-        log_info "Alert sent for '${name}' (${status})"
-    done
-    if [[ "$alerted_any" == "true" ]]; then
-        log_debug "_notify_failures: at least one alert was sent this cycle"
-    fi
-    if [[ $failed -gt 0 || $warnings -gt 0 ]]; then
-        _release_recovery_lock
-    fi
 }
 
 _generate_report() {
