@@ -280,9 +280,6 @@ printf 'Recovery-kit attachment passphrase contract tests passed.\n'
 
 check_recovery_kit_attachment_passphrase_contract
 
-# Variables in this behavioral harness are consumed by dynamically extracted
-# production functions.
-# shellcheck disable=SC2034
 check_recovery_notification_retry_contract() (
 set -euo pipefail
 
@@ -304,13 +301,11 @@ extract_func(){
 }
 
 HEALTH="$ROOT/utilities/maintenance-health.sh"
+# shellcheck source=../../../lib/health-alerts.sh
+source "$ROOT/lib/health-alerts.sh"
 log_info(){ printf 'INFO: %s\n' "$*"; }
 log_warn(){ printf 'WARN: %s\n' "$*"; }
-eval "$(extract_func "$HEALTH" _ensure_alert_dir)"
-eval "$(extract_func "$HEALTH" _acquire_alert_lock)"
-eval "$(extract_func "$HEALTH" _release_recovery_lock)"
 eval "$(extract_func "$HEALTH" _send_notification | sed '1s/^_send_notification()/_send_notification_production()/')"
-eval "$(extract_func "$HEALTH" _notify_recovery)"
 
 _email_available=false
 ADMIN_EMAIL=admin@example.test
@@ -322,7 +317,12 @@ _send_notification_production subject body >"$TMP/unavailable.out" 2>&1 || unava
 
 ALERT_LOCK_DIR="$TMP/alerts"
 ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
+RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
 ALERT_RECOVERY_TTL=86400
+ALERT_RECOVERY_PENDING_TTL=30
+RECOVERY_DELIVERY_PHASE=""
+RECOVERY_DELIVERY_INCIDENT_ID=""
+RECOVERY_DELIVERY_UPDATED_AT=""
 failed=0
 warnings=0
 passed=12
@@ -388,9 +388,6 @@ printf 'Recovery notification failure remains truthful and retryable.\n'
 
 check_recovery_notification_retry_contract
 
-# Variables in this behavioral harness are consumed by dynamically extracted
-# production functions.
-# shellcheck disable=SC2034
 check_health_incident_context() (
 set -euo pipefail
 
@@ -415,20 +412,19 @@ extract_func(){
 }
 
 HEALTH="$ROOT/utilities/maintenance-health.sh"
-eval "$(extract_func "$HEALTH" _ensure_alert_dir)"
-eval "$(extract_func "$HEALTH" _acquire_alert_lock)"
-eval "$(extract_func "$HEALTH" _release_alert_lock)"
-eval "$(extract_func "$HEALTH" _release_recovery_lock)"
-sed -n '/^_incident_sanitize()/,/^local -A check_results=/p' "$HEALTH" | sed '$d' > "$TMP/incident-functions.sh"
-# shellcheck source=/dev/null
-source "$TMP/incident-functions.sh"
+# shellcheck source=../../../lib/health-alerts.sh
+source "$ROOT/lib/health-alerts.sh"
 eval "$(extract_func "$HEALTH" _notify_failures)"
-eval "$(extract_func "$HEALTH" _notify_recovery)"
 
 ALERT_LOCK_DIR="$TMP/alerts"
 ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
+RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
 ALERT_COOLDOWN_SECONDS=3600
 ALERT_RECOVERY_TTL=86400
+ALERT_RECOVERY_PENDING_TTL=30
+RECOVERY_DELIVERY_PHASE=""
+RECOVERY_DELIVERY_INCIDENT_ID=""
+RECOVERY_DELIVERY_UPDATED_AT=""
 ACTIVE_INCIDENT_AVAILABLE=false
 ACTIVE_INCIDENT_ID=""
 ACTIVE_INCIDENT_STARTED_AT=""
@@ -446,7 +442,7 @@ passed=8
 
 _incident_update_unhealthy || fail "first unhealthy run did not create incident state"
 [[ -f "$ACTIVE_INCIDENT_FILE" ]] || fail "active incident file is missing"
-mode="$(stat -f '%Lp' "$ACTIVE_INCIDENT_FILE" 2>/dev/null || stat -c '%a' "$ACTIVE_INCIDENT_FILE")"
+mode="$(stat -c '%a' "$ACTIVE_INCIDENT_FILE" 2>/dev/null || stat -f '%Lp' "$ACTIVE_INCIDENT_FILE")"
 [[ "$mode" == "600" ]] || fail "active incident mode is $mode instead of 600"
 first_id="$ACTIVE_INCIDENT_ID"
 first_start="$ACTIVE_INCIDENT_STARTED_AT"
@@ -532,7 +528,7 @@ _incident_update_unhealthy || fail "bounded incident write failed"
 detail_length="$(awk -F '\t' '$1=="check" {print length($4); exit}' "$ACTIVE_INCIDENT_FILE")"
 [[ "$detail_length" -le 512 ]] || fail "incident detail exceeded per-check cap"
 
-! grep -Eq '^[[:space:]]*chown[[:space:]]' "$TMP/incident-functions.sh" \
+! grep -Eq '^[[:space:]]*chown[[:space:]]' "$ROOT/lib/health-alerts.sh" \
     || fail "health incident code hardcodes alert-directory ownership changes"
 ! grep -Fq 'active-incident.state' "$ROOT/lib/common.sh" \
     || fail "incident state was added to central known-path permissions"

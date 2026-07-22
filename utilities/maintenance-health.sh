@@ -14,6 +14,7 @@ source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
 source "$PROJECT_ROOT/lib/operations.sh"
 source "$PROJECT_ROOT/lib/email.sh"
+source "$PROJECT_ROOT/lib/health-alerts.sh"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
@@ -210,194 +211,20 @@ _release_run_lock() {
 local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-$(_default_alert_state_dir)}"
 local ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-3600}
 local ALERT_RECOVERY_TTL=${ALERT_RECOVERY_TTL:-86400}
+local ALERT_RECOVERY_PENDING_TTL=${ALERT_RECOVERY_PENDING_TTL:-900}
 local ACTIVE_INCIDENT_FILE="${ALERT_LOCK_DIR}/active-incident.state"
+local RECOVERY_DELIVERY_STATE_FILE="${ALERT_LOCK_DIR}/recovery-delivery.state"
 local ACTIVE_INCIDENT_AVAILABLE=false
 local ACTIVE_INCIDENT_ID=""
 local ACTIVE_INCIDENT_STARTED_AT=""
 local ACTIVE_INCIDENT_LAST_UNHEALTHY_AT=""
 local ACTIVE_INCIDENT_HOSTNAME=""
+local RECOVERY_DELIVERY_PHASE=""
+local RECOVERY_DELIVERY_INCIDENT_ID=""
+local RECOVERY_DELIVERY_UPDATED_AT=""
 local -A incident_statuses=()
 local -A incident_details=()
 local -a incident_check_order=()
-
-# Create the cooldown state directory if it is missing.
-# Returns 0 on success or 1 if the directory cannot be created, so callers can
-# skip the alert for this cycle instead of producing confusing mktemp errors.
-_ensure_alert_dir() {
-    [[ -d "${ALERT_LOCK_DIR}" ]] && return 0
-    if mkdir -p "${ALERT_LOCK_DIR}" 2>/dev/null; then
-        chmod 0750 "${ALERT_LOCK_DIR}" 2>/dev/null || true
-        return 0
-    fi
-    log_warn "_ensure_alert_dir: cannot create '${ALERT_LOCK_DIR}'" \
-             "— alert cooldown tracking disabled for this cycle." \
-             "Fix: sudo mkdir -p '${ALERT_LOCK_DIR}' && sudo chown $(id -un) '${ALERT_LOCK_DIR}'"
-    return 1
-}
-
-_acquire_alert_lock() {
-    local key="$1"
-    local safe_key
-    safe_key=$(printf '%s' "$key" | tr -cs '[:alnum:]-' '_')
-    # Ensure the directory exists; if it cannot be created, skip the alert.
-    _ensure_alert_dir || return 1
-    local state_file="${ALERT_LOCK_DIR}/${safe_key}.cooldown"
-    local ttl="${2:-${ALERT_COOLDOWN_SECONDS}}"
-    local now; now=$(date +%s)
-    if [[ -f "$state_file" ]]; then
-        local last_sent; last_sent=$(cat "$state_file" 2>/dev/null || printf '0')
-        if (( now - last_sent < ttl )); then return 1; fi
-    fi
-    local tmp_file
-    tmp_file=$(mktemp "${ALERT_LOCK_DIR}/.tmp.XXXXXXXXXX") || {
-        log_warn "_acquire_alert_lock: mktemp failed in '${ALERT_LOCK_DIR}' — skipping alert for '${key}'"
-        return 1
-    }
-    printf '%s\n' "$now" > "$tmp_file"
-    mv -f "$tmp_file" "$state_file"
-    return 0
-}
-
-_release_alert_lock() {
-    local key="$1"
-    local safe_key; safe_key=$(printf '%s' "$key" | tr -cs '[:alnum:]-' '_')
-    rm -f "${ALERT_LOCK_DIR}/${safe_key}.cooldown" 2>/dev/null || true
-}
-
-_release_recovery_lock() {
-    rm -f "${ALERT_LOCK_DIR}/recovery.cooldown" 2>/dev/null || true
-}
-
-_incident_sanitize() {
-    local value="${1:-}" max_length="${2:-512}"
-    value="$(printf '%s' "$value" | LC_ALL=C sed -E \
-        -e 's/[[:cntrl:]]/ /g' \
-        -e 's/((password|passwd|token|api[_-]?key|authorization|credential|secret)[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1[REDACTED]/Ig' \
-        -e 's/(Bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/Ig')"
-    value="${value//$'\n'/ }"
-    value="${value//$'\r'/ }"
-    value="${value//$'\t'/ }"
-    while [[ "$value" == *"  "* ]]; do value="${value//  / }"; done
-    value="${value# }"; value="${value% }"
-    printf '%s' "${value:0:max_length}"
-}
-
-_incident_set_check() {
-    local name="$1" status="$2" detail="$3"
-    if [[ -z "${incident_statuses[$name]+set}" ]]; then
-        incident_check_order+=("$name")
-    fi
-    incident_statuses["$name"]="$status"
-    incident_details["$name"]="$detail"
-}
-
-_incident_load() {
-    local path="${1:-$ACTIVE_INCIDENT_FILE}" record key value name status detail
-    [[ -r "$path" ]] || return 1
-    [[ "$(wc -c < "$path" 2>/dev/null || printf '999999')" -le 16384 ]] || return 1
-    ACTIVE_INCIDENT_ID=""
-    ACTIVE_INCIDENT_STARTED_AT=""
-    ACTIVE_INCIDENT_LAST_UNHEALTHY_AT=""
-    ACTIVE_INCIDENT_HOSTNAME=""
-    incident_statuses=()
-    incident_details=()
-    incident_check_order=()
-    while IFS=$'\t' read -r record key value detail; do
-        case "$record:$key" in
-            meta:incident_id) ACTIVE_INCIDENT_ID="$(_incident_sanitize "$value" 80)" ;;
-            meta:started_at) ACTIVE_INCIDENT_STARTED_AT="$(_incident_sanitize "$value" 64)" ;;
-            meta:last_unhealthy_at) ACTIVE_INCIDENT_LAST_UNHEALTHY_AT="$(_incident_sanitize "$value" 64)" ;;
-            meta:hostname) ACTIVE_INCIDENT_HOSTNAME="$(_incident_sanitize "$value" 255)" ;;
-            check:*)
-                name="$(_incident_sanitize "$key" 128)"
-                status="$(_incident_sanitize "$value" 8)"
-                detail="$(_incident_sanitize "$detail" 512)"
-                [[ -n "$name" && ( "$status" == "warn" || "$status" == "fail" ) ]] || return 1
-                _incident_set_check "$name" "$status" "$detail"
-                ;;
-        esac
-    done < "$path"
-    [[ -n "$ACTIVE_INCIDENT_ID" && -n "$ACTIVE_INCIDENT_STARTED_AT" ]] || return 1
-    ACTIVE_INCIDENT_AVAILABLE=true
-}
-
-_incident_write() {
-    if ! _ensure_alert_dir; then
-        log_warn "Health incident context unavailable: alert-state directory is not writable; continuing without incident correlation."
-        return 1
-    fi
-    local tmp_file old_umask line name bytes=0 max_bytes=16384
-    old_umask="$(umask)"
-    umask 077
-    tmp_file="$(mktemp "${ALERT_LOCK_DIR}/.active-incident.XXXXXXXX")" || {
-        umask "$old_umask"
-        log_warn "Health incident context unavailable: cannot create state in '${ALERT_LOCK_DIR}'; continuing without incident correlation."
-        return 1
-    }
-    umask "$old_umask"
-    chmod 0600 "$tmp_file" || { rm -f "$tmp_file"; return 1; }
-    {
-        printf 'meta\tincident_id\t%s\n' "$ACTIVE_INCIDENT_ID"
-        printf 'meta\tstarted_at\t%s\n' "$ACTIVE_INCIDENT_STARTED_AT"
-        printf 'meta\tlast_unhealthy_at\t%s\n' "$ACTIVE_INCIDENT_LAST_UNHEALTHY_AT"
-        printf 'meta\thostname\t%s\n' "$ACTIVE_INCIDENT_HOSTNAME"
-    } > "$tmp_file" || { rm -f "$tmp_file"; return 1; }
-    bytes="$(wc -c < "$tmp_file")"
-    for name in "${incident_check_order[@]}"; do
-        printf -v line 'check\t%s\t%s\t%s\n' \
-            "$name" "${incident_statuses[$name]}" "${incident_details[$name]}"
-        if (( bytes + ${#line} > max_bytes )); then
-            log_warn "Health incident context reached ${max_bytes} bytes; additional check details were omitted."
-            break
-        fi
-        printf '%s' "$line" >> "$tmp_file" || { rm -f "$tmp_file"; return 1; }
-        (( bytes += ${#line} )) || true
-    done
-    mv -f "$tmp_file" "$ACTIVE_INCIDENT_FILE" || { rm -f "$tmp_file"; return 1; }
-    chmod 0600 "$ACTIVE_INCIDENT_FILE" 2>/dev/null || true
-    ACTIVE_INCIDENT_AVAILABLE=true
-}
-
-_incident_update_unhealthy() {
-    (( failed > 0 || warnings > 0 )) || return 0
-    local now name original_name status detail
-    now="$(date -Iseconds)"
-    if [[ -e "$ACTIVE_INCIDENT_FILE" ]]; then
-        if ! _incident_load "$ACTIVE_INCIDENT_FILE"; then
-            log_warn "Health incident context is unreadable or invalid; preserving it and continuing without incident correlation."
-            ACTIVE_INCIDENT_AVAILABLE=false
-            return 1
-        fi
-    else
-        ACTIVE_INCIDENT_ID="$(_incident_sanitize "vw-$(date -u +%Y%m%dT%H%M%SZ)-$(openssl rand -hex 6 2>/dev/null || printf '%06d' "$RANDOM")" 80)"
-        ACTIVE_INCIDENT_STARTED_AT="$now"
-        ACTIVE_INCIDENT_HOSTNAME="$(_incident_sanitize "$(hostname -f 2>/dev/null || hostname)" 255)"
-        incident_statuses=()
-        incident_details=()
-        incident_check_order=()
-    fi
-    ACTIVE_INCIDENT_LAST_UNHEALTHY_AT="$now"
-    for original_name in "${check_order[@]}"; do
-        status="${check_results[$original_name]:-}"
-        [[ "$status" == "warn" || "$status" == "fail" ]] || continue
-        name="$(_incident_sanitize "$original_name" 128)"
-        detail="$(_incident_sanitize "${check_messages[$original_name]:-}" 512)"
-        _incident_set_check "$name" "$status" "$detail"
-    done
-    if ! _incident_write; then
-        ACTIVE_INCIDENT_AVAILABLE=false
-        return 1
-    fi
-}
-
-_incident_format_duration() {
-    local seconds="${1:-0}" days hours minutes
-    [[ "$seconds" =~ ^[0-9]+$ ]] || { printf 'unknown'; return; }
-    days=$(( seconds / 86400 ))
-    hours=$(( (seconds % 86400) / 3600 ))
-    minutes=$(( (seconds % 3600) / 60 ))
-    printf '%sd %sh %sm (%ss)' "$days" "$hours" "$minutes" "$seconds"
-}
 
 local -A check_results=()
 local -A check_messages=()
@@ -1327,62 +1154,6 @@ _notify_failures() {
     if [[ $failed -gt 0 || $warnings -gt 0 ]]; then
         _release_recovery_lock
     fi
-}
-
-_notify_recovery() {
-    [[ $failed -eq 0 && $warnings -eq 0 ]] || return 0
-
-    if [[ ! -e "$ACTIVE_INCIDENT_FILE" ]]; then
-        log_debug "No active health incident — recovery notification not applicable"
-        return 0
-    fi
-    if ! _incident_load "$ACTIVE_INCIDENT_FILE"; then
-        log_warn "Active health incident state is unreadable or invalid; preserving '${ACTIVE_INCIDENT_FILE}' and suppressing recovery notification."
-        return 0
-    fi
-    if ! _acquire_alert_lock "recovery" "${ALERT_RECOVERY_TTL}"; then
-        log_info "Recovery notification already sent within TTL — suppressing"
-        return 0
-    fi
-
-    local recovery_date recovery_time subject body recovered_file
-    local started_epoch recovery_epoch duration prior_lines="" name
-    recovery_date="$(date)"
-    recovery_time="$(date -Iseconds)"
-    started_epoch="$(date -d "$ACTIVE_INCIDENT_STARTED_AT" +%s 2>/dev/null || printf '')"
-    recovery_epoch="$(date -d "$recovery_time" +%s 2>/dev/null || date +%s)"
-    if [[ "$started_epoch" =~ ^[0-9]+$ && "$recovery_epoch" =~ ^[0-9]+$ \
-        && "$recovery_epoch" -ge "$started_epoch" ]]; then
-        duration="$(_incident_format_duration "$(( recovery_epoch - started_epoch ))")"
-    else
-        duration="unknown"
-    fi
-    for name in "${incident_check_order[@]}"; do
-        printf -v prior_lines '%s- %s [%s]: %s\n' \
-            "$prior_lines" "$name" "${incident_statuses[$name]^^}" "${incident_details[$name]}"
-    done
-    subject="VaultWarden Health RECOVERED [Incident ${ACTIVE_INCIDENT_ID}] on $(hostname)"
-    printf -v body \
-        'All health checks passed at %s\n\nIncident: %s\nIncident started: %s\nLast unhealthy observation: %s\nRecovered: %s\nDuration: %s\nHost: %s\n\nPreviously unhealthy checks:\n%s\nCurrent totals:\nPassed : %s\nWarnings: %s\nFailed : %s\n\nNo further alerts will fire until the next failure.' \
-        "$recovery_date" "$ACTIVE_INCIDENT_ID" "$ACTIVE_INCIDENT_STARTED_AT" \
-        "$ACTIVE_INCIDENT_LAST_UNHEALTHY_AT" "$recovery_time" "$duration" \
-        "$ACTIVE_INCIDENT_HOSTNAME" "$prior_lines" "$passed" "$warnings" "$failed"
-    if _send_notification "$subject" "$body"; then
-        log_info "Recovery notification sent"
-        recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
-        if mv -f -- "$ACTIVE_INCIDENT_FILE" "$recovered_file"; then
-            chmod 0600 "$recovered_file" 2>/dev/null || true
-            if ! rm -f -- "$recovered_file"; then
-                log_warn "Recovery email was delivered and the active incident was closed, but recovered incident cleanup failed; stale evidence remains at '${recovered_file}'. Review and remove this file manually."
-            fi
-        else
-            log_warn "Recovery email was delivered, but the active incident could not be archived from '${ACTIVE_INCIDENT_FILE}' to '${recovered_file}'. Stale active incident state may require operator action; the recovery cooldown remains active."
-        fi
-        return 0
-    fi
-    _release_recovery_lock
-    log_warn "Recovery notification delivery failed; cooldown released for retry next health cycle"
-    return 1
 }
 
 _generate_report() {
