@@ -342,12 +342,12 @@ services:
       - postfix_relay
 
     healthcheck:
-      # Confirm both the Postfix process and the upstream relay socket respond.
+      # Verify the local Postfix master process. Upstream relay connectivity is checked separately.
       test: ["CMD-SHELL", "postfix status >/dev/null 2>&1 || exit 1"]
-      interval: 120s
-      timeout: 15s
-      retries: 5
-      start_period: 60s
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
 
     security_opt:
       - no-new-privileges:true
