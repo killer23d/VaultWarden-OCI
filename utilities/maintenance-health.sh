@@ -222,6 +222,7 @@ local ACTIVE_INCIDENT_HOSTNAME=""
 local RECOVERY_DELIVERY_PHASE=""
 local RECOVERY_DELIVERY_INCIDENT_ID=""
 local RECOVERY_DELIVERY_UPDATED_AT=""
+local RECOVERY_LOCK_FD=""
 local -A incident_statuses=()
 local -A incident_details=()
 local -a incident_check_order=()
@@ -1277,8 +1278,12 @@ _health_main() {
     _incident_update_unhealthy || true
     if $JSON_OUTPUT; then _print_results_json; else _print_results; fi
     if $REPORT_MODE; then _generate_report; fi
-    _notify_failures
-    _notify_recovery
+    local notification_rc=0
+    _notify_failures || notification_rc=$?
+    _notify_recovery || notification_rc=$?
+    if (( notification_rc != 0 )); then
+        return "$notification_rc"
+    fi
     if [[ $failed -gt 0 ]]; then exit 2
     elif [[ $warnings -gt 0 ]]; then exit 1
     else exit 0

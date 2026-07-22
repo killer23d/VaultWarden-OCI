@@ -288,30 +288,17 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-extract_func(){
-    local file="$1" func="$2"
-    awk -v f="$func" '
-      $0 ~ "^" f "\\(\\)" {p=1}
-      p {
-        print
-        opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
-        depth += opens - closes
-        if (depth == 0) exit
-      }' "$file"
-}
-
-HEALTH="$ROOT/utilities/maintenance-health.sh"
 # shellcheck source=../../../lib/health-alerts.sh
 source "$ROOT/lib/health-alerts.sh"
+source "$ROOT/lib/email.sh"
 log_info(){ printf 'INFO: %s\n' "$*"; }
 log_warn(){ printf 'WARN: %s\n' "$*"; }
-eval "$(extract_func "$HEALTH" _send_notification | sed '1s/^_send_notification()/_send_notification_production()/')"
 
 _email_available=false
 ADMIN_EMAIL=admin@example.test
 export ADMIN_EMAIL
 unavailable_rc=0
-_send_notification_production subject body >"$TMP/unavailable.out" 2>&1 || unavailable_rc=$?
+_send_notification subject body >"$TMP/unavailable.out" 2>&1 || unavailable_rc=$?
 [[ "$unavailable_rc" -ne 0 ]] \
     || fail "email-unavailable notification path reported successful delivery"
 
@@ -320,6 +307,7 @@ ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
 RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
 ALERT_RECOVERY_TTL=86400
 ALERT_RECOVERY_PENDING_TTL=30
+RECOVERY_LOCK_FD=""
 RECOVERY_DELIVERY_PHASE=""
 RECOVERY_DELIVERY_INCIDENT_ID=""
 RECOVERY_DELIVERY_UPDATED_AT=""
@@ -399,22 +387,8 @@ log_info(){ :; }
 log_warn(){ printf 'WARN: %s\n' "$*"; }
 log_debug(){ :; }
 
-extract_func(){
-    local file="$1" func="$2"
-    awk -v f="$func" '
-      $0 ~ "^" f "\\(\\)" {p=1}
-      p {
-        print
-        opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
-        depth += opens - closes
-        if (depth == 0) exit
-      }' "$file"
-}
-
-HEALTH="$ROOT/utilities/maintenance-health.sh"
 # shellcheck source=../../../lib/health-alerts.sh
 source "$ROOT/lib/health-alerts.sh"
-eval "$(extract_func "$HEALTH" _notify_failures)"
 
 ALERT_LOCK_DIR="$TMP/alerts"
 ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
@@ -422,6 +396,7 @@ RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
 ALERT_COOLDOWN_SECONDS=3600
 ALERT_RECOVERY_TTL=86400
 ALERT_RECOVERY_PENDING_TTL=30
+RECOVERY_LOCK_FD=""
 RECOVERY_DELIVERY_PHASE=""
 RECOVERY_DELIVERY_INCIDENT_ID=""
 RECOVERY_DELIVERY_UPDATED_AT=""

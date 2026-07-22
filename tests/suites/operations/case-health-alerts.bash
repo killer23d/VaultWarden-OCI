@@ -20,13 +20,19 @@ fail() {
     exit 1
 }
 
+write_valid_incident() {
+    cat > "$ACTIVE_INCIDENT_FILE" <<'INCIDENT'
+meta	incident_id	vw-test-incident
+meta	started_at	2026-07-20T01:00:00+00:00
+meta	last_unhealthy_at	2026-07-20T01:05:00+00:00
+meta	hostname	vaultwarden-test
+check	container:vaultwarden_app	fail	Container was not running
+INCIDENT
+    chmod 0600 "$ACTIVE_INCIDENT_FILE"
+}
+
 reset_fixture() {
-    command rm -f -- \
-        "$TMP/active-incident.state" \
-        "$TMP/active-incident.state.recovered" \
-        "$TMP/recovery-delivery.state" \
-        "$TMP/recovery-delivery.lock" \
-        "$TMP/recovery.cooldown"
+    command rm -rf -- "$TMP"/*
     ALERT_LOCK_DIR="$TMP"
     ACTIVE_INCIDENT_FILE="$TMP/active-incident.state"
     RECOVERY_DELIVERY_STATE_FILE="$TMP/recovery-delivery.state"
@@ -35,16 +41,13 @@ reset_fixture() {
     passed=27
     warnings=0
     failed=0
-    LOAD_COUNT=0
     ACQUIRE_COUNT=0
     SEND_COUNT=0
     RELEASE_COUNT=0
-    INCIDENT_LOAD_RC=0
-    ACQUIRE_RC=0
-    SEND_RC=0
     TRACE=""
     CAPTURED_SUBJECT=""
     CAPTURED_BODY=""
+    RECOVERY_LOCK_FD=""
     ACTIVE_INCIDENT_AVAILABLE=false
     ACTIVE_INCIDENT_ID=""
     ACTIVE_INCIDENT_STARTED_AT=""
@@ -62,51 +65,43 @@ log_debug() { TRACE+="debug:$*"$'\n'; }
 log_info()  { TRACE+="info:$*"$'\n'; }
 log_warn()  { TRACE+="warn:$*"$'\n'; }
 
-_incident_load() {
-    (( LOAD_COUNT += 1 )) || true
-    (( INCIDENT_LOAD_RC == 0 )) || return "$INCIDENT_LOAD_RC"
-    ACTIVE_INCIDENT_ID="vw-test-incident"
-    ACTIVE_INCIDENT_STARTED_AT="2026-07-20T01:00:00+00:00"
-    ACTIVE_INCIDENT_LAST_UNHEALTHY_AT="2026-07-20T01:05:00+00:00"
-    ACTIVE_INCIDENT_HOSTNAME="vaultwarden-test"
-    incident_check_order=("container:vaultwarden_app")
-    incident_statuses["container:vaultwarden_app"]="fail"
-    incident_details["container:vaultwarden_app"]="Container was not running"
-}
-
 _acquire_alert_lock() {
     (( ACQUIRE_COUNT += 1 )) || true
-    return "$ACQUIRE_RC"
+    return 0
+}
+
+_release_recovery_lock() {
+    (( RELEASE_COUNT += 1 )) || true
+    _state_remove_regular_file "${ALERT_LOCK_DIR}/recovery.cooldown" "Recovery cooldown state" || true
 }
 
 _send_notification() {
     (( SEND_COUNT += 1 )) || true
     CAPTURED_SUBJECT="$1"
     CAPTURED_BODY="$2"
-    return "$SEND_RC"
-}
-
-_release_recovery_lock() {
-    (( RELEASE_COUNT += 1 )) || true
-}
-
-_incident_format_duration() {
-    printf '5m (300s)'
+    return 0
 }
 
 reset_fixture
 _notify_recovery
-(( LOAD_COUNT == 0 )) || fail "clean steady state must not load incident state"
 (( ACQUIRE_COUNT == 0 )) || fail "clean steady state must not acquire a recovery cooldown"
 (( SEND_COUNT == 0 )) || fail "clean steady state must not send a recovery email"
 [[ "$TRACE" == *"No active health incident"* ]] || fail "clean steady state should log a debug no-op"
 [[ ! -e "$RECOVERY_DELIVERY_STATE_FILE" ]] || fail "clean steady state must not create delivery state"
 
 reset_fixture
+ln -s "$TMP/missing-incident" "$ACTIVE_INCIDENT_FILE"
+if _notify_recovery; then
+    fail "dangling incident symlink must fail closed"
+fi
+(( SEND_COUNT == 0 )) || fail "dangling incident symlink must not send email"
+[[ -L "$ACTIVE_INCIDENT_FILE" ]] || fail "dangling incident symlink evidence must be preserved"
+
+reset_fixture
 : > "$ACTIVE_INCIDENT_FILE"
-INCIDENT_LOAD_RC=1
-_notify_recovery
-(( LOAD_COUNT == 1 )) || fail "existing incident state must be validated"
+if _notify_recovery; then
+    fail "invalid incident state must fail closed"
+fi
 (( ACQUIRE_COUNT == 0 )) || fail "invalid incident state must not acquire a recovery cooldown"
 (( SEND_COUNT == 0 )) || fail "invalid incident state must not send a recovery email"
 [[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "invalid incident evidence must be preserved"
@@ -114,120 +109,141 @@ _notify_recovery
 [[ "$TRACE" == *"unreadable or invalid"* ]] || fail "invalid incident state should be reported"
 
 reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
-_notify_recovery
-(( LOAD_COUNT == 1 )) || fail "valid recovery must load incident state"
+write_valid_incident
+_notify_recovery || fail "valid recovery must succeed"
 (( ACQUIRE_COUNT == 1 )) || fail "valid recovery must acquire the recovery cooldown"
 (( SEND_COUNT == 1 )) || fail "valid recovery must send exactly one email"
-[[ "$CAPTURED_SUBJECT" == *"RECOVERED [Incident vw-test-incident]"* ]] \
-    || fail "recovery subject must identify the incident"
-[[ "$CAPTURED_BODY" == *"Previously unhealthy checks:"* \
-    && "$CAPTURED_BODY" == *"container:vaultwarden_app [FAIL]"* ]] \
-    || fail "recovery body must include prior unhealthy context"
+[[ "$CAPTURED_SUBJECT" == *"RECOVERED [Incident vw-test-incident]"* ]] || fail "recovery subject must identify the incident"
+[[ "$CAPTURED_BODY" == *"Previously unhealthy checks:"* && "$CAPTURED_BODY" == *"container:vaultwarden_app [FAIL]"* ]] || fail "recovery body must include prior unhealthy context"
 [[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "delivered recovery must close the active incident"
 [[ ! -e "$RECOVERY_DELIVERY_STATE_FILE" ]] || fail "normal closure must clear delivered state"
 
 reset_fixture
 failed=1
-: > "$ACTIVE_INCIDENT_FILE"
+write_valid_incident
 _notify_recovery
-(( LOAD_COUNT == 0 && ACQUIRE_COUNT == 0 && SEND_COUNT == 0 )) \
-    || fail "an unhealthy run must never enter recovery notification handling"
+(( ACQUIRE_COUNT == 0 && SEND_COUNT == 0 )) || fail "an unhealthy run must never enter recovery notification handling"
 [[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "an unhealthy run must preserve the active incident"
 
 reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
-ACQUIRE_RC=1
-_notify_recovery
-(( ACQUIRE_COUNT == 1 && SEND_COUNT == 0 )) \
-    || fail "recovery cooldown must suppress duplicate delivery"
-[[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "cooldown suppression must preserve incident state"
-
-reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
-SEND_RC=1
+write_valid_incident
+_send_notification() {
+    (( SEND_COUNT += 1 )) || true
+    CAPTURED_SUBJECT="$1"
+    CAPTURED_BODY="$2"
+    return 42
+}
 if _notify_recovery; then
     fail "failed recovery delivery must return non-zero"
 fi
 (( RELEASE_COUNT == 1 )) || fail "failed recovery delivery must release its cooldown"
 [[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "failed recovery delivery must preserve incident state for retry"
 [[ ! -e "$RECOVERY_DELIVERY_STATE_FILE" ]] || fail "failed recovery delivery must clear pending state"
-SEND_RC=0
+_send_notification() {
+    (( SEND_COUNT += 1 )) || true
+    CAPTURED_SUBJECT="$1"
+    CAPTURED_BODY="$2"
+    return 0
+}
 _notify_recovery || fail "recovery retry after failed delivery returned nonzero"
 (( SEND_COUNT == 2 )) || fail "failed recovery delivery was not retryable"
-[[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "successful retry did not close the active incident"
 
 reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
+write_valid_incident
 _recovery_delivery_state_write pending vw-test-incident "$(date +%s)"
-_notify_recovery
-(( ACQUIRE_COUNT == 0 && SEND_COUNT == 0 )) \
-    || fail "recent pending lease must suppress a concurrent duplicate"
-[[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "recent pending lease must preserve the active incident"
+_notify_recovery || fail "recent pending lease should be a benign no-op"
+(( ACQUIRE_COUNT == 0 && SEND_COUNT == 0 )) || fail "recent pending lease must suppress a concurrent duplicate"
 
 reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
-_recovery_delivery_state_write pending vw-test-incident \
-    "$(( $(date +%s) - ALERT_RECOVERY_PENDING_TTL - 1 ))"
+write_valid_incident
+_recovery_delivery_state_write pending vw-test-incident "$(( $(date +%s) - ALERT_RECOVERY_PENDING_TTL - 1 ))"
 _notify_recovery || fail "stale pending lease retry returned nonzero"
-(( RELEASE_COUNT == 1 && ACQUIRE_COUNT == 1 && SEND_COUNT == 1 )) \
-    || fail "stale pending lease must permit one retry"
-[[ "$TRACE" == *"Stale recovery delivery lease"* ]] \
-    || fail "stale pending lease retry must be logged"
+(( RELEASE_COUNT == 1 && ACQUIRE_COUNT == 1 && SEND_COUNT == 1 )) || fail "stale pending lease must permit one retry"
+[[ "$TRACE" == *"Stale recovery delivery lease"* ]] || fail "stale pending lease retry must be logged"
 
 reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
+write_valid_incident
 _recovery_delivery_state_write delivered vw-older-incident "$(date +%s)"
-_notify_recovery || fail "new incident recovery returned nonzero with older delivery state"
-(( ACQUIRE_COUNT == 1 && SEND_COUNT == 1 )) \
-    || fail "delivery state for an older incident must not suppress the new incident"
+_notify_recovery || fail "delivery state for another incident must not block recovery"
+(( ACQUIRE_COUNT == 1 && SEND_COUNT == 1 )) || fail "delivery state for an older incident must not suppress the new incident"
 
 reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
+write_valid_incident
 printf 'broken\tstate\n' > "$RECOVERY_DELIVERY_STATE_FILE"
 chmod 0600 "$RECOVERY_DELIVERY_STATE_FILE"
-_notify_recovery
-(( ACQUIRE_COUNT == 0 && SEND_COUNT == 0 )) \
-    || fail "corrupt delivery state must fail closed before cooldown or email"
-[[ -e "$RECOVERY_DELIVERY_STATE_FILE" && -e "$ACTIVE_INCIDENT_FILE" ]] \
-    || fail "corrupt delivery state and incident evidence must be preserved"
-[[ "$TRACE" == *"unreadable or invalid"* ]] \
-    || fail "corrupt delivery state must produce an actionable warning"
+if _notify_recovery; then
+    fail "corrupt delivery state must fail closed"
+fi
+(( ACQUIRE_COUNT == 0 && SEND_COUNT == 0 )) || fail "corrupt delivery state must fail closed before cooldown or email"
+[[ -e "$RECOVERY_DELIVERY_STATE_FILE" && -e "$ACTIVE_INCIDENT_FILE" ]] || fail "corrupt delivery state and incident evidence must be preserved"
 
 reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
+write_valid_incident
+ln -s "$TMP/delivery-target" "$RECOVERY_DELIVERY_STATE_FILE"
+if _notify_recovery; then
+    fail "delivery-state symlink must fail closed"
+fi
+(( SEND_COUNT == 0 )) || fail "delivery-state symlink must not send email"
+
+reset_fixture
+write_valid_incident
+ln -s "$TMP/lock-target" "$TMP/recovery-delivery.lock"
+if _notify_recovery; then
+    fail "recovery lock symlink must fail closed"
+fi
+(( SEND_COUNT == 0 )) || fail "recovery lock symlink must not send email"
+
+reset_fixture
+write_valid_incident
+mkdir -p "$TMP/recovery-delivery.lock"
+if _notify_recovery; then
+    fail "recovery lock directory must fail closed"
+fi
+(( SEND_COUNT == 0 )) || fail "recovery lock directory must not send email"
+
+reset_fixture
+write_valid_incident
+recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
+mkdir -p "$recovered_file"
+if _notify_recovery; then
+    fail "invalid recovered destination must keep the incident unresolved"
+fi
+(( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) || fail "invalid recovered destination changed the initial delivery count"
+_recovery_delivery_state_load || fail "invalid recovered destination must retain delivered state"
+[[ "$RECOVERY_DELIVERY_PHASE" == "delivered" ]] || fail "invalid recovered destination must retain a delivered marker"
+[[ -e "$ACTIVE_INCIDENT_FILE" && -d "$recovered_file" ]] || fail "invalid recovered destination must preserve evidence"
+
+reset_fixture
+write_valid_incident
 recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
 mv() {
     local arg
     local -a operands=()
-
     for arg in "$@"; do
         [[ "$arg" == -* ]] || operands+=("$arg")
     done
-    if [[ "${operands[0]:-}" == "$ACTIVE_INCIDENT_FILE" \
-       && "${operands[1]:-}" == "$recovered_file" ]]; then
+    if [[ "${operands[0]:-}" == "$ACTIVE_INCIDENT_FILE" && "${operands[1]:-}" == "$recovered_file" ]]; then
         return 1
     fi
     command mv "$@"
 }
-_notify_recovery || fail "successful recovery returned nonzero when incident archival failed"
-(( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) \
-    || fail "incident archival failure changed the first delivery count"
-_recovery_delivery_state_load || fail "incident archival failure did not retain delivery state"
-[[ "$RECOVERY_DELIVERY_PHASE" == "delivered" ]] \
-    || fail "incident archival failure did not retain a delivered marker"
-_notify_recovery || fail "delivered incident archival retry returned nonzero"
-(( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) \
-    || fail "delivered incident archival retry sent a duplicate recovery email"
+if _notify_recovery; then
+    fail "incident archival failure must remain unresolved"
+fi
+(( SEND_COUNT == 1 )) || fail "incident archival failure changed the first delivery count"
+_recovery_delivery_state_load || fail "incident archival failure must retain delivery state"
+[[ "$RECOVERY_DELIVERY_PHASE" == "delivered" ]] || fail "incident archival failure must retain a delivered marker"
+if _notify_recovery; then
+    fail "delivered incident archival retry should remain unresolved until closure succeeds"
+fi
+(( SEND_COUNT == 1 )) || fail "delivered incident archival retry sent a duplicate recovery email"
 unset -f mv
 _notify_recovery || fail "incident archival retry after filesystem recovery returned nonzero"
-(( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) \
-    || fail "incident closure retry changed the delivery count"
-[[ ! -e "$ACTIVE_INCIDENT_FILE" && ! -e "$RECOVERY_DELIVERY_STATE_FILE" ]] \
-    || fail "incident closure retry did not close the incident and clear delivered state"
+(( SEND_COUNT == 1 )) || fail "incident closure retry changed the delivery count"
+[[ ! -e "$ACTIVE_INCIDENT_FILE" && ! -e "$RECOVERY_DELIVERY_STATE_FILE" ]] || fail "incident closure retry did not close the incident and clear delivered state"
 
 reset_fixture
-: > "$ACTIVE_INCIDENT_FILE"
+write_valid_incident
 recovered_file="${ACTIVE_INCIDENT_FILE}.recovered"
 rm() {
     local arg
@@ -236,91 +252,181 @@ rm() {
     done
     command rm "$@"
 }
-_notify_recovery || fail "successful recovery returned nonzero when archive cleanup failed"
+_notify_recovery || fail "cleanup failure should still report successful closure"
 unset -f rm
 (( SEND_COUNT == 1 )) || fail "cleanup failure changed the successful delivery count"
-(( RELEASE_COUNT == 0 )) || fail "cleanup failure released a successful recovery cooldown"
-[[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "cleanup failure left the incident active after successful delivery"
-[[ -e "$recovered_file" ]] || fail "cleanup failure did not preserve bounded recovered incident evidence"
-if stat -c '%a' "$recovered_file" >/dev/null 2>&1; then
-    recovered_mode="$(stat -c '%a' "$recovered_file")"
-else
-    recovered_mode="$(stat -f '%Lp' "$recovered_file")"
-fi
-[[ "$recovered_mode" == "600" ]] || fail "recovered incident evidence mode is $recovered_mode instead of 600"
-[[ "$TRACE" == *"Recovery notification sent"* ]] || fail "cleanup failure obscured successful delivery"
-[[ "$TRACE" == *"active incident was closed"* && "$TRACE" == *"$recovered_file"* ]] \
-    || fail "cleanup failure warning was not truthful or actionable"
-_notify_recovery
-(( SEND_COUNT == 1 && ACQUIRE_COUNT == 1 )) \
-    || fail "closed incident cleanup failure permitted duplicate recovery delivery"
-command rm -f "$recovered_file"
+[[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "cleanup failure left the incident active"
+[[ -e "$recovered_file" ]] || fail "cleanup failure must preserve bounded recovered evidence"
+_notify_recovery || fail "cleanup failure follow-up should not duplicate recovery"
+(( SEND_COUNT == 1 )) || fail "cleanup failure follow-up permitted duplicate delivery"
 
-# Re-source the library in a nested scope to restore the real parser after the
-# focused side-effect doubles above.
 (
 # shellcheck source=../../../lib/health-alerts.sh
 source "$ROOT/lib/health-alerts.sh"
-_acquire_alert_lock() {
-    (( ACQUIRE_COUNT += 1 )) || true
-    return "$ACQUIRE_RC"
+ALERT_LOCK_DIR="$TMP/real"
+ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
+RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
+ALERT_RECOVERY_TTL=86400
+ALERT_RECOVERY_PENDING_TTL=30
+passed=27
+warnings=0
+failed=0
+RECOVERY_LOCK_FD=""
+ACTIVE_INCIDENT_AVAILABLE=false
+ACTIVE_INCIDENT_ID=""
+ACTIVE_INCIDENT_STARTED_AT=""
+ACTIVE_INCIDENT_LAST_UNHEALTHY_AT=""
+ACTIVE_INCIDENT_HOSTNAME=""
+RECOVERY_DELIVERY_PHASE=""
+RECOVERY_DELIVERY_INCIDENT_ID=""
+RECOVERY_DELIVERY_UPDATED_AT=""
+declare -A incident_statuses=()
+declare -A incident_details=()
+declare -a incident_check_order=()
+declare -A check_results=()
+declare -A check_messages=()
+declare -a check_order=()
+log_debug() { :; }
+log_info() { :; }
+log_warn() { :; }
+_send_notification() { return 0; }
+
+mkdir -p "$ALERT_LOCK_DIR"
+printf 'meta\tincident_id\tvw-invalid\nmeta\tstarted_at\t2026-07-20T01:00:00+00:00\ncheck\tcontainer\tpass\tbad\n' > "$ACTIVE_INCIDENT_FILE"
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "invalid persisted status must be rejected"
+
+printf 'meta\tincident_id\tvw-dup\nmeta\tincident_id\tvw-dup-two\nmeta\tstarted_at\t2026-07-20T01:00:00+00:00\ncheck\tcontainer\tfail\tbad\n' > "$ACTIVE_INCIDENT_FILE"
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "duplicate incident id must be rejected"
+
+printf 'meta\tincident_id\tvw-missing\ncheck\tcontainer\tfail\tbad\n' > "$ACTIVE_INCIDENT_FILE"
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "missing started_at must be rejected"
+
+printf 'meta\tincident_id\tvw-tabs\nmeta\tstarted_at\t2026-07-20T01:00:00+00:00\ncheck\tcontainer\tfail\tbad\textra\n' > "$ACTIVE_INCIDENT_FILE"
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "extra fields must be rejected"
+
+printf 'meta\tincident_id\tvw-trailing\nmeta\tstarted_at\t2026-07-20T01:00:00+00:00\nunknown\tfield\tvalue\n' > "$ACTIVE_INCIDENT_FILE"
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "unknown record types must be rejected"
+
+printf 'meta\tincident_id\tvw-nonl\nmeta\tstarted_at\t2026-07-20T01:00:00+00:00\ncheck\tcontainer\tfail\tbad' > "$ACTIVE_INCIDENT_FILE"
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "unterminated final record must be rejected"
+
+printf 'meta\tincident_id\tvw-nul\nmeta\tstarted_at\t2026-07-20T01:00:00+00:00\ncheck\tcontainer\tfail\tba\0d\n' > "$ACTIVE_INCIDENT_FILE"
+chmod 0600 "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "embedded NUL bytes must be rejected"
+
+ACTIVE_INCIDENT_ID='vw-real-parser-recovery'
+ACTIVE_INCIDENT_STARTED_AT='2026-07-20T01:00:00+00:00'
+ACTIVE_INCIDENT_LAST_UNHEALTHY_AT='2026-07-20T01:05:00+00:00'
+ACTIVE_INCIDENT_HOSTNAME='vaultwarden-test'
+incident_check_order=('container:vaultwarden_app' 'backup:age')
+incident_statuses['container:vaultwarden_app']='fail'
+incident_details['container:vaultwarden_app']='Container was not running'
+incident_statuses['backup:age']='warn'
+incident_details['backup:age']='Latest backup was stale'
+_incident_write || fail "real incident writer should succeed"
+_incident_reset_loaded_state
+_incident_load "$ACTIVE_INCIDENT_FILE" || fail "real incident writer output must round-trip"
+
+append_check_line_with_detail_bytes() {
+    local path="$1" key="$2" detail_bytes="$3" encoding="$4"
+    local pairs=0 odd=0 i fill
+
+    printf 'check\t%s\tfail\t' "$key" >> "$path"
+    if [[ "$encoding" == "ascii" ]]; then
+        if (( detail_bytes > 0 )); then
+            printf -v fill '%*s' "$detail_bytes" ''
+            fill="${fill// /A}"
+            printf '%s' "$fill" >> "$path"
+        fi
+    else
+        pairs=$(( detail_bytes / 2 ))
+        odd=$(( detail_bytes % 2 ))
+        for (( i = 0; i < pairs; i++ )); do
+            printf '\303\251' >> "$path"
+        done
+        if (( odd == 1 )); then
+            printf 'A' >> "$path"
+        fi
+    fi
+    printf '\n' >> "$path"
 }
-_release_recovery_lock() { (( RELEASE_COUNT += 1 )) || true; }
-_send_notification() {
-    (( SEND_COUNT += 1 )) || true
-    CAPTURED_SUBJECT="$1"
-    CAPTURED_BODY="$2"
-    return "$SEND_RC"
+
+build_incident_file_of_size() {
+    local path="$1" incident_id="$2" target_bytes="$3" encoding="$4"
+    local idx=0 current_bytes remaining base_check_bytes min_line_bytes max_line_bytes
+    local detail_one detail_two sum key
+
+    printf 'meta\tincident_id\t%s\nmeta\tstarted_at\t2026-07-20T01:00:00+00:00\nmeta\tlast_unhealthy_at\t2026-07-20T01:05:00+00:00\nmeta\thostname\tvaultwarden-test\n' "$incident_id" > "$path"
+    base_check_bytes="$(printf 'check\tk00000\tfail\t' | LC_ALL=C wc -c | tr -d '[:space:]')"
+    min_line_bytes=$(( base_check_bytes + 1 ))
+    max_line_bytes=$(( base_check_bytes + 1 + 512 ))
+
+    while :; do
+        current_bytes="$(LC_ALL=C wc -c < "$path" | tr -d '[:space:]')"
+        remaining=$(( target_bytes - current_bytes ))
+        if (( remaining == 0 )); then
+            break
+        fi
+        (( remaining >= min_line_bytes )) || fail "cannot represent target incident size: ${target_bytes} bytes"
+
+        key="k$(printf '%05d' "$idx")"
+        idx=$(( idx + 1 ))
+
+        if (( remaining <= max_line_bytes )); then
+            append_check_line_with_detail_bytes "$path" "$key" "$(( remaining - min_line_bytes ))" "$encoding"
+            break
+        fi
+
+        if (( remaining > 2 * max_line_bytes )); then
+            append_check_line_with_detail_bytes "$path" "$key" 512 "$encoding"
+            continue
+        fi
+
+        sum=$(( remaining - (2 * min_line_bytes) ))
+        (( sum >= 0 && sum <= 1024 )) || fail "internal test size decomposition failed"
+        if (( sum > 512 )); then
+            detail_one=512
+            detail_two=$(( sum - 512 ))
+        else
+            detail_one=$sum
+            detail_two=0
+        fi
+        append_check_line_with_detail_bytes "$path" "$key" "$detail_one" "$encoding"
+        key="k$(printf '%05d' "$idx")"
+        idx=$(( idx + 1 ))
+        append_check_line_with_detail_bytes "$path" "$key" "$detail_two" "$encoding"
+        break
+    done
 }
 
-reset_fixture
-cat > "$ACTIVE_INCIDENT_FILE" <<'INVALID_INCIDENT'
-meta	incident_id	vw-invalid-parser
-meta	started_at	2026-07-20T01:00:00+00:00
-check	container:vaultwarden_app	pass	Invalid persisted status
-INVALID_INCIDENT
-chmod 0600 "$ACTIVE_INCIDENT_FILE"
-_notify_recovery
-(( ACQUIRE_COUNT == 0 )) || fail "real parser invalid state acquired a recovery cooldown"
-(( SEND_COUNT == 0 )) || fail "real parser invalid state attempted delivery"
-[[ -e "$ACTIVE_INCIDENT_FILE" ]] || fail "real parser invalid state was not preserved"
+ascii_limit_file="$TMP/ascii-limit-incident.state"
+build_incident_file_of_size "$ascii_limit_file" 'vw-size' 16384 ascii
+cp "$ascii_limit_file" "$ACTIVE_INCIDENT_FILE"
+_incident_load "$ACTIVE_INCIDENT_FILE" || fail "exactly-at-limit ASCII incident must load"
+printf 'A\n' >> "$ascii_limit_file"
+cp "$ascii_limit_file" "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "one-byte-over-limit ASCII incident must be rejected"
 
-reset_fixture
-printf 'meta\tincident_id\tvw-trailing-record\nmeta\tstarted_at\t2026-07-20T01:00:00+00:00\nunknown\tfield\tvalue' \
-    > "$ACTIVE_INCIDENT_FILE"
-chmod 0600 "$ACTIVE_INCIDENT_FILE"
-_notify_recovery
-(( ACQUIRE_COUNT == 0 && SEND_COUNT == 0 )) \
-    || fail "unterminated trailing record bypassed strict incident parsing"
-[[ -e "$ACTIVE_INCIDENT_FILE" ]] \
-    || fail "malformed trailing incident evidence was not preserved"
+utf8_limit_file="$TMP/utf8-limit-incident.state"
+build_incident_file_of_size "$utf8_limit_file" 'vw-utf8' 16384 utf8
+cp "$utf8_limit_file" "$ACTIVE_INCIDENT_FILE"
+_incident_load "$ACTIVE_INCIDENT_FILE" || fail "exactly-at-limit UTF-8 incident must load"
+printf '\303\251' >> "$utf8_limit_file"
+cp "$utf8_limit_file" "$ACTIVE_INCIDENT_FILE"
+! _incident_load "$ACTIVE_INCIDENT_FILE" || fail "one-byte-over-limit UTF-8 incident must be rejected"
 
-reset_fixture
-cat > "$ACTIVE_INCIDENT_FILE" <<'VALID_INCIDENT'
-meta	incident_id	vw-real-parser-recovery
-meta	started_at	2026-07-20T01:00:00+00:00
-meta	last_unhealthy_at	2026-07-20T01:05:00+00:00
-meta	hostname	vaultwarden-test
-check	container:vaultwarden_app	fail	Container was not running
-check	backup:age	warn	Latest backup was stale
-VALID_INCIDENT
-chmod 0600 "$ACTIVE_INCIDENT_FILE"
-_notify_recovery || fail "real serialized incident recovery failed"
-(( ACQUIRE_COUNT == 1 )) || fail "real serialized incident did not acquire recovery cooldown"
-(( SEND_COUNT == 1 )) || fail "real serialized incident did not send exactly one recovery email"
-[[ "$CAPTURED_SUBJECT" == *"RECOVERED [Incident vw-real-parser-recovery]"* ]] \
-    || fail "real parser recovery subject omitted incident ID"
-[[ "$CAPTURED_BODY" == *"container:vaultwarden_app [FAIL]: Container was not running"* \
-    && "$CAPTURED_BODY" == *"backup:age [WARN]: Latest backup was stale"* ]] \
-    || fail "real parser recovery body omitted persisted unhealthy checks"
-[[ "$CAPTURED_BODY" == *"Duration:"* && "$CAPTURED_BODY" != *"Duration: unknown"* ]] \
-    || fail "real parser recovery did not produce a valid duration"
-[[ ! -e "$ACTIVE_INCIDENT_FILE" ]] || fail "real parser recovery retained active incident state"
-[[ ! -e "${ACTIVE_INCIDENT_FILE}.recovered" ]] || fail "normal recovery retained recovered archive state"
+printf 'v1\tpending\tvw-oversized\t%s\n' "$(printf '9%.0s' {1..600})" > "$RECOVERY_DELIVERY_STATE_FILE"
+chmod 0600 "$RECOVERY_DELIVERY_STATE_FILE"
+! _recovery_delivery_state_load || fail "oversized delivery state must be rejected"
 )
 
-! grep -Fq 'No preceding incident snapshot was available.' "$HEALTH" \
-    || fail "generic no-incident recovery email path must not exist"
+! grep -Fq 'No preceding incident snapshot was available.' "$HEALTH" || fail "generic no-incident recovery email path must not exist"
 
 printf 'PASS: health recovery emails require a valid active incident\n'
 )
@@ -342,6 +448,8 @@ meta	hostname	vaultwarden-test
 check	container:vaultwarden_app	fail	Container was not running
 INCIDENT
 chmod 0600 "$TMP/alerts/active-incident.state"
+mkfifo "$TMP/release-send"
+touch "$TMP/sends"
 
 run_one() (
 # shellcheck source=../../../lib/health-alerts.sh
@@ -354,6 +462,7 @@ ALERT_RECOVERY_PENDING_TTL=30
 failed=0
 warnings=0
 passed=1
+RECOVERY_LOCK_FD=""
 ACTIVE_INCIDENT_AVAILABLE=false
 ACTIVE_INCIDENT_ID=""
 ACTIVE_INCIDENT_STARTED_AT=""
@@ -363,31 +472,27 @@ declare -A incident_statuses=()
 declare -A incident_details=()
 declare -a incident_check_order=()
 log_debug() { :; }
-log_info() { :; }
+log_info() { printf '%s\n' "$*" >> "$TMP/info"; }
 log_warn() { printf '%s\n' "$*" >> "$TMP/warnings"; }
 _send_notification() {
     printf 'send\n' >> "$TMP/sends"
-    sleep 0.2
+    printf 'entered\n' > "$TMP/entered-send"
+    read -r _ < "$TMP/release-send"
+    return 0
 }
 _notify_recovery
 )
 
 run_one &
 first_pid=$!
+while [[ ! -s "$TMP/entered-send" ]]; do :; done
 run_one &
 second_pid=$!
-wait_rc=0
-wait "$first_pid" || wait_rc=1
-wait "$second_pid" || wait_rc=1
-(( wait_rc == 0 )) || {
-    cat "$TMP/warnings" >&2 2>/dev/null || true
-    printf 'FAIL: concurrent recovery worker failed\n' >&2
-    exit 1
-}
-[[ "$(wc -l < "$TMP/sends")" -eq 1 ]] \
-    || { printf 'FAIL: concurrent recovery attempts did not send exactly once\n' >&2; exit 1; }
-[[ ! -e "$TMP/alerts/active-incident.state" ]] \
-    || { printf 'FAIL: concurrent recovery did not close the active incident\n' >&2; exit 1; }
+wait "$second_pid" || { printf 'FAIL: concurrent losing worker failed\n' >&2; exit 1; }
+printf 'release\n' > "$TMP/release-send"
+wait "$first_pid" || { printf 'FAIL: concurrent winning worker failed\n' >&2; exit 1; }
+[[ "$(wc -l < "$TMP/sends")" -eq 1 ]] || { printf 'FAIL: concurrent recovery attempts did not send exactly once\n' >&2; exit 1; }
+[[ ! -e "$TMP/alerts/active-incident.state" ]] || { printf 'FAIL: concurrent recovery did not close the active incident\n' >&2; exit 1; }
 printf 'PASS: concurrent health recovery attempts send once\n'
 )
 
