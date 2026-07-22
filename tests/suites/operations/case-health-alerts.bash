@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Health alert state-transition regression tests.
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR/../../..
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
@@ -10,7 +11,7 @@ set -euo pipefail
 
 ROOT="$VW_TEST_REPO_ROOT"
 HEALTH="$ROOT/utilities/maintenance-health.sh"
-# shellcheck source=../../../lib/health-alerts.sh
+# shellcheck source=lib/health-alerts.sh
 source "$ROOT/lib/health-alerts.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -261,7 +262,7 @@ _notify_recovery || fail "cleanup failure follow-up should not duplicate recover
 (( SEND_COUNT == 1 )) || fail "cleanup failure follow-up permitted duplicate delivery"
 
 (
-# shellcheck source=../../../lib/health-alerts.sh
+# shellcheck source=lib/health-alerts.sh
 source "$ROOT/lib/health-alerts.sh"
 ALERT_LOCK_DIR="$TMP/real"
 ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
@@ -452,7 +453,7 @@ mkfifo "$TMP/release-send"
 touch "$TMP/sends"
 
 run_one() (
-# shellcheck source=../../../lib/health-alerts.sh
+# shellcheck source=lib/health-alerts.sh
 source "$ROOT/lib/health-alerts.sh"
 ALERT_LOCK_DIR="$TMP/alerts"
 ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"

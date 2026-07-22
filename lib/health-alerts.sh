@@ -20,6 +20,16 @@
 #   crash after SMTP acceptance and before local persistence remains an
 #   unavoidable ambiguous window.
 
+# Caller-owned health-cycle state.
+#
+# These declarations document the expected variable types for Bash and
+# ShellCheck. They intentionally avoid assigning values so caller state is not
+# reset when this library is sourced.
+declare -g failed warnings passed
+declare -ga check_order incident_check_order
+declare -gA check_results check_messages
+declare -gA incident_statuses incident_details
+
 _state_path_present() {
     local path="$1"
 

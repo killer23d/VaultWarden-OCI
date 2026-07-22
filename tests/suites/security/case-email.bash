@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Consolidated email regression suite.
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR/../../..
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
@@ -288,7 +289,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-# shellcheck source=../../../lib/health-alerts.sh
+# shellcheck source=lib/health-alerts.sh
 source "$ROOT/lib/health-alerts.sh"
 source "$ROOT/lib/email.sh"
 log_info(){ printf 'INFO: %s\n' "$*"; }
@@ -387,7 +388,7 @@ log_info(){ :; }
 log_warn(){ printf 'WARN: %s\n' "$*"; }
 log_debug(){ :; }
 
-# shellcheck source=../../../lib/health-alerts.sh
+# shellcheck source=lib/health-alerts.sh
 source "$ROOT/lib/health-alerts.sh"
 
 ALERT_LOCK_DIR="$TMP/alerts"
