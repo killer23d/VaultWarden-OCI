@@ -280,6 +280,9 @@ printf 'Recovery-kit attachment passphrase contract tests passed.\n'
 
 check_recovery_kit_attachment_passphrase_contract
 
+# Variables in this behavioral harness are consumed by dynamically extracted
+# production functions.
+# shellcheck disable=SC2034
 check_recovery_notification_retry_contract() (
 set -euo pipefail
 
@@ -331,10 +334,37 @@ _send_notification(){
     return 0
 }
 
+ACTIVE_INCIDENT_ID=""
+ACTIVE_INCIDENT_STARTED_AT=""
+ACTIVE_INCIDENT_LAST_UNHEALTHY_AT=""
+ACTIVE_INCIDENT_HOSTNAME=""
+declare -a incident_check_order=()
+declare -A incident_statuses=()
+declare -A incident_details=()
+
+_incident_load(){
+    ACTIVE_INCIDENT_ID="vw-test-recovery-retry"
+    ACTIVE_INCIDENT_STARTED_AT="2026-07-20T01:00:00+00:00"
+    ACTIVE_INCIDENT_LAST_UNHEALTHY_AT="2026-07-20T01:05:00+00:00"
+    ACTIVE_INCIDENT_HOSTNAME="vaultwarden-test"
+    incident_check_order=("smtp:sidecar")
+    incident_statuses["smtp:sidecar"]="fail"
+    incident_details["smtp:sidecar"]="Simulated recovery delivery failure"
+}
+
+_incident_format_duration(){
+    printf '5m (300s)'
+}
+
+mkdir -p "$ALERT_LOCK_DIR"
+: > "$ACTIVE_INCIDENT_FILE"
+
 first_rc=0
 _notify_recovery >"$TMP/first.out" 2>&1 || first_rc=$?
 [[ "$first_rc" -ne 0 ]] || fail "failed recovery delivery returned success"
 [[ "$send_attempts" -eq 1 ]] || fail "failed recovery delivery was not attempted exactly once"
+[[ -e "$ACTIVE_INCIDENT_FILE" ]] \
+    || fail "failed recovery delivery removed active incident state"
 [[ ! -e "$ALERT_LOCK_DIR/recovery.cooldown" ]] \
     || fail "failed recovery delivery retained recovery cooldown state"
 ! grep -Fq 'Recovery notification sent' "$TMP/first.out" \
@@ -348,6 +378,8 @@ _notify_recovery >"$TMP/second.out" 2>&1 \
     || fail "released recovery cooldown did not permit a subsequent delivery attempt"
 [[ -e "$ALERT_LOCK_DIR/recovery.cooldown" ]] \
     || fail "successful recovery delivery did not retain its cooldown state"
+[[ ! -e "$ACTIVE_INCIDENT_FILE" ]] \
+    || fail "successful recovery delivery retained active incident state"
 grep -Fq 'Recovery notification sent' "$TMP/second.out" \
     || fail "successful subsequent recovery delivery omitted sent wording"
 
