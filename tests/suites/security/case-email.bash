@@ -308,7 +308,7 @@ ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
 RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
 ALERT_RECOVERY_TTL=86400
 ALERT_RECOVERY_PENDING_TTL=30
-RECOVERY_LOCK_FD=""
+HEALTH_ALERT_STATE_LOCK_FD=""
 RECOVERY_DELIVERY_PHASE=""
 RECOVERY_DELIVERY_INCIDENT_ID=""
 RECOVERY_DELIVERY_UPDATED_AT=""
@@ -317,7 +317,8 @@ warnings=0
 passed=12
 export ALERT_RECOVERY_TTL failed warnings passed
 send_attempts=0
-_send_notification(){
+_email_available=true
+send_email(){
     send_attempts=$((send_attempts + 1))
     if (( send_attempts == 1 )); then return 42; fi
     return 0
@@ -397,7 +398,7 @@ RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
 ALERT_COOLDOWN_SECONDS=3600
 ALERT_RECOVERY_TTL=86400
 ALERT_RECOVERY_PENDING_TTL=30
-RECOVERY_LOCK_FD=""
+HEALTH_ALERT_STATE_LOCK_FD=""
 RECOVERY_DELIVERY_PHASE=""
 RECOVERY_DELIVERY_INCIDENT_ID=""
 RECOVERY_DELIVERY_UPDATED_AT=""
@@ -464,7 +465,7 @@ failed=1
 warnings=0
 _incident_update_unhealthy || fail "could not create second incident"
 second_id="$ACTIVE_INCIDENT_ID"
-_release_recovery_lock
+_release_recovery_cooldown
 failed=0
 warnings=0
 _send_notification(){ return 22; }
@@ -486,7 +487,7 @@ if _incident_update_unhealthy > "$TMP/unwritable.out" 2>&1; then
     fail "incident persistence unexpectedly succeeded with unavailable state path"
 fi
 [[ "$failed" == "$before_failed" ]] || fail "incident persistence changed health counters"
-grep -Fq 'continuing without incident correlation' "$TMP/unwritable.out" \
+grep -Fq 'is not a real directory; health alert state tracking is disabled' "$TMP/unwritable.out" \
     || fail "unavailable incident state did not emit a bounded warning"
 
 ALERT_LOCK_DIR="$TMP/bounded-alerts"
