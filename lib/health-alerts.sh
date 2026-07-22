@@ -90,11 +90,14 @@ _state_file_identity() {
 }
 
 _state_open_file_matches_path() {
-    local path="$1" fd="$2" path_identity fd_identity
+    local path="$1" fd="$2" path_identity fd_identity shell_pid
 
-    if [[ -e "/proc/$$/fd/${fd}" ]]; then
+    # $$ remains the parent shell PID inside Bash subshells; BASHPID identifies
+    # the process that actually owns the dynamically opened descriptor.
+    shell_pid="${BASHPID:-$$}"
+    if [[ -e "/proc/${shell_pid}/fd/${fd}" ]]; then
         path_identity="$(_state_file_identity "$path")" || return 1
-        fd_identity="$(_state_file_identity "/proc/$$/fd/${fd}")" || return 1
+        fd_identity="$(_state_file_identity "/proc/${shell_pid}/fd/${fd}")" || return 1
     elif [[ -e "/dev/fd/${fd}" ]]; then
         # Development fallback for BSD hosts. The supported Ubuntu runtime
         # uses the device-and-inode comparison above through /proc.
