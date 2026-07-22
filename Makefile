@@ -151,7 +151,7 @@ help: ## Show normal admin/day-2 commands
 	@echo "$(YELLOW)Service lifecycle$(NC)"
 	@echo "  $(GREEN)start$(NC)                    Start all services through startup.sh"
 	@echo "  $(GREEN)stop$(NC)                     Stop all services gracefully"
-	@echo "  $(GREEN)restart$(NC)                  Restart all services (run: sudo make restart)"
+	@echo "  $(GREEN)restart$(NC)                  Recreate services without pulling images"
 	@echo "  $(GREEN)status$(NC)                   Show service, backup, disk, and CrowdSec summary"
 	@echo "  $(GREEN)logs$(NC)                     View logs (SERVICE=caddy|vaultwarden|postfix)"
 	@echo ""
@@ -316,10 +316,11 @@ down: ## Stop all services gracefully (root required)
 
 stop: down ## Alias for down
 
-restart: ## Restart all services (via startup.sh; root required)
+restart: ## Recreate all services using locally installed images (root required)
 	$(call require-root)
-	@echo "$(BLUE)Restarting VaultWarden services...$(NC)"
-	@./startup.sh --force || { \
+	$(call check-docker)
+	@echo "$(BLUE)Restarting VaultWarden services without pulling images...$(NC)"
+	@./startup.sh --force --skip-pull || { \
 		echo "$(RED)Restart failed!$(NC)"; \
 		$(MAKE) status; \
 		echo "$(YELLOW)If restart failed due to a key issue, run: sudo make key-health$(NC)"; \

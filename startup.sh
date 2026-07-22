@@ -541,16 +541,23 @@ cleanup_orphaned_resources() {
   log_info "Cleaning up orphaned resources..."
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would remove orphaned containers, networks, and dangling images"
+    log_info "[DRY RUN] Would remove project-scoped orphaned Docker resources"
     return 0
   fi
 
-  # cleanup_docker_system() prunes containers, images, volumes, and networks
-  # scoped to the project label so shared hosts do not lose unrelated
-  # services.
-  cleanup_docker_system || true
+  # Cleanup is intentionally nonfatal, but its result must be reported
+  # accurately so stale project resources are not hidden from operators.
+  if cleanup_docker_system; then
+    log_success "Orphaned resources cleaned up"
+    return 0
+  fi
 
-  log_success "Orphaned resources cleaned up"
+  log_warn "Orphaned resource cleanup failed; startup will continue"
+  _STARTUP_WARNINGS+=(
+    "Project-scoped Docker cleanup failed; stale resources may remain."
+    " Fix: sudo make prune"
+  )
+
   return 0
 }
 
@@ -633,26 +640,20 @@ update_dns_on_startup() {
 _startup_start_services() {
   log_info "Starting VaultWarden services..."
 
-  local compose_args=(up -d --remove-orphans)
+  local compose_args=(
+    up
+    -d
+    --remove-orphans
+  )
 
   if [[ "$FORCE_RESTART" == "true" ]]; then
     compose_args+=(--force-recreate)
+    log_info "Force restart requested; Docker Compose will recreate existing containers."
   fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    if [[ "$FORCE_RESTART" == "true" ]]; then
-      log_info "[DRY RUN] Would run: docker compose rm -sf"
-    fi
     log_info "[DRY RUN] Would run: docker compose ${compose_args[*]}"
     return 0
-  fi
-
-  if [[ "$FORCE_RESTART" == "true" ]]; then
-    log_info "Force restart requested; removing existing containers so Docker metadata is regenerated."
-    if ! docker compose rm -sf; then
-      log_error "docker compose rm failed during forced restart"
-      return 1
-    fi
   fi
 
   if ! docker compose "${compose_args[@]}"; then
@@ -687,8 +688,11 @@ ensure_vaultwarden_egress_nat() {
   # stay in one place and remain reusable outside startup.
   local _fw_script="${PROJECT_ROOT}/utilities/setup-firewall.sh"
   if [[ -x "$_fw_script" ]]; then
-    log_info "Invoking: ${_fw_script} --phase iptables"
-    if _maybe_sudo "$_fw_script" --phase iptables; then
+  log_info "Invoking noninteractive firewall reconciliation: ${_fw_script}"
+
+  # Startup may repair live rules, but must never install packages or wait
+  # for operator input. EOF selects the helper's documented default answer.
+  if _maybe_sudo "$_fw_script" --phase iptables </dev/null; then
       log_success "Egress firewall remediation completed via utilities/setup-firewall.sh"
       return 0
     fi
@@ -711,12 +715,73 @@ ensure_vaultwarden_egress_nat() {
 # (lib/defaults.sh). Add a new sidecar there — not here — when the stack grows.
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
-  local timeout=90
+
+  local timeout="${CRITICAL_SERVICE_STARTUP_TIMEOUT:-90}"
   local service
+
   for service in "${_VW_DEFAULT_CRITICAL_SERVICES[@]}"; do
     wait_for_service_ready "$service" "$timeout" || return 1
   done
+
   log_success "Critical services are ready"
+  return 0
+}
+
+wait_for_optional_service_health() {
+  local service="${1:?service name is required}"
+  local timeout="${2:-60}"
+  local interval=2
+  local elapsed=0
+  local container_id=""
+  local status=""
+
+  container_id=$(docker compose ps -q "$service" 2>/dev/null || true)
+  if [[ -z "$container_id" ]]; then
+    log_warn "Optional service '${service}' has no running container"
+    return 1
+  fi
+
+  while (( elapsed < timeout )); do
+    status=$(docker inspect \
+      --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+      "$container_id" 2>/dev/null || true)
+
+    case "$status" in
+      healthy|running)
+        return 0
+        ;;
+      unhealthy|exited|dead)
+        log_warn "Optional service '${service}' entered state '${status}'"
+        return 1
+        ;;
+    esac
+
+    sleep "$interval"
+    (( elapsed += interval )) || true
+  done
+
+  log_warn "Optional service '${service}' remained '${status:-unknown}' after ${timeout}s"
+  return 1
+}
+
+wait_for_optional_services() {
+  local service="postfix"
+  local timeout="${POSTFIX_STARTUP_TIMEOUT:-60}"
+
+  log_info "Waiting up to ${timeout}s for optional service '${service}' to become ready..."
+
+  if wait_for_optional_service_health "$service" "$timeout"; then
+    log_success "Optional service '${service}' is ready"
+    return 0
+  fi
+
+  _STARTUP_WARNINGS+=(
+    "Postfix did not become ready during its startup grace period."
+    " Vaultwarden remains available, but email delivery may be delayed."
+    " Fix: docker logs vaultwarden_postfix --tail=100"
+  )
+
+  return 0
 }
 
 
@@ -838,9 +903,26 @@ main() {
   # Post-start: service readiness poll + health check.
   # Skipped in --background mode because the caller manages orchestration.
   if [[ "$BACKGROUND" != "true" && "$DRY_RUN" != "true" ]]; then
-    wait_for_services || true
+    local readiness_rc=0
     local health_rc=0
+
+    # Preserve the readiness result, but still run the comprehensive health
+    # check so a failed startup includes actionable diagnostics.
+    wait_for_services || readiness_rc=$?
+
+    # Postfix is optional for core availability. Give its Docker health check a
+    # bounded grace period before running the comprehensive health report.
+    wait_for_optional_services || true
+
     run_health_check || health_rc=$?
+
+    if (( readiness_rc != 0 )); then
+      log_error "One or more critical services failed their startup readiness check"
+      log_error "Review the health output and container logs before retrying"
+      _show_startup_warnings
+      exit "$readiness_rc"
+    fi
+
     if (( health_rc != 0 )); then
       log_error "Startup tip: if the failure is key-related, run: sudo make key-health"
       log_error "Canonical production key path: ${AGE_KEY_FILE}"
@@ -848,6 +930,7 @@ main() {
       _show_startup_warnings
       exit "$health_rc"
     fi
+
     show_status || true
   fi
 

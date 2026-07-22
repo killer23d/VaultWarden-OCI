@@ -342,7 +342,8 @@ services:
       - postfix_relay
 
     healthcheck:
-      # Verify the local Postfix master process. Upstream relay connectivity is checked separately.
+      # Verify the local Postfix master process. Upstream relay connectivity
+      # is checked separately by the SMTP health test.
       test: ["CMD-SHELL", "postfix status >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
