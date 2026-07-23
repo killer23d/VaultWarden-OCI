@@ -422,6 +422,7 @@ log_warn() { :; }
 _send_notification() { return 0; }
 
 mkdir -p "$ALERT_LOCK_DIR"
+chmod 0700 "$ALERT_LOCK_DIR"
 printf 'not-an-epoch\n' > "$ALERT_LOCK_DIR/malformed.cooldown"
 chmod 0600 "$ALERT_LOCK_DIR/malformed.cooldown"
 malformed_before="$(cksum < "$ALERT_LOCK_DIR/malformed.cooldown")"
@@ -669,6 +670,7 @@ ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/alerts"
+chmod 0700 "$TMP/alerts"
 wait_for_nonempty_file() {
     local path="$1" attempts="$2" delay="$3" attempt
 
@@ -748,6 +750,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 ALERT_LOCK_DIR="$TMP/alerts"
 mkdir -p "$ALERT_LOCK_DIR"
+chmod 0700 "$ALERT_LOCK_DIR"
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
