@@ -574,24 +574,27 @@ _CS_EMAIL_ENV_FILE="${VW_CROWDSEC_EMAIL_ENV_FILE:-${PROJECT_ROOT}/.env}"
 _CS_YQ_COMMAND=""
 
 _cs_require_mikefarah_yq_v4() {
-    local resolved version_output
+    local resolved version_output normalized_version version_summary
 
     if ! resolved="$(command -v yq 2>/dev/null)" \
         || [[ "$resolved" != /* || ! -x "$resolved" ]]; then
-        log_error "Cannot inspect CrowdSec YAML: required Mike Farah yq v4 command is unavailable."
-        log_error "Re-run sudo ./setup.sh install to install the supported yq implementation."
+        log_error "Mike Farah yq v4 is required for CrowdSec YAML inspection; no yq executable was found in PATH. Re-run sudo ./setup.sh install."
         return 1
     fi
 
     version_output="$(LC_ALL=C "$resolved" --version 2>&1)" || version_output=""
-    if [[ "$version_output" != *"mikefarah/yq"* \
-        || ! "$version_output" =~ version[[:space:]]v?4\. ]]; then
-        log_error "Cannot inspect CrowdSec YAML: unsupported yq implementation at $resolved: ${version_output:-unknown version}"
-        log_error "Mike Farah yq v4 is required; re-run sudo ./setup.sh install."
+    normalized_version="${version_output,,}"
+    if [[ "$normalized_version" != *"github.com/mikefarah/yq"* \
+        || ! "$normalized_version" =~ version[[:space:]]+v?4\.[0-9]+(\.[0-9]+)?([^0-9.]|$) ]]; then
+        version_summary="${version_output//$'\r'/ }"
+        version_summary="${version_summary//$'\n'/ }"
+        version_summary="${version_summary:-unknown version}"
+        (( ${#version_summary} <= 160 )) || version_summary="${version_summary:0:157}..."
+        log_error "Mike Farah yq v4 is required for CrowdSec YAML inspection; unsupported yq at $resolved ($version_summary). Re-run sudo ./setup.sh install."
         return 1
     fi
 
-    _CS_YQ_COMMAND="$resolved"
+    printf '%s\n' "$resolved"
 }
 
 _cs_email_paths() {
@@ -733,7 +736,10 @@ _cs_email_validate_unique_plugin_definition() {
     managed_plugin_path="${_CS_EMAIL_PLUGIN_PATH:-${notifications_dir}/vaultwarden-email.yaml}"
     [[ -d "$notifications_dir" ]] || return 0
 
-    _cs_require_mikefarah_yq_v4 || return 1
+    if [[ -z "$_CS_YQ_COMMAND" ]] \
+        && ! _CS_YQ_COMMAND="$(_cs_require_mikefarah_yq_v4)"; then
+        return 1
+    fi
     if [[ ! -r "$notifications_dir" || ! -x "$notifications_dir" ]]; then
         log_error "Cannot inspect CrowdSec notification directory: $notifications_dir"
         return 1
@@ -788,7 +794,10 @@ _cs_email_profile_has_unmanaged_reference() {
 _cs_email_validate_unique_profile_reference() {
     local file rc
 
-    _cs_require_mikefarah_yq_v4 || return 1
+    if [[ -z "$_CS_YQ_COMMAND" ]] \
+        && ! _CS_YQ_COMMAND="$(_cs_require_mikefarah_yq_v4)"; then
+        return 1
+    fi
 
     for file in \
         "${_CS_LAPI_COHORT_ROOT}/profiles.yaml" \

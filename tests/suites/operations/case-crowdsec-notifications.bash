@@ -403,6 +403,7 @@ run_control status >"$TMP/status.out"
 test_assert_file_contains "$TMP/status.out" 'Configured: true'
 test_assert_file_contains "$TMP/status.out" 'Installed:  true'
 test_assert_file_contains "$TMP/status.out" 'Consistent: true'
+test_assert_equal "$(command -v cscli)" "$BIN/cscli"
 run_control test >"$TMP/test.out"
 test_assert_file_contains "$CALLS" 'cscli notifications test vaultwarden_email'
 test_assert_file_contains "$TMP/test.out" 'confirm mailbox receipt'

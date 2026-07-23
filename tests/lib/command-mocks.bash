@@ -27,6 +27,7 @@ if [[ -z "${VW_TEST_COMMAND_MOCKS_LOADED:-}" ]]; then
         local command_name resolved
 
         mkdir -p "$destination"
+        chmod 0700 "$destination"
         for command_name in "$@"; do
             resolved="$(command -v "$command_name" 2>/dev/null)" \
                 || test_fail "required fixture command is unavailable: $command_name"
