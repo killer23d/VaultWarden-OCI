@@ -4,6 +4,10 @@ set -euo pipefail
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+# shellcheck source=../../lib/assertions.bash
+source "$VW_TEST_REPO_ROOT/tests/lib/assertions.bash"
+# shellcheck source=../../lib/command-mocks.bash
+source "$VW_TEST_REPO_ROOT/tests/lib/command-mocks.bash"
 
 check_crowdsec_configuration() (
 # Focused checks for the CrowdSec collection set, log acquisition, and
@@ -95,6 +99,106 @@ printf 'CrowdSec configuration tests passed.\n'
 )
 
 check_crowdsec_configuration
+
+check_crowdsec_yq_resolution() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+PROJECT_ROOT="$ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+log_error() { printf 'ERROR: %s\n' "$*" >&2; }
+
+sed -n '/^_CS_EMAIL_PLUGIN_MARKER=/,/^# CLI flags/p' \
+    "$ROOT/utilities/setup-crowdsec.sh" | sed '$d' >"$TMP/yq-resolution-functions.bash"
+# shellcheck source=/dev/null
+source "$TMP/yq-resolution-functions.bash"
+
+mike_yq_bin="$TMP/Mike Farah yq bin"
+v3_yq_bin="$TMP/v3-yq-bin"
+python_yq_bin="$TMP/python-yq-bin"
+missing_yq_bin="$TMP/missing-yq-bin"
+for fixture_bin in "$mike_yq_bin" "$v3_yq_bin" "$python_yq_bin" "$missing_yq_bin"; do
+    test_build_isolated_path "$fixture_bin" bash >/dev/null
+done
+
+test_write_command_mock "$mike_yq_bin/yq" <<'EOF_MIKE_YQ'
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'release metadata follows\nYQ (https://github.com/mikefarah/yq/) VERSION v4.53.3 (stable)\nend metadata\n'
+    exit 0
+fi
+exit 0
+EOF_MIKE_YQ
+test_write_command_mock "$v3_yq_bin/yq" <<'EOF_V3_YQ'
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'yq (https://github.com/mikefarah/yq/) version v3.4.1\n'
+    exit 0
+fi
+exit 0
+EOF_V3_YQ
+test_write_command_mock "$python_yq_bin/yq" <<'EOF_PYTHON_YQ'
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'yq 3.4.3\n'
+    exit 0
+fi
+exit 0
+EOF_PYTHON_YQ
+
+resolved_yq="$(PATH="$mike_yq_bin" _cs_require_mikefarah_yq_v4)" \
+    || test_fail "controlled Mike Farah yq v4 command was rejected"
+test_assert_equal "$resolved_yq" "$mike_yq_bin/yq"
+
+if PATH="$v3_yq_bin" _cs_require_mikefarah_yq_v4 \
+    >"$TMP/v3-yq.out" 2>&1; then
+    test_fail "Mike Farah yq v3 command was accepted"
+fi
+test_assert_file_contains "$TMP/v3-yq.out" "Mike Farah yq v4 is required"
+test_assert_file_contains "$TMP/v3-yq.out" "unsupported yq at $v3_yq_bin/yq"
+
+if PATH="$python_yq_bin" _cs_require_mikefarah_yq_v4 \
+    >"$TMP/python-yq.out" 2>&1; then
+    test_fail "Python yq command was accepted"
+fi
+test_assert_file_contains "$TMP/python-yq.out" "Mike Farah yq v4 is required"
+test_assert_file_contains "$TMP/python-yq.out" "unsupported yq at $python_yq_bin/yq"
+
+test_assert_equal "$(PATH="$missing_yq_bin" command -v bash)" \
+    "$missing_yq_bin/bash"
+if PATH="$missing_yq_bin" command -v yq >/dev/null 2>&1; then
+    test_fail "isolated missing-yq fixture exposed a host yq command"
+fi
+
+missing_yq_root="$TMP/missing-yq-crowdsec"
+missing_yq_notifications="$missing_yq_root/notifications"
+missing_yq_candidate="$missing_yq_notifications/operator-owned.yaml"
+missing_yq_managed="$missing_yq_notifications/vaultwarden-email.yaml"
+mkdir -p "$missing_yq_notifications"
+chmod 0700 "$missing_yq_root" "$missing_yq_notifications"
+printf 'name: operator_owned\n' >"$missing_yq_candidate"
+chmod 0600 "$missing_yq_candidate"
+cp "$missing_yq_candidate" "$TMP/missing-yq-candidate.before"
+_CS_LAPI_COHORT_ROOT="$missing_yq_root"
+_CS_EMAIL_PLUGIN_PATH="$missing_yq_managed"
+_CS_YQ_COMMAND=""
+if PATH="$missing_yq_bin" _cs_email_validate_unique_plugin_definition \
+    >"$TMP/missing-yq.out" 2>&1; then
+    test_fail "CrowdSec YAML inspection accepted a missing yq command"
+fi
+test_assert_file_contains "$TMP/missing-yq.out" \
+    "Mike Farah yq v4 is required"
+test_assert_file_contains "$TMP/missing-yq.out" \
+    "no yq executable was found in PATH"
+cmp -s "$TMP/missing-yq-candidate.before" "$missing_yq_candidate" \
+    || test_fail "missing-yq validation modified operator-owned YAML"
+test_assert_not_exists "$missing_yq_managed"
+if find "$missing_yq_root" -type f ! -name 'operator-owned.yaml' -print -quit | grep -q .; then
+    test_fail "missing-yq validation left a partial generated file"
+fi
+
+printf 'CrowdSec yq resolution tests passed.\n'
+)
+
+check_crowdsec_yq_resolution
 
 check_crowdsec_env_writer_wrapper() (
 set -euo pipefail

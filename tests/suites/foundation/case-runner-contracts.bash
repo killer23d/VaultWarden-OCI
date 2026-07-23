@@ -9,6 +9,7 @@ ROOT="$VW_TEST_REPO_ROOT"
 RUNNER="$ROOT/tests/run-tests.sh"
 TEST_ROOT_HELPER="$ROOT/tests/lib/test-root.bash"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/vaultwarden-runner-contracts.XXXXXX")"
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd)"
 FIXTURE_TESTS="$TMP_ROOT/fixture-tests"
 NORMAL_REPO="$TMP_ROOT/normal-repo"
 LAST_STATUS=0
@@ -133,6 +134,45 @@ git -C "$ROOT" status --short --untracked-files=all -- tests >"$repo_status_befo
 copy_registered_fixture "$FIXTURE_TESTS"
 fixture_env=(env "VAULTWARDEN_TEST_RUNNER_TESTS_DIR=$FIXTURE_TESTS")
 run_output="$TMP_ROOT/run.out"
+
+# If the Bash executable's directory is already in PATH, the runner must not
+# move it ahead of a caller-selected command directory.
+caller_bin="$TMP_ROOT/caller-bin"
+bash_bin="$TMP_ROOT/bash-bin"
+path_probe_marker="$TMP_ROOT/path-probe"
+path_execution_marker="$TMP_ROOT/path-probe-executed"
+mkdir -p "$caller_bin" "$bash_bin"
+ln -s "$BASH" "$bash_bin/bash"
+write_case "$caller_bin/path-priority-probe" \
+    'printf caller > "$PATH_PRIORITY_EXECUTED"'
+write_case "$bash_bin/path-priority-probe" \
+    'printf bash-directory > "$PATH_PRIORITY_EXECUTED"'
+write_case "$FIXTURE_TESTS/test-architecture.sh" \
+    'path-priority-probe
+for command_name in path-priority-probe bash dirname stat; do
+    resolved_command="$(command -v "$command_name")"
+    [[ "$resolved_command" == /* && -x "$resolved_command" ]]
+    printf "%s\n" "$resolved_command"
+done > "$PATH_PROBE_MARKER"'
+capture "$run_output" env \
+    "PATH=$caller_bin:$bash_bin:$PATH" \
+    "PATH_PROBE_MARKER=$path_probe_marker" \
+    "PATH_PRIORITY_EXECUTED=$path_execution_marker" \
+    "VAULTWARDEN_TEST_RUNNER_TESTS_DIR=$FIXTURE_TESTS" \
+    "$bash_bin/bash" "$RUNNER" foundation
+assert_status 0 "caller PATH precedence"
+mapfile -t path_probe_results <"$path_probe_marker"
+[[ "${#path_probe_results[@]}" -eq 4 ]] \
+    || fail "runner fixture did not resolve every required baseline utility"
+[[ "${path_probe_results[0]}" == "$caller_bin/path-priority-probe" ]] \
+    || fail "runner moved the Bash directory ahead of the caller-selected PATH entry"
+[[ "$(<"$path_execution_marker")" == caller ]] \
+    || fail "runner executed the Bash-directory mock instead of the caller-provided mock"
+for resolved_baseline in "${path_probe_results[@]:1}"; do
+    [[ "$resolved_baseline" == /* ]] \
+        || fail "runner lost a required baseline utility: $resolved_baseline"
+done
+write_case "$FIXTURE_TESTS/test-architecture.sh" "exit 0"
 
 normal_extra_case="$TMP_ROOT/normal-extra.bash"
 normal_extra_marker="$TMP_ROOT/normal-extra-ran"

@@ -8,6 +8,8 @@ tests/
 ├── run-tests.sh
 ├── test-architecture.sh
 ├── lib/
+│   ├── assertions.bash
+│   ├── command-mocks.bash
 │   └── test-root.bash
 └── suites/
     ├── foundation/
@@ -19,6 +21,8 @@ tests/
 Permanent `case-*.bash` files live under the closest responsibility directory and are registered exactly once in `run-tests.sh`. The runner executes each case directly at its registered path and writes temporary compatibility or timeout state only under the system temporary directory; it does not create files or symlinks in the checkout.
 
 Nested cases source `tests/lib/test-root.bash`, which derives the repository root from the helper's stable location. Case bodies use `VW_TEST_REPO_ROOT` instead of assuming they are one directory below the repository root.
+
+`tests/lib/assertions.bash` contains the small set of file, equality, absence, and wait assertions reused across cases. `tests/lib/command-mocks.bash` creates executable mocks and isolated command paths so command-presence tests do not depend on host packages. Domain-specific fixture behavior remains in its owning case.
 
 ## Suites
 

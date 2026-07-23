@@ -26,7 +26,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully (root required) |
 | `make stop` |  Alias for down |
-| `make restart` |  Restart all services (via startup.sh; root required) |
+| `make restart` |  Recreate all services using locally installed images (root required) |
 | `make safe-restart` |  Restart with automatic rollback on failure (root required) |
 | `make status` |  Show service status, backup inventory, disk usage, and CrowdSec ban summary |
 | `make operations` |  Show active or interrupted VaultWarden operations |

@@ -8,7 +8,11 @@ if (( BASH_VERSINFO[0] < 5 )); then
         fi
     done
 fi
-PATH="$(dirname "$BASH"):$PATH"
+BASH_DIR="$(cd "$(dirname "$BASH")" && pwd)"
+case ":${PATH}:" in
+    *":${BASH_DIR}:"*) ;;
+    *) PATH="${BASH_DIR}:${PATH}" ;;
+esac
 export PATH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -74,7 +78,7 @@ OPERATIONS_CASES=(
     tests/suites/operations/case-health-alerts.bash
     tests/suites/operations/case-lock-fd-hygiene.bash
     tests/suites/operations/case-lifecycle.bash
-  tests/suites/operations/case-startup-lifecycle-hardening.bash
+    tests/suites/operations/case-startup-lifecycle-hardening.bash
     tests/suites/operations/case-operator-ui.bash
     tests/suites/operations/case-firewall-update.bash
     tests/suites/operations/case-crowdsec.bash

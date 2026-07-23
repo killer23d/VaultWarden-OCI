@@ -5,31 +5,23 @@ set -euo pipefail
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+# shellcheck source=../../lib/assertions.bash
+source "$VW_TEST_REPO_ROOT/tests/lib/assertions.bash"
+# shellcheck source=../../lib/command-mocks.bash
+source "$VW_TEST_REPO_ROOT/tests/lib/command-mocks.bash"
 
 ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-contains() { grep -Fq -- "$2" "$1" || fail "expected $1 to contain: $2"; }
-not_contains() { ! grep -Fq -- "$2" "$1" || fail "expected $1 not to contain: $2"; }
-assert_eq() { [[ "$1" == "$2" ]] || fail "expected '$1' == '$2'"; }
-wait_for_file() {
-    local file="$1"
-    for _ in {1..200}; do
-        [[ -e "$file" ]] && return 0
-        sleep 0.05
-    done
-    fail "timed out waiting for $file"
-}
 assert_no_backups() {
     if compgen -G "${VW_CROWDSEC_EMAIL_ENV_FILE}.backup.*" >/dev/null; then
-        fail 'temporary .env backup was not removed'
+        test_fail 'temporary .env backup was not removed'
     fi
 }
 assert_lock_free() {
-    flock -n "$VW_OPERATIONS_LOCK" true || fail 'VaultWarden operation lock remained held'
-    flock -n "$VW_TEST_SPECIFIC_LOCK" true || fail 'CrowdSec setup lock remained held'
+    flock -n "$VW_OPERATIONS_LOCK" true || test_fail 'VaultWarden operation lock remained held'
+    flock -n "$VW_TEST_SPECIFIC_LOCK" true || test_fail 'CrowdSec setup lock remained held'
 }
 
 FIXTURE="$TMP/project"
@@ -48,9 +40,9 @@ setup_begin="$(sed -n 's/^_CS_EMAIL_PROFILE_BEGIN="\(.*\)"$/\1/p' "$ROOT/utiliti
 setup_end="$(sed -n 's/^_CS_EMAIL_PROFILE_END="\(.*\)"$/\1/p' "$ROOT/utilities/setup-crowdsec.sh")"
 wrapper_begin="$(sed -n 's/^PROFILE_BEGIN="\(.*\)"$/\1/p' "$ROOT/utilities/crowdsec-email.sh")"
 wrapper_end="$(sed -n 's/^PROFILE_END="\(.*\)"$/\1/p' "$ROOT/utilities/crowdsec-email.sh")"
-[[ -n "$setup_begin" && -n "$setup_end" ]] || fail 'production profile markers were not found'
-assert_eq "$wrapper_begin" "$setup_begin"
-assert_eq "$wrapper_end" "$setup_end"
+[[ -n "$setup_begin" && -n "$setup_end" ]] || test_fail 'production profile markers were not found'
+test_assert_equal "$wrapper_begin" "$setup_begin"
+test_assert_equal "$wrapper_end" "$setup_end"
 
 cat >"$FIXTURE/utilities/setup-crowdsec.sh" <<'EOF_SETUP'
 #!/usr/bin/env bash
@@ -250,17 +242,17 @@ assert_snapshot() {
     local path="$1" prefix="$2" existed
     existed="$(cat "${prefix}.exists")"
     if [[ "$existed" == true ]]; then
-        [[ -f "$path" ]] || fail "restored path is missing: $path"
-        cmp -s "${prefix}.content" "$path" || fail "restored content differs: $path"
-        assert_eq "$(stat -c '%a %u %g' "$path")" "$(cat "${prefix}.meta")"
+        [[ -f "$path" ]] || test_fail "restored path is missing: $path"
+        cmp -s "${prefix}.content" "$path" || test_fail "restored content differs: $path"
+        test_assert_equal "$(stat -c '%a %u %g' "$path")" "$(cat "${prefix}.meta")"
     else
-        [[ ! -e "$path" ]] || fail "path should have remained absent: $path"
+        [[ ! -e "$path" ]] || test_fail "path should have remained absent: $path"
     fi
 }
 assert_no_email_temps() {
     if find "$ETC" -name '.vw-email-*' -print -quit | grep -q .; then
         find "$ETC" -name '.vw-email-*' -print >&2
-        fail 'CrowdSec email transaction left temporary files behind'
+        test_fail 'CrowdSec email transaction left temporary files behind'
     fi
 }
 assert_partial() {
@@ -271,13 +263,13 @@ assert_partial() {
     case "$shape" in
         plugin) write_plugin ;;
         profile) write_profile ;;
-        *) fail "unknown partial shape: $shape" ;;
+        *) test_fail "unknown partial shape: $shape" ;;
     esac
     if run_control status >"$output" 2>&1; then
-        fail "partial state was reported consistent: flag=$flag shape=$shape"
+        test_fail "partial state was reported consistent: flag=$flag shape=$shape"
     fi
-    contains "$output" 'Installed:  partial'
-    contains "$output" 'Consistent: false'
+    test_assert_file_contains "$output" 'Installed:  partial'
+    test_assert_file_contains "$output" 'Consistent: false'
 }
 run_unprivileged_control() {
     local output="$1" test_mode="$2" allow_non_root="$3"
@@ -309,53 +301,53 @@ run_unprivileged_control() {
 }
 
 bash -n "$ROOT/utilities/crowdsec-email.sh"
-contains "$ROOT/utilities/crowdsec-email.sh" '--reconcile-email'
-contains "$ROOT/utilities/crowdsec-email.sh" 'operation_acquire'
-not_contains "$ROOT/utilities/crowdsec-email.sh" 'vaultwarden-crowdsec-email-control.lock'
+test_assert_file_contains "$ROOT/utilities/crowdsec-email.sh" '--reconcile-email'
+test_assert_file_contains "$ROOT/utilities/crowdsec-email.sh" 'operation_acquire'
+test_assert_file_not_contains "$ROOT/utilities/crowdsec-email.sh" 'vaultwarden-crowdsec-email-control.lock'
 ! grep -Eq '^[[:space:]]*(function[[:space:]]+)?(_crowdsec_email_)?require_root[[:space:]]*\(\)' \
     "$ROOT/utilities/crowdsec-email.sh" \
-    || fail 'CrowdSec email control still defines a local root helper'
-not_contains "$ROOT/utilities/crowdsec-email.sh" '$EUID'
-not_contains "$ROOT/utilities/crowdsec-email.sh" 'is_root'
+    || test_fail 'CrowdSec email control still defines a local root helper'
+test_assert_file_not_contains "$ROOT/utilities/crowdsec-email.sh" '$EUID'
+test_assert_file_not_contains "$ROOT/utilities/crowdsec-email.sh" 'is_root'
 log_source_line="$(grep -nF 'source "${PROJECT_ROOT}/lib/log.sh"' "$ROOT/utilities/crowdsec-email.sh" | cut -d: -f1)"
 common_source_line="$(grep -nF 'source "${PROJECT_ROOT}/lib/common.sh"' "$ROOT/utilities/crowdsec-email.sh" | cut -d: -f1)"
 [[ -n "$log_source_line" && -n "$common_source_line" ]] \
-    || fail 'canonical CrowdSec email library sources are missing'
+    || test_fail 'canonical CrowdSec email library sources are missing'
 (( log_source_line < common_source_line )) \
-    || fail 'CrowdSec email control must source log.sh before common.sh'
-contains "$ROOT/utilities/crowdsec-email.sh" 'init_common_lib "$0"'
-contains "$ROOT/utilities/crowdsec-email.sh" 'require_root "$command"'
-contains "$ROOT/utilities/crowdsec-email.sh" '${VW_TEST_MODE:-0}'
-contains "$ROOT/utilities/crowdsec-email.sh" '${VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0}'
+    || test_fail 'CrowdSec email control must source log.sh before common.sh'
+test_assert_file_contains "$ROOT/utilities/crowdsec-email.sh" 'init_common_lib "$0"'
+test_assert_file_contains "$ROOT/utilities/crowdsec-email.sh" 'require_root "$command"'
+test_assert_file_contains "$ROOT/utilities/crowdsec-email.sh" '${VW_TEST_MODE:-0}'
+test_assert_file_contains "$ROOT/utilities/crowdsec-email.sh" '${VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0}'
 write_flag_body="$(sed -n '/^write_flag()/,/^}/p' "$ROOT/utilities/crowdsec-email.sh")"
 grep -Fq "awk -v value" <<< "$write_flag_body" \
-    || fail 'CrowdSec email write_flag no longer owns its specialized renderer'
+    || test_fail 'CrowdSec email write_flag no longer owns its specialized renderer'
 ! grep -Fq '_set_env_var' <<< "$write_flag_body" \
-    || fail 'CrowdSec email write_flag was incorrectly consolidated into the generic helper'
+    || test_fail 'CrowdSec email write_flag was incorrectly consolidated into the generic helper'
 
 cp "$VW_CROWDSEC_EMAIL_ENV_FILE" "$TMP/informational-env.before"
 : > "$CALLS"
 for help_arg in --help -h help; do
     run_unprivileged_control "$TMP/help-${help_arg#-}.out" '' '' "$help_arg" \
-        || fail "$help_arg should succeed without root"
-    contains "$TMP/help-${help_arg#-}.out" 'CrowdSec Email Notifications'
+        || test_fail "$help_arg should succeed without root"
+    test_assert_file_contains "$TMP/help-${help_arg#-}.out" 'CrowdSec Email Notifications'
 done
 cmp -s "$TMP/informational-env.before" "$VW_CROWDSEC_EMAIL_ENV_FILE" \
-    || fail 'help changed the CrowdSec email environment setting'
-[[ ! -s "$CALLS" ]] || fail 'help invoked CrowdSec setup or runtime commands'
+    || test_fail 'help changed the CrowdSec email environment setting'
+[[ ! -s "$CALLS" ]] || test_fail 'help invoked CrowdSec setup or runtime commands'
 assert_lock_free
 
 set +e
 run_unprivileged_control "$TMP/unknown.out" '' '' unknown-command
 unknown_rc=$?
 set -e
-[[ "$unknown_rc" -eq 2 ]] || fail "unknown command returned $unknown_rc instead of 2"
-contains "$TMP/unknown.out" 'Unknown command: unknown-command'
-not_contains "$TMP/unknown.out" 'This script must be run as root.'
-not_contains "$TMP/unknown.out" 'Re-run with: sudo'
+[[ "$unknown_rc" -eq 2 ]] || test_fail "unknown command returned $unknown_rc instead of 2"
+test_assert_file_contains "$TMP/unknown.out" 'Unknown command: unknown-command'
+test_assert_file_not_contains "$TMP/unknown.out" 'This script must be run as root.'
+test_assert_file_not_contains "$TMP/unknown.out" 'Re-run with: sudo'
 cmp -s "$TMP/informational-env.before" "$VW_CROWDSEC_EMAIL_ENV_FILE" \
-    || fail 'unknown command changed the CrowdSec email environment setting'
-[[ ! -s "$CALLS" ]] || fail 'unknown command invoked CrowdSec setup or runtime commands'
+    || test_fail 'unknown command changed the CrowdSec email environment setting'
+[[ ! -s "$CALLS" ]] || test_fail 'unknown command invoked CrowdSec setup or runtime commands'
 assert_lock_free
 
 set_flag false
@@ -364,15 +356,15 @@ for privileged_command in enable disable status test; do
     cp "$VW_CROWDSEC_EMAIL_ENV_FILE" "$TMP/${privileged_command}-nonroot.before"
     : > "$CALLS"
     if run_unprivileged_control "$TMP/${privileged_command}-nonroot.out" '' '' "$privileged_command"; then
-        fail "non-root $privileged_command unexpectedly succeeded"
+        test_fail "non-root $privileged_command unexpectedly succeeded"
     fi
-    contains "$TMP/${privileged_command}-nonroot.out" 'This script must be run as root.'
-    contains "$TMP/${privileged_command}-nonroot.out" 'Re-run with: sudo'
+    test_assert_file_contains "$TMP/${privileged_command}-nonroot.out" 'This script must be run as root.'
+    test_assert_file_contains "$TMP/${privileged_command}-nonroot.out" 'Re-run with: sudo'
     cmp -s "$TMP/${privileged_command}-nonroot.before" "$VW_CROWDSEC_EMAIL_ENV_FILE" \
-        || fail "non-root $privileged_command changed the CrowdSec email environment setting"
-    [[ ! -s "$CALLS" ]] || fail "non-root $privileged_command invoked setup or runtime commands"
+        || test_fail "non-root $privileged_command changed the CrowdSec email environment setting"
+    [[ ! -s "$CALLS" ]] || test_fail "non-root $privileged_command invoked setup or runtime commands"
     [[ ! -e "$PLUGIN" && ! -e "$PROFILES" ]] \
-        || fail "non-root $privileged_command modified CrowdSec notification configuration"
+        || test_fail "non-root $privileged_command modified CrowdSec notification configuration"
     assert_no_backups
     assert_lock_free
 done
@@ -383,15 +375,15 @@ for bypass_case in allow-only test-mode-only; do
         test-mode-only) test_mode=1 allow_non_root='' ;;
     esac
     if run_unprivileged_control "$TMP/${bypass_case}.out" "$test_mode" "$allow_non_root" status; then
-        fail "$bypass_case unexpectedly bypassed the root requirement"
+        test_fail "$bypass_case unexpectedly bypassed the root requirement"
     fi
-    contains "$TMP/${bypass_case}.out" 'Re-run with: sudo'
+    test_assert_file_contains "$TMP/${bypass_case}.out" 'Re-run with: sudo'
 done
 chmod 0644 "$VW_CROWDSEC_EMAIL_ENV_FILE"
 run_unprivileged_control "$TMP/both-bypass.out" 1 1 status \
-    || fail 'the narrowly gated fixture mode did not reach status'
-contains "$TMP/both-bypass.out" 'Configured: false'
-contains "$TMP/both-bypass.out" 'Installed:  false'
+    || test_fail 'the narrowly gated fixture mode did not reach status'
+test_assert_file_contains "$TMP/both-bypass.out" 'Configured: false'
+test_assert_file_contains "$TMP/both-bypass.out" 'Installed:  false'
 chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"
 
 # Ordinary enable/status/test/disable behavior and metadata preservation.
@@ -399,31 +391,33 @@ env_mode="$(stat -c '%a' "$VW_CROWDSEC_EMAIL_ENV_FILE")"
 env_uid="$(stat -c '%u' "$VW_CROWDSEC_EMAIL_ENV_FILE")"
 env_gid="$(stat -c '%g' "$VW_CROWDSEC_EMAIL_ENV_FILE")"
 run_control enable >"$TMP/enable.out" 2>&1
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
-contains "$CALLS" 'enter origin=wrapper pre=true post=true'
-contains "$PLUGIN" '# Managed by VaultWarden-OCI: CrowdSec email notification'
-contains "$PROFILES" "$setup_begin"
-contains "$PROFILES" "$setup_end"
-assert_eq "$(stat -c '%a' "$VW_CROWDSEC_EMAIL_ENV_FILE")" "$env_mode"
-assert_eq "$(stat -c '%u' "$VW_CROWDSEC_EMAIL_ENV_FILE")" "$env_uid"
-assert_eq "$(stat -c '%g' "$VW_CROWDSEC_EMAIL_ENV_FILE")" "$env_gid"
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
+test_assert_file_contains "$CALLS" 'enter origin=wrapper pre=true post=true'
+test_assert_file_contains "$PLUGIN" '# Managed by VaultWarden-OCI: CrowdSec email notification'
+test_assert_file_contains "$PROFILES" "$setup_begin"
+test_assert_file_contains "$PROFILES" "$setup_end"
+test_assert_equal "$(stat -c '%a' "$VW_CROWDSEC_EMAIL_ENV_FILE")" "$env_mode"
+test_assert_equal "$(stat -c '%u' "$VW_CROWDSEC_EMAIL_ENV_FILE")" "$env_uid"
+test_assert_equal "$(stat -c '%g' "$VW_CROWDSEC_EMAIL_ENV_FILE")" "$env_gid"
 run_control status >"$TMP/status.out"
-contains "$TMP/status.out" 'Configured: true'
-contains "$TMP/status.out" 'Installed:  true'
-contains "$TMP/status.out" 'Consistent: true'
+test_assert_file_contains "$TMP/status.out" 'Configured: true'
+test_assert_file_contains "$TMP/status.out" 'Installed:  true'
+test_assert_file_contains "$TMP/status.out" 'Consistent: true'
+test_assert_equal "$(command -v cscli)" "$BIN/cscli"
 run_control test >"$TMP/test.out"
-contains "$CALLS" 'cscli notifications test vaultwarden_email'
-contains "$TMP/test.out" 'confirm mailbox receipt'
+test_assert_file_contains "$CALLS" 'cscli notifications test vaultwarden_email'
+test_assert_file_contains "$TMP/test.out" 'confirm mailbox receipt'
 run_control disable >"$TMP/disable.out" 2>&1
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
-[[ ! -e "$PLUGIN" && ! -e "$PROFILES" ]] || fail 'disable left a managed artifact behind'
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
+test_assert_not_exists "$PLUGIN"
+test_assert_not_exists "$PROFILES"
 run_control status >"$TMP/status-disabled.out"
-contains "$TMP/status-disabled.out" 'Configured: false'
-contains "$TMP/status-disabled.out" 'Installed:  false'
-contains "$TMP/status-disabled.out" 'Consistent: true'
+test_assert_file_contains "$TMP/status-disabled.out" 'Configured: false'
+test_assert_file_contains "$TMP/status-disabled.out" 'Installed:  false'
+test_assert_file_contains "$TMP/status-disabled.out" 'Consistent: true'
 assert_no_backups
 assert_lock_free
-not_contains "$CALLS" 'descriptor-leak'
+test_assert_file_not_contains "$CALLS" 'descriptor-leak'
 
 assert_partial false plugin
 assert_partial false profile
@@ -434,20 +428,20 @@ assert_partial true profile
 set_flag false
 clear_managed
 printf 'type: email\nname: operator_owned\n' >"$PLUGIN"
-if run_control status >"$TMP/operator-plugin.out" 2>&1; then fail 'operator plugin was reported consistent'; fi
-contains "$TMP/operator-plugin.out" 'Installed:  invalid'
-contains "$TMP/operator-plugin.out" 'Consistent: false'
+if run_control status >"$TMP/operator-plugin.out" 2>&1; then test_fail 'operator plugin was reported consistent'; fi
+test_assert_file_contains "$TMP/operator-plugin.out" 'Installed:  invalid'
+test_assert_file_contains "$TMP/operator-plugin.out" 'Consistent: false'
 clear_managed
 printf '%s\n%s\n%s\n' "$setup_begin" "$setup_begin" "$setup_end" >"$PROFILES"
-if run_control status >"$TMP/malformed-profile.out" 2>&1; then fail 'duplicate profile markers were reported consistent'; fi
-contains "$TMP/malformed-profile.out" 'Installed:  invalid'
+if run_control status >"$TMP/malformed-profile.out" 2>&1; then test_fail 'duplicate profile markers were reported consistent'; fi
+test_assert_file_contains "$TMP/malformed-profile.out" 'Installed:  invalid'
 clear_managed
 printf 'CROWDSEC_EMAIL_NOTIFICATIONS=true\nCROWDSEC_EMAIL_NOTIFICATIONS=false\n' >"$VW_CROWDSEC_EMAIL_ENV_FILE"
-if run_control status >"$TMP/duplicate-flag.out" 2>&1; then fail 'duplicate flag was reported consistent'; fi
-contains "$TMP/duplicate-flag.out" 'Configured: invalid'
+if run_control status >"$TMP/duplicate-flag.out" 2>&1; then test_fail 'duplicate flag was reported consistent'; fi
+test_assert_file_contains "$TMP/duplicate-flag.out" 'Configured: invalid'
 printf 'CROWDSEC_EMAIL_NOTIFICATIONS=true\n CROWDSEC_EMAIL_NOTIFICATIONS = false\n' >"$VW_CROWDSEC_EMAIL_ENV_FILE"
-if run_control status >"$TMP/whitespace-flag.out" 2>&1; then fail 'whitespace-malformed duplicate flag was reported consistent'; fi
-contains "$TMP/whitespace-flag.out" 'Configured: invalid'
+if run_control status >"$TMP/whitespace-flag.out" 2>&1; then test_fail 'whitespace-malformed duplicate flag was reported consistent'; fi
+test_assert_file_contains "$TMP/whitespace-flag.out" 'Configured: invalid'
 set_flag false
 
 # Fixture-mode status still reports permission failures as unknown, never healthy.
@@ -457,23 +451,23 @@ run_unprivileged_status() {
 set_flag false
 clear_managed
 chmod 000 "$VW_CROWDSEC_EMAIL_ENV_FILE"
-if run_unprivileged_status "$TMP/unreadable-env.out"; then fail 'unreadable .env status succeeded'; fi
-contains "$TMP/unreadable-env.out" 'Configured: unknown'
-contains "$TMP/unreadable-env.out" 'Consistent: false'
+if run_unprivileged_status "$TMP/unreadable-env.out"; then test_fail 'unreadable .env status succeeded'; fi
+test_assert_file_contains "$TMP/unreadable-env.out" 'Configured: unknown'
+test_assert_file_contains "$TMP/unreadable-env.out" 'Consistent: false'
 chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"
 set_flag true
 write_plugin
 write_profile
 chmod 0644 "$VW_CROWDSEC_EMAIL_ENV_FILE" "$PROFILES"
 chmod 000 "$PLUGIN"
-if run_unprivileged_status "$TMP/unreadable-plugin.out"; then fail 'unreadable plugin status succeeded'; fi
-contains "$TMP/unreadable-plugin.out" 'Installed:  unknown'
-contains "$TMP/unreadable-plugin.out" 'Consistent: false'
+if run_unprivileged_status "$TMP/unreadable-plugin.out"; then test_fail 'unreadable plugin status succeeded'; fi
+test_assert_file_contains "$TMP/unreadable-plugin.out" 'Installed:  unknown'
+test_assert_file_contains "$TMP/unreadable-plugin.out" 'Consistent: false'
 chmod 0644 "$PLUGIN"
 chmod 000 "$PROFILES"
-if run_unprivileged_status "$TMP/unreadable-profile.out"; then fail 'unreadable profile status succeeded'; fi
-contains "$TMP/unreadable-profile.out" 'Installed:  unknown'
-contains "$TMP/unreadable-profile.out" 'Consistent: false'
+if run_unprivileged_status "$TMP/unreadable-profile.out"; then test_fail 'unreadable profile status succeeded'; fi
+test_assert_file_contains "$TMP/unreadable-profile.out" 'Installed:  unknown'
+test_assert_file_contains "$TMP/unreadable-profile.out" 'Consistent: false'
 chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE" "$PLUGIN" "$PROFILES"
 
 # Two wrapper mutations serialize; the second command owns the final state.
@@ -485,17 +479,17 @@ pause_fifo="$TMP/wrapper-fifo"
 mkfifo "$pause_fifo"
 export VW_TEST_PAUSE_ORIGIN=wrapper VW_TEST_PAUSE_MARKER="$pause_marker" VW_TEST_PAUSE_FIFO="$pause_fifo"
 run_control enable >"$TMP/concurrent-enable.out" 2>&1 & first_pid=$!
-wait_for_file "$pause_marker"
+test_wait_for_file "$pause_marker"
 run_control disable >"$TMP/concurrent-disable.out" 2>&1 & second_pid=$!
 sleep 0.2
-[[ "$(grep -c '^enter origin=wrapper' "$CALLS")" == 1 ]] || fail 'second wrapper entered setup before the first completed'
+[[ "$(grep -c '^enter origin=wrapper' "$CALLS")" == 1 ]] || test_fail 'second wrapper entered setup before the first completed'
 printf 'continue\n' >"$pause_fifo"
-wait "$first_pid" || fail 'first concurrent command failed'
-wait "$second_pid" || fail 'second concurrent command failed'
-assert_eq "$(grep '^enter origin=wrapper' "$CALLS" | sed -n '1p')" 'enter origin=wrapper pre=true post=true'
-assert_eq "$(grep '^enter origin=wrapper' "$CALLS" | sed -n '2p')" 'enter origin=wrapper pre=false post=false'
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
-[[ ! -e "$PLUGIN" && ! -e "$PROFILES" ]] || fail 'second wrapper did not determine final state'
+wait "$first_pid" || test_fail 'first concurrent command failed'
+wait "$second_pid" || test_fail 'second concurrent command failed'
+test_assert_equal "$(grep '^enter origin=wrapper' "$CALLS" | sed -n '1p')" 'enter origin=wrapper pre=true post=true'
+test_assert_equal "$(grep '^enter origin=wrapper' "$CALLS" | sed -n '2p')" 'enter origin=wrapper pre=false post=false'
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
+[[ ! -e "$PLUGIN" && ! -e "$PROFILES" ]] || test_fail 'second wrapper did not determine final state'
 unset VW_TEST_PAUSE_ORIGIN VW_TEST_PAUSE_MARKER VW_TEST_PAUSE_FIFO
 assert_no_backups
 assert_lock_free
@@ -511,19 +505,19 @@ wrapper_fifo="$TMP/direct-wrapper-fifo"
 mkfifo "$pre_fifo" "$wrapper_fifo"
 export VW_TEST_PRELOCK_PAUSE_ORIGIN=direct VW_TEST_PRELOCK_MARKER="$pre_marker" VW_TEST_PRELOCK_FIFO="$pre_fifo"
 run_setup --reconcile-email >"$TMP/direct.out" 2>&1 & direct_pid=$!
-wait_for_file "$pre_marker"
+test_wait_for_file "$pre_marker"
 export VW_TEST_PAUSE_ORIGIN=wrapper VW_TEST_PAUSE_MARKER="$wrapper_marker" VW_TEST_PAUSE_FIFO="$wrapper_fifo"
 run_control enable >"$TMP/direct-wrapper.out" 2>&1 & wrapper_pid=$!
-wait_for_file "$wrapper_marker"
+test_wait_for_file "$wrapper_marker"
 printf 'continue\n' >"$pre_fifo"
 sleep 0.2
-not_contains "$CALLS" 'enter origin=direct'
+test_assert_file_not_contains "$CALLS" 'enter origin=direct'
 printf 'continue\n' >"$wrapper_fifo"
-wait "$wrapper_pid" || fail 'wrapper enable failed in direct race'
-wait "$direct_pid" || fail 'direct reconcile failed after waiting'
-contains "$CALLS" 'enter origin=direct pre=false post=true'
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
-[[ -e "$PLUGIN" && -e "$PROFILES" ]] || fail 'direct reconcile used its stale pre-lock value'
+wait "$wrapper_pid" || test_fail 'wrapper enable failed in direct race'
+wait "$direct_pid" || test_fail 'direct reconcile failed after waiting'
+test_assert_file_contains "$CALLS" 'enter origin=direct pre=false post=true'
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
+[[ -e "$PLUGIN" && -e "$PROFILES" ]] || test_fail 'direct reconcile used its stale pre-lock value'
 unset VW_TEST_PRELOCK_PAUSE_ORIGIN VW_TEST_PRELOCK_MARKER VW_TEST_PRELOCK_FIFO
 unset VW_TEST_PAUSE_ORIGIN VW_TEST_PAUSE_MARKER VW_TEST_PAUSE_FIFO
 assert_lock_free
@@ -540,19 +534,19 @@ wrapper_fifo="$TMP/full-wrapper-fifo"
 mkfifo "$pre_fifo" "$wrapper_fifo"
 export VW_TEST_PRELOCK_PAUSE_ORIGIN=full VW_TEST_PRELOCK_MARKER="$pre_marker" VW_TEST_PRELOCK_FIFO="$pre_fifo"
 run_setup >"$TMP/full.out" 2>&1 & full_pid=$!
-wait_for_file "$pre_marker"
+test_wait_for_file "$pre_marker"
 export VW_TEST_PAUSE_ORIGIN=wrapper VW_TEST_PAUSE_MARKER="$wrapper_marker" VW_TEST_PAUSE_FIFO="$wrapper_fifo"
 run_control disable >"$TMP/full-wrapper.out" 2>&1 & wrapper_pid=$!
-wait_for_file "$wrapper_marker"
+test_wait_for_file "$wrapper_marker"
 printf 'continue\n' >"$pre_fifo"
 sleep 0.2
-not_contains "$CALLS" 'enter origin=full'
+test_assert_file_not_contains "$CALLS" 'enter origin=full'
 printf 'continue\n' >"$wrapper_fifo"
-wait "$wrapper_pid" || fail 'wrapper disable failed in full-setup race'
-wait "$full_pid" || fail 'full setup reconcile failed after waiting'
-contains "$CALLS" 'enter origin=full pre=true post=false'
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
-[[ ! -e "$PLUGIN" && ! -e "$PROFILES" ]] || fail 'full setup used its stale pre-lock value'
+wait "$wrapper_pid" || test_fail 'wrapper disable failed in full-setup race'
+wait "$full_pid" || test_fail 'full setup reconcile failed after waiting'
+test_assert_file_contains "$CALLS" 'enter origin=full pre=true post=false'
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
+[[ ! -e "$PLUGIN" && ! -e "$PROFILES" ]] || test_fail 'full setup used its stale pre-lock value'
 unset VW_TEST_PRELOCK_PAUSE_ORIGIN VW_TEST_PRELOCK_MARKER VW_TEST_PRELOCK_FIFO
 unset VW_TEST_PAUSE_ORIGIN VW_TEST_PAUSE_MARKER VW_TEST_PAUSE_FIFO
 assert_lock_free
@@ -566,19 +560,19 @@ signal_fifo="$TMP/signal-fifo"
 mkfifo "$signal_fifo"
 export VW_TEST_PAUSE_ORIGIN=wrapper VW_TEST_PAUSE_MARKER="$signal_marker" VW_TEST_PAUSE_FIFO="$signal_fifo"
 bash "$FIXTURE/utilities/crowdsec-email.sh" enable >"$TMP/signal.out" 2>&1 & signal_pid=$!
-wait_for_file "$signal_marker"
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
+test_wait_for_file "$signal_marker"
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
 kill -TERM "$signal_pid"
 kill -TERM "$signal_pid" 2>/dev/null || true
-if wait "$signal_pid"; then fail 'TERM-interrupted command exited successfully'; fi
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
-contains "$TMP/signal.out" 'Interrupted CrowdSec email transaction; restored the previous .env.'
-not_contains "$TMP/signal.out" 'CrowdSec email notifications enabled.'
+if wait "$signal_pid"; then test_fail 'TERM-interrupted command exited successfully'; fi
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
+test_assert_file_contains "$TMP/signal.out" 'Interrupted CrowdSec email transaction; restored the previous .env.'
+test_assert_file_not_contains "$TMP/signal.out" 'CrowdSec email notifications enabled.'
 assert_no_backups
 assert_lock_free
 unset VW_TEST_PAUSE_ORIGIN VW_TEST_PAUSE_MARKER VW_TEST_PAUSE_FIFO
 run_control disable >"$TMP/post-signal.out" 2>&1
-contains "$TMP/post-signal.out" 'CrowdSec email notifications disabled.'
+test_assert_file_contains "$TMP/post-signal.out" 'CrowdSec email notifications disabled.'
 
 # Production transaction hooks exercise every dangerous mutation boundary through the wrapper.
 FAKE_SETUP="$VW_CROWDSEC_SETUP_SCRIPT"
@@ -596,8 +590,8 @@ set +e
 run_control enable >"$TMP/absent-enable.out" 2>&1
 signal_rc=$?
 set -e
-[[ "$signal_rc" -eq 143 ]] || fail "absent-path interrupted enable returned $signal_rc instead of 143"
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
+[[ "$signal_rc" -eq 143 ]] || test_fail "absent-path interrupted enable returned $signal_rc instead of 143"
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
 assert_snapshot "$PLUGIN" "$TMP/absent-enable-plugin"
 assert_snapshot "$PROFILES" "$TMP/absent-enable-profiles"
 assert_no_email_temps
@@ -621,25 +615,25 @@ for point in "${interrupt_points[@]}"; do
     if [[ "$signal_rc" -ne 143 ]]; then
         cat "$TMP/${point}-enable.out" >&2
         cat "$CALLS" >&2
-        fail "$point interrupted enable returned $signal_rc instead of 143"
+        test_fail "$point interrupted enable returned $signal_rc instead of 143"
     fi
-    contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
+    test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=false'
     assert_snapshot "$PLUGIN" "$TMP/${point}-enable-plugin"
     assert_snapshot "$PROFILES" "$TMP/${point}-enable-profiles"
-    contains "$TMP/${point}-enable.out" 'Interrupted CrowdSec email transaction; restored the previous .env.'
-    not_contains "$TMP/${point}-enable.out" 'CrowdSec email notifications enabled.'
+    test_assert_file_contains "$TMP/${point}-enable.out" 'Interrupted CrowdSec email transaction; restored the previous .env.'
+    test_assert_file_not_contains "$TMP/${point}-enable.out" 'CrowdSec email notifications enabled.'
     assert_no_email_temps
     assert_no_backups
     assert_lock_free
     unset VW_TEST_CROWDSEC_EMAIL_SIGNAL_POINT
     run_control disable >"$TMP/${point}-enable-retry.out" 2>&1 \
-        || fail "$point interrupted enable prevented a subsequent command"
+        || test_fail "$point interrupted enable prevented a subsequent command"
 
     # enabled -> interrupted disable: managed files and surrounding operator content survive.
     set_flag false
     clear_managed
     run_control enable >"$TMP/${point}-seed-enabled.out" 2>&1 \
-        || fail "could not seed enabled state for $point"
+        || test_fail "could not seed enabled state for $point"
     profile_with_operator_content="$TMP/${point}-profile-with-operator-content"
     {
         printf '# operator header\nname: operator_profile_before\n'
@@ -659,19 +653,19 @@ for point in "${interrupt_points[@]}"; do
     if [[ "$signal_rc" -ne 143 ]]; then
         cat "$TMP/${point}-disable.out" >&2
         cat "$CALLS" >&2
-        fail "$point interrupted disable returned $signal_rc instead of 143"
+        test_fail "$point interrupted disable returned $signal_rc instead of 143"
     fi
-    contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
+    test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
     assert_snapshot "$PLUGIN" "$TMP/${point}-disable-plugin"
     assert_snapshot "$PROFILES" "$TMP/${point}-disable-profiles"
-    contains "$TMP/${point}-disable.out" 'Interrupted CrowdSec email transaction; restored the previous .env.'
-    not_contains "$TMP/${point}-disable.out" 'CrowdSec email notifications disabled.'
+    test_assert_file_contains "$TMP/${point}-disable.out" 'Interrupted CrowdSec email transaction; restored the previous .env.'
+    test_assert_file_not_contains "$TMP/${point}-disable.out" 'CrowdSec email notifications disabled.'
     assert_no_email_temps
     assert_no_backups
     assert_lock_free
     unset VW_TEST_CROWDSEC_EMAIL_SIGNAL_POINT
     run_control enable >"$TMP/${point}-disable-retry.out" 2>&1 \
-        || fail "$point interrupted disable prevented a subsequent command"
+        || test_fail "$point interrupted disable prevented a subsequent command"
 done
 VW_CROWDSEC_SETUP_SCRIPT="$FAKE_SETUP"
 export VW_CROWDSEC_SETUP_SCRIPT
@@ -686,10 +680,10 @@ run_control enable >"$TMP/committed-before-exit.out" 2>&1
 committed_rc=$?
 set -e
 unset VW_TEST_FAKE_EXIT_AFTER_COMMIT
-[[ "$committed_rc" -eq 143 ]] || fail "committed child exit returned $committed_rc instead of 143"
-contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
-[[ -e "$PLUGIN" && -e "$PROFILES" ]] || fail 'committed child state was lost after signal-like exit'
-contains "$TMP/committed-before-exit.out" 'committed before interruption; keeping the reconciled .env state'
+[[ "$committed_rc" -eq 143 ]] || test_fail "committed child exit returned $committed_rc instead of 143"
+test_assert_file_contains "$VW_CROWDSEC_EMAIL_ENV_FILE" 'CROWDSEC_EMAIL_NOTIFICATIONS=true'
+[[ -e "$PLUGIN" && -e "$PROFILES" ]] || test_fail 'committed child state was lost after signal-like exit'
+test_assert_file_contains "$TMP/committed-before-exit.out" 'committed before interruption; keeping the reconciled .env state'
 assert_no_backups
 assert_lock_free
 
@@ -698,22 +692,29 @@ mv "$BIN/cscli" "$BIN/cscli.off"
 set_flag true
 write_plugin
 write_profile
-if run_control test >"$TMP/missing-cscli.out" 2>&1; then fail 'missing cscli was ignored'; fi
-contains "$TMP/missing-cscli.out" 'Required command is unavailable: cscli'
+missing_cscli_path="$(test_build_isolated_path \
+    "$TMP/missing-cscli-bin" bash dirname basename tr awk grep)"
+if PATH="$missing_cscli_path" command -v cscli >/dev/null 2>&1; then
+    test_fail 'isolated missing-cscli fixture exposed a host cscli command'
+fi
+if PATH="$missing_cscli_path" run_control test >"$TMP/missing-cscli.out" 2>&1; then
+    test_fail 'missing cscli was ignored'
+fi
+test_assert_file_contains "$TMP/missing-cscli.out" 'Required command is unavailable: cscli'
 mv "$BIN/cscli.off" "$BIN/cscli"
 chmod -x "$VW_CROWDSEC_SETUP_SCRIPT"
 set_flag false
-if run_control enable >"$TMP/missing-setup.out" 2>&1; then fail 'non-executable setup was ignored'; fi
-contains "$TMP/missing-setup.out" 'missing or not executable'
+if run_control enable >"$TMP/missing-setup.out" 2>&1; then test_fail 'non-executable setup was ignored'; fi
+test_assert_file_contains "$TMP/missing-setup.out" 'missing or not executable'
 chmod +x "$VW_CROWDSEC_SETUP_SCRIPT"
 printf 'CROWDSEC_EMAIL_NOTIFICATIONS=true\nCROWDSEC_EMAIL_NOTIFICATIONS=false\n' >"$VW_CROWDSEC_EMAIL_ENV_FILE"
-if run_control enable >"$TMP/duplicate-enable.out" 2>&1; then fail 'duplicate flag was silently rewritten'; fi
-contains "$TMP/duplicate-enable.out" 'malformed or duplicated'
-not_contains "$TMP/duplicate-enable.out" 'CrowdSec email notifications enabled.'
+if run_control enable >"$TMP/duplicate-enable.out" 2>&1; then test_fail 'duplicate flag was silently rewritten'; fi
+test_assert_file_contains "$TMP/duplicate-enable.out" 'malformed or duplicated'
+test_assert_file_not_contains "$TMP/duplicate-enable.out" 'CrowdSec email notifications enabled.'
 printf 'CROWDSEC_EMAIL_NOTIFICATIONS=true\n CROWDSEC_EMAIL_NOTIFICATIONS = false\n' >"$VW_CROWDSEC_EMAIL_ENV_FILE"
-if run_control enable >"$TMP/whitespace-enable.out" 2>&1; then fail 'whitespace-malformed duplicate flag was silently rewritten'; fi
-contains "$TMP/whitespace-enable.out" 'malformed or duplicated'
-not_contains "$TMP/whitespace-enable.out" 'CrowdSec email notifications enabled.'
+if run_control enable >"$TMP/whitespace-enable.out" 2>&1; then test_fail 'whitespace-malformed duplicate flag was silently rewritten'; fi
+test_assert_file_contains "$TMP/whitespace-enable.out" 'malformed or duplicated'
+test_assert_file_not_contains "$TMP/whitespace-enable.out" 'CrowdSec email notifications enabled.'
 assert_no_backups
 assert_lock_free
 
