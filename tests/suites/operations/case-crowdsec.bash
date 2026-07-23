@@ -4,6 +4,10 @@ set -euo pipefail
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+# shellcheck source=../../lib/assertions.bash
+source "$VW_TEST_REPO_ROOT/tests/lib/assertions.bash"
+# shellcheck source=../../lib/command-mocks.bash
+source "$VW_TEST_REPO_ROOT/tests/lib/command-mocks.bash"
 
 check_crowdsec_configuration() (
 # Focused checks for the CrowdSec collection set, log acquisition, and
@@ -95,6 +99,56 @@ printf 'CrowdSec configuration tests passed.\n'
 )
 
 check_crowdsec_configuration
+
+check_crowdsec_yq_resolution() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+log_error() { printf 'ERROR: %s\n' "$*" >&2; }
+
+sed -n '/^_cs_require_mikefarah_yq_v4() {/,/^}/p' \
+    "$ROOT/utilities/setup-crowdsec.sh" >"$TMP/yq-resolution-function.bash"
+# shellcheck source=/dev/null
+source "$TMP/yq-resolution-function.bash"
+
+original_path="$PATH"
+mike_yq_bin="$TMP/mike-yq-bin"
+python_yq_bin="$TMP/python-yq-bin"
+test_write_command_mock "$mike_yq_bin/yq" <<'EOF_MIKE_YQ'
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'yq (https://github.com/mikefarah/yq/) version v4.53.3\n'
+    exit 0
+fi
+exit 0
+EOF_MIKE_YQ
+test_write_command_mock "$python_yq_bin/yq" <<'EOF_PYTHON_YQ'
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'yq 3.4.3\n'
+    exit 0
+fi
+exit 0
+EOF_PYTHON_YQ
+
+PATH="$mike_yq_bin:$python_yq_bin:$original_path"
+_CS_YQ_COMMAND=""
+_cs_require_mikefarah_yq_v4 \
+    || test_fail "controlled Mike Farah yq v4 command was rejected"
+test_assert_equal "$_CS_YQ_COMMAND" "$mike_yq_bin/yq"
+
+PATH="$python_yq_bin:$mike_yq_bin:$original_path"
+_CS_YQ_COMMAND=""
+if _cs_require_mikefarah_yq_v4 >"$TMP/python-yq.out" 2>&1; then
+    test_fail "incompatible Python yq command was accepted"
+fi
+test_assert_file_contains "$TMP/python-yq.out" "unsupported yq implementation at $python_yq_bin/yq"
+test_assert_file_contains "$TMP/python-yq.out" "Mike Farah yq v4 is required"
+
+printf 'CrowdSec yq resolution tests passed.\n'
+)
+
+check_crowdsec_yq_resolution
 
 check_crowdsec_env_writer_wrapper() (
 set -euo pipefail
