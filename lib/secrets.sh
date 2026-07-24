@@ -646,7 +646,7 @@ _encrypt_recovery_kit_attachment() {
   case $- in *x*) xtrace_was_set=1 ;; esac
   { set +x; } 2>/dev/null
   passphrase="$(prompt_password_with_confirmation \
-    "Passphrase for emailed AES-256 ZIP (different from the backup passphrase)" 16)" || {
+    "Passphrase for emailed AES-256 ZIP (independent from stored project credentials)" 16)" || {
       unset passphrase
       [[ $xtrace_was_set -eq 1 ]] && set -x
       log_error "Attachment passphrase entry failed or was aborted."
@@ -809,7 +809,7 @@ _offer_email_recovery_kit() {
   body=$(cat <<'BODY'
 Please keep the attached file somewhere safe.
 
-It is a ZIP archive encrypted with AES-256. The attachment passphrase is independent from the VaultWarden backup passphrase and is not included in this email.
+It is a ZIP archive encrypted with AES-256. The attachment passphrase is independent from all stored VaultWarden-OCI credentials and is not included in this email.
 
 Extraction:
 - Windows: use 7-Zip or another AES-ZIP-capable application.

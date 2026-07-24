@@ -69,6 +69,8 @@ for marker in 'AGE-SECRET-KEY-1SYNTHETIC-TEST-ONLY' 'VW-SYNTHETIC-PLAINTEXT' 'CA
   [[ "$handoff_output" != *"$marker"* ]] || fail "setup handoff printed synthetic marker"
 done
 [[ "$(grep -c '^│  0[123]  ' "$handoff_file")" == "3" ]] || fail "unexpected setup handoff section count"
+! grep -Fq '04  BACKUP PASSPHRASE' "$handoff_file" || fail "retired backup-passphrase section returned"
+! grep -Fq 'BACKUP_PLAIN_FILE' setup.sh || fail "retired setup backup capture returned"
 ! grep -Eq 'CLOUDFLARE|SMTP|PUSH|RECOVERY PROCEDURE' "$handoff_file" || fail "setup handoff contains out-of-scope inventory"
 if publish_setup_credentials \
   "$tmp/age.txt" "$tmp/vw-plain" "$tmp/vw-hash" \

@@ -119,7 +119,7 @@ SUBCOMMANDS:
                Sub-actions: install | remove | validate | status
 
 FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
-  --auto              Non-interactive install. Auto-generates passwords/passphrases;
+  --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.

@@ -34,6 +34,20 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
+REQUIRED_LIBS=(
+  "lib/log.sh"
+  "lib/validate.sh"
+  "lib/config.sh"
+  "lib/common.sh"
+  "lib/operations.sh"
+  "lib/crypto.sh"
+  "lib/docker.sh"
+  "lib/backup-utils.sh"
+  "lib/secrets.sh"
+  "lib/setup-credentials.sh"
+  "lib/defaults.sh"
+  "lib/storage.sh"
+)
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "${SCRIPT_DIR}/${lib}" ]]; then
         echo "ERROR: Required library not found: ${SCRIPT_DIR}/${lib}" >&2
@@ -92,7 +106,7 @@ SUBCOMMANDS:
                Sub-actions: install | remove | validate | status
 
 FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
-  --auto              Non-interactive install. Auto-generates passwords/passphrases;
+  --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
@@ -559,7 +573,7 @@ main() {
         # Interactive TTY: offer to run secrets configuration now so all four
         # credentials are captured and shown in the final summary.
         log_info ""
-        log_info "Secrets can be configured now so all four credentials are shown in the final summary."
+        log_info "Secrets can be configured now so all generated setup credentials are captured in the final summary."
         local _secrets_ans
         read -r -t 300 -p "Run interactive secrets setup now? [yes/no] (default: yes): " _secrets_ans || _secrets_ans="no"
         if [[ -z "$_secrets_ans" || "$_secrets_ans" =~ ^[Yy] ]]; then
@@ -567,7 +581,7 @@ main() {
                 log_warn "Secrets configuration encountered issues — run 'sudo ./setup.sh secrets' to retry"
             fi
         else
-            log_info "Skipping secrets setup — items [2]–[4] will show placeholder text in the summary."
+            log_info "Skipping secrets setup — generated credential items will show placeholder text in the summary."
         fi
         unset _secrets_ans
     fi

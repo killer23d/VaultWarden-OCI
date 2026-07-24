@@ -7,6 +7,8 @@ import sys
 root = Path(__file__).resolve().parents[1]
 restore_text = (root / "utilities/restore-run.sh").read_text()
 restore_match = re.search(r"(?ms)^_display_new_key\(\) \{.*?^\}", restore_text)
+handoff_text = (root / "lib/setup-credentials.sh").read_text()
+setup_text = (root / "setup.sh").read_text()
 checks = {
     "setup protected handoff": "VWOCI-PRR-PATCH-01" in (root / "lib/setup-credentials.sh").read_text(),
     "required UFW failure": "Required UFW firewall configuration failed" in (root / "setup.sh").read_text(),
@@ -21,6 +23,10 @@ checks = {
         (root / "lib/defaults.sh").read_text(),
     )),
     "permanent tests registered": "case-production-readiness" in (root / "tests/run-tests.sh").read_text(),
+    "behavioral setup gates registered": "case-production-readiness-setup-gates.bash" in (root / "tests/run-tests.sh").read_text(),
+    "setup handoff has exactly three active groups": len(re.findall(r"^│  0[123]  ", handoff_text, re.MULTILINE)) == 3,
+    "retired backup passphrase absent from setup": "BACKUP_PLAIN_FILE" not in setup_text and "04  BACKUP PASSPHRASE" not in handoff_text,
+    "backup integrity key remains distinct": "file_integrity_hmac_key" in (root / "secrets-schema.yaml").read_text(),
 }
 failed = [name for name, ok in checks.items() if not ok]
 for name, ok in checks.items():

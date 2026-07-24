@@ -72,6 +72,7 @@ SECURITY_CASES=(
     tests/suites/security/case-secrets.bash
     tests/suites/security/case-email.bash
   tests/suites/security/case-production-readiness-security.bash
+  tests/suites/security/case-production-readiness-setup-gates.bash
 )
 
 OPERATIONS_CASES=(

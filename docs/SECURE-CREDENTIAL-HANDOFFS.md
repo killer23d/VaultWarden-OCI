@@ -58,3 +58,7 @@ Normal `full` backups explicitly exclude current and legacy setup/recovery docum
 Startup enforces log directories as `0750`, regular log files as `0640`, and canonical numeric `PUID:PGID` ownership. Permission failures are fatal; dry-run does not mutate files.
 
 `EMAIL_MODE=direct` is canonical. `host` remains a deprecated compatibility alias. `smtp`, `direct`, and `host` all require the runtime `smtp_password` secret.
+
+## Backup protection terminology
+
+Normal `db`, `full`, and `emergency` backups remain encrypted by the operational Age identity. `file_integrity_hmac_key` authenticates checksum sidecars and is not a password or backup passphrase. The active schema has no `backup_passphrase` secret or backup/restore consumer. The emailed recovery-kit ZIP uses a separate, ephemeral attachment passphrase that is never stored in project secrets.
