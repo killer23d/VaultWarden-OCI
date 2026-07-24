@@ -238,3 +238,9 @@ See [docs/RESTORE-RUNTIME-PERMISSIONS.md](docs/RESTORE-RUNTIME-PERMISSIONS.md).
 ## License
 
 MIT License — see [LICENSE](LICENSE).
+
+## Secure credential handoffs
+
+<!-- VWOCI-PRR-PATCH-04 -->
+
+Automatic setup writes generated credentials to a protected root-only handoff instead of printing them. The separate full recovery kit is exported under `/root/vaultwarden-recovery/` and can be emailed only as an AES-256 encrypted ZIP. See [Secure credential and recovery handoffs](docs/SECURE-CREDENTIAL-HANDOFFS.md).

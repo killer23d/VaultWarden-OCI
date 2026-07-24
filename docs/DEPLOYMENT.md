@@ -226,3 +226,9 @@ These features are supported where implemented but should not complicate a first
 - **Provider-specific email APIs** — advanced operational-alert route; the Postfix SMTP path remains the normal appliance mail path.
 - **Disaster-recovery rehearsals** — use the current smoke test and pre-production drill after the normal stack is stable.
 - **Deep CrowdSec Worker/KV tuning** — see [CROWDSEC.md](CROWDSEC.md) after the default enforcement path is working.
+
+## Automatic setup credential handoff
+
+<!-- VWOCI-PRR-PATCH-04 -->
+
+After a successful automatic setup that generated new credentials, retrieve the root-only setup handoff from `/root/vaultwarden-recovery/`. Setup no longer prints those values. Required UFW configuration and automatic secret configuration failures now terminate setup before a completion summary or handoff is published. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).
