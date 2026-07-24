@@ -63,9 +63,20 @@ init_common_lib "$0"
 require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+# shellcheck disable=SC1091
+source "${PROJECT_ROOT}/lib/operations.sh"
 load_project_environment || exit 1
 
-trap perform_cleanup EXIT
+cleanup_recovery_export() {
+  local rc=$?
+  operation_release "$rc" 2>/dev/null || true
+  perform_cleanup
+  return "$rc"
+}
+trap cleanup_recovery_export EXIT
+trap 'operation_release 130; exit 130' INT
+trap 'operation_release 129; exit 129' HUP
+trap 'operation_release 143; exit 143' TERM
 
 check_prerequisites() {
     local missing=()
@@ -135,21 +146,23 @@ _export_recovery_kit_safe() {
 }
 
 main() {
-    if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
-
-    case "${1:-}" in
-        --help|-h) show_help; exit 0 ;;
-        --version|-V) show_version; exit 0 ;;
-        "")        ;;
-        *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
-    esac
-
-    if ! check_prerequisites; then exit 1; fi
-    _warn_if_stack_unavailable
-
-    log_info "Running standalone recovery kit export..."
-    _export_recovery_kit_safe
-    exit $?
+  if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
+  case "${1:-}" in
+    --help|-h) show_help; exit 0 ;;
+    --version|-V) show_version; exit 0 ;;
+    "") ;;
+    *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
+  esac
+  if ! check_prerequisites; then exit 1; fi
+  operation_acquire \
+    --id recovery-export \
+    --label "Recovery kit export" \
+    --specific-lock /run/lock/vaultwarden-recovery-export.lock \
+    --non-interactive skip || exit $?
+  _warn_if_stack_unavailable
+  log_info "Running standalone recovery kit export..."
+  _export_recovery_kit_safe
+  exit $?
 }
 
 main "$@"
