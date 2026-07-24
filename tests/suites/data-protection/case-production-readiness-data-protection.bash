@@ -36,8 +36,11 @@ fi
 
 # Optional real 7-Zip smoke test when the distro tool is available.
 tool=""
-command -v 7z >/dev/null 2>&1 && tool=7z
-[[ -n "$tool" ]] || command -v 7zz >/dev/null 2>&1 && tool=7zz
+if command -v 7z >/dev/null 2>&1; then
+  tool=7z
+elif command -v 7zz >/dev/null 2>&1; then
+  tool=7zz
+fi
 if [[ -n "$tool" ]]; then
   printf payload > "$tmp/document.txt"
   passphrase='VWOCI-synthetic-zip-passphrase-2026'

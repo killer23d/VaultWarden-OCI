@@ -16,7 +16,10 @@ checks = {
     "no legacy tar.gpg implementation": "tar.gpg" not in (root / "lib/secrets.sh").read_text(),
     "full archive exclusions": "vaultwarden-setup-credentials-" in (root / "utilities/backup-run.sh").read_text(),
     "no recursive log 0755": not re.search(r"chmod\s+-R\s+755.*logs", (root / "startup.sh").read_text()),
-    "direct email mode": "_VW_DEFAULT_EMAIL_MODES=( auto api smtp direct host )" in (root / "lib/defaults.sh").read_text(),
+    "direct email mode": bool(re.search(
+        r"(?ms)^readonly -a _VW_DEFAULT_EMAIL_MODES=\(\s*.*?^\s*direct\s*$.*?^\)$",
+        (root / "lib/defaults.sh").read_text(),
+    )),
     "permanent tests registered": "case-production-readiness" in (root / "tests/run-tests.sh").read_text(),
 }
 failed = [name for name, ok in checks.items() if not ok]

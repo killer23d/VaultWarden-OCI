@@ -20,7 +20,7 @@ source "${SCRIPT_DIR}/lib/crypto.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/lib/runtime-log-permissions.sh"
+source "${SCRIPT_DIR}/lib/runtime-permissions.sh"
 source "${SCRIPT_DIR}/lib/operations.sh"
 
 ORIGINAL_ARGS=("$@")

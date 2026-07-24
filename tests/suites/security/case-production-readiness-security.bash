@@ -29,6 +29,15 @@ restore_summary="$(sed -n '/^_display_new_key() {/,/^}/p' utilities/restore-run.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
+cat > "$tmp/bin/date" <<'EOF_FAKE_DATE'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" && "${2:-}" == "+%Y%m%dT%H%M%SZ" ]]; then
+  printf '%s\n' '20260724T000000Z'
+else
+  exec /usr/bin/date "$@"
+fi
+EOF_FAKE_DATE
+chmod +x "$tmp/bin/date"
 public_recipient="age1$(printf 'q%.0s' {1..58})"
 cat > "$tmp/bin/age-keygen" <<EOF_FAKE_AGE
 #!/usr/bin/env bash
@@ -76,7 +85,7 @@ log_error() { printf '%s\n' "$*" >&2; }
 log_info() { :; }
 _maybe_sudo() { "$@"; }
 # shellcheck disable=SC1091
-source lib/runtime-log-permissions.sh
+source lib/runtime-permissions.sh
 enforce_runtime_log_permissions "$tmp/logs" "$(id -u)" "$(id -g)" false
 while IFS= read -r -d '' path; do
   [[ "$(stat -c '%a' "$path")" == "750" ]] || fail "directory mode is not 0750: $path"

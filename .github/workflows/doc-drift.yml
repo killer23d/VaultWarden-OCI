@@ -193,6 +193,9 @@ jobs:
           fi
           echo "COMMAND-REFERENCE.md is up to date."
 
+      - name: Verify production-readiness remediation
+        run: python3 utilities/verify-production-readiness-remediation.py
+
   shellcheck:
     runs-on: ubuntu-latest
     permissions:
@@ -227,7 +230,7 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y age apache2-utils python3-argon2 python3-yaml
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-yaml
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
           echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq

@@ -682,13 +682,15 @@ _encrypt_recovery_kit_attachment() {
     log_error "Could not restrict ZIP attachment permissions."
     return 1
   }
-  (( EUID != 0 )) || chown root:root -- "$output_file" || {
-    unset passphrase
-    [[ $xtrace_was_set -eq 1 ]] && set -x
-    _secure_shred "$output_file" 2>/dev/null || true
-    log_error "Could not set root ownership on ZIP attachment."
-    return 1
-  }
+  if (( EUID == 0 )); then
+    if ! chown root:root -- "$output_file"; then
+      unset passphrase
+      [[ $xtrace_was_set -eq 1 ]] && set -x
+      _secure_shred "$output_file" 2>/dev/null || true
+      log_error "Could not set root ownership on ZIP attachment."
+      return 1
+    fi
+  fi
 
   listing="$("$tool" l -slt -- "$output_file" 2>/dev/null)" || {
     unset passphrase
@@ -1461,7 +1463,9 @@ _ork_generate_and_secure() {
     grep -Fq 'END OF RECOVERY KIT' "$temp_file" || exit 1
     grep -Fq 'AGE-SECRET-KEY-1' "$temp_file" || exit 1
     chmod 0600 -- "$temp_file" || exit 1
-    (( EUID != 0 )) || chown root:root -- "$temp_file" || exit 1
+    if (( EUID == 0 )); then
+      chown root:root -- "$temp_file" || exit 1
+    fi
     # Hard-link publication is atomic and fails when the destination exists.
     ln -- "$temp_file" "$output_file" || exit 1
     rm -f -- "$temp_file" || exit 1
