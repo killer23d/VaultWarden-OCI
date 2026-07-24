@@ -1480,7 +1480,7 @@ _display_new_key() {
   if [[ "$FORCE" != "true" ]]; then
     local _confirm="" _attempt=1
     while (( _attempt <= RESTORE_SAVED_ACK_ATTEMPTS )); do
-      if ! read -r -t "$RESTORE_SAVED_ACK_TIMEOUT" \
+      if ! read -r -t "${RESTORE_SAVED_ACK_TIMEOUT}" \
         -p " Type SAVED (all caps) after recording the protected handoff: " _confirm; then
         _restore_print_key_ack_abort_guidance
         return 1

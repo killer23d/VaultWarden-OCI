@@ -34,7 +34,8 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/operations.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh"  "lib/setup-credentials.sh""lib/storage.sh")
+  "${SCRIPT_DIR}/lib/setup-credentials.sh"
+  "${SCRIPT_DIR}/lib/storage.sh"
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "${SCRIPT_DIR}/${lib}" ]]; then
         echo "ERROR: Required library not found: ${SCRIPT_DIR}/${lib}" >&2
@@ -69,7 +70,6 @@ PHASE=""
 PHASE_ARGS=()
 export ENTROPY_THRESHOLD=200
 export ENTROPY_MAX_WAIT=60
-CLEAN_DOMAIN=""
 # Storage mode variables. Defaults are overridden by --data-device/--data-mount
 # or by DATA_VOLUME_DEVICE/DATA_VOLUME_MOUNT already set in the environment.
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
