@@ -102,7 +102,71 @@ output. Do not edit manually; run `make docs` to regenerate.
 ### setup.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Setup Tool — Security Hardened Edition
+
+USAGE:
+    sudo ./setup.sh install --domain DOMAIN --email EMAIL [OPTIONS]  # Full setup
+    sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]          # Full setup (legacy)
+    sudo ./setup.sh secrets [OPTIONS]                                # Secrets phase only
+    sudo ./setup.sh systemd <install|remove|validate|status> [OPTIONS]  # Systemd phase
+
+SUBCOMMANDS:
+    install    Run the full setup workflow. This is the recommended explicit
+               entry point; legacy top-level --domain/--email flags still work.
+    secrets    Configure encrypted secrets (admin password, API tokens, SMTP, etc.)
+               Run this after editing .env with your Cloudflare zone / email settings.
+    systemd    Install, validate, or remove VaultWarden systemd timers.
+               Sub-actions: install | remove | validate | status
+
+FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
+  --auto              Non-interactive install. Auto-generates passwords/passphrases;
+                      external credentials (CF tokens, SMTP) remain as CHANGE_ME
+                      placeholders — the post-install summary lists exact commands
+                      to rotate them. Does NOT imply --use-latest.
+  --use-latest        Use live upstream container and CrowdSec versions in .env,
+                      and resolve the latest SOPS release instead of the pinned
+                      production default.
+  --skip-deps         Skip dependency installation (assumes already installed).
+  --force             Overwrite existing .env, secrets, and docker-compose files.
+                      WARNING: Also regenerates the Age encryption key. All
+                      existing encrypted secrets become permanently unrecoverable
+                      without a prior recovery kit export. Run
+                      'sudo ./utilities/secrets-export-recovery-kit.sh' BEFORE using
+                      --force on a running installation. To confirm you understand,
+                      set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
+                      environment (or type YES at the interactive prompt).
+  --dry-run           Print what would happen without making any changes.
+  --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
+                      Existing ext4/xfs filesystems require explicit operator
+                      confirmation. Blank devices are formatted only when
+                      DATA_VOLUME_FORCE_FORMAT=true is set. A Docker systemd
+                      drop-in ensures the stack never starts without this mount.
+                      Example: --data-device /dev/disk/by-id/your-volume
+  --data-mount PATH   Mount point for the data volume (default: /mnt/vw-data).
+                      Must match PROJECT_STATE_DIR when DATA_VOLUME_DEVICE is set.
+
+GLOBAL OPTIONS:
+  --help, -h          Show this help and exit.
+  --version, -V       Print the VaultWarden-OCI version and exit.
+
+EXAMPLES:
+    # ── First-time setup ──────────────────────────────────────────
+    sudo ./setup.sh install --domain vault.example.com --email admin@example.com
+    sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
+
+    # ── Secrets configuration ─────────────────────────────────────
+    sudo ./setup.sh secrets              # Interactive credential setup
+    sudo ./setup.sh secrets --auto       # Automated with generated passwords
+    sudo ./setup.sh secrets --force      # Reconfigure without prompting
+    sudo ./setup.sh secrets --skip-optional   # Skip push notification keys
+    sudo ./setup.sh secrets --export-recovery-kit
+
+    # ── Systemd timer management ──────────────────────────────────
+    sudo ./setup.sh systemd install      # Install and enable all timers
+    sudo ./setup.sh systemd validate     # Detect split-brain vs /opt/
+    sudo ./setup.sh systemd status       # Show timer status
+    sudo ./setup.sh systemd remove       # Disable and remove all timers
+    sudo ./setup.sh systemd install --dry-run
 ```
 
 ### startup.sh

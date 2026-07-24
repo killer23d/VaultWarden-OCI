@@ -118,8 +118,10 @@ reject_function '_restore_should_rotate_age_key' 'answer="no"' \
   "Age rotation decision must not map timeout/EOF to no"
 reject_function '_display_new_key' 'while \[\[ "\$_confirm" != "SAVED" \]\]' \
   "SAVED acknowledgement must not loop indefinitely"
-require 'RESTORE_SAVED_ACK_TIMEOUT.*Type SAVED' "$RESTORE" \
+require 'read -r -t .*RESTORE_SAVED_ACK_TIMEOUT' "$RESTORE" \
   "SAVED acknowledgement must use bounded timeout"
+require 'Type SAVED' "$RESTORE" \
+  "SAVED acknowledgement prompt must require explicit SAVED text"
 
 printf 'PASS: restore confirmation safety\n'
 
