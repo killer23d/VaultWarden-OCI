@@ -43,15 +43,25 @@ elif command -v 7zz >/dev/null 2>&1; then
 fi
 if [[ -n "$tool" ]]; then
   printf payload > "$tmp/document.txt"
-  passphrase='VWOCI-synthetic-zip-passphrase-2026'
-  printf '%s\n%s\n' "$passphrase" "$passphrase" | (
-    cd "$tmp" && "$tool" a -tzip -mem=AES256 -mx=5 -bd -y -p archive.zip document.txt >/dev/null
+
+  # These are synthetic, non-secret test values.  Supplying them with the
+  # documented -p{password} switch avoids implementation-specific interactive
+  # prompt handling in non-TTY CI.  Production passphrases remain protected by
+  # the separate no-secret-in-argv tests.
+  ci_passphrase='vwoci-ci-only-aes-zip-password'
+  wrong_passphrase='vwoci-ci-only-wrong-password'
+
+  (
+    cd "$tmp"
+    "$tool" a -tzip -mem=AES256 -mx=5 -bd -y \
+      "-p${ci_passphrase}" archive.zip document.txt >/dev/null
   )
   listing="$("$tool" l -slt "$tmp/archive.zip")"
   grep -q '^Type = zip$' <<<"$listing" || fail "real archive is not ZIP"
   grep -Eq '^Method = .*AES-256' <<<"$listing" || fail "real archive is not AES-256"
-  printf '%s\n' "$passphrase" | "$tool" t -bd -y -p "$tmp/archive.zip" >/dev/null
-  ! printf '%s\n' wrong | "$tool" t -bd -y -p "$tmp/archive.zip" >/dev/null 2>&1 || fail "wrong password extracted ZIP"
+  "$tool" t -bd -y "-p${ci_passphrase}" "$tmp/archive.zip" >/dev/null
+  ! "$tool" t -bd -y "-p${wrong_passphrase}" "$tmp/archive.zip" >/dev/null 2>&1 \
+    || fail "wrong password extracted ZIP"
 fi
 
 pass "production-readiness recovery/backup regressions"
