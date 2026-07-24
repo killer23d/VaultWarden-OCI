@@ -34,7 +34,7 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/operations.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
+REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/operations.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh"  "lib/setup-credentials.sh""lib/storage.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "${SCRIPT_DIR}/${lib}" ]]; then
         echo "ERROR: Required library not found: ${SCRIPT_DIR}/${lib}" >&2
@@ -53,6 +53,8 @@ DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=v
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/backup-utils.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/setup-credentials.sh"
 source "${SCRIPT_DIR}/lib/defaults.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
 
@@ -314,138 +316,76 @@ if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid
 
 
 show_post_install_summary() {
-    local mode="${1:-interactive}"
+  # VWOCI-PRR-PATCH-01: publish generated values once, never print them.
+  local mode="${1:-interactive}"
+  if [[ "${DRY_RUN:-false}" == "true" ]]; then
+    log_info "[DRY RUN] Would publish a root-only setup credential handoff after all required phases pass."
+    return 0
+  fi
 
-    [[ -t 1 ]] && clear
-    local age_pub_key="" age_key_content=""
-    if [[ -f "secrets/keys/age-key.txt" ]]; then
-        age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
-        age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
+  local age_key_file credential_file
+  age_key_file="$(resolve_age_key_path 2>/dev/null)" || {
+    log_error "Cannot publish setup credentials: operational Age identity is unavailable."
+    return 1
+  }
+
+  local capture_count=0 capture_path
+  for capture_path in \
+    "${VW_ADMIN_PLAIN_FILE:-}" "${VW_ADMIN_HASH_FILE:-}" \
+    "${CADDY_PLAIN_FILE:-}" "${CADDY_HASH_FILE:-}"; do
+    [[ -n "$capture_path" && -s "$capture_path" ]] && capture_count=$((capture_count + 1))
+  done
+  if (( capture_count != 4 )); then
+    if (( capture_count == 0 )) && [[ "${SETUP_SECRETS_PREEXISTED:-false}" == "true" ]]; then
+      printf '\n'
+      log_success "Setup completed without printing secret values."
+      log_info "Existing secrets were retained; no new setup-credentials file was created."
+      log_info "Export the separate full recovery kit later with: sudo ./edit-secrets.sh export-recovery-kit"
+      return 0
     fi
-    
-    printf '%s' "${COLOR_RED}"
-    cat << 'CRED_BANNER'
-  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-  !                                                                       !
-  !   🚨 CRITICAL: SAVE ALL OF THESE CREDENTIALS FOR DISASTER RECOVERY 🚨  !
-  !     They will NOT be shown again unless you export a recovery kit     !
-  !                                                                       !
-  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-CRED_BANNER
-    printf '%s' "${COLOR_RESET}"
-
-    local _na="(not configured yet — run sudo ./setup.sh secrets, then sudo ./utilities/secrets-export-recovery-kit.sh)"
-    local vw_admin_plain="${_na}" caddy_admin_plain="${_na}" backup_pass_plain="${_na}"
-    [[ -f "${VW_ADMIN_PLAIN_FILE:-}" ]] && [[ -s "${VW_ADMIN_PLAIN_FILE:-}" ]] && \
-        vw_admin_plain=$(cat "${VW_ADMIN_PLAIN_FILE}")
-    [[ -f "${CADDY_PLAIN_FILE:-}" ]] && [[ -s "${CADDY_PLAIN_FILE:-}" ]] && \
-        caddy_admin_plain=$(cat "${CADDY_PLAIN_FILE}")
-    [[ -f "${BACKUP_PLAIN_FILE:-}" ]] && [[ -s "${BACKUP_PLAIN_FILE:-}" ]] && \
-        backup_pass_plain=$(cat "${BACKUP_PLAIN_FILE}")
-
-    printf '\n%s[1] SOPS AGE SECRET KEY%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '    Public key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
-
-    printf '\n%s[2] VAULTWARDEN ADMIN TOKEN (plaintext — hash stored in secrets)%s\n' \
-        "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${vw_admin_plain}" "${COLOR_RESET}"
-
-    printf '\n%s[3] CADDY ADMIN PASSWORD (plaintext — bcrypt hash stored in secrets)%s\n' \
-        "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${caddy_admin_plain}" "${COLOR_RESET}"
-
-    printf '\n%s[4] BACKUP PASSPHRASE%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${backup_pass_plain}" "${COLOR_RESET}"
-
-    printf '\n%s!!! PRESS ENTER ONLY AFTER SAVING ALL CREDENTIALS !!!%s\n' \
-        "${COLOR_RED}" "${COLOR_RESET}"
-    press_enter_to_continue " Press [Enter] ONLY after saving all credentials above..."
-    clear
-
-    local env_edit_cmd="sudo make edit-env"
-
-    local _cf_cmds
-    _cf_cmds="$(printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s' \
-        "${COLOR_YELLOW}" "${COLOR_RESET}" \
-        "${COLOR_YELLOW}" "${COLOR_RESET}" \
-        "${COLOR_YELLOW}" "${COLOR_RESET}")"
-
-    if [[ "$mode" == "auto" ]]; then
-        printf '\n%s--- AUTO-GENERATED CREDENTIALS (scroll up and save plaintext passwords now) ---%s\n' \
-            "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '  %s✔%s VaultWarden admin token    : GENERATED (Argon2id hash stored in secrets)\n' \
-            "${COLOR_GREEN}" "${COLOR_RESET}"
-        printf '  %s✔%s Caddy admin password       : GENERATED (bcrypt hash stored in secrets)\n' \
-            "${COLOR_GREEN}" "${COLOR_RESET}"
-        printf '  %s✔%s Backup passphrase          : GENERATED (stored in secrets)\n' \
-            "${COLOR_GREEN}" "${COLOR_RESET}"
-
-        printf '\n%s--- CREDENTIALS REQUIRING MANUAL CONFIGURATION ---%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf 'These fields still contain CHANGE_ME placeholders.\n'
-        printf 'Set them BEFORE running %ssudo make up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate smtp_password%s         (if using SMTP)\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate email_api_token%s       (if using API-based email)\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate push_installation_id%s  (optional — mobile push)\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate push_installation_key%s (optional — mobile push)\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-
-        printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. Edit environment:   %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
-        printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
-        printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '2. Set external tokens: %s(use sudo ./edit-secrets.sh rotate <field> commands above)%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
-        printf '%s\n' "$_cf_cmds"
-        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
-        printf '     from secrets.yaml — those three must be set (step 3) before running this.\n'
-        printf '5. Start services:      %ssudo make up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '7. Export recovery kit: %ssudo ./edit-secrets.sh export-recovery-kit%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %s(Run AFTER steps 2-3 so all secrets are included in the kit)%s\n' \
-            "${COLOR_RED}" "${COLOR_RESET}"
-    else
-        printf '\n%s--- EXTERNAL CONFIGURATION CHECKLIST ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. [ ] Domain Name:   %s%s%s\n' "${COLOR_GREEN}" "${CLEAN_DOMAIN:-Not Set}" "${COLOR_RESET}"
-        printf '2. [ ] Admin Email:   %s%s%s\n' "${COLOR_GREEN}" "${ADMIN_EMAIL:-Not Set}" "${COLOR_RESET}"
-
-        printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. Edit environment:   %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
-        printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
-        printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '2. Configure secrets:   %ssudo ./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
-        printf '%s\n' "$_cf_cmds"
-        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
-        printf '     from secrets.yaml — those three must be set (step 3) before running this.\n'
-        printf '5. Start services:      %ssudo make up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '7. Export recovery kit: %ssudo ./edit-secrets.sh export-recovery-kit%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %s(Run AFTER steps 2-3 so all secrets are included in the kit)%s\n' \
-            "${COLOR_RED}" "${COLOR_RESET}"
+    if [[ "$mode" == "auto" || $capture_count -ne 0 ]]; then
+      log_error "Cannot publish setup credentials: generated plaintext/hash capture is incomplete."
+      return 1
     fi
+    printf '\n'
+    log_success "Setup completed without printing secret values."
+    log_info "No setup-credentials file was created because interactive secrets were not auto-generated."
+    log_info "Export the separate full recovery kit later with: sudo ./edit-secrets.sh export-recovery-kit"
+    return 0
+  fi
 
-    if [[ "$mode" == "interactive" ]]; then
-        press_enter_to_continue " Press [Enter] to clear this screen and finish..."
-        clear
-    fi
+  credential_file="$(publish_setup_credentials \
+    "$age_key_file" "$VW_ADMIN_PLAIN_FILE" "$VW_ADMIN_HASH_FILE" \
+    "$CADDY_PLAIN_FILE" "$CADDY_HASH_FILE")" || {
+      log_error "Secure setup-credential publication failed; setup is not complete."
+      return 1
+    }
+
+  printf '\n'
+  printf '╭──────────────────────────────────────────────────────────────────────────────╮\n'
+  printf '│  SETUP CREDENTIALS SAVED                                                     │\n'
+  printf '├──────────────────────────────────────────────────────────────────────────────┤\n'
+  local credential_dir credential_name
+  credential_dir="${credential_file%/*}/"
+  credential_name="${credential_file##*/}"
+  printf '│  %-76s│\n' "$credential_dir"
+  printf '│  %-76s│\n' "$credential_name"
+  printf '│  Owner          root:root                                                    │\n'
+  printf '│  Permissions    0600                                                         │\n'
+  printf '│  Credentials    3                                                            │\n'
+  printf '│                                                                              │\n'
+  printf '│  ✓ SOPS Age identity                                                        │\n'
+  printf '│  ✓ Vaultwarden admin password                                                │\n'
+  printf '│  ✓ Caddy admin password                                                      │\n'
+  printf '│                                                                              │\n'
+  printf '│  No credential values were written to terminal output.                      │\n'
+  printf '╰──────────────────────────────────────────────────────────────────────────────╯\n'
+  printf '\n'
+  log_info "Configure external provider secrets with: sudo ./edit-secrets.sh rotate FIELD"
+  log_info "Start and validate with: sudo make up && sudo make health"
+  log_warn "After copying the handoff offline, remove it explicitly: sudo rm -f '$credential_file'"
+  return 0
 }
-
 
 _verify_required_utilities() {
     local utils=(
@@ -552,9 +492,10 @@ main() {
 
     operation_set_phase "5" "Firewall setup"
     log_phase 5 6 "Firewall setup"
-    "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase ufw \
-        "${_auto[@]}" "${_dry[@]}" "${_force[@]}" \
-        || log_warn "UFW firewall setup had a non-fatal issue — review output above"
+    if ! "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase ufw \
+      "${_auto[@]}" "${_dry[@]}" "${_force[@]}"; then
+      _phase_failed 5 "Required UFW firewall configuration failed"
+    fi
 
     # Apply iptables rules on a best-effort basis.
     if [[ -x "${SCRIPT_DIR}/utilities/setup-firewall.sh" ]]; then
@@ -597,8 +538,13 @@ main() {
     # and interactive mode) can write plaintext credentials for the final summary.
     # TMP_WORKDIR is mode 700 (created with umask 077), so files are root-only.
     export VW_ADMIN_PLAIN_FILE="${TMP_WORKDIR}/vw_admin_plain"
+    export VW_ADMIN_HASH_FILE="${TMP_WORKDIR}/vw_admin_hash"
     export CADDY_PLAIN_FILE="${TMP_WORKDIR}/caddy_plain"
-    export BACKUP_PLAIN_FILE="${TMP_WORKDIR}/backup_plain"
+    export CADDY_HASH_FILE="${TMP_WORKDIR}/caddy_hash"
+    export SETUP_SECRETS_PREEXISTED=false
+    if secrets_file_exists && ensure_sops_env && check_placeholder_values >/dev/null 2>&1; then
+      export SETUP_SECRETS_PREEXISTED=true
+    fi
 
     if [[ "$AUTO_MODE" == "true" ]]; then
         operation_set_phase "6" "Secrets configuration"
@@ -609,7 +555,7 @@ main() {
         local secrets_args=(--auto --skip-optional --quiet-summary)
         [[ "$FORCE" == "true" ]] && secrets_args+=(--force)
         if ! "${SCRIPT_DIR}/utilities/setup-secrets.sh" configure "${secrets_args[@]}"; then
-            log_warn "Secrets auto-configuration encountered issues — run 'sudo make edit-env', then retry with 'sudo ./setup.sh secrets'"
+          _phase_failed 6 "Required automatic secrets configuration failed"
         fi
     elif [[ -t 0 ]] && [[ "$DRY_RUN" != "true" ]]; then
         # Interactive TTY: offer to run secrets configuration now so all four
@@ -629,11 +575,15 @@ main() {
     fi
 
     if [[ "$AUTO_MODE" == "true" ]]; then
-        show_post_install_summary "auto"
+        if ! show_post_install_summary "auto"; then
+          _phase_failed 6 "Secure setup-credential handoff failed"
+        fi
     else
         operation_set_phase "6" "Secrets configuration"
         log_phase 6 6 "Secrets configuration"
-        show_post_install_summary "interactive"
+        if ! show_post_install_summary "interactive"; then
+          _phase_failed 6 "Secure setup-credential handoff failed"
+        fi
     fi
     return 0
 }

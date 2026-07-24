@@ -609,6 +609,13 @@ HELP
                     vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
                 fi
                 _COLLECTED_SECRETS["admin_token"]="$vw_hash"
+    if [[ -n "${VW_ADMIN_HASH_FILE:-}" && -s "${VW_ADMIN_PLAIN_FILE:-}" \
+       && "$DRY_RUN" != "true" ]]; then
+      local _umask_vw_hash
+      _umask_vw_hash="$(umask)"; umask 077
+      printf '%s' "$vw_hash" > "$VW_ADMIN_HASH_FILE"
+      umask "$_umask_vw_hash"
+    fi
                 ;;
 
             # ── admin_basic_auth_hash ──────────────────────────────────────────
@@ -648,6 +655,13 @@ HELP
                     caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
                 fi
                 _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
+    if [[ -n "${CADDY_HASH_FILE:-}" && -s "${CADDY_PLAIN_FILE:-}" \
+       && "$DRY_RUN" != "true" ]]; then
+      local _umask_caddy_hash
+      _umask_caddy_hash="$(umask)"; umask 077
+      printf '%s' "$caddy_hash" > "$CADDY_HASH_FILE"
+      umask "$_umask_caddy_hash"
+    fi
                 ;;
 
             # ── smtp_password ──────────────────────────────────────────────────
