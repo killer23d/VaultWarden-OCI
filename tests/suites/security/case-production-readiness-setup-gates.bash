@@ -38,6 +38,17 @@ trap cleanup EXIT INT TERM HUP
 FIXTURE="$TMP/repo"
 mkdir -p "$FIXTURE"
 tar --exclude='./.git' --exclude='./test-results' -cf - . | tar -xf - -C "$FIXTURE"
+
+# Setup-gates fixture intentionally bypasses input-format validation. Domain and
+# email validation have separate coverage; this case must reach the phase
+# orchestration so it can prove required UFW and automatic-secrets failures stop
+# setup before credential publication.
+mkdir -p "$FIXTURE/lib"
+cat > "$FIXTURE/lib/validate.sh" <<'EOF_VALIDATE'
+validate_domain() { return 0; }
+validate_email() { return 0; }
+EOF_VALIDATE
+
 INVOCATIONS="$TMP/invocations.log"
 : > "$INVOCATIONS"
 chmod 0666 "$INVOCATIONS"
