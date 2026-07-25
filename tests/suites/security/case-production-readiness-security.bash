@@ -28,39 +28,45 @@ restore_summary="$(sed -n '/^_display_new_key() {/,/^}/p' utilities/restore-run.
 # Recovery-export help must describe persistent publication and conditional cleanup.
 recovery_help="$(./utilities/secrets-export-recovery-kit.sh --help)" \
   || fail "recovery-export --help failed"
-[[ "$recovery_help" == *"protected plaintext recovery document"* ]] \
+
+recovery_help_normalized="$(
+  printf '%s' "$recovery_help" |
+    tr '\n' ' ' |
+    sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+)"
+[[ "$recovery_help_normalized" == *"protected plaintext recovery document"* ]] \
   || fail "recovery help omits protected plaintext document contract"
-[[ "$recovery_help" == *"persistent"* ]] \
+[[ "$recovery_help_normalized" == *"persistent"* ]] \
   || fail "recovery help omits persistent final-output contract"
-[[ "$recovery_help" == *"recovery directory /root/vaultwarden-recovery"* ]] \
+[[ "$recovery_help_normalized" == *"recovery directory /root/vaultwarden-recovery"* ]] \
   || fail "recovery help omits final recovery directory"
-[[ "$recovery_help" == *"root:root with mode 0700"* ]] \
+[[ "$recovery_help_normalized" == *"root:root with mode 0700"* ]] \
   || fail "recovery help omits directory ownership/mode"
-[[ "$recovery_help" == *"root:root with mode 0600"* ]] \
+[[ "$recovery_help_normalized" == *"root:root with mode 0600"* ]] \
   || fail "recovery help omits document ownership/mode"
-[[ "$recovery_help" == *"When at(1) is available"* ]] \
+[[ "$recovery_help_normalized" == *"When at(1) is available"* ]] \
   || fail "recovery help omits conditional at(1) availability"
-[[ "$recovery_help" == *"accepts the cleanup job"* ]] \
+[[ "$recovery_help_normalized" == *"accepts the cleanup job"* ]] \
   || fail "recovery help omits successful scheduling condition"
-[[ "$recovery_help" == *"secure removal is"*"scheduled after 30 minutes"* ]] \
+[[ "$recovery_help_normalized" == *"secure removal is"*"scheduled after 30 minutes"* ]] \
   || fail "recovery help omits conditional 30-minute cleanup"
-[[ "$recovery_help" == *"If cleanup cannot be scheduled"* ]] \
+[[ "$recovery_help_normalized" == *"If cleanup cannot be scheduled"* ]] \
   || fail "recovery help omits cleanup scheduling failure condition"
-[[ "$recovery_help" == *"must securely remove the document manually"* ]] \
+[[ "$recovery_help_normalized" == *"must securely remove the document manually"* ]] \
   || fail "recovery help does not require manual secure removal"
-[[ "$recovery_help" == *"explicit"*"manual secure-removal instruction"* ]] \
+[[ "$recovery_help_normalized" == *"explicit"*"manual secure-removal instruction"* ]] \
   || fail "recovery help omits manual secure-removal instruction"
-[[ "$recovery_help" == *"Temporary decryption may use /dev/shm"* ]] \
+[[ "$recovery_help_normalized" == *"Temporary decryption may use /dev/shm"* ]] \
   || fail "recovery help omits temporary /dev/shm distinction"
-[[ "$recovery_help" == *"document remains under /root/vaultwarden-recovery"* ]] \
+[[ "$recovery_help_normalized" == *"document remains under /root/vaultwarden-recovery"* ]] \
   || fail "recovery help confuses temporary and final locations"
-[[ "$recovery_help" == *"Recovery content is"*"never printed to terminal output"* ]] \
+[[ "$recovery_help_normalized" == *"Recovery content is"*"never printed to terminal output"* ]] \
   || fail "recovery help omits terminal-output prohibition"
-[[ "$recovery_help" != *"written to a tmpfs-backed directory"* ]] \
+[[ "$recovery_help_normalized" != *"written to a tmpfs-backed directory"* ]] \
   || fail "recovery help still claims tmpfs-backed final output"
-[[ "$recovery_help" != *"/dev/shm) with mode 0600"* ]] \
+[[ "$recovery_help_normalized" != *"/dev/shm) with mode 0600"* ]] \
   || fail "recovery help still presents /dev/shm as final output"
-[[ "$recovery_help" != *"auto-delete"* ]] \
+[[ "$recovery_help_normalized" != *"auto-delete"* ]] \
   || fail "recovery help still promises unconditional deletion"
 # Protected setup handoff behavior with synthetic values only.
 tmp="$(mktemp -d)"
