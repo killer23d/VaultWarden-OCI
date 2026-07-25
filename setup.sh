@@ -570,10 +570,10 @@ main() {
           _phase_failed 6 "Required automatic secrets configuration failed"
         fi
     elif [[ -t 0 ]] && [[ "$DRY_RUN" != "true" ]]; then
-        # Interactive TTY: offer to run secrets configuration now so all four
-        # credentials are captured and shown in the final summary.
+        # Interactive TTY: offer to run secrets configuration now so newly generated
+        # administrator credentials can be captured in the protected setup handoff.
         log_info ""
-        log_info "Secrets can be configured now so all generated setup credentials are captured in the final summary."
+        log_info "Secrets can be configured now so newly generated administrator credentials are captured in the protected setup handoff."
         local _secrets_ans
         read -r -t 300 -p "Run interactive secrets setup now? [yes/no] (default: yes): " _secrets_ans || _secrets_ans="no"
         if [[ -z "$_secrets_ans" || "$_secrets_ans" =~ ^[Yy] ]]; then
@@ -581,7 +581,7 @@ main() {
                 log_warn "Secrets configuration encountered issues — run 'sudo ./setup.sh secrets' to retry"
             fi
         else
-            log_info "Skipping secrets setup — generated credential items will show placeholder text in the summary."
+            log_info "Skipping secrets setup — no setup credential handoff will be created unless new credentials are generated."
         fi
         unset _secrets_ans
     fi

@@ -18,6 +18,26 @@ grep -q '_phase_failed 6 "Required automatic secrets configuration failed"' setu
 summary="$(sed -n '/^show_post_install_summary() {/,/^}/p' setup.sh)"
 [[ "$summary" == *"No credential values were written to terminal output"* ]] || fail "secret-free setup summary missing"
 [[ "$summary" != *'cat "$age_key_file"'* ]] || fail "setup summary prints Age identity"
+
+# Interactive setup messaging must describe the protected credential handoff truthfully.
+grep -Fq \
+  'administrator credentials can be captured in the protected setup handoff' \
+  setup.sh \
+  || fail "protected setup-handoff comment missing"
+grep -Fq \
+  'administrator credentials are captured in the protected setup handoff' \
+  setup.sh \
+  || fail "protected setup-handoff information message missing"
+grep -Fq \
+  'Skipping secrets setup — no setup credential handoff will be created unless new credentials are generated.' \
+  setup.sh \
+  || fail "truthful setup skip notice missing"
+! grep -Fq 'captured and shown in the final summary' setup.sh \
+  || fail "stale terminal-summary comment remains"
+! grep -Fq 'captured in the final summary' setup.sh \
+  || fail "stale terminal-summary message remains"
+! grep -Fq 'placeholder text in the summary' setup.sh \
+  || fail "stale placeholder-summary message remains"
 rotation_summary="$(sed -n '/^_display_rotated_age_key_summary() {/,/^}/p' utilities/key-rotate.sh)"
 [[ "$rotation_summary" != *'cat '* ]] || fail "key rotation summary prints private material"
 restore_summary="$(sed -n '/^_display_new_key() {/,/^}/p' utilities/restore-run.sh)"
