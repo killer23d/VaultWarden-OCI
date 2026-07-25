@@ -1069,11 +1069,20 @@ USAGE:
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
-    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, then
-    exports a plaintext recovery document containing the Age private key and
-    all credentials. The output file is written to a tmpfs-backed directory
-    (e.g. /dev/shm) with mode 0600 and an auto-delete scheduled after 30
-    minutes via at(1).
+    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, and
+    publishes a protected plaintext recovery document in the persistent
+    recovery directory /root/vaultwarden-recovery.
+
+    The recovery directory is owned by root:root with mode 0700, and the
+    recovery document is owned by root:root with mode 0600. When at(1) is
+    available and accepts the cleanup job, secure removal is scheduled after
+    30 minutes. If cleanup cannot be scheduled, the operator must securely
+    remove the document manually. The command prints an explicit manual
+    secure-removal instruction.
+
+    Temporary decryption may use /dev/shm, but the final published recovery
+    document remains under /root/vaultwarden-recovery. Recovery content is
+    never printed to terminal output.
 
     This is the canonical standalone entry point for recovery kit export.
     setup-secrets.sh delegates its post-setup export prompt here.
