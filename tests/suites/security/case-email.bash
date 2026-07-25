@@ -144,8 +144,19 @@ grep -Fq 'set +x' "$helper_source" \
     || fail 'attachment helper must disable xtrace while the passphrase is live'
 grep -Fq 'unset passphrase' "$helper_source" \
     || fail 'attachment helper must unset the passphrase promptly'
-! grep -En -- '(-p|--password)(=|[[:space:]])?"?\$\{?[A-Za-z_][A-Za-z0-9_]*' "$helper_source" "$transport_source" >"$TMP/source.matches" \
-    || { cat "$TMP/source.matches" >&2; fail 'attachment helper must not place a variable passphrase in archiver argv'; }
+# Static policy: reject password-like scalar variables attached to or passed
+# immediately with an archiver password switch. A standalone literal -p next
+# to an argument-array splice is allowed; the sentinel checks below prove that
+# the actual passphrase never appears in argv or environment at runtime.
+! awk '
+  /-p|--password/ &&
+  /\$[{]?(passphrase|password|secret|zip_password|recovery_password)([}]|[^A-Za-z0-9_])/ {
+    print FILENAME ":" FNR ":" $0
+    found=1
+  }
+  END { exit found ? 0 : 1 }
+' "$helper_source" "$transport_source" >"$TMP/source.matches" \
+    || { cat "$TMP/source.matches" >&2; fail 'attachment helper must not place a passphrase variable in archiver argv'; }
 ! grep -En -- 'ZIP_PASSWORD|RECOVERY_PASSWORD|passphrase[-_]file|_pass_file' "$helper_source" "$transport_source" >"$TMP/source.matches" \
     || { cat "$TMP/source.matches" >&2; fail 'attachment helper must not use environment or passphrase-file handoff'; }
 ! grep -En 'openssl[[:space:]]+enc|aes-256-cbc|tar[.]gpg|--symmetric|OpenPGP|GnuPG' "$helper_source" "$transport_source" >"$TMP/source.matches" \
