@@ -589,8 +589,9 @@ _tmpfs_dir() {
 # ---------------------------------------------------------------------------
 # _check_recovery_kit_email_deps
 #
-# Prints the AES-ZIP tool name ("7z" or "7zz") when the secure prompt,
-# Python PTY bridge, SMTP attachment helper, and archiver are available.
+# Prints the AES-ZIP tool name when the secure prompt, SMTP attachment helper,
+# and an archiver are available. Prefer upstream 7zz from Ubuntu's 7zip
+# package, with legacy 7z retained as a compatibility fallback.
 # ---------------------------------------------------------------------------
 _check_recovery_kit_email_deps() {
   declare -F prompt_password_with_confirmation >/dev/null 2>&1 || {
@@ -601,12 +602,8 @@ _check_recovery_kit_email_deps() {
     log_error "recovery-kit email: SMTP attachment helper is unavailable."
     return 1
   }
-  command -v python3 >/dev/null 2>&1 || {
-    log_warn "recovery-kit email: python3 is required for private 7-Zip password prompting."
-    return 1
-  }
   local candidate
-  for candidate in 7z 7zz; do
+  for candidate in 7zz 7z; do
     if command -v "$candidate" >/dev/null 2>&1; then
       printf '%s\n' "$candidate"
       return 0
@@ -620,101 +617,65 @@ _check_recovery_kit_email_deps() {
 # ---------------------------------------------------------------------------
 # _run_7zip_with_passphrase PASSPHRASE TOOL ARG...
 #
-# Runs 7-Zip under a private pseudo-terminal because 7z/7zz password prompts
-# require terminal semantics on some distributions. The passphrase reaches the
-# Python bridge only through fd 3 and reaches 7-Zip only through the PTY. It is
-# never placed in argv, exported, or written to a passphrase file.
+# Sends the passphrase only through the archiver's standard input. For archive
+# creation/update, a standalone -p switch enables encryption and the confirmed
+# passphrase is supplied twice. For read operations, standalone -p is removed:
+# an encrypted archive causes 7-Zip to request the password from stdin, while
+# avoiding the non-TTY -p behavior that differs between 7z and upstream 7zz.
+# Inline -pPASSWORD arguments are rejected so secrets never enter argv.
 # ---------------------------------------------------------------------------
 _run_7zip_with_passphrase() {
   local passphrase="$1"
   shift
   local tool="$1"
   shift
+
   [[ -n "$passphrase" ]] || return 64
-  command -v python3 >/dev/null 2>&1 || return 127
+  [[ "$passphrase" != *$'\n'* && "$passphrase" != *$'\r'* ]] || return 64
+  command -v "$tool" >/dev/null 2>&1 || return 127
 
-  python3 - "$tool" "$@" 3<<<"$passphrase" <<'PY_PTY'
-import errno
-import os
-import pty
-import re
-import select
-import signal
-import sys
-import time
+  local command_name="${1:-}"
+  [[ -n "$command_name" ]] || return 64
 
-try:
-    with os.fdopen(3, "rb", closefd=True) as secret_stream:
-        secret = secret_stream.readline().rstrip(b"\r\n")
-except OSError:
-    raise SystemExit(64)
+  local -a argv=("$@") safe_argv=()
+  local arg prompt_switch=false rc=0
+  for arg in "${argv[@]}"; do
+    case "$arg" in
+      -p)
+        if [[ "$command_name" == "a" || "$command_name" == "u" ]]; then
+          prompt_switch=true
+          safe_argv+=("$arg")
+        fi
+        ;;
+      -p?*)
+        # Never accept an inline password, even if a caller constructs one.
+        return 64
+        ;;
+      *) safe_argv+=("$arg") ;;
+    esac
+  done
 
-if not secret or b"\x00" in secret or b"\n" in secret or b"\r" in secret:
-    raise SystemExit(64)
+  if [[ "$command_name" == "a" || "$command_name" == "u" ]]; then
+    if [[ "$prompt_switch" != "true" ]]; then
+      safe_argv=("${safe_argv[0]}" -p "${safe_argv[@]:1}")
+    fi
+    if printf '%s\n%s\n' "$passphrase" "$passphrase" | "$tool" "${safe_argv[@]}"; then
+      return 0
+    else
+      rc="${PIPESTATUS[1]}"
+      return "$rc"
+    fi
+  fi
 
-argv = sys.argv[1:]
-if not argv:
-    raise SystemExit(64)
-
-pid, master_fd = pty.fork()
-if pid == 0:
-    os.execvp(argv[0], argv)
-
-prompt_re = re.compile(br"(?:reenter|verify|enter) password", re.IGNORECASE)
-transcript = b""
-sent = 0
-status = None
-deadline = time.monotonic() + 120.0
-
-try:
-    while status is None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            time.sleep(0.2)
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            _, status = os.waitpid(pid, 0)
-            raise SystemExit(124)
-
-        readable, _, _ = select.select([master_fd], [], [], min(1.0, remaining))
-        if readable:
-            try:
-                chunk = os.read(master_fd, 4096)
-            except OSError as exc:
-                if exc.errno != errno.EIO:
-                    raise
-                chunk = b""
-            if chunk:
-                transcript += chunk
-                if len(transcript) > 65536:
-                    transcript = transcript[-65536:]
-                prompt_count = len(prompt_re.findall(transcript))
-                while sent < prompt_count:
-                    os.write(master_fd, secret + b"\r")
-                    sent += 1
-            else:
-                _, status = os.waitpid(pid, 0)
-                break
-
-        waited_pid, waited_status = os.waitpid(pid, os.WNOHANG)
-        if waited_pid == pid:
-            status = waited_status
-finally:
-    try:
-        os.close(master_fd)
-    except OSError:
-        pass
-
-if status is None:
-    _, status = os.waitpid(pid, 0)
-raise SystemExit(os.waitstatus_to_exitcode(status))
-PY_PTY
+  # Test/extract/list operations prompt automatically when encrypted content is
+  # encountered. Supplying one line on stdin is portable across upstream 7zz
+  # and the retained legacy 7z fallback.
+  if printf '%s\n' "$passphrase" | "$tool" "${safe_argv[@]}"; then
+    return 0
+  else
+    rc="${PIPESTATUS[1]}"
+    return "$rc"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -722,9 +683,9 @@ PY_PTY
 #
 # Creates a single-member AES-256 ZIP. The independent attachment passphrase is
 # collected with prompt_password_with_confirmation (minimum 16 characters) and
-# passed to 7-Zip only through _run_7zip_with_passphrase. The helper validates
-# the container type, AES method, member list, correct passphrase, wrong
-# passphrase rejection, and empty-passphrase rejection before returning success.
+# sent to 7-Zip only on stdin. The helper validates the container type, AES
+# method, member list, correct passphrase, wrong-passphrase rejection, and
+# empty-passphrase rejection before returning success.
 # ---------------------------------------------------------------------------
 _encrypt_recovery_kit_attachment() {
   local plaintext_file="$1" output_file="$2" tool="$3"
@@ -836,7 +797,7 @@ _encrypt_recovery_kit_attachment() {
     log_error "Attachment validation failed: an incorrect passphrase was accepted."
     return 1
   fi
-  if "$tool" t -bd -y '-p' -- "$output_file" </dev/null >/dev/null 2>&1; then
+  if "$tool" t -bd -y -- "$output_file" </dev/null >/dev/null 2>&1; then
     unset passphrase; [[ $xtrace_was_set -eq 1 ]] && set -x
     _secure_shred "$output_file" 2>/dev/null || true
     log_error "Attachment validation failed: extraction without a passphrase succeeded."
