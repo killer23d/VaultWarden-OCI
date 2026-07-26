@@ -38,6 +38,96 @@ grep -Fq \
   || fail "stale terminal-summary message remains"
 ! grep -Fq 'placeholder text in the summary' setup.sh \
   || fail "stale placeholder-summary message remains"
+# Direct automatic secret setup must use protected capture and publication.
+setup_secrets_help="$(./utilities/setup-secrets.sh configure --help)" \
+  || fail "setup-secrets configure --help failed"
+setup_secrets_help_normalized="$(
+  printf '%s' "$setup_secrets_help" |
+    tr '\n' ' ' |
+    sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+)"
+[[ "$setup_secrets_help_normalized" == *"protected setup credential handoff"* ]] \
+  || fail "direct automatic setup help omits protected handoff"
+[[ "$setup_secrets_help_normalized" == *"Generated administrator passwords are never printed"* ]] \
+  || fail "direct automatic setup help omits terminal-output prohibition"
+
+setup_secrets_source="$(cat utilities/setup-secrets.sh)"
+[[ "$setup_secrets_source" == *'source "${PROJECT_ROOT}/lib/setup-credentials.sh"'* ]] \
+  || fail "setup-secrets does not load protected handoff support"
+[[ "$setup_secrets_source" == *'_ss_prepare_auto_handoff || return 1'* ]] \
+  || fail "setup-secrets does not prepare protected automatic capture"
+[[ "$setup_secrets_source" == *$'    done\n\n    _ss_prepare_auto_handoff || return 1\n\n    local AGE_KEY_FILE='* ]] \
+  || fail "setup-secrets prepares automatic handoff before option parsing completes"
+[[ "$setup_secrets_source" == *'_ss_publish_auto_handoff || return 1'* ]] \
+  || fail "setup-secrets does not publish direct automatic handoff"
+[[ "$setup_secrets_source" != *"scroll up to save the generated passwords"* ]] \
+  || fail "setup-secrets still tells operators to recover passwords from terminal output"
+
+auto_generator="$(
+  sed -n \
+    '/^auto_generate_secret_field() {/,/^_grk_sops_extract() {/p' \
+    lib/secrets.sh
+)"
+[[ "$auto_generator" != *"/dev/tty"* ]] \
+  || fail "automatic secret generator still writes plaintext to /dev/tty"
+[[ "$auto_generator" != *"_print_secret_banner"* ]] \
+  || fail "automatic secret generator still contains the plaintext banner"
+[[ "$auto_generator" == *"requires protected capture and publication"* ]] \
+  || fail "automatic administrator generation does not fail closed"
+
+# Exercise capture preparation and file permissions without real credentials.
+auto_handoff_helpers="$(
+  sed -n \
+    '/^    _ss_capture_path_count() {/,/^    _ss_show_help() {/p' \
+    utilities/setup-secrets.sh |
+    sed '$d; s/^    //'
+)"
+[[ -n "$auto_handoff_helpers" ]] \
+  || fail "automatic handoff helper block is missing"
+(
+  eval "$auto_handoff_helpers"
+  log_error() { :; }
+  log_info() { :; }
+  log_success() { :; }
+  log_warn() { :; }
+
+  helper_tmp="$(mktemp -d)"
+  trap 'rm -rf "$helper_tmp"' EXIT
+  chmod 0700 "$helper_tmp"
+
+  # These values are consumed by the helper functions loaded through eval.
+  # Exporting them makes that dynamic contract explicit to ShellCheck.
+  export TMP_WORKDIR="$helper_tmp"
+  export AUTO_MODE=true
+  export QUIET_SUMMARY=false
+  export AUTO_HANDOFF_OWNER=false
+  export DRY_RUN=false
+  unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE
+  unset CADDY_PLAIN_FILE CADDY_HASH_FILE
+
+  _ss_prepare_auto_handoff || exit 1
+  [[ "$AUTO_HANDOFF_OWNER" == "true" ]] || exit 1
+  [[ "$QUIET_SUMMARY" == "true" ]] || exit 1
+
+  synthetic_secret='VW_TEST_SECRET_DO_NOT_PRINT_276'
+  _ss_write_capture \
+    "$VW_ADMIN_PLAIN_FILE" \
+    "$synthetic_secret" \
+    "Vaultwarden administrator password" || exit 1
+  [[ "$(stat -c '%a' "$VW_ADMIN_PLAIN_FILE")" == "600" ]] || exit 1
+  [[ "$(cat "$VW_ADMIN_PLAIN_FILE")" == "$synthetic_secret" ]] || exit 1
+
+  ln -s "$helper_tmp/elsewhere" "$helper_tmp/unsafe-link"
+  ! _ss_write_capture \
+    "$helper_tmp/unsafe-link" \
+    "$synthetic_secret" \
+    "unsafe test capture" || exit 1
+
+  unset VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
+  VW_ADMIN_PLAIN_FILE="$helper_tmp/partial"
+  ! _ss_prepare_auto_handoff || exit 1
+) || fail "protected automatic capture helper contract failed"
+
 rotation_summary="$(sed -n '/^_display_rotated_age_key_summary() {/,/^}/p' utilities/key-rotate.sh)"
 [[ "$rotation_summary" != *'cat '* ]] || fail "key rotation summary prints private material"
 restore_summary="$(sed -n '/^_display_new_key() {/,/^}/p' utilities/restore-run.sh)"

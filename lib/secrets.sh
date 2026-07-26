@@ -1123,90 +1123,34 @@ collect_secret_field() {
 
 auto_generate_secret_field() {
     local field="$1"
-    local _banner_width=86
-    _print_secret_banner() {
-        local title="$1"
-        local value="$2"
-        local border
-        border=$(printf '%*s' "${_banner_width}" '' | tr ' ' '=')
-        {
-            printf '\n'
-            printf '\033[1;97;41m%s\033[0m\n' "$border"
-            printf '\033[1;97;41m  %-80s\033[0m\n' "🚨 SAVE THIS NOW — AUTO-GENERATED SECRET 🚨"
-            printf '\033[1;97;41m%s\033[0m\n' "$border"
-            printf '\033[1;33m%s\033[0m\n' "$title"
-            printf '\033[1;32m%s\033[0m\n' "$value"
-            printf '\033[1;97;41m  %-80s\033[0m\n' "This plaintext will not be shown again. Store it in your password manager."
-            printf '\033[1;97;41m%s\033[0m\n' "$border"
-            printf '\n'
-        } > /dev/tty 2>/dev/null
-    }
 
     case "$field" in
-
-        admin_token)
-            local vw_pass
-            vw_pass=$(generate_secure_string 32)
-            _print_secret_banner "VAULTWARDEN ADMIN PASSWORD" "$vw_pass" || {
-                log_warn "VaultWarden admin password auto-generated -- retrieve from recovery kit." >&2
-            }
-            log_info "Generating Argon2id hash..." >&2
-            local vw_hash
-            vw_hash=$(generate_argon2_hash "$vw_pass")
-            if [[ -z "$vw_hash" ]]; then
-                log_error "Failed to generate Argon2id hash" >&2
-                return 1
-            fi
-            log_success "VaultWarden admin hash generated (Argon2id)" >&2
-            printf '%s' "$vw_hash"
+        admin_token|admin_basic_auth_hash)
+            log_error "Automatic administrator credential generation requires protected capture and publication." >&2
+            log_error "Use: sudo ./setup.sh --auto" >&2
+            log_error "Direct interactive configuration remains available without --auto." >&2
+            return 1
             ;;
-
-        admin_basic_auth_hash)
-            local caddy_pass
-            caddy_pass=$(generate_secure_string 32)
-            _print_secret_banner "CADDY ADMIN PASSWORD" "$caddy_pass" || {
-                log_warn "Caddy admin password auto-generated -- retrieve from recovery kit." >&2
-            }
-            log_info "Generating bcrypt hash for Caddy basic auth..." >&2
-            local caddy_hash
-            caddy_hash=$(generate_bcrypt_hash "$caddy_pass")
-            if [[ -z "$caddy_hash" ]]; then
-                log_error "Failed to generate bcrypt hash. Ensure apache2-utils is installed." >&2
-                return 1
-            fi
-            if ! _bcrypt_format_ok "$caddy_hash"; then
-                log_error "Generated bcrypt hash has invalid format: $caddy_hash" >&2
-                return 1
-            fi
-            log_success "Caddy admin hash generated (htpasswd format: admin:\$2y\$...)" >&2
-            printf '%s' "admin $caddy_hash"
-            ;;
-
         caddy_cloudflare_dns_token)
             log_warn "Auto mode: Using placeholder for Cloudflare DNS token - MUST be updated before deployment" >&2
             printf '%s' "CHANGE_ME_DNS_TOKEN"
             ;;
-
         email_api_token)
             # Placeholder for the email provider API token.
             # Must be set via: sudo ./edit-secrets.sh rotate email_api_token
             log_warn "Auto mode: Using placeholder for email API token - configure via rotate email_api_token" >&2
             printf '%s' "CHANGE_ME_EMAIL_API_TOKEN"
             ;;
-
         smtp_password)
             log_warn "Auto mode: Using placeholder for SMTP password - configure later in .env" >&2
             printf '%s' "CHANGE_ME_SMTP_PASSWORD"
             ;;
-
         push_installation_id)
             printf '%s' "CHANGE_ME_OR_LEAVE_EMPTY"
             ;;
-
         push_installation_key)
             printf '%s' "CHANGE_ME_OR_LEAVE_EMPTY"
             ;;
-
         # Single source of truth for this auto key.
         # collect_secret_field() returns an error for auto keys.
         # _dispatch_auto_fn() in setup-secrets.sh is the sole entry point.
@@ -1216,7 +1160,6 @@ auto_generate_secret_field() {
             log_success "Backup integrity HMAC key generated (64 characters)" >&2
             printf '%s' "$integrity_key"
             ;;
-
         *)
             log_error "auto_generate_secret_field: unknown field '$field'" >&2
             return 1

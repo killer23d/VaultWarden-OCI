@@ -14,11 +14,12 @@ TMP_WORKDIR=$(mktemp -d -p "${PROJECT_ROOT}" vw_tmp.XXXXXXXXXX) || {
     exit 1
 }
 umask "$old_umask"
+chmod 0700 "$TMP_WORKDIR" || { echo "ERROR: Failed to secure temporary directory" >&2; exit 1; }
 trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"' EXIT
 trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh" "lib/operations.sh"; do
+for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh" "lib/setup-credentials.sh" "lib/operations.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
@@ -34,6 +35,7 @@ source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+source "${PROJECT_ROOT}/lib/setup-credentials.sh"
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
 
@@ -143,6 +145,7 @@ _cmd_configure() {
     local AUTO_MODE=false
     local FORCE=false
     local DRY_RUN=false
+    local AUTO_HANDOFF_OWNER=false
     declare -A _COLLECTED_SECRETS=()
 
     _ss_run_cleanup_action() {
@@ -184,6 +187,144 @@ _cmd_configure() {
     }
     trap '_ss_perform_cleanup' RETURN
 
+    # Count the four protected capture paths used for generated administrator
+    # credentials and their verification hashes.
+    _ss_capture_path_count() {
+        local count=0 path
+        for path in \
+            "${VW_ADMIN_PLAIN_FILE:-}" \
+            "${VW_ADMIN_HASH_FILE:-}" \
+            "${CADDY_PLAIN_FILE:-}" \
+            "${CADDY_HASH_FILE:-}"; do
+            [[ -n "$path" ]] && count=$((count + 1))
+        done
+        printf '%s\n' "$count"
+    }
+
+    # Capture files must be absolute, non-symlink paths inside an existing
+    # private directory. The file itself may not already be a symlink or a
+    # non-regular object.
+    _ss_validate_capture_target() {
+        local target="$1" label="$2" parent mode
+
+        [[ "$target" == /* ]] || {
+            log_error "$label capture path must be absolute: $target"
+            return 1
+        }
+
+        parent="$(dirname -- "$target")"
+        [[ -d "$parent" && ! -L "$parent" ]] || {
+            log_error "$label capture directory is missing or unsafe: $parent"
+            return 1
+        }
+
+        mode="$(stat -c '%a' "$parent" 2>/dev/null)" || {
+            log_error "Unable to inspect $label capture directory: $parent"
+            return 1
+        }
+        if (( (8#$mode & 077) != 0 )); then
+            log_error "$label capture directory must not grant group/world access: $parent (mode $mode)"
+            return 1
+        fi
+
+        if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
+            log_error "$label capture path is not a safe regular file: $target"
+            return 1
+        fi
+    }
+
+    # Write a generated value without logging it. The restrictive umask is
+    # restored on every path, and chmod protects pre-existing regular files.
+    _ss_write_capture() {
+        local target="$1" value="$2" label="$3" old_umask rc=0
+
+        _ss_validate_capture_target "$target" "$label" || return 1
+
+        old_umask="$(umask)"
+        umask 077
+        printf '%s' "$value" > "$target" || rc=$?
+        umask "$old_umask"
+
+        if (( rc != 0 )); then
+            log_error "Unable to write $label capture file: $target"
+            return "$rc"
+        fi
+
+        chmod 0600 "$target" || {
+            log_error "Unable to enforce mode 0600 on $label capture file: $target"
+            return 1
+        }
+    }
+
+    # Direct configure --auto owns its capture files and publishes the same
+    # protected handoff as setup.sh. A caller such as setup.sh may provide all
+    # four paths and retain responsibility for publication after later phases.
+    _ss_prepare_auto_handoff() {
+        local configured
+
+        [[ "$AUTO_MODE" == "true" ]] || return 0
+
+        configured="$(_ss_capture_path_count)"
+        case "$configured" in
+            0)
+                AUTO_HANDOFF_OWNER=true
+                export VW_ADMIN_PLAIN_FILE="$TMP_WORKDIR/vw-admin-password"
+                export VW_ADMIN_HASH_FILE="$TMP_WORKDIR/vw-admin-hash"
+                export CADDY_PLAIN_FILE="$TMP_WORKDIR/caddy-admin-password"
+                export CADDY_HASH_FILE="$TMP_WORKDIR/caddy-admin-hash"
+                ;;
+            4)
+                if [[ "$QUIET_SUMMARY" != "true" ]]; then
+                    log_error "Caller-provided automatic capture paths require the internal --quiet-summary contract."
+                    return 1
+                fi
+                AUTO_HANDOFF_OWNER=false
+                ;;
+            *)
+                log_error "Automatic setup requires either all four protected capture paths or none."
+                return 1
+                ;;
+        esac
+
+        QUIET_SUMMARY=true
+        _ss_validate_capture_target "$VW_ADMIN_PLAIN_FILE" "Vaultwarden administrator password" || return 1
+        _ss_validate_capture_target "$VW_ADMIN_HASH_FILE" "Vaultwarden administrator hash" || return 1
+        _ss_validate_capture_target "$CADDY_PLAIN_FILE" "Caddy administrator password" || return 1
+        _ss_validate_capture_target "$CADDY_HASH_FILE" "Caddy administrator hash" || return 1
+    }
+
+    _ss_publish_auto_handoff() {
+        local age_key_file handoff_path
+
+        [[ "$AUTO_MODE" == "true" && "$AUTO_HANDOFF_OWNER" == "true" ]] || return 0
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[dry-run] Would publish a protected setup credential handoff."
+            return 0
+        fi
+
+        age_key_file="${AGE_KEY_FILE:-}"
+        [[ -n "$age_key_file" && -f "$age_key_file" ]] || {
+            log_error "Cannot publish the protected setup handoff: active Age identity not found."
+            return 1
+        }
+
+        handoff_path="$(
+            publish_setup_credentials \
+                "$age_key_file" \
+                "$VW_ADMIN_PLAIN_FILE" \
+                "$VW_ADMIN_HASH_FILE" \
+                "$CADDY_PLAIN_FILE" \
+                "$CADDY_HASH_FILE"
+        )" || return 1
+
+        log_success "Protected setup credential handoff created: $handoff_path"
+        log_info "Expected protection: root:root, recovery directory mode 0700, file mode 0600."
+        log_info "Credential groups: SOPS Age identity, Vaultwarden administrator password, Caddy administrator password."
+        log_info "No credential values were written to terminal output."
+        log_warn "Store the handoff securely and remove it when it is no longer needed."
+    }
+
     _ss_show_help() {
         cat << 'HELP'
 VaultWarden Interactive Secrets Setup (Idempotent - Security Hardened)
@@ -192,9 +333,9 @@ USAGE:
     sudo utilities/setup-secrets.sh configure [OPTIONS]
 
 OPTIONS:
-    --auto                  Auto-generate passwords; external credentials
-                            (CF tokens, SMTP, push keys) are left as
-                            CHANGE_ME placeholders for manual rotation.
+    --auto               Generate administrator credentials without terminal disclosure.
+                         Direct use publishes a protected setup credential handoff.
+                         Generated administrator passwords are never printed.
     --skip-validation       Skip token/SMTP validation
     --skip-optional         Skip optional secrets (push notifications)
     --force                 Overwrite existing secrets without prompting
@@ -233,7 +374,7 @@ FEATURES:
 
 EXAMPLES:
     sudo utilities/setup-secrets.sh configure                        # Interactive setup
-    sudo utilities/setup-secrets.sh configure --auto                 # Automated with generated passwords
+    sudo utilities/setup-secrets.sh configure --auto                 # Automated with protected handoff
     sudo utilities/setup-secrets.sh configure --force                # Reconfigure without prompting
     sudo utilities/setup-secrets.sh configure --skip-optional        # Skip push notifications
     sudo utilities/setup-secrets.sh configure --export-recovery-kit  # Prompt for kit after setup
@@ -260,6 +401,8 @@ HELP
             *) log_error "Unknown option: $1"; _ss_show_help; return 1 ;;
         esac
     done
+
+    _ss_prepare_auto_handoff || return 1
 
     local AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
     if [[ "$AGE_KEY_FILE" != /* ]]; then
@@ -590,31 +733,28 @@ HELP
                 echo ""
 
                 local vw_hash
-                if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
+                if [[ "$AUTO_MODE" == "true" ]]; then
                     local vw_plain
                     vw_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_token"; return 1; }
                     vw_hash=$(generate_argon2_hash "$vw_plain") || { log_error "Failed to hash admin_token"; return 1; }
-                    if [[ -n "${VW_ADMIN_PLAIN_FILE:-}" ]]; then
-                        if [[ "$DRY_RUN" == "true" ]]; then
-                            log_info "[DRY RUN] Would write VaultWarden admin plaintext to ${VW_ADMIN_PLAIN_FILE}"
-                        else
-                            local _umask_vw
-                            _umask_vw=$(umask)
-                            umask 077
-                            printf '%s' "$vw_plain" > "${VW_ADMIN_PLAIN_FILE}"
-                            umask "$_umask_vw"
-                        fi
+                    if [[ "$DRY_RUN" == "true" ]]; then
+                        log_info "[dry-run] Would capture the generated Vaultwarden administrator password securely"
+                    else
+                        _ss_write_capture \
+                            "$VW_ADMIN_PLAIN_FILE" \
+                            "$vw_plain" \
+                            "Vaultwarden administrator password" || return 1
                     fi
+                    unset vw_plain
                 else
                     vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
                 fi
                 _COLLECTED_SECRETS["admin_token"]="$vw_hash"
-    if [[ -n "${VW_ADMIN_HASH_FILE:-}" && -s "${VW_ADMIN_PLAIN_FILE:-}" \
-       && "$DRY_RUN" != "true" ]]; then
-      local _umask_vw_hash
-      _umask_vw_hash="$(umask)"; umask 077
-      printf '%s' "$vw_hash" > "$VW_ADMIN_HASH_FILE"
-      umask "$_umask_vw_hash"
+    if [[ "$AUTO_MODE" == "true" && "$DRY_RUN" != "true" ]]; then
+        _ss_write_capture \
+            "$VW_ADMIN_HASH_FILE" \
+            "${_COLLECTED_SECRETS[admin_token]}" \
+            "Vaultwarden administrator hash" || return 1
     fi
                 ;;
 
@@ -630,37 +770,35 @@ HELP
                 echo ""
 
                 local caddy_hash
-                if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
+                if [[ "$AUTO_MODE" == "true" ]]; then
                     local caddy_plain
                     caddy_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_basic_auth_hash"; return 1; }
                     local _raw_caddy_hash
                     _raw_caddy_hash=$(generate_bcrypt_hash "$caddy_plain") || { log_error "Failed to hash admin_basic_auth_hash"; return 1; }
                     if ! _bcrypt_format_ok "$_raw_caddy_hash"; then
                         log_error "Generated bcrypt hash has invalid format: $_raw_caddy_hash"
+                        unset caddy_plain
                         return 1
                     fi
                     caddy_hash="admin ${_raw_caddy_hash}"
-                    if [[ -n "${CADDY_PLAIN_FILE:-}" ]]; then
-                        if [[ "$DRY_RUN" == "true" ]]; then
-                            log_info "[DRY RUN] Would write Caddy admin plaintext to ${CADDY_PLAIN_FILE}"
-                        else
-                            local _umask_caddy
-                            _umask_caddy=$(umask)
-                            umask 077
-                            printf '%s' "$caddy_plain" > "${CADDY_PLAIN_FILE}"
-                            umask "$_umask_caddy"
-                        fi
+                    if [[ "$DRY_RUN" == "true" ]]; then
+                        log_info "[dry-run] Would capture the generated Caddy administrator password securely"
+                    else
+                        _ss_write_capture \
+                            "$CADDY_PLAIN_FILE" \
+                            "$caddy_plain" \
+                            "Caddy administrator password" || return 1
                     fi
+                    unset caddy_plain
                 else
                     caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
                 fi
                 _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
-    if [[ -n "${CADDY_HASH_FILE:-}" && -s "${CADDY_PLAIN_FILE:-}" \
-       && "$DRY_RUN" != "true" ]]; then
-      local _umask_caddy_hash
-      _umask_caddy_hash="$(umask)"; umask 077
-      printf '%s' "$caddy_hash" > "$CADDY_HASH_FILE"
-      umask "$_umask_caddy_hash"
+    if [[ "$AUTO_MODE" == "true" && "$DRY_RUN" != "true" ]]; then
+        _ss_write_capture \
+            "$CADDY_HASH_FILE" \
+            "${_COLLECTED_SECRETS[admin_basic_auth_hash]}" \
+            "Caddy administrator hash" || return 1
     fi
                 ;;
 
@@ -1047,6 +1185,8 @@ HELP
             return 1
         fi
 
+        _ss_publish_auto_handoff || return 1
+
         for _cleanup_key in \
             admin_token admin_basic_auth_hash \
             caddy_cloudflare_dns_token cf_account_id cf_worker_bouncer_token cloudflare_zone_id \
@@ -1083,7 +1223,7 @@ HELP
             echo "   smtp  — Postfix sidecar → direct SMTP (rotate smtp_password)"
             echo "   host  — deprecated alias for direct (smtp_password required)"
             echo ""
-            log_warn "⚠️  If you used --auto mode, scroll up to save the generated passwords!"
+            log_info "Generated administrator passwords were not printed; automatic mode uses a protected setup credential handoff."
             echo ""
 
             if [[ "$DRY_RUN" == "false" ]]; then
