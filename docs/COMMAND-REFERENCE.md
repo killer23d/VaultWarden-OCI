@@ -1323,6 +1323,14 @@ DESCRIPTION:
     credentials interactively or automatically. Interactive view/list/rotate
     and recovery-kit export are root-operated commands via sudo ./edit-secrets.sh.
 
+AUTOMATIC CREDENTIAL HANDOFF:
+    sudo utilities/setup-secrets.sh configure --auto
+    Generated credential values are never printed. After successful atomic
+    publication, the command displays the protected root-only handoff path,
+    root:root ownership and 0700/0600 permissions. The handoff contains exactly
+    the SOPS Age identity, Vaultwarden administrator password, and Caddy
+    administrator password. Automatic configuration fails if publication fails.
+
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
                         (called automatically by setup.sh install phase)

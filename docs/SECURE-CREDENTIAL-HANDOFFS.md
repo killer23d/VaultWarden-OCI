@@ -6,13 +6,22 @@ This document defines the bounded production-readiness remediation for credentia
 
 ## Setup credentials
 
-A successful automatic install no longer prints generated secret values. It writes one UTF-8, root-owned file under:
+Both supported automatic entry points use the same protected handoff contract:
+
+```bash
+sudo ./setup.sh --domain DOMAIN --email EMAIL --auto
+sudo ./utilities/setup-secrets.sh configure --auto
+```
+
+They do not print generated credential values to the terminal or command trace. A successful run writes one UTF-8, root-owned file under:
 
 ```text
 /root/vaultwarden-recovery/vaultwarden-setup-credentials-<UTC_TIMESTAMP>.txt
 ```
 
-The directory is `root:root` mode `0700`; the file is `root:root` mode `0600`. Publication uses a randomized same-directory temporary file and an atomic no-overwrite handoff. The current audited `delta` implementation generates three consumed credential groups: the SOPS Age identity, the Vaultwarden administrator plaintext, and the Caddy administrator plaintext. The setup file is never emailed.
+The directory is `root:root` mode `0700`; the file is `root:root` mode `0600`. Publication uses a randomized same-directory temporary file and an atomic no-overwrite handoff. The handoff contains exactly three credential groups: the SOPS Age identity, the Vaultwarden administrator plaintext, and the Caddy administrator plaintext. The setup file is never emailed.
+
+After successful publication, the command displays the protected path, the credential group names, the ownership and permission contract, and a statement that no credential values were printed. Automatic configuration fails if the handoff cannot be published; it does not print a completion summary after publication failure.
 
 The remediation intentionally does **not** label `file_integrity_hmac_key` as a backup passphrase. The audited branch has no canonical backup-passphrase generator/consumer contract. Adding a fourth credential requires a separate design that defines where it is generated, stored, consumed by backup/restore, rotated, and tested.
 

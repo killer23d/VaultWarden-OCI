@@ -108,6 +108,14 @@ DESCRIPTION:
     credentials interactively or automatically. Interactive view/list/rotate
     and recovery-kit export are root-operated commands via sudo ./edit-secrets.sh.
 
+AUTOMATIC CREDENTIAL HANDOFF:
+    sudo utilities/setup-secrets.sh configure --auto
+    Generated credential values are never printed. After successful atomic
+    publication, the command displays the protected root-only handoff path,
+    root:root ownership and 0700/0600 permissions. The handoff contains exactly
+    the SOPS Age identity, Vaultwarden administrator password, and Caddy
+    administrator password. Automatic configuration fails if publication fails.
+
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
                         (called automatically by setup.sh install phase)
@@ -134,6 +142,10 @@ EOF
 
 # Run interactive or automated secrets setup.
 _cmd_configure() {
+    # Secret generation and capture must remain opaque even when a caller starts
+    # this script with `bash -x` or exports SHELLOPTS with xtrace enabled.
+    { set +x; } 2>/dev/null
+
     local CLEANUP_ACTIONS=()
     _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
 
@@ -256,6 +268,65 @@ _cmd_configure() {
         }
     }
 
+    # Generate one administrator credential without terminal disclosure, write
+    # its plaintext and hash only to protected capture files, and return only
+    # the hash needed by the encrypted SOPS document.
+    _ss_generate_admin_credential_quietly() {
+        local field="$1" plain_file="$2" hash_file="$3"
+        local label plaintext generated_hash raw_hash=""
+
+        { set +x; } 2>/dev/null
+        case "$field" in
+            admin_token)
+                label="Vaultwarden administrator"
+                ;;
+            admin_basic_auth_hash)
+                label="Caddy administrator"
+                ;;
+            *)
+                log_error "Unsupported protected administrator credential field: $field"
+                return 1
+                ;;
+        esac
+
+        plaintext="$(generate_secure_string 32)" || {
+            log_error "Failed to generate $label password"
+            return 1
+        }
+
+        case "$field" in
+            admin_token)
+                generated_hash="$(generate_argon2_hash "$plaintext")" || {
+                    log_error "Failed to hash $label password"
+                    return 1
+                }
+                ;;
+            admin_basic_auth_hash)
+                raw_hash="$(generate_bcrypt_hash "$plaintext")" || {
+                    log_error "Failed to hash $label password"
+                    return 1
+                }
+                if ! _bcrypt_format_ok "$raw_hash"; then
+                    log_error "Generated Caddy administrator hash has an invalid format"
+                    return 1
+                fi
+                generated_hash="admin ${raw_hash}"
+                ;;
+        esac
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[dry-run] Would capture the generated $label password and hash securely" >&2
+        else
+            _ss_write_capture "$plain_file" "$plaintext" "$label password" || return 1
+            _ss_write_capture "$hash_file" "$generated_hash" "$label hash" || return 1
+        fi
+
+        printf '%s' "$generated_hash"
+        plaintext=""
+        generated_hash=""
+        raw_hash=""
+    }
+
     # Direct configure --auto owns its capture files and publishes the same
     # protected handoff as setup.sh. A caller such as setup.sh may provide all
     # four paths and retain responsibility for publication after later phases.
@@ -349,6 +420,13 @@ OPTIONS:
     --help                  Show help
 
 NOTES:
+    Direct `configure --auto` creates a protected root-only handoff containing
+    exactly three credential groups: the SOPS Age identity, Vaultwarden
+    administrator password, and Caddy administrator password. On success the
+    command displays the protected path, ownership, and permissions, and states
+    that no credential values were printed. Publication failure makes the
+    command fail.
+
     --export-recovery-kit triggers the recovery-kit prompt that already
     appears after a successful setup run. To export a recovery kit
     independently (without running setup), use:
@@ -734,28 +812,16 @@ HELP
 
                 local vw_hash
                 if [[ "$AUTO_MODE" == "true" ]]; then
-                    local vw_plain
-                    vw_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_token"; return 1; }
-                    vw_hash=$(generate_argon2_hash "$vw_plain") || { log_error "Failed to hash admin_token"; return 1; }
-                    if [[ "$DRY_RUN" == "true" ]]; then
-                        log_info "[dry-run] Would capture the generated Vaultwarden administrator password securely"
-                    else
-                        _ss_write_capture \
+                    vw_hash="$(
+                        _ss_generate_admin_credential_quietly \
+                            "admin_token" \
                             "$VW_ADMIN_PLAIN_FILE" \
-                            "$vw_plain" \
-                            "Vaultwarden administrator password" || return 1
-                    fi
-                    unset vw_plain
+                            "$VW_ADMIN_HASH_FILE"
+                    )" || return 1
                 else
                     vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
                 fi
                 _COLLECTED_SECRETS["admin_token"]="$vw_hash"
-    if [[ "$AUTO_MODE" == "true" && "$DRY_RUN" != "true" ]]; then
-        _ss_write_capture \
-            "$VW_ADMIN_HASH_FILE" \
-            "${_COLLECTED_SECRETS[admin_token]}" \
-            "Vaultwarden administrator hash" || return 1
-    fi
                 ;;
 
             # ── admin_basic_auth_hash ──────────────────────────────────────────
@@ -771,35 +837,16 @@ HELP
 
                 local caddy_hash
                 if [[ "$AUTO_MODE" == "true" ]]; then
-                    local caddy_plain
-                    caddy_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_basic_auth_hash"; return 1; }
-                    local _raw_caddy_hash
-                    _raw_caddy_hash=$(generate_bcrypt_hash "$caddy_plain") || { log_error "Failed to hash admin_basic_auth_hash"; return 1; }
-                    if ! _bcrypt_format_ok "$_raw_caddy_hash"; then
-                        log_error "Generated bcrypt hash has invalid format: $_raw_caddy_hash"
-                        unset caddy_plain
-                        return 1
-                    fi
-                    caddy_hash="admin ${_raw_caddy_hash}"
-                    if [[ "$DRY_RUN" == "true" ]]; then
-                        log_info "[dry-run] Would capture the generated Caddy administrator password securely"
-                    else
-                        _ss_write_capture \
+                    caddy_hash="$(
+                        _ss_generate_admin_credential_quietly \
+                            "admin_basic_auth_hash" \
                             "$CADDY_PLAIN_FILE" \
-                            "$caddy_plain" \
-                            "Caddy administrator password" || return 1
-                    fi
-                    unset caddy_plain
+                            "$CADDY_HASH_FILE"
+                    )" || return 1
                 else
                     caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
                 fi
                 _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
-    if [[ "$AUTO_MODE" == "true" && "$DRY_RUN" != "true" ]]; then
-        _ss_write_capture \
-            "$CADDY_HASH_FILE" \
-            "${_COLLECTED_SECRETS[admin_basic_auth_hash]}" \
-            "Caddy administrator hash" || return 1
-    fi
                 ;;
 
             # ── smtp_password ──────────────────────────────────────────────────
