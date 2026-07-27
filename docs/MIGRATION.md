@@ -299,7 +299,7 @@ General workflow:
 7. create/verify a full backup;
 8. activate/validate systemd automation;
 9. export recovery material;
-10. securely remove plaintext source exports.
+10. remove plaintext source exports using best-effort overwrite/unlink, noting that physical erasure is not guaranteed.
 
 Do not keep unencrypted CSV/JSON exports as the long-term backup strategy for this appliance.
 

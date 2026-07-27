@@ -933,12 +933,12 @@ secure_delete() {
     local file="$1"
 
     if [[ ! -f "$file" ]]; then
-        log_error "File not found for secure deletion: $file"
+        log_error "File not found for sensitive-file removal: $file"
         return 1
     fi
 
     _secure_remove_file "$file"
-    log_debug "File securely deleted: $file"
+    log_debug "Sensitive file removed with best-effort overwrite/unlink: $file"
     return 0
 }
 
@@ -1409,7 +1409,7 @@ create_printable_key_backup() {
     <div class="delete-reminder">
         <strong>🗑️ DELETE THIS FILE AFTER PRINTING</strong><br>
         This HTML file contains your plaintext Age private key.<br>
-        After printing or saving to PDF, securely delete it:<br>
+        After printing or saving to PDF, remove the plaintext copy:<br>
         <code>shred -fuz '${output_pdf%.pdf}.html'</code><br>
         <em>File created: ${date_val}</em>
     </div>

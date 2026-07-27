@@ -308,7 +308,7 @@ do_rotate() {
         log_warn "rotate: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_plain"
         log_warn "        Ensure full-disk encryption is active on this host."
     fi
-    register_cleanup "_secure_shred" "$temp_plain"
+    register_cleanup "_remove_sensitive_file" "$temp_plain"
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
@@ -378,7 +378,7 @@ PYEOF
         log_warn "rotate: /dev/shm unavailable — patched temp file is disk-backed: $temp_patched"
         log_warn "        Ensure full-disk encryption is active on this host."
     fi
-    register_cleanup "_secure_shred" "$temp_patched"
+    register_cleanup "_remove_sensitive_file" "$temp_patched"
 
     local _patch_rc=0
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?

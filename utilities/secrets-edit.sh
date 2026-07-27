@@ -404,7 +404,7 @@ do_edit() {
         log_error "Failed to secure temp file: $temp_file"
         return 1
     fi
-    register_cleanup "_secure_shred" "$temp_file"
+    register_cleanup "_remove_sensitive_file" "$temp_file"
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
