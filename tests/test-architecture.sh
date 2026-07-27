@@ -223,6 +223,29 @@ assert_output "arm64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" arm6
 assert_output "arm64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" aarch64
 assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" riscv64
 
+# Missing Python modules must fail with an actionable package hint. The mock
+# accepts Argon2 and rejects only bcrypt so the exact missing dependency path
+# is exercised without changing the developer machine.
+mkdir -p "$tmpdir/python-missing-bcrypt"
+cat > "$tmpdir/python-missing-bcrypt/python3" <<'EOF_PYTHON_MISSING_BCRYPT'
+#!/usr/bin/env bash
+if [[ " $* " == *" import bcrypt "* ]]; then
+    exit 1
+fi
+exit 0
+EOF_PYTHON_MISSING_BCRYPT
+chmod +x "$tmpdir/python-missing-bcrypt/python3"
+if PATH="$tmpdir/python-missing-bcrypt:$PATH" \
+    VAULTWARDEN_TEST_ARCH_HELPERS=1 \
+    "$setup_system" verify-python-modules \
+    >"$tmpdir/python-modules.out" 2>&1; then
+    fail "missing python3-bcrypt unexpectedly passed dependency verification"
+fi
+grep -Fq 'python3-bcrypt is not installed or cannot be imported' "$tmpdir/python-modules.out" \
+    || fail "missing python3-bcrypt error is unclear"
+grep -Fq 'sudo apt-get install -y python3-bcrypt' "$tmpdir/python-modules.out" \
+    || fail "missing python3-bcrypt install hint is absent"
+
 printf 'Architecture helper tests passed.\n'
 
 )
@@ -310,10 +333,33 @@ awk '/verify_dependencies\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '_vali
 
 grep -Fq '"python3-yaml"' utilities/setup-system.sh \
     || fail 'setup-system must explicitly own python3-yaml'
+grep -Fq '"python3-bcrypt"' utilities/setup-system.sh \
+    || fail 'normal setup must explicitly own python3-bcrypt'
+grep -Fq '[python3-bcrypt]=""' utilities/setup-system.sh \
+    || fail 'python3-bcrypt package must be checked through dpkg membership'
 ! grep -Eq 'local basic_packages=.*"yq"' utilities/setup-system.sh \
     || fail 'setup-system basic apt packages must not install Ubuntu python-yq'
 grep -Fq 'python3 -c "import yaml"' utilities/setup-system.sh \
     || fail 'verify_dependencies must verify PyYAML import'
+grep -Fq 'python3 -c "import bcrypt"' utilities/setup-system.sh \
+    || fail 'verify_dependencies must verify the bcrypt module import'
+awk '/verify_dependencies\(\)/,/^}/' utilities/setup-system.sh \
+    | grep -Fq '_verify_required_python_modules' \
+    || fail 'verify_dependencies must run Python module checks with --skip-deps'
+main_flow="$(awk '/^main\(\) {/,/^}/' utilities/setup-system.sh)"
+[[ "$main_flow" == *$'    install_dependencies\n    verify_dependencies'* ]] \
+    || fail '--skip-deps must skip installation only and still verify dependencies'
+! grep -REn 'pip(3)?[[:space:]]+install[[:space:]]+bcrypt' \
+    utilities/setup-system.sh setup.sh .github/workflows \
+    || fail 'bcrypt must not be installed from PyPI'
+for cleanup_command in systemd-run shred realpath rm; do
+    awk '/verify_dependencies\(\)/,/^}/' utilities/setup-system.sh \
+        | grep -Fq "\"${cleanup_command}\"" \
+        || fail "verify_dependencies omits cleanup runtime command: ${cleanup_command}"
+done
+awk '/verify_dependencies\(\)/,/^}/' utilities/setup-system.sh \
+    | grep -Fq '[[ -x /bin/sh ]]' \
+    || fail 'verify_dependencies must require /bin/sh for detached cleanup'
 
 yq_version="$(sed -n 's/^YQ_VERSION="\([^"]*\)"/\1/p' utilities/setup-system.sh)"
 yq_sha_amd64="$(sed -n 's/^YQ_SHA256_AMD64="\([^"]*\)"/\1/p' utilities/setup-system.sh)"

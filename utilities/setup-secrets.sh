@@ -15,9 +15,169 @@ TMP_WORKDIR=$(mktemp -d -p "${PROJECT_ROOT}" vw_tmp.XXXXXXXXXX) || {
 }
 umask "$old_umask"
 chmod 0700 "$TMP_WORKDIR" || { echo "ERROR: Failed to secure temporary directory" >&2; exit 1; }
-trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"' EXIT
-trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
-trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
+
+# Secret cleanup lifecycle is script-scoped because EXIT and signal traps can
+# run after _cmd_configure has returned. Keep this state small and explicit.
+declare -ga SETUP_SECRETS_CLEANUP_ACTIONS=()
+declare -gA SETUP_SECRETS_COLLECTED_SECRETS=()
+SETUP_SECRETS_CLEANUP_ACTIVE=true
+SETUP_SECRETS_CLEANUP_DONE=false
+SETUP_SECRETS_XTRACE_WAS_ENABLED=false
+SETUP_SECRETS_TMP_WORKDIR="$TMP_WORKDIR"
+SETUP_SECRETS_GUARD_HELD=false
+
+_setup_secrets_cleanup_warn() {
+    local message="$1"
+    if declare -F log_warn >/dev/null 2>&1; then
+        log_warn "$message"
+    else
+        printf 'WARNING: %s
+' "$message" >&2
+    fi
+}
+
+_setup_secrets_cleanup_begin() {
+    if [[ $- == *x* ]]; then
+        SETUP_SECRETS_XTRACE_WAS_ENABLED=true
+    else
+        SETUP_SECRETS_XTRACE_WAS_ENABLED=false
+    fi
+    { set +x; } 2>/dev/null
+    SETUP_SECRETS_CLEANUP_ACTIONS=()
+    SETUP_SECRETS_COLLECTED_SECRETS=()
+    SETUP_SECRETS_CLEANUP_ACTIVE=true
+    SETUP_SECRETS_CLEANUP_DONE=false
+    SETUP_SECRETS_TMP_WORKDIR="${TMP_WORKDIR:-}"
+}
+
+_ss_register_cleanup() {
+    local action="${1:-}" target
+    case "$action" in
+        "rm -f "*) target="${action#rm -f }" ;;
+        *) target="$action" ;;
+    esac
+    if [[ -z "$target" || "$target" == *$'
+'* ]]; then
+        _setup_secrets_cleanup_warn "Refusing to register an empty or malformed cleanup path"
+        return 1
+    fi
+    SETUP_SECRETS_CLEANUP_ACTIONS+=("$target")
+}
+
+_setup_secrets_cleanup_file_allowed() {
+    local target="$1" resolved project_root_resolved tmp_resolved secrets_resolved
+    resolved="$(realpath -m -- "$target" 2>/dev/null)" || return 1
+    project_root_resolved="$(realpath -m -- "${PROJECT_ROOT:-/opt/vaultwarden-scripts}" 2>/dev/null)" || return 1
+    secrets_resolved="${project_root_resolved}/secrets"
+    tmp_resolved=""
+    if [[ -n "${SETUP_SECRETS_TMP_WORKDIR:-}" ]]; then
+        tmp_resolved="$(realpath -m -- "$SETUP_SECRETS_TMP_WORKDIR" 2>/dev/null)" || return 1
+    fi
+    case "$resolved" in
+        /tmp/*|"$secrets_resolved"/*) return 0 ;;
+    esac
+    [[ -n "$tmp_resolved" && "$resolved" == "$tmp_resolved"/* ]]
+}
+
+_ss_run_cleanup_action() {
+    local target="$1"
+    if ! _setup_secrets_cleanup_file_allowed "$target"; then
+        _setup_secrets_cleanup_warn "Refusing cleanup outside approved temporary or secrets paths: $target"
+        return 1
+    fi
+    if ! rm -f -- "$target" 2>/dev/null; then
+        _setup_secrets_cleanup_warn "Failed to remove cleanup path: $target"
+        return 1
+    fi
+}
+
+_setup_secrets_remove_workdir() {
+    local target="${SETUP_SECRETS_TMP_WORKDIR:-}" resolved root_resolved parent base
+    [[ -n "$target" && "$target" != "/" && "$target" != "." && "$target" != ".." ]] || return 0
+    resolved="$(realpath -m -- "$target" 2>/dev/null)" || {
+        _setup_secrets_cleanup_warn "Unable to resolve temporary workspace; refusing recursive removal: $target"
+        return 1
+    }
+    root_resolved="$(realpath -m -- "${PROJECT_ROOT:-/opt/vaultwarden-scripts}" 2>/dev/null)" || return 1
+    parent="$(dirname -- "$resolved")"
+    base="$(basename -- "$resolved")"
+    if [[ "$parent" != "$root_resolved" || "$base" != vw_tmp.* || "$resolved" == "$root_resolved" ]]; then
+        _setup_secrets_cleanup_warn "Refusing unsafe temporary workspace removal: $resolved"
+        return 1
+    fi
+    rm -rf -- "$resolved" 2>/dev/null || {
+        _setup_secrets_cleanup_warn "Failed to remove temporary workspace: $resolved"
+        return 1
+    }
+}
+
+_ss_perform_cleanup() {
+    local original_status="${1:-$?}" idx key
+    if [[ "${SETUP_SECRETS_CLEANUP_ACTIVE:-false}" != "true" ]] ||
+       [[ "${SETUP_SECRETS_CLEANUP_DONE:-false}" == "true" ]]; then
+        return "$original_status"
+    fi
+
+    SETUP_SECRETS_CLEANUP_DONE=true
+    { set +x; } 2>/dev/null
+
+    for key in "${!SETUP_SECRETS_COLLECTED_SECRETS[@]}"; do
+        SETUP_SECRETS_COLLECTED_SECRETS["$key"]=""
+    done
+    SETUP_SECRETS_COLLECTED_SECRETS=()
+
+    for ((idx=${#SETUP_SECRETS_CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx--)); do
+        _ss_run_cleanup_action "${SETUP_SECRETS_CLEANUP_ACTIONS[$idx]}" || true
+    done
+    SETUP_SECRETS_CLEANUP_ACTIONS=()
+
+    if declare -F cleanup_secrets_environment >/dev/null 2>&1; then
+        cleanup_secrets_environment ||
+            _setup_secrets_cleanup_warn "Secret environment cleanup reported a failure"
+    fi
+
+    # The workspace is removed last even when an earlier cleanup action fails.
+    _setup_secrets_remove_workdir || true
+    SETUP_SECRETS_TMP_WORKDIR=""
+    SETUP_SECRETS_CLEANUP_ACTIVE=false
+
+    if [[ "${SETUP_SECRETS_XTRACE_WAS_ENABLED:-false}" == "true" ]]; then
+        set -x
+    fi
+    return "$original_status"
+}
+
+_setup_secrets_cleanup_all() {
+    local original_status="${1:-$?}"
+    set +e
+    if [[ "${SETUP_SECRETS_GUARD_HELD:-false}" == "true" ]] &&
+       declare -F operation_release >/dev/null 2>&1; then
+        operation_release "$original_status" || true
+        SETUP_SECRETS_GUARD_HELD=false
+    fi
+    _ss_perform_cleanup "$original_status"
+    return 0
+}
+
+_setup_secrets_on_exit() {
+    local original_status="$1"
+    trap - EXIT INT HUP TERM
+    _setup_secrets_cleanup_all "$original_status"
+    exit "$original_status"
+}
+
+_setup_secrets_on_signal() {
+    local signal_status="$1"
+    trap - EXIT INT HUP TERM
+    _setup_secrets_cleanup_all "$signal_status"
+    exit "$signal_status"
+}
+# End secret cleanup lifecycle.
+
+trap '_setup_secrets_on_exit $?' EXIT
+trap '_setup_secrets_on_signal 130' INT
+trap '_setup_secrets_on_signal 129' HUP
+trap '_setup_secrets_on_signal 143' TERM
 
 for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh" "lib/setup-credentials.sh" "lib/operations.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
@@ -39,18 +199,7 @@ source "${PROJECT_ROOT}/lib/setup-credentials.sh"
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
 
-SETUP_SECRETS_GUARD_HELD=false
-
-_setup_secrets_cleanup_all() {
-    local rc=$?
-    operation_release "$rc"
-    if declare -F _ss_perform_cleanup >/dev/null 2>&1; then
-        _ss_perform_cleanup
-    fi
-    rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true
-    exit "$rc"
-}
-
+# Cleanup lifecycle is initialized before library loading so partial initialization failures use the same finalizer.
 _setup_secrets_should_guard() {
     local subcmd="$1"
     shift || true
@@ -90,9 +239,6 @@ _setup_secrets_acquire_guard() {
         --specific-lock /run/lock/vaultwarden-secrets.lock \
         --non-interactive "$policy" || return $?
     SETUP_SECRETS_GUARD_HELD=true
-    trap _setup_secrets_cleanup_all EXIT
-    trap 'operation_release 130; if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 130' INT
-    trap 'operation_release 143; if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 143' HUP TERM
     operation_set_phase "$subcmd" "Secrets ${subcmd}"
 }
 
@@ -144,10 +290,7 @@ EOF
 _cmd_configure() {
     # Secret generation and capture must remain opaque even when a caller starts
     # this script with `bash -x` or exports SHELLOPTS with xtrace enabled.
-    { set +x; } 2>/dev/null
-
-    local CLEANUP_ACTIONS=()
-    _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
+    _setup_secrets_cleanup_begin
 
     local SKIP_VALIDATION=false
     local SKIP_OPTIONAL=false
@@ -158,47 +301,7 @@ _cmd_configure() {
     local FORCE=false
     local DRY_RUN=false
     local AUTO_HANDOFF_OWNER=false
-    declare -A _COLLECTED_SECRETS=()
-
-    _ss_run_cleanup_action() {
-        local action="$1"
-        case "$action" in
-            rm\ -f\ *)
-                local target="${action#rm -f }"
-                if [[ -z "$target" || "$target" == *$'\n'* ]]; then
-                    return 0
-                fi
-                local resolved
-                resolved=$(realpath -m "$target" 2>/dev/null) || {
-                    log_warn "_run_cleanup_action: realpath failed for target — refusing rm: $target"
-                    return 1
-                }
-                local allowed_secrets="${PROJECT_ROOT:-/opt/vaultwarden-scripts}/secrets"
-                if [[ "$resolved" != /tmp/* && "$resolved" != "$allowed_secrets"/* ]]; then
-                    log_warn "_run_cleanup_action: refusing rm on path outside allowed dirs: $resolved"
-                    return 1
-                fi
-                rm -f "$target" 2>/dev/null || true
-                ;;
-            *)
-                log_warn "_ss_perform_cleanup: skipping unknown action: $action"
-                ;;
-        esac
-    }
-
-    _ss_perform_cleanup() {
-        for key in "${!_COLLECTED_SECRETS[@]}"; do
-            _COLLECTED_SECRETS["$key"]=""
-        done
-        unset _COLLECTED_SECRETS 2>/dev/null || true
-
-        for (( idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx-- )); do
-            _ss_run_cleanup_action "${CLEANUP_ACTIONS[$idx]}"
-        done
-        cleanup_secrets_environment
-    }
-    trap '_ss_perform_cleanup' RETURN
-
+    SETUP_SECRETS_COLLECTED_SECRETS=()
     # Count the four protected capture paths used for generated administrator
     # credentials and their verification hashes.
     _ss_capture_path_count() {
@@ -780,7 +883,7 @@ HELP
                     log_error "collect_secrets: auto generation failed for schema key '${_key}'"
                     return 1
                 fi
-                _COLLECTED_SECRETS["$_key"]="$_auto_value"
+                SETUP_SECRETS_COLLECTED_SECRETS["$_key"]="$_auto_value"
                 continue
             fi
 
@@ -793,7 +896,7 @@ HELP
                 fi
                 if ! "$_condition_fn" "$_key"; then
                     _placeholder=$(schema_placeholder_for_key "$_key")
-                    _COLLECTED_SECRETS["$_key"]="$_placeholder"
+                    SETUP_SECRETS_COLLECTED_SECRETS["$_key"]="$_placeholder"
                     log_info "${_key}: condition ${_condition_fn} is false; using schema placeholder"
                     continue
                 fi
@@ -821,7 +924,7 @@ HELP
                 else
                     vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
                 fi
-                _COLLECTED_SECRETS["admin_token"]="$vw_hash"
+                SETUP_SECRETS_COLLECTED_SECRETS["admin_token"]="$vw_hash"
                 ;;
 
             # ── admin_basic_auth_hash ──────────────────────────────────────────
@@ -846,7 +949,7 @@ HELP
                 else
                     caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
                 fi
-                _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
+                SETUP_SECRETS_COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
                 ;;
 
             # ── smtp_password ──────────────────────────────────────────────────
@@ -880,9 +983,9 @@ HELP
                             log_info "  ./utilities/secrets-rotate.sh smtp_password"
                         fi
                     fi
-                    _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
+                    SETUP_SECRETS_COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
                 else
-                    _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
+                    SETUP_SECRETS_COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
                 ;;
 
@@ -946,9 +1049,9 @@ HELP
                             log_info "  ./utilities/secrets-rotate.sh email_api_token"
                         fi
                     fi
-                    _COLLECTED_SECRETS["email_api_token"]="$email_api_token"
+                    SETUP_SECRETS_COLLECTED_SECRETS["email_api_token"]="$email_api_token"
                 else
-                    _COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
+                    SETUP_SECRETS_COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
                 ;;
 
@@ -968,8 +1071,8 @@ HELP
                     echo ""
 
                     if [[ "$AUTO_MODE" == "true" ]]; then
-                        _COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
-                        _COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
+                        SETUP_SECRETS_COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
+                        SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
                         log_warn "[AUTO] PUSH_ENABLED=true but Bitwarden push credentials cannot be generated automatically."
                         log_warn "Rotate both push fields before startup."
                     else
@@ -979,26 +1082,26 @@ HELP
                             do_push="no"
                         fi
                         if [[ "$do_push" == "yes" ]]; then
-                            _COLLECTED_SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
-                            _COLLECTED_SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
+                            SETUP_SECRETS_COLLECTED_SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
+                            SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
                             log_success "Push notifications configured"
                         else
-                            _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
-                            _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                            SETUP_SECRETS_COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                            SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
                             log_info "Push notifications skipped - configure later with: ./utilities/secrets-rotate.sh push_installation_id"
                         fi
                     fi
                 else
-                    _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
-                    _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                    SETUP_SECRETS_COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                    SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
                 fi
                 ;;
 
             # push_installation_key is collected alongside push_installation_id
             # in the block above; skip it when the loop reaches it directly.
             push_installation_key)
-                [[ -n "${_COLLECTED_SECRETS[push_installation_key]+x}" ]] || \
-                    _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                [[ -n "${SETUP_SECRETS_COLLECTED_SECRETS[push_installation_key]+x}" ]] || \
+                    SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
                 ;;
 
             # ── caddy_cloudflare_dns_token ─────────────────────────────────────
@@ -1013,7 +1116,7 @@ HELP
 
                 local cf_dns
                 cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
-                _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
+                SETUP_SECRETS_COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
                 ;;
 
             # ── cf_worker_bouncer_token / cloudflare_zone_id / cf_account_id ───
@@ -1039,9 +1142,9 @@ HELP
                     cloudflare_zone_id=$(_get_field "cloudflare_zone_id") || { log_error "Failed to collect cloudflare_zone_id"; return 1; }
                     cf_account_id=$(_get_field "cf_account_id") || { log_error "Failed to collect cf_account_id"; return 1; }
                 fi
-                _COLLECTED_SECRETS["cf_worker_bouncer_token"]="$cf_worker_bouncer_token"
-                _COLLECTED_SECRETS["cloudflare_zone_id"]="$cloudflare_zone_id"
-                _COLLECTED_SECRETS["cf_account_id"]="$cf_account_id"
+                SETUP_SECRETS_COLLECTED_SECRETS["cf_worker_bouncer_token"]="$cf_worker_bouncer_token"
+                SETUP_SECRETS_COLLECTED_SECRETS["cloudflare_zone_id"]="$cloudflare_zone_id"
+                SETUP_SECRETS_COLLECTED_SECRETS["cf_account_id"]="$cf_account_id"
                 ;;
 
             # cloudflare_zone_id and cf_account_id are collected together in the
@@ -1068,7 +1171,7 @@ HELP
             local _collect_type
             _collect_type=$(schema_collect_type "$_key")
             [[ "$_collect_type" == "skip" ]] && continue
-            if [[ -z "${_COLLECTED_SECRETS[$_key]+set}" ]]; then
+            if [[ -z "${SETUP_SECRETS_COLLECTED_SECRETS[$_key]+set}" ]]; then
                 log_error "collect_secrets: schema key '${_key}' was not deliberately collected or generated"
                 return 1
             fi
@@ -1124,7 +1227,7 @@ HELP
                 local _label _collect_type
                 _collect_type=$(schema_collect_type "$_wkey")
                 [[ "$_collect_type" == "skip" ]] && continue
-                if [[ -z "${_COLLECTED_SECRETS[$_wkey]+set}" ]]; then
+                if [[ -z "${SETUP_SECRETS_COLLECTED_SECRETS[$_wkey]+set}" ]]; then
                     log_error "write_secrets: schema key '${_wkey}' has no collected/generated value"
                     return 1
                 fi
@@ -1132,15 +1235,15 @@ HELP
                 [[ -n "$_label" ]] && printf '# %s\n' "$_label"
                 printf '%s: %s\n\n' \
                     "$_wkey" \
-                    "$(yaml_escape "${_COLLECTED_SECRETS[$_wkey]}")"
+                    "$(yaml_escape "${SETUP_SECRETS_COLLECTED_SECRETS[$_wkey]}")"
             done <<< "$_wkeys"
         } > "$temp_file"
 
-        for key in "${!_COLLECTED_SECRETS[@]}"; do
-            _COLLECTED_SECRETS["$key"]=""
+        for key in "${!SETUP_SECRETS_COLLECTED_SECRETS[@]}"; do
+            SETUP_SECRETS_COLLECTED_SECRETS["$key"]=""
         done
-        unset _COLLECTED_SECRETS
-        declare -A _COLLECTED_SECRETS
+        unset SETUP_SECRETS_COLLECTED_SECRETS
+        declare -A SETUP_SECRETS_COLLECTED_SECRETS
 
         if ! ensure_sops_env; then
             log_error "Failed to setup SOPS environment"

@@ -341,6 +341,75 @@ printf 'Recovery-kit AES-256 ZIP passphrase contract tests passed.\n'
 
 check_recovery_kit_attachment_passphrase_contract
 
+check_health_alert_lock_mode_normalization() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+log_info(){ :; }
+log_warn(){ :; }
+log_error(){ :; }
+log_debug(){ :; }
+
+# shellcheck source=lib/health-alerts.sh
+source "$ROOT/lib/health-alerts.sh"
+
+ALERT_LOCK_DIR="$TMP/alerts"
+install -d -m 0700 "$ALERT_LOCK_DIR"
+HEALTH_ALERT_STATE_LOCK_FD=""
+
+mkdir -p "$TMP/bin"
+MOCK_CHMOD_LOG="$TMP/chmod.log"
+MOCK_REAL_CHMOD="$(command -v chmod)"
+export MOCK_CHMOD_LOG MOCK_REAL_CHMOD
+
+cat > "$TMP/bin/chmod" <<'MOCK_CHMOD'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >> "$MOCK_CHMOD_LOG"
+[[ "${MOCK_CHMOD_FAIL:-0}" != "1" ]] || exit 1
+exec "$MOCK_REAL_CHMOD" "$@"
+MOCK_CHMOD
+chmod 0755 "$TMP/bin/chmod"
+
+PATH="$TMP/bin:$PATH"
+export PATH
+
+lock_path="$(_health_alert_state_lock_path)"
+_health_alert_state_lock_prepare "$lock_path" \
+    || fail "new health-alert lock was not prepared"
+grep -Fxq "0600 -- $lock_path" "$MOCK_CHMOD_LOG" \
+    || fail "new lock creation did not explicitly normalize mode 0600"
+
+lock_mode="$(
+    stat -c '%a' "$lock_path" 2>/dev/null \
+        || stat -f '%Lp' "$lock_path"
+)"
+[[ "$lock_mode" == "600" ]] \
+    || fail "normalized health-alert lock mode is not 0600"
+
+rm -f -- "$lock_path"
+: > "$MOCK_CHMOD_LOG"
+export MOCK_CHMOD_FAIL=1
+if _health_alert_state_lock_prepare "$lock_path" >/dev/null 2>&1; then
+    fail "lock preparation succeeded when explicit mode normalization failed"
+fi
+[[ ! -e "$lock_path" ]] \
+    || fail "failed lock-mode normalization left a newly created lock behind"
+
+printf 'Health-alert lock mode normalization tests passed.\n'
+)
+
+check_health_alert_lock_mode_normalization
+
 check_recovery_notification_retry_contract() (
 set -euo pipefail
 
@@ -406,7 +475,7 @@ _incident_format_duration(){
     printf '5m (300s)'
 }
 
-mkdir -p "$ALERT_LOCK_DIR"
+install -d -m 0700 "$ALERT_LOCK_DIR"
 : > "$ACTIVE_INCIDENT_FILE"
 
 first_rc=0

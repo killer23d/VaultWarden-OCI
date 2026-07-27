@@ -118,7 +118,7 @@ After updating from `main` with `git pull --ff-only origin main`, repeat the thr
 sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
-The recovery kit is a plaintext operator handoff containing the Age private key and generated credentials needed for recovery. Store it in your password manager and a separate offline recovery location, then remove plaintext copies from the server. Re-export after setup, restore, or Age key rotation.
+The recovery kit is a plaintext operator handoff containing the Age private key and generated credentials needed for recovery. It is published root-only under `/root/vaultwarden-recovery/` only after a 30-minute systemd transient cleanup timer (or optional `at` fallback) is accepted. Scheduler failure removes the new file and fails export; successful encrypted email removes the local copy immediately. Store the encrypted/offline copy in your password manager and a separate recovery location. Re-export after setup, restore, or Age key rotation.
 
 ---
 

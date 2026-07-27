@@ -1070,15 +1070,23 @@ USAGE:
 
 DESCRIPTION:
     Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, and
-    publishes a protected plaintext recovery document in the persistent
+    publishes a protected plaintext recovery document in the
     recovery directory /root/vaultwarden-recovery.
 
     The recovery directory is owned by root:root with mode 0700, and the
-    recovery document is owned by root:root with mode 0600. When at(1) is
-    available and accepts the cleanup job, secure removal is scheduled after
-    30 minutes. If cleanup cannot be scheduled, the operator must securely
-    remove the document manually. The command prints an explicit manual
-    secure-removal instruction.
+    recovery document is owned by root:root with mode 0600. Immediately after
+    publication, a systemd transient timer is scheduled to expire it after
+    30 minutes; at(1) is an optional fallback. If neither scheduler accepts
+    cleanup, export fails closed and removes the plaintext document before
+    returning.
+
+    Successful encrypted email delivery removes the local plaintext copy
+    immediately. Declined or failed email leaves the protected copy only until
+    its accepted cleanup timer runs. Email uses only an AES-256 encrypted ZIP
+    with a passphrase independent from stored VaultWarden credentials.
+
+    Best-effort overwrite and unlink. Physical erasure is not guaranteed on
+    SSDs, snapshots, journaling filesystems, or copy-on-write storage.
 
     Temporary decryption may use /dev/shm, but the final published recovery
     document remains under /root/vaultwarden-recovery. Recovery content is

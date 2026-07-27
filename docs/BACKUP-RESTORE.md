@@ -400,4 +400,4 @@ See [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md).
 
 Setup credential handoffs and full recovery-kit documents live under `/root/vaultwarden-recovery/`, outside the project and normal state backup inputs. As defence in depth, the full-backup input excludes current and legacy recovery-kit names, setup-credential names, staging files, and `important-documents-*.zip`; the final archive-listing validator rejects any that still appear. The emergency tier keeps its separately documented key-bearing contract.
 
-Recovery-kit email uses an AES-256 encrypted ZIP, not TAR/GPG. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).
+Full recovery-kit export accepts a 30-minute systemd transient cleanup timer before offering email, with `at` only as an optional fallback. Scheduler failure removes the plaintext file and fails export. Successful encrypted email removes the local copy immediately; declined or failed email leaves it only until the accepted timer expires. Recovery-kit email uses an AES-256 encrypted ZIP, not TAR/GPG. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

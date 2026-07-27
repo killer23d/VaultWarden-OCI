@@ -74,23 +74,32 @@ raise SystemExit(0 if ok else 1)
 PY_VERIFY_ARGON2
 }
 
-_setup_handoff_verify_bcrypt() {
-  local plaintext="$1" encoded="$2"
+_setup_handoff_verify_bcrypt() (
+  # PLAINTEXT is accepted only on fd 3 so it cannot enter argv or the
+  # environment. Disable inherited xtrace before reading the descriptor.
+  { set +x; } 2>/dev/null
+  local encoded="$1"
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 -W ignore::DeprecationWarning - "$encoded" 3<<<"$plaintext" <<'PY_VERIFY_BCRYPT'
+  python3 - "$encoded" 3<&3 <<'PY_VERIFY_BCRYPT'
 import os
 import sys
 try:
-    import crypt
+    import bcrypt
 except Exception:
     raise SystemExit(1)
 stored = sys.argv[1]
 plain = os.fdopen(3, encoding="utf-8").read()
 if plain.endswith("\n"):
     plain = plain[:-1]
-raise SystemExit(0 if crypt.crypt(plain, stored) == stored else 1)
+if not plain:
+    raise SystemExit(1)
+try:
+    ok = bcrypt.checkpw(plain.encode("utf-8"), stored.encode("ascii"))
+except Exception:
+    ok = False
+raise SystemExit(0 if ok else 1)
 PY_VERIFY_BCRYPT
-}
+)
 
 _setup_handoff_publish_file() {
   local temp_file="$1" final_file="$2"
@@ -143,7 +152,7 @@ publish_setup_credentials() {
   [[ "$public_recipient" =~ ^age1[a-z0-9]{58}$ ]] || return 1
   [[ "$private_identity" == *AGE-SECRET-KEY-1* ]] || return 1
   _setup_handoff_verify_argon2 "$vw_plain" "$vw_hash" || return 1
-  _setup_handoff_verify_bcrypt "$caddy_plain" "$caddy_hash" || return 1
+  _setup_handoff_verify_bcrypt "$caddy_hash" 3<<<"$caddy_plain" || return 1
 
   local target_dir="${SETUP_CREDENTIALS_DIR:-$_SETUP_CREDENTIALS_DEFAULT_DIR}"
   _setup_handoff_prepare_dir "$target_dir" || return 1

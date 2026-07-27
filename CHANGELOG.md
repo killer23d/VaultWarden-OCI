@@ -21,6 +21,8 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- Replaced deprecated Python `crypt` verification with the Ubuntu `python3-bcrypt` package, including normal setup installation and explicit dependency checks even with `--skip-deps`.
+- Recovery-kit export now accepts a 30-minute systemd transient cleanup timer before email, uses `at` only as an optional fallback, fails closed when scheduling is unavailable, and removes the local plaintext copy immediately after successful encrypted delivery.
 - Standardized the supported production-host contract on Ubuntu 24.04 LTS Noble for `amd64` and `arm64`, with Cloudflare as the mandatory edge and a root-operated lifecycle/maintenance model.
 - Normal setup now owns and verifies production dependencies required by supported workflows, including exact repository-pinned SOPS and Mike Farah `yq` contracts and the `zstd`, GnuPG, tar, and related backup/recovery tooling used by production paths.
 - Lifecycle, secrets mutation, environment configuration, systemd installation/removal, storage migration, restore, backup, maintenance, firewall, CrowdSec, key rotation, permission repair, update, and uninstall mutation paths now coordinate through the shared operation guard where appropriate.
@@ -59,6 +61,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- Corrected sensitive-file cleanup language to describe best-effort overwrite/unlink without claiming guaranteed physical erasure on SSD, snapshot, journaling, or copy-on-write storage.
 - Hardened recovery-kit attachment protection so the passphrase is validated, held only for the required shell operation with tracing disabled, passed to the encryption tool through a file descriptor, and kept out of argv, environment variables, temporary passphrase files, and logs.
 - Hardened secret and Age-key custody around root-owned persistent configuration and transient runtime secret material; runtime secrets are materialized under `/run/vaultwarden-oci/secrets` for container consumption rather than treated as persistent plaintext state.
 - Hardened operation-owner attribution and stop behavior with explicit global ownership metadata, PID/start-time verification, controlled descendant signalling, and refusal to automatically terminate or bypass active apt/dpkg/repository package work.
