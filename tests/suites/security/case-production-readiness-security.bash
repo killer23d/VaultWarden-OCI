@@ -368,6 +368,7 @@ PY_DIRECT_PTY
       "$direct_stdout" "$direct_stderr" "$direct_pty" \
       sudo -n /usr/bin/env \
         "PATH=$direct_auto_bin:$PATH" \
+        "OFFLINE_AGE_RECIPIENT=$direct_auto_public" \
         "PROJECT_STATE_DIR=$direct_auto_state" \
         "SOPS_AGE_KEY_FILE=$direct_auto_age_key" \
         "SETUP_CREDENTIALS_DIR=$handoff_target" \
