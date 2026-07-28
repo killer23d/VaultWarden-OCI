@@ -650,8 +650,12 @@ _cs_email_read_env_setting() {
 }
 
 _cs_reload_email_environment() {
-    local notifications admin_email smtp_from allowed_sender_domains
+    local notifications event_policy group_wait group_threshold
+    local admin_email smtp_from allowed_sender_domains
     _cs_email_read_env_setting CROWDSEC_EMAIL_NOTIFICATIONS false notifications || return 1
+    _cs_email_read_env_setting CROWDSEC_EMAIL_EVENT_POLICY all event_policy || return 1
+    _cs_email_read_env_setting CROWDSEC_EMAIL_GROUP_WAIT 30s group_wait || return 1
+    _cs_email_read_env_setting CROWDSEC_EMAIL_GROUP_THRESHOLD 10 group_threshold || return 1
     _cs_email_read_env_setting ADMIN_EMAIL "" admin_email || return 1
     _cs_email_read_env_setting SMTP_FROM "" smtp_from || return 1
     _cs_email_read_env_setting ALLOWED_SENDER_DOMAINS "" allowed_sender_domains || return 1
@@ -665,11 +669,36 @@ _cs_reload_email_environment() {
             ;;
     esac
 
+    _cs_email_validate_settings "$event_policy" "$group_wait" "$group_threshold" \
+        "$_CS_EMAIL_ENV_FILE" || return 1
+
     CROWDSEC_EMAIL_NOTIFICATIONS="$notifications"
+    CROWDSEC_EMAIL_EVENT_POLICY="$event_policy"
+    CROWDSEC_EMAIL_GROUP_WAIT="$group_wait"
+    CROWDSEC_EMAIL_GROUP_THRESHOLD="$group_threshold"
     ADMIN_EMAIL="$admin_email"
     SMTP_FROM="$smtp_from"
     ALLOWED_SENDER_DOMAINS="$allowed_sender_domains"
-    export CROWDSEC_EMAIL_NOTIFICATIONS ADMIN_EMAIL SMTP_FROM ALLOWED_SENDER_DOMAINS
+    export CROWDSEC_EMAIL_NOTIFICATIONS CROWDSEC_EMAIL_EVENT_POLICY
+    export CROWDSEC_EMAIL_GROUP_WAIT CROWDSEC_EMAIL_GROUP_THRESHOLD
+    export ADMIN_EMAIL SMTP_FROM ALLOWED_SENDER_DOMAINS
+}
+
+_cs_email_validate_settings() {
+    local event_policy="$1" group_wait="$2" group_threshold="$3"
+    local source="${4:-environment}"
+    if [[ "$event_policy" != "none" && "$event_policy" != "all" ]]; then
+        log_error "CROWDSEC_EMAIL_EVENT_POLICY must be exactly none or all in $source"
+        return 1
+    fi
+    if [[ ! "$group_wait" =~ ^[1-9][0-9]*(s|m|h)$ ]]; then
+        log_error "CROWDSEC_EMAIL_GROUP_WAIT must be a positive integer followed by s, m, or h in $source"
+        return 1
+    fi
+    if [[ ! "$group_threshold" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "CROWDSEC_EMAIL_GROUP_THRESHOLD must be a positive integer in $source"
+        return 1
+    fi
 }
 
 _cs_yaml_single_quote() {
@@ -850,8 +879,10 @@ _cs_email_write_plugin_stage() {
         return 1
     fi
     if ! grep -Fq '__SMTP_FROM__' "$template" \
-        || ! grep -Fq '__ADMIN_EMAIL__' "$template"; then
-        log_error "CrowdSec email template is missing required address placeholders: $template"
+        || ! grep -Fq '__ADMIN_EMAIL__' "$template" \
+        || ! grep -Fq '__GROUP_WAIT__' "$template" \
+        || ! grep -Fq '__GROUP_THRESHOLD__' "$template"; then
+        log_error "CrowdSec email template is missing required placeholders: $template"
         return 1
     fi
 
@@ -861,10 +892,12 @@ _cs_email_write_plugin_stage() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="${line//__SMTP_FROM__/"$sender"}"
         line="${line//__ADMIN_EMAIL__/"$receiver"}"
+        line="${line//__GROUP_WAIT__/"$CROWDSEC_EMAIL_GROUP_WAIT"}"
+        line="${line//__GROUP_THRESHOLD__/"$CROWDSEC_EMAIL_GROUP_THRESHOLD"}"
         printf '%s\n' "$line"
     done < "$template" > "$output"
 
-    if grep -Eq '__SMTP_FROM__|__ADMIN_EMAIL__' "$output"; then
+    if grep -Eq '__SMTP_FROM__|__ADMIN_EMAIL__|__GROUP_WAIT__|__GROUP_THRESHOLD__' "$output"; then
         log_error "CrowdSec email template rendering left unresolved placeholders."
         return 1
     fi
@@ -902,19 +935,26 @@ EOF_EMAIL_PROFILE
 }
 
 _cs_email_validate_stages() {
-    local plugin="$1" profiles="$2" enabled="$3"
+    local plugin="$1" profiles="$2" enabled="$3" event_policy="$4"
     if [[ "$enabled" == "true" ]]; then
         grep -Fxq "$_CS_EMAIL_PLUGIN_MARKER" "$plugin" || return 1
         grep -Fxq 'smtp_host: 127.0.0.1' "$plugin" || return 1
         grep -Fxq 'smtp_port: 587' "$plugin" || return 1
         grep -Fxq 'auth_type: none' "$plugin" || return 1
         grep -Fxq 'encryption_type: none' "$plugin" || return 1
+        grep -Fxq "group_wait: $CROWDSEC_EMAIL_GROUP_WAIT" "$plugin" || return 1
+        grep -Fxq "group_threshold: $CROWDSEC_EMAIL_GROUP_THRESHOLD" "$plugin" || return 1
         if grep -Eiq 'smtp_password|smtp_username|email_api_token|authorization|api[_-]?token' "$plugin"; then
             return 1
         fi
-        [[ "$(grep -Fxc "$_CS_EMAIL_PROFILE_BEGIN" "$profiles")" == "1" ]] || return 1
-        [[ "$(grep -Fxc "$_CS_EMAIL_PROFILE_END" "$profiles")" == "1" ]] || return 1
-        grep -Fxq 'on_success: continue' "$profiles" || return 1
+        if [[ "$event_policy" == "all" ]]; then
+            [[ "$(grep -Fxc "$_CS_EMAIL_PROFILE_BEGIN" "$profiles")" == "1" ]] || return 1
+            [[ "$(grep -Fxc "$_CS_EMAIL_PROFILE_END" "$profiles")" == "1" ]] || return 1
+            grep -Fxq 'on_success: continue' "$profiles" || return 1
+        else
+            ! grep -Fq "$_CS_EMAIL_PROFILE_BEGIN" "$profiles" || return 1
+            ! grep -Fq "$_CS_EMAIL_PROFILE_END" "$profiles" || return 1
+        fi
     else
         ! grep -Fq "$_CS_EMAIL_PROFILE_BEGIN" "$profiles" || return 1
         ! grep -Fq "$_CS_EMAIL_PROFILE_END" "$profiles" || return 1
@@ -997,8 +1037,16 @@ _cs_reconcile_email_notifications() (
     set -euo pipefail
     _cs_email_paths
     local enabled="${CROWDSEC_EMAIL_NOTIFICATIONS:-false}"
+    local event_policy="${CROWDSEC_EMAIL_EVENT_POLICY:-all}"
+    local group_wait="${CROWDSEC_EMAIL_GROUP_WAIT:-30s}"
+    local group_threshold="${CROWDSEC_EMAIL_GROUP_THRESHOLD:-10}"
     enabled="${enabled,,}"
     [[ "$enabled" == "true" ]] || enabled=false
+    _cs_email_validate_settings "$event_policy" "$group_wait" "$group_threshold" \
+        "environment" || return 1
+    CROWDSEC_EMAIL_EVENT_POLICY="$event_policy"
+    CROWDSEC_EMAIL_GROUP_WAIT="$group_wait"
+    CROWDSEC_EMAIL_GROUP_THRESHOLD="$group_threshold"
 
     local transaction_active=false transaction_committed=false rollback_done=false
     local transaction_changed=false rollback_failed=false success_ready=false
@@ -1131,7 +1179,11 @@ _cs_reconcile_email_notifications() (
     # shellcheck disable=SC2317,SC2329  # scoped helper invoked by transaction control flow
     _cs_email_log_success() {
         if [[ "$enabled" == true ]]; then
-            log_success "CrowdSec email notifications enabled through 127.0.0.1:587."
+            if [[ "$event_policy" == "all" ]]; then
+                log_success "CrowdSec automatic event email enabled through 127.0.0.1:587."
+            else
+                log_success "CrowdSec email plugin installed; automatic event email disabled by policy."
+            fi
             log_info "Delivery testing remains explicit: sudo cscli notifications test vaultwarden_email"
         else
             log_info "CrowdSec email notifications disabled; managed notification files removed when present."
@@ -1198,7 +1250,7 @@ _cs_reconcile_email_notifications() (
     trap 'exit 143' TERM
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would reconcile CrowdSec email notifications: ${enabled}"
+        log_info "[DRY RUN] Would reconcile CrowdSec email notifications: enabled=${enabled}, event_policy=${event_policy}"
         success_ready=true
         return 0
     fi
@@ -1282,12 +1334,15 @@ _cs_reconcile_email_notifications() (
 
     if [[ "$enabled" == true ]]; then
         _cs_email_write_plugin_stage "$plugin_stage" || return 1
-        _cs_email_append_profile_block "$profiles_stage"
+        if [[ "$event_policy" == "all" ]]; then
+            _cs_email_append_profile_block "$profiles_stage"
+        fi
     else
         : > "$plugin_stage"
     fi
 
-    if ! _cs_email_validate_stages "$plugin_stage" "$profiles_stage" "$enabled"; then
+    if ! _cs_email_validate_stages \
+        "$plugin_stage" "$profiles_stage" "$enabled" "$event_policy"; then
         log_error "CrowdSec email notification staged-file validation failed."
         return 1
     fi
@@ -1378,6 +1433,11 @@ ENVIRONMENT:
     CROWDSEC_EMAIL_NOTIFICATIONS
                                Optional security-event email through the
                                existing 127.0.0.1:587 Postfix relay. Default: false.
+    CROWDSEC_EMAIL_EVENT_POLICY
+                               Automatic event email: all or none. Default: all.
+    CROWDSEC_EMAIL_GROUP_WAIT  Event email batching window. Default: 30s.
+    CROWDSEC_EMAIL_GROUP_THRESHOLD
+                               Maximum events per batch. Default: 10.
 
     Cloudflare credentials (in encrypted secrets, not .env):
         sudo ./edit-secrets.sh rotate cf_worker_bouncer_token

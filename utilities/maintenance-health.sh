@@ -718,12 +718,19 @@ _crowdsec_health_validate_config() (
 
 _check_crowdsec_email_notifications() {
     local enabled="${CROWDSEC_EMAIL_NOTIFICATIONS:-false}"
+    local event_policy="${CROWDSEC_EMAIL_EVENT_POLICY:-all}"
     local etc_dir="${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}"
     local plugin_file="${etc_dir}/notifications/vaultwarden-email.yaml"
     local profiles_file="${etc_dir}/profiles.yaml.local"
     local plugin_marker="# Managed by VaultWarden-OCI: CrowdSec email notification"
     local profile_begin="# BEGIN VaultWarden-OCI CrowdSec email notifications"
+    local profile_end="# END VaultWarden-OCI CrowdSec email notifications"
     enabled="${enabled,,}"
+    if [[ "$event_policy" != "all" && "$event_policy" != "none" ]]; then
+        _warn "crowdsec:email-notifications:policy" \
+            "CROWDSEC_EMAIL_EVENT_POLICY must be exactly all or none"
+        return 0
+    fi
     if [[ "$enabled" != "true" ]]; then
         _pass "crowdsec:email-notifications" "CrowdSec security-event email notifications are disabled"
         return 0
@@ -738,13 +745,27 @@ _check_crowdsec_email_notifications() {
             "CrowdSec email notifications are enabled but ${plugin_file} is not the managed VaultWarden-OCI plugin"
         return 0
     fi
-    if [[ ! -f "$profiles_file" ]] || ! grep -Fxq "$profile_begin" "$profiles_file"; then
-        _warn "crowdsec:email-notifications:profile" \
-            "CrowdSec email notifications are enabled but the managed profiles.yaml.local block is missing"
-        return 0
+    if [[ "$event_policy" == "all" ]]; then
+        if [[ ! -f "$profiles_file" ]] \
+            || ! grep -Fxq "$profile_begin" "$profiles_file" \
+            || ! grep -Fxq "$profile_end" "$profiles_file"; then
+            _warn "crowdsec:email-notifications:profile" \
+                "CrowdSec automatic event email is enabled but the managed profiles.yaml.local block is missing"
+            return 0
+        fi
+        _pass "crowdsec:email-notifications:configured" \
+            "CrowdSec automatic event email is configured through 127.0.0.1:587"
+    else
+        if [[ -f "$profiles_file" ]] \
+            && { grep -Fxq "$profile_begin" "$profiles_file" \
+                || grep -Fxq "$profile_end" "$profiles_file"; }; then
+            _warn "crowdsec:email-notifications:profile" \
+                "CrowdSec event policy is none but the managed automatic email profile is still present"
+            return 0
+        fi
+        _pass "crowdsec:email-notifications:configured" \
+            "CrowdSec automatic event email is disabled by policy; manual plugin tests remain available"
     fi
-    _pass "crowdsec:email-notifications:configured" \
-        "CrowdSec email notifications are enabled and configured through 127.0.0.1:587"
     if ! command -v crowdsec >/dev/null 2>&1; then
         _warn "crowdsec:email-notifications:validation" \
             "CrowdSec email notification configuration is present but the crowdsec command is unavailable"

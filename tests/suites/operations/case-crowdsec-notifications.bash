@@ -55,6 +55,7 @@ mode=full
 origin="$mode"
 [[ "${VW_OPERATION_PARENT_ID:-}" == crowdsec-email-control ]] && origin=wrapper
 read_flag(){ awk -F= '$1 == "CROWDSEC_EMAIL_NOTIFICATIONS" { value=$2 } END { print value }' "${VW_CROWDSEC_EMAIL_ENV_FILE:?}"; }
+read_policy(){ awk -F= '$1 == "CROWDSEC_EMAIL_EVENT_POLICY" { value=$2 } END { print value == "" ? "all" : value }' "${VW_CROWDSEC_EMAIL_ENV_FILE:?}"; }
 pre_flag="$(read_flag)"
 if [[ "${VW_TEST_PRELOCK_PAUSE_ORIGIN:-}" == "$origin" ]]; then
     : >"${VW_TEST_PRELOCK_MARKER:?}"
@@ -94,7 +95,11 @@ profiles="${VW_CROWDSEC_ETC_DIR:?}/profiles.yaml.local"
 if [[ "$post_flag" == true ]]; then
     mkdir -p "$(dirname "$plugin")"
     printf '# Managed by VaultWarden-OCI: CrowdSec email notification\n' >"$plugin"
-    printf '%s\n%s\n' "${VW_TEST_PROFILE_BEGIN:?}" "${VW_TEST_PROFILE_END:?}" >"$profiles"
+    if [[ "$(read_policy)" == all ]]; then
+        printf '%s\n%s\n' "${VW_TEST_PROFILE_BEGIN:?}" "${VW_TEST_PROFILE_END:?}" >"$profiles"
+    else
+        rm -f "$profiles"
+    fi
 else
     rm -f "$plugin" "$profiles"
 fi
@@ -224,6 +229,7 @@ chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"
 run_control() { bash "$FIXTURE/utilities/crowdsec-email.sh" "$@"; }
 run_setup() { bash "$FIXTURE/utilities/setup-crowdsec.sh" "$@"; }
 set_flag() { printf 'CROWDSEC_EMAIL_NOTIFICATIONS=%s\nADMIN_EMAIL=admin@example.com\nSMTP_FROM=vaultwarden@example.com\nALLOWED_SENDER_DOMAINS=example.com\n' "$1" >"$VW_CROWDSEC_EMAIL_ENV_FILE"; chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"; }
+set_flag_with_policy() { printf 'CROWDSEC_EMAIL_NOTIFICATIONS=%s\nCROWDSEC_EMAIL_EVENT_POLICY=%s\nADMIN_EMAIL=admin@example.com\nSMTP_FROM=vaultwarden@example.com\nALLOWED_SENDER_DOMAINS=example.com\n' "$1" "$2" >"$VW_CROWDSEC_EMAIL_ENV_FILE"; chmod 0600 "$VW_CROWDSEC_EMAIL_ENV_FILE"; }
 write_plugin() { printf '# Managed by VaultWarden-OCI: CrowdSec email notification\n' >"$PLUGIN"; }
 write_profile() { printf '%s\n%s\n' "$setup_begin" "$setup_end" >"$PROFILES"; }
 clear_managed() { rm -f "$PLUGIN" "$PROFILES"; }
@@ -256,19 +262,19 @@ assert_no_email_temps() {
     fi
 }
 assert_partial() {
-    local flag="$1" shape="$2" output
+    local flag="$1" shape="$2" output expected_install=partial
     output="$TMP/partial-${flag}-${shape}.out"
     set_flag "$flag"
     clear_managed
     case "$shape" in
-        plugin) write_plugin ;;
+        plugin) write_plugin; expected_install=plugin-only ;;
         profile) write_profile ;;
         *) test_fail "unknown partial shape: $shape" ;;
     esac
     if run_control status >"$output" 2>&1; then
         test_fail "partial state was reported consistent: flag=$flag shape=$shape"
     fi
-    test_assert_file_contains "$output" 'Installed:  partial'
+    test_assert_file_contains "$output" "Installed:  $expected_install"
     test_assert_file_contains "$output" 'Consistent: false'
 }
 run_unprivileged_control() {
@@ -419,6 +425,20 @@ assert_no_backups
 assert_lock_free
 test_assert_file_not_contains "$CALLS" 'descriptor-leak'
 
+# Quiet policy keeps the plugin testable without an automatic event profile.
+set_flag_with_policy true none
+write_plugin
+rm -f "$PROFILES"
+run_control status >"$TMP/status-none.out"
+test_assert_file_contains "$TMP/status-none.out" 'Event policy: none'
+test_assert_file_contains "$TMP/status-none.out" 'Installed:  plugin-only'
+test_assert_file_contains "$TMP/status-none.out" 'Consistent: true'
+run_control test >"$TMP/test-none.out"
+test_assert_file_contains "$CALLS" 'cscli notifications test vaultwarden_email'
+test_assert_file_contains "$TMP/test-none.out" 'confirm mailbox receipt'
+clear_managed
+set_flag false
+
 assert_partial false plugin
 assert_partial false profile
 assert_partial true plugin
@@ -442,6 +462,12 @@ test_assert_file_contains "$TMP/duplicate-flag.out" 'Configured: invalid'
 printf 'CROWDSEC_EMAIL_NOTIFICATIONS=true\n CROWDSEC_EMAIL_NOTIFICATIONS = false\n' >"$VW_CROWDSEC_EMAIL_ENV_FILE"
 if run_control status >"$TMP/whitespace-flag.out" 2>&1; then test_fail 'whitespace-malformed duplicate flag was reported consistent'; fi
 test_assert_file_contains "$TMP/whitespace-flag.out" 'Configured: invalid'
+set_flag_with_policy true invalid
+write_plugin
+if run_control status >"$TMP/invalid-policy.out" 2>&1; then test_fail 'invalid event policy was reported consistent'; fi
+test_assert_file_contains "$TMP/invalid-policy.out" 'Event policy: invalid'
+test_assert_file_contains "$TMP/invalid-policy.out" 'Consistent: false'
+clear_managed
 set_flag false
 
 # Fixture-mode status still reports permission failures as unknown, never healthy.

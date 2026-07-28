@@ -574,7 +574,9 @@ sudo ./utilities/crowdsec-email.sh disable
 
 `enable` and `disable` update `CROWDSEC_EMAIL_NOTIFICATIONS` transactionally and
 delegate to the established CrowdSec reconciliation path. `status` checks the
-environment flag and managed markers. `test` confirms plugin dispatch through
+environment flag, `CROWDSEC_EMAIL_EVENT_POLICY`, and managed markers. The
+`none` policy keeps the plugin available for `test` while omitting automatic
+event delivery; `all` is the default. `test` confirms plugin dispatch through
 the loopback Postfix route but does not prove mailbox receipt.
 
 This is separate from health-check incident mail and generic systemd

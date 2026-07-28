@@ -1234,6 +1234,11 @@ ENVIRONMENT:
     CROWDSEC_EMAIL_NOTIFICATIONS
                                Optional security-event email through the
                                existing 127.0.0.1:587 Postfix relay. Default: false.
+    CROWDSEC_EMAIL_EVENT_POLICY
+                               Automatic event email: all or none. Default: all.
+    CROWDSEC_EMAIL_GROUP_WAIT  Event email batching window. Default: 30s.
+    CROWDSEC_EMAIL_GROUP_THRESHOLD
+                               Maximum events per batch. Default: 10.
 
     Cloudflare credentials (in encrypted secrets, not .env):
         sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
