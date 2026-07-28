@@ -717,19 +717,32 @@ _health_alert_state_lock_path() {
 }
 
 _health_alert_state_lock_prepare() {
-    local lock_path="$1" mode owner_uid old_umask
+    local lock_path="$1" mode owner_uid old_umask created=false
 
     _ensure_alert_dir || return 1
     if ! _state_path_present "$lock_path"; then
         old_umask="$(umask)"
         umask 077
-        if ! ( set -o noclobber; : > "$lock_path" ) 2>/dev/null \
-            && ! _state_path_present "$lock_path"; then
+        if (
+            set -o noclobber
+            : > "$lock_path"
+        ) 2>/dev/null; then
+            created=true
+        elif ! _state_path_present "$lock_path"; then
             umask "$old_umask"
             log_warn "Health alert state transition suppressed because lock '${lock_path}' could not be created safely."
             return 1
         fi
         umask "$old_umask"
+
+        # Default ACLs can broaden a newly created file beyond the requested umask.
+        # Normalize only a file created by this invocation; existing paths remain subject
+        # to the existing type, owner, identity, and strict mode checks below.
+        if [[ "$created" == "true" ]] && ! chmod 0600 -- "$lock_path" 2>/dev/null; then
+            rm -f -- "$lock_path" 2>/dev/null || true
+            log_warn "Health alert state transition suppressed because newly created lock '${lock_path}' could not be restricted to mode 0600."
+            return 1
+        fi
     fi
 
     [[ -f "$lock_path" && ! -L "$lock_path" ]] || {

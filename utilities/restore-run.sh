@@ -12,6 +12,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/operations.sh"
+# shellcheck disable=SC1091
+source "${PROJECT_ROOT}/lib/setup-credentials.sh"
 _source_lib() {
     local lib="$1"
     # shellcheck source=/dev/null
@@ -1417,26 +1419,15 @@ _rotate_age_key() {
 
     # Write a local recovery-kit file so the operator has a copy
     # that survives independently of secrets/keys/
-    local kit_ts; kit_ts=$(date +%Y%m%d-%H%M%S)
-    local kit_file="/root/vaultwarden-recovery-kit-${kit_ts}.txt"
-    if {
-        echo "# VaultWarden-OCI Recovery Kit"
-        echo "# Generated: $(date -u)"
-        echo "# Host:      $(hostname -f 2>/dev/null || hostname)"
-        echo "# IMPORTANT: Store this file offline in a secure password manager or USB."
-        echo "#            Required to decrypt future backups created after this date."
-        echo "#            Delete this file from /root/ once safely copied offline."
-        echo ""
-        cat "$new_key_tmp"
-    } > "$kit_file" 2>/dev/null; then
-        chmod 600 "$kit_file" 2>/dev/null || true
-        ROTATED_KIT_FILE="$kit_file"
-        log_warn "  Recovery kit saved: $kit_file"
-        log_warn "  ← COPY THIS FILE OFFLINE NOW, then delete it from /root/"
-    else
-        log_warn "  Could not write recovery kit to /root/ — save the key manually."
-        ROTATED_KIT_FILE=""
-    fi
+    local kit_ts kit_file
+    kit_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    kit_file="$(publish_age_rotation_handoff "$new_key_tmp" "$new_recipient" "$kit_ts")" || {
+      log_error "Could not publish the protected post-restore Age handoff."
+      return 1
+    }
+    ROTATED_KIT_FILE="$kit_file"
+    log_warn "Protected recovery handoff saved: $kit_file"
+    log_warn "Copy it offline, verify it, then delete the host copy."
 
     # 6. Derive public key for display
     ROTATED_PUB_KEY=$(grep -m1 '^# public key:' "$local_key_file" | sed 's/^# public key: //' || true)
@@ -1456,69 +1447,56 @@ _rotate_age_key() {
 # would show on first install.  Requires the operator to press Enter to
 # acknowledge before services start (unless --force is passed).
 _display_new_key() {
-    [[ "$DRY_RUN" == "true" ]] && return 0
-    [[ -z "$ROTATED_KEY_FILE" ]] && return 0
+  # VWOCI-PRR-PATCH-01: keep the existing acknowledgement/startup safety gate,
+  # but hand off the private identity only through the protected root file.
+  [[ "$DRY_RUN" == "true" ]] && return 0
+  [[ -z "$ROTATED_KEY_FILE" ]] && return 0
 
-    local priv_key_line
-    # Suppress xtrace BEFORE reading the private key so that debug mode
-    # does not leak the key material to the terminal or systemd journal.
-    { set +x; } 2>/dev/null
-    priv_key_line=$(grep -m1 '^AGE-SECRET-KEY-1' "$ROTATED_KEY_FILE" 2>/dev/null || true)
+  if [[ -z "${ROTATED_KIT_FILE:-}" || ! -s "$ROTATED_KIT_FILE" ]]; then
+    RESTORE_PREVENT_AUTOSTART=true
+    log_error "The rotated Age identity was not committed to a protected recovery handoff."
+    log_error "Restore services will remain stopped for manual review."
+    _restore_print_manual_start_checklist
+    return 1
+  fi
 
-    echo ""
-    echo "  ╔══════════════════════════════════════════════════════════╗"
-    echo "  ║       ⚠️  SAVE YOUR NEW AGE ENCRYPTION KEY  ⚠️         ║"
-    echo "  ╚══════════════════════════════════════════════════════════╝"
-    echo ""
-    log_warn  "  A NEW age key was generated as part of this restore."
-    log_warn  "  All future backups will be encrypted with this new key."
-    log_warn  "  You MUST save this key before pressing Enter."
-    log_warn  "  Loss of this key = permanent loss of future backups."
-    echo ""
-    log_info  "  Private key (keep secret; required for decryption):"
-    echo      ""
-    echo      "  ${priv_key_line:-<could not read key — check $ROTATED_KEY_FILE>}"
-    unset priv_key_line
-    echo      ""
-    log_info  "  Public key (safe to share; used for encryption):"
-    echo      ""
-    echo      "  ${ROTATED_PUB_KEY:-<could not derive public key>}"
-    echo      ""
-    log_info  "  Installed locations:"
-    log_info  "    Primary:    $ROTATED_KEY_FILE"
-    [[ -f "/etc/vaultwarden/age-key.txt" ]] && \
-        log_info  "    systemd:    /etc/vaultwarden/age-key.txt"
-    log_info  "    .env:       SOPS_AGE_KEY_FILE updated"
-    [[ -f "/etc/vaultwarden/vaultwarden.env" ]] && \
-        log_info  "    systemd env: /etc/vaultwarden/vaultwarden.env updated"
-    echo ""
-    log_warn  "  Recommended: copy the private key to a secure password manager or"
-    log_warn  "  offline storage NOW.  Services are about to start."
-    echo ""
+  echo ""
+  echo " ╔══════════════════════════════════════════════════════════╗"
+  echo " ║          NEW AGE KEY — PROTECTED HANDOFF SAVED          ║"
+  echo " ╚══════════════════════════════════════════════════════════╝"
+  echo ""
+  log_warn "A new operational Age key was generated as part of this restore."
+  log_warn "All future backups will use the new recipient."
+  log_info "Protected handoff: $ROTATED_KIT_FILE"
+  log_info "Owner/mode: root:root 0600"
+  log_info "Public recipient: ${ROTATED_PUB_KEY:-unavailable}"
+  log_info "Primary key path: $ROTATED_KEY_FILE"
+  [[ -f "/etc/vaultwarden/age-key.txt" ]] && \
+    log_info "systemd key path: /etc/vaultwarden/age-key.txt"
+  log_info "No private key material was written to terminal output."
+  log_warn "Copy the protected handoff offline, verify it, then delete the host copy."
+  echo ""
 
-    if [[ "$FORCE" != "true" ]]; then
-        if [[ -n "${ROTATED_KIT_FILE:-}" ]]; then
-            log_warn "  Recovery kit written to: $ROTATED_KIT_FILE"
-            log_warn "  Copy it offline NOW, then delete it: rm -f '$ROTATED_KIT_FILE'"
-            echo ""
-        fi
-        local _confirm="" _attempt=1
-        while (( _attempt <= RESTORE_SAVED_ACK_ATTEMPTS )); do
-            if ! read -r -t "$RESTORE_SAVED_ACK_TIMEOUT" -p "  Type SAVED (all caps) to confirm the key is recorded and start services: " _confirm; then
-                _restore_print_key_ack_abort_guidance
-                return 1
-            fi
-            if [[ "$_confirm" == "SAVED" ]]; then
-                echo ""
-                return 0
-            fi
-            log_warn "  Please type exactly: SAVED"
-            _attempt=$(( _attempt + 1 ))
-        done
+  if [[ "$FORCE" != "true" ]]; then
+    local _confirm="" _attempt=1
+    while (( _attempt <= RESTORE_SAVED_ACK_ATTEMPTS )); do
+      if ! read -r -t "${RESTORE_SAVED_ACK_TIMEOUT}" \
+        -p " Type SAVED (all caps) after recording the protected handoff: " _confirm; then
         _restore_print_key_ack_abort_guidance
         return 1
-    fi
-    echo ""
+      fi
+      if [[ "$_confirm" == "SAVED" ]]; then
+        echo ""
+        return 0
+      fi
+      log_warn "Please type exactly: SAVED"
+      _attempt=$(( _attempt + 1 ))
+    done
+    _restore_print_key_ack_abort_guidance
+    return 1
+  fi
+  echo ""
+  return 0
 }
 
 _restore_print_key_ack_abort_guidance() {

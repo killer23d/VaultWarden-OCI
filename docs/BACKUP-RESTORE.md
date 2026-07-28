@@ -393,3 +393,11 @@ See [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md).
 - After Age key rotation: export new recovery material and retain old identities needed by retained backups.
 - Quarterly: rehearse restore on a disposable host or copied state volume; never rehearse destructive recovery on the only live production state.
 - Before go-live or after major DR: `systemd validate` and smoke test pass without required checks skipped.
+
+## Recovery artifacts and full-backup isolation
+
+<!-- VWOCI-PRR-PATCH-04 -->
+
+Setup credential handoffs and full recovery-kit documents live under `/root/vaultwarden-recovery/`, outside the project and normal state backup inputs. As defence in depth, the full-backup input excludes current and legacy recovery-kit names, setup-credential names, staging files, and `important-documents-*.zip`; the final archive-listing validator rejects any that still appear. The emergency tier keeps its separately documented key-bearing contract.
+
+Full recovery-kit export accepts a 30-minute systemd transient cleanup timer before offering email, with `at` only as an optional fallback. Scheduler failure removes the plaintext file and fails export. Successful encrypted email removes the local copy immediately; declined or failed email leaves it only until the accepted timer expires. Recovery-kit email uses an AES-256 encrypted ZIP, not TAR/GPG. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

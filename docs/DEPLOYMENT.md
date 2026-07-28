@@ -226,3 +226,9 @@ These features are supported where implemented but should not complicate a first
 - **Provider-specific email APIs** — advanced operational-alert route; the Postfix SMTP path remains the normal appliance mail path.
 - **Disaster-recovery rehearsals** — use the current smoke test and pre-production drill after the normal stack is stable.
 - **Deep CrowdSec Worker/KV tuning** — see [CROWDSEC.md](CROWDSEC.md) after the default enforcement path is working.
+
+## Automatic setup credential handoff
+
+<!-- VWOCI-PRR-PATCH-04 -->
+
+Both `sudo ./setup.sh --domain DOMAIN --email EMAIL --auto` and the documented direct command `sudo ./utilities/setup-secrets.sh configure --auto` keep generated credential values out of terminal output. After successful atomic publication, the command displays the root-only handoff path under `/root/vaultwarden-recovery/`, its `root:root` ownership and `0700` directory/`0600` file permissions, and the three included groups: SOPS Age identity, Vaultwarden administrator password, and Caddy administrator password. Automatic configuration fails without a completion summary if the handoff cannot be published. Required UFW and automatic secret-configuration failures also terminate top-level setup before its completion summary. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

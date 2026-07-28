@@ -139,7 +139,7 @@ do_view() {
         log_error "Failed to secure temp file: $temp_file"
         return 1
     fi
-    register_cleanup "_secure_shred" "$temp_file"
+    register_cleanup "_remove_sensitive_file" "$temp_file"
 
     local sops_rc=0
     sops -d "$SECRETS_FILE" > "$temp_file" || sops_rc=$?

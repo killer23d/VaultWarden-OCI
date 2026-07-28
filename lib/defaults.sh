@@ -50,6 +50,7 @@ readonly -a _VW_DEFAULT_EMAIL_MODES=(
     auto
     api
     smtp
+    direct
     host
 )
 

@@ -23,18 +23,303 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
+# Establish setup-owned cleanup custody before any workspace is created.
+unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
+unset TMP_WORKDIR SETUP_TEMP_ROOT SETUP_OWNED_WORKDIR SETUP_OWNED_WORKDIR_ID
+unset SETUP_BOOTSTRAP_CLEANUP_ACTIVE SETUP_BOOTSTRAP_CLEANUP_RUNNING
+SETUP_BOOTSTRAP_CLEANUP_ACTIVE=true
+SETUP_BOOTSTRAP_CLEANUP_RUNNING=false
+
+_setup_bootstrap_cleanup_warn() {
+    printf 'WARNING: %s\n' "$1" >&2
+}
+_setup_bootstrap_remove_workspace() {
+    local original_status="${1:-0}" cleanup_failed=0
+    local candidate="${TMP_WORKDIR:-}" parent="" base=""
+    if [[ "${SETUP_BOOTSTRAP_CLEANUP_ACTIVE:-false}" != "true" ||
+          "${SETUP_BOOTSTRAP_CLEANUP_RUNNING:-false}" == "true" ]]; then
+        return "$original_status"
+    fi
+    SETUP_BOOTSTRAP_CLEANUP_RUNNING=true
+    { set +x; } 2>/dev/null
+    if [[ -z "$candidate" ]]; then
+        SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
+    else
+        parent="${candidate%/*}"
+        base="${candidate##*/}"
+        if [[ "$candidate" != /* ||
+              "$parent" != "${SETUP_TEMP_ROOT:-}" ||
+              ! "$base" =~ ^vw_setup\.[[:alnum:]]{10}$ ||
+              -L "$candidate" || ! -d "$candidate" ]]; then
+            _setup_bootstrap_cleanup_warn "Initialization cleanup refused an unvalidated setup workspace."
+            cleanup_failed=1
+        elif ! rmdir -- "$candidate" 2>/dev/null; then
+            _setup_bootstrap_cleanup_warn "Failed to remove the validated empty setup workspace during initialization cleanup."
+            cleanup_failed=1
+        else
+            SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
+            unset TMP_WORKDIR
+        fi
+    fi
+    SETUP_BOOTSTRAP_CLEANUP_RUNNING=false
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_failed == 0 )) || return 1
+    return 0
+}
+_setup_bootstrap_on_exit() {
+    local original_status="$?" final_status=0
+    trap - EXIT HUP INT TERM
+    _setup_bootstrap_remove_workspace "$original_status" || final_status=$?
+    exit "$final_status"
+}
+_setup_bootstrap_on_signal() {
+    local signal_status="$1"
+    trap - EXIT HUP INT TERM
+    _setup_bootstrap_remove_workspace "$signal_status" || true
+    exit "$signal_status"
+}
+_setup_initialization_failed() {
+    local status="$1" message="$2"
+    printf 'ERROR: %s\n' "$message" >&2
+    exit "$status"
+}
+
+# Bootstrap traps are active before mktemp; an empty TMP_WORKDIR is a no-op.
+trap '_setup_bootstrap_on_exit' EXIT
+trap '_setup_bootstrap_on_signal 129' HUP
+trap '_setup_bootstrap_on_signal 130' INT
+trap '_setup_bootstrap_on_signal 143' TERM
+
+SETUP_TEMP_ROOT="$(realpath -e -- "${TMPDIR:-/tmp}" 2>/dev/null)" || {
+    setup_init_status=$?
+    _setup_initialization_failed "$setup_init_status" "Failed to resolve the temporary root"
+}
+if [[ ! -d "$SETUP_TEMP_ROOT" || -L "${TMPDIR:-/tmp}" ]]; then
+    _setup_initialization_failed 1 "Temporary root must be a real directory"
+fi
+case "$SETUP_TEMP_ROOT" in
+    /|/etc|/root|"$PROJECT_ROOT")
+        _setup_initialization_failed 1 "Refusing unsafe temporary root"
+        ;;
+esac
 old_umask=$(umask)
 umask 077
-TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
-    echo "ERROR: Failed to create secure temporary directory" >&2
-    exit 1
+TMP_WORKDIR="$(mktemp -d "${SETUP_TEMP_ROOT}/vw_setup.XXXXXXXXXX")" || {
+    setup_init_status=$?
+    umask "$old_umask" || true
+    _setup_initialization_failed "$setup_init_status" "Failed to create secure temporary directory"
 }
 umask "$old_umask"
-trap 'rm -rf "$TMP_WORKDIR"' EXIT
-trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
-trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
+SETUP_OWNED_WORKDIR="$(realpath -e -- "$TMP_WORKDIR" 2>/dev/null)" || {
+    setup_init_status=$?
+    _setup_initialization_failed "$setup_init_status" "Failed to resolve secure temporary directory"
+}
+SETUP_OWNED_WORKDIR_ID="$(stat -c '%d:%i' -- "$SETUP_OWNED_WORKDIR" 2>/dev/null)" || {
+    setup_init_status=$?
+    _setup_initialization_failed "$setup_init_status" "Failed to record secure temporary directory identity"
+}
+SETUP_SENSITIVE_CLEANUP_ACTIVE=true
+SETUP_SENSITIVE_CLEANUP_RUNNING=false
+SETUP_SENSITIVE_CLEANUP_FAILED=false
+SETUP_OPERATION_GUARD_HELD=false
+# Top-level setup sensitive cleanup lifecycle.
+_setup_cleanup_warn() {
+    local message="$1"
+    if declare -F log_warn >/dev/null 2>&1; then
+        log_warn "$message"
+    else
+        printf 'WARNING: %s\n' "$message" >&2
+    fi
+}
+_setup_validate_workspace() {
+    local candidate="${1:-}" require_exists="${2:-true}"
+    local resolved parent base identity
+    [[ -n "$candidate" && "$candidate" == /* ]] || return 1
+    resolved="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
+    [[ -n "${SETUP_OWNED_WORKDIR:-}" && "$resolved" == "$SETUP_OWNED_WORKDIR" ]] || return 1
+    parent="$(dirname -- "$resolved")" || return 1
+    base="$(basename -- "$resolved")" || return 1
+    [[ "$parent" == "${SETUP_TEMP_ROOT:-}" ]] || return 1
+    [[ "$base" =~ ^vw_setup\.[[:alnum:]]{8,}$ ]] || return 1
+    case "$resolved" in
+        /|/tmp|/var/tmp|/etc|/root|"${PROJECT_ROOT:-}") return 1 ;;
+    esac
+    if [[ -e "$resolved" || -L "$resolved" ]]; then
+        [[ ! -L "$resolved" && -d "$resolved" ]] || return 1
+        identity="$(stat -c '%d:%i' -- "$resolved" 2>/dev/null)" || return 1
+        [[ -n "${SETUP_OWNED_WORKDIR_ID:-}" && "$identity" == "$SETUP_OWNED_WORKDIR_ID" ]] || return 1
+    elif [[ "$require_exists" == "true" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$resolved"
+}
+_setup_validate_sensitive_file() {
+    local candidate="${1:-}" workspace="${2:-}" require_exists="${3:-false}"
+    local resolved parent base metadata
+    [[ -n "$candidate" && "$candidate" == /* ]] || return 1
+    workspace="$(_setup_validate_workspace "$workspace" true)" || return 1
+    resolved="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
+    parent="$(dirname -- "$resolved")" || return 1
+    base="$(basename -- "$resolved")" || return 1
+    [[ "$parent" == "$workspace" ]] || return 1
+    case "$base" in
+        vw_admin_plain|vw_admin_hash|caddy_plain|caddy_hash) ;;
+        *) return 1 ;;
+    esac
+    [[ ! -L "$candidate" ]] || return 1
+    if [[ -e "$candidate" ]]; then
+        [[ -f "$candidate" ]] || return 1
+        metadata="$(stat -c '%u:%h' -- "$candidate" 2>/dev/null)" || return 1
+        [[ "$metadata" == "${EUID}:1" ]] || return 1
+    elif [[ "$require_exists" == "true" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$resolved"
+}
+_setup_manual_cleanup() {
+    local flag="$1" target="$2" workspace="${3:-}" validated quoted
+    case "$flag" in
+        -f)
+            validated="$(_setup_validate_sensitive_file "$target" "$workspace" true)" || return 1
+            ;;
+        -rf)
+            validated="$(_setup_validate_workspace "$target" true)" || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    printf -v quoted '%q' "$validated"
+    _setup_cleanup_warn "Residual validated setup-owned sensitive path: $validated"
+    _setup_cleanup_warn "Manual cleanup: sudo rm $flag -- $quoted"
+}
+_setup_remove_sensitive_workspace() {
+    local original_status="${1:-0}" cleanup_failed=0 path validated_path
+    local workspace="" current_workdir="" workspace_cleanup_allowed=true
+    local -a sensitive_paths=(
+        "${VW_ADMIN_PLAIN_FILE:-}"
+        "${VW_ADMIN_HASH_FILE:-}"
+        "${CADDY_PLAIN_FILE:-}"
+        "${CADDY_HASH_FILE:-}"
+    )
+    if [[ "${SETUP_SENSITIVE_CLEANUP_RUNNING:-false}" == "true" ]]; then
+        return "$original_status"
+    fi
+    if [[ "${SETUP_SENSITIVE_CLEANUP_ACTIVE:-false}" != "true" ]]; then
+        if (( original_status == 0 )) && [[ "${SETUP_SENSITIVE_CLEANUP_FAILED:-false}" == "true" ]]; then
+            return 1
+        fi
+        return "$original_status"
+    fi
+    SETUP_SENSITIVE_CLEANUP_RUNNING=true
+    { set +x; } 2>/dev/null
+    if ! workspace="$(_setup_validate_workspace "${SETUP_OWNED_WORKDIR:-}" true)"; then
+        _setup_cleanup_warn "Automatic setup cleanup was refused because workspace custody could not be validated; inspect it manually."
+        cleanup_failed=1
+        workspace_cleanup_allowed=false
+    fi
+    if [[ -n "${TMP_WORKDIR:-}" ]]; then
+        current_workdir="$(realpath -m -- "$TMP_WORKDIR" 2>/dev/null || true)"
+        if [[ -z "$workspace" || "$current_workdir" != "$workspace" ]]; then
+            _setup_cleanup_warn "Ignoring an untrusted current temporary-workspace value; no destructive command will be suggested."
+            cleanup_failed=1
+        fi
+    fi
+    if [[ -n "$workspace" ]]; then
+        for path in "${sensitive_paths[@]}"; do
+            [[ -n "$path" ]] || continue
+            if ! validated_path="$(_setup_validate_sensitive_file "$path" "$workspace" false)"; then
+                _setup_cleanup_warn "Automatic cleanup refused an out-of-custody or unsafe sensitive-file candidate; inspect it manually."
+                cleanup_failed=1
+                workspace_cleanup_allowed=false
+                continue
+            fi
+            if [[ ! -e "$validated_path" && ! -L "$validated_path" ]]; then
+                continue
+            fi
+            if ! rm -f -- "$validated_path" 2>/dev/null || [[ -e "$validated_path" || -L "$validated_path" ]]; then
+                _setup_cleanup_warn "Failed to remove a validated setup-owned sensitive temporary file."
+                _setup_manual_cleanup "-f" "$validated_path" "$workspace" || true
+                cleanup_failed=1
+                workspace_cleanup_allowed=false
+            fi
+        done
+    fi
+    if [[ -n "$workspace" && "$workspace_cleanup_allowed" == "true" ]]; then
+        if ! workspace="$(_setup_validate_workspace "$workspace" true)"; then
+            _setup_cleanup_warn "Automatic setup workspace cleanup was refused after custody changed; inspect it manually."
+            cleanup_failed=1
+        elif ! rm -rf -- "$workspace" 2>/dev/null || [[ -e "$workspace" || -L "$workspace" ]]; then
+            _setup_cleanup_warn "Failed to remove the validated setup-owned sensitive temporary workspace."
+            _setup_manual_cleanup "-rf" "$workspace" || true
+            cleanup_failed=1
+        fi
+    fi
+    if (( cleanup_failed == 0 )); then
+        SETUP_SENSITIVE_CLEANUP_ACTIVE=false
+        unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
+    else
+        SETUP_SENSITIVE_CLEANUP_FAILED=true
+    fi
+    SETUP_SENSITIVE_CLEANUP_RUNNING=false
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_failed == 0 )) || return 1
+    return 0
+}
+_setup_finalize() {
+    local original_status="$1" release_status=0 cleanup_status=0
+    { set +x; } 2>/dev/null
+    if [[ "${SETUP_OPERATION_GUARD_HELD:-false}" == "true" ]] &&
+       declare -F operation_release >/dev/null 2>&1; then
+        operation_release "$original_status" || release_status=$?
+        SETUP_OPERATION_GUARD_HELD=false
+    fi
+    _setup_remove_sensitive_workspace "$original_status" || cleanup_status=$?
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_status == 0 )) || return "$cleanup_status"
+    (( release_status == 0 )) || return "$release_status"
+    return 0
+}
+_setup_on_exit() {
+    local original_status="$1" final_status=0
+    trap - EXIT INT HUP TERM
+    _setup_finalize "$original_status" || final_status=$?
+    exit "$final_status"
+}
+_setup_on_signal() {
+    local signal_status="$1"
+    trap - EXIT INT HUP TERM
+    _setup_finalize "$signal_status" || true
+    exit "$signal_status"
+}
+# End top-level setup sensitive cleanup lifecycle.
+trap '_setup_on_exit $?' EXIT
+trap '_setup_on_signal 129' HUP
+trap '_setup_on_signal 130' INT
+trap '_setup_on_signal 143' TERM
+# Full identity-based custody is active; retire workspace-only cleanup.
+SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
 
-REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/operations.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
+REQUIRED_LIBS=(
+  "lib/log.sh"
+  "lib/validate.sh"
+  "lib/config.sh"
+  "lib/common.sh"
+  "lib/operations.sh"
+  "lib/crypto.sh"
+  "lib/docker.sh"
+  "lib/backup-utils.sh"
+  "lib/secrets.sh"
+  "lib/setup-credentials.sh"
+  "lib/defaults.sh"
+  "lib/storage.sh"
+)
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "${SCRIPT_DIR}/${lib}" ]]; then
         echo "ERROR: Required library not found: ${SCRIPT_DIR}/${lib}" >&2
@@ -53,6 +338,8 @@ DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=v
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/backup-utils.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/setup-credentials.sh"
 source "${SCRIPT_DIR}/lib/defaults.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
 
@@ -67,7 +354,6 @@ PHASE=""
 PHASE_ARGS=()
 export ENTROPY_THRESHOLD=200
 export ENTROPY_MAX_WAIT=60
-CLEAN_DOMAIN=""
 # Storage mode variables. Defaults are overridden by --data-device/--data-mount
 # or by DATA_VOLUME_DEVICE/DATA_VOLUME_MOUNT already set in the environment.
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
@@ -92,7 +378,7 @@ SUBCOMMANDS:
                Sub-actions: install | remove | validate | status
 
 FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
-  --auto              Non-interactive install. Auto-generates passwords/passphrases;
+  --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
@@ -314,138 +600,88 @@ if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid
 
 
 show_post_install_summary() {
-    local mode="${1:-interactive}"
+  # VWOCI-PRR-PATCH-01: publish generated values once, never print them.
+  local mode="${1:-interactive}"
+  if [[ "${DRY_RUN:-false}" == "true" ]]; then
+    log_info "[DRY RUN] Would publish a root-only setup credential handoff after all required phases pass."
+    return 0
+  fi
 
-    [[ -t 1 ]] && clear
-    local age_pub_key="" age_key_content=""
-    if [[ -f "secrets/keys/age-key.txt" ]]; then
-        age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
-        age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
+  local age_key_file credential_file
+  age_key_file="$(resolve_age_key_path 2>/dev/null)" || {
+    log_error "Cannot publish setup credentials: operational Age identity is unavailable."
+    return 1
+  }
+
+  local capture_count=0 capture_path
+  for capture_path in \
+    "${VW_ADMIN_PLAIN_FILE:-}" "${VW_ADMIN_HASH_FILE:-}" \
+    "${CADDY_PLAIN_FILE:-}" "${CADDY_HASH_FILE:-}"; do
+    [[ -n "$capture_path" && -s "$capture_path" ]] && capture_count=$((capture_count + 1))
+  done
+  if (( capture_count != 4 )); then
+    if (( capture_count == 0 )) && [[ "${SETUP_SECRETS_PREEXISTED:-false}" == "true" ]]; then
+      if ! _setup_remove_sensitive_workspace 0; then
+        log_error "Sensitive temporary workspace cleanup failed; setup is not complete."
+        return 1
+      fi
+      printf '\n'
+      log_success "Setup completed without printing secret values."
+      log_info "Existing secrets were retained; no new setup-credentials file was created."
+      log_info "Export the separate full recovery kit later with: sudo ./edit-secrets.sh export-recovery-kit"
+      return 0
     fi
-    
-    printf '%s' "${COLOR_RED}"
-    cat << 'CRED_BANNER'
-  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-  !                                                                       !
-  !   🚨 CRITICAL: SAVE ALL OF THESE CREDENTIALS FOR DISASTER RECOVERY 🚨  !
-  !     They will NOT be shown again unless you export a recovery kit     !
-  !                                                                       !
-  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-CRED_BANNER
-    printf '%s' "${COLOR_RESET}"
-
-    local _na="(not configured yet — run sudo ./setup.sh secrets, then sudo ./utilities/secrets-export-recovery-kit.sh)"
-    local vw_admin_plain="${_na}" caddy_admin_plain="${_na}" backup_pass_plain="${_na}"
-    [[ -f "${VW_ADMIN_PLAIN_FILE:-}" ]] && [[ -s "${VW_ADMIN_PLAIN_FILE:-}" ]] && \
-        vw_admin_plain=$(cat "${VW_ADMIN_PLAIN_FILE}")
-    [[ -f "${CADDY_PLAIN_FILE:-}" ]] && [[ -s "${CADDY_PLAIN_FILE:-}" ]] && \
-        caddy_admin_plain=$(cat "${CADDY_PLAIN_FILE}")
-    [[ -f "${BACKUP_PLAIN_FILE:-}" ]] && [[ -s "${BACKUP_PLAIN_FILE:-}" ]] && \
-        backup_pass_plain=$(cat "${BACKUP_PLAIN_FILE}")
-
-    printf '\n%s[1] SOPS AGE SECRET KEY%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '    Public key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
-
-    printf '\n%s[2] VAULTWARDEN ADMIN TOKEN (plaintext — hash stored in secrets)%s\n' \
-        "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${vw_admin_plain}" "${COLOR_RESET}"
-
-    printf '\n%s[3] CADDY ADMIN PASSWORD (plaintext — bcrypt hash stored in secrets)%s\n' \
-        "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${caddy_admin_plain}" "${COLOR_RESET}"
-
-    printf '\n%s[4] BACKUP PASSPHRASE%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${backup_pass_plain}" "${COLOR_RESET}"
-
-    printf '\n%s!!! PRESS ENTER ONLY AFTER SAVING ALL CREDENTIALS !!!%s\n' \
-        "${COLOR_RED}" "${COLOR_RESET}"
-    press_enter_to_continue " Press [Enter] ONLY after saving all credentials above..."
-    clear
-
-    local env_edit_cmd="sudo make edit-env"
-
-    local _cf_cmds
-    _cf_cmds="$(printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s' \
-        "${COLOR_YELLOW}" "${COLOR_RESET}" \
-        "${COLOR_YELLOW}" "${COLOR_RESET}" \
-        "${COLOR_YELLOW}" "${COLOR_RESET}")"
-
-    if [[ "$mode" == "auto" ]]; then
-        printf '\n%s--- AUTO-GENERATED CREDENTIALS (scroll up and save plaintext passwords now) ---%s\n' \
-            "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '  %s✔%s VaultWarden admin token    : GENERATED (Argon2id hash stored in secrets)\n' \
-            "${COLOR_GREEN}" "${COLOR_RESET}"
-        printf '  %s✔%s Caddy admin password       : GENERATED (bcrypt hash stored in secrets)\n' \
-            "${COLOR_GREEN}" "${COLOR_RESET}"
-        printf '  %s✔%s Backup passphrase          : GENERATED (stored in secrets)\n' \
-            "${COLOR_GREEN}" "${COLOR_RESET}"
-
-        printf '\n%s--- CREDENTIALS REQUIRING MANUAL CONFIGURATION ---%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf 'These fields still contain CHANGE_ME placeholders.\n'
-        printf 'Set them BEFORE running %ssudo make up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate smtp_password%s         (if using SMTP)\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate email_api_token%s       (if using API-based email)\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate push_installation_id%s  (optional — mobile push)\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./edit-secrets.sh rotate push_installation_key%s (optional — mobile push)\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-
-        printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. Edit environment:   %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
-        printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
-        printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '2. Set external tokens: %s(use sudo ./edit-secrets.sh rotate <field> commands above)%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
-        printf '%s\n' "$_cf_cmds"
-        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
-        printf '     from secrets.yaml — those three must be set (step 3) before running this.\n'
-        printf '5. Start services:      %ssudo make up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '7. Export recovery kit: %ssudo ./edit-secrets.sh export-recovery-kit%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %s(Run AFTER steps 2-3 so all secrets are included in the kit)%s\n' \
-            "${COLOR_RED}" "${COLOR_RESET}"
-    else
-        printf '\n%s--- EXTERNAL CONFIGURATION CHECKLIST ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. [ ] Domain Name:   %s%s%s\n' "${COLOR_GREEN}" "${CLEAN_DOMAIN:-Not Set}" "${COLOR_RESET}"
-        printf '2. [ ] Admin Email:   %s%s%s\n' "${COLOR_GREEN}" "${ADMIN_EMAIL:-Not Set}" "${COLOR_RESET}"
-
-        printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. Edit environment:   %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
-        printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
-        printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '2. Configure secrets:   %ssudo ./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
-        printf '%s\n' "$_cf_cmds"
-        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
-        printf '     from secrets.yaml — those three must be set (step 3) before running this.\n'
-        printf '5. Start services:      %ssudo make up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '7. Export recovery kit: %ssudo ./edit-secrets.sh export-recovery-kit%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %s(Run AFTER steps 2-3 so all secrets are included in the kit)%s\n' \
-            "${COLOR_RED}" "${COLOR_RESET}"
+    if [[ "$mode" == "auto" || $capture_count -ne 0 ]]; then
+      log_error "Cannot publish setup credentials: generated plaintext/hash capture is incomplete."
+      return 1
     fi
-
-    if [[ "$mode" == "interactive" ]]; then
-        press_enter_to_continue " Press [Enter] to clear this screen and finish..."
-        clear
+    if ! _setup_remove_sensitive_workspace 0; then
+      log_error "Sensitive temporary workspace cleanup failed; setup is not complete."
+      return 1
     fi
+    printf '\n'
+    log_success "Setup completed without printing secret values."
+    log_info "No setup-credentials file was created because interactive secrets were not auto-generated."
+    log_info "Export the separate full recovery kit later with: sudo ./edit-secrets.sh export-recovery-kit"
+    return 0
+  fi
+
+  credential_file="$(publish_setup_credentials \
+    "$age_key_file" "$VW_ADMIN_PLAIN_FILE" "$VW_ADMIN_HASH_FILE" \
+    "$CADDY_PLAIN_FILE" "$CADDY_HASH_FILE")" || {
+      log_error "Secure setup-credential publication failed; setup is not complete."
+      return 1
+    }
+
+  if ! _setup_remove_sensitive_workspace 0; then
+    log_error "Protected handoff was published, but sensitive temporary cleanup failed; setup is not complete."
+    return 1
+  fi
+  printf '\n'
+  printf '╭──────────────────────────────────────────────────────────────────────────────╮\n'
+  printf '│  SETUP CREDENTIALS SAVED                                                     │\n'
+  printf '├──────────────────────────────────────────────────────────────────────────────┤\n'
+  local credential_dir credential_name
+  credential_dir="${credential_file%/*}/"
+  credential_name="${credential_file##*/}"
+  printf '│  %-76s│\n' "$credential_dir"
+  printf '│  %-76s│\n' "$credential_name"
+  printf '│  Owner          root:root                                                    │\n'
+  printf '│  Permissions    0600                                                         │\n'
+  printf '│  Credentials    3                                                            │\n'
+  printf '│                                                                              │\n'
+  printf '│  ✓ SOPS Age identity                                                        │\n'
+  printf '│  ✓ Vaultwarden admin password                                                │\n'
+  printf '│  ✓ Caddy admin password                                                      │\n'
+  printf '│                                                                              │\n'
+  printf '│  No credential values were written to terminal output.                      │\n'
+  printf '╰──────────────────────────────────────────────────────────────────────────────╯\n'
+  printf '\n'
+  log_info "Configure external provider secrets with: sudo ./edit-secrets.sh rotate FIELD"
+  log_info "Start and validate with: sudo make up && sudo make health"
+  log_warn "After copying the handoff offline, remove it explicitly: sudo rm -f '$credential_file'"
+  return 0
 }
-
 
 _verify_required_utilities() {
     local utils=(
@@ -484,16 +720,7 @@ main() {
         --id setup \
         --label "Setup" \
         --specific-lock /run/lock/vaultwarden-setup.lock || exit $?
-    _setup_cleanup() {
-        local rc=$?
-        operation_release "$rc"
-        # Clean TMP_WORKDIR here because this trap overrides the earlier trap.
-        rm -rf "$TMP_WORKDIR" 2>/dev/null || true
-        return "$rc"
-    }
-    trap _setup_cleanup EXIT
-    trap 'operation_release 130; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 130' INT
-    trap 'operation_release 143; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 143' HUP TERM
+    SETUP_OPERATION_GUARD_HELD=true
 
     _verify_required_utilities
 
@@ -525,7 +752,7 @@ main() {
     "${SCRIPT_DIR}/utilities/setup-system.sh" \
         "${_auto[@]}" "${_skip_deps[@]}" "${_use_latest[@]}" "${_dry[@]}" "${_force[@]}" \
         "${_dev_flags[@]}" "${_sops_flags[@]}" \
-        || _phase_failed 1 "System setup"             "Check missing packages: sudo apt-get update && sudo apt-get install -y docker.io age sops"             "Re-run this phase: sudo ./utilities/setup-system.sh"             "If dependencies are already installed, re-run setup with --skip-deps"
+        || _phase_failed 1 "System setup"             "Check missing packages: sudo apt-get update && sudo apt-get install -y docker.io age sops 7zip python3-argon2 python3-bcrypt"             "Re-run this phase: sudo ./utilities/setup-system.sh"             "If dependencies are already installed, re-run setup with --skip-deps"
 
     operation_set_phase "2" "Storage setup"
     log_phase 2 6 "Storage setup"
@@ -552,9 +779,10 @@ main() {
 
     operation_set_phase "5" "Firewall setup"
     log_phase 5 6 "Firewall setup"
-    "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase ufw \
-        "${_auto[@]}" "${_dry[@]}" "${_force[@]}" \
-        || log_warn "UFW firewall setup had a non-fatal issue — review output above"
+    if ! "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase ufw \
+      "${_auto[@]}" "${_dry[@]}" "${_force[@]}"; then
+      _phase_failed 5 "Required UFW firewall configuration failed"
+    fi
 
     # Apply iptables rules on a best-effort basis.
     if [[ -x "${SCRIPT_DIR}/utilities/setup-firewall.sh" ]]; then
@@ -597,8 +825,13 @@ main() {
     # and interactive mode) can write plaintext credentials for the final summary.
     # TMP_WORKDIR is mode 700 (created with umask 077), so files are root-only.
     export VW_ADMIN_PLAIN_FILE="${TMP_WORKDIR}/vw_admin_plain"
+    export VW_ADMIN_HASH_FILE="${TMP_WORKDIR}/vw_admin_hash"
     export CADDY_PLAIN_FILE="${TMP_WORKDIR}/caddy_plain"
-    export BACKUP_PLAIN_FILE="${TMP_WORKDIR}/backup_plain"
+    export CADDY_HASH_FILE="${TMP_WORKDIR}/caddy_hash"
+    export SETUP_SECRETS_PREEXISTED=false
+    if secrets_file_exists && ensure_sops_env && check_placeholder_values >/dev/null 2>&1; then
+      export SETUP_SECRETS_PREEXISTED=true
+    fi
 
     if [[ "$AUTO_MODE" == "true" ]]; then
         operation_set_phase "6" "Secrets configuration"
@@ -609,13 +842,13 @@ main() {
         local secrets_args=(--auto --skip-optional --quiet-summary)
         [[ "$FORCE" == "true" ]] && secrets_args+=(--force)
         if ! "${SCRIPT_DIR}/utilities/setup-secrets.sh" configure "${secrets_args[@]}"; then
-            log_warn "Secrets auto-configuration encountered issues — run 'sudo make edit-env', then retry with 'sudo ./setup.sh secrets'"
+          _phase_failed 6 "Required automatic secrets configuration failed"
         fi
     elif [[ -t 0 ]] && [[ "$DRY_RUN" != "true" ]]; then
-        # Interactive TTY: offer to run secrets configuration now so all four
-        # credentials are captured and shown in the final summary.
+        # Interactive TTY: offer to run secrets configuration now so newly generated
+        # administrator credentials can be captured in the protected setup handoff.
         log_info ""
-        log_info "Secrets can be configured now so all four credentials are shown in the final summary."
+        log_info "Secrets can be configured now so newly generated administrator credentials are captured in the protected setup handoff."
         local _secrets_ans
         read -r -t 300 -p "Run interactive secrets setup now? [yes/no] (default: yes): " _secrets_ans || _secrets_ans="no"
         if [[ -z "$_secrets_ans" || "$_secrets_ans" =~ ^[Yy] ]]; then
@@ -623,17 +856,21 @@ main() {
                 log_warn "Secrets configuration encountered issues — run 'sudo ./setup.sh secrets' to retry"
             fi
         else
-            log_info "Skipping secrets setup — items [2]–[4] will show placeholder text in the summary."
+            log_info "Skipping secrets setup — no setup credential handoff will be created unless new credentials are generated."
         fi
         unset _secrets_ans
     fi
 
     if [[ "$AUTO_MODE" == "true" ]]; then
-        show_post_install_summary "auto"
+        if ! show_post_install_summary "auto"; then
+          _phase_failed 6 "Secure setup-credential handoff failed"
+        fi
     else
         operation_set_phase "6" "Secrets configuration"
         log_phase 6 6 "Secrets configuration"
-        show_post_install_summary "interactive"
+        if ! show_post_install_summary "interactive"; then
+          _phase_failed 6 "Secure setup-credential handoff failed"
+        fi
     fi
     return 0
 }

@@ -421,6 +421,15 @@ _validate_full_archive_payload() {
         return 1
     }
     members="$(printf '%s\n' "$members" | sed 's#^\./##')"
+  if [[ "$backup_label" == "full" ]] && printf '%s\n' "$members" | grep -Eq \
+    '(^|/)(recovery-kit-[^/]*\.txt|vaultwarden-recovery-kit-[^/]*\.txt|vaultwarden-recovery-[^/]*\.txt|vaultwarden-setup-credentials-[^/]*\.txt|important-documents-[^/]*\.zip|\.vaultwarden-(setup-credentials|recovery-kit)[^/]*)$'; then
+    log_error "Backup validation failed: full archive contains a setup/recovery artifact or staging file." >&2
+    printf '%s\n' "$members" | grep -E \
+      '(^|/)(recovery-kit-[^/]*\.txt|vaultwarden-recovery-kit-[^/]*\.txt|vaultwarden-recovery-[^/]*\.txt|vaultwarden-setup-credentials-[^/]*\.txt|important-documents-[^/]*\.zip|\.vaultwarden-(setup-credentials|recovery-kit)[^/]*)$' \
+      | sed 's/^/  forbidden member: /' >&2
+    rm -f "$temp_tar"
+    return 1
+  fi
     if [[ -f "$live_db" ]]; then
         local count
         count="$(printf '%s\n' "$members" | grep -Fxc "$expected_db" || true)"
@@ -1287,6 +1296,13 @@ perform_full_backup() {
         "*.lock"
         "*.tmp"
         "*.age.tmp"
+        "recovery-kit-*.txt"
+        "vaultwarden-recovery-kit-*.txt"
+        "vaultwarden-recovery-*.txt"
+        "vaultwarden-setup-credentials-*.txt"
+        "important-documents-*.zip"
+        ".vaultwarden-setup-credentials*"
+        ".vaultwarden-recovery-kit*"
         ".pre-restore-*"
         "*/.pre-restore-*"
     )
@@ -1454,6 +1470,13 @@ print_backup_manifest() {
         "*.lock"
         "*.tmp"
         "*.age.tmp"
+        "recovery-kit-*.txt"
+        "vaultwarden-recovery-kit-*.txt"
+        "vaultwarden-recovery-*.txt"
+        "vaultwarden-setup-credentials-*.txt"
+        "important-documents-*.zip"
+        ".vaultwarden-setup-credentials*"
+        ".vaultwarden-recovery-kit*"
         ".pre-restore-*"
         "*/.pre-restore-*"
     )

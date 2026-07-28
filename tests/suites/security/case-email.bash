@@ -110,57 +110,161 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-if grep -En '7z[[:space:]].*-p|zip[[:space:]].*(--password|-P)|ZIP_PASSWORD|vw-enc-pass|_pass_file' "$ROOT/lib/secrets.sh" >"$TMP/source.matches"; then
-    cat "$TMP/source.matches" >&2
-    fail 'recovery-kit attachment helper must not use secret-bearing archiver argv, environment handoff, or passphrase temp files'
-fi
-if grep -En 'openssl[[:space:]]+enc|aes-256-cbc|tar\.'"enc" "$ROOT/lib/secrets.sh" >"$TMP/source.matches"; then
-    cat "$TMP/source.matches" >&2
-    fail 'recovery-kit helper must not retain the obsolete encrypted-tar format'
-fi
-grep -Fq 'prompt_password_with_confirmation \' "$ROOT/lib/secrets.sh" \
+helper_source="$TMP/encrypt-helper.sh"
+awk '
+  /^_encrypt_recovery_kit_attachment[(][)]/ { in_helper=1 }
+  in_helper { print }
+  in_helper && /^}/ { exit }
+' "$ROOT/lib/secrets.sh" >"$helper_source"
+[[ -s "$helper_source" ]] || fail 'could not isolate attachment encryption helper'
+
+transport_source="$TMP/stdin-helper.sh"
+awk '
+  /^_run_7zip_with_passphrase[(][)]/ { in_helper=1 }
+  in_helper { print }
+  in_helper && /^}/ { exit }
+' "$ROOT/lib/secrets.sh" >"$transport_source"
+[[ -s "$transport_source" ]] || fail 'could not isolate 7-Zip stdin helper'
+
+grep -Fq 'prompt_password_with_confirmation' "$helper_source" \
     || fail 'attachment helper must use the existing password confirmation helper'
-grep -Fq '"Passphrase to encrypt emailed attachment" 16' "$ROOT/lib/secrets.sh" \
+grep -Fq '"Passphrase to encrypt emailed AES-256 ZIP (independent from stored project credentials)" 16)' "$helper_source" \
     || fail 'attachment helper must enforce the 16-character minimum through the password helper'
-grep -Fq "printf 'gpg'" "$ROOT/lib/secrets.sh" \
-    || fail 'recovery-kit email dependency helper must select gpg'
-grep -Fq -- '--passphrase-fd 3' "$ROOT/lib/secrets.sh" \
-    || fail 'attachment helper must pass the secret to GnuPG through fd 3'
-grep -Fq -- '--no-symkey-cache' "$ROOT/lib/secrets.sh" \
-    || fail 'attachment helper must disable GnuPG symmetric passphrase caching'
-grep -Fq -- '3<<<"$_enc_pass"' "$ROOT/lib/secrets.sh" \
-    || fail 'attachment helper must feed the passphrase through fd 3'
-grep -Fq 'set +x' "$ROOT/lib/secrets.sh" \
+grep -Fq '_run_7zip_with_passphrase "$passphrase"' "$helper_source" \
+    || fail 'attachment helper must use the private 7-Zip password transport'
+grep -Fq "printf '%s\\n%s\\n' \"\$passphrase\" \"\$passphrase\"" "$transport_source" \
+    || fail 'archive creation must supply the confirmed passphrase twice on stdin'
+grep -Fq "printf '%s\\n' \"\$passphrase\"" "$transport_source" \
+    || fail 'archive read operations must supply one passphrase on stdin'
+grep -Fq -- '-p?*)' "$transport_source" \
+    || fail '7-Zip transport must reject inline password arguments'
+! grep -Eq 'pty[.]fork|python3 -|3<<<|fd 3' "$transport_source" \
+    || fail 'obsolete PTY bridge remains in the 7-Zip transport'
+grep -Fq 'set +x' "$helper_source" \
     || fail 'attachment helper must disable xtrace while the passphrase is live'
-grep -Fq 'unset _enc_pass' "$ROOT/lib/secrets.sh" \
+grep -Fq 'unset passphrase' "$helper_source" \
     || fail 'attachment helper must unset the passphrase promptly'
-! grep -En -- '(^|[[:space:]])--passphrase([=[:space:]]|$)|--passphrase-file|RECOVERY_PASSWORD|passphrase-file' "$ROOT/lib/secrets.sh" >"$TMP/source.matches" \
-    || { cat "$TMP/source.matches" >&2; fail 'attachment helper must not use argv, environment, or temp-file passphrase handoff'; }
+# Static policy: reject password-like scalar variables attached to or passed
+# immediately with an archiver password switch. A standalone literal -p next
+# to an argument-array splice is allowed; the sentinel checks below prove that
+# the actual passphrase never appears in argv or environment at runtime.
+! awk '
+  /-p|--password/ &&
+  /\$[{]?(passphrase|password|secret|zip_password|recovery_password)([}]|[^A-Za-z0-9_])/ {
+    print FILENAME ":" FNR ":" $0
+    found=1
+  }
+  END { exit found ? 0 : 1 }
+' "$helper_source" "$transport_source" >"$TMP/source.matches" \
+    || { cat "$TMP/source.matches" >&2; fail 'attachment helper must not place a passphrase variable in archiver argv'; }
+! grep -En -- 'ZIP_PASSWORD|RECOVERY_PASSWORD|passphrase[-_]file|_pass_file' "$helper_source" "$transport_source" >"$TMP/source.matches" \
+    || { cat "$TMP/source.matches" >&2; fail 'attachment helper must not use environment or passphrase-file handoff'; }
+! grep -En 'openssl[[:space:]]+enc|aes-256-cbc|tar[.]gpg|--symmetric|OpenPGP|GnuPG' "$helper_source" "$transport_source" >"$TMP/source.matches" \
+    || { cat "$TMP/source.matches" >&2; fail 'obsolete encrypted-tar/GnuPG attachment contract remains'; }
 
 mkdir -p "$TMP/bin"
-cat > "$TMP/bin/gpg" <<'MOCK_GPG'
+cat > "$TMP/bin/7zz" <<'MOCK_7ZZ'
 #!/usr/bin/env bash
-printf '%s\n' "$@" > "$MOCK_ARGV_FILE"
-export -p > "$MOCK_ENV_FILE"
-cat <&3 > "$MOCK_FD_FILE"
-out=""
-while [[ $# -gt 0 ]]; do
-    if [[ "$1" == "--output" ]]; then
-        out="$2"
-        shift 2
-        continue
-    fi
-    shift
-done
-cat > "$MOCK_STDIN_FILE"
-cp "$MOCK_STDIN_FILE" "$out"
-MOCK_GPG
-chmod +x "$TMP/bin/gpg"
+set -euo pipefail
+: "${MOCK_ARGV_FILE:?}" "${MOCK_STDIN_FILE:?}" "${MOCK_ENV_FILE:?}"
+printf '%s\n' "$@" >"$MOCK_ARGV_FILE"
+export -p >"$MOCK_ENV_FILE"
+cat >"$MOCK_STDIN_FILE"
+case "${1:-}" in
+  a|u)
+    grep -Fxq -- '-p' "$MOCK_ARGV_FILE"
+    mapfile -t lines <"$MOCK_STDIN_FILE"
+    [[ "${#lines[@]}" -eq 2 && "${lines[0]}" == "${lines[1]}" ]]
+    ;;
+  t|x|e|l)
+    ! grep -Fxq -- '-p' "$MOCK_ARGV_FILE"
+    mapfile -t lines <"$MOCK_STDIN_FILE"
+    [[ "${#lines[@]}" -eq 1 && "${lines[0]}" != 'WrongNonProdPassphrase16' ]]
+    ;;
+  *) exit 7 ;;
+esac
+MOCK_7ZZ
+chmod +x "$TMP/bin/7zz"
+
+sentinel='TEST_ATTACHMENT_SECRET_1234567890'
+(
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH"
+    export PATH
+    # shellcheck source=../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    export MOCK_ARGV_FILE="$TMP/add.argv"
+    export MOCK_STDIN_FILE="$TMP/add.stdin"
+    export MOCK_ENV_FILE="$TMP/add.env"
+    _run_7zip_with_passphrase "$sentinel" 7zz \
+        a -tzip -mem=AES256 -p -- out.zip recovery-kit.txt
+)
+! grep -Fq "$sentinel" "$TMP/add.argv" \
+    || fail '7-Zip argv contains the sentinel passphrase'
+! grep -Fq "$sentinel" "$TMP/add.env" \
+    || fail '7-Zip environment contains the sentinel passphrase'
+[[ "$(grep -Fxc "$sentinel" "$TMP/add.stdin")" -eq 2 ]] \
+    || fail 'archive creation did not receive the confirmed passphrase twice'
+grep -Fxq -- '-p' "$TMP/add.argv" \
+    || fail 'archive creation must retain standalone -p to enable encryption'
+
+(
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH"
+    export PATH
+    # shellcheck source=../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    export MOCK_ARGV_FILE="$TMP/test.argv"
+    export MOCK_STDIN_FILE="$TMP/test.stdin"
+    export MOCK_ENV_FILE="$TMP/test.env"
+    _run_7zip_with_passphrase "$sentinel" 7zz \
+        t -bd -y -p -- out.zip
+)
+! grep -Fq "$sentinel" "$TMP/test.argv" \
+    || fail '7-Zip test argv contains the sentinel passphrase'
+! grep -Fq "$sentinel" "$TMP/test.env" \
+    || fail '7-Zip test environment contains the sentinel passphrase'
+[[ "$(grep -Fxc "$sentinel" "$TMP/test.stdin")" -eq 1 ]] \
+    || fail 'archive test did not receive exactly one passphrase line'
+! grep -Fxq -- '-p' "$TMP/test.argv" \
+    || fail 'archive read operation must remove standalone -p for non-TTY stdin use'
+
+if (
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH"
+    export PATH
+    # shellcheck source=../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    export MOCK_ARGV_FILE="$TMP/wrong.argv"
+    export MOCK_STDIN_FILE="$TMP/wrong.stdin"
+    export MOCK_ENV_FILE="$TMP/wrong.env"
+    _run_7zip_with_passphrase 'WrongNonProdPassphrase16' 7zz \
+        t -bd -y -p -- out.zip
+); then
+    fail 'wrong synthetic passphrase must be rejected by the transport smoke test'
+fi
+
+cat > "$TMP/bin/7z" <<'MOCK_7Z'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  l)
+    cat <<'LISTING'
+Type = zip
+Method = AES-256 Deflate
+----------
+Path = recovery-kit.txt
+LISTING
+    ;;
+  t) exit 1 ;;
+  *) exit 1 ;;
+esac
+MOCK_7Z
+chmod +x "$TMP/bin/7z"
 
 plaintext="$TMP/recovery-kit.txt"
-printf 'test recovery kit\n' > "$plaintext"
-sentinel='TEST_ATTACHMENT_SECRET_1234567890'
-
+printf 'test recovery kit\n' >"$plaintext"
+transport_log="$TMP/transport.log"
 run_encrypt_with_prompt() {
     local prompt_body="$1" out_file="$2"
     (
@@ -170,116 +274,141 @@ run_encrypt_with_prompt() {
         # shellcheck source=../lib/secrets.sh
         source "$ROOT/lib/secrets.sh"
         prompt_password_with_confirmation(){ eval "$prompt_body"; }
-        MOCK_ARGV_FILE="$TMP/gpg.argv"
-        MOCK_ENV_FILE="$TMP/gpg.env"
-        MOCK_FD_FILE="$TMP/gpg.fd"
-        MOCK_STDIN_FILE="$TMP/gpg.stdin"
-        export MOCK_ARGV_FILE MOCK_ENV_FILE MOCK_FD_FILE MOCK_STDIN_FILE
-        _encrypt_recovery_kit_attachment "$plaintext" "$out_file" gpg
+        _run_7zip_with_passphrase() {
+            local secret="$1"
+            shift 2
+            printf '%s\n' "$secret" >>"$transport_log"
+            case " ${*} " in
+              *' a '*) printf 'mock zip\n' >"$out_file"; return 0 ;;
+              *' t '*) [[ "$secret" != 'VWOCI-DELIBERATELY-WRONG-PASSPHRASE' ]] ;;
+              *) return 1 ;;
+            esac
+        }
+        export transport_log out_file
+        _encrypt_recovery_kit_attachment "$plaintext" "$out_file" 7z
     )
 }
 
-short_prompt='return 1'
-if run_encrypt_with_prompt "$short_prompt" "$TMP/short.enc"; then
-    fail 'short passphrase validation failure must reject before archive success'
+if run_encrypt_with_prompt 'return 1' "$TMP/short.zip"; then
+    fail 'password-helper rejection must stop attachment creation'
 fi
-[[ ! -s "$TMP/short.enc" ]] || fail 'short passphrase rejection must not leave a successful archive'
-
-mismatch_prompt='return 1'
-if run_encrypt_with_prompt "$mismatch_prompt" "$TMP/mismatch.enc"; then
-    fail 'confirmation mismatch validation failure must reject before archive success'
-fi
-[[ ! -s "$TMP/mismatch.enc" ]] || fail 'confirmation mismatch must not leave a successful archive'
+[[ ! -s "$TMP/short.zip" ]] || fail 'rejected passphrase must not leave a successful archive'
 
 exact16='1234567890abcdef'
-run_encrypt_with_prompt "printf %s '$exact16'" "$TMP/exact.enc" \
+run_encrypt_with_prompt "printf %s '$exact16'" "$TMP/exact.zip" \
     || fail 'matching 16-character passphrase should be accepted'
 longer='1234567890abcdefghi'
-run_encrypt_with_prompt "printf %s '$longer'" "$TMP/long.enc" \
+run_encrypt_with_prompt "printf %s '$longer'" "$TMP/long.zip" \
     || fail 'matching longer passphrase should be accepted'
+grep -Fq "$exact16" "$transport_log" \
+    || fail 'attachment helper did not pass the selected passphrase to the stdin transport'
 
-run_encrypt_with_prompt "printf %s '$sentinel'" "$TMP/sentinel.enc" \
-    || fail 'sentinel encryption should succeed'
-! grep -Fq "$sentinel" "$TMP/gpg.argv" \
-    || fail 'GnuPG argv contains sentinel secret'
-! grep -Fq "$sentinel" "$TMP/gpg.env" \
-    || fail 'GnuPG environment contains sentinel secret'
-grep -Fq "$sentinel" "$TMP/gpg.fd" \
-    || fail 'GnuPG did not receive passphrase through fd capture'
-tar -tf "$TMP/gpg.stdin" | grep -Fxq 'recovery-kit.txt' \
-    || fail 'tar payload was not supplied on stdin to GnuPG'
-require_gpg_arg() {
-    local arg="$1"
-    grep -Fxq -- "$arg" "$TMP/gpg.argv" || fail "GnuPG argv missing required option: $arg"
-}
-require_gpg_arg '--batch'
-require_gpg_arg '--yes'
-require_gpg_arg '--pinentry-mode'
-require_gpg_arg 'loopback'
-require_gpg_arg '--passphrase-fd'
-require_gpg_arg '3'
-require_gpg_arg '--no-symkey-cache'
-require_gpg_arg '--symmetric'
-require_gpg_arg '--output'
-! grep -Eq -- '(^|[[:space:]])(--passphrase|--passphrase-file|--password|-P)([=[:space:]]|$)' "$TMP/gpg.argv" \
-    || fail 'secret-bearing password argv appeared unexpectedly'
-
-if command -v gpg >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+real_tool=""
+if command -v 7zz >/dev/null 2>&1; then
+    real_tool=7zz
+elif command -v 7z >/dev/null 2>&1; then
+    real_tool=7z
+fi
+if [[ -n "$real_tool" ]]; then
     smoke_dir="$TMP/smoke"
-    mkdir -p "$smoke_dir/out" "$smoke_dir/gnupg"
-    chmod 700 "$smoke_dir/gnupg"
-    printf 'real archive sentinel content\n' > "$smoke_dir/recovery-kit.txt"
+    mkdir -p "$smoke_dir/out"
+    printf 'real archive sentinel content\n' >"$smoke_dir/recovery-kit.txt"
     (
         cd "$ROOT"
-        GNUPGHOME="$smoke_dir/gnupg"
-        export GNUPGHOME
         # shellcheck source=../lib/secrets.sh
         source "$ROOT/lib/secrets.sh"
         prompt_password_with_confirmation(){ printf '%s' 'NonProdTestPassphrase16'; }
-        _encrypt_recovery_kit_attachment "$smoke_dir/recovery-kit.txt" "$smoke_dir/kit.tar.gpg" gpg
-    )
-    [[ -s "$smoke_dir/kit.tar.gpg" ]] || fail 'real GnuPG archive was not created'
-    ! LC_ALL=C grep -aFq 'real archive sentinel content' "$smoke_dir/kit.tar.gpg" \
-        || fail 'real GnuPG archive contains plaintext sentinel content'
-    gpg_decrypt_with_fd() (
-        local input_file="$1" output_file="$2" passphrase="$3"
-        GNUPGHOME="$smoke_dir/gnupg"
-        export GNUPGHOME
-        gpg \
-            --batch \
-            --yes \
-            --pinentry-mode loopback \
-            --passphrase-fd 3 \
-            --no-symkey-cache \
-            --output "$output_file" \
-            --decrypt "$input_file" \
-            3<<<"$passphrase" >/dev/null 2>&1
-    )
-    gpg_decrypt_with_fd "$smoke_dir/kit.tar.gpg" "$smoke_dir/kit.tar" 'NonProdTestPassphrase16' \
-        || fail 'real GnuPG archive did not decrypt with the correct passphrase'
-    if gpg_decrypt_with_fd "$smoke_dir/kit.tar.gpg" "$smoke_dir/wrong.tar" 'WrongNonProdPassphrase16'; then
-        fail 'real GnuPG archive decrypted with the wrong passphrase'
-    fi
-    tar -C "$smoke_dir/out" -xf "$smoke_dir/kit.tar"
+        _encrypt_recovery_kit_attachment \
+            "$smoke_dir/recovery-kit.txt" "$smoke_dir/kit.zip" "$real_tool"
+        _run_7zip_with_passphrase 'NonProdTestPassphrase16' "$real_tool" \
+            x -bd -y -p "-o$smoke_dir/out" -- "$smoke_dir/kit.zip" >/dev/null 2>&1
+        if _run_7zip_with_passphrase 'WrongNonProdPassphrase16' "$real_tool" \
+            t -bd -y -p -- "$smoke_dir/kit.zip" >/dev/null 2>&1; then
+            exit 9
+        fi
+    ) || fail 'real AES-256 ZIP stdin smoke test failed'
+    [[ -s "$smoke_dir/kit.zip" ]] || fail 'real AES-256 ZIP archive was not created'
+    ! LC_ALL=C grep -aFq 'real archive sentinel content' "$smoke_dir/kit.zip" \
+        || fail 'real AES-256 ZIP contains plaintext sentinel content'
     cmp "$smoke_dir/recovery-kit.txt" "$smoke_dir/out/recovery-kit.txt" \
-        || fail 'real archive extracted content mismatch'
-    tampered="$smoke_dir/kit.tampered.tar.gpg"
-    cp "$smoke_dir/kit.tar.gpg" "$tampered"
-    orig_byte=$(od -An -tx1 -j 16 -N1 "$tampered" | tr -d ' \n')
-    new_byte=00
-    [[ "$orig_byte" == "00" ]] && new_byte=ff
-    printf '%b' "\\x${new_byte}" | dd of="$tampered" bs=1 seek=16 count=1 conv=notrunc >/dev/null 2>&1
-    if gpg_decrypt_with_fd "$tampered" "$smoke_dir/tampered.tar" 'NonProdTestPassphrase16'; then
-        fail 'tampered GnuPG archive decrypted successfully'
-    fi
+        || fail 'real AES-256 ZIP extracted content mismatch'
 else
-    printf 'Real GnuPG recovery-kit attachment smoke test skipped: gpg or tar unavailable.\n'
+    printf 'Real AES-256 ZIP stdin smoke test skipped: 7z/7zz unavailable.\n'
 fi
 
-printf 'Recovery-kit attachment passphrase contract tests passed.\n'
+printf 'Recovery-kit AES-256 ZIP passphrase contract tests passed.\n'
 )
 
 check_recovery_kit_attachment_passphrase_contract
+
+check_health_alert_lock_mode_normalization() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+log_info(){ :; }
+log_warn(){ :; }
+log_error(){ :; }
+log_debug(){ :; }
+
+# shellcheck source=lib/health-alerts.sh
+source "$ROOT/lib/health-alerts.sh"
+
+ALERT_LOCK_DIR="$TMP/alerts"
+install -d -m 0700 "$ALERT_LOCK_DIR"
+HEALTH_ALERT_STATE_LOCK_FD=""
+
+mkdir -p "$TMP/bin"
+MOCK_CHMOD_LOG="$TMP/chmod.log"
+MOCK_REAL_CHMOD="$(command -v chmod)"
+export MOCK_CHMOD_LOG MOCK_REAL_CHMOD
+
+cat > "$TMP/bin/chmod" <<'MOCK_CHMOD'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >> "$MOCK_CHMOD_LOG"
+[[ "${MOCK_CHMOD_FAIL:-0}" != "1" ]] || exit 1
+exec "$MOCK_REAL_CHMOD" "$@"
+MOCK_CHMOD
+chmod 0755 "$TMP/bin/chmod"
+
+PATH="$TMP/bin:$PATH"
+export PATH
+
+lock_path="$(_health_alert_state_lock_path)"
+_health_alert_state_lock_prepare "$lock_path" \
+    || fail "new health-alert lock was not prepared"
+grep -Fxq "0600 -- $lock_path" "$MOCK_CHMOD_LOG" \
+    || fail "new lock creation did not explicitly normalize mode 0600"
+
+lock_mode="$(
+    stat -c '%a' "$lock_path" 2>/dev/null \
+        || stat -f '%Lp' "$lock_path"
+)"
+[[ "$lock_mode" == "600" ]] \
+    || fail "normalized health-alert lock mode is not 0600"
+
+rm -f -- "$lock_path"
+: > "$MOCK_CHMOD_LOG"
+export MOCK_CHMOD_FAIL=1
+if _health_alert_state_lock_prepare "$lock_path" >/dev/null 2>&1; then
+    fail "lock preparation succeeded when explicit mode normalization failed"
+fi
+[[ ! -e "$lock_path" ]] \
+    || fail "failed lock-mode normalization left a newly created lock behind"
+
+printf 'Health-alert lock mode normalization tests passed.\n'
+)
+
+check_health_alert_lock_mode_normalization
 
 check_recovery_notification_retry_contract() (
 set -euo pipefail
@@ -346,7 +475,7 @@ _incident_format_duration(){
     printf '5m (300s)'
 }
 
-mkdir -p "$ALERT_LOCK_DIR"
+install -d -m 0700 "$ALERT_LOCK_DIR"
 : > "$ACTIVE_INCIDENT_FILE"
 
 first_rc=0

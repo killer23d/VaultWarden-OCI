@@ -538,144 +538,542 @@ cleanup_old_secret_backups() {
     return 0
 }
 
-_secure_shred() {
-    local target="$1"
-    [[ -f "$target" ]] || return 0
-    if command -v shred >/dev/null 2>&1; then
-        shred -fuz "$target" 2>/dev/null && return 0
-    fi
-    local file_size
-    file_size=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "4096")
-    [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=4096
-    (( file_size == 0 )) && file_size=4096
-    dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
-    rm -f "$target"
+_remove_sensitive_file() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || return 1
+
+  # Best-effort overwrite and unlink. Physical erasure is not guaranteed on
+  # SSDs, snapshots, journaling filesystems, or copy-on-write storage.
+  [[ ! -L "$target" ]] || return 1
+  if [[ ! -e "$target" ]]; then
+    return 0
+  fi
+  [[ -f "$target" ]] || return 1
+
+  if command -v shred >/dev/null 2>&1; then
+    shred -fuz -- "$target" 2>/dev/null || true
+  fi
+
+  # Recheck before the unlink fallback so a replacement symlink is rejected.
+  [[ ! -L "$target" ]] || return 1
+  if [[ -e "$target" ]]; then
+    [[ -f "$target" ]] || return 1
+    rm -f -- "$target" 2>/dev/null || return 1
+  fi
+  [[ ! -e "$target" && ! -L "$target" ]]
 }
 
-_tmpfs_dir() {
-    local uid
-    uid=$(id -u)
+# Remove eligible plaintext recovery kits that survived the primary transient
+# cleanup. This fallback runs only during the existing routine-maintenance flow.
+cleanup_expired_recovery_kits() {
+  local recovery_dir="/root/vaultwarden-recovery"
+  local min_age_seconds=1800
+  local dry_run="${1:-false}"
+  local candidate parent filename directory_metadata
+  local initial_metadata current_metadata
+  local device inode current_device current_inode uid gid mode links mtime
+  local now age cleanup_result=0 resolved_dir candidate_list
 
-    if [[ -d /dev/shm && -w /dev/shm ]]; then
-        echo "/dev/shm"
-        return 0
+  case "$dry_run" in
+    true|false) ;;
+    *)
+      log_error "recovery cleanup: invalid dry-run value: $dry_run"
+      return 1
+      ;;
+  esac
+
+  # Internal deterministic-test hooks only. They are intentionally unavailable
+  # as operator configuration and cannot change production defaults.
+  if [[ -n "${RECOVERY_KIT_DIR:-}" ]]; then
+    if [[ "${VW_TEST_MODE:-false}" != "true" ]]; then
+      log_error "recovery cleanup: RECOVERY_KIT_DIR override is test-only"
+      return 1
     fi
-
-    local run_user="/run/user/$uid"
-    if [[ -d "$run_user" && -w "$run_user" ]]; then
-        echo "$run_user"
-        return 0
+    recovery_dir="$RECOVERY_KIT_DIR"
+  fi
+  if [[ -n "${VW_RECOVERY_CLEANUP_MIN_AGE_SECONDS:-}" ]]; then
+    if [[ "${VW_TEST_MODE:-false}" != "true" ]] ||
+       [[ ! "$VW_RECOVERY_CLEANUP_MIN_AGE_SECONDS" =~ ^[0-9]+$ ]]; then
+      log_error "recovery cleanup: invalid internal age override"
+      return 1
     fi
+    min_age_seconds="$VW_RECOVERY_CLEANUP_MIN_AGE_SECONDS"
+  fi
 
-    if [[ -w /tmp ]]; then
-        printf '\n WARNING: /dev/shm and /run/user/%s are unavailable.\n' "$uid" > /dev/tty 2>/dev/null || true
-        printf '            Recovery kit will be written to /tmp which may NOT be tmpfs.\n' > /dev/tty 2>/dev/null || true
-        printf '            Shred effectiveness on CoW/journaled filesystems is not guaranteed.\n\n' > /dev/tty 2>/dev/null || true
-        echo "/tmp"
-        return 0
-    fi
-
-    log_error "_tmpfs_dir: no writable tmpfs candidate found (/dev/shm, /run/user/$uid, /tmp)"
+  [[ "$recovery_dir" == /* ]] || {
+    log_error "recovery cleanup: directory must be absolute: $recovery_dir"
     return 1
+  }
+  if [[ -L "$recovery_dir" ]]; then
+    log_error "recovery cleanup: refusing symlink recovery directory: $recovery_dir"
+    return 1
+  fi
+  [[ -e "$recovery_dir" ]] || return 0
+  [[ -d "$recovery_dir" ]] || {
+    log_error "recovery cleanup: expected directory is not a directory: $recovery_dir"
+    return 1
+  }
+  resolved_dir="$(realpath -e -- "$recovery_dir" 2>/dev/null)" || {
+    log_error "recovery cleanup: cannot resolve recovery directory: $recovery_dir"
+    return 1
+  }
+  if [[ "$resolved_dir" != "$recovery_dir" ]]; then
+    log_error "recovery cleanup: directory is not the exact canonical path: $recovery_dir"
+    return 1
+  fi
+  directory_metadata="$(stat -c '%u:%g:%a' -- "$recovery_dir" 2>/dev/null)" || {
+    log_error "recovery cleanup: cannot inspect recovery directory: $recovery_dir"
+    return 1
+  }
+  if [[ "$directory_metadata" != "0:0:700" ]]; then
+    log_error "recovery cleanup: expected root:root mode 0700 directory: $recovery_dir"
+    return 1
+  fi
+
+  now="$(date +%s)" || return 1
+  candidate_list="$(mktemp "${TMPDIR:-/tmp}/vw-recovery-candidates.XXXXXXXXXX")" || {
+    log_error "recovery cleanup: failed to allocate a protected candidate list"
+    return 1
+  }
+  if ! find -P "$recovery_dir" -mindepth 1 -maxdepth 1 \
+      -name 'vaultwarden-recovery-kit-*.txt' -print0 >"$candidate_list" 2>/dev/null; then
+    log_error "recovery cleanup: failed to enumerate recovery-kit candidates"
+    rm -f -- "$candidate_list" 2>/dev/null || true
+    return 1
+  fi
+  while IFS= read -r -d '' candidate; do
+    parent="$(dirname -- "$candidate")"
+    filename="$(basename -- "$candidate")"
+
+    if [[ "$parent" != "$recovery_dir" ]]; then
+      log_warn "recovery cleanup: refusing candidate outside expected directory: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ ! "$filename" =~ ^vaultwarden-recovery-kit-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\.txt$ ]]; then
+      log_warn "recovery cleanup: refusing matching candidate with an unexpected filename: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+      continue
+    fi
+    if [[ -L "$candidate" ]]; then
+      log_warn "recovery cleanup: refusing symlink candidate: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ ! -f "$candidate" ]]; then
+      log_warn "recovery cleanup: refusing non-regular candidate: $candidate"
+      cleanup_result=1
+      continue
+    fi
+
+    initial_metadata="$(stat -c '%d:%i:%u:%g:%a:%h:%Y' -- "$candidate" 2>/dev/null)" || {
+      if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+        continue
+      fi
+      log_warn "recovery cleanup: cannot inspect candidate: $candidate"
+      cleanup_result=1
+      continue
+    }
+    IFS=: read -r device inode uid gid mode links mtime <<<"$initial_metadata"
+    if [[ "$uid" != 0 || "$gid" != 0 ]]; then
+      log_warn "recovery cleanup: refusing candidate not owned by root:root: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ "$mode" != 600 ]]; then
+      log_warn "recovery cleanup: refusing candidate with mode $mode instead of 0600: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ "$links" != 1 ]]; then
+      log_warn "recovery cleanup: refusing candidate with link count $links: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if (( mtime > now )); then
+      log_warn "recovery cleanup: retaining candidate with a future modification time: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    age=$((now - mtime))
+    if (( age < min_age_seconds )); then
+      log_debug "recovery cleanup: retaining young recovery kit: $candidate"
+      continue
+    fi
+
+    current_metadata="$(stat -c '%d:%i:%u:%g:%a:%h:%Y' -- "$candidate" 2>/dev/null)" || {
+      if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+        continue
+      fi
+      log_warn "recovery cleanup: candidate became unreadable before removal: $candidate"
+      cleanup_result=1
+      continue
+    }
+    IFS=: read -r current_device current_inode _ <<<"$current_metadata"
+    if [[ "$current_device" != "$device" ||
+          "$current_inode" != "$inode" ||
+          "$current_metadata" != "$initial_metadata" ]]; then
+      log_warn "recovery cleanup: candidate identity or security metadata changed; leaving it untouched: $candidate"
+      cleanup_result=1
+      continue
+    fi
+
+    if [[ "$dry_run" == "true" ]]; then
+      log_info "[DRY RUN] Would remove expired plaintext recovery kit: $candidate"
+      continue
+    fi
+    if _remove_sensitive_file "$candidate"; then
+      log_info "Removed expired plaintext recovery kit: $candidate"
+    else
+      log_error "recovery cleanup: failed to remove safe expired candidate: $candidate"
+      cleanup_result=1
+    fi
+  done < "$candidate_list"
+  if ! rm -f -- "$candidate_list" 2>/dev/null; then
+    log_error "recovery cleanup: failed to remove the protected candidate list"
+    cleanup_result=1
+  fi
+  return "$cleanup_result"
 }
 
+_prepare_recovery_dir() {
+  # Recovery artifacts belong outside the checkout and outside the normal
+  # full-backup input tree.
+  local target_dir="${RECOVERY_KIT_DIR:-/root/vaultwarden-recovery}"
+  if [[ -L "$target_dir" || ( -e "$target_dir" && ! -d "$target_dir" ) ]]; then
+    log_error "Recovery directory is unsafe: $target_dir"
+    return 1
+  fi
+  local old_umask
+  old_umask="$(umask)"
+  umask 077
+  if ! mkdir -p -- "$target_dir"; then
+    umask "$old_umask"
+    log_error "Cannot create protected recovery directory: $target_dir"
+    return 1
+  fi
+  umask "$old_umask"
+  if (( EUID == 0 )); then
+    chown root:root -- "$target_dir" || {
+      log_error "Cannot set root ownership on recovery directory: $target_dir"
+      return 1
+    }
+  elif [[ -z "${RECOVERY_KIT_DIR:-}" ]]; then
+    log_error "The default recovery directory requires root."
+    return 1
+  fi
+  chmod 0700 "$target_dir" || {
+    log_error "Cannot set mode 0700 on recovery directory: $target_dir"
+    return 1
+  }
+  printf '%s\n' "$target_dir"
+}
+
+# ---------------------------------------------------------------------------
+# _schedule_recovery_cleanup FILE [DELAY]
+#
+# Accepts a transient cleanup job for the current regular, non-symlink FILE.
+# systemd-run is primary; at is an optional fallback. The static detached
+# command receives the absolute path as a positional argument and rechecks the
+# file type before best-effort overwrite/unlink. No recovery content or
+# passphrase is placed in scheduler arguments, unit metadata, or environment.
+# ---------------------------------------------------------------------------
+_schedule_recovery_cleanup() {
+  local target="${1:-}" delay="${2:-30m}"
+  local absolute_file delay_count delay_unit at_unit systemd_run="" at_cmd=""
+  local unit_name cleanup_body at_command escaped_body escaped_file
+
+  unset _RECOVERY_CLEANUP_SCHEDULER _RECOVERY_CLEANUP_DELAY
+  [[ -n "$target" && ! -L "$target" && -f "$target" ]] || return 1
+  absolute_file="$(realpath -- "$target" 2>/dev/null)" || return 1
+  [[ "$absolute_file" == /* && ! -L "$absolute_file" && -f "$absolute_file" ]] || return 1
+
+  if [[ "$delay" =~ ^([1-9][0-9]*)(s|m|h|d)$ ]]; then
+    delay_count="${BASH_REMATCH[1]}"
+    delay_unit="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+  case "$delay_unit" in
+    s) at_unit="seconds" ;;
+    m) at_unit="minutes" ;;
+    h) at_unit="hours" ;;
+    d) at_unit="days" ;;
+    *) return 1 ;;
+  esac
+
+  unit_name="vaultwarden-recovery-cleanup-$(date -u +%s)-$$-${RANDOM}"
+  [[ "$unit_name" =~ ^[A-Za-z0-9_.@-]+$ ]] || return 1
+  cleanup_body='
+target=$1
+if /bin/test -L "$target"; then exit 1; fi
+if ! /bin/test -e "$target"; then exit 0; fi
+/bin/test -f "$target" || exit 1
+if /bin/test -x /usr/bin/shred; then
+  /usr/bin/shred -fuz -- "$target" 2>/dev/null || true
+fi
+if /bin/test -L "$target"; then exit 1; fi
+if /bin/test -e "$target"; then
+  /bin/test -f "$target" || exit 1
+  /bin/rm -f -- "$target" || exit 1
+fi
+! /bin/test -e "$target" && ! /bin/test -L "$target"
+'
+
+  systemd_run="$(command -v systemd-run 2>/dev/null || true)"
+  if [[ -n "$systemd_run" ]] && "$systemd_run" \
+      --quiet \
+      --collect \
+      --unit="$unit_name" \
+      --on-active="$delay" \
+      /bin/sh -c "$cleanup_body" sh "$absolute_file"; then
+    _RECOVERY_CLEANUP_SCHEDULER="systemd"
+    _RECOVERY_CLEANUP_DELAY="$delay"
+    return 0
+  fi
+
+  at_cmd="$(command -v at 2>/dev/null || true)"
+  [[ -n "$at_cmd" ]] || return 1
+  # at reads a POSIX-sh job from stdin. Single-quote each positional word
+  # without relying on Bash-only printf %q output such as $'...'.
+  escaped_body="${cleanup_body//\'/\'\\\'\'}"
+  escaped_file="${absolute_file//\'/\'\\\'\'}"
+  printf -v at_command "/bin/sh -c '%s' sh '%s'\n" \
+    "$escaped_body" "$escaped_file"
+  if printf '%s' "$at_command" |
+      "$at_cmd" "now + ${delay_count} ${at_unit}" >/dev/null 2>&1; then
+    _RECOVERY_CLEANUP_SCHEDULER="at"
+    _RECOVERY_CLEANUP_DELAY="$delay"
+    return 0
+  fi
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # _check_recovery_kit_email_deps
 #
-# Prints the encryption tool name ("gpg") if available, returns 1 if
-# required tools are missing. Callers should warn and skip gracefully on failure.
+# Prints the AES-ZIP tool name when the secure prompt, SMTP attachment helper,
+# and an archiver are available. Prefer upstream 7zz from Ubuntu's 7zip
+# package, with legacy 7z retained as a compatibility fallback.
 # ---------------------------------------------------------------------------
 _check_recovery_kit_email_deps() {
-    if command -v gpg >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
-        printf 'gpg'
-        return 0
-    fi
-    log_warn "recovery-kit email: gpg and tar are required -- skipping email option."
-    log_warn "  Install with: sudo apt-get install -y gnupg tar"
+  declare -F prompt_password_with_confirmation >/dev/null 2>&1 || {
+    log_error "recovery-kit email: secure passphrase prompt helper is unavailable."
     return 1
+  }
+  declare -F send_smtp_attachment >/dev/null 2>&1 || {
+    log_error "recovery-kit email: SMTP attachment helper is unavailable."
+    return 1
+  }
+  local candidate
+  for candidate in 7zz 7z; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  log_warn "recovery-kit email: an AES-ZIP capable 7-Zip command is required."
+  log_warn "Install on Ubuntu 24.04 with: sudo apt-get install -y 7zip"
+  return 1
 }
 
+# ---------------------------------------------------------------------------
+# _run_7zip_with_passphrase PASSPHRASE TOOL ARG...
+#
+# Sends the passphrase only through the archiver's standard input. For archive
+# creation/update, a standalone -p switch enables encryption and the confirmed
+# passphrase is supplied twice. For read operations, standalone -p is removed:
+# an encrypted archive causes 7-Zip to request the password from stdin, while
+# avoiding the non-TTY -p behavior that differs between 7z and upstream 7zz.
+# Inline -pPASSWORD arguments are rejected so secrets never enter argv.
+# ---------------------------------------------------------------------------
+_run_7zip_with_passphrase() {
+  local passphrase="$1"
+  shift
+  local tool="$1"
+  shift
+
+  [[ -n "$passphrase" ]] || return 64
+  [[ "$passphrase" != *$'\n'* && "$passphrase" != *$'\r'* ]] || return 64
+  command -v "$tool" >/dev/null 2>&1 || return 127
+
+  local command_name="${1:-}"
+  [[ -n "$command_name" ]] || return 64
+
+  local -a argv=("$@") safe_argv=()
+  local arg prompt_switch=false rc=0
+  for arg in "${argv[@]}"; do
+    case "$arg" in
+      -p)
+        if [[ "$command_name" == "a" || "$command_name" == "u" ]]; then
+          prompt_switch=true
+          safe_argv+=("$arg")
+        fi
+        ;;
+      -p?*)
+        # Never accept an inline password, even if a caller constructs one.
+        return 64
+        ;;
+      *) safe_argv+=("$arg") ;;
+    esac
+  done
+
+  if [[ "$command_name" == "a" || "$command_name" == "u" ]]; then
+    if [[ "$prompt_switch" != "true" ]]; then
+      safe_argv=("${safe_argv[0]}" -p "${safe_argv[@]:1}")
+    fi
+    if printf '%s\n%s\n' "$passphrase" "$passphrase" | "$tool" "${safe_argv[@]}"; then
+      return 0
+    else
+      rc="${PIPESTATUS[1]}"
+      return "$rc"
+    fi
+  fi
+
+  # Test/extract/list operations prompt automatically when encrypted content is
+  # encountered. Supplying one line on stdin is portable across upstream 7zz
+  # and the retained legacy 7z fallback.
+  if printf '%s\n' "$passphrase" | "$tool" "${safe_argv[@]}"; then
+    return 0
+  else
+    rc="${PIPESTATUS[1]}"
+    return "$rc"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # _encrypt_recovery_kit_attachment PLAINTEXT_FILE OUTPUT_FILE TOOL
 #
-# Encrypts PLAINTEXT_FILE into OUTPUT_FILE as a symmetric OpenPGP message. The
-# plaintext is first wrapped as a small tar stream so file metadata and content
-# can be validated after decryption. Bash collects and validates the independent
-# attachment passphrase with prompt_password_with_confirmation (minimum 16
-# characters, confirmation required), then passes it to GnuPG on fd 3. The
-# passphrase is never exported, logged, stored in a temporary file, used in a
-# filename, or interpolated into process argv; xtrace is disabled while the
-# secret is live.
-# Returns 0 on success, 1 on failure. Shreds OUTPUT_FILE on failure.
+# Creates a single-member AES-256 ZIP. The independent attachment passphrase is
+# collected with prompt_password_with_confirmation (minimum 16 characters) and
+# sent to 7-Zip only on stdin. The helper validates the container type, AES
+# method, member list, correct passphrase, wrong-passphrase rejection, and
+# empty-passphrase rejection before returning success.
 # ---------------------------------------------------------------------------
 _encrypt_recovery_kit_attachment() {
-    local plaintext_file="$1"
-    local output_file="$2"
-    local tool="$3"
+  local plaintext_file="$1" output_file="$2" tool="$3"
+  [[ -f "$plaintext_file" && -s "$plaintext_file" ]] || {
+    log_error "Recovery-kit plaintext file is missing or empty."
+    return 1
+  }
+  case "${tool##*/}" in 7z|7zz) ;; *)
+    log_error "Unsupported recovery ZIP tool: $tool"
+    return 1
+    ;;
+  esac
 
-    if [[ "$tool" != "gpg" ]]; then
-        log_error "_encrypt_recovery_kit_attachment: unsupported tool '$tool'"
-        return 1
-    fi
-    if [[ ! -f "$plaintext_file" ]]; then
-        log_error "_encrypt_recovery_kit_attachment: plaintext file not found"
-        return 1
-    fi
-
-    local _enc_pass _xtrace_was_set=0
-    case $- in *x*) _xtrace_was_set=1 ;; esac
-    { set +x; } 2>/dev/null
-    _enc_pass=$(prompt_password_with_confirmation \
-        "Passphrase to encrypt emailed attachment" 16) || {
-        unset _enc_pass
-        [[ $_xtrace_was_set -eq 1 ]] && set -x
-        log_error "Passphrase entry failed or aborted"
-        return 1
+  local passphrase xtrace_was_set=0 plain_dir plain_base listing member_count member_path
+  case $- in *x*) xtrace_was_set=1 ;; esac
+  { set +x; } 2>/dev/null
+  passphrase="$(prompt_password_with_confirmation \
+    "Passphrase to encrypt emailed AES-256 ZIP (independent from stored project credentials)" 16)" || {
+      unset passphrase
+      [[ $xtrace_was_set -eq 1 ]] && set -x
+      log_error "Attachment passphrase entry failed or was aborted."
+      return 1
     }
 
-    local _rc=0 _plain_dir _plain_base
-    _plain_dir=$(dirname -- "$plaintext_file")
-    _plain_base=$(basename -- "$plaintext_file")
-    rm -f "$output_file"
-
-    # GnuPG 2.4 on Ubuntu 24.04 accepts --passphrase-fd only in batch loopback
-    # mode. The secret is supplied on fd 3; the tar stream is the only stdin data.
-    if (
-        set -o pipefail
-        tar -C "$_plain_dir" -cf - "$_plain_base" \
-            | gpg \
-                --batch \
-                --yes \
-                --pinentry-mode loopback \
-                --passphrase-fd 3 \
-                --no-symkey-cache \
-                --symmetric \
-                --output "$output_file" \
-                3<<<"$_enc_pass"
+  plain_dir="$(dirname -- "$plaintext_file")"
+  plain_base="$(basename -- "$plaintext_file")"
+  rm -f -- "$output_file"
+  if ! (
+      cd -- "$plain_dir" &&
+      _run_7zip_with_passphrase "$passphrase" "$tool" \
+        a -tzip -mem=AES256 -mx=5 -bd -y -p -- "$output_file" "$plain_base" \
+        >/dev/null 2>&1
     ); then
-        _rc=0
-    else
-        _rc=$?
-    fi
-    unset _enc_pass
-    [[ $_xtrace_was_set -eq 1 ]] && set -x
+    unset passphrase
+    [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "AES-256 ZIP creation failed."
+    return 1
+  fi
 
-    if [[ $_rc -ne 0 ]]; then
-        _secure_shred "$output_file" 2>/dev/null || true
-        log_error "Encryption failed (${tool} exit ${_rc})"
-        return 1
+  [[ -s "$output_file" ]] || {
+    unset passphrase
+    [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "ZIP creation reported success but produced no archive."
+    return 1
+  }
+  chmod 0600 -- "$output_file" || {
+    unset passphrase
+    [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Could not restrict ZIP attachment permissions."
+    return 1
+  }
+  if (( EUID == 0 )); then
+    if ! chown root:root -- "$output_file"; then
+      unset passphrase
+      [[ $xtrace_was_set -eq 1 ]] && set -x
+      _remove_sensitive_file "$output_file" 2>/dev/null || true
+      log_error "Could not set root ownership on ZIP attachment."
+      return 1
     fi
+  fi
 
-    if ! chmod 600 "$output_file"; then
-        _secure_shred "$output_file" 2>/dev/null || true
-        log_error "Encryption failed: could not restrict attachment permissions"
-        return 1
-    fi
-    return 0
+  listing="$("$tool" l -slt -- "$output_file" 2>/dev/null)" || {
+    unset passphrase
+    [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Could not inspect ZIP attachment."
+    return 1
+  }
+  grep -Eq '^Type = zip$' <<<"$listing" || {
+    unset passphrase; [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Attachment validation failed: container is not ZIP."
+    return 1
+  }
+  grep -Eq '^Method = .*AES-256' <<<"$listing" || {
+    unset passphrase; [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Attachment validation failed: AES-256 encryption was not proven."
+    return 1
+  }
+  if grep -Eqi 'ZipCrypto|ZipCrypto_AES' <<<"$listing"; then
+    unset passphrase; [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Attachment validation failed: legacy ZipCrypto was detected."
+    return 1
+  fi
+  member_count="$(awk -F' = ' '/^----------$/{body=1; next} body && $1=="Path"{count++} END{print count+0}' <<<"$listing")"
+  member_path="$(awk -F' = ' '/^----------$/{body=1; next} body && $1=="Path"{print $2}' <<<"$listing")"
+  if [[ "$member_count" != "1" || "$member_path" != "$plain_base" ]]; then
+    unset passphrase; [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Attachment validation failed: expected exactly '$plain_base'."
+    return 1
+  fi
+  if ! _run_7zip_with_passphrase "$passphrase" "$tool" \
+      t -bd -y -p -- "$output_file" >/dev/null 2>&1; then
+    unset passphrase; [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Attachment validation failed with the selected passphrase."
+    return 1
+  fi
+  if _run_7zip_with_passphrase 'VWOCI-DELIBERATELY-WRONG-PASSPHRASE' "$tool" \
+      t -bd -y -p -- "$output_file" >/dev/null 2>&1; then
+    unset passphrase; [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Attachment validation failed: an incorrect passphrase was accepted."
+    return 1
+  fi
+  if "$tool" t -bd -y -- "$output_file" </dev/null >/dev/null 2>&1; then
+    unset passphrase; [[ $xtrace_was_set -eq 1 ]] && set -x
+    _remove_sensitive_file "$output_file" 2>/dev/null || true
+    log_error "Attachment validation failed: extraction without a passphrase succeeded."
+    return 1
+  fi
+
+  unset passphrase listing member_path
+  [[ $xtrace_was_set -eq 1 ]] && set -x
+  return 0
 }
-
 
 # ---------------------------------------------------------------------------
 # _offer_email_recovery_kit PLAINTEXT_FILE
@@ -683,120 +1081,83 @@ _encrypt_recovery_kit_attachment() {
 # Sends the encrypted recovery kit only through the SMTP attachment path.
 # The prompt is shown before passphrase collection, and non-secret direct-SMTP
 # settings are validated before encryption so operators fail early.
+# Returns 0 when sent, 2 when declined/timed out, and another nonzero status
+# when email was requested but preparation or delivery failed.
 # ---------------------------------------------------------------------------
 _offer_email_recovery_kit() {
-    local plaintext_file="$1"
+  # VWOCI-PRR-PATCH-02: only an independently encrypted AES-256 ZIP may be sent.
+  local plaintext_file="$1" tool yn
+  printf '\nEmail an AES-256 encrypted ZIP copy via SMTP? [yes/no] (default: no): ' >/dev/tty
+  read -r -t 30 yn </dev/tty || yn="no"
+  [[ "${yn,,}" == "yes" ]] || return 2
+  tool="$(_check_recovery_kit_email_deps)" || {
+    log_error "Email was requested, but the encrypted ZIP dependency contract is not satisfied."
+    return 1
+  }
 
-    local _tool
-    if ! _tool=$(_check_recovery_kit_email_deps); then
-        return 0
-    fi
+  local from to recovery_dir attachment_file attachment_name
+  from="$(resolve_email_sender)" || return 1
+  [[ -n "$from" && "$from" != *$'\r'* && "$from" != *$'\n'* ]] || {
+    log_error "Recovery-kit email preflight: SMTP_FROM is missing or invalid."
+    return 1
+  }
+  [[ -n "${SMTP_HOST:-}" && "${SMTP_HOST:-}" != *$'\r'* && "${SMTP_HOST:-}" != *$'\n'* ]] || {
+    log_error "Recovery-kit email preflight: SMTP_HOST is missing or invalid."
+    return 1
+  }
+  [[ "${SMTP_PORT:-}" =~ ^[0-9]+$ ]] || {
+    log_error "Recovery-kit email preflight: SMTP_PORT is missing or invalid."
+    return 1
+  }
+  [[ -n "${SMTP_USERNAME:-}" && "${SMTP_USERNAME:-}" != *$'\r'* && "${SMTP_USERNAME:-}" != *$'\n'* ]] || {
+    log_error "Recovery-kit email preflight: SMTP_USERNAME is missing or invalid."
+    return 1
+  }
+  to="$(_read_dotenv_value "ADMIN_EMAIL" "${PROJECT_ROOT:-.}/.env")"
+  [[ -n "$to" ]] || to="${ADMIN_EMAIL:-}"
+  [[ -n "$to" ]] || {
+    log_error "Recovery-kit email preflight: ADMIN_EMAIL is not configured."
+    return 1
+  }
 
-    echo "" >/dev/tty
-    local _yn
-    cat >/dev/tty <<'PROMPT'
-Recovery-kit attachments use SMTP only.
-The HTTP email API is not used for attachments. Delivery first uses the
-Postfix sidecar and falls back to the configured upstream SMTP relay when
-the sidecar is unavailable.
-SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password must
-be configured.
-PROMPT
-    printf '\n' >/dev/tty
-    printf 'Email an encrypted backup of this document via SMTP? [yes/no] (default: no): ' >/dev/tty
-    read -r -t 30 _yn </dev/tty 2>/dev/null || _yn="no"
-    if [[ "${_yn,,}" != "yes" ]]; then
-        return 0
-    fi
+  recovery_dir="$(_prepare_recovery_dir)" || return 1
+  attachment_name="important-documents-$(date -u +%Y%m%d).zip"
+  attachment_file="$(mktemp "${recovery_dir}/.important-documents.XXXXXXXX.zip")" || return 1
+  chmod 0600 -- "$attachment_file" || { rm -f -- "$attachment_file"; return 1; }
+  register_cleanup "_remove_sensitive_file" "$attachment_file"
+  if ! _encrypt_recovery_kit_attachment "$plaintext_file" "$attachment_file" "$tool"; then
+    log_error "Encrypted ZIP creation or validation failed; email was not attempted."
+    _remove_sensitive_file "$attachment_file" 2>/dev/null || true
+    return 1
+  fi
 
-    local _from
-    if ! _from=$(resolve_email_sender); then
-        return 1
-    fi
-    if [[ -z "$_from" || "$_from" == *$'\r'* || "$_from" == *$'\n'* ]]; then
-        log_error "Recovery-kit email preflight: SMTP_FROM is missing or invalid"
-        return 1
-    fi
-    if [[ -z "${SMTP_HOST:-}" || "${SMTP_HOST:-}" == *$'\r'* || "${SMTP_HOST:-}" == *$'\n'* ]]; then
-        log_error "Recovery-kit email preflight: SMTP_HOST is missing or invalid"
-        return 1
-    fi
-    if [[ -z "${SMTP_PORT:-}" || ! "${SMTP_PORT:-}" =~ ^[0-9]+$ ]]; then
-        log_error "Recovery-kit email preflight: SMTP_PORT is missing or invalid"
-        return 1
-    fi
-    if [[ -z "${SMTP_USERNAME:-}" || "${SMTP_USERNAME:-}" == *$'\r'* || "${SMTP_USERNAME:-}" == *$'\n'* ]]; then
-        log_error "Recovery-kit email preflight: SMTP_USERNAME is missing or invalid"
-        return 1
-    fi
-    log_info "Recovery-kit email preflight passed for non-secret SMTP settings; smtp_password will be resolved only if Direct SMTP fallback is needed."
+  local subject body
+  subject="Do not lose this — important account documents"
+  body=$(cat <<'BODY'
+Please keep the attached file somewhere safe.
 
-    local _ext="tar.gpg" _att_name _att_file
-    _att_name="important-documents-$(date +%Y%m%d).${_ext}"
-    _att_file=$(mktemp -p /dev/shm "vw-att.XXXXXX.${_ext}" 2>/dev/null || mktemp "vw-att.XXXXXX.${_ext}")
-    install -m 600 /dev/null "$_att_file"
-    register_cleanup "_secure_shred" "$_att_file"
+It is a ZIP archive encrypted with AES-256. The attachment passphrase is independent from all stored VaultWarden-OCI credentials and is not included in this email.
 
-    if ! _encrypt_recovery_kit_attachment "$plaintext_file" "$_att_file" "$_tool"; then
-        log_error "Could not encrypt attachment — email skipped"
-        _secure_shred "$_att_file" 2>/dev/null || true
-        return 1
-    fi
+Extraction:
+- Windows: use 7-Zip or another AES-ZIP-capable application.
+- macOS: use an AES-ZIP-capable application; the built-in Archive Utility may not support this archive.
+- Linux: run `7z x important-documents-YYYYMMDD.zip` and enter the attachment passphrase.
 
-    local _subject="Do not lose this — important account documents" _body _to
-    _body=$(cat <<'BODY'
-Please keep this file somewhere safe.
-
-The attached archive contains important account documents you requested. It is
-encrypted with GnuPG using the independent attachment passphrase you selected.
-
-Recovery steps:
-1. Save the attachment on a trusted device.
-2. Decrypt it:
-   gpg --output recovery-kit.tar \
-     --decrypt important-documents-YYYYMMDD.tar.gpg
-3. GnuPG prompts for the independent attachment passphrase.
-4. Extract the decrypted TAR:
-   tar -xf recovery-kit.tar
-5. Store the recovered document securely.
-6. Delete recovery-kit.tar after the recovery document has been secured.
-
-A GnuPG-compatible GUI can also decrypt the .gpg file; open the resulting .tar
-with a normal archive manager.
-
-Do not share this file or the passphrase with anyone.
-If you did not request this, please disregard.
+Store the extracted recovery document securely and delete plaintext copies after use.
 BODY
 )
-    _to=$(_read_dotenv_value "ADMIN_EMAIL" "${PROJECT_ROOT:-.}/.env")
-    [[ -n "$_to" ]] || _to="${ADMIN_EMAIL:-}"
-    if [[ -z "$_to" ]]; then
-        log_error "_offer_email_recovery_kit: ADMIN_EMAIL not set in .env or environment — cannot send"
-        _secure_shred "$_att_file" 2>/dev/null || true
-        return 1
-    fi
-
-    log_info "Sending encrypted attachment to ${_to} via SMTP attachment path..."
-    if send_smtp_attachment "$_to" "$_subject" "$_body" "$_att_file" "$_att_name"; then
-        log_success "Encrypted attachment sent to ${_to}"
-        printf '\n' >/dev/tty
-        printf '════════════════════════════════════════════════════════════════\n' >/dev/tty
-        printf '  ✅  Encrypted recovery kit emailed to: %s\n' "$_to" >/dev/tty
-        printf '════════════════════════════════════════════════════════════════\n' >/dev/tty
-        printf '\n' >/dev/tty
-    else
-        log_warn "Attachment send failed. The encrypted file was NOT emailed."
-        log_warn "You can send it manually from: ${_att_file}"
-        log_warn "(It will be deleted when this session ends.)"
-        printf '\n' >/dev/tty
-        printf '════════════════════════════════════════════════════════════════\n' >/dev/tty
-        printf '  ⚠️   Email delivery FAILED — recovery kit was NOT sent.\n' >/dev/tty
-        printf '       Check SMTP settings and logs above for details.\n' >/dev/tty
-        printf '════════════════════════════════════════════════════════════════\n' >/dev/tty
-        printf '\n' >/dev/tty
-    fi
-    _secure_shred "$_att_file" 2>/dev/null || true
-    return 0
+  log_info "Sending encrypted recovery ZIP to ${to} via SMTP attachment path..."
+  if ! send_smtp_attachment "$to" "$subject" "$body" "$attachment_file" "$attachment_name"; then
+    log_error "SMTP delivery failed; the recovery ZIP was not emailed."
+    _remove_sensitive_file "$attachment_file" 2>/dev/null || true
+    return 1
+  fi
+  _remove_sensitive_file "$attachment_file" 2>/dev/null || {
+    log_error "Email succeeded, but temporary ZIP cleanup failed."
+    return 1
+  }
+  log_success "Encrypted recovery ZIP emailed to ${to}."
+  return 0
 }
 
 validate_cloudflare_token() {
@@ -1030,90 +1391,34 @@ collect_secret_field() {
 
 auto_generate_secret_field() {
     local field="$1"
-    local _banner_width=86
-    _print_secret_banner() {
-        local title="$1"
-        local value="$2"
-        local border
-        border=$(printf '%*s' "${_banner_width}" '' | tr ' ' '=')
-        {
-            printf '\n'
-            printf '\033[1;97;41m%s\033[0m\n' "$border"
-            printf '\033[1;97;41m  %-80s\033[0m\n' "🚨 SAVE THIS NOW — AUTO-GENERATED SECRET 🚨"
-            printf '\033[1;97;41m%s\033[0m\n' "$border"
-            printf '\033[1;33m%s\033[0m\n' "$title"
-            printf '\033[1;32m%s\033[0m\n' "$value"
-            printf '\033[1;97;41m  %-80s\033[0m\n' "This plaintext will not be shown again. Store it in your password manager."
-            printf '\033[1;97;41m%s\033[0m\n' "$border"
-            printf '\n'
-        } > /dev/tty 2>/dev/null
-    }
 
     case "$field" in
-
-        admin_token)
-            local vw_pass
-            vw_pass=$(generate_secure_string 32)
-            _print_secret_banner "VAULTWARDEN ADMIN PASSWORD" "$vw_pass" || {
-                log_warn "VaultWarden admin password auto-generated -- retrieve from recovery kit." >&2
-            }
-            log_info "Generating Argon2id hash..." >&2
-            local vw_hash
-            vw_hash=$(generate_argon2_hash "$vw_pass")
-            if [[ -z "$vw_hash" ]]; then
-                log_error "Failed to generate Argon2id hash" >&2
-                return 1
-            fi
-            log_success "VaultWarden admin hash generated (Argon2id)" >&2
-            printf '%s' "$vw_hash"
+        admin_token|admin_basic_auth_hash)
+            log_error "Automatic administrator credential generation requires protected capture and publication." >&2
+            log_error "Use: sudo ./setup.sh --auto" >&2
+            log_error "Direct interactive configuration remains available without --auto." >&2
+            return 1
             ;;
-
-        admin_basic_auth_hash)
-            local caddy_pass
-            caddy_pass=$(generate_secure_string 32)
-            _print_secret_banner "CADDY ADMIN PASSWORD" "$caddy_pass" || {
-                log_warn "Caddy admin password auto-generated -- retrieve from recovery kit." >&2
-            }
-            log_info "Generating bcrypt hash for Caddy basic auth..." >&2
-            local caddy_hash
-            caddy_hash=$(generate_bcrypt_hash "$caddy_pass")
-            if [[ -z "$caddy_hash" ]]; then
-                log_error "Failed to generate bcrypt hash. Ensure apache2-utils is installed." >&2
-                return 1
-            fi
-            if ! _bcrypt_format_ok "$caddy_hash"; then
-                log_error "Generated bcrypt hash has invalid format: $caddy_hash" >&2
-                return 1
-            fi
-            log_success "Caddy admin hash generated (htpasswd format: admin:\$2y\$...)" >&2
-            printf '%s' "admin $caddy_hash"
-            ;;
-
         caddy_cloudflare_dns_token)
             log_warn "Auto mode: Using placeholder for Cloudflare DNS token - MUST be updated before deployment" >&2
             printf '%s' "CHANGE_ME_DNS_TOKEN"
             ;;
-
         email_api_token)
             # Placeholder for the email provider API token.
             # Must be set via: sudo ./edit-secrets.sh rotate email_api_token
             log_warn "Auto mode: Using placeholder for email API token - configure via rotate email_api_token" >&2
             printf '%s' "CHANGE_ME_EMAIL_API_TOKEN"
             ;;
-
         smtp_password)
             log_warn "Auto mode: Using placeholder for SMTP password - configure later in .env" >&2
             printf '%s' "CHANGE_ME_SMTP_PASSWORD"
             ;;
-
         push_installation_id)
             printf '%s' "CHANGE_ME_OR_LEAVE_EMPTY"
             ;;
-
         push_installation_key)
             printf '%s' "CHANGE_ME_OR_LEAVE_EMPTY"
             ;;
-
         # Single source of truth for this auto key.
         # collect_secret_field() returns an error for auto keys.
         # _dispatch_auto_fn() in setup-secrets.sh is the sole entry point.
@@ -1123,7 +1428,6 @@ auto_generate_secret_field() {
             log_success "Backup integrity HMAC key generated (64 characters)" >&2
             printf '%s' "$integrity_key"
             ;;
-
         *)
             log_error "auto_generate_secret_field: unknown field '$field'" >&2
             return 1
@@ -1406,145 +1710,100 @@ EOF
 }
 
 _ork_generate_and_secure() {
-    local output_file="$1"
-
-    {
-        printf '\n'
-        printf $'═══════════════════════════════════════════════════════════════\n'
-        printf ' SECURITY NOTICE -- PLAINTEXT FILE ABOUT TO BE WRITTEN\n'
-        printf $'═══════════════════════════════════════════════════════════════\n'
-        printf 'The recovery kit will be written to:\n'
-        printf '  %s\n' "$output_file"
-        printf '\n'
-        printf 'Even on tmpfs, this file is visible to root and may appear\n'
-        printf 'in OCI block-volume snapshots if /tmp falls back to disk.\n'
-        printf 'The file will be securely deleted after you confirm.\n'
-        printf $'═══════════════════════════════════════════════════════════════\n'
-        printf '\n'
-    } > /dev/tty 2>/dev/null || true
-
-    # shellcheck disable=SC2064  # intentional: $output_file expands at registration to capture the path
-    trap "_secure_shred '$output_file'; echo '[recovery-kit] Plaintext kit securely deleted.' >&2" RETURN
-
-    if ! generate_recovery_kit "$output_file"; then
-        log_error "Failed to generate recovery kit"
-        return 1
+  # VWOCI-PRR-PATCH-02: render to a randomized same-directory temporary file,
+  # validate, then publish atomically without ever printing the body.
+  local output_file="$1" output_dir temp_file old_umask
+  output_dir="$(dirname -- "$output_file")"
+  [[ -d "$output_dir" && ! -L "$output_dir" ]] || return 1
+  [[ ! -e "$output_file" && ! -L "$output_file" ]] || {
+    log_error "Refusing to overwrite recovery kit: $output_file"
+    return 1
+  }
+  old_umask="$(umask)"; umask 077
+  temp_file="$(mktemp "${output_dir}/.vaultwarden-recovery-kit.XXXXXXXX")" || {
+    umask "$old_umask"; return 1;
+  }
+  umask "$old_umask"
+  (
+    local published=false
+    trap '[[ "$published" == "true" ]] || _remove_sensitive_file "$temp_file" 2>/dev/null || true' EXIT
+    trap 'exit 130' INT; trap 'exit 129' HUP; trap 'exit 143' TERM
+    generate_recovery_kit "$temp_file" || exit 1
+    [[ -s "$temp_file" ]] || exit 1
+    grep -Fq 'END OF RECOVERY KIT' "$temp_file" || exit 1
+    grep -Fq 'AGE-SECRET-KEY-1' "$temp_file" || exit 1
+    chmod 0600 -- "$temp_file" || exit 1
+    if (( EUID == 0 )); then
+      chown root:root -- "$temp_file" || exit 1
     fi
-
-    log_success "Recovery Kit created: $output_file"
-    echo ""
-    log_warn " ACTION REQUIRED -- SAVE NOW BEFORE THIS FILE IS AUTO-DELETED:"
-    echo "  1. Copy ALL contents to your password manager (Secure Note)."
-    echo "  2. Optionally print a physical copy for your fireproof safe."
-    echo ""
-    cat "$output_file"
-    echo ""
-
-    # --- Optional: email an encrypted copy before deletion ---
-    local _email_result=0
-    _offer_email_recovery_kit "$output_file" || _email_result=$?
-    # --- end email step ---
-
-    log_warn "This file will be securely deleted after you press Enter."
-    log_warn "If you do not respond within 120 seconds it will be deleted automatically."
-    echo ""
-
-    # shellcheck disable=SC2034  # user_ack is the read target; value not needed, only the timeout/EOF behaviour
-    local user_ack
-    printf 'Press Enter once you have saved the recovery kit: ' >/dev/tty
-    # shellcheck disable=SC2034  # intentional: read target used only for its timeout/EOF side-effect
-    read -r -t 120 user_ack </dev/tty 2>/dev/null || true
-
-    log_info "Securely deleting recovery kit from server..."
-    _secure_shred "$output_file"
-    trap - RETURN
-    log_success "Recovery kit securely deleted from server."
-    echo ""
+    # Hard-link publication is atomic and fails when the destination exists.
+    ln -- "$temp_file" "$output_file" || exit 1
+    rm -f -- "$temp_file" || exit 1
+    published=true
+  ) || return 1
+  return 0
 }
 
 offer_recovery_kit_export() {
-    local auto_export="${1:-false}"
+  # VWOCI-PRR-PATCH-02: the full kit is separate from setup credentials and is
+  # published only under /root/vaultwarden-recovery (or an explicit test override).
+  local auto_export="${1:-false}" recovery_dir stamp short_id recovery_file email_rc=0
+  recovery_dir="$(_prepare_recovery_dir)" || return 1
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  short_id="$(openssl rand -hex 3 2>/dev/null)" || return 1
+  recovery_file="${recovery_dir}/vaultwarden-recovery-kit-${stamp}-${short_id}.txt"
 
-    # Always persist a secure on-disk copy in the current working
-    # directory before any /dev/tty-dependent display flow. This prevents the
-    # recovery kit from being lost when setup runs through an SSH jumphost,
-    # nohup, or other detached TTY environment.
-    local recovery_file
-    recovery_file="./recovery-kit-$(date +%s).txt"
+  if [[ "$auto_export" != "true" ]]; then
+    local answer
+    printf 'Export a protected plaintext Recovery Kit? [yes/no] (default: no): ' >/dev/tty
+    read -r answer </dev/tty || answer="no"
+    [[ "${answer,,}" == "yes" ]] || return 0
+  fi
 
-    if generate_recovery_kit "$recovery_file"; then
-        chmod 600 "$recovery_file"
-        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        log_warn "  RECOVERY KIT SAVED TO: $recovery_file"
-        log_warn "  SAVE THIS FILE SECURELY AND DELETE IT WHEN DONE."
-        log_warn "  It contains your Age private key and all credentials."
-        log_warn "  Auto-delete scheduled in 30 minutes via at(1) (if available)."
-        log_warn "  Manual delete: shred -fuz '$recovery_file'"
-        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  _ork_generate_and_secure "$recovery_file" || {
+    log_error "Recovery-kit publication failed."
+    return 1
+  }
+  log_success "Recovery Kit saved: $recovery_file"
+  log_info "Owner: root:root; permissions: 0600; document validation: passed"
+  log_info "The recovery-kit body was not written to terminal output."
 
-        # Register an EXIT-trap cleanup so the file is shredded even if the
-        # process is killed or exits abnormally before the interactive flow
-        # below has a chance to delete it.
-        # shellcheck disable=SC2064  # intentional: $recovery_file expands now to capture the path
-        register_cleanup "_secure_shred" "$recovery_file"
+  if ! _schedule_recovery_cleanup "$recovery_file" "30m"; then
+    log_error "Recovery-kit cleanup could not be scheduled; export is failing closed."
+    if ! _remove_sensitive_file "$recovery_file" || [[ -e "$recovery_file" || -L "$recovery_file" ]]; then
+      log_error "Recovery-kit cleanup scheduling failed and the plaintext file could not be removed: $recovery_file"
+      return 1
+    fi
+    log_info "Unscheduled plaintext recovery kit removed: $recovery_file"
+    return 1
+  fi
+  log_info "Primary plaintext cleanup accepted by ${_RECOVERY_CLEANUP_SCHEDULER} for approximately 30 minutes: $recovery_file"
+  log_info "Routine maintenance also removes eligible leftovers that are at least 30 minutes old."
 
-        # Schedule at(1) auto-delete as an additional belt-and-suspenders
-        # safeguard for non-interactive invocations where the interactive
-        # TTY flow is never reached.
-        local _rk_abs
-        _rk_abs="$(realpath "$recovery_file" 2>/dev/null || echo "$recovery_file")"
-        if command -v at >/dev/null 2>&1; then
-            if printf 'shred -fuz "%s" 2>/dev/null; rm -f "%s"\n' "$_rk_abs" "$_rk_abs" \
-                    | at "now + 30 minutes" 2>/dev/null; then
-                log_info "Auto-delete scheduled in 30 minutes for: $recovery_file"
-            else
-                log_warn "Could not schedule at(1) auto-delete — delete manually: shred -fuz '$recovery_file'"
-            fi
-        else
-            log_warn "at(1) not available — delete manually within 30 minutes: shred -fuz '$recovery_file'"
-        fi
-    else
-        log_error "Failed to write recovery kit to disk"
+  _offer_email_recovery_kit "$recovery_file" || email_rc=$?
+  case "$email_rc" in
+    0)
+      if ! _remove_sensitive_file "$recovery_file" || [[ -e "$recovery_file" || -L "$recovery_file" ]]; then
+        log_error "Encrypted delivery succeeded, but the local plaintext copy could not be removed: $recovery_file"
         return 1
-    fi
-
-    local tmpfs_base
-    if ! tmpfs_base=$(_tmpfs_dir); then
-        log_error "Cannot determine a safe (tmpfs) directory for the recovery kit. Aborting."
-        return 1
-    fi
-
-    local output_file
-    output_file="${tmpfs_base}/vaultwarden-recovery-kit-$(date +%Y%m%d%H%M%S).txt"
-
-    if [[ "$auto_export" == "true" ]]; then
-        log_info "Exporting recovery kit (--export-recovery-kit specified)..."
-        _ork_generate_and_secure "$output_file"
-        local _rc=$?
-        # Shred the persistent on-disk copy now that the user has confirmed
-        # they have saved the kit via the interactive TTY flow.
-        log_info "Securely deleting persistent on-disk recovery kit..."
-        _secure_shred "$recovery_file"
-        log_success "On-disk recovery kit deleted: $recovery_file"
-        return $_rc
-    fi
-
-    echo ""
-    read -r -p "Export a plaintext Recovery Kit? [yes/no] (default: no): " export_kit
-    if [[ "$export_kit" == "yes" ]]; then
-        _ork_generate_and_secure "$output_file"
-        # Shred the persistent on-disk copy now that the user has confirmed
-        # they have saved the kit via the interactive TTY flow.
-        log_info "Securely deleting persistent on-disk recovery kit..."
-        _secure_shred "$recovery_file"
-        log_success "On-disk recovery kit deleted: $recovery_file"
-    else
-        # User declined the interactive export — shred the on-disk copy now
-        # rather than waiting for the EXIT trap to fire at session end.
-        log_info "Securely deleting on-disk recovery kit (export declined)..."
-        _secure_shred "$recovery_file"
-        log_success "On-disk recovery kit deleted: $recovery_file"
-    fi
+      fi
+      log_success "Encrypted delivery succeeded; local plaintext recovery kit removed: $recovery_file"
+      log_info "The accepted 30-minute cleanup timer remains as an idempotent safety net."
+      return 0
+      ;;
+    2)
+      log_info "Encrypted email declined; protected plaintext remains temporarily at: $recovery_file"
+      log_info "Primary cleanup is scheduled for approximately 30 minutes (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "If it survives that cleanup, the next routine maintenance run removes eligible leftovers."
+      return 0
+      ;;
+    *)
+      log_error "Encrypted email was requested but failed; protected plaintext remains temporarily at: $recovery_file"
+      log_info "Primary cleanup is scheduled for approximately 30 minutes (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "If it survives that cleanup, the next routine maintenance run removes eligible leftovers."
+      return "$email_rc"
+      ;;
+  esac
 }
 
 _read_dotenv_value() {
@@ -1925,7 +2184,7 @@ PYEOF
         [[ "$(basename "$_f")" == "secrets.yaml" ]] && continue
         if read -r -n 4 _head < "$_f" 2>/dev/null && [[ "$_head" == "ENC[" ]]; then
             _bad_secrets+=("$(basename "$_f")")
-            _secure_shred "$_f" 2>/dev/null || rm -f "$_f"
+            _remove_sensitive_file "$_f" 2>/dev/null || rm -f "$_f"
         fi
     done
     if [[ ${#_bad_secrets[@]} -gt 0 ]]; then

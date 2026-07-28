@@ -14,11 +14,248 @@ TMP_WORKDIR=$(mktemp -d -p "${PROJECT_ROOT}" vw_tmp.XXXXXXXXXX) || {
     exit 1
 }
 umask "$old_umask"
-trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"' EXIT
-trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
-trap 'if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
+chmod 0700 "$TMP_WORKDIR" || { echo "ERROR: Failed to secure temporary directory" >&2; exit 1; }
 
-for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh" "lib/operations.sh"; do
+# Secret cleanup lifecycle is script-scoped because EXIT and signal traps can
+# run after _cmd_configure has returned. Keep path state until cleanup has been
+# verified so a fallback trap can retry and report exact residual paths.
+declare -ga SETUP_SECRETS_CLEANUP_ACTIONS=()
+declare -gA SETUP_SECRETS_COLLECTED_SECRETS=()
+SETUP_SECRETS_CLEANUP_ACTIVE=true
+SETUP_SECRETS_CLEANUP_DONE=false
+SETUP_SECRETS_CLEANUP_RUNNING=false
+SETUP_SECRETS_CLEANUP_FAILED=false
+SETUP_SECRETS_TMP_WORKDIR="$TMP_WORKDIR"
+SETUP_SECRETS_GUARD_HELD=false
+_setup_secrets_cleanup_warn() {
+    local message="$1"
+    if declare -F log_warn >/dev/null 2>&1; then
+        log_warn "$message"
+    else
+        printf 'WARNING: %s\n' "$message" >&2
+    fi
+}
+_setup_secrets_manual_cleanup() {
+    local flag="$1" target="$2" quoted
+    printf -v quoted '%q' "$target"
+    _setup_secrets_cleanup_warn "Residual sensitive path: $target"
+    _setup_secrets_cleanup_warn "Manual cleanup: sudo rm $flag -- $quoted"
+}
+_setup_secrets_cleanup_begin() {
+    { set +x; } 2>/dev/null
+    SETUP_SECRETS_CLEANUP_ACTIONS=()
+    SETUP_SECRETS_COLLECTED_SECRETS=()
+    SETUP_SECRETS_CLEANUP_ACTIVE=true
+    SETUP_SECRETS_CLEANUP_DONE=false
+    SETUP_SECRETS_CLEANUP_RUNNING=false
+    SETUP_SECRETS_CLEANUP_FAILED=false
+    SETUP_SECRETS_TMP_WORKDIR="${TMP_WORKDIR:-}"
+}
+_ss_register_cleanup() {
+    local action="${1:-}" target
+    case "$action" in
+        "rm -f "*) target="${action#rm -f }" ;;
+        *) target="$action" ;;
+    esac
+    if [[ -z "$target" || "$target" == *$'\n'* ]]; then
+        _setup_secrets_cleanup_warn "Refusing to register an empty or malformed cleanup path"
+        return 1
+    fi
+    SETUP_SECRETS_CLEANUP_ACTIONS+=("$target")
+}
+_setup_secrets_cleanup_file_allowed() {
+    local target="$1" resolved project_root_resolved tmp_resolved secrets_resolved
+    resolved="$(realpath -m -- "$target" 2>/dev/null)" || return 1
+    project_root_resolved="$(realpath -m -- "${PROJECT_ROOT:-/opt/vaultwarden-scripts}" 2>/dev/null)" || return 1
+    secrets_resolved="${project_root_resolved}/secrets"
+    tmp_resolved=""
+    if [[ -n "${SETUP_SECRETS_TMP_WORKDIR:-}" ]]; then
+        tmp_resolved="$(realpath -m -- "$SETUP_SECRETS_TMP_WORKDIR" 2>/dev/null)" || return 1
+    fi
+    case "$resolved" in
+        /tmp/*|"$secrets_resolved"/*) return 0 ;;
+    esac
+    [[ -n "$tmp_resolved" && "$resolved" == "$tmp_resolved"/* ]]
+}
+_ss_run_cleanup_action() {
+    local target="$1"
+    if ! _setup_secrets_cleanup_file_allowed "$target"; then
+        # This path is outside this process's cleanup custody. Refuse it, but do
+        # not turn an unrelated path into a retryable sensitive residual or
+        # suggest a destructive manual command for it.
+        _setup_secrets_cleanup_warn "Refusing cleanup outside approved temporary or secrets paths: $target"
+        return 2
+    fi
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+        return 0
+    fi
+    if ! rm -f -- "$target" 2>/dev/null || [[ -e "$target" || -L "$target" ]]; then
+        _setup_secrets_cleanup_warn "Failed to remove sensitive cleanup path: $target"
+        return 1
+    fi
+}
+_setup_secrets_remove_workdir() {
+    local target="${SETUP_SECRETS_TMP_WORKDIR:-}" resolved root_resolved parent base
+    [[ -n "$target" && "$target" != "/" && "$target" != "." && "$target" != ".." ]] || return 0
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+        return 0
+    fi
+    resolved="$(realpath -m -- "$target" 2>/dev/null)" || {
+        _setup_secrets_cleanup_warn "Unable to resolve temporary workspace; refusing recursive removal: $target"
+        return 2
+    }
+    root_resolved="$(realpath -m -- "${PROJECT_ROOT:-/opt/vaultwarden-scripts}" 2>/dev/null)" || {
+        _setup_secrets_cleanup_warn "Unable to resolve the project root; refusing temporary workspace removal: $target"
+        return 2
+    }
+    parent="$(dirname -- "$resolved")"
+    base="$(basename -- "$resolved")"
+    if [[ "$parent" != "$root_resolved" || "$base" != vw_tmp.* || "$resolved" == "$root_resolved" || -L "$target" ]]; then
+        _setup_secrets_cleanup_warn "Refusing unsafe temporary workspace removal: $target"
+        return 2
+    fi
+    if ! rm -rf -- "$resolved" 2>/dev/null || [[ -e "$resolved" || -L "$resolved" ]]; then
+        _setup_secrets_cleanup_warn "Failed to remove temporary workspace: $resolved"
+        return 1
+    fi
+}
+_ss_perform_cleanup() {
+    local original_status="${1:-$?}" idx key target action_status=0 workdir_status=0 cleanup_failed=0
+    local -a failed_actions=() remaining_actions=()
+    if [[ "${SETUP_SECRETS_CLEANUP_RUNNING:-false}" == "true" ]]; then
+        return "$original_status"
+    fi
+    if [[ "${SETUP_SECRETS_CLEANUP_ACTIVE:-false}" != "true" ]] ||
+       [[ "${SETUP_SECRETS_CLEANUP_DONE:-false}" == "true" ]]; then
+        if (( original_status == 0 )) && [[ "${SETUP_SECRETS_CLEANUP_FAILED:-false}" == "true" ]]; then
+            return 1
+        fi
+        return "$original_status"
+    fi
+
+    SETUP_SECRETS_CLEANUP_RUNNING=true
+    { set +x; } 2>/dev/null
+    for key in "${!SETUP_SECRETS_COLLECTED_SECRETS[@]}"; do
+        SETUP_SECRETS_COLLECTED_SECRETS["$key"]=""
+    done
+    SETUP_SECRETS_COLLECTED_SECRETS=()
+
+    # A refused, out-of-custody path is discarded after warning. Only an
+    # approved path that survives an actual removal attempt is retryable.
+    for ((idx=${#SETUP_SECRETS_CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx--)); do
+        target="${SETUP_SECRETS_CLEANUP_ACTIONS[$idx]}"
+        if _ss_run_cleanup_action "$target"; then
+            continue
+        else
+            action_status=$?
+        fi
+        case "$action_status" in
+            1) failed_actions=("$target" "${failed_actions[@]}") ;;
+            2) : ;;
+            *)
+                _setup_secrets_cleanup_warn "Unexpected cleanup result for approved path: $target"
+                failed_actions=("$target" "${failed_actions[@]}")
+                ;;
+        esac
+    done
+
+    if declare -F cleanup_secrets_environment >/dev/null 2>&1; then
+        if ! cleanup_secrets_environment; then
+            _setup_secrets_cleanup_warn "Secret environment cleanup reported a failure"
+            cleanup_failed=1
+        fi
+    fi
+
+    if _setup_secrets_remove_workdir; then
+        SETUP_SECRETS_TMP_WORKDIR=""
+    else
+        workdir_status=$?
+        case "$workdir_status" in
+            1)
+                cleanup_failed=1
+                if [[ -n "${SETUP_SECRETS_TMP_WORKDIR:-}" ]] &&
+                   [[ -e "$SETUP_SECRETS_TMP_WORKDIR" || -L "$SETUP_SECRETS_TMP_WORKDIR" ]]; then
+                    _setup_secrets_manual_cleanup "-rf" "$SETUP_SECRETS_TMP_WORKDIR"
+                fi
+                ;;
+            2)
+                # The workspace is expected to be script-owned. Refusal is a
+                # real cleanup failure, but never suggest a recursive deletion
+                # command for a path outside the verified workspace contract.
+                cleanup_failed=1
+                ;;
+            *)
+                _setup_secrets_cleanup_warn "Unexpected temporary workspace cleanup result"
+                cleanup_failed=1
+                ;;
+        esac
+    fi
+
+    # Workspace deletion may have removed a file whose individual unlink was
+    # blocked. Retain and report only approved paths that actually still exist.
+    for target in "${failed_actions[@]}"; do
+        if [[ -e "$target" || -L "$target" ]]; then
+            remaining_actions+=("$target")
+            _setup_secrets_manual_cleanup "-f" "$target"
+            cleanup_failed=1
+        fi
+    done
+    SETUP_SECRETS_CLEANUP_ACTIONS=("${remaining_actions[@]}")
+
+    if (( cleanup_failed == 0 )); then
+        SETUP_SECRETS_CLEANUP_ACTIONS=()
+        SETUP_SECRETS_TMP_WORKDIR=""
+        SETUP_SECRETS_CLEANUP_ACTIVE=false
+        SETUP_SECRETS_CLEANUP_DONE=true
+        SETUP_SECRETS_CLEANUP_FAILED=false
+    else
+        SETUP_SECRETS_CLEANUP_FAILED=true
+    fi
+    SETUP_SECRETS_CLEANUP_RUNNING=false
+
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_failed == 0 )) || return 1
+    return 0
+}
+_setup_secrets_cleanup_all() {
+    local original_status="${1:-$?}" release_status=0 cleanup_status=0
+    set +e
+    { set +x; } 2>/dev/null
+    if [[ "${SETUP_SECRETS_GUARD_HELD:-false}" == "true" ]] &&
+       declare -F operation_release >/dev/null 2>&1; then
+        operation_release "$original_status" || release_status=$?
+        SETUP_SECRETS_GUARD_HELD=false
+    fi
+    _ss_perform_cleanup "$original_status" || cleanup_status=$?
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_status == 0 )) || return "$cleanup_status"
+    (( release_status == 0 )) || return "$release_status"
+    return 0
+}
+_setup_secrets_on_exit() {
+    local original_status="$1" final_status=0
+    trap - EXIT INT HUP TERM
+    _setup_secrets_cleanup_all "$original_status" || final_status=$?
+    exit "$final_status"
+}
+_setup_secrets_on_signal() {
+    local signal_status="$1"
+    trap - EXIT INT HUP TERM
+    _setup_secrets_cleanup_all "$signal_status" || true
+    exit "$signal_status"
+}
+# End secret cleanup lifecycle.
+
+trap '_setup_secrets_on_exit $?' EXIT
+trap '_setup_secrets_on_signal 130' INT
+trap '_setup_secrets_on_signal 129' HUP
+trap '_setup_secrets_on_signal 143' TERM
+
+for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh" "lib/setup-credentials.sh" "lib/operations.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
@@ -34,21 +271,11 @@ source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+source "${PROJECT_ROOT}/lib/setup-credentials.sh"
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
 
-SETUP_SECRETS_GUARD_HELD=false
-
-_setup_secrets_cleanup_all() {
-    local rc=$?
-    operation_release "$rc"
-    if declare -F _ss_perform_cleanup >/dev/null 2>&1; then
-        _ss_perform_cleanup
-    fi
-    rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true
-    exit "$rc"
-}
-
+# Cleanup lifecycle is initialized before library loading so partial initialization failures use the same finalizer.
 _setup_secrets_should_guard() {
     local subcmd="$1"
     shift || true
@@ -88,9 +315,6 @@ _setup_secrets_acquire_guard() {
         --specific-lock /run/lock/vaultwarden-secrets.lock \
         --non-interactive "$policy" || return $?
     SETUP_SECRETS_GUARD_HELD=true
-    trap _setup_secrets_cleanup_all EXIT
-    trap 'operation_release 130; if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 130' INT
-    trap 'operation_release 143; if declare -F _ss_perform_cleanup >/dev/null 2>&1; then _ss_perform_cleanup; fi; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 143' HUP TERM
     operation_set_phase "$subcmd" "Secrets ${subcmd}"
 }
 
@@ -105,6 +329,14 @@ DESCRIPTION:
     Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
     credentials interactively or automatically. Interactive view/list/rotate
     and recovery-kit export are root-operated commands via sudo ./edit-secrets.sh.
+
+AUTOMATIC CREDENTIAL HANDOFF:
+    sudo utilities/setup-secrets.sh configure --auto
+    Generated credential values are never printed. After successful atomic
+    publication, the command displays the protected root-only handoff path,
+    root:root ownership and 0700/0600 permissions. The handoff contains exactly
+    the SOPS Age identity, Vaultwarden administrator password, and Caddy
+    administrator password. Automatic configuration fails if publication fails.
 
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
@@ -132,8 +364,9 @@ EOF
 
 # Run interactive or automated secrets setup.
 _cmd_configure() {
-    local CLEANUP_ACTIONS=()
-    _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
+    # Secret generation and capture must remain opaque even when a caller starts
+    # this script with `bash -x` or exports SHELLOPTS with xtrace enabled.
+    _setup_secrets_cleanup_begin
 
     local SKIP_VALIDATION=false
     local SKIP_OPTIONAL=false
@@ -143,46 +376,204 @@ _cmd_configure() {
     local AUTO_MODE=false
     local FORCE=false
     local DRY_RUN=false
-    declare -A _COLLECTED_SECRETS=()
+    local AUTO_HANDOFF_OWNER=false
+    SETUP_SECRETS_COLLECTED_SECRETS=()
+    # Count the four protected capture paths used for generated administrator
+    # credentials and their verification hashes.
+    _ss_capture_path_count() {
+        local count=0 path
+        for path in \
+            "${VW_ADMIN_PLAIN_FILE:-}" \
+            "${VW_ADMIN_HASH_FILE:-}" \
+            "${CADDY_PLAIN_FILE:-}" \
+            "${CADDY_HASH_FILE:-}"; do
+            [[ -n "$path" ]] && count=$((count + 1))
+        done
+        printf '%s\n' "$count"
+    }
 
-    _ss_run_cleanup_action() {
-        local action="$1"
-        case "$action" in
-            rm\ -f\ *)
-                local target="${action#rm -f }"
-                if [[ -z "$target" || "$target" == *$'\n'* ]]; then
-                    return 0
-                fi
-                local resolved
-                resolved=$(realpath -m "$target" 2>/dev/null) || {
-                    log_warn "_run_cleanup_action: realpath failed for target — refusing rm: $target"
-                    return 1
-                }
-                local allowed_secrets="${PROJECT_ROOT:-/opt/vaultwarden-scripts}/secrets"
-                if [[ "$resolved" != /tmp/* && "$resolved" != "$allowed_secrets"/* ]]; then
-                    log_warn "_run_cleanup_action: refusing rm on path outside allowed dirs: $resolved"
-                    return 1
-                fi
-                rm -f "$target" 2>/dev/null || true
+    # Capture files must be absolute, non-symlink paths inside an existing
+    # private directory. The file itself may not already be a symlink or a
+    # non-regular object.
+    _ss_validate_capture_target() {
+        local target="$1" label="$2" parent mode
+
+        [[ "$target" == /* ]] || {
+            log_error "$label capture path must be absolute: $target"
+            return 1
+        }
+
+        parent="$(dirname -- "$target")"
+        [[ -d "$parent" && ! -L "$parent" ]] || {
+            log_error "$label capture directory is missing or unsafe: $parent"
+            return 1
+        }
+
+        mode="$(stat -c '%a' "$parent" 2>/dev/null)" || {
+            log_error "Unable to inspect $label capture directory: $parent"
+            return 1
+        }
+        if (( (8#$mode & 077) != 0 )); then
+            log_error "$label capture directory must not grant group/world access: $parent (mode $mode)"
+            return 1
+        fi
+
+        if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
+            log_error "$label capture path is not a safe regular file: $target"
+            return 1
+        fi
+    }
+
+    # Write a generated value without logging it. The restrictive umask is
+    # restored on every path, and chmod protects pre-existing regular files.
+    _ss_write_capture() {
+        local target="$1" value="$2" label="$3" old_umask rc=0
+
+        _ss_validate_capture_target "$target" "$label" || return 1
+
+        old_umask="$(umask)"
+        umask 077
+        printf '%s' "$value" > "$target" || rc=$?
+        umask "$old_umask"
+
+        if (( rc != 0 )); then
+            log_error "Unable to write $label capture file: $target"
+            return "$rc"
+        fi
+
+        chmod 0600 "$target" || {
+            log_error "Unable to enforce mode 0600 on $label capture file: $target"
+            return 1
+        }
+    }
+
+    # Generate one administrator credential without terminal disclosure, write
+    # its plaintext and hash only to protected capture files, and return only
+    # the hash needed by the encrypted SOPS document.
+    _ss_generate_admin_credential_quietly() {
+        local field="$1" plain_file="$2" hash_file="$3"
+        local label plaintext generated_hash raw_hash=""
+
+        { set +x; } 2>/dev/null
+        case "$field" in
+            admin_token)
+                label="Vaultwarden administrator"
+                ;;
+            admin_basic_auth_hash)
+                label="Caddy administrator"
                 ;;
             *)
-                log_warn "_ss_perform_cleanup: skipping unknown action: $action"
+                log_error "Unsupported protected administrator credential field: $field"
+                return 1
                 ;;
         esac
+
+        plaintext="$(generate_secure_string 32)" || {
+            log_error "Failed to generate $label password"
+            return 1
+        }
+
+        case "$field" in
+            admin_token)
+                generated_hash="$(generate_argon2_hash "$plaintext")" || {
+                    log_error "Failed to hash $label password"
+                    return 1
+                }
+                ;;
+            admin_basic_auth_hash)
+                raw_hash="$(generate_bcrypt_hash "$plaintext")" || {
+                    log_error "Failed to hash $label password"
+                    return 1
+                }
+                if ! _bcrypt_format_ok "$raw_hash"; then
+                    log_error "Generated Caddy administrator hash has an invalid format"
+                    return 1
+                fi
+                generated_hash="admin ${raw_hash}"
+                ;;
+        esac
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[dry-run] Would capture the generated $label password and hash securely" >&2
+        else
+            _ss_write_capture "$plain_file" "$plaintext" "$label password" || return 1
+            _ss_write_capture "$hash_file" "$generated_hash" "$label hash" || return 1
+        fi
+
+        printf '%s' "$generated_hash"
+        plaintext=""
+        generated_hash=""
+        raw_hash=""
     }
 
-    _ss_perform_cleanup() {
-        for key in "${!_COLLECTED_SECRETS[@]}"; do
-            _COLLECTED_SECRETS["$key"]=""
-        done
-        unset _COLLECTED_SECRETS 2>/dev/null || true
+    # Direct configure --auto owns its capture files and publishes the same
+    # protected handoff as setup.sh. A caller such as setup.sh may provide all
+    # four paths and retain responsibility for publication after later phases.
+    _ss_prepare_auto_handoff() {
+        local configured
 
-        for (( idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx-- )); do
-            _ss_run_cleanup_action "${CLEANUP_ACTIONS[$idx]}"
-        done
-        cleanup_secrets_environment
+        [[ "$AUTO_MODE" == "true" ]] || return 0
+
+        configured="$(_ss_capture_path_count)"
+        case "$configured" in
+            0)
+                AUTO_HANDOFF_OWNER=true
+                export VW_ADMIN_PLAIN_FILE="$TMP_WORKDIR/vw-admin-password"
+                export VW_ADMIN_HASH_FILE="$TMP_WORKDIR/vw-admin-hash"
+                export CADDY_PLAIN_FILE="$TMP_WORKDIR/caddy-admin-password"
+                export CADDY_HASH_FILE="$TMP_WORKDIR/caddy-admin-hash"
+                ;;
+            4)
+                if [[ "$QUIET_SUMMARY" != "true" ]]; then
+                    log_error "Caller-provided automatic capture paths require the internal --quiet-summary contract."
+                    return 1
+                fi
+                AUTO_HANDOFF_OWNER=false
+                ;;
+            *)
+                log_error "Automatic setup requires either all four protected capture paths or none."
+                return 1
+                ;;
+        esac
+
+        QUIET_SUMMARY=true
+        _ss_validate_capture_target "$VW_ADMIN_PLAIN_FILE" "Vaultwarden administrator password" || return 1
+        _ss_validate_capture_target "$VW_ADMIN_HASH_FILE" "Vaultwarden administrator hash" || return 1
+        _ss_validate_capture_target "$CADDY_PLAIN_FILE" "Caddy administrator password" || return 1
+        _ss_validate_capture_target "$CADDY_HASH_FILE" "Caddy administrator hash" || return 1
     }
-    trap '_ss_perform_cleanup' RETURN
+
+    _ss_publish_auto_handoff() {
+        local age_key_file handoff_path
+
+        [[ "$AUTO_MODE" == "true" && "$AUTO_HANDOFF_OWNER" == "true" ]] || return 0
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[dry-run] Would publish a protected setup credential handoff."
+            return 0
+        fi
+
+        age_key_file="${AGE_KEY_FILE:-}"
+        [[ -n "$age_key_file" && -f "$age_key_file" ]] || {
+            log_error "Cannot publish the protected setup handoff: active Age identity not found."
+            return 1
+        }
+
+        handoff_path="$(
+            publish_setup_credentials \
+                "$age_key_file" \
+                "$VW_ADMIN_PLAIN_FILE" \
+                "$VW_ADMIN_HASH_FILE" \
+                "$CADDY_PLAIN_FILE" \
+                "$CADDY_HASH_FILE"
+        )" || return 1
+
+        log_success "Protected setup credential handoff created: $handoff_path"
+        log_info "Expected protection: root:root, recovery directory mode 0700, file mode 0600."
+        log_info "Credential groups: SOPS Age identity, Vaultwarden administrator password, Caddy administrator password."
+        log_info "No credential values were written to terminal output."
+        log_warn "Store the handoff securely and remove it when it is no longer needed."
+    }
 
     _ss_show_help() {
         cat << 'HELP'
@@ -192,9 +583,9 @@ USAGE:
     sudo utilities/setup-secrets.sh configure [OPTIONS]
 
 OPTIONS:
-    --auto                  Auto-generate passwords; external credentials
-                            (CF tokens, SMTP, push keys) are left as
-                            CHANGE_ME placeholders for manual rotation.
+    --auto               Generate administrator credentials without terminal disclosure.
+                         Direct use publishes a protected setup credential handoff.
+                         Generated administrator passwords are never printed.
     --skip-validation       Skip token/SMTP validation
     --skip-optional         Skip optional secrets (push notifications)
     --force                 Overwrite existing secrets without prompting
@@ -208,6 +599,13 @@ OPTIONS:
     --help                  Show help
 
 NOTES:
+    Direct `configure --auto` creates a protected root-only handoff containing
+    exactly three credential groups: the SOPS Age identity, Vaultwarden
+    administrator password, and Caddy administrator password. On success the
+    command displays the protected path, ownership, and permissions, and states
+    that no credential values were printed. Publication failure makes the
+    command fail.
+
     --export-recovery-kit triggers the recovery-kit prompt that already
     appears after a successful setup run. To export a recovery kit
     independently (without running setup), use:
@@ -233,7 +631,7 @@ FEATURES:
 
 EXAMPLES:
     sudo utilities/setup-secrets.sh configure                        # Interactive setup
-    sudo utilities/setup-secrets.sh configure --auto                 # Automated with generated passwords
+    sudo utilities/setup-secrets.sh configure --auto                 # Automated with protected handoff
     sudo utilities/setup-secrets.sh configure --force                # Reconfigure without prompting
     sudo utilities/setup-secrets.sh configure --skip-optional        # Skip push notifications
     sudo utilities/setup-secrets.sh configure --export-recovery-kit  # Prompt for kit after setup
@@ -260,6 +658,8 @@ HELP
             *) log_error "Unknown option: $1"; _ss_show_help; return 1 ;;
         esac
     done
+
+    _ss_prepare_auto_handoff || return 1
 
     local AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
     if [[ "$AGE_KEY_FILE" != /* ]]; then
@@ -559,7 +959,7 @@ HELP
                     log_error "collect_secrets: auto generation failed for schema key '${_key}'"
                     return 1
                 fi
-                _COLLECTED_SECRETS["$_key"]="$_auto_value"
+                SETUP_SECRETS_COLLECTED_SECRETS["$_key"]="$_auto_value"
                 continue
             fi
 
@@ -572,7 +972,7 @@ HELP
                 fi
                 if ! "$_condition_fn" "$_key"; then
                     _placeholder=$(schema_placeholder_for_key "$_key")
-                    _COLLECTED_SECRETS["$_key"]="$_placeholder"
+                    SETUP_SECRETS_COLLECTED_SECRETS["$_key"]="$_placeholder"
                     log_info "${_key}: condition ${_condition_fn} is false; using schema placeholder"
                     continue
                 fi
@@ -590,25 +990,17 @@ HELP
                 echo ""
 
                 local vw_hash
-                if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
-                    local vw_plain
-                    vw_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_token"; return 1; }
-                    vw_hash=$(generate_argon2_hash "$vw_plain") || { log_error "Failed to hash admin_token"; return 1; }
-                    if [[ -n "${VW_ADMIN_PLAIN_FILE:-}" ]]; then
-                        if [[ "$DRY_RUN" == "true" ]]; then
-                            log_info "[DRY RUN] Would write VaultWarden admin plaintext to ${VW_ADMIN_PLAIN_FILE}"
-                        else
-                            local _umask_vw
-                            _umask_vw=$(umask)
-                            umask 077
-                            printf '%s' "$vw_plain" > "${VW_ADMIN_PLAIN_FILE}"
-                            umask "$_umask_vw"
-                        fi
-                    fi
+                if [[ "$AUTO_MODE" == "true" ]]; then
+                    vw_hash="$(
+                        _ss_generate_admin_credential_quietly \
+                            "admin_token" \
+                            "$VW_ADMIN_PLAIN_FILE" \
+                            "$VW_ADMIN_HASH_FILE"
+                    )" || return 1
                 else
                     vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
                 fi
-                _COLLECTED_SECRETS["admin_token"]="$vw_hash"
+                SETUP_SECRETS_COLLECTED_SECRETS["admin_token"]="$vw_hash"
                 ;;
 
             # ── admin_basic_auth_hash ──────────────────────────────────────────
@@ -623,31 +1015,17 @@ HELP
                 echo ""
 
                 local caddy_hash
-                if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
-                    local caddy_plain
-                    caddy_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_basic_auth_hash"; return 1; }
-                    local _raw_caddy_hash
-                    _raw_caddy_hash=$(generate_bcrypt_hash "$caddy_plain") || { log_error "Failed to hash admin_basic_auth_hash"; return 1; }
-                    if ! _bcrypt_format_ok "$_raw_caddy_hash"; then
-                        log_error "Generated bcrypt hash has invalid format: $_raw_caddy_hash"
-                        return 1
-                    fi
-                    caddy_hash="admin ${_raw_caddy_hash}"
-                    if [[ -n "${CADDY_PLAIN_FILE:-}" ]]; then
-                        if [[ "$DRY_RUN" == "true" ]]; then
-                            log_info "[DRY RUN] Would write Caddy admin plaintext to ${CADDY_PLAIN_FILE}"
-                        else
-                            local _umask_caddy
-                            _umask_caddy=$(umask)
-                            umask 077
-                            printf '%s' "$caddy_plain" > "${CADDY_PLAIN_FILE}"
-                            umask "$_umask_caddy"
-                        fi
-                    fi
+                if [[ "$AUTO_MODE" == "true" ]]; then
+                    caddy_hash="$(
+                        _ss_generate_admin_credential_quietly \
+                            "admin_basic_auth_hash" \
+                            "$CADDY_PLAIN_FILE" \
+                            "$CADDY_HASH_FILE"
+                    )" || return 1
                 else
                     caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
                 fi
-                _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
+                SETUP_SECRETS_COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
                 ;;
 
             # ── smtp_password ──────────────────────────────────────────────────
@@ -681,9 +1059,9 @@ HELP
                             log_info "  ./utilities/secrets-rotate.sh smtp_password"
                         fi
                     fi
-                    _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
+                    SETUP_SECRETS_COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
                 else
-                    _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
+                    SETUP_SECRETS_COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
                 ;;
 
@@ -747,9 +1125,9 @@ HELP
                             log_info "  ./utilities/secrets-rotate.sh email_api_token"
                         fi
                     fi
-                    _COLLECTED_SECRETS["email_api_token"]="$email_api_token"
+                    SETUP_SECRETS_COLLECTED_SECRETS["email_api_token"]="$email_api_token"
                 else
-                    _COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
+                    SETUP_SECRETS_COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
                 ;;
 
@@ -769,8 +1147,8 @@ HELP
                     echo ""
 
                     if [[ "$AUTO_MODE" == "true" ]]; then
-                        _COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
-                        _COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
+                        SETUP_SECRETS_COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
+                        SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
                         log_warn "[AUTO] PUSH_ENABLED=true but Bitwarden push credentials cannot be generated automatically."
                         log_warn "Rotate both push fields before startup."
                     else
@@ -780,26 +1158,26 @@ HELP
                             do_push="no"
                         fi
                         if [[ "$do_push" == "yes" ]]; then
-                            _COLLECTED_SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
-                            _COLLECTED_SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
+                            SETUP_SECRETS_COLLECTED_SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
+                            SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
                             log_success "Push notifications configured"
                         else
-                            _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
-                            _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                            SETUP_SECRETS_COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                            SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
                             log_info "Push notifications skipped - configure later with: ./utilities/secrets-rotate.sh push_installation_id"
                         fi
                     fi
                 else
-                    _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
-                    _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                    SETUP_SECRETS_COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                    SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
                 fi
                 ;;
 
             # push_installation_key is collected alongside push_installation_id
             # in the block above; skip it when the loop reaches it directly.
             push_installation_key)
-                [[ -n "${_COLLECTED_SECRETS[push_installation_key]+x}" ]] || \
-                    _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                [[ -n "${SETUP_SECRETS_COLLECTED_SECRETS[push_installation_key]+x}" ]] || \
+                    SETUP_SECRETS_COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
                 ;;
 
             # ── caddy_cloudflare_dns_token ─────────────────────────────────────
@@ -814,7 +1192,7 @@ HELP
 
                 local cf_dns
                 cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
-                _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
+                SETUP_SECRETS_COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
                 ;;
 
             # ── cf_worker_bouncer_token / cloudflare_zone_id / cf_account_id ───
@@ -840,9 +1218,9 @@ HELP
                     cloudflare_zone_id=$(_get_field "cloudflare_zone_id") || { log_error "Failed to collect cloudflare_zone_id"; return 1; }
                     cf_account_id=$(_get_field "cf_account_id") || { log_error "Failed to collect cf_account_id"; return 1; }
                 fi
-                _COLLECTED_SECRETS["cf_worker_bouncer_token"]="$cf_worker_bouncer_token"
-                _COLLECTED_SECRETS["cloudflare_zone_id"]="$cloudflare_zone_id"
-                _COLLECTED_SECRETS["cf_account_id"]="$cf_account_id"
+                SETUP_SECRETS_COLLECTED_SECRETS["cf_worker_bouncer_token"]="$cf_worker_bouncer_token"
+                SETUP_SECRETS_COLLECTED_SECRETS["cloudflare_zone_id"]="$cloudflare_zone_id"
+                SETUP_SECRETS_COLLECTED_SECRETS["cf_account_id"]="$cf_account_id"
                 ;;
 
             # cloudflare_zone_id and cf_account_id are collected together in the
@@ -869,7 +1247,7 @@ HELP
             local _collect_type
             _collect_type=$(schema_collect_type "$_key")
             [[ "$_collect_type" == "skip" ]] && continue
-            if [[ -z "${_COLLECTED_SECRETS[$_key]+set}" ]]; then
+            if [[ -z "${SETUP_SECRETS_COLLECTED_SECRETS[$_key]+set}" ]]; then
                 log_error "collect_secrets: schema key '${_key}' was not deliberately collected or generated"
                 return 1
             fi
@@ -925,7 +1303,7 @@ HELP
                 local _label _collect_type
                 _collect_type=$(schema_collect_type "$_wkey")
                 [[ "$_collect_type" == "skip" ]] && continue
-                if [[ -z "${_COLLECTED_SECRETS[$_wkey]+set}" ]]; then
+                if [[ -z "${SETUP_SECRETS_COLLECTED_SECRETS[$_wkey]+set}" ]]; then
                     log_error "write_secrets: schema key '${_wkey}' has no collected/generated value"
                     return 1
                 fi
@@ -933,15 +1311,15 @@ HELP
                 [[ -n "$_label" ]] && printf '# %s\n' "$_label"
                 printf '%s: %s\n\n' \
                     "$_wkey" \
-                    "$(yaml_escape "${_COLLECTED_SECRETS[$_wkey]}")"
+                    "$(yaml_escape "${SETUP_SECRETS_COLLECTED_SECRETS[$_wkey]}")"
             done <<< "$_wkeys"
         } > "$temp_file"
 
-        for key in "${!_COLLECTED_SECRETS[@]}"; do
-            _COLLECTED_SECRETS["$key"]=""
+        for key in "${!SETUP_SECRETS_COLLECTED_SECRETS[@]}"; do
+            SETUP_SECRETS_COLLECTED_SECRETS["$key"]=""
         done
-        unset _COLLECTED_SECRETS
-        declare -A _COLLECTED_SECRETS
+        unset SETUP_SECRETS_COLLECTED_SECRETS
+        declare -A SETUP_SECRETS_COLLECTED_SECRETS
 
         if ! ensure_sops_env; then
             log_error "Failed to setup SOPS environment"
@@ -1033,6 +1411,12 @@ HELP
             return 1
         fi
 
+        _ss_publish_auto_handoff || return 1
+        if ! _ss_perform_cleanup 0; then
+            log_error "Sensitive temporary workspace cleanup failed; setup is not complete."
+            return 1
+        fi
+
         for _cleanup_key in \
             admin_token admin_basic_auth_hash \
             caddy_cloudflare_dns_token cf_account_id cf_worker_bouncer_token cloudflare_zone_id \
@@ -1069,7 +1453,7 @@ HELP
             echo "   smtp  — Postfix sidecar → direct SMTP (rotate smtp_password)"
             echo "   host  — deprecated alias for direct (smtp_password required)"
             echo ""
-            log_warn "⚠️  If you used --auto mode, scroll up to save the generated passwords!"
+            log_info "Generated administrator passwords were not printed; automatic mode uses a protected setup credential handoff."
             echo ""
 
             if [[ "$DRY_RUN" == "false" ]]; then

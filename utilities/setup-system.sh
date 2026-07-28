@@ -210,6 +210,31 @@ _validate_sops_contract() {
     _sops_resolved_version >/dev/null
 }
 
+_verify_required_python_modules() {
+    if ! python3 -c "from argon2 import PasswordHasher" 2>/dev/null; then
+        if declare -F log_error >/dev/null 2>&1; then
+            log_error "python3-argon2 is not installed or cannot be imported — required for administrator password verification"
+            log_info "Install hint: sudo apt-get update && sudo apt-get install -y python3-argon2"
+        else
+            printf '%s\n' \
+                "ERROR: python3-argon2 is not installed or cannot be imported." \
+                "Install hint: sudo apt-get update && sudo apt-get install -y python3-argon2" >&2
+        fi
+        return 1
+    fi
+    if ! python3 -c "import bcrypt" 2>/dev/null; then
+        if declare -F log_error >/dev/null 2>&1; then
+            log_error "python3-bcrypt is not installed or cannot be imported — required for protected setup credential verification"
+            log_info "Install hint: sudo apt-get update && sudo apt-get install -y python3-bcrypt"
+        else
+            printf '%s\n' \
+                "ERROR: python3-bcrypt is not installed or cannot be imported." \
+                "Install hint: sudo apt-get update && sudo apt-get install -y python3-bcrypt" >&2
+        fi
+        return 1
+    fi
+}
+
 if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
     case "${1:-}" in
         ubuntu-archive-url)
@@ -250,8 +275,11 @@ if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
             actual="$(_sops_resolved_version "${2:-}")" || exit 1
             [[ "$actual" == "$3" ]]
             ;;
+        verify-python-modules)
+            _verify_required_python_modules
+            ;;
         *)
-            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch|yq-release-asset|yq-release-sha256|supported-host|sops-default-version|yq-version|validate-yq|validate-yq-exact|yq-resolved-version|sops-version|sops-version-equals} [ARG...]\n' "$0" >&2
+            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch|yq-release-asset|yq-release-sha256|supported-host|sops-default-version|yq-version|validate-yq|validate-yq-exact|yq-resolved-version|sops-version|sops-version-equals|verify-python-modules} [ARG...]\n' "$0" >&2
             exit 2
             ;;
     esac
@@ -746,6 +774,28 @@ install_sops() {
     log_success "Installed SOPS: ${final_sops_ver}"
 }
 
+# Ubuntu installs package 7zip, while usable command names vary by source.
+# Keep detection centralized so both 7zz and 7z remain valid.
+_resolve_7zip_command() {
+    local candidate
+    for candidate in 7zz 7z; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+_require_7zip_command() {
+    local archive_tool
+    if ! archive_tool="$(_resolve_7zip_command)"; then
+        log_error "Missing required 7-Zip command: expected 7zz (preferred) or 7z (compatibility fallback)."
+        log_info "Install hint: sudo apt-get install -y 7zip"
+        return 1
+    fi
+    log_debug "Resolved 7-Zip command: $archive_tool"
+    return 0
+}
 # Install the required system packages, Docker, and SOPS.
 # NOTE: CrowdSec is intentionally NOT installed here. It is an optional
 # post-install step that requires Cloudflare secrets to be injected first.
@@ -779,7 +829,7 @@ install_dependencies() {
         log_success "Universe repository enabled"
     fi
 
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "util-linux" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-yaml" "apache2-utils" "cron" "openssl" "tar" "zstd")
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "7zip" "git" "gpg" "coreutils" "util-linux" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-bcrypt" "python3-yaml" "apache2-utils" "cron" "openssl" "tar" "zstd")
 
     log_info "Refreshing apt package index..."
     operation_package_run apt-get update -qq || return 1
@@ -804,6 +854,7 @@ install_dependencies() {
         [rsync]=rsync
         [python3]=python3
         [python3-argon2]=""
+        [python3-bcrypt]=""
         [python3-yaml]=""
         [apache2-utils]=htpasswd
         [cron]=cron
@@ -815,7 +866,9 @@ install_dependencies() {
     local missing_packages=()
     for pkg in "${basic_packages[@]}"; do
         local cmd="${pkg_to_cmd[$pkg]:-}"
-        if [[ -n "$cmd" ]]; then
+        if [[ "$pkg" == "7zip" ]]; then
+            _resolve_7zip_command >/dev/null 2>&1 || missing_packages+=("$pkg")
+        elif [[ -n "$cmd" ]]; then
             ! command -v "$cmd" >/dev/null 2>&1 && missing_packages+=("$pkg")
         else
             ! dpkg -s "$pkg" >/dev/null 2>&1 && missing_packages+=("$pkg")
@@ -848,7 +901,7 @@ install_dependencies() {
 # Confirm that all required commands and Python modules are present.
 verify_dependencies() {
     hash -r
-    local required_commands=("age" "sops" "docker" "jq" "yq" "sqlite3" "ufw" "curl" "python3" "htpasswd" "zstd" "flock" "stat")
+    local required_commands=("age" "sops" "docker" "jq" "yq" "sqlite3" "ufw" "curl" "python3" "htpasswd" "zstd" "flock" "stat" "systemd-run" "shred" "realpath" "rm")
     if ! command -v ufw >/dev/null 2>&1; then
         log_error "Missing required command: ufw"
         log_info  "Install hint: sudo apt-get update && sudo apt-get install -y ufw"
@@ -856,6 +909,7 @@ verify_dependencies() {
     fi
 
     require_commands "${required_commands[@]}" || return 1
+    _require_7zip_command || return 1
     if ! _validate_sops_contract; then
         log_error "Resolved sops command does not satisfy the required repository SOPS interface."
         return 1
@@ -864,7 +918,12 @@ verify_dependencies() {
         log_error "Resolved yq does not satisfy the required Mike Farah v4 schema interface."
         return 1
     fi
-    python3 -c "from argon2 import PasswordHasher" 2>/dev/null || return 1
+    [[ -x /bin/sh ]] || {
+        log_error "Missing required shell: /bin/sh"
+        log_info "Install hint: sudo apt-get update && sudo apt-get install -y dash"
+        return 1
+    }
+    _verify_required_python_modules || return 1
     python3 -c "import yaml" 2>/dev/null || {
         log_error "python3-yaml (PyYAML) is not installed — required for secrets parsing"
         return 1

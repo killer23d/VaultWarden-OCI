@@ -19,6 +19,8 @@ source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/crypto.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/runtime-permissions.sh"
 source "${SCRIPT_DIR}/lib/operations.sh"
 
 ORIGINAL_ARGS=("$@")
@@ -192,33 +194,36 @@ warn_plaintext_secret_overrides() {
 # Valid modes are declared in _VW_DEFAULT_EMAIL_MODES (lib/defaults.sh).
 # Add a new mode there; no edit to this function is needed.
 check_email_config_consistency() {
+  # VWOCI-PRR-PATCH-03: canonical modes are declared in lib/defaults.sh.
   local email_mode="${EMAIL_MODE:-auto}"
   local secrets_dir="$DOCKER_SECRETS_DIR"
-
   case "$email_mode" in
     api)
       local token_file="${secrets_dir}/email_api_token"
-      if [[ ! -f "$token_file" ]] || [[ ! -s "$token_file" ]]; then
+      if [[ ! -s "$token_file" ]]; then
         log_warn "EMAIL_MODE=api is set but '${token_file}' is absent or empty."
-        log_warn "  All alert emails will fail silently until the token is populated."
-        log_warn "  Fix: ./utilities/secrets-rotate.sh email_api_token"
+        log_warn "Email API delivery will fail until the token is populated."
+        log_warn "Fix: ./utilities/secrets-rotate.sh email_api_token"
       fi
       ;;
-    smtp)
+    smtp|direct|host)
       local pw_file="${secrets_dir}/smtp_password"
-      if [[ ! -f "$pw_file" ]] || [[ ! -s "$pw_file" ]]; then
-        log_warn "EMAIL_MODE=smtp is set but '${pw_file}' is absent or empty."
-        log_warn "  SMTP relay authentication will fail on first send."
-        log_warn "  Fix: ./utilities/secrets-rotate.sh smtp_password"
+      if [[ "$email_mode" == "host" ]]; then
+        log_warn "EMAIL_MODE=host is a deprecated compatibility alias; use EMAIL_MODE=direct."
+      fi
+      if [[ ! -s "$pw_file" ]]; then
+        log_warn "EMAIL_MODE=${email_mode} requires '${pw_file}', but it is absent or empty."
+        log_warn "Direct SMTP authentication will fail on first send."
+        log_warn "Fix: ./utilities/secrets-rotate.sh smtp_password"
       fi
       ;;
-    auto|host)
+    auto)
       ;;
     *)
-      local _valid_modes_str
-      _valid_modes_str=$(IFS='|'; echo "${_VW_DEFAULT_EMAIL_MODES[*]}")
-      log_warn "EMAIL_MODE='${email_mode}' is not a recognised value (${_valid_modes_str})."
-      log_warn "  Email delivery may fail. Check EMAIL_MODE in .env."
+      local valid_modes
+      valid_modes="$(IFS='|'; echo "${_VW_DEFAULT_EMAIL_MODES[*]}")"
+      log_warn "EMAIL_MODE='${email_mode}' is not a recognised value (${valid_modes})."
+      log_warn "Email delivery may fail."
       ;;
   esac
   return 0
@@ -367,52 +372,46 @@ prepare_directories() {
 }
 
 prepare_log_directories() {
-  log_info "Ensuring base state directory exists..."
-
+  # VWOCI-PRR-PATCH-03: never widen existing log files to executable/world-readable.
   local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
+  local logs_root="${project_state_dir}/logs"
+  local svc puid pgid
+  local log_dirs=()
+  for svc in "${_VW_DEFAULT_LOG_SERVICES[@]}"; do
+    log_dirs+=("${logs_root}/${svc}")
+  done
+  puid="$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")"
+  pgid="$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")"
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would create base state directory: $project_state_dir"
-    return 0
+    log_info "[DRY RUN] Would create log directories: ${log_dirs[*]}"
+    enforce_runtime_log_permissions "$logs_root" "$puid" "$pgid" true
+    return $?
   fi
 
-  if ! _maybe_sudo mkdir -p "$project_state_dir"; then
-    log_error "Failed to create base state directory: $project_state_dir"
+  log_info "Creating log subdirectories with canonical permissions..."
+  if ! _maybe_sudo mkdir -p -- "${log_dirs[@]}"; then
+    log_error "Failed to create required log subdirectories."
     return 1
   fi
-
-  log_info "Creating log subdirectories with correct permissions..."
-
-  local svc log_dirs=();
-  for svc in "${_VW_DEFAULT_LOG_SERVICES[@]}"; do
-    log_dirs+=("${project_state_dir}/logs/${svc}")
-  done
-
-  if ! _maybe_sudo mkdir -p "${log_dirs[@]}"; then
-    log_warn "Failed to create log subdirectories (init container will try)"
-  else
-    local puid pgid
-    puid=$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")
-    pgid=$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")
-    _maybe_sudo chown -R "${puid}:${pgid}" "${project_state_dir}/logs" 2>/dev/null || true
-    _maybe_sudo chmod -R 755 "${project_state_dir}/logs" 2>/dev/null || true
-    log_success "Log subdirectories created with correct permissions"
+  if ! enforce_runtime_log_permissions "$logs_root" "$puid" "$pgid" false; then
+    log_error "Failed to enforce runtime log ownership and permissions."
+    return 1
   fi
-
-  if ! ensure_caddy_log_permissions "${project_state_dir}/logs/caddy"; then
-    log_error "Failed to enforce Caddy log directory and file permissions"
+  # Retain the focused Caddy correction for any service-specific edge cases.
+  if ! ensure_caddy_log_permissions "${logs_root}/caddy"; then
+    log_error "Failed to enforce Caddy log directory and file permissions."
     return 1
   fi
 
   local backup_dir
   backup_dir="$(get_config_value "BACKUP_DIR" "${project_state_dir}/backups")"
-  if ! _maybe_sudo mkdir -p "$backup_dir" 2>/dev/null; then
+  if ! _maybe_sudo mkdir -p -- "$backup_dir"; then
     log_warn "Could not create backup directory: $backup_dir"
   else
     log_info "Backup directory ready: $backup_dir"
   fi
-
-  log_success "State directories prepared successfully"
+  log_success "Runtime log directories are ready (directories 0750, files 0640)."
   return 0
 }
 

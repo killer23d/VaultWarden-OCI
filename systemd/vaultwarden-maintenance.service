@@ -40,6 +40,8 @@ ProtectHome=read-only
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat <unit>
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
+# Optional because the recovery directory exists only after an export.
+ReadWritePaths=-/root/vaultwarden-recovery
 # Embedded crowdsec -t may update database metadata under /var/lib/crowdsec.
 # The path is optional so maintenance still starts on hosts without CrowdSec.
 ReadWritePaths=-/var/lib/crowdsec

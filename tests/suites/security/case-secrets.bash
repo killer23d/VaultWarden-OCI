@@ -1202,6 +1202,17 @@ cat > "$repo/lib/crypto.sh" <<'MOCK_CRYPTO'
 resolve_age_key_path(){ printf '%s\n' "${VW_TEST_ROOT:?}/etc/vaultwarden/age-key.txt"; }
 check_age_key(){ [[ -s "$1" ]]; }
 MOCK_CRYPTO
+cat > "$repo/lib/setup-credentials.sh" <<'MOCK_SETUP_CREDENTIALS'
+# Minimal functional mock for the full-entrypoint transaction fixture.  The
+# production helper's formatting is covered elsewhere; this fixture needs the
+# sourced symbol and the root-only handoff artifact expected after a retry.
+publish_age_rotation_handoff() {
+    local key_file="$1" timestamp="$3"
+    local destination="${VW_TEST_ROOT:?}/root/vaultwarden-recovery-kit-age-rotate-${timestamp}.txt"
+    install -m 600 "$key_file" "$destination"
+    printf '%s\n' "$destination"
+}
+MOCK_SETUP_CREDENTIALS
 
 cat > "$case_root/bin/install" <<'MOCK_INSTALL'
 #!/usr/bin/env bash

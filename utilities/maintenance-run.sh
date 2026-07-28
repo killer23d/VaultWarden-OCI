@@ -51,8 +51,9 @@ USAGE:
 
 DESCRIPTION:
     Performs routine maintenance: log cleanup, old backup pruning, Docker
-    system cleanup, and scheduled database optimization. Run automatically
-    by the vaultwarden-maintenance systemd timer, or manually on demand.
+    system cleanup, expired plaintext recovery-kit fallback cleanup, and
+    scheduled database optimization. Primary recovery cleanup is scheduled for
+    approximately 30 minutes; this sweep removes eligible older leftovers.
 
 OPTIONS:
     --comprehensive         Run everything: routine + firewall + DNS
@@ -138,6 +139,7 @@ main() {
     require_project_state_ready || exit 1
 
     local log_cleanup_result=0 backup_cleanup_result=0 docker_cleanup_result=0
+    local recovery_cleanup_result=0
     local db_optimization_result=0 firewall_update_result=1 dns_update_result=1
     local health_validation_result=0
 
@@ -145,6 +147,7 @@ main() {
     log_header "Phase 1/4 — System cleanup"
     cleanup_logs    || log_cleanup_result=$?
     cleanup_backups || backup_cleanup_result=$?
+    cleanup_expired_recovery_kits "$DRY_RUN" || recovery_cleanup_result=$?
     if cleanup_docker_system; then
         docker_cleanup_result=0
     else
@@ -179,12 +182,18 @@ main() {
     local _maint_duration_seconds=$(( $(date +%s) - _MAINT_START_EPOCH ))
 
     log_header "Maintenance Summary"
+    if [[ "$recovery_cleanup_result" == 0 ]]; then
+        log_success "Recovery-kit fallback cleanup: completed"
+    else
+        log_error "Recovery-kit fallback cleanup: issues require operator review"
+    fi
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
         "$health_validation_result" "$_maint_duration_seconds"
 
     local critical_failures=0
+    [[ "$recovery_cleanup_result" != "0" ]] && ((++critical_failures))
     [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup_result"       != "0" ]] && ((++critical_failures))
     [[ "$CLEAN_BACKUPS"     == "true"  && "$backup_cleanup_result"    != "0" ]] && ((++critical_failures))
     [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup_result"    == "2" ]] && ((++critical_failures))

@@ -67,6 +67,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/operations.sh"
+# shellcheck disable=SC1091
+source "${PROJECT_ROOT}/lib/setup-credentials.sh"
 require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 
@@ -245,29 +247,20 @@ _key_rotate_test_signal_after() {
 }
 
 _display_rotated_age_key_summary() {
-    local key_file="$1" public_key="$2" kit_file="$3"
-    local private_key_line=""
-
-    { set +x; } 2>/dev/null
-    private_key_line="$(grep -m1 '^AGE-SECRET-KEY-1' "$key_file" 2>/dev/null || true)"
-
-    printf '\n%s' "${COLOR_RED:-}"
-    cat <<'CRED_BANNER'
-  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-  !                                                                       !
-  !       🚨 CRITICAL: SAVE THIS NEW AGE KEY FOR DISASTER RECOVERY 🚨      !
-  !     Future backups and secrets require this new private key.          !
-  !                                                                       !
-  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-CRED_BANNER
-    printf '%s\n' "${COLOR_RESET:-}"
-
-    printf '\n%s[1] SOPS AGE SECRET KEY%s\n' "${COLOR_CYAN:-}" "${COLOR_RESET:-}"
-    printf '    Public key:  %s%s%s\n' "${COLOR_GREEN:-}" "$public_key" "${COLOR_RESET:-}"
-    printf '%s%s%s\n' "${COLOR_GREEN:-}" "${private_key_line:-ERROR: could not read private key}" "${COLOR_RESET:-}"
-
-    printf '\n%sRecovery kit:%s %s\n' "${COLOR_CYAN:-}" "${COLOR_RESET:-}" "$kit_file"
-    printf '\n%s!!! TYPE SAVED ONLY AFTER SAVING THIS KEY OFFLINE !!!%s\n' "${COLOR_RED:-}" "${COLOR_RESET:-}"
+  # VWOCI-PRR-PATCH-01: private identity remains only in the protected handoff.
+  local _key_file="$1" public_key="$2" kit_file="$3"
+  : "$_key_file"
+  printf '\n'
+  printf '╭──────────────────────────────────────────────────────────────────────────────╮\n'
+  printf '│  AGE KEY ROTATION HANDOFF SAVED                                              │\n'
+  printf '├──────────────────────────────────────────────────────────────────────────────┤\n'
+  printf '│  %-76s│\n' "$kit_file"
+  printf '│  Owner          root:root                                                    │\n'
+  printf '│  Permissions    0600                                                         │\n'
+  printf '│  Public key     %-60s│\n' "$public_key"
+  printf '│                                                                              │\n'
+  printf '│  No private key material was written to terminal output.                    │\n'
+  printf '╰──────────────────────────────────────────────────────────────────────────────╯\n'
 }
 
 log_header "VaultWarden-OCI Age Key Rotation"
@@ -483,23 +476,10 @@ SOPS_AGE_KEY_FILE="$system_key" sops -d "$secrets_file" >/dev/null
 check_age_key "$system_key" >/dev/null
 _KEY_ROTATE_COMMITTED=true
 
-kit_file="/root/vaultwarden-recovery-kit-age-rotate-${ts}.txt"
-{
-    echo "# VaultWarden-OCI Age Key Recovery Kit"
-    echo "# Generated: $(date -u)"
-    echo "# Host:      $(hostname -f 2>/dev/null || hostname)"
-    echo "# Reason:    Operational Age key rotation"
-    echo "#"
-    echo "# Store this file offline in a secure password manager or USB."
-    echo "# Delete it from /root after it is safely copied."
-    echo
-    echo "[AGE PRIVATE KEY]"
-    cat "$system_key"
-    echo
-    echo "[AGE PUBLIC KEY]"
-    echo "$new_pub"
-} > "$kit_file"
-chmod 600 "$kit_file"
+kit_file="$(publish_age_rotation_handoff "$system_key" "$new_pub" "$ts")" || {
+  log_error "Could not publish the protected Age rotation handoff."
+  exit 1
+}
 
 log_success "Age key rotation complete."
 log_success "New public key: $new_pub"

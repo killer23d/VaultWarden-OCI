@@ -569,6 +569,7 @@ auto_fix_critical_permissions(){ :; }
 require_project_state_ready(){ :; }
 cleanup_logs(){ :; }
 cleanup_backups(){ :; }
+cleanup_expired_recovery_kits(){ :; }
 cleanup_docker_system(){ :; }
 optimize_database(){ :; }
 validate_system_health(){ :; }

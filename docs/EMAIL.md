@@ -379,3 +379,11 @@ Git updates the checkout; systemd failure notifications use the managed installe
 - Do not rely on provider pricing/free-tier numbers copied into repository docs.
 - Keep Postfix configured even when advanced API-first operational alerts are enabled.
 - Treat recovery-kit attachment delivery as a high-sensitivity path and use the independent attachment passphrase according to the recovery-kit workflow.
+
+## Recovery-kit attachment
+
+<!-- VWOCI-PRR-PATCH-04 -->
+
+`EMAIL_MODE=direct` is a supported direct-SMTP mode and requires the runtime `smtp_password` secret. `host` remains a deprecated compatibility alias.
+
+Recovery-kit email attaches only an AES-256 encrypted ZIP created by the Ubuntu 24.04 `7zip` package. The independently entered attachment passphrase is not included in the message and is not reused from any stored project credential. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

@@ -18,11 +18,31 @@ USAGE:
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
-    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, then
-    exports a plaintext recovery document containing the Age private key and
-    all credentials. The output file is written to a tmpfs-backed directory
-    (e.g. /dev/shm) with mode 0600 and an auto-delete scheduled after 30
-    minutes via at(1).
+    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, and
+    publishes a protected plaintext recovery document in the
+    recovery directory /root/vaultwarden-recovery.
+
+    The recovery directory is owned by root:root with mode 0700, and the
+    recovery document is owned by root:root with mode 0600. Immediately after
+    publication, a systemd transient timer is scheduled to remove it after
+    approximately 30 minutes; at(1) is an optional fallback. If neither
+    scheduler accepts cleanup, export fails closed and removes the plaintext
+    document before returning.
+
+    Successful encrypted email delivery removes the local plaintext copy
+    immediately. Declined or failed email leaves the protected copy temporarily.
+    Primary cleanup is scheduled for approximately 30 minutes. If the file
+    survives that cleanup, the next routine maintenance run removes eligible
+    leftovers that are already at least 30 minutes old. Email uses only an
+    AES-256 encrypted ZIP with a passphrase independent from stored VaultWarden
+    credentials.
+
+    Best-effort overwrite and unlink. Physical erasure is not guaranteed on
+    SSDs, snapshots, journaling filesystems, or copy-on-write storage.
+
+    Temporary decryption may use /dev/shm, but the final published recovery
+    document remains under /root/vaultwarden-recovery. Recovery content is
+    never printed to terminal output.
 
     This is the canonical standalone entry point for recovery kit export.
     setup-secrets.sh delegates its post-setup export prompt here.
@@ -63,9 +83,20 @@ init_common_lib "$0"
 require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+# shellcheck disable=SC1091
+source "${PROJECT_ROOT}/lib/operations.sh"
 load_project_environment || exit 1
 
-trap perform_cleanup EXIT
+cleanup_recovery_export() {
+  local rc=$?
+  operation_release "$rc" 2>/dev/null || true
+  perform_cleanup
+  return "$rc"
+}
+trap cleanup_recovery_export EXIT
+trap 'operation_release 130; exit 130' INT
+trap 'operation_release 129; exit 129' HUP
+trap 'operation_release 143; exit 143' TERM
 
 check_prerequisites() {
     local missing=()
@@ -105,7 +136,7 @@ _export_recovery_kit_safe() {
         log_error "Failed to secure temp file: $temp_plain"
         return 1
     fi
-    register_cleanup "_secure_shred" "$temp_plain"
+    register_cleanup "_remove_sensitive_file" "$temp_plain"
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
@@ -135,21 +166,23 @@ _export_recovery_kit_safe() {
 }
 
 main() {
-    if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
-
-    case "${1:-}" in
-        --help|-h) show_help; exit 0 ;;
-        --version|-V) show_version; exit 0 ;;
-        "")        ;;
-        *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
-    esac
-
-    if ! check_prerequisites; then exit 1; fi
-    _warn_if_stack_unavailable
-
-    log_info "Running standalone recovery kit export..."
-    _export_recovery_kit_safe
-    exit $?
+  if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
+  case "${1:-}" in
+    --help|-h) show_help; exit 0 ;;
+    --version|-V) show_version; exit 0 ;;
+    "") ;;
+    *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
+  esac
+  if ! check_prerequisites; then exit 1; fi
+  operation_acquire \
+    --id recovery-export \
+    --label "Recovery kit export" \
+    --specific-lock /run/lock/vaultwarden-recovery-export.lock \
+    --non-interactive skip || exit $?
+  _warn_if_stack_unavailable
+  log_info "Running standalone recovery kit export..."
+  _export_recovery_kit_safe
+  exit $?
 }
 
 main "$@"

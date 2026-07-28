@@ -826,9 +826,20 @@ pass "dry-run force needs no acknowledgement"
 GUARD_ROOT="$TMP/guard-repo"
 mkdir -p "$GUARD_ROOT/lib" "$GUARD_ROOT/utilities"
 cp "$SETUP" "$ROOT/VERSION" "$GUARD_ROOT/"
-for lib in log validate config common operations crypto docker backup-utils secrets defaults storage; do
-    : >"$GUARD_ROOT/lib/${lib}.sh"
-done
+# Keep this fixture aligned with setup.sh instead of maintaining a second,
+# drift-prone dependency list in the test.
+guard_required_lib_count=0
+while IFS= read -r required_lib; do
+    [[ -n "$required_lib" ]] || continue
+    mkdir -p "$GUARD_ROOT/$(dirname "$required_lib")"
+    : >"$GUARD_ROOT/$required_lib"
+    guard_required_lib_count=$((guard_required_lib_count + 1))
+done < <(
+    sed -n '/^REQUIRED_LIBS=(/,/^)/p' "$GUARD_ROOT/setup.sh" \
+        | sed -n 's/^[[:space:]]*"\([^"]*\.sh\)".*/\1/p'
+)
+(( guard_required_lib_count > 0 )) \
+    || fail "could not derive setup required-library fixture"
 cat >"$GUARD_ROOT/lib/log.sh" <<'EOF_LOG'
 COLOR_BOLD_RED=""; COLOR_RESET=""; COLOR_YELLOW=""; COLOR_RED=""; COLOR_CYAN=""; COLOR_GREEN=""
 log_error(){ printf 'ERROR: %s\n' "$*" >&2; }

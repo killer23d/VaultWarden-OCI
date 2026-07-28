@@ -554,3 +554,9 @@ When reviewing a change, ask:
 10. Can the defect be fixed locally without adding a framework, registry, database, daemon, or second source of truth?
 
 Prefer the smallest coherent fix that preserves a truthful production contract.
+
+## Protected credential output
+
+<!-- VWOCI-PRR-PATCH-04 -->
+
+Setup, Age-key rotation, restore, and recovery export do not print private identities or generated plaintext credentials. New setup credentials and key handoffs are root-only files under `/root/vaultwarden-recovery/`; operators must move them offline and explicitly remove the host copy. The setup handoff is not emailed. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

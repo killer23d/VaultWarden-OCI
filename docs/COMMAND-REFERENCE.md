@@ -119,7 +119,7 @@ SUBCOMMANDS:
                Sub-actions: install | remove | validate | status
 
 FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
-  --auto              Non-interactive install. Auto-generates passwords/passphrases;
+  --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
@@ -719,8 +719,9 @@ USAGE:
 
 DESCRIPTION:
     Performs routine maintenance: log cleanup, old backup pruning, Docker
-    system cleanup, and scheduled database optimization. Run automatically
-    by the vaultwarden-maintenance systemd timer, or manually on demand.
+    system cleanup, expired plaintext recovery-kit fallback cleanup, and
+    scheduled database optimization. Primary recovery cleanup is scheduled for
+    approximately 30 minutes; this sweep removes eligible older leftovers.
 
 OPTIONS:
     --comprehensive         Run everything: routine + firewall + DNS
@@ -1069,11 +1070,31 @@ USAGE:
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
-    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, then
-    exports a plaintext recovery document containing the Age private key and
-    all credentials. The output file is written to a tmpfs-backed directory
-    (e.g. /dev/shm) with mode 0600 and an auto-delete scheduled after 30
-    minutes via at(1).
+    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, and
+    publishes a protected plaintext recovery document in the
+    recovery directory /root/vaultwarden-recovery.
+
+    The recovery directory is owned by root:root with mode 0700, and the
+    recovery document is owned by root:root with mode 0600. Immediately after
+    publication, a systemd transient timer is scheduled to remove it after
+    approximately 30 minutes; at(1) is an optional fallback. If neither
+    scheduler accepts cleanup, export fails closed and removes the plaintext
+    document before returning.
+
+    Successful encrypted email delivery removes the local plaintext copy
+    immediately. Declined or failed email leaves the protected copy temporarily.
+    Primary cleanup is scheduled for approximately 30 minutes. If the file
+    survives that cleanup, the next routine maintenance run removes eligible
+    leftovers that are already at least 30 minutes old. Email uses only an
+    AES-256 encrypted ZIP with a passphrase independent from stored VaultWarden
+    credentials.
+
+    Best-effort overwrite and unlink. Physical erasure is not guaranteed on
+    SSDs, snapshots, journaling filesystems, or copy-on-write storage.
+
+    Temporary decryption may use /dev/shm, but the final published recovery
+    document remains under /root/vaultwarden-recovery. Recovery content is
+    never printed to terminal output.
 
     This is the canonical standalone entry point for recovery kit export.
     setup-secrets.sh delegates its post-setup export prompt here.
@@ -1313,6 +1334,14 @@ DESCRIPTION:
     Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
     credentials interactively or automatically. Interactive view/list/rotate
     and recovery-kit export are root-operated commands via sudo ./edit-secrets.sh.
+
+AUTOMATIC CREDENTIAL HANDOFF:
+    sudo utilities/setup-secrets.sh configure --auto
+    Generated credential values are never printed. After successful atomic
+    publication, the command displays the protected root-only handoff path,
+    root:root ownership and 0700/0600 permissions. The handoff contains exactly
+    the SOPS Age identity, Vaultwarden administrator password, and Caddy
+    administrator password. Automatic configuration fails if publication fails.
 
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
