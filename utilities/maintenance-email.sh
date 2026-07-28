@@ -205,9 +205,10 @@ run_email_diagnostics() {
     local passed_tests=0
     local failed_tests=()
     for i in "${!test_results[@]}"; do
-        if [[ ${test_results[i]} -eq 0 ]]; then ((passed_tests++))
-        else failed_tests+=("${test_names[i]}")
-        fi
+        if [[ ${test_results[i]} -eq 0 ]]; then
+            passed_tests=$((passed_tests + 1))
+        else
+            failed_tests+=("${test_names[i]}")
     done
     echo ""
     log_info "============================================"
