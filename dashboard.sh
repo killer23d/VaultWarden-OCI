@@ -865,7 +865,7 @@ handle_advanced_menu() {
 draw_identity_menu() {
     echo -e " ${BLD}Identity, Email & Admin${NC}"
     echo ""
-    echo -e "  [ ${GRN}1${NC} ] Email Delivery Tests"
+    echo -e "  [ ${GRN}1${NC} ] Email Operations"
     echo -e "  [ ${GRN}2${NC} ] Tail Auth & Access Drops"
     echo -e "  [ ${GRN}3${NC} ] Rotate Vault Admin Token"
     echo -e "  [ ${GRN}4${NC} ] View Breakglass Status"
@@ -880,7 +880,7 @@ handle_identity_menu() {
     local opt="$1"
     case "${opt}" in
         1)
-            ACTIVE_MENU="email_tests"
+            ACTIVE_MENU="email_operations"
             ;;
         2)
             echo ""
@@ -911,16 +911,18 @@ handle_identity_menu() {
 }
 
 # ===========================================================================
-# SUBMENU I.1 — Email Delivery Tests
+# SUBMENU I.1 — Email Operations
 # ===========================================================================
-draw_email_tests_menu() {
-    echo -e " ${BLD}Email Delivery Tests${NC}"
+draw_email_operations_menu() {
+    echo -e " ${BLD}Email Operations${NC}"
     echo ""
     echo -e "  [ ${GRN}1${NC} ] Configured production route"
     echo -e "  [ ${GRN}2${NC} ] All exact transports"
     echo -e "  [ ${GRN}3${NC} ] HTTP API only"
     echo -e "  [ ${GRN}4${NC} ] Postfix sidecar only"
     echo -e "  [ ${GRN}5${NC} ] Direct SMTP only"
+    echo -e "  [ ${GRN}6${NC} ] Show Postfix queue"
+    echo -e "  [ ${RED}7${NC} ] Clear Postfix queue"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Identity, Email & Admin"
     echo ""
@@ -929,7 +931,7 @@ draw_email_tests_menu() {
     echo ""
 }
 
-handle_email_tests_menu() {
+handle_email_operations_menu() {
     local opt="$1" transport=""
     case "${opt}" in
         1) transport="configured" ;;
@@ -937,6 +939,29 @@ handle_email_tests_menu() {
         3) transport="api" ;;
         4) transport="sidecar" ;;
         5) transport="direct" ;;
+        6)
+            run_sudo_cmd \
+                "sudo make email-queue" \
+                make -C "${REPO_ROOT}" email-queue
+            return
+            ;;
+        7)
+            local confirmation=""
+            echo ""
+            echo -e "${YLW} This deletes every email currently queued by Postfix.${NC}"
+            printf ' Type CLEAR to confirm, or anything else to cancel: '
+            IFS= read -r confirmation || confirmation=""
+            if [[ "$confirmation" != "CLEAR" ]]; then
+                echo -e "${YLW} Postfix queue clear cancelled.${NC}"
+                _press_enter
+                return
+            fi
+            run_sudo_cmd \
+                "sudo make email-queue-clear" \
+                env VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1 \
+                make -C "${REPO_ROOT}" email-queue-clear
+            return
+            ;;
         b)
             ACTIVE_MENU="identity"
             return
@@ -994,7 +1019,7 @@ main() {
             secrets)  draw_secrets_menu  ;;
             advanced) draw_advanced_menu ;;
             identity) draw_identity_menu ;;
-            email_tests) draw_email_tests_menu ;;
+            email_operations) draw_email_operations_menu ;;
             *)
                 ACTIVE_MENU="main"
                 draw_main_menu
@@ -1022,7 +1047,7 @@ main() {
             secrets)  handle_secrets_menu  "${opt}" ;;
             advanced) handle_advanced_menu "${opt}" ;;
             identity) handle_identity_menu "${opt}" ;;
-            email_tests) handle_email_tests_menu "${opt}" ;;
+            email_operations) handle_email_operations_menu "${opt}" ;;
         esac
     done
 }

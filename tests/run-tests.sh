@@ -86,6 +86,7 @@ OPERATIONS_CASES=(
     tests/suites/operations/case-firewall-update.bash
     tests/suites/operations/case-crowdsec.bash
     tests/suites/operations/case-crowdsec-notifications.bash
+    tests/suites/operations/case-email-queue.bash
     tests/suites/operations/case-uninstall.bash
 )
 

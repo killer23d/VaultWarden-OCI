@@ -44,7 +44,7 @@ EMAIL_TEST_TRANSPORT ?= configured
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
-        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email \
+        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-clear \
         up down restart start stop safe-restart status operations \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
@@ -75,7 +75,7 @@ EMAIL_TEST_TRANSPORT ?= configured
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email health-email up down start stop restart safe-restart status operations \
+	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-clear health-email up down start stop restart safe-restart status operations \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
@@ -257,6 +257,14 @@ test-email: ## Test configured or exact email delivery transports (EMAIL_TEST_TR
 	$(call require-root)
 	@echo "$(BLUE)Testing email delivery transport: $(EMAIL_TEST_TRANSPORT)$(NC)"
 	@./maintenance.sh test-email --transport "$(EMAIL_TEST_TRANSPORT)" --verbose
+
+email-queue: ## Show the Postfix email queue
+	$(call require-root)
+	@./utilities/email-queue.sh status
+
+email-queue-clear: ## Clear the Postfix email queue after exact confirmation
+	$(call require-root)
+	@./utilities/email-queue.sh clear
 
 # ===========================================================================
 ##@ Normal Admin + Dashboard Stable API — Service Management

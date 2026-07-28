@@ -97,10 +97,16 @@ grep -Fq 'Create + Fully Verify + Sync DB Backup' "$ROOT/dashboard.sh" || fail '
 ! grep -Fq 'Start/Restart Stack     (safe)' "$ROOT/dashboard.sh" || fail 'dashboard ordinary restart must not be labeled safe'
 ! grep -Fq 'validate_ip' "$ROOT/dashboard.sh" || fail 'dashboard unban should let cscli validate address forms through make unban'
 grep -Fq 'make -C "${REPO_ROOT}" unban "IP=${ip_to_unban}"' "$ROOT/dashboard.sh" || fail 'dashboard unban must route through make unban'
-grep -Fq 'Email Delivery Tests' "$ROOT/dashboard.sh" || fail 'dashboard email transport submenu is missing'
-grep -Fq 'ACTIVE_MENU="email_tests"' "$ROOT/dashboard.sh" || fail 'identity menu must open the email transport submenu'
+grep -Fq 'Email Operations' "$ROOT/dashboard.sh" || fail 'dashboard email operations submenu is missing'
+grep -Fq 'ACTIVE_MENU="email_operations"' "$ROOT/dashboard.sh" || fail 'identity menu must open the email operations submenu'
 grep -Fq 'make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"' "$ROOT/dashboard.sh" \
     || fail 'dashboard email diagnostics must use the stable Make target'
+grep -Fq 'make -C "${REPO_ROOT}" email-queue' "$ROOT/dashboard.sh" \
+    || fail 'dashboard queue status must use the stable Make target'
+grep -Fq 'VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1' "$ROOT/dashboard.sh" \
+    || fail 'dashboard queue clear must pass the exact confirmation marker'
+grep -Fq 'make -C "${REPO_ROOT}" email-queue-clear' "$ROOT/dashboard.sh" \
+    || fail 'dashboard queue clear must use the stable Make target'
 grep -Fq 'ACTIVE_MENU="identity"' "$ROOT/dashboard.sh" || fail 'email transport submenu must return to the identity menu'
 printf 'Dashboard truthfulness tests passed.\n'
 

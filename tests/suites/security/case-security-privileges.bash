@@ -368,12 +368,12 @@ extract_shell_function() {
 
 # Root-operated lifecycle contract.
 grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
-for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email health-email diagnose systemd-status prune key-show; do
+for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-clear health-email diagnose systemd-status prune key-show; do
     grep -Eq "(^|[[:space:]])${target}([[:space:]]|\|$)" Makefile || fail "${target} is not root-allowed"
 done
 pass "root-supported lifecycle/day-2 targets are allowed under sudo make"
 
-for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email diagnose systemd-status prune key-show; do
+for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-clear diagnose systemd-status prune key-show; do
     _snip="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
     extract_make_target "$target" Makefile > "$_snip" || fail "could not extract make ${target} target"
     grep -Fq '$(call require-root)' "$_snip" || { cat "$_snip" >&2; rm -f "$_snip"; fail "make ${target} does not require root"; }
@@ -502,7 +502,7 @@ grep -Fq 'run_sudo_cmd "sudo make health"' dashboard.sh || fail "dashboard healt
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should use sudo"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"' dashboard.sh || fail "dashboard recovery-kit export should stay root-operated"
 EMAIL_MENU_SNIP="$(mktemp -t vw-dashboard-email.XXXXXXXXXX)"
-extract_shell_function handle_email_tests_menu dashboard.sh > "$EMAIL_MENU_SNIP" \
+extract_shell_function handle_email_operations_menu dashboard.sh > "$EMAIL_MENU_SNIP" \
     || fail "could not extract dashboard email handler"
 grep -Fq 'run_sudo_cmd \' "$EMAIL_MENU_SNIP" \
     || fail "dashboard email diagnostic does not use run_sudo_cmd"
@@ -510,6 +510,14 @@ grep -Fq '"sudo make test-email EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU
     || fail "dashboard email diagnostic label does not show the root-operated Make command"
 grep -Fq 'make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_SNIP" \
     || fail "dashboard email diagnostic does not invoke the root-operated Make target"
+grep -Fq '"sudo make email-queue"' "$EMAIL_MENU_SNIP" \
+    || fail "dashboard queue status label does not show the root-operated Make command"
+grep -Fq 'make -C "${REPO_ROOT}" email-queue' "$EMAIL_MENU_SNIP" \
+    || fail "dashboard queue status does not invoke the root-operated Make target"
+grep -Fq 'env VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1 \' "$EMAIL_MENU_SNIP" \
+    || fail "dashboard queue clear does not pass the exact confirmation marker"
+grep -Fq 'make -C "${REPO_ROOT}" email-queue-clear' "$EMAIL_MENU_SNIP" \
+    || fail "dashboard queue clear does not invoke the root-operated Make target"
 ! grep -Fq 'run_cmd ' "$EMAIL_MENU_SNIP" \
     || fail "dashboard email diagnostic bypasses the sudo command helper"
 ! grep -Eq 'maintenance-email\.sh|maintenance\.sh[[:space:]]+test-email|send_email|send_notification_email' \

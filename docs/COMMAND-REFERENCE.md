@@ -22,6 +22,8 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
 | `make test-email` |  Test configured or exact email delivery transports (EMAIL_TEST_TRANSPORT=...) |
+| `make email-queue` |  Show the Postfix email queue |
+| `make email-queue-clear` |  Clear the Postfix email queue after exact confirmation |
 | `make up` |  Start all services (runs startup.sh for health checks; root required) |
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully (root required) |
@@ -563,6 +565,25 @@ DESCRIPTION:
     Re-renders /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
     from the current project environment and encrypted secrets, then restarts
     and verifies crowdsec-cloudflare-worker-bouncer.
+```
+
+### email-queue.sh
+
+```
+VaultWarden-OCI Postfix Queue Operations
+
+USAGE:
+    sudo utilities/email-queue.sh status
+    sudo utilities/email-queue.sh clear
+
+COMMANDS:
+    status  Show the current Postfix queue.
+    clear   Show the queue, delete every queued message after exact
+            confirmation, then show the queue again.
+
+AUTOMATION:
+    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1 skips the interactive CLEAR prompt.
+    No other value is accepted as confirmation.
 ```
 
 ### env-edit.sh

@@ -103,6 +103,39 @@ Postfix provides queueing/retry behavior for the normal appliance mail path.
 - Preserve the capabilities in the current `docker-compose.yml.example` unless a tested image/runtime change proves a smaller set works. Mail spool/ownership operations depend on the current container contract.
 - Keep upstream relay authentication in SOPS-backed `smtp_password`, not repository configuration.
 
+### Inspecting and clearing the Postfix queue
+
+Use the root-operated Compose service interface instead of a container name:
+
+```bash
+sudo make email-queue
+```
+
+This runs `postqueue -p` inside the running `postfix` service and does not
+modify queued mail.
+
+To deliberately delete every queued message:
+
+```bash
+sudo make email-queue-clear
+```
+
+The command shows the queue before deletion, requires the exact confirmation
+`CLEAR`, deletes all messages with `postsuper -d ALL` as root inside the
+Compose service, and shows the queue afterward. Any other response cancels.
+This deletion cannot be undone; inspect the queue and preserve any diagnostic
+details you need first.
+
+For explicitly approved root automation, the only non-interactive confirmation
+marker is:
+
+```bash
+sudo env VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1 make email-queue-clear
+```
+
+No other marker value bypasses the interactive confirmation. Both commands
+fail if Docker, Compose, or the `postfix` service is unavailable.
+
 ## Operational alert routing
 
 Repository operational email uses `lib/email.sh`.
