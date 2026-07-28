@@ -353,6 +353,19 @@ extract_make_target() {
     ' "$file"
 }
 
+extract_shell_function() {
+    local function_name="$1" file="$2"
+    awk -v function_name="$function_name" '
+        $0 ~ "^" function_name "\\(\\)[[:space:]]*\\{" {
+            found=1
+            inside=1
+        }
+        inside { print }
+        inside && /^}$/ { exit }
+        END { if (!found) exit 2 }
+    ' "$file"
+}
+
 # Root-operated lifecycle contract.
 grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
 for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email health-email diagnose systemd-status prune key-show; do
@@ -488,7 +501,21 @@ grep -Fq 'run_sudo_cmd "sudo make down"' dashboard.sh || fail "dashboard stop la
 grep -Fq 'run_sudo_cmd "sudo make health"' dashboard.sh || fail "dashboard health label missing"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should use sudo"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"' dashboard.sh || fail "dashboard recovery-kit export should stay root-operated"
-grep -Fq 'run_sudo_cmd "sudo make test-email" make -C "${REPO_ROOT}" test-email' dashboard.sh || fail "dashboard email diagnostic should stay root-operated"
+EMAIL_MENU_SNIP="$(mktemp -t vw-dashboard-email.XXXXXXXXXX)"
+extract_shell_function handle_email_tests_menu dashboard.sh > "$EMAIL_MENU_SNIP" \
+    || fail "could not extract dashboard email handler"
+grep -Fq 'run_sudo_cmd \' "$EMAIL_MENU_SNIP" \
+    || fail "dashboard email diagnostic does not use run_sudo_cmd"
+grep -Fq '"sudo make test-email EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_SNIP" \
+    || fail "dashboard email diagnostic label does not show the root-operated Make command"
+grep -Fq 'make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_SNIP" \
+    || fail "dashboard email diagnostic does not invoke the root-operated Make target"
+! grep -Fq 'run_cmd ' "$EMAIL_MENU_SNIP" \
+    || fail "dashboard email diagnostic bypasses the sudo command helper"
+! grep -Eq 'maintenance-email\.sh|maintenance\.sh[[:space:]]+test-email|send_email|send_notification_email' \
+    "$EMAIL_MENU_SNIP" \
+    || fail "dashboard email diagnostic bypasses the Makefile operator interface"
+rm -f "$EMAIL_MENU_SNIP"
 ! grep -Fq 'run_user_cmd' dashboard.sh || fail "dashboard should not drop root for root-operated actions"
 pass "dashboard command labels match root-operated lifecycle"
 
