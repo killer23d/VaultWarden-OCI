@@ -257,29 +257,47 @@ Do not maintain provider-specific plaintext API token variables in `.env` for th
 
 ## Testing the email path
 
-Run the dedicated diagnostic:
+The default diagnostic exercises the configured production routing policy:
 
 ```bash
-sudo ./maintenance.sh test-email --verbose
+sudo make test-email
+sudo make test-email EMAIL_TEST_TRANSPORT=configured
 ```
 
-Preview the diagnostic without sending:
+Exact transport diagnostics bypass production fallback and test each transport
+directly. `all` tests the API provider, Postfix sidecar, and direct upstream
+SMTP independently, and can therefore send three messages:
 
 ```bash
-sudo utilities/maintenance-email.sh --dry-run
+sudo make test-email EMAIL_TEST_TRANSPORT=all
+sudo make test-email EMAIL_TEST_TRANSPORT=api
+sudo make test-email EMAIL_TEST_TRANSPORT=sidecar
+sudo make test-email EMAIL_TEST_TRANSPORT=direct
 ```
 
-Override the recipient when required:
+Preview any selection without sending by using the maintenance entry point:
 
 ```bash
 sudo ./maintenance.sh test-email \
+  --transport all \
   --recipient admin@example.com \
+  --dry-run \
   --verbose
 ```
 
-The diagnostic checks Postfix container health, selected operational route prerequisites, CrowdSec integration context, and end-to-end email delivery.
+`configured` calls the normal notification helper and therefore follows
+`EMAIL_MODE`. The exact `api`, `sidecar`, and `direct` selections do not fall
+back to another transport. Their preflight checks are scoped to the requested
+transport, while CrowdSec status is supplemental information only.
 
-A successful send means the selected delivery chain accepted the message. It does not independently prove the external recipient's spam-folder policy or long-term provider account status.
+A successful sidecar test proves that Postfix accepted the message. It does not
+independently prove final delivery by the upstream relay or recipient. Check the
+Postfix logs and queue when diagnosing relay delivery:
+
+```bash
+docker compose logs postfix --tail=100
+docker exec vaultwarden_postfix mailq
+```
 
 ## Troubleshooting Postfix SMTP
 

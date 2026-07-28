@@ -139,13 +139,16 @@ _email_http_common() {
 
     case "$cfg_kind" in
         bearer)
-            printf 'header = %s\n' "$(_email_curl_quote "Authorization: Bearer ${token}")" >"$cfg" || return 1
+            printf 'header = %s\n' "$(_email_curl_quote "Authorization: Bearer ${token}")" >"$cfg" \
+                || { rm -f "$body_file" "$cfg"; return 1; }
             ;;
         basic)
-            printf 'user = %s\n' "$(_email_curl_quote "${username}:${token}")" >"$cfg" || return 1
+            printf 'user = %s\n' "$(_email_curl_quote "${username}:${token}")" >"$cfg" \
+                || { rm -f "$body_file" "$cfg"; return 1; }
             ;;
         header)
-            printf 'header = %s\n' "$(_email_curl_quote "${username}: ${token}")" >"$cfg" || return 1
+            printf 'header = %s\n' "$(_email_curl_quote "${username}: ${token}")" >"$cfg" \
+                || { rm -f "$body_file" "$cfg"; return 1; }
             ;;
         *)
             log_error "email HTTP helper: unknown config kind '${cfg_kind}'"
@@ -773,6 +776,101 @@ send_email() {
     return "$rc"
 }
 
+send_email_via_transport() {
+    local transport="${1:-}" to="${2:-}" subject="${3:-}" body="${4:-}"
+    local provider="${EMAIL_PROVIDER:-mailersend}" driver fn
+    local from message_file msgid metadata_body rc=1
+    local host timestamp
+
+    case "$transport" in
+        api|sidecar|direct) ;;
+        *)
+            log_error "Unsupported diagnostic email transport '${transport}'. Valid values: api sidecar direct"
+            return 2
+            ;;
+    esac
+    if [[ $# -ne 4 ]]; then
+        log_error "send_email_via_transport requires TRANSPORT, TO, SUBJECT, and BODY."
+        return 2
+    fi
+
+    _email_validate_addr TO "$to" || return 1
+    subject=$(_normalise_email_subject "$subject")
+    _email_validate_header Subject "$subject" || return 1
+    host=$(_email_host)
+    timestamp=$(date -Iseconds)
+
+    if [[ "$transport" == api ]]; then
+        if ! driver=$(_email_driver_lookup "$provider"); then
+            log_error "Unknown EMAIL_PROVIDER='${provider}' for exact API diagnostic."
+            return 1
+        fi
+        fn="_email_driver_${driver}"
+        if ! declare -f "$fn" >/dev/null 2>&1; then
+            log_error "EMAIL_PROVIDER='${provider}' resolves to unsupported API driver '${driver}'."
+            return 1
+        fi
+        metadata_body=$(_build_email_metadata_body \
+            "$body" "$host" "$timestamp" "diagnostic" "$provider" \
+            "Exact HTTP API transport (${driver})")
+        if "$fn" "$to" "$subject" "$metadata_body"; then
+            log_info "Diagnostic email sent via exact HTTP API provider ${driver}"
+            return 0
+        fi
+        log_error "Exact HTTP API diagnostic failed via ${driver}; no SMTP fallback was attempted."
+        return 1
+    fi
+
+    from=$(resolve_email_sender) || return 1
+    _email_validate_addr SMTP_FROM "$from" || return 1
+    _email_sender_name >/dev/null || return 1
+    message_file=$(_email_tmpfile vw-email-diagnostic) || return 1
+    chmod 600 "$message_file" || { rm -f "$message_file"; return 1; }
+    _email_register_cleanup_file "$message_file"
+    msgid=$(_email_msgid)
+
+    case "$transport" in
+        sidecar)
+            metadata_body=$(_build_email_metadata_body \
+                "$body" "$host" "$timestamp" "diagnostic" "none" \
+                "Exact Postfix sidecar SMTP transport")
+            ;;
+        direct)
+            metadata_body=$(_build_email_metadata_body \
+                "$body" "$host" "$timestamp" "diagnostic" "none" \
+                "Exact direct upstream SMTP transport")
+            ;;
+    esac
+
+    if ! _build_plain_message "$message_file" "$from" "$to" "$subject" "$metadata_body" "$msgid"; then
+        rm -f "$message_file"
+        return 1
+    fi
+
+    case "$transport" in
+        sidecar)
+            if _smtp_upload_sidecar "$message_file" "$from" "$to"; then
+                rc=0
+                log_info "Diagnostic email submitted to exact Postfix sidecar transport"
+            else
+                rc=$?
+                log_error "Exact Postfix sidecar diagnostic failed; no direct SMTP fallback was attempted."
+            fi
+            ;;
+        direct)
+            if _smtp_upload_direct "$message_file" "$from" "$to"; then
+                rc=0
+                log_info "Diagnostic email sent via exact direct upstream SMTP transport"
+            else
+                rc=$?
+                log_error "Exact direct SMTP diagnostic failed."
+            fi
+            ;;
+    esac
+    rm -f "$message_file"
+    return "$rc"
+}
+
 send_notification_email() {
     send_email "$1" "$2"
 }
@@ -794,4 +892,4 @@ clear_email_rate_limit() {
 
 export -f resolve_email_sender _email_driver_lookup _email_http_bearer_json _email_http_basic_form _email_http_custom_header_json
 export -f _email_driver_mailgun _email_driver_sendgrid _email_driver_mailersend _email_driver_postmark _email_driver_resend _email_driver_cyberpersons
-export -f _smtp_upload_sidecar _smtp_upload_direct send_smtp_attachment send_email send_notification_email clear_email_rate_limit
+export -f _smtp_upload_sidecar _smtp_upload_direct send_smtp_attachment send_email send_email_via_transport send_notification_email clear_email_rate_limit

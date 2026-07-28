@@ -36,6 +36,114 @@ pass "maintenance-email.sh is root-operated"
 )
 
 check_maintenance_email_root_contract
+check_email_diagnostic_transport_contracts() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+DIAGNOSTIC="$ROOT/utilities/maintenance-email.sh"
+EMAIL_LIB="$ROOT/lib/email.sh"
+MAKEFILE="$ROOT/Makefile"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+extract_function() {
+    local file="$1" function_name="$2"
+    awk -v function_name="$function_name" '
+        $0 ~ "^" function_name "[(][)]" { printing=1 }
+        printing {
+            print
+            opens=gsub(/{/, "{")
+            closes=gsub(/}/, "}")
+            depth += opens - closes
+            if (depth == 0) exit
+        }
+    ' "$file"
+}
+
+exact_source="$(extract_function "$EMAIL_LIB" send_email_via_transport)"
+[[ -n "$exact_source" ]] || fail "could not isolate send_email_via_transport"
+grep -Fq '_smtp_upload_sidecar "$message_file"' <<<"$exact_source" \
+    || fail "exact sidecar diagnostic must call the sidecar uploader"
+grep -Fq '_smtp_upload_direct "$message_file"' <<<"$exact_source" \
+    || fail "exact direct diagnostic must call the direct uploader"
+! grep -Fq '_smtp_fallback_chain' <<<"$exact_source" \
+    || fail "exact diagnostic must not use the SMTP fallback chain"
+! grep -Eq '^[[:space:]]*(export[[:space:]]+)?EMAIL_MODE=' "$DIAGNOSTIC" \
+    || fail "diagnostic must not overwrite EMAIL_MODE"
+
+grep -Fq 'transports=(api sidecar direct)' "$DIAGNOSTIC" \
+    || fail "all must select exactly API, sidecar, and direct transports"
+grep -Fq 'test_subject="VaultWarden Email Test - ${transport} - ${timestamp} - $$-${RANDOM}"' "$DIAGNOSTIC" \
+    || fail "diagnostic subjects must identify the transport and include a unique timestamp suffix"
+! grep -Eq '[(][(](passed|failed)[+][+][)][)]' "$DIAGNOSTIC" \
+    || fail "diagnostic counters must be safe under set -e"
+grep -Fq 'EMAIL_TEST_TRANSPORT ?= configured' "$MAKEFILE" \
+    || fail "Make must default email diagnostics to the configured route"
+grep -Fq './maintenance.sh test-email --transport "$(EMAIL_TEST_TRANSPORT)" --verbose' "$MAKEFILE" \
+    || fail "Make must quote and forward EMAIL_TEST_TRANSPORT"
+
+extract_function "$DIAGNOSTIC" run_email_diagnostics >"$TMP/run-email-diagnostics.bash"
+cat >>"$TMP/run-email-diagnostics.bash" <<'HARNESS'
+TEST_TRANSPORT=all
+DRY_RUN=false
+CALLS=()
+log_header(){ :; }
+log_info(){ printf '%s\n' "$*"; }
+log_warn(){ :; }
+log_error(){ printf '%s\n' "$*"; }
+test_crowdsec_integration(){ return 0; }
+_run_transport_test(){
+    CALLS+=("$1")
+    [[ "$1" != sidecar ]]
+}
+rc=0
+run_email_diagnostics || rc=$?
+printf 'RC=%s\n' "$rc"
+printf 'CALLS=%s\n' "${CALLS[*]}"
+HARNESS
+
+aggregate_output="$(bash "$TMP/run-email-diagnostics.bash")"
+[[ "$aggregate_output" == *"RC=1"* ]] \
+    || fail "all must return nonzero when one exact transport fails"
+[[ "$aggregate_output" == *"CALLS=api sidecar direct"* ]] \
+    || fail "all must continue testing independently after a transport failure"
+[[ "$aggregate_output" == *"SUMMARY: 2/3 transport tests passed; 1 failed"* ]] \
+    || fail "aggregate summary must report individual failures"
+
+extract_function "$DIAGNOSTIC" _run_transport_test >"$TMP/run-email-dry-run.bash"
+cat >>"$TMP/run-email-dry-run.bash" <<'HARNESS'
+DRY_RUN=true
+TEST_RECIPIENT=admin@example.com
+SENDS=0
+log_info(){ printf '%s\n' "$*"; }
+log_success(){ printf '%s\n' "$*"; }
+log_error(){ printf '%s\n' "$*"; }
+_preflight_transport(){ return 0; }
+send_notification_email(){ SENDS=$((SENDS + 1)); }
+send_email_via_transport(){ SENDS=$((SENDS + 1)); }
+for transport in configured api sidecar direct; do
+    _run_transport_test "$transport"
+done
+printf 'SENDS=%s\n' "$SENDS"
+HARNESS
+
+dry_run_output="$(bash "$TMP/run-email-dry-run.bash")"
+[[ "$dry_run_output" == *"SENDS=0"* ]] \
+    || fail "dry-run must not call configured or exact email send functions"
+[[ "$dry_run_output" == *"configured: dry-run validated"* \
+    && "$dry_run_output" == *"api: dry-run validated"* \
+    && "$dry_run_output" == *"sidecar: dry-run validated"* \
+    && "$dry_run_output" == *"direct: dry-run validated"* ]] \
+    || fail "dry-run must report validation for every requested transport"
+[[ "$dry_run_output" != *": passed"* ]] \
+    || fail "dry-run must not report actual transport delivery"
+
+printf 'Email diagnostic transport contracts passed.\n'
+)
+
+check_email_diagnostic_transport_contracts
 check_email_delivery_refactor_contracts() (
 set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
@@ -80,6 +188,12 @@ run_case 'cyber aliases resolve identically' "$routing_prelude; for p in cyberpe
 run_case 'API sends include delivery metadata' "$routing_prelude; EMAIL_PROVIDER=mailgun; send_email admin@example.com subj body; [[ \"\$CAPTURED\" == *'Email delivery metadata:'* && \"\$CAPTURED\" == *'Method:    HTTP API provider mailgun'* ]]"
 run_case 'SMTP sends include delivery metadata' "$routing_prelude; EMAIL_MODE=smtp SIDE_RC=0; send_email admin@example.com subj body; [[ \"\$CAPTURED\" == *'Email delivery metadata:'* && \"\$CAPTURED\" == *'Method:    SMTP fallback chain'* ]]"
 run_case 'direct sends include delivery metadata' "$routing_prelude; EMAIL_MODE=direct; send_email admin@example.com subj body; [[ \"\$CAPTURED\" == *'Email delivery metadata:'* && \"\$CAPTURED\" == *'Method:    Direct upstream SMTP'* ]]"
+run_case 'exact API diagnostic does not use SMTP or mutate EMAIL_MODE' "$routing_prelude; EMAIL_MODE=smtp API_RC=0; send_email_via_transport api admin@example.com diagnostic body; [[ \"\$EMAIL_MODE\" == smtp && \"\$TRACE\" == *api:* && \"\$TRACE\" != *sidecar* && \"\$TRACE\" != *direct* && \"\$CAPTURED\" == *'Method:    Exact HTTP API transport (mailersend)'* ]]"
+run_case 'exact API failure does not fall back' "$routing_prelude; API_RC=1; ! send_email_via_transport api admin@example.com diagnostic body; [[ \"\$TRACE\" == *api:* && \"\$TRACE\" != *sidecar* && \"\$TRACE\" != *direct* ]]"
+run_case 'exact sidecar failure does not call direct and removes message file' "$routing_prelude; SIDE_RC=1 DIRECT_CALLED=0; _smtp_upload_sidecar(){ TRACE+=\" sidecar\"; MESSAGE_FILE=\"\$1\"; CAPTURED=\$(cat \"\$1\"); return 1; }; _smtp_upload_direct(){ DIRECT_CALLED=1; return 0; }; ! send_email_via_transport sidecar admin@example.com diagnostic body; [[ \"\$TRACE\" == *sidecar* && \"\$DIRECT_CALLED\" -eq 0 && ! -e \"\$MESSAGE_FILE\" && \"\$CAPTURED\" == *'Method:    Exact Postfix sidecar SMTP transport'* ]]"
+run_case 'exact direct diagnostic does not call sidecar and removes message file' "$routing_prelude; _smtp_upload_direct(){ TRACE+=\" direct\"; MESSAGE_FILE=\"\$1\"; CAPTURED=\$(cat \"\$1\"); return 0; }; send_email_via_transport direct admin@example.com diagnostic body; [[ \"\$TRACE\" == *direct* && \"\$TRACE\" != *sidecar* && ! -e \"\$MESSAGE_FILE\" && \"\$CAPTURED\" == *'Method:    Exact direct upstream SMTP transport'* ]]"
+run_case 'exact diagnostics bypass the production rate limiter' "$routing_prelude; _rate_limit_check(){ TRACE+=\" rate-limit\"; return 1; }; SIDE_RC=0; send_email_via_transport sidecar admin@example.com diagnostic body; [[ \"\$TRACE\" == *sidecar* && \"\$TRACE\" != *rate-limit* ]]"
+run_case 'unsupported exact transport returns status 2 without sending' "$routing_prelude; rc=0 API_CALLED=0 SIDECAR_CALLED=0 DIRECT_CALLED=0; _email_driver_mailersend(){ API_CALLED=1; }; _smtp_upload_sidecar(){ SIDECAR_CALLED=1; }; _smtp_upload_direct(){ DIRECT_CALLED=1; }; send_email_via_transport bogus admin@example.com diagnostic body || rc=\$?; [[ \"\$rc\" -eq 2 && \"\$API_CALLED\" -eq 0 && \"\$SIDECAR_CALLED\" -eq 0 && \"\$DIRECT_CALLED\" -eq 0 ]]"
 
 run_case 'direct SMTP implementation accepts normal values and infers STARTTLS' "$common_prelude; reset_env; unset EMAIL_API_TOKEN; curl(){ CURL_ARGS=\"\$*\"; return 0; }; _smtp_upload_direct /dev/null noreply@example.com admin@example.com; [[ \"\$CURL_ARGS\" == *--ssl-reqd* && \"\$CURL_ARGS\" != *\"\$SMTP_PASSWORD\"* ]]"
 run_case 'direct SMTP implementation infers TLS on port 465' "$common_prelude; reset_env; SMTP_PORT=465; curl(){ CURL_ARGS=\"\$*\"; return 0; }; _smtp_upload_direct /dev/null noreply@example.com admin@example.com; [[ \"\$CURL_ARGS\" == *smtps://smtp.example.com:465* ]]"

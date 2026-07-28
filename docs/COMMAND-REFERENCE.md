@@ -21,7 +21,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make edit-env` |  Interactively edit repo .env and sync on change (root required) |
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
-| `make test-email` |  Send a test operational alert email (health/backup notification channel) |
+| `make test-email` |  Test configured or exact email delivery transports (EMAIL_TEST_TRANSPORT=...) |
 | `make up` |  Start all services (runs startup.sh for health checks; root required) |
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully (root required) |
@@ -668,6 +668,8 @@ USAGE:
 
 OPTIONS:
     --recipient EMAIL   Override default admin email recipient
+    --transport VALUE   Transport to test: configured, api, sidecar, direct, or all
+                        (default: configured)
     --verbose           Show detailed diagnostic output
     --dry-run           Preview without sending
     --help, -h          Show this help
@@ -676,6 +678,7 @@ OPTIONS:
 EXIT CODES:
     0 — all email tests passed
     1 — one or more tests failed
+    2 — invalid command-line usage
 ```
 
 ### maintenance-health.sh

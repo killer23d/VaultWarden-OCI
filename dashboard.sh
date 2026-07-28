@@ -865,7 +865,7 @@ handle_advanced_menu() {
 draw_identity_menu() {
     echo -e " ${BLD}Identity, Email & Admin${NC}"
     echo ""
-    echo -e "  [ ${GRN}1${NC} ] Test SMTP Delivery"
+    echo -e "  [ ${GRN}1${NC} ] Email Delivery Tests"
     echo -e "  [ ${GRN}2${NC} ] Tail Auth & Access Drops"
     echo -e "  [ ${GRN}3${NC} ] Rotate Vault Admin Token"
     echo -e "  [ ${GRN}4${NC} ] View Breakglass Status"
@@ -880,7 +880,7 @@ handle_identity_menu() {
     local opt="$1"
     case "${opt}" in
         1)
-            run_sudo_cmd "sudo make test-email" make -C "${REPO_ROOT}" test-email
+            ACTIVE_MENU="email_tests"
             ;;
         2)
             echo ""
@@ -908,6 +908,50 @@ handle_identity_menu() {
             sleep 1
             ;;
     esac
+}
+
+# ===========================================================================
+# SUBMENU I.1 — Email Delivery Tests
+# ===========================================================================
+draw_email_tests_menu() {
+    echo -e " ${BLD}Email Delivery Tests${NC}"
+    echo ""
+    echo -e "  [ ${GRN}1${NC} ] Configured production route"
+    echo -e "  [ ${GRN}2${NC} ] All exact transports"
+    echo -e "  [ ${GRN}3${NC} ] HTTP API only"
+    echo -e "  [ ${GRN}4${NC} ] Postfix sidecar only"
+    echo -e "  [ ${GRN}5${NC} ] Direct SMTP only"
+    draw_divider
+    echo -e "  [ ${GRN}b${NC} ] Back to Identity, Email & Admin"
+    echo ""
+    echo -e " ${CYN}Tip:${NC} Exact transport tests do not use production-route fallback."
+    echo -e " ${CYN}Tip:${NC} Use b to return, e/q to exit, Ctrl-C anytime."
+    echo ""
+}
+
+handle_email_tests_menu() {
+    local opt="$1" transport=""
+    case "${opt}" in
+        1) transport="configured" ;;
+        2) transport="all" ;;
+        3) transport="api" ;;
+        4) transport="sidecar" ;;
+        5) transport="direct" ;;
+        b)
+            ACTIVE_MENU="identity"
+            return
+            ;;
+        e|q) _cleanup ;;
+        *)
+            echo -e "${YLW} Invalid option. Please try again.${NC}"
+            sleep 1
+            return
+            ;;
+    esac
+
+    run_sudo_cmd \
+        "sudo make test-email EMAIL_TEST_TRANSPORT=${transport}" \
+        make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"
 }
 
 # ===========================================================================
@@ -950,6 +994,7 @@ main() {
             secrets)  draw_secrets_menu  ;;
             advanced) draw_advanced_menu ;;
             identity) draw_identity_menu ;;
+            email_tests) draw_email_tests_menu ;;
             *)
                 ACTIVE_MENU="main"
                 draw_main_menu
@@ -977,6 +1022,7 @@ main() {
             secrets)  handle_secrets_menu  "${opt}" ;;
             advanced) handle_advanced_menu "${opt}" ;;
             identity) handle_identity_menu "${opt}" ;;
+            email_tests) handle_email_tests_menu "${opt}" ;;
         esac
     done
 }

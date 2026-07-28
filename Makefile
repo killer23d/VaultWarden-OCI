@@ -40,6 +40,7 @@ CORE_SERVICES     = vaultwarden caddy
 BACKUP_FILE ?=
 # Optional first install data volume: sudo ./setup.sh install --domain <domain> --email <email> --data-device /dev/sdb
 DATA_DEVICE ?=
+EMAIL_TEST_TRANSPORT ?= configured
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
@@ -158,7 +159,7 @@ help: ## Show normal admin/day-2 commands
 	@echo "$(YELLOW)Health and diagnostics$(NC)"
 	@echo "  $(GREEN)health$(NC)                   Full health check (AUTO_RECOVER=true enables safe fixes)"
 	@echo "  $(GREEN)health-quick$(NC)             Concise health check"
-	@echo "  $(GREEN)test-email$(NC)               Test Postfix-backed operational alert channel"
+	@echo "  $(GREEN)test-email$(NC)               Test configured or exact email delivery transports"
 	@echo "  $(GREEN)test-secrets$(NC)             Verify SOPS/Age secret decryption"
 	@echo "  $(GREEN)diagnose$(NC)                 Collect versions, status, key state, disk, and logs"
 	@echo ""
@@ -252,10 +253,10 @@ test-secrets: ## Test secrets decryption
 		exit 1; \
 	fi
 
-test-email: ## Send a test operational alert email (health/backup notification channel)
+test-email: ## Test configured or exact email delivery transports (EMAIL_TEST_TRANSPORT=...)
 	$(call require-root)
-	@echo "$(BLUE)Sending a test operational alert email...$(NC)"
-	@./maintenance.sh test-email --verbose
+	@echo "$(BLUE)Testing email delivery transport: $(EMAIL_TEST_TRANSPORT)$(NC)"
+	@./maintenance.sh test-email --transport "$(EMAIL_TEST_TRANSPORT)" --verbose
 
 # ===========================================================================
 ##@ Normal Admin + Dashboard Stable API — Service Management

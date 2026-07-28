@@ -97,6 +97,11 @@ grep -Fq 'Create + Fully Verify + Sync DB Backup' "$ROOT/dashboard.sh" || fail '
 ! grep -Fq 'Start/Restart Stack     (safe)' "$ROOT/dashboard.sh" || fail 'dashboard ordinary restart must not be labeled safe'
 ! grep -Fq 'validate_ip' "$ROOT/dashboard.sh" || fail 'dashboard unban should let cscli validate address forms through make unban'
 grep -Fq 'make -C "${REPO_ROOT}" unban "IP=${ip_to_unban}"' "$ROOT/dashboard.sh" || fail 'dashboard unban must route through make unban'
+grep -Fq 'Email Delivery Tests' "$ROOT/dashboard.sh" || fail 'dashboard email transport submenu is missing'
+grep -Fq 'ACTIVE_MENU="email_tests"' "$ROOT/dashboard.sh" || fail 'identity menu must open the email transport submenu'
+grep -Fq 'make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"' "$ROOT/dashboard.sh" \
+    || fail 'dashboard email diagnostics must use the stable Make target'
+grep -Fq 'ACTIVE_MENU="identity"' "$ROOT/dashboard.sh" || fail 'email transport submenu must return to the identity menu'
 printf 'Dashboard truthfulness tests passed.\n'
 
 SMOKE="$ROOT/utilities/smoke-test.sh"
@@ -321,6 +326,8 @@ expect_failure_contains utilities/setup-system.sh "--data-device requires an arg
 expect_failure_contains utilities/setup-storage.sh "--data-device requires a value" setup --data-device --force
 expect_failure_contains utilities/key-rotate.sh "--extra-recipient requires an Age public key" --extra-recipient --dry-run
 expect_failure_contains utilities/maintenance-email.sh "--recipient requires an argument" --recipient --dry-run
+expect_failure_contains utilities/maintenance-email.sh "--transport requires an argument" --transport --dry-run
+expect_failure_contains utilities/maintenance-email.sh "Valid values: configured api sidecar direct all" --transport invalid --dry-run
 expect_failure_contains recover.sh "Option --state-dir requires a value" --state-dir --key "$TMP/key.txt"
 
 grep -Fq '### recover.sh' "$ROOT/docs/COMMAND-REFERENCE.md" \
