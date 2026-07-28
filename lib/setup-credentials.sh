@@ -121,8 +121,10 @@ _setup_handoff_publish_file() {
     rm -f -- "$final_file" 2>/dev/null || true
     return 1
   fi
-  if [[ "${VW_HANDOFF_TEST_MODE:-false}" != "true" ]]; then
-    [[ "$(stat -c '%U:%G' "$final_file" 2>/dev/null)" == "root:root" ]] || return 1
+  if [[ "${VW_HANDOFF_TEST_MODE:-false}" != "true" ]] &&
+     [[ "$(stat -c '%U:%G' "$final_file" 2>/dev/null)" != "root:root" ]]; then
+    rm -f -- "$final_file" 2>/dev/null || true
+    return 1
   fi
 }
 

@@ -1103,4 +1103,62 @@ chmod 0777 "$tmp/logs/caddy/access.log"
 enforce_runtime_log_permissions "$tmp/logs" "$(id -u)" "$(id -g)" true
 [[ "$(stat -c '%a' "$tmp/logs/caddy/access.log")" == "777" ]] || fail "dry-run mutated fixture"
 
+# Post-publication ownership validation must fail clean.
+handoff_publish_block="$(sed -n '/^_setup_handoff_publish_file() {$/,/^}$/p' lib/setup-credentials.sh)"
+[[ -n "$handoff_publish_block" ]] \
+  || fail "setup handoff publication helper could not be extracted"
+HANDOFF_PUBLISH_BLOCK="$handoff_publish_block" bash -s <<'HANDOFF_OWNER_TEST' \
+  || fail "post-publication ownership cleanup tests failed"
+set -euo pipefail
+
+eval "$HANDOFF_PUBLISH_BLOCK"
+fixture="$(mktemp -d)"
+trap '/bin/rm -rf -- "$fixture"' EXIT
+
+chown() { :; }
+stat() {
+  case "${2:-}" in
+    %a) printf '%s\n' 600 ;;
+    %U:%G)
+      case "${HANDOFF_OWNER_CASE:-}" in
+        success) printf '%s\n' root:root ;;
+        mismatch) printf '%s\n' nobody:nogroup ;;
+        error) return 72 ;;
+        *) return 73 ;;
+      esac
+      ;;
+    *) command stat "$@" ;;
+  esac
+}
+
+run_failure_case() {
+  local case_name="$1" temp_file final_file rc
+  temp_file="$fixture/${case_name}.temporary"
+  final_file="$fixture/${case_name}.published"
+  printf '%s\n' 'PROTECTED-HANDOFF-CONTENT' > "$temp_file"
+  HANDOFF_OWNER_CASE="$case_name"
+  set +e
+  _setup_handoff_publish_file "$temp_file" "$final_file"
+  rc=$?
+  set -e
+  (( rc != 0 ))
+  [[ ! -e "$temp_file" && ! -L "$temp_file" ]]
+  [[ ! -e "$final_file" && ! -L "$final_file" ]]
+}
+
+run_failure_case mismatch
+run_failure_case error
+
+success_temp="$fixture/success.temporary"
+success_final="$fixture/success.published"
+printf '%s\n' 'PROTECTED-HANDOFF-CONTENT' > "$success_temp"
+HANDOFF_OWNER_CASE=success
+_setup_handoff_publish_file "$success_temp" "$success_final"
+[[ ! -e "$success_temp" && ! -L "$success_temp" ]]
+[[ -s "$success_final" && ! -L "$success_final" ]]
+
+/bin/rm -rf -- "$fixture"
+trap - EXIT
+HANDOFF_OWNER_TEST
+
 pass "production-readiness security/runtime regressions"
