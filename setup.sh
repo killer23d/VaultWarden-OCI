@@ -23,38 +23,102 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# Establish setup-owned cleanup custody before traps are installed.
+# Establish setup-owned cleanup custody before any workspace is created.
 unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
 unset TMP_WORKDIR SETUP_TEMP_ROOT SETUP_OWNED_WORKDIR SETUP_OWNED_WORKDIR_ID
+unset SETUP_BOOTSTRAP_CLEANUP_ACTIVE SETUP_BOOTSTRAP_CLEANUP_RUNNING
+SETUP_BOOTSTRAP_CLEANUP_ACTIVE=true
+SETUP_BOOTSTRAP_CLEANUP_RUNNING=false
+
+_setup_bootstrap_cleanup_warn() {
+    printf 'WARNING: %s\n' "$1" >&2
+}
+_setup_bootstrap_remove_workspace() {
+    local original_status="${1:-0}" cleanup_failed=0
+    local candidate="${TMP_WORKDIR:-}" parent="" base=""
+    if [[ "${SETUP_BOOTSTRAP_CLEANUP_ACTIVE:-false}" != "true" ||
+          "${SETUP_BOOTSTRAP_CLEANUP_RUNNING:-false}" == "true" ]]; then
+        return "$original_status"
+    fi
+    SETUP_BOOTSTRAP_CLEANUP_RUNNING=true
+    { set +x; } 2>/dev/null
+    if [[ -z "$candidate" ]]; then
+        SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
+    else
+        parent="${candidate%/*}"
+        base="${candidate##*/}"
+        if [[ "$candidate" != /* ||
+              "$parent" != "${SETUP_TEMP_ROOT:-}" ||
+              ! "$base" =~ ^vw_setup\.[[:alnum:]]{10}$ ||
+              -L "$candidate" || ! -d "$candidate" ]]; then
+            _setup_bootstrap_cleanup_warn "Initialization cleanup refused an unvalidated setup workspace."
+            cleanup_failed=1
+        elif ! rmdir -- "$candidate" 2>/dev/null; then
+            _setup_bootstrap_cleanup_warn "Failed to remove the validated empty setup workspace during initialization cleanup."
+            cleanup_failed=1
+        else
+            SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
+            unset TMP_WORKDIR
+        fi
+    fi
+    SETUP_BOOTSTRAP_CLEANUP_RUNNING=false
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_failed == 0 )) || return 1
+    return 0
+}
+_setup_bootstrap_on_exit() {
+    local original_status="$?" final_status=0
+    trap - EXIT HUP INT TERM
+    _setup_bootstrap_remove_workspace "$original_status" || final_status=$?
+    exit "$final_status"
+}
+_setup_bootstrap_on_signal() {
+    local signal_status="$1"
+    trap - EXIT HUP INT TERM
+    _setup_bootstrap_remove_workspace "$signal_status" || true
+    exit "$signal_status"
+}
+_setup_initialization_failed() {
+    local status="$1" message="$2"
+    printf 'ERROR: %s\n' "$message" >&2
+    exit "$status"
+}
+
+# Bootstrap traps are active before mktemp; an empty TMP_WORKDIR is a no-op.
+trap '_setup_bootstrap_on_exit' EXIT
+trap '_setup_bootstrap_on_signal 129' HUP
+trap '_setup_bootstrap_on_signal 130' INT
+trap '_setup_bootstrap_on_signal 143' TERM
+
 SETUP_TEMP_ROOT="$(realpath -e -- "${TMPDIR:-/tmp}" 2>/dev/null)" || {
-    echo "ERROR: Failed to resolve the temporary root" >&2
-    exit 1
+    setup_init_status=$?
+    _setup_initialization_failed "$setup_init_status" "Failed to resolve the temporary root"
 }
 if [[ ! -d "$SETUP_TEMP_ROOT" || -L "${TMPDIR:-/tmp}" ]]; then
-    echo "ERROR: Temporary root must be a real directory" >&2
-    exit 1
+    _setup_initialization_failed 1 "Temporary root must be a real directory"
 fi
 case "$SETUP_TEMP_ROOT" in
     /|/etc|/root|"$PROJECT_ROOT")
-        echo "ERROR: Refusing unsafe temporary root" >&2
-        exit 1
+        _setup_initialization_failed 1 "Refusing unsafe temporary root"
         ;;
 esac
 old_umask=$(umask)
 umask 077
 TMP_WORKDIR="$(mktemp -d "${SETUP_TEMP_ROOT}/vw_setup.XXXXXXXXXX")" || {
-    umask "$old_umask"
-    echo "ERROR: Failed to create secure temporary directory" >&2
-    exit 1
+    setup_init_status=$?
+    umask "$old_umask" || true
+    _setup_initialization_failed "$setup_init_status" "Failed to create secure temporary directory"
 }
 umask "$old_umask"
 SETUP_OWNED_WORKDIR="$(realpath -e -- "$TMP_WORKDIR" 2>/dev/null)" || {
-    echo "ERROR: Failed to resolve secure temporary directory" >&2
-    exit 1
+    setup_init_status=$?
+    _setup_initialization_failed "$setup_init_status" "Failed to resolve secure temporary directory"
 }
 SETUP_OWNED_WORKDIR_ID="$(stat -c '%d:%i' -- "$SETUP_OWNED_WORKDIR" 2>/dev/null)" || {
-    echo "ERROR: Failed to record secure temporary directory identity" >&2
-    exit 1
+    setup_init_status=$?
+    _setup_initialization_failed "$setup_init_status" "Failed to record secure temporary directory identity"
 }
 SETUP_SENSITIVE_CLEANUP_ACTIVE=true
 SETUP_SENSITIVE_CLEANUP_RUNNING=false
@@ -239,6 +303,8 @@ trap '_setup_on_exit $?' EXIT
 trap '_setup_on_signal 129' HUP
 trap '_setup_on_signal 130' INT
 trap '_setup_on_signal 143' TERM
+# Full identity-based custody is active; retire workspace-only cleanup.
+SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
 
 REQUIRED_LIBS=(
   "lib/log.sh"

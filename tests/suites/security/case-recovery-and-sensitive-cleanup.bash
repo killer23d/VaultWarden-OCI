@@ -222,10 +222,89 @@ secrets_source="$(cat utilities/setup-secrets.sh)"
 # Exercise successful cleanup, injected file/workspace failures, original-status
 # preservation, signal-compatible exits, continued cleanup, and confidential
 # diagnostics without running the full setup workflow.
-setup_cleanup_block="$(sed -n '/^# Establish setup-owned cleanup custody before traps are installed\.$/,/^trap '\''_setup_on_signal 143'\'' TERM$/p' setup.sh)"
+setup_cleanup_block="$(sed -n '/^# Establish setup-owned cleanup custody before any workspace is created\.$/,/^SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false$/p' setup.sh)"
 direct_cleanup_block="$(sed -n '/^# Secret cleanup lifecycle is script-scoped/,/^# End secret cleanup lifecycle\.$/p' utilities/setup-secrets.sh)"
 [[ -n "$setup_cleanup_block" && -n "$direct_cleanup_block" ]] \
   || fail "cleanup lifecycle blocks could not be extracted"
+# Workspace-only cleanup covers failures and signals before full custody exists.
+bootstrap_fixture="$(mktemp -d)"
+trap '/bin/rm -rf -- "$bootstrap_fixture"' EXIT
+mkdir -p -- "$bootstrap_fixture/repository"
+run_bootstrap_case() {
+  local case_name="$1" expected_status="$2" expect_residual="${3:-false}"
+  local case_root="$bootstrap_fixture/$case_name" case_tmp
+  local case_output case_rc residual
+  case_tmp="$case_root/temp root"
+  mkdir -p -- "$case_tmp"
+  set +e
+  case_output="$(
+    PROJECT_ROOT="$bootstrap_fixture/repository" \
+    TMPDIR="$case_tmp" \
+    BOOTSTRAP_CASE="$case_name" \
+    SETUP_CLEANUP_BLOCK="$setup_cleanup_block" \
+    bash -s 2>&1 <<'BOOTSTRAP_SETUP_TEST'
+set -euo pipefail
+real_realpath="$(command -v realpath)"
+real_stat="$(command -v stat)"
+real_rmdir="$(command -v rmdir)"
+realpath() {
+  if [[ "$*" == *'/vw_setup.'* ]]; then
+    case "$BOOTSTRAP_CASE" in
+      canonicalization|cleanup_failure) return 41 ;;
+      early_signal)
+        kill -TERM "$PPID"
+        sleep 1
+        return 99
+        ;;
+    esac
+  fi
+  "$real_realpath" "$@"
+}
+stat() {
+  if [[ "$BOOTSTRAP_CASE" == "identity" && "$*" == *'/vw_setup.'* ]]; then
+    return 42
+  fi
+  "$real_stat" "$@"
+}
+rmdir() {
+  if [[ "$BOOTSTRAP_CASE" == "cleanup_failure" ]]; then
+    return 73
+  fi
+  "$real_rmdir" "$@"
+}
+eval "$SETUP_CLEANUP_BLOCK"
+BOOTSTRAP_SETUP_TEST
+  )"
+  case_rc=$?
+  set -e
+  [[ "$case_rc" == "$expected_status" ]] \
+    || fail "$case_name returned $case_rc instead of $expected_status: $case_output"
+  residual="$(find -P "$case_tmp" -mindepth 1 -maxdepth 1 -name 'vw_setup.*' -print -quit)"
+  if [[ "$expect_residual" == "true" ]]; then
+    [[ -n "$residual" ]] || fail "$case_name did not preserve the injected cleanup residual"
+    [[ "$case_output" == *"Failed to remove the validated empty setup workspace"* ]] \
+      || fail "$case_name did not report the bootstrap cleanup failure"
+  else
+    [[ -z "$residual" ]] || fail "$case_name left a temporary workspace behind"
+  fi
+  case "$case_name" in
+    canonicalization|cleanup_failure)
+      [[ "$case_output" == *"Failed to resolve secure temporary directory"* ]] \
+        || fail "$case_name did not report the primary initialization failure"
+      ;;
+    identity)
+      [[ "$case_output" == *"Failed to record secure temporary directory identity"* ]] \
+        || fail "identity failure diagnostic is missing"
+      ;;
+  esac
+  /bin/rm -rf -- "$case_root"
+}
+run_bootstrap_case canonicalization 41
+run_bootstrap_case identity 42
+run_bootstrap_case early_signal 143
+run_bootstrap_case cleanup_failure 41 true
+/bin/rm -rf -- "$bootstrap_fixture"
+trap - EXIT
 SETUP_CLEANUP_BLOCK="$setup_cleanup_block" bash -s <<'TOP_SETUP_TEST' \
   || fail "top-level sensitive cleanup custody tests failed"
 set -euo pipefail
@@ -603,8 +682,8 @@ grep -Fq '"dnsutils" "rsync" "python3" "python3-argon2"' utilities/setup-system.
   || fail "dependency list must keep rsync and python3 as separate package entries"
 ! grep -Fq '"rsync""python3"' utilities/setup-system.sh \
   || fail "dependency list contains a concatenated rsync/python3 package token"
-grep -Fq '[7zip]=7zz' utilities/setup-system.sh \
-  || fail "7zip package is not mapped to preferred 7zz executable"
+! grep -Eq '^[[:space:]]*\[7zip\]=' utilities/setup-system.sh \
+  || fail "generic dependency map must not claim one guaranteed 7-Zip executable"
 grep -Fq 'for candidate in 7zz 7z; do' utilities/setup-system.sh \
   || fail "setup dependency resolver does not prefer 7zz with 7z fallback"
 grep -Fq '_require_7zip_command || return 1' utilities/setup-system.sh \
@@ -617,8 +696,6 @@ grep -Fq 'for candidate in 7zz 7z; do' lib/secrets.sh \
   || fail "recovery ZIP helper does not prefer 7zz with 7z fallback"
 grep -Fq 'a -tzip -mem=AES256' lib/secrets.sh \
   || fail "recovery artifact is no longer an AES-256 encrypted ZIP"
-! grep -Fq '[7zip]=7zip' utilities/setup-system.sh \
-  || fail "dependency validation incorrectly expects a command named 7zip"
 resolver_block="$(sed -n '/^_resolve_7zip_command() {/,/^# Install the required system packages/p' utilities/setup-system.sh | sed '$d')"
 [[ -n "$resolver_block" ]] || fail "7zip resolver block could not be extracted"
 RESOLVER_BLOCK="$resolver_block" bash -s <<'SEVENZIP_TEST' \
@@ -636,13 +713,19 @@ make_cmd() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/$name"
   chmod 0755 "$dir/$name"
 }
+preferred="$fixture/preferred"
+make_cmd "$preferred" 7zz
+[[ "$(PATH="$preferred" _resolve_7zip_command)" == 7zz ]]
+PATH="$preferred" _require_7zip_command
 both="$fixture/both"
 make_cmd "$both" 7zz
 make_cmd "$both" 7z
 [[ "$(PATH="$both" _resolve_7zip_command)" == 7zz ]]
+PATH="$both" _require_7zip_command
 fallback="$fixture/fallback"
 make_cmd "$fallback" 7z
 [[ "$(PATH="$fallback" _resolve_7zip_command)" == 7z ]]
+PATH="$fallback" _require_7zip_command
 empty="$fixture/empty"
 mkdir -p -- "$empty"
 set +e

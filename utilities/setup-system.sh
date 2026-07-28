@@ -774,6 +774,8 @@ install_sops() {
     log_success "Installed SOPS: ${final_sops_ver}"
 }
 
+# Ubuntu installs package 7zip, while usable command names vary by source.
+# Keep detection centralized so both 7zz and 7z remain valid.
 _resolve_7zip_command() {
     local candidate
     for candidate in 7zz 7z; do
@@ -843,7 +845,6 @@ install_dependencies() {
         [curl]=curl
         [wget]=wget
         [unzip]=unzip
-        [7zip]=7zz
         [git]=git
         [gpg]=gpg
         [coreutils]=sha256sum
