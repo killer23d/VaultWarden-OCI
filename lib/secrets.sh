@@ -563,6 +563,170 @@ _remove_sensitive_file() {
   [[ ! -e "$target" && ! -L "$target" ]]
 }
 
+# Remove eligible plaintext recovery kits that survived the primary transient
+# cleanup. This fallback runs only during the existing routine-maintenance flow.
+cleanup_expired_recovery_kits() {
+  local recovery_dir="/root/vaultwarden-recovery"
+  local min_age_seconds=1800
+  local dry_run="${1:-false}"
+  local candidate parent filename directory_metadata
+  local initial_metadata current_metadata
+  local device inode current_device current_inode uid gid mode links mtime
+  local now age cleanup_result=0 resolved_dir
+
+  case "$dry_run" in
+    true|false) ;;
+    *)
+      log_error "recovery cleanup: invalid dry-run value: $dry_run"
+      return 1
+      ;;
+  esac
+
+  # Internal deterministic-test hooks only. They are intentionally unavailable
+  # as operator configuration and cannot change production defaults.
+  if [[ -n "${RECOVERY_KIT_DIR:-}" ]]; then
+    if [[ "${VW_TEST_MODE:-false}" != "true" ]]; then
+      log_error "recovery cleanup: RECOVERY_KIT_DIR override is test-only"
+      return 1
+    fi
+    recovery_dir="$RECOVERY_KIT_DIR"
+  fi
+  if [[ -n "${VW_RECOVERY_CLEANUP_MIN_AGE_SECONDS:-}" ]]; then
+    if [[ "${VW_TEST_MODE:-false}" != "true" ]] ||
+       [[ ! "$VW_RECOVERY_CLEANUP_MIN_AGE_SECONDS" =~ ^[0-9]+$ ]]; then
+      log_error "recovery cleanup: invalid internal age override"
+      return 1
+    fi
+    min_age_seconds="$VW_RECOVERY_CLEANUP_MIN_AGE_SECONDS"
+  fi
+
+  [[ "$recovery_dir" == /* ]] || {
+    log_error "recovery cleanup: directory must be absolute: $recovery_dir"
+    return 1
+  }
+  if [[ -L "$recovery_dir" ]]; then
+    log_error "recovery cleanup: refusing symlink recovery directory: $recovery_dir"
+    return 1
+  fi
+  [[ -e "$recovery_dir" ]] || return 0
+  [[ -d "$recovery_dir" ]] || {
+    log_error "recovery cleanup: expected directory is not a directory: $recovery_dir"
+    return 1
+  }
+  resolved_dir="$(realpath -e -- "$recovery_dir" 2>/dev/null)" || {
+    log_error "recovery cleanup: cannot resolve recovery directory: $recovery_dir"
+    return 1
+  }
+  if [[ "$resolved_dir" != "$recovery_dir" ]]; then
+    log_error "recovery cleanup: directory is not the exact canonical path: $recovery_dir"
+    return 1
+  fi
+  directory_metadata="$(stat -c '%u:%g:%a' -- "$recovery_dir" 2>/dev/null)" || {
+    log_error "recovery cleanup: cannot inspect recovery directory: $recovery_dir"
+    return 1
+  }
+  if [[ "$directory_metadata" != "0:0:700" ]]; then
+    log_error "recovery cleanup: expected root:root mode 0700 directory: $recovery_dir"
+    return 1
+  fi
+
+  now="$(date +%s)" || return 1
+  while IFS= read -r -d '' candidate; do
+    parent="$(dirname -- "$candidate")"
+    filename="$(basename -- "$candidate")"
+
+    if [[ "$parent" != "$recovery_dir" ]]; then
+      log_warn "recovery cleanup: refusing candidate outside expected directory: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ ! "$filename" =~ ^vaultwarden-recovery-kit-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\.txt$ ]]; then
+      log_warn "recovery cleanup: refusing matching candidate with an unexpected filename: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+      continue
+    fi
+    if [[ -L "$candidate" ]]; then
+      log_warn "recovery cleanup: refusing symlink candidate: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ ! -f "$candidate" ]]; then
+      log_warn "recovery cleanup: refusing non-regular candidate: $candidate"
+      cleanup_result=1
+      continue
+    fi
+
+    initial_metadata="$(stat -c '%d:%i:%u:%g:%a:%h:%Y' -- "$candidate" 2>/dev/null)" || {
+      if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+        continue
+      fi
+      log_warn "recovery cleanup: cannot inspect candidate: $candidate"
+      cleanup_result=1
+      continue
+    }
+    IFS=: read -r device inode uid gid mode links mtime <<<"$initial_metadata"
+    if [[ "$uid" != 0 || "$gid" != 0 ]]; then
+      log_warn "recovery cleanup: refusing candidate not owned by root:root: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ "$mode" != 600 ]]; then
+      log_warn "recovery cleanup: refusing candidate with mode $mode instead of 0600: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if [[ "$links" != 1 ]]; then
+      log_warn "recovery cleanup: refusing candidate with link count $links: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    if (( mtime > now )); then
+      log_warn "recovery cleanup: retaining candidate with a future modification time: $candidate"
+      cleanup_result=1
+      continue
+    fi
+    age=$((now - mtime))
+    if (( age < min_age_seconds )); then
+      log_debug "recovery cleanup: retaining young recovery kit: $candidate"
+      continue
+    fi
+
+    current_metadata="$(stat -c '%d:%i:%u:%g:%a:%h:%Y' -- "$candidate" 2>/dev/null)" || {
+      if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+        continue
+      fi
+      log_warn "recovery cleanup: candidate became unreadable before removal: $candidate"
+      cleanup_result=1
+      continue
+    }
+    IFS=: read -r current_device current_inode _ <<<"$current_metadata"
+    if [[ "$current_device" != "$device" ||
+          "$current_inode" != "$inode" ||
+          "$current_metadata" != "$initial_metadata" ]]; then
+      log_warn "recovery cleanup: candidate identity or security metadata changed; leaving it untouched: $candidate"
+      cleanup_result=1
+      continue
+    fi
+
+    if [[ "$dry_run" == "true" ]]; then
+      log_info "[DRY RUN] Would remove expired plaintext recovery kit: $candidate"
+      continue
+    fi
+    if _remove_sensitive_file "$candidate"; then
+      log_info "Removed expired plaintext recovery kit: $candidate"
+    else
+      log_error "recovery cleanup: failed to remove safe expired candidate: $candidate"
+      cleanup_result=1
+    fi
+  done < <(find -P "$recovery_dir" -mindepth 1 -maxdepth 1 \
+    -name 'vaultwarden-recovery-kit-*.txt' -print0 2>/dev/null)
+
+  return "$cleanup_result"
+}
+
 _prepare_recovery_dir() {
   # Recovery artifacts belong outside the checkout and outside the normal
   # full-backup input tree.
@@ -1601,7 +1765,8 @@ offer_recovery_kit_export() {
     log_info "Unscheduled plaintext recovery kit removed: $recovery_file"
     return 1
   fi
-  log_info "Plaintext cleanup accepted by ${_RECOVERY_CLEANUP_SCHEDULER} for 30 minutes from now: $recovery_file"
+  log_info "Primary plaintext cleanup accepted by ${_RECOVERY_CLEANUP_SCHEDULER} for approximately 30 minutes: $recovery_file"
+  log_info "Routine maintenance also removes eligible leftovers that are at least 30 minutes old."
 
   _offer_email_recovery_kit "$recovery_file" || email_rc=$?
   case "$email_rc" in
@@ -1616,12 +1781,14 @@ offer_recovery_kit_export() {
       ;;
     2)
       log_info "Encrypted email declined; protected plaintext remains temporarily at: $recovery_file"
-      log_info "Scheduled expiration: 30 minutes from export (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "Primary cleanup is scheduled for approximately 30 minutes (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "If it survives that cleanup, the next routine maintenance run removes eligible leftovers."
       return 0
       ;;
     *)
       log_error "Encrypted email was requested but failed; protected plaintext remains temporarily at: $recovery_file"
-      log_info "Scheduled expiration: 30 minutes from export (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "Primary cleanup is scheduled for approximately 30 minutes (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "If it survives that cleanup, the next routine maintenance run removes eligible leftovers."
       return "$email_rc"
       ;;
   esac

@@ -431,8 +431,8 @@ PY_DIRECT_PTY
   assert_direct_auto_temps_are_clean() {
     ! find "$direct_auto_fixture" -maxdepth 1 -name 'vw_tmp.*' -print -quit | grep -q . \
       || fail "$1 left its plaintext/hash capture workspace behind"
-    if [[ -d "$direct_auto_tmp/plaintext-stage" ]]; then
-      ! find "$direct_auto_tmp/plaintext-stage" -type f -print -quit | grep -q . \
+    if sudo -n test -d "$direct_auto_tmp/plaintext-stage"; then
+      ! sudo -n find "$direct_auto_tmp/plaintext-stage" -type f -print -quit | grep -q . \
         || fail "$1 left its plaintext SOPS staging file behind"
     fi
   }
@@ -561,16 +561,18 @@ recovery_help_normalized="$(
   || fail "recovery help omits directory ownership/mode"
 [[ "$recovery_help_normalized" == *"root:root with mode 0600"* ]] \
   || fail "recovery help omits document ownership/mode"
-[[ "$recovery_help_normalized" == *"systemd transient timer"*"after 30 minutes"* ]] \
-  || fail "recovery help omits primary 30-minute systemd timer"
+[[ "$recovery_help_normalized" == *"systemd transient timer"*"approximately 30 minutes"* ]] \
+  || fail "recovery help omits approximate primary 30-minute systemd timer"
 [[ "$recovery_help_normalized" == *"at(1) is an optional fallback"* ]] \
   || fail "recovery help does not describe at as optional fallback"
 [[ "$recovery_help_normalized" == *"If neither scheduler accepts cleanup, export fails closed and removes the plaintext document"* ]] \
   || fail "recovery help omits fail-closed scheduling behavior"
 [[ "$recovery_help_normalized" == *"Successful encrypted email delivery removes the local plaintext copy immediately"* ]] \
   || fail "recovery help omits immediate post-email removal"
-[[ "$recovery_help_normalized" == *"Declined or failed email leaves the protected copy only until its accepted cleanup timer runs"* ]] \
-  || fail "recovery help omits declined/failed email expiration"
+[[ "$recovery_help_normalized" == *"Declined or failed email leaves the protected copy temporarily"* ]] \
+  || fail "recovery help omits declined/failed email temporary-retention wording"
+[[ "$recovery_help_normalized" == *"next routine maintenance run removes eligible leftovers"*"at least 30 minutes old"* ]] \
+  || fail "recovery help omits routine-maintenance fallback cleanup"
 [[ "$recovery_help_normalized" == *"Best-effort overwrite and unlink. Physical erasure is not guaranteed"* ]] \
   || fail "recovery help overstates physical erasure"
 [[ "$recovery_help_normalized" == *"Temporary decryption may use /dev/shm"* ]] \
@@ -979,9 +981,12 @@ EOF_FAILING_SHRED
         || fail "$local_label recovery file mode is not 0600"
       grep -Fq "$recovery_file" "$case_dir/stdout" "$case_dir/stderr" \
         || fail "$local_label outcome did not state the exact recovery path"
-      grep -Fq 'Scheduled expiration: 30 minutes from export' \
+      grep -Fq 'Primary cleanup is scheduled for approximately 30 minutes' \
         "$case_dir/stdout" "$case_dir/stderr" \
-        || fail "$local_label outcome did not state the scheduled expiration"
+        || fail "$local_label outcome did not state the approximate primary cleanup"
+      grep -Fq 'If it survives that cleanup, the next routine maintenance run removes eligible leftovers.' \
+        "$case_dir/stdout" "$case_dir/stderr" \
+        || fail "$local_label outcome did not state the maintenance fallback"
     else
       [[ -z "$recovery_file" ]] \
         || fail "$local_label export left an unexpected plaintext recovery file"

@@ -30,9 +30,122 @@ TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
     exit 1
 }
 umask "$old_umask"
-trap 'rm -rf "$TMP_WORKDIR"' EXIT
-trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
-trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
+SETUP_SENSITIVE_CLEANUP_ACTIVE=true
+SETUP_SENSITIVE_CLEANUP_RUNNING=false
+SETUP_SENSITIVE_CLEANUP_FAILED=false
+SETUP_OPERATION_GUARD_HELD=false
+# Top-level setup sensitive cleanup lifecycle.
+_setup_cleanup_warn() {
+    local message="$1"
+    if declare -F log_warn >/dev/null 2>&1; then
+        log_warn "$message"
+    else
+        printf 'WARNING: %s\n' "$message" >&2
+    fi
+}
+_setup_manual_cleanup() {
+    local flag="$1" target="$2" quoted
+    printf -v quoted '%q' "$target"
+    _setup_cleanup_warn "Residual sensitive path: $target"
+    _setup_cleanup_warn "Manual cleanup: sudo rm $flag -- $quoted"
+}
+_setup_remove_sensitive_workspace() {
+    local original_status="${1:-0}" cleanup_failed=0 path
+    local -a sensitive_paths=(
+        "${VW_ADMIN_PLAIN_FILE:-}"
+        "${VW_ADMIN_HASH_FILE:-}"
+        "${CADDY_PLAIN_FILE:-}"
+        "${CADDY_HASH_FILE:-}"
+    )
+    if [[ "${SETUP_SENSITIVE_CLEANUP_RUNNING:-false}" == "true" ]]; then
+        return "$original_status"
+    fi
+    if [[ "${SETUP_SENSITIVE_CLEANUP_ACTIVE:-false}" != "true" ]]; then
+        if (( original_status == 0 )) && [[ "${SETUP_SENSITIVE_CLEANUP_FAILED:-false}" == "true" ]]; then
+            return 1
+        fi
+        return "$original_status"
+    fi
+
+    SETUP_SENSITIVE_CLEANUP_RUNNING=true
+    { set +x; } 2>/dev/null
+    for path in "${sensitive_paths[@]}"; do
+        [[ -n "$path" ]] || continue
+        if [[ ! -e "$path" && ! -L "$path" ]]; then
+            continue
+        fi
+        if ! rm -f -- "$path" 2>/dev/null || [[ -e "$path" || -L "$path" ]]; then
+            _setup_cleanup_warn "Failed to remove sensitive temporary file: $path"
+            _setup_manual_cleanup "-f" "$path"
+            cleanup_failed=1
+        fi
+    done
+
+    if [[ -n "${TMP_WORKDIR:-}" && ( -e "$TMP_WORKDIR" || -L "$TMP_WORKDIR" ) ]]; then
+        local workdir_resolved tmp_root_resolved workdir_parent workdir_base
+        workdir_resolved="$(realpath -m -- "$TMP_WORKDIR" 2>/dev/null)" || workdir_resolved=""
+        tmp_root_resolved="$(realpath -m -- "${TMPDIR:-/tmp}" 2>/dev/null)" || tmp_root_resolved=""
+        workdir_parent="$(dirname -- "$workdir_resolved" 2>/dev/null || true)"
+        workdir_base="$(basename -- "$workdir_resolved" 2>/dev/null || true)"
+        if [[ -L "$TMP_WORKDIR" || -z "$workdir_resolved" || -z "$tmp_root_resolved" ||
+              "$workdir_parent" != "$tmp_root_resolved" || "$workdir_base" != vw_setup.* ]]; then
+            _setup_cleanup_warn "Refusing unsafe temporary workspace removal: $TMP_WORKDIR"
+            _setup_manual_cleanup "-rf" "$TMP_WORKDIR"
+            cleanup_failed=1
+        elif ! rm -rf -- "$workdir_resolved" 2>/dev/null || [[ -e "$workdir_resolved" || -L "$workdir_resolved" ]]; then
+            _setup_cleanup_warn "Failed to remove sensitive temporary workspace: $workdir_resolved"
+            _setup_manual_cleanup "-rf" "$workdir_resolved"
+            cleanup_failed=1
+        fi
+    fi
+
+    if (( cleanup_failed == 0 )); then
+        SETUP_SENSITIVE_CLEANUP_ACTIVE=false
+        unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
+    else
+        SETUP_SENSITIVE_CLEANUP_FAILED=true
+    fi
+    SETUP_SENSITIVE_CLEANUP_RUNNING=false
+
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_failed == 0 )) || return 1
+    return 0
+}
+_setup_finalize() {
+    local original_status="$1" release_status=0 cleanup_status=0
+    { set +x; } 2>/dev/null
+    if [[ "${SETUP_OPERATION_GUARD_HELD:-false}" == "true" ]] &&
+       declare -F operation_release >/dev/null 2>&1; then
+        operation_release "$original_status" || release_status=$?
+        SETUP_OPERATION_GUARD_HELD=false
+    fi
+    _setup_remove_sensitive_workspace "$original_status" || cleanup_status=$?
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_status == 0 )) || return "$cleanup_status"
+    (( release_status == 0 )) || return "$release_status"
+    return 0
+}
+_setup_on_exit() {
+    local original_status="$1" final_status=0
+    trap - EXIT INT HUP TERM
+    _setup_finalize "$original_status" || final_status=$?
+    exit "$final_status"
+}
+_setup_on_signal() {
+    local signal_status="$1"
+    trap - EXIT INT HUP TERM
+    _setup_finalize "$signal_status" || true
+    exit "$signal_status"
+}
+# End top-level setup sensitive cleanup lifecycle.
+trap '_setup_on_exit $?' EXIT
+trap '_setup_on_signal 129' HUP
+trap '_setup_on_signal 130' INT
+trap '_setup_on_signal 143' TERM
 
 REQUIRED_LIBS=(
   "lib/log.sh"
@@ -349,6 +462,10 @@ show_post_install_summary() {
   done
   if (( capture_count != 4 )); then
     if (( capture_count == 0 )) && [[ "${SETUP_SECRETS_PREEXISTED:-false}" == "true" ]]; then
+      if ! _setup_remove_sensitive_workspace 0; then
+        log_error "Sensitive temporary workspace cleanup failed; setup is not complete."
+        return 1
+      fi
       printf '\n'
       log_success "Setup completed without printing secret values."
       log_info "Existing secrets were retained; no new setup-credentials file was created."
@@ -357,6 +474,10 @@ show_post_install_summary() {
     fi
     if [[ "$mode" == "auto" || $capture_count -ne 0 ]]; then
       log_error "Cannot publish setup credentials: generated plaintext/hash capture is incomplete."
+      return 1
+    fi
+    if ! _setup_remove_sensitive_workspace 0; then
+      log_error "Sensitive temporary workspace cleanup failed; setup is not complete."
       return 1
     fi
     printf '\n'
@@ -373,6 +494,10 @@ show_post_install_summary() {
       return 1
     }
 
+  if ! _setup_remove_sensitive_workspace 0; then
+    log_error "Protected handoff was published, but sensitive temporary cleanup failed; setup is not complete."
+    return 1
+  fi
   printf '\n'
   printf '╭──────────────────────────────────────────────────────────────────────────────╮\n'
   printf '│  SETUP CREDENTIALS SAVED                                                     │\n'
@@ -436,16 +561,7 @@ main() {
         --id setup \
         --label "Setup" \
         --specific-lock /run/lock/vaultwarden-setup.lock || exit $?
-    _setup_cleanup() {
-        local rc=$?
-        operation_release "$rc"
-        # Clean TMP_WORKDIR here because this trap overrides the earlier trap.
-        rm -rf "$TMP_WORKDIR" 2>/dev/null || true
-        return "$rc"
-    }
-    trap _setup_cleanup EXIT
-    trap 'operation_release 130; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 130' INT
-    trap 'operation_release 143; rm -rf "${TMP_WORKDIR:-}" 2>/dev/null || true; exit 143' HUP TERM
+    SETUP_OPERATION_GUARD_HELD=true
 
     _verify_required_utilities
 

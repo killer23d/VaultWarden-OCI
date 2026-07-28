@@ -24,15 +24,18 @@ DESCRIPTION:
 
     The recovery directory is owned by root:root with mode 0700, and the
     recovery document is owned by root:root with mode 0600. Immediately after
-    publication, a systemd transient timer is scheduled to expire it after
-    30 minutes; at(1) is an optional fallback. If neither scheduler accepts
-    cleanup, export fails closed and removes the plaintext document before
-    returning.
+    publication, a systemd transient timer is scheduled to remove it after
+    approximately 30 minutes; at(1) is an optional fallback. If neither
+    scheduler accepts cleanup, export fails closed and removes the plaintext
+    document before returning.
 
     Successful encrypted email delivery removes the local plaintext copy
-    immediately. Declined or failed email leaves the protected copy only until
-    its accepted cleanup timer runs. Email uses only an AES-256 encrypted ZIP
-    with a passphrase independent from stored VaultWarden credentials.
+    immediately. Declined or failed email leaves the protected copy temporarily.
+    Primary cleanup is scheduled for approximately 30 minutes. If the file
+    survives that cleanup, the next routine maintenance run removes eligible
+    leftovers that are already at least 30 minutes old. Email uses only an
+    AES-256 encrypted ZIP with a passphrase independent from stored VaultWarden
+    credentials.
 
     Best-effort overwrite and unlink. Physical erasure is not guaranteed on
     SSDs, snapshots, journaling filesystems, or copy-on-write storage.

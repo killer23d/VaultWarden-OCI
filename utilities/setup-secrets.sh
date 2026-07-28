@@ -17,53 +17,52 @@ umask "$old_umask"
 chmod 0700 "$TMP_WORKDIR" || { echo "ERROR: Failed to secure temporary directory" >&2; exit 1; }
 
 # Secret cleanup lifecycle is script-scoped because EXIT and signal traps can
-# run after _cmd_configure has returned. Keep this state small and explicit.
+# run after _cmd_configure has returned. Keep path state until cleanup has been
+# verified so a fallback trap can retry and report exact residual paths.
 declare -ga SETUP_SECRETS_CLEANUP_ACTIONS=()
 declare -gA SETUP_SECRETS_COLLECTED_SECRETS=()
 SETUP_SECRETS_CLEANUP_ACTIVE=true
 SETUP_SECRETS_CLEANUP_DONE=false
-SETUP_SECRETS_XTRACE_WAS_ENABLED=false
+SETUP_SECRETS_CLEANUP_RUNNING=false
+SETUP_SECRETS_CLEANUP_FAILED=false
 SETUP_SECRETS_TMP_WORKDIR="$TMP_WORKDIR"
 SETUP_SECRETS_GUARD_HELD=false
-
 _setup_secrets_cleanup_warn() {
     local message="$1"
     if declare -F log_warn >/dev/null 2>&1; then
         log_warn "$message"
     else
-        printf 'WARNING: %s
-' "$message" >&2
+        printf 'WARNING: %s\n' "$message" >&2
     fi
 }
-
+_setup_secrets_manual_cleanup() {
+    local flag="$1" target="$2" quoted
+    printf -v quoted '%q' "$target"
+    _setup_secrets_cleanup_warn "Residual sensitive path: $target"
+    _setup_secrets_cleanup_warn "Manual cleanup: sudo rm $flag -- $quoted"
+}
 _setup_secrets_cleanup_begin() {
-    if [[ $- == *x* ]]; then
-        SETUP_SECRETS_XTRACE_WAS_ENABLED=true
-    else
-        SETUP_SECRETS_XTRACE_WAS_ENABLED=false
-    fi
     { set +x; } 2>/dev/null
     SETUP_SECRETS_CLEANUP_ACTIONS=()
     SETUP_SECRETS_COLLECTED_SECRETS=()
     SETUP_SECRETS_CLEANUP_ACTIVE=true
     SETUP_SECRETS_CLEANUP_DONE=false
+    SETUP_SECRETS_CLEANUP_RUNNING=false
+    SETUP_SECRETS_CLEANUP_FAILED=false
     SETUP_SECRETS_TMP_WORKDIR="${TMP_WORKDIR:-}"
 }
-
 _ss_register_cleanup() {
     local action="${1:-}" target
     case "$action" in
         "rm -f "*) target="${action#rm -f }" ;;
         *) target="$action" ;;
     esac
-    if [[ -z "$target" || "$target" == *$'
-'* ]]; then
+    if [[ -z "$target" || "$target" == *$'\n'* ]]; then
         _setup_secrets_cleanup_warn "Refusing to register an empty or malformed cleanup path"
         return 1
     fi
     SETUP_SECRETS_CLEANUP_ACTIONS+=("$target")
 }
-
 _setup_secrets_cleanup_file_allowed() {
     local target="$1" resolved project_root_resolved tmp_resolved secrets_resolved
     resolved="$(realpath -m -- "$target" 2>/dev/null)" || return 1
@@ -78,98 +77,175 @@ _setup_secrets_cleanup_file_allowed() {
     esac
     [[ -n "$tmp_resolved" && "$resolved" == "$tmp_resolved"/* ]]
 }
-
 _ss_run_cleanup_action() {
     local target="$1"
     if ! _setup_secrets_cleanup_file_allowed "$target"; then
+        # This path is outside this process's cleanup custody. Refuse it, but do
+        # not turn an unrelated path into a retryable sensitive residual or
+        # suggest a destructive manual command for it.
         _setup_secrets_cleanup_warn "Refusing cleanup outside approved temporary or secrets paths: $target"
-        return 1
+        return 2
     fi
-    if ! rm -f -- "$target" 2>/dev/null; then
-        _setup_secrets_cleanup_warn "Failed to remove cleanup path: $target"
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+        return 0
+    fi
+    if ! rm -f -- "$target" 2>/dev/null || [[ -e "$target" || -L "$target" ]]; then
+        _setup_secrets_cleanup_warn "Failed to remove sensitive cleanup path: $target"
         return 1
     fi
 }
-
 _setup_secrets_remove_workdir() {
     local target="${SETUP_SECRETS_TMP_WORKDIR:-}" resolved root_resolved parent base
     [[ -n "$target" && "$target" != "/" && "$target" != "." && "$target" != ".." ]] || return 0
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+        return 0
+    fi
     resolved="$(realpath -m -- "$target" 2>/dev/null)" || {
         _setup_secrets_cleanup_warn "Unable to resolve temporary workspace; refusing recursive removal: $target"
-        return 1
+        return 2
     }
-    root_resolved="$(realpath -m -- "${PROJECT_ROOT:-/opt/vaultwarden-scripts}" 2>/dev/null)" || return 1
+    root_resolved="$(realpath -m -- "${PROJECT_ROOT:-/opt/vaultwarden-scripts}" 2>/dev/null)" || {
+        _setup_secrets_cleanup_warn "Unable to resolve the project root; refusing temporary workspace removal: $target"
+        return 2
+    }
     parent="$(dirname -- "$resolved")"
     base="$(basename -- "$resolved")"
-    if [[ "$parent" != "$root_resolved" || "$base" != vw_tmp.* || "$resolved" == "$root_resolved" ]]; then
-        _setup_secrets_cleanup_warn "Refusing unsafe temporary workspace removal: $resolved"
-        return 1
+    if [[ "$parent" != "$root_resolved" || "$base" != vw_tmp.* || "$resolved" == "$root_resolved" || -L "$target" ]]; then
+        _setup_secrets_cleanup_warn "Refusing unsafe temporary workspace removal: $target"
+        return 2
     fi
-    rm -rf -- "$resolved" 2>/dev/null || {
+    if ! rm -rf -- "$resolved" 2>/dev/null || [[ -e "$resolved" || -L "$resolved" ]]; then
         _setup_secrets_cleanup_warn "Failed to remove temporary workspace: $resolved"
         return 1
-    }
+    fi
 }
-
 _ss_perform_cleanup() {
-    local original_status="${1:-$?}" idx key
+    local original_status="${1:-$?}" idx key target action_status=0 workdir_status=0 cleanup_failed=0
+    local -a failed_actions=() remaining_actions=()
+    if [[ "${SETUP_SECRETS_CLEANUP_RUNNING:-false}" == "true" ]]; then
+        return "$original_status"
+    fi
     if [[ "${SETUP_SECRETS_CLEANUP_ACTIVE:-false}" != "true" ]] ||
        [[ "${SETUP_SECRETS_CLEANUP_DONE:-false}" == "true" ]]; then
+        if (( original_status == 0 )) && [[ "${SETUP_SECRETS_CLEANUP_FAILED:-false}" == "true" ]]; then
+            return 1
+        fi
         return "$original_status"
     fi
 
-    SETUP_SECRETS_CLEANUP_DONE=true
+    SETUP_SECRETS_CLEANUP_RUNNING=true
     { set +x; } 2>/dev/null
-
     for key in "${!SETUP_SECRETS_COLLECTED_SECRETS[@]}"; do
         SETUP_SECRETS_COLLECTED_SECRETS["$key"]=""
     done
     SETUP_SECRETS_COLLECTED_SECRETS=()
 
+    # A refused, out-of-custody path is discarded after warning. Only an
+    # approved path that survives an actual removal attempt is retryable.
     for ((idx=${#SETUP_SECRETS_CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx--)); do
-        _ss_run_cleanup_action "${SETUP_SECRETS_CLEANUP_ACTIONS[$idx]}" || true
+        target="${SETUP_SECRETS_CLEANUP_ACTIONS[$idx]}"
+        if _ss_run_cleanup_action "$target"; then
+            continue
+        else
+            action_status=$?
+        fi
+        case "$action_status" in
+            1) failed_actions=("$target" "${failed_actions[@]}") ;;
+            2) : ;;
+            *)
+                _setup_secrets_cleanup_warn "Unexpected cleanup result for approved path: $target"
+                failed_actions=("$target" "${failed_actions[@]}")
+                ;;
+        esac
     done
-    SETUP_SECRETS_CLEANUP_ACTIONS=()
 
     if declare -F cleanup_secrets_environment >/dev/null 2>&1; then
-        cleanup_secrets_environment ||
+        if ! cleanup_secrets_environment; then
             _setup_secrets_cleanup_warn "Secret environment cleanup reported a failure"
+            cleanup_failed=1
+        fi
     fi
 
-    # The workspace is removed last even when an earlier cleanup action fails.
-    _setup_secrets_remove_workdir || true
-    SETUP_SECRETS_TMP_WORKDIR=""
-    SETUP_SECRETS_CLEANUP_ACTIVE=false
-
-    if [[ "${SETUP_SECRETS_XTRACE_WAS_ENABLED:-false}" == "true" ]]; then
-        set -x
+    if _setup_secrets_remove_workdir; then
+        SETUP_SECRETS_TMP_WORKDIR=""
+    else
+        workdir_status=$?
+        case "$workdir_status" in
+            1)
+                cleanup_failed=1
+                if [[ -n "${SETUP_SECRETS_TMP_WORKDIR:-}" ]] &&
+                   [[ -e "$SETUP_SECRETS_TMP_WORKDIR" || -L "$SETUP_SECRETS_TMP_WORKDIR" ]]; then
+                    _setup_secrets_manual_cleanup "-rf" "$SETUP_SECRETS_TMP_WORKDIR"
+                fi
+                ;;
+            2)
+                # The workspace is expected to be script-owned. Refusal is a
+                # real cleanup failure, but never suggest a recursive deletion
+                # command for a path outside the verified workspace contract.
+                cleanup_failed=1
+                ;;
+            *)
+                _setup_secrets_cleanup_warn "Unexpected temporary workspace cleanup result"
+                cleanup_failed=1
+                ;;
+        esac
     fi
-    return "$original_status"
-}
 
-_setup_secrets_cleanup_all() {
-    local original_status="${1:-$?}"
-    set +e
-    if [[ "${SETUP_SECRETS_GUARD_HELD:-false}" == "true" ]] &&
-       declare -F operation_release >/dev/null 2>&1; then
-        operation_release "$original_status" || true
-        SETUP_SECRETS_GUARD_HELD=false
+    # Workspace deletion may have removed a file whose individual unlink was
+    # blocked. Retain and report only approved paths that actually still exist.
+    for target in "${failed_actions[@]}"; do
+        if [[ -e "$target" || -L "$target" ]]; then
+            remaining_actions+=("$target")
+            _setup_secrets_manual_cleanup "-f" "$target"
+            cleanup_failed=1
+        fi
+    done
+    SETUP_SECRETS_CLEANUP_ACTIONS=("${remaining_actions[@]}")
+
+    if (( cleanup_failed == 0 )); then
+        SETUP_SECRETS_CLEANUP_ACTIONS=()
+        SETUP_SECRETS_TMP_WORKDIR=""
+        SETUP_SECRETS_CLEANUP_ACTIVE=false
+        SETUP_SECRETS_CLEANUP_DONE=true
+        SETUP_SECRETS_CLEANUP_FAILED=false
+    else
+        SETUP_SECRETS_CLEANUP_FAILED=true
     fi
-    _ss_perform_cleanup "$original_status"
+    SETUP_SECRETS_CLEANUP_RUNNING=false
+
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_failed == 0 )) || return 1
     return 0
 }
-
-_setup_secrets_on_exit() {
-    local original_status="$1"
-    trap - EXIT INT HUP TERM
-    _setup_secrets_cleanup_all "$original_status"
-    exit "$original_status"
+_setup_secrets_cleanup_all() {
+    local original_status="${1:-$?}" release_status=0 cleanup_status=0
+    set +e
+    { set +x; } 2>/dev/null
+    if [[ "${SETUP_SECRETS_GUARD_HELD:-false}" == "true" ]] &&
+       declare -F operation_release >/dev/null 2>&1; then
+        operation_release "$original_status" || release_status=$?
+        SETUP_SECRETS_GUARD_HELD=false
+    fi
+    _ss_perform_cleanup "$original_status" || cleanup_status=$?
+    if (( original_status != 0 )); then
+        return "$original_status"
+    fi
+    (( cleanup_status == 0 )) || return "$cleanup_status"
+    (( release_status == 0 )) || return "$release_status"
+    return 0
 }
-
+_setup_secrets_on_exit() {
+    local original_status="$1" final_status=0
+    trap - EXIT INT HUP TERM
+    _setup_secrets_cleanup_all "$original_status" || final_status=$?
+    exit "$final_status"
+}
 _setup_secrets_on_signal() {
     local signal_status="$1"
     trap - EXIT INT HUP TERM
-    _setup_secrets_cleanup_all "$signal_status"
+    _setup_secrets_cleanup_all "$signal_status" || true
     exit "$signal_status"
 }
 # End secret cleanup lifecycle.
@@ -1336,6 +1412,10 @@ HELP
         fi
 
         _ss_publish_auto_handoff || return 1
+        if ! _ss_perform_cleanup 0; then
+            log_error "Sensitive temporary workspace cleanup failed; setup is not complete."
+            return 1
+        fi
 
         for _cleanup_key in \
             admin_token admin_basic_auth_hash \
