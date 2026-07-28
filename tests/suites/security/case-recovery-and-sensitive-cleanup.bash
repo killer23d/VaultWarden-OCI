@@ -165,6 +165,27 @@ unset -f stat
 [[ -e "$race" ]] || exit 1
 /bin/rm -f -- "$race" "$stat_counter"
 
+# Enumeration failure is visible, returns nonzero, and processes no partial list.
+enum_fail="$RECOVERY_KIT_DIR/vaultwarden-recovery-kit-20260727T121300Z-a1b2cf.txt"
+make_file "$enum_fail"
+touch -d '120 seconds ago' "$enum_fail"
+real_find="$(command -v find)"
+find() {
+  if [[ "$*" == *"vaultwarden-recovery-kit-*.txt"* ]]; then
+    return 73
+  fi
+  "$real_find" "$@"
+}
+set +e
+enum_output="$(cleanup_expired_recovery_kits false 2>&1)"
+enum_rc=$?
+set -e
+unset -f find
+(( enum_rc != 0 )) || exit 1
+[[ -e "$enum_fail" ]] || exit 1
+[[ "$enum_output" == *"failed to enumerate recovery-kit candidates"* ]] || exit 1
+[[ "$enum_output" != *"Removed expired plaintext recovery kit"* ]] || exit 1
+/bin/rm -f -- "$enum_fail"
 # An absent test directory is an idempotent no-op and is not created.
 absent="${RECOVERY_KIT_DIR}.absent"
 RECOVERY_KIT_DIR="$absent" cleanup_expired_recovery_kits false
@@ -201,28 +222,46 @@ secrets_source="$(cat utilities/setup-secrets.sh)"
 # Exercise successful cleanup, injected file/workspace failures, original-status
 # preservation, signal-compatible exits, continued cleanup, and confidential
 # diagnostics without running the full setup workflow.
-setup_cleanup_block="$(sed -n '/^SETUP_SENSITIVE_CLEANUP_ACTIVE=true$/,/^trap '\''_setup_on_signal 143'\'' TERM$/p' setup.sh)"
+setup_cleanup_block="$(sed -n '/^# Establish setup-owned cleanup custody before traps are installed\.$/,/^trap '\''_setup_on_signal 143'\'' TERM$/p' setup.sh)"
 direct_cleanup_block="$(sed -n '/^# Secret cleanup lifecycle is script-scoped/,/^# End secret cleanup lifecycle\.$/p' utilities/setup-secrets.sh)"
 [[ -n "$setup_cleanup_block" && -n "$direct_cleanup_block" ]] \
   || fail "cleanup lifecycle blocks could not be extracted"
-
 SETUP_CLEANUP_BLOCK="$setup_cleanup_block" bash -s <<'TOP_SETUP_TEST' \
-  || fail "top-level sensitive cleanup injected-failure tests failed"
+  || fail "top-level sensitive cleanup custody tests failed"
 set -euo pipefail
 log_warn() { printf 'WARN %s\n' "$*" >&2; }
 fixture="$(mktemp -d)"
 trap '/bin/rm -rf -- "$fixture"' EXIT
-TMPDIR="$fixture"
-TMP_WORKDIR="$(mktemp -d "$TMPDIR/vw_setup.XXXXXXXX")"
+PROJECT_ROOT="$fixture/repository"
+mkdir -p -- "$PROJECT_ROOT"
+TMPDIR="$fixture/temp root;meta"
+mkdir -p -- "$TMPDIR"
+external="$fixture/external-sensitive"
+printf '%s' 'EXTERNAL-SECRET-MUST-NOT-APPEAR' > "$external"
+VW_ADMIN_PLAIN_FILE="$external"
+VW_ADMIN_HASH_FILE="/etc/passwd"
+CADDY_PLAIN_FILE="$external"
+CADDY_HASH_FILE="$external"
+TMP_WORKDIR="/etc"
 eval "$SETUP_CLEANUP_BLOCK"
 trap - EXIT INT HUP TERM
-
+[[ -e "$external" ]]
+[[ -z "${VW_ADMIN_PLAIN_FILE+x}" && -z "${VW_ADMIN_HASH_FILE+x}" ]]
+first_workspace="$SETUP_OWNED_WORKDIR"
+set +e
+_setup_remove_sensitive_workspace 17 >/dev/null 2>&1
+first_rc=$?
+set -e
+[[ "$first_rc" == 17 ]]
+[[ ! -e "$first_workspace" ]]
 prepare_workspace() {
-  TMP_WORKDIR="$(mktemp -d "$TMPDIR/vw_setup.XXXXXXXX")"
-  VW_ADMIN_PLAIN_FILE="$TMP_WORKDIR/admin plain;touch PWNED"
-  VW_ADMIN_HASH_FILE="$TMP_WORKDIR/admin-hash"
-  CADDY_PLAIN_FILE="$TMP_WORKDIR/caddy-plain"
-  CADDY_HASH_FILE="$TMP_WORKDIR/caddy-hash"
+  TMP_WORKDIR="$(mktemp -d "${SETUP_TEMP_ROOT}/vw_setup.XXXXXXXXXX")"
+  SETUP_OWNED_WORKDIR="$(realpath -e -- "$TMP_WORKDIR")"
+  SETUP_OWNED_WORKDIR_ID="$(stat -c '%d:%i' -- "$SETUP_OWNED_WORKDIR")"
+  VW_ADMIN_PLAIN_FILE="$TMP_WORKDIR/vw_admin_plain"
+  VW_ADMIN_HASH_FILE="$TMP_WORKDIR/vw_admin_hash"
+  CADDY_PLAIN_FILE="$TMP_WORKDIR/caddy_plain"
+  CADDY_HASH_FILE="$TMP_WORKDIR/caddy_hash"
   printf '%s' 'TOP-SECRET-PLAINTEXT' > "$VW_ADMIN_PLAIN_FILE"
   printf '%s' 'TOP-SECRET-HASH' > "$VW_ADMIN_HASH_FILE"
   printf x > "$CADDY_PLAIN_FILE"
@@ -231,12 +270,77 @@ prepare_workspace() {
   SETUP_SENSITIVE_CLEANUP_RUNNING=false
   SETUP_SENSITIVE_CLEANUP_FAILED=false
 }
-
 prepare_workspace
+owned_workspace="$TMP_WORKDIR"
 _setup_remove_sensitive_workspace 0
-[[ ! -e "$TMP_WORKDIR" ]]
-
-# Fail one file and the workspace: other individual cleanup actions must still run.
+[[ ! -e "$owned_workspace" ]]
+# Out-of-custody inherited-style values are never passed to rm or used in commands.
+prepare_workspace
+owned_workspace="$TMP_WORKDIR"
+VW_ADMIN_PLAIN_FILE="$external"
+rm_log="$fixture/rm.log"
+rm() {
+  printf '%q ' "$@" >> "$rm_log"
+  printf '\n' >> "$rm_log"
+  command rm "$@"
+}
+set +e
+refused_output="$(_setup_remove_sensitive_workspace 0 2>&1)"
+refused_rc=$?
+set -e
+unset -f rm
+(( refused_rc != 0 ))
+[[ -e "$external" && -e "$owned_workspace" ]]
+[[ "$refused_output" == *"out-of-custody or unsafe sensitive-file candidate"* ]]
+[[ "$refused_output" != *"Manual cleanup:"* ]]
+[[ "$refused_output" != *"EXTERNAL-SECRET-MUST-NOT-APPEAR"* ]]
+! grep -Fq -- "$external" "$rm_log"
+/bin/rm -rf -- "$owned_workspace"
+/bin/rm -f -- "$rm_log"
+# Protected and broad paths are rejected without destructive guidance.
+for broad in /etc /tmp; do
+  prepare_workspace
+  owned_workspace="$SETUP_OWNED_WORKDIR"
+  TMP_WORKDIR="$broad"
+  VW_ADMIN_PLAIN_FILE="/etc/passwd"
+  set +e
+  broad_output="$(_setup_remove_sensitive_workspace 0 2>&1)"
+  broad_rc=$?
+  set -e
+  (( broad_rc != 0 ))
+  [[ -e /etc/passwd ]]
+  [[ "$broad_output" != *"Manual cleanup:"* ]]
+  [[ "$broad_output" != *"sudo rm -rf -- $broad"* ]]
+  /bin/rm -rf -- "$owned_workspace"
+done
+# A symlink candidate and a replaced workspace are left untouched.
+prepare_workspace
+owned_workspace="$SETUP_OWNED_WORKDIR"
+/bin/rm -f -- "$VW_ADMIN_PLAIN_FILE"
+ln -s -- "$external" "$VW_ADMIN_PLAIN_FILE"
+set +e
+symlink_output="$(_setup_remove_sensitive_workspace 0 2>&1)"
+symlink_rc=$?
+set -e
+(( symlink_rc != 0 ))
+[[ -L "$VW_ADMIN_PLAIN_FILE" && -e "$external" && -d "$owned_workspace" ]]
+[[ "$symlink_output" != *"Manual cleanup:"* ]]
+/bin/rm -rf -- "$owned_workspace"
+prepare_workspace
+owned_workspace="$SETUP_OWNED_WORKDIR"
+moved_workspace="${owned_workspace}.moved"
+mv -- "$owned_workspace" "$moved_workspace"
+ln -s -- "$moved_workspace" "$owned_workspace"
+set +e
+workspace_output="$(_setup_remove_sensitive_workspace 0 2>&1)"
+workspace_rc=$?
+set -e
+(( workspace_rc != 0 ))
+[[ -L "$owned_workspace" && -d "$moved_workspace" ]]
+[[ "$workspace_output" != *"Manual cleanup:"* ]]
+/bin/rm -f -- "$owned_workspace"
+/bin/rm -rf -- "$moved_workspace"
+# Failed removal of a validated path may emit a shell-quoted manual command.
 prepare_workspace
 blocked_file="$VW_ADMIN_PLAIN_FILE"
 blocked_workdir="$TMP_WORKDIR"
@@ -250,20 +354,17 @@ rm() {
   command rm "$@"
 }
 set +e
-output="$({ set -x; _setup_remove_sensitive_workspace 0; } 2>&1)"
-rc=$?
+failure_output="$({ set -x; _setup_remove_sensitive_workspace 0; } 2>&1)"
+failure_rc=$?
 set -e
 unset -f rm
-(( rc != 0 ))
+(( failure_rc != 0 ))
 [[ -e "$blocked_file" ]]
-[[ ! -e "$VW_ADMIN_HASH_FILE" && ! -e "$CADDY_PLAIN_FILE" && ! -e "$CADDY_HASH_FILE" ]]
-[[ "$output" == *"Residual sensitive path: $blocked_file"* ]]
-[[ "$output" == *'Manual cleanup: sudo rm -f -- '* ]]
-[[ "$output" != *'TOP-SECRET-PLAINTEXT'* && "$output" != *'TOP-SECRET-HASH'* ]]
-[[ ! -e "$fixture/PWNED" ]]
+[[ "$failure_output" == *"Residual validated setup-owned sensitive path: $blocked_file"* ]]
+[[ "$failure_output" == *"Manual cleanup: sudo rm -f -- "* ]]
+[[ "$failure_output" != *"TOP-SECRET-PLAINTEXT"* && "$failure_output" != *"TOP-SECRET-HASH"* ]]
 /bin/rm -rf -- "$blocked_workdir"
-
-# Existing operation failure wins even when cleanup also fails.
+# Existing operation and conventional signal statuses remain authoritative.
 prepare_workspace
 blocked_workdir="$TMP_WORKDIR"
 rm() {
@@ -275,13 +376,11 @@ rm() {
 }
 set +e
 _setup_remove_sensitive_workspace 37 >/dev/null 2>&1
-rc=$?
+status_rc=$?
 set -e
 unset -f rm
-[[ "$rc" == 37 ]]
+[[ "$status_rc" == 37 ]]
 /bin/rm -rf -- "$blocked_workdir"
-
-# Signal handlers preserve conventional statuses and keep residual warnings visible.
 for signal_status in 129 130 143; do
   prepare_workspace
   blocked_workdir="$TMP_WORKDIR"
@@ -294,14 +393,13 @@ for signal_status in 129 130 143; do
   }
   set +e
   signal_output="$( ( _setup_on_signal "$signal_status" ) 2>&1)"
-  rc=$?
+  signal_rc=$?
   set -e
   unset -f rm
-  [[ "$rc" == "$signal_status" ]]
-  [[ "$signal_output" == *"Residual sensitive path: $blocked_workdir"* ]]
+  [[ "$signal_rc" == "$signal_status" ]]
+  [[ "$signal_output" == *"Residual validated setup-owned sensitive path: $blocked_workdir"* ]]
   /bin/rm -rf -- "$blocked_workdir"
 done
-
 /bin/rm -rf -- "$fixture"
 trap - EXIT
 TOP_SETUP_TEST
@@ -468,6 +566,95 @@ done
 trap - EXIT
 DIRECT_SETUP_TEST
 
+# Ubuntu 7zip package and executable-selection contracts.
+# Exact apt dependency-array tokenization contract.
+python3 - <<'PY_PACKAGES' \
+  || fail "dependency package array tokenization contract failed"
+from pathlib import Path
+import re
+import shlex
+
+expected = [
+    "age", "make", "nano", "rclone", "sqlite3", "jq", "ufw", "curl",
+    "wget", "unzip", "7zip", "git", "gpg", "coreutils", "util-linux",
+    "haveged", "dnsutils", "rsync", "python3", "python3-argon2",
+    "python3-bcrypt", "python3-yaml", "apache2-utils", "cron", "openssl",
+    "tar", "zstd",
+]
+text = Path("utilities/setup-system.sh").read_text(encoding="utf-8")
+matches = re.findall(
+    r"(?m)^[ \t]*local basic_packages=\((.*)\)[ \t]*$",
+    text,
+)
+if len(matches) != 1:
+    raise SystemExit(
+        f"expected one basic_packages declaration, found {len(matches)}"
+    )
+actual = shlex.split(matches[0], posix=True)
+if actual != expected:
+    raise SystemExit(
+        "basic_packages tokenization mismatch:\n"
+        f"expected={expected!r}\nactual={actual!r}"
+    )
+PY_PACKAGES
+grep -Fq '"unzip" "7zip" "git"' utilities/setup-system.sh \
+  || fail "normal dependency list does not install Ubuntu 7zip"
+grep -Fq '"dnsutils" "rsync" "python3" "python3-argon2"' utilities/setup-system.sh \
+  || fail "dependency list must keep rsync and python3 as separate package entries"
+! grep -Fq '"rsync""python3"' utilities/setup-system.sh \
+  || fail "dependency list contains a concatenated rsync/python3 package token"
+grep -Fq '[7zip]=7zz' utilities/setup-system.sh \
+  || fail "7zip package is not mapped to preferred 7zz executable"
+grep -Fq 'for candidate in 7zz 7z; do' utilities/setup-system.sh \
+  || fail "setup dependency resolver does not prefer 7zz with 7z fallback"
+grep -Fq '_require_7zip_command || return 1' utilities/setup-system.sh \
+  || fail "--skip-deps verification does not require a usable 7-Zip executable"
+grep -Fq 'Install hint: sudo apt-get install -y 7zip' utilities/setup-system.sh \
+  || fail "setup-system 7zip installation guidance is incorrect"
+grep -Fq 'sudo apt-get install -y docker.io age sops 7zip python3-argon2 python3-bcrypt' setup.sh \
+  || fail "top-level setup phase guidance omits 7zip"
+grep -Fq 'for candidate in 7zz 7z; do' lib/secrets.sh \
+  || fail "recovery ZIP helper does not prefer 7zz with 7z fallback"
+grep -Fq 'a -tzip -mem=AES256' lib/secrets.sh \
+  || fail "recovery artifact is no longer an AES-256 encrypted ZIP"
+! grep -Fq '[7zip]=7zip' utilities/setup-system.sh \
+  || fail "dependency validation incorrectly expects a command named 7zip"
+resolver_block="$(sed -n '/^_resolve_7zip_command() {/,/^# Install the required system packages/p' utilities/setup-system.sh | sed '$d')"
+[[ -n "$resolver_block" ]] || fail "7zip resolver block could not be extracted"
+RESOLVER_BLOCK="$resolver_block" bash -s <<'SEVENZIP_TEST' \
+  || fail "7zip executable resolution tests failed"
+set -euo pipefail
+log_error() { printf 'ERROR %s\n' "$*" >&2; }
+log_info() { printf 'INFO %s\n' "$*" >&2; }
+log_debug() { :; }
+eval "$RESOLVER_BLOCK"
+fixture="$(mktemp -d)"
+trap '/bin/rm -rf -- "$fixture"' EXIT
+make_cmd() {
+  local dir="$1" name="$2"
+  mkdir -p -- "$dir"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/$name"
+  chmod 0755 "$dir/$name"
+}
+both="$fixture/both"
+make_cmd "$both" 7zz
+make_cmd "$both" 7z
+[[ "$(PATH="$both" _resolve_7zip_command)" == 7zz ]]
+fallback="$fixture/fallback"
+make_cmd "$fallback" 7z
+[[ "$(PATH="$fallback" _resolve_7zip_command)" == 7z ]]
+empty="$fixture/empty"
+mkdir -p -- "$empty"
+set +e
+missing_output="$(PATH="$empty" _require_7zip_command 2>&1)"
+missing_rc=$?
+set -e
+(( missing_rc != 0 ))
+[[ "$missing_output" == *"expected 7zz (preferred) or 7z"* ]]
+[[ "$missing_output" == *"sudo apt-get install -y 7zip"* ]]
+/bin/rm -rf -- "$fixture"
+trap - EXIT
+SEVENZIP_TEST
 python3 - <<'PY_ORDER' || fail "success-summary ordering is unsafe"
 from pathlib import Path
 setup = Path('setup.sh').read_text()

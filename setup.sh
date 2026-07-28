@@ -23,13 +23,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
+# Establish setup-owned cleanup custody before traps are installed.
+unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
+unset TMP_WORKDIR SETUP_TEMP_ROOT SETUP_OWNED_WORKDIR SETUP_OWNED_WORKDIR_ID
+SETUP_TEMP_ROOT="$(realpath -e -- "${TMPDIR:-/tmp}" 2>/dev/null)" || {
+    echo "ERROR: Failed to resolve the temporary root" >&2
+    exit 1
+}
+if [[ ! -d "$SETUP_TEMP_ROOT" || -L "${TMPDIR:-/tmp}" ]]; then
+    echo "ERROR: Temporary root must be a real directory" >&2
+    exit 1
+fi
+case "$SETUP_TEMP_ROOT" in
+    /|/etc|/root|"$PROJECT_ROOT")
+        echo "ERROR: Refusing unsafe temporary root" >&2
+        exit 1
+        ;;
+esac
 old_umask=$(umask)
 umask 077
-TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
+TMP_WORKDIR="$(mktemp -d "${SETUP_TEMP_ROOT}/vw_setup.XXXXXXXXXX")" || {
+    umask "$old_umask"
     echo "ERROR: Failed to create secure temporary directory" >&2
     exit 1
 }
 umask "$old_umask"
+SETUP_OWNED_WORKDIR="$(realpath -e -- "$TMP_WORKDIR" 2>/dev/null)" || {
+    echo "ERROR: Failed to resolve secure temporary directory" >&2
+    exit 1
+}
+SETUP_OWNED_WORKDIR_ID="$(stat -c '%d:%i' -- "$SETUP_OWNED_WORKDIR" 2>/dev/null)" || {
+    echo "ERROR: Failed to record secure temporary directory identity" >&2
+    exit 1
+}
 SETUP_SENSITIVE_CLEANUP_ACTIVE=true
 SETUP_SENSITIVE_CLEANUP_RUNNING=false
 SETUP_SENSITIVE_CLEANUP_FAILED=false
@@ -43,14 +69,71 @@ _setup_cleanup_warn() {
         printf 'WARNING: %s\n' "$message" >&2
     fi
 }
+_setup_validate_workspace() {
+    local candidate="${1:-}" require_exists="${2:-true}"
+    local resolved parent base identity
+    [[ -n "$candidate" && "$candidate" == /* ]] || return 1
+    resolved="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
+    [[ -n "${SETUP_OWNED_WORKDIR:-}" && "$resolved" == "$SETUP_OWNED_WORKDIR" ]] || return 1
+    parent="$(dirname -- "$resolved")" || return 1
+    base="$(basename -- "$resolved")" || return 1
+    [[ "$parent" == "${SETUP_TEMP_ROOT:-}" ]] || return 1
+    [[ "$base" =~ ^vw_setup\.[[:alnum:]]{8,}$ ]] || return 1
+    case "$resolved" in
+        /|/tmp|/var/tmp|/etc|/root|"${PROJECT_ROOT:-}") return 1 ;;
+    esac
+    if [[ -e "$resolved" || -L "$resolved" ]]; then
+        [[ ! -L "$resolved" && -d "$resolved" ]] || return 1
+        identity="$(stat -c '%d:%i' -- "$resolved" 2>/dev/null)" || return 1
+        [[ -n "${SETUP_OWNED_WORKDIR_ID:-}" && "$identity" == "$SETUP_OWNED_WORKDIR_ID" ]] || return 1
+    elif [[ "$require_exists" == "true" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$resolved"
+}
+_setup_validate_sensitive_file() {
+    local candidate="${1:-}" workspace="${2:-}" require_exists="${3:-false}"
+    local resolved parent base metadata
+    [[ -n "$candidate" && "$candidate" == /* ]] || return 1
+    workspace="$(_setup_validate_workspace "$workspace" true)" || return 1
+    resolved="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
+    parent="$(dirname -- "$resolved")" || return 1
+    base="$(basename -- "$resolved")" || return 1
+    [[ "$parent" == "$workspace" ]] || return 1
+    case "$base" in
+        vw_admin_plain|vw_admin_hash|caddy_plain|caddy_hash) ;;
+        *) return 1 ;;
+    esac
+    [[ ! -L "$candidate" ]] || return 1
+    if [[ -e "$candidate" ]]; then
+        [[ -f "$candidate" ]] || return 1
+        metadata="$(stat -c '%u:%h' -- "$candidate" 2>/dev/null)" || return 1
+        [[ "$metadata" == "${EUID}:1" ]] || return 1
+    elif [[ "$require_exists" == "true" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$resolved"
+}
 _setup_manual_cleanup() {
-    local flag="$1" target="$2" quoted
-    printf -v quoted '%q' "$target"
-    _setup_cleanup_warn "Residual sensitive path: $target"
+    local flag="$1" target="$2" workspace="${3:-}" validated quoted
+    case "$flag" in
+        -f)
+            validated="$(_setup_validate_sensitive_file "$target" "$workspace" true)" || return 1
+            ;;
+        -rf)
+            validated="$(_setup_validate_workspace "$target" true)" || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    printf -v quoted '%q' "$validated"
+    _setup_cleanup_warn "Residual validated setup-owned sensitive path: $validated"
     _setup_cleanup_warn "Manual cleanup: sudo rm $flag -- $quoted"
 }
 _setup_remove_sensitive_workspace() {
-    local original_status="${1:-0}" cleanup_failed=0 path
+    local original_status="${1:-0}" cleanup_failed=0 path validated_path
+    local workspace="" current_workdir="" workspace_cleanup_allowed=true
     local -a sensitive_paths=(
         "${VW_ADMIN_PLAIN_FILE:-}"
         "${VW_ADMIN_HASH_FILE:-}"
@@ -66,39 +149,50 @@ _setup_remove_sensitive_workspace() {
         fi
         return "$original_status"
     fi
-
     SETUP_SENSITIVE_CLEANUP_RUNNING=true
     { set +x; } 2>/dev/null
-    for path in "${sensitive_paths[@]}"; do
-        [[ -n "$path" ]] || continue
-        if [[ ! -e "$path" && ! -L "$path" ]]; then
-            continue
-        fi
-        if ! rm -f -- "$path" 2>/dev/null || [[ -e "$path" || -L "$path" ]]; then
-            _setup_cleanup_warn "Failed to remove sensitive temporary file: $path"
-            _setup_manual_cleanup "-f" "$path"
-            cleanup_failed=1
-        fi
-    done
-
-    if [[ -n "${TMP_WORKDIR:-}" && ( -e "$TMP_WORKDIR" || -L "$TMP_WORKDIR" ) ]]; then
-        local workdir_resolved tmp_root_resolved workdir_parent workdir_base
-        workdir_resolved="$(realpath -m -- "$TMP_WORKDIR" 2>/dev/null)" || workdir_resolved=""
-        tmp_root_resolved="$(realpath -m -- "${TMPDIR:-/tmp}" 2>/dev/null)" || tmp_root_resolved=""
-        workdir_parent="$(dirname -- "$workdir_resolved" 2>/dev/null || true)"
-        workdir_base="$(basename -- "$workdir_resolved" 2>/dev/null || true)"
-        if [[ -L "$TMP_WORKDIR" || -z "$workdir_resolved" || -z "$tmp_root_resolved" ||
-              "$workdir_parent" != "$tmp_root_resolved" || "$workdir_base" != vw_setup.* ]]; then
-            _setup_cleanup_warn "Refusing unsafe temporary workspace removal: $TMP_WORKDIR"
-            _setup_manual_cleanup "-rf" "$TMP_WORKDIR"
-            cleanup_failed=1
-        elif ! rm -rf -- "$workdir_resolved" 2>/dev/null || [[ -e "$workdir_resolved" || -L "$workdir_resolved" ]]; then
-            _setup_cleanup_warn "Failed to remove sensitive temporary workspace: $workdir_resolved"
-            _setup_manual_cleanup "-rf" "$workdir_resolved"
+    if ! workspace="$(_setup_validate_workspace "${SETUP_OWNED_WORKDIR:-}" true)"; then
+        _setup_cleanup_warn "Automatic setup cleanup was refused because workspace custody could not be validated; inspect it manually."
+        cleanup_failed=1
+        workspace_cleanup_allowed=false
+    fi
+    if [[ -n "${TMP_WORKDIR:-}" ]]; then
+        current_workdir="$(realpath -m -- "$TMP_WORKDIR" 2>/dev/null || true)"
+        if [[ -z "$workspace" || "$current_workdir" != "$workspace" ]]; then
+            _setup_cleanup_warn "Ignoring an untrusted current temporary-workspace value; no destructive command will be suggested."
             cleanup_failed=1
         fi
     fi
-
+    if [[ -n "$workspace" ]]; then
+        for path in "${sensitive_paths[@]}"; do
+            [[ -n "$path" ]] || continue
+            if ! validated_path="$(_setup_validate_sensitive_file "$path" "$workspace" false)"; then
+                _setup_cleanup_warn "Automatic cleanup refused an out-of-custody or unsafe sensitive-file candidate; inspect it manually."
+                cleanup_failed=1
+                workspace_cleanup_allowed=false
+                continue
+            fi
+            if [[ ! -e "$validated_path" && ! -L "$validated_path" ]]; then
+                continue
+            fi
+            if ! rm -f -- "$validated_path" 2>/dev/null || [[ -e "$validated_path" || -L "$validated_path" ]]; then
+                _setup_cleanup_warn "Failed to remove a validated setup-owned sensitive temporary file."
+                _setup_manual_cleanup "-f" "$validated_path" "$workspace" || true
+                cleanup_failed=1
+                workspace_cleanup_allowed=false
+            fi
+        done
+    fi
+    if [[ -n "$workspace" && "$workspace_cleanup_allowed" == "true" ]]; then
+        if ! workspace="$(_setup_validate_workspace "$workspace" true)"; then
+            _setup_cleanup_warn "Automatic setup workspace cleanup was refused after custody changed; inspect it manually."
+            cleanup_failed=1
+        elif ! rm -rf -- "$workspace" 2>/dev/null || [[ -e "$workspace" || -L "$workspace" ]]; then
+            _setup_cleanup_warn "Failed to remove the validated setup-owned sensitive temporary workspace."
+            _setup_manual_cleanup "-rf" "$workspace" || true
+            cleanup_failed=1
+        fi
+    fi
     if (( cleanup_failed == 0 )); then
         SETUP_SENSITIVE_CLEANUP_ACTIVE=false
         unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
@@ -106,7 +200,6 @@ _setup_remove_sensitive_workspace() {
         SETUP_SENSITIVE_CLEANUP_FAILED=true
     fi
     SETUP_SENSITIVE_CLEANUP_RUNNING=false
-
     if (( original_status != 0 )); then
         return "$original_status"
     fi
@@ -593,7 +686,7 @@ main() {
     "${SCRIPT_DIR}/utilities/setup-system.sh" \
         "${_auto[@]}" "${_skip_deps[@]}" "${_use_latest[@]}" "${_dry[@]}" "${_force[@]}" \
         "${_dev_flags[@]}" "${_sops_flags[@]}" \
-        || _phase_failed 1 "System setup"             "Check missing packages: sudo apt-get update && sudo apt-get install -y docker.io age sops python3-argon2 python3-bcrypt"             "Re-run this phase: sudo ./utilities/setup-system.sh"             "If dependencies are already installed, re-run setup with --skip-deps"
+        || _phase_failed 1 "System setup"             "Check missing packages: sudo apt-get update && sudo apt-get install -y docker.io age sops 7zip python3-argon2 python3-bcrypt"             "Re-run this phase: sudo ./utilities/setup-system.sh"             "If dependencies are already installed, re-run setup with --skip-deps"
 
     operation_set_phase "2" "Storage setup"
     log_phase 2 6 "Storage setup"

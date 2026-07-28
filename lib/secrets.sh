@@ -572,7 +572,7 @@ cleanup_expired_recovery_kits() {
   local candidate parent filename directory_metadata
   local initial_metadata current_metadata
   local device inode current_device current_inode uid gid mode links mtime
-  local now age cleanup_result=0 resolved_dir
+  local now age cleanup_result=0 resolved_dir candidate_list
 
   case "$dry_run" in
     true|false) ;;
@@ -631,6 +631,16 @@ cleanup_expired_recovery_kits() {
   fi
 
   now="$(date +%s)" || return 1
+  candidate_list="$(mktemp "${TMPDIR:-/tmp}/vw-recovery-candidates.XXXXXXXXXX")" || {
+    log_error "recovery cleanup: failed to allocate a protected candidate list"
+    return 1
+  }
+  if ! find -P "$recovery_dir" -mindepth 1 -maxdepth 1 \
+      -name 'vaultwarden-recovery-kit-*.txt' -print0 >"$candidate_list" 2>/dev/null; then
+    log_error "recovery cleanup: failed to enumerate recovery-kit candidates"
+    rm -f -- "$candidate_list" 2>/dev/null || true
+    return 1
+  fi
   while IFS= read -r -d '' candidate; do
     parent="$(dirname -- "$candidate")"
     filename="$(basename -- "$candidate")"
@@ -721,9 +731,11 @@ cleanup_expired_recovery_kits() {
       log_error "recovery cleanup: failed to remove safe expired candidate: $candidate"
       cleanup_result=1
     fi
-  done < <(find -P "$recovery_dir" -mindepth 1 -maxdepth 1 \
-    -name 'vaultwarden-recovery-kit-*.txt' -print0 2>/dev/null)
-
+  done < "$candidate_list"
+  if ! rm -f -- "$candidate_list" 2>/dev/null; then
+    log_error "recovery cleanup: failed to remove the protected candidate list"
+    cleanup_result=1
+  fi
   return "$cleanup_result"
 }
 

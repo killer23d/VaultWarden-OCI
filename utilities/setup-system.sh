@@ -774,6 +774,26 @@ install_sops() {
     log_success "Installed SOPS: ${final_sops_ver}"
 }
 
+_resolve_7zip_command() {
+    local candidate
+    for candidate in 7zz 7z; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+_require_7zip_command() {
+    local archive_tool
+    if ! archive_tool="$(_resolve_7zip_command)"; then
+        log_error "Missing required 7-Zip command: expected 7zz (preferred) or 7z (compatibility fallback)."
+        log_info "Install hint: sudo apt-get install -y 7zip"
+        return 1
+    fi
+    log_debug "Resolved 7-Zip command: $archive_tool"
+    return 0
+}
 # Install the required system packages, Docker, and SOPS.
 # NOTE: CrowdSec is intentionally NOT installed here. It is an optional
 # post-install step that requires Cloudflare secrets to be injected first.
@@ -807,7 +827,7 @@ install_dependencies() {
         log_success "Universe repository enabled"
     fi
 
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "util-linux" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-bcrypt" "python3-yaml" "apache2-utils" "cron" "openssl" "tar" "zstd")
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "7zip" "git" "gpg" "coreutils" "util-linux" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "python3-bcrypt" "python3-yaml" "apache2-utils" "cron" "openssl" "tar" "zstd")
 
     log_info "Refreshing apt package index..."
     operation_package_run apt-get update -qq || return 1
@@ -823,6 +843,7 @@ install_dependencies() {
         [curl]=curl
         [wget]=wget
         [unzip]=unzip
+        [7zip]=7zz
         [git]=git
         [gpg]=gpg
         [coreutils]=sha256sum
@@ -844,7 +865,9 @@ install_dependencies() {
     local missing_packages=()
     for pkg in "${basic_packages[@]}"; do
         local cmd="${pkg_to_cmd[$pkg]:-}"
-        if [[ -n "$cmd" ]]; then
+        if [[ "$pkg" == "7zip" ]]; then
+            _resolve_7zip_command >/dev/null 2>&1 || missing_packages+=("$pkg")
+        elif [[ -n "$cmd" ]]; then
             ! command -v "$cmd" >/dev/null 2>&1 && missing_packages+=("$pkg")
         else
             ! dpkg -s "$pkg" >/dev/null 2>&1 && missing_packages+=("$pkg")
@@ -885,6 +908,7 @@ verify_dependencies() {
     fi
 
     require_commands "${required_commands[@]}" || return 1
+    _require_7zip_command || return 1
     if ! _validate_sops_contract; then
         log_error "Resolved sops command does not satisfy the required repository SOPS interface."
         return 1
