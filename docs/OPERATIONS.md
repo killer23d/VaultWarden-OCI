@@ -534,7 +534,7 @@ safe. Single-message deletion, retry-all, and snapshot purge require exact
 confirmation in `utilities/email-queue.sh`. `email-queue-purge` holds eligible
 snapshot messages, verifies arrival time, size, envelope sender, and recipients,
 and deletes only identities that still match. Reused IDs and changed identities
-are skipped and make the command return nonzero. Newly held survivors are
+are skipped and ensure the command return nonzero. Newly held survivors are
 released after partial failure, while messages held before the operation remain
 held. The old `email-queue-clear` target remains a deprecated compatibility alias
 for the same identity-verified snapshot behavior.
