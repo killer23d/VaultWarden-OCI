@@ -137,8 +137,17 @@ _new_private_tempdir() {
     _NEW_TEMP_DIR="$dir"
 }
 
+_run_without_mutation_lock_fd() (
+    # Docker/Compose descendants must never extend the lifetime of the
+    # host mutation lock. The parent retains its descriptor throughout.
+    if [[ -n "${_MUTATION_LOCK_FD:-}" ]]; then
+        exec {_MUTATION_LOCK_FD}>&-
+    fi
+    exec "$@"
+)
+
 _require_postfix_service() {
-    if ! docker compose ps --services --filter status=running 2>/dev/null \
+    if ! _run_without_mutation_lock_fd docker compose ps --services --filter status=running 2>/dev/null \
         | grep -Fxq postfix; then
         log_error "The Compose service 'postfix' is not running."
         log_hint "Start the stack first: sudo make up"
@@ -201,15 +210,8 @@ _read_long_queue_ids() {
     _LONG_QUEUE_IDS_VALUE=""
     _new_private_tempdir || return 1
     output_file="$_NEW_TEMP_DIR/enable-long-queue-ids"
-    if ! (
-        # Docker or Compose descendants must not inherit the host mutation lock.
-        # A long-lived child must not keep this utility's lock alive.
-        if [[ -n "${_MUTATION_LOCK_FD:-}" ]]; then
-            exec {_MUTATION_LOCK_FD}>&-
-        fi
-        docker compose exec -T --user root postfix \
-            postconf -h enable_long_queue_ids
-    ) >"$output_file" 2>/dev/null; then
+    if ! _run_without_mutation_lock_fd docker compose exec -T --user root postfix \
+        postconf -h enable_long_queue_ids >"$output_file" 2>/dev/null; then
         return 1
     fi
     mapfile -t lines <"$output_file"
@@ -254,13 +256,13 @@ _warn_long_queue_ids_for_retry() {
 }
 
 _show_queue() {
-    docker compose exec -T postfix postqueue -p
+    _run_without_mutation_lock_fd docker compose exec -T postfix postqueue -p
 }
 
 _capture_inventory() {
     local raw_file="$1" tsv_file="$2"
     _require_machine_inventory || return 1
-    if ! docker compose exec -T postfix postqueue -j >"$raw_file"; then
+    if ! _run_without_mutation_lock_fd docker compose exec -T postfix postqueue -j >"$raw_file"; then
         log_error "Unable to read the machine-readable Postfix queue inventory."
         return 1
     fi
@@ -569,12 +571,12 @@ _inspect() {
     _print_metadata "$queue_id" "$tsv" || true
     if [[ "$include_body" == true ]]; then
         log_warn "Message bodies may contain credentials, reset links, or other sensitive content."
-        if ! docker compose exec -T --user root postfix postcat -q "$queue_id"; then
+        if ! _run_without_mutation_lock_fd docker compose exec -T --user root postfix postcat -q "$queue_id"; then
             log_error "Queue ID disappeared or postcat could not inspect it: $queue_id"
             return 1
         fi
     else
-        if ! docker compose exec -T --user root postfix postcat -q -e -h "$queue_id"; then
+        if ! _run_without_mutation_lock_fd docker compose exec -T --user root postfix postcat -q -e -h "$queue_id"; then
             log_error "Queue ID disappeared or postcat could not inspect it: $queue_id"
             return 1
         fi
@@ -587,7 +589,7 @@ _retry_one() {
     _make_inventory tsv || return 1
     _validate_queue_id "$queue_id" "$tsv" || return $?
     _print_metadata "$queue_id" "$tsv" || true
-    if docker compose exec -T --user root postfix postqueue -i "$queue_id"; then
+    if _run_without_mutation_lock_fd docker compose exec -T --user root postfix postqueue -i "$queue_id"; then
         log_info "Immediate delivery was scheduled for queue ID $queue_id."
         return 0
     fi
@@ -606,7 +608,7 @@ _retry_all() {
     fi
     log_warn "Repeatedly flushing undeliverable mail can increase relay and delivery load."
     _confirm_exact "RETRY ALL" "retry-all" "Retry-all" || return 1
-    if ! docker compose exec -T --user root postfix postqueue -f; then
+    if ! _run_without_mutation_lock_fd docker compose exec -T --user root postfix postqueue -f; then
         log_error "Postfix queue flush failed."
         return 1
     fi
@@ -753,9 +755,7 @@ _delete_one() {
     IFS=$'\t' read -r state current_queue <<<"$state_info"
 
     case "$state" in
-        absent|mismatch)
-            # The selected original no longer exists. Never release by queue ID in
-            # this state because a different message may now own that ID.
+        absent)
             _HOLD_ROLLBACK_ACTIVE=false
             if (( delete_rc == 0 )); then
                 log_info "Deleted the identity-verified queue message: $queue_id"
@@ -763,6 +763,13 @@ _delete_one() {
                 log_warn "The selected original became absent while deletion completed: $queue_id"
             fi
             return 0
+            ;;
+        mismatch)
+            # The original is gone and a replacement now owns the reused ID.
+            # Disable ID-based rollback before returning; never mutate replacement mail.
+            _HOLD_ROLLBACK_ACTIVE=false
+            log_error "The original identity-verified message is gone, but queue ID $queue_id now belongs to a different message. The replacement was not held, released, retried, or deleted."
+            return 1
             ;;
         match-held)
             if [[ "$before_queue" != "hold" ]]; then
@@ -793,19 +800,19 @@ _delete_one() {
 _hold_ids() {
     local ids_file="$1"
     [[ -s "$ids_file" ]] || return 0
-    docker compose exec -T --user root postfix postsuper -h - <"$ids_file"
+    _run_without_mutation_lock_fd docker compose exec -T --user root postfix postsuper -h - <"$ids_file"
 }
 
 _release_ids() {
     local ids_file="$1"
     [[ -s "$ids_file" ]] || return 0
-    docker compose exec -T --user root postfix postsuper -H - <"$ids_file"
+    _run_without_mutation_lock_fd docker compose exec -T --user root postfix postsuper -H - <"$ids_file"
 }
 
 _delete_ids() {
     local ids_file="$1"
     [[ -s "$ids_file" ]] || return 0
-    docker compose exec -T --user root postfix postsuper -d - <"$ids_file"
+    _run_without_mutation_lock_fd docker compose exec -T --user root postfix postsuper -d - <"$ids_file"
 }
 
 _count_file_lines() {
@@ -1062,7 +1069,7 @@ _logs() {
             fi
         fi
     fi
-    if ! docker compose logs --no-color --tail "$tail_lines" postfix >"$log_file"; then
+    if ! _run_without_mutation_lock_fd docker compose logs --no-color --tail "$tail_lines" postfix >"$log_file"; then
         log_error "Unable to read Postfix logs."
         return 1
     fi

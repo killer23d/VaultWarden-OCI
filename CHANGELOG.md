@@ -24,6 +24,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Made effective `enable_long_queue_ids=yes` a fail-closed prerequisite for targeted deletion, snapshot purge, and deprecated clear; legitimate duplicate queue-list records are now normalized safely while conflicting identities block mutation.
 
 ### Changed
+- Prevented Docker/Compose children from inheriting the email-queue mutation lock, reported post-delete queue-ID reuse accurately, and aligned invalid email-diagnostic options with exit status 2.
 
 - Replaced deprecated Python `crypt` verification with the Ubuntu `python3-bcrypt` package, including normal setup installation and explicit dependency checks even with `--skip-deps`.
 - Recovery-kit export now accepts a 30-minute systemd transient cleanup timer before email, uses `at` only as an optional fallback, fails closed when scheduling is unavailable, and removes the local plaintext copy immediately after successful encrypted delivery.

@@ -9,6 +9,9 @@ ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 signal_pid=""
 lock_pid=""
+fd_session_pid=""
+fd_parent_pid=""
+fd_child_pid=""
 
 stop_test_process_group() {
     local pid="${1:-}" _
@@ -29,6 +32,13 @@ stop_test_process_group() {
 cleanup_test_processes() {
     stop_test_process_group "${signal_pid:-}"
     stop_test_process_group "${lock_pid:-}"
+    stop_test_process_group "${fd_session_pid:-}"
+    for pid in "${fd_parent_pid:-}" "${fd_child_pid:-}"; do
+        [[ -n "$pid" ]] || continue
+        kill -TERM "$pid" 2>/dev/null || true
+        kill -KILL "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    done
     rm -rf "$TMP"
 }
 trap cleanup_test_processes EXIT
@@ -178,7 +188,17 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
             exit 0
         fi
         if [[ "${1:-}" == postqueue && "${2:-}" == -f ]]; then
-            printf 'flushed\n'
+            if [[ -n "${VW_TEST_BLOCK_DOCKER_MARKER:-}" ]]; then
+                printf '%s
+' "$$" >"$VW_TEST_BLOCK_DOCKER_MARKER"
+                printf '%s
+' "$PPID" >"${VW_TEST_BLOCK_DOCKER_MARKER}.parent"
+                while [[ ! -e "${VW_TEST_BLOCK_DOCKER_RELEASE:-/nonexistent}" ]]; do
+                    sleep 0.05
+                done
+            fi
+            printf 'flushed
+'
             exit 0
         fi
         if [[ "${1:-}" == postsuper && "${2:-}" == -d && "${3:-}" != - ]]; then
@@ -215,12 +235,13 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
                 *) exit 97 ;;
             esac
             set +e
-            python3 - "$op" "$fail_id" "${VW_TEST_INVENTORY:?}" "${POSTSUPER_IDS[@]}" <<'PY_BATCH'
+            python3 - "$op" "$fail_id" "${VW_TEST_REUSE_ID_AFTER_DELETE:-}" \
+                "${VW_TEST_INVENTORY:?}" "${POSTSUPER_IDS[@]}" <<'PY_BATCH'
 import json, sys
 from pathlib import Path
 
-op, fail_id, path = sys.argv[1], sys.argv[2], Path(sys.argv[3])
-ids = [item for item in sys.argv[4:] if item]
+op, fail_id, reuse_after_delete, path = sys.argv[1], sys.argv[2], sys.argv[3], Path(sys.argv[4])
+ids = [item for item in sys.argv[5:] if item]
 fail_ids = {item for item in fail_id.split(",") if item}
 rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 for queue_id in ids:
@@ -228,6 +249,16 @@ for queue_id in ids:
         continue
     if op == "-d":
         rows[:] = [row for row in rows if row.get("queue_id") != queue_id]
+        if queue_id == reuse_after_delete:
+            rows.append({
+                "queue_id": queue_id,
+                "queue_name": "deferred",
+                "arrival_time": 1800000000,
+                "message_size": 999,
+                "sender": "replacement@example.test",
+                "recipients": [{"address": "replacement-recipient@example.test", "delay_reason": "new message"}],
+                "test_marker": "replacement-after-delete",
+            })
     else:
         for row in rows:
             if row.get("queue_id") == queue_id:
@@ -272,6 +303,7 @@ run_queue() {
         "VW_TEST_FAIL_RETRY_ID=${VW_TEST_FAIL_RETRY_ID:-}" \
         "VW_TEST_REUSE_ID_ON_HOLD=${VW_TEST_REUSE_ID_ON_HOLD:-}" \
         "VW_TEST_REUSE_SAME_ID_ON_HOLD=${VW_TEST_REUSE_SAME_ID_ON_HOLD:-}" \
+        "VW_TEST_REUSE_ID_AFTER_DELETE=${VW_TEST_REUSE_ID_AFTER_DELETE:-}" \
         "VW_TEST_REMOVE_ID_ON_HOLD=${VW_TEST_REMOVE_ID_ON_HOLD:-}" \
         "VW_TEST_ADD_NEW_ON_HOLD=${VW_TEST_ADD_NEW_ON_HOLD:-false}" \
         "VW_TEST_FAIL_HOLD_ID=${VW_TEST_FAIL_HOLD_ID:-}" \
@@ -280,6 +312,8 @@ run_queue() {
         "VW_TEST_POSTCONF_FAIL=${VW_TEST_POSTCONF_FAIL:-false}" \
         "VW_TEST_BLOCK_AFTER_HOLD_MARKER=${VW_TEST_BLOCK_AFTER_HOLD_MARKER:-}" \
         "VW_TEST_BLOCK_AFTER_HOLD_RELEASE=${VW_TEST_BLOCK_AFTER_HOLD_RELEASE:-}" \
+        "VW_TEST_BLOCK_DOCKER_MARKER=${VW_TEST_BLOCK_DOCKER_MARKER:-}" \
+        "VW_TEST_BLOCK_DOCKER_RELEASE=${VW_TEST_BLOCK_DOCKER_RELEASE:-}" \
         "VW_TEST_LOG_OUTPUT=${VW_TEST_LOG_OUTPUT:-Jul 28 postfix ABC[123]: queued}" \
         "VW_TEST_INVENTORY_CALLS=$INVENTORY_CALLS" \
         "VW_EMAIL_QUEUE_LOCK_FILE=$LOCK_FILE" \
@@ -311,10 +345,12 @@ run_hardening_tests() {
         VW_TEST_FAIL_DELETE_ID VW_TEST_FAIL_DELETE_IDS \
         VW_TEST_ALREADY_ABSENT_DELETE_ID VW_TEST_FAIL_RETRY_ID \
         VW_TEST_REUSE_ID_ON_HOLD VW_TEST_REUSE_SAME_ID_ON_HOLD \
+        VW_TEST_REUSE_ID_AFTER_DELETE \
         VW_TEST_REMOVE_ID_ON_HOLD VW_TEST_ADD_NEW_ON_HOLD \
         VW_TEST_FAIL_HOLD_ID VW_TEST_FAIL_RELEASE_ID \
         VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL \
         VW_TEST_BLOCK_AFTER_HOLD_MARKER VW_TEST_BLOCK_AFTER_HOLD_RELEASE \
+        VW_TEST_BLOCK_DOCKER_MARKER VW_TEST_BLOCK_DOCKER_RELEASE \
         VW_TEST_LOG_OUTPUT VW_EMAIL_QUEUE_CONFIRM VW_EMAIL_QUEUE_CLEAR_CONFIRMED
     rm -f "${INVENTORY}.hold-event"
     : >"$CALLS"
@@ -627,6 +663,108 @@ export VW_EMAIL_QUEUE_CONFIRM
 run_queue retry --all </dev/null >"$TMP/retry-all.out"
 grep -Fq '<postqueue> <-f>' "$CALLS" || fail 'retry-all did not flush exactly once'
 pass 'retry-all exact confirmation'
+fd_marker="$TMP/long-lived-docker.pid"
+fd_release="$TMP/long-lived-docker.release"
+fd_queue_tmp="$TMP/fd-inheritance-queue-tmp"
+rm -f "$fd_marker" "${fd_marker}.parent" "$fd_release"
+rm -rf "$fd_queue_tmp"
+mkdir -p "$fd_queue_tmp"
+base_inventory
+: >"$CALLS"
+(
+    exec setsid env \
+        "PATH=$BIN:$PATH" \
+        "VW_TEST_DOCKER_CALLS=$CALLS" \
+        "VW_TEST_INVENTORY=$INVENTORY" \
+        "VW_TEST_POSTFIX_RUNNING=true" \
+        "VW_TEST_MALFORMED_INVENTORY=false" \
+        "VW_TEST_FAIL_DELETE_ID=" \
+        "VW_TEST_FAIL_DELETE_IDS=" \
+        "VW_TEST_ALREADY_ABSENT_DELETE_ID=" \
+        "VW_TEST_FAIL_RETRY_ID=" \
+        "VW_TEST_REUSE_ID_ON_HOLD=" \
+        "VW_TEST_REUSE_SAME_ID_ON_HOLD=" \
+        "VW_TEST_REUSE_ID_AFTER_DELETE=" \
+        "VW_TEST_REMOVE_ID_ON_HOLD=" \
+        "VW_TEST_ADD_NEW_ON_HOLD=false" \
+        "VW_TEST_FAIL_HOLD_ID=" \
+        "VW_TEST_FAIL_RELEASE_ID=" \
+        "VW_TEST_LONG_QUEUE_IDS=yes" \
+        "VW_TEST_POSTCONF_FAIL=false" \
+        "VW_TEST_BLOCK_AFTER_HOLD_MARKER=" \
+        "VW_TEST_BLOCK_AFTER_HOLD_RELEASE=" \
+        "VW_TEST_BLOCK_DOCKER_MARKER=$fd_marker" \
+        "VW_TEST_BLOCK_DOCKER_RELEASE=$fd_release" \
+        "VW_TEST_LOG_OUTPUT=Jul 28 postfix test" \
+        "VW_TEST_INVENTORY_CALLS=$INVENTORY_CALLS" \
+        "VW_EMAIL_QUEUE_LOCK_FILE=$LOCK_FILE" \
+        "TMPDIR=$fd_queue_tmp" \
+        "VW_EMAIL_QUEUE_CONFIRM=retry-all" \
+        "VW_EMAIL_QUEUE_CLEAR_CONFIRMED=" \
+        "VW_TEST_MODE=1" \
+        "VAULTWARDEN_TEST_ALLOW_NON_ROOT=1" \
+        bash "$FIXTURE/utilities/email-queue.sh" retry --all
+) >"$TMP/fd-inheritance.out" 2>&1 &
+fd_session_pid=$!
+fd_ready=false
+for _ in $(seq 1 300); do
+    if [[ -s "$fd_marker" && -s "${fd_marker}.parent" ]]; then
+        fd_ready=true
+        break
+    fi
+    kill -0 "$fd_session_pid" 2>/dev/null || break
+    sleep 0.01
+done
+[[ "$fd_ready" == true ]] || fail 'FD regression did not reach the long-lived Docker child'
+fd_child_pid=$(<"$fd_marker")
+fd_parent_pid=$(<"${fd_marker}.parent")
+[[ "$fd_child_pid" =~ ^[0-9]+$ && "$fd_parent_pid" =~ ^[0-9]+$ ]] \
+    || fail 'FD regression recorded invalid process IDs'
+kill -0 "$fd_parent_pid" 2>/dev/null || fail 'email-queue parent exited before lock assertion'
+kill -0 "$fd_child_pid" 2>/dev/null || fail 'mocked Docker child exited before lock assertion'
+exec {lock_probe_fd}>"$LOCK_FILE"
+if flock -n "$lock_probe_fd"; then
+    flock -u "$lock_probe_fd" || true
+    exec {lock_probe_fd}>&-
+    fail 'email-queue parent did not retain the mutation lock while alive'
+fi
+exec {lock_probe_fd}>&-
+kill -KILL "$fd_parent_pid"
+if [[ "$fd_parent_pid" == "$fd_session_pid" ]]; then
+    wait "$fd_session_pid" 2>/dev/null || true
+    fd_session_pid=""
+else
+    for _ in $(seq 1 200); do
+        kill -0 "$fd_parent_pid" 2>/dev/null || break
+        sleep 0.01
+    done
+fi
+kill -0 "$fd_parent_pid" 2>/dev/null && fail 'email-queue parent did not terminate independently'
+kill -0 "$fd_child_pid" 2>/dev/null || fail 'mocked Docker child did not survive parent termination'
+exec {lock_probe_fd}>"$LOCK_FILE"
+flock -n "$lock_probe_fd" \
+    || fail 'mocked Docker child inherited and retained the mutation lock descriptor'
+flock -u "$lock_probe_fd"
+exec {lock_probe_fd}>&-
+: >"$fd_release"
+for _ in $(seq 1 200); do
+    kill -0 "$fd_child_pid" 2>/dev/null || break
+    sleep 0.01
+done
+if kill -0 "$fd_child_pid" 2>/dev/null; then
+    kill -TERM "$fd_child_pid" 2>/dev/null || true
+    fail 'mocked Docker child did not exit after release'
+fi
+if [[ -n "$fd_session_pid" ]]; then
+    wait "$fd_session_pid" 2>/dev/null || true
+fi
+rm -rf "$fd_queue_tmp"
+[[ ! -e "$fd_queue_tmp" ]] \
+    || fail 'FD regression did not clean its forced-crash temporary root'
+fd_session_pid=""
+fd_parent_pid=""
+fd_child_pid=""
+pass 'Docker children do not inherit the parent mutation lock descriptor'
 
 base_inventory
 VW_EMAIL_QUEUE_CONFIRM=delete:WRONG
@@ -648,6 +786,36 @@ grep -Fq 'stdin <AbC-123>' "$CALLS" || fail 'targeted delete did not pass the ex
 grep -Fq '<postconf> <-h> <enable_long_queue_ids>' "$CALLS" \
     || fail 'targeted delete did not verify effective long queue IDs'
 pass 'targeted deletion holds, identity-verifies, and deletes only the selected message'
+rm -f "${INVENTORY}.hold-event"
+base_inventory
+: >"$CALLS"
+VW_TEST_REUSE_ID_AFTER_DELETE=AbC-123
+export VW_TEST_REUSE_ID_AFTER_DELETE
+if run_queue delete AbC-123 </dev/null >"$TMP/delete-post-reuse.out" 2>&1; then
+    fail 'post-delete queue-ID reuse was reported as success'
+fi
+grep -Fq '"queue_id":"AbC-123"' "$INVENTORY" \
+    || fail 'post-delete replacement did not remain queued'
+grep -Fq '"queue_name":"deferred"' "$INVENTORY" \
+    || fail 'post-delete replacement was held or released incorrectly'
+grep -Fq 'replacement@example.test' "$INVENTORY" \
+    || fail 'post-delete replacement identity was not preserved'
+[[ "$(grep -Fc '<postsuper> <-h> <->' "$CALLS" || true)" -eq 1 ]] \
+    || fail 'post-delete reuse path performed an unexpected hold operation'
+[[ "$(grep -Fc '<postsuper> <-d> <->' "$CALLS" || true)" -eq 1 ]] \
+    || fail 'post-delete reuse path performed an unexpected delete operation'
+! grep -Fq '<postsuper> <-H> <->' "$CALLS" \
+    || fail 'post-delete reuse path released the replacement'
+! grep -Fq '<postqueue> <-i>' "$CALLS" \
+    || fail 'post-delete reuse path retried the replacement'
+! grep -Fq '<postqueue> <-f>' "$CALLS" \
+    || fail 'post-delete reuse path flushed the queue'
+grep -Eqi 'queue ID.*different message|queue-ID reuse|identity mismatch' "$TMP/delete-post-reuse.out" \
+    || fail 'post-delete queue-ID reuse was not explained clearly'
+! grep -Fq 'Deleted the identity-verified queue message' "$TMP/delete-post-reuse.out" \
+    || fail 'post-delete queue-ID reuse printed the normal success message'
+unset VW_TEST_REUSE_ID_AFTER_DELETE
+pass 'post-delete queue-ID reuse preserves the replacement and returns failure'
 
 rm -f "${INVENTORY}.hold-event"
 base_inventory

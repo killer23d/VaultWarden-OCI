@@ -140,6 +140,62 @@ dry_run_output="$(bash "$TMP/run-email-dry-run.bash")"
 [[ "$dry_run_output" != *": passed"* ]] \
     || fail "dry-run must not report actual transport delivery"
 
+cat >"$TMP/run-email-cli.bash" <<'HARNESS'
+#!/usr/bin/env bash
+set -euo pipefail
+TEST_RECIPIENT=""
+TEST_TRANSPORT="configured"
+VERBOSE=false
+DRY_RUN=false
+PROJECT_ROOT=/tmp
+log_error(){ :; }
+show_help(){ :; }
+print_project_version(){ :; }
+require_root(){ :; }
+HARNESS
+extract_function "$DIAGNOSTIC" _require_cli_value >>"$TMP/run-email-cli.bash"
+extract_function "$DIAGNOSTIC" _validate_transport >>"$TMP/run-email-cli.bash"
+sed -n '/^\[\[ "${1:-}" == "test-email" \]\] && shift$/,/^: "${VERBOSE}"$/p' \
+    "$DIAGNOSTIC" >>"$TMP/run-email-cli.bash"
+assert_cli_rc() {
+    local expected="$1" description="$2" rc=0
+    shift 2
+    set +e
+    bash "$TMP/run-email-cli.bash" "$@" >"$TMP/cli.out" 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" -eq "$expected" ]] \
+        || fail "$description returned $rc instead of $expected"
+}
+assert_cli_rc 2 'unknown option' --unknown
+assert_cli_rc 2 'missing option value' --recipient
+assert_cli_rc 2 'invalid transport value' --transport invalid
+assert_cli_rc 0 'valid diagnostic usage' --transport configured --dry-run
+
+extract_function "$DIAGNOSTIC" _run_transport_test >"$TMP/run-email-result.bash"
+cat >>"$TMP/run-email-result.bash" <<'HARNESS'
+DRY_RUN=false
+TEST_RECIPIENT=admin@example.com
+SEND_RC=0
+log_info(){ :; }
+log_success(){ :; }
+log_error(){ :; }
+_preflight_transport(){ return 0; }
+send_notification_email(){ return "$SEND_RC"; }
+send_email_via_transport(){ return "$SEND_RC"; }
+rc=0
+_run_transport_test configured || rc=$?
+printf 'SUCCESS_RC=%s\n' "$rc"
+SEND_RC=1
+rc=0
+_run_transport_test configured || rc=$?
+printf 'FAILURE_RC=%s\n' "$rc"
+HARNESS
+delivery_output="$(bash "$TMP/run-email-result.bash")"
+[[ "$delivery_output" == *"SUCCESS_RC=0"* ]] \
+    || fail 'successful mocked delivery did not return 0'
+[[ "$delivery_output" == *"FAILURE_RC=1"* ]] \
+    || fail 'failed mocked delivery did not return 1'
 printf 'Email diagnostic transport contracts passed.\n'
 )
 

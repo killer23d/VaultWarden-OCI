@@ -384,7 +384,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)   DRY_RUN=true;        shift   ;;
         --help|-h|help) show_help; exit 0 ;;
         --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
-        *) log_error "Unknown option for 'test-email': $1"; show_help; exit 1 ;;
+        *) log_error "Unknown option for 'test-email': $1"; show_help; exit 2 ;;
     esac
 done
 _validate_transport || exit $?

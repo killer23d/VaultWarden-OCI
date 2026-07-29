@@ -93,6 +93,7 @@ OPERATIONS_CASES=(
 DATA_PROTECTION_CASES=(
     tests/suites/data-protection/case-backup.bash
     tests/suites/data-protection/case-restore-recovery.bash
+    tests/suites/data-protection/case-restore-recovery-tail.bash
   tests/suites/data-protection/case-production-readiness-data-protection.bash
 )
 

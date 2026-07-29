@@ -221,6 +221,14 @@ Mail accepted shortly before a Postfix container recreation can be lost. This is
 a documented small-team tradeoff rather than a durable security-event queue; do
 not use email as the only alerting or incident-response signal.
 
+`CROWDSEC_EMAIL_EVENT_POLICY=all` sends the configured automatic CrowdSec event
+notifications. `CROWDSEC_EMAIL_EVENT_POLICY=none` disables those automatic event
+notifications without removing manual delivery tests or operational health
+checks. `none` is a reasonable small-team choice when routine messages for events
+that CrowdSec has already remediated are not useful. Health monitoring remains an
+operational check; it does not promise to identify every security event that may
+need operator action.
+
 ## Secret source
 
 The CrowdSec Workers credentials are SOPS keys in:
