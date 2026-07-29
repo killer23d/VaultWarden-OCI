@@ -168,14 +168,33 @@ The destructive whole-queue workflow is snapshot based:
 sudo make email-queue-purge
 ```
 
-The utility captures the exact current IDs into a private temporary snapshot,
-shows the captured count and summary, and requires `PURGE N`, where `N` is the
-captured count. It then deletes only those individually validated IDs. Messages
-that arrive after confirmation are not added to the deletion set. The command
-continues through already-delivered or failed items and reports deleted,
-already absent, failed, and newly remaining counts. Any genuine partial failure
-returns nonzero. Temporary snapshot files contain IDs and minimal metadata only
-and are removed on success, failure, cancellation, or interruption.
+The utility captures a normalized private snapshot containing each queue ID,
+arrival time, message size, envelope sender, and recipient addresses. It shows
+the captured count and summary and requires `PURGE N`, where `N` is that count.
+One exclusive host-side lock serializes mutating invocations of this utility.
+
+After confirmation, snapshot messages that were not already held are submitted
+to Postfix hold in one exact-ID batch. The utility then captures a fresh
+inventory and deletes only held records whose stable identity still matches the
+snapshot. A reused queue ID or changed identity is skipped and reported; a
+mismatched message caught by this operation's hold is released instead of being
+deleted. Messages that were already held before the purge remain held if they
+survive. Newly introduced holds are rolled back after a partial failure and by
+the interruption cleanup path when possible.
+
+A nonempty purge uses four complete `postqueue -j` inventories for the whole
+operation, rather than inventories inside the per-message loop, and processes
+snapshot records in O(N) work. Exact IDs are batched through Postfix stdin; the
+utility never uses `postsuper -d ALL`. The final summary distinguishes deleted
+snapshot messages, already-absent originals, identity mismatches or reused IDs,
+failed operations, and the current remaining count. Identity mismatches and
+destructive-operation failures return nonzero.
+
+Temporary files are created with restrictive permissions, contain queue
+metadata but never message bodies, and are removed on success, failure,
+cancellation, or interruption. Long, non-repeating Postfix queue IDs are enabled
+by default through `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes` and verified at runtime as
+defence in depth; identity matching remains mandatory.
 
 Noninteractive automation accepts only these dedicated values:
 
@@ -193,11 +212,15 @@ accepted only by this deprecated alias and should be migrated to
 `VW_EMAIL_QUEUE_CONFIRM=purge-snapshot`.
 
 Exit status is `0` for success (including an empty queue or no matching log
-lines), `1` for operational failure, cancellation, or partial destructive
-failure, and `2` for invalid usage. Queue state is inherently concurrent: a
-message may be delivered between inventory and action, and new mail may arrive
-during a purge. An empty queue does not by itself prove the mail path is
-healthy. Postfix acceptance or a requested retry also does not prove final
+lines), `1` for operational failure, cancellation, identity mismatch, or partial
+destructive failure, and `2` for invalid usage. Within the utility's host lock,
+Postfix hold prevents normal delivery from reopening the verified-ID window.
+Direct `postsuper`, `postqueue`, or other administrative actions that bypass the
+utility are outside that lock and must not run concurrently with snapshot purge.
+The implementation therefore makes a conditional safety guarantee: only a held
+record whose snapshotted identity still matches is eligible for deletion under
+that operating assumption. An empty queue does not by itself prove the mail path
+is healthy. Postfix acceptance or a requested retry also does not prove final
 recipient delivery; use the logs and the upstream provider's delivery evidence.
 ## Operational alert routing
 

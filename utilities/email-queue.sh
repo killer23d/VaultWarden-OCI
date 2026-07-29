@@ -15,6 +15,9 @@ source "${PROJECT_ROOT}/lib/docker.sh"
 
 _TEMP_PATHS=()
 _NEW_TEMP_DIR=""
+_MUTATION_LOCK_FD=""
+_PURGE_ROLLBACK_FILE=""
+_PURGE_ROLLBACK_ACTIVE=false
 
 show_help() {
     cat <<'EOF'
@@ -47,9 +50,9 @@ COMMANDS:
     logs [ID] [--tail N]    Show Postfix logs, optionally filtered by a fixed
                             queue-ID string. N defaults to 200 and is limited to
                             1..5000.
-    purge --snapshot        Capture the current queue IDs, confirm the captured
-                            count, and delete only those IDs. Mail arriving after
-                            the snapshot is never added to the deletion set.
+    purge --snapshot        Capture stable message identities, hold eligible
+                            snapshot messages, re-check identity, and delete only
+                            exact matches. Reused IDs are skipped and reported.
     clear                   Deprecated alias for purge --snapshot.
 
 AUTOMATION CONFIRMATION:
@@ -69,13 +72,33 @@ EXIT STATUS:
     2  Invalid usage.
 
 NOTES:
-    Queue state can change between inventory, inspection, and mutation. A retry
-    or Postfix acceptance does not prove final delivery to the recipient.
+    Mutating commands use one exclusive host-side lock. Snapshot purge compares
+    arrival time, size, envelope sender, and recipients before deletion. It uses
+    Postfix hold to stabilize matching messages and restores newly introduced
+    holds after partial failure. External administrators that bypass this utility
+    are outside the host lock and must not mutate the queue during a purge.
+    A retry or Postfix acceptance does not prove final recipient delivery.
 EOF
+}
+
+_best_effort_purge_rollback() {
+    local rollback_file="${_PURGE_ROLLBACK_FILE:-}"
+    if [[ "${_PURGE_ROLLBACK_ACTIVE:-false}" != true \
+        || -z "$rollback_file" || ! -s "$rollback_file" ]]; then
+        return 0
+    fi
+    # Clear the guard first so an EXIT-path failure cannot recurse. This is a
+    # best-effort safety net for signals and unexpected errors after holding.
+    _PURGE_ROLLBACK_ACTIVE=false
+    if declare -F _release_ids >/dev/null 2>&1; then
+        _release_ids "$rollback_file" \
+            || log_warn "Could not fully roll back Postfix holds during cleanup."
+    fi
 }
 
 _cleanup_temp() {
     local path
+    _best_effort_purge_rollback || true
     for path in "${_TEMP_PATHS[@]}"; do
         [[ -n "$path" ]] && rm -rf -- "$path"
     done
@@ -113,6 +136,65 @@ _require_machine_inventory() {
     fi
 }
 
+
+_resolve_mutation_lock_file() {
+    if [[ "${VW_TEST_MODE:-0}" == "1" \
+        && "${VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0}" == "1" \
+        && -n "${VW_EMAIL_QUEUE_LOCK_FILE:-}" ]]; then
+        printf '%s\n' "$VW_EMAIL_QUEUE_LOCK_FILE"
+    else
+        printf '%s\n' '/run/lock/vaultwarden-email-queue.lock'
+    fi
+}
+
+_acquire_mutation_lock() {
+    local lock_file lock_dir old_umask
+    if ! command -v flock >/dev/null 2>&1; then
+        log_error "Mutating queue operations require flock for exclusive host-side locking."
+        return 1
+    fi
+    lock_file=$(_resolve_mutation_lock_file)
+    lock_dir=${lock_file%/*}
+    if [[ "${VW_TEST_MODE:-0}" == "1" \
+        && "${VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0}" == "1" ]]; then
+        mkdir -p -- "$lock_dir" || return 1
+    elif [[ ! -d "$lock_dir" ]]; then
+        log_error "Queue mutation lock directory is unavailable: $lock_dir"
+        return 1
+    fi
+    old_umask=$(umask)
+    umask 077
+    if ! exec {_MUTATION_LOCK_FD}>"$lock_file"; then
+        umask "$old_umask"
+        log_error "Unable to open the queue mutation lock: $lock_file"
+        return 1
+    fi
+    umask "$old_umask"
+    if ! flock -n "$_MUTATION_LOCK_FD"; then
+        log_error "Another Postfix queue mutation is already running."
+        log_hint "Wait for it to finish, then retry. Lock: $lock_file"
+        return 1
+    fi
+}
+
+_verify_long_queue_ids() {
+    local value
+    if ! value=$(docker compose exec -T --user root postfix \
+        postconf -h enable_long_queue_ids 2>/dev/null); then
+        log_warn "Could not verify the effective Postfix enable_long_queue_ids value."
+        log_warn "Snapshot identity matching remains mandatory; inspect with: docker compose exec -T postfix postconf -h enable_long_queue_ids"
+        return 0
+    fi
+    value=${value//$'\r'/}
+    value=${value//$'\n'/}
+    if [[ "$value" == "yes" ]]; then
+        log_info "Postfix long queue IDs are enabled (defence in depth)."
+    else
+        log_warn "Postfix enable_long_queue_ids is '$value', not 'yes'."
+        log_warn "Stable identity verification still protects purge; recreate Postfix after applying the updated Compose configuration."
+    fi
+}
+
 _show_queue() {
     docker compose exec -T postfix postqueue -p
 }
@@ -125,6 +207,8 @@ _capture_inventory() {
         return 1
     fi
     if ! python3 - "$raw_file" "$tsv_file" <<'PY_INVENTORY'
+import base64
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -132,6 +216,7 @@ from pathlib import Path
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 rows = []
+seen_ids = set()
 try:
     for number, raw in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
         if not raw.strip():
@@ -144,28 +229,63 @@ try:
             raise ValueError(f"line {number} has no queue_id")
         if any(ch in queue_id for ch in "\t\r\n\0"):
             raise ValueError(f"line {number} has an unsupported queue_id separator")
+        if queue_id in seen_ids:
+            raise ValueError(f"line {number} repeats queue_id {queue_id!r}")
+        seen_ids.add(queue_id)
+
         queue_name = item.get("queue_name") or "unknown"
-        arrival = item.get("arrival_time")
-        size = item.get("message_size")
-        sender = item.get("sender") or ""
+        sender = item.get("sender")
+        if not isinstance(queue_name, str) or not isinstance(sender, str):
+            raise ValueError(f"line {number} has invalid queue_name or sender")
         try:
-            arrival = int(arrival) if arrival is not None else 0
-            size = int(size) if size is not None else 0
+            arrival = int(item.get("arrival_time"))
+            size = int(item.get("message_size"))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"line {number} has invalid numeric metadata") from exc
-        reasons = []
-        recipients = item.get("recipients") or []
+        if arrival < 0 or size < 0:
+            raise ValueError(f"line {number} has negative numeric metadata")
+
+        recipients = item.get("recipients")
         if not isinstance(recipients, list):
             raise ValueError(f"line {number} recipients is not a list")
+        addresses = []
+        reasons = []
         for recipient in recipients:
             if not isinstance(recipient, dict):
-                continue
+                raise ValueError(f"line {number} has a non-object recipient")
+            address = recipient.get("address")
+            if not isinstance(address, str):
+                raise ValueError(f"line {number} recipient has no string address")
+            addresses.append(address)
             reason = recipient.get("delay_reason")
             if isinstance(reason, str) and reason.strip():
                 reasons.append(" ".join(reason.split()))
+
+        identity = {
+            "arrival_time": arrival,
+            "message_size": size,
+            "sender": sender,
+            "recipients": sorted(addresses),
+        }
+        canonical = json.dumps(
+            identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        digest = hashlib.sha256(canonical).hexdigest()
+        encoded = base64.urlsafe_b64encode(canonical).decode("ascii")
+
         def clean(value):
             return " ".join(str(value).replace("\t", " ").splitlines())
-        rows.append((queue_id, clean(queue_name), arrival, size, clean(sender), " || ".join(reasons)))
+
+        rows.append((
+            queue_id,
+            clean(queue_name),
+            arrival,
+            size,
+            clean(sender),
+            digest,
+            encoded,
+            " || ".join(reasons),
+        ))
 except Exception as exc:
     print(f"invalid postqueue -j inventory: {exc}", file=sys.stderr)
     raise SystemExit(1)
@@ -214,7 +334,7 @@ for line in path.read_text(encoding="utf-8").splitlines():
     fields = line.split("\t")
     if fields and fields[0] == wanted:
         queue, arrival, size, sender = fields[1], int(fields[2]), int(fields[3]), fields[4]
-        reasons = fields[5].split(" || ") if len(fields) > 5 and fields[5] else []
+        reasons = fields[7].split(" || ") if len(fields) > 7 and fields[7] else []
         when = dt.datetime.fromtimestamp(arrival, dt.timezone.utc).isoformat() if arrival else "unknown"
         print(f"Queue ID: {wanted}")
         print(f"Queue: {queue}")
@@ -248,14 +368,14 @@ for raw in path.read_text(encoding="utf-8").splitlines():
     if not raw:
         continue
     fields = raw.split("\t")
-    if len(fields) < 6:
+    if len(fields) < 8:
         raise SystemExit("invalid normalized inventory")
     rows.append({
         "id": fields[0],
         "queue": fields[1],
         "arrival": int(fields[2]),
         "size": int(fields[3]),
-        "reason": fields[5],
+        "reason": fields[7],
     })
 count = len(rows)
 total_bytes = sum(row["size"] for row in rows)
@@ -432,22 +552,195 @@ _delete_one() {
     log_info "Deleted queue ID $queue_id."
 }
 
-_purge_snapshot() {
-    local legacy_clear="${1:-false}" tsv count expected_token queue_id
-    local snapshot_dir snapshot_ids before_tsv after_tsv remaining
-    local deleted=0 absent=0 failed=0
+_hold_ids() {
+    local ids_file="$1"
+    [[ -s "$ids_file" ]] || return 0
+    docker compose exec -T --user root postfix postsuper -h - <"$ids_file"
+}
 
-    _make_inventory tsv || return 1
-    count=$(_render_summary quiet "$tsv") || return 1
-    _render_summary text "$tsv"
+_release_ids() {
+    local ids_file="$1"
+    [[ -s "$ids_file" ]] || return 0
+    docker compose exec -T --user root postfix postsuper -H - <"$ids_file"
+}
+
+_delete_ids() {
+    local ids_file="$1"
+    [[ -s "$ids_file" ]] || return 0
+    docker compose exec -T --user root postfix postsuper -d - <"$ids_file"
+}
+
+_count_file_lines() {
+    local file="$1"
+    awk 'END { print NR + 0 }' "$file"
+}
+
+_prepare_snapshot_lists() {
+    local snapshot_tsv="$1" to_hold_file="$2" preheld_file="$3"
+    python3 - "$snapshot_tsv" "$to_hold_file" "$preheld_file" <<'PY_PREPARE'
+import sys
+from pathlib import Path
+
+snapshot, to_hold, preheld = map(Path, sys.argv[1:])
+hold_ids = []
+preheld_ids = []
+for raw in snapshot.read_text(encoding="utf-8").splitlines():
+    if not raw:
+        continue
+    fields = raw.split("\t")
+    if len(fields) < 8:
+        raise SystemExit("invalid normalized snapshot")
+    (preheld_ids if fields[1] == "hold" else hold_ids).append(fields[0])
+to_hold.write_text("".join(f"{item}\n" for item in hold_ids), encoding="utf-8")
+preheld.write_text("".join(f"{item}\n" for item in preheld_ids), encoding="utf-8")
+PY_PREPARE
+}
+
+_classify_after_hold() {
+    local snapshot_tsv="$1" current_tsv="$2" output_dir="$3"
+    python3 - "$snapshot_tsv" "$current_tsv" "$output_dir" <<'PY_AFTER_HOLD'
+import sys
+from pathlib import Path
+
+snapshot_path, current_path, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+
+def load(path):
+    result = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if not raw:
+            continue
+        fields = raw.split("\t")
+        if len(fields) < 8:
+            raise SystemExit("invalid normalized inventory")
+        result[fields[0]] = fields
+    return result
+
+snapshot = load(snapshot_path)
+current = load(current_path)
+files = {name: [] for name in (
+    "eligible", "absent", "mismatch", "hold_failed", "release_mismatch",
+    "newly_held"
+)}
+for queue_id, snap in snapshot.items():
+    now = current.get(queue_id)
+    if now is None:
+        files["absent"].append(queue_id)
+    elif now[5] != snap[5]:
+        files["mismatch"].append(queue_id)
+        if snap[1] != "hold" and now[1] == "hold":
+            files["release_mismatch"].append(queue_id)
+    elif now[1] == "hold":
+        files["eligible"].append(queue_id)
+        if snap[1] != "hold":
+            files["newly_held"].append(queue_id)
+    else:
+        files["hold_failed"].append(queue_id)
+for name, values in files.items():
+    (out / f"{name}.ids").write_text(
+        "".join(f"{item}\n" for item in values), encoding="utf-8"
+    )
+PY_AFTER_HOLD
+}
+
+_classify_after_delete() {
+    local snapshot_tsv="$1" eligible_file="$2" current_tsv="$3" output_dir="$4"
+    python3 - "$snapshot_tsv" "$eligible_file" "$current_tsv" "$output_dir" <<'PY_AFTER_DELETE'
+import sys
+from pathlib import Path
+
+snapshot_path, eligible_path, current_path, out = map(Path, sys.argv[1:])
+
+def load(path):
+    result = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if not raw:
+            continue
+        fields = raw.split("\t")
+        if len(fields) < 8:
+            raise SystemExit("invalid normalized inventory")
+        result[fields[0]] = fields
+    return result
+
+snapshot = load(snapshot_path)
+current = load(current_path)
+eligible = [line for line in eligible_path.read_text(encoding="utf-8").splitlines() if line]
+deleted = []
+delete_failed = []
+rollback = set()
+for queue_id in eligible:
+    snap = snapshot[queue_id]
+    now = current.get(queue_id)
+    if now is None or now[5] != snap[5]:
+        deleted.append(queue_id)
+    else:
+        delete_failed.append(queue_id)
+        if snap[1] != "hold" and now[1] == "hold":
+            rollback.add(queue_id)
+# Also restore a mismatched replacement that our initial hold may have caught.
+for queue_id, snap in snapshot.items():
+    now = current.get(queue_id)
+    if now is not None and now[5] != snap[5] and snap[1] != "hold" and now[1] == "hold":
+        rollback.add(queue_id)
+(out / "deleted.ids").write_text("".join(f"{item}\n" for item in deleted), encoding="utf-8")
+(out / "delete_failed.ids").write_text("".join(f"{item}\n" for item in delete_failed), encoding="utf-8")
+(out / "rollback.ids").write_text("".join(f"{item}\n" for item in sorted(rollback)), encoding="utf-8")
+PY_AFTER_DELETE
+}
+
+_count_held_ids() {
+    local ids_file="$1" current_tsv="$2"
+    python3 - "$ids_file" "$current_tsv" <<'PY_COUNT_HELD'
+import sys
+from pathlib import Path
+
+ids_path, current_path = map(Path, sys.argv[1:])
+wanted = set(ids_path.read_text(encoding="utf-8").splitlines())
+held = 0
+for raw in current_path.read_text(encoding="utf-8").splitlines():
+    if not raw:
+        continue
+    fields = raw.split("\t")
+    if fields[0] in wanted and fields[1] == "hold":
+        held += 1
+print(held)
+PY_COUNT_HELD
+}
+
+_purge_snapshot() {
+    local legacy_clear="${1:-false}" purge_dir snapshot_raw snapshot_tsv
+    local after_hold_raw after_hold_tsv after_delete_raw after_delete_tsv
+    local final_raw final_tsv to_hold preheld eligible absent_ids mismatch_ids
+    local hold_failed_ids release_mismatch newly_held rollback_pending rollback_ids
+    local count to_hold_count preheld_count
+    local deleted absent mismatches hold_failed delete_failed restore_failed failed remaining
+    local expected_token
+
+    _new_private_tempdir || return 1
+    purge_dir="$_NEW_TEMP_DIR"
+    snapshot_raw="$purge_dir/snapshot.ndjson"
+    snapshot_tsv="$purge_dir/snapshot.tsv"
+    after_hold_raw="$purge_dir/after-hold.ndjson"
+    after_hold_tsv="$purge_dir/after-hold.tsv"
+    after_delete_raw="$purge_dir/after-delete.ndjson"
+    after_delete_tsv="$purge_dir/after-delete.tsv"
+    final_raw="$purge_dir/final.ndjson"
+    final_tsv="$purge_dir/final.tsv"
+    to_hold="$purge_dir/to-hold.ids"
+    preheld="$purge_dir/preheld.ids"
+
+    _verify_long_queue_ids
+    _capture_inventory "$snapshot_raw" "$snapshot_tsv" || return 1
+    count=$(_render_summary quiet "$snapshot_tsv") || return 1
+    _render_summary text "$snapshot_tsv"
     if [[ "$count" == 0 ]]; then
         return 0
     fi
-
-    _new_private_tempdir || return 1
-    snapshot_dir="$_NEW_TEMP_DIR"
-    snapshot_ids="$snapshot_dir/queue-ids"
-    cut -f1 -- "$tsv" >"$snapshot_ids"
+    _prepare_snapshot_lists "$snapshot_tsv" "$to_hold" "$preheld" || return 1
+    to_hold_count=$(_count_file_lines "$to_hold")
+    preheld_count=$(_count_file_lines "$preheld")
+    printf 'Snapshot messages: %d\nWill place on hold before identity verification: %d\nAlready held: %d\n' \
+        "$count" "$to_hold_count" "$preheld_count"
+    printf '%s\n' 'Only messages whose arrival time, size, sender, and recipients still match will be deleted.'
 
     expected_token="PURGE $count"
     if [[ "$legacy_clear" == true && "${VW_EMAIL_QUEUE_CLEAR_CONFIRMED:-}" == "1" ]]; then
@@ -456,35 +749,63 @@ _purge_snapshot() {
         _confirm_exact "$expected_token" "purge-snapshot" "Snapshot purge" || return 1
     fi
 
-    while IFS= read -r queue_id; do
-        [[ -n "$queue_id" ]] || continue
-        _make_inventory before_tsv || { failed=$((failed + 1)); continue; }
-        if ! _queue_id_exists "$queue_id" "$before_tsv"; then
-            absent=$((absent + 1))
-            continue
-        fi
-        if docker compose exec -T --user root postfix postsuper -d "$queue_id"; then
-            _make_inventory after_tsv || { failed=$((failed + 1)); continue; }
-            if _queue_id_exists "$queue_id" "$after_tsv"; then
-                failed=$((failed + 1))
-            else
-                deleted=$((deleted + 1))
-            fi
-        else
-            _make_inventory after_tsv || { failed=$((failed + 1)); continue; }
-            if _queue_id_exists "$queue_id" "$after_tsv"; then
-                failed=$((failed + 1))
-            else
-                absent=$((absent + 1))
-            fi
-        fi
-    done <"$snapshot_ids"
+    # The host lock serializes this utility. Holding prevents normal Postfix delivery
+    # from removing a verified item between the post-hold inventory and batch delete.
+    # Administrators invoking Postfix directly are outside this lock and must not
+    # mutate the queue during the operation.
+    _PURGE_ROLLBACK_FILE="$to_hold"
+    _PURGE_ROLLBACK_ACTIVE=true
+    _hold_ids "$to_hold" || log_warn "One or more snapshot IDs could not be placed on hold; identity verification will decide eligibility."
+    if ! _capture_inventory "$after_hold_raw" "$after_hold_tsv"; then
+        log_error "Unable to verify held snapshot identities; attempting to release IDs held by this operation."
+        _release_ids "$to_hold" || true
+        return 1
+    fi
 
-    _make_inventory after_tsv || return 1
-    remaining=$(_render_summary quiet "$after_tsv") || return 1
-    printf 'Deleted: %d\nAlready absent: %d\nFailed: %d\nNewly remaining queue count: %d\n' \
-        "$deleted" "$absent" "$failed" "$remaining"
-    (( failed == 0 ))
+    _classify_after_hold "$snapshot_tsv" "$after_hold_tsv" "$purge_dir" || return 1
+    eligible="$purge_dir/eligible.ids"
+    absent_ids="$purge_dir/absent.ids"
+    mismatch_ids="$purge_dir/mismatch.ids"
+    hold_failed_ids="$purge_dir/hold_failed.ids"
+    release_mismatch="$purge_dir/release_mismatch.ids"
+    newly_held="$purge_dir/newly_held.ids"
+    rollback_pending="$purge_dir/rollback-pending.ids"
+    cat "$newly_held" "$release_mismatch" >"$rollback_pending"
+    _PURGE_ROLLBACK_FILE="$rollback_pending"
+
+    if [[ -s "$release_mismatch" ]]; then
+        _release_ids "$release_mismatch" || log_warn "A mismatched held queue ID could not be released immediately; cleanup will retry."
+    fi
+    _delete_ids "$eligible" || log_warn "One or more verified held messages could not be deleted; survivors will be released when appropriate."
+
+    if ! _capture_inventory "$after_delete_raw" "$after_delete_tsv"; then
+        log_error "Unable to verify deletion results; cleanup will release newly held snapshot survivors."
+        return 1
+    fi
+    _classify_after_delete "$snapshot_tsv" "$eligible" "$after_delete_tsv" "$purge_dir" || return 1
+    rollback_ids="$purge_dir/rollback.ids"
+    _PURGE_ROLLBACK_FILE="$rollback_ids"
+    if [[ -s "$rollback_ids" ]]; then
+        _release_ids "$rollback_ids" || log_warn "One or more newly introduced holds could not be rolled back."
+    fi
+
+    _capture_inventory "$final_raw" "$final_tsv" || return 1
+    _PURGE_ROLLBACK_ACTIVE=false
+    deleted=$(_count_file_lines "$purge_dir/deleted.ids")
+    absent=$(_count_file_lines "$absent_ids")
+    mismatches=$(_count_file_lines "$mismatch_ids")
+    hold_failed=$(_count_file_lines "$hold_failed_ids")
+    delete_failed=$(_count_file_lines "$purge_dir/delete_failed.ids")
+    restore_failed=$(_count_held_ids "$rollback_ids" "$final_tsv")
+    failed=$((hold_failed + delete_failed + restore_failed))
+    remaining=$(_render_summary quiet "$final_tsv") || return 1
+
+    printf 'Deleted snapshot messages: %d\n' "$deleted"
+    printf 'Already absent: %d\n' "$absent"
+    printf 'Identity mismatches or reused IDs skipped: %d\n' "$mismatches"
+    printf 'Failed operations: %d\n' "$failed"
+    printf 'Messages currently remaining in queue: %d\n' "$remaining"
+    (( mismatches == 0 && failed == 0 ))
 }
 
 _logs() {
@@ -633,6 +954,9 @@ main() {
     cd "$PROJECT_ROOT"
     require_docker || return 1
     _require_postfix_service || return 1
+    case "$command" in
+        retry|delete|purge|clear) _acquire_mutation_lock || return 1 ;;
+    esac
 
     case "$command" in
         status) _show_queue ;;

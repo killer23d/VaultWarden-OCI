@@ -531,10 +531,13 @@ sudo make email-queue-logs QUEUE_ID=AbC-123 EMAIL_QUEUE_TAIL=500
 
 Use `EMAIL_QUEUE_BODY=true` only when message-body disclosure is necessary and
 safe. Single-message deletion, retry-all, and snapshot purge require exact
-confirmation in `utilities/email-queue.sh`. `email-queue-purge` deletes only the
-IDs captured before confirmation; mail arriving afterward is outside that
-snapshot. The old `email-queue-clear` target remains a deprecated compatibility
-alias for the same snapshot behavior.
+confirmation in `utilities/email-queue.sh`. `email-queue-purge` holds eligible
+snapshot messages, verifies arrival time, size, envelope sender, and recipients,
+and deletes only identities that still match. Reused IDs and changed identities
+are skipped and make the command return nonzero. Newly held survivors are
+released after partial failure, while messages held before the operation remain
+held. The old `email-queue-clear` target remains a deprecated compatibility alias
+for the same identity-verified snapshot behavior.
 
 Normal production mail is Postfix-first. Vaultwarden talks to the internal Postfix sidecar; Postfix owns upstream SMTP TLS/authentication/queueing. A successful queue retry or an empty queue does not prove final recipient delivery.
 

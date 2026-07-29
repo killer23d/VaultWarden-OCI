@@ -97,12 +97,19 @@ The aggregate maintenance path understands exit `75` as an expected active-opera
 ### `utilities/email-queue.sh`
 
 Owns all Postfix queue inventory, inspection, retry, deletion, log filtering,
-and snapshot-purge behavior. The Makefile is the stable root-operated operator
-surface, while the dashboard calls only explicit Make targets through
-`run_sudo_cmd`. Machine-readable operations parse `postqueue -j` with Python;
-they do not scrape human `mailq` output or expose a generic Postfix pass-through.
-The deprecated `clear` interface uses the same ID-by-ID snapshot purge and never
-a live all-queue deletion.
+and identity-verified snapshot-purge behavior. The Makefile is the stable
+root-operated operator surface, while the dashboard calls only explicit Make
+targets through `run_sudo_cmd`. Machine-readable operations parse `postqueue -j`
+with Python; they do not scrape human `mailq` output or expose a generic Postfix
+pass-through.
+
+Mutating operations share an exclusive host-side `flock`. Snapshot purge stores
+stable identity metadata, batches exact IDs through Postfix hold/delete stdin,
+and uses a fixed four-inventory hold/verify/delete/restore workflow. Reused IDs
+are skipped, pre-existing holds are preserved, and newly introduced holds are
+rolled back after failures when possible. Direct external Postfix administration
+is outside this utility lock. The deprecated `clear` interface uses this same
+workflow and never a live all-queue deletion.
 
 ### `backup.sh`
 

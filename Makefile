@@ -298,11 +298,11 @@ email-queue-logs: ## Show Postfix logs (QUEUE_ID optional, EMAIL_QUEUE_TAIL defa
 		./utilities/email-queue.sh logs --tail "$${EMAIL_QUEUE_TAIL}"; \
 	fi
 
-email-queue-purge: ## Purge only a confirmed snapshot of current queue IDs
+email-queue-purge: ## Purge only identity-matched messages from a confirmed queue snapshot
 	$(call require-root)
 	@./utilities/email-queue.sh purge --snapshot
 
-email-queue-clear: ## Deprecated alias for snapshot queue purge
+email-queue-clear: ## Deprecated alias for identity-verified snapshot purge
 	$(call require-root)
 	@./utilities/email-queue.sh clear
 

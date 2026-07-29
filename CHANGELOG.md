@@ -19,6 +19,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Added machine-readable JSON output for backup listing and maintenance health status.
 - Added `utilities/crowdsec-email.sh` as a transaction-safe root-operated controller for enabling, disabling, inspecting, and testing the optional CrowdSec security-event email integration.
 - Added root-operated Postfix queue summary, inspection, targeted retry/deletion, bounded log filtering, and confirmation-gated snapshot purge workflows across the utility, Makefile, dashboard, tests, and operator documentation. The deprecated clear alias now uses the same snapshot-only deletion path.
+- Hardened snapshot purge against Postfix queue-ID reuse with stable identity verification, a host mutation lock, hold/release rollback, fixed-count queue inventories, exact-ID batching, and long queue IDs as defence in depth.
 
 ### Changed
 

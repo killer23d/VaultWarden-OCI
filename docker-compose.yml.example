@@ -322,6 +322,7 @@ services:
       - RELAYHOST_USERNAME=${SMTP_USERNAME}
       - RELAYHOST_PASSWORD_FILE=/run/secrets/smtp_password
       - POSTFIX_myhostname=${POSTFIX_MYHOSTNAME:-postfix}
+      - POSTFIX_enable_long_queue_ids=${POSTFIX_ENABLE_LONG_QUEUE_IDS:-yes}
       - POSTFIX_smtp_tls_security_level=${POSTFIX_SMTP_TLS_SECURITY_LEVEL:-encrypt}
       - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
       - POSTFIX_alias_maps=

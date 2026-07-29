@@ -140,6 +140,9 @@ sudo make timers              # systemd timer status
 sudo make email-queue-summary # safe Postfix queue summary
 sudo make email-queue         # list queued messages
 sudo make logs SERVICE=caddy  # container logs
+
+Snapshot purge is confirmation-gated and deletes only held messages whose
+snapshotted identity still matches. Reused queue IDs are skipped and reported.
 ```
 
 For exact public script grammar and options, use `--help` or [docs/COMMAND-REFERENCE.md](docs/COMMAND-REFERENCE.md).

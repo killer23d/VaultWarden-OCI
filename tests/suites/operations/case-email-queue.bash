@@ -17,7 +17,10 @@ BIN="$TMP/bin"
 CALLS="$TMP/docker.calls"
 INVENTORY="$TMP/inventory.ndjson"
 QUEUE_TMP="$TMP/queue-tmp"
+LOCK_FILE="$TMP/email-queue.lock"
+INVENTORY_CALLS="$TMP/inventory.calls"
 mkdir -p "$FIXTURE/utilities" "$FIXTURE/lib" "$BIN" "$QUEUE_TMP"
+: >"$INVENTORY_CALLS"
 cp "$ROOT/utilities/email-queue.sh" "$FIXTURE/utilities/"
 cp "$ROOT/lib/log.sh" "$ROOT/lib/common.sh" "$ROOT/lib/docker.sh" "$FIXTURE/lib/"
 chmod +x "$FIXTURE/utilities/email-queue.sh"
@@ -34,6 +37,58 @@ set -euo pipefail
     printf ' <%s>' "$@"
     printf '\n'
 } >>"${VW_TEST_DOCKER_CALLS:?}"
+
+mutate_inventory() {
+    local action="$1" id="${2:-}"
+    python3 - "$action" "$id" "${VW_TEST_INVENTORY:?}" <<'PY_MUTATE'
+import json, os, sys
+from pathlib import Path
+
+action, wanted, path = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+def write():
+    path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+
+if action == "remove":
+    rows[:] = [row for row in rows if row.get("queue_id") != wanted]
+elif action == "replace":
+    replacement = {
+        "queue_id": wanted,
+        "queue_name": "deferred",
+        "arrival_time": 1800000000,
+        "message_size": 999,
+        "sender": "replacement@example.test",
+        "recipients": [{"address": "replacement-recipient@example.test", "delay_reason": "new message"}],
+    }
+    rows[:] = [row for row in rows if row.get("queue_id") != wanted]
+    rows.append(replacement)
+elif action == "add-new":
+    if not any(row.get("queue_id") == "NEW-AFTER-SNAPSHOT" for row in rows):
+        rows.append({
+            "queue_id": "NEW-AFTER-SNAPSHOT",
+            "queue_name": "deferred",
+            "arrival_time": 1800000100,
+            "message_size": 5,
+            "sender": "new@example.test",
+            "recipients": [{"address": "new-recipient@example.test"}],
+        })
+elif action in {"hold", "release"}:
+    for row in rows:
+        if row.get("queue_id") == wanted:
+            row["queue_name"] = "hold" if action == "hold" else "deferred"
+elif action == "delete":
+    rows[:] = [row for row in rows if row.get("queue_id") != wanted]
+else:
+    raise SystemExit(f"unknown mutation {action}")
+write()
+PY_MUTATE
+}
+
+read_ids() {
+    mapfile -t POSTSUPER_IDS
+}
+
 if [[ "${1:-}" == info ]]; then
     exit 0
 fi
@@ -41,7 +96,8 @@ if [[ "${1:-}" == compose && "${2:-}" == version ]]; then
     printf 'Docker Compose version test\n'
     exit 0
 fi
-if [[ "${1:-}" == compose && "${2:-}" == ps && "${3:-}" == --services     && "${4:-}" == --filter && "${5:-}" == status=running ]]; then
+if [[ "${1:-}" == compose && "${2:-}" == ps && "${3:-}" == --services \
+    && "${4:-}" == --filter && "${5:-}" == status=running ]]; then
     [[ "${VW_TEST_POSTFIX_RUNNING:-true}" == true ]] && printf 'postfix\n'
     exit 0
 fi
@@ -52,6 +108,7 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
         exit 0
     fi
     if [[ "${1:-}" == postfix && "${2:-}" == postqueue && "${3:-}" == -j ]]; then
+        printf '1\n' >>"${VW_TEST_INVENTORY_CALLS:?}"
         [[ "${VW_TEST_MALFORMED_INVENTORY:-false}" == true ]] \
             && { printf '{not-json}\n'; exit 0; }
         cat "${VW_TEST_INVENTORY:?}"
@@ -59,6 +116,10 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
     fi
     if [[ "${1:-}" == --user && "${2:-}" == root && "${3:-}" == postfix ]]; then
         shift 3
+        if [[ "${1:-}" == postconf && "${2:-}" == -h && "${3:-}" == enable_long_queue_ids ]]; then
+            printf '%s\n' "${VW_TEST_LONG_QUEUE_IDS:-yes}"
+            exit 0
+        fi
         if [[ "${1:-}" == postcat ]]; then
             if [[ "$*" == *" -e -h "* ]]; then
                 printf '*** ENVELOPE RECORDS ***\n*** MESSAGE CONTENTS ***\nSubject: test\n\n'
@@ -76,40 +137,63 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
             printf 'flushed\n'
             exit 0
         fi
-        if [[ "${1:-}" == postsuper && "${2:-}" == -d ]]; then
+        if [[ "${1:-}" == postsuper && "${2:-}" == -d && "${3:-}" != - ]]; then
             id="${3:-}"
-            if [[ "${VW_TEST_FAIL_DELETE_ID:-}" == "$id" ]]; then
-                exit 1
-            fi
-            already_absent=false
+            [[ "${VW_TEST_FAIL_DELETE_ID:-}" == "$id" ]] && exit 1
             if [[ "${VW_TEST_ALREADY_ABSENT_DELETE_ID:-}" == "$id" ]]; then
-                already_absent=true
-            fi
-            python3 - "$id" "${VW_TEST_INVENTORY:?}" <<'PY_DELETE'
-import json, sys
-from pathlib import Path
-wanted, path = sys.argv[1], Path(sys.argv[2])
-kept = []
-for line in path.read_text().splitlines():
-    if not line.strip():
-        continue
-    if json.loads(line).get("queue_id") != wanted:
-        kept.append(line)
-path.write_text("\n".join(kept) + ("\n" if kept else ""))
-PY_DELETE
-            if [[ "$already_absent" == true ]]; then
+                mutate_inventory remove "$id"
                 exit 1
             fi
-            if [[ "${VW_TEST_ADD_AFTER_FIRST_DELETE:-false}" == true && ! -e "${VW_TEST_INVENTORY}.added" ]]; then
-                printf '%s\n' '{"queue_id":"NEW-AFTER-SNAPSHOT","queue_name":"deferred","arrival_time":1700000300,"message_size":5,"sender":"new@example.test","recipients":[]}' >>"${VW_TEST_INVENTORY}"
-                : >"${VW_TEST_INVENTORY}.added"
-            fi
+            mutate_inventory delete "$id"
             printf 'deleted %s\n' "$id"
             exit 0
         fi
+        if [[ "${1:-}" == postsuper && "${3:-}" == - ]]; then
+            op="${2:-}"
+            read_ids
+            rc=0
+            if [[ "$op" == -h && ! -e "${VW_TEST_INVENTORY}.hold-event" ]]; then
+                [[ -n "${VW_TEST_REUSE_ID_ON_HOLD:-}" ]] \
+                    && mutate_inventory replace "$VW_TEST_REUSE_ID_ON_HOLD"
+                [[ -n "${VW_TEST_REMOVE_ID_ON_HOLD:-}" ]] \
+                    && mutate_inventory remove "$VW_TEST_REMOVE_ID_ON_HOLD"
+                [[ "${VW_TEST_ADD_NEW_ON_HOLD:-false}" == true ]] \
+                    && mutate_inventory add-new
+                : >"${VW_TEST_INVENTORY}.hold-event"
+            fi
+            fail_id=""
+            case "$op" in
+                -h) fail_id="${VW_TEST_FAIL_HOLD_ID:-}" ;;
+                -H) fail_id="${VW_TEST_FAIL_RELEASE_ID:-}" ;;
+                -d) fail_id="${VW_TEST_FAIL_DELETE_IDS:-${VW_TEST_FAIL_DELETE_ID:-}}" ;;
+                *) exit 97 ;;
+            esac
+            python3 - "$op" "$fail_id" "${VW_TEST_INVENTORY:?}" "${POSTSUPER_IDS[@]}" <<'PY_BATCH'
+import json, sys
+from pathlib import Path
+
+op, fail_id, path = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+ids = [item for item in sys.argv[4:] if item]
+fail_ids = {item for item in fail_id.split(",") if item}
+rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+for queue_id in ids:
+    if queue_id in fail_ids:
+        continue
+    if op == "-d":
+        rows[:] = [row for row in rows if row.get("queue_id") != queue_id]
+    else:
+        for row in rows:
+            if row.get("queue_id") == queue_id:
+                row["queue_name"] = "hold" if op == "-h" else "deferred"
+path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+raise SystemExit(1 if fail_ids.intersection(ids) else 0)
+PY_BATCH
+            exit $?
+        fi
     fi
 fi
-if [[ "${1:-}" == compose && "${2:-}" == logs && "${3:-}" == --no-color && "${4:-}" == --tail && "${6:-}" == postfix ]]; then
+if [[ "${1:-}" == compose && "${2:-}" == logs && "${3:-}" == --no-color \
+    && "${4:-}" == --tail && "${6:-}" == postfix ]]; then
     printf '%s\n' "${VW_TEST_LOG_OUTPUT:-Jul 28 postfix ABC[123]: queued}"
     exit 0
 fi
@@ -128,10 +212,18 @@ run_queue() {
         "VW_TEST_POSTFIX_RUNNING=${VW_TEST_POSTFIX_RUNNING:-true}" \
         "VW_TEST_MALFORMED_INVENTORY=${VW_TEST_MALFORMED_INVENTORY:-false}" \
         "VW_TEST_FAIL_DELETE_ID=${VW_TEST_FAIL_DELETE_ID:-}" \
+        "VW_TEST_FAIL_DELETE_IDS=${VW_TEST_FAIL_DELETE_IDS:-}" \
         "VW_TEST_ALREADY_ABSENT_DELETE_ID=${VW_TEST_ALREADY_ABSENT_DELETE_ID:-}" \
         "VW_TEST_FAIL_RETRY_ID=${VW_TEST_FAIL_RETRY_ID:-}" \
-        "VW_TEST_ADD_AFTER_FIRST_DELETE=${VW_TEST_ADD_AFTER_FIRST_DELETE:-false}" \
+        "VW_TEST_REUSE_ID_ON_HOLD=${VW_TEST_REUSE_ID_ON_HOLD:-}" \
+        "VW_TEST_REMOVE_ID_ON_HOLD=${VW_TEST_REMOVE_ID_ON_HOLD:-}" \
+        "VW_TEST_ADD_NEW_ON_HOLD=${VW_TEST_ADD_NEW_ON_HOLD:-false}" \
+        "VW_TEST_FAIL_HOLD_ID=${VW_TEST_FAIL_HOLD_ID:-}" \
+        "VW_TEST_FAIL_RELEASE_ID=${VW_TEST_FAIL_RELEASE_ID:-}" \
+        "VW_TEST_LONG_QUEUE_IDS=${VW_TEST_LONG_QUEUE_IDS:-yes}" \
         "VW_TEST_LOG_OUTPUT=${VW_TEST_LOG_OUTPUT:-Jul 28 postfix ABC[123]: queued}" \
+        "VW_TEST_INVENTORY_CALLS=$INVENTORY_CALLS" \
+        "VW_EMAIL_QUEUE_LOCK_FILE=$LOCK_FILE" \
         "TMPDIR=$QUEUE_TMP" \
         "VW_EMAIL_QUEUE_CONFIRM=${VW_EMAIL_QUEUE_CONFIRM:-}" \
         "VW_EMAIL_QUEUE_CLEAR_CONFIRMED=${VW_EMAIL_QUEUE_CLEAR_CONFIRMED:-}" \
@@ -153,7 +245,14 @@ grep -Fq 'VW_TEST_MODE:-0' "$script" || fail 'test gate missing'
 grep -Fq 'VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0' "$script" || fail 'non-root test gate missing'
 ! grep -Fq 'postsuper -d ALL' "$script" || fail 'unsafe live ALL deletion remains'
 ! grep -Eq 'postsuper[[:space:]]+"\$@"|eval[[:space:]]' "$script" || fail 'generic command forwarding or eval found'
-pass 'static queue safety contract'
+grep -Fq 'postsuper -h -' "$script" || fail 'snapshot purge does not batch exact hold IDs through stdin'
+grep -Fq 'postsuper -d -' "$script" || fail 'snapshot purge does not batch exact delete IDs through stdin'
+grep -Fq 'flock -n' "$script" || fail 'mutating queue lock is missing'
+grep -Fq 'postconf -h enable_long_queue_ids' "$script"     || fail 'runtime long queue-ID verification is missing'
+grep -Fq 'umask 077' "$script" || fail 'private temporary-file umask is missing'
+grep -Fq 'POSTFIX_enable_long_queue_ids=${POSTFIX_ENABLE_LONG_QUEUE_IDS:-yes}'     "$ROOT/docker-compose.yml.example"     || fail 'Compose does not enable long queue IDs by default'
+grep -Fq 'POSTFIX_ENABLE_LONG_QUEUE_IDS=yes' "$ROOT/.env.example"     || fail 'long queue-ID operator setting is not documented in .env.example'
+pass 'static queue safety and long-ID defence-in-depth contract'
 
 if (( EUID != 0 )); then
     if env PATH="$BIN:$PATH" VW_TEST_DOCKER_CALLS="$CALLS" \
@@ -254,39 +353,87 @@ pass 'single deletion is ID-bound'
 
 base_inventory
 VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
-VW_TEST_ADD_AFTER_FIRST_DELETE=true
-export VW_EMAIL_QUEUE_CONFIRM VW_TEST_ADD_AFTER_FIRST_DELETE
-run_queue purge --snapshot </dev/null >"$TMP/purge.out"
-grep -Fq '"queue_id":"NEW-AFTER-SNAPSHOT"' "$INVENTORY" || fail 'snapshot purge deleted newly arrived mail'
-! grep -Fq '"queue_id":"AbC-123"' "$INVENTORY" || fail 'snapshot purge left captured ID'
-! grep -Fq '"queue_id":"XYZ987"' "$INVENTORY" || fail 'snapshot purge left captured ID'
-! grep -Fq '<postsuper> <-d> <ALL>' "$CALLS" || fail 'snapshot purge used ALL'
-unset VW_TEST_ADD_AFTER_FIRST_DELETE
-pass 'snapshot purge deletes only captured IDs'
+VW_TEST_REUSE_ID_ON_HOLD=AbC-123
+export VW_EMAIL_QUEUE_CONFIRM VW_TEST_REUSE_ID_ON_HOLD
+if run_queue purge --snapshot </dev/null >"$TMP/purge-reuse.out" 2>&1; then
+    fail 'reused queue ID returned success'
+fi
+grep -Fq '"queue_id":"AbC-123"' "$INVENTORY" || fail 'reused queue ID replacement was deleted'
+grep -Fq 'replacement@example.test' "$INVENTORY" || fail 'replacement identity was not preserved'
+grep -Fq '"queue_name":"deferred"' "$INVENTORY" || fail 'mismatched replacement was not released'
+grep -Fq 'Identity mismatches or reused IDs skipped: 1' "$TMP/purge-reuse.out" \
+    || fail 'identity mismatch was not reported'
+grep -Fq '<postconf> <-h> <enable_long_queue_ids>' "$CALLS" \
+    || fail 'purge did not verify the effective long queue-ID setting'
+unset VW_TEST_REUSE_ID_ON_HOLD
+pass 'reused queue ID is released, skipped, and returns nonzero'
 
+rm -f "${INVENTORY}.hold-event"
 base_inventory
-VW_TEST_ALREADY_ABSENT_DELETE_ID=AbC-123
-export VW_TEST_ALREADY_ABSENT_DELETE_ID
+VW_TEST_REMOVE_ID_ON_HOLD=AbC-123
+export VW_TEST_REMOVE_ID_ON_HOLD
 run_queue purge --snapshot </dev/null >"$TMP/purge-absent.out"
-grep -Fq 'Already absent: 1' "$TMP/purge-absent.out" || fail 'concurrently absent item was not reported accurately'
-unset VW_TEST_ALREADY_ABSENT_DELETE_ID
-pass 'snapshot purge handles an already-missing item'
+grep -Fq 'Already absent: 1' "$TMP/purge-absent.out" \
+    || fail 'disappeared original was not reported absent'
+unset VW_TEST_REMOVE_ID_ON_HOLD
+pass 'disappeared original is reported already absent'
+
+rm -f "${INVENTORY}.hold-event"
+write_inventory <<'EOF_HOLD_FAILURES'
+{"queue_id":"HELD-1","queue_name":"hold","arrival_time":1700000000,"message_size":100,"sender":"held@example.test","recipients":[{"address":"one@example.test"}]}
+{"queue_id":"NORMAL-1","queue_name":"deferred","arrival_time":1700000100,"message_size":200,"sender":"normal@example.test","recipients":[{"address":"two@example.test"}]}
+EOF_HOLD_FAILURES
+VW_TEST_FAIL_DELETE_IDS=HELD-1,NORMAL-1
+export VW_TEST_FAIL_DELETE_IDS
+if run_queue purge --snapshot </dev/null >"$TMP/purge-partial.out" 2>&1; then
+    fail 'partial purge failure returned success'
+fi
+grep -Fq '"queue_id":"HELD-1","queue_name":"hold"' "$INVENTORY" \
+    || fail 'message held before purge did not remain held'
+grep -Fq '"queue_id":"NORMAL-1","queue_name":"deferred"' "$INVENTORY" \
+    || fail 'newly held deletion survivor was not released'
+grep -Fq 'Failed operations:' "$TMP/purge-partial.out" || fail 'partial failure summary missing'
+unset VW_TEST_FAIL_DELETE_IDS
+pass 'pre-existing holds are preserved and newly held survivors are restored'
+
+rm -f "${INVENTORY}.hold-event"
+: >"$INVENTORY_CALLS"
+python3 - "$INVENTORY" <<'PY_LARGE'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+with path.open("w") as handle:
+    for index in range(100):
+        item = {
+            "queue_id": f"Q{index:03d}",
+            "queue_name": "deferred",
+            "arrival_time": 1700000000 + index,
+            "message_size": 100 + index,
+            "sender": f"sender{index}@example.test",
+            "recipients": [{"address": f"recipient{index}@example.test"}],
+        }
+        handle.write(json.dumps(item, separators=(",", ":")) + "\n")
+PY_LARGE
+VW_TEST_ADD_NEW_ON_HOLD=true
+export VW_TEST_ADD_NEW_ON_HOLD
+run_queue purge --snapshot </dev/null >"$TMP/purge-large.out"
+grep -Fq '"queue_id":"NEW-AFTER-SNAPSHOT"' "$INVENTORY" \
+    || fail 'new different queue ID was deleted'
+[[ "$(grep -c '^' "$INVENTORY")" -eq 1 ]] || fail 'stable snapshot messages were not all deleted'
+grep -Fq 'Deleted snapshot messages: 100' "$TMP/purge-large.out" \
+    || fail 'stable snapshot deletions were not reported'
+inventory_count=$(wc -l <"$INVENTORY_CALLS")
+(( inventory_count <= 4 )) \
+    || fail "100-message purge used $inventory_count complete inventories"
+unset VW_TEST_ADD_NEW_ON_HOLD
+pass '100 stable messages delete with fixed inventories while new mail remains'
 
 if find "$QUEUE_TMP" -mindepth 1 -print -quit | grep -q .; then
     fail 'queue utility left private temporary files behind'
 fi
 pass 'private queue temporary files are cleaned'
 
-base_inventory
-VW_TEST_FAIL_DELETE_ID=XYZ987
-export VW_TEST_FAIL_DELETE_ID
-if run_queue purge --snapshot </dev/null >"$TMP/purge-partial.out" 2>&1; then
-    fail 'partial purge failure returned success'
-fi
-grep -Fq 'Failed: 1' "$TMP/purge-partial.out" || fail 'partial purge failure was not reported'
-unset VW_TEST_FAIL_DELETE_ID
-pass 'snapshot purge continues and reports partial failure'
-
+rm -f "${INVENTORY}.hold-event"
 base_inventory
 VW_EMAIL_QUEUE_CONFIRM=
 VW_EMAIL_QUEUE_CLEAR_CONFIRMED=true
@@ -299,16 +446,41 @@ export VW_EMAIL_QUEUE_CLEAR_CONFIRMED
 run_queue clear </dev/null >"$TMP/clear.out"
 grep -Fqi 'deprecated' "$TMP/clear.out" "$TMP/clear-wrong.out" || fail 'clear deprecation warning missing'
 ! grep -Fq '<postsuper> <-d> <ALL>' "$CALLS" || fail 'clear alias used ALL deletion'
-pass 'deprecated clear uses snapshot behavior'
+pass 'deprecated clear uses identity-verified snapshot behavior'
 
 base_inventory
 VW_TEST_LOG_OUTPUT='Jul 28 postfix literal.ABC[123] result'
 export VW_TEST_LOG_OUTPUT
 run_queue logs 'ABC[123]' --tail 100 >"$TMP/logs.out"
 grep -Fq 'literal.ABC[123]' "$TMP/logs.out" || fail 'logs did not use fixed-string queue ID matching'
-run_queue logs DOES-NOT-MATCH --tail 100 >"$TMP/no-logs.out"
+run_queue logs DOES-NOT-MATCH --tail 100 >"$TMP/no-logs.out" 2>&1
 grep -Fq 'No Postfix log lines matched' "$TMP/no-logs.out" || fail 'no-match log result was not truthful'
 pass 'log tail validation and fixed-string filtering'
+
+base_inventory
+VW_EMAIL_QUEUE_CONFIRM=retry-all
+export VW_EMAIL_QUEUE_CONFIRM
+(
+    exec 8>"$LOCK_FILE"
+    flock 8
+    : >"$TMP/lock-ready"
+    sleep 30
+) &
+lock_pid=$!
+for _ in $(seq 1 100); do
+    [[ -e "$TMP/lock-ready" ]] && break
+    sleep 0.01
+done
+if run_queue retry --all </dev/null >"$TMP/lock.out" 2>&1; then
+    kill "$lock_pid" 2>/dev/null || true
+    wait "$lock_pid" 2>/dev/null || true
+    fail 'concurrent queue mutation acquired an already-held lock'
+fi
+kill "$lock_pid" 2>/dev/null || true
+wait "$lock_pid" 2>/dev/null || true
+grep -Fq 'Another Postfix queue mutation is already running' "$TMP/lock.out" \
+    || fail 'lock contention error is not actionable'
+pass 'mutating queue commands use an exclusive host-side lock'
 
 VW_TEST_POSTFIX_RUNNING=false
 export VW_TEST_POSTFIX_RUNNING

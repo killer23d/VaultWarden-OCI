@@ -29,8 +29,8 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make email-queue-retry-all` |  Retry all queued messages after exact confirmation |
 | `make email-queue-delete` |  Delete one exact QUEUE_ID after exact confirmation |
 | `make email-queue-logs` |  Show Postfix logs (QUEUE_ID optional, EMAIL_QUEUE_TAIL default 200) |
-| `make email-queue-purge` |  Purge only a confirmed snapshot of current queue IDs |
-| `make email-queue-clear` |  Deprecated alias for snapshot queue purge |
+| `make email-queue-purge` |  Purge only identity-matched messages from a confirmed queue snapshot |
+| `make email-queue-clear` |  Deprecated alias for identity-verified snapshot purge |
 | `make up` |  Start all services (runs startup.sh for health checks; root required) |
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully (root required) |
@@ -606,9 +606,9 @@ COMMANDS:
     logs [ID] [--tail N]    Show Postfix logs, optionally filtered by a fixed
                             queue-ID string. N defaults to 200 and is limited to
                             1..5000.
-    purge --snapshot        Capture the current queue IDs, confirm the captured
-                            count, and delete only those IDs. Mail arriving after
-                            the snapshot is never added to the deletion set.
+    purge --snapshot        Capture stable message identities, hold eligible
+                            snapshot messages, re-check identity, and delete only
+                            exact matches. Reused IDs are skipped and reported.
     clear                   Deprecated alias for purge --snapshot.
 
 AUTOMATION CONFIRMATION:
@@ -628,8 +628,12 @@ EXIT STATUS:
     2  Invalid usage.
 
 NOTES:
-    Queue state can change between inventory, inspection, and mutation. A retry
-    or Postfix acceptance does not prove final delivery to the recipient.
+    Mutating commands use one exclusive host-side lock. Snapshot purge compares
+    arrival time, size, envelope sender, and recipients before deletion. It uses
+    Postfix hold to stabilize matching messages and restores newly introduced
+    holds after partial failure. External administrators that bypass this utility
+    are outside the host lock and must not mutate the queue during a purge.
+    A retry or Postfix acceptance does not prove final recipient delivery.
 ```
 
 ### env-edit.sh
