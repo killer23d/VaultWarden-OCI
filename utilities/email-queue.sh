@@ -18,6 +18,7 @@ _NEW_TEMP_DIR=""
 _MUTATION_LOCK_FD=""
 _HOLD_ROLLBACK_FILE=""
 _HOLD_ROLLBACK_ACTIVE=false
+_LONG_QUEUE_IDS_VALUE=""
 
 show_help() {
     cat <<'EOF'
@@ -46,15 +47,15 @@ COMMANDS:
     retry ID                Schedule immediate delivery for one exact queue ID.
     retry --all             Flush all currently queued mail after exact
                             confirmation.
-    delete ID               Hold and identity-verify one exact queue message
-                            after exact confirmation, then delete only that held
-                            identity match.
+    delete ID               Require verified long queue IDs, then hold and
+                            identity-verify one exact message after confirmation
+                            and delete only that held identity match.
     logs [ID] [--tail N]    Show Postfix logs, optionally filtered by a fixed
                             queue-ID string. N defaults to 200 and is limited to
                             1..5000.
-    purge --snapshot        Capture stable message identities, hold eligible
-                            snapshot messages, re-check identity, and delete only
-                            exact matches. Reused IDs are skipped and reported.
+    purge --snapshot        Require verified long queue IDs, capture stable
+                            identities, hold eligible snapshot messages, and
+                            delete only held identity matches.
     clear                   Deprecated alias for purge --snapshot.
 
 AUTOMATION CONFIRMATION:
@@ -75,9 +76,11 @@ EXIT STATUS:
     129, 130, 143  Interrupted by SIGHUP, SIGINT, or SIGTERM.
 
 NOTES:
-    Mutating commands use one exclusive host-side lock. Targeted deletion and
-    snapshot purge compare arrival time, size, envelope sender, and recipients,
-    then require a matching record to be held before deletion. Newly introduced
+    Mutating commands use one exclusive host-side lock. Destructive commands
+    fail closed unless the effective Postfix setting enable_long_queue_ids=yes.
+    They also compare arrival time, size, envelope sender, and recipients, then
+    require a matching record to be held before deletion; metadata is defence in
+    depth, not a substitute for non-repeating queue IDs. Newly introduced
     holds are restored after failure or interruption when possible; pre-existing
     holds are preserved. External administrators that bypass this utility are
     outside the host lock and must not mutate the queue during destructive work.
@@ -192,21 +195,61 @@ _acquire_mutation_lock() {
     fi
 }
 
-_verify_long_queue_ids() {
-    local operation="${1:-queue mutation}" value
-    if ! value=$(docker compose exec -T --user root postfix \
-        postconf -h enable_long_queue_ids 2>/dev/null); then
-        log_warn "Could not verify the effective Postfix enable_long_queue_ids value."
-        log_warn "Stable identity matching remains mandatory for $operation; inspect with: docker compose exec -T postfix postconf -h enable_long_queue_ids"
+_read_long_queue_ids() {
+    local output_file
+    local -a lines=()
+    _LONG_QUEUE_IDS_VALUE=""
+    _new_private_tempdir || return 1
+    output_file="$_NEW_TEMP_DIR/enable-long-queue-ids"
+    if ! (
+        # Docker or Compose descendants must not inherit the host mutation lock.
+        # A long-lived child must not keep this utility's lock alive.
+        if [[ -n "${_MUTATION_LOCK_FD:-}" ]]; then
+            exec {_MUTATION_LOCK_FD}>&-
+        fi
+        docker compose exec -T --user root postfix \
+            postconf -h enable_long_queue_ids
+    ) >"$output_file" 2>/dev/null; then
+        return 1
+    fi
+    mapfile -t lines <"$output_file"
+    (( ${#lines[@]} == 1 )) || return 1
+    _LONG_QUEUE_IDS_VALUE=${lines[0]%$'\r'}
+}
+
+_long_queue_ids_remediation() {
+    log_hint "Set POSTFIX_ENABLE_LONG_QUEUE_IDS=yes in the production environment."
+    log_hint "Recreate/apply the Postfix service with the normal root-operated workflow: sudo make up"
+    log_hint "Verify before retrying: sudo docker compose exec -T postfix postconf -h enable_long_queue_ids"
+}
+
+_require_long_queue_ids() {
+    local operation="${1:-destructive queue operation}" value
+    if ! _read_long_queue_ids; then
+        log_error "Cannot safely perform $operation because the effective Postfix enable_long_queue_ids value could not be read."
+        _long_queue_ids_remediation
+        return 1
+    fi
+    value=$_LONG_QUEUE_IDS_VALUE
+    if [[ "$value" != "yes" ]]; then
+        log_error "Cannot safely perform $operation because Postfix enable_long_queue_ids is '$value', not 'yes'."
+        _long_queue_ids_remediation
+        return 1
+    fi
+    log_info "Postfix long queue IDs are enabled. Stable metadata comparison remains defence in depth."
+}
+
+_warn_long_queue_ids_for_retry() {
+    local operation="${1:-queue retry}" value
+    if ! _read_long_queue_ids; then
+        log_warn "Could not verify Postfix enable_long_queue_ids before $operation. Retry may proceed, but destructive queue operations remain blocked."
+        _long_queue_ids_remediation
         return 0
     fi
-    value=${value//$'\r'/}
-    value=${value//$'\n'/}
-    if [[ "$value" == "yes" ]]; then
-        log_info "Postfix long queue IDs are enabled (defence in depth)."
-    else
-        log_warn "Postfix enable_long_queue_ids is '$value', not 'yes'."
-        log_warn "Identity verification remains the primary protection for $operation; recreate Postfix after applying the updated Compose configuration."
+    value=$_LONG_QUEUE_IDS_VALUE
+    if [[ "$value" != "yes" ]]; then
+        log_warn "Postfix enable_long_queue_ids is '$value' before $operation. Retry may proceed, but destructive queue operations remain blocked."
+        _long_queue_ids_remediation
     fi
 }
 
@@ -230,8 +273,7 @@ from pathlib import Path
 
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
-rows = []
-seen_ids = set()
+records = {}
 try:
     for number, raw in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
         if not raw.strip():
@@ -244,14 +286,17 @@ try:
             raise ValueError(f"line {number} has no queue_id")
         if any(ch in queue_id for ch in "\t\r\n\0"):
             raise ValueError(f"line {number} has an unsupported queue_id separator")
-        if queue_id in seen_ids:
-            raise ValueError(f"line {number} repeats queue_id {queue_id!r}")
-        seen_ids.add(queue_id)
 
         queue_name = item.get("queue_name") or "unknown"
         sender = item.get("sender")
         if not isinstance(queue_name, str) or not isinstance(sender, str):
             raise ValueError(f"line {number} has invalid queue_name or sender")
+
+        def clean(value):
+            return " ".join(str(value).replace("\t", " ").splitlines())
+
+        queue_name = clean(queue_name) or "unknown"
+        sender = clean(sender)
         try:
             arrival = int(item.get("arrival_time"))
             size = int(item.get("message_size"))
@@ -271,7 +316,7 @@ try:
             address = recipient.get("address")
             if not isinstance(address, str):
                 raise ValueError(f"line {number} recipient has no string address")
-            addresses.append(address)
+            addresses.append(clean(address))
             reason = recipient.get("delay_reason")
             if isinstance(reason, str) and reason.strip():
                 reasons.append(" ".join(reason.split()))
@@ -288,24 +333,46 @@ try:
         digest = hashlib.sha256(canonical).hexdigest()
         encoded = base64.urlsafe_b64encode(canonical).decode("ascii")
 
-        def clean(value):
-            return " ".join(str(value).replace("\t", " ").splitlines())
-
-        rows.append((
-            queue_id,
-            clean(queue_name),
-            arrival,
-            size,
-            clean(sender),
-            digest,
-            encoded,
-            " || ".join(reasons),
-        ))
+        normalized_reasons = {clean(reason) for reason in reasons if clean(reason)}
+        previous = records.get(queue_id)
+        if previous is None:
+            records[queue_id] = {
+                "line": number,
+                "queue_name": queue_name,
+                "arrival": arrival,
+                "size": size,
+                "sender": sender,
+                "digest": digest,
+                "encoded": encoded,
+                "reasons": normalized_reasons,
+            }
+            continue
+        if previous["digest"] != digest:
+            raise ValueError(
+                f"queue_id {queue_id!r} has conflicting normalized identities "
+                f"on lines {previous['line']} and {number}"
+            )
+        if queue_name == "hold" or previous["queue_name"] == "hold":
+            previous["queue_name"] = "hold"
+        else:
+            previous["queue_name"] = min(previous["queue_name"], queue_name)
+        previous["reasons"].update(normalized_reasons)
 except Exception as exc:
     print(f"invalid postqueue -j inventory: {exc}", file=sys.stderr)
     raise SystemExit(1)
 with dst.open("w", encoding="utf-8", newline="\n") as handle:
-    for row in rows:
+    for queue_id in sorted(records):
+        record = records[queue_id]
+        row = (
+            queue_id,
+            record["queue_name"],
+            record["arrival"],
+            record["size"],
+            record["sender"],
+            record["digest"],
+            record["encoded"],
+            " || ".join(sorted(record["reasons"])),
+        )
         handle.write("\t".join(map(str, row)) + "\n")
 PY_INVENTORY
     then
@@ -516,6 +583,7 @@ _inspect() {
 
 _retry_one() {
     local queue_id="$1" tsv
+    _warn_long_queue_ids_for_retry "targeted retry"
     _make_inventory tsv || return 1
     _validate_queue_id "$queue_id" "$tsv" || return $?
     _print_metadata "$queue_id" "$tsv" || true
@@ -529,6 +597,7 @@ _retry_one() {
 
 _retry_all() {
     local tsv count
+    _warn_long_queue_ids_for_retry "retry-all"
     _make_inventory tsv || return 1
     _render_summary text "$tsv"
     count=$(_render_summary quiet "$tsv") || return 1
@@ -599,6 +668,7 @@ _delete_one() {
     local after_delete_raw after_delete_tsv before_queue state_info state current_queue
     local hold_rc=0 delete_rc=0 release_rc=0
 
+    _require_long_queue_ids "targeted deletion" || return 1
     _new_private_tempdir || return 1
     delete_dir="$_NEW_TEMP_DIR"
     selected_ids="$delete_dir/selected.ids"
@@ -609,7 +679,6 @@ _delete_one() {
     after_delete_raw="$delete_dir/after-delete.ndjson"
     after_delete_tsv="$delete_dir/after-delete.tsv"
 
-    _verify_long_queue_ids "targeted deletion"
     _capture_inventory "$before_raw" "$before_tsv" || return 1
     _validate_queue_id "$queue_id" "$before_tsv" || return $?
     _print_metadata "$queue_id" "$before_tsv" || true
@@ -884,6 +953,7 @@ _purge_snapshot() {
     local deleted absent mismatches hold_failed delete_failed restore_failed failed remaining
     local expected_token
 
+    _require_long_queue_ids "snapshot purge" || return 1
     _new_private_tempdir || return 1
     purge_dir="$_NEW_TEMP_DIR"
     snapshot_raw="$purge_dir/snapshot.ndjson"
@@ -897,7 +967,6 @@ _purge_snapshot() {
     to_hold="$purge_dir/to-hold.ids"
     preheld="$purge_dir/preheld.ids"
 
-    _verify_long_queue_ids "snapshot purge"
     _capture_inventory "$snapshot_raw" "$snapshot_tsv" || return 1
     count=$(_render_summary quiet "$snapshot_tsv") || return 1
     _render_summary text "$snapshot_tsv"

@@ -420,12 +420,22 @@ by default; use `EMAIL_QUEUE_BODY=true` only when the sensitive content is
 needed for diagnosis. An empty queue is not proof of successful recipient
 delivery, so correlate the queue state with Postfix and upstream relay evidence.
 
-If targeted deletion or snapshot purge reports an identity mismatch or reused
-queue ID, the current message was preserved rather than deleted. Review the
-selected metadata or final purge counts and recent Postfix logs, then retry from
-a fresh inventory. A newly introduced hold is released when possible; a message
-held before the command remains held. Any mismatch or failed destructive
-operation returns nonzero and represents a partial result.
+If targeted deletion, snapshot purge, or deprecated clear reports that long
+queue IDs cannot be verified, set `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run
+`sudo make up` so Postfix is recreated or updated, and confirm:
+
+```bash
+sudo docker compose exec -T postfix postconf -h enable_long_queue_ids
+```
+
+The result must be exactly `yes`. Metadata comparison remains defence in depth
+and cannot replace long queue IDs. If an identity mismatch or reused ID is
+reported, the current message was preserved rather than deleted. Equivalent
+duplicate queue records are normalized once; conflicting identities for one ID
+are reported as malformed inventory and block mutation. Review current metadata,
+final purge counts, and recent Postfix logs before retrying from a fresh
+inventory. A newly introduced hold is released when possible; a message held
+before the command remains held.
 
 Edit non-secret SMTP settings through:
 

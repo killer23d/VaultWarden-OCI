@@ -141,9 +141,12 @@ sudo make email-queue-summary # safe Postfix queue summary
 sudo make email-queue         # list queued messages
 sudo make logs SERVICE=caddy  # container logs
 
-Targeted deletion and snapshot purge are confirmation-gated, hold-stabilized,
-and identity-verified. A reused queue ID with different message metadata is
-preserved and reported instead of being deleted.
+Targeted deletion and snapshot purge require the effective Postfix setting
+`enable_long_queue_ids=yes` and fail closed when it cannot be verified. After
+changing `POSTFIX_ENABLE_LONG_QUEUE_IDS`, run `sudo make up` to recreate or
+apply Postfix before destructive queue work. Hold stabilization and metadata
+identity checks remain defence in depth, and equivalent queue-list duplicates
+are counted once.
 ```
 
 For exact public script grammar and options, use `--help` or [docs/COMMAND-REFERENCE.md](docs/COMMAND-REFERENCE.md).

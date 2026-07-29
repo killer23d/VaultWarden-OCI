@@ -7,7 +7,31 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
 
 ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+signal_pid=""
+lock_pid=""
+
+stop_test_process_group() {
+    local pid="${1:-}" _
+    [[ -n "$pid" ]] || return 0
+    if kill -0 -- "-$pid" 2>/dev/null; then
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+            kill -0 -- "-$pid" 2>/dev/null || break
+            sleep 0.02
+        done
+        if kill -0 -- "-$pid" 2>/dev/null; then
+            kill -KILL -- "-$pid" 2>/dev/null || true
+        fi
+    fi
+    wait "$pid" 2>/dev/null || true
+}
+
+cleanup_test_processes() {
+    stop_test_process_group "${signal_pid:-}"
+    stop_test_process_group "${lock_pid:-}"
+    rm -rf "$TMP"
+}
+trap cleanup_test_processes EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
@@ -63,6 +87,20 @@ elif action == "replace":
     }
     rows[:] = [row for row in rows if row.get("queue_id") != wanted]
     rows.append(replacement)
+elif action == "replace-same-identity":
+    original = next((row for row in rows if row.get("queue_id") == wanted), None)
+    if original is not None:
+        replacement = {
+            "queue_id": wanted,
+            "queue_name": "deferred",
+            "arrival_time": original.get("arrival_time"),
+            "message_size": original.get("message_size"),
+            "sender": original.get("sender"),
+            "recipients": original.get("recipients"),
+            "test_marker": "replacement-with-same-normalized-identity",
+        }
+        rows[:] = [row for row in rows if row.get("queue_id") != wanted]
+        rows.append(replacement)
 elif action == "add-new":
     if not any(row.get("queue_id") == "NEW-AFTER-SNAPSHOT" for row in rows):
         rows.append({
@@ -122,6 +160,7 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
     if [[ "${1:-}" == --user && "${2:-}" == root && "${3:-}" == postfix ]]; then
         shift 3
         if [[ "${1:-}" == postconf && "${2:-}" == -h && "${3:-}" == enable_long_queue_ids ]]; then
+            [[ "${VW_TEST_POSTCONF_FAIL:-false}" == true ]] && exit 1
             printf '%s\n' "${VW_TEST_LONG_QUEUE_IDS:-yes}"
             exit 0
         fi
@@ -160,6 +199,8 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
             if [[ "$op" == -h && ! -e "${VW_TEST_INVENTORY}.hold-event" ]]; then
                 [[ -n "${VW_TEST_REUSE_ID_ON_HOLD:-}" ]] \
                     && mutate_inventory replace "$VW_TEST_REUSE_ID_ON_HOLD"
+                [[ -n "${VW_TEST_REUSE_SAME_ID_ON_HOLD:-}" ]] \
+                    && mutate_inventory replace-same-identity "$VW_TEST_REUSE_SAME_ID_ON_HOLD"
                 [[ -n "${VW_TEST_REMOVE_ID_ON_HOLD:-}" ]] \
                     && mutate_inventory remove "$VW_TEST_REMOVE_ID_ON_HOLD"
                 [[ "${VW_TEST_ADD_NEW_ON_HOLD:-false}" == true ]] \
@@ -230,11 +271,13 @@ run_queue() {
         "VW_TEST_ALREADY_ABSENT_DELETE_ID=${VW_TEST_ALREADY_ABSENT_DELETE_ID:-}" \
         "VW_TEST_FAIL_RETRY_ID=${VW_TEST_FAIL_RETRY_ID:-}" \
         "VW_TEST_REUSE_ID_ON_HOLD=${VW_TEST_REUSE_ID_ON_HOLD:-}" \
+        "VW_TEST_REUSE_SAME_ID_ON_HOLD=${VW_TEST_REUSE_SAME_ID_ON_HOLD:-}" \
         "VW_TEST_REMOVE_ID_ON_HOLD=${VW_TEST_REMOVE_ID_ON_HOLD:-}" \
         "VW_TEST_ADD_NEW_ON_HOLD=${VW_TEST_ADD_NEW_ON_HOLD:-false}" \
         "VW_TEST_FAIL_HOLD_ID=${VW_TEST_FAIL_HOLD_ID:-}" \
         "VW_TEST_FAIL_RELEASE_ID=${VW_TEST_FAIL_RELEASE_ID:-}" \
         "VW_TEST_LONG_QUEUE_IDS=${VW_TEST_LONG_QUEUE_IDS:-yes}" \
+        "VW_TEST_POSTCONF_FAIL=${VW_TEST_POSTCONF_FAIL:-false}" \
         "VW_TEST_BLOCK_AFTER_HOLD_MARKER=${VW_TEST_BLOCK_AFTER_HOLD_MARKER:-}" \
         "VW_TEST_BLOCK_AFTER_HOLD_RELEASE=${VW_TEST_BLOCK_AFTER_HOLD_RELEASE:-}" \
         "VW_TEST_LOG_OUTPUT=${VW_TEST_LOG_OUTPUT:-Jul 28 postfix ABC[123]: queued}" \
@@ -248,11 +291,230 @@ run_queue() {
         bash "$FIXTURE/utilities/email-queue.sh" "$@"
 }
 
+assert_no_destructive_postsuper() {
+    if grep -Eq '<postsuper> <-h>|<postsuper> <-H>|<postsuper> <-d>' "$CALLS"; then
+        fail "blocked operation invoked hold, release, or deletion"
+    fi
+}
+
 base_inventory() {
     write_inventory <<'EOF_INV'
 {"queue_id":"AbC-123","queue_name":"deferred","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test","delay_reason":"connection timed out"}]}
 {"queue_id":"XYZ987","queue_name":"active","arrival_time":1700000100,"message_size":250,"sender":"second@example.test","recipients":[{"address":"two@example.test","delay_reason":"connection timed out"},{"address":"three@example.test","delay_reason":"temporary lookup failure"}]}
 EOF_INV
+}
+
+run_hardening_tests() {
+    # Core coverage intentionally leaves failure controls set. Reset the shared
+    # mock state so the hardening matrix is deterministic in the same process.
+    unset VW_TEST_POSTFIX_RUNNING VW_TEST_MALFORMED_INVENTORY \
+        VW_TEST_FAIL_DELETE_ID VW_TEST_FAIL_DELETE_IDS \
+        VW_TEST_ALREADY_ABSENT_DELETE_ID VW_TEST_FAIL_RETRY_ID \
+        VW_TEST_REUSE_ID_ON_HOLD VW_TEST_REUSE_SAME_ID_ON_HOLD \
+        VW_TEST_REMOVE_ID_ON_HOLD VW_TEST_ADD_NEW_ON_HOLD \
+        VW_TEST_FAIL_HOLD_ID VW_TEST_FAIL_RELEASE_ID \
+        VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL \
+        VW_TEST_BLOCK_AFTER_HOLD_MARKER VW_TEST_BLOCK_AFTER_HOLD_RELEASE \
+        VW_TEST_LOG_OUTPUT VW_EMAIL_QUEUE_CONFIRM VW_EMAIL_QUEUE_CLEAR_CONFIRMED
+    rm -f "${INVENTORY}.hold-event"
+    : >"$CALLS"
+    : >"$INVENTORY_CALLS"
+write_inventory <<'EOF_DUPLICATE_IDENTICAL'
+{"queue_id":"DUP-1","queue_name":"deferred","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test","delay_reason":"connection timed out"}]}
+{"queue_id":"DUP-1","queue_name":"deferred","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test","delay_reason":"connection timed out"}]}
+EOF_DUPLICATE_IDENTICAL
+[[ "$(run_queue summary --quiet 2>"$TMP/duplicate-identical.err")" == 1 ]] \
+    || fail 'identical duplicate records were double-counted'
+[[ ! -s "$TMP/duplicate-identical.err" ]] || fail 'identical duplicates emitted diagnostics'
+run_queue summary --json >"$TMP/duplicate-identical.json"
+python3 - "$TMP/duplicate-identical.json" <<'PY_DUPLICATE_IDENTICAL' \
+    || fail 'identical duplicate summary is incorrect'
+import json, sys
+obj = json.load(open(sys.argv[1]))
+assert obj["count"] == 1
+assert obj["total_bytes"] == 100
+assert obj["queues"] == {"deferred": 1}
+PY_DUPLICATE_IDENTICAL
+run_queue summary >"$TMP/duplicate-identical.txt"
+grep -Fq 'Total messages: 1' "$TMP/duplicate-identical.txt" \
+    || fail 'text summary double-counted identical duplicates'
+pass 'identical duplicate inventory records are normalized once'
+
+write_inventory <<'EOF_DUPLICATE_QUEUES'
+{"queue_id":"DUP-QUEUE","queue_name":"deferred","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test"}]}
+{"queue_id":"DUP-QUEUE","queue_name":"active","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test"}]}
+EOF_DUPLICATE_QUEUES
+run_queue summary --json >"$TMP/duplicate-queues.json"
+python3 - "$TMP/duplicate-queues.json" <<'PY_DUPLICATE_QUEUES' \
+    || fail 'equivalent queue-name duplicates were not deterministic'
+import json, sys
+obj = json.load(open(sys.argv[1]))
+assert obj["count"] == 1
+assert obj["queues"] == {"active": 1}
+PY_DUPLICATE_QUEUES
+pass 'equivalent duplicates use a deterministic queue name'
+
+write_inventory <<'EOF_DUPLICATE_HOLD'
+{"queue_id":"DUP-HOLD","queue_name":"deferred","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test"}]}
+{"queue_id":"DUP-HOLD","queue_name":"hold","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test"}]}
+EOF_DUPLICATE_HOLD
+run_queue summary --json >"$TMP/duplicate-hold.json"
+python3 - "$TMP/duplicate-hold.json" <<'PY_DUPLICATE_HOLD' \
+    || fail 'hold queue preference was not preserved'
+import json, sys
+obj = json.load(open(sys.argv[1]))
+assert obj["count"] == 1
+assert obj["queues"] == {"hold": 1}
+PY_DUPLICATE_HOLD
+pass 'hold wins when equivalent duplicates report different queues'
+
+write_inventory <<'EOF_DUPLICATE_CONFLICT'
+{"queue_id":"DUP-CONFLICT","queue_name":"deferred","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test"}]}
+{"queue_id":"DUP-CONFLICT","queue_name":"active","arrival_time":1700000001,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test"}]}
+EOF_DUPLICATE_CONFLICT
+if run_queue summary --quiet >"$TMP/duplicate-conflict.out" 2>&1; then
+    fail 'conflicting duplicate identities were accepted'
+fi
+grep -Fq "queue_id 'DUP-CONFLICT' has conflicting normalized identities" \
+    "$TMP/duplicate-conflict.out" || fail 'conflicting duplicate diagnostic is not useful'
+! grep -Fq 'MESSAGE CONTENTS' "$TMP/duplicate-conflict.out" \
+    || fail 'conflicting duplicate diagnostic exposed message content'
+for conflict_command in delete purge; do
+    : >"$CALLS"
+    VW_TEST_LONG_QUEUE_IDS=yes
+    VW_TEST_POSTCONF_FAIL=false
+    VW_EMAIL_QUEUE_CONFIRM=delete:DUP-CONFLICT
+    [[ "$conflict_command" == purge ]] && VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
+    export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL VW_EMAIL_QUEUE_CONFIRM
+    set +e
+    if [[ "$conflict_command" == delete ]]; then
+        run_queue delete DUP-CONFLICT </dev/null >"$TMP/conflict-delete.out" 2>&1
+    else
+        run_queue purge --snapshot </dev/null >"$TMP/conflict-purge.out" 2>&1
+    fi
+    conflict_rc=$?
+    set -e
+    [[ $conflict_rc -ne 0 ]] || fail "$conflict_command accepted conflicting inventory"
+    assert_no_destructive_postsuper
+done
+pass 'conflicting duplicates fail closed before queue mutation'
+
+base_inventory
+VW_TEST_LONG_QUEUE_IDS=no
+VW_TEST_POSTCONF_FAIL=false
+export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL
+for blocked_command in delete purge clear; do
+    rm -f "${INVENTORY}.hold-event"
+    base_inventory
+    : >"$CALLS"
+    VW_EMAIL_QUEUE_CONFIRM=delete:AbC-123
+    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=
+    [[ "$blocked_command" == purge ]] && VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
+    [[ "$blocked_command" == clear ]] && VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1
+    export VW_EMAIL_QUEUE_CONFIRM VW_EMAIL_QUEUE_CLEAR_CONFIRMED
+    set +e
+    case "$blocked_command" in
+        delete) run_queue delete AbC-123 </dev/null >"$TMP/long-no-delete.out" 2>&1 ;;
+        purge) run_queue purge --snapshot </dev/null >"$TMP/long-no-purge.out" 2>&1 ;;
+        clear) run_queue clear </dev/null >"$TMP/long-no-clear.out" 2>&1 ;;
+    esac
+    blocked_rc=$?
+    set -e
+    [[ $blocked_rc -ne 0 ]] || fail "$blocked_command accepted enable_long_queue_ids=no"
+    grep -Fq 'POSTFIX_ENABLE_LONG_QUEUE_IDS=yes' "$TMP/long-no-$blocked_command.out" \
+        || fail "$blocked_command long-ID error lacks environment remediation"
+    grep -Fq 'sudo make up' "$TMP/long-no-$blocked_command.out" \
+        || fail "$blocked_command long-ID error lacks recreate workflow"
+    assert_no_destructive_postsuper
+done
+pass 'destructive operations require enable_long_queue_ids=yes'
+
+VW_TEST_LONG_QUEUE_IDS=yes
+VW_TEST_POSTCONF_FAIL=true
+export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL
+for blocked_command in delete purge clear; do
+    rm -f "${INVENTORY}.hold-event"
+    base_inventory
+    : >"$CALLS"
+    VW_EMAIL_QUEUE_CONFIRM=delete:AbC-123
+    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=
+    [[ "$blocked_command" == purge ]] && VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
+    [[ "$blocked_command" == clear ]] && VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1
+    export VW_EMAIL_QUEUE_CONFIRM VW_EMAIL_QUEUE_CLEAR_CONFIRMED
+    set +e
+    case "$blocked_command" in
+        delete) run_queue delete AbC-123 </dev/null >"$TMP/postconf-fail-delete.out" 2>&1 ;;
+        purge) run_queue purge --snapshot </dev/null >"$TMP/postconf-fail-purge.out" 2>&1 ;;
+        clear) run_queue clear </dev/null >"$TMP/postconf-fail-clear.out" 2>&1 ;;
+    esac
+    blocked_rc=$?
+    set -e
+    [[ $blocked_rc -ne 0 ]] || fail "$blocked_command accepted an unreadable long-ID setting"
+    grep -Fq 'could not be read' "$TMP/postconf-fail-$blocked_command.out" \
+        || fail "$blocked_command postconf failure is not explicit"
+    assert_no_destructive_postsuper
+done
+pass 'destructive operations fail closed when postconf cannot be read'
+
+write_inventory <<'EOF_SAME_METADATA_REPLACEMENT'
+{"queue_id":"AbC-123","queue_name":"deferred","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test","delay_reason":"connection timed out"}],"test_marker":"replacement-with-same-normalized-identity"}
+EOF_SAME_METADATA_REPLACEMENT
+: >"$CALLS"
+VW_TEST_LONG_QUEUE_IDS=no
+VW_TEST_POSTCONF_FAIL=false
+VW_EMAIL_QUEUE_CONFIRM=delete:AbC-123
+export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL VW_EMAIL_QUEUE_CONFIRM
+if run_queue delete AbC-123 </dev/null >"$TMP/same-metadata-short-id.out" 2>&1; then
+    fail 'same-metadata replacement was deletable without long queue IDs'
+fi
+grep -Fq 'replacement-with-same-normalized-identity' "$INVENTORY" \
+    || fail 'same-metadata replacement was changed on blocked deletion'
+assert_no_destructive_postsuper
+pass 'same-metadata replacement cannot reach deletion without long queue IDs'
+
+base_inventory
+: >"$CALLS"
+VW_TEST_LONG_QUEUE_IDS=no
+VW_TEST_POSTCONF_FAIL=false
+VW_EMAIL_QUEUE_CONFIRM=
+export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL VW_EMAIL_QUEUE_CONFIRM
+run_queue status >"$TMP/read-only-status.out"
+run_queue summary --quiet >"$TMP/read-only-summary.out"
+run_queue inspect AbC-123 >"$TMP/read-only-inspect.out"
+run_queue logs AbC-123 --tail 10 >"$TMP/read-only-logs.out"
+! grep -Fq '<postconf>' "$CALLS" || fail 'read-only commands queried the destructive long-ID prerequisite'
+VW_TEST_LONG_QUEUE_IDS=yes
+VW_TEST_POSTCONF_FAIL=true
+export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL
+run_queue summary --quiet >"$TMP/read-only-postconf-fail.out"
+! grep -Fq '<postconf>' "$CALLS" || fail 'read-only commands queried an unavailable postconf path'
+pass 'read-only commands remain available without long-ID verification'
+
+base_inventory
+: >"$CALLS"
+VW_TEST_LONG_QUEUE_IDS=no
+VW_TEST_POSTCONF_FAIL=false
+export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL
+run_queue retry AbC-123 >"$TMP/retry-short-id.out" 2>"$TMP/retry-short-id.err"
+grep -Fq 'destructive queue operations remain blocked' "$TMP/retry-short-id.err" \
+    || fail 'targeted retry did not warn when long IDs were disabled'
+grep -Fq '<postqueue> <-i> <AbC-123>' "$CALLS" \
+    || fail 'targeted retry was incorrectly blocked by the long-ID warning'
+VW_EMAIL_QUEUE_CONFIRM=retry-all
+export VW_EMAIL_QUEUE_CONFIRM
+run_queue retry --all </dev/null >"$TMP/retry-all-short-id.out" 2>"$TMP/retry-all-short-id.err"
+grep -Fq 'destructive queue operations remain blocked' "$TMP/retry-all-short-id.err" \
+    || fail 'retry-all did not warn when long IDs were disabled'
+grep -Fq '<postqueue> <-f>' "$CALLS" \
+    || fail 'retry-all was incorrectly blocked by the long-ID warning'
+VW_TEST_LONG_QUEUE_IDS=yes
+VW_TEST_POSTCONF_FAIL=true
+VW_EMAIL_QUEUE_CONFIRM=
+export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL VW_EMAIL_QUEUE_CONFIRM
+run_queue retry AbC-123 >"$TMP/retry-postconf-fail.out" 2>"$TMP/retry-postconf-fail.err"
+grep -Fq 'Could not verify Postfix enable_long_queue_ids' "$TMP/retry-postconf-fail.err" \
+    || fail 'targeted retry did not warn when postconf was unreadable'
+pass 'retry operations remain available with clear long-ID warnings'
 }
 
 script="$ROOT/utilities/email-queue.sh"
@@ -271,7 +533,11 @@ grep -Fq 'postconf -h enable_long_queue_ids' "$script"     || fail 'runtime long
 grep -Fq 'umask 077' "$script" || fail 'private temporary-file umask is missing'
 grep -Fq 'POSTFIX_enable_long_queue_ids=${POSTFIX_ENABLE_LONG_QUEUE_IDS:-yes}'     "$ROOT/docker-compose.yml.example"     || fail 'Compose does not enable long queue IDs by default'
 grep -Fq 'POSTFIX_ENABLE_LONG_QUEUE_IDS=yes' "$ROOT/.env.example"     || fail 'long queue-ID operator setting is not documented in .env.example'
-pass 'static queue safety and long-ID defence-in-depth contract'
+grep -Fq '_require_long_queue_ids "targeted deletion"' "$script" \
+    || fail 'targeted deletion does not require verified long queue IDs'
+grep -Fq '_require_long_queue_ids "snapshot purge"' "$script" \
+    || fail 'snapshot purge does not require verified long queue IDs'
+pass 'static queue safety and mandatory long-ID contract'
 
 if (( EUID != 0 )); then
     if env PATH="$BIN:$PATH" VW_TEST_DOCKER_CALLS="$CALLS" \
@@ -318,6 +584,7 @@ grep -Fq 'Total messages: 2' "$TMP/summary.txt" || fail 'text summary count miss
 grep -Fq 'Total size:' "$TMP/summary.txt" || fail 'text summary size missing'
 pass 'summary text, quiet, and deterministic JSON'
 
+
 VW_TEST_MALFORMED_INVENTORY=true
 export VW_TEST_MALFORMED_INVENTORY
 if run_queue summary --quiet >"$TMP/malformed.out" 2>&1; then
@@ -338,6 +605,10 @@ grep -Fqi 'sensitive' "$TMP/inspect-body.err" || fail 'inspect --body warning mi
 grep -Fq '<--user> <root> <postfix> <postcat>' "$CALLS" || fail 'postcat was not root-operated inside the container'
 pass 'exact validation and body opt-in'
 
+
+VW_TEST_LONG_QUEUE_IDS=yes
+VW_TEST_POSTCONF_FAIL=false
+export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL
 base_inventory
 : >"$CALLS"
 run_queue retry AbC-123 >"$TMP/retry.out"
@@ -577,11 +848,13 @@ export VW_EMAIL_QUEUE_CONFIRM VW_TEST_BLOCK_AFTER_HOLD_MARKER VW_TEST_BLOCK_AFTE
         "VW_TEST_ALREADY_ABSENT_DELETE_ID=" \
         "VW_TEST_FAIL_RETRY_ID=" \
         "VW_TEST_REUSE_ID_ON_HOLD=" \
+        "VW_TEST_REUSE_SAME_ID_ON_HOLD=" \
         "VW_TEST_REMOVE_ID_ON_HOLD=" \
         "VW_TEST_ADD_NEW_ON_HOLD=false" \
         "VW_TEST_FAIL_HOLD_ID=" \
         "VW_TEST_FAIL_RELEASE_ID=" \
         "VW_TEST_LONG_QUEUE_IDS=yes" \
+        "VW_TEST_POSTCONF_FAIL=false" \
         "VW_TEST_BLOCK_AFTER_HOLD_MARKER=$signal_marker" \
         "VW_TEST_BLOCK_AFTER_HOLD_RELEASE=$signal_release" \
         "VW_TEST_LOG_OUTPUT=Jul 28 postfix test" \
@@ -607,8 +880,8 @@ for _ in $(seq 1 200); do
     sleep 0.01
 done
 if [[ "$signal_ready" != true ]]; then
-    kill -KILL -- "-$signal_pid" 2>/dev/null || true
-    wait "$signal_pid" 2>/dev/null || true
+    stop_test_process_group "$signal_pid"
+    signal_pid=""
     fail 'signal rollback test did not reach the post-hold synchronization marker'
 fi
 kill -TERM -- "-$signal_pid"
@@ -616,6 +889,8 @@ set +e
 wait "$signal_pid"
 signal_rc=$?
 set -e
+stop_test_process_group "$signal_pid"
+signal_pid=""
 [[ $signal_rc -eq 143 ]] || fail "signal rollback returned $signal_rc instead of 143"
 grep -Fq '"queue_id":"SIGNAL-NEW","queue_name":"deferred"' "$INVENTORY" \
     || fail 'SIGTERM cleanup did not release the newly held survivor'
@@ -634,26 +909,34 @@ pass 'signal cleanup releases only newly introduced holds and frees the mutation
 base_inventory
 VW_EMAIL_QUEUE_CONFIRM=retry-all
 export VW_EMAIL_QUEUE_CONFIRM
-(
-    exec 8>"$LOCK_FILE"
+setsid bash -c '
+    set -euo pipefail
+    lock_file=$1
+    ready_file=$2
+    exec 8>"$lock_file"
     flock 8
-    : >"$TMP/lock-ready"
-    sleep 30
-) &
+    : >"$ready_file"
+    exec sleep 30
+' _ "$LOCK_FILE" "$TMP/lock-ready" &
 lock_pid=$!
 for _ in $(seq 1 100); do
     [[ -e "$TMP/lock-ready" ]] && break
     sleep 0.01
 done
 if run_queue retry --all </dev/null >"$TMP/lock.out" 2>&1; then
-    kill "$lock_pid" 2>/dev/null || true
-    wait "$lock_pid" 2>/dev/null || true
+    stop_test_process_group "$lock_pid"
+    lock_pid=""
     fail 'concurrent queue mutation acquired an already-held lock'
 fi
-kill "$lock_pid" 2>/dev/null || true
-wait "$lock_pid" 2>/dev/null || true
+stop_test_process_group "$lock_pid"
+lock_pid=""
 grep -Fq 'Another Postfix queue mutation is already running' "$TMP/lock.out" \
     || fail 'lock contention error is not actionable'
+exec {lock_probe_fd}>"$LOCK_FILE"
+flock -n "$lock_probe_fd" \
+    || fail 'lock-holder test process group survived cleanup'
+flock -u "$lock_probe_fd"
+exec {lock_probe_fd}>&-
 pass 'mutating queue commands use an exclusive host-side lock'
 
 VW_TEST_POSTFIX_RUNNING=false
@@ -664,4 +947,5 @@ fi
 grep -Fq "Compose service 'postfix' is not running" "$TMP/stopped.out" || fail 'stopped service error is not actionable'
 pass 'stopped Postfix failure'
 
+run_hardening_tests
 printf 'Postfix queue operation tests passed.\n'

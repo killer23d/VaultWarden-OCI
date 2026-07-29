@@ -530,15 +530,22 @@ sudo make email-queue-logs QUEUE_ID=AbC-123 EMAIL_QUEUE_TAIL=500
 ```
 
 Use `EMAIL_QUEUE_BODY=true` only when message-body disclosure is necessary and
-safe. Targeted deletion, retry-all, and snapshot purge require exact confirmation
-in `utilities/email-queue.sh`. Targeted deletion holds only the selected exact ID,
-compares its current identity with the pre-confirmation record, and deletes only
-a held match. A reused ID is preserved and reported; a newly introduced hold is
-released after mismatch, failure, or interruption when possible. A pre-existing
-hold remains held following failure. `email-queue-purge` applies the same identity
-principle to its captured snapshot with bounded inventories. The old
-`email-queue-clear` target remains a deprecated compatibility alias for the same
-identity-verified snapshot behavior.
+safe. Targeted deletion, snapshot purge, and the deprecated clear alias fail
+closed unless the effective Postfix setting is `enable_long_queue_ids=yes`. If
+it is disabled or cannot be read, set `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run
+`sudo make up` to recreate or apply Postfix, verify the effective setting, and
+retry. Retry operations remain available with a warning.
+
+Targeted deletion holds only the selected exact ID, compares its current
+identity with the pre-confirmation record, and deletes only a held match. A
+reused ID is preserved and reported; a newly introduced hold is released after
+mismatch, failure, or interruption when possible. A pre-existing hold remains
+held following failure. Snapshot purge applies the same identity principle to
+its captured set with bounded inventories. Metadata comparison is defence in
+depth, not a replacement for long queue IDs. Equivalent duplicate
+`postqueue -j` records are counted once, while conflicting identities for one
+ID fail closed before mutation. The old `email-queue-clear` target remains a
+deprecated compatibility alias for the same protected snapshot behavior.
 
 Normal production mail is Postfix-first. Vaultwarden talks to the internal Postfix sidecar; Postfix owns upstream SMTP TLS/authentication/queueing. A successful queue retry or an empty queue does not prove final recipient delivery.
 

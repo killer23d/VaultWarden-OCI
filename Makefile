@@ -286,7 +286,7 @@ email-queue-retry-all: ## Retry all queued messages after exact confirmation
 	$(call require-root)
 	@./utilities/email-queue.sh retry --all
 
-email-queue-delete: ## Hold, identity-verify, and delete one exact QUEUE_ID
+email-queue-delete: ## Delete one exact QUEUE_ID; requires verified long IDs
 	$(call require-root)
 	@./utilities/email-queue.sh delete "$${QUEUE_ID}"
 
@@ -298,11 +298,11 @@ email-queue-logs: ## Show Postfix logs (QUEUE_ID optional, EMAIL_QUEUE_TAIL defa
 		./utilities/email-queue.sh logs --tail "$${EMAIL_QUEUE_TAIL}"; \
 	fi
 
-email-queue-purge: ## Purge only identity-matched messages from a confirmed queue snapshot
+email-queue-purge: ## Purge identity matches; requires verified long IDs
 	$(call require-root)
 	@./utilities/email-queue.sh purge --snapshot
 
-email-queue-clear: ## Deprecated alias for identity-verified snapshot purge
+email-queue-clear: ## Deprecated long-ID-gated alias for snapshot purge
 	$(call require-root)
 	@./utilities/email-queue.sh clear
 

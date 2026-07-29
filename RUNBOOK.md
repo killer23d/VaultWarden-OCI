@@ -76,11 +76,13 @@ A Docker-group re-login is not part of the production golden path. The productio
 | Postfix logs | `sudo make logs-postfix` |
 | CrowdSec logs | `sudo make logs-crowdsec` |
 
-Targeted deletion holds only the selected ID after confirmation and verifies
-that the message identity still matches before deletion. Snapshot purge applies
-the same rule to its captured set. Reused IDs and partial failures are preserved,
-reported, and return nonzero. Do not run direct Postfix administrative commands
-concurrently with the utility.
+Targeted deletion and snapshot purge require the effective Postfix setting
+`enable_long_queue_ids=yes`. If verification fails, set
+`POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run `sudo make up`, verify with `postconf`,
+and retry. The utility then holds exact IDs and checks metadata as defence in
+depth. Equivalent queue-list duplicates are counted once; conflicting identities
+fail closed. Do not run direct Postfix administrative commands concurrently with
+the utility.
 
 When an SSH session drops during setup, backup, restore, update, storage migration, secrets work, or another guarded mutation, start with:
 

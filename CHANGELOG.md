@@ -21,6 +21,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Added root-operated Postfix queue summary, inspection, targeted retry/deletion, bounded log filtering, and confirmation-gated snapshot purge workflows across the utility, Makefile, dashboard, tests, and operator documentation. The deprecated clear alias now uses the same snapshot-only deletion path.
 - Hardened snapshot purge against Postfix queue-ID reuse with stable identity verification, a host mutation lock, hold/release rollback, fixed-count queue inventories, exact-ID batching, and long queue IDs as defence in depth.
 - Closed the targeted-delete confirmation race by holding the selected queue ID, revalidating its stable identity, preserving reused IDs, and rolling back only newly introduced holds after failures or handled signals.
+- Made effective `enable_long_queue_ids=yes` a fail-closed prerequisite for targeted deletion, snapshot purge, and deprecated clear; legitimate duplicate queue-list records are now normalized safely while conflicting identities block mutation.
 
 ### Changed
 

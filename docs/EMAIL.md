@@ -159,15 +159,29 @@ contain credentials, password-reset links, or other sensitive content.
 
 Single-message retry operates only on the selected ID. Retry-all can increase
 delivery load when messages remain undeliverable and therefore requires the
-exact interactive token `RETRY ALL`. Targeted deletion requires
-`DELETE QUEUE_ID`, where `QUEUE_ID` is the selected case-sensitive ID. After
-confirmation, the utility places that exact ID on hold when needed, captures a
-fresh inventory, and deletes only if arrival time, size, envelope sender, and
-recipients still match the pre-confirmation identity. A reused ID is released
-when this command introduced the hold, preserved, reported, and returned as a
-nonzero result. A selected original that is already absent is reported without
-deleting another message. A message held before the command remains held if
-deletion fails.
+exact interactive token `RETRY ALL`. Retry operations remain available when
+long queue IDs cannot be verified, but the utility emits a warning because all
+destructive operations stay blocked.
+
+Targeted deletion and snapshot purge require the effective runtime setting
+`enable_long_queue_ids=yes`. The utility checks this before confirmation or any
+hold, release, or deletion call. When the setting is disabled or cannot be read,
+set `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run `sudo make up` so Compose recreates
+or applies the Postfix service, and verify the effective value before retrying:
+
+```bash
+sudo docker compose exec -T postfix postconf -h enable_long_queue_ids
+```
+
+Targeted deletion requires `DELETE QUEUE_ID`, where `QUEUE_ID` is the selected
+case-sensitive ID. After confirmation, the utility places that exact ID on hold
+when needed, captures a fresh inventory, and deletes only if arrival time, size,
+envelope sender, and recipients still match the pre-confirmation identity. This
+metadata comparison remains defence in depth; it is not a substitute for
+non-repeating long queue IDs. A reused ID is released when this command
+introduced the hold, preserved, reported, and returned as a nonzero result. A
+selected original that is already absent is reported without deleting another
+message. A message held before the command remains held if deletion fails.
 
 The destructive whole-queue workflow is snapshot based:
 
@@ -220,18 +234,24 @@ accepted only by this deprecated alias and should be migrated to
 
 Exit status is `0` for success (including an empty queue, an already-absent
 selected original, or no matching log lines), `1` for operational failure,
-cancellation, identity mismatch, or partial destructive failure, and `2` for
-invalid usage. Signal exits are `129` for SIGHUP, `130` for SIGINT, and `143` for
-SIGTERM. Within the utility's host lock, Postfix hold prevents normal delivery
-from reopening the verified-ID window for targeted deletion and snapshot purge.
+cancellation, identity mismatch, unverifiable long queue IDs, or partial
+destructive failure, and `2` for invalid usage. Signal exits are `129` for
+SIGHUP, `130` for SIGINT, and `143` for SIGTERM.
+
+Machine-readable inventory normalization accepts legitimate duplicate
+`postqueue -j` records when their normalized identities match. Each message is
+counted once; `hold` wins when duplicate records report different queue names,
+and other queue names are selected deterministically. Conflicting identities for
+one queue ID are treated as malformed inventory, reported without message-body
+content, and block destructive work before Postfix mutation.
+
+Within the utility's host lock, Postfix hold prevents normal delivery from
+reopening the verified-ID window for targeted deletion and snapshot purge.
 Direct `postsuper`, `postqueue`, or other administrative actions that bypass the
 utility are outside that lock and must not run concurrently with destructive
-queue work. The implementation therefore makes a conditional safety guarantee:
-only a held record whose captured identity still matches is eligible for
-deletion under that operating assumption. An empty queue does not by itself
-prove the mail path is healthy. Postfix acceptance or a requested retry also
-does not prove final recipient delivery; use the logs and the upstream
-provider's delivery evidence.
+queue work. An empty queue does not by itself prove the mail path is healthy.
+Postfix acceptance or a requested retry also does not prove final recipient
+delivery; use the logs and the upstream provider's delivery evidence.
 ## Operational alert routing
 
 Repository operational email uses `lib/email.sh`.
