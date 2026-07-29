@@ -87,6 +87,11 @@ PY_MUTATE
 
 read_ids() {
     mapfile -t POSTSUPER_IDS
+    {
+        printf 'stdin'
+        printf ' <%s>' "${POSTSUPER_IDS[@]}"
+        printf '\n'
+    } >>"${VW_TEST_DOCKER_CALLS:?}"
 }
 
 if [[ "${1:-}" == info ]]; then
@@ -168,6 +173,7 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
                 -d) fail_id="${VW_TEST_FAIL_DELETE_IDS:-${VW_TEST_FAIL_DELETE_ID:-}}" ;;
                 *) exit 97 ;;
             esac
+            set +e
             python3 - "$op" "$fail_id" "${VW_TEST_INVENTORY:?}" "${POSTSUPER_IDS[@]}" <<'PY_BATCH'
 import json, sys
 from pathlib import Path
@@ -188,7 +194,15 @@ for queue_id in ids:
 path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
 raise SystemExit(1 if fail_ids.intersection(ids) else 0)
 PY_BATCH
-            exit $?
+            batch_rc=$?
+            set -e
+            if [[ "$op" == -h && -n "${VW_TEST_BLOCK_AFTER_HOLD_MARKER:-}" ]]; then
+                : >"$VW_TEST_BLOCK_AFTER_HOLD_MARKER"
+                while [[ ! -e "${VW_TEST_BLOCK_AFTER_HOLD_RELEASE:-/nonexistent}" ]]; do
+                    sleep 0.05
+                done
+            fi
+            exit "$batch_rc"
         fi
     fi
 fi
@@ -221,6 +235,8 @@ run_queue() {
         "VW_TEST_FAIL_HOLD_ID=${VW_TEST_FAIL_HOLD_ID:-}" \
         "VW_TEST_FAIL_RELEASE_ID=${VW_TEST_FAIL_RELEASE_ID:-}" \
         "VW_TEST_LONG_QUEUE_IDS=${VW_TEST_LONG_QUEUE_IDS:-yes}" \
+        "VW_TEST_BLOCK_AFTER_HOLD_MARKER=${VW_TEST_BLOCK_AFTER_HOLD_MARKER:-}" \
+        "VW_TEST_BLOCK_AFTER_HOLD_RELEASE=${VW_TEST_BLOCK_AFTER_HOLD_RELEASE:-}" \
         "VW_TEST_LOG_OUTPUT=${VW_TEST_LOG_OUTPUT:-Jul 28 postfix ABC[123]: queued}" \
         "VW_TEST_INVENTORY_CALLS=$INVENTORY_CALLS" \
         "VW_EMAIL_QUEUE_LOCK_FILE=$LOCK_FILE" \
@@ -248,6 +264,9 @@ grep -Fq 'VAULTWARDEN_TEST_ALLOW_NON_ROOT:-0' "$script" || fail 'non-root test g
 grep -Fq 'postsuper -h -' "$script" || fail 'snapshot purge does not batch exact hold IDs through stdin'
 grep -Fq 'postsuper -d -' "$script" || fail 'snapshot purge does not batch exact delete IDs through stdin'
 grep -Fq 'flock -n' "$script" || fail 'mutating queue lock is missing'
+grep -Fq '_HOLD_ROLLBACK_ACTIVE' "$script" || fail 'generic hold rollback state is missing'
+! grep -Fq '_PURGE_ROLLBACK_' "$script" || fail 'purge-specific rollback state remains'
+grep -Fq "trap '_signal_exit 129' HUP" "$script" || fail 'explicit SIGHUP exit handling is missing'
 grep -Fq 'postconf -h enable_long_queue_ids' "$script"     || fail 'runtime long queue-ID verification is missing'
 grep -Fq 'umask 077' "$script" || fail 'private temporary-file umask is missing'
 grep -Fq 'POSTFIX_enable_long_queue_ids=${POSTFIX_ENABLE_LONG_QUEUE_IDS:-yes}'     "$ROOT/docker-compose.yml.example"     || fail 'Compose does not enable long queue IDs by default'
@@ -346,10 +365,87 @@ if run_queue delete AbC-123 </dev/null >"$TMP/delete-wrong.out" 2>&1; then
 fi
 VW_EMAIL_QUEUE_CONFIRM=delete:AbC-123
 export VW_EMAIL_QUEUE_CONFIRM
+: >"$CALLS"
+rm -f "${INVENTORY}.hold-event"
 run_queue delete AbC-123 </dev/null >"$TMP/delete.out"
-! grep -Fq '"queue_id":"AbC-123"' "$INVENTORY" || fail 'delete did not remove selected ID'
-grep -Fq '"queue_id":"XYZ987"' "$INVENTORY" || fail 'delete removed another ID'
-pass 'single deletion is ID-bound'
+! grep -Fq '"queue_id":"AbC-123"' "$INVENTORY" || fail 'delete did not remove selected identity'
+grep -Fq '"queue_id":"XYZ987"' "$INVENTORY" || fail 'delete removed an unrelated message'
+grep -Fq '<postsuper> <-h> <->' "$CALLS" || fail 'targeted delete did not hold through exact stdin mode'
+grep -Fq '<postsuper> <-d> <->' "$CALLS" || fail 'targeted delete did not delete through exact stdin mode'
+grep -Fq 'stdin <AbC-123>' "$CALLS" || fail 'targeted delete did not pass the exact case-sensitive ID record'
+! grep -Fq 'stdin <abc-123>' "$CALLS" || fail 'targeted delete changed queue-ID case'
+grep -Fq '<postconf> <-h> <enable_long_queue_ids>' "$CALLS" \
+    || fail 'targeted delete did not verify effective long queue IDs'
+pass 'targeted deletion holds, identity-verifies, and deletes only the selected message'
+
+rm -f "${INVENTORY}.hold-event"
+base_inventory
+VW_TEST_REUSE_ID_ON_HOLD=AbC-123
+export VW_TEST_REUSE_ID_ON_HOLD
+if run_queue delete AbC-123 </dev/null >"$TMP/delete-reuse.out" 2>&1; then
+    fail 'targeted delete accepted a reused queue ID'
+fi
+grep -Fq '"queue_id":"AbC-123"' "$INVENTORY" || fail 'reused-ID replacement was deleted'
+grep -Fq 'replacement@example.test' "$INVENTORY" || fail 'replacement identity was not preserved'
+grep -Fq '"queue_name":"deferred"' "$INVENTORY" || fail 'new hold on replacement was not released'
+grep -Fqi 'different message' "$TMP/delete-reuse.out" || fail 'identity mismatch was not reported'
+unset VW_TEST_REUSE_ID_ON_HOLD
+pass 'targeted deletion skips and releases a reused-ID replacement'
+
+rm -f "${INVENTORY}.hold-event"
+base_inventory
+VW_TEST_REMOVE_ID_ON_HOLD=AbC-123
+export VW_TEST_REMOVE_ID_ON_HOLD
+run_queue delete AbC-123 </dev/null >"$TMP/delete-absent.out" 2>&1
+! grep -Fq '"queue_id":"AbC-123"' "$INVENTORY" || fail 'disappeared original remained unexpectedly'
+grep -Fq '"queue_id":"XYZ987"' "$INVENTORY" || fail 'absent-original path deleted an unrelated message'
+grep -Fqi 'already absent' "$TMP/delete-absent.out" || fail 'already-absent original was not reported'
+unset VW_TEST_REMOVE_ID_ON_HOLD
+pass 'targeted deletion reports an original that disappears at the hold boundary'
+
+rm -f "${INVENTORY}.hold-event"
+base_inventory
+: >"$CALLS"
+VW_TEST_FAIL_HOLD_ID=AbC-123
+export VW_TEST_FAIL_HOLD_ID
+if run_queue delete AbC-123 </dev/null >"$TMP/delete-hold-fail.out" 2>&1; then
+    fail 'targeted delete succeeded without holding the matching message'
+fi
+grep -Fq '"queue_id":"AbC-123","queue_name":"deferred"' "$INVENTORY" \
+    || fail 'hold-failure path mutated the matching message'
+! grep -Fq '<postsuper> <-d> <->' "$CALLS" || fail 'hold-failure path attempted deletion'
+grep -Fqi 'could not place the matching message on hold' "$TMP/delete-hold-fail.out" \
+    || fail 'hold failure was not reported'
+unset VW_TEST_FAIL_HOLD_ID
+pass 'targeted deletion fails closed when hold does not stabilize the match'
+
+rm -f "${INVENTORY}.hold-event"
+base_inventory
+VW_TEST_FAIL_DELETE_IDS=AbC-123
+export VW_TEST_FAIL_DELETE_IDS
+if run_queue delete AbC-123 </dev/null >"$TMP/delete-fail-normal.out" 2>&1; then
+    fail 'targeted delete returned success after deletion failure'
+fi
+grep -Fq '"queue_id":"AbC-123","queue_name":"deferred"' "$INVENTORY" \
+    || fail 'newly held deletion survivor was not released'
+grep -Fqi 'failed to delete' "$TMP/delete-fail-normal.out" || fail 'deletion failure was not reported'
+unset VW_TEST_FAIL_DELETE_IDS
+pass 'targeted deletion releases a newly held survivor after deletion failure'
+
+rm -f "${INVENTORY}.hold-event"
+write_inventory <<'EOF_DELETE_PREHELD'
+{"queue_id":"AbC-123","queue_name":"hold","arrival_time":1700000000,"message_size":100,"sender":"sender@example.test","recipients":[{"address":"one@example.test"}]}
+{"queue_id":"XYZ987","queue_name":"deferred","arrival_time":1700000100,"message_size":250,"sender":"second@example.test","recipients":[{"address":"two@example.test"}]}
+EOF_DELETE_PREHELD
+VW_TEST_FAIL_DELETE_IDS=AbC-123
+export VW_TEST_FAIL_DELETE_IDS
+if run_queue delete AbC-123 </dev/null >"$TMP/delete-fail-preheld.out" 2>&1; then
+    fail 'pre-held deletion failure returned success'
+fi
+grep -Fq '"queue_id":"AbC-123","queue_name":"hold"' "$INVENTORY" \
+    || fail 'message held before targeted delete did not remain held'
+unset VW_TEST_FAIL_DELETE_IDS
+pass 'targeted deletion preserves a pre-existing hold after deletion failure'
 
 base_inventory
 VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
@@ -456,6 +552,84 @@ grep -Fq 'literal.ABC[123]' "$TMP/logs.out" || fail 'logs did not use fixed-stri
 run_queue logs DOES-NOT-MATCH --tail 100 >"$TMP/no-logs.out" 2>&1
 grep -Fq 'No Postfix log lines matched' "$TMP/no-logs.out" || fail 'no-match log result was not truthful'
 pass 'log tail validation and fixed-string filtering'
+
+write_inventory <<'EOF_SIGNAL'
+{"queue_id":"SIGNAL-NEW","queue_name":"deferred","arrival_time":1700000200,"message_size":300,"sender":"signal@example.test","recipients":[{"address":"signal-recipient@example.test"}]}
+{"queue_id":"SIGNAL-HELD","queue_name":"hold","arrival_time":1700000300,"message_size":400,"sender":"preheld@example.test","recipients":[{"address":"preheld-recipient@example.test"}]}
+EOF_SIGNAL
+rm -f "${INVENTORY}.hold-event"
+signal_marker="$TMP/targeted-delete-hold-ready"
+signal_release="$TMP/targeted-delete-hold-release"
+rm -f "$signal_marker" "$signal_release"
+VW_EMAIL_QUEUE_CONFIRM=delete:SIGNAL-NEW
+VW_TEST_BLOCK_AFTER_HOLD_MARKER="$signal_marker"
+VW_TEST_BLOCK_AFTER_HOLD_RELEASE="$signal_release"
+export VW_EMAIL_QUEUE_CONFIRM VW_TEST_BLOCK_AFTER_HOLD_MARKER VW_TEST_BLOCK_AFTER_HOLD_RELEASE
+(
+    exec setsid env \
+        "PATH=$BIN:$PATH" \
+        "VW_TEST_DOCKER_CALLS=$CALLS" \
+        "VW_TEST_INVENTORY=$INVENTORY" \
+        "VW_TEST_POSTFIX_RUNNING=true" \
+        "VW_TEST_MALFORMED_INVENTORY=false" \
+        "VW_TEST_FAIL_DELETE_ID=" \
+        "VW_TEST_FAIL_DELETE_IDS=" \
+        "VW_TEST_ALREADY_ABSENT_DELETE_ID=" \
+        "VW_TEST_FAIL_RETRY_ID=" \
+        "VW_TEST_REUSE_ID_ON_HOLD=" \
+        "VW_TEST_REMOVE_ID_ON_HOLD=" \
+        "VW_TEST_ADD_NEW_ON_HOLD=false" \
+        "VW_TEST_FAIL_HOLD_ID=" \
+        "VW_TEST_FAIL_RELEASE_ID=" \
+        "VW_TEST_LONG_QUEUE_IDS=yes" \
+        "VW_TEST_BLOCK_AFTER_HOLD_MARKER=$signal_marker" \
+        "VW_TEST_BLOCK_AFTER_HOLD_RELEASE=$signal_release" \
+        "VW_TEST_LOG_OUTPUT=Jul 28 postfix test" \
+        "VW_TEST_INVENTORY_CALLS=$INVENTORY_CALLS" \
+        "VW_EMAIL_QUEUE_LOCK_FILE=$LOCK_FILE" \
+        "TMPDIR=$QUEUE_TMP" \
+        "VW_EMAIL_QUEUE_CONFIRM=delete:SIGNAL-NEW" \
+        "VW_EMAIL_QUEUE_CLEAR_CONFIRMED=" \
+        "VW_TEST_MODE=1" \
+        "VAULTWARDEN_TEST_ALLOW_NON_ROOT=1" \
+        bash "$FIXTURE/utilities/email-queue.sh" delete SIGNAL-NEW
+) >"$TMP/signal.out" 2>&1 &
+signal_pid=$!
+signal_ready=false
+for _ in $(seq 1 200); do
+    if [[ -e "$signal_marker" ]]; then
+        signal_ready=true
+        break
+    fi
+    if ! kill -0 "$signal_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.01
+done
+if [[ "$signal_ready" != true ]]; then
+    kill -KILL -- "-$signal_pid" 2>/dev/null || true
+    wait "$signal_pid" 2>/dev/null || true
+    fail 'signal rollback test did not reach the post-hold synchronization marker'
+fi
+kill -TERM -- "-$signal_pid"
+set +e
+wait "$signal_pid"
+signal_rc=$?
+set -e
+[[ $signal_rc -eq 143 ]] || fail "signal rollback returned $signal_rc instead of 143"
+grep -Fq '"queue_id":"SIGNAL-NEW","queue_name":"deferred"' "$INVENTORY" \
+    || fail 'SIGTERM cleanup did not release the newly held survivor'
+grep -Fq '"queue_id":"SIGNAL-HELD","queue_name":"hold"' "$INVENTORY" \
+    || fail 'SIGTERM cleanup released a pre-existing hold'
+if find "$QUEUE_TMP" -mindepth 1 -print -quit | grep -q .; then
+    fail 'SIGTERM cleanup left private temporary files behind'
+fi
+unset VW_TEST_BLOCK_AFTER_HOLD_MARKER VW_TEST_BLOCK_AFTER_HOLD_RELEASE
+VW_EMAIL_QUEUE_CONFIRM=
+export VW_EMAIL_QUEUE_CONFIRM
+run_queue retry SIGNAL-NEW >"$TMP/post-signal-lock.out" \
+    || fail 'mutation lock was not available after signal cleanup'
+pass 'signal cleanup releases only newly introduced holds and frees the mutation lock'
 
 base_inventory
 VW_EMAIL_QUEUE_CONFIRM=retry-all

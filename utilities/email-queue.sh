@@ -16,8 +16,8 @@ source "${PROJECT_ROOT}/lib/docker.sh"
 _TEMP_PATHS=()
 _NEW_TEMP_DIR=""
 _MUTATION_LOCK_FD=""
-_PURGE_ROLLBACK_FILE=""
-_PURGE_ROLLBACK_ACTIVE=false
+_HOLD_ROLLBACK_FILE=""
+_HOLD_ROLLBACK_ACTIVE=false
 
 show_help() {
     cat <<'EOF'
@@ -46,7 +46,9 @@ COMMANDS:
     retry ID                Schedule immediate delivery for one exact queue ID.
     retry --all             Flush all currently queued mail after exact
                             confirmation.
-    delete ID               Delete one exact queue ID after exact confirmation.
+    delete ID               Hold and identity-verify one exact queue message
+                            after exact confirmation, then delete only that held
+                            identity match.
     logs [ID] [--tail N]    Show Postfix logs, optionally filtered by a fixed
                             queue-ID string. N defaults to 200 and is limited to
                             1..5000.
@@ -68,28 +70,30 @@ CONFIRMATION TOKENS:
 
 EXIT STATUS:
     0  Success, including an empty queue or no matching log lines.
-    1  Operational failure, cancellation, or partial destructive failure.
+    1  Operational failure, cancellation, identity mismatch, or partial destructive failure.
     2  Invalid usage.
+    129, 130, 143  Interrupted by SIGHUP, SIGINT, or SIGTERM.
 
 NOTES:
-    Mutating commands use one exclusive host-side lock. Snapshot purge compares
-    arrival time, size, envelope sender, and recipients before deletion. It uses
-    Postfix hold to stabilize matching messages and restores newly introduced
-    holds after partial failure. External administrators that bypass this utility
-    are outside the host lock and must not mutate the queue during a purge.
+    Mutating commands use one exclusive host-side lock. Targeted deletion and
+    snapshot purge compare arrival time, size, envelope sender, and recipients,
+    then require a matching record to be held before deletion. Newly introduced
+    holds are restored after failure or interruption when possible; pre-existing
+    holds are preserved. External administrators that bypass this utility are
+    outside the host lock and must not mutate the queue during destructive work.
     A retry or Postfix acceptance does not prove final recipient delivery.
 EOF
 }
 
-_best_effort_purge_rollback() {
-    local rollback_file="${_PURGE_ROLLBACK_FILE:-}"
-    if [[ "${_PURGE_ROLLBACK_ACTIVE:-false}" != true \
+_best_effort_hold_rollback() {
+    local rollback_file="${_HOLD_ROLLBACK_FILE:-}"
+    if [[ "${_HOLD_ROLLBACK_ACTIVE:-false}" != true \
         || -z "$rollback_file" || ! -s "$rollback_file" ]]; then
         return 0
     fi
     # Clear the guard first so an EXIT-path failure cannot recurse. This is a
     # best-effort safety net for signals and unexpected errors after holding.
-    _PURGE_ROLLBACK_ACTIVE=false
+    _HOLD_ROLLBACK_ACTIVE=false
     if declare -F _release_ids >/dev/null 2>&1; then
         _release_ids "$rollback_file" \
             || log_warn "Could not fully roll back Postfix holds during cleanup."
@@ -97,16 +101,27 @@ _best_effort_purge_rollback() {
 }
 
 _cleanup_temp() {
-    local path
-    _best_effort_purge_rollback || true
+    local original_status=$? path
+    # Prevent cleanup failures from changing the command result or recursively
+    # triggering another EXIT cleanup while rollback is in progress.
+    trap - EXIT
+    set +e
+    _best_effort_hold_rollback
     for path in "${_TEMP_PATHS[@]}"; do
         [[ -n "$path" ]] && rm -rf -- "$path"
     done
-    return 0
+    return "$original_status"
 }
+
+_signal_exit() {
+    local status="$1"
+    exit "$status"
+}
+
 trap _cleanup_temp EXIT
-trap 'exit 130' INT
-trap 'exit 143' HUP TERM
+trap '_signal_exit 130' INT
+trap '_signal_exit 129' HUP
+trap '_signal_exit 143' TERM
 
 _new_private_tempdir() {
     local dir
@@ -178,11 +193,11 @@ _acquire_mutation_lock() {
 }
 
 _verify_long_queue_ids() {
-    local value
+    local operation="${1:-queue mutation}" value
     if ! value=$(docker compose exec -T --user root postfix \
         postconf -h enable_long_queue_ids 2>/dev/null); then
         log_warn "Could not verify the effective Postfix enable_long_queue_ids value."
-        log_warn "Snapshot identity matching remains mandatory; inspect with: docker compose exec -T postfix postconf -h enable_long_queue_ids"
+        log_warn "Stable identity matching remains mandatory for $operation; inspect with: docker compose exec -T postfix postconf -h enable_long_queue_ids"
         return 0
     fi
     value=${value//$'\r'/}
@@ -191,7 +206,7 @@ _verify_long_queue_ids() {
         log_info "Postfix long queue IDs are enabled (defence in depth)."
     else
         log_warn "Postfix enable_long_queue_ids is '$value', not 'yes'."
-        log_warn "Stable identity verification still protects purge; recreate Postfix after applying the updated Compose configuration."
+        log_warn "Identity verification remains the primary protection for $operation; recreate Postfix after applying the updated Compose configuration."
     fi
 }
 
@@ -529,27 +544,181 @@ _retry_all() {
     _summary
 }
 
+_selected_queue_name() {
+    local queue_id="$1" tsv_file="$2"
+    python3 - "$queue_id" "$tsv_file" <<'PY_SELECTED_QUEUE'
+import sys
+from pathlib import Path
+
+wanted, path = sys.argv[1], Path(sys.argv[2])
+for raw in path.read_text(encoding="utf-8").splitlines():
+    fields = raw.split("\t")
+    if fields and fields[0] == wanted:
+        print(fields[1])
+        raise SystemExit(0)
+raise SystemExit(1)
+PY_SELECTED_QUEUE
+}
+
+_classify_selected_identity() {
+    local queue_id="$1" snapshot_tsv="$2" current_tsv="$3"
+    python3 - "$queue_id" "$snapshot_tsv" "$current_tsv" <<'PY_SELECTED_IDENTITY'
+import sys
+from pathlib import Path
+
+wanted = sys.argv[1]
+snapshot_path, current_path = map(Path, sys.argv[2:])
+
+def find(path):
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        fields = raw.split("\t")
+        if fields and fields[0] == wanted:
+            if len(fields) < 8:
+                raise SystemExit("invalid normalized inventory")
+            return fields
+    return None
+
+snapshot = find(snapshot_path)
+if snapshot is None:
+    raise SystemExit("selected snapshot record is missing")
+current = find(current_path)
+if current is None:
+    print("absent\t")
+elif current[5] != snapshot[5]:
+    print(f"mismatch\t{current[1]}")
+elif current[1] == "hold":
+    print("match-held\thold")
+else:
+    print(f"match-unheld\t{current[1]}")
+PY_SELECTED_IDENTITY
+}
+
 _delete_one() {
-    local queue_id="$1" tsv after_tsv
-    _make_inventory tsv || return 1
-    _validate_queue_id "$queue_id" "$tsv" || return $?
-    _print_metadata "$queue_id" "$tsv" || true
+    local queue_id="$1" delete_dir selected_ids
+    local before_raw before_tsv after_hold_raw after_hold_tsv
+    local after_delete_raw after_delete_tsv before_queue state_info state current_queue
+    local hold_rc=0 delete_rc=0 release_rc=0
+
+    _new_private_tempdir || return 1
+    delete_dir="$_NEW_TEMP_DIR"
+    selected_ids="$delete_dir/selected.ids"
+    before_raw="$delete_dir/before.ndjson"
+    before_tsv="$delete_dir/before.tsv"
+    after_hold_raw="$delete_dir/after-hold.ndjson"
+    after_hold_tsv="$delete_dir/after-hold.tsv"
+    after_delete_raw="$delete_dir/after-delete.ndjson"
+    after_delete_tsv="$delete_dir/after-delete.tsv"
+
+    _verify_long_queue_ids "targeted deletion"
+    _capture_inventory "$before_raw" "$before_tsv" || return 1
+    _validate_queue_id "$queue_id" "$before_tsv" || return $?
+    _print_metadata "$queue_id" "$before_tsv" || true
+    before_queue=$(_selected_queue_name "$queue_id" "$before_tsv") || return 1
     _confirm_exact "DELETE $queue_id" "delete:$queue_id" "Queue deletion" || return 1
-    if ! docker compose exec -T --user root postfix postsuper -d "$queue_id"; then
-        _make_inventory after_tsv || return 1
-        if ! _queue_id_exists "$queue_id" "$after_tsv"; then
-            log_warn "Queue ID $queue_id was already absent before deletion completed."
+    printf '%s\n' "$queue_id" >"$selected_ids"
+
+    # The exact selected ID is held after confirmation, then compared with the
+    # pre-confirmation identity. Holding closes the normal-delivery reuse window;
+    # direct external Postfix administration remains outside the utility lock.
+    if [[ "$before_queue" != "hold" ]]; then
+        _HOLD_ROLLBACK_FILE="$selected_ids"
+        _HOLD_ROLLBACK_ACTIVE=true
+        _hold_ids "$selected_ids" || hold_rc=$?
+    fi
+
+    if ! _capture_inventory "$after_hold_raw" "$after_hold_tsv"; then
+        log_error "Unable to verify the selected identity after the hold attempt."
+        return 1
+    fi
+    state_info=$(_classify_selected_identity "$queue_id" "$before_tsv" "$after_hold_tsv") || return 1
+    IFS=$'\t' read -r state current_queue <<<"$state_info"
+
+    case "$state" in
+        absent)
+            _HOLD_ROLLBACK_ACTIVE=false
+            log_warn "The selected original message is already absent: $queue_id"
             return 0
-        fi
-        log_error "Failed to delete queue ID $queue_id."
+            ;;
+        mismatch)
+            if [[ "$before_queue" != "hold" && "$current_queue" == "hold" ]]; then
+                _release_ids "$selected_ids" || release_rc=$?
+                if (( release_rc == 0 )); then
+                    _HOLD_ROLLBACK_ACTIVE=false
+                else
+                    log_warn "The reused queue ID could not be released immediately; cleanup will retry."
+                fi
+            else
+                _HOLD_ROLLBACK_ACTIVE=false
+            fi
+            log_error "Queue ID $queue_id now refers to a different message; the replacement was not deleted."
+            return 1
+            ;;
+        match-unheld)
+            _HOLD_ROLLBACK_ACTIVE=false
+            if (( hold_rc != 0 )); then
+                log_error "Postfix could not place the matching message on hold: $queue_id"
+            else
+                log_error "The matching message is not in the hold queue; refusing deletion: $queue_id"
+            fi
+            return 1
+            ;;
+        match-held)
+            if [[ "$before_queue" == "hold" ]]; then
+                _HOLD_ROLLBACK_ACTIVE=false
+            elif (( hold_rc != 0 )); then
+                log_warn "The hold command reported failure, but the matching message is held; continuing with identity-safe deletion."
+            fi
+            ;;
+        *)
+            log_error "Unexpected selected-message classification: $state"
+            return 1
+            ;;
+    esac
+
+    _delete_ids "$selected_ids" || delete_rc=$?
+    if ! _capture_inventory "$after_delete_raw" "$after_delete_tsv"; then
+        log_error "Unable to verify targeted deletion; cleanup will release a newly introduced hold when possible."
         return 1
     fi
-    _make_inventory after_tsv || return 1
-    if _queue_id_exists "$queue_id" "$after_tsv"; then
-        log_error "Postfix reported success but queue ID is still present: $queue_id"
-        return 1
-    fi
-    log_info "Deleted queue ID $queue_id."
+    state_info=$(_classify_selected_identity "$queue_id" "$before_tsv" "$after_delete_tsv") || return 1
+    IFS=$'\t' read -r state current_queue <<<"$state_info"
+
+    case "$state" in
+        absent|mismatch)
+            # The selected original no longer exists. Never release by queue ID in
+            # this state because a different message may now own that ID.
+            _HOLD_ROLLBACK_ACTIVE=false
+            if (( delete_rc == 0 )); then
+                log_info "Deleted the identity-verified queue message: $queue_id"
+            else
+                log_warn "The selected original became absent while deletion completed: $queue_id"
+            fi
+            return 0
+            ;;
+        match-held)
+            if [[ "$before_queue" != "hold" ]]; then
+                _release_ids "$selected_ids" || release_rc=$?
+                if (( release_rc == 0 )); then
+                    _HOLD_ROLLBACK_ACTIVE=false
+                else
+                    log_error "Failed to release the matching deletion survivor: $queue_id"
+                fi
+            else
+                _HOLD_ROLLBACK_ACTIVE=false
+            fi
+            log_error "Failed to delete the identity-verified queue message: $queue_id"
+            return 1
+            ;;
+        match-unheld)
+            _HOLD_ROLLBACK_ACTIVE=false
+            log_error "The matching message left the hold queue before deletion verification: $queue_id"
+            return 1
+            ;;
+        *)
+            log_error "Unexpected post-deletion classification: $state"
+            return 1
+            ;;
+    esac
 }
 
 _hold_ids() {
@@ -728,7 +897,7 @@ _purge_snapshot() {
     to_hold="$purge_dir/to-hold.ids"
     preheld="$purge_dir/preheld.ids"
 
-    _verify_long_queue_ids
+    _verify_long_queue_ids "snapshot purge"
     _capture_inventory "$snapshot_raw" "$snapshot_tsv" || return 1
     count=$(_render_summary quiet "$snapshot_tsv") || return 1
     _render_summary text "$snapshot_tsv"
@@ -753,8 +922,8 @@ _purge_snapshot() {
     # from removing a verified item between the post-hold inventory and batch delete.
     # Administrators invoking Postfix directly are outside this lock and must not
     # mutate the queue during the operation.
-    _PURGE_ROLLBACK_FILE="$to_hold"
-    _PURGE_ROLLBACK_ACTIVE=true
+    _HOLD_ROLLBACK_FILE="$to_hold"
+    _HOLD_ROLLBACK_ACTIVE=true
     _hold_ids "$to_hold" || log_warn "One or more snapshot IDs could not be placed on hold; identity verification will decide eligibility."
     if ! _capture_inventory "$after_hold_raw" "$after_hold_tsv"; then
         log_error "Unable to verify held snapshot identities; attempting to release IDs held by this operation."
@@ -771,7 +940,7 @@ _purge_snapshot() {
     newly_held="$purge_dir/newly_held.ids"
     rollback_pending="$purge_dir/rollback-pending.ids"
     cat "$newly_held" "$release_mismatch" >"$rollback_pending"
-    _PURGE_ROLLBACK_FILE="$rollback_pending"
+    _HOLD_ROLLBACK_FILE="$rollback_pending"
 
     if [[ -s "$release_mismatch" ]]; then
         _release_ids "$release_mismatch" || log_warn "A mismatched held queue ID could not be released immediately; cleanup will retry."
@@ -784,13 +953,13 @@ _purge_snapshot() {
     fi
     _classify_after_delete "$snapshot_tsv" "$eligible" "$after_delete_tsv" "$purge_dir" || return 1
     rollback_ids="$purge_dir/rollback.ids"
-    _PURGE_ROLLBACK_FILE="$rollback_ids"
+    _HOLD_ROLLBACK_FILE="$rollback_ids"
     if [[ -s "$rollback_ids" ]]; then
         _release_ids "$rollback_ids" || log_warn "One or more newly introduced holds could not be rolled back."
     fi
 
     _capture_inventory "$final_raw" "$final_tsv" || return 1
-    _PURGE_ROLLBACK_ACTIVE=false
+    _HOLD_ROLLBACK_ACTIVE=false
     deleted=$(_count_file_lines "$purge_dir/deleted.ids")
     absent=$(_count_file_lines "$absent_ids")
     mismatches=$(_count_file_lines "$mismatch_ids")

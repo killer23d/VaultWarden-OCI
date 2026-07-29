@@ -76,10 +76,11 @@ A Docker-group re-login is not part of the production golden path. The productio
 | Postfix logs | `sudo make logs-postfix` |
 | CrowdSec logs | `sudo make logs-crowdsec` |
 
-Snapshot purge holds captured non-held messages, verifies stable identity, and
-deletes matches only. A reused ID or partial failure is preserved, reported, and
-returns nonzero. Do not run direct Postfix administrative commands concurrently
-with the utility.
+Targeted deletion holds only the selected ID after confirmation and verifies
+that the message identity still matches before deletion. Snapshot purge applies
+the same rule to its captured set. Reused IDs and partial failures are preserved,
+reported, and return nonzero. Do not run direct Postfix administrative commands
+concurrently with the utility.
 
 When an SSH session drops during setup, backup, restore, update, storage migration, secrets work, or another guarded mutation, start with:
 

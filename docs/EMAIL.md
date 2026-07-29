@@ -157,10 +157,17 @@ format. The default inspection path prints envelope and header information but
 not the message body. `EMAIL_QUEUE_BODY=true` is explicit because bodies may
 contain credentials, password-reset links, or other sensitive content.
 
-Single-message retry and deletion operate only on the selected ID. Retry-all
-can increase delivery load when messages remain undeliverable and therefore
-requires the exact interactive token `RETRY ALL`. Single deletion requires
-`DELETE QUEUE_ID`, where `QUEUE_ID` is the selected ID.
+Single-message retry operates only on the selected ID. Retry-all can increase
+delivery load when messages remain undeliverable and therefore requires the
+exact interactive token `RETRY ALL`. Targeted deletion requires
+`DELETE QUEUE_ID`, where `QUEUE_ID` is the selected case-sensitive ID. After
+confirmation, the utility places that exact ID on hold when needed, captures a
+fresh inventory, and deletes only if arrival time, size, envelope sender, and
+recipients still match the pre-confirmation identity. A reused ID is released
+when this command introduced the hold, preserved, reported, and returned as a
+nonzero result. A selected original that is already absent is reported without
+deleting another message. A message held before the command remains held if
+deletion fails.
 
 The destructive whole-queue workflow is snapshot based:
 
@@ -211,17 +218,20 @@ live `ALL` deletion. The old `VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1` marker is
 accepted only by this deprecated alias and should be migrated to
 `VW_EMAIL_QUEUE_CONFIRM=purge-snapshot`.
 
-Exit status is `0` for success (including an empty queue or no matching log
-lines), `1` for operational failure, cancellation, identity mismatch, or partial
-destructive failure, and `2` for invalid usage. Within the utility's host lock,
-Postfix hold prevents normal delivery from reopening the verified-ID window.
+Exit status is `0` for success (including an empty queue, an already-absent
+selected original, or no matching log lines), `1` for operational failure,
+cancellation, identity mismatch, or partial destructive failure, and `2` for
+invalid usage. Signal exits are `129` for SIGHUP, `130` for SIGINT, and `143` for
+SIGTERM. Within the utility's host lock, Postfix hold prevents normal delivery
+from reopening the verified-ID window for targeted deletion and snapshot purge.
 Direct `postsuper`, `postqueue`, or other administrative actions that bypass the
-utility are outside that lock and must not run concurrently with snapshot purge.
-The implementation therefore makes a conditional safety guarantee: only a held
-record whose snapshotted identity still matches is eligible for deletion under
-that operating assumption. An empty queue does not by itself prove the mail path
-is healthy. Postfix acceptance or a requested retry also does not prove final
-recipient delivery; use the logs and the upstream provider's delivery evidence.
+utility are outside that lock and must not run concurrently with destructive
+queue work. The implementation therefore makes a conditional safety guarantee:
+only a held record whose captured identity still matches is eligible for
+deletion under that operating assumption. An empty queue does not by itself
+prove the mail path is healthy. Postfix acceptance or a requested retry also
+does not prove final recipient delivery; use the logs and the upstream
+provider's delivery evidence.
 ## Operational alert routing
 
 Repository operational email uses `lib/email.sh`.

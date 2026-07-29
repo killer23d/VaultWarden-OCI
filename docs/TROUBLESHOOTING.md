@@ -420,10 +420,12 @@ by default; use `EMAIL_QUEUE_BODY=true` only when the sensitive content is
 needed for diagnosis. An empty queue is not proof of successful recipient
 delivery, so correlate the queue state with Postfix and upstream relay evidence.
 
-If snapshot purge reports an identity mismatch or reused queue ID, the current
-message was preserved rather than deleted. Review the final counts and recent
-Postfix logs, then take a new snapshot before retrying. Any mismatch or failed
-destructive operation returns nonzero and represents a partial result.
+If targeted deletion or snapshot purge reports an identity mismatch or reused
+queue ID, the current message was preserved rather than deleted. Review the
+selected metadata or final purge counts and recent Postfix logs, then retry from
+a fresh inventory. A newly introduced hold is released when possible; a message
+held before the command remains held. Any mismatch or failed destructive
+operation returns nonzero and represents a partial result.
 
 Edit non-secret SMTP settings through:
 

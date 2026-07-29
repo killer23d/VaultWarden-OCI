@@ -286,7 +286,7 @@ email-queue-retry-all: ## Retry all queued messages after exact confirmation
 	$(call require-root)
 	@./utilities/email-queue.sh retry --all
 
-email-queue-delete: ## Delete one exact QUEUE_ID after exact confirmation
+email-queue-delete: ## Hold, identity-verify, and delete one exact QUEUE_ID
 	$(call require-root)
 	@./utilities/email-queue.sh delete "$${QUEUE_ID}"
 
