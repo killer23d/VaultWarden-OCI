@@ -368,18 +368,34 @@ extract_shell_function() {
 
 # Root-operated lifecycle contract.
 grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
-for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-clear health-email diagnose systemd-status prune key-show; do
+for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear health-email diagnose systemd-status prune key-show; do
     grep -Eq "(^|[[:space:]])${target}([[:space:]]|\|$)" Makefile || fail "${target} is not root-allowed"
 done
 pass "root-supported lifecycle/day-2 targets are allowed under sudo make"
 
-for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-clear diagnose systemd-status prune key-show; do
+for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear diagnose systemd-status prune key-show; do
     _snip="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
     extract_make_target "$target" Makefile > "$_snip" || fail "could not extract make ${target} target"
     grep -Fq '$(call require-root)' "$_snip" || { cat "$_snip" >&2; rm -f "$_snip"; fail "make ${target} does not require root"; }
     rm -f "$_snip"
 done
 pass "health/status/logs/CrowdSec security targets enforce the root-operated policy"
+for target in email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear; do
+    QUEUE_TARGET_SNIP="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
+    extract_make_target "$target" Makefile > "$QUEUE_TARGET_SNIP" \
+        || fail "could not extract make ${target} target"
+    grep -Fq '$(call require-root)' "$QUEUE_TARGET_SNIP" \
+        || fail "make ${target} does not explicitly require root"
+    grep -E '^[[:space:]]' "$QUEUE_TARGET_SNIP" \
+        | grep -Fq './utilities/email-queue.sh' \
+        || fail "make ${target} does not delegate to the queue utility"
+    if grep -E '^[[:space:]]' "$QUEUE_TARGET_SNIP" \
+        | grep -Eq 'docker([[:space:]]+compose|[[:space:]]+exec)|postqueue|postcat|postsuper'; then
+        fail "make ${target} bypasses the queue utility"
+    fi
+    rm -f "$QUEUE_TARGET_SNIP"
+done
+pass "Postfix queue Make targets preserve root and utility ownership boundaries"
 
 UP_SNIP="$(mktemp -t vw-priv-up.XXXXXXXXXX)"
 trap 'rm -f "$UP_SNIP"; rm -rf "${KEY_TMP:-}"' EXIT
@@ -502,28 +518,37 @@ grep -Fq 'run_sudo_cmd "sudo make health"' dashboard.sh || fail "dashboard healt
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should use sudo"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"' dashboard.sh || fail "dashboard recovery-kit export should stay root-operated"
 EMAIL_MENU_SNIP="$(mktemp -t vw-dashboard-email.XXXXXXXXXX)"
+QUEUE_MENU_SNIP="$(mktemp -t vw-dashboard-queue.XXXXXXXXXX)"
+EMAIL_MENU_NORM="$(mktemp -t vw-dashboard-email-normalized.XXXXXXXXXX)"
+QUEUE_MENU_NORM="$(mktemp -t vw-dashboard-queue-normalized.XXXXXXXXXX)"
 extract_shell_function handle_email_operations_menu dashboard.sh > "$EMAIL_MENU_SNIP" \
-    || fail "could not extract dashboard email handler"
-grep -Fq 'run_sudo_cmd \' "$EMAIL_MENU_SNIP" \
+    || fail "could not extract dashboard email transport handler"
+extract_shell_function handle_email_queue_menu dashboard.sh > "$QUEUE_MENU_SNIP" \
+    || fail "could not extract dashboard queue handler"
+tr '\n' ' ' < "$EMAIL_MENU_SNIP" \
+    | sed 's/\\[[:space:]]*/ /g; s/[[:space:]][[:space:]]*/ /g' > "$EMAIL_MENU_NORM"
+tr '\n' ' ' < "$QUEUE_MENU_SNIP" \
+    | sed 's/\\[[:space:]]*/ /g; s/[[:space:]][[:space:]]*/ /g' > "$QUEUE_MENU_NORM"
+grep -Fq 'run_sudo_cmd' "$EMAIL_MENU_NORM" \
     || fail "dashboard email diagnostic does not use run_sudo_cmd"
-grep -Fq '"sudo make test-email EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_SNIP" \
+grep -Fq '"sudo make test-email EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_NORM" \
     || fail "dashboard email diagnostic label does not show the root-operated Make command"
-grep -Fq 'make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_SNIP" \
+grep -Fq 'make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_NORM" \
     || fail "dashboard email diagnostic does not invoke the root-operated Make target"
-grep -Fq '"sudo make email-queue"' "$EMAIL_MENU_SNIP" \
-    || fail "dashboard queue status label does not show the root-operated Make command"
-grep -Fq 'make -C "${REPO_ROOT}" email-queue' "$EMAIL_MENU_SNIP" \
-    || fail "dashboard queue status does not invoke the root-operated Make target"
-grep -Fq 'env VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1 \' "$EMAIL_MENU_SNIP" \
-    || fail "dashboard queue clear does not pass the exact confirmation marker"
-grep -Fq 'make -C "${REPO_ROOT}" email-queue-clear' "$EMAIL_MENU_SNIP" \
-    || fail "dashboard queue clear does not invoke the root-operated Make target"
-! grep -Fq 'run_cmd ' "$EMAIL_MENU_SNIP" \
-    || fail "dashboard email diagnostic bypasses the sudo command helper"
-! grep -Eq 'maintenance-email\.sh|maintenance\.sh[[:space:]]+test-email|send_email|send_notification_email' \
-    "$EMAIL_MENU_SNIP" \
-    || fail "dashboard email diagnostic bypasses the Makefile operator interface"
-rm -f "$EMAIL_MENU_SNIP"
+grep -Fq 'ACTIVE_MENU="email_queue"' "$EMAIL_MENU_NORM" \
+    || fail "dashboard email handler does not enter the nested queue menu"
+grep -Fq 'run_sudo_cmd' "$QUEUE_MENU_NORM" \
+    || fail "dashboard queue operations do not use run_sudo_cmd"
+for target in email-queue-summary email-queue email-queue-inspect email-queue-retry email-queue-delete email-queue-retry-all email-queue-logs email-queue-purge; do
+    grep -Fq "sudo make ${target}" "$QUEUE_MENU_NORM" \
+        || fail "dashboard queue label missing sudo make ${target}"
+    grep -Fq "make -C \"\${REPO_ROOT}\" ${target}" "$QUEUE_MENU_NORM" \
+        || fail "dashboard queue action missing Make target ${target}"
+done
+! grep -Eq 'run_cmd|run_user_cmd|utilities/email-queue\.sh|docker([[:space:]]+compose|[[:space:]]+exec)|postqueue|postcat|postsuper' \
+    "$EMAIL_MENU_NORM" "$QUEUE_MENU_NORM" \
+    || fail "dashboard email handlers bypass the root-operated Make interface"
+rm -f "$EMAIL_MENU_SNIP" "$QUEUE_MENU_SNIP" "$EMAIL_MENU_NORM" "$QUEUE_MENU_NORM"
 ! grep -Fq 'run_user_cmd' dashboard.sh || fail "dashboard should not drop root for root-operated actions"
 pass "dashboard command labels match root-operated lifecycle"
 

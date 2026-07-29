@@ -98,16 +98,22 @@ grep -Fq 'Create + Fully Verify + Sync DB Backup' "$ROOT/dashboard.sh" || fail '
 ! grep -Fq 'validate_ip' "$ROOT/dashboard.sh" || fail 'dashboard unban should let cscli validate address forms through make unban'
 grep -Fq 'make -C "${REPO_ROOT}" unban "IP=${ip_to_unban}"' "$ROOT/dashboard.sh" || fail 'dashboard unban must route through make unban'
 grep -Fq 'Email Operations' "$ROOT/dashboard.sh" || fail 'dashboard email operations submenu is missing'
+grep -Fq 'Postfix Queue Operations' "$ROOT/dashboard.sh" || fail 'nested Postfix queue submenu is missing'
 grep -Fq 'ACTIVE_MENU="email_operations"' "$ROOT/dashboard.sh" || fail 'identity menu must open the email operations submenu'
+grep -Fq 'ACTIVE_MENU="email_queue"' "$ROOT/dashboard.sh" || fail 'email operations must open the nested queue submenu'
+grep -Fq 'ACTIVE_MENU="identity"' "$ROOT/dashboard.sh" || fail 'email operations must return to identity'
+grep -Fq 'ACTIVE_MENU="email_operations"' "$ROOT/dashboard.sh" || fail 'queue submenu must return to email operations'
 grep -Fq 'make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"' "$ROOT/dashboard.sh" \
     || fail 'dashboard email diagnostics must use the stable Make target'
-grep -Fq 'make -C "${REPO_ROOT}" email-queue' "$ROOT/dashboard.sh" \
-    || fail 'dashboard queue status must use the stable Make target'
-grep -Fq 'VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1' "$ROOT/dashboard.sh" \
-    || fail 'dashboard queue clear must pass the exact confirmation marker'
-grep -Fq 'make -C "${REPO_ROOT}" email-queue-clear' "$ROOT/dashboard.sh" \
-    || fail 'dashboard queue clear must use the stable Make target'
-grep -Fq 'ACTIVE_MENU="identity"' "$ROOT/dashboard.sh" || fail 'email transport submenu must return to the identity menu'
+for target in email-queue-summary email-queue email-queue-inspect email-queue-retry email-queue-delete email-queue-retry-all email-queue-logs email-queue-purge; do
+    grep -Fq "make -C \"\${REPO_ROOT}\" ${target}" "$ROOT/dashboard.sh" \
+        || fail "dashboard queue action must use stable Make target ${target}"
+done
+grep -Fq 'Delete a message' "$ROOT/dashboard.sh" || fail 'single delete must be visibly destructive'
+grep -Fq 'Purge current queue snapshot' "$ROOT/dashboard.sh" || fail 'snapshot purge must be visibly destructive'
+grep -Fq 'summary --quiet' "$ROOT/dashboard.sh" || fail 'live queue count must use centralized quiet summary'
+! grep -Fq 'docker exec "${CONTAINER_POSTFIX}" mailq' "$ROOT/dashboard.sh" \
+    || fail 'dashboard still duplicates human mailq parsing'
 printf 'Dashboard truthfulness tests passed.\n'
 
 SMOKE="$ROOT/utilities/smoke-test.sh"

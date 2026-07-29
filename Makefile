@@ -41,10 +41,14 @@ BACKUP_FILE ?=
 # Optional first install data volume: sudo ./setup.sh install --domain <domain> --email <email> --data-device /dev/sdb
 DATA_DEVICE ?=
 EMAIL_TEST_TRANSPORT ?= configured
+QUEUE_ID ?=
+EMAIL_QUEUE_TAIL ?= 200
+EMAIL_QUEUE_BODY ?= false
+export QUEUE_ID EMAIL_QUEUE_TAIL EMAIL_QUEUE_BODY
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
-        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-clear \
+        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear \
         up down restart start stop safe-restart status operations \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
@@ -75,7 +79,7 @@ EMAIL_TEST_TRANSPORT ?= configured
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-clear health-email up down start stop restart safe-restart status operations \
+	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear health-email up down start stop restart safe-restart status operations \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
@@ -258,11 +262,47 @@ test-email: ## Test configured or exact email delivery transports (EMAIL_TEST_TR
 	@echo "$(BLUE)Testing email delivery transport: $(EMAIL_TEST_TRANSPORT)$(NC)"
 	@./maintenance.sh test-email --transport "$(EMAIL_TEST_TRANSPORT)" --verbose
 
-email-queue: ## Show the Postfix email queue
+email-queue: ## Show the human-readable Postfix email queue
 	$(call require-root)
 	@./utilities/email-queue.sh status
 
-email-queue-clear: ## Clear the Postfix email queue after exact confirmation
+email-queue-summary: ## Summarize the Postfix queue safely
+	$(call require-root)
+	@./utilities/email-queue.sh summary
+
+email-queue-inspect: ## Inspect QUEUE_ID headers/envelope (EMAIL_QUEUE_BODY=true includes body)
+	$(call require-root)
+	@if [ "$${EMAIL_QUEUE_BODY}" = "true" ]; then \
+		./utilities/email-queue.sh inspect "$${QUEUE_ID}" --body; \
+	else \
+		./utilities/email-queue.sh inspect "$${QUEUE_ID}"; \
+	fi
+
+email-queue-retry: ## Retry one exact QUEUE_ID
+	$(call require-root)
+	@./utilities/email-queue.sh retry "$${QUEUE_ID}"
+
+email-queue-retry-all: ## Retry all queued messages after exact confirmation
+	$(call require-root)
+	@./utilities/email-queue.sh retry --all
+
+email-queue-delete: ## Delete one exact QUEUE_ID after exact confirmation
+	$(call require-root)
+	@./utilities/email-queue.sh delete "$${QUEUE_ID}"
+
+email-queue-logs: ## Show Postfix logs (QUEUE_ID optional, EMAIL_QUEUE_TAIL default 200)
+	$(call require-root)
+	@if [ -n "$${QUEUE_ID}" ]; then \
+		./utilities/email-queue.sh logs "$${QUEUE_ID}" --tail "$${EMAIL_QUEUE_TAIL}"; \
+	else \
+		./utilities/email-queue.sh logs --tail "$${EMAIL_QUEUE_TAIL}"; \
+	fi
+
+email-queue-purge: ## Purge only a confirmed snapshot of current queue IDs
+	$(call require-root)
+	@./utilities/email-queue.sh purge --snapshot
+
+email-queue-clear: ## Deprecated alias for snapshot queue purge
 	$(call require-root)
 	@./utilities/email-queue.sh clear
 

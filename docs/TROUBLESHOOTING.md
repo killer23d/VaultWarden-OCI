@@ -409,9 +409,16 @@ sudo ./maintenance.sh test-email --verbose
 Inspect Postfix when using the normal SMTP path:
 
 ```bash
-docker compose ps postfix
-docker compose logs postfix --tail=120
+sudo make email-queue-summary
+sudo make email-queue
+sudo make email-queue-logs EMAIL_QUEUE_TAIL=120
 ```
+
+For one current message, copy its case-sensitive queue ID from the listing and
+run `sudo make email-queue-inspect QUEUE_ID=AbC-123`. Message bodies are omitted
+by default; use `EMAIL_QUEUE_BODY=true` only when the sensitive content is
+needed for diagnosis. An empty queue is not proof of successful recipient
+delivery, so correlate the queue state with Postfix and upstream relay evidence.
 
 Edit non-secret SMTP settings through:
 

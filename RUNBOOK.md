@@ -70,6 +70,9 @@ A Docker-group re-login is not part of the production golden path. The productio
 | Tail all logs | `sudo make logs-tail` |
 | Vaultwarden logs | `sudo make logs-vaultwarden` |
 | Caddy logs | `sudo make logs-caddy` |
+| Postfix queue summary | `sudo make email-queue-summary` |
+| List queued messages | `sudo make email-queue` |
+| Postfix queue logs | `sudo make email-queue-logs` |
 | Postfix logs | `sudo make logs-postfix` |
 | CrowdSec logs | `sudo make logs-crowdsec` |
 

@@ -22,8 +22,15 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
 | `make test-email` |  Test configured or exact email delivery transports (EMAIL_TEST_TRANSPORT=...) |
-| `make email-queue` |  Show the Postfix email queue |
-| `make email-queue-clear` |  Clear the Postfix email queue after exact confirmation |
+| `make email-queue` |  Show the human-readable Postfix email queue |
+| `make email-queue-summary` |  Summarize the Postfix queue safely |
+| `make email-queue-inspect` |  Inspect QUEUE_ID headers/envelope (EMAIL_QUEUE_BODY=true includes body) |
+| `make email-queue-retry` |  Retry one exact QUEUE_ID |
+| `make email-queue-retry-all` |  Retry all queued messages after exact confirmation |
+| `make email-queue-delete` |  Delete one exact QUEUE_ID after exact confirmation |
+| `make email-queue-logs` |  Show Postfix logs (QUEUE_ID optional, EMAIL_QUEUE_TAIL default 200) |
+| `make email-queue-purge` |  Purge only a confirmed snapshot of current queue IDs |
+| `make email-queue-clear` |  Deprecated alias for snapshot queue purge |
 | `make up` |  Start all services (runs startup.sh for health checks; root required) |
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully (root required) |
@@ -573,17 +580,56 @@ DESCRIPTION:
 VaultWarden-OCI Postfix Queue Operations
 
 USAGE:
-    sudo utilities/email-queue.sh status
+    sudo utilities/email-queue.sh [status]
+    sudo utilities/email-queue.sh summary [--quiet | --json]
+    sudo utilities/email-queue.sh inspect QUEUE_ID [--body]
+    sudo utilities/email-queue.sh retry QUEUE_ID
+    sudo utilities/email-queue.sh retry --all
+    sudo utilities/email-queue.sh delete QUEUE_ID
+    sudo utilities/email-queue.sh logs [QUEUE_ID] [--tail N]
+    sudo utilities/email-queue.sh purge --snapshot
     sudo utilities/email-queue.sh clear
 
 COMMANDS:
-    status  Show the current Postfix queue.
-    clear   Show the queue, delete every queued message after exact
-            confirmation, then show the queue again.
+    status                  Show the human-readable Postfix queue. This is the
+                            default and never mutates queued mail.
+    summary [MODE]          Show count, bytes, oldest age, queue states, and the
+                            most frequent current delay reason. MODE is
+                            --quiet or --json.
+    inspect ID [--body]     Show envelope and header details for an exact queue
+                            ID. Message bodies are excluded unless --body is
+                            explicitly supplied.
+    retry ID                Schedule immediate delivery for one exact queue ID.
+    retry --all             Flush all currently queued mail after exact
+                            confirmation.
+    delete ID               Delete one exact queue ID after exact confirmation.
+    logs [ID] [--tail N]    Show Postfix logs, optionally filtered by a fixed
+                            queue-ID string. N defaults to 200 and is limited to
+                            1..5000.
+    purge --snapshot        Capture the current queue IDs, confirm the captured
+                            count, and delete only those IDs. Mail arriving after
+                            the snapshot is never added to the deletion set.
+    clear                   Deprecated alias for purge --snapshot.
 
-AUTOMATION:
-    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1 skips the interactive CLEAR prompt.
-    No other value is accepted as confirmation.
+AUTOMATION CONFIRMATION:
+    VW_EMAIL_QUEUE_CONFIRM=retry-all
+    VW_EMAIL_QUEUE_CONFIRM=delete:QUEUE_ID
+    VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
+    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1   Deprecated; accepted only by clear.
+
+CONFIRMATION TOKENS:
+    retry --all             RETRY ALL
+    delete QUEUE_ID         DELETE QUEUE_ID
+    purge --snapshot        PURGE N
+
+EXIT STATUS:
+    0  Success, including an empty queue or no matching log lines.
+    1  Operational failure, cancellation, or partial destructive failure.
+    2  Invalid usage.
+
+NOTES:
+    Queue state can change between inventory, inspection, and mutation. A retry
+    or Postfix acceptance does not prove final delivery to the recipient.
 ```
 
 ### env-edit.sh

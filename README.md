@@ -136,8 +136,10 @@ sudo make backup-emergency   # clone-grade emergency backup
 sudo make restore            # interactive restore
 sudo make key-health         # Age key health
 sudo make key-rotate         # rotate the operational Age/SOPS key
-sudo make timers             # systemd timer status
-sudo make logs SERVICE=caddy # container logs
+sudo make timers              # systemd timer status
+sudo make email-queue-summary # safe Postfix queue summary
+sudo make email-queue         # list queued messages
+sudo make logs SERVICE=caddy  # container logs
 ```
 
 For exact public script grammar and options, use `--help` or [docs/COMMAND-REFERENCE.md](docs/COMMAND-REFERENCE.md).

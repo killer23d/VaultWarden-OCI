@@ -103,39 +103,102 @@ Postfix provides queueing/retry behavior for the normal appliance mail path.
 - Preserve the capabilities in the current `docker-compose.yml.example` unless a tested image/runtime change proves a smaller set works. Mail spool/ownership operations depend on the current container contract.
 - Keep upstream relay authentication in SOPS-backed `smtp_password`, not repository configuration.
 
-### Inspecting and clearing the Postfix queue
+### Safe Postfix queue operations
 
-Use the root-operated Compose service interface instead of a container name:
+Use the root-operated Make targets. The queue utility owns all Postfix queue
+logic; the dashboard and Makefile do not invoke Postfix administrative commands
+directly.
 
 ```bash
 sudo make email-queue
+sudo make email-queue-summary
+sudo make email-queue-inspect QUEUE_ID=AbC-123
+sudo make email-queue-inspect QUEUE_ID=AbC-123 EMAIL_QUEUE_BODY=true
+sudo make email-queue-retry QUEUE_ID=AbC-123
+sudo make email-queue-retry-all
+sudo make email-queue-delete QUEUE_ID=AbC-123
+sudo make email-queue-logs
+sudo make email-queue-logs QUEUE_ID=AbC-123 EMAIL_QUEUE_TAIL=500
+sudo make email-queue-purge
 ```
 
-This runs `postqueue -p` inside the running `postfix` service and does not
-modify queued mail.
-
-To deliberately delete every queued message:
+The direct utility forms are also documented and remain root-operated:
 
 ```bash
-sudo make email-queue-clear
+sudo utilities/email-queue.sh status
+sudo utilities/email-queue.sh summary
+sudo utilities/email-queue.sh summary --quiet
+sudo utilities/email-queue.sh summary --json
+sudo utilities/email-queue.sh inspect AbC-123
+sudo utilities/email-queue.sh inspect AbC-123 --body
+sudo utilities/email-queue.sh retry AbC-123
+sudo utilities/email-queue.sh retry --all
+sudo utilities/email-queue.sh delete AbC-123
+sudo utilities/email-queue.sh logs
+sudo utilities/email-queue.sh logs AbC-123 --tail 500
+sudo utilities/email-queue.sh purge --snapshot
+sudo utilities/email-queue.sh clear
 ```
 
-The command shows the queue before deletion, requires the exact confirmation
-`CLEAR`, deletes all messages with `postsuper -d ALL` as root inside the
-Compose service, and shows the queue afterward. Any other response cancels.
-This deletion cannot be undone; inspect the queue and preserve any diagnostic
-details you need first.
-
-For explicitly approved root automation, the only non-interactive confirmation
-marker is:
+`email-queue` preserves the human-readable `postqueue -p` listing and never
+modifies mail. `email-queue-summary` uses `postqueue -j` with Python's JSON
+parser to report the total count and bytes, oldest age, queue states, and most
+frequent current delay reason. The quiet form prints only a base-10 count, and
+the JSON form is intended for scripts:
 
 ```bash
-sudo env VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1 make email-queue-clear
+sudo utilities/email-queue.sh summary --quiet
+sudo utilities/email-queue.sh summary --json
 ```
 
-No other marker value bypasses the interactive confirmation. Both commands
-fail if Docker, Compose, or the `postfix` service is unavailable.
+Queue IDs are validated by exact, case-sensitive membership in the current
+machine-readable inventory. They are not restricted to a guessed hexadecimal
+format. The default inspection path prints envelope and header information but
+not the message body. `EMAIL_QUEUE_BODY=true` is explicit because bodies may
+contain credentials, password-reset links, or other sensitive content.
 
+Single-message retry and deletion operate only on the selected ID. Retry-all
+can increase delivery load when messages remain undeliverable and therefore
+requires the exact interactive token `RETRY ALL`. Single deletion requires
+`DELETE QUEUE_ID`, where `QUEUE_ID` is the selected ID.
+
+The destructive whole-queue workflow is snapshot based:
+
+```bash
+sudo make email-queue-purge
+```
+
+The utility captures the exact current IDs into a private temporary snapshot,
+shows the captured count and summary, and requires `PURGE N`, where `N` is the
+captured count. It then deletes only those individually validated IDs. Messages
+that arrive after confirmation are not added to the deletion set. The command
+continues through already-delivered or failed items and reports deleted,
+already absent, failed, and newly remaining counts. Any genuine partial failure
+returns nonzero. Temporary snapshot files contain IDs and minimal metadata only
+and are removed on success, failure, cancellation, or interruption.
+
+Noninteractive automation accepts only these dedicated values:
+
+```bash
+sudo env VW_EMAIL_QUEUE_CONFIRM=retry-all make email-queue-retry-all
+sudo env VW_EMAIL_QUEUE_CONFIRM='delete:AbC-123' \
+  make email-queue-delete QUEUE_ID=AbC-123
+sudo env VW_EMAIL_QUEUE_CONFIRM=purge-snapshot make email-queue-purge
+```
+
+`clear` and `sudo make email-queue-clear` remain deprecated compatibility
+aliases. They use the same snapshot purge implementation and never perform a
+live `ALL` deletion. The old `VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1` marker is
+accepted only by this deprecated alias and should be migrated to
+`VW_EMAIL_QUEUE_CONFIRM=purge-snapshot`.
+
+Exit status is `0` for success (including an empty queue or no matching log
+lines), `1` for operational failure, cancellation, or partial destructive
+failure, and `2` for invalid usage. Queue state is inherently concurrent: a
+message may be delivered between inventory and action, and new mail may arrive
+during a purge. An empty queue does not by itself prove the mail path is
+healthy. Postfix acceptance or a requested retry also does not prove final
+recipient delivery; use the logs and the upstream provider's delivery evidence.
 ## Operational alert routing
 
 Repository operational email uses `lib/email.sh`.

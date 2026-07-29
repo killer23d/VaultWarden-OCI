@@ -519,7 +519,24 @@ Test the operational alert path:
 sudo ./maintenance.sh test-email --verbose
 ```
 
-Normal production mail is Postfix-first. Vaultwarden talks to the internal Postfix sidecar; Postfix owns upstream SMTP TLS/authentication/queueing.
+Inspect the Postfix queue through the stable root-operated Make targets:
+
+```bash
+sudo make email-queue-summary
+sudo make email-queue
+sudo make email-queue-inspect QUEUE_ID=AbC-123
+sudo make email-queue-retry QUEUE_ID=AbC-123
+sudo make email-queue-logs QUEUE_ID=AbC-123 EMAIL_QUEUE_TAIL=500
+```
+
+Use `EMAIL_QUEUE_BODY=true` only when message-body disclosure is necessary and
+safe. Single-message deletion, retry-all, and snapshot purge require exact
+confirmation in `utilities/email-queue.sh`. `email-queue-purge` deletes only the
+IDs captured before confirmation; mail arriving afterward is outside that
+snapshot. The old `email-queue-clear` target remains a deprecated compatibility
+alias for the same snapshot behavior.
+
+Normal production mail is Postfix-first. Vaultwarden talks to the internal Postfix sidecar; Postfix owns upstream SMTP TLS/authentication/queueing. A successful queue retry or an empty queue does not prove final recipient delivery.
 
 Optional HTTP API email providers apply to the operational script alert path. Keep SMTP/Postfix configured for Vaultwarden mail and attachment-based recovery-kit delivery.
 
