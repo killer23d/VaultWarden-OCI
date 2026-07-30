@@ -244,15 +244,36 @@ INSTALL
   cat > "$bin/chown" <<'CHOWN'
 #!/usr/bin/env bash
 for arg in "$@"; do
-  [[ "$arg" == /run/lock/* ]] && exit 0
+  if [[ -n "${VW_SYSTEMD_RUNTIME_LOCK_DIR:-}" && "$arg" == "$VW_SYSTEMD_RUNTIME_LOCK_DIR/"* ]]; then
+    [[ "${1:-}" == "root:vaultwarden" ]] || exit 1
+    printf '%s\n' "$arg" >> "${VW_TEST_LOCK_CHOWN_LOG:?}"
+    exit 0
+  fi
 done
 exec /usr/bin/chown "$@"
 CHOWN
+  cat > "$bin/stat" <<'STAT'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'stat (GNU coreutils) test fixture\n'
+  exit 0
+fi
+path="${!#}"
+if [[ -n "${VW_SYSTEMD_RUNTIME_LOCK_DIR:-}" \
+      && "$path" == "$VW_SYSTEMD_RUNTIME_LOCK_DIR/"* \
+      && -f "${VW_TEST_LOCK_CHOWN_LOG:-}" \
+      && "${1:-}" == "-c" \
+      && "${2:-}" == '%d:%i:%U:%G:%a' \
+      && grep -Fxq "$path" "$VW_TEST_LOCK_CHOWN_LOG" ]]; then
+  metadata="$(/usr/bin/stat -c '%d:%i:%U:%G:%a' -- "$path")"
+  IFS=: read -r device inode owner _group mode <<< "$metadata"
+  printf '%s:%s:%s:vaultwarden:%s\n' "$device" "$inode" "$owner" "$mode"
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+STAT
   cat > "$bin/chmod" <<'CHMOD'
 #!/usr/bin/env bash
-for arg in "$@"; do
-  [[ "$arg" == /run/lock/* ]] && exit 0
-done
 exec /bin/chmod "$@"
 CHMOD
   chmod +x "$bin"/*
@@ -287,11 +308,13 @@ run_systemd_install_fixture(){
     PATH="$bin:$PATH" \
     SYSTEMCTL_LOG="$TMP/systemctl-install.log" \
     VW_TEST_RUN_LOCK_DIR="$TMP/run-locks" \
+    VW_TEST_LOCK_CHOWN_LOG="$TMP/lock-chown.log" \
     VW_TEST_SERVICE_USER="vwtest" \
     SERVICE_USER="vwtest" \
     VW_TEST_SYSTEMCTL_MODE="$mode" \
     PROJECT_STATE_DIR="$state" \
     VW_CONFIG_INSTALLED_ENV_FILE="$env_dir/vaultwarden.env" \
+    VW_SYSTEMD_RUNTIME_LOCK_DIR="$TMP/run-locks" \
     VW_SYSTEMD_UNIT_DEST_DIR="$unit_dir" \
     VW_SYSTEMD_OPT_SCRIPTS_DIR="$opt_dir" \
     VW_SYSTEMD_ENV_DIR="$env_dir" \

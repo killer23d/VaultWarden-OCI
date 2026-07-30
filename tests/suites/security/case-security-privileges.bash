@@ -438,13 +438,15 @@ done
 grep -Fq 'local secrets_dir="${DOCKER_SECRETS_DIR:-/run/vaultwarden-oci/secrets}"' utilities/maintenance-health.sh || fail "health does not inspect runtime secret directory"
 pass "live startup/health paths use /run runtime secrets"
 
-# Startup key remediation must preserve the root-operated Age key contract.
+# Startup key remediation must preserve the root-operated Age key contract
+# without silently switching identities.
 ! grep -Eq 'chown[[:space:]].*/etc/vaultwarden/age-key\.txt|chgrp[[:space:]].*/etc/vaultwarden|chmod[[:space:]]+750[[:space:]]+/etc/vaultwarden|install[[:space:]]+-d[[:space:]]+-m[[:space:]]+750[[:space:]]+/etc/vaultwarden' startup.sh \
     || fail "startup.sh contains stale non-root Age key remediation"
-grep -Fq 'sudo install -d -m 700 -o root -g root /etc/vaultwarden' startup.sh || fail "startup.sh missing root-owned /etc/vaultwarden install remediation"
-grep -Fq 'sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}' startup.sh || fail "startup.sh missing root-owned age key install remediation"
+! grep -Fq 'export SOPS_AGE_KEY_FILE="$repo_local_key"' startup.sh || fail "startup.sh still falls back to a repository-local Age identity"
+grep -Fq 'Repository key use is limited to explicit bootstrap/development mode' startup.sh || fail "startup.sh missing explicit repository-key boundary"
+grep -Fq 'Correct this selected identity, then run: sudo make key-health' startup.sh || fail "startup.sh missing fail-closed key remediation"
 grep -Fq 'sudo make key-health' startup.sh || fail "startup.sh key verification guidance must use sudo make key-health"
-pass "startup key remediation stays root-owned"
+pass "startup key remediation stays root-owned and fail-closed"
 
 # Encrypted secret authoring leaf utilities are root-operated. The top-level
 # edit-secrets.sh dispatcher stays metadata-friendly and delegates to these
