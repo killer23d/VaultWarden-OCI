@@ -169,6 +169,15 @@ SLEEP
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
   group:vaultwarden)
+    if [[ -n "${VW_TEST_GETENT_COUNT_FILE:-}" ]]; then
+      count=0
+      [[ ! -f "$VW_TEST_GETENT_COUNT_FILE" ]] || read -r count < "$VW_TEST_GETENT_COUNT_FILE"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$VW_TEST_GETENT_COUNT_FILE"
+      # The operation guard prepares its global and specific locks before
+      # setup-systemd creates the shared vaultwarden group.
+      (( count > 2 )) || exit 2
+    fi
     printf 'vaultwarden:x:997:root,%s\n' "${VW_TEST_SERVICE_USER:-vwtest}"
     exit 0
     ;;
@@ -244,8 +253,9 @@ INSTALL
   cat > "$bin/chown" <<'CHOWN'
 #!/usr/bin/env bash
 for arg in "$@"; do
-  if [[ -n "${VW_SYSTEMD_RUNTIME_LOCK_DIR:-}" && "$arg" == "$VW_SYSTEMD_RUNTIME_LOCK_DIR/"* ]]; then
-    [[ "${1:-}" == "root:vaultwarden" ]] || exit 1
+  if [[ "${1:-}" == "root:vaultwarden" \
+      && -n "${VW_SYSTEMD_RUNTIME_LOCK_DIR:-}" \
+      && "$arg" == "$VW_SYSTEMD_RUNTIME_LOCK_DIR/"* ]]; then
     printf '%s\n' "$arg" >> "${VW_TEST_LOCK_CHOWN_LOG:?}"
     exit 0
   fi
@@ -309,6 +319,7 @@ run_systemd_install_fixture(){
     SYSTEMCTL_LOG="$TMP/systemctl-install.log" \
     VW_TEST_RUN_LOCK_DIR="$TMP/run-locks" \
     VW_TEST_LOCK_CHOWN_LOG="$TMP/lock-chown.log" \
+    VW_TEST_GETENT_COUNT_FILE="$state/getent-count" \
     VW_TEST_SERVICE_USER="vwtest" \
     VW_OPERATIONS_LOCK="$TMP/run-locks/vaultwarden-operations.lock" \
     VW_OPERATIONS_STATE_DIR="$TMP/operations-state" \

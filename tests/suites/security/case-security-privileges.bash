@@ -768,6 +768,11 @@ REPO_RECIPIENT="age1repo000000000000000000000000000000000000000000000000000000"
 printf '# public key: %s\nAGE-SECRET-KEY-1PRODUCTION-ACTIVE-KEY\n' "$PROD_RECIPIENT" > "$PROD_KEY"
 printf '# public key: %s\nAGE-SECRET-KEY-1REPO-LOCAL-KEY\n' "$REPO_RECIPIENT" > "$REPO_KEY"
 chmod 0600 "$PROD_KEY" "$REPO_KEY"
+cat > "$KEY_REPO/.env" <<EOF_KEY_ENV
+PROJECT_STATE_DIR=$KEY_TMP/state
+SOPS_AGE_KEY_FILE=$PROD_KEY
+EOF_KEY_ENV
+chmod 0600 "$KEY_REPO/.env"
 cat > "$KEY_REPO/.sops.yaml" <<EOF_KEY_POLICY
 creation_rules:
   - path_regex: '.*\.yaml$'
@@ -803,7 +808,7 @@ chmod +x "$KEY_BIN"/*
 run_key_make() {
     local target="$1" out="$2"
     PATH="$KEY_BIN:/opt/homebrew/bin:$PATH" \
-        AGE_KEY_FILE="$PROD_KEY" \
+        SOPS_AGE_KEY_FILE="$PROD_KEY" \
         SOPS_CONFIG_FILE="$KEY_REPO/.sops.yaml" \
         HOME="$KEY_TMP/home" \
         make -C "$KEY_REPO" "$target" > "$out" 2>&1
