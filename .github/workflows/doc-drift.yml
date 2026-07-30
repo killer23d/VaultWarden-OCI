@@ -30,7 +30,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Validate Docker Compose example
         run: |
@@ -43,7 +43,7 @@ jobs:
   doc-drift:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # yq is required by lib/schema.sh (used by secrets-rotate.sh --help and
       # write-command-reference.sh). Installing it here ensures the generated
@@ -201,7 +201,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run Strict Shellcheck
         run: |
@@ -225,7 +225,7 @@ jobs:
           - operations
           - data-protection
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install test dependencies
         run: |
@@ -260,7 +260,7 @@ jobs:
 
       - name: Upload ${{ matrix.suite }} suite log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-log-${{ matrix.suite }}
           path: test-results/${{ matrix.suite }}.log
