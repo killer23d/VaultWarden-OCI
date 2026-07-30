@@ -700,13 +700,7 @@ _crowdsec_health_validate_config() (
     fi
     unset HEALTH_LOCK_FD
 
-    if declare -f operation_run_without_guard_fds >/dev/null 2>&1; then
-        if operation_run_without_guard_fds crowdsec -t >"$validation_log" 2>&1; then
-            return 0
-        else
-            validation_rc=$?
-        fi
-    elif crowdsec -t >"$validation_log" 2>&1; then
+    if crowdsec -t >"$validation_log" 2>&1; then
         return 0
     else
         validation_rc=$?

@@ -408,6 +408,7 @@ The guard preserves:
 - global serialization where required;
 - operation-specific locks where justified;
 - verified owner PID/start identity;
+- a verified owner-bound holder that keeps lock descriptors out of workload descendants and exits when the owner control channel closes;
 - conservative stale metadata handling;
 - controlled TERM-before-KILL behavior for eligible owners;
 - refusal to automatically terminate package-manager work;

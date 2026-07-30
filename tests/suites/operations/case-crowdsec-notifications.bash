@@ -78,7 +78,7 @@ trap 'exit 129' HUP
 trap 'exit 143' TERM
 post_flag="$(read_flag)"
 printf 'enter origin=%s pre=%s post=%s\n' "$origin" "$pre_flag" "$post_flag" >>"${VW_TEST_CALLS:?}"
-operation_run_without_guard_fds bash -c '
+bash -c '
     for fd in /proc/$$/fd/*; do
         target=$(readlink "$fd" 2>/dev/null || true)
         case "$target" in

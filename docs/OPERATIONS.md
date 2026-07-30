@@ -100,7 +100,7 @@ Inspect active/interrupted work with:
 sudo make operations
 ```
 
-Operation metadata may show the owning PID, start identity, label, and current phase. The kernel lock is authoritative; file existence alone is not proof that an operation is active.
+Operation metadata may show the owning PID, owner-bound lock-holder identity, label, and current phase. The holder owns the global and operation-specific lock descriptors; ordinary workload children do not. If the owning shell exits or is killed, its private control channel closes and the holder releases both locks even when an unrelated workload child remains alive. The kernel lock is authoritative; file existence alone is not proof that an operation is active.
 
 When a command reports contention:
 
@@ -116,6 +116,8 @@ The operation tooling refuses to automatically terminate package-manager work. D
 Expected non-interactive contention uses exit `75` where the owning service contract defines a clean skip. DNS/firewall maintenance and their aggregate caller preserve that distinction. Real failures remain failures.
 
 `--force` may skip a documented confirmation; it does not silently bypass the shared operation guard.
+
+On a host using managed systemd runtime copies, refresh and validate those copies through the existing systemd setup workflow after deploying a library change; updating the checkout alone does not activate `/opt/vaultwarden-scripts`.
 
 ---
 

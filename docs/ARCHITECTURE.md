@@ -106,6 +106,8 @@ Conflicting mutating workflows use `lib/operations.sh` and `flock`.
 
 Kernel lock state is authoritative. Operation metadata exists for operator diagnostics and interruption handling; lock-file existence by itself is not proof that an operation is active.
 
+One owner-bound Bash holder acquires the global lock before any operation-specific lock. The guarded shell and its ordinary descendants receive no lock descriptors; owner exit closes a private control channel so the holder exits and releases both locks.
+
 Expected non-interactive contention uses exit `75` where the owning script/systemd contract defines a clean skip. Real failures must remain non-zero failures and must not be relabeled as contention.
 
 ## Backup architecture

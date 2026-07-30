@@ -998,13 +998,9 @@ _cs_email_path_matches_backup() {
         && [[ "$(stat -c '%g' "$destination")" == "$gid" ]]
 }
 
-_cs_run_without_operation_guard_fds() (
+_cs_run_external() (
     unset VW_CROWDSEC_EMAIL_COMMIT_MARKER VW_CROWDSEC_EMAIL_COMMIT_TOKEN
-    if declare -f operation_run_without_guard_fds >/dev/null 2>&1; then
-        operation_run_without_guard_fds "$@"
-    else
-        exec "$@"
-    fi
+    "$@"
 )
 
 _cs_validate_crowdsec_config() {
@@ -1013,7 +1009,7 @@ _cs_validate_crowdsec_config() {
         log_error "CrowdSec static validation failed for ${context}: 'crowdsec' command is unavailable."
         return 1
     fi
-    if ! _cs_run_without_operation_guard_fds crowdsec -t; then
+    if ! _cs_run_external crowdsec -t; then
         log_error "CrowdSec static validation failed for ${context}: crowdsec -t"
         return 1
     fi
@@ -1163,7 +1159,7 @@ _cs_reconcile_email_notifications() (
             failed=true
         fi
         if [[ "$transaction_changed" == true ]] \
-            && ! _cs_run_without_operation_guard_fds systemctl restart crowdsec >/dev/null 2>&1; then
+            && ! _cs_run_external systemctl restart crowdsec >/dev/null 2>&1; then
             log_error "CrowdSec restart after rollback failed; inspect: sudo systemctl status crowdsec"
             failed=true
         fi
@@ -1375,7 +1371,7 @@ _cs_reconcile_email_notifications() (
     _cs_email_test_hook after-validate
     _cs_email_test_hook before-restart
 
-    if ! _cs_run_without_operation_guard_fds systemctl restart crowdsec; then
+    if ! _cs_run_external systemctl restart crowdsec; then
         log_error "CrowdSec restart failed: systemctl restart crowdsec"
         return 1
     fi

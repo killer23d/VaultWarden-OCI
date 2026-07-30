@@ -45,7 +45,7 @@ Nested cases source `tests/lib/test-root.bash`, which derives the repository roo
 
 Add a regression to an existing case when it shares the same fixture and responsibility. Create another case when a separate failure or timeout boundary is useful, or combining it would mix unrelated fixtures. Do not add another top-level `test-*.sh` command.
 
-`case-runner-contracts.bash` tests command grammar, hierarchical fixture mapping, inventory validation, checkout isolation, failure propagation, and timeout diagnostics. `case-lock-fd-hygiene.bash` remains a separate runner entry so descriptor-hygiene failures and timeouts retain an independent boundary.
+`case-runner-contracts.bash` tests command grammar, hierarchical fixture mapping, inventory validation, checkout isolation, failure propagation, and timeout diagnostics. `case-lock-fd-hygiene.bash` keeps focused structural coverage that logging and CrowdSec helpers no longer carry obsolete lock-descriptor lifecycle logic; the real Linux owner-death and arbitrary-child behavior runs in `case-operations.bash`.
 
 Fixture mode is internal to the runner-contract tests. `VAULTWARDEN_TEST_RUNNER_TESTS_DIR` substitutes an isolated test root while preserving each registered path relative to `tests/`, including its `suites/<suite>/` hierarchy. This permits identical basenames in different suites without collisions and never writes to the repository's real `tests/` tree.
 
