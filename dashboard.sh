@@ -479,19 +479,17 @@ draw_live_stats() {
     fi
 
     # --- Email Queue ---
-    local queue_count="" queue_str mailq_output mailq_rc=0
-    if docker ps --format '{{.Names}}' 2>/dev/null \
-            | grep -qx "${CONTAINER_POSTFIX}"; then
-        mailq_output="$(docker exec "${CONTAINER_POSTFIX}" mailq 2>/dev/null)" || mailq_rc=$?
-        if (( mailq_rc == 0 )); then
-            queue_count="$(printf '%s\n' "${mailq_output}" | grep -c '^[0-9A-F]' || true)"
-        fi
+    local queue_count="" queue_str queue_rc=0
+    if [[ -x "${REPO_ROOT}/utilities/email-queue.sh" ]]; then
+        queue_count="$(timeout 3 "${REPO_ROOT}/utilities/email-queue.sh" \
+            summary --quiet 2>/dev/null)" || queue_rc=$?
+        (( queue_rc == 0 )) || queue_count=""
     fi
-    if [[ -z "${queue_count}" ]]; then
+    if [[ ! "${queue_count}" =~ ^[0-9]+$ ]]; then
         queue_str="${YLW}Unknown${NC}"
-    elif [[ "${queue_count}" -eq 0 ]]; then
+    elif (( queue_count == 0 )); then
         queue_str="${GRN}0 queued${NC}"
-    elif [[ "${queue_count}" -lt 5 ]]; then
+    elif (( queue_count < 5 )); then
         queue_str="${YLW}${queue_count} queued${NC}"
     else
         queue_str="${RED}${queue_count} queued${NC}"
@@ -865,7 +863,7 @@ handle_advanced_menu() {
 draw_identity_menu() {
     echo -e " ${BLD}Identity, Email & Admin${NC}"
     echo ""
-    echo -e "  [ ${GRN}1${NC} ] Test SMTP Delivery"
+    echo -e "  [ ${GRN}1${NC} ] Email Operations"
     echo -e "  [ ${GRN}2${NC} ] Tail Auth & Access Drops"
     echo -e "  [ ${GRN}3${NC} ] Rotate Vault Admin Token"
     echo -e "  [ ${GRN}4${NC} ] View Breakglass Status"
@@ -880,7 +878,7 @@ handle_identity_menu() {
     local opt="$1"
     case "${opt}" in
         1)
-            run_sudo_cmd "sudo make test-email" make -C "${REPO_ROOT}" test-email
+            ACTIVE_MENU="email_operations"
             ;;
         2)
             echo ""
@@ -910,6 +908,143 @@ handle_identity_menu() {
     esac
 }
 
+# ===========================================================================
+# SUBMENU I.1 — Email Operations
+# ===========================================================================
+draw_email_operations_menu() {
+    echo -e " ${BLD}Email Operations${NC}"
+    echo ""
+    echo -e "  [ ${GRN}1${NC} ] Configured production route"
+    echo -e "  [ ${GRN}2${NC} ] All exact transports"
+    echo -e "  [ ${GRN}3${NC} ] HTTP API only"
+    echo -e "  [ ${GRN}4${NC} ] Postfix sidecar only"
+    echo -e "  [ ${GRN}5${NC} ] Direct SMTP only"
+    echo -e "  [ ${GRN}6${NC} ] Postfix queue operations"
+    draw_divider
+    echo -e "  [ ${GRN}b${NC} ] Back to Identity, Email & Admin"
+    echo ""
+    echo -e " ${CYN}Tip:${NC} Exact transport tests do not use production-route fallback."
+    echo -e " ${CYN}Tip:${NC} Use b to return, e/q to exit, Ctrl-C anytime."
+    echo ""
+}
+handle_email_operations_menu() {
+    local opt="$1" transport=""
+    case "${opt}" in
+        1) transport="configured" ;;
+        2) transport="all" ;;
+        3) transport="api" ;;
+        4) transport="sidecar" ;;
+        5) transport="direct" ;;
+        6)
+            ACTIVE_MENU="email_queue"
+            return
+            ;;
+        b)
+            ACTIVE_MENU="identity"
+            return
+            ;;
+        e|q) _cleanup ;;
+        *)
+            echo -e "${YLW} Invalid option. Please try again.${NC}"
+            sleep 1
+            return
+            ;;
+    esac
+    run_sudo_cmd \
+        "sudo make test-email EMAIL_TEST_TRANSPORT=${transport}" \
+        make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"
+}
+
+# ===========================================================================
+# SUBMENU I.1.1 — Postfix Queue Operations
+# ===========================================================================
+draw_email_queue_menu() {
+    echo -e " ${BLD}Postfix Queue Operations${NC}"
+    echo ""
+    echo -e "  [ ${GRN}1${NC} ] Queue summary"
+    echo -e "  [ ${GRN}2${NC} ] List queued messages"
+    echo -e "  [ ${GRN}3${NC} ] Inspect a message"
+    echo -e "  [ ${GRN}4${NC} ] Retry a message"
+    echo -e "  [ ${RED}5${NC} ] Delete a message"
+    echo -e "  [ ${YLW}6${NC} ] Retry all queued messages"
+    echo -e "  [ ${GRN}7${NC} ] View Postfix logs"
+    echo -e "  [ ${RED}8${NC} ] Purge current queue snapshot"
+    draw_divider
+    echo -e "  [ ${GRN}b${NC} ] Back to Email Operations"
+    echo ""
+    echo -e " ${CYN}Tip:${NC} Destructive confirmation is owned by the queue utility."
+    echo -e " ${CYN}Tip:${NC} Queue IDs remain case-sensitive."
+    echo ""
+}
+
+_prompt_email_queue_id() {
+    local prompt="$1" queue_id=""
+    printf ' %s: ' "$prompt" >&2
+    IFS= read -r queue_id || queue_id=""
+    queue_id="$(printf '%s' "$queue_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [[ -z "$queue_id" ]]; then
+        echo -e "${YLW} Queue ID must not be empty.${NC}" >&2
+        _press_enter
+        return 1
+    fi
+    printf '%s\n' "$queue_id"
+}
+
+handle_email_queue_menu() {
+    local opt="$1" queue_id="" tail_lines="200"
+    case "${opt}" in
+        1)
+            run_sudo_cmd "sudo make email-queue-summary" \
+                make -C "${REPO_ROOT}" email-queue-summary
+            ;;
+        2)
+            run_sudo_cmd "sudo make email-queue" \
+                make -C "${REPO_ROOT}" email-queue
+            ;;
+        3)
+            queue_id=$(_prompt_email_queue_id "Queue ID to inspect") || return
+            run_sudo_cmd "sudo make email-queue-inspect QUEUE_ID=${queue_id}" \
+                make -C "${REPO_ROOT}" email-queue-inspect "QUEUE_ID=${queue_id}"
+            ;;
+        4)
+            queue_id=$(_prompt_email_queue_id "Queue ID to retry") || return
+            run_sudo_cmd "sudo make email-queue-retry QUEUE_ID=${queue_id}" \
+                make -C "${REPO_ROOT}" email-queue-retry "QUEUE_ID=${queue_id}"
+            ;;
+        5)
+            queue_id=$(_prompt_email_queue_id "Queue ID to delete") || return
+            run_sudo_cmd "sudo make email-queue-delete QUEUE_ID=${queue_id}" \
+                make -C "${REPO_ROOT}" email-queue-delete "QUEUE_ID=${queue_id}"
+            ;;
+        6)
+            run_sudo_cmd "sudo make email-queue-retry-all" \
+                make -C "${REPO_ROOT}" email-queue-retry-all
+            ;;
+        7)
+            printf ' Optional queue ID (blank for all logs): '
+            IFS= read -r queue_id || queue_id=""
+            queue_id="$(printf '%s' "$queue_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            printf ' Tail lines [200]: '
+            IFS= read -r tail_lines || tail_lines="200"
+            tail_lines="$(printf '%s' "${tail_lines:-200}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            run_sudo_cmd "sudo make email-queue-logs QUEUE_ID=${queue_id} EMAIL_QUEUE_TAIL=${tail_lines}" \
+                make -C "${REPO_ROOT}" email-queue-logs \
+                "QUEUE_ID=${queue_id}" "EMAIL_QUEUE_TAIL=${tail_lines}"
+            ;;
+        8)
+            run_sudo_cmd "sudo make email-queue-purge" \
+                make -C "${REPO_ROOT}" email-queue-purge
+            ;;
+        b)
+            ACTIVE_MENU="email_operations"
+            ;;
+        e|q) _cleanup ;;
+        *)
+            echo -e "${YLW} Invalid option. Please try again.${NC}"
+            sleep 1
+            ;;
+    esac
+}
 # ===========================================================================
 # Main event loop
 # ===========================================================================
@@ -950,6 +1085,8 @@ main() {
             secrets)  draw_secrets_menu  ;;
             advanced) draw_advanced_menu ;;
             identity) draw_identity_menu ;;
+            email_operations) draw_email_operations_menu ;;
+            email_queue) draw_email_queue_menu ;;
             *)
                 ACTIVE_MENU="main"
                 draw_main_menu
@@ -977,6 +1114,8 @@ main() {
             secrets)  handle_secrets_menu  "${opt}" ;;
             advanced) handle_advanced_menu "${opt}" ;;
             identity) handle_identity_menu "${opt}" ;;
+            email_operations) handle_email_operations_menu "${opt}" ;;
+            email_queue) handle_email_queue_menu "${opt}" ;;
         esac
     done
 }

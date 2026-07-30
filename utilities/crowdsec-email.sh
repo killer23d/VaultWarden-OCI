@@ -117,6 +117,45 @@ _read_flag_record() {
     esac
 }
 
+_read_policy_record() {
+    local exact_count related_count value
+    [[ -e "$ENV_FILE" ]] || { printf 'unknown\n'; return 2; }
+    [[ -f "$ENV_FILE" && -r "$ENV_FILE" ]] || { printf 'unknown\n'; return 3; }
+
+    read -r exact_count related_count < <(
+        awk '
+            /^[[:space:]]*#/ { next }
+            {
+                trimmed=$0
+                sub(/^[[:space:]]*/, "", trimmed)
+                if (trimmed ~ /^CROWDSEC_EMAIL_EVENT_POLICY[[:space:]]*=/) related++
+                if ($0 ~ /^CROWDSEC_EMAIL_EVENT_POLICY=/) exact++
+            }
+            END { print exact + 0, related + 0 }
+        ' "$ENV_FILE"
+    ) || { printf 'unknown\n'; return 3; }
+
+    if (( exact_count > 1 || related_count != exact_count )); then
+        printf 'invalid\n'
+        return 4
+    fi
+    if (( exact_count == 0 )); then
+        printf 'all\n'
+        return 0
+    fi
+
+    value="$(awk '
+        index($0, "CROWDSEC_EMAIL_EVENT_POLICY=") == 1 {
+            print substr($0, length("CROWDSEC_EMAIL_EVENT_POLICY=") + 1)
+            exit
+        }
+    ' "$ENV_FILE")" || { printf 'unknown\n'; return 3; }
+    case "$value" in
+        all|none) printf '%s\n' "$value" ;;
+        *) printf 'invalid\n'; return 4 ;;
+    esac
+}
+
 write_flag() {
     local value="$1" tmp
     tmp="$(mktemp "${ENV_FILE}.tmp.XXXXXXXX")" || {
@@ -238,6 +277,8 @@ managed_install_state() {
     fi
     if [[ "$plugin" == valid && "$profile" == valid ]]; then
         printf 'true\n'
+    elif [[ "$plugin" == valid && "$profile" == absent ]]; then
+        printf 'plugin-only\n'
     elif [[ "$plugin" == absent && "$profile" == absent ]]; then
         printf 'false\n'
     else
@@ -458,7 +499,8 @@ apply_state() {
 }
 
 show_status() {
-    local configured installed configured_rc=0 installed_rc=0 consistent=false
+    local configured event_policy installed
+    local configured_rc=0 policy_rc=0 installed_rc=0 consistent=false
     if [[ ! -e "$ENV_FILE" ]]; then
         error "Repository .env not found: $ENV_FILE"
         return 1
@@ -470,15 +512,23 @@ show_status() {
     fi
 
     configured="$(_read_flag_record)" || configured_rc=$?
+    event_policy="$(_read_policy_record)" || policy_rc=$?
     installed="$(managed_install_state)" || installed_rc=$?
     if (( configured_rc == 4 )); then
         error "CROWDSEC_EMAIL_NOTIFICATIONS is malformed or duplicated in $ENV_FILE"
     elif (( configured_rc != 0 )); then
         error "Could not inspect CROWDSEC_EMAIL_NOTIFICATIONS in $ENV_FILE"
     fi
+    if (( policy_rc == 4 )); then
+        error "CROWDSEC_EMAIL_EVENT_POLICY is malformed or duplicated in $ENV_FILE"
+    elif (( policy_rc != 0 )); then
+        error "Could not inspect CROWDSEC_EMAIL_EVENT_POLICY in $ENV_FILE"
+    fi
 
-    if (( configured_rc == 0 && installed_rc == 0 )); then
-        if [[ "$configured" == true && "$installed" == true ]]; then
+    if (( configured_rc == 0 && policy_rc == 0 && installed_rc == 0 )); then
+        if [[ "$configured" == true && "$event_policy" == all && "$installed" == true ]]; then
+            consistent=true
+        elif [[ "$configured" == true && "$event_policy" == none && "$installed" == plugin-only ]]; then
             consistent=true
         elif [[ "$configured" == false && "$installed" == false ]]; then
             consistent=true
@@ -486,13 +536,14 @@ show_status() {
     fi
 
     printf 'Configured: %s\n' "$configured"
+    printf 'Event policy: %s\n' "$event_policy"
     printf 'Installed:  %s\n' "$installed"
     printf 'Consistent: %s\n' "$consistent"
     [[ "$consistent" == true ]]
 }
 
 send_test() {
-    local configured installed
+    local configured event_policy installed expected_install
     [[ -f "$ENV_FILE" && -r "$ENV_FILE" ]] || {
         error "Repository .env is missing or unreadable: $ENV_FILE"
         return 1
@@ -501,8 +552,14 @@ send_test() {
         error "CrowdSec email notification setting is malformed or unreadable."
         return 1
     }
+    event_policy="$(_read_policy_record)" || {
+        error "CrowdSec email event policy is malformed or unreadable."
+        return 1
+    }
     installed="$(managed_install_state)" || return 1
-    if [[ "$configured" != true || "$installed" != true ]]; then
+    expected_install=true
+    [[ "$event_policy" == none ]] && expected_install="plugin-only"
+    if [[ "$configured" != true || "$installed" != "$expected_install" ]]; then
         error "CrowdSec email notifications are not enabled."
         return 1
     fi

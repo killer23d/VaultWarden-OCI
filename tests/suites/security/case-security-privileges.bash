@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Consolidated security and privilege regression suite.
+# This static assertion suite intentionally uses literal shell/Make patterns and
+# subshell-local PATH probes; keep plain ShellCheck focused on actionable findings.
+# shellcheck disable=SC1091,SC2016,SC2030,SC2031
 set -euo pipefail
 
 # shellcheck source=../../lib/test-root.bash
@@ -353,20 +356,49 @@ extract_make_target() {
     ' "$file"
 }
 
+extract_shell_function() {
+    local function_name="$1" file="$2"
+    awk -v function_name="$function_name" '
+        $0 ~ "^" function_name "\\(\\)[[:space:]]*\\{" {
+            found=1
+            inside=1
+        }
+        inside { print }
+        inside && /^}$/ { exit }
+        END { if (!found) exit 2 }
+    ' "$file"
+}
+
 # Root-operated lifecycle contract.
 grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
-for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email health-email diagnose systemd-status prune key-show; do
+for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear health-email diagnose systemd-status prune key-show; do
     grep -Eq "(^|[[:space:]])${target}([[:space:]]|\|$)" Makefile || fail "${target} is not root-allowed"
 done
 pass "root-supported lifecycle/day-2 targets are allowed under sudo make"
 
-for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email diagnose systemd-status prune key-show; do
+for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear diagnose systemd-status prune key-show; do
     _snip="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
     extract_make_target "$target" Makefile > "$_snip" || fail "could not extract make ${target} target"
     grep -Fq '$(call require-root)' "$_snip" || { cat "$_snip" >&2; rm -f "$_snip"; fail "make ${target} does not require root"; }
     rm -f "$_snip"
 done
 pass "health/status/logs/CrowdSec security targets enforce the root-operated policy"
+for target in email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear; do
+    QUEUE_TARGET_SNIP="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
+    extract_make_target "$target" Makefile > "$QUEUE_TARGET_SNIP" \
+        || fail "could not extract make ${target} target"
+    grep -Fq '$(call require-root)' "$QUEUE_TARGET_SNIP" \
+        || fail "make ${target} does not explicitly require root"
+    grep -E '^[[:space:]]' "$QUEUE_TARGET_SNIP" \
+        | grep -Fq './utilities/email-queue.sh' \
+        || fail "make ${target} does not delegate to the queue utility"
+    if grep -E '^[[:space:]]' "$QUEUE_TARGET_SNIP" \
+        | grep -Eq 'docker([[:space:]]+compose|[[:space:]]+exec)|postqueue|postcat|postsuper'; then
+        fail "make ${target} bypasses the queue utility"
+    fi
+    rm -f "$QUEUE_TARGET_SNIP"
+done
+pass "Postfix queue Make targets preserve root and utility ownership boundaries"
 
 UP_SNIP="$(mktemp -t vw-priv-up.XXXXXXXXXX)"
 trap 'rm -f "$UP_SNIP"; rm -rf "${KEY_TMP:-}"' EXIT
@@ -488,9 +520,223 @@ grep -Fq 'run_sudo_cmd "sudo make down"' dashboard.sh || fail "dashboard stop la
 grep -Fq 'run_sudo_cmd "sudo make health"' dashboard.sh || fail "dashboard health label missing"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should use sudo"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"' dashboard.sh || fail "dashboard recovery-kit export should stay root-operated"
-grep -Fq 'run_sudo_cmd "sudo make test-email" make -C "${REPO_ROOT}" test-email' dashboard.sh || fail "dashboard email diagnostic should stay root-operated"
+EMAIL_MENU_SNIP="$(mktemp -t vw-dashboard-email.XXXXXXXXXX)"
+QUEUE_MENU_SNIP="$(mktemp -t vw-dashboard-queue.XXXXXXXXXX)"
+EMAIL_MENU_NORM="$(mktemp -t vw-dashboard-email-normalized.XXXXXXXXXX)"
+QUEUE_MENU_NORM="$(mktemp -t vw-dashboard-queue-normalized.XXXXXXXXXX)"
+extract_shell_function handle_email_operations_menu dashboard.sh > "$EMAIL_MENU_SNIP" \
+    || fail "could not extract dashboard email transport handler"
+extract_shell_function handle_email_queue_menu dashboard.sh > "$QUEUE_MENU_SNIP" \
+    || fail "could not extract dashboard queue handler"
+tr '\n' ' ' < "$EMAIL_MENU_SNIP" \
+    | sed 's/\\[[:space:]]*/ /g; s/[[:space:]][[:space:]]*/ /g' > "$EMAIL_MENU_NORM"
+tr '\n' ' ' < "$QUEUE_MENU_SNIP" \
+    | sed 's/\\[[:space:]]*/ /g; s/[[:space:]][[:space:]]*/ /g' > "$QUEUE_MENU_NORM"
+grep -Fq 'run_sudo_cmd' "$EMAIL_MENU_NORM" \
+    || fail "dashboard email diagnostic does not use run_sudo_cmd"
+grep -Fq '"sudo make test-email EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_NORM" \
+    || fail "dashboard email diagnostic label does not show the root-operated Make command"
+grep -Fq 'make -C "${REPO_ROOT}" test-email "EMAIL_TEST_TRANSPORT=${transport}"' "$EMAIL_MENU_NORM" \
+    || fail "dashboard email diagnostic does not invoke the root-operated Make target"
+grep -Fq 'ACTIVE_MENU="email_queue"' "$EMAIL_MENU_NORM" \
+    || fail "dashboard email handler does not enter the nested queue menu"
+grep -Fq 'run_sudo_cmd' "$QUEUE_MENU_NORM" \
+    || fail "dashboard queue operations do not use run_sudo_cmd"
+for target in email-queue-summary email-queue email-queue-inspect email-queue-retry email-queue-delete email-queue-retry-all email-queue-logs email-queue-purge; do
+    grep -Fq "sudo make ${target}" "$QUEUE_MENU_NORM" \
+        || fail "dashboard queue label missing sudo make ${target}"
+    grep -Fq "make -C \"\${REPO_ROOT}\" ${target}" "$QUEUE_MENU_NORM" \
+        || fail "dashboard queue action missing Make target ${target}"
+done
+! grep -Eq 'run_cmd|run_user_cmd|utilities/email-queue\.sh|docker([[:space:]]+compose|[[:space:]]+exec)|postqueue|postcat|postsuper' \
+    "$EMAIL_MENU_NORM" "$QUEUE_MENU_NORM" \
+    || fail "dashboard email handlers bypass the root-operated Make interface"
+grep -Fq '(IFS=" "; "$@")' dashboard.sh \
+    || fail "dashboard command runner does not execute the supplied argv directly"
+! grep -Eq '(^|[;&|[:space:]])(eval|bash[[:space:]]+-c|sh[[:space:]]+-c)([;&|[:space:]]|$)' \
+    "$EMAIL_MENU_SNIP" "$QUEUE_MENU_SNIP" \
+    || fail "dashboard email handlers construct a second shell-evaluation path"
+rm -f "$EMAIL_MENU_SNIP" "$QUEUE_MENU_SNIP" "$EMAIL_MENU_NORM" "$QUEUE_MENU_NORM"
 ! grep -Fq 'run_user_cmd' dashboard.sh || fail "dashboard should not drop root for root-operated actions"
 pass "dashboard command labels match root-operated lifecycle"
+
+python3 - Makefile <<'PY_MAKE_LITERAL_ORDER' \
+    || fail "documented Make inputs are not frozen before the first parse-time shell expression"
+from pathlib import Path
+
+lines = Path("Makefile").read_text(encoding="utf-8").splitlines()
+first_shell = next((
+    number
+    for number, line in enumerate(lines, 1)
+    if not line.startswith("\t")
+    and not line.lstrip().startswith("#")
+    and "$(shell" in line
+), None)
+if first_shell is None:
+    raise SystemExit("no active parse-time $(shell expression found")
+for name in ("EMAIL_TEST_TRANSPORT", "QUEUE_ID", "EMAIL_QUEUE_TAIL", "EMAIL_QUEUE_BODY"):
+    expected = f"override {name} := $(value {name})"
+    matches = [number for number, line in enumerate(lines, 1) if line.strip() == expected]
+    if len(matches) != 1:
+        raise SystemExit(f"expected one {expected!r}, found {len(matches)}")
+    if matches[0] >= first_shell:
+        raise SystemExit(f"{name} is normalized at line {matches[0]}, not before first shell at line {first_shell}")
+PY_MAKE_LITERAL_ORDER
+pass "documented Make parameters are frozen before parse-time shell expansion"
+MAKE_LITERAL_TMP="$(mktemp -d -t vw-make-email-literals.XXXXXXXXXX)"
+MAKE_LITERAL_REPO="$MAKE_LITERAL_TMP/repo"
+MAKE_LITERAL_BIN="$MAKE_LITERAL_TMP/bin"
+MAKE_LITERAL_CALLS="$MAKE_LITERAL_TMP/calls.jsonl"
+MAKE_LITERAL_SUPPLEMENT="$MAKE_LITERAL_TMP/supplement.mk"
+MAKE_LITERAL_FEATURES_MK="$MAKE_LITERAL_TMP/features.mk"
+rm -rf "$MAKE_LITERAL_TMP"
+mkdir -p "$MAKE_LITERAL_REPO/utilities" "$MAKE_LITERAL_BIN"
+cat > "$MAKE_LITERAL_BIN/id" <<'EOF_MAKE_LITERAL_ID'
+#!/usr/bin/env bash
+case "${1:-}" in
+    -u) printf '0\n' ;;
+    -un) printf 'root\n' ;;
+    -g) printf '0\n' ;;
+    -gn) printf 'root\n' ;;
+    *) /usr/bin/id "$@" ;;
+esac
+EOF_MAKE_LITERAL_ID
+cat > "$MAKE_LITERAL_REPO/maintenance.sh" <<'EOF_MAKE_LITERAL_MAINTENANCE'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+with open(os.environ["VW_MAKE_LITERAL_CALLS"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:], separators=(",", ":")) + "\n")
+EOF_MAKE_LITERAL_MAINTENANCE
+cat > "$MAKE_LITERAL_REPO/utilities/email-queue.sh" <<'EOF_MAKE_LITERAL_QUEUE'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+with open(os.environ["VW_MAKE_LITERAL_CALLS"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:], separators=(",", ":")) + "\n")
+EOF_MAKE_LITERAL_QUEUE
+cat > "$MAKE_LITERAL_SUPPLEMENT" <<'EOF_MAKE_LITERAL_SUPPLEMENT'
+test-email:
+	@python3 -c 'import json,os; print(json.dumps({name:os.environ[name] for name in ("EMAIL_TEST_TRANSPORT","QUEUE_ID","EMAIL_QUEUE_TAIL","EMAIL_QUEUE_BODY")}, separators=(",",":")))'
+EOF_MAKE_LITERAL_SUPPLEMENT
+cat > "$MAKE_LITERAL_FEATURES_MK" <<'EOF_MAKE_LITERAL_FEATURES'
+.PHONY: print-features
+print-features:
+	@printf '%s\n' '$(.FEATURES)'
+EOF_MAKE_LITERAL_FEATURES
+chmod +x "$MAKE_LITERAL_BIN/id" "$MAKE_LITERAL_REPO/maintenance.sh" \
+    "$MAKE_LITERAL_REPO/utilities/email-queue.sh"
+run_make_literal_target() {
+    local target="$1"
+    shift
+    : >"$MAKE_LITERAL_CALLS"
+    PATH="$MAKE_LITERAL_BIN:$PATH" VW_MAKE_LITERAL_CALLS="$MAKE_LITERAL_CALLS" \
+        make -s -C "$MAKE_LITERAL_REPO" -f "$ROOT/Makefile" "$target" "$@"
+}
+assert_make_literal_call() {
+    local expected_json="$1"
+    python3 - "$MAKE_LITERAL_CALLS" "$expected_json" <<'PY_MAKE_LITERAL_CALL' \
+        || fail "Make target did not preserve the expected literal argv"
+import json, sys
+from pathlib import Path
+rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+assert rows == [json.loads(sys.argv[2])], rows
+PY_MAKE_LITERAL_CALL
+}
+for transport in configured all api sidecar direct; do
+    run_make_literal_target test-email "EMAIL_TEST_TRANSPORT=$transport" \
+        >"$MAKE_LITERAL_TMP/test-email-${transport}.out"
+    assert_make_literal_call "[\"test-email\",\"--transport\",\"$transport\",\"--verbose\"]"
+done
+malformed_transport='bad"; touch SHOULD_NOT_EXIST; printf "'
+run_make_literal_target test-email "EMAIL_TEST_TRANSPORT=$malformed_transport" \
+    >"$MAKE_LITERAL_TMP/test-email-malformed.out"
+python3 - "$MAKE_LITERAL_CALLS" "$malformed_transport" <<'PY_MAKE_LITERAL_TRANSPORT' \
+    || fail "malformed transport escaped its quoted Make recipe argument"
+import json, sys
+from pathlib import Path
+rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+assert rows == [["test-email", "--transport", sys.argv[2], "--verbose"]], rows
+PY_MAKE_LITERAL_TRANSPORT
+[[ ! -e "$MAKE_LITERAL_REPO/SHOULD_NOT_EXIST" ]] \
+    || fail "malformed transport executed a constructed shell command"
+run_make_literal_target email-queue-inspect 'QUEUE_ID=AbC-123' 'EMAIL_QUEUE_BODY=false' \
+    >"$MAKE_LITERAL_TMP/queue-inspect.out"
+assert_make_literal_call '["inspect","AbC-123"]'
+run_make_literal_target email-queue-inspect 'QUEUE_ID=AbC-123' 'EMAIL_QUEUE_BODY=true' \
+    >"$MAKE_LITERAL_TMP/queue-inspect-body.out"
+assert_make_literal_call '["inspect","AbC-123","--body"]'
+run_make_literal_target email-queue-logs 'QUEUE_ID=AbC-123' 'EMAIL_QUEUE_TAIL=37' \
+    >"$MAKE_LITERAL_TMP/queue-logs.out"
+assert_make_literal_call '["logs","AbC-123","--tail","37"]'
+
+literal_shell='$(shell touch '"$MAKE_LITERAL_TMP/marker-shell"')'
+literal_error='$(error injected)'
+literal_escaped='$$(shell touch '"$MAKE_LITERAL_TMP/marker-escaped"')'
+PATH="$MAKE_LITERAL_BIN:$PATH" \
+    make -s -C "$MAKE_LITERAL_REPO" -f "$ROOT/Makefile" -f "$MAKE_LITERAL_SUPPLEMENT" \
+        test-email \
+        "EMAIL_TEST_TRANSPORT=$literal_shell" \
+        "QUEUE_ID=$literal_error" \
+        "EMAIL_QUEUE_TAIL=$literal_escaped" \
+        'EMAIL_QUEUE_BODY=false' \
+        >"$MAKE_LITERAL_TMP/exported-values.json" \
+        2>"$MAKE_LITERAL_TMP/exported-values.err" \
+    || { cat "$MAKE_LITERAL_TMP/exported-values.err" >&2; fail "literal Make values were evaluated during parsing or export"; }
+[[ ! -e "$MAKE_LITERAL_TMP/marker-shell" && ! -e "$MAKE_LITERAL_TMP/marker-escaped" ]] \
+    || fail "documented NAME=value input executed a Make shell function"
+python3 - "$MAKE_LITERAL_TMP/exported-values.json" \
+    "$literal_shell" "$literal_error" "$literal_escaped" <<'PY_MAKE_LITERAL_VALUES' \
+    || fail "documented NAME=value inputs did not reach the receiving shell literally"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    values = json.load(handle)
+assert values == {
+    "EMAIL_TEST_TRANSPORT": sys.argv[2],
+    "QUEUE_ID": sys.argv[3],
+    "EMAIL_QUEUE_TAIL": sys.argv[4],
+    "EMAIL_QUEUE_BODY": "false",
+}, values
+PY_MAKE_LITERAL_VALUES
+MAKE_LITERAL_FEATURES="$(make -s -f "$MAKE_LITERAL_FEATURES_MK" print-features)"
+if [[ " $MAKE_LITERAL_FEATURES " == *" shell-export "* ]]; then
+    shell_export_shell='$(shell touch '"$MAKE_LITERAL_TMP/marker-shell-export"')'
+    shell_export_error='$(error injected)'
+    shell_export_escaped='$$(shell touch '"$MAKE_LITERAL_TMP/marker-shell-export-escaped"')'
+    PATH="$MAKE_LITERAL_BIN:$PATH" \
+        make -s -C "$MAKE_LITERAL_REPO" -f "$ROOT/Makefile" -f "$MAKE_LITERAL_SUPPLEMENT" \
+        test-email \
+        "EMAIL_TEST_TRANSPORT=$shell_export_shell" \
+        "QUEUE_ID=$shell_export_error" \
+        "EMAIL_QUEUE_TAIL=$shell_export_escaped" \
+        'EMAIL_QUEUE_BODY=true' \
+        >"$MAKE_LITERAL_TMP/shell-export-values.json" \
+        2>"$MAKE_LITERAL_TMP/shell-export-values.err" \
+        || { cat "$MAKE_LITERAL_TMP/shell-export-values.err" >&2; fail "GNU Make shell-export evaluated a documented input during parsing"; }
+    [[ ! -e "$MAKE_LITERAL_TMP/marker-shell-export" \
+        && ! -e "$MAKE_LITERAL_TMP/marker-shell-export-escaped" ]] \
+        || fail "GNU Make shell-export executed a documented Make input"
+    python3 - "$MAKE_LITERAL_TMP/shell-export-values.json" \
+        "$shell_export_shell" "$shell_export_error" "$shell_export_escaped" <<'PY_MAKE_SHELL_EXPORT' \
+        || fail "GNU Make shell-export changed a documented input before the receiving shell"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    values = json.load(handle)
+assert values == {
+    "EMAIL_TEST_TRANSPORT": sys.argv[2],
+    "QUEUE_ID": sys.argv[3],
+    "EMAIL_QUEUE_TAIL": sys.argv[4],
+    "EMAIL_QUEUE_BODY": "true",
+}, values
+PY_MAKE_SHELL_EXPORT
+    pass "GNU Make shell-export preserves documented Make inputs literally"
+else
+    pass "GNU Make shell-export reproduction skipped because the installed Make lacks the feature"
+fi
+rm -rf "$MAKE_LITERAL_TMP"
+pass "documented email Make parameters remain literal and argv-safe"
 
 grep -Fq 'sudo ./setup.sh install --domain <your-domain> --email <your-email>' Makefile \
     || fail "Makefile setup guidance must advertise supported first-install command"

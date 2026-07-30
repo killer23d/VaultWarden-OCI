@@ -606,13 +606,39 @@ ADMIN_EMAIL=admin@example.test
 SMTP_FROM=security@example.test
 ALLOWED_SENDER_DOMAINS="example.invalid EXAMPLE.TEST"
 CROWDSEC_EMAIL_NOTIFICATIONS=true
+CROWDSEC_EMAIL_EVENT_POLICY=all
+CROWDSEC_EMAIL_GROUP_WAIT=45s
+CROWDSEC_EMAIL_GROUP_THRESHOLD=7
 export ADMIN_EMAIL SMTP_FROM ALLOWED_SENDER_DOMAINS CROWDSEC_EMAIL_NOTIFICATIONS
+export CROWDSEC_EMAIL_EVENT_POLICY CROWDSEC_EMAIL_GROUP_WAIT
+export CROWDSEC_EMAIL_GROUP_THRESHOLD
 mkdir -p "$_CS_LAPI_COHORT_ROOT"
 printf 'name: operator_profile\nfilters:\n  - true\non_success: continue\n' \
     > "$_CS_LAPI_COHORT_ROOT/profiles.yaml.local"
 cp "$_CS_LAPI_COHORT_ROOT/profiles.yaml.local" "$TMP/operator.original"
 plugin="$_CS_LAPI_COHORT_ROOT/notifications/vaultwarden-email.yaml"
 profiles="$_CS_LAPI_COHORT_ROOT/profiles.yaml.local"
+
+assert_invalid_email_setting() {
+    local label="$1" variable="$2" value="$3" previous
+    previous="${!variable}"
+    printf -v "$variable" '%s' "$value"
+    cp "$profiles" "$TMP/${label}.profiles-before"
+    if _cs_reconcile_email_notifications >"$TMP/${label}.out" 2>&1; then
+        fail "invalid CrowdSec email setting unexpectedly reconciled: $label"
+    fi
+    [[ ! -d "$(dirname "$plugin")" ]] \
+        || fail "invalid CrowdSec email setting created the notifications directory: $label"
+    [[ ! -e "$plugin" ]] \
+        || fail "invalid CrowdSec email setting installed the plugin: $label"
+    cmp -s "$TMP/${label}.profiles-before" "$profiles" \
+        || fail "invalid CrowdSec email setting changed profiles: $label"
+    printf -v "$variable" '%s' "$previous"
+}
+
+assert_invalid_email_setting event-policy CROWDSEC_EMAIL_EVENT_POLICY ALL
+assert_invalid_email_setting group-wait CROWDSEC_EMAIL_GROUP_WAIT 0s
+assert_invalid_email_setting group-threshold CROWDSEC_EMAIL_GROUP_THRESHOLD 0
 
 _cs_email_sender_domain_is_allowed \
     "security@example.test" "EXAMPLE.TEST other.example" \
@@ -761,6 +787,8 @@ grep -Fxq 'smtp_host: 127.0.0.1' "$plugin" || fail "plugin does not use loopback
 grep -Fxq 'smtp_port: 587' "$plugin" || fail "plugin does not use loopback Postfix port"
 grep -Fxq 'auth_type: none' "$plugin" || fail "plugin unexpectedly requires authentication"
 grep -Fxq 'encryption_type: none' "$plugin" || fail "plugin unexpectedly enables encryption on loopback hop"
+grep -Fxq 'group_wait: 45s' "$plugin" || fail "configured CrowdSec batching wait was not rendered"
+grep -Fxq 'group_threshold: 7' "$plugin" || fail "configured CrowdSec batching threshold was not rendered"
 grep -Fq "sender_email: 'security@example.test'" "$plugin" || fail "SMTP_FROM was not rendered"
 grep -Fq -- "- 'admin@example.test'" "$plugin" || fail "ADMIN_EMAIL was not rendered"
 
@@ -828,6 +856,30 @@ _cs_reconcile_email_notifications || fail "repeat reconciliation failed"
 after="$(shasum -a 256 "$plugin" "$profiles")"
 [[ "$before" == "$after" ]] || fail "repeat reconciliation was not byte-stable"
 
+unset CROWDSEC_EMAIL_EVENT_POLICY CROWDSEC_EMAIL_GROUP_WAIT CROWDSEC_EMAIL_GROUP_THRESHOLD
+_cs_reconcile_email_notifications || fail "legacy default reconciliation failed"
+grep -Fxq 'group_wait: 30s' "$plugin" || fail "missing group wait did not preserve the 30s default"
+grep -Fxq 'group_threshold: 10' "$plugin" || fail "missing threshold did not preserve the default of 10"
+grep -Fxq "$_CS_EMAIL_PROFILE_BEGIN" "$profiles" \
+    || fail "missing event policy did not preserve automatic email behavior"
+
+CROWDSEC_EMAIL_EVENT_POLICY=none
+CROWDSEC_EMAIL_GROUP_WAIT=1m
+CROWDSEC_EMAIL_GROUP_THRESHOLD=3
+_cs_reconcile_email_notifications || fail "none-policy reconciliation failed"
+[[ -f "$plugin" ]] || fail "none policy removed the manual-test plugin"
+grep -Fxq 'group_wait: 1m' "$plugin" || fail "none policy did not render the configured batching wait"
+grep -Fxq 'group_threshold: 3' "$plugin" || fail "none policy did not render the configured threshold"
+! grep -Fq "$_CS_EMAIL_PROFILE_BEGIN" "$profiles" \
+    || fail "none policy retained the automatic email profile"
+grep -Fq 'name: operator_profile' "$profiles" \
+    || fail "none policy removed operator profile content"
+
+CROWDSEC_EMAIL_EVENT_POLICY=all
+CROWDSEC_EMAIL_GROUP_WAIT=45s
+CROWDSEC_EMAIL_GROUP_THRESHOLD=7
+_cs_reconcile_email_notifications || fail "all-policy restoration failed"
+
 CROWDSEC_EMAIL_NOTIFICATIONS=false
 export CROWDSEC_EMAIL_NOTIFICATIONS
 _cs_reconcile_email_notifications || fail "disable reconciliation failed"
@@ -870,6 +922,12 @@ grep -Fq 'systemctl restart crowdsec' "$TMP/restart.out" || fail "restart failur
 
 grep -Fxq 'CROWDSEC_EMAIL_NOTIFICATIONS=false' "$ROOT/.env.example" \
     || fail "CrowdSec email notifications are not disabled by default"
+grep -Fxq 'CROWDSEC_EMAIL_EVENT_POLICY=all' "$ROOT/.env.example" \
+    || fail "CrowdSec email event policy does not preserve legacy behavior by default"
+grep -Fxq 'CROWDSEC_EMAIL_GROUP_WAIT=30s' "$ROOT/.env.example" \
+    || fail "CrowdSec email grouping wait default is missing"
+grep -Fxq 'CROWDSEC_EMAIL_GROUP_THRESHOLD=10' "$ROOT/.env.example" \
+    || fail "CrowdSec email grouping threshold default is missing"
 ! grep -Fq 'CROWDSEC_EMAIL_NOTIFICATIONS' "$ROOT/secrets-schema.yaml" \
     || fail "non-secret CrowdSec option was added to the secret schema"
 ! grep -Eq 'nc .*127\.0\.0\.1.*587|curl .*127\.0\.0\.1.*587' "$SETUP" \
@@ -1088,6 +1146,7 @@ printf '\001\002\r\t\n' > "$sanitize_log"
 VW_CROWDSEC_ETC_DIR="$TMP/etc-crowdsec"
 export VW_CROWDSEC_ETC_DIR
 CROWDSEC_EMAIL_NOTIFICATIONS=false
+CROWDSEC_EMAIL_EVENT_POLICY=all
 RESULTS=""
 _check_crowdsec_email_notifications
 [[ "$RESULTS" == pass:*disabled* ]] || fail "disabled notifications were not reported as a clean pass"
@@ -1136,6 +1195,23 @@ _check_crowdsec_email_notifications
     || fail "statically valid enabled state was not reported"
 assert_no_validation_logs
 
+CROWDSEC_EMAIL_EVENT_POLICY=none
+rm -f "$VW_CROWDSEC_ETC_DIR/profiles.yaml.local"
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == *pass:*disabled*policy* && "$RESULTS" == *pass:*validation*valid* ]] \
+    || fail "valid none policy was not reported as manual-test-only"
+[[ "$RESULTS" != *warn:* ]] || fail "valid none policy produced a health warning"
+assert_no_validation_logs
+
+CROWDSEC_EMAIL_EVENT_POLICY=invalid
+RESULTS=""
+_check_crowdsec_email_notifications
+[[ "$RESULTS" == warn:*policy* ]] || fail "invalid event policy was not reported"
+
+CROWDSEC_EMAIL_EVENT_POLICY=all
+printf '# BEGIN VaultWarden-OCI CrowdSec email notifications\n# END VaultWarden-OCI CrowdSec email notifications\n' \
+    > "$VW_CROWDSEC_ETC_DIR/profiles.yaml.local"
 VALIDATION_RC=143
 VALIDATION_SIGNAL=TERM
 printf 'FATAL validation subprocess terminated\n' > "$VALIDATION_OUTPUT_FILE"

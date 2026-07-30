@@ -911,7 +911,7 @@ assert_real_etc_unchanged() {
     fi
 }
 
-run_test() {
+_restore_recovery_run_test_impl() {
     local name="$1"; shift
     TESTS_RUN=$((TESTS_RUN + 1))
     "$@"
@@ -1633,6 +1633,45 @@ test_health_failure_reports_nonzero_without_rollback() {
     grep -q "# mock-age=$NEW_RECIPIENT,$USB_RECIPIENT" "$dir/state/secrets/secrets.yaml" || fail 'cipher artifacts rolled back after health failure'
     grep -q 'new-private-key' "$dir/etc/age-key.txt" || fail 'active key rolled back after health failure'
     grep -q "$NEW_RECIPIENT,$USB_RECIPIENT" "$dir/repo/.sops.yaml" || fail 'policy rolled back after health failure'
+}
+
+
+# Keep each runner-owned case comfortably within the repository's unchanged
+# 120-second per-case deadline. The companion case executes the other half;
+# skipped TAP entries keep each shard's plan deterministic and visible.
+_RESTORE_RECOVERY_SHARD_SPLIT=13
+_restore_recovery_run_test_index=0
+_restore_recovery_skip_test() { return 0; }
+
+run_test() {
+    local name="${1:-unnamed restore-recovery test}"
+    local shard="${VAULTWARDEN_RESTORE_RECOVERY_SHARD:-main}"
+
+    _restore_recovery_run_test_index=$((_restore_recovery_run_test_index + 1))
+    case "$shard" in
+        main)
+            if (( _restore_recovery_run_test_index > _RESTORE_RECOVERY_SHARD_SPLIT )); then
+                _restore_recovery_run_test_impl \
+                    "${name} # SKIP exercised by case-restore-recovery-tail.bash" \
+                    _restore_recovery_skip_test
+                return
+            fi
+            ;;
+        tail)
+            if (( _restore_recovery_run_test_index <= _RESTORE_RECOVERY_SHARD_SPLIT )); then
+                _restore_recovery_run_test_impl \
+                    "${name} # SKIP exercised by case-restore-recovery.bash" \
+                    _restore_recovery_skip_test
+                return
+            fi
+            ;;
+        *)
+            printf 'FAIL: invalid VAULTWARDEN_RESTORE_RECOVERY_SHARD: %s\n' "$shard" >&2
+            return 2
+            ;;
+    esac
+
+    _restore_recovery_run_test_impl "$@"
 }
 
 run_test 'missing --state-dir prints usage and fails' test_missing_state_dir

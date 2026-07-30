@@ -89,7 +89,34 @@ CrowdSec security-event email is opt-in and disabled by default:
 
 ```bash
 CROWDSEC_EMAIL_NOTIFICATIONS=false
+CROWDSEC_EMAIL_EVENT_POLICY=all
+CROWDSEC_EMAIL_GROUP_WAIT=30s
+CROWDSEC_EMAIL_GROUP_THRESHOLD=10
 ```
+
+`CROWDSEC_EMAIL_EVENT_POLICY=all` preserves the original behavior: enabling
+notifications installs both the email plugin and the automatic event profile.
+If the policy setting is absent, it also defaults to `all` for compatibility.
+Set the policy to `none` for a quiet small-team preset that keeps explicit
+delivery tests available without emailing each matching CrowdSec event:
+
+```bash
+CROWDSEC_EMAIL_NOTIFICATIONS=true
+CROWDSEC_EMAIL_EVENT_POLICY=none
+CROWDSEC_EMAIL_GROUP_WAIT=30s
+CROWDSEC_EMAIL_GROUP_THRESHOLD=10
+```
+
+With `none`, reconciliation installs the managed plugin but removes the managed
+automatic profile. `sudo ./utilities/crowdsec-email.sh test` and
+`sudo cscli notifications test vaultwarden_email` remain valid. Setting
+`CROWDSEC_EMAIL_NOTIFICATIONS=false` removes both managed components regardless
+of policy.
+
+The batching values apply to the plugin in either enabled policy. Group wait
+must be a positive integer followed by `s`, `m`, or `h`; group threshold must
+be a positive integer. The policy must be exactly `all` or `none`. Invalid or
+duplicate values fail before managed CrowdSec files are changed.
 
 To enable it, edit the normal non-secret environment and run the existing
 root-operated CrowdSec reconciliation path:
@@ -104,9 +131,10 @@ delegates to the existing setup reconciliation. The full
 `sudo ./utilities/setup-crowdsec.sh` path remains valid for initial installation
 and broader CrowdSec maintenance.
 
-`crowdsec-email.sh status` reports whether the `.env` enablement flag and
-VaultWarden-OCI managed marker files are structurally consistent. It is not a
-complete validation of all CrowdSec or Postfix configuration. After manual
+`crowdsec-email.sh status` reports whether the `.env` enablement flag, event
+policy, and VaultWarden-OCI managed marker files are structurally consistent.
+It recognizes the plugin-only `none` state as valid. It is not a complete
+validation of all CrowdSec or Postfix configuration. After manual
 operator changes, reconcile the feature and run `sudo crowdsec -t`; mailbox
 receipt still requires the explicit notification test below.
 
@@ -137,9 +165,10 @@ Operator-owned metadata on `profiles.yaml.local` is preserved. The email body is
 minimal HTML because CrowdSec 1.7.8 sends notification content as `text/html`;
 dynamic alert fields are escaped and wrapped in a preformatted block.
 
-Setup writes only the marked plugin file and the marked
+Setup writes only the marked plugin file and, for the `all` policy, the marked
 VaultWarden-OCI block in `/etc/crowdsec/profiles.yaml.local`. Operator content
-outside that block is retained. Static configuration validation uses the
+outside that block is retained. The `none` policy removes only the managed
+block. Static configuration validation uses the
 CrowdSec 1.7-supported command before the service restart:
 
 ```bash
@@ -172,10 +201,10 @@ sudo docker compose logs --tail=100 postfix
 sudo make health
 ```
 
-Health reports disabled, missing-plugin, missing-profile, invalid, configured,
-and statically valid states separately. A disabled optional notification is a
-healthy state and does not generate a warning. Health does not send a live
-notification test on every run.
+Health reports disabled, policy-disabled, missing-plugin, missing-profile,
+invalid, configured, and statically valid states separately. Disabled
+notifications and a valid `none` policy are healthy states and do not generate
+a warning. Health does not send a live notification test on every run.
 
 To disable the feature, set the option back to `false` and reconcile again:
 
@@ -191,6 +220,14 @@ Postfix's queue remains intentionally transient in the default Compose profile.
 Mail accepted shortly before a Postfix container recreation can be lost. This is
 a documented small-team tradeoff rather than a durable security-event queue; do
 not use email as the only alerting or incident-response signal.
+
+`CROWDSEC_EMAIL_EVENT_POLICY=all` sends the configured automatic CrowdSec event
+notifications. `CROWDSEC_EMAIL_EVENT_POLICY=none` disables those automatic event
+notifications without removing manual delivery tests or operational health
+checks. `none` is a reasonable small-team choice when routine messages for events
+that CrowdSec has already remediated are not useful. Health monitoring remains an
+operational check; it does not promise to identify every security event that may
+need operator action.
 
 ## Secret source
 

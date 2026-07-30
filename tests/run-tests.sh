@@ -86,12 +86,14 @@ OPERATIONS_CASES=(
     tests/suites/operations/case-firewall-update.bash
     tests/suites/operations/case-crowdsec.bash
     tests/suites/operations/case-crowdsec-notifications.bash
+    tests/suites/operations/case-email-queue.bash
     tests/suites/operations/case-uninstall.bash
 )
 
 DATA_PROTECTION_CASES=(
     tests/suites/data-protection/case-backup.bash
     tests/suites/data-protection/case-restore-recovery.bash
+    tests/suites/data-protection/case-restore-recovery-tail.bash
   tests/suites/data-protection/case-production-readiness-data-protection.bash
 )
 

@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+
+# This case intentionally creates long-lived descendants while checking file-
+# descriptor hygiene. Run it in a private session so the caller's timeout
+# process group cannot become part of the behavior being tested.
+if [[ "${VAULTWARDEN_LOCK_FD_TEST_SESSION:-0}" != "1" ]]; then
+    command -v setsid >/dev/null 2>&1 || {
+        printf 'FAIL: setsid is required for isolated lock-FD hygiene testing.\n' >&2
+        exit 1
+    }
+    export VAULTWARDEN_LOCK_FD_TEST_SESSION=1
+    exec setsid --fork --wait bash "$0" "$@"
+fi
 # Focused regression coverage for child-process lock descriptor hygiene.
 set -euo pipefail
 

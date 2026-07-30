@@ -94,6 +94,32 @@ The health path is read-only unless repair/fix behavior is requested. Mutating h
 
 The aggregate maintenance path understands exit `75` as an expected active-operation skip for the guarded DNS/firewall leaves. A real nonzero leaf failure remains a maintenance failure.
 
+### `utilities/email-queue.sh`
+
+Owns all Postfix queue inventory, inspection, retry, deletion, log filtering,
+and identity-verified snapshot-purge behavior. The Makefile is the stable
+root-operated operator surface, while the dashboard calls only explicit Make
+targets through `run_sudo_cmd`. Machine-readable operations parse `postqueue -j`
+with Python; they do not scrape human `mailq` output or expose a generic Postfix
+pass-through.
+
+Mutating operations share an exclusive host-side `flock`. Destructive
+operations first require the effective Postfix setting
+`enable_long_queue_ids=yes`; there is no production bypass. Targeted deletion
+captures the selected identity before confirmation, holds only that exact ID,
+re-inventories, and deletes only a held identity match. Snapshot purge stores the
+same stable identity metadata, batches exact IDs through Postfix hold/delete
+stdin, and retains its fixed four-inventory workflow. Metadata is defence in
+depth rather than a substitute for long queue IDs.
+
+Inventory normalization collapses equivalent duplicate `postqueue -j` records,
+prefers `hold` when queue names differ, and otherwise chooses a deterministic
+queue name. Conflicting identities for one ID reject the inventory. Reused IDs
+are skipped, pre-existing holds are preserved, and newly introduced holds are
+rolled back after failures or handled signals when possible. Direct external
+Postfix administration is outside this utility lock. The deprecated `clear`
+interface uses the snapshot workflow and never a live all-queue deletion.
+
 ### `backup.sh`
 
 Delegates backup work to `utilities/backup-run.sh` and shared backup logic in `lib/backup-utils.sh`.

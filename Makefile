@@ -14,6 +14,21 @@
 #   make help-all            — Show every target, including dashboard/API/advanced targets
 # ===========================================================================
 
+# Freeze documented operator inputs before any parse-time shell invocation.
+# GNU Make 4.4's shell-export feature exports command-line variables to
+# $(shell ...), so capture their raw values before the first such expansion.
+EMAIL_TEST_TRANSPORT ?= configured
+QUEUE_ID ?=
+EMAIL_QUEUE_TAIL ?= 200
+EMAIL_QUEUE_BODY ?= false
+
+override EMAIL_TEST_TRANSPORT := $(value EMAIL_TEST_TRANSPORT)
+override QUEUE_ID := $(value QUEUE_ID)
+override EMAIL_QUEUE_TAIL := $(value EMAIL_QUEUE_TAIL)
+override EMAIL_QUEUE_BODY := $(value EMAIL_QUEUE_BODY)
+
+export EMAIL_TEST_TRANSPORT QUEUE_ID EMAIL_QUEUE_TAIL EMAIL_QUEUE_BODY
+
 # ── Colour helpers ──────────────────────────────────────────────────────────
 RED    := \033[0;31m
 GREEN  := \033[0;32m
@@ -43,7 +58,7 @@ DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
-        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email \
+        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear \
         up down restart start stop safe-restart status operations \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
@@ -74,7 +89,7 @@ DATA_DEVICE ?=
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email health-email up down start stop restart safe-restart status operations \
+	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear health-email up down start stop restart safe-restart status operations \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
@@ -158,7 +173,7 @@ help: ## Show normal admin/day-2 commands
 	@echo "$(YELLOW)Health and diagnostics$(NC)"
 	@echo "  $(GREEN)health$(NC)                   Full health check (AUTO_RECOVER=true enables safe fixes)"
 	@echo "  $(GREEN)health-quick$(NC)             Concise health check"
-	@echo "  $(GREEN)test-email$(NC)               Test Postfix-backed operational alert channel"
+	@echo "  $(GREEN)test-email$(NC)               Test configured or exact email delivery transports"
 	@echo "  $(GREEN)test-secrets$(NC)             Verify SOPS/Age secret decryption"
 	@echo "  $(GREEN)diagnose$(NC)                 Collect versions, status, key state, disk, and logs"
 	@echo ""
@@ -252,10 +267,54 @@ test-secrets: ## Test secrets decryption
 		exit 1; \
 	fi
 
-test-email: ## Send a test operational alert email (health/backup notification channel)
+test-email: ## Test configured or exact email delivery transports (EMAIL_TEST_TRANSPORT=...)
 	$(call require-root)
-	@echo "$(BLUE)Sending a test operational alert email...$(NC)"
-	@./maintenance.sh test-email --verbose
+	@echo "$(BLUE)Testing email delivery transport: $${EMAIL_TEST_TRANSPORT}$(NC)"
+	@./maintenance.sh test-email --transport "$${EMAIL_TEST_TRANSPORT}" --verbose
+
+email-queue: ## Show the human-readable Postfix email queue
+	$(call require-root)
+	@./utilities/email-queue.sh status
+
+email-queue-summary: ## Summarize the Postfix queue safely
+	$(call require-root)
+	@./utilities/email-queue.sh summary
+
+email-queue-inspect: ## Inspect QUEUE_ID headers/envelope (EMAIL_QUEUE_BODY=true includes body)
+	$(call require-root)
+	@if [ "$${EMAIL_QUEUE_BODY}" = "true" ]; then \
+		./utilities/email-queue.sh inspect "$${QUEUE_ID}" --body; \
+	else \
+		./utilities/email-queue.sh inspect "$${QUEUE_ID}"; \
+	fi
+
+email-queue-retry: ## Retry one exact QUEUE_ID
+	$(call require-root)
+	@./utilities/email-queue.sh retry "$${QUEUE_ID}"
+
+email-queue-retry-all: ## Retry all queued messages after exact confirmation
+	$(call require-root)
+	@./utilities/email-queue.sh retry --all
+
+email-queue-delete: ## Delete one exact QUEUE_ID; requires verified long IDs
+	$(call require-root)
+	@./utilities/email-queue.sh delete "$${QUEUE_ID}"
+
+email-queue-logs: ## Show Postfix logs (QUEUE_ID optional, EMAIL_QUEUE_TAIL default 200)
+	$(call require-root)
+	@if [ -n "$${QUEUE_ID}" ]; then \
+		./utilities/email-queue.sh logs "$${QUEUE_ID}" --tail "$${EMAIL_QUEUE_TAIL}"; \
+	else \
+		./utilities/email-queue.sh logs --tail "$${EMAIL_QUEUE_TAIL}"; \
+	fi
+
+email-queue-purge: ## Purge identity matches; requires verified long IDs
+	$(call require-root)
+	@./utilities/email-queue.sh purge --snapshot
+
+email-queue-clear: ## Deprecated long-ID-gated alias for snapshot purge
+	$(call require-root)
+	@./utilities/email-queue.sh clear
 
 # ===========================================================================
 ##@ Normal Admin + Dashboard Stable API — Service Management

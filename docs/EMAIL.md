@@ -103,6 +103,155 @@ Postfix provides queueing/retry behavior for the normal appliance mail path.
 - Preserve the capabilities in the current `docker-compose.yml.example` unless a tested image/runtime change proves a smaller set works. Mail spool/ownership operations depend on the current container contract.
 - Keep upstream relay authentication in SOPS-backed `smtp_password`, not repository configuration.
 
+### Safe Postfix queue operations
+
+Use the root-operated Make targets. The queue utility owns all Postfix queue
+logic; the dashboard and Makefile do not invoke Postfix administrative commands
+directly.
+
+```bash
+sudo make email-queue
+sudo make email-queue-summary
+sudo make email-queue-inspect QUEUE_ID=AbC-123
+sudo make email-queue-inspect QUEUE_ID=AbC-123 EMAIL_QUEUE_BODY=true
+sudo make email-queue-retry QUEUE_ID=AbC-123
+sudo make email-queue-retry-all
+sudo make email-queue-delete QUEUE_ID=AbC-123
+sudo make email-queue-logs
+sudo make email-queue-logs QUEUE_ID=AbC-123 EMAIL_QUEUE_TAIL=500
+sudo make email-queue-purge
+```
+
+The direct utility forms are also documented and remain root-operated:
+
+```bash
+sudo utilities/email-queue.sh status
+sudo utilities/email-queue.sh summary
+sudo utilities/email-queue.sh summary --quiet
+sudo utilities/email-queue.sh summary --json
+sudo utilities/email-queue.sh inspect AbC-123
+sudo utilities/email-queue.sh inspect AbC-123 --body
+sudo utilities/email-queue.sh retry AbC-123
+sudo utilities/email-queue.sh retry --all
+sudo utilities/email-queue.sh delete AbC-123
+sudo utilities/email-queue.sh logs
+sudo utilities/email-queue.sh logs AbC-123 --tail 500
+sudo utilities/email-queue.sh purge --snapshot
+sudo utilities/email-queue.sh clear
+```
+
+`email-queue` preserves the human-readable `postqueue -p` listing and never
+modifies mail. `email-queue-summary` uses `postqueue -j` with Python's JSON
+parser to report the total count and bytes, oldest age, queue states, and most
+frequent current delay reason. The quiet form prints only a base-10 count, and
+the JSON form is intended for scripts:
+
+```bash
+sudo utilities/email-queue.sh summary --quiet
+sudo utilities/email-queue.sh summary --json
+```
+
+Queue IDs are validated by exact, case-sensitive membership in the current
+machine-readable inventory. They are not restricted to a guessed hexadecimal
+format. The default inspection path prints envelope and header information but
+not the message body. `EMAIL_QUEUE_BODY=true` is explicit because bodies may
+contain credentials, password-reset links, or other sensitive content.
+
+Single-message retry operates only on the selected ID. Retry-all can increase
+delivery load when messages remain undeliverable and therefore requires the
+exact interactive token `RETRY ALL`. Retry operations remain available when
+long queue IDs cannot be verified, but the utility emits a warning because all
+destructive operations stay blocked.
+
+Targeted deletion and snapshot purge require the effective runtime setting
+`enable_long_queue_ids=yes`. The utility checks this before confirmation or any
+hold, release, or deletion call. When the setting is disabled or cannot be read,
+set `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run `sudo make up` so Compose recreates
+or applies the Postfix service, and verify the effective value before retrying:
+
+```bash
+sudo docker compose exec -T postfix postconf -h enable_long_queue_ids
+```
+
+Targeted deletion requires `DELETE QUEUE_ID`, where `QUEUE_ID` is the selected
+case-sensitive ID. After confirmation, the utility places that exact ID on hold
+when needed, captures a fresh inventory, and deletes only if arrival time, size,
+envelope sender, and recipients still match the pre-confirmation identity. This
+metadata comparison remains defence in depth; it is not a substitute for
+non-repeating long queue IDs. A reused ID is released when this command
+introduced the hold, preserved, reported, and returned as a nonzero result. A
+selected original that is already absent is reported without deleting another
+message. A message held before the command remains held if deletion fails.
+
+The destructive whole-queue workflow is snapshot based:
+
+```bash
+sudo make email-queue-purge
+```
+
+The utility captures a normalized private snapshot containing each queue ID,
+arrival time, message size, envelope sender, and recipient addresses. It shows
+the captured count and summary and requires `PURGE N`, where `N` is that count.
+One exclusive host-side lock serializes mutating invocations of this utility.
+
+After confirmation, snapshot messages that were not already held are submitted
+to Postfix hold in one exact-ID batch. The utility then captures a fresh
+inventory and deletes only held records whose stable identity still matches the
+snapshot. A reused queue ID or changed identity is skipped and reported; a
+mismatched message caught by this operation's hold is released instead of being
+deleted. Messages that were already held before the purge remain held if they
+survive. Newly introduced holds are rolled back after a partial failure and by
+the interruption cleanup path when possible.
+
+A nonempty purge uses four complete `postqueue -j` inventories for the whole
+operation, rather than inventories inside the per-message loop, and processes
+snapshot records in O(N) work. Exact IDs are batched through Postfix stdin; the
+utility never uses `postsuper -d ALL`. The final summary distinguishes deleted
+snapshot messages, already-absent originals, identity mismatches or reused IDs,
+failed operations, and the current remaining count. Identity mismatches and
+destructive-operation failures return nonzero.
+
+Temporary files are created with restrictive permissions, contain queue
+metadata but never message bodies, and are removed on success, failure,
+cancellation, or interruption. Long, non-repeating Postfix queue IDs are enabled
+by default through `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes` and verified at runtime as
+defence in depth; identity matching remains mandatory.
+
+Noninteractive automation accepts only these dedicated values:
+
+```bash
+sudo env VW_EMAIL_QUEUE_CONFIRM=retry-all make email-queue-retry-all
+sudo env VW_EMAIL_QUEUE_CONFIRM='delete:AbC-123' \
+  make email-queue-delete QUEUE_ID=AbC-123
+sudo env VW_EMAIL_QUEUE_CONFIRM=purge-snapshot make email-queue-purge
+```
+
+`clear` and `sudo make email-queue-clear` remain deprecated compatibility
+aliases. They use the same snapshot purge implementation and never perform a
+live `ALL` deletion. The old `VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1` marker is
+accepted only by this deprecated alias and should be migrated to
+`VW_EMAIL_QUEUE_CONFIRM=purge-snapshot`.
+
+Exit status is `0` for success (including an empty queue, an already-absent
+selected original, or no matching log lines), `1` for operational failure,
+cancellation, identity mismatch, unverifiable long queue IDs, or partial
+destructive failure, and `2` for invalid usage. Signal exits are `129` for
+SIGHUP, `130` for SIGINT, and `143` for SIGTERM.
+
+Machine-readable inventory normalization accepts legitimate duplicate
+`postqueue -j` records when their normalized identities match. Each message is
+counted once; `hold` wins when duplicate records report different queue names,
+and other queue names are selected deterministically. Conflicting identities for
+one queue ID are treated as malformed inventory, reported without message-body
+content, and block destructive work before Postfix mutation.
+
+Within the utility's host lock, Postfix hold prevents normal delivery from
+reopening the verified-ID window for targeted deletion and snapshot purge.
+Direct `postsuper`, `postqueue`, or other administrative actions that bypass the
+utility are outside that lock and must not run concurrently with destructive
+queue work. An empty queue does not by itself prove the mail path is healthy.
+Postfix acceptance or a requested retry also does not prove final recipient
+delivery; use the logs and the upstream provider's delivery evidence.
 ## Operational alert routing
 
 Repository operational email uses `lib/email.sh`.
@@ -257,29 +406,47 @@ Do not maintain provider-specific plaintext API token variables in `.env` for th
 
 ## Testing the email path
 
-Run the dedicated diagnostic:
+The default diagnostic exercises the configured production routing policy:
 
 ```bash
-sudo ./maintenance.sh test-email --verbose
+sudo make test-email
+sudo make test-email EMAIL_TEST_TRANSPORT=configured
 ```
 
-Preview the diagnostic without sending:
+Exact transport diagnostics bypass production fallback and test each transport
+directly. `all` tests the API provider, Postfix sidecar, and direct upstream
+SMTP independently, and can therefore send three messages:
 
 ```bash
-sudo utilities/maintenance-email.sh --dry-run
+sudo make test-email EMAIL_TEST_TRANSPORT=all
+sudo make test-email EMAIL_TEST_TRANSPORT=api
+sudo make test-email EMAIL_TEST_TRANSPORT=sidecar
+sudo make test-email EMAIL_TEST_TRANSPORT=direct
 ```
 
-Override the recipient when required:
+Preview any selection without sending by using the maintenance entry point:
 
 ```bash
 sudo ./maintenance.sh test-email \
+  --transport all \
   --recipient admin@example.com \
+  --dry-run \
   --verbose
 ```
 
-The diagnostic checks Postfix container health, selected operational route prerequisites, CrowdSec integration context, and end-to-end email delivery.
+`configured` calls the normal notification helper and therefore follows
+`EMAIL_MODE`. The exact `api`, `sidecar`, and `direct` selections do not fall
+back to another transport. Their preflight checks are scoped to the requested
+transport, while CrowdSec status is supplemental information only.
 
-A successful send means the selected delivery chain accepted the message. It does not independently prove the external recipient's spam-folder policy or long-term provider account status.
+A successful sidecar test proves that Postfix accepted the message. It does not
+independently prove final delivery by the upstream relay or recipient. Check the
+Postfix logs and queue when diagnosing relay delivery:
+
+```bash
+docker compose logs postfix --tail=100
+docker exec vaultwarden_postfix mailq
+```
 
 ## Troubleshooting Postfix SMTP
 

@@ -136,8 +136,17 @@ sudo make backup-emergency   # clone-grade emergency backup
 sudo make restore            # interactive restore
 sudo make key-health         # Age key health
 sudo make key-rotate         # rotate the operational Age/SOPS key
-sudo make timers             # systemd timer status
-sudo make logs SERVICE=caddy # container logs
+sudo make timers              # systemd timer status
+sudo make email-queue-summary # safe Postfix queue summary
+sudo make email-queue         # list queued messages
+sudo make logs SERVICE=caddy  # container logs
+
+Targeted deletion and snapshot purge require the effective Postfix setting
+`enable_long_queue_ids=yes` and fail closed when it cannot be verified. After
+changing `POSTFIX_ENABLE_LONG_QUEUE_IDS`, run `sudo make up` to recreate or
+apply Postfix before destructive queue work. Hold stabilization and metadata
+identity checks remain defence in depth, and equivalent queue-list duplicates
+are counted once.
 ```
 
 For exact public script grammar and options, use `--help` or [docs/COMMAND-REFERENCE.md](docs/COMMAND-REFERENCE.md).

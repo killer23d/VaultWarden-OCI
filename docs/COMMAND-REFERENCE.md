@@ -21,7 +21,16 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make edit-env` |  Interactively edit repo .env and sync on change (root required) |
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
-| `make test-email` |  Send a test operational alert email (health/backup notification channel) |
+| `make test-email` |  Test configured or exact email delivery transports (EMAIL_TEST_TRANSPORT=...) |
+| `make email-queue` |  Show the human-readable Postfix email queue |
+| `make email-queue-summary` |  Summarize the Postfix queue safely |
+| `make email-queue-inspect` |  Inspect QUEUE_ID headers/envelope (EMAIL_QUEUE_BODY=true includes body) |
+| `make email-queue-retry` |  Retry one exact QUEUE_ID |
+| `make email-queue-retry-all` |  Retry all queued messages after exact confirmation |
+| `make email-queue-delete` |  Delete one exact QUEUE_ID; requires verified long IDs |
+| `make email-queue-logs` |  Show Postfix logs (QUEUE_ID optional, EMAIL_QUEUE_TAIL default 200) |
+| `make email-queue-purge` |  Purge identity matches; requires verified long IDs |
+| `make email-queue-clear` |  Deprecated long-ID-gated alias for snapshot purge |
 | `make up` |  Start all services (runs startup.sh for health checks; root required) |
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully (root required) |
@@ -565,6 +574,74 @@ DESCRIPTION:
     and verifies crowdsec-cloudflare-worker-bouncer.
 ```
 
+### email-queue.sh
+
+```
+VaultWarden-OCI Postfix Queue Operations
+
+USAGE:
+    sudo utilities/email-queue.sh [status]
+    sudo utilities/email-queue.sh summary [--quiet | --json]
+    sudo utilities/email-queue.sh inspect QUEUE_ID [--body]
+    sudo utilities/email-queue.sh retry QUEUE_ID
+    sudo utilities/email-queue.sh retry --all
+    sudo utilities/email-queue.sh delete QUEUE_ID
+    sudo utilities/email-queue.sh logs [QUEUE_ID] [--tail N]
+    sudo utilities/email-queue.sh purge --snapshot
+    sudo utilities/email-queue.sh clear
+
+COMMANDS:
+    status                  Show the human-readable Postfix queue. This is the
+                            default and never mutates queued mail.
+    summary [MODE]          Show count, bytes, oldest age, queue states, and the
+                            most frequent current delay reason. MODE is
+                            --quiet or --json.
+    inspect ID [--body]     Show envelope and header details for an exact queue
+                            ID. Message bodies are excluded unless --body is
+                            explicitly supplied.
+    retry ID                Schedule immediate delivery for one exact queue ID.
+    retry --all             Flush all currently queued mail after exact
+                            confirmation.
+    delete ID               Require verified long queue IDs, then hold and
+                            identity-verify one exact message after confirmation
+                            and delete only that held identity match.
+    logs [ID] [--tail N]    Show Postfix logs, optionally filtered by a fixed
+                            queue-ID string. N defaults to 200 and is limited to
+                            1..5000.
+    purge --snapshot        Require verified long queue IDs, capture stable
+                            identities, hold eligible snapshot messages, and
+                            delete only held identity matches.
+    clear                   Deprecated alias for purge --snapshot.
+
+AUTOMATION CONFIRMATION:
+    VW_EMAIL_QUEUE_CONFIRM=retry-all
+    VW_EMAIL_QUEUE_CONFIRM=delete:QUEUE_ID
+    VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
+    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1   Deprecated; accepted only by clear.
+
+CONFIRMATION TOKENS:
+    retry --all             RETRY ALL
+    delete QUEUE_ID         DELETE QUEUE_ID
+    purge --snapshot        PURGE N
+
+EXIT STATUS:
+    0  Success, including an empty queue or no matching log lines.
+    1  Operational failure, cancellation, identity mismatch, or partial destructive failure.
+    2  Invalid usage.
+    129, 130, 143  Interrupted by SIGHUP, SIGINT, or SIGTERM.
+
+NOTES:
+    Mutating commands use one exclusive host-side lock. Destructive commands
+    fail closed unless the effective Postfix setting enable_long_queue_ids=yes.
+    They also compare arrival time, size, envelope sender, and recipients, then
+    require a matching record to be held before deletion; metadata is defence in
+    depth, not a substitute for non-repeating queue IDs. Newly introduced
+    holds are restored after failure or interruption when possible; pre-existing
+    holds are preserved. External administrators that bypass this utility are
+    outside the host lock and must not mutate the queue during destructive work.
+    A retry or Postfix acceptance does not prove final recipient delivery.
+```
+
 ### env-edit.sh
 
 ```
@@ -668,6 +745,8 @@ USAGE:
 
 OPTIONS:
     --recipient EMAIL   Override default admin email recipient
+    --transport VALUE   Transport to test: configured, api, sidecar, direct, or all
+                        (default: configured)
     --verbose           Show detailed diagnostic output
     --dry-run           Preview without sending
     --help, -h          Show this help
@@ -676,6 +755,7 @@ OPTIONS:
 EXIT CODES:
     0 — all email tests passed
     1 — one or more tests failed
+    2 — invalid command-line usage
 ```
 
 ### maintenance-health.sh
@@ -1231,6 +1311,11 @@ ENVIRONMENT:
     CROWDSEC_EMAIL_NOTIFICATIONS
                                Optional security-event email through the
                                existing 127.0.0.1:587 Postfix relay. Default: false.
+    CROWDSEC_EMAIL_EVENT_POLICY
+                               Automatic event email: all or none. Default: all.
+    CROWDSEC_EMAIL_GROUP_WAIT  Event email batching window. Default: 30s.
+    CROWDSEC_EMAIL_GROUP_THRESHOLD
+                               Maximum events per batch. Default: 10.
 
     Cloudflare credentials (in encrypted secrets, not .env):
         sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
