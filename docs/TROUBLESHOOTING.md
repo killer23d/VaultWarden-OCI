@@ -102,6 +102,20 @@ sudo make health
 
 Do not rerun full `setup.sh install --force` as a generic configuration repair.
 
+### Runtime configuration source is rejected
+
+Production commands select one complete environment in this order: installed `/etc/vaultwarden/vaultwarden.env`, persistent `${PROJECT_STATE_DIR}/config/install.env`, then repository `.env` for bootstrap/development. Diagnostics identify the selected source.
+
+If a present installed or persistent source is unreadable, malformed, or lacks an absolute `PROJECT_STATE_DIR` or nonblank `SOPS_AGE_KEY_FILE`, correct or regenerate that preferred source. The command intentionally stops instead of continuing with inherited variables, repository `.env`, or defaults:
+
+```bash
+utilities/env-edit.sh status
+sudo utilities/env-edit.sh sync
+sudo ./setup.sh systemd validate
+```
+
+Do not hand-edit `/etc/vaultwarden/vaultwarden.env` or remove it merely to expose a lower-priority configuration.
+
 ---
 
 ## Cloudflare `525` / Caddy TLS failure after restore
@@ -362,6 +376,8 @@ sudo bash -c '
 '
 ```
 
+The probe and supported health/startup paths use the exact selected `SOPS_AGE_KEY_FILE`. If that path is invalid, repair the configured key or environment; a healthy `secrets/keys/age-key.txt` is not an automatic production fallback. Explicit repository-key mode is only for repository-selected bootstrap/development work.
+
 Check known permissions:
 
 ```bash
@@ -536,7 +552,9 @@ sudo ./utilities/smoke-test.sh
 
 A plain non-interactive `systemd install` defaults to install/enable without starting timers immediately. That is appropriate for recovery/manual-inspection hosts, not the normal repair for "timers are not running" on an intended production host.
 
-After `git pull`, remember that systemd jobs still execute `/opt/vaultwarden-scripts` until the installer copies the current repository code.
+After `git pull`, remember that systemd jobs still execute `/opt/vaultwarden-scripts` until the installer copies the current repository code. Reinstallation also reconciles unexpected VaultWarden-OCI-managed scripts, libraries, units, and generated drop-ins. Removed managed units are stopped and disabled; installed environment/key/rclone material and operator or third-party drop-ins are preserved.
+
+If lock-file preparation fails, inspect the exact reported `/run/lock/vaultwarden-*.lock` path. It must be a regular non-symlink file with `root:vaultwarden 0660`. Correct the owning filesystem or metadata problem and rerun installation; do not delete an active coordination file as a generic repair.
 
 ---
 

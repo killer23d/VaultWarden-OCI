@@ -428,7 +428,7 @@ log_info(){ printf 'INFO %s\\n' "\$*"; }
 log_warn(){ printf 'WARN %s\\n' "\$*"; }
 log_error(){ printf 'ERROR %s\\n' "\$*" >&2; }
 log_success(){ printf 'SUCCESS %s\\n' "\$*"; }
-load_env_file(){ return 0; }
+load_project_environment(){ return 0; }
 check_dependencies(){ return 0; }
 require_root(){ return 0; }
 auto_fix_critical_permissions(){ return 0; }
@@ -1001,6 +1001,33 @@ EOF_ENV
 write_mocks() {
     local dir="$1"
     local mock="$dir/mockbin"
+    local real_stat real_chown
+    real_stat="$(command -v stat)"
+    real_chown="$(command -v chown)"
+    cat > "$mock/stat" <<EOF_STAT
+#!/usr/bin/env bash
+path="\${!#}"
+if [[ "\$path" == */state/config || "\$path" == */state/config/* \
+    || "\$path" == */state/secrets || "\$path" == */state/secrets/* ]]; then
+    case "\${1:-}:\${2:-}" in
+        -c:%U|-f:%Su) printf 'root\n'; exit 0 ;;
+        -c:%G|-f:%Sg) printf 'root\n'; exit 0 ;;
+    esac
+fi
+exec "$real_stat" "\$@"
+EOF_STAT
+    cat > "$mock/chown" <<EOF_CHOWN
+#!/usr/bin/env bash
+# The recovery fixture runs through the explicit non-root test bypass; emulate
+# successful root ownership changes so verified permission postconditions can
+# be exercised without weakening production behavior.
+path="\${!#}"
+if [[ "\$path" == */state/config || "\$path" == */state/config/* \
+    || "\$path" == */state/secrets || "\$path" == */state/secrets/* ]]; then
+    exit 0
+fi
+exec "$real_chown" "\$@"
+EOF_CHOWN
     cat > "$mock/mountpoint" <<'MOUNT'
 #!/usr/bin/env bash
 [[ "${MOCK_MOUNTPOINT_FAIL:-false}" == true ]] && exit 1

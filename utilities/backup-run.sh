@@ -1548,7 +1548,7 @@ main() {
     fi
 
     if [[ "$LIST_ONLY" == "true" ]]; then
-        load_env_file 2>/dev/null || true
+        load_project_environment || { log_error "Failed to load selected runtime environment"; exit 1; }
         local list_base_dir
         list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
         if [[ -d "$list_base_dir" && ! -r "$list_base_dir" ]]; then
@@ -1574,7 +1574,7 @@ main() {
         umask "$old_umask"
 
         log_header "VaultWarden-OCI Backup Verify"
-        load_env_file || { log_error "Failed to load .env"; exit 1; }
+        load_project_environment || { log_error "Failed to load selected runtime environment"; exit 1; }
         auto_fix_critical_permissions "$PROJECT_ROOT"
         require_project_state_ready || exit 1
         _load_integrity_hmac_key || exit 1
@@ -1637,7 +1637,7 @@ main() {
         local sync_dry_label=""
         [[ "$DRY_RUN" == "true" ]] && sync_dry_label=" [DRY RUN]"
         log_header "VaultWarden-OCI Rclone Backup Copy${sync_dry_label}"
-        load_env_file || { log_error "Failed to load .env"; exit 1; }
+        load_project_environment || { log_error "Failed to load selected runtime environment"; exit 1; }
         auto_fix_critical_permissions "$PROJECT_ROOT"
 
         local old_umask
@@ -1662,7 +1662,7 @@ main() {
         local rotate_dry_label=""
         [[ "$DRY_RUN" == "true" ]] && rotate_dry_label=" [DRY RUN]"
         log_header "VaultWarden-OCI Backup Rotation${rotate_dry_label}"
-        load_env_file || { log_error "Failed to load .env"; exit 1; }
+        load_project_environment || { log_error "Failed to load selected runtime environment"; exit 1; }
         auto_fix_critical_permissions "$PROJECT_ROOT"
 
         local base_dir
@@ -1716,7 +1716,7 @@ main() {
         log_header "VaultWarden-OCI Backup"
     fi
 
-    load_env_file || { log_error "Failed to load .env"; exit 1; }
+    load_project_environment || { log_error "Failed to load selected runtime environment"; exit 1; }
     auto_fix_critical_permissions "$PROJECT_ROOT"
     require_project_state_ready || exit 1
     _load_integrity_hmac_key || exit 1

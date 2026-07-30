@@ -1598,9 +1598,10 @@ WHAT install DOES:
        structure is preserved at the destination.
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
     3. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
-       using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
+       using the canonical installed -> persistent -> bootstrap/development repository source contract.
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
+       while reconciling unexpected VaultWarden-OCI-managed runtime and unit artifacts.
     6. systemctl daemon-reload
     7. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
     8. If timers were started now, verifies all managed timers are active and have a next trigger

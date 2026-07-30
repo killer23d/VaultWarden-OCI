@@ -64,18 +64,10 @@ EOF
 }
 
 _load_env() {
-    if load_project_environment 2>/dev/null; then
-        return 0
+    if ! load_project_environment; then
+        log_error "DNS update could not load the selected runtime environment."
+        return 1
     fi
-
-    if load_env_file /etc/vaultwarden/vaultwarden.env 2>/dev/null; then
-        resolve_secrets_file
-        return 0
-    fi
-
-    log_warn "No project environment found — relying on environment already set."
-    resolve_secrets_file
-    return 0
 }
 
 # _resolve_cf_token

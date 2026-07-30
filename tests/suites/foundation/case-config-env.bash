@@ -380,17 +380,19 @@ test_config_caller_override_wins() {
     write_env "$override_state/config/install.env" "PROJECT_STATE_DIR=$TMP/wrong-loaded-state" 'DATA_VOLUME_MOUNT=/loaded-mount' 'SOPS_AGE_KEY_FILE=/loaded/key.txt'
 
     local output
-    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" PROJECT_STATE_DIR="$override_state" DATA_VOLUME_MOUNT=/caller-mount SOPS_AGE_KEY_FILE=/caller/key.txt bash <<'PROBE'
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" PROJECT_STATE_DIR="$override_state" DATA_VOLUME_DEVICE=/caller-device DATA_VOLUME_MOUNT=/caller-mount SOPS_AGE_KEY_FILE=/caller/key.txt bash <<'PROBE'
 set -euo pipefail
 source "$REAL_CONFIG"
 load_project_environment
 load_project_environment
 printf 'PROJECT_STATE_DIR=%s\n' "$PROJECT_STATE_DIR"
+printf 'DATA_VOLUME_DEVICE=%s\n' "$DATA_VOLUME_DEVICE"
 printf 'DATA_VOLUME_MOUNT=%s\n' "$DATA_VOLUME_MOUNT"
 printf 'SOPS_AGE_KEY_FILE=%s\n' "$SOPS_AGE_KEY_FILE"
 PROBE
 )
     grep -q "PROJECT_STATE_DIR=$override_state" <<< "$output" || fail "caller PROJECT_STATE_DIR override lost: $output"
+    grep -q 'DATA_VOLUME_DEVICE=/caller-device' <<< "$output" || fail "caller DATA_VOLUME_DEVICE override lost: $output"
     grep -q 'DATA_VOLUME_MOUNT=/caller-mount' <<< "$output" || fail "caller DATA_VOLUME_MOUNT override lost: $output"
     grep -q 'SOPS_AGE_KEY_FILE=/caller/key.txt' <<< "$output" || fail "caller SOPS_AGE_KEY_FILE override lost: $output"
 }
@@ -399,14 +401,14 @@ test_installed_runtime_secret_resolution() {
     grep -q 'load_project_environment' "$ROOT/utilities/maintenance-update-dns.sh" \
         || fail "DNS updater does not use load_project_environment"
 
-    grep -q 'resolve_secrets_file' "$ROOT/utilities/maintenance-update-dns.sh" \
-        || fail "DNS updater does not resolve SECRETS_FILE after env load"
-
     grep -q 'load_project_environment' "$ROOT/utilities/notify-failure.sh" \
         || fail "notify-failure helper does not use load_project_environment"
 
-    grep -q 'resolve_secrets_file' "$ROOT/utilities/notify-failure.sh" \
-        || fail "notify-failure helper does not resolve SECRETS_FILE after env load"
+    ! grep -q 'load_env_file /etc/vaultwarden/vaultwarden.env' "$ROOT/utilities/maintenance-update-dns.sh" \
+        || fail "DNS updater retains a lower-priority fallback after canonical load failure"
+
+    ! grep -q 'using process environment only' "$ROOT/utilities/notify-failure.sh" \
+        || fail "notify-failure helper continues with inherited values after canonical load failure"
 
     grep -q 'unset SOPS_CONFIG' "$ROOT/lib/secrets.sh" \
         || fail "ensure_sops_env does not unset missing SOPS_CONFIG"
@@ -424,11 +426,238 @@ test_dns_optional_and_strict_modes() {
         || fail "DNS updater does not fail strict missing DNS config"
 }
 
+test_runtime_source_precedence_and_observability() {
+    local fake_repo="$TMP/fake-repo-precedence" installed="$TMP/installed-precedence.env"
+    local persistent_state="$TMP/persistent-state"
+    mkdir -p "$fake_repo"
+    write_env "$fake_repo/.env" \
+        "PROJECT_STATE_DIR=$persistent_state" \
+        'BACKUP_DIR=/from-repository' \
+        'TZ=Repo/Zone' \
+        'SOPS_AGE_KEY_FILE=/repository/key.txt'
+    write_env "$persistent_state/config/install.env" \
+        "PROJECT_STATE_DIR=$persistent_state" \
+        'BACKUP_DIR=/from-persistent' \
+        'TZ=Persistent/Zone' \
+        'SOPS_AGE_KEY_FILE=/persistent/key.txt'
+    write_env "$installed" \
+        "PROJECT_STATE_DIR=$TMP/installed-state" \
+        'BACKUP_DIR=/from-installed' \
+        'TZ=Installed/Zone' \
+        'SOPS_AGE_KEY_FILE=/installed/key.txt'
+
+    local output
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
+set -euo pipefail
+source "$REAL_CONFIG"
+load_project_environment >/dev/null
+printf '%s|%s|%s|%s|%s\n' "$VW_CONFIG_SELECTED_ENV_SOURCE" "$VW_CONFIG_SELECTED_ENV_FILE" "$PROJECT_STATE_DIR" "$BACKUP_DIR" "$TZ"
+PROBE
+)
+    [[ "$output" == "installed|$installed|$TMP/installed-state|/from-installed|Installed/Zone" ]] \
+        || fail "installed source did not win canonical precedence: $output"
+
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$TMP/missing-installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
+set -euo pipefail
+source "$REAL_CONFIG"
+load_project_environment >/dev/null
+printf '%s|%s|%s|%s\n' "$VW_CONFIG_SELECTED_ENV_SOURCE" "$PROJECT_STATE_DIR" "$BACKUP_DIR" "$TZ"
+PROBE
+)
+    [[ "$output" == "persistent|$persistent_state|/from-persistent|Persistent/Zone" ]] \
+        || fail "persistent source did not win over repository .env: $output"
+
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" DASHBOARD="$ROOT/dashboard.sh" bash <<'PROBE'
+set -euo pipefail
+source "$DASHBOARD"
+_load_dashboard_environment
+printf '%s|%s|%s\n' "$STATE_DIR" "$BACKUP_DIR" "$TZ_DISPLAY"
+PROBE
+)
+    [[ "$(printf '%s\n' "$output" | tail -n 1)" == "$TMP/installed-state|/from-installed|Installed/Zone" ]] \
+        || fail "dashboard did not use installed runtime values: $output"
+
+    local fixture_bin="$TMP/runtime-surface-bin" root_bin="$TMP/runtime-root-bin"
+    mkdir -p "$fixture_bin" "$root_bin" "$TMP/installed-state"
+    cat > "$root_bin/id" <<'EOF_ID'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" ]]; then
+    printf '0\n'
+else
+    /usr/bin/id "$@"
+fi
+EOF_ID
+    cat > "$fixture_bin/docker" <<'EOF_DOCKER'
+#!/usr/bin/env bash
+case "${1:-}" in
+    compose)
+        case "${2:-}" in
+            version) printf 'Docker Compose fixture\n' ;;
+            *) printf 'compose fixture\n' ;;
+        esac
+        ;;
+    --version) printf 'Docker fixture\n' ;;
+    *) printf 'docker fixture\n' ;;
+esac
+EOF_DOCKER
+    cat > "$fixture_bin/systemctl" <<'EOF_SYSTEMCTL'
+#!/usr/bin/env bash
+exit 1
+EOF_SYSTEMCTL
+    chmod +x "$root_bin/id" "$fixture_bin/docker" "$fixture_bin/systemctl"
+
+    local surface
+    for surface in info status diagnose; do
+        local surface_path="$fixture_bin:$PATH"
+        [[ "$surface" == "info" ]] || surface_path="$root_bin:$surface_path"
+        output=$(PATH="$surface_path" VW_CONFIG_INSTALLED_ENV_FILE="$installed" \
+            make --no-print-directory -s -C "$ROOT" "$surface" 2>&1) \
+            || fail "make $surface fixture failed: $output"
+        if [[ "$surface" == "status" ]]; then
+            [[ "$output" == *"$TMP/installed-state"* && "$output" == *"/from-installed"* ]] \
+                || fail "make status did not use installed state/backup values: $output"
+        else
+            [[ "$output" == *"$installed"* ]] \
+                || fail "make $surface did not report installed configuration: $output"
+        fi
+        [[ "$output" != *"/var/lib/vaultwarden"* ]] \
+            || fail "make $surface fell back to /var/lib/vaultwarden: $output"
+    done
+}
+
+test_invalid_selected_production_source_fails_closed() {
+    local fake_repo="$TMP/fake-repo-invalid" installed="$TMP/installed-invalid.env"
+    mkdir -p "$fake_repo"
+    write_env "$fake_repo/.env" \
+        "PROJECT_STATE_DIR=$TMP/repo-state" \
+        'SOPS_AGE_KEY_FILE=/healthy/repository-key.txt'
+    write_env "$installed" \
+        "PROJECT_STATE_DIR=$TMP/installed-state" \
+        'BROKEN PRODUCTION LINE' \
+        'SOPS_AGE_KEY_FILE=/selected/key.txt'
+
+    local output rc
+    set +e
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" \
+        ADMIN_EMAIL=inherited@example.test bash <<'PROBE' 2>&1
+set +e
+source "$REAL_CONFIG"
+load_project_environment
+rc=$?
+printf 'rc=%s selected=%s state=%s\n' "$rc" "${VW_CONFIG_SELECTED_ENV_FILE:-}" "${PROJECT_STATE_DIR:-}"
+exit "$rc"
+PROBE
+)
+    rc=$?
+    set -e
+    [[ "$rc" -ne 0 ]] || fail "malformed installed environment unexpectedly succeeded"
+    [[ "$output" == *"Refusing selected production environment: $installed"* ]] \
+        || fail "rejected source was not identified: $output"
+    [[ "$output" == *"selected=$installed"* ]] || fail "selected source was not observable after rejection: $output"
+    [[ "$output" != *"state=$TMP/repo-state"* ]] || fail "rejected installed source fell through to repository state"
+
+    set +e
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" ADMIN_EMAIL=inherited@example.test \
+        "$ROOT/utilities/maintenance-health.sh" --json 2>&1)
+    rc=$?
+    set -e
+    [[ "$rc" -eq 3 ]] || fail "health rejection returned $rc instead of 3: $output"
+    [[ "$output" == *"rejected selected runtime environment '$installed'"* ]] \
+        || fail "health did not identify the rejected selected source: $output"
+    [[ "$output" == *"Refusing to continue with inherited or lower-priority configuration."* ]] \
+        || fail "health did not explain its fail-closed boundary: $output"
+}
+
+test_age_key_modes_are_explicit_and_deterministic() {
+    local fake_repo="$TMP/fake-repo-key-mode" missing_installed="$TMP/no-installed-key-mode"
+    mkdir -p "$fake_repo/secrets/keys"
+    write_env "$fake_repo/.env" "PROJECT_STATE_DIR=$TMP/dev-state" 'SOPS_AGE_KEY_FILE='
+
+    local output
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$missing_installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
+set -euo pipefail
+source "$REAL_CONFIG"
+load_project_environment >/dev/null
+printf '%s\n' "$SOPS_AGE_KEY_FILE"
+PROBE
+)
+    [[ "$output" == "/etc/vaultwarden/age-key.txt" ]] \
+        || fail "normal repository bootstrap did not choose canonical production key: $output"
+
+    output=$(VW_CONFIG_AGE_KEY_MODE=repository VW_CONFIG_INSTALLED_ENV_FILE="$missing_installed" \
+        PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
+set -euo pipefail
+source "$REAL_CONFIG"
+load_project_environment >/dev/null
+printf '%s\n' "$SOPS_AGE_KEY_FILE"
+PROBE
+)
+    [[ "$output" == "$fake_repo/secrets/keys/age-key.txt" ]] \
+        || fail "explicit repository key mode was not deterministic: $output"
+}
+
+test_env_literal_and_injection_contracts() {
+    local literal="$TMP/literal.env" dangerous="$TMP/dangerous.env"
+    write_env "$literal" \
+        'LITERAL_VALUE=left=right\path|pipe&semi;colon' \
+        'QUOTED_VALUE="spaces = remain literal"'
+    write_env "$dangerous" \
+        'PROJECT_STATE_DIR=/safe' \
+        'PATH=/attacker/bin'
+
+    local output
+    output=$(REAL_CONFIG="$ROOT/lib/config.sh" ENV_FILE="$literal" bash <<'PROBE'
+set -euo pipefail
+source "$REAL_CONFIG"
+load_env_file "$ENV_FILE" >/dev/null
+printf '%s|%s\n' "$LITERAL_VALUE" "$QUOTED_VALUE"
+PROBE
+)
+    [[ "$output" == 'left=right\path|pipe&semi;colon|spaces = remain literal' ]] \
+        || fail "literal environment values changed: $output"
+
+    if REAL_CONFIG="$ROOT/lib/config.sh" ENV_FILE="$dangerous" bash <<'PROBE' >/dev/null 2>&1
+set -euo pipefail
+source "$REAL_CONFIG"
+load_env_file "$ENV_FILE"
+PROBE
+    then
+        fail "dangerous environment-variable injection was accepted"
+    fi
+}
+
+test_runtime_callers_use_canonical_authority() {
+    grep -Fq 'load_project_environment' "$ROOT/dashboard.sh" \
+        || fail "dashboard does not load canonical runtime configuration"
+    ! grep -Fq 'done < "${REPO_ROOT}/.env"' "$ROOT/dashboard.sh" \
+        || fail "dashboard retains its private repository .env parser"
+    local target
+    for target in status info diagnose; do
+        awk -v target="$target" '
+            $0 ~ "^" target ":" { found=1 }
+            found && /^[[:alnum:]_.-]+:/ && $0 !~ "^" target ":" { exit }
+            found { print }
+        ' "$ROOT/Makefile" | grep -Fq 'load_project_environment' \
+            || fail "make $target does not load canonical runtime configuration"
+    done
+    ! grep -Eq "grep ['\"]?\\^PROJECT_STATE_DIR=" "$ROOT/Makefile" \
+        || fail "Makefile retains private PROJECT_STATE_DIR parsing"
+    grep -Fq 'if ! load_project_environment; then' "$ROOT/utilities/maintenance-health.sh" \
+        || fail "health does not fail on canonical runtime load rejection"
+    ! grep -Fq 'Continuing with inherited environment only' "$ROOT/utilities/maintenance-health.sh" \
+        || fail "health still continues with inherited environment after rejection"
+}
+
 run_test 'repo .env without PROJECT_STATE_DIR falls through to installed environment' test_config_falls_through_empty_repo_state
 run_test 'explicit caller overrides survive loading and repeated calls' test_config_caller_override_wins
 run_test 'installed runtime secret resolution is guarded' test_installed_runtime_secret_resolution
 run_test 'DNS update optional and strict modes are represented' test_dns_optional_and_strict_modes
-[[ "$TESTS_RUN" -eq 4 ]] || fail "expected 4 tests, ran $TESTS_RUN"
+run_test 'installed, persistent, and repository source precedence is canonical and observable' test_runtime_source_precedence_and_observability
+run_test 'invalid selected production environment fails closed without fallback' test_invalid_selected_production_source_fails_closed
+run_test 'repository Age-key behavior requires an explicit deterministic mode' test_age_key_modes_are_explicit_and_deterministic
+run_test 'environment literals and injection protections remain intact' test_env_literal_and_injection_contracts
+run_test 'dashboard, Make, health, and maintenance callers use canonical authority' test_runtime_callers_use_canonical_authority
+[[ "$TESTS_RUN" -eq 9 ]] || fail "expected 9 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )

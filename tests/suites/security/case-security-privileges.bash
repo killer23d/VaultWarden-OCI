@@ -166,7 +166,7 @@ mkdir -p "$TMP/home" "$TMP/state/config"
 chmod 0755 "$TMP/home" "$TMP/state" "$TMP/state/config"
 cat >"$TMP/state/config/install.env" <<EOF_ENV
 PROJECT_STATE_DIR=$TMP/state
-SOPS_AGE_KEY_FILE=
+SOPS_AGE_KEY_FILE=$TMP/synthetic-age-key.txt
 EOF_ENV
 chmod 0644 "$TMP/state/config/install.env"
 
@@ -890,7 +890,7 @@ pass "notify-failure explicitly requires root"
 
 _backup_list_snip="$(awk '/if \[\[ "\$LIST_ONLY" == "true" \]\]/{flag=1} flag{print} /exit 0/{if(flag){exit}}' utilities/backup-run.sh)"
 ! grep -Fq 'auto_fix_critical_permissions' <<<"$_backup_list_snip" || fail "backup list-only path mutates permissions"
-_restore_pre_root_snip="$(awk '/load_env_file 2>\/dev\/null/{flag=1} /require_root "\$@"/{if(flag){exit}} flag{print}' utilities/restore-run.sh)"
+_restore_pre_root_snip="$(awk '/if ! load_project_environment/{flag=1} /require_root "\$@"/{if(flag){exit}} flag{print}' utilities/restore-run.sh)"
 ! grep -Fq 'auto_fix_critical_permissions' <<<"$_restore_pre_root_snip" || fail "restore list-only/pre-root path mutates permissions"
 pass "backup/restore list-only paths avoid mutating permission repair"
 

@@ -108,7 +108,7 @@ sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
 ```
 
-A zero `systemd validate` result means the expected installed scripts, libraries, managed units, environment/key permissions, and timer readiness match the current repository contract. A zero smoke-test result requires every smoke check to complete without `FAIL` or `SKIP`.
+A zero `systemd validate` result means the expected installed scripts, libraries, managed units, environment/key permissions, and timer readiness match the current repository contract, with no unexpected VaultWarden-OCI-managed leftovers. Reinstallation stops/disables removed managed units while preserving operator drop-ins and installed environment/key/rclone material. A zero smoke-test result requires every smoke check to complete without `FAIL` or `SKIP`.
 
 After updating from `main` with `git pull --ff-only origin main`, repeat the three commands above when managed scripts, libraries, or units changed. Git updates the checkout; the systemd installer activates the current repository code under `/opt/vaultwarden-scripts`.
 

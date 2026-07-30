@@ -29,7 +29,9 @@ cleanup() {
     if [[ "$orig_present" == 1 ]]; then
         if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
             sudo cp -p "$backup" .sops.yaml 2>/dev/null || cp -p "$backup" .sops.yaml
+            # shellcheck disable=SC2033 # Later test-local mocks intentionally shadow these commands.
             sudo chown "${orig_owner}:${orig_group}" .sops.yaml 2>/dev/null || true
+            # shellcheck disable=SC2033 # Later test-local mocks intentionally shadow these commands.
             sudo chmod "$orig_mode" .sops.yaml 2>/dev/null || true
         else
             cp -p "$backup" .sops.yaml 2>/dev/null || true
@@ -350,8 +352,17 @@ persistent_secret="$PROJECT_STATE_DIR/secrets/secrets.yaml"
 printf 'secrets: {}\n' > "$persistent_secret"
 chmod 0755 "$PROJECT_STATE_DIR/secrets"
 chmod 0644 "$persistent_secret"
-fix_known_path_permissions "$persistent_secret"
-fix_known_path_permissions "$PROJECT_STATE_DIR/secrets"
+if (( EUID == 0 )); then
+    fix_known_path_permissions "$persistent_secret"
+    fix_known_path_permissions "$PROJECT_STATE_DIR/secrets"
+else
+    (
+        _common_stat_owner(){ printf 'root'; }
+        _common_stat_group(){ printf 'root'; }
+        fix_known_path_permissions "$persistent_secret"
+        fix_known_path_permissions "$PROJECT_STATE_DIR/secrets"
+    )
+fi
 [[ "$(_common_stat_mode "$persistent_secret")" == 600 ]] || fail 'persistent secrets.yaml was not repaired to 0600'
 [[ "$(_common_stat_mode "$PROJECT_STATE_DIR/secrets")" == 700 ]] || fail 'persistent secrets dir was not repaired to 0700'
 pass 'persistent state secrets are repaired by central helper'
@@ -380,6 +391,67 @@ export SECRETS_FILE
 load_env_file "$PROJECT_STATE_DIR/config/install.env" || fail 'load_env_file failed for persistent secrets resolution regression'
 [[ "$SECRETS_FILE" == "$persistent_secret" ]] || fail 'load_env_file did not resolve persistent secrets.yaml for direct health-style callers'
 pass 'load_env_file resolves persistent secrets.yaml for direct health-style callers'
+
+required_target="$PROJECT_STATE_DIR/config/install.env"
+if (
+    _common_stat_owner(){ printf 'wrong-owner'; }
+    _common_stat_group(){ printf 'wrong-group'; }
+    _common_stat_mode(){ printf '600'; }
+    chown(){ return 41; }
+    fix_known_path_permissions "$required_target"
+) >/dev/null 2>&1; then
+    fail 'required chown failure was swallowed'
+fi
+pass 'required ownership repair failure returns nonzero'
+
+if (
+    _common_stat_owner(){ printf 'root'; }
+    _common_stat_group(){ printf 'root'; }
+    _common_stat_mode(){ printf '644'; }
+    chmod(){ return 42; }
+    fix_known_path_permissions "$required_target"
+) >/dev/null 2>&1; then
+    fail 'required chmod failure was swallowed'
+fi
+pass 'required mode repair failure returns nonzero'
+
+if (
+    _common_stat_owner(){ printf 'wrong-owner'; }
+    _common_stat_group(){ printf 'wrong-group'; }
+    _common_stat_mode(){ printf '644'; }
+    chown(){ return 0; }
+    chmod(){ return 0; }
+    fix_known_path_permissions "$required_target"
+) >/dev/null 2>&1; then
+    fail 'zero-returning repair with a false postcondition unexpectedly succeeded'
+fi
+pass 'permission repair re-stats and rejects a false postcondition'
+
+caddy_fixture="$TMP/caddy-fixture"
+mkdir -p "$caddy_fixture/caddy"
+printf '#!/usr/bin/env bash\n' > "$caddy_fixture/caddy/entrypoint.sh"
+chmod 0644 "$caddy_fixture/caddy/entrypoint.sh"
+set +e
+caddy_failure_output="$(
+    (
+        chmod(){ return 43; }
+        auto_fix_critical_permissions "$caddy_fixture"
+    ) 2>&1
+)"
+caddy_failure_rc=$?
+set -e
+[[ "$caddy_failure_rc" -ne 0 ]] || fail 'Caddy execute-bit repair failure unexpectedly succeeded'
+[[ "$caddy_failure_output" != *'corrected and verified'* ]] \
+    || fail 'Caddy execute-bit failure printed a correction success message'
+pass 'Caddy execute-bit repair failure is nonzero and truthful'
+
+startup_fix_line="$(awk '/if ! auto_fix_critical_permissions/{print NR; exit}' "$ROOT/startup.sh")"
+startup_state_line="$(awk '/check_project_state_ready \|\| exit 1/{print NR; exit}' "$ROOT/startup.sh")"
+[[ -n "$startup_fix_line" && -n "$startup_state_line" && "$startup_fix_line" -lt "$startup_state_line" ]] \
+    || fail 'startup does not block on required permission repair before later state mutation'
+grep -Fq 'Required permission repair failed; startup stopped before state or service mutation.' "$ROOT/startup.sh" \
+    || fail 'startup permission failure lacks an actionable fail-closed diagnostic'
+pass 'startup checks required permission repair before later mutation'
 
 age_warn_pattern="Age key ownership was .*expected.*ubunt""u"
 ! grep -RIn "$age_warn_pattern" . --exclude-dir=.git >/tmp/vw-age-warn.$$ || { cat /tmp/vw-age-warn.$$ >&2; rm -f /tmp/vw-age-warn.$$; fail 'stale ubuntu age-key warning found'; }

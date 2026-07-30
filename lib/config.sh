@@ -30,8 +30,8 @@ _VW_CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CONFIG_LIB_DIR}/log.sh"
 
 _ENV_FILE_SEARCH_PATHS=(
-    "${PROJECT_ROOT:-$(cd "${_VW_CONFIG_LIB_DIR}/.." && pwd)}/.env"
     "/etc/vaultwarden/vaultwarden.env"
+    "${PROJECT_ROOT:-$(cd "${_VW_CONFIG_LIB_DIR}/.." && pwd)}/.env"
 )
 unset _VW_CONFIG_LIB_DIR
 
@@ -43,6 +43,12 @@ _get_file_perms() {
 
 load_env_file() {
     local env_file="${1:-}"
+    local load_mode="${2:-lenient}"
+
+    if (( $# > 2 )) || [[ "$load_mode" != "lenient" && "$load_mode" != "--strict" ]]; then
+        log_error "load_env_file: usage: load_env_file [PATH] [--strict]"
+        return 64
+    fi
 
     if [[ -z "$env_file" ]]; then
         local candidate
@@ -56,6 +62,10 @@ load_env_file() {
 
     if [[ -z "$env_file" || ! -f "$env_file" ]]; then
         log_error "Environment file not found: ${env_file:-.env} (also searched: ${_ENV_FILE_SEARCH_PATHS[*]})"
+        return 1
+    fi
+    if [[ ! -r "$env_file" ]]; then
+        log_error "Environment file is not readable: ${env_file}"
         return 1
     fi
 
@@ -98,6 +108,7 @@ load_env_file() {
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         if [[ "$line" != *=* ]]; then
+            malformed_lines+=("line ${lineno}: ${line}")
             continue
         fi
 
@@ -150,39 +161,24 @@ load_env_file() {
     done < "$env_file"
 
     if (( ${#malformed_lines[@]} > 0 )); then
-        log_warn "load_env_file: ${#malformed_lines[@]} malformed .env line(s) skipped from ${env_file}:"
+        local malformed_level="WARN"
+        [[ "$load_mode" == "--strict" ]] && malformed_level="ERROR"
+        "log_${malformed_level,,}" "load_env_file: ${#malformed_lines[@]} malformed .env line(s) found in ${env_file}:"
         local malformed
         for malformed in "${malformed_lines[@]}"; do
-            log_warn "  ${malformed}"
+            "log_${malformed_level,,}" "  ${malformed}"
         done
         log_hint "Valid format: KEY=value or KEY=\"value with spaces\""
         log_hint "Common mistakes: spaces around '=', an 'export ' prefix, or invalid variable names."
+        if [[ "$load_mode" == "--strict" ]]; then
+            log_error "Refusing selected production environment: ${env_file}"
+            return 1
+        fi
     fi
 
-    # A blank SOPS_AGE_KEY_FILE in repo .env is intentional: it keeps operator
-    # editable config portable. Do not pass that blank value through to SOPS;
-    # resolve a concrete key path for the current caller instead.
-    if [[ -z "${SOPS_AGE_KEY_FILE:-}" ]]; then
-        local _config_project_root _age_candidate
-        _config_project_root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-        for _age_candidate in \
-            "${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" \
-            "/etc/vaultwarden/age-key.txt" \
-            "${_config_project_root}/secrets/keys/age-key.txt"; do
-            [[ -z "$_age_candidate" ]] && continue
-            if [[ -r "$_age_candidate" ]]; then
-                SOPS_AGE_KEY_FILE="$_age_candidate"
-                break
-            fi
-        done
-        SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
-        export SOPS_AGE_KEY_FILE
-        log_debug "load_env_file: SOPS_AGE_KEY_FILE was blank; using ${SOPS_AGE_KEY_FILE}"
-    fi
-
-    # Keep direct env-file callers aligned with the split-permission secrets
-    # layout. load_project_environment already does this, but scripts such as
-    # maintenance-health.sh call load_env_file directly.
+    # Keep explicit single-file callers aligned with the split-permission
+    # secrets layout. Runtime source selection and Age-key identity are owned
+    # by load_project_environment.
     if declare -F resolve_secrets_file >/dev/null 2>&1; then
         resolve_secrets_file
     fi
@@ -247,53 +243,109 @@ load_project_environment() {
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
     local repo_env="${root}/.env"
     local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
-    local bootstrap_state="$default_state_dir"
+    local bootstrap_state="${override_state:-$default_state_dir}"
+    local persistent_env="${bootstrap_state}/config/install.env"
+    local selected_kind=""
 
-    local _read_project_state_dir
-    _read_project_state_dir() {
-        local file="$1"
-        [[ -f "$file" ]] || return 0
-        awk -F= -v sq="'" '$1 == "PROJECT_STATE_DIR" {
-            value = substr($0, index($0, "=") + 1)
-            gsub("^[\"" sq "]|[\"" sq "]$", "", value)
-            if (value != "") found = value
-        }
-        END { if (found != "") print found }' "$file"
-    }
-
-    if [[ -n "$override_state" ]]; then
-        bootstrap_state="$override_state"
-    else
-        local repo_state installed_state
-        repo_state="$(_read_project_state_dir "$repo_env")"
-        installed_state="$(_read_project_state_dir "$installed_env")"
-        if [[ -n "$repo_state" ]]; then
-            bootstrap_state="$repo_state"
-        elif [[ -n "$installed_state" ]]; then
-            bootstrap_state="$installed_state"
-        fi
-    fi
-
-    PROJECT_STATE_DIR="$bootstrap_state"
-    export PROJECT_STATE_DIR
-
-    local persistent_env="${PROJECT_STATE_DIR}/config/install.env"
     if [[ -f "$installed_env" ]]; then
-        load_env_file "$installed_env" || return 1
+        VW_CONFIG_SELECTED_ENV_FILE="$installed_env"
+        selected_kind="installed"
     elif [[ -f "$persistent_env" ]]; then
-        load_env_file "$persistent_env" || return 1
+        VW_CONFIG_SELECTED_ENV_FILE="$persistent_env"
+        selected_kind="persistent"
     elif [[ -f "$repo_env" ]]; then
-        log_warn "Using repository .env — migrate to ${persistent_env} for production use"
-        load_env_file "$repo_env" || return 1
+        # Repository .env may identify a non-default persistent state path
+        # during bootstrap. Use the canonical parser in a subshell to discover
+        # only that path; never maintain a second environment parser.
+        if [[ -z "$override_state" ]]; then
+            local repo_state=""
+            repo_state="$(
+                unset PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
+                load_env_file "$repo_env" >/dev/null || exit 1
+                printf '%s' "${PROJECT_STATE_DIR:-}"
+            )" || {
+                VW_CONFIG_SELECTED_ENV_FILE="$repo_env"
+                VW_CONFIG_SELECTED_ENV_SOURCE="repository"
+                export VW_CONFIG_SELECTED_ENV_FILE VW_CONFIG_SELECTED_ENV_SOURCE
+                return 1
+            }
+            if [[ -n "$repo_state" && -f "${repo_state}/config/install.env" ]]; then
+                bootstrap_state="$repo_state"
+                persistent_env="${bootstrap_state}/config/install.env"
+                VW_CONFIG_SELECTED_ENV_FILE="$persistent_env"
+                selected_kind="persistent"
+            fi
+        fi
+        if [[ -z "$selected_kind" ]]; then
+            VW_CONFIG_SELECTED_ENV_FILE="$repo_env"
+            selected_kind="repository"
+        fi
     else
         log_error "No project environment found. Expected ${persistent_env}, ${repo_env}, or ${installed_env}."
         return 1
+    fi
+
+    VW_CONFIG_SELECTED_ENV_SOURCE="$selected_kind"
+    export VW_CONFIG_SELECTED_ENV_FILE VW_CONFIG_SELECTED_ENV_SOURCE
+    log_info "Selected ${selected_kind} runtime environment: ${VW_CONFIG_SELECTED_ENV_FILE}"
+
+    # These four settings are the supported caller overrides. Clear inherited
+    # values before loading the selected authority, then reapply only captured
+    # explicit overrides. A rejected production source can therefore never
+    # leave inherited identity values active in a caller that checks failure.
+    PROJECT_STATE_DIR=""
+    DATA_VOLUME_DEVICE=""
+    DATA_VOLUME_MOUNT=""
+    SOPS_AGE_KEY_FILE=""
+    export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
+
+    if [[ "$selected_kind" == "repository" ]]; then
+        log_warn "Using repository .env for bootstrap/development; production should install ${persistent_env}"
+        load_env_file "$VW_CONFIG_SELECTED_ENV_FILE" || return 1
+    else
+        load_env_file "$VW_CONFIG_SELECTED_ENV_FILE" --strict || return 1
     fi
 
     [[ -n "$override_state" ]] && PROJECT_STATE_DIR="$override_state"
     [[ -n "$override_device" ]] && DATA_VOLUME_DEVICE="$override_device"
     [[ -n "$override_mount" ]] && DATA_VOLUME_MOUNT="$override_mount"
     [[ -n "$override_key" ]] && SOPS_AGE_KEY_FILE="$override_key"
+
+    if [[ "$selected_kind" != "repository" ]]; then
+        if [[ -z "${PROJECT_STATE_DIR:-}" || "$PROJECT_STATE_DIR" != /* ]]; then
+            log_error "Selected production environment '${VW_CONFIG_SELECTED_ENV_FILE}' has an invalid PROJECT_STATE_DIR."
+            return 1
+        fi
+        if [[ -z "${SOPS_AGE_KEY_FILE:-}" ]]; then
+            log_error "Selected production environment '${VW_CONFIG_SELECTED_ENV_FILE}' does not define SOPS_AGE_KEY_FILE."
+            return 1
+        fi
+    fi
+
+    if [[ -z "${SOPS_AGE_KEY_FILE:-}" ]]; then
+        case "${VW_CONFIG_AGE_KEY_MODE:-production}" in
+            production)
+                SOPS_AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+                log_info "Selected canonical production Age key identity: ${SOPS_AGE_KEY_FILE}"
+                ;;
+            repository)
+                if [[ "$selected_kind" != "repository" ]]; then
+                    log_error "VW_CONFIG_AGE_KEY_MODE=repository is limited to repository bootstrap/development configuration."
+                    return 1
+                fi
+                SOPS_AGE_KEY_FILE="${root}/secrets/keys/age-key.txt"
+                log_warn "Explicit repository bootstrap/development Age key identity: ${SOPS_AGE_KEY_FILE}"
+                ;;
+            *)
+                log_error "Unsupported VW_CONFIG_AGE_KEY_MODE='${VW_CONFIG_AGE_KEY_MODE}'. Expected: production or repository."
+                return 1
+                ;;
+        esac
+    elif [[ "${VW_CONFIG_AGE_KEY_MODE:-production}" != "production" && "${VW_CONFIG_AGE_KEY_MODE:-production}" != "repository" ]]; then
+        log_error "Unsupported VW_CONFIG_AGE_KEY_MODE='${VW_CONFIG_AGE_KEY_MODE}'. Expected: production or repository."
+        return 1
+    fi
+
     export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
 
     resolve_secrets_file

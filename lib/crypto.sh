@@ -35,34 +35,26 @@ _VW_CRYPTO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CRYPTO_LIB_DIR}/log.sh"
 unset _VW_CRYPTO_LIB_DIR
 
-# resolve_age_key_path — single authoritative resolver for the age key path.
-# Priority:
-#   1. $AGE_KEY_FILE env var      (explicit override, highest priority)
-#   2. /etc/vaultwarden/age-key.txt  (runtime/production system path)
-#   3. ${PROJECT_ROOT:-$(pwd)}/secrets/keys/age-key.txt  (repo-local dev fallback)
-# Prints the resolved absolute path to stdout. Returns 1 on failure.
+# resolve_age_key_path — return the selected Age-key identity.
+#
+# The optional argument is an explicit caller selection. Otherwise the
+# canonical runtime configuration supplies SOPS_AGE_KEY_FILE, with
+# AGE_KEY_FILE retained only as a compatibility default when the canonical
+# loader has not run. A rejected configured identity is never replaced by a
+# different key. Repository bootstrap/development use is selected explicitly
+# by load_project_environment through VW_CONFIG_AGE_KEY_MODE=repository.
 resolve_age_key_path() {
-    local _p _abs
-    local _candidates=(
-        "${AGE_KEY_FILE:-}"
-        "/etc/vaultwarden/age-key.txt"
-        "${PROJECT_ROOT:-$(pwd)}/secrets/keys/age-key.txt"
-    )
-    for _p in "${_candidates[@]}"; do
-        [[ -z "$_p" ]] && continue
-        if [[ "$_p" != /* ]]; then
-            _abs="${PROJECT_ROOT:-$(pwd)}/$_p"
-        else
-            _abs="$_p"
-        fi
-        if [[ -f "$_abs" && -r "$_abs" ]]; then
-            printf '%s' "$_abs"
-            return 0
-        fi
-    done
-    log_error "resolve_age_key_path: age key not found in any expected location."
-    log_error "  Searched: ${_candidates[*]}"
-    log_error "  Fix: set AGE_KEY_FILE or place key at /etc/vaultwarden/age-key.txt"
+    local selected="${1:-${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}}"
+    local absolute="$selected"
+    [[ "$absolute" == /* ]] || absolute="${PROJECT_ROOT:-$(pwd)}/$absolute"
+
+    if [[ -f "$absolute" && -r "$absolute" ]]; then
+        printf '%s' "$absolute"
+        return 0
+    fi
+
+    log_error "resolve_age_key_path: selected Age key is missing or unreadable: ${absolute}"
+    log_error "  Correct SOPS_AGE_KEY_FILE or install the selected key before retrying."
     return 1
 }
 
@@ -988,7 +980,7 @@ validate_crypto_environment() {
 
 simple_verify_age_key() {
     local age_key
-    age_key=$(resolve_age_key_path) || return 1
+    age_key=$(resolve_age_key_path "${1:-}") || return 1
 
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key missing: $age_key"
@@ -1483,10 +1475,11 @@ _sops_yaml_age_recipients() {
 # A mismatch means a new age key was restored while .sops.yaml still references the old key.
 # ---------------------------------------------------------------------------
 check_age_key_health() {
-    simple_verify_age_key || return 1
+    local selected_key="${1:-}"
+    simple_verify_age_key "$selected_key" || return 1
 
     local age_key
-    age_key=$(resolve_age_key_path) || return 1
+    age_key=$(resolve_age_key_path "$selected_key") || return 1
     local sops_yaml="${SOPS_CONFIG_FILE:-.sops.yaml}"
 
     if [[ ! -f "$sops_yaml" ]]; then

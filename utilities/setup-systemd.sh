@@ -58,6 +58,43 @@ SERVICES=(
     vaultwarden-iptables.service
 )
 
+_MANAGED_FLAT_SCRIPTS=(
+    maintenance.sh
+    backup.sh
+    restore.sh
+)
+
+_MANAGED_STRUCTURED_SCRIPTS=(
+    utilities/setup-firewall.sh
+    utilities/maintenance-run.sh
+    utilities/maintenance-health.sh
+    utilities/maintenance-update.sh
+    utilities/maintenance-db-maint.sh
+    utilities/maintenance-email.sh
+    utilities/maintenance-update-dns.sh
+    utilities/notify-failure.sh
+    utilities/maintenance-update-firewall.sh
+    utilities/backup-run.sh
+    utilities/restore-run.sh
+)
+
+mapfile -t _MANAGED_LIB_FILES < <(
+    cd "$PROJECT_ROOT"
+    find lib \( -type f -o -type l \) -print | sort
+)
+
+_MANAGED_RUNTIME_FILES=(
+    "${_MANAGED_FLAT_SCRIPTS[@]}"
+    "${_MANAGED_STRUCTURED_SCRIPTS[@]}"
+    "${_MANAGED_LIB_FILES[@]}"
+)
+
+_MANAGED_UNIT_FILES=(
+    "${SERVICES[@]}"
+    "${TIMERS[@]}"
+    "$STARTUP_SERVICE"
+)
+
 _VW_DROPIN_UNITS=(
     vaultwarden-maintenance.service
     vaultwarden-db-backup.service
@@ -73,6 +110,32 @@ _VW_DROPIN_UNITS=(
     vaultwarden-health.timer
     vaultwarden-dns-update.timer
     vaultwarden-firewall-update.timer
+)
+
+_MANAGED_DROPIN_NAMES=(
+    10-state-dir.conf
+    20-identity.conf
+    30-run-as-root.conf
+)
+
+_RUNTIME_LOCK_NAMES=(
+    vaultwarden-backup.lock
+    vaultwarden-operations.lock
+    vaultwarden-crowdsec-setup.lock
+    vaultwarden-dns-update.lock
+    vaultwarden-env.lock
+    vaultwarden-firewall-update.lock
+    vaultwarden-health.lock
+    vaultwarden-key-rotate.lock
+    vaultwarden-maintenance.lock
+    vaultwarden-permission-repair.lock
+    vaultwarden-restore.lock
+    vaultwarden-secrets.lock
+    vaultwarden-setup.lock
+    vaultwarden-startup.lock
+    vaultwarden-systemd.lock
+    vaultwarden-uninstall.lock
+    vaultwarden-update.lock
 )
 
 _setup_systemd_acquire_guard() {
@@ -158,9 +221,10 @@ WHAT install DOES:
        structure is preserved at the destination.
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
     3. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
-       using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
+       using the canonical installed -> persistent -> bootstrap/development repository source contract.
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
+       while reconciling unexpected VaultWarden-OCI-managed runtime and unit artifacts.
     6. systemctl daemon-reload
     7. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
     8. If timers were started now, verifies all managed timers are active and have a next trigger
@@ -315,6 +379,150 @@ _sha256() {
     fi
 }
 
+_inventory_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+_managed_dropin_is_expected() {
+    local unit="$1" dropin_name="$2"
+    _inventory_contains "$dropin_name" "${_MANAGED_DROPIN_NAMES[@]}" || return 1
+    case "$dropin_name" in
+        10-state-dir.conf)
+            [[ -n "${DATA_VOLUME_DEVICE:-}" ]] \
+                && _inventory_contains "$unit" "${_VW_DROPIN_UNITS[@]}"
+            ;;
+        20-identity.conf)
+            _inventory_contains "$unit" "${_IDENTITY_DROPIN_UNITS[@]}"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+_is_project_owned_unit_artifact() {
+    local path="$1" unit
+    unit="$(basename "$path")"
+    [[ "$unit" == vaultwarden-*.service || "$unit" == vaultwarden-*.timer ]] || return 1
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    grep -Eiq 'VaultWarden(-OCI)?|killer23d/VaultWarden-OCI|/opt/vaultwarden-scripts' "$path"
+}
+
+_list_unexpected_managed_artifacts() {
+    local path rel unit dropin_name
+    if [[ -d "$OPT_SCRIPTS_DIR" ]]; then
+        while IFS= read -r -d '' path; do
+            rel="${path#"$OPT_SCRIPTS_DIR"/}"
+            if ! _inventory_contains "$rel" "${_MANAGED_RUNTIME_FILES[@]}"; then
+                printf 'runtime|%s\n' "$path"
+            fi
+        done < <(find "$OPT_SCRIPTS_DIR" \( -type f -o -type l \) -print0 2>/dev/null)
+    fi
+
+    if [[ -d "$UNIT_DEST_DIR" ]]; then
+        while IFS= read -r -d '' path; do
+            unit="$(basename "$path")"
+            if ! _inventory_contains "$unit" "${_MANAGED_UNIT_FILES[@]}" \
+               && _is_project_owned_unit_artifact "$path"; then
+                printf 'unit|%s\n' "$path"
+            fi
+        done < <(
+            find "$UNIT_DEST_DIR" -mindepth 1 -maxdepth 1 -type f \
+                \( -name 'vaultwarden-*.service' -o -name 'vaultwarden-*.timer' \) \
+                -print0 2>/dev/null
+        )
+
+        while IFS= read -r -d '' path; do
+            unit="$(basename "$(dirname "$path")")"
+            unit="${unit%.d}"
+            dropin_name="$(basename "$path")"
+            [[ "$unit" == vaultwarden-*.service || "$unit" == vaultwarden-*.timer ]] || continue
+            if _managed_dropin_is_expected "$unit" "$dropin_name"; then
+                continue
+            fi
+            # The marker lets us reconcile a renamed drop-in from an older
+            # project revision. A matching reserved name without the marker is
+            # operator/third-party state and is preserved.
+            if grep -Fq 'Written by setup-systemd.sh install' "$path" 2>/dev/null; then
+                printf 'dropin|%s\n' "$path"
+            fi
+        done < <(
+            find "$UNIT_DEST_DIR" -mindepth 2 -maxdepth 2 -type f -name '*.conf' -print0 2>/dev/null
+        )
+    fi
+}
+
+_reconcile_unexpected_managed_artifacts() {
+    local -a stale_artifacts=()
+    local record kind path unit unit_changes=false
+    mapfile -t stale_artifacts < <(_list_unexpected_managed_artifacts)
+
+    for record in "${stale_artifacts[@]}"; do
+        kind="${record%%|*}"
+        path="${record#*|}"
+        log_warn "Unexpected stale managed ${kind}: ${path}"
+        case "$kind" in
+            runtime)
+                _run rm -f -- "$path" || {
+                    log_error "Failed to remove stale managed runtime artifact: ${path}"
+                    return 1
+                }
+                ;;
+            unit)
+                unit="$(basename "$path")"
+                if systemctl is-active "$unit" >/dev/null 2>&1 \
+                   || systemctl is-enabled "$unit" >/dev/null 2>&1; then
+                    _run systemctl disable --now "$unit" || {
+                        log_error "Failed to stop/disable stale managed unit: ${unit}"
+                        return 1
+                    }
+                else
+                    log_info "Stale managed unit is already inactive and disabled: ${unit}"
+                fi
+                _run rm -f -- "$path" || {
+                    log_error "Failed to remove stale managed unit: ${path}"
+                    return 1
+                }
+                unit_changes=true
+                ;;
+            dropin)
+                _run rm -f -- "$path" || {
+                    log_error "Failed to remove stale managed drop-in: ${path}"
+                    return 1
+                }
+                unit_changes=true
+                ;;
+            *)
+                log_error "Unknown managed artifact class '${kind}' for ${path}"
+                return 1
+                ;;
+        esac
+    done
+
+    if [[ "$DRY_RUN" == "false" && -d "$OPT_SCRIPTS_DIR" ]]; then
+        while IFS= read -r -d '' path; do
+            rmdir "$path" 2>/dev/null || true
+        done < <(find "$OPT_SCRIPTS_DIR" -depth -type d -empty -print0 2>/dev/null)
+    fi
+    if [[ "$DRY_RUN" == "false" && -d "$UNIT_DEST_DIR" ]]; then
+        while IFS= read -r -d '' path; do
+            rmdir "$path" 2>/dev/null || true
+        done < <(find "$UNIT_DEST_DIR" -mindepth 1 -maxdepth 1 -type d -empty -print0 2>/dev/null)
+    fi
+
+    if [[ "$unit_changes" == "true" ]]; then
+        _run systemctl daemon-reload || {
+            log_error "systemctl daemon-reload failed after stale managed unit reconciliation."
+            return 1
+        }
+    fi
+    return 0
+}
+
 
 # _resolve_service_user
 #
@@ -441,52 +649,98 @@ _ensure_lock_group() {
 
 _ensure_runtime_lock_files() {
     local service_user="$1"
+    local service_group="$2"
+    : "$service_user" "$service_group"
     # service_group ($2) is intentionally unused: lock files are always
     # root:vaultwarden regardless of the service user's primary group.
     # This allows both the systemd service user (ubuntu) and root (sudo
     # callers) to open the same flock fd. See _ensure_lock_group.
     local lock_owner="root"
     local lock_group="vaultwarden"
-    local -a lock_files=(
-        "/run/lock/vaultwarden-backup.lock"
-        "/run/lock/vaultwarden-operations.lock"
-        "/run/lock/vaultwarden-crowdsec-setup.lock"
-        "/run/lock/vaultwarden-dns-update.lock"
-        "/run/lock/vaultwarden-env.lock"
-        "/run/lock/vaultwarden-firewall-update.lock"
-        "/run/lock/vaultwarden-health.lock"
-        "/run/lock/vaultwarden-key-rotate.lock"
-        "/run/lock/vaultwarden-maintenance.lock"
-        "/run/lock/vaultwarden-permission-repair.lock"
-        "/run/lock/vaultwarden-restore.lock"
-        "/run/lock/vaultwarden-secrets.lock"
-        "/run/lock/vaultwarden-setup.lock"
-        "/run/lock/vaultwarden-startup.lock"
-        "/run/lock/vaultwarden-systemd.lock"
-        "/run/lock/vaultwarden-uninstall.lock"
-        "/run/lock/vaultwarden-update.lock"
-    )
-    local lock_file
-    for lock_file in "${lock_files[@]}"; do
+    local lock_dir="${VW_SYSTEMD_RUNTIME_LOCK_DIR:-/run/lock}"
+    local failures=0 lock_name lock_file before_metadata after_metadata
+    local before_device before_inode _before_owner _before_group _before_mode
+    local after_device after_inode after_owner after_group after_mode
+
+    _runtime_lock_metadata() {
+        if stat --version >/dev/null 2>&1; then
+            stat -c '%d:%i:%U:%G:%a' -- "$1" 2>/dev/null
+        else
+            stat -f '%d:%i:%Su:%Sg:%Lp' "$1" 2>/dev/null
+        fi
+    }
+
+    for lock_name in "${_RUNTIME_LOCK_NAMES[@]}"; do
+        lock_file="${lock_dir}/${lock_name}"
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would ensure lock file: ${lock_file} -> ${lock_owner}:${lock_group} 0660"
             continue
         fi
-        if [[ ! -e "$lock_file" ]]; then
-            install -m 0660 -o "$lock_owner" -g "$lock_group" /dev/null "$lock_file" 2>/dev/null || {
-                log_warn "_ensure_runtime_lock_files: could not create ${lock_file}"
-                log_warn "  Possible cause: group '${lock_group}' does not exist yet."
-                log_warn "  This resolves itself after _ensure_lock_group completes."
+
+        before_metadata=""
+        if [[ -L "$lock_file" ]]; then
+            log_error "_ensure_runtime_lock_files: refusing symlink lock path: ${lock_file}"
+            failures=$((failures + 1))
+            continue
+        elif [[ -e "$lock_file" ]]; then
+            if [[ ! -f "$lock_file" ]]; then
+                log_error "_ensure_runtime_lock_files: lock path is not a regular file: ${lock_file}"
+                failures=$((failures + 1))
+                continue
+            fi
+            before_metadata="$(_runtime_lock_metadata "$lock_file")" || {
+                log_error "_ensure_runtime_lock_files: cannot stat existing lock file: ${lock_file}"
+                failures=$((failures + 1))
                 continue
             }
+            IFS=: read -r before_device before_inode _before_owner _before_group _before_mode <<< "$before_metadata"
         else
-            # Correct permissions in place without removing the file. The active
-            # lock owner is determined by flock(), not pathname existence.
-            chown "${lock_owner}:${lock_group}" "$lock_file" 2>/dev/null || true
-            chmod 0660 "$lock_file" 2>/dev/null || true
+            if ! (umask 0117; set -o noclobber; : > "$lock_file") 2>/dev/null; then
+                log_error "_ensure_runtime_lock_files: could not securely create ${lock_file}"
+                failures=$((failures + 1))
+                continue
+            fi
+        fi
+
+        if ! chown "${lock_owner}:${lock_group}" "$lock_file" 2>/dev/null; then
+            log_error "_ensure_runtime_lock_files: ownership repair failed for ${lock_file}"
+            failures=$((failures + 1))
+            continue
+        fi
+        if ! chmod 0660 "$lock_file" 2>/dev/null; then
+            log_error "_ensure_runtime_lock_files: mode repair failed for ${lock_file}"
+            failures=$((failures + 1))
+            continue
+        fi
+        if [[ -L "$lock_file" || ! -f "$lock_file" ]]; then
+            log_error "_ensure_runtime_lock_files: lock path type changed during preparation: ${lock_file}"
+            failures=$((failures + 1))
+            continue
+        fi
+        after_metadata="$(_runtime_lock_metadata "$lock_file")" || {
+            log_error "_ensure_runtime_lock_files: cannot verify lock file: ${lock_file}"
+            failures=$((failures + 1))
+            continue
+        }
+        IFS=: read -r after_device after_inode after_owner after_group after_mode <<< "$after_metadata"
+        if [[ "$after_owner:$after_group" != "$lock_owner:$lock_group" || "$after_mode" != "660" ]]; then
+            log_error "_ensure_runtime_lock_files: postcondition failed for ${lock_file}; got ${after_owner}:${after_group} ${after_mode}"
+            failures=$((failures + 1))
+            continue
+        fi
+        if [[ -n "$before_metadata" && "$before_device:$before_inode" != "$after_device:$after_inode" ]]; then
+            log_error "_ensure_runtime_lock_files: existing lock inode changed during in-place repair: ${lock_file}"
+            failures=$((failures + 1))
+            continue
         fi
         log_success "Lock file ready: ${lock_file} (${lock_owner}:${lock_group} 0660)"
     done
+
+    if (( failures > 0 )); then
+        log_error "Required runtime lock preparation failed for ${failures} path(s)."
+        return 1
+    fi
+    return 0
 }
 
 # No current managed service is safe to run as the detected non-root service user.
@@ -557,43 +811,8 @@ DROPIN
     done
 }
 
-_cleanup_stale_identity_dropins() {
-    local unit dropin_dir dropin_file
-
-    local -a stale_files=(
-        "vaultwarden-db-backup.service.d/30-run-as-root.conf"
-        "vaultwarden-full-backup.service.d/30-run-as-root.conf"
-    )
-    local stale_rel
-    for stale_rel in "${stale_files[@]}"; do
-        dropin_file="${UNIT_DEST_DIR}/${stale_rel}"
-        dropin_dir="$(dirname "$dropin_file")"
-        if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
-            log_success "Removed stale root identity drop-in: $dropin_file"
-        fi
-        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
-            log_success "Removed empty drop-in dir: $dropin_dir"
-        fi
-    done
-
-    for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
-        dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
-        dropin_file="${dropin_dir}/20-identity.conf"
-        if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
-            log_success "Removed stale identity drop-in from root-required unit: $dropin_file"
-        fi
-        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
-            log_success "Removed empty drop-in dir: $dropin_dir"
-        fi
-    done
-}
-
-
-# so that ProtectSystem=strict allows writes to DATA_VOLUME_MOUNT. Without
+# Install the managed state-directory drop-ins so ProtectSystem=strict allows
+# writes to DATA_VOLUME_MOUNT. Without
 # this drop-in, any write to DATA_VOLUME_MOUNT (backup files, health cooldown
 # stamps, DB operations) is silently blocked by the kernel, causing runtime
 # Permission denied errors that are hard to diagnose from the unit file alone.
@@ -713,6 +932,8 @@ install_units() {
         return 1
     fi
 
+    _reconcile_unexpected_managed_artifacts || return 1
+
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
     _run mkdir -p "$OPT_SCRIPTS_DIR"
 
@@ -751,18 +972,13 @@ install_units() {
 
     # Keep these scripts flat-installed because existing callers reference
     # /opt/vaultwarden-scripts/<name> directly.
-    local flat_scripts_to_install=(
-        maintenance.sh
-        backup.sh
-        restore.sh
-    )
-    for script in "${flat_scripts_to_install[@]}"; do
+    for script in "${_MANAGED_FLAT_SCRIPTS[@]}"; do
         local src="$PROJECT_ROOT/$script"
         local dest
         dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
         if [[ ! -f "$src" ]]; then
-            log_warn "Script not found, skipping: $src"
-            continue
+            log_error "Managed script source is missing: $src"
+            return 1
         fi
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would install: $dest (700 root:root)"
@@ -774,26 +990,13 @@ install_units() {
 
     # Preserve the utilities/ subdirectory for these scripts so each utility's
     # BASH_SOURCE-based PROJECT_ROOT resolution matches the repository layout.
-    local structured_scripts_to_install=(
-        utilities/setup-firewall.sh
-        utilities/maintenance-run.sh
-        utilities/maintenance-health.sh
-        utilities/maintenance-update.sh
-        utilities/maintenance-db-maint.sh
-        utilities/maintenance-email.sh
-        utilities/maintenance-update-dns.sh
-        utilities/notify-failure.sh
-        utilities/maintenance-update-firewall.sh
-        utilities/backup-run.sh
-        utilities/restore-run.sh
-    )
-    for script in "${structured_scripts_to_install[@]}"; do
+    for script in "${_MANAGED_STRUCTURED_SCRIPTS[@]}"; do
         local src="$PROJECT_ROOT/$script"
         local dest
         dest="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$src" ]]; then
-            log_warn "Script not found, skipping: $src"
-            continue
+            log_error "Managed script source is missing: $src"
+            return 1
         fi
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would install: $dest (700 root:root)"
@@ -833,12 +1036,12 @@ install_units() {
     else
         if [[ -f "$age_key_src" ]]; then
             install -m 600 -o root -g root "$age_key_src" "$AGE_KEY_DEST"
-            fix_known_path_permissions "$AGE_KEY_DEST"
+            fix_known_path_permissions "$AGE_KEY_DEST" || return 1
             log_success "Installed age key: $AGE_KEY_DEST (root:root 600)"
         else
             log_warn "Age key source not found: $age_key_src"
             if [[ -f "$AGE_KEY_DEST" ]]; then
-                fix_known_path_permissions "$AGE_KEY_DEST"
+                fix_known_path_permissions "$AGE_KEY_DEST" || return 1
                 log_info "  Key already present at $AGE_KEY_DEST -- no copy needed."
             else
                 log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
@@ -854,7 +1057,7 @@ install_units() {
 
     if [[ -f "$rclone_dest" ]]; then
         if [[ "$DRY_RUN" == "false" ]]; then
-            fix_known_path_permissions "$rclone_dest"
+            fix_known_path_permissions "$rclone_dest" || return 1
         fi
         log_success "rclone config already at $rclone_dest"
     else
@@ -904,29 +1107,23 @@ install_units() {
     _sync_runtime_environment_files || return 1
 
     log_info "Installing systemd unit files to $UNIT_DEST_DIR ..."
-    local unit_ok=true
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
         local src="$UNIT_SOURCE_DIR/$unit"
         if [[ ! -f "$src" ]]; then
-            log_warn "Unit file not found, skipping: $src"
-            unit_ok=false
-            continue
+            log_error "Managed unit source is missing: $src"
+            return 1
         fi
         _run cp "$src" "$UNIT_DEST_DIR/$unit"
         _run chmod 644 "$UNIT_DEST_DIR/$unit"
         log_success "Installed unit: $unit"
     done
-    if [[ "$unit_ok" == "false" ]]; then
-        log_warn "Some unit files were missing -- check the systemd/ directory."
-    fi
 
     _render_startup_service || return 1
 
-    _ensure_lock_group "$service_user"
-    _ensure_runtime_lock_files "$service_user" "$service_group"
-    _install_service_identity_dropin "$service_user" "$service_group"
-    _install_rwpaths_dropin
-    _cleanup_stale_identity_dropins
+    _ensure_lock_group "$service_user" || return 1
+    _ensure_runtime_lock_files "$service_user" "$service_group" || return 1
+    _install_service_identity_dropin "$service_user" "$service_group" || return 1
+    _install_rwpaths_dropin || return 1
 
     log_info "Reloading systemd daemon ..."
     _run systemctl daemon-reload
@@ -1062,7 +1259,7 @@ remove_units() {
         log_info "[DRY RUN] Would check and disable $STARTUP_SERVICE if enabled or active"
     fi
 
-    for unit in "${TIMERS[@]}" "${SERVICES[@]}" "$STARTUP_SERVICE"; do
+    for unit in "${_MANAGED_UNIT_FILES[@]}"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ -f "$dest" ]]; then
             _run rm -f "$dest"
@@ -1187,23 +1384,7 @@ validate_installation() {
     }
 
     log_info "[1/9] Checking installed scripts ..."
-    local scripts_to_check=(
-        maintenance.sh
-        backup.sh
-        restore.sh
-        utilities/setup-firewall.sh
-        utilities/maintenance-run.sh
-        utilities/maintenance-health.sh
-        utilities/maintenance-update.sh
-        utilities/maintenance-db-maint.sh
-        utilities/maintenance-email.sh
-        utilities/maintenance-update-dns.sh
-        utilities/notify-failure.sh
-        utilities/maintenance-update-firewall.sh
-        utilities/backup-run.sh
-        utilities/restore-run.sh
-    )
-    for script in "${scripts_to_check[@]}"; do
+    for script in "${_MANAGED_FLAT_SCRIPTS[@]}" "${_MANAGED_STRUCTURED_SCRIPTS[@]}"; do
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$installed" ]]; then
             log_error "  MISSING:        $installed"
@@ -1373,6 +1554,12 @@ validate_installation() {
                 (( warnings++ )) || true
             else
                 log_success "  OK: $dropin"
+                if ! grep -Fq 'Written by setup-systemd.sh install' "$dropin" \
+                   || ! grep -Fq "After=$(systemd-escape --path --suffix=mount "${DATA_VOLUME_MOUNT:-}" 2>/dev/null)" "$dropin" \
+                   || { [[ "$unit" == *.service ]] && ! grep -Fq "ReadWritePaths=${DATA_VOLUME_MOUNT:-}" "$dropin"; }; then
+                    log_error "  DRIFT: managed drop-in content is invalid: $dropin"
+                    (( errors++ )) || true
+                fi
             fi
         done
     fi
@@ -1440,21 +1627,31 @@ validate_installation() {
     fi
 
     log_info "[8/9] Checking for split-brain (sha256 repo vs installed) ..."
-    for script in "${scripts_to_check[@]}"; do
+    for script in "${_MANAGED_FLAT_SCRIPTS[@]}" "${_MANAGED_STRUCTURED_SCRIPTS[@]}"; do
         local repo_src="$PROJECT_ROOT/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
         _compare_repo_artifact "$repo_src" "$installed"
     done
 
-    while IFS= read -r -d '' repo_lib; do
-        local rel_path installed_lib
-        rel_path="${repo_lib#$PROJECT_ROOT/}"
+    local rel_path installed_lib
+    for rel_path in "${_MANAGED_LIB_FILES[@]}"; do
         installed_lib="$OPT_SCRIPTS_DIR/$rel_path"
-        _compare_repo_artifact "$repo_lib" "$installed_lib"
-    done < <(find "$PROJECT_ROOT/lib" -type f -print0 2>/dev/null)
+        _compare_repo_artifact "$PROJECT_ROOT/$rel_path" "$installed_lib"
+    done
 
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
         _compare_repo_artifact "$UNIT_SOURCE_DIR/$unit" "$UNIT_DEST_DIR/$unit"
+    done
+
+    local -a unexpected_artifacts=()
+    local unexpected_record unexpected_kind unexpected_path
+    mapfile -t unexpected_artifacts < <(_list_unexpected_managed_artifacts)
+    for unexpected_record in "${unexpected_artifacts[@]}"; do
+        unexpected_kind="${unexpected_record%%|*}"
+        unexpected_path="${unexpected_record#*|}"
+        log_error "  UNEXPECTED STALE MANAGED ${unexpected_kind^^}: ${unexpected_path}"
+        log_error "         Re-run: sudo utilities/setup-systemd.sh install"
+        (( errors++ )) || true
     done
 
     # Verify timers are healthy.
@@ -1513,12 +1710,12 @@ main() {
     fi
 
     if [[ "$REMOVE" == "true" ]]; then
-        remove_units
+        remove_units || exit $?
         exit 0
     fi
 
     if [[ "$INSTALL" == "true" ]]; then
-        install_units
+        install_units || exit $?
         exit 0
     fi
 

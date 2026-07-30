@@ -216,6 +216,8 @@ The live operational Age private key is installed at:
 
 It is root-owned private state.
 
+Production commands use the exact `SOPS_AGE_KEY_FILE` selected by the canonical runtime environment. A missing, unreadable, or unhealthy configured key is a blocking error; startup and health checks do not silently substitute a repository-local private key. Repository key use is limited to an explicit bootstrap/development selection (`VW_CONFIG_AGE_KEY_MODE=repository` while repository `.env` is the selected source).
+
 Check it with:
 
 ```bash
@@ -441,7 +443,9 @@ sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
 ```
 
-`systemd validate` detects repository/installed split-brain instead of returning success with stale active runtime.
+The installer reconciles a closed inventory of VaultWarden-OCI scripts, libraries, units, and generated drop-ins. Removed managed units are stopped and disabled before their files are removed; operator and third-party drop-ins are preserved. `systemd validate` detects repository/installed split-brain and unexpected managed leftovers instead of returning success with stale active runtime.
+
+Runtime coordination files are prepared in place as regular, non-symlink files with the verified `root:vaultwarden 0660` contract. Preparation failure blocks installation; an existing valid lock inode is never replaced merely to normalize metadata.
 
 Expected operation contention must not trigger false failure incidents. Real service failure must not be mapped to clean contention.
 

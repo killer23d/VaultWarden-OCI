@@ -648,20 +648,29 @@ extract_func() {
         }' "$file"
 }
 
-# Referenced by the extracted dashboard function evaluated below.
-# shellcheck disable=SC2034
-REPO_ROOT="$TMP"
+PROJECT_ROOT="$TMP"
+VW_CONFIG_INSTALLED_ENV_FILE="$TMP/installed.env"
+export PROJECT_ROOT VW_CONFIG_INSTALLED_ENV_FILE
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/config.sh"
 eval "$(extract_func "$ROOT/dashboard.sh" _read_env_var)"
 
 cat >"$TMP/.env" <<'EOF_ENV'
-PROJECT_STATE_DIR=/srv/obsolete-state
-PROJECT_STATE_DIR=/srv/vault=state
-BACKUP_DIR=/srv/obsolete-backups
-BACKUP_DIR='/srv/backup=primary'
+PROJECT_STATE_DIR=/srv/repository-state
+BACKUP_DIR=/srv/repository-backups
 TZ=UTC
+RCLONE_REMOTE_NAME=repository
+EOF_ENV
+cat >"$VW_CONFIG_INSTALLED_ENV_FILE" <<'EOF_ENV'
+PROJECT_STATE_DIR=/srv/vault=state
+BACKUP_DIR='/srv/backup=primary'
 TZ="America/Vancouver"
 RCLONE_REMOTE_NAME=archive=nightly
+SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt
 EOF_ENV
+chmod 0600 "$TMP/.env" "$VW_CONFIG_INSTALLED_ENV_FILE"
+
+load_project_environment >/dev/null
 
 STATE_DIR="$(_read_env_var PROJECT_STATE_DIR /var/lib/vaultwarden)"
 BACKUP_DIR="$(_read_env_var BACKUP_DIR "${STATE_DIR}/backups")"
@@ -676,21 +685,16 @@ RCLONE_REMOTE_NAME="$(_read_env_var RCLONE_REMOTE_NAME '')"
     || fail "TZ did not use the last assignment and strip one matching double-quote pair: $TZ_DISPLAY"
 [[ "$RCLONE_REMOTE_NAME" == 'archive=nightly' ]] \
     || fail "RCLONE_REMOTE_NAME did not preserve text after the first equals: $RCLONE_REMOTE_NAME"
-pass "dashboard consumers use exact-key, last-assignment, quoted, and equals parsing"
+[[ "$VW_CONFIG_SELECTED_ENV_FILE" == "$VW_CONFIG_INSTALLED_ENV_FILE" ]] \
+    || fail "dashboard did not consume the installed canonical source"
+pass "dashboard consumers use canonical installed values with literal parsing preserved"
 
-cat >"$TMP/.env" <<'EOF_ENV'
-RCLONE_REMOTE_NAME=
-PROJECT_STATE_DIR="mismatched'
-EOF_ENV
-
+unset RCLONE_REMOTE_NAME BACKUP_DIR
 [[ "$(_read_env_var RCLONE_REMOTE_NAME fallback-remote)" == fallback-remote ]] \
     || fail "empty dashboard value did not retain default behavior"
 [[ "$(_read_env_var BACKUP_DIR fallback-backups)" == fallback-backups ]] \
     || fail "missing dashboard value did not use fallback"
-expected_mismatched="\"mismatched'"
-[[ "$(_read_env_var PROJECT_STATE_DIR fallback-state)" == "$expected_mismatched" ]] \
-    || fail "mismatched surrounding quotes were stripped"
-pass "dashboard empty, missing, and mismatched-quote behavior is preserved"
+pass "dashboard empty and missing canonical values retain defaults"
 )
 
 check_dashboard_environment_parsing

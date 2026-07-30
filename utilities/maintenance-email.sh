@@ -79,9 +79,10 @@ _validate_transport() {
 }
 
 _load_env() {
-    if load_env_file 2>/dev/null; then return 0; fi
-    log_warn "No .env file found — relying on environment already set"
-    return 0
+    if ! load_project_environment; then
+        log_error "Email diagnostics could not load the selected runtime environment."
+        return 1
+    fi
 }
 
 test_postfix_container() {

@@ -10,17 +10,19 @@ The project separates the operator-editable repository environment from persiste
 - `${PROJECT_STATE_DIR}/config/install.env` is the persistent root-owned runtime configuration stored with project state;
 - `/etc/vaultwarden/vaultwarden.env` is the installed systemd environment used by managed automation.
 
-`load_project_environment` first resolves the bootstrap state directory from an explicit caller override, then repository `.env`, then the installed systemd environment, with `/var/lib/vaultwarden` as the default.
+`load_project_environment` first preserves explicit supported caller overrides. It can use repository `.env` only to discover a bootstrap state directory when no explicit state directory is supplied; that discovery does not give repository values authority over installed or persistent production configuration.
 
 After the state directory is known, one complete runtime environment is loaded in this order:
 
 1. `/etc/vaultwarden/vaultwarden.env`, when installed;
 2. `${PROJECT_STATE_DIR}/config/install.env`;
-3. repository `.env` as the legacy/bootstrap fallback.
+3. repository `.env` for bootstrap/development only.
 
 Explicit caller overrides for state directory, data device, data mount, and SOPS Age key path are reapplied after loading.
 
-This ordering is deliberate: installed systemd jobs use the root-owned installed environment, normal persistent state survives repository replacement, and repository `.env` remains the authoring/bootstrap surface rather than a second live production environment.
+Installed and persistent production sources must contain valid absolute state identity and a nonblank Age key path. A present but malformed or incomplete preferred production source fails closed; the loader does not continue with inherited or lower-priority identity. The selected file and source class are exposed as `VW_CONFIG_SELECTED_ENV_FILE` and `VW_CONFIG_SELECTED_ENV_SOURCE` for diagnostics.
+
+This ordering is deliberate: installed systemd jobs use the root-owned installed environment, normal persistent state survives repository replacement, and repository `.env` remains the authoring/bootstrap surface rather than a second live production environment. Repository key use is allowed only when the selected source is repository `.env` and `VW_CONFIG_AGE_KEY_MODE=repository` is explicitly set; otherwise bootstrap/development uses the canonical `/etc/vaultwarden/age-key.txt` identity.
 
 ## Persistent state layout
 
@@ -89,6 +91,8 @@ and installs managed units under:
 ```
 
 It also installs the systemd environment and operational Age key under `/etc/vaultwarden`.
+
+The installer owns a closed inventory of runtime scripts, libraries, unit files, and generated project drop-ins. Reinstallation removes unexpected VaultWarden-OCI-managed leftovers (stopping and disabling removed units first), while preserving the installed environment, Age key, rclone configuration, state, backups, and operator or third-party drop-ins. `systemd validate` reports both drift in expected files and unexpected managed artifacts.
 
 Therefore a `git pull` updates repository code but does not activate new code for existing systemd timers. After pulling managed script, library, or unit changes, run:
 

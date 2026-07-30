@@ -38,30 +38,11 @@ _default_report_dir() {
 }
 
 _resolve_age_key() {
-    local candidates=(
-        "${SOPS_AGE_KEY_FILE:-}"
-        "/etc/vaultwarden/age-key.txt"
-        "${PROJECT_ROOT}/secrets/keys/age-key.txt"
-    )
-    local candidate
-    for candidate in "${candidates[@]}"; do
-        [[ -z "$candidate" ]] && continue
-        if [[ "$candidate" != /* ]]; then
-            if [[ -f "$PROJECT_ROOT/$candidate" ]]; then
-                echo "$PROJECT_ROOT/$candidate"
-                return 0
-            fi
-            [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
-            continue
-        fi
-        [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
-    done
-    # Mirror backup-run fallback behavior for diagnostics.
-    for candidate in "${candidates[@]}"; do
-        [[ -n "$candidate" && "$candidate" == /* ]] && { echo "$candidate"; return 1; }
-    done
-    echo "/etc/vaultwarden/age-key.txt"
-    return 1
+    local selected="${SOPS_AGE_KEY_FILE:-}"
+    [[ -n "$selected" ]] || return 1
+    [[ "$selected" == /* ]] || selected="${PROJECT_ROOT}/${selected}"
+    printf '%s\n' "$selected"
+    [[ -f "$selected" && -r "$selected" ]]
 }
 
 _resolve_backup_base_dir() {
@@ -75,53 +56,14 @@ _resolve_backup_base_dir() {
 }
 
 run_health_check() {
-_resolve_env_file() {
-    local candidates=(
-        "/etc/vaultwarden/vaultwarden.env"
-        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env"
-        "${PROJECT_ROOT}/.env"
-    )
-    local first_existing=""
-    for candidate in "${candidates[@]}"; do
-        if [[ -f "$candidate" ]]; then
-            [[ -n "$first_existing" ]] || first_existing="$candidate"
-            if [[ -r "$candidate" ]]; then
-                echo "$candidate"
-                return 0
-            fi
-        fi
-    done
-    if [[ -n "$first_existing" ]]; then
-        echo "$first_existing"
-        return 0
-    fi
-    echo ""
-    return 1
-}
-
-local ENV_FILE
-ENV_FILE="$(_resolve_env_file || true)"
-
-if [[ -n "${ENV_FILE}" ]]; then
-    if [[ ! -r "${ENV_FILE}" ]]; then
-        log_error "maintenance.sh health: '${ENV_FILE}' is not readable by $(id -un); refusing to continue with unset runtime config."
-        log_error "Run health through the root-operated path: sudo make health"
-        return 3
-    else
-        # load_env_file returns 1 when run as root and the file has permissions
-        # wider than 0600, such as 640 or 644. That is a warning, not a fatal
-        # error, so log it and continue to avoid silently aborting via set -e.
-        load_env_file "${ENV_FILE}" 2>/dev/null || \
-            log_warn "maintenance-health: env file '${ENV_FILE}' could not be loaded." \
-                 "If running as root, permissions must be 600 (run: chmod 600 '${ENV_FILE}')." \
-                 "Continuing with inherited environment only."
-    fi
-else
-    log_error "maintenance.sh health: no runtime env file found at '/etc/vaultwarden/vaultwarden.env', '${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env', or '${PROJECT_ROOT}/.env'."
-    log_error "Run setup first, then use: sudo make health"
-    ENV_FILE="/etc/vaultwarden/vaultwarden.env"
+local ENV_FILE=""
+if ! load_project_environment; then
+    ENV_FILE="${VW_CONFIG_SELECTED_ENV_FILE:-<unresolved>}"
+    log_error "maintenance.sh health: rejected selected runtime environment '${ENV_FILE}'."
+    log_error "Refusing to continue with inherited or lower-priority configuration."
     return 3
 fi
+ENV_FILE="${VW_CONFIG_SELECTED_ENV_FILE}"
 
 local HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-10}
 local HEALTH_CONNECT_TIMEOUT=${HEALTH_CONNECT_TIMEOUT:-3}
@@ -1016,27 +958,17 @@ _check_config() {
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
     fi
-    # Resolve the age key using backup-run compatible precedence and relative-path handling.
+    # Evaluate the exact Age-key identity selected by canonical runtime config.
     local age_key_file=""
     age_key_file="$(_resolve_age_key || true)"
 
-    # Warn if SOPS_AGE_KEY_FILE is set but points nowhere so the operator can fix .env.
-    if [[ -n "${SOPS_AGE_KEY_FILE:-}" ]]; then
-        local _env_age_candidate="${SOPS_AGE_KEY_FILE}"
-        [[ "$_env_age_candidate" != /* ]] && _env_age_candidate="${PROJECT_ROOT}/${_env_age_candidate}"
-        if [[ ! -f "$_env_age_candidate" && -n "$age_key_file" ]]; then
-            _warn "config:age-key-path" \
-                "SOPS_AGE_KEY_FILE=${SOPS_AGE_KEY_FILE} not found — resolved via fallback to: ${age_key_file}. Remove or correct SOPS_AGE_KEY_FILE in .env"
-        fi
-    fi
-
     if [[ -z "$age_key_file" ]]; then
-        config_issues+=("Age key not found in any expected location — run: ./utilities/setup-secrets.sh configure")
+        config_issues+=("SOPS_AGE_KEY_FILE did not select an Age key — correct ${ENV_FILE}")
     fi
     if [[ ! -f "$age_key_file" ]]; then
-        config_issues+=("Age key not found: ${age_key_file} — backups cannot encrypt. Run: ./utilities/setup-secrets.sh configure")
+        config_issues+=("Selected Age key not found: ${age_key_file} — no fallback key will be used")
     elif [[ ! -r "$age_key_file" ]]; then
-        config_issues+=("Age key not readable: ${age_key_file} — check file permissions")
+        config_issues+=("Selected Age key not readable: ${age_key_file} — check file permissions")
     else
         if ! grep -q '^AGE-SECRET-KEY-' "$age_key_file" 2>/dev/null; then
             config_issues+=("Age key malformed or empty: ${age_key_file} — missing AGE-SECRET-KEY line")

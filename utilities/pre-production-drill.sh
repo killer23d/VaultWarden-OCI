@@ -96,10 +96,10 @@ _DRILL_START=$(date +%s)
 drill_environment() {
     _step_header "Environment"
 
-    if load_env_file 2>/dev/null; then
-        _step_pass "env-load: .env loaded successfully"
+    if load_project_environment; then
+        _step_pass "env-load: selected runtime environment loaded successfully"
     else
-        _step_fail "env-load" ".env missing or has insecure permissions — abort"
+        _step_fail "env-load" "selected runtime environment missing or rejected — abort"
         return 1
     fi
 

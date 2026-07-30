@@ -191,8 +191,8 @@ test_systemd_remove_disables_startup_service() {
 
     local state="$TMP/systemd-state" bin="$TMP/bin" out="$TMP/systemd-remove.out" installed="$TMP/systemd-installed.env"
     mkdir -p "$state/config" "$bin"
-    write_env "$state/config/install.env" "PROJECT_STATE_DIR=$state"
-    write_env "$installed" "PROJECT_STATE_DIR=$state"
+    write_env "$state/config/install.env" "PROJECT_STATE_DIR=$state" "SOPS_AGE_KEY_FILE=$TMP/synthetic-age-key.txt"
+    write_env "$installed" "PROJECT_STATE_DIR=$state" "SOPS_AGE_KEY_FILE=$TMP/synthetic-age-key.txt"
     cat > "$bin/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -225,9 +225,11 @@ test_notify_failure_systemd_uses_helper() {
         || fail "notifier unit can write cooldown under /"
 }
 
-test_notify_failure_helper_defaults_state_dir() {
-    grep -q 'PROJECT_STATE_DIR=/var/lib/vaultwarden' "$ROOT/utilities/notify-failure.sh" \
-        || fail "notify helper does not default PROJECT_STATE_DIR safely"
+test_notify_failure_helper_requires_selected_state_dir() {
+    grep -q 'require_config PROJECT_STATE_DIR' "$ROOT/utilities/notify-failure.sh" \
+        || fail "notify helper does not require canonical PROJECT_STATE_DIR"
+    ! grep -q 'PROJECT_STATE_DIR=/var/lib/vaultwarden' "$ROOT/utilities/notify-failure.sh" \
+        || fail "notify helper silently defaults after canonical configuration failure"
     grep -q '\${PROJECT_STATE_DIR}/.vw-health-alert' "$ROOT/utilities/notify-failure.sh" \
         || fail "notify helper does not write cooldowns under PROJECT_STATE_DIR"
     grep -q 'Refusing unsafe cooldown directory' "$ROOT/utilities/notify-failure.sh" \
@@ -248,14 +250,12 @@ test_notify_failure_helper_loads_secret_resolution() {
 }
 
 test_stale_root_dropin_cleanup_preserves_state_dir() {
-    grep -q 'vaultwarden-db-backup.service.d/30-run-as-root.conf' "$ROOT/utilities/setup-systemd.sh" \
-        || fail "db backup stale root drop-in cleanup missing"
-    grep -q 'vaultwarden-full-backup.service.d/30-run-as-root.conf' "$ROOT/utilities/setup-systemd.sh" \
-        || fail "full backup stale root drop-in cleanup missing"
+    grep -q '30-run-as-root.conf' "$ROOT/utilities/setup-systemd.sh" \
+        || fail "historical root drop-in is not part of managed stale inventory"
+    grep -q '_list_unexpected_managed_artifacts' "$ROOT/utilities/setup-systemd.sh" \
+        || fail "managed stale drop-in detection is missing"
     grep -q '10-state-dir.conf' "$ROOT/utilities/setup-systemd.sh" \
         || fail "10-state-dir.conf handling unexpectedly missing"
-    ! grep -q '30-run-as-root.conf.*10-state-dir.conf' "$ROOT/utilities/setup-systemd.sh" \
-        || fail "stale root cleanup appears to target 10-state-dir.conf"
 }
 
 can_run_systemd_behavioral_tests() {
@@ -315,7 +315,9 @@ prepare_systemd_validation_fixture() {
     mkdir -p "$unit_dir" "$opt_dir" "$env_dir" "$state_dir/config"
 
     cp -a "$ROOT/lib" "$opt_dir/lib"
+    # shellcheck disable=SC2033 # A later isolated test intentionally mocks chmod.
     find "$opt_dir/lib" -type d -exec chmod 755 {} +
+    # shellcheck disable=SC2033 # A later isolated test intentionally mocks chmod.
     find "$opt_dir/lib" -type f -name '*.sh' -exec chmod 644 {} +
 
     local script
@@ -363,6 +365,7 @@ EOF_KEY
     if (( EUID == 0 )); then
         chown root:root "$env_dir" "$env_dir/vaultwarden.env" "$env_dir/age-key.txt"
     else
+        # shellcheck disable=SC2033 # A later isolated test intentionally mocks chown.
         sudo -n chown root:root "$env_dir" "$env_dir/vaultwarden.env" "$env_dir/age-key.txt"
     fi
 }
@@ -427,6 +430,42 @@ test_systemd_validation_fails_on_stale_installed_runtime() {
     cp "$ROOT/systemd/vaultwarden-db-backup.service" "$installed"
     chmod 644 "$installed"
 
+    installed="$opt_dir/retired-managed.sh"
+    printf '#!/usr/bin/env bash\n' > "$installed"
+    chmod 700 "$installed"
+    stale_out="$TMP/validate-unexpected-script.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with unexpected stale managed script"
+    grep -Fq "UNEXPECTED STALE MANAGED RUNTIME: $installed" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "unexpected stale script was not named"; }
+    rm -f "$installed"
+
+    installed="$opt_dir/lib/retired-managed.sh"
+    printf '# stale managed library\n' > "$installed"
+    chmod 644 "$installed"
+    stale_out="$TMP/validate-unexpected-library.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with unexpected stale managed library"
+    grep -Fq "UNEXPECTED STALE MANAGED RUNTIME: $installed" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "unexpected stale library was not named"; }
+    rm -f "$installed"
+
+    installed="$unit_dir/vaultwarden-retired.service"
+    printf '[Unit]\nDescription=VaultWarden-OCI retired fixture\n' > "$installed"
+    chmod 644 "$installed"
+    stale_out="$TMP/validate-unexpected-unit.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with unexpected stale managed unit"
+    grep -Fq "UNEXPECTED STALE MANAGED UNIT: $installed" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "unexpected stale unit was not named"; }
+    rm -f "$installed"
+
+    mkdir -p "$unit_dir/vaultwarden-health.service.d"
+    printf '# operator-owned fixture\n[Service]\nEnvironment=OPERATOR_VALUE=1\n' \
+        > "$unit_dir/vaultwarden-health.service.d/operator.conf"
+    run_systemd_validate_fixture "$TMP/validate-operator-dropin.out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || { cat "$TMP/validate-operator-dropin.out" >&2; fail "operator drop-in was classified as stale managed state"; }
+
     installed="$unit_dir/vaultwarden-startup.service"
     printf '\n# stale rendered startup unit fixture\n' >> "$installed"
     stale_out="$TMP/validate-stale-startup-service.out"
@@ -436,14 +475,219 @@ test_systemd_validation_fails_on_stale_installed_runtime() {
         || { cat "$stale_out" >&2; fail "stale rendered startup service was not named"; }
 }
 
+test_closed_inventory_reconciles_only_project_owned_artifacts() (
+    set -euo pipefail
+    local opt_dir="$TMP/inventory-opt" unit_dir="$TMP/inventory-units" env_dir="$TMP/inventory-env"
+    local outside="$TMP/outside-untouched" systemctl_log="$TMP/inventory-systemctl.log"
+    mkdir -p "$opt_dir/lib" "$opt_dir/utilities" "$unit_dir/vaultwarden-current.service.d" \
+        "$unit_dir/vaultwarden-retired.service.d" "$env_dir"
+    printf 'expected\n' > "$opt_dir/maintenance.sh"
+    printf 'expected\n' > "$opt_dir/lib/current.sh"
+    printf 'stale script\n' > "$opt_dir/retired.sh"
+    printf 'stale library\n' > "$opt_dir/lib/retired.sh"
+    printf '[Unit]\nDescription=VaultWarden-OCI current\n' > "$unit_dir/vaultwarden-current.service"
+    printf '[Unit]\nDescription=VaultWarden-OCI retired\n' > "$unit_dir/vaultwarden-retired.service"
+    printf '# Written by setup-systemd.sh install — do not edit by hand.\n' \
+        > "$unit_dir/vaultwarden-retired.service.d/30-run-as-root.conf"
+    printf '# operator override\n' > "$unit_dir/vaultwarden-current.service.d/operator.conf"
+    printf '# operator-owned reserved-name override\n' \
+        > "$unit_dir/vaultwarden-current.service.d/10-state-dir.conf"
+    printf 'runtime env\n' > "$env_dir/vaultwarden.env"
+    printf 'synthetic key\n' > "$env_dir/age-key.txt"
+    printf 'outside\n' > "$outside"
+    : > "$systemctl_log"
+
+    # shellcheck disable=SC2034 # Consumed by functions extracted with eval below.
+    OPT_SCRIPTS_DIR="$opt_dir"
+    # shellcheck disable=SC2034 # Consumed by functions extracted with eval below.
+    UNIT_DEST_DIR="$unit_dir"
+    # shellcheck disable=SC2034 # Consumed by functions extracted with eval below.
+    DATA_VOLUME_DEVICE=""
+    DRY_RUN=false
+    _MANAGED_RUNTIME_FILES=(maintenance.sh lib/current.sh)
+    _MANAGED_UNIT_FILES=(vaultwarden-current.service)
+    _MANAGED_DROPIN_NAMES=(10-state-dir.conf 20-identity.conf 30-run-as-root.conf)
+    _VW_DROPIN_UNITS=(vaultwarden-current.service)
+    _IDENTITY_DROPIN_UNITS=()
+    log_info(){ printf 'INFO %s\n' "$*"; }
+    log_warn(){ printf 'WARN %s\n' "$*"; }
+    log_error(){ printf 'ERROR %s\n' "$*"; }
+    _run(){ "$@"; }
+    systemctl() {
+        printf '%s\n' "$*" >> "$systemctl_log"
+        case "${1:-}" in
+            is-active|is-enabled)
+                [[ "${2:-}" == vaultwarden-retired.service ]]
+                ;;
+            *) return 0 ;;
+        esac
+    }
+
+    eval "$(extract_func "$ROOT/utilities/setup-systemd.sh" _inventory_contains)"
+    eval "$(extract_func "$ROOT/utilities/setup-systemd.sh" _managed_dropin_is_expected)"
+    eval "$(extract_func "$ROOT/utilities/setup-systemd.sh" _is_project_owned_unit_artifact)"
+    eval "$(extract_func "$ROOT/utilities/setup-systemd.sh" _list_unexpected_managed_artifacts)"
+    eval "$(extract_func "$ROOT/utilities/setup-systemd.sh" _reconcile_unexpected_managed_artifacts)"
+
+    _reconcile_unexpected_managed_artifacts >/dev/null \
+        || fail "closed managed inventory reconciliation failed"
+    [[ ! -e "$opt_dir/retired.sh" ]] || fail "removed managed script survived reconciliation"
+    [[ ! -e "$opt_dir/lib/retired.sh" ]] || fail "removed managed library survived reconciliation"
+    [[ ! -e "$unit_dir/vaultwarden-retired.service" ]] || fail "removed managed unit survived reconciliation"
+    [[ ! -e "$unit_dir/vaultwarden-retired.service.d/30-run-as-root.conf" ]] \
+        || fail "stale project-owned drop-in survived reconciliation"
+    [[ -f "$unit_dir/vaultwarden-current.service.d/operator.conf" ]] \
+        || fail "operator/third-party drop-in was removed"
+    [[ -f "$unit_dir/vaultwarden-current.service.d/10-state-dir.conf" ]] \
+        || fail "operator-owned reserved-name drop-in was removed without a project marker"
+    [[ -f "$env_dir/vaultwarden.env" && -f "$env_dir/age-key.txt" ]] \
+        || fail "installed environment or Age key material was removed"
+    [[ -f "$outside" ]] || fail "file outside managed namespace was removed"
+    grep -Fxq 'disable --now vaultwarden-retired.service' "$systemctl_log" \
+        || fail "stale active unit was not stopped and disabled"
+    grep -Fxq 'daemon-reload' "$systemctl_log" \
+        || fail "daemon-reload did not follow stale unit/drop-in changes"
+
+    local calls_before
+    calls_before="$(wc -l < "$systemctl_log" | tr -d ' ')"
+    _reconcile_unexpected_managed_artifacts >/dev/null \
+        || fail "idempotent managed inventory rerun failed"
+    [[ "$(wc -l < "$systemctl_log" | tr -d ' ')" == "$calls_before" ]] \
+        || fail "idempotent inventory rerun repeated systemctl mutations"
+
+    printf 'stale script\n' > "$opt_dir/retired.sh"
+    printf '[Unit]\nDescription=VaultWarden-OCI retired\n' > "$unit_dir/vaultwarden-retired.service"
+    mkdir -p "$unit_dir/vaultwarden-retired.service.d"
+    printf '# Written by setup-systemd.sh install — do not edit by hand.\n' \
+        > "$unit_dir/vaultwarden-retired.service.d/30-run-as-root.conf"
+    DRY_RUN=true
+    _run(){ log_info "[DRY RUN] $*"; }
+    local dry_output
+    dry_output="$(_reconcile_unexpected_managed_artifacts 2>&1)" \
+        || fail "managed inventory dry-run failed"
+    [[ -f "$opt_dir/retired.sh" && -f "$unit_dir/vaultwarden-retired.service" \
+       && -f "$unit_dir/vaultwarden-retired.service.d/30-run-as-root.conf" ]] \
+        || fail "managed inventory dry-run mutated fixture files"
+    [[ "$dry_output" == *"$opt_dir/retired.sh"* \
+       && "$dry_output" == *"$unit_dir/vaultwarden-retired.service"* \
+       && "$dry_output" == *'systemctl disable --now vaultwarden-retired.service'* ]] \
+        || fail "managed inventory dry-run did not name exact stale artifacts and intended actions"
+)
+
+test_runtime_lock_preparation_is_verified_and_stable() (
+    set -euo pipefail
+    local lock_dir="$TMP/runtime-locks" lock="$TMP/runtime-locks/probe.lock"
+    mkdir -p "$lock_dir"
+    _RUNTIME_LOCK_NAMES=(probe.lock)
+    # shellcheck disable=SC2034 # Consumed by the function extracted with eval below.
+    VW_SYSTEMD_RUNTIME_LOCK_DIR="$lock_dir"
+    # shellcheck disable=SC2034 # Consumed by the function extracted with eval below.
+    DRY_RUN=false
+    CHOWN_RC=0
+    CHMOD_RC=0
+
+    _real_lock_identity() {
+        if command -v gstat >/dev/null 2>&1; then
+            gstat -c '%d:%i:%a' -- "$1"
+        elif command stat --version >/dev/null 2>&1; then
+            command stat -c '%d:%i:%a' -- "$1"
+        else
+            command stat -f '%d:%i:%Lp' "$1"
+        fi
+    }
+    stat() {
+        [[ "${1:-}" == "--version" ]] && return 0
+        local path="${!#}" identity device inode mode
+        identity="$(_real_lock_identity "$path")" || return 1
+        IFS=: read -r device inode mode <<< "$identity"
+        printf '%s:%s:root:vaultwarden:%s\n' "$device" "$inode" "$mode"
+    }
+    chown(){ return "$CHOWN_RC"; }
+    chmod() {
+        (( CHMOD_RC == 0 )) || return "$CHMOD_RC"
+        command chmod "$@"
+    }
+    log_info(){ printf 'INFO %s\n' "$*"; }
+    log_warn(){ printf 'WARN %s\n' "$*"; }
+    log_error(){ printf 'ERROR %s\n' "$*"; }
+    log_success(){ printf 'SUCCESS %s\n' "$*"; }
+    eval "$(extract_func "$ROOT/utilities/setup-systemd.sh" _ensure_runtime_lock_files)"
+
+    printf 'existing lock\n' > "$lock"
+    command chmod 0644 "$lock"
+    local inode_before inode_after success_output
+    inode_before="$(_real_lock_identity "$lock")"
+    success_output="$(_ensure_runtime_lock_files user group)" \
+        || fail "valid in-place lock repair failed: $success_output"
+    inode_after="$(_real_lock_identity "$lock")"
+    [[ "${inode_before%:*}" == "${inode_after%:*}" ]] \
+        || fail "existing lock device/inode changed during in-place repair"
+    [[ "${inode_after##*:}" == "660" ]] || fail "existing lock mode was not repaired to 0660"
+    [[ "$success_output" == *"Lock file ready: $lock"* ]] \
+        || fail "verified lock preparation omitted readiness message"
+    _ensure_runtime_lock_files user group >/dev/null \
+        || fail "idempotent lock preparation rerun failed"
+
+    command chmod 0644 "$lock"
+    CHOWN_RC=41
+    local output
+    if output="$(_ensure_runtime_lock_files user group 2>&1)"; then
+        fail "lock ownership repair failure unexpectedly succeeded"
+    fi
+    [[ "$output" != *'Lock file ready:'* ]] || fail "ownership failure printed lock readiness"
+
+    CHOWN_RC=0
+    CHMOD_RC=42
+    if output="$(_ensure_runtime_lock_files user group 2>&1)"; then
+        fail "lock mode repair failure unexpectedly succeeded"
+    fi
+    [[ "$output" != *'Lock file ready:'* ]] || fail "mode failure printed lock readiness"
+
+    CHMOD_RC=0
+    chmod(){ return 0; }
+    command chmod 0644 "$lock"
+    if output="$(_ensure_runtime_lock_files user group 2>&1)"; then
+        fail "zero-returning lock repair with false postcondition unexpectedly succeeded"
+    fi
+    [[ "$output" != *'Lock file ready:'* ]] || fail "false postcondition printed lock readiness"
+    unset -f chmod
+    chmod() {
+        (( CHMOD_RC == 0 )) || return "$CHMOD_RC"
+        command chmod "$@"
+    }
+
+    rm -f "$lock"
+    ln -s "$TMP/symlink-target" "$lock"
+    if output="$(_ensure_runtime_lock_files user group 2>&1)"; then
+        fail "symlink lock path unexpectedly succeeded"
+    fi
+    [[ "$output" != *'Lock file ready:'* ]] || fail "symlink rejection printed lock readiness"
+
+    rm -f "$lock"
+    mkdir "$lock"
+    if output="$(_ensure_runtime_lock_files user group 2>&1)"; then
+        fail "non-regular lock path unexpectedly succeeded"
+    fi
+    [[ "$output" != *'Lock file ready:'* ]] || fail "non-regular rejection printed lock readiness"
+
+    rmdir "$lock"
+    rmdir "$lock_dir"
+    if output="$(_ensure_runtime_lock_files user group 2>&1)"; then
+        fail "lock creation failure unexpectedly succeeded"
+    fi
+    [[ "$output" != *'Lock file ready:'* ]] || fail "creation failure printed lock readiness"
+)
+
 run_test 'systemd remove requests startup disable and daemon reload' test_systemd_remove_disables_startup_service
 run_test 'notify-failure systemd uses helper and no root cooldown path' test_notify_failure_systemd_uses_helper
-run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
+run_test 'notify-failure helper requires canonical PROJECT_STATE_DIR' test_notify_failure_helper_requires_selected_state_dir
 run_test 'notify-failure helper loads encrypted-secret resolution before email' test_notify_failure_helper_loads_secret_resolution
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
 run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dropins_match_unit_type
 run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
-[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
+run_test 'closed managed inventory reconciles only project-owned stale artifacts' test_closed_inventory_reconciles_only_project_owned_artifacts
+run_test 'runtime lock preparation is verified, stable, and truthful' test_runtime_lock_preparation_is_verified_and_stable
+[[ "$TESTS_RUN" -eq 9 ]] || fail "expected 9 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )

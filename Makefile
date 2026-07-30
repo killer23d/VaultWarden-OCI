@@ -42,10 +42,6 @@ PROJECT_ROOT         ?= $(shell pwd)
 COMPOSE_FILE         ?= docker-compose.yml
 COMPOSE_PROJECT_NAME ?= vaultwarden-oci
 DOCKER_COMP          ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
-# Resolve SECRETS_FILE from lib/config.sh at make-time; operator may override.
-_STATE_DIR           := $(shell grep -E '^PROJECT_STATE_DIR=' "$(PROJECT_ROOT)/.env" 2>/dev/null | cut -d= -f2- | tr -d "'\"" )
-_STATE_DIR           := $(if $(_STATE_DIR),$(_STATE_DIR),/var/lib/vaultwarden)
-SECRETS_FILE         ?= $(_STATE_DIR)/secrets/secrets.yaml
 
 SERVICES          = vaultwarden caddy postfix
 CORE_SERVICES     = vaultwarden caddy
@@ -237,7 +233,8 @@ fix-permissions: ## Repair known VaultWarden-OCI permission drift
 init-secrets: ## Initialize secrets file (interactive; root required)
 	$(call require-root)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
-	@if [ ! -f "$(SECRETS_FILE)" ]; then \
+	@SECRETS_PATH=$$(bash -c 'source lib/log.sh; source lib/config.sh; load_project_environment >/dev/null || exit 1; printf "%s" "$$SECRETS_FILE"') || exit 1; \
+	if [ ! -f "$$SECRETS_PATH" ]; then \
 		echo "$(BLUE)No secrets file found. Running setup.sh secrets...$(NC)"; \
 		./setup.sh secrets; \
 	else \
@@ -344,7 +341,8 @@ up: ## Start all services (runs startup.sh for health checks; root required)
 # startup.sh is responsible for decrypting secrets.yaml into
 # /run/vaultwarden-oci/secrets. Do not require decoded runtime secret files
 # here; they are created during root startup.
-	@if ! test -f "$(SECRETS_FILE)"; then \
+	@SECRETS_PATH=$$(bash -c 'source lib/log.sh; source lib/config.sh; load_project_environment >/dev/null || exit 1; printf "%s" "$$SECRETS_FILE"') || exit 1; \
+	if ! test -f "$$SECRETS_PATH"; then \
 		echo "$(RED)ERROR: secrets/secrets.yaml not found — secrets have not been initialized.$(NC)"; \
 		echo "$(RED)       Run: sudo make init-secrets$(NC)"; \
 		echo "$(RED)       Then re-run: sudo make up$(NC)"; \
@@ -357,8 +355,7 @@ up: ## Start all services (runs startup.sh for health checks; root required)
 		echo "$(YELLOW)If startup failed due to a missing or misconfigured Age key:$(NC)"; \
 		echo "$(YELLOW)  Diagnose: sudo make key-health$(NC)"; \
 		echo "$(YELLOW)  Auto-fix: sudo make key-install$(NC)"; \
-		CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-		[ -n "$$CONFIGURED_KEY" ] && echo "$(YELLOW)  Configured key path (from .env): $$CONFIGURED_KEY$(NC)"; \
+		echo "$(YELLOW)  The configured key from the selected runtime environment was not replaced by a fallback.$(NC)"; \
 		echo "$(YELLOW)  Canonical production path:        /etc/vaultwarden/age-key.txt$(NC)"; \
 		exit 1; \
 	}
@@ -402,16 +399,15 @@ status: ## Show service status, backup inventory, disk usage, and CrowdSec ban s
 	@docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|postfix" || true
 	@echo ""
 	@echo "$(CYAN)Backup status:$(NC)"
-	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \
-	STATE_DIR=$${STATE_DIR:-/var/lib/vaultwarden}; \
-	BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2-); \
+	@bash -c 'source lib/log.sh; source lib/config.sh; load_project_environment >/dev/null || exit 1; \
+	STATE_DIR=$${PROJECT_STATE_DIR:?}; \
 	BACKUP_DIR=$${BACKUP_DIR:-$$STATE_DIR/backups}; \
 	for btype in db full emergency; do \
 		DIR="$$BACKUP_DIR/$$btype"; \
 		if [ -d "$$DIR" ]; then \
 			LATEST=$$(find "$$DIR" -name "*.age" -type f 2>/dev/null | sort | tail -1); \
 			if [ -n "$$LATEST" ]; then \
-				TS=$$(basename "$$LATEST" | grep -oE '[0-9]{8}[_-][0-9]{6}' | head -1 || true); \
+				TS=$$(basename "$$LATEST" | grep -oE "[0-9]{8}[_-][0-9]{6}" | head -1 || true); \
 				SIZE=$$(du -sh "$$LATEST" 2>/dev/null | cut -f1 || echo "?"); \
 				echo "  $(GREEN)$$btype$(NC): $$(basename $$LATEST)  ($$SIZE)  $$TS"; \
 			else \
@@ -419,21 +415,20 @@ status: ## Show service status, backup inventory, disk usage, and CrowdSec ban s
 			fi; \
 		else \
 			echo "  $(YELLOW)$$btype$(NC): backup directory not found ($$DIR)"; \
-		fi; \
-	done
+			fi; \
+		done'
 	@echo ""
 	@echo "$(CYAN)Disk usage:$(NC)"
-	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \
-	STATE_DIR=$${STATE_DIR:-/var/lib/vaultwarden}; \
-	BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2-); \
+	@bash -c 'source lib/log.sh; source lib/config.sh; load_project_environment >/dev/null || exit 1; \
+	STATE_DIR=$${PROJECT_STATE_DIR:?}; \
 	BACKUP_DIR=$${BACKUP_DIR:-$$STATE_DIR/backups}; \
 	for DIR in "$$STATE_DIR" "$$BACKUP_DIR"; do \
 		if [ -d "$$DIR" ]; then \
-			AVAIL=$$(df -h "$$DIR" 2>/dev/null | awk 'END {print $$4}'); \
-			USED=$$(df -h "$$DIR" 2>/dev/null | awk 'END {printf "%s/%s (%s used)", $$3, $$2, $$5}'); \
+			AVAIL=$$(df -h "$$DIR" 2>/dev/null | awk "END {print \$$4}"); \
+			USED=$$(df -h "$$DIR" 2>/dev/null | awk "END {printf \"%s/%s (%s used)\", \$$3, \$$2, \$$5}"); \
 			echo "  $$DIR — available: $$AVAIL  ($$USED)"; \
-		fi; \
-	done
+			fi; \
+		done'
 	@echo ""
 	@echo "$(CYAN)CrowdSec bans:$(NC)"
 	@if systemctl is-active crowdsec >/dev/null 2>&1; then \
@@ -641,7 +636,7 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	@echo ""
 	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
 	         source lib/crypto.sh; \
-	         load_project_environment >/dev/null 2>&1 || true; \
+	         load_project_environment >/dev/null 2>&1 || exit 1; \
 	         KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
 	         echo \"$(CYAN)  Resolved active key path: \$$KEY_FILE$(NC)\"; \
 	         echo \"$(CYAN)  Canonical production path: /etc/vaultwarden/age-key.txt$(NC)\"; \
@@ -657,26 +652,27 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	           echo \"$(YELLOW)  Or install manually:$(NC)\"; \
 	           echo \"$(YELLOW)       sudo install -d -m 700 -o root -g root /etc/vaultwarden$(NC)\"; \
 	           echo \"$(YELLOW)       sudo install -m 600 -o root -g root secrets/keys/age-key.txt /etc/vaultwarden/age-key.txt$(NC)\"; \
-	           echo \"$(YELLOW)       # Set SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in .env$(NC)\"; \
+	           echo \"$(YELLOW)       # Set SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in the canonical runtime environment$(NC)\"; \
 	           echo \"$(YELLOW)       sudo make key-health$(NC)\"; \
 	           exit 1; \
 	         fi"
 
 # ---------------------------------------------------------------------------
 # key-install: install the Age private key from secrets/keys/age-key.txt to
-# the path configured in SOPS_AGE_KEY_FILE (default: /etc/vaultwarden/age-key.txt).
+# the path selected by the canonical runtime environment.
 #
 # This is the fast-path fix for the most common startup failure:
 #   "Age key missing: /etc/vaultwarden/age-key.txt"
 #
 # When to use:
-#   SOPS_AGE_KEY_FILE in .env points to /etc/vaultwarden/age-key.txt (or any
-#   system path) but the file does not yet exist there, while the key is
+#   SOPS_AGE_KEY_FILE in the selected runtime environment points to
+#   /etc/vaultwarden/age-key.txt (or another system path) but the file does
+#   not yet exist there, while the key is
 #   already present at secrets/keys/age-key.txt (placed by setup.sh secrets
 #   or the initial age-keygen run).
 #
 # What it does:
-#   1. Reads SOPS_AGE_KEY_FILE from .env.
+#   1. Reads SOPS_AGE_KEY_FILE from the canonical selected runtime environment.
 #   2. Self-referential path check (CONFIGURED == REPO_KEY):
 #      - File exists  → informational message, exit 0 (no install needed).
 #      - File missing → actionable error directing to sudo make init-secrets, exit 1.
@@ -694,8 +690,7 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 	$(call require-root)
 	$(call check-env-readable)
 	@echo "$(BLUE)Installing Age key...$(NC)"
-	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	CONFIGURED_KEY=$${CONFIGURED_KEY:-/etc/vaultwarden/age-key.txt}; \
+	@CONFIGURED_KEY=$$(bash -c 'source lib/log.sh; source lib/config.sh; load_project_environment >/dev/null || exit 1; printf "%s" "$$SOPS_AGE_KEY_FILE"') || exit 1; \
 	REPO_KEY="secrets/keys/age-key.txt"; \
 	echo "  Target path  : $$CONFIGURED_KEY"; \
 	echo "  Source key   : $$REPO_KEY"; \
@@ -742,7 +737,7 @@ key-show: ## Show current age public key and key file path/status
 	@echo "$(BLUE)Age Key Status:$(NC)"
 	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib key-show; \
 	         source lib/crypto.sh; \
-	         load_project_environment >/dev/null 2>&1 || true; \
+	         load_project_environment >/dev/null 2>&1 || exit 1; \
 	         KEY_FILE=\$$(resolve_age_key_path 2>/dev/null || true); \
 	         if [[ -z \"\$$KEY_FILE\" ]]; then KEY_DISPLAY='<not resolved>'; else KEY_DISPLAY=\"\$$KEY_FILE\"; fi; \
 	         echo \"  Key file : \$$KEY_DISPLAY\"; \
@@ -762,7 +757,7 @@ key-backup: ## Create local Age key copy for manual offline transfer
 	@echo "$(BLUE)Create local Age key copy for manual offline transfer$(NC)"
 	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib key-backup; \
 	         source lib/crypto.sh; \
-	         load_project_environment >/dev/null 2>&1 || true; \
+	         load_project_environment >/dev/null 2>&1 || exit 1; \
 	         KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
 	         BACKUP_DEST=\"\$$HOME/age-key-backup-\$$(date +%Y%m%d-%H%M%S).txt\"; \
 	         cp \"\$$KEY_FILE\" \"\$$BACKUP_DEST\"; \
@@ -775,7 +770,7 @@ key-escrow: ## Generate password-manager Age key escrow file
 	@echo "$(BLUE)Age Key Escrow$(NC)"
 	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
 	        source lib/crypto.sh; \
-	        load_project_environment >/dev/null 2>&1 || true; \
+	        load_project_environment >/dev/null 2>&1 || exit 1; \
 	        KEY_FILE=\$$(resolve_age_key_path) || exit 1; \
 	        ESCROW_DEST=\"\$$HOME/age-key-escrow-\$$(date +%Y%m%d-%H%M%S).txt\"; \
 	        AGE_KEY_FILE=\"\$$KEY_FILE\" create_password_manager_escrow \"\$$ESCROW_DEST\""
@@ -911,22 +906,21 @@ dry-run: ## Show what startup would do without executing
 # ===========================================================================
 
 info: ## Show deployment information
-	$(call check-env-readable)
 	@echo "$(BLUE)VaultWarden-OCI Deployment Info:$(NC)"
 	@echo ""
-	@if [ -f ".env" ]; then \
-		echo "  Domain    : $$(grep '^DOMAIN=' .env 2>/dev/null | cut -d= -f2)"; \
-		echo "  Admin     : $$(grep '^ADMIN_EMAIL=' .env 2>/dev/null | cut -d= -f2)"; \
-		echo "  State Dir : $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-)"; \
-		DATA_DEV=$$(grep '^DATA_VOLUME_DEVICE=' .env 2>/dev/null | cut -d= -f2-); \
-		DATA_MNT=$$(grep '^DATA_VOLUME_MOUNT=' .env 2>/dev/null | cut -d= -f2-); \
+	@bash -c 'source lib/log.sh; source lib/config.sh; load_project_environment >/dev/null || exit 1; \
+		echo "  Config    : $$VW_CONFIG_SELECTED_ENV_FILE"; \
+		echo "  Domain    : $${DOMAIN:-}"; \
+		echo "  Admin     : $${ADMIN_EMAIL:-}"; \
+		echo "  State Dir : $${PROJECT_STATE_DIR:-}"; \
+		DATA_DEV=$${DATA_VOLUME_DEVICE:-}; \
+		DATA_MNT=$${DATA_VOLUME_MOUNT:-}; \
 		if [ -n "$$DATA_DEV" ]; then \
 			MOUNTED=$$(mountpoint -q "$$DATA_MNT" 2>/dev/null && echo "$(GREEN)mounted$(NC)" || echo "$(RED)NOT MOUNTED$(NC)"); \
 			echo "  Volume    : $$DATA_DEV → $$DATA_MNT  [$$MOUNTED]"; \
 		else \
 			echo "  Volume    : boot-only mode"; \
-		fi; \
-	fi
+		fi'
 	@echo "  Version   : $$(cat VERSION 2>/dev/null || echo 'unknown')"
 	@echo "  Uptime    : $$(docker inspect --format='{{.State.StartedAt}}' vaultwarden_app 2>/dev/null || echo 'not running')"
 
@@ -961,10 +955,11 @@ diagnose: ## Full diagnostic dump (versions, status, health, key, logs tail)
 	@$(DOCKER_COMP) ps 2>/dev/null || echo "docker compose: not available"
 	@echo ""
 	@echo "$(CYAN)--- Storage ---$(NC)"
-	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \
-	STATE_DIR=$${STATE_DIR:-/var/lib/vaultwarden}; \
-	DATA_DEV=$$(grep '^DATA_VOLUME_DEVICE=' .env 2>/dev/null | cut -d= -f2-); \
-	DATA_MNT=$$(grep '^DATA_VOLUME_MOUNT=' .env 2>/dev/null | cut -d= -f2-); \
+	@bash -c 'source lib/log.sh; source lib/config.sh; load_project_environment >/dev/null || exit 1; \
+	STATE_DIR=$${PROJECT_STATE_DIR:?}; \
+	DATA_DEV=$${DATA_VOLUME_DEVICE:-}; \
+	DATA_MNT=$${DATA_VOLUME_MOUNT:-}; \
+	echo "  Config    : $$VW_CONFIG_SELECTED_ENV_FILE"; \
 	if [ -n "$$DATA_DEV" ]; then \
 		echo "  Mode      : separate-volume ($$DATA_DEV → $$DATA_MNT)"; \
 		mountpoint -q "$$DATA_MNT" 2>/dev/null \
@@ -973,7 +968,7 @@ diagnose: ## Full diagnostic dump (versions, status, health, key, logs tail)
 	else \
 		echo "  Mode      : boot-only"; \
 	fi; \
-	df -h "$$STATE_DIR" 2>/dev/null || true
+	df -h "$$STATE_DIR" 2>/dev/null || true'
 	@echo ""
 	@echo "$(CYAN)--- Key Health ---$(NC)"
 	@$(MAKE) key-health 2>/dev/null || echo "key-health: failed"

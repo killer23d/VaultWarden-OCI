@@ -2618,13 +2618,23 @@ restore_full() {
 main() {
     log_header "VaultWarden-OCI Restore Utility"
 
-    # Load .env unconditionally and early so every code path — including
-    # list subcommand and the rclone availability checks — can read config values
+    # Load the canonical runtime environment early so every code path — including
+    # list and rclone availability checks — uses the selected deployment values
     # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
-    load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
+    if ! load_project_environment; then
+        if [[ "$USE_REMOTE" == "true" \
+            && -z "${VW_CONFIG_SELECTED_ENV_FILE:-}" \
+            && ! -f "${PROJECT_ROOT}/.env" ]]; then
+            log_warn "No runtime environment found — operating in bootstrap/emergency-restore mode."
+            log_warn "PUID, PGID, and the restore identity will be prompted if not set."
+        else
+            log_error "Failed to load selected runtime environment"
+            exit 1
+        fi
+    fi
     check_dependencies
 
-    # Resolve the backup storage root from .env using the same
+    # Resolve the backup storage root from the selected environment using the same
     # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path
     # in this script is built from BACKUP_BASE_DIR, never from PROJECT_ROOT/backups.
     local _early_state_dir; _early_state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
@@ -2663,20 +2673,6 @@ main() {
             --specific-lock /run/lock/vaultwarden-restore.lock || exit $?
         operation_set_phase "prepare" "Preparing restore"
     fi
-
-    # Re-load .env strictly now that we are root (surfaces hard errors).
-    # When USE_REMOTE=true and .env is absent (emergency restore on a fresh
-    # server), treat the load failure as a warning rather than a hard exit —
-    # the operator is about to restore .env from the backup.
-    if ! load_env_file; then
-        if [[ "$USE_REMOTE" == "true" ]] && [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
-            log_warn ".env not found — operating in bootstrap/emergency-restore mode."
-            log_warn "PUID, PGID, and age key will be prompted if not set."
-        else
-            log_error "Failed to load .env"; exit 1
-        fi
-    fi
-    auto_fix_critical_permissions "$PROJECT_ROOT"
 
     # Fail closed if a block/data volume is configured.  --force --remote may
     # skip this check only for boot-volume/bootstrap mode where no block device

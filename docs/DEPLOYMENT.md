@@ -151,7 +151,7 @@ The managed timer set covers:
 
 Managed services also use failure notification integration.
 
-`systemd validate` detects stale installed scripts, libraries, unit files, environment/key permission failures, rendered startup-unit drift, and unhealthy managed timers.
+`systemd install` reconciles a closed inventory of VaultWarden-OCI scripts, libraries, unit files, and generated drop-ins, including stopping/disabling removed managed units. It preserves installed environment/key/rclone material and operator or third-party drop-ins. `systemd validate` detects stale or unexpected managed artifacts, environment/key permission failures, rendered startup-unit drift, and unhealthy managed timers.
 
 After updating from `main` with `git pull --ff-only origin main`, repeat:
 

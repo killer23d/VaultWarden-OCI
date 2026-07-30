@@ -11,7 +11,10 @@ IFS=$'\n\t'
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
+PROJECT_ROOT="${REPO_ROOT}"
 source "${REPO_ROOT}/lib/log.sh"
+source "${REPO_ROOT}/lib/defaults.sh"
+source "${REPO_ROOT}/lib/config.sh"
 source "${REPO_ROOT}/lib/common.sh"
 init_common_lib "$0"
 [[ -f "${REPO_ROOT}/lib/validate.sh" ]] && source "${REPO_ROOT}/lib/validate.sh"
@@ -27,39 +30,29 @@ RED="${COLOR_RED}"
 YLW="${COLOR_YELLOW}"
 NC="${COLOR_RESET}"
 
-# Read a single variable from .env without sourcing the whole file.
+# Read one already-loaded value from the canonical runtime configuration.
 _read_env_var() {
-    local var="$1" default="$2" line key val=""
-    if [[ -f "${REPO_ROOT}/.env" && -r "${REPO_ROOT}/.env" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ "$line" == *=* ]] || continue
-            key="${line%%=*}"
-            [[ "$key" == "$var" ]] || continue
-            val="${line#*=}"
-        done < "${REPO_ROOT}/.env"
-        if (( ${#val} >= 2 )); then
-            if [[ "${val:0:1}" == '"' && "${val: -1}" == '"' ]]; then
-                val="${val:1:${#val}-2}"
-            elif [[ "${val:0:1}" == "'" && "${val: -1}" == "'" ]]; then
-                val="${val:1:${#val}-2}"
-            fi
-        fi
-        printf '%s' "${val:-${default}}"
-    else
-        printf '%s' "${default}"
-    fi
+    get_config_value "$1" "$2"
 }
 
-STATE_DIR="$(_read_env_var PROJECT_STATE_DIR /var/lib/vaultwarden)"
-BACKUP_DIR="$(_read_env_var BACKUP_DIR "${STATE_DIR}/backups")"
+STATE_DIR=""
+BACKUP_DIR=""
+TZ_DISPLAY=""
+
+_load_dashboard_environment() {
+    if ! load_project_environment; then
+        log_error "Dashboard cannot load the selected runtime configuration."
+        return 1
+    fi
+    STATE_DIR="$(_read_env_var PROJECT_STATE_DIR /var/lib/vaultwarden)"
+    BACKUP_DIR="$(_read_env_var BACKUP_DIR "${STATE_DIR}/backups")"
+    TZ_DISPLAY="$(_read_env_var TZ "UTC")"
+}
 
 # Container names (must match docker-compose.yml)
 CONTAINER_VW="vaultwarden_app"
 CONTAINER_CADDY="vaultwarden_caddy"
 CONTAINER_POSTFIX="vaultwarden_postfix"
-
-# Dashboard timestamps: read TZ from .env (ux.md #4), default UTC.
-TZ_DISPLAY="$(_read_env_var TZ "UTC")"
 
 # Divider line
 DIVIDER="--------------------------------------------------"
@@ -341,7 +334,7 @@ _secrets_health() {
 #
 # Returns a single color-coded status line describing rclone availability:
 #
-#   Configured (not probed) — binary present + RCLONE_REMOTE_NAME set in .env
+#   Configured (not probed) — binary present + RCLONE_REMOTE_NAME set in the selected environment
 #   Not configured  — binary present but RCLONE_REMOTE_NAME is missing/placeholder
 #   Not installed   — rclone binary not found on PATH
 #
@@ -368,7 +361,7 @@ _rclone_status() {
     if [[ -z "${remote_name}" \
         || "${upper_name}" == *CHANGE_ME* \
         || "${upper_name}" == *CHANGEME* ]]; then
-        printf '%sNot configured (set RCLONE_REMOTE_NAME in .env)%s' "${YLW}" "${NC}"
+        printf '%sNot configured (set RCLONE_REMOTE_NAME in the runtime environment)%s' "${YLW}" "${NC}"
         return
     fi
 
@@ -591,7 +584,7 @@ draw_backup_menu() {
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
     echo ""
-    echo -e " ${CYN}Tip:${NC} Options 5-7 require RCLONE_REMOTE_NAME to be set in .env."
+    echo -e " ${CYN}Tip:${NC} Options 5-7 require RCLONE_REMOTE_NAME in the selected runtime environment."
     echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
     echo ""
 }
@@ -626,8 +619,8 @@ handle_backup_menu() {
             remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
             remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
             if [[ -z "${remote_name}" ]]; then
-                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
-                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
+                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in the selected runtime environment — cannot sync.${NC}"
+                echo -e " Run ${BLD}sudo make edit-env${NC} and set RCLONE_REMOTE_NAME=<your-remote>."
                 _press_enter
                 return
             fi
@@ -642,8 +635,8 @@ handle_backup_menu() {
             remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
             remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
             if [[ -z "${remote_name}" ]]; then
-                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
-                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
+                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in the selected runtime environment — cannot sync.${NC}"
+                echo -e " Run ${BLD}sudo make edit-env${NC} and set RCLONE_REMOTE_NAME=<your-remote>."
                 _press_enter
                 return
             fi
@@ -658,8 +651,8 @@ handle_backup_menu() {
             remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
             remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
             if [[ -z "${remote_name}" ]]; then
-                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
-                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
+                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in the selected runtime environment — cannot sync.${NC}"
+                echo -e " Run ${BLD}sudo make edit-env${NC} and set RCLONE_REMOTE_NAME=<your-remote>."
                 _press_enter
                 return
             fi
@@ -1072,6 +1065,7 @@ main() {
 
     # Ensure we are running from the repo root so relative paths and make work.
     cd "${REPO_ROOT}"
+    _load_dashboard_environment || exit 1
 
     while true; do
         clear
@@ -1120,4 +1114,6 @@ main() {
     done
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

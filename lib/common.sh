@@ -271,8 +271,7 @@ operator_next_steps() {
     done
 }
 
-# Best-effort remediation for common operational file permission drift.
-# This is intentionally non-fatal and safe to call repeatedly.
+# Verified remediation for known operational permission invariants.
 _common_stat_mode() {
     if stat --version >/dev/null 2>&1; then stat -c '%a' "$1" 2>/dev/null; else stat -f '%OLp' "$1" 2>/dev/null; fi
 }
@@ -365,40 +364,108 @@ expected_mode_for_path() {
     esac
 }
 
-fix_known_path_permissions() {
-    local path owner group mode
+_expected_type_for_permission_path() {
+    local path state_dir
     path="$(_canonical_permission_path "$1")"
+    state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    case "$path" in
+        /etc/vaultwarden|/run/vaultwarden-oci/secrets|"$PROJECT_ROOT/secrets"|\
+        "$state_dir"/config|"$state_dir"/secrets)
+            printf 'directory' ;;
+        /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
+        /run/vaultwarden-oci/secrets/*|/run/vaultwarden-oci/managed-secrets|\
+        "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|\
+        "$PROJECT_ROOT/secrets/secrets.yaml"|"$state_dir"/secrets/secrets.yaml)
+            printf 'file' ;;
+        *) return 1 ;;
+    esac
+}
+
+fix_known_path_permissions() {
+    local path owner group mode expected_type actual_owner actual_group actual_mode
+    local verify_owner_group=true
+    path="$(_canonical_permission_path "$1")"
+    if [[ -L "$path" ]]; then
+        log_error "Refusing permission repair through symlink: ${path}"
+        return 1
+    fi
     [[ -e "$path" ]] || return 0
     owner="$(expected_owner_for_path "$path")" || return 0
     group="$(expected_group_for_path "$path")" || return 0
     mode="$(expected_mode_for_path "$path")" || return 0
-    if [[ "$(_common_stat_owner "$path"):$(_common_stat_group "$path")" != "${owner}:${group}" ]]; then
+    expected_type="$(_expected_type_for_permission_path "$path")" || return 0
+
+    if [[ "$expected_type" == "directory" && ! -d "$path" ]] \
+       || [[ "$expected_type" == "file" && ! -f "$path" ]]; then
+        log_error "Permission target has wrong type: ${path} (expected ${expected_type})"
+        return 1
+    fi
+
+    actual_owner="$(_common_stat_owner "$path")" || {
+        log_error "Cannot stat owner for required permission target: ${path}"
+        return 1
+    }
+    actual_group="$(_common_stat_group "$path")" || {
+        log_error "Cannot stat group for required permission target: ${path}"
+        return 1
+    }
+    if [[ "$actual_owner:$actual_group" != "${owner}:${group}" ]]; then
         if [[ "$owner" == "root" && -z "${SUDO_USER:-}" ]] && _is_operator_permission_path "$path"; then
-            log_warn "Skipping ownership correction for operator-owned ${path}: non-root operator could not be resolved"
+            log_warn "Warning-only: preserving operator-owned ${path} because the invoking non-root operator could not be resolved."
+            verify_owner_group=false
         else
             log_warn "Correcting ownership for ${path}: expected ${owner}:${group}"
-            chown "${owner}:${group}" "$path" 2>/dev/null || true
+            if ! chown "${owner}:${group}" "$path" 2>/dev/null; then
+                log_error "Required ownership correction failed for ${path}; expected ${owner}:${group}"
+                return 1
+            fi
         fi
     fi
-    if [[ "$(_common_stat_mode "$path")" != "$mode" ]]; then
+    actual_mode="$(_common_stat_mode "$path")" || {
+        log_error "Cannot stat mode for required permission target: ${path}"
+        return 1
+    }
+    if [[ "$actual_mode" != "$mode" ]]; then
         log_warn "Correcting mode for ${path}: expected ${mode}"
-        chmod "$mode" "$path" 2>/dev/null || true
+        if ! chmod "$mode" "$path" 2>/dev/null; then
+            log_error "Required mode correction failed for ${path}; expected ${mode}"
+            return 1
+        fi
     fi
+
+    if ! assert_known_path_permissions "$path" "$verify_owner_group"; then
+        log_error "Required permission postcondition is still false for ${path}"
+        return 1
+    fi
+    return 0
 }
 
 assert_known_path_permissions() {
-    local path owner group mode actual_owner actual_group actual_mode
+    local path owner group mode actual_owner actual_group actual_mode expected_type
+    local verify_owner_group="${2:-true}"
     path="$(_canonical_permission_path "$1")"
+    [[ ! -L "$path" ]] || return 1
     [[ -e "$path" ]] || return 0
     owner="$(expected_owner_for_path "$path")" || return 0
     group="$(expected_group_for_path "$path")" || return 0
     mode="$(expected_mode_for_path "$path")" || return 0
-    actual_owner="$(_common_stat_owner "$path")"; actual_group="$(_common_stat_group "$path")"; actual_mode="$(_common_stat_mode "$path")"
-    [[ "$actual_owner:$actual_group" == "$owner:$group" && "$actual_mode" == "$mode" ]]
+    expected_type="$(_expected_type_for_permission_path "$path")" || return 0
+    if [[ "$expected_type" == "directory" ]]; then
+        [[ -d "$path" ]] || return 1
+    else
+        [[ -f "$path" ]] || return 1
+    fi
+    actual_owner="$(_common_stat_owner "$path")" || return 1
+    actual_group="$(_common_stat_group "$path")" || return 1
+    actual_mode="$(_common_stat_mode "$path")" || return 1
+    [[ "$actual_mode" == "$mode" ]] || return 1
+    [[ "$verify_owner_group" == "false" || "$actual_owner:$actual_group" == "$owner:$group" ]]
 }
 
 auto_fix_critical_permissions() {
     local project_root="${1:-$PROJECT_ROOT}"
+    local failures=0
 
     # Repo .env is never chowned to root. It may be repaired back to the
     # real operator owner/group when that owner can be resolved; persistent
@@ -409,9 +476,10 @@ auto_fix_critical_permissions() {
         age_key_file="/etc/vaultwarden/age-key.txt"
     fi
     if [[ -f "$age_key_file" ]]; then
-        fix_known_path_permissions "$age_key_file"
+        fix_known_path_permissions "$age_key_file" || failures=$((failures + 1))
     fi
 
+    local _vw_path
     for _vw_path in \
         /etc/vaultwarden \
         /etc/vaultwarden/vaultwarden.env \
@@ -427,19 +495,32 @@ auto_fix_critical_permissions() {
         "${project_root}/secrets/secrets.yaml" \
         /run/vaultwarden-oci/managed-secrets \
         /run/vaultwarden-oci/secrets; do
-        [[ -e "$_vw_path" ]] && fix_known_path_permissions "$_vw_path"
+        if [[ -e "$_vw_path" || -L "$_vw_path" ]]; then
+            fix_known_path_permissions "$_vw_path" || failures=$((failures + 1))
+        fi
     done
     if [[ -d /run/vaultwarden-oci/secrets ]]; then
+        local _vw_secret_path
         while IFS= read -r -d '' _vw_secret_path; do
-            fix_known_path_permissions "$_vw_secret_path"
+            fix_known_path_permissions "$_vw_secret_path" || failures=$((failures + 1))
         done < <(find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
     fi
 
     local caddy_ep="${project_root}/caddy/entrypoint.sh"
     if [[ -f "$caddy_ep" && ! -x "$caddy_ep" ]]; then
-        chmod +x "$caddy_ep" 2>/dev/null || true
-        log_warn "auto_fix_critical_permissions: caddy/entrypoint.sh was not executable — corrected"
+        if ! chmod +x "$caddy_ep" 2>/dev/null || [[ ! -x "$caddy_ep" ]]; then
+            log_error "Required execute-bit repair failed for ${caddy_ep}"
+            failures=$((failures + 1))
+        else
+            log_warn "auto_fix_critical_permissions: caddy/entrypoint.sh was not executable — corrected and verified"
+        fi
     fi
+
+    if (( failures > 0 )); then
+        log_error "Required permission repair failed for ${failures} path(s)."
+        return 1
+    fi
+    return 0
 }
 
 # _fix_rclone_ownership
