@@ -169,15 +169,6 @@ SLEEP
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
   group:vaultwarden)
-    if [[ -n "${VW_TEST_GETENT_COUNT_FILE:-}" ]]; then
-      count=0
-      [[ ! -f "$VW_TEST_GETENT_COUNT_FILE" ]] || read -r count < "$VW_TEST_GETENT_COUNT_FILE"
-      count=$((count + 1))
-      printf '%s\n' "$count" > "$VW_TEST_GETENT_COUNT_FILE"
-      # The operation guard prepares its global and specific locks before
-      # setup-systemd creates the shared vaultwarden group.
-      (( count > 2 )) || exit 2
-    fi
     printf 'vaultwarden:x:997:root,%s\n' "${VW_TEST_SERVICE_USER:-vwtest}"
     exit 0
     ;;
@@ -294,6 +285,14 @@ copy_systemd_install_repo(){
   mkdir -p "$repo/secrets/keys"
   cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$repo/"
   cp "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" "$repo/"
+  # Operation-holder identity and owner-death behavior have dedicated Linux
+  # coverage in case-operations.bash. Keep this fixture focused on the
+  # systemd install, lock inventory, reconciliation, and timer policy.
+  cat > "$repo/lib/operations.sh" <<'EOF_OPERATIONS'
+operation_acquire(){ return 0; }
+operation_release(){ return 0; }
+operation_set_phase(){ return 0; }
+EOF_OPERATIONS
   cat > "$repo/.env" <<EOF_ENV
 DOMAIN=https://systemd-policy.example.test
 ADMIN_EMAIL=admin@example.test
@@ -319,10 +318,7 @@ run_systemd_install_fixture(){
     SYSTEMCTL_LOG="$TMP/systemctl-install.log" \
     VW_TEST_RUN_LOCK_DIR="$TMP/run-locks" \
     VW_TEST_LOCK_CHOWN_LOG="$TMP/lock-chown.log" \
-    VW_TEST_GETENT_COUNT_FILE="$state/getent-count" \
     VW_TEST_SERVICE_USER="vwtest" \
-    VW_OPERATIONS_LOCK="$TMP/run-locks/vaultwarden-operations.lock" \
-    VW_OPERATIONS_STATE_DIR="$TMP/operations-state" \
     SERVICE_USER="vwtest" \
     VW_TEST_SYSTEMCTL_MODE="$mode" \
     PROJECT_STATE_DIR="$state" \
