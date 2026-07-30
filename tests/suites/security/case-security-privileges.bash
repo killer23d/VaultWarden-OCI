@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Consolidated security and privilege regression suite.
+# This static assertion suite intentionally uses literal shell/Make patterns and
+# subshell-local PATH probes; keep plain ShellCheck focused on actionable findings.
+# shellcheck disable=SC1091,SC2016,SC2030,SC2031
 set -euo pipefail
 
 # shellcheck source=../../lib/test-root.bash
@@ -557,11 +560,35 @@ rm -f "$EMAIL_MENU_SNIP" "$QUEUE_MENU_SNIP" "$EMAIL_MENU_NORM" "$QUEUE_MENU_NORM
 ! grep -Fq 'run_user_cmd' dashboard.sh || fail "dashboard should not drop root for root-operated actions"
 pass "dashboard command labels match root-operated lifecycle"
 
+python3 - Makefile <<'PY_MAKE_LITERAL_ORDER' \
+    || fail "documented Make inputs are not frozen before the first parse-time shell expression"
+from pathlib import Path
+
+lines = Path("Makefile").read_text(encoding="utf-8").splitlines()
+first_shell = next((
+    number
+    for number, line in enumerate(lines, 1)
+    if not line.startswith("\t")
+    and not line.lstrip().startswith("#")
+    and "$(shell" in line
+), None)
+if first_shell is None:
+    raise SystemExit("no active parse-time $(shell expression found")
+for name in ("EMAIL_TEST_TRANSPORT", "QUEUE_ID", "EMAIL_QUEUE_TAIL", "EMAIL_QUEUE_BODY"):
+    expected = f"override {name} := $(value {name})"
+    matches = [number for number, line in enumerate(lines, 1) if line.strip() == expected]
+    if len(matches) != 1:
+        raise SystemExit(f"expected one {expected!r}, found {len(matches)}")
+    if matches[0] >= first_shell:
+        raise SystemExit(f"{name} is normalized at line {matches[0]}, not before first shell at line {first_shell}")
+PY_MAKE_LITERAL_ORDER
+pass "documented Make parameters are frozen before parse-time shell expansion"
 MAKE_LITERAL_TMP="$(mktemp -d -t vw-make-email-literals.XXXXXXXXXX)"
 MAKE_LITERAL_REPO="$MAKE_LITERAL_TMP/repo"
 MAKE_LITERAL_BIN="$MAKE_LITERAL_TMP/bin"
 MAKE_LITERAL_CALLS="$MAKE_LITERAL_TMP/calls.jsonl"
 MAKE_LITERAL_SUPPLEMENT="$MAKE_LITERAL_TMP/supplement.mk"
+MAKE_LITERAL_FEATURES_MK="$MAKE_LITERAL_TMP/features.mk"
 rm -rf "$MAKE_LITERAL_TMP"
 mkdir -p "$MAKE_LITERAL_REPO/utilities" "$MAKE_LITERAL_BIN"
 cat > "$MAKE_LITERAL_BIN/id" <<'EOF_MAKE_LITERAL_ID'
@@ -594,6 +621,11 @@ cat > "$MAKE_LITERAL_SUPPLEMENT" <<'EOF_MAKE_LITERAL_SUPPLEMENT'
 test-email:
 	@python3 -c 'import json,os; print(json.dumps({name:os.environ[name] for name in ("EMAIL_TEST_TRANSPORT","QUEUE_ID","EMAIL_QUEUE_TAIL","EMAIL_QUEUE_BODY")}, separators=(",",":")))'
 EOF_MAKE_LITERAL_SUPPLEMENT
+cat > "$MAKE_LITERAL_FEATURES_MK" <<'EOF_MAKE_LITERAL_FEATURES'
+.PHONY: print-features
+print-features:
+	@printf '%s\n' '$(.FEATURES)'
+EOF_MAKE_LITERAL_FEATURES
 chmod +x "$MAKE_LITERAL_BIN/id" "$MAKE_LITERAL_REPO/maintenance.sh" \
     "$MAKE_LITERAL_REPO/utilities/email-queue.sh"
 run_make_literal_target() {
@@ -633,6 +665,9 @@ PY_MAKE_LITERAL_TRANSPORT
 run_make_literal_target email-queue-inspect 'QUEUE_ID=AbC-123' 'EMAIL_QUEUE_BODY=false' \
     >"$MAKE_LITERAL_TMP/queue-inspect.out"
 assert_make_literal_call '["inspect","AbC-123"]'
+run_make_literal_target email-queue-inspect 'QUEUE_ID=AbC-123' 'EMAIL_QUEUE_BODY=true' \
+    >"$MAKE_LITERAL_TMP/queue-inspect-body.out"
+assert_make_literal_call '["inspect","AbC-123","--body"]'
 run_make_literal_target email-queue-logs 'QUEUE_ID=AbC-123' 'EMAIL_QUEUE_TAIL=37' \
     >"$MAKE_LITERAL_TMP/queue-logs.out"
 assert_make_literal_call '["logs","AbC-123","--tail","37"]'
@@ -665,6 +700,41 @@ assert values == {
     "EMAIL_QUEUE_BODY": "false",
 }, values
 PY_MAKE_LITERAL_VALUES
+MAKE_LITERAL_FEATURES="$(make -s -f "$MAKE_LITERAL_FEATURES_MK" print-features)"
+if [[ " $MAKE_LITERAL_FEATURES " == *" shell-export "* ]]; then
+    shell_export_shell='$(shell touch '"$MAKE_LITERAL_TMP/marker-shell-export"')'
+    shell_export_error='$(error injected)'
+    shell_export_escaped='$$(shell touch '"$MAKE_LITERAL_TMP/marker-shell-export-escaped"')'
+    PATH="$MAKE_LITERAL_BIN:$PATH" \
+        make -s -C "$MAKE_LITERAL_REPO" -f "$ROOT/Makefile" -f "$MAKE_LITERAL_SUPPLEMENT" \
+        test-email \
+        "EMAIL_TEST_TRANSPORT=$shell_export_shell" \
+        "QUEUE_ID=$shell_export_error" \
+        "EMAIL_QUEUE_TAIL=$shell_export_escaped" \
+        'EMAIL_QUEUE_BODY=true' \
+        >"$MAKE_LITERAL_TMP/shell-export-values.json" \
+        2>"$MAKE_LITERAL_TMP/shell-export-values.err" \
+        || { cat "$MAKE_LITERAL_TMP/shell-export-values.err" >&2; fail "GNU Make shell-export evaluated a documented input during parsing"; }
+    [[ ! -e "$MAKE_LITERAL_TMP/marker-shell-export" \
+        && ! -e "$MAKE_LITERAL_TMP/marker-shell-export-escaped" ]] \
+        || fail "GNU Make shell-export executed a documented Make input"
+    python3 - "$MAKE_LITERAL_TMP/shell-export-values.json" \
+        "$shell_export_shell" "$shell_export_error" "$shell_export_escaped" <<'PY_MAKE_SHELL_EXPORT' \
+        || fail "GNU Make shell-export changed a documented input before the receiving shell"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    values = json.load(handle)
+assert values == {
+    "EMAIL_TEST_TRANSPORT": sys.argv[2],
+    "QUEUE_ID": sys.argv[3],
+    "EMAIL_QUEUE_TAIL": sys.argv[4],
+    "EMAIL_QUEUE_BODY": "true",
+}, values
+PY_MAKE_SHELL_EXPORT
+    pass "GNU Make shell-export preserves documented Make inputs literally"
+else
+    pass "GNU Make shell-export reproduction skipped because the installed Make lacks the feature"
+fi
 rm -rf "$MAKE_LITERAL_TMP"
 pass "documented email Make parameters remain literal and argv-safe"
 

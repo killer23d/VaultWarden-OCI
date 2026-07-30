@@ -14,6 +14,21 @@
 #   make help-all            — Show every target, including dashboard/API/advanced targets
 # ===========================================================================
 
+# Freeze documented operator inputs before any parse-time shell invocation.
+# GNU Make 4.4's shell-export feature exports command-line variables to
+# $(shell ...), so capture their raw values before the first such expansion.
+EMAIL_TEST_TRANSPORT ?= configured
+QUEUE_ID ?=
+EMAIL_QUEUE_TAIL ?= 200
+EMAIL_QUEUE_BODY ?= false
+
+override EMAIL_TEST_TRANSPORT := $(value EMAIL_TEST_TRANSPORT)
+override QUEUE_ID := $(value QUEUE_ID)
+override EMAIL_QUEUE_TAIL := $(value EMAIL_QUEUE_TAIL)
+override EMAIL_QUEUE_BODY := $(value EMAIL_QUEUE_BODY)
+
+export EMAIL_TEST_TRANSPORT QUEUE_ID EMAIL_QUEUE_TAIL EMAIL_QUEUE_BODY
+
 # ── Colour helpers ──────────────────────────────────────────────────────────
 RED    := \033[0;31m
 GREEN  := \033[0;32m
@@ -40,17 +55,6 @@ CORE_SERVICES     = vaultwarden caddy
 BACKUP_FILE ?=
 # Optional first install data volume: sudo ./setup.sh install --domain <domain> --email <email> --data-device /dev/sdb
 DATA_DEVICE ?=
-EMAIL_TEST_TRANSPORT ?= configured
-QUEUE_ID ?=
-EMAIL_QUEUE_TAIL ?= 200
-EMAIL_QUEUE_BODY ?= false
-
-override EMAIL_TEST_TRANSPORT := $(value EMAIL_TEST_TRANSPORT)
-override QUEUE_ID := $(value QUEUE_ID)
-override EMAIL_QUEUE_TAIL := $(value EMAIL_QUEUE_TAIL)
-override EMAIL_QUEUE_BODY := $(value EMAIL_QUEUE_BODY)
-
-export EMAIL_TEST_TRANSPORT QUEUE_ID EMAIL_QUEUE_TAIL EMAIL_QUEUE_BODY
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
