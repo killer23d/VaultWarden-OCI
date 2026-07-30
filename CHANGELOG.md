@@ -45,7 +45,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
-- Fixed global operation-lock lifetime so parent release closes the owning descriptor without explicitly unlocking a flock that may still be inherited by active child processes.
+- Fixed operation-lock lifetime so one owner-bound holder owns the global and operation-specific descriptors and releases both when the guarded shell exits, even if an arbitrary workload child remains alive.
 - Fixed gaps where startup/restart/down, safe restart, secrets mutation, environment setup/edit/sync, and systemd configuration could mutate state outside the shared operation guard.
 - Fixed systemd runtime-path and installed-utility contracts, including the structured firewall utility path and operation-state runtime directory ownership.
 - Fixed systemd state-directory drop-in rendering so service-only directives are not written into timer drop-ins; systemd regression coverage now verifies generated units with `systemd-analyze verify` when available.
@@ -59,7 +59,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Fixed Postfix startup compatibility by removing the upstream-incompatible read-only root filesystem setting while retaining compatible container hardening controls.
 - Fixed dependency ownership gaps for supported backup paths, including normal setup ownership and verification of `zstd`.
 - Fixed CrowdSec notification reconciliation to validate sender-domain policy, reject duplicate/unmanaged notification references, normalize managed-file metadata, escape dynamic HTML fields, and preserve operator-owned profile content.
-- Fixed CrowdSec validation and notification subprocesses, the shared spinner, and external bouncer execution boundaries so inherited operation-lock descriptors cannot leave stale-looking contention after the parent exits.
+- Removed operation-lock descriptor lifecycle knowledge from CrowdSec validation, the shared spinner, and external bouncer execution because workload processes no longer own or inherit those descriptors.
 - Fixed hardened systemd maintenance services so UFW and optional CrowdSec validation receive only the required writable paths while real firewall-update failures still propagate.
 - Fixed state-volume recovery so it acquires the shared operation guard before creating or promoting recovery artifacts and returns exit `75` without mutation when another operation owns the guard.
 - Fixed destructive setup acknowledgement, root-remediation command hints, read-only dashboard environment inspection, and lazy Docker project-label resolution so public operator paths remain executable and truthful.
@@ -69,7 +69,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Corrected sensitive-file cleanup language to describe best-effort overwrite/unlink without claiming guaranteed physical erasure on SSD, snapshot, journaling, or copy-on-write storage.
 - Hardened recovery-kit attachment protection so the passphrase is validated, held only for the required shell operation with tracing disabled, passed to the encryption tool through a file descriptor, and kept out of argv, environment variables, temporary passphrase files, and logs.
 - Hardened secret and Age-key custody around root-owned persistent configuration and transient runtime secret material; runtime secrets are materialized under `/run/vaultwarden-oci/secrets` for container consumption rather than treated as persistent plaintext state.
-- Hardened operation-owner attribution and stop behavior with explicit global ownership metadata, PID/start-time verification, controlled descendant signalling, and refusal to automatically terminate or bypass active apt/dpkg/repository package work.
+- Hardened operation-owner attribution and stop behavior with explicit global ownership metadata, owner/holder PID-start verification, open-lock-inode validation, controlled descendant signalling, and refusal to automatically terminate or bypass active apt/dpkg/repository package work.
 - Hardened data-volume, restore, and uninstall paths to fail closed when mount identity, migration state, archive requirements, or database integrity cannot be safely established.
 - Hardened backup encryption/verification metadata and emergency backup policy so archives containing operational key material cannot rely solely on that same operational Age recipient for protection.
 

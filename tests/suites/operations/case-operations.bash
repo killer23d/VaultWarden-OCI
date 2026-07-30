@@ -51,10 +51,15 @@ if ! command -v flock >/dev/null 2>&1; then
 set -euo pipefail
 
 mode="lock"
-case "${1:-}" in
-    -n) shift ;;
-    -u) mode="unlock"; shift ;;
-esac
+contention_exit=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n) shift ;;
+        -E) contention_exit="${2:-1}"; shift 2 ;;
+        -u) mode="unlock"; shift ;;
+        *) break ;;
+    esac
+done
 
 fd="${1:-}"
 [[ "$fd" =~ ^[0-9]+$ ]] || exit 2
@@ -83,7 +88,7 @@ if [[ ! "$owner" =~ ^[0-9]+$ ]] || ! kill -0 "$owner" 2>/dev/null; then
     fi
 fi
 
-exit 1
+exit "$contention_exit"
 EOF_FLOCK
     chmod +x "$mock_bin/flock"
     export PATH="$mock_bin:$PATH"
@@ -173,126 +178,6 @@ VW_OPERATIONS_LOCK="$ops_lock" \
     operation_set_phase "2" "Reacquired after release"
     operation_release 0
 ' "$ROOT"
-
-if [[ -r /proc/$$/stat ]]; then
-    isolation_dir="$tmpdir/isolation"
-    mkdir -p "$isolation_dir"
-    isolated_child_pid_file="$isolation_dir/child.pid"
-    isolated_specific_lock="$isolation_dir/specific.lock"
-
-    VW_OPERATIONS_STATE_DIR="$state_dir" \
-    VW_OPERATIONS_LOCK="$ops_lock" \
-    ISOLATED_CHILD_PID_FILE="$isolated_child_pid_file" \
-    ISOLATED_SPECIFIC_LOCK="$isolated_specific_lock" \
-    "${BASH}" -c '
-        set -euo pipefail
-        source "$0/lib/log.sh"
-        source "$0/lib/common.sh"
-        init_common_lib isolated-external
-        source "$0/lib/operations.sh"
-
-        operation_acquire \
-            --id isolated-parent \
-            --label "Isolated external command" \
-            --specific-lock "$ISOLATED_SPECIFIC_LOCK"
-        global_fd="$OPERATION_LOCK_FD"
-        specific_fd="$OPERATION_SPECIFIC_LOCK_FD"
-        [[ -e "/proc/${BASHPID}/fd/${global_fd}" ]]
-        [[ -e "/proc/${BASHPID}/fd/${specific_fd}" ]]
-        export OPERATION_LOCK_FD OPERATION_SPECIFIC_LOCK_FD
-
-        operation_run_without_guard_fds "$BASH" -c '\''
-            global_fd="$1"
-            specific_fd="$2"
-            child_pid_file="$3"
-            [[ -z "${OPERATION_LOCK_FD+x}" ]]
-            [[ -z "${OPERATION_SPECIFIC_LOCK_FD+x}" ]]
-            [[ -z "${VW_OPERATION_INHERITED_FD+x}" ]]
-            [[ -z "${VW_OPERATION_PARENT_STATE+x}" ]]
-            [[ -z "${VW_OPERATION_PARENT_TOKEN+x}" ]]
-            [[ -z "${VW_OPERATION_PARENT_ID+x}" ]]
-            [[ ! -e "/proc/${BASHPID}/fd/${global_fd}" ]]
-            [[ ! -e "/proc/${BASHPID}/fd/${specific_fd}" ]]
-            ( trap "" HUP; sleep 30 ) </dev/null >/dev/null 2>&1 &
-            printf "%s\n" "$!" > "$child_pid_file"
-        '\'' _ "$global_fd" "$specific_fd" "$ISOLATED_CHILD_PID_FILE"
-
-        [[ -s "$ISOLATED_CHILD_PID_FILE" ]]
-        external_pid="$(cat "$ISOLATED_CHILD_PID_FILE")"
-        kill -0 "$external_pid" 2>/dev/null
-        [[ -e "/proc/${BASHPID}/fd/${global_fd}" ]]
-        [[ -e "/proc/${BASHPID}/fd/${specific_fd}" ]]
-
-        operation_release 0
-        operation_acquire \
-            --id isolated-contender \
-            --label "Contender after isolated external command" \
-            --non-interactive fail
-        operation_release 0
-
-        kill "$external_pid" 2>/dev/null || true
-        for _ in {1..50}; do
-            ! kill -0 "$external_pid" 2>/dev/null && break
-            sleep 0.1
-        done
-        if kill -0 "$external_pid" 2>/dev/null; then
-            child_state="$(ps -o stat= -p "$external_pid" 2>/dev/null | tr -d "[:space:]" || true)"
-            [[ "$child_state" == Z* ]] || exit 1
-        fi
-    ' "$ROOT" || fail "external command child retained an operation guard descriptor after release"
-
-    (
-        set -euo pipefail
-        source "$ROOT/lib/operations.sh"
-        exec {probe_fd}>"$isolation_dir/probe.lock"
-        OPERATION_LOCK_FD="$probe_fd"
-        OPERATION_SPECIFIC_LOCK_FD="$probe_fd"
-        VW_OPERATION_INHERITED_FD="$probe_fd"
-        VW_OPERATION_PARENT_STATE="$isolation_dir/parent.state"
-        VW_OPERATION_PARENT_TOKEN="test-token"
-        VW_OPERATION_PARENT_ID="test-parent"
-        export OPERATION_LOCK_FD OPERATION_SPECIFIC_LOCK_FD
-        export VW_OPERATION_INHERITED_FD VW_OPERATION_PARENT_STATE
-        export VW_OPERATION_PARENT_TOKEN VW_OPERATION_PARENT_ID
-
-        operation_run_without_guard_fds "$BASH" -c '
-            fd="$1"
-            [[ -z "${OPERATION_LOCK_FD+x}" ]]
-            [[ -z "${OPERATION_SPECIFIC_LOCK_FD+x}" ]]
-            [[ -z "${VW_OPERATION_INHERITED_FD+x}" ]]
-            [[ -z "${VW_OPERATION_PARENT_STATE+x}" ]]
-            [[ -z "${VW_OPERATION_PARENT_TOKEN+x}" ]]
-            [[ -z "${VW_OPERATION_PARENT_ID+x}" ]]
-            [[ ! -e "/proc/${BASHPID}/fd/${fd}" ]]
-        ' _ "$probe_fd"
-        [[ -e "/proc/${BASHPID}/fd/${probe_fd}" ]]
-        { eval "exec ${probe_fd}>&-"; }
-
-        OPERATION_LOCK_FD=""
-        OPERATION_SPECIFIC_LOCK_FD="not-a-descriptor"
-        VW_OPERATION_INHERITED_FD="2"
-        VW_OPERATION_PARENT_STATE="ignored"
-        VW_OPERATION_PARENT_TOKEN="ignored"
-        VW_OPERATION_PARENT_ID="ignored"
-        export OPERATION_LOCK_FD OPERATION_SPECIFIC_LOCK_FD
-        export VW_OPERATION_INHERITED_FD VW_OPERATION_PARENT_STATE
-        export VW_OPERATION_PARENT_TOKEN VW_OPERATION_PARENT_ID
-        marker="$(
-            operation_run_without_guard_fds "$BASH" -c '
-                [[ -z "${OPERATION_LOCK_FD+x}" ]]
-                [[ -z "${OPERATION_SPECIFIC_LOCK_FD+x}" ]]
-                [[ -z "${VW_OPERATION_INHERITED_FD+x}" ]]
-                [[ -z "${VW_OPERATION_PARENT_STATE+x}" ]]
-                [[ -z "${VW_OPERATION_PARENT_TOKEN+x}" ]]
-                [[ -z "${VW_OPERATION_PARENT_ID+x}" ]]
-                [[ -e "/proc/${BASHPID}/fd/1" ]]
-                [[ -e "/proc/${BASHPID}/fd/2" ]]
-                printf isolated
-            '
-        )"
-        [[ "$marker" == "isolated" ]]
-    ) || fail "descriptor isolation mishandled duplicate, empty, invalid, or standard descriptors"
-fi
 
 cat > "$state_dir/old.state" <<EOF_STATE
 owner=VaultWarden-OCI
@@ -416,10 +301,10 @@ require 'operation_package_run' "$CROWDSEC" "CrowdSec apt/dpkg calls must use pa
 require 'operation_set_phase "0" "Resetting installed CrowdSec components"' "$CROWDSEC" \
     "CrowdSec force reset must record Phase 0 before destructive reset"
 require 'operation_acquire' "$CROWDSEC" "CrowdSec setup must acquire an operation guard"
-require 'operation_run_without_guard_fds' "$OPS" \
-    "operations library must provide external-command descriptor isolation"
-require '_cs_run_without_operation_guard_fds crowdsec -t' "$CROWDSEC" \
-    "CrowdSec static validation must not pass operation guard descriptors to plugins"
+reject 'operation_run_without_guard_fds' "$OPS" \
+    "operations library must not retain obsolete descriptor-closing wrappers"
+require 'if ! _cs_run_external crowdsec -t' "$CROWDSEC" \
+    "CrowdSec static validation must run normally under owner-bound operation locks"
 require 'crowdsec-setup' "$CROWDSEC" "CrowdSec setup guard must use the crowdsec-setup operation id"
 require 'source "\$\{PROJECT_ROOT\}/lib/operations\.sh"' "$CROWDSEC_APPLY" \
     "standalone CrowdSec Worker apply must source operation guards"
@@ -523,89 +408,6 @@ EOF_STATE
     kill "$live_pid"
     wait "$live_pid" 2>/dev/null || true
     cleanup_pids=("${cleanup_pids[@]/$live_pid}")
-
-    child_ready="$tmpdir/child-ready"
-    child_pid_file="$tmpdir/child.pid"
-    child_marker="$tmpdir/child-contender-entered"
-    child_fifo="$tmpdir/child.fifo"
-    mkfifo "$child_fifo"
-    VW_OPERATIONS_STATE_DIR="$state_dir" \
-    VW_OPERATIONS_LOCK="$ops_lock" \
-    CHILD_READY="$child_ready" \
-    CHILD_PID_FILE="$child_pid_file" \
-    CHILD_FIFO="$child_fifo" \
-    "${BASH}" -c '
-        set -euo pipefail
-        source "$0/lib/log.sh"
-        source "$0/lib/common.sh"
-        init_common_lib orphan-parent
-        source "$0/lib/operations.sh"
-        operation_acquire --id orphan --label "Orphan child lock"
-        operation_set_phase "4" "Child inherited lock"
-        "${BASH}" -c '"'"'
-            child_pid_file="$1"
-            child_ready="$2"
-            child_fifo="$3"
-            trap "" HUP
-            exec 9<> "$child_fifo"
-            printf "%s\n" "$$" > "$child_pid_file"
-            : > "$child_ready"
-            while :; do
-                read -r -t 1 _ <&9 || true
-            done
-        '"'"' _ "$CHILD_PID_FILE" "$CHILD_READY" "$CHILD_FIFO" &
-        for _ in {1..100}; do
-            [[ -s "$CHILD_PID_FILE" && -f "$CHILD_READY" ]] && break
-            sleep 0.1
-        done
-        [[ -s "$CHILD_PID_FILE" && -f "$CHILD_READY" ]] || exit 1
-        kill -KILL "$$"
-    ' "$ROOT" >/dev/null 2>&1 &
-    orphan_parent=$!
-    wait "$orphan_parent" 2>/dev/null || true
-    for _ in {1..50}; do
-        [[ -s "$child_pid_file" ]] && break
-        sleep 0.1
-    done
-    [[ -s "$child_pid_file" ]] || fail "inherited-lock child did not start"
-    orphan_child="$(cat "$child_pid_file")"
-    cleanup_pids+=("$orphan_child")
-
-    set +e
-    orphan_output="$(
-        VW_OPERATIONS_STATE_DIR="$state_dir" \
-        VW_OPERATIONS_LOCK="$ops_lock" \
-        VW_OPERATIONS_WAIT_LIMIT=0 \
-        CHILD_MARKER="$child_marker" \
-        "${BASH}" -c '
-            set -euo pipefail
-            source "$0/lib/log.sh"
-            source "$0/lib/common.sh"
-            init_common_lib orphan-contender
-            source "$0/lib/operations.sh"
-            operation_acquire --id contender --label "Contender" --non-interactive skip
-            : > "$CHILD_MARKER"
-        ' "$ROOT" </dev/null 2>&1
-    )"
-    rc=$?
-    set -e
-    [[ "$rc" -eq 75 ]] || fail "inherited child lock should block contender with exit 75, got $rc"
-    [[ ! -f "$child_marker" ]] || fail "contender entered while inherited-lock child still held the lock"
-    [[ "$orphan_output" == *"owning operation metadata could not be verified"* ]] \
-        || fail "dead parent with inherited child lock must be reported as unverified metadata"
-    [[ "$orphan_output" != *"Orphan child lock"* ]] \
-        || fail "dead parent metadata must not be reported as the verified active owner"
-    kill "$orphan_child" 2>/dev/null || true
-    for _ in {1..50}; do
-        ! kill -0 "$orphan_child" 2>/dev/null && break
-        sleep 0.1
-    done
-    if kill -0 "$orphan_child" 2>/dev/null; then
-        child_state="$(ps -o stat= -p "$orphan_child" 2>/dev/null | tr -d '[:space:]' || true)"
-        [[ "$child_state" == Z* ]] \
-            || fail "inherited-lock child did not stop during cleanup"
-    fi
-    cleanup_pids=("${cleanup_pids[@]/$orphan_child}")
 
     sleep 20 &
     reuse_pid=$!
@@ -882,11 +684,25 @@ reject() {
     ! grep -Eq -- "$1" "$2" || fail "$3"
 }
 
+assert_contains() {
+    [[ "$1" == *"$2"* ]] || fail "expected output to contain '$2'; got: $1"
+}
+
+assert_not_contains() {
+    [[ "$1" != *"$2"* ]] || fail "expected output not to contain '$2'; got: $1"
+}
+
 require 'VW_OPERATIONS_PROMPT_TIMEOUT' "$OPS" "operation conflict prompts must have a timeout"
 require 'global_lock_owned=' "$OPS" "operation state must record explicit global lock ownership"
 require '_operation_state_global_owned' "$OPS" "global owner lookup must require explicit global ownership"
-reject 'flock -u "\$OPERATION_LOCK_FD"' "$OPS" "global operation release must not explicitly LOCK_UN inherited fd"
-require 'last inherited descriptor closes' "$OPS" "global release must document descriptor lifetime semantics"
+require 'holder_pid=' "$OPS" "operation state must record the owner-bound lock holder identity"
+require '_operation_lock_holder' "$OPS" "operation locks must be owned by a narrow holder"
+require '_operation_parse_proc_stat' "$OPS" "operation process identity must use the hardened proc-stat parser"
+reject 'awk .*print \$22' "$OPS" "operation identity must not parse proc stat using naive whitespace fields"
+reject 'VW_OPERATION_INHERITED_FD' "$OPS" "raw operation lock descriptors must not be inherited"
+reject 'OPERATION_LOCK_FD' "$OPS" "the workload shell must not own the global operation lock descriptor"
+reject 'OPERATION_SPECIFIC_LOCK_FD' "$OPS" "the workload shell must not own a specific operation lock descriptor"
+reject 'operation_run_without_guard_fds' "$OPS" "descriptor-closing wrappers must be obsolete"
 require 'LC_ALL=C "\$@"' "$OPS" "package helper must run wrapped command with deterministic C locale"
 require 'add-apt-repository|apt-add-repository' "$OPS" "package child detection must include repository helpers"
 require 'operation_package_run add-apt-repository -y universe' "$ROOT/utilities/setup-system.sh" \
@@ -895,6 +711,10 @@ require 'operation_package_run add-apt-repository -y universe' "$ROOT/utilities/
 tmpdir="$(mktemp -d)"
 cleanup() {
     [[ -n "${child_pid:-}" ]] && kill "$child_pid" 2>/dev/null || true
+    [[ -n "${owner_pid:-}" ]] && kill "$owner_pid" 2>/dev/null || true
+    [[ -n "${owner_launcher_pid:-}" ]] && kill "$owner_launcher_pid" 2>/dev/null || true
+    [[ -n "${lock_holder_pid:-}" ]] && kill "$lock_holder_pid" 2>/dev/null || true
+    [[ -n "${nested_lock_holder_pid:-}" ]] && kill "$nested_lock_holder_pid" 2>/dev/null || true
     [[ -n "${holder_pid:-}" ]] && kill "$holder_pid" 2>/dev/null || true
     [[ -n "${nonglobal_pid:-}" ]] && kill "$nonglobal_pid" 2>/dev/null || true
     rm -rf "$tmpdir"
@@ -908,6 +728,36 @@ LC_ALL=fr_FR.UTF-8 "$BASH" -c '
     operation_package_run bash -c '"'"'printf "%s" "$LC_ALL" > "$1"'"'"' _ "$2"
 ' _ "$OPS" "$lc_file"
 [[ "$(cat "$lc_file")" == "C" ]] || fail "operation_package_run did not force LC_ALL=C for child command"
+
+proc_tail='S 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345'
+for proc_name in \
+    'name with spaces' \
+    'name)with)paren' \
+    'name with spaces)and)paren'; do
+    parsed="$(
+        "$BASH" -c '
+            set -euo pipefail
+            source "$1"
+            _operation_parse_proc_stat "$2"
+        ' _ "$OPS" "123 (${proc_name}) ${proc_tail}"
+    )"
+    [[ "$parsed" == $'S\t42\t12345' ]] \
+        || fail "proc stat parser mishandled process name '${proc_name}': ${parsed}"
+done
+if "$BASH" -c '
+    set -euo pipefail
+    source "$1"
+    _operation_parse_proc_stat "$2"
+' _ "$OPS" "123 (zombie) ${proc_tail/S/Z}" >/dev/null 2>&1; then
+    fail "proc stat parser accepted a zombie identity"
+fi
+if "$BASH" -c '
+    set -euo pipefail
+    source "$1"
+    _operation_parse_proc_stat "malformed stat record"
+' _ "$OPS" >/dev/null 2>&1; then
+    fail "proc stat parser accepted malformed input"
+fi
 
 if [[ "$(uname -s)" != "Linux" || ! -r /proc/$$/stat ]] || ! command -v flock >/dev/null 2>&1; then
     pass "operation descriptor and ownership static checks; Linux flock/proc behavioral checks skipped on this host"
@@ -923,44 +773,236 @@ run_ops_shell() {
     "$BASH" "$@"
 }
 
-ready="$tmpdir/child.ready"
-stop="$tmpdir/child.stop"
-pid_file="$tmpdir/child.pid"
+pid_has_inode() {
+    local pid="$1" expected="$2" fd actual
+    for fd in "/proc/${pid}/fd/"*; do
+        [[ -e "$fd" ]] || continue
+        actual="$(stat -Lc '%d:%i' "$fd" 2>/dev/null || true)"
+        [[ "$actual" == "$expected" ]] && return 0
+    done
+    return 1
+}
+
+infra_bin="$tmpdir/infra-bin"
+mkdir -p "$infra_bin"
+cat > "$infra_bin/flock" <<'EOF'
+#!/usr/bin/env bash
+exit 64
+EOF
+chmod +x "$infra_bin/flock"
+set +e
+infra_output="$(
+    PATH="$infra_bin:$PATH" run_ops_shell -c '
+        set -euo pipefail
+        source "$1/lib/log.sh"
+        source "$1/lib/common.sh"
+        init_common_lib acquisition-infra
+        source "$1/lib/operations.sh"
+        operation_acquire --id acquisition-infra --label "Acquisition infrastructure"
+    ' _ "$ROOT" 2>&1
+)"
+infra_rc=$?
+set -e
+[[ "$infra_rc" -eq 1 ]] || fail "unexpected global flock failure must be an infrastructure error"
+assert_contains "$infra_output" "Global operation flock failed unexpectedly with status 64"
+
+specific_infra_bin="$tmpdir/specific-infra-bin"
+specific_infra_count="$tmpdir/specific-infra-count"
+mkdir -p "$specific_infra_bin"
+cat > "$specific_infra_bin/flock" <<'EOF'
+#!/usr/bin/env bash
+count=0
+[[ ! -f "$VW_TEST_FLOCK_COUNT" ]] || read -r count < "$VW_TEST_FLOCK_COUNT"
+count=$((count + 1))
+printf '%s\n' "$count" > "$VW_TEST_FLOCK_COUNT"
+[[ "$count" -eq 1 ]] && exit 0
+exit 64
+EOF
+chmod +x "$specific_infra_bin/flock"
+set +e
+specific_infra_output="$(
+    VW_TEST_FLOCK_COUNT="$specific_infra_count" \
+    PATH="$specific_infra_bin:$PATH" \
+    run_ops_shell -c '
+        set -euo pipefail
+        source "$1/lib/log.sh"
+        source "$1/lib/common.sh"
+        init_common_lib specific-acquisition-infra
+        source "$1/lib/operations.sh"
+        operation_acquire \
+            --id specific-acquisition-infra \
+            --label "Specific acquisition infrastructure" \
+            --specific-lock "$2"
+    ' _ "$ROOT" "$tmpdir/specific-infra.lock" 2>&1
+)"
+specific_infra_rc=$?
+set -e
+[[ "$specific_infra_rc" -eq 1 ]] || fail "unexpected specific flock failure must be an infrastructure error"
+assert_contains "$specific_infra_output" "Specific operation flock failed unexpectedly with status 64"
+assert_not_contains "$specific_infra_output" "Another Specific acquisition infrastructure operation is already running"
+
+set +e
+malformed_ready_output="$(
+    run_ops_shell -c '
+        set -euo pipefail
+        source "$1/lib/log.sh"
+        source "$1/lib/common.sh"
+        init_common_lib malformed-ready
+        source "$1/lib/operations.sh"
+        _operation_lock_holder() {
+            printf "malformed\n"
+            read -r _ || true
+        }
+        operation_acquire --id malformed-ready --label "Malformed readiness"
+    ' _ "$ROOT" 2>&1
+)"
+malformed_ready_rc=$?
+set -e
+[[ "$malformed_ready_rc" -eq 1 ]] || fail "malformed holder readiness must be an infrastructure error"
+assert_contains "$malformed_ready_output" "Operation lock holder returned a malformed readiness response."
+
+owner_ready="$tmpdir/owner-death.ready"
+child_ready="$tmpdir/arbitrary-child.ready"
+child_pid_file="$tmpdir/arbitrary-child.pid"
+specific_lock="$tmpdir/owner-death-specific.lock"
 run_ops_shell -c '
     set -euo pipefail
-    root="$1"; ready="$2"; stop="$3"; pid_file="$4"
+    root="$1"; owner_ready="$2"; child_ready="$3"; child_pid_file="$4"; specific_lock="$5"
     source "$root/lib/log.sh"
     source "$root/lib/common.sh"
-    init_common_lib inherited-parent
+    init_common_lib owner-death
     source "$root/lib/operations.sh"
-    operation_acquire --id inherited-parent --label "Inherited parent"
+    operation_acquire \
+        --id owner-death \
+        --label "Owner death" \
+        --specific-lock "$specific_lock"
     "$BASH" -c '"'"'
         set -euo pipefail
-        root="$1"; ready="$2"; stop="$3"; pid_file="$4"
-        source "$root/lib/log.sh"
-        source "$root/lib/common.sh"
-        init_common_lib inherited-child
-        source "$root/lib/operations.sh"
-        operation_acquire --id inherited-child --label "Inherited child"
-        printf "%s\n" "$$" > "$pid_file"
-        : > "$ready"
-        while [[ ! -f "$stop" ]]; do sleep 0.1; done
-        operation_release 0
-    '"'"' _ "$root" "$ready" "$stop" "$pid_file" &
-    for _ in {1..100}; do
-        [[ -f "$ready" ]] && break
-        sleep 0.1
-    done
-    [[ -f "$ready" ]] || exit 1
-    operation_release 0
-' _ "$ROOT" "$ready" "$stop" "$pid_file"
+        child_ready="$1"; child_pid_file="$2"
+        trap "" HUP TERM
+        printf "%s\n" "$$" > "$child_pid_file"
+        : > "$child_ready"
+        while :; do sleep 1; done
+    '"'"' _ "$child_ready" "$child_pid_file" &
+    : > "$owner_ready"
+    while :; do sleep 1; done
+' _ "$ROOT" "$owner_ready" "$child_ready" "$child_pid_file" "$specific_lock" &
+owner_launcher_pid=$!
 
 for _ in {1..100}; do
-    [[ -s "$pid_file" ]] && break
+    [[ -f "$owner_ready" && -f "$child_ready" && -s "$child_pid_file" ]] && break
     sleep 0.1
 done
-[[ -s "$pid_file" ]] || fail "inherited child did not start"
-child_pid="$(cat "$pid_file")"
+[[ -f "$owner_ready" && -f "$child_ready" && -s "$child_pid_file" ]] \
+    || fail "owner-death regression did not reach ready state"
+child_pid="$(cat "$child_pid_file")"
+owner_state="$state_dir/owner-death.state"
+owner_pid="$(awk -F= '$1 == "pid" { print $2; exit }' "$owner_state")"
+[[ "$owner_pid" =~ ^[0-9]+$ ]] || fail "operation state did not record the owner PID"
+lock_holder_pid="$(awk -F= '$1 == "holder_pid" { print $2; exit }' "$owner_state")"
+[[ "$lock_holder_pid" =~ ^[0-9]+$ ]] || fail "operation state did not record a lock holder PID"
+global_identity="$(stat -Lc '%d:%i' "$ops_lock")"
+specific_identity="$(stat -Lc '%d:%i' "$specific_lock")"
+
+kill -KILL "$owner_pid"
+set +e
+wait "$owner_launcher_pid" 2>/dev/null
+set -e
+owner_pid=""
+owner_launcher_pid=""
+
+for _ in {1..20}; do
+    if ! kill -0 "$lock_holder_pid" 2>/dev/null; then
+        break
+    fi
+    holder_state="$(ps -o stat= -p "$lock_holder_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$holder_state" == Z* ]] && break
+    sleep 0.1
+done
+kill -0 "$child_pid" 2>/dev/null || fail "owner SIGKILL terminated the arbitrary child"
+pid_has_inode "$child_pid" "$global_identity" \
+    && fail "arbitrary child retained the global operation lock inode"
+pid_has_inode "$child_pid" "$specific_identity" \
+    && fail "arbitrary child retained the operation-specific lock inode"
+if kill -0 "$lock_holder_pid" 2>/dev/null; then
+    holder_state="$(ps -o stat= -p "$lock_holder_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$holder_state" == Z* ]] || fail "owner-bound lock holder survived owner death"
+fi
+lock_holder_pid=""
+
+set +e
+timeout 2 env \
+    VW_OPERATIONS_STATE_DIR="$state_dir" \
+    VW_OPERATIONS_LOCK="$ops_lock" \
+    SPECIFIC_LOCK="$specific_lock" \
+    "$BASH" -c '
+        set -euo pipefail
+        root="$1"
+        source "$root/lib/log.sh"
+        source "$root/lib/common.sh"
+        init_common_lib owner-death-contender
+        source "$root/lib/operations.sh"
+        operation_acquire \
+            --id owner-death-contender \
+            --label "Owner death contender" \
+            --specific-lock "$SPECIFIC_LOCK" \
+            --non-interactive skip
+        operation_release 0
+    ' _ "$ROOT" </dev/null >/dev/null 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 0 ]] || fail "contender did not acquire both locks within two seconds; rc=$rc"
+[[ "$(stat -Lc '%d:%i' "$ops_lock")" == "$global_identity" ]] \
+    || fail "global operation lock pathname was deleted or replaced"
+[[ "$(stat -Lc '%d:%i' "$specific_lock")" == "$specific_identity" ]] \
+    || fail "operation-specific lock pathname was deleted or replaced"
+kill -0 "$child_pid" 2>/dev/null || fail "arbitrary child did not remain alive after contender acquisition"
+kill "$child_pid" 2>/dev/null || true
+wait "$child_pid" 2>/dev/null || true
+child_pid=""
+
+nested_ready="$tmpdir/nested.ready"
+nested_stop="$tmpdir/nested.stop"
+nested_phase_trigger="$tmpdir/nested-phase.trigger"
+nested_phase_result="$tmpdir/nested-phase.result"
+run_ops_shell -c '
+    set -euo pipefail
+    root="$1"; nested_ready="$2"; nested_stop="$3"
+    nested_phase_trigger="$4"; nested_phase_result="$5"
+    source "$root/lib/log.sh"
+    source "$root/lib/common.sh"
+    init_common_lib nested-parent
+    source "$root/lib/operations.sh"
+    operation_acquire --id nested-parent --label "Nested parent"
+    "$BASH" -c '"'"'
+        set -euo pipefail
+        root="$1"; nested_ready="$2"
+        source "$root/lib/log.sh"
+        source "$root/lib/common.sh"
+        init_common_lib nested-child
+        source "$root/lib/operations.sh"
+        operation_acquire --id nested-child --label "Nested child"
+        operation_set_phase nested "Nested foreground operation"
+        operation_release 0
+        : > "$nested_ready"
+    '"'"' _ "$root" "$nested_ready"
+    phase_checked=false
+    while [[ ! -f "$nested_stop" ]]; do
+        if [[ "$phase_checked" == "false" && -f "$nested_phase_trigger" ]]; then
+            set +e
+            operation_set_phase after-holder-loss "Must fail closed"
+            phase_rc=$?
+            set -e
+            printf "%s\n" "$phase_rc" > "$nested_phase_result"
+            phase_checked=true
+        fi
+        sleep 0.1
+    done
+    operation_release 0
+' _ "$ROOT" "$nested_ready" "$nested_stop" "$nested_phase_trigger" "$nested_phase_result" &
+holder_pid=$!
+for _ in {1..100}; do [[ -f "$nested_ready" ]] && break; sleep 0.1; done
+[[ -f "$nested_ready" ]] || fail "valid nested foreground operation was rejected"
 
 set +e
 run_ops_shell -c '
@@ -968,35 +1010,60 @@ run_ops_shell -c '
     root="$1"
     source "$root/lib/log.sh"
     source "$root/lib/common.sh"
-    init_common_lib inherited-contender
+    init_common_lib nested-contender
     source "$root/lib/operations.sh"
     operation_acquire --id contender --label "Contender" --non-interactive skip
 ' _ "$ROOT" </dev/null >/dev/null 2>&1
 rc=$?
 set -e
-[[ "$rc" -eq 75 ]] || fail "inherited child must retain global lock after parent release; contender rc=$rc"
+[[ "$rc" -eq 75 ]] || fail "valid nested operation released the parent global lock; contender rc=$rc"
 
-: > "$stop"
-for _ in {1..100}; do
-    ! kill -0 "$child_pid" 2>/dev/null && break
+set +e
+forged_output="$(
+    VW_OPERATIONS_STATE_DIR="$state_dir" \
+    VW_OPERATIONS_LOCK="$ops_lock" \
+    VW_OPERATION_PARENT_STATE="$state_dir/nested-parent.state" \
+    VW_OPERATION_PARENT_TOKEN="forged-token" \
+    VW_OPERATION_PARENT_ID="nested-parent" \
+    run_ops_shell -c '
+        set -euo pipefail
+        root="$1"
+        source "$root/lib/log.sh"
+        source "$root/lib/common.sh"
+        init_common_lib forged-nested
+        source "$root/lib/operations.sh"
+        operation_acquire --id forged-nested --label "Forged nested" --non-interactive skip
+    ' _ "$ROOT" </dev/null 2>&1
+)"
+rc=$?
+set -e
+[[ "$rc" -eq 1 ]] || fail "forged inherited operation metadata returned $rc instead of failing closed"
+[[ "$forged_output" == *"Inherited operation ownership metadata could not be verified"* ]] \
+    || fail "forged inherited operation metadata failure was not diagnosed"
+
+nested_lock_holder_pid="$(
+    awk -F= '$1 == "holder_pid" { print $2; exit }' "$state_dir/nested-parent.state"
+)"
+[[ "$nested_lock_holder_pid" =~ ^[0-9]+$ ]] || fail "nested parent holder identity is missing"
+kill -KILL "$nested_lock_holder_pid"
+for _ in {1..20}; do
+    ! kill -0 "$nested_lock_holder_pid" 2>/dev/null && break
     sleep 0.1
 done
-if kill -0 "$child_pid" 2>/dev/null; then
-    child_state="$(ps -o stat= -p "$child_pid" 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ "$child_state" == Z* ]] || fail "inherited child did not exit"
-fi
-child_pid=""
+nested_lock_holder_pid=""
+: > "$nested_phase_trigger"
+for _ in {1..50}; do [[ -s "$nested_phase_result" ]] && break; sleep 0.1; done
+[[ -s "$nested_phase_result" ]] || fail "phase boundary did not report lock-infrastructure loss"
+[[ "$(<"$nested_phase_result")" -ne 0 ]] \
+    || fail "phase boundary succeeded after verified lock-infrastructure death"
 
-run_ops_shell -c '
-    set -euo pipefail
-    root="$1"
-    source "$root/lib/log.sh"
-    source "$root/lib/common.sh"
-    init_common_lib inherited-post
-    source "$root/lib/operations.sh"
-    operation_acquire --id post-inherited --label "Post inherited"
-    operation_release 0
-' _ "$ROOT"
+: > "$nested_stop"
+set +e
+wait "$holder_pid"
+rc=$?
+set -e
+[[ "$rc" -ne 0 ]] || fail "operation release succeeded after lock-infrastructure death"
+holder_pid=""
 
 owner_ready="$tmpdir/owner.ready"
 owner_fifo="$tmpdir/owner.fifo"

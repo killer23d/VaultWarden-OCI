@@ -1419,7 +1419,7 @@ confirm_uninstall() {
 _finalize_successful_operation_guard() {
     # remove_runtime_artifacts already deleted the current operation state path.
     # Prevent operation_release from recreating /run/vaultwarden-oci on success,
-    # then close the held FDs so flock is released by descriptor close.
+    # then stop the owner-bound holder so its flocks are released by process exit.
     if [[ "$UNINSTALL_OPERATION_HELD" == "true" ]] && declare -f operation_release >/dev/null 2>&1; then
         # shellcheck disable=SC2034 # Consumed by sourced lib/operations.sh
         OPERATION_OWNS_STATE=false
@@ -1427,7 +1427,7 @@ _finalize_successful_operation_guard() {
         OPERATION_STATE_FILE=""
         operation_release 0
         UNINSTALL_OPERATION_HELD=false
-        unset VW_OPERATION_INHERITED_FD VW_OPERATION_PARENT_STATE VW_OPERATION_PARENT_TOKEN VW_OPERATION_PARENT_ID
+        unset VW_OPERATION_PARENT_STATE VW_OPERATION_PARENT_TOKEN VW_OPERATION_PARENT_ID
     fi
 }
 

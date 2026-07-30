@@ -594,10 +594,10 @@ VALIDATION_RC=0
 VALIDATION_WRAPPER_LOG="$TMP/validation-wrapper.log"
 : > "$VALIDATION_WRAPPER_LOG"
 RESTART_RC=0
-crowdsec(){ [[ "${1:-}" == "-t" ]] || return 2; return "$VALIDATION_RC"; }
-operation_run_without_guard_fds(){
+crowdsec(){
     printf 'call\n' >> "$VALIDATION_WRAPPER_LOG"
-    "$@"
+    [[ "${1:-}" == "-t" ]] || return 2
+    return "$VALIDATION_RC"
 }
 systemctl(){ [[ "${1:-}" == "restart" && "${2:-}" == "crowdsec" ]] || return 0; return "$RESTART_RC"; }
 
@@ -965,7 +965,6 @@ source "$TMP/health-functions.sh"
 RESULTS=""
 _pass(){ RESULTS+="pass:$1:$2\n"; }
 _warn(){ RESULTS+="warn:$1:$2\n"; }
-operation_run_without_guard_fds(){ "$@"; }
 
 BIN="$TMP/bin"
 VALIDATION_TMP="$TMP/validation-tmp"

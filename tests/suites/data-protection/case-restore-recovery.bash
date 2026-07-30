@@ -1110,9 +1110,17 @@ esac
 SOPS
     cat > "$mock/flock" <<'FLOCK'
 #!/usr/bin/env bash
-if [[ "${1:-}" == -n && "${MOCK_FLOCK_CONTENDED:-false}" == true ]]; then
-    exit 1
-fi
+contention_exit=1
+nonblocking=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n) nonblocking=true; shift ;;
+        -E) contention_exit="${2:-1}"; shift 2 ;;
+        *) break ;;
+    esac
+done
+[[ "$nonblocking" == true && "${MOCK_FLOCK_CONTENDED:-false}" == true ]] \
+    && exit "$contention_exit"
 exit 0
 FLOCK
     cat > "$mock/mv" <<'MV'

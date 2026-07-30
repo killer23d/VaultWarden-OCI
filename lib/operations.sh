@@ -14,18 +14,25 @@ readonly VW_OPERATIONS_LIB_LOADED=1
 : "${VW_OPERATIONS_STOP_GRACE:=10}"
 : "${VW_OPERATIONS_FORCE_GRACE:=5}"
 : "${VW_OPERATIONS_PROMPT_TIMEOUT:=300}"
+: "${VW_OPERATIONS_HOLDER_READY_TIMEOUT:=5}"
 
 OPERATION_ID=""
 OPERATION_LABEL=""
 OPERATION_STATE_FILE=""
-OPERATION_LOCK_FD=""
-OPERATION_SPECIFIC_LOCK_FD=""
 OPERATION_SPECIFIC_LOCK=""
 OPERATION_TOKEN=""
 OPERATION_STARTED=""
 OPERATION_STARTED_EPOCH=""
 OPERATION_PHASE=""
 OPERATION_PHASE_NAME=""
+OPERATION_OWNER_PID=""
+OPERATION_OWNER_PID_START=""
+OPERATION_HOLDER_PID=""
+OPERATION_HOLDER_PID_START=""
+OPERATION_HOLDER_READ_FD=""
+OPERATION_HOLDER_CONTROL_FD=""
+OPERATION_HOLDER_GLOBAL_LOCK=""
+OPERATION_HOLDER_SPECIFIC_LOCK=""
 OPERATION_OWNS_GLOBAL=false
 OPERATION_OWNS_STATE=false
 OPERATION_RELEASED=false
@@ -63,10 +70,35 @@ _operation_safe_value() {
     printf '%s' "$value"
 }
 
+_operation_parse_proc_stat() {
+    local line="$1" rest state ppid start
+    local -a fields=()
+    [[ "$line" == *") "* ]] || return 1
+    rest="${line##*) }"
+    [[ "$rest" != "$line" ]]
+    read -r -a fields <<< "$rest"
+    (( ${#fields[@]} >= 20 )) || return 1
+    state="${fields[0]}"
+    ppid="${fields[1]}"
+    start="${fields[19]}"
+    [[ "$state" =~ ^[A-Z]$ && "$state" != "Z" ]] || return 1
+    [[ "$ppid" =~ ^[0-9]+$ && "$start" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\t%s\t%s\n' "$state" "$ppid" "$start"
+}
+
+_operation_proc_identity() {
+    local pid="$1" line
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
+    IFS= read -r line < "/proc/${pid}/stat" || return 1
+    _operation_parse_proc_stat "$line"
+}
+
 _operation_pid_start() {
-    local pid="$1"
-    [[ -r "/proc/${pid}/stat" ]] || return 1
-    awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null
+    local pid="$1" identity state ppid start
+    identity="$(_operation_proc_identity "$pid" 2>/dev/null)" || return 1
+    IFS=$'\t' read -r state ppid start <<< "$identity"
+    [[ -n "$state" && "$ppid" =~ ^[0-9]+$ && "$start" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$start"
 }
 
 _operation_prepare_state_dir() {
@@ -164,21 +196,32 @@ _operation_state_get() {
     return 1
 }
 
+_operation_state_file_is_trusted() {
+    local file="$1" mode owner_uid
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    mode="$(stat -c '%a' "$file" 2>/dev/null \
+        || stat -f '%Lp' "$file" 2>/dev/null || true)"
+    owner_uid="$(stat -c '%u' "$file" 2>/dev/null \
+        || stat -f '%u' "$file" 2>/dev/null || true)"
+    [[ "$mode" == "600" && "$owner_uid" == "$EUID" ]]
+}
+
 _operation_write_state() {
     local state="${1:-running}" result="${2:-}" completed="${3:-}"
-    local tmp pid_start
+    local tmp
     [[ -n "$OPERATION_STATE_FILE" ]] || return 0
     _operation_prepare_state_dir || return 1
     tmp="$(mktemp "${OPERATION_STATE_FILE}.tmp.XXXXXXXX")" || return 1
     chmod 0600 "$tmp" 2>/dev/null || true
-    pid_start="$(_operation_pid_start "$$" 2>/dev/null || true)"
     {
         printf 'owner=VaultWarden-OCI\n'
         printf 'operation=%s\n' "$(_operation_safe_value "$OPERATION_ID")"
         printf 'label=%s\n' "$(_operation_safe_value "$OPERATION_LABEL")"
         printf 'state=%s\n' "$(_operation_safe_value "$state")"
-        printf 'pid=%s\n' "$$"
-        printf 'pid_start=%s\n' "$(_operation_safe_value "$pid_start")"
+        printf 'pid=%s\n' "$(_operation_safe_value "$OPERATION_OWNER_PID")"
+        printf 'pid_start=%s\n' "$(_operation_safe_value "$OPERATION_OWNER_PID_START")"
+        printf 'holder_pid=%s\n' "$(_operation_safe_value "$OPERATION_HOLDER_PID")"
+        printf 'holder_pid_start=%s\n' "$(_operation_safe_value "$OPERATION_HOLDER_PID_START")"
         printf 'script=%s\n' "$(_operation_safe_value "${0##*/}")"
         printf 'started=%s\n' "$(_operation_safe_value "$OPERATION_STARTED")"
         printf 'started_epoch=%s\n' "$(_operation_safe_value "$OPERATION_STARTED_EPOCH")"
@@ -233,16 +276,286 @@ _operation_lock_is_held() {
     return 0
 }
 
-_operation_try_lock_into() {
-    local lock_path="$1" result_var="$2" lock_fd
-    _operation_prepare_lock_file "$lock_path" || return 2
-    { exec {lock_fd}>"$lock_path"; } 2>/dev/null || return 2
-    if flock -n "$lock_fd" 2>/dev/null; then
-        printf -v "$result_var" '%s' "$lock_fd"
-        return 0
+_operation_path_identity() {
+    local path="$1"
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    stat -Lc '%d:%i' "$path" 2>/dev/null \
+        || stat -f '%d:%i' "$path" 2>/dev/null
+}
+
+_operation_lock_path_is_valid() {
+    local path="$1" mode owner_uid
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    mode="$(stat -c '%a' "$path" 2>/dev/null \
+        || stat -f '%Lp' "$path" 2>/dev/null || true)"
+    owner_uid="$(stat -c '%u' "$path" 2>/dev/null \
+        || stat -f '%u' "$path" 2>/dev/null || true)"
+    [[ "$mode" == "660" && "$owner_uid" =~ ^[0-9]+$ ]] || return 1
+    if (( EUID == 0 )); then
+        [[ "$owner_uid" == "0" ]] || return 1
     fi
-    { eval "exec ${lock_fd}>&-"; } 2>/dev/null || true
+}
+
+_operation_open_file_identity() {
+    local pid="$1" fd="$2"
+    if [[ -e "/proc/${pid}/fd/${fd}" ]]; then
+        stat -Lc '%d:%i' "/proc/${pid}/fd/${fd}" 2>/dev/null
+    else
+        stat -f '%d:%i' "/dev/fd/${fd}" 2>/dev/null
+    fi
+}
+
+_operation_open_file_matches_path() {
+    local path="$1" fd="$2" pid="${3:-${BASHPID}}"
+    local path_identity fd_identity
+    _operation_lock_path_is_valid "$path" || return 1
+    path_identity="$(_operation_path_identity "$path")" || return 1
+    fd_identity="$(_operation_open_file_identity "$pid" "$fd")" || return 1
+    if [[ -e "/proc/${pid}/fd/${fd}" ]]; then
+        [[ "$path_identity" == "$fd_identity" ]]
+    else
+        [[ "${path_identity#*:}" == "${fd_identity#*:}" ]]
+    fi
+}
+
+_operation_lock_holder() {
+    local global_path="$1" specific_path="$2"
+    local global_fd="" specific_fd="" flock_rc
+
+    trap 'exit 1' HUP INT TERM
+
+    if [[ -n "$global_path" ]]; then
+        if ! exec {global_fd}>"$global_path"; then
+            printf 'global-open-failure\n'
+            return 1
+        fi
+        if ! _operation_open_file_matches_path "$global_path" "$global_fd"; then
+            printf 'global-validation-failure\n'
+            return 1
+        fi
+        if flock -n -E 75 "$global_fd" 2>/dev/null; then
+            flock_rc=0
+        else
+            flock_rc=$?
+        fi
+        case "$flock_rc" in
+            0) ;;
+            75)
+                printf 'global-contention\n'
+                return 0
+                ;;
+            *)
+                printf 'global-flock-failure:%s\n' "$flock_rc"
+                return 1
+                ;;
+        esac
+        if ! _operation_open_file_matches_path "$global_path" "$global_fd"; then
+            printf 'global-validation-failure\n'
+            return 1
+        fi
+    fi
+
+    if [[ -n "$specific_path" ]]; then
+        if ! exec {specific_fd}>"$specific_path"; then
+            printf 'specific-open-failure\n'
+            return 1
+        fi
+        if ! _operation_open_file_matches_path "$specific_path" "$specific_fd"; then
+            printf 'specific-validation-failure\n'
+            return 1
+        fi
+        if flock -n -E 75 "$specific_fd" 2>/dev/null; then
+            flock_rc=0
+        else
+            flock_rc=$?
+        fi
+        case "$flock_rc" in
+            0) ;;
+            75)
+                printf 'specific-contention\n'
+                return 0
+                ;;
+            *)
+                printf 'specific-flock-failure:%s\n' "$flock_rc"
+                return 1
+                ;;
+        esac
+        if ! _operation_open_file_matches_path "$specific_path" "$specific_fd"; then
+            printf 'specific-validation-failure\n'
+            return 1
+        fi
+    fi
+
+    printf 'ready\n'
+    IFS= read -r _ || true
+}
+
+_operation_close_holder_read_fd() {
+    if [[ "$OPERATION_HOLDER_READ_FD" =~ ^[0-9]+$ ]]; then
+        { exec {OPERATION_HOLDER_READ_FD}<&-; } 2>/dev/null || true
+    fi
+    OPERATION_HOLDER_READ_FD=""
+}
+
+_operation_close_holder_control_fd() {
+    if [[ "$OPERATION_HOLDER_CONTROL_FD" =~ ^[0-9]+$ ]]; then
+        { exec {OPERATION_HOLDER_CONTROL_FD}>&-; } 2>/dev/null || true
+    fi
+    OPERATION_HOLDER_CONTROL_FD=""
+}
+
+_operation_clear_holder() {
+    OPERATION_HOLDER_PID=""
+    OPERATION_HOLDER_PID_START=""
+    OPERATION_HOLDER_READ_FD=""
+    OPERATION_HOLDER_CONTROL_FD=""
+    OPERATION_HOLDER_GLOBAL_LOCK=""
+    OPERATION_HOLDER_SPECIFIC_LOCK=""
+}
+
+_operation_discard_holder() {
+    local pid="$OPERATION_HOLDER_PID"
+    _operation_close_holder_read_fd
+    _operation_close_holder_control_fd
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+    _operation_clear_holder
+}
+
+_operation_pid_has_open_lock() {
+    local pid="$1" lock_path="$2" expected fd actual
+    [[ "$pid" =~ ^[0-9]+$ && -d "/proc/${pid}/fd" ]] || return 1
+    expected="$(_operation_path_identity "$lock_path")" || return 1
+    for fd in "/proc/${pid}/fd/"*; do
+        [[ -e "$fd" ]] || continue
+        actual="$(stat -Lc '%d:%i' "$fd" 2>/dev/null || true)"
+        [[ "$actual" == "$expected" ]] && return 0
+    done
     return 1
+}
+
+_operation_holder_identity_is_live() {
+    local pid="$1" expected_start="$2" global_path="${3:-}" specific_path="${4:-}"
+    local current_start
+    [[ "$pid" =~ ^[0-9]+$ && "$expected_start" =~ ^[0-9]+$ ]] || return 1
+    current_start="$(_operation_pid_start "$pid" 2>/dev/null || true)"
+    [[ "$current_start" == "$expected_start" ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [[ -z "$global_path" ]] || _operation_pid_has_open_lock "$pid" "$global_path" || return 1
+    [[ -z "$specific_path" ]] || _operation_pid_has_open_lock "$pid" "$specific_path" || return 1
+}
+
+_operation_local_holder_is_live() {
+    [[ -n "$OPERATION_HOLDER_PID" ]] || return 0
+    if [[ ! -d "/proc/${OPERATION_HOLDER_PID}/fd" ]]; then
+        kill -0 "$OPERATION_HOLDER_PID" 2>/dev/null
+        return
+    fi
+    _operation_holder_identity_is_live \
+        "$OPERATION_HOLDER_PID" \
+        "$OPERATION_HOLDER_PID_START" \
+        "$OPERATION_HOLDER_GLOBAL_LOCK" \
+        "$OPERATION_HOLDER_SPECIFIC_LOCK"
+}
+
+_operation_start_holder() {
+    local global_path="$1" specific_path="$2" response="" read_rc=0
+    local holder_pid holder_start
+
+    [[ -n "$global_path$specific_path" ]] || return 0
+    [[ -z "$OPERATION_HOLDER_PID" ]] || {
+        _operation_log error "Operation lock holder is already active in this shell."
+        return 1
+    }
+
+    coproc VW_OPERATION_LOCK_HOLDER {
+        _operation_lock_holder "$global_path" "$specific_path"
+    }
+    holder_pid="${VW_OPERATION_LOCK_HOLDER_PID:-}"
+    OPERATION_HOLDER_READ_FD="${VW_OPERATION_LOCK_HOLDER[0]:-}"
+    OPERATION_HOLDER_CONTROL_FD="${VW_OPERATION_LOCK_HOLDER[1]:-}"
+    OPERATION_HOLDER_PID="$holder_pid"
+    OPERATION_HOLDER_GLOBAL_LOCK="$global_path"
+    OPERATION_HOLDER_SPECIFIC_LOCK="$specific_path"
+
+    holder_start="$(_operation_pid_start "$holder_pid" 2>/dev/null || true)"
+    if [[ "$(uname -s)" == "Linux" && ! "$holder_start" =~ ^[0-9]+$ ]]; then
+        _operation_log error "Cannot verify the operation lock holder process identity."
+        _operation_discard_holder
+        return 1
+    fi
+    OPERATION_HOLDER_PID_START="$holder_start"
+
+    if IFS= read -r -t "$VW_OPERATIONS_HOLDER_READY_TIMEOUT" response \
+        <&"$OPERATION_HOLDER_READ_FD"; then
+        read_rc=0
+    else
+        read_rc=$?
+    fi
+    _operation_close_holder_read_fd
+    if (( read_rc != 0 )); then
+        _operation_log error "Operation lock holder did not report readiness within ${VW_OPERATIONS_HOLDER_READY_TIMEOUT}s."
+        _operation_discard_holder
+        return 1
+    fi
+
+    case "$response" in
+        ready)
+            if [[ "$(uname -s)" == "Linux" ]] && ! _operation_local_holder_is_live; then
+                _operation_log error "Operation lock holder lost its verified lock files during startup."
+                _operation_discard_holder
+                return 1
+            fi
+            return 0
+            ;;
+        global-contention)
+            _operation_discard_holder
+            return 75
+            ;;
+        specific-contention)
+            _operation_discard_holder
+            return 76
+            ;;
+        global-open-failure)
+            _operation_log error "Operation lock holder could not open the global lock: ${global_path}"
+            ;;
+        specific-open-failure)
+            _operation_log error "Operation lock holder could not open the specific lock: ${specific_path}"
+            ;;
+        global-validation-failure)
+            _operation_log error "Global operation lock identity changed during holder startup: ${global_path}"
+            ;;
+        specific-validation-failure)
+            _operation_log error "Specific operation lock identity changed during holder startup: ${specific_path}"
+            ;;
+        global-flock-failure:*)
+            _operation_log error "Global operation flock failed unexpectedly with status ${response##*:}."
+            ;;
+        specific-flock-failure:*)
+            _operation_log error "Specific operation flock failed unexpectedly with status ${response##*:}."
+            ;;
+        *)
+            _operation_log error "Operation lock holder returned a malformed readiness response."
+            ;;
+    esac
+    _operation_discard_holder
+    return 1
+}
+
+_operation_release_holder() {
+    local pid="$OPERATION_HOLDER_PID" wait_rc=0
+    [[ -n "$pid" ]] || return 0
+    _operation_close_holder_read_fd
+    _operation_close_holder_control_fd
+    if wait "$pid" 2>/dev/null; then
+        wait_rc=0
+    else
+        wait_rc=$?
+    fi
+    _operation_clear_holder
+    (( wait_rc == 0 ))
 }
 
 _operation_state_global_owned() {
@@ -255,7 +568,7 @@ _operation_find_state_for_lock() {
     local lock_path="$1" file state stored_lock
     [[ -d "$VW_OPERATIONS_STATE_DIR" ]] || return 1
     for file in "$VW_OPERATIONS_STATE_DIR"/*.state; do
-        [[ -f "$file" ]] || continue
+        _operation_state_file_is_trusted "$file" || continue
         state="$(_operation_state_get "$file" state 2>/dev/null || true)"
         stored_lock="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
         [[ "$state" == "running" && "$stored_lock" == "$lock_path" ]] || continue
@@ -267,16 +580,51 @@ _operation_find_state_for_lock() {
     return 1
 }
 
+_operation_verify_holder() {
+    local file="$1" holder_pid holder_start global_owned global_path specific_path
+    holder_pid="$(_operation_state_get "$file" holder_pid 2>/dev/null || true)"
+    holder_start="$(_operation_state_get "$file" holder_pid_start 2>/dev/null || true)"
+    global_owned="$(_operation_state_get "$file" global_lock_owned 2>/dev/null || true)"
+    global_path="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
+    specific_path="$(_operation_state_get "$file" specific_lock 2>/dev/null || true)"
+    [[ "$global_owned" == "true" ]] || global_path=""
+    [[ -n "$global_path$specific_path" ]] || return 1
+    _operation_holder_identity_is_live \
+        "$holder_pid" \
+        "$holder_start" \
+        "$global_path" \
+        "$specific_path"
+}
+
 _operation_verify_owner() {
-    local file="$1" pid saved_start current_start owner token
+    local file="$1" pid saved_start current_start owner token state
+    _operation_state_file_is_trusted "$file" || return 1
     owner="$(_operation_state_get "$file" owner 2>/dev/null || true)"
     token="$(_operation_state_get "$file" token 2>/dev/null || true)"
+    state="$(_operation_state_get "$file" state 2>/dev/null || true)"
     pid="$(_operation_state_get "$file" pid 2>/dev/null || true)"
     saved_start="$(_operation_state_get "$file" pid_start 2>/dev/null || true)"
-    [[ "$owner" == "VaultWarden-OCI" && -n "$token" && "$pid" =~ ^[0-9]+$ ]] || return 1
+    [[ "$owner" == "VaultWarden-OCI" && "$state" == "running" \
+        && -n "$token" && "$pid" =~ ^[0-9]+$ ]] || return 1
     [[ -d "/proc/${pid}" ]] || return 1
     current_start="$(_operation_pid_start "$pid" 2>/dev/null || true)"
     [[ -n "$saved_start" && "$current_start" == "$saved_start" ]] || return 1
+    _operation_verify_holder "$file"
+}
+
+_operation_pid_is_self_or_descendant() {
+    local current="$1" ancestor="$2" identity state parent start depth=0
+    [[ "$current" =~ ^[0-9]+$ && "$ancestor" =~ ^[0-9]+$ ]] || return 1
+    [[ "$current" == "$ancestor" ]] && return 0
+    while (( current > 1 && depth < 256 )); do
+        identity="$(_operation_proc_identity "$current" 2>/dev/null)" || return 1
+        IFS=$'\t' read -r state parent start <<< "$identity"
+        [[ -n "$state" && "$parent" =~ ^[0-9]+$ && "$start" =~ ^[0-9]+$ ]] || return 1
+        current="$parent"
+        [[ "$current" == "$ancestor" ]] && return 0
+        depth=$(( depth + 1 ))
+    done
+    return 1
 }
 
 _operation_related_rows() {
@@ -548,7 +896,9 @@ _operation_wait_for_release() {
 
 _operation_stop_scope() {
     local file="$1" mode="${2:-graceful}"
-    local pid pid_start root_identity lock_path child_identities child_pids remaining
+    local pid pid_start root_identity lock_path specific_lock global_owned
+    local holder_pid holder_start holder_identity child_pids remaining identity
+    local -a captured_identities=() child_identities=()
     _operation_verify_owner "$file" || {
         _operation_log error "Cannot verify the active VaultWarden operation owner; refusing to signal."
         return 1
@@ -561,8 +911,17 @@ _operation_stop_scope() {
     pid_start="$(_operation_state_get "$file" pid_start 2>/dev/null || true)"
     root_identity="${pid}:${pid_start}"
     lock_path="$(_operation_state_get "$file" lock_path 2>/dev/null || true)"
+    specific_lock="$(_operation_state_get "$file" specific_lock 2>/dev/null || true)"
+    global_owned="$(_operation_state_get "$file" global_lock_owned 2>/dev/null || true)"
+    holder_pid="$(_operation_state_get "$file" holder_pid 2>/dev/null || true)"
+    holder_start="$(_operation_state_get "$file" holder_pid_start 2>/dev/null || true)"
+    holder_identity="${holder_pid}:${holder_start}"
 
-    mapfile -t child_identities < <(_operation_capture_descendant_identities "$pid")
+    mapfile -t captured_identities < <(_operation_capture_descendant_identities "$pid")
+    for identity in "${captured_identities[@]}"; do
+        [[ "$identity" == "$holder_identity" ]] && continue
+        child_identities+=("$identity")
+    done
     if (( ${#child_identities[@]} > 0 )); then
         child_pids="$(_operation_live_identity_pids "${child_identities[@]}" | paste -sd' ' -)"
         _operation_log warn "Requesting graceful stop for VaultWarden operation child process(es): ${child_pids}"
@@ -619,6 +978,27 @@ _operation_stop_scope() {
     if _operation_identity_is_live "$root_identity"; then
         _operation_log error "Operation wrapper is still running: ${pid}"
         return 1
+    fi
+
+    remaining="$(_operation_wait_for_identities_exit "$VW_OPERATIONS_STOP_GRACE" "$holder_identity" || true)"
+    if [[ -n "$remaining" ]]; then
+        [[ "$global_owned" == "true" ]] || lock_path=""
+        if ! _operation_holder_identity_is_live \
+            "$holder_pid" "$holder_start" "$lock_path" "$specific_lock"; then
+            _operation_log error "Cannot verify the operation lock holder after wrapper exit."
+            return 1
+        fi
+        _operation_log warn "Stopping verified operation lock infrastructure after wrapper exit: ${holder_pid}"
+        kill -TERM "$holder_pid" 2>/dev/null || true
+        remaining="$(_operation_wait_for_identities_exit "$VW_OPERATIONS_FORCE_GRACE" "$holder_identity" || true)"
+        if [[ -n "$remaining" ]]; then
+            _operation_log error "Operation lock infrastructure is still running: ${remaining}"
+            return 1
+        fi
+    fi
+
+    if [[ "$global_owned" != "true" ]]; then
+        lock_path="$specific_lock"
     fi
     _operation_wait_for_lock_clear "$lock_path" "$VW_OPERATIONS_STOP_GRACE" || {
         _operation_log error "Operation lock is still held after stop request; inspect with: sudo make operations"
@@ -742,21 +1122,40 @@ operation_conflict_prompt() {
 }
 
 _operation_validate_inherited_global() {
-    local fd="${VW_OPERATION_INHERITED_FD:-}" state_file="${VW_OPERATION_PARENT_STATE:-}"
-    local token="${VW_OPERATION_PARENT_TOKEN:-}" target state_token state_state
-    [[ "$fd" =~ ^[0-9]+$ ]] || return 1
-    [[ -e "/proc/$$/fd/${fd}" ]] || return 1
-    target="$(readlink "/proc/$$/fd/${fd}" 2>/dev/null || true)"
-    [[ "$target" == "$VW_OPERATIONS_LOCK" ]] || return 1
-    [[ -r "$state_file" && -n "$token" ]] || return 1
+    local state_file="${VW_OPERATION_PARENT_STATE:-}"
+    local token="${VW_OPERATION_PARENT_TOKEN:-}" id="${VW_OPERATION_PARENT_ID:-}"
+    local expected_state state_token state_operation state_state owner_pid
+    [[ "$id" =~ ^[a-z0-9._-]+$ && -n "$token" ]] || return 1
+    expected_state="${VW_OPERATIONS_STATE_DIR}/${id}.state"
+    [[ "$state_file" == "$expected_state" ]] || return 1
+    _operation_state_file_is_trusted "$state_file" || return 1
     state_token="$(_operation_state_get "$state_file" token 2>/dev/null || true)"
+    state_operation="$(_operation_state_get "$state_file" operation 2>/dev/null || true)"
     state_state="$(_operation_state_get "$state_file" state 2>/dev/null || true)"
-    [[ "$state_token" == "$token" && "$state_state" == "running" ]] || return 1
+    owner_pid="$(_operation_state_get "$state_file" pid 2>/dev/null || true)"
+    [[ "$state_token" == "$token" && "$state_operation" == "$id" \
+        && "$state_state" == "running" ]] || return 1
+    _operation_verify_owner "$state_file" || return 1
+    _operation_pid_is_self_or_descendant "$BASHPID" "$owner_pid"
+}
+
+_operation_current_guard_is_valid() {
+    if [[ "$OPERATION_OWNS_STATE" == "true" ]]; then
+        if [[ -d "/proc/${OPERATION_OWNER_PID}/fd" ]]; then
+            _operation_verify_owner "$OPERATION_STATE_FILE" || return 1
+            _operation_pid_is_self_or_descendant "$BASHPID" "$OPERATION_OWNER_PID" || return 1
+        fi
+        _operation_local_holder_is_live
+        return
+    fi
+    _operation_validate_inherited_global || return 1
+    _operation_local_holder_is_live
 }
 
 operation_acquire() {
     local id="" label="" specific_lock="" no_global=false policy="fail" skip_code=75
-    local arg fd rc should_claim_state=false
+    local arg rc should_claim_state=false inherited_global=false global_path=""
+    local inherited_metadata=false
     while [[ $# -gt 0 ]]; do
         arg="$1"; shift
         case "$arg" in
@@ -784,8 +1183,11 @@ operation_acquire() {
     OPERATION_SPECIFIC_LOCK="$specific_lock"
     OPERATION_STARTED="$(_operation_now)"
     OPERATION_STARTED_EPOCH="$(_operation_epoch)"
-    OPERATION_TOKEN="${id}.$$.$RANDOM.$RANDOM.${OPERATION_STARTED_EPOCH}"
+    OPERATION_OWNER_PID="$BASHPID"
+    OPERATION_OWNER_PID_START="$(_operation_pid_start "$OPERATION_OWNER_PID" 2>/dev/null || true)"
+    OPERATION_TOKEN="${id}.${OPERATION_OWNER_PID}.$RANDOM.$RANDOM.${OPERATION_STARTED_EPOCH}"
     OPERATION_STATE_FILE="${VW_OPERATIONS_STATE_DIR}/${id}.state"
+    _operation_clear_holder
     OPERATION_OWNS_GLOBAL=false
     OPERATION_OWNS_STATE=false
     OPERATION_RELEASED=false
@@ -796,107 +1198,111 @@ operation_acquire() {
     }
 
     if [[ "$no_global" != "true" ]]; then
-        if _operation_validate_inherited_global; then
-            OPERATION_LOCK_FD="${VW_OPERATION_INHERITED_FD}"
+        if [[ -n "${VW_OPERATION_PARENT_STATE:-}${VW_OPERATION_PARENT_TOKEN:-}${VW_OPERATION_PARENT_ID:-}" ]]; then
+            inherited_metadata=true
+        fi
+        if [[ "$inherited_metadata" == "true" ]]; then
+            if ! _operation_validate_inherited_global; then
+                _operation_log error "Inherited operation ownership metadata could not be verified."
+                return 1
+            fi
             OPERATION_STATE_FILE="${VW_OPERATION_PARENT_STATE}"
             OPERATION_TOKEN="${VW_OPERATION_PARENT_TOKEN}"
+            inherited_global=true
             OPERATION_OWNS_GLOBAL=false
             OPERATION_OWNS_STATE=false
         else
-            while true; do
-                if _operation_try_lock_into "$VW_OPERATIONS_LOCK" fd; then
-                    OPERATION_LOCK_FD="$fd"
-                    OPERATION_OWNS_GLOBAL=true
-                    should_claim_state=true
-                    break
-                fi
-                rc=$?
-                if (( rc == 2 )); then
-                    _operation_log error "Cannot open operations lock: ${VW_OPERATIONS_LOCK}"
-                    return 1
-                fi
-                operation_conflict_prompt "$VW_OPERATIONS_LOCK" "$policy" "$skip_code"
-                rc=$?
-                (( rc == 0 )) && continue
-                return "$rc"
-            done
+            _operation_prepare_lock_file "$VW_OPERATIONS_LOCK" || {
+                _operation_log error "Cannot prepare operations lock: ${VW_OPERATIONS_LOCK}"
+                return 1
+            }
+            global_path="$VW_OPERATIONS_LOCK"
+            OPERATION_OWNS_GLOBAL=true
+            should_claim_state=true
         fi
     else
         should_claim_state=true
     fi
 
     if [[ -n "$specific_lock" ]]; then
-        if ! _operation_try_lock_into "$specific_lock" fd; then
-            _operation_log error "Another ${label} operation is already running."
-            if [[ -n "${OPERATION_LOCK_FD:-}" && "$OPERATION_OWNS_GLOBAL" == "true" ]]; then
-                { eval "exec ${OPERATION_LOCK_FD}>&-"; } 2>/dev/null || true
-                OPERATION_LOCK_FD=""
-                OPERATION_OWNS_GLOBAL=false
-            fi
+        _operation_prepare_lock_file "$specific_lock" || {
+            _operation_log error "Cannot prepare operation-specific lock: ${specific_lock}"
             return 1
-        fi
-        OPERATION_SPECIFIC_LOCK_FD="$fd"
+        }
     fi
 
+    while [[ -n "$global_path$specific_lock" ]]; do
+        if _operation_start_holder "$global_path" "$specific_lock"; then
+            break
+        else
+            rc=$?
+        fi
+        case "$rc" in
+            75)
+                operation_conflict_prompt "$VW_OPERATIONS_LOCK" "$policy" "$skip_code"
+                rc=$?
+                (( rc == 0 )) && continue
+                OPERATION_OWNS_GLOBAL=false
+                return "$rc"
+                ;;
+            76)
+                _operation_log error "Another ${label} operation is already running."
+                OPERATION_OWNS_GLOBAL=false
+                return 1
+                ;;
+            *)
+                OPERATION_OWNS_GLOBAL=false
+                return 1
+                ;;
+        esac
+    done
+
     if [[ "$should_claim_state" == "true" ]]; then
+        if [[ -z "$global_path$specific_lock" ]]; then
+            _operation_log error "Operation acquisition requested no global or specific lock."
+            return 1
+        fi
         OPERATION_OWNS_STATE=true
         OPERATION_PHASE="start"
         OPERATION_PHASE_NAME="Starting"
         if ! _operation_write_state running; then
             OPERATION_OWNS_STATE=false
-            if [[ -n "${OPERATION_SPECIFIC_LOCK_FD:-}" ]]; then
-                flock -u "$OPERATION_SPECIFIC_LOCK_FD" 2>/dev/null || true
-                { eval "exec ${OPERATION_SPECIFIC_LOCK_FD}>&-"; } 2>/dev/null || true
-                OPERATION_SPECIFIC_LOCK_FD=""
-            fi
-            if [[ -n "${OPERATION_LOCK_FD:-}" && "$OPERATION_OWNS_GLOBAL" == "true" ]]; then
-                { eval "exec ${OPERATION_LOCK_FD}>&-"; } 2>/dev/null || true
-                OPERATION_LOCK_FD=""
-                OPERATION_OWNS_GLOBAL=false
-            fi
+            _operation_log error "Cannot write operation state: ${OPERATION_STATE_FILE}"
+            _operation_discard_holder
+            OPERATION_OWNS_GLOBAL=false
             return 1
         fi
         if [[ "$OPERATION_OWNS_GLOBAL" == "true" ]]; then
-            export VW_OPERATION_INHERITED_FD="$OPERATION_LOCK_FD"
             export VW_OPERATION_PARENT_STATE="$OPERATION_STATE_FILE"
             export VW_OPERATION_PARENT_TOKEN="$OPERATION_TOKEN"
             export VW_OPERATION_PARENT_ID="$OPERATION_ID"
         fi
+        if [[ -d "/proc/${OPERATION_OWNER_PID}/fd" ]] \
+            && ! _operation_current_guard_is_valid; then
+            _operation_log error "Operation lock infrastructure failed verification after state startup."
+            _operation_write_state failed 1 "$(_operation_now)" 2>/dev/null || true
+            OPERATION_OWNS_STATE=false
+            _operation_discard_holder
+            OPERATION_OWNS_GLOBAL=false
+            return 1
+        fi
+    elif [[ "$inherited_global" == "true" ]] && [[ -n "$specific_lock" ]] \
+        && ! _operation_local_holder_is_live; then
+        _operation_log error "Nested operation-specific lock holder failed verification."
+        _operation_discard_holder
+        return 1
     fi
     return 0
 }
-
-# Run an external command without passing VaultWarden operation-lock file
-# descriptors or inherited-operation metadata into that command or its children.
-# The subshell keeps the parent shell's guard descriptors open while ensuring
-# daemonizing/plugin-style children cannot outlive the operation and retain the
-# kernel flock after the owning wrapper has released it.
-operation_run_without_guard_fds() (
-    (( $# > 0 )) || return 2
-    local fd
-    local -a guard_fds=(
-        "${OPERATION_SPECIFIC_LOCK_FD:-}"
-        "${OPERATION_LOCK_FD:-}"
-        "${VW_OPERATION_INHERITED_FD:-}"
-    )
-    for fd in "${guard_fds[@]}"; do
-        if [[ "$fd" =~ ^[0-9]+$ ]] && (( fd > 2 )); then
-            { eval "exec ${fd}>&-"; } 2>/dev/null || true
-        fi
-    done
-    unset OPERATION_LOCK_FD
-    unset OPERATION_SPECIFIC_LOCK_FD
-    unset VW_OPERATION_INHERITED_FD
-    unset VW_OPERATION_PARENT_STATE
-    unset VW_OPERATION_PARENT_TOKEN
-    unset VW_OPERATION_PARENT_ID
-    exec "$@"
-)
 
 operation_set_phase() {
     OPERATION_PHASE="${1:-}"
     OPERATION_PHASE_NAME="${2:-}"
     [[ -n "$OPERATION_STATE_FILE" ]] || return 0
+    if ! _operation_current_guard_is_valid; then
+        _operation_log error "Operation lock ownership could not be verified before phase update."
+        return 1
+    fi
     if [[ "$OPERATION_OWNS_STATE" != "true" ]]; then
         _operation_update_phase_fields
         return $?
@@ -905,26 +1311,29 @@ operation_set_phase() {
 }
 
 operation_release() {
-    local result="${1:-0}" state="complete" completed
+    local result="${1:-0}" state="complete" completed release_rc=0
     [[ "$OPERATION_RELEASED" == "true" ]] && return 0
     OPERATION_RELEASED=true
     completed="$(_operation_now)"
     [[ "$result" == "0" ]] || state="failed"
+    if [[ -n "$OPERATION_HOLDER_PID" ]] && ! _operation_local_holder_is_live; then
+        _operation_log error "Operation lock infrastructure was lost before release."
+        state="failed"
+        [[ "$result" == "0" ]] && result=1
+        release_rc=1
+    fi
     if [[ "$OPERATION_OWNS_STATE" == "true" ]]; then
-        _operation_write_state "$state" "$result" "$completed" 2>/dev/null || true
+        if ! _operation_write_state "$state" "$result" "$completed" 2>/dev/null; then
+            _operation_log error "Cannot write final operation state: ${OPERATION_STATE_FILE}"
+            release_rc=1
+        fi
     fi
-    if [[ -n "${OPERATION_SPECIFIC_LOCK_FD:-}" ]]; then
-        flock -u "$OPERATION_SPECIFIC_LOCK_FD" 2>/dev/null || true
-        { eval "exec ${OPERATION_SPECIFIC_LOCK_FD}>&-"; } 2>/dev/null || true
-        OPERATION_SPECIFIC_LOCK_FD=""
+    if ! _operation_release_holder; then
+        _operation_log error "Operation lock holder exited unexpectedly during release."
+        release_rc=1
     fi
-    if [[ "$OPERATION_OWNS_GLOBAL" == "true" && -n "${OPERATION_LOCK_FD:-}" ]]; then
-        # The global lock FD is intentionally inherited by nested mutating
-        # children. Close our descriptor and let the kernel release the flock
-        # only when the last inherited descriptor closes.
-        { eval "exec ${OPERATION_LOCK_FD}>&-"; } 2>/dev/null || true
-        OPERATION_LOCK_FD=""
-    fi
+    unset VW_OPERATION_PARENT_STATE VW_OPERATION_PARENT_TOKEN VW_OPERATION_PARENT_ID
+    return "$release_rc"
 }
 
 _operation_known_label() {
