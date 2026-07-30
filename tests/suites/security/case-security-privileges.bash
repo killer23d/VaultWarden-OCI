@@ -548,9 +548,125 @@ done
 ! grep -Eq 'run_cmd|run_user_cmd|utilities/email-queue\.sh|docker([[:space:]]+compose|[[:space:]]+exec)|postqueue|postcat|postsuper' \
     "$EMAIL_MENU_NORM" "$QUEUE_MENU_NORM" \
     || fail "dashboard email handlers bypass the root-operated Make interface"
+grep -Fq '(IFS=" "; "$@")' dashboard.sh \
+    || fail "dashboard command runner does not execute the supplied argv directly"
+! grep -Eq '(^|[;&|[:space:]])(eval|bash[[:space:]]+-c|sh[[:space:]]+-c)([;&|[:space:]]|$)' \
+    "$EMAIL_MENU_SNIP" "$QUEUE_MENU_SNIP" \
+    || fail "dashboard email handlers construct a second shell-evaluation path"
 rm -f "$EMAIL_MENU_SNIP" "$QUEUE_MENU_SNIP" "$EMAIL_MENU_NORM" "$QUEUE_MENU_NORM"
 ! grep -Fq 'run_user_cmd' dashboard.sh || fail "dashboard should not drop root for root-operated actions"
 pass "dashboard command labels match root-operated lifecycle"
+
+MAKE_LITERAL_TMP="$(mktemp -d -t vw-make-email-literals.XXXXXXXXXX)"
+MAKE_LITERAL_REPO="$MAKE_LITERAL_TMP/repo"
+MAKE_LITERAL_BIN="$MAKE_LITERAL_TMP/bin"
+MAKE_LITERAL_CALLS="$MAKE_LITERAL_TMP/calls.jsonl"
+MAKE_LITERAL_SUPPLEMENT="$MAKE_LITERAL_TMP/supplement.mk"
+rm -rf "$MAKE_LITERAL_TMP"
+mkdir -p "$MAKE_LITERAL_REPO/utilities" "$MAKE_LITERAL_BIN"
+cat > "$MAKE_LITERAL_BIN/id" <<'EOF_MAKE_LITERAL_ID'
+#!/usr/bin/env bash
+case "${1:-}" in
+    -u) printf '0\n' ;;
+    -un) printf 'root\n' ;;
+    -g) printf '0\n' ;;
+    -gn) printf 'root\n' ;;
+    *) /usr/bin/id "$@" ;;
+esac
+EOF_MAKE_LITERAL_ID
+cat > "$MAKE_LITERAL_REPO/maintenance.sh" <<'EOF_MAKE_LITERAL_MAINTENANCE'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+with open(os.environ["VW_MAKE_LITERAL_CALLS"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:], separators=(",", ":")) + "\n")
+EOF_MAKE_LITERAL_MAINTENANCE
+cat > "$MAKE_LITERAL_REPO/utilities/email-queue.sh" <<'EOF_MAKE_LITERAL_QUEUE'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+with open(os.environ["VW_MAKE_LITERAL_CALLS"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:], separators=(",", ":")) + "\n")
+EOF_MAKE_LITERAL_QUEUE
+cat > "$MAKE_LITERAL_SUPPLEMENT" <<'EOF_MAKE_LITERAL_SUPPLEMENT'
+test-email:
+	@python3 -c 'import json,os; print(json.dumps({name:os.environ[name] for name in ("EMAIL_TEST_TRANSPORT","QUEUE_ID","EMAIL_QUEUE_TAIL","EMAIL_QUEUE_BODY")}, separators=(",",":")))'
+EOF_MAKE_LITERAL_SUPPLEMENT
+chmod +x "$MAKE_LITERAL_BIN/id" "$MAKE_LITERAL_REPO/maintenance.sh" \
+    "$MAKE_LITERAL_REPO/utilities/email-queue.sh"
+run_make_literal_target() {
+    local target="$1"
+    shift
+    : >"$MAKE_LITERAL_CALLS"
+    PATH="$MAKE_LITERAL_BIN:$PATH" VW_MAKE_LITERAL_CALLS="$MAKE_LITERAL_CALLS" \
+        make -s -C "$MAKE_LITERAL_REPO" -f "$ROOT/Makefile" "$target" "$@"
+}
+assert_make_literal_call() {
+    local expected_json="$1"
+    python3 - "$MAKE_LITERAL_CALLS" "$expected_json" <<'PY_MAKE_LITERAL_CALL' \
+        || fail "Make target did not preserve the expected literal argv"
+import json, sys
+from pathlib import Path
+rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+assert rows == [json.loads(sys.argv[2])], rows
+PY_MAKE_LITERAL_CALL
+}
+for transport in configured all api sidecar direct; do
+    run_make_literal_target test-email "EMAIL_TEST_TRANSPORT=$transport" \
+        >"$MAKE_LITERAL_TMP/test-email-${transport}.out"
+    assert_make_literal_call "[\"test-email\",\"--transport\",\"$transport\",\"--verbose\"]"
+done
+malformed_transport='bad"; touch SHOULD_NOT_EXIST; printf "'
+run_make_literal_target test-email "EMAIL_TEST_TRANSPORT=$malformed_transport" \
+    >"$MAKE_LITERAL_TMP/test-email-malformed.out"
+python3 - "$MAKE_LITERAL_CALLS" "$malformed_transport" <<'PY_MAKE_LITERAL_TRANSPORT' \
+    || fail "malformed transport escaped its quoted Make recipe argument"
+import json, sys
+from pathlib import Path
+rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+assert rows == [["test-email", "--transport", sys.argv[2], "--verbose"]], rows
+PY_MAKE_LITERAL_TRANSPORT
+[[ ! -e "$MAKE_LITERAL_REPO/SHOULD_NOT_EXIST" ]] \
+    || fail "malformed transport executed a constructed shell command"
+run_make_literal_target email-queue-inspect 'QUEUE_ID=AbC-123' 'EMAIL_QUEUE_BODY=false' \
+    >"$MAKE_LITERAL_TMP/queue-inspect.out"
+assert_make_literal_call '["inspect","AbC-123"]'
+run_make_literal_target email-queue-logs 'QUEUE_ID=AbC-123' 'EMAIL_QUEUE_TAIL=37' \
+    >"$MAKE_LITERAL_TMP/queue-logs.out"
+assert_make_literal_call '["logs","AbC-123","--tail","37"]'
+
+literal_shell='$(shell touch '"$MAKE_LITERAL_TMP/marker-shell"')'
+literal_error='$(error injected)'
+literal_escaped='$$(shell touch '"$MAKE_LITERAL_TMP/marker-escaped"')'
+PATH="$MAKE_LITERAL_BIN:$PATH" \
+    make -s -C "$MAKE_LITERAL_REPO" -f "$ROOT/Makefile" -f "$MAKE_LITERAL_SUPPLEMENT" \
+        test-email \
+        "EMAIL_TEST_TRANSPORT=$literal_shell" \
+        "QUEUE_ID=$literal_error" \
+        "EMAIL_QUEUE_TAIL=$literal_escaped" \
+        'EMAIL_QUEUE_BODY=false' \
+        >"$MAKE_LITERAL_TMP/exported-values.json" \
+        2>"$MAKE_LITERAL_TMP/exported-values.err" \
+    || { cat "$MAKE_LITERAL_TMP/exported-values.err" >&2; fail "literal Make values were evaluated during parsing or export"; }
+[[ ! -e "$MAKE_LITERAL_TMP/marker-shell" && ! -e "$MAKE_LITERAL_TMP/marker-escaped" ]] \
+    || fail "documented NAME=value input executed a Make shell function"
+python3 - "$MAKE_LITERAL_TMP/exported-values.json" \
+    "$literal_shell" "$literal_error" "$literal_escaped" <<'PY_MAKE_LITERAL_VALUES' \
+    || fail "documented NAME=value inputs did not reach the receiving shell literally"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    values = json.load(handle)
+assert values == {
+    "EMAIL_TEST_TRANSPORT": sys.argv[2],
+    "QUEUE_ID": sys.argv[3],
+    "EMAIL_QUEUE_TAIL": sys.argv[4],
+    "EMAIL_QUEUE_BODY": "false",
+}, values
+PY_MAKE_LITERAL_VALUES
+rm -rf "$MAKE_LITERAL_TMP"
+pass "documented email Make parameters remain literal and argv-safe"
 
 grep -Fq 'sudo ./setup.sh install --domain <your-domain> --email <your-email>' Makefile \
     || fail "Makefile setup guidance must advertise supported first-install command"

@@ -236,12 +236,13 @@ if [[ "${1:-}" == compose && "${2:-}" == exec && "${3:-}" == -T ]]; then
             esac
             set +e
             python3 - "$op" "$fail_id" "${VW_TEST_REUSE_ID_AFTER_DELETE:-}" \
+                "${VW_TEST_REUSE_ID_AFTER_DELETE_QUEUE_NAME:-deferred}" \
                 "${VW_TEST_INVENTORY:?}" "${POSTSUPER_IDS[@]}" <<'PY_BATCH'
 import json, sys
 from pathlib import Path
-
-op, fail_id, reuse_after_delete, path = sys.argv[1], sys.argv[2], sys.argv[3], Path(sys.argv[4])
-ids = [item for item in sys.argv[5:] if item]
+op, fail_id, reuse_after_delete, reuse_queue_name = sys.argv[1:5]
+path = Path(sys.argv[5])
+ids = [item for item in sys.argv[6:] if item]
 fail_ids = {item for item in fail_id.split(",") if item}
 rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 for queue_id in ids:
@@ -252,7 +253,7 @@ for queue_id in ids:
         if queue_id == reuse_after_delete:
             rows.append({
                 "queue_id": queue_id,
-                "queue_name": "deferred",
+                "queue_name": reuse_queue_name,
                 "arrival_time": 1800000000,
                 "message_size": 999,
                 "sender": "replacement@example.test",
@@ -304,6 +305,7 @@ run_queue() {
         "VW_TEST_REUSE_ID_ON_HOLD=${VW_TEST_REUSE_ID_ON_HOLD:-}" \
         "VW_TEST_REUSE_SAME_ID_ON_HOLD=${VW_TEST_REUSE_SAME_ID_ON_HOLD:-}" \
         "VW_TEST_REUSE_ID_AFTER_DELETE=${VW_TEST_REUSE_ID_AFTER_DELETE:-}" \
+        "VW_TEST_REUSE_ID_AFTER_DELETE_QUEUE_NAME=${VW_TEST_REUSE_ID_AFTER_DELETE_QUEUE_NAME:-deferred}" \
         "VW_TEST_REMOVE_ID_ON_HOLD=${VW_TEST_REMOVE_ID_ON_HOLD:-}" \
         "VW_TEST_ADD_NEW_ON_HOLD=${VW_TEST_ADD_NEW_ON_HOLD:-false}" \
         "VW_TEST_FAIL_HOLD_ID=${VW_TEST_FAIL_HOLD_ID:-}" \
@@ -330,6 +332,79 @@ assert_no_destructive_postsuper() {
         fail "blocked operation invoked hold, release, or deletion"
     fi
 }
+assert_post_delete_purge_reuse() {
+    local replacement_queue="$1" label="$2"
+    local out="$TMP/purge-post-delete-${replacement_queue}.out" lock_fd
+    rm -f "${INVENTORY}.hold-event"
+    write_inventory <<'EOF_PURGE_POST_DELETE_REUSE'
+{"queue_id":"PURGE-REUSE","queue_name":"deferred","arrival_time":1700000200,"message_size":321,"sender":"original@example.test","recipients":[{"address":"original-recipient@example.test","delay_reason":"temporary failure"}]}
+EOF_PURGE_POST_DELETE_REUSE
+    : >"$CALLS"
+    : >"$INVENTORY_CALLS"
+    VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
+    VW_TEST_REUSE_ID_AFTER_DELETE=PURGE-REUSE
+    VW_TEST_REUSE_ID_AFTER_DELETE_QUEUE_NAME="$replacement_queue"
+    VW_TEST_ADD_NEW_ON_HOLD=true
+    export VW_EMAIL_QUEUE_CONFIRM VW_TEST_REUSE_ID_AFTER_DELETE \
+        VW_TEST_REUSE_ID_AFTER_DELETE_QUEUE_NAME VW_TEST_ADD_NEW_ON_HOLD
+    if run_queue purge --snapshot </dev/null >"$out" 2>&1; then
+        fail "$label returned success"
+    fi
+    python3 - "$INVENTORY" "$replacement_queue" <<'PY_PURGE_POST_DELETE_REUSE' \
+        || fail "$label did not preserve the replacement and unrelated message exactly"
+import json, sys
+from pathlib import Path
+path, replacement_queue = Path(sys.argv[1]), sys.argv[2]
+rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+by_id = {row["queue_id"]: row for row in rows}
+assert set(by_id) == {"PURGE-REUSE", "NEW-AFTER-SNAPSHOT"}
+assert by_id["PURGE-REUSE"] == {
+    "queue_id": "PURGE-REUSE",
+    "queue_name": replacement_queue,
+    "arrival_time": 1800000000,
+    "message_size": 999,
+    "sender": "replacement@example.test",
+    "recipients": [{"address": "replacement-recipient@example.test", "delay_reason": "new message"}],
+    "test_marker": "replacement-after-delete",
+}
+assert by_id["NEW-AFTER-SNAPSHOT"] == {
+    "queue_id": "NEW-AFTER-SNAPSHOT",
+    "queue_name": "deferred",
+    "arrival_time": 1800000100,
+    "message_size": 5,
+    "sender": "new@example.test",
+    "recipients": [{"address": "new-recipient@example.test"}],
+}
+PY_PURGE_POST_DELETE_REUSE
+    grep -Fq 'Deleted snapshot messages: 0' "$out" \
+        || fail "$label counted the replacement as an ordinary deletion"
+    grep -Fq 'Identity mismatches or reused IDs skipped: 1' "$out" \
+        || fail "$label did not include the post-delete replacement in the mismatch total"
+    grep -Eqi 'post-delete.*queue-ID reuse|post-delete.*identity mismatch' "$out" \
+        || fail "$label did not explain the post-delete identity replacement"
+    [[ "$(grep -Fc '<postsuper> <-h> <->' "$CALLS" || true)" -eq 1 ]] \
+        || fail "$label did not perform exactly one intended hold batch"
+    [[ "$(grep -Fc '<postsuper> <-d> <->' "$CALLS" || true)" -eq 1 ]] \
+        || fail "$label did not perform exactly one intended delete batch"
+    ! grep -Fq '<postsuper> <-H> <->' "$CALLS" \
+        || fail "$label released the post-delete replacement"
+    ! grep -Fq '<postqueue> <-i>' "$CALLS" \
+        || fail "$label retried the post-delete replacement"
+    ! grep -Fq '<postqueue> <-f>' "$CALLS" \
+        || fail "$label flushed the queue"
+    if find "$QUEUE_TMP" -mindepth 1 -print -quit | grep -q .; then
+        fail "$label left private temporary files behind"
+    fi
+    exec {lock_fd}>"$LOCK_FILE"
+    flock -n "$lock_fd" || fail "$label left the mutation lock held"
+    exec {lock_fd}>&-
+    rm -f "${INVENTORY}.hold-event"
+    unset VW_TEST_REUSE_ID_AFTER_DELETE VW_TEST_REUSE_ID_AFTER_DELETE_QUEUE_NAME \
+        VW_TEST_ADD_NEW_ON_HOLD
+    VW_EMAIL_QUEUE_CONFIRM=
+    export VW_EMAIL_QUEUE_CONFIRM
+    pass "$label"
+}
 
 base_inventory() {
     write_inventory <<'EOF_INV'
@@ -345,7 +420,7 @@ run_hardening_tests() {
         VW_TEST_FAIL_DELETE_ID VW_TEST_FAIL_DELETE_IDS \
         VW_TEST_ALREADY_ABSENT_DELETE_ID VW_TEST_FAIL_RETRY_ID \
         VW_TEST_REUSE_ID_ON_HOLD VW_TEST_REUSE_SAME_ID_ON_HOLD \
-        VW_TEST_REUSE_ID_AFTER_DELETE \
+        VW_TEST_REUSE_ID_AFTER_DELETE VW_TEST_REUSE_ID_AFTER_DELETE_QUEUE_NAME \
         VW_TEST_REMOVE_ID_ON_HOLD VW_TEST_ADD_NEW_ON_HOLD \
         VW_TEST_FAIL_HOLD_ID VW_TEST_FAIL_RELEASE_ID \
         VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL \
@@ -886,6 +961,10 @@ grep -Fq '"queue_id":"AbC-123","queue_name":"hold"' "$INVENTORY" \
 unset VW_TEST_FAIL_DELETE_IDS
 pass 'targeted deletion preserves a pre-existing hold after deletion failure'
 
+assert_post_delete_purge_reuse deferred \
+    'snapshot purge preserves a deferred replacement created after deletion'
+assert_post_delete_purge_reuse hold \
+    'snapshot purge preserves a held replacement created after deletion'
 base_inventory
 VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
 VW_TEST_REUSE_ID_ON_HOLD=AbC-123

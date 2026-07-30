@@ -81,8 +81,14 @@ grep -Fq 'test_subject="VaultWarden Email Test - ${transport} - ${timestamp} - $
     || fail "diagnostic counters must be safe under set -e"
 grep -Fq 'EMAIL_TEST_TRANSPORT ?= configured' "$MAKEFILE" \
     || fail "Make must default email diagnostics to the configured route"
-grep -Fq './maintenance.sh test-email --transport "$(EMAIL_TEST_TRANSPORT)" --verbose' "$MAKEFILE" \
-    || fail "Make must quote and forward EMAIL_TEST_TRANSPORT"
+grep -Fq 'override EMAIL_TEST_TRANSPORT := $(value EMAIL_TEST_TRANSPORT)' "$MAKEFILE" \
+    || fail "Make must preserve EMAIL_TEST_TRANSPORT as a literal command-line value"
+grep -Fq 'export EMAIL_TEST_TRANSPORT QUEUE_ID EMAIL_QUEUE_TAIL EMAIL_QUEUE_BODY' "$MAKEFILE" \
+    || fail "Make must export documented email inputs to shell recipes"
+grep -Fq './maintenance.sh test-email --transport "$${EMAIL_TEST_TRANSPORT}" --verbose' "$MAKEFILE" \
+    || fail "Make must quote and forward EMAIL_TEST_TRANSPORT from the shell environment"
+! grep -Fq './maintenance.sh test-email --transport "$(EMAIL_TEST_TRANSPORT)" --verbose' "$MAKEFILE" \
+    || fail "Make must not expand EMAIL_TEST_TRANSPORT while constructing the recipe"
 
 extract_function "$DIAGNOSTIC" run_email_diagnostics >"$TMP/run-email-diagnostics.bash"
 cat >>"$TMP/run-email-diagnostics.bash" <<'HARNESS'

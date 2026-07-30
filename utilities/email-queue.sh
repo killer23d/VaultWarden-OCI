@@ -894,7 +894,6 @@ import sys
 from pathlib import Path
 
 snapshot_path, eligible_path, current_path, out = map(Path, sys.argv[1:])
-
 def load(path):
     result = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -905,29 +904,29 @@ def load(path):
             raise SystemExit("invalid normalized inventory")
         result[fields[0]] = fields
     return result
-
 snapshot = load(snapshot_path)
 current = load(current_path)
 eligible = [line for line in eligible_path.read_text(encoding="utf-8").splitlines() if line]
 deleted = []
 delete_failed = []
+post_delete_mismatch = []
 rollback = set()
 for queue_id in eligible:
     snap = snapshot[queue_id]
     now = current.get(queue_id)
-    if now is None or now[5] != snap[5]:
+    if now is None:
         deleted.append(queue_id)
+    elif now[5] != snap[5]:
+        post_delete_mismatch.append(queue_id)
     else:
         delete_failed.append(queue_id)
         if snap[1] != "hold" and now[1] == "hold":
             rollback.add(queue_id)
-# Also restore a mismatched replacement that our initial hold may have caught.
-for queue_id, snap in snapshot.items():
-    now = current.get(queue_id)
-    if now is not None and now[5] != snap[5] and snap[1] != "hold" and now[1] == "hold":
-        rollback.add(queue_id)
 (out / "deleted.ids").write_text("".join(f"{item}\n" for item in deleted), encoding="utf-8")
 (out / "delete_failed.ids").write_text("".join(f"{item}\n" for item in delete_failed), encoding="utf-8")
+(out / "post_delete_mismatch.ids").write_text(
+    "".join(f"{item}\n" for item in post_delete_mismatch), encoding="utf-8"
+)
 (out / "rollback.ids").write_text("".join(f"{item}\n" for item in sorted(rollback)), encoding="utf-8")
 PY_AFTER_DELETE
 }
@@ -956,10 +955,10 @@ _purge_snapshot() {
     local after_hold_raw after_hold_tsv after_delete_raw after_delete_tsv
     local final_raw final_tsv to_hold preheld eligible absent_ids mismatch_ids
     local hold_failed_ids release_mismatch newly_held rollback_pending rollback_ids
+    local post_delete_mismatch_ids
     local count to_hold_count preheld_count
-    local deleted absent mismatches hold_failed delete_failed restore_failed failed remaining
+    local deleted absent mismatches post_delete_mismatch hold_failed delete_failed restore_failed failed remaining
     local expected_token
-
     _require_long_queue_ids "snapshot purge" || return 1
     _new_private_tempdir || return 1
     purge_dir="$_NEW_TEMP_DIR"
@@ -973,7 +972,6 @@ _purge_snapshot() {
     final_tsv="$purge_dir/final.tsv"
     to_hold="$purge_dir/to-hold.ids"
     preheld="$purge_dir/preheld.ids"
-
     _capture_inventory "$snapshot_raw" "$snapshot_tsv" || return 1
     count=$(_render_summary quiet "$snapshot_tsv") || return 1
     _render_summary text "$snapshot_tsv"
@@ -986,14 +984,12 @@ _purge_snapshot() {
     printf 'Snapshot messages: %d\nWill place on hold before identity verification: %d\nAlready held: %d\n' \
         "$count" "$to_hold_count" "$preheld_count"
     printf '%s\n' 'Only messages whose arrival time, size, sender, and recipients still match will be deleted.'
-
     expected_token="PURGE $count"
     if [[ "$legacy_clear" == true && "${VW_EMAIL_QUEUE_CLEAR_CONFIRMED:-}" == "1" ]]; then
         :
     else
         _confirm_exact "$expected_token" "purge-snapshot" "Snapshot purge" || return 1
     fi
-
     # The host lock serializes this utility. Holding prevents normal Postfix delivery
     # from removing a verified item between the post-hold inventory and batch delete.
     # Administrators invoking Postfix directly are outside this lock and must not
@@ -1006,7 +1002,6 @@ _purge_snapshot() {
         _release_ids "$to_hold" || true
         return 1
     fi
-
     _classify_after_hold "$snapshot_tsv" "$after_hold_tsv" "$purge_dir" || return 1
     eligible="$purge_dir/eligible.ids"
     absent_ids="$purge_dir/absent.ids"
@@ -1017,34 +1012,36 @@ _purge_snapshot() {
     rollback_pending="$purge_dir/rollback-pending.ids"
     cat "$newly_held" "$release_mismatch" >"$rollback_pending"
     _HOLD_ROLLBACK_FILE="$rollback_pending"
-
     if [[ -s "$release_mismatch" ]]; then
         _release_ids "$release_mismatch" || log_warn "A mismatched held queue ID could not be released immediately; cleanup will retry."
     fi
     _delete_ids "$eligible" || log_warn "One or more verified held messages could not be deleted; survivors will be released when appropriate."
-
     if ! _capture_inventory "$after_delete_raw" "$after_delete_tsv"; then
         log_error "Unable to verify deletion results; cleanup will release newly held snapshot survivors."
         return 1
     fi
     _classify_after_delete "$snapshot_tsv" "$eligible" "$after_delete_tsv" "$purge_dir" || return 1
+    post_delete_mismatch_ids="$purge_dir/post_delete_mismatch.ids"
+    if [[ -s "$post_delete_mismatch_ids" ]]; then
+        log_warn "Detected post-delete queue-ID reuse or identity mismatch; replacement messages were preserved unchanged."
+    fi
     rollback_ids="$purge_dir/rollback.ids"
     _HOLD_ROLLBACK_FILE="$rollback_ids"
     if [[ -s "$rollback_ids" ]]; then
         _release_ids "$rollback_ids" || log_warn "One or more newly introduced holds could not be rolled back."
     fi
-
     _capture_inventory "$final_raw" "$final_tsv" || return 1
     _HOLD_ROLLBACK_ACTIVE=false
     deleted=$(_count_file_lines "$purge_dir/deleted.ids")
     absent=$(_count_file_lines "$absent_ids")
     mismatches=$(_count_file_lines "$mismatch_ids")
+    post_delete_mismatch=$(_count_file_lines "$post_delete_mismatch_ids")
+    mismatches=$((mismatches + post_delete_mismatch))
     hold_failed=$(_count_file_lines "$hold_failed_ids")
     delete_failed=$(_count_file_lines "$purge_dir/delete_failed.ids")
     restore_failed=$(_count_held_ids "$rollback_ids" "$final_tsv")
     failed=$((hold_failed + delete_failed + restore_failed))
     remaining=$(_render_summary quiet "$final_tsv") || return 1
-
     printf 'Deleted snapshot messages: %d\n' "$deleted"
     printf 'Already absent: %d\n' "$absent"
     printf 'Identity mismatches or reused IDs skipped: %d\n' "$mismatches"

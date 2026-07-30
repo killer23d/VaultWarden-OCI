@@ -44,7 +44,13 @@ EMAIL_TEST_TRANSPORT ?= configured
 QUEUE_ID ?=
 EMAIL_QUEUE_TAIL ?= 200
 EMAIL_QUEUE_BODY ?= false
-export QUEUE_ID EMAIL_QUEUE_TAIL EMAIL_QUEUE_BODY
+
+override EMAIL_TEST_TRANSPORT := $(value EMAIL_TEST_TRANSPORT)
+override QUEUE_ID := $(value QUEUE_ID)
+override EMAIL_QUEUE_TAIL := $(value EMAIL_QUEUE_TAIL)
+override EMAIL_QUEUE_BODY := $(value EMAIL_QUEUE_BODY)
+
+export EMAIL_TEST_TRANSPORT QUEUE_ID EMAIL_QUEUE_TAIL EMAIL_QUEUE_BODY
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
@@ -259,8 +265,8 @@ test-secrets: ## Test secrets decryption
 
 test-email: ## Test configured or exact email delivery transports (EMAIL_TEST_TRANSPORT=...)
 	$(call require-root)
-	@echo "$(BLUE)Testing email delivery transport: $(EMAIL_TEST_TRANSPORT)$(NC)"
-	@./maintenance.sh test-email --transport "$(EMAIL_TEST_TRANSPORT)" --verbose
+	@echo "$(BLUE)Testing email delivery transport: $${EMAIL_TEST_TRANSPORT}$(NC)"
+	@./maintenance.sh test-email --transport "$${EMAIL_TEST_TRANSPORT}" --verbose
 
 email-queue: ## Show the human-readable Postfix email queue
 	$(call require-root)
