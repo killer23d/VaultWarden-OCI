@@ -1293,8 +1293,8 @@ require 'utilities/env-edit\.sh" sync' "$SETUP_ENV" \
 
 require '--id systemd-install' "$SETUP_SYSTEMD" \
   "setup-systemd install/remove must use systemd-install operation id"
-require '--specific-lock /run/lock/vaultwarden-systemd\.lock' "$SETUP_SYSTEMD" \
-  "setup-systemd must use systemd-specific lock"
+require '--specific-lock "\$\{VW_SYSTEMD_RUNTIME_LOCK_DIR:-/run/lock\}/vaultwarden-systemd\.lock"' "$SETUP_SYSTEMD" \
+  "setup-systemd must use its systemd-specific lock in the selected runtime lock directory"
 require 'utilities/setup-firewall\.sh' "$SETUP_SYSTEMD" \
   "setup-systemd must preserve structured setup-firewall utility path"
 reject 'script" == "utilities/setup-firewall\.sh"' "$SETUP_SYSTEMD" \

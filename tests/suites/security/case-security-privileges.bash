@@ -490,9 +490,10 @@ grep -Fq 'resolve_age_key_path >/dev/null 2>&1' utilities/secrets-list.sh || fai
 grep -Fq 'resolve_age_key_path >/dev/null 2>&1' utilities/secrets-view.sh || fail "secrets-view does not resolve active Age key"
 pass "secrets prerequisite checks use active Age key resolver and canonical diagnostics"
 
-grep -Fq '"/etc/vaultwarden/age-key.txt"' lib/crypto.sh || fail "Age key resolver does not include installed canonical path"
+grep -Fq 'SOPS_AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"' lib/config.sh || fail "canonical config does not select the installed Age key"
+grep -Fq 'local selected="${1:-${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}}"' lib/crypto.sh || fail "Age key resolver does not preserve the canonical selected identity"
 grep -Fq '"/etc/vaultwarden/vaultwarden.env"' lib/config.sh || fail "environment loader does not include installed env path"
-pass "root execution can resolve installed Age key and env defaults"
+pass "root execution resolves canonical installed Age key and env defaults"
 
 # setup-secrets bootstrap must preserve repo .env owner/group/mode across atomic replacement.
 grep -Fq 'env_uid=$(stat -c '\''%u'\'' "$env_file"' utilities/setup-secrets.sh || fail "setup-secrets does not capture .env owner"
@@ -832,7 +833,7 @@ escrow_copy="$(find "$KEY_TMP/home" -name 'age-key-escrow-*.txt' -type f -print 
 [[ -n "$escrow_copy" ]] || { cat "$KEY_ESCROW_OUT" >&2; fail "key-escrow did not create an escrow file"; }
 grep -Fq 'PRODUCTION-ACTIVE-KEY' "$escrow_copy" || fail "key-escrow wrote escrow from the wrong key"
 ! grep -Fq 'REPO-LOCAL-KEY' "$escrow_copy" || fail "key-escrow escrow contains repo-local key"
-pass "retained key targets resolve production active key before repo-local fallback"
+pass "retained key targets preserve the selected production identity without repo-local fallback"
 
 STATUS_SNIP="$(mktemp -t vw-status-contract.XXXXXXXXXX)"
 extract_make_target status Makefile > "$STATUS_SNIP" || fail "could not extract status target"

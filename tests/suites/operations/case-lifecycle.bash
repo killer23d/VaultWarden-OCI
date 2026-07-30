@@ -310,6 +310,8 @@ run_systemd_install_fixture(){
     VW_TEST_RUN_LOCK_DIR="$TMP/run-locks" \
     VW_TEST_LOCK_CHOWN_LOG="$TMP/lock-chown.log" \
     VW_TEST_SERVICE_USER="vwtest" \
+    VW_OPERATIONS_LOCK="$TMP/run-locks/vaultwarden-operations.lock" \
+    VW_OPERATIONS_STATE_DIR="$TMP/operations-state" \
     SERVICE_USER="vwtest" \
     VW_TEST_SYSTEMCTL_MODE="$mode" \
     PROJECT_STATE_DIR="$state" \

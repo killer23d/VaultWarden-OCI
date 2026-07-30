@@ -150,7 +150,7 @@ _setup_systemd_acquire_guard() {
     operation_acquire \
         --id systemd-install \
         --label "$label" \
-        --specific-lock /run/lock/vaultwarden-systemd.lock \
+        --specific-lock "${VW_SYSTEMD_RUNTIME_LOCK_DIR:-/run/lock}/vaultwarden-systemd.lock" \
         --non-interactive "$policy" || return $?
     SETUP_SYSTEMD_GUARD_HELD=true
     _setup_systemd_cleanup() {
