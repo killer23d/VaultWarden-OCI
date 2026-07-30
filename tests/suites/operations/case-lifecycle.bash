@@ -293,6 +293,14 @@ operation_acquire(){ return 0; }
 operation_release(){ return 0; }
 operation_set_phase(){ return 0; }
 EOF_OPERATIONS
+  # Environment propagation has dedicated behavioral coverage in the
+  # foundation suite; this fixture only needs setup-systemd's delegation to
+  # succeed before it exercises unit and timer installation.
+  cat > "$repo/utilities/env-edit.sh" <<'EOF_ENV_EDIT'
+#!/usr/bin/env bash
+exit 0
+EOF_ENV_EDIT
+  chmod +x "$repo/utilities/env-edit.sh"
   cat > "$repo/.env" <<EOF_ENV
 DOMAIN=https://systemd-policy.example.test
 ADMIN_EMAIL=admin@example.test
