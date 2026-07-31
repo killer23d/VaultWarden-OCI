@@ -17,13 +17,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD > pr280-source-sha.txt
-          tar --exclude=.git -czf pr280-source.tar.gz .
+          git rev-parse HEAD > "$RUNNER_TEMP/pr280-source-sha.txt"
+          tar --exclude=.git -czf "$RUNNER_TEMP/pr280-source.tar.gz" .
       - uses: actions/upload-artifact@v6
         with:
           name: pr280-source
           path: |
-            pr280-source.tar.gz
-            pr280-source-sha.txt
+            ${{ runner.temp }}/pr280-source.tar.gz
+            ${{ runner.temp }}/pr280-source-sha.txt
           if-no-files-found: error
           retention-days: 1
