@@ -583,12 +583,17 @@ test_closed_inventory_reconciles_only_project_owned_artifacts() (
         || fail "managed inventory dry-run did not name exact stale artifacts and intended actions"
 )
 
-    local sync_line reload_line render_line
+    local sync_line reload_line reconcile_line render_line
     sync_line="$(grep -n '_sync_runtime_environment_files || return 1' "$ROOT/utilities/setup-systemd.sh" | head -1 | cut -d: -f1)"
     reload_line="$(grep -n '_reload_runtime_environment_after_sync || return 1' "$ROOT/utilities/setup-systemd.sh" | head -1 | cut -d: -f1)"
+    reconcile_line="$(grep -n '_reconcile_unexpected_managed_artifacts || return 1' "$ROOT/utilities/setup-systemd.sh" | tail -1 | cut -d: -f1)"
     render_line="$(grep -n 'Installing systemd unit files to' "$ROOT/utilities/setup-systemd.sh" | head -1 | cut -d: -f1)"
-    [[ -n "$sync_line" && -n "$reload_line" && -n "$render_line" && "$sync_line" -lt "$reload_line" && "$reload_line" -lt "$render_line" ]] \
-        || fail "setup-systemd does not reload canonical configuration between sync and rendering"
+    if [[ -z "$sync_line" || -z "$reload_line" || -z "$reconcile_line" || -z "$render_line" ]]; then
+        fail "setup-systemd post-sync ordering markers are incomplete"
+    fi
+    if (( sync_line >= reload_line || reload_line >= reconcile_line || reconcile_line >= render_line )); then
+        fail "setup-systemd does not reconcile the post-sync snapshot before rendering"
+    fi
     printf 'PASS setup-systemd reloads one canonical post-sync snapshot before rendering\n'
 
 test_runtime_lock_preparation_is_verified_and_stable() (
@@ -789,9 +794,15 @@ check_systemd_post_sync_snapshot_contract() (
 set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
+DEVICE_A="/dev/vw-pr280-a-$$"
+DEVICE_B="/dev/vw-pr280-b-$$"
 cleanup(){
-  if [[ -d "$TMP" ]]; then
-    if (( EUID == 0 )); then rm -rf "$TMP"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then sudo -n rm -rf "$TMP"; else rm -rf "$TMP"; fi
+  if (( EUID == 0 )); then
+    rm -rf "$TMP"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n rm -rf "$TMP"
+  else
+    rm -rf "$TMP"
   fi
 }
 trap cleanup EXIT
@@ -803,106 +814,279 @@ if (( EUID != 0 )) && { ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/de
   exit 0
 fi
 
+root_run(){
+  if (( EUID == 0 )); then "$@"; else sudo -n "$@"; fi
+}
 REPO="$TMP/repo"
 mkdir -p "$REPO"
 (cd "$ROOT" && tar --exclude=.git --exclude='.migrate-volume.state' -cf - .) | (cd "$REPO" && tar -xf -)
+# The transition contract under test is systemd inventory/rendering. Keep the
+# public env-edit sync boundary, but make its attached-volume readiness probe a
+# fixture-local success so the test does not require a privileged block device.
+cat >> "$REPO/lib/storage.sh" <<'EOF_STORAGE_TEST'
+if [[ "${VW_TEST_ASSUME_STORAGE_READY:-false}" == "true" ]]; then
+  check_project_state_ready(){ return 0; }
+fi
+EOF_STORAGE_TEST
 ENV_DIR="$TMP/etc-vaultwarden"
 UNIT_DIR="$TMP/systemd"
 OPT_DIR="$TMP/opt"
 LOCK_DIR="$TMP/locks"
-STATE_A="$TMP/state-a"
-STATE_B="$TMP/state-b"
+BOOT_A="$TMP/boot-a"
+BOOT_B="$TMP/boot-b"
+MOUNT_A="$TMP/mount-a"
+MOUNT_B="$TMP/mount-b"
 BIN="$TMP/bin"
-mkdir -p "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" "$STATE_A" "$STATE_B" "$BIN"
-cat > "$ENV_DIR/vaultwarden.env" <<EOF_A
-PROJECT_STATE_DIR=$STATE_A
-DATA_VOLUME_DEVICE=
-DATA_VOLUME_MOUNT=
-SOPS_AGE_KEY_FILE=$ENV_DIR/age-key.txt
-DOMAIN=a.example.invalid
-ADMIN_EMAIL=admin@a.example.invalid
+mkdir -p "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" "$BOOT_A" "$BOOT_B" "$MOUNT_A" "$MOUNT_B" "$BIN"
+: > "$MOUNT_A/.vw-data-volume"
+: > "$MOUNT_B/.vw-data-volume"
+
+DROPIN_UNITS=(
+  vaultwarden-maintenance.service
+  vaultwarden-db-backup.service
+  vaultwarden-full-backup.service
+  vaultwarden-health.service
+  vaultwarden-dns-update.service
+  vaultwarden-firewall-update.service
+  vaultwarden-notify-failure.service
+  vaultwarden-notify-failure@.service
+  vaultwarden-maintenance.timer
+  vaultwarden-db-backup.timer
+  vaultwarden-full-backup.timer
+  vaultwarden-health.timer
+  vaultwarden-dns-update.timer
+  vaultwarden-firewall-update.timer
+)
+
+write_env(){
+  local path="$1" state="$2" device="$3" mount="$4" domain="$5"
+  local optional_key="${6:-}" sops_key="${7:-}"
+  cat > "$path" <<EOF_ENV
+PROJECT_STATE_DIR=$state
+DATA_VOLUME_DEVICE=$device
+DATA_VOLUME_MOUNT=$mount
+SOPS_AGE_KEY_FILE=$sops_key
+DOMAIN=$domain
+ADMIN_EMAIL=admin@$domain
 CADDY_VERSION=2.11.4
-EOF_A
-cat > "$REPO/.env" <<EOF_B
-PROJECT_STATE_DIR=$STATE_B
-DATA_VOLUME_DEVICE=
-DATA_VOLUME_MOUNT=
-SOPS_AGE_KEY_FILE=
-DOMAIN=b.example.invalid
-ADMIN_EMAIL=admin@b.example.invalid
-CADDY_VERSION=2.11.4
-EOF_B
-chmod 0600 "$ENV_DIR/vaultwarden.env" "$REPO/.env"
+EOF_ENV
+  if [[ -n "$optional_key" ]]; then
+    printf 'A_ONLY_TRANSITION_KEY=%s\n' "$optional_key" >> "$path"
+  fi
+  chmod 0600 "$path"
+}
+
+write_env "$ENV_DIR/vaultwarden.env" "$BOOT_A" "" "" "a.example.invalid" "legacy-only" "$ENV_DIR/age-key.txt"
+write_env "$REPO/.env" "$BOOT_B" "" "" "b.example.invalid"
+
 cat > "$BIN/systemctl" <<'EOF_SYSTEMCTL'
 #!/usr/bin/env bash
+printf 'cmd=%s|A_ONLY=%s|STATE=%s|DEVICE=%s|MOUNT=%s\n' \
+  "$*" "${A_ONLY_TRANSITION_KEY-<unset>}" "${PROJECT_STATE_DIR-<unset>}" \
+  "${DATA_VOLUME_DEVICE-<unset>}" "${DATA_VOLUME_MOUNT-<unset>}" \
+  >> "${SYSTEMCTL_LOG:?}"
 case "${1:-}" in
   is-active|is-enabled) exit 0 ;;
   show) printf 'Fri 2099-01-01 00:00:00 UTC\n'; exit 0 ;;
   status) exit 0 ;;
-  *) printf 'systemctl %s\n' "$*" >> "${SYSTEMCTL_LOG:?}"; exit 0 ;;
+  *) exit 0 ;;
 esac
 EOF_SYSTEMCTL
 cat > "$BIN/systemd-analyze" <<'EOF_ANALYZE'
 #!/usr/bin/env bash
 exit 0
 EOF_ANALYZE
+cat > "$BIN/mountpoint" <<'EOF_MOUNTPOINT'
+#!/usr/bin/env bash
+exit 0
+EOF_MOUNTPOINT
 chmod +x "$BIN/"*
 : > "$TMP/systemctl.log"
 
 run_setup(){
   local action="$1"; shift
   local -a cmd=(env PATH="$BIN:$PATH" SYSTEMCTL_LOG="$TMP/systemctl.log" SERVICE_USER=root SERVICE_GROUP=root
+    VW_TEST_ASSUME_STORAGE_READY=true
     VW_CONFIG_INSTALLED_ENV_FILE="$ENV_DIR/vaultwarden.env" VW_SYNC_ETC_DIR="$ENV_DIR"
     VW_SYSTEMD_ENV_DIR="$ENV_DIR" VW_SYSTEMD_UNIT_DEST_DIR="$UNIT_DIR"
     VW_SYSTEMD_OPT_SCRIPTS_DIR="$OPT_DIR" VW_SYSTEMD_RUNTIME_LOCK_DIR="$LOCK_DIR"
     bash "$REPO/utilities/setup-systemd.sh" "$action" "$@")
-  if (( EUID == 0 )); then "${cmd[@]}"; else sudo -n "${cmd[@]}"; fi
+  root_run "${cmd[@]}"
 }
 
 read_fixture_file(){
   local path="$1"
-  if [[ -r "$path" ]]; then
-    cat "$path"
-  elif (( EUID == 0 )); then
-    cat "$path"
-  else
-    sudo -n cat "$path"
-  fi
+  if [[ -r "$path" ]]; then cat "$path"; else root_run cat "$path"; fi
 }
-hash_fixture_tree(){
+
+snapshot_fixture(){
   local output="$1"
+  local -a roots=("$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" "$BOOT_A" "$BOOT_B" "$MOUNT_A" "$MOUNT_B")
+  {
+    root_run find "${roots[@]}" -printf '%p|%y|%m|%l\n' | sort
+    root_run find "${roots[@]}" -type f -print0 | sort -z | root_run xargs -0 -r sha256sum
+  } > "$output"
+}
+
+ensure_fixture_key(){
   if (( EUID == 0 )); then
-    find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" -type f -print0 | sort -z | xargs -0 sha256sum > "$output"
+    printf 'fixture-key\n' > "$ENV_DIR/age-key.txt"
+    chmod 0600 "$ENV_DIR/age-key.txt"
+    chown root:root "$ENV_DIR/age-key.txt"
   else
-    sudo -n find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" -type f -print0 | sort -z | sudo -n xargs -0 sha256sum | tee "$output" >/dev/null
+    printf 'fixture-key\n' | sudo -n tee "$ENV_DIR/age-key.txt" >/dev/null
+    sudo -n "$(type -P chmod)" 0600 "$ENV_DIR/age-key.txt"
+    sudo -n "$(type -P chown)" root:root "$ENV_DIR/age-key.txt"
   fi
 }
 
-run_setup install --no-start >"$TMP/install-1.out" 2>&1 || { cat "$TMP/install-1.out" >&2; fail 'first public install failed'; }
-read_fixture_file "$ENV_DIR/vaultwarden.env" | grep -Fxq "PROJECT_STATE_DIR=$STATE_B" || fail 'explicit sync did not write B environment'
-grep -Fq "$STATE_B" "$UNIT_DIR/vaultwarden-startup.service" || fail 'startup unit did not render B state'
-! grep -Fq "$STATE_A" "$UNIT_DIR/vaultwarden-startup.service" || fail 'startup unit retained A state'
-if grep -R -F "$STATE_A" "$UNIT_DIR" >/dev/null 2>&1; then fail 'generated unit or drop-in retained A state'; fi
-if find "$UNIT_DIR" -type f -name '*.conf' -print0 | xargs -0 grep -L -F "$STATE_B" >/dev/null 2>&1; then :; fi
+assert_boot_only(){
+  local unit file
+  for unit in "${DROPIN_UNITS[@]}"; do
+    file="$UNIT_DIR/${unit}.d/10-state-dir.conf"
+    [[ ! -e "$file" ]] || fail "boot-only install retained generated state-dir drop-in: $file"
+  done
+}
 
-# Validation expects a configured key and active/enabled timers. Supply the
-# fixture key after installation; production installation owns the real key copy.
-if (( EUID == 0 )); then
-  printf 'fixture-key\n' > "$ENV_DIR/age-key.txt"
-  chmod 0600 "$ENV_DIR/age-key.txt"
-  chown root:root "$ENV_DIR/age-key.txt"
-else
-  printf 'fixture-key\n' | sudo -n tee "$ENV_DIR/age-key.txt" >/dev/null
-  sudo -n "$(type -P chmod)" 0600 "$ENV_DIR/age-key.txt"
-  sudo -n "$(type -P chown)" root:root "$ENV_DIR/age-key.txt"
-fi
-run_setup validate >"$TMP/validate.out" 2>&1 || { cat "$TMP/validate.out" >&2; fail 'immediate validation failed'; }
+assert_separate_volume(){
+  local mount="$1" old_value="${2:-}" unit file mount_unit
+  mount_unit="$(systemd-escape --path --suffix=mount "$mount")"
+  for unit in "${DROPIN_UNITS[@]}"; do
+    file="$UNIT_DIR/${unit}.d/10-state-dir.conf"
+    [[ -f "$file" ]] || fail "missing state-dir drop-in for $unit"
+    grep -Fq "After=$mount_unit" "$file" || fail "drop-in for $unit does not use $mount"
+    if [[ "$unit" == *.service ]]; then
+      grep -Fq "ReadWritePaths=$mount" "$file" || fail "service drop-in for $unit lacks $mount"
+    fi
+    if [[ -n "$old_value" ]]; then
+      ! grep -Fq "$old_value" "$file" || fail "drop-in for $unit retained old value $old_value"
+    fi
+  done
+}
 
-hash_fixture_tree "$TMP/before.sha"
-run_setup install --no-start >"$TMP/install-2.out" 2>&1 || { cat "$TMP/install-2.out" >&2; fail 'second public install failed'; }
-hash_fixture_tree "$TMP/after.sha"
-cmp -s "$TMP/before.sha" "$TMP/after.sha" || fail 'second installation was not content-idempotent'
-printf 'PASS setup-systemd public install reloads one coherent A-to-B configuration snapshot\n'
+assert_preserved_operator_state(){
+  [[ -f "$UNIT_DIR/vaultwarden-health.service.d/90-operator.conf" ]] \
+    || fail 'operator drop-in was removed'
+  [[ -f "$UNIT_DIR/third-party.service.d/10-state-dir.conf" ]] \
+    || fail 'third-party drop-in was removed'
+  [[ -L "$UNIT_DIR/timers.target.wants/external.timer" ]] \
+    || fail 'ordinary wants link was removed'
+}
+
+assert_generated_value_absent(){
+  local value="$1"
+  [[ -n "$value" ]] || return 0
+  if root_run grep -R -F -- "$value" "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" >/dev/null 2>&1; then
+    fail "generated runtime artifact retained obsolete value: $value"
+  fi
+}
+
+validate_and_check_idempotence(){
+  local label="$1"
+  local before="$TMP/${label}.before" after="$TMP/${label}.after"
+  ensure_fixture_key
+  run_setup validate >"$TMP/${label}.validate.out" 2>&1 \
+    || { cat "$TMP/${label}.validate.out" >&2; fail "$label immediate validation failed"; }
+  snapshot_fixture "$before"
+  run_setup install --no-start >"$TMP/${label}.second.out" 2>&1 \
+    || { cat "$TMP/${label}.second.out" >&2; fail "$label second install failed"; }
+  snapshot_fixture "$after"
+  cmp -s "$before" "$after" || fail "$label second installation was not content-idempotent"
+  assert_preserved_operator_state
+}
+
+run_dry_transition(){
+  local label="$1" old_value="$2" new_value="$3" expected="$4"
+  local before="$TMP/${label}.dry.before" after="$TMP/${label}.dry.after"
+  local output="$TMP/${label}.dry.out"
+  snapshot_fixture "$before"
+  run_setup install --dry-run --no-start >"$output" 2>&1 \
+    || { cat "$output" >&2; fail "$label dry-run failed"; }
+  snapshot_fixture "$after"
+  cmp -s "$before" "$after" || fail "$label dry-run mutated installed state"
+  grep -Fq '[DRY RUN] Current runtime source:' "$output" || fail "$label dry-run omitted current source"
+  grep -Fq '[DRY RUN] Intended post-sync source:' "$output" || fail "$label dry-run omitted intended source"
+  if [[ -n "$old_value" ]]; then
+    ! grep -Fq "PROJECT_STATE_DIR=$old_value" "$output" || fail "$label dry-run reported old state as intended"
+    ! grep -Fq "ReadWritePaths=$old_value" "$output" || fail "$label dry-run reported old mount as intended"
+  fi
+  if [[ "$expected" == boot ]]; then
+    local unit
+    for unit in "${DROPIN_UNITS[@]}"; do
+      grep -Fq "$UNIT_DIR/${unit}.d/10-state-dir.conf" "$output" \
+        || fail "$label dry-run omitted stale drop-in for $unit"
+    done
+  else
+    grep -Fq "DATA_VOLUME_MOUNT=$new_value" "$output" \
+      || fail "$label dry-run did not report intended mount $new_value"
+    local unit
+    for unit in "${DROPIN_UNITS[@]}"; do
+      grep -Fq "Would write state-dir drop-in: $UNIT_DIR/${unit}.d/10-state-dir.conf" "$output" \
+        || fail "$label dry-run omitted new drop-in for $unit"
+    done
+  fi
+}
+
+mkdir -p "$UNIT_DIR/vaultwarden-health.service.d" "$UNIT_DIR/third-party.service.d" "$UNIT_DIR/timers.target.wants"
+printf '[Service]\nEnvironment=OPERATOR_PRESERVED=yes\n' > "$UNIT_DIR/vaultwarden-health.service.d/90-operator.conf"
+printf '# third-party reserved-name file\n' > "$UNIT_DIR/third-party.service.d/10-state-dir.conf"
+ln -s /tmp/external.timer "$UNIT_DIR/timers.target.wants/external.timer"
+
+# 1. Boot-only A -> boot-only B, including removal of an A-only variable.
+run_setup install --no-start >"$TMP/boot-to-boot.out" 2>&1 \
+  || { cat "$TMP/boot-to-boot.out" >&2; fail 'boot-only A-to-B install failed'; }
+read_fixture_file "$ENV_DIR/vaultwarden.env" | grep -Fxq "PROJECT_STATE_DIR=$BOOT_B" \
+  || fail 'boot-only A-to-B sync did not select B'
+! grep -Fq "$BOOT_A" "$UNIT_DIR/vaultwarden-startup.service" \
+  || fail 'boot-only A-to-B startup unit retained A'
+! grep -Fq 'A_ONLY=legacy-only' "$TMP/systemctl.log" \
+  || fail 'A-only variable survived the post-sync reload'
+! read_fixture_file "$ENV_DIR/vaultwarden.env" | grep -Fq 'A_ONLY_TRANSITION_KEY=' \
+  || fail 'A-only variable survived in the synchronized environment'
+assert_generated_value_absent "$BOOT_A"
+assert_generated_value_absent 'legacy-only'
+assert_boot_only
+validate_and_check_idempotence boot-to-boot
+
+# 2. Boot-only -> separate volume creates every B drop-in truthfully.
+write_env "$REPO/.env" "$MOUNT_A" "$DEVICE_A" "$MOUNT_A" "volume-a.example.invalid"
+run_dry_transition boot-to-volume "$BOOT_B" "$MOUNT_A" volume
+run_setup install --no-start >"$TMP/boot-to-volume.out" 2>&1 \
+  || { cat "$TMP/boot-to-volume.out" >&2; fail 'boot-only to separate-volume install failed'; }
+assert_separate_volume "$MOUNT_A" "$BOOT_B"
+assert_generated_value_absent "$BOOT_B"
+validate_and_check_idempotence boot-to-volume
+
+# 3. Separate volume -> boot-only removes every generated state-dir drop-in.
+write_env "$REPO/.env" "$BOOT_B" "" "" "boot-b.example.invalid"
+local_reload_before="$(grep -c 'cmd=daemon-reload' "$TMP/systemctl.log" || true)"
+run_dry_transition volume-to-boot "$MOUNT_A" "$BOOT_B" boot
+run_setup install --no-start >"$TMP/volume-to-boot.out" 2>&1 \
+  || { cat "$TMP/volume-to-boot.out" >&2; fail 'separate-volume to boot-only install failed'; }
+assert_boot_only
+assert_generated_value_absent "$MOUNT_A"
+local_reload_after="$(grep -c 'cmd=daemon-reload' "$TMP/systemctl.log" || true)"
+(( local_reload_after >= local_reload_before + 2 )) \
+  || fail 'daemon-reload did not follow stale drop-in reconciliation'
+validate_and_check_idempotence volume-to-boot
+
+# 4. Boot-only -> separate volume B creates all expected B content.
+write_env "$REPO/.env" "$MOUNT_B" "$DEVICE_B" "$MOUNT_B" "volume-b.example.invalid"
+run_dry_transition boot-to-volume-b "$BOOT_B" "$MOUNT_B" volume
+run_setup install --no-start >"$TMP/boot-to-volume-b.out" 2>&1 \
+  || { cat "$TMP/boot-to-volume-b.out" >&2; fail 'boot-only to separate-volume B install failed'; }
+assert_separate_volume "$MOUNT_B" "$BOOT_B"
+assert_generated_value_absent "$BOOT_B"
+validate_and_check_idempotence boot-to-volume-b
+
+# 5. Separate-volume mount B -> mount A rewrites every generated file.
+write_env "$REPO/.env" "$MOUNT_A" "$DEVICE_A" "$MOUNT_A" "volume-a2.example.invalid"
+run_setup install --no-start >"$TMP/volume-to-volume.out" 2>&1 \
+  || { cat "$TMP/volume-to-volume.out" >&2; fail 'separate-volume mount transition failed'; }
+assert_separate_volume "$MOUNT_A" "$MOUNT_B"
+assert_generated_value_absent "$MOUNT_B"
+validate_and_check_idempotence volume-to-volume
+
+printf 'PASS setup-systemd public install covers boot-only and separate-volume transitions\n'
 )
-
 check_systemd_post_sync_snapshot_contract
