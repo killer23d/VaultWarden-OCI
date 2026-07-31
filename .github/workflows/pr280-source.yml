@@ -1,12 +1,10 @@
 name: PR 280 source snapshot
 on:
-  push:
-    branches:
-      - codex/small-team-runtime-remediation
+  pull_request:
     paths:
       - '.github/workflows/pr280-source.yml'
 permissions:
-  contents: write
+  contents: read
 jobs:
   snapshot:
     runs-on: ubuntu-latest
@@ -15,22 +13,17 @@ jobs:
         with:
           ref: codex/small-team-runtime-remediation
           fetch-depth: 0
-      - name: Publish exact target sources
+      - name: Archive exact source tree
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .pr280-src-setup-* .pr280-src-test-* .pr280-src-manifest
-          rm -rf .pr280-src
-          mkdir -p .pr280-src
-          cp utilities/setup-systemd.sh .pr280-src/setup-systemd.sh
-          cp tests/suites/foundation/case-systemd.bash .pr280-src/case-systemd.bash
-          {
-            git rev-parse HEAD
-            sha256sum utilities/setup-systemd.sh tests/suites/foundation/case-systemd.bash
-            wc -l utilities/setup-systemd.sh tests/suites/foundation/case-systemd.bash
-          } > .pr280-src/manifest
-          git config user.name 'OpenAI Codex'
-          git config user.email 'codex@openai.com'
-          git add -A .pr280-src .pr280-src-setup-* .pr280-src-test-* .pr280-src-manifest
-          git commit -m 'stage exact PR 280 target sources'
-          git push origin HEAD:codex/small-team-runtime-remediation
+          git rev-parse HEAD > pr280-source-sha.txt
+          tar --exclude=.git -czf pr280-source.tar.gz .
+      - uses: actions/upload-artifact@v6
+        with:
+          name: pr280-source
+          path: |
+            pr280-source.tar.gz
+            pr280-source-sha.txt
+          if-no-files-found: error
+          retention-days: 1
