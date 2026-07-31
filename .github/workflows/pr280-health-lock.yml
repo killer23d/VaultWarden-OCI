@@ -1,4 +1,4 @@
-name: Diagnose PR 280 process leak
+name: Inspect PR 280 legacy fixture cleanup
 on:
   pull_request:
     paths:
@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  diagnose:
+  inspect:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -14,7 +14,7 @@ jobs:
         with:
           ref: codex/small-team-runtime-remediation
           fetch-depth: 0
-      - name: Run only operations case and inspect survivors
+      - name: Render leaking operation fixtures
         shell: bash
         run: |
           set -euo pipefail
@@ -37,26 +37,4 @@ jobs:
           Path('/tmp/pr280-prepare.sh').write_text(prefix + '\n')
           PY
           bash -e -o pipefail /tmp/pr280-prepare.sh
-          ps -e -o pid= | sort -n > /tmp/pids.before
-          set +e
-          timeout --kill-after=5s 180s bash tests/suites/operations/case-operations.bash > /tmp/case.log 2>&1
-          rc=$?
-          set -e
-          cat /tmp/case.log
-          printf 'case rc=%s\n' "$rc"
-          sleep 1
-          ps -e -o pid= | sort -n > /tmp/pids.after
-          comm -13 /tmp/pids.before /tmp/pids.after | tr -d ' ' > /tmp/new-pids
-          echo '--- surviving processes created by case ---'
-          while read -r pid; do
-            [[ "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] || continue
-            ps -o pid=,ppid=,user=,stat=,comm=,args= -p "$pid" || true
-            printf '  cwd=%s\n' "$(sudo readlink "/proc/$pid/cwd" 2>/dev/null || true)"
-            printf '  fd1=%s\n' "$(sudo readlink "/proc/$pid/fd/1" 2>/dev/null || true)"
-            printf '  fd2=%s\n' "$(sudo readlink "/proc/$pid/fd/2" 2>/dev/null || true)"
-          done < /tmp/new-pids
-          while read -r pid; do
-            [[ "$pid" =~ ^[0-9]+$ ]] || continue
-            sudo kill -KILL "$pid" 2>/dev/null || true
-          done < <(tac /tmp/new-pids)
-          [[ "$rc" -eq 0 ]]
+          nl -ba tests/suites/operations/case-operations.bash | sed -n '600,1100p'
