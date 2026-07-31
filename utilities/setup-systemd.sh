@@ -36,6 +36,8 @@ ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
 STARTUP_SERVICE="vaultwarden-startup.service"
 SETUP_SYSTEMD_GUARD_HELD=false
+_PRE_SYNC_ENV_KEYS=()
+_DRY_RUN_RCLONE_WILL_EXIST=false
 
 TIMERS=(
     vaultwarden-maintenance.timer
@@ -827,16 +829,22 @@ DROPIN
 # Dry-run mode: logs what would be written without touching the filesystem.
 _install_rwpaths_dropin() {
     local data_device data_mount
-    # Read from the installed EnvironmentFile when available so that
-    # standalone 'setup-systemd.sh install' runs (without CLI flags) pick up
-    # the correct value written by a previous full setup run.
-    if [[ -f "$ENV_FILE" ]]; then
+    # The current shell snapshot is canonical after load/reload, including an
+    # intentionally empty DATA_VOLUME_DEVICE for boot-only mode. Fall back to
+    # the installed EnvironmentFile only for direct helper callers that have
+    # not loaded configuration into the environment.
+    if [[ -n "${DATA_VOLUME_DEVICE+x}" ]]; then
+        data_device="$DATA_VOLUME_DEVICE"
+    elif [[ -f "$ENV_FILE" ]]; then
         data_device=$(_read_env_value "DATA_VOLUME_DEVICE" "$ENV_FILE")
-        data_mount=$(_read_env_value "DATA_VOLUME_MOUNT"  "$ENV_FILE")
     fi
-    # Fall back to environment variables.
-    [[ -z "${data_device:-}" ]] && data_device="${DATA_VOLUME_DEVICE:-}"
-    [[ -z "${data_mount:-}"  ]] && data_mount="${DATA_VOLUME_MOUNT:-}"
+    if [[ -n "${DATA_VOLUME_MOUNT+x}" ]]; then
+        data_mount="$DATA_VOLUME_MOUNT"
+    elif [[ -f "$ENV_FILE" ]]; then
+        data_mount=$(_read_env_value "DATA_VOLUME_MOUNT" "$ENV_FILE")
+    fi
+    data_device="${data_device:-}"
+    data_mount="${data_mount:-}"
 
     if [[ -z "$data_device" ]]; then
         log_info "Boot-only mode — skipping per-unit ReadWritePaths drop-ins."
@@ -893,6 +901,91 @@ DROPIN
     done
 }
 
+_capture_pre_sync_environment_keys() {
+    local source="${VW_CONFIG_SELECTED_ENV_FILE:-}"
+    local key
+    _PRE_SYNC_ENV_KEYS=()
+    [[ -n "$source" && -r "$source" ]] || return 0
+
+    while IFS= read -r key; do
+        if ! _inventory_contains "$key" "${_PRE_SYNC_ENV_KEYS[@]}"; then
+            _PRE_SYNC_ENV_KEYS+=("$key")
+        fi
+    done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$source")
+}
+
+_clear_pre_sync_environment_values() {
+    local key declaration
+    for key in "${_PRE_SYNC_ENV_KEYS[@]}"; do
+        # These names belong to Bash or this script's loader state, not to the
+        # replaceable configuration snapshot.
+        case "$key" in
+            _VW_*|BASH*|EUID|UID|PPID|SHELLOPTS|FUNCNAME|GROUPS|DIRSTACK|PIPESTATUS|RANDOM|SRANDOM|SECONDS|LINENO|OPTIND|REPLY|PWD|OLDPWD|SHLVL|_)
+                continue
+                ;;
+        esac
+        declaration="$(declare -p "$key" 2>/dev/null || true)"
+        # Never attempt to unset another readonly shell variable. Only names
+        # loaded from the selected pre-sync environment are otherwise cleared.
+        if [[ "$declaration" =~ ^declare[[:space:]]+-[^[:space:]]*r ]]; then
+            continue
+        fi
+        unset "$key" 2>/dev/null || true
+    done
+}
+
+_apply_supported_caller_overrides() {
+    if [[ -n "${_VW_CALLER_PROJECT_STATE_DIR:-}" ]]; then
+        PROJECT_STATE_DIR="$_VW_CALLER_PROJECT_STATE_DIR"
+    fi
+    if [[ -n "${_VW_CALLER_DATA_VOLUME_DEVICE:-}" ]]; then
+        DATA_VOLUME_DEVICE="$_VW_CALLER_DATA_VOLUME_DEVICE"
+    fi
+    if [[ -n "${_VW_CALLER_DATA_VOLUME_MOUNT:-}" ]]; then
+        DATA_VOLUME_MOUNT="$_VW_CALLER_DATA_VOLUME_MOUNT"
+    fi
+    if [[ -n "${_VW_CALLER_SOPS_AGE_KEY_FILE:-}" ]]; then
+        SOPS_AGE_KEY_FILE="$_VW_CALLER_SOPS_AGE_KEY_FILE"
+    fi
+    export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
+}
+
+_load_intended_runtime_environment_for_dry_run() {
+    local repo_env="${PROJECT_ROOT}/.env"
+    local current_source="${VW_CONFIG_SELECTED_ENV_FILE:-<none>}"
+
+    if [[ ! -f "$repo_env" || ! -r "$repo_env" ]]; then
+        log_error "[DRY RUN] Repository environment is unavailable: $repo_env"
+        return 1
+    fi
+
+    _clear_pre_sync_environment_values
+    PROJECT_STATE_DIR=""
+    DATA_VOLUME_DEVICE=""
+    DATA_VOLUME_MOUNT=""
+    SOPS_AGE_KEY_FILE=""
+    export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
+
+    # env-edit sync copies repository .env into the generated production files;
+    # the subsequent canonical reload is strict, so predict that same contract
+    # without writing either generated file.
+    if ! load_env_file "$repo_env" --strict; then
+        log_error "[DRY RUN] Intended post-sync repository environment is invalid."
+        return 1
+    fi
+
+    SOPS_AGE_KEY_FILE="$AGE_KEY_DEST"
+    if [[ "$_DRY_RUN_RCLONE_WILL_EXIST" == "true" ]]; then
+        RCLONE_CONFIG="${ENV_DIR}/rclone.conf"
+        export RCLONE_CONFIG
+    fi
+    _apply_supported_caller_overrides
+
+    log_info "[DRY RUN] Current runtime source: $current_source"
+    log_info "[DRY RUN] Intended post-sync source: $repo_env (would generate $ENV_FILE)"
+    log_success "[DRY RUN] Loaded intended post-sync configuration without filesystem mutation"
+}
+
 _sync_runtime_environment_files() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would run utilities/env-edit.sh sync to regenerate install.env and $ENV_FILE"
@@ -906,21 +999,11 @@ _sync_runtime_environment_files() {
 
 _reload_runtime_environment_after_sync() {
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would reload canonical runtime configuration after env sync"
+        _load_intended_runtime_environment_for_dry_run || return 1
         return 0
     fi
 
-    local old_source="${VW_CONFIG_SELECTED_ENV_FILE:-}"
-    local key
-    if [[ -r "$old_source" ]]; then
-        while IFS= read -r key; do
-            case "$key" in
-                PROJECT_STATE_DIR|DATA_VOLUME_DEVICE|DATA_VOLUME_MOUNT|SOPS_AGE_KEY_FILE) ;;
-                *) unset "$key" ;;
-            esac
-        done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$old_source")
-    fi
-
+    _clear_pre_sync_environment_values
     if ! load_project_environment; then
         log_error "Failed to reload canonical runtime configuration after env sync."
         return 1
@@ -961,8 +1044,6 @@ install_units() {
         log_error "Run from the VaultWarden-OCI repository root."
         return 1
     fi
-
-    _reconcile_unexpected_managed_artifacts || return 1
 
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
     _run mkdir -p "$OPT_SCRIPTS_DIR"
@@ -1083,9 +1164,11 @@ install_units() {
     fi
 
     local rclone_dest="$ENV_DIR/rclone.conf"
+    _DRY_RUN_RCLONE_WILL_EXIST=false
     log_info "Setting up rclone config at $rclone_dest ..."
 
     if [[ -f "$rclone_dest" ]]; then
+        _DRY_RUN_RCLONE_WILL_EXIST=true
         if [[ "$DRY_RUN" == "false" ]]; then
             fix_known_path_permissions "$rclone_dest" || return 1
         fi
@@ -1112,6 +1195,7 @@ install_units() {
         fi
 
         if [[ -n "$rclone_src" ]]; then
+            _DRY_RUN_RCLONE_WILL_EXIST=true
             if [[ "$DRY_RUN" == "true" ]]; then
                 log_info "[DRY RUN] Would copy $rclone_src -> $rclone_dest (600 root:root)"
                 log_info "[DRY RUN] sync-env would set RCLONE_CONFIG=$rclone_dest in generated runtime env files"
@@ -1134,8 +1218,10 @@ install_units() {
         fi
     fi
 
+    _capture_pre_sync_environment_keys
     _sync_runtime_environment_files || return 1
     _reload_runtime_environment_after_sync || return 1
+    _reconcile_unexpected_managed_artifacts || return 1
 
     log_info "Installing systemd unit files to $UNIT_DEST_DIR ..."
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
