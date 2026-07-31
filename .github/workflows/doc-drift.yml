@@ -4,71 +4,47 @@ on:
     paths:
       - '.github/workflows/**'
       - '.pr280-final-*'
-      - '.pr280-patch-*'
-      - 'AGENTS.md'
-      - 'caddy/**'
-      - 'docs/**'
-      - 'README.md'
-      - 'RUNBOOK.md'
-      - 'utilities/**'
-      - 'lib/**'
-      - '*.sh'
-      - 'Makefile'
-      - 'systemd/**'
-      - 'tests/**'
-      - 'secrets-schema.yaml'
-      - '.env.example'
-      - 'docker-compose.yml.example'
-      - '.gitignore'
 permissions:
   contents: read
 jobs:
-  apply-pr280-remediation:
-    name: Apply verified PR 280 remediation
+  diagnose-pr280-patch:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v5
-        with:
-          ref: codex/small-team-runtime-remediation
-          fetch-depth: 0
-      - name: Install focused validation dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
-          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
-          sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
-          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
-          sudo install -m 755 /tmp/sops /usr/local/bin/sops
-      - name: Verify, apply, and validate bounded patch
+      - name: Verify each staged patch chunk
         shell: bash
         run: |
           set -euo pipefail
+          cat > /tmp/expected.sha256 <<'EOF'
+          e3839811cc358aa7758765241204d1e3ec764386fa42b8aabe8b0b579225f81a  .pr280-final-000
+          ffcd29bf6ec7af7963601056a8e08a2b1f1ac11e7730118fe7d33f91a843f494  .pr280-final-001
+          c57bc3be44cc7b564bee3fb3c729c2e2388aa9cf70bfffca280a5f74daf375ad  .pr280-final-002
+          58ac5436963ea92d2c252b6e733a43de59556c76c5fdc5c1e9ee374f29eea1c7  .pr280-final-003
+          3baae67e61e54e007d39b1fdbecb76e39dec4a68f2740d2ad043cc04ef828299  .pr280-final-004
+          fd3014b739de6c6c55b9319361533f1faa3ac5085576a16035df4a0b2bc79aa4  .pr280-final-005
+          5733ead65df2e85903a11e5c783b791a93157453dc6dd39c9400c895bf573a26  .pr280-final-006
+          4e37bcf584939605a55295454f4d52afcfc67e988b89a0a9a941478378bf9a30  .pr280-final-007
+          1cea714826bc5a2c72c3f3d8e4143e009501070f1e8c35e0fad526da4f92ba9e  .pr280-final-008
+          d40f1883ee6bb56b954ed1dffca004906b07c5bb4a0b0d4a0d84615caad0eab7  .pr280-final-009
+          da41e4a9a834f9dab8b244670f182b6220c202d46c552a4edd68a7a4d708efe0  .pr280-final-010
+          4dd4df4ba2fabba9c6437cadd98b9eddf5ce1b79e86ddcc5eb6e3280582800d0  .pr280-final-011
+          b885666de2ead25aed568d4edcb6fa4c9eb74716c4450f62647bb25439a0b46a  .pr280-final-012
+          ab210e25a5077067cb90e58b1845366797c4fe996ea5f1be7b34cd2ac377610f  .pr280-final-013
+          b9fb0de066616441ccfbc45ed13599435dad41fb3916a6a70e090f4de12156fa  .pr280-final-014
+          5155bcbf8fd753af7e1defc4ab89b799fd3b3d6b490fca9398d3111ae7816265  .pr280-final-015
+          946670c3a21afe1761cddd6629d2ba980039b1f406469f66ca1cddef300c6b2d  .pr280-final-016
+          a33097b6e2752541d28bb5381e46b691b0b0fc0a62d0618ad2192bca3cac9c77  .pr280-final-017
+          93b9d9dd803095eb798ac5b5f07d4b107ead347091ffded6f5aa591f7be56ced  .pr280-final-018
+          c4cead7c3242c3b46696881a7bd61adb9c8ca7f0b56f813266921519da6067c3  .pr280-final-019
+          1ee8d2ae6cab89f3fffdeb4b577223f34f75084fd0a3d6390159e78e53064d1e  .pr280-final-020
+          44a6c5ee4f68b0c19e12c6aca3bc475608cb85d23c6c1fb4c46e66289a19e7c1  .pr280-final-021
+          17fba7c0fefce675e299fdb1fbc21447394e523cb3300f1c99953b7f73b9e3de  .pr280-final-022
+          2c301f4287340593fd9c2b0855afe61c34fb0c63598427caa0ac183fa5e3bffb  .pr280-final-023
+          aad8e827b2333ef5035b05c6d1a59061cf172686eda20c6cdfbe4cd79bc55a21  .pr280-final-024
+          EOF
+          sha256sum --check /tmp/expected.sha256
           cat .pr280-final-* > /tmp/pr280-final.patch.b64
           echo "a9c85c13953263e2bca80cde5851d898c149219fd2fed3a597063b06f098cafc  /tmp/pr280-final.patch.b64" | sha256sum --check
           base64 --decode /tmp/pr280-final.patch.b64 > /tmp/pr280-final.patch
           echo "05fce1a200fd57ec518e4199a2b971c633f1451b18fc36bcc163cc3a894f1d99  /tmp/pr280-final.patch" | sha256sum --check
           git apply --check /tmp/pr280-final.patch
-          git apply /tmp/pr280-final.patch
-          git diff --check
-          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n1 bash -n
-          python3 utilities/verify-production-readiness-remediation.py
-          bash tests/suites/foundation/case-config-env.bash
-          bash tests/suites/foundation/case-systemd.bash
-          bash tests/suites/security/case-secrets.bash
-          DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
-      - name: Restore workflow and commit clean final tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          git show f273e7b97d4d66d51c8ddeb8c6de51e191aefd05^:.github/workflows/doc-drift.yml > .github/workflows/doc-drift.yml
-          rm -f .pr280-final-* .pr280-patch-* .github/workflows/pr280-apply.yml
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git diff --cached --check
-          git commit -m "complete small-team runtime remediation"
-          git push origin HEAD:codex/small-team-runtime-remediation
