@@ -1,40 +1,23 @@
-name: Publish PR 280 health lock fix
+name: Inspect PR 280 non-root fixture
 on:
   pull_request:
     paths:
       - '.github/workflows/pr280-health-lock.yml'
 permissions:
-  contents: write
+  contents: read
 jobs:
-  publish:
+  inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:
           ref: codex/small-team-runtime-remediation
           fetch-depth: 0
-      - name: Install validation dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
-          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
-          sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
-          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
-          sudo install -m 755 /tmp/sops /usr/local/bin/sops
-      - name: Verify, test, and publish exact tree
+      - name: Render generated non-root fixture
         shell: bash
         run: |
           set -euo pipefail
-          base='207c3e03d831d9857de254489ea7c27a56256f8c'
-          branch='codex/small-team-runtime-remediation'
-          staging_sha="$(git rev-parse HEAD)"
-          git merge-base --is-ancestor "$base" "$staging_sha"
-          unexpected="$(git diff --name-only "$base".."$staging_sha" | grep -Ev '^(\.github/workflows/pr280-health-lock\.yml|\.pr280-.*)$' || true)"
-          [[ -z "$unexpected" ]] || { printf 'Unexpected staging changes:\n%s\n' "$unexpected" >&2; exit 1; }
-
           cat \
             .pr280-hl-00 .pr280-hl-01 \
             .pr280-hr-00 .pr280-hr-01 \
@@ -48,191 +31,8 @@ jobs:
           test "$(wc -c < /tmp/pr280.patch.b64)" -eq 74676
           base64 --decode /tmp/pr280.patch.b64 > /tmp/pr280.patch
           echo '1ac3df57203588a816ebeaec968ffa04c527f97f84d804af9423d6083261be30  /tmp/pr280.patch' | sha256sum --check
-          git apply --check /tmp/pr280.patch
           git apply /tmp/pr280.patch
-
           base64 --decode .pr280-health-test-fix > /tmp/pr280-health-test-fix.patch
           echo '2a03344e110b78f6335896651641e8e74cd3140be7f12027e20bcbb1d7704c0d  /tmp/pr280-health-test-fix.patch' | sha256sum --check
-          git apply --check /tmp/pr280-health-test-fix.patch
           git apply /tmp/pr280-health-test-fix.patch
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path('tests/suites/operations/case-operations.bash')
-          text = path.read_text()
-
-          def replace_once(old: str, new: str, label: str) -> None:
-              global text
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected one match, found {count}')
-              text = text.replace(old, new, 1)
-
-          root_kill_tree = r'''root_kill_tree() {
-              local pid="$1" signal="$2"
-              [[ "$pid" =~ ^[0-9]+$ ]] || return 0
-              root_run "$BASH" -c '
-                  set +e
-                  signal="$1"
-                  root="$2"
-                  kill_tree() {
-                      local current="$1" child
-                      while read -r child; do
-                          [[ "$child" =~ ^[0-9]+$ ]] || continue
-                          kill_tree "$child"
-                      done < <(ps -o pid= --ppid "$current" 2>/dev/null)
-                      kill "-${signal}" "$current" 2>/dev/null || true
-                  }
-                  kill_tree "$root"
-              ' _ "$signal" "$pid" >/dev/null 2>&1 || true
-          }
-
-          '''
-          pattern = re.compile(r'(?s)(root_run\(\) \{.*?\n\}\n\n)(cleanup\(\) \{)')
-          matches = list(pattern.finditer(text))
-          if len(matches) != 1:
-              raise SystemExit(f'root kill-tree insertion: expected one match, found {len(matches)}')
-          text = pattern.sub(lambda match: match.group(1) + root_kill_tree + match.group(2), text, count=1)
-
-          replace_once(
-              '        root_run kill -TERM "$pid" 2>/dev/null || true',
-              '        root_kill_tree "$pid" TERM',
-              'recursive TERM cleanup',
-          )
-          replace_once(
-              '        root_run kill -KILL "$pid" 2>/dev/null || true',
-              '        root_kill_tree "$pid" KILL',
-              'recursive KILL cleanup',
-          )
-
-          root_pid_has_inode = r'''root_pid_has_inode() {
-              local pid="$1" expected="$2"
-              root_run "$BASH" -c '
-                  set -euo pipefail
-                  pid="$1"
-                  expected="$2"
-                  [[ "$pid" =~ ^[0-9]+$ && -d "/proc/${pid}/fd" ]] || exit 1
-                  shopt -s nullglob
-                  for fd in "/proc/${pid}/fd/"*; do
-                      actual="$(stat -Lc "%d:%i" "$fd" 2>/dev/null || true)"
-                      [[ "$actual" == "$expected" ]] && exit 0
-                  done
-                  exit 1
-              ' _ "$pid" "$expected"
-          }
-
-          '''
-          pattern = re.compile(r'(?s)(find_flock_ancestor\(\) \{.*?\n\}\n\n)(wait_for_file\(\) \{)')
-          matches = list(pattern.finditer(text))
-          if len(matches) != 1:
-              raise SystemExit(f'privileged inode helper insertion: expected one match, found {len(matches)}')
-          text = pattern.sub(lambda match: match.group(1) + root_pid_has_inode + match.group(2), text, count=1)
-
-          replace_once(
-              'pid_has_inode "$root_lock_owner" "$root_identity" \\\n    || fail "dedicated flock owner does not hold the health lock inode"',
-              'root_pid_has_inode "$root_lock_owner" "$root_identity" \\\n    || fail "dedicated flock owner does not hold the health lock inode"',
-              'privileged flock-owner inode assertion',
-          )
-          replace_once(
-              '    ! pid_has_inode "$pid" "$root_identity" \\\n        || fail "health workload process $pid inherited the health lock inode"',
-              '    ! root_pid_has_inode "$pid" "$root_identity" \\\n        || fail "health workload process $pid inherited the health lock inode"',
-              'privileged workload ancestry assertion',
-          )
-          replace_once(
-              '    ! pid_has_inode "$pid" "$root_identity" \\\n        || fail "health workload descendant $pid inherited the health lock inode"',
-              '    ! root_pid_has_inode "$pid" "$root_identity" \\\n        || fail "health workload descendant $pid inherited the health lock inode"',
-              'privileged descendant assertion',
-          )
-          replace_once(
-              '! pid_has_inode "$root_survivor" "$root_identity" \\\n    || fail "surviving child retained the health lock after owner death"',
-              '! root_pid_has_inode "$root_survivor" "$root_identity" \\\n    || fail "surviving child retained the health lock after owner death"',
-              'privileged surviving-child assertion',
-          )
-
-          replace_once(
-              'root_run kill -TERM "$root_owner"',
-              '''root_run kill -TERM "$root_lock_owner"
-          for _ in {1..40}; do
-              ! root_run kill -0 "$root_lock_owner" 2>/dev/null && break
-              sleep 0.05
-          done
-          ! root_run kill -0 "$root_lock_owner" 2>/dev/null \\
-              || fail "dedicated flock owner remained alive after TERM"
-          root_run kill -0 "$root_owner" 2>/dev/null \\
-              || fail "health workload died when the dedicated flock owner was killed"
-          root_run kill -0 "$root_survivor" 2>/dev/null \\
-              || fail "deliberately surviving child died when the dedicated flock owner was killed"''',
-              'actual flock-owner death assertion',
-          )
-
-          path.write_text(text)
-          PY
-
-          rm -f .pr280-* .github/workflows/pr280-health-lock.yml
-
-          git diff --check
-          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n 1 bash -n
-          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck -x --severity=warning
-          docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
-          DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
-          git diff --exit-code -- docs/COMMAND-REFERENCE.md
-          python3 utilities/verify-production-readiness-remediation.py
-          set +e
-          timeout --kill-after=10s 300s bash tests/suites/operations/case-operations.bash > /tmp/health-lock.log 2>&1
-          health_lock_rc=$?
-          set -e
-          cat /tmp/health-lock.log
-          [[ "$health_lock_rc" -eq 0 ]] || exit "$health_lock_rc"
-          grep -Fq 'PASS: read-only health uses a dedicated close-on-exec flock owner and releases after owner death' /tmp/health-lock.log
-          grep -Fq 'PASS: health lock path, metadata, wrapper identity, and unexpected flock failures fail as infrastructure errors' /tmp/health-lock.log
-          grep -Fq 'PASS: health --fix remains root-operated under global and health-specific coordination' /tmp/health-lock.log
-          grep -Fq 'PASS: non-root health uses a user-owned 0600 XDG lock with genuine contention exit 75' /tmp/health-lock.log
-          ./tests/run-tests.sh foundation | tee /tmp/foundation.log
-          grep -Fq 'PASS suite:foundation (6 cases)' /tmp/foundation.log
-          ./tests/run-tests.sh security | tee /tmp/security.log
-          ./tests/run-tests.sh operations | tee /tmp/operations.log
-          ./tests/run-tests.sh data-protection | tee /tmp/data-protection.log
-          if grep -Fq 'SKIP:' /tmp/operations.log; then
-            echo 'Operations suite contains a skipped production case.' >&2
-            exit 1
-          fi
-
-          git config user.name 'OpenAI Codex'
-          git config user.email 'codex@openai.com'
-          git add lib/log.sh lib/operations.sh setup.sh utilities/maintenance-health.sh utilities/setup-systemd.sh docs/SECURITY.md
-          git commit -m 'fix owner-bound health coordination'
-          git add tests/suites/operations/case-operations.bash tests/suites/operations/case-lock-fd-hygiene.bash tests/suites/operations/case-crowdsec.bash
-          git commit -m 'test owner-bound health lock behavior'
-          git add -A
-          git commit -m 'complete bounded small-team cleanup'
-
-          git diff --exit-code
-          mapfile -t final_files < <(git diff --name-only "$base"..HEAD | sort)
-          mapfile -t expected_files <<'FILES'
-          .github/workflows/doc-drift.yml
-          dashboard.sh
-          docs/SECURITY.md
-          lib/common.sh
-          lib/defaults.sh
-          lib/log.sh
-          lib/operations.sh
-          setup.sh
-          tests/suites/operations/case-crowdsec.bash
-          tests/suites/operations/case-lock-fd-hygiene.bash
-          tests/suites/operations/case-operations.bash
-          tests/suites/operations/case-uninstall.bash
-          utilities/maintenance-health.sh
-          utilities/setup-systemd.sh
-          utilities/uninstall-vaultwarden.sh
-          FILES
-          [[ "${final_files[*]}" == "${expected_files[*]}" ]] || { printf 'Unexpected final files:\n%s\n' "${final_files[*]}" >&2; exit 1; }
-          test ! -e .github/workflows/pr280-health-lock.yml
-          if find . -maxdepth 1 -name '.pr280-*' -print -quit | grep -q .; then
-            echo 'Temporary PR 280 staging file leaked into final tree.' >&2
-            exit 1
-          fi
-          git fetch origin "$branch"
-          [[ "$(git rev-parse "origin/$branch")" == "$staging_sha" ]] || { echo 'Remote branch advanced during validation.' >&2; exit 1; }
-          git push origin "HEAD:refs/heads/$branch"
+          nl -ba tests/suites/operations/case-operations.bash | sed -n '1680,1950p'
