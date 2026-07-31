@@ -49,7 +49,7 @@ jobs:
                   raise SystemExit(f'{label}: expected one match, found {count}')
               script = script.replace(old, new, 1)
 
-          fixture_patch = r'''python3 - <<'PY_FIXTURES'
+          fixture_patch = r"""python3 - <<'PY_FIXTURES'
           from pathlib import Path
 
           case_path = Path('tests/suites/operations/case-operations.bash')
@@ -136,7 +136,7 @@ jobs:
           alert_path.write_text(alert_text.replace(locale_old, locale_new, 1))
           PY_FIXTURES
 
-          '''
+          """
           marker = 'rm -f .pr280-* .github/workflows/pr280-health-lock.yml'
           if script.count(marker) != 1:
               raise SystemExit('temporary-file removal marker did not match exactly once')
