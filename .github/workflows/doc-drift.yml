@@ -248,7 +248,7 @@ jobs:
         run: |
           set -euo pipefail
           cat .pr280-patch-* > /tmp/pr280.patch.b64
-          base64 --decode /tmp/pr280.patch.b64 > /tmp/pr280.patch
+          base64 --decode --ignore-garbage /tmp/pr280.patch.b64 > /tmp/pr280.patch
           git apply --check /tmp/pr280.patch
           git apply /tmp/pr280.patch
           git diff --check
