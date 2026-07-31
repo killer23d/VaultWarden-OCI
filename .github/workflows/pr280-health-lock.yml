@@ -1,4 +1,4 @@
-name: Inspect PR 280 legacy fixture cleanup
+name: Inspect PR 280 fixture tail
 on:
   pull_request:
     paths:
@@ -14,7 +14,7 @@ jobs:
         with:
           ref: codex/small-team-runtime-remediation
           fetch-depth: 0
-      - name: Render leaking operation fixtures
+      - name: Render leaking fixture tail
         shell: bash
         run: |
           set -euo pipefail
@@ -37,4 +37,4 @@ jobs:
           Path('/tmp/pr280-prepare.sh').write_text(prefix + '\n')
           PY
           bash -e -o pipefail /tmp/pr280-prepare.sh
-          nl -ba tests/suites/operations/case-operations.bash | sed -n '600,1100p'
+          nl -ba tests/suites/operations/case-operations.bash | sed -n '1070,1275p'
