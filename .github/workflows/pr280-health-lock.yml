@@ -8,7 +8,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
@@ -50,6 +50,11 @@ jobs:
           echo '1ac3df57203588a816ebeaec968ffa04c527f97f84d804af9423d6083261be30  /tmp/pr280.patch' | sha256sum --check
           git apply --check /tmp/pr280.patch
           git apply /tmp/pr280.patch
+
+          base64 --decode .pr280-health-test-fix > /tmp/pr280-health-test-fix.patch
+          echo '3a01d63f256470eee0787e2997e4c2b4ad4f1085b42a8721e0bde5f3269c1d48  /tmp/pr280-health-test-fix.patch' | sha256sum --check
+          git apply --check /tmp/pr280-health-test-fix.patch
+          git apply /tmp/pr280-health-test-fix.patch
           rm -f .pr280-* .github/workflows/pr280-health-lock.yml
 
           git diff --check
