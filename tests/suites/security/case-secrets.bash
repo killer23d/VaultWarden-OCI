@@ -1362,3 +1362,81 @@ printf 'Full key-rotation entrypoint rollback, cleanup, guard-release, and retry
 )
 
 check_key_rotate_full_entrypoint_cleanup_contract
+
+
+check_age_key_no_repair_contract() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+PROJECT_ROOT="$TMP/project"
+mkdir -p "$PROJECT_ROOT/secrets/keys"
+# shellcheck source=../../../lib/log.sh
+source "$ROOT/lib/log.sh"
+# shellcheck source=../../../lib/config.sh
+source "$ROOT/lib/config.sh"
+# shellcheck source=../../../lib/common.sh
+source "$ROOT/lib/common.sh"
+# shellcheck source=../../../lib/crypto.sh
+source "$ROOT/lib/crypto.sh"
+PROJECT_ROOT="$TMP/project"
+key="$PROJECT_ROOT/secrets/keys/age-key.txt"
+age-keygen -o "$key" >/dev/null 2>&1
+chmod 600 "$key"
+pub="$(age-keygen -y "$key")"
+printf 'creation_rules:\n  - age: %s\n' "$pub" > "$PROJECT_ROOT/.sops.yaml"
+SOPS_CONFIG_FILE="$PROJECT_ROOT/.sops.yaml"
+export SOPS_CONFIG_FILE
+before="$(stat -c '%a:%u:%g:%i:%Y:%s' "$key")|$(sha256sum "$key")"
+check_age_key_health "$key" --no-repair || { echo 'FAIL valid no-repair key rejected' >&2; exit 1; }
+[[ "$(stat -c '%a:%u:%g:%i:%Y:%s' "$key")|$(sha256sum "$key")" == "$before" ]] || { echo 'FAIL valid no-repair key mutated' >&2; exit 1; }
+chmod 640 "$key"
+wrong_before="$(stat -c '%a:%u:%g:%i:%Y:%s' "$key")|$(sha256sum "$key")"
+! check_age_key_health "$key" --no-repair >/dev/null 2>&1 || { echo 'FAIL wrong mode passed no-repair' >&2; exit 1; }
+[[ "$(stat -c '%a:%u:%g:%i:%Y:%s' "$key")|$(sha256sum "$key")" == "$wrong_before" ]] || { echo 'FAIL wrong mode was repaired' >&2; exit 1; }
+chmod 600 "$key"
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1 && [[ "$(id -u)" -ne 0 ]]; then
+  sudo -n chown root:root "$key"
+  owner_before="$(stat -c '%a:%u:%g:%i:%Y:%s' "$key")|$(sudo -n sha256sum "$key")"
+  owner_probe="$TMP/owner-probe.bash"
+  cat > "$owner_probe" <<'EOF_OWNER_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$REAL_ROOT/lib/log.sh"
+source "$REAL_ROOT/lib/config.sh"
+source "$REAL_ROOT/lib/common.sh"
+source "$REAL_ROOT/lib/crypto.sh"
+PROJECT_ROOT="$TEST_PROJECT"
+check_age_key_health "$TEST_KEY" --no-repair
+EOF_OWNER_PROBE
+  chmod 700 "$owner_probe"
+  set +e
+  sudo -n env SUDO_USER="$(id -un)" REAL_ROOT="$ROOT" TEST_PROJECT="$PROJECT_ROOT" TEST_KEY="$key" SOPS_CONFIG_FILE="$SOPS_CONFIG_FILE" bash "$owner_probe" >/dev/null 2>&1
+  owner_rc=$?
+  set -e
+  [[ "$owner_rc" -ne 0 ]] || { echo 'FAIL wrong owner/group passed no-repair' >&2; exit 1; }
+  [[ "$(stat -c '%a:%u:%g:%i:%Y:%s' "$key")|$(sudo -n sha256sum "$key")" == "$owner_before" ]] || { echo 'FAIL wrong owner/group was repaired' >&2; exit 1; }
+  sudo -n chown "$(id -u):$(id -g)" "$key"
+fi
+ln -s "$key" "$TMP/key-link"
+! check_age_key_health "$TMP/key-link" --no-repair >/dev/null 2>&1 || { echo 'FAIL symlink key passed' >&2; exit 1; }
+printf 'not an age key\n' > "$TMP/malformed"
+chmod 600 "$TMP/malformed"
+! check_age_key_health "$TMP/malformed" --no-repair >/dev/null 2>&1 || { echo 'FAIL malformed key passed' >&2; exit 1; }
+healthy_repo="$PROJECT_ROOT/secrets/keys/healthy-repository-key.txt"
+age-keygen -o "$healthy_repo" >/dev/null 2>&1
+chmod 600 "$healthy_repo"
+healthy_before="$(stat -c '%a:%u:%g:%i:%Y:%s' "$healthy_repo")|$(sha256sum "$healthy_repo")"
+! check_age_key_health "$TMP/malformed" --no-repair >/dev/null 2>&1 || { echo 'FAIL invalid selected key fell back to repository key' >&2; exit 1; }
+[[ "$(stat -c '%a:%u:%g:%i:%Y:%s' "$healthy_repo")|$(sha256sum "$healthy_repo")" == "$healthy_before" ]] || { echo 'FAIL healthy repository key was evaluated or mutated' >&2; exit 1; }
+printf 'creation_rules:\n  - age: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n' > "$PROJECT_ROOT/.sops.yaml"
+! check_age_key_health "$key" --no-repair >/dev/null 2>&1 || { echo 'FAIL recipient mismatch passed' >&2; exit 1; }
+set +e
+check_age_key_health "$key" --unknown >/dev/null 2>&1
+rc=$?
+set -e
+[[ "$rc" -eq 64 ]] || { echo "FAIL unknown option returned $rc" >&2; exit 1; }
+printf 'PASS Age key no-repair validates without chmod/chown or fallback mutation\n'
+)
+
+check_age_key_no_repair_contract

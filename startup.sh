@@ -58,7 +58,7 @@ STARTUP OPTIONS:
   --background     Start services in background (daemon mode)
   --skip-egress-fix  Skip automatic egress NAT remediation for
                       non-internal VaultWarden Docker bridge networks
-  --dry-run        Show the complete non-mutating startup plan
+  --dry-run        Show what would be done without executing
 
 GLOBAL OPTIONS:
   --help, -h       Show this help

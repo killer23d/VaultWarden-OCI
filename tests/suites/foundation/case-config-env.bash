@@ -38,7 +38,15 @@ grep -Fq '_cmd_sync "$@"' "$ROOT/utilities/env-edit.sh" || fail 'sync subcommand
 pass 'env-edit sync is non-interactive'
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  echo 'SKIP: env-edit filesystem behavior requires root'
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n env VW_TEST_ENV_EDIT_ROOT_ONLY=1 bash "${BASH_SOURCE[0]}"
+    echo 'PASS root env-edit filesystem behavior executed through sudo'
+    exit 0
+  fi
+  if [[ "${GITHUB_ACTIONS:-false}" == "true" ]]; then
+    fail 'GitHub Actions runner could not execute root env-edit filesystem behavior'
+  fi
+  echo 'SKIP local-only: env-edit filesystem behavior requires root or passwordless sudo'
   exit 0
 fi
 
@@ -150,13 +158,26 @@ pass 'status is read-only and reports env paths, migration state, and storage mi
 )
 
 check_env_edit_contracts
+if [[ "${VW_TEST_ENV_EDIT_ROOT_ONLY:-0}" == "1" ]]; then
+  echo 'PASS root env-edit filesystem behavior completed'
+  exit 0
+fi
 
 check_runtime_authority_entrypoints() (
 set -euo pipefail
 
 ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+cleanup_runtime_authority_tmp(){
+  if (( EUID == 0 )); then
+    rm -rf "$TMP"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n rm -rf "$TMP"
+  else
+    rm -rf "$TMP"
+  fi
+}
+trap cleanup_runtime_authority_tmp EXIT
 fail(){ printf 'FAIL runtime authority entrypoints: %s\n' "$*" >&2; exit 1; }
 
 copy_repo(){
@@ -251,6 +272,7 @@ fi
 # environment deliberately conflict with the valid installed authority.
 START_REPO="$TMP/startup-repo"
 copy_repo "$START_REPO"
+cp "$START_REPO/docker-compose.yml.example" "$START_REPO/docker-compose.yml"
 START_INSTALLED="$TMP/start-installed/vaultwarden.env"
 START_STATE="$TMP/start-state"
 write_runtime_env "$START_INSTALLED" "$START_STATE" selected.example "$TMP/selected-key.txt"
@@ -261,33 +283,100 @@ printf 'sops:\n  mac: fixture\n' > "$START_STATE/secrets/secrets.yaml"
 START_SYNC_LOG="$TMP/start-sync.log"
 SELECTED_LOG="$TMP/selected.log"
 : > "$START_SYNC_LOG"
+: > "$SELECTED_LOG"
 cat > "$START_REPO/utilities/env-edit.sh" <<'EOF_START_ENV'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${START_SYNC_LOG:?}"
 EOF_START_ENV
+FORBIDDEN_LOG="$TMP/forbidden-mutations.log"
+: > "$FORBIDDEN_LOG"
+for forbidden_command in chmod chown sops age curl iptables systemctl; do
+  cat > "$TMP/start-bin/$forbidden_command" <<'EOF_FORBIDDEN'
+#!/usr/bin/env bash
+printf '%s:%s\n' "${0##*/}" "$*" >> "${FORBIDDEN_LOG:?}"
+exit 97
+EOF_FORBIDDEN
+  chmod +x "$TMP/start-bin/$forbidden_command"
+done
 cat > "$TMP/start-bin/docker" <<'EOF_START_DOCKER'
 #!/usr/bin/env bash
 printf '%s|%s|%s|%s\n' "${VW_CONFIG_SELECTED_ENV_SOURCE:-}" "${PROJECT_STATE_DIR:-}" "${DOMAIN:-}" "${SOPS_AGE_KEY_FILE:-}" >> "${SELECTED_LOG:?}"
 case "${1:-}" in
   info) exit 0 ;;
-  compose) exit 0 ;;
+  compose)
+    case "${2:-}" in
+      version|config|ps) exit 0 ;;
+      *) printf 'docker:%s\n' "$*" >> "${FORBIDDEN_LOG:?}"; exit 97 ;;
+    esac
+    ;;
   inspect) exit 1 ;;
-  *) exit 0 ;;
+  *) printf 'docker:%s\n' "$*" >> "${FORBIDDEN_LOG:?}"; exit 97 ;;
 esac
 EOF_START_DOCKER
-chmod +x "$START_REPO/utilities/env-edit.sh" "$TMP/start-bin/docker"
-installed_before="$(sha256sum "$START_INSTALLED" | awk '{print $1}')"
-if ! PATH="$TMP/start-bin:$PATH" START_SYNC_LOG="$START_SYNC_LOG" SELECTED_LOG="$SELECTED_LOG" \
-    VW_CONFIG_INSTALLED_ENV_FILE="$START_INSTALLED" \
-    bash "$START_REPO/startup.sh" --dry-run --skip-pull --skip-egress-fix >"$TMP/startup.out" 2>&1; then
+chmod +x "$START_REPO/utilities/env-edit.sh" "$TMP/start-bin/"*
+if (( EUID == 0 )); then
+  chown root:root "$START_INSTALLED" "$START_STATE/config" "$START_STATE/config/install.env" "$START_STATE/secrets" "$START_STATE/secrets/secrets.yaml"
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  sudo -n "$(type -P chown)" root:root "$START_INSTALLED" "$START_STATE/config" "$START_STATE/config/install.env" "$START_STATE/secrets" "$START_STATE/secrets/secrets.yaml"
+else
+  [[ "${GITHUB_ACTIONS:-false}" != true ]] || fail 'passwordless sudo unavailable for production-like dry-run fixture'
+  printf 'SKIP: production-like dry-run fixture requires root or passwordless sudo\n'
+  exit 0
+fi
+chmod 0600 "$START_INSTALLED" 2>/dev/null || sudo -n chmod 0600 "$START_INSTALLED"
+snapshot_path() {
+  stat -c '%n|%a|%u|%g|%i|%Y|%s' "$1"
+  if [[ -r "$1" ]]; then
+    sha256sum "$1"
+  else
+    sudo -n sha256sum "$1"
+  fi
+}
+installed_before="$(snapshot_path "$START_INSTALLED")"
+state_before="$TMP/state.before"
+find "$START_STATE" -mindepth 1 -printf '%P|%y|%m|%U|%G|%i|%T@|%s\n' | sort > "$state_before"
+run_start_root() {
+  local -a command=(env PATH="$TMP/start-bin:$PATH" START_SYNC_LOG="$START_SYNC_LOG" SELECTED_LOG="$SELECTED_LOG" FORBIDDEN_LOG="$FORBIDDEN_LOG" VW_CONFIG_INSTALLED_ENV_FILE="$START_INSTALLED" "$@")
+  if (( EUID == 0 )); then "${command[@]}"; else sudo -n "${command[@]}"; fi
+}
+if ! run_start_root bash "$START_REPO/startup.sh" --dry-run --skip-pull --skip-egress-fix >"$TMP/startup.out" 2>&1; then
   cat "$TMP/startup.out" >&2
   fail 'startup dry-run authority boundary failed'
 fi
 [[ ! -s "$START_SYNC_LOG" ]] || fail 'ordinary startup invoked env-edit.sh sync'
-[[ "$(sha256sum "$START_INSTALLED" | awk '{print $1}')" == "$installed_before" ]] || fail 'ordinary startup rewrote installed environment'
+[[ "$(snapshot_path "$START_INSTALLED")" == "$installed_before" ]] || fail 'startup dry-run changed installed environment metadata or contents'
+state_after="$TMP/state.after"
+find "$START_STATE" -mindepth 1 -printf '%P|%y|%m|%U|%G|%i|%T@|%s\n' | sort > "$state_after"
+cmp -s "$state_before" "$state_after" || fail 'startup dry-run changed state/config/secret fixture metadata'
+[[ ! -s "$FORBIDDEN_LOG" ]] || { cat "$FORBIDDEN_LOG" >&2; fail 'startup dry-run invoked a forbidden mutation command'; }
 grep -Fxq "installed|$START_STATE|selected.example|$TMP/selected-key.txt" "$SELECTED_LOG" \
   || { cat "$SELECTED_LOG" >&2; fail 'installed values did not remain selected over persistent and repository values'; }
+grep -Fq 'Selected configuration source: installed' "$TMP/startup.out" || fail 'dry-run did not report installed authority'
+grep -Fq 'Domain: selected.example' "$TMP/startup.out" || fail 'dry-run did not report selected installed values'
+! grep -Fq 'repository-start.example' "$TMP/startup.out" || fail 'dry-run exposed stale repository values'
 
+: > "$SELECTED_LOG"; : > "$FORBIDDEN_LOG"
+run_start_root make --no-print-directory -C "$START_REPO" dry-run >"$TMP/make-dry-run.out" 2>&1 || { cat "$TMP/make-dry-run.out" >&2; fail 'sudo make dry-run failed'; }
+[[ ! -s "$FORBIDDEN_LOG" ]] || { cat "$FORBIDDEN_LOG" >&2; fail 'make dry-run invoked a forbidden mutation command'; }
+grep -Fq "$START_INSTALLED" "$TMP/make-dry-run.out" || fail 'make dry-run did not report installed selected source'
+run_start_root make --no-print-directory -C "$START_REPO" info >"$TMP/make-info.out" 2>&1 || { cat "$TMP/make-info.out" >&2; fail 'sudo make info failed'; }
+grep -Fq "$START_INSTALLED" "$TMP/make-info.out" || fail 'sudo make info did not report installed source'
+
+if (( EUID != 0 )); then
+  set +e
+  PATH="$TMP/start-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$START_INSTALLED" make --no-print-directory -C "$START_REPO" info >"$TMP/info-unpriv.out" 2>&1
+  info_rc=$?
+  PATH="$TMP/start-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$START_INSTALLED" make --no-print-directory -C "$START_REPO" dry-run >"$TMP/dry-unpriv.out" 2>&1
+  dry_rc=$?
+  set -e
+  [[ "$info_rc" -ne 0 && "$dry_rc" -ne 0 ]] || fail 'unprivileged installed Make invocation unexpectedly succeeded'
+  grep -Fq 'sudo make info' "$TMP/info-unpriv.out" || fail 'unprivileged info lacked sudo guidance'
+  grep -Fq 'sudo make dry-run' "$TMP/dry-unpriv.out" || fail 'unprivileged dry-run lacked sudo guidance'
+  ! grep -Fq 'repository-start.example' "$TMP/info-unpriv.out" || fail 'unprivileged info fell back to repository values'
+fi
+
+printf 'PASS startup and Make dry-run preserve root-owned installed state without mutation\n'
+printf 'PASS make info and make dry-run honor installed privilege contracts\n'
 printf 'PASS runtime authority entrypoints preserve installed configuration and explicit sync\n'
 )
 

@@ -979,12 +979,40 @@ validate_crypto_environment() {
 
 
 simple_verify_age_key() {
-    local age_key
-    age_key=$(resolve_age_key_path "${1:-}") || return 1
+    local selected_key=""
+    local mode="repair"
+    local arg
 
+    for arg in "$@"; do
+        case "$arg" in
+            --no-repair) mode="no-repair" ;;
+            --*)
+                log_error "simple_verify_age_key: usage: simple_verify_age_key [KEY_PATH] [--no-repair]"
+                return 64
+                ;;
+            *)
+                if [[ -n "$selected_key" ]]; then
+                    log_error "simple_verify_age_key: usage: simple_verify_age_key [KEY_PATH] [--no-repair]"
+                    return 64
+                fi
+                selected_key="$arg"
+                ;;
+        esac
+    done
+
+    local age_key
+    age_key=$(resolve_age_key_path "$selected_key") || return 1
+
+    if [[ -L "$age_key" ]]; then
+        log_error "Age key path must not be a symlink: $age_key"
+        return 1
+    fi
     if [[ ! -f "$age_key" ]]; then
-        log_error "Age key missing: $age_key"
-        log_error "If you are restoring a backup, see BACKUP-RESTORE.md for key recovery steps."
+        log_error "Age key path is not a regular file: $age_key"
+        return 1
+    fi
+    if [[ ! -r "$age_key" ]]; then
+        log_error "Age key is not readable: $age_key"
         return 1
     fi
 
@@ -993,49 +1021,61 @@ simple_verify_age_key() {
     expected_group=$(expected_group_for_path "$age_key" 2>/dev/null || printf '')
     expected_mode=$(expected_mode_for_path "$age_key" 2>/dev/null || printf '600')
 
-    perms=$(_stat_octal_perms "$age_key" 2>/dev/null || echo "")
+    perms=$(_stat_octal_perms "$age_key" 2>/dev/null || printf '')
     if [[ "$perms" != "$expected_mode" ]]; then
+        if [[ "$mode" == "no-repair" ]]; then
+            log_error "Age key permissions are ${perms:-<unreadable>} (expected ${expected_mode}): $age_key"
+            return 1
+        fi
         log_warn "Age key permissions for ${age_key} were ${perms:-<unreadable>} (expected ${expected_mode}) — auto-correcting"
-        chmod "$expected_mode" "$age_key"
+        chmod "$expected_mode" "$age_key" || return 1
+        [[ "$(_stat_octal_perms "$age_key" 2>/dev/null || printf '')" == "$expected_mode" ]] || return 1
     fi
 
     local current_owner current_group current_owner_group
-    current_owner=$(_stat_owner "$age_key" 2>/dev/null || echo "")
-    current_group=$(_stat_group "$age_key" 2>/dev/null || echo "")
+    current_owner=$(_stat_owner "$age_key" 2>/dev/null || printf '')
+    current_group=$(_stat_group "$age_key" 2>/dev/null || printf '')
     current_owner_group="${current_owner}:${current_group}"
-    if [[ -n "$expected_owner" && -n "$current_owner" && "$current_owner_group" != "${expected_owner}:${expected_group}" ]]; then
+    if [[ -z "$current_owner" || -z "$current_group" ]]; then
+        log_error "Cannot verify ownership of Age key: $age_key"
+        return 1
+    fi
+    if [[ -n "$expected_owner" && "$current_owner_group" != "${expected_owner}:${expected_group}" ]]; then
+        if [[ "$mode" == "no-repair" ]]; then
+            log_error "Age key ownership is '${current_owner_group}' (expected '${expected_owner}:${expected_group}'): $age_key"
+            return 1
+        fi
         if [[ "$expected_owner" == "root" && -z "${SUDO_USER:-}" ]] && _is_operator_permission_path "$age_key"; then
             log_warn "Skipping ownership correction for operator-owned age key ${age_key}: non-root operator could not be resolved"
-        else
+        elif [[ "$(id -u)" -eq 0 ]]; then
             log_warn "Age key ownership for ${age_key} was '${current_owner_group}' (expected '${expected_owner}:${expected_group}') — auto-correcting"
-            if [[ "$(id -u)" -eq 0 ]]; then
-                chown "${expected_owner}:${expected_group}" "$age_key" 2>/dev/null || \
-                    log_warn "Could not restore ownership of $age_key to ${expected_owner}:${expected_group}"
-            else
-                log_warn "Cannot correct ownership of $age_key — re-run with sudo (sudo make key-health)"
-            fi
+            chown "${expected_owner}:${expected_group}" "$age_key" || return 1
+            [[ "$(_stat_owner "$age_key" 2>/dev/null):$(_stat_group "$age_key" 2>/dev/null)" == "${expected_owner}:${expected_group}" ]] || return 1
+        else
+            log_error "Cannot correct ownership of $age_key — re-run with sudo (sudo make key-health)"
+            return 1
         fi
-    elif [[ -n "$current_owner" ]]; then
-        :
-    else
-        log_warn "Cannot verify ownership of $age_key — re-run with sudo for full check"
     fi
 
-    local test_data
-    test_data="vw-key-check-$(date +%s)"
-    local result
-
-    local public_key
-    if ! public_key=$(_derive_age_public_key "$age_key"); then
-        log_error "Age key corrupted: Cannot extract public key"
+    local private_line
+    private_line=$(grep -m1 '^AGE-SECRET-KEY-1' "$age_key" 2>/dev/null || true)
+    if [[ -z "$private_line" ]]; then
+        log_error "Age key file does not contain a valid AGE-SECRET-KEY-1 private key line: $age_key"
         return 1
     fi
 
+    local public_key
+    if ! public_key=$(_derive_age_public_key "$age_key"); then
+        log_error "Age key corrupted: cannot extract public key"
+        return 1
+    fi
+
+    local test_data result
+    test_data="vw-key-check-$(date +%s)-$$"
     if ! result=$(printf '%s' "$test_data" | age -r "$public_key" 2>/dev/null | age -d -i "$age_key" 2>/dev/null); then
         log_error "Age key encryption/decryption test failed"
         return 1
     fi
-
     if [[ "$result" != "$test_data" ]]; then
         log_error "Age key data integrity check failed"
         return 1
@@ -1475,8 +1515,32 @@ _sops_yaml_age_recipients() {
 # A mismatch means a new age key was restored while .sops.yaml still references the old key.
 # ---------------------------------------------------------------------------
 check_age_key_health() {
-    local selected_key="${1:-}"
-    simple_verify_age_key "$selected_key" || return 1
+    local selected_key=""
+    local mode="repair"
+    local arg
+
+    for arg in "$@"; do
+        case "$arg" in
+            --no-repair) mode="no-repair" ;;
+            --*)
+                log_error "check_age_key_health: usage: check_age_key_health [KEY_PATH] [--no-repair]"
+                return 64
+                ;;
+            *)
+                if [[ -n "$selected_key" ]]; then
+                    log_error "check_age_key_health: usage: check_age_key_health [KEY_PATH] [--no-repair]"
+                    return 64
+                fi
+                selected_key="$arg"
+                ;;
+        esac
+    done
+
+    if [[ "$mode" == "no-repair" ]]; then
+        simple_verify_age_key "$selected_key" --no-repair || return $?
+    else
+        simple_verify_age_key "$selected_key" || return $?
+    fi
 
     local age_key
     age_key=$(resolve_age_key_path "$selected_key") || return 1

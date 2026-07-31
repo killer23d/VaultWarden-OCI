@@ -487,6 +487,10 @@ test_closed_inventory_reconciles_only_project_owned_artifacts() (
     printf 'stale library\n' > "$opt_dir/lib/retired.sh"
     printf '[Unit]\nDescription=VaultWarden-OCI current\n' > "$unit_dir/vaultwarden-current.service"
     printf '[Unit]\nDescription=VaultWarden-OCI retired\n' > "$unit_dir/vaultwarden-retired.service"
+    printf 'outside target\n' > "$TMP/symlink-target"
+    ln -s "$TMP/symlink-target" "$unit_dir/vaultwarden-stale-link.service"
+    ln -s "$TMP/symlink-target" "$unit_dir/vaultwarden-current.timer"
+    ln -s "$TMP/symlink-target" "$unit_dir/unrelated.service"
     printf '# Written by setup-systemd.sh install — do not edit by hand.\n' \
         > "$unit_dir/vaultwarden-retired.service.d/30-run-as-root.conf"
     printf '# operator override\n' > "$unit_dir/vaultwarden-current.service.d/operator.conf"
@@ -534,6 +538,9 @@ test_closed_inventory_reconciles_only_project_owned_artifacts() (
     [[ ! -e "$opt_dir/retired.sh" ]] || fail "removed managed script survived reconciliation"
     [[ ! -e "$opt_dir/lib/retired.sh" ]] || fail "removed managed library survived reconciliation"
     [[ ! -e "$unit_dir/vaultwarden-retired.service" ]] || fail "removed managed unit survived reconciliation"
+    [[ ! -L "$unit_dir/vaultwarden-stale-link.service" ]] || fail "unexpected project unit symlink survived reconciliation"
+    [[ ! -L "$unit_dir/vaultwarden-current.timer" ]] || fail "expected managed unit symlink survived reconciliation"
+    [[ -L "$unit_dir/unrelated.service" && -f "$TMP/symlink-target" ]] || fail "unrelated symlink or its target was removed"
     [[ ! -e "$unit_dir/vaultwarden-retired.service.d/30-run-as-root.conf" ]] \
         || fail "stale project-owned drop-in survived reconciliation"
     [[ -f "$unit_dir/vaultwarden-current.service.d/operator.conf" ]] \
@@ -545,6 +552,8 @@ test_closed_inventory_reconciles_only_project_owned_artifacts() (
     [[ -f "$outside" ]] || fail "file outside managed namespace was removed"
     grep -Fxq 'disable --now vaultwarden-retired.service' "$systemctl_log" \
         || fail "stale active unit was not stopped and disabled"
+    grep -Fq 'vaultwarden-stale-link.service' "$systemctl_log" \
+        || fail "stale project symlink unit identity was not checked before removal"
     grep -Fxq 'daemon-reload' "$systemctl_log" \
         || fail "daemon-reload did not follow stale unit/drop-in changes"
 
@@ -573,6 +582,14 @@ test_closed_inventory_reconciles_only_project_owned_artifacts() (
        && "$dry_output" == *'systemctl disable --now vaultwarden-retired.service'* ]] \
         || fail "managed inventory dry-run did not name exact stale artifacts and intended actions"
 )
+
+    local sync_line reload_line render_line
+    sync_line="$(grep -n '_sync_runtime_environment_files || return 1' "$ROOT/utilities/setup-systemd.sh" | head -1 | cut -d: -f1)"
+    reload_line="$(grep -n '_reload_runtime_environment_after_sync || return 1' "$ROOT/utilities/setup-systemd.sh" | head -1 | cut -d: -f1)"
+    render_line="$(grep -n 'Installing systemd unit files to' "$ROOT/utilities/setup-systemd.sh" | head -1 | cut -d: -f1)"
+    [[ -n "$sync_line" && -n "$reload_line" && -n "$render_line" && "$sync_line" -lt "$reload_line" && "$reload_line" -lt "$render_line" ]] \
+        || fail "setup-systemd does not reload canonical configuration between sync and rendering"
+    printf 'PASS setup-systemd reloads one canonical post-sync snapshot before rendering\n'
 
 test_runtime_lock_preparation_is_verified_and_stable() (
     set -euo pipefail
@@ -767,3 +784,125 @@ printf 'Notification features preserve systemd unit and sandbox contracts.\n'
 )
 
 check_notification_features_preserve_systemd_contracts
+
+check_systemd_post_sync_snapshot_contract() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+cleanup(){
+  if [[ -d "$TMP" ]]; then
+    if (( EUID == 0 )); then rm -rf "$TMP"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then sudo -n rm -rf "$TMP"; else rm -rf "$TMP"; fi
+  fi
+}
+trap cleanup EXIT
+fail(){ printf 'FAIL systemd A-to-B snapshot: %s\n' "$*" >&2; exit 1; }
+
+if (( EUID != 0 )) && { ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; }; then
+  if [[ "${GITHUB_ACTIONS:-false}" == true ]]; then fail 'passwordless sudo unavailable in GitHub Actions'; fi
+  printf 'SKIP: systemd A-to-B public install fixture requires root or passwordless sudo\n'
+  exit 0
+fi
+
+REPO="$TMP/repo"
+mkdir -p "$REPO"
+(cd "$ROOT" && tar --exclude=.git --exclude='.migrate-volume.state' -cf - .) | (cd "$REPO" && tar -xf -)
+ENV_DIR="$TMP/etc-vaultwarden"
+UNIT_DIR="$TMP/systemd"
+OPT_DIR="$TMP/opt"
+LOCK_DIR="$TMP/locks"
+STATE_A="$TMP/state-a"
+STATE_B="$TMP/state-b"
+BIN="$TMP/bin"
+mkdir -p "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" "$STATE_A" "$STATE_B" "$BIN"
+cat > "$ENV_DIR/vaultwarden.env" <<EOF_A
+PROJECT_STATE_DIR=$STATE_A
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=
+SOPS_AGE_KEY_FILE=$ENV_DIR/age-key.txt
+DOMAIN=a.example.invalid
+ADMIN_EMAIL=admin@a.example.invalid
+CADDY_VERSION=2.11.4
+EOF_A
+cat > "$REPO/.env" <<EOF_B
+PROJECT_STATE_DIR=$STATE_B
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=
+SOPS_AGE_KEY_FILE=
+DOMAIN=b.example.invalid
+ADMIN_EMAIL=admin@b.example.invalid
+CADDY_VERSION=2.11.4
+EOF_B
+chmod 0600 "$ENV_DIR/vaultwarden.env" "$REPO/.env"
+cat > "$BIN/systemctl" <<'EOF_SYSTEMCTL'
+#!/usr/bin/env bash
+case "${1:-}" in
+  is-active|is-enabled) exit 0 ;;
+  show) printf 'Fri 2099-01-01 00:00:00 UTC\n'; exit 0 ;;
+  status) exit 0 ;;
+  *) printf 'systemctl %s\n' "$*" >> "${SYSTEMCTL_LOG:?}"; exit 0 ;;
+esac
+EOF_SYSTEMCTL
+cat > "$BIN/systemd-analyze" <<'EOF_ANALYZE'
+#!/usr/bin/env bash
+exit 0
+EOF_ANALYZE
+chmod +x "$BIN/"*
+: > "$TMP/systemctl.log"
+
+run_setup(){
+  local action="$1"; shift
+  local -a cmd=(env PATH="$BIN:$PATH" SYSTEMCTL_LOG="$TMP/systemctl.log" SERVICE_USER=root SERVICE_GROUP=root
+    VW_CONFIG_INSTALLED_ENV_FILE="$ENV_DIR/vaultwarden.env" VW_SYNC_ETC_DIR="$ENV_DIR"
+    VW_SYSTEMD_ENV_DIR="$ENV_DIR" VW_SYSTEMD_UNIT_DEST_DIR="$UNIT_DIR"
+    VW_SYSTEMD_OPT_SCRIPTS_DIR="$OPT_DIR" VW_SYSTEMD_RUNTIME_LOCK_DIR="$LOCK_DIR"
+    bash "$REPO/utilities/setup-systemd.sh" "$action" "$@")
+  if (( EUID == 0 )); then "${cmd[@]}"; else sudo -n "${cmd[@]}"; fi
+}
+
+read_fixture_file(){
+  local path="$1"
+  if [[ -r "$path" ]]; then
+    cat "$path"
+  elif (( EUID == 0 )); then
+    cat "$path"
+  else
+    sudo -n cat "$path"
+  fi
+}
+hash_fixture_tree(){
+  local output="$1"
+  if (( EUID == 0 )); then
+    find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" -type f -print0 | sort -z | xargs -0 sha256sum > "$output"
+  else
+    sudo -n find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" -type f -print0 | sort -z | sudo -n xargs -0 sha256sum | tee "$output" >/dev/null
+  fi
+}
+
+run_setup install --no-start >"$TMP/install-1.out" 2>&1 || { cat "$TMP/install-1.out" >&2; fail 'first public install failed'; }
+read_fixture_file "$ENV_DIR/vaultwarden.env" | grep -Fxq "PROJECT_STATE_DIR=$STATE_B" || fail 'explicit sync did not write B environment'
+grep -Fq "$STATE_B" "$UNIT_DIR/vaultwarden-startup.service" || fail 'startup unit did not render B state'
+! grep -Fq "$STATE_A" "$UNIT_DIR/vaultwarden-startup.service" || fail 'startup unit retained A state'
+if grep -R -F "$STATE_A" "$UNIT_DIR" >/dev/null 2>&1; then fail 'generated unit or drop-in retained A state'; fi
+if find "$UNIT_DIR" -type f -name '*.conf' -print0 | xargs -0 grep -L -F "$STATE_B" >/dev/null 2>&1; then :; fi
+
+# Validation expects a configured key and active/enabled timers. Supply the
+# fixture key after installation; production installation owns the real key copy.
+if (( EUID == 0 )); then
+  printf 'fixture-key\n' > "$ENV_DIR/age-key.txt"
+  chmod 0600 "$ENV_DIR/age-key.txt"
+  chown root:root "$ENV_DIR/age-key.txt"
+else
+  printf 'fixture-key\n' | sudo -n tee "$ENV_DIR/age-key.txt" >/dev/null
+  sudo -n "$(type -P chmod)" 0600 "$ENV_DIR/age-key.txt"
+  sudo -n "$(type -P chown)" root:root "$ENV_DIR/age-key.txt"
+fi
+run_setup validate >"$TMP/validate.out" 2>&1 || { cat "$TMP/validate.out" >&2; fail 'immediate validation failed'; }
+
+hash_fixture_tree "$TMP/before.sha"
+run_setup install --no-start >"$TMP/install-2.out" 2>&1 || { cat "$TMP/install-2.out" >&2; fail 'second public install failed'; }
+hash_fixture_tree "$TMP/after.sha"
+cmp -s "$TMP/before.sha" "$TMP/after.sha" || fail 'second installation was not content-idempotent'
+printf 'PASS setup-systemd public install reloads one coherent A-to-B configuration snapshot\n'
+)
+
+check_systemd_post_sync_snapshot_contract

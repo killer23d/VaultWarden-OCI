@@ -94,7 +94,7 @@ ROOT_ALLOWED_TARGETS := \
 	install-systemd remove-systemd systemd-status systemd-validate \
 	unban crowdsec-status crowdsec-alerts security-report smoke-test drill \
 	breakglass-create breakglass-status breakglass-remove \
-	uninstall uninstall-dry-run diagnose prune
+	uninstall uninstall-dry-run diagnose prune info dry-run
 
 ROOT_NEUTRAL_TARGETS := help help-all version
 
@@ -899,7 +899,10 @@ test-config: ## Validate docker-compose configuration
 
 dry-run: ## Show what startup would do without executing
 	@echo "$(BLUE)Startup dry run...$(NC)"
-	@./startup.sh --dry-run
+	@./startup.sh --dry-run || { \
+		echo "$(YELLOW)For an installed root-owned environment, run: sudo make dry-run$(NC)"; \
+		exit 1; \
+	}
 
 # ===========================================================================
 ##@ Normal Admin + Dashboard Stable API — Information & Diagnostics
@@ -908,7 +911,11 @@ dry-run: ## Show what startup would do without executing
 info: ## Show deployment information
 	@echo "$(BLUE)VaultWarden-OCI Deployment Info:$(NC)"
 	@echo ""
-	@bash -c 'source lib/log.sh; source lib/config.sh; load_project_environment >/dev/null || exit 1; \
+	@bash -c 'source lib/log.sh; source lib/config.sh; \
+		if ! load_project_environment >/dev/null; then \
+			echo "$(YELLOW)For an installed root-owned environment, run: sudo make info$(NC)" >&2; \
+			exit 1; \
+		fi; \
 		echo "  Config    : $$VW_CONFIG_SELECTED_ENV_FILE"; \
 		echo "  Domain    : $${DOMAIN:-}"; \
 		echo "  Admin     : $${ADMIN_EMAIL:-}"; \
