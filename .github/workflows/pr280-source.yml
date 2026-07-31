@@ -1,0 +1,29 @@
+name: PR 280 source snapshot
+on:
+  push:
+    branches:
+      - codex/small-team-runtime-remediation
+    paths:
+      - '.github/workflows/pr280-source.yml'
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: codex/small-team-runtime-remediation
+          fetch-depth: 0
+      - name: Archive exact source tree
+        run: |
+          git rev-parse HEAD > pr280-source-sha.txt
+          tar --exclude=.git -czf pr280-source.tar.gz .
+      - uses: actions/upload-artifact@v6
+        with:
+          name: pr280-source
+          path: |
+            pr280-source.tar.gz
+            pr280-source-sha.txt
+          if-no-files-found: error
+          retention-days: 1
