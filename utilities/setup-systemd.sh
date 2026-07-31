@@ -1444,26 +1444,40 @@ remove_units() {
     _setup_systemd_acquire_guard "Systemd remove" "remove" || return $?
     log_header "VaultWarden-OCI systemd Timer Removal"
 
+    local timer timer_active timer_enabled
     for timer in "${TIMERS[@]}"; do
+        timer_active=false
+        timer_enabled=false
+        if systemctl is-active "$timer" &>/dev/null; then
+            timer_active=true
+        fi
         if systemctl is-enabled "$timer" &>/dev/null; then
-            if _run systemctl disable --now "$timer"; then
-                log_success "Disabled: $timer"
-            else
-                log_warn "Failed to disable $timer -- it may already be inactive or masked."
-                log_warn "  Check: systemctl status $timer"
-            fi
+            timer_enabled=true
+        fi
+        if [[ "$timer_active" == "true" || "$timer_enabled" == "true" ]]; then
+            _run systemctl disable --now "$timer" || {
+                log_error "Failed to disable and stop managed timer: $timer"
+                log_error "  Check: systemctl status $timer"
+                return 1
+            }
+            log_success "Disabled: $timer"
         fi
     done
 
-    if systemctl is-enabled "$STARTUP_SERVICE" &>/dev/null || systemctl is-active "$STARTUP_SERVICE" &>/dev/null; then
-        if _run systemctl disable --now "$STARTUP_SERVICE"; then
-            log_success "Disabled: $STARTUP_SERVICE"
-        else
-            log_warn "Failed to disable $STARTUP_SERVICE -- it may already be inactive or masked."
-            log_warn "  Check: systemctl status $STARTUP_SERVICE"
-        fi
-    elif [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would check and disable $STARTUP_SERVICE if enabled or active"
+    local startup_active=false startup_enabled=false
+    if systemctl is-active "$STARTUP_SERVICE" &>/dev/null; then
+        startup_active=true
+    fi
+    if systemctl is-enabled "$STARTUP_SERVICE" &>/dev/null; then
+        startup_enabled=true
+    fi
+    if [[ "$startup_active" == "true" || "$startup_enabled" == "true" ]]; then
+        _run systemctl disable --now "$STARTUP_SERVICE" || {
+            log_error "Failed to disable and stop startup service: $STARTUP_SERVICE"
+            log_error "  Check: systemctl status $STARTUP_SERVICE"
+            return 1
+        }
+        log_success "Disabled: $STARTUP_SERVICE"
     fi
 
     for unit in "${_MANAGED_UNIT_FILES[@]}"; do
