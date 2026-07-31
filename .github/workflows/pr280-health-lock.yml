@@ -1,0 +1,113 @@
+name: Publish PR 280 health lock fix
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/pr280-health-lock.yml'
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: codex/small-team-runtime-remediation
+          fetch-depth: 0
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+      - name: Verify, test, and publish exact tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='207c3e03d831d9857de254489ea7c27a56256f8c'
+          branch='codex/small-team-runtime-remediation'
+          staging_sha="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$base" "$staging_sha"
+          unexpected="$(git diff --name-only "$base".."$staging_sha" | grep -Ev '^(\.github/workflows/pr280-health-lock\.yml|\.pr280-.*)$' || true)"
+          [[ -z "$unexpected" ]] || { printf 'Unexpected staging changes:\n%s\n' "$unexpected" >&2; exit 1; }
+
+          cat \
+            .pr280-hl-00 .pr280-hl-01 \
+            .pr280-hr-00 .pr280-hr-01 \
+            .pr280-q-00 .pr280-q-01 .pr280-q-02 .pr280-q-03 .pr280-q-04 \
+            .pr280-hr-03 .pr280-hr-04 .pr280-hr-05 .pr280-hr-06 .pr280-hr-07 \
+            .pr280-t-00 .pr280-t-01 .pr280-t-02 .pr280-t-03 .pr280-t-04 .pr280-t-05 \
+            .pr280-u-00 .pr280-u-01 .pr280-u-02 .pr280-u-03 .pr280-u-04 \
+            .pr280-u-05 .pr280-u-06 .pr280-u-07 .pr280-u-08 .pr280-u-09 \
+            .pr280-u-10 .pr280-u-11 .pr280-u-12 .pr280-u-13 .pr280-u-14 \
+            .pr280-u-15 .pr280-u-16 > /tmp/pr280.patch.b64
+          test "$(wc -c < /tmp/pr280.patch.b64)" -eq 74676
+          base64 --decode /tmp/pr280.patch.b64 > /tmp/pr280.patch
+          echo '1ac3df57203588a816ebeaec968ffa04c527f97f84d804af9423d6083261be30  /tmp/pr280.patch' | sha256sum --check
+          git apply --check /tmp/pr280.patch
+          git apply /tmp/pr280.patch
+          rm -f .pr280-* .github/workflows/pr280-health-lock.yml
+
+          git diff --check
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n 1 bash -n
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck -x --severity=warning
+          docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
+          DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
+          git diff --exit-code -- docs/COMMAND-REFERENCE.md
+          python3 utilities/verify-production-readiness-remediation.py
+          timeout 300 bash tests/suites/operations/case-operations.bash | tee /tmp/health-lock.log
+          grep -Fq 'PASS: read-only health uses a dedicated close-on-exec flock owner and releases after owner death' /tmp/health-lock.log
+          grep -Fq 'PASS: health lock path, metadata, wrapper identity, and unexpected flock failures fail as infrastructure errors' /tmp/health-lock.log
+          grep -Fq 'PASS: health --fix remains root-operated under global and health-specific coordination' /tmp/health-lock.log
+          grep -Fq 'PASS: non-root health uses a user-owned 0600 XDG lock with genuine contention exit 75' /tmp/health-lock.log
+          ./tests/run-tests.sh foundation | tee /tmp/foundation.log
+          grep -Fq 'PASS suite:foundation (6 cases)' /tmp/foundation.log
+          ./tests/run-tests.sh security | tee /tmp/security.log
+          ./tests/run-tests.sh operations | tee /tmp/operations.log
+          ./tests/run-tests.sh data-protection | tee /tmp/data-protection.log
+          if grep -Fq 'SKIP:' /tmp/operations.log; then
+            echo 'Operations suite contains a skipped production case.' >&2
+            exit 1
+          fi
+
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+          git add lib/log.sh lib/operations.sh setup.sh utilities/maintenance-health.sh utilities/setup-systemd.sh docs/SECURITY.md
+          git commit -m 'fix owner-bound health coordination'
+          git add tests/suites/operations/case-operations.bash tests/suites/operations/case-lock-fd-hygiene.bash tests/suites/operations/case-crowdsec.bash
+          git commit -m 'test owner-bound health lock behavior'
+          git add -A
+          git commit -m 'complete bounded small-team cleanup'
+
+          git diff --exit-code
+          mapfile -t final_files < <(git diff --name-only "$base"..HEAD | sort)
+          mapfile -t expected_files <<'FILES'
+          .github/workflows/doc-drift.yml
+          dashboard.sh
+          docs/SECURITY.md
+          lib/common.sh
+          lib/defaults.sh
+          lib/log.sh
+          lib/operations.sh
+          setup.sh
+          tests/suites/operations/case-crowdsec.bash
+          tests/suites/operations/case-lock-fd-hygiene.bash
+          tests/suites/operations/case-operations.bash
+          tests/suites/operations/case-uninstall.bash
+          utilities/maintenance-health.sh
+          utilities/setup-systemd.sh
+          utilities/uninstall-vaultwarden.sh
+          FILES
+          [[ "${final_files[*]}" == "${expected_files[*]}" ]] || { printf 'Unexpected final files:\n%s\n' "${final_files[*]}" >&2; exit 1; }
+          test ! -e .github/workflows/pr280-health-lock.yml
+          if find . -maxdepth 1 -name '.pr280-*' -print -quit | grep -q .; then
+            echo 'Temporary PR 280 staging file leaked into final tree.' >&2
+            exit 1
+          fi
+          git fetch origin "$branch"
+          [[ "$(git rev-parse "origin/$branch")" == "$staging_sha" ]] || { echo 'Remote branch advanced during validation.' >&2; exit 1; }
+          git push origin "HEAD:refs/heads/$branch"
