@@ -1,0 +1,26 @@
+diff --git a/tests/suites/foundation/case-config-env.bash b/tests/suites/foundation/case-config-env.bash
+index a3881c8..bc78548 100755
+--- a/tests/suites/foundation/case-config-env.bash
++++ b/tests/suites/foundation/case-config-env.bash
+@@ -307,7 +307,7 @@ chmod +x "$START_REPO/utilities/env-edit.sh" "$TMP/start-bin/"*
+ if (( EUID == 0 )); then
+   chown root:root "$START_INSTALLED" "$START_STATE/config" "$START_STATE/config/install.env" "$START_STATE/secrets" "$START_STATE/secrets/secrets.yaml"
+ elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+-  sudo -n chown root:root "$START_INSTALLED" "$START_STATE/config" "$START_STATE/config/install.env" "$START_STATE/secrets" "$START_STATE/secrets/secrets.yaml"
++  sudo -n "$(type -P chown)" root:root "$START_INSTALLED" "$START_STATE/config" "$START_STATE/config/install.env" "$START_STATE/secrets" "$START_STATE/secrets/secrets.yaml"
+ else
+   [[ "${GITHUB_ACTIONS:-false}" != true ]] || fail 'passwordless sudo unavailable for production-like dry-run fixture'
+   printf 'SKIP: production-like dry-run fixture requires root or passwordless sudo\n'
+diff --git a/tests/suites/foundation/case-systemd.bash b/tests/suites/foundation/case-systemd.bash
+index 7aa6fb5..28cb098 100755
+--- a/tests/suites/foundation/case-systemd.bash
++++ b/tests/suites/foundation/case-systemd.bash
+@@ -870,7 +870,7 @@ if find "$UNIT_DIR" -type f -name '*.conf' -print0 | xargs -0 grep -L -F "$STATE
+ # fixture key after installation; production installation owns the real key copy.
+ printf 'fixture-key\n' > "$ENV_DIR/age-key.txt"
+ chmod 0600 "$ENV_DIR/age-key.txt"
+-if (( EUID != 0 )); then sudo -n chown root:root "$ENV_DIR/age-key.txt"; else chown root:root "$ENV_DIR/age-key.txt"; fi
++if (( EUID != 0 )); then sudo -n "$(type -P chown)" root:root "$ENV_DIR/age-key.txt"; else chown root:root "$ENV_DIR/age-key.txt"; fi
+ run_setup validate >"$TMP/validate.out" 2>&1 || { cat "$TMP/validate.out" >&2; fail 'immediate validation failed'; }
+ 
+ find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" -type f -print0 | sort -z | xargs -0 sha256sum > "$TMP/before.sha"
