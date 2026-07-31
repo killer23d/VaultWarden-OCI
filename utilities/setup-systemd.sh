@@ -803,7 +803,7 @@ _install_service_identity_dropin() {
             continue
         fi
         mkdir -p "$dropin_dir" || { log_error "Cannot create drop-in dir: $dropin_dir"; return 1; }
-        cat > "$dropin_file" << DROPIN
+        if ! cat > "$dropin_file" << DROPIN
 # Written by setup-systemd.sh install — do not edit by hand.
 # Regenerate: sudo utilities/setup-systemd.sh install
 #
@@ -814,7 +814,14 @@ _install_service_identity_dropin() {
 User=${service_user}
 Group=${service_group}
 DROPIN
-        chmod 644 "$dropin_file"
+        then
+            log_error "Failed to publish identity drop-in: $dropin_file"
+            return 1
+        fi
+        chmod 644 "$dropin_file" || {
+            log_error "Failed to set identity drop-in mode: $dropin_file"
+            return 1
+        }
         log_success "Installed identity drop-in: $dropin_file (${service_user}:${service_group})"
     done
 }
@@ -877,7 +884,7 @@ _install_rwpaths_dropin() {
             continue
         fi
         mkdir -p "$dropin_dir" || { log_error "Cannot create drop-in dir: $dropin_dir"; return 1; }
-        cat > "$dropin_file" << DROPIN
+        if ! cat > "$dropin_file" << DROPIN
 # Written by setup-systemd.sh install — do not edit by hand.
 # Regenerate: sudo utilities/setup-systemd.sh install
 #
@@ -886,17 +893,28 @@ _install_rwpaths_dropin() {
 [Unit]
 After=${_mount_unit}
 DROPIN
+        then
+            log_error "Failed to publish state-dir drop-in: $dropin_file"
+            return 1
+        fi
 
         if [[ "$unit" == *.service ]]; then
-            cat >> "$dropin_file" << DROPIN
+            if ! cat >> "$dropin_file" << DROPIN
 # [Service] ReadWritePaths= — grants write access to DATA_VOLUME_MOUNT under
 #                             ProtectSystem=strict (without this, all writes to
 #                             the data volume are silently denied by the kernel).
 [Service]
 ReadWritePaths=${data_mount}
 DROPIN
+            then
+                log_error "Failed to complete state-dir drop-in: $dropin_file"
+                return 1
+            fi
         fi
-        chmod 644 "$dropin_file"
+        chmod 644 "$dropin_file" || {
+            log_error "Failed to set state-dir drop-in mode: $dropin_file"
+            return 1
+        }
         log_success "Installed state-dir drop-in: $dropin_file"
     done
 }
@@ -1028,15 +1046,30 @@ _render_startup_service() {
         return 0
     fi
     local tmp
-    tmp=$(mktemp -p "$UNIT_DEST_DIR" "${STARTUP_SERVICE}.XXXXXXXXXX") || return 1
-    _render_startup_expected "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
-    mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+    tmp=$(mktemp -p "$UNIT_DEST_DIR" "${STARTUP_SERVICE}.XXXXXXXXXX") || {
+        log_error "Failed to create temporary rendered unit in: $UNIT_DEST_DIR"
+        return 1
+    }
+    _render_startup_expected "$tmp" || {
+        log_error "Failed to render startup unit: $template -> $tmp"
+        rm -f "$tmp"
+        return 1
+    }
+    chmod 0644 "$tmp" || {
+        log_error "Failed to set rendered startup unit mode: $tmp"
+        rm -f "$tmp"
+        return 1
+    }
+    mv "$tmp" "$dest" || {
+        log_error "Failed to publish rendered startup unit: $tmp -> $dest"
+        rm -f "$tmp"
+        return 1
+    }
     log_success "Installed unit: $STARTUP_SERVICE"
 }
 
 install_units() {
-    _setup_systemd_acquire_guard "Systemd install" "install" || exit $?
+    _setup_systemd_acquire_guard "Systemd install" "install" || return $?
     log_header "VaultWarden-OCI systemd Timer Installation"
 
     if [[ ! -d "$UNIT_SOURCE_DIR" ]]; then
@@ -1046,10 +1079,16 @@ install_units() {
     fi
 
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
-    _run mkdir -p "$OPT_SCRIPTS_DIR"
+    _run mkdir -p "$OPT_SCRIPTS_DIR" || {
+        log_error "Failed to create managed script destination: $OPT_SCRIPTS_DIR"
+        return 1
+    }
 
     if [[ "$DRY_RUN" == "false" ]]; then
-        cp -rP "$PROJECT_ROOT/lib" "$OPT_SCRIPTS_DIR/"
+        cp -rP "$PROJECT_ROOT/lib" "$OPT_SCRIPTS_DIR/" || {
+            log_error "Failed to copy managed library: $PROJECT_ROOT/lib -> $OPT_SCRIPTS_DIR/lib"
+            return 1
+        }
 
         # lib files are installed 644 root:root (not 640).
         #
@@ -1066,10 +1105,22 @@ install_units() {
         # contain inline credentials), set User= to a dedicated group,
         # change these lines to chmod 640 and chown root:<service-group>,
         # and add the service account to that group. Document the choice.
-        find "$OPT_SCRIPTS_DIR/lib" -type f -name '*.sh' -exec chmod 644 {} +
-        find "$OPT_SCRIPTS_DIR/lib" -type f ! -name '*.sh' -exec chmod 640 {} +  2>/dev/null || true
-        find "$OPT_SCRIPTS_DIR/lib" -type d -exec chmod 755 {} +
-        chown -R root:root "$OPT_SCRIPTS_DIR/lib"
+        find "$OPT_SCRIPTS_DIR/lib" -type f -name '*.sh' -exec chmod 644 {} + || {
+            log_error "Failed to set managed shell library modes under: $OPT_SCRIPTS_DIR/lib"
+            return 1
+        }
+        find "$OPT_SCRIPTS_DIR/lib" -type f ! -name '*.sh' -exec chmod 640 {} + 2>/dev/null || {
+            log_error "Failed to set managed non-shell library modes under: $OPT_SCRIPTS_DIR/lib"
+            return 1
+        }
+        find "$OPT_SCRIPTS_DIR/lib" -type d -exec chmod 755 {} + || {
+            log_error "Failed to set managed library directory modes under: $OPT_SCRIPTS_DIR/lib"
+            return 1
+        }
+        chown -R root:root "$OPT_SCRIPTS_DIR/lib" || {
+            log_error "Failed to set managed library ownership: $OPT_SCRIPTS_DIR/lib"
+            return 1
+        }
         log_success "Installed lib/ to $OPT_SCRIPTS_DIR/lib/ (*.sh: 644, other files: 640)"
     else
         log_info "[DRY RUN] Would copy lib/ -> $OPT_SCRIPTS_DIR/lib/ (*.sh: 644 root:root)"
@@ -1095,7 +1146,10 @@ install_units() {
             log_info "[DRY RUN] Would install: $dest (700 root:root)"
             continue
         fi
-        install -m 700 -o root -g root "$src" "$dest"
+        install -m 700 -o root -g root "$src" "$dest" || {
+            log_error "Failed to install managed script: $src -> $dest"
+            return 1
+        }
         log_success "Installed: $dest"
     done
 
@@ -1113,11 +1167,22 @@ install_units() {
             log_info "[DRY RUN] Would install: $dest (700 root:root)"
             continue
         fi
-        mkdir -p "$(dirname "$dest")"
-        install -m 700 -o root -g root "$src" "$dest"
+        mkdir -p "$(dirname "$dest")" || {
+            log_error "Failed to create managed script directory: $(dirname "$dest")"
+            return 1
+        }
+        install -m 700 -o root -g root "$src" "$dest" || {
+            log_error "Failed to install managed script: $src -> $dest"
+            return 1
+        }
         log_success "Installed: $dest"
     done
-    if [[ "$DRY_RUN" == "false" ]]; then chown root:root "$OPT_SCRIPTS_DIR"; fi
+    if [[ "$DRY_RUN" == "false" ]]; then
+        chown root:root "$OPT_SCRIPTS_DIR" || {
+            log_error "Failed to set managed script destination ownership: $OPT_SCRIPTS_DIR"
+            return 1
+        }
+    fi
 
     local service_user service_group service_identity
     service_identity=$(_resolve_service_identity)
@@ -1146,7 +1211,10 @@ install_units() {
         fi
     else
         if [[ -f "$age_key_src" ]]; then
-            install -m 600 -o root -g root "$age_key_src" "$AGE_KEY_DEST"
+            install -m 600 -o root -g root "$age_key_src" "$AGE_KEY_DEST" || {
+                log_error "Failed to install Age key: $age_key_src -> $AGE_KEY_DEST"
+                return 1
+            }
             fix_known_path_permissions "$AGE_KEY_DEST" || return 1
             log_success "Installed age key: $AGE_KEY_DEST (root:root 600)"
         else
@@ -1200,7 +1268,10 @@ install_units() {
                 log_info "[DRY RUN] Would copy $rclone_src -> $rclone_dest (600 root:root)"
                 log_info "[DRY RUN] sync-env would set RCLONE_CONFIG=$rclone_dest in generated runtime env files"
             else
-                install -m 600 -o root -g root "$rclone_src" "$rclone_dest"
+                install -m 600 -o root -g root "$rclone_src" "$rclone_dest" || {
+                    log_error "Failed to install rclone config: $rclone_src -> $rclone_dest"
+                    return 1
+                }
                 log_success "Installed rclone config: $rclone_dest (source: $rclone_src)"
                 if [[ "$rclone_src" != "$rclone_dest" ]]; then
                     log_info "ADMIN NOTE: if you re-run 'rclone config' interactively as a non-root"
@@ -1230,8 +1301,15 @@ install_units() {
             log_error "Managed unit source is missing: $src"
             return 1
         fi
-        _run cp "$src" "$UNIT_DEST_DIR/$unit"
-        _run chmod 644 "$UNIT_DEST_DIR/$unit"
+        local dest="$UNIT_DEST_DIR/$unit"
+        _run cp "$src" "$dest" || {
+            log_error "Failed to install managed unit: $src -> $dest"
+            return 1
+        }
+        _run chmod 644 "$dest" || {
+            log_error "Failed to set managed unit mode: $dest"
+            return 1
+        }
         log_success "Installed unit: $unit"
     done
 
@@ -1243,7 +1321,10 @@ install_units() {
     _install_rwpaths_dropin || return 1
 
     log_info "Reloading systemd daemon ..."
-    _run systemctl daemon-reload
+    _run systemctl daemon-reload || {
+        log_error "Failed to reload systemd after installing managed units."
+        return 1
+    }
 
     # Validate OnCalendar expressions before enabling timers.
     # An invalid expression causes systemctl enable --now to fail with a
@@ -1265,7 +1346,10 @@ install_units() {
         done
     fi
 
-    _run systemctl enable "$STARTUP_SERVICE"
+    _run systemctl enable "$STARTUP_SERVICE" || {
+        log_error "Failed to enable startup service: $STARTUP_SERVICE"
+        return 1
+    }
     log_success "Enabled: $STARTUP_SERVICE"
 
     local _enable_now=false
@@ -1281,7 +1365,10 @@ install_units() {
     if [[ "$_enable_now" == "true" ]]; then
         log_info "Enabling and starting timers ..."
         for timer in "${TIMERS[@]}"; do
-            _run systemctl enable --now "$timer"
+            _run systemctl enable --now "$timer" || {
+                log_error "Failed to enable and start timer: $timer"
+                return 1
+            }
             log_success "Enabled and started: $timer"
         done
     else
@@ -1290,7 +1377,10 @@ install_units() {
         log_info "Start later with: sudo utilities/setup-systemd.sh install --enable-now"
         log_info "Or run: sudo systemctl enable --now ${TIMERS[*]}"
         for timer in "${TIMERS[@]}"; do
-            _run systemctl enable "$timer"
+            _run systemctl enable "$timer" || {
+                log_error "Failed to enable timer: $timer"
+                return 1
+            }
             log_success "Enabled: $timer"
         done
     fi
@@ -1351,7 +1441,7 @@ install_units() {
 }
 
 remove_units() {
-    _setup_systemd_acquire_guard "Systemd remove" "remove" || exit $?
+    _setup_systemd_acquire_guard "Systemd remove" "remove" || return $?
     log_header "VaultWarden-OCI systemd Timer Removal"
 
     for timer in "${TIMERS[@]}"; do
@@ -1379,7 +1469,10 @@ remove_units() {
     for unit in "${_MANAGED_UNIT_FILES[@]}"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ -f "$dest" ]]; then
-            _run rm -f "$dest"
+            _run rm -f "$dest" || {
+                log_error "Failed to remove managed unit: $dest"
+                return 1
+            }
             log_success "Removed: $dest"
         fi
     done
@@ -1394,13 +1487,19 @@ remove_units() {
         local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
         local dropin_file="$dropin_dir/10-state-dir.conf"
         if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
+            _run rm -f "$dropin_file" || {
+                log_error "Failed to remove managed state-dir drop-in: $dropin_file"
+                return 1
+            }
             log_success "Removed ReadWritePaths drop-in: $dropin_file"
         fi
         # Remove the .d/ dir only if it is now empty (preserve any
         # drop-ins installed by other tools, e.g. Docker or the OS).
         if [[ -d "$dropin_dir" ]] && [[ -z "$(ls -A "$dropin_dir" 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
+            _run rmdir "$dropin_dir" || {
+                log_error "Failed to remove empty managed drop-in directory: $dropin_dir"
+                return 1
+            }
             log_success "Removed empty drop-in dir: $dropin_dir"
         fi
     done
@@ -1419,16 +1518,25 @@ remove_units() {
         local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
         local dropin_file="$dropin_dir/20-identity.conf"
         if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
+            _run rm -f "$dropin_file" || {
+                log_error "Failed to remove managed identity drop-in: $dropin_file"
+                return 1
+            }
             log_success "Removed identity drop-in: $dropin_file"
         fi
         if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
+            _run rmdir "$dropin_dir" || {
+                log_error "Failed to remove empty managed drop-in directory: $dropin_dir"
+                return 1
+            }
             log_success "Removed empty drop-in dir: $dropin_dir"
         fi
     done
 
-    _run systemctl daemon-reload
+    _run systemctl daemon-reload || {
+        log_error "Failed to reload systemd after removing managed units."
+        return 1
+    }
     log_success "All timer units removed and daemon reloaded."
     log_info "Scripts remain in $OPT_SCRIPTS_DIR -- remove manually if desired."
 
@@ -1827,12 +1935,12 @@ main() {
     fi
 
     if [[ "$REMOVE" == "true" ]]; then
-        remove_units || exit $?
+        remove_units
         exit 0
     fi
 
     if [[ "$INSTALL" == "true" ]]; then
-        install_units || exit $?
+        install_units
         exit 0
     fi
 
