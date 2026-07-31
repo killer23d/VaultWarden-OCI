@@ -72,9 +72,12 @@ assert_contains "$SCRIPT" "10-state-dir.conf"
 assert_contains "$SCRIPT" "20-identity.conf"
 assert_contains "$SCRIPT" "30-run-as-root.conf"
 assert_contains "$SCRIPT" "vaultwarden_init"
-assert_contains "$SCRIPT" "vaultwarden_app"
-assert_contains "$SCRIPT" "vaultwarden_caddy"
-assert_contains "$SCRIPT" "vaultwarden_postfix"
+assert_contains "$SCRIPT" '_VW_DEFAULT_CONTAINER_VAULTWARDEN'
+assert_contains "$SCRIPT" '_VW_DEFAULT_CONTAINER_CADDY'
+assert_contains "$SCRIPT" '_VW_DEFAULT_CONTAINER_POSTFIX'
+assert_contains "$ROOT/lib/defaults.sh" 'vaultwarden_app'
+assert_contains "$ROOT/lib/defaults.sh" 'vaultwarden_caddy'
+assert_contains "$ROOT/lib/defaults.sh" 'vaultwarden_postfix'
 assert_contains "$SCRIPT" "vaultwarden_egress_network"
 assert_contains "$SCRIPT" "caddy_external_network"
 assert_contains "$SCRIPT" "postfix_relay_network"

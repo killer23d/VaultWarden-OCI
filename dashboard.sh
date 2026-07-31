@@ -50,9 +50,9 @@ _load_dashboard_environment() {
 }
 
 # Container names (must match docker-compose.yml)
-CONTAINER_VW="vaultwarden_app"
-CONTAINER_CADDY="vaultwarden_caddy"
-CONTAINER_POSTFIX="vaultwarden_postfix"
+CONTAINER_VW="$_VW_DEFAULT_CONTAINER_VAULTWARDEN"
+CONTAINER_CADDY="$_VW_DEFAULT_CONTAINER_CADDY"
+CONTAINER_POSTFIX="$_VW_DEFAULT_CONTAINER_POSTFIX"
 
 # Divider line
 DIVIDER="--------------------------------------------------"

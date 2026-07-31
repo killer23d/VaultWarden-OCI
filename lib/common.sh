@@ -523,45 +523,6 @@ auto_fix_critical_permissions() {
     return 0
 }
 
-# _fix_rclone_ownership
-#
-# When rclone is called under sudo, the rclone config file can become owned
-# by root, making it unreadable by the real service user on subsequent runs.
-# This function detects and silently corrects that ownership drift.
-#
-# Resolves the real user home path even when HOME=/root (sudo context).
-# Silent no-op when ownership is already correct or the file does not exist.
-_fix_rclone_ownership() {
-    local real_user
-    real_user=$(get_real_user 2>/dev/null || id -un)
-
-    local rclone_conf
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        # Under sudo, HOME is /root; resolve the actual user's home directory.
-        local sudo_user_home
-        sudo_user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
-        [[ -n "$sudo_user_home" ]] || return 0
-        rclone_conf="${sudo_user_home}/.config/rclone/rclone.conf"
-    else
-        rclone_conf="${HOME}/.config/rclone/rclone.conf"
-    fi
-
-    if [[ ! -f "$rclone_conf" ]]; then
-        return 0
-    fi
-
-    local owner
-    owner=$(stat -c '%U' "$rclone_conf" 2>/dev/null || echo "")
-    if [[ -n "$owner" && "$owner" != "$real_user" ]]; then
-        log_warn "_fix_rclone_ownership: '${rclone_conf}' owned by '${owner}' — correcting to '${real_user}'"
-        if chown "${real_user}:$(id -gn "$real_user" 2>/dev/null || id -gn)" "$rclone_conf" 2>/dev/null; then
-            log_info "_fix_rclone_ownership: ownership corrected → ${rclone_conf}"
-        else
-            log_warn "_fix_rclone_ownership: chown failed — rclone.conf may still be root-owned"
-        fi
-    fi
-}
-
 # _run_rclone [ARGS...]
 #
 # Wrapper around rclone that drops privileges when running as root via sudo.
@@ -969,7 +930,7 @@ export -f has_command require_commands retry_with_backoff is_root require_root p
 export -f project_version print_project_version get_real_user _maybe_sudo
 export -f expected_owner_for_path expected_group_for_path expected_mode_for_path fix_known_path_permissions assert_known_path_permissions
 export -f auto_fix_critical_permissions
-export -f _fix_rclone_ownership _run_rclone _check_sudo_requirement
+export -f _run_rclone _check_sudo_requirement
 export -f register_cleanup perform_cleanup
 export -f ensure_dir secure_file test_connectivity test_http download_file
 export -f setup_error_trap setup_cleanup_trap safe_execute

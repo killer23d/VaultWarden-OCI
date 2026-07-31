@@ -29,6 +29,13 @@ readonly _VW_DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/mnt/vw-data}"
 readonly _VW_DEFAULT_PUID="${_VW_DEFAULT_PUID:-1001}"
 readonly _VW_DEFAULT_PGID="${_VW_DEFAULT_PGID:-1001}"
 
+# Fixed container names declared by docker-compose.yml.example. Keep the
+# dashboard, health checks, and uninstall inventory aligned through these
+# three simple constants rather than duplicating the names in each caller.
+readonly _VW_DEFAULT_CONTAINER_VAULTWARDEN="${_VW_DEFAULT_CONTAINER_VAULTWARDEN:-vaultwarden_app}"
+readonly _VW_DEFAULT_CONTAINER_CADDY="${_VW_DEFAULT_CONTAINER_CADDY:-vaultwarden_caddy}"
+readonly _VW_DEFAULT_CONTAINER_POSTFIX="${_VW_DEFAULT_CONTAINER_POSTFIX:-vaultwarden_postfix}"
+
 # Service log subdirectories created under PROJECT_STATE_DIR/logs/
 # startup.sh iterates this array — add new sidecars here only.
 readonly -a _VW_DEFAULT_LOG_SERVICES=(

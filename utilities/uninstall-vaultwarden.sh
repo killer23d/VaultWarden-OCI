@@ -231,9 +231,9 @@ MANAGED_SERVICES=(
 
 MANAGED_CONTAINERS=(
     vaultwarden_init
-    vaultwarden_app
-    vaultwarden_caddy
-    vaultwarden_postfix
+    "$_VW_DEFAULT_CONTAINER_VAULTWARDEN"
+    "$_VW_DEFAULT_CONTAINER_CADDY"
+    "$_VW_DEFAULT_CONTAINER_POSTFIX"
 )
 
 MANAGED_NETWORKS=(
