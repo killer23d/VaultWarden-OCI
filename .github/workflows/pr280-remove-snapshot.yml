@@ -1,0 +1,29 @@
+name: PR 280 remove snapshot
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/pr280-remove-snapshot.yml'
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: codex/small-team-runtime-remediation
+          fetch-depth: 0
+      - name: Archive exact source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/pr280-remove-source-sha.txt"
+          tar --exclude=.git -czf "$RUNNER_TEMP/pr280-remove-source.tar.gz" .
+      - uses: actions/upload-artifact@v6
+        with:
+          name: pr280-remove-source
+          path: |
+            ${{ runner.temp }}/pr280-remove-source.tar.gz
+            ${{ runner.temp }}/pr280-remove-source-sha.txt
+          if-no-files-found: error
+          retention-days: 1
