@@ -974,10 +974,6 @@ cat > "$BIN/crowdsec" <<'EOF_CROWDSEC'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${1:-}" == "-t" ]] || exit 2
-if [[ -n "${EXPECTED_CLOSED_FD:-}" && -e "/proc/${BASHPID}/fd/${EXPECTED_CLOSED_FD}" ]]; then
-    printf 'FATAL health lock descriptor %s remained open\n' "$EXPECTED_CLOSED_FD"
-    exit 98
-fi
 [[ -r "${VALIDATION_OUTPUT_FILE:-}" ]] && cat "$VALIDATION_OUTPUT_FILE"
 if [[ -n "${VALIDATION_SIGNAL:-}" ]]; then
     kill -s "$VALIDATION_SIGNAL" "${BASHPID}"
@@ -1165,10 +1161,6 @@ _check_crowdsec_email_notifications
 
 printf '# BEGIN VaultWarden-OCI CrowdSec email notifications\n# END VaultWarden-OCI CrowdSec email notifications\n' \
     > "$VW_CROWDSEC_ETC_DIR/profiles.yaml.local"
-exec {HEALTH_LOCK_FD}>"$TMP/health.lock"
-EXPECTED_CLOSED_FD="$HEALTH_LOCK_FD"
-export EXPECTED_CLOSED_FD
-
 VALIDATION_RC=8
 VALIDATION_SIGNAL=""
 printf '\033[33mWARN\tCrowdSec validation failed\r SMTP_PASSWORD=do-not-print\033[0m\nsecond line\n' \
@@ -1182,8 +1174,6 @@ _check_crowdsec_email_notifications
     || fail "health warning omitted the sanitized actionable validation detail"
 [[ "$RESULTS" != *"do-not-print"* && "$RESULTS" != *$'\033'* ]] \
     || fail "health warning exposed unsafe validation output"
-[[ -e "/proc/${BASHPID}/fd/${HEALTH_LOCK_FD}" ]] \
-    || fail "health validation closed the caller's health lock descriptor"
 assert_no_validation_logs
 
 VALIDATION_RC=0
@@ -1229,7 +1219,6 @@ _check_crowdsec_email_notifications
     || fail "empty validation output did not use the generic bounded warning"
 assert_no_validation_logs
 
-{ eval "exec ${HEALTH_LOCK_FD}>&-"; }
 printf 'CrowdSec email notification health visibility tests passed.\n'
 )
 

@@ -16,19 +16,22 @@ fail() {
     exit 1
 }
 
-spinner_block="$(sed -n '/^spinner_start()/,/^spinner_stop()/p' "$LOG_LIB")"
 for variable in \
     OPERATION_SPECIFIC_LOCK_FD \
     OPERATION_LOCK_FD \
-    VW_OPERATION_INHERITED_FD; do
+    VW_OPERATION_INHERITED_FD \
+    HEALTH_LOCK_FD; do
     if grep -Fq "$variable" "$LOG_LIB"; then
         fail "logging library must not know repository lock variable ${variable}"
     fi
 done
-grep -Fq 'local health_fd="${HEALTH_LOCK_FD:-}"' <<< "$spinner_block" \
-    || fail "spinner must preserve read-health lock isolation"
-grep -Fq 'eval "exec ${health_fd}>&-"' <<< "$spinner_block" \
-    || fail "spinner child must close the read-health lock descriptor"
+
+# Presentation helpers must work without any health or operation lock state.
+unset HEALTH_LOCK_FD OPERATION_SPECIFIC_LOCK_FD OPERATION_LOCK_FD VW_OPERATION_INHERITED_FD
+# shellcheck source=../../../lib/log.sh
+source "$LOG_LIB"
+spinner_start "lock-independent spinner"
+spinner_stop true
 
 if grep -Fq '_crowdsec_worker_run_without_guard_fds' "$CROWDSEC_WORKER_LIB"; then
     fail "CrowdSec worker library retained obsolete operation descriptor isolation"
@@ -36,4 +39,4 @@ fi
 grep -Fq 'if "$bouncer_bin" -S -c "$dest"; then' "$CROWDSEC_WORKER_LIB" \
     || fail "autonomous CrowdSec Workers deployment must run normally under owner-bound locking"
 
-printf 'Owner-bound lock helper hygiene tests passed.\n'
+printf 'Owner-bound lock and logging independence tests passed.\n'

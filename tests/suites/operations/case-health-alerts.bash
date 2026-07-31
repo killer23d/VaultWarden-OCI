@@ -645,7 +645,7 @@ LC_ALL=C grep -q "$(printf '\303\251')" "$utf8_limit_file" \
     || fail "UTF-8 over-limit fixture does not end in exactly one canonical newline"
 
 check_boundary_files_for_locale C 'LC_ALL=C'
-if locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -qx 'c\.utf-8'; then
+if locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Eqx 'c\.(utf-8|utf8)'; then
     check_boundary_files_for_locale C.UTF-8 'LC_ALL=C.UTF-8'
 else
     printf 'SKIP: C.UTF-8 locale unavailable; UTF-8 locale boundary replay is covered by Ubuntu CI.\n'

@@ -709,14 +709,39 @@ require 'operation_package_run add-apt-repository -y universe' "$ROOT/utilities/
     "add-apt-repository must be routed through operation_package_run"
 
 tmpdir="$(mktemp -d)"
+kill_test_tree() {
+    local pid="$1" state
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    "$BASH" -c '
+        set +e
+        kill_tree() {
+            local current="$1" child
+            kill -STOP "$current" 2>/dev/null || return 0
+            while read -r child; do
+                [[ "$child" =~ ^[0-9]+$ ]] || continue
+                kill_tree "$child"
+            done < <(ps -o pid= --ppid "$current" 2>/dev/null)
+            kill -KILL "$current" 2>/dev/null || true
+        }
+        kill_tree "$1"
+    ' _ "$pid" >/dev/null 2>&1 || true
+    for _ in {1..40}; do
+        [[ ! -d "/proc/${pid}" ]] && return 0
+        state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+        [[ -z "$state" || "$state" == Z* ]] && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
 cleanup() {
-    [[ -n "${child_pid:-}" ]] && kill "$child_pid" 2>/dev/null || true
-    [[ -n "${owner_pid:-}" ]] && kill "$owner_pid" 2>/dev/null || true
-    [[ -n "${owner_launcher_pid:-}" ]] && kill "$owner_launcher_pid" 2>/dev/null || true
-    [[ -n "${lock_holder_pid:-}" ]] && kill "$lock_holder_pid" 2>/dev/null || true
-    [[ -n "${nested_lock_holder_pid:-}" ]] && kill "$nested_lock_holder_pid" 2>/dev/null || true
-    [[ -n "${holder_pid:-}" ]] && kill "$holder_pid" 2>/dev/null || true
-    [[ -n "${nonglobal_pid:-}" ]] && kill "$nonglobal_pid" 2>/dev/null || true
+    [[ -z "${child_pid:-}" ]] || kill_test_tree "$child_pid" || true
+    [[ -z "${owner_pid:-}" ]] || kill_test_tree "$owner_pid" || true
+    [[ -z "${owner_launcher_pid:-}" ]] || kill_test_tree "$owner_launcher_pid" || true
+    [[ -z "${lock_holder_pid:-}" ]] || kill_test_tree "$lock_holder_pid" || true
+    [[ -z "${nested_lock_holder_pid:-}" ]] || kill_test_tree "$nested_lock_holder_pid" || true
+    [[ -z "${holder_pid:-}" ]] || kill_test_tree "$holder_pid" || true
+    [[ -z "${nonglobal_pid:-}" ]] || kill_test_tree "$nonglobal_pid" || true
     rm -rf "$tmpdir"
 }
 trap cleanup EXIT
@@ -957,7 +982,7 @@ set -e
 [[ "$(stat -Lc '%d:%i' "$specific_lock")" == "$specific_identity" ]] \
     || fail "operation-specific lock pathname was deleted or replaced"
 kill -0 "$child_pid" 2>/dev/null || fail "arbitrary child did not remain alive after contender acquisition"
-kill "$child_pid" 2>/dev/null || true
+kill_test_tree "$child_pid" || fail "arbitrary child did not terminate during cleanup"
 wait "$child_pid" 2>/dev/null || true
 child_pid=""
 
@@ -1122,7 +1147,8 @@ set -e
 [[ "$owner_output" == *"Restore A"* ]] || fail "global contender did not attribute verified global owner"
 [[ "$owner_output" != *"Non-global B"* ]] || fail "global contender incorrectly attributed non-global operation"
 
-kill "$holder_pid" "$nonglobal_pid" 2>/dev/null || true
+kill_test_tree "$holder_pid" || fail "global owner fixture did not terminate"
+kill_test_tree "$nonglobal_pid" || fail "non-global owner fixture did not terminate"
 wait "$holder_pid" "$nonglobal_pid" 2>/dev/null || true
 holder_pid=""
 nonglobal_pid=""
@@ -1175,7 +1201,7 @@ set -e
 after="$(cat "$same_state")"
 [[ "$before" == "$after" ]] || fail "same-ID losing contender overwrote active owner state"
 
-kill "$holder_pid" 2>/dev/null || true
+kill_test_tree "$holder_pid" || fail "same-ID owner fixture did not terminate"
 wait "$holder_pid" 2>/dev/null || true
 holder_pid=""
 
@@ -1205,14 +1231,12 @@ reject() {
   ! grep -Eq -- "$1" "$2" || fail "$3"
 }
 
-require '_acquire_readonly_health_lock' "$HEALTH" \
-  "read-only health must use direct health-specific flock"
-reject '--no-global' "$HEALTH" \
-  "read-only health must not use operation_acquire --no-global"
+reject 'HEALTH_LOCK_FD|_acquire_readonly_health_lock' "$HEALTH" \
+  "read-only health must not retain the raw descriptor implementation"
+require 'flock --nonblock --conflict-exit-code 75 --close' "$HEALTH" \
+  "read-only health must use the close-on-exec flock wrapper"
 require '--id health-repair' "$HEALTH" \
   "health --fix must use the global health-repair operation"
-require 'return "\$lock_rc"' "$HEALTH" \
-  "health lock acquisition failures must preserve their real status"
 require 'health --fix requires root' "$HEALTH" \
   "health repair mode must remain root-operated"
 require 'return 4' "$HEALTH" \
@@ -1327,6 +1351,525 @@ printf 'PASS: secrets/env/systemd operation guards\n'
 
 check_secrets_env_systemd_operation_guards
 
+check_health_lock_owner_boundary() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+HEALTH="$ROOT/utilities/maintenance-health.sh"
+TMP="$(mktemp -d -t vw-health-owner-lock.XXXXXXXXXX)"
+created_group=false
+cleanup_pids=()
+
+fail(){ printf 'FAIL health lock owner boundary: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+
+root_run() {
+    if (( EUID == 0 )); then
+        "$@"
+    else
+        sudo -n "$@"
+    fi
+}
+
+root_kill_tree() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    root_run "$BASH" -c '
+        set +e
+        kill_tree() {
+            local current="$1" child
+            kill -STOP "$current" 2>/dev/null || true
+            while read -r child; do
+                [[ "$child" =~ ^[0-9]+$ ]] || continue
+                kill_tree "$child"
+            done < <(ps -o pid= --ppid "$current" 2>/dev/null)
+            kill -KILL "$current" 2>/dev/null || true
+        }
+        kill_tree "$1"
+    ' _ "$pid" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+    local pid
+    for pid in "${cleanup_pids[@]}"; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        root_kill_tree "$pid"
+    done
+    sleep 0.1
+    for pid in "${cleanup_pids[@]}"; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        root_kill_tree "$pid"
+    done
+    if [[ "$created_group" == true ]]; then
+        root_run groupdel vaultwarden >/dev/null 2>&1 || true
+    fi
+    root_run rm -rf "$TMP" 2>/dev/null || rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+if (( EUID != 0 )); then
+    command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1 \
+        || fail "root metadata behavior requires root or passwordless sudo"
+fi
+if ! getent group vaultwarden >/dev/null 2>&1; then
+    root_run groupadd --system vaultwarden
+    created_group=true
+fi
+
+write_health_env() {
+    local case_dir="$1" owner_name="${2:-root}" owner_group="${3:-root}"
+    mkdir -p "$case_dir/state/backups" "$case_dir/state/reports"
+    cat >"$case_dir/installed.env" <<EOF_ENV
+PROJECT_STATE_DIR=$case_dir/state
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=
+SOPS_AGE_KEY_FILE=$case_dir/age-key.txt
+DOMAIN_NAME=
+BACKUP_DIR=$case_dir/state/backups
+REPORT_DIR=$case_dir/state/reports
+COMPOSE_PROJECT_NAME=vaultwarden-oci
+EOF_ENV
+    printf 'AGE-SECRET-KEY-TEST\n' >"$case_dir/age-key.txt"
+    chmod 0600 "$case_dir/installed.env" "$case_dir/age-key.txt"
+    if [[ "$owner_name" != root ]]; then
+        root_run chown -R "$owner_name:$owner_group" "$case_dir"
+        root_run chmod 0755 "$case_dir"
+        root_run chmod 0700 "$case_dir/state" "$case_dir/state/backups" "$case_dir/state/reports"
+        root_run chmod 0600 "$case_dir/installed.env" "$case_dir/age-key.txt"
+    fi
+}
+
+write_blocking_docker() {
+    local bin_dir="$1"
+    mkdir -p "$bin_dir"
+    cat >"$bin_dir/docker" <<'EOF_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$PPID" >"${VW_TEST_HEALTH_OWNER_PID_FILE:?}"
+printf '%s\n' "$$" >"${VW_TEST_DOCKER_PID_FILE:?}"
+"$BASH" -c '
+    set -euo pipefail
+    trap "" HUP TERM
+    printf "%s\n" "$$" >"$1"
+    : >"$2"
+    while :; do sleep 1; done
+' _ "$VW_TEST_SURVIVOR_PID_FILE" "$VW_TEST_HEALTH_READY" &
+trap '' HUP TERM
+while :; do sleep 1; done
+EOF_DOCKER
+    chmod 0755 "$bin_dir/docker"
+}
+
+pid_has_inode() {
+    local pid="$1" expected="$2" fd actual
+    [[ "$pid" =~ ^[0-9]+$ && -d "/proc/${pid}/fd" ]] || return 1
+    for fd in "/proc/${pid}/fd/"*; do
+        [[ -e "$fd" ]] || continue
+        actual="$(stat -Lc '%d:%i' "$fd" 2>/dev/null || true)"
+        [[ "$actual" == "$expected" ]] && return 0
+    done
+    return 1
+}
+
+find_flock_ancestor() {
+    local pid="$1" parent executable
+    for _ in {1..16}; do
+        [[ "$pid" =~ ^[0-9]+$ && -d "/proc/${pid}" ]] || return 1
+        executable="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+        if [[ "${executable##*/}" == flock ]]; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+        parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+        [[ "$parent" =~ ^[0-9]+$ && "$parent" != 0 && "$parent" != "$pid" ]] || return 1
+        pid="$parent"
+    done
+    return 1
+}
+
+root_pid_has_inode() {
+    local pid="$1" expected="$2"
+    root_run "$BASH" -c '
+        set -euo pipefail
+        pid="$1"
+        expected="$2"
+        [[ "$pid" =~ ^[0-9]+$ && -d "/proc/${pid}/fd" ]] || exit 1
+        shopt -s nullglob
+        for fd in "/proc/${pid}/fd/"*; do
+            actual="$(stat -Lc "%d:%i" "$fd" 2>/dev/null || true)"
+            [[ "$actual" == "$expected" ]] && exit 0
+        done
+        exit 1
+    ' _ "$pid" "$expected"
+}
+
+wait_for_file() {
+    local file="$1"
+    for _ in {1..100}; do
+        [[ -s "$file" || -e "$file" ]] && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+# Root read-only health: canonical shared metadata, descendant isolation,
+# duplicate contention, no global operation lock, and owner-death release.
+root_case="$TMP/root"
+mkdir -p "$root_case"
+write_health_env "$root_case"
+write_blocking_docker "$root_case/bin"
+root_lock="$root_case/vaultwarden-health.lock"
+: >"$root_lock"
+chmod 0600 "$root_lock"
+root_run chown root:root "$root_lock"
+root_identity_before="$(stat -Lc '%d:%i' "$root_lock")"
+global_lock="$root_case/vaultwarden-operations.lock"
+: >"$global_lock"
+exec {global_fd}>"$global_lock"
+flock -n "$global_fd" || fail "could not hold global operation lock for read-only isolation test"
+
+root_run env \
+    PATH="$root_case/bin:$PATH" \
+    VW_CONFIG_INSTALLED_ENV_FILE="$root_case/installed.env" \
+    VW_HEALTH_LOCK_FILE="$root_lock" \
+    VW_OPERATIONS_LOCK="$global_lock" \
+    VW_TEST_HEALTH_OWNER_PID_FILE="$root_case/owner.pid" \
+    VW_TEST_DOCKER_PID_FILE="$root_case/docker.pid" \
+    VW_TEST_SURVIVOR_PID_FILE="$root_case/survivor.pid" \
+    VW_TEST_HEALTH_READY="$root_case/ready" \
+    "$HEALTH" --quiet >"$root_case/health.out" 2>&1 &
+root_launcher=$!
+cleanup_pids+=("$root_launcher")
+wait_for_file "$root_case/ready" || {
+    cat "$root_case/health.out" >&2 || true
+    fail "root public health fixture did not reach the blocking child"
+}
+root_owner="$(cat "$root_case/owner.pid")"
+root_docker="$(cat "$root_case/docker.pid")"
+root_survivor="$(cat "$root_case/survivor.pid")"
+cleanup_pids+=("$root_owner" "$root_docker" "$root_survivor")
+root_lock_owner="$(find_flock_ancestor "$root_owner" || true)"
+[[ "$root_lock_owner" =~ ^[0-9]+$ ]] || fail "could not identify util-linux flock owner"
+cleanup_pids+=("$root_lock_owner")
+root_identity="$(stat -Lc '%d:%i' "$root_lock")"
+[[ "$root_identity" == "$root_identity_before" ]] || fail "root health lock inode changed during preparation"
+[[ "$(stat -c '%U:%G %a' "$root_lock")" == 'root:vaultwarden 660' ]] \
+    || fail "root health lock is not root:vaultwarden 0660"
+root_pid_has_inode "$root_lock_owner" "$root_identity" \
+    || fail "dedicated flock owner does not hold the health lock inode"
+pid="$root_owner"
+while [[ "$pid" != "$root_lock_owner" ]]; do
+    ! root_pid_has_inode "$pid" "$root_identity" \
+        || fail "health workload process $pid inherited the health lock inode"
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$pid" =~ ^[0-9]+$ ]] || fail "health workload ancestry ended before the flock owner"
+done
+for pid in "$root_docker" "$root_survivor"; do
+    ! root_pid_has_inode "$pid" "$root_identity" \
+        || fail "health workload descendant $pid inherited the health lock inode"
+done
+
+set +e
+root_duplicate_output="$(root_run env \
+    VW_HEALTH_LOCK_FILE="$root_lock" \
+    "$HEALTH" --quiet 2>&1)"
+root_duplicate_rc=$?
+set -e
+[[ "$root_duplicate_rc" -eq 75 ]] \
+    || fail "duplicate root health returned $root_duplicate_rc instead of 75"
+[[ "$root_duplicate_output" == *"Another VaultWarden health check is already running"* ]] \
+    || fail "duplicate root health omitted contention diagnostic"
+
+root_run kill -TERM "$root_lock_owner"
+for _ in {1..40}; do
+    ! root_run kill -0 "$root_lock_owner" 2>/dev/null && break
+    sleep 0.05
+done
+! root_run kill -0 "$root_lock_owner" 2>/dev/null \
+    || fail "dedicated flock owner remained alive after TERM"
+root_run kill -0 "$root_owner" 2>/dev/null \
+    || fail "health workload died when the dedicated flock owner was killed"
+root_run kill -0 "$root_survivor" 2>/dev/null \
+    || fail "deliberately surviving child died when the dedicated flock owner was killed"
+for _ in {1..40}; do
+    ! kill -0 "$root_launcher" 2>/dev/null && break
+    sleep 0.05
+done
+set +e
+wait "$root_launcher"
+root_signal_rc=$?
+set -e
+[[ "$root_signal_rc" -eq 143 ]] \
+    || fail "read-only health signal status was $root_signal_rc instead of 143"
+for _ in {1..40}; do
+    if root_run flock -n -E 75 "$root_lock" true; then
+        reacquire_rc=0
+        break
+    fi
+    reacquire_rc=$?
+    sleep 0.05
+done
+[[ "${reacquire_rc:-99}" -eq 0 ]] \
+    || fail "contender did not acquire root health lock within two seconds after owner death"
+root_run kill -0 "$root_survivor" 2>/dev/null \
+    || fail "deliberately surviving child died with the health owner"
+! root_pid_has_inode "$root_survivor" "$root_identity" \
+    || fail "surviving child retained the health lock after owner death"
+[[ "$(stat -Lc '%d:%i' "$root_lock")" == "$root_identity" ]] \
+    || fail "root health lock path was replaced during owner-death recovery"
+exec {global_fd}>&-
+pass "read-only health uses a dedicated close-on-exec flock owner and releases after owner death"
+
+# Invalid path and infrastructure failures are real failures, never contention.
+assert_root_failure() {
+    local expected_rc="$1" expected_text="$2" lock_path="$3" path_prefix="${4:-}"
+    local output rc
+    set +e
+    output="$(root_run env PATH="${path_prefix}${PATH}" VW_HEALTH_LOCK_FILE="$lock_path" \
+        "$HEALTH" --quiet 2>&1)"
+    rc=$?
+    set -e
+    [[ "$rc" -eq "$expected_rc" ]] \
+        || fail "lock failure for $lock_path returned $rc, expected $expected_rc: $output"
+    [[ "$output" == *"$expected_text"* ]] \
+        || fail "lock failure for $lock_path omitted '$expected_text': $output"
+    [[ "$rc" -ne 75 ]] || fail "infrastructure failure was misreported as contention"
+}
+
+invalid_dir="$TMP/invalid"
+mkdir -p "$invalid_dir"
+: >"$invalid_dir/target"
+ln -s "$invalid_dir/target" "$invalid_dir/symlink.lock"
+mkdir "$invalid_dir/directory.lock"
+mkfifo "$invalid_dir/fifo.lock"
+assert_root_failure 3 "Operation lock path is not a regular file" "$invalid_dir/symlink.lock"
+assert_root_failure 3 "Operation lock path is not a regular file" "$invalid_dir/directory.lock"
+assert_root_failure 3 "Operation lock path is not a regular file" "$invalid_dir/fifo.lock"
+
+missing_group_bin="$TMP/missing-group-bin"
+mkdir -p "$missing_group_bin"
+cat >"$missing_group_bin/getent" <<'EOF_GETENT'
+#!/usr/bin/env bash
+exit 2
+EOF_GETENT
+chmod 0755 "$missing_group_bin/getent"
+assert_root_failure 3 "Required group 'vaultwarden' is unavailable" \
+    "$TMP/missing-group.lock" "$missing_group_bin:"
+missing_group_output="$(root_run env PATH="$missing_group_bin:$PATH" \
+    VW_HEALTH_LOCK_FILE="$TMP/missing-group-again.lock" "$HEALTH" --quiet 2>&1 || true)"
+[[ "$missing_group_output" == *"Run: sudo ./utilities/setup-systemd.sh install"* ]] \
+    || fail "missing-group diagnostic omitted the exact setup command"
+
+chown_bin="$TMP/chown-bin"
+mkdir -p "$chown_bin"
+cat >"$chown_bin/chown" <<'EOF_CHOWN'
+#!/usr/bin/env bash
+exit 1
+EOF_CHOWN
+chmod 0755 "$chown_bin/chown"
+: >"$TMP/chown.lock"; chmod 0660 "$TMP/chown.lock"; root_run chown root:root "$TMP/chown.lock"
+assert_root_failure 3 "Cannot set operation lock ownership to root:vaultwarden" \
+    "$TMP/chown.lock" "$chown_bin:"
+
+chmod_bin="$TMP/chmod-bin"
+mkdir -p "$chmod_bin"
+cat >"$chmod_bin/chmod" <<'EOF_CHMOD'
+#!/usr/bin/env bash
+exit 1
+EOF_CHMOD
+chmod 0755 "$chmod_bin/chmod"
+: >"$TMP/chmod.lock"; chmod 0600 "$TMP/chmod.lock"; root_run chown root:root "$TMP/chmod.lock"
+assert_root_failure 3 "Cannot set operation lock mode 0660" "$TMP/chmod.lock" "$chmod_bin:"
+
+stat_bin="$TMP/stat-bin"
+mkdir -p "$stat_bin"
+cat >"$stat_bin/stat" <<'EOF_STAT'
+#!/usr/bin/env bash
+exit 1
+EOF_STAT
+chmod 0755 "$stat_bin/stat"
+: >"$TMP/stat.lock"
+assert_root_failure 3 "Cannot stat operation lock file before preparation" "$TMP/stat.lock" "$stat_bin:"
+
+flock_bin="$TMP/flock-bin"
+mkdir -p "$flock_bin"
+cat >"$flock_bin/flock" <<'EOF_FLOCK'
+#!/usr/bin/env bash
+exit 64
+EOF_FLOCK
+chmod 0755 "$flock_bin/flock"
+: >"$TMP/flock.lock"; chmod 0660 "$TMP/flock.lock"; root_run chown root:vaultwarden "$TMP/flock.lock"
+assert_root_failure 64 "" "$TMP/flock.lock" "$flock_bin:"
+
+wrapped_bypass_lock="$TMP/wrapped-bypass.lock"
+: >"$wrapped_bypass_lock"
+chmod 0660 "$wrapped_bypass_lock"
+root_run chown root:vaultwarden "$wrapped_bypass_lock"
+set +e
+wrapped_bypass_output="$(root_run env \
+    VW_HEALTH_LOCK_WRAPPED=true \
+    VW_HEALTH_LOCK_PATH="$wrapped_bypass_lock" \
+    "$HEALTH" --quiet 2>&1)"
+wrapped_bypass_rc=$?
+set -e
+[[ "$wrapped_bypass_rc" -eq 3 ]] \
+    || fail "forged internal health wrapper marker returned $wrapped_bypass_rc instead of 3"
+[[ "$wrapped_bypass_output" == *"not the expected util-linux flock process"* ]] \
+    || fail "forged internal health wrapper marker omitted owner verification failure"
+pass "health lock path, metadata, wrapper identity, and unexpected flock failures fail as infrastructure errors"
+
+# Repair mode remains root-only, uses the global guard, and coordinates with
+# the same health-specific lock selected by the read-only path.
+repair_dir="$TMP/repair"
+mkdir -p "$repair_dir"
+write_health_env "$repair_dir"
+repair_health_lock="$repair_dir/vaultwarden-health.lock"
+repair_global_lock="$repair_dir/vaultwarden-operations.lock"
+repair_state="$repair_dir/state-dir"
+: >"$repair_health_lock"; chmod 0660 "$repair_health_lock"; root_run chown root:vaultwarden "$repair_health_lock"
+: >"$repair_global_lock"
+
+root_run "$BASH" -c '
+    exec 9>"$1"
+    flock -n 9
+    printf "%s\n" "$$" >"$2"
+    : >"$3"
+    while :; do sleep 1; done
+' _ "$repair_health_lock" "$repair_dir/specific.pid" "$repair_dir/specific.ready" &
+specific_launcher=$!
+cleanup_pids+=("$specific_launcher")
+wait_for_file "$repair_dir/specific.ready" || fail "specific repair lock holder did not start"
+specific_holder="$(cat "$repair_dir/specific.pid")"
+cleanup_pids+=("$specific_holder")
+set +e
+repair_specific_output="$(root_run env \
+    VW_CONFIG_INSTALLED_ENV_FILE="$repair_dir/installed.env" \
+    VW_HEALTH_LOCK_FILE="$repair_health_lock" \
+    VW_OPERATIONS_LOCK="$repair_global_lock" \
+    VW_OPERATIONS_STATE_DIR="$repair_state" \
+    "$HEALTH" --fix --quiet 2>&1)"
+repair_specific_rc=$?
+set -e
+[[ "$repair_specific_rc" -eq 75 ]] \
+    || fail "health --fix did not coordinate with the read-only health lock: rc=$repair_specific_rc output=$repair_specific_output"
+root_run kill -KILL "$specific_holder" 2>/dev/null || true
+wait "$specific_launcher" 2>/dev/null || true
+
+root_run "$BASH" -c '
+    exec 9>"$1"
+    flock -n 9
+    printf "%s\n" "$$" >"$2"
+    : >"$3"
+    while :; do sleep 1; done
+' _ "$repair_global_lock" "$repair_dir/global.pid" "$repair_dir/global.ready" &
+global_launcher=$!
+cleanup_pids+=("$global_launcher")
+wait_for_file "$repair_dir/global.ready" || fail "global repair lock holder did not start"
+global_holder="$(cat "$repair_dir/global.pid")"
+cleanup_pids+=("$global_holder")
+set +e
+repair_global_rc=0
+repair_global_output="$(root_run env \
+    VW_CONFIG_INSTALLED_ENV_FILE="$repair_dir/installed.env" \
+    VW_HEALTH_LOCK_FILE="$repair_health_lock" \
+    VW_OPERATIONS_LOCK="$repair_global_lock" \
+    VW_OPERATIONS_STATE_DIR="$repair_state" \
+    "$HEALTH" --fix --quiet 2>&1)" || repair_global_rc=$?
+set -e
+[[ "$repair_global_rc" -eq 75 ]] \
+    || fail "health --fix did not use the global operation guard: rc=$repair_global_rc output=$repair_global_output"
+root_run kill -KILL "$global_holder" 2>/dev/null || true
+wait "$global_launcher" 2>/dev/null || true
+pass "health --fix remains root-operated under global and health-specific coordination"
+
+# Non-root direct health uses a private XDG lock and does not require the
+# production vaultwarden group.
+nonroot_name=""
+nonroot_exec=()
+if (( EUID != 0 )); then
+    nonroot_name="$(id -un)"
+    nonroot_exec=()
+elif command -v runuser >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
+    nonroot_name=nobody
+    nonroot_exec=(runuser -u nobody --)
+elif command -v sudo >/dev/null 2>&1 && id nobody >/dev/null 2>&1 \
+    && sudo -n -u nobody true >/dev/null 2>&1; then
+    nonroot_name=nobody
+    nonroot_exec=(sudo -n -u nobody)
+else
+    fail "non-root health lock behavior requires a non-root runner"
+fi
+nonroot_group="$(id -gn "$nonroot_name")"
+root_run chmod 0755 "$TMP"
+nonroot_dir="$TMP/nonroot"
+mkdir -p "$nonroot_dir"
+root_run chown "$nonroot_name:$nonroot_group" "$nonroot_dir"
+root_run chmod 0755 "$nonroot_dir"
+write_health_env "$nonroot_dir" "$nonroot_name" "$nonroot_group"
+write_blocking_docker "$nonroot_dir/bin"
+root_run chown -R "$nonroot_name:$nonroot_group" "$nonroot_dir/bin"
+nonroot_xdg="$nonroot_dir/xdg"
+mkdir -p "$nonroot_xdg"
+root_run chown "$nonroot_name:$nonroot_group" "$nonroot_xdg"
+root_run chmod 0700 "$nonroot_xdg"
+nonroot_getent_bin="$nonroot_dir/getent-bin"
+mkdir -p "$nonroot_getent_bin"
+cat >"$nonroot_getent_bin/getent" <<'EOF_NONROOT_GETENT'
+#!/usr/bin/env bash
+exit 2
+EOF_NONROOT_GETENT
+chmod 0755 "$nonroot_getent_bin/getent"
+root_run chown -R "$nonroot_name:$nonroot_group" "$nonroot_getent_bin"
+
+"${nonroot_exec[@]}" env \
+    PATH="$nonroot_getent_bin:$nonroot_dir/bin:$PATH" \
+    XDG_RUNTIME_DIR="$nonroot_xdg" \
+    VW_CONFIG_INSTALLED_ENV_FILE="$nonroot_dir/installed.env" \
+    VW_TEST_HEALTH_OWNER_PID_FILE="$nonroot_dir/owner.pid" \
+    VW_TEST_DOCKER_PID_FILE="$nonroot_dir/docker.pid" \
+    VW_TEST_SURVIVOR_PID_FILE="$nonroot_dir/survivor.pid" \
+    VW_TEST_HEALTH_READY="$nonroot_dir/ready" \
+    "$HEALTH" --quiet >"$nonroot_dir/health.out" 2>&1 &
+nonroot_launcher=$!
+cleanup_pids+=("$nonroot_launcher")
+wait_for_file "$nonroot_dir/ready" || {
+    cat "$nonroot_dir/health.out" >&2 || true
+    fail "non-root public health fixture did not reach the blocking child"
+}
+nonroot_lock="$nonroot_xdg/vaultwarden-health.lock"
+nonroot_owner_pid="$(cat "$nonroot_dir/owner.pid")"
+nonroot_docker_pid="$(cat "$nonroot_dir/docker.pid")"
+nonroot_survivor_pid="$(cat "$nonroot_dir/survivor.pid")"
+cleanup_pids+=("$nonroot_owner_pid" "$nonroot_docker_pid" "$nonroot_survivor_pid")
+[[ "$(stat -c '%U:%G %a' "$nonroot_lock")" == "$nonroot_name:$nonroot_group 600" ]] \
+    || fail "non-root XDG health lock is not user-owned mode 0600"
+set +e
+nonroot_duplicate_output="$("${nonroot_exec[@]}" env \
+    PATH="$nonroot_getent_bin:$PATH" \
+    XDG_RUNTIME_DIR="$nonroot_xdg" \
+    "$HEALTH" --quiet 2>&1)"
+nonroot_duplicate_rc=$?
+set -e
+[[ "$nonroot_duplicate_rc" -eq 75 ]] \
+    || fail "duplicate non-root health returned $nonroot_duplicate_rc instead of 75"
+[[ "$nonroot_duplicate_output" == *"Another VaultWarden health check is already running"* ]] \
+    || fail "duplicate non-root health omitted contention diagnostic"
+root_run kill -KILL "$nonroot_owner_pid"
+for _ in {1..40}; do
+    if "${nonroot_exec[@]}" flock -n -E 75 "$nonroot_lock" true; then
+        nonroot_reacquire=0
+        break
+    fi
+    nonroot_reacquire=$?
+    sleep 0.05
+done
+[[ "${nonroot_reacquire:-99}" -eq 0 ]] \
+    || fail "non-root contender did not acquire after owner death"
+pass "non-root health uses a user-owned 0600 XDG lock with genuine contention exit 75"
+)
+
+check_health_lock_owner_boundary
+
 check_operation_lock_file_preparation() (
 set -euo pipefail
 
@@ -1435,6 +1978,15 @@ root="$1"
 case_root="$2"
 ops="$root/lib/operations.sh"
 mkdir -p "$case_root"
+created_group=false
+cleanup_group(){
+    [[ "$created_group" == true ]] && groupdel vaultwarden >/dev/null 2>&1 || true
+}
+trap cleanup_group EXIT
+if ! getent group vaultwarden >/dev/null 2>&1; then
+    groupadd --system vaultwarden
+    created_group=true
+fi
 
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -1445,32 +1997,37 @@ fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
     : >"$lock"
     chmod 0600 "$lock"
     chown root:root "$lock"
-    _operation_prepare_lock_file "$lock"
-    actual="$(stat -c '%U:%G %a' "$lock")"
-    [[ "$actual" == 'root:root 660' ]] \
-        || fail "group-unavailable lock is '$actual', expected 'root:root 660'"
-    printf 'PASS: root group-unavailable path applies actual root:root mode 0660\n'
+    set +e
+    output="$(_operation_prepare_lock_file "$lock" shared 2>&1)"
+    rc=$?
+    set -e
+    [[ "$rc" -ne 0 ]] || fail "canonical group-unavailable lock unexpectedly succeeded"
+    [[ "$output" == *"Required group 'vaultwarden' is unavailable"* ]] \
+        || fail "group-unavailable lock omitted required-group diagnostic: $output"
+    [[ "$output" == *"Run: sudo ./utilities/setup-systemd.sh install"* ]] \
+        || fail "group-unavailable lock omitted exact setup command: $output"
+    [[ "$(stat -c '%U:%G %a' "$lock")" == 'root:root 600' ]] \
+        || fail "group-unavailable failure mutated the lock before setup"
+    printf 'PASS: canonical shared lock rejects a missing vaultwarden group\n'
 )
 
 (
-    if ! getent group vaultwarden >/dev/null 2>&1; then
-        printf 'SKIP: actual root:vaultwarden assertion (safe pre-existing vaultwarden group is unavailable)\n'
-        exit 0
-    fi
     source "$ops"
     lock="$case_root/group-available.lock"
     : >"$lock"
     chmod 0600 "$lock"
     chown root:root "$lock"
-    _operation_prepare_lock_file "$lock"
+    before="$(stat -Lc '%d:%i' "$lock")"
+    _operation_prepare_lock_file "$lock" shared
     actual="$(stat -c '%U:%G %a' "$lock")"
     [[ "$actual" == 'root:vaultwarden 660' ]] \
         || fail "group-available lock is '$actual', expected 'root:vaultwarden 660'"
-    printf 'PASS: safe pre-existing vaultwarden group applies actual root:vaultwarden mode 0660\n'
+    [[ "$(stat -Lc '%d:%i' "$lock")" == "$before" ]] \
+        || fail "group-available lock inode changed during preparation"
+    printf 'PASS: canonical shared lock applies root:vaultwarden mode 0660 in place\n'
 )
 
 (
-    getent(){ return 2; }
     source "$ops"
     lock="$case_root/chown-failure.lock"
     : >"$lock"
@@ -1479,15 +2036,15 @@ fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
     "$real_chown" 65534:65534 "$lock"
     chown(){ return 1; }
     set +e
-    output="$(_operation_prepare_lock_file "$lock" 2>&1)"
+    output="$(_operation_prepare_lock_file "$lock" shared 2>&1)"
     rc=$?
     set -e
     [[ "$rc" -ne 0 ]] || fail "root-side chown failure unexpectedly succeeded"
-    [[ "$output" == *"Cannot set operation lock ownership to root:root"* ]] \
+    [[ "$output" == *"Cannot set operation lock ownership to root:vaultwarden"* ]] \
         || fail "root-side chown failure omitted ownership diagnostic: $output"
-    [[ "$output" == *"Fix: sudo chown root:root"* ]] \
+    [[ "$output" == *"Fix: sudo chown root:vaultwarden"* ]] \
         || fail "root-side chown failure omitted remediation: $output"
-    printf 'PASS: root-side chown failure rejects lock preparation with actionable diagnostics\n'
+    printf 'PASS: canonical root-side chown failure rejects lock preparation\n'
 )
 EOF_ROOT_CASES
     chmod +x "$root_case_script"
