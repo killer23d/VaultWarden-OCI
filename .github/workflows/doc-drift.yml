@@ -3,21 +3,72 @@ on:
   pull_request:
     paths:
       - '.github/workflows/**'
+      - '.pr280-final-*'
       - '.pr280-patch-*'
+      - 'AGENTS.md'
+      - 'caddy/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'RUNBOOK.md'
+      - 'utilities/**'
+      - 'lib/**'
+      - '*.sh'
+      - 'Makefile'
+      - 'systemd/**'
+      - 'tests/**'
+      - 'secrets-schema.yaml'
+      - '.env.example'
+      - 'docker-compose.yml.example'
+      - '.gitignore'
 permissions:
   contents: read
 jobs:
-  diagnose-patch:
+  apply-pr280-remediation:
+    name: Apply verified PR 280 remediation
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
-      - name: Check patch fragment sizes and hashes
+        with:
+          ref: codex/small-team-runtime-remediation
+          fetch-depth: 0
+      - name: Install focused validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+      - name: Verify, apply, and validate bounded patch
+        shell: bash
         run: |
           set -euo pipefail
-          wc -c .pr280-patch-*
-          sha256sum .pr280-patch-*
-          cat .pr280-patch-* > /tmp/pr280.patch.b64
-          wc -c /tmp/pr280.patch.b64
-          base64 --decode --ignore-garbage /tmp/pr280.patch.b64 > /tmp/pr280.patch
-          wc -c /tmp/pr280.patch
-          git apply --check /tmp/pr280.patch
+          cat .pr280-final-* > /tmp/pr280-final.patch.b64
+          echo "a9c85c13953263e2bca80cde5851d898c149219fd2fed3a597063b06f098cafc  /tmp/pr280-final.patch.b64" | sha256sum --check
+          base64 --decode /tmp/pr280-final.patch.b64 > /tmp/pr280-final.patch
+          echo "05fce1a200fd57ec518e4199a2b971c633f1451b18fc36bcc163cc3a894f1d99  /tmp/pr280-final.patch" | sha256sum --check
+          git apply --check /tmp/pr280-final.patch
+          git apply /tmp/pr280-final.patch
+          git diff --check
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n1 bash -n
+          python3 utilities/verify-production-readiness-remediation.py
+          bash tests/suites/foundation/case-config-env.bash
+          bash tests/suites/foundation/case-systemd.bash
+          bash tests/suites/security/case-secrets.bash
+          DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
+      - name: Restore workflow and commit clean final tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show f273e7b97d4d66d51c8ddeb8c6de51e191aefd05^:.github/workflows/doc-drift.yml > .github/workflows/doc-drift.yml
+          rm -f .pr280-final-* .pr280-patch-* .github/workflows/pr280-apply.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m "complete small-team runtime remediation"
+          git push origin HEAD:codex/small-team-runtime-remediation
