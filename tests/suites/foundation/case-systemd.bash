@@ -790,6 +790,305 @@ printf 'Notification features preserve systemd unit and sandbox contracts.\n'
 
 check_notification_features_preserve_systemd_contracts
 
+check_systemd_required_failure_propagation() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+cleanup(){
+  if (( EUID == 0 )); then
+    rm -rf "$TMP"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n rm -rf "$TMP"
+  else
+    rm -rf "$TMP"
+  fi
+}
+trap cleanup EXIT
+fail(){ printf 'FAIL systemd failure propagation: %s\n' "$*" >&2; exit 1; }
+
+if (( EUID != 0 )) && { ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; }; then
+  if [[ "${GITHUB_ACTIONS:-false}" == true ]]; then fail 'passwordless sudo unavailable in GitHub Actions'; fi
+  printf 'SKIP: systemd public failure propagation fixture requires root or passwordless sudo\n'
+  exit 0
+fi
+
+root_run(){
+  if (( EUID == 0 )); then "$@"; else sudo -n "$@"; fi
+}
+
+REPO="$TMP/repo"
+BIN="$TMP/bin"
+REAL_INSTALL="$(type -P install)"
+REAL_CHMOD="$(type -P chmod)"
+REAL_RM="$(type -P rm)"
+mkdir -p "$REPO" "$BIN"
+(cd "$ROOT" && tar --exclude=.git --exclude='.migrate-volume.state' -cf - .) | (cd "$REPO" && tar -xf -)
+cat >> "$REPO/lib/storage.sh" <<'EOF_STORAGE_TEST'
+if [[ "${VW_TEST_ASSUME_STORAGE_READY:-false}" == "true" ]]; then
+  check_project_state_ready(){ return 0; }
+fi
+EOF_STORAGE_TEST
+
+cat > "$BIN/install" <<'EOF_INSTALL_WRAPPER'
+#!/usr/bin/env bash
+printf 'install %s\n' "$*" >> "${MUTATION_LOG:?}"
+dest="${!#}"
+if [[ -n "${VW_FAIL_INSTALL_PATH:-}" && "$dest" == "$VW_FAIL_INSTALL_PATH" ]]; then
+  exit 73
+fi
+exec "${REAL_INSTALL:?}" "$@"
+EOF_INSTALL_WRAPPER
+cat > "$BIN/chmod" <<'EOF_CHMOD_WRAPPER'
+#!/usr/bin/env bash
+printf 'chmod %s\n' "$*" >> "${MUTATION_LOG:?}"
+for arg in "$@"; do
+  if [[ -n "${VW_FAIL_CHMOD_PATH:-}" && "$arg" == "$VW_FAIL_CHMOD_PATH" ]]; then
+    exit 74
+  fi
+done
+exec "${REAL_CHMOD:?}" "$@"
+EOF_CHMOD_WRAPPER
+cat > "$BIN/rm" <<'EOF_RM_WRAPPER'
+#!/usr/bin/env bash
+printf 'rm %s\n' "$*" >> "${MUTATION_LOG:?}"
+for arg in "$@"; do
+  if [[ -n "${VW_FAIL_RM_PATH:-}" && "$arg" == "$VW_FAIL_RM_PATH" ]]; then
+    exit 75
+  fi
+done
+exec "${REAL_RM:?}" "$@"
+EOF_RM_WRAPPER
+cat > "$BIN/systemctl" <<'EOF_SYSTEMCTL_WRAPPER'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "${MUTATION_LOG:?}"
+if [[ -n "${VW_FAIL_SYSTEMCTL_COMMAND:-}" && "$*" == "$VW_FAIL_SYSTEMCTL_COMMAND" ]]; then
+  exit 76
+fi
+case "${1:-}" in
+  is-active|is-enabled) exit 1 ;;
+  show) printf 'Fri 2099-01-01 00:00:00 UTC\n'; exit 0 ;;
+  status) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF_SYSTEMCTL_WRAPPER
+cat > "$BIN/systemd-analyze" <<'EOF_ANALYZE_WRAPPER'
+#!/usr/bin/env bash
+exit 0
+EOF_ANALYZE_WRAPPER
+cat > "$BIN/mountpoint" <<'EOF_MOUNTPOINT_WRAPPER'
+#!/usr/bin/env bash
+exit 0
+EOF_MOUNTPOINT_WRAPPER
+chmod +x "$BIN/"*
+
+CASE_DIR=""
+ENV_DIR=""
+UNIT_DIR=""
+OPT_DIR=""
+LOCK_DIR=""
+MUTATION_LOG=""
+RUN_RC=0
+FAIL_INSTALL_PATH=""
+FAIL_CHMOD_PATH=""
+FAIL_RM_PATH=""
+FAIL_SYSTEMCTL_COMMAND=""
+
+write_env(){
+  local path="$1" state="$2" domain="$3"
+  cat > "$path" <<EOF_ENV
+PROJECT_STATE_DIR=$state
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=
+SOPS_AGE_KEY_FILE=$ENV_DIR/age-key.txt
+DOMAIN=$domain
+ADMIN_EMAIL=admin@$domain
+CADDY_VERSION=2.11.4
+EOF_ENV
+  chmod 0600 "$path"
+}
+
+new_case(){
+  local name="$1"
+  CASE_DIR="$TMP/$name"
+  ENV_DIR="$CASE_DIR/etc-vaultwarden"
+  UNIT_DIR="$CASE_DIR/systemd"
+  OPT_DIR="$CASE_DIR/opt"
+  LOCK_DIR="$CASE_DIR/locks"
+  MUTATION_LOG="$CASE_DIR/mutations.log"
+  mkdir -p "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" "$CASE_DIR/state"
+  : > "$MUTATION_LOG"
+  write_env "$REPO/.env" "$CASE_DIR/state" "$name.example.invalid"
+  write_env "$ENV_DIR/vaultwarden.env" "$CASE_DIR/old-state" "old-$name.example.invalid"
+  FAIL_INSTALL_PATH=""
+  FAIL_CHMOD_PATH=""
+  FAIL_RM_PATH=""
+  FAIL_SYSTEMCTL_COMMAND=""
+}
+
+run_public(){
+  local output="$1"; shift
+  if root_run env \
+      PATH="$BIN:$PATH" \
+      MUTATION_LOG="$MUTATION_LOG" \
+      REAL_INSTALL="$REAL_INSTALL" REAL_CHMOD="$REAL_CHMOD" REAL_RM="$REAL_RM" \
+      VW_FAIL_INSTALL_PATH="$FAIL_INSTALL_PATH" \
+      VW_FAIL_CHMOD_PATH="$FAIL_CHMOD_PATH" \
+      VW_FAIL_RM_PATH="$FAIL_RM_PATH" \
+      VW_FAIL_SYSTEMCTL_COMMAND="$FAIL_SYSTEMCTL_COMMAND" \
+      SERVICE_USER=root SERVICE_GROUP=root \
+      VW_TEST_ASSUME_STORAGE_READY=true \
+      VW_CONFIG_INSTALLED_ENV_FILE="$ENV_DIR/vaultwarden.env" \
+      VW_SYNC_ETC_DIR="$ENV_DIR" \
+      VW_SYSTEMD_ENV_DIR="$ENV_DIR" \
+      VW_SYSTEMD_UNIT_DEST_DIR="$UNIT_DIR" \
+      VW_SYSTEMD_OPT_SCRIPTS_DIR="$OPT_DIR" \
+      VW_SYSTEMD_RUNTIME_LOCK_DIR="$LOCK_DIR" \
+      bash "$REPO/utilities/setup-systemd.sh" "$@" >"$output" 2>&1; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+}
+
+assert_failed(){
+  local output="$1" diagnostic="$2" path="$3"
+  (( RUN_RC != 0 )) || fail "injected failure unexpectedly returned zero: $diagnostic"
+  grep -Fq "$diagnostic" "$output" || { cat "$output" >&2; fail "missing actionable diagnostic: $diagnostic"; }
+  grep -Fq "$path" "$output" || { cat "$output" >&2; fail "diagnostic omitted exact failed path: $path"; }
+}
+
+assert_no_install_success(){
+  local output="$1"
+  ! grep -Fq 'Installation complete.' "$output" || fail 'required install failure printed final success'
+}
+
+assert_no_enablement(){
+  ! grep -Eq '^systemctl enable( |$)' "$MUTATION_LOG" \
+    || { cat "$MUTATION_LOG" >&2; fail 'enablement followed an earlier required install failure'; }
+}
+
+# 1. Managed script installation failure stops before any systemd mutation.
+new_case install-script-failure
+FAIL_INSTALL_PATH="$OPT_DIR/maintenance.sh"
+output="$CASE_DIR/output.log"
+run_public "$output" install --no-start
+assert_failed "$output" 'Failed to install managed script:' "$FAIL_INSTALL_PATH"
+assert_no_install_success "$output"
+assert_no_enablement
+! grep -Fxq 'systemctl daemon-reload' "$MUTATION_LOG" \
+  || fail 'daemon-reload followed managed script installation failure'
+[[ ! -e "$FAIL_INSTALL_PATH" ]] || fail 'failed managed script path was unexpectedly published'
+
+# 2. Managed unit chmod failure stops before daemon-reload and enablement.
+new_case unit-chmod-failure
+FAIL_CHMOD_PATH="$UNIT_DIR/vaultwarden-maintenance.service"
+output="$CASE_DIR/output.log"
+run_public "$output" install --no-start
+assert_failed "$output" 'Failed to set managed unit mode:' "$FAIL_CHMOD_PATH"
+assert_no_install_success "$output"
+assert_no_enablement
+! grep -Fxq 'systemctl daemon-reload' "$MUTATION_LOG" \
+  || fail 'daemon-reload followed managed unit chmod failure'
+! grep -Fq 'Installed unit: vaultwarden-maintenance.service' "$output" \
+  || fail 'failed unit chmod printed false unit-installed success'
+
+# 3. daemon-reload failure prevents all enablement.
+new_case daemon-reload-failure
+FAIL_SYSTEMCTL_COMMAND='daemon-reload'
+output="$CASE_DIR/output.log"
+run_public "$output" install --no-start
+(( RUN_RC != 0 )) || fail 'daemon-reload failure unexpectedly returned zero'
+grep -Fq 'Failed to reload systemd after installing managed units.' "$output" \
+  || { cat "$output" >&2; fail 'daemon-reload failure lacked actionable diagnostic'; }
+assert_no_install_success "$output"
+assert_no_enablement
+
+# 4. Startup-service enable failure prevents timer enablement.
+new_case startup-enable-failure
+FAIL_SYSTEMCTL_COMMAND='enable vaultwarden-startup.service'
+output="$CASE_DIR/output.log"
+run_public "$output" install --no-start
+(( RUN_RC != 0 )) || fail 'startup-service enable failure unexpectedly returned zero'
+grep -Fq 'Failed to enable startup service: vaultwarden-startup.service' "$output" \
+  || { cat "$output" >&2; fail 'startup-service enable failure lacked exact diagnostic'; }
+assert_no_install_success "$output"
+! grep -Eq '^systemctl enable vaultwarden-.*\.timer$' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'timer enablement began after startup-service enable failure'; }
+
+# 5. A timer enable failure prevents false success and later timer actions.
+new_case timer-enable-failure
+failed_timer='vaultwarden-db-backup.timer'
+later_timer='vaultwarden-full-backup.timer'
+FAIL_SYSTEMCTL_COMMAND="enable $failed_timer"
+output="$CASE_DIR/output.log"
+run_public "$output" install --no-start
+(( RUN_RC != 0 )) || fail 'timer enable failure unexpectedly returned zero'
+grep -Fq "Failed to enable timer: $failed_timer" "$output" \
+  || { cat "$output" >&2; fail 'timer enable failure lacked exact diagnostic'; }
+assert_no_install_success "$output"
+! grep -Fq "Enabled: $failed_timer" "$output" || fail 'failed timer printed false enabled success'
+! grep -Fxq "systemctl enable $later_timer" "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'later timer enablement followed required timer failure'; }
+
+# 6. Managed unit removal failure is observable and stops final success.
+new_case remove-unit-failure
+failed_remove="$UNIT_DIR/vaultwarden-maintenance.service"
+printf '[Unit]\nDescription=fixture\n' > "$failed_remove"
+FAIL_RM_PATH="$failed_remove"
+output="$CASE_DIR/output.log"
+run_public "$output" remove
+assert_failed "$output" 'Failed to remove managed unit:' "$failed_remove"
+[[ -f "$failed_remove" ]] || fail 'failed managed removal path did not remain observable'
+! grep -Fq 'All timer units removed and daemon reloaded.' "$output" \
+  || fail 'managed removal failure printed final success'
+! grep -Fxq 'systemctl daemon-reload' "$MUTATION_LOG" \
+  || fail 'removal daemon-reload followed an earlier required removal failure'
+
+# 7. Removal-time daemon-reload failure prevents final removal success.
+new_case remove-reload-failure
+FAIL_SYSTEMCTL_COMMAND='daemon-reload'
+output="$CASE_DIR/output.log"
+run_public "$output" remove
+(( RUN_RC != 0 )) || fail 'removal daemon-reload failure unexpectedly returned zero'
+grep -Fq 'Failed to reload systemd after removing managed units.' "$output" \
+  || { cat "$output" >&2; fail 'removal daemon-reload failure lacked actionable diagnostic'; }
+! grep -Fq 'All timer units removed and daemon reloaded.' "$output" \
+  || fail 'removal daemon-reload failure printed final success'
+
+# 8. Armed mutation failures remain irrelevant during a truthful dry-run.
+new_case dry-run-failure-mocks
+FAIL_INSTALL_PATH="$OPT_DIR/maintenance.sh"
+FAIL_CHMOD_PATH="$UNIT_DIR/vaultwarden-maintenance.service"
+FAIL_RM_PATH="$UNIT_DIR/vaultwarden-maintenance.service"
+FAIL_SYSTEMCTL_COMMAND='daemon-reload'
+before="$CASE_DIR/before.snapshot"
+after="$CASE_DIR/after.snapshot"
+root_run find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" -printf '%p|%y|%m|%l\n' | sort > "$before"
+output="$CASE_DIR/output.log"
+run_public "$output" install --dry-run --no-start
+(( RUN_RC == 0 )) || { cat "$output" >&2; fail 'dry-run required successful mutation mocks'; }
+root_run find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" -printf '%p|%y|%m|%l\n' | sort > "$after"
+cmp -s "$before" "$after" || fail 'dry-run mutated fixture paths while failures were armed'
+grep -Fq '[DRY RUN] Intended post-sync source:' "$output" \
+  || fail 'dry-run omitted intended post-sync configuration'
+! grep -Eq '^(install|chmod|rm) ' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'dry-run invoked a filesystem mutation wrapper'; }
+! grep -Eq '^systemctl (daemon-reload|enable|disable|reset-failed)( |$)' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'dry-run invoked a systemctl mutation'; }
+
+# Supplement the public failure cases with a direct dispatch shape assertion.
+main_body="$(sed -n '/^main() {/,/^}/p' "$ROOT/utilities/setup-systemd.sh")"
+grep -Eq '^[[:space:]]+install_units[[:space:]]*$' <<< "$main_body" \
+  || fail 'public main does not directly invoke install_units'
+grep -Eq '^[[:space:]]+remove_units[[:space:]]*$' <<< "$main_body" \
+  || fail 'public main does not directly invoke remove_units'
+! grep -Eq '(install_units|remove_units)[[:space:]]*(&&|\|\|)' <<< "$main_body" \
+  || fail 'public main still invokes install/remove in an errexit-suppressing list'
+
+printf 'PASS setup-systemd public failures stop without false success or later mutations\n'
+)
+check_systemd_required_failure_propagation
+
 check_systemd_post_sync_snapshot_contract() (
 set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
