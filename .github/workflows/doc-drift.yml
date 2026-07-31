@@ -19,27 +19,11 @@ on:
       - 'docker-compose.yml.example'
       - '.gitignore'
 
+# Global permissions
 permissions:
   contents: read
 
 jobs:
-  source-snapshot:
-    name: Temporary source snapshot
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-      - name: Package source
-        run: tar --exclude=.git -czf /tmp/pr280-source.tar.gz .
-      - name: Upload source snapshot
-        uses: actions/upload-artifact@v6
-        with:
-          name: pr280-source
-          path: /tmp/pr280-source.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-
   compose-config:
     name: Docker Compose config
     runs-on: ubuntu-latest
@@ -47,6 +31,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
+
       - name: Validate Docker Compose example
         run: |
           docker compose version
@@ -59,8 +44,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      # yq is required by lib/schema.sh (used by secrets-rotate.sh --help and
+      # write-command-reference.sh). Installing it here ensures the generated
+      # COMMAND-REFERENCE.md is identical to what was committed (which was
+      # produced on a machine that had yq installed).
+      #
+      # NOTE: 'apt-get install yq' installs python-yq (a jq wrapper), NOT
+      # the Mike Farah yq v4 binary required by production setup and
+      # lib/schema.sh. Keep this pin in sync with utilities/setup-system.sh.
       - name: Install yq
         run: |
+          # Pinned to v4.53.3 -- do NOT change to /releases/latest (violates
+          # the unpinned-version check this same workflow enforces).
+          # To upgrade: update YQ_VERSION and YQ_SHA256 together.
+          # SHA-256 source: https://github.com/mikefarah/yq/releases/tag/v4.53.3
+          # (asset: yq_linux_amd64, digest field)
           YQ_VERSION="v4.53.3"
           YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
           curl -fsSL \
@@ -69,6 +68,7 @@ jobs:
           echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
           yq --version
+
       - name: Check for known stale terms
         run: |
           STALE_TERMS=(
@@ -90,6 +90,7 @@ jobs:
             fi
           done
           [[ $FAIL -eq 0 ]] || exit 1
+
       - name: Verify Makefile targets referenced in docs exist
         run: |
           FAIL=0
@@ -100,6 +101,7 @@ jobs:
             fi
           done < <(grep -roh 'make [a-z_-]\+' docs/ README.md RUNBOOK.md | sed 's/make //' | sort -u)
           [[ $FAIL -eq 0 ]] || exit 1
+
       - name: Verify script flags referenced in docs exist
         run: |
           check_flag() {
@@ -117,14 +119,20 @@ jobs:
           check_flag setup.sh "--force"                             || FAIL=1
           check_flag utilities/uninstall-vaultwarden.sh "--dry-run" || FAIL=1
           [[ $FAIL -eq 0 ]] || exit 1
+
       - name: Check for unpinned version references
         run: |
           FAIL=0
+          # setup-crowdsec.sh may use @latest only when --use-latest clears the
+          # configured pin. All other shell scripts must remain reproducible.
           if grep -rn '@latest' utilities/ lib/ --include='*.sh' \
                | grep -v 'utilities/setup-crowdsec.sh'; then
             echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"
             FAIL=1
           fi
+          # Guard against unintended /releases/latest calls. setup-system.sh
+          # may resolve SOPS latest only behind explicit --use-latest;
+          # setup-crowdsec.sh has its own explicit latest-mode contract.
           if grep -rn '/releases/latest' setup.sh utilities/ lib/ --include='*.sh' 2>/dev/null \
                | grep -v 'utilities/setup-system.sh:' \
                | grep -v 'utilities/setup-crowdsec.sh:'; then
@@ -152,6 +160,7 @@ jobs:
             FAIL=1
           fi
           [[ $FAIL -eq 0 ]] || exit 1
+
       - name: Systemd unit hardening check
         run: |
           REQUIRED_DIRECTIVES=(PrivateTmp ProtectSystem ProtectHome NoNewPrivileges)
@@ -167,8 +176,12 @@ jobs:
             done
           done
           [[ $FAIL -eq 0 ]] && echo "All units pass hardening check." || exit 1
+
       - name: Verify COMMAND-REFERENCE.md is up to date
         env:
+          # Suppress the docker.sh Compose-project-label diagnostic that
+          # scripts emit to stderr when DOCKER_PROJECT_LABEL is unset.
+          # Setting it to a fixed value makes --help output deterministic.
           DOCKER_PROJECT_LABEL: ci
         run: |
           cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
@@ -179,6 +192,7 @@ jobs:
             exit 1
           fi
           echo "COMMAND-REFERENCE.md is up to date."
+
       - name: Verify production-readiness remediation
         run: python3 utilities/verify-production-readiness-remediation.py
 
@@ -188,8 +202,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
+
       - name: Run Strict Shellcheck
         run: |
+          # -x: follow source statements to avoid SC1091 false positives.
+          # --severity=warning: fail on warning or error; info/style are logged only.
           find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
             | xargs -0 shellcheck -x --severity=warning
 
@@ -209,6 +226,7 @@ jobs:
           - data-protection
     steps:
       - uses: actions/checkout@v5
+
       - name: Install test dependencies
         run: |
           sudo apt-get update
@@ -219,6 +237,7 @@ jobs:
           curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
           echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
       - name: Run ${{ matrix.suite }} suite
         shell: bash
         run: |
@@ -233,11 +252,12 @@ jobs:
             exit "$rc"
           fi
           if [[ "${{ matrix.suite }}" == "security" ]]; then
-            grep -Fq 'PASS direct automatic setup PTY no-leak regression' "$log" || {
-              echo "ERROR: mandatory direct-auto PTY no-leak regression did not execute" >&2
-              exit 1
-            }
+            grep -Fq               'PASS direct automatic setup PTY no-leak regression'               "$log" || {
+                echo "ERROR: mandatory direct-auto PTY no-leak regression did not execute" >&2
+                exit 1
+              }
           fi
+
       - name: Upload ${{ matrix.suite }} suite log
         if: always()
         uses: actions/upload-artifact@v6
