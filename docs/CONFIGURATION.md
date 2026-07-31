@@ -473,7 +473,7 @@ Do not delete lock files or operation metadata as a generic way to "unstick" the
 
 ## Applying and validating configuration changes
 
-For ordinary non-secret `.env` changes:
+For ordinary non-secret changes:
 
 ```bash
 sudo make edit-env
@@ -481,14 +481,23 @@ sudo make restart
 sudo make health
 ```
 
-For secret changes, use `edit-secrets.sh`; schema apply behavior may restart or reconfigure the affected component.
-
-For managed systemd/runtime changes:
+If repository `.env` was edited separately:
 
 ```bash
+sudo make sync-env
+sudo make restart
+sudo make health
+```
+
+For storage or systemd-affecting changes:
+
+```bash
+sudo make edit-env
 sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
-sudo ./utilities/smoke-test.sh
+sudo make health
 ```
+
+For secret changes, use `edit-secrets.sh`; schema apply behavior may restart or reconfigure the affected component.
 
 For exact script options, rely on `--help` and [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md). Do not maintain a separate hand-copied option inventory in local notes.

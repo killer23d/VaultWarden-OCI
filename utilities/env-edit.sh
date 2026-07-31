@@ -2,8 +2,8 @@
 # utilities/env-edit.sh — Manage VaultWarden-OCI environment: sync, edit, and status.
 #
 # Subcommands:
-#   sync   (default) Non-interactively propagate repo .env → install.env → vaultwarden.env.
-#                    Safe for make up, make restart, setup-systemd.sh install.
+#   sync   (default) Explicitly publish repo .env → install.env → vaultwarden.env.
+#                    Used directly or by edit/setup-systemd; ordinary startup does not sync.
 #   edit             Open repo .env in ${EDITOR:-nano}, detect changes, run sync when saved.
 #   status           Report env-file drift and storage state (non-destructive).
 #
@@ -276,7 +276,7 @@ _storage_preflight() {
 }
 
 # ---------------------------------------------------------------------------
-# sync subcommand — non-interactive; safe for make up / make restart / systemd
+# sync subcommand — explicit non-interactive repository-to-runtime publication
 # ---------------------------------------------------------------------------
 _cmd_sync() {
   require_root sync

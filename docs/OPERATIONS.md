@@ -58,7 +58,7 @@ A check that did not run is not a healthy result. Use the current `PASS`, `FAIL`
 sudo make up
 ```
 
-`make up` synchronizes the accepted environment inside the guarded lifecycle operation and delegates to `startup.sh`. Startup validates storage readiness, materializes runtime secrets, and uses the current Compose lifecycle path.
+`make up` consumes the selected runtime environment and delegates to `startup.sh`; it does not publish repository `.env`. Startup validates storage readiness, materializes runtime secrets, and uses the current Compose lifecycle path.
 
 Do not replace the normal production start path with a bare:
 
@@ -446,24 +446,32 @@ Do not run broad `chmod -R 777` or whole-state `chown -R 2000:2000` commands.
 
 ## Environment changes
 
-Edit non-secret values:
+For the normal non-secret workflow:
 
 ```bash
 sudo make edit-env
-```
-
-Inspect state/path drift:
-
-```bash
-utilities/env-edit.sh status
-```
-
-Restart after an ordinary environment change:
-
-```bash
 sudo make restart
 sudo make health
 ```
+
+If repository `.env` was edited separately:
+
+```bash
+sudo make sync-env
+sudo make restart
+sudo make health
+```
+
+For storage or systemd-affecting changes:
+
+```bash
+sudo make edit-env
+sudo ./setup.sh systemd install --enable-now
+sudo ./setup.sh systemd validate
+sudo make health
+```
+
+Inspect state/path drift with `utilities/env-edit.sh status`.
 
 Repository `.env` is the operator-editable source. Persistent `install.env` and `/etc/vaultwarden/vaultwarden.env` are managed runtime copies and should not be hand-edited as the normal configuration workflow.
 

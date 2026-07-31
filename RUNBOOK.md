@@ -207,11 +207,15 @@ After Age key rotation, retain recovery material for old backup generations unti
 
 ## Environment Configuration
 
-Edit non-secret configuration through:
+Use the normal non-secret workflow:
 
 ```bash
 sudo make edit-env
+sudo make restart
+sudo make health
 ```
+
+If repository `.env` was edited separately, run `sudo make sync-env` before restart and health checks. For storage or systemd-affecting changes, run `sudo make edit-env`, `sudo ./setup.sh systemd install --enable-now`, `sudo ./setup.sh systemd validate`, and `sudo make health`.
 
 Check environment paths and drift with:
 

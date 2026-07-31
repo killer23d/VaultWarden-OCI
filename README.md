@@ -120,6 +120,10 @@ sudo ./utilities/secrets-export-recovery-kit.sh
 
 The recovery kit is a plaintext operator handoff containing the Age private key and generated credentials needed for recovery. It is published root-only under `/root/vaultwarden-recovery/` only after a 30-minute systemd transient cleanup timer (or optional `at` fallback) is accepted. Scheduler failure removes the new file and fails export; successful encrypted email removes the local copy immediately. Store the encrypted/offline copy in your password manager and a separate recovery location. Re-export after setup, restore, or Age key rotation.
 
+### Day-two environment changes
+
+For ordinary changes, run `sudo make edit-env`, `sudo make restart`, and `sudo make health`. If repository `.env` was edited separately, run `sudo make sync-env` before restart and health checks. Storage or systemd-affecting changes require `sudo make edit-env`, `sudo ./setup.sh systemd install --enable-now`, `sudo ./setup.sh systemd validate`, and `sudo make health`.
+
 ---
 
 ## Core Commands
