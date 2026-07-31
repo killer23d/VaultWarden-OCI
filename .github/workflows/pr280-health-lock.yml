@@ -18,6 +18,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          getent group vaultwarden >/dev/null || sudo groupadd --system vaultwarden
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
           echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
@@ -173,6 +174,18 @@ jobs:
           )
 
           path.write_text(text)
+
+          workflow_path = Path('.github/workflows/doc-drift.yml')
+          workflow_text = workflow_path.read_text()
+          workflow_old = '''          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq'''
+          workflow_new = '''          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          getent group vaultwarden >/dev/null || sudo groupadd --system vaultwarden
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq'''
+          workflow_count = workflow_text.count(workflow_old)
+          if workflow_count != 1:
+              raise SystemExit(f'functional test group prerequisite: expected one match, found {workflow_count}')
+          workflow_path.write_text(workflow_text.replace(workflow_old, workflow_new, 1))
           PY
 
           rm -f .pr280-* .github/workflows/pr280-health-lock.yml
