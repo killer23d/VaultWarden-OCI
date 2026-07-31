@@ -9,6 +9,7 @@ on:
       - '.pr280-root-fixture-fix.patch'
       - '.pr280-call-log-owner-fix.patch'
       - '.pr280-systemd-root-read-fix.patch'
+      - '.pr280-systemd-shellcheck-fix.patch'
       - 'AGENTS.md'
       - 'caddy/**'
       - 'docs/**'
@@ -59,9 +60,10 @@ jobs:
           echo "4d32201bd3acacb00d8b8a85c8e6bf147359945680e0d9e21457a6bd707b18d0  .pr280-root-fixture-fix.patch" | sha256sum --check
           echo "77763bfbdc80ef7dc6b185719cbe19a7ac966fe3ca99d8afba0bbf834304c13d  .pr280-call-log-owner-fix.patch" | sha256sum --check
           echo "b067c49026b18e0b601150326ceaa9f15ef0b32210c302ea3b71e66f6e1119e9  .pr280-systemd-root-read-fix.patch" | sha256sum --check
+          echo "3f47b42ac9a330d474e77e129e9768b62afeb35e6299339894c2e8eeb8c09a16  .pr280-systemd-shellcheck-fix.patch" | sha256sum --check
           git apply --check /tmp/pr280-final.patch
           git apply /tmp/pr280-final.patch
-          for patch in .pr280-shellcheck-fix.patch .pr280-root-fixture-fix.patch .pr280-call-log-owner-fix.patch .pr280-systemd-root-read-fix.patch; do
+          for patch in .pr280-shellcheck-fix.patch .pr280-root-fixture-fix.patch .pr280-call-log-owner-fix.patch .pr280-systemd-root-read-fix.patch .pr280-systemd-shellcheck-fix.patch; do
             git apply --check "$patch"
             git apply "$patch"
           done
@@ -77,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           git show f273e7b97d4d66d51c8ddeb8c6de51e191aefd05^:.github/workflows/doc-drift.yml > .github/workflows/doc-drift.yml
-          rm -f .pr280-final-* .pr280-patch-* .pr280-shellcheck-fix.patch .pr280-root-fixture-fix.patch .pr280-call-log-owner-fix.patch .pr280-systemd-root-read-fix.patch .github/workflows/pr280-apply.yml
+          rm -f .pr280-final-* .pr280-patch-* .pr280-shellcheck-fix.patch .pr280-root-fixture-fix.patch .pr280-call-log-owner-fix.patch .pr280-systemd-root-read-fix.patch .pr280-systemd-shellcheck-fix.patch .github/workflows/pr280-apply.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
