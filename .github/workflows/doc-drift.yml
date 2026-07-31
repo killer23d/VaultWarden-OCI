@@ -6,6 +6,7 @@ on:
       - '.pr280-final-*'
       - '.pr280-patch-*'
       - '.pr280-shellcheck-fix.patch'
+      - '.pr280-root-fixture-fix.patch'
       - 'AGENTS.md'
       - 'caddy/**'
       - 'docs/**'
@@ -53,10 +54,13 @@ jobs:
           base64 --decode /tmp/pr280-final.patch.b64 > /tmp/pr280-final.patch
           echo "05fce1a200fd57ec518e4199a2b971c633f1451b18fc36bcc163cc3a894f1d99  /tmp/pr280-final.patch" | sha256sum --check
           echo "60dd20cde0747106c6f6c04a44b5c25b1b95f5d698428a8d2276ed6893eae131  .pr280-shellcheck-fix.patch" | sha256sum --check
+          echo "4d32201bd3acacb00d8b8a85c8e6bf147359945680e0d9e21457a6bd707b18d0  .pr280-root-fixture-fix.patch" | sha256sum --check
           git apply --check /tmp/pr280-final.patch
           git apply /tmp/pr280-final.patch
           git apply --check .pr280-shellcheck-fix.patch
           git apply .pr280-shellcheck-fix.patch
+          git apply --check .pr280-root-fixture-fix.patch
+          git apply .pr280-root-fixture-fix.patch
           git diff --check
           find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n1 bash -n
           find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck -x --severity=warning
@@ -71,7 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           git show f273e7b97d4d66d51c8ddeb8c6de51e191aefd05^:.github/workflows/doc-drift.yml > .github/workflows/doc-drift.yml
-          rm -f .pr280-final-* .pr280-patch-* .pr280-shellcheck-fix.patch .github/workflows/pr280-apply.yml
+          rm -f .pr280-final-* .pr280-patch-* .pr280-shellcheck-fix.patch .pr280-root-fixture-fix.patch .github/workflows/pr280-apply.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
