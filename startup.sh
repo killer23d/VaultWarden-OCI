@@ -259,7 +259,7 @@ warn_env_drift() {
       if [[ "$repo_value" != "$installed_value" ]]; then
         if [[ "$drift_found" == "false" ]]; then
           log_warn "Repository .env differs from generated runtime env file(s) for non-secret email settings."
-          log_warn "Run: sudo make sync-env  (or sudo make restart, which syncs first)"
+          log_warn "Run: sudo make sync-env, then sudo make restart"
           drift_found=true
         fi
         log_warn "  ${installed_env}: ${key}: repo='${repo_value}' installed='${installed_value}'"
@@ -415,9 +415,9 @@ prepare_log_directories() {
   return 0
 }
 
-# Run check_age_key_health() before any SOPS invocation so a corrupt,
-# missing, or wrong-permissions Age key produces a clear actionable error
-# instead of an opaque decryption failure.
+# Run check_age_key_health() in validation-only mode before any SOPS,
+# filesystem repair, or later startup mutation so a corrupt, missing,
+# wrong-permissions, or wrong-owner Age key fails closed without being changed.
 #
 check_age_key_health_preflight() {
   local configured_key="${SOPS_AGE_KEY_FILE:-}"
@@ -428,7 +428,7 @@ check_age_key_health_preflight() {
     return 1
   fi
 
-  if check_age_key_health "$configured_key" 2>/dev/null; then
+  if check_age_key_health "$configured_key" --no-repair 2>/dev/null; then
     log_info "Validated selected Age key identity: ${configured_key}"
     return 0
   fi
@@ -814,11 +814,6 @@ main() {
   # reflects termination (130 for INT, 143 for TERM).
   trap 'operation_release 130; exit 130' INT
   trap 'operation_release 143; exit 143' HUP TERM
-
-  if [[ "$DRY_RUN" != "true" ]]; then
-    operation_set_phase "env-sync" "Synchronizing runtime environment"
-    "${SCRIPT_DIR}/utilities/env-edit.sh" sync || exit $?
-  fi
 
   operation_set_phase "startup" "Preparing runtime and starting services"
   load_environment || exit 1
