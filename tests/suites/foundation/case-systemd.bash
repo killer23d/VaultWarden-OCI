@@ -864,8 +864,20 @@ printf 'systemctl %s\n' "$*" >> "${MUTATION_LOG:?}"
 if [[ -n "${VW_FAIL_SYSTEMCTL_COMMAND:-}" && "$*" == "$VW_FAIL_SYSTEMCTL_COMMAND" ]]; then
   exit 76
 fi
+unit="${!#}"
 case "${1:-}" in
-  is-active|is-enabled) exit 1 ;;
+  is-active)
+    case ",${VW_ACTIVE_UNITS:-}," in
+      *",$unit,"*) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  is-enabled)
+    case ",${VW_ENABLED_UNITS:-}," in
+      *",$unit,"*) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
   show) printf 'Fri 2099-01-01 00:00:00 UTC\n'; exit 0 ;;
   status) exit 0 ;;
   *) exit 0 ;;
@@ -892,6 +904,8 @@ FAIL_INSTALL_PATH=""
 FAIL_CHMOD_PATH=""
 FAIL_RM_PATH=""
 FAIL_SYSTEMCTL_COMMAND=""
+ACTIVE_UNITS=""
+ENABLED_UNITS=""
 
 write_env(){
   local path="$1" state="$2" domain="$3"
@@ -923,6 +937,8 @@ new_case(){
   FAIL_CHMOD_PATH=""
   FAIL_RM_PATH=""
   FAIL_SYSTEMCTL_COMMAND=""
+  ACTIVE_UNITS=""
+  ENABLED_UNITS=""
 }
 
 run_public(){
@@ -935,6 +951,8 @@ run_public(){
       VW_FAIL_CHMOD_PATH="$FAIL_CHMOD_PATH" \
       VW_FAIL_RM_PATH="$FAIL_RM_PATH" \
       VW_FAIL_SYSTEMCTL_COMMAND="$FAIL_SYSTEMCTL_COMMAND" \
+      VW_ACTIVE_UNITS="$ACTIVE_UNITS" \
+      VW_ENABLED_UNITS="$ENABLED_UNITS" \
       SERVICE_USER=root SERVICE_GROUP=root \
       VW_TEST_ASSUME_STORAGE_READY=true \
       VW_CONFIG_INSTALLED_ENV_FILE="$ENV_DIR/vaultwarden.env" \
@@ -965,6 +983,28 @@ assert_no_install_success(){
 assert_no_enablement(){
   ! grep -Eq '^systemctl enable( |$)' "$MUTATION_LOG" \
     || { cat "$MUTATION_LOG" >&2; fail 'enablement followed an earlier required install failure'; }
+}
+
+assert_log_order(){
+  local first="$1" second="$2"
+  local first_line second_line
+  first_line="$(grep -n -F -x "$first" "$MUTATION_LOG" | head -1 | cut -d: -f1 || true)"
+  second_line="$(grep -n -F -x "$second" "$MUTATION_LOG" | head -1 | cut -d: -f1 || true)"
+  [[ -n "$first_line" ]] || { cat "$MUTATION_LOG" >&2; fail "missing command log entry: $first"; }
+  [[ -n "$second_line" ]] || { cat "$MUTATION_LOG" >&2; fail "missing command log entry: $second"; }
+  (( first_line < second_line )) \
+    || { cat "$MUTATION_LOG" >&2; fail "command order was not preserved: $first before $second"; }
+}
+
+snapshot_fixture(){
+  local output="$1"
+  {
+    root_run find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" \
+      -printf 'meta|%p|%y|%m|%u|%g|%s|%T@|%l\n'
+    while IFS= read -r -d '' path; do
+      root_run sha256sum "$path" | sed 's/^/sha256|/'
+    done < <(root_run find "$ENV_DIR" "$UNIT_DIR" "$OPT_DIR" "$LOCK_DIR" -type f -print0)
+  } | sort > "$output"
 }
 
 # 1. Managed script installation failure stops before any systemd mutation.
@@ -1055,7 +1095,139 @@ grep -Fq 'Failed to reload systemd after removing managed units.' "$output" \
 ! grep -Fq 'All timer units removed and daemon reloaded.' "$output" \
   || fail 'removal daemon-reload failure printed final success'
 
-# 8. Armed mutation failures remain irrelevant during a truthful dry-run.
+# 8. An active but disabled timer is stopped before its unit file is removed.
+new_case remove-active-disabled-timer
+active_timer='vaultwarden-maintenance.timer'
+active_timer_path="$UNIT_DIR/$active_timer"
+printf '[Unit]\nDescription=active disabled fixture\n' > "$active_timer_path"
+ACTIVE_UNITS="$active_timer"
+output="$CASE_DIR/output.log"
+run_public "$output" remove
+(( RUN_RC == 0 )) || { cat "$output" >&2; fail 'active but disabled timer removal returned nonzero'; }
+grep -Fxq "systemctl disable --now $active_timer" "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'active but disabled timer was not stopped'; }
+assert_log_order "systemctl is-active $active_timer" "systemctl is-enabled $active_timer"
+assert_log_order "systemctl is-enabled $active_timer" "systemctl disable --now $active_timer"
+assert_log_order "systemctl disable --now $active_timer" "rm -f $active_timer_path"
+[[ ! -e "$active_timer_path" ]] || fail 'active but disabled timer file remained after successful disable'
+grep -Fq 'All timer units removed and daemon reloaded.' "$output" \
+  || { cat "$output" >&2; fail 'active but disabled timer removal omitted final success'; }
+
+# 9. An enabled but inactive timer is disabled before removal.
+new_case remove-enabled-inactive-timer
+enabled_timer='vaultwarden-db-backup.timer'
+enabled_timer_path="$UNIT_DIR/$enabled_timer"
+printf '[Unit]\nDescription=enabled inactive fixture\n' > "$enabled_timer_path"
+ENABLED_UNITS="$enabled_timer"
+output="$CASE_DIR/output.log"
+run_public "$output" remove
+(( RUN_RC == 0 )) || { cat "$output" >&2; fail 'enabled but inactive timer removal returned nonzero'; }
+grep -Fxq "systemctl disable --now $enabled_timer" "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'enabled but inactive timer was not disabled'; }
+assert_log_order "systemctl is-active $enabled_timer" "systemctl is-enabled $enabled_timer"
+assert_log_order "systemctl is-enabled $enabled_timer" "systemctl disable --now $enabled_timer"
+assert_log_order "systemctl disable --now $enabled_timer" "rm -f $enabled_timer_path"
+[[ ! -e "$enabled_timer_path" ]] || fail 'enabled but inactive timer file remained after successful disable'
+grep -Fq 'All timer units removed and daemon reloaded.' "$output" \
+  || { cat "$output" >&2; fail 'enabled but inactive timer removal omitted final success'; }
+
+# 10. A timer disable failure stops before any managed unit removal.
+new_case remove-timer-disable-failure
+failed_disable_timer='vaultwarden-full-backup.timer'
+failed_disable_path="$UNIT_DIR/$failed_disable_timer"
+later_remove_path="$UNIT_DIR/vaultwarden-maintenance.service"
+printf '[Unit]\nDescription=failed timer fixture\n' > "$failed_disable_path"
+printf '[Unit]\nDescription=must remain fixture\n' > "$later_remove_path"
+ACTIVE_UNITS="$failed_disable_timer"
+FAIL_SYSTEMCTL_COMMAND="disable --now $failed_disable_timer"
+output="$CASE_DIR/output.log"
+run_public "$output" remove
+(( RUN_RC != 0 )) || fail 'timer disable failure unexpectedly returned zero'
+grep -Fq "Failed to disable and stop managed timer: $failed_disable_timer" "$output" \
+  || { cat "$output" >&2; fail 'timer disable failure omitted the exact timer diagnostic'; }
+grep -Fxq "systemctl disable --now $failed_disable_timer" "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'timer disable failure command was not attempted'; }
+[[ -f "$failed_disable_path" ]] || fail 'failed timer unit file was removed'
+[[ -f "$later_remove_path" ]] || fail 'later managed unit file was removed after timer disable failure'
+! grep -Eq '^rm ' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'managed unit removal followed timer disable failure'; }
+! grep -Fxq 'systemctl daemon-reload' "$MUTATION_LOG" \
+  || fail 'removal daemon-reload followed timer disable failure'
+! grep -Fq 'All timer units removed and daemon reloaded.' "$output" \
+  || fail 'timer disable failure printed final removal success'
+
+# 11. An active startup-service disable failure is fatal before removal.
+new_case remove-startup-disable-failure
+startup_path="$UNIT_DIR/vaultwarden-startup.service"
+later_startup_remove_path="$UNIT_DIR/vaultwarden-health.service"
+printf '[Unit]\nDescription=startup fixture\n' > "$startup_path"
+printf '[Unit]\nDescription=must remain fixture\n' > "$later_startup_remove_path"
+ACTIVE_UNITS='vaultwarden-startup.service'
+FAIL_SYSTEMCTL_COMMAND='disable --now vaultwarden-startup.service'
+output="$CASE_DIR/output.log"
+run_public "$output" remove
+(( RUN_RC != 0 )) || fail 'startup-service disable failure unexpectedly returned zero'
+grep -Fq 'Failed to disable and stop startup service: vaultwarden-startup.service' "$output" \
+  || { cat "$output" >&2; fail 'startup-service disable failure omitted the exact diagnostic'; }
+grep -Fxq 'systemctl disable --now vaultwarden-startup.service' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'startup-service disable failure command was not attempted'; }
+[[ -f "$startup_path" ]] || fail 'failed startup-service unit file was removed'
+[[ -f "$later_startup_remove_path" ]] || fail 'later managed unit file was removed after startup-service disable failure'
+! grep -Eq '^rm ' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'managed unit removal followed startup-service disable failure'; }
+! grep -Fxq 'systemctl daemon-reload' "$MUTATION_LOG" \
+  || fail 'removal daemon-reload followed startup-service disable failure'
+! grep -Fq 'All timer units removed and daemon reloaded.' "$output" \
+  || fail 'startup-service disable failure printed final removal success'
+
+# 12. Already inactive and disabled units are removed without disable calls.
+new_case remove-already-inactive-disabled
+inactive_timer_path="$UNIT_DIR/vaultwarden-health.timer"
+inactive_startup_path="$UNIT_DIR/vaultwarden-startup.service"
+inactive_service_path="$UNIT_DIR/vaultwarden-health.service"
+printf '[Unit]\nDescription=inactive timer fixture\n' > "$inactive_timer_path"
+printf '[Unit]\nDescription=inactive startup fixture\n' > "$inactive_startup_path"
+printf '[Unit]\nDescription=inactive service fixture\n' > "$inactive_service_path"
+output="$CASE_DIR/output.log"
+run_public "$output" remove
+(( RUN_RC == 0 )) || { cat "$output" >&2; fail 'inactive and disabled removal returned nonzero'; }
+! grep -Eq '^systemctl disable --now ' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'inactive and disabled unit triggered disable --now'; }
+[[ ! -e "$inactive_timer_path" && ! -e "$inactive_startup_path" && ! -e "$inactive_service_path" ]] \
+  || fail 'inactive and disabled managed unit removal did not complete'
+grep -Fxq 'systemctl daemon-reload' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'inactive and disabled removal omitted daemon-reload'; }
+grep -Fq 'All timer units removed and daemon reloaded.' "$output" \
+  || { cat "$output" >&2; fail 'inactive and disabled removal omitted final success'; }
+
+# 13. Removal dry-run reports active units without mutating state.
+new_case remove-active-dry-run
+dry_timer='vaultwarden-firewall-update.timer'
+dry_timer_path="$UNIT_DIR/$dry_timer"
+dry_startup_path="$UNIT_DIR/vaultwarden-startup.service"
+printf '[Unit]\nDescription=dry timer fixture\n' > "$dry_timer_path"
+printf '[Unit]\nDescription=dry startup fixture\n' > "$dry_startup_path"
+ACTIVE_UNITS="$dry_timer,vaultwarden-startup.service"
+before="$CASE_DIR/remove-before.snapshot"
+after="$CASE_DIR/remove-after.snapshot"
+snapshot_fixture "$before"
+output="$CASE_DIR/output.log"
+run_public "$output" remove --dry-run
+(( RUN_RC == 0 )) || { cat "$output" >&2; fail 'active removal dry-run returned nonzero'; }
+snapshot_fixture "$after"
+cmp -s "$before" "$after" || { diff -u "$before" "$after" >&2 || true; fail 'removal dry-run changed fixture contents or metadata'; }
+grep -Fq "[DRY RUN] systemctl disable --now $dry_timer" "$output" \
+  || { cat "$output" >&2; fail 'removal dry-run omitted active timer disable action'; }
+grep -Fq '[DRY RUN] systemctl disable --now vaultwarden-startup.service' "$output" \
+  || { cat "$output" >&2; fail 'removal dry-run omitted active startup-service disable action'; }
+[[ -f "$dry_timer_path" && -f "$dry_startup_path" ]] \
+  || fail 'removal dry-run deleted a managed unit file'
+! grep -Eq '^rm ' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'removal dry-run invoked the rm mutation wrapper'; }
+! grep -Eq '^systemctl (disable --now|daemon-reload)( |$)' "$MUTATION_LOG" \
+  || { cat "$MUTATION_LOG" >&2; fail 'removal dry-run invoked a systemctl mutation'; }
+
+# 14. Armed installation mutation failures remain irrelevant during a truthful dry-run.
 new_case dry-run-failure-mocks
 FAIL_INSTALL_PATH="$OPT_DIR/maintenance.sh"
 FAIL_CHMOD_PATH="$UNIT_DIR/vaultwarden-maintenance.service"
@@ -1086,6 +1258,7 @@ grep -Eq '^[[:space:]]+remove_units[[:space:]]*$' <<< "$main_body" \
   || fail 'public main still invokes install/remove in an errexit-suppressing list'
 
 printf 'PASS setup-systemd public failures stop without false success or later mutations\n'
+printf 'PASS setup-systemd removal handles active state and disable failures fail-closed\n'
 )
 check_systemd_required_failure_propagation
 
