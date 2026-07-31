@@ -70,8 +70,8 @@ jobs:
               'workflow restoration before cleanup commit',
           )
           replace_once(
-              '.github/workflows/doc-drift.yml\n',
-              '.github/workflows/pr280-health-lock.yml\n.github/workflows/pr280-nonworkflow-publish.yml\n',
+              "mapfile -t expected_files <<'FILES'\n.github/workflows/doc-drift.yml\n",
+              "mapfile -t expected_files <<'FILES'\n.github/workflows/pr280-health-lock.yml\n.github/workflows/pr280-nonworkflow-publish.yml\n",
               'final file whitelist workflow entries',
           )
           replace_once(
