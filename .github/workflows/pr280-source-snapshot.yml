@@ -1,0 +1,21 @@
+name: PR 280 Source Snapshot
+on:
+  push:
+    branches:
+      - codex/small-team-runtime-remediation
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Package source
+        run: tar --exclude=.git -czf /tmp/pr280-source.tar.gz .
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v6
+        with:
+          name: pr280-source
+          path: /tmp/pr280-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
