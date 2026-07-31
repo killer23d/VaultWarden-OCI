@@ -1,6 +1,0 @@
-bfc8a4c351ee70e29a94552c5b77f20d43b5cb98
-1e229fe70ca97b43801e11767553b46fc24c2ce5df85049ee142c3d84229a18b  utilities/setup-systemd.sh
-11e93515bf925546524dfd3ab63b41fcf76515d53fdeae7c3984ccfe1cf974a3  tests/suites/foundation/case-systemd.bash
-  1844 utilities/setup-systemd.sh
-  1092 tests/suites/foundation/case-systemd.bash
-  2936 total
