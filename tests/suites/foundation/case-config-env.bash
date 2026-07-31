@@ -19,13 +19,13 @@ assert_not_contains(){ ! grep -Fq -- "$2" "$1" || fail "$3"; }
 awk '/^sync-env: /,/^edit-env:/' "$ROOT/Makefile" | grep -Fq './utilities/env-edit.sh sync' || fail 'make sync-env does not call env-edit.sh sync'
 awk '/^edit-env: /,/^edit-secrets:/' "$ROOT/Makefile" | grep -Fq './utilities/env-edit.sh edit' || fail 'make edit-env does not call env-edit.sh edit'
 awk '/^up: /,/^start:/' "$ROOT/Makefile" | grep -Fq './startup.sh' || fail 'make up must call startup.sh'
-! awk '/^up: /,/^start:/' "$ROOT/Makefile" | grep -Fq '$(MAKE) sync-env' || fail 'make up must leave env sync inside guarded startup.sh'
+! awk '/^up: /,/^start:/' "$ROOT/Makefile" | grep -Fq '$(MAKE) sync-env' || fail 'make up must not synchronize repository configuration implicitly'
 awk '/^restart: /,/^safe-restart:/' "$ROOT/Makefile" | grep -Fq './startup.sh --force' || fail 'make restart must call startup.sh --force'
-! awk '/^restart: /,/^safe-restart:/' "$ROOT/Makefile" | grep -Fq '$(MAKE) sync-env' || fail 'make restart must leave env sync inside guarded startup.sh'
-grep -Fq 'utilities/env-edit.sh" sync' "$ROOT/startup.sh" || fail 'startup.sh must sync env inside the lifecycle operation'
+! awk '/^restart: /,/^safe-restart:/' "$ROOT/Makefile" | grep -Fq '$(MAKE) sync-env' || fail 'make restart must not synchronize repository configuration implicitly'
+! grep -Fq 'utilities/env-edit.sh" sync' "$ROOT/startup.sh" || fail 'ordinary startup must consume the selected runtime authority without syncing repository .env'
 grep -Fq 'utilities/env-edit.sh" sync' "$ROOT/utilities/setup-env.sh" || fail 'setup-env.sh does not call env-edit.sh sync'
 grep -Fq 'utilities/env-edit.sh" sync' "$ROOT/utilities/setup-systemd.sh" || fail 'setup-systemd.sh does not call env-edit.sh sync'
-pass 'Makefile, startup, and setup callers use env-edit.sh sync/edit correctly'
+pass 'ordinary startup and lifecycle targets leave repository-to-runtime sync explicit'
 
 awk '/^_mv_step_update_dropin\(\)/,/^}/' "$ROOT/lib/migrate.sh" | grep -Fq 'VW_ENV_EDIT_ALLOW_MIGRATION_SYNC=true "${PROJECT_ROOT}/utilities/setup-systemd.sh" install' \
   || fail 'migration drop-in regeneration does not pass env-edit migration bypass to setup-systemd install'
@@ -83,7 +83,6 @@ rm -f "$ETC/rclone.conf"
 ( cd "$REPO" && VW_SYNC_ETC_DIR="$ETC" ./utilities/env-edit.sh sync >/dev/null ) || fail 'boot-only sync without rclone failed'
 assert_not_contains "$STATE/config/install.env" "RCLONE_CONFIG=$ETC/rclone.conf" 'RCLONE_CONFIG injected when rclone.conf absent'
 pass 'RCLONE_CONFIG is injected only when rclone.conf exists'
-
 
 # Data-volume fail-closed cases.
 for case in missing-device mismatch not-mounted; do
@@ -151,6 +150,149 @@ pass 'status is read-only and reports env paths, migration state, and storage mi
 )
 
 check_env_edit_contracts
+
+check_runtime_authority_entrypoints() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL runtime authority entrypoints: %s\n' "$*" >&2; exit 1; }
+
+copy_repo(){
+  local dest="$1"
+  mkdir -p "$dest"
+  (cd "$ROOT" && tar --exclude=.git --exclude='.migrate-volume.state' -cf - .) | (cd "$dest" && tar -xf -)
+}
+write_runtime_env(){
+  local file="$1" state="$2" domain="$3" key="$4"
+  mkdir -p "$(dirname "$file")" "$state"
+  cat > "$file" <<EOF_ENV
+PROJECT_STATE_DIR=$state
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=
+SOPS_AGE_KEY_FILE=$key
+DOMAIN=$domain
+ADMIN_EMAIL=admin@$domain
+CADDY_VERSION=2.11.4
+EMAIL_MODE=auto
+EOF_ENV
+  chmod 0600 "$file"
+}
+
+# Exercise make up/restart at their public boundary with call-log mocks. The
+# lifecycle targets may start services, but they must not synchronize .env.
+REPO="$TMP/make-repo"
+copy_repo "$REPO"
+INSTALLED="$TMP/installed/vaultwarden.env"
+STATE="$TMP/installed-state"
+write_runtime_env "$INSTALLED" "$STATE" installed.example "$TMP/installed-key.txt"
+write_runtime_env "$STATE/config/install.env" "$TMP/persistent-state" persistent.example "$TMP/persistent-key.txt"
+write_runtime_env "$REPO/.env" "$TMP/repository-state" repository.example "$TMP/repository-key.txt"
+mkdir -p "$STATE/secrets" "$TMP/bin"
+printf 'sops:\n  mac: fixture\n' > "$STATE/secrets/secrets.yaml"
+CALL_LOG="$TMP/calls.log"
+: > "$CALL_LOG"
+cat > "$REPO/startup.sh" <<'EOF_STARTUP'
+#!/usr/bin/env bash
+printf 'startup:%s\n' "$*" >> "${CALL_LOG:?}"
+EOF_STARTUP
+cat > "$REPO/utilities/env-edit.sh" <<'EOF_ENV_EDIT'
+#!/usr/bin/env bash
+printf 'env-edit:%s\n' "$*" >> "${CALL_LOG:?}"
+EOF_ENV_EDIT
+cat > "$TMP/bin/docker" <<'EOF_DOCKER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  info) exit 0 ;;
+  compose)
+    [[ "${2:-}" == version ]] && printf 'Docker Compose fixture\n'
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+EOF_DOCKER
+chmod +x "$REPO/startup.sh" "$REPO/utilities/env-edit.sh" "$TMP/bin/docker"
+
+run_make_root(){
+  if (( EUID == 0 )); then
+    env PATH="$TMP/bin:$PATH" CALL_LOG="$CALL_LOG" VW_CONFIG_INSTALLED_ENV_FILE="$INSTALLED" make --no-print-directory -C "$REPO" "$@"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n env PATH="$TMP/bin:$PATH" CALL_LOG="$CALL_LOG" VW_CONFIG_INSTALLED_ENV_FILE="$INSTALLED" make --no-print-directory -C "$REPO" "$@"
+  else
+    return 77
+  fi
+}
+
+if run_make_root up >"$TMP/make-up.out" 2>&1; then
+  :
+else
+  rc=$?
+  if [[ "$rc" -eq 77 ]]; then
+    printf 'SKIP: public make lifecycle fixture requires root or passwordless sudo\n'
+  else
+    cat "$TMP/make-up.out" >&2
+    fail 'make up fixture failed'
+  fi
+fi
+if [[ -s "$CALL_LOG" ]]; then
+  grep -Fxq 'startup:' "$CALL_LOG" || fail 'make up did not invoke ordinary startup'
+  ! grep -q '^env-edit:' "$CALL_LOG" || fail 'make up invoked env-edit sync'
+
+  run_make_root restart >"$TMP/make-restart.out" 2>&1 || { cat "$TMP/make-restart.out" >&2; fail 'make restart fixture failed'; }
+  grep -Fxq 'startup:--force --skip-pull' "$CALL_LOG" || fail 'make restart did not invoke restart startup boundary'
+  ! grep -q '^env-edit:' "$CALL_LOG" || fail 'make restart invoked env-edit sync'
+
+  run_make_root sync-env >"$TMP/make-sync.out" 2>&1 || { cat "$TMP/make-sync.out" >&2; fail 'make sync-env fixture failed'; }
+  grep -Fxq 'env-edit:sync' "$CALL_LOG" || fail 'explicit make sync-env did not invoke env-edit.sh sync'
+fi
+
+# Run the largest safe real startup boundary. A stale repo .env and persistent
+# environment deliberately conflict with the valid installed authority.
+START_REPO="$TMP/startup-repo"
+copy_repo "$START_REPO"
+START_INSTALLED="$TMP/start-installed/vaultwarden.env"
+START_STATE="$TMP/start-state"
+write_runtime_env "$START_INSTALLED" "$START_STATE" selected.example "$TMP/selected-key.txt"
+write_runtime_env "$START_STATE/config/install.env" "$TMP/persistent-start" persistent-start.example "$TMP/persistent-start-key.txt"
+write_runtime_env "$START_REPO/.env" "$TMP/repository-start" repository-start.example "$TMP/repository-start-key.txt"
+mkdir -p "$START_STATE/secrets" "$TMP/start-bin"
+printf 'sops:\n  mac: fixture\n' > "$START_STATE/secrets/secrets.yaml"
+START_SYNC_LOG="$TMP/start-sync.log"
+SELECTED_LOG="$TMP/selected.log"
+: > "$START_SYNC_LOG"
+cat > "$START_REPO/utilities/env-edit.sh" <<'EOF_START_ENV'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${START_SYNC_LOG:?}"
+EOF_START_ENV
+cat > "$TMP/start-bin/docker" <<'EOF_START_DOCKER'
+#!/usr/bin/env bash
+printf '%s|%s|%s|%s\n' "${VW_CONFIG_SELECTED_ENV_SOURCE:-}" "${PROJECT_STATE_DIR:-}" "${DOMAIN:-}" "${SOPS_AGE_KEY_FILE:-}" >> "${SELECTED_LOG:?}"
+case "${1:-}" in
+  info) exit 0 ;;
+  compose) exit 0 ;;
+  inspect) exit 1 ;;
+  *) exit 0 ;;
+esac
+EOF_START_DOCKER
+chmod +x "$START_REPO/utilities/env-edit.sh" "$TMP/start-bin/docker"
+installed_before="$(sha256sum "$START_INSTALLED" | awk '{print $1}')"
+if ! PATH="$TMP/start-bin:$PATH" START_SYNC_LOG="$START_SYNC_LOG" SELECTED_LOG="$SELECTED_LOG" \
+    VW_CONFIG_INSTALLED_ENV_FILE="$START_INSTALLED" \
+    bash "$START_REPO/startup.sh" --dry-run --skip-pull --skip-egress-fix >"$TMP/startup.out" 2>&1; then
+  cat "$TMP/startup.out" >&2
+  fail 'startup dry-run authority boundary failed'
+fi
+[[ ! -s "$START_SYNC_LOG" ]] || fail 'ordinary startup invoked env-edit.sh sync'
+[[ "$(sha256sum "$START_INSTALLED" | awk '{print $1}')" == "$installed_before" ]] || fail 'ordinary startup rewrote installed environment'
+grep -Fxq "installed|$START_STATE|selected.example|$TMP/selected-key.txt" "$SELECTED_LOG" \
+  || { cat "$SELECTED_LOG" >&2; fail 'installed values did not remain selected over persistent and repository values'; }
+
+printf 'PASS runtime authority entrypoints preserve installed configuration and explicit sync\n'
+)
+
+check_runtime_authority_entrypoints
+
 check_set_env_var_contracts() (
 set -euo pipefail
 
