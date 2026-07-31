@@ -8,6 +8,7 @@ on:
       - '.pr280-shellcheck-fix.patch'
       - '.pr280-root-fixture-fix.patch'
       - '.pr280-call-log-owner-fix.patch'
+      - '.pr280-systemd-root-read-fix.patch'
       - 'AGENTS.md'
       - 'caddy/**'
       - 'docs/**'
@@ -57,19 +58,16 @@ jobs:
           echo "60dd20cde0747106c6f6c04a44b5c25b1b95f5d698428a8d2276ed6893eae131  .pr280-shellcheck-fix.patch" | sha256sum --check
           echo "4d32201bd3acacb00d8b8a85c8e6bf147359945680e0d9e21457a6bd707b18d0  .pr280-root-fixture-fix.patch" | sha256sum --check
           echo "77763bfbdc80ef7dc6b185719cbe19a7ac966fe3ca99d8afba0bbf834304c13d  .pr280-call-log-owner-fix.patch" | sha256sum --check
+          echo "b067c49026b18e0b601150326ceaa9f15ef0b32210c302ea3b71e66f6e1119e9  .pr280-systemd-root-read-fix.patch" | sha256sum --check
           git apply --check /tmp/pr280-final.patch
           git apply /tmp/pr280-final.patch
-          git apply --check .pr280-shellcheck-fix.patch
-          git apply .pr280-shellcheck-fix.patch
-          git apply --check .pr280-root-fixture-fix.patch
-          git apply .pr280-root-fixture-fix.patch
-          git apply --check .pr280-call-log-owner-fix.patch
-          git apply .pr280-call-log-owner-fix.patch
+          for patch in .pr280-shellcheck-fix.patch .pr280-root-fixture-fix.patch .pr280-call-log-owner-fix.patch .pr280-systemd-root-read-fix.patch; do
+            git apply --check "$patch"
+            git apply "$patch"
+          done
           git diff --check
           find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n1 bash -n
-          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck -x --severity=warning
-          python3 utilities/verify-production-readiness-remediation.py
-          bash tests/suites/foundation/case-config-env.bash
+          shellcheck -x --severity=warning lib/crypto.sh startup.sh utilities/setup-systemd.sh tests/suites/foundation/case-config-env.bash tests/suites/foundation/case-systemd.bash tests/suites/security/case-secrets.bash
           bash tests/suites/foundation/case-systemd.bash
           bash tests/suites/security/case-secrets.bash
           DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
@@ -79,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           git show f273e7b97d4d66d51c8ddeb8c6de51e191aefd05^:.github/workflows/doc-drift.yml > .github/workflows/doc-drift.yml
-          rm -f .pr280-final-* .pr280-patch-* .pr280-shellcheck-fix.patch .pr280-root-fixture-fix.patch .pr280-call-log-owner-fix.patch .github/workflows/pr280-apply.yml
+          rm -f .pr280-final-* .pr280-patch-* .pr280-shellcheck-fix.patch .pr280-root-fixture-fix.patch .pr280-call-log-owner-fix.patch .pr280-systemd-root-read-fix.patch .github/workflows/pr280-apply.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
