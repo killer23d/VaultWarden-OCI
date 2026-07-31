@@ -1,0 +1,12 @@
+diff --git a/tests/suites/foundation/case-config-env.bash b/tests/suites/foundation/case-config-env.bash
+index e164188..9f3b02f 100755
+--- a/tests/suites/foundation/case-config-env.bash
++++ b/tests/suites/foundation/case-config-env.bash
+@@ -283,6 +283,7 @@ printf 'sops:\n  mac: fixture\n' > "$START_STATE/secrets/secrets.yaml"
+ START_SYNC_LOG="$TMP/start-sync.log"
+ SELECTED_LOG="$TMP/selected.log"
+ : > "$START_SYNC_LOG"
++: > "$SELECTED_LOG"
+ cat > "$START_REPO/utilities/env-edit.sh" <<'EOF_START_ENV'
+ #!/usr/bin/env bash
+ printf '%s\n' "$*" >> "${START_SYNC_LOG:?}"
