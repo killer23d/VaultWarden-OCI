@@ -1,31 +1,20 @@
-name: Publish PR 280 health lock fix
+name: Inspect PR 280 process cleanup
 on:
   pull_request:
     paths:
       - '.github/workflows/pr280-health-lock.yml'
 permissions:
-  contents: write
+  contents: read
 jobs:
-  publish:
+  inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:
           ref: codex/small-team-runtime-remediation
           fetch-depth: 0
-      - name: Install validation dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
-          getent group vaultwarden >/dev/null || sudo groupadd --system vaultwarden
-          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
-          sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
-          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
-          sudo install -m 755 /tmp/sops /usr/local/bin/sops
-      - name: Execute corrected guarded publisher
+      - name: Render intended health fixture cleanup
         shell: bash
         run: |
           set -euo pipefail
@@ -41,10 +30,11 @@ jobs:
               for step in workflow['jobs']['publish']['steps']
               if step.get('name') == 'Verify, test, and publish exact tree'
           )
-          old = "grep -Fq 'PASS suite:foundation (6 cases)' /tmp/foundation.log"
-          new = "grep -Eq '^PASS[[:space:]]+suite:foundation \\(6 cases\\)$' /tmp/foundation.log"
-          if script.count(old) != 1:
-              raise SystemExit('foundation suite assertion source did not match exactly once')
-          Path('/tmp/pr280-publish.sh').write_text(script.replace(old, new, 1) + '\n')
+          marker = 'rm -f .pr280-* .github/workflows/pr280-health-lock.yml'
+          prefix, separator, _ = script.partition(marker)
+          if not separator:
+              raise SystemExit('publisher preparation marker not found')
+          Path('/tmp/pr280-prepare.sh').write_text(prefix + '\n')
           PY
-          bash -e -o pipefail /tmp/pr280-publish.sh
+          bash -e -o pipefail /tmp/pr280-prepare.sh
+          nl -ba tests/suites/operations/case-operations.bash | sed -n '1280,1770p'
