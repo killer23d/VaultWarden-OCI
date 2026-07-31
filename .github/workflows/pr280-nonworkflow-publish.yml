@@ -60,6 +60,11 @@ jobs:
               text = text.replace(old, new, 1)
 
           replace_once(
+              "grep -Ev '^(\\.github/workflows/pr280-health-lock\\.yml|\\.pr280-.*)$'",
+              "grep -Ev '^(\\.github/workflows/pr280-health-lock\\.yml|\\.github/workflows/pr280-nonworkflow-publish\\.yml|\\.pr280-.*)$'",
+              'staging path allowlist',
+          )
+          replace_once(
               'rm -f .pr280-* .github/workflows/pr280-health-lock.yml',
               'rm -f .pr280-*',
               'temporary artifact removal',
