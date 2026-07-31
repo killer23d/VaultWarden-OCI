@@ -20,14 +20,17 @@ jobs:
         run: |
           set -euo pipefail
           rm -f .pr280-src-setup-* .pr280-src-test-* .pr280-src-manifest
-          base64 -w0 utilities/setup-systemd.sh | split -b 20000 -d -a 2 - .pr280-src-setup-
-          base64 -w0 tests/suites/foundation/case-systemd.bash | split -b 20000 -d -a 2 - .pr280-src-test-
+          rm -rf .pr280-src
+          mkdir -p .pr280-src
+          cp utilities/setup-systemd.sh .pr280-src/setup-systemd.sh
+          cp tests/suites/foundation/case-systemd.bash .pr280-src/case-systemd.bash
           {
             git rev-parse HEAD
             sha256sum utilities/setup-systemd.sh tests/suites/foundation/case-systemd.bash
-          } > .pr280-src-manifest
+            wc -l utilities/setup-systemd.sh tests/suites/foundation/case-systemd.bash
+          } > .pr280-src/manifest
           git config user.name 'OpenAI Codex'
           git config user.email 'codex@openai.com'
-          git add .pr280-src-setup-* .pr280-src-test-* .pr280-src-manifest
+          git add -A .pr280-src .pr280-src-setup-* .pr280-src-test-* .pr280-src-manifest
           git commit -m 'stage exact PR 280 target sources'
           git push origin HEAD:codex/small-team-runtime-remediation
