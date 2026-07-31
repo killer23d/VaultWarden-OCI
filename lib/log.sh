@@ -126,15 +126,7 @@ spinner_start() {
     [[ -t 1 ]] || return 0
     local msg="${1:-Working...}"
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    local health_fd="${HEALTH_LOCK_FD:-}"
     (
-        # The read-only health lock remains parent-owned. Keep this UI helper
-        # from extending that secondary lock if the health process is killed.
-        if [[ "$health_fd" =~ ^[0-9]+$ ]] && (( health_fd > 2 )); then
-            { eval "exec ${health_fd}>&-"; } 2>/dev/null || true
-        fi
-        unset HEALTH_LOCK_FD
-
         # Re-evaluate TTY inside the subshell: the parent's COLOR_CYAN /
         # COLOR_RESET are exported with escape sequences that were set at
         # source-time.  If the subshell's stdout is redirected (e.g. the

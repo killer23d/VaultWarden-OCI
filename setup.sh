@@ -716,6 +716,21 @@ main() {
 
     if ! is_root; then log_error "Must run as root."; exit 1; fi
 
+    # setup.sh is the supported first-install entry point. Bootstrap only the
+    # shared lock identity here so the canonical setup lock can be prepared
+    # without weakening lib/operations.sh to a root:root fallback.
+    if [[ "$DRY_RUN" != "true" ]] && ! getent group vaultwarden >/dev/null 2>&1; then
+        command -v groupadd >/dev/null 2>&1 || {
+            log_error "Cannot create required shared lock group 'vaultwarden': groupadd is unavailable."
+            exit 1
+        }
+        groupadd --system vaultwarden || {
+            log_error "Cannot create required shared lock group 'vaultwarden'."
+            exit 1
+        }
+        log_success "Created shared lock group: vaultwarden"
+    fi
+
     operation_acquire \
         --id setup \
         --label "Setup" \

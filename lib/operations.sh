@@ -111,8 +111,23 @@ _operation_prepare_state_dir() {
 }
 
 _operation_prepare_lock_file() {
-    local lock_path="$1" lock_dir desired_group=root created=false old_umask
-    local desired_owner current_mode current_owner ownership_applied=false
+    local lock_path="$1" shared_policy="${2:-auto}" lock_dir desired_group=root
+    local created=false old_umask desired_owner current_mode current_owner
+    local ownership_applied=false shared_contract=false before_identity="" after_identity=""
+    local final_mode final_owner
+
+    case "$shared_policy" in
+        auto)
+            [[ "$lock_path" == /run/lock/vaultwarden-*.lock ]] && shared_contract=true
+            ;;
+        shared)
+            shared_contract=true
+            ;;
+        *)
+            _operation_log error "_operation_prepare_lock_file: invalid policy '${shared_policy}'"
+            return 2
+            ;;
+    esac
 
     lock_dir="$(dirname "$lock_path")"
     if [[ ! -d "$lock_dir" ]]; then
@@ -123,7 +138,15 @@ _operation_prepare_lock_file() {
         }
     fi
 
-    if command -v getent >/dev/null 2>&1 \
+    if [[ "$shared_contract" == "true" ]]; then
+        if ! command -v getent >/dev/null 2>&1 \
+            || ! getent group vaultwarden >/dev/null 2>&1; then
+            _operation_log error "Required group 'vaultwarden' is unavailable for shared operation lock: ${lock_path}"
+            _operation_log error "Run: sudo ./utilities/setup-systemd.sh install"
+            return 1
+        fi
+        desired_group=vaultwarden
+    elif command -v getent >/dev/null 2>&1 \
         && getent group vaultwarden >/dev/null 2>&1; then
         desired_group=vaultwarden
     fi
@@ -132,6 +155,12 @@ _operation_prepare_lock_file() {
         [[ -f "$lock_path" && ! -L "$lock_path" ]] || {
             _operation_log error "Operation lock path is not a regular file: ${lock_path}"
             _operation_log error "Inspect it before retrying: sudo ls -la '${lock_path}'"
+            return 1
+        }
+        before_identity="$(stat -Lc '%d:%i' "$lock_path" 2>/dev/null \
+            || stat -f '%d:%i' "$lock_path" 2>/dev/null || true)"
+        [[ -n "$before_identity" ]] || {
+            _operation_log error "Cannot stat operation lock file before preparation: ${lock_path}"
             return 1
         }
     else
@@ -151,6 +180,10 @@ _operation_prepare_lock_file() {
 
     current_mode="$(stat -c '%a' "$lock_path" 2>/dev/null \
         || stat -f '%Lp' "$lock_path" 2>/dev/null || true)"
+    [[ -n "$current_mode" ]] || {
+        _operation_log error "Cannot stat operation lock mode: ${lock_path}"
+        return 1
+    }
     if [[ "$current_mode" != 660 ]]; then
         if ! chmod 0660 "$lock_path" 2>/dev/null; then
             _operation_log error "Cannot set operation lock mode 0660: ${lock_path}"
@@ -162,12 +195,16 @@ _operation_prepare_lock_file() {
     desired_owner="root:${desired_group}"
     current_owner="$(stat -c '%U:%G' "$lock_path" 2>/dev/null \
         || stat -f '%Su:%Sg' "$lock_path" 2>/dev/null || true)"
+    [[ -n "$current_owner" ]] || {
+        _operation_log error "Cannot stat operation lock ownership: ${lock_path}"
+        return 1
+    }
     if [[ "$current_owner" == "$desired_owner" ]]; then
         ownership_applied=true
     elif chown "$desired_owner" "$lock_path" 2>/dev/null; then
         ownership_applied=true
     else
-        if (( EUID == 0 )); then
+        if [[ "$shared_contract" == "true" ]] || (( EUID == 0 )); then
             _operation_log error "Cannot set operation lock ownership to ${desired_owner}: ${lock_path}"
             _operation_log error "Fix: sudo chown ${desired_owner} '${lock_path}'"
             return 1
@@ -176,10 +213,37 @@ _operation_prepare_lock_file() {
         _operation_log warn "Fix: sudo chown ${desired_owner} '${lock_path}' && sudo chmod 0660 '${lock_path}'"
     fi
 
-    if [[ "$desired_group" == root && "$created" == true && "$ownership_applied" == true ]]; then
-        _operation_log warn "The 'vaultwarden' group is unavailable; using root:root mode 0660 for ${lock_path}."
-        _operation_log warn "Run 'sudo utilities/setup-systemd.sh install' to create the group and enforce shared ownership."
+    [[ -f "$lock_path" && ! -L "$lock_path" ]] || {
+        _operation_log error "Operation lock path type changed during preparation: ${lock_path}"
+        return 1
+    }
+    after_identity="$(stat -Lc '%d:%i' "$lock_path" 2>/dev/null \
+        || stat -f '%d:%i' "$lock_path" 2>/dev/null || true)"
+    final_mode="$(stat -c '%a' "$lock_path" 2>/dev/null \
+        || stat -f '%Lp' "$lock_path" 2>/dev/null || true)"
+    final_owner="$(stat -c '%U:%G' "$lock_path" 2>/dev/null \
+        || stat -f '%Su:%Sg' "$lock_path" 2>/dev/null || true)"
+    [[ -n "$after_identity" && -n "$final_mode" && -n "$final_owner" ]] || {
+        _operation_log error "Cannot verify operation lock after preparation: ${lock_path}"
+        return 1
+    }
+    if [[ -n "$before_identity" && "$before_identity" != "$after_identity" ]]; then
+        _operation_log error "Operation lock inode changed during in-place preparation: ${lock_path}"
+        return 1
     fi
+    if [[ "$final_mode" != 660 ]]; then
+        _operation_log error "Operation lock mode verification failed for ${lock_path}; got ${final_mode}, expected 660"
+        return 1
+    fi
+    if [[ "$shared_contract" == "true" && "$final_owner" != "$desired_owner" ]]; then
+        _operation_log error "Operation lock ownership verification failed for ${lock_path}; got ${final_owner}, expected ${desired_owner}"
+        return 1
+    fi
+
+    if [[ "$desired_group" == root && "$created" == true && "$ownership_applied" == true ]]; then
+        _operation_log warn "The 'vaultwarden' group is unavailable; using root:root mode 0660 for non-canonical lock ${lock_path}."
+    fi
+    return 0
 }
 
 _operation_state_get() {
@@ -1246,9 +1310,11 @@ operation_acquire() {
                 return "$rc"
                 ;;
             76)
-                _operation_log error "Another ${label} operation is already running."
+                operation_conflict_prompt "$specific_lock" "$policy" "$skip_code"
+                rc=$?
+                (( rc == 0 )) && continue
                 OPERATION_OWNS_GLOBAL=false
-                return 1
+                return "$rc"
                 ;;
             *)
                 OPERATION_OWNS_GLOBAL=false

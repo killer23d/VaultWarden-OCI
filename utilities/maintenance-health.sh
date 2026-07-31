@@ -37,6 +37,163 @@ _default_report_dir() {
     printf '%s/reports' "$state_dir"
 }
 
+
+_health_readonly_lock_path() {
+    if [[ -n "${VW_HEALTH_LOCK_FILE:-}" ]]; then
+        printf '%s\n' "$VW_HEALTH_LOCK_FILE"
+    elif [[ $EUID -eq 0 ]]; then
+        printf '%s\n' "/run/lock/vaultwarden-health.lock"
+    elif [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR:-}" && -w "${XDG_RUNTIME_DIR:-}" ]]; then
+        printf '%s\n' "${XDG_RUNTIME_DIR}/vaultwarden-health.lock"
+    else
+        printf '%s\n' "${TMPDIR:-/tmp}/vaultwarden-health-${EUID}.lock"
+    fi
+}
+
+_health_lock_metadata() {
+    stat -Lc '%d:%i:%u:%a' "$1" 2>/dev/null \
+        || stat -f '%d:%i:%u:%Lp' "$1" 2>/dev/null
+}
+
+_health_prepare_private_lock_file() {
+    local lock_path="$1" lock_dir before_metadata="" after_metadata
+    local before_device before_inode _before_uid _before_mode
+    local after_device after_inode after_uid after_mode old_umask
+
+    lock_dir="$(dirname "$lock_path")"
+    if ! mkdir -p "$lock_dir" 2>/dev/null; then
+        log_error "Cannot prepare health coordination directory: $lock_dir"
+        return 3
+    fi
+    if [[ -L "$lock_path" ]]; then
+        log_error "Health coordination lock must not be a symlink: $lock_path"
+        return 3
+    fi
+    if [[ -e "$lock_path" ]]; then
+        if [[ ! -f "$lock_path" ]]; then
+            log_error "Health coordination lock is not a regular file: $lock_path"
+            return 3
+        fi
+        before_metadata="$(_health_lock_metadata "$lock_path")" || {
+            log_error "Cannot stat health coordination lock: $lock_path"
+            return 3
+        }
+        IFS=: read -r before_device before_inode _before_uid _before_mode <<< "$before_metadata"
+    else
+        old_umask="$(umask)"
+        umask 0177
+        if ! (set -o noclobber; : > "$lock_path") 2>/dev/null; then
+            umask "$old_umask"
+            if [[ -L "$lock_path" || ! -f "$lock_path" ]]; then
+                log_error "Cannot securely create health coordination lock: $lock_path"
+                return 3
+            fi
+        fi
+        umask "$old_umask"
+    fi
+    if ! chmod 0600 "$lock_path" 2>/dev/null; then
+        log_error "Cannot set health coordination lock mode 0600: $lock_path"
+        return 3
+    fi
+    if [[ -L "$lock_path" || ! -f "$lock_path" ]]; then
+        log_error "Health coordination lock type changed during preparation: $lock_path"
+        return 3
+    fi
+    after_metadata="$(_health_lock_metadata "$lock_path")" || {
+        log_error "Cannot verify health coordination lock: $lock_path"
+        return 3
+    }
+    IFS=: read -r after_device after_inode after_uid after_mode <<< "$after_metadata"
+    if [[ "$after_uid" != "$EUID" || "$after_mode" != 600 ]]; then
+        log_error "Health coordination lock metadata is ${after_uid}:${after_mode}; expected uid ${EUID} mode 600: $lock_path"
+        return 3
+    fi
+    if [[ -n "$before_metadata" && "$before_device:$before_inode" != "$after_device:$after_inode" ]]; then
+        log_error "Health coordination lock inode changed during in-place preparation: $lock_path"
+        return 3
+    fi
+}
+
+_health_prepare_readonly_lock_file() {
+    local lock_path="$1"
+    if (( EUID == 0 )); then
+        _operation_prepare_lock_file "$lock_path" shared || {
+            log_error "Cannot prepare shared health coordination lock: $lock_path"
+            return 3
+        }
+    else
+        _health_prepare_private_lock_file "$lock_path"
+    fi
+}
+
+_health_verify_flock_parent() {
+    local lock_path="${VW_HEALTH_LOCK_PATH:-}" expected fd actual
+    local parent_exe lock_rc=0 parent_has_inode=false
+    [[ -n "$lock_path" && -f "$lock_path" && ! -L "$lock_path" ]] || {
+        log_error "Health lock wrapper did not provide a valid lock path."
+        return 3
+    }
+    expected="$(stat -Lc '%d:%i' "$lock_path" 2>/dev/null \
+        || stat -f '%d:%i' "$lock_path" 2>/dev/null || true)"
+    [[ -n "$expected" && -d "/proc/${PPID}/fd" ]] || {
+        log_error "Cannot verify the health lock owner process."
+        return 3
+    }
+    parent_exe="$(readlink -f "/proc/${PPID}/exe" 2>/dev/null || true)"
+    [[ "${parent_exe##*/}" == flock ]] || {
+        log_error "Health lock owner is not the expected util-linux flock process."
+        return 3
+    }
+    for fd in "/proc/${PPID}/fd/"*; do
+        [[ -e "$fd" ]] || continue
+        actual="$(stat -Lc '%d:%i' "$fd" 2>/dev/null || true)"
+        if [[ "$actual" == "$expected" ]]; then
+            parent_has_inode=true
+            break
+        fi
+    done
+    [[ "$parent_has_inode" == true ]] || {
+        log_error "Health lock owner does not hold the expected lock inode: $lock_path"
+        return 3
+    }
+    flock --nonblock --conflict-exit-code 75 "$lock_path" true >/dev/null 2>&1 \
+        || lock_rc=$?
+    [[ "$lock_rc" -eq 75 ]] || {
+        log_error "Health lock owner did not retain the expected active flock: $lock_path"
+        return 3
+    }
+}
+
+_health_args_request_fix() {
+    local arg
+    for arg in "$@"; do
+        [[ "$arg" == "--fix" || "$arg" == "-f" ]] && return 0
+    done
+    return 1
+}
+
+_health_run_readonly_locked() {
+    local lock_path rc
+    command -v flock >/dev/null 2>&1 || {
+        log_error "flock is required for health coordination."
+        return 3
+    }
+    lock_path="$(_health_readonly_lock_path)"
+    _health_prepare_readonly_lock_file "$lock_path" || return $?
+
+    if VW_HEALTH_LOCK_WRAPPED=true VW_HEALTH_LOCK_PATH="$lock_path" \
+        flock --nonblock --conflict-exit-code 75 --close \
+            "$lock_path" "$BASH" "${BASH_SOURCE[0]}" "$@"; then
+        return 0
+    else
+        rc=$?
+    fi
+    if (( rc == 75 )); then
+        log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
+    fi
+    return "$rc"
+}
+
 _resolve_age_key() {
     local selected="${SOPS_AGE_KEY_FILE:-}"
     [[ -n "$selected" ]] || return 1
@@ -81,51 +238,18 @@ local MEM_WARN_THRESHOLD=${MEM_WARN_THRESHOLD:-80}
 local MEM_CRIT_THRESHOLD=${MEM_CRIT_THRESHOLD:-90}
 local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
-local HEALTH_LOCK_FD=""
-
-_health_readonly_lock_path() {
-    if [[ -n "${VW_HEALTH_LOCK_FILE:-}" ]]; then
-        printf '%s\n' "$VW_HEALTH_LOCK_FILE"
-    elif [[ $EUID -eq 0 ]]; then
-        printf '%s\n' "/run/lock/vaultwarden-health.lock"
-    elif [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR:-}" && -w "${XDG_RUNTIME_DIR:-}" ]]; then
-        printf '%s\n' "${XDG_RUNTIME_DIR}/vaultwarden-health.lock"
-    else
-        printf '%s\n' "${TMPDIR:-/tmp}/vaultwarden-health-${EUID}.lock"
-    fi
-}
-
-_acquire_readonly_health_lock() {
-    local lock_path lock_dir fd
-    lock_path="$(_health_readonly_lock_path)"
-    lock_dir="$(dirname "$lock_path")"
-    if ! mkdir -p "$lock_dir" 2>/dev/null; then
-        log_error "Cannot prepare health coordination directory: $lock_dir"
-        return 3
-    fi
-    if ! : >> "$lock_path" 2>/dev/null; then
-        log_error "Cannot open health coordination lock: $lock_path"
-        return 3
-    fi
-    chmod 0600 "$lock_path" 2>/dev/null || true
-    if ! { exec {fd}>"$lock_path"; } 2>/dev/null; then
-        log_error "Cannot open health coordination lock: $lock_path"
-        return 3
-    fi
-    if ! flock -n "$fd" 2>/dev/null; then
-        { eval "exec ${fd}>&-"; } 2>/dev/null || true
-        log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
-        return 75
-    fi
-    HEALTH_LOCK_FD="$fd"
-}
-
 _acquire_run_lock() {
     if [[ "$FIX_MODE" == "true" ]]; then
+        local health_lock
+        health_lock="$(_health_readonly_lock_path)"
+        _health_prepare_readonly_lock_file "$health_lock" || {
+            log_error "Health repair lock preparation failed before checks could run."
+            return 4
+        }
         operation_acquire \
             --id health-repair \
             --label "Health repair" \
-            --specific-lock /run/lock/vaultwarden-health.lock \
+            --specific-lock "$health_lock" \
             --non-interactive skip || {
                 local rc=$?
                 (( rc == 75 )) && return 75
@@ -133,8 +257,6 @@ _acquire_run_lock() {
                 return 4
             }
         operation_set_phase "repair" "Health check with auto-repair"
-    else
-        _acquire_readonly_health_lock
     fi
 }
 
@@ -142,10 +264,6 @@ _release_run_lock() {
     local rc=$?
     if [[ "$FIX_MODE" == "true" ]]; then
         operation_release "$rc"
-    elif [[ -n "${HEALTH_LOCK_FD:-}" ]]; then
-        flock -u "$HEALTH_LOCK_FD" 2>/dev/null || true
-        { eval "exec ${HEALTH_LOCK_FD}>&-"; } 2>/dev/null || true
-        HEALTH_LOCK_FD=""
     fi
     return "$rc"
 }
@@ -280,7 +398,11 @@ _get_domain() {
 
 _check_containers() {
     log_info "Checking container status..."
-    local containers=("vaultwarden_app" "vaultwarden_caddy" "vaultwarden_postfix")
+    local containers=(
+        "$_VW_DEFAULT_CONTAINER_VAULTWARDEN"
+        "$_VW_DEFAULT_CONTAINER_CADDY"
+        "$_VW_DEFAULT_CONTAINER_POSTFIX"
+    )
     local all_healthy=true
     for container in "${containers[@]}"; do
         if ! docker inspect "$container" &>/dev/null; then
@@ -626,7 +748,6 @@ _crowdsec_health_sanitize_validation_log() {
 
 _crowdsec_health_validate_config() (
     local validation_log="" validation_rc=0
-    local fd="${HEALTH_LOCK_FD:-}"
 
     validation_log="$(mktemp -t vw-crowdsec-health.XXXXXXXXXX 2>/dev/null)" || return 125
     _crowdsec_health_validation_cleanup() {
@@ -637,10 +758,6 @@ _crowdsec_health_validate_config() (
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    if [[ "$fd" =~ ^[0-9]+$ ]] && (( fd > 2 )); then
-        { eval "exec ${fd}>&-"; } 2>/dev/null || true
-    fi
-    unset HEALTH_LOCK_FD
 
     if crowdsec -t >"$validation_log" 2>&1; then
         return 0
@@ -1140,7 +1257,9 @@ _health_main() {
     if (( lock_rc != 0 )); then
         return "$lock_rc"
     fi
-    trap '_release_run_lock' EXIT HUP INT TERM
+    if [[ "$FIX_MODE" == "true" ]]; then
+        trap '_release_run_lock' EXIT HUP INT TERM
+    fi
     log_info "Starting VaultWarden health check..."
     if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
     _check_containers
@@ -1228,6 +1347,22 @@ main() {
             break
         fi
     done
+
+    if [[ "${VW_HEALTH_LOCK_WRAPPED:-false}" == "true" ]]; then
+        if _health_args_request_fix "$@"; then
+            log_error "Internal read-only health lock wrapper cannot run repair mode."
+            return 3
+        fi
+        _health_verify_flock_parent || return $?
+        unset VW_HEALTH_LOCK_WRAPPED VW_HEALTH_LOCK_PATH
+        run_health_check "$@"
+        return
+    fi
+
+    if ! _health_args_request_fix "$@"; then
+        _health_run_readonly_locked "$@"
+        return
+    fi
     run_health_check "$@"
 }
 

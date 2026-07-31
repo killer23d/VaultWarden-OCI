@@ -145,6 +145,22 @@ _setup_systemd_acquire_guard() {
     [[ "$DRY_RUN" == "true" ]] && return 0
     [[ "$SETUP_SYSTEMD_GUARD_HELD" == "true" ]] && return 0
 
+    # This installer is the documented owner of the shared lock group. On a
+    # first install it must create that identity before acquiring its own
+    # canonical /run/lock guard; every other caller still fails closed and
+    # directs the operator here when the group is missing.
+    if [[ "$phase" == "install" ]] && ! getent group vaultwarden >/dev/null 2>&1; then
+        command -v groupadd >/dev/null 2>&1 || {
+            log_error "Cannot create required shared lock group 'vaultwarden': groupadd is unavailable."
+            return 1
+        }
+        groupadd --system vaultwarden || {
+            log_error "Cannot create required shared lock group 'vaultwarden'."
+            return 1
+        }
+        log_success "Created shared lock group: vaultwarden"
+    fi
+
     local policy="fail"
     if [[ ! -t 0 || ! -t 1 ]]; then
         policy="skip"

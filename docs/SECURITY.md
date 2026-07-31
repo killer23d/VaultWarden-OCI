@@ -445,7 +445,9 @@ sudo ./utilities/smoke-test.sh
 
 The installer reconciles a closed inventory of VaultWarden-OCI scripts, libraries, units, and generated drop-ins. Removed managed units are stopped and disabled before their files are removed; operator and third-party drop-ins are preserved. `systemd validate` detects repository/installed split-brain and unexpected managed leftovers instead of returning success with stale active runtime.
 
-Runtime coordination files are prepared in place as regular, non-symlink files with the verified `root:vaultwarden 0660` contract. Preparation failure blocks installation; an existing valid lock inode is never replaced merely to normalize metadata.
+Runtime coordination files are prepared in place as regular, non-symlink files with the verified `root:vaultwarden 0660` contract. Preparation failure blocks installation; an existing valid lock inode is never replaced merely to normalize metadata. A missing `vaultwarden` group is a setup failure for this shared contract; rerun `sudo ./utilities/setup-systemd.sh install` rather than falling back to `root:root`.
+
+Direct read-only health uses a dedicated util-linux `flock --close` owner. The health workload and arbitrary descendants never inherit the lock descriptor, so owner death releases coordination without requiring descendant termination. Root health uses `/run/lock/vaultwarden-health.lock` under the shared contract; documented non-root direct health uses a user-owned `0600` lock under `XDG_RUNTIME_DIR` or an effective-UID-specific temporary fallback. `health --fix` remains root-operated, takes the global operation guard, and coordinates on the same health-specific lock.
 
 Expected operation contention must not trigger false failure incidents. Real service failure must not be mapped to clean contention.
 
