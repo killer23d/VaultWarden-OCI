@@ -1,29 +1,116 @@
-name: PR 280 source snapshot
+name: Publish PR 280 failure propagation
 on:
   pull_request:
     paths:
       - '.github/workflows/pr280-source.yml'
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  publish:
+    name: Verify and publish failure propagation fix
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
           ref: codex/small-team-runtime-remediation
           fetch-depth: 0
-      - name: Archive exact source tree
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+      - name: Verify exact patch and publish focused commits
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD > "$RUNNER_TEMP/pr280-source-sha.txt"
-          tar --exclude=.git -czf "$RUNNER_TEMP/pr280-source.tar.gz" .
-      - uses: actions/upload-artifact@v6
-        with:
-          name: pr280-source
-          path: |
-            ${{ runner.temp }}/pr280-source.tar.gz
-            ${{ runner.temp }}/pr280-source-sha.txt
-          if-no-files-found: error
-          retention-days: 1
+          base='c0afc605ecad7c240e70ca6e41e9c230bbc45326'
+          branch='codex/small-team-runtime-remediation'
+          staging_sha="$(git rev-parse HEAD)"
+
+          git merge-base --is-ancestor "$base" "$staging_sha"
+          unexpected="$(git diff --name-only "$base".."$staging_sha" | grep -Ev '^(\.github/workflows/pr280-source\.yml|\.pr280-src(/.*)?|\.pr280-failure-fix-[0-9][0-9]\.patch)$' || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo 'Unexpected branch changes appeared during staging:' >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+          echo '647f32f352914c3c8ebfbd2f92f0a8b8390118b60c62961674d7ae69806aa581  .pr280-failure-fix-00.patch' | sha256sum --check
+          echo 'edad420bcc61e1be0780c1f2926ef2818cdf1c9be85badaf8507164221abc219  .pr280-failure-fix-01.patch' | sha256sum --check
+          echo '25ab063babc0154ef131a43da07382d3b03754ad82b04ef9dfb6d94a5326407c  .pr280-failure-fix-02.patch' | sha256sum --check
+          echo '3a5fd4f3bfb8713acbe7e662cab3db85514a5ccef77e36c351ef75f8aedc579e  .pr280-failure-fix-03.patch' | sha256sum --check
+          echo 'd2ae23d0ea492486deac57d8203d04eda47e8184a01a4bdbd2f3fed08944a1bb  .pr280-failure-fix-04.patch' | sha256sum --check
+          echo 'a2584445b5d3eca465ecf87bb15d5a4e4d254e7e6f9ac9f90a6696cf64e737be  .pr280-failure-fix-05.patch' | sha256sum --check
+          echo '2b9f4fd20e84875e2fd5c9f42c0c648cc10a38f76053d3351a33ad67a4971923  .pr280-failure-fix-06.patch' | sha256sum --check
+          echo 'a3d7696c4a084a13312080e3fe2a849acad846b425a91f8307ec61f1312b8acd  .pr280-failure-fix-07.patch' | sha256sum --check
+          echo '9cae943cc722f728ba315bfe32cfaa140348a31b102fd55257a7b47598ae1e24  .pr280-failure-fix-08.patch' | sha256sum --check
+          cat .pr280-failure-fix-*.patch > /tmp/pr280-failure-fix.patch.b64
+          base64 --decode /tmp/pr280-failure-fix.patch.b64 > /tmp/pr280-failure-fix.patch
+          echo '94f03cf401dcd1a97427ea4dd667ee4dd4a541447d1d28188be227f07172561d  /tmp/pr280-failure-fix.patch' | sha256sum --check
+          git apply --check /tmp/pr280-failure-fix.patch
+          git apply /tmp/pr280-failure-fix.patch
+
+          rm -rf .pr280-src .pr280-src-*
+          rm -f .pr280-failure-fix-*.patch .github/workflows/pr280-source.yml
+
+          git diff --check
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n1 bash -n
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 shellcheck -x --severity=warning
+          docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
+          DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
+          git diff --exit-code -- docs/COMMAND-REFERENCE.md
+          python3 utilities/verify-production-readiness-remediation.py
+          timeout 120 bash tests/suites/foundation/case-systemd.bash
+          ./tests/run-tests.sh foundation
+          ./tests/run-tests.sh security
+          ./tests/run-tests.sh operations
+          ./tests/run-tests.sh data-protection
+
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+
+          git add utilities/setup-systemd.sh
+          git commit -m 'fix systemd required mutation propagation'
+
+          git add tests/suites/foundation/case-systemd.bash
+          git commit -m 'test systemd public failure propagation'
+
+          git add -A -- .github/workflows/pr280-source.yml .pr280-src \
+            .pr280-failure-fix-00.patch .pr280-failure-fix-01.patch \
+            .pr280-failure-fix-02.patch .pr280-failure-fix-03.patch \
+            .pr280-failure-fix-04.patch .pr280-failure-fix-05.patch \
+            .pr280-failure-fix-06.patch .pr280-failure-fix-07.patch \
+            .pr280-failure-fix-08.patch
+          git commit -m 'remove PR 280 staging artifacts'
+
+          git diff --exit-code
+          mapfile -t final_files < <(git diff --name-only "$base"..HEAD | sort)
+          expected_files=(
+            tests/suites/foundation/case-systemd.bash
+            utilities/setup-systemd.sh
+          )
+          [[ "${final_files[*]}" == "${expected_files[*]}" ]] || {
+            printf 'Unexpected final changed files:\n%s\n' "${final_files[*]}" >&2
+            exit 1
+          }
+          test "$(git show HEAD:.github/workflows/doc-drift.yml | git hash-object --stdin)" = '2f7f27cdb5ce9d578ad215f51f0b32ac6210b8e3'
+          test ! -e .github/workflows/pr280-source.yml
+          test ! -e .pr280-src
+          if find . -maxdepth 1 -name '.pr280-failure-fix-*.patch' -print -quit | grep -q .; then
+            echo 'Temporary patch fragments leaked into final tree.' >&2
+            exit 1
+          fi
+
+          git fetch origin "$branch"
+          remote_sha="$(git rev-parse "origin/$branch")"
+          [[ "$remote_sha" == "$staging_sha" ]] || {
+            echo "Remote branch advanced during validation: $remote_sha" >&2
+            exit 1
+          }
+          git push origin "HEAD:refs/heads/$branch"
