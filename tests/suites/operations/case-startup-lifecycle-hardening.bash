@@ -99,7 +99,9 @@ printf 'synthetic repository key\n' > "$KEY_FIXTURE/secrets/keys/age-key.txt"
 SCRIPT_DIR="$KEY_FIXTURE"
 SOPS_AGE_KEY_FILE="$TMP/rejected-configured-key.txt"
 export SCRIPT_DIR SOPS_AGE_KEY_FILE
+# shellcheck disable=SC2034 # Consumed by the extracted startup function evaluated below.
 DRY_RUN=false
+# shellcheck disable=SC2034 # Consumed by the extracted startup function evaluated below.
 DOCKER_SECRETS_DIR="$TMP/runtime-secrets"
 LOG_FILE="$TMP/key-log"
 CALL_FILE="$TMP/key-health-calls"
@@ -127,6 +129,7 @@ check_age_key_health_preflight(){ return 1; }
 schema_validate(){ : > "$TMP/schema-called"; }
 validate_required_secrets(){ : > "$TMP/required-secrets-called"; }
 export_docker_secrets(){ : > "$TMP/sops-export-called"; }
+# shellcheck disable=SC2034 # Consumed by the extracted startup function evaluated below.
 SECRETS_FILE="$TMP/secrets.yaml"
 eval "$(extract_func "$ROOT/startup.sh" prepare_docker_secrets)"
 if prepare_docker_secrets; then

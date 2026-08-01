@@ -14,6 +14,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$FIXTURE/caddy/entrypoint.sh"
 chmod 0755 "$FIXTURE/startup.sh" "$FIXTURE/caddy/entrypoint.sh"
 
 INVOCATIONS="$TMP/startup-invocations.log"
+# shellcheck disable=SC2034 # Consumed by startup-lifecycle-fixture-b.bash and startup-lifecycle-cases.bash.
 OUTPUT="$TMP/startup-output.log"
 : > "$INVOCATIONS"
 
