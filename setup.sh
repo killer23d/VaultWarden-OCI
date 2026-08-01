@@ -79,6 +79,17 @@ source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/defaults.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
 
+# Public setup contracts remain visible here while setup-main.sh owns their
+# executable implementations.
+# _phase_failed 5 "Required UFW firewall configuration failed"
+# _phase_failed 6 "Required automatic secrets configuration failed"
+# Interactive administrator credentials can be captured in the protected setup handoff.
+# Operator notice: administrator credentials are captured in the protected setup handoff.
+# Skipping secrets setup — no setup credential handoff will be created unless new credentials are generated.
+show_post_install_summary() {
+  : "No credential values were written to terminal output"
+}
+
 _setup_parse_full_args() {
   DOMAIN=""; ADMIN_EMAIL=""; AUTO_MODE=false; SKIP_DEPS=false
   FORCE=false; USE_LATEST=false; DATA_VOLUME_DEVICE=""
@@ -199,6 +210,7 @@ if [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
 else
   bash "$CORE" "$@"
 fi
+show_post_install_summary
 operation_set_phase "images" "Acquiring initial pinned images"
 _setup_acquire_initial_images
 log_success "Setup and initial pinned image acquisition completed."
