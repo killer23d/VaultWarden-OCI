@@ -172,7 +172,7 @@ _health_path_identity() {
 }
 
 _health_lock_fd_path() {
-    local fd="$1" owner_pid="$BASHPID"
+    local fd="$1" owner_pid="$2"
     if [[ -e "/proc/${owner_pid}/fd/${fd}" ]]; then
         printf '/proc/%s/fd/%s\n' "$owner_pid" "$fd"
     else
@@ -271,16 +271,16 @@ _health_create_lock_path() {
 }
 
 _health_open_lock_matches_path() {
-    local lock_path="$1" fd="$2" fd_path path_identity fd_identity
-    fd_path="$(_health_lock_fd_path "$fd")"
+    local lock_path="$1" fd="$2" fd_path path_identity fd_identity owner_pid="$BASHPID"
+    fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
     fd_identity="$(_health_path_identity "$fd_path")" || return 1
     path_identity="$(_health_path_identity "$lock_path")" || return 1
     [[ "$fd_identity" == "$path_identity" ]]
 }
 
 _health_establish_lock_metadata() {
-    local lock_path="$1" fd="$2" fd_path metadata mode uid gid links
-    fd_path="$(_health_lock_fd_path "$fd")"
+    local lock_path="$1" fd="$2" fd_path metadata mode uid gid links owner_pid="$BASHPID"
+    fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
     if ! chown "${EUID}:${HEALTH_LOCK_GID}" "$fd_path" 2>/dev/null; then
         log_error "Cannot set health coordination lock ownership for: $lock_path"
         return 3
