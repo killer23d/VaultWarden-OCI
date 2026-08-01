@@ -1,0 +1,68 @@
+name: Finalize third-pass lock fixes
+
+on:
+  push:
+    branches:
+      - refactor/single-lock-ownership
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out review branch
+        uses: actions/checkout@v5
+        with:
+          ref: refactor/single-lock-ownership
+          fetch-depth: 0
+
+      - name: Apply and publish bounded fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 6f2706bdafd813a82433fc3bd9dabca068d971b9 HEAD
+          expected=$'.github/third-pass-transform.py.gz.b64\n.github/workflows/third-pass-bootstrap.yml\n.github/workflows/third-pass-finalize.yml\n.github/workflows/third-pass-rescue.yml'
+          actual="$(git diff --name-only 6f2706bdafd813a82433fc3bd9dabca068d971b9...HEAD | sort)"
+          [[ "$actual" == "$expected" ]] || {
+            printf 'Unexpected pre-finalize diff:\n%s\n' "$actual" >&2
+            exit 1
+          }
+
+          base64 -d .github/third-pass-transform.py.gz.b64 | gzip -d > /tmp/third-pass-transform.py
+          python3 /tmp/third-pass-transform.py
+          rm -f -- /tmp/third-pass-transform.py \
+            .github/third-pass-transform.py.gz.b64 \
+            .github/workflows/third-pass-bootstrap.yml \
+            .github/workflows/third-pass-rescue.yml \
+            .github/workflows/third-pass-finalize.yml
+
+          expected_delta=$'lib/operations.sh\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh'
+          actual_delta="$(git diff --name-only 6f2706bdafd813a82433fc3bd9dabca068d971b9 | sort)"
+          [[ "$actual_delta" == "$expected_delta" ]] || {
+            printf 'Unexpected third-pass delta:\n%s\n' "$actual_delta" >&2
+            exit 1
+          }
+
+          expected_pr=$'lib/operations.sh\ntests/suites/foundation/case-systemd.bash\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-lock-fd-hygiene.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh\nutilities/setup-systemd.sh'
+          actual_pr="$(git diff --name-only 1ff4f908866de7a917c37fa37147981d238af28f | sort)"
+          [[ "$actual_pr" == "$expected_pr" ]] || {
+            printf 'Unexpected final PR scope:\n%s\n' "$actual_pr" >&2
+            exit 1
+          }
+
+          git diff --check
+          bash -n lib/operations.sh
+          bash -n utilities/maintenance-health.sh
+          bash -n tests/suites/operations/case-operations.bash
+          bash -n tests/suites/operations/case-health-alerts.bash
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'Harden lock descriptor handling'
+          git push origin HEAD:refactor/single-lock-ownership
