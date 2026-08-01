@@ -278,7 +278,7 @@ _operation_update_phase_fields() {
 _operation_lock_is_held() {
     local lock_path="$1" fd
     [[ -e "$lock_path" ]] || return 1
-    { exec {fd}>"$lock_path"; } 2>/dev/null || return 0
+    { exec {fd}<>"$lock_path"; } 2>/dev/null || return 0
     if flock -n "$fd" 2>/dev/null; then
         flock -u "$fd" 2>/dev/null || true
         { eval "exec ${fd}>&-"; } 2>/dev/null || true
@@ -340,7 +340,7 @@ _operation_lock_holder() {
     trap 'exit 1' HUP INT TERM
 
     if [[ -n "$global_path" ]]; then
-        if ! exec {global_fd}>"$global_path"; then
+        if ! exec {global_fd}<>"$global_path"; then
             printf 'global-open-failure\n'
             return 1
         fi
@@ -371,7 +371,7 @@ _operation_lock_holder() {
     fi
 
     if [[ -n "$specific_path" ]]; then
-        if ! exec {specific_fd}>"$specific_path"; then
+        if ! exec {specific_fd}<>"$specific_path"; then
             printf 'specific-open-failure\n'
             return 1
         fi

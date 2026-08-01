@@ -51,6 +51,8 @@ grep -Eq '^SuccessExitStatus=0 75$' "$ROOT/systemd/vaultwarden-dns-update.servic
   || fail "DNS update unit must treat expected contention as success"
 grep -Eq '^SuccessExitStatus=0 75$' "$ROOT/systemd/vaultwarden-firewall-update.service" \
   || fail "firewall update unit must treat expected contention as success"
+grep -Eq '^SuccessExitStatus=0 1 75$' "$ROOT/systemd/vaultwarden-health.service" \
+  || fail "health unit must notify on critical exit 3/4 while accepting warnings and contention"
 
 printf 'PASS: systemd operation runtime paths\n'
 
@@ -600,8 +602,8 @@ timer_count="$(find "$ROOT/systemd" -maxdepth 1 -type f -name '*.timer' | wc -l 
 health_unit="$ROOT/systemd/vaultwarden-health.service"
 grep -Fxq 'ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci' "$health_unit" \
     || fail "health ReadWritePaths contract changed"
-grep -Fxq 'SuccessExitStatus=0 1 3 75' "$health_unit" \
-    || fail "health SuccessExitStatus contract changed"
+grep -Fxq 'SuccessExitStatus=0 1 75' "$health_unit" \
+    || fail "health SuccessExitStatus must preserve critical exit 3/4 as failures"
 grep -Fxq 'OnFailure=vaultwarden-notify-failure@%n.service' "$health_unit" \
     || fail "health OnFailure contract changed"
 ! grep -Fq '/etc/crowdsec' "$health_unit" \

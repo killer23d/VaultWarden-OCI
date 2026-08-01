@@ -1155,6 +1155,24 @@ set -e
 _release_run_lock 0 || fail "parent repair release failed"
 pass "all health read and repair overlap combinations are serialized"
 
+# Reproduce a subshell closing an inherited health descriptor and reusing the
+# same numeric fd for another health path. Descriptor validation must inspect
+# the process that actually opened the fd, not the shell that sourced helpers.
+FIX_MODE=false
+VW_HEALTH_LOCK_FILE="$TMP/parent-descriptor.lock"
+_acquire_run_lock || fail "parent descriptor-reuse setup failed"
+parent_health_fd="$HEALTH_LOCK_FD"
+(
+    eval "exec ${parent_health_fd}>&-"
+    HEALTH_LOCK_FD=""
+    VW_HEALTH_LOCK_FILE="$TMP/subshell-descriptor.lock"
+    _acquire_readonly_health_lock         || fail "subshell health acquisition failed after descriptor reuse"
+    [[ "$HEALTH_LOCK_FD" == "$parent_health_fd" ]]         || fail "subshell did not reuse expected descriptor $parent_health_fd"
+    _release_readonly_health_lock         || fail "subshell descriptor-reuse release failed"
+)
+_release_run_lock 0 || fail "parent descriptor-reuse release failed"
+pass "health descriptor validation follows the current subshell owner"
+
 SIGNAL_SCRIPT="$TMP/signal-holder.bash"
 cat > "$SIGNAL_SCRIPT" <<'EOF_SIGNAL'
 #!/usr/bin/env bash

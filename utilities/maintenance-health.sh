@@ -141,7 +141,6 @@ local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 local HEALTH_LOCK_FD=""
 local HEALTH_OPERATION_GUARD_ACQUIRED=false
-local HEALTH_LOCK_OWNER_PID="$BASHPID"
 local HEALTH_LOCK_GID
 HEALTH_LOCK_GID="$(id -g 2>/dev/null)" || {
     log_error "Cannot determine the effective group for health coordination."
@@ -173,9 +172,9 @@ _health_path_identity() {
 }
 
 _health_lock_fd_path() {
-    local fd="$1"
-    if [[ -e "/proc/${HEALTH_LOCK_OWNER_PID}/fd/${fd}" ]]; then
-        printf '/proc/%s/fd/%s\n' "$HEALTH_LOCK_OWNER_PID" "$fd"
+    local fd="$1" owner_pid="$BASHPID"
+    if [[ -e "/proc/${owner_pid}/fd/${fd}" ]]; then
+        printf '/proc/%s/fd/%s\n' "$owner_pid" "$fd"
     else
         printf '/dev/fd/%s\n' "$fd"
     fi

@@ -1431,6 +1431,35 @@ hardlink_mode="$(stat -c '%a' "$hardlink_target" 2>/dev/null || stat -f '%Lp' "$
     || fail "operation hard-link rejection changed target mode to $hardlink_mode"
 pass "operation lock preparation rejects hard links before metadata changes"
 
+nontruncate_dir="$TMP/nontruncate"
+mkdir -p "$nontruncate_dir"
+probe_lock="$nontruncate_dir/probe.lock"
+holder_lock="$nontruncate_dir/holder.lock"
+printf 'probe-sentinel\n' > "$probe_lock"
+printf 'holder-sentinel\n' > "$holder_lock"
+chmod 0660 "$probe_lock" "$holder_lock"
+VW_OPERATIONS_STATE_DIR="$nontruncate_dir/state" \
+VW_TEST_PROBE_LOCK="$probe_lock" \
+VW_TEST_HOLDER_LOCK="$holder_lock" \
+"$BASH" -c '
+    set -euo pipefail
+    source "$1/lib/operations.sh"
+    if _operation_lock_is_held "$VW_TEST_PROBE_LOCK"; then
+        exit 91
+    fi
+    operation_acquire \
+        --id nontruncate-holder \
+        --label "Non-truncating holder" \
+        --no-global \
+        --specific-lock "$VW_TEST_HOLDER_LOCK"
+    operation_release 0
+' _ "$ROOT"
+[[ "$(cat "$probe_lock")" == probe-sentinel ]] \
+    || fail "operation lock probe truncated existing lock contents"
+[[ "$(cat "$holder_lock")" == holder-sentinel ]] \
+    || fail "operation lock holder truncated existing lock contents"
+pass "operation lock probes and holders open existing files without truncation"
+
 ! grep -Fq 'getent group vaultwarden' "$OPS" \
     || fail "operations still depends on the vaultwarden group"
 ! grep -Fq 'setup-systemd.sh install' "$OPS" \
