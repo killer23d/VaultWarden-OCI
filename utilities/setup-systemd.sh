@@ -316,194 +316,10 @@ _sha256() {
 }
 
 
-# _resolve_service_user
-#
-# Determines the non-root user retained for vaultwarden lock-group membership
-# only. Current managed operational systemd services run as root; this user is
-# not used for /etc/vaultwarden secret ownership or service privileges.
-# Detection order (first match wins):
-#   1. SERVICE_USER env var (explicit operator override)
-#   2. SUDO_USER env var   (the human who invoked sudo — most common case)
-#   3. First UID≥1000 account with a real login shell from getent passwd
-#      (Ubuntu default: ubuntu; other distros will find their primary user)
-#   4. Hard fail — never silently default to root or a phantom user.
-#
-# Echoes the resolved username on stdout; returns 0 on success, 1 on failure.
-# Callers must handle the failure return and abort installation.
-_resolve_service_user() {
-    # 1. Explicit operator override always wins.
-    if [[ -n "${SERVICE_USER:-}" ]]; then
-        if id "$SERVICE_USER" &>/dev/null; then
-            echo "$SERVICE_USER"
-            return 0
-        fi
-        # Log a warning but continue to try the remaining heuristics.
-        log_warn "SERVICE_USER='${SERVICE_USER}' does not exist on this system — trying detection."
-    fi
-
-    # 2. The human who invoked sudo is the most reliable signal on Ubuntu Noble cloud
-    #    images and developer workstations alike (sudo always sets SUDO_USER).
-    if [[ -n "${SUDO_USER:-}" ]] && id "$SUDO_USER" &>/dev/null; then
-        echo "$SUDO_USER"
-        return 0
-    fi
-
-    # 3. Fall back to the first UID≥1000 account with a real login shell.
-    #    On Ubuntu this resolves to 'ubuntu'; on other distros it resolves to
-    #    whatever the primary non-root user account is.
-    local candidate
-    candidate=$(getent passwd | awk -F: '$3>=1000 && $7!~/false|nologin/{print $1; exit}')
-    if [[ -n "$candidate" ]]; then
-        echo "$candidate"
-        return 0
-    fi
-
-    # 4. Hard fail — returning empty/root would cause subtler failures later.
-    echo ""
-    return 1
-}
-
-_resolve_service_identity() {
-    local service_user service_group
-
-    service_user=$(_resolve_service_user) || {
-        log_error "Cannot determine the service user for systemd unit drop-ins."
-        log_error "Set SERVICE_USER=<username> in the environment and re-run:"
-        log_error "  sudo SERVICE_USER=myuser utilities/setup-systemd.sh install"
-        return 1
-    }
-
-    service_group="${SERVICE_GROUP:-}"
-    if [[ -z "$service_group" ]]; then
-        service_group=$(id -gn "$service_user" 2>/dev/null) || service_group="$service_user"
-    fi
-
-    printf '%s:%s\n' "$service_user" "$service_group"
-}
-
-# _ensure_lock_group SERVICE_USER
-#
-# Creates the 'vaultwarden' system group and adds SERVICE_USER + root to it.
-# This group is the shared identity for lock files: mode 0660 root:vaultwarden
-# allows both the systemd service user (ubuntu) and root (sudo callers) to
-# open the same flock fd without AppArmor interference.
-#
-# Idempotent — safe to run on every install.
-# Dry-run aware.
-_ensure_lock_group() {
-    local service_user="$1"
-    local lock_group="vaultwarden"
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would ensure system group '${lock_group}' exists"
-        log_info "[DRY RUN] Would add '${service_user}' and 'root' to group '${lock_group}'"
-        return 0
-    fi
-
-    # Create the group if it does not exist.
-    if ! getent group "$lock_group" >/dev/null 2>&1; then
-        groupadd --system "$lock_group" || {
-            log_error "_ensure_lock_group: failed to create group '${lock_group}'"
-            log_error "  Fix: sudo groupadd --system ${lock_group}"
-            return 1
-        }
-        log_success "Created system group: ${lock_group}"
-    else
-        log_info "Group '${lock_group}' already exists — skipping creation."
-    fi
-
-    # Add service user to the lock group (idempotent).
-    if ! id -nG "$service_user" 2>/dev/null | grep -qw "$lock_group"; then
-        usermod -aG "$lock_group" "$service_user" || {
-            log_error "_ensure_lock_group: failed to add '${service_user}' to '${lock_group}'"
-            return 1
-        }
-        log_success "Added '${service_user}' to group '${lock_group}'"
-    else
-        log_info "'${service_user}' is already a member of '${lock_group}'"
-    fi
-
-    # Add root to the lock group (idempotent).
-    if ! id -nG root 2>/dev/null | grep -qw "$lock_group"; then
-        usermod -aG "$lock_group" root || {
-            log_error "_ensure_lock_group: failed to add 'root' to '${lock_group}'"
-            return 1
-        }
-        log_success "Added 'root' to group '${lock_group}'"
-    else
-        log_info "'root' is already a member of '${lock_group}'"
-    fi
-
-    log_info "NOTE: New group membership takes effect in the NEXT login session."
-    log_info "  systemd services pick it up immediately (new process per run)."
-    log_info "  Interactive sudo sessions need: sudo -i  (or re-login)"
-}
-
-_ensure_runtime_lock_files() {
-    local service_user="$1"
-    # service_group ($2) is intentionally unused: lock files are always
-    # root:vaultwarden regardless of the service user's primary group.
-    # This allows both the systemd service user (ubuntu) and root (sudo
-    # callers) to open the same flock fd. See _ensure_lock_group.
-    local lock_owner="root"
-    local lock_group="vaultwarden"
-    local -a lock_files=(
-        "/run/lock/vaultwarden-backup.lock"
-        "/run/lock/vaultwarden-operations.lock"
-        "/run/lock/vaultwarden-crowdsec-setup.lock"
-        "/run/lock/vaultwarden-dns-update.lock"
-        "/run/lock/vaultwarden-env.lock"
-        "/run/lock/vaultwarden-firewall-update.lock"
-        "/run/lock/vaultwarden-health.lock"
-        "/run/lock/vaultwarden-key-rotate.lock"
-        "/run/lock/vaultwarden-maintenance.lock"
-        "/run/lock/vaultwarden-permission-repair.lock"
-        "/run/lock/vaultwarden-restore.lock"
-        "/run/lock/vaultwarden-secrets.lock"
-        "/run/lock/vaultwarden-setup.lock"
-        "/run/lock/vaultwarden-startup.lock"
-        "/run/lock/vaultwarden-systemd.lock"
-        "/run/lock/vaultwarden-uninstall.lock"
-        "/run/lock/vaultwarden-update.lock"
-    )
-    local lock_file
-    for lock_file in "${lock_files[@]}"; do
-        if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would ensure lock file: ${lock_file} -> ${lock_owner}:${lock_group} 0660"
-            continue
-        fi
-        if [[ ! -e "$lock_file" ]]; then
-            install -m 0660 -o "$lock_owner" -g "$lock_group" /dev/null "$lock_file" 2>/dev/null || {
-                log_warn "_ensure_runtime_lock_files: could not create ${lock_file}"
-                log_warn "  Possible cause: group '${lock_group}' does not exist yet."
-                log_warn "  This resolves itself after _ensure_lock_group completes."
-                continue
-            }
-        else
-            # Correct permissions in place without removing the file. The active
-            # lock owner is determined by flock(), not pathname existence.
-            chown "${lock_owner}:${lock_group}" "$lock_file" 2>/dev/null || true
-            chmod 0660 "$lock_file" 2>/dev/null || true
-        fi
-        log_success "Lock file ready: ${lock_file} (${lock_owner}:${lock_group} 0660)"
-    done
-}
-
-# No current managed service is safe to run as the detected non-root service user.
-# The vaultwarden group is retained only for shared lock-file coordination; it is
-# not a general systemd privilege delegation group. Root-run services still use
-# systemd sandboxing such as ProtectSystem=strict, ReadWritePaths,
-# NoNewPrivileges, PrivateTmp, and RuntimeDirectory.
-#
-# Future candidates:
-#   - vaultwarden-dns-update.service only after maintenance-update-dns.sh no
-#     longer calls require_root, no longer calls auto_fix_critical_permissions
-#     for non-root callers, and secret access is proven non-root-safe.
-#   - vaultwarden-health.service only after read-only health checks are split
-#     from health --fix.
-_IDENTITY_DROPIN_UNITS=()
-
-_ROOT_REQUIRED_UNITS=(
+# Current managed operational services run as root. Previous releases could
+# install identity drop-ins; retain explicit cleanup for those managed files
+# without detecting users or creating group membership solely for lock access.
+_STALE_IDENTITY_DROPIN_UNITS=(
     vaultwarden-db-backup.service
     vaultwarden-full-backup.service
     vaultwarden-health.service
@@ -516,77 +332,35 @@ _ROOT_REQUIRED_UNITS=(
     vaultwarden-notify-failure@.service
 )
 
-# _install_service_identity_dropin SERVICE_USER SERVICE_GROUP
-#
-# Writes a 20-identity.conf drop-in for any future service that is explicitly
-# approved to run as the detected service user. The current list is empty
-# because managed operational services still require root.
-#
-# Dry-run mode: logs what would be written without touching the filesystem.
-_install_service_identity_dropin() {
-    local service_user="$1" service_group="$2"
-    local unit dropin_dir dropin_file
-
-    if [[ ${#_IDENTITY_DROPIN_UNITS[@]} -eq 0 ]]; then
-        log_info "No non-root identity drop-ins configured — all managed services run as root."
-        return 0
-    fi
-
-    log_info "Installing service identity drop-ins (User=${service_user} Group=${service_group}) ..."
-    for unit in "${_IDENTITY_DROPIN_UNITS[@]}"; do
-        dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
-        dropin_file="${dropin_dir}/20-identity.conf"
-        if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would write identity drop-in: $dropin_file"
-            continue
-        fi
-        mkdir -p "$dropin_dir" || { log_error "Cannot create drop-in dir: $dropin_dir"; return 1; }
-        cat > "$dropin_file" << DROPIN
-# Written by setup-systemd.sh install — do not edit by hand.
-# Regenerate: sudo utilities/setup-systemd.sh install
-#
-# Sets the service identity detected at install time (SERVICE_USER env var,
-# SUDO_USER, or first UID≥1000 account) for an explicitly approved non-root
-# unit. Root-required units must not use this drop-in.
-[Service]
-User=${service_user}
-Group=${service_group}
-DROPIN
-        chmod 644 "$dropin_file"
-        log_success "Installed identity drop-in: $dropin_file (${service_user}:${service_group})"
-    done
-}
-
 _cleanup_stale_identity_dropins() {
-    local unit dropin_dir dropin_file
-
-    local -a stale_files=(
+    local unit dropin_dir dropin_file stale_rel
+    local -a stale_root_files=(
         "vaultwarden-db-backup.service.d/30-run-as-root.conf"
         "vaultwarden-full-backup.service.d/30-run-as-root.conf"
     )
-    local stale_rel
-    for stale_rel in "${stale_files[@]}"; do
+
+    for stale_rel in "${stale_root_files[@]}"; do
         dropin_file="${UNIT_DEST_DIR}/${stale_rel}"
         dropin_dir="$(dirname "$dropin_file")"
-        if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
+        if [[ -e "$dropin_file" || -L "$dropin_file" ]]; then
+            _run rm -f -- "$dropin_file"
             log_success "Removed stale root identity drop-in: $dropin_file"
         fi
         if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
+            _run rmdir -- "$dropin_dir"
             log_success "Removed empty drop-in dir: $dropin_dir"
         fi
     done
 
-    for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
+    for unit in "${_STALE_IDENTITY_DROPIN_UNITS[@]}"; do
         dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
         dropin_file="${dropin_dir}/20-identity.conf"
-        if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
+        if [[ -e "$dropin_file" || -L "$dropin_file" ]]; then
+            _run rm -f -- "$dropin_file"
             log_success "Removed stale identity drop-in from root-required unit: $dropin_file"
         fi
         if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
+            _run rmdir -- "$dropin_dir"
             log_success "Removed empty drop-in dir: $dropin_dir"
         fi
     done
@@ -805,15 +579,6 @@ install_units() {
     done
     if [[ "$DRY_RUN" == "false" ]]; then chown root:root "$OPT_SCRIPTS_DIR"; fi
 
-    local service_user service_group service_identity
-    service_identity=$(_resolve_service_identity)
-    service_user="${service_identity%%:*}"
-    service_group="${service_identity##*:}"
-    # service_user is retained for lock-group membership only so root-run
-    # services and sudo callers can coordinate through shared flock files. It
-    # is not used for ownership of /etc/vaultwarden secrets; current managed
-    # operational units run as root.
-
     # Install the age key into /etc/vaultwarden/age-key.txt because
     # ProtectHome=yes makes /home/ubuntu/ inaccessible to service processes.
     log_info "Installing age key to $AGE_KEY_DEST ..."
@@ -922,9 +687,6 @@ install_units() {
 
     _render_startup_service || return 1
 
-    _ensure_lock_group "$service_user"
-    _ensure_runtime_lock_files "$service_user" "$service_group"
-    _install_service_identity_dropin "$service_user" "$service_group"
     _install_rwpaths_dropin
     _cleanup_stale_identity_dropins
 

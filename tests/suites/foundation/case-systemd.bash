@@ -436,6 +436,98 @@ test_systemd_validation_fails_on_stale_installed_runtime() {
         || { cat "$stale_out" >&2; fail "stale rendered startup service was not named"; }
 }
 
+
+
+test_systemd_relinquishes_lock_and_group_ownership() {
+    local setup="$ROOT/utilities/setup-systemd.sh" ops="$ROOT/lib/operations.sh"
+    for dead_term in \
+        _ensure_runtime_lock_files \
+        _ensure_lock_group \
+        _resolve_service_user \
+        _resolve_service_identity \
+        _install_service_identity_dropin \
+        'groupadd --system' \
+        'usermod -aG'; do
+        ! grep -Fq "$dead_term" "$setup" \
+            || fail "setup-systemd retains dead lock/group/identity owner path: $dead_term"
+    done
+    ! grep -Fq 'getent group vaultwarden' "$ops" \
+        || fail "operations still depends on a systemd-created vaultwarden group"
+    ! grep -Fq 'setup-systemd.sh install' "$ops" \
+        || fail "operations still delegates lock preparation to setup-systemd"
+    grep -Fq '_operation_prepare_lock_file()' "$ops" \
+        || fail "operations lock preparation owner is missing"
+}
+
+test_stale_identity_dropin_cleanup_and_dry_run() {
+    local unit_dir="$TMP/identity-cleanup-units" probe="$TMP/identity-cleanup-probe.sh"
+    local unit
+    mkdir -p "$unit_dir"
+    local -a units=(
+        vaultwarden-db-backup.service
+        vaultwarden-full-backup.service
+        vaultwarden-health.service
+        vaultwarden-dns-update.service
+        vaultwarden-maintenance.service
+        vaultwarden-firewall-update.service
+        vaultwarden-iptables.service
+        vaultwarden-startup.service
+        vaultwarden-notify-failure.service
+        vaultwarden-notify-failure@.service
+    )
+    for unit in "${units[@]}"; do
+        mkdir -p "$unit_dir/${unit}.d"
+        printf '[Service]\nUser=legacy\n' > "$unit_dir/${unit}.d/20-identity.conf"
+    done
+    printf '[Service]\nUser=root\n' > "$unit_dir/vaultwarden-db-backup.service.d/30-run-as-root.conf"
+    printf '[Service]\nUser=root\n' > "$unit_dir/vaultwarden-full-backup.service.d/30-run-as-root.conf"
+    printf '[Unit]\nAfter=test.mount\n' > "$unit_dir/vaultwarden-db-backup.service.d/10-state-dir.conf"
+
+    cat > "$probe" <<EOF_PROBE
+#!/usr/bin/env bash
+set -euo pipefail
+UNIT_DEST_DIR="$unit_dir"
+DRY_RUN="\${DRY_RUN_VALUE:?}"
+_run(){
+    if [[ "\$DRY_RUN" == true ]]; then
+        printf '[DRY RUN] %s\\n' "\$*"
+    else
+        "\$@"
+    fi
+}
+log_success(){ :; }
+EOF_PROBE
+    sed -n '/^_STALE_IDENTITY_DROPIN_UNITS=(/,/^)/p' "$ROOT/utilities/setup-systemd.sh" >> "$probe"
+    extract_func "$ROOT/utilities/setup-systemd.sh" _cleanup_stale_identity_dropins >> "$probe"
+    printf '\n_cleanup_stale_identity_dropins\n' >> "$probe"
+    chmod 0755 "$probe"
+
+    DRY_RUN_VALUE=false "$BASH" "$probe" \
+        || fail "stale managed identity cleanup failed"
+    for unit in "${units[@]}"; do
+        [[ ! -e "$unit_dir/${unit}.d/20-identity.conf" ]] \
+            || fail "stale identity drop-in remains for $unit"
+    done
+    [[ ! -e "$unit_dir/vaultwarden-db-backup.service.d/30-run-as-root.conf" \
+        && ! -e "$unit_dir/vaultwarden-full-backup.service.d/30-run-as-root.conf" ]] \
+        || fail "stale 30-run-as-root drop-ins remain"
+    [[ -e "$unit_dir/vaultwarden-db-backup.service.d/10-state-dir.conf" ]] \
+        || fail "identity cleanup removed the state-dir drop-in"
+
+    for unit in "${units[@]}"; do
+        mkdir -p "$unit_dir/${unit}.d"
+        printf '[Service]\nUser=legacy\n' > "$unit_dir/${unit}.d/20-identity.conf"
+    done
+    printf '[Service]\nUser=root\n' > "$unit_dir/vaultwarden-db-backup.service.d/30-run-as-root.conf"
+    DRY_RUN_VALUE=true "$BASH" "$probe" > "$TMP/identity-cleanup-dry-run.out" \
+        || fail "identity cleanup dry-run failed"
+    [[ -e "$unit_dir/vaultwarden-health.service.d/20-identity.conf" \
+        && -e "$unit_dir/vaultwarden-db-backup.service.d/30-run-as-root.conf" ]] \
+        || fail "identity cleanup dry-run mutated managed drop-ins"
+}
+
+run_test 'systemd relinquishes lock, group, and dead identity ownership' test_systemd_relinquishes_lock_and_group_ownership
+run_test 'stale managed identity drop-ins clean safely and dry-run is inert' test_stale_identity_dropin_cleanup_and_dry_run
 run_test 'systemd remove requests startup disable and daemon reload' test_systemd_remove_disables_startup_service
 run_test 'notify-failure systemd uses helper and no root cooldown path' test_notify_failure_systemd_uses_helper
 run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
@@ -443,7 +535,7 @@ run_test 'notify-failure helper loads encrypted-secret resolution before email' 
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
 run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dropins_match_unit_type
 run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
-[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 9 ]] || fail "expected 9 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )

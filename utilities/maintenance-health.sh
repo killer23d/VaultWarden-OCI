@@ -140,6 +140,13 @@ local MEM_CRIT_THRESHOLD=${MEM_CRIT_THRESHOLD:-90}
 local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 local HEALTH_LOCK_FD=""
+local HEALTH_OPERATION_GUARD_ACQUIRED=false
+local HEALTH_LOCK_OWNER_PID="$BASHPID"
+local HEALTH_LOCK_GID
+HEALTH_LOCK_GID="$(id -g 2>/dev/null)" || {
+    log_error "Cannot determine the effective group for health coordination."
+    return 3
+}
 
 _health_readonly_lock_path() {
     if [[ -n "${VW_HEALTH_LOCK_FILE:-}" ]]; then
@@ -153,59 +160,302 @@ _health_readonly_lock_path() {
     fi
 }
 
+_health_stat_mode_uid_gid_links() {
+    local target="$1"
+    stat -Lc '%a:%u:%g:%h' -- "$target" 2>/dev/null \
+        || stat -f '%Lp:%u:%g:%l' -- "$target" 2>/dev/null
+}
+
+_health_path_identity() {
+    local target="$1"
+    stat -Lc '%d:%i' -- "$target" 2>/dev/null \
+        || stat -f '%d:%i' -- "$target" 2>/dev/null
+}
+
+_health_lock_fd_path() {
+    local fd="$1"
+    if [[ -e "/proc/${HEALTH_LOCK_OWNER_PID}/fd/${fd}" ]]; then
+        printf '/proc/%s/fd/%s\n' "$HEALTH_LOCK_OWNER_PID" "$fd"
+    else
+        printf '/dev/fd/%s\n' "$fd"
+    fi
+}
+
+_health_lock_directory_is_trusted() {
+    local dir="$1" metadata mode uid _gid _links mode_value
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
+    metadata="$(_health_stat_mode_uid_gid_links "$dir")" || return 1
+    IFS=: read -r mode uid _gid _links <<< "$metadata"
+    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" =~ ^[0-9]+$ ]] || return 1
+    mode_value=$((8#$mode))
+
+    if [[ "$uid" == "$EUID" ]] && (( (mode_value & 0022) == 0 )); then
+        return 0
+    fi
+    if [[ "$uid" == 0 ]] && (( (mode_value & 0022) == 0 )); then
+        return 0
+    fi
+    if (( EUID == 0 )) && [[ "$uid" == 0 ]] && (( (mode_value & 0002) == 0 )); then
+        return 0
+    fi
+    [[ "$uid" == 0 ]] \
+        && (( (mode_value & 01000) != 0 )) \
+        && (( (mode_value & 0002) != 0 ))
+}
+
+_health_prepare_lock_directory() {
+    local dir="$1" parent old_umask
+    [[ "$dir" == /* ]] || {
+        log_error "Health coordination lock directory must be absolute: $dir"
+        return 3
+    }
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        if ! _health_lock_directory_is_trusted "$dir"; then
+            log_error "Health coordination directory is unsafe: $dir"
+            return 3
+        fi
+        return 0
+    fi
+
+    parent="$(dirname "$dir")"
+    [[ "$parent" != "$dir" ]] || {
+        log_error "Cannot prepare health coordination directory: $dir"
+        return 3
+    }
+    _health_prepare_lock_directory "$parent" || return $?
+    old_umask="$(umask)"
+    umask 0077
+    if ! mkdir -- "$dir" 2>/dev/null; then
+        umask "$old_umask"
+        if [[ ! -d "$dir" || -L "$dir" ]]; then
+            log_error "Cannot create health coordination directory: $dir"
+            return 3
+        fi
+    else
+        umask "$old_umask"
+    fi
+    if ! _health_lock_directory_is_trusted "$dir"; then
+        log_error "Health coordination directory metadata is unsafe: $dir"
+        return 3
+    fi
+}
+
+_health_existing_lock_path_is_safe() {
+    local lock_path="$1" metadata _mode uid _gid links
+    [[ -f "$lock_path" && ! -L "$lock_path" ]] || return 1
+    metadata="$(_health_stat_mode_uid_gid_links "$lock_path")" || return 1
+    IFS=: read -r _mode uid _gid links <<< "$metadata"
+    [[ "$uid" == "$EUID" && "$links" == 1 ]]
+}
+
+_health_create_lock_path() {
+    local lock_path="$1" lock_dir temp old_umask
+    lock_dir="$(dirname "$lock_path")"
+    old_umask="$(umask)"
+    umask 0077
+    temp="$(mktemp "${lock_dir}/.vaultwarden-health.lock.XXXXXXXX")" || {
+        umask "$old_umask"
+        log_error "Cannot create health coordination lock in: $lock_dir"
+        return 3
+    }
+    umask "$old_umask"
+    if ! ln -- "$temp" "$lock_path" 2>/dev/null; then
+        rm -f -- "$temp"
+        if [[ ! -e "$lock_path" && ! -L "$lock_path" ]]; then
+            log_error "Cannot create health coordination lock: $lock_path"
+            return 3
+        fi
+    else
+        rm -f -- "$temp"
+    fi
+}
+
+_health_open_lock_matches_path() {
+    local lock_path="$1" fd="$2" fd_path path_identity fd_identity
+    fd_path="$(_health_lock_fd_path "$fd")"
+    fd_identity="$(_health_path_identity "$fd_path")" || return 1
+    path_identity="$(_health_path_identity "$lock_path")" || return 1
+    [[ "$fd_identity" == "$path_identity" ]]
+}
+
+_health_establish_lock_metadata() {
+    local lock_path="$1" fd="$2" fd_path metadata mode uid gid links
+    fd_path="$(_health_lock_fd_path "$fd")"
+    if ! chown "${EUID}:${HEALTH_LOCK_GID}" "$fd_path" 2>/dev/null; then
+        log_error "Cannot set health coordination lock ownership for: $lock_path"
+        return 3
+    fi
+    if ! chmod 0600 "$fd_path" 2>/dev/null; then
+        log_error "Cannot set health coordination lock mode 0600 for: $lock_path"
+        return 3
+    fi
+    metadata="$(_health_stat_mode_uid_gid_links "$fd_path")" || return 3
+    IFS=: read -r mode uid gid links <<< "$metadata"
+    if [[ "$mode" != 600 || "$uid" != "$EUID" || "$gid" != "$HEALTH_LOCK_GID" || "$links" != 1 ]]; then
+        log_error "Health coordination lock metadata could not be established safely: $lock_path"
+        return 3
+    fi
+    if ! _health_existing_lock_path_is_safe "$lock_path" \
+        || ! _health_open_lock_matches_path "$lock_path" "$fd"; then
+        log_error "Health coordination lock identity changed during preparation: $lock_path"
+        return 3
+    fi
+}
+
+_health_close_lock_fd() {
+    local fd="$1"
+    [[ "$fd" =~ ^[0-9]+$ ]] || return 0
+    { eval "exec ${fd}>&-"; } 2>/dev/null
+}
+
+_release_readonly_health_lock() {
+    local release_rc=0
+    if [[ -n "${HEALTH_LOCK_FD:-}" ]]; then
+        flock -u "$HEALTH_LOCK_FD" 2>/dev/null || release_rc=$?
+        _health_close_lock_fd "$HEALTH_LOCK_FD" || release_rc=$?
+    fi
+    HEALTH_LOCK_FD=""
+    return "$release_rc"
+}
+
 _acquire_readonly_health_lock() {
-    local lock_path lock_dir fd
+    local lock_path lock_dir fd flock_rc
     lock_path="$(_health_readonly_lock_path)"
     lock_dir="$(dirname "$lock_path")"
-    if ! mkdir -p "$lock_dir" 2>/dev/null; then
-        log_error "Cannot prepare health coordination directory: $lock_dir"
+    [[ "$lock_path" == /* ]] || {
+        log_error "Health coordination lock path must be absolute: $lock_path"
         return 3
+    }
+    _health_prepare_lock_directory "$lock_dir" || return $?
+
+    if [[ -e "$lock_path" || -L "$lock_path" ]]; then
+        if ! _health_existing_lock_path_is_safe "$lock_path"; then
+            log_error "Health coordination lock path is unsafe: $lock_path"
+            return 3
+        fi
+    else
+        _health_create_lock_path "$lock_path" || return $?
+        if ! _health_existing_lock_path_is_safe "$lock_path"; then
+            log_error "Health coordination lock path is unsafe after creation: $lock_path"
+            return 3
+        fi
     fi
-    if ! : >> "$lock_path" 2>/dev/null; then
+
+    if ! { exec {fd}<>"$lock_path"; } 2>/dev/null; then
         log_error "Cannot open health coordination lock: $lock_path"
         return 3
     fi
-    chmod 0600 "$lock_path" 2>/dev/null || true
-    if ! { exec {fd}>"$lock_path"; } 2>/dev/null; then
-        log_error "Cannot open health coordination lock: $lock_path"
+    if ! _health_open_lock_matches_path "$lock_path" "$fd"; then
+        _health_close_lock_fd "$fd" || true
+        log_error "Health coordination lock identity changed while opening: $lock_path"
         return 3
     fi
-    if ! flock -n "$fd" 2>/dev/null; then
-        { eval "exec ${fd}>&-"; } 2>/dev/null || true
-        log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
-        return 75
+    if ! _health_establish_lock_metadata "$lock_path" "$fd"; then
+        _health_close_lock_fd "$fd" || true
+        return 3
+    fi
+
+    if flock -n -E 75 "$fd" 2>/dev/null; then
+        flock_rc=0
+    else
+        flock_rc=$?
+    fi
+    case "$flock_rc" in
+        0) ;;
+        75)
+            _health_close_lock_fd "$fd" || true
+            log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
+            return 75
+            ;;
+        *)
+            _health_close_lock_fd "$fd" || true
+            log_error "Health coordination flock failed with status ${flock_rc}: $lock_path"
+            return 3
+            ;;
+    esac
+
+    if ! _health_existing_lock_path_is_safe "$lock_path" \
+        || ! _health_open_lock_matches_path "$lock_path" "$fd"; then
+        flock -u "$fd" 2>/dev/null || true
+        _health_close_lock_fd "$fd" || true
+        log_error "Health coordination lock identity changed after acquisition: $lock_path"
+        return 3
     fi
     HEALTH_LOCK_FD="$fd"
 }
 
 _acquire_run_lock() {
-    if [[ "$FIX_MODE" == "true" ]]; then
-        operation_acquire \
-            --id health-repair \
-            --label "Health repair" \
-            --specific-lock /run/lock/vaultwarden-health.lock \
-            --non-interactive skip || {
-                local rc=$?
-                (( rc == 75 )) && return 75
-                log_error "Health repair operation guard failed before checks could run."
-                return 4
-            }
-        operation_set_phase "repair" "Health check with auto-repair"
+    local rc
+    _acquire_readonly_health_lock || return $?
+    if [[ "$FIX_MODE" != "true" ]]; then
+        return 0
+    fi
+
+    if operation_acquire \
+        --id health-repair \
+        --label "Health repair" \
+        --non-interactive skip; then
+        HEALTH_OPERATION_GUARD_ACQUIRED=true
     else
-        _acquire_readonly_health_lock
+        rc=$?
+        if ! _release_readonly_health_lock; then
+            log_error "Health coordination cleanup reported a failure after global guard acquisition failed."
+        fi
+        if (( rc == 75 )); then
+            return 75
+        fi
+        log_error "Health repair operation guard failed before checks could run."
+        return 4
+    fi
+
+    if ! operation_set_phase "repair" "Health check with auto-repair"; then
+        operation_release 4 || true
+        HEALTH_OPERATION_GUARD_ACQUIRED=false
+        _release_readonly_health_lock || true
+        log_error "Health repair operation guard could not record its phase."
+        return 4
     fi
 }
 
 _release_run_lock() {
-    local rc=$?
-    if [[ "$FIX_MODE" == "true" ]]; then
-        operation_release "$rc"
-    elif [[ -n "${HEALTH_LOCK_FD:-}" ]]; then
-        flock -u "$HEALTH_LOCK_FD" 2>/dev/null || true
-        { eval "exec ${HEALTH_LOCK_FD}>&-"; } 2>/dev/null || true
-        HEALTH_LOCK_FD=""
+    local original_rc="${1:-0}" cleanup_rc=0 rc
+    if [[ "$HEALTH_OPERATION_GUARD_ACQUIRED" == "true" ]]; then
+        if operation_release "$original_rc"; then
+            :
+        else
+            rc=$?
+            cleanup_rc="$rc"
+        fi
+        HEALTH_OPERATION_GUARD_ACQUIRED=false
     fi
-    return "$rc"
+    if _release_readonly_health_lock; then
+        :
+    else
+        rc=$?
+        cleanup_rc="$rc"
+    fi
+    if (( original_rc != 0 )); then
+        return "$original_rc"
+    fi
+    (( cleanup_rc == 0 )) || return 4
+    return 0
+}
+
+_health_exit_cleanup() {
+    local original_rc=$? final_rc=0
+    trap - EXIT HUP INT TERM
+    _release_run_lock "$original_rc" || final_rc=$?
+    if (( original_rc != 0 )); then
+        exit "$original_rc"
+    fi
+    exit "$final_rc"
+}
+
+_health_signal_cleanup() {
+    local signal_rc="$1"
+    trap - EXIT HUP INT TERM
+    _release_run_lock "$signal_rc" || true
+    exit "$signal_rc"
 }
 
 local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-$(_default_alert_state_dir)}"
@@ -1208,7 +1458,10 @@ _health_main() {
     if (( lock_rc != 0 )); then
         return "$lock_rc"
     fi
-    trap '_release_run_lock' EXIT HUP INT TERM
+    trap '_health_exit_cleanup' EXIT
+    trap '_health_signal_cleanup 129' HUP
+    trap '_health_signal_cleanup 130' INT
+    trap '_health_signal_cleanup 143' TERM
     log_info "Starting VaultWarden health check..."
     if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
     _check_containers

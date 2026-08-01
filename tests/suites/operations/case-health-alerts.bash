@@ -933,3 +933,253 @@ printf 'PASS: unhealthy update waits for recovery closure and preserves the new 
 )
 
 check_unhealthy_update_recovery_race_contract
+
+
+check_health_run_lock_contracts() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+HEALTH="$ROOT/utilities/maintenance-health.sh"
+TMP="$(mktemp -d -t vw-health-run-lock.XXXXXXXXXX)"
+cleanup() {
+    [[ -n "${signal_pid:-}" ]] && kill -KILL "$signal_pid" 2>/dev/null || true
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass(){ printf 'PASS: %s\n' "$*"; }
+log_error(){ printf 'error:%s\n' "$*" >> "$TMP/log"; }
+log_warn(){ printf 'warn:%s\n' "$*" >> "$TMP/log"; }
+log_info(){ :; }
+
+LOCK_BLOCK="$TMP/health-lock-block.bash"
+awk '
+    /^local HEALTH_LOCK_FD=""$/ {copy=1}
+    copy && /^local ALERT_LOCK_DIR=/ {exit}
+    copy {print}
+' "$HEALTH" > "$LOCK_BLOCK"
+[[ -s "$LOCK_BLOCK" ]] || fail "could not extract health run-lock block"
+
+FIX_MODE=false
+# shellcheck disable=SC1090
+source "$LOCK_BLOCK"
+
+VW_HEALTH_LOCK_FILE="$TMP/health.lock"
+_acquire_readonly_health_lock || fail "initial health lock acquisition failed"
+first_inode="$(_health_path_identity "$VW_HEALTH_LOCK_FILE")"
+metadata="$(_health_stat_mode_uid_gid_links "$VW_HEALTH_LOCK_FILE")"
+[[ "$metadata" == "600:${EUID}:$(id -g):1" ]] \
+    || fail "health lock metadata is $metadata"
+_release_readonly_health_lock || fail "initial health lock release failed"
+chmod 0644 "$VW_HEALTH_LOCK_FILE"
+_acquire_readonly_health_lock || fail "health lock metadata repair failed"
+second_inode="$(_health_path_identity "$VW_HEALTH_LOCK_FILE")"
+[[ "$second_inode" == "$first_inode" ]] || fail "health lock preparation replaced the inode"
+[[ "$(_health_stat_mode_uid_gid_links "$VW_HEALTH_LOCK_FILE")" == "600:${EUID}:$(id -g):1" ]] \
+    || fail "health lock metadata was not restored"
+_release_readonly_health_lock || fail "health lock metadata test release failed"
+pass "health lock ownership, mode, and inode remain stable"
+
+for kind in symlink directory fifo; do
+    path="$TMP/unsafe-$kind.lock"
+    case "$kind" in
+        symlink) : > "$TMP/unsafe-target"; ln -s "$TMP/unsafe-target" "$path" ;;
+        directory) mkdir "$path" ;;
+        fifo) mkfifo "$path" ;;
+    esac
+    VW_HEALTH_LOCK_FILE="$path"
+    set +e
+    _acquire_readonly_health_lock
+    rc=$?
+    set -e
+    [[ "$rc" -eq 3 ]] || fail "$kind health lock returned $rc instead of 3"
+    [[ -z "$HEALTH_LOCK_FD" ]] || fail "$kind health lock leaked a descriptor"
+done
+pass "health lock rejects symlink and non-regular paths"
+
+VW_HEALTH_LOCK_FILE="$TMP/chmod-failure.lock"
+: > "$VW_HEALTH_LOCK_FILE"
+chmod 0644 "$VW_HEALTH_LOCK_FILE"
+chmod(){ return 64; }
+set +e
+_acquire_readonly_health_lock
+rc=$?
+set -e
+unset -f chmod
+[[ "$rc" -eq 3 && -z "$HEALTH_LOCK_FD" ]] \
+    || fail "health lock hid a permission failure or leaked its descriptor"
+pass "health lock permission failures remain real failures"
+
+if [[ -d "/proc/$$/fd" ]]; then
+    VW_HEALTH_LOCK_FILE="$TMP/replacement.lock"
+    : > "$VW_HEALTH_LOCK_FILE"
+    chmod 0600 "$VW_HEALTH_LOCK_FILE"
+    mkdir -p "$TMP/bin"
+    real_stat="$(command -v stat)"
+    cat > "$TMP/bin/stat" <<'EOF_STAT'
+#!/usr/bin/env bash
+set -euo pipefail
+last_arg="${!#}"
+if [[ "$last_arg" == /proc/*/fd/* ]]; then
+    : > "$SWAP_ARMED"
+elif [[ "$last_arg" == "$LOCK_PATH" && -e "$SWAP_ARMED" && ! -e "$SWAP_DONE" ]]; then
+    mv -- "$LOCK_PATH" "${LOCK_PATH}.opened"
+    : > "$LOCK_PATH"
+    chmod 0600 "$LOCK_PATH"
+    : > "$SWAP_DONE"
+fi
+exec "$REAL_STAT" "$@"
+EOF_STAT
+    chmod 0755 "$TMP/bin/stat"
+    set +e
+    REAL_STAT="$real_stat" LOCK_PATH="$VW_HEALTH_LOCK_FILE" \
+        SWAP_ARMED="$TMP/swap-armed" SWAP_DONE="$TMP/swap-done" \
+        PATH="$TMP/bin:$PATH" _acquire_readonly_health_lock
+    rc=$?
+    set -e
+    [[ "$rc" -eq 3 && -e "$TMP/swap-done" && -z "$HEALTH_LOCK_FD" ]] \
+        || fail "health lock replacement was not detected safely"
+    pass "health lock verifies the opened descriptor against the intended path"
+else
+    printf 'SKIP: descriptor replacement test requires /proc.\n'
+fi
+
+TRACE=""
+OP_ACQUIRE_RC=0
+operation_acquire() {
+    [[ -n "$HEALTH_LOCK_FD" ]] || fail "global guard was attempted before health coordination"
+    local arg
+    for arg in "$@"; do
+        [[ "$arg" != --specific-lock ]] || fail "health lock was passed as an operation-specific lock"
+    done
+    TRACE+="health-before-global\n"
+    return "$OP_ACQUIRE_RC"
+}
+operation_set_phase(){ TRACE+="phase\n"; return 0; }
+operation_release(){ TRACE+="operation-release:$1\n"; return 0; }
+
+FIX_MODE=true
+VW_HEALTH_LOCK_FILE="$TMP/fix.lock"
+_acquire_run_lock || fail "health repair run-lock acquisition failed"
+[[ "$TRACE" == $'health-before-global\\nphase\\n' ]] \
+    || fail "health repair acquisition sequence was $TRACE"
+[[ "$HEALTH_OPERATION_GUARD_ACQUIRED" == true && -n "$HEALTH_LOCK_FD" ]] \
+    || fail "health repair did not retain both resources"
+_release_run_lock 0 || fail "health repair release failed"
+[[ "$TRACE" == *"operation-release:0"* && -z "$HEALTH_LOCK_FD" ]] \
+    || fail "health repair did not release both resources"
+pass "health repair acquires health coordination before the global guard"
+
+for guarded_rc in 75 64; do
+    TRACE=""
+    OP_ACQUIRE_RC="$guarded_rc"
+    VW_HEALTH_LOCK_FILE="$TMP/guard-failure-$guarded_rc.lock"
+    set +e
+    _acquire_run_lock
+    rc=$?
+    set -e
+    expected=4
+    (( guarded_rc == 75 )) && expected=75
+    [[ "$rc" -eq "$expected" && -z "$HEALTH_LOCK_FD" \
+        && "$HEALTH_OPERATION_GUARD_ACQUIRED" == false ]] \
+        || fail "global result $guarded_rc became rc=$rc or retained health coordination"
+done
+pass "global contention stays 75 while infrastructure failure stays non-75"
+OP_ACQUIRE_RC=0
+
+FIX_MODE=false
+VW_HEALTH_LOCK_FILE="$TMP/overlap.lock"
+_acquire_run_lock || fail "parent read-only health acquisition failed"
+probe_health() {
+    local mode="$1" marker="$2"
+    FIX_MODE="$mode"
+    HEALTH_LOCK_FD=""
+    HEALTH_OPERATION_GUARD_ACQUIRED=false
+    operation_acquire(){ : > "$marker"; return 0; }
+    operation_set_phase(){ return 0; }
+    operation_release(){ return 0; }
+    _acquire_run_lock
+}
+set +e
+(probe_health false "$TMP/readonly-global-called")
+readonly_rc=$?
+(probe_health true "$TMP/repair-global-called")
+repair_rc=$?
+set -e
+[[ "$readonly_rc" -eq 75 && "$repair_rc" -eq 75 ]] \
+    || fail "read-only holder did not exclude duplicate/repair runs"
+[[ ! -e "$TMP/readonly-global-called" && ! -e "$TMP/repair-global-called" ]] \
+    || fail "repair attempted the global guard before health contention cleared"
+_release_run_lock 0 || fail "parent read-only health release failed"
+
+FIX_MODE=true
+TRACE=""
+VW_HEALTH_LOCK_FILE="$TMP/overlap.lock"
+_acquire_run_lock || fail "parent health repair acquisition failed"
+set +e
+(probe_health false "$TMP/fix-readonly-global-called")
+fix_readonly_rc=$?
+(probe_health true "$TMP/fix-repair-global-called")
+fix_repair_rc=$?
+set -e
+[[ "$fix_readonly_rc" -eq 75 && "$fix_repair_rc" -eq 75 ]] \
+    || fail "repair holder did not exclude read-only/second repair runs"
+_release_run_lock 0 || fail "parent repair release failed"
+pass "all health read and repair overlap combinations are serialized"
+
+SIGNAL_SCRIPT="$TMP/signal-holder.bash"
+cat > "$SIGNAL_SCRIPT" <<'EOF_SIGNAL'
+#!/usr/bin/env bash
+set -euo pipefail
+run() {
+    local FIX_MODE=false
+    log_error(){ :; }
+    log_warn(){ :; }
+    log_info(){ :; }
+    operation_acquire(){ return 0; }
+    operation_set_phase(){ return 0; }
+    operation_release(){ return 0; }
+    # shellcheck disable=SC1090
+    source "$LOCK_BLOCK"
+    _acquire_run_lock
+    trap '_health_exit_cleanup' EXIT
+    trap '_health_signal_cleanup 129' HUP
+    trap '_health_signal_cleanup 130' INT
+    trap '_health_signal_cleanup 143' TERM
+    : > "$READY_FILE"
+    while :; do sleep 1; done
+}
+run
+EOF_SIGNAL
+chmod 0755 "$SIGNAL_SCRIPT"
+LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_FILE="$TMP/signal.lock" \
+    READY_FILE="$TMP/signal-ready" "$BASH" "$SIGNAL_SCRIPT" &
+signal_pid=$!
+for _ in {1..100}; do
+    [[ -e "$TMP/signal-ready" ]] && break
+    sleep 0.02
+done
+[[ -e "$TMP/signal-ready" ]] || fail "signal holder did not acquire health lock"
+kill -TERM "$signal_pid"
+set +e
+wait "$signal_pid"
+signal_rc=$?
+set -e
+signal_pid=""
+[[ "$signal_rc" -eq 143 ]] || fail "TERM cleanup returned $signal_rc instead of 143"
+# shellcheck disable=SC2034 # consumed by dynamically sourced health lock functions
+FIX_MODE=false
+VW_HEALTH_LOCK_FILE="$TMP/signal.lock"
+_acquire_run_lock || fail "health lock was not reusable after TERM cleanup"
+_release_run_lock 0 || fail "post-signal release failed"
+grep -Fq "trap '_health_signal_cleanup 129' HUP" "$HEALTH" \
+    || fail "HUP cleanup trap is missing"
+grep -Fq "trap '_health_signal_cleanup 130' INT" "$HEALTH" \
+    || fail "INT cleanup trap is missing"
+grep -Fq "trap '_health_signal_cleanup 143' TERM" "$HEALTH" \
+    || fail "TERM cleanup trap is missing"
+pass "health coordination is released on EXIT, HUP, INT, and TERM paths"
+)
+
+check_health_run_lock_contracts
