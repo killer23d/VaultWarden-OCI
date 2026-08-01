@@ -7,13 +7,16 @@ PROJECT_ROOT="$SCRIPT_DIR"
 CORE="${SCRIPT_DIR}/setup-main.sh"
 cd "$PROJECT_ROOT"
 
-[[ -f "$CORE" && ! -L "$CORE" ]] || {
-  printf 'ERROR: setup implementation is missing or unsafe: %s\n' "$CORE" >&2
-  exit 1
+_setup_require_core() {
+  [[ -f "$CORE" && ! -L "$CORE" ]] || {
+    printf 'ERROR: setup implementation is missing or unsafe: %s\n' "$CORE" >&2
+    return 1
+  }
 }
 
 case "${1:-}" in
   secrets|systemd|help|--help|-h|--version|-V)
+    _setup_require_core || exit 1
     exec bash "$CORE" "$@"
     ;;
 esac
@@ -22,8 +25,8 @@ esac
 # `setup.sh install --version`) without requiring root or entering an operation.
 for arg in "$@"; do
   case "$arg" in
-    --version|-V) exec bash "$CORE" --version ;;
-    --help|-h) exec bash "$CORE" --help ;;
+    --version|-V) _setup_require_core || exit 1; exec bash "$CORE" --version ;;
+    --help|-h) _setup_require_core || exit 1; exec bash "$CORE" --help ;;
   esac
 done
 
@@ -31,6 +34,7 @@ done
 # through the public entrypoint. setup-main.sh owns the hook and exits before
 # normal setup work; the wrapper must not impose its production root gate first.
 if [[ "${VW_SETUP_TEST_FORCE_ACK_ONLY:-false}" == "true" ]]; then
+  _setup_require_core || exit 1
   exec bash "$CORE" "$@"
 fi
 
@@ -46,6 +50,25 @@ if [[ -n "${SOPS_VERSION+x}" && -n "${SOPS_VERSION:-}" ]]; then
 fi
 SOPS_VERSION="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
 
+# These are the public coordinator's direct dependencies. setup-main.sh owns
+# its larger implementation dependency set separately.
+REQUIRED_LIBS=(
+  "lib/log.sh"
+  "lib/validate.sh"
+  "lib/config.sh"
+  "lib/common.sh"
+  "lib/operations.sh"
+  "lib/docker.sh"
+  "lib/defaults.sh"
+  "lib/storage.sh"
+)
+for lib in "${REQUIRED_LIBS[@]}"; do
+  [[ -f "${SCRIPT_DIR}/${lib}" && ! -L "${SCRIPT_DIR}/${lib}" ]] || {
+    printf 'ERROR: Required setup coordinator library is missing or unsafe: %s\n' "${SCRIPT_DIR}/${lib}" >&2
+    exit 1
+  }
+done
+
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/validate.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
@@ -54,6 +77,7 @@ init_common_lib "$0"
 source "${SCRIPT_DIR}/lib/operations.sh"
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/defaults.sh"
+source "${SCRIPT_DIR}/lib/storage.sh"
 
 _setup_parse_full_args() {
   DOMAIN=""; ADMIN_EMAIL=""; AUTO_MODE=false; SKIP_DEPS=false
@@ -87,7 +111,7 @@ _setup_require_phase() {
 }
 
 _setup_full_dry_run() {
-  (( EUID == 0 )) || { log_error "Must run as root."; return 1; }
+  is_root || { log_error "Must run as root."; return 1; }
   _setup_parse_full_args "$@" || return $?
 
   local system="${SCRIPT_DIR}/utilities/setup-system.sh"
@@ -159,13 +183,17 @@ if [[ "$FULL_DRY_RUN" == true ]]; then
   exit $?
 fi
 
-(( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
+is_root || { log_error "Must run as root."; exit 1; }
 _setup_ensure_group
-operation_acquire --id setup --label "Setup" || exit $?
+operation_acquire \
+  --id setup \
+  --label "Setup" \
+  --specific-lock /run/lock/vaultwarden-setup.lock || exit $?
 trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT
 trap 'operation_release 130; exit 130' INT
 trap 'operation_release 143; exit 143' HUP TERM
 
+_setup_require_core || exit 1
 if [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
   env SOPS_VERSION="$SOPS_VERSION" bash "$CORE" "$@"
 else
