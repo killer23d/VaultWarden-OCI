@@ -195,8 +195,8 @@ else
   printf 'SKIP root-owned recovery fixture: passwordless sudo unavailable\n'
 fi
 
-# Cleanup failures are explicit and signal-compatible in both entry points.
-setup_source="$(cat setup.sh)"
+# Cleanup failures are explicit and signal-compatible in both setup files.
+setup_source="$(cat setup.sh setup-main.sh)"
 secrets_source="$(cat utilities/setup-secrets.sh)"
 [[ "$setup_source" == *'_setup_remove_sensitive_workspace 0'* ]] \
   || fail "top-level setup lacks explicit pre-summary cleanup"
@@ -222,7 +222,7 @@ secrets_source="$(cat utilities/setup-secrets.sh)"
 # Exercise successful cleanup, injected file/workspace failures, original-status
 # preservation, signal-compatible exits, continued cleanup, and confidential
 # diagnostics without running the full setup workflow.
-setup_cleanup_block="$(sed -n '/^# Establish setup-owned cleanup custody before any workspace is created\.$/,/^SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false$/p' setup.sh)"
+setup_cleanup_block="$(sed -n '/^# Establish setup-owned cleanup custody before any workspace is created\.$/,/^SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false$/p' setup-main.sh)"
 direct_cleanup_block="$(sed -n '/^# Secret cleanup lifecycle is script-scoped/,/^# End secret cleanup lifecycle\.$/p' utilities/setup-secrets.sh)"
 [[ -n "$setup_cleanup_block" && -n "$direct_cleanup_block" ]] \
   || fail "cleanup lifecycle blocks could not be extracted"
@@ -690,7 +690,7 @@ grep -Fq '_require_7zip_command || return 1' utilities/setup-system.sh \
   || fail "--skip-deps verification does not require a usable 7-Zip executable"
 grep -Fq 'Install hint: sudo apt-get install -y 7zip' utilities/setup-system.sh \
   || fail "setup-system 7zip installation guidance is incorrect"
-grep -Fq 'sudo apt-get install -y docker.io age sops 7zip python3-argon2 python3-bcrypt' setup.sh \
+cat setup.sh setup-main.sh | grep -Fq 'sudo apt-get install -y docker.io age sops 7zip python3-argon2 python3-bcrypt' \
   || fail "top-level setup phase guidance omits 7zip"
 grep -Fq 'for candidate in 7zz 7z; do' lib/secrets.sh \
   || fail "recovery ZIP helper does not prefer 7zz with 7z fallback"
@@ -740,7 +740,7 @@ trap - EXIT
 SEVENZIP_TEST
 python3 - <<'PY_ORDER' || fail "success-summary ordering is unsafe"
 from pathlib import Path
-setup = Path('setup.sh').read_text()
+setup = Path('setup.sh').read_text() + Path('setup-main.sh').read_text()
 secrets = Path('utilities/setup-secrets.sh').read_text()
 start = setup.index('credential_file="$(publish_setup_credentials')
 assert setup.index('_setup_remove_sensitive_workspace 0', start) < setup.index('│  SETUP CREDENTIALS SAVED', start)
