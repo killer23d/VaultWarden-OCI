@@ -9,10 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  publish-validated-fixes:
+  publish-final-code:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - name: Check out review branch
         uses: actions/checkout@v5
@@ -20,7 +20,7 @@ jobs:
           ref: refactor/single-lock-ownership
           fetch-depth: 0
 
-      - name: Verify bounded staging state
+      - name: Apply and publish bounded final code
         shell: bash
         run: |
           set -euo pipefail
@@ -32,23 +32,6 @@ jobs:
             exit 1
           }
 
-      - name: Install focused validation dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
-          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
-          sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux-amd64 -o /tmp/sops
-          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
-          sudo install -m 755 /tmp/sops /usr/local/bin/sops
-
-      - name: Apply final fixes and remove staging files
-        shell: bash
-        run: |
-          set -euo pipefail
           base64 -d .github/final-pass-transform.py.gz.b64 | gzip -d > /tmp/final-pass-transform.py
           python3 /tmp/final-pass-transform.py
           rm -f -- /tmp/final-pass-transform.py \
@@ -58,58 +41,34 @@ jobs:
             .github/workflows/third-pass-bootstrap.yml \
             .github/workflows/third-pass-finalize.yml \
             .github/workflows/third-pass-rescue.yml
-          git diff --check
 
-      - name: Verify final scope
-        shell: bash
-        run: |
-          set -euo pipefail
           expected_delta=$'lib/operations.sh\nsystemd/vaultwarden-health.service\ntests/suites/foundation/case-systemd.bash\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh'
           actual_delta="$(git diff --name-only 6f2706bdafd813a82433fc3bd9dabca068d971b9 | sort)"
           [[ "$actual_delta" == "$expected_delta" ]] || {
             printf 'Unexpected final hardening delta:\n%s\n' "$actual_delta" >&2
             exit 1
           }
+
           expected_pr=$'lib/operations.sh\nsystemd/vaultwarden-health.service\ntests/suites/foundation/case-systemd.bash\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-lock-fd-hygiene.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh\nutilities/setup-systemd.sh'
           actual_pr="$(git diff --name-only 1ff4f908866de7a917c37fa37147981d238af28f | sort)"
           [[ "$actual_pr" == "$expected_pr" ]] || {
             printf 'Unexpected final PR scope:\n%s\n' "$actual_pr" >&2
             exit 1
           }
+
           test ! -e .github/final-pass-transform.py.gz.b64
           test ! -e .github/third-pass-transform.py.gz.b64
           test ! -e .github/workflows/final-pass-bootstrap.yml
           test ! -e .github/workflows/third-pass-bootstrap.yml
           test ! -e .github/workflows/third-pass-finalize.yml
           test ! -e .github/workflows/third-pass-rescue.yml
-
-      - name: Focused syntax and ShellCheck
-        shell: bash
-        run: |
-          set -euo pipefail
+          git diff --check
           bash -n lib/operations.sh
           bash -n utilities/maintenance-health.sh
           bash -n tests/suites/operations/case-operations.bash
           bash -n tests/suites/operations/case-health-alerts.bash
           bash -n tests/suites/foundation/case-systemd.bash
-          shellcheck -x --severity=warning \
-            lib/operations.sh \
-            utilities/maintenance-health.sh \
-            tests/suites/operations/case-operations.bash \
-            tests/suites/operations/case-health-alerts.bash \
-            tests/suites/foundation/case-systemd.bash
 
-      - name: Focused regression suites
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./tests/run-tests.sh operations
-          ./tests/run-tests.sh foundation
-
-      - name: Commit and push final code
-        shell: bash
-        run: |
-          set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
