@@ -72,65 +72,6 @@ wait_for_optional_services() {
 }
 
 
-run_health_check() {
-  if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
-    log_info "Skipping post-start health check (--skip-health)"
-    return 0
-  fi
-
-  local _health_script="${PROJECT_ROOT}/utilities/maintenance-health.sh"
-  if [[ ! -x "$_health_script" ]]; then
-    log_error "utilities/maintenance-health.sh not executable or missing; cannot run health check"
-    log_error "Ensure setup.sh has been run and scripts are correctly installed"
-    log_error "To skip this gate during recovery: ./startup.sh --skip-health"
-    return 1
-  fi
-
-  log_info "Running post-start health check..."
-
-  # Disable errexit around the health check so its exit code can be captured
-  # cleanly.
-  log_info "Invoking: ${_health_script} health"
-  local health_exit=0
-  local health_attempt=1
-  local health_max_attempts=3
-  # Internal root/systemd path; direct health commands still refuse root.
-  VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health || health_exit=$?
-
-  while (( health_exit == 75 && health_attempt < health_max_attempts )); do
-    log_warn "Post-start health check is contended; retrying shortly (${health_attempt}/${health_max_attempts})..."
-    sleep 1
-    (( health_attempt++ )) || true
-    health_exit=0
-    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health || health_exit=$?
-  done
-
-  case "$health_exit" in
-    0)
-      log_success "Health check passed — all checks healthy"
-      ;;
-    1)
-      log_warn "Health check completed with warnings — review output above"
-      ;;
-    75)
-      log_error "Post-start health is unknown: the health check remained contended after ${health_max_attempts} attempts."
-      log_error "Startup cannot confirm service health until the active health check completes."
-      return 75
-      ;;
-    *)
-      # Exit 2 means one or more critical failures; exit 3+ means the health
-      # script crashed.
-      log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
-      log_error "Startup aborted. Investigate the failures above, then re-run sudo ./startup.sh"
-      log_error "To skip this gate during recovery: ./startup.sh --skip-health"
-      return 1
-      ;;
-  esac
-
-  return 0
-}
-
-
 show_status() {
   log_info "Current service status:"
   docker compose ps || true

@@ -23,6 +23,13 @@ for arg in "$@"; do
   [[ "$arg" == "--dry-run" ]] && FULL_DRY_RUN=true
 done
 
+SOPS_DEFAULT_VERSION="v3.13.2"
+SOPS_VERSION_ENV_SET=false
+if [[ -n "${SOPS_VERSION+x}" && -n "${SOPS_VERSION:-}" ]]; then
+  SOPS_VERSION_ENV_SET=true
+fi
+SOPS_VERSION="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
+
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/validate.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
@@ -78,17 +85,18 @@ _setup_full_dry_run() {
   done
   bash -n "$secrets" || { log_error "Secrets setup script failed syntax validation."; return 1; }
 
-  local -a common=(--dry-run) auto=() skip=() force=() latest=() device=()
+  local -a common=(--dry-run) auto=() skip=() force=() latest=() device=() _sops_flags=()
   [[ "$AUTO_MODE" == true ]] && auto=(--auto)
   [[ "$SKIP_DEPS" == true ]] && skip=(--skip-deps)
   [[ "$FORCE" == true ]] && force=(--force)
   [[ "$USE_LATEST" == true ]] && latest=(--use-latest)
+  [[ "$SOPS_VERSION_ENV_SET" == "true" ]] && _sops_flags=(--sops-version "$SOPS_VERSION")
   [[ -n "$DATA_VOLUME_DEVICE" ]] && device+=(--data-device "$DATA_VOLUME_DEVICE")
   device+=(--data-mount "$DATA_VOLUME_MOUNT")
 
   log_header "VaultWarden-OCI Setup - Read-only Preview"
   log_info "[DRY RUN] Operation locks and operation state will not be acquired or created."
-  "$system" "${auto[@]}" "${skip[@]}" "${latest[@]}" "${common[@]}" "${force[@]}" "${device[@]}"
+  "$system" "${auto[@]}" "${skip[@]}" "${latest[@]}" "${common[@]}" "${force[@]}" "${device[@]}" "${_sops_flags[@]}"
   "$storage" setup "${auto[@]}" "${common[@]}" "${force[@]}" "${device[@]}"
   "$env_setup" --domain "$DOMAIN" --email "$ADMIN_EMAIL" "${latest[@]}" "${common[@]}" "${force[@]}" "${device[@]}"
   local force_text=""
@@ -146,3 +154,4 @@ bash "$CORE" "$@"
 operation_set_phase "images" "Acquiring initial pinned images"
 _setup_acquire_initial_images
 log_success "Setup and initial pinned image acquisition completed."
+log_info "Next step: sudo make up"
