@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CASE_DIR="$SCRIPT_DIR"
 # shellcheck source=../../lib/test-root.bash
 source "${SCRIPT_DIR}/../../lib/test-root.bash"
 ROOT="${VW_TEST_REPO_ROOT:?VW_TEST_REPO_ROOT was not initialized}"
@@ -12,35 +13,37 @@ fail() {
 }
 
 assert_contains() {
-  local haystack="$1"
-  local needle="$2"
-  local label="$3"
+  local haystack="$1" needle="$2" label="$3"
   [[ "$haystack" == *"$needle"* ]] || fail "$label"
 }
 
 assert_not_contains() {
-  local haystack="$1"
-  local needle="$2"
-  local label="$3"
+  local haystack="$1" needle="$2" label="$3"
   [[ "$haystack" != *"$needle"* ]] || fail "$label"
 }
 
 extract_func() {
-  local file="$1" func="$2"
+  local _entrypoint="$1" func="$2"
+  local -a files=("$ROOT/startup.sh")
+  if compgen -G "$ROOT/lib/startup-*.sh" >/dev/null; then
+    files+=("$ROOT"/lib/startup-*.sh)
+  fi
   awk -v f="$func" '
     $0 ~ "^" f "\\(\\)" { capture=1 }
     capture {
       print
-      opens=gsub(/\{/,"{")
-      closes=gsub(/\}/,"}")
+      opens=gsub(/\{/ ,"{")
+      closes=gsub(/\}/ ,"}")
       depth += opens - closes
       if (depth == 0) exit
     }
-  ' "$file"
+  ' "${files[@]}"
 }
 
-startup=$(<"${ROOT}/startup.sh")
-
+startup="$(cat "${ROOT}/startup.sh")"
+if compgen -G "${ROOT}/lib/startup-*.sh" >/dev/null; then
+  startup+=$'\n'"$(cat "${ROOT}"/lib/startup-*.sh)"
+fi
 restart_block=$(awk '
   /^restart:/ { capture=1 }
   capture && /^safe-restart:/ { exit }
@@ -50,22 +53,31 @@ restart_block=$(awk '
 assert_contains "$restart_block" '$(call check-docker)' \
   "restart must verify Docker availability"
 assert_contains "$restart_block" './startup.sh --force --skip-pull' \
-  "restart must recreate containers without pulling images"
-assert_not_contains "$restart_block" './startup.sh --force ||' \
-  "restart must not use the image-pulling startup path"
-
+  "restart compatibility command must remain accepted"
 assert_not_contains "$startup" 'docker compose rm -sf' \
   "startup must not remove working containers before Compose recreation"
 assert_contains "$startup" 'compose_args+=(--force-recreate)' \
   "forced restart must still request Compose recreation"
-assert_not_contains "$startup" 'cleanup_docker_system || true' \
-  "cleanup failures must not be silently discarded"
-assert_contains "$startup" 'if cleanup_docker_system; then' \
-  "cleanup result must be checked"
-assert_contains "$startup" 'Orphaned resource cleanup failed; startup will continue' \
-  "cleanup failure must be reported"
-assert_contains "$startup" '_maybe_sudo "$_fw_script" --phase iptables </dev/null' \
-  "startup firewall reconciliation must be noninteractive"
+assert_contains "$startup" '--pull never' \
+  "ordinary startup must enforce a no-pull Compose policy"
+assert_not_contains "$startup" 'docker compose pull --quiet' \
+  "ordinary startup must not contain an image-pull operation"
+assert_not_contains "$startup" '--remove-orphans' \
+  "ordinary Compose startup must not delete orphan containers"
+assert_contains "$startup" 'REPAIR=false' \
+  "startup must expose an explicit repair mode"
+assert_contains "$startup" 'repair_critical_permissions || exit 1' \
+  "permission repair failure must stop startup"
+assert_contains "$startup" 'reconcile_managed_orphans || exit 1' \
+  "managed orphan repair failure must stop startup"
+assert_contains "$startup" 'repair_vaultwarden_egress_nat || exit 1' \
+  "NAT repair failure must stop startup"
+assert_contains "$startup" 'repair_dns_state || exit 1' \
+  "DNS repair failure must stop startup"
+assert_not_contains "$startup" 'cleanup_docker_system' \
+  "startup must not call broad Docker cleanup"
+assert_not_contains "$startup" '_startup_pull_images()' \
+  "startup must not retain an implicit pull helper"
 assert_not_contains "$startup" 'wait_for_services || true' \
   "critical readiness failures must not be discarded"
 assert_contains "$startup" 'wait_for_services || readiness_rc=$?' \
@@ -77,16 +89,15 @@ assert_contains "$startup" 'wait_for_optional_services || true' \
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-SCRIPT_DIR="$TMP/repo"
-mkdir -p "$SCRIPT_DIR/secrets/keys"
-printf 'synthetic repository key\n' > "$SCRIPT_DIR/secrets/keys/age-key.txt"
+KEY_FIXTURE="$TMP/key-fixture"
+mkdir -p "$KEY_FIXTURE/secrets/keys"
+printf 'synthetic repository key\n' > "$KEY_FIXTURE/secrets/keys/age-key.txt"
+SCRIPT_DIR="$KEY_FIXTURE"
 SOPS_AGE_KEY_FILE="$TMP/rejected-configured-key.txt"
 export SCRIPT_DIR SOPS_AGE_KEY_FILE
-# shellcheck disable=SC2034 # Consumed by the function extracted with eval below.
 DRY_RUN=false
-# shellcheck disable=SC2034 # Consumed by the function extracted with eval below.
 DOCKER_SECRETS_DIR="$TMP/runtime-secrets"
-LOG_FILE="$TMP/log"
+LOG_FILE="$TMP/key-log"
 CALL_FILE="$TMP/key-health-calls"
 log_info(){ printf 'INFO %s\n' "$*" >> "$LOG_FILE"; }
 log_warn(){ printf 'WARN %s\n' "$*" >> "$LOG_FILE"; }
@@ -112,7 +123,6 @@ check_age_key_health_preflight(){ return 1; }
 schema_validate(){ : > "$TMP/schema-called"; }
 validate_required_secrets(){ : > "$TMP/required-secrets-called"; }
 export_docker_secrets(){ : > "$TMP/sops-export-called"; }
-# shellcheck disable=SC2034 # Consumed by the function extracted with eval below.
 SECRETS_FILE="$TMP/secrets.yaml"
 eval "$(extract_func "$ROOT/startup.sh" prepare_docker_secrets)"
 if prepare_docker_secrets; then
@@ -120,18 +130,6 @@ if prepare_docker_secrets; then
 fi
 [[ ! -e "$TMP/schema-called" && ! -e "$TMP/required-secrets-called" && ! -e "$TMP/sops-export-called" ]] \
   || fail "SOPS/schema/secret mutation ran after selected Age-key failure"
-
-prepare_line="$(awk '/prepare_docker_secrets \|\| exit 1/{print NR; exit}' "$ROOT/startup.sh")"
-early_key_line="$(awk '/check_age_key_health_preflight \|\| exit 1/{print NR; exit}' "$ROOT/startup.sh")"
-permission_line="$(awk '/if ! auto_fix_critical_permissions/{print NR; exit}' "$ROOT/startup.sh")"
-firewall_line="$(awk '/ensure_vaultwarden_egress_nat \|\| true/{print NR; exit}' "$ROOT/startup.sh")"
-pull_line="$(awk '/_startup_pull_images \|\| exit 1/{print NR; exit}' "$ROOT/startup.sh")"
-start_line="$(awk '/_startup_start_services \|\| exit 1/{print NR; exit}' "$ROOT/startup.sh")"
-[[ -n "$early_key_line" && "$early_key_line" -lt "$permission_line" ]] \
-  || fail "selected Age-key rejection no longer precedes startup permission/state mutation"
-[[ -n "$prepare_line" && "$prepare_line" -lt "$firewall_line" \
-   && "$prepare_line" -lt "$pull_line" && "$prepare_line" -lt "$start_line" ]] \
-  || fail "Age-key/SOPS gate no longer precedes network, image-pull, and service mutations"
 
 postfix_health=$(awk '
   /postfix status/ { capture=1; remaining=7 }
@@ -146,6 +144,9 @@ assert_contains "$postfix_health" 'retries: 4' \
 assert_contains "$postfix_health" 'start_period: 20s' \
   "Postfix health start period must match the readiness grace window"
 
-bash -n "${ROOT}/startup.sh" || fail "startup.sh must pass Bash syntax validation"
 
-printf 'PASS startup lifecycle hardening contracts\n'
+# Public-entrypoint behavioral fixture and cases are kept in non-case helpers so
+# this registered case remains readable while the test runner sees one case.
+source "${CASE_DIR}/startup-lifecycle-fixture-a.bash"
+source "${CASE_DIR}/startup-lifecycle-fixture-b.bash"
+source "${CASE_DIR}/startup-lifecycle-cases.bash"
