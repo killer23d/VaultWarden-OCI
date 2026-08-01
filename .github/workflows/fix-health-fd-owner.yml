@@ -20,22 +20,18 @@ jobs:
           ref: refactor/single-lock-ownership
           fetch-depth: 0
 
-      - name: Verify bounded staging state
+      - name: Apply bounded descriptor fix
         shell: bash
         run: |
           set -euo pipefail
           git merge-base --is-ancestor 01bf1f37b64c3b25091eb3a9930a70a58ef7be8a HEAD
-          expected='.github/workflows/fix-health-fd-owner.yml'
-          actual="$(git diff --name-only 01bf1f37b64c3b25091eb3a9930a70a58ef7be8a...HEAD)"
+          expected=$'.github/workflows/fix-health-fd-owner.yml\n.github/workflows/fix-health-fd-path.yml'
+          actual="$(git diff --name-only 01bf1f37b64c3b25091eb3a9930a70a58ef7be8a...HEAD | sort)"
           [[ "$actual" == "$expected" ]] || {
             printf 'Unexpected pre-fix diff:\n%s\n' "$actual" >&2
             exit 1
           }
 
-      - name: Capture the actual descriptor owner
-        shell: bash
-        run: |
-          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
@@ -67,107 +63,20 @@ jobs:
                   '''_health_open_lock_matches_path() {
               local lock_path="$1" fd="$2" fd_path path_identity fd_identity
               fd_path="$(_health_lock_fd_path "$fd")"
-              fd_identity="$(_health_path_identity "$fd_path")" || return 1
-              path_identity="$(_health_path_identity "$lock_path")" || return 1
-              [[ "$fd_identity" == "$path_identity" ]]
-          }
           ''',
                   '''_health_open_lock_matches_path() {
-              local lock_path="$1" fd="$2" owner_pid="${3:-$BASHPID}"
-              local fd_path path_identity fd_identity
+              local lock_path="$1" fd="$2" fd_path path_identity fd_identity owner_pid="$BASHPID"
               fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
-              fd_identity="$(_health_path_identity "$fd_path")" || return 1
-              path_identity="$(_health_path_identity "$lock_path")" || return 1
-              [[ "$fd_identity" == "$path_identity" ]]
-          }
           ''',
               ),
               (
                   '''_health_establish_lock_metadata() {
               local lock_path="$1" fd="$2" fd_path metadata mode uid gid links
               fd_path="$(_health_lock_fd_path "$fd")"
-              if ! chown "${EUID}:${HEALTH_LOCK_GID}" "$fd_path" 2>/dev/null; then
-                  log_error "Cannot set health coordination lock ownership for: $lock_path"
-                  return 3
-              fi
-              if ! chmod 0600 "$fd_path" 2>/dev/null; then
-                  log_error "Cannot set health coordination lock mode 0600 for: $lock_path"
-                  return 3
-              fi
-              metadata="$(_health_stat_mode_uid_gid_links "$fd_path")" || return 3
-              IFS=: read -r mode uid gid links <<< "$metadata"
-              if [[ "$mode" != 600 || "$uid" != "$EUID" || "$gid" != "$HEALTH_LOCK_GID" || "$links" != 1 ]]; then
-                  log_error "Health coordination lock metadata could not be established safely: $lock_path"
-                  return 3
-              fi
-              if ! _health_existing_lock_path_is_safe "$lock_path" \\
-                  || ! _health_open_lock_matches_path "$lock_path" "$fd"; then
-                  log_error "Health coordination lock identity changed during preparation: $lock_path"
-                  return 3
-              fi
-          }
           ''',
                   '''_health_establish_lock_metadata() {
-              local lock_path="$1" fd="$2" owner_pid="${3:-$BASHPID}"
-              local fd_path metadata mode uid gid links
+              local lock_path="$1" fd="$2" fd_path metadata mode uid gid links owner_pid="$BASHPID"
               fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
-              if ! chown "${EUID}:${HEALTH_LOCK_GID}" "$fd_path" 2>/dev/null; then
-                  log_error "Cannot set health coordination lock ownership for: $lock_path"
-                  return 3
-              fi
-              if ! chmod 0600 "$fd_path" 2>/dev/null; then
-                  log_error "Cannot set health coordination lock mode 0600 for: $lock_path"
-                  return 3
-              fi
-              metadata="$(_health_stat_mode_uid_gid_links "$fd_path")" || return 3
-              IFS=: read -r mode uid gid links <<< "$metadata"
-              if [[ "$mode" != 600 || "$uid" != "$EUID" || "$gid" != "$HEALTH_LOCK_GID" || "$links" != 1 ]]; then
-                  log_error "Health coordination lock metadata could not be established safely: $lock_path"
-                  return 3
-              fi
-              if ! _health_existing_lock_path_is_safe "$lock_path" \\
-                  || ! _health_open_lock_matches_path "$lock_path" "$fd" "$owner_pid"; then
-                  log_error "Health coordination lock identity changed during preparation: $lock_path"
-                  return 3
-              fi
-          }
-          ''',
-              ),
-              (
-                  '''_acquire_readonly_health_lock() {
-              local lock_path lock_dir fd flock_rc
-          ''',
-                  '''_acquire_readonly_health_lock() {
-              local lock_path lock_dir fd fd_owner_pid flock_rc
-          ''',
-              ),
-              (
-                  '''    if ! { exec {fd}<>"$lock_path"; } 2>/dev/null; then
-              log_error "Cannot open health coordination lock: $lock_path"
-              return 3
-          fi
-          if ! _health_open_lock_matches_path "$lock_path" "$fd"; then
-          ''',
-                  '''    if ! { exec {fd}<>"$lock_path"; } 2>/dev/null; then
-              log_error "Cannot open health coordination lock: $lock_path"
-              return 3
-          fi
-          fd_owner_pid="$BASHPID"
-          if ! _health_open_lock_matches_path "$lock_path" "$fd" "$fd_owner_pid"; then
-          ''',
-              ),
-              (
-                  '''    if ! _health_establish_lock_metadata "$lock_path" "$fd"; then
-          ''',
-                  '''    if ! _health_establish_lock_metadata "$lock_path" "$fd" "$fd_owner_pid"; then
-          ''',
-              ),
-              (
-                  '''    if ! _health_existing_lock_path_is_safe "$lock_path" \\
-              || ! _health_open_lock_matches_path "$lock_path" "$fd"; then
-          ''',
-                  '''    if ! _health_existing_lock_path_is_safe "$lock_path" \\
-              || ! _health_open_lock_matches_path "$lock_path" "$fd" "$fd_owner_pid"; then
           ''',
               ),
           ]
@@ -179,8 +88,12 @@ jobs:
 
           path.write_text(text)
           PY
-          rm -f -- .github/workflows/fix-health-fd-owner.yml
+
+          rm -f -- \
+            .github/workflows/fix-health-fd-owner.yml \
+            .github/workflows/fix-health-fd-path.yml
           git diff --check
+          bash -n utilities/maintenance-health.sh
 
       - name: Verify final scope
         shell: bash
@@ -198,6 +111,7 @@ jobs:
             exit 1
           }
           test ! -e .github/workflows/fix-health-fd-owner.yml
+          test ! -e .github/workflows/fix-health-fd-path.yml
 
       - name: Install operations test dependencies
         shell: bash
@@ -208,7 +122,7 @@ jobs:
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
           echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux-amd64 -o /tmp/sops
           echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
@@ -216,7 +130,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash -n utilities/maintenance-health.sh
           shellcheck -x --severity=warning utilities/maintenance-health.sh tests/suites/operations/case-health-alerts.bash
           ./tests/run-tests.sh operations
 
@@ -228,5 +141,5 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
           git diff --cached --check
-          git commit -m 'Bind health descriptor checks to the opening shell'
+          git commit -m 'Fix health descriptor path lifetime'
           git push origin HEAD:refactor/single-lock-ownership
