@@ -27,6 +27,13 @@ for arg in "$@"; do
   esac
 done
 
+# Keep the existing isolated force-acknowledgement test boundary reachable
+# through the public entrypoint. setup-main.sh owns the hook and exits before
+# normal setup work; the wrapper must not impose its production root gate first.
+if [[ "${VW_SETUP_TEST_FORCE_ACK_ONLY:-false}" == "true" ]]; then
+  exec bash "$CORE" "$@"
+fi
+
 FULL_DRY_RUN=false
 for arg in "$@"; do
   [[ "$arg" == "--dry-run" ]] && FULL_DRY_RUN=true

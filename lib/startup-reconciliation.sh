@@ -193,6 +193,13 @@ validate_local_images() {
 _startup_start_services() {
   log_info "Starting VaultWarden services with local images only..."
 
+  # Dry-run is a pure preview. It must not require a live/resolvable Compose
+  # model merely to explain the no-pull, no-dependency startup boundary.
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would resolve runtime services, exclude init-permissions, and run: docker compose up -d --pull never --no-deps <runtime-services>"
+    return 0
+  fi
+
   local -a services=()
   mapfile -t services < <(docker compose config --services 2>/dev/null | awk 'NF && $0 != "init-permissions" && !seen[$0]++')
   (( ${#services[@]} > 0 )) || {
@@ -214,11 +221,6 @@ _startup_start_services() {
     log_info "Force restart requested; Docker Compose will recreate existing containers."
   fi
   compose_args+=("${services[@]}")
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would run: docker compose ${compose_args[*]}"
-    return 0
-  fi
 
   if ! docker compose "${compose_args[@]}"; then
     log_error "docker compose ${compose_args[*]} failed"
