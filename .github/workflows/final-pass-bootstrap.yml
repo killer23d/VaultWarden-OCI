@@ -24,8 +24,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD~2)" = "6be4eccbd60b197dccc5e791f57022a67a4fd4da"
-          expected=$'.github/final-pass-transform.py.gz.b64\n.github/third-pass-transform.py.gz.b64\n.github/workflows/final-pass-bootstrap.yml\n.github/workflows/third-pass-bootstrap.yml\n.github/workflows/third-pass-rescue.yml'
+          git merge-base --is-ancestor 6f2706bdafd813a82433fc3bd9dabca068d971b9 HEAD
+          expected=$'.github/final-pass-transform.py.gz.b64\n.github/third-pass-transform.py.gz.b64\n.github/workflows/final-pass-bootstrap.yml\n.github/workflows/third-pass-bootstrap.yml\n.github/workflows/third-pass-finalize.yml\n.github/workflows/third-pass-rescue.yml'
           actual="$(git diff --name-only 6f2706bdafd813a82433fc3bd9dabca068d971b9...HEAD | sort)"
           [[ "$actual" == "$expected" ]] || {
             printf 'Unexpected pre-finalizer diff:\n%s\n' "$actual" >&2
@@ -56,6 +56,7 @@ jobs:
             .github/third-pass-transform.py.gz.b64 \
             .github/workflows/final-pass-bootstrap.yml \
             .github/workflows/third-pass-bootstrap.yml \
+            .github/workflows/third-pass-finalize.yml \
             .github/workflows/third-pass-rescue.yml
           git diff --check
 
@@ -79,6 +80,7 @@ jobs:
           test ! -e .github/third-pass-transform.py.gz.b64
           test ! -e .github/workflows/final-pass-bootstrap.yml
           test ! -e .github/workflows/third-pass-bootstrap.yml
+          test ! -e .github/workflows/third-pass-finalize.yml
           test ! -e .github/workflows/third-pass-rescue.yml
 
       - name: Repository-wide Bash syntax
