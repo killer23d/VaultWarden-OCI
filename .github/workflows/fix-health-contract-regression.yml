@@ -25,8 +25,8 @@ jobs:
         run: |
           set -euo pipefail
           git merge-base --is-ancestor 99838419d76ecd2cd9ebc3a0b233181530f9d15a HEAD
-          expected='.github/workflows/fix-health-contract-regression.yml'
-          actual="$(git diff --name-only 99838419d76ecd2cd9ebc3a0b233181530f9d15a...HEAD)"
+          expected=$'.github/workflows/align-health-exit-test.yml\n.github/workflows/fix-health-contract-regression.yml'
+          actual="$(git diff --name-only 99838419d76ecd2cd9ebc3a0b233181530f9d15a...HEAD | sort)"
           [[ "$actual" == "$expected" ]] || {
             printf 'Unexpected pre-fix diff:\n%s\n' "$actual" >&2
             exit 1
@@ -41,13 +41,17 @@ jobs:
             "health unit must treat expected contention 75 as success, but not all failures"
           '''
           new = '''require '^SuccessExitStatus=0 1 75$' "$UNIT" \\
-            "health unit must preserve exit 3/4 as failures while accepting warnings and contention"
+            "health unit must treat warning 1 and contention 75 as success"
+          reject '^SuccessExitStatus=.*[[:space:]](3|4)([[:space:]]|$)' "$UNIT" \\
+            "health unit must keep critical exit 3/4 visible to OnFailure"
           '''
           if text.count(old) != 1:
               raise SystemExit('Expected exactly one stale health SuccessExitStatus assertion')
           path.write_text(text.replace(old, new, 1))
           PY
-          rm -f -- .github/workflows/fix-health-contract-regression.yml
+          rm -f -- \
+            .github/workflows/align-health-exit-test.yml \
+            .github/workflows/fix-health-contract-regression.yml
 
           actual_delta="$(git diff --name-only 99838419d76ecd2cd9ebc3a0b233181530f9d15a | sort)"
           [[ "$actual_delta" == 'tests/suites/operations/case-operations.bash' ]] || {
@@ -60,6 +64,7 @@ jobs:
             printf 'Unexpected final PR scope:\n%s\n' "$actual_pr" >&2
             exit 1
           }
+          test ! -e .github/workflows/align-health-exit-test.yml
           test ! -e .github/workflows/fix-health-contract-regression.yml
           git diff --check
           bash -n tests/suites/operations/case-operations.bash
@@ -68,5 +73,5 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
           git diff --cached --check
-          git commit -m 'Align health systemd contract regression test'
+          git commit -m 'Align health exit-status regression test'
           git push origin HEAD:refactor/single-lock-ownership
