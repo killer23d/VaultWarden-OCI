@@ -73,6 +73,11 @@ source "${SCRIPT_DIR}/lib/validate.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
+# Minimal isolated fixtures may stub common.sh without its root helper. Keep
+# production on the canonical helper and provide only an equivalent fallback.
+if ! declare -F is_root >/dev/null 2>&1; then
+  is_root() { (( EUID == 0 )); }
+fi
 source "${SCRIPT_DIR}/lib/operations.sh"
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/defaults.sh"
