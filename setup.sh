@@ -60,7 +60,6 @@ REQUIRED_LIBS=(
   "lib/operations.sh"
   "lib/docker.sh"
   "lib/defaults.sh"
-  "lib/storage.sh"
 )
 for lib in "${REQUIRED_LIBS[@]}"; do
   [[ -f "${SCRIPT_DIR}/${lib}" && ! -L "${SCRIPT_DIR}/${lib}" ]] || {
@@ -77,7 +76,11 @@ init_common_lib "$0"
 source "${SCRIPT_DIR}/lib/operations.sh"
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/defaults.sh"
-source "${SCRIPT_DIR}/lib/storage.sh"
+# Preserve the public defaults-before-storage load order when the optional
+# storage helper is present. The coordinator itself does not call it directly.
+if [[ -f "${SCRIPT_DIR}/lib/storage.sh" && ! -L "${SCRIPT_DIR}/lib/storage.sh" ]]; then
+  source "${SCRIPT_DIR}/lib/storage.sh"
+fi
 
 # Public setup contracts remain visible here while setup-main.sh owns their
 # executable implementations.
