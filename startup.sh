@@ -249,6 +249,9 @@ run_health_check() {
 # - Repository key use is limited to explicit bootstrap/development mode.
 # - Correct this selected identity, then run: sudo make key-health
 # - Root/systemd health uses: VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health
+# - lib/startup-filesystem.sh validates the schema and required secrets exactly once:
+#   schema_validate || return 1
+#   validate_required_secrets "$SECRETS_FILE" || return 1
 
 source "${SCRIPT_DIR}/lib/startup-config.sh"
 source "${SCRIPT_DIR}/lib/startup-preview.sh"

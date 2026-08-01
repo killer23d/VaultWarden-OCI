@@ -125,8 +125,8 @@ _setup_full_dry_run() {
   done
   bash -n "$secrets" || { log_error "Secrets setup script failed syntax validation."; return 1; }
 
-  local -a common=(--dry-run) auto=() skip=() force=() latest=() device=() _sops_flags=()
-  [[ "$AUTO_MODE" == true ]] && auto=(--auto)
+  local -a common=(--dry-run) _auto=() skip=() force=() latest=() device=() _sops_flags=()
+  [[ "$AUTO_MODE" == true ]] && _auto=(--auto)
   [[ "$SKIP_DEPS" == true ]] && skip=(--skip-deps)
   [[ "$FORCE" == true ]] && force=(--force)
   [[ "$USE_LATEST" == true ]] && latest=(--use-latest)
@@ -136,14 +136,14 @@ _setup_full_dry_run() {
 
   log_header "VaultWarden-OCI Setup - Read-only Preview"
   log_info "[DRY RUN] Operation locks and operation state will not be acquired or created."
-  "$system" "${auto[@]}" "${skip[@]}" "${latest[@]}" "${common[@]}" "${force[@]}" "${device[@]}" "${_sops_flags[@]}"
-  "$storage" setup "${auto[@]}" "${common[@]}" "${force[@]}" "${device[@]}"
+  "$system" "${_auto[@]}" "${skip[@]}" "${latest[@]}" "${common[@]}" "${force[@]}" "${device[@]}" "${_sops_flags[@]}"
+  "${SCRIPT_DIR}/utilities/setup-storage.sh" setup "${_auto[@]}" "${common[@]}" "${force[@]}" "${device[@]}"
   "$env_setup" --domain "$DOMAIN" --email "$ADMIN_EMAIL" "${latest[@]}" "${common[@]}" "${force[@]}" "${device[@]}"
   local force_text=""
   [[ "$FORCE" == true ]] && force_text=" --force"
   log_info "[DRY RUN] Would run: ${secrets} bootstrap --dry-run${force_text}"
-  "$firewall" --phase ufw "${auto[@]}" "${common[@]}" "${force[@]}"
-  "$firewall" --phase iptables "${auto[@]}" "${common[@]}" "${force[@]}"
+  "$firewall" --phase ufw "${_auto[@]}" "${common[@]}" "${force[@]}"
+  "$firewall" --phase iptables "${_auto[@]}" "${common[@]}" "${force[@]}"
   if [[ "$AUTO_MODE" == true ]]; then
     log_info "[DRY RUN] Would run: ${secrets} configure --auto --skip-optional --quiet-summary --dry-run"
   else
