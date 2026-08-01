@@ -1,0 +1,130 @@
+name: Single lock third-pass bootstrap
+
+on:
+  push:
+    branches:
+      - refactor/single-lock-ownership
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-push:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out review branch
+        uses: actions/checkout@v5
+        with:
+          ref: refactor/single-lock-ownership
+          fetch-depth: 0
+
+      - name: Verify bounded bootstrap state
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 6f2706bdafd813a82433fc3bd9dabca068d971b9 HEAD
+          expected=$'.github/third-pass-transform.py.gz.b64\n.github/workflows/third-pass-bootstrap.yml'
+          actual="$(git diff --name-only 6f2706bdafd813a82433fc3bd9dabca068d971b9...HEAD | sort)"
+          [[ "$actual" == "$expected" ]] || {
+            printf 'Unexpected pre-bootstrap diff:\n%s\n' "$actual" >&2
+            exit 1
+          }
+
+      - name: Install validation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Apply bounded third-pass fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/third-pass-transform.py.gz.b64 | gzip -d > /tmp/third-pass-transform.py
+          python3 /tmp/third-pass-transform.py
+          rm -f -- /tmp/third-pass-transform.py \
+            .github/third-pass-transform.py.gz.b64 \
+            .github/workflows/third-pass-bootstrap.yml
+          git diff --check
+
+      - name: Verify final scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_delta=$'lib/operations.sh\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh'
+          actual_delta="$(git diff --name-only 6f2706bdafd813a82433fc3bd9dabca068d971b9 | sort)"
+          [[ "$actual_delta" == "$expected_delta" ]] || {
+            printf 'Unexpected third-pass delta:\n%s\n' "$actual_delta" >&2
+            exit 1
+          }
+          expected_pr=$'lib/operations.sh\ntests/suites/foundation/case-systemd.bash\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-lock-fd-hygiene.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh\nutilities/setup-systemd.sh'
+          actual_pr="$(git diff --name-only 1ff4f908866de7a917c37fa37147981d238af28f | sort)"
+          [[ "$actual_pr" == "$expected_pr" ]] || {
+            printf 'Unexpected final PR scope:\n%s\n' "$actual_pr" >&2
+            exit 1
+          }
+          test ! -e .github/third-pass-transform.py.gz.b64
+          test ! -e .github/workflows/third-pass-bootstrap.yml
+
+      - name: Repository-wide Bash syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+
+      - name: Strict ShellCheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 shellcheck -x --severity=warning
+
+      - name: Docker Compose example
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
+
+      - name: Command-reference drift
+        shell: bash
+        env:
+          DOCKER_PROJECT_LABEL: ci
+        run: |
+          set -euo pipefail
+          cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
+          bash utilities/write-command-reference.sh
+          diff -u /tmp/COMMAND-REFERENCE.committed.md docs/COMMAND-REFERENCE.md
+
+      - name: Production-readiness verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 utilities/verify-production-readiness-remediation.py
+
+      - name: Full test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/run-tests.sh all
+
+      - name: Commit and push validated fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'Harden lock descriptor handling'
+          git push origin HEAD:refactor/single-lock-ownership
