@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
-CORE="${SCRIPT_DIR}/lib/setup-main.sh"
+CORE="${SCRIPT_DIR}/setup-main.sh"
 cd "$PROJECT_ROOT"
 
 [[ -f "$CORE" && ! -L "$CORE" ]] || {

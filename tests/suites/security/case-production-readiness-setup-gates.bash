@@ -8,7 +8,7 @@ fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS %s\n' "$*"; }
 
 [[ -f setup.sh ]] || fail "setup.sh is missing"
-[[ -f lib/setup-main.sh ]] || fail "lib/setup-main.sh is missing"
+[[ -f setup-main.sh ]] || fail "setup-main.sh is missing"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT INT TERM HUP
@@ -26,7 +26,7 @@ chmod 0640 "$LOCK_GLOBAL" "$LOCK_SETUP"
 GLOBAL_BEFORE="$(stat -c '%a:%s:%Y' "$LOCK_GLOBAL")"
 SETUP_BEFORE="$(stat -c '%a:%s:%Y' "$LOCK_SETUP")"
 
-cat > "$FIXTURE/lib/setup-main.sh" <<'EOF_CORE'
+cat > "$FIXTURE/setup-main.sh" <<'EOF_CORE'
 #!/usr/bin/env bash
 printf 'core:%s\n' "$*" >> "${VW_TEST_LOG:?}"
 exit "${VW_TEST_CORE_RC:-0}"
