@@ -184,30 +184,32 @@ EXAMPLES:
 VaultWarden-OCI Startup Script
 
 USAGE:
-  sudo ./startup.sh [OPTIONS]    # Start all services (root-operated path)
-  sudo ./startup.sh stop         # Stop all services
+  sudo ./startup.sh [OPTIONS]    # Validate current local state and start services
+  sudo ./startup.sh --repair    # Reconcile supported runtime drift, then start
+  sudo ./startup.sh stop        # Stop all services
 
 SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
 
 STARTUP OPTIONS:
+  --repair         Explicitly repair permissions, managed container orphans,
+                   egress NAT, and DNS before starting. Does not update images.
   --force          Recreate containers so compose/.env metadata is regenerated
   --skip-health    Skip post-startup health check
-  --skip-pull      Skip docker compose pull (use for systemd restarts
-                   or when images are already current)
   --background     Start services in background (daemon mode)
-  --skip-egress-fix  Skip automatic egress NAT remediation for
-                      non-internal VaultWarden Docker bridge networks
   --dry-run        Show what would be done without executing
+  --skip-pull      Deprecated compatibility no-op; startup never pulls images
+  --skip-egress-fix  Deprecated compatibility no-op; startup validates NAT
 
 GLOBAL OPTIONS:
   --help, -h       Show this help
   --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-  sudo ./startup.sh               # Normal startup (pulls latest images)
-  sudo ./startup.sh --skip-pull   # Restart without pulling (fast path)
-  sudo ./startup.sh --force       # Recreate containers after .env/compose changes
+  sudo ./startup.sh               # Validate and start with local pinned images
+  sudo ./startup.sh --repair      # Explicitly reconcile supported runtime drift
+  sudo ./utilities/maintenance-update.sh --images  # Acquire/refresh images
+  sudo ./startup.sh --force       # Recreate containers without pulling images
   sudo ./startup.sh --background  # Start in daemon mode
   sudo ./startup.sh stop          # Stop all services
 ```
@@ -1520,7 +1522,7 @@ USAGE:
 DESCRIPTION:
     Prepares the host system for VaultWarden-OCI: installs dependencies
     (Docker, Age, SOPS, rclone, sqlite3), configures user permissions, and
-    sets script execute bits. Called automatically by setup.sh phase 1.
+    sets script execute bits. Called automatically by setup.sh during phase 1.
 
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
