@@ -111,7 +111,7 @@ _operation_prepare_state_dir() {
 }
 
 _operation_prepare_lock_file() {
-    local lock_path="$1" lock_dir current_mode current_uid current_gid desired_gid old_umask
+    local lock_path="$1" lock_dir current_mode current_uid current_gid current_links desired_gid old_umask
 
     lock_dir="$(dirname "$lock_path")"
     desired_gid="$(id -g 2>/dev/null)" || {
@@ -148,6 +148,14 @@ _operation_prepare_lock_file() {
         umask "$old_umask"
     fi
 
+    current_links="$(stat -c '%h' "$lock_path" 2>/dev/null \
+        || stat -f '%l' "$lock_path" 2>/dev/null || true)"
+    if [[ "$current_links" != 1 ]]; then
+        _operation_log error "Operation lock path must have exactly one hard link: ${lock_path}"
+        _operation_log error "Inspect it before retrying: sudo ls -li '${lock_path}'"
+        return 1
+    fi
+
     current_mode="$(stat -c '%a' "$lock_path" 2>/dev/null \
         || stat -f '%Lp' "$lock_path" 2>/dev/null || true)"
     if [[ "$current_mode" != 660 ]]; then
@@ -176,8 +184,11 @@ _operation_prepare_lock_file() {
         || stat -f '%u' "$lock_path" 2>/dev/null || true)"
     current_gid="$(stat -c '%g' "$lock_path" 2>/dev/null \
         || stat -f '%g' "$lock_path" 2>/dev/null || true)"
+    current_links="$(stat -c '%h' "$lock_path" 2>/dev/null \
+        || stat -f '%l' "$lock_path" 2>/dev/null || true)"
     if [[ ! -f "$lock_path" || -L "$lock_path" || "$current_mode" != 660 \
-        || "$current_uid" != "$EUID" || "$current_gid" != "$desired_gid" ]]; then
+        || "$current_uid" != "$EUID" || "$current_gid" != "$desired_gid" \
+        || "$current_links" != 1 ]]; then
         _operation_log error "Operation lock metadata could not be established safely: ${lock_path}"
         return 1
     fi
@@ -285,7 +296,7 @@ _operation_path_identity() {
 }
 
 _operation_lock_path_is_valid() {
-    local path="$1" mode owner_uid owner_gid expected_gid
+    local path="$1" mode owner_uid owner_gid link_count expected_gid
     [[ -f "$path" && ! -L "$path" ]] || return 1
     expected_gid="$(id -g 2>/dev/null)" || return 1
     mode="$(stat -c '%a' "$path" 2>/dev/null \
@@ -294,7 +305,10 @@ _operation_lock_path_is_valid() {
         || stat -f '%u' "$path" 2>/dev/null || true)"
     owner_gid="$(stat -c '%g' "$path" 2>/dev/null \
         || stat -f '%g' "$path" 2>/dev/null || true)"
-    [[ "$mode" == "660" && "$owner_uid" == "$EUID" && "$owner_gid" == "$expected_gid" ]]
+    link_count="$(stat -c '%h' "$path" 2>/dev/null \
+        || stat -f '%l' "$path" 2>/dev/null || true)"
+    [[ "$mode" == "660" && "$owner_uid" == "$EUID" \
+        && "$owner_gid" == "$expected_gid" && "$link_count" == 1 ]]
 }
 
 _operation_open_file_identity() {

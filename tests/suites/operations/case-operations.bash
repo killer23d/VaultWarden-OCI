@@ -1407,6 +1407,30 @@ for kind in symlink directory fifo; do
 done
 pass "operation lock preparation rejects symlink and non-regular paths"
 
+hardlink_dir="$TMP/reject-hardlink"
+mkdir -p "$hardlink_dir"
+hardlink_target="$hardlink_dir/target"
+hardlink_path="$hardlink_dir/test.lock"
+: > "$hardlink_target"
+chmod 0644 "$hardlink_target"
+ln "$hardlink_target" "$hardlink_path"
+set +e
+hardlink_output="$(VW_OPERATIONS_STATE_DIR="$hardlink_dir/state" \
+    VW_TEST_LOCK="$hardlink_path" "$BASH" -c '
+        set -euo pipefail
+        source "$1/lib/operations.sh"
+        _operation_prepare_lock_file "$VW_TEST_LOCK"
+    ' _ "$ROOT" 2>&1)"
+hardlink_rc=$?
+set -e
+[[ "$hardlink_rc" -ne 0 ]] || fail "multi-link operation lock path was accepted"
+[[ "$hardlink_output" == *"exactly one hard link"* ]] \
+    || fail "multi-link operation lock rejection was not actionable: $hardlink_output"
+hardlink_mode="$(stat -c '%a' "$hardlink_target" 2>/dev/null || stat -f '%Lp' "$hardlink_target")"
+[[ "$hardlink_mode" == 644 ]] \
+    || fail "operation hard-link rejection changed target mode to $hardlink_mode"
+pass "operation lock preparation rejects hard links before metadata changes"
+
 ! grep -Fq 'getent group vaultwarden' "$OPS" \
     || fail "operations still depends on the vaultwarden group"
 ! grep -Fq 'setup-systemd.sh install' "$OPS" \

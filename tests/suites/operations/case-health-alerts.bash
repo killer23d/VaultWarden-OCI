@@ -981,12 +981,17 @@ second_inode="$(_health_path_identity "$VW_HEALTH_LOCK_FILE")"
 _release_readonly_health_lock || fail "health lock metadata test release failed"
 pass "health lock ownership, mode, and inode remain stable"
 
-for kind in symlink directory fifo; do
+for kind in symlink directory fifo hardlink; do
     path="$TMP/unsafe-$kind.lock"
     case "$kind" in
         symlink) : > "$TMP/unsafe-target"; ln -s "$TMP/unsafe-target" "$path" ;;
         directory) mkdir "$path" ;;
         fifo) mkfifo "$path" ;;
+        hardlink)
+            : > "$TMP/unsafe-hardlink-target"
+            chmod 0644 "$TMP/unsafe-hardlink-target"
+            ln "$TMP/unsafe-hardlink-target" "$path"
+            ;;
     esac
     VW_HEALTH_LOCK_FILE="$path"
     set +e
@@ -995,8 +1000,30 @@ for kind in symlink directory fifo; do
     set -e
     [[ "$rc" -eq 3 ]] || fail "$kind health lock returned $rc instead of 3"
     [[ -z "$HEALTH_LOCK_FD" ]] || fail "$kind health lock leaked a descriptor"
+    if [[ "$kind" == hardlink ]]; then
+        hardlink_mode="$(stat -c '%a' "$TMP/unsafe-hardlink-target" 2>/dev/null \
+            || stat -f '%Lp' "$TMP/unsafe-hardlink-target")"
+        [[ "$hardlink_mode" == 644 ]] \
+            || fail "health hard-link rejection changed target mode to $hardlink_mode"
+    fi
 done
-pass "health lock rejects symlink and non-regular paths"
+pass "health lock rejects symlink, hard-link, and non-regular paths"
+
+unsafe_parent="$TMP/unsafe-parent"
+unsafe_child="$unsafe_parent/private"
+mkdir -p "$unsafe_child"
+chmod 0777 "$unsafe_parent"
+chmod 0700 "$unsafe_child"
+VW_HEALTH_LOCK_FILE="$unsafe_child/health.lock"
+set +e
+_acquire_readonly_health_lock
+rc=$?
+set -e
+[[ "$rc" -eq 3 && -z "$HEALTH_LOCK_FD" ]] \
+    || fail "health lock accepted a safe-looking directory below a writable ancestor"
+[[ ! -e "$VW_HEALTH_LOCK_FILE" ]] \
+    || fail "health lock created a file below an unsafe ancestor"
+pass "health lock validates the full directory ancestry"
 
 VW_HEALTH_LOCK_FILE="$TMP/chmod-failure.lock"
 : > "$VW_HEALTH_LOCK_FILE"

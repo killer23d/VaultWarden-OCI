@@ -182,11 +182,11 @@ _health_lock_fd_path() {
 }
 
 _health_lock_directory_is_trusted() {
-    local dir="$1" metadata mode uid _gid _links mode_value
+    local dir="$1" metadata mode uid gid _links mode_value
     [[ -d "$dir" && ! -L "$dir" ]] || return 1
     metadata="$(_health_stat_mode_uid_gid_links "$dir")" || return 1
-    IFS=: read -r mode uid _gid _links <<< "$metadata"
-    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" =~ ^[0-9]+$ ]] || return 1
+    IFS=: read -r mode uid gid _links <<< "$metadata"
+    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || return 1
     mode_value=$((8#$mode))
 
     if [[ "$uid" == "$EUID" ]] && (( (mode_value & 0022) == 0 )); then
@@ -195,10 +195,11 @@ _health_lock_directory_is_trusted() {
     if [[ "$uid" == 0 ]] && (( (mode_value & 0022) == 0 )); then
         return 0
     fi
-    if (( EUID == 0 )) && [[ "$uid" == 0 ]] && (( (mode_value & 0002) == 0 )); then
+    if (( EUID == 0 )) && [[ "$uid" == 0 && "$gid" == 0 ]] \
+        && (( (mode_value & 0002) == 0 )); then
         return 0
     fi
-    [[ "$uid" == 0 ]] \
+    [[ "$uid" == 0 && "$gid" == 0 ]] \
         && (( (mode_value & 01000) != 0 )) \
         && (( (mode_value & 0002) != 0 ))
 }
@@ -209,6 +210,12 @@ _health_prepare_lock_directory() {
         log_error "Health coordination lock directory must be absolute: $dir"
         return 3
     }
+
+    parent="$(dirname "$dir")"
+    if [[ "$parent" != "$dir" ]]; then
+        _health_prepare_lock_directory "$parent" || return $?
+    fi
+
     if [[ -e "$dir" || -L "$dir" ]]; then
         if ! _health_lock_directory_is_trusted "$dir"; then
             log_error "Health coordination directory is unsafe: $dir"
@@ -217,12 +224,6 @@ _health_prepare_lock_directory() {
         return 0
     fi
 
-    parent="$(dirname "$dir")"
-    [[ "$parent" != "$dir" ]] || {
-        log_error "Cannot prepare health coordination directory: $dir"
-        return 3
-    }
-    _health_prepare_lock_directory "$parent" || return $?
     old_umask="$(umask)"
     umask 0077
     if ! mkdir -- "$dir" 2>/dev/null; then
