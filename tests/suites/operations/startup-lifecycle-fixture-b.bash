@@ -72,7 +72,35 @@ exit 93
 EOF_MUTATION
   chmod 0755 "$MOCK_BIN/$command_name"
 done
-chmod 0755 "$MOCK_BIN/docker" "$MOCK_BIN/iptables" "$MOCK_BIN/getent" "$MOCK_BIN/netfilter-persistent" "$MOCK_BIN/python3"
+cat > "$MOCK_BIN/install" <<'EOF_INSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
+is_dir=false
+mode=""
+targets=()
+while (( $# > 0 )); do
+  case "$1" in
+    -d) is_dir=true; shift ;;
+    -m) mode="$2"; shift 2 ;;
+    -o|-g) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) targets+=("$1"); shift ;;
+  esac
+done
+targets+=("$@")
+if [[ "$is_dir" == true ]]; then
+  mkdir -p -- "${targets[@]}"
+  [[ -z "$mode" ]] || /bin/chmod "$mode" -- "${targets[@]}"
+elif (( ${#targets[@]} >= 2 )); then
+  destination="${targets[${#targets[@]}-1]}"
+  mkdir -p -- "$(dirname -- "$destination")"
+  : > "$destination"
+  [[ -z "$mode" ]] || /bin/chmod "$mode" -- "$destination"
+fi
+EOF_INSTALL
+chmod 0755 "$MOCK_BIN/install"
+chmod 0755 "$MOCK_BIN/docker" "$MOCK_BIN/iptables" "$MOCK_BIN/getent" "$MOCK_BIN/netfilter-persistent" "$MOCK_BIN/python3" "$MOCK_BIN/install"
 
 run_startup() {
   local arg

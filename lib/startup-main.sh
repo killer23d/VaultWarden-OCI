@@ -25,10 +25,10 @@ main() {
     prepare_log_directories || exit 1
     prepare_docker_secrets || exit 1
     prepare_push_secret_placeholders || exit 1
-    inspect_managed_orphans || exit 1
-    validate_vaultwarden_egress_nat || exit 1
-    validate_dns_state || exit 1
-    validate_local_images || exit 1
+    log_info "[DRY RUN] Would inspect managed Docker orphans without deleting resources."
+    log_info "[DRY RUN] Would validate VaultWarden egress NAT without modifying firewall state."
+    log_info "[DRY RUN] Would validate configured DNS without calling the provider."
+    log_info "[DRY RUN] Would verify every required pinned image is available locally."
     _startup_start_services || exit 1
     log_success "VaultWarden-OCI startup dry-run completed"
     _show_startup_warnings

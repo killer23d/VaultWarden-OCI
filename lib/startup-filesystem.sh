@@ -30,9 +30,11 @@ prepare_directories() {
 prepare_log_directories() {
   local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
   local logs_root="${project_state_dir}/logs"
-  local puid pgid service owner group path bad
+  local puid pgid caddy_uid caddy_gid service owner group path bad
   puid="$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")"
   pgid="$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")"
+  caddy_uid="${CADDY_UID:-2000}"
+  caddy_gid="${CADDY_GID:-2000}"
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would create missing runtime log directories and files only."
@@ -53,8 +55,8 @@ prepare_log_directories() {
     owner="$puid"
     group="$pgid"
     if [[ "$service" == "caddy" ]]; then
-      owner=2000
-      group=2000
+      owner="$caddy_uid"
+      group="$caddy_gid"
     fi
     if [[ ! -d "$path" ]]; then
       install -d -m 0750 -o "$owner" -g "$group" "$path" || {
@@ -84,7 +86,7 @@ prepare_log_directories() {
   local caddy_log
   for caddy_log in "${logs_root}/caddy/access.log" "${logs_root}/caddy/security.log"; do
     if [[ ! -e "$caddy_log" ]]; then
-      install -m 0640 -o 2000 -g 2000 /dev/null "$caddy_log" || {
+      install -m 0640 -o "$caddy_uid" -g "$caddy_gid" /dev/null "$caddy_log" || {
         log_error "Failed to create required Caddy log file: $caddy_log"
         return 1
       }

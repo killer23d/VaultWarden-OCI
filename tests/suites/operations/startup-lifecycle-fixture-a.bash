@@ -26,8 +26,10 @@ log_hint(){ printf 'HINT %s\n' "$*" >&2; }
 EOF_LOG
 cat > "$FIXTURE/lib/defaults.sh" <<'EOF_DEFAULTS'
 readonly _VW_DEFAULT_STATE_DIR="${VW_TEST_STATE_DIR:?}"
-readonly _VW_DEFAULT_PUID=0
-readonly _VW_DEFAULT_PGID=0
+readonly _VW_DEFAULT_PUID="$(id -u)"
+readonly _VW_DEFAULT_PGID="$(id -g)"
+readonly CADDY_UID="$(id -u)"
+readonly CADDY_GID="$(id -g)"
 readonly -a _VW_DEFAULT_LOG_SERVICES=(vaultwarden caddy postfix)
 readonly -a _VW_DEFAULT_CRITICAL_SERVICES=(vaultwarden caddy)
 readonly -a _VW_DEFAULT_EMAIL_MODES=(auto api smtp direct host)
@@ -44,7 +46,7 @@ load_project_environment(){
   AGE_KEY_FILE="$SOPS_AGE_KEY_FILE"
   export PROJECT_STATE_DIR DOMAIN DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE SECRETS_FILE AGE_KEY_FILE
 }
-get_config_value(){ case "$1" in PUID|PGID) printf '0';; BACKUP_DIR) printf '%s/backups' "${VW_TEST_STATE_DIR:?}";; *) printf '%s' "${2:-}";; esac; }
+get_config_value(){ case "$1" in PUID) id -u;; PGID) id -g;; BACKUP_DIR) printf '%s/backups' "${VW_TEST_STATE_DIR:?}";; *) printf '%s' "${2:-}";; esac; }
 _read_env_value(){ :; }
 EOF_CONFIG
 cat > "$FIXTURE/lib/common.sh" <<'EOF_COMMON'
