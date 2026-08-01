@@ -1,0 +1,133 @@
+name: Fix health descriptor path lifetime
+
+on:
+  push:
+    branches:
+      - refactor/single-lock-ownership
+
+permissions:
+  contents: write
+
+jobs:
+  fix-validate-push:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out review branch
+        uses: actions/checkout@v5
+        with:
+          ref: refactor/single-lock-ownership
+          fetch-depth: 0
+
+      - name: Apply bounded descriptor fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 01bf1f37b64c3b25091eb3a9930a70a58ef7be8a HEAD
+          expected='.github/workflows/fix-health-fd-path.yml'
+          actual="$(git diff --name-only 01bf1f37b64c3b25091eb3a9930a70a58ef7be8a...HEAD)"
+          [[ "$actual" == "$expected" ]] || {
+            printf 'Unexpected pre-fix diff:\n%s\n' "$actual" >&2
+            exit 1
+          }
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('utilities/maintenance-health.sh')
+          text = path.read_text()
+
+          old_helper = '''_health_lock_fd_path() {
+              local fd="$1" owner_pid="$BASHPID"
+              if [[ -e "/proc/${owner_pid}/fd/${fd}" ]]; then
+                  printf '/proc/%s/fd/%s\\n' "$owner_pid" "$fd"
+              else
+                  printf '/dev/fd/%s\\n' "$fd"
+              fi
+          }
+          '''
+          new_helper = '''_health_lock_fd_path() {
+              local fd="$1" owner_pid="$2"
+              if [[ -e "/proc/${owner_pid}/fd/${fd}" ]]; then
+                  printf '/proc/%s/fd/%s\\n' "$owner_pid" "$fd"
+              else
+                  printf '/dev/fd/%s\\n' "$fd"
+              fi
+          }
+          '''
+          if text.count(old_helper) != 1:
+              raise SystemExit(f'expected one fd-path helper, found {text.count(old_helper)}')
+          text = text.replace(old_helper, new_helper)
+
+          old_open = '''_health_open_lock_matches_path() {
+              local lock_path="$1" fd="$2" fd_path path_identity fd_identity
+              fd_path="$(_health_lock_fd_path "$fd")"
+          '''
+          new_open = '''_health_open_lock_matches_path() {
+              local lock_path="$1" fd="$2" fd_path path_identity fd_identity owner_pid="$BASHPID"
+              fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
+          '''
+          if text.count(old_open) != 1:
+              raise SystemExit(f'expected one open-identity caller, found {text.count(old_open)}')
+          text = text.replace(old_open, new_open)
+
+          old_metadata = '''_health_establish_lock_metadata() {
+              local lock_path="$1" fd="$2" fd_path metadata mode uid gid links
+              fd_path="$(_health_lock_fd_path "$fd")"
+          '''
+          new_metadata = '''_health_establish_lock_metadata() {
+              local lock_path="$1" fd="$2" fd_path metadata mode uid gid links owner_pid="$BASHPID"
+              fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
+          '''
+          if text.count(old_metadata) != 1:
+              raise SystemExit(f'expected one metadata caller, found {text.count(old_metadata)}')
+          path.write_text(text.replace(old_metadata, new_metadata))
+          PY
+
+          rm -f -- .github/workflows/fix-health-fd-path.yml
+          git diff --check
+          bash -n utilities/maintenance-health.sh
+
+      - name: Install operations test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Run operations suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/run-tests.sh operations
+
+      - name: Verify scope and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_delta="$(git diff --name-only 01bf1f37b64c3b25091eb3a9930a70a58ef7be8a | sort)"
+          [[ "$actual_delta" == 'utilities/maintenance-health.sh' ]] || {
+            printf 'Unexpected descriptor-fix delta:\n%s\n' "$actual_delta" >&2
+            exit 1
+          }
+
+          expected_pr=$'lib/operations.sh\nsystemd/vaultwarden-health.service\ntests/suites/foundation/case-systemd.bash\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-lock-fd-hygiene.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh\nutilities/setup-systemd.sh'
+          actual_pr="$(git diff --name-only 1ff4f908866de7a917c37fa37147981d238af28f | sort)"
+          [[ "$actual_pr" == "$expected_pr" ]] || {
+            printf 'Unexpected final PR scope:\n%s\n' "$actual_pr" >&2
+            exit 1
+          }
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'Fix health descriptor path lifetime'
+          git push origin HEAD:refactor/single-lock-ownership
