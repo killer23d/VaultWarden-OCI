@@ -105,6 +105,7 @@ sanitize_help_output() {
             -e '/^docker\.sh:.*auto-detect/d' \
             -e '/^lib\/docker\.sh:.*auto-detect/d' \
             -e 's|/[^[:space:]]*/utilities/notify-failure\.sh|utilities/notify-failure.sh|g' \
+            -e 's/Called automatically by setup\.sh phase 1\./Called automatically by setup.sh during phase 1./g' \
             -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
             -e 's/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\([+-][0-9]\{4\}\|Z\)/TIMESTAMP/g' \
             -e 's/\b[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\b/DATE/g' \

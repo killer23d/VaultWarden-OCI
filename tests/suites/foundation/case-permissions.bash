@@ -445,13 +445,19 @@ set -e
     || fail 'Caddy execute-bit failure printed a correction success message'
 pass 'Caddy execute-bit repair failure is nonzero and truthful'
 
-startup_fix_line="$(awk '/if ! auto_fix_critical_permissions/{print NR; exit}' "$ROOT/startup.sh")"
-startup_state_line="$(awk '/check_project_state_ready \|\| exit 1/{print NR; exit}' "$ROOT/startup.sh")"
-[[ -n "$startup_fix_line" && -n "$startup_state_line" && "$startup_fix_line" -lt "$startup_state_line" ]] \
-    || fail 'startup does not block on required permission repair before later state mutation'
-grep -Fq 'Required permission repair failed; startup stopped before state or service mutation.' "$ROOT/startup.sh" \
-    || fail 'startup permission failure lacks an actionable fail-closed diagnostic'
-pass 'startup checks required permission repair before later mutation'
+startup_main="$ROOT/lib/startup-main.sh"
+grep -Fq 'validate_critical_permissions || exit 1' "$startup_main" \
+    || fail 'ordinary startup does not enforce validation-only permission checks'
+validation_line="$(awk '/validate_critical_permissions \|\| exit 1/{print NR; exit}' "$startup_main")"
+prepare_line="$(awk '/operation_set_phase "prepare"/{print NR; exit}' "$startup_main")"
+start_line="$(awk '/operation_set_phase "start"/{print NR; exit}' "$startup_main")"
+[[ -n "$validation_line" && -n "$prepare_line" && -n "$start_line" \
+   && "$validation_line" -lt "$prepare_line" && "$validation_line" -lt "$start_line" ]] \
+    || fail 'ordinary startup does not validate permissions before ephemeral preparation and service start'
+normal_prefix="$(awk '/if \[\[ "\$REPAIR" == "true" \]\]; then/{exit} {print}' "$startup_main")"
+! grep -Fq 'repair_critical_permissions' <<< "$normal_prefix" \
+    || fail 'ordinary startup reaches permission repair before the explicit --repair branch'
+pass 'ordinary startup validates permissions before preparation and reserves repair for --repair'
 
 age_warn_pattern="Age key ownership was .*expected.*ubunt""u"
 ! grep -RIn "$age_warn_pattern" . --exclude-dir=.git >/tmp/vw-age-warn.$$ || { cat /tmp/vw-age-warn.$$ >&2; rm -f /tmp/vw-age-warn.$$; fail 'stale ubuntu age-key warning found'; }

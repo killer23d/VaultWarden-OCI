@@ -8,11 +8,11 @@ printf 'docker:%s\n' "$*" >> "${VW_TEST_INVOCATION_LOG:?}"
 case "${1:-}:${2:-}:${3:-}" in
   info::) exit 0 ;;
   compose:config:--services)
-    printf 'vaultwarden\ncaddy\npostfix\n'
+    printf 'init-permissions\nvaultwarden\ncaddy\npostfix\n'
     exit 0
     ;;
   compose:config:--images)
-    printf 'vaultwarden/server:1.0\nvaultwarden-oci-caddy\npostfix:1.0\n'
+    printf 'busybox:1.36.1\nvaultwarden/server:1.0\nvaultwarden-oci-caddy\npostfix:1.0\n'
     exit 0
     ;;
   ps:-a:--filter)
@@ -145,4 +145,7 @@ run_startup
 ! grep -Eq '^(chown|chmod):' "$INVOCATIONS" || fail "normal startup ran corrective chown/chmod"
 compose_up="$(grep '^docker:compose up ' "$INVOCATIONS" || true)"
 [[ "$compose_up" == *"--pull never"* ]] || fail "normal startup did not pass --pull never"
+[[ "$compose_up" == *"--no-deps"* ]] || fail "normal startup did not bypass Compose dependencies"
+[[ "$compose_up" == *"vaultwarden caddy postfix"* ]] || fail "normal startup did not explicitly name runtime services"
+[[ "$compose_up" != *"init-permissions"* ]] || fail "normal startup invoked mutating init-permissions service"
 [[ "$compose_up" != *"--remove-orphans"* ]] || fail "normal startup allowed implicit orphan deletion"

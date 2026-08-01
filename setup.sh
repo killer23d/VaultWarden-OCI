@@ -18,6 +18,15 @@ case "${1:-}" in
     ;;
 esac
 
+# Preserve metadata/help behavior regardless of argument position (for example,
+# `setup.sh install --version`) without requiring root or entering an operation.
+for arg in "$@"; do
+  case "$arg" in
+    --version|-V) exec bash "$CORE" --version ;;
+    --help|-h) exec bash "$CORE" --help ;;
+  esac
+done
+
 FULL_DRY_RUN=false
 for arg in "$@"; do
   [[ "$arg" == "--dry-run" ]] && FULL_DRY_RUN=true
@@ -150,7 +159,11 @@ trap 'rc=$?; operation_release "$rc"; exit "$rc"' EXIT
 trap 'operation_release 130; exit 130' INT
 trap 'operation_release 143; exit 143' HUP TERM
 
-bash "$CORE" "$@"
+if [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
+  env SOPS_VERSION="$SOPS_VERSION" bash "$CORE" "$@"
+else
+  bash "$CORE" "$@"
+fi
 operation_set_phase "images" "Acquiring initial pinned images"
 _setup_acquire_initial_images
 log_success "Setup and initial pinned image acquisition completed."

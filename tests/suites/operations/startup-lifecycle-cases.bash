@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 
-pass_normal="normal startup validates without repair, cleanup, DNS mutation, NAT mutation, or image pull"
+pass_normal="normal startup validates without repair, cleanup, DNS mutation, NAT mutation, image pull, or init-permissions"
 printf 'PASS %s\n' "$pass_normal"
 
 run_startup VW_TEST_PERMISSION_DRIFT=1
@@ -40,7 +40,13 @@ assert_no_compose_start "missing image"
 
 run_startup VW_TEST_ORPHAN_ROW=$'abc123\tremoved-service\texited\tvaultwarden_old' --repair
 (( STARTUP_RC == 0 )) || fail "explicit repair startup failed: $(cat "$OUTPUT")"
-for required in 'operation-acquire:--id startup --label Startup repair' permission-repair 'docker:rm -f -- abc123' nat-repair dns-repair 'docker:compose up -d --pull never'; do
+for required in \
+  'operation-acquire:--id startup --label Startup repair' \
+  permission-repair \
+  'docker:rm -f -- abc123' \
+  nat-repair \
+  dns-repair \
+  'docker:compose up -d --pull never --no-deps vaultwarden caddy postfix'; do
   grep -Fq "$required" "$INVOCATIONS" || fail "explicit repair omitted: $required"
 done
 line_guard="$(grep -n -m1 '^operation-acquire:--id startup --label Startup repair ' "$INVOCATIONS" | cut -d: -f1)"
@@ -55,6 +61,7 @@ line_start="$(grep -n -m1 '^docker:compose up ' "$INVOCATIONS" | cut -d: -f1)"
   || fail "explicit repair order is not guard -> permission -> orphan -> NAT -> DNS -> start"
 ! grep -Eq '^docker:(compose pull|pull )' "$INVOCATIONS" || fail "repair mode silently updated images"
 ! grep -Eq '^docker:.*prune' "$INVOCATIONS" || fail "repair mode invoked broad Docker cleanup"
+! grep -Fq 'init-permissions' "$INVOCATIONS" || fail "repair mode invoked mutating init-permissions through Compose"
 
 for failure_case in permission orphan nat dns; do
   case "$failure_case" in
@@ -67,7 +74,7 @@ for failure_case in permission orphan nat dns; do
   (( STARTUP_RC != 0 )) || fail "$failure_case repair failure returned success"
   assert_no_compose_start "$failure_case repair failure"
 done
-printf 'PASS explicit repair is guarded, ordered, fail-fast, and excludes image updates\n'
+printf 'PASS explicit repair is guarded, ordered, fail-fast, and excludes image updates and init-permissions\n'
 
 bash -n "${ROOT}/startup.sh" || fail "startup.sh must pass Bash syntax validation"
 printf 'PASS startup lifecycle hardening contracts\n'

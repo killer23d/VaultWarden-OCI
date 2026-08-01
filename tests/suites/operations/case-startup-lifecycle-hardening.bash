@@ -60,6 +60,10 @@ assert_contains "$startup" 'compose_args+=(--force-recreate)' \
   "forced restart must still request Compose recreation"
 assert_contains "$startup" '--pull never' \
   "ordinary startup must enforce a no-pull Compose policy"
+assert_contains "$startup" '--no-deps' \
+  "ordinary startup must bypass mutating Compose dependencies"
+assert_contains "$startup" '$0 != "init-permissions"' \
+  "ordinary startup must exclude the mutating init-permissions service"
 assert_not_contains "$startup" 'docker compose pull --quiet' \
   "ordinary startup must not contain an image-pull operation"
 assert_not_contains "$startup" '--remove-orphans' \
@@ -143,7 +147,6 @@ assert_contains "$postfix_health" 'retries: 4' \
   "Postfix health retries must be bounded"
 assert_contains "$postfix_health" 'start_period: 20s' \
   "Postfix health start period must match the readiness grace window"
-
 
 # Public-entrypoint behavioral fixture and cases are kept in non-case helpers so
 # this registered case remains readable while the test runner sees one case.

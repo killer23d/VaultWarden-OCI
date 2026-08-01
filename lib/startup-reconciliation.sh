@@ -193,16 +193,27 @@ validate_local_images() {
 _startup_start_services() {
   log_info "Starting VaultWarden services with local images only..."
 
+  local -a services=()
+  mapfile -t services < <(docker compose config --services 2>/dev/null | awk 'NF && $0 != "init-permissions" && !seen[$0]++')
+  (( ${#services[@]} > 0 )) || {
+    log_error "No runnable Compose services were resolved."
+    return 1
+  }
+
+  # init-permissions is an explicit repair/bootstrap helper. Never allow its
+  # recursive chown/chmod workload to run during ordinary or repair startup.
   local compose_args=(
     up
     -d
     --pull never
+    --no-deps
   )
 
   if [[ "$FORCE_RESTART" == "true" ]]; then
     compose_args+=(--force-recreate)
     log_info "Force restart requested; Docker Compose will recreate existing containers."
   fi
+  compose_args+=("${services[@]}")
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would run: docker compose ${compose_args[*]}"
