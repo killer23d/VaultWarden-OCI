@@ -1219,8 +1219,10 @@ require 'return 4' "$HEALTH" \
   "health --fix guard infrastructure failures must be real failures"
 reject 'maintenance-health\.sh must be run as root' "$CONFIG" \
   "config loading must not block documented non-root read-only health"
-require '^SuccessExitStatus=0 1 3 75$' "$UNIT" \
-  "health unit must treat expected contention 75 as success, but not all failures"
+require '^SuccessExitStatus=0 1 75$' "$UNIT" \
+  "health unit must treat warning 1 and contention 75 as success"
+reject '^SuccessExitStatus=.*[[:space:]](3|4)([[:space:]]|$)' "$UNIT" \
+  "health unit must keep critical exit 3/4 visible to OnFailure"
 
 printf 'PASS: health operation contract\n'
 
