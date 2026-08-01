@@ -39,9 +39,10 @@ jobs:
 
       - name: Apply bounded patch
         run: |
-          base64 --decode .github/single-lock-transform.py.gz.b64 | gzip -dc > /tmp/transform.py
+          cat .github/single-lock-transform.py.gz.b64 .github/single-lock-transform.py.gz.b64.part2 | base64 --decode | gzip -dc > /tmp/transform.py
           python3 /tmp/transform.py
           rm -f .github/single-lock-transform.py.gz.b64
+          rm -f .github/single-lock-transform.py.gz.b64.part2
           rm -f .github/workflows/single-lock-ownership-bootstrap.yml
 
       - name: Mandatory lock inventory
@@ -98,4 +99,5 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
           git commit -m "Refactor single lock ownership"
+          test -z "$(git status --porcelain)"
           git push origin HEAD:refactor/single-lock-ownership
