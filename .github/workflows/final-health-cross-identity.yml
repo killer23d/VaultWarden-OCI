@@ -109,7 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           expected=$'.github/final-health-cross-identity.py\n.github/workflows/final-health-cross-identity.yml\nlib/log.sh\nsystemd/vaultwarden-health.service\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-lock-fd-hygiene.bash\nutilities/maintenance-health.sh'
-          actual="$(git diff --name-only | sort)"
+          actual="$({ git diff --name-only; git diff --cached --name-only; } | sort -u)"
           [[ "$actual" == "$expected" ]] || {
             printf 'Unexpected transformed file set:\n%s\n' "$actual" >&2
             exit 1
