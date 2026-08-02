@@ -349,19 +349,90 @@ _health_close_lock_fd() {
     { eval "exec ${fd}>&-"; } 2>/dev/null
 }
 
+_health_secure_open_helper() {
+    local lock_path="$1"
+    python3 -c '
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+if not hasattr(os, "O_PATH") or not hasattr(os, "O_NOFOLLOW"):
+    print("error:unsupported-open-flags", flush=True)
+    raise SystemExit(1)
+
+fd = -1
+try:
+    fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    opened = os.fstat(fd)
+    current = os.lstat(path)
+    valid = (
+        stat.S_ISREG(opened.st_mode)
+        and stat.S_ISREG(current.st_mode)
+        and not stat.S_ISLNK(current.st_mode)
+        and opened.st_uid == os.geteuid()
+        and opened.st_nlink == 1
+        and current.st_nlink == 1
+        and opened.st_dev == current.st_dev
+        and opened.st_ino == current.st_ino
+    )
+    if not valid:
+        print("error:untrusted-target", flush=True)
+        raise SystemExit(1)
+    print(f"ready:{fd}", flush=True)
+    sys.stdin.buffer.read(1)
+except OSError as exc:
+    print(f"error:open:{exc.errno}", flush=True)
+    raise SystemExit(1)
+finally:
+    if fd >= 0:
+        os.close(fd)
+' "$lock_path"
+}
+
 _health_open_lock_file() {
-    local lock_path="$1" fd fd_path owner_pid="$BASHPID"
+    local lock_path="$1" helper_status="" helper_fd="" fd fd_path owner_pid="$BASHPID"
+    local opener_pid opener_read_fd opener_control_fd opener_fd_path helper_rc=0
     HEALTH_OPENED_LOCK_FD=""
 
-    # The file already exists and is eligible. Open it read-only so a raced
-    # replacement cannot be created, truncated, or otherwise mutated.
-    if ! { exec {fd}<"$lock_path"; } 2>/dev/null; then
-        log_error "Cannot open health coordination lock without mutation: $lock_path"
+    # A short-lived helper performs an O_PATH|O_NOFOLLOW capture. The parent
+    # duplicates that already-validated inode through procfs, so a raced
+    # symlink, FIFO, device, or directory is never opened through its public
+    # pathname. The helper exits before flock and owns no coordination state.
+    coproc VW_HEALTH_LOCK_OPENER { _health_secure_open_helper "$lock_path"; }
+    opener_pid="$VW_HEALTH_LOCK_OPENER_PID"
+    opener_read_fd="${VW_HEALTH_LOCK_OPENER[0]}"
+    opener_control_fd="${VW_HEALTH_LOCK_OPENER[1]}"
+
+    if ! IFS= read -r helper_status <&"$opener_read_fd"; then
+        helper_status="error:no-status"
+    fi
+    if [[ "$helper_status" == ready:* ]]; then
+        helper_fd="${helper_status#ready:}"
+        opener_fd_path="/proc/${opener_pid}/fd/${helper_fd}"
+        if [[ "$helper_fd" =~ ^[0-9]+$ ]] \
+            && { exec {fd}<"$opener_fd_path"; } 2>/dev/null; then
+            HEALTH_OPENED_LOCK_FD="$fd"
+        fi
+    fi
+
+    _health_close_lock_fd "$opener_control_fd" || true
+    _health_close_lock_fd "$opener_read_fd" || true
+    if wait "$opener_pid"; then
+        helper_rc=0
+    else
+        helper_rc=$?
+    fi
+
+    if [[ -z "$HEALTH_OPENED_LOCK_FD" || "$helper_rc" -ne 0 ]]; then
+        [[ -z "$HEALTH_OPENED_LOCK_FD" ]] || _health_close_lock_fd "$HEALTH_OPENED_LOCK_FD" || true
+        HEALTH_OPENED_LOCK_FD=""
+        log_error "Cannot capture health coordination lock safely (${helper_status}): $lock_path"
         return 1
     fi
-    HEALTH_OPENED_LOCK_FD="$fd"
-    fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
 
+    fd="$HEALTH_OPENED_LOCK_FD"
+    fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
     if ! _health_lock_file_is_eligible "$lock_path" 1 \
         || ! _health_lock_fd_is_eligible "$fd" 1 \
         || ! _health_open_lock_matches_target "$lock_path" "$fd"; then
@@ -371,8 +442,8 @@ _health_open_lock_file() {
         return 1
     fi
 
-    # Restrict the inode through the opened descriptor, not through the public
-    # pathname. This avoids a check-to-chmod pathname race.
+    # Restrict the captured inode through the descriptor, not through the
+    # public pathname. This avoids a check-to-chmod pathname race.
     if ! chmod 0600 -- "$fd_path" 2>/dev/null \
         || ! _health_lock_fd_is_trusted "$fd" 1 \
         || ! _health_lock_path_is_trusted "$lock_path" 1 \
