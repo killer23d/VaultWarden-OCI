@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           git merge-base --is-ancestor 2f8ec8c5b3379433881149f4961af1ac706fce18 HEAD
-          expected=$'.github/health-global-transform.py.gz.b64\n.github/workflows/doc-drift.yml\n.github/workflows/finalize-health-global-coordination.yml\n.github/workflows/finalize-health-global-rescue.yml'
+          expected=$'.github/health-global-transform.part00\n.github/health-global-transform.part01\n.github/health-global-transform.part02\n.github/health-global-transform.part03\n.github/health-global-transform.part04\n.github/health-global-transform.part05\n.github/health-global-transform.py.gz.b64\n.github/workflows/doc-drift.yml\n.github/workflows/finalize-health-global-coordination.yml\n.github/workflows/finalize-health-global-rescue.yml'
           actual="$(git diff --name-only 2f8ec8c5b3379433881149f4961af1ac706fce18...HEAD | sort)"
           [[ "$actual" == "$expected" ]] || {
             printf 'Unexpected bootstrap staging diff:\n%s\n' "$actual" >&2
@@ -58,7 +58,9 @@ jobs:
           set -euo pipefail
           git show 2f8ec8c5b3379433881149f4961af1ac706fce18:.github/workflows/doc-drift.yml \
             > .github/workflows/doc-drift.yml
-          base64 -d .github/health-global-transform.py.gz.b64 | gzip -d \
+          cat .github/health-global-transform.part?? \
+            | base64 -d \
+            | gzip -d \
             > /tmp/health-global-transform.py
           python3 /tmp/health-global-transform.py
           python3 - <<'PY'
@@ -68,6 +70,7 @@ jobs:
           PY
           rm -f -- \
             .github/health-global-transform.py.gz.b64 \
+            .github/health-global-transform.part?? \
             .github/workflows/finalize-health-global-coordination.yml \
             .github/workflows/finalize-health-global-rescue.yml
 
@@ -100,6 +103,7 @@ jobs:
             exit 1
           }
           test ! -e .github/health-global-transform.py.gz.b64
+          compgen -G '.github/health-global-transform.part??' >/dev/null && exit 1 || true
           test ! -e .github/workflows/finalize-health-global-coordination.yml
           test ! -e .github/workflows/finalize-health-global-rescue.yml
           git diff --check
