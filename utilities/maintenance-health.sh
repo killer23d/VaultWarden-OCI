@@ -351,7 +351,7 @@ _health_close_lock_fd() {
 
 _health_secure_open_helper() {
     local lock_path="$1"
-    python3 -c '
+    exec python3 -c '
 import os
 import stat
 import sys
