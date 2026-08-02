@@ -188,6 +188,15 @@ _health_lock_directory_is_trusted() {
     [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || return 1
     mode_value=$((8#$mode))
 
+    # Root-owned sticky runtime directories such as /run/lock and /tmp are
+    # intentionally shared. The sticky bit protects directory entries, so
+    # root must accept this normal production shape before applying the
+    # stricter current-owner rule used for private directories.
+    if (( EUID == 0 )) && [[ "$uid" == 0 && "$gid" == 0 ]] \
+        && (( (mode_value & 01000) != 0 )); then
+        return 0
+    fi
+
     if [[ "$uid" == "$EUID" ]]; then
         (( (mode_value & 0022) == 0 ))
         return
@@ -238,24 +247,14 @@ _health_lock_path_is_trusted() {
 }
 
 _health_prepare_lock_directory() {
-    local lock_dir="$1" old_umask
+    local lock_dir="$1"
     [[ "$lock_dir" == /* ]] || {
         log_error "Health coordination directory must be an absolute path: $lock_dir"
         return 1
     }
-    if [[ -L "$lock_dir" ]]; then
-        log_error "Health coordination directory must not be a symlink: $lock_dir"
+    if [[ ! -d "$lock_dir" || -L "$lock_dir" ]]; then
+        log_error "Health coordination directory must already exist as a real directory: $lock_dir"
         return 1
-    fi
-    if [[ ! -d "$lock_dir" ]]; then
-        old_umask="$(umask)"
-        umask 077
-        if ! mkdir -p -- "$lock_dir" 2>/dev/null; then
-            umask "$old_umask"
-            log_error "Cannot prepare health coordination directory: $lock_dir"
-            return 1
-        fi
-        umask "$old_umask"
     fi
     if ! _health_lock_ancestry_is_trusted "$lock_dir"; then
         log_error "Health coordination directory ancestry is unsafe: $lock_dir"
@@ -898,7 +897,7 @@ _check_caddy_storage_permissions() {
     else
         local i=0
         for issue in "${issues[@]}"; do
-            _warn "permissions:caddy-storage:${i}" "${issue} — run: sudo utilities/repair-permissions.sh"
+            _warn "permissions:caddy-storage:${i}" "$issue — run: sudo utilities/repair-permissions.sh"
             (( i++ )) || true
         done
     fi
@@ -918,9 +917,6 @@ _check_crowdsec() {
         log_warn "CrowdSec LAPI metrics unavailable without non-interactive root access; skipping optional cscli check."
     fi
 
-    # Bouncer check priority: prefer crowdsec-firewall-bouncer, then
-    # crowdsec-cloudflare-worker-bouncer. Warn when a bouncer unit is installed but not
-    # running, and pass with an install note when no bouncer is installed.
     local _bouncer_active=false
     local _bouncer_name=""
 
@@ -936,11 +932,9 @@ _check_crowdsec() {
         _pass "crowdsec:bouncer" "CrowdSec ${_bouncer_name} is active"
     elif systemctl list-unit-files 2>/dev/null \
             | grep -qE 'crowdsec-(firewall|cloudflare)-bouncer\.service'; then
-        # A bouncer unit is installed but not running, so flag it.
         _warn "crowdsec:bouncer" \
             "CrowdSec bouncer is installed but not active — check: sudo systemctl status crowdsec-firewall-bouncer"
     else
-        # No bouncer is installed, which is optional, so keep this as pass.
         _pass "crowdsec:bouncer" \
             "No CrowdSec bouncer installed (optional — install crowdsec-firewall-bouncer or crowdsec-cloudflare-worker-bouncer)"
     fi
@@ -1245,10 +1239,8 @@ _check_backups() {
                 break
             fi
             chmod 750 "$backup_dir/$_subdir" 2>/dev/null || true
-            # Only chown when running as root to avoid install -o style
-            # failures when the username does not resolve in this namespace.
             if (( EUID == 0 )) && [[ -n "$real_user" ]] && id "$real_user" &>/dev/null; then
-            chown "$real_user" "$backup_dir/$_subdir" 2>/dev/null || true
+                chown "$real_user" "$backup_dir/$_subdir" 2>/dev/null || true
             fi
         done
         if [[ "$created_ok" == "true" ]]; then
@@ -1258,7 +1250,7 @@ _check_backups() {
             return
         fi
     fi
-    
+
     local -A max_age_hours
     max_age_hours=([db]=26 [full]=168)
     local any_found=false
@@ -1310,8 +1302,6 @@ _check_config() {
             [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
         done
     fi
-    # cloudflare_zone_id lives in encrypted secrets.yaml — not in .env.
-    # Check it is present and decryptable rather than testing an env var.
     local _cf_zone_id
     if _cf_zone_id=$(decrypt_secret "cloudflare_zone_id" 2>/dev/null) \
         && [[ -n "$_cf_zone_id" ]] \
@@ -1331,11 +1321,9 @@ _check_config() {
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
     fi
-    # Resolve the age key using backup-run compatible precedence and relative-path handling.
     local age_key_file=""
     age_key_file="$(_resolve_age_key || true)"
 
-    # Warn if SOPS_AGE_KEY_FILE is set but points nowhere so the operator can fix .env.
     if [[ -n "${SOPS_AGE_KEY_FILE:-}" ]]; then
         local _env_age_candidate="${SOPS_AGE_KEY_FILE}"
         [[ "$_env_age_candidate" != /* ]] && _env_age_candidate="${PROJECT_ROOT}/${_env_age_candidate}"
@@ -1456,7 +1444,6 @@ _generate_report() {
     find "$REPORT_DIR" -name 'health_*.txt' \
         -mtime +"$REPORT_RETENTION_DAYS" -delete 2>/dev/null || true
 }
-
 
 _health_json_escape() {
     local str="$1"
