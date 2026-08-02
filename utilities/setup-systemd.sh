@@ -319,7 +319,7 @@ _sha256() {
 # Current managed operational services run as root. Previous releases could
 # install identity drop-ins; retain explicit cleanup for those managed files
 # without detecting users or creating group membership solely for lock access.
-_STALE_IDENTITY_DROPIN_UNITS=(
+_ROOT_REQUIRED_UNITS=(
     vaultwarden-db-backup.service
     vaultwarden-full-backup.service
     vaultwarden-health.service
@@ -352,7 +352,7 @@ _cleanup_stale_identity_dropins() {
         fi
     done
 
-    for unit in "${_STALE_IDENTITY_DROPIN_UNITS[@]}"; do
+    for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
         dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
         dropin_file="${dropin_dir}/20-identity.conf"
         if [[ -e "$dropin_file" || -L "$dropin_file" ]]; then
@@ -853,28 +853,7 @@ remove_units() {
         fi
     done
 
-    # Clean up service identity drop-ins written by historical or current
-    # setup-systemd.sh versions. Remove only the managed 20-identity.conf file
-    # and remove .d/ directories only when they are empty.
-    local -A _seen_identity_units=()
-    local -a _IDENTITY_CLEANUP_UNITS=()
-    for unit in "${_ROOT_REQUIRED_UNITS[@]}" "${_IDENTITY_DROPIN_UNITS[@]}"; do
-        [[ -n "${_seen_identity_units[$unit]:-}" ]] && continue
-        _seen_identity_units[$unit]=1
-        _IDENTITY_CLEANUP_UNITS+=("$unit")
-    done
-    for unit in "${_IDENTITY_CLEANUP_UNITS[@]}"; do
-        local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
-        local dropin_file="$dropin_dir/20-identity.conf"
-        if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
-            log_success "Removed identity drop-in: $dropin_file"
-        fi
-        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
-            log_success "Removed empty drop-in dir: $dropin_dir"
-        fi
-    done
+    _cleanup_stale_identity_dropins
 
     _run systemctl daemon-reload
     log_success "All timer units removed and daemon reloaded."
@@ -1051,17 +1030,6 @@ validate_installation() {
     fi
 
     log_info "[4/9] Checking systemd drop-in files ..."
-    for unit in "${_IDENTITY_DROPIN_UNITS[@]}"; do
-        local dropin="$UNIT_DEST_DIR/${unit}.d/20-identity.conf"
-        if [[ ! -f "$dropin" ]]; then
-            log_warn "  MISSING: $dropin"
-            log_warn "  Services will execute as root instead of the designated service user."
-            log_warn "  Fix: sudo utilities/setup-systemd.sh install"
-            (( warnings++ )) || true
-        else
-            log_success "  OK: $dropin"
-        fi
-    done
     for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
         local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
         [[ -d "$dropin_dir" ]] || continue
