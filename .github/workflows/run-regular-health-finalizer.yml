@@ -1,0 +1,197 @@
+name: Run regular health finalizer
+
+on:
+  pull_request:
+    types: [reopened]
+    branches: [delta]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out current review branch head
+        uses: actions/checkout@v5
+        with:
+          ref: refactor/single-lock-ownership
+          fetch-depth: 0
+
+      - name: Detect execution mode
+        id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Fq '_health_readonly_lock_target()' utilities/maintenance-health.sh; then
+            echo 'mode=transform' >> "$GITHUB_OUTPUT"
+          else
+            echo 'mode=validate' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install validation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux-amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Apply regular-file health lock contract
+        if: steps.mode.outputs.mode == 'transform'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64
+          import gzip
+          import re
+
+          source = Path('.github/workflows/finalize-regular-health-lock.yml').read_text()
+          def payload(name: str) -> str:
+              match = re.search(rf"{name}: '([^']+)'", source)
+              if not match:
+                  raise SystemExit(f'{name} payload not found')
+              return gzip.decompress(base64.b64decode(match.group(1))).decode()
+
+          block = payload('BLOCK_B64')
+          test_function = payload('TEST_B64')
+
+          health_path = Path('utilities/maintenance-health.sh')
+          health = health_path.read_text()
+          start = health.index('local HEALTH_LOCK_FD=""')
+          end = health.index('local ALERT_LOCK_DIR=', start)
+          health_path.write_text(health[:start] + block.rstrip() + '\n\n' + health[end:])
+
+          tests_path = Path('tests/suites/operations/case-health-alerts.bash')
+          tests = tests_path.read_text()
+          start = tests.index('check_health_run_lock_contracts() (')
+          call = tests.rindex('\ncheck_health_run_lock_contracts')
+          call_end = call + len('\ncheck_health_run_lock_contracts')
+          tests_path.write_text(tests[:start] + test_function.rstrip() + tests[call_end:])
+
+          service_path = Path('systemd/vaultwarden-health.service')
+          service = service_path.read_text()
+          old = '''# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
+# root-owned runtime directory before ExecStart runs. The operation library uses
+# that directory for owner/holder state. Health duplicate-run coordination locks
+# the dedicated root-owned /run/lock/vaultwarden-health directory inode, so the
+# installed root service and supported diagnostics share one host-global object.
+'''
+          new = '''# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
+# root-owned runtime directory before ExecStart runs. The operation library uses
+# that directory for owner/holder state. Root health uses the regular lock file
+# /run/lock/vaultwarden-health.lock; documented non-root diagnostics preserve
+# their XDG_RUNTIME_DIR or per-EUID TMP fallback paths.
+'''
+          if old not in service:
+              raise SystemExit('health service comment marker not found')
+          service_path.write_text(service.replace(old, new, 1))
+          PY
+
+          grep -Fq '_health_readonly_lock_path()' utilities/maintenance-health.sh
+          ! grep -Fq '_health_readonly_lock_target()' utilities/maintenance-health.sh
+          ! grep -Fq 'VW_HEALTH_LOCK_TARGET' utilities/maintenance-health.sh
+          grep -Fq 'VW_HEALTH_LOCK_FILE' utilities/maintenance-health.sh
+          grep -Fq 'ln -T --' utilities/maintenance-health.sh
+          grep -Fq 'ln -P -T --' utilities/maintenance-health.sh
+          git diff --check
+          bash -n utilities/maintenance-health.sh
+          bash -n tests/suites/operations/case-health-alerts.bash
+          shellcheck -x --severity=warning utilities/maintenance-health.sh tests/suites/operations/case-health-alerts.bash
+
+      - name: Run focused operations validation
+        if: steps.mode.outputs.mode == 'transform'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/run-tests.sh operations
+
+      - name: Verify scope and publish code
+        if: steps.mode.outputs.mode == 'transform'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$'systemd/vaultwarden-health.service\ntests/suites/operations/case-health-alerts.bash\nutilities/maintenance-health.sh'
+          actual="$(git diff --name-only | sort)"
+          [[ "$actual" == "$expected" ]] || {
+            printf 'Unexpected transformed file set:\n%s\n' "$actual" >&2
+            exit 1
+          }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- systemd/vaultwarden-health.service tests/suites/operations/case-health-alerts.bash utilities/maintenance-health.sh
+          git commit -m 'Restore regular health lock contract'
+          git push origin HEAD:refactor/single-lock-ownership
+
+      - name: Validate exact final PR head
+        if: steps.mode.outputs.mode == 'validate'
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_head="$(git ls-remote origin refs/heads/refactor/single-lock-ownership | awk '{print $1}')"
+          [[ -n "$remote_head" ]]
+          [[ "$(git rev-parse HEAD)" == "$remote_head" ]]
+          printf 'Exact PR head: %s\n' "$remote_head"
+
+          git fetch --no-tags origin delta:refs/remotes/origin/delta
+          expected=$'lib/operations.sh\nsystemd/vaultwarden-health.service\ntests/suites/foundation/case-systemd.bash\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-lock-fd-hygiene.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh\nutilities/setup-systemd.sh'
+          actual="$(git diff --name-only origin/delta...HEAD | sort)"
+          [[ "$actual" == "$expected" ]] || {
+            printf 'Unexpected final PR file set:\n%s\n' "$actual" >&2
+            exit 1
+          }
+
+          git diff --check origin/delta...HEAD
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 shellcheck -x --severity=warning
+
+          set +e
+          ./tests/run-tests.sh all > /tmp/all-tests.log 2>&1
+          tests_rc=$?
+          set -e
+          cat /tmp/all-tests.log
+          (( tests_rc == 0 )) || exit "$tests_rc"
+
+          git diff --check
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf 'Working tree is not clean after validation:\n%s\n' "$status" >&2
+            exit 1
+          fi
+
+          {
+            echo '=== operation guard callers ==='
+            grep -RIn --exclude-dir=.git --include='*.sh' --include='*.bash' \
+              -E 'operation_acquire|--specific-lock' . || true
+            echo
+            echo '=== direct flock and lock-path users ==='
+            grep -RIn --exclude-dir=.git --include='*.sh' --include='*.bash' \
+              -E 'flock|LOCK(_FILE|_PATH|_DIR|_TARGET)?=' . || true
+            echo
+            echo '=== health lock contract ==='
+            grep -n -E 'VW_HEALTH_LOCK_FILE|XDG_RUNTIME_DIR|vaultwarden-health.*lock|ln -P? ?-?T|single-link regular' utilities/maintenance-health.sh tests/suites/operations/case-health-alerts.bash systemd/vaultwarden-health.service || true
+          } > /tmp/lock-inventory.txt
+          cat /tmp/lock-inventory.txt
+
+      - name: Upload exact-head evidence
+        if: steps.mode.outputs.mode == 'validate'
+        uses: actions/upload-artifact@v6
+        with:
+          name: pr-281-regular-health-exact-head-evidence
+          path: |
+            /tmp/all-tests.log
+            /tmp/lock-inventory.txt
+          if-no-files-found: error
+          retention-days: 14
