@@ -140,16 +140,25 @@ local MEM_CRIT_THRESHOLD=${MEM_CRIT_THRESHOLD:-90}
 local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 local HEALTH_LOCK_FD=""
+local HEALTH_OPENED_LOCK_FD=""
 local HEALTH_OPERATION_GUARD_ACQUIRED=false
 
-_health_readonly_lock_target() {
-    printf '%s\n' "${VW_HEALTH_LOCK_TARGET:-/run/lock/vaultwarden-health}"
+_health_readonly_lock_path() {
+    if [[ -n "${VW_HEALTH_LOCK_FILE:-}" ]]; then
+        printf '%s\n' "$VW_HEALTH_LOCK_FILE"
+    elif (( EUID == 0 )); then
+        printf '%s\n' '/run/lock/vaultwarden-health.lock'
+    elif [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR:-}" && -w "${XDG_RUNTIME_DIR:-}" ]]; then
+        printf '%s\n' "${XDG_RUNTIME_DIR}/vaultwarden-health.lock"
+    else
+        printf '%s\n' "${TMPDIR:-/tmp}/vaultwarden-health-${EUID}.lock"
+    fi
 }
 
-_health_stat_mode_uid_gid() {
+_health_stat_mode_uid_gid_nlink() {
     local target="$1"
-    stat -Lc '%a:%u:%g' -- "$target" 2>/dev/null \
-        || stat -f '%Lp:%u:%g' -- "$target" 2>/dev/null
+    stat -Lc '%a:%u:%g:%h' -- "$target" 2>/dev/null \
+        || stat -f '%Lp:%u:%g:%l' -- "$target" 2>/dev/null
 }
 
 _health_path_identity() {
@@ -167,16 +176,24 @@ _health_lock_fd_path() {
     fi
 }
 
+_health_path_present() {
+    [[ -e "$1" || -L "$1" ]]
+}
+
 _health_lock_directory_is_trusted() {
     local dir="$1" metadata mode uid gid mode_value
     [[ -d "$dir" && ! -L "$dir" ]] || return 1
-    metadata="$(_health_stat_mode_uid_gid "$dir")" || return 1
-    IFS=: read -r mode uid gid <<< "$metadata"
-    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" == 0 && "$gid" == 0 ]] || return 1
+    metadata="$(_health_stat_mode_uid_gid_nlink "$dir")" || return 1
+    IFS=: read -r mode uid gid _ <<< "$metadata"
+    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || return 1
     mode_value=$((8#$mode))
 
-    # Root-group write is acceptable on the supported Ubuntu /run/lock path.
-    # Other-write is accepted only for a root-owned sticky directory such as /tmp.
+    if [[ "$uid" == "$EUID" ]]; then
+        (( (mode_value & 0022) == 0 ))
+        return
+    fi
+
+    [[ "$uid" == 0 && "$gid" == 0 ]] || return 1
     if (( (mode_value & 0002) == 0 )); then
         return 0
     fi
@@ -195,72 +212,115 @@ _health_lock_ancestry_is_trusted() {
     done
 }
 
-_health_lock_target_is_trusted() {
-    local target="$1" metadata mode uid gid
-    _health_lock_ancestry_is_trusted "$target" || return 1
-    metadata="$(_health_stat_mode_uid_gid "$target")" || return 1
-    IFS=: read -r mode uid gid <<< "$metadata"
-    [[ "$mode" == 755 && "$uid" == 0 && "$gid" == 0 ]]
+_health_lock_file_is_eligible() {
+    local lock_path="$1" expected_links="${2:-1}"
+    local metadata mode uid gid links
+    [[ -f "$lock_path" && ! -L "$lock_path" ]] || return 1
+    metadata="$(_health_stat_mode_uid_gid_nlink "$lock_path")" || return 1
+    IFS=: read -r mode uid gid links <<< "$metadata"
+    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" == "$EUID" \
+        && "$gid" =~ ^[0-9]+$ && "$links" == "$expected_links" ]]
 }
 
-_health_prepare_lock_target() {
-    local lock_target="$1" parent metadata mode uid gid
-    [[ "$lock_target" == /* ]] || {
-        log_error "Health coordination target must be an absolute path: $lock_target"
+_health_lock_file_is_trusted() {
+    local lock_path="$1" expected_links="${2:-1}" metadata mode _uid _gid _links
+    _health_lock_file_is_eligible "$lock_path" "$expected_links" || return 1
+    metadata="$(_health_stat_mode_uid_gid_nlink "$lock_path")" || return 1
+    IFS=: read -r mode _uid _gid _links <<< "$metadata"
+    [[ "$mode" == 600 ]]
+}
+
+_health_lock_path_is_trusted() {
+    local lock_path="$1" expected_links="${2:-1}" lock_dir
+    lock_dir="$(dirname "$lock_path")"
+    _health_lock_ancestry_is_trusted "$lock_dir" \
+        && _health_lock_file_is_trusted "$lock_path" "$expected_links"
+}
+
+_health_prepare_lock_directory() {
+    local lock_dir="$1" old_umask
+    [[ "$lock_dir" == /* ]] || {
+        log_error "Health coordination directory must be an absolute path: $lock_dir"
         return 1
     }
-    parent="$(dirname "$lock_target")"
-    if ! _health_lock_ancestry_is_trusted "$parent"; then
-        log_error "Health coordination parent ancestry is unsafe: $parent"
+    if [[ -L "$lock_dir" ]]; then
+        log_error "Health coordination directory must not be a symlink: $lock_dir"
+        return 1
+    fi
+    if [[ ! -d "$lock_dir" ]]; then
+        old_umask="$(umask)"
+        umask 077
+        if ! mkdir -p -- "$lock_dir" 2>/dev/null; then
+            umask "$old_umask"
+            log_error "Cannot prepare health coordination directory: $lock_dir"
+            return 1
+        fi
+        umask "$old_umask"
+    fi
+    if ! _health_lock_ancestry_is_trusted "$lock_dir"; then
+        log_error "Health coordination directory ancestry is unsafe: $lock_dir"
+        return 1
+    fi
+}
+
+_health_create_lock_file() {
+    local lock_path="$1" lock_dir temp old_umask
+    lock_dir="$(dirname "$lock_path")"
+    old_umask="$(umask)"
+    umask 077
+    temp="$(mktemp "${lock_dir}/.vaultwarden-health-create.XXXXXXXXXX")" || {
+        umask "$old_umask"
+        log_error "Cannot create a temporary health coordination inode in: $lock_dir"
+        return 1
+    }
+    umask "$old_umask"
+
+    if ! chmod 0600 -- "$temp" 2>/dev/null; then
+        rm -f -- "$temp" 2>/dev/null || true
+        log_error "Cannot restrict temporary health coordination inode: $temp"
         return 1
     fi
 
-    if [[ -e "$lock_target" || -L "$lock_target" ]]; then
-        [[ -d "$lock_target" && ! -L "$lock_target" ]] || {
-            log_error "Health coordination target is not a real directory: $lock_target"
+    if ln -T -- "$temp" "$lock_path" 2>/dev/null; then
+        rm -f -- "$temp" 2>/dev/null || {
+            log_error "Cannot remove temporary health coordination name: $temp"
             return 1
         }
-    else
-        if (( EUID != 0 )); then
-            log_error "Health coordination target is not initialized: $lock_target"
-            log_error "Initialize it through the root-operated path: sudo make health"
-            return 1
-        fi
-        if ! mkdir -m 0755 -- "$lock_target" 2>/dev/null; then
-            [[ -d "$lock_target" && ! -L "$lock_target" ]] || {
-                log_error "Cannot create health coordination target: $lock_target"
-                return 1
-            }
-        fi
+        return 0
     fi
 
-    metadata="$(_health_stat_mode_uid_gid "$lock_target")" || {
-        log_error "Cannot inspect health coordination target: $lock_target"
+    rm -f -- "$temp" 2>/dev/null || true
+    if _health_path_present "$lock_path"; then
+        return 0
+    fi
+    log_error "Cannot create health coordination lock: $lock_path"
+    return 1
+}
+
+_health_prepare_lock_file() {
+    local lock_path="$1" lock_dir
+    [[ "$lock_path" == /* ]] || {
+        log_error "Health coordination lock must be an absolute path: $lock_path"
         return 1
     }
-    IFS=: read -r mode uid gid <<< "$metadata"
-    if [[ "$uid" != 0 || "$gid" != 0 ]]; then
-        log_error "Health coordination target must be owned by root:root: $lock_target"
-        return 1
-    fi
-    if [[ "$mode" != 755 ]]; then
-        if (( EUID != 0 )) || ! chmod 0755 -- "$lock_target" 2>/dev/null; then
-            log_error "Health coordination target must have mode 0755: $lock_target"
-            return 1
-        fi
+    lock_dir="$(dirname "$lock_path")"
+    _health_prepare_lock_directory "$lock_dir" || return 1
+
+    if ! _health_path_present "$lock_path"; then
+        _health_create_lock_file "$lock_path" || return 1
     fi
 
-    if ! _health_lock_target_is_trusted "$lock_target"; then
-        log_error "Health coordination target metadata is unsafe: $lock_target"
+    if ! _health_lock_file_is_eligible "$lock_path" 1; then
+        log_error "Health coordination lock must be a single-link regular file owned by UID ${EUID}: $lock_path"
         return 1
     fi
 }
 
 _health_open_lock_matches_target() {
-    local lock_target="$1" fd="$2" fd_path target_identity fd_identity owner_pid="$BASHPID"
+    local lock_path="$1" fd="$2" fd_path target_identity fd_identity owner_pid="$BASHPID"
     fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
     fd_identity="$(_health_path_identity "$fd_path")" || return 1
-    target_identity="$(_health_path_identity "$lock_target")" || return 1
+    target_identity="$(_health_path_identity "$lock_path")" || return 1
     [[ "$fd_identity" == "$target_identity" ]]
 }
 
@@ -268,6 +328,73 @@ _health_close_lock_fd() {
     local fd="$1"
     [[ "$fd" =~ ^[0-9]+$ ]] || return 0
     { eval "exec ${fd}>&-"; } 2>/dev/null
+}
+
+_health_open_lock_file() {
+    local lock_path="$1" lock_dir private_dir alias fd old_umask
+    HEALTH_OPENED_LOCK_FD=""
+    lock_dir="$(dirname "$lock_path")"
+
+    old_umask="$(umask)"
+    umask 077
+    private_dir="$(mktemp -d "${lock_dir}/.vaultwarden-health-open.XXXXXXXXXX")" || {
+        umask "$old_umask"
+        log_error "Cannot create a private health lock-open directory in: $lock_dir"
+        return 1
+    }
+    umask "$old_umask"
+    alias="${private_dir}/lock"
+
+    # -P hard-links the directory entry itself rather than dereferencing a
+    # symlink; -T requires the destination to be this exact pathname.
+    if ! ln -PT -- "$lock_path" "$alias" 2>/dev/null; then
+        rmdir -- "$private_dir" 2>/dev/null || true
+        log_error "Cannot capture health coordination lock without following replacements: $lock_path"
+        return 1
+    fi
+
+    if ! _health_lock_file_is_eligible "$alias" 2 \
+        || ! _health_lock_file_is_eligible "$lock_path" 2 \
+        || [[ "$(_health_path_identity "$alias" 2>/dev/null || true)" \
+            != "$(_health_path_identity "$lock_path" 2>/dev/null || true)" ]]; then
+        rm -f -- "$alias" 2>/dev/null || true
+        rmdir -- "$private_dir" 2>/dev/null || true
+        log_error "Health coordination lock changed while its inode was captured: $lock_path"
+        return 1
+    fi
+
+    if ! chmod 0600 -- "$alias" 2>/dev/null \
+        || ! _health_lock_file_is_trusted "$alias" 2 \
+        || ! _health_lock_file_is_trusted "$lock_path" 2; then
+        rm -f -- "$alias" 2>/dev/null || true
+        rmdir -- "$private_dir" 2>/dev/null || true
+        log_error "Health coordination lock metadata could not be restricted safely: $lock_path"
+        return 1
+    fi
+
+    if ! { exec {fd}<>"$alias"; } 2>/dev/null; then
+        rm -f -- "$alias" 2>/dev/null || true
+        rmdir -- "$private_dir" 2>/dev/null || true
+        log_error "Cannot open captured health coordination inode: $lock_path"
+        return 1
+    fi
+
+    if ! rm -f -- "$alias" 2>/dev/null || ! rmdir -- "$private_dir" 2>/dev/null; then
+        _health_close_lock_fd "$fd" || true
+        rm -f -- "$alias" 2>/dev/null || true
+        rmdir -- "$private_dir" 2>/dev/null || true
+        log_error "Cannot clean private health lock-open state: $lock_path"
+        return 1
+    fi
+
+    if ! _health_open_lock_matches_target "$lock_path" "$fd" \
+        || ! _health_lock_path_is_trusted "$lock_path" 1; then
+        _health_close_lock_fd "$fd" || true
+        log_error "Health coordination lock changed while being opened: $lock_path"
+        return 1
+    fi
+
+    HEALTH_OPENED_LOCK_FD="$fd"
 }
 
 _release_readonly_health_lock() {
@@ -281,22 +408,17 @@ _release_readonly_health_lock() {
 }
 
 _acquire_readonly_health_lock() {
-    local lock_target fd flock_rc
-    lock_target="$(_health_readonly_lock_target)"
+    local lock_path fd flock_rc
+    lock_path="$(_health_readonly_lock_path)"
 
-    if ! _health_prepare_lock_target "$lock_target"; then
+    if ! _health_prepare_lock_file "$lock_path"; then
         return 3
     fi
-    if ! { exec {fd}<"$lock_target"; } 2>/dev/null; then
-        log_error "Cannot open health coordination target: $lock_target"
+    if ! _health_open_lock_file "$lock_path"; then
         return 3
     fi
-    if ! _health_open_lock_matches_target "$lock_target" "$fd" \
-        || ! _health_lock_target_is_trusted "$lock_target"; then
-        _health_close_lock_fd "$fd" || true
-        log_error "Health coordination target changed while opening: $lock_target"
-        return 3
-    fi
+    fd="$HEALTH_OPENED_LOCK_FD"
+    HEALTH_OPENED_LOCK_FD=""
 
     if flock -n -E 75 "$fd" 2>/dev/null; then
         flock_rc=0
@@ -312,16 +434,16 @@ _acquire_readonly_health_lock() {
             ;;
         *)
             _health_close_lock_fd "$fd" || true
-            log_error "Health coordination flock failed with status ${flock_rc}: $lock_target"
+            log_error "Health coordination flock failed with status ${flock_rc}: $lock_path"
             return 3
             ;;
     esac
 
-    if ! _health_open_lock_matches_target "$lock_target" "$fd" \
-        || ! _health_lock_target_is_trusted "$lock_target"; then
+    if ! _health_open_lock_matches_target "$lock_path" "$fd" \
+        || ! _health_lock_path_is_trusted "$lock_path" 1; then
         flock -u "$fd" 2>/dev/null || true
         _health_close_lock_fd "$fd" || true
-        log_error "Health coordination target changed after acquisition: $lock_target"
+        log_error "Health coordination lock changed after acquisition: $lock_path"
         return 3
     fi
     HEALTH_LOCK_FD="$fd"

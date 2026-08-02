@@ -941,7 +941,6 @@ set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
 HEALTH="$ROOT/utilities/maintenance-health.sh"
 TMP="$(mktemp -d -t vw-health-run-lock.XXXXXXXXXX)"
-ROOT_PATHS=()
 
 as_root() {
     if (( EUID == 0 )); then
@@ -953,12 +952,7 @@ as_root() {
 
 cleanup() {
     [[ -n "${signal_pid:-}" ]] && kill -KILL "$signal_pid" 2>/dev/null || true
-    [[ -n "${root_holder_pid:-}" ]] && as_root kill -KILL "$root_holder_pid" 2>/dev/null || true
     [[ -n "${mutator_pid:-}" ]] && kill -KILL "$mutator_pid" 2>/dev/null || true
-    local path
-    for path in "${ROOT_PATHS[@]}"; do
-        as_root rm -rf -- "$path" "${path}.opened" 2>/dev/null || true
-    done
     rm -rf -- "$TMP"
 }
 trap cleanup EXIT
@@ -976,30 +970,16 @@ wait_for_file() {
     done
     fail "timed out waiting for $path"
 }
+lock_metadata() {
+    _health_stat_mode_uid_gid_nlink "$1"
+}
 
+HAS_ROOT=true
 if (( EUID != 0 )); then
-    command -v sudo >/dev/null 2>&1 \
-        && sudo -n true >/dev/null 2>&1 \
-        || { printf 'SKIP: health run-lock contracts require root or passwordless sudo.\n'; exit 0; }
+    if ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; then
+        HAS_ROOT=false
+    fi
 fi
-
-new_root_target() {
-    local label="$1"
-    local path="/run/lock/vaultwarden-health-test-${UID}-${BASHPID}-${RANDOM}-${label}"
-    as_root rm -rf -- "$path" "${path}.opened"
-    as_root mkdir -m 0755 -- "$path"
-    as_root chown 0:0 -- "$path"
-    ROOT_PATHS+=("$path")
-    printf '%s\n' "$path"
-}
-
-new_root_path() {
-    local label="$1"
-    local path="/run/lock/vaultwarden-health-test-${UID}-${BASHPID}-${RANDOM}-${label}"
-    as_root rm -rf -- "$path" "${path}.opened"
-    ROOT_PATHS+=("$path")
-    printf '%s\n' "$path"
-}
 
 LOCK_BLOCK="$TMP/health-lock-block.bash"
 awk '
@@ -1013,175 +993,196 @@ FIX_MODE=false
 # shellcheck disable=SC1090
 source "$LOCK_BLOCK"
 
-unset VW_HEALTH_LOCK_TARGET
-default_target="$(_health_readonly_lock_target)"
-[[ "$default_target" == /run/lock/vaultwarden-health ]] \
-    || fail "default health coordination target was $default_target"
-root_default="$(as_root env LOCK_BLOCK="$LOCK_BLOCK" "$BASH" -c '
-    run() {
-        local FIX_MODE=false
-        log_error(){ :; }
-        log_warn(){ :; }
-        log_info(){ :; }
-        source "$LOCK_BLOCK"
-        _health_readonly_lock_target
-    }
-    run
-')"
-[[ "$root_default" == "$default_target" ]] \
-    || fail "root and non-root default health targets differ"
-pass "root and non-root health runs resolve one host-global default target"
+explicit_dir="$TMP/explicit"
+mkdir -m 0700 "$explicit_dir"
+VW_HEALTH_LOCK_FILE="$explicit_dir/custom-health.lock"
+[[ "$(_health_readonly_lock_path)" == "$VW_HEALTH_LOCK_FILE" ]] \
+    || fail "VW_HEALTH_LOCK_FILE override was not preserved"
+unset VW_HEALTH_LOCK_FILE
 
-anchor="$(new_root_target initial)"
-VW_HEALTH_LOCK_TARGET="$anchor"
-_acquire_readonly_health_lock || fail "initial health coordination acquisition failed"
-first_identity="$(_health_path_identity "$anchor")"
+if (( EUID != 0 )); then
+    xdg_dir="$TMP/xdg-runtime"
+    fallback_dir="$TMP/fallback"
+    mkdir -m 0700 "$xdg_dir" "$fallback_dir"
+    # Consumed by the dynamically sourced lock-path resolver.
+    # shellcheck disable=SC2034
+    XDG_RUNTIME_DIR="$xdg_dir"
+    TMPDIR="$fallback_dir"
+    [[ "$(_health_readonly_lock_path)" == "$xdg_dir/vaultwarden-health.lock" ]] \
+        || fail "non-root XDG runtime lock path changed"
+    unset XDG_RUNTIME_DIR
+    [[ "$(_health_readonly_lock_path)" == "$fallback_dir/vaultwarden-health-${EUID}.lock" ]] \
+        || fail "non-root TMP fallback lock path changed"
+    unset TMPDIR
+else
+    printf 'SKIP: XDG/TMP path resolution requires a non-root runner.\n'
+fi
+
+if [[ "$HAS_ROOT" == true ]]; then
+    root_default="$(as_root env LOCK_BLOCK="$LOCK_BLOCK" "$BASH" -c '
+        run() {
+            local FIX_MODE=false
+            log_error(){ :; }
+            log_warn(){ :; }
+            log_info(){ :; }
+            unset VW_HEALTH_LOCK_FILE XDG_RUNTIME_DIR TMPDIR
+            source "$LOCK_BLOCK"
+            _health_readonly_lock_path
+        }
+        run
+    ')"
+    [[ "$root_default" == /run/lock/vaultwarden-health.lock ]] \
+        || fail "root health lock path changed to $root_default"
+else
+    printf 'SKIP: root path resolution requires root or passwordless sudo.\n'
+fi
+pass "health lock resolution preserves override, root, XDG, and TMP contracts"
+
+lock_dir="$TMP/locks"
+mkdir -m 0700 "$lock_dir"
+lock_path="$lock_dir/health.lock"
+VW_HEALTH_LOCK_FILE="$lock_path"
+_acquire_readonly_health_lock || fail "initial regular-file health acquisition failed"
+[[ -f "$lock_path" && ! -L "$lock_path" ]] \
+    || fail "health coordination target is not a regular non-symlink file"
+IFS=: read -r mode owner _group links <<< "$(lock_metadata "$lock_path")"
+[[ "$mode" == 600 && "$owner" == "$EUID" && "$links" == 1 ]] \
+    || fail "health lock metadata was ${mode}:${owner}:${links}, expected 600:${EUID}:1"
+first_identity="$(_health_path_identity "$lock_path")"
 [[ -n "$HEALTH_LOCK_FD" ]] || fail "health coordination did not retain its descriptor"
 _release_readonly_health_lock || fail "initial health coordination release failed"
-[[ "$(_health_path_identity "$anchor")" == "$first_identity" ]] \
-    || fail "health coordination replaced the stable directory inode"
-[[ -z "$(find "$anchor" -mindepth 1 -print -quit)" ]] \
-    || fail "health coordination created state beneath its directory"
-pass "health coordination locks a dedicated stable directory without creating files"
+_acquire_readonly_health_lock || fail "second regular-file health acquisition failed"
+[[ "$(_health_path_identity "$lock_path")" == "$first_identity" ]] \
+    || fail "health coordination replaced the existing lock inode"
+_release_readonly_health_lock || fail "second health coordination release failed"
+pass "health coordination uses one restrictive regular file without replacing its inode"
 
-missing_target="$(new_root_path missing)"
-VW_HEALTH_LOCK_TARGET="$missing_target"
-set +e
-_acquire_readonly_health_lock
-rc=$?
-set -e
-[[ "$rc" -eq 3 && ! -e "$missing_target" && -z "$HEALTH_LOCK_FD" ]] \
-    || fail "non-root missing target returned $rc, created state, or leaked a descriptor"
-pass "non-root health fails closed until root initializes the global target"
+normalizable="$lock_dir/normalizable.lock"
+: > "$normalizable"
+chmod 0644 "$normalizable"
+normalizable_identity="$(_health_path_identity "$normalizable")"
+VW_HEALTH_LOCK_FILE="$normalizable"
+_acquire_readonly_health_lock || fail "existing current-user lock could not be normalized"
+IFS=: read -r mode owner _group links <<< "$(lock_metadata "$normalizable")"
+[[ "$mode" == 600 && "$owner" == "$EUID" && "$links" == 1 \
+    && "$(_health_path_identity "$normalizable")" == "$normalizable_identity" ]] \
+    || fail "existing health lock metadata/inode normalization was not in-place"
+_release_readonly_health_lock || fail "normalized health lock release failed"
+pass "existing regular lock metadata is restricted without unlinking the inode"
 
-attacker_target="$TMP/attacker-target"
-mkdir -m 0700 "$attacker_target"
-symlink_target="$(new_root_path symlink)"
-as_root ln -s -- "$attacker_target" "$symlink_target"
-VW_HEALTH_LOCK_TARGET="$symlink_target"
+hardlink_lock="$lock_dir/hardlink.lock"
+: > "$hardlink_lock"
+chmod 0600 "$hardlink_lock"
+ln -- "$hardlink_lock" "$lock_dir/hardlink-alias"
+VW_HEALTH_LOCK_FILE="$hardlink_lock"
 set +e
 _acquire_readonly_health_lock
 rc=$?
 set -e
 [[ "$rc" -eq 3 && -z "$HEALTH_LOCK_FD" ]] \
-    || fail "symlink-to-directory coordination target returned $rc or leaked a descriptor"
-[[ -z "$(find "$attacker_target" -mindepth 1 -print -quit)" ]] \
-    || fail "symlink-to-directory target received unintended state"
-pass "existing destination symlinks are rejected without being followed"
+    || fail "multi-link health lock returned $rc or leaked a descriptor"
+rm -f -- "$lock_dir/hardlink-alias" "$hardlink_lock"
+pass "health coordination rejects multiply linked regular files"
 
-race_target="$(new_root_path race)"
-mkdir -p "$TMP/mockbin"
-cat > "$TMP/mockbin/mkdir" <<'EOF_MKDIR'
-#!/usr/bin/env bash
-set -euo pipefail
-destination="${@: -1}"
-if [[ "$destination" == "$RACE_TARGET" && ! -e "$RACE_MARKER" ]]; then
-    /usr/bin/ln -s -- "$ATTACKER_DIR" "$destination"
-    : > "$RACE_MARKER"
-fi
-exec /usr/bin/mkdir "$@"
-EOF_MKDIR
-chmod 0755 "$TMP/mockbin/mkdir"
-set +e
-as_root env PATH="$TMP/mockbin:$PATH" LOCK_BLOCK="$LOCK_BLOCK" \
-    VW_HEALTH_LOCK_TARGET="$race_target" ATTACKER_DIR="$attacker_target" \
-    RACE_TARGET="$race_target" RACE_MARKER="$TMP/race-marker" \
-    "$BASH" -c '
-        run() {
-            local FIX_MODE=false
-            log_error(){ :; }
-            log_warn(){ :; }
-            log_info(){ :; }
-            source "$LOCK_BLOCK"
-            _acquire_readonly_health_lock
-        }
-        run
-    ' >"$TMP/race.out" 2>"$TMP/race.err"
-race_rc=$?
-set -e
-[[ "$race_rc" -eq 3 && -e "$TMP/race-marker" && -L "$race_target" ]] \
-    || fail "creation-race symlink was not rejected safely"
-[[ -z "$(find "$attacker_target" -mindepth 1 -print -quit)" ]] \
-    || fail "creation race followed the attacker-controlled directory"
-pass "initial target creation never follows a raced destination symlink"
+attacker_dir="$TMP/attacker-dir"
+attacker_file="$TMP/attacker-file"
+mkdir -m 0700 "$attacker_dir"
+: > "$attacker_file"
+chmod 0600 "$attacker_file"
 
-for kind in regular fifo; do
-    target="$(new_root_path "$kind")"
+for kind in symlink-file symlink-dir directory fifo device; do
+    target="$lock_dir/unsafe-$kind"
     case "$kind" in
-        regular) as_root touch -- "$target" ;;
-        fifo) as_root mkfifo -- "$target" ;;
+        symlink-file) ln -s -- "$attacker_file" "$target" ;;
+        symlink-dir) ln -s -- "$attacker_dir" "$target" ;;
+        directory) mkdir -m 0700 "$target" ;;
+        fifo) mkfifo "$target" ;;
+        device) target=/dev/null ;;
     esac
-    VW_HEALTH_LOCK_TARGET="$target"
+    VW_HEALTH_LOCK_FILE="$target"
     set +e
     _acquire_readonly_health_lock
     rc=$?
     set -e
     [[ "$rc" -eq 3 && -z "$HEALTH_LOCK_FD" ]] \
-        || fail "$kind coordination target returned $rc or leaked a descriptor"
+        || fail "$kind health target returned $rc or leaked a descriptor"
 done
-pass "health coordination rejects non-directory targets"
+[[ -z "$(find "$attacker_dir" -mindepth 1 -print -quit)" ]] \
+    || fail "rejected symlink-to-directory target received state"
+pass "health coordination rejects symlinks and every tested non-regular target"
 
-unsafe_parent="$TMP/unsafe-parent"
-unsafe_anchor="$unsafe_parent/anchor"
-mkdir -p "$unsafe_anchor"
-chmod 0777 "$unsafe_parent"
-VW_HEALTH_LOCK_TARGET="$unsafe_anchor"
-set +e
-as_root env LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_TARGET="$unsafe_anchor" \
-    "$BASH" -c '
-        run() {
-            local FIX_MODE=false
-            log_error(){ :; }
-            log_warn(){ :; }
-            log_info(){ :; }
-            source "$LOCK_BLOCK"
-            _acquire_readonly_health_lock
-        }
-        run
-    ' >"$TMP/unsafe.out" 2>"$TMP/unsafe.err"
-rc=$?
-set -e
-[[ "$rc" -eq 3 ]] || fail "health coordination accepted a target below an untrusted ancestor"
-pass "health coordination validates root ownership and the complete target ancestry"
-
-if [[ -d "/proc/$$/fd" ]]; then
-    replacement_anchor="$(new_root_target replacement)"
-    real_stat="$(command -v stat)"
-    cat > "$TMP/mockbin/stat" <<'EOF_STAT'
+race_lock="$lock_dir/race.lock"
+mkdir -p "$TMP/mockbin"
+cat > "$TMP/mockbin/ln" <<'EOF_LN'
 #!/usr/bin/env bash
 set -euo pipefail
-last_arg="${!#}"
-if [[ "$last_arg" == /proc/*/fd/* ]]; then
-    : > "$SWAP_ARMED"
-elif [[ "$last_arg" == "$LOCK_TARGET" && -e "$SWAP_ARMED" && ! -e "$SWAP_DONE" ]]; then
-    /bin/mv -- "$LOCK_TARGET" "${LOCK_TARGET}.opened"
-    /usr/bin/mkdir -m 0755 -- "$LOCK_TARGET"
-    /bin/chown 0:0 -- "$LOCK_TARGET"
-    : > "$SWAP_DONE"
+printf '%s\n' "$*" >> "$LN_TRACE"
+destination="${@: -1}"
+if [[ "$destination" == "$RACE_LOCK" && ! -e "$RACE_MARKER" ]]; then
+    /usr/bin/ln -s -- "$ATTACKER_DIR" "$destination"
+    : > "$RACE_MARKER"
 fi
-exec "$REAL_STAT" "$@"
-EOF_STAT
-    chmod 0755 "$TMP/mockbin/stat"
+exec /usr/bin/ln "$@"
+EOF_LN
+chmod 0755 "$TMP/mockbin/ln"
+set +e
+PATH="$TMP/mockbin:$PATH" LN_TRACE="$TMP/ln-trace" RACE_LOCK="$race_lock" \
+    RACE_MARKER="$TMP/race-marker" ATTACKER_DIR="$attacker_dir" \
+    VW_HEALTH_LOCK_FILE="$race_lock" _acquire_readonly_health_lock
+race_rc=$?
+set -e
+[[ "$race_rc" -eq 3 && -L "$race_lock" && -e "$TMP/race-marker" \
+    && -z "$HEALTH_LOCK_FD" ]] \
+    || fail "destination symlink creation race was not rejected safely"
+grep -Eq -- '(^| )-T( |$)' "$TMP/ln-trace" \
+    || fail "health lock creation did not use no-target-directory semantics"
+[[ -z "$(find "$attacker_dir" -mindepth 1 -print -quit)" ]] \
+    || fail "creation race placed an inode beneath the attacker-controlled directory"
+rm -f -- "$race_lock"
+pass "initial regular-file creation never follows a raced symlink-to-directory"
+
+unsafe_parent="$TMP/unsafe-parent"
+mkdir -m 0777 "$unsafe_parent"
+VW_HEALTH_LOCK_FILE="$unsafe_parent/health.lock"
+set +e
+_acquire_readonly_health_lock
+rc=$?
+set -e
+[[ "$rc" -eq 3 && ! -e "$unsafe_parent/health.lock" && -z "$HEALTH_LOCK_FD" ]] \
+    || fail "health coordination accepted a writable current-user ancestor"
+pass "health coordination validates the complete lock-directory ancestry"
+
+if [[ -d "/proc/$$/fd" ]]; then
+    replacement_lock="$lock_dir/replacement.lock"
+    : > "$replacement_lock"
+    chmod 0600 "$replacement_lock"
+    original_identity_definition="$(declare -f _health_path_identity)"
+    _health_path_identity_real() {
+        local target="$1"
+        stat -Lc '%d:%i' -- "$target" 2>/dev/null \
+            || stat -f '%d:%i' -- "$target" 2>/dev/null
+    }
+    _health_path_identity() {
+        local target="$1" identity
+        identity="$(_health_path_identity_real "$target")" || return 1
+        if [[ "$target" == /proc/*/fd/* && ! -e "$TMP/swap-done" ]]; then
+            mv -- "$replacement_lock" "${replacement_lock}.opened"
+            : > "$replacement_lock"
+            chmod 0600 -- "$replacement_lock"
+            : > "$TMP/swap-done"
+        fi
+        printf '%s\n' "$identity"
+    }
+    VW_HEALTH_LOCK_FILE="$replacement_lock"
     set +e
-    as_root env PATH="$TMP/mockbin:$PATH" LOCK_BLOCK="$LOCK_BLOCK" \
-        VW_HEALTH_LOCK_TARGET="$replacement_anchor" REAL_STAT="$real_stat" \
-        LOCK_TARGET="$replacement_anchor" SWAP_ARMED="$TMP/swap-armed" \
-        SWAP_DONE="$TMP/swap-done" "$BASH" -c '
-            run() {
-                local FIX_MODE=false
-                log_error(){ :; }
-                log_warn(){ :; }
-                log_info(){ :; }
-                source "$LOCK_BLOCK"
-                _acquire_readonly_health_lock
-            }
-            run
-        ' >"$TMP/replacement.out" 2>"$TMP/replacement.err"
+    _acquire_readonly_health_lock
     rc=$?
     set -e
-    [[ "$rc" -eq 3 && -e "$TMP/swap-done" ]] \
-        || fail "health coordination target replacement was not detected safely"
-    pass "health coordination verifies the opened descriptor against the intended directory"
+    eval "$original_identity_definition"
+    unset -f _health_path_identity_real
+    [[ "$rc" -eq 3 && -e "$TMP/swap-done" && -z "$HEALTH_LOCK_FD" ]] \
+        || fail "health lock replacement was not detected safely"
+    pass "health coordination verifies the opened descriptor against the intended regular file"
 else
     printf 'SKIP: descriptor replacement test requires /proc.\n'
 fi
@@ -1192,17 +1193,17 @@ operation_acquire() {
     [[ -n "$HEALTH_LOCK_FD" ]] || fail "global guard was attempted before health coordination"
     local arg
     for arg in "$@"; do
-        [[ "$arg" != --specific-lock ]] || fail "health target was passed as an operation-specific lock"
+        [[ "$arg" != --specific-lock ]] || fail "health lock was passed as an operation-specific lock"
     done
     TRACE+=$'health-before-global\n'
     return "$OP_ACQUIRE_RC"
 }
 operation_set_phase(){ TRACE+=$'phase\n'; return 0; }
-operation_release(){ TRACE+="operation-release:$1\n"; return 0; }
+operation_release(){ TRACE+="operation-release:$1"$'\n'; return 0; }
 
-fix_anchor="$(new_root_target fix)"
+fix_lock="$lock_dir/fix.lock"
 FIX_MODE=true
-VW_HEALTH_LOCK_TARGET="$fix_anchor"
+VW_HEALTH_LOCK_FILE="$fix_lock"
 _acquire_run_lock || fail "health repair run-lock acquisition failed"
 [[ "$TRACE" == $'health-before-global\nphase\n' ]] \
     || fail "health repair acquisition sequence was $TRACE"
@@ -1211,13 +1212,13 @@ _acquire_run_lock || fail "health repair run-lock acquisition failed"
 _release_run_lock 0 || fail "health repair release failed"
 [[ "$TRACE" == *"operation-release:0"* && -z "$HEALTH_LOCK_FD" ]] \
     || fail "health repair did not release both resources"
-pass "health repair acquires health coordination before the global guard"
+pass "health repair acquires its resolved regular-file lock before the global guard"
 
 for guarded_rc in 75 64; do
     TRACE=""
     OP_ACQUIRE_RC="$guarded_rc"
-    guard_anchor="$(new_root_target "guard-$guarded_rc")"
-    VW_HEALTH_LOCK_TARGET="$guard_anchor"
+    guard_lock="$lock_dir/guard-$guarded_rc.lock"
+    VW_HEALTH_LOCK_FILE="$guard_lock"
     set +e
     _acquire_run_lock
     rc=$?
@@ -1232,13 +1233,16 @@ pass "global contention stays 75 while infrastructure failure stays non-75"
 OP_ACQUIRE_RC=0
 
 FIX_MODE=false
-overlap_anchor="$(new_root_target overlap)"
-VW_HEALTH_LOCK_TARGET="$overlap_anchor"
+overlap_lock="$lock_dir/overlap.lock"
+VW_HEALTH_LOCK_FILE="$overlap_lock"
 _acquire_run_lock || fail "parent read-only health acquisition failed"
 probe_health() {
     local mode="$1" marker="$2"
     FIX_MODE="$mode"
     HEALTH_LOCK_FD=""
+    # Consumed by the dynamically sourced lock-open helper.
+# shellcheck disable=SC2034
+HEALTH_OPENED_LOCK_FD=""
     HEALTH_OPERATION_GUARD_ACQUIRED=false
     operation_acquire(){ : > "$marker"; return 0; }
     operation_set_phase(){ return 0; }
@@ -1252,14 +1256,14 @@ readonly_rc=$?
 repair_rc=$?
 set -e
 [[ "$readonly_rc" -eq 75 && "$repair_rc" -eq 75 ]] \
-    || fail "read-only holder did not exclude duplicate/repair runs"
+    || fail "read-only holder did not exclude same-path duplicate/repair runs"
 [[ ! -e "$TMP/readonly-global-called" && ! -e "$TMP/repair-global-called" ]] \
     || fail "repair attempted the global guard before health contention cleared"
 _release_run_lock 0 || fail "parent read-only health release failed"
 
 FIX_MODE=true
 TRACE=""
-VW_HEALTH_LOCK_TARGET="$overlap_anchor"
+VW_HEALTH_LOCK_FILE="$overlap_lock"
 _acquire_run_lock || fail "parent health repair acquisition failed"
 set +e
 (probe_health false "$TMP/fix-readonly-global-called")
@@ -1268,84 +1272,11 @@ fix_readonly_rc=$?
 fix_repair_rc=$?
 set -e
 [[ "$fix_readonly_rc" -eq 75 && "$fix_repair_rc" -eq 75 ]] \
-    || fail "repair holder did not exclude read-only/second repair runs"
+    || fail "repair holder did not exclude same-path read-only/second repair runs"
 _release_run_lock 0 || fail "parent repair release failed"
-pass "all health read and repair overlap combinations are serialized"
+pass "same resolved health path serializes every read and repair combination"
 
-cross_anchor="$(new_root_target cross-identity)"
-if (( EUID != 0 )); then
-    VW_HEALTH_LOCK_TARGET="$cross_anchor"
-    FIX_MODE=false
-    _acquire_run_lock || fail "non-root health acquisition failed"
-    set +e
-    root_probe_output="$(as_root env LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_TARGET="$cross_anchor" \
-        "$BASH" -c '
-            run() {
-                local FIX_MODE=true
-                log_error(){ :; }
-                log_warn(){ :; }
-                log_info(){ :; }
-                operation_acquire(){ printf "global-called\n"; return 0; }
-                operation_set_phase(){ return 0; }
-                operation_release(){ return 0; }
-                source "$LOCK_BLOCK"
-                _acquire_run_lock
-            }
-            run
-        ' 2>"$TMP/root-probe.err")"
-    root_probe_rc=$?
-    set -e
-    [[ "$root_probe_rc" -eq 75 && "$root_probe_output" != *global-called* ]] \
-        || fail "non-root read-only health did not exclude root repair"
-    _release_run_lock 0 || fail "non-root health release failed"
-
-    root_holder="$TMP/root-health-holder.bash"
-    root_ready="$TMP/root-health-ready"
-    root_release="$TMP/root-health-release"
-    mkfifo "$root_release"
-    cat > "$root_holder" <<'EOF_ROOT_HOLDER'
-#!/usr/bin/env bash
-set -euo pipefail
-run() {
-    local FIX_MODE=true
-    log_error(){ :; }
-    log_warn(){ :; }
-    log_info(){ :; }
-    operation_acquire(){ return 0; }
-    operation_set_phase(){ return 0; }
-    operation_release(){ return 0; }
-    source "$LOCK_BLOCK"
-    _acquire_run_lock
-    : > "$READY_FILE"
-    read -r _ < "$RELEASE_FIFO"
-    _release_run_lock 0
-}
-run
-EOF_ROOT_HOLDER
-    chmod 0755 "$root_holder"
-    as_root env LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_TARGET="$cross_anchor" \
-        READY_FILE="$root_ready" RELEASE_FIFO="$root_release" \
-        "$BASH" "$root_holder" &
-    root_holder_pid=$!
-    wait_for_file "$root_ready"
-    FIX_MODE=false
-    HEALTH_LOCK_FD=""
-    HEALTH_OPERATION_GUARD_ACQUIRED=false
-    set +e
-    _acquire_run_lock
-    nonroot_probe_rc=$?
-    set -e
-    [[ "$nonroot_probe_rc" -eq 75 ]] \
-        || fail "root repair did not exclude non-root read-only health"
-    printf 'release\n' > "$root_release"
-    wait "$root_holder_pid" || fail "root repair holder failed"
-    root_holder_pid=""
-    pass "one root-owned host-global target serializes root and non-root runs"
-else
-    printf 'SKIP: root/non-root overlap direction requires a non-root runner with sudo.\n'
-fi
-
-real_anchor="$(new_root_target real-global)"
+real_lock="$lock_dir/real-global.lock"
 real_ops_state="$TMP/real-operations-state"
 real_ops_lock="$TMP/real-operations.lock"
 mutator_ready="$TMP/mutator-ready"
@@ -1390,7 +1321,7 @@ run
 EOF_REAL_PROBE
 chmod 0755 "$real_probe"
 set +e
-ROOT="$ROOT" LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_TARGET="$real_anchor" \
+ROOT="$ROOT" LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_FILE="$real_lock" \
     VW_OPERATIONS_STATE_DIR="$real_ops_state" VW_OPERATIONS_LOCK="$real_ops_lock" \
     "$BASH" "$real_probe" >"$TMP/real-probe.out" 2>"$TMP/real-probe.err"
 real_probe_rc=$?
@@ -1398,26 +1329,32 @@ set -e
 [[ "$real_probe_rc" -eq 75 ]] \
     || fail "real global mutator contention returned $real_probe_rc instead of 75"
 FIX_MODE=false
-VW_HEALTH_LOCK_TARGET="$real_anchor"
+VW_HEALTH_LOCK_FILE="$real_lock"
 HEALTH_LOCK_FD=""
+# Consumed by the dynamically sourced lock-open helper.
+# shellcheck disable=SC2034
+HEALTH_OPENED_LOCK_FD=""
 HEALTH_OPERATION_GUARD_ACQUIRED=false
 _acquire_run_lock || fail "health coordination was not released after real global contention"
 _release_run_lock 0 || fail "post-global-contention health release failed"
 printf 'release\n' > "$mutator_release"
 wait "$mutator_pid" || fail "real mutator holder failed"
 mutator_pid=""
-pass "a real global mutator blocks health repair without retaining health coordination"
+pass "a real global mutator blocks health repair without retaining its health lock"
 
 FIX_MODE=false
-parent_anchor="$(new_root_target parent-descriptor)"
-subshell_anchor="$(new_root_target subshell-descriptor)"
-VW_HEALTH_LOCK_TARGET="$parent_anchor"
+parent_lock="$lock_dir/parent-descriptor.lock"
+subshell_lock="$lock_dir/subshell-descriptor.lock"
+VW_HEALTH_LOCK_FILE="$parent_lock"
 _acquire_run_lock || fail "parent descriptor-reuse setup failed"
 parent_health_fd="$HEALTH_LOCK_FD"
 (
     eval "exec ${parent_health_fd}>&-"
     HEALTH_LOCK_FD=""
-    VW_HEALTH_LOCK_TARGET="$subshell_anchor"
+    # Consumed by the dynamically sourced lock-open helper.
+# shellcheck disable=SC2034
+HEALTH_OPENED_LOCK_FD=""
+    VW_HEALTH_LOCK_FILE="$subshell_lock"
     _acquire_readonly_health_lock || fail "subshell health acquisition failed after descriptor reuse"
     [[ "$HEALTH_LOCK_FD" == "$parent_health_fd" ]] \
         || fail "subshell did not reuse expected descriptor $parent_health_fd"
@@ -1426,7 +1363,7 @@ parent_health_fd="$HEALTH_LOCK_FD"
 _release_run_lock 0 || fail "parent descriptor-reuse release failed"
 pass "health descriptor validation follows the current subshell owner"
 
-signal_anchor="$(new_root_target signal)"
+signal_lock="$lock_dir/signal.lock"
 SIGNAL_SCRIPT="$TMP/signal-holder.bash"
 cat > "$SIGNAL_SCRIPT" <<'EOF_SIGNAL'
 #!/usr/bin/env bash
@@ -1451,7 +1388,7 @@ run() {
 run
 EOF_SIGNAL
 chmod 0755 "$SIGNAL_SCRIPT"
-LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_TARGET="$signal_anchor" \
+LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_FILE="$signal_lock" \
     READY_FILE="$TMP/signal-ready" "$BASH" "$SIGNAL_SCRIPT" &
 signal_pid=$!
 wait_for_file "$TMP/signal-ready"
@@ -1467,7 +1404,7 @@ signal_pid=""
 FIX_MODE=false
 # Consumed by dynamically sourced lock helpers.
 # shellcheck disable=SC2034
-VW_HEALTH_LOCK_TARGET="$signal_anchor"
+VW_HEALTH_LOCK_FILE="$signal_lock"
 _acquire_run_lock || fail "health coordination was not reusable after TERM cleanup"
 _release_run_lock 0 || fail "post-signal release failed"
 grep -Fq "trap '_health_signal_cleanup 129' HUP" "$HEALTH" || fail "HUP cleanup trap is missing"
