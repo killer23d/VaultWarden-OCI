@@ -127,13 +127,17 @@ spinner_start() {
     local msg="${1:-Working...}"
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     local health_fd="${HEALTH_LOCK_FD:-}"
+    local health_host_fd="${HEALTH_HOST_LOCK_FD:-}"
     (
-        # The read-only health lock remains parent-owned. Keep this UI helper
-        # from extending that secondary lock if the health process is killed.
-        if [[ "$health_fd" =~ ^[0-9]+$ ]] && (( health_fd > 2 )); then
-            { eval "exec ${health_fd}>&-"; } 2>/dev/null || true
-        fi
-        unset HEALTH_LOCK_FD
+        # Health coordination remains parent-owned. Keep this UI helper from
+        # extending either the host-wide gate or the local regular-file lock.
+        local inherited_health_fd
+        for inherited_health_fd in "$health_host_fd" "$health_fd"; do
+            if [[ "$inherited_health_fd" =~ ^[0-9]+$ ]] && (( inherited_health_fd > 2 )); then
+                { eval "exec ${inherited_health_fd}>&-"; } 2>/dev/null || true
+            fi
+        done
+        unset HEALTH_HOST_LOCK_FD HEALTH_LOCK_FD
 
         # Re-evaluate TTY inside the subshell: the parent's COLOR_CYAN /
         # COLOR_RESET are exported with escape sequences that were set at

@@ -141,6 +141,7 @@ local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 local HEALTH_LOCK_FD=""
 local HEALTH_OPENED_LOCK_FD=""
+local HEALTH_HOST_LOCK_FD=""
 local HEALTH_OPERATION_GUARD_ACQUIRED=false
 
 _health_readonly_lock_path() {
@@ -153,6 +154,14 @@ _health_readonly_lock_path() {
     else
         printf '%s\n' "${TMPDIR:-/tmp}/vaultwarden-health-${EUID}.lock"
     fi
+}
+
+_health_host_gate_path() {
+    # flock(2) is advisory: locking this stable root-owned directory inode
+    # does not block ordinary /run/lock file creation or access. It provides
+    # one host-wide health domain without a shared writable file, lock group,
+    # installer precreation, daemon, or registry.
+    printf '%s\n' '/run/lock'
 }
 
 _health_stat_mode_uid_gid_nlink() {
@@ -349,6 +358,69 @@ _health_close_lock_fd() {
     { eval "exec ${fd}>&-"; } 2>/dev/null
 }
 
+_health_release_host_lock() {
+    local release_rc=0 fd="${HEALTH_HOST_LOCK_FD:-}"
+    if [[ -n "$fd" ]]; then
+        flock -u "$fd" 2>/dev/null || release_rc=$?
+        _health_close_lock_fd "$fd" || release_rc=$?
+    fi
+    HEALTH_HOST_LOCK_FD=""
+    return "$release_rc"
+}
+
+_health_acquire_host_lock() {
+    local gate_path fd fd_path flock_rc owner_pid="$BASHPID"
+    gate_path="$(_health_host_gate_path)"
+    HEALTH_HOST_LOCK_FD=""
+
+    if [[ ! -d "$gate_path" || -L "$gate_path" ]] \
+        || ! _health_lock_ancestry_is_trusted "$gate_path"; then
+        log_error "Host-wide health coordination gate is unsafe: $gate_path"
+        return 3
+    fi
+    if ! { exec {fd}<"$gate_path"; } 2>/dev/null; then
+        log_error "Cannot open host-wide health coordination gate: $gate_path"
+        return 3
+    fi
+
+    fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
+    if [[ ! -d "$fd_path" ]] \
+        || ! _health_open_lock_matches_target "$gate_path" "$fd"; then
+        _health_close_lock_fd "$fd" || true
+        log_error "Host-wide health coordination gate changed while being opened: $gate_path"
+        return 3
+    fi
+
+    if flock -n -E 75 "$fd" 2>/dev/null; then
+        flock_rc=0
+    else
+        flock_rc=$?
+    fi
+    case "$flock_rc" in
+        0) ;;
+        75)
+            _health_close_lock_fd "$fd" || true
+            log_warn "Another VaultWarden health check is already running on this host; skipping this duplicate run."
+            return 75
+            ;;
+        *)
+            _health_close_lock_fd "$fd" || true
+            log_error "Host-wide health coordination flock failed with status ${flock_rc}: $gate_path"
+            return 3
+            ;;
+    esac
+
+    if [[ ! -d "$fd_path" ]] \
+        || ! _health_open_lock_matches_target "$gate_path" "$fd" \
+        || ! _health_lock_ancestry_is_trusted "$gate_path"; then
+        flock -u "$fd" 2>/dev/null || true
+        _health_close_lock_fd "$fd" || true
+        log_error "Host-wide health coordination gate changed after acquisition: $gate_path"
+        return 3
+    fi
+    HEALTH_HOST_LOCK_FD="$fd"
+}
+
 _health_secure_open_helper() {
     local lock_path="$1"
     exec python3 -c '
@@ -456,7 +528,7 @@ _health_open_lock_file() {
 }
 
 _release_readonly_health_lock() {
-    local release_rc=0 opened_fd="${HEALTH_OPENED_LOCK_FD:-}"
+    local release_rc=0 host_release_rc opened_fd="${HEALTH_OPENED_LOCK_FD:-}"
     if [[ -n "${HEALTH_LOCK_FD:-}" ]]; then
         flock -u "$HEALTH_LOCK_FD" 2>/dev/null || release_rc=$?
         _health_close_lock_fd "$HEALTH_LOCK_FD" || release_rc=$?
@@ -466,17 +538,33 @@ _release_readonly_health_lock() {
     fi
     HEALTH_LOCK_FD=""
     HEALTH_OPENED_LOCK_FD=""
+
+    if _health_release_host_lock; then
+        :
+    else
+        host_release_rc=$?
+        (( release_rc == 0 )) && release_rc="$host_release_rc"
+    fi
     return "$release_rc"
 }
 
 _acquire_readonly_health_lock() {
-    local lock_path fd flock_rc
+    local lock_path fd flock_rc host_rc
     lock_path="$(_health_readonly_lock_path)"
 
+    if _health_acquire_host_lock; then
+        :
+    else
+        host_rc=$?
+        return "$host_rc"
+    fi
+
     if ! _health_prepare_lock_file "$lock_path"; then
+        _health_release_host_lock || true
         return 3
     fi
     if ! _health_open_lock_file "$lock_path"; then
+        _health_release_host_lock || true
         return 3
     fi
     fd="$HEALTH_OPENED_LOCK_FD"
@@ -491,12 +579,14 @@ _acquire_readonly_health_lock() {
         75)
             _health_close_lock_fd "$fd" || true
             HEALTH_OPENED_LOCK_FD=""
-            log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
+            _health_release_host_lock || true
+            log_warn "Another VaultWarden health check is already running for this local identity; skipping this duplicate run."
             return 75
             ;;
         *)
             _health_close_lock_fd "$fd" || true
             HEALTH_OPENED_LOCK_FD=""
+            _health_release_host_lock || true
             log_error "Health coordination flock failed with status ${flock_rc}: $lock_path"
             return 3
             ;;
@@ -507,6 +597,7 @@ _acquire_readonly_health_lock() {
         flock -u "$fd" 2>/dev/null || true
         _health_close_lock_fd "$fd" || true
         HEALTH_OPENED_LOCK_FD=""
+        _health_release_host_lock || true
         log_error "Health coordination lock changed after acquisition: $lock_path"
         return 3
     fi

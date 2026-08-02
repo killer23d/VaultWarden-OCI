@@ -955,6 +955,7 @@ cleanup() {
     [[ -n "${capture_pid_two:-}" ]] && kill -KILL "$capture_pid_two" 2>/dev/null || true
     [[ -n "${capture_signal_helper_pid:-}" ]] && kill -KILL "$capture_signal_helper_pid" 2>/dev/null || true
     [[ -n "${signal_pid:-}" ]] && kill -KILL "$signal_pid" 2>/dev/null || true
+    [[ -n "${cross_identity_pid:-}" ]] && kill -KILL "$cross_identity_pid" 2>/dev/null || true
     [[ -n "${mutator_pid:-}" ]] && kill -KILL "$mutator_pid" 2>/dev/null || true
     rm -rf -- "$TMP"
 }
@@ -1170,7 +1171,7 @@ if [[ -d "/proc/$$/fd" ]]; then
     _health_path_identity() {
         local target="$1" identity
         identity="$(_health_path_identity_real "$target")" || return 1
-        if [[ "$target" == /proc/*/fd/* && ! -e "$TMP/swap-done" ]]; then
+        if [[ "$target" == /proc/*/fd/* && "$identity" == "$(_health_path_identity_real "$replacement_lock")" && ! -e "$TMP/swap-done" ]]; then
             mv -- "$replacement_lock" "${replacement_lock}.opened"
             : > "$replacement_lock"
             chmod 0600 -- "$replacement_lock"
@@ -1222,6 +1223,9 @@ run() {
     log_warn(){ :; }
     log_info(){ :; }
     source "$LOCK_BLOCK"
+    # This regression targets the local secure-open window itself. The
+    # host-wide gate has independent process-level coverage below.
+    _health_acquire_host_lock(){ return 0; }
     set +e
     _acquire_readonly_health_lock
     rc=$?
@@ -1435,28 +1439,30 @@ overlap_lock="$lock_dir/overlap.lock"
 VW_HEALTH_LOCK_FILE="$overlap_lock"
 _acquire_run_lock || fail "parent read-only health acquisition failed"
 probe_health() {
-    local mode="$1" marker="$2"
+    local mode="$1" marker="$2" path="$3"
     FIX_MODE="$mode"
+    HEALTH_HOST_LOCK_FD=""
     HEALTH_LOCK_FD=""
     # Consumed by the dynamically sourced lock-open helper.
     # shellcheck disable=SC2034
     HEALTH_OPENED_LOCK_FD=""
     HEALTH_OPERATION_GUARD_ACQUIRED=false
+    VW_HEALTH_LOCK_FILE="$path"
     operation_acquire(){ : > "$marker"; return 0; }
     operation_set_phase(){ return 0; }
     operation_release(){ return 0; }
     _acquire_run_lock
 }
 set +e
-(probe_health false "$TMP/readonly-global-called")
+(probe_health false "$TMP/readonly-global-called" "$lock_dir/readonly-other.lock")
 readonly_rc=$?
-(probe_health true "$TMP/repair-global-called")
+(probe_health true "$TMP/repair-global-called" "$lock_dir/repair-other.lock")
 repair_rc=$?
 set -e
 [[ "$readonly_rc" -eq 75 && "$repair_rc" -eq 75 ]] \
-    || fail "read-only holder did not exclude same-path duplicate/repair runs"
+    || fail "host-wide read-only holder did not exclude duplicate/repair runs on other local paths"
 [[ ! -e "$TMP/readonly-global-called" && ! -e "$TMP/repair-global-called" ]] \
-    || fail "repair attempted the global guard before health contention cleared"
+    || fail "repair attempted the operation guard before host-wide health contention cleared"
 _release_run_lock 0 || fail "parent read-only health release failed"
 
 FIX_MODE=true
@@ -1464,15 +1470,117 @@ TRACE=""
 VW_HEALTH_LOCK_FILE="$overlap_lock"
 _acquire_run_lock || fail "parent health repair acquisition failed"
 set +e
-(probe_health false "$TMP/fix-readonly-global-called")
+(probe_health false "$TMP/fix-readonly-global-called" "$lock_dir/fix-readonly-other.lock")
 fix_readonly_rc=$?
-(probe_health true "$TMP/fix-repair-global-called")
+(probe_health true "$TMP/fix-repair-global-called" "$lock_dir/fix-repair-other.lock")
 fix_repair_rc=$?
 set -e
 [[ "$fix_readonly_rc" -eq 75 && "$fix_repair_rc" -eq 75 ]] \
-    || fail "repair holder did not exclude same-path read-only/second repair runs"
+    || fail "host-wide repair holder did not exclude read-only/repair runs on other local paths"
 _release_run_lock 0 || fail "parent repair release failed"
-pass "same resolved health path serializes every read and repair combination"
+pass "host-wide health gate serializes every read and repair combination across local paths"
+
+if (( EUID != 0 )) && [[ "$HAS_ROOT" == true ]]; then
+    cross_holder="$TMP/cross-identity-holder.bash"
+    cross_probe="$TMP/cross-identity-probe.bash"
+    cat > "$cross_holder" <<'EOF_CROSS_HOLDER'
+#!/usr/bin/env bash
+set -euo pipefail
+run() {
+    local FIX_MODE="$HOLDER_FIX_MODE"
+    log_error(){ :; }
+    log_warn(){ :; }
+    log_info(){ :; }
+    operation_acquire(){ return 0; }
+    operation_set_phase(){ return 0; }
+    operation_release(){ return 0; }
+    source "$LOCK_BLOCK"
+    unset VW_HEALTH_LOCK_FILE XDG_RUNTIME_DIR TMPDIR
+    _acquire_run_lock
+    : > "$READY_FILE"
+    while [[ ! -e "$RELEASE_FILE" ]]; do sleep 0.02; done
+    _release_run_lock 0
+}
+run
+EOF_CROSS_HOLDER
+    cat > "$cross_probe" <<'EOF_CROSS_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+run() {
+    local FIX_MODE=false rc
+    log_error(){ :; }
+    log_warn(){ :; }
+    log_info(){ :; }
+    operation_acquire(){ return 0; }
+    operation_set_phase(){ return 0; }
+    operation_release(){ return 0; }
+    source "$LOCK_BLOCK"
+    unset VW_HEALTH_LOCK_FILE TMPDIR
+    XDG_RUNTIME_DIR="$PROBE_XDG"
+    set +e
+    _acquire_run_lock
+    rc=$?
+    set -e
+    if (( rc == 0 )); then
+        : > "$CHECKS_MARKER"
+        _release_run_lock 0
+    fi
+    exit "$rc"
+}
+run
+EOF_CROSS_PROBE
+    chmod 0755 "$cross_holder" "$cross_probe"
+
+    root_default_existed=false
+    if sudo -n -- test -e /run/lock/vaultwarden-health.lock; then
+        root_default_existed=true
+    fi
+
+    for cross_spec in readonly:false repair:true; do
+        cross_label="${cross_spec%%:*}"
+        cross_fix="${cross_spec##*:}"
+        cross_ready="$TMP/cross-${cross_label}.ready"
+        cross_release="$TMP/cross-${cross_label}.release"
+        cross_checks="$TMP/cross-${cross_label}.checks"
+        cross_xdg="$TMP/cross-${cross_label}-xdg"
+        mkdir -m 0700 "$cross_xdg"
+
+        sudo -n -- env -u VW_HEALTH_LOCK_FILE -u XDG_RUNTIME_DIR -u TMPDIR \
+            LOCK_BLOCK="$LOCK_BLOCK" HOLDER_FIX_MODE="$cross_fix" \
+            READY_FILE="$cross_ready" RELEASE_FILE="$cross_release" \
+            "$BASH" "$cross_holder" &
+        cross_identity_pid=$!
+        wait_for_file "$cross_ready"
+
+        set +e
+        env -u VW_HEALTH_LOCK_FILE -u TMPDIR \
+            LOCK_BLOCK="$LOCK_BLOCK" PROBE_XDG="$cross_xdg" \
+            CHECKS_MARKER="$cross_checks" "$BASH" "$cross_probe"
+        cross_rc=$?
+        set -e
+        [[ "$cross_rc" -eq 75 && ! -e "$cross_checks" \
+            && ! -e "$cross_xdg/vaultwarden-health.lock" ]] \
+            || fail "non-root read-only health overlapped root ${cross_label} or reached local checks (rc=$cross_rc)"
+
+        : > "$cross_release"
+        wait "$cross_identity_pid" || fail "root ${cross_label} holder failed"
+        cross_identity_pid=""
+
+        env -u VW_HEALTH_LOCK_FILE -u TMPDIR \
+            LOCK_BLOCK="$LOCK_BLOCK" PROBE_XDG="$cross_xdg" \
+            CHECKS_MARKER="$cross_checks" "$BASH" "$cross_probe" \
+            || fail "non-root health did not acquire after root ${cross_label} released"
+        [[ -e "$cross_checks" ]] \
+            || fail "post-release non-root health did not reach its check boundary"
+    done
+
+    if [[ "$root_default_existed" == false ]]; then
+        sudo -n -- /usr/bin/rm -f -- /run/lock/vaultwarden-health.lock
+    fi
+    pass "root read-only and repair runs exclude non-root default-path health before checks"
+else
+    printf 'SKIP: cross-EUID health serialization requires a non-root runner with passwordless sudo.\n'
+fi
 
 real_lock="$lock_dir/real-global.lock"
 real_ops_state="$TMP/real-operations-state"
@@ -1545,21 +1653,23 @@ parent_lock="$lock_dir/parent-descriptor.lock"
 subshell_lock="$lock_dir/subshell-descriptor.lock"
 VW_HEALTH_LOCK_FILE="$parent_lock"
 _acquire_run_lock || fail "parent descriptor-reuse setup failed"
+parent_host_fd="$HEALTH_HOST_LOCK_FD"
 parent_health_fd="$HEALTH_LOCK_FD"
+_release_run_lock 0 || fail "parent descriptor-reuse release failed"
 (
-    eval "exec ${parent_health_fd}>&-"
+    HEALTH_HOST_LOCK_FD=""
     HEALTH_LOCK_FD=""
     # Consumed by the dynamically sourced lock-open helper.
     # shellcheck disable=SC2034
     HEALTH_OPENED_LOCK_FD=""
     VW_HEALTH_LOCK_FILE="$subshell_lock"
     _acquire_readonly_health_lock || fail "subshell health acquisition failed after descriptor reuse"
-    [[ "$HEALTH_LOCK_FD" == "$parent_health_fd" ]] \
-        || fail "subshell did not reuse expected descriptor $parent_health_fd"
+    [[ "$HEALTH_HOST_LOCK_FD" == "$parent_host_fd" \
+        && "$HEALTH_LOCK_FD" == "$parent_health_fd" ]] \
+        || fail "subshell did not reuse the expected host/local descriptor pair"
     _release_readonly_health_lock || fail "subshell descriptor-reuse release failed"
 )
-_release_run_lock 0 || fail "parent descriptor-reuse release failed"
-pass "health descriptor validation follows the current subshell owner"
+pass "host and local health descriptor validation follows the current subshell owner"
 
 signal_lock="$lock_dir/signal.lock"
 SIGNAL_SCRIPT="$TMP/signal-holder.bash"

@@ -14,8 +14,10 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # Start even if /etc/vaultwarden/vaultwarden.env is not installed yet;
 # maintenance.sh reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# maintenance.sh health owns duplicate-run protection. With --fix, it also uses
-# the shared operation guard and exits cleanly if another operation is active.
+# maintenance.sh health first takes a host-wide advisory gate on the stable
+# /run/lock directory inode, then its root/XDG/TMP regular-file lock. With
+# --fix, it also uses the shared operation guard and exits cleanly if another
+# operation is active. Advisory directory locking does not block normal files.
 # Add --email only after alert delivery is configured.
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh health --fix
 # This unit intentionally runs as root because the current backup/maintenance
@@ -54,9 +56,10 @@ ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-
 ReadWritePaths=-/var/lib/crowdsec
 # RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
 # root-owned runtime directory before ExecStart runs. The operation library uses
-# that directory for owner/holder state. Root health uses the regular lock file
-# /run/lock/vaultwarden-health.lock; documented non-root diagnostics preserve
-# their XDG_RUNTIME_DIR or per-EUID TMP fallback paths.
+# that directory for owner/holder state. Every health invocation shares the
+# host-wide /run/lock directory-inode gate. Root health then uses the regular
+# /run/lock/vaultwarden-health.lock file; non-root diagnostics retain their
+# XDG_RUNTIME_DIR or per-EUID TMP regular-file paths as a local second layer.
 RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes

@@ -45,9 +45,15 @@ for variable in \
     fi
 done
 grep -Fq 'local health_fd="${HEALTH_LOCK_FD:-}"' <<< "$spinner_block" \
-    || fail "spinner must preserve read-health lock isolation"
-grep -Fq 'eval "exec ${health_fd}>&-"' <<< "$spinner_block" \
-    || fail "spinner child must close the read-health lock descriptor"
+    || fail "spinner must preserve local read-health lock isolation"
+grep -Fq 'local health_host_fd="${HEALTH_HOST_LOCK_FD:-}"' <<< "$spinner_block" \
+    || fail "spinner must preserve host-wide health gate isolation"
+grep -Fq 'for inherited_health_fd in "$health_host_fd" "$health_fd"' <<< "$spinner_block" \
+    || fail "spinner child must enumerate both health descriptors"
+grep -Fq 'exec ${inherited_health_fd}>&-' <<< "$spinner_block" \
+    || fail "spinner child must close both health descriptors"
+grep -Fq 'unset HEALTH_HOST_LOCK_FD HEALTH_LOCK_FD' <<< "$spinner_block" \
+    || fail "spinner child must clear both inherited health descriptor variables"
 
 if grep -Fq '_crowdsec_worker_run_without_guard_fds' "$CROWDSEC_WORKER_LIB"; then
     fail "CrowdSec worker library retained obsolete operation descriptor isolation"
