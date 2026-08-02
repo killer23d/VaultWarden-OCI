@@ -84,8 +84,8 @@ jobs:
           text = text.replace(old_local, new_local)
 
           replacements = {
-              '    TRACE+="health-before-global\\\\n"\n': "    TRACE+=$'health-before-global\\n'\n",
-              'operation_set_phase(){ TRACE+="phase\\\\n"; return 0; }\n': "operation_set_phase(){ TRACE+=$'phase\\n'; return 0; }\n",
+              '    TRACE+="health-before-global\\n"\n': "    TRACE+=$'health-before-global\\n'\n",
+              'operation_set_phase(){ TRACE+="phase\\n"; return 0; }\n': "operation_set_phase(){ TRACE+=$'phase\\n'; return 0; }\n",
           }
           for old, new in replacements.items():
               if text.count(old) != 1:
