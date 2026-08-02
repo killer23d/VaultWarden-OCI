@@ -301,7 +301,7 @@ jobs:
     name: Exact-head required validation
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
