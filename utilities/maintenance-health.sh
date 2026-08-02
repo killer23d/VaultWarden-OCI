@@ -280,11 +280,10 @@ _health_create_lock_file() {
         return 1
     fi
 
-    if ln -T -- "$temp" "$lock_path" 2>/dev/null; then
-        rm -f -- "$temp" 2>/dev/null || {
-            log_error "Cannot remove temporary health coordination name: $temp"
-            return 1
-        }
+    # Publish with one no-clobber rename. The public inode therefore always
+    # has one link, and process death can leave only an unrelated hidden temp.
+    if mv -T -n -- "$temp" "$lock_path" 2>/dev/null \
+        && [[ ! -e "$temp" ]]; then
         return 0
     fi
 
@@ -323,6 +322,27 @@ _health_open_lock_matches_target() {
     [[ "$fd_identity" == "$target_identity" ]]
 }
 
+_health_lock_fd_is_eligible() {
+    local fd="$1" expected_links="${2:-1}" fd_path metadata mode uid gid links
+    local owner_pid="$BASHPID"
+    fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
+    [[ -f "$fd_path" ]] || return 1
+    metadata="$(_health_stat_mode_uid_gid_nlink "$fd_path")" || return 1
+    IFS=: read -r mode uid gid links <<< "$metadata"
+    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" == "$EUID" \
+        && "$gid" =~ ^[0-9]+$ && "$links" == "$expected_links" ]]
+}
+
+_health_lock_fd_is_trusted() {
+    local fd="$1" expected_links="${2:-1}" fd_path metadata mode _uid _gid _links
+    local owner_pid="$BASHPID"
+    _health_lock_fd_is_eligible "$fd" "$expected_links" || return 1
+    fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
+    metadata="$(_health_stat_mode_uid_gid_nlink "$fd_path")" || return 1
+    IFS=: read -r mode _uid _gid _links <<< "$metadata"
+    [[ "$mode" == 600 ]]
+}
+
 _health_close_lock_fd() {
     local fd="$1"
     [[ "$fd" =~ ^[0-9]+$ ]] || return 0
@@ -330,79 +350,51 @@ _health_close_lock_fd() {
 }
 
 _health_open_lock_file() {
-    local lock_path="$1" lock_dir private_dir alias fd old_umask
+    local lock_path="$1" fd fd_path owner_pid="$BASHPID"
     HEALTH_OPENED_LOCK_FD=""
-    lock_dir="$(dirname "$lock_path")"
 
-    old_umask="$(umask)"
-    umask 077
-    private_dir="$(mktemp -d "${lock_dir}/.vaultwarden-health-open.XXXXXXXXXX")" || {
-        umask "$old_umask"
-        log_error "Cannot create a private health lock-open directory in: $lock_dir"
-        return 1
-    }
-    umask "$old_umask"
-    alias="${private_dir}/lock"
-
-    # -P hard-links the directory entry itself rather than dereferencing a
-    # symlink; -T requires the destination to be this exact pathname.
-    if ! ln -PT -- "$lock_path" "$alias" 2>/dev/null; then
-        rmdir -- "$private_dir" 2>/dev/null || true
-        log_error "Cannot capture health coordination lock without following replacements: $lock_path"
+    # The file already exists and is eligible. Open it read-only so a raced
+    # replacement cannot be created, truncated, or otherwise mutated.
+    if ! { exec {fd}<"$lock_path"; } 2>/dev/null; then
+        log_error "Cannot open health coordination lock without mutation: $lock_path"
         return 1
     fi
+    HEALTH_OPENED_LOCK_FD="$fd"
+    fd_path="$(_health_lock_fd_path "$fd" "$owner_pid")"
 
-    if ! _health_lock_file_is_eligible "$alias" 2 \
-        || ! _health_lock_file_is_eligible "$lock_path" 2 \
-        || [[ "$(_health_path_identity "$alias" 2>/dev/null || true)" \
-            != "$(_health_path_identity "$lock_path" 2>/dev/null || true)" ]]; then
-        rm -f -- "$alias" 2>/dev/null || true
-        rmdir -- "$private_dir" 2>/dev/null || true
-        log_error "Health coordination lock changed while its inode was captured: $lock_path"
-        return 1
-    fi
-
-    if ! chmod 0600 -- "$alias" 2>/dev/null \
-        || ! _health_lock_file_is_trusted "$alias" 2 \
-        || ! _health_lock_file_is_trusted "$lock_path" 2; then
-        rm -f -- "$alias" 2>/dev/null || true
-        rmdir -- "$private_dir" 2>/dev/null || true
-        log_error "Health coordination lock metadata could not be restricted safely: $lock_path"
-        return 1
-    fi
-
-    if ! { exec {fd}<>"$alias"; } 2>/dev/null; then
-        rm -f -- "$alias" 2>/dev/null || true
-        rmdir -- "$private_dir" 2>/dev/null || true
-        log_error "Cannot open captured health coordination inode: $lock_path"
-        return 1
-    fi
-
-    if ! rm -f -- "$alias" 2>/dev/null || ! rmdir -- "$private_dir" 2>/dev/null; then
+    if ! _health_lock_file_is_eligible "$lock_path" 1 \
+        || ! _health_lock_fd_is_eligible "$fd" 1 \
+        || ! _health_open_lock_matches_target "$lock_path" "$fd"; then
         _health_close_lock_fd "$fd" || true
-        rm -f -- "$alias" 2>/dev/null || true
-        rmdir -- "$private_dir" 2>/dev/null || true
-        log_error "Cannot clean private health lock-open state: $lock_path"
-        return 1
-    fi
-
-    if ! _health_open_lock_matches_target "$lock_path" "$fd" \
-        || ! _health_lock_path_is_trusted "$lock_path" 1; then
-        _health_close_lock_fd "$fd" || true
+        HEALTH_OPENED_LOCK_FD=""
         log_error "Health coordination lock changed while being opened: $lock_path"
         return 1
     fi
 
-    HEALTH_OPENED_LOCK_FD="$fd"
+    # Restrict the inode through the opened descriptor, not through the public
+    # pathname. This avoids a check-to-chmod pathname race.
+    if ! chmod 0600 -- "$fd_path" 2>/dev/null \
+        || ! _health_lock_fd_is_trusted "$fd" 1 \
+        || ! _health_lock_path_is_trusted "$lock_path" 1 \
+        || ! _health_open_lock_matches_target "$lock_path" "$fd"; then
+        _health_close_lock_fd "$fd" || true
+        HEALTH_OPENED_LOCK_FD=""
+        log_error "Health coordination lock metadata could not be restricted safely: $lock_path"
+        return 1
+    fi
 }
 
 _release_readonly_health_lock() {
-    local release_rc=0
+    local release_rc=0 opened_fd="${HEALTH_OPENED_LOCK_FD:-}"
     if [[ -n "${HEALTH_LOCK_FD:-}" ]]; then
         flock -u "$HEALTH_LOCK_FD" 2>/dev/null || release_rc=$?
         _health_close_lock_fd "$HEALTH_LOCK_FD" || release_rc=$?
     fi
+    if [[ -n "$opened_fd" && "$opened_fd" != "${HEALTH_LOCK_FD:-}" ]]; then
+        _health_close_lock_fd "$opened_fd" || release_rc=$?
+    fi
     HEALTH_LOCK_FD=""
+    HEALTH_OPENED_LOCK_FD=""
     return "$release_rc"
 }
 
@@ -417,7 +409,6 @@ _acquire_readonly_health_lock() {
         return 3
     fi
     fd="$HEALTH_OPENED_LOCK_FD"
-    HEALTH_OPENED_LOCK_FD=""
 
     if flock -n -E 75 "$fd" 2>/dev/null; then
         flock_rc=0
@@ -428,11 +419,13 @@ _acquire_readonly_health_lock() {
         0) ;;
         75)
             _health_close_lock_fd "$fd" || true
+            HEALTH_OPENED_LOCK_FD=""
             log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
             return 75
             ;;
         *)
             _health_close_lock_fd "$fd" || true
+            HEALTH_OPENED_LOCK_FD=""
             log_error "Health coordination flock failed with status ${flock_rc}: $lock_path"
             return 3
             ;;
@@ -442,10 +435,12 @@ _acquire_readonly_health_lock() {
         || ! _health_lock_path_is_trusted "$lock_path" 1; then
         flock -u "$fd" 2>/dev/null || true
         _health_close_lock_fd "$fd" || true
+        HEALTH_OPENED_LOCK_FD=""
         log_error "Health coordination lock changed after acquisition: $lock_path"
         return 3
     fi
     HEALTH_LOCK_FD="$fd"
+    HEALTH_OPENED_LOCK_FD=""
 }
 
 _acquire_run_lock() {
@@ -1505,15 +1500,15 @@ _health_main() {
         log_error "Run: sudo ./maintenance.sh health --fix"
         return 3
     fi
+    trap '_health_exit_cleanup' EXIT
+    trap '_health_signal_cleanup 129' HUP
+    trap '_health_signal_cleanup 130' INT
+    trap '_health_signal_cleanup 143' TERM
     _acquire_run_lock
     lock_rc=$?
     if (( lock_rc != 0 )); then
         return "$lock_rc"
     fi
-    trap '_health_exit_cleanup' EXIT
-    trap '_health_signal_cleanup 129' HUP
-    trap '_health_signal_cleanup 130' INT
-    trap '_health_signal_cleanup 143' TERM
     log_info "Starting VaultWarden health check..."
     if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
     _check_containers
