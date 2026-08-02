@@ -42,6 +42,78 @@ generated = generated.replace(
     '# shellcheck disable=SC2034\n'
     'HEALTH_OPENED_LOCK_FD=""',
 )
+old_replacement_test = '''if [[ -d "/proc/$$/fd" ]]; then
+    replacement_lock="$lock_dir/replacement.lock"
+    : > "$replacement_lock"
+    chmod 0600 "$replacement_lock"
+    real_stat="$(command -v stat)"
+    cat > "$TMP/mockbin/stat" <<'EOF_STAT'
+#!/usr/bin/env bash
+set -euo pipefail
+last_arg="${!#}"
+if [[ "$last_arg" == /proc/*/fd/* ]]; then
+    : > "$SWAP_ARMED"
+elif [[ "$last_arg" == "$LOCK_PATH" && -e "$SWAP_ARMED" && ! -e "$SWAP_DONE" ]]; then
+    /bin/mv -- "$LOCK_PATH" "${LOCK_PATH}.opened"
+    : > "$LOCK_PATH"
+    /bin/chmod 0600 -- "$LOCK_PATH"
+    : > "$SWAP_DONE"
+fi
+exec "$REAL_STAT" "$@"
+EOF_STAT
+    chmod 0755 "$TMP/mockbin/stat"
+    VW_HEALTH_LOCK_FILE="$replacement_lock"
+    set +e
+    REAL_STAT="$real_stat" LOCK_PATH="$replacement_lock" \\
+        SWAP_ARMED="$TMP/swap-armed" SWAP_DONE="$TMP/swap-done" \\
+        PATH="$TMP/mockbin:$PATH" _acquire_readonly_health_lock
+    rc=$?
+    set -e
+    [[ "$rc" -eq 3 && -e "$TMP/swap-done" && -z "$HEALTH_LOCK_FD" ]] \\
+        || fail "health lock replacement was not detected safely"
+    pass "health coordination verifies the opened descriptor against the intended regular file"
+else
+    printf 'SKIP: descriptor replacement test requires /proc.\\n'
+fi
+'''
+new_replacement_test = '''if [[ -d "/proc/$$/fd" ]]; then
+    replacement_lock="$lock_dir/replacement.lock"
+    : > "$replacement_lock"
+    chmod 0600 "$replacement_lock"
+    original_identity_definition="$(declare -f _health_path_identity)"
+    _health_path_identity_real() {
+        local target="$1"
+        stat -Lc '%d:%i' -- "$target" 2>/dev/null \\
+            || stat -f '%d:%i' -- "$target" 2>/dev/null
+    }
+    _health_path_identity() {
+        local target="$1" identity
+        identity="$(_health_path_identity_real "$target")" || return 1
+        if [[ "$target" == /proc/*/fd/* && ! -e "$TMP/swap-done" ]]; then
+            mv -- "$replacement_lock" "${replacement_lock}.opened"
+            : > "$replacement_lock"
+            chmod 0600 -- "$replacement_lock"
+            : > "$TMP/swap-done"
+        fi
+        printf '%s\\n' "$identity"
+    }
+    VW_HEALTH_LOCK_FILE="$replacement_lock"
+    set +e
+    _acquire_readonly_health_lock
+    rc=$?
+    set -e
+    eval "$original_identity_definition"
+    unset -f _health_path_identity_real
+    [[ "$rc" -eq 3 && -e "$TMP/swap-done" && -z "$HEALTH_LOCK_FD" ]] \\
+        || fail "health lock replacement was not detected safely"
+    pass "health coordination verifies the opened descriptor against the intended regular file"
+else
+    printf 'SKIP: descriptor replacement test requires /proc.\\n'
+fi
+'''
+if generated.count(old_replacement_test) != 1:
+    raise SystemExit("replacement test marker not found exactly once")
+generated = generated.replace(old_replacement_test, new_replacement_test, 1)
 tests_path.write_text(tests[:start] + generated + tests[call_end:])
 
 service_path = Path("systemd/vaultwarden-health.service")
