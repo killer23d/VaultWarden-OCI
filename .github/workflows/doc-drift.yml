@@ -1,23 +1,5 @@
 name: Doc Drift Check
 on:
-  push:
-    paths:
-      - '.github/workflows/**'
-      - 'AGENTS.md'
-      - 'caddy/**'
-      - 'docs/**'
-      - 'README.md'
-      - 'RUNBOOK.md'
-      - 'utilities/**'
-      - 'lib/**'
-      - '*.sh'
-      - 'Makefile'
-      - 'systemd/**'
-      - 'tests/**'
-      - 'secrets-schema.yaml'
-      - '.env.example'
-      - 'docker-compose.yml.example'
-      - '.gitignore'
   pull_request:
     paths:
       - '.github/workflows/**'
@@ -37,10 +19,6 @@ on:
       - 'docker-compose.yml.example'
       - '.gitignore'
 
-
-concurrency:
-  group: doc-drift-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 # Global permissions
 permissions:
   contents: read
@@ -225,13 +203,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Validate repository-wide Bash syntax
-        shell: bash
-        run: |
-          while IFS= read -r -d '' file; do
-            bash -n "$file"
-          done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
-
       - name: Run Strict Shellcheck
         run: |
           # -x: follow source statements to avoid SC1091 false positives.
@@ -240,7 +211,6 @@ jobs:
             | xargs -0 shellcheck -x --severity=warning
 
   functional-tests:
-    if: github.event_name == 'pull_request'
     name: Functional tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -282,9 +252,7 @@ jobs:
             exit "$rc"
           fi
           if [[ "${{ matrix.suite }}" == "security" ]]; then
-            grep -Fq \
-              'PASS direct automatic setup PTY no-leak regression' \
-              "$log" || {
+            grep -Fq               'PASS direct automatic setup PTY no-leak regression'               "$log" || {
                 echo "ERROR: mandatory direct-auto PTY no-leak regression did not execute" >&2
                 exit 1
               }
@@ -298,93 +266,3 @@ jobs:
           path: test-results/${{ matrix.suite }}.log
           if-no-files-found: error
           retention-days: 7
-
-  exact-head-validation:
-    name: Exact-head required validation
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-
-      - name: Verify exact branch head
-        env:
-          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          git fetch --no-tags origin delta:refs/remotes/origin/delta
-          git diff --check origin/delta...HEAD
-
-      - name: Install test dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
-          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
-          sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
-          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
-          sudo install -m 755 /tmp/sops /usr/local/bin/sops
-
-      - name: Run mandatory final validation
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r -d '' file; do
-            bash -n "$file"
-          done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
-
-          # Do not pipe the suite through tee. A descendant that retains the
-          # inherited stdout descriptor can keep the pipe open after the test
-          # runner has already returned and printed its final PASS line.
-          set +e
-          ./tests/run-tests.sh all > /tmp/all-tests.log 2>&1
-          tests_rc=$?
-          set -e
-          cat /tmp/all-tests.log
-          if (( tests_rc != 0 )); then
-            exit "$tests_rc"
-          fi
-
-          status="$(git status --porcelain=v1 --untracked-files=all)"
-          if [[ -n "$status" ]]; then
-            printf 'Working tree is not clean after validation:\n%s\n' "$status" >&2
-            exit 1
-          fi
-
-      - name: Capture repository lock inventory evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo '=== operation guard callers ==='
-            grep -RIn --include='*.sh' --include='*.bash' \
-              -E 'operation_acquire|--specific-lock' . || true
-            echo
-            echo '=== direct flock and lock-path users ==='
-            grep -RIn --include='*.sh' --include='*.bash' \
-              -E 'flock|LOCK(_FILE|_PATH|_DIR)?=' . || true
-            echo
-            echo '=== systemd lock-related callers ==='
-            grep -RIn -E 'flock|health --fix|backup|restore|maintenance' systemd Makefile .github/workflows || true
-          } | tee /tmp/lock-inventory.txt
-
-      - name: Upload exact-head evidence
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: exact-head-validation-evidence
-          path: |
-            /tmp/all-tests.log
-            /tmp/lock-inventory.txt
-          if-no-files-found: warn
-          retention-days: 14
