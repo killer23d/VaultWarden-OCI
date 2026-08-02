@@ -48,7 +48,7 @@ jobs:
           echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
 
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux-amd64 -o /tmp/sops
           echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
@@ -65,8 +65,17 @@ jobs:
           python3 /tmp/health-global-transform.py
           python3 - <<'PY'
           from pathlib import Path
-          path = Path('.github/workflows/doc-drift.yml')
-          path.write_text(path.read_text().rstrip() + '\n')
+
+          workflow_path = Path('.github/workflows/doc-drift.yml')
+          workflow_path.write_text(workflow_path.read_text().rstrip() + '\n')
+
+          test_path = Path('tests/suites/operations/case-health-alerts.bash')
+          test_text = test_path.read_text()
+          old = '    saved_project_root="$PROJECT_ROOT"\n'
+          new = '    saved_project_root="${PROJECT_ROOT:-$ROOT}"\n'
+          if test_text.count(old) != 1:
+              raise SystemExit('Expected one cross-identity PROJECT_ROOT fixture assignment')
+          test_path.write_text(test_text.replace(old, new, 1))
           PY
           rm -f -- \
             .github/health-global-transform.py.gz.b64 \
