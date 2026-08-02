@@ -94,7 +94,7 @@ check_health_lock_directory_security() (
     run_symlink_parent_case
 
     if (( EUID == 0 )) || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }; then
-        local root_dir="/tmp/vw-health-root-sticky-${$}-${RANDOM}" root_lock
+        local root_dir="/tmp/vw-health-root-sticky-${BASHPID}-${RANDOM}" root_lock
         root_lock="$root_dir/health.lock"
         if (( EUID == 0 )); then
             mkdir -m 1777 "$root_dir"
