@@ -177,8 +177,7 @@ _operation_prepare_lock_file() {
     fi
 
     if [[ "$desired_group" == root && "$created" == true && "$ownership_applied" == true ]]; then
-        _operation_log warn "The 'vaultwarden' group is unavailable; using root:root mode 0660 for ${lock_path}."
-        _operation_log warn "Run 'sudo utilities/setup-systemd.sh install' to create the group and enforce shared ownership."
+        _operation_log info "The optional 'vaultwarden' group is unavailable; using root:root mode 0660 for ${lock_path}."
     fi
 }
 

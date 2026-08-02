@@ -1205,12 +1205,14 @@ reject() {
   ! grep -Eq -- "$1" "$2" || fail "$3"
 }
 
-require '_acquire_readonly_health_lock' "$HEALTH" \
-  "read-only health must use direct health-specific flock"
+require '_acquire_health_lock' "$HEALTH" \
+  "every health invocation must use its direct health-specific flock"
 reject '--no-global' "$HEALTH" \
-  "read-only health must not use operation_acquire --no-global"
+  "health locking must not use operation_acquire --no-global"
 require '--id health-repair' "$HEALTH" \
   "health --fix must use the global health-repair operation"
+reject '--specific-lock /run/lock/vaultwarden-health\.lock' "$HEALTH" \
+  "health --fix must not delegate health-lock ownership to the operation guard"
 require 'return "\$lock_rc"' "$HEALTH" \
   "health lock acquisition failures must preserve their real status"
 require 'health --fix requires root' "$HEALTH" \

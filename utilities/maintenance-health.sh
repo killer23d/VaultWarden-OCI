@@ -140,8 +140,9 @@ local MEM_CRIT_THRESHOLD=${MEM_CRIT_THRESHOLD:-90}
 local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 local HEALTH_LOCK_FD=""
+local HEALTH_OPERATION_GUARD_HELD=false
 
-_health_readonly_lock_path() {
+_health_lock_path() {
     if [[ -n "${VW_HEALTH_LOCK_FILE:-}" ]]; then
         printf '%s\n' "$VW_HEALTH_LOCK_FILE"
     elif [[ $EUID -eq 0 ]]; then
@@ -153,58 +154,130 @@ _health_readonly_lock_path() {
     fi
 }
 
-_acquire_readonly_health_lock() {
-    local lock_path lock_dir fd
-    lock_path="$(_health_readonly_lock_path)"
+_release_health_lock() {
+    if [[ -n "${HEALTH_LOCK_FD:-}" ]]; then
+        flock -u "$HEALTH_LOCK_FD" 2>/dev/null || true
+        { eval "exec ${HEALTH_LOCK_FD}>&-"; } 2>/dev/null || true
+        HEALTH_LOCK_FD=""
+    fi
+}
+
+_acquire_health_lock() {
+    local lock_path lock_dir fd flock_rc old_umask owner_uid open_owner_uid
+    lock_path="$(_health_lock_path)"
     lock_dir="$(dirname "$lock_path")"
     if ! mkdir -p "$lock_dir" 2>/dev/null; then
         log_error "Cannot prepare health coordination directory: $lock_dir"
         return 3
     fi
-    if ! : >> "$lock_path" 2>/dev/null; then
-        log_error "Cannot open health coordination lock: $lock_path"
+    if [[ -L "$lock_path" || ( -e "$lock_path" && ! -f "$lock_path" ) ]]; then
+        log_error "Health coordination lock is not a regular file: $lock_path"
         return 3
     fi
-    chmod 0600 "$lock_path" 2>/dev/null || true
+    if [[ ! -e "$lock_path" ]]; then
+        old_umask="$(umask)"
+        umask 0077
+        if (set -o noclobber; : >"$lock_path") 2>/dev/null; then
+            :
+        elif [[ -L "$lock_path" || ! -f "$lock_path" ]]; then
+            umask "$old_umask"
+            log_error "Cannot create health coordination lock: $lock_path"
+            return 3
+        fi
+        umask "$old_umask"
+    fi
+    if [[ -L "$lock_path" || ! -f "$lock_path" ]]; then
+        log_error "Health coordination lock is not a regular file: $lock_path"
+        return 3
+    fi
+    owner_uid="$(stat -c '%u' "$lock_path" 2>/dev/null \
+        || stat -f '%u' "$lock_path" 2>/dev/null || true)"
+    if [[ "$owner_uid" != "$EUID" ]]; then
+        log_error "Health coordination lock owner UID is ${owner_uid:-unknown}, expected ${EUID}: $lock_path"
+        return 3
+    fi
+    if ! chmod 0600 "$lock_path" 2>/dev/null; then
+        log_error "Cannot restrict health coordination lock: $lock_path"
+        return 3
+    fi
     if ! { exec {fd}>"$lock_path"; } 2>/dev/null; then
         log_error "Cannot open health coordination lock: $lock_path"
         return 3
     fi
-    if ! flock -n "$fd" 2>/dev/null; then
+    open_owner_uid="$(stat -Lc '%u' "/proc/${BASHPID}/fd/${fd}" 2>/dev/null \
+        || stat -f '%u' "/dev/fd/${fd}" 2>/dev/null || true)"
+    if [[ "$open_owner_uid" != "$EUID" ]]; then
         { eval "exec ${fd}>&-"; } 2>/dev/null || true
-        log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
-        return 75
+        log_error "Opened health coordination lock owner UID is ${open_owner_uid:-unknown}, expected ${EUID}: $lock_path"
+        return 3
     fi
-    HEALTH_LOCK_FD="$fd"
+    if flock -n -E 75 "$fd" 2>/dev/null; then
+        flock_rc=0
+    else
+        flock_rc=$?
+    fi
+    case "$flock_rc" in
+        0)
+            HEALTH_LOCK_FD="$fd"
+            ;;
+        75)
+            { eval "exec ${fd}>&-"; } 2>/dev/null || true
+            log_warn "Another VaultWarden health check is already running; skipping this duplicate run."
+            return 75
+            ;;
+        *)
+            { eval "exec ${fd}>&-"; } 2>/dev/null || true
+            log_error "Health coordination flock failed unexpectedly with status ${flock_rc}: $lock_path"
+            return 3
+            ;;
+    esac
 }
 
 _acquire_run_lock() {
-    if [[ "$FIX_MODE" == "true" ]]; then
-        operation_acquire \
-            --id health-repair \
-            --label "Health repair" \
-            --specific-lock /run/lock/vaultwarden-health.lock \
-            --non-interactive skip || {
-                local rc=$?
-                (( rc == 75 )) && return 75
-                log_error "Health repair operation guard failed before checks could run."
-                return 4
-            }
-        operation_set_phase "repair" "Health check with auto-repair"
+    local rc
+    if _acquire_health_lock; then
+        :
     else
-        _acquire_readonly_health_lock
+        rc=$?
+        (( rc == 75 )) && return 75
+        if [[ "$FIX_MODE" == "true" ]]; then
+            log_error "Health repair lock infrastructure failed before checks could run."
+            return 4
+        fi
+        return "$rc"
+    fi
+    if [[ "$FIX_MODE" != "true" ]]; then
+        return 0
+    fi
+    if operation_acquire \
+        --id health-repair \
+        --label "Health repair" \
+        --non-interactive skip; then
+        HEALTH_OPERATION_GUARD_HELD=true
+    else
+        rc=$?
+        _release_health_lock
+        (( rc == 75 )) && return 75
+        log_error "Health repair operation guard failed before checks could run."
+        return 4
+    fi
+    if ! operation_set_phase "repair" "Health check with auto-repair"; then
+        operation_release 1 || true
+        HEALTH_OPERATION_GUARD_HELD=false
+        _release_health_lock
+        log_error "Health repair operation guard failed before checks could run."
+        return 4
     fi
 }
 
 _release_run_lock() {
-    local rc=$?
-    if [[ "$FIX_MODE" == "true" ]]; then
-        operation_release "$rc"
-    elif [[ -n "${HEALTH_LOCK_FD:-}" ]]; then
-        flock -u "$HEALTH_LOCK_FD" 2>/dev/null || true
-        { eval "exec ${HEALTH_LOCK_FD}>&-"; } 2>/dev/null || true
-        HEALTH_LOCK_FD=""
+    local rc="${1:-$?}" release_rc=0
+    if [[ "$HEALTH_OPERATION_GUARD_HELD" == "true" ]]; then
+        operation_release "$rc" || release_rc=$?
+        HEALTH_OPERATION_GUARD_HELD=false
     fi
+    _release_health_lock
+    (( release_rc == 0 )) || return "$release_rc"
     return "$rc"
 }
 
@@ -1208,7 +1281,9 @@ _health_main() {
     if (( lock_rc != 0 )); then
         return "$lock_rc"
     fi
-    trap '_release_run_lock' EXIT HUP INT TERM
+    trap '_release_run_lock' EXIT
+    trap '_release_run_lock 130; exit 130' INT
+    trap '_release_run_lock 143; exit 143' HUP TERM
     log_info "Starting VaultWarden health check..."
     if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
     _check_containers
