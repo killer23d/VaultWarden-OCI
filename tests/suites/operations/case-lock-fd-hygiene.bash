@@ -69,9 +69,12 @@ check_health_lock_directory_security() (
     [[ -s "$block" ]] || fail "could not extract health lock implementation"
 
     run_symlink_parent_case() {
+        # shellcheck disable=SC2034 # Sourced health functions consume these dynamically.
         local FIX_MODE=false
         local HEALTH_LOCK_FD=""
+        # shellcheck disable=SC2034 # Sourced health functions consume this dynamically.
         local HEALTH_OPENED_LOCK_FD=""
+        # shellcheck disable=SC2034 # Sourced health functions consume this dynamically.
         local HEALTH_OPERATION_GUARD_ACQUIRED=false
         log_error(){ :; }
         log_warn(){ :; }
@@ -83,6 +86,7 @@ check_health_lock_directory_security() (
         link_path="$tmp/attacker-link"
         mkdir -m 0700 "$target"
         ln -s -- "$target" "$link_path"
+        # shellcheck disable=SC2034 # Sourced path resolver consumes this dynamically.
         VW_HEALTH_LOCK_FILE="$link_path/new-directory/health.lock"
         set +e
         _acquire_readonly_health_lock
