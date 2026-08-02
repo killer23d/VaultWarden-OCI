@@ -1,125 +1,377 @@
 name: Doc Drift Check
-# Temporary bootstrap; the published commit restores the permanent workflow.
-
 on:
   push:
-    branches:
-      - refactor/single-lock-ownership
+    paths:
+      - '.github/workflows/**'
+      - 'AGENTS.md'
+      - 'caddy/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'RUNBOOK.md'
+      - 'utilities/**'
+      - 'lib/**'
+      - '*.sh'
+      - 'Makefile'
+      - 'systemd/**'
+      - 'tests/**'
+      - 'secrets-schema.yaml'
+      - '.env.example'
+      - 'docker-compose.yml.example'
+      - '.gitignore'
   pull_request:
-    types:
-      - reopened
-    branches:
-      - delta
+    paths:
+      - '.github/workflows/**'
+      - 'AGENTS.md'
+      - 'caddy/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'RUNBOOK.md'
+      - 'utilities/**'
+      - 'lib/**'
+      - '*.sh'
+      - 'Makefile'
+      - 'systemd/**'
+      - 'tests/**'
+      - 'secrets-schema.yaml'
+      - '.env.example'
+      - 'docker-compose.yml.example'
+      - '.gitignore'
 
+
+concurrency:
+  group: doc-drift-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+# Global permissions
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  bootstrap-global-health-coordination:
+  compose-config:
+    name: Docker Compose config
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    permissions:
+      contents: read
     steps:
-      - name: Check out review branch
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+
+      - name: Validate Docker Compose example
+        run: |
+          docker compose version
+          docker compose \
+            --env-file .env.example \
+            -f docker-compose.yml.example \
+            config --quiet
+
+  doc-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # yq is required by lib/schema.sh (used by secrets-rotate.sh --help and
+      # write-command-reference.sh). Installing it here ensures the generated
+      # COMMAND-REFERENCE.md is identical to what was committed (which was
+      # produced on a machine that had yq installed).
+      #
+      # NOTE: 'apt-get install yq' installs python-yq (a jq wrapper), NOT
+      # the Mike Farah yq v4 binary required by production setup and
+      # lib/schema.sh. Keep this pin in sync with utilities/setup-system.sh.
+      - name: Install yq
+        run: |
+          # Pinned to v4.53.3 -- do NOT change to /releases/latest (violates
+          # the unpinned-version check this same workflow enforces).
+          # To upgrade: update YQ_VERSION and YQ_SHA256 together.
+          # SHA-256 source: https://github.com/mikefarah/yq/releases/tag/v4.53.3
+          # (asset: yq_linux_amd64, digest field)
+          YQ_VERSION="v4.53.3"
+          YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
+          curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o /tmp/yq
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          yq --version
+
+      - name: Check for known stale terms
+        run: |
+          STALE_TERMS=(
+            "simple_key_resilience.sh"
+            "--quick-verify"
+            "cs-cloudflare-bouncer"
+            "make logs FOLLOW=true"
+            "--puid"
+            "--pgid"
+            "simple_verify_age_key"
+          )
+          FAIL=0
+          for term in "${STALE_TERMS[@]}"; do
+            matches=$(grep -rn "$term" docs/ README.md RUNBOOK.md 2>/dev/null || true)
+            if [[ -n "$matches" ]]; then
+              echo "STALE TERM FOUND: $term"
+              echo "$matches"
+              FAIL=1
+            fi
+          done
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Verify Makefile targets referenced in docs exist
+        run: |
+          FAIL=0
+          while IFS= read -r target; do
+            if ! grep -q "^${target}:" Makefile; then
+              echo "MISSING MAKEFILE TARGET referenced in docs: make $target"
+              FAIL=1
+            fi
+          done < <(grep -roh 'make [a-z_-]\+' docs/ README.md RUNBOOK.md | sed 's/make //' | sort -u)
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Verify script flags referenced in docs exist
+        run: |
+          check_flag() {
+            local script="$1" flag="$2"
+            if ! grep -q -- "$flag" "$script" 2>/dev/null; then
+              echo "FLAG NOT FOUND: $flag in $script (referenced in docs)"
+              return 1
+            fi
+          }
+          FAIL=0
+          check_flag utilities/backup-run.sh "--full-verification" || FAIL=1
+          check_flag utilities/maintenance-update.sh "--images"     || FAIL=1
+          check_flag utilities/maintenance-update.sh "--system"     || FAIL=1
+          check_flag utilities/maintenance-update.sh "--all"        || FAIL=1
+          check_flag setup.sh "--force"                             || FAIL=1
+          check_flag utilities/uninstall-vaultwarden.sh "--dry-run" || FAIL=1
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Check for unpinned version references
+        run: |
+          FAIL=0
+          # setup-crowdsec.sh may use @latest only when --use-latest clears the
+          # configured pin. All other shell scripts must remain reproducible.
+          if grep -rn '@latest' utilities/ lib/ --include='*.sh' \
+               | grep -v 'utilities/setup-crowdsec.sh'; then
+            echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"
+            FAIL=1
+          fi
+          # Guard against unintended /releases/latest calls. setup-system.sh
+          # may resolve SOPS latest only behind explicit --use-latest;
+          # setup-crowdsec.sh has its own explicit latest-mode contract.
+          if grep -rn '/releases/latest' setup.sh utilities/ lib/ --include='*.sh' 2>/dev/null \
+               | grep -v 'utilities/setup-system.sh:' \
+               | grep -v 'utilities/setup-crowdsec.sh:'; then
+            echo "UNPINNED: unexpected /releases/latest GitHub API call"
+            FAIL=1
+          fi
+          if ! grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.2"' utilities/setup-system.sh; then
+            echo "UNPINNED: setup-system.sh must define the pinned SOPS default"
+            FAIL=1
+          fi
+          if ! awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq 'USE_LATEST'; then
+            echo "UNPINNED: SOPS latest resolution must be owned by explicit --use-latest"
+            FAIL=1
+          fi
+          if grep -En '^[[:space:]]*--with[[:space:]]+github.com/[^[:space:]@]+([[:space:]\\]|$)' caddy/Dockerfile; then
+            echo "UNPINNED: direct xcaddy module reference lacks an @version"
+            FAIL=1
+          fi
+          if grep -En '^[[:space:]]*--with[[:space:]]+github.com/.*@(latest|main|master|HEAD)([[:space:]\\]|$)' caddy/Dockerfile; then
+            echo "UNPINNED: direct xcaddy module uses a mutable ref"
+            FAIL=1
+          fi
+          if grep -Eq '^(CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
+            echo "UNPINNED: CrowdSec component version in .env.example"
+            FAIL=1
+          fi
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Systemd unit hardening check
+        run: |
+          REQUIRED_DIRECTIVES=(PrivateTmp ProtectSystem ProtectHome NoNewPrivileges)
+          FAIL=0
+          for unit in systemd/vaultwarden-*.service; do
+            [[ "$unit" == *template* ]] && continue
+            for directive in "${REQUIRED_DIRECTIVES[@]}"; do
+              [[ "$unit" == *iptables* ]] && [[ "$directive" == "NoNewPrivileges" ]] && continue
+              if ! grep -q "^${directive}=" "$unit"; then
+                echo "MISSING $directive in $unit"
+                FAIL=1
+              fi
+            done
+          done
+          [[ $FAIL -eq 0 ]] && echo "All units pass hardening check." || exit 1
+
+      - name: Verify COMMAND-REFERENCE.md is up to date
+        env:
+          # Suppress the docker.sh Compose-project-label diagnostic that
+          # scripts emit to stderr when DOCKER_PROJECT_LABEL is unset.
+          # Setting it to a fixed value makes --help output deterministic.
+          DOCKER_PROJECT_LABEL: ci
+        run: |
+          cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
+          bash utilities/write-command-reference.sh
+          if ! diff -q docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md > /dev/null 2>&1; then
+            echo "COMMAND-REFERENCE.md is stale. Run: make docs"
+            diff docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md || true
+            exit 1
+          fi
+          echo "COMMAND-REFERENCE.md is up to date."
+
+      - name: Verify production-readiness remediation
+        run: python3 utilities/verify-production-readiness-remediation.py
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate repository-wide Bash syntax
+        shell: bash
+        run: |
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+
+      - name: Run Strict Shellcheck
+        run: |
+          # -x: follow source statements to avoid SC1091 false positives.
+          # --severity=warning: fail on warning or error; info/style are logged only.
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 shellcheck -x --severity=warning
+
+  functional-tests:
+    if: github.event_name == 'pull_request'
+    name: Functional tests (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - foundation
+          - security
+          - operations
+          - data-protection
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Run ${{ matrix.suite }} suite
+        shell: bash
+        run: |
+          mkdir -p test-results
+          log="test-results/${{ matrix.suite }}.log"
+          set +e
+          ./tests/run-tests.sh "${{ matrix.suite }}" >"$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          if (( rc != 0 )); then
+            exit "$rc"
+          fi
+          if [[ "${{ matrix.suite }}" == "security" ]]; then
+            grep -Fq               'PASS direct automatic setup PTY no-leak regression'               "$log" || {
+                echo "ERROR: mandatory direct-auto PTY no-leak regression did not execute" >&2
+                exit 1
+              }
+          fi
+
+      - name: Upload ${{ matrix.suite }} suite log
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
-          ref: refactor/single-lock-ownership
+          name: test-log-${{ matrix.suite }}
+          path: test-results/${{ matrix.suite }}.log
+          if-no-files-found: error
+          retention-days: 7
+
+  exact-head-validation:
+    name: Exact-head required validation
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
-      - name: Verify bounded staging state
+      - name: Verify exact branch head
+        env:
+          EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor 2f8ec8c5b3379433881149f4961af1ac706fce18 HEAD
-          expected=$'.github/health-global-transform.part00\n.github/health-global-transform.part01\n.github/health-global-transform.part02\n.github/health-global-transform.part03\n.github/health-global-transform.part04\n.github/health-global-transform.part05\n.github/health-global-transform.py.gz.b64\n.github/workflows/doc-drift.yml\n.github/workflows/finalize-health-global-coordination.yml\n.github/workflows/finalize-health-global-rescue.yml'
-          actual="$(git diff --name-only 2f8ec8c5b3379433881149f4961af1ac706fce18...HEAD | sort)"
-          [[ "$actual" == "$expected" ]] || {
-            printf 'Unexpected bootstrap staging diff:\n%s\n' "$actual" >&2
-            exit 1
-          }
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git fetch --no-tags origin delta:refs/remotes/origin/delta
+          git diff --check origin/delta...HEAD
 
-      - name: Install validation dependencies
+      - name: Install test dependencies
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
-
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
-
           curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
-          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
-      - name: Restore workflow and apply reviewed transform
+      - name: Run mandatory final validation
         shell: bash
         run: |
           set -euo pipefail
-          git show 2f8ec8c5b3379433881149f4961af1ac706fce18:.github/workflows/doc-drift.yml \
-            > .github/workflows/doc-drift.yml
-          cat .github/health-global-transform.part?? \
-            | base64 -d \
-            | gzip -d \
-            > /tmp/health-global-transform.py
-          python3 /tmp/health-global-transform.py
-          python3 - <<'PY'
-          from pathlib import Path
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+          ./tests/run-tests.sh all 2>&1 | tee /tmp/all-tests.log
 
-          workflow_path = Path('.github/workflows/doc-drift.yml')
-          workflow_path.write_text(workflow_path.read_text().rstrip() + '\n')
-
-          test_path = Path('tests/suites/operations/case-health-alerts.bash')
-          test_text = test_path.read_text()
-          old = '    saved_project_root="$PROJECT_ROOT"\n'
-          new = '    saved_project_root="${PROJECT_ROOT:-$ROOT}"\n'
-          if test_text.count(old) != 1:
-              raise SystemExit('Expected one cross-identity PROJECT_ROOT fixture assignment')
-          test_path.write_text(test_text.replace(old, new, 1))
-          PY
-          rm -f -- \
-            .github/health-global-transform.py.gz.b64 \
-            .github/health-global-transform.part?? \
-            .github/workflows/finalize-health-global-coordination.yml \
-            .github/workflows/finalize-health-global-rescue.yml
-
-          git diff --check
-          bash -n utilities/maintenance-health.sh
-          bash -n tests/suites/operations/case-health-alerts.bash
-          python3 - <<'PY'
-          import yaml
-          with open('.github/workflows/doc-drift.yml', encoding='utf-8') as handle:
-              yaml.safe_load(handle)
-          PY
-
-      - name: Validate focused changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          shellcheck -x --severity=warning \
-            utilities/maintenance-health.sh \
-            tests/suites/operations/case-health-alerts.bash
-          ./tests/run-tests.sh operations
-
-      - name: Verify final scope and publish
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected=$'.github/workflows/doc-drift.yml\nlib/operations.sh\nsystemd/vaultwarden-health.service\ntests/suites/foundation/case-systemd.bash\ntests/suites/operations/case-health-alerts.bash\ntests/suites/operations/case-lock-fd-hygiene.bash\ntests/suites/operations/case-operations.bash\nutilities/maintenance-health.sh\nutilities/setup-systemd.sh'
-          actual="$(git diff --name-only 1ff4f908866de7a917c37fa37147981d238af28f | sort)"
-          [[ "$actual" == "$expected" ]] || {
-            printf 'Unexpected final PR scope:\n%s\n' "$actual" >&2
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$status" ]]; then
+            printf 'Working tree is not clean after validation:\n%s\n' "$status" >&2
             exit 1
-          }
-          test ! -e .github/health-global-transform.py.gz.b64
-          compgen -G '.github/health-global-transform.part??' >/dev/null && exit 1 || true
-          test ! -e .github/workflows/finalize-health-global-coordination.yml
-          test ! -e .github/workflows/finalize-health-global-rescue.yml
-          git diff --check
+          fi
 
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
-          git commit -m 'Make health coordination cross-identity safe'
-          git push origin HEAD:refactor/single-lock-ownership
+      - name: Capture repository lock inventory evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '=== operation guard callers ==='
+            grep -RIn --include='*.sh' --include='*.bash' \
+              -E 'operation_acquire|--specific-lock' . || true
+            echo
+            echo '=== direct flock and lock-path users ==='
+            grep -RIn --include='*.sh' --include='*.bash' \
+              -E 'flock|LOCK(_FILE|_PATH|_DIR)?=' . || true
+            echo
+            echo '=== systemd lock-related callers ==='
+            grep -RIn -E 'flock|health --fix|backup|restore|maintenance' systemd Makefile .github/workflows || true
+          } | tee /tmp/lock-inventory.txt
+
+      - name: Upload exact-head evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: exact-head-validation-evidence
+          path: |
+            /tmp/all-tests.log
+            /tmp/lock-inventory.txt
+          if-no-files-found: warn
+          retention-days: 14
