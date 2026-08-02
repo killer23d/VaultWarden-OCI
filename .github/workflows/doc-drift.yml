@@ -282,7 +282,9 @@ jobs:
             exit "$rc"
           fi
           if [[ "${{ matrix.suite }}" == "security" ]]; then
-            grep -Fq               'PASS direct automatic setup PTY no-leak regression'               "$log" || {
+            grep -Fq \
+              'PASS direct automatic setup PTY no-leak regression' \
+              "$log" || {
                 echo "ERROR: mandatory direct-auto PTY no-leak regression did not execute" >&2
                 exit 1
               }
@@ -340,7 +342,18 @@ jobs:
           while IFS= read -r -d '' file; do
             bash -n "$file"
           done < <(find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
-          ./tests/run-tests.sh all 2>&1 | tee /tmp/all-tests.log
+
+          # Do not pipe the suite through tee. A descendant that retains the
+          # inherited stdout descriptor can keep the pipe open after the test
+          # runner has already returned and printed its final PASS line.
+          set +e
+          ./tests/run-tests.sh all > /tmp/all-tests.log 2>&1
+          tests_rc=$?
+          set -e
+          cat /tmp/all-tests.log
+          if (( tests_rc != 0 )); then
+            exit "$tests_rc"
+          fi
 
           status="$(git status --porcelain=v1 --untracked-files=all)"
           if [[ -n "$status" ]]; then
