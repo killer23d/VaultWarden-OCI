@@ -71,6 +71,16 @@ jobs:
             tests/suites/operations/case-health-alerts.bash
           grep -Fq 'sudo -n -- /usr/bin/rm -f -- /run/lock/vaultwarden-health.lock' \
             tests/suites/operations/case-health-alerts.bash
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tests/suites/operations/case-health-alerts.bash')
+          text = path.read_text()
+          old = '        if [[ "$target" == /proc/*/fd/* && ! -e "$TMP/swap-done" ]]; then\n'
+          new = '        if [[ "$target" == /proc/*/fd/* && "$identity" == "$(_health_path_identity_real "$replacement_lock")" && ! -e "$TMP/swap-done" ]]; then\n'
+          if text.count(old) != 1:
+              raise SystemExit('descriptor replacement trigger: expected one match')
+          path.write_text(text.replace(old, new, 1))
+          PY
           git rm \
             .github/final-health-cross-identity.py \
             .github/workflows/final-health-cross-identity.yml
