@@ -1,14 +1,24 @@
-name: Regular health publisher probe
+name: Publish regular health lock contract
 
 on:
   pull_request:
+    types: [reopened]
     branches: [delta]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  probe:
+  publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - run: echo regular-health-publisher-probe
+      - name: Check out current branch head
+        uses: actions/checkout@v5
+        with:
+          ref: refactor/single-lock-ownership
+          fetch-depth: 0
+
+      - name: Publish validated regular-file health contract
+        shell: bash
+        run: bash .github/regular-health-publish.sh
