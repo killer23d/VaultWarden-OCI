@@ -951,6 +951,9 @@ as_root() {
 }
 
 cleanup() {
+    [[ -n "${capture_pid_one:-}" ]] && kill -KILL "$capture_pid_one" 2>/dev/null || true
+    [[ -n "${capture_pid_two:-}" ]] && kill -KILL "$capture_pid_two" 2>/dev/null || true
+    [[ -n "${capture_signal_helper_pid:-}" ]] && kill -KILL "$capture_signal_helper_pid" 2>/dev/null || true
     [[ -n "${signal_pid:-}" ]] && kill -KILL "$signal_pid" 2>/dev/null || true
     [[ -n "${mutator_pid:-}" ]] && kill -KILL "$mutator_pid" 2>/dev/null || true
     rm -rf -- "$TMP"
@@ -1113,20 +1116,20 @@ pass "health coordination rejects symlinks and every tested non-regular target"
 
 race_lock="$lock_dir/race.lock"
 mkdir -p "$TMP/mockbin"
-cat > "$TMP/mockbin/ln" <<'EOF_LN'
+cat > "$TMP/mockbin/mv" <<'EOF_MV'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >> "$LN_TRACE"
+printf '%s\n' "$*" >> "$MV_TRACE"
 destination="${@: -1}"
 if [[ "$destination" == "$RACE_LOCK" && ! -e "$RACE_MARKER" ]]; then
     /usr/bin/ln -s -- "$ATTACKER_DIR" "$destination"
     : > "$RACE_MARKER"
 fi
-exec /usr/bin/ln "$@"
-EOF_LN
-chmod 0755 "$TMP/mockbin/ln"
+exec /usr/bin/mv "$@"
+EOF_MV
+chmod 0755 "$TMP/mockbin/mv"
 set +e
-PATH="$TMP/mockbin:$PATH" LN_TRACE="$TMP/ln-trace" RACE_LOCK="$race_lock" \
+PATH="$TMP/mockbin:$PATH" MV_TRACE="$TMP/mv-trace" RACE_LOCK="$race_lock" \
     RACE_MARKER="$TMP/race-marker" ATTACKER_DIR="$attacker_dir" \
     VW_HEALTH_LOCK_FILE="$race_lock" _acquire_readonly_health_lock
 race_rc=$?
@@ -1134,12 +1137,14 @@ set -e
 [[ "$race_rc" -eq 3 && -L "$race_lock" && -e "$TMP/race-marker" \
     && -z "$HEALTH_LOCK_FD" ]] \
     || fail "destination symlink creation race was not rejected safely"
-grep -Eq -- '(^| )-T( |$)' "$TMP/ln-trace" \
-    || fail "health lock creation did not use no-target-directory semantics"
+grep -Eq -- '(^| )-T( |$)' "$TMP/mv-trace" \
+    || fail "health lock publication did not use no-target-directory semantics"
+grep -Eq -- '(^| )-n( |$)' "$TMP/mv-trace" \
+    || fail "health lock publication did not use no-clobber semantics"
 [[ -z "$(find "$attacker_dir" -mindepth 1 -print -quit)" ]] \
     || fail "creation race placed an inode beneath the attacker-controlled directory"
 rm -f -- "$race_lock"
-pass "initial regular-file creation never follows a raced symlink-to-directory"
+pass "atomic health lock publication never follows a raced symlink-to-directory"
 
 unsafe_parent="$TMP/unsafe-parent"
 mkdir -m 0777 "$unsafe_parent"
@@ -1185,6 +1190,199 @@ if [[ -d "/proc/$$/fd" ]]; then
     pass "health coordination verifies the opened descriptor against the intended regular file"
 else
     printf 'SKIP: descriptor replacement test requires /proc.\n'
+fi
+
+if [[ -d "/proc/$$/fd" ]]; then
+    capture_lock="$lock_dir/capture-race.lock"
+    : > "$capture_lock"
+    chmod 0600 "$capture_lock"
+    capture_bin="$TMP/capture-bin"
+    capture_ready="$TMP/capture-ready"
+    capture_release="$TMP/capture-release"
+    capture_holder_release="$TMP/capture-holder-release"
+    mkdir -p "$capture_bin" "$capture_ready"
+    cat > "$capture_bin/chmod" <<'EOF_CAPTURE_CHMOD'
+#!/usr/bin/env bash
+set -euo pipefail
+last_arg="${!#}"
+if [[ "$last_arg" == /proc/*/fd/* ]]; then
+    : > "$CAPTURE_READY_DIR/$CAPTURE_WORKER_ID"
+    while [[ ! -e "$CAPTURE_RELEASE_FILE" ]]; do sleep 0.01; done
+fi
+exec /usr/bin/chmod "$@"
+EOF_CAPTURE_CHMOD
+    chmod 0755 "$capture_bin/chmod"
+    capture_worker="$TMP/capture-worker.bash"
+    cat > "$capture_worker" <<'EOF_CAPTURE_WORKER'
+#!/usr/bin/env bash
+set -euo pipefail
+run() {
+    local FIX_MODE=false
+    log_error(){ :; }
+    log_warn(){ :; }
+    log_info(){ :; }
+    source "$LOCK_BLOCK"
+    set +e
+    _acquire_readonly_health_lock
+    rc=$?
+    set -e
+    printf '%s\n' "$rc" > "$CAPTURE_STATUS_FILE"
+    if (( rc == 0 )); then
+        while [[ ! -e "$CAPTURE_HOLDER_RELEASE_FILE" ]]; do sleep 0.01; done
+        _release_readonly_health_lock
+    fi
+}
+run
+EOF_CAPTURE_WORKER
+    chmod 0755 "$capture_worker"
+
+    PATH="$capture_bin:$PATH" LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_FILE="$capture_lock" \
+        CAPTURE_READY_DIR="$capture_ready" CAPTURE_RELEASE_FILE="$capture_release" \
+        CAPTURE_HOLDER_RELEASE_FILE="$capture_holder_release" CAPTURE_WORKER_ID=one \
+        CAPTURE_STATUS_FILE="$TMP/capture-one.status" "$BASH" "$capture_worker" &
+    capture_pid_one=$!
+    PATH="$capture_bin:$PATH" LOCK_BLOCK="$LOCK_BLOCK" VW_HEALTH_LOCK_FILE="$capture_lock" \
+        CAPTURE_READY_DIR="$capture_ready" CAPTURE_RELEASE_FILE="$capture_release" \
+        CAPTURE_HOLDER_RELEASE_FILE="$capture_holder_release" CAPTURE_WORKER_ID=two \
+        CAPTURE_STATUS_FILE="$TMP/capture-two.status" "$BASH" "$capture_worker" &
+    capture_pid_two=$!
+    wait_for_file "$capture_ready/one"
+    wait_for_file "$capture_ready/two"
+    : > "$capture_release"
+    wait_for_file "$TMP/capture-one.status"
+    wait_for_file "$TMP/capture-two.status"
+    mapfile -t capture_statuses < <(
+        printf '%s\n' "$(cat "$TMP/capture-one.status")" "$(cat "$TMP/capture-two.status")" | sort -n
+    )
+    [[ "${capture_statuses[*]}" == "0 75" ]] \
+        || fail "simultaneous pre-flock openers returned '${capture_statuses[*]}' instead of one success and one contention"
+    : > "$capture_holder_release"
+    wait "$capture_pid_one" || fail "first capture-race worker failed"
+    wait "$capture_pid_two" || fail "second capture-race worker failed"
+    capture_pid_one=""
+    capture_pid_two=""
+    IFS=: read -r mode owner _group links <<< "$(lock_metadata "$capture_lock")"
+    [[ "$mode" == 600 && "$owner" == "$EUID" && "$links" == 1 ]] \
+        || fail "capture-race lock metadata was ${mode}:${owner}:${links} after both workers"
+    VW_HEALTH_LOCK_FILE="$capture_lock"
+    _acquire_readonly_health_lock || fail "health lock was not reusable after simultaneous pre-flock preparation"
+    _release_readonly_health_lock || fail "post-capture-race release failed"
+    pass "simultaneous pre-flock preparation yields one success and one exit 75"
+
+    capture_signal_bin="$TMP/capture-signal-bin"
+    mkdir -p "$capture_signal_bin"
+    cat > "$capture_signal_bin/chmod" <<'EOF_SIGNAL_CHMOD'
+#!/usr/bin/env bash
+set -euo pipefail
+last_arg="${!#}"
+if [[ "$last_arg" == /proc/*/fd/* ]]; then
+    : > "$CAPTURE_READY_FILE"
+    while [[ ! -e "$CAPTURE_RELEASE_FILE" ]]; do sleep 0.01; done
+fi
+exec /usr/bin/chmod "$@"
+EOF_SIGNAL_CHMOD
+    chmod 0755 "$capture_signal_bin/chmod"
+    capture_signal_worker="$TMP/capture-signal-worker.bash"
+    cat > "$capture_signal_worker" <<'EOF_SIGNAL_WORKER'
+#!/usr/bin/env bash
+set -euo pipefail
+run() {
+    local FIX_MODE=false
+    log_error(){ :; }
+    log_warn(){ :; }
+    log_info(){ :; }
+    operation_acquire(){ return 0; }
+    operation_set_phase(){ return 0; }
+    operation_release(){ return 0; }
+    source "$LOCK_BLOCK"
+    trap '_health_exit_cleanup' EXIT
+    trap '_health_signal_cleanup 129' HUP
+    trap '_health_signal_cleanup 130' INT
+    trap '_health_signal_cleanup 143' TERM
+    printf '%s\n' "$$" > "$CAPTURE_PID_FILE"
+    _acquire_readonly_health_lock
+    exit 98
+}
+run
+EOF_SIGNAL_WORKER
+    chmod 0755 "$capture_signal_worker"
+
+    for capture_signal_spec in HUP:129 INT:130 TERM:143; do
+        capture_signal_name="${capture_signal_spec%%:*}"
+        capture_expected_rc="${capture_signal_spec##*:}"
+        capture_signal_lock="$lock_dir/capture-${capture_signal_name,,}.lock"
+        capture_ready_file="$TMP/capture-${capture_signal_name}.ready"
+        capture_release_file="$TMP/capture-${capture_signal_name}.release"
+        capture_pid_file="$TMP/capture-${capture_signal_name}.pid"
+        : > "$capture_signal_lock"
+        chmod 0600 "$capture_signal_lock"
+        (
+            wait_for_file "$capture_ready_file"
+            wait_for_file "$capture_pid_file"
+            kill -s "$capture_signal_name" "$(cat "$capture_pid_file")"
+            : > "$capture_release_file"
+        ) &
+        capture_signal_helper_pid=$!
+        set +e
+        PATH="$capture_signal_bin:$PATH" LOCK_BLOCK="$LOCK_BLOCK" \
+            VW_HEALTH_LOCK_FILE="$capture_signal_lock" \
+            CAPTURE_READY_FILE="$capture_ready_file" CAPTURE_RELEASE_FILE="$capture_release_file" \
+            CAPTURE_PID_FILE="$capture_pid_file" "$BASH" "$capture_signal_worker"
+        capture_signal_rc=$?
+        set -e
+        wait "$capture_signal_helper_pid" || fail "$capture_signal_name capture helper failed"
+        capture_signal_helper_pid=""
+        [[ "$capture_signal_rc" -eq "$capture_expected_rc" ]] \
+            || fail "$capture_signal_name during capture returned $capture_signal_rc instead of $capture_expected_rc"
+        IFS=: read -r mode owner _group links <<< "$(lock_metadata "$capture_signal_lock")"
+        [[ "$mode" == 600 && "$owner" == "$EUID" && "$links" == 1 ]] \
+            || fail "$capture_signal_name left capture lock metadata ${mode}:${owner}:${links}"
+        HEALTH_LOCK_FD=""
+        HEALTH_OPENED_LOCK_FD=""
+        FIX_MODE=false
+        VW_HEALTH_LOCK_FILE="$capture_signal_lock"
+        _acquire_readonly_health_lock \
+            || fail "health lock was not reusable after $capture_signal_name during capture"
+        _release_readonly_health_lock || fail "post-$capture_signal_name capture release failed"
+    done
+    pass "HUP, INT, and TERM during capture leave the health lock reusable"
+
+    capture_kill_lock="$lock_dir/capture-kill.lock"
+    capture_kill_ready="$TMP/capture-KILL.ready"
+    capture_kill_release="$TMP/capture-KILL.release"
+    capture_kill_pid_file="$TMP/capture-KILL.pid"
+    : > "$capture_kill_lock"
+    chmod 0600 "$capture_kill_lock"
+    (
+        wait_for_file "$capture_kill_ready"
+        wait_for_file "$capture_kill_pid_file"
+        kill -KILL "$(cat "$capture_kill_pid_file")"
+        : > "$capture_kill_release"
+    ) &
+    capture_signal_helper_pid=$!
+    set +e
+    PATH="$capture_signal_bin:$PATH" LOCK_BLOCK="$LOCK_BLOCK" \
+        VW_HEALTH_LOCK_FILE="$capture_kill_lock" \
+        CAPTURE_READY_FILE="$capture_kill_ready" CAPTURE_RELEASE_FILE="$capture_kill_release" \
+        CAPTURE_PID_FILE="$capture_kill_pid_file" "$BASH" "$capture_signal_worker"
+    capture_kill_rc=$?
+    set -e
+    wait "$capture_signal_helper_pid" || fail "KILL capture helper failed"
+    capture_signal_helper_pid=""
+    [[ "$capture_kill_rc" -eq 137 ]] \
+        || fail "KILL during capture returned $capture_kill_rc instead of 137"
+    IFS=: read -r mode owner _group links <<< "$(lock_metadata "$capture_kill_lock")"
+    [[ "$mode" == 600 && "$owner" == "$EUID" && "$links" == 1 ]] \
+        || fail "KILL left capture lock metadata ${mode}:${owner}:${links}"
+    HEALTH_LOCK_FD=""
+    HEALTH_OPENED_LOCK_FD=""
+    FIX_MODE=false
+    VW_HEALTH_LOCK_FILE="$capture_kill_lock"
+    _acquire_readonly_health_lock || fail "health lock was not reusable after abrupt capture death"
+    _release_readonly_health_lock || fail "post-KILL capture release failed"
+    pass "abrupt process death during capture cannot poison the public lock inode"
+else
+    printf 'SKIP: pre-flock capture regressions require the supported Linux /proc runtime.\n'
 fi
 
 TRACE=""
@@ -1241,8 +1439,8 @@ probe_health() {
     FIX_MODE="$mode"
     HEALTH_LOCK_FD=""
     # Consumed by the dynamically sourced lock-open helper.
-# shellcheck disable=SC2034
-HEALTH_OPENED_LOCK_FD=""
+    # shellcheck disable=SC2034
+    HEALTH_OPENED_LOCK_FD=""
     HEALTH_OPERATION_GUARD_ACQUIRED=false
     operation_acquire(){ : > "$marker"; return 0; }
     operation_set_phase(){ return 0; }
@@ -1352,8 +1550,8 @@ parent_health_fd="$HEALTH_LOCK_FD"
     eval "exec ${parent_health_fd}>&-"
     HEALTH_LOCK_FD=""
     # Consumed by the dynamically sourced lock-open helper.
-# shellcheck disable=SC2034
-HEALTH_OPENED_LOCK_FD=""
+    # shellcheck disable=SC2034
+    HEALTH_OPENED_LOCK_FD=""
     VW_HEALTH_LOCK_FILE="$subshell_lock"
     _acquire_readonly_health_lock || fail "subshell health acquisition failed after descriptor reuse"
     [[ "$HEALTH_LOCK_FD" == "$parent_health_fd" ]] \
@@ -1377,11 +1575,11 @@ run() {
     operation_set_phase(){ return 0; }
     operation_release(){ return 0; }
     source "$LOCK_BLOCK"
-    _acquire_run_lock
     trap '_health_exit_cleanup' EXIT
     trap '_health_signal_cleanup 129' HUP
     trap '_health_signal_cleanup 130' INT
     trap '_health_signal_cleanup 143' TERM
+    _acquire_run_lock
     : > "$READY_FILE"
     while :; do sleep 1; done
 }
