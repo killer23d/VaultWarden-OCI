@@ -58,6 +58,17 @@ jobs:
             > /tmp/final-health-transform.py
           python3 -m py_compile /tmp/final-health-transform.py
           python3 /tmp/final-health-transform.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/suites/operations/case-health-alerts.bash')
+          text = path.read_text()
+          old = '    local label="$1" path="/run/lock/vaultwarden-health-test-${UID}-${BASHPID}-${RANDOM}-${label}"\n'
+          new = '    local label="$1"\n    local path="/run/lock/vaultwarden-health-test-${UID}-${BASHPID}-${RANDOM}-${label}"\n'
+          if text.count(old) != 2:
+              raise SystemExit('Expected two test lock-target local declarations')
+          path.write_text(text.replace(old, new))
+          PY
 
           git diff --check
           bash -n utilities/maintenance-health.sh
