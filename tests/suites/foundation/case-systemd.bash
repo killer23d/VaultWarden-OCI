@@ -150,9 +150,6 @@ EOF_PROBE
         return 0
     fi
 
-    # Keep the repository service and timer bodies in the fixture. Only the
-    # command and direct dependencies unrelated to drop-in parsing are made
-    # self-contained so systemd-analyze can validate this temporary unit tree.
     sed 's|^ExecStart=.*|ExecStart=/usr/bin/true|' "$unit_dir/$service" > "$unit_dir/${service}.tmp"
     mv "$unit_dir/${service}.tmp" "$unit_dir/$service"
     cat > "$unit_dir/docker.service" <<'EOF_UNIT'
@@ -274,7 +271,6 @@ run_root_env_capture() {
     if (( EUID == 0 )); then
         env "$@" > "$out" 2>&1
     else
-        # shellcheck disable=SC2024 # The output file is owned by the test runner, not the sudo command.
         sudo -n env "$@" > "$out" 2>&1
     fi
 }
@@ -396,6 +392,19 @@ test_systemd_validation_fails_on_stale_installed_runtime() {
     run_systemd_validate_fixture "$clean_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
         || { cat "$clean_out" >&2; fail "clean temp-installed systemd tree did not validate"; }
 
+    local conflict_dropin="$unit_dir/vaultwarden-health.service.d/40-test-identity.conf"
+    mkdir -p "$(dirname "$conflict_dropin")"
+    printf '[Service]\nUser=legacy\nGroup=legacy\n' > "$conflict_dropin"
+    stale_out="$TMP/validate-conflicting-identity.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with a conflicting non-root identity drop-in"
+    grep -Fq "CONFLICT: vaultwarden-health.service has User=legacy" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "validate did not report the conflicting User= override"; }
+    grep -Fq "CONFLICT: vaultwarden-health.service has Group=legacy" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "validate did not report the conflicting Group= override"; }
+    rm -f "$conflict_dropin"
+    rmdir "$(dirname "$conflict_dropin")"
+
     local installed
     installed="$opt_dir/utilities/backup-run.sh"
     printf '\n# stale backup-run fixture\n' >> "$installed"
@@ -438,8 +447,6 @@ test_systemd_validation_fails_on_stale_installed_runtime() {
         || { cat "$stale_out" >&2; fail "stale rendered startup service was not named"; }
 }
 
-
-
 test_systemd_relinquishes_lock_and_group_ownership() {
     local setup="$ROOT/utilities/setup-systemd.sh" ops="$ROOT/lib/operations.sh"
     for dead_term in \
@@ -463,7 +470,7 @@ test_systemd_relinquishes_lock_and_group_ownership() {
 
 test_stale_identity_dropin_cleanup_and_dry_run() {
     local unit_dir="$TMP/identity-cleanup-units" probe="$TMP/identity-cleanup-probe.sh"
-    local unit
+    local unit remove_block
     mkdir -p "$unit_dir"
     local -a units=(
         vaultwarden-db-backup.service
@@ -499,7 +506,7 @@ _run(){
 }
 log_success(){ :; }
 EOF_PROBE
-    sed -n '/^_STALE_IDENTITY_DROPIN_UNITS=(/,/^)/p' "$ROOT/utilities/setup-systemd.sh" >> "$probe"
+    sed -n '/^_ROOT_REQUIRED_UNITS=(/,/^)/p' "$ROOT/utilities/setup-systemd.sh" >> "$probe"
     extract_func "$ROOT/utilities/setup-systemd.sh" _cleanup_stale_identity_dropins >> "$probe"
     printf '\n_cleanup_stale_identity_dropins\n' >> "$probe"
     chmod 0755 "$probe"
@@ -526,6 +533,10 @@ EOF_PROBE
     [[ -e "$unit_dir/vaultwarden-health.service.d/20-identity.conf" \
         && -e "$unit_dir/vaultwarden-db-backup.service.d/30-run-as-root.conf" ]] \
         || fail "identity cleanup dry-run mutated managed drop-ins"
+
+    remove_block="$(extract_func "$ROOT/utilities/setup-systemd.sh" remove_units)"
+    grep -Fq '_cleanup_stale_identity_dropins' <<< "$remove_block" \
+        || fail "systemd remove does not invoke canonical stale identity cleanup"
 }
 
 run_test 'systemd relinquishes lock, group, and dead identity ownership' test_systemd_relinquishes_lock_and_group_ownership
@@ -536,7 +547,7 @@ run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_f
 run_test 'notify-failure helper loads encrypted-secret resolution before email' test_notify_failure_helper_loads_secret_resolution
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
 run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dropins_match_unit_type
-run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
+run_test 'systemd validation rejects stale runtime and conflicting identities' test_systemd_validation_fails_on_stale_installed_runtime
 [[ "$TESTS_RUN" -eq 9 ]] || fail "expected 9 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
@@ -560,7 +571,6 @@ _extract_func(){
     }' "$file"
 }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-# Behavior: systemd manual policy does not run enable --now, while auto does.
 cat > "$TMP/systemd-policy-probe.sh" <<'EOF_PROBE'
 set -euo pipefail
 START_POLICY=manual; DRY_RUN=false; STARTUP_SERVICE=vaultwarden-startup.service
