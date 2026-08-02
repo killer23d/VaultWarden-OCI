@@ -1,124 +1,14 @@
-name: Publish regular health lock contract
+name: Regular health publisher probe
 
 on:
   pull_request:
     branches: [delta]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
+  probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
-      - name: Check out current branch head
-        uses: actions/checkout@v5
-        with:
-          ref: refactor/single-lock-ownership
-          fetch-depth: 0
-
-      - name: Install validation dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
-          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
-          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
-          sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
-          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
-          sudo install -m 755 /tmp/sops /usr/local/bin/sops
-
-      - name: Apply reviewed three-file transform
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import base64
-          import gzip
-          import re
-
-          source = Path('.github/workflows/finalize-regular-health-lock.yml').read_text()
-
-          def payload(name: str) -> str:
-              match = re.search(rf"{name}: '([^']+)'", source)
-              if not match:
-                  raise SystemExit(f'{name} payload not found')
-              return gzip.decompress(base64.b64decode(match.group(1))).decode()
-
-          health_path = Path('utilities/maintenance-health.sh')
-          health = health_path.read_text()
-          start = health.index('local HEALTH_LOCK_FD=""')
-          end = health.index('local ALERT_LOCK_DIR=', start)
-          health_path.write_text(
-              health[:start] + payload('BLOCK_B64').rstrip() + '\n\n' + health[end:]
-          )
-
-          tests_path = Path('tests/suites/operations/case-health-alerts.bash')
-          tests = tests_path.read_text()
-          start = tests.index('check_health_run_lock_contracts() (')
-          call = tests.rindex('\ncheck_health_run_lock_contracts')
-          call_end = call + len('\ncheck_health_run_lock_contracts')
-          tests_path.write_text(
-              tests[:start] + payload('TEST_B64').rstrip() + tests[call_end:]
-          )
-
-          service_path = Path('systemd/vaultwarden-health.service')
-          service = service_path.read_text()
-          old = '''# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
-# root-owned runtime directory before ExecStart runs. The operation library uses
-# that directory for owner/holder state. Health duplicate-run coordination locks
-# the dedicated root-owned /run/lock/vaultwarden-health directory inode, so the
-# installed root service and supported diagnostics share one host-global object.
-'''
-          new = '''# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
-# root-owned runtime directory before ExecStart runs. The operation library uses
-# that directory for owner/holder state. Root health uses the regular lock file
-# /run/lock/vaultwarden-health.lock; documented non-root diagnostics preserve
-# their XDG_RUNTIME_DIR or per-EUID TMP fallback paths.
-'''
-          if old not in service:
-              raise SystemExit('health service comment marker not found')
-          service_path.write_text(service.replace(old, new, 1))
-          PY
-
-          expected=$'systemd/vaultwarden-health.service\ntests/suites/operations/case-health-alerts.bash\nutilities/maintenance-health.sh'
-          actual="$(git diff --name-only | sort)"
-          [[ "$actual" == "$expected" ]] || {
-            printf 'Unexpected transformed file set:\n%s\n' "$actual" >&2
-            exit 1
-          }
-          grep -Fq '_health_readonly_lock_path()' utilities/maintenance-health.sh
-          ! grep -Fq '_health_readonly_lock_target()' utilities/maintenance-health.sh
-          ! grep -Fq 'VW_HEALTH_LOCK_TARGET' utilities/maintenance-health.sh
-          grep -Fq 'VW_HEALTH_LOCK_FILE' utilities/maintenance-health.sh
-          grep -Fq 'ln -T --' utilities/maintenance-health.sh
-          grep -Fq 'ln -P -T --' utilities/maintenance-health.sh
-          git diff --check
-          bash -n utilities/maintenance-health.sh
-          bash -n tests/suites/operations/case-health-alerts.bash
-          shellcheck -x --severity=warning \
-            utilities/maintenance-health.sh \
-            tests/suites/operations/case-health-alerts.bash
-
-      - name: Run focused operations validation
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./tests/run-tests.sh operations
-
-      - name: Publish validated changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- \
-            systemd/vaultwarden-health.service \
-            tests/suites/operations/case-health-alerts.bash \
-            utilities/maintenance-health.sh
-          git commit -m 'Restore regular health lock contract'
-          git push origin HEAD:refactor/single-lock-ownership
+      - run: echo regular-health-publisher-probe
