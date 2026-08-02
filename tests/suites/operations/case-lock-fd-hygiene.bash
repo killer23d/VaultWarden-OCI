@@ -94,7 +94,8 @@ check_health_lock_directory_security() (
     run_symlink_parent_case
 
     if (( EUID == 0 )) || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }; then
-        local root_dir="$tmp/root-sticky" root_lock="$tmp/root-sticky/health.lock"
+        local root_dir="/tmp/vw-health-root-sticky-${$}-${RANDOM}" root_lock
+        root_lock="$root_dir/health.lock"
         if (( EUID == 0 )); then
             mkdir -m 1777 "$root_dir"
             chown root:root "$root_dir"
@@ -116,6 +117,7 @@ check_health_lock_directory_security() (
                 }
                 run
             '
+            rm -rf -- "$root_dir"
         else
             sudo -n mkdir -m 1777 "$root_dir"
             sudo -n chown root:root "$root_dir"
