@@ -55,8 +55,8 @@ ReadWritePaths=-/var/lib/crowdsec
 # RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
 # root-owned runtime directory before ExecStart runs. The operation library uses
 # that directory for owner/holder state. Health duplicate-run coordination locks
-# the validated WorkingDirectory inode, so root repair and supported non-root
-# diagnostics share one stable object without creating a cross-identity lock file.
+# the dedicated root-owned /run/lock/vaultwarden-health directory inode, so the
+# installed root service and supported diagnostics share one host-global object.
 RuntimeDirectory=vaultwarden-oci
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes

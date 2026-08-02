@@ -143,11 +143,7 @@ local HEALTH_LOCK_FD=""
 local HEALTH_OPERATION_GUARD_ACQUIRED=false
 
 _health_readonly_lock_target() {
-    if [[ -n "${VW_HEALTH_LOCK_TARGET:-}" ]]; then
-        printf '%s\n' "$VW_HEALTH_LOCK_TARGET"
-    else
-        printf '%s\n' "$PROJECT_ROOT"
-    fi
+    printf '%s\n' "${VW_HEALTH_LOCK_TARGET:-/run/lock/vaultwarden-health}"
 }
 
 _health_stat_mode_uid_gid() {
@@ -176,19 +172,18 @@ _health_lock_directory_is_trusted() {
     [[ -d "$dir" && ! -L "$dir" ]] || return 1
     metadata="$(_health_stat_mode_uid_gid "$dir")" || return 1
     IFS=: read -r mode uid gid <<< "$metadata"
-    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || return 1
+    [[ "$mode" =~ ^[0-7]{3,4}$ && "$uid" == 0 && "$gid" == 0 ]] || return 1
     mode_value=$((8#$mode))
 
-    if (( (mode_value & 0022) == 0 )); then
+    # Root-group write is acceptable on the supported Ubuntu /run/lock path.
+    # Other-write is accepted only for a root-owned sticky directory such as /tmp.
+    if (( (mode_value & 0002) == 0 )); then
         return 0
     fi
-
-    [[ "$uid" == 0 && "$gid" == 0 ]] \
-        && (( (mode_value & 01000) != 0 )) \
-        && (( (mode_value & 0002) != 0 ))
+    (( (mode_value & 01000) != 0 ))
 }
 
-_health_lock_target_is_trusted() {
+_health_lock_ancestry_is_trusted() {
     local current="$1" parent
     [[ "$current" == /* ]] || return 1
 
@@ -198,6 +193,67 @@ _health_lock_target_is_trusted() {
         [[ "$parent" == "$current" ]] && break
         current="$parent"
     done
+}
+
+_health_lock_target_is_trusted() {
+    local target="$1" metadata mode uid gid
+    _health_lock_ancestry_is_trusted "$target" || return 1
+    metadata="$(_health_stat_mode_uid_gid "$target")" || return 1
+    IFS=: read -r mode uid gid <<< "$metadata"
+    [[ "$mode" == 755 && "$uid" == 0 && "$gid" == 0 ]]
+}
+
+_health_prepare_lock_target() {
+    local lock_target="$1" parent metadata mode uid gid
+    [[ "$lock_target" == /* ]] || {
+        log_error "Health coordination target must be an absolute path: $lock_target"
+        return 1
+    }
+    parent="$(dirname "$lock_target")"
+    if ! _health_lock_ancestry_is_trusted "$parent"; then
+        log_error "Health coordination parent ancestry is unsafe: $parent"
+        return 1
+    fi
+
+    if [[ -e "$lock_target" || -L "$lock_target" ]]; then
+        [[ -d "$lock_target" && ! -L "$lock_target" ]] || {
+            log_error "Health coordination target is not a real directory: $lock_target"
+            return 1
+        }
+    else
+        if (( EUID != 0 )); then
+            log_error "Health coordination target is not initialized: $lock_target"
+            log_error "Initialize it through the root-operated path: sudo make health"
+            return 1
+        fi
+        if ! mkdir -m 0755 -- "$lock_target" 2>/dev/null; then
+            [[ -d "$lock_target" && ! -L "$lock_target" ]] || {
+                log_error "Cannot create health coordination target: $lock_target"
+                return 1
+            }
+        fi
+    fi
+
+    metadata="$(_health_stat_mode_uid_gid "$lock_target")" || {
+        log_error "Cannot inspect health coordination target: $lock_target"
+        return 1
+    }
+    IFS=: read -r mode uid gid <<< "$metadata"
+    if [[ "$uid" != 0 || "$gid" != 0 ]]; then
+        log_error "Health coordination target must be owned by root:root: $lock_target"
+        return 1
+    fi
+    if [[ "$mode" != 755 ]]; then
+        if (( EUID != 0 )) || ! chmod 0755 -- "$lock_target" 2>/dev/null; then
+            log_error "Health coordination target must have mode 0755: $lock_target"
+            return 1
+        fi
+    fi
+
+    if ! _health_lock_target_is_trusted "$lock_target"; then
+        log_error "Health coordination target metadata is unsafe: $lock_target"
+        return 1
+    fi
 }
 
 _health_open_lock_matches_target() {
@@ -228,11 +284,9 @@ _acquire_readonly_health_lock() {
     local lock_target fd flock_rc
     lock_target="$(_health_readonly_lock_target)"
 
-    if ! _health_lock_target_is_trusted "$lock_target"; then
-        log_error "Health coordination target is unsafe or inaccessible: $lock_target"
+    if ! _health_prepare_lock_target "$lock_target"; then
         return 3
     fi
-
     if ! { exec {fd}<"$lock_target"; } 2>/dev/null; then
         log_error "Cannot open health coordination target: $lock_target"
         return 3
