@@ -1,4 +1,5 @@
 name: Doc Drift Check
+# Temporary bootstrap; the published commit restores the permanent workflow.
 
 on:
   push:
