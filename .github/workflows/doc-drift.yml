@@ -61,6 +61,11 @@ jobs:
           base64 -d .github/health-global-transform.py.gz.b64 | gzip -d \
             > /tmp/health-global-transform.py
           python3 /tmp/health-global-transform.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/doc-drift.yml')
+          path.write_text(path.read_text().rstrip() + '\n')
+          PY
           rm -f -- \
             .github/health-global-transform.py.gz.b64 \
             .github/workflows/finalize-health-global-coordination.yml \
