@@ -142,7 +142,7 @@ check_health_lock_directory_security() (
     else
         printf 'SKIP: root-owned sticky-directory health lock test requires root or passwordless sudo.\n'
     fi
-}
+)
 
 check_health_lock_directory_security
 
