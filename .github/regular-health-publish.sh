@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 
 sudo apt-get update
 sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
