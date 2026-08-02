@@ -271,6 +271,7 @@ run_root_env_capture() {
     if (( EUID == 0 )); then
         env "$@" > "$out" 2>&1
     else
+        # shellcheck disable=SC2024 # The caller owns this writable test output path.
         sudo -n env "$@" > "$out" 2>&1
     fi
 }
