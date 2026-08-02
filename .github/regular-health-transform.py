@@ -37,13 +37,10 @@ generated = generated.replace(
     1,
 )
 generated = generated.replace(
-    'HEALTH_LOCK_FD=""\nHEALTH_OPENED_LOCK_FD=""\nHEALTH_OPERATION_GUARD_ACQUIRED=false',
-    'HEALTH_LOCK_FD=""\n'
+    'HEALTH_OPENED_LOCK_FD=""',
     '# Consumed by the dynamically sourced lock-open helper.\n'
     '# shellcheck disable=SC2034\n'
-    'HEALTH_OPENED_LOCK_FD=""\n'
-    'HEALTH_OPERATION_GUARD_ACQUIRED=false',
-    1,
+    'HEALTH_OPENED_LOCK_FD=""',
 )
 tests_path.write_text(tests[:start] + generated + tests[call_end:])
 
