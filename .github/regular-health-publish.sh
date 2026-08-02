@@ -32,7 +32,7 @@ grep -Fq '_health_readonly_lock_path()' utilities/maintenance-health.sh
 ! grep -Fq 'VW_HEALTH_LOCK_TARGET' utilities/maintenance-health.sh
 grep -Fq 'VW_HEALTH_LOCK_FILE' utilities/maintenance-health.sh
 grep -Fq 'ln -T --' utilities/maintenance-health.sh
-grep -Fq 'ln -P -T --' utilities/maintenance-health.sh
+grep -Fq 'ln -PT --' utilities/maintenance-health.sh
 
 git diff --check
 bash -n utilities/maintenance-health.sh
