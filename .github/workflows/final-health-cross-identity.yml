@@ -56,7 +56,7 @@ jobs:
           echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
 
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux-amd64 -o /tmp/sops
           echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
@@ -67,6 +67,10 @@ jobs:
           set -euo pipefail
           python3 -m py_compile .github/final-health-cross-identity.py
           python3 .github/final-health-cross-identity.py
+          sed -i 's#sudo -n -- rm -f -- /run/lock/vaultwarden-health.lock#sudo -n -- /usr/bin/rm -f -- /run/lock/vaultwarden-health.lock#' \
+            tests/suites/operations/case-health-alerts.bash
+          grep -Fq 'sudo -n -- /usr/bin/rm -f -- /run/lock/vaultwarden-health.lock' \
+            tests/suites/operations/case-health-alerts.bash
           git rm \
             .github/final-health-cross-identity.py \
             .github/workflows/final-health-cross-identity.yml
