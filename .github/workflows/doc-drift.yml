@@ -5,6 +5,11 @@ on:
   push:
     branches:
       - refactor/single-lock-ownership
+  pull_request:
+    types:
+      - reopened
+    branches:
+      - delta
 
 permissions:
   contents: write
