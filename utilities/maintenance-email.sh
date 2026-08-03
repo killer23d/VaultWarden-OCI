@@ -78,12 +78,6 @@ _validate_transport() {
     esac
 }
 
-_load_env() {
-    if load_env_file 2>/dev/null; then return 0; fi
-    log_warn "No .env file found — relying on environment already set"
-    return 0
-}
-
 test_postfix_container() {
     log_info "Testing postfix container status..."
     local postfix_running
@@ -392,7 +386,7 @@ require_root "$@"
 : "${VERBOSE}"
 
 main() {
-    _load_env
+    load_project_environment || exit 1
     local rc=0
     run_email_diagnostics || rc=$?
     exit "$rc"
