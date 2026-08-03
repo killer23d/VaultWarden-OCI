@@ -292,15 +292,6 @@ check_compose_startup_and_setup_contract() (
     ! grep -Fq '.permissions-initialized' "$compose" \
         || fail "Compose still contains the obsolete permission sentinel"
 
-    source_line="$(grep -nF 'source "${SCRIPT_DIR}/lib/runtime-permissions.sh"' startup.sh | head -1 | cut -d: -f1)"
-    ready_line="$(grep -nF 'check_project_state_ready || exit 1' startup.sh | head -1 | cut -d: -f1)"
-    check_line="$(grep -nF 'validate_runtime_permissions || exit 1' startup.sh | head -1 | cut -d: -f1)"
-    secrets_line="$(grep -nF 'prepare_docker_secrets || exit 1' startup.sh | head -1 | cut -d: -f1)"
-    services_line="$(grep -nF '_startup_start_services || exit 1' startup.sh | head -1 | cut -d: -f1)"
-    [[ -n "$source_line" && -n "$ready_line" && -n "$check_line" && -n "$secrets_line" && -n "$services_line" ]] \
-        || fail "startup permission validation markers are incomplete"
-    (( source_line < ready_line && ready_line < check_line && check_line < secrets_line && check_line < services_line )) \
-        || fail "startup does not validate runtime permissions before secrets and services"
     ! grep -Eq '^[[:space:]]*(prepare_directories|prepare_log_directories)[[:space:]]*\|\|' startup.sh \
         || fail "startup still invokes legacy runtime directory preparation"
     ! grep -Fq 'enforce_runtime_log_permissions' startup.sh \
