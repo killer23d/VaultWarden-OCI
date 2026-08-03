@@ -508,7 +508,7 @@ esac
 MOCK_ID
     chmod +x "$TMP/interface-bin/docker" "$TMP/interface-bin/systemctl" "$TMP/interface-bin/id"
 
-    local direct_output dashboard_output cli_output make_output init_output
+    local direct_output dashboard_output cli_output make_output init_output info_output dry_run_output
     direct_output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fixture" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
 set -euo pipefail
 source "$REAL_CONFIG"
@@ -529,6 +529,8 @@ PROBE
     cli_output=$(cd "$fixture" && PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" ./backup.sh list 2>&1)
     make_output=$(PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" make -s -C "$fixture" status 2>&1)
     init_output=$(PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" make -s -C "$fixture" init-secrets 2>&1)
+    info_output=$(PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" make -s -C "$fixture" info 2>&1)
+    dry_run_output=$(PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" make --no-print-directory -n -C "$fixture" dry-run 2>&1)
 
     for output in "$direct_output" "$dashboard_output"; do
         grep -Fq "STATE=$installed_state" <<< "$output" || fail "interface selected the repository state: $output"
@@ -542,6 +544,11 @@ PROBE
     grep -Fq "$installed_archive" <<< "$make_output" || fail "Make status did not use backup CLI installed path: $make_output"
     grep -Fq "$installed_state" <<< "$make_output" || fail "Make status did not use installed state path: $make_output"
     grep -Fq 'Secrets file already exists' <<< "$init_output" || fail "Make init-secrets did not use installed secrets path: $init_output"
+    grep -Fq 'https://installed.example.test' <<< "$info_output" || fail "Make info did not report installed domain: $info_output"
+    grep -Fq "$installed_state" <<< "$info_output" || fail "Make info did not report installed state path: $info_output"
+    ! grep -Fq 'https://repo.example.test' <<< "$info_output" || fail "Make info reported repository domain: $info_output"
+    ! grep -Fq "$repo_state" <<< "$info_output" || fail "Make info reported repository state path: $info_output"
+    grep -Fq './startup.sh --dry-run' <<< "$dry_run_output" || fail "Make dry-run did not reach the startup dry-run recipe: $dry_run_output"
 }
 
 test_installed_runtime_secret_resolution() {
