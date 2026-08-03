@@ -337,84 +337,6 @@ validate_prerequisites() {
 }
 
 
-# Ensure all PROJECT_STATE_DIR subdirectories required by Docker bind mounts
-# exist on the host before `docker compose up`. Use absolute paths so
-# separate-volume installs create directories on the data volume rather than
-# under PROJECT_ROOT.
-#
-# prepare_log_directories() handles logs/ and backups/ with ownership logic;
-# this function covers the remaining non-log subtrees.
-prepare_directories() {
-  local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
-
-  local required_dirs=(
-    "${project_state_dir}/data"
-    "${project_state_dir}/caddy/data"
-    "${project_state_dir}/caddy/config"
-  )
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would create state directories: ${required_dirs[*]}"
-    return 0
-  fi
-
-  log_info "Preparing required state directories under ${project_state_dir}..."
-
-  local dir
-  for dir in "${required_dirs[@]}"; do
-    if ! _maybe_sudo mkdir -p "$dir"; then
-      log_warn "Could not create directory: $dir (init container will retry)"
-    fi
-  done
-
-  log_success "State directories prepared"
-  return 0
-}
-
-prepare_log_directories() {
-  # VWOCI-PRR-PATCH-03: never widen existing log files to executable/world-readable.
-  local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
-  local logs_root="${project_state_dir}/logs"
-  local svc puid pgid
-  local log_dirs=()
-  for svc in "${_VW_DEFAULT_LOG_SERVICES[@]}"; do
-    log_dirs+=("${logs_root}/${svc}")
-  done
-  puid="$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")"
-  pgid="$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")"
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would create log directories: ${log_dirs[*]}"
-    enforce_runtime_log_permissions "$logs_root" "$puid" "$pgid" true
-    return $?
-  fi
-
-  log_info "Creating log subdirectories with canonical permissions..."
-  if ! _maybe_sudo mkdir -p -- "${log_dirs[@]}"; then
-    log_error "Failed to create required log subdirectories."
-    return 1
-  fi
-  if ! enforce_runtime_log_permissions "$logs_root" "$puid" "$pgid" false; then
-    log_error "Failed to enforce runtime log ownership and permissions."
-    return 1
-  fi
-  # Retain the focused Caddy correction for any service-specific edge cases.
-  if ! ensure_caddy_log_permissions "${logs_root}/caddy"; then
-    log_error "Failed to enforce Caddy log directory and file permissions."
-    return 1
-  fi
-
-  local backup_dir
-  backup_dir="$(get_config_value "BACKUP_DIR" "${project_state_dir}/backups")"
-  if ! _maybe_sudo mkdir -p -- "$backup_dir"; then
-    log_warn "Could not create backup directory: $backup_dir"
-  else
-    log_info "Backup directory ready: $backup_dir"
-  fi
-  log_success "Runtime log directories are ready (directories 0750, files 0640)."
-  return 0
-}
-
 # Run check_age_key_health() before any SOPS invocation so a corrupt,
 # missing, or wrong-permissions Age key produces a clear actionable error
 # instead of an opaque decryption failure.
@@ -884,11 +806,9 @@ main() {
 
   operation_set_phase "startup" "Preparing runtime and starting services"
   load_environment || exit 1
-  auto_fix_critical_permissions "$PROJECT_ROOT"
   check_project_state_ready || exit 1
+  auto_fix_critical_permissions "$PROJECT_ROOT" || exit 1
   validate_prerequisites || exit 1
-  prepare_directories || exit 1
-  prepare_log_directories || exit 1
   prepare_docker_secrets || exit 1
   prepare_push_secret_placeholders || exit 1
   check_email_config_consistency || true # Warn only; never block startup.

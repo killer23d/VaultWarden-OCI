@@ -971,28 +971,23 @@ EXAMPLES:
 VaultWarden-OCI permission repair
 
 USAGE:
-    sudo utilities/repair-permissions.sh        Repair known permission drift
-    utilities/repair-permissions.sh --check     Report drift without changing files
-    sudo utilities/repair-permissions.sh --dry-run
+    sudo utilities/repair-permissions.sh              Repair known permission drift
+    sudo utilities/repair-permissions.sh --check      Report drift without changing files
+    sudo utilities/repair-permissions.sh --dry-run    Alias for --check
     utilities/repair-permissions.sh --help
     utilities/repair-permissions.sh --version
 
-Checks/repairs explicit project paths only:
-  .sops.yaml -> 0644 (public SOPS policy/Age recipients; owner preserved)
-  repo Age key -> operator-owned 0600 when present
-  /etc/vaultwarden and installed key/env/rclone files -> root:root private
-  PROJECT_STATE_DIR config/secrets env/manifest files -> root:root private state
-  encrypted persistent secrets.yaml and containing directory -> root:root private state
-  /run/vaultwarden-oci/secrets and files inside -> root:root runtime secrets
-  PROJECT_STATE_DIR/caddy data/config paths -> UID/GID 2000, Caddy-writable
-  PROJECT_STATE_DIR/logs/caddy -> UID/GID 2000, Caddy-writable
-  known recovery-kit outputs under the project root -> not world-readable
+Checks/repairs explicit repository-managed paths only:
+  repository and installed configuration/secrets -> existing private contracts
+  PROJECT_STATE_DIR data and service logs -> PUID:PGID, directories 0750, files 0640
+  configured backup tree -> PUID:PGID, directories 0750, files 0640
+  PROJECT_STATE_DIR Caddy data/config/logs -> UID/GID 2000, directories 0750, files 0640
+  /run/vaultwarden-oci secrets and metadata -> existing root-owned runtime contracts
 
-Does not recursively chmod broad directories and never makes private keys,
-env files, encrypted secrets, backups, or recovery kits world-readable.
+Does not scan arbitrary repository or host directories.
 
 OPTIONS:
-  --check, --dry-run  Report drift without changing files
+  --check, --dry-run  Report drift without changing files (root required)
   --help, -h          Show this help
   --version, -V       Print the VaultWarden-OCI version and exit
 ```

@@ -922,8 +922,6 @@ grep -Fq 'CADDY_UID:-2000' lib/runtime-permissions.sh \
     || fail "Caddy UID 2000 contract changed"
 grep -Fq 'CADDY_GID:-2000' lib/runtime-permissions.sh \
     || fail "Caddy GID 2000 contract changed"
-grep -Fq '_vw_repair_tree_permissions "$state_dir/data" "$puid" "$pgid"' lib/runtime-permissions.sh \
-    || fail "Vaultwarden PUID:PGID application-data contract changed"
 pass "CrowdSec email and incident context preserve privilege/ownership/secret contracts"
 
 )

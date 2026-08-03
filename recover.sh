@@ -482,7 +482,9 @@ run_startup_health() {
     else
         export PROJECT_STATE_DIR="$STATE_DIR" DATA_VOLUME_MOUNT="" DATA_VOLUME_DEVICE="" SOPS_AGE_KEY_FILE="$ACTIVE_KEY"
     fi
-    auto_fix_critical_permissions "$SCRIPT_DIR"
+    if [[ $EUID -eq 0 ]]; then
+        auto_fix_critical_permissions "$SCRIPT_DIR"
+    fi
     if ! bash "$VW_STARTUP_SCRIPT"; then
         echo "Startup: FAIL"
         echo "Recovery artifacts were promoted, but Vaultwarden startup failed."

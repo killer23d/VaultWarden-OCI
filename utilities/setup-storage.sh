@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # one level up from utilities/
 cd "${PROJECT_ROOT}"
 
-REQUIRED_LIBS=(lib/log.sh lib/config.sh lib/common.sh lib/operations.sh lib/storage.sh lib/docker.sh lib/backup-utils.sh lib/migrate.sh)
+REQUIRED_LIBS=(lib/log.sh lib/config.sh lib/common.sh lib/operations.sh lib/storage.sh lib/runtime-permissions.sh lib/docker.sh lib/backup-utils.sh lib/migrate.sh)
 for _lib in "${REQUIRED_LIBS[@]}"; do
     [[ -f "${PROJECT_ROOT}/${_lib}" ]] || {
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
@@ -21,6 +21,7 @@ source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/storage.sh"
+source "${PROJECT_ROOT}/lib/runtime-permissions.sh"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "${PROJECT_ROOT}/lib/docker.sh"
 source "${PROJECT_ROOT}/lib/backup-utils.sh"
@@ -101,65 +102,8 @@ setup_directories() {
     local pgid; pgid=$(id -g "$real_user")
     local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
 
-    install -d -m 0700 -o root -g root "${project_state_dir}/config" "${project_state_dir}/secrets" || return 1
-    [[ -e "${project_state_dir}/config/install.env" ]] && fix_known_path_permissions "${project_state_dir}/config/install.env"
-    [[ -e "${project_state_dir}/secrets/secrets.yaml" ]] && fix_known_path_permissions "${project_state_dir}/secrets/secrets.yaml"
-
-    # Create the backup directory tree that backup.sh and restore.sh require.
-    local backup_base_dir="${BACKUP_DIR:-${project_state_dir}/backups}"
-    if ! mkdir -p "${backup_base_dir}"/{db,full,emergency}; then
-        log_error "Failed to create backup directories under ${backup_base_dir}"
-        return 1
-    fi
-    chmod 750 "${backup_base_dir}" "${backup_base_dir}"/{db,full,emergency} || return 1
-    chown -R "${puid}:${pgid}" "${backup_base_dir}" || return 1
-    log_info "Backup directories created: ${backup_base_dir}/{db,full,emergency}"
-
-    if ! mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,postfix},caddy/{data,config}}; then
-        return 1
-    fi
-
-    for _dir in data logs caddy backups; do
-        {
-            [[ -d "${project_state_dir}/${_dir}" ]] && \
-                chown -R "${puid}:${pgid}" "${project_state_dir}/${_dir}"
-        } || return 1
-    done
-
-    # Only normalize non-sensitive mutable data trees.  Never broad-chmod
-    # ${project_state_dir}/config or ${project_state_dir}/secrets; those are
-    # root-operated state and have stricter central permissions.
-    for _dir in data logs backups; do
-        if [[ -d "${project_state_dir}/${_dir}" ]]; then
-            find "${project_state_dir}/${_dir}" -type d -exec chmod 750 {} + 2>/dev/null || return 1
-            find "${project_state_dir}/${_dir}" -type f -exec chmod 640 {} + 2>/dev/null || true
-        fi
-    done
-
-    ensure_caddy_log_permissions "${project_state_dir}/logs/caddy" || return 1
-
-    # Caddy's TLS storage directories must be owned by root:root and
-    # traversable (755) so Caddy can write certificate material during the
-    # first ACME negotiation. 700 is rwx------: only the exact owning UID can
-    # enter. The remapped container UID is not host root (0), so 700 blocks
-    # traversal with EACCES. 755 grants r-x to all, which is sufficient for a
-    # non-world-writable storage directory containing private keys (the keys
-    # themselves are created by Caddy with mode 0600).
-    local caddy_data_dir="${project_state_dir}/caddy/data"
-    local caddy_config_dir="${project_state_dir}/caddy/config"
-
-    mkdir -p \
-        "${caddy_data_dir}/caddy/certificates" \
-        "${caddy_data_dir}/caddy/locks" \
-        "${caddy_data_dir}/caddy/ocsp"
-
-    chown -R root:root "${caddy_data_dir}" "${caddy_config_dir}" || return 1
-    find "${caddy_data_dir}" "${caddy_config_dir}" -type d -exec chmod 755 {} + || return 1
-    find "${caddy_data_dir}" "${caddy_config_dir}" -type f -exec chmod 600 {} + 2>/dev/null || true
-
-    log_info "Set ${caddy_data_dir} and ${caddy_config_dir} to root:root 755 (Caddy ACME storage)"
-    log_info "Pre-created Caddy ACME subtree: certificates/ locks/ ocsp/"
-
+    log_info "Preparing repository-managed runtime paths under ${project_state_dir}..."
+    repair_runtime_state_permissions "$project_state_dir" "$puid" "$pgid" "$PROJECT_ROOT" || return 1
     return 0
 }
 
@@ -334,65 +278,17 @@ EOF
     done
 }
 
-_ss_check_known_path() {
-    local path="$1" label="${2:-$1}"
-    if [[ ! -e "$path" ]]; then
-        log_warn "Missing: ${label} (${path})"
-        return 1
-    fi
-    if ! assert_known_path_permissions "$path"; then
-        local owner group mode actual
-        owner="$(expected_owner_for_path "$path" 2>/dev/null || printf '?')"
-        group="$(expected_group_for_path "$path" 2>/dev/null || printf '?')"
-        mode="$(expected_mode_for_path "$path" 2>/dev/null || printf '?')"
-        actual="$(_common_stat_owner "$path"):$(_common_stat_group "$path") $(_common_stat_mode "$path")"
-        log_warn "Permission drift: ${label} (${path}) actual=${actual} expected=${owner}:${group} ${mode}"
-        return 1
-    fi
-    log_success "OK: ${label} (${path})"
-}
-
-_ss_check_mode_owner() {
-    local path="$1" type="$2" owner="$3" group="$4" mode="$5"
-    if [[ "$type" == "dir" && ! -d "$path" ]] || [[ "$type" == "file" && ! -f "$path" ]]; then
-        log_warn "Missing ${type}: ${path}"
-        return 1
-    fi
-    local actual_owner actual_group actual_mode
-    actual_owner="$(_common_stat_owner "$path")"
-    actual_group="$(_common_stat_group "$path")"
-    actual_mode="$(_common_stat_mode "$path")"
-    if [[ "${actual_owner}:${actual_group}" != "${owner}:${group}" || "${actual_mode}" != "$mode" ]]; then
-        log_warn "Permission drift: ${path} actual=${actual_owner}:${actual_group} ${actual_mode} expected=${owner}:${group} ${mode}"
-        return 1
-    fi
-    log_success "OK: ${path}"
-}
-
 _mode_verify() {
     log_info "Verifying storage layout and permissions..."
     require_project_state_ready || return 1
 
     local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
-    local errors=0
-    for dir in data logs caddy backups; do
-        if [[ ! -d "${project_state_dir}/${dir}" ]]; then
-            log_warn "Missing directory: ${project_state_dir}/${dir}"
-            (( errors++ )) || true
-        else
-            log_success "OK: ${project_state_dir}/${dir}"
-        fi
-    done
+    local real_user puid pgid errors=0
+    real_user="$(get_real_user)"
+    puid="$(id -u "$real_user")"
+    pgid="$(id -g "$real_user")"
 
-    _ss_check_known_path "${project_state_dir}/config" "persistent config dir" || (( errors++ )) || true
-    _ss_check_known_path "${project_state_dir}/secrets" "persistent secrets dir" || (( errors++ )) || true
-    if [[ -e "${project_state_dir}/config/install.env" ]]; then _ss_check_known_path "${project_state_dir}/config/install.env" "install.env" || (( errors++ )) || true; fi
-    if [[ -e "${project_state_dir}/config/dr-manifest.env" ]]; then _ss_check_known_path "${project_state_dir}/config/dr-manifest.env" "dr-manifest.env" || (( errors++ )) || true; fi
-    if [[ -e "${project_state_dir}/secrets/secrets.yaml" ]]; then _ss_check_known_path "${project_state_dir}/secrets/secrets.yaml" "persistent secrets.yaml" || (( errors++ )) || true; fi
-
-    _ss_check_mode_owner "${project_state_dir}/logs/caddy" dir root root 755 || (( errors++ )) || true
-    _ss_check_mode_owner "${project_state_dir}/logs/caddy/access.log" file root root 644 || (( errors++ )) || true
-    _ss_check_mode_owner "${project_state_dir}/logs/caddy/security.log" file root root 644 || (( errors++ )) || true
+    check_runtime_state_permissions "$project_state_dir" "$puid" "$pgid" "$PROJECT_ROOT" || (( errors++ )) || true
 
     if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
         [[ "${PROJECT_STATE_DIR:-}" == "${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}" ]] || { log_warn "PROJECT_STATE_DIR/DATA_VOLUME_MOUNT mismatch"; (( errors++ )) || true; }
