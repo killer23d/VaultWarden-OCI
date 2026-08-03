@@ -360,7 +360,7 @@ main() {
     trap 'operation_release 143; exit 143' HUP TERM
     operation_set_phase "1" "Pre-update checks"
     auto_fix_critical_permissions "$PROJECT_ROOT"
-    load_env_file || { log_error "Failed to load .env"; exit 1; }
+    load_project_environment || { log_error "Failed to load project environment"; exit 1; }
     auto_fix_critical_permissions "$PROJECT_ROOT"
     if [[ "$UPDATE_SYSTEM" == "false" && "$UPDATE_IMAGES" == "false" ]]; then
         log_error "Specify at least one of: --system, --images, --all"
