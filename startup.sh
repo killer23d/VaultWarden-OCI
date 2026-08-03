@@ -275,12 +275,6 @@ validate_caddy_version_pin() {
 load_environment() {
   log_info "Loading environment configuration..."
 
-  if [[ -f ".env" && ! -r ".env" ]]; then
-    log_error ".env is not readable by the current user ($(id -un))."
-    log_error "Run startup through the root-operated path: sudo make up"
-    return 1
-  fi
-
   load_project_environment || return 1
   validate_caddy_version_pin || return 1
   warn_env_drift || true
