@@ -32,11 +32,6 @@ fi
 # Self-load log.sh if not already loaded so this lib can be sourced standalone.
 _VW_CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CONFIG_LIB_DIR}/log.sh"
-
-_ENV_FILE_SEARCH_PATHS=(
-    "${PROJECT_ROOT:-$(cd "${_VW_CONFIG_LIB_DIR}/.." && pwd)}/.env"
-    "/etc/vaultwarden/vaultwarden.env"
-)
 unset _VW_CONFIG_LIB_DIR
 
 _get_file_perms() {
@@ -49,17 +44,12 @@ load_env_file() {
     local env_file="${1:-}"
 
     if [[ -z "$env_file" ]]; then
-        local candidate
-        for candidate in "${_ENV_FILE_SEARCH_PATHS[@]}"; do
-            if [[ -f "$candidate" ]]; then
-                env_file="$candidate"
-                break
-            fi
-        done
+        load_project_environment
+        return $?
     fi
 
-    if [[ -z "$env_file" || ! -f "$env_file" ]]; then
-        log_error "Environment file not found: ${env_file:-.env} (also searched: ${_ENV_FILE_SEARCH_PATHS[*]})"
+    if [[ ! -f "$env_file" ]]; then
+        log_error "Environment file not found: $env_file"
         return 1
     fi
 
