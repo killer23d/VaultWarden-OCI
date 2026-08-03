@@ -46,7 +46,7 @@ SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
 
 STARTUP OPTIONS:
-  --force          Recreate containers so compose/.env metadata is regenerated
+  --force          Recreate containers to apply current Compose and runtime environment values
   --skip-health    Skip post-startup health check
   --skip-pull      Compatibility option; startup never pulls images
   --background     Start services in background (daemon mode)
