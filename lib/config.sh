@@ -251,7 +251,8 @@ load_project_environment() {
     local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
     local repo_env="${root}/.env"
-    local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
+    local installed_env="/etc/vaultwarden/vaultwarden.env"
+    installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-$installed_env}"
     local bootstrap_state="$default_state_dir"
 
     local _read_project_state_dir
