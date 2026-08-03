@@ -10,10 +10,14 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "${1:-}" == "list" ]]; then
-    # Let the established utility parser reject malformed inventory commands
-    # before privilege checks, preserving clear option diagnostics.
+    # Let metadata and malformed inventory commands reach the established
+    # utility parser before privilege checks, preserving root-free help/version
+    # and clear option diagnostics.
     case "${2:-}" in
-        ""|--remote|--help|-h|--version|-V)
+        ""|--remote)
+            ;;
+        --help|-h|--version|-V)
+            exec bash "${PROJECT_ROOT}/utilities/restore-run.sh" "$@"
             ;;
         *)
             exec bash "${PROJECT_ROOT}/utilities/restore-run.sh" "$@"
