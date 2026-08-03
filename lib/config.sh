@@ -25,6 +25,8 @@ if [[ -z "${_VW_CALLER_OVERRIDES_CAPTURED:-}" ]]; then
     _VW_CALLER_BACKUP_DIR="${BACKUP_DIR:-}"
     _VW_CALLER_TZ="${TZ:-}"
     _VW_CALLER_RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-}"
+    _VW_CALLER_RCLONE_REMOTE_PATH="${RCLONE_REMOTE_PATH:-}"
+    _VW_CALLER_RCLONE_CONFIG="${RCLONE_CONFIG:-}"
     _VW_CALLER_SECRETS_FILE="${SECRETS_FILE:-}"
     _VW_CALLER_OVERRIDES_CAPTURED=1
 fi
@@ -38,6 +40,40 @@ _get_file_perms() {
     stat -c '%a' "$1" 2>/dev/null \
         || stat -f '%OLp' "$1" 2>/dev/null \
         || printf 'unknown'
+}
+
+_config_env_candidate_state() {
+    local env_file="$1" ancestor
+
+    if [[ -f "$env_file" ]]; then
+        if [[ -r "$env_file" ]]; then
+            return 0
+        fi
+        log_error "Environment file is not readable: $env_file"
+        (( EUID != 0 )) && log_hint "Re-run the command with sudo to read the installed configuration."
+        return 1
+    fi
+
+    if [[ -e "$env_file" ]]; then
+        log_error "Canonical environment path is not a regular file: $env_file"
+        return 1
+    fi
+
+    ancestor="${env_file%/*}"
+    [[ "$ancestor" == "$env_file" ]] && ancestor="."
+    while [[ "$ancestor" != "/" && "$ancestor" != "." && ! -e "$ancestor" ]]; do
+        ancestor="${ancestor%/*}"
+        [[ -n "$ancestor" ]] || ancestor="/"
+    done
+
+    if [[ -d "$ancestor" && ! -x "$ancestor" ]]; then
+        log_error "Canonical environment path is not accessible: $env_file"
+        log_error "Directory is not searchable: $ancestor"
+        (( EUID != 0 )) && log_hint "Re-run the command with sudo to read the installed configuration."
+        return 1
+    fi
+
+    return 2
 }
 
 load_env_file() {
@@ -55,6 +91,7 @@ load_env_file() {
 
     if [[ ! -r "$env_file" ]]; then
         log_error "Environment file is not readable: $env_file"
+        (( EUID != 0 )) && log_hint "Re-run the command with sudo to read the installed configuration."
         return 1
     fi
 
@@ -246,6 +283,8 @@ load_project_environment() {
     local override_backup="${_VW_CALLER_BACKUP_DIR:-}"
     local override_tz="${_VW_CALLER_TZ:-}"
     local override_remote="${_VW_CALLER_RCLONE_REMOTE_NAME:-}"
+    local override_remote_path="${_VW_CALLER_RCLONE_REMOTE_PATH:-}"
+    local override_rclone_config="${_VW_CALLER_RCLONE_CONFIG:-}"
     local override_secrets="${_VW_CALLER_SECRETS_FILE:-}"
 
     local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -284,17 +323,40 @@ load_project_environment() {
     export PROJECT_STATE_DIR
 
     local persistent_env="${PROJECT_STATE_DIR}/config/install.env"
-    if [[ -f "$installed_env" ]]; then
-        load_env_file "$installed_env" || return 1
-    elif [[ -f "$persistent_env" ]]; then
-        load_env_file "$persistent_env" || return 1
-    elif [[ -f "$repo_env" ]]; then
-        log_warn "Using repository .env — migrate to ${persistent_env} for production use"
-        load_env_file "$repo_env" || return 1
+    local selected_env="" candidate_status
+
+    if _config_env_candidate_state "$installed_env"; then
+        selected_env="$installed_env"
     else
-        log_error "No project environment found. Expected ${persistent_env}, ${repo_env}, or ${installed_env}."
-        return 1
+        candidate_status=$?
+        (( candidate_status == 1 )) && return 1
     fi
+
+    if [[ -z "$selected_env" ]]; then
+        if _config_env_candidate_state "$persistent_env"; then
+            selected_env="$persistent_env"
+        else
+            candidate_status=$?
+            (( candidate_status == 1 )) && return 1
+        fi
+    fi
+
+    if [[ -z "$selected_env" ]]; then
+        if _config_env_candidate_state "$repo_env"; then
+            selected_env="$repo_env"
+            log_warn "Using repository .env — migrate to ${persistent_env} for production use"
+        else
+            candidate_status=$?
+            (( candidate_status == 1 )) && return 1
+        fi
+    fi
+
+    if [[ -z "$selected_env" ]]; then
+        log_error "No project environment found. Expected ${persistent_env}, ${repo_env}, or ${installed_env}."
+        return 2
+    fi
+
+    load_env_file "$selected_env" || return 1
 
     [[ -n "$override_state" ]] && PROJECT_STATE_DIR="$override_state"
     [[ -n "$override_device" ]] && DATA_VOLUME_DEVICE="$override_device"
@@ -303,8 +365,10 @@ load_project_environment() {
     [[ -n "$override_backup" ]] && BACKUP_DIR="$override_backup"
     [[ -n "$override_tz" ]] && TZ="$override_tz"
     [[ -n "$override_remote" ]] && RCLONE_REMOTE_NAME="$override_remote"
+    [[ -n "$override_remote_path" ]] && RCLONE_REMOTE_PATH="$override_remote_path"
+    [[ -n "$override_rclone_config" ]] && RCLONE_CONFIG="$override_rclone_config"
     export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
-    export BACKUP_DIR TZ RCLONE_REMOTE_NAME
+    export BACKUP_DIR TZ RCLONE_REMOTE_NAME RCLONE_REMOTE_PATH RCLONE_CONFIG
 
     resolve_secrets_file
     if [[ -n "$override_secrets" ]]; then
