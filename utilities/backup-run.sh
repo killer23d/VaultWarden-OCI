@@ -27,7 +27,7 @@ KEEP_DAYS_EXPLICIT=false
 QUIET=false
 FORCE=false
 EMAIL_NOTIFY=false   # Set by --email; send_notification_email() runs on completion.
-LIST_ONLY=false      # Set by the list subcommand; prints backups and exits without root.
+LIST_ONLY=false      # Set by the list subcommand; prints backups and exits.
 RCLONE_SYNC=false    # Set by --rclone; syncs the encrypted backup after creation.
 FULL_VERIFY=false    # Set by --full-verification; decrypts and integrity-checks before sync.
 JSON_OUTPUT=false
@@ -38,7 +38,6 @@ VaultWarden-OCI Backup Script
 
 USAGE:
     sudo ./backup.sh <subcommand> [options]
-    ./backup.sh list                                    # No root required
 
 SUBCOMMANDS:
     run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
@@ -47,7 +46,7 @@ SUBCOMMANDS:
                       emergency: clone-grade sealed capsule; can include /etc/vaultwarden
                       key/config material and must use an independent emergency
                       passphrase or EMERGENCY_BACKUP_AGE_RECIPIENT
-    list [--json]     List existing backups (no root required; JSON optional)
+    list [--json]     List existing backups (root required; JSON optional)
     verify [--type TYPE] [--quiet]
                       Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
@@ -85,8 +84,8 @@ EXAMPLES:
     sudo ./backup.sh run full           # Full state backup
     sudo ./backup.sh run emergency      # Clone-grade sealed capsule; prompts for emergency passphrase unless EMERGENCY_BACKUP_AGE_RECIPIENT is set
     sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
-    ./backup.sh list                              # List existing backups (no sudo)
-    ./backup.sh list --json                       # Machine-readable backup inventory
+    sudo ./backup.sh list                         # List existing backups
+    sudo ./backup.sh list --json                  # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh verify --type db --quiet     # Verify latest DB backup quietly
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
@@ -240,7 +239,6 @@ _acquire_backup_guard() {
         --non-interactive skip || exit $?
 }
 
-
 _resolve_age_key() {
     local candidates=(
         "${SOPS_AGE_KEY_FILE:-}"
@@ -337,8 +335,6 @@ _load_integrity_hmac_key() {
     FILE_INTEGRITY_HMAC_KEY="$raw_value"
     export FILE_INTEGRITY_HMAC_KEY
 }
-
-
 
 auto_determine_backup_type() {
     local state_dir
@@ -974,7 +970,6 @@ sync_to_rclone() {
     fi
 
     backup_log_info "Offsite sync complete → ${remote_file_path}"
-
 }
 
 # _resolve_rclone_config_arg NAMEREF_ARRAY
@@ -1072,15 +1067,6 @@ sync_all_backups_to_rclone() {
     backup_log_success "Rclone backup copy complete (${copied_types} backup type(s))."
 }
 
-# _prune_remote_backups
-#
-# Prunes backup files on the configured rclone remote that are older than
-# the per-type retention period. Retention days are read via
-# _retention_days_for_type() for each backup type, mirroring the local
-# cleanup_old_backups() policy on the remote store.
-#
-# Non-fatal: logs a warning and returns 1 on partial failure so that a single
-# unreachable remote does not abort an otherwise successful backup run.
 _prune_remote_backups() {
     if ! command -v rclone >/dev/null 2>&1; then
         backup_log_info "rclone not installed — skipping remote retention pruning."
@@ -1159,7 +1145,6 @@ _prune_remote_backups() {
                 else
                     backup_log_info "[remote] Deleted: ${_file} (${_age_days}d > ${retention_days}d)"
                     (( ++_deleted_remote )) || true
-                    # Remove associated sidecar files; ignore errors (may not exist).
                     local _ext
                     for _ext in .sha256 .sha256.hmac .meta; do
                         rclone deletefile "${rclone_config_arg[@]}" \
@@ -1285,8 +1270,6 @@ perform_full_backup() {
 
     backup_log_info "Archiving state (relative paths, safe for staged restore)..."
 
-    # Canonical backup exclusion list — single source of truth.
-    # Keep in sync with print_backup_manifest() below and docs/BACKUP-RESTORE.md.
     local -a _BACKUP_EXCLUDES=(
         ".git"
         "backups"
@@ -1315,7 +1298,6 @@ perform_full_backup() {
                 ;;
             *)
                 tar_excludes+=("--exclude=${SCRIPT_DIR#/}/${excl}")
-                # Also exclude the same paths under state_dir where applicable
                 [[ "$excl" == "backups" || "$excl" == "logs" ]] && \
                     tar_excludes+=("--exclude=${state_dir#/}/${excl}")
                 ;;
@@ -1333,9 +1315,7 @@ perform_full_backup() {
     )
 
     local tar_sources=()
-
     tar_sources+=("${SCRIPT_DIR#/}")
-
     tar_sources+=("${state_dir#/}")
 
     local encryption_mode="age-recipient"
@@ -1458,8 +1438,6 @@ EOF
     echo "$enc"
 }
 
-# print_backup_manifest — Show what is included/excluded in a full/emergency backup.
-# Called by `make backup-manifest`.
 print_backup_manifest() {
     local -a _BACKUP_EXCLUDES=(
         ".git"
@@ -1512,7 +1490,6 @@ _check_backup_deps() {
     fi
 }
 
-
 _log_backup_size() {
     local backup_file="$1"
     if [[ ! -f "$backup_file" ]]; then
@@ -1543,12 +1520,13 @@ main() {
     trap 'operation_release 130; rm -rf "${TMPDIR_BACKUP:-}" 2>/dev/null || true; exit 130' INT
     trap 'operation_release 143; rm -rf "${TMPDIR_BACKUP:-}" 2>/dev/null || true; exit 143' HUP TERM
 
-    if [[ "$_SUBCMD" != "list" ]]; then
-        backup_require_root
-    fi
+    backup_require_root
 
     if [[ "$LIST_ONLY" == "true" ]]; then
-        load_env_file 2>/dev/null || true
+        if ! load_env_file; then
+            log_error "Failed to load project environment for backup inventory."
+            exit 1
+        fi
         local list_base_dir
         list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
         if [[ -d "$list_base_dir" && ! -r "$list_base_dir" ]]; then
@@ -1683,7 +1661,6 @@ main() {
             exit 1
         fi
 
-        # Prune remote backups to match the local retention policy.
         _prune_remote_backups || {
             log_warn "[rotate] Remote retention pruning reported errors — local rotation was successful."
         }
@@ -1693,7 +1670,6 @@ main() {
         backup_log_success "Rotation complete${rotate_suffix}."
         exit 0
     fi
-
 
     _check_backup_deps
 
@@ -1779,7 +1755,6 @@ main() {
     fi
 
     if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
-
         local verify_failed=false
         local rclone_failed=false
         local verification_status="not run"
@@ -1870,7 +1845,6 @@ main() {
         cleanup_old_backups "$backup_dir" "$actual_type" "$retention_days" || \
             backup_log_warn "Failed to clean up some old backups"
 
-        # Prune remote backups to mirror local retention policy
         if [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]]; then
             _prune_remote_backups || \
                 backup_log_warn "Failed to prune some remote backups"
