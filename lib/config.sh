@@ -22,6 +22,10 @@ if [[ -z "${_VW_CALLER_OVERRIDES_CAPTURED:-}" ]]; then
     _VW_CALLER_DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
     _VW_CALLER_DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-}"
     _VW_CALLER_SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-}"
+    _VW_CALLER_BACKUP_DIR="${BACKUP_DIR:-}"
+    _VW_CALLER_TZ="${TZ:-}"
+    _VW_CALLER_RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-}"
+    _VW_CALLER_SECRETS_FILE="${SECRETS_FILE:-}"
     _VW_CALLER_OVERRIDES_CAPTURED=1
 fi
 
@@ -249,6 +253,10 @@ load_project_environment() {
     local override_device="${_VW_CALLER_DATA_VOLUME_DEVICE:-}"
     local override_mount="${_VW_CALLER_DATA_VOLUME_MOUNT:-}"
     local override_key="${_VW_CALLER_SOPS_AGE_KEY_FILE:-}"
+    local override_backup="${_VW_CALLER_BACKUP_DIR:-}"
+    local override_tz="${_VW_CALLER_TZ:-}"
+    local override_remote="${_VW_CALLER_RCLONE_REMOTE_NAME:-}"
+    local override_secrets="${_VW_CALLER_SECRETS_FILE:-}"
 
     local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
@@ -301,9 +309,17 @@ load_project_environment() {
     [[ -n "$override_device" ]] && DATA_VOLUME_DEVICE="$override_device"
     [[ -n "$override_mount" ]] && DATA_VOLUME_MOUNT="$override_mount"
     [[ -n "$override_key" ]] && SOPS_AGE_KEY_FILE="$override_key"
+    [[ -n "$override_backup" ]] && BACKUP_DIR="$override_backup"
+    [[ -n "$override_tz" ]] && TZ="$override_tz"
+    [[ -n "$override_remote" ]] && RCLONE_REMOTE_NAME="$override_remote"
     export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
+    export BACKUP_DIR TZ RCLONE_REMOTE_NAME
 
     resolve_secrets_file
+    if [[ -n "$override_secrets" ]]; then
+        SECRETS_FILE="$override_secrets"
+        export SECRETS_FILE
+    fi
 }
 
 _set_env_var() (
