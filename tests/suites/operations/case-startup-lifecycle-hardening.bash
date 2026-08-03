@@ -69,9 +69,19 @@ assert_contains "$postfix_health" 'start_period: 20s' \
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+make_marker_command() {
+  local path="$1" marker="$2" rc="${3:-0}"
+  cat > "$path" <<EOF_STUB
+#!/usr/bin/env bash
+printf '%s %s\\n' '$marker' "\$*" >> "\${CALL_LOG:?}"
+exit $rc
+EOF_STUB
+  chmod +x "$path"
+}
+
 make_startup_fixture() {
   local repo="$1"
-  mkdir -p "$repo/lib" "$repo/state/config" "$repo/state/secrets"
+  mkdir -p "$repo/lib" "$repo/utilities" "$repo/state/config" "$repo/state/secrets"
   cp "$ROOT/startup.sh" "$repo/startup.sh"
   chmod +x "$repo/startup.sh"
   : > "$repo/docker-compose.yml"
@@ -112,10 +122,12 @@ EOF_LIB
 init_common_lib(){ :; }
 require_root(){ :; }
 print_project_version(){ printf 'test\n'; }
+_maybe_sudo(){ "$@"; }
 EOF_LIB
   cat > "$repo/lib/docker.sh" <<'EOF_LIB'
 check_docker_available(){ return 0; }
 wait_for_service_ready(){ return 0; }
+cleanup_docker_system(){ printf 'CLEANUP_DOCKER\n' >> "${CALL_LOG:?}"; return 0; }
 EOF_LIB
   cat > "$repo/lib/crypto.sh" <<'EOF_LIB'
 check_age_key_health(){ return 0; }
@@ -138,6 +150,10 @@ operation_acquire(){ return 0; }
 operation_release(){ return 0; }
 operation_set_phase(){ :; }
 EOF_LIB
+
+  make_marker_command "$repo/utilities/env-edit.sh" ENV_SYNC
+  make_marker_command "$repo/utilities/maintenance-update-dns.sh" DNS_UPDATE
+  make_marker_command "$repo/utilities/setup-firewall.sh" FIREWALL_SETUP
 }
 
 make_docker_stub() {
@@ -156,6 +172,9 @@ case "${1:-}:${2:-}:${3:-}" in
 esac
 EOF_DOCKER
   chmod +x "$bin/docker"
+  make_marker_command "$bin/iptables" IPTABLES
+  make_marker_command "$bin/groupadd" GROUPADD
+  make_marker_command "$bin/getent" GETENT 1
 }
 
 run_startup() {
@@ -184,6 +203,8 @@ run_startup "$repo" "$TMP/success.out" || {
 [[ -e "$TMP/push-created" ]] || fail 'ordinary startup did not materialize push placeholders'
 grep -Fq 'PERMISSION_CHECK' "$TMP/calls.log" || fail 'ordinary startup did not validate permissions'
 ! grep -Fq 'PERMISSION_REPAIR' "$TMP/calls.log" || fail 'ordinary startup repaired permissions'
+! grep -Eq '^(ENV_SYNC|DNS_UPDATE|FIREWALL_SETUP|CLEANUP_DOCKER|IPTABLES|GROUPADD|GETENT)( |$)' "$TMP/calls.log" \
+  || fail 'ordinary startup invoked a prohibited maintenance or host-mutation path'
 ! grep -Eq 'DOCKER compose pull|DOCKER system prune|DOCKER .* prune|--remove-orphans' "$TMP/calls.log" \
   || fail 'ordinary startup pulled images or pruned Docker resources'
 grep -Fq 'DOCKER compose up -d --pull never --no-build' "$TMP/calls.log" \
@@ -196,6 +217,8 @@ if PERMISSION_RC=1 run_startup "$repo" "$TMP/permissions.out"; then
 fi
 grep -Fq 'sudo utilities/repair-permissions.sh' "$TMP/permissions.out" \
   || fail 'permission failure lacked the focused repair command'
+[[ ! -e "$TMP/secret-created" && ! -e "$TMP/push-created" ]] \
+  || fail 'startup materialized secrets after permission validation failed'
 ! grep -Fq 'DOCKER compose up' "$TMP/calls.log" \
   || fail 'startup attempted Compose up after permission validation failed'
 
