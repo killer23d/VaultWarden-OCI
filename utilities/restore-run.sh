@@ -152,8 +152,8 @@ USAGE:
 
 SUBCOMMANDS:
     latest [TYPE]     Restore the newest local backup (TYPE: db | full | emergency)
-    list              List available local backups (no root required)
-    list --remote     List available remote backups (no root required)
+    list              List available local backups (root required)
+    list --remote     List available remote backups (root required)
     interactive       Interactive guided restore — shows a numbered backup menu.
     inspect           Non-destructive backup layout/storage preflight only.
                       If rclone is configured, you are first asked whether to
@@ -219,8 +219,8 @@ EXAMPLES:
     sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
     sudo ./restore.sh latest db          # Restore newest DB backup
     sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
-    ./restore.sh list                    # List local backups (no sudo)
-    ./restore.sh list --remote           # List remote backups (no sudo)
+    sudo ./restore.sh list               # List local backups
+    sudo ./restore.sh list --remote      # List remote backups
 
     # ── INTERACTIVE MENU ─────────────────────────────────────────
     sudo ./restore.sh interactive                    # Select from local backups
@@ -257,7 +257,7 @@ _reject_restore_option() {
     local subcmd="$1" opt="$2"
     log_error "Unknown option for '${subcmd}': ${opt}"
     case "$subcmd" in
-        list) log_error "Usage: ./restore.sh list [--remote]" ;;
+        list) log_error "Usage: sudo ./restore.sh list [--remote]" ;;
         latest) log_error "Usage: sudo ./restore.sh latest [TYPE] [OPTIONS]" ;;
         interactive) log_error "Usage: sudo ./restore.sh interactive [OPTIONS]" ;;
         inspect) log_error "Usage: sudo ./restore.sh inspect [--remote] [--file FILE] [OPTIONS]" ;;
@@ -719,7 +719,7 @@ list_remote_backups() {
         echo ""
         printf '  ── %s backups (remote) ──\n' "${t^^}"
         for remote_file in "${type_files[@]}"; do
-            (( global_index++ ))
+            (( ++global_index ))
             _REMOTE_FILES+=("$remote_file")
             _REMOTE_TYPES+=("$t")
             local size_str="?" date_str="unknown"
@@ -873,7 +873,7 @@ list_all_backups_interactive() {
         printf '  ── %s backups ──\n' "${t^^}"
         local i=0
         for f in "${files[@]}"; do
-            (( i++ ))
+            (( ++i ))
             local size_str="?"
             local sz; sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
             if [[ "$sz" =~ ^[0-9]+$ ]]; then
@@ -2617,33 +2617,24 @@ restore_full() {
 
 main() {
     log_header "VaultWarden-OCI Restore Utility"
-
-    # Load .env unconditionally and early so every code path — including
-    # list subcommand and the rclone availability checks — can read config values
-    # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
-    load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
-    check_dependencies
-
-    # Resolve the backup storage root from .env using the same
-    # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path
-    # in this script is built from BACKUP_BASE_DIR, never from PROJECT_ROOT/backups.
-    local _early_state_dir; _early_state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
-    BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${_early_state_dir}/backups")"
-    log_info "Backup storage root: $BACKUP_BASE_DIR"
+    require_root "$@"
 
     if [[ "$LIST_ONLY" == "true" ]]; then
+        if ! load_env_file; then
+            log_error "Failed to load project environment for restore inventory."
+            exit 1
+        fi
+        check_dependencies
+
+        local _list_state_dir
+        _list_state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+        BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${_list_state_dir}/backups")"
+        log_info "Backup storage root: $BACKUP_BASE_DIR"
+
         if [[ "$LIST_REMOTE" == "true" ]]; then
-            # Remote listing: if RCLONE_REMOTE_NAME is missing, prompt for it
-            # to support emergency listing without .env.
             if ! _rclone_is_available; then
-                if [[ "$RCLONE_NEEDS_INTERACTIVE_NAME" == "true" ]]; then
-                    _prompt_rclone_remote_name || exit 1
-                    if ! _rclone_is_available; then
-                        _rclone_diagnose; exit 1
-                    fi
-                else
-                    _rclone_diagnose; exit 1
-                fi
+                _rclone_diagnose
+                exit 1
             fi
             _build_rclone_config_arg || exit 1
             list_remote_backups
@@ -2653,7 +2644,7 @@ main() {
         exit 0
     fi
 
-    require_root "$@"
+    check_dependencies
     auto_fix_critical_permissions "$PROJECT_ROOT"
 
     if [[ "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]; then
@@ -2664,7 +2655,7 @@ main() {
         operation_set_phase "prepare" "Preparing restore"
     fi
 
-    # Re-load .env strictly now that we are root (surfaces hard errors).
+    # Load .env strictly now that we are root (surfaces hard errors).
     # When USE_REMOTE=true and .env is absent (emergency restore on a fresh
     # server), treat the load failure as a warning rather than a hard exit —
     # the operator is about to restore .env from the backup.
