@@ -51,12 +51,6 @@ EXIT CODES:
 EOF
 }
 
-_load_env() {
-    if load_env_file 2>/dev/null; then return 0; fi
-    log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
-    return 0
-}
-
 # shellcheck disable=SC2120  # $@ is forwarded to require_root; callers pass no args intentionally
 update_firewall_ranges() {
     if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
@@ -274,7 +268,7 @@ main() {
             }
         operation_set_phase "update" "Updating Cloudflare firewall ranges"
     fi
-    _load_env
+    load_project_environment || exit 1
     auto_fix_critical_permissions "$PROJECT_ROOT"
     trap 'rc=$?; operation_release "$rc"; perform_cleanup; exit "$rc"' EXIT
     trap 'operation_release 130; perform_cleanup; exit 130' INT
