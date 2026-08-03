@@ -191,7 +191,7 @@ SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
 
 STARTUP OPTIONS:
-  --force          Recreate containers so compose/.env metadata is regenerated
+  --force          Recreate containers to apply current Compose and runtime environment values
   --skip-health    Skip post-startup health check
   --skip-pull      Compatibility option; startup never pulls images
   --background     Start services in background (daemon mode)
@@ -263,7 +263,7 @@ EXAMPLES:
     sudo ./backup.sh run full           # Full state backup
     sudo ./backup.sh run emergency      # Clone-grade sealed capsule; prompts for emergency passphrase unless EMERGENCY_BACKUP_AGE_RECIPIENT is set
     sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
-    ./backup.sh list                              # List existing backups (no sudo)
+    ./backup.sh list                              # List local backups (no sudo)
     ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh verify --type db --quiet     # Verify latest DB backup quietly
@@ -537,7 +537,7 @@ EXAMPLES:
     sudo ./backup.sh run full           # Full state backup
     sudo ./backup.sh run emergency      # Clone-grade sealed capsule; prompts for emergency passphrase unless EMERGENCY_BACKUP_AGE_RECIPIENT is set
     sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
-    ./backup.sh list                              # List existing backups (no sudo)
+    ./backup.sh list                              # List local backups (no sudo)
     ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh verify --type db --quiet     # Verify latest DB backup quietly
@@ -1252,7 +1252,7 @@ VaultWarden Secrets — view subcommand
 USAGE:
     sudo ./utilities/secrets-view.sh [OPTIONS]
     sudo ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
-    sudo ./edit-secrets.sh view [OPTIONS]
+    sudo ./edit-secrets.sh view
 
 DESCRIPTION:
     Decrypts and displays secrets in read-only mode. No changes are saved.
