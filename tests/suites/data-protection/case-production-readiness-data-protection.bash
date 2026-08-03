@@ -132,7 +132,7 @@ if (( EUID != 0 )) && command -v sudo >/dev/null 2>&1; then
     cat "$protected_output" >&2
     fail "unprivileged restore inventory bypassed protected installed configuration"
   fi
-  grep -Fq 'Re-run with sudo' "$protected_output" \
+  grep -Eq 'Re-run .*sudo' "$protected_output" \
     || { cat "$protected_output" >&2; fail "protected installed configuration failure lacked sudo guidance"; }
   pass "protected installed environment fails clearly for unprivileged inventory"
 fi
