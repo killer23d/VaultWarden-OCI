@@ -371,7 +371,7 @@ extract_shell_function() {
 
 # Root-operated lifecycle contract.
 grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
-for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear health-email diagnose systemd-status prune key-show; do
+for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear health-email diagnose systemd-status prune key-show info dry-run; do
     grep -Eq "(^|[[:space:]])${target}([[:space:]]|\|$)" Makefile || fail "${target} is not root-allowed"
 done
 pass "root-supported lifecycle/day-2 targets are allowed under sudo make"
@@ -496,7 +496,7 @@ pass "root execution can resolve installed Age key and env defaults"
 grep -Fq 'env_uid=$(stat -c '\''%u'\'' "$env_file"' utilities/setup-secrets.sh || fail "setup-secrets does not capture .env owner"
 grep -Fq 'env_mode=$(stat -c '\''%a'\'' "$env_file"' utilities/setup-secrets.sh || fail "setup-secrets does not capture .env mode"
 grep -Fq 'chown "$env_uid:$env_gid" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env owner/group on temp file"
-grep -Fq 'chmod "$env_mode" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env mode on temp file"
+grep -Fq 'chmod "$env_mode" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env mode"
 pass "setup-secrets bootstrap preserves repo .env ownership and mode"
 
 # Encrypted secrets live under root-owned persistent state, and runtime secrets stay root-owned.
@@ -755,7 +755,8 @@ pass "key inspection/backup targets avoid misleading production status"
 KEY_TMP="$(mktemp -d -t vw-key-contract.XXXXXXXXXX)"
 KEY_REPO="$KEY_TMP/repo"
 KEY_BIN="$KEY_TMP/bin"
-mkdir -p "$KEY_REPO/secrets/keys" "$KEY_REPO/lib" "$KEY_BIN" "$KEY_TMP/home"
+KEY_ENV="$KEY_TMP/installed.env"
+mkdir -p "$KEY_REPO/secrets/keys" "$KEY_REPO/lib" "$KEY_BIN" "$KEY_TMP/home" "$KEY_TMP/state"
 cp Makefile "$KEY_REPO/Makefile"
 cp -a lib/. "$KEY_REPO/lib/"
 PROD_KEY="$KEY_TMP/prod-age-key.txt"
@@ -765,6 +766,11 @@ REPO_RECIPIENT="age1repo000000000000000000000000000000000000000000000000000000"
 printf '# public key: %s\nAGE-SECRET-KEY-1PRODUCTION-ACTIVE-KEY\n' "$PROD_RECIPIENT" > "$PROD_KEY"
 printf '# public key: %s\nAGE-SECRET-KEY-1REPO-LOCAL-KEY\n' "$REPO_RECIPIENT" > "$REPO_KEY"
 chmod 0600 "$PROD_KEY" "$REPO_KEY"
+cat > "$KEY_ENV" <<EOF_KEY_ENV
+PROJECT_STATE_DIR=$KEY_TMP/state
+SOPS_AGE_KEY_FILE=$PROD_KEY
+EOF_KEY_ENV
+chmod 0600 "$KEY_ENV"
 cat > "$KEY_REPO/.sops.yaml" <<EOF_KEY_POLICY
 creation_rules:
   - path_regex: '.*\.yaml$'
@@ -800,6 +806,7 @@ chmod +x "$KEY_BIN"/*
 run_key_make() {
     local target="$1" out="$2"
     PATH="$KEY_BIN:/opt/homebrew/bin:$PATH" \
+        VW_CONFIG_INSTALLED_ENV_FILE="$KEY_ENV" \
         AGE_KEY_FILE="$PROD_KEY" \
         SOPS_CONFIG_FILE="$KEY_REPO/.sops.yaml" \
         HOME="$KEY_TMP/home" \

@@ -22,17 +22,18 @@ if [[ -z "${_VW_CALLER_OVERRIDES_CAPTURED:-}" ]]; then
     _VW_CALLER_DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
     _VW_CALLER_DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-}"
     _VW_CALLER_SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-}"
+    _VW_CALLER_BACKUP_DIR="${BACKUP_DIR:-}"
+    _VW_CALLER_TZ="${TZ:-}"
+    _VW_CALLER_RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-}"
+    _VW_CALLER_RCLONE_REMOTE_PATH="${RCLONE_REMOTE_PATH:-}"
+    _VW_CALLER_RCLONE_CONFIG="${RCLONE_CONFIG:-}"
+    _VW_CALLER_SECRETS_FILE="${SECRETS_FILE:-}"
     _VW_CALLER_OVERRIDES_CAPTURED=1
 fi
 
 # Self-load log.sh if not already loaded so this lib can be sourced standalone.
 _VW_CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CONFIG_LIB_DIR}/log.sh"
-
-_ENV_FILE_SEARCH_PATHS=(
-    "${PROJECT_ROOT:-$(cd "${_VW_CONFIG_LIB_DIR}/.." && pwd)}/.env"
-    "/etc/vaultwarden/vaultwarden.env"
-)
 unset _VW_CONFIG_LIB_DIR
 
 _get_file_perms() {
@@ -41,21 +42,56 @@ _get_file_perms() {
         || printf 'unknown'
 }
 
+_config_env_candidate_state() {
+    local env_file="$1" ancestor
+
+    if [[ -f "$env_file" ]]; then
+        if [[ -r "$env_file" ]]; then
+            return 0
+        fi
+        log_error "Environment file is not readable: $env_file"
+        (( EUID != 0 )) && log_hint "Re-run the command with sudo to read the installed configuration."
+        return 1
+    fi
+
+    if [[ -e "$env_file" ]]; then
+        log_error "Canonical environment path is not a regular file: $env_file"
+        return 1
+    fi
+
+    ancestor="${env_file%/*}"
+    [[ "$ancestor" == "$env_file" ]] && ancestor="."
+    while [[ "$ancestor" != "/" && "$ancestor" != "." && ! -e "$ancestor" ]]; do
+        ancestor="${ancestor%/*}"
+        [[ -n "$ancestor" ]] || ancestor="/"
+    done
+
+    if [[ -d "$ancestor" && ! -x "$ancestor" ]]; then
+        log_error "Canonical environment path is not accessible: $env_file"
+        log_error "Directory is not searchable: $ancestor"
+        (( EUID != 0 )) && log_hint "Re-run the command with sudo to read the installed configuration."
+        return 1
+    fi
+
+    return 2
+}
+
 load_env_file() {
     local env_file="${1:-}"
 
     if [[ -z "$env_file" ]]; then
-        local candidate
-        for candidate in "${_ENV_FILE_SEARCH_PATHS[@]}"; do
-            if [[ -f "$candidate" ]]; then
-                env_file="$candidate"
-                break
-            fi
-        done
+        load_project_environment
+        return $?
     fi
 
-    if [[ -z "$env_file" || ! -f "$env_file" ]]; then
-        log_error "Environment file not found: ${env_file:-.env} (also searched: ${_ENV_FILE_SEARCH_PATHS[*]})"
+    if [[ ! -f "$env_file" ]]; then
+        log_error "Environment file not found: $env_file"
+        return 1
+    fi
+
+    if [[ ! -r "$env_file" ]]; then
+        log_error "Environment file is not readable: $env_file"
+        (( EUID != 0 )) && log_hint "Re-run the command with sudo to read the installed configuration."
         return 1
     fi
 
@@ -92,7 +128,7 @@ load_env_file() {
 
     local line key raw_value value lineno=0
     local -a malformed_lines=()
-    while IFS= read -r line || [[ -n "$line" ]]; do
+    if ! while IFS= read -r line || [[ -n "$line" ]]; do
         (( lineno++ )) || true
 
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
@@ -138,7 +174,7 @@ load_env_file() {
                 return 1
                 ;;
         esac
-            if [[ "$value" == *';'* || "$value" == *'&'* ]]; then
+        if [[ "$value" == *';'* || "$value" == *'&'* ]]; then
             log_warn "load_env_file: line ${lineno}: value for '${key}' contains" \
                      "';' or '&' — loaded as literal. If unintended, check '${env_file}'."
         fi
@@ -147,7 +183,10 @@ load_env_file() {
         # shellcheck disable=SC2163  # export "$key" exports the variable whose name is in $key
         export "$key"
 
-    done < "$env_file"
+    done < "$env_file"; then
+        log_error "Environment file could not be read: $env_file"
+        return 1
+    fi
 
     if (( ${#malformed_lines[@]} > 0 )); then
         log_warn "load_env_file: ${#malformed_lines[@]} malformed .env line(s) skipped from ${env_file}:"
@@ -181,8 +220,7 @@ load_env_file() {
     fi
 
     # Keep direct env-file callers aligned with the split-permission secrets
-    # layout. load_project_environment already does this, but scripts such as
-    # maintenance-health.sh call load_env_file directly.
+    # layout when they intentionally load a specific file.
     if declare -F resolve_secrets_file >/dev/null 2>&1; then
         resolve_secrets_file
     fi
@@ -242,17 +280,24 @@ load_project_environment() {
     local override_device="${_VW_CALLER_DATA_VOLUME_DEVICE:-}"
     local override_mount="${_VW_CALLER_DATA_VOLUME_MOUNT:-}"
     local override_key="${_VW_CALLER_SOPS_AGE_KEY_FILE:-}"
+    local override_backup="${_VW_CALLER_BACKUP_DIR:-}"
+    local override_tz="${_VW_CALLER_TZ:-}"
+    local override_remote="${_VW_CALLER_RCLONE_REMOTE_NAME:-}"
+    local override_remote_path="${_VW_CALLER_RCLONE_REMOTE_PATH:-}"
+    local override_rclone_config="${_VW_CALLER_RCLONE_CONFIG:-}"
+    local override_secrets="${_VW_CALLER_SECRETS_FILE:-}"
 
     local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
     local repo_env="${root}/.env"
-    local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
+    local installed_env="/etc/vaultwarden/vaultwarden.env"
+    installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-$installed_env}"
     local bootstrap_state="$default_state_dir"
 
     local _read_project_state_dir
     _read_project_state_dir() {
         local file="$1"
-        [[ -f "$file" ]] || return 0
+        [[ -f "$file" && -r "$file" ]] || return 0
         awk -F= -v sq="'" '$1 == "PROJECT_STATE_DIR" {
             value = substr($0, index($0, "=") + 1)
             gsub("^[\"" sq "]|[\"" sq "]$", "", value)
@@ -278,25 +323,58 @@ load_project_environment() {
     export PROJECT_STATE_DIR
 
     local persistent_env="${PROJECT_STATE_DIR}/config/install.env"
-    if [[ -f "$installed_env" ]]; then
-        load_env_file "$installed_env" || return 1
-    elif [[ -f "$persistent_env" ]]; then
-        load_env_file "$persistent_env" || return 1
-    elif [[ -f "$repo_env" ]]; then
-        log_warn "Using repository .env — migrate to ${persistent_env} for production use"
-        load_env_file "$repo_env" || return 1
+    local selected_env="" candidate_status
+
+    if _config_env_candidate_state "$installed_env"; then
+        selected_env="$installed_env"
     else
-        log_error "No project environment found. Expected ${persistent_env}, ${repo_env}, or ${installed_env}."
-        return 1
+        candidate_status=$?
+        (( candidate_status == 1 )) && return 1
     fi
+
+    if [[ -z "$selected_env" ]]; then
+        if _config_env_candidate_state "$persistent_env"; then
+            selected_env="$persistent_env"
+        else
+            candidate_status=$?
+            (( candidate_status == 1 )) && return 1
+        fi
+    fi
+
+    if [[ -z "$selected_env" ]]; then
+        if _config_env_candidate_state "$repo_env"; then
+            selected_env="$repo_env"
+            log_warn "Using repository .env — migrate to ${persistent_env} for production use"
+        else
+            candidate_status=$?
+            (( candidate_status == 1 )) && return 1
+        fi
+    fi
+
+    if [[ -z "$selected_env" ]]; then
+        log_error "No project environment found. Expected ${persistent_env}, ${repo_env}, or ${installed_env}."
+        return 2
+    fi
+
+    load_env_file "$selected_env" || return 1
 
     [[ -n "$override_state" ]] && PROJECT_STATE_DIR="$override_state"
     [[ -n "$override_device" ]] && DATA_VOLUME_DEVICE="$override_device"
     [[ -n "$override_mount" ]] && DATA_VOLUME_MOUNT="$override_mount"
     [[ -n "$override_key" ]] && SOPS_AGE_KEY_FILE="$override_key"
+    [[ -n "$override_backup" ]] && BACKUP_DIR="$override_backup"
+    [[ -n "$override_tz" ]] && TZ="$override_tz"
+    [[ -n "$override_remote" ]] && RCLONE_REMOTE_NAME="$override_remote"
+    [[ -n "$override_remote_path" ]] && RCLONE_REMOTE_PATH="$override_remote_path"
+    [[ -n "$override_rclone_config" ]] && RCLONE_CONFIG="$override_rclone_config"
     export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
+    export BACKUP_DIR TZ RCLONE_REMOTE_NAME RCLONE_REMOTE_PATH RCLONE_CONFIG
 
     resolve_secrets_file
+    if [[ -n "$override_secrets" ]]; then
+        SECRETS_FILE="$override_secrets"
+        export SECRETS_FILE
+    fi
 }
 
 _set_env_var() (

@@ -1548,7 +1548,10 @@ main() {
     fi
 
     if [[ "$LIST_ONLY" == "true" ]]; then
-        load_env_file 2>/dev/null || true
+        if ! load_env_file; then
+            log_error "Failed to load project environment for backup inventory."
+            exit 1
+        fi
         local list_base_dir
         list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
         if [[ -d "$list_base_dir" && ! -r "$list_base_dir" ]]; then

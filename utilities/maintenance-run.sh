@@ -82,13 +82,6 @@ EOF
 }
 
 
-_load_env() {
-    if load_env_file 2>/dev/null; then return 0; fi
-    log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
-    return 0
-}
-
-
 [[ "${1:-}" == "run" ]] && shift
 
 while [[ $# -gt 0 ]]; do
@@ -134,7 +127,7 @@ main() {
     local _MAINT_START_EPOCH
     _MAINT_START_EPOCH=$(date +%s)
 
-    _load_env
+    load_project_environment || exit 1
     auto_fix_critical_permissions "$PROJECT_ROOT"
     require_project_state_ready || exit 1
 

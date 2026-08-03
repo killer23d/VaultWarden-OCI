@@ -146,7 +146,6 @@ grep -Fq "trap '_handle_signal 130' INT" "$DRILL" || fail 'drill INT handler mus
 grep -Fq "trap '_handle_signal 143' TERM" "$DRILL" || fail 'drill TERM handler must exit 143'
 printf 'Drill truthfulness tests passed.\n'
 
-
 run_db_maintenance_health_failure_behavior_test() {
     local tmpdir harness output status safety_backup
     tmpdir="$(mktemp -d)"
@@ -583,7 +582,7 @@ operation_acquire(){ :; }
 operation_release(){ :; }
 operation_set_phase(){ :; }
 perform_cleanup(){ :; }
-_load_env(){ :; }
+load_project_environment(){ :; }
 auto_fix_critical_permissions(){ :; }
 require_project_state_ready(){ :; }
 cleanup_logs(){ :; }
@@ -593,10 +592,10 @@ cleanup_docker_system(){ :; }
 optimize_database(){ :; }
 validate_system_health(){ :; }
 log_header(){ :; }
-log_info(){ printf '%s\\n' "\$*"; }
-log_success(){ printf '%s\\n' "\$*"; }
-log_warn(){ printf '%s\\n' "\$*" >&2; }
-log_error(){ printf '%s\\n' "\$*" >&2; }
+log_info(){ printf '%s\n' "\$*"; }
+log_success(){ printf '%s\n' "\$*"; }
+log_warn(){ printf '%s\n' "\$*" >&2; }
+log_error(){ printf '%s\n' "\$*" >&2; }
 $(extract_func "$ROOT/utilities/maintenance-run.sh" main)
 main
 EOF_PROBE
@@ -626,71 +625,70 @@ printf 'PASS: maintenance contention status is truthful in operator output\n'
 
 check_maintenance_contention_operator_ui
 
-check_dashboard_environment_parsing() (
+check_dashboard_configuration_behavior() (
 set -euo pipefail
 
 ROOT="$VW_TEST_REPO_ROOT"
-TMP="$(mktemp -d -t vw-dashboard-env.XXXXXXXXXX)"
+TMP="$(mktemp -d -t vw-dashboard-config.XXXXXXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass(){ printf 'PASS: %s\n' "$*"; }
 
-extract_func() {
-    local file="$1" func="$2"
-    awk -v f="$func" '
-        $0 ~ "^" f "\\(\\)" {p=1}
-        p {
-            print
-            opens=gsub(/\{/ ,"{"); closes=gsub(/\}/,"}")
-            depth += opens - closes
-            if (depth == 0) exit
-        }' "$file"
-}
-
-# Referenced by the extracted dashboard function evaluated below.
-# shellcheck disable=SC2034
-REPO_ROOT="$TMP"
-eval "$(extract_func "$ROOT/dashboard.sh" _read_env_var)"
-
-cat >"$TMP/.env" <<'EOF_ENV'
-PROJECT_STATE_DIR=/srv/obsolete-state
-PROJECT_STATE_DIR=/srv/vault=state
-BACKUP_DIR=/srv/obsolete-backups
-BACKUP_DIR='/srv/backup=primary'
+fixture="$TMP/repo"
+installed="$TMP/installed.env"
+state="$TMP/installed-state"
+mkdir -p "$fixture" "$state/secrets"
+cp "$ROOT/dashboard.sh" "$ROOT/VERSION" "$fixture/"
+ln -s "$ROOT/lib" "$fixture/lib"
+sed -i 's/^main "$@"$/: # fixture: do not auto-run dashboard/' "$fixture/dashboard.sh"
+cat > "$fixture/.env" <<EOF_REPO
+PROJECT_STATE_DIR=$TMP/repo-state
+BACKUP_DIR=$TMP/repo-backups
 TZ=UTC
-TZ="America/Vancouver"
-RCLONE_REMOTE_NAME=archive=nightly
-EOF_ENV
+RCLONE_REMOTE_NAME=repo-remote
+EOF_REPO
+cat > "$installed" <<EOF_INSTALLED
+PROJECT_STATE_DIR=$state
+BACKUP_DIR=$TMP/installed-backups
+TZ=America/Vancouver
+RCLONE_REMOTE_NAME=installed-remote
+EOF_INSTALLED
+chmod 0600 "$fixture/.env" "$installed"
+printf 'encrypted fixture\n' > "$state/secrets/secrets.yaml"
 
-STATE_DIR="$(_read_env_var PROJECT_STATE_DIR /var/lib/vaultwarden)"
-BACKUP_DIR="$(_read_env_var BACKUP_DIR "${STATE_DIR}/backups")"
-TZ_DISPLAY="$(_read_env_var TZ UTC)"
-RCLONE_REMOTE_NAME="$(_read_env_var RCLONE_REMOTE_NAME '')"
+output=$(env -u TZ -u RCLONE_REMOTE_NAME \
+    VW_CONFIG_INSTALLED_ENV_FILE="$installed" DASHBOARD="$fixture/dashboard.sh" bash <<'PROBE'
+set -euo pipefail
+source "$DASHBOARD"
+_load_dashboard_config
+printf 'STATE=%s\nBACKUP=%s\nTZ=%s\nREMOTE=%s\nSECRETS=%s\n' \
+    "$STATE_DIR" "$BACKUP_DIR" "$TZ_DISPLAY" "$RCLONE_REMOTE_NAME" "$SECRETS_FILE"
+PROBE
+) || fail 'dashboard canonical configuration load failed'
 
-[[ "$STATE_DIR" == '/srv/vault=state' ]] \
-    || fail "PROJECT_STATE_DIR did not preserve an unquoted equals-containing value: $STATE_DIR"
-[[ "$BACKUP_DIR" == '/srv/backup=primary' ]] \
-    || fail "BACKUP_DIR did not strip one matching single-quote pair: $BACKUP_DIR"
-[[ "$TZ_DISPLAY" == 'America/Vancouver' ]] \
-    || fail "TZ did not use the last assignment and strip one matching double-quote pair: $TZ_DISPLAY"
-[[ "$RCLONE_REMOTE_NAME" == 'archive=nightly' ]] \
-    || fail "RCLONE_REMOTE_NAME did not preserve text after the first equals: $RCLONE_REMOTE_NAME"
-pass "dashboard consumers use exact-key, last-assignment, quoted, and equals parsing"
+[[ "$output" == *"STATE=$state"* ]] || fail "dashboard selected repository state: $output"
+[[ "$output" == *"BACKUP=$TMP/installed-backups"* ]] || fail "dashboard selected repository backup path: $output"
+[[ "$output" == *'TZ=America/Vancouver'* ]] || fail "dashboard selected repository timezone: $output"
+[[ "$output" == *'REMOTE=installed-remote'* ]] || fail "dashboard selected repository rclone remote: $output"
+[[ "$output" == *"SECRETS=$state/secrets/secrets.yaml"* ]] || fail "dashboard selected the wrong secrets path: $output"
+pass 'dashboard uses canonical installed configuration'
 
-cat >"$TMP/.env" <<'EOF_ENV'
-RCLONE_REMOTE_NAME=
-PROJECT_STATE_DIR="mismatched'
-EOF_ENV
-
-[[ "$(_read_env_var RCLONE_REMOTE_NAME fallback-remote)" == fallback-remote ]] \
-    || fail "empty dashboard value did not retain default behavior"
-[[ "$(_read_env_var BACKUP_DIR fallback-backups)" == fallback-backups ]] \
-    || fail "missing dashboard value did not use fallback"
-expected_mismatched="\"mismatched'"
-[[ "$(_read_env_var PROJECT_STATE_DIR fallback-state)" == "$expected_mismatched" ]] \
-    || fail "mismatched surrounding quotes were stripped"
-pass "dashboard empty, missing, and mismatched-quote behavior is preserved"
+missing_repo="$TMP/missing-repo"
+mkdir -p "$missing_repo"
+cp "$ROOT/dashboard.sh" "$ROOT/VERSION" "$missing_repo/"
+ln -s "$ROOT/lib" "$missing_repo/lib"
+sed -i 's/^main "$@"$/: # fixture: do not auto-run dashboard/' "$missing_repo/dashboard.sh"
+if env -u TZ -u RCLONE_REMOTE_NAME \
+    VW_CONFIG_INSTALLED_ENV_FILE="$TMP/does-not-exist.env" DASHBOARD="$missing_repo/dashboard.sh" bash <<'PROBE'
+set -euo pipefail
+source "$DASHBOARD"
+_load_dashboard_config
+PROBE
+then
+    fail 'dashboard succeeded without a canonical environment'
+fi
+pass 'dashboard fails when canonical configuration cannot be loaded'
 )
 
-check_dashboard_environment_parsing
+check_dashboard_configuration_behavior

@@ -75,51 +75,9 @@ _resolve_backup_base_dir() {
 }
 
 run_health_check() {
-_resolve_env_file() {
-    local candidates=(
-        "/etc/vaultwarden/vaultwarden.env"
-        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env"
-        "${PROJECT_ROOT}/.env"
-    )
-    local first_existing=""
-    for candidate in "${candidates[@]}"; do
-        if [[ -f "$candidate" ]]; then
-            [[ -n "$first_existing" ]] || first_existing="$candidate"
-            if [[ -r "$candidate" ]]; then
-                echo "$candidate"
-                return 0
-            fi
-        fi
-    done
-    if [[ -n "$first_existing" ]]; then
-        echo "$first_existing"
-        return 0
-    fi
-    echo ""
-    return 1
-}
-
-local ENV_FILE
-ENV_FILE="$(_resolve_env_file || true)"
-
-if [[ -n "${ENV_FILE}" ]]; then
-    if [[ ! -r "${ENV_FILE}" ]]; then
-        log_error "maintenance.sh health: '${ENV_FILE}' is not readable by $(id -un); refusing to continue with unset runtime config."
-        log_error "Run health through the root-operated path: sudo make health"
-        return 3
-    else
-        # load_env_file returns 1 when run as root and the file has permissions
-        # wider than 0600, such as 640 or 644. That is a warning, not a fatal
-        # error, so log it and continue to avoid silently aborting via set -e.
-        load_env_file "${ENV_FILE}" 2>/dev/null || \
-            log_warn "maintenance-health: env file '${ENV_FILE}' could not be loaded." \
-                 "If running as root, permissions must be 600 (run: chmod 600 '${ENV_FILE}')." \
-                 "Continuing with inherited environment only."
-    fi
-else
-    log_error "maintenance.sh health: no runtime env file found at '/etc/vaultwarden/vaultwarden.env', '${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env', or '${PROJECT_ROOT}/.env'."
+if ! load_project_environment; then
+    log_error "maintenance.sh health: canonical project environment could not be loaded."
     log_error "Run setup first, then use: sudo make health"
-    ENV_FILE="/etc/vaultwarden/vaultwarden.env"
     return 3
 fi
 
@@ -1049,25 +1007,11 @@ _check_backups() {
 _check_config() {
     log_info "Checking configuration..."
     local config_issues=()
-    if [[ ! -f "$ENV_FILE" ]]; then
-        config_issues+=("Missing env file: $ENV_FILE")
-    elif [[ ! -r "$ENV_FILE" ]]; then
-        config_issues+=("$ENV_FILE is not readable by $(id -un) — run health through sudo make health and verify root-owned runtime env permissions")
-    else
-        local env_mode
-        env_mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo "unknown")
-        if [[ "$env_mode" != "unknown" ]]; then
-            local env_mode_int
-            env_mode_int=$((8#$env_mode))
-            if (( (env_mode_int & 0177) != 0 )); then
-                config_issues+=("${ENV_FILE} permissions are ${env_mode}; must be 600 so root-mode health checks can read config safely")
-            fi
-        fi
-        local required_vars=("DOMAIN" "ADMIN_EMAIL")
-        for var in "${required_vars[@]}"; do
-            [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
-        done
-    fi
+    local required_vars=("DOMAIN" "ADMIN_EMAIL")
+    local var
+    for var in "${required_vars[@]}"; do
+        [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set in the canonical project environment")
+    done
     # cloudflare_zone_id lives in encrypted secrets.yaml — not in .env.
     # Check it is present and decryptable rather than testing an env var.
     local _cf_zone_id

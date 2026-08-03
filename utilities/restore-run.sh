@@ -30,44 +30,6 @@ _source_lib "lib/storage.sh"
 _source_lib "lib/runtime-permissions.sh"
 unset -f _source_lib
 
-# Require a real .env before any live restore so a fresh host never restores
-# with placeholder values from .env.example. Help and list modes stay exempt.
-_require_env_for_live_restore() {
-    local arg
-    for arg in "$@"; do
-        case "$arg" in
-            help|list) return 0 ;;
-        esac
-    done
-
-    local has_interactive=false has_inspect=false has_remote=false
-    for arg in "$@"; do
-        [[ "$arg" == "interactive" ]] && has_interactive=true
-        [[ "$arg" == "inspect" ]] && has_inspect=true
-        [[ "$arg" == "--remote"    ]] && has_remote=true
-    done
-    [[ "$has_interactive" == "true" && "$has_remote" == "true" ]] && return 0
-    [[ "$has_inspect" == "true" && "$has_remote" == "true" ]] && return 0
-
-    if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
-        echo "" >&2
-        echo "ERROR: .env not found." >&2
-        echo "" >&2
-        echo "  On a fresh server, copy the example file and fill in your values:" >&2
-        echo "" >&2
-        echo "    cp .env.example .env" >&2
-        echo "    nano .env   # set DOMAIN, CLOUDFLARE_*, PUID, PGID, etc." >&2
-        echo "" >&2
-        echo "  For a bare-metal disaster-recovery restore (no .env yet)," >&2
-        echo "  use the interactive subcommand with --remote so restore.sh can" >&2
-        echo "  download and restore your .env from the encrypted remote backup:" >&2
-        echo "" >&2
-        echo "    sudo ./restore.sh interactive --remote" >&2
-        echo "" >&2
-        exit 1
-    fi
-}
-
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
     local -a soft=(sops zstd rclone)
@@ -388,8 +350,6 @@ case "$ROTATE_AGE_KEY_POLICY" in
     ""|rotate|skip) ;;
     *) log_error "Invalid Age rotation policy: $ROTATE_AGE_KEY_POLICY"; exit 1 ;;
 esac
-
-_require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
 
 # Handle the list + --remote combination.
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
@@ -719,7 +679,7 @@ list_remote_backups() {
         echo ""
         printf '  ── %s backups (remote) ──\n' "${t^^}"
         for remote_file in "${type_files[@]}"; do
-            (( global_index++ ))
+            (( ++global_index ))
             _REMOTE_FILES+=("$remote_file")
             _REMOTE_TYPES+=("$t")
             local size_str="?" date_str="unknown"
@@ -873,7 +833,7 @@ list_all_backups_interactive() {
         printf '  ── %s backups ──\n' "${t^^}"
         local i=0
         for f in "${files[@]}"; do
-            (( i++ ))
+            (( ++i ))
             local size_str="?"
             local sz; sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
             if [[ "$sz" =~ ^[0-9]+$ ]]; then
@@ -2617,24 +2577,26 @@ restore_full() {
 
 main() {
     log_header "VaultWarden-OCI Restore Utility"
-
-    # Load .env unconditionally and early so every code path — including
-    # list subcommand and the rclone availability checks — can read config values
-    # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
-    load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
-    check_dependencies
-
-    # Resolve the backup storage root from .env using the same
-    # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path
-    # in this script is built from BACKUP_BASE_DIR, never from PROJECT_ROOT/backups.
-    local _early_state_dir; _early_state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
-    BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${_early_state_dir}/backups")"
-    log_info "Backup storage root: $BACKUP_BASE_DIR"
+    local config_status=0
 
     if [[ "$LIST_ONLY" == "true" ]]; then
+        load_env_file || config_status=$?
+        if (( config_status != 0 )); then
+            if (( config_status == 2 )) && [[ "$LIST_REMOTE" == "true" ]]; then
+                log_warn "No project environment found — using session-only remote recovery configuration."
+            else
+                log_error "Failed to load project environment for restore inventory."
+                exit 1
+            fi
+        fi
+        check_dependencies
+
+        local _early_state_dir
+        _early_state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+        BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${_early_state_dir}/backups")"
+        log_info "Backup storage root: $BACKUP_BASE_DIR"
+
         if [[ "$LIST_REMOTE" == "true" ]]; then
-            # Remote listing: if RCLONE_REMOTE_NAME is missing, prompt for it
-            # to support emergency listing without .env.
             if ! _rclone_is_available; then
                 if [[ "$RCLONE_NEEDS_INTERACTIVE_NAME" == "true" ]]; then
                     _prompt_rclone_remote_name || exit 1
@@ -2654,6 +2616,20 @@ main() {
     fi
 
     require_root "$@"
+    load_env_file || config_status=$?
+    if (( config_status != 0 )); then
+        if (( config_status == 2 )) \
+            && [[ "$USE_REMOTE" == "true" ]] \
+            && [[ "${_ORIGINAL_ARGS[0]}" == "interactive" || "${_ORIGINAL_ARGS[0]}" == "inspect" ]]; then
+            log_warn "No project environment found — operating in bootstrap/emergency-restore mode."
+            log_warn "PUID, PGID, and Age key will be prompted if not set."
+        else
+            log_error "Failed to load project environment."
+            exit 1
+        fi
+    fi
+
+    check_dependencies
     auto_fix_critical_permissions "$PROJECT_ROOT"
 
     if [[ "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]; then
@@ -2663,20 +2639,6 @@ main() {
             --specific-lock /run/lock/vaultwarden-restore.lock || exit $?
         operation_set_phase "prepare" "Preparing restore"
     fi
-
-    # Re-load .env strictly now that we are root (surfaces hard errors).
-    # When USE_REMOTE=true and .env is absent (emergency restore on a fresh
-    # server), treat the load failure as a warning rather than a hard exit —
-    # the operator is about to restore .env from the backup.
-    if ! load_env_file; then
-        if [[ "$USE_REMOTE" == "true" ]] && [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
-            log_warn ".env not found — operating in bootstrap/emergency-restore mode."
-            log_warn "PUID, PGID, and age key will be prompted if not set."
-        else
-            log_error "Failed to load .env"; exit 1
-        fi
-    fi
-    auto_fix_critical_permissions "$PROJECT_ROOT"
 
     # Fail closed if a block/data volume is configured.  --force --remote may
     # skip this check only for boot-volume/bootstrap mode where no block device
