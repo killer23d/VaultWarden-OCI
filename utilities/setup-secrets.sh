@@ -376,6 +376,7 @@ _cmd_configure() {
             _ss_write_capture "$plain_file" "$plaintext" "$label password" || return 1
             _ss_write_capture "$hash_file" "$generated_hash" "$label hash" || return 1
         fi
+
         printf '%s' "$generated_hash"
         plaintext=""
         generated_hash=""
@@ -838,6 +839,7 @@ HELP
         # Business logic that is too context-dependent to express as a predicate
         # (for example email-mode sentinel values) remains in the matching key
         # branch. The schema drives ordering, collection mode, and simple gates.
+
         while IFS= read -r _key; do
             [[ -z "$_key" ]] && continue
             local _collect_type
@@ -1389,6 +1391,7 @@ _cmd_breakglass() {
             | sed 's/^[^=]*=[[:space:]]*//' | tr -d '"'"'" | tr -d '[:space:]') || true
     fi
     SSH_PORT="${SSH_PORT:-22}"
+
     _bg_show_help() {
         cat << 'EOF'
 VaultWarden-OCI Break-Glass Admin Manager — Emergency Access
@@ -2388,6 +2391,7 @@ _ss_commit_ciphertext_transaction() {
 
     _ss_write_policy_file "$policy_stage" "$desired_csv" || { _ss_tx_fail 1; return 1; }
     _ss_stage_manifest_update "$desired_csv" "$manifest_stage" || { _ss_tx_fail 1; return 1; }
+
     if [[ "$mode" == "rekey" ]]; then
         cp "$final_file" "$ciphertext_stage" || { _ss_tx_fail 1; return 1; }
     else
