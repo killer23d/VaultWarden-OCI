@@ -3,7 +3,7 @@
 
 # Usage:
 #   sudo ./restore.sh latest [TYPE] [OPTIONS]
-#   ./restore.sh list [--remote]
+#   sudo ./restore.sh list [--remote]
 #   sudo ./restore.sh interactive [OPTIONS]
 
 set -euo pipefail
