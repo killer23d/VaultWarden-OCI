@@ -205,7 +205,7 @@ if MISSING_IMAGE=true run_startup "$repo" "$TMP/missing-image.out"; then
 fi
 grep -Fq 'Required local image is missing:' "$TMP/missing-image.out" \
   || fail 'missing-image failure was not reported'
-grep -Fq 'sudo ./maintenance.sh update' "$TMP/missing-image.out" \
+grep -Fq 'sudo ./maintenance.sh update --images' "$TMP/missing-image.out" \
   || fail 'missing-image failure lacked the focused image-maintenance command'
 ! grep -Fq 'DOCKER compose up' "$TMP/calls.log" \
   || fail 'startup attempted Compose up after image validation failed'
