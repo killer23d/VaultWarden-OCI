@@ -96,7 +96,7 @@ ROOT_ALLOWED_TARGETS := \
 	install-systemd remove-systemd systemd-status systemd-validate \
 	unban crowdsec-status crowdsec-alerts security-report smoke-test drill \
 	breakglass-create breakglass-status breakglass-remove \
-	uninstall uninstall-dry-run info diagnose prune
+	uninstall uninstall-dry-run diagnose prune
 
 ROOT_NEUTRAL_TARGETS := help help-all version
 
@@ -847,8 +847,7 @@ dry-run: ## Show what startup would do without executing
 ##@ Normal Admin + Dashboard Stable API — Information & Diagnostics
 # ===========================================================================
 
-info: ## Show deployment information (root required)
-	$(call require-root)
+info: ## Show deployment information
 	@echo "$(BLUE)VaultWarden-OCI Deployment Info:$(NC)"
 	@echo ""
 	@bash -c 'source lib/config.sh; load_project_environment >/dev/null || exit 1; \

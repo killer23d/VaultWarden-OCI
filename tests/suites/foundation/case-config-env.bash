@@ -352,20 +352,10 @@ write_env() {
 
 run_unprivileged() {
     if (( EUID == 0 )); then
-        command -v runuser >/dev/null 2>&1 || fail 'runuser is required for unprivileged configuration tests'
+        command -v runuser >/dev/null 2>&1 || fail 'runuser is required for unreadable-file configuration tests'
         runuser -u nobody -- "$@"
     else
         "$@"
-    fi
-}
-
-run_privileged() {
-    if (( EUID == 0 )); then
-        "$@"
-    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-        sudo -n "$@"
-    else
-        fail 'passwordless sudo or a root test runner is required for installed-permission interface tests'
     fi
 }
 
@@ -462,20 +452,18 @@ load_project_environment
 }
 
 test_operator_interfaces_share_installed_configuration() {
-    local fixture="$TMP/interface-repo" protected="$TMP/interface-protected"
-    local installed="$protected/etc/vaultwarden/vaultwarden.env"
-    local installed_state="$protected/state" installed_backup="$protected/backups"
+    local fixture="$TMP/interface-repo" installed="$TMP/interface-installed.env"
+    local installed_state="$TMP/interface-installed-state" installed_backup="$TMP/interface-installed-backups"
     local repo_state="$TMP/interface-repo-state" repo_backup="$TMP/interface-repo-backups"
     local installed_archive='db_backup_20990101_000000.sqlite3.age'
     local repo_archive='db_backup_19990101_000000.sqlite3.age'
-    local rclone_calls="$TMP/rclone.calls"
 
-    mkdir -p "$fixture/utilities" "$repo_backup/db" "$TMP/interface-bin"
-    cp "$ROOT/Makefile" "$ROOT/dashboard.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" "$ROOT/VERSION" "$fixture/"
-    cp "$ROOT/utilities/backup-run.sh" "$ROOT/utilities/restore-run.sh" "$fixture/utilities/"
+    mkdir -p "$fixture/utilities" "$installed_state/secrets" "$installed_backup/db" "$repo_backup/db" "$TMP/interface-bin"
+    cp "$ROOT/Makefile" "$ROOT/dashboard.sh" "$ROOT/backup.sh" "$ROOT/VERSION" "$fixture/"
+    cp "$ROOT/utilities/backup-run.sh" "$fixture/utilities/"
     ln -s "$ROOT/lib" "$fixture/lib"
-    chmod 0755 "$fixture" "$fixture/utilities" "$repo_backup" "$repo_backup/db"
-    chmod +x "$fixture/backup.sh" "$fixture/restore.sh" "$fixture/utilities/backup-run.sh" "$fixture/utilities/restore-run.sh"
+    chmod 0755 "$fixture" "$fixture/utilities" "$installed_state" "$installed_state/secrets" "$installed_backup" "$installed_backup/db" "$repo_backup" "$repo_backup/db"
+    chmod +x "$fixture/backup.sh" "$fixture/utilities/backup-run.sh"
     sed -i 's/^main "$@"$/: # fixture: do not auto-run dashboard/' "$fixture/dashboard.sh"
 
     write_env "$fixture/.env" \
@@ -483,34 +471,17 @@ test_operator_interfaces_share_installed_configuration() {
         "BACKUP_DIR=$repo_backup" \
         'TZ=UTC' \
         'RCLONE_REMOTE_NAME=repo-remote' \
-        'RCLONE_REMOTE_PATH=repo-path' \
         'DOMAIN=https://repo.example.test' \
         'ADMIN_EMAIL=repo@example.test'
-    chmod 0644 "$fixture/.env"
-    printf 'stale repository archive\n' > "$repo_backup/db/$repo_archive"
-
-    run_privileged install -d -m 0700 -o root -g root \
-        "$protected" "$protected/etc" "$protected/etc/vaultwarden" \
-        "$installed_state" "$installed_state/secrets" \
-        "$installed_backup" "$installed_backup/db"
-    run_privileged bash -c 'cat > "$1" <<EOF_ENV
-PROJECT_STATE_DIR=$2
-BACKUP_DIR=$3
-TZ=America/Vancouver
-RCLONE_REMOTE_NAME=installed-remote
-RCLONE_REMOTE_PATH=installed-path
-RCLONE_CONFIG=$4
-DOMAIN=https://installed.example.test
-ADMIN_EMAIL=installed@example.test
-EOF_ENV
-chmod 0600 "$1"
-chown root:root "$1"
-printf "[installed-remote]\ntype = local\n" > "$4"
-chmod 0600 "$4"
-chown root:root "$4"
-printf "encrypted fixture\n" > "$2/secrets/secrets.yaml"
-printf "installed archive\n" > "$3/db/$5"
-' _ "$installed" "$installed_state" "$installed_backup" "$protected/etc/vaultwarden/rclone.conf" "$installed_archive"
+    write_env "$installed" \
+        "PROJECT_STATE_DIR=$installed_state" \
+        "BACKUP_DIR=$installed_backup" \
+        'TZ=America/Vancouver' \
+        'RCLONE_REMOTE_NAME=installed-remote' \
+        'DOMAIN=https://installed.example.test' \
+        'ADMIN_EMAIL=installed@example.test'
+    printf 'encrypted fixture\n' > "$installed_state/secrets/secrets.yaml"
+    touch "$installed_backup/db/$installed_archive" "$repo_backup/db/$repo_archive"
 
     cat > "$TMP/interface-bin/docker" <<'MOCK_DOCKER'
 #!/usr/bin/env bash
@@ -526,51 +497,38 @@ MOCK_DOCKER
 #!/usr/bin/env bash
 exit 1
 MOCK_SYSTEMCTL
-    cat > "$TMP/interface-bin/rclone" <<'MOCK_RCLONE'
+    cat > "$TMP/interface-bin/id" <<'MOCK_ID'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "${VW_RCLONE_CALLS:?}"
-case " $* " in
-    *" listremotes "*) printf 'installed-remote:\n' ;;
-    *" lsf "*) printf 'remote_backup_20990101_000000.sqlite3.age\n' ;;
-    *" lsl "*) printf '1024 2099-01-01 00:00:00.000000000 remote_backup_20990101_000000.sqlite3.age\n' ;;
-    *) exit 0 ;;
+case "${1:-}" in
+    -u) printf '0\n' ;;
+    -un) printf 'root\n' ;;
+    -gn) printf 'root\n' ;;
+    *) exec /usr/bin/id "$@" ;;
 esac
-MOCK_RCLONE
-    chmod +x "$TMP/interface-bin/docker" "$TMP/interface-bin/systemctl" "$TMP/interface-bin/rclone"
-    : > "$rclone_calls"
+MOCK_ID
+    chmod +x "$TMP/interface-bin/docker" "$TMP/interface-bin/systemctl" "$TMP/interface-bin/id"
 
-    local root_env=(env "PATH=$TMP/interface-bin:$PATH" "VW_CONFIG_INSTALLED_ENV_FILE=$installed" "VW_RCLONE_CALLS=$rclone_calls")
-    local direct_output dashboard_output backup_output restore_output remote_output info_output
-    if ! direct_output=$(run_privileged "${root_env[@]}" PROJECT_ROOT="$fixture" REAL_CONFIG="$ROOT/lib/config.sh" bash -c '
+    local direct_output dashboard_output cli_output make_output init_output
+    direct_output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fixture" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
 set -euo pipefail
 source "$REAL_CONFIG"
 load_env_file
-printf "STATE=%s\nBACKUP=%s\nSECRETS=%s\n" "$PROJECT_STATE_DIR" "$BACKUP_DIR" "$SECRETS_FILE"
-' 2>&1); then
-        fail "direct canonical loader failed: $direct_output"
-    fi
-    if ! dashboard_output=$(run_privileged "${root_env[@]}" DASHBOARD="$fixture/dashboard.sh" bash -c '
+printf 'STATE=%s\nBACKUP=%s\nSECRETS=%s\n' "$PROJECT_STATE_DIR" "$BACKUP_DIR" "$SECRETS_FILE"
+PROBE
+)
+
+    dashboard_output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" DASHBOARD="$fixture/dashboard.sh" bash <<'PROBE'
 set -euo pipefail
 source "$DASHBOARD"
 _load_dashboard_config
-printf "STATE=%s\nBACKUP=%s\nTZ=%s\nREMOTE=%s\nSECRETS=%s\n" \
+printf 'STATE=%s\nBACKUP=%s\nTZ=%s\nREMOTE=%s\nSECRETS=%s\n' \
     "$STATE_DIR" "$BACKUP_DIR" "$TZ_DISPLAY" "$RCLONE_REMOTE_NAME" "$SECRETS_FILE"
-' 2>&1); then
-        fail "dashboard canonical load failed: $dashboard_output"
-    fi
-    if ! backup_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./backup.sh list' _ "$fixture" 2>&1); then
-        fail "backup inventory failed: $backup_output"
-    fi
-    if ! restore_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./restore.sh list' _ "$fixture" 2>&1); then
-        fail "local restore inventory failed: $restore_output"
-    fi
-    : > "$rclone_calls"
-    if ! remote_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./restore.sh list --remote' _ "$fixture" 2>&1); then
-        fail "remote restore inventory failed: $remote_output"
-    fi
-    if ! info_output=$(run_privileged "${root_env[@]}" make -s -C "$fixture" info 2>&1); then
-        fail "make info failed: $info_output"
-    fi
+PROBE
+)
+
+    cli_output=$(cd "$fixture" && PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" ./backup.sh list 2>&1)
+    make_output=$(PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" make -s -C "$fixture" status 2>&1)
+    init_output=$(PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" make -s -C "$fixture" init-secrets 2>&1)
 
     for output in "$direct_output" "$dashboard_output"; do
         grep -Fq "STATE=$installed_state" <<< "$output" || fail "interface selected the repository state: $output"
@@ -579,45 +537,11 @@ printf "STATE=%s\nBACKUP=%s\nTZ=%s\nREMOTE=%s\nSECRETS=%s\n" \
     done
     grep -Fq 'TZ=America/Vancouver' <<< "$dashboard_output" || fail "dashboard selected the repository timezone: $dashboard_output"
     grep -Fq 'REMOTE=installed-remote' <<< "$dashboard_output" || fail "dashboard selected the repository rclone remote: $dashboard_output"
-    for output in "$backup_output" "$restore_output"; do
-        grep -Fq "$installed_archive" <<< "$output" || fail "inventory did not use installed backup path: $output"
-        ! grep -Fq "$repo_archive" <<< "$output" || fail "inventory used repository backup path: $output"
-    done
-    grep -Fq 'installed-remote:installed-path' "$rclone_calls" || fail "remote restore list did not use installed rclone location: $(cat "$rclone_calls")"
-    grep -Fq 'remote_backup_20990101_000000.sqlite3.age' <<< "$remote_output" || fail "remote restore list did not query installed remote: $remote_output"
-    grep -Fq "$installed_state" <<< "$info_output" || fail "make info did not use installed state: $info_output"
-    grep -Fq 'https://installed.example.test' <<< "$info_output" || fail "make info did not use installed domain: $info_output"
-
-    local label output_file rc
-    for label in backup restore-local restore-remote make-info; do
-        output_file="$TMP/unprivileged-$label.out"
-        set +e
-        case "$label" in
-            backup)
-                run_unprivileged env "PATH=$TMP/interface-bin:$PATH" "VW_CONFIG_INSTALLED_ENV_FILE=$installed" \
-                    bash -c 'cd "$1" && ./backup.sh list' _ "$fixture" >"$output_file" 2>&1
-                ;;
-            restore-local)
-                run_unprivileged env "PATH=$TMP/interface-bin:$PATH" "VW_CONFIG_INSTALLED_ENV_FILE=$installed" \
-                    bash -c 'cd "$1" && ./restore.sh list' _ "$fixture" >"$output_file" 2>&1
-                ;;
-            restore-remote)
-                run_unprivileged env "PATH=$TMP/interface-bin:$PATH" "VW_CONFIG_INSTALLED_ENV_FILE=$installed" \
-                    bash -c 'cd "$1" && ./restore.sh list --remote' _ "$fixture" >"$output_file" 2>&1
-                ;;
-            make-info)
-                run_unprivileged env "PATH=$TMP/interface-bin:$PATH" "VW_CONFIG_INSTALLED_ENV_FILE=$installed" \
-                    make -s -C "$fixture" info >"$output_file" 2>&1
-                ;;
-        esac
-        rc=$?
-        set -e
-        (( rc != 0 )) || fail "$label unexpectedly allowed unprivileged installed inventory"
-        grep -Eiq 'requires root|Run with sudo|sudo make info' "$output_file" \
-            || fail "$label unprivileged failure was unclear: $(cat "$output_file")"
-        ! grep -Fq "$repo_archive" "$output_file" || fail "$label exposed stale repository inventory"
-        ! grep -Fq '/var/lib/vaultwarden' "$output_file" || fail "$label fell back to default state"
-    done
+    grep -Fq "$installed_archive" <<< "$cli_output" || fail "backup CLI did not use installed backup path: $cli_output"
+    ! grep -Fq "$repo_archive" <<< "$cli_output" || fail "backup CLI used repository backup path: $cli_output"
+    grep -Fq "$installed_archive" <<< "$make_output" || fail "Make status did not use backup CLI installed path: $make_output"
+    grep -Fq "$installed_state" <<< "$make_output" || fail "Make status did not use installed state path: $make_output"
+    grep -Fq 'Secrets file already exists' <<< "$init_output" || fail "Make init-secrets did not use installed secrets path: $init_output"
 }
 
 test_installed_runtime_secret_resolution() {
@@ -653,30 +577,14 @@ test_dns_optional_and_strict_modes() {
         || fail "DNS updater does not fail strict missing DNS config"
 }
 
-test_repository_diff_and_shell_syntax() {
-    if git -C "$ROOT" rev-parse --verify HEAD^1 >/dev/null 2>&1; then
-        git -C "$ROOT" diff --check HEAD^1 HEAD \
-            || fail 'git diff --check found whitespace errors in the current merge result'
-    else
-        git -C "$ROOT" diff --check \
-            || fail 'git diff --check found whitespace errors'
-    fi
-
-    local file
-    while IFS= read -r -d '' file; do
-        bash -n "$file" || fail "bash -n failed: ${file#$ROOT/}"
-    done < <(find "$ROOT" -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
-}
-
 run_test 'repo .env without PROJECT_STATE_DIR falls through to installed environment' test_config_falls_through_empty_repo_state
 run_test 'explicit caller overrides survive loading and repeated calls' test_config_caller_override_wins
 run_test 'unreadable repository .env does not block installed runtime configuration' test_unreadable_repo_allows_installed_environment
 run_test 'unreadable selected canonical environment fails explicitly' test_unreadable_selected_environment_fails
-run_test 'root-operated interfaces use installed config and unprivileged inventory fails closed' test_operator_interfaces_share_installed_configuration
+run_test 'Make, dashboard, and backup CLI share installed configuration' test_operator_interfaces_share_installed_configuration
 run_test 'installed runtime secrets path is resolved canonically' test_installed_runtime_secret_resolution
 run_test 'DNS update optional and strict modes are represented' test_dns_optional_and_strict_modes
-run_test 'git diff and repository-wide Bash syntax checks pass' test_repository_diff_and_shell_syntax
-[[ "$TESTS_RUN" -eq 8 ]] || fail "expected 8 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )

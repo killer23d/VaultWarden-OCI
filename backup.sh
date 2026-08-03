@@ -3,7 +3,7 @@
 
 # Usage:
 #   sudo ./backup.sh run [TYPE] [OPTIONS]
-#   sudo ./backup.sh list
+#   ./backup.sh list
 #   sudo ./backup.sh verify
 #   sudo ./backup.sh rotate [OPTIONS]
 

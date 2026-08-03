@@ -34,6 +34,75 @@ if _validate_full_archive_payload "$tmp/invalid.tar" "$tmp/state" "$tmp/project"
   fail "full archive accepted a recovery artifact"
 fi
 
+# A genuinely fresh host may use explicit process overrides for remote inventory.
+mock_bin="$tmp/bin"
+mkdir -p "$mock_bin" "$tmp/home/.config/rclone" "$tmp/missing-state"
+cat > "$mock_bin/rclone" <<'EOF_RCLONE'
+#!/usr/bin/env bash
+case "${1:-}" in
+  lsf)
+    [[ "${*: -1}" == *'/db' ]] && printf 'db_backup_20260803_000000.sqlite3.age\n'
+    ;;
+  lsl)
+    printf '123 2026-08-03 00:00:00.000000000 db_backup_20260803_000000.sqlite3.age\n'
+    ;;
+  listremotes)
+    printf 'testremote:\n'
+    ;;
+esac
+EOF_RCLONE
+chmod 0755 "$mock_bin/rclone"
+printf '[testremote]\ntype = local\n' > "$tmp/home/.config/rclone/rclone.conf"
+chmod 0600 "$tmp/home/.config/rclone/rclone.conf"
+
+fresh_output="$tmp/fresh-list.out"
+if ! env \
+  PATH="$mock_bin:$PATH" \
+  HOME="$tmp/home" \
+  PROJECT_STATE_DIR="$tmp/missing-state" \
+  VW_CONFIG_INSTALLED_ENV_FILE="$tmp/missing-installed.env" \
+  RCLONE_REMOTE_NAME=testremote \
+  RCLONE_REMOTE_PATH=testpath \
+  RCLONE_CONFIG="$tmp/home/.config/rclone/rclone.conf" \
+  bash ./restore.sh list --remote >"$fresh_output" 2>&1; then
+  cat "$fresh_output" >&2
+  fail "fresh-host remote inventory rejected explicit session configuration"
+fi
+grep -Fq 'testremote:testpath/db/db_backup_20260803_000000.sqlite3.age' "$fresh_output" \
+  || { cat "$fresh_output" >&2; fail "fresh-host remote inventory did not use session configuration"; }
+pass "fresh-host remote inventory accepts explicit session configuration"
+
+# A present-but-invalid installed environment must fail before restore work begins.
+invalid_env="$tmp/invalid-installed.env"
+printf 'PROJECT_STATE_DIR=%s\n' "$tmp/installed-state" > "$invalid_env"
+chmod 0644 "$invalid_env"
+invalid_output="$tmp/invalid-restore.out"
+ops_dir="$tmp/operations"
+ops_lock="$tmp/operations.lock"
+run_root() {
+  if (( EUID == 0 )); then
+    "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+if run_root env \
+  PATH="$mock_bin:$PATH" \
+  HOME="$tmp/home" \
+  PROJECT_STATE_DIR="$tmp/missing-state" \
+  VW_CONFIG_INSTALLED_ENV_FILE="$invalid_env" \
+  VW_OPERATIONS_STATE_DIR="$ops_dir" \
+  VW_OPERATIONS_LOCK="$ops_lock" \
+  bash ./restore.sh interactive --remote --force >"$invalid_output" 2>&1; then
+  cat "$invalid_output" >&2
+  fail "restore accepted an insecure installed environment"
+fi
+grep -Eiq 'insecure permissions|failed to load project environment' "$invalid_output" \
+  || { cat "$invalid_output" >&2; fail "invalid installed environment failure was not actionable"; }
+[[ ! -e "$ops_dir" && ! -e "$ops_lock" ]] \
+  || fail "restore started operation work before rejecting invalid installed configuration"
+pass "invalid installed environment fails before restore work"
+
 # Optional real 7-Zip smoke test when the distro tool is available.
 tool=""
 if command -v 7z >/dev/null 2>&1; then
