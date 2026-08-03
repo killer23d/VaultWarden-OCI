@@ -5,6 +5,22 @@ cd "$ROOT"
 fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS %s\n' "$*"; }
 
+# Parse every tracked shell entry point separately from ShellCheck.
+while IFS= read -r -d '' shell_file; do
+  bash -n "$shell_file" || fail "bash syntax validation failed: $shell_file"
+done < <(git ls-files -z '*.sh' '*.bash')
+pass "repository-wide bash -n"
+
+# Check the exact pull-request diff in Actions; check the working tree locally.
+if [[ -n "${GITHUB_EVENT_PATH:-}" && -r "$GITHUB_EVENT_PATH" ]]; then
+  base_sha="$(python3 -c 'import json, os; print(json.load(open(os.environ["GITHUB_EVENT_PATH"]))["pull_request"]["base"]["sha"])')"
+  git fetch --no-tags --depth=1 origin "$base_sha" >/dev/null
+  git diff --check "$base_sha" HEAD
+else
+  git diff --check
+fi
+pass "git diff --check"
+
 # Integration and systemd contracts.
 grep -Fq 'cleanup_expired_recovery_kits "$DRY_RUN" || recovery_cleanup_result=$?' \
   utilities/maintenance-run.sh || fail "maintenance does not invoke recovery fallback cleanup"
@@ -195,6 +211,41 @@ else
   printf 'SKIP root-owned recovery fixture: passwordless sudo unavailable\n'
 fi
 
+# Direct configure uses its installed TERM trap to clean the owned workspace.
+direct_workspace_helpers="$(
+  sed -n \
+    '/^unset TMP_WORKDIR$/,/^trap '\''_setup_secrets_on_signal 143'\'' TERM$/p' \
+    utilities/setup-secrets.sh
+)"
+[[ -n "$direct_workspace_helpers" ]] \
+  || fail "direct sensitive-workspace helpers could not be extracted"
+direct_signal_fixture="$(mktemp -d)"
+direct_signal_marker="$direct_signal_fixture/workspace.path"
+set +e
+DIRECT_WORKSPACE_HELPERS="$direct_workspace_helpers" \
+DIRECT_SIGNAL_MARKER="$direct_signal_marker" \
+PROJECT_ROOT="$direct_signal_fixture" \
+bash -s <<'DIRECT_SIGNAL_TEST' >/dev/null 2>&1
+set -euo pipefail
+log_warn() { printf 'WARN %s\n' "$*" >&2; }
+cleanup_secrets_environment() { return 0; }
+operation_release() { return 0; }
+eval "$DIRECT_WORKSPACE_HELPERS"
+_setup_secrets_create_workdir
+printf '%s' "$SETUP_SECRETS_OWNED_WORKDIR" > "$DIRECT_SIGNAL_MARKER"
+printf '%s' 'DIRECT-SIGNAL-SECRET' > "$SETUP_SECRETS_OWNED_WORKDIR/capture"
+kill -TERM "$BASHPID"
+exit 99
+DIRECT_SIGNAL_TEST
+direct_signal_rc=$?
+set -e
+direct_signal_workspace="$(cat "$direct_signal_marker")"
+[[ "$direct_signal_rc" == 143 ]] \
+  || fail "direct TERM path returned $direct_signal_rc instead of 143"
+[[ ! -e "$direct_signal_workspace" ]] \
+  || fail "direct TERM path left the sensitive workspace behind"
+/bin/rm -rf -- "$direct_signal_fixture"
+
 # Top-level setup creates one private workspace only when credential capture starts.
 setup_workspace_helpers="$(
   sed -n \
@@ -253,13 +304,25 @@ unset -f rm
 /bin/rm -rf -- "$blocked_workspace"
 unset TMP_WORKDIR VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
 
-_setup_create_sensitive_workspace
-signal_workspace="$TMP_WORKDIR"
-printf '%s' 'TOP-LEVEL-SIGNAL-SECRET' > "$VW_ADMIN_PLAIN_FILE"
+signal_marker="$fixture/top-level-signal-workspace.path"
 set +e
-( _setup_on_signal 143 ) >/dev/null 2>&1
+SETUP_WORKSPACE_HELPERS="$SETUP_WORKSPACE_HELPERS" \
+TOP_LEVEL_SIGNAL_MARKER="$signal_marker" \
+TMPDIR="$TMPDIR" \
+bash -s <<'TOP_LEVEL_SIGNAL_TEST' >/dev/null 2>&1
+set -euo pipefail
+log_warn() { printf 'WARN %s\n' "$*" >&2; }
+operation_release() { return 0; }
+eval "$SETUP_WORKSPACE_HELPERS"
+_setup_create_sensitive_workspace
+printf '%s' "$TMP_WORKDIR" > "$TOP_LEVEL_SIGNAL_MARKER"
+printf '%s' 'TOP-LEVEL-SIGNAL-SECRET' > "$VW_ADMIN_PLAIN_FILE"
+kill -TERM "$BASHPID"
+exit 99
+TOP_LEVEL_SIGNAL_TEST
 signal_rc=$?
 set -e
+signal_workspace="$(cat "$signal_marker")"
 [[ "$signal_rc" == 143 ]]
 [[ ! -e "$signal_workspace" ]]
 /bin/rm -rf -- "$fixture"
