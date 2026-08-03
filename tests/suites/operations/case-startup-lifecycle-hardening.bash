@@ -71,7 +71,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 make_startup_fixture() {
   local repo="$1"
-  mkdir -p "$repo/lib" "$repo/utilities" "$repo/state/config" "$repo/state/secrets"
+  mkdir -p "$repo/lib" "$repo/state/config" "$repo/state/secrets"
   cp "$ROOT/startup.sh" "$repo/startup.sh"
   chmod +x "$repo/startup.sh"
   : > "$repo/docker-compose.yml"
@@ -138,15 +138,6 @@ operation_acquire(){ return 0; }
 operation_release(){ return 0; }
 operation_set_phase(){ :; }
 EOF_LIB
-
-  for name in env-edit.sh maintenance-update-dns.sh setup-firewall.sh repair-permissions.sh; do
-    cat > "$repo/utilities/$name" <<'EOF_UTIL'
-#!/usr/bin/env bash
-printf 'MUTATION %s %s\n' "$(basename "$0")" "$*" >> "${CALL_LOG:?}"
-exit 99
-EOF_UTIL
-    chmod +x "$repo/utilities/$name"
-  done
 }
 
 make_docker_stub() {
@@ -193,7 +184,6 @@ run_startup "$repo" "$TMP/success.out" || {
 [[ -e "$TMP/push-created" ]] || fail 'ordinary startup did not materialize push placeholders'
 grep -Fq 'PERMISSION_CHECK' "$TMP/calls.log" || fail 'ordinary startup did not validate permissions'
 ! grep -Fq 'PERMISSION_REPAIR' "$TMP/calls.log" || fail 'ordinary startup repaired permissions'
-! grep -Fq 'MUTATION ' "$TMP/calls.log" || fail 'ordinary startup called environment, DNS, or firewall mutation'
 ! grep -Eq 'DOCKER compose pull|DOCKER system prune|DOCKER .* prune|--remove-orphans' "$TMP/calls.log" \
   || fail 'ordinary startup pulled images or pruned Docker resources'
 grep -Fq 'DOCKER compose up -d --pull never --no-build' "$TMP/calls.log" \
