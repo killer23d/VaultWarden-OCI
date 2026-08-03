@@ -23,108 +23,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# Establish setup-owned cleanup custody before any workspace is created.
 unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
-unset TMP_WORKDIR SETUP_TEMP_ROOT SETUP_OWNED_WORKDIR SETUP_OWNED_WORKDIR_ID
-unset SETUP_BOOTSTRAP_CLEANUP_ACTIVE SETUP_BOOTSTRAP_CLEANUP_RUNNING
-SETUP_BOOTSTRAP_CLEANUP_ACTIVE=true
-SETUP_BOOTSTRAP_CLEANUP_RUNNING=false
-
-_setup_bootstrap_cleanup_warn() {
-    printf 'WARNING: %s\n' "$1" >&2
-}
-_setup_bootstrap_remove_workspace() {
-    local original_status="${1:-0}" cleanup_failed=0
-    local candidate="${TMP_WORKDIR:-}" parent="" base=""
-    if [[ "${SETUP_BOOTSTRAP_CLEANUP_ACTIVE:-false}" != "true" ||
-          "${SETUP_BOOTSTRAP_CLEANUP_RUNNING:-false}" == "true" ]]; then
-        return "$original_status"
-    fi
-    SETUP_BOOTSTRAP_CLEANUP_RUNNING=true
-    { set +x; } 2>/dev/null
-    if [[ -z "$candidate" ]]; then
-        SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
-    else
-        parent="${candidate%/*}"
-        base="${candidate##*/}"
-        if [[ "$candidate" != /* ||
-              "$parent" != "${SETUP_TEMP_ROOT:-}" ||
-              ! "$base" =~ ^vw_setup\.[[:alnum:]]{10}$ ||
-              -L "$candidate" || ! -d "$candidate" ]]; then
-            _setup_bootstrap_cleanup_warn "Initialization cleanup refused an unvalidated setup workspace."
-            cleanup_failed=1
-        elif ! rmdir -- "$candidate" 2>/dev/null; then
-            _setup_bootstrap_cleanup_warn "Failed to remove the validated empty setup workspace during initialization cleanup."
-            cleanup_failed=1
-        else
-            SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
-            unset TMP_WORKDIR
-        fi
-    fi
-    SETUP_BOOTSTRAP_CLEANUP_RUNNING=false
-    if (( original_status != 0 )); then
-        return "$original_status"
-    fi
-    (( cleanup_failed == 0 )) || return 1
-    return 0
-}
-_setup_bootstrap_on_exit() {
-    local original_status="$?" final_status=0
-    trap - EXIT HUP INT TERM
-    _setup_bootstrap_remove_workspace "$original_status" || final_status=$?
-    exit "$final_status"
-}
-_setup_bootstrap_on_signal() {
-    local signal_status="$1"
-    trap - EXIT HUP INT TERM
-    _setup_bootstrap_remove_workspace "$signal_status" || true
-    exit "$signal_status"
-}
-_setup_initialization_failed() {
-    local status="$1" message="$2"
-    printf 'ERROR: %s\n' "$message" >&2
-    exit "$status"
-}
-
-# Bootstrap traps are active before mktemp; an empty TMP_WORKDIR is a no-op.
-trap '_setup_bootstrap_on_exit' EXIT
-trap '_setup_bootstrap_on_signal 129' HUP
-trap '_setup_bootstrap_on_signal 130' INT
-trap '_setup_bootstrap_on_signal 143' TERM
-
-SETUP_TEMP_ROOT="$(realpath -e -- "${TMPDIR:-/tmp}" 2>/dev/null)" || {
-    setup_init_status=$?
-    _setup_initialization_failed "$setup_init_status" "Failed to resolve the temporary root"
-}
-if [[ ! -d "$SETUP_TEMP_ROOT" || -L "${TMPDIR:-/tmp}" ]]; then
-    _setup_initialization_failed 1 "Temporary root must be a real directory"
-fi
-case "$SETUP_TEMP_ROOT" in
-    /|/etc|/root|"$PROJECT_ROOT")
-        _setup_initialization_failed 1 "Refusing unsafe temporary root"
-        ;;
-esac
-old_umask=$(umask)
-umask 077
-TMP_WORKDIR="$(mktemp -d "${SETUP_TEMP_ROOT}/vw_setup.XXXXXXXXXX")" || {
-    setup_init_status=$?
-    umask "$old_umask" || true
-    _setup_initialization_failed "$setup_init_status" "Failed to create secure temporary directory"
-}
-umask "$old_umask"
-SETUP_OWNED_WORKDIR="$(realpath -e -- "$TMP_WORKDIR" 2>/dev/null)" || {
-    setup_init_status=$?
-    _setup_initialization_failed "$setup_init_status" "Failed to resolve secure temporary directory"
-}
-SETUP_OWNED_WORKDIR_ID="$(stat -c '%d:%i' -- "$SETUP_OWNED_WORKDIR" 2>/dev/null)" || {
-    setup_init_status=$?
-    _setup_initialization_failed "$setup_init_status" "Failed to record secure temporary directory identity"
-}
-SETUP_SENSITIVE_CLEANUP_ACTIVE=true
-SETUP_SENSITIVE_CLEANUP_RUNNING=false
-SETUP_SENSITIVE_CLEANUP_FAILED=false
+unset TMP_WORKDIR
 SETUP_OPERATION_GUARD_HELD=false
-# Top-level setup sensitive cleanup lifecycle.
+
 _setup_cleanup_warn() {
     local message="$1"
     if declare -F log_warn >/dev/null 2>&1; then
@@ -133,145 +35,51 @@ _setup_cleanup_warn() {
         printf 'WARNING: %s\n' "$message" >&2
     fi
 }
-_setup_validate_workspace() {
-    local candidate="${1:-}" require_exists="${2:-true}"
-    local resolved parent base identity
-    [[ -n "$candidate" && "$candidate" == /* ]] || return 1
-    resolved="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
-    [[ -n "${SETUP_OWNED_WORKDIR:-}" && "$resolved" == "$SETUP_OWNED_WORKDIR" ]] || return 1
-    parent="$(dirname -- "$resolved")" || return 1
-    base="$(basename -- "$resolved")" || return 1
-    [[ "$parent" == "${SETUP_TEMP_ROOT:-}" ]] || return 1
-    [[ "$base" =~ ^vw_setup\.[[:alnum:]]{8,}$ ]] || return 1
-    case "$resolved" in
-        /|/tmp|/var/tmp|/etc|/root|"${PROJECT_ROOT:-}") return 1 ;;
-    esac
-    if [[ -e "$resolved" || -L "$resolved" ]]; then
-        [[ ! -L "$resolved" && -d "$resolved" ]] || return 1
-        identity="$(stat -c '%d:%i' -- "$resolved" 2>/dev/null)" || return 1
-        [[ -n "${SETUP_OWNED_WORKDIR_ID:-}" && "$identity" == "$SETUP_OWNED_WORKDIR_ID" ]] || return 1
-    elif [[ "$require_exists" == "true" ]]; then
-        return 1
-    fi
-    printf '%s\n' "$resolved"
+
+_setup_create_sensitive_workspace() {
+    local old_umask create_status
+
+    [[ -z "${TMP_WORKDIR:-}" ]] || return 0
+
+    old_umask="$(umask)"
+    umask 077
+    TMP_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/vw_setup.XXXXXXXXXX")" || {
+        create_status=$?
+        umask "$old_umask" || true
+        return "$create_status"
+    }
+    umask "$old_umask"
+
+    export VW_ADMIN_PLAIN_FILE="${TMP_WORKDIR}/vw_admin_plain"
+    export VW_ADMIN_HASH_FILE="${TMP_WORKDIR}/vw_admin_hash"
+    export CADDY_PLAIN_FILE="${TMP_WORKDIR}/caddy_plain"
+    export CADDY_HASH_FILE="${TMP_WORKDIR}/caddy_hash"
 }
-_setup_validate_sensitive_file() {
-    local candidate="${1:-}" workspace="${2:-}" require_exists="${3:-false}"
-    local resolved parent base metadata
-    [[ -n "$candidate" && "$candidate" == /* ]] || return 1
-    workspace="$(_setup_validate_workspace "$workspace" true)" || return 1
-    resolved="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
-    parent="$(dirname -- "$resolved")" || return 1
-    base="$(basename -- "$resolved")" || return 1
-    [[ "$parent" == "$workspace" ]] || return 1
-    case "$base" in
-        vw_admin_plain|vw_admin_hash|caddy_plain|caddy_hash) ;;
-        *) return 1 ;;
-    esac
-    [[ ! -L "$candidate" ]] || return 1
-    if [[ -e "$candidate" ]]; then
-        [[ -f "$candidate" ]] || return 1
-        metadata="$(stat -c '%u:%h' -- "$candidate" 2>/dev/null)" || return 1
-        [[ "$metadata" == "${EUID}:1" ]] || return 1
-    elif [[ "$require_exists" == "true" ]]; then
-        return 1
-    fi
-    printf '%s\n' "$resolved"
-}
-_setup_manual_cleanup() {
-    local flag="$1" target="$2" workspace="${3:-}" validated quoted
-    case "$flag" in
-        -f)
-            validated="$(_setup_validate_sensitive_file "$target" "$workspace" true)" || return 1
-            ;;
-        -rf)
-            validated="$(_setup_validate_workspace "$target" true)" || return 1
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-    printf -v quoted '%q' "$validated"
-    _setup_cleanup_warn "Residual validated setup-owned sensitive path: $validated"
-    _setup_cleanup_warn "Manual cleanup: sudo rm $flag -- $quoted"
-}
+
 _setup_remove_sensitive_workspace() {
-    local original_status="${1:-0}" cleanup_failed=0 path validated_path
-    local workspace="" current_workdir="" workspace_cleanup_allowed=true
-    local -a sensitive_paths=(
-        "${VW_ADMIN_PLAIN_FILE:-}"
-        "${VW_ADMIN_HASH_FILE:-}"
-        "${CADDY_PLAIN_FILE:-}"
-        "${CADDY_HASH_FILE:-}"
-    )
-    if [[ "${SETUP_SENSITIVE_CLEANUP_RUNNING:-false}" == "true" ]]; then
-        return "$original_status"
-    fi
-    if [[ "${SETUP_SENSITIVE_CLEANUP_ACTIVE:-false}" != "true" ]]; then
-        if (( original_status == 0 )) && [[ "${SETUP_SENSITIVE_CLEANUP_FAILED:-false}" == "true" ]]; then
-            return 1
-        fi
-        return "$original_status"
-    fi
-    SETUP_SENSITIVE_CLEANUP_RUNNING=true
+    local original_status="${1:-0}" cleanup_status=0
+    local workspace="${TMP_WORKDIR:-}"
+
     { set +x; } 2>/dev/null
-    if ! workspace="$(_setup_validate_workspace "${SETUP_OWNED_WORKDIR:-}" true)"; then
-        _setup_cleanup_warn "Automatic setup cleanup was refused because workspace custody could not be validated; inspect it manually."
-        cleanup_failed=1
-        workspace_cleanup_allowed=false
-    fi
-    if [[ -n "${TMP_WORKDIR:-}" ]]; then
-        current_workdir="$(realpath -m -- "$TMP_WORKDIR" 2>/dev/null || true)"
-        if [[ -z "$workspace" || "$current_workdir" != "$workspace" ]]; then
-            _setup_cleanup_warn "Ignoring an untrusted current temporary-workspace value; no destructive command will be suggested."
-            cleanup_failed=1
-        fi
-    fi
     if [[ -n "$workspace" ]]; then
-        for path in "${sensitive_paths[@]}"; do
-            [[ -n "$path" ]] || continue
-            if ! validated_path="$(_setup_validate_sensitive_file "$path" "$workspace" false)"; then
-                _setup_cleanup_warn "Automatic cleanup refused an out-of-custody or unsafe sensitive-file candidate; inspect it manually."
-                cleanup_failed=1
-                workspace_cleanup_allowed=false
-                continue
-            fi
-            if [[ ! -e "$validated_path" && ! -L "$validated_path" ]]; then
-                continue
-            fi
-            if ! rm -f -- "$validated_path" 2>/dev/null || [[ -e "$validated_path" || -L "$validated_path" ]]; then
-                _setup_cleanup_warn "Failed to remove a validated setup-owned sensitive temporary file."
-                _setup_manual_cleanup "-f" "$validated_path" "$workspace" || true
-                cleanup_failed=1
-                workspace_cleanup_allowed=false
-            fi
-        done
-    fi
-    if [[ -n "$workspace" && "$workspace_cleanup_allowed" == "true" ]]; then
-        if ! workspace="$(_setup_validate_workspace "$workspace" true)"; then
-            _setup_cleanup_warn "Automatic setup workspace cleanup was refused after custody changed; inspect it manually."
-            cleanup_failed=1
-        elif ! rm -rf -- "$workspace" 2>/dev/null || [[ -e "$workspace" || -L "$workspace" ]]; then
-            _setup_cleanup_warn "Failed to remove the validated setup-owned sensitive temporary workspace."
-            _setup_manual_cleanup "-rf" "$workspace" || true
-            cleanup_failed=1
+        if rm -rf -- "$workspace"; then
+            unset TMP_WORKDIR
+            unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
+        else
+            cleanup_status=$?
+            _setup_cleanup_warn "Failed to remove the setup sensitive workspace: $workspace"
         fi
     fi
-    if (( cleanup_failed == 0 )); then
-        SETUP_SENSITIVE_CLEANUP_ACTIVE=false
-        unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
-    else
-        SETUP_SENSITIVE_CLEANUP_FAILED=true
-    fi
-    SETUP_SENSITIVE_CLEANUP_RUNNING=false
+
     if (( original_status != 0 )); then
         return "$original_status"
     fi
-    (( cleanup_failed == 0 )) || return 1
-    return 0
+    return "$cleanup_status"
 }
+
 _setup_finalize() {
     local original_status="$1" release_status=0 cleanup_status=0
+
     { set +x; } 2>/dev/null
     if [[ "${SETUP_OPERATION_GUARD_HELD:-false}" == "true" ]] &&
        declare -F operation_release >/dev/null 2>&1; then
@@ -279,6 +87,7 @@ _setup_finalize() {
         SETUP_OPERATION_GUARD_HELD=false
     fi
     _setup_remove_sensitive_workspace "$original_status" || cleanup_status=$?
+
     if (( original_status != 0 )); then
         return "$original_status"
     fi
@@ -286,25 +95,27 @@ _setup_finalize() {
     (( release_status == 0 )) || return "$release_status"
     return 0
 }
+
 _setup_on_exit() {
     local original_status="$1" final_status=0
+
     trap - EXIT INT HUP TERM
     _setup_finalize "$original_status" || final_status=$?
     exit "$final_status"
 }
+
 _setup_on_signal() {
     local signal_status="$1"
+
     trap - EXIT INT HUP TERM
     _setup_finalize "$signal_status" || true
     exit "$signal_status"
 }
-# End top-level setup sensitive cleanup lifecycle.
+
 trap '_setup_on_exit $?' EXIT
 trap '_setup_on_signal 129' HUP
 trap '_setup_on_signal 130' INT
 trap '_setup_on_signal 143' TERM
-# Full identity-based custody is active; retire workspace-only cleanup.
-SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false
 
 REQUIRED_LIBS=(
   "lib/log.sh"
@@ -821,13 +632,6 @@ main() {
         log_info "  sudo ./utilities/setup-crowdsec.sh"
     fi
 
-    # Export temp-file paths unconditionally so setup-secrets.sh (in both auto
-    # and interactive mode) can write plaintext credentials for the final summary.
-    # TMP_WORKDIR is mode 700 (created with umask 077), so files are root-only.
-    export VW_ADMIN_PLAIN_FILE="${TMP_WORKDIR}/vw_admin_plain"
-    export VW_ADMIN_HASH_FILE="${TMP_WORKDIR}/vw_admin_hash"
-    export CADDY_PLAIN_FILE="${TMP_WORKDIR}/caddy_plain"
-    export CADDY_HASH_FILE="${TMP_WORKDIR}/caddy_hash"
     export SETUP_SECRETS_PREEXISTED=false
     if secrets_file_exists && ensure_sops_env && check_placeholder_values >/dev/null 2>&1; then
       export SETUP_SECRETS_PREEXISTED=true
@@ -836,19 +640,23 @@ main() {
     if [[ "$AUTO_MODE" == "true" ]]; then
         operation_set_phase "6" "Secrets configuration"
         log_phase 6 6 "Secrets configuration"
-        if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would create plaintext credential capture files in ${TMP_WORKDIR}"
+        if [[ "$DRY_RUN" != "true" ]] &&
+           { [[ "$FORCE" == "true" ]] || [[ "$SETUP_SECRETS_PREEXISTED" != "true" ]]; }; then
+            if ! _setup_create_sensitive_workspace; then
+                _phase_failed 6 "Unable to create the protected credential capture workspace"
+            fi
         fi
         local secrets_args=(--auto --skip-optional --quiet-summary)
         [[ "$FORCE" == "true" ]] && secrets_args+=(--force)
+        [[ "$DRY_RUN" == "true" ]] && secrets_args+=(--dry-run)
         if ! "${SCRIPT_DIR}/utilities/setup-secrets.sh" configure "${secrets_args[@]}"; then
           _phase_failed 6 "Required automatic secrets configuration failed"
         fi
     elif [[ -t 0 ]] && [[ "$DRY_RUN" != "true" ]]; then
-        # Interactive TTY: offer to run secrets configuration now so newly generated
-        # administrator credentials can be captured in the protected setup handoff.
+        # Interactive setup does not auto-generate the administrator credentials,
+        # so it does not need the protected automatic-capture workspace.
         log_info ""
-        log_info "Secrets can be configured now so newly generated administrator credentials are captured in the protected setup handoff."
+        log_info "Secrets can be configured now. Automatic setup is required to create the protected generated-credential handoff."
         local _secrets_ans
         read -r -t 300 -p "Run interactive secrets setup now? [yes/no] (default: yes): " _secrets_ans || _secrets_ans="no"
         if [[ -z "$_secrets_ans" || "$_secrets_ans" =~ ^[Yy] ]]; then
@@ -856,7 +664,7 @@ main() {
                 log_warn "Secrets configuration encountered issues — run 'sudo ./setup.sh secrets' to retry"
             fi
         else
-            log_info "Skipping secrets setup — no setup credential handoff will be created unless new credentials are generated."
+            log_info "Skipping secrets setup — no setup credential handoff will be created unless automatic setup generates new credentials."
         fi
         unset _secrets_ans
     fi

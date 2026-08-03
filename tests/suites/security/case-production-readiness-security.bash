@@ -19,25 +19,48 @@ summary="$(sed -n '/^show_post_install_summary() {/,/^}/p' setup.sh)"
 [[ "$summary" == *"No credential values were written to terminal output"* ]] || fail "secret-free setup summary missing"
 [[ "$summary" != *'cat "$age_key_file"'* ]] || fail "setup summary prints Age identity"
 
-# Interactive setup messaging must describe the protected credential handoff truthfully.
-grep -Fq \
-  'administrator credentials can be captured in the protected setup handoff' \
-  setup.sh \
-  || fail "protected setup-handoff comment missing"
-grep -Fq \
-  'administrator credentials are captured in the protected setup handoff' \
-  setup.sh \
-  || fail "protected setup-handoff information message missing"
-grep -Fq \
-  'Skipping secrets setup — no setup credential handoff will be created unless new credentials are generated.' \
-  setup.sh \
-  || fail "truthful setup skip notice missing"
-! grep -Fq 'captured and shown in the final summary' setup.sh \
-  || fail "stale terminal-summary comment remains"
-! grep -Fq 'captured in the final summary' setup.sh \
-  || fail "stale terminal-summary message remains"
-! grep -Fq 'placeholder text in the summary' setup.sh \
-  || fail "stale placeholder-summary message remains"
+# Early setup routes must not create a sensitive workspace.
+workspace_probe="$(mktemp -d)"
+trap 'rm -rf -- "$workspace_probe"' EXIT
+real_mktemp="$(command -v mktemp)"
+mkdir -p "$workspace_probe/bin"
+cat > "$workspace_probe/bin/mktemp" <<'EOF_MKTEMP_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+for arg in "$@"; do
+  case "$arg" in
+    *vw_setup.*|*vw_tmp.*)
+      printf '%s\n' "$*" >> "${VW_TEST_SENSITIVE_MKTEMP_LOG:?}"
+      ;;
+  esac
+done
+exec "${VW_TEST_REAL_MKTEMP:?}" "$@"
+EOF_MKTEMP_PROBE
+chmod 0755 "$workspace_probe/bin/mktemp"
+: > "$workspace_probe/sensitive-mktemp.log"
+for command in \
+  './setup.sh --help' \
+  './setup.sh --version' \
+  './setup.sh not-a-subcommand' \
+  './setup.sh secrets --help' \
+  './setup.sh systemd --help'; do
+  set +e
+  PATH="$workspace_probe/bin:$PATH" \
+    VW_TEST_REAL_MKTEMP="$real_mktemp" \
+    VW_TEST_SENSITIVE_MKTEMP_LOG="$workspace_probe/sensitive-mktemp.log" \
+    bash -c "$command" >"$workspace_probe/route.out" 2>"$workspace_probe/route.err"
+  route_rc=$?
+  set -e
+  case "$command" in
+    *not-a-subcommand*) (( route_rc != 0 )) || fail "invalid setup route unexpectedly succeeded" ;;
+    *) (( route_rc == 0 )) || fail "early setup route failed: $command" ;;
+  esac
+done
+[[ ! -s "$workspace_probe/sensitive-mktemp.log" ]] \
+  || fail "help, version, invalid, or non-secret setup routing created a sensitive workspace"
+rm -rf -- "$workspace_probe"
+trap - EXIT
+
 # Direct automatic secret setup must use protected capture and publication.
 setup_secrets_help="$(./utilities/setup-secrets.sh configure --help)" \
   || fail "setup-secrets configure --help failed"
@@ -55,28 +78,6 @@ setup_secrets_help_normalized="$(
 [[ "$setup_secrets_help_normalized" == *"Publication failure makes the command fail"* ]] \
   || fail "direct automatic setup help omits publication failure behavior"
 
-setup_secrets_source="$(cat utilities/setup-secrets.sh)"
-[[ "$setup_secrets_source" == *'declare -ga SETUP_SECRETS_CLEANUP_ACTIONS=()'* ]] \
-  || fail "setup-secrets cleanup actions are not script-scoped"
-[[ "$setup_secrets_source" == *'declare -gA SETUP_SECRETS_COLLECTED_SECRETS=()'* ]] \
-  || fail "setup-secrets collected secrets are not script-scoped"
-[[ "$setup_secrets_source" != *'local CLEANUP_ACTIONS=()'* ]] \
-  || fail "setup-secrets still uses function-local cleanup state"
-[[ "$setup_secrets_source" != *"trap '_ss_perform_cleanup' RETURN"* ]] \
-  || fail "setup-secrets still installs the unsafe RETURN cleanup trap"
-[[ "$setup_secrets_source" == *'_setup_secrets_cleanup_all "$original_status"'* ]] \
-  || fail "setup-secrets signal/exit finalizer does not pass the original status"
-[[ "$setup_secrets_source" == *'source "${PROJECT_ROOT}/lib/setup-credentials.sh"'* ]] \
-  || fail "setup-secrets does not load protected handoff support"
-[[ "$setup_secrets_source" == *'_ss_prepare_auto_handoff || return 1'* ]] \
-  || fail "setup-secrets does not prepare protected automatic capture"
-[[ "$setup_secrets_source" == *$'    done\n\n    _ss_prepare_auto_handoff || return 1\n\n    local AGE_KEY_FILE='* ]] \
-  || fail "setup-secrets prepares automatic handoff before option parsing completes"
-[[ "$setup_secrets_source" == *'_ss_publish_auto_handoff || return 1'* ]] \
-  || fail "setup-secrets does not publish direct automatic handoff"
-[[ "$setup_secrets_source" != *"scroll up to save the generated passwords"* ]] \
-  || fail "setup-secrets still tells operators to recover passwords from terminal output"
-
 auto_generator="$(
   sed -n \
     '/^auto_generate_secret_field() {/,/^_grk_sops_extract() {/p' \
@@ -89,133 +90,56 @@ auto_generator="$(
 [[ "$auto_generator" == *"requires protected capture and publication"* ]] \
   || fail "automatic administrator generation does not fail closed"
 
-# Exercise capture preparation and file permissions without real credentials.
-auto_handoff_helpers="$(
+# Exercise the simple direct-workspace lifecycle with synthetic content.
+direct_cleanup_helpers="$(
   sed -n \
-    '/^    _ss_capture_path_count() {/,/^    _ss_show_help() {/p' \
-    utilities/setup-secrets.sh |
-    sed '$d; s/^    //'
-)"
-[[ -n "$auto_handoff_helpers" ]] \
-  || fail "automatic handoff helper block is missing"
-(
-  eval "$auto_handoff_helpers"
-  log_error() { :; }
-  log_info() { :; }
-  log_success() { :; }
-  log_warn() { :; }
-
-  helper_tmp="$(mktemp -d)"
-  trap 'rm -rf "$helper_tmp"' EXIT
-  chmod 0700 "$helper_tmp"
-
-  # These values are consumed by the helper functions loaded through eval.
-  # Exporting them makes that dynamic contract explicit to ShellCheck.
-  export TMP_WORKDIR="$helper_tmp"
-  export AUTO_MODE=true
-  export QUIET_SUMMARY=false
-  export AUTO_HANDOFF_OWNER=false
-  export DRY_RUN=false
-  unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE
-  unset CADDY_PLAIN_FILE CADDY_HASH_FILE
-
-  _ss_prepare_auto_handoff || exit 1
-  [[ "$AUTO_HANDOFF_OWNER" == "true" ]] || exit 1
-  [[ "$QUIET_SUMMARY" == "true" ]] || exit 1
-
-  synthetic_secret='VW_TEST_SECRET_DO_NOT_PRINT_276'
-  _ss_write_capture \
-    "$VW_ADMIN_PLAIN_FILE" \
-    "$synthetic_secret" \
-    "Vaultwarden administrator password" || exit 1
-  [[ "$(stat -c '%a' "$VW_ADMIN_PLAIN_FILE")" == "600" ]] || exit 1
-  [[ "$(cat "$VW_ADMIN_PLAIN_FILE")" == "$synthetic_secret" ]] || exit 1
-
-  ln -s "$helper_tmp/elsewhere" "$helper_tmp/unsafe-link"
-  ! _ss_write_capture \
-    "$helper_tmp/unsafe-link" \
-    "$synthetic_secret" \
-    "unsafe test capture" || exit 1
-
-  unset VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
-  VW_ADMIN_PLAIN_FILE="$helper_tmp/partial"
-  ! _ss_prepare_auto_handoff || exit 1
-) || fail "protected automatic capture helper contract failed"
-# Exercise the script-scoped cleanup state directly with synthetic files.
-cleanup_lifecycle_helpers="$(
-  sed -n \
-    '/^# Secret cleanup lifecycle is script-scoped/,/^# End secret cleanup lifecycle\./p' \
+    '/^unset TMP_WORKDIR$/,/^trap '\''_setup_secrets_on_signal 143'\'' TERM$/p' \
     utilities/setup-secrets.sh
 )"
-[[ -n "$cleanup_lifecycle_helpers" ]] || fail "script-scoped cleanup helper block is missing"
-(
-  cleanup_root="$(mktemp -d)"
-  trap 'rm -rf -- "$cleanup_root"' EXIT
-  export PROJECT_ROOT="$cleanup_root"
-  export TMP_WORKDIR="$cleanup_root/vw_tmp.cleanup-contract"
-  mkdir -p "$TMP_WORKDIR"
-  cleanup_secrets_environment() { return 0; }
-  log_warn() { :; }
-  eval "$cleanup_lifecycle_helpers"
-  _setup_secrets_cleanup_begin
-  printf '%s' 'SYNTHETIC-CLEANUP-SECRET-ONE' > "$TMP_WORKDIR/secret one"
-  printf '%s' 'SYNTHETIC-CLEANUP-SECRET-TWO' > "$TMP_WORKDIR/secret-two"
-  _ss_register_cleanup "$TMP_WORKDIR/secret one"
-  _ss_register_cleanup "rm -f $TMP_WORKDIR/secret-two"
-  _ss_register_cleanup "/etc/passwd"
-  SETUP_SECRETS_COLLECTED_SECRETS["test"]='SYNTHETIC-COLLECTED-SECRET'
-  set +e
-  _ss_perform_cleanup 37
-  cleanup_rc=$?
-  set -e
-  (( cleanup_rc == 37 )) || exit 1
-  [[ ! -e "$TMP_WORKDIR/secret one" ]] || exit 1
-  [[ ! -e "$TMP_WORKDIR/secret-two" ]] || exit 1
-  [[ ! -d "$TMP_WORKDIR" ]] || exit 1
-  [[ ${#SETUP_SECRETS_CLEANUP_ACTIONS[@]} -eq 0 ]] || exit 1
-  [[ ${#SETUP_SECRETS_COLLECTED_SECRETS[@]} -eq 0 ]] || exit 1
-  set +e
-  _ss_perform_cleanup 23
-  repeated_rc=$?
-  set -e
-  (( repeated_rc == 23 )) || exit 1
-) || fail "script-scoped cleanup idempotence and status preservation failed"
-for signal_status in 130 143; do
-  signal_root="$(mktemp -d)"
-  set +e
-  (
-    export PROJECT_ROOT="$signal_root"
-    export TMP_WORKDIR="$signal_root/vw_tmp.signal-contract"
-    mkdir -p "$TMP_WORKDIR"
-    printf '%s' 'SYNTHETIC-SIGNAL-SECRET' > "$TMP_WORKDIR/signal-secret"
-    cleanup_secrets_environment() { return 0; }
-    log_warn() { :; }
-    eval "$cleanup_lifecycle_helpers"
-    _setup_secrets_cleanup_begin
-    _ss_register_cleanup "$TMP_WORKDIR/signal-secret"
-    case "$signal_status" in
-      130)
-        trap '_setup_secrets_on_signal 130' INT
-        kill -INT "$BASHPID"
-        ;;
-      143)
-        trap '_setup_secrets_on_signal 143' TERM
-        kill -TERM "$BASHPID"
-        ;;
-    esac
-    exit 99
-  )
-  observed_signal_status=$?
-  set -e
-  [[ ! -e "$signal_root/vw_tmp.signal-contract/signal-secret" ]] \
-    || fail "signal cleanup left a plaintext file for status $signal_status"
-  [[ ! -d "$signal_root/vw_tmp.signal-contract" ]] \
-    || fail "signal cleanup left its workspace for status $signal_status"
-  rm -rf -- "$signal_root"
-  (( observed_signal_status == signal_status )) \
-    || fail "cleanup signal handler did not preserve status $signal_status"
-done
-pass "script-scoped setup-secrets cleanup lifecycle"
+[[ -n "$direct_cleanup_helpers" ]] \
+  || fail "direct sensitive-workspace helpers could not be extracted"
+DIRECT_CLEANUP_HELPERS="$direct_cleanup_helpers" bash -s <<'DIRECT_WORKSPACE_TEST' \
+  || fail "direct lazy sensitive-workspace lifecycle failed"
+set -euo pipefail
+PROJECT_ROOT="$(mktemp -d)"
+trap '/bin/rm -rf -- "$PROJECT_ROOT"' EXIT
+log_warn() { printf 'WARN %s\n' "$*" >&2; }
+cleanup_secrets_environment() { return 0; }
+operation_release() { return 0; }
+eval "$DIRECT_CLEANUP_HELPERS"
+trap - EXIT INT HUP TERM
+
+! find "$PROJECT_ROOT" -maxdepth 1 -name 'vw_tmp.*' -print -quit | grep -q .
+_setup_secrets_create_workdir
+workspace="$SETUP_SECRETS_OWNED_WORKDIR"
+[[ -d "$workspace" && "$(stat -c '%a' "$workspace")" == "700" ]]
+printf '%s' 'SYNTHETIC-DIRECT-PLAINTEXT' > "$workspace/capture"
+_ss_register_cleanup "$workspace/capture"
+SETUP_SECRETS_COLLECTED_SECRETS[test]='SYNTHETIC-COLLECTED-SECRET'
+cleanup_log="$PROJECT_ROOT/cleanup.log"
+set +e
+_ss_perform_cleanup 37 >"$cleanup_log" 2>&1
+cleanup_rc=$?
+set -e
+cleanup_output="$(cat "$cleanup_log")"
+[[ "$cleanup_rc" == 37 ]]
+[[ ! -e "$workspace" ]]
+[[ "$cleanup_output" != *'SYNTHETIC-DIRECT-PLAINTEXT'* ]]
+[[ "$cleanup_output" != *'SYNTHETIC-COLLECTED-SECRET'* ]]
+
+_setup_secrets_create_workdir
+signal_workspace="$SETUP_SECRETS_OWNED_WORKDIR"
+printf '%s' 'SYNTHETIC-SIGNAL-PLAINTEXT' > "$signal_workspace/capture"
+set +e
+( _setup_secrets_on_signal 143 ) >/dev/null 2>&1
+signal_rc=$?
+set -e
+[[ "$signal_rc" == 143 ]]
+[[ ! -e "$signal_workspace" ]]
+/bin/rm -rf -- "$PROJECT_ROOT"
+trap - EXIT
+DIRECT_WORKSPACE_TEST
+pass "direct lazy setup-secrets workspace lifecycle"
 
 # Exercise the real direct command parser and orchestration under a PTY with
 # deterministic synthetic values. The dependency and host-output boundaries are
@@ -239,8 +163,11 @@ if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   direct_auto_bin="$direct_auto_tmp/bin"
   direct_auto_state="$direct_auto_tmp/state"
   direct_auto_success_dir="$direct_auto_tmp/recovery-success"
+  direct_auto_dry_run_dir="$direct_auto_tmp/recovery-dry-run"
+  direct_auto_reuse_dir="$direct_auto_tmp/recovery-reuse"
   direct_auto_failure_target="$direct_auto_tmp/recovery-not-a-directory"
   direct_auto_counter="$direct_auto_tmp/generator-counter"
+  direct_auto_workspace_mode="$direct_auto_tmp/workspace.mode"
   mkdir -p "$direct_auto_bin" "$direct_auto_state" "$direct_auto_success_dir"
   chmod 0700 "$direct_auto_state" "$direct_auto_success_dir"
   printf '0\n' > "$direct_auto_counter"
@@ -308,6 +235,9 @@ generate_secure_string() {
     printf '%s' 'TEST-INTEGRITY-HMAC-NOT-A-HANDOFF-PASSWORD'
     return 0
   fi
+  if [[ -n "${VW_ADMIN_PLAIN_FILE:-}" ]]; then
+    stat -c '%a' "$(dirname "$VW_ADMIN_PLAIN_FILE")" > "${VW_TEST_WORKSPACE_MODE_FILE:?}"
+  fi
   next="$(( $(cat "${VW_TEST_COUNTER_FILE:?}") + 1 ))"
   printf '%s\n' "$next" > "${VW_TEST_COUNTER_FILE}"
   case "$next" in
@@ -322,7 +252,8 @@ _bcrypt_format_ok() { return 0; }
 check_age_key() { return 0; }
 check_argon2_support() { return 0; }
 get_age_public_key() { printf '%s' "${VW_TEST_PUBLIC_RECIPIENT:?}"; }
-secrets_file_exists() { return 1; }
+secrets_file_exists() { [[ "${VW_TEST_EXISTING_SECRETS:-0}" == "1" ]]; }
+check_placeholder_values() { return 0; }
 ensure_sops_env() {
   export SOPS_AGE_KEY_FILE="${VW_TEST_AGE_KEY_FILE:?}"
   export SOPS_CONFIG="${PROJECT_ROOT}/.sops.yaml"
@@ -438,14 +369,16 @@ PY_DIRECT_PTY
   }
 
   run_direct_auto_case() {
-    local label="$1" handoff_target="$2"
+    local label="$1" handoff_target="$2" existing_secrets="$3"
+    shift 3
     direct_stdout="$direct_auto_tmp/$label.stdout"
     direct_stderr="$direct_auto_tmp/$label.stderr"
     direct_pty="$direct_auto_tmp/$label.pty"
     : > "$direct_stdout"
     : > "$direct_stderr"
     : > "$direct_pty"
-    chmod 0666 "$direct_stdout" "$direct_stderr"
+    : > "$direct_auto_workspace_mode"
+    chmod 0666 "$direct_stdout" "$direct_stderr" "$direct_auto_workspace_mode"
     printf '0\n' > "$direct_auto_counter"
 
     set +e
@@ -460,20 +393,24 @@ PY_DIRECT_PTY
         "VW_HANDOFF_TEST_MODE=true" \
         "VW_TEST_AGE_KEY_FILE=$direct_auto_age_key" \
         "VW_TEST_COUNTER_FILE=$direct_auto_counter" \
+        "VW_TEST_EXISTING_SECRETS=$existing_secrets" \
         "VW_TEST_PROJECT_STATE_DIR=$direct_auto_state" \
         "VW_TEST_PUBLIC_RECIPIENT=$direct_auto_public" \
         "VW_TEST_REAL_INSTALL=$(command -v install)" \
+        "VW_TEST_WORKSPACE_MODE_FILE=$direct_auto_workspace_mode" \
         "VW_SETUP_SECRETS_TMP_DIR=$direct_auto_tmp/plaintext-stage" \
-        bash -x "$direct_auto_fixture/utilities/setup-secrets.sh" configure --auto
+        bash -x "$direct_auto_fixture/utilities/setup-secrets.sh" configure --auto "$@"
     direct_rc=$?
     set -e
   }
 
-  run_direct_auto_case success "$direct_auto_success_dir"
+  run_direct_auto_case success "$direct_auto_success_dir" 0
   (( direct_rc == 0 )) || fail "direct configure --auto failed in synthetic PTY fixture"
   grep -Fq '_cmd_configure --auto' "$direct_stderr" \
     || fail "direct automatic regression did not exercise an active command trace"
   assert_direct_auto_streams_are_secret_free "successful direct automatic setup"
+  [[ "$(cat "$direct_auto_workspace_mode")" == "700" ]] \
+    || fail "direct automatic credential workspace mode is not 0700"
   ! grep -Fq 'scroll up to save the generated passwords' \
     "$direct_stdout" "$direct_stderr" "$direct_pty" \
     || fail "direct automatic output contains obsolete scrollback guidance"
@@ -515,7 +452,23 @@ PY_DIRECT_PTY
     || fail "direct automatic setup omitted the no-values-printed statement"
   assert_direct_auto_temps_are_clean "direct automatic success"
 
-  run_direct_auto_case publication-failure "$direct_auto_failure_target"
+  run_direct_auto_case dry-run "$direct_auto_dry_run_dir" 0 --dry-run
+  (( direct_rc == 0 )) || fail "direct configure --auto --dry-run failed"
+  [[ ! -s "$direct_auto_workspace_mode" ]] \
+    || fail "direct dry-run created the sensitive credential workspace"
+  [[ ! -e "$direct_auto_dry_run_dir" ]] \
+    || fail "direct dry-run published a credential handoff"
+  assert_direct_auto_temps_are_clean "direct automatic dry-run"
+
+  run_direct_auto_case reuse-existing "$direct_auto_reuse_dir" 1
+  (( direct_rc == 0 )) || fail "direct automatic existing-secret reuse failed"
+  [[ ! -s "$direct_auto_workspace_mode" ]] \
+    || fail "existing-secret reuse created the sensitive credential workspace"
+  [[ ! -e "$direct_auto_reuse_dir" ]] \
+    || fail "existing-secret reuse published a credential handoff"
+  assert_direct_auto_temps_are_clean "direct automatic existing-secret reuse"
+
+  run_direct_auto_case publication-failure "$direct_auto_failure_target" 0
   (( direct_rc != 0 )) || fail "forced direct handoff-publication failure returned success"
   assert_direct_auto_streams_are_secret_free "failed direct automatic setup"
   ! grep -Fq 'Protected setup credential handoff created:' \

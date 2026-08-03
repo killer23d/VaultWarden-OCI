@@ -7,26 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-old_umask=$(umask)
-umask 077
-TMP_WORKDIR=$(mktemp -d -p "${PROJECT_ROOT}" vw_tmp.XXXXXXXXXX) || {
-    echo "ERROR: Failed to create secure temporary directory" >&2
-    exit 1
-}
-umask "$old_umask"
-chmod 0700 "$TMP_WORKDIR" || { echo "ERROR: Failed to secure temporary directory" >&2; exit 1; }
-
-# Secret cleanup lifecycle is script-scoped because EXIT and signal traps can
-# run after _cmd_configure has returned. Keep path state until cleanup has been
-# verified so a fallback trap can retry and report exact residual paths.
+unset TMP_WORKDIR
 declare -ga SETUP_SECRETS_CLEANUP_ACTIONS=()
 declare -gA SETUP_SECRETS_COLLECTED_SECRETS=()
-SETUP_SECRETS_CLEANUP_ACTIVE=true
-SETUP_SECRETS_CLEANUP_DONE=false
-SETUP_SECRETS_CLEANUP_RUNNING=false
-SETUP_SECRETS_CLEANUP_FAILED=false
-SETUP_SECRETS_TMP_WORKDIR="$TMP_WORKDIR"
+SETUP_SECRETS_OWNED_WORKDIR=""
 SETUP_SECRETS_GUARD_HELD=false
+
 _setup_secrets_cleanup_warn() {
     local message="$1"
     if declare -F log_warn >/dev/null 2>&1; then
@@ -35,22 +21,23 @@ _setup_secrets_cleanup_warn() {
         printf 'WARNING: %s\n' "$message" >&2
     fi
 }
-_setup_secrets_manual_cleanup() {
-    local flag="$1" target="$2" quoted
-    printf -v quoted '%q' "$target"
-    _setup_secrets_cleanup_warn "Residual sensitive path: $target"
-    _setup_secrets_cleanup_warn "Manual cleanup: sudo rm $flag -- $quoted"
+
+_setup_secrets_create_workdir() {
+    local old_umask create_status
+
+    [[ -z "${SETUP_SECRETS_OWNED_WORKDIR:-}" ]] || return 0
+
+    old_umask="$(umask)"
+    umask 077
+    TMP_WORKDIR="$(mktemp -d -p "${PROJECT_ROOT}" vw_tmp.XXXXXXXXXX)" || {
+        create_status=$?
+        umask "$old_umask" || true
+        return "$create_status"
+    }
+    umask "$old_umask"
+    SETUP_SECRETS_OWNED_WORKDIR="$TMP_WORKDIR"
 }
-_setup_secrets_cleanup_begin() {
-    { set +x; } 2>/dev/null
-    SETUP_SECRETS_CLEANUP_ACTIONS=()
-    SETUP_SECRETS_COLLECTED_SECRETS=()
-    SETUP_SECRETS_CLEANUP_ACTIVE=true
-    SETUP_SECRETS_CLEANUP_DONE=false
-    SETUP_SECRETS_CLEANUP_RUNNING=false
-    SETUP_SECRETS_CLEANUP_FAILED=false
-    SETUP_SECRETS_TMP_WORKDIR="${TMP_WORKDIR:-}"
-}
+
 _ss_register_cleanup() {
     local action="${1:-}" target
     case "$action" in
@@ -63,164 +50,54 @@ _ss_register_cleanup() {
     fi
     SETUP_SECRETS_CLEANUP_ACTIONS+=("$target")
 }
-_setup_secrets_cleanup_file_allowed() {
-    local target="$1" resolved project_root_resolved tmp_resolved secrets_resolved
-    resolved="$(realpath -m -- "$target" 2>/dev/null)" || return 1
-    project_root_resolved="$(realpath -m -- "${PROJECT_ROOT:-/opt/vaultwarden-scripts}" 2>/dev/null)" || return 1
-    secrets_resolved="${project_root_resolved}/secrets"
-    tmp_resolved=""
-    if [[ -n "${SETUP_SECRETS_TMP_WORKDIR:-}" ]]; then
-        tmp_resolved="$(realpath -m -- "$SETUP_SECRETS_TMP_WORKDIR" 2>/dev/null)" || return 1
-    fi
-    case "$resolved" in
-        /tmp/*|"$secrets_resolved"/*) return 0 ;;
-    esac
-    [[ -n "$tmp_resolved" && "$resolved" == "$tmp_resolved"/* ]]
-}
-_ss_run_cleanup_action() {
-    local target="$1"
-    if ! _setup_secrets_cleanup_file_allowed "$target"; then
-        # This path is outside this process's cleanup custody. Refuse it, but do
-        # not turn an unrelated path into a retryable sensitive residual or
-        # suggest a destructive manual command for it.
-        _setup_secrets_cleanup_warn "Refusing cleanup outside approved temporary or secrets paths: $target"
-        return 2
-    fi
-    if [[ ! -e "$target" && ! -L "$target" ]]; then
-        return 0
-    fi
-    if ! rm -f -- "$target" 2>/dev/null || [[ -e "$target" || -L "$target" ]]; then
-        _setup_secrets_cleanup_warn "Failed to remove sensitive cleanup path: $target"
-        return 1
-    fi
-}
-_setup_secrets_remove_workdir() {
-    local target="${SETUP_SECRETS_TMP_WORKDIR:-}" resolved root_resolved parent base
-    [[ -n "$target" && "$target" != "/" && "$target" != "." && "$target" != ".." ]] || return 0
-    if [[ ! -e "$target" && ! -L "$target" ]]; then
-        return 0
-    fi
-    resolved="$(realpath -m -- "$target" 2>/dev/null)" || {
-        _setup_secrets_cleanup_warn "Unable to resolve temporary workspace; refusing recursive removal: $target"
-        return 2
-    }
-    root_resolved="$(realpath -m -- "${PROJECT_ROOT:-/opt/vaultwarden-scripts}" 2>/dev/null)" || {
-        _setup_secrets_cleanup_warn "Unable to resolve the project root; refusing temporary workspace removal: $target"
-        return 2
-    }
-    parent="$(dirname -- "$resolved")"
-    base="$(basename -- "$resolved")"
-    if [[ "$parent" != "$root_resolved" || "$base" != vw_tmp.* || "$resolved" == "$root_resolved" || -L "$target" ]]; then
-        _setup_secrets_cleanup_warn "Refusing unsafe temporary workspace removal: $target"
-        return 2
-    fi
-    if ! rm -rf -- "$resolved" 2>/dev/null || [[ -e "$resolved" || -L "$resolved" ]]; then
-        _setup_secrets_cleanup_warn "Failed to remove temporary workspace: $resolved"
-        return 1
-    fi
-}
-_ss_perform_cleanup() {
-    local original_status="${1:-$?}" idx key target action_status=0 workdir_status=0 cleanup_failed=0
-    local -a failed_actions=() remaining_actions=()
-    if [[ "${SETUP_SECRETS_CLEANUP_RUNNING:-false}" == "true" ]]; then
-        return "$original_status"
-    fi
-    if [[ "${SETUP_SECRETS_CLEANUP_ACTIVE:-false}" != "true" ]] ||
-       [[ "${SETUP_SECRETS_CLEANUP_DONE:-false}" == "true" ]]; then
-        if (( original_status == 0 )) && [[ "${SETUP_SECRETS_CLEANUP_FAILED:-false}" == "true" ]]; then
-            return 1
-        fi
-        return "$original_status"
-    fi
 
-    SETUP_SECRETS_CLEANUP_RUNNING=true
+_ss_perform_cleanup() {
+    local original_status="${1:-$?}" cleanup_status=0 key target
+    local workspace="${SETUP_SECRETS_OWNED_WORKDIR:-}"
+
     { set +x; } 2>/dev/null
     for key in "${!SETUP_SECRETS_COLLECTED_SECRETS[@]}"; do
         SETUP_SECRETS_COLLECTED_SECRETS["$key"]=""
     done
     SETUP_SECRETS_COLLECTED_SECRETS=()
 
-    # A refused, out-of-custody path is discarded after warning. Only an
-    # approved path that survives an actual removal attempt is retryable.
-    for ((idx=${#SETUP_SECRETS_CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx--)); do
-        target="${SETUP_SECRETS_CLEANUP_ACTIONS[$idx]}"
-        if _ss_run_cleanup_action "$target"; then
-            continue
-        else
-            action_status=$?
+    for target in "${SETUP_SECRETS_CLEANUP_ACTIONS[@]}"; do
+        [[ -e "$target" || -L "$target" ]] || continue
+        if ! rm -f -- "$target"; then
+            _setup_secrets_cleanup_warn "Failed to remove sensitive cleanup path: $target"
+            cleanup_status=1
         fi
-        case "$action_status" in
-            1) failed_actions=("$target" "${failed_actions[@]}") ;;
-            2) : ;;
-            *)
-                _setup_secrets_cleanup_warn "Unexpected cleanup result for approved path: $target"
-                failed_actions=("$target" "${failed_actions[@]}")
-                ;;
-        esac
     done
 
     if declare -F cleanup_secrets_environment >/dev/null 2>&1; then
         if ! cleanup_secrets_environment; then
             _setup_secrets_cleanup_warn "Secret environment cleanup reported a failure"
-            cleanup_failed=1
+            cleanup_status=1
         fi
     fi
 
-    if _setup_secrets_remove_workdir; then
-        SETUP_SECRETS_TMP_WORKDIR=""
-    else
-        workdir_status=$?
-        case "$workdir_status" in
-            1)
-                cleanup_failed=1
-                if [[ -n "${SETUP_SECRETS_TMP_WORKDIR:-}" ]] &&
-                   [[ -e "$SETUP_SECRETS_TMP_WORKDIR" || -L "$SETUP_SECRETS_TMP_WORKDIR" ]]; then
-                    _setup_secrets_manual_cleanup "-rf" "$SETUP_SECRETS_TMP_WORKDIR"
-                fi
-                ;;
-            2)
-                # The workspace is expected to be script-owned. Refusal is a
-                # real cleanup failure, but never suggest a recursive deletion
-                # command for a path outside the verified workspace contract.
-                cleanup_failed=1
-                ;;
-            *)
-                _setup_secrets_cleanup_warn "Unexpected temporary workspace cleanup result"
-                cleanup_failed=1
-                ;;
-        esac
+    if [[ -n "$workspace" ]]; then
+        if rm -rf -- "$workspace"; then
+            SETUP_SECRETS_OWNED_WORKDIR=""
+            unset TMP_WORKDIR
+        else
+            _setup_secrets_cleanup_warn "Failed to remove the setup-secrets sensitive workspace: $workspace"
+            cleanup_status=1
+        fi
     fi
 
-    # Workspace deletion may have removed a file whose individual unlink was
-    # blocked. Retain and report only approved paths that actually still exist.
-    for target in "${failed_actions[@]}"; do
-        if [[ -e "$target" || -L "$target" ]]; then
-            remaining_actions+=("$target")
-            _setup_secrets_manual_cleanup "-f" "$target"
-            cleanup_failed=1
-        fi
-    done
-    SETUP_SECRETS_CLEANUP_ACTIONS=("${remaining_actions[@]}")
-
-    if (( cleanup_failed == 0 )); then
+    if (( cleanup_status == 0 )); then
         SETUP_SECRETS_CLEANUP_ACTIONS=()
-        SETUP_SECRETS_TMP_WORKDIR=""
-        SETUP_SECRETS_CLEANUP_ACTIVE=false
-        SETUP_SECRETS_CLEANUP_DONE=true
-        SETUP_SECRETS_CLEANUP_FAILED=false
-    else
-        SETUP_SECRETS_CLEANUP_FAILED=true
     fi
-    SETUP_SECRETS_CLEANUP_RUNNING=false
-
     if (( original_status != 0 )); then
         return "$original_status"
     fi
-    (( cleanup_failed == 0 )) || return 1
-    return 0
+    return "$cleanup_status"
 }
+
 _setup_secrets_cleanup_all() {
     local original_status="${1:-$?}" release_status=0 cleanup_status=0
+
     set +e
     { set +x; } 2>/dev/null
     if [[ "${SETUP_SECRETS_GUARD_HELD:-false}" == "true" ]] &&
@@ -236,19 +113,20 @@ _setup_secrets_cleanup_all() {
     (( release_status == 0 )) || return "$release_status"
     return 0
 }
+
 _setup_secrets_on_exit() {
     local original_status="$1" final_status=0
     trap - EXIT INT HUP TERM
     _setup_secrets_cleanup_all "$original_status" || final_status=$?
     exit "$final_status"
 }
+
 _setup_secrets_on_signal() {
     local signal_status="$1"
     trap - EXIT INT HUP TERM
     _setup_secrets_cleanup_all "$signal_status" || true
     exit "$signal_status"
 }
-# End secret cleanup lifecycle.
 
 trap '_setup_secrets_on_exit $?' EXIT
 trap '_setup_secrets_on_signal 130' INT
@@ -275,7 +153,6 @@ source "${PROJECT_ROOT}/lib/setup-credentials.sh"
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
 
-# Cleanup lifecycle is initialized before library loading so partial initialization failures use the same finalizer.
 _setup_secrets_should_guard() {
     local subcmd="$1"
     shift || true
@@ -366,7 +243,7 @@ EOF
 _cmd_configure() {
     # Secret generation and capture must remain opaque even when a caller starts
     # this script with `bash -x` or exports SHELLOPTS with xtrace enabled.
-    _setup_secrets_cleanup_begin
+    { set +x; } 2>/dev/null
 
     local SKIP_VALIDATION=false
     local SKIP_OPTIONAL=false
@@ -518,10 +395,6 @@ _cmd_configure() {
         case "$configured" in
             0)
                 AUTO_HANDOFF_OWNER=true
-                export VW_ADMIN_PLAIN_FILE="$TMP_WORKDIR/vw-admin-password"
-                export VW_ADMIN_HASH_FILE="$TMP_WORKDIR/vw-admin-hash"
-                export CADDY_PLAIN_FILE="$TMP_WORKDIR/caddy-admin-password"
-                export CADDY_HASH_FILE="$TMP_WORKDIR/caddy-admin-hash"
                 ;;
             4)
                 if [[ "$QUIET_SUMMARY" != "true" ]]; then
@@ -537,6 +410,25 @@ _cmd_configure() {
         esac
 
         QUIET_SUMMARY=true
+    }
+
+    # Allocate direct automatic capture only after parsing, prerequisite checks,
+    # schema validation, and the existing-secret reconfiguration decision.
+    _ss_prepare_auto_capture() {
+        [[ "$AUTO_MODE" == "true" ]] || return 0
+        [[ "$DRY_RUN" != "true" ]] || return 0
+
+        if [[ "$AUTO_HANDOFF_OWNER" == "true" ]]; then
+            if ! _setup_secrets_create_workdir; then
+                log_error "Failed to create the protected automatic credential workspace"
+                return 1
+            fi
+            export VW_ADMIN_PLAIN_FILE="$TMP_WORKDIR/vw-admin-password"
+            export VW_ADMIN_HASH_FILE="$TMP_WORKDIR/vw-admin-hash"
+            export CADDY_PLAIN_FILE="$TMP_WORKDIR/caddy-admin-password"
+            export CADDY_HASH_FILE="$TMP_WORKDIR/caddy-admin-hash"
+        fi
+
         _ss_validate_capture_target "$VW_ADMIN_PLAIN_FILE" "Vaultwarden administrator password" || return 1
         _ss_validate_capture_target "$VW_ADMIN_HASH_FILE" "Vaultwarden administrator hash" || return 1
         _ss_validate_capture_target "$CADDY_PLAIN_FILE" "Caddy administrator password" || return 1
@@ -994,8 +886,8 @@ HELP
                     vw_hash="$(
                         _ss_generate_admin_credential_quietly \
                             "admin_token" \
-                            "$VW_ADMIN_PLAIN_FILE" \
-                            "$VW_ADMIN_HASH_FILE"
+                            "${VW_ADMIN_PLAIN_FILE:-}" \
+                            "${VW_ADMIN_HASH_FILE:-}"
                     )" || return 1
                 else
                     vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
@@ -1019,8 +911,8 @@ HELP
                     caddy_hash="$(
                         _ss_generate_admin_credential_quietly \
                             "admin_basic_auth_hash" \
-                            "$CADDY_PLAIN_FILE" \
-                            "$CADDY_HASH_FILE"
+                            "${CADDY_PLAIN_FILE:-}" \
+                            "${CADDY_HASH_FILE:-}"
                     )" || return 1
                 else
                     caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
@@ -1392,6 +1284,8 @@ HELP
             log_info "Tip: to export a recovery kit run:  sudo ./edit-secrets.sh export-recovery-kit"
             return 0
         fi
+
+        _ss_prepare_auto_capture || return 1
 
         echo ""
         log_info "═══════════════════════════════════════════════════════════"

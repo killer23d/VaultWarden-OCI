@@ -121,4 +121,36 @@ secrets_output="$(run_setup_case "automatic secrets failure" 0 1)"
 grep -q 'setup-secrets.sh:configure' "$INVOCATIONS" \
   || fail "automatic secrets configure stub was not invoked"
 
+# A full automatic dry-run reaches the secrets route but never allocates the
+# top-level plaintext credential workspace or publishes a handoff.
+dry_tmp="$TMP/dry-run-tmp"
+mkdir -p "$dry_tmp"
+: > "$INVOCATIONS"
+rm -rf "$TMP/recovery"
+set +e
+dry_output="$(
+  sudo -n env \
+    TMPDIR="$dry_tmp" \
+    VW_TEST_INVOCATION_LOG="$INVOCATIONS" \
+    VW_TEST_FAIL_UFW=0 \
+    VW_TEST_FAIL_SECRETS=0 \
+    SETUP_CREDENTIALS_DIR="$TMP/recovery" \
+    ENTROPY_THRESHOLD=0 \
+    bash "$FIXTURE/setup.sh" install \
+      --domain vault.example.com \
+      --email admin@example.com \
+      --auto --skip-deps --dry-run 2>&1
+)"
+dry_rc=$?
+set -e
+(( dry_rc == 0 )) || fail "automatic setup dry-run failed: $dry_output"
+grep -q 'setup-secrets.sh:configure .*--dry-run' "$INVOCATIONS" \
+  || fail "automatic setup dry-run did not delegate dry-run to secrets configuration"
+! find "$dry_tmp" -mindepth 1 -maxdepth 1 -name 'vw_setup.*' -print -quit | grep -q . \
+  || fail "automatic setup dry-run created a sensitive workspace"
+[[ ! -e "$TMP/recovery" ]] || {
+  ! find "$TMP/recovery" -type f -name 'vaultwarden-setup-credentials-*' -print -quit | grep -q . \
+    || fail "automatic setup dry-run published a credential handoff"
+}
+
 pass "behavioral setup failure gates and bootstrap loading"
