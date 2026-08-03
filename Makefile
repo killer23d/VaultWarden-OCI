@@ -96,7 +96,7 @@ ROOT_ALLOWED_TARGETS := \
 	install-systemd remove-systemd systemd-status systemd-validate \
 	unban crowdsec-status crowdsec-alerts security-report smoke-test drill \
 	breakglass-create breakglass-status breakglass-remove \
-	uninstall uninstall-dry-run diagnose prune
+	uninstall uninstall-dry-run diagnose prune info dry-run
 
 ROOT_NEUTRAL_TARGETS := help help-all version
 
