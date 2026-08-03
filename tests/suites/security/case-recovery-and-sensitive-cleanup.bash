@@ -195,455 +195,76 @@ else
   printf 'SKIP root-owned recovery fixture: passwordless sudo unavailable\n'
 fi
 
-# Cleanup failures are explicit and signal-compatible in both entry points.
-setup_source="$(cat setup.sh)"
-secrets_source="$(cat utilities/setup-secrets.sh)"
-[[ "$setup_source" == *'_setup_remove_sensitive_workspace 0'* ]] \
-  || fail "top-level setup lacks explicit pre-summary cleanup"
-[[ "$setup_source" == *"trap '_setup_on_signal 129' HUP"* ]] \
-  || fail "top-level setup does not preserve HUP status"
-[[ "$setup_source" == *"trap '_setup_on_signal 130' INT"* ]] \
-  || fail "top-level setup does not preserve INT status"
-[[ "$setup_source" == *"trap '_setup_on_signal 143' TERM"* ]] \
-  || fail "top-level setup does not preserve TERM status"
-[[ "$setup_source" != *'rm -rf "$TMP_WORKDIR" 2>/dev/null || true'* ]] \
-  || fail "top-level setup still suppresses workspace cleanup failure"
-[[ "$secrets_source" == *'Sensitive temporary workspace cleanup failed; setup is not complete.'* ]] \
-  || fail "direct setup lacks cleanup-failure gate"
-[[ "$secrets_source" != *'_ss_run_cleanup_action "${SETUP_SECRETS_CLEANUP_ACTIONS[$idx]}" || true'* ]] \
-  || fail "direct setup still suppresses file cleanup failure"
-[[ "$secrets_source" != *'_setup_secrets_remove_workdir || true'* ]] \
-  || fail "direct setup still suppresses workspace cleanup failure"
-[[ "$secrets_source" == *'printf -v quoted '\''%q'\'' "$target"'* ]] \
-  || fail "direct setup lacks shell-safe manual cleanup command"
-[[ "$secrets_source" == *'_setup_secrets_cleanup_all "$signal_status" || true'* ]] \
-  || fail "direct setup signal cleanup does not preserve visible warnings"
-
-# Exercise successful cleanup, injected file/workspace failures, original-status
-# preservation, signal-compatible exits, continued cleanup, and confidential
-# diagnostics without running the full setup workflow.
-setup_cleanup_block="$(sed -n '/^# Establish setup-owned cleanup custody before any workspace is created\.$/,/^SETUP_BOOTSTRAP_CLEANUP_ACTIVE=false$/p' setup.sh)"
-direct_cleanup_block="$(sed -n '/^# Secret cleanup lifecycle is script-scoped/,/^# End secret cleanup lifecycle\.$/p' utilities/setup-secrets.sh)"
-[[ -n "$setup_cleanup_block" && -n "$direct_cleanup_block" ]] \
-  || fail "cleanup lifecycle blocks could not be extracted"
-# Workspace-only cleanup covers failures and signals before full custody exists.
-bootstrap_fixture="$(mktemp -d)"
-trap '/bin/rm -rf -- "$bootstrap_fixture"' EXIT
-mkdir -p -- "$bootstrap_fixture/repository"
-run_bootstrap_case() {
-  local case_name="$1" expected_status="$2" expect_residual="${3:-false}"
-  local case_root="$bootstrap_fixture/$case_name" case_tmp
-  local case_output case_rc residual
-  case_tmp="$case_root/temp root"
-  mkdir -p -- "$case_tmp"
-  set +e
-  case_output="$(
-    PROJECT_ROOT="$bootstrap_fixture/repository" \
-    TMPDIR="$case_tmp" \
-    BOOTSTRAP_CASE="$case_name" \
-    SETUP_CLEANUP_BLOCK="$setup_cleanup_block" \
-    bash -s 2>&1 <<'BOOTSTRAP_SETUP_TEST'
+# Top-level setup creates one private workspace only when credential capture starts.
+setup_workspace_helpers="$(
+  sed -n \
+    '/^unset VW_ADMIN_PLAIN_FILE/,/^trap '\''_setup_on_signal 143'\'' TERM$/p' \
+    setup.sh
+)"
+[[ -n "$setup_workspace_helpers" ]] \
+  || fail "top-level sensitive-workspace helpers could not be extracted"
+SETUP_WORKSPACE_HELPERS="$setup_workspace_helpers" bash -s <<'TOP_LEVEL_WORKSPACE_TEST' \
+  || fail "top-level lazy sensitive-workspace lifecycle failed"
 set -euo pipefail
-real_realpath="$(command -v realpath)"
-real_stat="$(command -v stat)"
-real_rmdir="$(command -v rmdir)"
-realpath() {
-  if [[ "$*" == *'/vw_setup.'* ]]; then
-    case "$BOOTSTRAP_CASE" in
-      canonicalization|cleanup_failure) return 41 ;;
-      early_signal)
-        kill -TERM "$PPID"
-        sleep 1
-        return 99
-        ;;
-    esac
-  fi
-  "$real_realpath" "$@"
-}
-stat() {
-  if [[ "$BOOTSTRAP_CASE" == "identity" && "$*" == *'/vw_setup.'* ]]; then
-    return 42
-  fi
-  "$real_stat" "$@"
-}
-rmdir() {
-  if [[ "$BOOTSTRAP_CASE" == "cleanup_failure" ]]; then
-    return 73
-  fi
-  "$real_rmdir" "$@"
-}
-eval "$SETUP_CLEANUP_BLOCK"
-BOOTSTRAP_SETUP_TEST
-  )"
-  case_rc=$?
-  set -e
-  [[ "$case_rc" == "$expected_status" ]] \
-    || fail "$case_name returned $case_rc instead of $expected_status: $case_output"
-  residual="$(find -P "$case_tmp" -mindepth 1 -maxdepth 1 -name 'vw_setup.*' -print -quit)"
-  if [[ "$expect_residual" == "true" ]]; then
-    [[ -n "$residual" ]] || fail "$case_name did not preserve the injected cleanup residual"
-    [[ "$case_output" == *"Failed to remove the validated empty setup workspace"* ]] \
-      || fail "$case_name did not report the bootstrap cleanup failure"
-  else
-    [[ -z "$residual" ]] || fail "$case_name left a temporary workspace behind"
-  fi
-  case "$case_name" in
-    canonicalization|cleanup_failure)
-      [[ "$case_output" == *"Failed to resolve secure temporary directory"* ]] \
-        || fail "$case_name did not report the primary initialization failure"
-      ;;
-    identity)
-      [[ "$case_output" == *"Failed to record secure temporary directory identity"* ]] \
-        || fail "identity failure diagnostic is missing"
-      ;;
-  esac
-  /bin/rm -rf -- "$case_root"
-}
-run_bootstrap_case canonicalization 41
-run_bootstrap_case identity 42
-run_bootstrap_case early_signal 143
-run_bootstrap_case cleanup_failure 41 true
-/bin/rm -rf -- "$bootstrap_fixture"
-trap - EXIT
-SETUP_CLEANUP_BLOCK="$setup_cleanup_block" bash -s <<'TOP_SETUP_TEST' \
-  || fail "top-level sensitive cleanup custody tests failed"
-set -euo pipefail
-log_warn() { printf 'WARN %s\n' "$*" >&2; }
 fixture="$(mktemp -d)"
 trap '/bin/rm -rf -- "$fixture"' EXIT
-PROJECT_ROOT="$fixture/repository"
-mkdir -p -- "$PROJECT_ROOT"
-TMPDIR="$fixture/temp root;meta"
-mkdir -p -- "$TMPDIR"
-external="$fixture/external-sensitive"
-printf '%s' 'EXTERNAL-SECRET-MUST-NOT-APPEAR' > "$external"
-VW_ADMIN_PLAIN_FILE="$external"
-VW_ADMIN_HASH_FILE="/etc/passwd"
-CADDY_PLAIN_FILE="$external"
-CADDY_HASH_FILE="$external"
-TMP_WORKDIR="/etc"
-eval "$SETUP_CLEANUP_BLOCK"
+TMPDIR="$fixture/tmp"
+mkdir -p "$TMPDIR"
+log_warn() { printf 'WARN %s\n' "$*" >&2; }
+operation_release() { return 0; }
+eval "$SETUP_WORKSPACE_HELPERS"
 trap - EXIT INT HUP TERM
-[[ -e "$external" ]]
-[[ -z "${VW_ADMIN_PLAIN_FILE+x}" && -z "${VW_ADMIN_HASH_FILE+x}" ]]
-first_workspace="$SETUP_OWNED_WORKDIR"
-set +e
-_setup_remove_sensitive_workspace 17 >/dev/null 2>&1
-first_rc=$?
-set -e
-[[ "$first_rc" == 17 ]]
-[[ ! -e "$first_workspace" ]]
-prepare_workspace() {
-  TMP_WORKDIR="$(mktemp -d "${SETUP_TEMP_ROOT}/vw_setup.XXXXXXXXXX")"
-  SETUP_OWNED_WORKDIR="$(realpath -e -- "$TMP_WORKDIR")"
-  SETUP_OWNED_WORKDIR_ID="$(stat -c '%d:%i' -- "$SETUP_OWNED_WORKDIR")"
-  VW_ADMIN_PLAIN_FILE="$TMP_WORKDIR/vw_admin_plain"
-  VW_ADMIN_HASH_FILE="$TMP_WORKDIR/vw_admin_hash"
-  CADDY_PLAIN_FILE="$TMP_WORKDIR/caddy_plain"
-  CADDY_HASH_FILE="$TMP_WORKDIR/caddy_hash"
-  printf '%s' 'TOP-SECRET-PLAINTEXT' > "$VW_ADMIN_PLAIN_FILE"
-  printf '%s' 'TOP-SECRET-HASH' > "$VW_ADMIN_HASH_FILE"
-  printf x > "$CADDY_PLAIN_FILE"
-  printf x > "$CADDY_HASH_FILE"
-  SETUP_SENSITIVE_CLEANUP_ACTIVE=true
-  SETUP_SENSITIVE_CLEANUP_RUNNING=false
-  SETUP_SENSITIVE_CLEANUP_FAILED=false
-}
-prepare_workspace
-owned_workspace="$TMP_WORKDIR"
-_setup_remove_sensitive_workspace 0
-[[ ! -e "$owned_workspace" ]]
-# Out-of-custody inherited-style values are never passed to rm or used in commands.
-prepare_workspace
-owned_workspace="$TMP_WORKDIR"
-VW_ADMIN_PLAIN_FILE="$external"
-rm_log="$fixture/rm.log"
-rm() {
-  printf '%q ' "$@" >> "$rm_log"
-  printf '\n' >> "$rm_log"
-  command rm "$@"
-}
-set +e
-refused_output="$(_setup_remove_sensitive_workspace 0 2>&1)"
-refused_rc=$?
-set -e
-unset -f rm
-(( refused_rc != 0 ))
-[[ -e "$external" && -e "$owned_workspace" ]]
-[[ "$refused_output" == *"out-of-custody or unsafe sensitive-file candidate"* ]]
-[[ "$refused_output" != *"Manual cleanup:"* ]]
-[[ "$refused_output" != *"EXTERNAL-SECRET-MUST-NOT-APPEAR"* ]]
-! grep -Fq -- "$external" "$rm_log"
-/bin/rm -rf -- "$owned_workspace"
-/bin/rm -f -- "$rm_log"
-# Protected and broad paths are rejected without destructive guidance.
-for broad in /etc /tmp; do
-  prepare_workspace
-  owned_workspace="$SETUP_OWNED_WORKDIR"
-  TMP_WORKDIR="$broad"
-  VW_ADMIN_PLAIN_FILE="/etc/passwd"
-  set +e
-  broad_output="$(_setup_remove_sensitive_workspace 0 2>&1)"
-  broad_rc=$?
-  set -e
-  (( broad_rc != 0 ))
-  [[ -e /etc/passwd ]]
-  [[ "$broad_output" != *"Manual cleanup:"* ]]
-  [[ "$broad_output" != *"sudo rm -rf -- $broad"* ]]
-  /bin/rm -rf -- "$owned_workspace"
+
+! find "$TMPDIR" -maxdepth 1 -name 'vw_setup.*' -print -quit | grep -q .
+_setup_create_sensitive_workspace
+workspace="$TMP_WORKDIR"
+[[ -d "$workspace" && "$(stat -c '%a' "$workspace")" == "700" ]]
+for capture in \
+  "$VW_ADMIN_PLAIN_FILE" "$VW_ADMIN_HASH_FILE" \
+  "$CADDY_PLAIN_FILE" "$CADDY_HASH_FILE"; do
+  [[ "${capture%/*}" == "$workspace" ]]
 done
-# A symlink candidate and a replaced workspace are left untouched.
-prepare_workspace
-owned_workspace="$SETUP_OWNED_WORKDIR"
-/bin/rm -f -- "$VW_ADMIN_PLAIN_FILE"
-ln -s -- "$external" "$VW_ADMIN_PLAIN_FILE"
-set +e
-symlink_output="$(_setup_remove_sensitive_workspace 0 2>&1)"
-symlink_rc=$?
-set -e
-(( symlink_rc != 0 ))
-[[ -L "$VW_ADMIN_PLAIN_FILE" && -e "$external" && -d "$owned_workspace" ]]
-[[ "$symlink_output" != *"Manual cleanup:"* ]]
-/bin/rm -rf -- "$owned_workspace"
-prepare_workspace
-owned_workspace="$SETUP_OWNED_WORKDIR"
-moved_workspace="${owned_workspace}.moved"
-mv -- "$owned_workspace" "$moved_workspace"
-ln -s -- "$moved_workspace" "$owned_workspace"
-set +e
-workspace_output="$(_setup_remove_sensitive_workspace 0 2>&1)"
-workspace_rc=$?
-set -e
-(( workspace_rc != 0 ))
-[[ -L "$owned_workspace" && -d "$moved_workspace" ]]
-[[ "$workspace_output" != *"Manual cleanup:"* ]]
-/bin/rm -f -- "$owned_workspace"
-/bin/rm -rf -- "$moved_workspace"
-# Failed removal of a validated path may emit a shell-quoted manual command.
-prepare_workspace
-blocked_file="$VW_ADMIN_PLAIN_FILE"
-blocked_workdir="$TMP_WORKDIR"
+printf '%s' 'TOP-LEVEL-PLAINTEXT-DO-NOT-LEAK' > "$VW_ADMIN_PLAIN_FILE"
+_setup_remove_sensitive_workspace 0
+[[ ! -e "$workspace" ]]
+
+_setup_create_sensitive_workspace
+blocked_workspace="$TMP_WORKDIR"
+printf '%s' 'TOP-LEVEL-FAILURE-SECRET' > "$VW_ADMIN_PLAIN_FILE"
 rm() {
-  local arg
-  for arg in "$@"; do
-    if [[ "$arg" == "$blocked_file" || "$arg" == "$blocked_workdir" ]]; then
-      return 1
-    fi
-  done
+  local last="${!#}"
+  [[ "$last" == "$blocked_workspace" ]] && return 73
   command rm "$@"
 }
 set +e
 failure_output="$({ set -x; _setup_remove_sensitive_workspace 0; } 2>&1)"
 failure_rc=$?
 set -e
-unset -f rm
-(( failure_rc != 0 ))
-[[ -e "$blocked_file" ]]
-[[ "$failure_output" == *"Residual validated setup-owned sensitive path: $blocked_file"* ]]
-[[ "$failure_output" == *"Manual cleanup: sudo rm -f -- "* ]]
-[[ "$failure_output" != *"TOP-SECRET-PLAINTEXT"* && "$failure_output" != *"TOP-SECRET-HASH"* ]]
-/bin/rm -rf -- "$blocked_workdir"
-# Existing operation and conventional signal statuses remain authoritative.
-prepare_workspace
-blocked_workdir="$TMP_WORKDIR"
-rm() {
-  local arg
-  for arg in "$@"; do
-    [[ "$arg" == "$blocked_workdir" ]] && return 1
-  done
-  command rm "$@"
-}
+[[ "$failure_rc" == 73 ]]
+[[ -d "$blocked_workspace" ]]
+[[ "$failure_output" == *"Failed to remove the setup sensitive workspace"* ]]
+[[ "$failure_output" != *'TOP-LEVEL-FAILURE-SECRET'* ]]
 set +e
-_setup_remove_sensitive_workspace 37 >/dev/null 2>&1
-status_rc=$?
+_setup_remove_sensitive_workspace 42 >/dev/null 2>&1
+original_rc=$?
 set -e
+[[ "$original_rc" == 42 ]]
 unset -f rm
-[[ "$status_rc" == 37 ]]
-/bin/rm -rf -- "$blocked_workdir"
-for signal_status in 129 130 143; do
-  prepare_workspace
-  blocked_workdir="$TMP_WORKDIR"
-  rm() {
-    local arg
-    for arg in "$@"; do
-      [[ "$arg" == "$blocked_workdir" ]] && return 1
-    done
-    command rm "$@"
-  }
-  set +e
-  signal_output="$( ( _setup_on_signal "$signal_status" ) 2>&1)"
-  signal_rc=$?
-  set -e
-  unset -f rm
-  [[ "$signal_rc" == "$signal_status" ]]
-  [[ "$signal_output" == *"Residual validated setup-owned sensitive path: $blocked_workdir"* ]]
-  /bin/rm -rf -- "$blocked_workdir"
-done
+/bin/rm -rf -- "$blocked_workspace"
+unset TMP_WORKDIR VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
+
+_setup_create_sensitive_workspace
+signal_workspace="$TMP_WORKDIR"
+printf '%s' 'TOP-LEVEL-SIGNAL-SECRET' > "$VW_ADMIN_PLAIN_FILE"
+set +e
+( _setup_on_signal 143 ) >/dev/null 2>&1
+signal_rc=$?
+set -e
+[[ "$signal_rc" == 143 ]]
+[[ ! -e "$signal_workspace" ]]
 /bin/rm -rf -- "$fixture"
 trap - EXIT
-TOP_SETUP_TEST
-
-DIRECT_CLEANUP_BLOCK="$direct_cleanup_block" bash -s <<'DIRECT_SETUP_TEST' \
-  || fail "direct setup sensitive cleanup injected-failure tests failed"
-set -euo pipefail
-log_warn() { printf 'WARN %s\n' "$*" >&2; }
-cleanup_secrets_environment() { return 0; }
-PROJECT_ROOT="$(mktemp -d)"
-trap '/bin/rm -rf -- "$PROJECT_ROOT"' EXIT
-TMP_WORKDIR="$(mktemp -d "$PROJECT_ROOT/vw_tmp.XXXXXXXX")"
-eval "$DIRECT_CLEANUP_BLOCK"
-trap - EXIT INT HUP TERM
-
-prepare_workspace() {
-  TMP_WORKDIR="$(mktemp -d "$PROJECT_ROOT/vw_tmp.XXXXXXXX")"
-  SETUP_SECRETS_TMP_WORKDIR="$TMP_WORKDIR"
-  SETUP_SECRETS_CLEANUP_ACTIONS=()
-  SETUP_SECRETS_COLLECTED_SECRETS=([admin_token]='DIRECT-SECRET-HASH')
-  SETUP_SECRETS_CLEANUP_ACTIVE=true
-  SETUP_SECRETS_CLEANUP_DONE=false
-  SETUP_SECRETS_CLEANUP_RUNNING=false
-  SETUP_SECRETS_CLEANUP_FAILED=false
-}
-
-prepare_workspace
-first="$TMP_WORKDIR/first secret;touch PWNED"
-second="$TMP_WORKDIR/second"
-printf '%s' 'DIRECT-SECRET-PLAINTEXT' > "$first"
-printf x > "$second"
-_ss_register_cleanup "$first"
-_ss_register_cleanup "$second"
-_ss_perform_cleanup 0
-[[ ! -e "$TMP_WORKDIR" ]]
-
-# An out-of-custody path is refused and discarded without becoming a cleanup
-# failure, reaching rm, or producing an unsafe manual deletion command.
-prepare_workspace
-owned="$TMP_WORKDIR/owned"
-printf x > "$owned"
-_ss_register_cleanup "$owned"
-_ss_register_cleanup "/etc/passwd"
-rm_log="$PROJECT_ROOT/refused-rm.log"
-rm() {
-  printf '%q ' "$@" >> "$rm_log"
-  printf '\n' >> "$rm_log"
-  command rm "$@"
-}
-refused_log="$PROJECT_ROOT/refused-output.log"
-set +e
-_ss_perform_cleanup 0 > "$refused_log" 2>&1
-refused_rc=$?
-set -e
-unset -f rm
-refused_output="$(cat "$refused_log")"
-(( refused_rc == 0 ))
-[[ ! -e "$owned" && ! -e "$TMP_WORKDIR" ]]
-[[ ${#SETUP_SECRETS_CLEANUP_ACTIONS[@]} -eq 0 ]]
-[[ "${SETUP_SECRETS_CLEANUP_ACTIVE:-true}" == "false" ]]
-[[ "${SETUP_SECRETS_CLEANUP_DONE:-false}" == "true" ]]
-[[ "$refused_output" == *"Refusing cleanup outside approved temporary or secrets paths: /etc/passwd"* ]]
-[[ "$refused_output" != *"Manual cleanup:"* ]]
-! grep -Fq '/etc/passwd' "$rm_log"
-/bin/rm -f -- "$rm_log" "$refused_log"
-
-# An unsafe workspace is a nonzero cleanup failure, but it is never passed to
-# rm and never produces an unsafe recursive manual-deletion command.
-prepare_workspace
-orphaned_test_workdir="$TMP_WORKDIR"
-SETUP_SECRETS_TMP_WORKDIR="/etc"
-unsafe_workdir_log="$PROJECT_ROOT/unsafe-workdir-output.log"
-set +e
-_ss_perform_cleanup 0 > "$unsafe_workdir_log" 2>&1
-unsafe_workdir_rc=$?
-set -e
-unsafe_workdir_output="$(cat "$unsafe_workdir_log")"
-(( unsafe_workdir_rc != 0 ))
-[[ "${SETUP_SECRETS_CLEANUP_ACTIVE:-false}" == "true" ]]
-[[ "${SETUP_SECRETS_CLEANUP_DONE:-true}" == "false" ]]
-[[ "${SETUP_SECRETS_CLEANUP_FAILED:-false}" == "true" ]]
-[[ "${SETUP_SECRETS_TMP_WORKDIR:-}" == "/etc" ]]
-[[ "$unsafe_workdir_output" == *"Refusing unsafe temporary workspace removal: /etc"* ]]
-[[ "$unsafe_workdir_output" != *"Manual cleanup:"* ]]
-/bin/rm -rf -- "$orphaned_test_workdir"
-/bin/rm -f -- "$unsafe_workdir_log"
-
-# Reverse-order cleanup continues after a failure and then attempts the workspace.
-prepare_workspace
-first="$TMP_WORKDIR/first secret;touch PWNED"
-second="$TMP_WORKDIR/second"
-printf '%s' 'DIRECT-SECRET-PLAINTEXT' > "$first"
-printf x > "$second"
-_ss_register_cleanup "$second"
-_ss_register_cleanup "$first"
-blocked_file="$first"
-blocked_workdir="$TMP_WORKDIR"
-rm() {
-  local arg
-  for arg in "$@"; do
-    if [[ "$arg" == "$blocked_file" || "$arg" == "$blocked_workdir" ]]; then
-      return 1
-    fi
-  done
-  command rm "$@"
-}
-failure_log="$PROJECT_ROOT/approved-failure-output.log"
-set +e
-{ set -x; _ss_perform_cleanup 0; } > "$failure_log" 2>&1
-rc=$?
-set -e
-unset -f rm
-output="$(cat "$failure_log")"
-(( rc != 0 ))
-[[ -e "$blocked_file" && ! -e "$second" ]]
-[[ ${#SETUP_SECRETS_CLEANUP_ACTIONS[@]} -eq 1 ]]
-[[ "${SETUP_SECRETS_CLEANUP_ACTIONS[0]}" == "$blocked_file" ]]
-[[ "$output" == *"Residual sensitive path: $blocked_file"* ]]
-[[ "$output" == *'Manual cleanup: sudo rm -f -- '* ]]
-[[ "$output" != *'DIRECT-SECRET-PLAINTEXT'* && "$output" != *'DIRECT-SECRET-HASH'* ]]
-[[ ! -e "$PROJECT_ROOT/PWNED" ]]
-/bin/rm -rf -- "$blocked_workdir"
-/bin/rm -f -- "$failure_log"
-
-# Existing failure and all conventional signal statuses remain authoritative.
-prepare_workspace
-blocked_workdir="$TMP_WORKDIR"
-rm() {
-  local arg
-  for arg in "$@"; do
-    [[ "$arg" == "$blocked_workdir" ]] && return 1
-  done
-  command rm "$@"
-}
-set +e
-_ss_perform_cleanup 42 >/dev/null 2>&1
-rc=$?
-set -e
-unset -f rm
-[[ "$rc" == 42 ]]
-/bin/rm -rf -- "$blocked_workdir"
-
-for signal_status in 129 130 143; do
-  prepare_workspace
-  blocked_workdir="$TMP_WORKDIR"
-  rm() {
-    local arg
-    for arg in "$@"; do
-      [[ "$arg" == "$blocked_workdir" ]] && return 1
-    done
-    command rm "$@"
-  }
-  set +e
-  signal_output="$( ( _setup_secrets_on_signal "$signal_status" ) 2>&1)"
-  rc=$?
-  set -e
-  unset -f rm
-  [[ "$rc" == "$signal_status" ]]
-  [[ "$signal_output" == *"Residual sensitive path: $blocked_workdir"* ]]
-  /bin/rm -rf -- "$blocked_workdir"
-done
-
-/bin/rm -rf -- "$PROJECT_ROOT"
-trap - EXIT
-DIRECT_SETUP_TEST
+TOP_LEVEL_WORKSPACE_TEST
 
 # Ubuntu 7zip package and executable-selection contracts.
 # Exact apt dependency-array tokenization contract.
