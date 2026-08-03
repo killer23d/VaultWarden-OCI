@@ -2521,8 +2521,11 @@ EOF
     
     local tmp_secrets=""
     tmp_secrets="$(_ss_make_plaintext_temp)" || return 1
+    # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"" RETURN
+    # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"; exit 130" INT
+    # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"; exit 143" TERM
     {
         local _bkeys _bkey _bph
