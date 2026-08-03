@@ -21,10 +21,11 @@ done
 # Exercise the actual archive-listing validator against a synthetic forbidden member.
 tmp="$(mktemp -d)"
 cleanup() {
-  if [[ -d "${protected_dir:-}" ]] && (( EUID != 0 )); then
-    sudo rm -rf "$protected_dir" 2>/dev/null || true
+  if (( EUID != 0 )) && command -v sudo >/dev/null 2>&1; then
+    sudo rm -rf "$tmp" 2>/dev/null || true
+  else
+    rm -rf "$tmp"
   fi
-  rm -rf "$tmp"
 }
 trap cleanup EXIT
 mkdir -p "$tmp/state/data" "$tmp/project"
@@ -98,6 +99,33 @@ run_root() {
     sudo -n "$@"
   fi
 }
+
+# A fresh-host remote restore must enter bootstrap mode, list the remote, and remain non-destructive.
+bootstrap_output="$tmp/bootstrap-restore.out"
+bootstrap_ops_dir="$tmp/bootstrap-operations"
+bootstrap_ops_lock="$tmp/bootstrap-operations.lock"
+if ! printf 'q\n' | run_root env \
+  PATH="$mock_bin:$PATH" \
+  HOME="$tmp/home" \
+  PROJECT_STATE_DIR="$tmp/missing-state" \
+  VW_CONFIG_INSTALLED_ENV_FILE="$tmp/missing-installed.env" \
+  RCLONE_REMOTE_NAME=testremote \
+  RCLONE_REMOTE_PATH=testpath \
+  RCLONE_CONFIG="$tmp/home/.config/rclone/rclone.conf" \
+  RCLONE_CALLS="$rclone_calls" \
+  PUID=1000 \
+  PGID=1000 \
+  VW_OPERATIONS_STATE_DIR="$bootstrap_ops_dir" \
+  VW_OPERATIONS_LOCK="$bootstrap_ops_lock" \
+  bash ./restore.sh interactive --remote --force >"$bootstrap_output" 2>&1; then
+  cat "$bootstrap_output" >&2
+  fail "fresh-host remote restore did not enter the supported bootstrap path"
+fi
+grep -Fq 'operating in bootstrap/emergency-restore mode' "$bootstrap_output" \
+  || { cat "$bootstrap_output" >&2; fail "fresh-host remote restore did not report bootstrap mode"; }
+grep -Fq 'db_backup_20260803_000000.sqlite3.age' "$bootstrap_output" \
+  || { cat "$bootstrap_output" >&2; fail "fresh-host remote restore did not reach remote selection"; }
+pass "fresh-host remote restore enters bootstrap mode"
 if run_root env \
   PATH="$mock_bin:$PATH" \
   HOME="$tmp/home" \
