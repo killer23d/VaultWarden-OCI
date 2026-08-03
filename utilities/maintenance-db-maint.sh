@@ -53,12 +53,6 @@ EXIT CODES:
 EOF
 }
 
-_load_env() {
-    if load_project_environment 2>/dev/null; then return 0; fi
-    log_warn "No project environment found — relying on environment already set (e.g. systemd EnvironmentFile)"
-    return 0
-}
-
 _find_new_db_safety_backup() {
     local db_backup_dir="$1" marker="$2"
     local -a candidates=()
@@ -224,7 +218,7 @@ run_deep_db_maintenance() {
     elif [[ -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
         log_warn "Maintenance did not complete successfully. Retaining safety backup: $safety_backup_file"
     fi
-    [[  "$maintenance_successful" == "true" ]]
+    [[ "$maintenance_successful" == "true" ]]
 }
 
 [[ "${1:-}" == "db-maint" ]] && shift
@@ -251,7 +245,7 @@ main() {
     trap 'operation_release 130; perform_cleanup; exit 130' INT
     trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
     operation_set_phase "1" "Preparing database maintenance"
-    _load_env
+    load_project_environment || exit 1
     operation_set_phase "2" "Running deep database maintenance"
     run_deep_db_maintenance
     exit $?
