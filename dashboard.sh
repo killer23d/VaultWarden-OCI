@@ -12,6 +12,7 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
 source "${REPO_ROOT}/lib/log.sh"
+source "${REPO_ROOT}/lib/config.sh"
 source "${REPO_ROOT}/lib/common.sh"
 init_common_lib "$0"
 [[ -f "${REPO_ROOT}/lib/validate.sh" ]] && source "${REPO_ROOT}/lib/validate.sh"
@@ -27,39 +28,21 @@ RED="${COLOR_RED}"
 YLW="${COLOR_YELLOW}"
 NC="${COLOR_RESET}"
 
-# Read a single variable from .env without sourcing the whole file.
-_read_env_var() {
-    local var="$1" default="$2" line key val=""
-    if [[ -f "${REPO_ROOT}/.env" && -r "${REPO_ROOT}/.env" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ "$line" == *=* ]] || continue
-            key="${line%%=*}"
-            [[ "$key" == "$var" ]] || continue
-            val="${line#*=}"
-        done < "${REPO_ROOT}/.env"
-        if (( ${#val} >= 2 )); then
-            if [[ "${val:0:1}" == '"' && "${val: -1}" == '"' ]]; then
-                val="${val:1:${#val}-2}"
-            elif [[ "${val:0:1}" == "'" && "${val: -1}" == "'" ]]; then
-                val="${val:1:${#val}-2}"
-            fi
-        fi
-        printf '%s' "${val:-${default}}"
-    else
-        printf '%s' "${default}"
-    fi
-}
+STATE_DIR="/var/lib/vaultwarden"
+BACKUP_DIR="${STATE_DIR}/backups"
+TZ_DISPLAY="UTC"
 
-STATE_DIR="$(_read_env_var PROJECT_STATE_DIR /var/lib/vaultwarden)"
-BACKUP_DIR="$(_read_env_var BACKUP_DIR "${STATE_DIR}/backups")"
+_load_dashboard_config() {
+    load_project_environment || return 1
+    STATE_DIR="$(get_config_value PROJECT_STATE_DIR /var/lib/vaultwarden)"
+    BACKUP_DIR="$(get_config_value BACKUP_DIR "${STATE_DIR}/backups")"
+    TZ_DISPLAY="$(get_config_value TZ UTC)"
+}
 
 # Container names (must match docker-compose.yml)
 CONTAINER_VW="vaultwarden_app"
 CONTAINER_CADDY="vaultwarden_caddy"
 CONTAINER_POSTFIX="vaultwarden_postfix"
-
-# Dashboard timestamps: read TZ from .env (ux.md #4), default UTC.
-TZ_DISPLAY="$(_read_env_var TZ "UTC")"
 
 # Divider line
 DIVIDER="--------------------------------------------------"
@@ -341,7 +324,7 @@ _secrets_health() {
 #
 # Returns a single color-coded status line describing rclone availability:
 #
-#   Configured (not probed) — binary present + RCLONE_REMOTE_NAME set in .env
+#   Configured (not probed) — binary present + RCLONE_REMOTE_NAME configured
 #   Not configured  — binary present but RCLONE_REMOTE_NAME is missing/placeholder
 #   Not installed   — rclone binary not found on PATH
 #
@@ -356,9 +339,7 @@ _rclone_status() {
         return
     fi
 
-    # Read the configured remote name from .env.
-    local remote_name
-    remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
+    local remote_name="${RCLONE_REMOTE_NAME:-}"
 
     # Strip surrounding whitespace and treat placeholder values as unset.
     remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
@@ -368,7 +349,7 @@ _rclone_status() {
     if [[ -z "${remote_name}" \
         || "${upper_name}" == *CHANGE_ME* \
         || "${upper_name}" == *CHANGEME* ]]; then
-        printf '%sNot configured (set RCLONE_REMOTE_NAME in .env)%s' "${YLW}" "${NC}"
+        printf '%sNot configured (set RCLONE_REMOTE_NAME)%s' "${YLW}" "${NC}"
         return
     fi
 
@@ -591,7 +572,7 @@ draw_backup_menu() {
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
     echo ""
-    echo -e " ${CYN}Tip:${NC} Options 5-7 require RCLONE_REMOTE_NAME to be set in .env."
+    echo -e " ${CYN}Tip:${NC} Options 5-7 use the configured RCLONE_REMOTE_NAME."
     echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
     echo ""
 }
@@ -618,51 +599,17 @@ handle_backup_menu() {
             run_sudo_cmd "sudo make backup-status" make -C "${REPO_ROOT}" backup-status
             ;;
         5)
-            # Sync the most recent backup archive to the configured rclone remote.
-            # backup.sh --rclone is non-fatal on network failure by design, so the
-            # local archive is never at risk.
             _check_script "${REPO_ROOT}/backup.sh" || return
-            local remote_name
-            remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
-            remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
-            if [[ -z "${remote_name}" ]]; then
-                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
-                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
-                _press_enter
-                return
-            fi
             run_sudo_cmd "sudo ./backup.sh run db --rclone" \
                 "${REPO_ROOT}/backup.sh" run db --rclone
             ;;
         6)
-            # Full end-to-end verification (decrypt + integrity check) followed
-            # by an rclone sync. Fatal on verification failure before any upload.
             _check_script "${REPO_ROOT}/backup.sh" || return
-            local remote_name
-            remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
-            remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
-            if [[ -z "${remote_name}" ]]; then
-                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
-                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
-                _press_enter
-                return
-            fi
             run_sudo_cmd "sudo ./backup.sh run db --full-verification --rclone" \
                 "${REPO_ROOT}/backup.sh" run db --full-verification --rclone
             ;;
         7)
-            # Copy every retained local archive and sidecar to its matching
-            # db/full/emergency remote folder, then apply configured retention.
             _check_script "${REPO_ROOT}/backup.sh" || return
-            local remote_name
-            remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
-            remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
-            if [[ -z "${remote_name}" ]]; then
-                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
-                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
-                _press_enter
-                return
-            fi
             run_sudo_cmd "./backup.sh sync" \
                 "${REPO_ROOT}/backup.sh" sync
             ;;
@@ -1072,6 +1019,7 @@ main() {
 
     # Ensure we are running from the repo root so relative paths and make work.
     cd "${REPO_ROOT}"
+    _load_dashboard_config || exit 1
 
     while true; do
         clear
@@ -1111,7 +1059,7 @@ main() {
             main)     handle_main_menu     "${opt}" ;;
             backup)   handle_backup_menu   "${opt}" ;;
             security) handle_security_menu "${opt}" ;;
-            secrets)  handle_secrets_menu  "${opt}" ;;
+            secrets)  handle_secrets_menu "${opt}" ;;
             advanced) handle_advanced_menu "${opt}" ;;
             identity) handle_identity_menu "${opt}" ;;
             email_operations) handle_email_operations_menu "${opt}" ;;
