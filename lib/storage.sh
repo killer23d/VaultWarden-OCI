@@ -4,12 +4,12 @@
 # Provides:
 #   Validation : require_project_state_ready
 #   Provision  : setup_data_volume, install_docker_mount_guard
-#   Paths      : vw_default_backup_dir, ensure_caddy_log_permissions
+#   Paths      : vw_default_backup_dir
 #
 # Depends on / Load order:
 #   lib/log.sh is auto-loaded if it has not already been sourced.
 #   lib/common.sh should be sourced before this file for is_root,
-#   get_real_user, _maybe_sudo, and get_config_value.
+#   get_real_user, and get_config_value.
 #
 # Canonical caller source block:
 #   source "${LIB_DIR}/log.sh"
@@ -819,86 +819,4 @@ vw_default_backup_dir() {
         state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     fi
     printf '%s/backups' "$state_dir"
-}
-
-# ---------------------------------------------------------------------------
-# ensure_caddy_log_permissions
-#
-# Creates the Caddy log directory and its access.log / security.log files,
-# then enforces 2000:2000 750/640 ownership, matching the Caddy service. Uses a stat-check-then-fix
-# pattern to remain idempotent. Relies on _maybe_sudo() from lib/common.sh
-# for privilege escalation when the caller is not already root.
-#
-# Arguments:
-#   $1 — caddy_log_dir  (e.g. /var/lib/vaultwarden/logs/caddy)
-#         Must be a non-empty absolute path. The function refuses to proceed
-#         if the argument is blank or not an absolute path to prevent
-#         accidental creation of files in the filesystem root when the
-#         caller passes an unset variable.
-#
-# Returns 0 on success, 1 on any failure.
-# ---------------------------------------------------------------------------
-ensure_caddy_log_permissions() {
-    local caddy_log_dir="$1"
-
-    # Guard: reject blank or non-absolute paths before any filesystem operation.
-    if [[ -z "$caddy_log_dir" ]]; then
-        log_error "ensure_caddy_log_permissions: caddy_log_dir argument is empty."
-        log_error "Ensure CADDY_LOG_DIR (or the equivalent variable) is set before calling this function."
-        return 1
-    fi
-    if [[ "$caddy_log_dir" != /* ]]; then
-        log_error "ensure_caddy_log_permissions: caddy_log_dir must be an absolute path, got: '$caddy_log_dir'"
-        return 1
-    fi
-
-    local access_log="${caddy_log_dir}/access.log"
-    local security_log="${caddy_log_dir}/security.log"
-    local changed=false
-
-    command -v _maybe_sudo >/dev/null 2>&1 || {
-        log_error "ensure_caddy_log_permissions requires lib/common.sh to be sourced first"
-        return 1
-    }
-
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log_info "[DRY RUN] Would enforce 2000:2000 750/640 permissions for ${caddy_log_dir}"
-        return 0
-    fi
-
-    _maybe_sudo mkdir -p "$caddy_log_dir" || return 1
-    [[ -e "$access_log" ]] || _maybe_sudo touch "$access_log" || return 1
-    [[ -e "$security_log" ]] || _maybe_sudo touch "$security_log" || return 1
-
-    local dir_owner dir_mode
-    dir_owner=$(stat -c '%u:%g' "$caddy_log_dir" 2>/dev/null || echo "")
-    dir_mode=$(stat  -c '%a'    "$caddy_log_dir" 2>/dev/null || echo "")
-    if [[ "$dir_owner" != "2000:2000" ]]; then
-        _maybe_sudo chown 2000:2000 "$caddy_log_dir" || return 1
-        changed=true
-    fi
-    if [[ "$dir_mode" != "750" ]]; then
-        _maybe_sudo chmod 750 "$caddy_log_dir" || return 1
-        changed=true
-    fi
-
-    local log_file owner mode
-    for log_file in "$access_log" "$security_log"; do
-        owner=$(stat -c '%u:%g' "$log_file" 2>/dev/null || echo "")
-        mode=$(stat  -c '%a'    "$log_file" 2>/dev/null || echo "")
-        if [[ "$owner" != "2000:2000" ]]; then
-            _maybe_sudo chown 2000:2000 "$log_file" || return 1
-            changed=true
-        fi
-        if [[ "$mode" != "640" ]]; then
-            _maybe_sudo chmod 640 "$log_file" || return 1
-            changed=true
-        fi
-    done
-
-    if [[ "$changed" == "true" ]]; then
-        log_success "Caddy log permissions remediated (${caddy_log_dir})"
-    else
-        log_success "Caddy log permissions already correct (${caddy_log_dir})"
-    fi
 }

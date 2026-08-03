@@ -399,47 +399,23 @@ assert_known_path_permissions() {
 
 auto_fix_critical_permissions() {
     local project_root="${1:-$PROJECT_ROOT}"
+    local state_dir="${PROJECT_STATE_DIR:-}"
+    local puid pgid
 
-    # Repo .env is never chowned to root. It may be repaired back to the
-    # real operator owner/group when that owner can be resolved; persistent
-    # runtime env is installed under ${PROJECT_STATE_DIR}/config/install.env.
+    [[ -n "$state_dir" ]] || return 0
 
-    local age_key_file="${SOPS_AGE_KEY_FILE:-}"
-    if [[ -z "$age_key_file" ]]; then
-        age_key_file="/etc/vaultwarden/age-key.txt"
-    fi
-    if [[ -f "$age_key_file" ]]; then
-        fix_known_path_permissions "$age_key_file"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY RUN] Would check and repair repository-managed runtime permissions under: $state_dir"
+        return 0
     fi
 
-    for _vw_path in \
-        /etc/vaultwarden \
-        /etc/vaultwarden/vaultwarden.env \
-        /etc/vaultwarden/rclone.conf \
-        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config" \
-        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env" \
-        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env" \
-        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets" \
-        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/secrets.yaml" \
-        "${project_root}/.env" \
-        "${project_root}/secrets/keys/age-key.txt" \
-        "${project_root}/.sops.yaml" \
-        "${project_root}/secrets/secrets.yaml" \
-        /run/vaultwarden-oci/managed-secrets \
-        /run/vaultwarden-oci/secrets; do
-        [[ -e "$_vw_path" ]] && fix_known_path_permissions "$_vw_path"
-    done
-    if [[ -d /run/vaultwarden-oci/secrets ]]; then
-        while IFS= read -r -d '' _vw_secret_path; do
-            fix_known_path_permissions "$_vw_secret_path"
-        done < <(find /run/vaultwarden-oci/secrets -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
+    if ! declare -F repair_runtime_state_permissions >/dev/null 2>&1; then
+        # shellcheck source=runtime-permissions.sh
+        source "${LIB_DIR}/runtime-permissions.sh"
     fi
-
-    local caddy_ep="${project_root}/caddy/entrypoint.sh"
-    if [[ -f "$caddy_ep" && ! -x "$caddy_ep" ]]; then
-        chmod +x "$caddy_ep" 2>/dev/null || true
-        log_warn "auto_fix_critical_permissions: caddy/entrypoint.sh was not executable — corrected"
-    fi
+    puid="${PUID:-$(get_config_value "PUID" "" 2>/dev/null || true)}"
+    pgid="${PGID:-$(get_config_value "PGID" "" 2>/dev/null || true)}"
+    repair_runtime_state_permissions "$state_dir" "$puid" "$pgid" "$project_root"
 }
 
 # _fix_rclone_ownership

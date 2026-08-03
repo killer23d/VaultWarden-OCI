@@ -1082,26 +1082,37 @@ if publish_setup_credentials \
   fail "setup handoff overwrote timestamp-colliding file"
 fi
 
-# Runtime permission behavior, including dry-run no-op.
-mkdir -p "$tmp/logs/caddy" "$tmp/logs/postfix"
-printf x > "$tmp/logs/caddy/access.log"
-printf y > "$tmp/logs/postfix/mail.log"
-chmod 0777 "$tmp/logs" "$tmp/logs/caddy" "$tmp/logs/postfix" "$tmp/logs/caddy/access.log" "$tmp/logs/postfix/mail.log"
+# Canonical per-service log-tree behavior, including check-only no-op.
+mkdir -p "$tmp/logs/vaultwarden" "$tmp/logs/postfix" "$tmp/logs/caddy/nested"
+printf v > "$tmp/logs/vaultwarden/vaultwarden.log"
+printf p > "$tmp/logs/postfix/mail.log"
+printf c > "$tmp/logs/caddy/access.log"
+printf n > "$tmp/logs/caddy/nested/rotated.log"
+chmod -R 0777 "$tmp/logs"
 log_error() { printf '%s\n' "$*" >&2; }
 log_info() { :; }
-_maybe_sudo() { "$@"; }
 # shellcheck disable=SC1091
 source lib/runtime-permissions.sh
-enforce_runtime_log_permissions "$tmp/logs" "$(id -u)" "$(id -g)" false
+runtime_uid="$(id -u)"
+runtime_gid="$(id -g)"
+for service in vaultwarden postfix caddy; do
+  _vw_runtime_manage_tree repair \
+    "$tmp/logs/$service" "$runtime_uid" "$runtime_gid" 750 640 "${service} logs"
+done
 while IFS= read -r -d '' path; do
   [[ "$(stat -c '%a' "$path")" == "750" ]] || fail "directory mode is not 0750: $path"
-done < <(find "$tmp/logs" -type d -print0)
+done < <(find "$tmp/logs" -mindepth 1 -type d -print0)
 while IFS= read -r -d '' path; do
   [[ "$(stat -c '%a' "$path")" == "640" ]] || fail "file mode is not 0640: $path"
 done < <(find "$tmp/logs" -type f -print0)
 chmod 0777 "$tmp/logs/caddy/access.log"
-enforce_runtime_log_permissions "$tmp/logs" "$(id -u)" "$(id -g)" true
-[[ "$(stat -c '%a' "$tmp/logs/caddy/access.log")" == "777" ]] || fail "dry-run mutated fixture"
+set +e
+_vw_runtime_manage_tree check \
+  "$tmp/logs/caddy" "$runtime_uid" "$runtime_gid" 750 640 "Caddy logs" >/dev/null 2>&1
+check_rc=$?
+set -e
+(( check_rc != 0 )) || fail "check-only accepted Caddy log drift"
+[[ "$(stat -c '%a' "$tmp/logs/caddy/access.log")" == "777" ]] || fail "check-only mutated fixture"
 
 # Post-publication ownership validation must fail clean.
 handoff_publish_block="$(sed -n '/^_setup_handoff_publish_file() {$/,/^}$/p' lib/setup-credentials.sh)"
