@@ -497,7 +497,16 @@ MOCK_DOCKER
 #!/usr/bin/env bash
 exit 1
 MOCK_SYSTEMCTL
-    chmod +x "$TMP/interface-bin/docker" "$TMP/interface-bin/systemctl"
+    cat > "$TMP/interface-bin/id" <<'MOCK_ID'
+#!/usr/bin/env bash
+case "${1:-}" in
+    -u) printf '0\n' ;;
+    -un) printf 'root\n' ;;
+    -gn) printf 'root\n' ;;
+    *) exec /usr/bin/id "$@" ;;
+esac
+MOCK_ID
+    chmod +x "$TMP/interface-bin/docker" "$TMP/interface-bin/systemctl" "$TMP/interface-bin/id"
 
     local direct_output dashboard_output cli_output make_output init_output
     direct_output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fixture" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
