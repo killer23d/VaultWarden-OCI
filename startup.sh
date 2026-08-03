@@ -266,7 +266,7 @@ validate_caddy_version_pin() {
     log_error "The Dockerfile uses caddy:\${CADDY_VERSION}-builder; caddy:latest-builder is not published."
     log_error "Fix .env by setting: CADDY_VERSION=2.11.4"
     log_error "Then run: sudo make sync-env"
-    log_error "Update the local image explicitly with: sudo ./maintenance.sh update"
+    log_error "Update the local image explicitly with: sudo ./maintenance.sh update --images"
     return 1
   fi
   return 0
@@ -499,7 +499,7 @@ validate_local_images() {
 
   if [[ "$missing_image" == "true" ]]; then
     log_error "Startup does not pull or update images."
-    log_error "Run the existing image-maintenance command: sudo ./maintenance.sh update"
+    log_error "Run the existing image-maintenance command: sudo ./maintenance.sh update --images"
     log_error "Then retry: sudo make up"
     return 1
   fi
