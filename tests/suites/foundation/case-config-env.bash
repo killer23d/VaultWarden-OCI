@@ -84,7 +84,6 @@ rm -f "$ETC/rclone.conf"
 assert_not_contains "$STATE/config/install.env" "RCLONE_CONFIG=$ETC/rclone.conf" 'RCLONE_CONFIG injected when rclone.conf absent'
 pass 'RCLONE_CONFIG is injected only when rclone.conf exists'
 
-
 # Data-volume fail-closed cases.
 for case in missing-device mismatch not-mounted; do
   R="$TMP/repo-$case"; copy_repo "$R"; M="$TMP/mount-$case"; mkdir -p "$M"
@@ -325,6 +324,7 @@ set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 TESTS_RUN=0
+chmod 0755 "$TMP"
 
 cleanup() {
     if [[ -d "$TMP" ]]; then
@@ -350,10 +350,15 @@ write_env() {
     chmod 0600 "$file"
 }
 
-run_config_probe() {
-    local script="$1"
-    PROJECT_ROOT="$ROOT" bash -c "$script"
+run_unprivileged() {
+    if (( EUID == 0 )); then
+        command -v runuser >/dev/null 2>&1 || fail 'runuser is required for unreadable-file configuration tests'
+        runuser -u nobody -- "$@"
+    else
+        "$@"
+    fi
 }
+
 test_config_falls_through_empty_repo_state() {
     local fake_repo="$TMP/fake-repo-fallthrough" installed="$TMP/installed.env" installed_state="$TMP/installed-state"
     mkdir -p "$fake_repo"
@@ -373,14 +378,16 @@ PROBE
 
 test_config_caller_override_wins() {
     local fake_repo="$TMP/fake-repo-override" installed="$TMP/installed-override.env" installed_state="$TMP/installed-other" override_state="$TMP/override-state"
-    mkdir -p "$fake_repo"
-    mkdir -p "$override_state/config"
+    mkdir -p "$fake_repo" "$override_state/config"
     write_env "$fake_repo/.env" 'DOMAIN=https://repo.example.test'
-    write_env "$installed" "PROJECT_STATE_DIR=$installed_state"
-    write_env "$override_state/config/install.env" "PROJECT_STATE_DIR=$TMP/wrong-loaded-state" 'DATA_VOLUME_MOUNT=/loaded-mount' 'SOPS_AGE_KEY_FILE=/loaded/key.txt'
+    write_env "$installed" "PROJECT_STATE_DIR=$installed_state" 'BACKUP_DIR=/loaded/backups' 'TZ=UTC' 'RCLONE_REMOTE_NAME=loaded-remote'
 
     local output
-    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" PROJECT_STATE_DIR="$override_state" DATA_VOLUME_MOUNT=/caller-mount SOPS_AGE_KEY_FILE=/caller/key.txt bash <<'PROBE'
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" \
+        PROJECT_STATE_DIR="$override_state" DATA_VOLUME_MOUNT=/caller-mount \
+        SOPS_AGE_KEY_FILE=/caller/key.txt BACKUP_DIR=/caller/backups \
+        TZ=America/Vancouver RCLONE_REMOTE_NAME=caller-remote \
+        SECRETS_FILE=/caller/secrets.yaml bash <<'PROBE'
 set -euo pipefail
 source "$REAL_CONFIG"
 load_project_environment
@@ -388,29 +395,166 @@ load_project_environment
 printf 'PROJECT_STATE_DIR=%s\n' "$PROJECT_STATE_DIR"
 printf 'DATA_VOLUME_MOUNT=%s\n' "$DATA_VOLUME_MOUNT"
 printf 'SOPS_AGE_KEY_FILE=%s\n' "$SOPS_AGE_KEY_FILE"
+printf 'BACKUP_DIR=%s\n' "$BACKUP_DIR"
+printf 'TZ=%s\n' "$TZ"
+printf 'RCLONE_REMOTE_NAME=%s\n' "$RCLONE_REMOTE_NAME"
+printf 'SECRETS_FILE=%s\n' "$SECRETS_FILE"
 PROBE
 )
     grep -q "PROJECT_STATE_DIR=$override_state" <<< "$output" || fail "caller PROJECT_STATE_DIR override lost: $output"
     grep -q 'DATA_VOLUME_MOUNT=/caller-mount' <<< "$output" || fail "caller DATA_VOLUME_MOUNT override lost: $output"
     grep -q 'SOPS_AGE_KEY_FILE=/caller/key.txt' <<< "$output" || fail "caller SOPS_AGE_KEY_FILE override lost: $output"
+    grep -q 'BACKUP_DIR=/caller/backups' <<< "$output" || fail "caller BACKUP_DIR override lost: $output"
+    grep -q 'TZ=America/Vancouver' <<< "$output" || fail "caller TZ override lost: $output"
+    grep -q 'RCLONE_REMOTE_NAME=caller-remote' <<< "$output" || fail "caller RCLONE_REMOTE_NAME override lost: $output"
+    grep -q 'SECRETS_FILE=/caller/secrets.yaml' <<< "$output" || fail "caller SECRETS_FILE override lost: $output"
+}
+
+test_unreadable_repo_allows_installed_environment() {
+    local fake_repo="$TMP/fake-repo-unreadable" installed="$TMP/readable-installed.env" installed_state="$TMP/readable-installed-state"
+    mkdir -p "$fake_repo"
+    chmod 0755 "$fake_repo"
+    write_env "$fake_repo/.env" 'PROJECT_STATE_DIR=/wrong/repo/state' 'DOMAIN=https://repo.example.test'
+    chmod 000 "$fake_repo/.env"
+    write_env "$installed" "PROJECT_STATE_DIR=$installed_state" 'DOMAIN=https://installed.example.test'
+    chmod 0644 "$installed"
+
+    local output
+    output=$(run_unprivileged env VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" \
+        REAL_CONFIG="$ROOT/lib/config.sh" bash -c '
+set -euo pipefail
+source "$REAL_CONFIG"
+load_project_environment
+printf "PROJECT_STATE_DIR=%s\nDOMAIN=%s\n" "$PROJECT_STATE_DIR" "$DOMAIN"
+') || fail 'unreadable repository .env blocked a readable installed environment'
+    grep -Fq "PROJECT_STATE_DIR=$installed_state" <<< "$output" || fail "installed state was not selected: $output"
+    grep -Fq 'DOMAIN=https://installed.example.test' <<< "$output" || fail "installed domain was not selected: $output"
+}
+
+test_unreadable_selected_environment_fails() {
+    local fake_repo="$TMP/fake-repo-selected-unreadable" installed="$TMP/unreadable-installed.env"
+    mkdir -p "$fake_repo"
+    chmod 0755 "$fake_repo"
+    write_env "$installed" "PROJECT_STATE_DIR=$TMP/unreadable-state" 'DOMAIN=https://installed.example.test'
+    chmod 000 "$installed"
+
+    local output
+    if output=$(run_unprivileged env VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" \
+        REAL_CONFIG="$ROOT/lib/config.sh" bash -c '
+set -euo pipefail
+source "$REAL_CONFIG"
+load_project_environment
+' 2>&1); then
+        fail 'unreadable selected canonical environment unexpectedly succeeded'
+    fi
+    grep -Fq 'Environment file is not readable' <<< "$output" \
+        || fail "unreadable selected environment error was unclear: $output"
+}
+
+test_operator_interfaces_share_installed_configuration() {
+    local fixture="$TMP/interface-repo" installed="$TMP/interface-installed.env"
+    local installed_state="$TMP/interface-installed-state" installed_backup="$TMP/interface-installed-backups"
+    local repo_state="$TMP/interface-repo-state" repo_backup="$TMP/interface-repo-backups"
+    local installed_archive='db_backup_20990101_000000.sqlite3.age'
+    local repo_archive='db_backup_19990101_000000.sqlite3.age'
+
+    mkdir -p "$fixture/utilities" "$installed_state/secrets" "$installed_backup/db" "$repo_backup/db" "$TMP/interface-bin"
+    cp "$ROOT/Makefile" "$ROOT/dashboard.sh" "$ROOT/backup.sh" "$ROOT/VERSION" "$fixture/"
+    cp "$ROOT/utilities/backup-run.sh" "$fixture/utilities/"
+    ln -s "$ROOT/lib" "$fixture/lib"
+    chmod 0755 "$fixture" "$fixture/utilities" "$installed_state" "$installed_state/secrets" "$installed_backup" "$installed_backup/db" "$repo_backup" "$repo_backup/db"
+    chmod +x "$fixture/backup.sh" "$fixture/utilities/backup-run.sh"
+    sed -i 's/^main "$@"$/: # fixture: do not auto-run dashboard/' "$fixture/dashboard.sh"
+
+    write_env "$fixture/.env" \
+        "PROJECT_STATE_DIR=$repo_state" \
+        "BACKUP_DIR=$repo_backup" \
+        'TZ=UTC' \
+        'RCLONE_REMOTE_NAME=repo-remote' \
+        'DOMAIN=https://repo.example.test' \
+        'ADMIN_EMAIL=repo@example.test'
+    write_env "$installed" \
+        "PROJECT_STATE_DIR=$installed_state" \
+        "BACKUP_DIR=$installed_backup" \
+        'TZ=America/Vancouver' \
+        'RCLONE_REMOTE_NAME=installed-remote' \
+        'DOMAIN=https://installed.example.test' \
+        'ADMIN_EMAIL=installed@example.test'
+    printf 'encrypted fixture\n' > "$installed_state/secrets/secrets.yaml"
+    touch "$installed_backup/db/$installed_archive" "$repo_backup/db/$repo_archive"
+
+    cat > "$TMP/interface-bin/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+case "${1:-}" in
+    info) exit 0 ;;
+    compose) exit 0 ;;
+    stats) exit 0 ;;
+    inspect) exit 1 ;;
+    *) exit 0 ;;
+esac
+MOCK_DOCKER
+    cat > "$TMP/interface-bin/systemctl" <<'MOCK_SYSTEMCTL'
+#!/usr/bin/env bash
+exit 1
+MOCK_SYSTEMCTL
+    chmod +x "$TMP/interface-bin/docker" "$TMP/interface-bin/systemctl"
+
+    local direct_output dashboard_output cli_output make_output init_output
+    direct_output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fixture" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
+set -euo pipefail
+source "$REAL_CONFIG"
+load_env_file
+printf 'STATE=%s\nBACKUP=%s\nSECRETS=%s\n' "$PROJECT_STATE_DIR" "$BACKUP_DIR" "$SECRETS_FILE"
+PROBE
+)
+
+    dashboard_output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" DASHBOARD="$fixture/dashboard.sh" bash <<'PROBE'
+set -euo pipefail
+source "$DASHBOARD"
+_load_dashboard_config
+printf 'STATE=%s\nBACKUP=%s\nTZ=%s\nREMOTE=%s\nSECRETS=%s\n' \
+    "$STATE_DIR" "$BACKUP_DIR" "$TZ_DISPLAY" "$RCLONE_REMOTE_NAME" "$SECRETS_FILE"
+PROBE
+)
+
+    cli_output=$(cd "$fixture" && PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" ./backup.sh list 2>&1)
+    make_output=$(PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" make -s -C "$fixture" status 2>&1)
+    init_output=$(PATH="$TMP/interface-bin:$PATH" VW_CONFIG_INSTALLED_ENV_FILE="$installed" make -s -C "$fixture" init-secrets 2>&1)
+
+    for output in "$direct_output" "$dashboard_output"; do
+        grep -Fq "STATE=$installed_state" <<< "$output" || fail "interface selected the repository state: $output"
+        grep -Fq "BACKUP=$installed_backup" <<< "$output" || fail "interface selected the repository backup path: $output"
+        grep -Fq "SECRETS=$installed_state/secrets/secrets.yaml" <<< "$output" || fail "interface selected the wrong secrets path: $output"
+    done
+    grep -Fq 'TZ=America/Vancouver' <<< "$dashboard_output" || fail "dashboard selected the repository timezone: $dashboard_output"
+    grep -Fq 'REMOTE=installed-remote' <<< "$dashboard_output" || fail "dashboard selected the repository rclone remote: $dashboard_output"
+    grep -Fq "$installed_archive" <<< "$cli_output" || fail "backup CLI did not use installed backup path: $cli_output"
+    ! grep -Fq "$repo_archive" <<< "$cli_output" || fail "backup CLI used repository backup path: $cli_output"
+    grep -Fq "$installed_archive" <<< "$make_output" || fail "Make status did not use backup CLI installed path: $make_output"
+    grep -Fq "$installed_state" <<< "$make_output" || fail "Make status did not use installed state path: $make_output"
+    grep -Fq 'Secrets file already exists' <<< "$init_output" || fail "Make init-secrets did not use installed secrets path: $init_output"
 }
 
 test_installed_runtime_secret_resolution() {
-    grep -q 'load_project_environment' "$ROOT/utilities/maintenance-update-dns.sh" \
-        || fail "DNS updater does not use load_project_environment"
+    local fake_repo="$TMP/fake-repo-secrets" installed="$TMP/secrets-installed.env" state="$TMP/secrets-state"
+    mkdir -p "$fake_repo" "$state/secrets"
+    write_env "$fake_repo/.env" 'PROJECT_STATE_DIR=/wrong/repository/state'
+    write_env "$installed" "PROJECT_STATE_DIR=$state"
+    printf 'encrypted fixture\n' > "$state/secrets/secrets.yaml"
 
-    grep -q 'resolve_secrets_file' "$ROOT/utilities/maintenance-update-dns.sh" \
-        || fail "DNS updater does not resolve SECRETS_FILE after env load"
-
-    grep -q 'load_project_environment' "$ROOT/utilities/notify-failure.sh" \
-        || fail "notify-failure helper does not use load_project_environment"
-
-    grep -q 'resolve_secrets_file' "$ROOT/utilities/notify-failure.sh" \
-        || fail "notify-failure helper does not resolve SECRETS_FILE after env load"
+    local output
+    output=$(VW_CONFIG_INSTALLED_ENV_FILE="$installed" PROJECT_ROOT="$fake_repo" REAL_CONFIG="$ROOT/lib/config.sh" bash <<'PROBE'
+set -euo pipefail
+source "$REAL_CONFIG"
+load_project_environment
+printf 'SECRETS_FILE=%s\n' "$SECRETS_FILE"
+PROBE
+)
+    grep -Fq "SECRETS_FILE=$state/secrets/secrets.yaml" <<< "$output" \
+        || fail "canonical environment did not resolve installed secrets path: $output"
 
     grep -q 'unset SOPS_CONFIG' "$ROOT/lib/secrets.sh" \
         || fail "ensure_sops_env does not unset missing SOPS_CONFIG"
-
     grep -q 'config=<unset; no .sops.yaml found>' "$ROOT/lib/secrets.sh" \
         || fail "ensure_sops_env does not document missing .sops.yaml fallback"
 }
@@ -426,9 +570,12 @@ test_dns_optional_and_strict_modes() {
 
 run_test 'repo .env without PROJECT_STATE_DIR falls through to installed environment' test_config_falls_through_empty_repo_state
 run_test 'explicit caller overrides survive loading and repeated calls' test_config_caller_override_wins
-run_test 'installed runtime secret resolution is guarded' test_installed_runtime_secret_resolution
+run_test 'unreadable repository .env does not block installed runtime configuration' test_unreadable_repo_allows_installed_environment
+run_test 'unreadable selected canonical environment fails explicitly' test_unreadable_selected_environment_fails
+run_test 'Make, dashboard, and backup CLI share installed configuration' test_operator_interfaces_share_installed_configuration
+run_test 'installed runtime secrets path is resolved canonically' test_installed_runtime_secret_resolution
 run_test 'DNS update optional and strict modes are represented' test_dns_optional_and_strict_modes
-[[ "$TESTS_RUN" -eq 4 ]] || fail "expected 4 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )
