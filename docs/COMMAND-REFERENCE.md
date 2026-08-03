@@ -191,13 +191,11 @@ SUBCOMMANDS:
   stop             Stop all services (delegates to docker compose down)
 
 STARTUP OPTIONS:
-  --force          Recreate containers so compose/.env metadata is regenerated
+  --force          Recreate containers to apply current Compose and runtime environment values
   --skip-health    Skip post-startup health check
-  --skip-pull      Skip docker compose pull (use for systemd restarts
-                   or when images are already current)
+  --skip-pull      Compatibility option; startup never pulls images
   --background     Start services in background (daemon mode)
-  --skip-egress-fix  Skip automatic egress NAT remediation for
-                      non-internal VaultWarden Docker bridge networks
+  --skip-egress-fix  Compatibility option; startup never repairs firewall/NAT
   --dry-run        Show what would be done without executing
 
 GLOBAL OPTIONS:
@@ -205,9 +203,8 @@ GLOBAL OPTIONS:
   --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-  sudo ./startup.sh               # Normal startup (pulls latest images)
-  sudo ./startup.sh --skip-pull   # Restart without pulling (fast path)
-  sudo ./startup.sh --force       # Recreate containers after .env/compose changes
+  sudo ./startup.sh               # Start with existing local images
+  sudo ./startup.sh --force       # Recreate containers after explicit env sync
   sudo ./startup.sh --background  # Start in daemon mode
   sudo ./startup.sh stop          # Stop all services
 ```

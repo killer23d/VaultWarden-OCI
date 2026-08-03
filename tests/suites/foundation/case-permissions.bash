@@ -261,9 +261,11 @@ check_permission_callers_are_thin() (
     [[ "$common_wrapper" != *'check_project_state_ready'* ]] \
         || fail "common compatibility hook repeats startup storage readiness"
     ! grep -Fq 'auto_fix_critical_permissions' recover.sh \
-        || fail "recovery repeats the permission repair performed by startup"
-    [[ "$(grep -Fc 'auto_fix_critical_permissions "$PROJECT_ROOT" || exit 1' startup.sh)" -eq 1 ]] \
-        || fail "startup must invoke canonical permission repair exactly once"
+        || fail "recovery must not use the legacy startup permission wrapper"
+    [[ "$(grep -Fc 'validate_runtime_permissions || exit 1' startup.sh)" -eq 1 ]] \
+        || fail "startup must invoke canonical permission validation exactly once"
+    ! grep -Fq 'auto_fix_critical_permissions "$PROJECT_ROOT" || exit 1' startup.sh \
+        || fail "startup must not repair persistent permissions"
 
     runtime_manager="$(awk '/^manage_runtime_state_permissions\(\)/{inside=1} inside{print} inside && /^}/{exit}' lib/runtime-permissions.sh)"
     [[ "$runtime_manager" == *'_vw_runtime_state_root "$operation" "$state_dir" || return 1'* ]] \
@@ -290,15 +292,6 @@ check_compose_startup_and_setup_contract() (
     ! grep -Fq '.permissions-initialized' "$compose" \
         || fail "Compose still contains the obsolete permission sentinel"
 
-    source_line="$(grep -nF 'source "${SCRIPT_DIR}/lib/runtime-permissions.sh"' startup.sh | head -1 | cut -d: -f1)"
-    ready_line="$(grep -nF 'check_project_state_ready || exit 1' startup.sh | head -1 | cut -d: -f1)"
-    repair_line="$(grep -nF 'auto_fix_critical_permissions "$PROJECT_ROOT" || exit 1' startup.sh | head -1 | cut -d: -f1)"
-    secrets_line="$(grep -nF 'prepare_docker_secrets || exit 1' startup.sh | head -1 | cut -d: -f1)"
-    services_line="$(grep -nF '_startup_start_services || exit 1' startup.sh | head -1 | cut -d: -f1)"
-    [[ -n "$source_line" && -n "$ready_line" && -n "$repair_line" && -n "$secrets_line" && -n "$services_line" ]] \
-        || fail "startup permission preparation markers are incomplete"
-    (( source_line < ready_line && ready_line < repair_line && repair_line < secrets_line && repair_line < services_line )) \
-        || fail "startup does not prepare runtime permissions once before secrets and services"
     ! grep -Eq '^[[:space:]]*(prepare_directories|prepare_log_directories)[[:space:]]*\|\|' startup.sh \
         || fail "startup still invokes legacy runtime directory preparation"
     ! grep -Fq 'enforce_runtime_log_permissions' startup.sh \
@@ -317,7 +310,7 @@ check_compose_startup_and_setup_contract() (
     grep -Fq 'check_runtime_state_permissions "$project_state_dir" "$puid" "$pgid" "$PROJECT_ROOT"' utilities/setup-storage.sh \
         || fail "storage verification does not use the canonical check-only path"
 
-    pass "Compose removes init-permissions and host startup/setup use the canonical owner"
+    pass "Compose removes init-permissions while startup validates and setup repairs through the canonical owner"
 )
 
 check_compose_startup_and_setup_contract
