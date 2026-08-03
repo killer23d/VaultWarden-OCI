@@ -468,6 +468,7 @@ test_operator_interfaces_share_installed_configuration() {
     local repo_state="$TMP/interface-repo-state" repo_backup="$TMP/interface-repo-backups"
     local installed_archive='db_backup_20990101_000000.sqlite3.age'
     local repo_archive='db_backup_19990101_000000.sqlite3.age'
+    local rclone_calls="$TMP/rclone.calls"
 
     mkdir -p "$fixture/utilities" "$repo_backup/db" "$TMP/interface-bin"
     cp "$ROOT/Makefile" "$ROOT/dashboard.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" "$ROOT/VERSION" "$fixture/"
@@ -486,7 +487,7 @@ test_operator_interfaces_share_installed_configuration() {
         'DOMAIN=https://repo.example.test' \
         'ADMIN_EMAIL=repo@example.test'
     chmod 0644 "$fixture/.env"
-    touch "$repo_backup/db/$repo_archive"
+    printf 'stale repository archive\n' > "$repo_backup/db/$repo_archive"
 
     run_privileged install -d -m 0700 -o root -g root \
         "$protected" "$protected/etc" "$protected/etc/vaultwarden" \
@@ -508,7 +509,7 @@ printf "[installed-remote]\ntype = local\n" > "$4"
 chmod 0600 "$4"
 chown root:root "$4"
 printf "encrypted fixture\n" > "$2/secrets/secrets.yaml"
-touch "$3/db/$5"
+printf "installed archive\n" > "$3/db/$5"
 ' _ "$installed" "$installed_state" "$installed_backup" "$protected/etc/vaultwarden/rclone.conf" "$installed_archive"
 
     cat > "$TMP/interface-bin/docker" <<'MOCK_DOCKER'
@@ -527,6 +528,7 @@ exit 1
 MOCK_SYSTEMCTL
     cat > "$TMP/interface-bin/rclone" <<'MOCK_RCLONE'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${VW_RCLONE_CALLS:?}"
 case " $* " in
     *" listremotes "*) printf 'installed-remote:\n' ;;
     *" lsf "*) printf 'remote_backup_20990101_000000.sqlite3.age\n' ;;
@@ -535,26 +537,40 @@ case " $* " in
 esac
 MOCK_RCLONE
     chmod +x "$TMP/interface-bin/docker" "$TMP/interface-bin/systemctl" "$TMP/interface-bin/rclone"
+    : > "$rclone_calls"
 
-    local root_env=(env "PATH=$TMP/interface-bin:$PATH" "VW_CONFIG_INSTALLED_ENV_FILE=$installed")
+    local root_env=(env "PATH=$TMP/interface-bin:$PATH" "VW_CONFIG_INSTALLED_ENV_FILE=$installed" "VW_RCLONE_CALLS=$rclone_calls")
     local direct_output dashboard_output backup_output restore_output remote_output info_output
-    direct_output=$(run_privileged "${root_env[@]}" PROJECT_ROOT="$fixture" REAL_CONFIG="$ROOT/lib/config.sh" bash -c '
+    if ! direct_output=$(run_privileged "${root_env[@]}" PROJECT_ROOT="$fixture" REAL_CONFIG="$ROOT/lib/config.sh" bash -c '
 set -euo pipefail
 source "$REAL_CONFIG"
 load_env_file
 printf "STATE=%s\nBACKUP=%s\nSECRETS=%s\n" "$PROJECT_STATE_DIR" "$BACKUP_DIR" "$SECRETS_FILE"
-')
-    dashboard_output=$(run_privileged "${root_env[@]}" DASHBOARD="$fixture/dashboard.sh" bash -c '
+' 2>&1); then
+        fail "direct canonical loader failed: $direct_output"
+    fi
+    if ! dashboard_output=$(run_privileged "${root_env[@]}" DASHBOARD="$fixture/dashboard.sh" bash -c '
 set -euo pipefail
 source "$DASHBOARD"
 _load_dashboard_config
 printf "STATE=%s\nBACKUP=%s\nTZ=%s\nREMOTE=%s\nSECRETS=%s\n" \
     "$STATE_DIR" "$BACKUP_DIR" "$TZ_DISPLAY" "$RCLONE_REMOTE_NAME" "$SECRETS_FILE"
-')
-    backup_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./backup.sh list' _ "$fixture" 2>&1)
-    restore_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./restore.sh list' _ "$fixture" 2>&1)
-    remote_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./restore.sh list --remote' _ "$fixture" 2>&1)
-    info_output=$(run_privileged "${root_env[@]}" make -s -C "$fixture" info 2>&1)
+' 2>&1); then
+        fail "dashboard canonical load failed: $dashboard_output"
+    fi
+    if ! backup_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./backup.sh list' _ "$fixture" 2>&1); then
+        fail "backup inventory failed: $backup_output"
+    fi
+    if ! restore_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./restore.sh list' _ "$fixture" 2>&1); then
+        fail "local restore inventory failed: $restore_output"
+    fi
+    : > "$rclone_calls"
+    if ! remote_output=$(run_privileged "${root_env[@]}" bash -c 'cd "$1" && ./restore.sh list --remote' _ "$fixture" 2>&1); then
+        fail "remote restore inventory failed: $remote_output"
+    fi
+    if ! info_output=$(run_privileged "${root_env[@]}" make -s -C "$fixture" info 2>&1); then
+        fail "make info failed: $info_output"
+    fi
 
     for output in "$direct_output" "$dashboard_output"; do
         grep -Fq "STATE=$installed_state" <<< "$output" || fail "interface selected the repository state: $output"
@@ -567,7 +583,7 @@ printf "STATE=%s\nBACKUP=%s\nTZ=%s\nREMOTE=%s\nSECRETS=%s\n" \
         grep -Fq "$installed_archive" <<< "$output" || fail "inventory did not use installed backup path: $output"
         ! grep -Fq "$repo_archive" <<< "$output" || fail "inventory used repository backup path: $output"
     done
-    grep -Fq 'installed-remote:installed-path' <<< "$remote_output" || fail "remote restore list did not use installed rclone location: $remote_output"
+    grep -Fq 'installed-remote:installed-path' "$rclone_calls" || fail "remote restore list did not use installed rclone location: $(cat "$rclone_calls")"
     grep -Fq 'remote_backup_20990101_000000.sqlite3.age' <<< "$remote_output" || fail "remote restore list did not query installed remote: $remote_output"
     grep -Fq "$installed_state" <<< "$info_output" || fail "make info did not use installed state: $info_output"
     grep -Fq 'https://installed.example.test' <<< "$info_output" || fail "make info did not use installed domain: $info_output"
