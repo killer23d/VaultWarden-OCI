@@ -63,21 +63,6 @@ EXIT CODES:
 EOF
 }
 
-_load_env() {
-    if load_project_environment 2>/dev/null; then
-        return 0
-    fi
-
-    if load_env_file /etc/vaultwarden/vaultwarden.env 2>/dev/null; then
-        resolve_secrets_file
-        return 0
-    fi
-
-    log_warn "No project environment found — relying on environment already set."
-    resolve_secrets_file
-    return 0
-}
-
 # _resolve_cf_token
 # Priority: decrypt_secret → host secret file → Caddy container secret.
 _resolve_cf_token() {
@@ -420,7 +405,7 @@ main() {
         trap 'operation_release 130; exit 130' INT
         trap 'operation_release 143; exit 143' HUP TERM
     fi
-    _load_env
+    load_project_environment || exit 1
     auto_fix_critical_permissions "$PROJECT_ROOT"
     update_dns_record
     exit $?
