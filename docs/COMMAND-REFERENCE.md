@@ -1550,7 +1550,7 @@ DESCRIPTION:
 
 ACTIONS:
     install   Install and enable all systemd timer units; start only by policy
-    remove    Disable and remove all timer units
+    remove    Disable and remove all systemd timer units
     validate  Verify installed state matches repo; detect split-brain
     status    Show timer and service status
 
