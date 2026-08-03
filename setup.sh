@@ -62,12 +62,12 @@ _setup_remove_sensitive_workspace() {
 
     { set +x; } 2>/dev/null
     if [[ -n "$workspace" ]]; then
-        if ! rm -rf -- "$workspace"; then
-            cleanup_status=$?
-            _setup_cleanup_warn "Failed to remove the setup sensitive workspace: $workspace"
-        else
+        if rm -rf -- "$workspace"; then
             unset TMP_WORKDIR
             unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
+        else
+            cleanup_status=$?
+            _setup_cleanup_warn "Failed to remove the setup sensitive workspace: $workspace"
         fi
     fi
 
