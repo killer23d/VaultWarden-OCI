@@ -29,11 +29,6 @@ SKIP_HEALTH_CHECK=false
 BACKGROUND=false
 DRY_RUN=false
 DO_DOWN=false
-# Pass --skip-pull in the unit file to avoid image pulls on routine service
-# restarts. Use maintenance.sh update or ./startup.sh without the flag to
-# refresh images.
-SKIP_PULL=false
-SKIP_EGRESS_FIX=false
 
 _STARTUP_WARNINGS=()
 
@@ -53,11 +48,9 @@ SUBCOMMANDS:
 STARTUP OPTIONS:
   --force          Recreate containers so compose/.env metadata is regenerated
   --skip-health    Skip post-startup health check
-  --skip-pull      Skip docker compose pull (use for systemd restarts
-                   or when images are already current)
+  --skip-pull      Compatibility option; startup never pulls images
   --background     Start services in background (daemon mode)
-  --skip-egress-fix  Skip automatic egress NAT remediation for
-                      non-internal VaultWarden Docker bridge networks
+  --skip-egress-fix  Compatibility option; startup never repairs firewall/NAT
   --dry-run        Show what would be done without executing
 
 GLOBAL OPTIONS:
@@ -65,9 +58,8 @@ GLOBAL OPTIONS:
   --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-  sudo ./startup.sh               # Normal startup (pulls latest images)
-  sudo ./startup.sh --skip-pull   # Restart without pulling (fast path)
-  sudo ./startup.sh --force       # Recreate containers after .env/compose changes
+  sudo ./startup.sh               # Start with existing local images
+  sudo ./startup.sh --force       # Recreate containers after explicit env sync
   sudo ./startup.sh --background  # Start in daemon mode
   sudo ./startup.sh stop          # Stop all services
 EOF
@@ -108,9 +100,9 @@ while [[ $# -gt 0 ]]; do
     case $1 in
       --force)           FORCE_RESTART=true;   shift ;;
       --skip-health)     SKIP_HEALTH_CHECK=true; shift ;;
-      --skip-pull)       SKIP_PULL=true;        shift ;;
+      --skip-pull)       shift ;;
       --background)      BACKGROUND=true;       shift ;;
-      --skip-egress-fix) SKIP_EGRESS_FIX=true;  shift ;;
+      --skip-egress-fix) shift ;;
       --dry-run)         DRY_RUN=true;          shift ;;
       --help|-h)         show_help; exit 0 ;;
       --version|-V)      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
@@ -259,7 +251,7 @@ warn_env_drift() {
       if [[ "$repo_value" != "$installed_value" ]]; then
         if [[ "$drift_found" == "false" ]]; then
           log_warn "Repository .env differs from generated runtime env file(s) for non-secret email settings."
-          log_warn "Run: sudo make sync-env  (or sudo make restart, which syncs first)"
+          log_warn "Run: sudo make sync-env"
           drift_found=true
         fi
         log_warn "  ${installed_env}: ${key}: repo='${repo_value}' installed='${installed_value}'"
@@ -272,8 +264,9 @@ validate_caddy_version_pin() {
   if [[ "${CADDY_VERSION:-}" == "latest" ]]; then
     log_error "CADDY_VERSION=latest is invalid for this stack's custom Caddy build."
     log_error "The Dockerfile uses caddy:\${CADDY_VERSION}-builder; caddy:latest-builder is not published."
-    log_error "Fix .env and installed env files by setting: CADDY_VERSION=2.11.4"
-    log_error "Then rerun setup-env or startup. Example: sudo sed -i 's/^CADDY_VERSION=.*/CADDY_VERSION=2.11.4/' .env"
+    log_error "Fix .env by setting: CADDY_VERSION=2.11.4"
+    log_error "Then run: sudo make sync-env"
+    log_error "Update the local image explicitly with: sudo ./maintenance.sh update"
     return 1
   fi
   return 0
@@ -334,6 +327,29 @@ validate_prerequisites() {
 
   log_success "Prerequisites validated"
   return 0
+}
+
+validate_runtime_permissions() {
+  log_info "Validating runtime permissions..."
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would validate known runtime permissions without repairing them"
+    return 0
+  fi
+
+  if check_runtime_state_permissions \
+      "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}" \
+      "${PUID:-}" \
+      "${PGID:-}" \
+      "$PROJECT_ROOT"; then
+    log_success "Runtime permissions validated"
+    return 0
+  fi
+
+  log_error "Runtime permission validation failed. Startup did not repair persistent state."
+  log_error "Run: sudo utilities/repair-permissions.sh"
+  log_error "Then retry: sudo make up"
+  return 1
 }
 
 
@@ -432,10 +448,10 @@ check_age_key_health_preflight() {
 }
 
 # #38 — prepare_docker_secrets() skips all SOPS/filesystem operations under
-# --dry-run. Previously only _startup_pull_images and _startup_start_services
-# were gated; this function still ran full SOPS decryption and secret-file
-# writes even in dry-run mode, which could fail on machines without a
-# configured Age key and misrepresented what "dry-run" means.
+# --dry-run. Previously only the service-start function was gated; this
+# function still ran full SOPS decryption and secret-file writes even in
+# dry-run mode, which could fail on machines without a configured Age key and
+# misrepresented what "dry-run" means.
 #
 # Under --dry-run we log the two operations that would occur so the operator
 # sees the full plan, then return 0 without touching the filesystem or
@@ -457,101 +473,38 @@ prepare_docker_secrets() {
   return 0
 }
 
-
-cleanup_orphaned_resources() {
-  log_info "Cleaning up orphaned resources..."
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would remove project-scoped orphaned Docker resources"
-    return 0
-  fi
-
-  # Cleanup is intentionally nonfatal, but its result must be reported
-  # accurately so stale project resources are not hidden from operators.
-  if cleanup_docker_system; then
-    log_success "Orphaned resources cleaned up"
-    return 0
-  fi
-
-  log_warn "Orphaned resource cleanup failed; startup will continue"
-  _STARTUP_WARNINGS+=(
-    "Project-scoped Docker cleanup failed; stale resources may remain."
-    " Fix: sudo make prune"
-  )
-
-  return 0
-}
-
-# Guard this wrapper with --skip-pull so systemd ExecStart restarts stay fast.
-# Refresh images through maintenance.sh update or a manual ./startup.sh run
-# without --skip-pull.
-#
-# Use direct `docker compose pull` so output streams to the journal without
-# buffering.
-_startup_pull_images() {
-  if [[ "$SKIP_PULL" == "true" ]]; then
-    log_info "Skipping docker compose pull (--skip-pull)"
-    return 0
-  fi
-
-  log_info "Pulling latest container images..."
+validate_local_images() {
+  log_info "Confirming required local container images..."
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would run: docker compose pull"
+    log_info "[DRY RUN] Would inspect images declared by: docker compose config --images"
     return 0
   fi
 
-  if ! docker compose pull --quiet; then
-    log_error "docker compose pull failed"
+  local images image
+  local missing_image=false
+
+  if ! images="$(docker compose config --images)"; then
+    log_error "Unable to resolve the images required by docker-compose.yml"
     return 1
   fi
 
-  log_success "Images pulled successfully"
-  return 0
-}
-
-ensure_lock_group_for_startup() {
-  local lock_group="vaultwarden"
-
-  if getent group "$lock_group" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  if (( EUID == 0 )) && command -v groupadd >/dev/null 2>&1; then
-    if groupadd --system "$lock_group"; then
-      log_info "Created system group '${lock_group}' for shared lock-file coordination."
-      log_info "Run 'sudo utilities/setup-systemd.sh install' later to add the operator user to this group for non-root maintenance commands."
-      return 0
+  while IFS= read -r image; do
+    [[ -n "$image" ]] || continue
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+      log_error "Required local image is missing: $image"
+      missing_image=true
     fi
+  done <<< "$images"
+
+  if [[ "$missing_image" == "true" ]]; then
+    log_error "Startup does not pull or update images."
+    log_error "Run the existing image-maintenance command: sudo ./maintenance.sh update"
+    log_error "Then retry: sudo make up"
+    return 1
   fi
 
-  log_warn "System group '${lock_group}' is missing; lock helpers may use a temporary fallback."
-  log_warn "Run 'sudo utilities/setup-systemd.sh install' to create it permanently."
-  return 0
-}
-
-update_dns_on_startup() {
-  local dns_script="${PROJECT_ROOT}/utilities/maintenance-update-dns.sh"
-  if [[ ! -x "$dns_script" ]]; then
-    log_warn "DNS update script missing/not executable; skipping startup DNS check: $dns_script"
-    return 0
-  fi
-
-  log_info "Running startup DNS reconciliation check..."
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would run: ${dns_script} update-dns"
-    return 0
-  fi
-
-  ensure_lock_group_for_startup
-
-  if _maybe_sudo "$dns_script" update-dns; then
-    log_success "Startup DNS reconciliation completed"
-  else
-    log_warn "Startup DNS reconciliation failed; continuing startup"
-    _STARTUP_WARNINGS+=("DNS reconciliation failed — your domain may still point to a stale IP address.")
-    _STARTUP_WARNINGS+=("  Fix: sudo ./utilities/maintenance-update-dns.sh update-dns")
-  fi
+  log_success "Declared local images are available"
   return 0
 }
 
@@ -559,12 +512,14 @@ update_dns_on_startup() {
 # Pass --force-recreate when FORCE_RESTART=true so containers are re-created
 # even if the image digest has not changed.
 _startup_start_services() {
-  log_info "Starting VaultWarden services..."
+  log_info "Starting VaultWarden services with existing local images..."
 
   local compose_args=(
     up
     -d
-    --remove-orphans
+    --pull
+    never
+    --no-build
   )
 
   if [[ "$FORCE_RESTART" == "true" ]]; then
@@ -583,51 +538,6 @@ _startup_start_services() {
   fi
 
   log_success "Services started"
-  return 0
-}
-
-# Provide an idempotent fallback for hardened VMs where Docker's normal
-# MASQUERADE behavior is missing or overridden. Only non-internal bridge
-# networks attached to the vaultwarden container are targeted.
-ensure_vaultwarden_egress_nat() {
-  if [[ "$SKIP_EGRESS_FIX" == "true" ]]; then
-    log_info "Skipping automatic egress NAT remediation (--skip-egress-fix)"
-    return 0
-  fi
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would verify/add MASQUERADE for vaultwarden non-internal bridge networks"
-    return 0
-  fi
-
-  if ! command -v iptables >/dev/null 2>&1; then
-    log_warn "iptables not found; skipping egress NAT remediation"
-    return 0
-  fi
-
-  # Prefer the repo-managed setup helper so NAT and DOCKER-USER remediation
-  # stay in one place and remain reusable outside startup.
-  local _fw_script="${PROJECT_ROOT}/utilities/setup-firewall.sh"
-  if [[ -x "$_fw_script" ]]; then
-  log_info "Invoking noninteractive firewall reconciliation: ${_fw_script}"
-
-  # Startup may repair live rules, but must never install packages or wait
-  # for operator input. EOF selects the helper's documented default answer.
-  if _maybe_sudo "$_fw_script" --phase iptables </dev/null; then
-      log_success "Egress firewall remediation completed via utilities/setup-firewall.sh"
-      return 0
-    fi
-    log_warn "utilities/setup-firewall.sh failed — egress NAT not applied."
-    log_warn "Run manually to restore: sudo ./utilities/setup-firewall.sh --phase iptables"
-    _STARTUP_WARNINGS+=("Egress NAT not applied — Docker containers may have no outbound internet access.")
-    _STARTUP_WARNINGS+=("  Fix: sudo ./utilities/setup-firewall.sh --phase iptables")
-    return 0
-  fi
-
-  log_warn "utilities/setup-firewall.sh not found or not executable; skipping egress NAT remediation."
-  log_warn "Run manually to configure: sudo ./utilities/setup-firewall.sh --phase iptables"
-  _STARTUP_WARNINGS+=("Egress NAT not verified — utilities/setup-firewall.sh not found or not executable.")
-  _STARTUP_WARNINGS+=("  Fix: sudo ./utilities/setup-firewall.sh --phase iptables")
   return 0
 }
 
@@ -799,24 +709,16 @@ main() {
   trap 'operation_release 130; exit 130' INT
   trap 'operation_release 143; exit 143' HUP TERM
 
-  if [[ "$DRY_RUN" != "true" ]]; then
-    operation_set_phase "env-sync" "Synchronizing runtime environment"
-    "${SCRIPT_DIR}/utilities/env-edit.sh" sync || exit $?
-  fi
-
-  operation_set_phase "startup" "Preparing runtime and starting services"
+  operation_set_phase "startup" "Validating runtime and starting services"
   load_environment || exit 1
   check_project_state_ready || exit 1
-  auto_fix_critical_permissions "$PROJECT_ROOT" || exit 1
   validate_prerequisites || exit 1
+  validate_runtime_permissions || exit 1
   prepare_docker_secrets || exit 1
   prepare_push_secret_placeholders || exit 1
   check_email_config_consistency || true # Warn only; never block startup.
   warn_plaintext_secret_overrides || true
-  cleanup_orphaned_resources || true
-  ensure_vaultwarden_egress_nat || true
-  update_dns_on_startup || true
-  _startup_pull_images || exit 1
+  validate_local_images || exit 1
   _startup_start_services || exit 1
 
   # Post-start: service readiness poll + health check.
