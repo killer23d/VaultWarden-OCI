@@ -59,6 +59,11 @@ load_env_file() {
         return 1
     fi
 
+    if [[ ! -r "$env_file" ]]; then
+        log_error "Environment file is not readable: $env_file"
+        return 1
+    fi
+
     local file_perms
     file_perms=$(_get_file_perms "$env_file")
 
@@ -92,7 +97,7 @@ load_env_file() {
 
     local line key raw_value value lineno=0
     local -a malformed_lines=()
-    while IFS= read -r line || [[ -n "$line" ]]; do
+    if ! while IFS= read -r line || [[ -n "$line" ]]; do
         (( lineno++ )) || true
 
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
@@ -138,7 +143,7 @@ load_env_file() {
                 return 1
                 ;;
         esac
-            if [[ "$value" == *';'* || "$value" == *'&'* ]]; then
+        if [[ "$value" == *';'* || "$value" == *'&'* ]]; then
             log_warn "load_env_file: line ${lineno}: value for '${key}' contains" \
                      "';' or '&' — loaded as literal. If unintended, check '${env_file}'."
         fi
@@ -147,7 +152,10 @@ load_env_file() {
         # shellcheck disable=SC2163  # export "$key" exports the variable whose name is in $key
         export "$key"
 
-    done < "$env_file"
+    done < "$env_file"; then
+        log_error "Environment file could not be read: $env_file"
+        return 1
+    fi
 
     if (( ${#malformed_lines[@]} > 0 )); then
         log_warn "load_env_file: ${#malformed_lines[@]} malformed .env line(s) skipped from ${env_file}:"
@@ -181,8 +189,7 @@ load_env_file() {
     fi
 
     # Keep direct env-file callers aligned with the split-permission secrets
-    # layout. load_project_environment already does this, but scripts such as
-    # maintenance-health.sh call load_env_file directly.
+    # layout when they intentionally load a specific file.
     if declare -F resolve_secrets_file >/dev/null 2>&1; then
         resolve_secrets_file
     fi
@@ -252,7 +259,7 @@ load_project_environment() {
     local _read_project_state_dir
     _read_project_state_dir() {
         local file="$1"
-        [[ -f "$file" ]] || return 0
+        [[ -f "$file" && -r "$file" ]] || return 0
         awk -F= -v sq="'" '$1 == "PROJECT_STATE_DIR" {
             value = substr($0, index($0, "=") + 1)
             gsub("^[\"" sq "]|[\"" sq "]$", "", value)
