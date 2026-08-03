@@ -339,6 +339,7 @@ up: ## Start all services (runs startup.sh for health checks; root required)
 		echo "$(RED)Startup failed!$(NC)"; \
 		$(MAKE) status; \
 		echo ""; \
+		echo "$(YELLOW)If encrypted secrets have not been initialized: sudo make init-secrets$(NC)"; \
 		echo "$(YELLOW)If startup failed due to a missing or misconfigured Age key:$(NC)"; \
 		echo "$(YELLOW)  Diagnose: sudo make key-health$(NC)"; \
 		echo "$(YELLOW)  Auto-fix: sudo make key-install$(NC)"; \
