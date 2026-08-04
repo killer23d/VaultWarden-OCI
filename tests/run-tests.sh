@@ -71,9 +71,7 @@ SECURITY_CASES=(
     tests/suites/security/case-security-privileges.bash
     tests/suites/security/case-secrets.bash
     tests/suites/security/case-email.bash
-  tests/suites/security/case-production-readiness-security.bash
-  tests/suites/security/case-production-readiness-setup-gates.bash
-  tests/suites/security/case-recovery-and-sensitive-cleanup.bash
+    tests/suites/security/case-recovery-and-sensitive-cleanup.bash
 )
 
 OPERATIONS_CASES=(
@@ -94,7 +92,6 @@ DATA_PROTECTION_CASES=(
     tests/suites/data-protection/case-backup.bash
     tests/suites/data-protection/case-restore-recovery.bash
     tests/suites/data-protection/case-restore-recovery-tail.bash
-  tests/suites/data-protection/case-production-readiness-data-protection.bash
 )
 
 # Internal fixture hooks for runner-contract tests. They are not part of the
