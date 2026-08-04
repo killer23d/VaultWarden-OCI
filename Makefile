@@ -166,7 +166,7 @@ help: ## Show normal admin/day-2 commands
 	@echo ""
 	@echo "$(YELLOW)Health and diagnostics$(NC)"
 	@echo "  $(GREEN)health$(NC)                   Full health check (AUTO_RECOVER=true enables safe fixes)"
-	@echo "  $(GREEN)health-quick$(NC)             Concise health check"
+	@echo "  $(GREEN)health-quick$(NC)             Bounded local health check"
 	@echo "  $(GREEN)test-email$(NC)               Test configured or exact email delivery transports"
 	@echo "  $(GREEN)test-secrets$(NC)             Verify SOPS/Age secret decryption"
 	@echo "  $(GREEN)diagnose$(NC)                 Collect versions, status, key state, disk, and logs"
@@ -444,10 +444,10 @@ health: ## Run health checks (set AUTO_RECOVER=true to auto-recover; root requir
 	@echo "$(BLUE)Running health checks...$(NC)"
 	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh $(if $(filter true,$(AUTO_RECOVER)),--fix,)
 
-health-quick: ## Quick health check (concise output; root required)
+health-quick: ## Run bounded local health checks (root required)
 	$(call require-root)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh --quiet
+	@VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ./utilities/maintenance-health.sh --quick --quiet
 
 health-report: ## Run health check and write a timestamped report file (root required)
 	$(call require-root)

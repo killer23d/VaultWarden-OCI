@@ -517,7 +517,7 @@ pass "operator-facing production next steps use sudo make up"
 # Dashboard should use root-operated lifecycle/health/secrets commands.
 grep -Fq 'run_sudo_cmd "sudo make restart"' dashboard.sh || fail "dashboard restart label missing"
 grep -Fq 'run_sudo_cmd "sudo make down"' dashboard.sh || fail "dashboard stop label missing"
-grep -Fq 'run_sudo_cmd "sudo make health"' dashboard.sh || fail "dashboard health label missing"
+grep -Fq 'run_sudo_cmd "sudo make health-quick"' dashboard.sh || fail "dashboard quick-health label missing"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-edit.sh" "${edit_sh}"' dashboard.sh || fail "dashboard secrets-edit should use sudo"
 grep -Fq 'run_sudo_cmd "sudo ./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"' dashboard.sh || fail "dashboard recovery-kit export should stay root-operated"
 EMAIL_MENU_SNIP="$(mktemp -t vw-dashboard-email.XXXXXXXXXX)"
