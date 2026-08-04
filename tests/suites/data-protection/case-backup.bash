@@ -1214,3 +1214,29 @@ printf 'PASS: backup run scopes remote --keep while sync/rotate remain all-tier\
 )
 
 check_backup_remote_keep_scope
+
+check_backup_run_dry_run_completion() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+BACKUP="$ROOT/utilities/backup-run.sh"
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+validation_block="$(awk '
+    /local backup_file=""/ {capture=1}
+    capture {print}
+    capture && /if \[\[ "\$backup_success" == "true" && "\$DRY_RUN" == "false" \]\]; then/ {exit}
+' "$BACKUP")"
+
+grep -Fq 'if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then' <<< "$validation_block" \
+    || fail "backup archive validation is not guarded from dry-run mode"
+! grep -Fq 'if [[ "$backup_success" == "true" ]]; then' <<< "$validation_block" \
+    || fail "backup run still validates a real archive path during dry-run"
+grep -Fq 'elif [[ "$DRY_RUN" == "true" ]]; then' "$BACKUP" \
+    || fail "backup run dry-run completion branch is missing"
+grep -Fq 'backup_log_success "Dry run completed"' "$BACKUP" \
+    || fail "backup run dry-run success message is missing"
+
+printf 'PASS: backup run dry-run bypasses real archive validation and completes\n'
+)
+
+check_backup_run_dry_run_completion
