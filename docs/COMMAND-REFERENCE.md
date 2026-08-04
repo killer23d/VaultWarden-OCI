@@ -818,9 +818,9 @@ OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — completed without real failures; may include expected contention skips
-    1 — completed with minor issues
-    2 — completed with critical failures
+    0 — completed without real failures; may include advisory warnings or expected skips
+    1 — completed with one real failure
+    2 — completed with multiple real failures
 
 EXAMPLES:
     sudo ./maintenance.sh run
