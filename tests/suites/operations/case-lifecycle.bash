@@ -416,7 +416,8 @@ reject 'SKIP_OPS_LOCK=true' "$MAINT_RUN" 'maintenance runner must not parse publ
 require 'vaultwarden-maintenance\.lock' "$MAINT_RUN" 'maintenance runner must keep canonical maintenance lock filename'
 reject '/bin/bash -c .*flock|flock -n' "$MAINT_SERVICE" 'maintenance service must not duplicate script-owned flock wrapper'
 reject '--skip-ops-lock' "$MAINT_SERVICE" 'maintenance service must not pass public lock bypass flag'
-require 'maintenance\.sh run --comprehensive --email' "$MAINT_SERVICE" 'maintenance service must delegate directly to maintenance.sh'
+require '^ExecStart=/opt/vaultwarden-scripts/maintenance\.sh run --email$' "$MAINT_SERVICE" 'maintenance service must run routine maintenance directly'
+reject '^ExecStart=.*--comprehensive' "$MAINT_SERVICE" 'scheduled maintenance must not duplicate dedicated DNS and firewall timers'
 require 'exits[[:space:]]+75' "$MAINT_SERVICE" 'maintenance service must document clean lock-contention skip'
 require '^SuccessExitStatus=75$' "$MAINT_SERVICE" 'maintenance service must treat lock-contention skip as success'
 
