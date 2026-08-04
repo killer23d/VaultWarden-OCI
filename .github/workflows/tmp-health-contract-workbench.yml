@@ -1,0 +1,25 @@
+name: Temporary health contract workbench
+
+on:
+  push:
+    branches:
+      - fix/health-quick-exit-contract
+
+permissions:
+  contents: read
+
+jobs:
+  export-checkout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Export checkout
+        run: tar --exclude=.git -czf /tmp/vaultwarden-oci-checkout.tar.gz .
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: vaultwarden-oci-checkout
+          path: /tmp/vaultwarden-oci-checkout.tar.gz
+          if-no-files-found: error
+          retention-days: 1
