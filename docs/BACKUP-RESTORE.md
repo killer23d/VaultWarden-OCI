@@ -86,7 +86,7 @@ The canonical resolver applies retention in this order:
 1. a nonempty `--keep N` override;
 2. `BACKUP_RETENTION_DB_DAYS`, `BACKUP_RETENTION_FULL_DAYS`, or `BACKUP_RETENTION_EMERGENCY_DAYS` for the selected type;
 3. `BACKUP_RETENTION_DAYS`;
-4. the repository's 14-day fail-safe.
+4. the historical per-tier fallback: 14 days for `db`, 30 days for `full`, and 90 days for `emergency`.
 
 The backup command, routine maintenance, and local/remote pruning use the same resolver. Values must be positive integers, and unknown backup types are rejected.
 
@@ -101,7 +101,7 @@ Retention always preserves the newest parseable timestamped archive for a tier, 
 
 Sidecars associated with deleted primary archives are removed only after the primary archive is removed. Orphaned local sidecars are cleaned separately.
 
-A failed remote inventory listing is not treated as an empty remote. No files are deleted for that type, the remote path and failure are logged, and requested remote retention returns nonzero.
+A remote tier directory that has never been created is treated as an empty tier. Other failed remote inventory listings are not treated as empty: no files are deleted for that type, the remote path and failure are logged, and requested remote retention returns nonzero.
 
 ---
 
