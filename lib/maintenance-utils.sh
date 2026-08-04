@@ -426,6 +426,9 @@ generate_maintenance_summary() {
         MAINTENANCE_SUMMARY_RESULT=2
     fi
 
+    : "${MAINTENANCE_SUMMARY_RESULT:?maintenance result was not classified}"
+    : "${MAINTENANCE_SUMMARY_STATE:?maintenance state was not classified}"
+
     printf '%b' "$summary"
 
     if [[ "${EMAIL_NOTIFY:-false}" == "true" ]]; then
