@@ -595,6 +595,8 @@ DELETE_LOG="$TMP/remote-listing-delete.log"
 OUTPUT_LOG="$TMP/remote-listing-output.log"
 DRY_RUN=false
 KEEP_DAYS=""
+source "\$ROOT/lib/log.sh"
+source "\$ROOT/lib/backup-utils.sh"
 backup_log_info(){ printf 'INFO:%s\n' "\$*" >> "\$OUTPUT_LOG"; }
 backup_log_success(){ printf 'SUCCESS:%s\n' "\$*" >> "\$OUTPUT_LOG"; }
 backup_log_warn(){ printf 'WARN:%s\n' "\$*" >> "\$OUTPUT_LOG"; }
@@ -627,8 +629,6 @@ rclone(){
         *) return 0 ;;
     esac
 }
-source "\$ROOT/lib/log.sh"
-source "\$ROOT/lib/backup-utils.sh"
 $(_extract_func "$BACKUP" _prune_remote_backups)
 _prune_remote_backups
 EOF_PROBE
