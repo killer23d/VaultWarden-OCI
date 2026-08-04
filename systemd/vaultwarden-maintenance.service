@@ -14,15 +14,10 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # setup.sh systemd install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# UFW and iptables use host-wide lock files under /run. Create them before
-# entering the strict filesystem sandbox while preserving existing lock inodes.
-ExecStartPre=+/usr/bin/touch /run/ufw.lock /run/xtables.lock
-ExecStartPre=+/usr/bin/chown root:root /run/ufw.lock /run/xtables.lock
-ExecStartPre=+/usr/bin/chmod 0600 /run/ufw.lock /run/xtables.lock
 # maintenance.sh owns the shared operation guard. Expected lock contention exits 75
 # and is treated as a clean skip. Real maintenance failures still use the
 # script's normal non-zero exits.
-ExecStart=/opt/vaultwarden-scripts/maintenance.sh run --comprehensive --email
+ExecStart=/opt/vaultwarden-scripts/maintenance.sh run --email
 User=root
 Group=root
 StandardOutput=journal
@@ -33,8 +28,8 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 # /run/lock is needed for flock() lock files and /run/vaultwarden-oci for runtime operation state.
-# The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
-# mode this is /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:
+# The first path in ReadWritePaths is the PROJECT_STATE_DIR. In boot-volume
+# mode this is /var/lib/vaultwarden. In separate-volume mode, setup.sh installs a drop-in at:
 #   /etc/systemd/system/<unit>.d/10-state-dir.conf
 # that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
 # The base unit file is never modified. To inspect the merged result:
@@ -42,11 +37,6 @@ ProtectHome=read-only
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
 # Optional because the recovery directory exists only after an export.
 ReadWritePaths=-/root/vaultwarden-recovery
-# Embedded crowdsec -t may update database metadata under /var/lib/crowdsec.
-# The path is optional so maintenance still starts on hosts without CrowdSec.
-ReadWritePaths=-/var/lib/crowdsec
-# Comprehensive maintenance also reconciles UFW rules using these exact paths.
-ReadWritePaths=/etc/ufw /run/ufw.lock /run/xtables.lock
 # RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
 # root-owned runtime directory before ExecStart runs.
 RuntimeDirectory=vaultwarden-oci
