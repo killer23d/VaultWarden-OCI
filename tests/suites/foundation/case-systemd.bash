@@ -100,6 +100,15 @@ extract_func() {
         }' "$file"
 }
 
+extract_array() {
+    local file="$1" name="$2"
+    awk -v name="$name" '
+        $0 ~ "^" name "=\\(" {printing=1}
+        printing {print}
+        printing && /^\)/ {exit}
+    ' "$file"
+}
+
 test_state_dir_dropins_match_unit_type() {
     local unit_dir="$TMP/state-dir-units" probe="$TMP/state-dir-dropin-probe.sh"
     local service="vaultwarden-db-backup.service" timer="vaultwarden-db-backup.timer"
@@ -258,6 +267,55 @@ test_stale_root_dropin_cleanup_preserves_state_dir() {
         || fail "stale root cleanup appears to target 10-state-dir.conf"
 }
 
+test_systemd_inventories_are_canonical() {
+    local script="$ROOT/utilities/setup-systemd.sh"
+    local services timers installed
+    services="$(extract_array "$script" COPIED_SERVICES)"
+    timers="$(extract_array "$script" TIMERS)"
+    installed="$(extract_array "$script" INSTALLED_SCRIPT_PATHS)"
+
+    for unit in \
+        vaultwarden-maintenance.service \
+        vaultwarden-db-backup.service \
+        vaultwarden-full-backup.service \
+        vaultwarden-health.service \
+        vaultwarden-dns-update.service \
+        vaultwarden-firewall-update.service \
+        vaultwarden-notify-failure.service \
+        vaultwarden-iptables.service; do
+        grep -Fxq "    $unit" <<< "$services" || fail "copied service inventory missing $unit"
+    done
+    grep -Fq '    "$NOTIFY_FAILURE_TEMPLATE"' <<< "$services" \
+        || fail "notifier template is not explicit in copied service inventory"
+    ! grep -Fq 'vaultwarden-startup.service' <<< "$services" \
+        || fail "rendered startup service was mixed into copied service inventory"
+
+    for timer in \
+        vaultwarden-maintenance.timer \
+        vaultwarden-db-backup.timer \
+        vaultwarden-full-backup.timer \
+        vaultwarden-health.timer \
+        vaultwarden-dns-update.timer \
+        vaultwarden-firewall-update.timer; do
+        grep -Fxq "    $timer" <<< "$timers" || fail "timer inventory missing $timer"
+    done
+
+    grep -Fxq 'MANAGED_UNITS=("${COPIED_SERVICES[@]}" "${TIMERS[@]}")' "$script" \
+        || fail "managed unit inventory is not derived from copied services and timers"
+    grep -Fxq '    maintenance.sh' <<< "$installed" \
+        || fail "installed script inventory lost top-level layout"
+    grep -Fxq '    utilities/backup-run.sh' <<< "$installed" \
+        || fail "installed script inventory lost utilities layout"
+    [[ "$(grep -Fc 'for script in "${INSTALLED_SCRIPT_PATHS[@]}"' "$script")" -ge 3 ]] \
+        || fail "installation and validation do not share the script path inventory"
+    [[ "$(grep -Fc 'for unit in "${MANAGED_UNITS[@]}"' "$script")" -ge 3 ]] \
+        || fail "install, validation, and removal do not share managed units"
+    ! grep -Eq 'flat_scripts_to_install|structured_scripts_to_install|scripts_to_check' "$script" \
+        || fail "duplicated local systemd inventories remain"
+    grep -Fq '[[ "$svc" == "$NOTIFY_FAILURE_TEMPLATE" ]] && continue' "$script" \
+        || fail "template service is not explicitly skipped by service actions"
+}
+
 can_run_systemd_behavioral_tests() {
     [[ "$(uname -s)" == "Linux" ]] || return 1
     if (( EUID == 0 )); then
@@ -275,6 +333,81 @@ run_root_env_capture() {
         # shellcheck disable=SC2024 # The output file is owned by the test runner, not the sudo command.
         sudo -n env "$@" > "$out" 2>&1
     fi
+}
+
+prepare_systemd_install_repo() {
+    local repo="$1" state="$2"
+    mkdir -p "$repo/secrets/keys"
+    cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$repo/"
+    cp "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" "$repo/"
+    cat > "$repo/.env" <<EOF_ENV
+DOMAIN=https://systemd-inventory.example.test
+ADMIN_EMAIL=admin@example.test
+PROJECT_STATE_DIR=$state
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=$state
+SOPS_AGE_KEY_FILE=
+EOF_ENV
+    chmod 600 "$repo/.env"
+    cat > "$repo/secrets/keys/age-key.txt" <<'EOF_KEY'
+# public key: age1systemdinventory0000000000000000000000000000000000000
+AGE-SECRET-KEY-1SYSTEMDINVENTORY
+EOF_KEY
+    chmod 600 "$repo/secrets/keys/age-key.txt"
+}
+
+test_systemd_missing_source_and_dry_run_behavior() {
+    if ! can_run_systemd_behavioral_tests; then
+        printf 'SKIP: systemd install source/dry-run test requires Linux root or passwordless sudo\n'
+        return 0
+    fi
+
+    local repo="$TMP/inventory-repo" state="$TMP/inventory-state"
+    local unit_dir="$TMP/inventory-units" opt_dir="$TMP/inventory-opt" env_dir="$TMP/inventory-etc"
+    local missing_out="$TMP/inventory-missing.out" dry_out="$TMP/inventory-dry.out"
+    prepare_systemd_install_repo "$repo" "$state"
+
+    rm "$repo/utilities/backup-run.sh"
+    if run_root_env_capture "$missing_out" \
+        PROJECT_STATE_DIR="$state" \
+        VW_CONFIG_INSTALLED_ENV_FILE="$env_dir/vaultwarden.env" \
+        VW_SYSTEMD_UNIT_DEST_DIR="$unit_dir" \
+        VW_SYSTEMD_OPT_SCRIPTS_DIR="$opt_dir" \
+        VW_SYSTEMD_ENV_DIR="$env_dir" \
+        bash "$repo/utilities/setup-systemd.sh" install --dry-run; then
+        fail "systemd install succeeded with a missing required repository script"
+    fi
+    grep -Fq "Required repository script not found: $repo/utilities/backup-run.sh" "$missing_out" \
+        || { cat "$missing_out" >&2; fail "missing required script was not named"; }
+    [[ ! -e "$unit_dir" && ! -e "$opt_dir" && ! -e "$env_dir" ]] \
+        || fail "missing-source preflight mutated installation paths"
+
+    cp "$ROOT/utilities/backup-run.sh" "$repo/utilities/backup-run.sh"
+    run_root_env_capture "$dry_out" \
+        PROJECT_STATE_DIR="$state" \
+        VW_CONFIG_INSTALLED_ENV_FILE="$env_dir/vaultwarden.env" \
+        VW_SYSTEMD_UNIT_DEST_DIR="$unit_dir" \
+        VW_SYSTEMD_OPT_SCRIPTS_DIR="$opt_dir" \
+        VW_SYSTEMD_ENV_DIR="$env_dir" \
+        bash "$repo/utilities/setup-systemd.sh" install --dry-run \
+        || { cat "$dry_out" >&2; fail "complete systemd dry-run failed"; }
+
+    grep -Fq "[DRY RUN] Would install: $opt_dir/maintenance.sh" "$dry_out" \
+        || fail "dry-run lost top-level script installation"
+    grep -Fq "[DRY RUN] Would install: $opt_dir/utilities/backup-run.sh" "$dry_out" \
+        || fail "dry-run lost utilities script installation"
+    grep -Fq "[DRY RUN] cp $repo/systemd/vaultwarden-db-backup.service $unit_dir/vaultwarden-db-backup.service" "$dry_out" \
+        || fail "dry-run did not install a copied service from the canonical inventory"
+    grep -Fq "[DRY RUN] cp $repo/systemd/vaultwarden-db-backup.timer $unit_dir/vaultwarden-db-backup.timer" "$dry_out" \
+        || fail "dry-run did not install a timer from the canonical inventory"
+    grep -Fq '[DRY RUN] Would render vaultwarden-startup.service' "$dry_out" \
+        || fail "startup service was not kept on the rendered path"
+    ! grep -Eq 'systemctl enable( --now)? vaultwarden-notify-failure@\.service' "$dry_out" \
+        || fail "template unit was directly enabled or started"
+    grep -Fq 'Boot-only mode — skipping per-unit ReadWritePaths drop-ins.' "$dry_out" \
+        || fail "boot-only install behavior changed"
+    [[ ! -e "$unit_dir" && ! -e "$opt_dir" && ! -e "$env_dir" ]] \
+        || fail "dry-run mutated installation paths"
 }
 
 write_healthy_systemctl_mock() {
@@ -442,8 +575,10 @@ run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_f
 run_test 'notify-failure helper loads encrypted-secret resolution before email' test_notify_failure_helper_loads_secret_resolution
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
 run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dropins_match_unit_type
+run_test 'systemd inventories are canonical and keep explicit exceptions' test_systemd_inventories_are_canonical
+run_test 'systemd missing source fails before mutation and dry-run stays read-only' test_systemd_missing_source_and_dry_run_behavior
 run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
-[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 9 ]] || fail "expected 9 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )
