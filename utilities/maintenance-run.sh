@@ -6,7 +6,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-_SAVE_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
@@ -17,10 +16,7 @@ DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=v
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
-_MAINT_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/secrets.sh"
-SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
-unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 source "$PROJECT_ROOT/lib/maintenance-utils.sh"
 
@@ -69,9 +65,9 @@ OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — completed without real failures; may include expected contention skips
-    1 — completed with minor issues
-    2 — completed with critical failures
+    0 — completed without real failures; may include advisory warnings or expected skips
+    1 — completed with one real failure
+    2 — completed with multiple real failures
 
 EXAMPLES:
     sudo ./maintenance.sh run
@@ -155,12 +151,12 @@ main() {
         operation_set_phase "3" "Security and network maintenance"
         log_header "Phase 3/4 — Security and network maintenance"
         if [[ "$UPDATE_FIREWALL" == "true" ]]; then
-            local _fw_args=("${SCRIPT_DIR}/utilities/maintenance-update-firewall.sh" update-firewall)
+            local _fw_args=("${PROJECT_ROOT}/utilities/maintenance-update-firewall.sh" update-firewall)
             [[ "$DRY_RUN" == "true" ]] && _fw_args+=("--dry-run")
             "${_fw_args[@]}" && firewall_update_result=0 || firewall_update_result=$?
         fi
         if [[ "$UPDATE_DNS" == "true" ]]; then
-            local _dns_args=("${SCRIPT_DIR}/utilities/maintenance-update-dns.sh" update-dns)
+            local _dns_args=("${PROJECT_ROOT}/utilities/maintenance-update-dns.sh" update-dns)
             [[ "$EMAIL_NOTIFY" == "true" ]] && _dns_args+=("--email")
             [[ "$DRY_RUN" == "true" ]]     && _dns_args+=("--dry-run")
             "${_dns_args[@]}" && dns_update_result=0 || dns_update_result=$?
@@ -175,39 +171,30 @@ main() {
     local _maint_duration_seconds=$(( $(date +%s) - _MAINT_START_EPOCH ))
 
     log_header "Maintenance Summary"
-    if [[ "$recovery_cleanup_result" == 0 ]]; then
-        log_success "Recovery-kit fallback cleanup: completed"
-    else
-        log_error "Recovery-kit fallback cleanup: issues require operator review"
-    fi
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
-        "$health_validation_result" "$_maint_duration_seconds"
+        "$health_validation_result" "$_maint_duration_seconds" "$recovery_cleanup_result"
 
-    local critical_failures=0
-    [[ "$recovery_cleanup_result" != "0" ]] && ((++critical_failures))
-    [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup_result"       != "0" ]] && ((++critical_failures))
-    [[ "$CLEAN_BACKUPS"     == "true"  && "$backup_cleanup_result"    != "0" ]] && ((++critical_failures))
-    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup_result"    == "2" ]] && ((++critical_failures))
-    [[ "$OPTIMIZE_DATABASE" == "true"  && "$db_optimization_result"   != "0" ]] && ((++critical_failures))
-    [[ "$UPDATE_FIREWALL"   == "true"  && "$firewall_update_result"   != "0" && "$firewall_update_result" != "75" ]] && ((++critical_failures))
-    [[ "$UPDATE_DNS"        == "true"  && "$dns_update_result"        != "0" && "$dns_update_result"      != "75" ]] && ((++critical_failures))
-    [[ "$TARGETED_MODE"     == "false" && "$health_validation_result" != "0" ]] && ((++critical_failures))
-
-    local operation_skips=0
-    [[ "$UPDATE_FIREWALL" == "true" && "$firewall_update_result" == "75" ]] && ((++operation_skips))
-    [[ "$UPDATE_DNS"      == "true" && "$dns_update_result"      == "75" ]] && ((++operation_skips))
-
-    if [[ $critical_failures -eq 0 && $operation_skips -eq 0 ]]; then
-        log_success "Maintenance completed successfully"; exit 0
-    elif [[ $critical_failures -eq 0 ]]; then
-        log_warn "Maintenance completed with skipped work"; exit 0
-    elif [[ $critical_failures -eq 1 ]]; then
-        log_warn "Maintenance completed with minor issues"; exit 1
-    else
-        log_error "Maintenance completed with critical failures"; exit 2
-    fi
+    local maintenance_result="${MAINTENANCE_SUMMARY_RESULT:-2}"
+    case "${MAINTENANCE_SUMMARY_STATE:-issues}" in
+        success) log_success "Maintenance completed successfully" ;;
+        warnings) log_warn "Maintenance completed successfully with advisory warnings" ;;
+        skips) log_warn "Maintenance completed with skipped work" ;;
+        warnings_and_skips) log_warn "Maintenance completed with advisory warnings and skipped work" ;;
+        issues)
+            if [[ "$maintenance_result" == "1" ]]; then
+                log_error "Maintenance completed with one real failure"
+            else
+                log_error "Maintenance completed with multiple real failures"
+            fi
+            ;;
+        *)
+            log_error "Maintenance completed with an unknown summary state"
+            maintenance_result=2
+            ;;
+    esac
+    exit "$maintenance_result"
 }
 
 main "$@"

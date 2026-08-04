@@ -24,8 +24,8 @@ pass "git diff --check"
 # Integration and systemd contracts.
 grep -Fq 'cleanup_expired_recovery_kits "$DRY_RUN" || recovery_cleanup_result=$?' \
   utilities/maintenance-run.sh || fail "maintenance does not invoke recovery fallback cleanup"
-grep -Fq '[[ "$recovery_cleanup_result" != "0" ]] && ((++critical_failures))' \
-  utilities/maintenance-run.sh || fail "recovery cleanup does not affect final status"
+grep -Fq '"$health_validation_result" "$_maint_duration_seconds" "$recovery_cleanup_result"' \
+  utilities/maintenance-run.sh || fail "maintenance does not pass recovery cleanup into canonical final status"
 grep -Fq 'ReadWritePaths=-/root/vaultwarden-recovery' \
   systemd/vaultwarden-maintenance.service || fail "maintenance sandbox lacks exact recovery path"
 grep -Fq 'OnCalendar=*-*-* 02:05:00' systemd/vaultwarden-maintenance.timer \

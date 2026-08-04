@@ -289,6 +289,8 @@ assert_no_call ' allow '
 health_unit="$ROOT/systemd/vaultwarden-health.service"
 maintenance_unit="$ROOT/systemd/vaultwarden-maintenance.service"
 firewall_unit="$ROOT/systemd/vaultwarden-firewall-update.service"
+dns_timer="$ROOT/systemd/vaultwarden-dns-update.timer"
+firewall_timer="$ROOT/systemd/vaultwarden-firewall-update.timer"
 
 for unit in "$health_unit" "$maintenance_unit" "$firewall_unit"; do
     assert_file_contains "$unit" 'ProtectSystem=strict'
@@ -305,18 +307,28 @@ for unit in "$health_unit" "$maintenance_unit" "$firewall_unit"; do
     done < <(grep '^ReadWritePaths=' "$unit")
 done
 
-assert_file_contains "$maintenance_unit" 'ReadWritePaths=-/var/lib/crowdsec'
 ! grep -Fq '/var/lib/crowdsec' "$health_unit" \
     || fail "vaultwarden-health.service grants stale CrowdSec write access"
-! grep -Fxq 'ReadWritePaths=/var/lib/crowdsec' "$maintenance_unit" \
-    || fail "vaultwarden-maintenance.service uses an unconditional CrowdSec write path"
+! grep -Fq '/var/lib/crowdsec' "$maintenance_unit" \
+    || fail "routine maintenance grants unused CrowdSec write access"
+! grep -Eq '^ReadWritePaths=.*(/etc/ufw|/run/ufw\.lock|/run/xtables\.lock)' "$maintenance_unit" \
+    || fail "routine maintenance grants firewall-only write access"
+! grep -Fq 'ExecStartPre=+/usr/bin/touch /run/ufw.lock /run/xtables.lock' "$maintenance_unit" \
+    || fail "routine maintenance prepares firewall-only locks"
+! grep -Fq 'ExecStartPre=+/usr/bin/chown root:root /run/ufw.lock /run/xtables.lock' "$maintenance_unit" \
+    || fail "routine maintenance changes firewall-only lock ownership"
+! grep -Fq 'ExecStartPre=+/usr/bin/chmod 0600 /run/ufw.lock /run/xtables.lock' "$maintenance_unit" \
+    || fail "routine maintenance changes firewall-only lock modes"
+assert_file_contains "$maintenance_unit" 'ExecStart=/opt/vaultwarden-scripts/maintenance.sh run --email'
+! grep -Fq -- '--comprehensive' "$maintenance_unit" \
+    || fail "routine maintenance still invokes comprehensive mode"
 
-for unit in "$maintenance_unit" "$firewall_unit"; do
-    assert_file_contains "$unit" 'ReadWritePaths=/etc/ufw /run/ufw.lock /run/xtables.lock'
-    assert_file_contains "$unit" 'ExecStartPre=+/usr/bin/touch /run/ufw.lock /run/xtables.lock'
-    assert_file_contains "$unit" 'ExecStartPre=+/usr/bin/chown root:root /run/ufw.lock /run/xtables.lock'
-    assert_file_contains "$unit" 'ExecStartPre=+/usr/bin/chmod 0600 /run/ufw.lock /run/xtables.lock'
-done
+assert_file_contains "$firewall_unit" 'ReadWritePaths=/etc/ufw /run/ufw.lock /run/xtables.lock'
+assert_file_contains "$firewall_unit" 'ExecStartPre=+/usr/bin/touch /run/ufw.lock /run/xtables.lock'
+assert_file_contains "$firewall_unit" 'ExecStartPre=+/usr/bin/chown root:root /run/ufw.lock /run/xtables.lock'
+assert_file_contains "$firewall_unit" 'ExecStartPre=+/usr/bin/chmod 0600 /run/ufw.lock /run/xtables.lock'
+assert_file_contains "$dns_timer" 'OnCalendar=*-*-* *:00:00'
+assert_file_contains "$firewall_timer" 'OnCalendar=Sat *-*-* 04:00:00'
 
 if command -v systemd-analyze >/dev/null 2>&1; then
     unit_dir="$TMP/systemd-units"
@@ -345,4 +357,195 @@ else
     printf 'SKIP: systemd-analyze unavailable; static systemd path assertions passed\n'
 fi
 
-printf 'PASS: firewall updater behavior and systemd sandbox contracts\n'
+maintenance_runner="$ROOT/utilities/maintenance-run.sh"
+maintenance_utils="$ROOT/lib/maintenance-utils.sh"
+deep_db_maintenance="$ROOT/utilities/maintenance-db-maint.sh"
+
+for function_name in optimize_database validate_system_health generate_maintenance_summary; do
+    grep -Eq "^${function_name}\\(\\)" "$maintenance_utils" \
+        || fail "maintenance library does not own ${function_name}"
+    ! grep -Eq "^${function_name}\\(\\)" "$maintenance_runner" \
+        || fail "maintenance runner duplicates canonical ${function_name}"
+done
+! grep -Eq '_SAVE_SCRIPT_DIR|_MAINT_SCRIPT_DIR' "$maintenance_runner" \
+    || fail "maintenance runner retains stale SCRIPT_DIR save/restore state"
+assert_file_contains "$maintenance_runner" 'source "$PROJECT_ROOT/lib/maintenance-utils.sh"'
+assert_file_contains "$maintenance_runner" 'MAINTENANCE_SUMMARY_RESULT'
+assert_file_contains "$maintenance_runner" 'MAINTENANCE_SUMMARY_STATE'
+assert_file_contains "$maintenance_runner" 'exit "$maintenance_result"'
+! grep -Fq 'local critical_failures=' "$maintenance_runner" \
+    || fail "maintenance runner duplicates canonical result classification"
+
+routine_function="$TMP/optimize-database.function"
+extract_func "$maintenance_utils" optimize_database > "$routine_function"
+for forbidden in 'backup-run.sh' 'docker compose' 'VACUUM' 'ANALYZE' 'wal_checkpoint(TRUNCATE)' 'integrity_check' 'trap '; do
+    ! grep -Fq "$forbidden" "$routine_function" \
+        || fail "routine database optimization contains deep-maintenance behavior: $forbidden"
+done
+
+routine_dir="$TMP/routine-db"
+mkdir -p "$routine_dir/state/data" "$routine_dir/bin"
+: > "$routine_dir/state/data/db.sqlite3"
+cat > "$routine_dir/bin/sqlite3" <<'EOF_SQLITE'
+#!/usr/bin/env bash
+set -euo pipefail
+sql="${*: -1}"
+printf '%s\n' "$sql" >> "${SQLITE_CALL_LOG:?}"
+case "$sql" in
+    'PRAGMA page_count;') printf '120\n' ;;
+    'PRAGMA freelist_count;') printf '7\n' ;;
+    'PRAGMA page_size;') printf '4096\n' ;;
+esac
+EOF_SQLITE
+chmod 0755 "$routine_dir/bin/sqlite3"
+cat > "$routine_dir/probe.bash" <<'EOF_ROUTINE_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+OPTIMIZE_DATABASE=true
+DRY_RUN=false
+get_config_value(){ printf '%s\n' "${VW_TEST_STATE_DIR:?}"; }
+log_info(){ :; }
+log_warn(){ :; }
+log_error(){ :; }
+log_success(){ :; }
+EOF_ROUTINE_PROBE
+cat "$routine_function" >> "$routine_dir/probe.bash"
+printf '\noptimize_database\n' >> "$routine_dir/probe.bash"
+SQLITE_CALL_LOG="$routine_dir/sqlite.log" \
+VW_TEST_STATE_DIR="$routine_dir/state" \
+PATH="$routine_dir/bin:$PATH" \
+    "$BASH" "$routine_dir/probe.bash" \
+    || fail "routine online database maintenance failed"
+assert_file_contains "$routine_dir/sqlite.log" 'PRAGMA optimize;'
+assert_file_contains "$routine_dir/sqlite.log" 'PRAGMA wal_checkpoint(PASSIVE);'
+assert_file_contains "$routine_dir/sqlite.log" 'PRAGMA page_count;'
+assert_file_contains "$routine_dir/sqlite.log" 'PRAGMA freelist_count;'
+assert_file_contains "$routine_dir/sqlite.log" 'PRAGMA page_size;'
+
+for required in \
+    'utilities/backup-run.sh" run db' \
+    'docker compose stop vaultwarden' \
+    'PRAGMA wal_checkpoint(TRUNCATE);' \
+    'PRAGMA optimize;' \
+    'VACUUM;'; do
+    assert_file_contains "$deep_db_maintenance" "$required"
+done
+
+health_root="$TMP/health-root"
+mkdir -p "$health_root/utilities"
+cat > "$health_root/utilities/maintenance-health.sh" <<'EOF_HEALTH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "${HEALTH_ARGS_LOG:?}"
+printf '%s\n' "${VAULTWARDEN_INTERNAL_HEALTH_CHECK:-}" > "${HEALTH_ENV_LOG:?}"
+exit "${VW_TEST_HEALTH_RC:?}"
+EOF_HEALTH
+chmod 0755 "$health_root/utilities/maintenance-health.sh"
+cat > "$TMP/health-probe.bash" <<'EOF_HEALTH_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+DRY_RUN=false
+log_info(){ printf 'INFO: %s\n' "$*"; }
+log_warn(){ printf 'WARN: %s\n' "$*"; }
+log_error(){ printf 'ERROR: %s\n' "$*"; }
+log_success(){ printf 'SUCCESS: %s\n' "$*"; }
+EOF_HEALTH_PROBE
+extract_func "$maintenance_utils" validate_system_health >> "$TMP/health-probe.bash"
+printf '\nvalidate_system_health\n' >> "$TMP/health-probe.bash"
+
+for health_rc in 0 1 75 2 3 4 9; do
+    set +e
+    PROJECT_ROOT="$health_root" \
+    VW_TEST_HEALTH_RC="$health_rc" \
+    HEALTH_ARGS_LOG="$TMP/health-${health_rc}.args" \
+    HEALTH_ENV_LOG="$TMP/health-${health_rc}.env" \
+        "$BASH" "$TMP/health-probe.bash" > "$TMP/health-${health_rc}.out" 2>&1
+    actual_rc=$?
+    set -e
+    [[ "$actual_rc" -eq "$health_rc" ]] \
+        || fail "quick health status $health_rc was changed to $actual_rc"
+    [[ "$(cat "$TMP/health-${health_rc}.args")" == '--quiet --quick' ]] \
+        || fail "maintenance health did not invoke quick quiet profile"
+    [[ "$(cat "$TMP/health-${health_rc}.env")" == true ]] \
+        || fail "maintenance health omitted internal health marker"
+done
+assert_file_contains "$TMP/health-1.out" 'passed with advisory warnings'
+assert_file_contains "$TMP/health-75.out" 'skipped because another health execution was active'
+for health_rc in 2 3 4; do
+    assert_file_contains "$TMP/health-${health_rc}.out" "failed with status ${health_rc}"
+done
+assert_file_contains "$TMP/health-9.out" 'unexpected status 9'
+
+cat > "$TMP/summary-probe.bash" <<'EOF_SUMMARY_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+CLEAN_LOGS=true
+CLEAN_BACKUPS=true
+CLEAN_DOCKER=true
+OPTIMIZE_DATABASE=true
+UPDATE_FIREWALL=false
+UPDATE_DNS=false
+TARGETED_MODE=false
+EMAIL_NOTIFY=true
+log_info(){ :; }
+log_warn(){ :; }
+send_notification_email(){
+    printf '%s\n' "$1" > "${SUMMARY_SUBJECT_LOG:?}"
+    printf '%s' "$2" > "${SUMMARY_BODY_LOG:?}"
+}
+EOF_SUMMARY_PROBE
+extract_func "$maintenance_utils" _format_duration >> "$TMP/summary-probe.bash"
+extract_func "$maintenance_utils" _health_summary_line >> "$TMP/summary-probe.bash"
+extract_func "$maintenance_utils" generate_maintenance_summary >> "$TMP/summary-probe.bash"
+cat >> "$TMP/summary-probe.bash" <<'EOF_SUMMARY_PROBE'
+generate_maintenance_summary 0 0 0 0 1 1 "${VW_TEST_HEALTH_RC:?}" 5 "${VW_TEST_RECOVERY_RC:?}"
+printf '%s\n' "${MAINTENANCE_SUMMARY_STATE:?}" > "${SUMMARY_STATE_LOG:?}"
+exit "${MAINTENANCE_SUMMARY_RESULT:?}"
+EOF_SUMMARY_PROBE
+
+run_summary_case() {
+    local name="$1" health_rc="$2" recovery_rc="$3" expected_rc="$4"
+    set +e
+    VW_TEST_HEALTH_RC="$health_rc" \
+    VW_TEST_RECOVERY_RC="$recovery_rc" \
+    SUMMARY_SUBJECT_LOG="$TMP/${name}.subject" \
+    SUMMARY_BODY_LOG="$TMP/${name}.body" \
+    SUMMARY_STATE_LOG="$TMP/${name}.state" \
+        "$BASH" "$TMP/summary-probe.bash" > "$TMP/${name}.out" 2>&1
+    actual_rc=$?
+    set -e
+    [[ "$actual_rc" -eq "$expected_rc" ]] \
+        || fail "summary case $name returned $actual_rc instead of $expected_rc"
+}
+
+run_summary_case warning 1 0 0
+assert_file_contains "$TMP/warning.out" 'Health validation: Passed with advisory warnings'
+assert_file_contains "$TMP/warning.out" 'Overall Status: SUCCESS WITH WARNINGS'
+assert_file_contains "$TMP/warning.subject" 'VaultWarden Maintenance: SUCCESS WITH WARNINGS'
+assert_file_contains "$TMP/warning.body" 'Health validation: Passed with advisory warnings'
+assert_file_contains "$TMP/warning.state" 'warnings'
+
+run_summary_case skipped 75 0 0
+assert_file_contains "$TMP/skipped.out" 'Health validation: Skipped (another health execution was active)'
+assert_file_contains "$TMP/skipped.out" 'Overall Status: COMPLETED WITH SKIPS'
+assert_file_contains "$TMP/skipped.subject" 'VaultWarden Maintenance: COMPLETED WITH SKIPS'
+assert_file_contains "$TMP/skipped.state" 'skips'
+
+for health_rc in 2 3 4 9; do
+    run_summary_case "failed-${health_rc}" "$health_rc" 0 1
+    assert_file_contains "$TMP/failed-${health_rc}.out" 'Health validation: Failed'
+    assert_file_contains "$TMP/failed-${health_rc}.out" 'Overall Status: COMPLETED WITH ISSUES'
+    assert_file_contains "$TMP/failed-${health_rc}.subject" 'VaultWarden Maintenance: ISSUES DETECTED'
+    assert_file_contains "$TMP/failed-${health_rc}.state" 'issues'
+done
+
+run_summary_case recovery-failed 0 1 1
+assert_file_contains "$TMP/recovery-failed.out" 'Recovery-kit fallback cleanup: Failed'
+assert_file_contains "$TMP/recovery-failed.out" 'Overall Status: COMPLETED WITH ISSUES'
+assert_file_contains "$TMP/recovery-failed.subject" 'VaultWarden Maintenance: ISSUES DETECTED'
+assert_file_contains "$TMP/recovery-failed.body" 'Recovery-kit fallback cleanup: Failed'
+assert_file_contains "$TMP/recovery-failed.state" 'issues'
+
+run_summary_case multiple-failures 2 1 2
+
+printf 'PASS: firewall updater, routine maintenance ownership, and systemd sandbox contracts\n'

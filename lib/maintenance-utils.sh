@@ -185,105 +185,71 @@ cleanup_docker_system() {
 }
 
 
+# Routine optimization is intentionally online. Deep backup, integrity,
+# checkpoint-truncate, ANALYZE, VACUUM, and container lifecycle work belongs to
+# utilities/maintenance-db-maint.sh.
 optimize_database() {
-    if [[ "${OPTIMIZE_DATABASE:-true}" != "true" ]]; then log_info "Skipping database optimization"; return 0; fi
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would safely optimize VaultWarden database"; return 0; fi
-    log_info "Starting SAFE database optimization (will stop VaultWarden temporarily)..."
-    local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    local host_db_path="$state_dir/data/db.sqlite3"
-    if [[ ! -f "$host_db_path" ]]; then log_error "Database file not found: $host_db_path"; return 1; fi
-    local was_running=false
-    if is_service_running "vaultwarden"; then
-        was_running=true
-    else
-        log_warn "VaultWarden not running, will optimize offline database"
+    if [[ "${OPTIMIZE_DATABASE:-true}" != "true" ]]; then
+        log_info "Skipping database optimization"
+        return 0
     fi
-    _db_opt_cleanup() {
-        if [[ "$was_running" == "true" ]]; then
-            if ! is_service_running "vaultwarden" 2>/dev/null; then
-                log_warn "optimize_database: safety net restarting VaultWarden..."
-                docker compose up -d vaultwarden 2>&1 || log_error "Safety net restart failed — manual intervention required"
-            fi
-        fi
-    }
-    trap '_db_opt_cleanup' RETURN
-    local size_bytes_before
-    size_bytes_before=$(stat -c%s "$host_db_path" 2>/dev/null || echo "0")
-    local size_kb_before=$(( size_bytes_before / 1024 ))
-    log_info "Database size before optimization: ${size_kb_before} KB"
-    if [[ "$was_running" == "true" ]]; then
-        log_info "Stopping VaultWarden service..."
-        docker compose stop vaultwarden || { log_error "Failed to stop VaultWarden"; return 1; }
-        log_success "VaultWarden stopped"
-        _wait_wal_quiesce "$host_db_path" 30
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY RUN] Would run PRAGMA optimize and PRAGMA wal_checkpoint(PASSIVE)"
+        return 0
     fi
-    log_info "Creating encrypted pre-optimization backup via backup-run.sh..."
-    # Call utilities/backup-run.sh directly (not the backup.sh dispatcher) so
-    # this lib function does not depend on the caller's working directory and
-    # cannot create a circular dispatcher loop.
-    if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db; then
-        log_error "Pre-optimization backup FAILED — aborting to avoid an unsafe rollback point"
-        [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
+
+    local state_dir db_file page_count freelist_count page_size
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    db_file="$state_dir/data/db.sqlite3"
+    if [[ ! -f "$db_file" ]]; then
+        log_error "Database file not found: $db_file"
         return 1
     fi
-    log_success "Encrypted pre-optimization backup created in backup directory"
-    log_info "Verifying integrity before optimization..."
-    if ! sqlite3 "$host_db_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
-        log_error "Integrity check failed - aborting"
-        [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        log_error "sqlite3 is required for routine database optimization"
         return 1
     fi
-    log_success "Integrity check passed"
-    local optimization_success=true
-    for cmd in "PRAGMA wal_checkpoint(TRUNCATE);" "PRAGMA optimize;" "ANALYZE;" "VACUUM;"; do
-        log_debug "Running: $cmd"
-        sqlite3 "$host_db_path" "$cmd" >/dev/null 2>&1 || { log_warn "Command failed: $cmd"; optimization_success=false; }
-    done
-    log_info "Verifying integrity after optimization..."
-    if ! sqlite3 "$host_db_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
-        log_error "CRITICAL: Post-optimization integrity check failed! Manual restore from backup directory required."
-        optimization_success=false
-    else
-        log_success "Post-optimization integrity check passed"
+
+    log_info "Running online SQLite routine maintenance..."
+    page_count=$(sqlite3 "$db_file" "PRAGMA page_count;" 2>/dev/null || true)
+    freelist_count=$(sqlite3 "$db_file" "PRAGMA freelist_count;" 2>/dev/null || true)
+    page_size=$(sqlite3 "$db_file" "PRAGMA page_size;" 2>/dev/null || true)
+    if [[ -n "$page_count" && -n "$freelist_count" && -n "$page_size" ]]; then
+        log_info "SQLite pages: total=${page_count}, free=${freelist_count}, page_size=${page_size} bytes"
     fi
-    if [[ "$was_running" == "true" ]]; then
-        if docker compose up -d vaultwarden; then
-            log_success "VaultWarden restarted"
-        else
-            log_error "Failed to restart VaultWarden"
-            optimization_success=false
-        fi
-        sleep 5
-        if is_service_running "vaultwarden"; then
-            log_success "VaultWarden healthy"
-        else
-            log_error "VaultWarden not healthy after optimization"
-            optimization_success=false
-        fi
+
+    if ! sqlite3 "$db_file" "PRAGMA optimize;" >/dev/null 2>&1; then
+        log_error "PRAGMA optimize failed"
+        return 1
     fi
-    local size_bytes_after
-    size_bytes_after=$(stat -c%s "$host_db_path" 2>/dev/null || echo "0")
-    local size_kb_after=$(( size_bytes_after / 1024 ))
-    if [[ "$optimization_success" == "true" ]]; then
-        log_success "Database optimization completed. ${size_kb_before} KB → ${size_kb_after} KB"
-    else
-        log_warn "Optimization completed with issues. Safety backup retained in backup directory."
+    if ! sqlite3 "$db_file" "PRAGMA wal_checkpoint(PASSIVE);" >/dev/null 2>&1; then
+        log_error "PRAGMA wal_checkpoint(PASSIVE) failed"
+        return 1
     fi
-    [[ "$optimization_success" == "true" ]]
+    log_success "Online SQLite routine maintenance completed"
 }
 
 
 validate_system_health() {
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
-    log_info "Validating system health after maintenance..."
-    log_info "Invoking: VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ${PROJECT_ROOT}/utilities/maintenance-health.sh --quiet"
-    if VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quiet; then
-        log_success "System health validation passed"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY RUN] Would run quick post-maintenance health validation"
         return 0
-    else
-        log_warn "System health validation detected issues"
-        return 1
     fi
+
+    local health_rc=0
+    log_info "Validating system health after maintenance..."
+    log_info "Invoking: VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ${PROJECT_ROOT}/utilities/maintenance-health.sh --quiet --quick"
+    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quiet \
+        --quick || health_rc=$?
+
+    case "$health_rc" in
+        0)  log_success "System health validation passed" ;;
+        1)  log_warn "System health validation passed with advisory warnings" ;;
+        75) log_warn "System health validation skipped because another health execution was active" ;;
+        2|3|4) log_error "System health validation failed with status ${health_rc}" ;;
+        *)  log_error "System health validation returned unexpected status ${health_rc}" ;;
+    esac
+    return "$health_rc"
 }
 
 
@@ -300,110 +266,175 @@ _format_duration() {
 }
 
 
-# generate_maintenance_summary LOG_RC BACKUP_RC DOCKER_RC DB_RC FW_RC DNS_RC HEALTH_RC [DURATION_SECONDS]
-#
-# Renders the post-run maintenance summary to stdout and optionally sends an
-# email notification.  The optional 8th argument (DURATION_SECONDS) appends a
-# human-readable "Duration: Xm Ys" line to the footer so every automated or
-# manual run is self-documenting.
-generate_maintenance_summary() {
-    local log_cleanup="$1"   backup_cleanup="$2" docker_cleanup="$3"
-    local db_optimization="$4" firewall_update="$5" dns_update="$6" health_validation="$7"
-    local duration_seconds="${8:-}"
+_health_summary_line() {
+    case "$1" in
+        0)  printf '  ✅ Health validation: Passed' ;;
+        1)  printf '  ⚠️  Health validation: Passed with advisory warnings' ;;
+        75) printf '  ⏭️  Health validation: Skipped (another health execution was active)' ;;
+        2|3|4) printf '  ❌ Health validation: Failed (status %s)' "$1" ;;
+        *)  printf '  ❌ Health validation: Failed (unexpected status %s)' "$1" ;;
+    esac
+}
 
-    local summary
+
+# generate_maintenance_summary LOG_RC BACKUP_RC DOCKER_RC DB_RC FW_RC DNS_RC
+#                              HEALTH_RC [DURATION_SECONDS] [RECOVERY_RC]
+#
+# Renders and optionally emails the summary. The owning runner reads
+# MAINTENANCE_SUMMARY_RESULT and MAINTENANCE_SUMMARY_STATE, which are derived by
+# the same classification that selects the rendered overall state and subject.
+generate_maintenance_summary() {
+    local log_cleanup="$1" backup_cleanup="$2" docker_cleanup="$3"
+    local db_optimization="$4" firewall_update="$5" dns_update="$6" health_validation="$7"
+    local duration_seconds="${8:-}" recovery_cleanup="${9:-}"
+    local critical_failures=0 advisory_warnings=0 operation_skips=0
+    local summary subject
+
+    MAINTENANCE_SUMMARY_RESULT=0
+    MAINTENANCE_SUMMARY_STATE=success
+
     summary="VaultWarden Maintenance Summary - $(date)\n\nMaintenance Results:\n"
 
     if [[ "${CLEAN_LOGS:-true}" == "true" ]]; then
-        [[ "$log_cleanup" == "0" ]] && summary+="  ✅ Log cleanup: OK\n" || summary+="  ❌ Log cleanup: Failed\n"
+        if [[ "$log_cleanup" == "0" ]]; then
+            summary+="  ✅ Log cleanup: OK\n"
+        else
+            summary+="  ❌ Log cleanup: Failed\n"
+            ((++critical_failures))
+        fi
     else
         summary+="  ⏭️  Log cleanup: Skipped\n"
     fi
+
     if [[ "${CLEAN_BACKUPS:-true}" == "true" ]]; then
-        [[ "$backup_cleanup" == "0" ]] && summary+="  ✅ Backup cleanup: OK\n" || summary+="  ❌ Backup cleanup: Failed\n"
+        if [[ "$backup_cleanup" == "0" ]]; then
+            summary+="  ✅ Backup cleanup: OK\n"
+        else
+            summary+="  ❌ Backup cleanup: Failed\n"
+            ((++critical_failures))
+        fi
     else
         summary+="  ⏭️  Backup cleanup: Skipped\n"
     fi
-    if [[ "${CLEAN_DOCKER:-true}" == "true" ]]; then
-        if [[ "$docker_cleanup" == "0" ]]; then
-            summary+="  ✅ Docker cleanup: OK\n"
-        elif [[ "$docker_cleanup" == "1" ]]; then
-            summary+="  ⚠️  Docker cleanup: Issues\n"
+
+    if [[ -n "$recovery_cleanup" ]]; then
+        if [[ "$recovery_cleanup" == "0" ]]; then
+            summary+="  ✅ Recovery-kit fallback cleanup: OK\n"
         else
-            summary+="  ❌ Docker cleanup: Failed\n"
+            summary+="  ❌ Recovery-kit fallback cleanup: Failed\n"
+            ((++critical_failures))
         fi
+    fi
+
+    if [[ "${CLEAN_DOCKER:-true}" == "true" ]]; then
+        case "$docker_cleanup" in
+            0) summary+="  ✅ Docker cleanup: OK\n" ;;
+            1)
+                summary+="  ⚠️  Docker cleanup: Issues\n"
+                ((++advisory_warnings))
+                ;;
+            *)
+                summary+="  ❌ Docker cleanup: Failed\n"
+                ((++critical_failures))
+                ;;
+        esac
     else
         summary+="  ⏭️  Docker cleanup: Skipped\n"
     fi
+
     if [[ "${OPTIMIZE_DATABASE:-true}" == "true" ]]; then
-        [[ "$db_optimization" == "0" ]] && summary+="  ✅ DB optimization: OK\n" || summary+="  ⚠️  DB optimization: Issues\n"
+        if [[ "$db_optimization" == "0" ]]; then
+            summary+="  ✅ DB optimization: OK\n"
+        else
+            summary+="  ❌ DB optimization: Failed\n"
+            ((++critical_failures))
+        fi
     else
         summary+="  ⏭️  DB optimization: Skipped\n"
     fi
+
     if [[ "${UPDATE_FIREWALL:-false}" == "true" ]]; then
-        if [[ "$firewall_update" == "0" ]]; then
-            summary+="  ✅ Firewall update: OK\n"
-        elif [[ "$firewall_update" == "75" ]]; then
-            summary+="  ⏭️  Firewall update: Skipped (active operation)\n"
-        else
-            summary+="  ❌ Firewall update: Failed\n"
-        fi
+        case "$firewall_update" in
+            0) summary+="  ✅ Firewall update: OK\n" ;;
+            75)
+                summary+="  ⏭️  Firewall update: Skipped (active operation)\n"
+                ((++operation_skips))
+                ;;
+            *)
+                summary+="  ❌ Firewall update: Failed\n"
+                ((++critical_failures))
+                ;;
+        esac
     else
         summary+="  ⏭️  Firewall update: Skipped\n"
     fi
+
     if [[ "${UPDATE_DNS:-false}" == "true" ]]; then
-        if [[ "$dns_update" == "0" ]]; then
-            summary+="  ✅ DNS update: OK\n"
-        elif [[ "$dns_update" == "75" ]]; then
-            summary+="  ⏭️  DNS update: Skipped (active operation)\n"
-        else
-            summary+="  ❌ DNS update: Failed\n"
-        fi
+        case "$dns_update" in
+            0) summary+="  ✅ DNS update: OK\n" ;;
+            75)
+                summary+="  ⏭️  DNS update: Skipped (active operation)\n"
+                ((++operation_skips))
+                ;;
+            *)
+                summary+="  ❌ DNS update: Failed\n"
+                ((++critical_failures))
+                ;;
+        esac
     else
         summary+="  ⏭️  DNS update: Skipped\n"
     fi
+
     if [[ "${TARGETED_MODE:-false}" == "false" ]]; then
-        [[ "$health_validation" == "0" ]] && summary+="  ✅ Health validation: Passed\n" || summary+="  ⚠️  Health validation: Issues\n"
+        summary+="$(_health_summary_line "$health_validation")\n"
+        case "$health_validation" in
+            0) ;;
+            1) ((++advisory_warnings)) ;;
+            75) ((++operation_skips)) ;;
+            *) ((++critical_failures)) ;;
+        esac
     fi
-
-    local critical_failures=0
-    [[ "${CLEAN_LOGS:-true}"        == "true"  && "$log_cleanup"      != "0" ]] && ((++critical_failures))
-    [[ "${CLEAN_BACKUPS:-true}"     == "true"  && "$backup_cleanup"   != "0" ]] && ((++critical_failures))
-    [[ "${CLEAN_DOCKER:-true}"      == "true"  && "$docker_cleanup"   == "2" ]] && ((++critical_failures))
-    [[ "${OPTIMIZE_DATABASE:-true}" == "true"  && "$db_optimization"  != "0" ]] && ((++critical_failures))
-    [[ "${UPDATE_FIREWALL:-false}"  == "true"  && "$firewall_update"  != "0" && "$firewall_update" != "75" ]] && ((++critical_failures))
-    [[ "${UPDATE_DNS:-false}"       == "true"  && "$dns_update"       != "0" && "$dns_update"      != "75" ]] && ((++critical_failures))
-    [[ "${TARGETED_MODE:-false}"    == "false" && "$health_validation" != "0" ]] && ((++critical_failures))
-
-    local operation_skips=0
-    [[ "${UPDATE_FIREWALL:-false}" == "true" && "$firewall_update" == "75" ]] && ((++operation_skips))
-    [[ "${UPDATE_DNS:-false}"      == "true" && "$dns_update"      == "75" ]] && ((++operation_skips))
 
     if [[ -n "$duration_seconds" && "$duration_seconds" =~ ^[0-9]+$ ]]; then
         summary+="\nDuration: $(_format_duration "$duration_seconds")\n"
     fi
 
-    if [[ $critical_failures -eq 0 && $operation_skips -eq 0 ]]; then
-        summary+="🎉 Overall Status: SUCCESS\n"
-    elif [[ $critical_failures -eq 0 ]]; then
-        summary+="⏭️  Overall Status: COMPLETED WITH SKIPS\n"
-    else
+    if (( critical_failures > 0 )); then
+        MAINTENANCE_SUMMARY_STATE=issues
         summary+="⚠️  Overall Status: COMPLETED WITH ISSUES\n"
+        subject="VaultWarden Maintenance: ISSUES DETECTED"
+    elif (( advisory_warnings > 0 && operation_skips > 0 )); then
+        MAINTENANCE_SUMMARY_STATE=warnings_and_skips
+        summary+="⚠️  Overall Status: COMPLETED WITH WARNINGS AND SKIPS\n"
+        subject="VaultWarden Maintenance: WARNINGS AND SKIPS"
+    elif (( advisory_warnings > 0 )); then
+        MAINTENANCE_SUMMARY_STATE=warnings
+        summary+="⚠️  Overall Status: SUCCESS WITH WARNINGS\n"
+        subject="VaultWarden Maintenance: SUCCESS WITH WARNINGS"
+    elif (( operation_skips > 0 )); then
+        MAINTENANCE_SUMMARY_STATE=skips
+        summary+="⏭️  Overall Status: COMPLETED WITH SKIPS\n"
+        subject="VaultWarden Maintenance: COMPLETED WITH SKIPS"
+    else
+        summary+="🎉 Overall Status: SUCCESS\n"
+        subject="VaultWarden Maintenance: SUCCESS"
     fi
+
+    if (( critical_failures == 1 )); then
+        MAINTENANCE_SUMMARY_RESULT=1
+    elif (( critical_failures > 1 )); then
+        MAINTENANCE_SUMMARY_RESULT=2
+    fi
+
+    : "${MAINTENANCE_SUMMARY_RESULT:?maintenance result was not classified}"
+    : "${MAINTENANCE_SUMMARY_STATE:?maintenance state was not classified}"
 
     printf '%b' "$summary"
 
     if [[ "${EMAIL_NOTIFY:-false}" == "true" ]]; then
-        local subj
-        if [[ $critical_failures -eq 0 && $operation_skips -eq 0 ]]; then
-            subj="VaultWarden Maintenance: SUCCESS"
-        elif [[ $critical_failures -eq 0 ]]; then
-            subj="VaultWarden Maintenance: COMPLETED WITH SKIPS"
-        else
-            subj="VaultWarden Maintenance: ISSUES DETECTED"
-        fi
-        local email_body; email_body=$(printf '%b' "$summary")
-        if send_notification_email "$subj" "$email_body"; then
+        local email_body
+        email_body=$(printf '%b' "$summary")
+        if send_notification_email "$subject" "$email_body"; then
             log_info "Summary emailed"
         else
             log_warn "Failed to send summary email"
