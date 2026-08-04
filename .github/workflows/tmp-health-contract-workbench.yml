@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           base64 -d .github/tmp-health-contract.patch.gz.b64 | gzip -d > /tmp/health-contract.patch
-          echo '4bd02836b36bf49600cddac4395d939e3ba50f53f6db2d2dc967b63abc977e04  /tmp/health-contract.patch' | sha256sum --check
+          echo '6be9659dd27db787662a7caf830e6284fb6a468b7d014b7d206baf9e8d6d87e0  /tmp/health-contract.patch' | sha256sum --check
           git apply /tmp/health-contract.patch
           rm -f .github/workflows/tmp-health-contract-workbench.yml
           rm -f .github/tmp-health-contract.patch.gz.b64
