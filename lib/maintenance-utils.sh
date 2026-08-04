@@ -238,7 +238,7 @@ validate_system_health() {
 
     local health_rc=0
     log_info "Validating system health after maintenance..."
-    log_info "Invoking: VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ${PROJECT_ROOT}/utilities/maintenance-health.sh --quick --quiet"
+    log_info "Invoking: VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ${PROJECT_ROOT}/utilities/maintenance-health.sh --quiet --quick"
     VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quiet \
         --quick || health_rc=$?
 
@@ -268,11 +268,11 @@ _format_duration() {
 
 _health_summary_line() {
     case "$1" in
-        0)  printf '  ✅ Health validation: Passed\n' ;;
-        1)  printf '  ⚠️  Health validation: Passed with advisory warnings\n' ;;
-        75) printf '  ⏭️  Health validation: Skipped (another health execution was active)\n' ;;
-        2|3|4) printf '  ❌ Health validation: Failed (status %s)\n' "$1" ;;
-        *)  printf '  ❌ Health validation: Failed (unexpected status %s)\n' "$1" ;;
+        0)  printf '  ✅ Health validation: Passed' ;;
+        1)  printf '  ⚠️  Health validation: Passed with advisory warnings' ;;
+        75) printf '  ⏭️  Health validation: Skipped (another health execution was active)' ;;
+        2|3|4) printf '  ❌ Health validation: Failed (status %s)' "$1" ;;
+        *)  printf '  ❌ Health validation: Failed (unexpected status %s)' "$1" ;;
     esac
 }
 
@@ -286,7 +286,7 @@ _health_summary_line() {
 generate_maintenance_summary() {
     local log_cleanup="$1" backup_cleanup="$2" docker_cleanup="$3"
     local db_optimization="$4" firewall_update="$5" dns_update="$6" health_validation="$7"
-    local duration_seconds="${8:-}" recovery_cleanup="${9:-0}"
+    local duration_seconds="${8:-}" recovery_cleanup="${9:-}"
     local critical_failures=0 advisory_warnings=0 operation_skips=0
     local summary subject
 
@@ -317,11 +317,13 @@ generate_maintenance_summary() {
         summary+="  ⏭️  Backup cleanup: Skipped\n"
     fi
 
-    if [[ "$recovery_cleanup" == "0" ]]; then
-        summary+="  ✅ Recovery-kit fallback cleanup: OK\n"
-    else
-        summary+="  ❌ Recovery-kit fallback cleanup: Failed\n"
-        ((++critical_failures))
+    if [[ -n "$recovery_cleanup" ]]; then
+        if [[ "$recovery_cleanup" == "0" ]]; then
+            summary+="  ✅ Recovery-kit fallback cleanup: OK\n"
+        else
+            summary+="  ❌ Recovery-kit fallback cleanup: Failed\n"
+            ((++critical_failures))
+        fi
     fi
 
     if [[ "${CLEAN_DOCKER:-true}" == "true" ]]; then
@@ -384,7 +386,7 @@ generate_maintenance_summary() {
     fi
 
     if [[ "${TARGETED_MODE:-false}" == "false" ]]; then
-        summary+="$(_health_summary_line "$health_validation")"
+        summary+="$(_health_summary_line "$health_validation")\n"
         case "$health_validation" in
             0) ;;
             1) ((++advisory_warnings)) ;;
