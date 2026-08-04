@@ -263,10 +263,9 @@ Do not remove Postfix merely because `EMAIL_MODE=api` works for one operational 
 
 ## Backup customization
 
-Current defaults are:
+Current configurable defaults are:
 
 ```bash
-BACKUP_VERIFICATION_MODE=quick_check
 REQUIRE_AUTHENTICATED_INTEGRITY=true
 BACKUP_RETENTION_DAYS=30
 BACKUP_RETENTION_DB_DAYS=14
@@ -274,9 +273,13 @@ BACKUP_RETENTION_FULL_DAYS=30
 BACKUP_RETENTION_EMERGENCY_DAYS=90
 ```
 
+Backup archives are always Age-encrypted. Quick verification is the command default; use `--full-verification` for the explicit end-to-end path. Neither behavior is controlled by a separate environment mode setting.
+
 ### Retention
 
-Retention preserves the newest parseable timestamped primary archive for each tier even when older than the retention window.
+Retention precedence is `--keep N`, the matching type-specific variable, `BACKUP_RETENTION_DAYS`, then the historical per-tier fallback: 14 days for `db`, 30 days for `full`, and 90 days for `emergency`. The backup command and routine maintenance use the same resolver.
+
+Retention preserves the newest parseable timestamped primary archive for each tier even when older than the retention window. Sidecars are removed only after their primary archive is removed.
 
 Do not customize retention by replacing the canonical helper with `find ... -mtime +N -delete`. That would bypass the newest-recovery-point and sidecar contracts.
 

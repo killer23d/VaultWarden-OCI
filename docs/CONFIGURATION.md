@@ -400,8 +400,6 @@ sudo make health
 Current `.env.example` defaults include:
 
 ```bash
-BACKUP_ENCRYPTION_ENABLED=true
-BACKUP_VERIFICATION_MODE=quick_check
 REQUIRE_AUTHENTICATED_INTEGRITY=true
 
 BACKUP_RETENTION_DAYS=30
@@ -416,7 +414,11 @@ RCLONE_REMOTE_PATH=BW-Backup
 
 `BACKUP_DIR` defaults under `PROJECT_STATE_DIR` when left blank.
 
-The normal production path keeps backup encryption enabled. Full and emergency backup semantics are security-relevant and differ from database backups; see [BACKUP-RESTORE.md](BACKUP-RESTORE.md) before changing encryption or retention behavior.
+Backup archives are always Age-encrypted; there is no plaintext-backup configuration mode. The backup command performs quick verification by default, and `--full-verification` requests the explicit end-to-end decrypt and integrity path without changing the default.
+
+Retention resolves in this order: a nonempty `--keep N` override, the matching type-specific variable, `BACKUP_RETENTION_DAYS`, then the historical per-tier fallback of 14 days for `db`, 30 days for `full`, and 90 days for `emergency`. The backup runner and routine maintenance both use this same resolver. Local and remote cleanup preserve the newest parseable primary archive and remove sidecars only with their primary.
+
+Full and emergency backup semantics are security-relevant and differ from database backups; see [BACKUP-RESTORE.md](BACKUP-RESTORE.md) before changing retention behavior.
 
 For systemd jobs, the canonical installed rclone config is:
 

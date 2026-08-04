@@ -22,8 +22,7 @@ source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
 
 BACKUP_TYPE="auto"    # Backup mode: auto, db, full, or emergency.
 DRY_RUN=false
-KEEP_DAYS=14
-KEEP_DAYS_EXPLICIT=false
+KEEP_DAYS=""
 QUIET=false
 FORCE=false
 EMAIL_NOTIFY=false   # Set by --email; send_notification_email() runs on completion.
@@ -134,7 +133,7 @@ case "$_SUBCMD" in
         fi
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --keep)                   _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
+                --keep)                   _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; shift 2 ;;
                 --quiet)                  QUIET=true;        shift ;;
                 --force)                  FORCE=true;        shift ;;
                 --email)                  EMAIL_NOTIFY=true; shift ;;
@@ -175,7 +174,7 @@ case "$_SUBCMD" in
         LIST_ONLY=false
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --keep)  _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
+                --keep)  _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; shift 2 ;;
                 --quiet) QUIET=true;     shift ;;
                 --dry-run) DRY_RUN=true; shift ;;
                 --help|-h) show_help; exit 0 ;;
@@ -187,7 +186,7 @@ case "$_SUBCMD" in
     sync)
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --keep)  _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
+                --keep)  _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; shift 2 ;;
                 --quiet) QUIET=true; shift ;;
                 --dry-run) DRY_RUN=true; shift ;;
                 --help|-h) show_help; exit 0 ;;
@@ -202,7 +201,8 @@ case "$_SUBCMD" in
 esac
 
 if [[ "$_SUBCMD" == "run" || "$_SUBCMD" == "rotate" || "$_SUBCMD" == "sync" ]]; then
-    if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
+    if [[ -n "$KEEP_DAYS" ]] && \
+       { [[ ! "$KEEP_DAYS" =~ ^[0-9]+$ ]] || (( 10#$KEEP_DAYS < 1 )); }; then
         log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
         exit 2
     fi
@@ -275,31 +275,6 @@ get_backup_dir() {
     local dir="$base_dir/$type"
     ensure_dir "$dir" 750 "$(get_real_user)"
     echo "$dir"
-}
-
-_retention_days_for_type() {
-    local backup_type="$1"
-    if [[ "$KEEP_DAYS_EXPLICIT" == "true" ]]; then
-        printf '%s\n' "$KEEP_DAYS"
-        return 0
-    fi
-
-    local specific_key=""
-    case "$backup_type" in
-        db)        specific_key="BACKUP_RETENTION_DB_DAYS" ;;
-        full)      specific_key="BACKUP_RETENTION_FULL_DAYS" ;;
-        emergency) specific_key="BACKUP_RETENTION_EMERGENCY_DAYS" ;;
-        *) log_error "Unknown backup type for retention: $backup_type"; return 1 ;;
-    esac
-
-    local retention
-    retention=$(get_config_value "$specific_key" "")
-    [[ -n "$retention" ]] || retention=$(get_config_value "BACKUP_RETENTION_DAYS" "$KEEP_DAYS")
-    if ! [[ "$retention" =~ ^[0-9]+$ ]] || (( retention < 1 )); then
-        log_error "Invalid retention value for ${backup_type}: '${retention}'"
-        return 1
-    fi
-    printf '%s\n' "$retention"
 }
 
 _load_integrity_hmac_key() {
@@ -1035,7 +1010,7 @@ sync_all_backups_to_rclone() {
     for t in db full emergency; do
         local_dir="${base_dir}/${t}"
         [[ -d "$local_dir" ]] || continue
-        retention=$(_retention_days_for_type "$t") || return 1
+        retention=$(backup_retention_days_for_type "$t" "${KEEP_DAYS:-}") || return 1
         if [[ "$DRY_RUN" == "true" ]]; then
             backup_log_info "[DRY RUN] Would apply ${retention}-day local retention to ${t} backups before upload."
         fi
@@ -1072,16 +1047,18 @@ sync_all_backups_to_rclone() {
     backup_log_success "Rclone backup copy complete (${copied_types} backup type(s))."
 }
 
-# _prune_remote_backups
+# _prune_remote_backups [OVERRIDE_TYPE]
 #
-# Prunes backup files on the configured rclone remote that are older than
-# the per-type retention period. Retention days are read via
-# _retention_days_for_type() for each backup type, mirroring the local
-# cleanup_old_backups() policy on the remote store.
-#
-# Non-fatal: logs a warning and returns 1 on partial failure so that a single
-# unreachable remote does not abort an otherwise successful backup run.
+# Prunes backup files on the configured rclone remote that are older than the
+# canonical per-type retention period. A failed inventory listing is distinct
+# from an empty inventory: no files are deleted for that type and the function
+# returns nonzero so the caller cannot report remote retention as successful.
+# A missing type directory (rclone exit 3) is an expected empty tier. When
+# OVERRIDE_TYPE is set, KEEP_DAYS applies only to that tier; otherwise it applies
+# to every tier for the sync/rotate command contract.
 _prune_remote_backups() {
+    local override_type="${1:-}"
+
     if ! command -v rclone >/dev/null 2>&1; then
         backup_log_info "rclone not installed — skipping remote retention pruning."
         return 0
@@ -1106,15 +1083,54 @@ _prune_remote_backups() {
 
     for t in db full emergency; do
         local remote_path="${remote_name}:${remote_base_path}/${t}"
-        local retention_days
-        retention_days=$(_retention_days_for_type "$t") || return 1
+        local retention_days retention_override=""
+        if [[ -z "$override_type" || "$t" == "$override_type" ]]; then
+            retention_override="${KEEP_DAYS:-}"
+        fi
+        retention_days=$(backup_retention_days_for_type "$t" "$retention_override") || return 1
+
+        local remote_listing="" list_rc=0 list_error_file
+        if [[ -n "${TMPDIR_BACKUP:-}" && -d "$TMPDIR_BACKUP" ]]; then
+            list_error_file="${TMPDIR_BACKUP}/rclone-lsf-${t}.err"
+            : > "$list_error_file"
+        else
+            list_error_file=$(mktemp -t vw-rclone-lsf.XXXXXXXXXX) || {
+                log_error "[remote] Could not create a temporary file for listing ${remote_path}/. No ${t} files were deleted."
+                _prune_failed=true
+                continue
+            }
+        fi
+
+        if remote_listing=$(rclone lsf "${rclone_config_arg[@]}" "${remote_path}/" \
+                --files-only --include "*.age" \
+                --contimeout 15s --timeout 60s 2>"$list_error_file"); then
+            list_rc=0
+        else
+            list_rc=$?
+        fi
+
+        if (( list_rc == 3 )); then
+            backup_log_info "[remote] No ${t} backup directory exists yet at ${remote_path}/ — nothing to prune."
+            rm -f "$list_error_file"
+            continue
+        fi
+
+        if (( list_rc != 0 )); then
+            local list_error=""
+            list_error=$(head -5 "$list_error_file" 2>/dev/null || true)
+            log_error "[remote] Failed to list ${remote_path}/ (rclone exit ${list_rc}). No ${t} files were deleted."
+            [[ -n "$list_error" ]] && log_error "[remote] rclone lsf: ${list_error}"
+            log_error "[remote] Check rclone configuration/connectivity and retry: sudo ./backup.sh rotate"
+            rm -f "$list_error_file"
+            _prune_failed=true
+            continue
+        fi
+        rm -f "$list_error_file"
 
         local -a remote_files=()
-        mapfile -t remote_files < <(
-            rclone lsf "${rclone_config_arg[@]}" "${remote_path}/" \
-                --files-only --include "*.age" \
-                --contimeout 15s --timeout 60s 2>/dev/null || true
-        )
+        if [[ -n "$remote_listing" ]]; then
+            mapfile -t remote_files <<< "$remote_listing"
+        fi
 
         if [[ ${#remote_files[@]} -eq 0 ]]; then
             backup_log_info "[remote] No ${t} backup archives found on remote — nothing to prune."
@@ -1130,6 +1146,7 @@ _prune_remote_backups() {
         fi
 
         local _deleted_remote=0
+        local _type_prune_failed=false
         local _file
         for _file in "${remote_files[@]}"; do
             local _age_days
@@ -1156,10 +1173,11 @@ _prune_remote_backups() {
                 if (( _del_exit != 0 )); then
                     log_warn "[rotate] Failed to delete remote file: ${remote_path}/${_file}" >&2
                     _prune_failed=true
+                    _type_prune_failed=true
                 else
                     backup_log_info "[remote] Deleted: ${_file} (${_age_days}d > ${retention_days}d)"
                     (( ++_deleted_remote )) || true
-                    # Remove associated sidecar files; ignore errors (may not exist).
+                    # Remove associated sidecar files only after the primary was deleted.
                     local _ext
                     for _ext in .sha256 .sha256.hmac .meta; do
                         rclone deletefile "${rclone_config_arg[@]}" \
@@ -1170,7 +1188,13 @@ _prune_remote_backups() {
             fi
         done
 
-        if (( _deleted_remote > 0 )); then
+        if [[ "$_type_prune_failed" == "true" ]]; then
+            if (( _deleted_remote > 0 )); then
+                log_error "[remote] Pruned ${_deleted_remote} old ${t} backup(s) from ${remote_path}/, but one or more primary deletions failed."
+            else
+                log_error "[remote] One or more old ${t} backups could not be pruned from ${remote_path}/."
+            fi
+        elif (( _deleted_remote > 0 )); then
             if [[ "$DRY_RUN" == "true" ]]; then
                 backup_log_info "[DRY RUN] Would prune ${_deleted_remote} old ${t} backup(s) from ${remote_path}/"
                 continue
@@ -1182,7 +1206,7 @@ _prune_remote_backups() {
     done
 
     if [[ "$_prune_failed" == "true" ]]; then
-        log_warn "[rotate] Some remote pruning steps encountered errors — check above for details." >&2
+        log_error "[rotate] Remote retention did not complete — check the errors above."
         return 1
     fi
     return 0
@@ -1676,23 +1700,30 @@ main() {
             local type_dir="$base_dir/$t"
             [[ -d "$type_dir" ]] || continue
             local retention_days
-            retention_days=$(_retention_days_for_type "$t") || exit 1
+            retention_days=$(backup_retention_days_for_type "$t" "${KEEP_DAYS:-}") || exit 1
 
             cleanup_old_backups "$type_dir" "$t" "$retention_days" || rotate_failed=true
         done
 
         if [[ "$rotate_failed" == "true" ]]; then
-            log_error "One or more rotation steps encountered errors — check above for details."
+            log_error "One or more local rotation steps encountered errors — check above for details."
             exit 1
         fi
 
-        # Prune remote backups to match the local retention policy.
-        _prune_remote_backups || {
-            log_warn "[rotate] Remote retention pruning reported errors — local rotation was successful."
-        }
-
         local rotate_suffix=""
-        [[ "$DRY_RUN" == "true" ]] && rotate_suffix=" (dry run)"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            rotate_suffix=" (dry run)"
+            backup_log_success "Local retention preview completed${rotate_suffix}."
+        else
+            backup_log_success "Local retention completed."
+        fi
+
+        if ! _prune_remote_backups; then
+            log_error "[rotate] Local retention completed, but remote retention failed."
+            log_error "[rotate] Review the remote errors above and rerun: sudo ./backup.sh rotate"
+            exit 1
+        fi
+
         backup_log_success "Rotation complete${rotate_suffix}."
         exit 0
     fi
@@ -1774,7 +1805,7 @@ main() {
             log_error "Invalid backup type: $actual_type"; exit 1 ;;
     esac
 
-    if [[ "$backup_success" == "true" ]]; then
+    if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
         [[ "$backup_file" == *.age && -f "$backup_file" ]] || {
             log_error "backup_file is invalid or missing: ${backup_file:-empty}"
             exit 1
@@ -1868,20 +1899,21 @@ main() {
         _log_backup_size "$backup_file"
 
         local retention_days
-        retention_days=$(_retention_days_for_type "$actual_type") || exit 1
+        retention_days=$(backup_retention_days_for_type "$actual_type" "${KEEP_DAYS:-}") || exit 1
         backup_log_info "Cleaning up old backups (retention: $retention_days days)..."
         cleanup_old_backups "$backup_dir" "$actual_type" "$retention_days" || \
             backup_log_warn "Failed to clean up some old backups"
 
-        # Prune remote backups to mirror local retention policy
         if [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]]; then
-            _prune_remote_backups || \
-                backup_log_warn "Failed to prune some remote backups"
+            if ! _prune_remote_backups "$actual_type"; then
+                rclone_failed=true
+                offsite_status="backup synced; remote retention FAILED"
+                log_error "Remote retention failed after the backup upload. Local and uploaded backup copies are safe."
+            fi
         fi
 
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-            local rclone_status="skipped"
-            [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]] && rclone_status="synced"
+            local rclone_status="$offsite_status"
 
             local verify_status
             if [[ "$FULL_VERIFY" == "true" ]]; then
@@ -1893,6 +1925,9 @@ main() {
             fi
 
             local subject="[VaultWarden] Backup completed: $actual_type ($timestamp)"
+            if [[ "$rclone_failed" == "true" ]]; then
+                subject="[VaultWarden] Backup remote retention FAILED: $actual_type ($timestamp)"
+            fi
             local body
             body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nVerification: %s\nOffsite sync: %s\nHost:         %s\n' \
                 "$actual_type" "$timestamp" \
@@ -1905,7 +1940,10 @@ main() {
         fi
 
         _print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"
-        if [[ "$verify_failed" == "true" ]]; then
+        if [[ "$rclone_failed" == "true" ]]; then
+            log_error "Backup completed locally, but requested remote retention failed."
+            exit 2
+        elif [[ "$verify_failed" == "true" ]]; then
             log_warn "Backup archive was created, but quick verification failed; do not treat it as verified."
             log_warn "Manual inspection required before using this backup for disaster recovery."
         else

@@ -134,15 +134,14 @@ cleanup_backups() {
     log_info "Managing backup retention..."
     local backup_base_dir; backup_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     local had_real_error=false
-    local backup_types=(
-        "db:${DB_BACKUP_RETENTION_DAYS:-14}"
-        "full:${FULL_BACKUP_RETENTION_DAYS:-30}"
-        "emergency:${EMERGENCY_BACKUP_RETENTION_DAYS:-90}"
-    )
-    for backup_type_info in "${backup_types[@]}"; do
-        local backup_type="${backup_type_info%%:*}"
-        local retention_days="${backup_type_info##*:}"
-        local backup_dir="$backup_base_dir/$backup_type"
+    local backup_type retention_days backup_dir
+    for backup_type in db full emergency; do
+        if ! retention_days="$(backup_retention_days_for_type "$backup_type")"; then
+            log_error "$backup_type backup retention policy is invalid"
+            had_real_error=true
+            continue
+        fi
+        backup_dir="$backup_base_dir/$backup_type"
         if [[ ! -d "$backup_dir" ]]; then
             log_info "No $backup_type backup directory yet (skipping cleanup)"
             continue
@@ -158,8 +157,12 @@ cleanup_backups() {
             had_real_error=true
         fi
     done
+    if [[ "$had_real_error" == "true" ]]; then
+        log_error "Backup retention management completed with errors"
+        return 1
+    fi
     log_success "Backup retention management completed"
-    [[ "$had_real_error" == "true" ]] && return 1 || return 0
+    return 0
 }
 
 

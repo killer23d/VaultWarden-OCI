@@ -81,15 +81,27 @@ Current defaults from `.env.example` are:
 | `full` | 30 days |
 | `emergency` | 90 days |
 
+The canonical resolver applies retention in this order:
+
+1. a nonempty `--keep N` override;
+2. `BACKUP_RETENTION_DB_DAYS`, `BACKUP_RETENTION_FULL_DAYS`, or `BACKUP_RETENTION_EMERGENCY_DAYS` for the selected type;
+3. `BACKUP_RETENTION_DAYS`;
+4. the historical per-tier fallback: 14 days for `db`, 30 days for `full`, and 90 days for `emergency`.
+
+The backup command, routine maintenance, and local/remote pruning use the same resolver. Values must be positive integers, and unknown backup types are rejected.
+
 Override a run with a positive integer:
 
 ```bash
 sudo ./backup.sh run full --keep 30
+sudo ./backup.sh rotate --keep 30
 ```
 
 Retention always preserves the newest parseable timestamped archive for a tier, even when it is older than the retention window. Primary archives with unparseable names fail safe and are not automatically deleted.
 
-Sidecars associated with deleted primary archives are removed with the archive. Orphaned sidecars are cleaned separately.
+Sidecars associated with deleted primary archives are removed only after the primary archive is removed. Orphaned local sidecars are cleaned separately.
+
+A remote tier directory that has never been created is treated as an empty tier. Other failed remote inventory listings are not treated as empty: no files are deleted for that type, the remote path and failure are logged, and requested remote retention returns nonzero.
 
 ---
 
