@@ -1053,6 +1053,7 @@ sync_all_backups_to_rclone() {
 # canonical per-type retention period. A failed inventory listing is distinct
 # from an empty inventory: no files are deleted for that type and the function
 # returns nonzero so the caller cannot report remote retention as successful.
+# A missing type directory (rclone exit 3) is an expected empty tier.
 _prune_remote_backups() {
     if ! command -v rclone >/dev/null 2>&1; then
         backup_log_info "rclone not installed — skipping remote retention pruning."
@@ -1101,6 +1102,12 @@ _prune_remote_backups() {
             list_rc=$?
         fi
 
+        if (( list_rc == 3 )); then
+            backup_log_info "[remote] No ${t} backup directory exists yet at ${remote_path}/ — nothing to prune."
+            rm -f "$list_error_file"
+            continue
+        fi
+
         if (( list_rc != 0 )); then
             local list_error=""
             list_error=$(head -5 "$list_error_file" 2>/dev/null || true)
@@ -1132,6 +1139,7 @@ _prune_remote_backups() {
         fi
 
         local _deleted_remote=0
+        local _type_prune_failed=false
         local _file
         for _file in "${remote_files[@]}"; do
             local _age_days
@@ -1158,6 +1166,7 @@ _prune_remote_backups() {
                 if (( _del_exit != 0 )); then
                     log_warn "[rotate] Failed to delete remote file: ${remote_path}/${_file}" >&2
                     _prune_failed=true
+                    _type_prune_failed=true
                 else
                     backup_log_info "[remote] Deleted: ${_file} (${_age_days}d > ${retention_days}d)"
                     (( ++_deleted_remote )) || true
@@ -1172,7 +1181,13 @@ _prune_remote_backups() {
             fi
         done
 
-        if (( _deleted_remote > 0 )); then
+        if [[ "$_type_prune_failed" == "true" ]]; then
+            if (( _deleted_remote > 0 )); then
+                log_error "[remote] Pruned ${_deleted_remote} old ${t} backup(s) from ${remote_path}/, but one or more primary deletions failed."
+            else
+                log_error "[remote] One or more old ${t} backups could not be pruned from ${remote_path}/."
+            fi
+        elif (( _deleted_remote > 0 )); then
             if [[ "$DRY_RUN" == "true" ]]; then
                 backup_log_info "[DRY RUN] Would prune ${_deleted_remote} old ${t} backup(s) from ${remote_path}/"
                 continue
