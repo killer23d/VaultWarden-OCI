@@ -168,7 +168,7 @@ main() {
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
-        "$health_validation_result" "$recovery_cleanup_result" "$duration_seconds" \
+        "$health_validation_result" "$duration_seconds" "$recovery_cleanup_result" \
         || maintenance_result=$?
 
     case "$maintenance_result" in
