@@ -1131,3 +1131,86 @@ printf 'PASS: deep maintenance fails closed and cleans only its successful safet
 )
 
 check_deep_maintenance_safety_backup_contracts
+
+check_backup_remote_keep_scope() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+BACKUP="$ROOT/utilities/backup-run.sh"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+cat > "$TMP/remote-keep-scope-probe.sh" <<EOF_PROBE
+set -euo pipefail
+TMPDIR_BACKUP="$TMP/work"
+mkdir -p "\$TMPDIR_BACKUP"
+KEEP_DAYS=7
+DRY_RUN=false
+RETENTION_LOG="$TMP/retention.log"
+backup_log_info(){ :; }
+backup_log_success(){ :; }
+backup_log_warn(){ :; }
+log_warn(){ :; }
+log_error(){ printf 'ERROR:%s\\n' "\$*" >&2; }
+get_config_value(){
+    case "\$1" in
+        RCLONE_REMOTE_NAME) printf '%s\\n' mockremote ;;
+        RCLONE_REMOTE_PATH) printf '%s\\n' vaultwarden_backups ;;
+        *) printf '%s\\n' "\${2:-}" ;;
+    esac
+}
+_resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(); }
+backup_retention_days_for_type(){
+    local backup_type="\$1" explicit_override="\${2:-}"
+    printf '%s=%s\\n' "\$backup_type" "\$explicit_override" >> "\$RETENTION_LOG"
+    printf '%s\\n' "\${explicit_override:-99}"
+}
+rclone(){
+    [[ "\${1:-}" == "lsf" ]] && return 0
+    return 0
+}
+$(_extract_func "$BACKUP" _prune_remote_backups)
+case "\${1:-}" in
+    typed) _prune_remote_backups db ;;
+    all) _prune_remote_backups ;;
+    *) exit 64 ;;
+esac
+EOF_PROBE
+
+grep -Fq '_prune_remote_backups "$actual_type"' "$BACKUP" \
+    || fail "backup run does not scope remote --keep retention to actual_type"
+
+: > "$TMP/retention.log"
+bash "$TMP/remote-keep-scope-probe.sh" typed
+for expected in 'db=7' 'full=' 'emergency='; do
+    grep -Fxq "$expected" "$TMP/retention.log" \
+        || fail "typed run remote retention scope missing: $expected"
+done
+[[ "$(grep -c '=7$' "$TMP/retention.log" || true)" == "1" ]] \
+    || fail "typed run applied --keep to more than its selected remote tier"
+
+: > "$TMP/retention.log"
+bash "$TMP/remote-keep-scope-probe.sh" all
+for expected in 'db=7' 'full=7' 'emergency=7'; do
+    grep -Fxq "$expected" "$TMP/retention.log" \
+        || fail "sync/rotate all-tier retention scope missing: $expected"
+done
+[[ "$(grep -c '=7$' "$TMP/retention.log" || true)" == "3" ]] \
+    || fail "sync/rotate did not apply --keep to every remote tier"
+
+printf 'PASS: backup run scopes remote --keep while sync/rotate remain all-tier\n'
+)
+
+check_backup_remote_keep_scope
