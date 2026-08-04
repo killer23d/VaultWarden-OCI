@@ -6,29 +6,302 @@ on:
       - delta
     paths:
       - '.github/workflows/tmp-health-contract-workbench.yml'
-      - 'utilities/maintenance-health.sh'
-      - 'maintenance.sh'
-      - 'Makefile'
-      - 'dashboard.sh'
-      - 'systemd/**'
-      - 'utilities/setup-systemd.sh'
-      - 'tests/**'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export-checkout:
+  validate-and-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Export checkout
-        run: tar --exclude=.git -czf /tmp/vaultwarden-oci-checkout.tar.gz .
-
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: vaultwarden-oci-checkout
-          path: /tmp/vaultwarden-oci-checkout.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Apply bounded health contract patch
+        shell: bash
+        run: |
+          cat > /tmp/health-contract.patch.gz.b64 <<'PATCH_B64'
+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
+PATCH_B64
+          base64 -d /tmp/health-contract.patch.gz.b64 | gzip -d > /tmp/health-contract.patch
+          echo '4bd02836b36bf49600cddac4395d939e3ba50f53f6db2d2dc967b63abc977e04  /tmp/health-contract.patch' | sha256sum --check
+          git apply /tmp/health-contract.patch
+          rm -f .github/workflows/tmp-health-contract-workbench.yml
+          git diff --check
+
+      - name: Install validation dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils p7zip-full python3-argon2 python3-bcrypt python3-yaml shellcheck
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Run syntax and strict ShellCheck
+        shell: bash
+        run: |
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 -n 1 bash -n
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 shellcheck -x --severity=warning
+
+      - name: Validate production Compose
+        shell: bash
+        run: docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
+
+      - name: Verify generated command reference
+        shell: bash
+        env:
+          DOCKER_PROJECT_LABEL: ci
+        run: |
+          cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
+          bash utilities/write-command-reference.sh
+          diff -u /tmp/COMMAND-REFERENCE.committed.md docs/COMMAND-REFERENCE.md
+
+      - name: Verify health systemd units
+        shell: bash
+        run: |
+          stub_dir=$(mktemp -d)
+          cleanup() {
+            sudo rm -f /opt/vaultwarden-scripts/maintenance.sh
+            sudo rmdir /opt/vaultwarden-scripts 2>/dev/null || true
+            rm -rf "$stub_dir"
+          }
+          trap cleanup EXIT
+          sudo mkdir -p /opt/vaultwarden-scripts
+          printf '#!/usr/bin/env bash\nexit 0\n' | sudo tee /opt/vaultwarden-scripts/maintenance.sh >/dev/null
+          sudo chmod 0755 /opt/vaultwarden-scripts/maintenance.sh
+          cat > "$stub_dir/docker.service" <<'EOF_DOCKER'
+          [Unit]
+          Description=Test Docker stub
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/true
+          RemainAfterExit=yes
+          EOF_DOCKER
+          cat > "$stub_dir/vaultwarden-notify-failure@.service" <<'EOF_NOTIFY'
+          [Unit]
+          Description=Test failure notifier
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/true
+          EOF_NOTIFY
+          SYSTEMD_UNIT_PATH="$stub_dir:$PWD/systemd:/etc/systemd/system:/usr/lib/systemd/system:/lib/systemd/system" \
+            systemd-analyze verify systemd/vaultwarden-health.service systemd/vaultwarden-health.timer
+
+      - name: Run focused health contract tests
+        shell: bash
+        run: |
+          bash tests/suites/operations/case-operations.bash
+          bash tests/suites/operations/case-operator-ui.bash
+          bash tests/suites/foundation/case-systemd.bash
+          bash tests/suites/operations/case-lock-fd-hygiene.bash
+
+      - name: Run complete canonical suite
+        shell: bash
+        run: ./tests/run-tests.sh all
+
+      - name: Commit validated patch
+        shell: bash
+        run: |
+          git diff --check
+          git status --short
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'Implement quick health exit contract'
+          git push origin HEAD:fix/health-quick-exit-contract
