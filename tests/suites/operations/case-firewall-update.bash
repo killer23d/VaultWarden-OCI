@@ -370,7 +370,8 @@ done
 ! grep -Eq '_SAVE_SCRIPT_DIR|_MAINT_SCRIPT_DIR' "$maintenance_runner" \
     || fail "maintenance runner retains stale SCRIPT_DIR save/restore state"
 assert_file_contains "$maintenance_runner" 'source "$PROJECT_ROOT/lib/maintenance-utils.sh"'
-assert_file_contains "$maintenance_runner" '|| maintenance_result=$?'
+assert_file_contains "$maintenance_runner" 'MAINTENANCE_SUMMARY_RESULT'
+assert_file_contains "$maintenance_runner" 'MAINTENANCE_SUMMARY_STATE'
 assert_file_contains "$maintenance_runner" 'exit "$maintenance_result"'
 ! grep -Fq 'local critical_failures=' "$maintenance_runner" \
     || fail "maintenance runner duplicates canonical result classification"
@@ -463,7 +464,7 @@ for health_rc in 0 1 75 2 3 4 9; do
     set -e
     [[ "$actual_rc" -eq "$health_rc" ]] \
         || fail "quick health status $health_rc was changed to $actual_rc"
-    [[ "$(cat "$TMP/health-${health_rc}.args")" == '--quick --quiet' ]] \
+    [[ "$(cat "$TMP/health-${health_rc}.args")" == '--quiet --quick' ]] \
         || fail "maintenance health did not invoke quick quiet profile"
     [[ "$(cat "$TMP/health-${health_rc}.env")" == true ]] \
         || fail "maintenance health omitted internal health marker"
@@ -497,11 +498,9 @@ extract_func "$maintenance_utils" _format_duration >> "$TMP/summary-probe.bash"
 extract_func "$maintenance_utils" _health_summary_line >> "$TMP/summary-probe.bash"
 extract_func "$maintenance_utils" generate_maintenance_summary >> "$TMP/summary-probe.bash"
 cat >> "$TMP/summary-probe.bash" <<'EOF_SUMMARY_PROBE'
-set +e
 generate_maintenance_summary 0 0 0 0 1 1 "${VW_TEST_HEALTH_RC:?}" 5 "${VW_TEST_RECOVERY_RC:?}"
-rc=$?
-set -e
-exit "$rc"
+printf '%s\n' "${MAINTENANCE_SUMMARY_STATE:?}" > "${SUMMARY_STATE_LOG:?}"
+exit "${MAINTENANCE_SUMMARY_RESULT:?}"
 EOF_SUMMARY_PROBE
 
 run_summary_case() {
@@ -511,6 +510,7 @@ run_summary_case() {
     VW_TEST_RECOVERY_RC="$recovery_rc" \
     SUMMARY_SUBJECT_LOG="$TMP/${name}.subject" \
     SUMMARY_BODY_LOG="$TMP/${name}.body" \
+    SUMMARY_STATE_LOG="$TMP/${name}.state" \
         "$BASH" "$TMP/summary-probe.bash" > "$TMP/${name}.out" 2>&1
     actual_rc=$?
     set -e
@@ -523,17 +523,20 @@ assert_file_contains "$TMP/warning.out" 'Health validation: Passed with advisory
 assert_file_contains "$TMP/warning.out" 'Overall Status: SUCCESS WITH WARNINGS'
 assert_file_contains "$TMP/warning.subject" 'VaultWarden Maintenance: SUCCESS WITH WARNINGS'
 assert_file_contains "$TMP/warning.body" 'Health validation: Passed with advisory warnings'
+assert_file_contains "$TMP/warning.state" 'warnings'
 
 run_summary_case skipped 75 0 0
 assert_file_contains "$TMP/skipped.out" 'Health validation: Skipped (another health execution was active)'
 assert_file_contains "$TMP/skipped.out" 'Overall Status: COMPLETED WITH SKIPS'
 assert_file_contains "$TMP/skipped.subject" 'VaultWarden Maintenance: COMPLETED WITH SKIPS'
+assert_file_contains "$TMP/skipped.state" 'skips'
 
 for health_rc in 2 3 4 9; do
     run_summary_case "failed-${health_rc}" "$health_rc" 0 1
     assert_file_contains "$TMP/failed-${health_rc}.out" 'Health validation: Failed'
     assert_file_contains "$TMP/failed-${health_rc}.out" 'Overall Status: COMPLETED WITH ISSUES'
     assert_file_contains "$TMP/failed-${health_rc}.subject" 'VaultWarden Maintenance: ISSUES DETECTED'
+    assert_file_contains "$TMP/failed-${health_rc}.state" 'issues'
 done
 
 run_summary_case recovery-failed 0 1 1
@@ -541,6 +544,7 @@ assert_file_contains "$TMP/recovery-failed.out" 'Recovery-kit fallback cleanup: 
 assert_file_contains "$TMP/recovery-failed.out" 'Overall Status: COMPLETED WITH ISSUES'
 assert_file_contains "$TMP/recovery-failed.subject" 'VaultWarden Maintenance: ISSUES DETECTED'
 assert_file_contains "$TMP/recovery-failed.body" 'Recovery-kit fallback cleanup: Failed'
+assert_file_contains "$TMP/recovery-failed.state" 'issues'
 
 run_summary_case multiple-failures 2 1 2
 
