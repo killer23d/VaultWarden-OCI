@@ -65,9 +65,9 @@ OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — completed without real failures; may include expected contention skips
-    1 — completed with minor issues
-    2 — completed with critical failures
+    0 — completed without real failures; may include advisory warnings or expected skips
+    1 — completed with one real failure
+    2 — completed with multiple real failures
 
 EXAMPLES:
     sudo ./maintenance.sh run
@@ -184,7 +184,7 @@ main() {
         warnings_and_skips) log_warn "Maintenance completed with advisory warnings and skipped work" ;;
         issues)
             if [[ "$maintenance_result" == "1" ]]; then
-                log_warn "Maintenance completed with one real failure"
+                log_error "Maintenance completed with one real failure"
             else
                 log_error "Maintenance completed with multiple real failures"
             fi
