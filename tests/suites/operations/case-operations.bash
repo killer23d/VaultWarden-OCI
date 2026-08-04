@@ -1221,14 +1221,245 @@ require 'return 4' "$HEALTH" \
   "health --fix guard infrastructure failures must be real failures"
 reject 'maintenance-health\.sh must be run as root' "$CONFIG" \
   "config loading must not block documented non-root read-only health"
-require '^SuccessExitStatus=0 1 3 75$' "$UNIT" \
-  "health unit must treat expected contention 75 as success, but not all failures"
+require '^SuccessExitStatus=0 1 75$' "$UNIT" \
+  "health unit must treat warnings and contention as success, but not prerequisite failures"
+reject '^SuccessExitStatus=.*(^| )3( |$)' "$UNIT" \
+  "health prerequisite exit 3 must remain a real systemd failure"
 
 printf 'PASS: health operation contract\n'
 
 )
 
 check_health_operation_contract
+check_health_quick_profile_contract() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+HEALTH="$ROOT/utilities/maintenance-health.sh"
+SECRETS="$ROOT/lib/secrets.sh"
+TMP="$(mktemp -d -t vw-health-quick.XXXXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+extract_func() {
+    local file="$1" func="$2"
+    awk -v f="$func" '
+        $0 ~ "^" f "\\(\\)" {p=1}
+        p {
+            print
+            opens=gsub(/\{/, "{")
+            closes=gsub(/\}/, "}")
+            depth += opens - closes
+            if (depth == 0) exit
+        }
+    ' "$file"
+}
+
+# The secrets library no longer mutates a caller-owned generic SCRIPT_DIR.
+! grep -Eq '^[[:space:]]*SCRIPT_DIR=' "$SECRETS" \
+    || fail 'lib/secrets.sh must not assign generic SCRIPT_DIR'
+! grep -Fq '_SAVE_SCRIPT_DIR' "$HEALTH" \
+    || fail 'health retained the obsolete SCRIPT_DIR save/restore workaround'
+! grep -Fq '_health_json_escape' "$HEALTH" \
+    || fail 'health retained its incomplete private JSON escape helper'
+grep -Fq '$(_json_escape "$message")' "$HEALTH" \
+    || fail 'health JSON must reuse the robust repository helper'
+
+main_probe="$TMP/main-probe.bash"
+cat > "$main_probe" <<'EOF_MAIN'
+#!/usr/bin/env bash
+set -uo pipefail
+QUICK=false
+COMPREHENSIVE=false
+FIX_MODE=false
+REPORT_MODE=false
+QUIET=false
+JSON_OUTPUT=false
+failed="${TEST_FAILED:-0}"
+warnings="${TEST_WARNINGS:-0}"
+trace(){ printf '%s\n' "$1" >>"${TRACE_FILE:?}"; }
+log_error(){ printf '%s\n' "$*" >&2; }
+log_info(){ :; }
+_health_show_help(){ :; }
+_acquire_run_lock(){ trace acquire; return "${LOCK_RC:-0}"; }
+_release_run_lock(){ return 0; }
+_collect_quick_compose_snapshot(){ trace compose_snapshot; return "${SNAPSHOT_RC:-0}"; }
+_check_quick_containers(){ trace quick_containers; }
+_check_containers(){ trace containers; }
+_check_ssl(){ trace ssl; }
+_check_vaultwarden_alive(){ trace alive; }
+_check_vaultwarden_server_info(){ trace server_info; }
+_check_caddy_storage_permissions(){ trace caddy_permissions; }
+_check_crowdsec(){ trace crowdsec; }
+_check_crowdsec_email_notifications(){ trace crowdsec_email; }
+_check_disk(){ trace disk; }
+_check_memory(){ trace memory; }
+_check_network(){ trace network; }
+_check_smtp(){ trace smtp; }
+_check_dns(){ trace dns; }
+_check_quick_backups(){ trace quick_backups; }
+_check_backups(){ trace backups; }
+_check_config(){ trace config; }
+_check_quick_postfix(){ trace quick_postfix; }
+_check_notify_failures(){ trace notify_dead_letter; }
+_check_container_resources(){ trace container_resources; }
+_fix_unhealthy_containers(){ trace fix_containers; }
+_incident_update_unhealthy(){ trace incident_update; }
+_print_results_json(){ trace print_json; }
+_print_results(){ trace print_results; }
+_generate_report(){ trace report; }
+_notify_failures(){ trace notify_failures; }
+_notify_recovery(){ trace notify_recovery; }
+EOF_MAIN
+extract_func "$HEALTH" _health_parse_args >> "$main_probe"
+extract_func "$HEALTH" _health_main >> "$main_probe"
+cat >> "$main_probe" <<'EOF_MAIN'
+_health_main "$@"
+EOF_MAIN
+chmod 0700 "$main_probe"
+
+set +e
+TRACE_FILE="$TMP/conflict.trace" "$BASH" "$main_probe" --quick --comprehensive >"$TMP/conflict.out" 2>&1
+conflict_rc=$?
+TRACE_FILE="$TMP/quick-report.trace" "$BASH" "$main_probe" --quick --report >"$TMP/quick-report.out" 2>&1
+quick_report_rc=$?
+set -e
+[[ "$conflict_rc" -ne 0 ]] || fail 'conflicting quick/comprehensive profiles must fail'
+grep -Fq 'health profiles conflict' "$TMP/conflict.out" \
+    || fail 'profile conflict must be actionable'
+[[ "$quick_report_rc" -ne 0 ]] \
+    || fail 'quick report request must fail rather than generate a report'
+
+quick_trace="$TMP/quick.trace"
+set +e
+TRACE_FILE="$quick_trace" "$BASH" "$main_probe" --quick
+quick_rc=$?
+set -e
+[[ "$quick_rc" -eq 0 ]] || fail "clean quick profile must exit 0, got $quick_rc"
+cat > "$TMP/quick.expected" <<'EOF_EXPECTED'
+acquire
+compose_snapshot
+quick_containers
+alive
+server_info
+disk
+memory
+quick_backups
+quick_postfix
+notify_dead_letter
+print_results
+EOF_EXPECTED
+cmp -s "$quick_trace" "$TMP/quick.expected" \
+    || { diff -u "$TMP/quick.expected" "$quick_trace" >&2 || true; fail 'quick profile called checks outside its local contract'; }
+
+standard_trace="$TMP/standard.trace"
+set +e
+TRACE_FILE="$standard_trace" "$BASH" "$main_probe"
+standard_rc=$?
+set -e
+[[ "$standard_rc" -eq 0 ]] || fail "clean standard profile must exit 0, got $standard_rc"
+for required in containers ssl alive server_info caddy_permissions crowdsec crowdsec_email disk memory network smtp dns backups config notify_dead_letter incident_update notify_failures notify_recovery; do
+    grep -Fxq "$required" "$standard_trace" || fail "standard profile lost check: $required"
+done
+for excluded in compose_snapshot quick_containers quick_backups quick_postfix; do
+    ! grep -Fxq "$excluded" "$standard_trace" || fail "standard profile unexpectedly called quick-only helper: $excluded"
+done
+
+set +e
+TRACE_FILE="$TMP/warn.trace" TEST_WARNINGS=1 "$BASH" "$main_probe" --quick
+warn_rc=$?
+TRACE_FILE="$TMP/prereq.trace" SNAPSHOT_RC=3 "$BASH" "$main_probe" --quick
+prereq_rc=$?
+TRACE_FILE="$TMP/skip.trace" LOCK_RC=75 "$BASH" "$main_probe" --quick
+skip_rc=$?
+set -e
+[[ "$warn_rc" -eq 1 ]] || fail "advisory quick warning must remain exit 1, got $warn_rc"
+[[ "$prereq_rc" -eq 3 ]] || fail "quick prerequisite failure must be exit 3, got $prereq_rc"
+[[ "$skip_rc" -eq 75 ]] || fail "duplicate quick run must remain clean exit 75, got $skip_rc"
+grep -Fq 'if $FIX_MODE && [[ $failed -gt 0 ]]; then' "$HEALTH" \
+    || fail 'selected check failures must enter the shared bounded repair path'
+grep -A3 -F 'if $FIX_MODE && [[ $failed -gt 0 ]]; then' "$HEALTH" | grep -Fq '_fix_unhealthy_containers' \
+    || fail 'shared health repair path must call bounded container repair'
+! grep -Fxq quick_containers "$TMP/prereq.trace" \
+    || fail 'quick checks ran after the Compose prerequisite failed'
+
+snapshot_probe="$TMP/snapshot-probe.bash"
+cat > "$snapshot_probe" <<'EOF_SNAPSHOT'
+#!/usr/bin/env bash
+set -euo pipefail
+HEALTH_TIMEOUT=10
+QUICK_COMPOSE_SNAPSHOT=""
+VW_SMTP_HOST=postfix
+require_jq(){ return 0; }
+log_error(){ printf '%s\n' "$*" >&2; }
+log_info(){ :; }
+_pass(){ printf 'pass:%s\n' "$1" >>"${RESULTS:?}"; }
+_warn(){ printf 'warn:%s\n' "$1" >>"${RESULTS:?}"; }
+_fail(){ printf 'fail:%s\n' "$1" >>"${RESULTS:?}"; }
+timeout(){ shift; "$@"; }
+EOF_SNAPSHOT
+extract_func "$HEALTH" _postfix_sidecar_configured >> "$snapshot_probe"
+extract_func "$HEALTH" _collect_quick_compose_snapshot >> "$snapshot_probe"
+extract_func "$HEALTH" _check_quick_containers >> "$snapshot_probe"
+cat >> "$snapshot_probe" <<'EOF_SNAPSHOT'
+_collect_quick_compose_snapshot
+_check_quick_containers
+EOF_SNAPSHOT
+chmod 0700 "$snapshot_probe"
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/docker" <<'EOF_DOCKER'
+#!/usr/bin/env bash
+count=0
+[[ -f "${DOCKER_COUNT:?}" ]] && count="$(cat "$DOCKER_COUNT")"
+printf '%s\n' "$(( count + 1 ))" >"$DOCKER_COUNT"
+printf '%s\n' '[{"Name":"vaultwarden_app","Service":"vaultwarden","State":"running","Health":"healthy"},{"Name":"vaultwarden_caddy","Service":"caddy","State":"running","Health":"healthy"},{"Name":"vaultwarden_postfix","Service":"postfix","State":"running","Health":"healthy"}]'
+EOF_DOCKER
+chmod 0700 "$TMP/bin/docker"
+PATH="$TMP/bin:$PATH" DOCKER_COUNT="$TMP/docker.count" RESULTS="$TMP/snapshot.results" \
+    "$BASH" "$snapshot_probe"
+[[ "$(cat "$TMP/docker.count")" == 1 ]] \
+    || fail 'quick profile must collect Docker Compose state exactly once'
+[[ "$(grep -c '^pass:container:' "$TMP/snapshot.results")" -eq 3 ]] \
+    || fail 'quick Compose snapshot did not cover all configured managed containers'
+
+repair_probe="$TMP/repair-probe.bash"
+cat > "$repair_probe" <<'EOF_REPAIR'
+#!/usr/bin/env bash
+set -euo pipefail
+ALERT_LOCK_DIR="${ALERT_LOCK_DIR:?}"
+MAX_AUTO_RESTARTS=1
+RESTART_COUNT_WINDOW_HOURS=6
+check_order=(container:vaultwarden_app)
+declare -A check_results=([container:vaultwarden_app]=fail)
+log_info(){ :; }
+log_warn(){ :; }
+log_error(){ :; }
+_warn(){ :; }
+sleep(){ :; }
+EOF_REPAIR
+extract_func "$HEALTH" _fix_unhealthy_containers >> "$repair_probe"
+cat >> "$repair_probe" <<'EOF_REPAIR'
+_fix_unhealthy_containers
+_fix_unhealthy_containers
+EOF_REPAIR
+cat > "$TMP/bin/docker" <<'EOF_REPAIR_DOCKER'
+#!/usr/bin/env bash
+count=0
+[[ -f "${RESTART_COUNT:?}" ]] && count="$(cat "$RESTART_COUNT")"
+printf '%s\n' "$(( count + 1 ))" >"$RESTART_COUNT"
+exit 0
+EOF_REPAIR_DOCKER
+chmod 0700 "$TMP/bin/docker" "$repair_probe"
+PATH="$TMP/bin:$PATH" ALERT_LOCK_DIR="$TMP/repair-state" RESTART_COUNT="$TMP/restart.count" \
+    "$BASH" "$repair_probe"
+[[ "$(cat "$TMP/restart.count")" == 1 ]] \
+    || fail 'quick container repair must remain bounded by the restart limit'
+
+printf 'PASS: quick health profile and exit contract\n'
+)
+
+check_health_quick_profile_contract
 check_secrets_env_systemd_operation_guards() (
 set -euo pipefail
 

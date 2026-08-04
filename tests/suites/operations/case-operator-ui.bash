@@ -87,6 +87,11 @@ grep -Fq 'Configured (not probed)' "$ROOT/dashboard.sh" || fail 'dashboard rclon
 grep -Fq 'No VaultWarden timers listed' "$ROOT/dashboard.sh" || fail 'dashboard timer empty state must distinguish successful empty query'
 grep -Fq 'queue_str="${YLW}Unknown${NC}"' "$ROOT/dashboard.sh" || fail 'dashboard email queue failure state must be Unknown'
 grep -Fq '0 queued' "$ROOT/dashboard.sh" || fail 'dashboard email queue empty state must say queued, not Healthy'
+health_quick_block="$(awk '/^health-quick:/,/^health-report:/' "$ROOT/Makefile")"
+grep -Fq './utilities/maintenance-health.sh --quick --quiet' <<<"$health_quick_block" \
+    || fail 'make health-quick must pass the quick profile explicitly'
+grep -Fq 'run_sudo_cmd "sudo make health-quick" make -C "${REPO_ROOT}" health-quick' "$ROOT/dashboard.sh" \
+    || fail 'dashboard Quick Health Check must invoke make health-quick'
 grep -Fq 'DB Snapshot Backup' "$ROOT/dashboard.sh" || fail 'dashboard DB backup label must not say incremental'
 grep -Fq 'Backup Inventory' "$ROOT/dashboard.sh" || fail 'dashboard backup list label must not say health'
 grep -Fq 'Create + Sync New DB Backup' "$ROOT/dashboard.sh" || fail 'dashboard rclone create/sync label missing'

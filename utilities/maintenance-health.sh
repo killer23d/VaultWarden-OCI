@@ -6,8 +6,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# lib/secrets.sh recomputes SCRIPT_DIR at load time, so save and restore PROJECT_ROOT's value.
-_SAVE_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
@@ -21,8 +19,6 @@ source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
 source "$PROJECT_ROOT/lib/secrets.sh"
 source "$PROJECT_ROOT/lib/storage.sh"
-SCRIPT_DIR="$_SAVE_SCRIPT_DIR"
-unset _SAVE_SCRIPT_DIR
 
 # Default path helpers mirror maintenance.sh, and storage.sh provides vw_default_backup_dir.
 _default_backup_dir()     { vw_default_backup_dir; }
@@ -266,15 +262,18 @@ local passed=0
 local warnings=0
 local failed=0
 local total=0
+local QUICK=false
 local COMPREHENSIVE=false
 local FIX_MODE=false
 local REPORT_MODE=false
 local QUIET=false
 local JSON_OUTPUT=false
+local QUICK_COMPOSE_SNAPSHOT=""
 
 _health_parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --quick)             QUICK=true;          shift ;;
             --comprehensive)     COMPREHENSIVE=true;  shift ;;
             --fix|-f)            FIX_MODE=true;       shift ;;
             --report|-r)         REPORT_MODE=true;    shift ;;
@@ -284,6 +283,14 @@ _health_parse_args() {
             *)                   log_error "Unknown option for 'health': $1"; _health_show_help; exit 1 ;;
         esac
     done
+    if [[ "$QUICK" == "true" && "$COMPREHENSIVE" == "true" ]]; then
+        log_error "health profiles conflict: choose either --quick or --comprehensive."
+        exit 1
+    fi
+    if [[ "$QUICK" == "true" && "$REPORT_MODE" == "true" ]]; then
+        log_error "health --quick does not generate reports; use standard or --comprehensive with --report."
+        exit 1
+    fi
 }
 
 _health_show_help() {
@@ -301,8 +308,12 @@ DESCRIPTION:
     Runs health checks with narrow duplicate-run coordination. --fix is a
     root-operated repair mode and uses the shared operation guard.
 
+PROFILES:
+    --quick             Run the bounded local health profile
+    (no profile flag)   Run the standard health profile
+    --comprehensive     Run standard checks plus extended diagnostics
+
 OPTIONS:
-    --comprehensive     Run all checks including extended diagnostics
     --fix, -f           Attempt automatic recovery for failed checks
     --report, -r        Save health report to file
     --quiet, -q         Suppress non-critical output
@@ -310,7 +321,16 @@ OPTIONS:
     --help, -h          Show this help
     --version, -V       Print the VaultWarden-OCI version and exit
 
-CHECKS PERFORMED:
+QUICK CHECKS:
+    - One in-memory Docker Compose state snapshot
+    - Managed-container running and health state
+    - Local Vaultwarden /alive and /api/config
+    - Critical disk and memory thresholds
+    - Newest local DB and full backup age
+    - Local Postfix sidecar availability when configured
+    - Notification failure/dead-letter state
+
+STANDARD CHECKS:
     - Docker container status and health
     - SSL certificate validity and expiry
     - VaultWarden /alive liveness probe (internal + external HTTPS)
@@ -332,6 +352,7 @@ EXIT CODES:
     75 — Clean skip because another health or repair operation is active
 
 EXAMPLES:
+    ./maintenance.sh health --quick
     ./maintenance.sh health
     ./maintenance.sh health --comprehensive
     ./maintenance.sh health --json
@@ -365,6 +386,63 @@ _get_domain() {
     else
         echo ""
     fi
+}
+
+_postfix_sidecar_configured() {
+    [[ "${VW_SMTP_HOST:-postfix}" == "postfix" || -n "${VW_SMTP_HOST_PORT:-}" ]]
+}
+
+_collect_quick_compose_snapshot() {
+    local raw_snapshot=""
+    if ! require_jq; then
+        log_error "Quick health requires jq to parse Docker Compose state."
+        return 3
+    fi
+    if ! raw_snapshot=$(timeout "$HEALTH_TIMEOUT" docker compose ps --format json 2>/dev/null); then
+        log_error "Quick health could not collect Docker Compose state."
+        return 3
+    fi
+    if ! QUICK_COMPOSE_SNAPSHOT=$(printf '%s' "$raw_snapshot" \
+        | jq -c -s 'if length == 1 and (.[0] | type) == "array" then .[0] else . end' 2>/dev/null); then
+        log_error "Quick health received invalid Docker Compose JSON state."
+        return 3
+    fi
+}
+
+_check_quick_containers() {
+    log_info "Checking managed container state from one Compose snapshot..."
+    local -a managed=(
+        "vaultwarden_app:vaultwarden"
+        "vaultwarden_caddy:caddy"
+    )
+    if _postfix_sidecar_configured; then
+        managed+=("vaultwarden_postfix:postfix")
+    fi
+
+    local entry container service row state health
+    for entry in "${managed[@]}"; do
+        container="${entry%%:*}"
+        service="${entry#*:}"
+        row=$(printf '%s' "$QUICK_COMPOSE_SNAPSHOT" \
+            | jq -c --arg name "$container" --arg service "$service" \
+                'map(select(.Name == $name or .Service == $service)) | .[0] // empty' 2>/dev/null)
+        if [[ -z "$row" ]]; then
+            _fail "container:${container}" "Managed container not found in Compose state: ${container}"
+            continue
+        fi
+        state=$(printf '%s' "$row" | jq -r '.State // "unknown"' 2>/dev/null)
+        health=$(printf '%s' "$row" | jq -r '(.Health // "") | if . == "" then "no-healthcheck" else . end' 2>/dev/null)
+        if [[ "$state" != "running" ]]; then
+            _fail "container:${container}" "Container not running: ${container} (state: ${state})"
+            continue
+        fi
+        case "$health" in
+            healthy|no-healthcheck) _pass "container:${container}" "${container} is running (health: ${health})" ;;
+            starting)               _warn "container:${container}" "${container} is starting up" ;;
+            unhealthy)              _fail "container:${container}" "${container} is unhealthy (run: docker logs ${container} --tail=50)" ;;
+            *)                      _warn "container:${container}" "${container} health status unknown: ${health}" ;;
+        esac
+    done
 }
 
 _check_containers() {
@@ -491,7 +569,7 @@ _check_vaultwarden_alive() {
             _fail "vaultwarden:alive" "VaultWarden /alive endpoint not responding"
         fi
     fi
-    if [[ -n "$domain" ]]; then
+    if [[ "$QUICK" != "true" && -n "$domain" ]]; then
         local external_code
         external_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
@@ -527,7 +605,7 @@ _check_vaultwarden_server_info() {
             fi
             ;;
     esac
-    if [[ -n "$domain" ]]; then
+    if [[ "$QUICK" != "true" && -n "$domain" ]]; then
         local external_code
         external_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
@@ -546,7 +624,7 @@ _check_vaultwarden_server_info() {
                 ;;
         esac
     fi
-    if $COMPREHENSIVE && [[ -n "$domain" ]]; then
+    if [[ "$QUICK" != "true" ]] && $COMPREHENSIVE && [[ -n "$domain" ]]; then
         local comp_code
         comp_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
@@ -830,7 +908,7 @@ _check_disk() {
         | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
     if (( usage_pct >= DISK_CRIT_THRESHOLD )); then
         _fail "disk:state" "Disk usage critical: ${usage_pct}% on ${state_dir} (mount: ${state_mount}) — threshold: ${DISK_CRIT_THRESHOLD}%"
-    elif (( usage_pct >= DISK_WARN_THRESHOLD )); then
+    elif [[ "$QUICK" != "true" ]] && (( usage_pct >= DISK_WARN_THRESHOLD )); then
         _warn "disk:state" "Disk usage warning: ${usage_pct}% on ${state_dir} (mount: ${state_mount}) — threshold: ${DISK_WARN_THRESHOLD}%"
     else
         _pass "disk:state" "Disk OK: ${usage_pct}% on ${state_dir} (mount: ${state_mount})"
@@ -841,7 +919,7 @@ _check_disk() {
             | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
         if (( root_usage >= DISK_CRIT_THRESHOLD )); then
             _fail "disk:root" "Root partition critical: ${root_usage}% on / — threshold: ${DISK_CRIT_THRESHOLD}%"
-        elif (( root_usage >= DISK_WARN_THRESHOLD )); then
+        elif [[ "$QUICK" != "true" ]] && (( root_usage >= DISK_WARN_THRESHOLD )); then
             _warn "disk:root" "Root partition warning: ${root_usage}% on / — threshold: ${DISK_WARN_THRESHOLD}%"
         else
             _pass "disk:root" "Root partition OK: ${root_usage}% on /"
@@ -858,7 +936,7 @@ _check_memory() {
         mem_used_pct=$(( (mem_total - mem_available) * 100 / mem_total ))
         if [[ $mem_used_pct -ge $MEM_CRIT_THRESHOLD ]]; then
             _fail "memory:usage" "Memory critical: ${mem_used_pct}% used (threshold: ${MEM_CRIT_THRESHOLD}%)"
-        elif [[ $mem_used_pct -ge $MEM_WARN_THRESHOLD ]]; then
+        elif [[ "$QUICK" != "true" && $mem_used_pct -ge $MEM_WARN_THRESHOLD ]]; then
             _warn "memory:usage" "Memory warning: ${mem_used_pct}% used (threshold: ${MEM_WARN_THRESHOLD}%)"
         else
             _pass "memory:usage" "Memory OK: ${mem_used_pct}% used"
@@ -892,6 +970,28 @@ _check_network() {
         200|301|302|400|401|403) _pass "network:cloudflare" "Cloudflare API reachable (HTTP $cf_code)" ;;
         *)                       _warn "network:cloudflare" "Cloudflare API not reachable (HTTP $cf_code)" ;;
     esac
+}
+
+_check_quick_postfix() {
+    if ! _postfix_sidecar_configured; then
+        _pass "smtp:sidecar" "Postfix sidecar is not configured for the local Vaultwarden route"
+        return
+    fi
+    log_info "Checking local Postfix sidecar availability..."
+    local sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
+    local sidecar_host="${sidecar_addr%:*}"
+    local sidecar_port="${sidecar_addr##*:}"
+    if command -v nc >/dev/null 2>&1; then
+        if nc -z -w 3 "$sidecar_host" "$sidecar_port" >/dev/null 2>&1; then
+            _pass "smtp:sidecar" "Postfix sidecar is available on ${sidecar_addr}"
+        else
+            _fail "smtp:sidecar" "Postfix sidecar is not listening on ${sidecar_addr}"
+        fi
+    elif (echo >/dev/tcp/"$sidecar_host"/"$sidecar_port") >/dev/null 2>&1; then
+        _pass "smtp:sidecar" "Postfix sidecar is available on ${sidecar_addr}"
+    else
+        _fail "smtp:sidecar" "Postfix sidecar is not reachable on ${sidecar_addr}"
+    fi
 }
 
 _check_smtp() {
@@ -947,10 +1047,49 @@ _check_dns() {
     fi
 }
 
+_check_backup_ages() {
+    local backup_dir="$1"
+    local now_epoch; now_epoch=$(date +%s)
+    local -A max_age_hours
+    max_age_hours=([db]=26 [full]=168)
+    local any_found=false btype type_dir latest_file mtime age_h
+    for btype in db full; do
+        type_dir="$backup_dir/$btype"
+        if [[ ! -d "$type_dir" ]]; then
+            _warn "backup:${btype}" "No $btype backup directory found: $type_dir"
+            continue
+        fi
+        latest_file=$(find "$type_dir" -maxdepth 1 -name '*.age' -type f \
+            -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
+        if [[ -z "$latest_file" ]]; then
+            _warn "backup:${btype}" "No $btype backups found in $type_dir"
+            continue
+        fi
+        any_found=true
+        mtime=$(stat -c %Y "$latest_file" 2>/dev/null || stat -f %m "$latest_file" 2>/dev/null || echo 0)
+        age_h=$(( (now_epoch - mtime) / 3600 ))
+        if (( age_h > max_age_hours[$btype] )); then
+            _warn "backup:${btype}" "$btype backup is ${age_h}h old (threshold: ${max_age_hours[$btype]}h): $(basename "$latest_file") (path: $type_dir)"
+        else
+            _pass "backup:${btype}" "$btype backup is ${age_h}h old: $(basename "$latest_file") (path: $type_dir)"
+        fi
+    done
+    [[ "$any_found" == "false" ]] && _warn "backup:age" "No backup archives found in $backup_dir"
+}
+
+_check_quick_backups() {
+    log_info "Checking newest local DB and full backup age..."
+    local backup_dir; backup_dir="$(_resolve_backup_base_dir)"
+    if [[ ! -d "$backup_dir" ]]; then
+        _warn "backup:dir" "Backup directory not found: $backup_dir"
+        return
+    fi
+    _check_backup_ages "$backup_dir"
+}
+
 _check_backups() {
     log_info "Checking backup status..."
     local backup_dir; backup_dir="$(_resolve_backup_base_dir)"
-    local now_epoch; now_epoch=$(date +%s)
     if [[ ! -d "$backup_dir" ]]; then
         local real_user
         real_user="$(get_real_user)"
@@ -961,10 +1100,8 @@ _check_backups() {
                 break
             fi
             chmod 750 "$backup_dir/$_subdir" 2>/dev/null || true
-            # Only chown when running as root to avoid install -o style
-            # failures when the username does not resolve in this namespace.
             if (( EUID == 0 )) && [[ -n "$real_user" ]] && id "$real_user" &>/dev/null; then
-            chown "$real_user" "$backup_dir/$_subdir" 2>/dev/null || true
+                chown "$real_user" "$backup_dir/$_subdir" 2>/dev/null || true
             fi
         done
         if [[ "$created_ok" == "true" ]]; then
@@ -974,34 +1111,7 @@ _check_backups() {
             return
         fi
     fi
-    
-    local -A max_age_hours
-    max_age_hours=([db]=26 [full]=168)
-    local any_found=false
-    for btype in db full; do
-        local type_dir="$backup_dir/$btype"
-        if [[ ! -d "$type_dir" ]]; then
-            _warn "backup:${btype}" "No $btype backup directory found: $type_dir"
-            continue
-        fi
-        local latest_file
-        latest_file=$(find "$type_dir" -maxdepth 1 -name '*.age' -type f \
-            -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
-        if [[ -z "$latest_file" ]]; then
-            _warn "backup:${btype}" "No $btype backups found in $type_dir"
-            continue
-        fi
-        any_found=true
-        local mtime age_h
-        mtime=$(stat -c %Y "$latest_file" 2>/dev/null || stat -f %m "$latest_file" 2>/dev/null || echo 0)
-        age_h=$(( (now_epoch - mtime) / 3600 ))
-        if (( age_h > max_age_hours[$btype] )); then
-            _warn "backup:${btype}" "$btype backup is ${age_h}h old (threshold: ${max_age_hours[$btype]}h): $(basename "$latest_file") (path: $type_dir)"
-        else
-            _pass "backup:${btype}" "$btype backup is ${age_h}h old: $(basename "$latest_file") (path: $type_dir)"
-        fi
-    done
-    [[ "$any_found" == "false" ]] && _warn "backup:age" "No backup archives found in $backup_dir"
+    _check_backup_ages "$backup_dir"
 }
 
 _check_config() {
@@ -1160,11 +1270,6 @@ _generate_report() {
 }
 
 
-_health_json_escape() {
-    local str="$1"
-    str=${str//\\/\\\\}; str=${str//\"/\\\"}; str=${str//$'\n'/\\n}; str=${str//$'\r'/}
-    printf '%s' "$str"
-}
 
 _print_results_json() {
     local overall="pass"
@@ -1178,7 +1283,7 @@ _print_results_json() {
         message="${check_messages[$name]:-}"
         [[ "$first" == "true" ]] && first=false || printf ','
         printf '{"name":"%s","status":"%s","message":"%s"}' \
-            "$(_health_json_escape "$name")" "$(_health_json_escape "$status")" "$(_health_json_escape "$message")"
+            "$(_json_escape "$name")" "$(_json_escape "$status")" "$(_json_escape "$message")"
     done
     printf ']}\n'
 }
@@ -1229,36 +1334,59 @@ _health_main() {
     trap '_release_run_lock 130; exit 130' INT
     trap '_release_run_lock 143; exit 143' HUP TERM
     log_info "Starting VaultWarden health check..."
-    if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
-    _check_containers
-    _check_ssl
-    _check_vaultwarden_alive
-    _check_vaultwarden_server_info
-    _check_caddy_storage_permissions
-    _check_crowdsec
-    _check_crowdsec_email_notifications
-    _check_disk
-    _check_memory
-    _check_network
-    _check_smtp
-    _check_dns
-    _check_backups
-    _check_config
-    _check_notify_failures
-    if $COMPREHENSIVE; then _check_container_resources; fi
+
+    if $QUICK; then
+        log_info "Mode: quick"
+        if ! _collect_quick_compose_snapshot; then
+            return 3
+        fi
+        _check_quick_containers
+        _check_vaultwarden_alive
+        _check_vaultwarden_server_info
+        _check_disk
+        _check_memory
+        _check_quick_backups
+        _check_quick_postfix
+        _check_notify_failures
+    else
+        if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
+        _check_containers
+        _check_ssl
+        _check_vaultwarden_alive
+        _check_vaultwarden_server_info
+        _check_caddy_storage_permissions
+        _check_crowdsec
+        _check_crowdsec_email_notifications
+        _check_disk
+        _check_memory
+        _check_network
+        _check_smtp
+        _check_dns
+        _check_backups
+        _check_config
+        _check_notify_failures
+        if $COMPREHENSIVE; then _check_container_resources; fi
+    fi
+
     if $FIX_MODE && [[ $failed -gt 0 ]]; then
         log_info "Fix mode enabled — attempting recovery..."
         _fix_unhealthy_containers
     fi
-    _incident_update_unhealthy || true
-    if $JSON_OUTPUT; then _print_results_json; else _print_results; fi
-    if $REPORT_MODE; then _generate_report; fi
-    local notification_rc=0
-    _notify_failures || notification_rc=$?
-    _notify_recovery || notification_rc=$?
-    if (( notification_rc != 0 )); then
-        return "$notification_rc"
+    if [[ "$QUICK" != "true" ]]; then
+        _incident_update_unhealthy || true
     fi
+    if $JSON_OUTPUT; then _print_results_json; else _print_results; fi
+
+    if [[ "$QUICK" != "true" ]]; then
+        if $REPORT_MODE; then _generate_report; fi
+        local notification_rc=0
+        _notify_failures || notification_rc=$?
+        _notify_recovery || notification_rc=$?
+        if (( notification_rc != 0 )); then
+            return "$notification_rc"
+        fi
+    fi
+
     if [[ $failed -gt 0 ]]; then exit 2
     elif [[ $warnings -gt 0 ]]; then exit 1
     else exit 0
@@ -1279,8 +1407,12 @@ USAGE:
 Root-operated repair path: sudo make health
 Direct read-only path: ./maintenance.sh health
 
+PROFILES:
+    --quick             Run the bounded local health profile
+    (no profile flag)   Run the standard health profile
+    --comprehensive     Run standard checks plus extended diagnostics
+
 OPTIONS:
-    --comprehensive     Run all checks including extended diagnostics
     --fix, -f           Attempt automatic recovery for failed checks
     --report, -r        Save health report to file
     --quiet, -q         Suppress non-critical output

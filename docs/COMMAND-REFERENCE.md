@@ -40,7 +40,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make status` |  Show service status, backup inventory, disk usage, and CrowdSec ban summary |
 | `make operations` |  Show active or interrupted VaultWarden operations |
 | `make health` |  Run health checks (set AUTO_RECOVER=true to auto-recover; root required) |
-| `make health-quick` |  Quick health check (concise output; root required) |
+| `make health-quick` |  Run bounded local health checks (root required) |
 | `make health-report` |  Run health check and write a timestamped report file (root required) |
 | `make health-email` |  Backward-compatible alias for test-email |
 | `make smoke-test` |  Run pre-production smoke test against the live stack (root required) |
@@ -767,8 +767,12 @@ USAGE:
 Root-operated repair path: sudo make health
 Direct read-only path: ./maintenance.sh health
 
+PROFILES:
+    --quick             Run the bounded local health profile
+    (no profile flag)   Run the standard health profile
+    --comprehensive     Run standard checks plus extended diagnostics
+
 OPTIONS:
-    --comprehensive     Run all checks including extended diagnostics
     --fix, -f           Attempt automatic recovery for failed checks
     --report, -r        Save health report to file
     --quiet, -q         Suppress non-critical output

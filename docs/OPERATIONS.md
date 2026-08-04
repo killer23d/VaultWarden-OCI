@@ -143,7 +143,7 @@ sudo ./maintenance.sh health
 
 The current critical service policy is owned by `lib/defaults.sh`. Do not hard-code a separate list in operator procedures.
 
-The health path verifies the live runtime and includes checks for storage, secrets, Docker services, HTTP/TLS behavior, backup state, and other configured integrations according to the current implementation.
+The standard health path verifies the live runtime and includes checks for storage, secrets, Docker services, HTTP/TLS behavior, backup state, and other configured integrations according to the current implementation. The quick profile is intentionally local and bounded: it checks one Compose state snapshot, local Vaultwarden readiness, critical host thresholds, local backup age, the configured Postfix sidecar, and notification dead-letter state.
 
 When the existing health alert-state path is writable, unhealthy checks are
 correlated under one active incident ID. Existing per-check alert/cooldown

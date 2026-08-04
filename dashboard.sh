@@ -524,7 +524,7 @@ handle_main_menu() {
             fi
             ;;
         3)
-            run_sudo_cmd "sudo make health" make -C "${REPO_ROOT}" health
+            run_sudo_cmd "sudo make health-quick" make -C "${REPO_ROOT}" health-quick
             ;;
         4)
             # Subshell + INT trap: Ctrl-C stops the tail, returns to menu (ux.md #33).
