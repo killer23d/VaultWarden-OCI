@@ -220,9 +220,25 @@ setup:
 	@exit 1
 
 dev-setup: ## Set up development environment (.env + docker-compose.override.yml)
-	@echo "$(BLUE)Setting up development environment...$(NC)"
-	@if [ ! -f ".env" ]; then cp .env.example .env; echo "$(YELLOW)Created .env from example. Please configure it.$(NC)"; fi
-	@if [ ! -f "docker-compose.override.yml" ]; then cp docker-compose.override.yml.example docker-compose.override.yml; echo "$(YELLOW)Created development override file.$(NC)"; fi
+	@echo "$(BLUE)Setting up local development environment (not for production)...$(NC)"
+	@if [ -f ".env" ]; then \
+		echo "$(YELLOW)Preserving existing .env.$(NC)"; \
+	elif cp .env.example .env; then \
+		echo "$(YELLOW)Created .env from example. Please configure it.$(NC)"; \
+	else \
+		echo "$(RED)Error: Failed to create .env from .env.example.$(NC)" >&2; \
+		echo "$(YELLOW)Check that .env.example exists and this directory is writable.$(NC)" >&2; \
+		exit 1; \
+	fi
+	@if [ -f "docker-compose.override.yml" ]; then \
+		echo "$(YELLOW)Preserving existing development override: docker-compose.override.yml$(NC)"; \
+	elif cp docker-compose.override.dev.yml.example docker-compose.override.yml; then \
+		echo "$(YELLOW)Created development override from docker-compose.override.dev.yml.example.$(NC)"; \
+	else \
+		echo "$(RED)Error: Failed to create docker-compose.override.yml from docker-compose.override.dev.yml.example.$(NC)" >&2; \
+		echo "$(YELLOW)Check that the example exists and this directory is writable.$(NC)" >&2; \
+		exit 1; \
+	fi
 
 fix-permissions: ## Repair known VaultWarden-OCI permission drift
 	$(call require-root)
