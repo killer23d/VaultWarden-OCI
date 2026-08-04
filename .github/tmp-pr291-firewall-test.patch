@@ -1,0 +1,21 @@
+diff --git a/tests/suites/operations/case-firewall-update.bash b/tests/suites/operations/case-firewall-update.bash
+index c8aa756..fc9d3ef 100644
+--- a/tests/suites/operations/case-firewall-update.bash
++++ b/tests/suites/operations/case-firewall-update.bash
+@@ -305,11 +305,11 @@ for unit in "$health_unit" "$maintenance_unit" "$firewall_unit"; do
+     done < <(grep '^ReadWritePaths=' "$unit")
+ done
+ 
+-for unit in "$health_unit" "$maintenance_unit"; do
+-    assert_file_contains "$unit" 'ReadWritePaths=-/var/lib/crowdsec'
+-    ! grep -Fxq 'ReadWritePaths=/var/lib/crowdsec' "$unit" \
+-        || fail "$(basename "$unit") uses an unconditional CrowdSec write path"
+-done
++assert_file_contains "$maintenance_unit" 'ReadWritePaths=-/var/lib/crowdsec'
++! grep -Fq '/var/lib/crowdsec' "$health_unit" \
++    || fail "vaultwarden-health.service grants stale CrowdSec write access"
++! grep -Fxq 'ReadWritePaths=/var/lib/crowdsec' "$maintenance_unit" \
++    || fail "vaultwarden-maintenance.service uses an unconditional CrowdSec write path"
+ 
+ for unit in "$maintenance_unit" "$firewall_unit"; do
+     assert_file_contains "$unit" 'ReadWritePaths=/etc/ufw /run/ufw.lock /run/xtables.lock'
