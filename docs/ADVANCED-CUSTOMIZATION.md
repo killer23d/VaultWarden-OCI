@@ -277,7 +277,7 @@ Backup archives are always Age-encrypted. Quick verification is the command defa
 
 ### Retention
 
-Retention precedence is `--keep N`, the matching type-specific variable, `BACKUP_RETENTION_DAYS`, then the 14-day fail-safe. The backup command and routine maintenance use the same resolver.
+Retention precedence is `--keep N`, the matching type-specific variable, `BACKUP_RETENTION_DAYS`, then the historical per-tier fallback: 14 days for `db`, 30 days for `full`, and 90 days for `emergency`. The backup command and routine maintenance use the same resolver.
 
 Retention preserves the newest parseable timestamped primary archive for each tier even when older than the retention window. Sidecars are removed only after their primary archive is removed.
 
