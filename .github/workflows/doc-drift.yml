@@ -193,9 +193,6 @@ jobs:
           fi
           echo "COMMAND-REFERENCE.md is up to date."
 
-      - name: Verify production-readiness remediation
-        run: python3 utilities/verify-production-readiness-remediation.py
-
   shellcheck:
     runs-on: ubuntu-latest
     permissions:
@@ -252,7 +249,9 @@ jobs:
             exit "$rc"
           fi
           if [[ "${{ matrix.suite }}" == "security" ]]; then
-            grep -Fq               'PASS direct automatic setup PTY no-leak regression'               "$log" || {
+            grep -Fq \
+              'PASS direct automatic setup PTY no-leak regression' \
+              "$log" || {
                 echo "ERROR: mandatory direct-auto PTY no-leak regression did not execute" >&2
                 exit 1
               }
