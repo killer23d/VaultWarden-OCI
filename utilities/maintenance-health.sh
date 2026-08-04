@@ -413,20 +413,18 @@ _collect_quick_compose_snapshot() {
 _check_quick_containers() {
     log_info "Checking managed container state from one Compose snapshot..."
     local -a managed=(
-        "vaultwarden_app:vaultwarden"
-        "vaultwarden_caddy:caddy"
+        "vaultwarden_app"
+        "vaultwarden_caddy"
     )
     if _postfix_sidecar_configured; then
-        managed+=("vaultwarden_postfix:postfix")
+        managed+=("vaultwarden_postfix")
     fi
 
-    local entry container service row state health
-    for entry in "${managed[@]}"; do
-        container="${entry%%:*}"
-        service="${entry#*:}"
+    local container row state health
+    for container in "${managed[@]}"; do
         row=$(printf '%s' "$QUICK_COMPOSE_SNAPSHOT" \
-            | jq -c --arg name "$container" --arg service "$service" \
-                'map(select(.Name == $name or .Service == $service)) | .[0] // empty' 2>/dev/null)
+            | jq -c --arg name "$container" \
+                'map(select(.Name == $name)) | .[0] // empty' 2>/dev/null)
         if [[ -z "$row" ]]; then
             _fail "container:${container}" "Managed container not found in Compose state: ${container}"
             continue

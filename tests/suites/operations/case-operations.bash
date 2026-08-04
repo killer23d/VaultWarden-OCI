@@ -1415,7 +1415,7 @@ count=0
 printf '%s\n' "$(( count + 1 ))" >"$DOCKER_COUNT"
 printf '%s\n' "$*" >"${DOCKER_ARGS:?}"
 printf '%s\n' "$PWD" >"${DOCKER_PWD:?}"
-printf '%s\n' '[{"Name":"vaultwarden_app","Service":"vaultwarden","State":"running","Health":"healthy"},{"Name":"vaultwarden_caddy","Service":"caddy","State":"exited","Health":""},{"Name":"vaultwarden_postfix","Service":"postfix","State":"running","Health":"healthy"}]'
+printf '%s\n' '[{"Name":"vaultwarden_app","Service":"vaultwarden","State":"running","Health":"healthy"},{"Name":"vaultwarden_caddy_run_1","Service":"caddy","State":"exited","Health":""},{"Name":"vaultwarden_caddy","Service":"caddy","State":"running","Health":"healthy"},{"Name":"vaultwarden_postfix","Service":"postfix","State":"exited","Health":""}]'
 EOF_DOCKER
 chmod 0700 "$TMP/bin/docker"
 installed_runtime="$TMP/opt/vaultwarden-scripts"
@@ -1438,8 +1438,13 @@ mkdir -p "$installed_runtime"
 [[ -z "$(find "$installed_runtime" -mindepth 1 -maxdepth 1 -print -quit)" ]] \
     || fail 'installed-runtime snapshot fixture unexpectedly contained a Compose file'
 [[ "$(grep -c '^pass:container:' "$TMP/snapshot.results")" -eq 2 ]] \
-    || fail 'quick Compose snapshot did not cover running managed containers'
-grep -Fq 'fail:container:vaultwarden_caddy:Container not running: vaultwarden_caddy (state: exited)' \
+    || fail 'quick Compose snapshot did not select the running managed containers'
+grep -Fq 'pass:container:vaultwarden_caddy:vaultwarden_caddy is running (health: healthy)' \
+    "$TMP/snapshot.results" \
+    || fail 'quick Compose snapshot selected a one-off container instead of the exact managed Caddy container'
+! grep -Fq 'fail:container:vaultwarden_caddy:' "$TMP/snapshot.results" \
+    || fail 'one-off Caddy state was attributed to the managed Caddy container'
+grep -Fq 'fail:container:vaultwarden_postfix:Container not running: vaultwarden_postfix (state: exited)' \
     "$TMP/snapshot.results" \
     || fail 'quick Compose snapshot did not preserve stopped-container state'
 
