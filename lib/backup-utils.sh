@@ -6,9 +6,9 @@
 #   Listing    : list_backups, get_backup_statistics, get_backup_size
 #   Validation : validate_backup_integrity, verify_backup_integrity,
 #                check_backup_disk_space
-#   Retention  : cleanup_old_backups, _backup_filename_timestamp_epoch,
-#                _backup_filename_age_days, _backup_ctime_age_days,
-#                _backup_newest_timestamped_archive
+#   Retention  : backup_retention_days_for_type, cleanup_old_backups,
+#                _backup_filename_timestamp_epoch, _backup_filename_age_days,
+#                _backup_ctime_age_days, _backup_newest_timestamped_archive
 #   Metadata   : create_backup_metadata, _resolve_rclone_config,
 #                validate_rclone_config_path
 #
@@ -484,6 +484,46 @@ check_backup_disk_space() {
 
     log_debug "Disk space check passed: ${available_space_mb}MB available (need ${required_space_mb}MB)"
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# backup_retention_days_for_type TYPE [EXPLICIT_OVERRIDE]
+#
+# Resolves the retention policy in one place. A non-empty explicit override
+# (the runner's --keep value) wins, followed by the type-specific setting, the
+# shared BACKUP_RETENTION_DAYS setting, and finally the repository's historical
+# fail-safe default of 14 days.
+# ---------------------------------------------------------------------------
+backup_retention_days_for_type() {
+    local backup_type="${1:-}"
+    local explicit_override="${2:-}"
+    local specific_key retention=""
+    local safe_default=14
+
+    case "$backup_type" in
+        db)        specific_key="BACKUP_RETENTION_DB_DAYS" ;;
+        full)      specific_key="BACKUP_RETENTION_FULL_DAYS" ;;
+        emergency) specific_key="BACKUP_RETENTION_EMERGENCY_DAYS" ;;
+        *)
+            log_error "Unknown backup type for retention: ${backup_type:-<empty>}"
+            return 1
+            ;;
+    esac
+
+    if [[ -n "$explicit_override" ]]; then
+        retention="$explicit_override"
+    else
+        retention="$(get_config_value "$specific_key" "")"
+        [[ -n "$retention" ]] || retention="$(get_config_value "BACKUP_RETENTION_DAYS" "")"
+        [[ -n "$retention" ]] || retention="$safe_default"
+    fi
+
+    if [[ ! "$retention" =~ ^[0-9]+$ ]] || (( 10#$retention < 1 )); then
+        log_error "Invalid retention value for ${backup_type}: '${retention}' — expected a positive integer"
+        return 1
+    fi
+
+    printf '%d\n' "$((10#$retention))"
 }
 
 # ---------------------------------------------------------------------------
@@ -984,7 +1024,7 @@ validate_rclone_config_path() {
 }
 
 export -f list_backups validate_backup_integrity check_backup_disk_space
-export -f cleanup_old_backups get_backup_statistics
+export -f backup_retention_days_for_type cleanup_old_backups get_backup_statistics
 # NOTE: keep create_backup_metadata local to this shell; older exported
 # versions caused noisy imported-function errors during apt/dpkg subprocesses.
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
