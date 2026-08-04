@@ -433,3 +433,381 @@ assert secrets.index('_ss_perform_cleanup 0', start) < secrets.index('Secrets Se
 PY_ORDER
 
 pass "recovery fallback and sensitive cleanup contracts"
+
+check_setup_failure_gates() (
+set -euo pipefail
+
+if ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; then
+  if [[ "${CI:-false}" == "true" || "${GITHUB_ACTIONS:-false}" == "true" ]]; then
+    fail "mandatory setup failure-gate regressions require passwordless sudo in CI"
+  fi
+  printf 'SKIP setup failure gates: passwordless sudo unavailable\n'
+  exit 0
+fi
+
+setup_tmp="$(mktemp -d)"
+trap 'sudo -n rm -rf -- "$setup_tmp" >/dev/null 2>&1 || true' EXIT INT TERM HUP
+setup_fixture="$setup_tmp/repo"
+mkdir -p "$setup_fixture"
+tar --exclude='./.git' --exclude='./test-results' -cf - . | tar -xf - -C "$setup_fixture"
+cat > "$setup_fixture/lib/validate.sh" <<'EOF_SETUP_VALIDATE'
+validate_domain() { return 0; }
+validate_email() { return 0; }
+EOF_SETUP_VALIDATE
+
+setup_invocations="$setup_tmp/invocations.log"
+: > "$setup_invocations"
+chmod 0666 "$setup_invocations"
+cat > "$setup_tmp/utility-stub" <<'EOF_SETUP_STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+name="$(basename "$0")"
+printf '%s:%s\n' "$name" "$*" >> "${VW_TEST_INVOCATION_LOG:?}"
+case "$name" in
+  setup-firewall.sh)
+    if [[ " $* " == *" --phase ufw "* && "${VW_TEST_FAIL_UFW:-0}" == "1" ]]; then
+      exit 42
+    fi
+    ;;
+  setup-secrets.sh)
+    if [[ "${1:-}" == "configure" && "${VW_TEST_FAIL_SECRETS:-0}" == "1" ]]; then
+      exit 43
+    fi
+    ;;
+esac
+EOF_SETUP_STUB
+chmod 0755 "$setup_tmp/utility-stub"
+for utility in \
+  setup-system.sh setup-storage.sh setup-env.sh setup-secrets.sh \
+  setup-firewall.sh setup-systemd.sh setup-crowdsec.sh uninstall-vaultwarden.sh; do
+  cp "$setup_tmp/utility-stub" "$setup_fixture/utilities/$utility"
+  chmod 0755 "$setup_fixture/utilities/$utility"
+done
+
+run_setup_failure() {
+  local label="$1" fail_ufw="$2" fail_secrets="$3" output rc
+  : > "$setup_invocations"
+  rm -rf "$setup_tmp/recovery"
+  set +e
+  output="$(
+    sudo -n env \
+      VW_TEST_INVOCATION_LOG="$setup_invocations" \
+      VW_TEST_FAIL_UFW="$fail_ufw" \
+      VW_TEST_FAIL_SECRETS="$fail_secrets" \
+      SETUP_CREDENTIALS_DIR="$setup_tmp/recovery" \
+      ENTROPY_THRESHOLD=0 \
+      bash "$setup_fixture/setup.sh" install \
+        --domain vault.example.com \
+        --email admin@example.com \
+        --auto --skip-deps 2>&1
+  )"
+  rc=$?
+  set -e
+  (( rc != 0 )) || fail "$label unexpectedly returned success"
+  [[ "$output" != *"SETUP CREDENTIALS SAVED"* ]] \
+    || fail "$label printed credential-publication success"
+  [[ ! -e "$setup_tmp/recovery" ]] || {
+    ! find "$setup_tmp/recovery" -type f \
+      -name 'vaultwarden-setup-credentials-*' -print -quit | grep -q . \
+      || fail "$label published a setup credential handoff"
+  }
+  printf '%s' "$output"
+}
+
+ufw_output="$(run_setup_failure "UFW failure" 1 0)"
+[[ "$ufw_output" == *"Phase 5"* ]] || fail "UFW failure did not identify phase 5"
+! grep -q 'setup-firewall.sh:--phase iptables' "$setup_invocations" \
+  || fail "iptables phase ran after required UFW failure"
+! grep -q 'setup-secrets.sh:configure' "$setup_invocations" \
+  || fail "secrets configuration ran after required UFW failure"
+
+secrets_output="$(run_setup_failure "automatic secrets failure" 0 1)"
+[[ "$secrets_output" == *"Phase 6"* ]] \
+  || fail "automatic secrets failure did not identify phase 6"
+grep -q 'setup-secrets.sh:configure' "$setup_invocations" \
+  || fail "automatic secrets configure stub was not invoked"
+)
+check_setup_failure_gates
+pass "behavioral setup failure gates"
+
+# Exercise the real direct command parser and orchestration under a PTY with
+# deterministic synthetic values. Host-output boundaries are replaced only in
+# a copied fixture; production source remains unchanged.
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+(
+  direct_tmp="$(mktemp -d)"
+  trap 'sudo -n rm -rf -- "$direct_tmp" >/dev/null 2>&1 || true' EXIT INT TERM HUP
+  direct_fixture="$direct_tmp/repo"
+  mkdir -p "$direct_fixture"
+  tar --exclude='./.git' --exclude='./test-results' --exclude='./vw_tmp.*' \
+    -cf - . | tar -xf - -C "$direct_fixture"
+
+  direct_bin="$direct_tmp/bin"
+  direct_state="$direct_tmp/state"
+  success_dir="$direct_tmp/recovery-success"
+  failure_target="$direct_tmp/recovery-not-a-directory"
+  counter_file="$direct_tmp/generator-counter"
+  workspace_mode_file="$direct_tmp/workspace.mode"
+  mkdir -p "$direct_bin" "$direct_state" "$success_dir"
+  chmod 0700 "$direct_state" "$success_dir"
+  printf '0\n' > "$counter_file"
+  chmod 0666 "$counter_file"
+  printf 'publication must fail here\n' > "$failure_target"
+
+  public_recipient="age1$(printf 'q%.0s' {1..58})"
+  age_key_file="$direct_tmp/age-key.txt"
+  {
+    printf '# AGE-SECRET-KEY-TEST-DO-NOT-LEAK\n'
+    printf '%s\n' 'AGE-SECRET-KEY-1SYNTHETIC-DIRECT-AUTO-ONLY'
+  } > "$age_key_file"
+  chmod 0600 "$age_key_file"
+
+  cat > "$direct_fixture/.env" <<EOF_DIRECT_ENV
+PROJECT_STATE_DIR=$direct_state
+SOPS_AGE_KEY_FILE=
+EMAIL_MODE=api
+EMAIL_PROVIDER=mailersend
+PUSH_ENABLED=false
+EOF_DIRECT_ENV
+  chmod 0600 "$direct_fixture/.env"
+  cat > "$direct_fixture/.sops.yaml" <<EOF_DIRECT_SOPS
+creation_rules:
+  - path_regex: '.*\\.yaml$'
+    age: "$public_recipient"
+EOF_DIRECT_SOPS
+
+  cat >> "$direct_fixture/lib/config.sh" <<'EOF_DIRECT_CONFIG'
+load_project_environment() {
+  PROJECT_STATE_DIR="${VW_TEST_PROJECT_STATE_DIR:?}"
+  SOPS_AGE_KEY_FILE="${VW_TEST_AGE_KEY_FILE:?}"
+  SECRETS_FILE="${PROJECT_STATE_DIR}/secrets/secrets.yaml"
+  export PROJECT_STATE_DIR SOPS_AGE_KEY_FILE SECRETS_FILE
+}
+EOF_DIRECT_CONFIG
+  cat >> "$direct_fixture/lib/operations.sh" <<'EOF_DIRECT_OPERATIONS'
+operation_acquire() { return 0; }
+operation_release() { return 0; }
+operation_set_phase() { return 0; }
+EOF_DIRECT_OPERATIONS
+  cat >> "$direct_fixture/lib/secrets.sh" <<'EOF_DIRECT_SECRETS'
+schema_validate() { return 0; }
+schema_keys() { printf '%s\n' admin_token admin_basic_auth_hash file_integrity_hmac_key; }
+schema_collect_type() {
+  case "$1" in
+    file_integrity_hmac_key) printf '%s' auto ;;
+    *) printf '%s' manual ;;
+  esac
+}
+schema_field_safe() {
+  case "$1:$2" in
+    file_integrity_hmac_key:auto_fn) printf '%s' auto_generate_secret_field ;;
+    *:label) printf '%s' 'Synthetic test field' ;;
+    *) printf '%s' '' ;;
+  esac
+}
+generate_secure_string() {
+  local requested="$1" next
+  if [[ "$requested" == "64" ]]; then
+    printf '%s' 'TEST-INTEGRITY-HMAC-NOT-A-HANDOFF-PASSWORD'
+    return 0
+  fi
+  if [[ -n "${VW_ADMIN_PLAIN_FILE:-}" ]]; then
+    stat -c '%a' "$(dirname "$VW_ADMIN_PLAIN_FILE")" \
+      > "${VW_TEST_WORKSPACE_MODE_FILE:?}"
+  fi
+  next="$(( $(cat "${VW_TEST_COUNTER_FILE:?}") + 1 ))"
+  printf '%s\n' "$next" > "${VW_TEST_COUNTER_FILE}"
+  case "$next" in
+    1) printf '%s' 'TEST-VW-PLAINTEXT-DO-NOT-LEAK' ;;
+    2) printf '%s' 'TEST-CADDY-PLAINTEXT-DO-NOT-LEAK' ;;
+    *) return 1 ;;
+  esac
+}
+generate_argon2_hash() { printf '%s' 'TEST-VW-ARGON2-HASH'; }
+generate_bcrypt_hash() { printf '%s' 'TEST-CADDY-BCRYPT-HASH'; }
+_bcrypt_format_ok() { return 0; }
+check_age_key() { return 0; }
+check_argon2_support() { return 0; }
+get_age_public_key() { printf '%s' "${VW_TEST_PUBLIC_RECIPIENT:?}"; }
+secrets_file_exists() { return 1; }
+check_placeholder_values() { return 0; }
+ensure_sops_env() {
+  export SOPS_AGE_KEY_FILE="${VW_TEST_AGE_KEY_FILE:?}"
+  export SOPS_CONFIG="${PROJECT_ROOT}/.sops.yaml"
+}
+cleanup_secrets_environment() { unset SOPS_AGE_KEY_FILE SOPS_CONFIG; }
+secure_secrets_file() { chmod 0600 "$1"; }
+export_docker_secrets() { return 0; }
+prepare_push_secret_placeholders() { return 0; }
+EOF_DIRECT_SECRETS
+  cat >> "$direct_fixture/lib/setup-credentials.sh" <<'EOF_DIRECT_HANDOFF'
+_setup_handoff_verify_argon2() { return 0; }
+_setup_handoff_verify_bcrypt() { return 0; }
+EOF_DIRECT_HANDOFF
+
+  cat > "$direct_bin/age-keygen" <<'EOF_DIRECT_AGE'
+#!/usr/bin/env bash
+printf '%s\n' "${VW_TEST_PUBLIC_RECIPIENT:?}"
+EOF_DIRECT_AGE
+  cat > "$direct_bin/yq" <<'EOF_DIRECT_YQ'
+#!/usr/bin/env bash
+printf '%s\n' "${VW_TEST_PUBLIC_RECIPIENT:?}"
+EOF_DIRECT_YQ
+  cat > "$direct_bin/sops" <<'EOF_DIRECT_SOPS_BIN'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+input="${!#}"
+for (( index=1; index<=$#; index++ )); do
+  arg="${!index}"
+  if [[ "$arg" == "--output" ]]; then
+    next=$((index + 1))
+    output="${!next}"
+  elif [[ "$arg" == "updatekeys" ]]; then
+    exit 0
+  fi
+done
+if [[ " $* " == *" --encrypt "* ]]; then
+  cp "$input" "$output"
+elif [[ " $* " == *" -d "* ]]; then
+  cat "$input"
+fi
+EOF_DIRECT_SOPS_BIN
+  cat > "$direct_bin/install" <<'EOF_DIRECT_INSTALL'
+#!/usr/bin/env bash
+if [[ " $* " == *" /run/vaultwarden-oci/secrets "* ]]; then
+  exit 0
+fi
+exec "${VW_TEST_REAL_INSTALL:?}" "$@"
+EOF_DIRECT_INSTALL
+  for command_name in age jq htpasswd; do
+    cat > "$direct_bin/$command_name" <<'EOF_DIRECT_COMMAND'
+#!/usr/bin/env bash
+exit 0
+EOF_DIRECT_COMMAND
+  done
+  chmod 0755 "$direct_bin"/*
+
+  pty_runner="$direct_tmp/run-under-pty.py"
+  cat > "$pty_runner" <<'PY_DIRECT_PTY'
+#!/usr/bin/env python3
+import os
+import pty
+import sys
+
+stdout_path, stderr_path, pty_path = sys.argv[1:4]
+command = sys.argv[4:]
+pid, master = pty.fork()
+if pid == 0:
+    stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_TRUNC)
+    stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_TRUNC)
+    os.dup2(stdout_fd, 1)
+    os.dup2(stderr_fd, 2)
+    os.execvp(command[0], command)
+with open(pty_path, "wb") as pty_output:
+    while True:
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        pty_output.write(chunk)
+os.close(master)
+_, status = os.waitpid(pid, 0)
+raise SystemExit(os.waitstatus_to_exitcode(status))
+PY_DIRECT_PTY
+  chmod 0755 "$pty_runner"
+
+  assert_secret_free_streams() {
+    local label="$1" stream marker
+    for stream in "$direct_stdout" "$direct_stderr" "$direct_pty"; do
+      for marker in \
+        'TEST-VW-PLAINTEXT-DO-NOT-LEAK' \
+        'TEST-CADDY-PLAINTEXT-DO-NOT-LEAK' \
+        'AGE-SECRET-KEY-TEST-DO-NOT-LEAK'; do
+        ! grep -Fq "$marker" "$stream" \
+          || fail "$label leaked $marker through $(basename "$stream")"
+      done
+    done
+  }
+
+  assert_direct_temps_clean() {
+    ! find "$direct_fixture" -maxdepth 1 -name 'vw_tmp.*' -print -quit | grep -q . \
+      || fail "$1 left its credential workspace behind"
+    if sudo -n test -d "$direct_tmp/plaintext-stage"; then
+      ! sudo -n find "$direct_tmp/plaintext-stage" -type f -print -quit | grep -q . \
+        || fail "$1 left its plaintext SOPS staging file behind"
+    fi
+  }
+
+  run_direct_case() {
+    local label="$1" handoff_target="$2"
+    direct_stdout="$direct_tmp/$label.stdout"
+    direct_stderr="$direct_tmp/$label.stderr"
+    direct_pty="$direct_tmp/$label.pty"
+    : > "$direct_stdout"
+    : > "$direct_stderr"
+    : > "$direct_pty"
+    : > "$workspace_mode_file"
+    chmod 0666 "$direct_stdout" "$direct_stderr" "$workspace_mode_file"
+    printf '0\n' > "$counter_file"
+    set +e
+    python3 "$pty_runner" "$direct_stdout" "$direct_stderr" "$direct_pty" \
+      sudo -n /usr/bin/env \
+        "PATH=$direct_bin:$PATH" \
+        "OFFLINE_AGE_RECIPIENT=$public_recipient" \
+        "PROJECT_STATE_DIR=$direct_state" \
+        "SOPS_AGE_KEY_FILE=$age_key_file" \
+        "SETUP_CREDENTIALS_DIR=$handoff_target" \
+        "VW_HANDOFF_TEST_MODE=true" \
+        "VW_TEST_AGE_KEY_FILE=$age_key_file" \
+        "VW_TEST_COUNTER_FILE=$counter_file" \
+        "VW_TEST_PROJECT_STATE_DIR=$direct_state" \
+        "VW_TEST_PUBLIC_RECIPIENT=$public_recipient" \
+        "VW_TEST_REAL_INSTALL=$(command -v install)" \
+        "VW_TEST_WORKSPACE_MODE_FILE=$workspace_mode_file" \
+        "VW_SETUP_SECRETS_TMP_DIR=$direct_tmp/plaintext-stage" \
+        bash -x "$direct_fixture/utilities/setup-secrets.sh" configure --auto
+    direct_rc=$?
+    set -e
+  }
+
+  run_direct_case success "$success_dir"
+  (( direct_rc == 0 )) || fail "direct configure --auto failed in PTY fixture"
+  grep -Fq '_cmd_configure --auto' "$direct_stderr" \
+    || fail "direct automatic regression did not exercise the command parser"
+  assert_secret_free_streams "successful direct automatic setup"
+  [[ "$(cat "$workspace_mode_file")" == "700" ]] \
+    || fail "direct automatic credential workspace mode is not 0700"
+  handoff_file="$(
+    sudo -n find "$success_dir" -maxdepth 1 -type f \
+      -name 'vaultwarden-setup-credentials-*.txt' -print
+  )"
+  [[ -n "$handoff_file" ]] || fail "direct automatic setup did not publish a handoff"
+  [[ "$(sudo -n stat -c '%a' "$handoff_file")" == "600" ]] \
+    || fail "direct automatic handoff file mode is not 0600"
+  [[ "$(sudo -n grep -c '^│  0[123]  ' "$handoff_file")" == "3" ]] \
+    || fail "direct automatic handoff does not contain exactly three groups"
+  grep -Fq "Protected setup credential handoff created: $handoff_file" "$direct_stdout" \
+    || fail "direct automatic setup did not report the protected handoff path"
+  assert_direct_temps_clean "direct automatic success"
+
+  run_direct_case publication-failure "$failure_target"
+  (( direct_rc != 0 )) || fail "forced handoff-publication failure returned success"
+  assert_secret_free_streams "failed direct automatic setup"
+  ! grep -Fq 'Protected setup credential handoff created:' \
+    "$direct_stdout" "$direct_stderr" "$direct_pty" \
+    || fail "publication failure printed a protected-handoff success summary"
+  ! grep -Fq 'Secrets Setup Complete!' \
+    "$direct_stdout" "$direct_stderr" "$direct_pty" \
+    || fail "publication failure printed the generic success summary"
+  assert_direct_temps_clean "direct automatic failure"
+) || fail "behavioral direct automatic protected-handoff contract failed"
+  pass "direct automatic setup PTY no-leak regression"
+else
+  if [[ "${CI:-false}" == "true" || "${GITHUB_ACTIONS:-false}" == "true" ]]; then
+    fail "mandatory direct automatic PTY regression requires passwordless sudo in CI"
+  fi
+  printf 'SKIP direct automatic PTY behavior: passwordless sudo unavailable\n'
+fi
