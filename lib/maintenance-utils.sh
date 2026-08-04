@@ -239,8 +239,8 @@ validate_system_health() {
     local health_rc=0
     log_info "Validating system health after maintenance..."
     log_info "Invoking: VAULTWARDEN_INTERNAL_HEALTH_CHECK=true ${PROJECT_ROOT}/utilities/maintenance-health.sh --quick --quiet"
-    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true \
-        "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quick --quiet || health_rc=$?
+    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quiet \
+        --quick || health_rc=$?
 
     case "$health_rc" in
         0)  log_success "System health validation passed" ;;
@@ -280,15 +280,18 @@ _health_summary_line() {
 # generate_maintenance_summary LOG_RC BACKUP_RC DOCKER_RC DB_RC FW_RC DNS_RC
 #                              HEALTH_RC [DURATION_SECONDS] [RECOVERY_RC]
 #
-# Renders and optionally emails the summary, then returns the final maintenance
-# status: 0 for no real failures, 1 for one real failure, and 2 for multiple
-# real failures. Advisory warnings and expected operation skips remain exit 0.
+# Renders and optionally emails the summary. The owning runner reads
+# MAINTENANCE_SUMMARY_RESULT and MAINTENANCE_SUMMARY_STATE, which are derived by
+# the same classification that selects the rendered overall state and subject.
 generate_maintenance_summary() {
     local log_cleanup="$1" backup_cleanup="$2" docker_cleanup="$3"
     local db_optimization="$4" firewall_update="$5" dns_update="$6" health_validation="$7"
     local duration_seconds="${8:-}" recovery_cleanup="${9:-0}"
     local critical_failures=0 advisory_warnings=0 operation_skips=0
-    local summary subject result=0
+    local summary subject
+
+    MAINTENANCE_SUMMARY_RESULT=0
+    MAINTENANCE_SUMMARY_STATE=success
 
     summary="VaultWarden Maintenance Summary - $(date)\n\nMaintenance Results:\n"
 
@@ -395,20 +398,30 @@ generate_maintenance_summary() {
     fi
 
     if (( critical_failures > 0 )); then
+        MAINTENANCE_SUMMARY_STATE=issues
         summary+="⚠️  Overall Status: COMPLETED WITH ISSUES\n"
         subject="VaultWarden Maintenance: ISSUES DETECTED"
     elif (( advisory_warnings > 0 && operation_skips > 0 )); then
+        MAINTENANCE_SUMMARY_STATE=warnings_and_skips
         summary+="⚠️  Overall Status: COMPLETED WITH WARNINGS AND SKIPS\n"
         subject="VaultWarden Maintenance: WARNINGS AND SKIPS"
     elif (( advisory_warnings > 0 )); then
+        MAINTENANCE_SUMMARY_STATE=warnings
         summary+="⚠️  Overall Status: SUCCESS WITH WARNINGS\n"
         subject="VaultWarden Maintenance: SUCCESS WITH WARNINGS"
     elif (( operation_skips > 0 )); then
+        MAINTENANCE_SUMMARY_STATE=skips
         summary+="⏭️  Overall Status: COMPLETED WITH SKIPS\n"
         subject="VaultWarden Maintenance: COMPLETED WITH SKIPS"
     else
         summary+="🎉 Overall Status: SUCCESS\n"
         subject="VaultWarden Maintenance: SUCCESS"
+    fi
+
+    if (( critical_failures == 1 )); then
+        MAINTENANCE_SUMMARY_RESULT=1
+    elif (( critical_failures > 1 )); then
+        MAINTENANCE_SUMMARY_RESULT=2
     fi
 
     printf '%b' "$summary"
@@ -422,13 +435,7 @@ generate_maintenance_summary() {
             log_warn "Failed to send summary email"
         fi
     fi
-
-    if (( critical_failures == 1 )); then
-        result=1
-    elif (( critical_failures > 1 )); then
-        result=2
-    fi
-    return "$result"
+    return 0
 }
 
 
