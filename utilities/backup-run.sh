@@ -1047,14 +1047,18 @@ sync_all_backups_to_rclone() {
     backup_log_success "Rclone backup copy complete (${copied_types} backup type(s))."
 }
 
-# _prune_remote_backups
+# _prune_remote_backups [OVERRIDE_TYPE]
 #
 # Prunes backup files on the configured rclone remote that are older than the
 # canonical per-type retention period. A failed inventory listing is distinct
 # from an empty inventory: no files are deleted for that type and the function
 # returns nonzero so the caller cannot report remote retention as successful.
-# A missing type directory (rclone exit 3) is an expected empty tier.
+# A missing type directory (rclone exit 3) is an expected empty tier. When
+# OVERRIDE_TYPE is set, KEEP_DAYS applies only to that tier; otherwise it applies
+# to every tier for the sync/rotate command contract.
 _prune_remote_backups() {
+    local override_type="${1:-}"
+
     if ! command -v rclone >/dev/null 2>&1; then
         backup_log_info "rclone not installed — skipping remote retention pruning."
         return 0
@@ -1079,8 +1083,11 @@ _prune_remote_backups() {
 
     for t in db full emergency; do
         local remote_path="${remote_name}:${remote_base_path}/${t}"
-        local retention_days
-        retention_days=$(backup_retention_days_for_type "$t" "${KEEP_DAYS:-}") || return 1
+        local retention_days retention_override=""
+        if [[ -z "$override_type" || "$t" == "$override_type" ]]; then
+            retention_override="${KEEP_DAYS:-}"
+        fi
+        retention_days=$(backup_retention_days_for_type "$t" "$retention_override") || return 1
 
         local remote_listing="" list_rc=0 list_error_file
         if [[ -n "${TMPDIR_BACKUP:-}" && -d "$TMPDIR_BACKUP" ]]; then
@@ -1898,7 +1905,7 @@ main() {
             backup_log_warn "Failed to clean up some old backups"
 
         if [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]]; then
-            if ! _prune_remote_backups; then
+            if ! _prune_remote_backups "$actual_type"; then
                 rclone_failed=true
                 offsite_status="backup synced; remote retention FAILED"
                 log_error "Remote retention failed after the backup upload. Local and uploaded backup copies are safe."
