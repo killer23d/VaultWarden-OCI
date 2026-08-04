@@ -1805,7 +1805,7 @@ main() {
             log_error "Invalid backup type: $actual_type"; exit 1 ;;
     esac
 
-    if [[ "$backup_success" == "true" ]]; then
+    if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
         [[ "$backup_file" == *.age && -f "$backup_file" ]] || {
             log_error "backup_file is invalid or missing: ${backup_file:-empty}"
             exit 1
