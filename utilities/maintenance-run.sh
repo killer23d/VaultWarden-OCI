@@ -169,19 +169,30 @@ main() {
 
     # Compute elapsed wall-clock time for the summary footer.
     local _maint_duration_seconds=$(( $(date +%s) - _MAINT_START_EPOCH ))
-    local maintenance_result=0
 
     log_header "Maintenance Summary"
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
-        "$health_validation_result" "$_maint_duration_seconds" "$recovery_cleanup_result" \
-        || maintenance_result=$?
+        "$health_validation_result" "$_maint_duration_seconds" "$recovery_cleanup_result"
 
-    case "$maintenance_result" in
-        0) log_success "Maintenance completed without real failures" ;;
-        1) log_warn "Maintenance completed with one real failure" ;;
-        *) log_error "Maintenance completed with multiple real failures" ;;
+    local maintenance_result="${MAINTENANCE_SUMMARY_RESULT:-2}"
+    case "${MAINTENANCE_SUMMARY_STATE:-issues}" in
+        success) log_success "Maintenance completed successfully" ;;
+        warnings) log_warn "Maintenance completed successfully with advisory warnings" ;;
+        skips) log_warn "Maintenance completed with skipped work" ;;
+        warnings_and_skips) log_warn "Maintenance completed with advisory warnings and skipped work" ;;
+        issues)
+            if [[ "$maintenance_result" == "1" ]]; then
+                log_warn "Maintenance completed with one real failure"
+            else
+                log_error "Maintenance completed with multiple real failures"
+            fi
+            ;;
+        *)
+            log_error "Maintenance completed with an unknown summary state"
+            maintenance_result=2
+            ;;
     esac
     exit "$maintenance_result"
 }
