@@ -87,6 +87,8 @@ sed -n '/^_validate_full_archive_payload()/,/^create_db_snapshot_host()/p' "$BAC
 state="$TMP/state"; mkdir -p "$state/data"; : > "$state/data/db.sqlite3"
 badroot="$TMP/badroot"; mkdir -p "$badroot/${state#/}/.pre-restore-x/data"; : > "$badroot/${state#/}/.pre-restore-x/data/db.sqlite3"; (cd "$badroot" && tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$TMP/bad.tar.zst" .)
 if bash -c "source '$BH'; _validate_full_archive_payload '$TMP/bad.tar.zst' '$state' '$ROOT' full" >/dev/null 2>&1; then fail 'snapshot-only DB must not satisfy backup validation'; fi
+forbiddenroot="$TMP/forbiddenroot"; mkdir -p "$forbiddenroot/${state#/}/data" "$forbiddenroot/${ROOT#/}"; : > "$forbiddenroot/${state#/}/data/db.sqlite3"; printf secret > "$forbiddenroot/${ROOT#/}/vaultwarden-recovery-kit-test.txt"; (cd "$forbiddenroot" && tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$TMP/forbidden.tar.zst" .)
+if bash -c "source '$BH'; _validate_full_archive_payload '$TMP/forbidden.tar.zst' '$state' '$ROOT' full" >/dev/null 2>&1; then fail 'full archive accepted a recovery artifact'; fi
 goodroot="$TMP/goodroot"; mkdir -p "$goodroot/${state#/}/data"; : > "$goodroot/${state#/}/data/db.sqlite3"; mkdir -p "$goodroot/${ROOT#/}"; (cd "$goodroot" && tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$TMP/good.tar.zst" .)
 bash -c "source '$BH'; _validate_full_archive_payload '$TMP/good.tar.zst' '$state' '$ROOT' full" || fail 'live DB archive should pass backup validation'
 
