@@ -314,6 +314,7 @@ cat > "$TMP/batch-sync-probe.sh" <<EOF_PROBE
 set -uo pipefail
 BASE_DIR="$TMP/retained"
 DRY_RUN=false
+KEEP_DAYS=""
 BATCH_META_CASE="\${BATCH_META_CASE:-zero}"
 COPY_LOG="$TMP/batch-copy.calls"
 rm -rf "\$BASE_DIR"
@@ -338,7 +339,7 @@ get_config_value(){
 }
 _default_backup_dir(){ printf '%s\\n' "\$BASE_DIR"; }
 _resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(--config "$TMP/mock-rclone.conf"); }
-_retention_days_for_type(){ printf '%s\\n' 30; }
+backup_retention_days_for_type(){ printf '%s\\n' 30; }
 cleanup_old_backups(){ return 0; }
 _prune_remote_backups(){ return 0; }
 rclone(){
@@ -500,6 +501,163 @@ fi
 )
 
 check_rclone_config_contracts
+check_backup_policy_retention_truthfulness() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+BACKUP="$ROOT/utilities/backup-run.sh"
+UTILS="$ROOT/lib/backup-utils.sh"
+MAINT="$ROOT/lib/maintenance-utils.sh"
+MAINT_RUN="$ROOT/utilities/maintenance-run.sh"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+source "$ROOT/lib/log.sh"
+source "$UTILS"
+
+declare -A RETENTION_CONFIG=()
+get_config_value(){
+    local key="$1" fallback="${2:-}"
+    printf '%s\n' "${RETENTION_CONFIG[$key]:-$fallback}"
+}
+
+RETENTION_CONFIG[BACKUP_RETENTION_DB_DAYS]=11
+RETENTION_CONFIG[BACKUP_RETENTION_FULL_DAYS]=22
+RETENTION_CONFIG[BACKUP_RETENTION_EMERGENCY_DAYS]=33
+[[ "$(backup_retention_days_for_type db)" == "11" ]] || fail "db type-specific retention was not selected"
+[[ "$(backup_retention_days_for_type full)" == "22" ]] || fail "full type-specific retention was not selected"
+[[ "$(backup_retention_days_for_type emergency)" == "33" ]] || fail "emergency type-specific retention was not selected"
+[[ "$(backup_retention_days_for_type db 7)" == "7" ]] || fail "explicit --keep retention did not win"
+
+RETENTION_CONFIG[BACKUP_RETENTION_DB_DAYS]=""
+RETENTION_CONFIG[BACKUP_RETENTION_DAYS]=44
+[[ "$(backup_retention_days_for_type db)" == "44" ]] || fail "generic retention fallback was not selected"
+RETENTION_CONFIG[BACKUP_RETENTION_DAYS]=""
+[[ "$(backup_retention_days_for_type db)" == "14" ]] || fail "safe 14-day retention fallback was not selected"
+
+for invalid in 0 -1 abc 1.5; do
+    if backup_retention_days_for_type db "$invalid" >/dev/null 2>&1; then
+        fail "invalid explicit retention was accepted: $invalid"
+    fi
+done
+RETENTION_CONFIG[BACKUP_RETENTION_DB_DAYS]=bad
+if backup_retention_days_for_type db >/dev/null 2>&1; then
+    fail "invalid configured retention was accepted"
+fi
+if backup_retention_days_for_type unknown >/dev/null 2>&1; then
+    fail "unknown backup type was accepted"
+fi
+
+for file in "$ROOT/.env.example" "$ROOT/docs/CONFIGURATION.md" "$ROOT/docs/ADVANCED-CUSTOMIZATION.md"; do
+    ! grep -Eq 'BACKUP_ENCRYPTION_ENABLED|BACKUP_VERIFICATION_MODE' "$file" \
+        || fail "unowned backup setting remains in $file"
+done
+if grep -R -nE 'BACKUP_ENCRYPTION_ENABLED|BACKUP_VERIFICATION_MODE' "$ROOT" \
+        --include='*.sh' --include='*.bash' --exclude-dir=.git --exclude-dir=tests >/dev/null; then
+    fail "unowned backup setting has an executable consumer"
+fi
+for legacy in DB_BACKUP_RETENTION_DAYS FULL_BACKUP_RETENTION_DAYS EMERGENCY_BACKUP_RETENTION_DAYS; do
+    ! grep -Fq "$legacy" "$BACKUP" || fail "legacy retention owner remains in backup runner: $legacy"
+    ! grep -Fq "$legacy" "$MAINT" || fail "legacy retention owner remains in maintenance library: $legacy"
+    ! grep -Fq "$legacy" "$MAINT_RUN" || fail "legacy retention global remains in maintenance runner: $legacy"
+done
+grep -Fq 'backup_retention_days_for_type "$backup_type"' "$MAINT" \
+    || fail "maintenance does not use the canonical retention resolver"
+grep -Fq 'backup_retention_days_for_type "$actual_type" "${KEEP_DAYS:-}"' "$BACKUP" \
+    || fail "backup run does not preserve explicit --keep precedence"
+grep -Fq 'Local retention completed, but remote retention failed.' "$BACKUP" \
+    || fail "rotate does not distinguish local completion from remote failure"
+
+if (( BASH_VERSINFO[0] < 5 )); then
+    printf 'SKIP: remote listing failure probe requires Bash 5 namerefs used by production backup-run.sh\n'
+    return 0
+fi
+
+cat > "$TMP/remote-listing-probe.sh" <<EOF_PROBE
+set -uo pipefail
+ROOT="$ROOT"
+TMPDIR_BACKUP="$TMP/remote-work"
+mkdir -p "\$TMPDIR_BACKUP"
+REMOTE_MODE="\${REMOTE_MODE:-empty}"
+DELETE_LOG="$TMP/remote-listing-delete.log"
+OUTPUT_LOG="$TMP/remote-listing-output.log"
+DRY_RUN=false
+KEEP_DAYS=""
+backup_log_info(){ printf 'INFO:%s\n' "\$*" >> "\$OUTPUT_LOG"; }
+backup_log_success(){ printf 'SUCCESS:%s\n' "\$*" >> "\$OUTPUT_LOG"; }
+backup_log_warn(){ printf 'WARN:%s\n' "\$*" >> "\$OUTPUT_LOG"; }
+log_warn(){ printf 'WARN:%s\n' "\$*" >> "\$OUTPUT_LOG"; }
+log_error(){ printf 'ERROR:%s\n' "\$*" >> "\$OUTPUT_LOG"; }
+get_config_value(){
+    case "\$1" in
+        RCLONE_REMOTE_NAME) printf '%s\n' mockremote ;;
+        RCLONE_REMOTE_PATH) printf '%s\n' vaultwarden_backups ;;
+        BACKUP_RETENTION_DB_DAYS|BACKUP_RETENTION_FULL_DAYS|BACKUP_RETENTION_EMERGENCY_DAYS) printf '%s\n' 1 ;;
+        *) printf '%s\n' "\${2:-}" ;;
+    esac
+}
+_resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(); }
+rclone(){
+    local cmd="\${1:-}"
+    shift || true
+    case "\$cmd" in
+        lsf)
+            if [[ "\$REMOTE_MODE" == "fail" ]]; then
+                printf 'simulated listing failure\n' >&2
+                return 17
+            fi
+            return 0
+            ;;
+        deletefile)
+            printf '%s\n' "\$*" >> "\$DELETE_LOG"
+            return 0
+            ;;
+        *) return 0 ;;
+    esac
+}
+source "\$ROOT/lib/log.sh"
+source "\$ROOT/lib/backup-utils.sh"
+$(_extract_func "$BACKUP" _prune_remote_backups)
+_prune_remote_backups
+EOF_PROBE
+
+: > "$TMP/remote-listing-delete.log"
+: > "$TMP/remote-listing-output.log"
+REMOTE_MODE=empty bash "$TMP/remote-listing-probe.sh" \
+    || { cat "$TMP/remote-listing-output.log" >&2; fail "empty remote inventory should succeed"; }
+[[ ! -s "$TMP/remote-listing-delete.log" ]] || fail "empty remote inventory triggered deletion"
+grep -Fq '[remote] No db backup archives found on remote — nothing to prune.' "$TMP/remote-listing-output.log" \
+    || fail "empty remote inventory was not reported distinctly"
+
+: > "$TMP/remote-listing-delete.log"
+: > "$TMP/remote-listing-output.log"
+if REMOTE_MODE=fail bash "$TMP/remote-listing-probe.sh"; then
+    fail "failed remote inventory returned success"
+fi
+[[ ! -s "$TMP/remote-listing-delete.log" ]] || fail "failed remote inventory triggered deletion"
+grep -Fq 'Failed to list mockremote:vaultwarden_backups/db/ (rclone exit 17). No db files were deleted.' "$TMP/remote-listing-output.log" \
+    || fail "remote listing failure did not report the remote path and no-delete outcome"
+grep -Fq 'simulated listing failure' "$TMP/remote-listing-output.log" \
+    || fail "remote listing failure omitted actionable rclone output"
+grep -Fq 'Remote retention did not complete' "$TMP/remote-listing-output.log" \
+    || fail "remote listing failure did not propagate a nonzero result"
+
+printf 'PASS: canonical retention policy and remote inventory failure reporting\n'
+)
+
+check_backup_policy_retention_truthfulness
 check_backup_retention_contracts() (
 set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
@@ -618,14 +776,14 @@ printf 'orphan\n' > "$maintenance_orphan"
 
 vw_default_backup_dir(){ printf '%s\n' "$maintenance_dry_run_dir"; }
 get_config_value(){
-    if [[ "$1" == "BACKUP_DIR" ]]; then
-        printf '%s\n' "$maintenance_dry_run_dir"
-    else
-        printf '%s\n' "${2:-}"
-    fi
+    case "$1" in
+        BACKUP_DIR) printf '%s\n' "$maintenance_dry_run_dir" ;;
+        BACKUP_RETENTION_DB_DAYS) printf '%s\n' 1 ;;
+        *) printf '%s\n' "${2:-}" ;;
+    esac
 }
 
-DRY_RUN=true CLEAN_BACKUPS=true DB_BACKUP_RETENTION_DAYS=1 \
+DRY_RUN=true CLEAN_BACKUPS=true \
     cleanup_backups > "$TMP/maintenance-dry-run.out" 2>&1 \
     || { cat "$TMP/maintenance-dry-run.out" >&2; fail "maintenance retention dry-run failed"; }
 for file in \
@@ -667,6 +825,7 @@ ROOT="$ROOT"
 DELETE_LOG="$TMP/remote-delete.log"
 REMOTE_LOG="$TMP/remote-prune.log"
 DRY_RUN="\${REMOTE_DRY_RUN:-false}"
+KEEP_DAYS=""
 backup_log_info(){ printf 'INFO:%s\n' "\$*" >> "\$REMOTE_LOG"; }
 backup_log_success(){ printf 'SUCCESS:%s\n' "\$*" >> "\$REMOTE_LOG"; }
 backup_log_warn(){ printf 'WARN:%s\n' "\$*" >> "\$REMOTE_LOG"; }
@@ -676,10 +835,10 @@ get_config_value(){
     case "\$1" in
         RCLONE_REMOTE_NAME) printf '%s\n' mockremote ;;
         RCLONE_REMOTE_PATH) printf '%s\n' vaultwarden_backups ;;
+        BACKUP_RETENTION_DB_DAYS|BACKUP_RETENTION_FULL_DAYS|BACKUP_RETENTION_EMERGENCY_DAYS) printf '%s\n' 1 ;;
         *) printf '%s\n' "\${2:-}" ;;
     esac
 }
-_retention_days_for_type(){ printf '%s\n' 1; }
 _resolve_rclone_config_arg(){ local -n _out="\$1"; _out=(); }
 rclone(){
     local cmd="\${1:-}"
