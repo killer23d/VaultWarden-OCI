@@ -35,6 +35,7 @@ ENV_DIR="${VW_SYSTEMD_ENV_DIR:-/etc/vaultwarden}"
 ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
 STARTUP_SERVICE="vaultwarden-startup.service"
+NOTIFY_FAILURE_TEMPLATE="vaultwarden-notify-failure@.service"
 SETUP_SYSTEMD_GUARD_HELD=false
 
 TIMERS=(
@@ -46,7 +47,7 @@ TIMERS=(
     vaultwarden-firewall-update.timer
 )
 
-SERVICES=(
+COPIED_SERVICES=(
     vaultwarden-maintenance.service
     vaultwarden-db-backup.service
     vaultwarden-full-backup.service
@@ -54,26 +55,37 @@ SERVICES=(
     vaultwarden-dns-update.service
     vaultwarden-firewall-update.service
     vaultwarden-notify-failure.service
-    vaultwarden-notify-failure@.service
+    "$NOTIFY_FAILURE_TEMPLATE"
     vaultwarden-iptables.service
 )
 
-_VW_DROPIN_UNITS=(
-    vaultwarden-maintenance.service
-    vaultwarden-db-backup.service
-    vaultwarden-full-backup.service
-    vaultwarden-health.service
-    vaultwarden-dns-update.service
-    vaultwarden-firewall-update.service
-    vaultwarden-notify-failure.service
-    vaultwarden-notify-failure@.service
-    vaultwarden-maintenance.timer
-    vaultwarden-db-backup.timer
-    vaultwarden-full-backup.timer
-    vaultwarden-health.timer
-    vaultwarden-dns-update.timer
-    vaultwarden-firewall-update.timer
+MANAGED_UNITS=("${COPIED_SERVICES[@]}" "${TIMERS[@]}")
+
+INSTALLED_SCRIPT_PATHS=(
+    maintenance.sh
+    backup.sh
+    restore.sh
+    utilities/setup-firewall.sh
+    utilities/maintenance-run.sh
+    utilities/maintenance-health.sh
+    utilities/maintenance-update.sh
+    utilities/maintenance-db-maint.sh
+    utilities/maintenance-email.sh
+    utilities/maintenance-update-dns.sh
+    utilities/notify-failure.sh
+    utilities/maintenance-update-firewall.sh
+    utilities/backup-run.sh
+    utilities/restore-run.sh
 )
+
+# Timers skip identity checks, while iptables skips data-volume drop-ins.
+_ROOT_REQUIRED_UNITS=("${COPIED_SERVICES[@]}" "$STARTUP_SERVICE")
+_VW_DROPIN_UNITS=()
+for unit in "${COPIED_SERVICES[@]}"; do
+    [[ "$unit" == "vaultwarden-iptables.service" ]] || _VW_DROPIN_UNITS+=("$unit")
+done
+_VW_DROPIN_UNITS+=("${TIMERS[@]}")
+unset unit
 
 _setup_systemd_acquire_guard() {
     local label="$1" phase="$2"
@@ -315,19 +327,6 @@ _sha256() {
     fi
 }
 
-_ROOT_REQUIRED_UNITS=(
-    vaultwarden-db-backup.service
-    vaultwarden-full-backup.service
-    vaultwarden-health.service
-    vaultwarden-dns-update.service
-    vaultwarden-maintenance.service
-    vaultwarden-firewall-update.service
-    vaultwarden-iptables.service
-    vaultwarden-startup.service
-    vaultwarden-notify-failure.service
-    vaultwarden-notify-failure@.service
-)
-
 _cleanup_stale_identity_dropins() {
     local unit dropin_dir dropin_file
 
@@ -363,7 +362,6 @@ _cleanup_stale_identity_dropins() {
     done
 }
 
-
 # so that ProtectSystem=strict allows writes to DATA_VOLUME_MOUNT. Without
 # this drop-in, any write to DATA_VOLUME_MOUNT (backup files, health cooldown
 # stamps, DB operations) is silently blocked by the kernel, causing runtime
@@ -394,11 +392,6 @@ _install_rwpaths_dropin() {
         return 1
     fi
 
-    # Self-contained unit list — do NOT rely on SERVICES/TIMERS from the
-    # enclosing scope. Dynamic-scope inheritance only works when called
-    # through the exact call chain that defines those locals; any future
-    # caller outside that chain would silently iterate zero units and install
-    # no drop-ins.
     local -a _DROPIN_UNITS=("${_VW_DROPIN_UNITS[@]}")
 
     log_info "Installing per-unit state-dir drop-ins for DATA_VOLUME_MOUNT=${data_mount} ..."
@@ -484,6 +477,20 @@ install_units() {
         return 1
     fi
 
+    local script unit
+    for script in "${INSTALLED_SCRIPT_PATHS[@]}"; do
+        if [[ ! -f "$PROJECT_ROOT/$script" ]]; then
+            log_error "Required repository script not found: $PROJECT_ROOT/$script"
+            return 1
+        fi
+    done
+    for unit in "${MANAGED_UNITS[@]}" "$STARTUP_SERVICE"; do
+        if [[ ! -f "$UNIT_SOURCE_DIR/$unit" ]]; then
+            log_error "Required unit file not found: $UNIT_SOURCE_DIR/$unit"
+            return 1
+        fi
+    done
+
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
     _run mkdir -p "$OPT_SCRIPTS_DIR"
 
@@ -520,52 +527,9 @@ install_units() {
         return 1
     fi
 
-    # Keep these scripts flat-installed because existing callers reference
-    # /opt/vaultwarden-scripts/<name> directly.
-    local flat_scripts_to_install=(
-        maintenance.sh
-        backup.sh
-        restore.sh
-    )
-    for script in "${flat_scripts_to_install[@]}"; do
+    for script in "${INSTALLED_SCRIPT_PATHS[@]}"; do
         local src="$PROJECT_ROOT/$script"
-        local dest
-        dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
-        if [[ ! -f "$src" ]]; then
-            log_warn "Script not found, skipping: $src"
-            continue
-        fi
-        if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would install: $dest (700 root:root)"
-            continue
-        fi
-        install -m 700 -o root -g root "$src" "$dest"
-        log_success "Installed: $dest"
-    done
-
-    # Preserve the utilities/ subdirectory for these scripts so each utility's
-    # BASH_SOURCE-based PROJECT_ROOT resolution matches the repository layout.
-    local structured_scripts_to_install=(
-        utilities/setup-firewall.sh
-        utilities/maintenance-run.sh
-        utilities/maintenance-health.sh
-        utilities/maintenance-update.sh
-        utilities/maintenance-db-maint.sh
-        utilities/maintenance-email.sh
-        utilities/maintenance-update-dns.sh
-        utilities/notify-failure.sh
-        utilities/maintenance-update-firewall.sh
-        utilities/backup-run.sh
-        utilities/restore-run.sh
-    )
-    for script in "${structured_scripts_to_install[@]}"; do
-        local src="$PROJECT_ROOT/$script"
-        local dest
-        dest="$OPT_SCRIPTS_DIR/$script"
-        if [[ ! -f "$src" ]]; then
-            log_warn "Script not found, skipping: $src"
-            continue
-        fi
+        local dest="$OPT_SCRIPTS_DIR/$script"
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would install: $dest (700 root:root)"
             continue
@@ -666,21 +630,12 @@ install_units() {
     _sync_runtime_environment_files || return 1
 
     log_info "Installing systemd unit files to $UNIT_DEST_DIR ..."
-    local unit_ok=true
-    for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
+    for unit in "${MANAGED_UNITS[@]}"; do
         local src="$UNIT_SOURCE_DIR/$unit"
-        if [[ ! -f "$src" ]]; then
-            log_warn "Unit file not found, skipping: $src"
-            unit_ok=false
-            continue
-        fi
         _run cp "$src" "$UNIT_DEST_DIR/$unit"
         _run chmod 644 "$UNIT_DEST_DIR/$unit"
         log_success "Installed unit: $unit"
     done
-    if [[ "$unit_ok" == "false" ]]; then
-        log_warn "Some unit files were missing -- check the systemd/ directory."
-    fi
 
     _render_startup_service || return 1
 
@@ -778,8 +733,8 @@ install_units() {
     fi
 
     log_info "Clearing stale failed status from all managed services ..."
-    for svc in "${SERVICES[@]}" "$STARTUP_SERVICE"; do
-        [[ "$svc" == *"@"* ]] && continue  # skip template unit
+    for svc in "${COPIED_SERVICES[@]}" "$STARTUP_SERVICE"; do
+        [[ "$svc" == "$NOTIFY_FAILURE_TEMPLATE" ]] && continue
         _run systemctl reset-failed "$svc" 2>/dev/null || true
     done
     _run systemctl reset-failed 'vaultwarden-notify-failure@*.service' 2>/dev/null || true
@@ -821,7 +776,7 @@ remove_units() {
         log_info "[DRY RUN] Would check and disable $STARTUP_SERVICE if enabled or active"
     fi
 
-    for unit in "${TIMERS[@]}" "${SERVICES[@]}" "$STARTUP_SERVICE"; do
+    for unit in "${MANAGED_UNITS[@]}" "$STARTUP_SERVICE"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ -f "$dest" ]]; then
             _run rm -f "$dest"
@@ -939,23 +894,7 @@ validate_installation() {
     }
 
     log_info "[1/9] Checking installed scripts ..."
-    local scripts_to_check=(
-        maintenance.sh
-        backup.sh
-        restore.sh
-        utilities/setup-firewall.sh
-        utilities/maintenance-run.sh
-        utilities/maintenance-health.sh
-        utilities/maintenance-update.sh
-        utilities/maintenance-db-maint.sh
-        utilities/maintenance-email.sh
-        utilities/maintenance-update-dns.sh
-        utilities/notify-failure.sh
-        utilities/maintenance-update-firewall.sh
-        utilities/backup-run.sh
-        utilities/restore-run.sh
-    )
-    for script in "${scripts_to_check[@]}"; do
+    for script in "${INSTALLED_SCRIPT_PATHS[@]}"; do
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$installed" ]]; then
             log_error "  MISSING:        $installed"
@@ -1010,7 +949,7 @@ validate_installation() {
     fi
 
     log_info "[3/9] Checking installed unit files ..."
-    for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
+    for unit in "${MANAGED_UNITS[@]}"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ ! -f "$dest" ]]; then
             log_error "  MISSING: $dest"
@@ -1081,7 +1020,7 @@ validate_installation() {
     else
         log_success "  OK: $notify_helper is installed and executable"
     fi
-    local notify_unit="$UNIT_DEST_DIR/vaultwarden-notify-failure@.service"
+    local notify_unit="$UNIT_DEST_DIR/$NOTIFY_FAILURE_TEMPLATE"
     if [[ -f "$notify_unit" ]]; then
         if grep -q '^ExecStart=/opt/vaultwarden-scripts/utilities/notify-failure.sh %i' "$notify_unit" \
            && ! grep -q 'ExecStart=/bin/bash -c' "$notify_unit"; then
@@ -1181,7 +1120,7 @@ validate_installation() {
     fi
 
     log_info "[8/9] Checking for split-brain (sha256 repo vs installed) ..."
-    for script in "${scripts_to_check[@]}"; do
+    for script in "${INSTALLED_SCRIPT_PATHS[@]}"; do
         local repo_src="$PROJECT_ROOT/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
         _compare_repo_artifact "$repo_src" "$installed"
@@ -1194,7 +1133,7 @@ validate_installation() {
         _compare_repo_artifact "$repo_lib" "$installed_lib"
     done < <(find "$PROJECT_ROOT/lib" -type f -print0 2>/dev/null)
 
-    for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
+    for unit in "${MANAGED_UNITS[@]}"; do
         _compare_repo_artifact "$UNIT_SOURCE_DIR/$unit" "$UNIT_DEST_DIR/$unit"
     done
 
@@ -1227,8 +1166,8 @@ show_status() {
     echo ""
     systemctl list-timers --all 2>/dev/null | grep vaultwarden || log_info "No vaultwarden timers active."
     echo ""
-    for svc in "${SERVICES[@]}" "$STARTUP_SERVICE"; do
-        [[ "$svc" == *"@"* ]] && continue
+    for svc in "${COPIED_SERVICES[@]}" "$STARTUP_SERVICE"; do
+        [[ "$svc" == "$NOTIFY_FAILURE_TEMPLATE" ]] && continue
         log_info "--- $svc ---"
         { systemctl status "$svc" --no-pager -l 2>/dev/null | head -20; } || true
         echo ""
