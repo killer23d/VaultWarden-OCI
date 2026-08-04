@@ -20,6 +20,7 @@ source "$PROJECT_ROOT/lib/secrets.sh"
 source "$PROJECT_ROOT/lib/storage.sh"
 source "$PROJECT_ROOT/lib/maintenance-utils.sh"
 
+# Configuration defaults mirror maintenance.sh.
 CLEAN_LOGS=true
 CLEAN_BACKUPS=true
 CLEAN_DOCKER=true
@@ -46,15 +47,16 @@ USAGE:
 
 DESCRIPTION:
     Performs routine maintenance: log cleanup, old backup pruning, Docker
-    system cleanup, expired plaintext recovery-kit fallback cleanup, online
-    SQLite optimization, and quick post-maintenance health validation.
+    system cleanup, expired plaintext recovery-kit fallback cleanup, and
+    scheduled database optimization. Primary recovery cleanup is scheduled for
+    approximately 30 minutes; this sweep removes eligible older leftovers.
 
 OPTIONS:
     --comprehensive         Run everything: routine + firewall + DNS
     --no-logs               Skip log rotation and cleanup
     --no-backups            Skip backup cleanup
     --no-docker             Skip Docker cleanup
-    --no-database           Skip routine online database optimization
+    --no-database           Skip scheduled database optimization
     --update-dns            Include DNS update in this run
     --update-firewall       Include firewall update in this run
     --dry-run               Show what would be done without executing
@@ -63,9 +65,9 @@ OPTIONS:
     --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — completed without real failures; may include warnings or expected skips
-    1 — completed with one real failure
-    2 — completed with multiple real failures
+    0 — completed without real failures; may include expected contention skips
+    1 — completed with minor issues
+    2 — completed with critical failures
 
 EXAMPLES:
     sudo ./maintenance.sh run
@@ -74,6 +76,7 @@ EXAMPLES:
     sudo ./maintenance.sh run --email
 EOF
 }
+
 
 [[ "${1:-}" == "run" ]] && shift
 
@@ -113,23 +116,25 @@ main() {
     trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
 
     log_header "VaultWarden-OCI Maintenance Manager"
-    [[ "$DRY_RUN" == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
+    [[ "$DRY_RUN"      == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
     [[ "$COMPREHENSIVE" == "true" ]] && log_info "Running comprehensive maintenance..."
 
-    local start_epoch
-    start_epoch=$(date +%s)
+    # Record start time so the summary can report elapsed duration (issue #37).
+    local _MAINT_START_EPOCH
+    _MAINT_START_EPOCH=$(date +%s)
 
     load_project_environment || exit 1
     auto_fix_critical_permissions "$PROJECT_ROOT"
     require_project_state_ready || exit 1
 
     local log_cleanup_result=0 backup_cleanup_result=0 docker_cleanup_result=0
-    local recovery_cleanup_result=0 db_optimization_result=0
-    local firewall_update_result=1 dns_update_result=1 health_validation_result=0
+    local recovery_cleanup_result=0
+    local db_optimization_result=0 firewall_update_result=1 dns_update_result=1
+    local health_validation_result=0
 
     operation_set_phase "1" "System cleanup"
     log_header "Phase 1/4 — System cleanup"
-    cleanup_logs || log_cleanup_result=$?
+    cleanup_logs    || log_cleanup_result=$?
     cleanup_backups || backup_cleanup_result=$?
     cleanup_expired_recovery_kits "$DRY_RUN" || recovery_cleanup_result=$?
     if cleanup_docker_system; then
@@ -146,15 +151,15 @@ main() {
         operation_set_phase "3" "Security and network maintenance"
         log_header "Phase 3/4 — Security and network maintenance"
         if [[ "$UPDATE_FIREWALL" == "true" ]]; then
-            local firewall_args=("${PROJECT_ROOT}/utilities/maintenance-update-firewall.sh" update-firewall)
-            [[ "$DRY_RUN" == "true" ]] && firewall_args+=(--dry-run)
-            "${firewall_args[@]}" && firewall_update_result=0 || firewall_update_result=$?
+            local _fw_args=("${PROJECT_ROOT}/utilities/maintenance-update-firewall.sh" update-firewall)
+            [[ "$DRY_RUN" == "true" ]] && _fw_args+=("--dry-run")
+            "${_fw_args[@]}" && firewall_update_result=0 || firewall_update_result=$?
         fi
         if [[ "$UPDATE_DNS" == "true" ]]; then
-            local dns_args=("${PROJECT_ROOT}/utilities/maintenance-update-dns.sh" update-dns)
-            [[ "$EMAIL_NOTIFY" == "true" ]] && dns_args+=(--email)
-            [[ "$DRY_RUN" == "true" ]] && dns_args+=(--dry-run)
-            "${dns_args[@]}" && dns_update_result=0 || dns_update_result=$?
+            local _dns_args=("${PROJECT_ROOT}/utilities/maintenance-update-dns.sh" update-dns)
+            [[ "$EMAIL_NOTIFY" == "true" ]] && _dns_args+=("--email")
+            [[ "$DRY_RUN" == "true" ]]     && _dns_args+=("--dry-run")
+            "${_dns_args[@]}" && dns_update_result=0 || dns_update_result=$?
         fi
     fi
 
@@ -162,13 +167,15 @@ main() {
     log_header "Phase 4/4 — Health validation"
     validate_system_health || health_validation_result=$?
 
-    local duration_seconds=$(( $(date +%s) - start_epoch ))
+    # Compute elapsed wall-clock time for the summary footer.
+    local _maint_duration_seconds=$(( $(date +%s) - _MAINT_START_EPOCH ))
     local maintenance_result=0
+
     log_header "Maintenance Summary"
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
-        "$health_validation_result" "$duration_seconds" "$recovery_cleanup_result" \
+        "$health_validation_result" "$_maint_duration_seconds" "$recovery_cleanup_result" \
         || maintenance_result=$?
 
     case "$maintenance_result" in
