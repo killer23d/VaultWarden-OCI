@@ -491,19 +491,27 @@ check_backup_disk_space() {
 #
 # Resolves the retention policy in one place. A non-empty explicit override
 # (the runner's --keep value) wins, followed by the type-specific setting, the
-# shared BACKUP_RETENTION_DAYS setting, and finally the repository's historical
-# fail-safe default of 14 days.
+# shared BACKUP_RETENTION_DAYS setting, and finally the historical per-tier
+# defaults: 14 days for db, 30 days for full, and 90 days for emergency.
 # ---------------------------------------------------------------------------
 backup_retention_days_for_type() {
     local backup_type="${1:-}"
     local explicit_override="${2:-}"
-    local specific_key retention=""
-    local safe_default=14
+    local specific_key retention="" safe_default
 
     case "$backup_type" in
-        db)        specific_key="BACKUP_RETENTION_DB_DAYS" ;;
-        full)      specific_key="BACKUP_RETENTION_FULL_DAYS" ;;
-        emergency) specific_key="BACKUP_RETENTION_EMERGENCY_DAYS" ;;
+        db)
+            specific_key="BACKUP_RETENTION_DB_DAYS"
+            safe_default=14
+            ;;
+        full)
+            specific_key="BACKUP_RETENTION_FULL_DAYS"
+            safe_default=30
+            ;;
+        emergency)
+            specific_key="BACKUP_RETENTION_EMERGENCY_DAYS"
+            safe_default=90
+            ;;
         *)
             log_error "Unknown backup type for retention: ${backup_type:-<empty>}"
             return 1
