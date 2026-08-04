@@ -525,6 +525,7 @@ _extract_func(){
 }
 
 source "$ROOT/lib/log.sh"
+# shellcheck source=../lib/backup-utils.sh
 source "$UTILS"
 
 declare -A RETENTION_CONFIG=()
@@ -539,13 +540,23 @@ RETENTION_CONFIG[BACKUP_RETENTION_EMERGENCY_DAYS]=33
 [[ "$(backup_retention_days_for_type db)" == "11" ]] || fail "db type-specific retention was not selected"
 [[ "$(backup_retention_days_for_type full)" == "22" ]] || fail "full type-specific retention was not selected"
 [[ "$(backup_retention_days_for_type emergency)" == "33" ]] || fail "emergency type-specific retention was not selected"
-[[ "$(backup_retention_days_for_type db 7)" == "7" ]] || fail "explicit --keep retention did not win"
+for backup_type in db full emergency; do
+    [[ "$(backup_retention_days_for_type "$backup_type" 7)" == "7" ]] \
+        || fail "explicit --keep retention did not win for $backup_type"
+done
 
 RETENTION_CONFIG[BACKUP_RETENTION_DB_DAYS]=""
+RETENTION_CONFIG[BACKUP_RETENTION_FULL_DAYS]=""
+RETENTION_CONFIG[BACKUP_RETENTION_EMERGENCY_DAYS]=""
 RETENTION_CONFIG[BACKUP_RETENTION_DAYS]=44
-[[ "$(backup_retention_days_for_type db)" == "44" ]] || fail "generic retention fallback was not selected"
+for backup_type in db full emergency; do
+    [[ "$(backup_retention_days_for_type "$backup_type")" == "44" ]] \
+        || fail "generic retention fallback was not selected for $backup_type"
+done
 RETENTION_CONFIG[BACKUP_RETENTION_DAYS]=""
-[[ "$(backup_retention_days_for_type db)" == "14" ]] || fail "safe 14-day retention fallback was not selected"
+[[ "$(backup_retention_days_for_type db)" == "14" ]] || fail "db safe retention fallback was not 14 days"
+[[ "$(backup_retention_days_for_type full)" == "30" ]] || fail "full safe retention fallback was not 30 days"
+[[ "$(backup_retention_days_for_type emergency)" == "90" ]] || fail "emergency safe retention fallback was not 90 days"
 
 for invalid in 0 -1 abc 1.5; do
     if backup_retention_days_for_type db "$invalid" >/dev/null 2>&1; then
@@ -616,14 +627,32 @@ rclone(){
     shift || true
     case "\$cmd" in
         lsf)
-            if [[ "\$REMOTE_MODE" == "fail" ]]; then
-                printf 'simulated listing failure\n' >&2
-                return 17
-            fi
-            return 0
+            local remote_path="\${1:-}"
+            case "\$REMOTE_MODE:\$remote_path" in
+                absent:mockremote:vaultwarden_backups/db/) return 0 ;;
+                absent:mockremote:vaultwarden_backups/full/|absent:mockremote:vaultwarden_backups/emergency/)
+                    printf 'directory not found\n' >&2
+                    return 3
+                    ;;
+                delete-fail:mockremote:vaultwarden_backups/db/)
+                    printf '%s\n' 'db-z-20000101-000000.age' 'db-a-20010101-000000.age'
+                    return 0
+                    ;;
+                delete-fail:mockremote:vaultwarden_backups/full/|delete-fail:mockremote:vaultwarden_backups/emergency/)
+                    return 3
+                    ;;
+                fail:*)
+                    printf 'simulated listing failure\n' >&2
+                    return 17
+                    ;;
+                *) return 0 ;;
+            esac
             ;;
         deletefile)
             printf '%s\n' "\$*" >> "\$DELETE_LOG"
+            if [[ "\$REMOTE_MODE" == "delete-fail" && "\$*" == *'/db-z-20000101-000000.age '* ]]; then
+                return 23
+            fi
             return 0
             ;;
         *) return 0 ;;
@@ -643,6 +672,18 @@ grep -Fq '[remote] No db backup archives found on remote — nothing to prune.' 
 
 : > "$TMP/remote-listing-delete.log"
 : > "$TMP/remote-listing-output.log"
+REMOTE_MODE=absent bash "$TMP/remote-listing-probe.sh" \
+    || { cat "$TMP/remote-listing-output.log" >&2; fail "absent full/emergency remote tiers should succeed"; }
+[[ ! -s "$TMP/remote-listing-delete.log" ]] || fail "absent remote tier triggered deletion"
+grep -Fq 'No full backup directory exists yet at mockremote:vaultwarden_backups/full/ — nothing to prune.' "$TMP/remote-listing-output.log" \
+    || fail "absent full tier was not reported as expected"
+grep -Fq 'No emergency backup directory exists yet at mockremote:vaultwarden_backups/emergency/ — nothing to prune.' "$TMP/remote-listing-output.log" \
+    || fail "absent emergency tier was not reported as expected"
+! grep -Fq 'Remote retention did not complete' "$TMP/remote-listing-output.log" \
+    || fail "absent remote tier was classified as a retention failure"
+
+: > "$TMP/remote-listing-delete.log"
+: > "$TMP/remote-listing-output.log"
 if REMOTE_MODE=fail bash "$TMP/remote-listing-probe.sh"; then
     fail "failed remote inventory returned success"
 fi
@@ -653,6 +694,19 @@ grep -Fq 'simulated listing failure' "$TMP/remote-listing-output.log" \
     || fail "remote listing failure omitted actionable rclone output"
 grep -Fq 'Remote retention did not complete' "$TMP/remote-listing-output.log" \
     || fail "remote listing failure did not propagate a nonzero result"
+
+: > "$TMP/remote-listing-delete.log"
+: > "$TMP/remote-listing-output.log"
+if REMOTE_MODE=delete-fail bash "$TMP/remote-listing-probe.sh"; then
+    fail "failed remote primary deletion returned success"
+fi
+grep -Fq 'One or more old db backups could not be pruned from mockremote:vaultwarden_backups/db/.' "$TMP/remote-listing-output.log" \
+    || fail "remote primary deletion failure did not report the tier outcome"
+! grep -Fq '[remote] No old db backups to prune on remote.' "$TMP/remote-listing-output.log" \
+    || fail "remote primary deletion failure printed a contradictory no-work message"
+
+grep -Fq 'Remote retention did not complete' "$TMP/remote-listing-output.log" \
+    || fail "remote primary deletion failure did not propagate a nonzero result"
 
 printf 'PASS: canonical retention policy and remote inventory failure reporting\n'
 )
