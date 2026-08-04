@@ -112,8 +112,15 @@ jobs:
         shell: bash
         run: |
           stub_dir=$(mktemp -d)
-          cleanup() { rm -rf "$stub_dir"; }
+          cleanup() {
+            sudo rm -rf /opt/vaultwarden-scripts
+            rm -rf "$stub_dir"
+          }
           trap cleanup EXIT
+          sudo mkdir -p /opt/vaultwarden-scripts
+          printf '#!/usr/bin/env bash\nexit 0\n' \
+            | sudo tee /opt/vaultwarden-scripts/maintenance.sh >/dev/null
+          sudo chmod 0755 /opt/vaultwarden-scripts/maintenance.sh
           cat > "$stub_dir/docker.service" <<'EOF_DOCKER_UNIT'
           [Unit]
           Description=Test Docker stub
