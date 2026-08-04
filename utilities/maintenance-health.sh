@@ -398,7 +398,8 @@ _collect_quick_compose_snapshot() {
         log_error "Quick health requires jq to parse Docker Compose state."
         return 3
     fi
-    if ! raw_snapshot=$(timeout "$HEALTH_TIMEOUT" docker compose ps --format json 2>/dev/null); then
+    if ! raw_snapshot=$(timeout "$HEALTH_TIMEOUT" \
+        docker compose --project-name vaultwarden-oci ps --all --format json 2>/dev/null); then
         log_error "Quick health could not collect Docker Compose state."
         return 3
     fi

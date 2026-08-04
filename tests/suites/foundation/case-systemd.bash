@@ -651,8 +651,8 @@ grep -Fxq 'ExecStart=/opt/vaultwarden-scripts/maintenance.sh health --quick --fi
     || fail "five-minute health service must use the quick repair profile"
 grep -Fxq 'OnFailure=vaultwarden-notify-failure@%n.service' "$health_unit" \
     || fail "health OnFailure contract changed"
-! grep -Fq '/etc/crowdsec' "$health_unit" \
-    || fail "health unit sandbox was broadened for CrowdSec notification config"
+! grep -Eq '/etc/crowdsec|/var/lib/crowdsec' "$health_unit" \
+    || fail "quick health unit must not grant CrowdSec configuration or state paths"
 grep -Fq 'utilities/maintenance-health.sh' "$ROOT/utilities/setup-systemd.sh" \
     || fail "installed runtime no longer carries the modified health script"
 ! grep -Fq 'vaultwarden-email' "$ROOT/utilities/setup-systemd.sh" \

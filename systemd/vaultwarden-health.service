@@ -49,9 +49,6 @@ ProtectHome=read-only
 # only and must not be writable at runtime (defence-in-depth against a
 # compromised script overwriting its siblings).
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci
-# crowdsec -t may update database metadata under /var/lib/crowdsec. The leading
-# dash makes the path optional so hosts without CrowdSec can still start health.
-ReadWritePaths=-/var/lib/crowdsec
 # RuntimeDirectory instructs systemd to pre-create /run/vaultwarden-oci/ as a
 # root-owned runtime directory before ExecStart runs. Scripts detect
 # RUNTIME_DIRECTORY (set automatically by systemd) and use it only for

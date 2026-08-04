@@ -1394,9 +1394,9 @@ VW_SMTP_HOST=postfix
 require_jq(){ return 0; }
 log_error(){ printf '%s\n' "$*" >&2; }
 log_info(){ :; }
-_pass(){ printf 'pass:%s\n' "$1" >>"${RESULTS:?}"; }
-_warn(){ printf 'warn:%s\n' "$1" >>"${RESULTS:?}"; }
-_fail(){ printf 'fail:%s\n' "$1" >>"${RESULTS:?}"; }
+_pass(){ printf 'pass:%s:%s\n' "$1" "$2" >>"${RESULTS:?}"; }
+_warn(){ printf 'warn:%s:%s\n' "$1" "$2" >>"${RESULTS:?}"; }
+_fail(){ printf 'fail:%s:%s\n' "$1" "$2" >>"${RESULTS:?}"; }
 timeout(){ shift; "$@"; }
 EOF_SNAPSHOT
 extract_func "$HEALTH" _postfix_sidecar_configured >> "$snapshot_probe"
@@ -1413,15 +1413,35 @@ cat > "$TMP/bin/docker" <<'EOF_DOCKER'
 count=0
 [[ -f "${DOCKER_COUNT:?}" ]] && count="$(cat "$DOCKER_COUNT")"
 printf '%s\n' "$(( count + 1 ))" >"$DOCKER_COUNT"
-printf '%s\n' '[{"Name":"vaultwarden_app","Service":"vaultwarden","State":"running","Health":"healthy"},{"Name":"vaultwarden_caddy","Service":"caddy","State":"running","Health":"healthy"},{"Name":"vaultwarden_postfix","Service":"postfix","State":"running","Health":"healthy"}]'
+printf '%s\n' "$*" >"${DOCKER_ARGS:?}"
+printf '%s\n' "$PWD" >"${DOCKER_PWD:?}"
+printf '%s\n' '[{"Name":"vaultwarden_app","Service":"vaultwarden","State":"running","Health":"healthy"},{"Name":"vaultwarden_caddy","Service":"caddy","State":"exited","Health":""},{"Name":"vaultwarden_postfix","Service":"postfix","State":"running","Health":"healthy"}]'
 EOF_DOCKER
 chmod 0700 "$TMP/bin/docker"
-PATH="$TMP/bin:$PATH" DOCKER_COUNT="$TMP/docker.count" RESULTS="$TMP/snapshot.results" \
-    "$BASH" "$snapshot_probe"
+installed_runtime="$TMP/opt/vaultwarden-scripts"
+mkdir -p "$installed_runtime"
+(
+    cd "$installed_runtime"
+    PATH="$TMP/bin:$PATH" \
+    DOCKER_COUNT="$TMP/docker.count" \
+    DOCKER_ARGS="$TMP/docker.args" \
+    DOCKER_PWD="$TMP/docker.pwd" \
+    RESULTS="$TMP/snapshot.results" \
+        "$BASH" "$snapshot_probe"
+)
 [[ "$(cat "$TMP/docker.count")" == 1 ]] \
     || fail 'quick profile must collect Docker Compose state exactly once'
-[[ "$(grep -c '^pass:container:' "$TMP/snapshot.results")" -eq 3 ]] \
-    || fail 'quick Compose snapshot did not cover all configured managed containers'
+[[ "$(cat "$TMP/docker.args")" == 'compose --project-name vaultwarden-oci ps --all --format json' ]] \
+    || fail "quick Compose snapshot did not select the canonical project with --all: $(cat "$TMP/docker.args")"
+[[ "$(cat "$TMP/docker.pwd")" == "$installed_runtime" ]] \
+    || fail 'quick Compose snapshot did not run from the empty installed-runtime fixture'
+[[ -z "$(find "$installed_runtime" -mindepth 1 -maxdepth 1 -print -quit)" ]] \
+    || fail 'installed-runtime snapshot fixture unexpectedly contained a Compose file'
+[[ "$(grep -c '^pass:container:' "$TMP/snapshot.results")" -eq 2 ]] \
+    || fail 'quick Compose snapshot did not cover running managed containers'
+grep -Fq 'fail:container:vaultwarden_caddy:Container not running: vaultwarden_caddy (state: exited)' \
+    "$TMP/snapshot.results" \
+    || fail 'quick Compose snapshot did not preserve stopped-container state'
 
 repair_probe="$TMP/repair-probe.bash"
 cat > "$repair_probe" <<'EOF_REPAIR'
