@@ -829,12 +829,10 @@ pull_remote_backup() {
     [[ -s "$local_file" ]] || { log_error "Downloaded file is empty or missing: $local_file"; return 1; }
 
     rclone copy "${RCLONE_CONFIG_ARG[@]}" "${remote_file}.sha256" "$pull_dir/" --checksum 2>/dev/null || true
-    rclone copy "${RCLONE_CONFIG_ARG[@]}" "${remote_file}.sha256.hmac" "$pull_dir/" --checksum 2>/dev/null || true
     rclone copy "${RCLONE_CONFIG_ARG[@]}" "${remote_file}.meta"   "$pull_dir/" --checksum 2>/dev/null || true
 
     chmod 600 "$pull_dir"/*.age    2>/dev/null || true
     chmod 600 "$pull_dir"/*.sha256 2>/dev/null || true
-    chmod 600 "$pull_dir"/*.sha256.hmac 2>/dev/null || true
     chmod 600 "$pull_dir"/*.meta   2>/dev/null || true
 
     if [[ "$btype" == "emergency" && ! -s "${local_file}.meta" ]]; then
@@ -1027,6 +1025,53 @@ resolve_backup_file() {
     return 0
 }
 
+# Stages a raw Age private-key line in the normalized file format expected
+# by check_age_key: public-key comment followed by the private identity.
+_stage_restore_age_key_line() {
+    local age_key_line="$1" staged_key="$2"
+    local stage_dir raw_key normalized_key public_key old_umask
+
+    [[ "$age_key_line" == AGE-SECRET-KEY-1* ]] || return 1
+    stage_dir="$(dirname "$staged_key")"
+    old_umask=$(umask); umask 077
+    mkdir -p "$stage_dir" || { umask "$old_umask"; return 1; }
+    raw_key=$(mktemp "$stage_dir/.raw-age-key.XXXXXX") \
+        || { umask "$old_umask"; return 1; }
+    normalized_key=$(mktemp "$stage_dir/.normalized-age-key.XXXXXX") \
+        || { rm -f "$raw_key"; umask "$old_umask"; return 1; }
+    umask "$old_umask"
+    chmod 700 "$stage_dir" || { rm -f "$raw_key" "$normalized_key"; return 1; }
+    chmod 600 "$raw_key" "$normalized_key" || { rm -f "$raw_key" "$normalized_key"; return 1; }
+
+    printf '%s\n' "$age_key_line" > "$raw_key" || {
+        rm -f "$raw_key" "$normalized_key"
+        return 1
+    }
+    public_key=$(age-keygen -y "$raw_key" 2>/dev/null) || {
+        rm -f "$raw_key" "$normalized_key"
+        return 1
+    }
+    [[ "$public_key" =~ ^age1[a-z0-9]{58}$ ]] || {
+        rm -f "$raw_key" "$normalized_key"
+        return 1
+    }
+    printf '# public key: %s\n%s\n' "$public_key" "$age_key_line" > "$normalized_key" || {
+        rm -f "$raw_key" "$normalized_key"
+        return 1
+    }
+    rm -f "$raw_key"
+    mv -f "$normalized_key" "$staged_key" || {
+        rm -f "$normalized_key"
+        return 1
+    }
+    chmod 600 "$staged_key" || { rm -f "$staged_key"; return 1; }
+
+    if ! TMPDIR="$CONTROL_WORKSPACE" check_age_key "$staged_key"; then
+        rm -f "$staged_key"
+        return 1
+    fi
+}
+
 #
 # Reads a plaintext recovery-kit file, extracts the Age private key line
 # (AGE-SECRET-KEY-1...), writes it to a chmod-600 temp file inside
@@ -1093,25 +1138,9 @@ _load_recovery_kit() {
         return 1
     fi
 
-    # --- Write to a secure temp file inside the control workspace --------
-    local kit_stage_dir="$CONTROL_WORKSPACE/kit_stage"
-    local old_umask; old_umask=$(umask)
-    umask 077
-    mkdir -p "$kit_stage_dir"
-    umask "$old_umask"
-    chmod 700 "$kit_stage_dir"
-
-    local staged_key="$kit_stage_dir/recovery-kit-age-key.txt"
-    local tmp_staged
-    tmp_staged=$(mktemp "${staged_key}.XXXXXX")
-    chmod 600 "$tmp_staged"
-    printf '%s\n' "$age_key_line" > "$tmp_staged"
-    mv -f "$tmp_staged" "$staged_key"
-    chmod 600 "$staged_key"
-
-    # --- Validate without mutating any live key metadata -----------------
-    if ! TMPDIR="$CONTROL_WORKSPACE" check_age_key "$staged_key"; then
-        rm -f "$staged_key"
+    # --- Normalize and validate inside the control workspace --------------
+    local staged_key="$CONTROL_WORKSPACE/kit_stage/recovery-kit-age-key.txt"
+    if ! _stage_restore_age_key_line "$age_key_line" "$staged_key"; then
         log_error "Age key from recovery kit failed validation."
         log_error "The key may be truncated, corrupted, or from a different installation."
         return 1
@@ -1222,18 +1251,12 @@ _prompt_age_key() {
         if [[ "$key_input" != AGE-SECRET-KEY-1* ]]; then
             log_error "Input does not look like an age private key (must start with AGE-SECRET-KEY-1)."
         else
-            local key_staging_dir="$CONTROL_WORKSPACE/key_stage"
-            mkdir -p "$key_staging_dir"
-            chmod 700 "$key_staging_dir"
-            local staged_key_file="$key_staging_dir/restore-age-key.txt"
-            printf '%s\n' "$key_input" > "$staged_key_file"
-            chmod 600 "$staged_key_file"
-            if TMPDIR="$CONTROL_WORKSPACE" check_age_key "$staged_key_file"; then
+            local staged_key_file="$CONTROL_WORKSPACE/key_stage/restore-age-key.txt"
+            if _stage_restore_age_key_line "$key_input" "$staged_key_file"; then
                 RESTORE_DECRYPT_AGE_KEY_FILE="$staged_key_file"
                 log_success "Age key accepted and staged for decryption."
                 return 0
             fi
-            rm -f "$staged_key_file"
         fi
 
         if (( attempt < 3 )); then

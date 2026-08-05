@@ -273,7 +273,7 @@ _extract_func(){
 grep -Fq 'local dec_db="$PAYLOAD_WORKSPACE/db.sqlite3"' "$RESTORE" || fail 'DB decryption is not target-filesystem staged'
 grep -Fq 'local pull_dir="$PAYLOAD_WORKSPACE/remote_pull"' "$RESTORE" || fail 'remote encrypted downloads are not payload-staged'
 grep -Fq 'local age_err="$control_workspace/age-decrypt.err"' "$RESTORE" || fail 'full-restore diagnostics are not control-staged'
-grep -Fq 'local key_staging_dir="$CONTROL_WORKSPACE/key_stage"' "$RESTORE" || fail 'pasted keys are not control-staged'
+grep -Fq 'local staged_key_file="$CONTROL_WORKSPACE/key_stage/restore-age-key.txt"' "$RESTORE" || fail 'pasted keys are not control-staged'
 main_body="$TMP/main.body"
 sed -n '/^main()/,$p' "$RESTORE" > "$main_body"
 capacity_line="$(grep -nF '_restore_preflight_archive_expansion_capacity "$_preflight_tar"' "$main_body" | head -1 | cut -d: -f1)"
@@ -368,6 +368,67 @@ EOF_PROBE
 bash "$TMP/capacity-probe.sh" >"$TMP/capacity.out" 2>&1 || fail 'insufficient-space preflight probe failed'
 grep -q 'Services were not stopped' "$TMP/capacity.out" || fail 'capacity failure did not state that services remain untouched'
 
+# Raw private-key recovery paths must normalize the file before shared validation.
+cat > "$TMP/raw-key-probe.sh" <<EOF_PROBE
+set -euo pipefail
+CONTROL_WORKSPACE="$TMP/key-control"; mkdir -m 700 -p "\$CONTROL_WORKSPACE"
+RECOVERY_KIT_FILE="$TMP/recovery-kit.txt"; RESTORE_RECOVERY_KIT_FILE=""
+KEY_FILE_ARG=""; RESTORE_AGE_KEY_FILE=""; RESTORE_DECRYPT_AGE_KEY_FILE=""
+DRY_RUN=false
+RAW_KEY='AGE-SECRET-KEY-1TESTKEY'
+PUBLIC_KEY='age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'
+log_info(){ :; }; log_warn(){ :; }; log_error(){ printf 'ERROR %s\n' "\$*" >&2; }; log_success(){ :; }; log_debug(){ :; }
+_age_key_countdown(){ sleep 30; }
+has_command(){ [[ "\$1" == age ]]; }
+_stat_octal_perms(){ stat -c '%a' "\$1"; }
+age-keygen(){
+  [[ "\${1:-}" == -y && -f "\${2:-}" ]] || return 1
+  grep -qxF "\$RAW_KEY" "\$2" || return 1
+  printf '%s\n' "\$PUBLIC_KEY"
+}
+age(){
+  local output="" arg
+  if [[ "\${1:-}" == -d ]]; then cat "\${!#}"; return; fi
+  while (( \$# )); do
+    arg="\$1"; shift
+    if [[ "\$arg" == -o ]]; then output="\${1:-}"; shift; fi
+  done
+  [[ -n "\$output" ]] || return 1
+  cat > "\$output"
+}
+$(_extract_func "$ROOT/lib/crypto.sh" _derive_age_public_key)
+$(_extract_func "$ROOT/lib/crypto.sh" check_age_key)
+$(_extract_func "$RESTORE" _stage_restore_age_key_line)
+$(_extract_func "$RESTORE" _load_recovery_kit)
+$(_extract_func "$RESTORE" _prompt_age_key)
+
+assert_normalized(){
+  local key_file="\$1"
+  [[ -f "\$key_file" && "\$(stat -c %a "\$key_file")" == 600 ]] || return 1
+  grep -qxF "# public key: \$PUBLIC_KEY" "\$key_file" || return 1
+  grep -qxF "\$RAW_KEY" "\$key_file"
+}
+
+case "\${1:-kit}" in
+  kit)
+    printf '%s\n' "\$RAW_KEY" > "\$RECOVERY_KIT_FILE"; chmod 600 "\$RECOVERY_KIT_FILE"
+    _load_recovery_kit
+    [[ "\$KEY_FILE_ARG" == "\$CONTROL_WORKSPACE/kit_stage/recovery-kit-age-key.txt" ]]
+    assert_normalized "\$KEY_FILE_ARG"
+    ;;
+  paste)
+    _prompt_age_key "$TMP/missing-configured-key.txt"
+    [[ "\$RESTORE_DECRYPT_AGE_KEY_FILE" == "\$CONTROL_WORKSPACE/key_stage/restore-age-key.txt" ]]
+    assert_normalized "\$RESTORE_DECRYPT_AGE_KEY_FILE"
+    ;;
+  *) exit 2 ;;
+esac
+EOF_PROBE
+bash "$TMP/raw-key-probe.sh" kit || fail 'raw recovery-kit Age key was not normalized and accepted'
+printf '%s\n' 'AGE-SECRET-KEY-1TESTKEY' \
+  | script -qfec "bash '$TMP/raw-key-probe.sh' paste" /dev/null >"$TMP/raw-key-paste.out" 2>&1 \
+  || { cat "$TMP/raw-key-paste.out" >&2; fail 'pasted raw Age key was not normalized and accepted'; }
+
 # Local/remote DB and full payloads, remote sidecars, and emergency private-key separation.
 cat > "$TMP/payload-flow-probe.sh" <<EOF_PROBE
 set -euo pipefail
@@ -402,7 +463,7 @@ rm -rf "\$PAYLOAD_WORKSPACE/remote_pull"
 for kind in db full; do
   pull_remote_backup "mock:backups/\$kind/\$kind.tar.zst.age" "\$kind"
   [[ "\$BACKUP_FILE" == "\$PAYLOAD_WORKSPACE/remote_pull/\$kind.tar.zst.age" ]] || exit 40
-  for suffix in .sha256 .sha256.hmac .meta; do [[ -f "\${BACKUP_FILE}\${suffix}" ]] || exit 41; done
+  for suffix in .sha256 .meta; do [[ -f "\${BACKUP_FILE}\${suffix}" ]] || exit 41; done
 done
 
 printf local > "$TMP/local-db.age"
@@ -507,7 +568,7 @@ rclone(){
   [[ "\$cmd" == copy ]] || return 1
   local src="\$1" dest="\$2"
   case "\$src" in
-    *.meta|*.sha256|*.sha256.hmac) return 1 ;;
+    *.meta|*.sha256) return 1 ;;
     *) mkdir -p "\$dest"; printf archive > "\$dest/\$(basename "\$src")"; return 0 ;;
   esac
 }
