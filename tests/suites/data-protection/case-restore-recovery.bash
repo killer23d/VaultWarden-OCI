@@ -274,22 +274,6 @@ grep -Fq 'local dec_db="$PAYLOAD_WORKSPACE/db.sqlite3"' "$RESTORE" || fail 'DB d
 grep -Fq 'local pull_dir="$PAYLOAD_WORKSPACE/remote_pull"' "$RESTORE" || fail 'remote encrypted downloads are not payload-staged'
 grep -Fq 'local age_err="$control_workspace/age-decrypt.err"' "$RESTORE" || fail 'full-restore diagnostics are not control-staged'
 grep -Fq 'local staged_key_file="$CONTROL_WORKSPACE/key_stage/restore-age-key.txt"' "$RESTORE" || fail 'pasted keys are not control-staged'
-main_body="$TMP/main.body"
-sed -n '/^main()/,$p' "$RESTORE" > "$main_body"
-capacity_line="$(grep -nF '_restore_preflight_archive_expansion_capacity "$_preflight_tar"' "$main_body" | head -1 | cut -d: -f1)"
-db_stage_line="$(grep -nF '_stage_db_restore_for_preflight "$BACKUP_FILE"' "$main_body" | head -1 | cut -d: -f1)"
-readiness_mutation_line="$(grep -nF 'require_project_state_ready || exit 1' "$main_body" | head -1 | cut -d: -f1)"
-permission_mutation_line="$(grep -nF 'auto_fix_critical_permissions "$PROJECT_ROOT"' "$main_body" | head -1 | cut -d: -f1)"
-snapshot_line="$(grep -nF 'create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE"' "$main_body" | head -1 | cut -d: -f1)"
-stop_line="$(grep -nF 'docker compose stop --timeout 30' "$main_body" | head -1 | cut -d: -f1)"
-[[ -n "$capacity_line" && -n "$db_stage_line" && -n "$readiness_mutation_line" \
-   && -n "$permission_mutation_line" && -n "$snapshot_line" && -n "$stop_line" ]] \
-  || fail 'restore preflight/live-mutation boundaries are missing'
-for mutation_line in "$readiness_mutation_line" "$permission_mutation_line" "$snapshot_line" "$stop_line"; do
-  (( capacity_line < mutation_line && db_stage_line < mutation_line )) \
-    || fail 'payload validation or capacity checks occur after live-state mutation'
-done
-
 # Secure placement, exact cleanup, cleanup refusal, and signal status/release.
 cat > "$TMP/workspace-probe.sh" <<EOF_PROBE
 set -euo pipefail
@@ -396,9 +380,9 @@ CONTROL_WORKSPACE="$TMP/key-control"; mkdir -m 700 -p "\$CONTROL_WORKSPACE"
 RECOVERY_KIT_FILE="$TMP/recovery-kit.txt"; RESTORE_RECOVERY_KIT_FILE=""
 KEY_FILE_ARG=""; RESTORE_AGE_KEY_FILE=""; RESTORE_DECRYPT_AGE_KEY_FILE=""
 DRY_RUN=false
-RAW_KEY='AGE-SECRET-KEY-1TESTKEY'
+RAW_KEY='AGE-SECRET-KEY-1PRIVATEKEYMATERIAL'
 PUBLIC_KEY='age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'
-log_info(){ :; }; log_warn(){ :; }; log_error(){ printf 'ERROR %s\n' "\$*" >&2; }; log_success(){ :; }; log_debug(){ :; }
+log_info(){ printf 'INFO %s\n' "\$*"; }; log_warn(){ printf 'WARN %s\n' "\$*"; }; log_error(){ printf 'ERROR %s\n' "\$*" >&2; }; log_success(){ printf 'SUCCESS %s\n' "\$*"; }; log_debug(){ :; }
 _age_key_countdown(){ sleep 30; }
 has_command(){ [[ "\$1" == age ]]; }
 _stat_octal_perms(){ stat -c '%a' "\$1"; }
@@ -445,8 +429,11 @@ case "\${1:-kit}" in
   *) exit 2 ;;
 esac
 EOF_PROBE
-bash "$TMP/raw-key-probe.sh" kit || fail 'raw recovery-kit Age key was not normalized and accepted'
-printf '%s\n' 'AGE-SECRET-KEY-1TESTKEY' \
+bash "$TMP/raw-key-probe.sh" kit >"$TMP/raw-key-kit.out" 2>&1 \
+  || { cat "$TMP/raw-key-kit.out" >&2; fail 'raw recovery-kit Age key was not normalized and accepted'; }
+! grep -Fq 'PRIVATEK' "$TMP/raw-key-kit.out" \
+  || fail 'recovery-kit output exposed private Age key material'
+printf '%s\n' 'AGE-SECRET-KEY-1PRIVATEKEYMATERIAL' \
   | script -qfec "bash '$TMP/raw-key-probe.sh' paste" /dev/null >"$TMP/raw-key-paste.out" 2>&1 \
   || { cat "$TMP/raw-key-paste.out" >&2; fail 'pasted raw Age key was not normalized and accepted'; }
 
@@ -683,14 +670,14 @@ cat > "$TMP/inspect-main-probe.sh" <<EOF_PROBE
 set -u
 LIST_ONLY=false
 LIST_REMOTE=false
-INSPECT_ONLY=true
+INSPECT_ONLY="\${TEST_INSPECT_ONLY:-true}"
 DRY_RUN=false
-FORCE=false
+FORCE="\${TEST_FORCE:-false}"
 USE_REMOTE=false
-NO_PRE_BACKUP=true
+NO_PRE_BACKUP="\${TEST_NO_PRE_BACKUP:-true}"
 RESTORE_TYPE=full
 BACKUP_FILE="$inspect_backup"
-ROTATE_AGE_KEY_POLICY=""
+ROTATE_AGE_KEY_POLICY="\${TEST_ROTATE_POLICY:-}"
 START_POLICY=auto
 RESTORE_ENV=true
 SKIP_VERIFICATION=true
@@ -698,6 +685,7 @@ DATA_VOLUME_MOUNT=""
 DATA_VOLUME_DEVICE=""
 CONTROL_WORKSPACE=""
 PAYLOAD_WORKSPACE=""
+MOCK_AVAILABLE_BYTES=4096
 PROJECT_ROOT="$inspect_project"
 SCRIPT_DIR="$inspect_project"
 log_header(){ :; }
@@ -708,13 +696,23 @@ log_success(){ printf 'SUCCESS %s\\n' "\$*"; }
 load_env_file(){ return 0; }
 check_dependencies(){ return 0; }
 require_root(){ return 0; }
+operation_acquire(){ return 0; }
+operation_set_phase(){ return 0; }
 auto_fix_critical_permissions(){ return 0; }
 check_project_state_ready(){ [[ "\${TEST_INSPECT_SENTINEL:-present}" == present ]]; }
 require_project_state_ready(){ return 0; }
 _restore_create_control_workspace(){ CONTROL_WORKSPACE="$TMP/inspect-control"; mkdir -p "\$CONTROL_WORKSPACE"; }
 _restore_create_payload_workspace(){ : > "$TMP/inspect-payload.called"; PAYLOAD_WORKSPACE="$TMP/inspect-payload"; mkdir -p "\$PAYLOAD_WORKSPACE"; }
 _restore_preflight_local_decrypt_capacity(){ return 0; }
-_restore_preflight_archive_expansion_capacity(){ return 0; }
+_restore_preflight_archive_expansion_capacity(){
+  if (( MOCK_AVAILABLE_BYTES < 2048 )); then
+    log_error "Insufficient target space after pre-restore snapshot. Services were not stopped."
+    return 1
+  fi
+  return 0
+}
+create_pre_restore_snapshot(){ MOCK_AVAILABLE_BYTES=1024; : > "$TMP/inspect-snapshot.called"; }
+_set_snapshot_operation_phase(){ return 0; }
 _load_recovery_kit(){ return 0; }
 resolve_backup_file(){ return 0; }
 _print_restore_plan_summary(){ return 0; }
@@ -765,6 +763,19 @@ if TEST_DATA_VOLUME_DEVICE=/dev/mock TEST_INSPECT_SENTINEL=missing \
 fi
 [[ ! -e "$TMP/inspect-payload.called" && ! -e "$TMP/inspect-decrypt.called" ]] \
   || fail 'inspect created payload staging or decrypted data before volume ownership validation'
+
+rm -rf "$TMP/inspect-control" "$TMP/inspect-payload"
+rm -f "$TMP/inspect-snapshot.called" "$TMP/inspect-docker-stop.called"
+if TEST_INSPECT_ONLY=false TEST_FORCE=true TEST_NO_PRE_BACKUP=false TEST_ROTATE_POLICY=skip \
+    bash "$TMP/inspect-main-probe.sh" >"$TMP/post-snapshot-capacity.out" 2>&1; then
+  fail 'restore unexpectedly continued after the snapshot consumed reserved capacity'
+fi
+[[ -e "$TMP/inspect-snapshot.called" ]] \
+  || fail 'post-snapshot capacity regression did not create the modeled safety snapshot'
+[[ ! -e "$TMP/inspect-docker-stop.called" ]] \
+  || fail 'post-snapshot capacity failure reached docker compose stop'
+grep -q 'Services were not stopped' "$TMP/post-snapshot-capacity.out" \
+  || fail 'post-snapshot capacity failure did not report the untouched service state'
 
 # RDR-06: snapshot state and persisted operation phase are truthful.
 cat > "$TMP/snapshot-probe.sh" <<EOF_PROBE

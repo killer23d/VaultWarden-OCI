@@ -149,9 +149,9 @@ Prepared attached-volume targets participate in the `.vw-data-volume` sentinel c
 
 The selected restore plan closes required executable dependencies before stopping services. Default rekey planning requires `sops` unless rotation is explicitly skipped, and a `full`/`emergency` restore to an actual mounted `STATE_DIR` requires `rsync` even when no `DATA_VOLUME_DEVICE` value is configured.
 
-Restore uses two random, mode-`0700`, process-owned workspaces. A small control workspace, preferably `/dev/shm` tmpfs, holds pasted or recovery-kit Age keys, diagnostics, and key-rotation control files. Large remote downloads, decrypted databases or archives, and extracted trees use the target filesystem: a sibling of `PROJECT_STATE_DIR` for normal boot-volume state, or a hidden non-allowlisted directory at the mounted state root for attached-volume state. The mounted name cannot be confused with the `data`, `caddy`, or `logs` payloads promoted by the restore transaction.
+Restore normally uses two random, mode-`0700`, process-owned workspaces. A small control workspace, preferably `/dev/shm` tmpfs, holds pasted or recovery-kit Age keys, diagnostics, and key-rotation control files. Large remote downloads, decrypted databases or archives, and extracted trees use the target filesystem: a sibling of `PROJECT_STATE_DIR` for normal boot-volume state, or a hidden non-allowlisted directory at the mounted state root for attached-volume state. For boot-volume full/emergency promotion, an internal subtransaction creates one additional short-lived mode-`0700` workspace beside `PROJECT_STATE_DIR`; it holds the final materialized tree until same-filesystem rename and participates in the same identity-checked cleanup. The mounted payload-workspace name cannot be confused with the `data`, `caddy`, or `logs` payloads promoted by the restore transaction.
 
-Before services stop or live state is changed, restore downloads the selected remote archive and available sidecars, decrypts it into payload staging, validates SQLite or archive members and the selected source root, and checks target free space with safety headroom. A capacity failure leaves services untouched. Cleanup removes only the identity-checked workspaces created by that invocation; it refuses replaced paths, symlinks, or ownership/mode drift. Payload staging is retained only when a failed promotion rollback genuinely needs manual recovery, and the command prints its path and restrictive permissions. Emergency private keys are moved into control staging promptly after extraction rather than left in the large payload tree.
+Before services stop or live state is changed, restore downloads the selected remote archive and available sidecars, decrypts it into payload staging, validates SQLite or archive members and the selected source root, and checks target free space with safety headroom. After the pre-restore safety snapshot, it repeats the database-commit or archive-promotion capacity check immediately before service stop. Any capacity failure leaves services untouched. Cleanup removes only the identity-checked workspaces created by that invocation; it refuses replaced paths, symlinks, or ownership/mode drift. Payload staging is retained only when a failed promotion rollback genuinely needs manual recovery, and the command prints its path and restrictive permissions. Emergency private keys are moved into control staging promptly after extraction rather than left in the large payload tree.
 
 ---
 
@@ -166,6 +166,7 @@ The restore workflow is root-operated and follows these boundaries:
 | Key/protection | resolve the private Age identity or independent emergency protection needed by the selected archive |
 | Integrity/preflight | validate tools, sidecars/metadata, target storage, capacity, decrypted payload, archive members, and source root before destructive work |
 | Safety snapshot | create the configured pre-restore backup unless explicitly skipped |
+| Final capacity gate | repeat the database-commit or archive-promotion capacity check after the snapshot |
 | Stop | stop the live stack |
 | Stage/promote | restore database or broader archive content through the owning transaction |
 | Re-key | reconcile persistent SOPS secrets and the operational Age key where the selected restore path requires it |
@@ -181,7 +182,7 @@ Supported version-1 archives with absolute member names are compatibility inputs
 
 Full/emergency restore extracts portable archive content without trusting stale owners/modes and then applies the target-host permission contract. See [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md).
 
-Automated shell tests cover workspace placement and permissions, local/remote DB and full payload paths, emergency decrypt dispatch, pre-stop capacity failure, exact cleanup and signal status, promotion allowlists, rollback, rekey, and start policy. Actual mount/device identity, filesystem free-space behavior under load, systemd service transitions, and end-to-end interruption on Ubuntu 24.04 remain host-only validation; container or mocked results do not replace a disposable-host restore rehearsal.
+Automated shell tests cover workspace placement and permissions, local/remote DB and full payload paths, emergency decrypt dispatch, initial and post-snapshot pre-stop capacity failure, exact cleanup and signal status, promotion allowlists, rollback, rekey, and start policy. Actual mount/device identity, filesystem free-space behavior under load, systemd service transitions, and end-to-end interruption on Ubuntu 24.04 remain host-only validation; container or mocked results do not replace a disposable-host restore rehearsal.
 
 ---
 

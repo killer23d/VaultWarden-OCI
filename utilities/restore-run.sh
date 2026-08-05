@@ -1186,7 +1186,6 @@ _load_recovery_kit() {
     KEY_FILE_ARG="$staged_key"
     log_success "Age key loaded from recovery kit and staged for decryption."
     log_info    "  Kit file:  $canonical_kit"
-    log_info    "  Key prefix: ${age_key_line:0:24}..."
     return 0
 }
 
@@ -3226,6 +3225,19 @@ main() {
 
     create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" "$RESTORE_TYPE" || exit 1
     _set_snapshot_operation_phase || exit 1
+
+    # The safety snapshot normally shares the target filesystem. Recheck the
+    # exact commit/promotion requirement after it has consumed any space.
+    case "$RESTORE_TYPE" in
+        db)
+            _restore_preflight_db_commit_capacity \
+                "$PAYLOAD_WORKSPACE/db.sqlite3" "$STATE_DIR" || exit 1
+            ;;
+        full|emergency)
+            _restore_preflight_archive_expansion_capacity \
+                "$_preflight_tar" || exit 1
+            ;;
+    esac
 
     RESTORE_DESTRUCTIVE_PHASE_STARTED=false
     _RESTORE_SAFETY_NET_RUNNING=false
