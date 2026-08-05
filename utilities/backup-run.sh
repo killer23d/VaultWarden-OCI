@@ -51,6 +51,7 @@ SUBCOMMANDS:
                       Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
     sync               Copy all retained local backups to rclone by type
+    manifest           Print the exact full/emergency archive exclusions
 
 RUN OPTIONS (used after 'run'):
     --keep N                 Override configured retention for this run
@@ -108,7 +109,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 case "$1" in
-    run|list|verify|rotate|sync)
+    run|list|verify|rotate|sync|manifest)
         _SUBCMD="$1"
         shift
         ;;
@@ -120,7 +121,7 @@ case "$1" in
         ;;
     *)
         log_error "Unknown subcommand: '$1'"
-        log_error "Valid subcommands: run [TYPE] | list | verify | rotate | sync"
+        log_error "Valid subcommands: run [TYPE] | list | verify | rotate | sync | manifest"
         log_error "Run './backup.sh help' for usage."
         exit 1
         ;;
@@ -195,8 +196,12 @@ case "$_SUBCMD" in
             esac
         done
         ;;
-    "")
-        show_help; exit 0
+    manifest)
+        if [[ $# -gt 0 ]]; then
+            log_error "manifest does not accept arguments."
+            show_help
+            exit 2
+        fi
         ;;
 esac
 
@@ -223,14 +228,86 @@ backup_require_root() {
     fi
 }
 
-TMPDIR_BACKUP=""
+CONTROL_WORKSPACE=""
+CONTROL_WORKSPACE_ID=""
+PAYLOAD_WORKSPACE=""
+PAYLOAD_WORKSPACE_ID=""
+PENDING_BACKUP_CANDIDATE=""
+PENDING_BACKUP_FINAL=""
+
+_workspace_identity() {
+    stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null
+}
+
+_remove_owned_workspace() {
+    local path="$1" expected_id="$2" label="$3" current_id=""
+    [[ -n "$path" && -n "$expected_id" ]] || return 0
+    if [[ -d "$path" && ! -L "$path" ]]; then
+        current_id="$(_workspace_identity "$path" 2>/dev/null || true)"
+    fi
+    [[ "$current_id" == "$expected_id" ]] || {
+        log_error "Refusing to clean unverified or replaced ${label} workspace: $path" >&2
+        return 1
+    }
+    rm -rf -- "$path"
+}
+
+_create_owned_workspace() {
+    local path_name="$1" id_name="$2" parent="$3" prefix="$4" fallback="${5:-false}"
+    local path="" old_umask
+    [[ -z "${!path_name:-}" && -z "${!id_name:-}" ]] || {
+        log_error "Backup workspace output is already populated: ${!path_name:-unset}" >&2
+        return 1
+    }
+
+    old_umask=$(umask); umask 077
+    if [[ -d "$parent" && ! -L "$parent" ]]; then
+        path="$(mktemp -d "${parent%/}/${prefix}.XXXXXXXXXX" 2>/dev/null || true)"
+    fi
+    [[ -n "$path" || "$fallback" != "true" ]] || path="$(mktemp -d -t "${prefix}.XXXXXXXXXX" 2>/dev/null || true)"
+    umask "$old_umask"
+
+    [[ -n "$path" && -d "$path" && ! -L "$path" ]] || {
+        log_error "Failed to create secure backup workspace on: $parent" >&2
+        return 1
+    }
+    chmod 0700 "$path" && printf -v "$id_name" '%s' "$(_workspace_identity "$path")" || {
+        rm -rf -- "$path" 2>/dev/null || true
+        return 1
+    }
+    printf -v "$path_name" '%s' "$path"
+}
+
+_cleanup_unpublished_backup() {
+    [[ -n "$PENDING_BACKUP_CANDIDATE" ]] || return 0
+    local candidate="$PENDING_BACKUP_CANDIDATE"
+    _discard_backup_cohort "$candidate" 2>/dev/null || true
+    if [[ -n "$PENDING_BACKUP_FINAL" && ! -e "$PENDING_BACKUP_FINAL" ]]; then
+        rm -f -- "${PENDING_BACKUP_FINAL}.meta" "${PENDING_BACKUP_FINAL}.sha256" \
+            "${PENDING_BACKUP_FINAL}.sha256.hmac" 2>/dev/null || true
+    fi
+    PENDING_BACKUP_CANDIDATE=""
+    PENDING_BACKUP_FINAL=""
+}
+
 cleanup() {
-    local rc=$?
+    local rc="${1:-$?}"
+    _db_snapshot_restart_if_needed
+    _cleanup_unpublished_backup
     operation_release "$rc" 2>/dev/null || true
-    if [[ -n "$TMPDIR_BACKUP" ]]; then rm -rf "$TMPDIR_BACKUP" 2>/dev/null; fi
+    _remove_owned_workspace "$PAYLOAD_WORKSPACE" "$PAYLOAD_WORKSPACE_ID" payload || true
+    _remove_owned_workspace "$CONTROL_WORKSPACE" "$CONTROL_WORKSPACE_ID" control || true
+    PAYLOAD_WORKSPACE=""; PAYLOAD_WORKSPACE_ID=""
+    CONTROL_WORKSPACE=""; CONTROL_WORKSPACE_ID=""
     return "$rc"
 }
 
+_backup_signal_exit() {
+    local rc="$1"
+    trap - ERR EXIT; trap '' HUP INT TERM
+    cleanup "$rc"
+    exit "$rc"
+}
 _acquire_backup_guard() {
     [[ "$DRY_RUN" == "true" ]] && return 0
     operation_acquire \
@@ -269,12 +346,40 @@ _resolve_age_key() {
 _default_backup_dir() { vw_default_backup_dir; }
 
 get_backup_dir() {
-    local type="$1"
-    local base_dir
-    base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
-    local dir="$base_dir/$type"
-    ensure_dir "$dir" 750 "$(get_real_user)"
-    echo "$dir"
+    local type="$1" state_dir="${2:-}"
+    local configured_base canonical_base expected_dir canonical_dir
+    configured_base="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+    if [[ "$type" == full || "$type" == emergency ]]; then
+        [[ -n "$state_dir" ]] || {
+            log_error "PROJECT_STATE_DIR is required to validate ${type} backup storage." >&2
+            return 1
+        }
+        _require_safe_backup_source_layout \
+            "$configured_base" "$SCRIPT_DIR" "$state_dir" canonical_base || return 1
+    else
+        canonical_base="$(realpath -m -- "$configured_base" 2>/dev/null)" || {
+            log_error "Cannot canonicalize configured BACKUP_DIR: $configured_base" >&2
+            return 1
+        }
+    fi
+    expected_dir="$canonical_base/$type"
+    canonical_dir="$(realpath -m -- "$expected_dir" 2>/dev/null)" || {
+        log_error "Cannot canonicalize backup type directory: $expected_dir" >&2
+        return 1
+    }
+    [[ "$canonical_dir" == "$canonical_base"/* ]] || {
+        log_error "Backup type directory resolves outside configured BACKUP_DIR: $canonical_dir" >&2
+        log_error "Configured BACKUP_DIR resolves to: $canonical_base" >&2
+        return 1
+    }
+    [[ "$canonical_dir" == "$expected_dir" ]] || {
+        log_error "Backup type directory must not be redirected: $expected_dir" >&2
+        log_error "Resolved backup type directory: $canonical_dir" >&2
+        return 1
+    }
+    ensure_dir "$canonical_dir" 750 "$(get_real_user)" || return 1
+    printf '%s
+' "$canonical_dir"
 }
 
 _load_integrity_hmac_key() {
@@ -383,6 +488,309 @@ _backup_storage_mode() {
     else
         echo "unknown"
     fi
+}
+
+_archive_member_path() {
+    local path="$1"
+    path="$(realpath -m -- "$path" 2>/dev/null)" || return 1
+    printf '%s\n' "${path#/}"
+}
+
+# Print the exact full/emergency tar exclusions, one archive-member pattern per line.
+backup_archive_exclusions() {
+    local project_root="$1" state_dir="$2" backup_base="$3" age_key_file="${4:-}"
+    local project_member state_member backup_member age_key_member=""
+    project_member="$(_archive_member_path "$project_root")"
+    state_member="$(_archive_member_path "$state_dir")"
+    backup_member="$(_archive_member_path "$backup_base")"
+    [[ -n "$age_key_file" ]] && age_key_member="$(_archive_member_path "$age_key_file")"
+
+    {
+        printf '%s\n' \
+            "${project_member}/.git" \
+            "${project_member}/backups" \
+            "${project_member}/logs" \
+            "${project_member}/.rate-limit" \
+            "${project_member}/recovery-kit-*.txt" \
+            "${project_member}/vaultwarden-recovery-kit-*.txt" \
+            "${project_member}/vaultwarden-recovery-*.txt" \
+            "${project_member}/vaultwarden-setup-credentials-*.txt" \
+            "${project_member}/important-documents-*.zip" \
+            "${project_member}/.vaultwarden-setup-credentials*" \
+            "${project_member}/.vaultwarden-recovery-kit*" \
+            "${project_member}/.pre-restore-*" \
+            "${project_member}/*/.pre-restore-*" \
+            "${project_member}/.env.pre-restore-*" \
+            "${project_member}/secrets/keys/age-key.txt" \
+            "${state_member}/backups" \
+            "${state_member}/logs" \
+            "${state_member}/data/db.sqlite3" \
+            "${state_member}/data/db.sqlite3-wal" \
+            "${state_member}/data/db.sqlite3-shm" \
+            "${state_member}/secrets/keys/age-key.txt" \
+            "${state_member}/.pre-restore-*" \
+            "${state_member}/*/.pre-restore-*" \
+            "${state_member}.pre-restore-*" \
+            "${state_member}.restore-staged.*" \
+            "$backup_member" \
+            "${backup_member}/.vaultwarden-backup.*" \
+            "dev/shm/.vaultwarden-emergency.*" \
+            "run/vaultwarden-oci/secrets" \
+            "run/vaultwarden-oci/secrets/*" \
+            "*.sock" "*.lock" "*.tmp" "*.age.tmp"
+        if [[ -n "$age_key_member" ]] && {
+            [[ "$age_key_member" == "$project_member"/* ]] ||
+            [[ "$age_key_member" == "$state_member"/* ]];
+        }; then
+            printf '%s\n' "$age_key_member"
+        fi
+    } | awk 'NF && !seen[$0]++'
+}
+
+_require_safe_backup_source_layout() {
+    local raw_backup_base="$1" raw_project_root="$2" raw_state_dir="$3"
+    local backup_out_name="${4:-}" project_out_name="${5:-}" state_out_name="${6:-}"
+    local resolved_backup resolved_project resolved_state resolved_source label index
+    local -a labels=("project root" "project state directory")
+
+    command -v realpath >/dev/null 2>&1 || {
+        log_error "Cannot validate BACKUP_DIR path relationships: realpath is unavailable." >&2
+        return 1
+    }
+    resolved_backup="$(realpath -m -- "$raw_backup_base" 2>/dev/null)" || {
+        log_error "Cannot canonicalize configured BACKUP_DIR: $raw_backup_base" >&2
+        return 1
+    }
+    resolved_project="$(realpath -m -- "$raw_project_root" 2>/dev/null)" || {
+        log_error "Cannot canonicalize backup project root: $raw_project_root" >&2
+        return 1
+    }
+    resolved_state="$(realpath -m -- "$raw_state_dir" 2>/dev/null)" || {
+        log_error "Cannot canonicalize backup project state directory: $raw_state_dir" >&2
+        return 1
+    }
+
+    local -a sources=("$resolved_project" "$resolved_state")
+    for index in "${!sources[@]}"; do
+        label="${labels[$index]}"
+        resolved_source="${sources[$index]}"
+        if [[ "$resolved_source" == "$resolved_backup" ||
+              "$resolved_source" == "$resolved_backup"/* ]]; then
+            log_error "Unsafe BACKUP_DIR layout: '$resolved_backup' is equal to or an ancestor of the ${label} '$resolved_source'." >&2
+            log_error "Refusing to continue because the shared tar exclusion would omit the entire ${label}." >&2
+            log_error "Choose BACKUP_DIR below an archive source (for example '${resolved_source}/backups') or on a separate path that is not its ancestor." >&2
+            return 1
+        fi
+    done
+
+    [[ -z "$backup_out_name" ]] || printf -v "$backup_out_name" '%s' "$resolved_backup"
+    [[ -z "$project_out_name" ]] || printf -v "$project_out_name" '%s' "$resolved_project"
+    [[ -z "$state_out_name" ]] || printf -v "$state_out_name" '%s' "$resolved_state"
+}
+
+_backup_estimated_source_mb() {
+    local project_root="$1" state_dir="$2" backup_base="$3" payload_workspace="${4:-}"
+    local -a roots=("$project_root")
+    if [[ "$state_dir" != "$project_root" && "$state_dir" != "$project_root"/* ]]; then
+        [[ "$project_root" == "$state_dir"/* ]] && roots=("$state_dir") || roots+=("$state_dir")
+    fi
+    local -a du_args=(-sm --apparent-size)
+    local path
+    for path in "$backup_base" "$payload_workspace" "$project_root/.git" "$project_root/logs" "$state_dir/backups" "$state_dir/logs"; do
+        [[ -n "$path" ]] && du_args+=("--exclude=$path")
+    done
+    du "${du_args[@]}" -- "${roots[@]}" 2>/dev/null | awk '{total += $1} END {print total + 0}'
+}
+
+_preflight_backup_payload_capacity() {
+    local state_dir="$1" backup_base="$2" type="$3"
+    local project_root="${4:-$SCRIPT_DIR}" payload_workspace="${5:-$PAYLOAD_WORKSPACE}"
+    local target_dir="${6:-$backup_base}"
+    local db_bytes db_mb source_mb required_mb
+    db_bytes="$(_stat_file_size "$state_dir/data/db.sqlite3" 2>/dev/null || echo 0)"
+    [[ "$db_bytes" =~ ^[0-9]+$ ]] || db_bytes=0
+    db_mb=$(( (db_bytes + 1048575) / 1048576 ))
+
+    if [[ "$type" == db ]]; then
+        check_backup_disk_space "$backup_base" "$((db_mb * 2 + 16))" "database backup payload staging"
+        return
+    fi
+    [[ "$type" == full || "$type" == emergency ]] || {
+        log_error "Unknown backup type for capacity preflight: $type" >&2
+        return 1
+    }
+    source_mb="$(_backup_estimated_source_mb "$project_root" "$state_dir" "$backup_base" "$payload_workspace")" || {
+        log_error "Cannot estimate backup source size with GNU du." >&2
+        return 1
+    }
+    [[ "$source_mb" =~ ^[0-9]+$ ]] || return 1
+
+    if [[ "$type" == full ]]; then
+        local payload_identity target_identity
+        payload_identity="$(_workspace_identity "$payload_workspace" 2>/dev/null)" || {
+            log_error "Cannot identify full backup payload filesystem: $payload_workspace" >&2
+            return 1
+        }
+        target_identity="$(_workspace_identity "$target_dir" 2>/dev/null)" || {
+            log_error "Cannot identify full backup target filesystem: $target_dir" >&2
+            return 1
+        }
+        if [[ "${payload_identity%%:*}" == "${target_identity%%:*}" ]]; then
+            required_mb=$((source_mb * 2 + db_mb * 3 + 64))
+            check_backup_disk_space "$payload_workspace" "$required_mb" \
+                "full backup archive, encryption, and payload staging" || return 1
+        else
+            check_backup_disk_space "$payload_workspace" "$((source_mb + db_mb * 2 + 32))" \
+                "full backup archive and payload staging" || return 1
+            check_backup_disk_space "$target_dir" "$((source_mb + db_mb + 32))" \
+                "encrypted full backup output" || return 1
+        fi
+        return 0
+    fi
+
+    local shm_type etc_mb=0 file bytes
+    shm_type="$(stat -f -c '%T' /dev/shm 2>/dev/null || true)"
+    [[ "$shm_type" == tmpfs ]] || {
+        log_error "Emergency backup requires tmpfs staging at /dev/shm; detected: ${shm_type:-unavailable}." >&2
+        log_error "Refusing to place an unencrypted secret-bearing emergency archive on persistent disk." >&2
+        return 1
+    }
+    for file in /etc/vaultwarden/age-key.txt /etc/vaultwarden/vaultwarden.env /etc/vaultwarden/rclone.conf; do
+        [[ -f "$file" ]] || continue
+        bytes="$(_stat_file_size "$file" 2>/dev/null || echo 0)"
+        [[ "$bytes" =~ ^[0-9]+$ ]] && etc_mb=$((etc_mb + (bytes + 1048575) / 1048576))
+    done
+    check_backup_disk_space /dev/shm "$((source_mb + db_mb * 2 + etc_mb + 64))" \
+        "secret-bearing emergency tmpfs payload staging" || {
+        log_error "Emergency backup did not start. Increase /dev/shm or reduce the archive inputs." >&2
+        return 1
+    }
+    check_backup_disk_space "$target_dir" "$((source_mb + db_mb + etc_mb + 32))" "encrypted emergency backup output"
+}
+_discard_backup_cohort() {
+    local enc_file="$1"
+    rm -f -- "$enc_file" "${enc_file}.meta" "${enc_file}.sha256" "${enc_file}.sha256.hmac"
+}
+
+_require_absent_backup_cohorts() {
+    local archive suffix
+    for archive in "$@"; do
+        for suffix in "" .meta .sha256 .sha256.hmac; do
+            [[ ! -e "${archive}${suffix}" && ! -L "${archive}${suffix}" ]] || {
+                log_error "Backup cohort member already exists: ${archive}${suffix}" >&2
+                return 1
+            }
+        done
+    done
+}
+
+_validate_created_backup_cohort() {
+    local archive="$1" expected_type="$2" file mode parsed
+    local -a files=("$archive" "${archive}.sha256" "${archive}.meta")
+    [[ -e "${archive}.sha256.hmac" ]] && files+=("${archive}.sha256.hmac")
+    for file in "${files[@]}"; do
+        mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || true)"
+        [[ -f "$file" && ! -L "$file" && -s "$file" && "$mode" == 600 ]] || {
+            log_error "Backup candidate member is invalid or not mode 600: $file" >&2
+            return 1
+        }
+    done
+    if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" && "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == true ]]; then
+        [[ -f "${archive}.sha256.hmac" ]] || { log_error "Required HMAC sidecar is missing." >&2; return 1; }
+    fi
+    verify_file_integrity "$archive" || return 1
+    parsed="$(awk -F= '
+        $1=="backup_type"{t++;tv=$2} $1=="archive_format"{f++;fv=$2}
+        $1=="version"{v++;vv=$2} $1=="encryption_mode"{m++;mv=$2}
+        END{printf "%d|%s|%d|%s|%d|%s|%d|%s",t,tv,f,fv,v,vv,m,mv}' "${archive}.meta")"
+    local tc type fc format vc version mc encryption
+    IFS='|' read -r tc type fc format vc version mc encryption <<< "$parsed"
+    [[ "$tc:$type:$fc:$format:$vc:$version:$mc" == "1:$expected_type:1:relative:1:2:1" ]] || {
+        log_error "Backup metadata is incomplete or incompatible: ${archive}.meta" >&2
+        return 1
+    }
+    if [[ "$expected_type" == emergency ]]; then
+        _validate_emergency_restore_metadata "$archive"
+    else
+        [[ "$encryption" == age-recipient ]] || { log_error "Unsupported backup encryption mode: $encryption" >&2; return 1; }
+    fi
+}
+_publish_backup_candidate() {
+    local candidate="$1" final="$2" suffix
+    [[ -f "$candidate" && -s "$candidate" ]] || { log_error "Backup candidate is missing: $candidate" >&2; return 1; }
+    _require_absent_backup_cohorts "$final" || return 1
+    PENDING_BACKUP_FINAL="$final"
+    for suffix in .meta .sha256 .sha256.hmac; do
+        [[ ! -e "${candidate}${suffix}" ]] || mv -- "${candidate}${suffix}" "${final}${suffix}" || return 1
+    done
+    mv -- "$candidate" "$final" || return 1
+    PENDING_BACKUP_CANDIDATE=""
+    PENDING_BACKUP_FINAL=""
+}
+_verify_encrypted_archive_stream() {
+    local enc_file="$1" backup_type="$2" encryption_mode="$3" age_key_file="$4"
+    [[ -n "$CONTROL_WORKSPACE" && -d "$CONTROL_WORKSPACE" ]] || {
+        log_error "Archive verification control workspace is unavailable" >&2
+        return 1
+    }
+
+    local inner_name="${enc_file%.candidate}" decompressor
+    inner_name="${inner_name%.age}"
+    case "$inner_name" in
+        *.tar.zst|*.zst) decompressor='zstd -d -T0' ;;
+        *.tar.bz2|*.bz2) decompressor='bzip2 -d' ;;
+        *.tar.xz|*.xz)   decompressor='xz -d' ;;
+        *.tar.gz|*.tgz)  decompressor='gzip -d' ;;
+        *.tar.lz4|*.lz4) decompressor='lz4 -d' ;;
+        *)
+            log_error "Full verification cannot identify the archive format: $(basename "$inner_name")" >&2
+            return 1
+            ;;
+    esac
+
+    local -a age_cmd=(age -d)
+    if [[ "$backup_type" == "emergency" && "$encryption_mode" == "age-passphrase" ]]; then
+        :
+    elif [[ "$backup_type" == "emergency" && "$encryption_mode" == "age-recipient" ]]; then
+        local emergency_identity
+        emergency_identity="$(get_config_value "EMERGENCY_BACKUP_AGE_IDENTITY_FILE" "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}")"
+        [[ -n "$emergency_identity" && -r "$emergency_identity" ]] || {
+            log_error "Full verification requires readable EMERGENCY_BACKUP_AGE_IDENTITY_FILE for this archive." >&2
+            return 1
+        }
+        age_cmd+=(-i "$emergency_identity")
+    else
+        [[ -n "$age_key_file" && -r "$age_key_file" ]] || {
+            log_error "Full verification requires a readable operational Age identity: ${age_key_file:-unset}" >&2
+            return 1
+        }
+        age_cmd+=(-i "$age_key_file")
+    fi
+    age_cmd+=("$enc_file")
+
+    local age_error="$CONTROL_WORKSPACE/archive-age.err"
+    local tar_error="$CONTROL_WORKSPACE/archive-tar.err"
+    : > "$age_error"
+    : > "$tar_error"
+    local -a pipeline_status=()
+    set -o pipefail
+    if "${age_cmd[@]}" 2>"$age_error" \
+        | tar --use-compress-program="$decompressor" -tf - >/dev/null 2>"$tar_error"; then
+        pipeline_status=("${PIPESTATUS[@]}")
+    else
+        pipeline_status=("${PIPESTATUS[@]}")
+    fi
+
+    local age_rc="${pipeline_status[0]:-125}" tar_rc="${pipeline_status[1]:-125}"
+    if (( age_rc != 0 )); then
+        log_error "Full verification FAILED: age decryption exited ${age_rc}." >&2
+        [[ -s "$age_error" ]] && log_error "  age: $(head -c 2048 "$age_error")" >&2
+    fi
+    if (( tar_rc != 0 )); then
+        log_error "Full verification FAILED: archive listing exited ${tar_rc}." >&2
+        [[ -s "$tar_error" ]] && log_error "  archive: $(head -c 2048 "$tar_error")" >&2
+    fi
+    (( age_rc == 0 && tar_rc == 0 ))
 }
 
 _validate_full_archive_payload() {
@@ -514,7 +922,6 @@ create_consistent_db_snapshot() {
     DB_SNAPSHOT_RESTART_SERVICE="$vw_container_name"
     DB_SNAPSHOT_STOPPED_CONTAINER=false
     DB_SNAPSHOT_RESTARTED=false
-    trap '_db_snapshot_restart_if_needed; cleanup' EXIT HUP INT TERM ERR
 
     if _vaultwarden_container_running "$vw_container_name"; then
         DB_SNAPSHOT_STOPPED_CONTAINER=true
@@ -544,7 +951,6 @@ create_consistent_db_snapshot() {
     DB_SNAPSHOT_METHOD="offline-checkpoint-copy"
     backup_log_info "DB snapshot method: ${DB_SNAPSHOT_METHOD}"
     _db_snapshot_restart_if_needed
-    trap cleanup EXIT HUP INT TERM ERR
     return 0
 }
 
@@ -607,7 +1013,7 @@ _validate_emergency_restore_metadata() {
 verify_backup_full() {
     local enc_file="$1"
     local backup_type="$2"
-    local shared_tmpdir="$3"
+    local payload_workspace="${3:-}"
 
     backup_log_info "Running full verification (decrypt + integrity check)..."
 
@@ -630,32 +1036,33 @@ verify_backup_full() {
         encryption_mode="$(awk -F= '$1=="encryption_mode"{print $2; exit}' "${enc_file}.meta" 2>/dev/null || true)"
     fi
 
-    local age_key_file
-    age_key_file=$(_resolve_age_key) || {
-        log_error "Age key file not found: $age_key_file" >&2
-        return 1
-    }
-
-    local dec_out
-    dec_out="$shared_tmpdir/verify_$(basename "$enc_file" .age)"
-
-    if [[ "$backup_type" == "emergency" && "$encryption_mode" == "age-passphrase" ]]; then
-        if ! age -d -o "$dec_out" "$enc_file"; then
-            log_error "Full verification FAILED: could not decrypt passphrase-sealed emergency backup" >&2
+    local age_key_file=""
+    if [[ "$backup_type" != "emergency" ]]; then
+        age_key_file=$(_resolve_age_key) || {
+            log_error "Age key file not found: $age_key_file" >&2
             return 1
-        fi
-    elif [[ "$backup_type" == "emergency" && "$encryption_mode" == "age-recipient" && -n "${EMERGENCY_BACKUP_AGE_IDENTITY_FILE:-}" ]]; then
-        if ! age -d -i "$EMERGENCY_BACKUP_AGE_IDENTITY_FILE" -o "$dec_out" "$enc_file"; then
-            log_error "Full verification FAILED: could not decrypt emergency backup with EMERGENCY_BACKUP_AGE_IDENTITY_FILE" >&2
-            return 1
-        fi
-    elif ! age -d -i "$age_key_file" -o "$dec_out" "$enc_file"; then
-        log_error "Full verification FAILED: could not decrypt $enc_file" >&2
-        return 1
+        }
     fi
 
     case "$backup_type" in
         db)
+            [[ -n "$payload_workspace" && -d "$payload_workspace" && ! -L "$payload_workspace" ]] || {
+                log_error "DB full verification requires a verified payload workspace on BACKUP_DIR." >&2
+                return 1
+            }
+            local dec_out="$payload_workspace/verify-db.sqlite3" encrypted_mb
+            encrypted_mb="$(_file_size_mb "$enc_file")"
+            check_backup_disk_space "$payload_workspace" "$((encrypted_mb + 16))" \
+                "DB verification output" || return 1
+            local age_error="$CONTROL_WORKSPACE/db-age.err" age_rc=0
+            : > "$age_error"
+            age -d -i "$age_key_file" -o "$dec_out" "$enc_file" 2>"$age_error" || age_rc=$?
+            if (( age_rc != 0 )); then
+                rm -f "$dec_out"
+                log_error "Full verification FAILED: DB decryption exited ${age_rc}." >&2
+                [[ -s "$age_error" ]] && log_error "  age: $(head -c 2048 "$age_error")" >&2
+                return 1
+            fi
             verify_sqlite "$dec_out" || return 1
 
             local live_db_path
@@ -674,37 +1081,21 @@ verify_backup_full() {
                     fi
                 fi
             fi
+            rm -f "$dec_out"
             ;;
         full|emergency)
-            backup_log_info "Verifying archive structure..."
-            local _decomp_prog
-            case "$dec_out" in
-                *.tar.zst|*.zst)  _decomp_prog='zstd -d -T0' ;;
-                *.tar.bz2|*.bz2)  _decomp_prog='bzip2 -d' ;;
-                *.tar.xz|*.xz)    _decomp_prog='xz -d' ;;
-                *.tar.gz|*.tgz)   _decomp_prog='gzip -d' ;;
-                *.tar.lz4|*.lz4)  _decomp_prog='lz4 -d' ;;
-                *)
-                    log_error "verify_backup_full: unrecognised archive extension for: $(basename "$dec_out")"
-                    log_error "Add the format to the decompressor case in verify_backup_full()."
-                    return 1
-                    ;;
-            esac
-            if ! tar --use-compress-program="$_decomp_prog" -tf "$dec_out" >/dev/null 2>&1; then
-                log_error "Full verification FAILED: archive is corrupt or unreadable" >&2
-                return 1
-            fi
+            backup_log_info "Streaming decryption into archive listing validation..."
+            _verify_encrypted_archive_stream "$enc_file" "$backup_type" "$encryption_mode" "$age_key_file" || return 1
             local size
-            size=$(stat -c%s "$dec_out" 2>/dev/null || stat -f%z "$dec_out" 2>/dev/null || echo 0)
+            size=$(stat -c%s "$enc_file" 2>/dev/null || stat -f%z "$enc_file" 2>/dev/null || echo 0)
             if (( size < 10240 )); then
-                log_error "Full verification FAILED: archive suspiciously small (${size} bytes)" >&2
+                log_error "Full verification FAILED: encrypted archive suspiciously small (${size} bytes)" >&2
                 return 1
             fi
             ;;
     esac
 
     backup_log_info "Full verification passed: $(basename "$enc_file")"
-    rm -f "$dec_out"
     return 0
 }
 
@@ -841,7 +1232,7 @@ sync_to_rclone() {
     fi
     backup_log_info "Pre-flight check passed: rclone remote '${remote_name}' is reachable."
 
-    local rclone_stderr_tmp="${TMPDIR_BACKUP}/rclone_stderr.tmp"
+    local rclone_stderr_tmp="${CONTROL_WORKSPACE}/rclone_stderr.tmp"
 
     local rclone_exit=0
     rclone copy "${rclone_config_arg[@]}" "$enc_file" "$remote_path/" --checksum 2>"${rclone_stderr_tmp}" || rclone_exit=$?
@@ -910,7 +1301,7 @@ sync_to_rclone() {
 
     local remote_file_path
     remote_file_path="${remote_path}/$(basename "$enc_file")"
-    local rclone_size_out rclone_size_err_tmp="${TMPDIR_BACKUP}/rclone_size_stderr.tmp"
+    local rclone_size_out rclone_size_err_tmp="${CONTROL_WORKSPACE}/rclone_size_stderr.tmp"
     local remote_size_bytes=0
     local remote_size_human=""
 
@@ -1090,8 +1481,8 @@ _prune_remote_backups() {
         retention_days=$(backup_retention_days_for_type "$t" "$retention_override") || return 1
 
         local remote_listing="" list_rc=0 list_error_file
-        if [[ -n "${TMPDIR_BACKUP:-}" && -d "$TMPDIR_BACKUP" ]]; then
-            list_error_file="${TMPDIR_BACKUP}/rclone-lsf-${t}.err"
+        if [[ -n "${CONTROL_WORKSPACE:-}" && -d "$CONTROL_WORKSPACE" ]]; then
+            list_error_file="${CONTROL_WORKSPACE}/rclone-lsf-${t}.err"
             : > "$list_error_file"
         else
             list_error_file=$(mktemp -t vw-rclone-lsf.XXXXXXXXXX) || {
@@ -1213,60 +1604,57 @@ _prune_remote_backups() {
 }
 
 perform_db_backup() {
-    local target_dir="$1"
-    local timestamp="$2"
-    local age_pub_key="$3"
-    local shared_tmpdir="$4"
-    local state_dir
-    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    local target_dir="$1" timestamp="$2" age_pub_key="$3" payload_workspace="$4"
+    local candidate_out_name="$5" final_out_name="$6"
+    local state_dir backup_base final_archive candidate_path
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    backup_base="$(dirname "$target_dir")"
+    final_archive="$target_dir/db_backup_$timestamp.sqlite3.age"
+    candidate_path="$target_dir/.$(basename "$final_archive").candidate"
 
     backup_log_info "Performing database backup..."
-
+    printf -v "$final_out_name" '%s' "$final_archive"
     if [[ "$DRY_RUN" == "true" ]]; then
-        backup_log_info "[DRY RUN] Would backup DB → $target_dir/db_backup_$timestamp.sqlite3.age"
+        backup_log_info "[DRY RUN] Would backup DB → $final_archive"
         return 0
     fi
 
-    local snap="$shared_tmpdir/db.sqlite3"
+    _require_absent_backup_cohorts "$candidate_path" "$final_archive" || return 1
+    _preflight_backup_payload_capacity "$state_dir" "$backup_base" db || return 1
+    PENDING_BACKUP_CANDIDATE="$candidate_path"
+
+    local snap="$payload_workspace/db.sqlite3"
     create_consistent_db_snapshot "$state_dir" "$snap" "db backup" || return 1
     local db_snapshot_method="$DB_SNAPSHOT_METHOD"
 
-    backup_log_info "Encrypting DB snapshot..."
-    local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
-    local enc_tmp="${enc}.tmp"
-    if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap" 2>/dev/null; then
-        log_error "Encryption failed (check disk space: df -h $(dirname "$enc"); verify Age key: make key-health)" >&2
-        rm -f "$enc_tmp"
+    backup_log_info "Encrypting DB snapshot to a hidden candidate..."
+    age -r "$age_pub_key" -o "$candidate_path" "$snap" 2>/dev/null || {
+        log_error "Encryption failed (check disk space: df -h $target_dir; verify Age key: make key-health)" >&2
         return 1
-    fi
-    mv "$enc_tmp" "$enc"
-    secure_file "$enc" 600
+    }
+    secure_file "$candidate_path" 600
+    rm -f -- "$snap" || return 1
+    [[ ! -e "$snap" ]] || { log_error "Plaintext DB snapshot still exists after encryption: $snap" >&2; return 1; }
 
-    rm -f "$snap" 2>/dev/null || true
-
-    write_file_integrity "$enc" || {
-        log_error "Failed to write backup integrity sidecars for: $enc" >&2
-        rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"
+    write_file_integrity "$candidate_path" || {
+        log_error "Failed to write backup integrity sidecars for candidate." >&2
         return 1
     }
 
-    [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"; return 1; }
-
     local db_file="$state_dir/data/db.sqlite3" orig_size
-    orig_size=$(stat -c%s "$db_file" 2>/dev/null || stat -f%z "$db_file" 2>/dev/null || echo 0)
-    if ! create_backup_metadata "$enc" "db" \
-            "$(printf 'original_size=%s
-archive_format=relative
-version=2
-db_snapshot_method=%s
-encryption_mode=age-recipient
-emergency_contains_key_material=false' "$orig_size" "$db_snapshot_method")"; then
-        log_error "Failed to write backup metadata: ${enc}.meta" >&2
+    orig_size="$(_stat_file_size "$db_file" 2>/dev/null || echo 0)"
+    create_backup_metadata "$candidate_path" db \
+        "$(printf 'original_size=%s\narchive_format=relative\nversion=2\ndb_snapshot_method=%s\nencryption_mode=age-recipient\nemergency_contains_key_material=false' "$orig_size" "$db_snapshot_method")" || {
+        log_error "Failed to write backup candidate metadata." >&2
         return 1
-    fi
+    }
+    _validate_created_backup_cohort "$candidate_path" db || {
+        log_error "Created DB backup candidate failed sidecar or metadata validation." >&2
+        return 1
+    }
 
-    backup_log_info "DB backup: $(basename "$enc")"
-    echo "$enc"
+    printf -v "$candidate_out_name" '%s' "$candidate_path"
+    backup_log_info "DB backup candidate ready: $(basename "$candidate_path")"
 }
 
 perform_full_backup() {
@@ -1274,30 +1662,73 @@ perform_full_backup() {
     local timestamp="$2"
     local age_pub_key="$3"
     local backup_label="${4:-full}"
-    local shared_tmpdir="$5"
-    local state_dir
-    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    local payload_workspace="$5"
+    local age_key_file="${6:-}"
+    local candidate_out_name="$7" final_out_name="$8"
+    local configured_state_dir raw_backup_base
+    configured_state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    raw_backup_base="$(dirname "$target_dir")"
+
+    local canonical_backup_base canonical_project_root canonical_state_dir
+    _require_safe_backup_source_layout \
+        "$raw_backup_base" "$SCRIPT_DIR" "$configured_state_dir" \
+        canonical_backup_base canonical_project_root canonical_state_dir || return 1
+
+    local backup_base="$canonical_backup_base"
+    local project_root="$canonical_project_root"
+    local state_dir="$canonical_state_dir"
+    local expected_target="$backup_base/$backup_label"
+    target_dir="$(realpath -m -- "$target_dir" 2>/dev/null)" || {
+        log_error "Cannot canonicalize backup target directory: $target_dir" >&2
+        return 1
+    }
+    [[ "$target_dir" == "$backup_base"/* ]] || {
+        log_error "Backup type directory resolves outside configured BACKUP_DIR: $target_dir" >&2
+        log_error "Configured BACKUP_DIR resolves to: $backup_base" >&2
+        return 1
+    }
+    [[ "$target_dir" == "$expected_target" ]] || {
+        log_error "Backup type directory must not be redirected: $expected_target" >&2
+        log_error "Resolved backup type directory: $target_dir" >&2
+        return 1
+    }
+    if [[ -n "$payload_workspace" ]]; then
+        payload_workspace="$(realpath -m -- "$payload_workspace" 2>/dev/null)" || {
+            log_error "Cannot canonicalize backup payload workspace: $payload_workspace" >&2
+            return 1
+        }
+    fi
 
     local backup_label_title
     backup_label_title="$(printf '%s' "${backup_label:0:1}" | tr '[:lower:]' '[:upper:]')${backup_label:1}"
 
+    local final_archive="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
+    local candidate_path
+    candidate_path="$target_dir/.$(basename "$final_archive").candidate"
+    printf -v "$final_out_name" '%s' "$final_archive"
+
     backup_log_info "Performing ${backup_label} backup (relative-path archive)..."
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        backup_log_info "[DRY RUN] Would create ${backup_label} backup → $target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
+        backup_log_info "[DRY RUN] Would create ${backup_label} backup → $final_archive"
         return 0
     fi
 
     require_commands tar || return 1
     require_commands zstd || return 1
 
-    local snap_dir="$shared_tmpdir/stage"
-    local snap_payload_dir="$shared_tmpdir/db-snapshot-payload"
+    _require_absent_backup_cohorts "$candidate_path" "$final_archive" || return 1
+    _preflight_backup_payload_capacity \
+        "$state_dir" "$backup_base" "$backup_label" "$project_root" "$payload_workspace" "$target_dir" || return 1
+    PENDING_BACKUP_CANDIDATE="$candidate_path"
+
+    local snap_dir="$payload_workspace/stage"
+    local snap_payload_dir="$payload_workspace/db-snapshot-payload"
     local snap_payload_name="__vaultwarden_verified_db_snapshot.sqlite3"
     local snap_payload_regex="__vaultwarden_verified_db_snapshot\\.sqlite3"
     local snap_db="$snap_payload_dir/$snap_payload_name"
     local db_archive_member="${state_dir#/}/data/db.sqlite3"
-    local temp_tar="$shared_tmpdir/${backup_label}_backup_$timestamp.tar.zst"
+    local temp_tar="$payload_workspace/${backup_label}_backup_$timestamp.tar.zst"
 
     mkdir -p "$snap_payload_dir"
 
@@ -1309,56 +1740,19 @@ perform_full_backup() {
 
     backup_log_info "Archiving state (relative paths, safe for staged restore)..."
 
-    # Canonical backup exclusion list — single source of truth.
-    # Keep in sync with print_backup_manifest() below and docs/BACKUP-RESTORE.md.
-    local -a _BACKUP_EXCLUDES=(
-        ".git"
-        "backups"
-        "logs"
-        ".rate-limit"
-        "*.sock"
-        "*.lock"
-        "*.tmp"
-        "*.age.tmp"
-        "recovery-kit-*.txt"
-        "vaultwarden-recovery-kit-*.txt"
-        "vaultwarden-recovery-*.txt"
-        "vaultwarden-setup-credentials-*.txt"
-        "important-documents-*.zip"
-        ".vaultwarden-setup-credentials*"
-        ".vaultwarden-recovery-kit*"
-        ".pre-restore-*"
-        "*/.pre-restore-*"
+    local -a effective_excludes=()
+    mapfile -t effective_excludes < <(
+        backup_archive_exclusions "$project_root" "$state_dir" "$backup_base" "$age_key_file"
     )
     local -a tar_excludes=()
     local excl
-    for excl in "${_BACKUP_EXCLUDES[@]}"; do
-        case "$excl" in
-            \*.*)
-                tar_excludes+=("--exclude=${excl}")
-                ;;
-            *)
-                tar_excludes+=("--exclude=${SCRIPT_DIR#/}/${excl}")
-                # Also exclude the same paths under state_dir where applicable
-                [[ "$excl" == "backups" || "$excl" == "logs" ]] && \
-                    tar_excludes+=("--exclude=${state_dir#/}/${excl}")
-                ;;
-        esac
+    for excl in "${effective_excludes[@]}"; do
+        tar_excludes+=("--exclude=${excl}")
     done
-    tar_excludes+=(
-        "--exclude=${state_dir#/}/.pre-restore-*"
-        "--exclude=${state_dir#/}/*/.pre-restore-*"
-        "--exclude=${state_dir#/}/data/db.sqlite3"
-        "--exclude=${state_dir#/}/data/db.sqlite3-wal"
-        "--exclude=${state_dir#/}/data/db.sqlite3-shm"
-        "--exclude=run/vaultwarden-oci/secrets/*"
-        "--exclude=${SCRIPT_DIR#/}/secrets/keys/age-key.txt"
-        "--exclude=${state_dir#/}/secrets/keys/age-key.txt"
-    )
 
     local tar_sources=()
 
-    tar_sources+=("${SCRIPT_DIR#/}")
+    tar_sources+=("${project_root#/}")
 
     tar_sources+=("${state_dir#/}")
 
@@ -1414,11 +1808,9 @@ EOF
         return 1
     fi
 
-    _validate_full_archive_payload "$temp_tar" "$state_dir" "$SCRIPT_DIR" "$backup_label" || return 1
+    _validate_full_archive_payload "$temp_tar" "$state_dir" "$project_root" "$backup_label" || return 1
 
-    backup_log_info "Encrypting ${backup_label} archive..."
-    local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
-    local enc_tmp="${enc}.tmp"
+    backup_log_info "Encrypting ${backup_label} archive to a hidden candidate..."
 
     if [[ "$backup_label" == "emergency" ]]; then
         local emergency_recipient
@@ -1427,17 +1819,17 @@ EOF
             encryption_mode="age-recipient"
             if [[ "$emergency_recipient" == "$age_pub_key" ]]; then
                 log_error "Emergency backup includes key material and cannot be encrypted only to the operational Age recipient." >&2
-                rm -f "$enc_tmp"
+                rm -f "$candidate_path"
                 return 1
             fi
-            age -r "$emergency_recipient" -o "$enc_tmp" "$temp_tar" 2>/dev/null || {
+            age -r "$emergency_recipient" -o "$candidate_path" "$temp_tar" 2>/dev/null || {
                 log_error "Emergency encryption failed with EMERGENCY_BACKUP_AGE_RECIPIENT." >&2
-                rm -f "$enc_tmp"; return 1
+                rm -f "$candidate_path"; return 1
             }
         else
             if [[ ! -t 0 ]]; then
                 log_error "Emergency backup includes key material and requires either a TTY passphrase prompt or EMERGENCY_BACKUP_AGE_RECIPIENT." >&2
-                rm -f "$enc_tmp"
+                rm -f "$candidate_path"
                 return 1
             fi
             encryption_mode="age-passphrase"
@@ -1446,71 +1838,79 @@ EOF
                     "This passphrase protects only the emergency backup capsule." \
                     "It is not the live operational Age key or a Vaultwarden account password."
             fi
-            age -p -o "$enc_tmp" "$temp_tar" || {
+            age -p -o "$candidate_path" "$temp_tar" || {
                 log_error "Emergency passphrase encryption failed." >&2
-                rm -f "$enc_tmp"; return 1
+                rm -f "$candidate_path"; return 1
             }
         fi
-    elif ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>/dev/null; then
-        log_error "Encryption failed (check disk space: df -h $(dirname "$enc"); verify Age key: make key-health)" >&2
-        rm -f "$enc_tmp"
+    elif ! age -r "$age_pub_key" -o "$candidate_path" "$temp_tar" 2>/dev/null; then
+        log_error "Encryption failed (check disk space: df -h $(dirname "$candidate_path"); verify Age key: make key-health)" >&2
+        rm -f "$candidate_path"
         return 1
     fi
-    mv "$enc_tmp" "$enc"
-    secure_file "$enc" 600
+    secure_file "$candidate_path" 600
 
-    write_file_integrity "$enc" || {
-        log_error "Failed to write backup integrity sidecars for: $enc" >&2
-        rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"
+    if ! rm -f -- "$temp_tar"; then
+        log_error "Encrypted backup was created, but its plaintext staging archive could not be removed." >&2
+        _discard_backup_cohort "$candidate_path"
+        return 1
+    fi
+    [[ ! -e "$temp_tar" ]] || {
+        log_error "Plaintext backup archive still exists after encryption: $temp_tar" >&2
+        _discard_backup_cohort "$candidate_path"
         return 1
     }
 
-    [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"; return 1; }
+    write_file_integrity "$candidate_path" || {
+        log_error "Failed to write backup integrity sidecars for candidate: $candidate_path" >&2
+        rm -f "$candidate_path" "${candidate_path}.sha256" "${candidate_path}.sha256.hmac"
+        return 1
+    }
+
+    [[ -s "$candidate_path" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$candidate_path" "${candidate_path}.sha256" "${candidate_path}.sha256.hmac"; return 1; }
 
     local data_volume_mount data_volume_device state_dir_is_mountpoint storage_mode
     data_volume_mount="$(get_config_value "DATA_VOLUME_MOUNT" "")"
     data_volume_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
     state_dir_is_mountpoint=false; mountpoint -q "$state_dir" 2>/dev/null && state_dir_is_mountpoint=true
     storage_mode="$(_backup_storage_mode "$state_dir" "$data_volume_mount" "$data_volume_device")"
-    if ! create_backup_metadata "$enc" "$backup_label" \
-            "$(printf 'project_state_dir=%s\nstorage_mode=%s\ndata_volume_mount=%s\ndata_volume_device=%s\nstate_dir_is_mountpoint=%s\nrepo_root=%s\narchive_format=relative\nversion=2\ndb_snapshot_method=%s\nencryption_mode=%s\nemergency_contains_key_material=%s' "$state_dir" "$storage_mode" "$data_volume_mount" "$data_volume_device" "$state_dir_is_mountpoint" "$SCRIPT_DIR" "$db_snapshot_method" "$encryption_mode" "$emergency_contains_key_material")"; then
-        log_error "Failed to write backup metadata: ${enc}.meta" >&2
+    if ! create_backup_metadata "$candidate_path" "$backup_label" \
+            "$(printf 'project_state_dir=%s\nstorage_mode=%s\ndata_volume_mount=%s\ndata_volume_device=%s\nstate_dir_is_mountpoint=%s\nrepo_root=%s\narchive_format=relative\nversion=2\ndb_snapshot_method=%s\nencryption_mode=%s\nemergency_contains_key_material=%s' "$state_dir" "$storage_mode" "$data_volume_mount" "$data_volume_device" "$state_dir_is_mountpoint" "$project_root" "$db_snapshot_method" "$encryption_mode" "$emergency_contains_key_material")"; then
+        log_error "Failed to write backup metadata: ${candidate_path}.meta" >&2
+        _discard_backup_cohort "$candidate_path"
         return 1
     fi
 
-    backup_log_info "${backup_label_title} backup: $(basename "$enc")"
-    echo "$enc"
+    if ! _validate_created_backup_cohort "$candidate_path" "$backup_label"; then
+        log_error "Created ${backup_label} backup cohort failed sidecar or metadata validation." >&2
+        _discard_backup_cohort "$candidate_path"
+        return 1
+    fi
+
+    printf -v "$candidate_out_name" '%s' "$candidate_path"
+    backup_log_info "${backup_label_title} backup candidate ready: $(basename "$candidate_path")"
+    return 0
 }
 
-# print_backup_manifest — Show what is included/excluded in a full/emergency backup.
-# Called by `make backup-manifest`.
+# print_backup_manifest — Show the exact full/emergency archive exclusions.
 print_backup_manifest() {
-    local -a _BACKUP_EXCLUDES=(
-        ".git"
-        "backups"
-        "logs"
-        ".rate-limit"
-        "*.sock"
-        "*.lock"
-        "*.tmp"
-        "*.age.tmp"
-        "recovery-kit-*.txt"
-        "vaultwarden-recovery-kit-*.txt"
-        "vaultwarden-recovery-*.txt"
-        "vaultwarden-setup-credentials-*.txt"
-        "important-documents-*.zip"
-        ".vaultwarden-setup-credentials*"
-        ".vaultwarden-recovery-kit*"
-        ".pre-restore-*"
-        "*/.pre-restore-*"
-    )
+    local configured_state_dir configured_backup_base age_key_file=""
+    configured_state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    configured_backup_base="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+    age_key_file="$(_resolve_age_key 2>/dev/null || true)"
+
+    local canonical_backup_base canonical_project_root canonical_state_dir
+    _require_safe_backup_source_layout \
+        "$configured_backup_base" "$SCRIPT_DIR" "$configured_state_dir" \
+        canonical_backup_base canonical_project_root canonical_state_dir || return 1
+
     echo "=== Full Backup Contents ==="
-    echo "Included: Project root + state directory"
-    echo "Excluded:"
-    local excl
-    for excl in "${_BACKUP_EXCLUDES[@]}"; do
-        echo "  - $excl"
-    done
+    echo "Included: $canonical_project_root + $canonical_state_dir"
+    echo "Effective tar exclusions:"
+    backup_archive_exclusions \
+        "$canonical_project_root" "$canonical_state_dir" "$canonical_backup_base" "$age_key_file" \
+        | sed 's/^/  - /'
+    echo "Emergency note: independently sealed emergency archives may add staged /etc/vaultwarden key/config material."
 }
 
 _check_backup_deps() {
@@ -1563,9 +1963,10 @@ _print_backup_run_summary() {
 }
 
 main() {
-    trap cleanup EXIT ERR
-    trap 'operation_release 130; rm -rf "${TMPDIR_BACKUP:-}" 2>/dev/null || true; exit 130' INT
-    trap 'operation_release 143; rm -rf "${TMPDIR_BACKUP:-}" 2>/dev/null || true; exit 143' HUP TERM
+    trap cleanup EXIT
+    trap '_backup_signal_exit 130' INT
+    trap '_backup_signal_exit 129' HUP
+    trap '_backup_signal_exit 143' TERM
 
     if [[ "$_SUBCMD" != "list" ]]; then
         backup_require_root
@@ -1586,19 +1987,17 @@ main() {
         exit 0
     fi
 
+    if [[ "$_SUBCMD" == "manifest" ]]; then
+        load_env_file || { log_error "Failed to load canonical project environment for backup manifest."; exit 1; }
+        print_backup_manifest
+        exit 0
+    fi
+
     if [[ "$_SUBCMD" == "verify" ]]; then
         require_root "$@"
         auto_fix_critical_permissions "$PROJECT_ROOT"
         _check_backup_deps
-
-        local old_umask
-        old_umask=$(umask)
-        umask 077
-        TMPDIR_BACKUP="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_verify.XXXXXXXXXX)" || {
-            log_error "Failed to create secure temporary directory"
-            exit 1
-        }
-        umask "$old_umask"
+        _create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID /dev/shm vw-backup-control true || exit 1
 
         log_header "VaultWarden-OCI Backup Verify"
         load_env_file || { log_error "Failed to load .env"; exit 1; }
@@ -1615,6 +2014,10 @@ main() {
 
         local base_dir
         base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+        base_dir="$(realpath -m -- "$base_dir" 2>/dev/null)" || {
+            log_error "Cannot canonicalize configured BACKUP_DIR: $base_dir"
+            exit 1
+        }
 
         local search_types=()
         if [[ "$BACKUP_TYPE" != "auto" ]]; then
@@ -1647,7 +2050,11 @@ main() {
 
         backup_log_info "Target: $(basename "$latest_file")  [type: $enc_type]"
 
-        if ! verify_backup_full "$latest_file" "$enc_type" "$TMPDIR_BACKUP"; then
+        if [[ "$enc_type" == "db" ]]; then
+            _create_owned_workspace PAYLOAD_WORKSPACE PAYLOAD_WORKSPACE_ID "$base_dir" .vaultwarden-backup || exit 1
+        fi
+
+        if ! verify_backup_full "$latest_file" "$enc_type" "$PAYLOAD_WORKSPACE"; then
             log_error "Verification FAILED: $(basename "$latest_file")"
             exit 1
         fi
@@ -1666,15 +2073,7 @@ main() {
         log_header "VaultWarden-OCI Rclone Backup Copy${sync_dry_label}"
         load_env_file || { log_error "Failed to load .env"; exit 1; }
         auto_fix_critical_permissions "$PROJECT_ROOT"
-
-        local old_umask
-        old_umask=$(umask)
-        umask 077
-        TMPDIR_BACKUP="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_sync.XXXXXXXXXX)" || {
-            log_error "Failed to create secure temporary directory"
-            exit 1
-        }
-        umask "$old_umask"
+        _create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID /dev/shm vw-backup-control true || exit 1
 
         sync_all_backups_to_rclone || exit 1
         exit 0
@@ -1691,6 +2090,7 @@ main() {
         log_header "VaultWarden-OCI Backup Rotation${rotate_dry_label}"
         load_env_file || { log_error "Failed to load .env"; exit 1; }
         auto_fix_critical_permissions "$PROJECT_ROOT"
+        _create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID /dev/shm vw-backup-control true || exit 1
 
         local base_dir
         base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
@@ -1734,15 +2134,7 @@ main() {
     [[ "$FORCE" == "true" ]] && backup_log_warn "--force does not bypass active VaultWarden operation guards."
     _acquire_backup_guard
     operation_set_phase "run" "Creating ${BACKUP_TYPE} backup"
-
-    local old_umask
-    old_umask=$(umask)
-    umask 077
-    TMPDIR_BACKUP="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_backup.XXXXXXXXXX)" || {
-        log_error "Failed to create secure temporary directory"
-        exit 1
-    }
-    umask "$old_umask"
+    _create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID /dev/shm vw-backup-control true || exit 1
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_header "VaultWarden-OCI Backup [DRY RUN]"
@@ -1788,26 +2180,37 @@ main() {
     local timestamp
     timestamp=$(date +%Y%m%d_%H%M%S)
     local backup_dir
-    backup_dir=$(get_backup_dir "$actual_type")
+    backup_dir=$(get_backup_dir "$actual_type" "$state_dir")
 
-    local backup_file=""
+    if [[ "$DRY_RUN" == "false" ]]; then
+        local backup_base
+        backup_base="$(dirname "$backup_dir")"
+        if [[ "$actual_type" == "emergency" ]]; then
+            _create_owned_workspace PAYLOAD_WORKSPACE PAYLOAD_WORKSPACE_ID /dev/shm .vaultwarden-emergency || exit 1
+        else
+            _create_owned_workspace PAYLOAD_WORKSPACE PAYLOAD_WORKSPACE_ID "$backup_base" .vaultwarden-backup || exit 1
+        fi
+    fi
+
+    local backup_file="" candidate_file="" final_file=""
     local backup_success=false
     case "$actual_type" in
         db)
-            backup_file=$(perform_db_backup "$backup_dir" "$timestamp" "$age_pub_key" "$TMPDIR_BACKUP") \
-                && backup_success=true
+            perform_db_backup "$backup_dir" "$timestamp" "$age_pub_key" "$PAYLOAD_WORKSPACE" \
+                candidate_file final_file && backup_success=true
             ;;
         full|emergency)
-            backup_file=$(perform_full_backup "$backup_dir" "$timestamp" "$age_pub_key" "$actual_type" "$TMPDIR_BACKUP") \
-                && backup_success=true
+            perform_full_backup "$backup_dir" "$timestamp" "$age_pub_key" "$actual_type" \
+                "$PAYLOAD_WORKSPACE" "$age_key_file" candidate_file final_file && backup_success=true
             ;;
         *)
             log_error "Invalid backup type: $actual_type"; exit 1 ;;
     esac
 
+    backup_file="$final_file"
     if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
-        [[ "$backup_file" == *.age && -f "$backup_file" ]] || {
-            log_error "backup_file is invalid or missing: ${backup_file:-empty}"
+        [[ -n "$candidate_file" && -f "$candidate_file" && "$final_file" == *.age ]] || {
+            log_error "Backup candidate or final path is invalid."
             exit 1
         }
     fi
@@ -1820,14 +2223,14 @@ main() {
         local offsite_status="not requested"
 
         if [[ "$FULL_VERIFY" == "true" ]]; then
-            if ! verify_backup_full "$backup_file" "$actual_type" "$TMPDIR_BACKUP"; then
+            if ! verify_backup_full "$candidate_file" "$actual_type" "$PAYLOAD_WORKSPACE"; then
                 log_error "Backup verification failed — discarding corrupt archive."
-                rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256" "${backup_file}.sha256.hmac"
+                _discard_backup_cohort "$candidate_file"
                 exit 1
             fi
             verification_status="full verification passed"
         else
-            if ! verify_backup_quick "$backup_file" "$age_key_file" "$actual_type"; then
+            if ! verify_backup_quick "$candidate_file" "$age_key_file" "$actual_type"; then
                 verify_failed=true
                 verification_status="quick verification FAILED"
                 log_error "Quick verification failed — backup is being discarded."
@@ -1836,7 +2239,7 @@ main() {
                     local warn_body
                     warn_body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n\nQuick verification (SHA256 + decrypt probe) FAILED.\nThe encrypted archive and sidecars were discarded and are not eligible for restore.\nOlder backups were preserved; retention and offsite sync were skipped.\n' \
                         "$actual_type" "$timestamp" \
-                        "$(basename "${backup_file:-unknown}")" \
+                        "$(basename "${candidate_file:-unknown}")" \
                         "$(hostname -f 2>/dev/null || hostname)")"
                     send_notification_email "$warn_subj" "$warn_body" 2>/dev/null || true
                 fi
@@ -1844,16 +2247,22 @@ main() {
                     log_error "Skipping offsite sync due to verification failure."
                     offsite_status="skipped because verification failed"
                 fi
-                _print_backup_run_summary "$actual_type" "$backup_file" "$verification_status" "$offsite_status"
-                log_error "Discarding failed archive and sidecars:"
-                log_error "  $backup_file"
-                rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256" "${backup_file}.sha256.hmac"
+                _print_backup_run_summary "$actual_type" "$candidate_file" "$verification_status" "$offsite_status"
+                log_error "Discarding unpublished candidate and sidecars:"
+                log_error "  $candidate_file"
+                _discard_backup_cohort "$candidate_file"
                 log_error "Backup failed: quick verification did not complete successfully."
                 exit 1
             else
                 verification_status="quick verification passed"
             fi
         fi
+
+        if ! _publish_backup_candidate "$candidate_file" "$final_file"; then
+            log_error "Backup candidate passed verification but could not be published."
+            exit 1
+        fi
+        backup_file="$final_file"
 
         if [[ "$RCLONE_SYNC" == "true" ]]; then
             local _sync_rc=0

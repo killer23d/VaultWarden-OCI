@@ -996,4 +996,5 @@ docs: ## Regenerate docs/COMMAND-REFERENCE.md from live script --help and Makefi
 	@bash utilities/write-command-reference.sh
 
 backup-manifest: ## Show what is included and excluded in a full/emergency backup
-	@bash -c 'source utilities/backup-run.sh 2>/dev/null; print_backup_manifest'
+	$(call require-root)
+	@./backup.sh manifest

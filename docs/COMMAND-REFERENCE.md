@@ -230,6 +230,7 @@ SUBCOMMANDS:
                       Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
     sync               Copy all retained local backups to rclone by type
+    manifest           Print the exact full/emergency archive exclusions
 
 RUN OPTIONS (used after 'run'):
     --keep N                 Override configured retention for this run
@@ -504,6 +505,7 @@ SUBCOMMANDS:
                       Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
     sync               Copy all retained local backups to rclone by type
+    manifest           Print the exact full/emergency archive exclusions
 
 RUN OPTIONS (used after 'run'):
     --keep N                 Override configured retention for this run

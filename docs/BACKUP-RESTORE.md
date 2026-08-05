@@ -53,7 +53,13 @@ sudo ./backup.sh run full --full-verification
 sudo ./backup.sh run emergency --full-verification
 ```
 
-Required verification failure is a backup failure. A newly created archive that fails required quick/full verification is discarded with its normal sidecars and is not left as a normal restore candidate. The failed backup does not run normal retention/pruning or success notification behavior.
+Required verification failure is a backup failure. New encrypted output stays under a hidden, non-`*.age` candidate name until its plaintext staging is removed, integrity sidecars and metadata are complete, and the requested quick or full verification passes. Publication moves sidecars and metadata to their final names first and renames the encrypted archive last. That final archive rename is the local commit point, so backup discovery never selects a partial cohort.
+
+Backup work uses two restrictive workspaces created by one ownership-checked primitive. Small diagnostics stay in a mode-`0700` control workspace, preferably on tmpfs. Database snapshots and ordinary full-backup plaintext payloads use a random mode-`0700` staging directory on the configured `BACKUP_DIR` filesystem. Before snapshot/archive work, the supported Ubuntu path uses a conservative GNU `du` apparent-size estimate, excludes the large recursive backup/staging, Git, and log paths, and applies safety headroom before comparing against `df`. Full verification streams `age` decryption directly into archive listing and does not create a second plaintext full archive.
+
+`BACKUP_DIR` may be a descendant of an archive source, including the normal `${PROJECT_STATE_DIR}/backups` layout, but it must not equal or be an ancestor of either `SCRIPT_DIR` or `PROJECT_STATE_DIR`. Full and emergency backups canonicalize those paths once and use the canonical values for relationship checks, capacity exclusions, archive sources, and tar exclusions, so equivalent `..` paths and existing symlink components cannot reintroduce backup or staging recursion. They refuse before capacity estimation, SQLite snapshotting, or tar execution when the relationship is unsafe.
+
+Emergency archives are the exception because they may carry the operational private key. Their plaintext payload staging remains on `/dev/shm`; backup refuses with required-capacity guidance before archive creation when `/dev/shm` is unavailable, is not tmpfs, or is too small. It does not fall back to persistent plaintext staging.
 
 ### Offsite sync
 
@@ -114,6 +120,8 @@ sudo ./backup.sh verify
 ```
 
 The verifier owns latest-backup selection and prints the exact target it verifies.
+
+Full/emergency verification streams decrypted archive bytes into the matching archive decompressor/listing command and treats either Age or archive-tool failure as fatal. DB verification uses a temporary SQLite file in owned payload staging because SQLite requires a file-backed database.
 
 Do not build operational procedures that independently name one "latest" archive and then invoke the canonical verifier without passing that exact archive; the two selection methods can disagree.
 
@@ -410,6 +418,6 @@ See [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md).
 
 <!-- VWOCI-PRR-PATCH-04 -->
 
-Setup credential handoffs and full recovery-kit documents live under `/root/vaultwarden-recovery/`, outside the project and normal state backup inputs. As defence in depth, the full-backup input excludes current and legacy recovery-kit names, setup-credential names, staging files, and `important-documents-*.zip`; the final archive-listing validator rejects any that still appear. The emergency tier keeps its separately documented key-bearing contract.
+Setup credential handoffs and full recovery-kit documents live under `/root/vaultwarden-recovery/`, outside the project and normal state backup inputs. As defence in depth, one exclusion producer supplies both tar and `sudo make backup-manifest`. The manifest target executes the normal `backup.sh manifest` command, loads canonical installed configuration, and fails rather than printing default paths when that configuration cannot be read. The exclusions include configured backup/staging paths, live DB/WAL/SHM, runtime decrypted secrets, operational private keys inside archive source roots, restore scratch state, current and legacy recovery-kit names, setup-credential names, and `important-documents-*.zip`. The final archive-listing validator rejects forbidden recovery artifacts that still appear. The emergency tier keeps its separately documented key-bearing contract.
 
 Full recovery-kit export accepts a 30-minute systemd transient cleanup timer before offering email, with `at` only as an optional fallback. Scheduler failure removes the plaintext file and fails export. Successful encrypted email removes the local copy immediately; declined or failed email leaves it only until the accepted timer expires. Recovery-kit email uses an AES-256 encrypted ZIP, not TAR/GPG. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

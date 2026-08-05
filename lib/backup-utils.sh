@@ -4,8 +4,7 @@
 #
 # Provides:
 #   Listing    : list_backups, get_backup_statistics, get_backup_size
-#   Validation : validate_backup_integrity, verify_backup_integrity,
-#                check_backup_disk_space
+#   Validation : check_backup_disk_space
 #   Retention  : backup_retention_days_for_type, cleanup_old_backups,
 #                _backup_filename_timestamp_epoch, _backup_filename_age_days,
 #                _backup_ctime_age_days, _backup_newest_timestamped_archive
@@ -273,105 +272,7 @@ list_backups() {
 }
 
 # ---------------------------------------------------------------------------
-# validate_backup_integrity BACKUP_FILE [AGE_KEY_FILE]
-#
-# Validates a .age backup archive end-to-end:
-#   1. File exists and is large enough to be plausible.
-#   2. SHA-256 checksum matches the paired .sha256 sidecar (if present).
-#   3. age decryption succeeds (correct key, intact envelope).
-#   4. Inner gzip/tar stream is structurally valid.
-#      Step 3 alone cannot catch a backup where age encryption succeeded
-#      but the tar payload was truncated or silently corrupted; such a
-#      backup passes step 3 and is unusable at restore time. Step 4 pipes
-#      the decryption output directly into `tar -tz` (list only, no
-#      extraction, no state change) to exercise the full path.
-#
-# PIPESTATUS usage: the pipe `age -d ... | tar -tz` is run in a subshell
-# that captures both exit codes via "${PIPESTATUS[@]}". This is safe under
-# set -euo pipefail because the subshell itself is the last command before
-# the status capture; the outer script's errexit is not triggered by the
-# inner pipe failure.
-#
-# Decryption test uses direct redirect; avoids pipeline
-# PIPESTATUS trap under set -euo pipefail.
-# ---------------------------------------------------------------------------
-validate_backup_integrity() {
-    local backup_file="$1"
-    local age_key_file="${2:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
-
-    if [[ ! -f "$backup_file" ]]; then
-        log_error "Backup file not found: $backup_file"
-        return 1
-    fi
-
-    if [[ ! -f "$age_key_file" ]]; then
-        log_error "Age key file not found: $age_key_file"
-        return 1
-    fi
-
-    if ! command -v tar >/dev/null 2>&1; then
-        log_error "validate_backup_integrity: 'tar' not found — cannot validate inner archive stream"
-        return 1
-    fi
-
-    log_info "Validating backup integrity: $(basename "$backup_file")"
-
-    local file_size
-    file_size=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null || echo "0")
-
-    if (( file_size < 1024 )); then
-        log_error "Backup file suspiciously small (${file_size} bytes)"
-        return 1
-    fi
-
-    if [[ -f "$backup_file.sha256" ]]; then
-        local expected_checksum
-        expected_checksum=$(cat "$backup_file.sha256" 2>/dev/null)
-
-        if [[ -n "$expected_checksum" ]]; then
-            if ! verify_sha256 "$backup_file" "$expected_checksum"; then
-                log_error "Backup file checksum verification failed"
-                return 1
-            fi
-            log_success "Checksum verification passed"
-        fi
-    fi
-
-    # Decrypt once to a temp file, then use it for both checks.
-    # The previous two-pass approach (decrypt to /dev/null + decrypt|tar)
-    # creates a TOCTOU window: the file on disk could change between the passes,
-    # making pass 2 fail even though pass 1 succeeded. A single decrypt also
-    # halves the CPU/IO cost for large backups.
-    local _bku_tmpdir _dec_payload
-    _bku_tmpdir=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)
-    _dec_payload="$_bku_tmpdir/decrypted_payload"
-
-    local _age_rc=0
-    if ! age -d -i "$age_key_file" -o "$_dec_payload" "$backup_file" 2>/dev/null; then
-        _age_rc=$?
-        rm -rf "$_bku_tmpdir"
-        log_error "Backup file decryption failed (wrong key or corrupt age envelope, exit ${_age_rc})"
-        return 1
-    fi
-
-    log_success "Decryption succeeded (age envelope intact)"
-
-    if ! tar -tz -f "$_dec_payload" >/dev/null 2>&1; then
-        rm -rf "$_bku_tmpdir"
-        log_error "Backup tar-stream check failed: inner tar payload is corrupt or truncated"
-        log_error "  age decryption: OK  |  tar -tz: FAILED"
-        log_error "  The .age envelope is valid but the archive will not restore correctly."
-        return 1
-    fi
-
-    rm -rf "$_bku_tmpdir"
-
-    log_success "Backup integrity validation passed (age envelope OK, tar stream OK)"
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# verify_backup_integrity DB_PATH [AGE_KEY_FILE]
+# verify_backup_integrity DB_PATH
 #
 # Uses sqlite3 "$db_path" ".backup '$db_copy'" (SQLite Online Backup API)
 # which holds the necessary shared read lock across the entire copy, producing
@@ -383,7 +284,6 @@ validate_backup_integrity() {
 # ---------------------------------------------------------------------------
 verify_backup_integrity() {
     local db_path="$1"
-    local age_key_file="${2:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
 
     if [[ ! -f "$db_path" ]]; then
         log_error "Database file not found: $db_path"
@@ -459,6 +359,7 @@ get_backup_size() {
 check_backup_disk_space() {
     local target_dir="$1"
     local required_space_mb="${2:-1000}"
+    local label="${3:-backup}"
 
     if [[ ! -d "$target_dir" ]]; then
         log_warn "check_backup_disk_space: target directory does not exist yet — disk space check skipped: $target_dir"
@@ -466,24 +367,20 @@ check_backup_disk_space() {
     fi
 
     local available_space_kb
-    # Use awk 'END' (last line) instead of 'NR==2' to handle long
-    # filesystem paths that cause df to wrap output across two lines.
-    available_space_kb=$(df "$target_dir" 2>/dev/null | awk 'END {print $4}')
-
-    if [[ -z "$available_space_kb" ]] || ! [[ "$available_space_kb" =~ ^[0-9]+$ ]]; then
-        log_error "Cannot determine available disk space for: $target_dir"
+    available_space_kb="$(df -Pk "$target_dir" 2>/dev/null | awk 'END {print $4}')"
+    if [[ -z "$available_space_kb" || ! "$available_space_kb" =~ ^[0-9]+$ ]]; then
+        log_error "Cannot determine available disk space for ${label}: $target_dir"
         return 1
     fi
 
     local available_space_mb=$((available_space_kb / 1024))
-
     if (( available_space_mb < required_space_mb )); then
-        log_error "Insufficient disk space: need ${required_space_mb}MB, have ${available_space_mb}MB"
+        log_error "Insufficient space for ${label}: need ${required_space_mb}MB, have ${available_space_mb}MB at $target_dir"
+        log_error "Free space or choose a larger configured BACKUP_DIR, then retry. Check: df -h '$target_dir'"
         return 1
     fi
 
-    log_debug "Disk space check passed: ${available_space_mb}MB available (need ${required_space_mb}MB)"
-    return 0
+    log_debug "Disk space check passed for ${label}: ${available_space_mb}MB available (need ${required_space_mb}MB)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1031,7 +928,7 @@ validate_rclone_config_path() {
     return 0
 }
 
-export -f list_backups validate_backup_integrity check_backup_disk_space
+export -f list_backups check_backup_disk_space
 export -f backup_retention_days_for_type cleanup_old_backups get_backup_statistics
 # NOTE: keep create_backup_metadata local to this shell; older exported
 # versions caused noisy imported-function errors during apt/dpkg subprocesses.
