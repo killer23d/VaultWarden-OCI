@@ -358,6 +358,8 @@ CONTROL_WORKSPACE=""
 CONTROL_WORKSPACE_ID=""
 PAYLOAD_WORKSPACE=""
 PAYLOAD_WORKSPACE_ID=""
+PROMOTION_WORKSPACE=""
+PROMOTION_WORKSPACE_ID=""
 RESTORE_RETAIN_PAYLOAD=false
 RESTORE_RETAIN_REASON=""
 RESTORE_CLEANUP_DONE=false
@@ -412,6 +414,7 @@ _restore_create_owned_workspace() {
 _restore_remove_owned_workspace() {
     local path="$1" expected_id="$2" label="$3"
     [[ -n "$path" && -n "$expected_id" ]] || return 0
+    [[ ! -e "$path" && ! -L "$path" ]] && return 0
     _restore_workspace_is_owned "$path" "$expected_id" || {
         log_error "Refusing to clean unverified, replaced, or permission-mismatched ${label} workspace: $path"
         return 1
@@ -419,12 +422,16 @@ _restore_remove_owned_workspace() {
     rm -rf -- "$path"
 }
 
-_restore_log_retained_payload() {
-    local reason="${1:-manual recovery}" owner mode
-    owner="$(stat -c '%U:%G' "$PAYLOAD_WORKSPACE" 2>/dev/null || printf 'uid:%s' "$EUID")"
-    mode="$(stat -c '%a' "$PAYLOAD_WORKSPACE" 2>/dev/null || printf 'unknown')"
-    log_warn "Restore payload staging retained for ${reason}: $PAYLOAD_WORKSPACE"
+_restore_log_retained_workspace() {
+    local path="$1" label="$2" reason="${3:-manual recovery}" owner mode
+    owner="$(stat -c '%U:%G' "$path" 2>/dev/null || printf 'uid:%s' "$EUID")"
+    mode="$(stat -c '%a' "$path" 2>/dev/null || printf 'unknown')"
+    log_warn "Restore ${label} staging retained for ${reason}: $path"
     log_warn "Retained staging owner/mode: ${owner} ${mode} (expected mode 700)."
+}
+
+_restore_log_retained_payload() {
+    _restore_log_retained_workspace "$PAYLOAD_WORKSPACE" payload "${1:-manual recovery}"
 }
 
 _restore_retain_payload_for_manual_recovery() {
@@ -438,25 +445,53 @@ _restore_retain_payload_for_manual_recovery() {
 }
 
 cleanup() {
-    local rc="${1:-$?}"
+    local rc="${1:-$?}" final_rc cleanup_failed=false
     [[ "$RESTORE_CLEANUP_DONE" != "true" ]] || return "$rc"
     RESTORE_CLEANUP_DONE=true
-    operation_release "$rc" 2>/dev/null || true
+
     if [[ "$RESTORE_RETAIN_PAYLOAD" == "true" ]]; then
         _restore_log_retained_payload "${RESTORE_RETAIN_REASON:-manual recovery}"
     elif ! _restore_remove_owned_workspace "$PAYLOAD_WORKSPACE" "$PAYLOAD_WORKSPACE_ID" payload; then
         [[ -z "$PAYLOAD_WORKSPACE" ]] || _restore_log_retained_payload "manual inspection after cleanup refusal"
+        cleanup_failed=true
     fi
-    _restore_remove_owned_workspace "$CONTROL_WORKSPACE" "$CONTROL_WORKSPACE_ID" control || true
+
+    if ! _restore_remove_owned_workspace "$PROMOTION_WORKSPACE" "$PROMOTION_WORKSPACE_ID" promotion; then
+        [[ -z "$PROMOTION_WORKSPACE" ]] || _restore_log_retained_workspace \
+            "$PROMOTION_WORKSPACE" promotion "manual inspection after cleanup refusal"
+        cleanup_failed=true
+    fi
+
+    if ! _restore_remove_owned_workspace "$CONTROL_WORKSPACE" "$CONTROL_WORKSPACE_ID" control; then
+        [[ -z "$CONTROL_WORKSPACE" ]] || _restore_log_retained_workspace \
+            "$CONTROL_WORKSPACE" control "manual inspection after cleanup refusal"
+        cleanup_failed=true
+    fi
+
+    final_rc="$rc"
+    [[ "$cleanup_failed" != "true" || "$rc" -ne 0 ]] || final_rc=1
+    operation_release "$final_rc" 2>/dev/null || true
+
     PAYLOAD_WORKSPACE=""; PAYLOAD_WORKSPACE_ID=""
+    PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
     CONTROL_WORKSPACE=""; CONTROL_WORKSPACE_ID=""
-    return "$rc"
+    return "$final_rc"
 }
 
 _restore_signal_exit() {
     local rc="$1"
     trap - EXIT ERR HUP INT TERM
-    cleanup "$rc"
+    cleanup "$rc" || true
+    exit "$rc"
+}
+
+_restore_exit_cleanup() {
+    local rc="${1:-$?}" cleanup_rc=0
+    trap - EXIT ERR HUP INT TERM
+    cleanup "$rc" || cleanup_rc=$?
+    if [[ "$rc" -eq 0 && "$cleanup_rc" -ne 0 ]]; then
+        exit "$cleanup_rc"
+    fi
     exit "$rc"
 }
 
@@ -519,7 +554,8 @@ _restore_should_rotate_age_key() {
     fi
     return 0
 }
-trap 'cleanup $?' EXIT ERR
+trap '_restore_exit_cleanup $?' EXIT
+trap 'cleanup $?' ERR
 trap '_restore_signal_exit 130' INT
 trap '_restore_signal_exit 129' HUP
 trap '_restore_signal_exit 143' TERM
@@ -1879,7 +1915,7 @@ _restore_create_payload_workspace() {
         prefix=".$(basename "$state_dir").restore-payload"
     fi
     _restore_create_owned_workspace \
-        PAYLOAD_WORKSPACE PAYLOAD_WORKSPACE_ID "$parent" "$prefix"
+        PAYLOAD_WORKSPACE PAYLOAD_WORKSPACE_ID "$parent" "$prefix" || return 1
     log_info "Restore payload staging filesystem: $PAYLOAD_WORKSPACE"
 }
 
@@ -2696,26 +2732,22 @@ restore_full() {
             # the destructive swap. The payload workspace is already on the
             # target filesystem, but it is not the final rename source.
             local old_state_snapshot="" target_staging promotion_marker
-            target_staging="$(mktemp -d "${state_dir}.restore-staged.XXXXXXXX")" || {
+            _restore_create_owned_workspace \
+                PROMOTION_WORKSPACE PROMOTION_WORKSPACE_ID \
+                "$(dirname "$state_dir")" "$(basename "$state_dir").restore-workspace" || {
                 log_error "Failed to create target-filesystem restore staging sibling for $state_dir."
                 return 1
             }
+            target_staging="$PROMOTION_WORKSPACE/state"
 
             log_info "Materializing staged state on the target filesystem before promotion..."
-            if ! cp -a "$staging/$rel_source/." "$target_staging/" \
-                || ! chmod --reference="$staging/$rel_source" "$target_staging"; then
+            if ! cp -a "$staging/$rel_source" "$target_staging"; then
                 log_error "Failed to materialize staged state at $target_staging; live state has not been moved."
-                if ! rm -rf "$target_staging"; then
-                    log_warn "Incomplete target-filesystem restore staging retained for inspection: $target_staging"
-                fi
                 return 1
             fi
 
             promotion_marker="$(mktemp "$target_staging/.restore-promotion.XXXXXXXX")" || {
                 log_error "Failed to mark target-filesystem restore staging; live state has not been moved."
-                if ! rm -rf "$target_staging"; then
-                    log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
-                fi
                 return 1
             }
             promotion_marker="$(basename "$promotion_marker")"
@@ -2724,9 +2756,6 @@ restore_full() {
                 old_state_snapshot="${state_dir}.pre-restore-${ts}"
                 if ! mv "$state_dir" "$old_state_snapshot"; then
                     log_error "Failed to move live state into pre-restore snapshot; promotion was not attempted."
-                    if ! rm -rf "$target_staging"; then
-                        log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
-                    fi
                     return 1
                 fi
             fi
@@ -2734,7 +2763,6 @@ restore_full() {
             log_info "State payload restore phase: promoting target-filesystem staged state directory to live path..."
             if ! mv "$target_staging" "$state_dir"; then
                 log_error "Failed to promote target-filesystem staged state into $state_dir."
-                [[ -e "$target_staging" ]] && log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
                 if [[ -e "$state_dir" ]]; then
                     if [[ -e "$state_dir/$promotion_marker" ]]; then
                         log_warn "Removing incomplete canonical state created by the failed promotion attempt: $state_dir"
@@ -2764,6 +2792,10 @@ restore_full() {
                     fi
                 fi
                 return 1
+            fi
+            if _restore_remove_owned_workspace \
+                "$PROMOTION_WORKSPACE" "$PROMOTION_WORKSPACE_ID" promotion; then
+                PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
             fi
             if ! rm -f "$state_dir/$promotion_marker"; then
                 log_warn "Could not remove restore promotion marker: $state_dir/$promotion_marker"
@@ -2965,7 +2997,12 @@ main() {
     _configured_data_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
     if [[ "$INSPECT_ONLY" == "true" ]]; then
         _state_ready_required=false
-        log_warn "Inspect mode: skipping live project-state readiness enforcement; storage readiness will be reported by restore preflight."
+        if [[ -n "$_configured_data_device" ]]; then
+            log_info "Inspect mode: validating configured data-volume ownership before staging."
+            check_project_state_ready || exit 1
+        else
+            log_warn "Inspect mode: skipping live project-state readiness enforcement; storage readiness will be reported by restore preflight."
+        fi
     elif [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" && -z "$_configured_data_device" ]]; then
         _state_ready_required=false
         log_warn "Skipping project-state-ready check (--force --remote boot-volume/bootstrap mode)."
@@ -3193,7 +3230,7 @@ main() {
     RESTORE_DESTRUCTIVE_PHASE_STARTED=false
     _RESTORE_SAFETY_NET_RUNNING=false
     _restore_cleanup_once() {
-        cleanup "${1:-$?}"
+        cleanup "${1:-$?}" || true
     }
     _restore_safety_net() {
         local rc="${1:-$?}"
