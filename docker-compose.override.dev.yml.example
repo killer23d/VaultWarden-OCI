@@ -148,15 +148,15 @@ services:
         chmod +x /tmp/test-smtp.py &&
         echo '' &&
         echo '=====================================' &&
-        echo 'Email Tester Ready!'
-        echo '====================================='
-        echo ''
-        echo 'Usage:'
-        echo '  docker compose exec email-tester python3 /tmp/test-smtp.py'
-        echo ''
-        echo 'Test SMTP connectivity:'
-        echo '  docker compose exec email-tester nc -zv postfix 587'
-        echo ''
+        echo 'Email Tester Ready!' &&
+        echo '=====================================' &&
+        echo '' &&
+        echo 'Usage:' &&
+        echo '  docker compose exec email-tester python3 /tmp/test-smtp.py' &&
+        echo '' &&
+        echo 'Test SMTP connectivity:' &&
+        echo '  docker compose exec email-tester nc -zv postfix 587' &&
+        echo '' &&
         tail -f /dev/null
       "
     networks:
