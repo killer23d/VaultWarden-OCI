@@ -729,9 +729,11 @@ _restore_print_manual_start_checklist(){ log_warn "Services may be stopped."; }
 timeout(){ shift; "\$@"; }
 docker(){
   : > "$TMP/inspect-docker-stop.called"
-  if [[ "\${TEST_STOP_SIGNAL:-false}" == true \
-        && "\$*" == "compose stop --timeout 30" ]]; then
-    kill -TERM "\$\$"
+  if [[ "\$*" == "compose stop --timeout 30" ]]; then
+    case "\${TEST_STOP_SIGNAL:-}" in
+      TERM) kill -TERM "\$\$" ;;
+      INT) kill -INT "\$\$" ;;
+    esac
   fi
 }
 get_config_value(){
@@ -791,26 +793,30 @@ fi
 grep -q 'Services were not stopped' "$TMP/post-snapshot-capacity.out" \
   || fail 'post-snapshot capacity failure did not report the untouched service state'
 
-rm -rf "$TMP/inspect-control" "$TMP/inspect-payload"
-rm -f "$TMP/inspect-docker-stop.called" "$TMP/inspect-startup.called"
-set +e
-TEST_INSPECT_ONLY=false TEST_FORCE=true TEST_NO_PRE_BACKUP=true TEST_ROTATE_POLICY=skip \
-    TEST_STOP_SIGNAL=true \
-    bash "$TMP/inspect-main-probe.sh" >"$TMP/stop-signal.out" 2>&1
-stop_signal_rc=$?
-set -e
-[[ "$stop_signal_rc" -eq 143 ]] \
-  || { cat "$TMP/stop-signal.out" >&2; fail "TERM during service stop expected 143, got $stop_signal_rc"; }
-[[ -e "$TMP/inspect-docker-stop.called" ]] \
-  || fail 'service-stop TERM regression did not enter docker compose stop'
-! grep -q 'Restore failed before destructive phase' "$TMP/stop-signal.out" \
-  || fail 'TERM during service stop was reported as pre-destructive'
-! grep -qi 'services were not stopped' "$TMP/stop-signal.out" \
-  || fail 'TERM during service stop falsely reported untouched services'
-grep -q 'Services may be stopped' "$TMP/stop-signal.out" \
-  || fail 'TERM during service stop did not report possible stopped services'
-[[ ! -e "$TMP/inspect-startup.called" ]] \
-  || fail 'TERM during service stop attempted unsafe full-restore startup'
+for stop_signal_case in TERM:143 INT:130; do
+  IFS=: read -r stop_signal expected_rc <<< "$stop_signal_case"
+  stop_signal_out="$TMP/stop-${stop_signal}.out"
+  rm -rf "$TMP/inspect-control" "$TMP/inspect-payload"
+  rm -f "$TMP/inspect-docker-stop.called" "$TMP/inspect-startup.called"
+  set +e
+  TEST_INSPECT_ONLY=false TEST_FORCE=true TEST_NO_PRE_BACKUP=true TEST_ROTATE_POLICY=skip \
+      TEST_STOP_SIGNAL="$stop_signal" \
+      bash "$TMP/inspect-main-probe.sh" >"$stop_signal_out" 2>&1
+  stop_signal_rc=$?
+  set -e
+  [[ "$stop_signal_rc" -eq "$expected_rc" ]] \
+    || { cat "$stop_signal_out" >&2; fail "$stop_signal during service stop expected $expected_rc, got $stop_signal_rc"; }
+  [[ -e "$TMP/inspect-docker-stop.called" ]] \
+    || fail "service-stop $stop_signal regression did not enter docker compose stop"
+  ! grep -q 'Restore failed before destructive phase' "$stop_signal_out" \
+    || fail "$stop_signal during service stop was reported as pre-destructive"
+  ! grep -qi 'services were not stopped' "$stop_signal_out" \
+    || fail "$stop_signal during service stop falsely reported untouched services"
+  grep -q 'Services may be stopped' "$stop_signal_out" \
+    || fail "$stop_signal during service stop did not report possible stopped services"
+  [[ ! -e "$TMP/inspect-startup.called" ]] \
+    || fail "$stop_signal during service stop attempted unsafe full-restore startup"
+done
 
 # RDR-06: snapshot state and persisted operation phase are truthful.
 cat > "$TMP/snapshot-probe.sh" <<EOF_PROBE
