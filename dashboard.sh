@@ -48,9 +48,16 @@ CONTAINER_POSTFIX="vaultwarden_postfix"
 DIVIDER="--------------------------------------------------"
 
 # ---------------------------------------------------------------------------
-# State: current active menu
+# State: current active menu and redraw-local snapshots
 # ---------------------------------------------------------------------------
 ACTIVE_MENU="main"
+declare -A DASHBOARD_SERVICE_STATE=()
+declare -A DASHBOARD_SERVICE_HEALTH=()
+declare -A DASHBOARD_SERVICE_CONTAINER=()
+declare -A DASHBOARD_SERVICE_STARTED_AT=()
+DASHBOARD_COMPOSE_SNAPSHOT_OK=false
+NEWEST_BACKUP_PATH=""
+NEWEST_BACKUP_MTIME=0
 
 # ---------------------------------------------------------------------------
 # Signal / cleanup trap
@@ -194,45 +201,137 @@ draw_divider() {
 }
 
 # ---------------------------------------------------------------------------
-# _container_status_plain  — plain text Running / Stopped (no color codes)
-# _container_status        — color-coded Running / Stopped
+# Redraw-local Docker Compose snapshot and container presentation helpers
 # ---------------------------------------------------------------------------
-_container_status_plain() {
-    local name="$1"
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${name}"; then
-        printf 'Running'
-    else
-        printf 'Stopped'
+_capture_dashboard_process_snapshot() {
+    local compose_output="" rows="" inspect_output=""
+    local service container state health started_at
+    local -a services=(vaultwarden caddy postfix)
+    local -a inspect_targets=()
+    local -A service_by_container=()
+
+    DASHBOARD_SERVICE_STATE=()
+    DASHBOARD_SERVICE_HEALTH=()
+    DASHBOARD_SERVICE_CONTAINER=()
+    DASHBOARD_SERVICE_STARTED_AT=()
+    DASHBOARD_COMPOSE_SNAPSHOT_OK=false
+
+    command -v jq >/dev/null 2>&1 || return 1
+    if ! compose_output=$(docker compose --project-name vaultwarden-oci \
+        ps --all --format json 2>/dev/null); then
+        return 1
     fi
+    if ! rows=$(printf '%s\n' "${compose_output}" | jq -r -s \
+        --arg vw_container "${CONTAINER_VW}" \
+        --arg caddy_container "${CONTAINER_CADDY}" \
+        --arg postfix_container "${CONTAINER_POSTFIX}" '
+        (if length == 1 and (.[0] | type) == "array" then .[0] else . end)
+        | .[]
+        | (.Name // .Names // "") as $container
+        | select(
+$container == $vw_container
+or $container == $caddy_container
+or $container == $postfix_container
+          )
+        | [
+(if $container == $vw_container then "vaultwarden"
+ elif $container == $caddy_container then "caddy"
+ else "postfix"
+ end),
+$container,
+((.State // "unknown") | tostring | ascii_downcase),
+((.Health // "") | tostring | ascii_downcase)
+          ]
+        | @tsv
+    ' 2>/dev/null); then
+        return 1
+    fi
+
+    while IFS=$'\t' read -r service container state health; do
+        [[ -n "${service}" ]] || continue
+        DASHBOARD_SERVICE_STATE["${service}"]="${state}"
+        DASHBOARD_SERVICE_HEALTH["${service}"]="${health}"
+        DASHBOARD_SERVICE_CONTAINER["${service}"]="${container}"
+    done <<< "${rows}"
+    DASHBOARD_COMPOSE_SNAPSHOT_OK=true
+
+    for service in "${services[@]}"; do
+        state="${DASHBOARD_SERVICE_STATE[${service}]:-}"
+        container="${DASHBOARD_SERVICE_CONTAINER[${service}]:-}"
+        if [[ "${state}" == "running" && -n "${container}" ]]; then
+            inspect_targets+=("${container}")
+            service_by_container["${container}"]="${service}"
+        fi
+    done
+    ((${#inspect_targets[@]} > 0)) || return 0
+
+    inspect_output=""
+    if inspect_output=$(docker inspect --format '{{.Name}}|{{.State.StartedAt}}' \
+        "${inspect_targets[@]}" 2>/dev/null); then
+        :
+    fi
+    while IFS='|' read -r container started_at; do
+        container="${container#/}"
+        service="${service_by_container[${container}]:-}"
+        [[ -n "${service}" && -n "${started_at}" ]] || continue
+        DASHBOARD_SERVICE_STARTED_AT["${service}"]="${started_at}"
+    done <<< "${inspect_output}"
+}
+
+_container_status_plain() {
+    local service="$1" state health
+    if [[ "${DASHBOARD_COMPOSE_SNAPSHOT_OK}" != "true" ]]; then
+        printf 'Unknown'
+        return
+    fi
+    if [[ -z "${DASHBOARD_SERVICE_STATE[${service}]+_}" ]]; then
+        printf 'Missing'
+        return
+    fi
+
+    state="${DASHBOARD_SERVICE_STATE[${service}]}"
+    health="${DASHBOARD_SERVICE_HEALTH[${service}]:-}"
+    case "${state}" in
+        running)
+            case "${health}" in
+                healthy|'') printf 'Running' ;;
+                starting)   printf 'Starting' ;;
+                unhealthy)  printf 'Unhealthy' ;;
+                *)          printf 'Running (health unknown)' ;;
+            esac
+            ;;
+        exited|dead) printf 'Stopped' ;;
+        created)     printf 'Created' ;;
+        restarting)  printf 'Restarting' ;;
+        paused)      printf 'Paused' ;;
+        removing)    printf 'Removing' ;;
+        unknown|'')  printf 'Unknown' ;;
+        *)           printf 'Unknown (%s)' "${state}" ;;
+    esac
 }
 
 _container_status() {
     local status
     status="$(_container_status_plain "$1")"
-    if [[ "${status}" == "Running" ]]; then
-        printf "${GRN}Running${NC}"
-    else
-        printf "${RED}Stopped${NC}"
-    fi
+    case "${status}" in
+        Running)           printf '%s%s%s' "${GRN}" "${status}" "${NC}" ;;
+        Stopped|Unhealthy) printf '%s%s%s' "${RED}" "${status}" "${NC}" ;;
+        *)                 printf '%s%s%s' "${YLW}" "${status}" "${NC}" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
-# _container_uptime  — "Xd Yh" / "Xh Ym" / "Xm" uptime string (ux.md #47)
-#
-# Docker's {{.State.StartedAt}} returns RFC 3339 with nanoseconds, e.g.
-#   2026-06-01T12:00:00.123456789Z
-# Both the GNU 'date -d' and BSD 'date -j' paths strip the fractional-second
-# component before parsing to avoid silent failures on older glibc/coreutils.
+# _container_uptime — format a start time captured by the redraw snapshot
 # ---------------------------------------------------------------------------
 _container_uptime() {
-    local container="$1"
+    local service="$1"
     local started_at started_at_clean start_epoch now_epoch delta days hours mins
 
-    started_at=$(docker inspect --format '{{.State.StartedAt}}' \
-        "${container}" 2>/dev/null) || { printf 'unknown'; return; }
+    started_at="${DASHBOARD_SERVICE_STARTED_AT[${service}]:-}"
+    [[ -n "${started_at}" ]] || { printf 'unknown'; return; }
 
-    # Strip nanoseconds: "2026-06-01T12:00:00.123456789Z" -> "2026-06-01T12:00:00Z"
-    started_at_clean="${started_at%%.*}Z"
+    started_at_clean="${started_at%%.*}"
+    started_at_clean="${started_at_clean%Z}Z"
 
     start_epoch=$(date -d "${started_at_clean}" +%s 2>/dev/null \
         || date -j -f "%Y-%m-%dT%H:%M:%SZ" "${started_at_clean}" +%s 2>/dev/null \
@@ -252,6 +351,16 @@ _container_uptime() {
     if   (( days  > 0 )); then printf '%dd %dh' "${days}"  "${hours}"
     elif (( hours > 0 )); then printf '%dh %dm' "${hours}" "${mins}"
     else                       printf '%dm'     "${mins}"
+    fi
+}
+
+_container_summary() {
+    local service="$1" status
+    status="$(_container_status "${service}")"
+    if [[ "${DASHBOARD_SERVICE_STATE[${service}]:-}" == "running" ]]; then
+        printf '%s (up %s)' "${status}" "$(_container_uptime "${service}")"
+    else
+        printf '%s' "${status}"
     fi
 }
 
@@ -320,6 +429,25 @@ _secrets_health() {
 }
 
 # ---------------------------------------------------------------------------
+# _capture_newest_backup — retain path and timestamp from one directory pass
+# ---------------------------------------------------------------------------
+_capture_newest_backup() {
+    local backup_file backup_mtime
+    NEWEST_BACKUP_PATH=""
+    NEWEST_BACKUP_MTIME=0
+
+    while IFS= read -r -d '' backup_file; do
+        backup_mtime="$(stat -c '%Y' "${backup_file}" 2>/dev/null \
+            || stat -f '%m' "${backup_file}" 2>/dev/null || echo 0)"
+        if [[ "${backup_mtime}" =~ ^[0-9]+$ ]] \
+            && (( backup_mtime > NEWEST_BACKUP_MTIME )); then
+            NEWEST_BACKUP_PATH="${backup_file}"
+            NEWEST_BACKUP_MTIME="${backup_mtime}"
+        fi
+    done < <(find "${BACKUP_DIR}" -name '*.age' -type f -print0 2>/dev/null)
+}
+
+# ---------------------------------------------------------------------------
 # _rclone_status
 #
 # Returns a single color-coded status line describing rclone availability:
@@ -359,21 +487,17 @@ _rclone_status() {
 # ---------------------------------------------------------------------------
 # draw_live_stats
 # ---------------------------------------------------------------------------
+
 draw_live_stats() {
     draw_divider
 
     # --- Stack Health ---
-    local vw_plain vw_stat caddy_stat pf_stat vw_uptime=""
-    vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
-    if [[ "${vw_plain}" == "Running" ]]; then
-        vw_stat="${GRN}Running${NC}"
-        vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
-    else
-        vw_stat="${RED}Stopped${NC}"
-    fi
-    caddy_stat="$(_container_status "${CONTAINER_CADDY}")"
-    pf_stat="$(_container_status "${CONTAINER_POSTFIX}")"
-    echo -e " ${BLD}Stack:${NC}  VaultWarden ${vw_stat}${vw_uptime}  |  Caddy ${caddy_stat}  |  Postfix ${pf_stat}"
+    local vw_stat caddy_stat pf_stat
+    _capture_dashboard_process_snapshot || true
+    vw_stat="$(_container_summary vaultwarden)"
+    caddy_stat="$(_container_summary caddy)"
+    pf_stat="$(_container_summary postfix)"
+    echo -e " ${BLD}Stack:${NC}  VaultWarden ${vw_stat}  |  Caddy ${caddy_stat}  |  Postfix ${pf_stat}"
 
     # --- Disk Space ---
     local disk_info
@@ -421,27 +545,17 @@ draw_live_stats() {
     echo -e " ${BLD}Config placeholders:${NC}   ${secrets_stat}"
 
     # --- Last Backup ---
-    local last_backup_str newest_backup="" newest_mtime=0
-    while IFS= read -r -d '' backup_file; do
-        local backup_mtime
-        backup_mtime="$(stat -c '%Y' "${backup_file}" 2>/dev/null \
-            || stat -f '%m' "${backup_file}" 2>/dev/null || echo 0)"
-        if [[ "$backup_mtime" =~ ^[0-9]+$ ]] && (( backup_mtime > newest_mtime )); then
-            newest_mtime="$backup_mtime"
-            newest_backup="$backup_file"
-        fi
-    done < <(find "${BACKUP_DIR}" -name '*.age' -type f -print0 2>/dev/null)
-    if [[ -n "${newest_backup}" ]]; then
-        local mtime
-        mtime="$(stat -c '%Y' "${newest_backup}" 2>/dev/null \
-            || stat -f '%m' "${newest_backup}" 2>/dev/null || echo 0)"
-        last_backup_str="$(_epoch_to_pt "${mtime}") ($(basename "${newest_backup}"))"
+    local last_backup_str
+    _capture_newest_backup
+    if [[ -n "${NEWEST_BACKUP_PATH}" ]]; then
+        last_backup_str="$(_epoch_to_pt "${NEWEST_BACKUP_MTIME}") ($(basename "${NEWEST_BACKUP_PATH}"))"
     else
         last_backup_str="${YLW}No backups found${NC}"
     fi
     echo -e " ${BLD}Last backup:${NC}  ${last_backup_str}"
 
     # --- Rclone Status ---
+
     local rclone_stat
     rclone_stat="$(_rclone_status)"
     echo -e " ${BLD}Rclone:${NC}  ${rclone_stat}"

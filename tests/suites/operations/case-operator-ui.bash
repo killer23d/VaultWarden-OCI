@@ -250,6 +250,190 @@ printf 'Operator UI tests passed.\n'
 )
 
 check_operator_ui_contracts
+check_dashboard_process_snapshot_behavior() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d -t vw-dashboard-snapshot.XXXXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+fixture="$TMP/repo"
+bin="$TMP/bin"
+mkdir -p "$fixture" "$bin" "$TMP/counts" "$TMP/backups"
+cp "$ROOT/dashboard.sh" "$ROOT/VERSION" "$fixture/"
+ln -s "$ROOT/lib" "$fixture/lib"
+sed -i 's/^main "$@"$/: # fixture: do not auto-run dashboard/' "$fixture/dashboard.sh"
+
+cat > "$bin/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+increment() {
+    local file="$1" count=0
+    [[ -f "$file" ]] && count="$(<"$file")"
+    printf '%s\n' "$((count + 1))" > "$file"
+}
+
+scenario="${DASHBOARD_DOCKER_SCENARIO:-normal}"
+case "${1:-}" in
+    compose)
+        [[ "$*" == 'compose --project-name vaultwarden-oci ps --all --format json' ]] || exit 97
+        increment "${DASHBOARD_COMPOSE_COUNT_FILE:?}"
+        case "$scenario" in
+            normal)
+                cat <<'JSON'
+{"Service":"vaultwarden","Name":"vaultwarden_app","State":"running","Health":"healthy"}
+{"Service":"caddy","Name":"vaultwarden_caddy","State":"running","Health":"starting"}
+{"Service":"caddy","Name":"vaultwarden-oci-caddy-run-deadbeef","State":"exited","Health":""}
+JSON
+                ;;
+            unknown)
+                cat <<'JSON'
+[
+  {"Service":"vaultwarden","Name":"vaultwarden_app","State":"running","Health":"mystery"},
+  {"Service":"caddy","Name":"vaultwarden_caddy","State":"mystery","Health":"healthy"},
+  {"Service":"postfix","Name":"vaultwarden_postfix","State":"exited","Health":""}
+]
+JSON
+                ;;
+            error)
+                exit 1
+                ;;
+            *) exit 96 ;;
+        esac
+        ;;
+    inspect)
+        increment "${DASHBOARD_INSPECT_COUNT_FILE:?}"
+        printf '%s\n' "$*" >> "${DASHBOARD_INSPECT_ARGS_FILE:?}"
+        shift
+        [[ "${1:-}" == '--format' ]] || exit 95
+        shift 2
+        for container in "$@"; do
+            case "$container" in
+                vaultwarden_app|vaultwarden_caddy|vaultwarden_postfix)
+                    printf '/%s|2026-08-05T18:00:00.000000000Z\n' "$container"
+                    ;;
+            esac
+        done
+        ;;
+    ps)
+        printf 'forbidden docker ps: %s\n' "$*" >> "${DASHBOARD_FORBIDDEN_FILE:?}"
+        exit 94
+        ;;
+    *) exit 93 ;;
+esac
+MOCK_DOCKER
+
+cat > "$bin/stat" <<'MOCK_STAT'
+#!/usr/bin/env bash
+set -euo pipefail
+file="${@: -1}"
+name="${file##*/}"
+count_file="${DASHBOARD_STAT_COUNT_DIR:?}/$name"
+count=0
+[[ -f "$count_file" ]] && count="$(<"$count_file")"
+printf '%s\n' "$((count + 1))" > "$count_file"
+case "$name" in
+    older.age)  printf '100\n' ;;
+    middle.age) printf '200\n' ;;
+    newest.age) printf '300\n' ;;
+    *) exit 1 ;;
+esac
+MOCK_STAT
+chmod +x "$bin/docker" "$bin/stat"
+
+compose_count="$TMP/counts/compose"
+inspect_count="$TMP/counts/inspect"
+inspect_args="$TMP/counts/inspect-args"
+forbidden="$TMP/counts/forbidden"
+stat_counts="$TMP/counts/stat"
+mkdir -p "$stat_counts"
+: > "$compose_count"
+: > "$inspect_count"
+: > "$inspect_args"
+: > "$forbidden"
+
+export DASHBOARD_COMPOSE_COUNT_FILE="$compose_count"
+export DASHBOARD_INSPECT_COUNT_FILE="$inspect_count"
+export DASHBOARD_INSPECT_ARGS_FILE="$inspect_args"
+export DASHBOARD_FORBIDDEN_FILE="$forbidden"
+export DASHBOARD_STAT_COUNT_DIR="$stat_counts"
+export PATH="$bin:$PATH"
+
+# shellcheck source=/dev/null
+source "$fixture/dashboard.sh"
+
+printf '0\n' > "$compose_count"
+printf '0\n' > "$inspect_count"
+: > "$inspect_args"
+DASHBOARD_DOCKER_SCENARIO=normal
+export DASHBOARD_DOCKER_SCENARIO
+_capture_dashboard_process_snapshot || fail 'normal dashboard snapshot failed'
+[[ "$(<"$compose_count")" == 1 ]] || fail 'dashboard did not issue exactly one Compose query'
+[[ "$(<"$inspect_count")" == 1 ]] || fail 'dashboard did not issue one batched inspect'
+grep -Fq 'vaultwarden_app' "$inspect_args" || fail 'batched inspect omitted Vaultwarden'
+grep -Fq 'vaultwarden_caddy' "$inspect_args" || fail 'batched inspect omitted canonical Caddy'
+if grep -Fq 'vaultwarden-oci-caddy-run-deadbeef' "$inspect_args"; then
+    fail 'batched inspect included a Compose one-off container'
+fi
+[[ "${DASHBOARD_SERVICE_CONTAINER[caddy]}" == vaultwarden_caddy ]] \
+    || fail 'one-off Caddy row replaced the canonical container'
+[[ "$(_container_status_plain vaultwarden)" == Running ]] || fail 'healthy Vaultwarden was not Running'
+[[ "$(_container_status_plain caddy)" == Starting ]] || fail 'starting canonical Caddy health was not preserved'
+[[ "$(_container_status_plain postfix)" == Missing ]] || fail 'missing Postfix was not truthful'
+[[ "$(_container_uptime vaultwarden)" != unknown ]] || fail 'Vaultwarden uptime did not reuse batch inspection'
+[[ "$(_container_uptime caddy)" != unknown ]] || fail 'Caddy uptime did not reuse batch inspection'
+[[ ! -s "$forbidden" ]] || fail 'dashboard used per-container docker ps'
+
+printf '0\n' > "$compose_count"
+printf '0\n' > "$inspect_count"
+: > "$inspect_args"
+DASHBOARD_DOCKER_SCENARIO=unknown
+export DASHBOARD_DOCKER_SCENARIO
+_capture_dashboard_process_snapshot || fail 'unknown-state dashboard snapshot failed'
+[[ "$(<"$compose_count")" == 1 ]] || fail 'unknown-state redraw repeated Compose queries'
+[[ "$(<"$inspect_count")" == 1 ]] || fail 'unknown-state redraw did not batch running-container inspect'
+[[ "$(_container_status_plain vaultwarden)" == 'Running (health unknown)' ]] \
+    || fail 'unknown health was reported as healthy'
+[[ "$(_container_status_plain caddy)" == 'Unknown (mystery)' ]] \
+    || fail 'unknown Docker state was reported as stopped or healthy'
+[[ "$(_container_status_plain postfix)" == Stopped ]] || fail 'stopped Postfix was not preserved'
+
+printf '0\n' > "$compose_count"
+printf '0\n' > "$inspect_count"
+DASHBOARD_DOCKER_SCENARIO=error
+export DASHBOARD_DOCKER_SCENARIO
+if _capture_dashboard_process_snapshot; then
+    fail 'Compose query error unexpectedly succeeded'
+fi
+[[ "$(<"$compose_count")" == 1 ]] || fail 'error redraw repeated Compose queries'
+[[ "$(<"$inspect_count")" == 0 ]] || fail 'error redraw inspected containers'
+[[ "$(_container_status_plain vaultwarden)" == Unknown ]] \
+    || fail 'Compose error was reported as stopped or healthy'
+
+touch "$TMP/backups/older.age" "$TMP/backups/middle.age" "$TMP/backups/newest.age"
+BACKUP_DIR="$TMP/backups"
+_capture_newest_backup
+[[ "$NEWEST_BACKUP_PATH" == "$TMP/backups/newest.age" ]] || fail 'newest backup path was incorrect'
+[[ "$NEWEST_BACKUP_MTIME" == 300 ]] || fail 'newest backup timestamp was incorrect'
+for name in older.age middle.age newest.age; do
+    [[ "$(<"$stat_counts/$name")" == 1 ]] || fail "backup candidate $name was statted more than once"
+done
+newest_output="$(_epoch_to_pt "$NEWEST_BACKUP_MTIME") ($(basename "$NEWEST_BACKUP_PATH"))"
+[[ "$newest_output" == *'(newest.age)' ]] || fail 'newest backup output was incorrect'
+
+grep -Fq 'read -r -t 60' "$ROOT/dashboard.sh" || fail 'dashboard refresh interval changed'
+grep -Fq 'make -C "${REPO_ROOT}" restart' "$ROOT/dashboard.sh" || fail 'restart menu action changed'
+grep -Fq 'make -C "${REPO_ROOT}" down' "$ROOT/dashboard.sh" || fail 'stop menu action changed'
+grep -Fq 'make -C "${REPO_ROOT}" health-quick' "$ROOT/dashboard.sh" || fail 'health menu action changed'
+grep -Fq 'make -C "${REPO_ROOT}" diagnose' "$ROOT/dashboard.sh" || fail 'diagnose menu action changed'
+
+printf 'Dashboard process snapshot tests passed.\n'
+)
+
+check_dashboard_process_snapshot_behavior
 check_operator_cli_argument_contracts() (
 set -euo pipefail
 
