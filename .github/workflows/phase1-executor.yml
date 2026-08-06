@@ -3,6 +3,8 @@ name: Execute Phase 1 consolidation
 on:
   push:
     branches: [codex/phase1-executor]
+  pull_request:
+    branches: [delta]
 
 permissions:
   contents: write
