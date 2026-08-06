@@ -21,7 +21,10 @@ require_pattern 'require_project_state_ready \|\| exit 1' 'storage readiness mus
 pass 'restore-run refuses to skip storage readiness when DATA_VOLUME_DEVICE is configured'
 
 require_pattern '^set -E[[:alpha:]-]*[[:space:]]+pipefail' 'restore-run must enable ERR trap inheritance for restore functions'
-require_pattern 'trap _restore_safety_net ERR HUP INT TERM' 'restore-run must arm safety-net trap around stopped-service restore work'
+require_pattern "trap '_restore_safety_net \\$\?' ERR" 'restore-run must arm its error safety net around stopped-service restore work'
+require_pattern "trap '_restore_safety_net 129' HUP" 'restore-run must preserve HUP status in the destructive safety net'
+require_pattern "trap '_restore_safety_net 130' INT" 'restore-run must preserve INT status in the destructive safety net'
+require_pattern "trap '_restore_safety_net 143' TERM" 'restore-run must preserve TERM status in the destructive safety net'
 require_pattern 'bash "\$\{PROJECT_ROOT\}/startup.sh" --skip-pull' 'restore-run must invoke startup.sh --skip-pull'
 reject_pattern 'docker compose up -d --remove-orphans' 'restore-run must not directly start docker compose'
 pass 'restore-run invokes startup path instead of direct docker compose up'
@@ -162,6 +165,7 @@ RESTORE_TYPE="full"; FORCE="false"; INSPECT_ONLY="false"; SKIP_VERIFICATION="tru
 HARNESS
 {
     sed -n '/^_tar_filter_for_file()/,/^tar_validate_members()/p' "$RESTORE" | sed '$d'
+    sed -n '/^_stage_emergency_private_key_in_control_workspace()/,/^}/p' "$RESTORE"
     sed -n '/^restore_full()/,/^main()/p' "$RESTORE" | sed '$d'
 } >> "$HARNESS"
 cat >> "$HARNESS" <<'HARNESS'
@@ -246,6 +250,261 @@ grep -q 'Skipped runtime decrypted secrets' "$ROOT/utilities/restore-run.sh" || 
 )
 
 check_restore_behavior_contracts
+check_restore_payload_staging_contracts() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+RESTORE="$ROOT/utilities/restore-run.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+
+! grep -q 'TMPDIR_RESTORE' "$RESTORE" || fail 'large restore payloads still reference the single legacy tmpfs workspace'
+grep -Fq 'local dec_db="$PAYLOAD_WORKSPACE/db.sqlite3"' "$RESTORE" || fail 'DB decryption is not target-filesystem staged'
+grep -Fq 'local pull_dir="$PAYLOAD_WORKSPACE/remote_pull"' "$RESTORE" || fail 'remote encrypted downloads are not payload-staged'
+grep -Fq 'local age_err="$control_workspace/age-decrypt.err"' "$RESTORE" || fail 'full-restore diagnostics are not control-staged'
+grep -Fq 'local staged_key_file="$CONTROL_WORKSPACE/key_stage/restore-age-key.txt"' "$RESTORE" || fail 'pasted keys are not control-staged'
+# Secure placement, exact cleanup, cleanup refusal, and signal status/release.
+cat > "$TMP/workspace-probe.sh" <<EOF_PROBE
+set -euo pipefail
+log_info(){ :; }; log_warn(){ printf 'WARN %s\\n' "\$*"; }; log_error(){ printf 'ERROR %s\\n' "\$*" >&2; }
+get_config_value(){ [[ "\$1" == DATA_VOLUME_DEVICE ]] && printf '%s' "\${TEST_DEVICE:-}" || printf '%s' "\${2:-}"; }
+TEST_MOUNTPOINT=""
+_path_is_mountpoint(){ [[ "\$TEST_MOUNTPOINT" == "\$1" ]]; }
+operation_release(){ printf '%s\\n' "\$1" >> "$TMP/releases"; }
+CONTROL_WORKSPACE=""; CONTROL_WORKSPACE_ID=""; PAYLOAD_WORKSPACE=""; PAYLOAD_WORKSPACE_ID=""
+PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
+RESTORE_RETAIN_PAYLOAD=false; RESTORE_RETAIN_REASON=""
+RESTORE_CLEANUP_DONE=false
+$(_extract_func "$RESTORE" _restore_workspace_identity)
+$(_extract_func "$RESTORE" _restore_workspace_is_owned)
+$(_extract_func "$RESTORE" _restore_create_owned_workspace)
+$(_extract_func "$RESTORE" _restore_remove_owned_workspace)
+$(_extract_func "$RESTORE" _restore_log_retained_workspace)
+$(_extract_func "$RESTORE" _restore_log_retained_payload)
+$(_extract_func "$RESTORE" _restore_retain_payload_for_manual_recovery)
+$(_extract_func "$RESTORE" cleanup)
+$(_extract_func "$RESTORE" _restore_signal_exit)
+$(_extract_func "$RESTORE" _restore_exit_cleanup)
+$(_extract_func "$RESTORE" _restore_payload_parent)
+$(_extract_func "$RESTORE" _restore_create_payload_workspace)
+
+mkdir -p "$TMP/control-parent" "$TMP/boot/state"
+_restore_create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID "$TMP/control-parent" control
+_restore_create_payload_workspace "$TMP/boot/state"
+[[ "\$(dirname "\$PAYLOAD_WORKSPACE")" == "$TMP/boot" ]] || exit 10
+[[ "\$PAYLOAD_WORKSPACE" != "$TMP/boot/state"/* ]] || exit 11
+[[ "\$(stat -c %a "\$CONTROL_WORKSPACE")" == 700 && "\$(stat -c %a "\$PAYLOAD_WORKSPACE")" == 700 ]] || exit 12
+[[ "\$(stat -c %u "\$CONTROL_WORKSPACE")" == "\$EUID" && "\$(stat -c %u "\$PAYLOAD_WORKSPACE")" == "\$EUID" ]] || exit 13
+control_saved="\$CONTROL_WORKSPACE"; payload_saved="\$PAYLOAD_WORKSPACE"
+printf nearby > "$TMP/boot/nearby.keep"
+cleanup 0
+[[ ! -e "\$control_saved" && ! -e "\$payload_saved" && -f "$TMP/boot/nearby.keep" ]] || exit 14
+
+CONTROL_WORKSPACE=""; CONTROL_WORKSPACE_ID=""; PAYLOAD_WORKSPACE=""; PAYLOAD_WORKSPACE_ID=""
+PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
+RESTORE_RETAIN_PAYLOAD=false; RESTORE_RETAIN_REASON=""
+RESTORE_CLEANUP_DONE=false
+mkdir -p "$TMP/mounted"
+TEST_MOUNTPOINT="$TMP/mounted"
+_restore_create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID "$TMP/control-parent" cleanup-control
+_restore_create_payload_workspace "$TMP/mounted"
+[[ "\$(dirname "\$PAYLOAD_WORKSPACE")" == "$TMP/mounted" ]] || exit 15
+[[ "\$(basename "\$PAYLOAD_WORKSPACE")" == .vaultwarden-restore-payload.* ]] || exit 16
+case "\$(basename "\$PAYLOAD_WORKSPACE")" in data|caddy|logs|backups|secrets|config) exit 17;; esac
+control_saved="\$CONTROL_WORKSPACE"; payload_saved="\$PAYLOAD_WORKSPACE"
+chmod 0755 "\$control_saved" "\$payload_saved"
+set +e; ( _restore_exit_cleanup 0 ); cleanup_rc=\$?; set -e
+[[ "\$cleanup_rc" -eq 1 && -d "\$control_saved" && -d "\$payload_saved" ]] || exit 18
+chmod 0700 "\$control_saved" "\$payload_saved"
+rm -rf -- "\$control_saved" "\$payload_saved"
+
+(
+  CONTROL_WORKSPACE=""; CONTROL_WORKSPACE_ID=""; PAYLOAD_WORKSPACE=""; PAYLOAD_WORKSPACE_ID=""
+  PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
+  RESTORE_RETAIN_PAYLOAD=false; RESTORE_RETAIN_REASON=""
+  RESTORE_CLEANUP_DONE=false
+  TEST_MOUNTPOINT=""
+  mktemp(){ return 1; }
+  if _restore_create_payload_workspace "$TMP/boot/state"; then exit 181; fi
+  [[ -z "\$PAYLOAD_WORKSPACE" && -z "\$PAYLOAD_WORKSPACE_ID" ]] || exit 182
+)
+
+CONTROL_WORKSPACE=""; CONTROL_WORKSPACE_ID=""; PAYLOAD_WORKSPACE=""; PAYLOAD_WORKSPACE_ID=""
+PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
+RESTORE_RETAIN_PAYLOAD=false; RESTORE_RETAIN_REASON=""
+RESTORE_CLEANUP_DONE=false
+TEST_MOUNTPOINT=""
+_restore_create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID "$TMP/control-parent" signal-control
+_restore_create_payload_workspace "$TMP/boot/state"
+printf '%s\\n%s\\n' "\$CONTROL_WORKSPACE" "\$PAYLOAD_WORKSPACE" > "$TMP/signal-paths"
+set +e
+( _restore_signal_exit 143 )
+signal_rc=\$?
+set -e
+[[ "\$signal_rc" -eq 143 ]] || exit 19
+while IFS= read -r path; do [[ ! -e "\$path" ]] || exit 20; done < "$TMP/signal-paths"
+[[ "\$(tail -1 "$TMP/releases")" == 143 ]] || exit 21
+EOF_PROBE
+bash "$TMP/workspace-probe.sh" >"$TMP/workspace.out" 2>&1 || { cat "$TMP/workspace.out" >&2; fail 'secure workspace placement/cleanup probe failed'; }
+grep -q 'Refusing to clean unverified, replaced, or permission-mismatched payload workspace' "$TMP/workspace.out" || fail 'cleanup mismatch refusal was not reported'
+
+# Capacity failure must short-circuit before the modeled service stop.
+cat > "$TMP/capacity-probe.sh" <<EOF_PROBE
+set -euo pipefail
+log_info(){ :; }; log_error(){ printf 'ERROR %s\\n' "\$*" >&2; }
+df(){ printf 'Filesystem 1-blocks Used Available Use%% Mounted on\\nmock 4096 3072 1024 75%% /mock\\n'; }
+docker(){ : > "$TMP/capacity-stop.called"; }
+$(_extract_func "$RESTORE" _restore_require_available_bytes)
+mkdir -p "$TMP/capacity-target"
+if _restore_require_available_bytes "$TMP/capacity-target" 2048 payload; then docker compose stop; exit 30; fi
+[[ ! -e "$TMP/capacity-stop.called" ]] || exit 31
+EOF_PROBE
+bash "$TMP/capacity-probe.sh" >"$TMP/capacity.out" 2>&1 || fail 'insufficient-space preflight probe failed'
+grep -q 'Services were not stopped' "$TMP/capacity.out" || fail 'capacity failure did not state that services remain untouched'
+
+# Raw private-key recovery paths must normalize the file before shared validation.
+cat > "$TMP/raw-key-probe.sh" <<EOF_PROBE
+set -euo pipefail
+CONTROL_WORKSPACE="$TMP/key-control"; mkdir -m 700 -p "\$CONTROL_WORKSPACE"
+RECOVERY_KIT_FILE="$TMP/recovery-kit.txt"; RESTORE_RECOVERY_KIT_FILE=""
+KEY_FILE_ARG=""; RESTORE_AGE_KEY_FILE=""; RESTORE_DECRYPT_AGE_KEY_FILE=""
+DRY_RUN=false
+RAW_KEY='AGE-SECRET-KEY-1PRIVATEKEYMATERIAL'
+PUBLIC_KEY='age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'
+log_info(){ printf 'INFO %s\n' "\$*"; }; log_warn(){ printf 'WARN %s\n' "\$*"; }; log_error(){ printf 'ERROR %s\n' "\$*" >&2; }; log_success(){ printf 'SUCCESS %s\n' "\$*"; }; log_debug(){ :; }
+_age_key_countdown(){ sleep 30; }
+has_command(){ [[ "\$1" == age ]]; }
+_stat_octal_perms(){ stat -c '%a' "\$1"; }
+age-keygen(){
+  [[ "\${1:-}" == -y && -f "\${2:-}" ]] || return 1
+  grep -qxF "\$RAW_KEY" "\$2" || return 1
+  printf '%s\n' "\$PUBLIC_KEY"
+}
+age(){
+  local output="" arg
+  if [[ "\${1:-}" == -d ]]; then cat "\${!#}"; return; fi
+  while (( \$# )); do
+    arg="\$1"; shift
+    if [[ "\$arg" == -o ]]; then output="\${1:-}"; shift; fi
+  done
+  [[ -n "\$output" ]] || return 1
+  cat > "\$output"
+}
+$(_extract_func "$ROOT/lib/crypto.sh" _derive_age_public_key)
+$(_extract_func "$ROOT/lib/crypto.sh" check_age_key)
+$(_extract_func "$RESTORE" _stage_restore_age_key_line)
+$(_extract_func "$RESTORE" _load_recovery_kit)
+$(_extract_func "$RESTORE" _prompt_age_key)
+
+assert_normalized(){
+  local key_file="\$1"
+  [[ -f "\$key_file" && "\$(stat -c %a "\$key_file")" == 600 ]] || return 1
+  grep -qxF "# public key: \$PUBLIC_KEY" "\$key_file" || return 1
+  grep -qxF "\$RAW_KEY" "\$key_file"
+}
+
+case "\${1:-kit}" in
+  kit)
+    printf '%s\n' "\$RAW_KEY" > "\$RECOVERY_KIT_FILE"; chmod 600 "\$RECOVERY_KIT_FILE"
+    _load_recovery_kit
+    [[ "\$KEY_FILE_ARG" == "\$CONTROL_WORKSPACE/kit_stage/recovery-kit-age-key.txt" ]]
+    assert_normalized "\$KEY_FILE_ARG"
+    ;;
+  paste)
+    _prompt_age_key "$TMP/missing-configured-key.txt"
+    [[ "\$RESTORE_DECRYPT_AGE_KEY_FILE" == "\$CONTROL_WORKSPACE/key_stage/restore-age-key.txt" ]]
+    assert_normalized "\$RESTORE_DECRYPT_AGE_KEY_FILE"
+    ;;
+  *) exit 2 ;;
+esac
+EOF_PROBE
+bash "$TMP/raw-key-probe.sh" kit >"$TMP/raw-key-kit.out" 2>&1 \
+  || { cat "$TMP/raw-key-kit.out" >&2; fail 'raw recovery-kit Age key was not normalized and accepted'; }
+! grep -Fq 'PRIVATEK' "$TMP/raw-key-kit.out" \
+  || fail 'recovery-kit output exposed private Age key material'
+printf '%s\n' 'AGE-SECRET-KEY-1PRIVATEKEYMATERIAL' \
+  | script -qfec "bash '$TMP/raw-key-probe.sh' paste" /dev/null >"$TMP/raw-key-paste.out" 2>&1 \
+  || { cat "$TMP/raw-key-paste.out" >&2; fail 'pasted raw Age key was not normalized and accepted'; }
+
+# Local/remote DB and full payloads, remote sidecars, and emergency private-key separation.
+cat > "$TMP/payload-flow-probe.sh" <<EOF_PROBE
+set -euo pipefail
+PAYLOAD_WORKSPACE="$TMP/payload"; CONTROL_WORKSPACE="$TMP/control"; mkdir -p "\$PAYLOAD_WORKSPACE" "\$CONTROL_WORKSPACE"
+RCLONE_CONFIG_ARG=(); BACKUP_FILE=""; RESTORE_TYPE=""; STATE_DIR="$TMP/state"; mkdir -p "\$STATE_DIR/data"
+SKIP_VERIFICATION=false; EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""; RESTORE_EMERGENCY_STAGED_KEY_FILE=""
+log_info(){ :; }; log_error(){ printf 'ERROR %s\\n' "\$*" >&2; }; log_hint(){ :; }; log_warn(){ :; }
+check_archive_dependencies(){ return 0; }; _restore_require_available_bytes(){ return 0; }
+verify_sqlite(){ return 0; }; _restore_preflight_db_commit_capacity(){ return 0; }
+sqlite3(){ printf '1\\n'; }
+age(){
+  local out="" input="\${!#}"
+  while (( \$# )); do [[ "\$1" == -o ]] && { out="\$2"; shift; }; shift; done
+  printf sqlite > "\$out"; printf '%s\\n' "\$input" >> "$TMP/db-inputs"
+}
+rclone(){
+  local cmd="\$1"; shift
+  if [[ "\$cmd" == lsl ]]; then printf '128 2026-08-05 12:00:00.000000000 %s\\n' "\$(basename "\$1")"; return 0; fi
+  [[ "\$cmd" == copy ]] || return 1
+  local src="\$1" dest="\$2"; mkdir -p "\$dest"
+  printf remote > "\$dest/\$(basename "\$src")"
+}
+$(_extract_func "$RESTORE" pull_remote_backup)
+$(_extract_func "$RESTORE" _stage_db_restore_for_preflight)
+$(_extract_func "$RESTORE" _decrypt_restore_archive_for_preflight)
+$(_extract_func "$RESTORE" _stage_emergency_private_key_in_control_workspace)
+_restore_backup_encryption_mode(){ printf '%s' age-recipient; }
+_age_decrypt_restore_backup(){ printf archive > "\$3"; printf '%s\\n' "\$1" >> "$TMP/full-inputs"; }
+_restore_age_no_identity_guidance(){ :; }
+
+rm -rf "\$PAYLOAD_WORKSPACE/remote_pull"
+for kind in db full; do
+  pull_remote_backup "mock:backups/\$kind/\$kind.tar.zst.age" "\$kind"
+  [[ "\$BACKUP_FILE" == "\$PAYLOAD_WORKSPACE/remote_pull/\$kind.tar.zst.age" ]] || exit 40
+  for suffix in .sha256 .meta; do [[ -f "\${BACKUP_FILE}\${suffix}" ]] || exit 41; done
+done
+
+printf local > "$TMP/local-db.age"
+rm -f "\$PAYLOAD_WORKSPACE/db.sqlite3"
+_stage_db_restore_for_preflight "$TMP/local-db.age" key "\$STATE_DIR"
+[[ -f "\$PAYLOAD_WORKSPACE/db.sqlite3" ]] || exit 42
+remote_db="\$PAYLOAD_WORKSPACE/remote_pull/db.tar.zst.age"
+rm -f "\$PAYLOAD_WORKSPACE/db.sqlite3"
+_stage_db_restore_for_preflight "\$remote_db" key "\$STATE_DIR"
+[[ -f "\$PAYLOAD_WORKSPACE/db.sqlite3" ]] || exit 43
+grep -qxF "$TMP/local-db.age" "$TMP/db-inputs" || exit 44
+grep -qxF "\$remote_db" "$TMP/db-inputs" || exit 45
+
+printf local > "$TMP/local-full.tar.zst.age"
+local_dec="\$(_decrypt_restore_archive_for_preflight "$TMP/local-full.tar.zst.age" key "\$PAYLOAD_WORKSPACE" "\$CONTROL_WORKSPACE")"
+remote_full="\$PAYLOAD_WORKSPACE/remote_pull/full.tar.zst.age"
+remote_dec="\$(_decrypt_restore_archive_for_preflight "\$remote_full" key "\$PAYLOAD_WORKSPACE" "\$CONTROL_WORKSPACE")"
+[[ "\$local_dec" == "\$PAYLOAD_WORKSPACE/local-full.tar.zst" && "\$remote_dec" == "\$PAYLOAD_WORKSPACE/full.tar.zst" ]] || exit 46
+
+RESTORE_TYPE=emergency
+mkdir -p "\$PAYLOAD_WORKSPACE/stage/etc/vaultwarden"
+printf private > "\$PAYLOAD_WORKSPACE/stage/etc/vaultwarden/age-key.txt"
+_stage_emergency_private_key_in_control_workspace "\$PAYLOAD_WORKSPACE/stage"
+[[ ! -e "\$PAYLOAD_WORKSPACE/stage/etc/vaultwarden/age-key.txt" ]] || exit 47
+[[ -f "\$RESTORE_EMERGENCY_STAGED_KEY_FILE" && "\$(stat -c %a "\$RESTORE_EMERGENCY_STAGED_KEY_FILE")" == 600 ]] || exit 48
+[[ "\$RESTORE_EMERGENCY_STAGED_KEY_FILE" == "\$CONTROL_WORKSPACE/"* ]] || exit 49
+EOF_PROBE
+bash "$TMP/payload-flow-probe.sh" >"$TMP/payload-flow.out" 2>&1 || { cat "$TMP/payload-flow.out" >&2; fail 'local/remote restore payload flow probe failed'; }
+
+printf 'PASS: split restore control/payload staging and pre-stop capacity contracts\n'
+)
+
+check_restore_payload_staging_contracts
 check_restore_dr_transaction_contracts() (
 set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
@@ -301,15 +560,20 @@ bash "$TMP/decrypt-mode-probe.sh" || fail 'emergency decrypt dispatch did not fa
 # RDR-01: remote emergency primary is not exposed without its matching metadata sidecar.
 cat > "$TMP/remote-meta-probe.sh" <<EOF_PROBE
 set -uo pipefail
-TMPDIR_RESTORE="$TMP/remote-work"
+PAYLOAD_WORKSPACE="$TMP/remote-work"
 RCLONE_CONFIG_ARG=()
 BACKUP_FILE=sentinel-backup
 RESTORE_TYPE=sentinel-type
+STATE_DIR="$TMP/remote-state"
+mkdir -p "\$PAYLOAD_WORKSPACE" "\$STATE_DIR"
 log_info(){ printf 'INFO %s\\n' "\$*"; }
 log_error(){ printf 'ERROR %s\\n' "\$*"; }
+check_archive_dependencies(){ return 0; }
+_restore_require_available_bytes(){ return 0; }
 rclone(){
   local cmd="\$1"; shift
-  [[ "\$cmd" == copy ]] || return 0
+  if [[ "\$cmd" == lsl ]]; then printf '7 2026-08-05 12:00:00.000000000 emergency-test.age\\n'; return 0; fi
+  [[ "\$cmd" == copy ]] || return 1
   local src="\$1" dest="\$2"
   case "\$src" in
     *.meta|*.sha256) return 1 ;;
@@ -404,23 +668,24 @@ EOF_STARTUP
 chmod +x "$inspect_project/startup.sh"
 cat > "$TMP/inspect-main-probe.sh" <<EOF_PROBE
 set -u
-TMPDIR_RESTORE=""
-trap 'rm -rf "\${TMPDIR_RESTORE:-}"' EXIT
 LIST_ONLY=false
 LIST_REMOTE=false
-INSPECT_ONLY=true
+INSPECT_ONLY="\${TEST_INSPECT_ONLY:-true}"
 DRY_RUN=false
-FORCE=false
+FORCE="\${TEST_FORCE:-false}"
 USE_REMOTE=false
-NO_PRE_BACKUP=true
+NO_PRE_BACKUP="\${TEST_NO_PRE_BACKUP:-true}"
 RESTORE_TYPE=full
 BACKUP_FILE="$inspect_backup"
-ROTATE_AGE_KEY_POLICY=""
+ROTATE_AGE_KEY_POLICY="\${TEST_ROTATE_POLICY:-}"
 START_POLICY=auto
 RESTORE_ENV=true
 SKIP_VERIFICATION=true
 DATA_VOLUME_MOUNT=""
 DATA_VOLUME_DEVICE=""
+CONTROL_WORKSPACE=""
+PAYLOAD_WORKSPACE=""
+MOCK_AVAILABLE_BYTES=4096
 PROJECT_ROOT="$inspect_project"
 SCRIPT_DIR="$inspect_project"
 log_header(){ :; }
@@ -431,21 +696,52 @@ log_success(){ printf 'SUCCESS %s\\n' "\$*"; }
 load_env_file(){ return 0; }
 check_dependencies(){ return 0; }
 require_root(){ return 0; }
+operation_acquire(){ return 0; }
+operation_set_phase(){ return 0; }
 auto_fix_critical_permissions(){ return 0; }
+check_project_state_ready(){ [[ "\${TEST_INSPECT_SENTINEL:-present}" == present ]]; }
 require_project_state_ready(){ return 0; }
+_restore_create_control_workspace(){ CONTROL_WORKSPACE="$TMP/inspect-control"; mkdir -p "\$CONTROL_WORKSPACE"; }
+_restore_create_payload_workspace(){ : > "$TMP/inspect-payload.called"; PAYLOAD_WORKSPACE="$TMP/inspect-payload"; mkdir -p "\$PAYLOAD_WORKSPACE"; }
+_restore_preflight_local_decrypt_capacity(){ return 0; }
+_restore_preflight_archive_expansion_capacity(){
+  if (( MOCK_AVAILABLE_BYTES < 2048 )); then
+    log_error "Insufficient target space after pre-restore snapshot. Services were not stopped."
+    return 1
+  fi
+  return 0
+}
+create_pre_restore_snapshot(){
+  [[ "\${TEST_SNAPSHOT_CONSUMES_SPACE:-false}" == true ]] && MOCK_AVAILABLE_BYTES=1024
+  : > "$TMP/inspect-snapshot.called"
+}
+_set_snapshot_operation_phase(){ return 0; }
 _load_recovery_kit(){ return 0; }
 resolve_backup_file(){ return 0; }
 _print_restore_plan_summary(){ return 0; }
 _prompt_age_key(){ RESTORE_DECRYPT_AGE_KEY_FILE=unused; return 0; }
 _require_selected_archive_tools(){ return 0; }
 _rotate_age_key(){ : > "$TMP/inspect-rotate.called"; }
-_decrypt_restore_archive_for_preflight(){ printf '%s\\n' "$inspect_archive"; }
-docker(){ : > "$TMP/inspect-docker-stop.called"; }
+_decrypt_restore_archive_for_preflight(){ : > "$TMP/inspect-decrypt.called"; printf '%s\\n' "$inspect_archive"; }
+cleanup(){ return 0; }
+_can_safe_restart(){ return 1; }
+_restore_print_manual_start_checklist(){ log_warn "Services may be stopped."; }
+timeout(){ shift; "\$@"; }
+docker(){
+  : > "$TMP/inspect-docker-stop.called"
+  if [[ "\$*" == "compose stop --timeout 30" ]]; then
+    case "\${TEST_STOP_SIGNAL:-}" in
+      TERM) kill -TERM "\$\$" ;;
+      INT) kill -INT "\$\$" ;;
+    esac
+  fi
+}
 get_config_value(){
   case "\$1" in
     PROJECT_STATE_DIR) printf '%s' "$inspect_state" ;;
     BACKUP_DIR) printf '%s' "$TMP" ;;
     SOPS_AGE_KEY_FILE) printf '%s' "$TMP/inspect-age-key.txt" ;;
+    DATA_VOLUME_DEVICE) printf '%s' "\${TEST_DATA_VOLUME_DEVICE:-}" ;;
     PUID|PGID) printf '%s' 1000 ;;
     *) printf '%s' "\${2:-}" ;;
   esac
@@ -462,6 +758,8 @@ $(_extract_func "$RESTORE" _detect_storage_mode)
 $(_extract_func "$RESTORE" _restore_required_dirs)
 $(_extract_func "$RESTORE" _restore_inspect_archive_layout)
 $(_extract_func "$RESTORE" restore_full_preflight)
+$(_extract_func "$RESTORE" tar_validate_members)
+$(_extract_func "$RESTORE" check_traversal_only)
 $(_extract_func "$RESTORE" main)
 main
 EOF_PROBE
@@ -471,6 +769,54 @@ grep -q 'Inspect mode complete — no services stopped, no files restored, no ke
 [[ ! -e "$TMP/inspect-docker-stop.called" ]] || fail 'inspect-only main path invoked docker'
 [[ ! -e "$TMP/inspect-rotate.called" ]] || fail 'inspect-only main path attempted key rotation'
 [[ ! -e "$TMP/inspect-startup.called" ]] || fail 'inspect-only main path invoked startup.sh'
+
+rm -rf "$TMP/inspect-control" "$TMP/inspect-payload"
+rm -f "$TMP/inspect-payload.called" "$TMP/inspect-decrypt.called"
+if TEST_DATA_VOLUME_DEVICE=/dev/mock TEST_INSPECT_SENTINEL=missing \
+    bash "$TMP/inspect-main-probe.sh" >"$TMP/inspect-missing-sentinel.out" 2>&1; then
+  fail 'inspect with configured volume and missing sentinel unexpectedly staged decrypted data'
+fi
+[[ ! -e "$TMP/inspect-payload.called" && ! -e "$TMP/inspect-decrypt.called" ]] \
+  || fail 'inspect created payload staging or decrypted data before volume ownership validation'
+
+rm -rf "$TMP/inspect-control" "$TMP/inspect-payload"
+rm -f "$TMP/inspect-snapshot.called" "$TMP/inspect-docker-stop.called"
+if TEST_INSPECT_ONLY=false TEST_FORCE=true TEST_NO_PRE_BACKUP=false TEST_ROTATE_POLICY=skip \
+    TEST_SNAPSHOT_CONSUMES_SPACE=true \
+    bash "$TMP/inspect-main-probe.sh" >"$TMP/post-snapshot-capacity.out" 2>&1; then
+  fail 'restore unexpectedly continued after the snapshot consumed reserved capacity'
+fi
+[[ -e "$TMP/inspect-snapshot.called" ]] \
+  || fail 'post-snapshot capacity regression did not create the modeled safety snapshot'
+[[ ! -e "$TMP/inspect-docker-stop.called" ]] \
+  || fail 'post-snapshot capacity failure reached docker compose stop'
+grep -q 'Services were not stopped' "$TMP/post-snapshot-capacity.out" \
+  || fail 'post-snapshot capacity failure did not report the untouched service state'
+
+for stop_signal_case in TERM:143 INT:130; do
+  IFS=: read -r stop_signal expected_rc <<< "$stop_signal_case"
+  stop_signal_out="$TMP/stop-${stop_signal}.out"
+  rm -rf "$TMP/inspect-control" "$TMP/inspect-payload"
+  rm -f "$TMP/inspect-docker-stop.called" "$TMP/inspect-startup.called"
+  set +e
+  TEST_INSPECT_ONLY=false TEST_FORCE=true TEST_NO_PRE_BACKUP=true TEST_ROTATE_POLICY=skip \
+      TEST_STOP_SIGNAL="$stop_signal" \
+      bash "$TMP/inspect-main-probe.sh" >"$stop_signal_out" 2>&1
+  stop_signal_rc=$?
+  set -e
+  [[ "$stop_signal_rc" -eq "$expected_rc" ]] \
+    || { cat "$stop_signal_out" >&2; fail "$stop_signal during service stop expected $expected_rc, got $stop_signal_rc"; }
+  [[ -e "$TMP/inspect-docker-stop.called" ]] \
+    || fail "service-stop $stop_signal regression did not enter docker compose stop"
+  ! grep -q 'Restore failed before destructive phase' "$stop_signal_out" \
+    || fail "$stop_signal during service stop was reported as pre-destructive"
+  ! grep -qi 'services were not stopped' "$stop_signal_out" \
+    || fail "$stop_signal during service stop falsely reported untouched services"
+  grep -q 'Services may be stopped' "$stop_signal_out" \
+    || fail "$stop_signal during service stop did not report possible stopped services"
+  [[ ! -e "$TMP/inspect-startup.called" ]] \
+    || fail "$stop_signal during service stop attempted unsafe full-restore startup"
+done
 
 # RDR-06: snapshot state and persisted operation phase are truthful.
 cat > "$TMP/snapshot-probe.sh" <<EOF_PROBE
@@ -599,12 +945,29 @@ PUID="$(id -u)"
 PGID="$(id -g)"
 EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""
 SECRETS_FILE=""
+CONTROL_WORKSPACE=""; CONTROL_WORKSPACE_ID=""
+PAYLOAD_WORKSPACE=""; PAYLOAD_WORKSPACE_ID=""
+PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
+RESTORE_RETAIN_PAYLOAD=false; RESTORE_RETAIN_REASON=""
+RESTORE_CLEANUP_DONE=false
+operation_release(){ :; }
 HARNESS
 {
+  sed -n '/^_restore_workspace_identity()/,/^}/p' "$RESTORE"
+  sed -n '/^_restore_workspace_is_owned()/,/^}/p' "$RESTORE"
+  sed -n '/^_restore_create_owned_workspace()/,/^}/p' "$RESTORE"
+  sed -n '/^_restore_remove_owned_workspace()/,/^}/p' "$RESTORE"
+  sed -n '/^_restore_log_retained_workspace()/,/^}/p' "$RESTORE"
+  sed -n '/^_restore_log_retained_payload()/,/^}/p' "$RESTORE"
+  sed -n '/^_restore_retain_payload_for_manual_recovery()/,/^}/p' "$RESTORE"
+  sed -n '/^cleanup()/,/^}/p' "$RESTORE"
+  sed -n '/^_restore_signal_exit()/,/^}/p' "$RESTORE"
   sed -n '/^_can_safe_restart()/,/^}/p' "$RESTORE"
   sed -n '/^_tar_filter_for_file()/,/^tar_validate_members()/p' "$RESTORE" | sed '$d'
+  sed -n '/^_stage_emergency_private_key_in_control_workspace()/,/^}/p' "$RESTORE"
   sed -n '/^restore_full()/,/^main()/p' "$RESTORE" | sed '$d'
 } >> "$RESTORE_HARNESS"
+printf '%s\n' "trap 'cleanup \$?' EXIT ERR" >> "$RESTORE_HARNESS"
 
 # RDR-03: materialization failure leaves the live same-layout generation untouched.
 materialize_state="$TMP/materialize-state"
@@ -625,7 +988,8 @@ RESTORE_PREFLIGHT_SOURCE_ROOT="$materialize_state"
 STARTUP_MARKER="$TMP/materialize-startup.called"
 _can_safe_restart(){ : > "\$STARTUP_MARKER"; return 1; }
 cp(){
-  if [[ "\${1:-}" == -a && "\${2:-}" == "$materialize_work/stage/${materialize_state#/}/." && "\${3:-}" == "$materialize_state".restore-staged.* ]]; then
+  if [[ "\${1:-}" == -a && "\${2:-}" == "$materialize_work/stage/${materialize_state#/}" \
+        && "\${3:-}" == "$materialize_state".restore-workspace.*/state ]]; then
     : > "$TMP/materialize-copy-failed"
     return 66
   fi
@@ -642,8 +1006,38 @@ if TEST_PROJECT_ROOT="$TMP/materialize-project" bash "$TMP/materialize-fail-prob
 grep -qx old "$materialize_state/generation" || fail 'target-filesystem materialization failure changed live generation'
 [[ ! -e "$TMP/materialize-live-move-attempted" ]] || fail 'target-filesystem materialization failure moved the live generation'
 [[ ! -e "$TMP/materialize-startup.called" ]] || fail 'target-filesystem materialization failure reached startup eligibility'
-! compgen -G "$materialize_state.restore-staged.*" >/dev/null || fail 'failed target-filesystem materialization left an unclean staging sibling'
+! compgen -G "$materialize_state.restore-workspace.*" >/dev/null || fail 'failed target-filesystem materialization left an unclean staging sibling'
 ! grep -q 'Full restore promotion completed' "$TMP/materialize.out" || fail 'target-filesystem materialization failure printed promotion success'
+
+rm -f "$TMP/materialize-term-paths"
+cat > "$TMP/materialize-term-probe.sh" <<EOF_PROBE
+source "$RESTORE_HARNESS"
+RESTORE_PREFLIGHT_SOURCE_ROOT="$materialize_state"
+_restore_create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID "$TMP" materialize-control
+_restore_create_owned_workspace PAYLOAD_WORKSPACE PAYLOAD_WORKSPACE_ID "$TMP" materialize-payload
+cp "$TMP/materialize.tar.gz" "\$PAYLOAD_WORKSPACE/materialize.tar.gz"
+trap '_restore_signal_exit 143' TERM
+cp(){
+  if [[ "\${1:-}" == -a && "\${2:-}" == "\$PAYLOAD_WORKSPACE/stage/${materialize_state#/}" \
+        && "\${3:-}" == "$materialize_state".restore-workspace.*/state ]]; then
+    command cp "\$@"
+    printf '%s\n%s\n%s\n' "\$CONTROL_WORKSPACE" "\$PAYLOAD_WORKSPACE" "\$PROMOTION_WORKSPACE" \
+      > "$TMP/materialize-term-paths"
+    kill -TERM \$\$
+    return 143
+  fi
+  command cp "\$@"
+}
+restore_full "$TMP/materialize.tar.gz.age" unused "$materialize_state" "\$PUID" "\$PGID" "\$PAYLOAD_WORKSPACE" relative
+EOF_PROBE
+set +e
+TEST_PROJECT_ROOT="$TMP/materialize-project" bash "$TMP/materialize-term-probe.sh" >"$TMP/materialize-term.out" 2>&1
+materialize_term_rc=$?
+set -e
+[[ "$materialize_term_rc" -eq 143 ]] || { cat "$TMP/materialize-term.out" >&2; fail "materialization TERM expected 143, got $materialize_term_rc"; }
+grep -qx old "$materialize_state/generation" || fail 'materialization TERM changed the live generation'
+while IFS= read -r path; do [[ ! -e "$path" ]] || fail "materialization TERM left decrypted staging: $path"; done < "$TMP/materialize-term-paths"
+! compgen -G "$materialize_state.restore-workspace.*" >/dev/null || fail 'materialization TERM left an untracked promotion sibling'
 
 # RDR-03: a partial canonical destination from the second rename is removed before rollback.
 rollback_state="$TMP/rollback-state"
@@ -663,7 +1057,7 @@ cat > "$TMP/rollback-probe.sh" <<EOF_PROBE
 source "$RESTORE_HARNESS"
 RESTORE_PREFLIGHT_SOURCE_ROOT="$rollback_state"
 mv(){
-  if [[ "\${1:-}" == "$rollback_state".restore-staged.* && "\${2:-}" == "$rollback_state" ]]; then
+  if [[ "\${1:-}" == "$rollback_state".restore-workspace.*/state && "\${2:-}" == "$rollback_state" ]]; then
     command mkdir -p "$rollback_state"
     local_marker="\$(find "\$1" -maxdepth 1 -name '.restore-promotion.*' -print -quit)"
     [[ -n "\$local_marker" ]] && command cp -a "\$local_marker" "$rollback_state/"
@@ -701,7 +1095,7 @@ _tar_extract_archive(){
   command tar -z -xf "\$1" -C "\$2" --no-same-owner --no-same-permissions
 }
 mv(){
-  if [[ "\${1:-}" == "$legacy_state".restore-staged.* && "\${2:-}" == "$legacy_state" ]]; then
+  if [[ "\${1:-}" == "$legacy_state".restore-workspace.*/state && "\${2:-}" == "$legacy_state" ]]; then
     printf '%s\\n' "\$1" > "$TMP/legacy-promotion-source"
   fi
   command mv "\$@"
@@ -717,8 +1111,8 @@ TEST_PROJECT_ROOT="$legacy_project" bash "$TMP/legacy-valid-probe.sh" >"$TMP/leg
 [[ -f "$TMP/legacy-traversal.called" ]] || fail 'legacy traversal check must run even with skip verification'
 grep -qx new "$legacy_state/generation" || fail 'valid staged legacy archive did not promote restored generation'
 legacy_promotion_source="$(cat "$TMP/legacy-promotion-source")"
-[[ "$(dirname "$legacy_promotion_source")" == "$(dirname "$legacy_state")" ]] || fail 'same-layout promotion source was not on the target filesystem'
-[[ "$legacy_promotion_source" == "$legacy_state".restore-staged.* ]] || fail 'same-layout promotion did not use a target-filesystem restore sibling'
+[[ "$(dirname "$(dirname "$legacy_promotion_source")")" == "$(dirname "$legacy_state")" ]] || fail 'same-layout promotion source was not on the target filesystem'
+[[ "$legacy_promotion_source" == "$legacy_state".restore-workspace.*/state ]] || fail 'same-layout promotion did not use a target-filesystem restore workspace'
 [[ "$legacy_promotion_source" != "$legacy_work/stage/${legacy_state#/}" ]] || fail 'same-layout promotion reused generic restore staging as rename source'
 ! grep -q 'Cross-layout restore' "$TMP/legacy-valid.out" || fail 'same-layout legacy archive was incorrectly sent through cross-layout promotion'
 

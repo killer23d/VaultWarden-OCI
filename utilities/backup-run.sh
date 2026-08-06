@@ -499,9 +499,12 @@ _archive_member_path() {
 # Print the exact full/emergency tar exclusions, one archive-member pattern per line.
 backup_archive_exclusions() {
     local project_root="$1" state_dir="$2" backup_base="$3" age_key_file="${4:-}"
-    local project_member state_member backup_member age_key_member=""
+    local project_member state_member state_parent_member state_parent_prefix state_basename backup_member age_key_member=""
     project_member="$(_archive_member_path "$project_root")"
     state_member="$(_archive_member_path "$state_dir")"
+    state_parent_member="$(_archive_member_path "$(dirname "$state_dir")")"
+    state_parent_prefix="${state_parent_member:+${state_parent_member}/}"
+    state_basename="$(basename "$state_dir")"
     backup_member="$(_archive_member_path "$backup_base")"
     [[ -n "$age_key_file" ]] && age_key_member="$(_archive_member_path "$age_key_file")"
 
@@ -531,6 +534,9 @@ backup_archive_exclusions() {
             "${state_member}/.pre-restore-*" \
             "${state_member}/*/.pre-restore-*" \
             "${state_member}.pre-restore-*" \
+            "${state_member}/.vaultwarden-restore-payload.*" \
+            "${state_parent_prefix}.${state_basename}.restore-payload.*" \
+            "${state_member}.restore-workspace.*" \
             "${state_member}.restore-staged.*" \
             "$backup_member" \
             "${backup_member}/.vaultwarden-backup.*" \
@@ -590,13 +596,23 @@ _require_safe_backup_source_layout() {
 
 _backup_estimated_source_mb() {
     local project_root="$1" state_dir="$2" backup_base="$3" payload_workspace="${4:-}"
+    local state_parent state_basename
+    state_parent="$(dirname "$state_dir")"
+    state_parent="${state_parent%/}"
+    state_basename="$(basename "$state_dir")"
     local -a roots=("$project_root")
     if [[ "$state_dir" != "$project_root" && "$state_dir" != "$project_root"/* ]]; then
         [[ "$project_root" == "$state_dir"/* ]] && roots=("$state_dir") || roots+=("$state_dir")
     fi
     local -a du_args=(-sm --apparent-size)
     local path
-    for path in "$backup_base" "$payload_workspace" "$project_root/.git" "$project_root/logs" "$state_dir/backups" "$state_dir/logs"; do
+    for path in \
+        "$backup_base" "$payload_workspace" "$project_root/.git" "$project_root/logs" \
+        "$state_dir/backups" "$state_dir/logs" \
+        "$state_dir/.vaultwarden-restore-payload.*" \
+        "$state_parent/.${state_basename}.restore-payload.*" \
+        "${state_dir}.restore-workspace.*" \
+        "${state_dir}.restore-staged.*"; do
         [[ -n "$path" ]] && du_args+=("--exclude=$path")
     done
     du "${du_args[@]}" -- "${roots[@]}" 2>/dev/null | awk '{total += $1} END {print total + 0}'

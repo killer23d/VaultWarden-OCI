@@ -1077,7 +1077,15 @@ contains "${backup_base#/}" || fail "effective exclusions omitted configured BAC
 contains "${backup_base#/}/.vaultwarden-backup.*" || fail "effective exclusions omitted payload staging pattern"
 contains "${age_key#/}" || fail "effective exclusions omitted configured operational Age key"
 contains "run/vaultwarden-oci/secrets/*" || fail "effective exclusions omitted runtime decrypted secrets"
-contains "${state#/}.restore-staged.*" || fail "effective exclusions omitted restore staging siblings"
+state_parent_member="$(_archive_member_path "$(dirname "$state")")"
+state_basename="$(basename "$state")"
+contains "${state#/}/.vaultwarden-restore-payload.*" \
+    || fail "effective exclusions omitted mounted restore payload workspaces"
+contains "${state_parent_member}/.${state_basename}.restore-payload.*" \
+    || fail "effective exclusions omitted boot restore payload workspaces"
+contains "${state#/}.restore-workspace.*" \
+    || fail "effective exclusions omitted boot promotion workspaces"
+contains "${state#/}.restore-staged.*" || fail "effective exclusions omitted legacy restore staging siblings"
 
 mapfile -t unique_effective < <(printf '%s\n' "${effective[@]}" | awk '!seen[$0]++')
 [[ ${#unique_effective[@]} -eq ${#effective[@]} ]] || fail "effective exclusions contain duplicates"
@@ -1093,6 +1101,50 @@ grep -Fxq "${state#/}/data/attachments/keep.txt" "$TMP/members" || fail "tar exc
 ! grep -Fq "${backup_base#/}" "$TMP/members" || fail "tar recursed into configured backup staging"
 ! grep -Fq "${age_key#/}" "$TMP/members" || fail "tar archived configured operational Age key"
 ! grep -Fq '.pre-restore-fixture' "$TMP/members" || fail "tar archived restore scratch state"
+
+# Real tar coverage for crash-residual restore workspace names. Keep the state
+# directory below the project root so sibling boot workspaces are archive inputs.
+residue_project="$TMP/restore-residue-project"
+residue_state="$residue_project/state"
+residue_backup="$residue_state/backups"
+residue_extract="$TMP/restore-residue-extract"
+residue_dirs=(
+    "$residue_state/.vaultwarden-restore-payload.mounted"
+    "$residue_project/.state.restore-payload.boot"
+    "$residue_project/state.restore-workspace.promotion"
+    "$residue_project/state.restore-staged.legacy"
+)
+mkdir -p "$residue_state/data" "$residue_backup" "$residue_extract"
+printf included > "$residue_state/data/keep.txt"
+for residue_dir in "${residue_dirs[@]}"; do
+    mkdir -p "$residue_dir"
+    printf 'RESTORE-RESIDUE-MARKER-%s\n' "$(basename "$residue_dir")" > "$residue_dir/marker.txt"
+    printf 'AGE-SECRET-KEY-1FAKE-RESTORE-RESIDUE-%s\n' "$(basename "$residue_dir")" \
+        > "$residue_dir/private-age-key.txt"
+done
+mapfile -t residue_excludes < <(
+    backup_archive_exclusions "$residue_project" "$residue_state" "$residue_backup" ""
+)
+residue_tar_args=()
+for item in "${residue_excludes[@]}"; do residue_tar_args+=("--exclude=$item"); done
+tar -cf "$TMP/restore-residue-exclusions.tar" -C / "${residue_tar_args[@]}" \
+    "${residue_project#/}" "${residue_state#/}"
+tar -tf "$TMP/restore-residue-exclusions.tar" | sed 's#^\./##' > "$TMP/restore-residue.members"
+grep -Fxq "${residue_state#/}/data/keep.txt" "$TMP/restore-residue.members" \
+    || fail "restore-residue exclusions removed included state content"
+! grep -Fq '.vaultwarden-restore-payload.' "$TMP/restore-residue.members" \
+    || fail "tar archived a mounted restore payload workspace"
+! grep -Fq '.state.restore-payload.' "$TMP/restore-residue.members" \
+    || fail "tar archived a boot restore payload workspace"
+! grep -Fq 'state.restore-workspace.' "$TMP/restore-residue.members" \
+    || fail "tar archived a boot promotion workspace"
+! grep -Fq 'state.restore-staged.' "$TMP/restore-residue.members" \
+    || fail "tar archived a legacy restore staging workspace"
+tar -xf "$TMP/restore-residue-exclusions.tar" -C "$residue_extract"
+! grep -R -Fq 'RESTORE-RESIDUE-MARKER-' "$residue_extract" \
+    || fail "tar archived restore workspace marker content"
+! grep -R -Fq 'AGE-SECRET-KEY-1FAKE-RESTORE-RESIDUE-' "$residue_extract" \
+    || fail "tar archived fake private Age key material from restore residue"
 
 assert_canonical_backup_exclusion() {
     local case_name="$1" raw_backup="$2"
@@ -1699,6 +1751,29 @@ truncate -s 128M "$backup_base/old-backup.age"
 source_mb="$(_backup_estimated_source_mb "$project" "$state" "$backup_base" "$PAYLOAD_WORKSPACE")"
 [[ "$source_mb" =~ ^[0-9]+$ ]] || fail "GNU du capacity estimate is not numeric"
 (( source_mb < 64 )) || fail "GNU du estimate traversed the excluded backup tree"
+
+estimate_project="$TMP/restore-estimate-project"
+estimate_state="$estimate_project/state"
+estimate_backup="$estimate_state/backups"
+estimate_payload="$estimate_backup/.vaultwarden-backup.current"
+estimate_residue_dirs=(
+    "$estimate_state/.vaultwarden-restore-payload.mounted"
+    "$estimate_project/.state.restore-payload.boot"
+    "$estimate_project/state.restore-workspace.promotion"
+    "$estimate_project/state.restore-staged.legacy"
+)
+mkdir -p "$estimate_state/data" "$estimate_payload"
+printf included > "$estimate_state/data/keep.txt"
+for residue_dir in "${estimate_residue_dirs[@]}"; do
+    mkdir -p "$residue_dir"
+    truncate -s 128M "$residue_dir/large-residue.bin"
+done
+source_mb="$(_backup_estimated_source_mb \
+    "$estimate_project" "$estimate_state" "$estimate_backup" "$estimate_payload")"
+[[ "$source_mb" =~ ^[0-9]+$ ]] || fail "restore-residue GNU du estimate is not numeric"
+(( source_mb < 64 )) \
+    || fail "GNU du estimate counted crash-residual restore workspaces"
+
 grep -Fq '_create_owned_workspace PAYLOAD_WORKSPACE PAYLOAD_WORKSPACE_ID /dev/shm .vaultwarden-emergency' "$BACKUP" \
     || fail "emergency payload staging is not constrained to /dev/shm"
 grep -Fq 'Refusing to place an unencrypted secret-bearing emergency archive on persistent disk.' "$BACKUP" \

@@ -354,16 +354,145 @@ esac
 # Handle the list + --remote combination.
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
 
-TMPDIR_RESTORE=""
+CONTROL_WORKSPACE=""
+CONTROL_WORKSPACE_ID=""
+PAYLOAD_WORKSPACE=""
+PAYLOAD_WORKSPACE_ID=""
+PROMOTION_WORKSPACE=""
+PROMOTION_WORKSPACE_ID=""
+RESTORE_RETAIN_PAYLOAD=false
+RESTORE_RETAIN_REASON=""
+RESTORE_CLEANUP_DONE=false
+RESTORE_EMERGENCY_STAGED_KEY_FILE=""
 RESTORE_PREVENT_AUTOSTART=false
 : "${RESTORE_PROMPT_TIMEOUT:=300}"
 : "${RESTORE_SAVED_ACK_TIMEOUT:=300}"
 : "${RESTORE_SAVED_ACK_ATTEMPTS:=3}"
+
+_restore_workspace_identity() {
+    stat -c '%d:%i:%u:%a' "$1" 2>/dev/null \
+        || stat -f '%d:%i:%u:%Lp' "$1" 2>/dev/null
+}
+
+_restore_workspace_is_owned() {
+    local path="$1" expected_id="$2" current_id=""
+    [[ -n "$path" && -n "$expected_id" && -d "$path" && ! -L "$path" ]] || return 1
+    current_id="$(_restore_workspace_identity "$path" 2>/dev/null || true)"
+    [[ "$current_id" == "$expected_id" && "$current_id" == *":${EUID}:700" ]]
+}
+
+_restore_create_owned_workspace() {
+    local path_name="$1" id_name="$2" parent="$3" prefix="$4" fallback="${5:-false}"
+    local path="" identity="" old_umask
+    [[ -z "${!path_name:-}" && -z "${!id_name:-}" ]] || {
+        log_error "Restore workspace output is already populated: ${!path_name:-unset}"
+        return 1
+    }
+
+    old_umask=$(umask); umask 077
+    if [[ -d "$parent" && ! -L "$parent" ]]; then
+        path="$(mktemp -d "${parent%/}/${prefix}.XXXXXXXXXX" 2>/dev/null || true)"
+    fi
+    [[ -n "$path" || "$fallback" != "true" ]] \
+        || path="$(mktemp -d -t "${prefix}.XXXXXXXXXX" 2>/dev/null || true)"
+    umask "$old_umask"
+
+    [[ -n "$path" && -d "$path" && ! -L "$path" ]] || {
+        log_error "Failed to create secure restore workspace on: $parent"
+        return 1
+    }
+    identity="$(_restore_workspace_identity "$path" 2>/dev/null || true)"
+    [[ "$identity" == *":${EUID}:700" ]] || {
+        log_error "Restore workspace ownership or mode validation failed: $path"
+        rmdir -- "$path" 2>/dev/null || true
+        return 1
+    }
+    printf -v "$path_name" '%s' "$path"
+    printf -v "$id_name" '%s' "$identity"
+}
+
+_restore_remove_owned_workspace() {
+    local path="$1" expected_id="$2" label="$3"
+    [[ -n "$path" && -n "$expected_id" ]] || return 0
+    [[ ! -e "$path" && ! -L "$path" ]] && return 0
+    _restore_workspace_is_owned "$path" "$expected_id" || {
+        log_error "Refusing to clean unverified, replaced, or permission-mismatched ${label} workspace: $path"
+        return 1
+    }
+    rm -rf -- "$path"
+}
+
+_restore_log_retained_workspace() {
+    local path="$1" label="$2" reason="${3:-manual recovery}" owner mode
+    owner="$(stat -c '%U:%G' "$path" 2>/dev/null || printf 'uid:%s' "$EUID")"
+    mode="$(stat -c '%a' "$path" 2>/dev/null || printf 'unknown')"
+    log_warn "Restore ${label} staging retained for ${reason}: $path"
+    log_warn "Retained staging owner/mode: ${owner} ${mode} (expected mode 700)."
+}
+
+_restore_log_retained_payload() {
+    _restore_log_retained_workspace "$PAYLOAD_WORKSPACE" payload "${1:-manual recovery}"
+}
+
+_restore_retain_payload_for_manual_recovery() {
+    local reason="$1"
+    _restore_workspace_is_owned "$PAYLOAD_WORKSPACE" "$PAYLOAD_WORKSPACE_ID" || {
+        log_error "Cannot safely retain an unverified restore payload workspace: $PAYLOAD_WORKSPACE"
+        return 1
+    }
+    RESTORE_RETAIN_PAYLOAD=true
+    RESTORE_RETAIN_REASON="$reason"
+}
+
 cleanup() {
-    local rc=$?
-    operation_release "$rc" 2>/dev/null || true
-    if [[ -n "$TMPDIR_RESTORE" ]]; then rm -rf "$TMPDIR_RESTORE" 2>/dev/null; fi
-    return "$rc"
+    local rc="${1:-$?}" final_rc cleanup_failed=false
+    [[ "$RESTORE_CLEANUP_DONE" != "true" ]] || return "$rc"
+    RESTORE_CLEANUP_DONE=true
+
+    if [[ "$RESTORE_RETAIN_PAYLOAD" == "true" ]]; then
+        _restore_log_retained_payload "${RESTORE_RETAIN_REASON:-manual recovery}"
+    elif ! _restore_remove_owned_workspace "$PAYLOAD_WORKSPACE" "$PAYLOAD_WORKSPACE_ID" payload; then
+        [[ -z "$PAYLOAD_WORKSPACE" ]] || _restore_log_retained_payload "manual inspection after cleanup refusal"
+        cleanup_failed=true
+    fi
+
+    if ! _restore_remove_owned_workspace "$PROMOTION_WORKSPACE" "$PROMOTION_WORKSPACE_ID" promotion; then
+        [[ -z "$PROMOTION_WORKSPACE" ]] || _restore_log_retained_workspace \
+            "$PROMOTION_WORKSPACE" promotion "manual inspection after cleanup refusal"
+        cleanup_failed=true
+    fi
+
+    if ! _restore_remove_owned_workspace "$CONTROL_WORKSPACE" "$CONTROL_WORKSPACE_ID" control; then
+        [[ -z "$CONTROL_WORKSPACE" ]] || _restore_log_retained_workspace \
+            "$CONTROL_WORKSPACE" control "manual inspection after cleanup refusal"
+        cleanup_failed=true
+    fi
+
+    final_rc="$rc"
+    [[ "$cleanup_failed" != "true" || "$rc" -ne 0 ]] || final_rc=1
+    operation_release "$final_rc" 2>/dev/null || true
+
+    PAYLOAD_WORKSPACE=""; PAYLOAD_WORKSPACE_ID=""
+    PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
+    CONTROL_WORKSPACE=""; CONTROL_WORKSPACE_ID=""
+    return "$final_rc"
+}
+
+_restore_signal_exit() {
+    local rc="$1"
+    trap - EXIT ERR HUP INT TERM
+    cleanup "$rc" || true
+    exit "$rc"
+}
+
+_restore_exit_cleanup() {
+    local rc="${1:-$?}" cleanup_rc=0
+    trap - EXIT ERR HUP INT TERM
+    cleanup "$rc" || cleanup_rc=$?
+    if [[ "$rc" -eq 0 && "$cleanup_rc" -ne 0 ]]; then
+        exit "$cleanup_rc"
+    fi
+    exit "$rc"
 }
 
 _restore_print_manual_start_checklist() {
@@ -425,9 +554,11 @@ _restore_should_rotate_age_key() {
     fi
     return 0
 }
-trap cleanup EXIT ERR
-trap 'operation_release 130; cleanup; exit 130' INT
-trap 'operation_release 143; cleanup; exit 143' HUP TERM
+trap '_restore_exit_cleanup $?' EXIT
+trap 'cleanup $?' ERR
+trap '_restore_signal_exit 130' INT
+trap '_restore_signal_exit 129' HUP
+trap '_restore_signal_exit 143' TERM
 
 # Mirrors backup.sh by auto-discovering rclone.conf across five priority locations.
 
@@ -710,8 +841,20 @@ list_remote_backups() {
 
 pull_remote_backup() {
     local remote_file="$1" btype="$2"
+    check_archive_dependencies "$remote_file" "$btype"
+    local remote_bytes
+    remote_bytes="$(rclone lsl "${RCLONE_CONFIG_ARG[@]}" "$remote_file" 2>/dev/null \
+        | awk 'NR == 1 && $1 ~ /^[0-9]+$/ { print $1; exit }')"
+    [[ "$remote_bytes" =~ ^[0-9]+$ ]] || {
+        log_error "Cannot determine remote backup size before download: $remote_file"
+        return 1
+    }
+    _restore_require_available_bytes "$PAYLOAD_WORKSPACE" \
+        "$((remote_bytes * 2 + 64 * 1024 * 1024))" \
+        "remote encrypted archive download and initial decryption staging" || return 1
+
     log_info "Downloading remote backup: $(basename "$remote_file") ..."
-    local pull_dir="$TMPDIR_RESTORE/remote_pull"
+    local pull_dir="$PAYLOAD_WORKSPACE/remote_pull"
     mkdir -p "$pull_dir"; chmod 700 "$pull_dir"
 
     rclone copy "${RCLONE_CONFIG_ARG[@]}" "$remote_file" "$pull_dir/" --checksum 2>&1 || {
@@ -734,12 +877,12 @@ pull_remote_backup() {
         return 1
     fi
 
+    RESTORE_TYPE="$btype"
     local pulled_size
     pulled_size=$(stat -c%s "$local_file" 2>/dev/null || stat -f%z "$local_file" 2>/dev/null || echo 0)
     log_info "Downloaded $(basename "$local_file") ($(( pulled_size / 1024 )) KiB)"
 
     BACKUP_FILE="$local_file"
-    RESTORE_TYPE="$btype"
     echo ""
     log_info "Remote backup pulled to local staging:"
     log_info "  File: $(basename "$BACKUP_FILE")"
@@ -918,10 +1061,57 @@ resolve_backup_file() {
     return 0
 }
 
+# Stages a raw Age private-key line in the normalized file format expected
+# by check_age_key: public-key comment followed by the private identity.
+_stage_restore_age_key_line() {
+    local age_key_line="$1" staged_key="$2"
+    local stage_dir raw_key normalized_key public_key old_umask
+
+    [[ "$age_key_line" == AGE-SECRET-KEY-1* ]] || return 1
+    stage_dir="$(dirname "$staged_key")"
+    old_umask=$(umask); umask 077
+    mkdir -p "$stage_dir" || { umask "$old_umask"; return 1; }
+    raw_key=$(mktemp "$stage_dir/.raw-age-key.XXXXXX") \
+        || { umask "$old_umask"; return 1; }
+    normalized_key=$(mktemp "$stage_dir/.normalized-age-key.XXXXXX") \
+        || { rm -f "$raw_key"; umask "$old_umask"; return 1; }
+    umask "$old_umask"
+    chmod 700 "$stage_dir" || { rm -f "$raw_key" "$normalized_key"; return 1; }
+    chmod 600 "$raw_key" "$normalized_key" || { rm -f "$raw_key" "$normalized_key"; return 1; }
+
+    printf '%s\n' "$age_key_line" > "$raw_key" || {
+        rm -f "$raw_key" "$normalized_key"
+        return 1
+    }
+    public_key=$(age-keygen -y "$raw_key" 2>/dev/null) || {
+        rm -f "$raw_key" "$normalized_key"
+        return 1
+    }
+    [[ "$public_key" =~ ^age1[a-z0-9]{58}$ ]] || {
+        rm -f "$raw_key" "$normalized_key"
+        return 1
+    }
+    printf '# public key: %s\n%s\n' "$public_key" "$age_key_line" > "$normalized_key" || {
+        rm -f "$raw_key" "$normalized_key"
+        return 1
+    }
+    rm -f "$raw_key"
+    mv -f "$normalized_key" "$staged_key" || {
+        rm -f "$normalized_key"
+        return 1
+    }
+    chmod 600 "$staged_key" || { rm -f "$staged_key"; return 1; }
+
+    if ! TMPDIR="$CONTROL_WORKSPACE" check_age_key "$staged_key"; then
+        rm -f "$staged_key"
+        return 1
+    fi
+}
+
 #
 # Reads a plaintext recovery-kit file, extracts the Age private key line
 # (AGE-SECRET-KEY-1...), writes it to a chmod-600 temp file inside
-# TMPDIR_RESTORE, and sets KEY_FILE_ARG so the existing _prompt_age_key()
+# CONTROL_WORKSPACE, and sets KEY_FILE_ARG so the existing _prompt_age_key()
 # priority chain picks it up non-interactively.
 #
 # The recovery-kit file is the plaintext document produced at setup time
@@ -930,7 +1120,7 @@ resolve_backup_file() {
 # surrounding prose, labels, or blank lines are all ignored.
 #
 # Priority: --from-recovery-kit > RESTORE_RECOVERY_KIT_FILE env var.
-# Must be called after TMPDIR_RESTORE is initialised (i.e. inside main()).
+# Must be called after CONTROL_WORKSPACE is initialised (i.e. inside main()).
 #
 # Returns 0 on success, 1 on any validation failure.
 _load_recovery_kit() {
@@ -984,25 +1174,9 @@ _load_recovery_kit() {
         return 1
     fi
 
-    # --- Write to a secure temp file inside TMPDIR_RESTORE ---------------
-    local kit_stage_dir="$TMPDIR_RESTORE/kit_stage"
-    local old_umask; old_umask=$(umask)
-    umask 077
-    mkdir -p "$kit_stage_dir"
-    umask "$old_umask"
-    chmod 700 "$kit_stage_dir"
-
-    local staged_key="$kit_stage_dir/recovery-kit-age-key.txt"
-    local tmp_staged
-    tmp_staged=$(mktemp "${staged_key}.XXXXXX")
-    chmod 600 "$tmp_staged"
-    printf '%s\n' "$age_key_line" > "$tmp_staged"
-    mv -f "$tmp_staged" "$staged_key"
-    chmod 600 "$staged_key"
-
-    # --- Validate via simple_verify_age_key() (roundtrip check) ----------
-    if ! SOPS_AGE_KEY_FILE="$staged_key" simple_verify_age_key; then
-        rm -f "$staged_key"
+    # --- Normalize and validate inside the control workspace --------------
+    local staged_key="$CONTROL_WORKSPACE/kit_stage/recovery-kit-age-key.txt"
+    if ! _stage_restore_age_key_line "$age_key_line" "$staged_key"; then
         log_error "Age key from recovery kit failed validation."
         log_error "The key may be truncated, corrupted, or from a different installation."
         return 1
@@ -1012,7 +1186,6 @@ _load_recovery_kit() {
     KEY_FILE_ARG="$staged_key"
     log_success "Age key loaded from recovery kit and staged for decryption."
     log_info    "  Kit file:  $canonical_kit"
-    log_info    "  Key prefix: ${age_key_line:0:24}..."
     return 0
 }
 
@@ -1029,16 +1202,15 @@ _load_recovery_kit() {
 #   4. Interactive prompt             (operator pastes/types the key; no echo on TTY)
 #   5. Press Enter blank              (fall back to the currently configured key)
 #
-# The key is written to a chmod-600 temp file inside TMPDIR_RESTORE so
+# The key is written to a chmod-600 temp file inside CONTROL_WORKSPACE so
 # that cleanup() always wipes it — the private key never persists on disk
 # beyond the lifetime of this process.
 #
 # Sets global RESTORE_DECRYPT_AGE_KEY_FILE to the path of the resolved key file.
 # Returns 0 on success, 1 on validation failure.
 #
-# Validation is delegated to simple_verify_age_key() from
-# lib/crypto.sh, which performs permissions + ownership +
-# crypto roundtrip checks and honours the full _resolve_age_key() chain.
+# Validation uses the non-mutating explicit-path Age key check. Any small
+# round-trip diagnostic file is constrained to CONTROL_WORKSPACE.
 _prompt_age_key() {
     local configured_key="$1"  # the key currently in .env (fallback)
 
@@ -1056,10 +1228,7 @@ _prompt_age_key() {
         [[ -f "$supplied_path" ]] || {
             log_error "Supplied age key file not found: $supplied_path"; return 1
         }
-        # simple_verify_age_key() accepts an explicit path argument;
-        # passing SOPS_AGE_KEY_FILE overrides _resolve_age_key() internals
-        # so it validates exactly the file we were given.
-        if ! SOPS_AGE_KEY_FILE="$supplied_path" simple_verify_age_key; then
+        if ! TMPDIR="$CONTROL_WORKSPACE" check_age_key "$supplied_path"; then
             log_error "Supplied age key failed validation: $supplied_path"
             return 1
         fi
@@ -1117,18 +1286,12 @@ _prompt_age_key() {
         if [[ "$key_input" != AGE-SECRET-KEY-1* ]]; then
             log_error "Input does not look like an age private key (must start with AGE-SECRET-KEY-1)."
         else
-            local key_staging_dir="$TMPDIR_RESTORE/key_stage"
-            mkdir -p "$key_staging_dir"
-            chmod 700 "$key_staging_dir"
-            local staged_key_file="$key_staging_dir/restore-age-key.txt"
-            printf '%s\n' "$key_input" > "$staged_key_file"
-            chmod 600 "$staged_key_file"
-            if SOPS_AGE_KEY_FILE="$staged_key_file" simple_verify_age_key; then
+            local staged_key_file="$CONTROL_WORKSPACE/key_stage/restore-age-key.txt"
+            if _stage_restore_age_key_line "$key_input" "$staged_key_file"; then
                 RESTORE_DECRYPT_AGE_KEY_FILE="$staged_key_file"
                 log_success "Age key accepted and staged for decryption."
                 return 0
             fi
-            rm -f "$staged_key_file"
         fi
 
         if (( attempt < 3 )); then
@@ -1196,8 +1359,8 @@ _rotate_age_key() {
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # ------------------------------------------------------------------
-    # 1. Generate new key to a temp file inside TMPDIR_RESTORE (secure)
-    local new_key_tmp="$TMPDIR_RESTORE/new-age-key.txt"
+    # 1. Generate new key inside the small secure control workspace.
+    local new_key_tmp="$CONTROL_WORKSPACE/new-age-key.txt"
 
     local _saved_umask; _saved_umask=$(umask)
     umask 077
@@ -1231,8 +1394,8 @@ _rotate_age_key() {
     local systemd_env="/etc/vaultwarden/vaultwarden.env"
     local install_env="${STATE_DIR}/config/install.env"
     local sops_policy_file="${PROJECT_ROOT}/.sops.yaml"
-    local staged_dir="$TMPDIR_RESTORE/age-rotation-staged"
-    local backup_dir="$TMPDIR_RESTORE/age-rotation-backups"
+    local staged_dir="$CONTROL_WORKSPACE/age-rotation-staged"
+    local backup_dir="$CONTROL_WORKSPACE/age-rotation-backups"
     local new_recipient="" offline_recipient="" policy_tmp="" cipher_tmp=""
     local staged_local_key="" staged_systemd_key="" staged_env="" staged_systemd_env="" staged_install_env=""
     local promoted_any=false rotation_committed=false
@@ -1483,7 +1646,7 @@ read_meta_field() {
 
 # Checks archive-specific restore tools once the selected backup path is known.
 check_archive_dependencies() {
-    local backup_file="$1"
+    local backup_file="$1" restore_type="${2:-${RESTORE_TYPE:-}}"
     local -a hard=()
     local missing_hard=()
     case "$backup_file" in
@@ -1493,7 +1656,7 @@ check_archive_dependencies() {
         if [[ "${ROTATE_AGE_KEY_POLICY:-}" != "skip" ]]; then
             hard+=(sops)
         fi
-        if [[ "${RESTORE_TYPE:-}" =~ ^(full|emergency)$ ]] && _path_is_mountpoint "$STATE_DIR"; then
+        if [[ "$restore_type" =~ ^(full|emergency)$ ]] && _path_is_mountpoint "$STATE_DIR"; then
             hard+=(rsync)
         fi
     fi
@@ -1703,6 +1866,143 @@ _require_sops_for_rekey() {
 
 _path_is_mountpoint() { mountpoint -q "$1" 2>/dev/null; }
 
+_restore_payload_parent() {
+    local state_dir="$1" canonical_state parent
+    canonical_state="$(realpath -m -- "$state_dir" 2>/dev/null)" || {
+        log_error "Cannot canonicalize restore target state path: $state_dir"
+        return 1
+    }
+    if _path_is_mountpoint "$state_dir"; then
+        parent="$canonical_state"
+    else
+        parent="$(dirname "$canonical_state")"
+    fi
+    [[ -d "$parent" && ! -L "$parent" && -w "$parent" ]] || {
+        log_error "Restore payload target is not a writable real directory: $parent"
+        return 1
+    }
+    printf '%s\n' "$parent"
+}
+
+_restore_create_control_workspace() {
+    local parent="/dev/shm" fs_type
+    fs_type="$(stat -f -c '%T' /dev/shm 2>/dev/null || true)"
+    if [[ "$fs_type" != "tmpfs" ]]; then
+        parent="${TMPDIR:-/tmp}"
+        log_warn "/dev/shm tmpfs is unavailable; small restore control files will use: $parent"
+    fi
+    _restore_create_owned_workspace \
+        CONTROL_WORKSPACE CONTROL_WORKSPACE_ID "$parent" vw-restore-control true || return 1
+    if [[ "$CONTROL_WORKSPACE" != /dev/shm/* ]]; then
+        log_warn "Restore control workspace is disk-backed: $CONTROL_WORKSPACE"
+        log_warn "Only small key, diagnostic, and rekey-control files will use it."
+    fi
+}
+
+_restore_create_payload_workspace() {
+    local state_dir="$1" parent prefix configured_device
+    configured_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
+    if [[ -n "$configured_device" ]] && ! _path_is_mountpoint "$state_dir"; then
+        log_error "Configured restore data volume is not mounted at: $state_dir"
+        log_error "Refusing to place restore payload staging on the boot filesystem."
+        return 1
+    fi
+    parent="$(_restore_payload_parent "$state_dir")" || return 1
+    if _path_is_mountpoint "$state_dir"; then
+        prefix=".vaultwarden-restore-payload"
+    else
+        prefix=".$(basename "$state_dir").restore-payload"
+    fi
+    _restore_create_owned_workspace \
+        PAYLOAD_WORKSPACE PAYLOAD_WORKSPACE_ID "$parent" "$prefix" || return 1
+    log_info "Restore payload staging filesystem: $PAYLOAD_WORKSPACE"
+}
+
+_restore_file_size_bytes() {
+    stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null
+}
+
+_restore_require_available_bytes() {
+    local target="$1" required="$2" purpose="$3" available
+    [[ -d "$target" && ! -L "$target" ]] || {
+        log_error "Cannot check restore capacity on an unverified target: $target"
+        return 1
+    }
+    [[ "$required" =~ ^[0-9]+$ ]] || {
+        log_error "Cannot determine required space for ${purpose}."
+        return 1
+    }
+    available="$(df -PB1 "$target" 2>/dev/null | awk 'END { print $4 }')"
+    [[ "$available" =~ ^[0-9]+$ ]] || {
+        log_error "Cannot determine available target space for ${purpose}: $target"
+        return 1
+    }
+    if (( available < required )); then
+        log_error "Insufficient target space before service stop for ${purpose}."
+        log_error "  Required: $required bytes"
+        log_error "  Available: $available bytes"
+        log_error "  Target: $target"
+        log_error "Free target space, then retry. Services were not stopped."
+        return 1
+    fi
+    log_info "Capacity preflight passed for ${purpose}: $required bytes required."
+}
+
+_restore_preflight_local_decrypt_capacity() {
+    local backup_file="$1" archive_bytes
+    archive_bytes="$(_restore_file_size_bytes "$backup_file" 2>/dev/null || true)"
+    [[ "$archive_bytes" =~ ^[0-9]+$ ]] || {
+        log_error "Cannot determine selected backup size: $backup_file"
+        return 1
+    }
+    _restore_require_available_bytes "$PAYLOAD_WORKSPACE" \
+        "$((archive_bytes + 64 * 1024 * 1024))" \
+        "selected backup decryption staging"
+}
+
+_restore_archive_apparent_bytes() {
+    local archive="$1" filter listing total
+    filter="$(_tar_filter_for_file "$archive")"
+    local -a filter_args=()
+    [[ -n "$filter" ]] && read -r -a filter_args <<< "$filter"
+    listing="$(LC_ALL=C tar "${filter_args[@]}" --numeric-owner -tvf "$archive")" || {
+        log_error "Cannot measure validated restore archive members."
+        return 1
+    }
+    # Round each member to a 4 KiB block and add another block for inode/
+    # directory metadata. This deliberately overestimates small-file trees.
+    total="$(awk '
+        $1 ~ /^[-dlcbpsh]/ && $3 ~ /^[0-9]+$/ {
+            blocks = int(($3 + 4095) / 4096) * 4096
+            total += blocks + 4096
+        }
+        END { printf "%.0f\n", total + 0 }
+    ' <<< "$listing")"
+    [[ "$total" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$total"
+}
+
+_restore_preflight_archive_expansion_capacity() {
+    local archive="$1" apparent_bytes
+    apparent_bytes="$(_restore_archive_apparent_bytes "$archive")" || return 1
+    _restore_require_available_bytes "$PAYLOAD_WORKSPACE" \
+        "$((apparent_bytes * 2 + 64 * 1024 * 1024))" \
+        "archive extraction and target-filesystem promotion"
+}
+
+_restore_preflight_db_commit_capacity() {
+    local staged_db="$1" state_dir="$2" staged_bytes live_bytes=0
+    staged_bytes="$(_restore_file_size_bytes "$staged_db" 2>/dev/null || true)"
+    [[ "$staged_bytes" =~ ^[0-9]+$ ]] || return 1
+    if [[ -f "$state_dir/data/db.sqlite3" ]]; then
+        live_bytes="$(_restore_file_size_bytes "$state_dir/data/db.sqlite3" 2>/dev/null || printf '0')"
+        [[ "$live_bytes" =~ ^[0-9]+$ ]] || live_bytes=0
+    fi
+    _restore_require_available_bytes "$PAYLOAD_WORKSPACE" \
+        "$((staged_bytes + live_bytes + 64 * 1024 * 1024))" \
+        "database atomic write and rollback copy"
+}
+
 _detect_storage_mode() {
     local root="${1:-}" data_mount="${2:-}" data_device="${3:-}"
     if [[ "$root" == "/var/lib/vaultwarden" ]]; then
@@ -1806,17 +2106,17 @@ _age_decrypt_restore_backup() {
 }
 
 _decrypt_restore_archive_for_preflight() {
-    local backup_file="$1" age_key_file="$2" tmpdir="$3"
+    local backup_file="$1" age_key_file="$2" payload_workspace="$3" control_workspace="$4"
     local inner_name="${backup_file%.age}"
     case "$inner_name" in
         *.tar.zst|*.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tbz) : ;;
         *) inner_name="${inner_name}.tar.gz" ;;
     esac
     local dec_tar
-    dec_tar="$tmpdir/$(basename "$inner_name")"
+    dec_tar="$payload_workspace/$(basename "$inner_name")"
     [[ -s "$dec_tar" ]] && { printf '%s\n' "$dec_tar"; return 0; }
     log_info "Decrypting archive for non-destructive preflight inspection..." >&2
-    local age_err="$tmpdir/age-decrypt.err"
+    local age_err="$control_workspace/age-decrypt.err"
     if ! _age_decrypt_restore_backup "$backup_file" "$age_key_file" "$dec_tar" "$age_err" "$(_restore_backup_encryption_mode)"; then
         if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
             _restore_age_no_identity_guidance
@@ -1827,7 +2127,37 @@ _decrypt_restore_archive_for_preflight() {
         fi
         return 1
     fi
+    chmod 0600 "$dec_tar" || return 1
     printf '%s\n' "$dec_tar"
+}
+
+_stage_db_restore_for_preflight() {
+    local backup_file="$1" age_key_file="$2" state_dir="$3"
+    local dec_db="$PAYLOAD_WORKSPACE/db.sqlite3"
+    local age_err="$CONTROL_WORKSPACE/db-age-decrypt.err"
+
+    if [[ ! -s "$dec_db" ]]; then
+        log_info "Decrypting database backup into target-filesystem staging..."
+        if ! age -d -i "$age_key_file" -o "$dec_db" "$backup_file" 2>"$age_err"; then
+            if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
+                _restore_age_no_identity_guidance
+            else
+                log_error "Decryption failed — verify the age key is correct."
+                log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+                log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+            fi
+            return 1
+        fi
+        chmod 0600 "$dec_db" || return 1
+    fi
+    [[ "$SKIP_VERIFICATION" == "true" ]] || verify_sqlite "$dec_db" || return 1
+    local schema_count
+    schema_count="$(sqlite3 "$dec_db" "SELECT count(*) FROM sqlite_master;" 2>/dev/null || echo 0)"
+    if [[ "$schema_count" =~ ^[0-9]+$ ]] && (( schema_count == 0 )); then
+        log_warn "Restored DB has an empty schema (0 objects in sqlite_master)."
+        log_warn "Verify this is the intended backup — an empty Vaultwarden DB has no tables."
+    fi
+    _restore_preflight_db_commit_capacity "$dec_db" "$state_dir"
 }
 
 _restore_inspect_archive_layout() {
@@ -2151,25 +2481,11 @@ restore_db() {
     local backup_file="$1" age_key_file="$2" state_dir="$3" puid="$4" pgid="$5" tmpdir="$6"
     local dec_db="$tmpdir/db.sqlite3"
 
-    log_info "Decrypting database backup..."
-    local age_err="$tmpdir/db-age-decrypt.err"
-    age -d -i "$age_key_file" -o "$dec_db" "$backup_file" 2>"$age_err" || {
-        if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
-            _restore_age_no_identity_guidance
-        else
-            log_error "Decryption failed — verify the age key is correct."
-            log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
-            log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
-        fi
-        return 1
-    }
-    [[ "$SKIP_VERIFICATION" != "true" ]] && { verify_sqlite "$dec_db" || return 1; }
-    local _schema_count
-    _schema_count=$(sqlite3 "$dec_db" "SELECT count(*) FROM sqlite_master;" 2>/dev/null || echo 0)
-    if [[ "$_schema_count" =~ ^[0-9]+$ ]] && (( _schema_count == 0 )); then
-        log_warn "Restored DB has an empty schema (0 objects in sqlite_master)."
-        log_warn "Verify this is the intended backup — an empty Vaultwarden DB has no tables."
+    if [[ ! -s "$dec_db" ]]; then
+        _stage_db_restore_for_preflight "$backup_file" "$age_key_file" "$state_dir" || return 1
     fi
+    log_info "Using preflight-validated database payload from target-filesystem staging."
+    [[ "$SKIP_VERIFICATION" != "true" ]] && { verify_sqlite "$dec_db" || return 1; }
 
     local db_dir="$state_dir/data" db_path
     db_path="$db_dir/db.sqlite3"
@@ -2227,6 +2543,29 @@ restore_db() {
     log_success "Database restored successfully."
 }
 
+_stage_emergency_private_key_in_control_workspace() {
+    local extracted_root="$1" source_key
+    source_key="$extracted_root/etc/vaultwarden/age-key.txt"
+    [[ "$RESTORE_TYPE" == "emergency" && -e "$source_key" ]] || return 0
+    [[ -f "$source_key" && ! -L "$source_key" ]] || {
+        log_error "Emergency archive Age key member is not a regular file: $source_key"
+        return 1
+    }
+    local staged_key="$CONTROL_WORKSPACE/emergency-capsule-age-key.txt"
+    [[ ! -e "$staged_key" && ! -L "$staged_key" ]] || {
+        log_error "Emergency Age key control path already exists: $staged_key"
+        return 1
+    }
+    install -m 0600 "$source_key" "$staged_key" || return 1
+    rm -f -- "$source_key" || {
+        rm -f -- "$staged_key" 2>/dev/null || true
+        log_error "Could not remove the emergency private key from payload staging."
+        return 1
+    }
+    RESTORE_EMERGENCY_STAGED_KEY_FILE="$staged_key"
+    log_info "Moved emergency private key from payload staging into the secure control workspace."
+}
+
 restore_full() {
     local backup_file="$1" age_key_file="$2" state_dir="$3" puid="$4" pgid="$5" tmpdir="$6" archive_format="$7"
 
@@ -2241,7 +2580,7 @@ restore_full() {
 
     if [[ ! -s "$dec_tar" ]]; then
         log_info "Decrypting archive..."
-        local age_err="$tmpdir/age-decrypt.err"
+        local age_err="$CONTROL_WORKSPACE/age-decrypt.err"
         if ! _age_decrypt_restore_backup "$backup_file" "$age_key_file" "$dec_tar" "$age_err" "$(_restore_backup_encryption_mode)"; then
             if grep -qi 'no identity matched any of the recipients' "$age_err" 2>/dev/null; then
                 _restore_age_no_identity_guidance
@@ -2289,6 +2628,8 @@ restore_full() {
         return 1
     fi
 
+    _stage_emergency_private_key_in_control_workspace "$staging" || return 1
+
     local ts; ts="$(date +%Y%m%d-%H%M%S)"
 
     if mountpoint -q "$state_dir" 2>/dev/null; then
@@ -2315,7 +2656,7 @@ restore_full() {
         local _payload_name _live_payload _staged_payload
 
         _rollback_payload_paths() {
-            local _rollback_path _rollback_name _created_path
+            local _rollback_path _rollback_name _created_path rollback_failed=false
             log_error "Attempting rollback of payload paths already moved into: $_snap_dir"
             for _created_path in "${_created_payload_paths[@]}"; do
                 if [[ -e "$_created_path" ]]; then
@@ -2323,6 +2664,7 @@ restore_full() {
                         log_warn "Rollback removed newly-created restore path: $_created_path"
                     else
                         log_error "Rollback failed to remove newly-created restore path: $_created_path"
+                        rollback_failed=true
                     fi
                 fi
             done
@@ -2335,9 +2677,11 @@ restore_full() {
                     else
                         log_error "Rollback failed for $_rollback_path"
                         log_error "Manual recovery: mv '$_snap_dir/$_rollback_name' '$_rollback_path'"
+                        rollback_failed=true
                     fi
                 fi
             done
+            [[ "$rollback_failed" != "true" ]]
         }
 
         for _payload_name in "${_restore_payload_allowlist[@]}"; do
@@ -2357,7 +2701,8 @@ restore_full() {
                     log_error "Failed to move $_live_payload into snapshot — aborting."
                     log_error "Protected paths were not touched: .vw-data-volume, lost+found, backups, secrets, config"
                     log_error "Partial snapshot at: $_snap_dir"
-                    _rollback_payload_paths
+                    _rollback_payload_paths \
+                        || _restore_retain_payload_for_manual_recovery "mounted-volume rollback" || true
                     return 1
                 fi
             else
@@ -2371,7 +2716,8 @@ restore_full() {
             [[ -e "$_staged_payload" ]] || continue
             if ! rsync -a --no-owner --no-group "$_staged_payload/" "$state_dir/$_payload_name/"; then
                 log_error "rsync of staged $_payload_name/ to $state_dir failed."
-                _rollback_payload_paths
+                _rollback_payload_paths \
+                    || _restore_retain_payload_for_manual_recovery "mounted-volume rollback" || true
                 return 1
             fi
             log_info "  Promoted: $_payload_name/"
@@ -2382,28 +2728,25 @@ restore_full() {
         if [[ "$source_root" == "$state_dir" ]]; then
             # Boot-only same-layout mode: first materialize the selected staged
             # state beside STATE_DIR, then use only target-filesystem renames for
-            # the destructive swap.  TMPDIR_RESTORE may be /dev/shm.
+            # the destructive swap. The payload workspace is already on the
+            # target filesystem, but it is not the final rename source.
             local old_state_snapshot="" target_staging promotion_marker
-            target_staging="$(mktemp -d "${state_dir}.restore-staged.XXXXXXXX")" || {
+            _restore_create_owned_workspace \
+                PROMOTION_WORKSPACE PROMOTION_WORKSPACE_ID \
+                "$(dirname "$state_dir")" "$(basename "$state_dir").restore-workspace" || {
                 log_error "Failed to create target-filesystem restore staging sibling for $state_dir."
                 return 1
             }
+            target_staging="$PROMOTION_WORKSPACE/state"
 
             log_info "Materializing staged state on the target filesystem before promotion..."
-            if ! cp -a "$staging/$rel_source/." "$target_staging/" \
-                || ! chmod --reference="$staging/$rel_source" "$target_staging"; then
+            if ! cp -a "$staging/$rel_source" "$target_staging"; then
                 log_error "Failed to materialize staged state at $target_staging; live state has not been moved."
-                if ! rm -rf "$target_staging"; then
-                    log_warn "Incomplete target-filesystem restore staging retained for inspection: $target_staging"
-                fi
                 return 1
             fi
 
             promotion_marker="$(mktemp "$target_staging/.restore-promotion.XXXXXXXX")" || {
                 log_error "Failed to mark target-filesystem restore staging; live state has not been moved."
-                if ! rm -rf "$target_staging"; then
-                    log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
-                fi
                 return 1
             }
             promotion_marker="$(basename "$promotion_marker")"
@@ -2412,9 +2755,6 @@ restore_full() {
                 old_state_snapshot="${state_dir}.pre-restore-${ts}"
                 if ! mv "$state_dir" "$old_state_snapshot"; then
                     log_error "Failed to move live state into pre-restore snapshot; promotion was not attempted."
-                    if ! rm -rf "$target_staging"; then
-                        log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
-                    fi
                     return 1
                 fi
             fi
@@ -2422,7 +2762,6 @@ restore_full() {
             log_info "State payload restore phase: promoting target-filesystem staged state directory to live path..."
             if ! mv "$target_staging" "$state_dir"; then
                 log_error "Failed to promote target-filesystem staged state into $state_dir."
-                [[ -e "$target_staging" ]] && log_warn "Target-filesystem restore staging retained for inspection: $target_staging"
                 if [[ -e "$state_dir" ]]; then
                     if [[ -e "$state_dir/$promotion_marker" ]]; then
                         log_warn "Removing incomplete canonical state created by the failed promotion attempt: $state_dir"
@@ -2431,6 +2770,7 @@ restore_full() {
                             if [[ -n "$old_state_snapshot" && -e "$old_state_snapshot" ]]; then
                                 log_error "Manual recovery after verifying the failed destination: rm -rf '$state_dir' && mv '$old_state_snapshot' '$state_dir'"
                             fi
+                            _restore_retain_payload_for_manual_recovery "boot-volume promotion recovery" || true
                             return 1
                         fi
                     else
@@ -2438,6 +2778,7 @@ restore_full() {
                         if [[ -n "$old_state_snapshot" && -e "$old_state_snapshot" ]]; then
                             log_error "Manual recovery after inspecting '$state_dir': rm -rf '$state_dir' && mv '$old_state_snapshot' '$state_dir'"
                         fi
+                        _restore_retain_payload_for_manual_recovery "boot-volume promotion recovery" || true
                         return 1
                     fi
                 fi
@@ -2446,9 +2787,14 @@ restore_full() {
                         log_warn "Restore promotion rollback succeeded: restored previous state to $state_dir."
                     else
                         log_error "CRITICAL: restore promotion rollback failed. Manual recovery: mv '$old_state_snapshot' '$state_dir'"
+                        _restore_retain_payload_for_manual_recovery "boot-volume promotion rollback" || true
                     fi
                 fi
                 return 1
+            fi
+            if _restore_remove_owned_workspace \
+                "$PROMOTION_WORKSPACE" "$PROMOTION_WORKSPACE_ID" promotion; then
+                PROMOTION_WORKSPACE=""; PROMOTION_WORKSPACE_ID=""
             fi
             if ! rm -f "$state_dir/$promotion_marker"; then
                 log_warn "Could not remove restore promotion marker: $state_dir/$promotion_marker"
@@ -2519,8 +2865,12 @@ restore_full() {
         install -d -o root -g root -m 700 /etc/vaultwarden
         local _emergency_file
         for _emergency_file in age-key.txt vaultwarden.env rclone.conf; do
-            if [[ -f "$staging/etc/vaultwarden/$_emergency_file" ]]; then
-                install -o root -g root -m 600 "$staging/etc/vaultwarden/$_emergency_file" "/etc/vaultwarden/$_emergency_file"
+            local _emergency_source="$staging/etc/vaultwarden/$_emergency_file"
+            if [[ "$_emergency_file" == "age-key.txt" && -n "$RESTORE_EMERGENCY_STAGED_KEY_FILE" ]]; then
+                _emergency_source="$RESTORE_EMERGENCY_STAGED_KEY_FILE"
+            fi
+            if [[ -f "$_emergency_source" ]]; then
+                install -o root -g root -m 600 "$_emergency_source" "/etc/vaultwarden/$_emergency_file"
                 log_info "  Installed /etc/vaultwarden/$_emergency_file (0600)"
             fi
         done
@@ -2630,7 +2980,6 @@ main() {
     fi
 
     check_dependencies
-    auto_fix_critical_permissions "$PROJECT_ROOT"
 
     if [[ "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]; then
         operation_acquire \
@@ -2643,15 +2992,22 @@ main() {
     # Fail closed if a block/data volume is configured.  --force --remote may
     # skip this check only for boot-volume/bootstrap mode where no block device
     # is configured; it must never permit writes to an unmounted block-volume path.
-    local _configured_data_device
+    local _configured_data_device _state_ready_required=true
     _configured_data_device="$(get_config_value "DATA_VOLUME_DEVICE" "")"
     if [[ "$INSPECT_ONLY" == "true" ]]; then
-        log_warn "Inspect mode: skipping live project-state readiness enforcement; storage readiness will be reported by restore preflight."
+        _state_ready_required=false
+        if [[ -n "$_configured_data_device" ]]; then
+            log_info "Inspect mode: validating configured data-volume ownership before staging."
+            check_project_state_ready || exit 1
+        else
+            log_warn "Inspect mode: skipping live project-state readiness enforcement; storage readiness will be reported by restore preflight."
+        fi
     elif [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" && -z "$_configured_data_device" ]]; then
+        _state_ready_required=false
         log_warn "Skipping project-state-ready check (--force --remote boot-volume/bootstrap mode)."
         log_warn "No DATA_VOLUME_DEVICE is configured; block-volume safety checks remain required when a data volume is configured."
     else
-        require_project_state_ready || exit 1
+        check_project_state_ready || exit 1
     fi
 
     # Derive the fallback from PROJECT_STATE_DIR so separate-volume installs
@@ -2702,27 +3058,16 @@ main() {
         exit 1
     fi
 
-    # Create the secure temp dir early so remote pull and key staging can use it.
-    local old_umask; old_umask=$(umask)
-    umask 077
-    # Prefer /dev/shm (RAM-backed tmpfs) so decrypted material never touches disk.
-    # Fall back to a mktemp in /tmp (or the OS default) when /dev/shm is absent or
-    # not writable — this is the same pattern used by backup.sh.
-    TMPDIR_RESTORE="$(mktemp -d -p /dev/shm vw_restore.XXXXXXXXXX 2>/dev/null || mktemp -d -t vw_restore.XXXXXXXXXX)" || {
-        log_error "Failed to create secure temporary directory"; exit 1
-    }
-    umask "$old_umask"
-    if [[ "$TMPDIR_RESTORE" != /dev/shm/* ]]; then
-        log_warn "TMPDIR_RESTORE: /dev/shm unavailable — restore temp dir is disk-backed: $TMPDIR_RESTORE"
-        log_warn "  Decrypted material will be on disk. Ensure full-disk encryption is active."
-    fi
+    _restore_create_control_workspace || exit 1
+    _restore_create_payload_workspace "$STATE_DIR" || exit 1
 
-    # Load Age key from recovery kit if supplied (must be after TMPDIR_RESTORE is set).
+    # Recovery-kit and pasted private keys remain in the small control workspace.
     _load_recovery_kit || exit 1
 
     resolve_backup_file || exit 1
     [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
     check_archive_dependencies "$BACKUP_FILE"
+    _restore_preflight_local_decrypt_capacity "$BACKUP_FILE" || exit 1
 
     echo ""
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2838,31 +3183,36 @@ main() {
     if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]]; then
         log_warn "Full/emergency restore replaces application state/config and may require the same expected storage class."
         local _preflight_tar
-        _preflight_tar="$(_decrypt_restore_archive_for_preflight "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$TMPDIR_RESTORE")" || exit 1
+        _preflight_tar="$(_decrypt_restore_archive_for_preflight \
+            "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" \
+            "$PAYLOAD_WORKSPACE" "$CONTROL_WORKSPACE")" || exit 1
+        if [[ "$archive_format" == "absolute" ]]; then
+            check_traversal_only "$_preflight_tar" || exit 1
+        else
+            tar_validate_members "$_preflight_tar" || exit 1
+        fi
         restore_full_preflight "$BACKUP_FILE" "$_preflight_tar" "$STATE_DIR" "$PUID" "$PGID" "$archive_format" "$archive_version" || exit 1
+        _restore_preflight_archive_expansion_capacity "$_preflight_tar" || exit 1
         if [[ "$INSPECT_ONLY" == "true" ]]; then
             log_success "Inspect mode complete — no services stopped, no files restored, no key rotation, no health check."
             exit 0
         fi
     elif [[ "$RESTORE_TYPE" == "db" ]]; then
         log_info "DB restore is storage-layout independent and is the safest path when only Vaultwarden data is needed."
+        _stage_db_restore_for_preflight "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" || exit 1
         if [[ "$INSPECT_ONLY" == "true" ]]; then
-            local _inspect_db="$TMPDIR_RESTORE/db-inspect.sqlite3" _db_err="$TMPDIR_RESTORE/db-age.err"
-            if age -d -i "$RESTORE_DECRYPT_AGE_KEY_FILE" -o "$_inspect_db" "$BACKUP_FILE" 2>"$_db_err"; then
-                if sqlite3 "$_inspect_db" 'PRAGMA integrity_check;' 2>/dev/null | grep -qx ok; then
-                    log_success "Inspect mode: DB backup integrity check passed."
-                else
-                    log_warn "Inspect mode: DB backup decrypted, but sqlite integrity check did not return ok."
-                fi
-            elif grep -qi 'no identity matched any of the recipients' "$_db_err" 2>/dev/null; then
-                _restore_age_no_identity_guidance; exit 1
-            else
-                log_error "Inspect mode: DB backup decryption failed."; exit 1
-            fi
+            log_success "Inspect mode: DB backup integrity check passed."
             log_success "Inspect mode complete — no services stopped, no files restored, no key rotation, no health check."
             exit 0
         fi
     fi
+
+    # All selected-archive, target-space, and structure checks have passed.
+    # Only now may normal readiness repair or live permission mutation begin.
+    if [[ "$_state_ready_required" == "true" ]]; then
+        require_project_state_ready || exit 1
+    fi
+    auto_fix_critical_permissions "$PROJECT_ROOT"
 
     if [[ "$RESTORE_TYPE" =~ ^(full|emergency)$ ]] && [[ "$DRY_RUN" != "true" ]]; then
         local _target_mode_for_prepare
@@ -2876,16 +3226,26 @@ main() {
     create_pre_restore_snapshot "$OPERATIONAL_SOPS_AGE_KEY_FILE" "$RESTORE_TYPE" || exit 1
     _set_snapshot_operation_phase || exit 1
 
+    # The safety snapshot normally shares the target filesystem. Recheck the
+    # exact commit/promotion requirement after it has consumed any space.
+    case "$RESTORE_TYPE" in
+        db)
+            _restore_preflight_db_commit_capacity \
+                "$PAYLOAD_WORKSPACE/db.sqlite3" "$STATE_DIR" || exit 1
+            ;;
+        full|emergency)
+            _restore_preflight_archive_expansion_capacity \
+                "$_preflight_tar" || exit 1
+            ;;
+    esac
+
     RESTORE_DESTRUCTIVE_PHASE_STARTED=false
     _RESTORE_SAFETY_NET_RUNNING=false
-    _RESTORE_CLEANUP_DONE=false
     _restore_cleanup_once() {
-        [[ "$_RESTORE_CLEANUP_DONE" == "true" ]] && return 0
-        _RESTORE_CLEANUP_DONE=true
-        cleanup
+        cleanup "${1:-$?}" || true
     }
     _restore_safety_net() {
-        local rc=$?
+        local rc="${1:-$?}"
         trap - ERR HUP INT TERM
         if [[ "${_RESTORE_SAFETY_NET_RUNNING:-false}" == "true" ]]; then
             exit "$rc"
@@ -2918,30 +3278,35 @@ main() {
                 log_warn "Restore failed before destructive phase (exit $rc); services were not stopped and startup.sh will not be run."
             fi
         fi
-        _restore_cleanup_once
+        _restore_cleanup_once "$rc"
         exit "$rc"
     }
 
-    trap _restore_safety_net ERR HUP INT TERM
+    trap '_restore_safety_net $?' ERR
+    trap '_restore_safety_net 129' HUP
+    trap '_restore_safety_net 130' INT
+    trap '_restore_safety_net 143' TERM
     if [[ "$DRY_RUN" != "true" ]]; then
         operation_set_phase "stop" "Stopping VaultWarden services"
+        # A signal during compose stop can leave some or all services stopped.
+        # Treat the stop attempt as destructive before launching the command.
+        RESTORE_DESTRUCTIVE_PHASE_STARTED=true
         log_info "Stopping services (up to 30s grace period)..."
         if ! timeout 35 docker compose stop --timeout 30; then
             log_warn "docker compose stop did not complete cleanly within 35s — forcing..."
             docker compose kill 2>/dev/null || true
         fi
-        RESTORE_DESTRUCTIVE_PHASE_STARTED=true
     fi
 
     case "$RESTORE_TYPE" in
         db)
             operation_set_phase "restore-db" "Restoring database backup"
-            restore_db "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE"
+            restore_db "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$PAYLOAD_WORKSPACE"
             ;;
         full|emergency)
             RESTORE_DESTRUCTIVE_PHASE_STARTED=true
             operation_set_phase "restore-full" "Restoring full application state"
-            restore_full "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE" "$archive_format"
+            restore_full "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$PAYLOAD_WORKSPACE" "$archive_format"
             ;;
         *)
             log_error "Unknown restore type: $RESTORE_TYPE"; exit 1 ;;
@@ -3002,12 +3367,13 @@ main() {
             ;;
         full|emergency)
             if [[ "$RESTORE_TYPE" == "emergency" && "$backup_encryption_mode" == "age-passphrase" ]]; then
-                # Check for restored key in staging first (restore_full installs it
-                # to /etc/vaultwarden/age-key.txt mid-run); check both before giving up.
+                # restore_full moves the capsule key into control staging before
+                # promotion and installs it under /etc/vaultwarden when present.
                 if [[ -f /etc/vaultwarden/age-key.txt ]]; then
                     RESTORE_REKEY_SOURCE_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
-                elif [[ -f "$TMPDIR_RESTORE/stage/etc/vaultwarden/age-key.txt" ]]; then
-                    RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$TMPDIR_RESTORE/stage/etc/vaultwarden/age-key.txt"
+                elif [[ -n "$RESTORE_EMERGENCY_STAGED_KEY_FILE" \
+                        && -f "$RESTORE_EMERGENCY_STAGED_KEY_FILE" ]]; then
+                    RESTORE_REKEY_SOURCE_AGE_KEY_FILE="$RESTORE_EMERGENCY_STAGED_KEY_FILE"
                 else
                     log_error "Passphrase emergency restore: cannot locate installed Age key for rekey."
                     log_error "Emergency archive did not contain /etc/vaultwarden/age-key.txt."
