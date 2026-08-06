@@ -11,6 +11,9 @@ OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 WorkingDirectory=/opt/vaultwarden-scripts
 # Start even if /etc/vaultwarden/vaultwarden.env is not installed yet; backup.sh
 # reports missing required values itself.

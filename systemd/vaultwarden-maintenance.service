@@ -8,6 +8,9 @@ OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 WorkingDirectory=/opt/vaultwarden-scripts
 # Leading dash makes the file optional: the service starts even if
 # /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
