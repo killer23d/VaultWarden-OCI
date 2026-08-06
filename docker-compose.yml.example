@@ -23,8 +23,7 @@ services:
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     # memswap_limit equal to mem_limit disables swap for this container, preventing
-    # decrypted secrets and DB content from being paged to disk. Must be a top-level
-    # service property to be applied by docker compose in standalone mode.
+    # decrypted secrets and DB content from being paged to disk.
     mem_limit: 512M
     memswap_limit: 512M
 
@@ -119,6 +118,18 @@ services:
         soft: 512
         hard: 512
 
+    # Docker Compose applies deploy.resources hard limits and memory reservations
+    # in standalone mode. CPU reservations are used only by Docker Swarm.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.3'
+          pids: 200
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+
   # -------------------- Core service: Caddy reverse proxy --------------------
   caddy:
     container_name: vaultwarden_caddy
@@ -205,6 +216,18 @@ services:
         soft: 512
         hard: 512
 
+    # Docker Compose applies deploy.resources hard limits and memory reservations
+    # in standalone mode. CPU reservations are used only by Docker Swarm.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+          pids: 200
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+
   # -------------------- Optional sidecar: Postfix relay --------------------
   postfix:
     container_name: vaultwarden_postfix
@@ -279,6 +302,18 @@ services:
       options:
         max-size: "5m"
         max-file: "3"
+
+    # Docker Compose applies deploy.resources hard limits and memory reservations
+    # in standalone mode. CPU reservations are used only by Docker Swarm.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.1'
+          pids: 50
+        reservations:
+          memory: 64M
+          cpus: '0.02'
 
 # =============================================================================
 # Docker Secrets

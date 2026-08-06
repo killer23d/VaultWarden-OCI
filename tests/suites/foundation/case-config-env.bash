@@ -597,3 +597,91 @@ printf '1..%s\n' "$TESTS_RUN"
 )
 
 check_config_environment_contracts
+
+check_compose_resource_contracts() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+PRODUCTION="$ROOT/docker-compose.yml.example"
+DEVELOPMENT="$ROOT/docker-compose.override.dev.yml.example"
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+service_block() {
+    local file="$1" service="$2"
+    awk -v header="  ${service}:" '
+        $0 == header { active = 1 }
+        active && $0 ~ /^  [[:alnum:]_-]+:[[:space:]]*$/ && $0 != header { exit }
+        active { print }
+    ' "$file"
+}
+
+assert_line() {
+    local block="$1" expected="$2" context="$3"
+    grep -Fqx -- "$expected" <<< "$block" || fail "$context"
+}
+
+assert_no_line() {
+    local block="$1" unexpected="$2" context="$3"
+    ! grep -Fqx -- "$unexpected" <<< "$block" || fail "$context"
+}
+
+vaultwarden="$(service_block "$PRODUCTION" vaultwarden)"
+caddy="$(service_block "$PRODUCTION" caddy)"
+postfix="$(service_block "$PRODUCTION" postfix)"
+mailpit="$(service_block "$DEVELOPMENT" mailpit)"
+
+assert_line "$vaultwarden" '    mem_limit: 512M' 'Vaultwarden top-level memory limit changed'
+assert_line "$vaultwarden" '    memswap_limit: 512M' 'Vaultwarden swap limit changed'
+assert_line "$vaultwarden" '    deploy:' 'Vaultwarden deploy resources are missing'
+assert_line "$vaultwarden" '          memory: 512M' 'Vaultwarden deploy memory limit changed'
+assert_line "$vaultwarden" "          cpus: '0.3'" 'Vaultwarden CPU limit changed'
+assert_line "$vaultwarden" '          pids: 200' 'Vaultwarden PID limit changed'
+assert_line "$vaultwarden" '          memory: 128M' 'Vaultwarden memory reservation changed'
+assert_line "$vaultwarden" "          cpus: '0.1'" 'Vaultwarden CPU reservation changed'
+
+assert_line "$caddy" '    mem_limit: 256M' 'Caddy top-level memory limit changed'
+assert_line "$caddy" '    memswap_limit: 256M' 'Caddy swap limit changed'
+assert_line "$caddy" '    cpus: "0.25"' 'Caddy top-level CPU limit changed'
+assert_line "$caddy" '    pids_limit: 200' 'Caddy top-level PID limit changed'
+assert_line "$caddy" '    deploy:' 'Caddy deploy resources are missing'
+assert_line "$caddy" '          memory: 256M' 'Caddy deploy memory limit changed'
+assert_line "$caddy" "          cpus: '0.25'" 'Caddy deploy CPU limit changed'
+assert_line "$caddy" '          pids: 200' 'Caddy deploy PID limit changed'
+assert_line "$caddy" '          memory: 128M' 'Caddy memory reservation changed'
+assert_line "$caddy" "          cpus: '0.1'" 'Caddy CPU reservation changed'
+
+assert_line "$postfix" '    mem_limit: 256M' 'Postfix top-level memory limit changed'
+assert_line "$postfix" '    memswap_limit: 256M' 'Postfix swap limit changed'
+assert_line "$postfix" '    deploy:' 'Postfix deploy resources are missing'
+assert_line "$postfix" '          memory: 256M' 'Postfix deploy memory limit changed'
+assert_line "$postfix" "          cpus: '0.1'" 'Postfix CPU limit changed'
+assert_line "$postfix" '          pids: 50' 'Postfix PID limit changed'
+assert_line "$postfix" '          memory: 64M' 'Postfix memory reservation changed'
+assert_line "$postfix" "          cpus: '0.02'" 'Postfix CPU reservation changed'
+
+assert_line "$mailpit" '    deploy:' 'Mailpit deploy resources are missing'
+assert_line "$mailpit" '          memory: 128M' 'Mailpit memory limit changed'
+assert_line "$mailpit" "          cpus: '0.1'" 'Mailpit CPU limit changed'
+
+for service in vaultwarden caddy postfix; do
+    override_block="$(service_block "$DEVELOPMENT" "$service")"
+    assert_no_line "$override_block" '    deploy:' "$service development override must not claim to clear active limits"
+done
+
+for block in "$vaultwarden" "$caddy" "$postfix"; do
+    assert_line "$block" '    # Docker Compose applies deploy.resources hard limits and memory reservations' \
+        'standalone Compose resource comment is missing'
+    assert_line "$block" '    # in standalone mode. CPU reservations are used only by Docker Swarm.' \
+        'CPU reservation scope comment is missing'
+done
+
+! grep -Fq 'deploy.resources is evaluated only in Docker Swarm mode' "$PRODUCTION" \
+    || fail 'production Compose still claims deploy resources are Swarm-only'
+! grep -Fq 'cpu and pid limits are silently ignored' "$PRODUCTION" \
+    || fail 'production Compose still claims standalone CPU/PID limits are ignored'
+
+printf 'PASS: Compose resource controls remain service-scoped and truthful\n'
+)
+
+check_compose_resource_contracts

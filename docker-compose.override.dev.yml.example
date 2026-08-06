@@ -200,6 +200,11 @@ services:
       - TZ=${TZ:-UTC}
     volumes:
       - ./dev-mailpit:/data
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.1'
     logging:
       driver: "json-file"
       options:
