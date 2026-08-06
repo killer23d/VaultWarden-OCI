@@ -1,0 +1,406 @@
+name: Apply Prompt 7 patch
+
+on:
+  push:
+    branches:
+      - perf/dashboard-process-snapshot
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/dashboard-process-snapshot
+          fetch-depth: 0
+
+      - name: Apply focused dashboard patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          dashboard = Path('dashboard.sh')
+          text = dashboard.read_text()
+
+          old = '''# ---------------------------------------------------------------------------
+# State: current active menu
+# ---------------------------------------------------------------------------
+ACTIVE_MENU="main"
+'''
+          new = '''# ---------------------------------------------------------------------------
+# State: current active menu and redraw-local snapshots
+# ---------------------------------------------------------------------------
+ACTIVE_MENU="main"
+declare -A DASHBOARD_CONTAINER_STATE=()
+declare -A DASHBOARD_CONTAINER_HEALTH=()
+declare -A DASHBOARD_CONTAINER_STARTED_AT=()
+DASHBOARD_CONTAINER_SNAPSHOT_OK=false
+NEWEST_BACKUP_PATH=""
+NEWEST_BACKUP_MTIME=0
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          start = text.index('# ---------------------------------------------------------------------------\n# _container_status_plain')
+          end = text.index('# ---------------------------------------------------------------------------\n# _crowdsec_status', start)
+          replacement = r'''# ---------------------------------------------------------------------------
+# Redraw-local Docker Compose snapshot and container presentation helpers
+# ---------------------------------------------------------------------------
+_capture_container_snapshot() {
+    local raw_snapshot="" snapshot="" parsed="" inspect_output=""
+    local name state health container started_at
+    local -a containers=(
+        "${CONTAINER_VW}"
+        "${CONTAINER_CADDY}"
+        "${CONTAINER_POSTFIX}"
+    )
+    local -a inspect_containers=()
+
+    DASHBOARD_CONTAINER_STATE=()
+    DASHBOARD_CONTAINER_HEALTH=()
+    DASHBOARD_CONTAINER_STARTED_AT=()
+    DASHBOARD_CONTAINER_SNAPSHOT_OK=false
+
+    command -v jq >/dev/null 2>&1 || return 1
+    if ! raw_snapshot=$(docker compose --project-name vaultwarden-oci \
+        ps --all --format json 2>/dev/null); then
+        return 1
+    fi
+    if ! snapshot=$(printf '%s' "${raw_snapshot}" \
+        | jq -c -s 'if length == 1 and (.[0] | type) == "array" then .[0] else . end' \
+            2>/dev/null); then
+        return 1
+    fi
+    if ! parsed=$(printf '%s' "${snapshot}" \
+        | jq -r \
+            --arg vw "${CONTAINER_VW}" \
+            --arg caddy "${CONTAINER_CADDY}" \
+            --arg postfix "${CONTAINER_POSTFIX}" '
+                .[]
+                | select(.Name == $vw or .Name == $caddy or .Name == $postfix)
+                | [
+                    .Name,
+                    ((.State // "unknown") | tostring | ascii_downcase),
+                    ((.Health // "") | tostring | ascii_downcase
+                        | if . == "" then "no-healthcheck" else . end)
+                  ]
+                | @tsv
+            ' 2>/dev/null); then
+        return 1
+    fi
+
+    while IFS=$'\t' read -r name state health; do
+        [[ -n "${name}" ]] || continue
+        DASHBOARD_CONTAINER_STATE["${name}"]="${state}"
+        DASHBOARD_CONTAINER_HEALTH["${name}"]="${health}"
+    done <<< "${parsed}"
+    DASHBOARD_CONTAINER_SNAPSHOT_OK=true
+
+    for container in "${containers[@]}"; do
+        if [[ "${DASHBOARD_CONTAINER_STATE[${container}]:-}" == "running" ]]; then
+            inspect_containers+=("${container}")
+        fi
+    done
+    ((${#inspect_containers[@]} > 0)) || return 0
+
+    inspect_output=""
+    if inspect_output=$(docker inspect --format '{{.Name}}|{{.State.StartedAt}}' \
+        "${inspect_containers[@]}" 2>/dev/null); then
+        :
+    fi
+    while IFS='|' read -r name started_at; do
+        name="${name#/}"
+        [[ -n "${name}" && -n "${started_at}" ]] || continue
+        if [[ -n "${DASHBOARD_CONTAINER_STATE[${name}]+_}" ]]; then
+            DASHBOARD_CONTAINER_STARTED_AT["${name}"]="${started_at}"
+        fi
+    done <<< "${inspect_output}"
+}
+
+_container_status_plain() {
+    local name="$1" state health
+    if [[ "${DASHBOARD_CONTAINER_SNAPSHOT_OK}" != "true" ]]; then
+        printf 'Unknown'
+        return
+    fi
+    if [[ -z "${DASHBOARD_CONTAINER_STATE[${name}]+_}" ]]; then
+        printf 'Missing'
+        return
+    fi
+
+    state="${DASHBOARD_CONTAINER_STATE[${name}]}"
+    health="${DASHBOARD_CONTAINER_HEALTH[${name}]:-no-healthcheck}"
+    case "${state}" in
+        running)
+            case "${health}" in
+                healthy|no-healthcheck) printf 'Running' ;;
+                starting)               printf 'Starting' ;;
+                unhealthy)              printf 'Unhealthy' ;;
+                *)                      printf 'Running (health unknown)' ;;
+            esac
+            ;;
+        exited|dead) printf 'Stopped' ;;
+        created)     printf 'Created' ;;
+        restarting)  printf 'Restarting' ;;
+        paused)      printf 'Paused' ;;
+        removing)    printf 'Removing' ;;
+        unknown|'')  printf 'Unknown' ;;
+        *)           printf 'Unknown (%s)' "${state}" ;;
+    esac
+}
+
+_container_status() {
+    local status
+    status="$(_container_status_plain "$1")"
+    case "${status}" in
+        Running)           printf '%s%s%s' "${GRN}" "${status}" "${NC}" ;;
+        Stopped|Unhealthy) printf '%s%s%s' "${RED}" "${status}" "${NC}" ;;
+        *)                 printf '%s%s%s' "${YLW}" "${status}" "${NC}" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# _container_uptime — format a start time captured by the redraw snapshot
+# ---------------------------------------------------------------------------
+_container_uptime() {
+    local container="$1"
+    local started_at started_at_clean start_epoch now_epoch delta days hours mins
+
+    started_at="${DASHBOARD_CONTAINER_STARTED_AT[${container}]:-}"
+    [[ -n "${started_at}" ]] || { printf 'unknown'; return; }
+
+    started_at_clean="${started_at%%.*}"
+    started_at_clean="${started_at_clean%Z}Z"
+
+    start_epoch=$(date -d "${started_at_clean}" +%s 2>/dev/null \
+        || date -j -f "%Y-%m-%dT%H:%M:%SZ" "${started_at_clean}" +%s 2>/dev/null \
+        || echo 0)
+
+    [[ "${start_epoch}" =~ ^[0-9]+$ && "${start_epoch}" -gt 0 ]] \
+        || { printf 'unknown'; return; }
+
+    now_epoch=$(date +%s)
+    delta=$(( now_epoch - start_epoch ))
+    (( delta < 0 )) && delta=0
+
+    days=$(( delta / 86400 ))
+    hours=$(( (delta % 86400) / 3600 ))
+    mins=$(( (delta % 3600) / 60 ))
+
+    if   (( days  > 0 )); then printf '%dd %dh' "${days}"  "${hours}"
+    elif (( hours > 0 )); then printf '%dh %dm' "${hours}" "${mins}"
+    else                       printf '%dm'     "${mins}"
+    fi
+}
+
+'''
+          text = text[:start] + replacement + text[end:]
+
+          marker = '# ---------------------------------------------------------------------------\n# _rclone_status\n'
+          backup_helper = r'''# ---------------------------------------------------------------------------
+# _capture_newest_backup — retain both path and timestamp from one directory pass
+# ---------------------------------------------------------------------------
+_capture_newest_backup() {
+    local backup_file backup_mtime
+    NEWEST_BACKUP_PATH=""
+    NEWEST_BACKUP_MTIME=0
+
+    while IFS= read -r -d '' backup_file; do
+        backup_mtime="$(stat -c '%Y' "${backup_file}" 2>/dev/null \
+            || stat -f '%m' "${backup_file}" 2>/dev/null || echo 0)"
+        if [[ "${backup_mtime}" =~ ^[0-9]+$ ]] \
+            && (( backup_mtime > NEWEST_BACKUP_MTIME )); then
+            NEWEST_BACKUP_MTIME="${backup_mtime}"
+            NEWEST_BACKUP_PATH="${backup_file}"
+        fi
+    done < <(find "${BACKUP_DIR}" -name '*.age' -type f -print0 2>/dev/null)
+}
+
+'''
+          assert marker in text
+          text = text.replace(marker, backup_helper + marker, 1)
+
+          old = '''draw_live_stats() {
+    draw_divider
+
+    # --- Stack Health ---
+    local vw_plain vw_stat caddy_stat pf_stat vw_uptime=""
+    vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
+    if [[ "${vw_plain}" == "Running" ]]; then
+        vw_stat="${GRN}Running${NC}"
+        vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
+    else
+        vw_stat="${RED}Stopped${NC}"
+    fi
+    caddy_stat="$(_container_status "${CONTAINER_CADDY}")"
+    pf_stat="$(_container_status "${CONTAINER_POSTFIX}")"
+'''
+          new = '''draw_live_stats() {
+    draw_divider
+    _capture_container_snapshot || true
+
+    # --- Stack Health ---
+    local vw_plain vw_stat caddy_stat pf_stat vw_uptime=""
+    vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
+    vw_stat="$(_container_status "${CONTAINER_VW}")"
+    if [[ "${vw_plain}" == "Running" ]]; then
+        vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
+    fi
+    caddy_stat="$(_container_status "${CONTAINER_CADDY}")"
+    pf_stat="$(_container_status "${CONTAINER_POSTFIX}")"
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    # --- Last Backup ---
+    local last_backup_str newest_backup="" newest_mtime=0
+    while IFS= read -r -d '' backup_file; do
+        local backup_mtime
+        backup_mtime="$(stat -c '%Y' "${backup_file}" 2>/dev/null \\
+            || stat -f '%m' "${backup_file}" 2>/dev/null || echo 0)"
+        if [[ "$backup_mtime" =~ ^[0-9]+$ ]] && (( backup_mtime > newest_mtime )); then
+            newest_mtime="$backup_mtime"
+            newest_backup="$backup_file"
+        fi
+    done < <(find "${BACKUP_DIR}" -name '*.age' -type f -print0 2>/dev/null)
+    if [[ -n "${newest_backup}" ]]; then
+        local mtime
+        mtime="$(stat -c '%Y' "${newest_backup}" 2>/dev/null \\
+            || stat -f '%m' "${newest_backup}" 2>/dev/null || echo 0)"
+        last_backup_str="$(_epoch_to_pt "${mtime}") ($(basename "${newest_backup}"))"
+    else
+        last_backup_str="${YLW}No backups found${NC}"
+    fi
+'''
+          new = '''    # --- Last Backup ---
+    local last_backup_str
+    _capture_newest_backup
+    if [[ -n "${NEWEST_BACKUP_PATH}" ]]; then
+        last_backup_str="$(_epoch_to_pt "${NEWEST_BACKUP_MTIME}") ($(basename "${NEWEST_BACKUP_PATH}"))"
+    else
+        last_backup_str="${YLW}No backups found${NC}"
+    fi
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          dashboard.write_text(text)
+
+          test = Path('tests/suites/operations/case-operator-ui.bash')
+          t = test.read_text()
+          anchor = '''grep -Fq '0 queued' "$ROOT/dashboard.sh" || fail 'dashboard email queue empty state must say queued, not Healthy'
+'''
+          addition = r'''grep -Fq 'docker compose --project-name vaultwarden-oci' "$ROOT/dashboard.sh" \
+    || fail 'dashboard redraw must collect one Compose service snapshot'
+[[ "$(grep -Fc 'docker compose --project-name vaultwarden-oci' "$ROOT/dashboard.sh")" -eq 1 ]] \
+    || fail 'dashboard must contain exactly one Compose query path'
+! grep -Fq 'docker ps ' "$ROOT/dashboard.sh" \
+    || fail 'dashboard redraw must not run per-container docker ps'
+grep -Fq '"${inspect_containers[@]}"' "$ROOT/dashboard.sh" \
+    || fail 'dashboard start-time lookup must use one batched inspect'
+uptime_block="$(awk '/^_container_uptime\(\)/,/^}/' "$ROOT/dashboard.sh")"
+! grep -Fq 'docker inspect' <<<"$uptime_block" \
+    || fail 'dashboard uptime formatting must reuse the batched inspect result'
+grep -Fq "printf 'Missing'" "$ROOT/dashboard.sh" \
+    || fail 'dashboard missing container state must remain explicit'
+grep -Fq "printf 'Unknown'" "$ROOT/dashboard.sh" \
+    || fail 'dashboard unknown Docker state must remain explicit'
+grep -Fq '_epoch_to_pt "${NEWEST_BACKUP_MTIME}"' "$ROOT/dashboard.sh" \
+    || fail 'dashboard must reuse the selected backup timestamp without restat'
+'''
+          assert anchor in t
+          t = t.replace(anchor, anchor + addition, 1)
+
+          marker = '\ncheck_dashboard_configuration_behavior() (\n'
+          behavior = r'''
+check_dashboard_process_snapshot_behavior() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d -t vw-dashboard-snapshot.XXXXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+fixture="$TMP/repo"
+mkdir -p "$fixture" "$TMP/backups" "$TMP/bin"
+cp "$ROOT/dashboard.sh" "$ROOT/VERSION" "$fixture/"
+ln -s "$ROOT/lib" "$fixture/lib"
+sed -i 's/^main "$@"$/: # fixture: do not auto-run dashboard/' "$fixture/dashboard.sh"
+
+cat > "$TMP/bin/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$DASHBOARD_DOCKER_CALL_LOG"
+case "$1" in
+    compose)
+        cat <<'JSON'
+[{"Name":"vaultwarden_app","State":"running","Health":"healthy"},{"Name":"vaultwarden_caddy","State":"exited","Health":""}]
+JSON
+        ;;
+    inspect)
+        printf '/vaultwarden_app|2026-08-05T12:00:00.000000000Z\n'
+        ;;
+    *) exit 64 ;;
+esac
+MOCK_DOCKER
+chmod +x "$TMP/bin/docker"
+
+DASHBOARD_DOCKER_CALL_LOG="$TMP/docker.calls" \
+PATH="$TMP/bin:$PATH" DASHBOARD="$fixture/dashboard.sh" bash <<'PROBE'
+set -euo pipefail
+source "$DASHBOARD"
+_capture_container_snapshot
+[[ "$(_container_status_plain "$CONTAINER_VW")" == Running ]]
+[[ "$(_container_status_plain "$CONTAINER_CADDY")" == Stopped ]]
+[[ "$(_container_status_plain "$CONTAINER_POSTFIX")" == Missing ]]
+DASHBOARD_CONTAINER_STATE["$CONTAINER_VW"]="unknown"
+DASHBOARD_CONTAINER_HEALTH["$CONTAINER_VW"]="healthy"
+[[ "$(_container_status_plain "$CONTAINER_VW")" == Unknown ]]
+PROBE
+
+[[ "$(grep -c '^compose ' "$TMP/docker.calls")" -eq 1 ]] \
+    || fail 'dashboard process snapshot did not use one Compose query'
+[[ "$(grep -c '^inspect ' "$TMP/docker.calls")" -eq 1 ]] \
+    || fail 'dashboard process snapshot did not use one batched inspect'
+! grep -q '^ps ' "$TMP/docker.calls" \
+    || fail 'dashboard process snapshot used docker ps'
+
+old="$TMP/backups/old.age"
+new="$TMP/backups/new.age"
+printf old > "$old"
+printf new > "$new"
+touch -d '@100' "$old"
+touch -d '@200' "$new"
+BACKUP_DIR="$TMP/backups" DASHBOARD="$fixture/dashboard.sh" bash <<'PROBE'
+set -euo pipefail
+source "$DASHBOARD"
+_capture_newest_backup
+[[ "$NEWEST_BACKUP_PATH" == "$BACKUP_DIR/new.age" ]]
+[[ "$NEWEST_BACKUP_MTIME" == 200 ]]
+PROBE
+
+printf 'Dashboard process snapshot behavior tests passed.\n'
+)
+
+check_dashboard_process_snapshot_behavior
+'''
+          assert marker in t
+          t = t.replace(marker, '\n' + behavior + marker, 1)
+          test.write_text(t)
+          PY
+
+          rm .github/workflows/prompt7-apply.yml
+          git diff --check
+          bash -n dashboard.sh tests/suites/operations/case-operator-ui.bash
+          shellcheck -x --severity=warning dashboard.sh tests/suites/operations/case-operator-ui.bash
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add dashboard.sh tests/suites/operations/case-operator-ui.bash .github/workflows/prompt7-apply.yml
+          git commit -m 'perf: reuse dashboard redraw snapshots'
+          git push origin HEAD:perf/dashboard-process-snapshot
