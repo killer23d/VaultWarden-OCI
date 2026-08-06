@@ -118,8 +118,7 @@ services:
         soft: 512
         hard: 512
 
-    # Docker Compose applies deploy.resources hard limits and memory reservations
-    # in standalone mode. CPU reservations are used only by Docker Swarm.
+    # Docker Compose applies these hard limits and memory reservations in standalone mode.
     deploy:
       resources:
         limits:
@@ -128,7 +127,6 @@ services:
           pids: 200
         reservations:
           memory: 128M
-          cpus: '0.1'
 
   # -------------------- Core service: Caddy reverse proxy --------------------
   caddy:
@@ -216,8 +214,7 @@ services:
         soft: 512
         hard: 512
 
-    # Docker Compose applies deploy.resources hard limits and memory reservations
-    # in standalone mode. CPU reservations are used only by Docker Swarm.
+    # Docker Compose applies these hard limits and memory reservations in standalone mode.
     deploy:
       resources:
         limits:
@@ -226,7 +223,6 @@ services:
           pids: 200
         reservations:
           memory: 128M
-          cpus: '0.1'
 
   # -------------------- Optional sidecar: Postfix relay --------------------
   postfix:
@@ -303,8 +299,7 @@ services:
         max-size: "5m"
         max-file: "3"
 
-    # Docker Compose applies deploy.resources hard limits and memory reservations
-    # in standalone mode. CPU reservations are used only by Docker Swarm.
+    # Docker Compose applies these hard limits and memory reservations in standalone mode.
     deploy:
       resources:
         limits:
@@ -313,7 +308,6 @@ services:
           pids: 50
         reservations:
           memory: 64M
-          cpus: '0.02'
 
 # =============================================================================
 # Docker Secrets
