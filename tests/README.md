@@ -41,7 +41,10 @@ Nested cases source `tests/lib/test-root.bash`, which derives the repository roo
 ./tests/run-tests.sh data-protection
 ./tests/run-tests.sh all
 ./tests/run-tests.sh list
+./tests/run-tests.sh list-files
 ```
+
+`list` prints the suite-grouped execution inventory. `list-files` prints each registered physical file exactly once, one path per line, for scripts that need a stable file inventory without parsing the human-readable suite listing.
 
 Add a regression to an existing case when it shares the same fixture and responsibility. Create another case when a separate failure or timeout boundary is useful, or combining it would mix unrelated fixtures. Do not add another top-level `test-*.sh` command.
 
@@ -49,7 +52,7 @@ Add a regression to an existing case when it shares the same fixture and respons
 
 Fixture mode is internal to the runner-contract tests. `VAULTWARDEN_TEST_RUNNER_TESTS_DIR` substitutes an isolated test root while preserving each registered path relative to `tests/`, including its `suites/<suite>/` hierarchy. This permits identical basenames in different suites without collisions and never writes to the repository's real `tests/` tree.
 
-## Per-case timeout behavior
+## Per-case timeout and timing behavior
 
 `TEST_CASE_TIMEOUT_SECONDS` defaults to `120` and applies independently to each registered runner entry. Override it when a focused developer run legitimately needs a different ceiling:
 
@@ -58,5 +61,7 @@ TEST_CASE_TIMEOUT_SECONDS=300 ./tests/run-tests.sh foundation
 ```
 
 The deadline is enforced only when the runner detects a GNU coreutils-compatible `timeout` command with the required `--kill-after` and `--verbose` options. Ubuntu CI provides GNU `timeout`; Homebrew users can use `gtimeout` from GNU coreutils. Without a supported command, cases run without a per-case deadline and the suite output states that limitation. The workflow's job timeout remains a separate outer bound.
+
+The runner reports elapsed time for every passed, failed, or timed-out case. These timings are informational and use Bash's built-in `EPOCHREALTIME`; they do not change timeout selection or introduce another dependency.
 
 GitHub Actions executes the four public suites independently and retains each suite log as a short-lived diagnostic artifact.
