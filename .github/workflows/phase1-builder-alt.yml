@@ -18,9 +18,8 @@ jobs:
       - name: Apply changes
         run: |
           git fetch origin codex/phase1-builder
-          payload="$(git show origin/codex/phase1-builder:.github/workflows/phase1-builder.yml | sed -n "s/.*printf '%s' '\([^']*\)'.*/\1/p")"
-          test -n "$payload"
-          printf '%s' "$payload" | base64 -d | gzip -d > /tmp/apply.py
+          git show origin/codex/phase1-builder:.github/phase1-fixed.b64 \
+            | base64 -d | gzip -d > /tmp/apply.py
           python3 /tmp/apply.py
           chmod +x tests/run-tests.sh tests/suites/*/case-*.bash
       - name: Validate and push
