@@ -59,6 +59,12 @@ COPIED_SERVICES=(
     vaultwarden-iptables.service
 )
 
+BACKGROUND_PRIORITY_SERVICES=(
+    vaultwarden-maintenance.service
+    vaultwarden-db-backup.service
+    vaultwarden-full-backup.service
+)
+
 MANAGED_UNITS=("${COPIED_SERVICES[@]}" "${TIMERS[@]}")
 
 INSTALLED_SCRIPT_PATHS=(
@@ -957,6 +963,24 @@ validate_installation() {
         else
             log_success "  OK: $dest"
         fi
+    done
+
+    local background_service expected_directive
+    for background_service in "${BACKGROUND_PRIORITY_SERVICES[@]}"; do
+        local background_path="$UNIT_DEST_DIR/$background_service"
+        [[ -f "$background_path" ]] || continue
+        for expected_directive in \
+            'Nice=10' \
+            'IOSchedulingClass=best-effort' \
+            'IOSchedulingPriority=7'; do
+            if grep -Fxq "$expected_directive" "$background_path"; then
+                log_success "  OK: $background_service has $expected_directive"
+            else
+                log_error "  PRIORITY DRIFT: $background_service is missing $expected_directive"
+                log_error "  Fix: sudo utilities/setup-systemd.sh install"
+                (( errors++ )) || true
+            fi
+        done
     done
 
     local startup_dest="$UNIT_DEST_DIR/$STARTUP_SERVICE"

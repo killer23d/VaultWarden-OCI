@@ -316,6 +316,44 @@ test_systemd_inventories_are_canonical() {
         || fail "template service is not explicitly skipped by service actions"
 }
 
+test_background_priority_contract() {
+    local script="$ROOT/utilities/setup-systemd.sh"
+    local priority_services unit file other
+    priority_services="$(extract_array "$script" BACKGROUND_PRIORITY_SERVICES)"
+
+    for unit in \
+        vaultwarden-maintenance.service \
+        vaultwarden-db-backup.service \
+        vaultwarden-full-backup.service; do
+        grep -Fxq "    $unit" <<< "$priority_services" \
+            || fail "background priority inventory missing $unit"
+        file="$ROOT/systemd/$unit"
+        [[ "$(grep -Fxc 'Nice=10' "$file")" -eq 1 ]] \
+            || fail "$unit must set Nice=10 exactly once"
+        [[ "$(grep -Fxc 'IOSchedulingClass=best-effort' "$file")" -eq 1 ]] \
+            || fail "$unit must set IOSchedulingClass=best-effort exactly once"
+        [[ "$(grep -Fxc 'IOSchedulingPriority=7' "$file")" -eq 1 ]] \
+            || fail "$unit must set IOSchedulingPriority=7 exactly once"
+        ! grep -Eq '^(CPUQuota|MemoryMax|OOMScoreAdjust|CPUWeight|IOWeight)=' "$file" \
+            || fail "$unit gained a hard or weighted resource control"
+    done
+    [[ "$(grep -Ec '^    vaultwarden-(maintenance|db-backup|full-backup)\.service$' <<< "$priority_services")" -eq 3 ]] \
+        || fail "background priority inventory contains an unexpected service"
+
+    for other in "$ROOT"/systemd/vaultwarden-*.service; do
+        case "$(basename "$other")" in
+            vaultwarden-maintenance.service|vaultwarden-db-backup.service|vaultwarden-full-backup.service) continue ;;
+        esac
+        ! grep -Eq '^(Nice|IOSchedulingClass|IOSchedulingPriority)=' "$other" \
+            || fail "$(basename "$other") unexpectedly received background priority directives"
+    done
+
+    grep -Fq 'for background_service in "${BACKGROUND_PRIORITY_SERVICES[@]}"' "$script" \
+        || fail "setup-systemd validation does not use the background priority inventory"
+    grep -Fq 'PRIORITY DRIFT:' "$script" \
+        || fail "setup-systemd validation does not report priority drift"
+}
+
 can_run_systemd_behavioral_tests() {
     [[ "$(uname -s)" == "Linux" ]] || return 1
     if (( EUID == 0 )); then
@@ -551,6 +589,15 @@ test_systemd_validation_fails_on_stale_installed_runtime() {
     chmod 644 "$installed"
 
     installed="$unit_dir/vaultwarden-db-backup.service"
+    sed -i '/^IOSchedulingPriority=7$/d' "$installed"
+    stale_out="$TMP/validate-priority-drift.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with missing background priority directive"
+    grep -Fq 'PRIORITY DRIFT: vaultwarden-db-backup.service is missing IOSchedulingPriority=7' "$stale_out" \
+        || { cat "$stale_out" >&2; fail "missing background priority directive was not named"; }
+    cp "$ROOT/systemd/vaultwarden-db-backup.service" "$installed"
+    chmod 644 "$installed"
+
     printf '\n# stale db backup unit fixture\n' >> "$installed"
     stale_out="$TMP/validate-stale-db-backup-service.out"
     ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
@@ -576,9 +623,10 @@ run_test 'notify-failure helper loads encrypted-secret resolution before email' 
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
 run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dropins_match_unit_type
 run_test 'systemd inventories are canonical and keep explicit exceptions' test_systemd_inventories_are_canonical
+run_test 'background priority applies only to heavy scheduled services' test_background_priority_contract
 run_test 'systemd missing source fails before mutation and dry-run stays read-only' test_systemd_missing_source_and_dry_run_behavior
 run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
-[[ "$TESTS_RUN" -eq 9 ]] || fail "expected 9 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 10 ]] || fail "expected 10 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )
