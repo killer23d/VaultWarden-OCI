@@ -1,0 +1,60 @@
+name: Phase 1 macOS builder
+
+on:
+  push:
+    branches: [codex/phase1-builder]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: codex/phase1-test-runner-records
+          fetch-depth: 0
+      - name: Install Bash 5
+        run: brew install bash coreutils
+      - name: Apply scoped transformation
+        run: |
+          git fetch origin codex/phase1-builder
+          git show origin/codex/phase1-builder:.github/phase1-fixed.b64 \
+            | base64 -d | gzip -d > /tmp/apply.py
+          python3 -m py_compile /tmp/apply.py
+          python3 /tmp/apply.py
+          chmod +x tests/run-tests.sh tests/suites/*/case-*.bash
+      - name: Validate and push clean commit
+        shell: /opt/homebrew/bin/bash {0}
+        run: |
+          set -euo pipefail
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 -n1 /opt/homebrew/bin/bash -n
+          ./tests/run-tests.sh list > /tmp/list.out
+          test "$(grep -c '^  ' /tmp/list.out)" -eq 27
+          test "$(find tests/suites -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 20
+          test -z "$(find tests -maxdepth 1 -type f \( -name 'case-*.bash' -o -name 'test-*.sh' \) -print -quit)"
+          VW_TEST_CASE_MODE=core /opt/homebrew/bin/bash tests/suites/foundation/case-runner-contracts.bash
+          for file in \
+            tests/suites/foundation/case-runner-contracts.bash \
+            tests/suites/foundation/case-config-env.bash \
+            tests/suites/foundation/case-storage-setup.bash \
+            tests/suites/security/case-secrets.bash \
+            tests/suites/operations/case-lifecycle.bash \
+            tests/suites/data-protection/case-restore-recovery.bash; do
+            set +e
+            VW_TEST_CASE_MODE=invalid-mode /opt/homebrew/bin/bash "$file" >/tmp/invalid-mode.out 2>&1
+            rc=$?
+            set -e
+            test "$rc" -eq 2
+          done
+          git add -A
+          test "$(git ls-files tests | wc -l | tr -d '[:space:]')" -eq 25
+          test "$(git ls-files 'tests/suites/**/case-*.bash' | wc -l | tr -d '[:space:]')" -eq 20
+          test -z "$(git ls-files 'tests/test-*.sh')"
+          git diff --cached --check
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+          git commit -m 'test: consolidate Phase 1 runner cases'
+          git push origin HEAD:codex/phase1-test-runner-records
