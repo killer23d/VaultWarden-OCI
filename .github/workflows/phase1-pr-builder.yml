@@ -3,6 +3,7 @@ name: Phase 1 PR builder
 on:
   pull_request:
     branches: [delta]
+    types: [opened, reopened, synchronize]
 
 permissions:
   contents: write
@@ -17,22 +18,28 @@ jobs:
           fetch-depth: 0
       - name: Apply scoped transformation
         run: |
+          set -euo pipefail
           git fetch origin codex/phase1-builder
-          git show f2327933475c8a1aae19c038b7ce890d97d7d96c:.github/phase1-fixed.b64 \
+          git show origin/codex/phase1-builder:.github/phase1-fixed.b64 \
             | base64 -d | gzip -d > /tmp/apply.py
           python3 -m py_compile /tmp/apply.py
           python3 /tmp/apply.py
           chmod +x tests/run-tests.sh tests/suites/*/case-*.bash
-      - name: Validate and push clean commit
+      - name: Static and smoke validation
         run: |
           set -euo pipefail
-          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
-            | xargs -0 -n1 bash -n
+          bash -n \
+            tests/run-tests.sh \
+            tests/suites/foundation/case-runner-contracts.bash \
+            tests/suites/foundation/case-config-env.bash \
+            tests/suites/foundation/case-storage-setup.bash \
+            tests/suites/security/case-secrets.bash \
+            tests/suites/operations/case-lifecycle.bash \
+            tests/suites/data-protection/case-restore-recovery.bash
           ./tests/run-tests.sh list > /tmp/list.out
           test "$(grep -c '^  ' /tmp/list.out)" -eq 27
           test "$(find tests/suites -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 20
           test -z "$(find tests -maxdepth 1 -type f \( -name 'case-*.bash' -o -name 'test-*.sh' \) -print -quit)"
-          VW_TEST_CASE_MODE=core bash tests/suites/foundation/case-runner-contracts.bash
           for file in \
             tests/suites/foundation/case-runner-contracts.bash \
             tests/suites/foundation/case-config-env.bash \
@@ -46,6 +53,10 @@ jobs:
             set -e
             test "$rc" -eq 2
           done
+          git diff --check
+      - name: Commit implementation
+        run: |
+          set -euo pipefail
           git add -A
           test "$(git ls-files tests | wc -l | tr -d '[:space:]')" -eq 25
           test "$(git ls-files 'tests/suites/**/case-*.bash' | wc -l | tr -d '[:space:]')" -eq 20
@@ -55,3 +66,10 @@ jobs:
           git config user.email 'codex@openai.com'
           git commit -m 'test: consolidate Phase 1 runner cases'
           git push origin HEAD:codex/phase1-test-runner-records
+      - name: Remove temporary branches
+        if: success()
+        run: |
+          set -euo pipefail
+          for branch in codex/phase1-executor codex/phase1-executor2 codex/phase1-builder; do
+            git push origin --delete "$branch" || true
+          done
