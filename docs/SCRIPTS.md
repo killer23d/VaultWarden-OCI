@@ -63,11 +63,13 @@ sudo ./setup.sh install \
 Owns foreground production lifecycle. Startup:
 
 1. acquires the shared global/lifecycle operation guard;
-2. synchronizes the environment inside the lifecycle operation;
-3. validates storage readiness;
-4. decrypts SOPS state and materializes transient runtime secrets under `/run/vaultwarden-oci/secrets`;
-5. reconciles the Compose stack;
-6. performs post-start DNS/health behavior required by the current implementation.
+2. loads the accepted runtime environment and reports relevant repository/runtime drift without persistently synchronizing it;
+3. validates project state, storage readiness, prerequisites, known runtime permissions, local images, and Age/SOPS secret state;
+4. materializes transient runtime secrets under `/run/vaultwarden-oci/secrets`;
+5. starts the existing Compose definition without pulling or building; explicit force mode may recreate containers;
+6. performs critical/optional service readiness checks and the standard post-start health profile.
+
+Ordinary startup does not persistently synchronize environment state, repair permissions, update images, reconcile DNS or firewall state, clean Docker resources, remove orphans, or create groups. Those actions remain owned by the environment, repair, update, dedicated DNS/firewall, maintenance, and setup-systemd workflows.
 
 Use the root-operated Make targets rather than calling bare `docker compose up` as the production lifecycle API:
 
@@ -90,9 +92,11 @@ Delegates to the maintenance utilities:
 - `maintenance-db-maint.sh`;
 - `maintenance-email.sh`.
 
-The health path is read-only unless repair/fix behavior is requested. Mutating health repair uses the shared operation guard.
+The health path is read-only unless repair/fix behavior is requested. Mutating health repair uses the shared operation guard. Health exposes bounded quick, standard, and comprehensive profiles; standard health is the no-profile default.
 
-The aggregate maintenance path understands exit `75` as an expected active-operation skip for the guarded DNS/firewall leaves. A real nonzero leaf failure remains a maintenance failure.
+Scheduled daily maintenance runs the routine path with email reporting. Routine maintenance owns cleanup, canonical backup pruning, online SQLite `PRAGMA optimize` plus passive WAL checkpointing, and quick post-maintenance health. DNS and firewall reconciliation remain owned by their dedicated timers. Explicit comprehensive maintenance may include them, while deep database maintenance is a separate offline workflow that owns backup, integrity checks, service stop/start, and `VACUUM`.
+
+Routine maintenance treats health status `1` as successful completion with advisory warnings and status `75` as successful completion with a visible health skip. Genuine health failures remain maintenance failures. The aggregate maintenance path also understands exit `75` as an expected active-operation skip for guarded DNS/firewall leaves; a real nonzero leaf failure remains a maintenance failure.
 
 ### `utilities/email-queue.sh`
 
@@ -134,7 +138,9 @@ The three backup tiers are intentionally different:
 
 All tiers use a verified SQLite snapshot. Full/emergency archive construction excludes live SQLite WAL/SHM state and transient runtime material, then injects the verified staged database at the normal live database path.
 
-Retention logic preserves the newest parseable timestamped archive even when it is older than the configured retention window. Unparseable archive names fail safe and are not automatically deleted as primary archives.
+Ordinary database/full payload staging uses the configured backup filesystem; small control material uses a restrictive control workspace. Emergency plaintext can contain operational private-key material and remains on verified, capacity-checked tmpfs without silently falling back to persistent plaintext staging. Full verification streams decryption into archive inspection instead of creating a second plaintext full archive.
+
+Retention resolution is shared by direct backup, routine maintenance, and local/remote pruning: nonempty `--keep`, matching `BACKUP_RETENTION_*_DAYS`, shared `BACKUP_RETENTION_DAYS`, then the per-tier fallback. Retention preserves the newest parseable timestamped archive even when it is older than the configured retention window. Unparseable archive names fail safe and are not automatically deleted as primary archives. A missing remote tier can be empty; a real remote listing failure skips pruning for that tier and makes the requested prune/rotate operation fail.
 
 Quick/full verification failure is not successful backup completion. A new archive that fails required verification is not left eligible as a normal restore candidate and must not trigger normal retention/success behavior.
 
@@ -157,6 +163,8 @@ Restore supports the three backup tiers and preserves the distinctions between:
 - Age key handling/rotation;
 - service start policy;
 - `/alive` verification.
+
+Restore uses split restrictive staging: small sensitive control material uses a control workspace, while remote downloads, decrypted large payloads, and extracted trees use a workspace on the target filesystem. Validation and initial capacity checks occur before service stop; required capacity is checked again after the pre-restore snapshot and before promotion. Failure before that destructive boundary leaves services untouched. Cleanup removes only workspaces owned by the current invocation, and retained staging is printed only when manual rollback/recovery genuinely requires it.
 
 Interactive full/emergency restore uses an operator-controlled start policy. Timeout/EOF at required confirmation or `SAVED` acknowledgement points fails safe rather than being converted into an implicit answer.
 
@@ -270,6 +278,8 @@ sudo utilities/setup-systemd.sh install --no-enable-now
 for recovery/manual-inspection hosts that are not ready to run scheduled backup/maintenance work immediately.
 
 `validate` checks installed scripts, libraries, units, rendered startup service, required environment/key permissions, and managed timer readiness. Run install + validate after managed repository code changes.
+
+The DB backup, full backup, and routine maintenance services use soft process/I/O scheduling priority (`Nice=10`, best-effort I/O, priority `7`). These are not hard CPU, memory, or I/O quotas.
 
 ## CrowdSec utilities
 
@@ -398,6 +408,8 @@ The canonical permanent Bash test entry point is:
 `tests/run-tests.sh` owns the registered permanent case inventory under `tests/suites/<suite>/case-*.bash` together with the architecture check, and fails when a registered case is missing or duplicated. Cases execute directly at their registered paths; the runner does not create compatibility files or symlinks in the checkout.
 
 GitHub Actions calls the four public suites through the runner. The Makefile and workflow YAML must not maintain a second permanent case-file inventory.
+
+The documentation workflow also covers contract-owning changes under `crowdsec/**`, `VERSION`, and `docker-compose.override.dev.yml.example`. It validates both production Compose and production Compose merged with the development override. External actions remain pinned to immutable commit SHAs.
 
 Strict ShellCheck remains an independent CI check.
 

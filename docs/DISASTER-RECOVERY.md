@@ -153,9 +153,12 @@ Confirm:
 - source storage layout;
 - target storage mode/mount;
 - required key/protection material;
-- database/archive metadata.
+- database/archive metadata;
+- which target filesystem must hold the download, decrypted payload, extracted tree, and final promoted state.
 
 If the selected full/emergency archive expects attached-volume state and the replacement host is still configured for boot storage, stop and prepare the correct storage layout.
+
+Restore performs download/decrypt/validation and an initial capacity check before the destructive boundary. It takes the configured safety snapshot, repeats the required capacity check, and only then stops services for promotion. A capacity refusal before that boundary means the named filesystem needs more space and services were not stopped.
 
 ### 7. Restore with an operator start gate
 
@@ -170,6 +173,8 @@ sudo ./restore.sh interactive --remote \
 Emergency restore follows the same selection flow but requires the independent emergency protection used by the archive: passphrase or separate emergency Age recipient.
 
 Restore may rotate/install a new operational Age key. When the workflow requires a `SAVED` acknowledgement for printed recovery material, timeout or lost SSH input fails safe instead of pretending the key was recorded.
+
+If restore prints a retained-staging path after a failed promotion/rollback, preserve that exact root-only path for the documented manual recovery step. It can contain decrypted databases, archives, extracted state, or key material; do not copy it casually, change it to world-readable, or delete it before recovery is complete.
 
 ### 8. Inspect the restored host before enabling timers
 

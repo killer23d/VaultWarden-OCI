@@ -9,6 +9,8 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- Added bounded quick, standard, and comprehensive health profiles. Quick health reuses one local Compose snapshot and intentionally omits external/network/configuration-audit/report checks.
+- Added process-local dashboard snapshot reuse for Compose state, batched container inspection, and one backup-tree pass per redraw without a persistent cache, background collector, daemon, database, or extra timer.
 - Added resilient persistent-state and disaster-recovery workflows built around the authoritative state-volume `install.env`, persistent SOPS ciphertext, transient `/run/vaultwarden-oci/secrets` material, operational and optional offline Age recipients, standalone `recover.sh`, and a printable recovery card.
 - Added a three-tier backup model for `db`, `full`, and `emergency` backups. Backup creation now stages and verifies consistent SQLite snapshots, records snapshot/encryption metadata, and keeps live database/WAL files and transient runtime secrets out of full archives.
 - Added independently protected emergency recovery material and an SMTP-only encrypted recovery-kit attachment workflow using a user-selected passphrase with a minimum-length and confirmation contract.
@@ -24,8 +26,15 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Made effective `enable_long_queue_ids=yes` a fail-closed prerequisite for targeted deletion, snapshot purge, and deprecated clear; legitimate duplicate queue-list records are now normalized safely while conflicting identities block mutation.
 
 ### Changed
-- Prevented Docker/Compose children from inheriting the email-queue mutation lock, reported post-delete queue-ID reuse accurately, and aligned invalid email-diagnostic options with exit status 2.
 
+- Scheduled daily maintenance now runs the routine path with email reporting; DNS and firewall reconciliation remain owned by their dedicated timers. Routine SQLite work stays online with `PRAGMA optimize` and passive WAL checkpointing, while the separate deep database-maintenance workflow owns backup, integrity checks, service stop/start, and `VACUUM`.
+- Backup retention now uses one precedence chain: explicit nonempty `--keep`, matching `BACKUP_RETENTION_*_DAYS`, shared `BACKUP_RETENTION_DAYS`, then the per-tier fallback. A missing remote tier may be empty, but an actual remote listing failure skips pruning for that tier and makes a requested rotate/prune operation fail.
+- Ordinary database/full backup payloads now stage on the configured backup filesystem with small control material isolated separately; emergency plaintext remains on verified, capacity-checked tmpfs. Full verification streams decryption into archive inspection instead of creating another plaintext full archive.
+- Restore now separates sensitive control material from large target-filesystem payload staging, validates and checks initial capacity before service stop, repeats required capacity checks after the pre-restore snapshot, and cleans only invocation-owned workspaces.
+- Documentation/development validation now covers changes under `crowdsec/**`, `VERSION`, and the development override; setup uses `docker-compose.override.dev.yml.example`, and CI validates production Compose both alone and merged with the development override. External actions remain immutably pinned.
+- DB backup, full backup, and routine maintenance services now use soft process/I/O scheduling priority (`Nice=10`, best-effort I/O, priority `7`) without imposing hard resource quotas.
+- Compose cleanup removed only inactive CPU reservation declarations. Active standalone memory/swap, CPU, PID, memory-reservation, and security controls remain intact.
+- Prevented Docker/Compose children from inheriting the email-queue mutation lock, reported post-delete queue-ID reuse accurately, and aligned invalid email-diagnostic options with exit status 2.
 - Replaced deprecated Python `crypt` verification with the Ubuntu `python3-bcrypt` package, including normal setup installation and explicit dependency checks even with `--skip-deps`.
 - Recovery-kit export now accepts a 30-minute systemd transient cleanup timer before email, uses `at` only as an optional fallback, fails closed when scheduling is unavailable, and removes the local plaintext copy immediately after successful encrypted delivery.
 - Standardized the supported production-host contract on Ubuntu 24.04 LTS Noble for `amd64` and `arm64`, with Cloudflare as the mandatory edge and a root-operated lifecycle/maintenance model.
@@ -45,6 +54,8 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- Corrected the systemd health contract: the five-minute service runs `health --quick --fix`, treats only `0`, `1`, and `75` as successful, and reports exits `2`, `3`, and `4` as real failures. Exit `3` is a critical prerequisite/execution failure, not a new-install success state.
+- Routine maintenance now treats health status `1` as successful completion with warnings and `75` as a visible successful skip while preserving genuine health failures as maintenance failures.
 - Fixed operation-lock lifetime so one owner-bound holder owns the global and operation-specific descriptors and releases both when the guarded shell exits, even if an arbitrary workload child remains alive.
 - Fixed gaps where startup/restart/down, safe restart, secrets mutation, environment setup/edit/sync, and systemd configuration could mutate state outside the shared operation guard.
 - Fixed systemd runtime-path and installed-utility contracts, including the structured firewall utility path and operation-state runtime directory ownership.
@@ -66,6 +77,8 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- Emergency backup plaintext that can contain operational private-key material now remains on verified, capacity-checked tmpfs and fails with capacity guidance instead of silently falling back to persistent plaintext staging.
+- Restore now keeps small sensitive control material in a restrictive control workspace and large decrypted payloads on the target filesystem, checks capacity before the destructive boundary, and retains staging only for genuine manual rollback/recovery with a clear sensitive-material warning.
 - Corrected sensitive-file cleanup language to describe best-effort overwrite/unlink without claiming guaranteed physical erasure on SSD, snapshot, journaling, or copy-on-write storage.
 - Hardened recovery-kit attachment protection so the passphrase is validated, held only for the required shell operation with tracing disabled, passed to the encryption tool through a file descriptor, and kept out of argv, environment variables, temporary passphrase files, and logs.
 - Hardened secret and Age-key custody around root-owned persistent configuration and transient runtime secret material; runtime secrets are materialized under `/run/vaultwarden-oci/secrets` for container consumption rather than treated as persistent plaintext state.

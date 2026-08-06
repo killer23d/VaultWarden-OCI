@@ -58,7 +58,9 @@ A check that did not run is not a healthy result. Use the current `PASS`, `FAIL`
 sudo make up
 ```
 
-`make up` synchronizes the accepted environment inside the guarded lifecycle operation and delegates to `startup.sh`. Startup validates storage readiness, materializes runtime secrets, and uses the current Compose lifecycle path.
+`make up` delegates to `startup.sh`. Ordinary startup loads the accepted runtime environment, validates storage, prerequisites, known permissions, local images, and secret/key state, materializes transient runtime secrets, starts the existing Compose definition without pulling or building, and performs readiness/standard-health validation.
+
+Startup does **not** persistently synchronize repository `.env`, repair permissions, update images, reconcile DNS or firewall state, clean Docker resources, remove orphans, or create groups. Use `sudo make edit-env` or `sudo make sync-env` for environment synchronization, `sudo utilities/repair-permissions.sh` for explicit repair, `sudo make update` for image updates, the dedicated DNS/firewall commands for reconciliation, and `sudo ./setup.sh systemd install ...` for installed runtime activation.
 
 Do not replace the normal production start path with a bare:
 
@@ -123,7 +125,7 @@ On a host using managed systemd runtime copies, refresh and validate those copie
 
 ## Health checks
 
-Full health:
+Standard health:
 
 ```bash
 sudo make health
@@ -135,7 +137,13 @@ Quick health:
 sudo make health-quick
 ```
 
-Direct command:
+Comprehensive health:
+
+```bash
+sudo ./maintenance.sh health --comprehensive
+```
+
+Direct standard command:
 
 ```bash
 sudo ./maintenance.sh health
@@ -143,7 +151,22 @@ sudo ./maintenance.sh health
 
 The current critical service policy is owned by `lib/defaults.sh`. Do not hard-code a separate list in operator procedures.
 
-The standard health path verifies the live runtime and includes checks for storage, secrets, Docker services, HTTP/TLS behavior, backup state, and other configured integrations according to the current implementation. The quick profile is intentionally local and bounded: it checks one Compose state snapshot, local Vaultwarden readiness, critical host thresholds, local backup age, the configured Postfix sidecar, and notification dead-letter state.
+The standard health path verifies the live runtime and includes the current Docker, HTTP/TLS, CrowdSec, host resource, network, backup, DNS, and configuration checks. Comprehensive health adds the current extended diagnostics.
+
+The quick profile is intentionally local and bounded: one Compose state snapshot, managed-container state, local Vaultwarden `/alive` and `/api/config`, critical disk/memory thresholds, newest local DB/full backup age, the configured Postfix sidecar, and notification failure/dead-letter state. It intentionally excludes external TLS, DNS, Cloudflare, CrowdSec, general outbound-network, SOPS/configuration-audit, detailed permission-traversal, and report-generation checks.
+
+Health exit contract:
+
+| Status | Meaning |
+| :-- | :-- |
+| `0` | selected checks passed |
+| `1` | advisory warnings |
+| `2` | selected checks failed |
+| `3` | a critical prerequisite prevented checks |
+| `4` | repair operation-guard or lock infrastructure failed |
+| `75` | a duplicate or contending health execution skipped cleanly |
+
+The five-minute systemd health service runs `health --quick --fix`. Its successful statuses are `0`, `1`, and `75`; exits `2`, `3`, and `4` trigger failure handling.
 
 When the existing health alert-state path is writable, unhealthy checks are
 correlated under one active incident ID. Existing per-check alert/cooldown
@@ -271,7 +294,7 @@ sudo ./setup.sh systemd validate
 
 A production-ready validation result requires the managed installed runtime to match the repository and every managed timer to be active with a next trigger.
 
-Managed services also use the project's failure-notification integration. Expected operation contention must not create a false incident; real execution failure must not be hidden as contention.
+Managed services also use the project's failure-notification integration. Expected operation contention must not create a false incident; real execution failure must not be hidden as contention. The DB backup, full backup, and routine maintenance services use soft scheduling priority (`Nice=10`, best-effort I/O class, priority `7`) so background work yields more readily; these settings are not hard resource quotas.
 
 ---
 
@@ -636,6 +659,10 @@ Database maintenance:
 ```bash
 sudo make db-maint
 ```
+
+The daily systemd job runs routine maintenance with email reporting. Routine maintenance owns cleanup, canonical backup pruning, online SQLite `PRAGMA optimize` plus `PRAGMA wal_checkpoint(PASSIVE)`, and quick post-maintenance health. It does not own daily DNS or firewall reconciliation; the dedicated timers do. Health status `1` completes successfully with advisory warnings, status `75` completes successfully with a visible skip, and genuine health failures make maintenance fail.
+
+`sudo make maintenance-full` is the explicit operator path that adds DNS and firewall work. `sudo make db-maint` is the separate deep offline workflow that owns a safety backup, integrity checks, service stop/start, checkpoint work, and `VACUUM`.
 
 Container image update:
 

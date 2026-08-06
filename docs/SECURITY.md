@@ -276,7 +276,7 @@ Supported independent protection is:
 - `age -p` passphrase mode; or
 - `EMERGENCY_BACKUP_AGE_RECIPIENT` with a separate private identity.
 
-Do not put emergency passphrases in shell history, environment variables, logs, or archive metadata.
+Do not put emergency passphrases in shell history, environment variables, logs, or archive metadata. Emergency plaintext can contain operational private-key material, so it remains in verified, capacity-checked tmpfs and does not fall back to persistent plaintext staging.
 
 ### Backup verification truthfulness
 
@@ -304,8 +304,11 @@ The important contracts are:
 
 - validate storage before destructive work;
 - identify the exact archive and required decryption identity/protection;
-- verify backup integrity/metadata according to the archive contract;
+- keep small sensitive control material in a restrictive control workspace and large downloads/decrypted payloads on the target filesystem;
+- verify backup integrity/metadata and initial capacity before services stop;
 - take the configured pre-restore safety snapshot unless deliberately skipped;
+- repeat the required capacity check after the snapshot and before service stop/promotion;
+- leave services untouched when failure occurs before that destructive boundary;
 - stop services before broad state replacement;
 - stage/promote through the owning restore/recovery transaction;
 - repair target-host runtime ownership/modes;
@@ -313,7 +316,7 @@ The important contracts are:
 - require `/alive`/health success where startup is part of the operation;
 - return non-zero when the state claimed by the command did not pass.
 
-Timeout/EOF at guarded confirmation and `SAVED` acknowledgement points is fail-safe. Lost SSH input must not be converted into a silent yes/no success.
+Timeout/EOF at guarded confirmation and `SAVED` acknowledgement points is fail-safe. Lost SSH input must not be converted into a silent yes/no success. Restore cleanup removes only workspaces owned by the current invocation. When rollback genuinely requires retained staging, the printed path may contain sensitive material and must remain root-only until manual recovery is complete.
 
 ### `recover.sh` transaction
 
@@ -460,8 +463,10 @@ Current patterns include:
 - read-only root filesystems for core containers where implemented;
 - tmpfs for temporary writable paths;
 - bounded Docker json-file logs;
-- explicit memory/swap limits on the core services;
+- active standalone memory/swap, CPU, PID, and memory-reservation controls where declared;
 - internal/private application networking plus explicit egress networks for components that require outbound access.
+
+The Compose cleanup removed only inactive CPU reservation declarations. It did not remove active standalone limits or container security controls.
 
 Vaultwarden is attached to the dedicated `vaultwarden_egress` network for outbound requirements such as push integration. Do not follow old instructions that tell operators to remove the main application network's isolation as the default push fix.
 

@@ -128,7 +128,8 @@ The recovery kit is a plaintext operator handoff containing the Age private key 
 sudo make up                 # start the stack through startup.sh
 sudo make down               # stop the stack
 sudo make restart            # restart the stack
-sudo make health             # health check
+sudo make health             # standard health check
+sudo make health-quick       # bounded local health check
 sudo make operations         # active/interrupted operation status
 sudo make backup             # database backup
 sudo make backup-full        # full DR backup
@@ -140,6 +141,11 @@ sudo make timers              # systemd timer status
 sudo make email-queue-summary # safe Postfix queue summary
 sudo make email-queue         # list queued messages
 sudo make logs SERVICE=caddy  # container logs
+```
+
+`sudo make health` runs the standard health profile. The five-minute systemd service uses bounded quick repair health (`health --quick --fix`); operators can run comprehensive health explicitly with `sudo ./maintenance.sh health --comprehensive`.
+
+Scheduled daily maintenance is routine maintenance with email reporting. DNS and firewall reconciliation remain owned by their dedicated timers, while deep database maintenance remains the separate offline `sudo make db-maint` workflow.
 
 Targeted deletion and snapshot purge require the effective Postfix setting
 `enable_long_queue_ids=yes` and fail closed when it cannot be verified. After
@@ -147,7 +153,6 @@ changing `POSTFIX_ENABLE_LONG_QUEUE_IDS`, run `sudo make up` to recreate or
 apply Postfix before destructive queue work. Hold stabilization and metadata
 identity checks remain defence in depth, and equivalent queue-list duplicates
 are counted once.
-```
 
 For exact public script grammar and options, use `--help` or [docs/COMMAND-REFERENCE.md](docs/COMMAND-REFERENCE.md).
 
