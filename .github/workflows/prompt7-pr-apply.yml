@@ -1,0 +1,30 @@
+name: Apply Prompt 7 patch from PR
+
+on:
+  pull_request:
+    branches:
+      - delta
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/dashboard-process-snapshot
+          fetch-depth: 0
+      - name: Run one-shot patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '
+            /^        run: \|$/ { capture=1; next }
+            capture { sub(/^          /, ""); print }
+          ' .github/workflows/prompt7-apply.yml > /tmp/apply-prompt7.sh
+          sed -i 's#\.github/workflows/prompt7-apply.yml#.github/workflows/prompt7-apply.yml .github/workflows/prompt7-pr-apply.yml#g' /tmp/apply-prompt7.sh
+          bash /tmp/apply-prompt7.sh
