@@ -110,6 +110,14 @@ One owner-bound Bash holder acquires the global lock before any operation-specif
 
 Expected non-interactive contention uses exit `75` where the owning script/systemd contract defines a clean skip. Real failures must remain non-zero failures and must not be relabeled as contention.
 
+## Health and maintenance ownership
+
+Health has three profiles: bounded local `--quick`, standard health with no profile flag, and extended `--comprehensive`. The five-minute systemd health service uses quick repair health (`health --quick --fix`) and accepts only `0`, `1`, and `75` as successful statuses. Exit `3` means a critical prerequisite prevented checks; it is not an installation/no-backup success state.
+
+Scheduled daily maintenance is routine maintenance with email reporting. It owns cleanup, canonical retention, online SQLite `PRAGMA optimize` and passive WAL checkpointing, and quick post-maintenance health. DNS and firewall reconciliation remain owned by their dedicated timers. Explicit comprehensive maintenance adds those reconciliations; deep database maintenance is a separate offline backup/integrity/service-stop/`VACUUM` workflow.
+
+The DB backup, full backup, and maintenance units use soft scheduling priority (`Nice=10`, `IOSchedulingClass=best-effort`, `IOSchedulingPriority=7`). These settings express background preference rather than hard CPU, memory, or I/O quotas.
+
 ## Backup architecture
 
 The backup model has three intentional tiers:
@@ -118,9 +126,17 @@ The backup model has three intentional tiers:
 - `full` — normal disaster-recovery archive without the live operational Age private key;
 - `emergency` — clone-grade secrets-bearing capsule that can include staged `/etc/vaultwarden` key/config material and is independently sealed.
 
-All tiers use a verified SQLite snapshot. Full/emergency archive construction excludes transient/runtime material and injects the verified staged database at the normal live database path.
+All tiers use a verified SQLite snapshot. Ordinary database/full payload staging uses the configured backup filesystem while small control material prefers tmpfs; emergency plaintext that may contain private-key material remains on verified capacity-checked tmpfs without persistent fallback. Full verification streams decryption into archive inspection, and atomic publication keeps incomplete candidates out of normal restore selection.
 
-See [BACKUP-RESTORE.md](BACKUP-RESTORE.md).
+Restore uses a split control/payload workspace model and validates payload/capacity before the destructive service-stop boundary, then repeats the required capacity check after the safety snapshot. See [BACKUP-RESTORE.md](BACKUP-RESTORE.md).
+
+## Dashboard redraw snapshots
+
+Each dashboard redraw reuses process-local snapshots: one Compose-state snapshot, at most one batched inspection for extra container details, and one backup-tree pass. This is an in-process redraw optimization only; there is no persistent cache, collector daemon, database, background worker, or additional timer.
+
+## Compose resource boundary
+
+The production Compose definition retains active standalone hard limits, memory reservations, and security controls. The recent cleanup removed only inactive CPU reservation declarations; operators should not treat those removed reservation values as standalone controls or assume resource controls were removed wholesale.
 
 ## Recovery transaction
 

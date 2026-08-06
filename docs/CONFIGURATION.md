@@ -414,9 +414,11 @@ RCLONE_REMOTE_PATH=BW-Backup
 
 `BACKUP_DIR` defaults under `PROJECT_STATE_DIR` when left blank.
 
-Backup archives are always Age-encrypted; there is no plaintext-backup configuration mode. The backup command performs quick verification by default, and `--full-verification` requests the explicit end-to-end decrypt and integrity path without changing the default.
+Backup archives are always Age-encrypted; there is no configurable plaintext-backup mode. The backup command performs quick verification by default, while `--full-verification` requests the explicit end-to-end decrypt and integrity path.
 
-Retention resolves in this order: a nonempty `--keep N` override, the matching type-specific variable, `BACKUP_RETENTION_DAYS`, then the historical per-tier fallback of 14 days for `db`, 30 days for `full`, and 90 days for `emergency`. The backup runner and routine maintenance both use this same resolver. Local and remote cleanup preserve the newest parseable primary archive and remove sidecars only with their primary.
+Retention resolves in this order: a nonempty `--keep N` override, the matching type-specific variable, `BACKUP_RETENTION_DAYS`, then the historical per-tier fallback of 14 days for `db`, 30 days for `full`, and 90 days for `emergency`. The obsolete maintenance-only names `DB_BACKUP_RETENTION_DAYS`, `FULL_BACKUP_RETENTION_DAYS`, and `EMERGENCY_BACKUP_RETENTION_DAYS` are not supported. The backup runner and routine maintenance both use this same resolver. Local and remote cleanup preserve the newest parseable primary archive and remove sidecars only with their primary.
+
+A remote tier that does not exist can be an empty tier. A real remote listing failure is not empty: pruning is skipped for that tier and the requested rotate/prune operation returns failure.
 
 Full and emergency backup semantics are security-relevant and differ from database backups; see [BACKUP-RESTORE.md](BACKUP-RESTORE.md) before changing retention behavior.
 

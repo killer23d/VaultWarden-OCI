@@ -98,12 +98,15 @@ Kernel lock state is authoritative. If the original operation is still active, i
 
 | Task | Command |
 |---|---|
-| Full health check | `sudo make health` |
+| Standard health check | `sudo make health` |
 | Quick health check | `sudo make health-quick` |
+| Comprehensive health check | `sudo ./maintenance.sh health --comprehensive` |
 | Test email | `sudo ./maintenance.sh test-email --verbose` |
 | Age key health | `sudo make key-health` |
 | Diagnostic dump | `sudo make diagnose` |
 | Production smoke test | `sudo ./utilities/smoke-test.sh` |
+
+The quick profile is intentionally local and bounded. It does not perform external TLS, DNS, Cloudflare, CrowdSec, general outbound-network, SOPS/configuration-audit, detailed permission-traversal, or report-generation checks. The five-minute systemd service uses `health --quick --fix`; statuses `0`, `1`, and `75` are successful, while `2`, `3`, and `4` remain real failures.
 
 The smoke test checks the canonical project environment, Docker/Compose, critical container health, TLS, `/alive`, admin protection, Age/SOPS state, materialized runtime secrets, backup recency, canonical systemd validation, CrowdSec, and disk space.
 
@@ -178,7 +181,7 @@ For guided remote restore with an operator start gate:
 sudo ./restore.sh interactive --remote --start-policy ask
 ```
 
-A timeout or lost confirmation channel is not treated as an implicit yes/no success. Restore fails safe where acknowledgement is required and prints manual next steps.
+A timeout or lost confirmation channel is not treated as an implicit yes/no success. Restore fails safe where acknowledgement is required and prints manual next steps. Capacity and payload validation happen before services stop, with a second capacity gate after the pre-restore snapshot; an early capacity refusal leaves services untouched. A printed retained-staging path is a restrictive recovery workspace that may contain sensitive material and must not be copied casually or made world-readable.
 
 See [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) and [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md).
 
@@ -249,7 +252,9 @@ Do not hand-edit installed runtime environment files as a normal configuration w
 | Update host packages | `sudo make update-system` |
 | Update Cloudflare DNS | `sudo make update-dns` |
 
-Expected operation contention from guarded DNS/firewall jobs is a clean skip using exit `75` where the service contract defines it. A real nonzero failure must still be treated as failure.
+The daily systemd unit runs routine maintenance with email reporting. Routine database work stays online and uses `PRAGMA optimize` plus `PRAGMA wal_checkpoint(PASSIVE)`; it does not stop Vaultwarden or run `VACUUM`. DNS and firewall reconciliation remain owned by their dedicated timers. Use comprehensive maintenance only when an operator intentionally wants those reconciliations in the same run, and use `db-maint` for the separate offline backup, integrity, stop/start, and `VACUUM` workflow.
+
+Routine post-maintenance health status `1` is successful with advisory warnings, and `75` is successful with a visible health skip. Genuine health failures remain maintenance failures. The scheduled DB backup, full backup, and maintenance services use soft `Nice=10` and best-effort I/O priority; these are not hard CPU, memory, or I/O quotas.
 
 ---
 

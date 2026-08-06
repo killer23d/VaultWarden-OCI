@@ -221,8 +221,9 @@ Do not manually copy live WAL/SHM files between hosts as a recovery method.
 Symptoms:
 
 - Age decrypt error;
-- storage preflight refuses the target;
+- storage or capacity preflight refuses the target;
 - restore stops before service start;
+- restore prints a retained-staging path;
 - a required key acknowledgement times out;
 - services or `/alive` fail after restore.
 
@@ -247,6 +248,7 @@ Common causes:
 | Wrong Age identity | Use a private key for a recipient that encrypted the selected backup. |
 | Emergency independent protection missing | Supply the emergency passphrase or matching `EMERGENCY_BACKUP_AGE_RECIPIENT` private identity. |
 | Attached-volume backup targeting boot storage | Prepare/mount the expected data volume, then rerun inspect. |
+| Insufficient target-filesystem capacity | Free space on the exact filesystem named by restore. Initial and post-snapshot refusals occur before service stop, so services remain untouched. |
 | Archive lacks the required verified live-path database | Choose another full/emergency archive or a database backup. |
 | Caddy ownership drift | Run `repair-permissions.sh`, then recheck health. |
 | Operator wants inspection before startup | Use `--start-policy ask` or `--no-start`. |
@@ -259,6 +261,8 @@ Backup tiers remain distinct:
 - `emergency` — independently sealed clone-grade capsule that may carry staged `/etc/vaultwarden` key/config material.
 
 A new operational Age key cannot decrypt a historical archive merely because it is the current server key. Retain and use the private identity matching the selected backup generation.
+
+A printed retained-staging path is not a normal cache. It is a root-only recovery workspace retained because rollback/manual recovery may need it, and it may contain sensitive material. Follow the printed recovery guidance before deleting it.
 
 After a successful restore that is intended to return to automated production:
 
@@ -290,7 +294,7 @@ sudo ./backup.sh run db
 sudo ./backup.sh run full --full-verification
 ```
 
-A required verification failure is a real backup failure. The failed new archive is not a valid restore candidate and does not justify retention/pruning of older recovery points.
+A required verification failure is a real backup failure. The failed new archive is not a valid restore candidate and does not justify retention/pruning of older recovery points. Ordinary database/full staging needs space on the configured backup filesystem; emergency plaintext staging needs verified tmpfs capacity and will not fall back to persistent storage.
 
 ### rclone/offsite failure
 
@@ -316,7 +320,7 @@ sudo ./setup.sh systemd validate
 sudo ./backup.sh run db --rclone
 ```
 
-Do not describe a requested-but-skipped offsite sync as successful remote protection.
+Do not describe a requested-but-skipped offsite sync as successful remote protection. A missing remote tier can be empty; an actual remote listing failure is not empty. The affected tier is not pruned, and a requested rotate/prune operation returns failure rather than claiming there are no remote backups.
 
 ---
 

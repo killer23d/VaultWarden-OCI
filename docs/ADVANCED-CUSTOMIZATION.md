@@ -84,12 +84,22 @@ Do not copy old instructions that refer to `docker-compose.override.yml.example`
 
 When experimenting locally, create the actual Compose override only on a non-production development checkout and remove it before using the production lifecycle.
 
-Validate Compose rendering:
+Validate production Compose rendering:
 
 ```bash
 docker compose \
   --env-file .env.example \
   -f docker-compose.yml.example \
+  config --quiet
+```
+
+Validate the production example merged with the development override:
+
+```bash
+docker compose \
+  --env-file .env.example \
+  -f docker-compose.yml.example \
+  -f docker-compose.override.dev.yml.example \
   config --quiet
 ```
 
@@ -445,18 +455,18 @@ and add the unit to the existing canonical install/validation ownership only whe
 
 ## Resource limits
 
-The production Compose file uses explicit top-level resource controls for core containers where standalone Docker Compose enforces them, including memory/swap limits and selected CPU/PID controls.
+The production Compose example retains active standalone memory/swap, CPU, PID, and memory-reservation controls together with the existing container security controls. The cleanup removed only inactive `deploy.resources.reservations.cpus` declarations; it did not remove resource controls wholesale.
 
 The defaults are tuned for a small production host, not specifically for OCI ARM or one cloud instance shape.
 
 When changing limits:
 
 - preserve both amd64 and arm64 support;
-- use top-level Compose properties that standalone Compose actually enforces for the intended control;
-- remember that `deploy.resources` is primarily a Swarm construct and is not the sole enforcement source for this repository;
+- inspect the effective standalone Compose configuration rather than assuming every `deploy.resources` field has the same runtime effect;
+- preserve the existing top-level memory/swap controls and active CPU/PID limits unless the intended production contract changes;
 - verify container health and host memory pressure after changes.
 
-Do not add a new resource scheduler or orchestration platform for a ten-user appliance.
+Do not teach operators to tune removed CPU reservation declarations as though they control normal standalone Compose operation. Do not add a new resource scheduler or orchestration platform for a ten-user appliance.
 
 ---
 
@@ -570,6 +580,14 @@ find . \
 docker compose \
   --env-file .env.example \
   -f docker-compose.yml.example \
+  config --quiet
+```
+
+```bash
+docker compose \
+  --env-file .env.example \
+  -f docker-compose.yml.example \
+  -f docker-compose.override.dev.yml.example \
   config --quiet
 ```
 
