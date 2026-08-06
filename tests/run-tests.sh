@@ -51,6 +51,7 @@ Suites:
   data-protection  Backup and restore/recovery contracts
   all              Run every suite in the order above
   list             Print the case inventory without running it
+  list-files       Print each registered physical case file once
 
 Examples:
   ./tests/run-tests.sh all
@@ -188,6 +189,30 @@ print_cases() {
     done
 }
 
+print_case_files() {
+    local case_file
+    local -A printed=()
+
+    for case_file in "${ALL_CASES[@]}"; do
+        if [[ -z "${printed[$case_file]+x}" ]]; then
+            printf '%s\n' "$case_file"
+            printed[$case_file]=1
+        fi
+    done
+}
+
+format_elapsed_seconds() {
+    local started_at="$1"
+    local ended_at="${EPOCHREALTIME}"
+    local started_us="${started_at/./}"
+    local ended_us="${ended_at/./}"
+    local elapsed_us=$((ended_us - started_us))
+
+    printf '%d.%02d' \
+        "$((elapsed_us / 1000000))" \
+        "$(((elapsed_us % 1000000) / 10000))"
+}
+
 resolve_timeout_candidate() {
     local requested="$1"
 
@@ -319,7 +344,7 @@ run_suite() {
     local suite="$1"
     shift
     local -a cases=("$@")
-    local case_file rc
+    local case_file rc started_at elapsed_seconds
 
     echo "SUITE $suite (${#cases[@]} cases; $TIMEOUT_DESCRIPTION)"
     if [[ -n "$TIMEOUT_NOTICE" ]]; then
@@ -327,14 +352,17 @@ run_suite() {
     fi
     for case_file in "${cases[@]}"; do
         echo "RUN   $case_file"
+        started_at="${EPOCHREALTIME}"
         if execute_case "$case_file"; then
-            echo "PASS  $case_file"
+            elapsed_seconds="$(format_elapsed_seconds "$started_at")"
+            echo "PASS  $case_file (${elapsed_seconds}s)"
         else
             rc=$?
+            elapsed_seconds="$(format_elapsed_seconds "$started_at")"
             if [[ "$CASE_TIMED_OUT" == true ]]; then
-                echo "TIMEOUT $case_file after ${TEST_CASE_TIMEOUT_SECONDS}s" >&2
+                echo "TIMEOUT $case_file after ${TEST_CASE_TIMEOUT_SECONDS}s (${elapsed_seconds}s)" >&2
             else
-                echo "FAIL  $case_file (exit $rc)" >&2
+                echo "FAIL  $case_file (exit $rc) (${elapsed_seconds}s)" >&2
             fi
             return "$rc"
         fi
@@ -384,6 +412,9 @@ case "$1" in
         print_cases security "${SECURITY_CASES[@]}"
         print_cases operations "${OPERATIONS_CASES[@]}"
         print_cases data-protection "${DATA_PROTECTION_CASES[@]}"
+        ;;
+    list-files)
+        print_case_files
         ;;
     -h|--help|help)
         usage
