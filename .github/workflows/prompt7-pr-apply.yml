@@ -26,5 +26,26 @@ jobs:
             /^        run: \|$/ { capture=1; next }
             capture { sub(/^          /, ""); print }
           ' .github/workflows/prompt7-apply.yml > /tmp/apply-prompt7.sh
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('/tmp/apply-prompt7.sh')
+          text = path.read_text()
+          start = text.index("old = '''    # --- Last Backup ---")
+          end = text.index('dashboard.write_text(text)', start)
+          replacement = '''backup_start = text.index("    # --- Last Backup ---")
+backup_end = text.index('    echo -e " ${BLD}Last backup:', backup_start)
+backup_replacement = r\'''    # --- Last Backup ---
+    local last_backup_str
+    _capture_newest_backup
+    if [[ -n "${NEWEST_BACKUP_PATH}" ]]; then
+        last_backup_str="$(_epoch_to_pt "${NEWEST_BACKUP_MTIME}") ($(basename "${NEWEST_BACKUP_PATH}"))"
+    else
+        last_backup_str="${YLW}No backups found${NC}"
+    fi
+\'''
+text = text[:backup_start] + backup_replacement + text[backup_end:]
+'''
+          path.write_text(text[:start] + replacement + text[end:])
+          PY
           sed -i 's#\.github/workflows/prompt7-apply.yml#.github/workflows/prompt7-apply.yml .github/workflows/prompt7-pr-apply.yml#g' /tmp/apply-prompt7.sh
           bash /tmp/apply-prompt7.sh
