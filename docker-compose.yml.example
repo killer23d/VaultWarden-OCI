@@ -23,9 +23,7 @@ services:
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     # memswap_limit equal to mem_limit disables swap for this container, preventing
-    # decrypted secrets and DB content from being paged to disk. Must be a top-level
-    # service property — not under deploy.resources.limits — to be applied by
-    # docker compose in standalone (non-Swarm) mode.
+    # decrypted secrets and DB content from being paged to disk.
     mem_limit: 512M
     memswap_limit: 512M
 
@@ -120,9 +118,7 @@ services:
         soft: 512
         hard: 512
 
-    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
-    # In standalone 'docker compose', cpu and pid limits are silently ignored.
-    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
+    # Docker Compose applies these hard limits and memory reservations in standalone mode.
     deploy:
       resources:
         limits:
@@ -131,7 +127,6 @@ services:
           pids: 200
         reservations:
           memory: 128M
-          cpus: '0.1'
 
   # -------------------- Core service: Caddy reverse proxy --------------------
   caddy:
@@ -219,9 +214,7 @@ services:
         soft: 512
         hard: 512
 
-    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
-    # In standalone 'docker compose', cpu and pid limits are silently ignored.
-    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
+    # Docker Compose applies these hard limits and memory reservations in standalone mode.
     deploy:
       resources:
         limits:
@@ -230,7 +223,6 @@ services:
           pids: 200
         reservations:
           memory: 128M
-          cpus: '0.1'
 
   # -------------------- Optional sidecar: Postfix relay --------------------
   postfix:
@@ -307,9 +299,7 @@ services:
         max-size: "5m"
         max-file: "3"
 
-    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
-    # In standalone 'docker compose', cpu and pid limits are silently ignored.
-    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
+    # Docker Compose applies these hard limits and memory reservations in standalone mode.
     deploy:
       resources:
         limits:
@@ -318,7 +308,6 @@ services:
           pids: 50
         reservations:
           memory: 64M
-          cpus: '0.02'
 
 # =============================================================================
 # Docker Secrets

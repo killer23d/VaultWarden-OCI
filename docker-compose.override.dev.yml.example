@@ -35,9 +35,6 @@ services:
     volumes:
       # Mount a local web vault build for UI testing
       - ./web-vault-dev:/web-vault:ro
-    # Remove production resource limits
-    deploy:
-      resources: {}
     # LOG CAP: Larger than prod (debug verbosity). 50m x 5 = 250MB max.
     logging:
       driver: "json-file"
@@ -54,9 +51,6 @@ services:
       - "127.0.0.1:8081:80"
       - "127.0.0.1:8443:443"
       - "127.0.0.1:2019:2019"  # Caddy admin API — unauthenticated, loopback only
-    # Remove resource limits for development
-    deploy:
-      resources: {}
     # LOG CAP: Larger than prod (one line per request + debug). 50m x 5 = 250MB max.
     logging:
       driver: "json-file"
@@ -77,9 +71,6 @@ services:
     # Development bind mounts
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/postfix:/var/log/postfix
-    # Remove resource limits for development
-    deploy:
-      resources: {}
     # Faster health checks for local testing
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "587"]

@@ -597,3 +597,75 @@ printf '1..%s\n' "$TESTS_RUN"
 )
 
 check_config_environment_contracts
+
+check_compose_resource_contracts() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+PRODUCTION="$ROOT/docker-compose.yml.example"
+DEVELOPMENT="$ROOT/docker-compose.override.dev.yml.example"
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+service_block() {
+    local file="$1" service="$2"
+    awk -v header="  ${service}:" '
+        $0 == header { active = 1 }
+        active && $0 ~ /^  [[:alnum:]_-]+:[[:space:]]*$/ && $0 != header { exit }
+        active { print }
+    ' "$file"
+}
+
+assert_line() {
+    local block="$1" expected="$2" context="$3"
+    grep -Fqx -- "$expected" <<< "$block" || fail "$context"
+}
+
+reservation_block() {
+    awk '
+        $0 == "        reservations:" { active = 1; next }
+        active { print }
+    ' <<< "$1"
+}
+
+assert_resources() {
+    local name="$1" block="$2" limit_memory="$3" limit_cpus="$4" limit_pids="$5" reserved_memory="$6"
+    local reservations
+
+    assert_line "$block" "          memory: $limit_memory" "$name memory limit changed"
+    assert_line "$block" "          cpus: '$limit_cpus'" "$name CPU limit changed"
+    assert_line "$block" "          pids: $limit_pids" "$name PID limit changed"
+
+    reservations="$(reservation_block "$block")"
+    assert_line "$reservations" "          memory: $reserved_memory" "$name memory reservation changed"
+    ! grep -Eq '^[[:space:]]+cpus:' <<< "$reservations" \
+        || fail "$name retains a Swarm-only CPU reservation"
+}
+
+vaultwarden="$(service_block "$PRODUCTION" vaultwarden)"
+caddy="$(service_block "$PRODUCTION" caddy)"
+postfix="$(service_block "$PRODUCTION" postfix)"
+mailpit="$(service_block "$DEVELOPMENT" mailpit)"
+
+assert_resources Vaultwarden "$vaultwarden" 512M 0.3 200 128M
+assert_resources Caddy "$caddy" 256M 0.25 200 128M
+assert_resources Postfix "$postfix" 256M 0.1 50 64M
+
+assert_line "$mailpit" '          memory: 128M' 'Mailpit memory limit changed'
+assert_line "$mailpit" "          cpus: '0.1'" 'Mailpit CPU limit changed'
+
+for service in vaultwarden caddy postfix; do
+    override_block="$(service_block "$DEVELOPMENT" "$service")"
+    ! grep -Fqx '    deploy:' <<< "$override_block" \
+        || fail "$service development override must not claim to clear active limits"
+done
+
+! grep -Fq 'deploy.resources is evaluated only in Docker Swarm mode' "$PRODUCTION" \
+    || fail 'production Compose still claims deploy resources are Swarm-only'
+! grep -Fq 'cpu and pid limits are silently ignored' "$PRODUCTION" \
+    || fail 'production Compose still claims standalone CPU/PID limits are ignored'
+
+printf 'PASS: Compose retains active limits without Swarm-only CPU reservations\n'
+)
+
+check_compose_resource_contracts
