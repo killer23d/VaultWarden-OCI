@@ -3,6 +3,8 @@ name: Export delta workspace
 on:
   push:
     branches: [codex/phase1-builder]
+  pull_request:
+    branches: [delta]
 
 permissions:
   contents: read
