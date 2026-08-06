@@ -93,8 +93,8 @@ DESCRIPTION:
       - CrowdSec services/packages/config/state and project firewall rules
       - setup-managed swap path only in --test-reset mode
 
-    Docker itself, /var/lib/docker, the docker group, common admin packages, SSH
-    configuration, and unrelated firewall rules are intentionally preserved.
+    Docker itself, /var/lib/docker, OS users/groups and memberships, common admin
+    packages, SSH configuration, and unrelated firewall rules are intentionally preserved.
 
 SUBCOMMANDS:
     run    Perform the idempotent uninstall
@@ -1067,16 +1067,17 @@ remove_swap_and_apt_sources() {
     return 0
 }
 
-remove_group_memberships() {
-    info "Step 10: Removing VaultWarden-specific group metadata..."
+preserve_os_identity() {
+    info "Step 10: Preserving OS users, groups, and memberships..."
 
     if getent group vaultwarden >/dev/null 2>&1; then
-        groupdel vaultwarden 2>/dev/null \
-            && success "Removed system group: vaultwarden" \
-            || die "Could not remove system group 'vaultwarden'; inspect processes or memberships still using it."
+        warn "Preserving existing system group 'vaultwarden'; the current root-operated runtime no longer creates or owns it."
+        warn "Legacy installations may have created this group. Remove it manually only after confirming no other workload uses it."
+    else
+        info "No legacy 'vaultwarden' system group found."
     fi
 
-    warn "Leaving Docker packages, /var/lib/docker, docker group, and operator Docker membership unchanged."
+    warn "Leaving Docker packages, /var/lib/docker, all OS groups, and operator memberships unchanged."
     return 0
 }
 
@@ -1273,8 +1274,6 @@ verify_uninstall_complete() {
         _residual "$FSTAB_FILE still references $SWAPFILE_PATH"
     fi
 
-    getent group vaultwarden >/dev/null 2>&1 && _residual "system group vaultwarden"
-
     if (( UNINSTALL_RESIDUALS > 0 )); then
         die "Uninstall incomplete — ${UNINSTALL_RESIDUALS} managed artifact(s) remain. Review RESIDUAL lines above."
     fi
@@ -1349,7 +1348,7 @@ show_summary() {
         fi
         _dry_run_line "shared SOPS binary preserved when present: ${SOPS_BIN}"
         _dry_run_line "Docker packages/runtime data are preserved by default"
-        _dry_run_line "vaultwarden group; docker group/memberships preserved"
+        _dry_run_line "OS users, groups, and memberships preserved (including any legacy vaultwarden group)"
         _dry_run_line "post-cleanup residual verification"
         echo ""
         info "DRY RUN complete — no changes made."
@@ -1464,7 +1463,7 @@ main() {
     remove_crowdsec
     remove_firewall_rules
     remove_swap_and_apt_sources
-    remove_group_memberships
+    preserve_os_identity
     remove_project_checkout
 
     operation_set_phase "6" "Final runtime cleanup and residual verification" 2>/dev/null || true
@@ -1482,7 +1481,7 @@ main() {
         info "Ambiguous existing ${SWAPFILE_PATH} is preserved unless project ownership can be proven."
     fi
     info "Intentionally preserved shared host infrastructure:"
-    info "  • Docker packages, /var/lib/docker, docker group, and operator Docker membership"
+    info "  • Docker packages, /var/lib/docker, and all OS users, groups, and memberships"
     info "  • SSH/UFW access rules not matching cached Cloudflare HTTP/HTTPS rules or historical broad project rules"
     info "  • Common admin tools not uniquely owned by this project: curl, wget, git, jq, sqlite3, ufw, gpg, rsync, python3, make, nano"
     info "  • Shared SOPS binary when present at ${SOPS_BIN}"
