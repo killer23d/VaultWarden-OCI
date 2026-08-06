@@ -711,7 +711,10 @@ _restore_preflight_archive_expansion_capacity(){
   fi
   return 0
 }
-create_pre_restore_snapshot(){ MOCK_AVAILABLE_BYTES=1024; : > "$TMP/inspect-snapshot.called"; }
+create_pre_restore_snapshot(){
+  [[ "\${TEST_SNAPSHOT_CONSUMES_SPACE:-false}" == true ]] && MOCK_AVAILABLE_BYTES=1024
+  : > "$TMP/inspect-snapshot.called"
+}
 _set_snapshot_operation_phase(){ return 0; }
 _load_recovery_kit(){ return 0; }
 resolve_backup_file(){ return 0; }
@@ -720,7 +723,17 @@ _prompt_age_key(){ RESTORE_DECRYPT_AGE_KEY_FILE=unused; return 0; }
 _require_selected_archive_tools(){ return 0; }
 _rotate_age_key(){ : > "$TMP/inspect-rotate.called"; }
 _decrypt_restore_archive_for_preflight(){ : > "$TMP/inspect-decrypt.called"; printf '%s\\n' "$inspect_archive"; }
-docker(){ : > "$TMP/inspect-docker-stop.called"; }
+cleanup(){ return 0; }
+_can_safe_restart(){ return 1; }
+_restore_print_manual_start_checklist(){ log_warn "Services may be stopped."; }
+timeout(){ shift; "\$@"; }
+docker(){
+  : > "$TMP/inspect-docker-stop.called"
+  if [[ "\${TEST_STOP_SIGNAL:-false}" == true \
+        && "\$*" == "compose stop --timeout 30" ]]; then
+    kill -TERM "\$\$"
+  fi
+}
 get_config_value(){
   case "\$1" in
     PROJECT_STATE_DIR) printf '%s' "$inspect_state" ;;
@@ -767,6 +780,7 @@ fi
 rm -rf "$TMP/inspect-control" "$TMP/inspect-payload"
 rm -f "$TMP/inspect-snapshot.called" "$TMP/inspect-docker-stop.called"
 if TEST_INSPECT_ONLY=false TEST_FORCE=true TEST_NO_PRE_BACKUP=false TEST_ROTATE_POLICY=skip \
+    TEST_SNAPSHOT_CONSUMES_SPACE=true \
     bash "$TMP/inspect-main-probe.sh" >"$TMP/post-snapshot-capacity.out" 2>&1; then
   fail 'restore unexpectedly continued after the snapshot consumed reserved capacity'
 fi
@@ -776,6 +790,27 @@ fi
   || fail 'post-snapshot capacity failure reached docker compose stop'
 grep -q 'Services were not stopped' "$TMP/post-snapshot-capacity.out" \
   || fail 'post-snapshot capacity failure did not report the untouched service state'
+
+rm -rf "$TMP/inspect-control" "$TMP/inspect-payload"
+rm -f "$TMP/inspect-docker-stop.called" "$TMP/inspect-startup.called"
+set +e
+TEST_INSPECT_ONLY=false TEST_FORCE=true TEST_NO_PRE_BACKUP=true TEST_ROTATE_POLICY=skip \
+    TEST_STOP_SIGNAL=true \
+    bash "$TMP/inspect-main-probe.sh" >"$TMP/stop-signal.out" 2>&1
+stop_signal_rc=$?
+set -e
+[[ "$stop_signal_rc" -eq 143 ]] \
+  || { cat "$TMP/stop-signal.out" >&2; fail "TERM during service stop expected 143, got $stop_signal_rc"; }
+[[ -e "$TMP/inspect-docker-stop.called" ]] \
+  || fail 'service-stop TERM regression did not enter docker compose stop'
+! grep -q 'Restore failed before destructive phase' "$TMP/stop-signal.out" \
+  || fail 'TERM during service stop was reported as pre-destructive'
+! grep -qi 'services were not stopped' "$TMP/stop-signal.out" \
+  || fail 'TERM during service stop falsely reported untouched services'
+grep -q 'Services may be stopped' "$TMP/stop-signal.out" \
+  || fail 'TERM during service stop did not report possible stopped services'
+[[ ! -e "$TMP/inspect-startup.called" ]] \
+  || fail 'TERM during service stop attempted unsafe full-restore startup'
 
 # RDR-06: snapshot state and persisted operation phase are truthful.
 cat > "$TMP/snapshot-probe.sh" <<EOF_PROBE

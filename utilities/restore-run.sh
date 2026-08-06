@@ -3288,12 +3288,14 @@ main() {
     trap '_restore_safety_net 143' TERM
     if [[ "$DRY_RUN" != "true" ]]; then
         operation_set_phase "stop" "Stopping VaultWarden services"
+        # A signal during compose stop can leave some or all services stopped.
+        # Treat the stop attempt as destructive before launching the command.
+        RESTORE_DESTRUCTIVE_PHASE_STARTED=true
         log_info "Stopping services (up to 30s grace period)..."
         if ! timeout 35 docker compose stop --timeout 30; then
             log_warn "docker compose stop did not complete cleanly within 35s — forcing..."
             docker compose kill 2>/dev/null || true
         fi
-        RESTORE_DESTRUCTIVE_PHASE_STARTED=true
     fi
 
     case "$RESTORE_TYPE" in
