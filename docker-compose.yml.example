@@ -24,8 +24,7 @@ services:
     user: "${PUID}:${PGID}"
     # memswap_limit equal to mem_limit disables swap for this container, preventing
     # decrypted secrets and DB content from being paged to disk. Must be a top-level
-    # service property — not under deploy.resources.limits — to be applied by
-    # docker compose in standalone (non-Swarm) mode.
+    # service property to be applied by docker compose in standalone mode.
     mem_limit: 512M
     memswap_limit: 512M
 
@@ -120,19 +119,6 @@ services:
         soft: 512
         hard: 512
 
-    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
-    # In standalone 'docker compose', cpu and pid limits are silently ignored.
-    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.3'
-          pids: 200
-        reservations:
-          memory: 128M
-          cpus: '0.1'
-
   # -------------------- Core service: Caddy reverse proxy --------------------
   caddy:
     container_name: vaultwarden_caddy
@@ -219,19 +205,6 @@ services:
         soft: 512
         hard: 512
 
-    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
-    # In standalone 'docker compose', cpu and pid limits are silently ignored.
-    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.25'
-          pids: 200
-        reservations:
-          memory: 128M
-          cpus: '0.1'
-
   # -------------------- Optional sidecar: Postfix relay --------------------
   postfix:
     container_name: vaultwarden_postfix
@@ -306,19 +279,6 @@ services:
       options:
         max-size: "5m"
         max-file: "3"
-
-    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
-    # In standalone 'docker compose', cpu and pid limits are silently ignored.
-    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.1'
-          pids: 50
-        reservations:
-          memory: 64M
-          cpus: '0.02'
 
 # =============================================================================
 # Docker Secrets
