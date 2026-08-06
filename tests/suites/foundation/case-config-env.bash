@@ -621,9 +621,25 @@ assert_line() {
     grep -Fqx -- "$expected" <<< "$block" || fail "$context"
 }
 
-assert_no_line() {
-    local block="$1" unexpected="$2" context="$3"
-    ! grep -Fqx -- "$unexpected" <<< "$block" || fail "$context"
+reservation_block() {
+    awk '
+        $0 == "        reservations:" { active = 1; next }
+        active { print }
+    ' <<< "$1"
+}
+
+assert_resources() {
+    local name="$1" block="$2" limit_memory="$3" limit_cpus="$4" limit_pids="$5" reserved_memory="$6"
+    local reservations
+
+    assert_line "$block" "          memory: $limit_memory" "$name memory limit changed"
+    assert_line "$block" "          cpus: '$limit_cpus'" "$name CPU limit changed"
+    assert_line "$block" "          pids: $limit_pids" "$name PID limit changed"
+
+    reservations="$(reservation_block "$block")"
+    assert_line "$reservations" "          memory: $reserved_memory" "$name memory reservation changed"
+    ! grep -Eq '^[[:space:]]+cpus:' <<< "$reservations" \
+        || fail "$name retains a Swarm-only CPU reservation"
 }
 
 vaultwarden="$(service_block "$PRODUCTION" vaultwarden)"
@@ -631,49 +647,17 @@ caddy="$(service_block "$PRODUCTION" caddy)"
 postfix="$(service_block "$PRODUCTION" postfix)"
 mailpit="$(service_block "$DEVELOPMENT" mailpit)"
 
-assert_line "$vaultwarden" '    mem_limit: 512M' 'Vaultwarden top-level memory limit changed'
-assert_line "$vaultwarden" '    memswap_limit: 512M' 'Vaultwarden swap limit changed'
-assert_line "$vaultwarden" '    deploy:' 'Vaultwarden deploy resources are missing'
-assert_line "$vaultwarden" '          memory: 512M' 'Vaultwarden deploy memory limit changed'
-assert_line "$vaultwarden" "          cpus: '0.3'" 'Vaultwarden CPU limit changed'
-assert_line "$vaultwarden" '          pids: 200' 'Vaultwarden PID limit changed'
-assert_line "$vaultwarden" '          memory: 128M' 'Vaultwarden memory reservation changed'
-assert_line "$vaultwarden" "          cpus: '0.1'" 'Vaultwarden CPU reservation changed'
+assert_resources Vaultwarden "$vaultwarden" 512M 0.3 200 128M
+assert_resources Caddy "$caddy" 256M 0.25 200 128M
+assert_resources Postfix "$postfix" 256M 0.1 50 64M
 
-assert_line "$caddy" '    mem_limit: 256M' 'Caddy top-level memory limit changed'
-assert_line "$caddy" '    memswap_limit: 256M' 'Caddy swap limit changed'
-assert_line "$caddy" '    cpus: "0.25"' 'Caddy top-level CPU limit changed'
-assert_line "$caddy" '    pids_limit: 200' 'Caddy top-level PID limit changed'
-assert_line "$caddy" '    deploy:' 'Caddy deploy resources are missing'
-assert_line "$caddy" '          memory: 256M' 'Caddy deploy memory limit changed'
-assert_line "$caddy" "          cpus: '0.25'" 'Caddy deploy CPU limit changed'
-assert_line "$caddy" '          pids: 200' 'Caddy deploy PID limit changed'
-assert_line "$caddy" '          memory: 128M' 'Caddy memory reservation changed'
-assert_line "$caddy" "          cpus: '0.1'" 'Caddy CPU reservation changed'
-
-assert_line "$postfix" '    mem_limit: 256M' 'Postfix top-level memory limit changed'
-assert_line "$postfix" '    memswap_limit: 256M' 'Postfix swap limit changed'
-assert_line "$postfix" '    deploy:' 'Postfix deploy resources are missing'
-assert_line "$postfix" '          memory: 256M' 'Postfix deploy memory limit changed'
-assert_line "$postfix" "          cpus: '0.1'" 'Postfix CPU limit changed'
-assert_line "$postfix" '          pids: 50' 'Postfix PID limit changed'
-assert_line "$postfix" '          memory: 64M' 'Postfix memory reservation changed'
-assert_line "$postfix" "          cpus: '0.02'" 'Postfix CPU reservation changed'
-
-assert_line "$mailpit" '    deploy:' 'Mailpit deploy resources are missing'
 assert_line "$mailpit" '          memory: 128M' 'Mailpit memory limit changed'
 assert_line "$mailpit" "          cpus: '0.1'" 'Mailpit CPU limit changed'
 
 for service in vaultwarden caddy postfix; do
     override_block="$(service_block "$DEVELOPMENT" "$service")"
-    assert_no_line "$override_block" '    deploy:' "$service development override must not claim to clear active limits"
-done
-
-for block in "$vaultwarden" "$caddy" "$postfix"; do
-    assert_line "$block" '    # Docker Compose applies deploy.resources hard limits and memory reservations' \
-        'standalone Compose resource comment is missing'
-    assert_line "$block" '    # in standalone mode. CPU reservations are used only by Docker Swarm.' \
-        'CPU reservation scope comment is missing'
+    ! grep -Fqx '    deploy:' <<< "$override_block" \
+        || fail "$service development override must not claim to clear active limits"
 done
 
 ! grep -Fq 'deploy.resources is evaluated only in Docker Swarm mode' "$PRODUCTION" \
@@ -681,7 +665,7 @@ done
 ! grep -Fq 'cpu and pid limits are silently ignored' "$PRODUCTION" \
     || fail 'production Compose still claims standalone CPU/PID limits are ignored'
 
-printf 'PASS: Compose resource controls remain service-scoped and truthful\n'
+printf 'PASS: Compose retains active limits without Swarm-only CPU reservations\n'
 )
 
 check_compose_resource_contracts
