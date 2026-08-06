@@ -62,6 +62,27 @@ assert_not_contains() {
     fi
 }
 
+production_compose="$ROOT/docker-compose.yml.example"
+development_compose="$ROOT/docker-compose.override.dev.yml.example"
+for compose_file in "$production_compose" "$development_compose"; do
+    if grep -Eq '^[[:space:]]+deploy:[[:space:]]*$' "$compose_file"; then
+        fail "Compose example retains an inactive Docker Swarm deploy declaration: $compose_file"
+    fi
+done
+[[ "$(grep -Fxc '    mem_limit: 512M' "$production_compose")" -eq 1 ]] \
+    || fail 'Vaultwarden standalone memory limit changed'
+[[ "$(grep -Fxc '    memswap_limit: 512M' "$production_compose")" -eq 1 ]] \
+    || fail 'Vaultwarden standalone swap limit changed'
+[[ "$(grep -Fxc '    mem_limit: 256M' "$production_compose")" -eq 2 ]] \
+    || fail 'Caddy/Postfix standalone memory limits changed'
+[[ "$(grep -Fxc '    memswap_limit: 256M' "$production_compose")" -eq 2 ]] \
+    || fail 'Caddy/Postfix standalone swap limits changed'
+[[ "$(grep -Fxc '    cpus: "0.25"' "$production_compose")" -eq 1 ]] \
+    || fail 'Caddy standalone CPU limit changed'
+[[ "$(grep -Fxc '    pids_limit: 200' "$production_compose")" -eq 1 ]] \
+    || fail 'Caddy standalone process limit changed'
+printf 'PASS: Compose examples retain only active standalone resource limits\n'
+
 write_case() {
     local path="$1"
     local command="$2"
