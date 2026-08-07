@@ -263,10 +263,14 @@ _read_env_value() {
     ' "$file" 2>/dev/null || true
 }
 
-_env_has_uninstall_config() {
-    local file="$1"
-    [[ -f "$file" ]] || return 1
-    [[ -n "$(_read_env_value PROJECT_STATE_DIR "$file")$(_read_env_value DATA_VOLUME_MOUNT "$file")$(_read_env_value DATA_VOLUME_DEVICE "$file")$(_read_env_value BACKUP_DIR "$file")" ]]
+_env_candidate_score() {
+    local file="$1" score=0
+    [[ -f "$file" ]] || { printf '%s\n' -1; return 0; }
+    [[ -n "$(_read_env_value PROJECT_STATE_DIR "$file")" ]] && score=$((score + 2))
+    [[ -n "$(_read_env_value DATA_VOLUME_MOUNT "$file")" ]] && score=$((score + 2))
+    [[ -n "$(_read_env_value DATA_VOLUME_DEVICE "$file")" ]] && score=$((score + 4))
+    [[ -n "$(_read_env_value BACKUP_DIR "$file")" ]] && score=$((score + 1))
+    printf '%s\n' "$score"
 }
 
 _env_candidates_for_bootstrap() {
@@ -281,9 +285,6 @@ _env_candidates_for_bootstrap() {
         mount="$(_read_env_value DATA_VOLUME_MOUNT "$INSTALLED_ENV")"
         [[ -n "$state" && -f "$state/config/install.env" ]] && printf '%s\n' "$state/config/install.env"
         [[ -n "$mount" && "$mount" != "$state" && -f "$mount/config/install.env" ]] && printf '%s\n' "$mount/config/install.env"
-        if _env_has_uninstall_config "$INSTALLED_ENV"; then
-            return 0
-        fi
     fi
 
     if [[ -f "$repo_env" ]]; then
@@ -441,21 +442,15 @@ resolve_paths() {
     COMPOSE_PROJECT_NAME_ENV=""
     UNINSTALL_CONFIG_SOURCE=""
 
+    local best_score=-1 score
     while IFS= read -r env_file; do
         [[ -f "$env_file" ]] || continue
-        if _env_has_uninstall_config "$env_file"; then
+        score="$(_env_candidate_score "$env_file")"
+        if (( score > best_score )); then
+            best_score=$score
             UNINSTALL_CONFIG_SOURCE="$env_file"
-            break
         fi
     done < <(_env_candidates_for_bootstrap | _unique_lines)
-
-    if [[ -z "$UNINSTALL_CONFIG_SOURCE" ]]; then
-        while IFS= read -r env_file; do
-            [[ -f "$env_file" ]] || continue
-            UNINSTALL_CONFIG_SOURCE="$env_file"
-            break
-        done < <(_env_candidates_for_bootstrap | _unique_lines)
-    fi
 
     if [[ -n "$UNINSTALL_CONFIG_SOURCE" ]]; then
         PROJECT_STATE_DIR="$(_read_env_value PROJECT_STATE_DIR "$UNINSTALL_CONFIG_SOURCE")"
@@ -471,6 +466,21 @@ resolve_paths() {
     PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-$DEFAULT_STATE_DIR}"
     COMPOSE_PROJECT_NAME_ENV="${COMPOSE_PROJECT_NAME_ENV:-vaultwarden-oci}"
     BACKUP_DIR="${BACKUP_DIR:-${PROJECT_STATE_DIR}/backups}"
+
+    # Recover a partial/stale environment safely when the configured state path
+    # is actually a mounted VaultWarden data volume. This avoids ever treating a
+    # sentinel-backed mount as recursively deletable boot-volume state.
+    if [[ -z "$DATA_VOLUME_DEVICE" && "$PROJECT_STATE_DIR" == /* ]] \
+        && mountpoint -q "$PROJECT_STATE_DIR" 2>/dev/null \
+        && [[ -f "$PROJECT_STATE_DIR/.vw-data-volume" && ! -L "$PROJECT_STATE_DIR/.vw-data-volume" ]] \
+        && [[ "$(head -1 "$PROJECT_STATE_DIR/.vw-data-volume" 2>/dev/null || true)" == "VaultWarden-OCI data volume" ]]; then
+        DATA_VOLUME_MOUNT="$PROJECT_STATE_DIR"
+        DATA_VOLUME_DEVICE="$(findmnt -n -o SOURCE --target "$PROJECT_STATE_DIR" 2>/dev/null || true)"
+        [[ -n "$DATA_VOLUME_DEVICE" ]] \
+            || die "Mounted VaultWarden data volume detected at $PROJECT_STATE_DIR, but its source device could not be resolved."
+        warn "Recovered separate-volume identity from mounted VaultWarden sentinel because the selected environment omitted DATA_VOLUME_DEVICE."
+    fi
+
     STORAGE_MODE="boot-volume"
     DATA_MOUNT_MOUNTED=false
     DATA_MOUNT_SENTINEL=false
@@ -544,10 +554,30 @@ _extract_age_public_key() {
     printf '%s' "$pubkey"
 }
 
+_age_key_will_be_deleted() {
+    local key="$1"
+    _path_is_inside "$key" "$ETC_VAULTWARDEN_DIR" && return 0
+    if _path_is_inside "$key" "$PROJECT_DIR"; then
+        # Test-reset removes repo-local secrets; normal uninstall removes the
+        # checkout unless a preserved backup inside it requires source retention.
+        [[ "$TEST_RESET" == "true" ]] && return 0
+        if ! (_backup_dir_is_external_to_state 2>/dev/null \
+            && _path_is_inside "$BACKUP_DIR" "$PROJECT_DIR" 2>/dev/null \
+            && [[ -d "$BACKUP_DIR" ]]); then
+            return 0
+        fi
+    fi
+    if [[ -z "${DATA_VOLUME_DEVICE:-}" ]] && _path_is_inside "$key" "$PROJECT_STATE_DIR"; then
+        return 0
+    fi
+    return 1
+}
+
 _existing_age_keys() {
     local key
     for key in "${MANAGED_AGE_KEY_PATHS[@]}"; do
-        [[ -f "$key" ]] && printf '%s\n' "$key"
+        [[ -f "$key" ]] || continue
+        _age_key_will_be_deleted "$key" && printf '%s\n' "$key"
     done | _unique_lines
 }
 
@@ -892,6 +922,10 @@ remove_state_and_mount() {
     info "Step 3: Removing managed state or detaching separate block storage..."
 
     if [[ -z "$DATA_VOLUME_DEVICE" ]]; then
+        if mountpoint -q "$PROJECT_STATE_DIR" 2>/dev/null \
+            || [[ -e "$PROJECT_STATE_DIR/.vw-data-volume" || -L "$PROJECT_STATE_DIR/.vw-data-volume" ]]; then
+            die "PROJECT_STATE_DIR looks mount-backed, but no verified DATA_VOLUME_DEVICE is available. Refusing recursive boot-state deletion: $PROJECT_STATE_DIR"
+        fi
         if [[ -d "$PROJECT_STATE_DIR" ]]; then
             _state_dir_has_managed_evidence "$PROJECT_STATE_DIR" \
                 || die "Custom PROJECT_STATE_DIR lacks recognizable VaultWarden state evidence; refusing recursive deletion: $PROJECT_STATE_DIR"
@@ -933,7 +967,7 @@ remove_state_and_mount() {
     else
         warn "$DATA_VOLUME_MOUNT is not mounted; filesystem contents will not be touched."
         if [[ -d "$DATA_VOLUME_MOUNT" ]] && [[ -n "$(find "$DATA_VOLUME_MOUNT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            die "Unmounted data mount path is non-empty. Refusing to treat local files as the detached block volume: $DATA_VOLUME_MOUNT"
+            warn "Unrelated/local files exist under the unmounted host mountpoint; preserving them: $DATA_VOLUME_MOUNT"
         fi
         uuid="$(_data_volume_uuid)"
         _remove_fstab_mount "$DATA_VOLUME_MOUNT" "$DATA_VOLUME_DEVICE" "$uuid" \
@@ -954,9 +988,11 @@ remove_state_and_mount() {
     fi
 
     if [[ -d "$DATA_VOLUME_MOUNT" ]]; then
-        rmdir "$DATA_VOLUME_MOUNT" 2>/dev/null \
-            && success "Removed empty host mountpoint directory: $DATA_VOLUME_MOUNT" \
-            || die "Host mountpoint remains non-empty after detach: $DATA_VOLUME_MOUNT"
+        if rmdir "$DATA_VOLUME_MOUNT" 2>/dev/null; then
+            success "Removed empty host mountpoint directory: $DATA_VOLUME_MOUNT"
+        else
+            warn "Preserving non-empty host mountpoint directory and its unrelated/local files: $DATA_VOLUME_MOUNT"
+        fi
     fi
 }
 
@@ -968,7 +1004,8 @@ _repo_artifact_is_preserved_backup() {
 }
 
 remove_repo_local_install_artifacts() {
-    [[ "$TEST_RESET" == "true" ]] || return 0
+    local reason="${1:-test-reset}"
+    [[ "$TEST_RESET" == "true" || "$reason" == "preserved-checkout" ]] || return 0
     info "Step 4: Resetting generated checkout-local installation artifacts..."
 
     local rel path
@@ -1062,11 +1099,16 @@ remove_project_checkout() {
     if [[ "$PROJECT_DIR" == */VaultWarden-OCI || "$PROJECT_BASENAME" == "VaultWarden-OCI" ]]; then
         if _backup_dir_is_external_to_state && _path_is_inside "$BACKUP_DIR" "$PROJECT_DIR" && [[ -d "$BACKUP_DIR" ]]; then
             warn "Preserving project checkout because external BACKUP_DIR is inside it: $BACKUP_DIR"
+            remove_repo_local_install_artifacts preserved-checkout
+            warn "Generated local secrets/config were removed; source and the backup subtree remain."
             warn "Move the backup elsewhere, then remove the checkout manually if desired: $PROJECT_DIR"
             return 0
         fi
-        _safe_rm_rf "$PROJECT_DIR" || true
-        success "Removed project checkout: $PROJECT_DIR"
+        if _safe_rm_rf "$PROJECT_DIR"; then
+            success "Removed project checkout: $PROJECT_DIR"
+        else
+            warn "Could not remove project checkout completely: $PROJECT_DIR"
+        fi
     else
         warn "Project directory does not look like a VaultWarden-OCI checkout; preserving it: $PROJECT_DIR"
     fi
@@ -1229,8 +1271,11 @@ preserve_os_identity() {
 remove_runtime_artifacts() {
     info "Step 12: Removing VaultWarden runtime secrets and operation state..."
     # Do not unlink live /run/lock paths while flock file descriptors are held.
-    _safe_rm_rf "$RUNTIME_DIR" || true
-    success "Removed VaultWarden runtime secrets/state."
+    if _safe_rm_rf "$RUNTIME_DIR"; then
+        success "Removed VaultWarden runtime secrets/state."
+    else
+        warn "Could not fully remove VaultWarden runtime secrets/state: $RUNTIME_DIR"
+    fi
     info "Reusable coordination lock pathnames under /run/lock are intentionally preserved."
 }
 
