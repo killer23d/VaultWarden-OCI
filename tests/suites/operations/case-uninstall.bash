@@ -22,16 +22,38 @@ printf 'UUID=managed\t/mnt/vw-data\text4\tnoatime,nofail,x-systemd.device-timeou
 chmod 640 "$FSTAB"
 remove_fstab /mnt/vw-data /dev/missing '' || fail "setup fstab signature rejected"
 [[ ! -s "$FSTAB" && "$(stat -c %a "$FSTAB")" == 640 ]] || fail "fstab rewrite or metadata preservation failed"
+remove_fstab /mnt/vw-data /dev/missing '' || fail "already-clean fstab was not idempotent"
 printf 'UUID=operator\t/mnt/vw-data\text4\tdefaults,nofail\t0\t2\n' > "$FSTAB"
 if remove_fstab /mnt/vw-data /dev/missing ''; then fail "mountpoint-only fstab entry removed"; fi
 grep -q 'UUID=operator' "$FSTAB" || fail "operator fstab entry changed"
 printf 'UUID=managed\t/mnt/other\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' > "$FSTAB"
 if fstab_can_remove /mnt/vw-data /dev/missing managed; then fail "same UUID at another mountpoint accepted"; fi
 
+# The installed runtime env is authoritative; a stale repo .env must not win
+# merely because it contains more populated storage keys.
+ROOT="$T/config-repo"; mkdir -p "$ROOT"
+INSTALLED_ENV="$T/installed.env"; DEFAULT_STATE="$T/default-state"; DEFAULT_DATA="$T/default-data"
+printf 'PROJECT_STATE_DIR=%s\nDATA_VOLUME_MOUNT=/mnt/vw-data\n' "$T/live-state" > "$INSTALLED_ENV"
+printf 'PROJECT_STATE_DIR=/mnt/stale\nDATA_VOLUME_MOUNT=/mnt/stale\nDATA_VOLUME_DEVICE=/dev/stale\nBACKUP_DIR=/stale/backups\n' > "$ROOT/.env"
+resolve
+[[ "$CONFIG_SOURCE" == "$INSTALLED_ENV" && "$PROJECT_STATE_DIR" == "$T/live-state" && -z "$DATA_VOLUME_DEVICE" ]] \
+  || fail "stale repo env outranked installed runtime env"
+
 mkdir -p "$T/x"
 if safe_rm "$T/x/.."; then fail "canonical broad path accepted"; fi
 PROJECT_STATE_DIR="$DEFAULT_DATA"; DATA_VOLUME_MOUNT="$DEFAULT_DATA"; DATA_VOLUME_DEVICE=''
 if ( preflight_storage ) >/dev/null 2>&1; then fail "partial separate-volume config accepted"; fi
+
+# A stale project-managed Docker mount guard is also separate-volume evidence,
+# even when a damaged env file lost the mount/device fields.
+SYSTEMD="$T/ambiguous-systemd"; MOUNT_GUARD="$SYSTEMD/docker.service.d/10-vaultwarden-data-volume.conf"
+mkdir -p "$(dirname "$MOUNT_GUARD")"
+printf '# Managed by VaultWarden-OCI setup.sh\n[Unit]\nRequiresMountsFor=/mnt/old-vw-data\n' > "$MOUNT_GUARD"
+PROJECT_STATE_DIR="$T/custom-state"; DATA_VOLUME_MOUNT=''; DATA_VOLUME_DEVICE=''; FSTAB="$T/no-fstab"
+storage_ambiguous || fail "managed mount guard did not expose partial storage config"
+
+DEFAULT_STATE="$T/default-owned"; mkdir -p "$DEFAULT_STATE"
+state_evidence "$DEFAULT_STATE" || fail "empty default state namespace was not idempotently attributable"
 
 handoff_name 'vaultwarden-setup-credentials-20260807T000000Z.txt' || fail "valid credentials handoff missed"
 if handoff_name 'vaultwarden-setup-credentials-operator.txt'; then fail "broad credentials handoff matched"; fi
@@ -40,12 +62,18 @@ if handoff_name 'vaultwarden-recovery-kit-current.txt'; then fail "broad recover
 
 ROOT="$T/VaultWarden-OCI"; ETC_DIR="$T/etc-vw"; PROJECT_STATE_DIR="$T/state"; DATA_VOLUME_DEVICE=''; BACKUP_DIR="$ROOT/backups/retained"
 mkdir -p "$ROOT/secrets/keys" "$BACKUP_DIR"
-key="$ROOT/secrets/keys/age-key.txt"; printf key > "$key"; AGE_KEYS=("$key")
+key="$ROOT/secrets/keys/age-key.txt"; printf 'AGE-SECRET-KEY-TEST\n' > "$key"; AGE_KEYS=("$key")
 [[ "$(existing_keys)" == "$key" ]] || fail "repo Age key escaped recovery guard"
 printf secret > "$ROOT/secrets/local"; printf old > "$ROOT/backups/old"; printf keep > "$BACKUP_DIR/keep"
 cleanup_checkout_artifacts
 [[ -f "$BACKUP_DIR/keep" ]] || fail "nested external backup deleted"
 [[ ! -e "$ROOT/backups/old" && ! -e "$ROOT/secrets" ]] || fail "generated checkout artifacts remained"
+
+# Project-rendered Workers config remains attributable even if env/domain files
+# were already removed by a partial uninstall.
+CS_WORKER="$T/crowdsec-worker.yaml"; DOMAIN_NAME=''
+printf '# crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example\ncloudflare_config: {}\n' > "$CS_WORKER"
+worker_config_managed || fail "managed CrowdSec Workers config depended on surviving DOMAIN config"
 
 SYSTEMD="$T/systemd"; MOUNT_GUARD="$SYSTEMD/docker.service.d/10-vaultwarden-data-volume.conf"; mkdir -p "$(dirname "$MOUNT_GUARD")"
 printf '# Managed by VaultWarden-OCI setup.sh - do not edit by hand.\n[Unit]\n' > "$MOUNT_GUARD"
@@ -75,5 +103,12 @@ remove_state >/dev/null
 [[ -f "$MOCK_DETACHED/operator-note" && -f "$MOCK_DETACHED/.vw-data-volume" ]] || fail "separate-volume data or sentinel deleted"
 ! grep -q "$DATA_VOLUME_MOUNT" "$FSTAB" || fail "managed fstab entry remained"
 [[ ! -e "$MOUNT_GUARD" ]] || fail "managed mount guard remained"
+
+# Successful operation finalization must not recreate the runtime operation state
+# that uninstall deliberately removed immediately before verification.
+OP_HELD=true; OPERATION_OWNS_STATE=true; OPERATION_STATE_FILE="$T/uninstall.state"; OPERATION_RELEASED=false
+operation_release(){ [[ "$OPERATION_OWNS_STATE" == false && -z "$OPERATION_STATE_FILE" ]]; }
+finalize_op_success || fail "successful operation release would recreate runtime state"
+[[ "$OP_HELD" == false ]] || fail "operation remained marked held after finalization"
 
 echo 'case-uninstall: ok'
