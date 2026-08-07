@@ -17,7 +17,7 @@ tests/
     └── data-protection/
 ```
 
-Permanent executable cases live under `tests/suites/**/case-*.bash`. `tests/run-tests.sh` is the only permanent inventory and exposes **27 logical records backed by 20 physical case files**. A record has four fields:
+Permanent executable cases live under `tests/suites/**/case-*.bash`. `tests/run-tests.sh` is the only permanent inventory and exposes **26 logical records backed by 19 physical case files**. A record has four fields:
 
 ```text
 logical-id|physical-path|mode|timeout-seconds
@@ -33,11 +33,11 @@ Nested cases source `tests/lib/test-root.bash`, which derives the repository roo
 
 | Suite | Logical cases | Responsibility |
 | --- | ---: | --- |
-| `foundation` | 9 | Architecture, runner/repository contracts, configuration, permissions, storage/setup, and systemd |
+| `foundation` | 8 | Architecture, runner/repository contracts, configuration, permissions, storage/setup, and systemd |
 | `security` | 4 | Security/privilege, secrets/sensitive cleanup, and email |
-| `operations` | 11 | Operation guards, lock-descriptor hygiene, lifecycle/startup, operator UI, CrowdSec, and uninstall |
+| `operations` | 11 | Operation guards, health alerts/locking, lifecycle/startup, operator UI, CrowdSec, and uninstall |
 | `data-protection` | 3 | Backup and independently timed restore core/tail recovery coverage |
-| `all` | 27 | All four suites in dependency order |
+| `all` | 26 | All four suites in dependency order |
 
 ```bash
 ./tests/run-tests.sh foundation
@@ -46,13 +46,15 @@ Nested cases source `tests/lib/test-root.bash`, which derives the repository roo
 ./tests/run-tests.sh data-protection
 ./tests/run-tests.sh all
 ./tests/run-tests.sh list
+./tests/run-tests.sh list-files
 ```
 
-`list` prints the effective logical inventory as `logical-id|physical-path|mode|timeout-seconds`. Add coverage to the closest existing domain case when it shares setup and responsibility. Use another logical mode when that physical case can own the coverage cleanly but needs independent identity, diagnostics, or timeout isolation. Create another physical `case-*.bash` file when the coverage needs distinct setup/fixtures or a focused boundary that would make a shared owner harder to navigate. Do not add top-level `test-*.sh` files or a second inventory.
+`list` is the logical execution inventory and prints `logical-id|physical-path|mode|timeout-seconds`. `list-files` is the unique physical case inventory and prints one registered `case-*.bash` path per line in deterministic order. One physical case may expose multiple logical modes while appearing only once in `list-files`. Add coverage to the closest existing domain case when it shares setup and responsibility. Use another logical mode when that physical case can own the coverage cleanly but needs independent identity, diagnostics, or timeout isolation. Create another physical `case-*.bash` file when the coverage needs distinct setup/fixtures or a focused boundary that would make a shared owner harder to navigate. Do not add top-level `test-*.sh` files or a second inventory.
 
 The consolidated multi-mode owners are:
 
-- `case-runner-contracts.bash`: `core`, `repository-interface`, `repository-validation`, `all`;
+- `case-runner-contracts.bash`: `core`, `repository-interface`, `all`;
+- `case-health-alerts.bash`: `core`, `locking`, `all`;
 - `case-config-env.bash`: `core`, `ci-dev-setup`, `all`;
 - `case-storage-setup.bash`: `core`, `host-architecture`, `all`;
 - `case-secrets.bash`: `core`, `sensitive-cleanup`, `all`;
@@ -63,7 +65,7 @@ Direct execution defaults to `all`; an unknown `VW_TEST_CASE_MODE` exits `2` bef
 
 ## Fixture and timeout behavior
 
-Fixture mode is internal to runner-contract tests. `VAULTWARDEN_TEST_RUNNER_TESTS_DIR` rewrites only each record's physical path into an isolated tests tree; logical ID, mode, and stored timeout remain unchanged. `VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_RECORD` injects one complete record only in fixture mode. Fixtures create each unique physical path once even when several logical records share it.
+Fixture mode is internal to runner-contract tests. `VAULTWARDEN_TEST_RUNNER_TESTS_DIR` rewrites only each record's physical path into an isolated tests tree; logical ID, mode, and stored timeout remain unchanged. `VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_RECORD` injects one complete record only in fixture mode. Runner-contract fixtures use `list-files` as the physical inventory and create each unique physical path once even when several logical records share it.
 
 Each logical record stores its own timeout. `TEST_CASE_TIMEOUT_SECONDS` optionally overrides that value for focused developer runs:
 
@@ -71,6 +73,6 @@ Each logical record stores its own timeout. `TEST_CASE_TIMEOUT_SECONDS` optional
 TEST_CASE_TIMEOUT_SECONDS=300 ./tests/run-tests.sh foundation
 ```
 
-The deadline is enforced only when a GNU coreutils-compatible `timeout`/`gtimeout` supports the required options. Without one, cases still run and the suite reports that per-logical-case deadlines are unavailable. A test that exits `124` on its own remains a normal failure; timeout reporting is based on GNU timeout's signal diagnostic.
+The deadline is enforced only when a GNU coreutils-compatible `timeout`/`gtimeout` supports the required options. Without one, cases still run and the suite reports that per-logical-case deadlines are unavailable. A test that exits `124` on its own remains a normal failure; timeout reporting is based on GNU timeout's signal diagnostic. Each logical PASS, FAIL, or TIMEOUT result includes elapsed duration in seconds.
 
 GitHub Actions continues to execute the four public suites independently and retains each suite log as a short-lived diagnostic artifact.

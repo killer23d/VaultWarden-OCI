@@ -1234,3 +1234,20 @@ printf 'CrowdSec email notification health visibility tests passed.\n'
 )
 
 check_crowdsec_email_health_visibility
+
+check_crowdsec_worker_descriptor_cleanup_contracts() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+CROWDSEC_WORKER_LIB="$ROOT/lib/crowdsec-worker.sh"
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+if grep -Fq '_crowdsec_worker_run_without_guard_fds' "$CROWDSEC_WORKER_LIB"; then
+    fail "CrowdSec worker library retained obsolete operation descriptor isolation"
+fi
+grep -Fq 'if "$bouncer_bin" -S -c "$dest"; then' "$CROWDSEC_WORKER_LIB" \
+    || fail "autonomous CrowdSec Workers deployment must run normally under owner-bound locking"
+
+printf 'CrowdSec worker descriptor cleanup contracts passed.\n'
+)
+
+check_crowdsec_worker_descriptor_cleanup_contracts

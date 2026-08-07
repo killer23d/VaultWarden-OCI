@@ -710,3 +710,29 @@ printf 'Notification features preserve systemd unit and sandbox contracts.\n'
 )
 
 check_notification_features_preserve_systemd_contracts
+
+check_systemd_obsolete_lock_identity_contracts() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+SYSTEMD_SETUP="$ROOT/utilities/setup-systemd.sh"
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+for obsolete in \
+    '_ensure_runtime_lock_files' \
+    '_ensure_lock_group' \
+    '_resolve_service_identity' \
+    '_install_service_identity_dropin' \
+    'groupadd --system' \
+    'usermod -aG'; do
+    if grep -Fq "$obsolete" "$SYSTEMD_SETUP"; then
+        fail "systemd installer still manages shared lock identity: ${obsolete}"
+    fi
+done
+if grep -Eq 'chown .*vaultwarden.*lock|chmod 0?660 .*lock' "$SYSTEMD_SETUP"; then
+    fail "systemd installer still changes operation lock ownership or mode"
+fi
+
+printf 'Systemd obsolete lock identity contracts passed.\n'
+)
+
+check_systemd_obsolete_lock_identity_contracts

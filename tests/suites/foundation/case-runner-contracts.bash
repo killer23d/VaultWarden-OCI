@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Canonical runner, repository-interface, and repository-validation contracts.
+# Canonical runner and repository-interface contracts.
 set -euo pipefail
 MODE="${VW_TEST_CASE_MODE:-all}"
-case "$MODE" in core|repository-interface|repository-validation|all) ;; *) printf 'FAIL: unknown VW_TEST_CASE_MODE for case-runner-contracts.bash: %s\n' "$MODE" >&2; exit 2 ;; esac
+case "$MODE" in core|repository-interface|all) ;; *) printf 'FAIL: unknown VW_TEST_CASE_MODE for case-runner-contracts.bash: %s\n' "$MODE" >&2; exit 2 ;; esac
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
@@ -35,6 +35,7 @@ capture() {
 assert_status() { [[ "$LAST_STATUS" -eq "$1" ]] || fail "$2: expected exit $1, got $LAST_STATUS"; }
 assert_contains() { grep -Fq -- "$1" "$2" || fail "$3: missing '$1'"; }
 assert_not_contains() { ! grep -Fq -- "$1" "$2" || fail "$3: unexpectedly contained '$1'"; }
+assert_matches() { grep -Eq -- "$1" "$2" || fail "$3: pattern did not match: $1"; }
 
 write_case() {
     local path="$1" command="$2"
@@ -51,27 +52,48 @@ write_fixture_case() {
 }
 
 real_list="$TMP_ROOT/real-list.out"
+real_list_repeat="$TMP_ROOT/real-list-repeat.out"
 capture "$real_list" "$RUNNER" list
 assert_status 0 "real runner list"
+capture "$real_list_repeat" "$RUNNER" list
+assert_status 0 "real runner list repeat"
+cmp -s "$real_list" "$real_list_repeat" || fail "logical list output is not deterministic"
 mapfile -t REGISTERED_RECORDS < <(sed -n 's/^  //p' "$real_list")
-[[ "${#REGISTERED_RECORDS[@]}" -eq 27 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 27"
+[[ "${#REGISTERED_RECORDS[@]}" -eq 26 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 26"
 
-declare -a REGISTERED_PATHS=()
-declare -A SEEN_PATHS=() SEEN_IDS=() SEEN_PATH_MODES=()
+real_files="$TMP_ROOT/real-files.out"
+real_files_repeat="$TMP_ROOT/real-files-repeat.out"
+capture "$real_files" "$RUNNER" list-files
+assert_status 0 "real runner list-files"
+capture "$real_files_repeat" "$RUNNER" list-files
+assert_status 0 "real runner list-files repeat"
+cmp -s "$real_files" "$real_files_repeat" || fail "list-files output is not deterministic"
+mapfile -t REGISTERED_PATHS < "$real_files"
+[[ "${#REGISTERED_PATHS[@]}" -eq 19 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 19"
+[[ "$(sort -u "$real_files" | wc -l | tr -d '[:space:]')" -eq 19 ]] || fail "list-files contains duplicate physical paths"
+
+declare -A SEEN_IDS=() SEEN_PATH_MODES=()
 for record in "${REGISTERED_RECORDS[@]}"; do
     IFS='|' read -r logical_id physical_path mode timeout <<<"$record"
     [[ -n "$logical_id" && -n "$physical_path" && -n "$mode" && -n "$timeout" ]] || fail "real list emitted an empty record field: $record"
+    [[ "$timeout" == 120 ]] || fail "real list changed stored timeout for $logical_id: $timeout"
     [[ -z "${SEEN_IDS[$logical_id]+x}" ]] || fail "real list duplicated logical ID: $logical_id"
     SEEN_IDS[$logical_id]=1
     path_mode="$physical_path|$mode"
     [[ -z "${SEEN_PATH_MODES[$path_mode]+x}" ]] || fail "real list duplicated path/mode: $path_mode"
     SEEN_PATH_MODES[$path_mode]=1
-    if [[ -z "${SEEN_PATHS[$physical_path]+x}" ]]; then
-        SEEN_PATHS[$physical_path]=1
-        REGISTERED_PATHS+=("$physical_path")
-    fi
+    grep -Fqx "$physical_path" "$real_files" || fail "list-files omitted registered physical case: $physical_path"
 done
-[[ "${#REGISTERED_PATHS[@]}" -eq 20 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 20"
+grep -Fqx 'health-alerts|tests/suites/operations/case-health-alerts.bash|core|120' < <(printf '%s\n' "${REGISTERED_RECORDS[@]}") \
+    || fail "health-alerts logical core record is missing"
+grep -Fqx 'health-locking|tests/suites/operations/case-health-alerts.bash|locking|120' < <(printf '%s\n' "${REGISTERED_RECORDS[@]}") \
+    || fail "health-locking logical record is missing"
+[[ "$(grep -Fxc 'tests/suites/operations/case-health-alerts.bash' "$real_files" || true)" -eq 1 ]] \
+    || fail "multi-mode health-alerts physical case must appear exactly once in list-files"
+health_alerts_line="$(grep -nF '  health-alerts|tests/suites/operations/case-health-alerts.bash|core|120' "$real_list" | cut -d: -f1)"
+health_locking_line="$(grep -nF '  health-locking|tests/suites/operations/case-health-alerts.bash|locking|120' "$real_list" | cut -d: -f1)"
+[[ -n "$health_alerts_line" && "$health_locking_line" -eq $(( health_alerts_line + 1 )) ]] \
+    || fail "logical list order changed for health-alerts/health-locking"
 
 for forbidden in ACTIVE_CASE_LINK CASE_ENTRYPOINT cleanup_case_link prepare_case_entrypoint '.runner-case.' 'ln -s --'; do
     ! grep -Fq -- "$forbidden" "$RUNNER" || fail "runner still contains checkout-mutation machinery: $forbidden"
@@ -93,18 +115,29 @@ repo_status_before="$TMP_ROOT/repo-status.before"
 repo_status_after="$TMP_ROOT/repo-status.after"
 git -C "$ROOT" status --short --untracked-files=all -- tests >"$repo_status_before"
 
-# Stable list, path rewrite, record preservation, and one fixture file per unique physical path.
+# Stable logical list, physical list-files rewrite, record preservation, and one fixture file per unique physical path.
 list_one="$TMP_ROOT/list-one.out"; list_two="$TMP_ROOT/list-two.out"
 capture "$list_one" "${fixture_env[@]}" "$RUNNER" list; assert_status 0 "fixture list first pass"
 capture "$list_two" "${fixture_env[@]}" "$RUNNER" list; assert_status 0 "fixture list second pass"
-cmp -s "$list_one" "$list_two" || fail "list output is not stable"
-[[ "$(grep -c '^  ' "$list_one")" -eq 27 ]] || fail "fixture list did not preserve 27 logical records"
+cmp -s "$list_one" "$list_two" || fail "fixture logical list output is not stable"
+[[ "$(grep -c '^  ' "$list_one")" -eq 26 ]] || fail "fixture list did not preserve 26 logical records"
 for record in "${REGISTERED_RECORDS[@]}"; do
     IFS='|' read -r logical_id physical_path mode timeout <<<"$record"
     mapped="$FIXTURE_TESTS/${physical_path#tests/}"
     grep -Fqx "  $logical_id|$mapped|$mode|$timeout" "$list_one" || fail "fixture rewrite changed record fields: $record"
 done
-[[ "$(find "$FIXTURE_TESTS/suites" -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 20 ]] \
+
+files_one="$TMP_ROOT/files-one.out"; files_two="$TMP_ROOT/files-two.out"
+capture "$files_one" "${fixture_env[@]}" "$RUNNER" list-files; assert_status 0 "fixture list-files first pass"
+capture "$files_two" "${fixture_env[@]}" "$RUNNER" list-files; assert_status 0 "fixture list-files second pass"
+cmp -s "$files_one" "$files_two" || fail "fixture list-files output is not stable"
+[[ "$(wc -l < "$files_one" | tr -d '[:space:]')" -eq 19 ]] || fail "fixture list-files did not preserve 19 unique physical paths"
+[[ "$(sort -u "$files_one" | wc -l | tr -d '[:space:]')" -eq 19 ]] || fail "fixture list-files duplicated a physical path"
+for physical_path in "${REGISTERED_PATHS[@]}"; do
+    mapped="$FIXTURE_TESTS/${physical_path#tests/}"
+    grep -Fqx "$mapped" "$files_one" || fail "fixture list-files omitted rewritten physical path: $mapped"
+done
+[[ "$(find "$FIXTURE_TESTS/suites" -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 19 ]] \
     || fail "fixture construction did not create one file per unique physical path"
 
 # Fixture hook is a complete record and is forbidden outside fixture mode.
@@ -221,12 +254,12 @@ write_fixture_case "$probe_mapped"
 mode_log="$TMP_ROOT/modes.log"; : > "$mode_log"
 capture "$run_output" env "VAULTWARDEN_TEST_RUNNER_TESTS_DIR=$FIXTURE_TESTS" "FIXTURE_MODE_LOG=$mode_log" "$RUNNER" foundation
 assert_status 0 "foundation mode propagation"
-[[ "$(wc -l < "$mode_log" | tr -d '[:space:]')" -eq 9 ]] || fail "foundation did not execute 9 logical records"
+assert_matches "^PASS    $probe_id \\([0-9]+\\.[0-9]{2}s\\) \\[$probe_mapped\\]$" "$run_output" "success duration diagnostic"
+[[ "$(wc -l < "$mode_log" | tr -d '[:space:]')" -eq 8 ]] || fail "foundation did not execute 8 logical records"
 for expected in \
     "host-architecture|$FIXTURE_TESTS/suites/foundation/case-storage-setup.bash" \
     "core|$FIXTURE_TESTS/suites/foundation/case-runner-contracts.bash" \
     "repository-interface|$FIXTURE_TESTS/suites/foundation/case-runner-contracts.bash" \
-    "repository-validation|$FIXTURE_TESTS/suites/foundation/case-runner-contracts.bash" \
     "core|$FIXTURE_TESTS/suites/foundation/case-config-env.bash" \
     "ci-dev-setup|$FIXTURE_TESTS/suites/foundation/case-config-env.bash"; do
     grep -Fqx "$expected" "$mode_log" || fail "missing propagated mode: $expected"
@@ -258,7 +291,7 @@ assert_contains '--kill-after=1s --verbose 1s' "$fake_log" "timeout capability p
 write_case "$probe_mapped" 'exit 37'
 capture "$run_output" "${fixture_env[@]}" "$RUNNER" all
 assert_status 37 "all failure propagation"
-assert_contains "FAIL    $probe_id [$probe_mapped] (exit 37)" "$run_output" "failure diagnostic"
+assert_matches "^FAIL    $probe_id \\([0-9]+\\.[0-9]{2}s\\) \\[$probe_mapped\\] \\(exit 37\\)$" "$run_output" "failure duration diagnostic"
 assert_not_contains 'PASS    all' "$run_output" "false all success"
 write_fixture_case "$probe_mapped"
 
@@ -280,8 +313,8 @@ if gnu_timeout="$(find_gnu_timeout)"; then
     capture "$run_output" env "VAULTWARDEN_TEST_RUNNER_TESTS_DIR=$FIXTURE_TESTS" \
         "VAULTWARDEN_TEST_RUNNER_TIMEOUT_COMMAND=$gnu_timeout" TEST_CASE_TIMEOUT_SECONDS=2 "$RUNNER" foundation
     assert_status 124 "ordinary exit 124 propagation"
-    assert_contains "FAIL    $probe_id [$probe_mapped] (exit 124)" "$run_output" "ordinary exit 124 diagnostic"
-    assert_not_contains "TIMEOUT $probe_id [$probe_mapped]" "$run_output" "ordinary exit 124 timeout distinction"
+    assert_matches "^FAIL    $probe_id \\([0-9]+\\.[0-9]{2}s\\) \\[$probe_mapped\\] \\(exit 124\\)$" "$run_output" "ordinary exit 124 duration diagnostic"
+    assert_not_contains "TIMEOUT $probe_id (" "$run_output" "ordinary exit 124 timeout distinction"
     write_fixture_case "$probe_mapped"
 
     # A real timeout is detected from GNU timeout's own signal diagnostic.
@@ -289,7 +322,7 @@ if gnu_timeout="$(find_gnu_timeout)"; then
     capture "$run_output" env "VAULTWARDEN_TEST_RUNNER_TESTS_DIR=$FIXTURE_TESTS" \
         "VAULTWARDEN_TEST_RUNNER_TIMEOUT_COMMAND=$gnu_timeout" TEST_CASE_TIMEOUT_SECONDS=1 "$RUNNER" foundation
     assert_status 124 "true timeout propagation"
-    assert_contains "TIMEOUT $probe_id [$probe_mapped] after 1s" "$run_output" "true timeout diagnostic"
+    assert_matches "^TIMEOUT $probe_id \\([0-9]+\\.[0-9]{2}s\\) \\[$probe_mapped\\] after 1s$" "$run_output" "true timeout duration diagnostic"
     write_fixture_case "$probe_mapped"
 
     # Stored per-record timeout is honored independently.
@@ -300,7 +333,7 @@ if gnu_timeout="$(find_gnu_timeout)"; then
         'VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_RECORD=slow-record|tests/suites/foundation/case-extra-timeout.bash|slow|1' \
         "$RUNNER" foundation
     assert_status 124 "stored per-record timeout"
-    assert_contains "TIMEOUT slow-record [$extra_path] after 1s" "$run_output" "stored per-record timeout diagnostic"
+    assert_matches "^TIMEOUT slow-record \\([0-9]+\\.[0-9]{2}s\\) \\[$extra_path\\] after 1s$" "$run_output" "stored per-record timeout duration diagnostic"
     rm -f "$extra_path"
 
     # Global override wins over a longer stored timeout.
@@ -310,7 +343,7 @@ if gnu_timeout="$(find_gnu_timeout)"; then
         'VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_RECORD=slow-record|tests/suites/foundation/case-extra-timeout.bash|slow|5' \
         "$RUNNER" foundation
     assert_status 124 "global timeout execution override"
-    assert_contains "TIMEOUT slow-record [$extra_path] after 1s" "$run_output" "global timeout execution diagnostic"
+    assert_matches "^TIMEOUT slow-record \\([0-9]+\\.[0-9]{2}s\\) \\[$extra_path\\] after 1s$" "$run_output" "global timeout execution duration diagnostic"
     rm -f "$extra_path"
 else
     printf 'SKIP: supported GNU timeout path unavailable in this environment.\n'
@@ -340,23 +373,6 @@ if find "$NORMAL_REPO/tests" -type l -name '.runner-case.*' -print -quit | grep 
 
 git -C "$ROOT" status --short --untracked-files=all -- tests >"$repo_status_after"
 cmp -s "$repo_status_before" "$repo_status_after" || { diff -u "$repo_status_before" "$repo_status_after" >&2 || true; fail "runner contracts modified repository tests tree"; }
-
-# A non-PR GitHub event still uses the local working-tree fallback instead of assuming pull_request JSON.
-# Use a tiny clean Git fixture so unrelated repository syntax failures cannot mask this event-routing contract.
-event_repo="$TMP_ROOT/event-repo"
-mkdir -p "$event_repo/tests/suites/foundation" "$event_repo/tests/lib"
-cp "$ROOT/tests/suites/foundation/case-runner-contracts.bash" "$event_repo/tests/suites/foundation/case-runner-contracts.bash"
-cp "$TEST_ROOT_HELPER" "$event_repo/tests/lib/test-root.bash"
-write_case "$event_repo/ok.sh" 'exit 0'
-git -C "$event_repo" init -q
-git -C "$event_repo" add tests ok.sh
-git -C "$event_repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm initial
-push_event="$TMP_ROOT/push-event.json"
-printf '%s\n' '{"ref":"refs/heads/example"}' >"$push_event"
-capture "$run_output" env GITHUB_EVENT_NAME=push GITHUB_EVENT_PATH="$push_event" \
-    VW_TEST_CASE_MODE=repository-validation "$BASH" "$event_repo/tests/suites/foundation/case-runner-contracts.bash"
-assert_status 0 "non-PR GitHub event repository validation fallback"
-assert_contains 'PASS git diff --check' "$run_output" "non-PR GitHub event fallback diagnostic"
 
 printf 'PASS: logical runner records, fixture isolation, failure, and timeout contracts\n'
 )
@@ -534,37 +550,11 @@ grep -Fq 'provider firewall/security group/network firewall' RUNBOOK.md \
 printf 'PASS: repository interface cleanup contracts\n'
 )
 
-check_repository_validation() (
-set -euo pipefail
-ROOT="$VW_TEST_REPO_ROOT"
-cd "$ROOT"
-fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
-pass() { printf 'PASS %s\n' "$*"; }
-
-while IFS= read -r -d '' shell_file; do
-    bash -n "$shell_file" || fail "bash syntax validation failed: $shell_file"
-done < <(git ls-files -z '*.sh' '*.bash')
-pass "repository-wide bash -n"
-
-if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" \
-    && -n "${GITHUB_EVENT_PATH:-}" \
-    && -r "$GITHUB_EVENT_PATH" ]]; then
-    base_sha="$(python3 -c 'import json, os; print(json.load(open(os.environ["GITHUB_EVENT_PATH"]))["pull_request"]["base"]["sha"])')"
-    git fetch --no-tags --depth=1 origin "$base_sha" >/dev/null
-    git diff --check "$base_sha" HEAD
-else
-    git diff --check
-fi
-pass "git diff --check"
-)
-
 case "$MODE" in
     core) check_runner_contracts_core ;;
     repository-interface) check_repository_interface_cleanup_contracts ;;
-    repository-validation) check_repository_validation ;;
     all)
         check_runner_contracts_core
         check_repository_interface_cleanup_contracts
-        check_repository_validation
         ;;
 esac

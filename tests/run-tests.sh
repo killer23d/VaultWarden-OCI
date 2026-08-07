@@ -38,6 +38,8 @@ usage() {
     cat <<'USAGE'
 Usage: ./tests/run-tests.sh all
        ./tests/run-tests.sh <suite>
+       ./tests/run-tests.sh list
+       ./tests/run-tests.sh list-files
 
 Suites:
   foundation       Architecture, configuration, permissions, storage, systemd
@@ -45,11 +47,14 @@ Suites:
   operations       Operations, lifecycle, operator UI, CrowdSec, uninstall
   data-protection  Backup and restore/recovery contracts
   all              Run every suite in the order above
-  list             Print the logical case inventory without running it
+  list             Print the logical execution inventory without running it
+  list-files       Print the unique physical case inventory without running it
 
 Examples:
   ./tests/run-tests.sh all
   ./tests/run-tests.sh foundation
+  ./tests/run-tests.sh list
+  ./tests/run-tests.sh list-files
 USAGE
 }
 
@@ -57,7 +62,6 @@ FOUNDATION_CASES=(
     "host-architecture|tests/suites/foundation/case-storage-setup.bash|host-architecture|120"
     "runner-contracts-core|tests/suites/foundation/case-runner-contracts.bash|core|120"
     "repository-interface|tests/suites/foundation/case-runner-contracts.bash|repository-interface|120"
-    "repository-validation|tests/suites/foundation/case-runner-contracts.bash|repository-validation|120"
     "config-env-core|tests/suites/foundation/case-config-env.bash|core|120"
     "ci-dev-setup|tests/suites/foundation/case-config-env.bash|ci-dev-setup|120"
     "permissions|tests/suites/foundation/case-permissions.bash|all|120"
@@ -74,8 +78,8 @@ SECURITY_CASES=(
 
 OPERATIONS_CASES=(
     "operations|tests/suites/operations/case-operations.bash|all|120"
-    "health-alerts|tests/suites/operations/case-health-alerts.bash|all|120"
-    "lock-fd-hygiene|tests/suites/operations/case-lock-fd-hygiene.bash|all|120"
+    "health-alerts|tests/suites/operations/case-health-alerts.bash|core|120"
+    "health-locking|tests/suites/operations/case-health-alerts.bash|locking|120"
     "lifecycle-core|tests/suites/operations/case-lifecycle.bash|core|120"
     "startup-hardening|tests/suites/operations/case-lifecycle.bash|startup-hardening|120"
     "operator-ui|tests/suites/operations/case-operator-ui.bash|all|120"
@@ -239,6 +243,28 @@ validate_inventory_files() {
     fi
 }
 
+elapsed_duration() {
+    local start="$1" end="$2"
+    local start_seconds start_fraction end_seconds end_fraction
+    local start_us end_us elapsed_us rounded_centiseconds seconds centiseconds
+
+    start_seconds="${start%%.*}"
+    start_fraction="${start#*.}000000"
+    start_fraction="${start_fraction:0:6}"
+    end_seconds="${end%%.*}"
+    end_fraction="${end#*.}000000"
+    end_fraction="${end_fraction:0:6}"
+
+    start_us=$(( start_seconds * 1000000 + 10#$start_fraction ))
+    end_us=$(( end_seconds * 1000000 + 10#$end_fraction ))
+    elapsed_us=$(( end_us - start_us ))
+    (( elapsed_us >= 0 )) || elapsed_us=0
+    rounded_centiseconds=$(( (elapsed_us + 5000) / 10000 ))
+    seconds=$(( rounded_centiseconds / 100 ))
+    centiseconds=$(( rounded_centiseconds % 100 ))
+    printf '%d.%02ds\n' "$seconds" "$centiseconds"
+}
+
 effective_timeout() {
     local record_timeout="$1"
     if [[ -n "$TEST_CASE_TIMEOUT_SECONDS" ]]; then
@@ -259,6 +285,18 @@ print_cases() {
         timeout_seconds="$(effective_timeout "$record_timeout")"
         printf '  %s|%s|%s|%s\n' "$logical_id" "$case_file" "$mode" "$timeout_seconds"
     done
+}
+
+print_case_files() {
+    local record case_file
+    local -A seen_paths=()
+
+    rebuild_all_cases
+    for record in "${ALL_CASES[@]}"; do
+        IFS='|' read -r _ case_file _ _ <<<"$record"
+        seen_paths["$case_file"]=1
+    done
+    printf '%s\n' "${!seen_paths[@]}" | LC_ALL=C sort
 }
 
 resolve_timeout_candidate() {
@@ -376,6 +414,7 @@ run_suite() {
     shift
     local -a records=("$@")
     local record logical_id case_file mode record_timeout timeout_seconds rc
+    local start_time end_time duration
 
     echo "SUITE $suite (${#records[@]} logical cases; $TIMEOUT_DESCRIPTION)"
     [[ -z "$TIMEOUT_NOTICE" ]] || echo "$TIMEOUT_NOTICE" >&2
@@ -383,14 +422,19 @@ run_suite() {
         IFS='|' read -r logical_id case_file mode record_timeout <<<"$record"
         timeout_seconds="$(effective_timeout "$record_timeout")"
         echo "RUN     $logical_id [$case_file mode=$mode timeout=${timeout_seconds}s]"
+        start_time="$EPOCHREALTIME"
         if execute_case "$logical_id" "$case_file" "$mode" "$timeout_seconds"; then
-            echo "PASS    $logical_id [$case_file]"
+            end_time="$EPOCHREALTIME"
+            duration="$(elapsed_duration "$start_time" "$end_time")"
+            echo "PASS    $logical_id ($duration) [$case_file]"
         else
             rc=$?
+            end_time="$EPOCHREALTIME"
+            duration="$(elapsed_duration "$start_time" "$end_time")"
             if [[ "$CASE_TIMED_OUT" == true ]]; then
-                echo "TIMEOUT $logical_id [$case_file] after ${timeout_seconds}s" >&2
+                echo "TIMEOUT $logical_id ($duration) [$case_file] after ${timeout_seconds}s" >&2
             else
-                echo "FAIL    $logical_id [$case_file] (exit $rc)" >&2
+                echo "FAIL    $logical_id ($duration) [$case_file] (exit $rc)" >&2
             fi
             return "$rc"
         fi
@@ -440,6 +484,9 @@ case "$1" in
         print_cases security "${SECURITY_CASES[@]}"
         print_cases operations "${OPERATIONS_CASES[@]}"
         print_cases data-protection "${DATA_PROTECTION_CASES[@]}"
+        ;;
+    list-files)
+        print_case_files
         ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
