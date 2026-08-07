@@ -100,9 +100,10 @@ DESCRIPTION:
       - CrowdSec services/packages/config/state and project-owned firewall rules
       - setup-managed swap path only in --test-reset mode
 
-    A dedicated data volume positively identified as VaultWarden-formatted may be
-    cleared. Contents of adopted or provenance-ambiguous filesystems are preserved
-    because the project cannot prove that every file on such a filesystem is its own.
+    A data volume carrying explicit VaultWarden provisioning metadata may be
+    cleared when its device identity is positively verified. Contents of adopted,
+    legacy, or provenance-ambiguous filesystems are preserved because the project
+    cannot prove that every file on such a filesystem is its own.
 
     Docker itself, /var/lib/docker, OS users/groups and memberships, common admin
     packages, SSH configuration, unmarked UFW rules, and ambiguous host settings
@@ -508,7 +509,7 @@ _sentinel_value() {
 _inspect_data_volume_identity() {
     local sentinel="${DATA_VOLUME_MOUNT}/.vw-data-volume"
     local source="" configured_uuid="" source_uuid="" sentinel_device="" sentinel_mount="" sentinel_uuid=""
-    local label="" provenance="" owner_uid="" mode=""
+    local provenance="" owner_uid="" mode=""
 
     DATA_VOLUME_IDENTITY_VERIFIED=false
     DATA_VOLUME_PROVENANCE="unknown"
@@ -576,14 +577,10 @@ _inspect_data_volume_identity() {
             DATA_VOLUME_PROVENANCE="adopted"
             ;;
         *)
-            label="$(blkid -o value -s LABEL "$source" 2>/dev/null || true)"
-            if [[ "$label" == "vw-data" ]]; then
-                # Legacy setup_data_volume formatted blank devices with this label.
-                DATA_VOLUME_PROVENANCE="legacy-formatted"
-                DATA_VOLUME_CONTENTS_WILL_BE_REMOVED=true
-            else
-                DATA_VOLUME_PROVENANCE="legacy-ambiguous"
-            fi
+            # Legacy sentinels do not record whether setup formatted a blank
+            # device or adopted an existing filesystem. A filesystem label is
+            # not strong enough ownership proof, so preserve the contents.
+            DATA_VOLUME_PROVENANCE="legacy-ambiguous"
             ;;
     esac
 
@@ -1275,12 +1272,16 @@ _remove_sensitive_handoff() {
     local target="$1"
     local initial_metadata="" current_metadata="" device inode uid gid mode links
     [[ -n "$target" ]] || return 1
-    _path_is_inside "$target" "$RECOVERY_HANDOFF_DIR" || return 1
+    [[ "$target" == "$RECOVERY_HANDOFF_DIR"/* ]] || return 1
 
+    # A symlink itself is safe to unlink after a lexical parent check; never
+    # canonicalize it first because that would follow the link outside the
+    # recovery directory and turn a harmless stale link into a blocking residual.
     if [[ -L "$target" ]]; then
         rm -f -- "$target"
         return $?
     fi
+    _path_is_inside "$target" "$RECOVERY_HANDOFF_DIR" || return 1
     if [[ ! -e "$target" ]]; then
         return 0
     fi
@@ -2032,7 +2033,7 @@ main() {
     info "  • Common admin tools not uniquely owned by this project: curl, wget, git, jq, sqlite3, ufw, gpg, rsync, python3, make, nano"
     info "  • Shared SOPS binary when present at ${SOPS_BIN}"
     info "  • /etc/ssh/sshd_config"
-    info "The OCI block device itself remains attached; only verified project-owned dedicated contents are bulk-deleted."
+    info "The OCI block device itself remains attached; only explicitly provenance-marked project-owned contents are eligible for bulk deletion."
     echo "════════════════════════════════════════════════════════════"
     echo ""
 }
