@@ -376,7 +376,7 @@ The canonical permanent Bash test entry point is:
 ./tests/run-tests.sh all
 ```
 
-`tests/run-tests.sh` owns the permanent `tests/test-*.sh` inventory.
+`tests/run-tests.sh` owns the logical test inventory. Each logical record maps a stable ID to a permanent `tests/suites/**/case-*.bash` source path, mode, and timeout. A physical case may back multiple logical records when distinct modes preserve separate failure and timeout boundaries.
 
 Do not create:
 

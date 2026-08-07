@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Consolidated storage and setup regression suite.
 set -euo pipefail
+MODE="${VW_TEST_CASE_MODE:-all}"
+case "$MODE" in core|host-architecture|all) ;; *) printf 'FAIL: unknown VW_TEST_CASE_MODE for case-storage-setup.bash: %s\n' "$MODE" >&2; exit 2 ;; esac
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
@@ -464,7 +466,6 @@ pass 'verify passes when excluded/protected files explain byte-count delta'
 
 )
 
-check_migration_storage_contracts
 check_setup_storage_ux_contracts() (
 set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
@@ -729,4 +730,268 @@ pass 'setup-storage canonical and compatibility CLI grammar is enforced'
 
 )
 
-check_setup_storage_ux_contracts
+check_architecture_helpers() (
+# Focused checks for architecture selection at artifact boundaries.
+
+set -euo pipefail
+
+PROJECT_ROOT="$VW_TEST_REPO_ROOT"
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+assert_output() {
+    local expected="$1"
+    shift
+    local actual
+    actual="$("$@")" || fail "command failed: $*"
+    [[ "$actual" == "$expected" ]] || fail "expected '$expected', got '$actual' from: $*"
+}
+
+assert_fails() {
+    if "$@" >/dev/null 2>&1; then
+        fail "expected failure from: $*"
+    fi
+}
+
+setup_system="${PROJECT_ROOT}/utilities/setup-system.sh"
+setup_crowdsec="${PROJECT_ROOT}/utilities/setup-crowdsec.sh"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+assert_output "http://archive.ubuntu.com/ubuntu" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" ubuntu-archive-url amd64
+assert_output "http://ports.ubuntu.com/ubuntu-ports" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" ubuntu-archive-url arm64
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" ubuntu-archive-url armhf
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" ubuntu-archive-url s390x
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" ubuntu-archive-url unknown
+
+assert_output "amd64" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-release-arch amd64
+assert_output "arm64" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-release-arch arm64
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-release-arch armhf
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-release-arch s390x
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-release-arch riscv64
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-release-arch unknown
+
+assert_output "yq_linux_amd64" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-asset amd64
+assert_output "yq_linux_arm64" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-asset arm64
+assert_output "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-sha256 amd64
+assert_output "578648e463a11c1b6db6010cbf41eafed6bee79466fcffa1bb446672cf7945ea" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-sha256 arm64
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-asset armhf
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-asset s390x
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-asset unknown
+
+assert_output "v3.13.2" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-default-version
+
+write_os_release() {
+    local file="$1"
+    shift
+    printf '%s\n' "$@" > "$file"
+}
+
+noble="$tmpdir/noble"
+write_os_release "$noble" \
+    'ID=ubuntu' \
+    'VERSION_ID="24.04"' \
+    'VERSION_CODENAME=noble' \
+    'UBUNTU_CODENAME=noble'
+assert_output "noble amd64" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$noble" amd64
+assert_output "noble arm64" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$noble" arm64
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$noble" armhf
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$noble" s390x
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$noble" unknown
+
+jammy="$tmpdir/jammy"
+write_os_release "$jammy" 'ID=ubuntu' 'VERSION_ID="22.04"' 'VERSION_CODENAME=jammy' 'UBUNTU_CODENAME=jammy'
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$jammy" amd64
+unsupported_ubuntu="$tmpdir/oracular"
+write_os_release "$unsupported_ubuntu" 'ID=ubuntu' 'VERSION_ID="24.10"' 'VERSION_CODENAME=oracular'
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$unsupported_ubuntu" amd64
+non_ubuntu="$tmpdir/debian"
+write_os_release "$non_ubuntu" 'ID=debian' 'VERSION_ID="12"' 'VERSION_CODENAME=bookworm'
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$non_ubuntu" amd64
+missing_id="$tmpdir/missing-id"
+write_os_release "$missing_id" 'VERSION_ID="24.04"' 'VERSION_CODENAME=noble'
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$missing_id" amd64
+missing_version="$tmpdir/missing-version"
+write_os_release "$missing_version" 'ID=ubuntu' 'VERSION_CODENAME=noble'
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$missing_version" amd64
+missing_codename="$tmpdir/missing-codename"
+write_os_release "$missing_codename" 'ID=ubuntu' 'VERSION_ID="24.04"'
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$missing_codename" amd64
+mismatch="$tmpdir/mismatch"
+write_os_release "$mismatch" 'ID=ubuntu' 'VERSION_ID="24.04"' 'VERSION_CODENAME=jammy'
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$mismatch" amd64
+codename_disagree="$tmpdir/codename-disagree"
+write_os_release "$codename_disagree" 'ID=ubuntu' 'VERSION_ID="24.04"' 'VERSION_CODENAME=noble' 'UBUNTU_CODENAME=jammy'
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" supported-host "$codename_disagree" amd64
+
+preflight_line="$(awk '/^[[:space:]]*validate_supported_host_preflight \|\| exit 1/{print NR; exit}' "$setup_system")"
+swap_line="$(awk '/^[[:space:]]*create_swapfile$/{print NR; exit}' "$setup_system")"
+deps_line="$(awk '/^[[:space:]]*install_dependencies$/{print NR; exit}' "$setup_system")"
+[[ -n "$preflight_line" && -n "$swap_line" && -n "$deps_line" ]] \
+    || fail "setup-system main flow markers missing"
+(( preflight_line < swap_line )) \
+    || fail "supported-host preflight must run before create_swapfile"
+(( preflight_line < deps_line )) \
+    || fail "supported-host preflight must run before install_dependencies"
+
+if ! bash "$setup_system" --use-latest --sops-version v3.13.2 >/tmp/vw-sops-ambiguous.$$ 2>&1; then
+    grep -Fq "cannot be combined" /tmp/vw-sops-ambiguous.$$ \
+        || fail "ambiguous --use-latest + --sops-version failure message missing"
+else
+    fail "ambiguous --use-latest + --sops-version unexpectedly succeeded"
+fi
+rm -f /tmp/vw-sops-ambiguous.$$
+
+make_yq_stub() {
+    local path="$1" mode="$2" version="${3:-v4.53.3}"
+    cat > "$path" <<EOF_STUB
+#!/usr/bin/env bash
+set -euo pipefail
+mode="$mode"
+version="$version"
+if [[ "\${1:-}" == "--version" ]]; then
+    case "\$mode" in
+        mikefarah4|broken4) printf 'yq (https://github.com/mikefarah/yq/) version %s\n' "\$version" ;;
+        mikefarah3) printf 'yq (https://github.com/mikefarah/yq/) version v3.4.1\n' ;;
+        python) printf 'yq 3.1.0\n' ;;
+    esac
+    exit 0
+fi
+if [[ "\$mode" != "mikefarah4" ]]; then
+    exit 1
+fi
+expr="\${2:-}"
+case "\$expr" in
+    .answer) printf 'plain-value\n' ;;
+    '.secrets[] | select(.required == true) | .key') printf 'cloudflare_zone_id\n' ;;
+    *) exit 1 ;;
+esac
+EOF_STUB
+    chmod +x "$path"
+}
+make_yq_stub "$tmpdir/yq-good" mikefarah4 v4.53.3
+make_yq_stub "$tmpdir/yq-older" mikefarah4 v4.52.9
+make_yq_stub "$tmpdir/yq-newer" mikefarah4 v4.54.1
+make_yq_stub "$tmpdir/yq-prefix" mikefarah4 v4.53.30
+make_yq_stub "$tmpdir/yq-broken4" broken4 v4.53.3
+make_yq_stub "$tmpdir/yq-python" python
+make_yq_stub "$tmpdir/yq-v3" mikefarah3
+env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-good" \
+    || fail "Mike Farah yq v4 contract was rejected"
+env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq-exact "$tmpdir/yq-good" \
+    || fail "exact pinned Mike Farah yq v4.53.3 contract was rejected"
+assert_output "v4.53.3" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-resolved-version "$tmpdir/yq-good"
+for compatible_non_pinned in "$tmpdir/yq-older" "$tmpdir/yq-newer"; do
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$compatible_non_pinned" \
+        || fail "--skip-deps-compatible Mike Farah yq v4 was rejected: $compatible_non_pinned"
+    assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq-exact "$compatible_non_pinned"
+done
+assert_output "v4.53.30" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-resolved-version "$tmpdir/yq-prefix"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq-exact "$tmpdir/yq-prefix"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-python"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-v3"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" validate-yq "$tmpdir/yq-broken4"
+
+make_sops_stub() {
+    local path="$1" version_output="$2"
+    cat > "$path" <<EOF_STUB
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "--version" ]]; then
+    cat <<'EOF_VERSION'
+${version_output}
+EOF_VERSION
+    exit 0
+fi
+exit 1
+EOF_STUB
+    chmod +x "$path"
+}
+make_sops_stub "$tmpdir/sops-good" 'sops 3.13.2'
+make_sops_stub "$tmpdir/sops-good-v-prefix" 'sops version v3.13.2'
+make_sops_stub "$tmpdir/sops-good-warn" 'sops 3.13.2
+[warning] failed to retrieve latest version from upstream'
+make_sops_stub "$tmpdir/sops-newer-patch" 'sops 3.13.20'
+make_sops_stub "$tmpdir/sops-prerelease" 'sops 3.13.2-dev'
+make_sops_stub "$tmpdir/sops-bad" 'not-sops 3.13.2'
+assert_output "v3.13.2" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-good"
+assert_output "v3.13.2" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-good-v-prefix"
+assert_output "v3.13.2" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-good-warn"
+assert_output "v3.13.20" \
+    env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-newer-patch"
+env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version-equals "$tmpdir/sops-newer-patch" v3.13.20 \
+    || fail "exact SOPS version comparison rejected the real installed version"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version-equals "$tmpdir/sops-newer-patch" v3.13.2
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-prerelease"
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-version "$tmpdir/sops-bad"
+
+assert_output "amd64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" amd64
+assert_output "amd64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" x86_64
+assert_output "arm64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" arm64
+assert_output "arm64" env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" aarch64
+assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_crowdsec" riscv64
+
+# Missing Python modules must fail with an actionable package hint. The mock
+# accepts Argon2 and rejects only bcrypt so the exact missing dependency path
+# is exercised without changing the developer machine.
+mkdir -p "$tmpdir/python-missing-bcrypt"
+cat > "$tmpdir/python-missing-bcrypt/python3" <<'EOF_PYTHON_MISSING_BCRYPT'
+#!/usr/bin/env bash
+if [[ " $* " == *" import bcrypt "* ]]; then
+    exit 1
+fi
+exit 0
+EOF_PYTHON_MISSING_BCRYPT
+chmod +x "$tmpdir/python-missing-bcrypt/python3"
+if PATH="$tmpdir/python-missing-bcrypt:$PATH" \
+    VAULTWARDEN_TEST_ARCH_HELPERS=1 \
+    "$setup_system" verify-python-modules \
+    >"$tmpdir/python-modules.out" 2>&1; then
+    fail "missing python3-bcrypt unexpectedly passed dependency verification"
+fi
+grep -Fq 'python3-bcrypt is not installed or cannot be imported' "$tmpdir/python-modules.out" \
+    || fail "missing python3-bcrypt error is unclear"
+grep -Fq 'sudo apt-get install -y python3-bcrypt' "$tmpdir/python-modules.out" \
+    || fail "missing python3-bcrypt install hint is absent"
+
+printf 'Architecture helper tests passed.\n'
+
+)
+
+case "$MODE" in
+    core)
+        check_migration_storage_contracts
+        check_setup_storage_ux_contracts
+        ;;
+    host-architecture)
+        check_architecture_helpers
+        ;;
+    all)
+        check_migration_storage_contracts
+        check_setup_storage_ux_contracts
+        check_architecture_helpers
+        ;;
+    *)
+        printf 'FAIL: unknown VW_TEST_CASE_MODE for case-storage-setup.bash: %s\n' "$MODE" >&2
+        exit 2
+        ;;
+esac
