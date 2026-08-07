@@ -2,9 +2,10 @@
 # utilities/uninstall-vaultwarden.sh — Fully uninstall VaultWarden-OCI managed artifacts.
 #
 # Destructive by design. This script removes the Docker stack, systemd units,
-# runtime secrets, installed configs, persistent state, CrowdSec integration,
-# firewall rules, optional data-volume mount wiring, and project-installed
-# helper binaries where safe. Shared host tooling such as Docker is preserved.
+# runtime secrets, root-only recovery handoffs, installed configs, persistent state,
+# CrowdSec integration, firewall rules, optional data-volume mount wiring, and
+# project-installed helper binaries where safe. Shared host tooling such as Docker
+# is preserved.
 
 set -euo pipefail
 
@@ -88,7 +89,8 @@ USAGE:
 DESCRIPTION:
     Fully removes VaultWarden-OCI managed stack artifacts from this host:
       - Docker compose stack, managed containers, networks, volumes, and runtime secrets
-      - systemd timers/services/drop-ins, /opt scripts, and /etc/vaultwarden
+      - systemd timers/services/drop-ins, including transient recovery-cleanup units
+      - /opt scripts, /etc/vaultwarden, and root-only credential/recovery handoffs
       - persistent VaultWarden state directory and optional data-volume fstab/mount wiring
       - CrowdSec services/packages/config/state and project firewall rules
       - setup-managed swap path only in --test-reset mode
@@ -110,17 +112,18 @@ OPTIONS (used after 'run'):
         so the next setup run can exercise the no-swap/create-swap path again.
 
     --i-have-saved-my-recovery-kit
-        Confirm that all Age keys shown by this script have been saved outside
-        this host. Required when any managed Age key exists, unless --force is used.
+        Confirm that managed Age keys and local root-only credential/recovery
+        handoffs can be deleted because recovery material has been saved outside
+        this host. Required when either exists, unless --force is used.
 
     --dry-run
         Show what would be removed without changing the system. Does not require root.
 
     --force
         DANGEROUS: non-interactive destructive mode. Skips uninstall confirmation,
-        backup prompt, external backup-dir prompt, and Age-key prompts. This can
-        permanently delete VaultWarden data and key material; use only after
-        recovery data has been verified outside this host.
+        backup prompt, external backup-dir prompt, and recovery-material prompts.
+        This can permanently delete VaultWarden data and key material; use only
+        after recovery data has been verified outside this host.
 
     --version, -V
         Print the VaultWarden-OCI version and exit.
@@ -197,6 +200,7 @@ SYSTEMD_SYSTEM_DIR="${VW_UNINSTALL_SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
 DOCKER_MOUNT_GUARD_DIR="${SYSTEMD_SYSTEM_DIR}/docker.service.d"
 DOCKER_MOUNT_GUARD="${DOCKER_MOUNT_GUARD_DIR}/10-vaultwarden-data-volume.conf"
 RUNTIME_DIR="${VW_UNINSTALL_RUNTIME_DIR:-/run/vaultwarden-oci}"
+RECOVERY_HANDOFF_DIR="${VW_UNINSTALL_RECOVERY_HANDOFF_DIR:-/root/vaultwarden-recovery}"
 IPTABLES_RULES_V4="${VW_UNINSTALL_IPTABLES_RULES_V4:-/etc/iptables/rules.v4}"
 APT_SOURCE_UNIVERSE="${VW_UNINSTALL_APT_SOURCE_UNIVERSE:-/etc/apt/sources.list.d/ubuntu-universe.list}"
 OPT_SCRIPTS_DIR="${VW_UNINSTALL_OPT_SCRIPTS_DIR:-/opt/vaultwarden-scripts}"
@@ -450,64 +454,117 @@ _show_age_keys() {
     done < <(_existing_age_keys)
 }
 
+_existing_recovery_handoffs() {
+    [[ -d "$RECOVERY_HANDOFF_DIR" && ! -L "$RECOVERY_HANDOFF_DIR" ]] || return 0
+    find -P "$RECOVERY_HANDOFF_DIR" -mindepth 1 -maxdepth 1 \
+        \( -type f -o -type l \) \
+        \( -name 'vaultwarden-setup-credentials-*.txt' \
+           -o -name '.vaultwarden-setup-credentials.*' \
+           -o -name 'vaultwarden-age-key-rotation-*.txt' \
+           -o -name '.vaultwarden-age-key-rotation.*' \
+           -o -name 'vaultwarden-recovery-kit-*.txt' \
+           -o -name '.important-documents.*.zip' \) \
+        -print 2>/dev/null || true
+}
+
+_show_recovery_handoffs() {
+    local path
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        echo "  ${path}"
+    done < <(_existing_recovery_handoffs)
+}
+
 _confirm_age_key_safety() {
-    local keys_present=false
+    local keys_present=false handoffs_present=false
     if [[ -n "$(_existing_age_keys)" ]]; then
         keys_present=true
     fi
+    if [[ -n "$(_existing_recovery_handoffs)" ]]; then
+        handoffs_present=true
+    fi
 
-    if [[ "$keys_present" != "true" ]]; then
-        info "No managed Age key files found — no Age-key destruction guard needed."
+    if [[ "$keys_present" != "true" && "$handoffs_present" != "true" ]]; then
+        info "No managed Age key files or local credential/recovery handoffs found — no recovery-material destruction guard needed."
         return 0
     fi
 
     if [[ "$FORCE" == "true" ]]; then
-        warn "--force active — skipping Age-key checks. Managed Age keys will be deleted."
-        _show_age_keys
+        warn "--force active — skipping recovery-material checks. Managed local key/handoff material will be deleted."
+        if [[ "$keys_present" == "true" ]]; then
+            _show_age_keys
+        fi
+        if [[ "$handoffs_present" == "true" ]]; then
+            _show_recovery_handoffs
+        fi
         return 0
     fi
 
     if [[ "$I_HAVE_SAVED_RECOVERY_KIT" != "true" ]]; then
         echo ""
         echo "════════════════════════════════════════════════════════════"
-        warn "ENCRYPTION KEY DESTRUCTION WARNING"
-        warn "The following managed Age key file(s) exist and will be deleted:"
-        _show_age_keys
+        warn "RECOVERY MATERIAL DESTRUCTION WARNING"
+        if [[ "$keys_present" == "true" ]]; then
+            warn "The following managed Age key file(s) exist and will be deleted:"
+            _show_age_keys
+        fi
+        if [[ "$handoffs_present" == "true" ]]; then
+            warn "The following root-only credential/recovery handoff(s) exist and will be deleted:"
+            _show_recovery_handoffs
+        fi
         warn ""
         warn "Without the matching private key, existing Age-encrypted backups are unrecoverable."
         warn "Export or copy your recovery kit to a location outside this host, then re-run:"
         warn "  sudo bash $0 run --i-have-saved-my-recovery-kit"
         echo "════════════════════════════════════════════════════════════"
         echo ""
-        die "Uninstall aborted — Age key preservation not confirmed. No changes made."
+        die "Uninstall aborted — recovery material preservation not confirmed. No changes made."
     fi
 
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    warn "FINAL CONFIRMATION — MANAGED AGE KEYS WILL BE DESTROYED"
-    warn "Confirm that the following key(s) are saved outside this host:"
-    _show_age_keys
+    warn "FINAL CONFIRMATION — MANAGED LOCAL RECOVERY MATERIAL WILL BE DESTROYED"
+    if [[ "$keys_present" == "true" ]]; then
+        warn "Confirm that the following key(s) are saved outside this host:"
+        _show_age_keys
+    fi
+    if [[ "$handoffs_present" == "true" ]]; then
+        warn "Confirm that these local handoff(s) are no longer the only recovery copy:"
+        _show_recovery_handoffs
+    fi
     echo "════════════════════════════════════════════════════════════"
     echo ""
 
     local first_key first_pub typed
-    first_key="$(_existing_age_keys | head -1)"
-    first_pub="$(_extract_age_public_key "$first_key" 2>/dev/null || true)"
-    if [[ -n "$first_pub" ]]; then
-        warn "Type the first Age public key shown above to continue."
-        read -r -t 300 -p "Age public key: " typed || typed=""
-        [[ "$typed" == "$first_pub" ]] || die "Confirmation mismatch — uninstall aborted before destructive changes."
+    if [[ "$keys_present" == "true" ]]; then
+        first_key="$(_existing_age_keys | head -1)"
+        first_pub="$(_extract_age_public_key "$first_key" 2>/dev/null || true)"
+        if [[ -n "$first_pub" ]]; then
+            warn "Type the first Age public key shown above to continue."
+            read -r -t 300 -p "Age public key: " typed || typed=""
+            [[ "$typed" == "$first_pub" ]] || die "Confirmation mismatch — uninstall aborted before destructive changes."
+        else
+            warn "Could not extract a public key automatically."
+            read -r -t 300 -p "Type DELETE-MY-KEYS to continue: " typed || typed=""
+            [[ "$typed" == "DELETE-MY-KEYS" ]] || die "Confirmation not given — uninstall aborted before destructive changes."
+        fi
     else
-        warn "Could not extract a public key automatically."
-        read -r -t 300 -p "Type DELETE-MY-KEYS to continue: " typed || typed=""
-        [[ "$typed" == "DELETE-MY-KEYS" ]] || die "Confirmation not given — uninstall aborted before destructive changes."
+        warn "No managed Age key file remains, but managed local credential/recovery handoffs will be deleted."
+        read -r -t 300 -p "Type DELETE-LOCAL-RECOVERY to continue: " typed || typed=""
+        [[ "$typed" == "DELETE-LOCAL-RECOVERY" ]] || die "Confirmation not given — uninstall aborted before destructive changes."
     fi
-    success "Age-key preservation confirmed."
+    success "Recovery-material preservation confirmed."
 }
 
 _run_if_exists() {
     local cmd="$1"
     command -v "$cmd" >/dev/null 2>&1
+}
+
+_existing_recovery_cleanup_units() {
+    _run_if_exists systemctl || return 0
+    systemctl list-units --all --no-legend --plain 'vaultwarden-recovery-cleanup-*' 2>/dev/null \
+        | awk 'NF { print $1 }' || true
 }
 
 _path_is_inside() {
@@ -541,6 +598,13 @@ disable_systemd_units() {
         [[ "$unit" == *"@"* ]] && continue
         systemctl stop "$unit" 2>/dev/null || true
     done
+
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        systemctl stop "$unit" 2>/dev/null || true
+        systemctl reset-failed "$unit" 2>/dev/null || true
+        success "Stopped transient recovery cleanup unit: $unit"
+    done < <(_existing_recovery_cleanup_units)
 
     for unit in "${MANAGED_TIMERS[@]}" "${MANAGED_SERVICES[@]}"; do
         dest="${SYSTEMD_SYSTEM_DIR}/${unit}"
@@ -872,6 +936,62 @@ remove_installed_files() {
     return 0
 }
 
+_remove_sensitive_handoff() {
+    local target="$1"
+    [[ -n "$target" ]] || return 1
+    [[ "$target" == "$RECOVERY_HANDOFF_DIR"/* ]] || return 1
+
+    if [[ -L "$target" ]]; then
+        rm -f -- "$target"
+        return $?
+    fi
+    if [[ ! -e "$target" ]]; then
+        return 0
+    fi
+    [[ -f "$target" ]] || return 1
+
+    # Match the recovery workflow's best-effort overwrite/unlink semantics.
+    # Physical erasure is not guaranteed on SSDs, snapshots, journaling, or CoW.
+    if command -v shred >/dev/null 2>&1; then
+        shred -fuz -- "$target" 2>/dev/null || true
+    fi
+
+    [[ ! -L "$target" ]] || return 1
+    if [[ -e "$target" ]]; then
+        [[ -f "$target" ]] || return 1
+        rm -f -- "$target" || return 1
+    fi
+    [[ ! -e "$target" && ! -L "$target" ]]
+}
+
+remove_recovery_handoffs() {
+    info "Step 5: Removing managed root-only credential and recovery handoffs..."
+
+    if [[ -L "$RECOVERY_HANDOFF_DIR" || ( -e "$RECOVERY_HANDOFF_DIR" && ! -d "$RECOVERY_HANDOFF_DIR" ) ]]; then
+        die "Recovery handoff path is not a real directory; refusing cleanup: $RECOVERY_HANDOFF_DIR"
+    fi
+
+    local path removed=0
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        if _remove_sensitive_handoff "$path"; then
+            removed=$((removed + 1))
+            success "Removed managed recovery handoff: $(basename "$path")"
+        else
+            die "Could not remove managed recovery handoff: $path"
+        fi
+    done < <(_existing_recovery_handoffs)
+
+    if [[ -d "$RECOVERY_HANDOFF_DIR" ]]; then
+        rmdir "$RECOVERY_HANDOFF_DIR" 2>/dev/null || true
+    fi
+
+    if (( removed == 0 )); then
+        info "No managed root-only credential/recovery handoffs found."
+    fi
+    return 0
+}
+
 remove_project_checkout() {
     [[ "$TEST_RESET" == "true" ]] && return 0
 
@@ -1128,6 +1248,10 @@ verify_uninstall_complete() {
                 || _residual "${SYSTEMD_SYSTEM_DIR}/${unit}.d/${dropin}"
         done
     done
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        _residual "transient recovery cleanup unit $unit"
+    done < <(_existing_recovery_cleanup_units)
     [[ ! -e "$DOCKER_MOUNT_GUARD" ]] \
         || _residual "$DOCKER_MOUNT_GUARD"
 
@@ -1142,6 +1266,15 @@ verify_uninstall_complete() {
         "$CROWDSEC_LOG_DIR"; do
         [[ ! -e "$path" ]] || _residual "$path"
     done
+
+    if [[ -L "$RECOVERY_HANDOFF_DIR" || ( -e "$RECOVERY_HANDOFF_DIR" && ! -d "$RECOVERY_HANDOFF_DIR" ) ]]; then
+        _residual "unsafe recovery handoff path $RECOVERY_HANDOFF_DIR"
+    else
+        while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            _residual "managed root-only credential/recovery handoff $path"
+        done < <(_existing_recovery_handoffs)
+    fi
 
     if [[ "$TEST_RESET" == "true" ]]; then
         [[ ! -e "$SWAPFILE_PATH" ]] || _residual "$SWAPFILE_PATH"
@@ -1304,12 +1437,14 @@ show_summary() {
         warn "DRY RUN MODE — would remove:"
         _dry_run_line "systemd timers: ${MANAGED_TIMERS[*]}"
         _dry_run_line "systemd services: ${MANAGED_SERVICES[*]}"
+        _dry_run_line "systemd transient recovery cleanup units: vaultwarden-recovery-cleanup-*"
         _dry_run_line "systemd managed drop-ins: 10-state-dir.conf 20-identity.conf 30-run-as-root.conf"
         _dry_run_line "Docker compose stack via docker-compose.yml; containers: ${MANAGED_CONTAINERS[*]}"
         _dry_run_line "Docker networks: ${MANAGED_NETWORKS[*]}; compose-labelled/safe-prefix volumes"
         _dry_run_line "runtime secrets/state: ${RUNTIME_DIR}; inactive VaultWarden-specific locks"
         _dry_run_line "installed config and key dir: ${ETC_VAULTWARDEN_DIR}"
         _dry_run_line "installed scripts: ${OPT_SCRIPTS_DIR}"
+        _dry_run_line "managed root-only credential/recovery handoffs under: ${RECOVERY_HANDOFF_DIR}"
 
         if [[ "$TEST_RESET" == "true" ]]; then
             _dry_run_line "preserve Git checkout: ${PROJECT_DIR}"
@@ -1392,7 +1527,7 @@ offer_final_backup() {
 }
 
 confirm_uninstall() {
-    warn "This will PERMANENTLY DELETE VaultWarden-OCI data, secrets, containers, and configuration."
+    warn "This will PERMANENTLY DELETE VaultWarden-OCI data, secrets, local recovery handoffs, containers, and configuration."
     if [[ "$TEST_RESET" == "true" ]]; then
         warn "Test-reset mode preserves the Git checkout but removes generated local install artifacts."
     else
@@ -1457,6 +1592,7 @@ main() {
     operation_set_phase "4" "Removing persistent and installed state" 2>/dev/null || true
     remove_state_and_mount
     remove_installed_files
+    remove_recovery_handoffs
 
     operation_set_phase "5" "Removing integrations and host mutations" 2>/dev/null || true
     remove_sops_and_packages
