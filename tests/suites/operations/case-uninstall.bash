@@ -206,6 +206,30 @@ SENTINEL
   [[ ! -e "$DOCKER_MOUNT_GUARD" ]] || fail "Docker mount guard remained"
 )
 
+# A partial/stale env can never turn a mounted path into recursively deletable boot state.
+(
+  source_uninstaller_for_behavior
+  bin="$TMP/partial-env-bin"
+  mkdir -p "$bin"
+  export MOCK_PARTIAL_MOUNT="$TMP/partial-mounted"
+  cat > "$bin/mountpoint" <<'MOCK'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-q" && "${2:-}" == "${MOCK_PARTIAL_MOUNT:?}" ]]
+MOCK
+  chmod +x "$bin/mountpoint"
+  PATH="$bin:$PATH"
+  DATA_VOLUME_DEVICE=""
+  DATA_VOLUME_MOUNT=""
+  PROJECT_STATE_DIR="$MOCK_PARTIAL_MOUNT"
+  mkdir -p "$PROJECT_STATE_DIR/config"
+  printf 'keep-me\n' > "$PROJECT_STATE_DIR/config/install.env"
+  if ( remove_state_and_mount ) > "$TMP/partial-env.out" 2>&1; then
+    fail "mount-backed PROJECT_STATE_DIR without device identity should fail closed"
+  fi
+  [[ -f "$PROJECT_STATE_DIR/config/install.env" ]] || fail "mount-backed state was recursively deleted"
+  assert_contains "$TMP/partial-env.out" "looks mount-backed"
+)
+
 # Detached device: a unique configured mountpoint entry is removable without manual UUID forensics.
 (
   source_uninstaller_for_behavior
