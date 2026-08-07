@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Consolidated configuration and environment regression suite.
 set -euo pipefail
+MODE="${VW_TEST_CASE_MODE:-all}"
+case "$MODE" in core|ci-dev-setup|all) ;; *) printf 'FAIL: unknown VW_TEST_CASE_MODE for case-config-env.bash: %s\n' "$MODE" >&2; exit 2 ;; esac
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
@@ -149,7 +151,6 @@ pass 'status is read-only and reports env paths, migration state, and storage mi
 
 )
 
-check_env_edit_contracts
 check_set_env_var_contracts() (
 set -euo pipefail
 
@@ -317,7 +318,6 @@ assert_no_env_temps
 pass 'canonical env mutation is strict-mode safe and preserves caller traps'
 )
 
-check_set_env_var_contracts
 check_config_environment_contracts() (
 set -euo pipefail
 
@@ -596,7 +596,6 @@ printf '1..%s\n' "$TESTS_RUN"
 
 )
 
-check_config_environment_contracts
 
 check_compose_resource_contracts() (
 set -euo pipefail
@@ -668,4 +667,79 @@ done
 printf 'PASS: Compose retains active limits without Swarm-only CPU reservations\n'
 )
 
-check_compose_resource_contracts
+check_ci_and_dev_setup_contracts() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+cd "$ROOT"
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+workflow="$ROOT/.github/workflows/doc-drift.yml"
+dev_setup_block="$(awk '/^dev-setup: /,/^fix-permissions:/' "$ROOT/Makefile")"
+
+grep -Fq 'local development environment (not for production)' <<<"$dev_setup_block" \
+    || fail 'dev-setup must remain clearly local-development-only'
+grep -Fq 'elif cp docker-compose.override.dev.yml.example docker-compose.override.yml; then' <<<"$dev_setup_block" \
+    || fail 'dev-setup must copy the real development override example'
+grep -Fq 'Preserving existing development override: docker-compose.override.yml' <<<"$dev_setup_block" \
+    || fail 'dev-setup must preserve an existing local override'
+
+copy_success_branch="$(awk '/elif cp docker-compose.override.dev.yml.example docker-compose.override.yml; then/,/^[[:space:]]*else/' <<<"$dev_setup_block")"
+grep -Fq 'Created development override from docker-compose.override.dev.yml.example.' <<<"$copy_success_branch" \
+    || fail 'dev-setup success output must follow a successful override copy'
+copy_failure_branch="$(awk '/Error: Failed to create docker-compose.override.yml from docker-compose.override.dev.yml.example./,/^[[:space:]]*fi/' <<<"$dev_setup_block")"
+grep -Fq 'exit 1;' <<<"$copy_failure_branch" \
+    || fail 'dev-setup override copy failure must exit nonzero'
+! grep -Fq 'Created development override' <<<"$copy_failure_branch" \
+    || fail 'dev-setup copy failure can still print a false success result'
+
+for required_path in \
+    "'crowdsec/**'" \
+    "'VERSION'" \
+    "'docker-compose.override.dev.yml.example'"; do
+    grep -Fq "$required_path" "$workflow" \
+        || fail "pull-request workflow path filter missing: $required_path"
+done
+
+[[ "$(grep -Fc -- '--env-file .env.example' "$workflow")" -eq 2 ]] \
+    || fail 'Compose validation must use .env.example for both configurations'
+[[ "$(grep -Fc -- '-f docker-compose.yml.example' "$workflow")" -eq 2 ]] \
+    || fail 'Compose validation must validate the base example twice'
+grep -Fq -- '-f docker-compose.override.dev.yml.example' "$workflow" \
+    || fail 'Compose validation must include the development override example'
+
+while IFS= read -r action_ref; do
+    [[ "$action_ref" == ./* ]] && continue
+    [[ "$action_ref" =~ @[0-9a-f]{40}$ ]] \
+        || fail "workflow action reference is not immutable: $action_ref"
+done < <(sed -n 's/^[[:space:]]*- uses: \([^[:space:]#]*\).*/\1/p' "$workflow")
+
+grep -Fq 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5' "$workflow" \
+    || fail 'workflow must pin actions/checkout v5 to the verified commit'
+grep -Fq 'actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6' "$workflow" \
+    || fail 'workflow must pin actions/upload-artifact v6 to the verified commit'
+
+printf 'PASS: CI coverage and development setup contracts\n'
+)
+
+case "$MODE" in
+    core)
+        check_env_edit_contracts
+        check_set_env_var_contracts
+        check_config_environment_contracts
+        check_compose_resource_contracts
+        ;;
+    ci-dev-setup)
+        check_ci_and_dev_setup_contracts
+        ;;
+    all)
+        check_env_edit_contracts
+        check_set_env_var_contracts
+        check_config_environment_contracts
+        check_compose_resource_contracts
+        check_ci_and_dev_setup_contracts
+        ;;
+    *)
+        printf 'FAIL: unknown VW_TEST_CASE_MODE for case-config-env.bash: %s\n' "$MODE" >&2
+        exit 2
+        ;;
+esac

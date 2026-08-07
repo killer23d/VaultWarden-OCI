@@ -6,7 +6,6 @@ The supported entry point is `./tests/run-tests.sh <suite>`.
 tests/
 ├── README.md
 ├── run-tests.sh
-├── test-architecture.sh
 ├── lib/
 │   ├── assertions.bash
 │   ├── command-mocks.bash
@@ -18,21 +17,27 @@ tests/
     └── data-protection/
 ```
 
-Permanent `case-*.bash` files live under the closest responsibility directory and are registered exactly once in `run-tests.sh`. The runner executes each case directly at its registered path and writes temporary compatibility or timeout state only under the system temporary directory; it does not create files or symlinks in the checkout.
+Permanent executable cases live under `tests/suites/**/case-*.bash`. `tests/run-tests.sh` is the only permanent inventory and exposes **27 logical records backed by 20 physical case files**. A record has four fields:
 
-Nested cases source `tests/lib/test-root.bash`, which derives the repository root from the helper's stable location. Case bodies use `VW_TEST_REPO_ROOT` instead of assuming they are one directory below the repository root.
+```text
+logical-id|physical-path|mode|timeout-seconds
+```
 
-`tests/lib/assertions.bash` contains the small set of file, equality, absence, and wait assertions reused across cases. `tests/lib/command-mocks.bash` creates executable mocks and isolated command paths so command-presence tests do not depend on host packages. Domain-specific fixture behavior remains in its owning case.
+Logical IDs are globally unique. Each `(physical-path, mode)` pair is also globally unique; the same physical path may be reused only with a different mode.
+
+One physical case may back multiple logical records when a mode preserves a useful independent failure/timeout boundary. The runner passes every record's mode through `VW_TEST_CASE_MODE`, validates the complete inventory before listing or executing it, and never creates wrapper files or symlinks in the checkout.
+
+Nested cases source `tests/lib/test-root.bash`, which derives the repository root from the helper's stable location. Case bodies use `VW_TEST_REPO_ROOT` instead of relying on their directory depth. `tests/lib/assertions.bash` and `tests/lib/command-mocks.bash` remain small shared helpers; domain-specific fixtures stay in their owning case.
 
 ## Suites
 
-| Suite | Responsibility |
-| --- | --- |
-| `foundation` | Architecture, runner contracts, configuration, permissions, storage/setup, and systemd contracts |
-| `security` | Security/privilege, secrets, and email contracts |
-| `operations` | Operation guards, lock-descriptor hygiene, lifecycle, operator UI, CrowdSec, and uninstall contracts |
-| `data-protection` | Backup and restore/recovery contracts |
-| `all` | All four suites in dependency order |
+| Suite | Logical cases | Responsibility |
+| --- | ---: | --- |
+| `foundation` | 9 | Architecture, runner/repository contracts, configuration, permissions, storage/setup, and systemd |
+| `security` | 4 | Security/privilege, secrets/sensitive cleanup, and email |
+| `operations` | 11 | Operation guards, lock-descriptor hygiene, lifecycle/startup, operator UI, CrowdSec, and uninstall |
+| `data-protection` | 3 | Backup and independently timed restore core/tail recovery coverage |
+| `all` | 27 | All four suites in dependency order |
 
 ```bash
 ./tests/run-tests.sh foundation
@@ -43,20 +48,29 @@ Nested cases source `tests/lib/test-root.bash`, which derives the repository roo
 ./tests/run-tests.sh list
 ```
 
-Add a regression to an existing case when it shares the same fixture and responsibility. Create another case when a separate failure or timeout boundary is useful, or combining it would mix unrelated fixtures. Do not add another top-level `test-*.sh` command.
+`list` prints the effective logical inventory as `logical-id|physical-path|mode|timeout-seconds`. Add coverage to the closest existing domain case when it shares setup and responsibility. Use another logical mode when that physical case can own the coverage cleanly but needs independent identity, diagnostics, or timeout isolation. Create another physical `case-*.bash` file when the coverage needs distinct setup/fixtures or a focused boundary that would make a shared owner harder to navigate. Do not add top-level `test-*.sh` files or a second inventory.
 
-`case-runner-contracts.bash` tests command grammar, hierarchical fixture mapping, inventory validation, checkout isolation, failure propagation, and timeout diagnostics. `case-lock-fd-hygiene.bash` keeps focused structural coverage that logging and CrowdSec helpers no longer carry obsolete lock-descriptor lifecycle logic; the real Linux owner-death and arbitrary-child behavior runs in `case-operations.bash`.
+The consolidated multi-mode owners are:
 
-Fixture mode is internal to the runner-contract tests. `VAULTWARDEN_TEST_RUNNER_TESTS_DIR` substitutes an isolated test root while preserving each registered path relative to `tests/`, including its `suites/<suite>/` hierarchy. This permits identical basenames in different suites without collisions and never writes to the repository's real `tests/` tree.
+- `case-runner-contracts.bash`: `core`, `repository-interface`, `repository-validation`, `all`;
+- `case-config-env.bash`: `core`, `ci-dev-setup`, `all`;
+- `case-storage-setup.bash`: `core`, `host-architecture`, `all`;
+- `case-secrets.bash`: `core`, `sensitive-cleanup`, `all`;
+- `case-lifecycle.bash`: `core`, `startup-hardening`, `all`;
+- `case-restore-recovery.bash`: `core`, `tail`, `all`.
 
-## Per-case timeout behavior
+Direct execution defaults to `all`; an unknown `VW_TEST_CASE_MODE` exits `2` before the case body runs.
 
-`TEST_CASE_TIMEOUT_SECONDS` defaults to `120` and applies independently to each registered runner entry. Override it when a focused developer run legitimately needs a different ceiling:
+## Fixture and timeout behavior
+
+Fixture mode is internal to runner-contract tests. `VAULTWARDEN_TEST_RUNNER_TESTS_DIR` rewrites only each record's physical path into an isolated tests tree; logical ID, mode, and stored timeout remain unchanged. `VAULTWARDEN_TEST_RUNNER_EXTRA_FOUNDATION_RECORD` injects one complete record only in fixture mode. Fixtures create each unique physical path once even when several logical records share it.
+
+Each logical record stores its own timeout. `TEST_CASE_TIMEOUT_SECONDS` optionally overrides that value for focused developer runs:
 
 ```bash
 TEST_CASE_TIMEOUT_SECONDS=300 ./tests/run-tests.sh foundation
 ```
 
-The deadline is enforced only when the runner detects a GNU coreutils-compatible `timeout` command with the required `--kill-after` and `--verbose` options. Ubuntu CI provides GNU `timeout`; Homebrew users can use `gtimeout` from GNU coreutils. Without a supported command, cases run without a per-case deadline and the suite output states that limitation. The workflow's job timeout remains a separate outer bound.
+The deadline is enforced only when a GNU coreutils-compatible `timeout`/`gtimeout` supports the required options. Without one, cases still run and the suite reports that per-logical-case deadlines are unavailable. A test that exits `124` on its own remains a normal failure; timeout reporting is based on GNU timeout's signal diagnostic.
 
-GitHub Actions executes the four public suites independently and retains each suite log as a short-lived diagnostic artifact.
+GitHub Actions continues to execute the four public suites independently and retains each suite log as a short-lived diagnostic artifact.
