@@ -81,7 +81,11 @@ AGE_KEYS=("$key")
 FORCE=true; SAVED_RECOVERY=false
 if ( confirm_recovery ) >/dev/null 2>&1; then fail "--force bypassed explicit recovery acknowledgement"; fi
 SAVED_RECOVERY=true; confirm_recovery >/dev/null
-FORCE=false; SAVED_RECOVERY=false
+# Reset sourced recovery globals before the remaining fixture checks.
+# shellcheck disable=SC2034
+FORCE=false
+# shellcheck disable=SC2034
+SAVED_RECOVERY=false
 printf secret > "$ROOT/secrets/local"; printf old > "$ROOT/backups/old"; printf keep > "$BACKUP_DIR/keep"
 cleanup_checkout_artifacts
 [[ -f "$BACKUP_DIR/keep" ]] || fail "nested external backup deleted"
@@ -102,7 +106,10 @@ printf 'VaultWarden-OCI data volume\nDevice: /dev/mock\nMounted: %s\n' "$DATA_VO
 chmod 444 "$DATA_VOLUME_MOUNT/.vw-data-volume"
 printf keep > "$DATA_VOLUME_MOUNT/operator-note"
 FSTAB="$T/fstab-mounted"; printf 'UUID=mock\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' "$DATA_VOLUME_MOUNT" > "$FSTAB"
-B="$T/bin"; mkdir -p "$B"; export MOCK_MOUNT="$DATA_VOLUME_MOUNT" MOCK_FLAG="$T/is-mounted" MOCK_DETACHED="$T/detached" REAL_STAT="$(command -v stat)"; : > "$MOCK_FLAG"
+B="$T/bin"; mkdir -p "$B"
+REAL_STAT="$(command -v stat)"
+export MOCK_MOUNT="$DATA_VOLUME_MOUNT" MOCK_FLAG="$T/is-mounted" MOCK_DETACHED="$T/detached" REAL_STAT
+: > "$MOCK_FLAG"
 cat > "$B/mountpoint" <<'MOCK'
 #!/usr/bin/env bash
 [[ "$1" == -q && "$2" == "$MOCK_MOUNT" && -e "$MOCK_FLAG" ]]
