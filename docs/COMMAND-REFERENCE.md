@@ -1647,55 +1647,30 @@ EXAMPLES:
 ```
 VaultWarden-OCI Uninstall
 
-USAGE:
-    sudo bash ./utilities/uninstall-vaultwarden.sh run [OPTIONS]
+Usage:
+  sudo bash utilities/uninstall-vaultwarden.sh run [OPTIONS]
+  bash utilities/uninstall-vaultwarden.sh help
 
-DESCRIPTION:
-    Fully removes VaultWarden-OCI managed stack artifacts from this host:
-      - Docker compose stack, managed containers, networks, volumes, and runtime secrets
-      - systemd timers/services/drop-ins, /opt scripts, and /etc/vaultwarden
-      - persistent VaultWarden state directory and optional data-volume fstab/mount wiring
-      - CrowdSec services/packages/config/state and project firewall rules
-      - setup-managed swap path only in --test-reset mode
+Options:
+  --dry-run
+      Show the resolved uninstall scope without changing the host.
+  --test-reset
+      Dedicated test-VM reset. Preserves the Git checkout, but also removes the
+      test VM's /swapfile, its fstab entry, the exact vm.swappiness=10 line, and
+      the setup fallback universe source. Do not use this as a normal uninstall.
+  --i-have-saved-my-recovery-kit
+      Acknowledge that managed local Age keys and recovery handoffs may be deleted.
+  --force
+      Non-interactive mode. Skips confirmation and final-backup prompts. It never
+      authorizes erasing separate block-storage contents or ambiguous shared state.
+  --version, -V
+      Print the project version.
 
-    Docker itself, /var/lib/docker, the docker group, common admin packages, SSH
-    configuration, and unrelated firewall rules are intentionally preserved.
-
-SUBCOMMANDS:
-    run    Perform the idempotent uninstall
-    help   Show this help
-
-OPTIONS (used after 'run'):
-    --test-reset
-        Remove the stack and generated local installation artifacts, but preserve
-        the Git checkout so the same branch can be installed again immediately.
-        This is intended for repeated production-host acceptance testing. It does
-        not restore the VM to a pristine OCI image or uninstall shared host tooling.
-        On a dedicated acceptance-test VM, this intentionally removes /swapfile
-        so the next setup run can exercise the no-swap/create-swap path again.
-
-    --i-have-saved-my-recovery-kit
-        Confirm that all Age keys shown by this script have been saved outside
-        this host. Required when any managed Age key exists, unless --force is used.
-
-    --dry-run
-        Show what would be removed without changing the system. Does not require root.
-
-    --force
-        DANGEROUS: non-interactive destructive mode. Skips uninstall confirmation,
-        backup prompt, external backup-dir prompt, and Age-key prompts. This can
-        permanently delete VaultWarden data and key material; use only after
-        recovery data has been verified outside this host.
-
-    --version, -V
-        Print the VaultWarden-OCI version and exit.
-
-EXAMPLES:
-    sudo bash ./utilities/uninstall-vaultwarden.sh run --dry-run
-    sudo bash ./utilities/uninstall-vaultwarden.sh run --test-reset --dry-run
-    sudo bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit
-    sudo bash ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
-    sudo bash ./utilities/uninstall-vaultwarden.sh run --force
+Policy:
+  Removes artifacts with positive VaultWarden-OCI ownership. Shared or ambiguous
+  Docker, CrowdSec, firewall, OS identity, package, sysctl and backup state is
+  preserved. Separate block-storage contents are never bulk-deleted; the verified
+  volume is only detached from host boot wiring and unmounted.
 ```
 
 ### write-command-reference.sh

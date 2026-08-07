@@ -214,7 +214,8 @@ preflight_storage(){
   [[ -n "$DATA_VOLUME_DEVICE" ]] || return 0
   [[ "$DATA_VOLUME_MOUNT" == /* && ! -L "$DATA_VOLUME_MOUNT" ]] || die "Separate volume requires a real absolute DATA_VOLUME_MOUNT."
   same_path "$PROJECT_STATE_DIR" "$DATA_VOLUME_MOUNT" || die "PROJECT_STATE_DIR must equal DATA_VOLUME_MOUNT for separate storage."
-  local src=$DATA_VOLUME_DEVICE id="$(uuid "$DATA_VOLUME_DEVICE")"
+  local src=$DATA_VOLUME_DEVICE id
+  id="$(uuid "$DATA_VOLUME_DEVICE")"
   if mountpoint -q "$DATA_VOLUME_MOUNT" 2>/dev/null; then verify_volume || die "Mounted data-volume identity verification failed."; src="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT")"; fi
   fstab_can_remove "$DATA_VOLUME_MOUNT" "$src" "$id" || die "Data-volume fstab wiring is ambiguous; no changes made."
   [[ ! -e "$MOUNT_GUARD" && ! -L "$MOUNT_GUARD" ]] || guard_managed || die "Docker mount guard is unmarked; no changes made."
@@ -294,7 +295,9 @@ remove_state(){
     [[ -d "$PROJECT_STATE_DIR" ]] && { state_evidence "$PROJECT_STATE_DIR" || die "State directory lacks recognizable VaultWarden evidence: $PROJECT_STATE_DIR"; safe_rm "$PROJECT_STATE_DIR" || die "Could not remove state."; }
     remove_guard || true; return
   fi
-  local mounted=false src=$DATA_VOLUME_DEVICE id="$(uuid "$DATA_VOLUME_DEVICE")"; mountpoint -q "$DATA_VOLUME_MOUNT" 2>/dev/null && mounted=true
+  local mounted=false src=$DATA_VOLUME_DEVICE id
+  id="$(uuid "$DATA_VOLUME_DEVICE")"
+  mountpoint -q "$DATA_VOLUME_MOUNT" 2>/dev/null && mounted=true
   if [[ "$mounted" == true ]]; then verify_volume || die "Data-volume verification failed."; src="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT")"; fstab_can_remove "$DATA_VOLUME_MOUNT" "$src" "$id" || die "Ambiguous fstab; refusing detach."; info "Unmounting verified data volume..."; umount "$DATA_VOLUME_MOUNT" 2>/dev/null || die "Unmount failed. Close open files and retry; lazy unmount is not used."; ok "Data volume unmounted; filesystem contents and sentinel preserved."; fi
   remove_fstab "$DATA_VOLUME_MOUNT" "$src" "$id" || die "Could not safely remove fstab wiring."
   remove_guard || die "Could not safely remove Docker mount guard."

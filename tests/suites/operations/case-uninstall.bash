@@ -14,7 +14,10 @@ bash -n "$U"
 ! grep -Eq 'apt-get (remove|autoremove).*purge|apt-get autoremove' "$U" || fail "shared package purge returned"
 
 set -- run --dry-run
+# shellcheck source=../../../utilities/uninstall-vaultwarden.sh
 source "$U"
+# These fixture globals are consumed by functions sourced from the uninstaller.
+# shellcheck disable=SC2034
 DRY_RUN=false FORCE=false TEST_RESET=false SAVED_RECOVERY=false
 
 FSTAB="$T/fstab"
@@ -60,9 +63,17 @@ if handoff_name 'vaultwarden-setup-credentials-operator.txt'; then fail "broad c
 handoff_name 'vaultwarden-recovery-kit-20260807T000000Z-abcdef.txt' || fail "valid recovery kit missed"
 if handoff_name 'vaultwarden-recovery-kit-current.txt'; then fail "broad recovery kit matched"; fi
 
-ROOT="$T/VaultWarden-OCI"; ETC_DIR="$T/etc-vw"; PROJECT_STATE_DIR="$T/state"; DATA_VOLUME_DEVICE=''; BACKUP_DIR="$ROOT/backups/retained"
+ROOT="$T/VaultWarden-OCI"
+# shellcheck disable=SC2034 # consumed by sourced cleanup helpers
+ETC_DIR="$T/etc-vw"
+PROJECT_STATE_DIR="$T/state"
+DATA_VOLUME_DEVICE=''
+BACKUP_DIR="$ROOT/backups/retained"
 mkdir -p "$ROOT/secrets/keys" "$BACKUP_DIR"
-key="$ROOT/secrets/keys/age-key.txt"; printf 'AGE-SECRET-KEY-TEST\n' > "$key"; AGE_KEYS=("$key")
+key="$ROOT/secrets/keys/age-key.txt"
+printf 'AGE-SECRET-KEY-TEST\n' > "$key"
+# shellcheck disable=SC2034 # consumed by sourced existing_keys()
+AGE_KEYS=("$key")
 [[ "$(existing_keys)" == "$key" ]] || fail "repo Age key escaped recovery guard"
 printf secret > "$ROOT/secrets/local"; printf old > "$ROOT/backups/old"; printf keep > "$BACKUP_DIR/keep"
 cleanup_checkout_artifacts
@@ -71,7 +82,9 @@ cleanup_checkout_artifacts
 
 # Project-rendered Workers config remains attributable even if env/domain files
 # were already removed by a partial uninstall.
-CS_WORKER="$T/crowdsec-worker.yaml"; DOMAIN_NAME=''
+CS_WORKER="$T/crowdsec-worker.yaml"
+# shellcheck disable=SC2034 # consumed by sourced worker_config_managed()
+DOMAIN_NAME=''
 printf '# crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example\ncloudflare_config: {}\n' > "$CS_WORKER"
 worker_config_managed || fail "managed CrowdSec Workers config depended on surviving DOMAIN config"
 
@@ -106,7 +119,11 @@ remove_state >/dev/null
 
 # Successful operation finalization must not recreate the runtime operation state
 # that uninstall deliberately removed immediately before verification.
-OP_HELD=true; OPERATION_OWNS_STATE=true; OPERATION_STATE_FILE="$T/uninstall.state"; OPERATION_RELEASED=false
+OP_HELD=true
+OPERATION_OWNS_STATE=true
+OPERATION_STATE_FILE="$T/uninstall.state"
+# shellcheck disable=SC2034 # consumed by sourced release_operation_lock()
+OPERATION_RELEASED=false
 operation_release(){ [[ "$OPERATION_OWNS_STATE" == false && -z "$OPERATION_STATE_FILE" ]]; }
 finalize_op_success || fail "successful operation release would recreate runtime state"
 [[ "$OP_HELD" == false ]] || fail "operation remained marked held after finalization"
