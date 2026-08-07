@@ -279,10 +279,10 @@ MOCK
   cmp -s "$FSTAB_FILE" "$TMP/storage-fstab.before" || fail "fstab changed before mounted sentinel validation"
   [[ -f "$DOCKER_MOUNT_GUARD" ]] || fail "docker mount guard removed before mounted sentinel validation"
   [[ ! -s "$UMOUNT_LOG" ]] || fail "unknown mounted volume was unmounted"
-  assert_contains "$TMP/storage.out" "lacks .vw-data-volume sentinel"
+  assert_contains "$TMP/storage.out" "lacks a safe .vw-data-volume sentinel"
 )
 
-# UFW cleanup removes cached Cloudflare CIDRs, explicitly commented managed rules, and historical broad rules.
+# UFW cleanup removes cached Cloudflare CIDRs and explicitly commented managed rules while preserving unrelated rules.
 (
   source_uninstaller_for_behavior
   bin="$TMP/ufw-bin"
@@ -410,11 +410,14 @@ EOF_IPT
   SOPS_BIN="$TMP/shared-sops"
   FSTAB_FILE="$TMP/residual-fstab"
   IPTABLES_RULES_V4="$TMP/rules.v4"
+  IPTABLES_RULES_V6="$TMP/rules.v6"
   MANAGED_CLOUDFLARE_CIDRS=(173.245.48.0/20)
+  MANAGED_IPV6_SUBNETS=()
   mkdir -p "$PROJECT_DIR/.git"
   mkdir -p "$SYSTEMD_SYSTEM_DIR"
   : > "$FSTAB_FILE"
   : > "$IPTABLES_RULES_V4"
+  : > "$IPTABLES_RULES_V6"
   : > "$SOPS_BIN"
   if ! verify_uninstall_complete > "$TMP/residual-clean.out" 2>&1; then
     cat "$TMP/residual-clean.out" >&2
@@ -468,7 +471,7 @@ EOF_IPT
   [[ -e "$global_lock" && -e "$uninstall_lock" ]] || fail "lock pathnames were unlinked"
 )
 
-# Swap cleanup preserves ambiguous swap in normal uninstall but resets it for test-reset.
+# Swap cleanup preserves ambiguous host settings in normal uninstall but resets them for test-reset.
 (
   source_uninstaller_for_behavior
   bin="$TMP/swap-bin"
@@ -505,7 +508,6 @@ MOCK
   remove_swap_and_apt_sources > "$TMP/swap-normal.out" 2>&1
   [[ -e "$SWAPFILE_PATH" ]] || fail "normal uninstall removed ambiguous swapfile"
   assert_contains "$FSTAB_FILE" "$SWAPFILE_PATH"
-  assert_not_contains "$SYSCTL_CONF" "vm.swappiness=10"
   assert_contains "$SYSCTL_CONF" "vm.swappiness=60"
   assert_contains "$SYSCTL_CONF" "vm.swappiness = 10"
   [[ ! -s "$SWAPOFF_LOG" ]] || fail "normal uninstall called swapoff for ambiguous swapfile"
