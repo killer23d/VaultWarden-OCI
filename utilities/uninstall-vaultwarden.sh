@@ -41,6 +41,7 @@ CS_PROFILE_END="# END VaultWarden-OCI CrowdSec email notifications"
 
 TIMERS=(vaultwarden-maintenance.timer vaultwarden-db-backup.timer vaultwarden-full-backup.timer vaultwarden-health.timer vaultwarden-dns-update.timer vaultwarden-firewall-update.timer)
 SERVICES=(vaultwarden-maintenance.service vaultwarden-db-backup.service vaultwarden-full-backup.service vaultwarden-health.service vaultwarden-dns-update.service vaultwarden-firewall-update.service vaultwarden-notify-failure.service vaultwarden-notify-failure@.service vaultwarden-iptables.service vaultwarden-startup.service)
+KNOWN_CONTAINERS=(vaultwarden_app vaultwarden_caddy vaultwarden_postfix)
 
 help(){ cat <<'EOH'
 VaultWarden-OCI Uninstall
@@ -84,7 +85,7 @@ while (($#)); do
     --dry-run) DRY_RUN=true;;
     --test-reset) TEST_RESET=true;;
     --i-have-saved-my-recovery-kit) SAVED_RECOVERY=true;;
-    --force) FORCE=true; SAVED_RECOVERY=true;;
+    --force) FORCE=true;;
     --version|-V) printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "$ROOT/VERSION" 2>/dev/null || echo unknown)"; exit 0;;
     *) die "Unknown option: $1";;
   esac
@@ -168,8 +169,10 @@ uuid(){ has blkid && blkid -o value -s UUID "$1" 2>/dev/null | head -1; }
 same_dev(){ local a=$1 b=$2 ra rb ua ub; [[ -n "$a" && -n "$b" ]] || return 1; [[ "$a" == "$b" ]] && return 0; ra="$(readlink -f -- "$a" 2>/dev/null || true)"; rb="$(readlink -f -- "$b" 2>/dev/null || true)"; [[ -n "$ra" && "$ra" == "$rb" ]] && return 0; ua="$(uuid "$a")"; ub="$(uuid "$b")"; [[ -n "$ua" && "$ua" == "$ub" ]]; }
 sentinel_value(){ awk -F: -v k="$1" '$1==k{v=substr($0,index($0,":")+1);sub(/^[[:space:]]+/,"",v);print v;exit}' "$2" 2>/dev/null; }
 verify_volume(){
-  local s="$DATA_VOLUME_MOUNT/.vw-data-volume" src sm sd
+  local s="$DATA_VOLUME_MOUNT/.vw-data-volume" src sm sd metadata
   [[ -f "$s" && ! -L "$s" && "$(head -1 "$s" 2>/dev/null)" == 'VaultWarden-OCI data volume' ]] || return 1
+  metadata="$(stat -c '%u:%g:%a:%h' "$s" 2>/dev/null || true)"
+  [[ "$metadata" == '0:0:444:1' ]] || return 1
   src="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT" 2>/dev/null || true)"; same_dev "$DATA_VOLUME_DEVICE" "$src" || return 1
   sm="$(sentinel_value Mounted "$s")"; [[ -z "$sm" ]] || same_path "$sm" "$DATA_VOLUME_MOUNT" || return 1
   sd="$(sentinel_value Device "$s")"; [[ -z "$sd" || ! -e "$sd" ]] || same_dev "$sd" "$src" || return 1
@@ -205,9 +208,16 @@ storage_ambiguous(){
   [[ -f "$FSTAB" && ! -L "$FSTAB" ]] && fstab_setup_signature "$PROJECT_STATE_DIR" && return 0
   return 1
 }
+docker_container_project(){ docker container inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$1" 2>/dev/null || true; }
 preflight_docker(){
   has docker || return 0
   docker info >/dev/null 2>&1 || die "Docker is installed but the daemon is unavailable. Start Docker and rerun uninstall so project containers, volumes, and networks can be removed and verified before state is deleted."
+  local name project
+  for name in "${KNOWN_CONTAINERS[@]}"; do
+    docker container inspect "$name" >/dev/null 2>&1 || continue
+    project="$(docker_container_project "$name")"
+    [[ "$project" == "$COMPOSE_PROJECT" ]] || die "Container '$name' belongs to Compose project '${project:-<unlabelled>}' but uninstall resolved '$COMPOSE_PROJECT'. Refusing state deletion; fix the configuration or remove/rename the conflicting container first."
+  done
 }
 preflight_storage(){
   storage_ambiguous && die "Storage config looks separate-volume but DATA_VOLUME_DEVICE is missing; repair persisted environment first."
@@ -222,7 +232,16 @@ preflight_storage(){
 }
 
 safe_rm(){ local p=$1 c; [[ "$p" == /* ]] || return 1; c="$(canon "$p")" || return 1; case "$c" in /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var|/var/lib) return 1;; esac; [[ "$DRY_RUN" == true ]] && { info "Would remove $p"; return 0; }; rm -rf --one-file-system -- "$p"; }
-state_evidence(){ same_path "$1" "$DEFAULT_STATE" && return 0; [[ -f "$1/config/install.env" || -f "$1/secrets/secrets.yaml" || -f "$1/data/db.sqlite3" || -d "$1/logs/vaultwarden" || -d "$1/caddy" ]]; }
+state_evidence(){
+  local root=$1 score=0
+  [[ -f "$root/config/install.env" && ! -L "$root/config/install.env" ]] && return 0
+  [[ -f "$root/secrets/secrets.yaml" && ! -L "$root/secrets/secrets.yaml" ]] && score=$((score+1))
+  [[ -f "$root/data/db.sqlite3" && ! -L "$root/data/db.sqlite3" ]] && score=$((score+1))
+  [[ -d "$root/logs/vaultwarden" && ! -L "$root/logs/vaultwarden" ]] && score=$((score+1))
+  { [[ -d "$root/caddy/data" && ! -L "$root/caddy/data" ]] || [[ -d "$root/caddy/config" && ! -L "$root/caddy/config" ]]; } && score=$((score+1))
+  (( score >= 2 ))
+}
+state_dir_empty(){ [[ -d "$1" && ! -L "$1" ]] && [[ -z "$(find -P "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; }
 
 handoff_name(){ [[ "$1" =~ ^vaultwarden-setup-credentials-[0-9]{8}T[0-9]{6}Z\.txt$ || "$1" =~ ^\.vaultwarden-setup-credentials\.[A-Za-z0-9]{8}$ || "$1" =~ ^vaultwarden-age-key-rotation-[0-9]{8}-[0-9]{6}\.txt$ || "$1" =~ ^\.vaultwarden-age-key-rotation\.[A-Za-z0-9]{8}$ || "$1" =~ ^vaultwarden-recovery-kit-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\.txt$ || "$1" =~ ^\.important-documents\.[A-Za-z0-9]{8}\.zip$ ]]; }
 handoffs(){ [[ -d "$RECOVERY_DIR" && ! -L "$RECOVERY_DIR" ]] || return 0; local p; while IFS= read -r -d '' p; do handoff_name "${p##*/}" && printf '%s\n' "$p"; done < <(find -P "$RECOVERY_DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null); }
@@ -234,10 +253,17 @@ validate_handoffs(){
 }
 key_will_delete(){ inside "$1" "$ETC_DIR" && return 0; inside "$1" "$ROOT/secrets" && return 0; [[ -z "$DATA_VOLUME_DEVICE" ]] && inside "$1" "$PROJECT_STATE_DIR"; }
 existing_keys(){ local k; for k in "${AGE_KEYS[@]}"; do [[ -f "$k" ]] && key_will_delete "$k" && printf '%s\n' "$k"; done | uniq; }
-confirm_recovery(){ local k h; k="$(existing_keys)"; h="$(handoffs)"; [[ -z "$k$h" ]] && return 0; [[ "$FORCE" == true || "$SAVED_RECOVERY" == true ]] && { warn "Recovery-material deletion explicitly acknowledged."; return 0; }; [[ -n "$k" ]] && printf 'Age keys to delete:\n%s\n' "$k"; [[ -n "$h" ]] && printf 'Recovery handoffs to delete:\n%s\n' "$h"; die "Save recovery material off-host and rerun with --i-have-saved-my-recovery-kit."; }
+confirm_recovery(){ local k h; k="$(existing_keys)"; h="$(handoffs)"; [[ -z "$k$h" ]] && return 0; [[ "$SAVED_RECOVERY" == true ]] && { warn "Recovery-material deletion explicitly acknowledged."; return 0; }; [[ -n "$k" ]] && printf 'Age keys to delete:\n%s\n' "$k"; [[ -n "$h" ]] && printf 'Recovery handoffs to delete:\n%s\n' "$h"; die "Save recovery material off-host and rerun with --i-have-saved-my-recovery-kit."; }
 remove_handoffs(){ local p before after; while IFS= read -r p; do before="$(stat -c '%d:%i:%u:%g:%a:%h' "$p")" || die "Cannot inspect $p"; [[ "$before" == *':0:0:600:1' ]] || die "Recovery handoff changed: $p"; after="$(stat -c '%d:%i:%u:%g:%a:%h' "$p")"; [[ "$after" == "$before" ]] || die "Recovery handoff changed during cleanup: $p"; has shred && shred -fuz -- "$p" 2>/dev/null || rm -f -- "$p"; [[ ! -e "$p" ]] || die "Could not remove $p"; done < <(handoffs); rmdir "$RECOVERY_DIR" 2>/dev/null || true; }
 at_jobs(){ has atq && has at || return 0; local id body; while read -r id _; do [[ "$id" =~ ^[0-9]+$ ]] || continue; body="$(at -c "$id" 2>/dev/null || true)"; grep -Fq "$RECOVERY_DIR/" <<<"$body" && grep -Eq 'vaultwarden-recovery-kit-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\.txt' <<<"$body" && printf '%s\n' "$id"; done < <(atq 2>/dev/null || true); }
 recovery_units(){ has systemctl || return 0; systemctl list-units --all --no-legend --plain 'vaultwarden-recovery-cleanup-*' 2>/dev/null | awk 'NF{print $1}' || true; }
+notify_units(){ has systemctl || return 0; systemctl list-units --all --no-legend --plain 'vaultwarden-notify-failure@*.service' 2>/dev/null | awk 'NF{print $1}' || true; }
+unit_is_live(){
+  has systemctl || return 1
+  local state
+  state="$(systemctl show "$1" --property=ActiveState --value 2>/dev/null || true)"
+  case "$state" in active|activating|reloading|deactivating) return 0;; *) return 1;; esac
+}
 
 backup_inside_state(){ [[ -z "$DATA_VOLUME_DEVICE" ]] && inside "$BACKUP_DIR" "$PROJECT_STATE_DIR"; }
 backup_external(){ ! inside "$BACKUP_DIR" "$PROJECT_STATE_DIR"; }
@@ -246,14 +272,20 @@ offer_backup(){ [[ "$FORCE" == true || ! -f "$ROOT/backup.sh" ]] && return 0; lo
 
 disable_units(){
   local u d
+  local -a dynamic_units=()
   if has systemctl; then
     for u in "${TIMERS[@]}" vaultwarden-startup.service; do systemctl disable --now "$u" 2>/dev/null || true; done
     for u in "${SERVICES[@]}"; do [[ "$u" == *'@.'* ]] || systemctl stop "$u" 2>/dev/null || true; done
-    while read -r u; do
+    mapfile -t dynamic_units < <({ recovery_units; notify_units; } | uniq)
+    for u in "${dynamic_units[@]}"; do
       [[ -n "$u" ]] || continue
       systemctl stop "$u" 2>/dev/null || true
       systemctl reset-failed "$u" 2>/dev/null || true
-    done < <(recovery_units)
+    done
+    for u in "${TIMERS[@]}" "${SERVICES[@]}" "${dynamic_units[@]}"; do
+      [[ -n "$u" && "$u" != *'@.'* ]] || continue
+      unit_is_live "$u" && die "Managed systemd unit is still active after stop: $u. Refusing persistent-state removal."
+    done
   fi
   for u in "${TIMERS[@]}" "${SERVICES[@]}"; do rm -f "$SYSTEMD/$u"; d="$SYSTEMD/$u.d"; rm -f "$d"/{10-state-dir.conf,20-identity.conf,30-run-as-root.conf} 2>/dev/null || true; rmdir "$d" 2>/dev/null || true; done
   if has systemctl; then
@@ -268,8 +300,7 @@ docker_cleanup(){
   docker info >/dev/null 2>&1 || die "Docker daemon became unavailable during uninstall; refusing to delete persistent state until project containers can be verified stopped."
   local id remaining
   if [[ -f "$ROOT/docker-compose.yml" ]]; then
-    (cd "$ROOT" && docker compose -p "$COMPOSE_PROJECT" -f docker-compose.yml down --volumes --remove-orphans --timeout 30) 2>/dev/null \
-      || warn "docker compose down reported errors; labelled cleanup continues."
+    (cd "$ROOT" && docker compose -p "$COMPOSE_PROJECT" -f docker-compose.yml down --volumes --remove-orphans --timeout 30) 2>/dev/null       || warn "docker compose down reported errors; labelled cleanup continues."
   fi
   while read -r id; do
     [[ -n "$id" ]] || continue
@@ -292,7 +323,15 @@ remove_state(){
     storage_ambiguous && die "Refusing ambiguous recursive state deletion."
     [[ ! -L "$PROJECT_STATE_DIR" ]] || die "State path is a symlink; refusing recursive deletion."
     mountpoint -q "$PROJECT_STATE_DIR" 2>/dev/null && die "State path is a mountpoint without verified device identity."
-    [[ -d "$PROJECT_STATE_DIR" ]] && { state_evidence "$PROJECT_STATE_DIR" || die "State directory lacks recognizable VaultWarden evidence: $PROJECT_STATE_DIR"; safe_rm "$PROJECT_STATE_DIR" || die "Could not remove state."; }
+    if [[ -d "$PROJECT_STATE_DIR" ]]; then
+      if state_evidence "$PROJECT_STATE_DIR"; then
+        safe_rm "$PROJECT_STATE_DIR" || die "Could not remove state."
+      elif same_path "$PROJECT_STATE_DIR" "$DEFAULT_STATE" && state_dir_empty "$PROJECT_STATE_DIR"; then
+        rmdir "$PROJECT_STATE_DIR" || die "Could not remove empty default state directory: $PROJECT_STATE_DIR"
+      else
+        die "State directory lacks strong VaultWarden ownership evidence; preserving it for review: $PROJECT_STATE_DIR"
+      fi
+    fi
     remove_guard || true; return
   fi
   local mounted=false src=$DATA_VOLUME_DEVICE id
@@ -325,11 +364,8 @@ crowdsec_cleanup(){
   local changed=false worker_owned=false
   worker_config_managed && worker_owned=true
   worker_unit_managed && worker_owned=true
-  if [[ "$worker_owned" == true ]] && has systemctl \
-     && { systemctl is-active crowdsec-cloudflare-worker-bouncer.service >/dev/null 2>&1 \
-          || systemctl is-enabled crowdsec-cloudflare-worker-bouncer.service >/dev/null 2>&1; }; then
-    systemctl disable --now crowdsec-cloudflare-worker-bouncer.service 2>/dev/null \
-      || die "Could not stop the VaultWarden-attributed CrowdSec Workers bouncer. Its config was preserved; stop the service and rerun uninstall."
+  if [[ "$worker_owned" == true ]] && has systemctl      && { systemctl is-active crowdsec-cloudflare-worker-bouncer.service >/dev/null 2>&1           || systemctl is-enabled crowdsec-cloudflare-worker-bouncer.service >/dev/null 2>&1; }; then
+    systemctl disable --now crowdsec-cloudflare-worker-bouncer.service 2>/dev/null       || die "Could not stop the VaultWarden-attributed CrowdSec Workers bouncer. Its config was preserved; stop the service and rerun uninstall."
   fi
   if [[ -f "$CS_EMAIL" && ! -L "$CS_EMAIL" ]] && grep -Fxq "$CS_EMAIL_MARKER" "$CS_EMAIL"; then rm -f "$CS_EMAIL"; changed=true; fi
   strip_profile || warn "CrowdSec profile markers malformed; preserved for review."
@@ -371,12 +407,16 @@ verify(){
   local bad=0 u ids
   for u in "${TIMERS[@]}" "${SERVICES[@]}"; do
     [[ ! -e "$SYSTEMD/$u" ]] || { warn "RESIDUAL: $SYSTEMD/$u"; bad=$((bad+1)); }
+    for d in 10-state-dir.conf 20-identity.conf 30-run-as-root.conf; do
+      [[ ! -e "$SYSTEMD/$u.d/$d" && ! -L "$SYSTEMD/$u.d/$d" ]] || { warn "RESIDUAL: $SYSTEMD/$u.d/$d"; bad=$((bad+1)); }
+    done
   done
   if has systemctl; then
     for u in "${TIMERS[@]}" vaultwarden-startup.service; do
       systemctl is-enabled "$u" >/dev/null 2>&1 && { warn "RESIDUAL: enabled systemd unit $u"; bad=$((bad+1)); }
     done
     while IFS= read -r u; do [[ -n "$u" ]] && { warn "RESIDUAL: recovery cleanup unit $u"; bad=$((bad+1)); }; done < <(recovery_units)
+    while IFS= read -r u; do [[ -n "$u" ]] && unit_is_live "$u" && { warn "RESIDUAL: active notification unit $u"; bad=$((bad+1)); }; done < <(notify_units)
   fi
   guard_managed && { warn "RESIDUAL: managed Docker mount guard $MOUNT_GUARD"; bad=$((bad+1)); } || true
   for u in "$OPT_DIR" "$ETC_DIR" "$RUNTIME"; do [[ ! -e "$u" && ! -L "$u" ]] || { warn "RESIDUAL: $u"; bad=$((bad+1)); }; done
@@ -396,6 +436,7 @@ verify(){
       ids="$(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" 2>/dev/null || true)"; [[ -z "$ids" ]] || { warn "RESIDUAL: compose-labelled container(s): $ids"; bad=$((bad+1)); }
       ids="$(docker volume ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" 2>/dev/null || true)"; [[ -z "$ids" ]] || { warn "RESIDUAL: compose-labelled volume(s): $ids"; bad=$((bad+1)); }
       ids="$(docker network ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" 2>/dev/null || true)"; [[ -z "$ids" ]] || { warn "RESIDUAL: compose-labelled network(s): $ids"; bad=$((bad+1)); }
+      for u in "${KNOWN_CONTAINERS[@]}"; do docker container inspect "$u" >/dev/null 2>&1 && { warn "RESIDUAL: known VaultWarden container name still exists: $u"; bad=$((bad+1)); }; done
     fi
   fi
   [[ -z "$(ufw_numbers)" ]] || { warn "RESIDUAL: VaultWarden Cloudflare UFW rule(s)"; bad=$((bad+1)); }
@@ -449,9 +490,9 @@ main(){
   warn "Preserving Docker packages/data, OS users/groups/memberships, SOPS/admin tools and external backups."
   remove_runtime
   verify
+  remove_checkout
   finalize_op_success
   trap - EXIT
-  remove_checkout
   ok "Uninstall complete."
 }
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main; fi

@@ -56,7 +56,10 @@ PROJECT_STATE_DIR="$T/custom-state"; DATA_VOLUME_MOUNT=''; DATA_VOLUME_DEVICE=''
 storage_ambiguous || fail "managed mount guard did not expose partial storage config"
 
 DEFAULT_STATE="$T/default-owned"; mkdir -p "$DEFAULT_STATE"
-state_evidence "$DEFAULT_STATE" || fail "empty default state namespace was not idempotently attributable"
+if state_evidence "$DEFAULT_STATE"; then fail "empty default state was accepted as recursive ownership evidence"; fi
+mkdir -p "$T/strong-state/data" "$T/strong-state/logs/vaultwarden"
+printf 'SQLite format 3\000' > "$T/strong-state/data/db.sqlite3"
+state_evidence "$T/strong-state" || fail "strong state evidence was not recognized"
 
 handoff_name 'vaultwarden-setup-credentials-20260807T000000Z.txt' || fail "valid credentials handoff missed"
 if handoff_name 'vaultwarden-setup-credentials-operator.txt'; then fail "broad credentials handoff matched"; fi
@@ -75,6 +78,10 @@ printf 'AGE-SECRET-KEY-TEST\n' > "$key"
 # shellcheck disable=SC2034 # consumed by sourced existing_keys()
 AGE_KEYS=("$key")
 [[ "$(existing_keys)" == "$key" ]] || fail "repo Age key escaped recovery guard"
+FORCE=true; SAVED_RECOVERY=false
+if ( confirm_recovery ) >/dev/null 2>&1; then fail "--force bypassed explicit recovery acknowledgement"; fi
+SAVED_RECOVERY=true; confirm_recovery >/dev/null
+FORCE=false; SAVED_RECOVERY=false
 printf secret > "$ROOT/secrets/local"; printf old > "$ROOT/backups/old"; printf keep > "$BACKUP_DIR/keep"
 cleanup_checkout_artifacts
 [[ -f "$BACKUP_DIR/keep" ]] || fail "nested external backup deleted"
@@ -92,9 +99,10 @@ SYSTEMD="$T/systemd"; MOUNT_GUARD="$SYSTEMD/docker.service.d/10-vaultwarden-data
 printf '# Managed by VaultWarden-OCI setup.sh - do not edit by hand.\n[Unit]\n' > "$MOUNT_GUARD"
 DATA_VOLUME_MOUNT="$T/mnt"; PROJECT_STATE_DIR="$DATA_VOLUME_MOUNT"; DATA_VOLUME_DEVICE=/dev/mock; mkdir -p "$DATA_VOLUME_MOUNT"
 printf 'VaultWarden-OCI data volume\nDevice: /dev/mock\nMounted: %s\n' "$DATA_VOLUME_MOUNT" > "$DATA_VOLUME_MOUNT/.vw-data-volume"
+chmod 444 "$DATA_VOLUME_MOUNT/.vw-data-volume"
 printf keep > "$DATA_VOLUME_MOUNT/operator-note"
 FSTAB="$T/fstab-mounted"; printf 'UUID=mock\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' "$DATA_VOLUME_MOUNT" > "$FSTAB"
-B="$T/bin"; mkdir -p "$B"; export MOCK_MOUNT="$DATA_VOLUME_MOUNT" MOCK_FLAG="$T/is-mounted" MOCK_DETACHED="$T/detached"; : > "$MOCK_FLAG"
+B="$T/bin"; mkdir -p "$B"; export MOCK_MOUNT="$DATA_VOLUME_MOUNT" MOCK_FLAG="$T/is-mounted" MOCK_DETACHED="$T/detached" REAL_STAT="$(command -v stat)"; : > "$MOCK_FLAG"
 cat > "$B/mountpoint" <<'MOCK'
 #!/usr/bin/env bash
 [[ "$1" == -q && "$2" == "$MOCK_MOUNT" && -e "$MOCK_FLAG" ]]
@@ -110,6 +118,14 @@ MOCK
 cat > "$B/umount" <<'MOCK'
 #!/usr/bin/env bash
 rm -f "$MOCK_FLAG"; mv "$MOCK_MOUNT" "$MOCK_DETACHED"; mkdir -p "$MOCK_MOUNT"
+MOCK
+cat > "$B/stat" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "$*" == *'.vw-data-volume'* && "$*" == *'%u:%g:%a:%h'* ]]; then
+  printf '0:0:444:1\n'
+  exit 0
+fi
+exec "$REAL_STAT" "$@"
 MOCK
 chmod +x "$B"/*; PATH="$B:$PATH"
 remove_state >/dev/null
