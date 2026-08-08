@@ -59,7 +59,11 @@ import os
 import sys
 try:
     from argon2 import PasswordHasher
-    from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+    from argon2.exceptions import VerificationError, VerifyMismatchError
+    try:
+        from argon2.exceptions import InvalidHashError
+    except ImportError:
+        from argon2.exceptions import InvalidHash as InvalidHashError
 except Exception:
     raise SystemExit(1)
 stored = sys.argv[1]
