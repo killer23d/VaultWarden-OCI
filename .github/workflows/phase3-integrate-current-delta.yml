@@ -1,0 +1,160 @@
+name: Phase 3 Current Delta Integration
+
+on:
+  push:
+    branches:
+      - codex/phase3-final-test-cleanup
+
+permissions:
+  contents: write
+
+jobs:
+  rebase-validate-push:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+
+      - name: Rebase onto current delta and build final commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRIGGER_SHA="$(git rev-parse HEAD)"
+          git fetch origin delta --no-tags
+          DELTA_SHA="$(git rev-parse origin/delta)"
+          printf 'TRIGGER_SHA=%s\n' "$TRIGGER_SHA"
+          printf 'CURRENT_DELTA_SHA=%s\n' "$DELTA_SHA"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rebase origin/delta
+
+          git rm .github/workflows/phase3-integrate-current-delta.yml
+          git commit -m 'test: refresh Phase 3 ownership cleanup on current delta'
+
+          FINAL_SHA="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$DELTA_SHA" "$FINAL_SHA"
+          printf 'FINAL_SHA=%s\n' "$FINAL_SHA"
+
+          {
+            echo "TRIGGER_SHA=$TRIGGER_SHA"
+            echo "DELTA_SHA=$DELTA_SHA"
+            echo "FINAL_SHA=$FINAL_SHA"
+          } >> "$GITHUB_ENV"
+
+      - name: Install validation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y shellcheck 7zip age
+          YQ_VERSION="v4.53.3"
+          YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
+          curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o /tmp/yq
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+
+      - name: Validate exact rebased head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FINAL_SHA"
+          test -z "$(git status --porcelain)"
+          git merge-base --is-ancestor "$DELTA_SHA" "$FINAL_SHA"
+          printf 'VALIDATING_DELTA_SHA=%s\n' "$DELTA_SHA"
+          printf 'VALIDATING_FINAL_SHA=%s\n' "$FINAL_SHA"
+
+          git diff --check "$DELTA_SHA...$FINAL_SHA"
+          find . \
+            -path './.git' -prune -o \
+            -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 -n 1 bash -n
+          find . \
+            -path './.git' -prune -o \
+            -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+            | xargs -0 shellcheck -x --severity=warning
+
+          bash tests/suites/security/case-email.bash
+          VW_TEST_CASE_MODE=core bash tests/suites/security/case-secrets.bash
+          VW_TEST_CASE_MODE=all bash tests/suites/security/case-secrets.bash
+          VW_TEST_CASE_MODE=core bash tests/suites/operations/case-health-alerts.bash
+          VW_TEST_CASE_MODE=locking bash tests/suites/operations/case-health-alerts.bash
+          VW_TEST_CASE_MODE=all bash tests/suites/operations/case-health-alerts.bash
+
+          set +e
+          VW_TEST_CASE_MODE=bogus bash tests/suites/security/case-secrets.bash >/dev/null 2>&1
+          secrets_unknown=$?
+          VW_TEST_CASE_MODE=bogus bash tests/suites/operations/case-health-alerts.bash >/dev/null 2>&1
+          health_unknown=$?
+          set -e
+          [[ "$secrets_unknown" -eq 2 && "$health_unknown" -eq 2 ]]
+
+          ./tests/run-tests.sh list | tee /tmp/list.out
+          ./tests/run-tests.sh list-files | tee /tmp/list-files.out
+          logical_count="$(grep -Ec '^  [^[:space:]].*[|]' /tmp/list.out)"
+          physical_count="$(grep -c '^tests/' /tmp/list-files.out)"
+          suite_count="$(grep -Ec '^[a-z-]+:$' /tmp/list.out)"
+          printf 'FINAL_INVENTORY logical=%s physical=%s suites=%s\n' \
+            "$logical_count" "$physical_count" "$suite_count"
+          [[ "$logical_count" -eq 26 && "$physical_count" -eq 19 && "$suite_count" -eq 4 ]]
+
+          ./tests/run-tests.sh security
+          ./tests/run-tests.sh operations
+          ./tests/run-tests.sh data-protection
+          ./tests/run-tests.sh all
+
+      - name: Final integration and scope sanity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FINAL_SHA"
+          git merge-base --is-ancestor "$DELTA_SHA" "$FINAL_SHA"
+          test ! -e .github/workflows/phase3-integrate-current-delta.yml
+          test ! -e tests/suites/operations/case-lock-fd-hygiene.bash
+
+          for name in \
+            check_recovery_kit_attachment_passphrase_contract \
+            check_health_alert_lock_mode_normalization \
+            check_recovery_notification_retry_contract \
+            check_health_incident_context; do
+            ! grep -Fq "$name" tests/suites/security/case-email.bash
+          done
+          grep -Fq 'check_recovery_kit_attachment_passphrase_contract' tests/suites/security/case-secrets.bash
+          grep -Fq 'real archive sentinel content' tests/suites/security/case-secrets.bash
+          grep -Fq 'WrongNonProdPassphrase16' tests/suites/security/case-secrets.bash
+          grep -Fq 'check_health_state_ownership_gaps' tests/suites/operations/case-health-alerts.bash
+
+          printf '%s\n' \
+            tests/suites/operations/case-health-alerts.bash \
+            tests/suites/security/case-email.bash \
+            tests/suites/security/case-secrets.bash \
+            | sort > /tmp/expected-files
+          git diff --name-only "$DELTA_SHA...$FINAL_SHA" | sort > /tmp/actual-files
+          diff -u /tmp/expected-files /tmp/actual-files
+          git diff --stat "$DELTA_SHA...$FINAL_SHA"
+          printf 'VALIDATED_DELTA_SHA=%s\n' "$DELTA_SHA"
+          printf 'VALIDATED_FINAL_SHA=%s\n' "$FINAL_SHA"
+
+      - name: Ensure delta did not move during validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin delta --no-tags
+          latest_delta="$(git rev-parse origin/delta)"
+          printf 'LATEST_DELTA_SHA=%s\n' "$latest_delta"
+          test "$latest_delta" = "$DELTA_SHA"
+
+      - name: Push validated rebased head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FINAL_SHA"
+          git push \
+            --force-with-lease=refs/heads/codex/phase3-final-test-cleanup:"$TRIGGER_SHA" \
+            origin HEAD:codex/phase3-final-test-cleanup
+          printf 'PUSHED_DELTA_SHA=%s\n' "$DELTA_SHA"
+          printf 'PUSHED_VALIDATED_FINAL_SHA=%s\n' "$FINAL_SHA"
