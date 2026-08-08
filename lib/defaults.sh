@@ -63,3 +63,39 @@ readonly -a _VW_DEFAULT_REQUIRED_COMMANDS=(
     python3
 )
 readonly _VW_DEFAULT_LOG_SERVICES
+
+# CrowdSec 1.7.8 rejects literal newlines exposed by `systemctl show` for a
+# transient service. Keep only VaultWarden recovery-cleanup /bin/sh bodies on
+# one physical line; every other systemd-run invocation is passed through.
+if [[ -n "$(type -P systemd-run 2>/dev/null || true)" ]]; then
+    systemd-run() {
+        local real_systemd_run arg body
+        local recovery_cleanup=false
+        local i
+        local -a args=("$@")
+
+        real_systemd_run="$(type -P systemd-run 2>/dev/null)" || return 127
+        for arg in "${args[@]}"; do
+            if [[ "$arg" == --unit=vaultwarden-recovery-cleanup-* ]]; then
+                recovery_cleanup=true
+                break
+            fi
+        done
+
+        if [[ "$recovery_cleanup" == "true" ]]; then
+            for (( i=0; i + 2 < ${#args[@]}; i++ )); do
+                if [[ "${args[$i]}" == "/bin/sh" && "${args[$((i + 1))]}" == "-c" ]]; then
+                    body="${args[$((i + 2))]}"
+                    body="${body#$'\n'}"
+                    body="${body%$'\n'}"
+                    body="${body//$'\n'/; }"
+                    body="${body//then; /then }"
+                    args[$((i + 2))]="$body"
+                    break
+                fi
+            done
+        fi
+
+        "$real_systemd_run" "${args[@]}"
+    }
+fi
