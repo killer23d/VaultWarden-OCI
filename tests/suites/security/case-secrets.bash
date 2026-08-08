@@ -184,6 +184,39 @@ run_encrypt_with_prompt "printf %s '$longer'" "$TMP/long.zip" \
 grep -Fq "$exact16" "$transport_log" \
     || fail 'attachment helper did not pass the confirmed passphrase to the stdin transport'
 
+real_tool=""
+if command -v 7zz >/dev/null 2>&1; then
+    real_tool=7zz
+elif command -v 7z >/dev/null 2>&1; then
+    real_tool=7z
+fi
+if [[ -n "$real_tool" ]]; then
+    smoke_dir="$TMP/smoke"
+    mkdir -p "$smoke_dir/out"
+    printf 'real archive sentinel content\n' >"$smoke_dir/recovery-kit.txt"
+    (
+        cd "$ROOT"
+        # shellcheck source=../lib/secrets.sh
+        source "$ROOT/lib/secrets.sh"
+        prompt_password_with_confirmation(){ printf '%s' 'NonProdTestPassphrase16'; }
+        _encrypt_recovery_kit_attachment \
+            "$smoke_dir/recovery-kit.txt" "$smoke_dir/kit.zip" "$real_tool"
+        _run_7zip_with_passphrase 'NonProdTestPassphrase16' "$real_tool" \
+            x -bd -y -p "-o$smoke_dir/out" -- "$smoke_dir/kit.zip" >/dev/null 2>&1
+        if _run_7zip_with_passphrase 'WrongNonProdPassphrase16' "$real_tool" \
+            t -bd -y -p -- "$smoke_dir/kit.zip" >/dev/null 2>&1; then
+            exit 9
+        fi
+    ) || fail 'real AES-256 ZIP stdin smoke test failed'
+    [[ -s "$smoke_dir/kit.zip" ]] || fail 'real AES-256 ZIP archive was not created'
+    ! LC_ALL=C grep -aFq 'real archive sentinel content' "$smoke_dir/kit.zip" \
+        || fail 'real AES-256 ZIP contains plaintext sentinel content'
+    cmp "$smoke_dir/recovery-kit.txt" "$smoke_dir/out/recovery-kit.txt" \
+        || fail 'real AES-256 ZIP extracted content mismatch'
+else
+    printf 'Real AES-256 ZIP stdin smoke test skipped: 7z/7zz unavailable.\n'
+fi
+
 printf 'Recovery-kit passphrase transport contract tests passed.\n'
 )
 
