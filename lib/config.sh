@@ -27,7 +27,6 @@ if [[ -z "${_VW_CALLER_OVERRIDES_CAPTURED:-}" ]]; then
     _VW_CALLER_RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-}"
     _VW_CALLER_RCLONE_REMOTE_PATH="${RCLONE_REMOTE_PATH:-}"
     _VW_CALLER_RCLONE_CONFIG="${RCLONE_CONFIG:-}"
-    _VW_CALLER_SECRETS_FILE="${SECRETS_FILE:-}"
     _VW_CALLER_OVERRIDES_CAPTURED=1
 fi
 
@@ -198,33 +197,6 @@ load_env_file() {
         log_hint "Common mistakes: spaces around '=', an 'export ' prefix, or invalid variable names."
     fi
 
-    # A blank SOPS_AGE_KEY_FILE in repo .env is intentional: it keeps operator
-    # editable config portable. Do not pass that blank value through to SOPS;
-    # resolve a concrete key path for the current caller instead.
-    if [[ -z "${SOPS_AGE_KEY_FILE:-}" ]]; then
-        local _config_project_root _age_candidate
-        _config_project_root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-        for _age_candidate in \
-            "${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" \
-            "/etc/vaultwarden/age-key.txt" \
-            "${_config_project_root}/secrets/keys/age-key.txt"; do
-            [[ -z "$_age_candidate" ]] && continue
-            if [[ -r "$_age_candidate" ]]; then
-                SOPS_AGE_KEY_FILE="$_age_candidate"
-                break
-            fi
-        done
-        SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
-        export SOPS_AGE_KEY_FILE
-        log_debug "load_env_file: SOPS_AGE_KEY_FILE was blank; using ${SOPS_AGE_KEY_FILE}"
-    fi
-
-    # Keep direct env-file callers aligned with the split-permission secrets
-    # layout when they intentionally load a specific file.
-    if declare -F resolve_secrets_file >/dev/null 2>&1; then
-        resolve_secrets_file
-    fi
-
     log_debug "Environment loaded successfully from: $env_file"
     return 0
 }
@@ -260,18 +232,7 @@ require_config() {
 
 resolve_secrets_file() {
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
-    local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-    local persistent="${PROJECT_STATE_DIR:-$default_state_dir}/secrets/secrets.yaml"
-    local legacy="${root}/secrets/secrets.yaml"
-
-    if [[ -f "$persistent" ]]; then
-        SECRETS_FILE="$persistent"
-    elif [[ -f "$legacy" ]]; then
-        SECRETS_FILE="$legacy"
-        log_warn "Using repository-local secrets file — migrate to ${persistent}"
-    else
-        SECRETS_FILE="$persistent"
-    fi
+    SECRETS_FILE="${PROJECT_STATE_DIR:-$default_state_dir}/secrets/secrets.yaml"
     export SECRETS_FILE
 }
 
@@ -285,7 +246,6 @@ load_project_environment() {
     local override_remote="${_VW_CALLER_RCLONE_REMOTE_NAME:-}"
     local override_remote_path="${_VW_CALLER_RCLONE_REMOTE_PATH:-}"
     local override_rclone_config="${_VW_CALLER_RCLONE_CONFIG:-}"
-    local override_secrets="${_VW_CALLER_SECRETS_FILE:-}"
 
     local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
@@ -371,10 +331,6 @@ load_project_environment() {
     export BACKUP_DIR TZ RCLONE_REMOTE_NAME RCLONE_REMOTE_PATH RCLONE_CONFIG
 
     resolve_secrets_file
-    if [[ -n "$override_secrets" ]]; then
-        SECRETS_FILE="$override_secrets"
-        export SECRETS_FILE
-    fi
 }
 
 _set_env_var() (
@@ -472,18 +428,15 @@ export -f _get_file_perms _set_env_var _read_env_value
 # or these variables are not present in the loaded file.
 #
 # Rules:
-#  • Use ${VAR:-default}: set only when unset or empty, never override a value
-#    already exported (e.g. by the .env loader above or the calling environment).
-#  • PROJECT_ROOT is resolved lazily via BASH_SOURCE so this block is safe to
-#    source from any working directory.
+#  • Persistent secret paths are derived from PROJECT_STATE_DIR only.
+#  • SOPS_AGE_KEY_FILE may remain blank until the crypto boundary resolves the
+#    canonical operational key.
 # ---------------------------------------------------------------------------
-_VW_CONFIG_PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
-SECRETS_FILE="${SECRETS_FILE:-${_VW_CONFIG_PROJECT_ROOT}/secrets/secrets.yaml}"
-SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE}}"
+SECRETS_FILE="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}}/secrets/secrets.yaml"
+SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-}"
 
 export AGE_KEY_FILE SECRETS_FILE SOPS_AGE_KEY_FILE
-unset _VW_CONFIG_PROJECT_ROOT
 
 log_debug "Config library loaded"

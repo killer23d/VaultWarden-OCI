@@ -79,9 +79,11 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 require_root "$@"
+source "${PROJECT_ROOT}/lib/storage.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 load_project_environment || exit 1
+require_project_state_ready || exit 1
 
 trap perform_cleanup EXIT
 
@@ -91,7 +93,7 @@ read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
 check_prerequisites() {
     local missing=()
     if ! resolve_age_key_path >/dev/null 2>&1; then
-        missing+=("Age encryption key (not found at /etc/vaultwarden/age-key.txt or secrets/keys/age-key.txt)")
+        missing+=("Age encryption key (not found at /etc/vaultwarden/age-key.txt)")
     fi
     [[ ! -f ".sops.yaml" ]]    && missing+=("SOPS configuration: .sops.yaml")
     [[ ! -f "$SECRETS_FILE" ]] && missing+=("Secrets file: $SECRETS_FILE")

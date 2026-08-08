@@ -521,6 +521,107 @@ awk '/setup-storage\.sh" setup/,/\|\| _phase_failed 2/' "$SETUP" | grep -Fq '"${
     || fail 'setup.sh phase 2 does not pass --auto to setup-storage'
 pass 'setup.sh install --auto suppresses the storage assistant in phase 2'
 
+# Full setup must not turn inherited/default storage values into explicit child
+# overrides. The child tools own installed storage identity when flags are omitted.
+FULL_SETUP_ROOT="$TMP/full-setup-rerun"
+mkdir -p "$FULL_SETUP_ROOT/lib" "$FULL_SETUP_ROOT/utilities"
+cp "$SETUP" "$ROOT/VERSION" "$FULL_SETUP_ROOT/"
+while IFS= read -r required_lib; do
+    [[ -n "$required_lib" ]] || continue
+    mkdir -p "$FULL_SETUP_ROOT/$(dirname "$required_lib")"
+    : > "$FULL_SETUP_ROOT/$required_lib"
+done < <(
+    sed -n '/^REQUIRED_LIBS=(/,/^)/p' "$FULL_SETUP_ROOT/setup.sh" \
+        | sed -n 's/^[[:space:]]*"\([^"]*\.sh\)".*/\1/p'
+)
+cat > "$FULL_SETUP_ROOT/lib/log.sh" <<'FULL_SETUP_LOG'
+COLOR_BOLD_RED=''; COLOR_RESET=''; COLOR_YELLOW=''; COLOR_RED=''; COLOR_CYAN=''; COLOR_GREEN=''
+log_header(){ :; }; log_info(){ :; }; log_warn(){ :; }; log_success(){ :; }; log_phase(){ :; }; log_hint(){ :; }
+log_error(){ printf 'ERROR: %s\n' "$*" >&2; }
+FULL_SETUP_LOG
+cat > "$FULL_SETUP_ROOT/lib/validate.sh" <<'FULL_SETUP_VALIDATE'
+validate_domain(){ return 0; }
+validate_email(){ return 0; }
+FULL_SETUP_VALIDATE
+cat > "$FULL_SETUP_ROOT/lib/common.sh" <<'FULL_SETUP_COMMON'
+init_common_lib(){ :; }
+is_root(){ return 0; }
+_require_script(){ [[ -x "$1" ]]; }
+press_enter_to_continue(){ :; }
+FULL_SETUP_COMMON
+cat > "$FULL_SETUP_ROOT/lib/operations.sh" <<'FULL_SETUP_OPERATIONS'
+operation_acquire(){ return 0; }
+operation_set_phase(){ return 0; }
+operation_release(){ return 0; }
+FULL_SETUP_OPERATIONS
+cat > "$FULL_SETUP_ROOT/lib/crypto.sh" <<'FULL_SETUP_CRYPTO'
+wait_for_entropy(){ return 0; }
+FULL_SETUP_CRYPTO
+cat > "$FULL_SETUP_ROOT/lib/secrets.sh" <<'FULL_SETUP_SECRETS'
+secrets_file_exists(){ return 1; }
+ensure_sops_env(){ return 0; }
+check_placeholder_values(){ return 0; }
+FULL_SETUP_SECRETS
+printf '_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data\n' > "$FULL_SETUP_ROOT/lib/defaults.sh"
+
+cat > "$FULL_SETUP_ROOT/utilities/storage-child.sh" <<'FULL_SETUP_CHILD'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1090
+source "${VW_SETUP_EXISTING_ENV:?}"
+device="${DATA_VOLUME_DEVICE:-}"
+mount="${DATA_VOLUME_MOUNT:-}"
+args=("$@")
+while (( $# > 0 )); do
+    case "$1" in
+        --data-device) device="$2"; shift 2 ;;
+        --data-mount) mount="$2"; shift 2 ;;
+        --domain|--email) shift 2 ;;
+        *) shift ;;
+    esac
+done
+case "${0##*/}" in
+    setup-storage.sh) result="${VW_SETUP_STORAGE_RESULT:?}"; argv="${VW_SETUP_STORAGE_ARGS:?}" ;;
+    setup-env.sh) result="${VW_SETUP_ENV_RESULT:?}"; argv="${VW_SETUP_ENV_ARGS:?}" ;;
+    *) exit 2 ;;
+esac
+printf '%s|%s\n' "$device" "$mount" > "$result"
+printf '%s\n' "${args[*]}" > "$argv"
+FULL_SETUP_CHILD
+cp "$FULL_SETUP_ROOT/utilities/storage-child.sh" "$FULL_SETUP_ROOT/utilities/setup-storage.sh"
+cp "$FULL_SETUP_ROOT/utilities/storage-child.sh" "$FULL_SETUP_ROOT/utilities/setup-env.sh"
+for utility in setup-system.sh setup-secrets.sh setup-firewall.sh setup-systemd.sh setup-crowdsec.sh uninstall-vaultwarden.sh; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$FULL_SETUP_ROOT/utilities/$utility"
+done
+chmod 0755 "$FULL_SETUP_ROOT/utilities/"*.sh
+cat > "$FULL_SETUP_ROOT/.env" <<'FULL_SETUP_ENV'
+PROJECT_STATE_DIR=/srv/vaultwarden-data
+DATA_VOLUME_DEVICE=/dev/disk/by-id/existing-vaultwarden-data
+DATA_VOLUME_MOUNT=/srv/vaultwarden-data
+FULL_SETUP_ENV
+
+if ! (
+    cd "$FULL_SETUP_ROOT"
+    unset DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT PROJECT_STATE_DIR
+    VW_SETUP_EXISTING_ENV="$FULL_SETUP_ROOT/.env" \
+    VW_SETUP_STORAGE_RESULT="$FULL_SETUP_ROOT/storage.result" \
+    VW_SETUP_STORAGE_ARGS="$FULL_SETUP_ROOT/storage.args" \
+    VW_SETUP_ENV_RESULT="$FULL_SETUP_ROOT/env.result" \
+    VW_SETUP_ENV_ARGS="$FULL_SETUP_ROOT/env.args" \
+        bash ./setup.sh install --domain vault.example.test --email admin@example.test \
+            --auto --skip-deps --dry-run >/dev/null 2>&1
+); then
+    fail 'full setup rerun fixture failed'
+fi
+expected_storage='/dev/disk/by-id/existing-vaultwarden-data|/srv/vaultwarden-data'
+[[ "$(cat "$FULL_SETUP_ROOT/storage.result")" == "$expected_storage" ]] \
+    || fail 'full setup rerun changed storage identity in setup-storage'
+[[ "$(cat "$FULL_SETUP_ROOT/env.result")" == "$expected_storage" ]] \
+    || fail 'full setup rerun changed storage identity in setup-env'
+! grep -Eq '(^| )--data-(device|mount)( |$)' "$FULL_SETUP_ROOT/storage.args" "$FULL_SETUP_ROOT/env.args" \
+    || fail 'full setup rerun forwarded an implicit storage flag'
+pass 'full setup rerun preserves custom storage identity when storage flags are omitted'
+
 # Help/unknown-option handling remains present.
 grep -Fq -- '--help|-h)' "$STORAGE" || fail 'setup-storage help option handling missing'
 grep -Fq 'Unknown option: $1' "$STORAGE" || fail 'setup-storage unknown-option handling missing'

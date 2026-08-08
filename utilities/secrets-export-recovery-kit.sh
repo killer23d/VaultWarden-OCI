@@ -75,17 +75,16 @@ dispatch_information_request "$@"
 
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
-if [[ -f "${PROJECT_ROOT}/.env" ]]; then
-    load_env_file "${PROJECT_ROOT}/.env"
-fi
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 require_root "$@"
+source "${PROJECT_ROOT}/lib/storage.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 # shellcheck disable=SC1091
 source "${PROJECT_ROOT}/lib/operations.sh"
 load_project_environment || exit 1
+require_project_state_ready || exit 1
 
 cleanup_recovery_export() {
   local rc=$?
@@ -103,7 +102,7 @@ check_prerequisites() {
     local resolved_age_key=""
 
     if ! resolved_age_key="$(resolve_age_key_path 2>/dev/null)"; then
-        missing+=("Age encryption key: readable key not found at \$AGE_KEY_FILE, /etc/vaultwarden/age-key.txt, or secrets/keys/age-key.txt")
+        missing+=("Age encryption key: readable key not found at \$AGE_KEY_FILE or /etc/vaultwarden/age-key.txt")
     fi
 
     [[ ! -f ".sops.yaml" ]]    && missing+=("SOPS configuration: .sops.yaml")

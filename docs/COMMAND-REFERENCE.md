@@ -66,8 +66,8 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make restore-preflight` |  Preview restore prerequisites without executing |
 | `make restore-db` |  Restore database only from latest backup |
 | `make restore-remote` |  Restore from remote storage (rclone) |
-| `make key-health` |  Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE) |
-| `make key-install` |  Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_FILE |
+| `make key-health` |  Check canonical Age key health (permissions, decodability, SOPS recipient) |
+| `make key-install` |  Repair canonical Age key ownership/mode and verify it |
 | `make key-show` |  Show current age public key and key file path/status |
 | `make key-backup` |  Create local Age key copy for manual offline transfer |
 | `make key-escrow` |  Generate password-manager Age key escrow file |
@@ -137,12 +137,12 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       production default.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
-                      WARNING: Also regenerates the Age encryption key. All
-                      existing encrypted secrets become permanently unrecoverable
-                      without a prior recovery kit export. Run
+                      The existing operational Age key is retained, but current
+                      configuration and encrypted secrets may be replaced. Export
+                      a recovery kit first so current credentials can be restored. Run
                       'sudo ./utilities/secrets-export-recovery-kit.sh' BEFORE using
                       --force on a running installation. To confirm you understand,
-                      set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
+                      set VW_FORCE_ACK=I_UNDERSTAND_OVERWRITING_CURRENT_STATE in the
                       environment (or type YES at the interactive prompt).
   --dry-run           Print what would happen without making any changes.
   --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
@@ -690,8 +690,8 @@ USAGE:
 
 DESCRIPTION:
     Generates a new operational Age key, rekeys secrets.yaml to the new
-    recipient, updates SOPS_AGE_KEY_FILE references, and writes a root-only
-    recovery kit that must be copied offline.
+    recipient, updates the public SOPS policy, and writes a root-only recovery
+    handoff that must be copied offline.
 
 OPTIONS:
     --yes, -y     Do not prompt before rotation

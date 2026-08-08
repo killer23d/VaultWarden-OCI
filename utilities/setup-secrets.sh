@@ -23,18 +23,22 @@ _setup_secrets_cleanup_warn() {
 }
 
 _setup_secrets_create_workdir() {
-    local old_umask create_status
+    local old_umask create_status workdir_parent
 
     [[ -z "${SETUP_SECRETS_OWNED_WORKDIR:-}" ]] || return 0
 
+    _ss_prepare_plain_tmp_dir || return 1
+    workdir_parent="$(_ss_plain_tmp_dir)"
+
     old_umask="$(umask)"
     umask 077
-    TMP_WORKDIR="$(mktemp -d -p "${PROJECT_ROOT}" vw_tmp.XXXXXXXXXX)" || {
+    TMP_WORKDIR="$(mktemp -d -p "$workdir_parent" vw-setup-secrets.XXXXXXXXXX)" || {
         create_status=$?
         umask "$old_umask" || true
         return "$create_status"
     }
     umask "$old_umask"
+    chmod 0700 "$TMP_WORKDIR" || { rm -rf "$TMP_WORKDIR"; return 1; }
     SETUP_SECRETS_OWNED_WORKDIR="$TMP_WORKDIR"
 }
 
@@ -553,9 +557,10 @@ HELP
 
     _ss_prepare_auto_handoff || return 1
 
-    local AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
     if [[ "$AGE_KEY_FILE" != /* ]]; then
-        AGE_KEY_FILE="$PROJECT_ROOT/$AGE_KEY_FILE"
+        log_error "AGE_KEY_FILE must be an absolute path: $AGE_KEY_FILE"
+        return 1
     fi
 
     ensure_prerequisites() {
@@ -568,19 +573,14 @@ HELP
             missing+=("Age encryption key")
             can_fix+=("age_key")
         elif ! check_age_key "$AGE_KEY_FILE" 2>/dev/null; then
-            log_warn "Age key exists but appears invalid"
-            missing+=("Valid Age encryption key")
-            can_fix+=("age_key")
+            log_error "Canonical Age key exists but is invalid: $AGE_KEY_FILE"
+            log_hint "Restore the correct offline Age identity; configure will not replace an existing key."
+            return 1
         fi
 
         if [[ ! -f ".sops.yaml" ]]; then
             missing+=("SOPS configuration")
             can_fix+=("sops_config")
-        fi
-
-        if [[ ! -d "secrets" ]]; then
-            missing+=("Secrets directory")
-            can_fix+=("directories")
         fi
 
         if [[ ${#missing[@]} -gt 0 ]]; then
@@ -607,9 +607,11 @@ HELP
         for item in "${items[@]}"; do
             case "$item" in
                 age_key)
-                    log_info "Creating Age encryption key..."
-                    mkdir -p "$(dirname "$AGE_KEY_FILE")"
-                    if generate_age_key "$AGE_KEY_FILE" true; then
+                    log_info "Creating canonical Age encryption key..."
+                    install -d -m 0700 -o root -g root "$(dirname "$AGE_KEY_FILE")" || return 1
+                    if generate_age_key "$AGE_KEY_FILE" false; then
+                        chown root:root "$AGE_KEY_FILE" || return 1
+                        chmod 0600 "$AGE_KEY_FILE" || return 1
                         log_success "Age key created: $AGE_KEY_FILE"
                     else
                         log_error "Failed to create Age key"
@@ -632,12 +634,6 @@ HELP
                     fi
                     _write_sops_config "$age_public_key" ".sops.yaml" || return 1
                     log_success "SOPS configuration created: .sops.yaml"
-                    ;;
-                directories)
-                    log_info "Creating directory structure..."
-                    mkdir -p secrets/keys /run/vaultwarden-oci/secrets
-                    chmod 700 secrets/keys /run/vaultwarden-oci/secrets
-                    log_success "Directories created"
                     ;;
             esac
         done
@@ -2476,7 +2472,7 @@ actual credentials after editing .env.
 
 FLAGS:
     --dry-run   Preview actions without executing
-    --force     Overwrite existing key/config (DANGEROUS: orphans existing secrets)
+    --force     Recreate SOPS policy/ciphertext using the existing canonical key
     --help      Show this help
 EOF
                 return 0 ;;
@@ -2484,61 +2480,39 @@ EOF
         esac
     done
 
-    local age_key_file="${PROJECT_ROOT}/secrets/keys/age-key.txt"
+    local age_key_file="/etc/vaultwarden/age-key.txt"
     local sops_config="${PROJECT_ROOT}/.sops.yaml"
-    local secrets_file="${SECRETS_FILE:-${PROJECT_ROOT}/secrets/secrets.yaml}"
-    local canonical_key="/etc/vaultwarden/age-key.txt"
+    local secrets_file="$SECRETS_FILE"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would bootstrap: Age key, SOPS config, placeholder secrets"
         return 0
     fi
 
-    # Create the directory structure.
-    mkdir -p "${PROJECT_ROOT}/secrets/keys" || return 1
-    chmod 700 "${PROJECT_ROOT}/secrets/keys" || return 1
+    install -d -m 700 -o root -g root /etc/vaultwarden || return 1
+    install -d -m 700 -o root -g root "$(dirname "$secrets_file")" || return 1
     install -d -m 700 -o root -g root "/run/vaultwarden-oci/secrets" || return 1
 
-    # Create or validate the repository Age key.
-    if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
+    # Bootstrap owns key creation, not key rotation. Existing key material must
+    # either validate or be restored explicitly; --force never replaces it.
+    if [[ -f "$age_key_file" ]]; then
         if check_age_key "$age_key_file" 2>/dev/null; then
-            log_info "Age key already present and valid: $age_key_file (skipping)"
+            log_info "Canonical Age key already present and valid: $age_key_file (skipping)"
         else
-            log_warn "Age key exists but is invalid — regenerating"
-            generate_age_key "$age_key_file" true || return 1
+            log_error "Canonical Age key exists but is invalid: $age_key_file"
+            log_hint "Restore the correct offline Age identity; bootstrap will not replace an existing key."
+            return 1
         fi
     else
-        [[ "$FORCE" == "true" && -f "$age_key_file" ]] && \
-            log_warn "bootstrap --force: regenerating Age key (existing encrypted data will be inaccessible)"
-        local real_user; real_user=$(get_real_user)
-        generate_age_key "$age_key_file" "$FORCE" || return 1
-        chown "${real_user}:$(id -g -n "$real_user")" "$age_key_file" || return 1
-        chmod 600 "$age_key_file" || return 1
-        log_success "Age key created: $age_key_file"
+        generate_age_key "$age_key_file" false || return 1
+        chown root:root "$age_key_file" || return 1
+        chmod 0600 "$age_key_file" || return 1
+        log_success "Canonical Age key created: $age_key_file"
     fi
 
-    # Verify the key immediately after generation or validation.
-    if ! SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key; then
+    if ! check_age_key "$age_key_file"; then
         log_error "Age key verification failed — aborting bootstrap"
         return 1
-    fi
-
-    # Install the canonical /etc/vaultwarden/age-key.txt copy.
-    local do_install=true
-    if [[ -f "$canonical_key" ]] && [[ "$FORCE" != "true" ]]; then
-        if check_age_key "$canonical_key" 2>/dev/null; then
-            log_info "Canonical Age key already present and healthy: $canonical_key"
-            do_install=false
-        else
-            log_warn "Canonical Age key invalid — reinstalling: $canonical_key"
-        fi
-    fi
-    if [[ "$do_install" == "true" ]]; then
-        install -d -m 700 -o root -g root /etc/vaultwarden || return 1
-        install -m 600 -o root -g root "$age_key_file" "$canonical_key" || return 1
-        chown root:root "$canonical_key" || return 1
-        chmod 600 "$canonical_key" || return 1
-        log_success "Age key installed: $canonical_key (mode 600, root:root)"
     fi
 
     # Ensure repo .env keeps SOPS_AGE_KEY_FILE blank.

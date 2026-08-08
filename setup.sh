@@ -169,6 +169,8 @@ export ENTROPY_MAX_WAIT=60
 # or by DATA_VOLUME_DEVICE/DATA_VOLUME_MOUNT already set in the environment.
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
 DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+DATA_VOLUME_DEVICE_EXPLICIT=false
+DATA_VOLUME_MOUNT_EXPLICIT=false
 
 show_help() {
     cat << 'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
@@ -198,12 +200,12 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       production default.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
-                      WARNING: Also regenerates the Age encryption key. All
-                      existing encrypted secrets become permanently unrecoverable
-                      without a prior recovery kit export. Run
+                      The existing operational Age key is retained, but current
+                      configuration and encrypted secrets may be replaced. Export
+                      a recovery kit first so current credentials can be restored. Run
                       'sudo ./utilities/secrets-export-recovery-kit.sh' BEFORE using
                       --force on a running installation. To confirm you understand,
-                      set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
+                      set VW_FORCE_ACK=I_UNDERSTAND_OVERWRITING_CURRENT_STATE in the
                       environment (or type YES at the interactive prompt).
   --dry-run           Print what would happen without making any changes.
   --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
@@ -296,8 +298,8 @@ while [[ $# -gt 0 ]]; do
         --skip-deps)    SKIP_DEPS=true;            shift ;;
         --force)        FORCE=true;                shift ;;
         --dry-run)      DRY_RUN=true;              shift ;;
-        --data-device)  _require_cli_value "$1" "${2-}"; DATA_VOLUME_DEVICE="$2";   shift 2 ;;
-        --data-mount)   _require_cli_value "$1" "${2-}"; DATA_VOLUME_MOUNT="$2";    shift 2 ;;
+        --data-device)  _require_cli_value "$1" "${2-}"; DATA_VOLUME_DEVICE="$2"; DATA_VOLUME_DEVICE_EXPLICIT=true; shift 2 ;;
+        --data-mount)   _require_cli_value "$1" "${2-}"; DATA_VOLUME_MOUNT="$2"; DATA_VOLUME_MOUNT_EXPLICIT=true; shift 2 ;;
         --help|-h)      show_help; exit 0 ;;
         --version|-V)   printf 'VaultWarden-OCI %s\n' "$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "unknown")"; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
@@ -313,8 +315,8 @@ fi
 # ---------------------------------------------------------------------------
 # _warn_force_destructive
 #
-# Prominent warning for `--force`, which rotates the Age key and makes old
-# encrypted backups unrecoverable without a prior recovery kit.
+# Prominent warning for `--force`, which can replace current configuration and
+# encrypted secrets while retaining the existing operational Age key.
 # ---------------------------------------------------------------------------
 _warn_force_destructive() {
     local term_cols box_width inner_width border
@@ -337,11 +339,13 @@ _warn_force_destructive() {
 
     printf '\n%s╔%s╗%s\n' "${COLOR_BOLD_RED}" "${border}" "${COLOR_RESET}"
     printf "%s║  %-${inner_width}s  ║%s\n" \
-        "${COLOR_BOLD_RED}" "⚠  DESTRUCTIVE: --force WILL ROTATE YOUR AGE KEY" "${COLOR_RESET}"
+        "${COLOR_BOLD_RED}" "⚠  DESTRUCTIVE: --force MAY OVERWRITE CURRENT STATE" "${COLOR_RESET}"
     printf "%s║  %-${inner_width}s  ║%s\n" \
-        "${COLOR_BOLD_RED}" "All existing encrypted backups become unrecoverable" "${COLOR_RESET}"
+        "${COLOR_BOLD_RED}" "The existing operational Age key is retained." "${COLOR_RESET}"
     printf "%s║  %-${inner_width}s  ║%s\n" \
-        "${COLOR_BOLD_RED}" "unless you export a recovery kit FIRST." "${COLOR_RESET}"
+        "${COLOR_BOLD_RED}" "--force does NOT rotate the Age key." "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "Export a recovery kit first for rollback/recovery." "${COLOR_RESET}"
     printf "%s║  %-${inner_width}s  ║%s\n" \
         "${COLOR_BOLD_RED}" "Run first: sudo ./utilities/secrets-export-recovery-kit.sh" "${COLOR_RESET}"
     printf '%s╚%s╝%s\n\n' "${COLOR_BOLD_RED}" "${border}" "${COLOR_RESET}"
@@ -362,9 +366,11 @@ _confirm_force_acknowledgement() {
 
     [[ "$FORCE" == "true" && "$DRY_RUN" != "true" ]] || return 0
 
-    if [[ "${VW_FORCE_ACK:-}" == "I_UNDERSTAND_LOSING_OLD_BACKUPS" ]]; then
-        return 0
-    fi
+    case "${VW_FORCE_ACK:-}" in
+        I_UNDERSTAND_OVERWRITING_CURRENT_STATE|I_UNDERSTAND_LOSING_OLD_BACKUPS)
+            return 0
+            ;;
+    esac
 
     _warn_force_destructive
     if [[ -t 0 ]]; then
@@ -389,7 +395,7 @@ _confirm_force_acknowledgement() {
     fi
 
     log_hint "Export your recovery kit first: sudo ./utilities/secrets-export-recovery-kit.sh"
-    log_hint "Non-interactive --force requires: VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS"
+    log_hint "Non-interactive --force requires: VW_FORCE_ACK=I_UNDERSTAND_OVERWRITING_CURRENT_STATE"
     return 2
 }
 
@@ -552,8 +558,8 @@ main() {
     [[ "$USE_LATEST" == "true" ]] && _use_latest=(--use-latest)
 
     local _dev_flags=()
-    [[ -n "$DATA_VOLUME_DEVICE" ]] && _dev_flags+=(--data-device "$DATA_VOLUME_DEVICE")
-    _dev_flags+=(--data-mount "$DATA_VOLUME_MOUNT")
+    [[ "$DATA_VOLUME_DEVICE_EXPLICIT" == "true" ]] && _dev_flags+=(--data-device "$DATA_VOLUME_DEVICE")
+    [[ "$DATA_VOLUME_MOUNT_EXPLICIT" == "true" ]] && _dev_flags+=(--data-mount "$DATA_VOLUME_MOUNT")
 
     local _sops_flags=()
     [[ "$SOPS_VERSION_ENV_SET" == "true" ]] && _sops_flags=(--sops-version "$SOPS_VERSION")

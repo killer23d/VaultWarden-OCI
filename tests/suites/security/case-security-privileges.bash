@@ -497,7 +497,11 @@ grep -Fq 'env_uid=$(stat -c '\''%u'\'' "$env_file"' utilities/setup-secrets.sh |
 grep -Fq 'env_mode=$(stat -c '\''%a'\'' "$env_file"' utilities/setup-secrets.sh || fail "setup-secrets does not capture .env mode"
 grep -Fq 'chown "$env_uid:$env_gid" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env owner/group on temp file"
 grep -Fq 'chmod "$env_mode" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env mode"
-pass "setup-secrets bootstrap preserves repo .env ownership and mode"
+grep -Fq 'local age_key_file="/etc/vaultwarden/age-key.txt"' utilities/setup-secrets.sh || fail "setup-secrets bootstrap does not own the canonical Age key"
+grep -Fq 'local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"' utilities/setup-secrets.sh || fail "setup-secrets configure does not default to the canonical Age key"
+grep -Fq 'AGE_KEY_FILE must be an absolute path' utilities/setup-secrets.sh || fail "setup-secrets configure does not reject relative Age key overrides"
+! grep -Fq 'local age_key_file="${PROJECT_ROOT}/secrets/keys/age-key.txt"' utilities/setup-secrets.sh || fail "setup-secrets bootstrap still owns a repo-local Age key"
+pass "setup-secrets bootstrap preserves .env metadata and canonical Age key custody"
 
 # Encrypted secrets live under root-owned persistent state, and runtime secrets stay root-owned.
 grep -Fq 'chown root:root "$secrets_dir"' utilities/setup-secrets.sh || fail "setup-secrets does not chown persistent secrets dir to root"
@@ -837,7 +841,7 @@ escrow_copy="$(find "$KEY_TMP/home" -name 'age-key-escrow-*.txt' -type f -print 
 [[ -n "$escrow_copy" ]] || { cat "$KEY_ESCROW_OUT" >&2; fail "key-escrow did not create an escrow file"; }
 grep -Fq 'PRODUCTION-ACTIVE-KEY' "$escrow_copy" || fail "key-escrow wrote escrow from the wrong key"
 ! grep -Fq 'REPO-LOCAL-KEY' "$escrow_copy" || fail "key-escrow escrow contains repo-local key"
-pass "retained key targets resolve production active key before repo-local fallback"
+pass "retained key targets use the production key and ignore the repo-local decoy"
 
 STATUS_SNIP="$(mktemp -t vw-status-contract.XXXXXXXXXX)"
 extract_make_target status Makefile > "$STATUS_SNIP" || fail "could not extract status target"
@@ -1033,15 +1037,27 @@ PY
     set -e
 }
 
-run_non_tty I_UNDERSTAND_LOSING_OLD_BACKUPS --force
+grep -Fq 'I_UNDERSTAND_OVERWRITING_CURRENT_STATE' "$SETUP" \
+    || fail 'setup --force does not advertise the current-state acknowledgement token'
+! grep -Fq 'WILL ROTATE YOUR AGE KEY' "$SETUP" \
+    || fail 'setup --force still claims that it rotates the Age key'
+grep -Fq -- '--force does NOT rotate the Age key.' "$SETUP" \
+    || fail 'setup --force warning does not state retained-key behavior'
+pass 'setup --force warning matches the retained-key bootstrap contract'
+
+run_non_tty I_UNDERSTAND_OVERWRITING_CURRENT_STATE --force
 [[ "$FORCE_STATUS" -eq 0 ]] || fail "non-TTY token acknowledgement failed: $FORCE_OUTPUT"
 [[ "$FORCE_OUTPUT" != *"Type YES to confirm"* ]] || fail "non-TTY token acknowledgement prompted"
 pass "non-TTY exact token is accepted without prompting"
 
-run_tty I_UNDERSTAND_LOSING_OLD_BACKUPS none --force
+run_tty I_UNDERSTAND_OVERWRITING_CURRENT_STATE none --force
 [[ "$FORCE_STATUS" -eq 0 ]] || fail "TTY token acknowledgement failed: $FORCE_OUTPUT"
 [[ "$FORCE_OUTPUT" != *"Type YES to confirm"* ]] || fail "TTY token acknowledgement prompted"
 pass "TTY exact token is accepted without prompting"
+
+run_non_tty I_UNDERSTAND_LOSING_OLD_BACKUPS --force
+[[ "$FORCE_STATUS" -eq 0 ]] || fail "legacy non-TTY token acknowledgement failed: $FORCE_OUTPUT"
+pass "legacy force acknowledgement token remains accepted"
 
 run_tty "" yes --force
 [[ "$FORCE_STATUS" -eq 0 ]] || fail "TTY YES acknowledgement failed: $FORCE_OUTPUT"

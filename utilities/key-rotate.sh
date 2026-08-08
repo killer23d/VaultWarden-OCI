@@ -2,8 +2,8 @@
 # utilities/key-rotate.sh — Rotate the operational SOPS/Age key safely.
 #
 # This script rotates the Age private key used by VaultWarden-OCI, rekeys the
-# encrypted SOPS secrets file, updates canonical key references, and writes a
-# root-only recovery kit containing the new private key.
+# encrypted SOPS secrets file, updates the public SOPS policy, and writes a
+# root-only recovery handoff containing the new private key.
 
 HISTFILE=/dev/null
 set -euo pipefail
@@ -22,8 +22,8 @@ USAGE:
 
 DESCRIPTION:
     Generates a new operational Age key, rekeys secrets.yaml to the new
-    recipient, updates SOPS_AGE_KEY_FILE references, and writes a root-only
-    recovery kit that must be copied offline.
+    recipient, updates the public SOPS policy, and writes a root-only recovery
+    handoff that must be copied offline.
 
 OPTIONS:
     --yes, -y     Do not prompt before rotation
@@ -66,6 +66,7 @@ source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+source "${PROJECT_ROOT}/lib/storage.sh"
 source "${PROJECT_ROOT}/lib/operations.sh"
 # shellcheck disable=SC1091
 source "${PROJECT_ROOT}/lib/setup-credentials.sh"
@@ -73,6 +74,7 @@ require_root "$@"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 
 load_project_environment || exit 1
+require_project_state_ready || exit 1
 
 _need_cmd() {
     local cmd="$1" pkg="${2:-$1}"
@@ -91,21 +93,6 @@ _secure_rm() {
     else
         rm -rf "$path"
     fi
-}
-
-_stage_env_with_key() {
-    local source_file="$1" staged_file="$2" key_path="$3"
-    [[ -f "$source_file" ]] || return 0
-
-    awk -F= -v k="SOPS_AGE_KEY_FILE" -v v="$key_path" '
-        BEGIN { done = 0 }
-        $1 == k { print k "=" v; done = 1; next }
-        { print }
-        END { if (!done) print k "=" v }
-    ' "$source_file" > "$staged_file"
-
-    chmod --reference="$source_file" "$staged_file" 2>/dev/null || chmod 600 "$staged_file"
-    chown --reference="$source_file" "$staged_file" 2>/dev/null || true
 }
 
 _join_recipients_csv() {
@@ -149,8 +136,8 @@ _collect_preserved_recipients() {
 }
 
 # Local live-generation transaction state. The backup directory remains the
-# durable rollback source until every coupled artifact is promoted and the new
-# canonical key decrypts the live ciphertext.
+# durable rollback source until every coupled artifact is promoted, the new
+# canonical key decrypts the live ciphertext, and the recovery handoff exists.
 _KEY_ROTATE_COMMITTED=false
 _KEY_ROTATE_PROMOTION_STARTED=false
 _KEY_ROTATE_ROLLBACK_DONE=false
@@ -180,8 +167,6 @@ _key_rotate_promote_file() {
     local mode="$5" owner="${6:-}" group="${7:-}"
     local -a install_args=(-m "$mode")
 
-    # Track the destination before replacement so an install error or signal
-    # after a partial copy still restores/removes this member.
     _KEY_ROTATE_PROMOTION_STARTED=true
     _KEY_ROTATE_PROMOTED_DESTS+=("$dest_file")
     _KEY_ROTATE_PROMOTED_BACKUPS+=("$backup_file")
@@ -247,7 +232,6 @@ _key_rotate_test_signal_after() {
 }
 
 _display_rotated_age_key_summary() {
-  # VWOCI-PRR-PATCH-01: private identity remains only in the protected handoff.
   local _key_file="$1" public_key="$2" kit_file="$3"
   : "$_key_file"
   printf '\n'
@@ -269,22 +253,17 @@ _need_cmd age-keygen age || exit 1
 _need_cmd sops sops || exit 1
 
 state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
-secrets_file="${SECRETS_FILE:-${state_dir}/secrets/secrets.yaml}"
+secrets_file="$SECRETS_FILE"
 system_key="/etc/vaultwarden/age-key.txt"
-repo_key="${PROJECT_ROOT}/secrets/keys/age-key.txt"
-repo_env="${PROJECT_ROOT}/.env"
-system_env="/etc/vaultwarden/vaultwarden.env"
-install_env="${state_dir}/config/install.env"
 sops_policy_file="${PROJECT_ROOT}/.sops.yaml"
 manifest_file="${state_dir}/config/dr-manifest.env"
-canonical_key="$system_key"
 
 current_key="$(resolve_age_key_path)" || exit 1
 
 log_info "Configured state dir: $state_dir"
 log_info "Secrets file:         $secrets_file"
-log_info "Current Age key:     $current_key"
-log_info "Canonical Age key:   $canonical_key"
+log_info "Current Age key:      $current_key"
+log_info "Canonical Age key:    $system_key"
 
 [[ -s "$secrets_file" ]] || { log_error "Secrets file not found or empty: $secrets_file"; exit 1; }
 [[ -s "$current_key" ]] || { log_error "Current Age key not found or empty: $current_key"; exit 1; }
@@ -307,11 +286,12 @@ if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would generate a new Age key."
     log_info "[DRY RUN] Would rekey: $secrets_file"
     log_info "[DRY RUN] Would install new key to: $system_key"
-    log_info "[DRY RUN] Would update SOPS_AGE_KEY_FILE in .env, vaultwarden.env, and install.env when present."
+    log_info "[DRY RUN] Would update public recipient policy: $sops_policy_file"
     exit 0
 fi
 
 workdir=""
+backup_dir=""
 _key_rotate_reset_transaction
 _KEY_ROTATE_OLD_KEY="$current_key"
 _KEY_ROTATE_LIVE_SECRETS="$secrets_file"
@@ -325,6 +305,9 @@ _key_rotate_cleanup() {
     local rollback_rc=0
     if [[ "$_KEY_ROTATE_COMMITTED" != "true" && "$_KEY_ROTATE_PROMOTION_STARTED" == "true" ]]; then
         _key_rotate_rollback_live_generation || rollback_rc=$?
+        if (( rollback_rc != 0 )); then
+            log_error "Rotation rollback is incomplete; recovery material is retained at: $backup_dir"
+        fi
         if (( rc == 0 || rollback_rc != 0 )); then
             (( rc == 0 )) && rc=1
         fi
@@ -415,71 +398,45 @@ if ! SOPS_AGE_KEY_FILE="$current_key" sops --config "$policy_tmp" updatekeys --y
 fi
 SOPS_AGE_KEY_FILE="$new_key_tmp" sops -d "$cipher_tmp" >/dev/null
 
-repo_env_tmp="${workdir}/repo.env"
-system_env_tmp="${workdir}/vaultwarden.env"
-install_env_tmp="${workdir}/install.env"
-
-_stage_env_with_key "$repo_env" "$repo_env_tmp" "$canonical_key"
-_stage_env_with_key "$system_env" "$system_env_tmp" "$canonical_key"
-_stage_env_with_key "$install_env" "$install_env_tmp" "$canonical_key"
-
-log_info "Backing up current key, policy, secrets, and env files to: $backup_dir"
+log_info "Backing up current key, policy, and secrets to: $backup_dir"
 secrets_existed=false
 policy_existed=false
 system_key_existed=false
-repo_key_existed=false
-repo_env_existed=false
-system_env_existed=false
-install_env_existed=false
 if [[ -f "$secrets_file" ]]; then install -m 600 -o root -g root "$secrets_file" "${backup_dir}/secrets.yaml"; secrets_existed=true; fi
 if [[ -f "$sops_policy_file" ]]; then install -m 644 "$sops_policy_file" "${backup_dir}/.sops.yaml"; policy_existed=true; fi
 if [[ -f "$system_key" ]]; then install -m 600 -o root -g root "$system_key" "${backup_dir}/age-key.system.txt"; system_key_existed=true; fi
-if [[ -f "$repo_key" ]]; then install -m 600 "$repo_key" "${backup_dir}/age-key.repo.txt"; repo_key_existed=true; fi
-if [[ -f "$repo_env" ]]; then install -m 600 "$repo_env" "${backup_dir}/.env"; repo_env_existed=true; fi
-if [[ -f "$system_env" ]]; then install -m 600 -o root -g root "$system_env" "${backup_dir}/vaultwarden.env"; system_env_existed=true; fi
-if [[ -f "$install_env" ]]; then install -m 600 -o root -g root "$install_env" "${backup_dir}/install.env"; install_env_existed=true; fi
-
-repo_env_mode="$(_stat_octal_perms "$repo_env" 2>/dev/null || printf '600')"
-repo_env_owner="$(_stat_owner "$repo_env" 2>/dev/null || printf 'root')"
-repo_env_group="$(_stat_group "$repo_env" 2>/dev/null || printf 'root')"
 
 operation_set_phase "4" "Promoting new key and rekeyed secrets"
 log_info "Promoting new key and rekeyed secrets..."
 install -d -m 700 -o root -g root /etc/vaultwarden
-install -d -m 700 "$(dirname "$repo_key")"
 install -d -m 700 -o root -g root "$(dirname "$secrets_file")"
 
 _key_rotate_promote_file "$new_key_tmp" "$system_key" "${backup_dir}/age-key.system.txt" "$system_key_existed" 600 root root
 _key_rotate_test_signal_after system-key
-_key_rotate_promote_file "$new_key_tmp" "$repo_key" "${backup_dir}/age-key.repo.txt" "$repo_key_existed" 600 root root
-_key_rotate_test_signal_after repo-key
 _key_rotate_promote_file "$cipher_tmp" "$secrets_file" "${backup_dir}/secrets.yaml" "$secrets_existed" 600 root root
 _key_rotate_test_signal_after ciphertext
 _key_rotate_promote_file "$policy_tmp" "$sops_policy_file" "${backup_dir}/.sops.yaml" "$policy_existed" 644 root root
 _key_rotate_test_signal_after policy
 
-if [[ -f "$repo_env_tmp" ]]; then
-    _key_rotate_promote_file "$repo_env_tmp" "$repo_env" "${backup_dir}/.env" "$repo_env_existed" "$repo_env_mode" "$repo_env_owner" "$repo_env_group"
-    _key_rotate_test_signal_after repo-env
-fi
-if [[ -f "$system_env_tmp" ]]; then
-    _key_rotate_promote_file "$system_env_tmp" "$system_env" "${backup_dir}/vaultwarden.env" "$system_env_existed" 600 root root
-    _key_rotate_test_signal_after system-env
-fi
-if [[ -f "$install_env_tmp" ]]; then
-    _key_rotate_promote_file "$install_env_tmp" "$install_env" "${backup_dir}/install.env" "$install_env_existed" 600 root root
-    _key_rotate_test_signal_after install-env
-fi
-
 log_info "Validating promoted secrets with new key..."
 SOPS_AGE_KEY_FILE="$system_key" sops -d "$secrets_file" >/dev/null
 check_age_key "$system_key" >/dev/null
-_KEY_ROTATE_COMMITTED=true
 
+operation_set_phase "5" "Publishing recovery handoff"
 kit_file="$(publish_age_rotation_handoff "$system_key" "$new_pub" "$ts")" || {
   log_error "Could not publish the protected Age rotation handoff."
   exit 1
 }
+
+# Handoff publication is part of the transaction. Only now is rollback no
+# longer required; successful rollback material contains the retired private
+# key and old ciphertext together, so remove it immediately after commit.
+_KEY_ROTATE_COMMITTED=true
+if ! _secure_rm "$backup_dir"; then
+    log_error "Rotation committed, but retired rollback material could not be removed: $backup_dir"
+    exit 1
+fi
+backup_dir=""
 
 log_success "Age key rotation complete."
 log_success "New public key: $new_pub"
@@ -493,8 +450,9 @@ if [[ "$ASSUME_YES" != "true" ]]; then
     while [[ "$saved" != "SAVED" ]]; do
         if ! read -r -t 300 -p "Type SAVED after copying the recovery kit offline: " saved; then
             printf '\n' >&2
-            log_error "No confirmation received within 5 minutes. Recovery-kit acknowledgement failed closed."
-            exit 1
+            log_warn "Age key rotation is already committed; offline-copy acknowledgement was not received."
+            log_warn "Copy the recovery handoff offline before deleting it: $kit_file"
+            break
         fi
         [[ "$saved" == "SAVED" ]] || log_warn "Please type exactly: SAVED"
     done

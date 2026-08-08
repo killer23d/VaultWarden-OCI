@@ -58,7 +58,7 @@ unset _SECRETS_LIB_DIR
 # two libraries always agree on the path. If you are sourcing this file
 # standalone (without config.sh loaded first), export SECRETS_FILE before
 # sourcing.
-SECRETS_BACKUP_DIR="${SECRETS_BACKUP_DIR:-secrets}"
+SECRETS_BACKUP_DIR="${SECRETS_BACKUP_DIR:-}"
 
 ensure_sops_env() {
     local age_key
@@ -504,10 +504,14 @@ list_secret_keys() {
 
 create_secrets_backup() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    local backup_dir="${2:-$SECRETS_BACKUP_DIR}"
+    local backup_dir="${2:-${SECRETS_BACKUP_DIR:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/backups}}"
     if [[ ! -f "$secrets_file" ]]; then
         log_debug "No secrets file to backup"
         return 0
+    fi
+    if ! install -d -m 0700 -o root -g root "$backup_dir"; then
+        log_error "Failed to prepare secrets backup directory: $backup_dir"
+        return 1
     fi
     local backup_file
     backup_file="$backup_dir/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
@@ -527,7 +531,7 @@ create_secrets_backup() {
 }
 
 cleanup_old_secret_backups() {
-    local backup_dir="${1:-$SECRETS_BACKUP_DIR}"
+    local backup_dir="${1:-${SECRETS_BACKUP_DIR:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/backups}}"
     local keep_count="${2:-5}"
     # NUL-delimited pipeline — safe for paths containing spaces.
     find "$backup_dir" -name "secrets.yaml.backup-*" -type f -print0 2>/dev/null \

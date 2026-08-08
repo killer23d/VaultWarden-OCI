@@ -84,6 +84,7 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 require_root "$@"
+source "${PROJECT_ROOT}/lib/storage.sh"
 source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
@@ -110,6 +111,9 @@ trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
 operation_set_phase "edit" "Editing encrypted secrets"
 
 load_project_environment || exit 1
+require_project_state_ready || exit 1
+SECRETS_BACKUP_DIR="${PROJECT_STATE_DIR}/secrets/backups"
+export SECRETS_BACKUP_DIR
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
 schema_validate || exit 1
@@ -125,7 +129,7 @@ _FORKING_EDITORS=("gvim" "mvim" "code" "atom" "subl" "sublime_text" "gedit" "kat
 check_prerequisites() {
     local missing=()
     if ! resolve_age_key_path 2>/dev/null; then
-        missing+=("Age encryption key (not found at \$AGE_KEY_FILE, /etc/vaultwarden/age-key.txt, or secrets/keys/age-key.txt)")
+        missing+=("Age encryption key (not found at /etc/vaultwarden/age-key.txt)")
     fi
 
     [[ ! -f ".sops.yaml" ]]    && missing+=("SOPS configuration: .sops.yaml")
@@ -159,14 +163,9 @@ create_backup() {
         log_info "Skipping backup (--no-backup specified)"
         return 0
     fi
-    local backup_file
-    backup_file="$SECRETS_BACKUP_DIR/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
-    log_info "Creating backup: $(basename "$backup_file")"
-    if ! install -m 600 -p "$SECRETS_FILE" "$backup_file" 2>/dev/null; then
-        log_error "Failed to create backup"
+    if ! create_secrets_backup "$SECRETS_FILE" "$SECRETS_BACKUP_DIR"; then
         return 1
     fi
-    log_success "Backup created"
     cleanup_old_secret_backups "$SECRETS_BACKUP_DIR" 5
     return 0
 }
@@ -276,11 +275,7 @@ _print_post_edit_apply_guidance() {
     local key apply_type targets target
     for key in "${changed_keys[@]}"; do
         if ! schema_key_exists "$key" 2>/dev/null; then
-            if [[ "$key" == "backup_passphrase" ]]; then
-                log_info "  ${key}: legacy key retained for compatibility; no active apply action."
-            else
-                log_warn "  ${key}: unknown key; no apply action available."
-            fi
+            log_warn "  ${key}: unknown key; no apply action available."
             continue
         fi
 

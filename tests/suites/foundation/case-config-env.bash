@@ -376,7 +376,7 @@ PROBE
     grep -q "PROJECT_STATE_DIR=$installed_state" <<< "$output" || fail "expected installed PROJECT_STATE_DIR, got: $output"
 }
 
-test_config_caller_override_wins() {
+test_config_caller_overrides_keep_canonical_secrets_path() {
     local fake_repo="$TMP/fake-repo-override" installed="$TMP/installed-override.env" installed_state="$TMP/installed-other" override_state="$TMP/override-state"
     mkdir -p "$fake_repo" "$override_state/config"
     write_env "$fake_repo/.env" 'DOMAIN=https://repo.example.test'
@@ -407,7 +407,8 @@ PROBE
     grep -q 'BACKUP_DIR=/caller/backups' <<< "$output" || fail "caller BACKUP_DIR override lost: $output"
     grep -q 'TZ=America/Vancouver' <<< "$output" || fail "caller TZ override lost: $output"
     grep -q 'RCLONE_REMOTE_NAME=caller-remote' <<< "$output" || fail "caller RCLONE_REMOTE_NAME override lost: $output"
-    grep -q 'SECRETS_FILE=/caller/secrets.yaml' <<< "$output" || fail "caller SECRETS_FILE override lost: $output"
+    grep -q "SECRETS_FILE=$override_state/secrets/secrets.yaml" <<< "$output" \
+        || fail "caller SECRETS_FILE override replaced canonical state-derived path: $output"
 }
 
 test_unreadable_repo_allows_installed_environment() {
@@ -585,7 +586,7 @@ test_dns_optional_and_strict_modes() {
 }
 
 run_test 'repo .env without PROJECT_STATE_DIR falls through to installed environment' test_config_falls_through_empty_repo_state
-run_test 'explicit caller overrides survive loading and repeated calls' test_config_caller_override_wins
+run_test 'supported caller overrides survive while SECRETS_FILE remains canonical' test_config_caller_overrides_keep_canonical_secrets_path
 run_test 'unreadable repository .env does not block installed runtime configuration' test_unreadable_repo_allows_installed_environment
 run_test 'unreadable selected canonical environment fails explicitly' test_unreadable_selected_environment_fails
 run_test 'Make, dashboard, and backup CLI share installed configuration' test_operator_interfaces_share_installed_configuration

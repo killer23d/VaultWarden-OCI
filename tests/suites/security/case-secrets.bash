@@ -1407,6 +1407,9 @@ require_root(){ :; }
 operator_attention(){ :; }
 operator_confirm_yes_no(){ return 0; }
 MOCK_COMMON
+cat > "$repo/lib/storage.sh" <<'MOCK_STORAGE'
+require_project_state_ready(){ return 0; }
+MOCK_STORAGE
 cat > "$repo/lib/operations.sh" <<'MOCK_OPERATIONS'
 operation_acquire(){ return 0; }
 operation_set_phase(){ return 0; }
@@ -1505,7 +1508,9 @@ chmod 644 "$repo/.sops.yaml"
 release_log="$case_root/releases.log"
 workdir_record="$case_root/workdir.path"
 run_full_rotation(){
-    local signal_after="$1" output_file="$2" rc=0
+    local signal_after="$1" output_file="$2" assume_yes="${3:-true}" rc=0
+    local -a rotate_args=()
+    [[ "$assume_yes" == "true" ]] && rotate_args+=(--yes)
     : > "$release_log"
     rm -f "$workdir_record"
     SECRETS_FILE="$secrets_file" \
@@ -1514,7 +1519,7 @@ run_full_rotation(){
     VW_TEST_WORKDIR_RECORD="$workdir_record" \
     VW_TEST_KEY_ROTATE_SIGNAL_AFTER="$signal_after" \
     PATH="$case_root/bin:$PATH" \
-        bash "$repo/utilities/key-rotate.sh" --yes >"$output_file" 2>&1 || rc=$?
+        bash "$repo/utilities/key-rotate.sh" "${rotate_args[@]}" </dev/null >"$output_file" 2>&1 || rc=$?
     printf '%s\n' "$rc"
 }
 
@@ -1572,7 +1577,16 @@ find "$rootfs/root" -maxdepth 1 -type f \
     -name 'vaultwarden-recovery-kit-age-rotate-*.txt' -print -quit | grep -q . \
     || fail 'successful full entrypoint did not write its recovery kit'
 
-printf 'Full key-rotation entrypoint rollback, cleanup, guard-release, and retry tests passed.\n'
+ack_rc="$(run_full_rotation '' "$case_root/ack-eof.out" false)"
+[[ "$ack_rc" == '0' ]] \
+    || { cat "$case_root/ack-eof.out" >&2; fail "committed rotation returned $ack_rc when acknowledgement input ended"; }
+grep -Fq 'Age key rotation is already committed; offline-copy acknowledgement was not received.' "$case_root/ack-eof.out" \
+    || fail 'committed rotation did not distinguish incomplete acknowledgement from transaction failure'
+mapfile -t ack_releases < "$release_log"
+[[ "${#ack_releases[@]}" -eq 1 && "${ack_releases[0]}" == '0' ]] \
+    || fail 'committed rotation released the operation guard as a failure after acknowledgement EOF'
+
+printf 'Full key-rotation entrypoint rollback, cleanup, guard-release, retry, and post-commit acknowledgement tests passed.\n'
 )
 
 check_sensitive_cleanup_contracts() (
@@ -1782,17 +1796,22 @@ direct_workspace_helpers="$(
   || fail "direct sensitive-workspace helpers could not be extracted"
 direct_signal_fixture="$(mktemp -d)"
 direct_signal_marker="$direct_signal_fixture/workspace.path"
+direct_runtime_tmp="$direct_signal_fixture/runtime-tmp"
 set +e
 DIRECT_WORKSPACE_HELPERS="$direct_workspace_helpers" \
 DIRECT_SIGNAL_MARKER="$direct_signal_marker" \
+VW_SETUP_SECRETS_TMP_DIR="$direct_runtime_tmp" \
 PROJECT_ROOT="$direct_signal_fixture" \
 bash -s <<'DIRECT_SIGNAL_TEST' >/dev/null 2>&1
 set -euo pipefail
 log_warn() { printf 'WARN %s\n' "$*" >&2; }
 cleanup_secrets_environment() { return 0; }
 operation_release() { return 0; }
+_ss_plain_tmp_dir() { printf '%s' "$VW_SETUP_SECRETS_TMP_DIR"; }
+_ss_prepare_plain_tmp_dir() { mkdir -p "$VW_SETUP_SECRETS_TMP_DIR"; chmod 0700 "$VW_SETUP_SECRETS_TMP_DIR"; }
 eval "$DIRECT_WORKSPACE_HELPERS"
 _setup_secrets_create_workdir
+[[ "$SETUP_SECRETS_OWNED_WORKDIR" == "$VW_SETUP_SECRETS_TMP_DIR"/* ]]
 printf '%s' "$SETUP_SECRETS_OWNED_WORKDIR" > "$DIRECT_SIGNAL_MARKER"
 printf '%s' 'DIRECT-SIGNAL-SECRET' > "$SETUP_SECRETS_OWNED_WORKDIR/capture"
 kill -TERM "$BASHPID"
@@ -2351,6 +2370,7 @@ PY_DIRECT_PTY
         "PATH=$direct_bin:$PATH" \
         "OFFLINE_AGE_RECIPIENT=$public_recipient" \
         "PROJECT_STATE_DIR=$direct_state" \
+        "AGE_KEY_FILE=$age_key_file" \
         "SOPS_AGE_KEY_FILE=$age_key_file" \
         "SETUP_CREDENTIALS_DIR=$handoff_target" \
         "VW_HANDOFF_TEST_MODE=true" \

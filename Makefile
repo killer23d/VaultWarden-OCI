@@ -358,7 +358,7 @@ up: ## Start all services (runs startup.sh for health checks; root required)
 		echo "$(YELLOW)If encrypted secrets have not been initialized: sudo make init-secrets$(NC)"; \
 		echo "$(YELLOW)If startup failed due to a missing or misconfigured Age key:$(NC)"; \
 		echo "$(YELLOW)  Diagnose: sudo make key-health$(NC)"; \
-		echo "$(YELLOW)  Auto-fix: sudo make key-install$(NC)"; \
+		echo "$(YELLOW)  Repair permissions: sudo make key-install$(NC)"; \
 		echo "$(YELLOW)  Canonical production path: /etc/vaultwarden/age-key.txt$(NC)"; \
 		exit 1; \
 	}
@@ -615,7 +615,7 @@ restore-remote: ## Restore from remote storage (rclone)
 ##@ Advanced Admin — Key Management
 # ===========================================================================
 
-key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
+key-health: ## Check canonical Age key health (permissions, decodability, SOPS recipient)
 	$(call require-root)
 	@echo "$(BLUE)Age Key Health Check:$(NC)"
 	@echo ""
@@ -630,64 +630,34 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	         else \
 	           echo \"$(RED)  ✗ Age key health check FAILED$(NC)\"; \
 	           echo \"\"; \
-	           echo \"$(YELLOW)  Remediation:$(NC)\"; \
+	           echo \"$(YELLOW)  If the canonical key exists, repair ownership and mode with:$(NC)\"; \
 	           echo \"$(YELLOW)       sudo make key-install$(NC)\"; \
 	           echo \"$(YELLOW)       sudo make key-health$(NC)\"; \
 	           echo \"\"; \
-	           echo \"$(YELLOW)  Or install manually:$(NC)\"; \
-	           echo \"$(YELLOW)       sudo install -d -m 700 -o root -g root /etc/vaultwarden$(NC)\"; \
-	           echo \"$(YELLOW)       sudo install -m 600 -o root -g root secrets/keys/age-key.txt /etc/vaultwarden/age-key.txt$(NC)\"; \
-	           echo \"$(YELLOW)       # Set SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in the project configuration$(NC)\"; \
-	           echo \"$(YELLOW)       sudo make key-health$(NC)\"; \
+	           echo \"$(YELLOW)  If the key is missing, restore your offline Age identity to:$(NC)\"; \
+	           echo \"$(YELLOW)       /etc/vaultwarden/age-key.txt$(NC)\"; \
+	           echo \"$(YELLOW)  Then enforce root:root 0600 and re-run sudo make key-health.$(NC)\"; \
 	           exit 1; \
 	         fi"
 
-# ---------------------------------------------------------------------------
-# key-install: install the Age private key from secrets/keys/age-key.txt to
-# the path configured in SOPS_AGE_KEY_FILE (default: /etc/vaultwarden/age-key.txt).
-# ---------------------------------------------------------------------------
-key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_FILE
+# Keep the stable operator target name, but never source key material from the
+# checkout. First installation and explicit offline recovery are the only ways
+# to create the canonical private identity.
+key-install: ## Repair canonical Age key ownership/mode and verify it
 	$(call require-root)
-	@echo "$(BLUE)Installing Age key...$(NC)"
-	@bash -c 'source lib/config.sh; load_project_environment >/dev/null || exit 1; \
-		CONFIGURED_KEY="$${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"; \
-		REPO_KEY="secrets/keys/age-key.txt"; \
-		echo "  Target path  : $$CONFIGURED_KEY"; \
-		echo "  Source key   : $$REPO_KEY"; \
-		echo ""; \
-		if [[ "$$CONFIGURED_KEY" == "$$REPO_KEY" ]]; then \
-			echo "$(CYAN)  Note: SOPS_AGE_KEY_FILE points at the repo-local key (Stage 1 / dev path).$(NC)"; \
-			echo "$(CYAN)        Installation to a system path is not needed at this lifecycle stage.$(NC)"; \
-			echo "$(CYAN)        The key is used in-place from: $$REPO_KEY$(NC)"; \
-			echo ""; \
-			if [[ -s "$$CONFIGURED_KEY" ]]; then \
-				echo "$(GREEN)  ✓ Key file exists and is non-empty at $$CONFIGURED_KEY$(NC)"; \
-				echo "$(GREEN)    Run '\''sudo make key-health'\'' to verify decryption integrity.$(NC)"; \
-				exit 0; \
-			fi; \
-			echo "$(RED)  ✗ Key file NOT FOUND at $$CONFIGURED_KEY$(NC)"; \
-			echo "$(RED)    Secrets have not been initialised on this host yet.$(NC)"; \
-			echo "$(RED)    Run: sudo make init-secrets$(NC)"; \
+	@echo "$(BLUE)Securing canonical Age key...$(NC)"
+	@bash -c 'KEY_FILE="/etc/vaultwarden/age-key.txt"; \
+		if [[ ! -s "$$KEY_FILE" ]]; then \
+			echo "$(RED)ERROR: Canonical Age key is missing: $$KEY_FILE$(NC)"; \
+			echo "$(YELLOW)Restore the Age identity from offline custody, for example:$(NC)"; \
+			echo "$(YELLOW)  sudo install -d -m 700 -o root -g root /etc/vaultwarden$(NC)"; \
+			echo "$(YELLOW)  sudo install -m 600 -o root -g root /path/to/offline-age-key.txt $$KEY_FILE$(NC)"; \
 			exit 1; \
 		fi; \
-		if [[ -s "$$CONFIGURED_KEY" ]]; then \
-			echo "$(GREEN)  ✓ Key already present at $$CONFIGURED_KEY — no action needed.$(NC)"; \
-			echo "$(GREEN)    Run '\''sudo make key-health'\'' to verify integrity.$(NC)"; \
-			exit 0; \
-		fi; \
-		if [[ ! -f "$$REPO_KEY" ]]; then \
-			echo "$(RED)ERROR: Source key not found at $$REPO_KEY$(NC)"; \
-			echo "$(RED)       No key to install. Run: sudo ./setup.sh install --domain <domain> --email <email>$(NC)"; \
-			exit 1; \
-		fi; \
-		TARGET_DIR=$$(dirname "$$CONFIGURED_KEY"); \
-		echo "$(BLUE)  Creating parent directory: $$TARGET_DIR$(NC)"; \
-		install -d -m 700 -o root -g root "$$TARGET_DIR"; \
-		echo "$(BLUE)  Copying key to: $$CONFIGURED_KEY$(NC)"; \
-		install -m 600 -o root -g root "$$REPO_KEY" "$$CONFIGURED_KEY"; \
-		echo "$(GREEN)  ✓ Key installed at $$CONFIGURED_KEY (mode 600, root:root)$(NC)"; \
-		echo ""'
-	@echo "$(BLUE)Verifying installation with key-health...$(NC)"
+		install -d -m 700 -o root -g root /etc/vaultwarden; \
+		chown root:root "$$KEY_FILE"; \
+		chmod 600 "$$KEY_FILE"; \
+		echo "$(GREEN)  ✓ Canonical Age key secured at $$KEY_FILE (root:root 600)$(NC)"'
 	@$(MAKE) key-health
 
 key-show: ## Show current age public key and key file path/status
@@ -707,7 +677,7 @@ key-show: ## Show current age public key and key file path/status
 	           echo \"  Health   : use sudo make key-health for authoritative validation\"; \
 	         else \
 	           echo \"  Status   : $(RED)MISSING$(NC)\"; \
-	           echo \"  Run: sudo make key-install\"; \
+	           echo \"  Restore the offline Age identity to /etc/vaultwarden/age-key.txt\"; \
 	         fi"
 
 key-backup: ## Create local Age key copy for manual offline transfer

@@ -35,38 +35,28 @@ _VW_CRYPTO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CRYPTO_LIB_DIR}/log.sh"
 unset _VW_CRYPTO_LIB_DIR
 
-# resolve_age_key_path — single authoritative resolver for the age key path.
-# Priority:
-#   1. $AGE_KEY_FILE env var      (explicit override, highest priority)
-#   2. /etc/vaultwarden/age-key.txt  (runtime/production system path)
-#   3. ${PROJECT_ROOT:-$(pwd)}/secrets/keys/age-key.txt  (repo-local dev fallback)
-# Prints the resolved absolute path to stdout. Returns 1 on failure.
+# resolve_age_key_path — single authoritative resolver for the operational Age key.
+# AGE_KEY_FILE is an explicit test/recovery override and must be absolute.
+# Normal production callers always resolve /etc/vaultwarden/age-key.txt.
 resolve_age_key_path() {
-    local _p _abs
-    local _candidates=(
-        "${AGE_KEY_FILE:-}"
-        "/etc/vaultwarden/age-key.txt"
-        "${PROJECT_ROOT:-$(pwd)}/secrets/keys/age-key.txt"
-    )
-    for _p in "${_candidates[@]}"; do
-        [[ -z "$_p" ]] && continue
-        if [[ "$_p" != /* ]]; then
-            _abs="${PROJECT_ROOT:-$(pwd)}/$_p"
-        else
-            _abs="$_p"
-        fi
-        if [[ -f "$_abs" && -r "$_abs" ]]; then
-            printf '%s' "$_abs"
-            return 0
-        fi
-    done
-    log_error "resolve_age_key_path: age key not found in any expected location."
-    log_error "  Searched: ${_candidates[*]}"
-    log_error "  Fix: set AGE_KEY_FILE or place key at /etc/vaultwarden/age-key.txt"
+    local key_path="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+
+    if [[ "$key_path" != /* ]]; then
+        log_error "resolve_age_key_path: AGE_KEY_FILE must be an absolute path: $key_path"
+        return 1
+    fi
+
+    if [[ -f "$key_path" && -r "$key_path" ]]; then
+        printf '%s' "$key_path"
+        return 0
+    fi
+
+    log_error "resolve_age_key_path: age key not found or unreadable: $key_path"
+    log_error "  Restore the operational key at /etc/vaultwarden/age-key.txt or set an explicit absolute AGE_KEY_FILE for this invocation."
     return 1
 }
 
-DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
+DEFAULT_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
 readonly DEFAULT_AGE_KEY_FILE
 
 readonly SECURITY_MIN_PASSWORD_LENGTH=12
@@ -970,7 +960,7 @@ validate_crypto_environment() {
             issues+=("Age key validation failed: $_resolved_key")
         fi
     else
-        issues+=("Age key not found in any expected location (AGE_KEY_FILE, /etc/vaultwarden/, secrets/keys/)")
+        issues+=("Operational Age key not found at /etc/vaultwarden/age-key.txt (or explicit absolute AGE_KEY_FILE)")
     fi
 
     if [[ ${#issues[@]} -gt 0 ]]; then
@@ -1092,20 +1082,13 @@ VaultWarden Age Key Backup - $date_val
 🔐 CRITICAL: Store this entire file in your password manager
    (1Password, Bitwarden, etc.) as a secure note.
 
-📝 Recovery Instructions (choose one path):
+📝 Recovery Instructions:
 
-   Production server:
    1. sudo install -d -m 700 -o root -g root /etc/vaultwarden
    2. sudo install -m 600 -o root -g root age-key.txt /etc/vaultwarden/age-key.txt
    3. Verify: sudo make key-health
 
-   Dev / fresh clone:
-   1. mkdir -p secrets/keys
-   2. cp age-key.txt secrets/keys/age-key.txt && chmod 600 secrets/keys/age-key.txt
-   3. Verify: sudo make key-health
-
-   Both paths are checked automatically (run: sudo make key-show to confirm).
-   Decrypt backups: age -d -i <resolved-key-path> backup.age
+   Decrypt backups: age -d -i /etc/vaultwarden/age-key.txt backup.age
 
 ⚠️  If you lose this key, ALL backups are unrecoverable!
 
@@ -1399,11 +1382,8 @@ create_printable_key_backup() {
 
     <div class="box">
         <h3>Recovery</h3>
-        <strong>Production server:</strong><br>
         <code>sudo install -d -m 700 -o root -g root /etc/vaultwarden &amp;&amp; sudo install -m 600 -o root -g root age-key.txt /etc/vaultwarden/age-key.txt</code><br><br>
-        <strong>Dev / fresh clone:</strong><br>
-        <code>mkdir -p secrets/keys &amp;&amp; cp age-key.txt secrets/keys/age-key.txt &amp;&amp; chmod 600 secrets/keys/age-key.txt</code><br><br>
-        Verify active path: <code>sudo make key-show</code>
+        Verify: <code>sudo make key-health</code>
     </div>
 
     <div class="delete-reminder">

@@ -35,6 +35,8 @@ ADMIN_EMAIL=""
 USE_LATEST=false
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
 DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+DATA_VOLUME_DEVICE_EXPLICIT=false
+DATA_VOLUME_MOUNT_EXPLICIT=false
 FORCE=false
 DRY_RUN=false
 SETUP_ENV_GUARD_HELD=false
@@ -130,11 +132,13 @@ _parse_args() {
                 shift
                 _require_cli_value "--data-device" "${1-}"
                 DATA_VOLUME_DEVICE="$1"
+                DATA_VOLUME_DEVICE_EXPLICIT=true
                 ;;
             --data-mount)
                 shift
                 _require_cli_value "--data-mount" "${1-}"
                 DATA_VOLUME_MOUNT="$1"
+                DATA_VOLUME_MOUNT_EXPLICIT=true
                 ;;
             --help|-h) show_help; exit 0 ;;
             --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
@@ -169,8 +173,6 @@ detect_ssh_log_path() {
     printf '%s\n' "$ssh_log_path"
 }
 
-# Create a mode-600 temp file in DIR pre-owned by OWNER:GROUP.
-# Print the temp file path to stdout and return 1 on failure.
 _make_owned_temp() {
     local dir="$1" owner="$2" group="$3"
     local tmp
@@ -194,16 +196,37 @@ create_env_file() {
         return 1
     fi
 
-    # Normalise domain early — needed for both idempotency check and awk substitution.
     local domain_with_protocol clean_domain
     [[ "$DOMAIN" =~ ^https?:// ]] \
         && domain_with_protocol="$DOMAIN" \
         || domain_with_protocol="https://$DOMAIN"
     clean_domain=$(printf '%s' "$domain_with_protocol" | sed -E 's|https?://||; s|/.*$||')
 
-    # Idempotency check: skip if .env already reflects current arguments.
+    # Optional storage flags are overrides, not reset switches. When an existing
+    # .env is present, omitted flags preserve its current storage identity.
+    if [[ -f "$env_file" ]]; then
+        if [[ "$DATA_VOLUME_DEVICE_EXPLICIT" != "true" ]]; then
+            DATA_VOLUME_DEVICE="$(_read_env_value DATA_VOLUME_DEVICE "$env_file")"
+        fi
+        if [[ "$DATA_VOLUME_MOUNT_EXPLICIT" != "true" ]]; then
+            local existing_mount
+            existing_mount="$(_read_env_value DATA_VOLUME_MOUNT "$env_file")"
+            [[ -n "$existing_mount" ]] && DATA_VOLUME_MOUNT="$existing_mount"
+        fi
+    fi
+    DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
+
+    local effective_state_dir
+    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
+        effective_state_dir="$DATA_VOLUME_MOUNT"
+    else
+        effective_state_dir="/var/lib/vaultwarden"
+    fi
+
+    # Idempotency compares the same effective storage identity that rendering
+    # uses, so an explicit storage change cannot be mistaken for a no-op.
     if [[ -f "$env_file" ]] && [[ "$FORCE" != "true" ]]; then
-        local domain_matches=false email_matches=false latest_matches=false
+        local domain_matches=false email_matches=false latest_matches=false storage_matches=false
         grep -qF "DOMAIN=$domain_with_protocol" "$env_file" && domain_matches=true
         grep -qF "ADMIN_EMAIL=$ADMIN_EMAIL"      "$env_file" && email_matches=true
 
@@ -222,15 +245,21 @@ create_env_file() {
                 || latest_matches=true
         fi
 
-        if [[ "$domain_matches" == "true" ]] && \
-           [[ "$email_matches"  == "true" ]] && \
-           [[ "$latest_matches" == "true" ]]; then
+        if [[ "$(_read_env_value DATA_VOLUME_DEVICE "$env_file")" == "${DATA_VOLUME_DEVICE:-}" &&
+              "$(_read_env_value DATA_VOLUME_MOUNT "$env_file")" == "$DATA_VOLUME_MOUNT" &&
+              "$(_read_env_value PROJECT_STATE_DIR "$env_file")" == "$effective_state_dir" ]]; then
+            storage_matches=true
+        fi
+
+        if [[ "$domain_matches"  == "true" ]] && \
+           [[ "$email_matches"   == "true" ]] && \
+           [[ "$latest_matches"  == "true" ]] && \
+           [[ "$storage_matches" == "true" ]]; then
             log_info ".env is already up-to-date — skipping (use --force to overwrite)"
             return 0
         fi
     fi
 
-    # Resolve the real (non-root) user once; reuse throughout.
     local real_user real_group user_id group_id
     real_user=$(get_real_user)
     real_group=$(id -gn "$real_user")
@@ -240,20 +269,9 @@ create_env_file() {
     local detected_ssh_log_path
     detected_ssh_log_path=$(detect_ssh_log_path)
 
-    local awk_state_dir
-    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
-        awk_state_dir="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
-    else
-        awk_state_dir="/var/lib/vaultwarden"
-    fi
-
     local env_dir
     env_dir="$(dirname "$env_file")"
 
-    # Pass 1 substitutes all primary variables in a single awk run.
-    # The temp file is pre-owned by real_user:real_group with mode 600 before any
-    # data is written, so .env is never visible on disk as root-owned at any
-    # point, even transiently.
     local temp_env
     temp_env=$(_make_owned_temp "$env_dir" "$real_user" "$real_group") || return 1
 
@@ -265,8 +283,8 @@ create_env_file() {
     AWK_ALLOWED_SENDER_DOMAINS="$clean_domain"        \
     AWK_SSH_LOG="$detected_ssh_log_path"              \
     AWK_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"         \
-    AWK_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}" \
-    AWK_STATE_DIR="$awk_state_dir"                    \
+    AWK_DATA_MOUNT="$DATA_VOLUME_MOUNT"               \
+    AWK_STATE_DIR="$effective_state_dir"              \
     awk '
         {
             sub(/^DOMAIN=.*/,                 "DOMAIN="                 ENVIRON["AWK_DOMAIN"]);
@@ -284,9 +302,6 @@ create_env_file() {
         }
     ' "$env_template" > "$temp_env" || { rm -f "$temp_env"; return 1; }
 
-    # Pass 2 optionally sets compatible mutable image versions to 'latest'.
-    # Caddy intentionally stays pinned because the custom xcaddy build uses tags
-    # like caddy:2.11.4-builder; caddy:latest-builder is not published.
     if [[ "$USE_LATEST" == "true" ]]; then
         local temp2
         temp2=$(_make_owned_temp "$env_dir" "$real_user" "$real_group") \
@@ -306,26 +321,19 @@ create_env_file() {
         temp_env="$temp2"
     fi
 
-    # Pass 3 optionally auto-populates BACKUP_DIR in separate-volume mode.
-    # _set_env_var uses sed -i, so ownership stays correct because temp_env is
-    # already owned correctly before this call.
     if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
         local current_backup_dir
         current_backup_dir=$(_read_env_value "BACKUP_DIR" "$temp_env")
         if [[ -z "$current_backup_dir" ]]; then
-            _set_env_var "BACKUP_DIR" "${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}/backups" "$temp_env"
-            log_info "Auto-set BACKUP_DIR=${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}/backups in .env (separate-volume mode)"
+            _set_env_var "BACKUP_DIR" "$DATA_VOLUME_MOUNT/backups" "$temp_env"
+            log_info "Auto-set BACKUP_DIR=$DATA_VOLUME_MOUNT/backups in .env (separate-volume mode)"
         fi
     fi
 
-    # Atomically promote temp_env to .env with a single rename.
-    # Because temp_env is already mode 600 and owned by real_user:real_group,
-    # the final .env is never visible on disk with incorrect ownership or permissions.
     mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
     log_success ".env written: $env_file (owner: $real_user:$real_group, mode: 600)"
     return 0
 }
-
 
 refresh_state_artifacts() {
     [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would refresh state-volume install.env, manifest, and recovery card"; return 0; }
@@ -406,13 +414,6 @@ create_docker_compose() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _check_domain — validate --domain and emit a precise, actionable error.
-#
-# Calls _validate_domain_reason() to get a human-readable rejection reason
-# and emits log_error + log_hint so the operator knows exactly what to fix.
-# Exits with status 1 on any failure.
-# ---------------------------------------------------------------------------
 _check_domain() {
     local domain="$1"
 
@@ -450,9 +451,9 @@ main() {
     [[ "$DRY_RUN" == "true" ]] && log_info "DRY RUN mode — no changes will be made"
     _setup_env_acquire_guard || exit $?
 
-    create_env_file       || { log_error "Failed to create .env";               exit 1; }
-    refresh_state_artifacts || { log_error "Failed to refresh state artifacts"; exit 1; }
-    create_docker_compose || { log_error "Failed to create docker-compose.yml"; exit 1; }
+    create_env_file         || { log_error "Failed to create .env";               exit 1; }
+    refresh_state_artifacts || { log_error "Failed to refresh state artifacts";   exit 1; }
+    create_docker_compose   || { log_error "Failed to create docker-compose.yml"; exit 1; }
 
     log_success "Environment configuration complete"
 }

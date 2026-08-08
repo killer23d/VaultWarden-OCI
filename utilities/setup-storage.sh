@@ -92,7 +92,7 @@ setup_directories() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -gn "$real_user")
 
-    local authoring_dirs=("secrets" "secrets/keys" "config")
+    local authoring_dirs=("config")
     for dir in "${authoring_dirs[@]}"; do
         ensure_dir "$dir" 700 || return 1
         chown "$real_user:$real_group" "$dir" || return 1

@@ -13,6 +13,7 @@ _CW_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/log.sh"
 [[ -n "${VW_CONFIG_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/config.sh"
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/common.sh"
+[[ -n "${VAULTWARDEN_STORAGE_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/storage.sh"
 declare -F decrypt_secret >/dev/null 2>&1 || source "${_CW_LIB_DIR}/secrets.sh"
 unset _CW_LIB_DIR
 
@@ -74,6 +75,7 @@ crowdsec_worker_apply_config() {
         load_env_file "${PROJECT_ROOT:-$(pwd)}/.env" || true
         declare -F resolve_secrets_file >/dev/null 2>&1 && resolve_secrets_file
     fi
+    [[ -z "${DATA_VOLUME_DEVICE:-}" ]] || require_project_state_ready || return 1
 
     local project_root="${PROJECT_ROOT:-$(pwd)}"
     local src="${CROWDSEC_WORKER_CONFIG_SRC:-${project_root}/crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example}"
