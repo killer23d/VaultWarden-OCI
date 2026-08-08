@@ -11,6 +11,170 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
 check_health_alerts_core() (
 set -euo pipefail
 
+check_health_state_ownership_gaps() (
+set -euo pipefail
+
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+log_info(){ :; }
+log_warn(){ printf 'WARN: %s\n' "$*"; }
+log_error(){ :; }
+log_debug(){ :; }
+
+# shellcheck source=lib/health-alerts.sh
+source "$ROOT/lib/health-alerts.sh"
+
+# Alert-state locking belongs to core state management, not the
+# health-command execution-lock mode.
+ALERT_LOCK_DIR="$TMP/lock-alerts"
+install -d -m 0700 "$ALERT_LOCK_DIR"
+HEALTH_ALERT_STATE_LOCK_FD=""
+mkdir -p "$TMP/bin"
+MOCK_CHMOD_LOG="$TMP/chmod.log"
+MOCK_REAL_CHMOD="$(command -v chmod)"
+export MOCK_CHMOD_LOG MOCK_REAL_CHMOD
+cat > "$TMP/bin/chmod" <<'MOCK_CHMOD'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_CHMOD_LOG"
+[[ "${MOCK_CHMOD_FAIL:-0}" != "1" ]] || exit 1
+exec "$MOCK_REAL_CHMOD" "$@"
+MOCK_CHMOD
+chmod 0755 "$TMP/bin/chmod"
+PATH="$TMP/bin:$PATH"
+export PATH
+
+lock_path="$(_health_alert_state_lock_path)"
+_health_alert_state_lock_prepare "$lock_path" \
+    || fail 'new health-alert state lock was not prepared'
+grep -Fxq "0600 -- $lock_path" "$MOCK_CHMOD_LOG" \
+    || fail 'new health-alert state lock was not normalized to mode 0600'
+lock_mode="$(stat -c '%a' "$lock_path" 2>/dev/null || stat -f '%Lp' "$lock_path")"
+[[ "$lock_mode" == '600' ]] \
+    || fail "normalized health-alert state lock mode is $lock_mode instead of 600"
+rm -f -- "$lock_path"
+: > "$MOCK_CHMOD_LOG"
+export MOCK_CHMOD_FAIL=1
+if _health_alert_state_lock_prepare "$lock_path" >/dev/null 2>&1; then
+    fail 'state-lock preparation succeeded when mode normalization failed'
+fi
+[[ ! -e "$lock_path" ]] \
+    || fail 'failed state-lock normalization left a newly created lock behind'
+unset MOCK_CHMOD_FAIL
+
+# Keep the small email-availability integration seam here while the
+# stronger recovery/retry lifecycle remains in the existing fixture.
+# shellcheck source=lib/email.sh
+source "$ROOT/lib/email.sh"
+_email_available=false
+ADMIN_EMAIL=admin@example.test
+export ADMIN_EMAIL
+unavailable_rc=0
+_send_notification subject body >"$TMP/unavailable.out" 2>&1 || unavailable_rc=$?
+[[ "$unavailable_rc" -ne 0 ]] \
+    || fail 'email-unavailable notification path reported successful delivery'
+
+# Preserve only incident-writer contracts not already covered by the
+# canonical recovery, concurrency, parser, and size-limit fixtures.
+ALERT_LOCK_DIR="$TMP/incidents"
+ACTIVE_INCIDENT_FILE="$ALERT_LOCK_DIR/active-incident.state"
+RECOVERY_DELIVERY_STATE_FILE="$ALERT_LOCK_DIR/recovery-delivery.state"
+ALERT_COOLDOWN_SECONDS=3600
+ALERT_RECOVERY_TTL=86400
+ALERT_RECOVERY_PENDING_TTL=30
+HEALTH_ALERT_STATE_LOCK_FD=""
+RECOVERY_DELIVERY_PHASE=""
+RECOVERY_DELIVERY_INCIDENT_ID=""
+RECOVERY_DELIVERY_UPDATED_AT=""
+ACTIVE_INCIDENT_AVAILABLE=false
+ACTIVE_INCIDENT_ID=""
+ACTIVE_INCIDENT_STARTED_AT=""
+ACTIVE_INCIDENT_LAST_UNHEALTHY_AT=""
+ACTIVE_INCIDENT_HOSTNAME=""
+declare -A check_results=(["docker:vaultwarden"]="fail")
+declare -A check_messages=(["docker:vaultwarden"]=$'container stopped\npassword=topsecret')
+declare -a check_order=("docker:vaultwarden")
+declare -A incident_statuses=()
+declare -A incident_details=()
+declare -a incident_check_order=()
+failed=1
+warnings=0
+passed=8
+
+_incident_update_unhealthy || fail 'first unhealthy run did not create incident state'
+[[ -f "$ACTIVE_INCIDENT_FILE" ]] || fail 'active incident file is missing'
+incident_mode="$(stat -c '%a' "$ACTIVE_INCIDENT_FILE" 2>/dev/null || stat -f '%Lp' "$ACTIVE_INCIDENT_FILE")"
+[[ "$incident_mode" == '600' ]] \
+    || fail "active incident mode is $incident_mode instead of 600"
+first_id="$ACTIVE_INCIDENT_ID"
+first_start="$ACTIVE_INCIDENT_STARTED_AT"
+[[ -n "$first_id" && -n "$first_start" ]] \
+    || fail 'incident identity metadata is missing'
+! grep -Fq 'topsecret' "$ACTIVE_INCIDENT_FILE" \
+    || fail 'secret-like detail was persisted'
+grep -Fq 'password=[REDACTED]' "$ACTIVE_INCIDENT_FILE" \
+    || fail 'secret-like detail was not redacted'
+
+check_results["docker:vaultwarden"]="warn"
+check_messages["docker:vaultwarden"]="container is recovering"
+failed=0
+warnings=1
+_incident_update_unhealthy || fail 'subsequent unhealthy update failed'
+[[ "$ACTIVE_INCIDENT_ID" == "$first_id" ]] \
+    || fail 'incident ID changed during an active incident'
+[[ "$ACTIVE_INCIDENT_STARTED_AT" == "$first_start" ]] \
+    || fail 'incident start changed during an active incident'
+grep -Fq $'check\tdocker:vaultwarden\twarn\tcontainer is recovering' "$ACTIVE_INCIDENT_FILE" \
+    || fail 'latest check status/detail was not persisted'
+
+captured_subject=""
+captured_body=""
+_send_notification(){ captured_subject="$1"; captured_body="$2"; return 0; }
+_notify_failures || fail 'incident failure notification failed'
+[[ "$captured_subject" == *"Incident ${first_id}"* ]] \
+    || fail 'failure subject omitted incident ID'
+[[ "$captured_body" == *"Incident: ${first_id}"* ]] \
+    || fail 'failure body omitted incident ID'
+
+printf '123\n' > "$ALERT_LOCK_DIR/unrelated-check.cooldown"
+failed=0
+warnings=0
+passed=12
+_notify_recovery >/dev/null \
+    || fail 'incident recovery notification failed'
+[[ -e "$ALERT_LOCK_DIR/unrelated-check.cooldown" ]] \
+    || fail 'successful recovery cleared an unrelated per-check cooldown'
+
+blocked_parent="$TMP/not-a-directory"
+printf 'x' > "$blocked_parent"
+ALERT_LOCK_DIR="$blocked_parent"
+ACTIVE_INCIDENT_FILE="$blocked_parent/active-incident.state"
+ACTIVE_INCIDENT_AVAILABLE=false
+failed=1
+warnings=0
+before_failed="$failed"
+if _incident_update_unhealthy >"$TMP/unwritable.out" 2>&1; then
+    fail 'incident persistence unexpectedly succeeded with unavailable state path'
+fi
+[[ "$failed" == "$before_failed" ]] \
+    || fail 'incident persistence changed health counters'
+grep -Fq 'is not a real directory; health alert state tracking is disabled' "$TMP/unwritable.out" \
+    || fail 'unavailable incident state did not emit its bounded warning'
+
+! grep -Eq '^[[:space:]]*chown[[:space:]]' "$ROOT/lib/health-alerts.sh" \
+    || fail 'health incident code hardcodes alert-directory ownership changes'
+! grep -Fq 'active-incident.state' "$ROOT/lib/common.sh" \
+    || fail 'incident state was added to central known-path permissions'
+! grep -Fq 'active-incident.state' "$ROOT/lib/runtime-permissions.sh" \
+    || fail 'incident state was added to runtime permission repair'
+
+printf 'Health state ownership gap tests passed.\n'
+)
+
+check_health_state_ownership_gaps
+
 check_health_recovery_notification_contracts() (
 set -euo pipefail
 

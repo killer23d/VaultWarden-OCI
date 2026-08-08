@@ -7,6 +7,223 @@ case "$MODE" in core|sensitive-cleanup|all) ;; *) printf 'FAIL: unknown VW_TEST_
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
 
+check_recovery_kit_attachment_passphrase_contract() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+helper_source="$TMP/encrypt-helper.sh"
+transport_source="$TMP/stdin-helper.sh"
+awk '
+  /^_encrypt_recovery_kit_attachment[(][)]/ { in_helper=1 }
+  in_helper { print }
+  in_helper && /^}/ { exit }
+' "$ROOT/lib/secrets.sh" >"$helper_source"
+awk '
+  /^_run_7zip_with_passphrase[(][)]/ { in_helper=1 }
+  in_helper { print }
+  in_helper && /^}/ { exit }
+' "$ROOT/lib/secrets.sh" >"$transport_source"
+[[ -s "$helper_source" && -s "$transport_source" ]] \
+    || fail 'could not isolate recovery-kit passphrase helpers'
+
+grep -Fq 'prompt_password_with_confirmation' "$helper_source" \
+    || fail 'attachment helper must use password confirmation'
+grep -Fq '"Passphrase to encrypt emailed AES-256 ZIP (independent from stored project credentials)" 16)' "$helper_source" \
+    || fail 'attachment helper must enforce the 16-character minimum'
+grep -Fq '_run_7zip_with_passphrase "$passphrase"' "$helper_source" \
+    || fail 'attachment helper must use the private 7-Zip passphrase transport'
+grep -Fq 'set +x' "$helper_source" \
+    || fail 'attachment helper must disable xtrace while the passphrase is live'
+grep -Fq 'unset passphrase' "$helper_source" \
+    || fail 'attachment helper must unset the passphrase promptly'
+grep -Fq "printf '%s\\n%s\\n' \"\$passphrase\" \"\$passphrase\"" "$transport_source" \
+    || fail 'archive creation must supply the confirmed passphrase twice on stdin'
+grep -Fq "printf '%s\\n' \"\$passphrase\"" "$transport_source" \
+    || fail 'archive read operations must supply one passphrase on stdin'
+grep -Fq -- '-p?*)' "$transport_source" \
+    || fail '7-Zip transport must reject inline password arguments'
+! grep -Eq 'pty[.]fork|python3 -|3<<<|fd 3|passphrase[-_]file|_pass_file|ZIP_PASSWORD|RECOVERY_PASSWORD' \
+    "$helper_source" "$transport_source" \
+    || fail 'obsolete passphrase transport mechanism remains'
+! awk '
+  /-p|--password/ &&
+  /\$[{]?(passphrase|password|secret|zip_password|recovery_password)([}]|[^A-Za-z0-9_])/ {
+    found=1
+  }
+  END { exit found ? 0 : 1 }
+' "$helper_source" "$transport_source" \
+    || fail 'passphrase variable must not be placed in archiver argv'
+
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/7zz" <<'MOCK_7ZZ'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${MOCK_ARGV_FILE:?}" "${MOCK_STDIN_FILE:?}" "${MOCK_ENV_FILE:?}"
+printf '%s\n' "$@" >"$MOCK_ARGV_FILE"
+export -p >"$MOCK_ENV_FILE"
+cat >"$MOCK_STDIN_FILE"
+[[ "${MOCK_FAIL_7ZIP:-0}" != "1" ]] || exit 42
+case "${1:-}" in
+  a|u)
+    grep -Fxq -- '-p' "$MOCK_ARGV_FILE"
+    mapfile -t lines <"$MOCK_STDIN_FILE"
+    [[ "${#lines[@]}" -eq 2 && "${lines[0]}" == "${lines[1]}" ]]
+    ;;
+  t|x|e|l)
+    ! grep -Fxq -- '-p' "$MOCK_ARGV_FILE"
+    mapfile -t lines <"$MOCK_STDIN_FILE"
+    [[ "${#lines[@]}" -eq 1 ]]
+    ;;
+  *) exit 7 ;;
+esac
+MOCK_7ZZ
+chmod +x "$TMP/bin/7zz"
+
+sentinel='TEST_ATTACHMENT_SECRET_1234567890'
+(
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH"
+    export PATH MOCK_ARGV_FILE="$TMP/add.argv" MOCK_STDIN_FILE="$TMP/add.stdin" MOCK_ENV_FILE="$TMP/add.env"
+    # shellcheck source=../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    _run_7zip_with_passphrase "$sentinel" 7zz a -tzip -mem=AES256 -p -- out.zip recovery-kit.txt
+)
+! grep -Fq "$sentinel" "$TMP/add.argv" \
+    || fail '7-Zip argv contains the sentinel passphrase'
+! grep -Fq "$sentinel" "$TMP/add.env" \
+    || fail '7-Zip environment contains the sentinel passphrase'
+[[ "$(grep -Fxc "$sentinel" "$TMP/add.stdin")" -eq 2 ]] \
+    || fail 'archive creation did not receive the confirmed passphrase twice'
+
+(
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH"
+    export PATH MOCK_ARGV_FILE="$TMP/read.argv" MOCK_STDIN_FILE="$TMP/read.stdin" MOCK_ENV_FILE="$TMP/read.env"
+    # shellcheck source=../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    _run_7zip_with_passphrase "$sentinel" 7zz t -bd -y -p -- out.zip
+)
+! grep -Fq "$sentinel" "$TMP/read.argv" \
+    || fail '7-Zip read argv contains the sentinel passphrase'
+! grep -Fq "$sentinel" "$TMP/read.env" \
+    || fail '7-Zip read environment contains the sentinel passphrase'
+[[ "$(grep -Fxc "$sentinel" "$TMP/read.stdin")" -eq 1 ]] \
+    || fail 'archive validation did not receive exactly one passphrase line'
+
+failure_output="$TMP/failure.out"
+if (
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH"
+    export PATH MOCK_FAIL_7ZIP=1 MOCK_ARGV_FILE="$TMP/fail.argv" MOCK_STDIN_FILE="$TMP/fail.stdin" MOCK_ENV_FILE="$TMP/fail.env"
+    # shellcheck source=../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    _run_7zip_with_passphrase "$sentinel" 7zz t -bd -y -p -- out.zip
+) >"$failure_output" 2>&1; then
+    fail 'forced 7-Zip failure unexpectedly succeeded'
+fi
+! grep -Fq "$sentinel" "$failure_output" \
+    || fail '7-Zip failure output exposed the passphrase'
+! grep -Fq "$sentinel" "$TMP/fail.argv" \
+    || fail '7-Zip failure argv exposed the passphrase'
+! grep -Fq "$sentinel" "$TMP/fail.env" \
+    || fail '7-Zip failure environment exposed the passphrase'
+
+plaintext="$TMP/recovery-kit.txt"
+printf 'test recovery kit\n' >"$plaintext"
+transport_log="$TMP/transport.log"
+run_encrypt_with_prompt() {
+    local prompt_body="$1" out_file="$2"
+    (
+        cd "$ROOT"
+        # shellcheck source=../lib/secrets.sh
+        source "$ROOT/lib/secrets.sh"
+        7zz() {
+            case "${1:-}" in
+                l)
+                    cat <<'LISTING'
+Type = zip
+Method = AES-256 Deflate
+----------
+Path = recovery-kit.txt
+LISTING
+                    ;;
+                t) return 1 ;;
+                *) return 1 ;;
+            esac
+        }
+        prompt_password_with_confirmation(){ eval "$prompt_body"; }
+        _run_7zip_with_passphrase() {
+            local secret="$1"
+            shift 2
+            printf '%s\n' "$secret" >>"$transport_log"
+            [[ "$secret" != 'VWOCI-DELIBERATELY-WRONG-PASSPHRASE' ]] || return 1
+            case " ${*} " in
+              *' a '*) printf 'mock zip\n' >"$out_file"; return 0 ;;
+              *' t '*) return 0 ;;
+              *) return 1 ;;
+            esac
+        }
+        export transport_log out_file
+        _encrypt_recovery_kit_attachment "$plaintext" "$out_file" 7zz
+    )
+}
+if run_encrypt_with_prompt 'return 1' "$TMP/rejected.zip"; then
+    fail 'password-helper rejection must stop attachment creation'
+fi
+[[ ! -s "$TMP/rejected.zip" ]] \
+    || fail 'rejected passphrase left a successful archive'
+exact16='1234567890abcdef'
+run_encrypt_with_prompt "printf %s '$exact16'" "$TMP/exact.zip" \
+    || fail 'matching 16-character passphrase should be accepted'
+longer='1234567890abcdefghi'
+run_encrypt_with_prompt "printf %s '$longer'" "$TMP/long.zip" \
+    || fail 'matching longer passphrase should be accepted'
+grep -Fq "$exact16" "$transport_log" \
+    || fail 'attachment helper did not pass the confirmed passphrase to the stdin transport'
+
+real_tool=""
+if command -v 7zz >/dev/null 2>&1; then
+    real_tool=7zz
+elif command -v 7z >/dev/null 2>&1; then
+    real_tool=7z
+fi
+if [[ -n "$real_tool" ]]; then
+    smoke_dir="$TMP/smoke"
+    mkdir -p "$smoke_dir/out"
+    printf 'real archive sentinel content\n' >"$smoke_dir/recovery-kit.txt"
+    (
+        cd "$ROOT"
+        # shellcheck source=../lib/secrets.sh
+        source "$ROOT/lib/secrets.sh"
+        prompt_password_with_confirmation(){ printf '%s' 'NonProdTestPassphrase16'; }
+        _encrypt_recovery_kit_attachment \
+            "$smoke_dir/recovery-kit.txt" "$smoke_dir/kit.zip" "$real_tool"
+        _run_7zip_with_passphrase 'NonProdTestPassphrase16' "$real_tool" \
+            x -bd -y -p "-o$smoke_dir/out" -- "$smoke_dir/kit.zip" >/dev/null 2>&1
+        if _run_7zip_with_passphrase 'WrongNonProdPassphrase16' "$real_tool" \
+            t -bd -y -p -- "$smoke_dir/kit.zip" >/dev/null 2>&1; then
+            exit 9
+        fi
+    ) || fail 'real AES-256 ZIP stdin smoke test failed'
+    [[ -s "$smoke_dir/kit.zip" ]] || fail 'real AES-256 ZIP archive was not created'
+    ! LC_ALL=C grep -aFq 'real archive sentinel content' "$smoke_dir/kit.zip" \
+        || fail 'real AES-256 ZIP contains plaintext sentinel content'
+    cmp "$smoke_dir/recovery-kit.txt" "$smoke_dir/out/recovery-kit.txt" \
+        || fail 'real AES-256 ZIP extracted content mismatch'
+else
+    printf 'Real AES-256 ZIP stdin smoke test skipped: 7z/7zz unavailable.\n'
+fi
+
+printf 'Recovery-kit passphrase transport contract tests passed.\n'
+)
+
+if [[ "$MODE" == "core" || "$MODE" == "all" ]]; then
+    check_recovery_kit_attachment_passphrase_contract
+fi
+
 check_secrets_cli_help() (
 # Verify standalone secrets informational options need no project configuration.
 
