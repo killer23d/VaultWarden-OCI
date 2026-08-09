@@ -63,8 +63,12 @@ set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
 TMP="$(mktemp -d)"
 TESTS_RUN=0
+TEST_CREATED_COMPOSE=false
 
 cleanup() {
+    if [[ "$TEST_CREATED_COMPOSE" == "true" ]]; then
+        rm -f "$ROOT/docker-compose.yml"
+    fi
     if [[ -d "$TMP" ]]; then
         if (( EUID == 0 )); then
             rm -rf "$TMP"
@@ -269,10 +273,12 @@ test_stale_root_dropin_cleanup_preserves_state_dir() {
 
 test_systemd_inventories_are_canonical() {
     local script="$ROOT/utilities/setup-systemd.sh"
-    local services timers installed
+    local services timers installed runtime_files runtime_exec
     services="$(extract_array "$script" COPIED_SERVICES)"
     timers="$(extract_array "$script" TIMERS)"
     installed="$(extract_array "$script" INSTALLED_SCRIPT_PATHS)"
+    runtime_files="$(extract_array "$script" STARTUP_RUNTIME_FILE_PATHS)"
+    runtime_exec="$(extract_array "$script" STARTUP_RUNTIME_EXECUTABLE_PATHS)"
 
     for unit in \
         vaultwarden-maintenance.service \
@@ -302,18 +308,54 @@ test_systemd_inventories_are_canonical() {
 
     grep -Fxq 'MANAGED_UNITS=("${COPIED_SERVICES[@]}" "${TIMERS[@]}")' "$script" \
         || fail "managed unit inventory is not derived from copied services and timers"
+    grep -Fxq '    startup.sh' <<< "$installed" \
+        || fail "installed script inventory does not include startup.sh"
     grep -Fxq '    maintenance.sh' <<< "$installed" \
         || fail "installed script inventory lost top-level layout"
     grep -Fxq '    utilities/backup-run.sh' <<< "$installed" \
         || fail "installed script inventory lost utilities layout"
+    for asset in docker-compose.yml docker-compose.yml.example secrets-schema.yaml VERSION caddy/Caddyfile caddy/Caddyfile.degraded caddy/Dockerfile; do
+        grep -Fxq "    $asset" <<< "$runtime_files" || fail "startup runtime file inventory missing $asset"
+    done
+    grep -Fxq '    caddy/entrypoint.sh' <<< "$runtime_exec" \
+        || fail "startup runtime executable inventory missing caddy/entrypoint.sh"
     [[ "$(grep -Fc 'for script in "${INSTALLED_SCRIPT_PATHS[@]}"' "$script")" -ge 3 ]] \
         || fail "installation and validation do not share the script path inventory"
+    [[ "$(grep -Fc 'STARTUP_RUNTIME_FILE_PATHS[@]' "$script")" -ge 3 ]] \
+        || fail "installation and validation do not share startup runtime file inventory"
+    [[ "$(grep -Fc 'STARTUP_RUNTIME_EXECUTABLE_PATHS[@]' "$script")" -ge 3 ]] \
+        || fail "installation and validation do not share startup runtime executable inventory"
     [[ "$(grep -Fc 'for unit in "${MANAGED_UNITS[@]}"' "$script")" -ge 3 ]] \
         || fail "install, validation, and removal do not share managed units"
     ! grep -Eq 'flat_scripts_to_install|structured_scripts_to_install|scripts_to_check' "$script" \
         || fail "duplicated local systemd inventories remain"
     grep -Fq '[[ "$svc" == "$NOTIFY_FAILURE_TEMPLATE" ]] && continue' "$script" \
         || fail "template service is not explicitly skipped by service actions"
+}
+
+test_startup_runtime_bundle_contract() {
+    local unit="$ROOT/systemd/vaultwarden-startup.service"
+    local installer="$ROOT/utilities/setup-systemd.sh"
+
+    grep -Fxq 'WorkingDirectory=@STARTUP_RUNTIME_DIR@' "$unit" \
+        || fail "startup unit does not use installed runtime working directory"
+    grep -Fxq 'ExecStart=/bin/bash @STARTUP_RUNTIME_DIR@/startup.sh' "$unit" \
+        || fail "startup unit does not execute installed startup.sh"
+    ! grep -Fq '@PROJECT_ROOT@' "$unit" \
+        || fail "startup unit still references mutable checkout placeholder"
+    ! grep -Fq -- '--skip-pull' "$unit" \
+        || fail "startup unit still passes dead --skip-pull token"
+    grep -Fxq 'SuccessExitStatus=0 75' "$unit" \
+        || fail "startup unit lost operation contention exit handling"
+    grep -Fxq 'PrivateTmp=true' "$unit" || fail "startup unit lost PrivateTmp sandboxing"
+    grep -Fxq 'ProtectSystem=full' "$unit" || fail "startup unit lost ProtectSystem sandboxing"
+    grep -Fxq 'NoNewPrivileges=true' "$unit" || fail "startup unit lost NoNewPrivileges sandboxing"
+    grep -Fq 'install -m 700 -o root -g root "$src" "$dest"' "$installer" \
+        || fail "startup scripts are not installed root-owned and non-writable"
+    grep -Fq 'install -m 644 -o root -g root "$src" "$dest"' "$installer" \
+        || fail "startup runtime files are not installed root-owned and non-writable"
+    grep -Fq 'install -m 755 -o root -g root "$src" "$dest"' "$installer" \
+        || fail "Caddy entrypoint is not installed root-owned and executable"
 }
 
 test_background_priority_contract() {
@@ -376,8 +418,10 @@ run_root_env_capture() {
 prepare_systemd_install_repo() {
     local repo="$1" state="$2"
     mkdir -p "$repo/secrets/keys"
-    cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$repo/"
-    cp "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" "$repo/"
+    cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$ROOT/caddy" "$repo/"
+    cp "$ROOT/startup.sh" "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" \
+       "$ROOT/docker-compose.yml.example" "$ROOT/secrets-schema.yaml" "$ROOT/VERSION" "$repo/"
+    cp "$ROOT/docker-compose.yml.example" "$repo/docker-compose.yml"
     cat > "$repo/.env" <<EOF_ENV
 DOMAIN=https://systemd-inventory.example.test
 ADMIN_EMAIL=admin@example.test
@@ -430,10 +474,16 @@ test_systemd_missing_source_and_dry_run_behavior() {
         bash "$repo/utilities/setup-systemd.sh" install --dry-run \
         || { cat "$dry_out" >&2; fail "complete systemd dry-run failed"; }
 
+    grep -Fq "[DRY RUN] Would install: $opt_dir/startup.sh" "$dry_out" \
+        || fail "dry-run did not install startup.sh"
     grep -Fq "[DRY RUN] Would install: $opt_dir/maintenance.sh" "$dry_out" \
         || fail "dry-run lost top-level script installation"
     grep -Fq "[DRY RUN] Would install: $opt_dir/utilities/backup-run.sh" "$dry_out" \
         || fail "dry-run lost utilities script installation"
+    grep -Fq "[DRY RUN] Would install startup runtime asset: $opt_dir/docker-compose.yml (644 root:root)" "$dry_out" \
+        || fail "dry-run did not install live Compose runtime model"
+    grep -Fq "[DRY RUN] Would install startup runtime asset: $opt_dir/caddy/entrypoint.sh (755 root:root)" "$dry_out" \
+        || fail "dry-run did not install executable Caddy runtime asset"
     grep -Fq "[DRY RUN] cp $repo/systemd/vaultwarden-db-backup.service $unit_dir/vaultwarden-db-backup.service" "$dry_out" \
         || fail "dry-run did not install a copied service from the canonical inventory"
     grep -Fq "[DRY RUN] cp $repo/systemd/vaultwarden-db-backup.timer $unit_dir/vaultwarden-db-backup.timer" "$dry_out" \
@@ -485,12 +535,17 @@ prepare_systemd_validation_fixture() {
     local unit_dir="$1" opt_dir="$2" env_dir="$3" state_dir="$4"
     mkdir -p "$unit_dir" "$opt_dir" "$env_dir" "$state_dir/config"
 
+    if [[ ! -f "$ROOT/docker-compose.yml" ]]; then
+        cp "$ROOT/docker-compose.yml.example" "$ROOT/docker-compose.yml"
+        TEST_CREATED_COMPOSE=true
+    fi
+
     cp -a "$ROOT/lib" "$opt_dir/lib"
     find "$opt_dir/lib" -type d -exec chmod 755 {} +
     find "$opt_dir/lib" -type f -name '*.sh' -exec chmod 644 {} +
 
     local script
-    for script in maintenance.sh backup.sh restore.sh; do
+    for script in startup.sh maintenance.sh backup.sh restore.sh; do
         cp "$ROOT/$script" "$opt_dir/$script"
         chmod 700 "$opt_dir/$script"
     done
@@ -510,11 +565,18 @@ prepare_systemd_validation_fixture() {
         cp "$ROOT/$script" "$opt_dir/$script"
         chmod 700 "$opt_dir/$script"
     done
+    cp "$ROOT/docker-compose.yml" "$ROOT/docker-compose.yml.example" "$ROOT/secrets-schema.yaml" "$ROOT/VERSION" "$opt_dir/"
+    mkdir -p "$opt_dir/caddy"
+    cp "$ROOT/caddy/Caddyfile" "$ROOT/caddy/Caddyfile.degraded" "$ROOT/caddy/Dockerfile" "$opt_dir/caddy/"
+    cp "$ROOT/caddy/entrypoint.sh" "$opt_dir/caddy/entrypoint.sh"
+    chmod 644 "$opt_dir/docker-compose.yml" "$opt_dir/docker-compose.yml.example" "$opt_dir/secrets-schema.yaml" "$opt_dir/VERSION"
+    chmod 644 "$opt_dir/caddy/Caddyfile" "$opt_dir/caddy/Caddyfile.degraded" "$opt_dir/caddy/Dockerfile"
+    chmod 755 "$opt_dir/caddy/entrypoint.sh"
 
     cp "$ROOT"/systemd/vaultwarden-*.service "$unit_dir/"
     cp "$ROOT"/systemd/vaultwarden-*.timer "$unit_dir/"
     chmod 644 "$unit_dir"/vaultwarden-*.service "$unit_dir"/vaultwarden-*.timer
-    sed -e "s|@PROJECT_ROOT@|$ROOT|g" \
+    sed -e "s|@STARTUP_RUNTIME_DIR@|$opt_dir|g" \
         -e "s|@PROJECT_STATE_DIR@|$state_dir|g" \
         "$ROOT/systemd/vaultwarden-startup.service" > "$unit_dir/vaultwarden-startup.service"
     chmod 644 "$unit_dir/vaultwarden-startup.service"
@@ -566,6 +628,26 @@ test_systemd_validation_fails_on_stale_installed_runtime() {
         || { cat "$clean_out" >&2; fail "clean temp-installed systemd tree did not validate"; }
 
     local installed
+    installed="$opt_dir/startup.sh"
+    printf '\n# stale startup fixture\n' >> "$installed"
+    stale_out="$TMP/validate-stale-startup.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with stale installed startup.sh"
+    grep -Fq "STALE: $installed does not match repo source" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "stale startup.sh was not named"; }
+    cp "$ROOT/startup.sh" "$installed"
+    chmod 700 "$installed"
+
+    installed="$opt_dir/docker-compose.yml"
+    printf '\n# stale compose fixture\n' >> "$installed"
+    stale_out="$TMP/validate-stale-compose.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir" \
+        || fail "validate succeeded with stale installed docker-compose.yml"
+    grep -Fq "STALE: $installed does not match repo source" "$stale_out" \
+        || { cat "$stale_out" >&2; fail "stale docker-compose.yml was not named"; }
+    cp "$ROOT/docker-compose.yml" "$installed"
+    chmod 644 "$installed"
+
     installed="$opt_dir/utilities/backup-run.sh"
     printf '\n# stale backup-run fixture\n' >> "$installed"
     stale_out="$TMP/validate-stale-backup-run.out"
@@ -623,10 +705,11 @@ run_test 'notify-failure helper loads encrypted-secret resolution before email' 
 run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
 run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dropins_match_unit_type
 run_test 'systemd inventories are canonical and keep explicit exceptions' test_systemd_inventories_are_canonical
+run_test 'startup service uses root-owned installed runtime bundle' test_startup_runtime_bundle_contract
 run_test 'background priority applies only to heavy scheduled services' test_background_priority_contract
 run_test 'systemd missing source fails before mutation and dry-run stays read-only' test_systemd_missing_source_and_dry_run_behavior
 run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
-[[ "$TESTS_RUN" -eq 10 ]] || fail "expected 10 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 11 ]] || fail "expected 11 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )
