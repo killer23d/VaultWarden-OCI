@@ -108,9 +108,14 @@ sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
 ```
 
-A zero `systemd validate` result means the expected installed scripts, libraries, managed units, environment/key permissions, and timer readiness match the current repository contract. A zero smoke-test result requires every smoke check to complete without `FAIL` or `SKIP`.
+A zero `systemd validate` result means the expected installed scripts, libraries, startup runtime assets, managed units, environment/key permissions, and timer readiness match the current repository contract. A zero smoke-test result requires every smoke check to complete without `FAIL` or `SKIP`.
 
-After updating from `main` with `git pull --ff-only origin main`, repeat the three commands above when managed scripts, libraries, or units changed. Git updates the checkout; the systemd installer activates the current repository code under `/opt/vaultwarden-scripts`.
+After a `git pull` or checkout edit that changes managed scripts, libraries, units, or startup runtime assets, refresh and validate the root-owned runtime before relying on the next managed boot. Startup runtime assets include the live/reference Compose files, schema/version files, and `caddy/` runtime/build inputs. Git updates the checkout; the systemd installer publishes the approved copies under `/opt/vaultwarden-scripts`:
+
+```bash
+sudo ./setup.sh systemd install --no-enable-now
+sudo ./setup.sh systemd validate
+```
 
 ### 7. Export recovery material
 

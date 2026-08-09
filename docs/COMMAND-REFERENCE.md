@@ -1552,7 +1552,8 @@ USAGE:
 
 DESCRIPTION:
     Installs, removes, validates, or shows the status of VaultWarden-OCI
-    systemd timers. Run after every 'git pull' to keep /opt/ in sync.
+    systemd automation and its root-owned runtime. Re-run install, then validate,
+    after managed scripts, libraries, units, or startup runtime assets change.
 
 ACTIONS:
     install   Install and enable all systemd timer units; start only by policy
@@ -1584,8 +1585,8 @@ START POLICY SAFETY:
     --version, -V Print the VaultWarden-OCI version and exit
 
 WHAT install DOES:
-    1. Copies scripts to /opt/vaultwarden-scripts/ (root:root 700):
-         maintenance.sh  backup.sh  restore.sh
+    1. Copies executable scripts to /opt/vaultwarden-scripts/ (root:root 700):
+         startup.sh  maintenance.sh  backup.sh  restore.sh
          utilities/setup-firewall.sh
          utilities/maintenance-run.sh      utilities/maintenance-health.sh
          utilities/maintenance-update.sh   utilities/maintenance-db-maint.sh
@@ -1595,13 +1596,18 @@ WHAT install DOES:
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-    3. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
+    3. Copies public startup runtime assets under /opt/vaultwarden-scripts/:
+         docker-compose.yml  docker-compose.yml.example  secrets-schema.yaml  VERSION
+         caddy/Caddyfile  caddy/Caddyfile.degraded  caddy/Dockerfile       (root:root 644)
+         caddy/entrypoint.sh                                                    (root:root 755)
+       Private secrets are not copied into this code bundle.
+    4. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
        using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
-    4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
-    5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
-    6. systemctl daemon-reload
-    7. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
-    8. If timers were started now, verifies all managed timers are active and have a next trigger
+    5. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
+    6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
+    7. systemctl daemon-reload
+    8. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
+    9. If timers were started now, verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install

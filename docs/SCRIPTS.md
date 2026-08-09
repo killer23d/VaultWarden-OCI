@@ -259,6 +259,8 @@ Installed runtime lives under:
 /etc/systemd/system/
 ```
 
+`install` publishes the managed scripts/libraries plus the root-owned startup runtime bundle used by `vaultwarden-startup.service`: `startup.sh`, the live/reference Compose definitions, `secrets-schema.yaml`, `VERSION`, and the required Caddy runtime/build files. Private secrets are not copied into this code bundle.
+
 `install` enables managed timers and starts them only according to the requested start policy.
 
 Use:
@@ -277,7 +279,7 @@ sudo utilities/setup-systemd.sh install --no-enable-now
 
 for recovery/manual-inspection hosts that are not ready to run scheduled backup/maintenance work immediately.
 
-`validate` checks installed scripts, libraries, units, rendered startup service, required environment/key permissions, and managed timer readiness. Run install + validate after managed repository code changes.
+`validate` checks installed scripts, libraries, startup runtime assets, units, rendered startup service, required environment/key permissions, managed timer readiness, and checkout-versus-installed drift. Run install + validate after managed repository code or startup runtime assets change, including Compose/Caddy files.
 
 The DB backup, full backup, and routine maintenance services use soft process/I/O scheduling priority (`Nice=10`, best-effort I/O, priority `7`). These are not hard CPU, memory, or I/O quotas.
 

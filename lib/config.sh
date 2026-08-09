@@ -17,6 +17,14 @@
 [[ -n "${VW_CONFIG_LIB_LOADED:-}" ]] && return 0
 readonly VW_CONFIG_LIB_LOADED=1
 
+# The appliance has one Compose project identity regardless of whether its
+# Compose model is executed from the checkout or the installed /opt runtime.
+# Reassert this after loading any env file so directory names and stale/custom
+# COMPOSE_PROJECT_NAME entries cannot split one host into two Compose projects.
+readonly _VW_CANONICAL_COMPOSE_PROJECT_NAME="vaultwarden-oci"
+COMPOSE_PROJECT_NAME="$_VW_CANONICAL_COMPOSE_PROJECT_NAME"
+export COMPOSE_PROJECT_NAME
+
 if [[ -z "${_VW_CALLER_OVERRIDES_CAPTURED:-}" ]]; then
     _VW_CALLER_PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-}"
     _VW_CALLER_DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
@@ -196,6 +204,11 @@ load_env_file() {
         log_hint "Valid format: KEY=value or KEY=\"value with spaces\""
         log_hint "Common mistakes: spaces around '=', an 'export ' prefix, or invalid variable names."
     fi
+
+    # COMPOSE_PROJECT_NAME is an appliance identity, not an operator setting.
+    # Keep it stable even if a legacy/custom env file contains another value.
+    COMPOSE_PROJECT_NAME="$_VW_CANONICAL_COMPOSE_PROJECT_NAME"
+    export COMPOSE_PROJECT_NAME
 
     log_debug "Environment loaded successfully from: $env_file"
     return 0

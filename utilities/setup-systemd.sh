@@ -68,6 +68,7 @@ BACKGROUND_PRIORITY_SERVICES=(
 MANAGED_UNITS=("${COPIED_SERVICES[@]}" "${TIMERS[@]}")
 
 INSTALLED_SCRIPT_PATHS=(
+    startup.sh
     maintenance.sh
     backup.sh
     restore.sh
@@ -82,6 +83,23 @@ INSTALLED_SCRIPT_PATHS=(
     utilities/maintenance-update-firewall.sh
     utilities/backup-run.sh
     utilities/restore-run.sh
+)
+
+# Public, non-secret files required by startup and the Compose/Caddy runtime.
+# docker-compose.yml is the currently approved live model; the .example copy is
+# also needed by lib/schema.sh for schema target validation.
+STARTUP_RUNTIME_FILE_PATHS=(
+    docker-compose.yml
+    docker-compose.yml.example
+    secrets-schema.yaml
+    VERSION
+    caddy/Caddyfile
+    caddy/Caddyfile.degraded
+    caddy/Dockerfile
+)
+
+STARTUP_RUNTIME_EXECUTABLE_PATHS=(
+    caddy/entrypoint.sh
 )
 
 # Timers skip identity checks, while iptables skips data-volume drop-ins.
@@ -132,7 +150,8 @@ USAGE:
 
 DESCRIPTION:
     Installs, removes, validates, or shows the status of VaultWarden-OCI
-    systemd timers. Run after every 'git pull' to keep /opt/ in sync.
+    systemd automation and its root-owned runtime. Re-run install, then validate,
+    after managed scripts, libraries, units, or startup runtime assets change.
 
 ACTIONS:
     install   Install and enable all systemd timer units; start only by policy
@@ -164,8 +183,8 @@ START POLICY SAFETY:
     --version, -V Print the VaultWarden-OCI version and exit
 
 WHAT install DOES:
-    1. Copies scripts to /opt/vaultwarden-scripts/ (root:root 700):
-         maintenance.sh  backup.sh  restore.sh
+    1. Copies executable scripts to /opt/vaultwarden-scripts/ (root:root 700):
+         startup.sh  maintenance.sh  backup.sh  restore.sh
          utilities/setup-firewall.sh
          utilities/maintenance-run.sh      utilities/maintenance-health.sh
          utilities/maintenance-update.sh   utilities/maintenance-db-maint.sh
@@ -175,13 +194,18 @@ WHAT install DOES:
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-    3. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
+    3. Copies public startup runtime assets under /opt/vaultwarden-scripts/:
+         docker-compose.yml  docker-compose.yml.example  secrets-schema.yaml  VERSION
+         caddy/Caddyfile  caddy/Caddyfile.degraded  caddy/Dockerfile       (root:root 644)
+         caddy/entrypoint.sh                                                    (root:root 755)
+       Private secrets are not copied into this code bundle.
+    4. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
        using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
-    4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
-    5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
-    6. systemctl daemon-reload
-    7. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
-    8. If timers were started now, verifies all managed timers are active and have a next trigger
+    5. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
+    6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
+    7. systemctl daemon-reload
+    8. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
+    9. If timers were started now, verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install
@@ -452,7 +476,7 @@ _sync_runtime_environment_files() {
 _render_startup_expected() {
     local dest="$1"
     local template="$UNIT_SOURCE_DIR/$STARTUP_SERVICE"
-    sed -e "s|@PROJECT_ROOT@|$PROJECT_ROOT|g" \
+    sed -e "s|@STARTUP_RUNTIME_DIR@|$OPT_SCRIPTS_DIR|g" \
         -e "s|@PROJECT_STATE_DIR@|${PROJECT_STATE_DIR:-/var/lib/vaultwarden}|g" \
         "$template" > "$dest"
 }
@@ -462,7 +486,7 @@ _render_startup_service() {
     local dest="$UNIT_DEST_DIR/$STARTUP_SERVICE"
     [[ -f "$template" ]] || { log_error "Missing startup service template: $template"; return 1; }
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would render $STARTUP_SERVICE with PROJECT_ROOT=$PROJECT_ROOT PROJECT_STATE_DIR=${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+        log_info "[DRY RUN] Would render $STARTUP_SERVICE with STARTUP_RUNTIME_DIR=$OPT_SCRIPTS_DIR PROJECT_STATE_DIR=${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
         return 0
     fi
     local tmp
@@ -483,10 +507,16 @@ install_units() {
         return 1
     fi
 
-    local script unit
+    local script asset unit
     for script in "${INSTALLED_SCRIPT_PATHS[@]}"; do
         if [[ ! -f "$PROJECT_ROOT/$script" ]]; then
             log_error "Required repository script not found: $PROJECT_ROOT/$script"
+            return 1
+        fi
+    done
+    for asset in "${STARTUP_RUNTIME_FILE_PATHS[@]}" "${STARTUP_RUNTIME_EXECUTABLE_PATHS[@]}"; do
+        if [[ ! -f "$PROJECT_ROOT/$asset" ]]; then
+            log_error "Required startup runtime asset not found: $PROJECT_ROOT/$asset"
             return 1
         fi
     done
@@ -540,11 +570,38 @@ install_units() {
             log_info "[DRY RUN] Would install: $dest (700 root:root)"
             continue
         fi
-        mkdir -p "$(dirname "$dest")"
+        install -d -m 755 -o root -g root "$(dirname "$dest")"
         install -m 700 -o root -g root "$src" "$dest"
         log_success "Installed: $dest"
     done
-    if [[ "$DRY_RUN" == "false" ]]; then chown root:root "$OPT_SCRIPTS_DIR"; fi
+
+    log_info "Installing startup runtime assets to $OPT_SCRIPTS_DIR ..."
+    for asset in "${STARTUP_RUNTIME_FILE_PATHS[@]}"; do
+        local src="$PROJECT_ROOT/$asset"
+        local dest="$OPT_SCRIPTS_DIR/$asset"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would install startup runtime asset: $dest (644 root:root)"
+            continue
+        fi
+        install -d -m 755 -o root -g root "$(dirname "$dest")"
+        install -m 644 -o root -g root "$src" "$dest"
+        log_success "Installed startup runtime asset: $dest"
+    done
+    for asset in "${STARTUP_RUNTIME_EXECUTABLE_PATHS[@]}"; do
+        local src="$PROJECT_ROOT/$asset"
+        local dest="$OPT_SCRIPTS_DIR/$asset"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would install startup runtime asset: $dest (755 root:root)"
+            continue
+        fi
+        install -d -m 755 -o root -g root "$(dirname "$dest")"
+        install -m 755 -o root -g root "$src" "$dest"
+        log_success "Installed startup runtime asset: $dest"
+    done
+    if [[ "$DRY_RUN" == "false" ]]; then
+        chown root:root "$OPT_SCRIPTS_DIR"
+        chmod 755 "$OPT_SCRIPTS_DIR"
+    fi
 
     # Install the age key into /etc/vaultwarden/age-key.txt because
     # ProtectHome=yes makes /home/ubuntu/ inaccessible to service processes.
@@ -899,7 +956,7 @@ validate_installation() {
         fi
     }
 
-    log_info "[1/9] Checking installed scripts ..."
+    log_info "[1/9] Checking installed scripts and startup runtime assets ..."
     for script in "${INSTALLED_SCRIPT_PATHS[@]}"; do
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$installed" ]]; then
@@ -907,6 +964,24 @@ validate_installation() {
             (( errors++ )) || true
         elif [[ ! -x "$installed" ]]; then
             log_error "  NOT EXECUTABLE: $installed"
+            (( errors++ )) || true
+        else
+            log_success "  OK:             $installed"
+        fi
+    done
+    for asset in "${STARTUP_RUNTIME_FILE_PATHS[@]}"; do
+        local installed="$OPT_SCRIPTS_DIR/$asset"
+        if [[ ! -f "$installed" ]]; then
+            log_error "  MISSING:        $installed"
+            (( errors++ )) || true
+        else
+            log_success "  OK:             $installed"
+        fi
+    done
+    for asset in "${STARTUP_RUNTIME_EXECUTABLE_PATHS[@]}"; do
+        local installed="$OPT_SCRIPTS_DIR/$asset"
+        if [[ ! -x "$installed" ]]; then
+            log_error "  MISSING/NOT EXECUTABLE: $installed"
             (( errors++ )) || true
         else
             log_success "  OK:             $installed"
@@ -987,7 +1062,7 @@ validate_installation() {
     if [[ ! -f "$startup_dest" ]]; then
         log_error "  MISSING: $startup_dest"
         (( errors++ )) || true
-    elif grep -qE '@PROJECT_ROOT@|@PROJECT_STATE_DIR@' "$startup_dest"; then
+    elif grep -qE '@STARTUP_RUNTIME_DIR@|@PROJECT_STATE_DIR@' "$startup_dest"; then
         log_error "  UNRENDERED PLACEHOLDER: $startup_dest"
         (( errors++ )) || true
     else
@@ -1156,6 +1231,10 @@ validate_installation() {
         installed_lib="$OPT_SCRIPTS_DIR/$rel_path"
         _compare_repo_artifact "$repo_lib" "$installed_lib"
     done < <(find "$PROJECT_ROOT/lib" -type f -print0 2>/dev/null)
+
+    for asset in "${STARTUP_RUNTIME_FILE_PATHS[@]}" "${STARTUP_RUNTIME_EXECUTABLE_PATHS[@]}"; do
+        _compare_repo_artifact "$PROJECT_ROOT/$asset" "$OPT_SCRIPTS_DIR/$asset"
+    done
 
     for unit in "${MANAGED_UNITS[@]}"; do
         _compare_repo_artifact "$UNIT_SOURCE_DIR/$unit" "$UNIT_DEST_DIR/$unit"
