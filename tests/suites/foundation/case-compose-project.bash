@@ -53,16 +53,30 @@ chmod 0600 "$INSTALLED_ENV"
     [[ "$COMPOSE_PROJECT_NAME" == "vaultwarden-oci" ]] \
         || fail "installed environment overrode Compose project identity: $COMPOSE_PROJECT_NAME"
 
-    project_name="$(docker compose config --format json \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name", ""))')"
-    [[ "$project_name" == "vaultwarden-oci" ]] \
-        || fail "installed runtime resolved Compose project '$project_name' instead of vaultwarden-oci"
+    checkout_project_name="$(
+        cd "$ROOT"
+        docker compose -f docker-compose.yml.example config --format json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name", ""))'
+    )"
+    checkout_images="$(cd "$ROOT" && docker compose -f docker-compose.yml.example config --images)"
 
-    images="$(docker compose config --images)"
-    grep -Fxq 'vaultwarden-oci-caddy' <<< "$images" \
-        || { printf '%s\n' "$images" >&2; fail 'installed runtime did not resolve the canonical Caddy image tag'; }
-    ! grep -Fq 'vaultwarden-scripts-caddy' <<< "$images" \
+    installed_project_name="$(
+        cd "$RUNTIME"
+        docker compose config --format json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name", ""))'
+    )"
+    installed_images="$(cd "$RUNTIME" && docker compose config --images)"
+
+    [[ "$checkout_project_name" == "vaultwarden-oci" ]] \
+        || fail "normal production context resolved Compose project '$checkout_project_name'"
+    [[ "$installed_project_name" == "$checkout_project_name" ]] \
+        || fail "installed project '$installed_project_name' differs from normal '$checkout_project_name'"
+    [[ "$installed_images" == "$checkout_images" ]] \
+        || fail 'installed runtime image identities differ from the normal production context'
+    grep -Fxq 'vaultwarden-oci-caddy' <<< "$installed_images" \
+        || { printf '%s\n' "$installed_images" >&2; fail 'installed runtime did not resolve the canonical Caddy image tag'; }
+    ! grep -Fq 'vaultwarden-scripts-caddy' <<< "$installed_images" \
         || fail 'installed runtime still derived the Caddy image tag from /opt directory name'
 )
 
-printf 'Installed runtime preserves Compose project vaultwarden-oci and Caddy image vaultwarden-oci-caddy.\n'
+printf 'Installed runtime preserves the normal vaultwarden-oci Compose project and Caddy image identity.\n'
