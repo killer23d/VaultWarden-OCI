@@ -183,7 +183,7 @@ START POLICY SAFETY:
 
 WHAT install DOES:
     1. Copies scripts to /opt/vaultwarden-scripts/ (root:root 700):
-         startup.sh  maintenance.sh  backup.sh  restore.sh
+         maintenance.sh  backup.sh  restore.sh
          utilities/setup-firewall.sh
          utilities/maintenance-run.sh      utilities/maintenance-health.sh
          utilities/maintenance-update.sh   utilities/maintenance-db-maint.sh
@@ -192,8 +192,7 @@ WHAT install DOES:
          utilities/backup-run.sh           utilities/restore-run.sh
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
-    2. Copies lib/ plus the Compose/Caddy startup runtime assets to /opt/vaultwarden-scripts/
-       as root-owned, non-writable runtime inputs.
+    2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
     3. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
        using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
