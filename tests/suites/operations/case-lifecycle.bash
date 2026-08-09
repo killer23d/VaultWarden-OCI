@@ -263,8 +263,10 @@ CHMOD
 copy_systemd_install_repo(){
   local repo="$1" state="$2"
   mkdir -p "$repo/secrets/keys"
-  cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$repo/"
-  cp "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" "$repo/"
+  cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$ROOT/caddy" "$repo/"
+  cp "$ROOT/startup.sh" "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" \
+     "$ROOT/docker-compose.yml.example" "$ROOT/secrets-schema.yaml" "$ROOT/VERSION" "$repo/"
+  cp "$ROOT/docker-compose.yml.example" "$repo/docker-compose.yml"
   cat > "$repo/.env" <<EOF_ENV
 DOMAIN=https://systemd-policy.example.test
 ADMIN_EMAIL=admin@example.test
