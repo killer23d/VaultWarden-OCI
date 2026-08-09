@@ -9,8 +9,8 @@ RequiresMountsFor=@PROJECT_STATE_DIR@
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-WorkingDirectory=@PROJECT_ROOT@
-ExecStart=/bin/bash @PROJECT_ROOT@/startup.sh --skip-pull
+WorkingDirectory=@STARTUP_RUNTIME_DIR@
+ExecStart=/bin/bash @STARTUP_RUNTIME_DIR@/startup.sh
 SuccessExitStatus=0 75
 # Restart is intentionally omitted for this oneshot unit.
 # After startup.sh succeeds, RemainAfterExit=yes marks the unit active;
