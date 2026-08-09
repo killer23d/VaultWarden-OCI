@@ -71,8 +71,11 @@ chmod 0600 "$INSTALLED_ENV"
         || fail "normal production context resolved Compose project '$checkout_project_name'"
     [[ "$installed_project_name" == "$checkout_project_name" ]] \
         || fail "installed project '$installed_project_name' differs from normal '$checkout_project_name'"
-    [[ "$installed_images" == "$checkout_images" ]] \
-        || fail 'installed runtime image identities differ from the normal production context'
+    if [[ "$installed_images" != "$checkout_images" ]]; then
+        printf 'Normal production images:\n%s\nInstalled runtime images:\n%s\n' \
+            "$checkout_images" "$installed_images" >&2
+        fail 'installed runtime image identities differ from the normal production context'
+    fi
     grep -Fxq 'vaultwarden-oci-caddy' <<< "$installed_images" \
         || { printf '%s\n' "$installed_images" >&2; fail 'installed runtime did not resolve the canonical Caddy image tag'; }
     ! grep -Fq 'vaultwarden-scripts-caddy' <<< "$installed_images" \
