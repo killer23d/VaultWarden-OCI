@@ -58,14 +58,14 @@ chmod 0600 "$INSTALLED_ENV"
         docker compose -f docker-compose.yml.example config --format json \
             | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name", ""))'
     )"
-    checkout_images="$(cd "$ROOT" && docker compose -f docker-compose.yml.example config --images)"
+    checkout_images="$(cd "$ROOT" && docker compose -f docker-compose.yml.example config --images | LC_ALL=C sort)"
 
     installed_project_name="$(
         cd "$RUNTIME"
         docker compose config --format json \
             | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name", ""))'
     )"
-    installed_images="$(cd "$RUNTIME" && docker compose config --images)"
+    installed_images="$(cd "$RUNTIME" && docker compose config --images | LC_ALL=C sort)"
 
     [[ "$checkout_project_name" == "vaultwarden-oci" ]] \
         || fail "normal production context resolved Compose project '$checkout_project_name'"
