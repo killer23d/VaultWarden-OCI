@@ -311,13 +311,6 @@ if [[ "$USE_LATEST" == "true" && "$SOPS_VERSION_ENV_SET" == "true" ]]; then
     exit 1
 fi
 
-
-# ---------------------------------------------------------------------------
-# _warn_force_destructive
-#
-# Prominent warning for `--force`, which can replace current configuration and
-# encrypted secrets while retaining the existing operational Age key.
-# ---------------------------------------------------------------------------
 _warn_force_destructive() {
     local term_cols box_width inner_width border
 
@@ -374,8 +367,6 @@ _confirm_force_acknowledgement() {
 
     _warn_force_destructive
     if [[ -t 0 ]]; then
-        # Keep the production timeout fixed; the shorter value is available
-        # only to the focused acknowledgement test hook below.
         if [[ "${VW_TEST_MODE:-false}" == "true" \
             && "${VW_SETUP_TEST_FORCE_ACK_ONLY:-false}" == "true" \
             && "${VW_SETUP_TEST_FORCE_ACK_TIMEOUT:-}" =~ ^[1-9][0-9]*$ ]]; then
@@ -399,9 +390,6 @@ _confirm_force_acknowledgement() {
     return 2
 }
 
-# FORCE safety gate.
-# This must run before any validation so --dry-run --force can still preview
-# without triggering the prompt.
 _force_ack_rc=0
 _confirm_force_acknowledgement || _force_ack_rc=$?
 if [[ "${VW_TEST_MODE:-false}" == "true" \
@@ -415,9 +403,7 @@ if [[ -z "$PHASE" ]] && { [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; }; then
 if [[ -z "$PHASE" ]] && ! validate_domain "$DOMAIN"; then log_error "Invalid domain format"; exit 1; fi
 if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid email format"; exit 1; fi
 
-
 show_post_install_summary() {
-  # VWOCI-PRR-PATCH-01: publish generated values once, never print them.
   local mode="${1:-interactive}"
   if [[ "${DRY_RUN:-false}" == "true" ]]; then
     log_info "[DRY RUN] Would publish a root-only setup credential handoff after all required phases pass."
@@ -516,7 +502,6 @@ _verify_required_utilities() {
     done
 }
 
-
 main() {
     log_header "VaultWarden-OCI Setup - Security Hardened Edition"
 
@@ -548,7 +533,6 @@ main() {
     else
         log_info "SOPS version pinned default: ${SOPS_VERSION}"
     fi
-
 
     local _dry=() _force=() _auto=() _skip_deps=() _use_latest=()
     [[ "$DRY_RUN"   == "true" ]] && _dry=(--dry-run)
@@ -586,7 +570,6 @@ main() {
 
     operation_set_phase "4" "Secrets bootstrap"
     log_phase 4 6 "Secrets bootstrap"
-    # Wait for sufficient kernel entropy before generating cryptographic keys (ux.md #34).
     wait_for_entropy "${ENTROPY_THRESHOLD:-200}" "${ENTROPY_MAX_WAIT:-60}" || true
     "${SCRIPT_DIR}/utilities/setup-secrets.sh" bootstrap \
         "${_dry[@]}" "${_force[@]}" \
@@ -601,15 +584,11 @@ main() {
       _phase_failed 5 "Required UFW firewall configuration failed"
     fi
 
-    # Apply iptables rules on a best-effort basis.
-    if [[ -x "${SCRIPT_DIR}/utilities/setup-firewall.sh" ]]; then
-        echo "INFO: Applying VaultWarden iptables rules..."
-        if "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase iptables; then
-            echo "OK: VaultWarden iptables rules applied"
-        else
-            echo "WARN: utilities/setup-firewall.sh --phase iptables did not complete successfully" >&2
-            echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
-        fi
+    if ! "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase iptables \
+      "${_auto[@]}" "${_dry[@]}" "${_force[@]}"; then
+      _phase_failed 5 "Required Docker/OCI firewall reconciliation failed" \
+        "Check Docker's firewall backend and the FORWARD/DOCKER-USER chains." \
+        "Re-run: sudo ./utilities/setup-firewall.sh --phase iptables --auto"
     fi
 
     if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
@@ -659,8 +638,6 @@ main() {
           _phase_failed 6 "Required automatic secrets configuration failed"
         fi
     elif [[ -t 0 ]] && [[ "$DRY_RUN" != "true" ]]; then
-        # Interactive setup does not auto-generate the administrator credentials,
-        # so it does not need the protected automatic-capture workspace.
         log_info ""
         log_info "Secrets can be configured now. Automatic setup is required to create the protected generated-credential handoff."
         local _secrets_ans
