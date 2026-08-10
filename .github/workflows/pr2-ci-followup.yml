@@ -16,71 +16,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          backup = Path('utilities/backup-run.sh')
-          text = backup.read_text()
-          replacements = {
-              'log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote recovery point is incomplete." >&2':
-                  'log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote emergency recovery point is incomplete." >&2',
-              'log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing or unusable." >&2':
-                  'log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing, unusable, or not delivered." >&2',
-          }
-          for old, new in replacements.items():
-              if text.count(old) != 1:
-                  raise SystemExit(f'backup message anchor count={text.count(old)}: {old[:80]}')
-              text = text.replace(old, new, 1)
-
-          old = '''        local retained_archive suffix
-          while IFS= read -r -d '' retained_archive; do
-              while IFS= read -r suffix; do
-                  [[ -f "${retained_archive}${suffix}" && ! -L "${retained_archive}${suffix}" && -s "${retained_archive}${suffix}" ]] || {
-                      log_error "[backup] Retained ${t} backup has an incomplete required cohort: $(basename "${retained_archive}${suffix}")"
-                      return 1
-                  }
-              done < <(backup_required_cohort_suffixes)
-              if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
-                  log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
-                  log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
-                  return 1
-              fi
-          done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
-'''
-          new = '''        local retained_archive suffix
-          while IFS= read -r -d '' retained_archive; do
-              if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
-                  log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
-                  log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
-                  return 1
-              fi
-              while IFS= read -r suffix; do
-                  [[ -f "${retained_archive}${suffix}" && ! -L "${retained_archive}${suffix}" && -s "${retained_archive}${suffix}" ]] || {
-                      log_error "[backup] Retained ${t} backup has an incomplete required cohort: $(basename "${retained_archive}${suffix}")"
-                      return 1
-                  }
-              done < <(backup_required_cohort_suffixes)
-          done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
-'''
-          if text.count(old) != 1:
-              raise SystemExit(f'retained-sync ordering anchor count={text.count(old)}')
-          backup.write_text(text.replace(old, new, 1))
-
-          tests = Path('tests/suites/data-protection/case-restore-recovery.bash')
-          text = tests.read_text()
-          old = 'source "$ROOT/lib/backup-utils.sh"\nCONTROL_WORKSPACE="$TMP"\nRCLONE_CONFIG_ARG=()\n_SESSION_RCLONE_REMOTE_NAME=mock\n'
-          new = 'source "$ROOT/lib/backup-utils.sh"\n_SESSION_RCLONE_REMOTE_NAME=mock\n'
-          if text.count(old) != 1:
-              raise SystemExit(f'shellcheck fixture anchor count={text.count(old)}')
-          tests.write_text(text.replace(old, new, 1))
-          PY
+          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpiYWNrdXAgPSBQYXRoKCJ1dGlsaXRpZXMvYmFja3VwLXJ1bi5zaCIpCnRleHQgPSBiYWNrdXAucmVhZF90ZXh0KCkKcmVwbGFjZW1lbnRzID0gewogICAgJ2xvZ19lcnJvciAiW2JhY2t1cF0gRW1lcmdlbmN5IHJlc3RvcmUgbWV0YWRhdGEgdXBsb2FkIEZBSUxFRDogJChiYXNlbmFtZSAiJGxvY2FsX21lbWJlciIpIChleGl0ICR7dXBsb2FkX3JjfSkg4oCUIHJlbW90ZSByZWNvdmVyeSBwb2ludCBpcyBpbmNvbXBsZXRlLiIgPiYyJzoKICAgICAgICAnbG9nX2Vycm9yICJbYmFja3VwXSBFbWVyZ2VuY3kgcmVzdG9yZSBtZXRhZGF0YSB1cGxvYWQgRkFJTEVEOiAkKGJhc2VuYW1lICIkbG9jYWxfbWVtYmVyIikgKGV4aXQgJHt1cGxvYWRfcmN9KSDigJQgcmVtb3RlIGVtZXJnZW5jeSByZWNvdmVyeSBwb2ludCBpcyBpbmNvbXBsZXRlLiIgPiYyJywKICAgICdsb2dfZXJyb3IgIltiYWNrdXBdIEVtZXJnZW5jeSBvZmZzaXRlIGRlbGl2ZXJ5IGlzIGluY29tcGxldGU6IHJlc3RvcmUtY3JpdGljYWwgbWV0YWRhdGEgaXMgbWlzc2luZyBvciB1bnVzYWJsZS4iID4mMic6CiAgICAgICAgJ2xvZ19lcnJvciAiW2JhY2t1cF0gRW1lcmdlbmN5IG9mZnNpdGUgZGVsaXZlcnkgaXMgaW5jb21wbGV0ZTogcmVzdG9yZS1jcml0aWNhbCBtZXRhZGF0YSBpcyBtaXNzaW5nLCB1bnVzYWJsZSwgb3Igbm90IGRlbGl2ZXJlZC4iID4mMicsCn0KZm9yIG9sZCwgbmV3IGluIHJlcGxhY2VtZW50cy5pdGVtcygpOgogICAgaWYgdGV4dC5jb3VudChvbGQpICE9IDE6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmImJhY2t1cCBtZXNzYWdlIGFuY2hvciBjb3VudD17dGV4dC5jb3VudChvbGQpfToge29sZFs6ODBdfSIpCiAgICB0ZXh0ID0gdGV4dC5yZXBsYWNlKG9sZCwgbmV3LCAxKQoKb2xkID0gIiIiICAgICAgICBsb2NhbCByZXRhaW5lZF9hcmNoaXZlIHN1ZmZpeAogICAgICAgIHdoaWxlIElGUz0gcmVhZCAtciAtZCAnJyByZXRhaW5lZF9hcmNoaXZlOyBkbwogICAgICAgICAgICB3aGlsZSBJRlM9IHJlYWQgLXIgc3VmZml4OyBkbwogICAgICAgICAgICAgICAgW1sgLWYgIiR7cmV0YWluZWRfYXJjaGl2ZX0ke3N1ZmZpeH0iICYmICEgLUwgIiR7cmV0YWluZWRfYXJjaGl2ZX0ke3N1ZmZpeH0iICYmIC1zICIke3JldGFpbmVkX2FyY2hpdmV9JHtzdWZmaXh9IiBdXSB8fCB7CiAgICAgICAgICAgICAgICAgICAgbG9nX2Vycm9yICJbYmFja3VwXSBSZXRhaW5lZCAke3R9IGJhY2t1cCBoYXMgYW4gaW5jb21wbGV0ZSByZXF1aXJlZCBjb2hvcnQ6ICQoYmFzZW5hbWUgIiR7cmV0YWluZWRfYXJjaGl2ZX0ke3N1ZmZpeH0iKSIKICAgICAgICAgICAgICAgICAgICByZXR1cm4gMQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICBkb25lIDwgPChiYWNrdXBfcmVxdWlyZWRfY29ob3J0X3N1ZmZpeGVzKQogICAgICAgICAgICBpZiBbWyAiJHQiID09ICJlbWVyZ2VuY3kiIF1dICYmICEgX3ZhbGlkYXRlX2VtZXJnZW5jeV9yZXN0b3JlX21ldGFkYXRhICIkcmV0YWluZWRfYXJjaGl2ZSI7IHRoZW4KICAgICAgICAgICAgICAgIGxvZ19lcnJvciAiW2JhY2t1cF0gUmV0YWluZWQgZW1lcmdlbmN5IGJhY2t1cCBpcyBub3QgcmVzdG9yZS11c2FibGU6ICQoYmFzZW5hbWUgIiRyZXRhaW5lZF9hcmNoaXZlIikiCiAgICAgICAgICAgICAgICBsb2dfZXJyb3IgIltiYWNrdXBdIFRoaXMgZW1lcmdlbmN5IHJlY292ZXJ5IHBvaW50IGlzIG5vdCBzYWZlIHRvIHJlcG9ydCBhcyBvZmZzaXRlIGNvbXBsZXRlLiIKICAgICAgICAgICAgICAgIHJldHVybiAxCiAgICAgICAgICAgIGZpCiAgICAgICAgZG9uZSA8IDwoZmluZCAiJGxvY2FsX2RpciIgLW1heGRlcHRoIDEgLW5hbWUgJyouYWdlJyAtdHlwZSBmIC1wcmludDApCiIiIgpuZXcgPSAiIiIgICAgICAgIGxvY2FsIHJldGFpbmVkX2FyY2hpdmUgc3VmZml4CiAgICAgICAgd2hpbGUgSUZTPSByZWFkIC1yIC1kICcnIHJldGFpbmVkX2FyY2hpdmU7IGRvCiAgICAgICAgICAgIGlmIFtbICIkdCIgPT0gImVtZXJnZW5jeSIgXV0gJiYgISBfdmFsaWRhdGVfZW1lcmdlbmN5X3Jlc3RvcmVfbWV0YWRhdGEgIiRyZXRhaW5lZF9hcmNoaXZlIjsgdGhlbgogICAgICAgICAgICAgICAgbG9nX2Vycm9yICJbYmFja3VwXSBSZXRhaW5lZCBlbWVyZ2VuY3kgYmFja3VwIGlzIG5vdCByZXN0b3JlLXVzYWJsZTogJChiYXNlbmFtZSAiJHJldGFpbmVkX2FyY2hpdmUiKSIKICAgICAgICAgICAgICAgIGxvZ19lcnJvciAiW2JhY2t1cF0gVGhpcyBlbWVyZ2VuY3kgcmVjb3ZlcnkgcG9pbnQgaXMgbm90IHNhZmUgdG8gcmVwb3J0IGFzIG9mZnNpdGUgY29tcGxldGUuIgogICAgICAgICAgICAgICAgcmV0dXJuIDEKICAgICAgICAgICAgZmkKICAgICAgICAgICAgd2hpbGUgSUZTPSByZWFkIC1yIHN1ZmZpeDsgZG8KICAgICAgICAgICAgICAgIFtbIC1mICIke3JldGFpbmVkX2FyY2hpdmV9JHtzdWZmaXh9IiAmJiAhIC1MICIke3JldGFpbmVkX2FyY2hpdmV9JHtzdWZmaXh9IiAmJiAtcyAiJHtyZXRhaW5lZF9hcmNoaXZlfSR7c3VmZml4fSIgXV0gfHwgewogICAgICAgICAgICAgICAgICAgIGxvZ19lcnJvciAiW2JhY2t1cF0gUmV0YWluZWQgJHt0fSBiYWNrdXAgaGFzIGFuIGluY29tcGxldGUgcmVxdWlyZWQgY29ob3J0OiAkKGJhc2VuYW1lICIke3JldGFpbmVkX2FyY2hpdmV9JHtzdWZmaXh9IikiCiAgICAgICAgICAgICAgICAgICAgcmV0dXJuIDEKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgZG9uZSA8IDwoYmFja3VwX3JlcXVpcmVkX2NvaG9ydF9zdWZmaXhlcykKICAgICAgICBkb25lIDwgPChmaW5kICIkbG9jYWxfZGlyIiAtbWF4ZGVwdGggMSAtbmFtZSAnKi5hZ2UnIC10eXBlIGYgLXByaW50MCkKIiIiCmlmIHRleHQuY291bnQob2xkKSAhPSAxOgogICAgcmFpc2UgU3lzdGVtRXhpdChmInJldGFpbmVkLXN5bmMgb3JkZXJpbmcgYW5jaG9yIGNvdW50PXt0ZXh0LmNvdW50KG9sZCl9IikKYmFja3VwLndyaXRlX3RleHQodGV4dC5yZXBsYWNlKG9sZCwgbmV3LCAxKSkKCnRlc3RzID0gUGF0aCgidGVzdHMvc3VpdGVzL2RhdGEtcHJvdGVjdGlvbi9jYXNlLXJlc3RvcmUtcmVjb3ZlcnkuYmFzaCIpCnRleHQgPSB0ZXN0cy5yZWFkX3RleHQoKQpvbGQgPSAnc291cmNlICIkUk9PVC9saWIvYmFja3VwLXV0aWxzLnNoIlxuQ09OVFJPTF9XT1JLU1BBQ0U9IiRUTVAiXG5SQ0xPTkVfQ09ORklHX0FSRz0oKVxuX1NFU1NJT05fUkNMT05FX1JFTU9URV9OQU1FPW1vY2tcbicKbmV3ID0gJ3NvdXJjZSAiJFJPT1QvbGliL2JhY2t1cC11dGlscy5zaCJcbl9TRVNTSU9OX1JDTE9ORV9SRU1PVEVfTkFNRT1tb2NrXG4nCmlmIHRleHQuY291bnQob2xkKSAhPSAxOgogICAgcmFpc2UgU3lzdGVtRXhpdChmInNoZWxsY2hlY2sgZml4dHVyZSBhbmNob3IgY291bnQ9e3RleHQuY291bnQob2xkKX0iKQp0ZXN0cy53cml0ZV90ZXh0KHRleHQucmVwbGFjZShvbGQsIG5ldywgMSkpCg==' | base64 -d > /tmp/fix.py
+          python3 /tmp/fix.py
           DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
-          bash -n utilities/backup-run.sh utilities/restore-run.sh \
-            tests/suites/data-protection/case-backup.bash \
-            tests/suites/data-protection/case-restore-recovery.bash
-          shellcheck -x --severity=warning utilities/backup-run.sh utilities/restore-run.sh \
-            tests/suites/data-protection/case-backup.bash \
-            tests/suites/data-protection/case-restore-recovery.bash
+          bash -n utilities/backup-run.sh utilities/restore-run.sh tests/suites/data-protection/case-backup.bash tests/suites/data-protection/case-restore-recovery.bash
+          shellcheck -x --severity=warning utilities/backup-run.sh utilities/restore-run.sh tests/suites/data-protection/case-backup.bash tests/suites/data-protection/case-restore-recovery.bash
           git diff --check
       - name: Install focused test dependencies
         shell: bash
@@ -107,7 +47,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm .github/workflows/pr2-ci-followup.yml
-          git add utilities/backup-run.sh docs/COMMAND-REFERENCE.md \
-            tests/suites/data-protection/case-restore-recovery.bash
+          git add utilities/backup-run.sh docs/COMMAND-REFERENCE.md tests/suites/data-protection/case-restore-recovery.bash
           git commit -m 'backup: fix cohort CI regressions'
           git push origin HEAD:fix/authenticated-backup-cohort
