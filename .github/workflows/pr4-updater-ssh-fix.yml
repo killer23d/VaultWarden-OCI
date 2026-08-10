@@ -1,0 +1,52 @@
+name: PR4 updater SSH collision fix
+
+on:
+  push:
+    branches:
+      - pr4-firewall-exactness
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ !contains(github.event.head_commit.message, '[skip pr4-updater-ssh]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Apply updater collision fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --rebase origin pr4-firewall-exactness
+          python3 .pr4-updater-ssh-fix.py
+      - name: Validate updater collision fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n \
+            lib/firewall.sh \
+            utilities/maintenance-update-firewall.sh \
+            tests/suites/operations/case-firewall-update.bash
+          shellcheck -x --severity=warning \
+            lib/firewall.sh \
+            utilities/maintenance-update-firewall.sh \
+            tests/suites/operations/case-firewall-update.bash
+          bash tests/suites/operations/case-firewall-update.bash
+          ./tests/run-tests.sh operations
+          git diff --check
+      - name: Commit validated updater fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            lib/firewall.sh \
+            utilities/maintenance-update-firewall.sh \
+            tests/suites/operations/case-firewall-update.bash
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'firewall: reject SSH web-port collision in updater [skip pr4-updater-ssh]'
+          git push origin HEAD:pr4-firewall-exactness
