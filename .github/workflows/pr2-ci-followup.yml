@@ -21,11 +21,17 @@ jobs:
 
           backup = Path('utilities/backup-run.sh')
           text = backup.read_text()
-          old = 'log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote recovery point is incomplete." >&2'
-          new = 'log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote emergency recovery point is incomplete." >&2'
-          if text.count(old) != 1:
-              raise SystemExit(f'backup message anchor count={text.count(old)}')
-          backup.write_text(text.replace(old, new, 1))
+          replacements = {
+              'log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote recovery point is incomplete." >&2':
+                  'log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote emergency recovery point is incomplete." >&2',
+              'log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing or unusable." >&2':
+                  'log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing, unusable, or not delivered." >&2',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'backup message anchor count={text.count(old)}: {old[:80]}')
+              text = text.replace(old, new, 1)
+          backup.write_text(text)
 
           tests = Path('tests/suites/data-protection/case-restore-recovery.bash')
           text = tests.read_text()
