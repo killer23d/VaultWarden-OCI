@@ -22,72 +22,12 @@ jobs:
           set -euo pipefail
           git pull --rebase origin pr4-firewall-exactness
           python3 - <<'PY'
+          import base64
           from pathlib import Path
-
           p = Path('tests/suites/operations/case-firewall-update.bash')
           text = p.read_text()
-          anchor = '''# PR4 iptables acceptance checks: Docker owns normal forwarding/NAT; this
-          # project only removes OCI/legacy exceptions after a successful rollback snapshot.
-          '''
-          block = r'''# Initial setup UFW acceptance checks use the same stateful UFW mock.
-SETUP_UFW_PROBE="$TMP/setup-ufw-probe.bash"
-cat > "$SETUP_UFW_PROBE" <<'EOF_SETUP_UFW'
-#!/usr/bin/env bash
-set -euo pipefail
-DRY_RUN=false
-log_error(){ printf 'ERROR: %s\n' "$*" >> "${LOG_FILE:?}"; }
-log_dry_run(){ :; }
-EOF_SETUP_UFW
-extract_func "$SETUP_FIREWALL" _ufw_status >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_has_range_port >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_line_cidr >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_collect_conflicts >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_delete_rules >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_ensure_range >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_verify_exact >> "$SETUP_UFW_PROBE"
-cat >> "$SETUP_UFW_PROBE" <<'EOF_SETUP_UFW'
-case "${SETUP_UFW_CASE:?}" in
-    verify)
-        _ufw_verify_exact 22 203.0.113.0/24
-        ;;
-    ensure)
-        _ufw_ensure_range 203.0.113.0/24 CF-IPv4
-        ;;
-    *) exit 2 ;;
-esac
-EOF_SETUP_UFW
-chmod 0755 "$SETUP_UFW_PROBE"
-
-reset_case setup-public-readiness
-cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
-Status: active
-22/tcp ALLOW IN Anywhere
-80/tcp ALLOW IN 203.0.113.0/24
-443/tcp ALLOW IN 203.0.113.0/24
-EOF_STATUS
-cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
-[ 1] 22/tcp ALLOW IN Anywhere
-[ 2] 80/tcp ALLOW IN 203.0.113.0/24
-[ 3] 443/tcp ALLOW IN 203.0.113.0/24
-[ 4] 80/tcp ALLOW IN Anywhere
-EOF_RULES
-set +e
-PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
-SETUP_UFW_RC=$?
-set -e
-[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted broad public port 80 ingress"
-assert_file_contains "$LOG_FILE" 'Conflicting public or stale managed UFW 80/443 rules remain'
-
-reset_case setup-single-cidr-failure
-export UFW_ALLOW80_RC=46 UFW_ALLOW80_OUTPUT='simulated initial setup CIDR failure'
-set +e
-PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=ensure "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
-SETUP_UFW_RC=$?
-set -e
-[[ "$SETUP_UFW_RC" -eq 46 ]] || fail "initial UFW CIDR mutation returned $SETUP_UFW_RC instead of 46"
-assert_file_contains "$LOG_FILE" 'simulated initial setup CIDR failure'
-
-'''
+          anchor = "# PR4 iptables acceptance checks: Docker owns normal forwarding/NAT; this\n# project only removes OCI/legacy exceptions after a successful rollback snapshot.\n"
+          block = base64.b64decode("IyBJbml0aWFsIHNldHVwIFVGVyBhY2NlcHRhbmNlIGNoZWNrcyB1c2UgdGhlIHNhbWUgc3RhdGVmdWwgVUZXIG1vY2suClNFVFVQX1VGV19QUk9CRT0iJFRNUC9zZXR1cC11ZnctcHJvYmUuYmFzaCIKY2F0ID4gIiRTRVRVUF9VRldfUFJPQkUiIDw8J0VPRl9TRVRVUF9VRlcnCiMhL3Vzci9iaW4vZW52IGJhc2gKc2V0IC1ldW8gcGlwZWZhaWwKRFJZX1JVTj1mYWxzZQpsb2dfZXJyb3IoKXsgcHJpbnRmICdFUlJPUjogJXNcbicgIiQqIiA+PiAiJHtMT0dfRklMRTo/fSI7IH0KbG9nX2RyeV9ydW4oKXsgOjsgfQpFT0ZfU0VUVVBfVUZXCmV4dHJhY3RfZnVuYyAiJFNFVFVQX0ZJUkVXQUxMIiBfdWZ3X3N0YXR1cyA+PiAiJFNFVFVQX1VGV19QUk9CRSIKZXh0cmFjdF9mdW5jICIkU0VUVVBfRklSRVdBTEwiIF91ZndfaGFzX3JhbmdlX3BvcnQgPj4gIiRTRVRVUF9VRldfUFJPQkUiCmV4dHJhY3RfZnVuYyAiJFNFVFVQX0ZJUkVXQUxMIiBfdWZ3X2xpbmVfY2lkciA+PiAiJFNFVFVQX1VGV19QUk9CRSIKZXh0cmFjdF9mdW5jICIkU0VUVVBfRklSRVdBTEwiIF91ZndfY29sbGVjdF9jb25mbGljdHMgPj4gIiRTRVRVUF9VRldfUFJPQkUiCmV4dHJhY3RfZnVuYyAiJFNFVFVQX0ZJUkVXQUxMIiBfdWZ3X2RlbGV0ZV9ydWxlcyA+PiAiJFNFVFVQX1VGV19QUk9CRSIKZXh0cmFjdF9mdW5jICIkU0VUVVBfRklSRVdBTEwiIF91ZndfZW5zdXJlX3JhbmdlID4+ICIkU0VUVVBfVUZXX1BST0JFIgpleHRyYWN0X2Z1bmMgIiRTRVRVUF9GSVJFV0FMTCIgX3Vmd192ZXJpZnlfZXhhY3QgPj4gIiRTRVRVUF9VRldfUFJPQkUiCmNhdCA+PiAiJFNFVFVQX1VGV19QUk9CRSIgPDwnRU9GX1NFVFVQX1VGVycKY2FzZSAiJHtTRVRVUF9VRldfQ0FTRTo/fSIgaW4KICAgIHZlcmlmeSkKICAgICAgICBfdWZ3X3ZlcmlmeV9leGFjdCAyMiAyMDMuMC4xMTMuMC8yNAogICAgICAgIDs7CiAgICBlbnN1cmUpCiAgICAgICAgX3Vmd19lbnN1cmVfcmFuZ2UgMjAzLjAuMTEzLjAvMjQgQ0YtSVB2NAogICAgICAgIDs7CiAgICAqKSBleGl0IDIgOzsKZXNhYwpFT0ZfU0VUVVBfVUZXCmNobW9kIDA3NTUgIiRTRVRVUF9VRldfUFJPQkUiCgpyZXNldF9jYXNlIHNldHVwLXB1YmxpYy1yZWFkaW5lc3MKY2F0ID4gIiRVRldfU1RBVFVTX0ZJTEUiIDw8J0VPRl9TVEFUVVMnClN0YXR1czogYWN0aXZlCjIyL3RjcCBBTExPVyBJTiBBbnl3aGVyZQo4MC90Y3AgQUxMT1cgSU4gMjAzLjAuMTEzLjAvMjQKNDQzL3RjcCBBTExPVyBJTiAyMDMuMC4xMTMuMC8yNApFT0ZfU1RBVFVTCmNhdCA+ICIkVUZXX05VTUJFUkVEX0ZJTEUiIDw8J0VPRl9SVUxFUycKWyAxXSAyMi90Y3AgQUxMT1cgSU4gQW55d2hlcmUKWyAyXSA4MC90Y3AgQUxMT1cgSU4gMjAzLjAuMTEzLjAvMjQKWyAzXSA0NDMvdGNwIEFMTE9XIElOIDIwMy4wLjExMy4wLzI0ClsgNF0gODAvdGNwIEFMTE9XIElOIEFueXdoZXJlCkVPRl9SVUxFUwpzZXQgK2UKUEFUSD0iJFRNUC9iaW46JFBBVEgiIFNFVFVQX1VGV19DQVNFPXZlcmlmeSAiJEJBU0giICIkU0VUVVBfVUZXX1BST0JFIiA+IiRDQVNFX09VVFBVVCIgMj4mMQpTRVRVUF9VRldfUkM9JD8Kc2V0IC1lCltbICIkU0VUVVBfVUZXX1JDIiAtbmUgMCBdXSB8fCBmYWlsICJpbml0aWFsIFVGVyByZWFkaW5lc3MgYWNjZXB0ZWQgYnJvYWQgcHVibGljIHBvcnQgODAgaW5ncmVzcyIKYXNzZXJ0X2ZpbGVfY29udGFpbnMgIiRMT0dfRklMRSIgJ0NvbmZsaWN0aW5nIHB1YmxpYyBvciBzdGFsZSBtYW5hZ2VkIFVGVyA4MC80NDMgcnVsZXMgcmVtYWluJwoKcmVzZXRfY2FzZSBzZXR1cC1zaW5nbGUtY2lkci1mYWlsdXJlCmV4cG9ydCBVRldfQUxMT1c4MF9SQz00NiBVRldfQUxMT1c4MF9PVVRQVVQ9J3NpbXVsYXRlZCBpbml0aWFsIHNldHVwIENJRFIgZmFpbHVyZScKc2V0ICtlClBBVEg9IiRUTVAvYmluOiRQQVRIIiBTRVRVUF9VRldfQ0FTRT1lbnN1cmUgIiRCQVNIIiAiJFNFVFVQX1VGV19QUk9CRSIgPiIkQ0FTRV9PVVRQVVQiIDI+JjEKU0VUVVBfVUZXX1JDPSQ/CnNldCAtZQpbWyAiJFNFVFVQX1VGV19SQyIgLWVxIDQ2IF1dIHx8IGZhaWwgImluaXRpYWwgVUZXIENJRFIgbXV0YXRpb24gcmV0dXJuZWQgJFNFVFVQX1VGV19SQyBpbnN0ZWFkIG9mIDQ2Igphc3NlcnRfZmlsZV9jb250YWlucyAiJExPR19GSUxFIiAnc2ltdWxhdGVkIGluaXRpYWwgc2V0dXAgQ0lEUiBmYWlsdXJlJwoK").decode()
           if anchor not in text:
               raise SystemExit('iptables acceptance anchor not found')
           if 'SETUP_UFW_PROBE=' in text:
