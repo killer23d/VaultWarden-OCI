@@ -14,15 +14,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
       - name: Deduplicate rollback assertions
         run: |
           set -euo pipefail
+          git pull --rebase origin pr4-firewall-exactness
           f=tests/suites/operations/case-firewall-update.bash
           awk '!($0 ~ /assert_file_contains .*_iptables_signal_rollback/ && seen[$0]++)' "$f" > "$f.tmp"
           mv "$f.tmp" "$f"
           bash -n "$f" utilities/setup-firewall.sh
           git diff --check
           git add "$f"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git commit -m 'test: deduplicate rollback assertions [skip pr4-clean]'
