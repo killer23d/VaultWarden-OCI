@@ -1,28 +1,21 @@
-# Re-apply VaultWarden NAT and DOCKER-USER rules after Docker starts.
-# Docker rebuilds DOCKER-USER on boot, so this unit keeps the firewall policy
-# in place. Use `sudo ./setup.sh systemd install` to install it.
+# Reconcile runtime OCI/Docker firewall state after Docker starts.
+# Docker owns bridge forwarding, isolation, and container NAT. This unit only
+# removes the OCI FORWARD reject and obsolete VaultWarden exceptions.
 
 [Unit]
-Description=VaultWarden iptables NAT and DOCKER-USER rules
+Description=VaultWarden Docker firewall runtime reconciliation
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=network-online.target docker.service
 Wants=docker.service
 Wants=network-online.target
-# On failure wait 10 s then retry up to 3 times, in case Docker is still
-# initialising its bridge networks during a race at boot.
 StartLimitIntervalSec=60s
 StartLimitBurst=3
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-
-# NOTE: SSH and web brute-force iptables bans are managed by crowdsec-firewall-bouncer, not this service.
-
-# Resolve the project root relative to this unit's installed location.
-# utilities/setup-firewall.sh uses SCRIPT_DIR to locate docker-compose.yml,
-# so WorkingDirectory must point to the installed repo root while preserving
-# the utilities/ subdirectory layout.
+User=root
+Group=root
 WorkingDirectory=/opt/vaultwarden-scripts
 ExecStart=/bin/bash /opt/vaultwarden-scripts/utilities/setup-firewall.sh --phase iptables --auto
 ExecStop=/bin/true
@@ -31,14 +24,16 @@ SuccessExitStatus=0 75
 Restart=on-failure
 RestartSec=10s
 
-# Tighten the unit's own privileges — the script itself re-execs via sudo
-# if not already root, so we allow that escalation path here.
+# The reconciliation script needs only runtime lock/snapshot writes. It does
+# not install packages, save persistent firewall state, or write the project tree.
+NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 RuntimeDirectory=vaultwarden-oci vaultwarden-iptables
+RuntimeDirectoryMode=0750
 Environment=TMPDIR=/run/vaultwarden-iptables
-ReadWritePaths=/run/xtables.lock /run/lock /run/vaultwarden-oci
+ReadWritePaths=/run/xtables.lock /run/lock /run/vaultwarden-oci /run/vaultwarden-iptables
 
 StandardOutput=journal
 StandardError=journal
