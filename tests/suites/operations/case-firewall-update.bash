@@ -351,6 +351,8 @@ assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 130' INT
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 143' TERM"
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 130' INT"
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 143' TERM"
+assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 130' INT"
+assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 143' TERM"
 
 compose_file="$ROOT/docker-compose.yml.example"
 for cidr in 172.21.0.0/28 172.22.0.0/28 172.23.0.0/28; do
