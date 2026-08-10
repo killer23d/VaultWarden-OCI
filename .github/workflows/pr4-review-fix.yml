@@ -54,6 +54,7 @@ jobs:
             tests/suites/operations/case-firewall-update.bash
           docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
           DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
+          bash tests/suites/operations/case-firewall-update.bash
           ./tests/run-tests.sh operations
           git diff --check
       - name: Commit validated fixes
