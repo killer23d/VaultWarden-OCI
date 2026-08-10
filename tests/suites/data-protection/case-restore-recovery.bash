@@ -2338,7 +2338,27 @@ grep -Fq 'RECOVERY_KIT_INTEGRITY_HMAC_KEY' "$RESTORE" || fail 'recovery kit does
 verify_line=$(grep -nF 'verify_file_integrity "$BACKUP_FILE"' "$RESTORE" | head -1 | cut -d: -f1)
 stop_line=$(grep -nF 'docker compose stop --timeout 30' "$RESTORE" | head -1 | cut -d: -f1)
 [[ -n "$verify_line" && -n "$stop_line" ]] && (( verify_line < stop_line )) || fail 'authenticated verification must happen before destructive service stop'
-printf 'PASS: restore authenticates required cohort before destructive work and can stage recovery-kit integrity key\n'
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+has_command(){ command -v "$1" >/dev/null 2>&1; }
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/crypto.sh"
+archive="$TMP/restore-guard.age"
+printf 'encrypted-restore-payload' > "$archive"
+FILE_INTEGRITY_HMAC_KEY='restore-guard-key'
+REQUIRE_AUTHENTICATED_INTEGRITY=true
+write_file_integrity "$archive" || fail 'could not create restore-guard integrity sidecars'
+run_destructive_guard(){
+    verify_file_integrity "$archive" || return 1
+    : > "$TMP/destructive-work-reached"
+}
+printf tampered > "${archive}.sha256.hmac"
+if run_destructive_guard >/dev/null 2>&1; then fail 'tampered HMAC reached destructive restore work'; fi
+[[ ! -e "$TMP/destructive-work-reached" ]] || fail 'tampered HMAC reached destructive restore marker'
+write_file_integrity "$archive" || fail 'could not recreate restore-guard integrity sidecars'
+rm -f "${archive}.sha256.hmac"
+if run_destructive_guard >/dev/null 2>&1; then fail 'missing HMAC reached destructive restore work'; fi
+[[ ! -e "$TMP/destructive-work-reached" ]] || fail 'missing HMAC reached destructive restore marker'
+printf 'PASS: restore rejects tampered/missing authenticated HMAC before destructive work\n'
 )
 check_authenticated_restore_cohort_contract
 

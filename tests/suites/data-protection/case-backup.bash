@@ -2465,17 +2465,20 @@ source "$ROOT/lib/log.sh"
 source "$ROOT/lib/crypto.sh"
 source "$ROOT/lib/backup-utils.sh"
 has_command(){ command -v "$1" >/dev/null 2>&1; }
-archive="$TMP/db-test.age"
-printf 'encrypted-payload' > "$archive"
 FILE_INTEGRITY_HMAC_KEY='cohort-test-key'
 REQUIRE_AUTHENTICATED_INTEGRITY=true
 export FILE_INTEGRITY_HMAC_KEY REQUIRE_AUTHENTICATED_INTEGRITY
-write_file_integrity "$archive" || fail 'strict integrity sidecars were not produced'
-printf 'backup_type=db\narchive_format=relative\nversion=2\nencryption_mode=age-recipient\n' > "${archive}.meta"
-chmod 600 "$archive" "${archive}.sha256" "${archive}.sha256.hmac" "${archive}.meta"
 mapfile -t suffixes < <(backup_required_cohort_suffixes)
 [[ "${suffixes[*]}" == ' .sha256 .sha256.hmac .meta' ]] || fail 'strict cohort definition drifted'
-verify_file_integrity "$archive" || fail 'valid authenticated cohort did not verify'
+for backup_type in db full; do
+    archive="$TMP/${backup_type}-test.age"
+    printf 'encrypted-payload-%s' "$backup_type" > "$archive"
+    write_file_integrity "$archive" || fail "strict ${backup_type} integrity sidecars were not produced"
+    printf 'backup_type=%s\narchive_format=relative\nversion=2\nencryption_mode=age-recipient\n' "$backup_type" > "${archive}.meta"
+    chmod 600 "$archive" "${archive}.sha256" "${archive}.sha256.hmac" "${archive}.meta"
+    verify_file_integrity "$archive" || fail "valid authenticated ${backup_type} cohort did not verify"
+done
+archive="$TMP/db-test.age"
 printf tampered > "${archive}.sha256.hmac"
 if verify_file_integrity "$archive" >/dev/null 2>&1; then fail 'tampered HMAC verified'; fi
 write_file_integrity "$archive" || fail 'could not recreate integrity sidecars'
