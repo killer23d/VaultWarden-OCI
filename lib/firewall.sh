@@ -264,9 +264,9 @@ firewall_reconcile_cloudflare_docker_ingress() {
     fi
 
     # Put fail-closed, project-scoped sentinels at the front before replacing
-    # any existing managed rules. Unrelated Docker destinations fall through.
-    # managed rules. A failed refresh may temporarily block web traffic, but it
-    # cannot leave the origin publicly exposed.
+    # existing managed rules. A failed refresh may temporarily block project web
+    # traffic, but unrelated Docker destinations fall through and the origin is
+    # never left publicly exposed.
     iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
         -d "$VW_CADDY_EXTERNAL_CIDR" -p tcp -m conntrack --ctorigdstport 443 -j DROP || return $?
     iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \

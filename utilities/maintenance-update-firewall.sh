@@ -64,6 +64,18 @@ update_firewall_ranges() {
 
     require_root "$@"
 
+    local ssh_port
+    ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port="$(awk '/^Port[[:space:]]/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null || true)"
+    fi
+    ssh_port="${ssh_port:-22}"
+    if [[ "$ssh_port" == "80" || "$ssh_port" == "443" ]]; then
+        log_error "SSH port ${ssh_port}/tcp conflicts with managed Cloudflare web ingress."
+        log_error "Move SSH to a dedicated non-web port before updating firewall rules."
+        return 1
+    fi
+
     log_info "Safely updating Cloudflare IP ranges in UFW and Docker ingress filtering..."
     local cf_ipv4_file cf_ipv6_file
     cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)

@@ -47,6 +47,16 @@ extract_func() {
 
 mkdir -p "$TMP/bin"
 
+cat > "$TMP/bin/sshd" <<'EOF_SSHD_UPDATER'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-T" ]]; then
+    printf 'port %s\n' "${SSHD_PORT:-22}"
+    exit 0
+fi
+exit 2
+EOF_SSHD_UPDATER
+chmod 0755 "$TMP/bin/sshd"
+
 cat > "$TMP/bin/curl" <<'EOF_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -224,7 +234,7 @@ reset_case() {
     unset UFW_VERBOSE_RC UFW_VERBOSE_OUTPUT
     unset UFW_ALLOW80_RC UFW_ALLOW80_OUTPUT UFW_ALLOW443_RC UFW_ALLOW443_OUTPUT
     unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE
-    unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC
+    unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC SSHD_PORT
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
     export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_CALL_LOG FW_CALL_LOG LOG_FILE
@@ -251,6 +261,22 @@ write_ipv4_status() {
     fi
 }
 
+
+reset_case updater-ssh-port-80-collision
+export SSHD_PORT=80
+run_case
+[[ "$CASE_RC" -ne 0 ]] || fail "periodic updater accepted SSH on port 80"
+assert_file_contains "$LOG_FILE" 'SSH port 80/tcp conflicts with managed Cloudflare web ingress'
+[[ ! -s "$UFW_CALL_LOG" ]] || fail "periodic updater mutated UFW before rejecting SSH port 80"
+[[ ! -s "$FW_CALL_LOG" ]] || fail "periodic updater touched Docker firewall before rejecting SSH port 80"
+
+reset_case updater-ssh-port-443-collision
+export SSHD_PORT=443
+run_case
+[[ "$CASE_RC" -ne 0 ]] || fail "periodic updater accepted SSH on port 443"
+assert_file_contains "$LOG_FILE" 'SSH port 443/tcp conflicts with managed Cloudflare web ingress'
+[[ ! -s "$UFW_CALL_LOG" ]] || fail "periodic updater mutated UFW before rejecting SSH port 443"
+[[ ! -s "$FW_CALL_LOG" ]] || fail "periodic updater touched Docker firewall before rejecting SSH port 443"
 
 reset_case docker-preflight-failure
 export FW_PREFLIGHT_RC=60
