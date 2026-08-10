@@ -2471,16 +2471,26 @@ source "$ROOT/lib/backup-utils.sh"
 _SESSION_RCLONE_REMOTE_NAME=mock
 _SESSION_RCLONE_REMOTE_PATH=backups
 _REMOTE_FILES=(); _REMOTE_TYPES=()
+REQUIRE_AUTHENTICATED_INTEGRITY=true
 get_config_value(){ printf '%s\n' "${2:-}"; }
 rclone(){
   local cmd="${1:-}"; shift || true
   case "$cmd" in
     lsf)
-      if [[ "${REMOTE_MODE:-empty}" == fail ]]; then
-        printf 'authentication failed\n' >&2
-        return 17
-      fi
-      return 0
+      case "${REMOTE_MODE:-empty}" in
+        fail)
+          printf 'authentication failed\n' >&2
+          return 17
+          ;;
+        incomplete)
+          printf '%s\n' \
+            'db_backup_20990101_000000.sqlite3.age' \
+            'db_backup_20990101_000000.sqlite3.age.sha256' \
+            'db_backup_20990101_000000.sqlite3.age.meta'
+          return 0
+          ;;
+        *) return 0 ;;
+      esac
       ;;
     *) return 0 ;;
   esac
@@ -2490,6 +2500,13 @@ REMOTE_MODE=empty
 list_remote_backups >"$TMP/empty.out" 2>&1 || fail 'genuinely empty remote should not be reported as an rclone failure'
 [[ ${#_REMOTE_FILES[@]} -eq 0 ]] || fail 'empty remote unexpectedly produced a trusted selection'
 grep -Fq 'No complete remote backup cohorts found' "$TMP/empty.out" || fail 'empty remote outcome was not reported clearly'
+REMOTE_MODE=incomplete
+list_remote_backups >"$TMP/incomplete.out" 2>&1 || fail 'incomplete remote cohort should be skipped, not treated as a transport failure'
+[[ ${#_REMOTE_FILES[@]} -eq 0 ]] || fail 'incomplete remote cohort was auto-selected as trusted'
+grep -Fq 'Skipping incomplete remote' "$TMP/incomplete.out" \
+  || fail 'incomplete remote cohort was not diagnosed as incomplete'
+grep -Fq '.sha256.hmac' "$TMP/incomplete.out" \
+  || fail 'incomplete strict remote cohort did not identify the missing HMAC sidecar'
 REMOTE_MODE=fail
 if list_remote_backups >"$TMP/fail.out" 2>&1; then fail 'rclone/auth listing failure returned success'; fi
 grep -Fq 'Remote backup listing failed' "$TMP/fail.out" || fail 'rclone listing failure was not distinguished from empty remote'
