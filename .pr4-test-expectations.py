@@ -41,4 +41,32 @@ if old not in t:
     raise SystemExit('restricted final diagnostic anchor not found')
 t = t.replace(old, new, 1)
 
+old = '''reset_case ipv6-existing
+: > "$CF_IPV4_FILE"
+printf '2001:db8::/32\\n' > "$CF_IPV6_FILE"
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+80/tcp (v6) ALLOW IN 2001:db8::/32
+443/tcp (v6) ALLOW IN 2001:db8::/32
+EOF_STATUS
+run_case
+[[ "$CASE_RC" -eq 0 ]] || fail "existing IPv6 rules failed with $CASE_RC"
+assert_no_call ' allow '
+'''
+new = '''reset_case ipv6-existing
+printf '203.0.113.0/24\\n' > "$CF_IPV4_FILE"
+printf '2001:db8::/32\\n' > "$CF_IPV6_FILE"
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+80/tcp ALLOW IN 203.0.113.0/24
+443/tcp ALLOW IN 203.0.113.0/24
+80/tcp (v6) ALLOW IN 2001:db8::/32
+443/tcp (v6) ALLOW IN 2001:db8::/32
+EOF_STATUS
+run_case
+[[ "$CASE_RC" -eq 0 ]] || fail "existing IPv4+IPv6 rules failed with $CASE_RC"
+assert_no_call ' allow '
+'''
+if old not in t:
+    raise SystemExit('IPv6 idempotency anchor not found')
+t = t.replace(old, new, 1)
+
 p.write_text(t)
