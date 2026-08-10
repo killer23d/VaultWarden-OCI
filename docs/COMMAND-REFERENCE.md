@@ -878,9 +878,9 @@ USAGE:
     sudo ./maintenance.sh update-firewall [OPTIONS]
 
 DESCRIPTION:
-    Fetches the current Cloudflare IP ranges (IPv4 + IPv6) and adds any new
-    ranges to UFW as allow rules for ports 80 and 443.  Removes stale rules
-    for ranges Cloudflare has retired.
+    Fetches the current Cloudflare IP ranges (IPv4 + IPv6) and reconciles UFW
+    so ports 80 and 443 are allowed only from those ranges. Conflicting public
+    ingress and retired managed Cloudflare rules are removed.
 
     Skipped automatically when CLOUDFLARE_PROXY_ENABLED is not "true".
 
@@ -1376,29 +1376,25 @@ USAGE:
     sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [OPTIONS]
 
 DESCRIPTION:
-    Configures UFW (with Cloudflare CIDR restrictions) and iptables NAT /
-    DOCKER-USER rules for the VaultWarden compose project. Safe to re-run
-    (idempotent). Called automatically by setup.sh during phase 6.
+    Reconciles the Cloudflare-only UFW ingress contract and removes the OCI
+    FORWARD reject that can block Docker forwarding. Docker remains authoritative
+    for bridge forwarding, inter-network isolation, and container masquerading.
 
 OPTIONS:
     --phase ufw|iptables|all   Phase to run (default: all)
-    --auto                     Non-interactive mode (implies --yes)
-    --yes                      Auto-confirm the netfilter-persistent install prompt
+    --auto                     Non-interactive mode
     --dry-run                  Preview actions without executing
-    --force                    Skip confirmations
-    --force-iptables           Continue iptables setup even when an active nftables
-                               ruleset is detected. Use only when you have verified
-                               that nftables will not override these iptables rules.
+    --force                    Reconcile even when the current state appears ready
     --help, -h                 Show this help
     --version, -V              Print the VaultWarden-OCI version and exit
 
 NOTES:
-    UFW rules must be applied AFTER Docker installation. Docker rewrites iptables
-    chains during installation; rules set before Docker is installed are silently
-    bypassed by Docker's DOCKER-USER chain.
+    The iptables phase supports Docker's iptables firewall backend only. Native
+    Docker nftables firewall mode or disabled Docker iptables management is not
+    supported by this project.
 
-    The systemd unit vaultwarden-iptables.service calls this script with
-    --phase iptables to re-apply NAT rules after a Docker upgrade resets chains.
+    vaultwarden-iptables.service owns boot-time runtime reconciliation. This
+    script does not install firewall packages or persist rules to disk.
 
 EXAMPLES:
     sudo utilities/setup-firewall.sh

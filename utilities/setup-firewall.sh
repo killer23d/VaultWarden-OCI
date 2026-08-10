@@ -235,7 +235,7 @@ _ufw_verify_exact() {
 
 _phase_ufw() {
     local ssh_port
-    ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')"
+    ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
     if [[ -z "$ssh_port" ]]; then
         ssh_port="$(awk '/^Port[[:space:]]/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null || true)"
     fi
