@@ -668,6 +668,9 @@ assert_file_contains "$iptables_unit" 'ProtectSystem=strict'
 assert_file_contains "$iptables_unit" 'NoNewPrivileges=yes'
 assert_file_contains "$iptables_unit" 'Environment=TMPDIR=/run/vaultwarden-iptables'
 assert_file_contains "$iptables_unit" 'ReadWritePaths=/run/xtables.lock /run/lock /run/vaultwarden-oci /run/vaultwarden-iptables'
+assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/touch /run/xtables.lock'
+assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/chown root:root /run/xtables.lock'
+assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/chmod 0600 /run/xtables.lock'
 ! grep -Eq 'netfilter-persistent|apt(-get)?|/etc/iptables|/etc/ufw' "$iptables_unit" \
     || fail "vaultwarden-iptables.service retains persistence/package ownership"
 assert_file_contains "$startup_unit" 'Requires=docker.service vaultwarden-iptables.service'
