@@ -23,6 +23,7 @@ jobs:
           set -euo pipefail
           git pull --rebase origin pr4-firewall-exactness
           python3 .pr4-update-transaction.py
+          python3 .pr4-update-transaction-fix.py
       - name: Validate updater transaction fix
         shell: bash
         run: |
