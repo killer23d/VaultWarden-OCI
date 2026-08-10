@@ -69,4 +69,9 @@ if old not in t:
     raise SystemExit('IPv6 idempotency anchor not found')
 t = t.replace(old, new, 1)
 
+t = t.replace(
+    "assert_file_contains \"$LOG_FILE\" 'Conflicting public or stale managed UFW 80/443 rules remain'",
+    "assert_file_contains \"$LOG_FILE\" 'Conflicting UFW 80/443 rules remain'",
+)
+
 p.write_text(t)
