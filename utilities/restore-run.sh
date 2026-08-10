@@ -89,6 +89,7 @@ RESTORE_FULL_PROMOTION_COMMITTED=false
 USE_REMOTE=false
 KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
 RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
+RECOVERY_KIT_INTEGRITY_HMAC_KEY=""
 INSPECT_ONLY=false
 RESTORE_PREFLIGHT_SOURCE_ROOT=""
 
@@ -142,9 +143,9 @@ OPTIONS (used after a subcommand):
                             (alternative to the interactive prompt)
     --from-recovery-kit FILE
                             Path to a plaintext recovery-kit file.  The Age
-                            private key (AGE-SECRET-KEY-1...) is extracted
-                            automatically and used for decryption — no manual
-                            key entry required.  Intended for bare-metal DR
+                            private key (AGE-SECRET-KEY-1...) and backup
+                            integrity HMAC key are extracted automatically.
+                            Intended for bare-metal DR
                             where the kit file is the only credential available.
     --no-backup             Skip pre-restore emergency snapshot. Use only when
                             current local state is disposable, such as a fresh
@@ -765,21 +766,13 @@ list_backups() {
     if _rclone_is_available; then
         log_info "── REMOTE backups ──"
         _build_rclone_config_arg || {
-            log_warn "Could not build rclone config argument — skipping remote listing."
-            return 0
+            log_error "Could not build rclone config argument for remote listing."
+            return 1
         }
-        local remote_name; remote_name="${_SESSION_RCLONE_REMOTE_NAME:-$(get_config_value "RCLONE_REMOTE_NAME" "")}"
-        local remote_base_path; remote_base_path="${_SESSION_RCLONE_REMOTE_PATH:-$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")}"
-        remote_base_path="${remote_base_path#/}"; remote_base_path="${remote_base_path%/}"
-        log_info "  Remote: ${remote_name}:${remote_base_path}/"
-        for t in "${types[@]}"; do
-            local remote_dir="${remote_name}:${remote_base_path}/${t}"
-            echo ""
-            log_info "  Available remote ${t} backups:"
-            rclone lsf "${RCLONE_CONFIG_ARG[@]}" --include "*.age" --files-only \
-                "$remote_dir" 2>/dev/null | sort -r | head -n 20 \
-                | sed "s|^|    ${remote_dir}/|" || echo "    (none)"
-        done
+        list_remote_backups || return 1
+    else
+        _rclone_diagnose
+        return 1
     fi
     return 0
 }
@@ -796,25 +789,55 @@ list_remote_backups() {
 
     for t in "${types[@]}"; do
         local remote_dir="${remote_name}:${remote_base_path}/${t}"
+        local listing="" list_rc=0 err_file="${CONTROL_WORKSPACE:-/tmp}/vw-rclone-list-${t}.$$.err"
+        if listing=$(rclone lsf "${RCLONE_CONFIG_ARG[@]}" --files-only "$remote_dir" 2>"$err_file"); then
+            list_rc=0
+        else
+            list_rc=$?
+        fi
+        if (( list_rc == 3 )); then
+            rm -f "$err_file"
+            continue
+        elif (( list_rc != 0 )); then
+            log_error "Remote backup listing failed for ${remote_dir}/ (rclone exit ${list_rc})."
+            [[ ! -s "$err_file" ]] || log_error "rclone: $(head -5 "$err_file")"
+            rm -f "$err_file"
+            return 1
+        fi
+        rm -f "$err_file"
+
+        local -A present=()
+        local fname suffix missing
+        while IFS= read -r fname; do
+            [[ -n "$fname" ]] && present["$fname"]=1
+        done <<< "$listing"
+
         local type_files=()
-        local fname
         while IFS= read -r fname; do
             [[ -z "$fname" ]] && continue
+            missing=""
+            while IFS= read -r suffix; do
+                [[ -n "${present[${fname}${suffix}]+set}" ]] || { missing="${fname}${suffix}"; break; }
+            done < <(backup_required_cohort_suffixes)
+            if [[ -n "$missing" ]]; then
+                log_warn "Skipping incomplete remote ${t} backup: $fname (missing $(basename "$missing"))"
+                continue
+            fi
             type_files+=("${remote_dir}/${fname}")
-        done < <(
-            rclone lsf "${RCLONE_CONFIG_ARG[@]}" --include "*.age" --files-only \
-                "$remote_dir" 2>/dev/null | sort -r
-        )
+        done < <(printf '%s
+' "$listing" | awk '/\.age$/ {print}' | sort -r)
+
         [[ ${#type_files[@]} -eq 0 ]] && continue
         any_found=true
         echo ""
-        printf '  ── %s backups (remote) ──\n' "${t^^}"
+        printf '  ── %s backups (remote) ──
+' "${t^^}"
+        local remote_file
         for remote_file in "${type_files[@]}"; do
             (( ++global_index ))
             _REMOTE_FILES+=("$remote_file")
             _REMOTE_TYPES+=("$t")
-            local size_str="?" date_str="unknown"
-            local lsl_line
+            local size_str="?" date_str="unknown" lsl_line
             lsl_line=$(rclone lsl "${RCLONE_CONFIG_ARG[@]}" "$remote_file" 2>/dev/null | head -1 || true)
             if [[ -n "$lsl_line" ]]; then
                 local raw_bytes raw_date raw_time
@@ -827,14 +850,14 @@ list_remote_backups() {
                 fi
                 [[ -n "$raw_date" && -n "$raw_time" ]] && date_str="${raw_date} ${raw_time:0:8}"
             fi
-            printf '  [%3d]  %-10s  %6s  %s  %s\n' \
+            printf '  [%3d]  %-10s  %6s  %s  %s
+' \
                 "$global_index" "($t)" "$size_str" "$date_str" "$(basename "$remote_file")"
         done
     done
     echo ""
     if [[ "$any_found" == "false" ]]; then
-        log_warn "No remote backup files found under ${remote_name}:${remote_base_path}/"
-        return 1
+        log_warn "No complete remote backup cohorts found under ${remote_name}:${remote_base_path}/"
     fi
     return 0
 }
@@ -857,19 +880,25 @@ pull_remote_backup() {
     local pull_dir="$PAYLOAD_WORKSPACE/remote_pull"
     mkdir -p "$pull_dir"; chmod 700 "$pull_dir"
 
-    rclone copy "${RCLONE_CONFIG_ARG[@]}" "$remote_file" "$pull_dir/" --checksum 2>&1 || {
-        log_error "Failed to download backup from remote: $remote_file"; return 1
-    }
-    local local_file
+    local local_file suffix remote_member local_member
     local_file="$pull_dir/$(basename "$remote_file")"
-    [[ -s "$local_file" ]] || { log_error "Downloaded file is empty or missing: $local_file"; return 1; }
+    while IFS= read -r suffix; do
+        remote_member="${remote_file}${suffix}"
+        if ! rclone copy "${RCLONE_CONFIG_ARG[@]}" "$remote_member" "$pull_dir/" --checksum 2>&1; then
+            log_error "Remote backup cohort is incomplete or unavailable: $(basename "$remote_member")"
+            return 1
+        fi
+        local_member="${local_file}${suffix}"
+        [[ -s "$local_member" ]] || {
+            log_error "Downloaded required backup member is empty or missing: $local_member"
+            return 1
+        }
+    done < <(backup_required_cohort_suffixes)
 
-    rclone copy "${RCLONE_CONFIG_ARG[@]}" "${remote_file}.sha256" "$pull_dir/" --checksum 2>/dev/null || true
-    rclone copy "${RCLONE_CONFIG_ARG[@]}" "${remote_file}.meta"   "$pull_dir/" --checksum 2>/dev/null || true
-
-    chmod 600 "$pull_dir"/*.age    2>/dev/null || true
-    chmod 600 "$pull_dir"/*.sha256 2>/dev/null || true
-    chmod 600 "$pull_dir"/*.meta   2>/dev/null || true
+    chmod 600 "$pull_dir"/*.age         2>/dev/null || true
+    chmod 600 "$pull_dir"/*.sha256      2>/dev/null || true
+    chmod 600 "$pull_dir"/*.sha256.hmac 2>/dev/null || true
+    chmod 600 "$pull_dir"/*.meta        2>/dev/null || true
 
     if [[ "$btype" == "emergency" && ! -s "${local_file}.meta" ]]; then
         log_error "Remote emergency backup is incomplete: restore-critical metadata is missing for $(basename "$local_file")."
@@ -951,6 +980,7 @@ _select_remote_backup() {
     }
     list_remote_backups || return 1
     local total="${#_REMOTE_FILES[@]}" choice
+    (( total > 0 )) || return 1
     while true; do
         read -r -p "  Enter number to restore (1-${total}), or q to quit: " choice
         [[ "$choice" == "q" || "$choice" == "Q" ]] && { log_info "Restore cancelled."; exit 0; }
@@ -1184,8 +1214,59 @@ _load_recovery_kit() {
 
     # Wire into the existing key-resolution priority chain.
     KEY_FILE_ARG="$staged_key"
-    log_success "Age key loaded from recovery kit and staged for decryption."
+
+    local integrity_label="Backup integrity HMAC key (auto-generated)" integrity_key=""
+    integrity_key=$(awk -v label="[$integrity_label]" '
+        $0 == label { if (getline > 0) { print; exit } }
+    ' "$canonical_kit" 2>/dev/null || true)
+    integrity_key="${integrity_key//$'\r'/}"
+    if [[ -n "$integrity_key" && "$integrity_key" != CHANGE_ME* && "$integrity_key" != "Not Set" ]]; then
+        RECOVERY_KIT_INTEGRITY_HMAC_KEY="$integrity_key"
+    elif [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-true}" == "true" ]]; then
+        log_error "Recovery kit is missing the historical backup integrity HMAC key required by the active policy."
+        log_error "Use the recovery kit that belongs to this backup generation, or restore the matching integrity key first."
+        return 1
+    fi
+
+    log_success "Recovery kit credentials staged for backup authentication and decryption."
     log_info    "  Kit file:  $canonical_kit"
+    return 0
+}
+
+_load_restore_integrity_hmac_key() {
+    local operational_key="$1" value="" secrets_file="${SECRETS_FILE:-}"
+
+    if [[ -n "$RECOVERY_KIT_INTEGRITY_HMAC_KEY" ]]; then
+        FILE_INTEGRITY_HMAC_KEY="$RECOVERY_KIT_INTEGRITY_HMAC_KEY"
+        export FILE_INTEGRITY_HMAC_KEY
+        return 0
+    fi
+
+    if [[ -z "$secrets_file" ]]; then
+        secrets_file="${STATE_DIR:-/var/lib/vaultwarden}/secrets/secrets.yaml"
+    elif [[ "$secrets_file" != /* ]]; then
+        secrets_file="$PROJECT_ROOT/$secrets_file"
+    fi
+    if [[ "$operational_key" != /* ]]; then
+        operational_key="$PROJECT_ROOT/$operational_key"
+    fi
+
+    if [[ -f "$secrets_file" && -f "$operational_key" && $(command -v sops 2>/dev/null) ]]; then
+        value=$(SOPS_AGE_KEY_FILE="$operational_key" sops -d --extract '["file_integrity_hmac_key"]' "$secrets_file" 2>/dev/null || true)
+    fi
+    if [[ -n "$value" && "$value" != CHANGE_ME* && "$value" != "Not Set" ]]; then
+        FILE_INTEGRITY_HMAC_KEY="$value"
+        export FILE_INTEGRITY_HMAC_KEY
+        return 0
+    fi
+
+    unset FILE_INTEGRITY_HMAC_KEY
+    if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-true}" == "true" ]]; then
+        log_error "Authenticated restore integrity is required, but file_integrity_hmac_key is unavailable."
+        log_error "For replacement-host DR, use --from-recovery-kit with the kit from the backup generation."
+        return 1
+    fi
+    log_warn "Backup integrity HMAC key unavailable; legacy SHA-256-only restore policy is active."
     return 0
 }
 
@@ -2940,6 +3021,12 @@ main() {
             fi
         fi
         check_dependencies
+        REQUIRE_AUTHENTICATED_INTEGRITY="$(get_config_value "REQUIRE_AUTHENTICATED_INTEGRITY" "true")"
+        [[ "$REQUIRE_AUTHENTICATED_INTEGRITY" == "true" || "$REQUIRE_AUTHENTICATED_INTEGRITY" == "false" ]] || {
+            log_error "REQUIRE_AUTHENTICATED_INTEGRITY must be true or false."
+            exit 1
+        }
+        export REQUIRE_AUTHENTICATED_INTEGRITY
 
         local _early_state_dir
         _early_state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
@@ -2980,6 +3067,12 @@ main() {
     fi
 
     check_dependencies
+    REQUIRE_AUTHENTICATED_INTEGRITY="$(get_config_value "REQUIRE_AUTHENTICATED_INTEGRITY" "true")"
+    [[ "$REQUIRE_AUTHENTICATED_INTEGRITY" == "true" || "$REQUIRE_AUTHENTICATED_INTEGRITY" == "false" ]] || {
+        log_error "REQUIRE_AUTHENTICATED_INTEGRITY must be true or false."
+        exit 1
+    }
+    export REQUIRE_AUTHENTICATED_INTEGRITY
 
     if [[ "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]; then
         operation_acquire \
@@ -3081,24 +3174,27 @@ main() {
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
+    if [[ "$SKIP_VERIFICATION" == "true" && "$REQUIRE_AUTHENTICATED_INTEGRITY" == "true" ]]; then
+        log_error "--skip-verification cannot bypass authenticated integrity while REQUIRE_AUTHENTICATED_INTEGRITY=true."
+        log_error "Restore the complete cohort and matching integrity key, then retry."
+        exit 1
+    fi
+    _load_restore_integrity_hmac_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
     local sha256_sidecar="${BACKUP_FILE}.sha256"
-    if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
-        log_info "Verifying backup checksum before decryption..."
-        local expected_sum actual_sum
-        expected_sum=$(awk '{print $1}' "$sha256_sidecar")
-        actual_sum=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
-        if [[ "$expected_sum" != "$actual_sum" ]]; then
-            log_error "Checksum MISMATCH — backup file may be corrupted or tampered."
-            log_error "  Expected: $expected_sum"
-            log_error "  Actual:   $actual_sum"
-            log_error "  Try an older backup from the backup directory, or re-download from offsite storage."
+    if [[ "$SKIP_VERIFICATION" == "true" ]]; then
+        log_warn "--skip-verification: legacy non-authenticated sidecar check bypassed."
+    elif [[ -f "$sha256_sidecar" ]]; then
+        log_info "Authenticating backup integrity before decryption..."
+        verify_file_integrity "$BACKUP_FILE" || {
+            log_error "Backup integrity verification failed before destructive restore work."
             exit 1
-        fi
-        log_success "Backup checksum verified: $(basename "$BACKUP_FILE")"
-    elif [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" == "true" ]]; then
-        log_warn "--skip-verification: SHA-256 sidecar check bypassed."
+        }
+        log_success "Backup integrity authenticated: $(basename "$BACKUP_FILE")"
+    elif [[ "$REQUIRE_AUTHENTICATED_INTEGRITY" == "true" ]]; then
+        log_error "Required backup integrity sidecar is missing: $sha256_sidecar"
+        exit 1
     else
-        log_warn "No .sha256 sidecar found — skipping pre-decryption checksum check."
+        log_warn "No .sha256 sidecar found — legacy non-authenticated restore will continue without a checksum."
     fi
 
     local meta_file="${BACKUP_FILE}.meta"

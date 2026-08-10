@@ -701,9 +701,14 @@ _require_absent_backup_cohorts() {
 }
 
 _validate_created_backup_cohort() {
-    local archive="$1" expected_type="$2" file mode parsed
-    local -a files=("$archive" "${archive}.sha256" "${archive}.meta")
-    [[ -e "${archive}.sha256.hmac" ]] && files+=("${archive}.sha256.hmac")
+    local archive="$1" expected_type="$2" file mode parsed suffix
+    local -a files=()
+    while IFS= read -r suffix; do
+        files+=("${archive}${suffix}")
+    done < <(backup_required_cohort_suffixes)
+    if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" != "true" && -e "${archive}.sha256.hmac" ]]; then
+        files+=("${archive}.sha256.hmac")
+    fi
     for file in "${files[@]}"; do
         mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || true)"
         [[ -f "$file" && ! -L "$file" && -s "$file" && "$mode" == 600 ]] || {
@@ -711,9 +716,6 @@ _validate_created_backup_cohort() {
             return 1
         }
     done
-    if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" && "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == true ]]; then
-        [[ -f "${archive}.sha256.hmac" ]] || { log_error "Required HMAC sidecar is missing." >&2; return 1; }
-    fi
     verify_file_integrity "$archive" || return 1
     parsed="$(awk -F= '
         $1=="backup_type"{t++;tv=$2} $1=="archive_format"{f++;fv=$2}
@@ -1204,6 +1206,25 @@ verify_backup_quick() {
     return 0
 }
 
+_verify_remote_cohort_member() {
+    local -n _rclone_args="$1"
+    local remote_member="$2" label="${3:-remote backup member}"
+    local out err_file="${CONTROL_WORKSPACE}/rclone-size-verify.$$.err" bytes=""
+    : > "$err_file"
+    if ! out=$(rclone size "${_rclone_args[@]}" "$remote_member" 2>"$err_file"); then
+        log_error "[backup] Remote verification FAILED for ${label}: ${remote_member}" >&2
+        [[ ! -s "$err_file" ]] || log_error "[backup] rclone: $(head -5 "$err_file")" >&2
+        return 1
+    fi
+    bytes=$(printf '%s
+' "$out" | awk 'tolower($0) ~ /^total size:/ { gsub(/[^0-9]/, "", $3); print $3+0; exit }')
+    [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]] || {
+        log_error "[backup] Remote verification FAILED for ${label}: ${remote_member} is missing or empty." >&2
+        return 1
+    }
+    return 0
+}
+
 sync_to_rclone() {
     local enc_file="$1"
     local backup_type="$2"
@@ -1230,133 +1251,60 @@ sync_to_rclone() {
     remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
     remote_base_path="${remote_base_path#/}"
     remote_base_path="${remote_base_path%/}"
-
     local remote_path="${remote_name}:${remote_base_path}/${backup_type}"
-    backup_log_info "Syncing backup to rclone remote: ${remote_path}/"
+
+    if [[ "$backup_type" == "emergency" ]] && ! _validate_emergency_restore_metadata "$enc_file"; then
+        log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing or unusable." >&2
+        return 3
+    fi
+
+    local suffix local_member
+    local -a required_suffixes=() upload_suffixes=()
+    mapfile -t required_suffixes < <(backup_required_cohort_suffixes)
+    upload_suffixes=("${required_suffixes[@]}")
+    if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" != "true" && -s "${enc_file}.sha256.hmac" ]]; then
+        upload_suffixes+=(".sha256.hmac")
+    fi
+    for suffix in "${required_suffixes[@]}"; do
+        local_member="${enc_file}${suffix}"
+        [[ -f "$local_member" && ! -L "$local_member" && -s "$local_member" ]] || {
+            log_error "[backup] Offsite sync refused incomplete local cohort: $(basename "$local_member") is missing or empty." >&2
+            return 1
+        }
+    done
+
+    backup_log_info "Syncing authenticated backup cohort to rclone remote: ${remote_path}/"
     backup_log_info "Pre-flight check: testing connectivity to rclone remote '${remote_name}'..."
     if ! rclone lsd "${rclone_config_arg[@]}" "${remote_name}:" --contimeout 10s --timeout 30s &>/dev/null; then
         log_error "Pre-flight check FAILED: cannot reach rclone remote '${remote_name}'. Aborting offsite sync." >&2
         log_error "Verify credentials and network, then retry: rclone lsd ${remote_name}:" >&2
-        if declare -f send_notification_email &>/dev/null; then
-            send_notification_email \
-                "[VaultWarden] BACKUP ABORTED: rclone remote unreachable" \
-                "$(printf 'Pre-flight connectivity check failed for remote: %s\nHost: %s\n\nVerify rclone credentials and network connectivity, then re-run the backup.\n' \
-                    "${remote_name}" "$(hostname -f 2>/dev/null || hostname)")" \
-                2>/dev/null || true
-        fi
         return 1
     fi
-    backup_log_info "Pre-flight check passed: rclone remote '${remote_name}' is reachable."
 
     local rclone_stderr_tmp="${CONTROL_WORKSPACE}/rclone_stderr.tmp"
-
-    local rclone_exit=0
-    rclone copy "${rclone_config_arg[@]}" "$enc_file" "$remote_path/" --checksum 2>"${rclone_stderr_tmp}" || rclone_exit=$?
-    if (( rclone_exit != 0 )); then
-        local rclone_err
-        rclone_err=$(head -20 "${rclone_stderr_tmp}" 2>/dev/null || true)
-        log_error "[backup] rclone upload FAILED (exit ${rclone_exit}). The backup was NOT delivered to remote storage." >&2
-        log_error "[backup] rclone error output: ${rclone_err}" >&2
-        return 1
-    fi
-
-    local meta_file="${enc_file}.meta"
-    local _sidecar_warn=false
-    local _sidecar_fail=0
-    local _emergency_meta_failed=false
-    if [[ "$backup_type" == "emergency" ]] && ! _validate_emergency_restore_metadata "$enc_file"; then
-        _emergency_meta_failed=true
-    elif [[ -f "$meta_file" ]]; then
-        local _meta_exit=0
-        rclone copy "${rclone_config_arg[@]}" "$meta_file" "$remote_path/" --checksum \
-            2>"${rclone_stderr_tmp}" || _meta_exit=$?
-        if (( _meta_exit != 0 )); then
-            if [[ "$backup_type" == "emergency" ]]; then
-                log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — remote emergency recovery point is incomplete." >&2
-                _emergency_meta_failed=true
-            else
-                log_warn "[backup] Sidecar upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — integrity metadata missing from remote." >&2
-                _sidecar_warn=true
-                (( _sidecar_fail++ )) || true
+    for suffix in "${upload_suffixes[@]}"; do
+        local_member="${enc_file}${suffix}"
+        local upload_rc=0
+        rclone copy "${rclone_config_arg[@]}" "$local_member" "$remote_path/" --checksum \
+            2>"${rclone_stderr_tmp}" || upload_rc=$?
+        if (( upload_rc != 0 )); then
+            if [[ "$backup_type" == "emergency" && "$suffix" == ".meta" ]]; then
+                log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote recovery point is incomplete." >&2
+                return 3
             fi
+            log_error "[backup] Required cohort upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote recovery point is incomplete." >&2
+            return 1
         fi
-    fi
+    done
 
-    local sha256_file="${enc_file}.sha256"
-    if [[ -f "$sha256_file" ]]; then
-        local _sha256_exit=0
-        rclone copy "${rclone_config_arg[@]}" "$sha256_file" "$remote_path/" --checksum \
-            2>"${rclone_stderr_tmp}" || _sha256_exit=$?
-        if (( _sha256_exit != 0 )); then
-            log_warn "[backup] Sidecar upload FAILED: $(basename "$sha256_file") (exit ${_sha256_exit}) — checksum file missing from remote." >&2
-            _sidecar_warn=true
-            (( _sidecar_fail++ )) || true
-        fi
-    fi
+    for suffix in "${required_suffixes[@]}"; do
+        _verify_remote_cohort_member rclone_config_arg \
+            "${remote_path}/$(basename "${enc_file}${suffix}")" \
+            "$(basename "${enc_file}${suffix}")" || return 1
+    done
 
-    local hmac_file="${enc_file}.sha256.hmac"
-    if [[ -f "$hmac_file" ]]; then
-        local _hmac_exit=0
-        rclone copy "${rclone_config_arg[@]}" "$hmac_file" "$remote_path/" --checksum \
-            2>"${rclone_stderr_tmp}" || _hmac_exit=$?
-        if (( _hmac_exit != 0 )); then
-            log_warn "[backup] Sidecar upload FAILED: $(basename "$hmac_file") (exit ${_hmac_exit}) — authenticated integrity metadata missing from remote." >&2
-            _sidecar_warn=true
-            (( _sidecar_fail++ )) || true
-        fi
-    fi
-
-    if [[ "$_emergency_meta_failed" == "true" ]]; then
-        log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing, unusable, or not delivered to ${remote_path}/." >&2
-        log_error "[backup] The local emergency backup remains valid. Do not treat the remote primary as a complete recovery point." >&2
-    elif [[ "$_sidecar_warn" == "true" ]]; then
-        log_warn "[backup] One or more sidecar files could not be uploaded to ${remote_path}/." >&2
-        log_warn "[backup] The primary backup archive was delivered. Remote integrity checks will" >&2
-        log_warn "[backup] fall back to size-only verification until sidecars are re-uploaded." >&2
-    fi
-
-    local remote_file_path
-    remote_file_path="${remote_path}/$(basename "$enc_file")"
-    local rclone_size_out rclone_size_err_tmp="${CONTROL_WORKSPACE}/rclone_size_stderr.tmp"
-    local remote_size_bytes=0
-    local remote_size_human=""
-
-    if rclone_size_out=$(rclone size "${rclone_config_arg[@]}" "$remote_file_path" \
-                             2>"$rclone_size_err_tmp"); then
-
-        remote_size_bytes=$(printf '%s\n' "$rclone_size_out" \
-            | awk 'tolower($0) ~ /^total size:/ { gsub(/[^0-9]/, "", $3); print $3+0; exit }')
-        remote_size_bytes="${remote_size_bytes:-0}"
-
-        remote_size_human=$(printf '%s\n' "$rclone_size_out" \
-            | awk 'tolower($0) ~ /^total size:/ { for(i=4;i<=NF;i++) printf "%s ", $i; exit }' \
-            | sed 's/[[:space:]]*$//')
-    else
-        local rclone_size_err
-        rclone_size_err=$(cat "$rclone_size_err_tmp" 2>/dev/null || true)
-        log_error "[backup] rclone size query failed for: ${remote_file_path}" >&2
-        [[ -n "$rclone_size_err" ]] && log_error "[backup] rclone size error: ${rclone_size_err}" >&2
-    fi
-
-    if [[ -z "$remote_size_bytes" || "$remote_size_bytes" -eq 0 ]]; then
-        log_error "[backup] Remote size verification FAILED: ${remote_file_path} reported zero bytes or is unreachable." >&2
-        log_error "[backup] The upload may have silently failed. Treat this backup as NOT offsite." >&2
-        return 1
-    fi
-
-    backup_log_info "Remote size verified: ${remote_file_path} — ${remote_size_bytes} bytes ${remote_size_human}"
-
-    if [[ "$_emergency_meta_failed" == "true" ]]; then
-        return 3
-    fi
-
-    if [[ "$_sidecar_warn" == "true" ]]; then
-        log_warn "[backup] Offsite sync completed with partial sidecar failures (${_sidecar_fail} file(s))"
-        return 2
-    fi
-
-    backup_log_info "Offsite sync complete → ${remote_file_path}"
-
+    backup_log_info "Offsite sync complete → ${remote_path}/$(basename "$enc_file") (complete required cohort)"
+    return 0
 }
 
 # _resolve_rclone_config_arg NAMEREF_ARRAY
@@ -1428,16 +1376,20 @@ sync_all_backups_to_rclone() {
             continue
         fi
 
-        if [[ "$t" == "emergency" ]]; then
-            local emergency_archive
-            while IFS= read -r -d '' emergency_archive; do
-                if ! _validate_emergency_restore_metadata "$emergency_archive"; then
-                    log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$emergency_archive")"
-                    log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
+        local retained_archive suffix
+        while IFS= read -r -d '' retained_archive; do
+            while IFS= read -r suffix; do
+                [[ -f "${retained_archive}${suffix}" && ! -L "${retained_archive}${suffix}" && -s "${retained_archive}${suffix}" ]] || {
+                    log_error "[backup] Retained ${t} backup has an incomplete required cohort: $(basename "${retained_archive}${suffix}")"
                     return 1
-                fi
-            done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
-        fi
+                }
+            done < <(backup_required_cohort_suffixes)
+            if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
+                log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
+                log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
+                return 1
+            fi
+        done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
 
         backup_log_info "Copying retained ${t} backups to ${remote_name}:${remote_base}/${t}/"
         rclone copy "${rclone_config_arg[@]}" "$local_dir/" \
@@ -1447,6 +1399,16 @@ sync_all_backups_to_rclone() {
             --include '*.age.sha256.hmac' \
             --include '*.age.meta' \
             --checksum "${dry_run_arg[@]}" || return 1
+
+        if [[ "$DRY_RUN" != "true" ]]; then
+            while IFS= read -r -d '' retained_archive; do
+                while IFS= read -r suffix; do
+                    _verify_remote_cohort_member rclone_config_arg \
+                        "${remote_name}:${remote_base}/${t}/$(basename "${retained_archive}${suffix}")" \
+                        "$(basename "${retained_archive}${suffix}")" || return 1
+                done < <(backup_required_cohort_suffixes)
+            done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
+        fi
         (( ++copied_types )) || true
     done
 
@@ -2283,10 +2245,7 @@ main() {
         if [[ "$RCLONE_SYNC" == "true" ]]; then
             local _sync_rc=0
             sync_to_rclone "$backup_file" "$actual_type" || _sync_rc=$?
-            if (( _sync_rc == 2 )); then
-                offsite_status="synced with sidecar warnings"
-                log_warn "Offsite sync completed with partial sidecar failures — primary backup was delivered."
-            elif (( _sync_rc == 3 )); then
+            if (( _sync_rc == 3 )); then
                 rclone_failed=true
                 offsite_status="FAILED: emergency restore metadata missing or unusable; local backup is safe"
                 if [[ "$EMAIL_NOTIFY" == "true" ]]; then

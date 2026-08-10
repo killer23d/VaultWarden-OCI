@@ -470,10 +470,12 @@ _age_decrypt_restore_backup(){ printf archive > "\$3"; printf '%s\\n' "\$1" >> "
 _restore_age_no_identity_guidance(){ :; }
 
 rm -rf "\$PAYLOAD_WORKSPACE/remote_pull"
+REQUIRE_AUTHENTICATED_INTEGRITY=true
+backup_required_cohort_suffixes(){ printf '%s\n' '' .sha256 .sha256.hmac .meta; }
 for kind in db full; do
   pull_remote_backup "mock:backups/\$kind/\$kind.tar.zst.age" "\$kind"
   [[ "\$BACKUP_FILE" == "\$PAYLOAD_WORKSPACE/remote_pull/\$kind.tar.zst.age" ]] || exit 40
-  for suffix in .sha256 .meta; do [[ -f "\${BACKUP_FILE}\${suffix}" ]] || exit 41; done
+  for suffix in .sha256 .sha256.hmac .meta; do [[ -f "\${BACKUP_FILE}\${suffix}" ]] || exit 41; done
 done
 
 printf local > "$TMP/local-db.age"
@@ -577,7 +579,7 @@ rclone(){
   [[ "\$cmd" == copy ]] || return 1
   local src="\$1" dest="\$2"
   case "\$src" in
-    *.meta|*.sha256) return 1 ;;
+    *.meta|*.sha256|*.sha256.hmac) return 1 ;;
     *) mkdir -p "\$dest"; printf archive > "\$dest/\$(basename "\$src")"; return 0 ;;
   esac
 }
@@ -682,6 +684,7 @@ ROTATE_AGE_KEY_POLICY="\${TEST_ROTATE_POLICY:-}"
 START_POLICY=auto
 RESTORE_ENV=true
 SKIP_VERIFICATION=true
+REQUIRE_AUTHENTICATED_INTEGRITY=false
 DATA_VOLUME_MOUNT=""
 DATA_VOLUME_DEVICE=""
 CONTROL_WORKSPACE=""
@@ -718,6 +721,7 @@ create_pre_restore_snapshot(){
 }
 _set_snapshot_operation_phase(){ return 0; }
 _load_recovery_kit(){ return 0; }
+_load_restore_integrity_hmac_key(){ return 0; }
 resolve_backup_file(){ return 0; }
 _print_restore_plan_summary(){ return 0; }
 _prompt_age_key(){ RESTORE_DECRYPT_AGE_KEY_FILE=unused; return 0; }
@@ -743,6 +747,7 @@ get_config_value(){
     BACKUP_DIR) printf '%s' "$TMP" ;;
     SOPS_AGE_KEY_FILE) printf '%s' "$TMP/inspect-age-key.txt" ;;
     DATA_VOLUME_DEVICE) printf '%s' "\${TEST_DATA_VOLUME_DEVICE:-}" ;;
+    REQUIRE_AUTHENTICATED_INTEGRITY) printf '%s' false ;;
     PUID|PGID) printf '%s' 1000 ;;
     *) printf '%s' "\${2:-}" ;;
   esac
@@ -2316,3 +2321,71 @@ case "$MODE" in
         exit 2
         ;;
 esac
+
+
+check_authenticated_restore_cohort_contract() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+RESTORE="$ROOT/utilities/restore-run.sh"
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+grep -Fq 'backup_required_cohort_suffixes' "$RESTORE" || fail 'remote restore does not consume shared cohort definition'
+grep -Fq '.sha256.hmac' "$RESTORE" || fail 'remote restore does not stage HMAC sidecars'
+grep -Fq 'verify_file_integrity "$BACKUP_FILE"' "$RESTORE" || fail 'destructive restore does not use canonical authenticated verifier'
+grep -Fq 'RECOVERY_KIT_INTEGRITY_HMAC_KEY' "$RESTORE" || fail 'recovery kit does not supply historical integrity key'
+verify_line=$(grep -nF 'verify_file_integrity "$BACKUP_FILE"' "$RESTORE" | head -1 | cut -d: -f1)
+stop_line=$(grep -nF 'docker compose stop --timeout 30' "$RESTORE" | head -1 | cut -d: -f1)
+[[ -n "$verify_line" && -n "$stop_line" ]] && (( verify_line < stop_line )) || fail 'authenticated verification must happen before destructive service stop'
+printf 'PASS: restore authenticates required cohort before destructive work and can stage recovery-kit integrity key\n'
+)
+check_authenticated_restore_cohort_contract
+
+check_remote_restore_listing_truthfulness() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+RESTORE="$ROOT/utilities/restore-run.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/backup-utils.sh"
+CONTROL_WORKSPACE="$TMP"
+RCLONE_CONFIG_ARG=()
+_SESSION_RCLONE_REMOTE_NAME=mock
+_SESSION_RCLONE_REMOTE_PATH=backups
+_REMOTE_FILES=(); _REMOTE_TYPES=()
+get_config_value(){ printf '%s\n' "${2:-}"; }
+rclone(){
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    lsf)
+      if [[ "${REMOTE_MODE:-empty}" == fail ]]; then
+        printf 'authentication failed\n' >&2
+        return 17
+      fi
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+}
+eval "$(_extract_func "$RESTORE" list_remote_backups)"
+REMOTE_MODE=empty
+list_remote_backups >"$TMP/empty.out" 2>&1 || fail 'genuinely empty remote should not be reported as an rclone failure'
+[[ ${#_REMOTE_FILES[@]} -eq 0 ]] || fail 'empty remote unexpectedly produced a trusted selection'
+grep -Fq 'No complete remote backup cohorts found' "$TMP/empty.out" || fail 'empty remote outcome was not reported clearly'
+REMOTE_MODE=fail
+if list_remote_backups >"$TMP/fail.out" 2>&1; then fail 'rclone/auth listing failure returned success'; fi
+grep -Fq 'Remote backup listing failed' "$TMP/fail.out" || fail 'rclone listing failure was not distinguished from empty remote'
+grep -Fq 'authentication failed' "$TMP/fail.out" || fail 'rclone listing error omitted actionable output'
+printf 'PASS: restore remote listing distinguishes empty inventory from rclone/auth failure\n'
+)
+check_remote_restore_listing_truthfulness

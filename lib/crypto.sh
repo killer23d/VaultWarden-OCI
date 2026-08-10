@@ -812,8 +812,8 @@ write_file_integrity() {
         local hmac
         hmac=$(_calculate_hmac_sha256 "$checksum") || return 1
         if ! install -m 600 /dev/null "${file}.sha256.hmac" 2>/dev/null; then
-            log_warn "write_file_integrity: failed to create ${file}.sha256.hmac with restricted permissions; skipping HMAC sidecar"
-            return 0
+            log_error "write_file_integrity: failed to create ${file}.sha256.hmac with restricted permissions"
+            return 1
         fi
         printf '%s\n' "$hmac" > "${file}.sha256.hmac" || {
             log_error "write_file_integrity: failed to write ${file}.sha256.hmac"

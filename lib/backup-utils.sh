@@ -272,6 +272,22 @@ list_backups() {
 }
 
 # ---------------------------------------------------------------------------
+# backup_required_cohort_suffixes
+#
+# Prints the required members, as archive suffixes, for a trusted backup under
+# the active integrity policy. The empty suffix names the archive itself.
+# Emergency backups keep their additional encryption-mode/identity rules in
+# their existing metadata validator.
+# ---------------------------------------------------------------------------
+backup_required_cohort_suffixes() {
+    printf '%s\n' '' '.sha256'
+    if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
+        printf '%s\n' '.sha256.hmac'
+    fi
+    printf '%s\n' '.meta'
+}
+
+# ---------------------------------------------------------------------------
 # verify_backup_integrity DB_PATH
 #
 # Uses sqlite3 "$db_path" ".backup '$db_copy'" (SQLite Online Backup API)

@@ -75,7 +75,7 @@ sudo ./backup.sh sync
 
 A requested offsite sync that is skipped or fails must not be described as completed offsite protection.
 
-For `emergency` backups, the matching `.meta` sidecar is restore-critical: its `encryption_mode` selects emergency passphrase or Age-recipient decryption. An emergency backup is not completely delivered offsite until both the primary archive and its matching non-empty `.meta` are present. `.sha256` and `.sha256.hmac` upload failures remain warning-class sidecar failures and do not change that emergency metadata rule.
+Under the production authenticated-integrity policy, a trusted `db`/`full` recovery cohort is the archive plus `.sha256`, `.sha256.hmac`, and `.meta`. Offsite success requires every required member to upload and pass remote presence verification; an archive with a missing required sidecar is incomplete, not synced. Emergency backups keep their additional encryption-mode/identity requirements, including restore-critical `.meta` validation.
 
 ### Retention
 
@@ -151,7 +151,7 @@ The selected restore plan closes required executable dependencies before stoppin
 
 Restore normally uses two random, mode-`0700`, process-owned workspaces. A small control workspace, preferably `/dev/shm` tmpfs, holds pasted or recovery-kit Age keys, diagnostics, and key-rotation control files. Large remote downloads, decrypted databases or archives, and extracted trees use the target filesystem: a sibling of `PROJECT_STATE_DIR` for normal boot-volume state, or a hidden non-allowlisted directory at the mounted state root for attached-volume state. For boot-volume full/emergency promotion, an internal subtransaction creates one additional short-lived mode-`0700` workspace beside `PROJECT_STATE_DIR`; it holds the final materialized tree until same-filesystem rename and participates in the same identity-checked cleanup. The mounted payload-workspace name cannot be confused with the `data`, `caddy`, or `logs` payloads promoted by the restore transaction.
 
-Before the destructive boundary where services stop or live state changes, restore downloads the selected remote archive and available sidecars, decrypts it into payload staging, validates SQLite or archive members and the selected source root, and checks target free space with safety headroom. After the pre-restore safety snapshot, it repeats the database-commit or archive-promotion capacity check immediately before service stop. Any capacity failure before that boundary leaves services untouched. Cleanup removes only the identity-checked workspaces created by that invocation; it refuses replaced paths, symlinks, or ownership/mode drift. Payload staging is retained only when a failed promotion rollback genuinely needs manual recovery, and the command prints its path and restrictive permissions. A retained path can contain decrypted or otherwise sensitive recovery material; keep it root-only, do not copy it casually, and remove it after the documented manual recovery work is complete. Emergency private keys are moved into control staging promptly after extraction rather than left in the large payload tree.
+Before the destructive boundary where services stop or live state changes, restore downloads the complete required remote cohort, authenticates it with the canonical integrity policy, decrypts it into payload staging, validates SQLite or archive members and the selected source root, and checks target free space with safety headroom. After the pre-restore safety snapshot, it repeats the database-commit or archive-promotion capacity check immediately before service stop. Any capacity failure before that boundary leaves services untouched. Cleanup removes only the identity-checked workspaces created by that invocation; it refuses replaced paths, symlinks, or ownership/mode drift. Payload staging is retained only when a failed promotion rollback genuinely needs manual recovery, and the command prints its path and restrictive permissions. A retained path can contain decrypted or otherwise sensitive recovery material; keep it root-only, do not copy it casually, and remove it after the documented manual recovery work is complete. Emergency private keys are moved into control staging promptly after extraction rather than left in the large payload tree.
 
 ---
 
@@ -203,7 +203,7 @@ sudo ./restore.sh interactive --remote \
   --from-recovery-kit /secure/path/recovery-kit.txt
 ```
 
-For scripted restore, `RESTORE_AGE_KEY_FILE` can provide the configured non-interactive key-file override.
+For scripted restore, `RESTORE_AGE_KEY_FILE` can provide the configured non-interactive key-file override. A recovery kit used for historical DR supplies both the matching Age private identity and the historical `file_integrity_hmac_key`; no additional restore-secret channel is required.
 
 Use:
 
