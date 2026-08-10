@@ -103,7 +103,7 @@ _ufw_status() {
 _ufw_has_range_port() {
     local status="$1" cidr="$2" port="$3" escaped
     escaped="$(printf '%s' "$cidr" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
-    grep -qE "^${port}(/tcp)?([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped}([[:space:]]|$)" <<< "$status"
+    grep -qE "^${port}/tcp([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped}([[:space:]]|$)" <<< "$status"
 }
 
 _ufw_line_cidr() {
@@ -129,6 +129,10 @@ _ufw_collect_conflicts() {
     while IFS= read -r line; do
         [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)([[:space:]]|$) ]] || continue
         rule_num="${BASH_REMATCH[1]}"
+        if [[ -z "${BASH_REMATCH[3]}" ]]; then
+            printf '%s\n' "$rule_num"
+            continue
+        fi
         cidr="$(_ufw_line_cidr "$line" || true)"
         keep=false
         if [[ -n "$cidr" ]]; then
