@@ -1,0 +1,105 @@
+name: PR4 focused coverage fix
+
+on:
+  push:
+    branches:
+      - pr4-firewall-exactness
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[skip pr4-coverage]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Add initial UFW reconciliation coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --rebase origin pr4-firewall-exactness
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('tests/suites/operations/case-firewall-update.bash')
+          text = p.read_text()
+          anchor = '''# PR4 iptables acceptance checks: Docker owns normal forwarding/NAT; this
+          # project only removes OCI/legacy exceptions after a successful rollback snapshot.
+          '''
+          block = r'''# Initial setup UFW acceptance checks use the same stateful UFW mock.
+SETUP_UFW_PROBE="$TMP/setup-ufw-probe.bash"
+cat > "$SETUP_UFW_PROBE" <<'EOF_SETUP_UFW'
+#!/usr/bin/env bash
+set -euo pipefail
+DRY_RUN=false
+log_error(){ printf 'ERROR: %s\n' "$*" >> "${LOG_FILE:?}"; }
+log_dry_run(){ :; }
+EOF_SETUP_UFW
+extract_func "$SETUP_FIREWALL" _ufw_status >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_has_range_port >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_line_cidr >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_collect_conflicts >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_delete_rules >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_ensure_range >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_verify_exact >> "$SETUP_UFW_PROBE"
+cat >> "$SETUP_UFW_PROBE" <<'EOF_SETUP_UFW'
+case "${SETUP_UFW_CASE:?}" in
+    verify)
+        _ufw_verify_exact 22 203.0.113.0/24
+        ;;
+    ensure)
+        _ufw_ensure_range 203.0.113.0/24 CF-IPv4
+        ;;
+    *) exit 2 ;;
+esac
+EOF_SETUP_UFW
+chmod 0755 "$SETUP_UFW_PROBE"
+
+reset_case setup-public-readiness
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+Status: active
+22/tcp ALLOW IN Anywhere
+80/tcp ALLOW IN 203.0.113.0/24
+443/tcp ALLOW IN 203.0.113.0/24
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 1] 22/tcp ALLOW IN Anywhere
+[ 2] 80/tcp ALLOW IN 203.0.113.0/24
+[ 3] 443/tcp ALLOW IN 203.0.113.0/24
+[ 4] 80/tcp ALLOW IN Anywhere
+EOF_RULES
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted broad public port 80 ingress"
+assert_file_contains "$LOG_FILE" 'Conflicting public or stale managed UFW 80/443 rules remain'
+
+reset_case setup-single-cidr-failure
+export UFW_ALLOW80_RC=46 UFW_ALLOW80_OUTPUT='simulated initial setup CIDR failure'
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=ensure "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -eq 46 ]] || fail "initial UFW CIDR mutation returned $SETUP_UFW_RC instead of 46"
+assert_file_contains "$LOG_FILE" 'simulated initial setup CIDR failure'
+
+'''
+          if anchor not in text:
+              raise SystemExit('iptables acceptance anchor not found')
+          if 'SETUP_UFW_PROBE=' in text:
+              raise SystemExit('setup UFW coverage already present')
+          p.write_text(text.replace(anchor, block + anchor, 1))
+          PY
+          bash -n tests/suites/operations/case-firewall-update.bash
+          shellcheck -x --severity=warning tests/suites/operations/case-firewall-update.bash
+          ./tests/run-tests.sh operations
+          git diff --check
+          git add tests/suites/operations/case-firewall-update.bash
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'test: cover initial firewall exactness [skip pr4-coverage]'
+          git push origin HEAD:pr4-firewall-exactness
