@@ -31,7 +31,40 @@ jobs:
               if text.count(old) != 1:
                   raise SystemExit(f'backup message anchor count={text.count(old)}: {old[:80]}')
               text = text.replace(old, new, 1)
-          backup.write_text(text)
+
+          old = '''        local retained_archive suffix
+          while IFS= read -r -d '' retained_archive; do
+              while IFS= read -r suffix; do
+                  [[ -f "${retained_archive}${suffix}" && ! -L "${retained_archive}${suffix}" && -s "${retained_archive}${suffix}" ]] || {
+                      log_error "[backup] Retained ${t} backup has an incomplete required cohort: $(basename "${retained_archive}${suffix}")"
+                      return 1
+                  }
+              done < <(backup_required_cohort_suffixes)
+              if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
+                  log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
+                  log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
+                  return 1
+              fi
+          done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
+'''
+          new = '''        local retained_archive suffix
+          while IFS= read -r -d '' retained_archive; do
+              if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
+                  log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
+                  log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
+                  return 1
+              fi
+              while IFS= read -r suffix; do
+                  [[ -f "${retained_archive}${suffix}" && ! -L "${retained_archive}${suffix}" && -s "${retained_archive}${suffix}" ]] || {
+                      log_error "[backup] Retained ${t} backup has an incomplete required cohort: $(basename "${retained_archive}${suffix}")"
+                      return 1
+                  }
+              done < <(backup_required_cohort_suffixes)
+          done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'retained-sync ordering anchor count={text.count(old)}')
+          backup.write_text(text.replace(old, new, 1))
 
           tests = Path('tests/suites/data-protection/case-restore-recovery.bash')
           text = tests.read_text()
