@@ -7,13 +7,22 @@ for path in ['utilities/setup-firewall.sh', 'utilities/maintenance-update-firewa
     if path.endswith('maintenance-update-firewall.sh'):
         old = 'grep -qE "^${port}(/tcp)?([[:space:]]+\\\\(v6\\\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}([[:space:]]|$)" <<< "$status"'
         new = 'grep -qE "^${port}/tcp([[:space:]]+\\\\(v6\\\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}([[:space:]]|$)" <<< "$status"'
+        indent = '            '
     else:
         new = 'grep -qE "^${port}/tcp([[:space:]]+\\\\(v6\\\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped}([[:space:]]|$)" <<< "$status"'
+        indent = '        '
     if old not in text:
         raise SystemExit(f'port matcher not found in {path}')
     text = text.replace(old, new, 1)
-    old_rule = '        rule_num="${BASH_REMATCH[1]}"\n        cidr="$(_ufw_line_cidr "$line" || true)"\n'
-    new_rule = '        rule_num="${BASH_REMATCH[1]}"\n        if [[ -z "${BASH_REMATCH[3]}" ]]; then\n            printf \'%s\\n\' "$rule_num"\n            continue\n        fi\n        cidr="$(_ufw_line_cidr "$line" || true)"\n'
+    old_rule = indent + 'rule_num="${BASH_REMATCH[1]}"\n' + indent + 'cidr="$(_ufw_line_cidr "$line" || true)"\n'
+    new_rule = (
+        indent + 'rule_num="${BASH_REMATCH[1]}"\n'
+        + indent + 'if [[ -z "${BASH_REMATCH[3]}" ]]; then\n'
+        + indent + '    printf \'%s\\n\' "$rule_num"\n'
+        + indent + '    continue\n'
+        + indent + 'fi\n'
+        + indent + 'cidr="$(_ufw_line_cidr "$line" || true)"\n'
+    )
     if old_rule not in text:
         raise SystemExit(f'conflict rule anchor not found in {path}')
     text = text.replace(old_rule, new_rule, 1)
