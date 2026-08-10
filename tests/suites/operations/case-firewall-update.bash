@@ -7,6 +7,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
 
 ROOT="$VW_TEST_REPO_ROOT"
 UPDATER="$ROOT/utilities/maintenance-update-firewall.sh"
+SETUP_FIREWALL="$ROOT/utilities/setup-firewall.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -93,6 +94,18 @@ if [[ "$command_line" == *" allow "* && "$command_line" == *" port 80 "* ]]; the
         printf '%s\n' "${UFW_ALLOW80_OUTPUT:-port 80 failed}" >&2
         exit "$UFW_ALLOW80_RC"
     fi
+    if [[ "${UFW_NO_MUTATE:-false}" != "true" ]]; then
+        range=""
+        while (( $# > 0 )); do
+            if [[ "$1" == "from" ]]; then range="$2"; break; fi
+            shift
+        done
+        if [[ "$range" == *:* ]]; then
+            printf '80/tcp (v6) ALLOW IN %s\n' "$range" >> "$UFW_STATUS_FILE"
+        else
+            printf '80/tcp ALLOW IN %s\n' "$range" >> "$UFW_STATUS_FILE"
+        fi
+    fi
     printf 'Rule added\n'
     exit 0
 fi
@@ -101,6 +114,18 @@ if [[ "$command_line" == *" allow "* && "$command_line" == *" port 443 "* ]]; th
     if (( ${UFW_ALLOW443_RC:-0} != 0 )); then
         printf '%s\n' "${UFW_ALLOW443_OUTPUT:-port 443 failed}" >&2
         exit "$UFW_ALLOW443_RC"
+    fi
+    if [[ "${UFW_NO_MUTATE:-false}" != "true" ]]; then
+        range=""
+        while (( $# > 0 )); do
+            if [[ "$1" == "from" ]]; then range="$2"; break; fi
+            shift
+        done
+        if [[ "$range" == *:* ]]; then
+            printf '443/tcp (v6) ALLOW IN %s\n' "$range" >> "$UFW_STATUS_FILE"
+        else
+            printf '443/tcp ALLOW IN %s\n' "$range" >> "$UFW_STATUS_FILE"
+        fi
     fi
     printf 'Rule added\n'
     exit 0
@@ -111,6 +136,13 @@ if [[ "${1:-}" == "--force" && "${2:-}" == "delete" ]]; then
     if [[ -n "${UFW_DELETE_FAIL_RULE:-}" && "$rule" == "$UFW_DELETE_FAIL_RULE" ]]; then
         printf '%s\n' "${UFW_DELETE_OUTPUT:-delete failed}" >&2
         exit "${UFW_DELETE_RC:-1}"
+    fi
+    if [[ "${UFW_NO_MUTATE:-false}" != "true" ]]; then
+        awk -v n="$rule" '
+            $0 ~ "^\\[[[:space:]]*" n "\\]" {next}
+            {print}
+        ' "$UFW_NUMBERED_FILE" > "${UFW_NUMBERED_FILE}.tmp"
+        mv "${UFW_NUMBERED_FILE}.tmp" "$UFW_NUMBERED_FILE"
     fi
     printf 'Rule deleted\n'
     exit 0
@@ -168,7 +200,7 @@ reset_case() {
 
     unset UFW_STATUS_RC UFW_STATUS_OUTPUT UFW_NUMBERED_RC UFW_NUMBERED_OUTPUT
     unset UFW_ALLOW80_RC UFW_ALLOW80_OUTPUT UFW_ALLOW443_RC UFW_ALLOW443_OUTPUT
-    unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT
+    unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
     export UFW_CALL_LOG LOG_FILE
@@ -264,6 +296,23 @@ delete_order="$(grep '^--force delete ' "$UFW_CALL_LOG" || true)"
 expected_order=$'--force delete 10\n--force delete 7\n--force delete 2'
 [[ "$delete_order" == "$expected_order" ]] || fail "obsolete rules deleted in wrong order: $delete_order"
 
+reset_case public-ingress-conflict
+write_ipv4_status true true
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 4] 80/tcp ALLOW IN Anywhere
+[ 5] 443/tcp ALLOW IN Anywhere
+EOF_RULES
+run_case
+[[ "$CASE_RC" -eq 0 ]] || fail "public ingress conflict reconciliation failed with $CASE_RC"
+assert_call '--force delete 5'
+assert_call '--force delete 4'
+
+reset_case final-verification
+export UFW_NO_MUTATE=true
+run_case
+[[ "$CASE_RC" -ne 0 ]] || fail "final verification accepted UFW mutations that did not take effect"
+assert_file_contains "$LOG_FILE" 'Final UFW verification missing'
+
 reset_case partial-retry
 write_ipv4_status true false
 run_case
@@ -286,9 +335,156 @@ run_case
 [[ "$CASE_RC" -eq 0 ]] || fail "existing IPv6 rules failed with $CASE_RC"
 assert_no_call ' allow '
 
+# PR4 iptables acceptance checks: Docker owns normal forwarding/NAT; this
+# project only removes OCI/legacy exceptions after a successful rollback snapshot.
+! grep -Eq 'iptables .*-[AI][[:space:]]+DOCKER-USER.*-j[[:space:]]+ACCEPT' "$SETUP_FIREWALL" \
+    || fail "setup-firewall adds a source-only DOCKER-USER ACCEPT"
+! grep -Eq 'iptables .*-[AI][[:space:]]+POSTROUTING.*-j[[:space:]]+MASQUERADE' "$SETUP_FIREWALL" \
+    || fail "setup-firewall adds project MASQUERADE rules"
+! grep -Fq 'netfilter-persistent save' "$SETUP_FIREWALL" \
+    || fail "runtime firewall reconciliation still persists iptables rules"
+! grep -Eq 'apt(-get)? .*install.*iptables-persistent|apt(-get)? .*install.*netfilter-persistent' "$SETUP_FIREWALL" \
+    || fail "runtime firewall reconciliation installs persistence packages"
+assert_file_contains "$SETUP_FIREWALL" "firewall-backend"
+assert_file_contains "$SETUP_FIREWALL" "Docker DOCKER-USER chain is unavailable."
+
+compose_file="$ROOT/docker-compose.yml.example"
+for cidr in 172.21.0.0/28 172.22.0.0/28 172.23.0.0/28; do
+    assert_file_contains "$compose_file" "subnet: $cidr"
+done
+
+setup_phase="$TMP/setup-firewall-phase.txt"
+awk '/--phase iptables/{p=1} p{print} /Required Docker\/OCI firewall reconciliation failed/{seen=1} seen && /fi/{exit}' \
+    "$ROOT/setup.sh" > "$setup_phase"
+assert_file_contains "$setup_phase" '_phase_failed 5 "Required Docker/OCI firewall reconciliation failed"'
+! grep -Fq 'best-effort' "$ROOT/setup.sh" \
+    || fail "setup still describes iptables remediation as best-effort"
+
+cat > "$TMP/bin/iptables" <<'EOF_IPTABLES'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'iptables %s\n' "$*" >> "${IPT_CALL_LOG:?}"
+args=" $* "
+if [[ "$args" == *" -C FORWARD -j REJECT --reject-with icmp-host-prohibited "* ]]; then
+    [[ -e "${IPT_REJECT_MARKER:?}" ]] && exit 0
+    exit 1
+fi
+if [[ "$args" == *" -D FORWARD -j REJECT --reject-with icmp-host-prohibited "* ]]; then
+    if (( ${IPT_DELETE_RC:-0} != 0 )); then exit "$IPT_DELETE_RC"; fi
+    rm -f "$IPT_REJECT_MARKER"
+    exit 0
+fi
+if [[ "$args" == *" -C DOCKER-USER "* || "$args" == *" -C POSTROUTING "* ]]; then
+    exit 1
+fi
+if [[ "$args" == *" -D DOCKER-USER "* || "$args" == *" -D POSTROUTING "* ]]; then
+    exit 2
+fi
+exit 0
+EOF_IPTABLES
+cat > "$TMP/bin/iptables-save" <<'EOF_IPTABLES_SAVE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'save\n' >> "${IPT_CALL_LOG:?}"
+if (( ${IPT_SAVE_RC:-0} != 0 )); then exit "$IPT_SAVE_RC"; fi
+printf '*filter\nCOMMIT\n'
+EOF_IPTABLES_SAVE
+cat > "$TMP/bin/iptables-restore" <<'EOF_IPTABLES_RESTORE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'restore\n' >> "${IPT_CALL_LOG:?}"
+cat >/dev/null
+exit "${IPT_RESTORE_RC:-0}"
+EOF_IPTABLES_RESTORE
+chmod 0755 "$TMP/bin/iptables" "$TMP/bin/iptables-save" "$TMP/bin/iptables-restore"
+
+IPT_PROBE="$TMP/iptables-probe.bash"
+cat > "$IPT_PROBE" <<'EOF_IPT_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+DRY_RUN=false
+log_info(){ printf 'INFO: %s\n' "$*" >> "${IPT_LOG_FILE:?}"; }
+log_warn(){ printf 'WARN: %s\n' "$*" >> "${IPT_LOG_FILE:?}"; }
+log_error(){ printf 'ERROR: %s\n' "$*" >> "${IPT_LOG_FILE:?}"; }
+log_success(){ printf 'SUCCESS: %s\n' "$*" >> "${IPT_LOG_FILE:?}"; }
+log_rollback(){ printf 'ROLLBACK: %s\n' "$*" >> "${IPT_LOG_FILE:?}"; }
+_docker_iptables_preflight(){ :; }
+EOF_IPT_PROBE
+extract_func "$SETUP_FIREWALL" _iptables_rule_state >> "$IPT_PROBE"
+extract_func "$SETUP_FIREWALL" _iptables_delete_all_exact >> "$IPT_PROBE"
+extract_func "$SETUP_FIREWALL" _iptables_needs_reconciliation >> "$IPT_PROBE"
+extract_func "$SETUP_FIREWALL" _phase_iptables >> "$IPT_PROBE"
+cat >> "$IPT_PROBE" <<'EOF_IPT_PROBE'
+set +e
+_phase_iptables
+rc=$?
+set -e
+exit "$rc"
+EOF_IPT_PROBE
+chmod 0755 "$IPT_PROBE"
+
+run_iptables_case() {
+    local name="$1"
+    IPT_CASE_DIR="$TMP/iptables-$name"
+    mkdir -p "$IPT_CASE_DIR/tmp"
+    IPT_CALL_LOG="$IPT_CASE_DIR/calls"
+    IPT_LOG_FILE="$IPT_CASE_DIR/log"
+    IPT_REJECT_MARKER="$IPT_CASE_DIR/reject-present"
+    : > "$IPT_CALL_LOG"
+    : > "$IPT_LOG_FILE"
+    unset IPT_SAVE_RC IPT_DELETE_RC IPT_RESTORE_RC
+    export IPT_CALL_LOG IPT_LOG_FILE IPT_REJECT_MARKER
+}
+
+run_iptables_case clean-skip
+set +e
+PATH="$TMP/bin:$PATH" TMPDIR="$IPT_CASE_DIR/tmp" "$BASH" "$IPT_PROBE"
+IPT_RC=$?
+set -e
+[[ "$IPT_RC" -eq 0 ]] || fail "clean non-OCI firewall state returned $IPT_RC"
+! grep -Fq 'save' "$IPT_CALL_LOG" || fail "clean non-OCI state took an unnecessary rollback snapshot"
+! grep -Fq ' -D ' "$IPT_CALL_LOG" || fail "clean non-OCI state mutated iptables"
+assert_file_contains "$IPT_LOG_FILE" 'skipping mutation'
+
+run_iptables_case reject-removal
+: > "$IPT_REJECT_MARKER"
+set +e
+PATH="$TMP/bin:$PATH" TMPDIR="$IPT_CASE_DIR/tmp" "$BASH" "$IPT_PROBE"
+IPT_RC=$?
+set -e
+[[ "$IPT_RC" -eq 0 ]] || fail "OCI reject reconciliation returned $IPT_RC"
+[[ ! -e "$IPT_REJECT_MARKER" ]] || fail "OCI reject was not removed"
+save_line="$(grep -n '^save$' "$IPT_CALL_LOG" | cut -d: -f1)"
+delete_line="$(grep -n ' -D FORWARD ' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+[[ -n "$save_line" && -n "$delete_line" && "$save_line" -lt "$delete_line" ]] \
+    || fail "iptables mutation occurred before rollback snapshot"
+! grep -Eq 'iptables .*-[AI] ' "$IPT_CALL_LOG" || fail "runtime reconciliation added an iptables rule"
+
+run_iptables_case snapshot-failure
+: > "$IPT_REJECT_MARKER"
+export IPT_SAVE_RC=48
+set +e
+PATH="$TMP/bin:$PATH" TMPDIR="$IPT_CASE_DIR/tmp" "$BASH" "$IPT_PROBE"
+IPT_RC=$?
+set -e
+[[ "$IPT_RC" -ne 0 ]] || fail "iptables snapshot failure did not fail reconciliation"
+! grep -Fq ' -D ' "$IPT_CALL_LOG" || fail "iptables mutated after snapshot failure"
+
+run_iptables_case delete-failure
+: > "$IPT_REJECT_MARKER"
+export IPT_DELETE_RC=49
+set +e
+PATH="$TMP/bin:$PATH" TMPDIR="$IPT_CASE_DIR/tmp" "$BASH" "$IPT_PROBE"
+IPT_RC=$?
+set -e
+[[ "$IPT_RC" -eq 49 ]] || fail "iptables delete failure returned $IPT_RC instead of 49"
+assert_file_contains "$IPT_CALL_LOG" 'restore'
+
 health_unit="$ROOT/systemd/vaultwarden-health.service"
 maintenance_unit="$ROOT/systemd/vaultwarden-maintenance.service"
 firewall_unit="$ROOT/systemd/vaultwarden-firewall-update.service"
+iptables_unit="$ROOT/systemd/vaultwarden-iptables.service"
+startup_unit="$ROOT/systemd/vaultwarden-startup.service"
 dns_timer="$ROOT/systemd/vaultwarden-dns-update.timer"
 firewall_timer="$ROOT/systemd/vaultwarden-firewall-update.timer"
 
@@ -327,13 +523,21 @@ assert_file_contains "$firewall_unit" 'ReadWritePaths=/etc/ufw /run/ufw.lock /ru
 assert_file_contains "$firewall_unit" 'ExecStartPre=+/usr/bin/touch /run/ufw.lock /run/xtables.lock'
 assert_file_contains "$firewall_unit" 'ExecStartPre=+/usr/bin/chown root:root /run/ufw.lock /run/xtables.lock'
 assert_file_contains "$firewall_unit" 'ExecStartPre=+/usr/bin/chmod 0600 /run/ufw.lock /run/xtables.lock'
+assert_file_contains "$iptables_unit" 'ProtectSystem=strict'
+assert_file_contains "$iptables_unit" 'NoNewPrivileges=yes'
+assert_file_contains "$iptables_unit" 'Environment=TMPDIR=/run/vaultwarden-iptables'
+assert_file_contains "$iptables_unit" 'ReadWritePaths=/run/xtables.lock /run/lock /run/vaultwarden-oci /run/vaultwarden-iptables'
+! grep -Eq 'netfilter-persistent|apt(-get)?|/etc/iptables|/etc/ufw' "$iptables_unit" \
+    || fail "vaultwarden-iptables.service retains persistence/package ownership"
+assert_file_contains "$startup_unit" 'Requires=docker.service vaultwarden-iptables.service'
+assert_file_contains "$startup_unit" 'After=local-fs.target docker.service network-online.target vaultwarden-iptables.service'
 assert_file_contains "$dns_timer" 'OnCalendar=*-*-* *:00:00'
 assert_file_contains "$firewall_timer" 'OnCalendar=Sat *-*-* 04:00:00'
 
 if command -v systemd-analyze >/dev/null 2>&1; then
     unit_dir="$TMP/systemd-units"
     mkdir -p "$unit_dir"
-    cp "$health_unit" "$maintenance_unit" "$firewall_unit" "$unit_dir/"
+    cp "$health_unit" "$maintenance_unit" "$firewall_unit" "$iptables_unit" "$unit_dir/"
     sed -i 's|^ExecStart=.*|ExecStart=/usr/bin/true|' "$unit_dir"/*.service
     cat > "$unit_dir/docker.service" <<'EOF_UNIT'
 [Service]
@@ -349,7 +553,8 @@ EOF_UNIT
     if ! SYSTEMD_UNIT_PATH="$unit_dir:" systemd-analyze verify \
         vaultwarden-health.service \
         vaultwarden-maintenance.service \
-        vaultwarden-firewall-update.service > "$verify_output" 2>&1; then
+        vaultwarden-firewall-update.service \
+        vaultwarden-iptables.service > "$verify_output" 2>&1; then
         cat "$verify_output" >&2
         fail "systemd-analyze rejected the modified units"
     fi
@@ -548,4 +753,4 @@ assert_file_contains "$TMP/recovery-failed.state" 'issues'
 
 run_summary_case multiple-failures 2 1 2
 
-printf 'PASS: firewall updater, routine maintenance ownership, and systemd sandbox contracts\n'
+printf 'PASS: firewall updater, Docker firewall reconciliation, routine maintenance ownership, and systemd sandbox contracts\n'
