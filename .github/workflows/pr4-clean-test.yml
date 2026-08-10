@@ -57,7 +57,8 @@ jobs:
           p.write_text(text.replace(old, new, 1))
 
           p = Path('tests/suites/operations/case-firewall-update.bash')
-          lines = p.read_text().splitlines(keepends=True)
+          text = p.read_text()
+          lines = text.splitlines(keepends=True)
           seen = set()
           out = []
           for line in lines:
@@ -66,7 +67,21 @@ jobs:
                       continue
                   seen.add(line)
               out.append(line)
-          p.write_text(''.join(out))
+          text = ''.join(out)
+          old = '''cat > "$IPT_PROBE" <<'EOF_IPT_PROBE'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          DRY_RUN=false
+          '''
+          new = '''cat > "$IPT_PROBE" <<'EOF_IPT_PROBE'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          DRY_RUN=false
+          FORCE=false
+          '''
+          if old not in text:
+              raise SystemExit('iptables probe default anchor not found')
+          p.write_text(text.replace(old, new, 1))
           PY
           bash -n utilities/setup-firewall.sh tests/suites/operations/case-operations.bash tests/suites/operations/case-firewall-update.bash
           shellcheck -x --severity=warning utilities/setup-firewall.sh tests/suites/operations/case-operations.bash tests/suites/operations/case-firewall-update.bash
