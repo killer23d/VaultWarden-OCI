@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
-# utilities/maintenance-update-firewall.sh — Reconciles Cloudflare UFW ingress.
+# utilities/maintenance-update-firewall.sh — Updates UFW rules for Cloudflare IP ranges.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+_SAVE_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
 source "$PROJECT_ROOT/lib/operations.sh"
+source "$PROJECT_ROOT/lib/docker.sh"
+source "$PROJECT_ROOT/lib/backup-utils.sh"
+source "$PROJECT_ROOT/lib/crypto.sh"
+_MAINT_SCRIPT_DIR="$PROJECT_ROOT"
+source "$PROJECT_ROOT/lib/secrets.sh"
+SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
+unset _MAINT_SCRIPT_DIR
+source "$PROJECT_ROOT/lib/storage.sh"
 
+UPDATE_FIREWALL=true
 DRY_RUN=false
 
 show_help() {
-    cat <<'HELP'
+    cat << 'EOF'
 VaultWarden-OCI Firewall Range Updater
 
 USAGE:
@@ -23,10 +33,11 @@ USAGE:
     sudo ./maintenance.sh update-firewall [OPTIONS]
 
 DESCRIPTION:
-    Reconciles ports 80/443 to the exact current Cloudflare CIDR set by using
-    the canonical setup-firewall UFW reconciler. Conflicting public ingress and
-    retired managed ranges are removed. Skipped when CLOUDFLARE_PROXY_ENABLED
-    is not "true".
+    Fetches the current Cloudflare IP ranges (IPv4 + IPv6) and reconciles UFW
+    so ports 80 and 443 are allowed only from those ranges. Conflicting public
+    ingress and retired managed Cloudflare rules are removed.
+
+    Skipped automatically when CLOUDFLARE_PROXY_ENABLED is not "true".
 
 OPTIONS:
     --dry-run     Preview what would be done without making changes
@@ -34,58 +45,271 @@ OPTIONS:
     --version, -V Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
-    0 — firewall reconciled successfully or skipped by configuration
+    0 — Firewall ranges updated successfully or skipped by configuration
     75 — skipped because another VaultWarden operation owns the lock
-    Other non-zero — firewall reconciliation failed
-HELP
+    Other non-zero — Firewall update failed
+EOF
+}
+
+# shellcheck disable=SC2120  # $@ is forwarded to require_root; callers pass no args intentionally
+update_firewall_ranges() {
+    if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
+    if [[ "$DRY_RUN"         == "true" ]]; then log_info "[DRY RUN] Would safely update Cloudflare IP ranges in firewall"; return 0; fi
+    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" != "true" ]]; then
+        log_info "Skipping Cloudflare IP range firewall update (CLOUDFLARE_PROXY_ENABLED is not 'true')"
+        return 0
+    fi
+
+    require_root "$@"
+
+    log_info "Safely updating Cloudflare IP ranges in firewall..."
+    local cf_ipv4_file cf_ipv6_file
+    cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)
+    cf_ipv6_file=$(mktemp -t cf_ipv6.XXXXXXXXXX)
+    register_cleanup rm -f "$cf_ipv4_file" "$cf_ipv6_file"
+    if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
+       retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
+        log_success "Successfully fetched current Cloudflare IP ranges"
+    else
+        log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"; return 1
+    fi
+
+    _ufw_has_range_port() {
+        local status="$1" range="$2" port="$3" escaped_range
+        escaped_range=$(printf '%s' "$range" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+        grep -qE "^${port}(/tcp)?([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}([[:space:]]|$)" <<< "$status"
+    }
+
+    _ufw_allow_range() {
+        local range="$1" label="$2"
+        _ufw_result=false
+
+        local ufw_status ufw_rc=0
+        ufw_status="$(ufw status 2>&1)" || ufw_rc=$?
+        if (( ufw_rc != 0 )); then
+            log_error "Unable to read UFW status for ${range} (exit ${ufw_rc}): ${ufw_status:-no output}"
+            return "$ufw_rc"
+        fi
+
+        local has_80=false has_443=false
+        _ufw_has_range_port "$ufw_status" "$range" 80 && has_80=true
+        _ufw_has_range_port "$ufw_status" "$range" 443 && has_443=true
+        if [[ "$has_80" == "true" && "$has_443" == "true" ]]; then return 0; fi
+
+        local ufw_output
+        if [[ "$has_80" != "true" ]]; then
+            ufw_rc=0
+            ufw_output="$(ufw allow proto tcp from "$range" to any port 80 comment "$label" 2>&1)" || ufw_rc=$?
+            if (( ufw_rc != 0 )); then
+                log_error "Failed to add UFW port 80 rule for ${range} (exit ${ufw_rc}): ${ufw_output:-no output}"
+                return "$ufw_rc"
+            fi
+        fi
+        if [[ "$has_443" != "true" ]]; then
+            ufw_rc=0
+            ufw_output="$(ufw allow proto tcp from "$range" to any port 443 comment "$label" 2>&1)" || ufw_rc=$?
+            if (( ufw_rc != 0 )); then
+                log_error "Failed to add UFW port 443 rule for ${range} (exit ${ufw_rc}): ${ufw_output:-no output}"
+                return "$ufw_rc"
+            fi
+        fi
+        _ufw_result=true
+    }
+
+    local ranges_added=false
+    local _ufw_result=false
+    local -a current_cidrs=()
+    local -a cached_cidrs=()
+    local cf_cidr_cache="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache"
+
+    if [[ -f "$cf_cidr_cache" ]]; then
+        while IFS= read -r cidr; do
+            [[ -n "$cidr" ]] && cached_cidrs+=("$cidr")
+        done < "$cf_cidr_cache"
+    fi
+
+    if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
+        log_info "Adding new Cloudflare IPv4 ranges..."
+        while IFS= read -r range; do
+            if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+                current_cidrs+=("$range")
+                _ufw_allow_range "$range" "CF-IPv4" || return $?
+                if [[ "$_ufw_result" == "true" ]]; then
+                    ranges_added=true
+                    log_debug "Added IPv4 range: $range"
+                fi
+            fi
+        done < "$cf_ipv4_file"
+    fi
+
+    if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
+        log_info "Adding new Cloudflare IPv6 ranges..."
+        while IFS= read -r range; do
+            if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
+                current_cidrs+=("$range")
+                _ufw_allow_range "$range" "CF-IPv6" || return $?
+                if [[ "$_ufw_result" == "true" ]]; then
+                    ranges_added=true
+                    log_debug "Added IPv6 range: $range"
+                fi
+            fi
+        done < "$cf_ipv6_file"
+    fi
+
+    if (( ${#current_cidrs[@]} == 0 )); then
+        log_error "No valid Cloudflare CIDRs were fetched; refusing to change UFW."
+        return 1
+    fi
+
+    if [[ "$ranges_added" == "true" ]]; then
+        log_success "New Cloudflare IP ranges added successfully"
+    else
+        log_info "No new IP ranges needed to be added"
+    fi
+
+    log_info "Removing conflicting or outdated Cloudflare ingress rules..."
+    local removed_count=0
+    local -a old_rule_nums=()
+    local ufw_status ufw_rc=0
+    ufw_status="$(ufw status numbered 2>&1)" || ufw_rc=$?
+    if (( ufw_rc != 0 )); then
+        log_error "Unable to read numbered UFW rules (exit ${ufw_rc}): ${ufw_status:-no output}"
+        return "$ufw_rc"
+    fi
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
+            local rule_num="${BASH_REMATCH[1]}"
+
+            if [[ "$line" =~ (^|[[:space:]])(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)[[:space:]]+Anywhere([[:space:]]|$) ]]; then
+                old_rule_nums+=("$rule_num")
+                continue
+            fi
+
+            local is_managed=false
+            local cidr=""
+            [[ "$line" =~ CF-IPv[46] ]] && is_managed=true
+
+            local -a words
+            read -ra words <<< "$line"
+            local word
+            for word in "${words[@]}"; do
+                if [[ "$word" =~ ^[0-9a-fA-F:\.]+/[0-9]+$ ]]; then
+                    cidr="$word"
+                    break
+                fi
+            done
+
+            if [[ "$is_managed" == "false" && -n "$cidr" ]]; then
+                local c
+                for c in "${cached_cidrs[@]}"; do
+                    if [[ "$c" == "$cidr" ]]; then
+                        is_managed=true
+                        break
+                    fi
+                done
+            fi
+
+            if [[ "$is_managed" == "true" ]]; then
+                local keep=false
+                if [[ -n "$cidr" ]]; then
+                    local c
+                    for c in "${current_cidrs[@]}"; do
+                        if [[ "$c" == "$cidr" ]]; then
+                            keep=true
+                            break
+                        fi
+                    done
+                fi
+                [[ "$keep" == "true" ]] || old_rule_nums+=("$rule_num")
+            fi
+        fi
+    done <<< "$ufw_status"
+
+    if (( ${#old_rule_nums[@]} > 0 )); then
+        mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | awk 'NF && !seen[$0]++' | sort -rn)
+        local rule_num ufw_output
+        for rule_num in "${old_rule_nums[@]}"; do
+            ufw_rc=0
+            ufw_output="$(ufw --force delete "$rule_num" 2>&1)" || ufw_rc=$?
+            if (( ufw_rc != 0 )); then
+                log_error "Failed to delete UFW rule ${rule_num} (exit ${ufw_rc}): ${ufw_output:-no output}"
+                return "$ufw_rc"
+            fi
+            removed_count=$((removed_count + 1))
+        done
+    fi
+    [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count conflicting/outdated firewall rules"
+
+    local final_status final_numbered
+    ufw_rc=0
+    final_status="$(ufw status 2>&1)" || ufw_rc=$?
+    if (( ufw_rc != 0 )); then
+        log_error "Unable to verify final UFW status (exit ${ufw_rc}): ${final_status:-no output}"
+        return "$ufw_rc"
+    fi
+    ufw_rc=0
+    final_numbered="$(ufw status numbered 2>&1)" || ufw_rc=$?
+    if (( ufw_rc != 0 )); then
+        log_error "Unable to verify final numbered UFW status (exit ${ufw_rc}): ${final_numbered:-no output}"
+        return "$ufw_rc"
+    fi
+    if grep -Eq '^\[[[:space:]]*[0-9]+\].*(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)[[:space:]]+Anywhere([[:space:]]|$)' <<< "$final_numbered"; then
+        log_error "Public UFW 80/443 allow rule remains after Cloudflare reconciliation."
+        return 1
+    fi
+    local cidr
+    for cidr in "${current_cidrs[@]}"; do
+        _ufw_has_range_port "$final_status" "$cidr" 80 || {
+            log_error "Final UFW verification missing ${cidr} -> 80/tcp"
+            return 1
+        }
+        _ufw_has_range_port "$final_status" "$cidr" 443 || {
+            log_error "Final UFW verification missing ${cidr} -> 443/tcp"
+            return 1
+        }
+    done
+
+    mkdir -p "$(dirname "$cf_cidr_cache")" 2>/dev/null || true
+    printf '%s\n' "${current_cidrs[@]}" > "$cf_cidr_cache" 2>/dev/null || true
+    chmod 640 "$cf_cidr_cache" 2>/dev/null || true
+
+    log_success "Firewall IP ranges updated and verified safely"
+    return 0
 }
 
 [[ "${1:-}" == "update-firewall" ]] && shift
+
 while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --dry-run)      DRY_RUN=true; shift ;;
-        --help|-h|help) show_help; exit 0 ;;
-        --version|-V)   print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
+    case $1 in
+        --dry-run)         DRY_RUN=true; shift ;;
+        --help|-h|help)    show_help; exit 0 ;;
+        --version|-V)      print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option for 'update-firewall': $1"; show_help; exit 1 ;;
     esac
 done
 
 main() {
-    local rc=0
+    local rc
     require_root "$@"
-    load_project_environment || exit 1
-
-    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" != "true" ]]; then
-        log_info "Skipping Cloudflare firewall update (CLOUDFLARE_PROXY_ENABLED is not 'true')"
-        return 0
-    fi
-
     if [[ "$DRY_RUN" != "true" ]]; then
         operation_acquire \
             --id firewall-update \
             --label "Firewall update" \
             --specific-lock /run/lock/vaultwarden-firewall-update.lock \
-            --non-interactive skip || return $?
+            --non-interactive skip || {
+                rc=$?
+                exit "$rc"
+            }
         operation_set_phase "update" "Updating Cloudflare firewall ranges"
-        _firewall_update_cleanup() {
-            local exit_rc=$?
-            operation_release "$exit_rc"
-            return "$exit_rc"
-        }
-        trap _firewall_update_cleanup EXIT
-        trap 'operation_release 130; exit 130' INT
-        trap 'operation_release 143; exit 143' HUP TERM
     fi
-
-    local -a args=(--phase ufw --auto)
-    [[ "$DRY_RUN" == "true" ]] && args+=(--dry-run)
-
-    "$PROJECT_ROOT/utilities/setup-firewall.sh" "${args[@]}" || rc=$?
-    if (( rc != 0 )); then
-        log_error "Cloudflare firewall reconciliation failed (exit ${rc})."
-        return "$rc"
-    fi
-    return 0
+    load_project_environment || exit 1
+    auto_fix_critical_permissions "$PROJECT_ROOT"
+    trap 'rc=$?; operation_release "$rc"; perform_cleanup; exit "$rc"' EXIT
+    trap 'operation_release 130; perform_cleanup; exit 130' INT
+    trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
+    update_firewall_ranges
+    exit $?
 }
 
 main "$@"
