@@ -35,4 +35,10 @@ if old not in t:
     raise SystemExit('setup non-TCP expectation anchor not found')
 t = t.replace(old, new, 1)
 
+old = "assert_file_contains \"$LOG_FILE\" 'Non-Cloudflare UFW 80/443 allow rule remains'\n"
+new = "assert_file_contains \"$LOG_FILE\" 'Non-Cloudflare UFW 80/443 rule remains'\n"
+if old not in t:
+    raise SystemExit('restricted final diagnostic anchor not found')
+t = t.replace(old, new, 1)
+
 p.write_text(t)
