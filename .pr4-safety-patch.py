@@ -28,19 +28,21 @@ replacement = "\n".join([
     '',
 ])
 text = text[:start] + replacement + text[end:]
-old = '    rm -f "$backup_v4"\n    log_success "Docker firewall runtime reconciled without project forwarding exceptions"\n'
-new = "\n".join([
+cleanup_start = text.rindex('    rm -f "$backup_v4"')
+log_marker = '    log_success "Docker firewall runtime reconciled without project forwarding exceptions"'
+log_start = text.index(log_marker, cleanup_start)
+log_end = text.index('\n', log_start) + 1
+cleanup = "\n".join([
     '    rm -f "$backup_v4"',
     '    backup_v4=""',
     "    trap 'operation_release 130; exit 130' INT",
     "    trap 'operation_release 129; exit 129' HUP",
     "    trap 'operation_release 143; exit 143' TERM",
-    '    log_success "Docker firewall runtime reconciled without project forwarding exceptions"',
+    log_marker,
     '',
 ])
-if old not in text:
-    raise SystemExit('expected successful cleanup block not found')
-p.write_text(text.replace(old, new, 1))
+text = text[:cleanup_start] + cleanup + text[log_end:]
+p.write_text(text)
 
 p = Path('tests/suites/operations/case-firewall-update.bash')
 text = p.read_text()
