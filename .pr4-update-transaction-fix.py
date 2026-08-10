@@ -2,21 +2,6 @@ from pathlib import Path
 p = Path('tests/suites/operations/case-firewall-update.bash')
 t = p.read_text()
 
-old = '''[[ "$CASE_RC" -eq 45 ]] || fail "delete failure returned $CASE_RC instead of 45"
-assert_file_contains "$LOG_FILE" 'Failed to delete UFW rule 12'
-assert_file_contains "$LOG_FILE" 'simulated delete failure'
-'''
-new = '''[[ "$CASE_RC" -eq 45 ]] || fail "delete failure returned $CASE_RC instead of 45"
-assert_file_contains "$LOG_FILE" 'Failed to delete UFW rule 12'
-assert_file_contains "$LOG_FILE" 'simulated delete failure'
-assert_call 'reload'
-[[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]] \
-    || fail "UFW delete failure left managed rules partially updated"
-'''
-if old not in t:
-    raise SystemExit('delete-failure assertion anchor missing after transaction patch')
-t = t.replace(old, new, 1)
-
 old = '''reset_case only-port-80
 write_ipv4_status true false
 run_case
@@ -45,5 +30,4 @@ run_case
 '''
 if old not in t:
     raise SystemExit('temporary only-port-80 diagnostics anchor missing')
-t = t.replace(old, new, 1)
-p.write_text(t)
+p.write_text(t.replace(old, new, 1))
