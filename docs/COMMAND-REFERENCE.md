@@ -878,9 +878,9 @@ USAGE:
     sudo ./maintenance.sh update-firewall [OPTIONS]
 
 DESCRIPTION:
-    Fetches the current Cloudflare IP ranges (IPv4 + IPv6) and reconciles UFW
-    so ports 80 and 443 are allowed only from those ranges. Conflicting public
-    ingress and retired managed Cloudflare rules are removed.
+    Fetches current Cloudflare IP ranges, reconciles defence-in-depth UFW
+    rules, and refreshes the Docker DOCKER-USER gate for published TCP 80/443.
+    Ambiguous host-firewall policy fails closed instead of being guessed.
 
     Skipped automatically when CLOUDFLARE_PROXY_ENABLED is not "true".
 
@@ -1376,9 +1376,9 @@ USAGE:
     sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [OPTIONS]
 
 DESCRIPTION:
-    Reconciles the Cloudflare-only UFW ingress contract and removes the OCI
-    FORWARD reject that can block Docker forwarding. Docker remains authoritative
-    for bridge forwarding, inter-network isolation, and container masquerading.
+    Reconciles defence-in-depth UFW rules, enforces Cloudflare-only access to
+    Docker-published TCP 80/443 in DOCKER-USER, and removes the OCI FORWARD
+    reject. Allowed traffic returns to Docker's own isolation/forwarding rules.
 
 OPTIONS:
     --phase ufw|iptables|all   Phase to run (default: all)

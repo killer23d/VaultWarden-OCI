@@ -1,8 +1,8 @@
 [Unit]
 Description=VaultWarden Firewall Rule Update
 Documentation=https://github.com/killer23d/VaultWarden-OCI
-After=network-online.target
-Wants=network-online.target
+After=network-online.target docker.service
+Wants=network-online.target docker.service
 ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
 OnFailure=vaultwarden-notify-failure@%n.service
 

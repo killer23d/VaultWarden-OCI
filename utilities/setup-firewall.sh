@@ -17,6 +17,8 @@ init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/operations.sh"
 # shellcheck source=../lib/defaults.sh
 source "${PROJECT_ROOT}/lib/defaults.sh"
+# shellcheck source=../lib/firewall.sh
+source "${PROJECT_ROOT}/lib/firewall.sh"
 
 show_help() {
     cat <<'HELP'
@@ -26,9 +28,9 @@ USAGE:
     sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [OPTIONS]
 
 DESCRIPTION:
-    Reconciles the Cloudflare-only UFW ingress contract and removes the OCI
-    FORWARD reject that can block Docker forwarding. Docker remains authoritative
-    for bridge forwarding, inter-network isolation, and container masquerading.
+    Reconciles defence-in-depth UFW rules, enforces Cloudflare-only access to
+    Docker-published TCP 80/443 in DOCKER-USER, and removes the OCI FORWARD
+    reject. Allowed traffic returns to Docker's own isolation/forwarding rules.
 
 OPTIONS:
     --phase ufw|iptables|all   Phase to run (default: all)
@@ -87,12 +89,16 @@ case "$PHASE" in
 esac
 
 _ufw_status() {
-    local numbered="${1:-false}" output rc=0
-    if [[ "$numbered" == "true" ]]; then
-        output="$(ufw status numbered 2>&1)" || rc=$?
-    else
-        output="$(ufw status 2>&1)" || rc=$?
-    fi
+    local mode="${1:-normal}" output rc=0
+    case "$mode" in
+        true|numbered) output="$(ufw status numbered 2>&1)" || rc=$? ;;
+        verbose)       output="$(ufw status verbose 2>&1)" || rc=$? ;;
+        false|normal)  output="$(ufw status 2>&1)" || rc=$? ;;
+        *)
+            log_error "Unknown UFW status mode: ${mode}"
+            return 2
+            ;;
+    esac
     if (( rc != 0 )); then
         log_error "Unable to read UFW status (exit ${rc}): ${output:-no output}"
         return "$rc"
@@ -101,9 +107,35 @@ _ufw_status() {
 }
 
 _ufw_has_range_port() {
-    local status="$1" cidr="$2" port="$3" escaped
-    escaped="$(printf '%s' "$cidr" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
-    grep -qE "^${port}/tcp([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped}([[:space:]]|$)" <<< "$status"
+    local status="$1" cidr="$2" port="$3" line token i
+    local -a fields=()
+
+    while IFS= read -r line; do
+        fields=()
+        read -ra fields <<< "$line"
+        (( ${#fields[@]} >= 4 )) || continue
+        [[ "${fields[0]}" == "${port}/tcp" ]] || continue
+
+        i=1
+        if [[ "${fields[$i]:-}" == "(v6)" ]]; then
+            i=$((i + 1))
+        fi
+        if [[ "${fields[$i]:-}" == "on" ]]; then
+            i=$((i + 2))
+        fi
+        [[ "${fields[$i]:-}" == "ALLOW" ]] || continue
+        i=$((i + 1))
+        if [[ "${fields[$i]:-}" == "IN" ]]; then
+            i=$((i + 1))
+        fi
+
+        for (( ; i<${#fields[@]}; i++ )); do
+            token="${fields[$i]}"
+            token="${token%#*}"
+            [[ "$token" == "$cidr" ]] && return 0
+        done
+    done <<< "$status"
+    return 1
 }
 
 _ufw_line_cidr() {
@@ -124,12 +156,13 @@ _ufw_collect_conflicts() {
     local numbered_status="$1"
     shift
     local -a desired=("$@")
-    local line rule_num cidr keep desired_cidr
+    local line rule_num cidr keep desired_cidr action
 
     while IFS= read -r line; do
-        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)([[:space:]]|$) ]] || continue
+        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
         rule_num="${BASH_REMATCH[1]}"
-        if [[ -z "${BASH_REMATCH[3]}" ]]; then
+        action="${BASH_REMATCH[6]}"
+        if [[ -z "${BASH_REMATCH[3]}" || "$action" != "ALLOW" ]]; then
             printf '%s\n' "$rule_num"
             continue
         fi
@@ -145,6 +178,60 @@ _ufw_collect_conflicts() {
         fi
         [[ "$keep" == "true" ]] || printf '%s\n' "$rule_num"
     done <<< "$numbered_status"
+}
+
+_ufw_default_incoming_fail_closed() {
+    local verbose_status="$1"
+    local defaults_file="${UFW_DEFAULTS_FILE:-/etc/default/ufw}" policy=""
+
+    if grep -Eqi '^Default:[[:space:]]+(deny|reject)[[:space:]]+\(incoming\)' <<< "$verbose_status"; then
+        return 0
+    fi
+
+    if grep -Eq '^Status:[[:space:]]+inactive' <<< "$verbose_status" && [[ -r "$defaults_file" ]]; then
+        policy="$(awk -F= '
+            $1 ~ /^[[:space:]]*DEFAULT_INPUT_POLICY[[:space:]]*$/ {
+                gsub(/[[:space:]\"'\''\r]/, "", $2)
+                print toupper($2)
+                exit
+            }
+        ' "$defaults_file")"
+        case "$policy" in
+            DROP|REJECT) return 0 ;;
+        esac
+    fi
+
+    log_error "UFW default incoming policy is not provably fail-closed (deny/reject)."
+    log_error "Remediation: sudo ufw default deny incoming; then review 'sudo ufw status verbose'."
+    return 1
+}
+
+_ufw_reject_ambiguous_inbound_allows() {
+    local numbered_status="$1" line rule_num body
+    while IFS= read -r line; do
+        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]] || continue
+        rule_num="${BASH_REMATCH[1]}"
+        body="${BASH_REMATCH[2]}"
+        [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(IN|FWD)([[:space:]]|$) ]] || continue
+
+        # A single numeric port with an explicit protocol is unambiguous. Literal
+        # web-port rows are handled separately by _ufw_collect_conflicts.
+        if [[ "$body" =~ ^[0-9]+/(tcp|udp)([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN([[:space:]]|$) ]]; then
+            continue
+        fi
+
+        log_error "Ambiguous inbound UFW allow rule ${rule_num}: ${body}"
+        log_error "Use explicit single-port/protocol rules; remove application profiles, port ranges, multi-port, all-port, or routed allows before retrying."
+        return 1
+    done <<< "$numbered_status"
+}
+
+_ufw_validate_safety() {
+    local verbose_status numbered_status
+    verbose_status="$(_ufw_status verbose)" || return $?
+    numbered_status="$(_ufw_status numbered)" || return $?
+    _ufw_default_incoming_fail_closed "$verbose_status" || return $?
+    _ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
 }
 
 _ufw_delete_rules() {
@@ -168,7 +255,7 @@ _ufw_delete_rules() {
 
 _ufw_ensure_range() {
     local cidr="$1" label="$2" status output rc=0
-    status="$(_ufw_status false)" || return $?
+    status="$(_ufw_status normal)" || return $?
     if ! _ufw_has_range_port "$status" "$cidr" 80; then
         if [[ "$DRY_RUN" == "true" ]]; then
             log_dry_run "Would allow Cloudflare ${cidr} to 80/tcp"
@@ -181,7 +268,7 @@ _ufw_ensure_range() {
         fi
     fi
 
-    status="$(_ufw_status false)" || return $?
+    status="$(_ufw_status normal)" || return $?
     if ! _ufw_has_range_port "$status" "$cidr" 443; then
         if [[ "$DRY_RUN" == "true" ]]; then
             log_dry_run "Would allow Cloudflare ${cidr} to 443/tcp"
@@ -200,21 +287,25 @@ _ufw_verify_exact() {
     local ssh_port="$1"
     shift
     local -a desired=("$@")
-    local status numbered_status cidr
-    status="$(_ufw_status false)" || return $?
-    numbered_status="$(_ufw_status true)" || return $?
+    local status numbered_status verbose_status cidr
+    status="$(_ufw_status normal)" || return $?
+    numbered_status="$(_ufw_status numbered)" || return $?
+    verbose_status="$(_ufw_status verbose)" || return $?
 
     grep -q '^Status: active' <<< "$status" || {
         log_error "UFW is not active after reconciliation."
         return 1
     }
-    grep -qE "^${ssh_port}(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW IN)" <<< "$status" || {
+    _ufw_default_incoming_fail_closed "$verbose_status" || return $?
+    _ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
+
+    grep -qE "^${ssh_port}/tcp([[:space:]]+\\(v6\\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?" <<< "$status" || {
         log_error "UFW SSH rule for ${ssh_port}/tcp is missing after reconciliation."
         return 1
     }
 
     if [[ -n "$(_ufw_collect_conflicts "$numbered_status" "${desired[@]}")" ]]; then
-        log_error "Conflicting public or stale managed UFW 80/443 rules remain after reconciliation."
+        log_error "Conflicting UFW 80/443 rules remain after reconciliation."
         return 1
     fi
 
@@ -238,6 +329,11 @@ _phase_ufw() {
         ssh_port="$(awk '/^Port[[:space:]]/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null || true)"
     fi
     ssh_port="${ssh_port:-22}"
+    if [[ "$ssh_port" == "80" || "$ssh_port" == "443" ]]; then
+        log_error "SSH port ${ssh_port}/tcp conflicts with managed Cloudflare web ingress."
+        log_error "Move SSH to a dedicated non-web port before running firewall reconciliation."
+        return 1
+    fi
     log_info "Detected SSH port: ${ssh_port}"
 
     local cf_ipv4_url="https://www.cloudflare.com/ips-v4"
@@ -297,12 +393,13 @@ _phase_ufw() {
     fi
 
     local ufw_active=false status numbered_status
-    status="$(_ufw_status false)" || return $?
+    _ufw_validate_safety || return $?
+    status="$(_ufw_status normal)" || return $?
     grep -q '^Status: active' <<< "$status" && ufw_active=true
 
     ufw allow "${ssh_port}/tcp" >/dev/null
 
-    numbered_status="$(_ufw_status true)" || return $?
+    numbered_status="$(_ufw_status numbered)" || return $?
     local -a conflicts=()
     mapfile -t conflicts < <(_ufw_collect_conflicts "$numbered_status" "${validated_cidrs[@]}")
     _ufw_delete_rules "${conflicts[@]}" || return $?
@@ -324,50 +421,7 @@ _phase_ufw() {
 }
 
 _docker_iptables_preflight() {
-    if ! command -v docker >/dev/null 2>&1; then
-        log_error "docker command not found"
-        return 1
-    fi
-    for cmd in iptables iptables-save iptables-restore python3; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            log_error "$cmd command not found"
-            return 1
-        fi
-    done
-
-    local daemon_json="${DOCKER_DAEMON_CONFIG:-/etc/docker/daemon.json}"
-    if [[ -r "$daemon_json" ]]; then
-        local backend iptables_enabled
-        backend="$(python3 - "$daemon_json" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as fh:
-    cfg = json.load(fh)
-print(cfg.get('firewall-backend', 'iptables'))
-PY
-)" || {
-            log_error "Could not parse Docker daemon configuration: ${daemon_json}"
-            return 1
-        }
-        iptables_enabled="$(python3 - "$daemon_json" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as fh:
-    cfg = json.load(fh)
-print('true' if cfg.get('iptables', True) else 'false')
-PY
-)" || return 1
-        if [[ "$backend" != "iptables" || "$iptables_enabled" != "true" ]]; then
-            log_error "Unsupported Docker firewall configuration in ${daemon_json}."
-            log_error "VaultWarden-OCI requires Docker's iptables firewall backend with iptables management enabled."
-            log_error "Remove unsupported firewall-backend/iptables overrides, restart Docker, then re-run setup."
-            return 1
-        fi
-    fi
-
-    if ! iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
-        log_error "Docker DOCKER-USER chain is unavailable."
-        log_error "Ensure Docker uses the iptables firewall backend and restart docker.service."
-        return 1
-    fi
+    firewall_docker_backend_preflight
 }
 
 _iptables_rule_state() {
@@ -406,7 +460,13 @@ _iptables_delete_all_exact() {
 }
 
 _iptables_needs_reconciliation() {
+    local -a cf_ipv4=("$@")
     local rc=0 cidr
+
+    if ! firewall_docker_ingress_is_exact "${cf_ipv4[@]}"; then
+        return 0
+    fi
+
     _iptables_rule_state filter FORWARD -j REJECT --reject-with icmp-host-prohibited || rc=$?
     [[ "$rc" -eq 0 ]] && return 0
     [[ "$rc" -eq 1 ]] || return "$rc"
@@ -427,14 +487,17 @@ _iptables_needs_reconciliation() {
 _phase_iptables() {
     _docker_iptables_preflight || return $?
 
+    local -a cf_ipv4=()
+    firewall_load_cached_cloudflare_ipv4 cf_ipv4 || return $?
+
     local rc=0
-    _iptables_needs_reconciliation || rc=$?
+    _iptables_needs_reconciliation "${cf_ipv4[@]}" || rc=$?
     if [[ "$rc" -eq 1 && "$FORCE" != "true" ]]; then
-        log_info "Docker firewall runtime already requires no VaultWarden remediation; skipping mutation."
+        log_info "Docker firewall runtime and Cloudflare ingress gate are already reconciled; skipping mutation."
         return 0
     fi
     if [[ "$rc" -eq 1 ]]; then
-        log_info "Force reconciliation requested; checking known OCI and legacy rules."
+        log_info "Force reconciliation requested; rebuilding the managed Docker ingress gate."
         rc=0
     fi
     if [[ "$rc" -ne 0 ]]; then
@@ -443,6 +506,7 @@ _phase_iptables() {
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
+        log_dry_run "Would enforce Cloudflare-only Docker-published TCP 80/443 with RETURN/DROP rules"
         log_dry_run "Would remove the OCI FORWARD reject and legacy VaultWarden forwarding/NAT exceptions if present"
         return 0
     fi
@@ -482,6 +546,15 @@ _phase_iptables() {
     trap '_iptables_signal_rollback 130' INT
     trap '_iptables_signal_rollback 129' HUP
     trap '_iptables_signal_rollback 143' TERM
+
+    if firewall_reconcile_cloudflare_docker_ingress "${cf_ipv4[@]}"; then
+        :
+    else
+        rc=$?
+        _restore_snapshot
+        return "$rc"
+    fi
+
     if _iptables_delete_all_exact filter FORWARD "OCI default FORWARD REJECT rule" \
         -j REJECT --reject-with icmp-host-prohibited; then
         :
@@ -511,12 +584,18 @@ _phase_iptables() {
         fi
     done
 
+    if ! firewall_docker_ingress_is_exact "${cf_ipv4[@]}"; then
+        log_error "Final Docker Cloudflare ingress verification failed."
+        _restore_snapshot
+        return 1
+    fi
+
     rm -f "$backup_v4"
     backup_v4=""
     trap 'operation_release 130; exit 130' INT
     trap 'operation_release 129; exit 129' HUP
     trap 'operation_release 143; exit 143' TERM
-    log_success "Docker firewall runtime reconciled without project forwarding exceptions"
+    log_success "Docker firewall runtime reconciled with Cloudflare-only published web ingress and no ACCEPT isolation shortcuts"
 }
 
 main() {

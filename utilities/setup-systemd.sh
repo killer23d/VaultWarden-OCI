@@ -102,14 +102,11 @@ STARTUP_RUNTIME_EXECUTABLE_PATHS=(
     caddy/entrypoint.sh
 )
 
-# Timers skip identity checks, while iptables skips data-volume drop-ins.
+# Timers skip identity checks. All managed units receive data-volume mount
+# ordering; vaultwarden-iptables.service is read-only and is special-cased below
+# so it does not receive a state-directory write grant.
 _ROOT_REQUIRED_UNITS=("${COPIED_SERVICES[@]}" "$STARTUP_SERVICE")
-_VW_DROPIN_UNITS=()
-for unit in "${COPIED_SERVICES[@]}"; do
-    [[ "$unit" == "vaultwarden-iptables.service" ]] || _VW_DROPIN_UNITS+=("$unit")
-done
-_VW_DROPIN_UNITS+=("${TIMERS[@]}")
-unset unit
+_VW_DROPIN_UNITS=("${COPIED_SERVICES[@]}" "${TIMERS[@]}")
 
 _setup_systemd_acquire_guard() {
     local label="$1" phase="$2"
@@ -448,7 +445,7 @@ _install_rwpaths_dropin() {
 After=${_mount_unit}
 DROPIN
 
-        if [[ "$unit" == *.service ]]; then
+        if [[ "$unit" == *.service && "$unit" != "vaultwarden-iptables.service" ]]; then
             cat >> "$dropin_file" << DROPIN
 # [Service] ReadWritePaths= — grants write access to DATA_VOLUME_MOUNT under
 #                             ProtectSystem=strict (without this, all writes to

@@ -17,6 +17,7 @@ RemainAfterExit=yes
 User=root
 Group=root
 WorkingDirectory=/opt/vaultwarden-scripts
+EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # iptables uses the host-wide xtables lock under /run. Prepare it before the
 # strict filesystem sandbox, matching the existing firewall updater contract.
 ExecStartPre=+/usr/bin/touch /run/xtables.lock
