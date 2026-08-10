@@ -19,8 +19,9 @@ Group=root
 WorkingDirectory=/opt/vaultwarden-scripts
 ExecStart=/bin/bash /opt/vaultwarden-scripts/utilities/setup-firewall.sh --phase iptables --auto
 ExecStop=/bin/true
-SuccessExitStatus=0 75
 
+# Exit 75 remains the shared operation-lock contention signal. Treat it as a
+# service failure here so boot reconciliation retries instead of being skipped.
 Restart=on-failure
 RestartSec=10s
 
