@@ -382,6 +382,7 @@ CONTROL_WORKSPACE="$TMP/key-control"; mkdir -m 700 -p "\$CONTROL_WORKSPACE"
 RECOVERY_KIT_FILE="$TMP/recovery-kit.txt"; RESTORE_RECOVERY_KIT_FILE=""
 KEY_FILE_ARG=""; RESTORE_AGE_KEY_FILE=""; RESTORE_DECRYPT_AGE_KEY_FILE=""
 DRY_RUN=false
+REQUIRE_AUTHENTICATED_INTEGRITY=false
 RAW_KEY='AGE-SECRET-KEY-1PRIVATEKEYMATERIAL'
 PUBLIC_KEY='age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'
 log_info(){ printf 'INFO %s\n' "\$*"; }; log_warn(){ printf 'WARN %s\n' "\$*"; }; log_error(){ printf 'ERROR %s\n' "\$*" >&2; }; log_success(){ printf 'SUCCESS %s\n' "\$*"; }; log_debug(){ :; }
@@ -470,10 +471,12 @@ _age_decrypt_restore_backup(){ printf archive > "\$3"; printf '%s\\n' "\$1" >> "
 _restore_age_no_identity_guidance(){ :; }
 
 rm -rf "\$PAYLOAD_WORKSPACE/remote_pull"
+REQUIRE_AUTHENTICATED_INTEGRITY=true
+backup_required_cohort_suffixes(){ printf '%s\n' '' .sha256 .sha256.hmac .meta; }
 for kind in db full; do
   pull_remote_backup "mock:backups/\$kind/\$kind.tar.zst.age" "\$kind"
   [[ "\$BACKUP_FILE" == "\$PAYLOAD_WORKSPACE/remote_pull/\$kind.tar.zst.age" ]] || exit 40
-  for suffix in .sha256 .meta; do [[ -f "\${BACKUP_FILE}\${suffix}" ]] || exit 41; done
+  for suffix in .sha256 .sha256.hmac .meta; do [[ -f "\${BACKUP_FILE}\${suffix}" ]] || exit 41; done
 done
 
 printf local > "$TMP/local-db.age"
@@ -577,7 +580,7 @@ rclone(){
   [[ "\$cmd" == copy ]] || return 1
   local src="\$1" dest="\$2"
   case "\$src" in
-    *.meta|*.sha256) return 1 ;;
+    *.meta|*.sha256|*.sha256.hmac) return 1 ;;
     *) mkdir -p "\$dest"; printf archive > "\$dest/\$(basename "\$src")"; return 0 ;;
   esac
 }
@@ -682,6 +685,7 @@ ROTATE_AGE_KEY_POLICY="\${TEST_ROTATE_POLICY:-}"
 START_POLICY=auto
 RESTORE_ENV=true
 SKIP_VERIFICATION=true
+REQUIRE_AUTHENTICATED_INTEGRITY=false
 DATA_VOLUME_MOUNT=""
 DATA_VOLUME_DEVICE=""
 CONTROL_WORKSPACE=""
@@ -718,6 +722,7 @@ create_pre_restore_snapshot(){
 }
 _set_snapshot_operation_phase(){ return 0; }
 _load_recovery_kit(){ return 0; }
+_load_restore_integrity_hmac_key(){ return 0; }
 resolve_backup_file(){ return 0; }
 _print_restore_plan_summary(){ return 0; }
 _prompt_age_key(){ RESTORE_DECRYPT_AGE_KEY_FILE=unused; return 0; }
@@ -743,6 +748,7 @@ get_config_value(){
     BACKUP_DIR) printf '%s' "$TMP" ;;
     SOPS_AGE_KEY_FILE) printf '%s' "$TMP/inspect-age-key.txt" ;;
     DATA_VOLUME_DEVICE) printf '%s' "\${TEST_DATA_VOLUME_DEVICE:-}" ;;
+    REQUIRE_AUTHENTICATED_INTEGRITY) printf '%s' false ;;
     PUID|PGID) printf '%s' 1000 ;;
     *) printf '%s' "\${2:-}" ;;
   esac
@@ -2121,8 +2127,10 @@ cat > "$mock_bin/rclone" <<'EOF_RCLONE'
 printf '%s\n' "$*" >> "${RCLONE_CALLS:?}"
 case "${1:-}" in
   lsf)
-    [[ "${*: -1}" == *'/db' ]] && printf 'db_backup_20260803_000000.sqlite3.age\n'
-    ;;
+  if [[ "$*" == *'/db'* ]]; then
+    printf '%s\n'       'db_backup_20260803_000000.sqlite3.age'       'db_backup_20260803_000000.sqlite3.age.sha256'       'db_backup_20260803_000000.sqlite3.age.sha256.hmac'       'db_backup_20260803_000000.sqlite3.age.meta'
+  fi
+  ;;
   lsl)
     printf '123 2026-08-03 00:00:00.000000000 db_backup_20260803_000000.sqlite3.age\n'
     ;;
@@ -2316,3 +2324,213 @@ case "$MODE" in
         exit 2
         ;;
 esac
+
+
+check_authenticated_restore_cohort_contract() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+RESTORE="$ROOT/utilities/restore-run.sh"
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+grep -Fq 'backup_required_cohort_suffixes' "$RESTORE" || fail 'remote restore does not consume shared cohort definition'
+grep -Fq '.sha256.hmac' "$RESTORE" || fail 'remote restore does not stage HMAC sidecars'
+grep -Fq 'verify_file_integrity "$BACKUP_FILE"' "$RESTORE" || fail 'destructive restore does not use canonical authenticated verifier'
+grep -Fq 'RECOVERY_KIT_INTEGRITY_HMAC_KEY' "$RESTORE" || fail 'recovery kit does not supply historical integrity key'
+verify_line=$(grep -nF 'verify_file_integrity "$BACKUP_FILE"' "$RESTORE" | head -1 | cut -d: -f1)
+stop_line=$(grep -nF 'docker compose stop --timeout 30' "$RESTORE" | head -1 | cut -d: -f1)
+[[ -n "$verify_line" && -n "$stop_line" ]] && (( verify_line < stop_line )) || fail 'authenticated verification must happen before destructive service stop'
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+has_command(){ command -v "$1" >/dev/null 2>&1; }
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/crypto.sh"
+archive="$TMP/restore-guard.age"
+printf 'encrypted-restore-payload' > "$archive"
+FILE_INTEGRITY_HMAC_KEY='restore-guard-key'
+REQUIRE_AUTHENTICATED_INTEGRITY=true
+write_file_integrity "$archive" || fail 'could not create restore-guard integrity sidecars'
+run_destructive_guard(){
+    verify_file_integrity "$archive" || return 1
+    : > "$TMP/destructive-work-reached"
+}
+printf tampered > "${archive}.sha256.hmac"
+if run_destructive_guard >/dev/null 2>&1; then fail 'tampered HMAC reached destructive restore work'; fi
+[[ ! -e "$TMP/destructive-work-reached" ]] || fail 'tampered HMAC reached destructive restore marker'
+write_file_integrity "$archive" || fail 'could not recreate restore-guard integrity sidecars'
+rm -f "${archive}.sha256.hmac"
+if run_destructive_guard >/dev/null 2>&1; then fail 'missing HMAC reached destructive restore work'; fi
+[[ ! -e "$TMP/destructive-work-reached" ]] || fail 'missing HMAC reached destructive restore marker'
+printf 'PASS: restore rejects tampered/missing authenticated HMAC before destructive work\n'
+)
+check_authenticated_restore_cohort_contract
+
+
+check_recovery_kit_authenticated_behavior() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+RESTORE="$ROOT/utilities/restore-run.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+for cmd in age age-keygen python3 sha256sum; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+        printf 'SKIP recovery-kit authenticated behavior: %s unavailable\n' "$cmd"
+        exit 0
+    }
+done
+
+_extract_func(){
+    local file="$1" func="$2"
+    awk -v f="$func" '
+        $0 ~ "^" f "\\(\\)" {p=1}
+        p {
+            print
+            opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+            depth += opens - closes
+            if (depth == 0) exit
+        }' "$file"
+}
+
+has_command(){ command -v "$1" >/dev/null 2>&1; }
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/crypto.sh"
+eval "$(_extract_func "$RESTORE" _stage_restore_age_key_line)"
+eval "$(_extract_func "$RESTORE" _load_recovery_kit)"
+eval "$(_extract_func "$RESTORE" _load_restore_integrity_hmac_key)"
+eval "$(_extract_func "$RESTORE" _age_decrypt_restore_backup)"
+
+CONTROL_WORKSPACE="$TMP/control"
+mkdir -m 700 "$CONTROL_WORKSPACE"
+RECOVERY_KIT_FILE="$TMP/recovery-kit.txt"
+RESTORE_RECOVERY_KIT_FILE=""
+KEY_FILE_ARG=""
+RECOVERY_KIT_INTEGRITY_HMAC_KEY=""
+REQUIRE_AUTHENTICATED_INTEGRITY=true
+DRY_RUN=false
+RESTORE_TYPE=full
+EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""
+SECRETS_FILE="$TMP/missing-secrets.yaml"
+STATE_DIR="$TMP/state"
+PROJECT_ROOT="$ROOT"
+export RESTORE_RECOVERY_KIT_FILE RECOVERY_KIT_INTEGRITY_HMAC_KEY REQUIRE_AUTHENTICATED_INTEGRITY RESTORE_TYPE EMERGENCY_BACKUP_AGE_IDENTITY_FILE SECRETS_FILE PROJECT_ROOT
+mkdir -p "$STATE_DIR"
+
+historical_age_key="$TMP/historical-age-key.txt"
+age-keygen -o "$historical_age_key" >/dev/null 2>&1 || fail 'could not generate historical Age identity'
+private_key="$(grep -m1 '^AGE-SECRET-KEY-1' "$historical_age_key")"
+recipient="$(age-keygen -y "$historical_age_key" 2>/dev/null)"
+[[ -n "$private_key" && "$recipient" == age1* ]] || fail 'historical Age identity fixture is invalid'
+
+age_only_kit="$TMP/age-only-recovery-kit.txt"
+printf '%s\n' "$private_key" > "$age_only_kit"
+chmod 600 "$age_only_kit"
+RECOVERY_KIT_FILE="$age_only_kit"
+if _load_recovery_kit >"$TMP/age-only.out" 2>&1; then
+    fail 'strict recovery accepted an Age-only recovery kit without historical HMAC key'
+fi
+grep -Fq 'missing the historical backup integrity HMAC key' "$TMP/age-only.out" \
+    || fail 'strict Age-only recovery-kit refusal was not actionable'
+
+historical_hmac_key='historical-cohort-hmac-key'
+{
+    printf '%s\n' "$private_key"
+    printf '%s\n' '[Backup integrity HMAC key (auto-generated)]'
+    printf '%s\n' "$historical_hmac_key"
+} > "$RECOVERY_KIT_FILE"
+chmod 600 "$RECOVERY_KIT_FILE"
+KEY_FILE_ARG=""
+RECOVERY_KIT_INTEGRITY_HMAC_KEY=""
+_load_recovery_kit || fail 'recovery kit with historical Age and HMAC credentials was rejected'
+_load_restore_integrity_hmac_key "$TMP/missing-operational-key.txt" \
+    || fail 'historical recovery-kit HMAC key was not selected'
+[[ "$FILE_INTEGRITY_HMAC_KEY" == "$historical_hmac_key" ]] \
+    || fail 'recovery-kit HMAC key did not become the canonical verification key'
+[[ "$KEY_FILE_ARG" == "$CONTROL_WORKSPACE/kit_stage/recovery-kit-age-key.txt" ]] \
+    || fail 'recovery-kit Age identity was not staged in the control workspace'
+
+archive="$TMP/historical-backup.age"
+printf 'historical-recovery-payload' | age -r "$recipient" -o "$archive" \
+    || fail 'could not create historical encrypted backup fixture'
+write_file_integrity "$archive" || fail 'could not create authenticated historical backup sidecars'
+verify_file_integrity "$archive" || fail 'historical backup failed recovery-kit HMAC verification'
+
+decrypted="$TMP/decrypted-payload"
+age_err="$TMP/age-decrypt.err"
+_age_decrypt_restore_backup "$archive" "$KEY_FILE_ARG" "$decrypted" "$age_err" age-recipient \
+    || fail 'recovery-kit Age identity could not decrypt authenticated historical backup'
+[[ "$(cat "$decrypted")" == 'historical-recovery-payload' ]] \
+    || fail 'recovery-kit-assisted decrypt returned unexpected payload'
+
+printf tamper >> "$archive"
+if verify_file_integrity "$archive" >/dev/null 2>&1; then
+    fail 'tampered historical backup verified with recovery-kit HMAC key'
+fi
+printf 'PASS: recovery kit supplies historical Age identity and HMAC key for authenticated restore\n'
+)
+check_recovery_kit_authenticated_behavior
+
+check_remote_restore_listing_truthfulness() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+RESTORE="$ROOT/utilities/restore-run.sh"
+grep -Fq 'mktemp "${CONTROL_WORKSPACE:-/tmp}/vw-rclone-list-${t}.XXXXXX"' "$RESTORE" \
+    || fail 'remote listing diagnostics must use a collision-safe temporary file'
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+_extract_func(){
+  local file="$1" func="$2"
+  awk -v f="$func" '
+    $0 ~ "^" f "\\(\\)" {p=1}
+    p {
+      print
+      opens=gsub(/\{/,"{"); closes=gsub(/\}/,"}")
+      depth += opens - closes
+      if (depth == 0) exit
+    }' "$file"
+}
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/backup-utils.sh"
+_SESSION_RCLONE_REMOTE_NAME=mock
+_SESSION_RCLONE_REMOTE_PATH=backups
+_REMOTE_FILES=(); _REMOTE_TYPES=()
+REQUIRE_AUTHENTICATED_INTEGRITY=true
+get_config_value(){ printf '%s\n' "${2:-}"; }
+rclone(){
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    lsf)
+      case "${REMOTE_MODE:-empty}" in
+        fail)
+          printf 'authentication failed\n' >&2
+          return 17
+          ;;
+        incomplete)
+          printf '%s\n' \
+            'db_backup_20990101_000000.sqlite3.age' \
+            'db_backup_20990101_000000.sqlite3.age.sha256' \
+            'db_backup_20990101_000000.sqlite3.age.meta'
+          return 0
+          ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 0 ;;
+  esac
+}
+eval "$(_extract_func "$RESTORE" list_remote_backups)"
+REMOTE_MODE=empty
+list_remote_backups >"$TMP/empty.out" 2>&1 || fail 'genuinely empty remote should not be reported as an rclone failure'
+[[ ${#_REMOTE_FILES[@]} -eq 0 ]] || fail 'empty remote unexpectedly produced a trusted selection'
+grep -Fq 'No complete remote backup cohorts found' "$TMP/empty.out" || fail 'empty remote outcome was not reported clearly'
+REMOTE_MODE=incomplete
+list_remote_backups >"$TMP/incomplete.out" 2>&1 || fail 'incomplete remote cohort should be skipped, not treated as a transport failure'
+[[ ${#_REMOTE_FILES[@]} -eq 0 ]] || fail 'incomplete remote cohort was auto-selected as trusted'
+grep -Fq 'Skipping incomplete remote' "$TMP/incomplete.out" \
+  || fail 'incomplete remote cohort was not diagnosed as incomplete'
+grep -Fq '.sha256.hmac' "$TMP/incomplete.out" \
+  || fail 'incomplete strict remote cohort did not identify the missing HMAC sidecar'
+REMOTE_MODE=fail
+if list_remote_backups >"$TMP/fail.out" 2>&1; then fail 'rclone/auth listing failure returned success'; fi
+grep -Fq 'Remote backup listing failed' "$TMP/fail.out" || fail 'rclone listing failure was not distinguished from empty remote'
+grep -Fq 'authentication failed' "$TMP/fail.out" || fail 'rclone listing error omitted actionable output'
+printf 'PASS: restore remote listing distinguishes empty inventory from rclone/auth failure\n'
+)
+check_remote_restore_listing_truthfulness

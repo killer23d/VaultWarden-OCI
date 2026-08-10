@@ -178,6 +178,7 @@ check_emergency_offsite_metadata_contract() (
 set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
 BACKUP="$ROOT/utilities/backup-run.sh"
+UTILS="$ROOT/lib/backup-utils.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -199,6 +200,7 @@ CONTROL_WORKSPACE="$TMP/work"
 mkdir -p "\$CONTROL_WORKSPACE"
 FAIL_SUFFIX="\${FAIL_SUFFIX:-}"
 META_CASE="\${META_CASE:-age-passphrase}"
+REQUIRE_AUTHENTICATED_INTEGRITY="\${REQUIRE_AUTHENTICATED_INTEGRITY:-false}"
 backup_log_info(){ printf 'INFO %s\\n' "\$*"; }
 log_warn(){ printf 'WARN %s\\n' "\$*"; }
 log_error(){ printf 'ERROR %s\\n' "\$*"; }
@@ -226,7 +228,9 @@ rclone(){
     *) return 0 ;;
   esac
 }
+$(_extract_func "$UTILS" backup_required_cohort_suffixes)
 $(_extract_func "$BACKUP" _validate_emergency_restore_metadata)
+$(_extract_func "$BACKUP" _verify_remote_cohort_member)
 $(_extract_func "$BACKUP" sync_to_rclone)
 archive="$TMP/emergency.tar.zst.age"
 printf archive > "\$archive"
@@ -239,6 +243,9 @@ case "\$META_CASE" in
   *) exit 90 ;;
 esac
 printf checksum > "\${archive}.sha256"
+if [[ "\$REQUIRE_AUTHENTICATED_INTEGRITY" == true ]]; then
+  printf hmac > "\${archive}.sha256.hmac"
+fi
 rc=0
 sync_to_rclone "\$archive" emergency || rc=\$?
 printf 'RC=%s\\n' "\$rc"
@@ -255,9 +262,19 @@ grep -qi 'emergency offsite delivery is incomplete\|remote emergency recovery po
 
 : > "$TMP/rclone-copy.calls"
 FAIL_SUFFIX=.sha256 bash "$TMP/sync-probe.sh" >"$TMP/sha-fail.out" 2>&1 || fail 'checksum sidecar upload probe crashed'
-grep -q '^RC=2$' "$TMP/sha-fail.out" || { cat "$TMP/sha-fail.out" >&2; fail '.sha256 upload failure must remain warning-class status 2'; }
-grep -q 'The primary backup archive was delivered' "$TMP/sha-fail.out" \
-  || fail '.sha256 upload failure must retain warning-class primary-delivered wording'
+grep -q '^RC=1$' "$TMP/sha-fail.out" || { cat "$TMP/sha-fail.out" >&2; fail '.sha256 upload failure must make offsite delivery incomplete'; }
+! grep -q 'Offsite sync complete' "$TMP/sha-fail.out" \
+  || fail '.sha256 upload failure must not report a complete remote recovery point'
+
+: > "$TMP/rclone-copy.calls"
+REQUIRE_AUTHENTICATED_INTEGRITY=true FAIL_SUFFIX=.sha256.hmac \
+  bash "$TMP/sync-probe.sh" >"$TMP/hmac-fail.out" 2>&1 || fail 'HMAC sidecar upload probe crashed'
+grep -q '^RC=1$' "$TMP/hmac-fail.out" \
+  || { cat "$TMP/hmac-fail.out" >&2; fail '.sha256.hmac upload failure must make offsite delivery incomplete'; }
+! grep -q 'Offsite sync complete' "$TMP/hmac-fail.out" \
+  || fail '.sha256.hmac upload failure must not report a complete remote recovery point'
+grep -Fq "$TMP/emergency.tar.zst.age.sha256.hmac" "$TMP/rclone-copy.calls" \
+  || fail 'strict offsite sync did not attempt required HMAC upload'
 
 for meta_case in zero missing-mode unsupported duplicate; do
   : > "$TMP/rclone-copy.calls"
@@ -328,6 +345,8 @@ done
 
 cat > "$TMP/batch-sync-probe.sh" <<EOF_PROBE
 set -uo pipefail
+CONTROL_WORKSPACE="$TMP/batch-work"
+mkdir -p "\$CONTROL_WORKSPACE"
 BASE_DIR="$TMP/retained"
 DRY_RUN=false
 KEEP_DAYS=""
@@ -337,6 +356,7 @@ rm -rf "\$BASE_DIR"
 mkdir -p "\$BASE_DIR/emergency"
 archive="\$BASE_DIR/emergency/emergency-retained-20260710-120000.tar.zst.age"
 printf archive > "\$archive"
+printf checksum > "\${archive}.sha256"
 case "\$BATCH_META_CASE" in
   zero) : > "\${archive}.meta" ;;
   valid) printf 'encryption_mode=age-recipient\\n' > "\${archive}.meta" ;;
@@ -363,10 +383,13 @@ rclone(){
   case "\$cmd" in
     lsd) return 0 ;;
     copy) printf '%s\\n' "\$*" >> "\$COPY_LOG"; return 0 ;;
+    size) printf 'Total size: 1234 Bytes (1.205 KiB)\\n'; return 0 ;;
     *) return 0 ;;
   esac
 }
+$(_extract_func "$UTILS" backup_required_cohort_suffixes)
 $(_extract_func "$BACKUP" _validate_emergency_restore_metadata)
+$(_extract_func "$BACKUP" _verify_remote_cohort_member)
 $(_extract_func "$BACKUP" sync_all_backups_to_rclone)
 sync_all_backups_to_rclone
 EOF_PROBE
@@ -387,12 +410,14 @@ BATCH_META_CASE=valid bash "$TMP/batch-sync-probe.sh" >"$TMP/batch-valid.out" 2>
 grep -Fq "$TMP/retained/emergency/" "$TMP/batch-copy.calls" || fail 'valid retained emergency backup did not continue to batch copy'
 grep -q 'Rclone backup copy complete' "$TMP/batch-valid.out" || fail 'valid retained emergency backup did not reach normal batch-sync completion'
 
-grep -Fq 'elif (( _sync_rc == 3 )); then' "$BACKUP" \
+grep -Fq 'if (( _sync_rc == 3 )); then' "$BACKUP" \
   || fail 'backup run caller must handle emergency metadata delivery status separately'
+! grep -Fq 'synced with sidecar warnings' "$BACKUP" \
+  || fail 'backup run must not report incomplete required sidecars as synced'
 grep -Fq 'FAILED: emergency restore metadata missing or unusable; local backup is safe' "$BACKUP" \
   || fail 'backup run summary must mark incomplete emergency offsite delivery as failed'
 
-printf 'PASS: emergency offsite metadata is restore-usable before sync and verification; checksum sidecars remain warning-class\n'
+printf 'PASS: emergency offsite metadata and required integrity sidecars must all complete before offsite success\n'
 )
 
 check_emergency_offsite_metadata_contract
@@ -1287,6 +1312,7 @@ for function_name in \
     eval "$(_extract_shell_function "$BACKUP" "$function_name")"
 done
 eval "$(_extract_shell_function "$UTILS" check_backup_disk_space)"
+eval "$(_extract_shell_function "$UTILS" backup_required_cohort_suffixes)"
 
 project="$TMP/project"
 state="$TMP/state"
@@ -2428,3 +2454,39 @@ printf 'PASS: standalone DB verifier accepts canonical backup symlink and cleans
 )
 
 check_standalone_db_verifier_symlink_base
+
+
+check_authenticated_backup_cohort_contract() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+source "$ROOT/lib/log.sh"
+source "$ROOT/lib/crypto.sh"
+source "$ROOT/lib/backup-utils.sh"
+has_command(){ command -v "$1" >/dev/null 2>&1; }
+FILE_INTEGRITY_HMAC_KEY='cohort-test-key'
+REQUIRE_AUTHENTICATED_INTEGRITY=true
+export FILE_INTEGRITY_HMAC_KEY REQUIRE_AUTHENTICATED_INTEGRITY
+mapfile -t suffixes < <(backup_required_cohort_suffixes)
+[[ "${suffixes[*]}" == ' .sha256 .sha256.hmac .meta' ]] || fail 'strict cohort definition drifted'
+for backup_type in db full; do
+    archive="$TMP/${backup_type}-test.age"
+    printf 'encrypted-payload-%s' "$backup_type" > "$archive"
+    write_file_integrity "$archive" || fail "strict ${backup_type} integrity sidecars were not produced"
+    printf 'backup_type=%s\narchive_format=relative\nversion=2\nencryption_mode=age-recipient\n' "$backup_type" > "${archive}.meta"
+    chmod 600 "$archive" "${archive}.sha256" "${archive}.sha256.hmac" "${archive}.meta"
+    verify_file_integrity "$archive" || fail "valid authenticated ${backup_type} cohort did not verify"
+done
+archive="$TMP/db-test.age"
+printf tampered > "${archive}.sha256.hmac"
+if verify_file_integrity "$archive" >/dev/null 2>&1; then fail 'tampered HMAC verified'; fi
+write_file_integrity "$archive" || fail 'could not recreate integrity sidecars'
+rm -f "${archive}.sha256.hmac"
+if verify_file_integrity "$archive" >/dev/null 2>&1; then fail 'missing required HMAC verified'; fi
+write_file_integrity "$archive" || fail 'could not recreate integrity sidecars after missing-HMAC case'
+FILE_INTEGRITY_HMAC_KEY='wrong-key'
+if verify_file_integrity "$archive" >/dev/null 2>&1; then fail 'wrong integrity key verified'; fi
+printf 'PASS: authenticated backup cohort rejects tampered/missing HMAC and wrong key\n'
+)
+check_authenticated_backup_cohort_contract
