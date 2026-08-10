@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# utilities/setup-firewall.sh — Configures VaultWarden-OCI UFW and iptables rules.
+# utilities/setup-firewall.sh — Configures VaultWarden-OCI UFW and Docker firewall reconciliation.
 
 set -euo pipefail
 
@@ -19,42 +19,38 @@ source "${PROJECT_ROOT}/lib/operations.sh"
 source "${PROJECT_ROOT}/lib/defaults.sh"
 
 show_help() {
-    cat <<'EOF'
+    cat <<'HELP'
 VaultWarden-OCI Firewall Configuration
 
 USAGE:
     sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [OPTIONS]
 
 DESCRIPTION:
-    Configures UFW (with Cloudflare CIDR restrictions) and iptables NAT /
-    DOCKER-USER rules for the VaultWarden compose project. Safe to re-run
-    (idempotent). Called automatically by setup.sh during phase 6.
+    Reconciles the Cloudflare-only UFW ingress contract and removes the OCI
+    FORWARD reject that can block Docker forwarding. Docker remains authoritative
+    for bridge forwarding, inter-network isolation, and container masquerading.
 
 OPTIONS:
     --phase ufw|iptables|all   Phase to run (default: all)
-    --auto                     Non-interactive mode (implies --yes)
-    --yes                      Auto-confirm the netfilter-persistent install prompt
+    --auto                     Non-interactive mode
     --dry-run                  Preview actions without executing
-    --force                    Skip confirmations
-    --force-iptables           Continue iptables setup even when an active nftables
-                               ruleset is detected. Use only when you have verified
-                               that nftables will not override these iptables rules.
+    --force                    Reconcile even when the current state appears ready
     --help, -h                 Show this help
     --version, -V              Print the VaultWarden-OCI version and exit
 
 NOTES:
-    UFW rules must be applied AFTER Docker installation. Docker rewrites iptables
-    chains during installation; rules set before Docker is installed are silently
-    bypassed by Docker's DOCKER-USER chain.
+    The iptables phase supports Docker's iptables firewall backend only. Native
+    Docker nftables firewall mode or disabled Docker iptables management is not
+    supported by this project.
 
-    The systemd unit vaultwarden-iptables.service calls this script with
-    --phase iptables to re-apply NAT rules after a Docker upgrade resets chains.
+    vaultwarden-iptables.service owns boot-time runtime reconciliation. This
+    script does not install firewall packages or persist rules to disk.
 
 EXAMPLES:
     sudo utilities/setup-firewall.sh
     sudo utilities/setup-firewall.sh --dry-run
     sudo utilities/setup-firewall.sh --phase ufw
-EOF
+HELP
 }
 
 _require_cli_value() {
@@ -66,45 +62,22 @@ _require_cli_value() {
     fi
 }
 
-# Store iptables rollback state populated by _phase_iptables().
-_ipt_backup_v4=""
-_ipt_backup_v6=""
-
-_ipt_cleanup() {
-    local _rc=$?
-    if [[ -n "$_ipt_backup_v4" && -f "$_ipt_backup_v4" ]]; then
-        log_rollback "Restoring iptables rules from: $_ipt_backup_v4"
-        iptables-restore < "$_ipt_backup_v4" 2>/dev/null || true
-        rm -f "$_ipt_backup_v4"
-    fi
-    if [[ -n "$_ipt_backup_v6" && -f "$_ipt_backup_v6" ]]; then
-        log_rollback "Restoring ip6tables rules from: $_ipt_backup_v6"
-        ip6tables-restore < "$_ipt_backup_v6" 2>/dev/null || true
-        rm -f "$_ipt_backup_v6"
-    fi
-    return $_rc
-}
-
 PHASE="all"
 AUTO_MODE=false
 DRY_RUN=false
 FORCE=false
-FORCE_IPTABLES=false
-YES=false
 ORIGINAL_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --phase)           _require_cli_value "$1" "${2-}"; PHASE="$2"; shift 2 ;;
-        --auto)            AUTO_MODE=true; YES=true; shift ;;
-        --yes)             YES=true; shift ;;
-        --dry-run)         DRY_RUN=true; shift ;;
-        --force)           FORCE=true; shift ;;
-        --force-iptables)  FORCE_IPTABLES=true; shift ;;
-        --help|-h)         show_help; exit 0 ;;
-        --version|-V)      print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
-        help)              show_help; exit 0 ;;
-        *)                 log_error "Unknown option: $1"; show_help; exit 1 ;;
+        --phase)      _require_cli_value "$1" "${2-}"; PHASE="$2"; shift 2 ;;
+        --auto)       AUTO_MODE=true; shift ;;
+        --dry-run)    DRY_RUN=true; shift ;;
+        --force)      FORCE=true; shift ;;
+        --help|-h)    show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
+        help)         show_help; exit 0 ;;
+        *)            log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
@@ -113,460 +86,441 @@ case "$PHASE" in
     *) log_error "--phase must be ufw|iptables|all (got: '$PHASE')"; exit 1 ;;
 esac
 
-_phase_ufw() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_dry_run "Would configure UFW firewall with Cloudflare CIDR restrictions"
-        log_dry_run "Would detect SSH port via sshd -T or /etc/ssh/sshd_config"
-        log_dry_run "Would fetch Cloudflare IPv4/IPv6 CIDR lists"
-        log_dry_run "Would allow SSH port, restrict 80/443 to Cloudflare CIDRs"
-        log_dry_run "Would enable UFW if not already active"
-        return 0
+_ufw_status() {
+    local numbered="${1:-false}" output rc=0
+    if [[ "$numbered" == "true" ]]; then
+        output="$(ufw status numbered 2>&1)" || rc=$?
+    else
+        output="$(ufw status 2>&1)" || rc=$?
+    fi
+    if (( rc != 0 )); then
+        log_error "Unable to read UFW status (exit ${rc}): ${output:-no output}"
+        return "$rc"
+    fi
+    printf '%s\n' "$output"
+}
+
+_ufw_has_range_port() {
+    local status="$1" cidr="$2" port="$3" escaped
+    escaped="$(printf '%s' "$cidr" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+    grep -qE "^${port}(/tcp)?([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped}([[:space:]]|$)" <<< "$status"
+}
+
+_ufw_line_cidr() {
+    local line="$1" word
+    local -a words=()
+    read -ra words <<< "$line"
+    for word in "${words[@]}"; do
+        word="${word%\#*}"
+        if [[ "$word" =~ ^[0-9]+(\.[0-9]+){3}/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+            printf '%s\n' "$word"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_ufw_collect_conflicts() {
+    local numbered_status="$1"
+    shift
+    local -a desired=("$@")
+    local line rule_num cidr keep desired_cidr
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]] || continue
+        rule_num="${BASH_REMATCH[1]}"
+
+        if [[ "$line" =~ (^|[[:space:]])(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)[[:space:]]+Anywhere([[:space:]]|$) ]]; then
+            printf '%s\n' "$rule_num"
+            continue
+        fi
+
+        [[ "$line" =~ CF-IPv[46] ]] || continue
+        cidr="$(_ufw_line_cidr "$line" || true)"
+        [[ -n "$cidr" ]] || { printf '%s\n' "$rule_num"; continue; }
+        keep=false
+        for desired_cidr in "${desired[@]}"; do
+            if [[ "$desired_cidr" == "$cidr" ]]; then
+                keep=true
+                break
+            fi
+        done
+        [[ "$keep" == "true" ]] || printf '%s\n' "$rule_num"
+    done <<< "$numbered_status"
+}
+
+_ufw_delete_rules() {
+    local -a rule_nums=("$@")
+    (( ${#rule_nums[@]} > 0 )) || return 0
+    mapfile -t rule_nums < <(printf '%s\n' "${rule_nums[@]}" | awk 'NF && !seen[$0]++' | sort -rn)
+    local rule_num output rc=0
+    for rule_num in "${rule_nums[@]}"; do
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_dry_run "Would delete conflicting UFW rule ${rule_num}"
+            continue
+        fi
+        rc=0
+        output="$(ufw --force delete "$rule_num" 2>&1)" || rc=$?
+        if (( rc != 0 )); then
+            log_error "Failed to delete UFW rule ${rule_num} (exit ${rc}): ${output:-no output}"
+            return "$rc"
+        fi
+    done
+}
+
+_ufw_ensure_range() {
+    local cidr="$1" label="$2" status output rc=0
+    status="$(_ufw_status false)" || return $?
+    if ! _ufw_has_range_port "$status" "$cidr" 80; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_dry_run "Would allow Cloudflare ${cidr} to 80/tcp"
+        else
+            output="$(ufw allow proto tcp from "$cidr" to any port 80 comment "$label" 2>&1)" || rc=$?
+            if (( rc != 0 )); then
+                log_error "Failed to add UFW port 80 rule for ${cidr} (exit ${rc}): ${output:-no output}"
+                return "$rc"
+            fi
+        fi
     fi
 
-    local ssh_port
-    ssh_port=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
-    if [[ -z "$ssh_port" ]]; then
-        ssh_port=$(awk '/^Port[[:space:]]/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
+    status="$(_ufw_status false)" || return $?
+    if ! _ufw_has_range_port "$status" "$cidr" 443; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_dry_run "Would allow Cloudflare ${cidr} to 443/tcp"
+        else
+            rc=0
+            output="$(ufw allow proto tcp from "$cidr" to any port 443 comment "$label" 2>&1)" || rc=$?
+            if (( rc != 0 )); then
+                log_error "Failed to add UFW port 443 rule for ${cidr} (exit ${rc}): ${output:-no output}"
+                return "$rc"
+            fi
+        fi
     fi
-    ssh_port=${ssh_port:-22}
+}
+
+_ufw_verify_exact() {
+    local ssh_port="$1"
+    shift
+    local -a desired=("$@")
+    local status numbered_status cidr
+    status="$(_ufw_status false)" || return $?
+    numbered_status="$(_ufw_status true)" || return $?
+
+    grep -q '^Status: active' <<< "$status" || {
+        log_error "UFW is not active after reconciliation."
+        return 1
+    }
+    grep -qE "^${ssh_port}(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW IN)" <<< "$status" || {
+        log_error "UFW SSH rule for ${ssh_port}/tcp is missing after reconciliation."
+        return 1
+    }
+
+    if [[ -n "$(_ufw_collect_conflicts "$numbered_status" "${desired[@]}")" ]]; then
+        log_error "Conflicting public or stale managed UFW 80/443 rules remain after reconciliation."
+        return 1
+    fi
+
+    for cidr in "${desired[@]}"; do
+        _ufw_has_range_port "$status" "$cidr" 80 || {
+            log_error "Missing Cloudflare UFW rule: ${cidr} -> 80/tcp"
+            return 1
+        }
+        _ufw_has_range_port "$status" "$cidr" 443 || {
+            log_error "Missing Cloudflare UFW rule: ${cidr} -> 443/tcp"
+            return 1
+        }
+    done
+    return 0
+}
+
+_phase_ufw() {
+    local ssh_port
+    ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')"
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port="$(awk '/^Port[[:space:]]/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null || true)"
+    fi
+    ssh_port="${ssh_port:-22}"
     log_info "Detected SSH port: ${ssh_port}"
 
     local cf_ipv4_url="https://www.cloudflare.com/ips-v4"
     local cf_ipv6_url="https://www.cloudflare.com/ips-v6"
     local cf_cidr_cache="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/cf-cidrs.cache"
-    local -a cf_cidrs=()
-    local cf_fetch_failed=false
+    local ipv4_list="" ipv6_list="" cf_fetch_failed=false
+    local -a cf_cidrs=() validated_cidrs=()
 
     log_info "Fetching Cloudflare CIDR lists for firewall restriction..."
-    local ipv4_list ipv6_list
-    ipv4_list=$(curl -fsSL --max-time 15 "$cf_ipv4_url" 2>/dev/null) || cf_fetch_failed=true
-    ipv6_list=$(curl -fsSL --max-time 15 "$cf_ipv6_url" 2>/dev/null) || cf_fetch_failed=true
+    ipv4_list="$(curl -fsSL --max-time 15 "$cf_ipv4_url" 2>/dev/null)" || cf_fetch_failed=true
+    ipv6_list="$(curl -fsSL --max-time 15 "$cf_ipv6_url" 2>/dev/null)" || cf_fetch_failed=true
 
-    if [[ "$cf_fetch_failed" == "false" ]] && \
-       [[ -n "$ipv4_list" ]] && [[ -n "$ipv6_list" ]]; then
+    if [[ "$cf_fetch_failed" == "false" && -n "$ipv4_list" && -n "$ipv6_list" ]]; then
         local cidr
         while IFS= read -r cidr; do
-            [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-            cf_cidrs+=("$cidr")
+            [[ -z "$cidr" || "$cidr" == \#* ]] || cf_cidrs+=("$cidr")
         done <<< "$ipv4_list"
         while IFS= read -r cidr; do
-            [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-            cf_cidrs+=("$cidr")
+            [[ -z "$cidr" || "$cidr" == \#* ]] || cf_cidrs+=("$cidr")
         done <<< "$ipv6_list"
         log_info "Fetched ${#cf_cidrs[@]} Cloudflare CIDRs"
-        # Persist a fresh cache so future fetch failures fall back to known-good data.
-        mkdir -p "$(dirname "$cf_cidr_cache")" 2>/dev/null || true
-        printf '%s\n' "${cf_cidrs[@]}" > "$cf_cidr_cache" 2>/dev/null || true
-        chmod 640 "$cf_cidr_cache" 2>/dev/null || true
-    else
-        # Fetch failed — try the last-known-good cache before failing open.
-        if [[ -s "$cf_cidr_cache" ]]; then
-            # TTL check: reject cache older than 7 days
-            if [[ -n "$(find "$cf_cidr_cache" -mtime +7 2>/dev/null)" ]]; then
-                log_warn "Cloudflare CIDR cache is older than 7 days — treating as stale."
-                log_error "Could not fetch fresh Cloudflare CIDR lists and cache is expired."
-                log_error "SECURITY: Refusing to configure ports 80/443 with stale CIDR data."
-                log_error "  Check internet connectivity, then re-run: sudo utilities/setup-firewall.sh"
-                return 1
-            fi
-            log_warn "Could not fetch Cloudflare CIDR lists — using cached copy: $cf_cidr_cache"
-            while IFS= read -r cidr; do
-                [[ -z "$cidr" || "$cidr" == \#* ]] && continue
-                cf_cidrs+=("$cidr")
-            done < "$cf_cidr_cache"
-            log_warn "SECURITY: Rules are based on cached CIDRs, which may be stale."
-            log_warn "  Re-run this script when network access is restored to refresh the cache."
-        else
-            log_error "Could not fetch Cloudflare CIDR lists and no cache is available."
-            log_error "SECURITY: Refusing to configure ports 80/443 without valid CIDR data."
-            log_error "  Check internet connectivity, then re-run: sudo utilities/setup-firewall.sh"
-            log_error "  To allow all IPs explicitly: ufw allow 80/tcp && ufw allow 443/tcp"
+    elif [[ -s "$cf_cidr_cache" ]]; then
+        if [[ -n "$(find "$cf_cidr_cache" -mtime +7 2>/dev/null)" ]]; then
+            log_warn "Cloudflare CIDR cache is older than 7 days — treating as stale."
+            log_error "Could not fetch fresh Cloudflare CIDR lists and cache is expired."
+            log_error "SECURITY: Refusing to configure ports 80/443 with stale CIDR data."
             return 1
         fi
+        log_warn "Could not fetch Cloudflare CIDR lists — using cached copy: $cf_cidr_cache"
+        while IFS= read -r cidr; do
+            [[ -z "$cidr" || "$cidr" == \#* ]] || cf_cidrs+=("$cidr")
+        done < "$cf_cidr_cache"
+        log_warn "SECURITY: Rules are based on cached CIDRs. Re-run when network access is restored."
+    else
+        log_error "Could not fetch Cloudflare CIDR lists and no recent cache is available."
+        log_error "SECURITY: Refusing to configure ports 80/443 without valid CIDR data."
+        return 1
     fi
 
-    local ufw_active=false
-    ufw status | grep -q "Status: active" && ufw_active=true
-
-    # Skip full reconfiguration when UFW is already active with the required rules,
-    # unless --force overrides the idempotency check.
-    if [[ "$FORCE" != "true" ]] && \
-       [[ "$ufw_active" == "true" ]] && \
-       ufw status | grep -q "80/tcp" && \
-       ufw status | grep -q "443/tcp" && \
-       ufw status | grep -q "${ssh_port}/tcp"; then
-        log_success "Firewall already configured and active"
-        return 0
-    fi
-
-    ufw allow "${ssh_port}/tcp"
-
-    # Validate CIDR format before inserting into firewall rules
-    local -a validated_cidrs=()
     local cidr
     for cidr in "${cf_cidrs[@]}"; do
         if [[ "$cidr" =~ ^[0-9a-fA-F.:]+/[0-9]+$ ]]; then
             validated_cidrs+=("$cidr")
         else
-            log_warn "Skipping invalid CIDR entry: ${cidr}"
+            log_error "Invalid Cloudflare CIDR entry: ${cidr}"
+            return 1
         fi
     done
-    if (( ${#validated_cidrs[@]} == 0 )); then
-        log_error "No valid CIDRs found after format validation — aborting firewall configuration."
+    (( ${#validated_cidrs[@]} > 0 )) || {
+        log_error "No valid Cloudflare CIDRs found."
         return 1
-    fi
-    log_info "Validated ${#validated_cidrs[@]} of ${#cf_cidrs[@]} CIDRs"
+    }
 
-    for cidr in "${validated_cidrs[@]}"; do
-        local label="CF-IPv4"
-        if [[ "$cidr" == *":"* ]]; then
-            label="CF-IPv6"
-        fi
-        ufw allow from "$cidr" to any port 80 proto tcp comment "${label}"  2>/dev/null || true
-        ufw allow from "$cidr" to any port 443 proto tcp comment "${label}" 2>/dev/null || true
-    done
-    log_success "Firewall: ports 80/443 restricted to ${#validated_cidrs[@]} Cloudflare CIDRs"
-
-    [[ "$ufw_active" == "false" ]] && ufw --force enable
-    log_success "UFW firewall configured"
-}
-
-_phase_iptables() {
-    if ! command -v docker >/dev/null 2>&1; then
-        log_error "docker command not found"
-        exit 1
-    fi
-    if ! command -v iptables >/dev/null 2>&1; then
-        log_error "iptables command not found"
-        exit 1
-    fi
-    if ! command -v python3 >/dev/null 2>&1; then
-        log_error "python3 command not found — required for subnet discovery from compose config"
-        exit 1
-    fi
-
-    # Refuse to run alongside an active nftables ruleset unless the operator
-    # has explicitly acknowledged the risk with --force-iptables.
-    #
-    # On systems using iptables-nft, nftables rules take precedence and can
-    # silently override what iptables writes, leaving the host in an undefined
-    # firewall state. Running both frameworks simultaneously is unsupported and
-    # may cause container traffic to be blocked or the host to be inaccessible.
-    if command -v nft >/dev/null 2>&1; then
-        if nft list ruleset 2>/dev/null | grep -q .; then
-            if [[ "$FORCE_IPTABLES" != "true" ]]; then
-                log_error "nftables ruleset is active on this host."
-                log_error "Running iptables alongside nftables may cause conflicting firewall"
-                log_error "policies. nftables rules can silently override these iptables rules,"
-                log_error "leaving container traffic blocked or SSH inaccessible."
-                log_error "Options:"
-                log_error "  1. Disable nftables first:  sudo systemctl stop nftables"
-                log_error "  2. Use nftables for all rules (see docs/OPERATIONS.md)."
-                log_error "  3. Override this check (RISK):  --force-iptables"
-                exit 1
-            fi
-            log_warn "nftables ruleset is active on this host (--force-iptables acknowledged)."
-            log_warn "Verify that nftables is not shadowing these iptables rules."
-        fi
-    fi
-
-    # Verify SSH is reachable before touching iptables rules.
-    # Adding MASQUERADE or FORWARD rules while accidentally blocking SSH could
-    # lock the operator out of the host.
-    #
-    # Checks are attempted in order:
-    #   1. An explicit ACCEPT rule for the SSH port.
-    #   2. A blanket ACCEPT for all INPUT traffic.
-    #   3. An INPUT chain default policy of ACCEPT.
-    #   4. A listening SSH daemon with no INPUT DROP or REJECT rules.
-    local _ssh_port="${SSH_PORT:-22}"
-    local _ssh_ok=false
-    if iptables -L INPUT -n 2>/dev/null | grep -qE "ACCEPT.*(tcp dpt:${_ssh_port}|state.*ESTABLISHED|multiport.*${_ssh_port})"; then
-        _ssh_ok=true
-    elif iptables -L INPUT -n 2>/dev/null | grep -qE "ACCEPT[[:space:]]+all[[:space:]]+--[[:space:]]+0\.0\.0\.0/0[[:space:]]+0\.0\.0\.0/0"; then
-        _ssh_ok=true
-    elif iptables -L INPUT 2>/dev/null | head -1 | grep -q "policy ACCEPT"; then
-        _ssh_ok=true
-    elif ss -tlnp 2>/dev/null | grep -q ":${_ssh_port}" && \
-         ! iptables -L INPUT -n 2>/dev/null | grep -qE "^(DROP|REJECT)"; then
-        _ssh_ok=true
-    fi
-    if [[ "$_ssh_ok" != "true" ]]; then
-        log_warn "Could not confirm an SSH ACCEPT rule in the INPUT chain."
-        log_warn "Proceeding, but verify SSH port ${_ssh_port} remains accessible after this script."
-    fi
-
-    # Save the current iptables rules before any modifications.
-    # On ERR, INT, or TERM, automatically restore the saved rules so the host
-    # is not left with a partial or broken iptables configuration.
-    if [[ "$DRY_RUN" != "true" ]]; then
-        _ipt_backup_v4="$(mktemp -p "${PROJECT_ROOT}" .iptables-backup.XXXXXX)"
-        iptables-save > "$_ipt_backup_v4" 2>/dev/null || {
-            log_warn "Could not save current iptables state — rollback on failure will not be available."
-            rm -f "$_ipt_backup_v4"; _ipt_backup_v4=""
-        }
-        if command -v ip6tables-save >/dev/null 2>&1; then
-            _ipt_backup_v6="$(mktemp -p "${PROJECT_ROOT}" .ip6tables-backup.XXXXXX)"
-            ip6tables-save > "$_ipt_backup_v6" 2>/dev/null || {
-                rm -f "$_ipt_backup_v6"; _ipt_backup_v6=""
-            }
-        fi
-        _setup_firewall_error_cleanup() {
-            local exit_rc=$?
-            _ipt_cleanup
-            operation_release "$exit_rc"
-            exit "$exit_rc"
-        }
-        trap _setup_firewall_error_cleanup ERR INT TERM
-        _setup_firewall_exit_cleanup() {
-            local exit_rc=$?
-            rm -f "${_ipt_backup_v4:-}" "${_ipt_backup_v6:-}"
-            operation_release "$exit_rc"
-            exit "$exit_rc"
-        }
-        # On success, clean up backup files without performing a rollback.
-        trap _setup_firewall_exit_cleanup EXIT
-    fi
-
-    local compose_file="${COMPOSE_FILE:-docker-compose.yml}"
-    if [[ ! -f "${PROJECT_ROOT}/${compose_file}" ]]; then
-        compose_file="docker-compose.yml.example"
-    fi
-
-    # Discover bridge network names from the Docker Compose JSON config.
-    local -a NETWORK_NAMES=()
-    set +e
-    mapfile -t NETWORK_NAMES < <(
-        docker compose -f "${PROJECT_ROOT}/${compose_file}" config --services >/dev/null 2>&1 &&
-        docker compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null |
-        python3 -c '
-import json, sys
-c = json.load(sys.stdin)
-nets = c.get("networks", {})
-for name, cfg in nets.items():
-    if cfg.get("driver", "bridge") != "bridge":
-        continue
-    if cfg.get("internal", False) is True:
-        continue
-    if cfg.get("external", False) is True:
-        continue
-    print(name)
-' 2>/dev/null
-    )
-    set -e
-
-    # Fall back when JSON config discovery is unavailable or returns nothing.
-    if [[ ${#NETWORK_NAMES[@]} -eq 0 ]]; then
-        NETWORK_NAMES=(vaultwarden_egress caddy_external)
-    fi
-
-    local -a SUBNETS=()
-    local net subnet full_name
-    for net in "${NETWORK_NAMES[@]}"; do
-        # Resolve the subnet directly from JSON to avoid fragile YAML awk parsing.
-        subnet=$(docker compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null | \
-            python3 -c "
-import json, sys
-c = json.load(sys.stdin)
-nets = c.get('networks', {})
-n = nets.get('${net}', {})
-cfgs = n.get('ipam', {}).get('config', [])
-print(cfgs[0]['subnet'] if cfgs else '')
-" 2>/dev/null || true)
-
-        # Fall back to inspecting the running network when no static subnet is pinned.
-        if [[ -z "${subnet:-}" ]]; then
-            full_name=$(docker compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null | \
-                python3 -c "
-import json, sys
-c = json.load(sys.stdin)
-nets = c.get('networks', {})
-n = nets.get('${net}', {})
-print(n.get('name', '${net}_network'))
-" 2>/dev/null || true)
-            [[ -n "${full_name:-}" ]] || full_name="${net}_network"
-            subnet=$(docker network inspect -f '{{with index .IPAM.Config 0}}{{.Subnet}}{{end}}' \
-                "${full_name}" 2>/dev/null || true)
-        fi
-
-        if [[ -n "${subnet:-}" ]]; then
-            SUBNETS+=("${subnet}")
-        fi
-    done
-
-    # Always include the pinned egress subnet as a deterministic baseline.
-    SUBNETS+=("172.21.0.0/16")
-
-    local -a UNIQUE_SUBNETS=()
-    mapfile -t UNIQUE_SUBNETS < <(printf '%s\n' "${SUBNETS[@]}" | awk 'NF && !seen[$0]++')
-
-    for subnet in "${UNIQUE_SUBNETS[@]}"; do
-        if [[ "$DRY_RUN" == "true" ]]; then
-            if iptables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
-                log_info "OK: MASQUERADE already present for $subnet (IPv4)"
-            else
-                log_dry_run "Would add: MASQUERADE for $subnet (IPv4)"
-            fi
-            continue
-        fi
-        if iptables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
-            log_info "OK: MASQUERADE already present for $subnet (IPv4)"
-            continue
-        fi
-        iptables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE
-        log_success "ADDED: MASQUERADE for $subnet (IPv4)"
-    done
-
-    # Mirror the IPv4 MASQUERADE rules in ip6tables when IPv6 is enabled.
-    # Docker assigns IPv6 ULA subnets such as fd00::/8, and without ip6tables
-    # MASQUERADE, IPv6 container traffic cannot reach the internet.
-    # This is best-effort because some kernels do not provide ip6tables support.
-    if command -v ip6tables >/dev/null 2>&1; then
-        for subnet in "${UNIQUE_SUBNETS[@]}"; do
-            # Skip IPv4-only CIDR notation because ip6tables only handles IPv6 prefixes.
-            if [[ "$subnet" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ ]]; then
-                continue
-            fi
-            if [[ "$DRY_RUN" == "true" ]]; then
-                if ip6tables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
-                    log_info "OK: MASQUERADE already present for $subnet (IPv6)"
-                else
-                    log_dry_run "Would add: MASQUERADE for $subnet (IPv6)"
-                fi
-                continue
-            fi
-            if ip6tables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
-                log_info "OK: MASQUERADE already present for $subnet (IPv6)"
-                continue
-            fi
-            ip6tables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE
-            log_success "ADDED: MASQUERADE for $subnet (IPv6)"
-        done
-    else
-        log_warn "ip6tables not found — IPv6 MASQUERADE rules not applied."
-        log_warn "Container IPv6 traffic may not reach the internet."
-    fi
-
-    # Remove OCI's default FORWARD REJECT rule if it is present.
-    # Fresh Oracle Cloud instances inject:
-    #   -A FORWARD -j REJECT --reject-with icmp-host-prohibited
-    # This blocks container forwarding until removed, and the while loop handles
-    # the case where the rule appears more than once.
     if [[ "$DRY_RUN" == "true" ]]; then
-        if iptables -C FORWARD -j REJECT --reject-with icmp-host-prohibited 2>/dev/null; then
-            log_dry_run "Would remove: OCI default FORWARD REJECT rule"
-        else
-            log_info "OK: OCI FORWARD REJECT rule not present (nothing to remove)"
-        fi
-    else
-        local count=0
-        while iptables -D FORWARD -j REJECT --reject-with icmp-host-prohibited 2>/dev/null; do
-            count=$((count + 1))
-        done
-        if [[ $count -gt 0 ]]; then
-            log_success "REMOVED: OCI default FORWARD REJECT rule (x${count})"
-        else
-            log_info "OK: OCI FORWARD REJECT rule not present (nothing to remove)"
-        fi
-    fi
-
-    # Accept only the three pinned VaultWarden Compose subnets in DOCKER-USER.
-    # Using pinned subnets instead of all RFC1918 ranges prevents future Docker
-    # projects on this host from inheriting unrestricted forwarding.
-    # Subnets: 172.21.0.0/16 (vaultwarden_egress), 172.22.0.0/16 (caddy_external),
-    #          172.23.0.0/16 (postfix_relay), all pinned in docker-compose.yml.example.
-    # Keep this append-only and idempotent so repeated runs stay predictable.
-    if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
-        local cidr
-        for cidr in "172.21.0.0/16" "172.22.0.0/16" "172.23.0.0/16"; do
-            if [[ "$DRY_RUN" == "true" ]]; then
-                if iptables -t filter -C DOCKER-USER -s "$cidr" -j ACCEPT >/dev/null 2>&1; then
-                    log_info "OK: DOCKER-USER ACCEPT already present for pinned subnet $cidr"
-                else
-                    log_dry_run "Would add: DOCKER-USER ACCEPT for pinned VaultWarden subnet $cidr"
-                fi
-                continue
-            fi
-            if ! iptables -t filter -C DOCKER-USER -s "$cidr" -j ACCEPT >/dev/null 2>&1; then
-                iptables -t filter -A DOCKER-USER -s "$cidr" -j ACCEPT
-                log_success "ADDED: DOCKER-USER ACCEPT for pinned VaultWarden subnet $cidr"
-            else
-                log_info "OK: DOCKER-USER ACCEPT already present for pinned subnet $cidr"
-            fi
-        done
-    else
-        log_warn "DOCKER-USER chain not available; skipping forward-policy remediation"
-    fi
-
-    # Persist iptables rules across reboots with netfilter-persistent.
-    # Install it automatically with confirmation or --yes / --auto when absent.
-    if [[ "$DRY_RUN" == "true" ]]; then
-        if command -v netfilter-persistent >/dev/null 2>&1; then
-            log_dry_run "Would run: netfilter-persistent save"
-        else
-            log_dry_run "Would install netfilter-persistent iptables-persistent and run: netfilter-persistent save"
-        fi
+        log_dry_run "Would reconcile UFW to Cloudflare-only 80/443 ingress for ${#validated_cidrs[@]} CIDRs"
         return 0
     fi
 
-    if ! command -v netfilter-persistent >/dev/null 2>&1; then
-        log_warn "netfilter-persistent not installed — rules will be lost on reboot."
+    local ufw_active=false status numbered_status
+    status="$(_ufw_status false)" || return $?
+    grep -q '^Status: active' <<< "$status" && ufw_active=true
 
-        local _do_install=false
-        if [[ "$YES" == "true" ]]; then
-            _do_install=true
-        else
-            local _reply
-            read -r -t 300 -p "Install netfilter-persistent and iptables-persistent now? [yes/no] (default: no): " _reply || _reply="no"
-            [[ "${_reply,,}" == "y" || "${_reply,,}" == "yes" ]] && _do_install=true
+    ufw allow "${ssh_port}/tcp" >/dev/null
+
+    numbered_status="$(_ufw_status true)" || return $?
+    local -a conflicts=()
+    mapfile -t conflicts < <(_ufw_collect_conflicts "$numbered_status" "${validated_cidrs[@]}")
+    _ufw_delete_rules "${conflicts[@]}" || return $?
+
+    for cidr in "${validated_cidrs[@]}"; do
+        local label="CF-IPv4"
+        [[ "$cidr" == *:* ]] && label="CF-IPv6"
+        _ufw_ensure_range "$cidr" "$label" || return $?
+    done
+
+    [[ "$ufw_active" == "true" ]] || ufw --force enable >/dev/null
+    _ufw_verify_exact "$ssh_port" "${validated_cidrs[@]}" || return $?
+
+    mkdir -p "$(dirname "$cf_cidr_cache")"
+    printf '%s\n' "${validated_cidrs[@]}" > "$cf_cidr_cache"
+    chmod 640 "$cf_cidr_cache"
+
+    log_success "UFW reconciled: 80/443 are restricted to ${#validated_cidrs[@]} Cloudflare CIDRs"
+}
+
+_docker_iptables_preflight() {
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "docker command not found"
+        return 1
+    fi
+    for cmd in iptables iptables-save iptables-restore python3; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            log_error "$cmd command not found"
+            return 1
         fi
+    done
 
-        if [[ "$_do_install" == "true" ]]; then
-            log_info "Installing netfilter-persistent iptables-persistent..."
-            operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                netfilter-persistent iptables-persistent || {
-                log_warn "apt-get install netfilter-persistent failed — rules will not persist across reboots."
-                return 0
-            }
-            log_success "netfilter-persistent installed."
-        else
-            log_warn "Skipping netfilter-persistent install — iptables rules will NOT persist across reboots."
-            log_warn "Install with: apt-get install -y netfilter-persistent iptables-persistent"
-            return 0
+    local daemon_json="${DOCKER_DAEMON_CONFIG:-/etc/docker/daemon.json}"
+    if [[ -r "$daemon_json" ]]; then
+        local backend iptables_enabled
+        backend="$(python3 - "$daemon_json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as fh:
+    cfg = json.load(fh)
+print(cfg.get('firewall-backend', 'iptables'))
+PY
+)" || {
+            log_error "Could not parse Docker daemon configuration: ${daemon_json}"
+            return 1
+        }
+        iptables_enabled="$(python3 - "$daemon_json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as fh:
+    cfg = json.load(fh)
+print('true' if cfg.get('iptables', True) else 'false')
+PY
+)" || return 1
+        if [[ "$backend" != "iptables" || "$iptables_enabled" != "true" ]]; then
+            log_error "Unsupported Docker firewall configuration in ${daemon_json}."
+            log_error "VaultWarden-OCI requires Docker's iptables firewall backend with iptables management enabled."
+            log_error "Remove unsupported firewall-backend/iptables overrides, restart Docker, then re-run setup."
+            return 1
         fi
     fi
 
-    if ! netfilter-persistent save >/dev/null 2>&1; then
-        log_error "netfilter-persistent save failed — rules may not survive reboot."
-        exit 1
+    if ! iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
+        log_error "Docker DOCKER-USER chain is unavailable."
+        log_error "Ensure Docker uses the iptables firewall backend and restart docker.service."
+        return 1
     fi
-    log_success "Persisted iptables rules with netfilter-persistent"
+}
+
+_iptables_rule_state() {
+    local table="$1" chain="$2"
+    shift 2
+    local rc=0
+    iptables -t "$table" -C "$chain" "$@" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return "$rc" ;;
+    esac
+}
+
+_iptables_delete_all_exact() {
+    local table="$1" chain="$2" description="$3"
+    shift 3
+    local rc=0 count=0
+    while true; do
+        rc=0
+        _iptables_rule_state "$table" "$chain" "$@" || rc=$?
+        case "$rc" in
+            0) ;;
+            1) break ;;
+            *) log_error "Could not inspect ${description} (iptables exit ${rc})."; return "$rc" ;;
+        esac
+        rc=0
+        iptables -t "$table" -D "$chain" "$@" || rc=$?
+        if (( rc != 0 )); then
+            log_error "Failed to remove ${description} (iptables exit ${rc})."
+            return "$rc"
+        fi
+        count=$((count + 1))
+    done
+    (( count == 0 )) || log_success "Removed ${description} (x${count})"
+}
+
+_iptables_needs_reconciliation() {
+    local rc=0 cidr
+    _iptables_rule_state filter FORWARD -j REJECT --reject-with icmp-host-prohibited || rc=$?
+    [[ "$rc" -eq 0 ]] && return 0
+    [[ "$rc" -eq 1 ]] || return "$rc"
+
+    for cidr in 172.21.0.0/16 172.22.0.0/16 172.23.0.0/16 172.21.0.0/28 172.22.0.0/28 172.23.0.0/28; do
+        rc=0
+        _iptables_rule_state filter DOCKER-USER -s "$cidr" -j ACCEPT || rc=$?
+        [[ "$rc" -eq 0 ]] && return 0
+        [[ "$rc" -eq 1 ]] || return "$rc"
+        rc=0
+        _iptables_rule_state nat POSTROUTING -s "$cidr" '!' -o docker0 -j MASQUERADE || rc=$?
+        [[ "$rc" -eq 0 ]] && return 0
+        [[ "$rc" -eq 1 ]] || return "$rc"
+    done
+    return 1
+}
+
+_phase_iptables() {
+    _docker_iptables_preflight || return $?
+
+    local rc=0
+    _iptables_needs_reconciliation || rc=$?
+    if [[ "$rc" -eq 1 ]]; then
+        log_info "Docker firewall runtime already requires no VaultWarden remediation; skipping mutation."
+        return 0
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        log_error "Could not determine whether firewall remediation is required (iptables exit ${rc})."
+        return "$rc"
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_dry_run "Would remove the OCI FORWARD reject and legacy VaultWarden forwarding/NAT exceptions if present"
+        return 0
+    fi
+
+    local backup_dir="${TMPDIR:-/run}" backup_v4
+    [[ -d "$backup_dir" && -w "$backup_dir" ]] || {
+        log_error "Firewall rollback directory is not writable: ${backup_dir}"
+        return 1
+    }
+    backup_v4="$(mktemp -p "$backup_dir" vaultwarden-iptables.XXXXXX)" || {
+        log_error "Could not allocate an iptables rollback snapshot."
+        return 1
+    }
+    if ! iptables-save > "$backup_v4"; then
+        log_error "Could not snapshot current iptables state; refusing firewall mutation."
+        rm -f "$backup_v4"
+        return 1
+    fi
+
+    _restore_snapshot() {
+        local restore_rc=0
+        log_rollback "Restoring iptables rules from rollback snapshot"
+        iptables-restore < "$backup_v4" || restore_rc=$?
+        rm -f "$backup_v4"
+        if (( restore_rc != 0 )); then
+            log_error "CRITICAL: iptables rollback restore failed (exit ${restore_rc})"
+        fi
+    }
+
+    if _iptables_delete_all_exact filter FORWARD "OCI default FORWARD REJECT rule" \
+        -j REJECT --reject-with icmp-host-prohibited; then
+        :
+    else
+        rc=$?
+        _restore_snapshot
+        return "$rc"
+    fi
+
+    local cidr
+    for cidr in 172.21.0.0/16 172.22.0.0/16 172.23.0.0/16 172.21.0.0/28 172.22.0.0/28 172.23.0.0/28; do
+        if _iptables_delete_all_exact filter DOCKER-USER "legacy source-only DOCKER-USER ACCEPT for ${cidr}" \
+            -s "$cidr" -j ACCEPT; then
+            :
+        else
+            rc=$?
+            _restore_snapshot
+            return "$rc"
+        fi
+        if _iptables_delete_all_exact nat POSTROUTING "legacy VaultWarden MASQUERADE for ${cidr}" \
+            -s "$cidr" '!' -o docker0 -j MASQUERADE; then
+            :
+        else
+            rc=$?
+            _restore_snapshot
+            return "$rc"
+        fi
+    done
+
+    rm -f "$backup_v4"
+    log_success "Docker firewall runtime reconciled without project forwarding exceptions"
 }
 
 main() {
     require_root "${ORIGINAL_ARGS[@]}"
     if [[ "$DRY_RUN" != "true" ]]; then
-        local _ops_policy="fail"
+        local ops_policy="fail"
         if [[ "$AUTO_MODE" == "true" || ! -t 0 || ! -t 1 ]]; then
-            _ops_policy="skip"
+            ops_policy="skip"
         fi
-        operation_acquire --id setup --label "Setup" --non-interactive "$_ops_policy" || exit $?
-        _setup_firewall_main_cleanup() {
+        operation_acquire --id setup --label "Setup" --non-interactive "$ops_policy" || exit $?
+        _setup_firewall_cleanup() {
             local exit_rc=$?
             operation_release "$exit_rc"
-            _ipt_cleanup
-            exit "$exit_rc"
+            return "$exit_rc"
         }
-        trap _setup_firewall_main_cleanup EXIT
-        trap 'operation_release 130; _ipt_cleanup; exit 130' INT
-        trap 'operation_release 143; _ipt_cleanup; exit 143' HUP TERM
+        trap _setup_firewall_cleanup EXIT
+        trap 'operation_release 130; exit 130' INT
+        trap 'operation_release 143; exit 143' HUP TERM
         operation_set_phase "firewall" "Firewall setup"
-    else
-        trap _ipt_cleanup EXIT
     fi
-
-    [[ "$AUTO_MODE" == "true" ]] && log_info "Running in non-interactive (auto) mode (--yes implied)."
-    [[ "$AUTO_MODE" != "true" && "$YES" == "true" ]] && log_info "Auto-confirm (--yes) enabled."
 
     case "$PHASE" in
         ufw)      _phase_ufw ;;
