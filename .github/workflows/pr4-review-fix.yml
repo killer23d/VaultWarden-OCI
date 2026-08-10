@@ -26,6 +26,7 @@ jobs:
           python3 .pr4-match-fix.py
           python3 .pr4-review-tests.py
           python3 .pr4-test-expectations.py
+          python3 .pr4-probe-fix.py
           python3 .pr4-debug.py
       - name: Install generated-doc dependency
         shell: bash
