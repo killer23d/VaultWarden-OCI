@@ -2451,6 +2451,8 @@ check_remote_restore_listing_truthfulness() (
 set -euo pipefail
 ROOT="$VW_TEST_REPO_ROOT"
 RESTORE="$ROOT/utilities/restore-run.sh"
+grep -Fq 'mktemp "${CONTROL_WORKSPACE:-/tmp}/vw-rclone-list-${t}.XXXXXX"' "$RESTORE" \
+    || fail 'remote listing diagnostics must use a collision-safe temporary file'
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 _extract_func(){

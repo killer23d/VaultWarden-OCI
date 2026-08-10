@@ -789,7 +789,11 @@ list_remote_backups() {
 
     for t in "${types[@]}"; do
         local remote_dir="${remote_name}:${remote_base_path}/${t}"
-        local listing="" list_rc=0 err_file="${CONTROL_WORKSPACE:-/tmp}/vw-rclone-list-${t}.$$.err"
+        local listing="" list_rc=0 err_file=""
+        err_file=$(mktemp "${CONTROL_WORKSPACE:-/tmp}/vw-rclone-list-${t}.XXXXXX") || {
+            log_error "Could not create temporary rclone listing diagnostic file."
+            return 1
+        }
         if listing=$(rclone lsf "${RCLONE_CONFIG_ARG[@]}" --files-only "$remote_dir" 2>"$err_file"); then
             list_rc=0
         else
