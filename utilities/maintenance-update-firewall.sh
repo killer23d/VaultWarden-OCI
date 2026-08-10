@@ -80,6 +80,43 @@ update_firewall_ranges() {
         grep -qE "^${port}(/tcp)?([[:space:]]+\\(v6\\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}([[:space:]]|$)" <<< "$status"
     }
 
+    _ufw_line_cidr() {
+        local line="$1" word
+        local -a words=()
+        read -ra words <<< "$line"
+        for word in "${words[@]}"; do
+            word="${word%\#*}"
+            if [[ "$word" =~ ^[0-9]+(\.[0-9]+){3}/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+                printf '%s\n' "$word"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    _ufw_collect_conflicts() {
+        local numbered_status="$1"
+        shift
+        local -a desired=("$@")
+        local line rule_num cidr keep desired_cidr
+
+        while IFS= read -r line; do
+            [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)([[:space:]]|$) ]] || continue
+            rule_num="${BASH_REMATCH[1]}"
+            cidr="$(_ufw_line_cidr "$line" || true)"
+            keep=false
+            if [[ -n "$cidr" ]]; then
+                for desired_cidr in "${desired[@]}"; do
+                    if [[ "$desired_cidr" == "$cidr" ]]; then
+                        keep=true
+                        break
+                    fi
+                done
+            fi
+            [[ "$keep" == "true" ]] || printf '%s\n' "$rule_num"
+        done <<< "$numbered_status"
+    }
+
     _ufw_allow_range() {
         local range="$1" label="$2"
         _ufw_result=false
@@ -119,14 +156,7 @@ update_firewall_ranges() {
     local ranges_added=false
     local _ufw_result=false
     local -a current_cidrs=()
-    local -a cached_cidrs=()
     local cf_cidr_cache="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache"
-
-    if [[ -f "$cf_cidr_cache" ]]; then
-        while IFS= read -r cidr; do
-            [[ -n "$cidr" ]] && cached_cidrs+=("$cidr")
-        done < "$cf_cidr_cache"
-    fi
 
     if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
         log_info "Adding new Cloudflare IPv4 ranges..."
@@ -177,54 +207,7 @@ update_firewall_ranges() {
         return "$ufw_rc"
     fi
 
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
-            local rule_num="${BASH_REMATCH[1]}"
-
-            if [[ "$line" =~ (^|[[:space:]])(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)[[:space:]]+Anywhere([[:space:]]|$) ]]; then
-                old_rule_nums+=("$rule_num")
-                continue
-            fi
-
-            local is_managed=false
-            local cidr=""
-            [[ "$line" =~ CF-IPv[46] ]] && is_managed=true
-
-            local -a words
-            read -ra words <<< "$line"
-            local word
-            for word in "${words[@]}"; do
-                if [[ "$word" =~ ^[0-9a-fA-F:\.]+/[0-9]+$ ]]; then
-                    cidr="$word"
-                    break
-                fi
-            done
-
-            if [[ "$is_managed" == "false" && -n "$cidr" ]]; then
-                local c
-                for c in "${cached_cidrs[@]}"; do
-                    if [[ "$c" == "$cidr" ]]; then
-                        is_managed=true
-                        break
-                    fi
-                done
-            fi
-
-            if [[ "$is_managed" == "true" ]]; then
-                local keep=false
-                if [[ -n "$cidr" ]]; then
-                    local c
-                    for c in "${current_cidrs[@]}"; do
-                        if [[ "$c" == "$cidr" ]]; then
-                            keep=true
-                            break
-                        fi
-                    done
-                fi
-                [[ "$keep" == "true" ]] || old_rule_nums+=("$rule_num")
-            fi
-        fi
-    done <<< "$ufw_status"
+    mapfile -t old_rule_nums < <(_ufw_collect_conflicts "$ufw_status" "${current_cidrs[@]}")
 
     if (( ${#old_rule_nums[@]} > 0 )); then
         mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | awk 'NF && !seen[$0]++' | sort -rn)
@@ -254,8 +237,8 @@ update_firewall_ranges() {
         log_error "Unable to verify final numbered UFW status (exit ${ufw_rc}): ${final_numbered:-no output}"
         return "$ufw_rc"
     fi
-    if grep -Eq '^\[[[:space:]]*[0-9]+\].*(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)[[:space:]]+Anywhere([[:space:]]|$)' <<< "$final_numbered"; then
-        log_error "Public UFW 80/443 allow rule remains after Cloudflare reconciliation."
+    if [[ -n "$(_ufw_collect_conflicts "$final_numbered" "${current_cidrs[@]}")" ]]; then
+        log_error "Non-Cloudflare UFW 80/443 allow rule remains after Cloudflare reconciliation."
         return 1
     fi
     local cidr

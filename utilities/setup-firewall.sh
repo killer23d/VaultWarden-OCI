@@ -127,24 +127,18 @@ _ufw_collect_conflicts() {
     local line rule_num cidr keep desired_cidr
 
     while IFS= read -r line; do
-        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]] || continue
+        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)([[:space:]]|$) ]] || continue
         rule_num="${BASH_REMATCH[1]}"
-
-        if [[ "$line" =~ (^|[[:space:]])(80|443)(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW[[:space:]]+IN)[[:space:]]+Anywhere([[:space:]]|$) ]]; then
-            printf '%s\n' "$rule_num"
-            continue
-        fi
-
-        [[ "$line" =~ CF-IPv[46] ]] || continue
         cidr="$(_ufw_line_cidr "$line" || true)"
-        [[ -n "$cidr" ]] || { printf '%s\n' "$rule_num"; continue; }
         keep=false
-        for desired_cidr in "${desired[@]}"; do
-            if [[ "$desired_cidr" == "$cidr" ]]; then
-                keep=true
-                break
-            fi
-        done
+        if [[ -n "$cidr" ]]; then
+            for desired_cidr in "${desired[@]}"; do
+                if [[ "$desired_cidr" == "$cidr" ]]; then
+                    keep=true
+                    break
+                fi
+            done
+        fi
         [[ "$keep" == "true" ]] || printf '%s\n' "$rule_num"
     done <<< "$numbered_status"
 }

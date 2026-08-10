@@ -307,6 +307,25 @@ run_case
 assert_call '--force delete 5'
 assert_call '--force delete 4'
 
+reset_case restricted-ingress-conflict
+write_ipv4_status true true
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 4] 80/tcp ALLOW IN 198.51.100.0/24
+EOF_RULES
+run_case
+[[ "$CASE_RC" -eq 0 ]] || fail "restricted non-Cloudflare ingress reconciliation failed with $CASE_RC"
+assert_call '--force delete 4'
+
+reset_case restricted-final-verification
+write_ipv4_status true true
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 4] 443/tcp ALLOW IN 198.51.100.0/24
+EOF_RULES
+export UFW_NO_MUTATE=true
+run_case
+[[ "$CASE_RC" -ne 0 ]] || fail "final verification accepted restricted non-Cloudflare ingress"
+assert_file_contains "$LOG_FILE" 'Non-Cloudflare UFW 80/443 allow rule remains'
+
 reset_case final-verification
 export UFW_NO_MUTATE=true
 run_case
@@ -382,6 +401,26 @@ PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_O
 SETUP_UFW_RC=$?
 set -e
 [[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted broad public port 80 ingress"
+assert_file_contains "$LOG_FILE" 'Conflicting public or stale managed UFW 80/443 rules remain'
+
+reset_case setup-restricted-readiness
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+Status: active
+22/tcp ALLOW IN Anywhere
+80/tcp ALLOW IN 203.0.113.0/24
+443/tcp ALLOW IN 203.0.113.0/24
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 1] 22/tcp ALLOW IN Anywhere
+[ 2] 80/tcp ALLOW IN 203.0.113.0/24
+[ 3] 443/tcp ALLOW IN 203.0.113.0/24
+[ 4] 443/tcp ALLOW IN 198.51.100.0/24
+EOF_RULES
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted restricted non-Cloudflare ingress"
 assert_file_contains "$LOG_FILE" 'Conflicting public or stale managed UFW 80/443 rules remain'
 
 reset_case setup-single-cidr-failure
