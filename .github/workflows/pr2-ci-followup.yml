@@ -1,13 +1,9 @@
 name: PR2 CI follow-up
-
 on:
   push:
-    branches:
-      - fix/authenticated-backup-cohort
-
+    branches: [fix/authenticated-backup-cohort]
 permissions:
   contents: write
-
 jobs:
   apply:
     runs-on: ubuntu-24.04
@@ -20,54 +16,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('utilities/backup-run.sh')
-          text=p.read_text()
-          replacements = {
-            'log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote recovery point is incomplete." >&2':
-              'log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote emergency recovery point is incomplete." >&2',
-            'log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing or unusable." >&2':
-              'log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing, unusable, or not delivered." >&2',
-          }
-          for old,new in replacements.items():
-              if text.count(old) != 1:
-                  raise SystemExit(f'emergency metadata message anchor count={text.count(old)}: {old[:60]}')
-              text=text.replace(old,new,1)
-          old='''        local retained_archive suffix
-        while IFS= read -r -d '' retained_archive; do
-            while IFS= read -r suffix; do
-                [[ -f "${retained_archive}${suffix}" && ! -L "${retained_archive}${suffix}" && -s "${retained_archive}${suffix}" ]] || {
-                    log_error "[backup] Retained ${t} backup has an incomplete required cohort: $(basename "${retained_archive}${suffix}")"
-                    return 1
-                }
-            done < <(backup_required_cohort_suffixes)
-            if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
-                log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
-                log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
-                return 1
-            fi
-        done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
-'''
-          new='''        local retained_archive suffix
-        while IFS= read -r -d '' retained_archive; do
-            if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
-                log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
-                log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
-                return 1
-            fi
-            while IFS= read -r suffix; do
-                [[ -f "${retained_archive}${suffix}" && ! -L "${retained_archive}${suffix}" && -s "${retained_archive}${suffix}" ]] || {
-                    log_error "[backup] Retained ${t} backup has an incomplete required cohort: $(basename "${retained_archive}${suffix}")"
-                    return 1
-                }
-            done < <(backup_required_cohort_suffixes)
-        done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
-'''
-          if text.count(old) != 1:
-              raise SystemExit(f'retained emergency validation block count={text.count(old)}')
-          p.write_text(text.replace(old,new,1))
-          PY
+          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCnA9UGF0aCgndXRpbGl0aWVzL2JhY2t1cC1ydW4uc2gnKQp0ZXh0PXAucmVhZF90ZXh0KCkKcmVwbHM9ewonJydsb2dfZXJyb3IgIltiYWNrdXBdIEVtZXJnZW5jeSByZXN0b3JlIG1ldGFkYXRhIHVwbG9hZCBGQUlMRUQ6ICQoYmFzZW5hbWUgIiRsb2NhbF9tZW1iZXIiKSAoZXhpdCAke3VwbG9hZF9yY30pIOKAlCByZW1vdGUgcmVjb3ZlcnkgcG9pbnQgaXMgaW5jb21wbGV0ZS4iID4mMicnJzogJycnbG9nX2Vycm9yICJbYmFja3VwXSBFbWVyZ2VuY3kgcmVzdG9yZSBtZXRhZGF0YSB1cGxvYWQgRkFJTEVEOiAkKGJhc2VuYW1lICIkbG9jYWxfbWVtYmVyIikgKGV4aXQgJHt1cGxvYWRfcmN9KSDigJQgcmVtb3RlIGVtZXJnZW5jeSByZWNvdmVyeSBwb2ludCBpcyBpbmNvbXBsZXRlLiIgPiYyJycnLAonJydsb2dfZXJyb3IgIltiYWNrdXBdIEVtZXJnZW5jeSBvZmZzaXRlIGRlbGl2ZXJ5IGlzIGluY29tcGxldGU6IHJlc3RvcmUtY3JpdGljYWwgbWV0YWRhdGEgaXMgbWlzc2luZyBvciB1bnVzYWJsZS4iID4mMicnJzogJycnbG9nX2Vycm9yICJbYmFja3VwXSBFbWVyZ2VuY3kgb2Zmc2l0ZSBkZWxpdmVyeSBpcyBpbmNvbXBsZXRlOiByZXN0b3JlLWNyaXRpY2FsIG1ldGFkYXRhIGlzIG1pc3NpbmcsIHVudXNhYmxlLCBvciBub3QgZGVsaXZlcmVkLiIgPiYyJycnLAp9CmZvciBvbGQsbmV3IGluIHJlcGxzLml0ZW1zKCk6CiAgICBhc3NlcnQgdGV4dC5jb3VudChvbGQpPT0xLCAodGV4dC5jb3VudChvbGQpLG9sZCkKICAgIHRleHQ9dGV4dC5yZXBsYWNlKG9sZCxuZXcsMSkKb2xkPScnJyAgICAgICAgbG9jYWwgcmV0YWluZWRfYXJjaGl2ZSBzdWZmaXgKICAgICAgICB3aGlsZSBJRlM9IHJlYWQgLXIgLWQgJycgcmV0YWluZWRfYXJjaGl2ZTsgZG8KICAgICAgICAgICAgd2hpbGUgSUZTPSByZWFkIC1yIHN1ZmZpeDsgZG8KICAgICAgICAgICAgICAgIFtbIC1mICIke3JldGFpbmVkX2FyY2hpdmV9JHtzdWZmaXh9IiAmJiAhIC1MICIke3JldGFpbmVkX2FyY2hpdmV9JHtzdWZmaXh9IiAmJiAtcyAiJHtyZXRhaW5lZF9hcmNoaXZlfSR7c3VmZml4fSIgXV0gfHwgewogICAgICAgICAgICAgICAgICAgIGxvZ19lcnJvciAiW2JhY2t1cF0gUmV0YWluZWQgJHt0fSBiYWNrdXAgaGFzIGFuIGluY29tcGxldGUgcmVxdWlyZWQgY29ob3J0OiAkKGJhc2VuYW1lICIke3JldGFpbmVkX2FyY2hpdmV9JHtzdWZmaXh9IikiCiAgICAgICAgICAgICAgICAgICAgcmV0dXJuIDEKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgZG9uZSA8IDwoYmFja3VwX3JlcXVpcmVkX2NvaG9ydF9zdWZmaXhlcykKICAgICAgICAgICAgaWYgW1sgIiR0IiA9PSAiZW1lcmdlbmN5IiBdXSAmJiAhIF92YWxpZGF0ZV9lbWVyZ2VuY3lfcmVzdG9yZV9tZXRhZGF0YSAiJHJldGFpbmVkX2FyY2hpdmUiOyB0aGVuCiAgICAgICAgICAgICAgICBsb2dfZXJyb3IgIltiYWNrdXBdIFJldGFpbmVkIGVtZXJnZW5jeSBiYWNrdXAgaXMgbm90IHJlc3RvcmUtdXNhYmxlOiAkKGJhc2VuYW1lICIkcmV0YWluZWRfYXJjaGl2ZSIpIgogICAgICAgICAgICAgICAgbG9nX2Vycm9yICJbYmFja3VwXSBUaGlzIGVtZXJnZW5jeSByZWNvdmVyeSBwb2ludCBpcyBub3Qgc2FmZSB0byByZXBvcnQgYXMgb2Zmc2l0ZSBjb21wbGV0ZS4iCiAgICAgICAgICAgICAgICByZXR1cm4gMQogICAgICAgICAgICBmaQogICAgICAgIGRvbmUgPCA8KGZpbmQgIiRsb2NhbF9kaXIiIC1tYXhkZXB0aCAxIC1uYW1lICcqLmFnZScgLXR5cGUgZiAtcHJpbnQwKQonJycKbmV3PScnJyAgICAgICAgbG9jYWwgcmV0YWluZWRfYXJjaGl2ZSBzdWZmaXgKICAgICAgICB3aGlsZSBJRlM9IHJlYWQgLXIgLWQgJycgcmV0YWluZWRfYXJjaGl2ZTsgZG8KICAgICAgICAgICAgaWYgW1sgIiR0IiA9PSAiZW1lcmdlbmN5IiBdXSAmJiAhIF92YWxpZGF0ZV9lbWVyZ2VuY3lfcmVzdG9yZV9tZXRhZGF0YSAiJHJldGFpbmVkX2FyY2hpdmUiOyB0aGVuCiAgICAgICAgICAgICAgICBsb2dfZXJyb3IgIltiYWNrdXBdIFJldGFpbmVkIGVtZXJnZW5jeSBiYWNrdXAgaXMgbm90IHJlc3RvcmUtdXNhYmxlOiAkKGJhc2VuYW1lICIkcmV0YWluZWRfYXJjaGl2ZSIpIgogICAgICAgICAgICAgICAgbG9nX2Vycm9yICJbYmFja3VwXSBUaGlzIGVtZXJnZW5jeSByZWNvdmVyeSBwb2ludCBpcyBub3Qgc2FmZSB0byByZXBvcnQgYXMgb2Zmc2l0ZSBjb21wbGV0ZS4iCiAgICAgICAgICAgICAgICByZXR1cm4gMQogICAgICAgICAgICBmaQogICAgICAgICAgICB3aGlsZSBJRlM9IHJlYWQgLXIgc3VmZml4OyBkbwogICAgICAgICAgICAgICAgW1sgLWYgIiR7cmV0YWluZWRfYXJjaGl2ZX0ke3N1ZmZpeH0iICYmICEgLUwgIiR7cmV0YWluZWRfYXJjaGl2ZX0ke3N1ZmZpeH0iICYmIC1zICIke3JldGFpbmVkX2FyY2hpdmV9JHtzdWZmaXh9IiBdXSB8fCB7CiAgICAgICAgICAgICAgICAgICAgbG9nX2Vycm9yICJbYmFja3VwXSBSZXRhaW5lZCAke3R9IGJhY2t1cCBoYXMgYW4gaW5jb21wbGV0ZSByZXF1aXJlZCBjb2hvcnQ6ICQoYmFzZW5hbWUgIiR7cmV0YWluZWRfYXJjaGl2ZX0ke3N1ZmZpeH0iKSIKICAgICAgICAgICAgICAgICAgICByZXR1cm4gMQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICBkb25lIDwgPChiYWNrdXBfcmVxdWlyZWRfY29ob3J0X3N1ZmZpeGVzKQogICAgICAgIGRvbmUgPCA8KGZpbmQgIiRsb2NhbF9kaXIiIC1tYXhkZXB0aCAxIC1uYW1lICcqLmFnZScgLXR5cGUgZiAtcHJpbnQwKQonJycKYXNzZXJ0IHRleHQuY291bnQob2xkKT09MSwgdGV4dC5jb3VudChvbGQpCnAud3JpdGVfdGV4dCh0ZXh0LnJlcGxhY2Uob2xkLG5ldywxKSkK' | base64 -d > /tmp/fix.py
+          python3 /tmp/fix.py
           bash utilities/write-command-reference.sh
           bash -n utilities/backup-run.sh utilities/restore-run.sh tests/suites/data-protection/case-backup.bash tests/suites/data-protection/case-restore-recovery.bash
           git diff --check
@@ -88,9 +38,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm .github/workflows/pr2-ci-followup.yml
           git add utilities/backup-run.sh docs/COMMAND-REFERENCE.md
-          git commit -m "backup: align generated docs and emergency status"
+          git commit -m 'backup: align generated docs and emergency status'
           git push origin HEAD:fix/authenticated-backup-cohort
