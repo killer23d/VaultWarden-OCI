@@ -1254,7 +1254,7 @@ sync_to_rclone() {
     local remote_path="${remote_name}:${remote_base_path}/${backup_type}"
 
     if [[ "$backup_type" == "emergency" ]] && ! _validate_emergency_restore_metadata "$enc_file"; then
-        log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing or unusable." >&2
+        log_error "[backup] Emergency offsite delivery is incomplete: restore-critical metadata is missing, unusable, or not delivered." >&2
         return 3
     fi
 
@@ -1289,7 +1289,7 @@ sync_to_rclone() {
             2>"${rclone_stderr_tmp}" || upload_rc=$?
         if (( upload_rc != 0 )); then
             if [[ "$backup_type" == "emergency" && "$suffix" == ".meta" ]]; then
-                log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote recovery point is incomplete." >&2
+                log_error "[backup] Emergency restore metadata upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote emergency recovery point is incomplete." >&2
                 return 3
             fi
             log_error "[backup] Required cohort upload FAILED: $(basename "$local_member") (exit ${upload_rc}) — remote recovery point is incomplete." >&2
@@ -1378,17 +1378,17 @@ sync_all_backups_to_rclone() {
 
         local retained_archive suffix
         while IFS= read -r -d '' retained_archive; do
+            if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
+                log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
+                log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
+                return 1
+            fi
             while IFS= read -r suffix; do
                 [[ -f "${retained_archive}${suffix}" && ! -L "${retained_archive}${suffix}" && -s "${retained_archive}${suffix}" ]] || {
                     log_error "[backup] Retained ${t} backup has an incomplete required cohort: $(basename "${retained_archive}${suffix}")"
                     return 1
                 }
             done < <(backup_required_cohort_suffixes)
-            if [[ "$t" == "emergency" ]] && ! _validate_emergency_restore_metadata "$retained_archive"; then
-                log_error "[backup] Retained emergency backup is not restore-usable: $(basename "$retained_archive")"
-                log_error "[backup] This emergency recovery point is not safe to report as offsite complete."
-                return 1
-            fi
         done < <(find "$local_dir" -maxdepth 1 -name '*.age' -type f -print0)
 
         backup_log_info "Copying retained ${t} backups to ${remote_name}:${remote_base}/${t}/"

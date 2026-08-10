@@ -310,9 +310,9 @@ OPTIONS (used after a subcommand):
                             (alternative to the interactive prompt)
     --from-recovery-kit FILE
                             Path to a plaintext recovery-kit file.  The Age
-                            private key (AGE-SECRET-KEY-1...) is extracted
-                            automatically and used for decryption — no manual
-                            key entry required.  Intended for bare-metal DR
+                            private key (AGE-SECRET-KEY-1...) and backup
+                            integrity HMAC key are extracted automatically.
+                            Intended for bare-metal DR
                             where the kit file is the only credential available.
     --no-backup             Skip pre-restore emergency snapshot. Use only when
                             current local state is disposable, such as a fresh
@@ -1033,9 +1033,9 @@ OPTIONS (used after a subcommand):
                             (alternative to the interactive prompt)
     --from-recovery-kit FILE
                             Path to a plaintext recovery-kit file.  The Age
-                            private key (AGE-SECRET-KEY-1...) is extracted
-                            automatically and used for decryption — no manual
-                            key entry required.  Intended for bare-metal DR
+                            private key (AGE-SECRET-KEY-1...) and backup
+                            integrity HMAC key are extracted automatically.
+                            Intended for bare-metal DR
                             where the kit file is the only credential available.
     --no-backup             Skip pre-restore emergency snapshot. Use only when
                             current local state is disposable, such as a fresh

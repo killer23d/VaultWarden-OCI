@@ -331,6 +331,8 @@ done
 
 cat > "$TMP/batch-sync-probe.sh" <<EOF_PROBE
 set -uo pipefail
+CONTROL_WORKSPACE="$TMP/batch-work"
+mkdir -p "\$CONTROL_WORKSPACE"
 BASE_DIR="$TMP/retained"
 DRY_RUN=false
 KEEP_DAYS=""
@@ -1296,6 +1298,7 @@ for function_name in \
     eval "$(_extract_shell_function "$BACKUP" "$function_name")"
 done
 eval "$(_extract_shell_function "$UTILS" check_backup_disk_space)"
+eval "$(_extract_shell_function "$UTILS" backup_required_cohort_suffixes)"
 
 project="$TMP/project"
 state="$TMP/state"
@@ -2447,6 +2450,7 @@ fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 source "$ROOT/lib/log.sh"
 source "$ROOT/lib/crypto.sh"
 source "$ROOT/lib/backup-utils.sh"
+has_command(){ command -v "$1" >/dev/null 2>&1; }
 archive="$TMP/db-test.age"
 printf 'encrypted-payload' > "$archive"
 FILE_INTEGRITY_HMAC_KEY='cohort-test-key'
