@@ -14,6 +14,12 @@ if [[ "$CASE_RC" -ne 0 ]]; then
     cat "$CASE_OUTPUT" >&2 || true
     printf '%s\\n' '--- only-port-80 log ---' >&2
     cat "$LOG_FILE" >&2 || true
+    printf '%s\\n' '--- only-port-80 status ---' >&2
+    cat "$UFW_STATUS_FILE" >&2 || true
+    printf '%s\\n' '--- only-port-80 numbered ---' >&2
+    cat "$UFW_NUMBERED_FILE" >&2 || true
+    printf '%s\\n' '--- only-port-80 verbose ---' >&2
+    cat "$UFW_VERBOSE_FILE" >&2 || true
     printf '%s\\n' '--- only-port-80 ufw calls ---' >&2
     cat "$UFW_CALL_LOG" >&2 || true
     printf '%s\\n' '--- only-port-80 firewall calls ---' >&2
