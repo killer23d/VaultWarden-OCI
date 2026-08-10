@@ -308,28 +308,12 @@ _mv_warn_fstab_entries() {
     fi
 }
 
-# ── Sentinel-mount probe ─────────────────────────────────────────────────────
-_mv_find_sentinel_mount() {
-    # Scans all active mount points for a VaultWarden data-volume sentinel
-    # (.vw-data-volume). Prints the unique sentinel mount path, or an empty
-    # string if zero or more than one sentinel volume is found (ambiguous).
-    local mnt found="" count=0
-    while IFS= read -r mnt; do
-        [[ -z "${mnt}" ]] && continue
-        [[ "${mnt}" == "/" ]] && continue
-        [[ -f "${mnt}/.vw-data-volume" ]] || continue
-        (( count++ )) || true
-        found="${mnt}"
-    done < <(findmnt -rn -o TARGET 2>/dev/null)
-    (( count == 1 )) && printf '%s' "${found}" || printf ''
-}
-
 # ── Interactive block device selector ────────────────────────────────────────
 _mv_select_device() {
     # Presents a numbered list of block devices and partitions using lsblk.
     # For boot-to-block: marks boot devices [boot] and warns against selecting them.
-    # For block-to-boot: shows only volumes bearing the VaultWarden sentinel,
-    #   labelled [vaultwarden-data]; auto-populates _MV_SOURCE after selection.
+    # For block-to-boot: shows only mounted volumes whose filesystem identity
+    #   validates against that exact device; auto-populates _MV_SOURCE after selection.
     # Skips if --device was already provided, or subcommand is not 'run'.
     [[ -n "${_MV_DEVICE:-}" ]] && return 0
     [[ "${_MV_SUBCOMMAND}" == "run" ]] || return 0
@@ -362,15 +346,15 @@ _mv_select_device() {
     [[ -n "${root_dev}" ]] && root_dev="/dev/${root_dev}"
 
     # Build the filtered display list.
-    # block-to-boot: only volumes with a VaultWarden sentinel (.vw-data-volume).
+    # block-to-boot: only mounted volumes with a valid filesystem identity.
     # boot-to-block: all devices (existing behaviour).
     local -a display_indices=()
     local _di
     for (( _di=0; _di<${#dev_names[@]}; _di++ )); do
         if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
             local _mnt="${dev_mounts[$_di]:-}"
-            [[ -n "${_mnt}" && "${_mnt}" != "-" \
-               && -f "${_mnt}/.vw-data-volume" ]] \
+            [[ -n "${_mnt}" && "${_mnt}" != "-" ]] || continue
+            storage_validate_volume_identity "${_mnt}" "${dev_names[$_di]}" >/dev/null 2>&1 \
                 && display_indices+=( "$_di" )
         else
             display_indices+=( "$_di" )
@@ -379,21 +363,21 @@ _mv_select_device() {
 
     if (( ${#display_indices[@]} == 0 )); then
         if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
-            log_error "No VaultWarden data volumes found (no mounted volume with .vw-data-volume sentinel)."
-            log_error "Ensure the block data volume is mounted and was provisioned by setup.sh."
-            log_error "As a workaround, specify the device explicitly: --device /dev/sda"
+            log_error "No mounted VaultWarden data volume with a valid filesystem identity was found."
+            log_error "Verify the configured source volume and repair identity only after proving the disk."
+            log_error "You may also specify the expected source device explicitly with --device."
         else
             log_error "No block devices found via lsblk. Ensure the target disk is attached."
         fi
         return 1
     fi
 
-    local _idx tags mount_display sentinel_tag
+    local _idx tags mount_display identity_tag
     local _dn=0
     local -a display_map=()
     for _idx in "${display_indices[@]}"; do
         tags=""
-        sentinel_tag=""
+        identity_tag=""
         if [[ "${dev_mounts[$_idx]}" == "/" ]] \
                 || { [[ -n "${root_dev}" ]] \
                      && [[ "${#dev_names[$_idx]}" -ge "${#root_dev}" ]] \
@@ -405,9 +389,9 @@ _mv_select_device() {
             tags="${tags} [part]"
         fi
         local _mnt_check="${dev_mounts[$_idx]:-}"
-        if [[ -n "${_mnt_check}" && "${_mnt_check}" != "-" \
-                && -f "${_mnt_check}/.vw-data-volume" ]]; then
-            sentinel_tag=" [vaultwarden-data]"
+        if [[ -n "${_mnt_check}" && "${_mnt_check}" != "-" ]] \
+                && storage_validate_volume_identity "${_mnt_check}" "${dev_names[$_idx]}" >/dev/null 2>&1; then
+            identity_tag=" [vaultwarden-data]"
         fi
 
         mount_display="${dev_mounts[$_idx]:-  -}"
@@ -417,14 +401,14 @@ _mv_select_device() {
             "${dev_sizes[$_idx]}" \
             "${mount_display}" \
             "${tags}" \
-            "${sentinel_tag}"
+            "${identity_tag}"
         display_map+=( "$_idx" )
         (( _dn++ )) || true
     done
 
     printf '\n'
     if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
-        printf '  Note: Only volumes with a VaultWarden data sentinel are shown above.\n'
+        printf '  Note: Only mounted volumes with a valid VaultWarden filesystem identity are shown above.\n'
         printf '  Select the volume containing the data you want to move back to the boot disk.\n'
         printf '\n'
         log_warn "Select SOURCE block device to migrate FROM (the data volume to vacate):"
@@ -1005,6 +989,19 @@ _mv_require_force_format_for_blank_device() {
     return 1
 }
 
+_mv_validate_mounted_target_identity() {
+    [[ "${_MV_DIRECTION}" == "boot-to-block" && -n "${_MV_DEVICE:-}" ]] || return 0
+    mountpoint -q "${_MV_TARGET}" 2>/dev/null || return 0
+
+    if ! storage_validate_volume_identity "${_MV_TARGET}" "${_MV_DEVICE}"; then
+        _mv_log error "Target ${_MV_TARGET} is already mounted but its filesystem identity is invalid."
+        _mv_log error "Refusing to migrate onto a mounted filesystem identified only by path or marker filename."
+        _mv_log error "Repair/adopt only after proving the disk: sudo utilities/setup-storage.sh setup --data-device ${_MV_DEVICE} --data-mount ${_MV_TARGET}"
+        return 1
+    fi
+    _mv_log info "Mounted target filesystem identity validated: ${_MV_TARGET}"
+}
+
 _mv_step_validate() {
     _mv_log info "── validate ──────────────────────────────────────────────────────"
 
@@ -1018,20 +1015,23 @@ _mv_step_validate() {
         return 1
     }
 
-    # block-to-boot: source must be a mounted VaultWarden data volume.
+    # block-to-boot: source must be the mounted filesystem identified by the
+    # configured source device and structured volume identity marker.
     if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
+        if [[ -z "${_MV_DEVICE}" ]]; then
+            _mv_log error "block-to-boot requires the expected source block device."
+            return 1
+        fi
         if ! mountpoint -q "${_MV_SOURCE}" 2>/dev/null; then
             _mv_log error "block-to-boot: '${_MV_SOURCE}' is not a mounted filesystem."
             _mv_log error "Ensure the block data volume is mounted before running this migration."
             _mv_log error "  sudo mount ${_MV_SOURCE}"
             return 1
         fi
-        if [[ ! -f "${_MV_SOURCE}/.vw-data-volume" ]]; then
-            _mv_log error "block-to-boot: VaultWarden data-volume sentinel missing at:"
-            _mv_log error "  ${_MV_SOURCE}/.vw-data-volume"
-            _mv_log error "The source volume cannot be positively identified as a VaultWarden"
-            _mv_log error "data volume. If this IS the correct volume, create the sentinel:"
-            _mv_log error "  sudo touch ${_MV_SOURCE}/.vw-data-volume"
+        if ! storage_validate_volume_identity "${_MV_SOURCE}" "${_MV_DEVICE}"; then
+            _mv_log error "block-to-boot: source filesystem identity is invalid."
+            _mv_log error "Refusing to migrate from a volume identified only by path or marker filename."
+            _mv_log error "Repair only after proving the disk: sudo utilities/setup-storage.sh setup --data-device ${_MV_DEVICE}"
             return 1
         fi
     fi
@@ -1083,6 +1083,7 @@ _mv_step_validate() {
                 _mv_log error "Unmount it first or omit --device if the target is already mounted."
                 return 1
             fi
+            _mv_validate_mounted_target_identity || return 1
             _mv_require_force_format_for_blank_device || return 1
         fi
     fi
@@ -1216,7 +1217,8 @@ _mv_step_format() {
     fi
 
     if mountpoint -q "${_MV_TARGET}" 2>/dev/null; then
-        _mv_log info "Target ${_MV_TARGET} is already a mounted filesystem — skipping format."
+        _mv_validate_mounted_target_identity || return 1
+        _mv_log info "Target ${_MV_TARGET} is already mounted with a valid filesystem identity — skipping format."
         _mv_check_disk_space "${_MV_SOURCE}" "${_MV_TARGET}"
         return 0
     fi
@@ -1941,48 +1943,50 @@ _mv_run_pipeline() {
                 _resume_ok=false
             fi
         fi
-        if [[ -n "${_MV_DEVICE}" ]] && ! mountpoint -q "${_MV_TARGET}" 2>/dev/null; then
+        if [[ -n "${_MV_DEVICE}" ]]; then
             if [[ "${_MV_DIRECTION}" == "boot-to-block" ]]; then
-                # Target mount is absent. Check whether there is a sentinel-bearing volume
-                # that could be the correct (or corrected) target.
-                local _sentinel_mount
-                _sentinel_mount="$(_mv_find_sentinel_mount)"
-                if [[ -n "${_sentinel_mount}" && "${_sentinel_mount}" != "${_MV_TARGET}" ]]; then
-                    log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    log_warn "  The target path recorded in the state file (${_MV_TARGET})"
-                    log_warn "  is not mounted, but a VaultWarden data volume was found at:"
-                    log_warn "    ${_sentinel_mount}"
-                    log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    local _fix_reply
-                    read -r -p "  Update the state file to use '${_sentinel_mount}' and continue? [yes/no] (default: no): " _fix_reply
-                    if [[ "${_fix_reply,,}" =~ ^y(es)?$ ]]; then
-                        local _old_target="${_MV_TARGET}"
-                        _MV_TARGET="${_sentinel_mount}"
-                        _mv_state_write MV_TARGET "${_MV_TARGET}"
-                        log_info "State file updated: MV_TARGET=${_MV_TARGET} (was: ${_old_target})"
-                        log_info "Continuing resume with corrected target path."
-                    else
-                        log_error "Resume aborted. To fix the target path manually:"
-                        log_error "  sudo sed -i 's|MV_TARGET=${_MV_TARGET}|MV_TARGET=/correct/path|' \\"
-                        log_error "    ${_MV_STATE_FILE}"
-                        log_error "  sudo utilities/setup-storage.sh migrate resume"
+                if _mv_state_has STEP_FORMAT_DONE; then
+                    if ! mountpoint -q "${_MV_TARGET}" 2>/dev/null; then
+                        log_error "Resume: saved target mount point is not mounted: ${_MV_TARGET}"
+                        log_error "Refusing to discover or rewrite MV_TARGET from marker filenames."
+                        log_error "Remount the expected target first, then re-run resume:"
+                        log_error "  sudo mount ${_MV_TARGET}"
+                        log_error "If the saved target path is wrong, inspect and edit ${_MV_STATE_FILE} explicitly before resuming."
                         _resume_ok=false
+                    elif ! storage_validate_volume_identity "${_MV_TARGET}" "${_MV_DEVICE}"; then
+                        log_error "Resume: saved target filesystem identity is invalid: ${_MV_TARGET}"
+                        log_error "Refusing to continue onto a changed, copied, or unproven target filesystem."
+                        _resume_ok=false
+                    else
+                        log_info "Resume: saved target filesystem identity validated."
+                    fi
+                elif mountpoint -q "${_MV_TARGET}" 2>/dev/null; then
+                    if ! storage_validate_volume_identity "${_MV_TARGET}" "${_MV_DEVICE}"; then
+                        log_error "Resume: target is already mounted before the format step, but its filesystem identity is invalid."
+                        log_error "Repair/adopt only after proving the disk before resuming."
+                        _resume_ok=false
+                    else
+                        log_info "Resume: pre-existing mounted target filesystem identity validated."
                     fi
                 else
-                    log_error "Resume: target mount point is not mounted: ${_MV_TARGET}"
-                    log_error "Remount it first, then re-run resume:"
-                    log_error "  sudo mount ${_MV_TARGET}"
-                    log_error "To fix a stale path in the state file manually:"
-                    log_error "  sudo sed -i 's|MV_TARGET=${_MV_TARGET}|MV_TARGET=/correct/path|' \\"
-                    log_error "    ${_MV_STATE_FILE}"
-                    log_error "  sudo utilities/setup-storage.sh migrate resume"
-                    _resume_ok=false
+                    log_info "Resume: target mount is not active yet because the format/mount step is still pending."
+                    log_info "Resume will continue with the saved target and device; MV_TARGET will not be rewritten."
                 fi
             elif [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
-                # block-to-boot: target is a directory on the boot disk, not a mountpoint.
-                # A missing or empty target directory at resume time means rsync never
-                # completed — this is recoverable. A non-empty target means rsync ran
-                # at least partially and we can safely continue.
+                if ! mountpoint -q "${_MV_SOURCE}" 2>/dev/null; then
+                    log_error "Resume: block-to-boot source is no longer mounted: ${_MV_SOURCE}"
+                    log_error "Remount the expected source volume before resuming."
+                    _resume_ok=false
+                elif ! storage_validate_volume_identity "${_MV_SOURCE}" "${_MV_DEVICE}"; then
+                    log_error "Resume: block-to-boot source filesystem identity is invalid: ${_MV_SOURCE}"
+                    log_error "Refusing to continue from a changed, copied, or unproven source filesystem."
+                    _resume_ok=false
+                else
+                    log_info "Resume: block-to-boot source filesystem identity validated."
+                fi
+
+                # Target is a directory on the boot disk, not a mountpoint. A missing
+                # target before rsync is recoverable; rsync will create/populate it.
                 if [[ ! -d "${_MV_TARGET}" ]]; then
                     log_warn "Resume (block-to-boot): target directory does not exist: ${_MV_TARGET}"
                     log_warn "It will be created when rsync runs. This is safe to continue."

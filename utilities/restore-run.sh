@@ -2091,7 +2091,7 @@ _restore_preflight_db_commit_capacity() {
 _detect_storage_mode() {
     local root="${1:-}" data_mount="${2:-}" data_device="${3:-}"
     if [[ "$root" == "/var/lib/vaultwarden" ]]; then
-        if [[ -f "$root/.vw-data-volume" ]] || _path_is_mountpoint "$root"; then echo "block"; else echo "boot"; fi
+        if _path_is_mountpoint "$root"; then echo "block"; else echo "boot"; fi
     elif [[ -n "$root" && ( "$root" == /mnt/* || "$root" == /media/* || "$root" == /srv/* ) ]]; then
         echo "block"
     elif [[ -n "$data_mount" && "$root" == "$data_mount" ]] || [[ -n "$data_device" ]]; then
@@ -2105,44 +2105,23 @@ _detect_storage_mode() {
 
 _restore_required_dirs() { printf '%s\n' data caddy logs config secrets backups; }
 
-_restore_ensure_volume_sentinel() {
+_restore_ensure_volume_identity() {
     local mount_point="$1"
     local device="${2:-${DATA_VOLUME_DEVICE:-}}"
-    local sentinel="$mount_point/.vw-data-volume"
 
-    if [[ -f "$sentinel" ]]; then
-        log_info "Data volume sentinel already present: $sentinel"
-        return 0
+    _path_is_mountpoint "$mount_point" || {
+        log_error "Cannot publish storage identity: target is not mounted: $mount_point"
+        return 1
+    }
+    if [[ -z "$device" ]]; then
+        device="$(findmnt -n -o SOURCE --target "$mount_point" 2>/dev/null || true)"
     fi
-
-    local sentinel_tmp
-    sentinel_tmp="$(mktemp "$mount_point/vw-data-volume-tmp.XXXXXX")" || {
-        log_error "Failed to create temp file for sentinel: $mount_point"
+    [[ -n "$device" ]] || {
+        log_error "Cannot resolve the mounted block device for storage identity at: $mount_point"
         return 1
     }
 
-    if ! printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
-        "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel_tmp"; then
-        rm -f "$sentinel_tmp" 2>/dev/null || true
-        log_error "Failed to write sentinel temp file"
-        return 1
-    fi
-
-    chmod 444 "$sentinel_tmp" 2>/dev/null || true
-
-    if ! mv -- "$sentinel_tmp" "$sentinel"; then
-        rm -f "$sentinel_tmp" 2>/dev/null || true
-        log_error "Failed to move sentinel into place: $sentinel"
-        return 1
-    fi
-
-    if command -v chattr >/dev/null 2>&1; then
-        chattr +i "$sentinel" 2>/dev/null \
-            || log_warn "chattr +i failed on sentinel — immutability not set (non-fatal; sentinel is still 444)"
-    fi
-
-    log_success "Data volume sentinel written and protected: $sentinel"
-    return 0
+    storage_write_volume_identity "$mount_point" "$device" recover
 }
 
 _restore_age_no_identity_guidance() {
@@ -2317,7 +2296,7 @@ _restore_prepare_block_target() {
             log_error "Required target path exists but is not a directory: $state_dir/$d"; return 1
         fi
     done
-    _restore_ensure_volume_sentinel "$state_dir" "${DATA_VOLUME_DEVICE:-}" || return 1
+    _restore_ensure_volume_identity "$state_dir" "${DATA_VOLUME_DEVICE:-}" || return 1
     chown -R "${puid}:${pgid}" "$state_dir/data" "$state_dir/backups" 2>/dev/null || true
     chmod 700 "$state_dir/secrets" 2>/dev/null || true
     return 0
@@ -2923,23 +2902,21 @@ restore_full() {
         fi
     fi
 
-    # Ensure storage sentinel survives restores in separate-volume mode.
-    # Primary path: DATA_VOLUME_MOUNT is populated (normal operation).
-    # Fallback path: DATA_VOLUME_MOUNT was not exported (partial env load) but
-    #   PROJECT_STATE_DIR is set and is itself a live mountpoint — in
-    #   separate-volume mode these two variables always resolve to the same path,
-    #   so the sentinel write is safe and correct.
-    _sentinel_dir=""
+    # Re-prove the mounted filesystem identity after payload/config promotion.
+    # A marker filename alone is never authority for restore or subsequent startup.
+    _identity_mount=""
     if [[ -n "${DATA_VOLUME_MOUNT:-}" ]] && mountpoint -q "${DATA_VOLUME_MOUNT}" 2>/dev/null; then
-        _sentinel_dir="${DATA_VOLUME_MOUNT}"
+        _identity_mount="${DATA_VOLUME_MOUNT}"
     elif [[ -n "${state_dir:-}" ]] && mountpoint -q "${state_dir}" 2>/dev/null; then
-        _sentinel_dir="${state_dir}"
+        _identity_mount="${state_dir}"
     fi
-    if [[ -n "$_sentinel_dir" ]]; then
-        _restore_ensure_volume_sentinel "$_sentinel_dir" "${DATA_VOLUME_DEVICE:-}" || \
-            log_warn "Could not ensure volume sentinel at ${_sentinel_dir}/.vw-data-volume"
+    if [[ -n "$_identity_mount" ]]; then
+        _restore_ensure_volume_identity "$_identity_mount" "${DATA_VOLUME_DEVICE:-}" || {
+            log_error "Could not validate/publish filesystem identity at $_identity_mount"
+            return 1
+        }
     fi
-    unset _sentinel_dir
+    unset _identity_mount
 
     chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || log_warn "Could not set ownership on $state_dir/data"
     purge_wal_shm "$state_dir/data/db.sqlite3" || true

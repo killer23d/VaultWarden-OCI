@@ -11,11 +11,11 @@
 #   When DATA_VOLUME_DEVICE is set in repo .env, sync fails closed before writing
 #   install.env unless the full storage contract is satisfied:
 #     - PROJECT_STATE_DIR == DATA_VOLUME_MOUNT
-#     - DATA_VOLUME_DEVICE exists as a block device
+#     - DATA_VOLUME_DEVICE is a block device whose filesystem UUID matches the mount
 #     - DATA_VOLUME_MOUNT is mounted
-#     - ${DATA_VOLUME_MOUNT}/.vw-data-volume sentinel exists
+#     - ${DATA_VOLUME_MOUNT}/.vw-data-volume is a valid structured filesystem identity
 #   This prevents accidentally writing the config skeleton onto the boot disk when the
-#   data volume is detached or its mount failed.
+#   data volume is detached, replaced, copied, or mounted incorrectly.
 #
 #   If .migrate-volume.state exists and the migration is incomplete, sync refuses to run
 #   to avoid clobbering a storage migration in progress.
@@ -83,16 +83,17 @@ USAGE:
 SUBCOMMANDS:
   sync    Copies repo .env to ${PROJECT_STATE_DIR}/config/install.env, applies
           root-runtime-only overrides, then installs /etc/vaultwarden/vaultwarden.env.
-          Fails closed when DATA_VOLUME_DEVICE is configured but the volume is not
-          mounted or the sentinel is missing.
+          Fails closed when DATA_VOLUME_DEVICE is configured but the mounted
+          filesystem identity cannot be proven.
 
   edit    Opens repo .env in ${EDITOR:-nano}. Detects whether the file was changed
           (sha256sum comparison) and runs sync only when a change is detected.
           Exits 0 and prints a "no changes" notice when the file is unchanged.
 
   status  Reports drift between repo .env and installed runtime env files for
-          non-secret configuration keys. Checks storage mount state and whether
-          a volume migration is in progress. Read-only; makes no changes.
+          non-secret configuration keys. Validates configured storage identity,
+          reports mount state, and shows whether a volume migration is in progress.
+          Read-only; makes no changes.
 
 ENVIRONMENT:
   EDITOR              Editor used by the edit subcommand (default: nano)
@@ -252,20 +253,16 @@ _storage_preflight() {
   fi
 
   # ── Separate-volume storage contract ──────────────────────────────────────
-  # When DATA_VOLUME_DEVICE is set, all five checks in check_project_state_ready
-  # must pass before we are allowed to create ${project_state_dir}/config or write
-  # any file under it.  This is a read-only preflight — it does NOT create dirs.
+  # When DATA_VOLUME_DEVICE is set, the canonical readiness check must pass
+  # before we are allowed to create ${project_state_dir}/config or write any file
+  # under it. This is a read-only preflight — it does NOT create dirs.
   if [[ -n "$data_volume_device" ]]; then
     export PROJECT_STATE_DIR="$project_state_dir"
     export DATA_VOLUME_DEVICE="$data_volume_device"
     export DATA_VOLUME_MOUNT="$data_volume_mount"
 
-    # check_project_state_ready (lib/storage.sh) validates:
-    #   1. Path safety (no shell metacharacters)
-    #   2. PROJECT_STATE_DIR == DATA_VOLUME_MOUNT
-    #   3. DATA_VOLUME_DEVICE is a real block device
-    #   4. DATA_VOLUME_MOUNT is mounted
-    #   5. ${DATA_VOLUME_MOUNT}/.vw-data-volume sentinel exists
+    # check_project_state_ready validates path/config consistency and delegates
+    # filesystem identity proof to storage_validate_volume_identity().
     check_project_state_ready || return 1
   fi
 
@@ -407,10 +404,11 @@ _cmd_status() {
       printf '  %-22s NOT MOUNTED\n' "  Volume mount:"
     fi
 
-    if [[ -f "${data_volume_mount}/.vw-data-volume" ]]; then
-      printf '  %-22s present\n' "  Sentinel:"
+    if storage_validate_volume_identity "$data_volume_mount" "$data_volume_device" >/dev/null 2>&1; then
+      printf '  %-22s valid\n' "  Volume identity:"
     else
-      printf '  %-22s MISSING\n' "  Sentinel:"
+      printf '  %-22s INVALID\n' "  Volume identity:"
+      printf '  %-22s %s\n' "" "Repair only after proving the disk: sudo utilities/setup-storage.sh setup --data-device $data_volume_device"
     fi
 
     if [[ "$project_state_dir" != "$data_volume_mount" ]]; then

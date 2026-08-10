@@ -219,15 +219,8 @@ _storage_confirm_existing_fs() {
 #   Creates PROJECT_STATE_DIR if absent, then returns 0.
 #
 # Separate-volume mode (DATA_VOLUME_DEVICE set):
-#   Runs five ordered checks and fails closed on the first failure:
-#   1. Path safety        — device and mount point contain only safe characters.
-#   2. Config consistency — PROJECT_STATE_DIR must equal DATA_VOLUME_MOUNT.
-#   3. Block device       — DATA_VOLUME_DEVICE must be a real block device.
-#   4. Mounted            — DATA_VOLUME_MOUNT must be currently active.
-#   5. Sentinel           — .vw-data-volume must exist on the mount (written by
-#                           setup_data_volume; prevents treating any arbitrary
-#                           mountpoint as the data volume).
-#   Then creates PROJECT_STATE_DIR if absent (idempotent).
+#   Fails closed unless the configured device, actual mounted filesystem UUID,
+#   structured identity marker, mount target, and PROJECT_STATE_DIR agree.
 #
 # Returns 0 on success, 1 on any failure. Callers should treat 1 as fatal.
 # ---------------------------------------------------------------------------
@@ -264,26 +257,7 @@ check_project_state_ready() {
         return 1
     fi
 
-    if [[ ! -b "$data_device" ]]; then
-        log_error "DATA_VOLUME_DEVICE is not a block device: $data_device"
-        log_error "Check .env or verify that the data disk is attached to this instance."
-        return 1
-    fi
-
-    if ! mountpoint -q "$data_mount" 2>/dev/null; then
-        log_error "Expected data volume is NOT mounted: $data_mount"
-        log_error "Refusing to continue — writing VaultWarden data onto the boot volume"
-        log_error "would silently corrupt your persistent state."
-        log_error "Remediation: sudo mount $data_mount"
-        return 1
-    fi
-
-    if [[ ! -f "$data_mount/.vw-data-volume" ]]; then
-        log_error "Data volume sentinel missing: $data_mount/.vw-data-volume"
-        log_error "The filesystem at $data_mount cannot be positively identified as the VaultWarden data volume."
-        log_error "Remediation (only if this IS the correct data disk): sudo touch $data_mount/.vw-data-volume"
-        return 1
-    fi
+    storage_validate_volume_identity "$data_mount" "$data_device" || return 1
 
     [[ -d "$state_dir" ]] || { log_error "check_project_state_ready: PROJECT_STATE_DIR missing: $state_dir"; return 1; }
     [[ -r "$state_dir" && -x "$state_dir" ]] || {
@@ -352,7 +326,8 @@ require_project_state_ready() {
 #   4. Adds a UUID-based fstab entry (fs-type matches detected filesystem)
 #      and runs daemon-reload.
 #   5. Mounts the volume if not already mounted.
-#   6. Writes a read-only sentinel file that identifies the volume.
+#   6. Atomically writes/repairs the filesystem identity marker after proving
+#      the configured device UUID matches the filesystem mounted at the target.
 #
 # Environment variables consumed:
 #   DATA_VOLUME_DEVICE          — block device to provision (required)
@@ -661,41 +636,12 @@ setup_data_volume() {
     fi
 
     # ------------------------------------------------------------------
-    # Step 6: Sentinel file (idempotent, read-only, immutable where supported).
-    #   The sentinel is the only positive proof that a given mountpoint IS the
-    #   VaultWarden data volume. Making it immutable with chattr +i protects it
-    #   from accidental rm -rf on the mount root while preserving the guard in
-    #   require_project_state_ready. The uninstaller runs chattr -i before wipe.
+    # Step 6: Filesystem-bound identity marker.
     # ------------------------------------------------------------------
-    local sentinel="$mount_point/.vw-data-volume"
     if [[ "$dry_run" == "true" ]]; then
-        [[ -f "$sentinel" ]] \
-            && log_info "[DRY RUN] Sentinel already present (idempotent): $sentinel" \
-            || log_info "[DRY RUN] Would write sentinel: $sentinel"
+        log_info "[DRY RUN] Would validate/write filesystem identity marker at $mount_point/.vw-data-volume"
     else
-        if [[ ! -f "$sentinel" ]]; then
-            # Write to a temp file first so a crash mid-write never leaves a
-            # zero-byte or partial sentinel that would silently pass the guard check.
-            local sentinel_tmp
-            sentinel_tmp=$(mktemp "$mount_point/vw-data-volume-tmp.XXXXXX") \
-                || { log_error "Failed to create temp file for sentinel: $mount_point"; return 1; }
-            printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
-                "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel_tmp" \
-                || { rm -f "$sentinel_tmp"; log_error "Failed to write sentinel temp file"; return 1; }
-            chmod 444 "$sentinel_tmp"
-            if ! mv -- "$sentinel_tmp" "$sentinel"; then
-                rm -f "$sentinel_tmp"
-                log_error "Failed to move sentinel into place: $sentinel"
-                return 1
-            fi
-            if command -v chattr >/dev/null 2>&1; then
-                chattr +i "$sentinel" 2>/dev/null \
-                    || log_warn "chattr +i failed on sentinel — immutability not set (non-fatal; sentinel is still 444)"
-            fi
-            log_success "Sentinel written and protected: $sentinel"
-        else
-            log_info "Sentinel already present (idempotent): $sentinel"
-        fi
+        storage_write_volume_identity "$mount_point" "$device" setup || return 1
     fi
 
     if [[ "$dry_run" == "true" ]]; then
@@ -820,3 +766,7 @@ vw_default_backup_dir() {
     fi
     printf '%s/backups' "$state_dir"
 }
+
+# Dedicated-volume identity is part of the storage library but kept in a small
+# companion so the parsing/writing contract is isolated from provisioning.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/storage-identity.sh"

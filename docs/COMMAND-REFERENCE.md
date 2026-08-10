@@ -654,16 +654,17 @@ USAGE:
 SUBCOMMANDS:
   sync    Copies repo .env to ${PROJECT_STATE_DIR}/config/install.env, applies
           root-runtime-only overrides, then installs /etc/vaultwarden/vaultwarden.env.
-          Fails closed when DATA_VOLUME_DEVICE is configured but the volume is not
-          mounted or the sentinel is missing.
+          Fails closed when DATA_VOLUME_DEVICE is configured but the mounted
+          filesystem identity cannot be proven.
 
   edit    Opens repo .env in ${EDITOR:-nano}. Detects whether the file was changed
           (sha256sum comparison) and runs sync only when a change is detected.
           Exits 0 and prints a "no changes" notice when the file is unchanged.
 
   status  Reports drift between repo .env and installed runtime env files for
-          non-secret configuration keys. Checks storage mount state and whether
-          a volume migration is in progress. Read-only; makes no changes.
+          non-secret configuration keys. Validates configured storage identity,
+          reports mount state, and shows whether a volume migration is in progress.
+          Read-only; makes no changes.
 
 ENVIRONMENT:
   EDITOR              Editor used by the edit subcommand (default: nano)

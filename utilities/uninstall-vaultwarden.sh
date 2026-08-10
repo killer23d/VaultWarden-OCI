@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -f "$ROOT/lib/defaults.sh" ]] && source "$ROOT/lib/defaults.sh"
 [[ -f "$ROOT/lib/log.sh" ]] && source "$ROOT/lib/log.sh"
 [[ -f "$ROOT/lib/common.sh" ]] && { source "$ROOT/lib/common.sh"; init_common_lib "$0"; }
+[[ -f "$ROOT/lib/storage.sh" ]] && source "$ROOT/lib/storage.sh"
 [[ -f "$ROOT/lib/operations.sh" ]] && source "$ROOT/lib/operations.sh"
 
 info(){ if declare -f log_info >/dev/null; then log_info "$@"; else printf '[INFO] %s\n' "$*"; fi; }
@@ -149,13 +150,15 @@ resolve(){
   BACKUP_DIR="${BACKUP_DIR:-$PROJECT_STATE_DIR/backups}"
   COMPOSE_PROJECT="${COMPOSE_PROJECT:-vaultwarden-oci}"
 
-  if [[ -z "$DATA_VOLUME_DEVICE" && "$PROJECT_STATE_DIR" == /* ]] && mountpoint -q "$PROJECT_STATE_DIR" 2>/dev/null \
-     && [[ -f "$PROJECT_STATE_DIR/.vw-data-volume" && ! -L "$PROJECT_STATE_DIR/.vw-data-volume" ]] \
-     && [[ "$(head -1 "$PROJECT_STATE_DIR/.vw-data-volume" 2>/dev/null)" == 'VaultWarden-OCI data volume' ]]; then
-    DATA_VOLUME_MOUNT=$PROJECT_STATE_DIR
-    DATA_VOLUME_DEVICE="$(findmnt -n -o SOURCE --target "$PROJECT_STATE_DIR" 2>/dev/null || true)"
-    [[ -n "$DATA_VOLUME_DEVICE" ]] || die "Mounted VaultWarden data volume found but source device cannot be resolved."
-    warn "Recovered separate-volume source from the mounted VaultWarden sentinel."
+  if [[ -z "$DATA_VOLUME_DEVICE" && "$PROJECT_STATE_DIR" == /* ]] && mountpoint -q "$PROJECT_STATE_DIR" 2>/dev/null; then
+    local mounted_source
+    mounted_source="$(findmnt -n -o SOURCE --target "$PROJECT_STATE_DIR" 2>/dev/null || true)"
+    if [[ -n "$mounted_source" ]] \
+       && storage_validate_volume_identity "$PROJECT_STATE_DIR" "$mounted_source" >/dev/null 2>&1; then
+      DATA_VOLUME_MOUNT=$PROJECT_STATE_DIR
+      DATA_VOLUME_DEVICE="$mounted_source"
+      warn "Recovered separate-volume source from the validated filesystem identity."
+    fi
   fi
 
   AGE_KEYS=()
@@ -167,15 +170,11 @@ resolve(){
 
 uuid(){ has blkid && blkid -o value -s UUID "$1" 2>/dev/null | head -1; }
 same_dev(){ local a=$1 b=$2 ra rb ua ub; [[ -n "$a" && -n "$b" ]] || return 1; [[ "$a" == "$b" ]] && return 0; ra="$(readlink -f -- "$a" 2>/dev/null || true)"; rb="$(readlink -f -- "$b" 2>/dev/null || true)"; [[ -n "$ra" && "$ra" == "$rb" ]] && return 0; ua="$(uuid "$a")"; ub="$(uuid "$b")"; [[ -n "$ua" && "$ua" == "$ub" ]]; }
-sentinel_value(){ awk -F: -v k="$1" '$1==k{v=substr($0,index($0,":")+1);sub(/^[[:space:]]+/,"",v);print v;exit}' "$2" 2>/dev/null; }
 verify_volume(){
-  local s="$DATA_VOLUME_MOUNT/.vw-data-volume" src sm sd metadata
-  [[ -f "$s" && ! -L "$s" && "$(head -1 "$s" 2>/dev/null)" == 'VaultWarden-OCI data volume' ]] || return 1
-  metadata="$(stat -c '%u:%g:%a:%h' "$s" 2>/dev/null || true)"
-  [[ "$metadata" == '0:0:444:1' ]] || return 1
-  src="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT" 2>/dev/null || true)"; same_dev "$DATA_VOLUME_DEVICE" "$src" || return 1
-  sm="$(sentinel_value Mounted "$s")"; [[ -z "$sm" ]] || same_path "$sm" "$DATA_VOLUME_MOUNT" || return 1
-  sd="$(sentinel_value Device "$s")"; [[ -z "$sd" || ! -e "$sd" ]] || same_dev "$sd" "$src" || return 1
+  local s="$DATA_VOLUME_MOUNT/.vw-data-volume" links
+  storage_validate_volume_identity "$DATA_VOLUME_MOUNT" "$DATA_VOLUME_DEVICE" >/dev/null 2>&1 || return 1
+  links="$(stat -c '%h' "$s" 2>/dev/null || true)"
+  [[ "$links" == 1 ]]
 }
 
 fstab_count(){ awk -v mp="$1" '!/^[[:space:]]*($|#)/&&$2==mp{n++}END{print n+0}' "$FSTAB" 2>/dev/null; }
@@ -202,6 +201,7 @@ remove_guard(){ if [[ -e "$MOUNT_GUARD" || -L "$MOUNT_GUARD" ]]; then guard_mana
 
 storage_ambiguous(){
   [[ -z "$DATA_VOLUME_DEVICE" ]] || return 1
+  mountpoint -q "$PROJECT_STATE_DIR" 2>/dev/null && return 0
   [[ -n "$DATA_VOLUME_MOUNT" ]] && same_path "$PROJECT_STATE_DIR" "$DATA_VOLUME_MOUNT" && return 0
   same_path "$PROJECT_STATE_DIR" "$DEFAULT_DATA" && return 0
   guard_managed && return 0
@@ -226,7 +226,7 @@ preflight_storage(){
   same_path "$PROJECT_STATE_DIR" "$DATA_VOLUME_MOUNT" || die "PROJECT_STATE_DIR must equal DATA_VOLUME_MOUNT for separate storage."
   local src=$DATA_VOLUME_DEVICE id
   id="$(uuid "$DATA_VOLUME_DEVICE")"
-  if mountpoint -q "$DATA_VOLUME_MOUNT" 2>/dev/null; then verify_volume || die "Mounted data-volume identity verification failed."; src="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT")"; fi
+  if mountpoint -q "$DATA_VOLUME_MOUNT" 2>/dev/null; then verify_volume || die "Mounted data-volume identity verification failed. Repair only after proving the disk: sudo utilities/setup-storage.sh setup --data-device $DATA_VOLUME_DEVICE"; src="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT")"; fi
   fstab_can_remove "$DATA_VOLUME_MOUNT" "$src" "$id" || die "Data-volume fstab wiring is ambiguous; no changes made."
   [[ ! -e "$MOUNT_GUARD" && ! -L "$MOUNT_GUARD" ]] || guard_managed || die "Docker mount guard is unmarked; no changes made."
 }
@@ -337,7 +337,7 @@ remove_state(){
   local mounted=false src=$DATA_VOLUME_DEVICE id
   id="$(uuid "$DATA_VOLUME_DEVICE")"
   mountpoint -q "$DATA_VOLUME_MOUNT" 2>/dev/null && mounted=true
-  if [[ "$mounted" == true ]]; then verify_volume || die "Data-volume verification failed."; src="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT")"; fstab_can_remove "$DATA_VOLUME_MOUNT" "$src" "$id" || die "Ambiguous fstab; refusing detach."; info "Unmounting verified data volume..."; umount "$DATA_VOLUME_MOUNT" 2>/dev/null || die "Unmount failed. Close open files and retry; lazy unmount is not used."; ok "Data volume unmounted; filesystem contents and sentinel preserved."; fi
+  if [[ "$mounted" == true ]]; then verify_volume || die "Data-volume identity verification failed. Repair only after proving the disk: sudo utilities/setup-storage.sh setup --data-device $DATA_VOLUME_DEVICE"; src="$(findmnt -n -o SOURCE --target "$DATA_VOLUME_MOUNT")"; fstab_can_remove "$DATA_VOLUME_MOUNT" "$src" "$id" || die "Ambiguous fstab; refusing detach."; info "Unmounting verified data volume..."; umount "$DATA_VOLUME_MOUNT" 2>/dev/null || die "Unmount failed. Close open files and retry; lazy unmount is not used."; ok "Data volume unmounted; filesystem contents and identity marker preserved."; fi
   remove_fstab "$DATA_VOLUME_MOUNT" "$src" "$id" || die "Could not safely remove fstab wiring."
   remove_guard || die "Could not safely remove Docker mount guard."
   [[ -d "$DATA_VOLUME_MOUNT" ]] && { rmdir "$DATA_VOLUME_MOUNT" 2>/dev/null || warn "Preserving non-empty host mountpoint directory: $DATA_VOLUME_MOUNT"; }

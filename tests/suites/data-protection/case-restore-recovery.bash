@@ -48,6 +48,13 @@ require_pattern '_rollback_payload_paths' 'separate-volume restore must attempt 
 reject_pattern 'mv "\$_subdir" "\$\{_snap_dir\}/"' 'separate-volume restore must not blindly move discovered top-level entries'
 pass 'restore-run protects separate-volume metadata and rolls back payload promotion failures'
 
+require_pattern '^_restore_ensure_volume_identity\(\)' 'restore-run must expose the canonical volume-identity bridge'
+require_pattern 'storage_write_volume_identity "\$mount_point" "\$device" recover' 'restore-run must delegate marker publication to the shared storage writer'
+reject_pattern '_restore_ensure_volume_sentinel' 'restore-run must not retain its legacy sentinel writer'
+reject_pattern 'VaultWarden-OCI data volume' 'restore-run must not retain the legacy plaintext marker format'
+require_pattern 'Could not validate/publish filesystem identity' 'post-promotion restore must fail loudly when identity cannot be established'
+pass 'restore-run delegates storage identity to the canonical writer and fails closed'
+
 require_pattern 'local install_env="\$\{STATE_DIR\}/config/install.env"' 'restore-run must target persistent install.env'
 require_pattern 'SOPS_AGE_KEY_FILE=\$\{canonical_key\}.*\$install_env|written to \$install_env' 'restore-run must update SOPS_AGE_KEY_FILE in install.env'
 pass 'restore-run updates state config install.env when key path changes'
@@ -80,7 +87,7 @@ pass 'restore-run selects post-restore rekey source by restore type and storage 
 
 bash -n "$SCRIPT"
 pass 'bash -n utilities/restore-run.sh'
-printf '1..11\n'
+printf '1..12\n'
 
 )
 
@@ -1281,7 +1288,9 @@ set -euo pipefail
 
 ROOT="$VW_TEST_REPO_ROOT"
 REAL_ETC_SNAPSHOT="$(mktemp -d)"
-TEST_ROOT="$(mktemp -d)"
+TEST_ROOT="/tmp/vw_restore_recovery_$$"
+rm -rf "$TEST_ROOT"
+mkdir -p "$TEST_ROOT"
 TESTS_RUN=0
 
 USB_RECIPIENT="age1usb0000000000000000000000000000000000000000000000000000000"
@@ -1360,9 +1369,53 @@ env_has_value() {
 
 make_case() {
     local dir="$TEST_ROOT/case-$TESTS_RUN"
+    rm -rf "$dir"
     mkdir -p "$dir/state/config" "$dir/state/secrets" "$dir/state/data" "$dir/repo" "$dir/etc" "$dir/mockbin"
     cp "$ROOT/recover.sh" "$dir/repo/recover.sh"
     cp -a "$ROOT/lib" "$dir/repo/lib"
+    cat >> "$dir/repo/lib/storage-identity.sh" <<'RECOVERY_IDENTITY_FIXTURE'
+
+# Recovery transaction fixtures mock only host identity/ownership discovery.
+# The production storage writer/validator remains the code under test.
+if [[ -n "${VW_TEST_RECOVERY_REPO:-}" && "${PROJECT_ROOT:-}" == "$VW_TEST_RECOVERY_REPO" ]]; then
+    readonly _VW_RECOVERY_TEST_FS_UUID="11111111-2222-3333-4444-555555555555"
+    _storage_identity_read_mount_facts() {
+        printf '/dev/mock\n%s\n%s\n' "$_VW_RECOVERY_TEST_FS_UUID" "$1"
+    }
+    _storage_identity_device_uuid() {
+        printf '%s\n' "$_VW_RECOVERY_TEST_FS_UUID"
+    }
+
+    _VW_RECOVERY_TEST_REAL_CHOWN="$(command -v chown)"
+    chown() {
+        if [[ "$*" == *'.vw-data-volume'* ]]; then
+            return 0
+        fi
+        "$_VW_RECOVERY_TEST_REAL_CHOWN" "$@"
+    }
+
+    _VW_RECOVERY_TEST_REAL_STAT="$(command -v stat)"
+    stat() {
+        if [[ "${1:-}" == -c && "${3:-}" == *'.vw-data-volume'* ]]; then
+            case "${2:-}" in
+                %u) printf '0\n'; return 0 ;;
+                %g) printf '0\n'; return 0 ;;
+                %a) printf '444\n'; return 0 ;;
+            esac
+        fi
+        "$_VW_RECOVERY_TEST_REAL_STAT" "$@"
+    }
+
+    eval "$(declare -f storage_write_volume_identity | sed '1s/storage_write_volume_identity/_vw_recovery_test_real_storage_write_volume_identity/')"
+    storage_write_volume_identity() {
+        _vw_recovery_test_real_storage_write_volume_identity "$@" || return 1
+        local marker="$1/.vw-data-volume"
+        if [[ -n "${MOCK_TOUCH_SIGNAL_PATH:-}" && "${MOCK_TOUCH_SIGNAL_PATH}" == "$marker" ]]; then
+            kill "-${MOCK_TOUCH_SIGNAL_NAME:-TERM}" "$$"
+        fi
+    }
+fi
+RECOVERY_IDENTITY_FIXTURE
     cat >> "$dir/repo/lib/operations.sh" <<'RELEASE_PROBE'
 
 if [[ -n "${VW_TEST_RELEASE_LOG:-}" ]]; then
@@ -1538,6 +1591,21 @@ if [[ -n "${MOCK_MV_SIGNAL_DEST:-}" && "$(canon "$last")" == "$(canon "$MOCK_MV_
 fi
 exec /bin/mv "$@"
 MV
+    cat > "$mock/lsattr" <<'LSATTR'
+#!/usr/bin/env bash
+path="${*: -1}"
+if [[ -e "${path}.mock-immutable" ]]; then
+    printf '%s %s\n' '----i-----------------' "$path"
+    exit 0
+fi
+exec /usr/bin/lsattr "$@"
+LSATTR
+    cat > "$mock/chattr" <<'CHATTR'
+#!/usr/bin/env bash
+path="${*: -1}"
+printf '%s\n' "$*" >> "${path}.mock-chattr-log"
+exit 0
+CHATTR
     cat > "$mock/touch" <<'TOUCH'
 #!/usr/bin/env bash
 canon(){ /usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
@@ -1565,7 +1633,7 @@ run_recover() {
     export MOCK_LIVE_CIPHER="$dir/state/secrets/secrets.yaml"
     set +e
     env PATH="$dir/mockbin:$PATH" \
-        MOCK_FINDMNT_SOURCE="/dev/mock-source" \
+        MOCK_FINDMNT_SOURCE="/dev/disk/by-uuid/1111-2222" \
         VW_TEST_MODE=true \
         VW_RECOVER_TEST_ALLOW_NON_ROOT=true \
         VW_RECOVER_ETC_DIR="$dir/etc" \
@@ -1607,7 +1675,7 @@ run_recover_async() {
     export MOCK_NEW_RECIPIENT="$NEW_RECIPIENT"
     export MOCK_LIVE_CIPHER="$dir/state/secrets/secrets.yaml"
     env PATH="$dir/mockbin:$PATH" \
-        MOCK_FINDMNT_SOURCE="/dev/mock-source" \
+        MOCK_FINDMNT_SOURCE="/dev/disk/by-uuid/1111-2222" \
         VW_TEST_MODE=true \
         VW_RECOVER_TEST_ALLOW_NON_ROOT=true \
         VW_RECOVER_ETC_DIR="$dir/etc" \
@@ -1806,12 +1874,9 @@ test_boot_mode_clears_block_env() {
 
 test_block_mode_uuid_device() {
     local dir; dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
-    mkdir -p "$dir/dev-by-uuid"
-    touch "$dir/mock-source"
-    ln -sf "$dir/mock-source" "$dir/dev-by-uuid/1111-2222"
     if ! run_recover "$dir" --storage-mode block; then cat "$dir/out"; fail 'block mode should succeed'; fi
-    grep -q "^DATA_VOLUME_DEVICE=$dir/dev-by-uuid/1111-2222$" "$dir/state/config/install.env" || fail 'uuid device path not used'
-    [[ -e "$dir/state/.vw-data-volume" ]] || fail 'sentinel missing'
+    grep -q '^DATA_VOLUME_DEVICE=/dev/disk/by-uuid/1111-2222$' "$dir/state/config/install.env" || fail 'uuid device path not used'
+    [[ -e "$dir/state/.vw-data-volume" ]] || fail 'identity marker missing'
 }
 
 test_final_permissions() {
@@ -1956,6 +2021,28 @@ test_signal_after_new_sentinel_mutation_rolls_back() {
     assert_file_missing "$dir/state/.vw-data-volume"
 }
 
+test_signal_after_repaired_existing_sentinel_restores_previous_marker() {
+    local dir rc before_mode
+    dir=$(make_case); write_mocks "$dir"; setup_startup "$dir"
+    printf 'legacy-corrupt-volume-marker\n' > "$dir/state/.vw-data-volume"
+    chmod 0640 "$dir/state/.vw-data-volume"
+    cp -a "$dir/state/.vw-data-volume" "$dir/sentinel.before"
+    : > "$dir/state/.vw-data-volume.mock-immutable"
+    before_mode="$(file_mode "$dir/sentinel.before")"
+    snapshot_recovery_state "$dir"
+    set +e
+    ( MOCK_TOUCH_SIGNAL_PATH="$dir/state/.vw-data-volume" MOCK_TOUCH_SIGNAL_NAME=TERM run_recover "$dir" --storage-mode block )
+    rc=$?
+    set -e
+    [[ "$rc" -eq 143 ]] || fail "repaired sentinel signal expected 143, got $rc"
+    ! grep -q 'mock startup: OK' "$dir/out" || fail 'continued into startup after repaired sentinel signal'
+    assert_recovery_state_unchanged "$dir" 'repaired sentinel signal'
+    assert_file_equals "$dir/sentinel.before" "$dir/state/.vw-data-volume" 'pre-existing repaired sentinel was not restored'
+    [[ "$(file_mode "$dir/state/.vw-data-volume")" == "$before_mode" ]] || fail 'pre-existing repaired sentinel mode was not restored'
+    [[ "$(grep -cF '+i ' "$dir/state/.vw-data-volume.mock-chattr-log" 2>/dev/null || true)" == 2 ]] \
+        || fail 'pre-existing repaired sentinel immutable flag was not restored after rollback'
+}
+
 test_reconciles_absent_repo_env_before_startup_sync() {
     local dir
     dir=$(make_case); write_mocks "$dir"; setup_startup_with_env_sync "$dir"
@@ -2045,8 +2132,8 @@ test_health_failure_reports_nonzero_without_rollback() {
 
 
 # Keep each runner-owned logical case comfortably within its independent
-# 120-second deadline. Both modes retain a deterministic 26-entry TAP plan:
-# core executes 1-13 and skips 14-26; tail skips 1-13 and executes 14-26.
+# 120-second deadline. Both modes retain a deterministic 27-entry TAP plan:
+# core executes 1-13 and skips 14-27; tail skips 1-13 and executes 14-27.
 _RESTORE_RECOVERY_MODE_SPLIT=13
 _restore_recovery_run_test_index=0
 _restore_recovery_skip_test() { return 0; }
@@ -2097,13 +2184,14 @@ run_test 'pre-existing block sentinel survives pre-commit failure' test_existing
 run_test 'pre-commit INT and TERM exit with signal status and stop execution' test_precommit_signals_exit_and_do_not_continue
 run_test 'signal after live ciphertext mutation rolls back' test_signal_after_live_cipher_mutation_rolls_back
 run_test 'signal after new sentinel mutation rolls back' test_signal_after_new_sentinel_mutation_rolls_back
+run_test 'signal after repaired pre-existing sentinel restores previous marker' test_signal_after_repaired_existing_sentinel_restores_previous_marker
 run_test 'fresh recovery creates repo env before startup sync' test_reconciles_absent_repo_env_before_startup_sync
 run_test 'stale repo env is reconciled before startup sync' test_reconciles_stale_repo_env_before_startup_sync
 run_test 'successful fresh-clone recovery updates all artifacts' test_success_fresh_clone
 run_test 'startup failure after commit exits non-zero without rollback' test_startup_failure_returns_nonzero_without_rollback
 run_test 'health-check failure after commit exits non-zero without rollback' test_health_failure_reports_nonzero_without_rollback
 
-[[ "$TESTS_RUN" -eq 26 ]] || fail "expected 26 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 27 ]] || fail "expected 27 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )

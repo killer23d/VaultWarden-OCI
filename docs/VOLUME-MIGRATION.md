@@ -29,7 +29,7 @@ The migration path:
 - refuses `--yes` together with `--skip-stack-stop`;
 - re-checks that the stack is stopped immediately before rsync;
 - excludes SQLite WAL/SHM files from the transfer;
-- protects the target `.vw-data-volume` sentinel;
+- protects the target `.vw-data-volume` filesystem identity marker;
 - verifies the transfer before completing;
 - applies a service start policy instead of always starting production automatically.
 
@@ -149,7 +149,7 @@ sudo utilities/setup-storage.sh migrate run \
   --target /var/lib/vaultwarden
 ```
 
-In interactive reverse mode, the device picker shows mounted volumes carrying the VaultWarden `.vw-data-volume` sentinel and lets you choose the source data volume.
+In interactive reverse mode, the device picker shows only mounted volumes whose complete VaultWarden filesystem identity validates against the selected device and expected mount target.
 
 You may also provide the mounted source device explicitly:
 
@@ -332,13 +332,13 @@ Do not manually copy WAL/SHM files to force a deceptively complete-looking targe
 
 ---
 
-## `.vw-data-volume` sentinel
+## `.vw-data-volume` filesystem identity marker
 
-The sentinel identifies a volume adopted/provisioned as VaultWarden data storage.
+`.vw-data-volume` is a structured filesystem-identity proof, not filename-only authority. A marker is accepted only when the configured device UUID, the filesystem actually mounted at the expected target, and the marker's recorded filesystem UUID and mount target agree. The marker structure plus its root ownership and read-only mode are validated as part of the same check.
 
-Migration protects the target-owned sentinel from rsync deletion/exclusion behavior. Reverse migration uses the sentinel to identify eligible mounted VaultWarden data volumes in the interactive picker.
+Migration protects the target-owned identity marker from rsync deletion/exclusion behavior. Reverse migration's interactive picker shows only mounted volumes whose complete filesystem identity validates against the selected device.
 
-Do not create or remove the sentinel merely to bypass a storage error. Resolve the device/mount ownership ambiguity first.
+Do not create, copy, or remove the identity marker merely to bypass a storage error. Prove the device and mounted filesystem first, then use the supported setup/adoption/repair path.
 
 ---
 
@@ -418,7 +418,7 @@ To roll back the migration state through the owning workflow:
 sudo utilities/setup-storage.sh migrate abort
 ```
 
-Do not delete `.migrate-volume.state`, lock files, fstab entries, or volume sentinels as a first troubleshooting step. The recorded state is needed to reason about the partial pipeline.
+Do not delete `.migrate-volume.state`, lock files, fstab entries, or volume identity markers as a first troubleshooting step. The recorded state is needed to reason about the partial pipeline.
 
 ---
 
@@ -434,4 +434,4 @@ sudo chown -R 1000:1000 /mnt/vw-data
 
 and then manually rewrite `.env`/systemd environment files.
 
-Those commands bypass the project's stop/WAL, Caddy/root-owned permission, sentinel, persistent environment, installed runtime, verification, and rollback contracts.
+Those commands bypass the project's stop/WAL, Caddy/root-owned permission, filesystem-identity, persistent environment, installed runtime, verification, and rollback contracts.

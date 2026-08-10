@@ -56,7 +56,10 @@ RECOVERY_COMMITTED=false
 RECOVERY_GUARD_HELD=false
 ROLLBACK_DONE=false
 SENTINEL_PATH=""
+SENTINEL_BACKUP=""
 SENTINEL_CREATED=false
+SENTINEL_REPLACED=false
+SENTINEL_WAS_IMMUTABLE=false
 
 usage() {
     cat <<'EOF'
@@ -268,6 +271,16 @@ create_backups() {
     INSTALL_ENV_BACKUP="$WORKDIR/install.env.bak"
     MANIFEST_BACKUP="$WORKDIR/dr-manifest.env.bak"
     SENTINEL_PATH="$STATE_DIR/.vw-data-volume"
+    SENTINEL_BACKUP="$WORKDIR/vw-data-volume.bak"
+    if [[ -f "$SENTINEL_PATH" && ! -L "$SENTINEL_PATH" ]]; then
+        cp -a -- "$SENTINEL_PATH" "$SENTINEL_BACKUP" \
+            || fatal "Failed to snapshot existing data-volume identity marker."
+        if command -v lsattr >/dev/null 2>&1; then
+            local sentinel_attrs
+            sentinel_attrs="$(lsattr -d -- "$SENTINEL_PATH" 2>/dev/null | awk '{print $1}' || true)"
+            [[ "$sentinel_attrs" == *i* ]] && SENTINEL_WAS_IMMUTABLE=true
+        fi
+    fi
 
     cp "$SECRETS_FILE" "$CIPHERTEXT_STAGING"
     cp "$SECRETS_FILE" "$CIPHERTEXT_BACKUP"
@@ -321,6 +334,49 @@ validate_staged() {
     fi
 }
 
+_rollback_volume_identity() {
+    [[ "$RECOVERY_COMMITTED" != "true" ]] || return 0
+    [[ "$SENTINEL_CREATED" == "true" || "$SENTINEL_REPLACED" == "true" ]] || return 0
+
+    if [[ -e "$SENTINEL_PATH" || -L "$SENTINEL_PATH" ]]; then
+        if command -v chattr >/dev/null 2>&1; then
+            chattr -i "$SENTINEL_PATH" 2>/dev/null || true
+        fi
+    fi
+
+    if [[ "$SENTINEL_REPLACED" == "true" ]]; then
+        local restore_tmp
+        [[ -f "$SENTINEL_BACKUP" ]] || {
+            log_error "Cannot restore pre-recovery data-volume identity marker: backup is missing."
+            return 1
+        }
+        restore_tmp="$(mktemp "$STATE_DIR/.vw-data-volume.rollback.XXXXXX")" || {
+            log_error "Cannot stage pre-recovery data-volume identity marker rollback."
+            return 1
+        }
+        if ! cp -a -- "$SENTINEL_BACKUP" "$restore_tmp"; then
+            rm -f -- "$restore_tmp"
+            log_error "Cannot stage pre-recovery data-volume identity marker rollback."
+            return 1
+        fi
+        if ! mv -f -- "$restore_tmp" "$SENTINEL_PATH"; then
+            rm -f -- "$restore_tmp"
+            log_error "Cannot restore pre-recovery data-volume identity marker."
+            return 1
+        fi
+        if [[ "$SENTINEL_WAS_IMMUTABLE" == "true" ]]; then
+            if command -v chattr >/dev/null 2>&1; then
+                chattr +i "$SENTINEL_PATH" 2>/dev/null \
+                    || log_warn "Could not restore immutable flag on pre-recovery data-volume identity marker."
+            else
+                log_warn "Could not restore immutable flag on pre-recovery data-volume identity marker: chattr unavailable."
+            fi
+        fi
+    else
+        rm -f -- "$SENTINEL_PATH"
+    fi
+}
+
 rollback() {
     [[ "$ROLLBACK_DONE" == "true" ]] && return 0
     ROLLBACK_DONE=true
@@ -340,9 +396,7 @@ rollback() {
     if [[ "$MANIFEST_PROMOTED" == "true" ]]; then
         restore_or_remove "$MANIFEST_EXISTED" "$MANIFEST_BACKUP" "$MANIFEST"
     fi
-    if [[ "$SENTINEL_CREATED" == "true" && "$RECOVERY_COMMITTED" != "true" ]]; then
-        rm -f "$SENTINEL_PATH"
-    fi
+    _rollback_volume_identity
 }
 
 validate_promoted_identity_config() {
@@ -415,18 +469,28 @@ promote_artifacts() {
         fatal "Recovery manifest promotion failed — recovery artifacts were rolled back."
     fi
 
-    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" && ! -e "$SENTINEL_PATH" ]]; then
-        SENTINEL_CREATED=true
-        if ! touch "$SENTINEL_PATH"; then
-            rollback
-            fatal "Data-volume sentinel creation failed — recovery artifacts were rolled back."
-        fi
-    fi
-
     if ! validate_promoted_identity_config; then
         rollback
         fatal "Post-promotion recovery identity/config validation failed — recovery artifacts were rolled back."
     fi
+
+    if [[ "$EFFECTIVE_STORAGE_MODE" == "block" ]]; then
+        if [[ ! -e "$SENTINEL_PATH" && ! -L "$SENTINEL_PATH" ]]; then
+            SENTINEL_CREATED=true
+        elif ! storage_validate_volume_identity "$STATE_DIR" "$DEVICE_PATH" >/dev/null 2>&1; then
+            if [[ -f "$SENTINEL_PATH" && ! -L "$SENTINEL_PATH" && -f "$SENTINEL_BACKUP" \
+                && "$(stat -c '%h' "$SENTINEL_PATH" 2>/dev/null || true)" == 1 ]]; then
+                # Mark the repair before entering the writer so INT/TERM after
+                # publication still knows the pre-recovery marker must be restored.
+                SENTINEL_REPLACED=true
+            fi
+        fi
+        if ! storage_write_volume_identity "$STATE_DIR" "$DEVICE_PATH" recover; then
+            rollback
+            fatal "Data-volume identity repair failed — recovery artifacts were rolled back."
+        fi
+    fi
+
     chmod 0600 "$ACTIVE_KEY" "$SECRETS_FILE" 2>/dev/null || true
     chown root:root "$ACTIVE_KEY" "$SECRETS_FILE" 2>/dev/null || true
     chmod 0644 "$SOPS_CONFIG_FILE" 2>/dev/null || true

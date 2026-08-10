@@ -4,7 +4,9 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
 ROOT_REPO="$VW_TEST_REPO_ROOT"
 U="$ROOT_REPO/utilities/uninstall-vaultwarden.sh"
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d)"
+UNINSTALL_MOUNT="/tmp/vw_uninstall_mount_$$"
+trap 'rm -rf "$T" "$UNINSTALL_MOUNT"' EXIT
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 
 bash -n "$U"
@@ -55,6 +57,16 @@ printf '# Managed by VaultWarden-OCI setup.sh\n[Unit]\nRequiresMountsFor=/mnt/ol
 PROJECT_STATE_DIR="$T/custom-state"; DATA_VOLUME_MOUNT=''; DATA_VOLUME_DEVICE=''; FSTAB="$T/no-fstab"
 storage_ambiguous || fail "managed mount guard did not expose partial storage config"
 
+# A mounted custom state root is separate-volume evidence even when persisted
+# device/mount fields and other wiring are missing; destructive uninstall must
+# fail closed rather than treating the live mount as boot-storage data.
+SYSTEMD="$T/no-managed-systemd"; MOUNT_GUARD="$SYSTEMD/docker.service.d/10-vaultwarden-data-volume.conf"
+PROJECT_STATE_DIR="$T/custom-mounted-state"; DATA_VOLUME_MOUNT=''; DATA_VOLUME_DEVICE=''; FSTAB="$T/no-mounted-fstab"
+mkdir -p "$PROJECT_STATE_DIR"
+mountpoint(){ [[ "${1:-}" == -q && "${2:-}" == "$PROJECT_STATE_DIR" ]]; }
+storage_ambiguous || fail "mounted custom state root did not expose ambiguous separate storage"
+unset -f mountpoint
+
 DEFAULT_STATE="$T/default-owned"; mkdir -p "$DEFAULT_STATE"
 if state_evidence "$DEFAULT_STATE"; then fail "empty default state was accepted as recursive ownership evidence"; fi
 mkdir -p "$T/strong-state/data" "$T/strong-state/logs/vaultwarden"
@@ -101,14 +113,23 @@ worker_config_managed || fail "managed CrowdSec Workers config depended on survi
 
 SYSTEMD="$T/systemd"; MOUNT_GUARD="$SYSTEMD/docker.service.d/10-vaultwarden-data-volume.conf"; mkdir -p "$(dirname "$MOUNT_GUARD")"
 printf '# Managed by VaultWarden-OCI setup.sh - do not edit by hand.\n[Unit]\n' > "$MOUNT_GUARD"
-DATA_VOLUME_MOUNT="$T/mnt"; PROJECT_STATE_DIR="$DATA_VOLUME_MOUNT"; DATA_VOLUME_DEVICE=/dev/mock; mkdir -p "$DATA_VOLUME_MOUNT"
-printf 'VaultWarden-OCI data volume\nDevice: /dev/mock\nMounted: %s\n' "$DATA_VOLUME_MOUNT" > "$DATA_VOLUME_MOUNT/.vw-data-volume"
+DATA_VOLUME_MOUNT="$UNINSTALL_MOUNT"; PROJECT_STATE_DIR="$DATA_VOLUME_MOUNT"; DATA_VOLUME_DEVICE=/dev/mock; mkdir -p "$DATA_VOLUME_MOUNT"
+MOCK_UUID='11111111-2222-3333-4444-555555555555'
+cat > "$DATA_VOLUME_MOUNT/.vw-data-volume" <<EOF_MARKER
+SIGNATURE=VaultWarden-OCI-data-volume
+FORMAT=1
+FILESYSTEM_UUID=$MOCK_UUID
+MOUNT_TARGET=$DATA_VOLUME_MOUNT
+DEVICE_CONTEXT=/dev/mock
+CREATED_AT=2026-08-10T12:00:00Z
+OPERATION=setup
+EOF_MARKER
 chmod 444 "$DATA_VOLUME_MOUNT/.vw-data-volume"
 printf keep > "$DATA_VOLUME_MOUNT/operator-note"
-FSTAB="$T/fstab-mounted"; printf 'UUID=mock\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' "$DATA_VOLUME_MOUNT" > "$FSTAB"
+FSTAB="$T/fstab-mounted"; printf 'UUID=%s\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' "$MOCK_UUID" "$DATA_VOLUME_MOUNT" > "$FSTAB"
 B="$T/bin"; mkdir -p "$B"
 REAL_STAT="$(command -v stat)"
-export MOCK_MOUNT="$DATA_VOLUME_MOUNT" MOCK_FLAG="$T/is-mounted" MOCK_DETACHED="$T/detached" REAL_STAT
+export MOCK_MOUNT="$DATA_VOLUME_MOUNT" MOCK_FLAG="$T/is-mounted" MOCK_DETACHED="$T/detached" REAL_STAT MOCK_UUID
 : > "$MOCK_FLAG"
 cat > "$B/mountpoint" <<'MOCK'
 #!/usr/bin/env bash
@@ -120,7 +141,7 @@ printf '/dev/mock\n'
 MOCK
 cat > "$B/blkid" <<'MOCK'
 #!/usr/bin/env bash
-printf 'mock\n'
+printf '%s\n' "$MOCK_UUID"
 MOCK
 cat > "$B/umount" <<'MOCK'
 #!/usr/bin/env bash
@@ -128,15 +149,25 @@ rm -f "$MOCK_FLAG"; mv "$MOCK_MOUNT" "$MOCK_DETACHED"; mkdir -p "$MOCK_MOUNT"
 MOCK
 cat > "$B/stat" <<'MOCK'
 #!/usr/bin/env bash
-if [[ "$*" == *'.vw-data-volume'* && "$*" == *'%u:%g:%a:%h'* ]]; then
-  printf '0:0:444:1\n'
-  exit 0
+if [[ "$*" == *'.vw-data-volume'* && "${1:-}" == -c ]]; then
+  case "${2:-}" in
+    %u) printf '0\n'; exit 0 ;;
+    %g) printf '0\n'; exit 0 ;;
+    %a) printf '444\n'; exit 0 ;;
+    %h) printf '1\n'; exit 0 ;;
+  esac
 fi
 exec "$REAL_STAT" "$@"
 MOCK
 chmod +x "$B"/*; PATH="$B:$PATH"
+
+# Keep the validator real while mocking only mount/device identity discovery.
+_storage_identity_read_mount_facts(){ printf '/dev/mock\n%s\n%s\n' "$MOCK_UUID" "$DATA_VOLUME_MOUNT"; }
+_storage_identity_device_uuid(){ printf '%s\n' "$MOCK_UUID"; }
+
+verify_volume || fail "structured filesystem identity was not accepted for uninstall"
 remove_state >/dev/null
-[[ -f "$MOCK_DETACHED/operator-note" && -f "$MOCK_DETACHED/.vw-data-volume" ]] || fail "separate-volume data or sentinel deleted"
+[[ -f "$MOCK_DETACHED/operator-note" && -f "$MOCK_DETACHED/.vw-data-volume" ]] || fail "separate-volume data or identity marker deleted"
 ! grep -q "$DATA_VOLUME_MOUNT" "$FSTAB" || fail "managed fstab entry remained"
 [[ ! -e "$MOUNT_GUARD" ]] || fail "managed mount guard remained"
 

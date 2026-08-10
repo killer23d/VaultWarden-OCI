@@ -67,6 +67,7 @@ FOUNDATION_CASES=(
     "ci-dev-setup|tests/suites/foundation/case-config-env.bash|ci-dev-setup|120"
     "permissions|tests/suites/foundation/case-permissions.bash|all|120"
     "storage-setup-core|tests/suites/foundation/case-storage-setup.bash|core|120"
+    "storage-identity|tests/suites/foundation/case-storage-identity.bash|all|120"
     "systemd|tests/suites/foundation/case-systemd.bash|all|120"
 )
 
