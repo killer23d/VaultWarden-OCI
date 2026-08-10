@@ -17,6 +17,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/pr2-ci-fix.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/suites/data-protection/case-restore-recovery.bash')
+          text = p.read_text()
+          old = 'PROJECT_ROOT="$ROOT"\nmkdir -p "$STATE_DIR"\n\nhistorical_age_key='
+          new = 'PROJECT_ROOT="$ROOT"\nexport RESTORE_RECOVERY_KIT_FILE RECOVERY_KIT_INTEGRITY_HMAC_KEY REQUIRE_AUTHENTICATED_INTEGRITY RESTORE_TYPE EMERGENCY_BACKUP_AGE_IDENTITY_FILE SECRETS_FILE PROJECT_ROOT\nmkdir -p "$STATE_DIR"\n\nhistorical_age_key='
+          if text.count(old) != 1:
+              raise SystemExit(f'fixture export anchor count={text.count(old)}')
+          p.write_text(text.replace(old, new, 1))
+          PY
           DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
           bash -n utilities/backup-run.sh utilities/restore-run.sh \
             tests/suites/data-protection/case-backup.bash \
