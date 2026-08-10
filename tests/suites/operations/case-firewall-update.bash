@@ -82,6 +82,10 @@ cat > "$TMP/bin/ufw" <<'EOF_UFW'
 set -euo pipefail
 printf '%s\n' "$*" >> "${UFW_CALL_LOG:?}"
 
+if [[ "${1:-}" == "reload" ]]; then
+    exit "${UFW_RELOAD_RC:-0}"
+fi
+
 if [[ "${1:-}" == "status" && "${2:-}" == "numbered" ]]; then
     if (( ${UFW_NUMBERED_RC:-0} != 0 )); then
         printf '%s\n' "${UFW_NUMBERED_OUTPUT:-numbered status failed}" >&2
@@ -127,6 +131,7 @@ if [[ "$command_line" == *" allow "* && "$command_line" == *" port 80 "* ]]; the
             printf '80/tcp ALLOW IN %s\n' "$range" >> "$UFW_STATUS_FILE"
         fi
     fi
+    printf 'mutation\n' >> "${UFW_CONFIG_DIR:?}/user.rules"
     printf 'Rule added\n'
     exit 0
 fi
@@ -148,6 +153,7 @@ if [[ "$command_line" == *" allow "* && "$command_line" == *" port 443 "* ]]; th
             printf '443/tcp ALLOW IN %s\n' "$range" >> "$UFW_STATUS_FILE"
         fi
     fi
+    printf 'mutation\n' >> "${UFW_CONFIG_DIR:?}/user.rules"
     printf 'Rule added\n'
     exit 0
 fi
@@ -165,6 +171,7 @@ if [[ "${1:-}" == "--force" && "${2:-}" == "delete" ]]; then
         ' "$UFW_NUMBERED_FILE" > "${UFW_NUMBERED_FILE}.tmp"
         mv "${UFW_NUMBERED_FILE}.tmp" "$UFW_NUMBERED_FILE"
     fi
+    printf 'mutation\n' >> "${UFW_CONFIG_DIR:?}/user.rules"
     printf 'Rule deleted\n'
     exit 0
 fi
@@ -219,6 +226,8 @@ reset_case() {
     FW_CALL_LOG="$CASE_DIR/firewall-calls"
     LOG_FILE="$CASE_DIR/log"
     CASE_OUTPUT="$CASE_DIR/output"
+    UFW_CONFIG_DIR="$CASE_DIR/ufw-config"
+    mkdir -p "$UFW_CONFIG_DIR"
 
     printf '203.0.113.0/24\n' > "$CF_IPV4_FILE"
     : > "$CF_IPV6_FILE"
@@ -226,6 +235,8 @@ reset_case() {
     : > "$UFW_NUMBERED_FILE"
     printf 'Status: active\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n' > "$UFW_VERBOSE_FILE"
     printf 'DEFAULT_INPUT_POLICY="DROP"\n' > "$UFW_DEFAULTS_FILE"
+    printf 'baseline-v4\n' > "$UFW_CONFIG_DIR/user.rules"
+    printf 'baseline-v6\n' > "$UFW_CONFIG_DIR/user6.rules"
     : > "$UFW_CALL_LOG"
     : > "$FW_CALL_LOG"
     : > "$LOG_FILE"
@@ -233,11 +244,11 @@ reset_case() {
     unset UFW_STATUS_RC UFW_STATUS_OUTPUT UFW_NUMBERED_RC UFW_NUMBERED_OUTPUT
     unset UFW_VERBOSE_RC UFW_VERBOSE_OUTPUT
     unset UFW_ALLOW80_RC UFW_ALLOW80_OUTPUT UFW_ALLOW443_RC UFW_ALLOW443_OUTPUT
-    unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE
+    unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE UFW_RELOAD_RC
     unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC SSHD_PORT
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
-    export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_CALL_LOG FW_CALL_LOG LOG_FILE
+    export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_CONFIG_DIR UFW_CALL_LOG FW_CALL_LOG LOG_FILE
 }
 
 run_case() {
@@ -321,22 +332,6 @@ assert_file_contains "$LOG_FILE" 'cannot open /run/ufw.lock: read-only file syst
 reset_case only-port-80
 write_ipv4_status true false
 run_case
-if [[ "$CASE_RC" -ne 0 ]]; then
-    printf '%s\n' '--- only-port-80 output ---' >&2
-    cat "$CASE_OUTPUT" >&2 || true
-    printf '%s\n' '--- only-port-80 log ---' >&2
-    cat "$LOG_FILE" >&2 || true
-    printf '%s\n' '--- only-port-80 status ---' >&2
-    cat "$UFW_STATUS_FILE" >&2 || true
-    printf '%s\n' '--- only-port-80 numbered ---' >&2
-    cat "$UFW_NUMBERED_FILE" >&2 || true
-    printf '%s\n' '--- only-port-80 verbose ---' >&2
-    cat "$UFW_VERBOSE_FILE" >&2 || true
-    printf '%s\n' '--- only-port-80 ufw calls ---' >&2
-    cat "$UFW_CALL_LOG" >&2 || true
-    printf '%s\n' '--- only-port-80 firewall calls ---' >&2
-    cat "$FW_CALL_LOG" >&2 || true
-fi
 [[ "$CASE_RC" -eq 0 ]] || fail "port 80-only convergence failed with $CASE_RC"
 assert_no_call 'port 80 comment'
 assert_call 'port 443 comment CF-IPv4'
@@ -383,6 +378,8 @@ run_case
 [[ "$CASE_RC" -eq 45 ]] || fail "delete failure returned $CASE_RC instead of 45"
 assert_file_contains "$LOG_FILE" 'Failed to delete UFW rule 12'
 assert_file_contains "$LOG_FILE" 'simulated delete failure'
+assert_call 'reload'
+[[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]]     || fail "UFW delete failure left managed rules partially updated"
 
 reset_case descending-delete
 write_ipv4_status true true
@@ -958,12 +955,14 @@ assert_file_contains "$FW_CALL_LOG" 'reconcile 203.0.113.0/24'
 assert_file_contains "$CASE_DIR/state/cf-cidrs.cache" '203.0.113.0/24'
 
 reset_case updater-docker-rollback
-write_ipv4_status true true
+write_ipv4_status true false
 IPT_CALL_LOG="$CASE_DIR/ipt-calls"; : > "$IPT_CALL_LOG"; export IPT_CALL_LOG
 export FW_EXACT_RC=1 FW_RECONCILE_RC=55
 run_case
 [[ "$CASE_RC" -eq 55 ]] || fail "periodic Docker ingress failure returned $CASE_RC instead of 55"
 assert_file_contains "$IPT_CALL_LOG" 'restore'
+assert_call 'reload'
+[[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]]     || fail "Docker ingress failure left UFW managed rules partially updated"
 [[ ! -e "$CASE_DIR/state/cf-cidrs.cache" ]] || fail "failed Docker ingress refresh published a new CIDR cache"
 
 health_unit="$ROOT/systemd/vaultwarden-health.service"
