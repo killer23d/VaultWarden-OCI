@@ -21,22 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           git pull --rebase origin pr4-firewall-exactness
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('tests/suites/operations/case-firewall-update.bash')
-          text = p.read_text()
-          anchor = '''assert_file_contains "$iptables_unit" 'ReadWritePaths=/run/xtables.lock /run/lock /run/vaultwarden-oci /run/vaultwarden-iptables'
-'''
-          extra = '''assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/touch /run/xtables.lock'
-assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/chown root:root /run/xtables.lock'
-assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/chmod 0600 /run/xtables.lock'
-'''
-          if anchor not in text:
-              raise SystemExit('iptables unit sandbox assertion anchor not found')
-          if 'ExecStartPre=+/usr/bin/touch /run/xtables.lock' in text:
-              raise SystemExit('xtables lock assertions already present')
-          p.write_text(text.replace(anchor, anchor + extra, 1))
-          PY
+          python3 -c 'from pathlib import Path; p=Path("tests/suites/operations/case-firewall-update.bash"); t=p.read_text(); a="assert_file_contains \"$iptables_unit\" '\''ReadWritePaths=/run/xtables.lock /run/lock /run/vaultwarden-oci /run/vaultwarden-iptables'\''\n"; e="assert_file_contains \"$iptables_unit\" '\''ExecStartPre=+/usr/bin/touch /run/xtables.lock'\''\nassert_file_contains \"$iptables_unit\" '\''ExecStartPre=+/usr/bin/chown root:root /run/xtables.lock'\''\nassert_file_contains \"$iptables_unit\" '\''ExecStartPre=+/usr/bin/chmod 0600 /run/xtables.lock'\''\n"; assert a in t; assert "ExecStartPre=+/usr/bin/touch /run/xtables.lock" not in t; p.write_text(t.replace(a,a+e,1))'
           bash -n tests/suites/operations/case-firewall-update.bash
           shellcheck -x --severity=warning tests/suites/operations/case-firewall-update.bash
           ./tests/run-tests.sh operations
