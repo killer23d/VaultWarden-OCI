@@ -405,6 +405,7 @@ cat > "$IPT_PROBE" <<'EOF_IPT_PROBE'
 #!/usr/bin/env bash
 set -euo pipefail
 DRY_RUN=false
+FORCE=false
 log_info(){ printf 'INFO: %s\n' "$*" >> "${IPT_LOG_FILE:?}"; }
 log_warn(){ printf 'WARN: %s\n' "$*" >> "${IPT_LOG_FILE:?}"; }
 log_error(){ printf 'ERROR: %s\n' "$*" >> "${IPT_LOG_FILE:?}"; }

@@ -431,9 +431,13 @@ _phase_iptables() {
 
     local rc=0
     _iptables_needs_reconciliation || rc=$?
-    if [[ "$rc" -eq 1 ]]; then
+    if [[ "$rc" -eq 1 && "$FORCE" != "true" ]]; then
         log_info "Docker firewall runtime already requires no VaultWarden remediation; skipping mutation."
         return 0
+    fi
+    if [[ "$rc" -eq 1 ]]; then
+        log_info "Force reconciliation requested; checking known OCI and legacy rules."
+        rc=0
     fi
     if [[ "$rc" -ne 0 ]]; then
         log_error "Could not determine whether firewall remediation is required (iptables exit ${rc})."

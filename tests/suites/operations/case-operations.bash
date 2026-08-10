@@ -1560,8 +1560,8 @@ reject 'script" == "utilities/setup-firewall\.sh"' "$SETUP_SYSTEMD" \
 
 require '^ExecStart=/bin/bash /opt/vaultwarden-scripts/utilities/setup-firewall\.sh --phase iptables --auto$' "$IPTABLES_UNIT" \
   "iptables unit must invoke structured installed setup-firewall path with --auto"
-require '^SuccessExitStatus=0 75$' "$IPTABLES_UNIT" \
-  "iptables unit must treat expected contention as success"
+reject '^SuccessExitStatus=.*75' "$IPTABLES_UNIT" \
+  "iptables unit must not treat operation contention as successful boot reconciliation"
 require '^ReadWritePaths=.*/run/lock' "$IPTABLES_UNIT" \
   "iptables unit must expose operation lock path"
 require '^ReadWritePaths=.*/run/vaultwarden-oci' "$IPTABLES_UNIT" \
