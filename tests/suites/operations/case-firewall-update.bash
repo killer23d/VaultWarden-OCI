@@ -335,6 +335,64 @@ run_case
 [[ "$CASE_RC" -eq 0 ]] || fail "existing IPv6 rules failed with $CASE_RC"
 assert_no_call ' allow '
 
+# Initial setup UFW acceptance checks use the same stateful UFW mock.
+SETUP_UFW_PROBE="$TMP/setup-ufw-probe.bash"
+cat > "$SETUP_UFW_PROBE" <<'EOF_SETUP_UFW'
+#!/usr/bin/env bash
+set -euo pipefail
+DRY_RUN=false
+log_error(){ printf 'ERROR: %s\n' "$*" >> "${LOG_FILE:?}"; }
+log_dry_run(){ :; }
+EOF_SETUP_UFW
+extract_func "$SETUP_FIREWALL" _ufw_status >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_has_range_port >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_line_cidr >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_collect_conflicts >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_delete_rules >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_ensure_range >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_verify_exact >> "$SETUP_UFW_PROBE"
+cat >> "$SETUP_UFW_PROBE" <<'EOF_SETUP_UFW'
+case "${SETUP_UFW_CASE:?}" in
+    verify)
+        _ufw_verify_exact 22 203.0.113.0/24
+        ;;
+    ensure)
+        _ufw_ensure_range 203.0.113.0/24 CF-IPv4
+        ;;
+    *) exit 2 ;;
+esac
+EOF_SETUP_UFW
+chmod 0755 "$SETUP_UFW_PROBE"
+
+reset_case setup-public-readiness
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+Status: active
+22/tcp ALLOW IN Anywhere
+80/tcp ALLOW IN 203.0.113.0/24
+443/tcp ALLOW IN 203.0.113.0/24
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 1] 22/tcp ALLOW IN Anywhere
+[ 2] 80/tcp ALLOW IN 203.0.113.0/24
+[ 3] 443/tcp ALLOW IN 203.0.113.0/24
+[ 4] 80/tcp ALLOW IN Anywhere
+EOF_RULES
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted broad public port 80 ingress"
+assert_file_contains "$LOG_FILE" 'Conflicting public or stale managed UFW 80/443 rules remain'
+
+reset_case setup-single-cidr-failure
+export UFW_ALLOW80_RC=46 UFW_ALLOW80_OUTPUT='simulated initial setup CIDR failure'
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=ensure "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -eq 46 ]] || fail "initial UFW CIDR mutation returned $SETUP_UFW_RC instead of 46"
+assert_file_contains "$LOG_FILE" 'simulated initial setup CIDR failure'
+
 # PR4 iptables acceptance checks: Docker owns normal forwarding/NAT; this
 # project only removes OCI/legacy exceptions after a successful rollback snapshot.
 ! grep -Eq 'iptables .*-[AI][[:space:]]+DOCKER-USER.*-j[[:space:]]+ACCEPT' "$SETUP_FIREWALL" \
