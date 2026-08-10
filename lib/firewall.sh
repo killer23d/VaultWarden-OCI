@@ -9,6 +9,7 @@
 [[ -n "${VW_FIREWALL_LIB_LOADED:-}" ]] && return 0
 readonly VW_FIREWALL_LIB_LOADED=1
 readonly VW_CF_DOCKER_CHAIN="VW-CF-INGRESS"
+readonly VW_CADDY_EXTERNAL_CIDR="172.22.0.0/28"
 
 _firewall_find_running_dockerd_pid() {
     local proc_root="${DOCKER_PROC_ROOT:-/proc}" proc_dir comm pid="" count=0
@@ -219,13 +220,13 @@ firewall_docker_ingress_is_exact() {
     for cidr in "${cidrs[@]}"; do
         for port in 80 443; do
             iptables -t filter -C "$VW_CF_DOCKER_CHAIN" \
-                -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN \
+                -d "$VW_CADDY_EXTERNAL_CIDR" -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN \
                 >/dev/null 2>&1 || return 1
         done
     done
     for port in 80 443; do
         iptables -t filter -C "$VW_CF_DOCKER_CHAIN" \
-            -p tcp -m conntrack --ctorigdstport "$port" -j DROP \
+            -d "$VW_CADDY_EXTERNAL_CIDR" -p tcp -m conntrack --ctorigdstport "$port" -j DROP \
             >/dev/null 2>&1 || return 1
     done
     return 0
@@ -262,13 +263,14 @@ firewall_reconcile_cloudflare_docker_ingress() {
         }
     fi
 
-    # Put fail-closed sentinels at the front before replacing any existing
+    # Put fail-closed, project-scoped sentinels at the front before replacing
+    # any existing managed rules. Unrelated Docker destinations fall through.
     # managed rules. A failed refresh may temporarily block web traffic, but it
     # cannot leave the origin publicly exposed.
     iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
-        -p tcp -m conntrack --ctorigdstport 443 -j DROP || return $?
+        -d "$VW_CADDY_EXTERNAL_CIDR" -p tcp -m conntrack --ctorigdstport 443 -j DROP || return $?
     iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
-        -p tcp -m conntrack --ctorigdstport 80 -j DROP || return $?
+        -d "$VW_CADDY_EXTERNAL_CIDR" -p tcp -m conntrack --ctorigdstport 80 -j DROP || return $?
 
     local count
     count="$(_firewall_chain_rule_count "$VW_CF_DOCKER_CHAIN")"
@@ -287,7 +289,7 @@ firewall_reconcile_cloudflare_docker_ingress() {
     for cidr in "${cidrs[@]}"; do
         for port in 80 443; do
             iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
-                -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN \
+                -d "$VW_CADDY_EXTERNAL_CIDR" -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN \
                 || return $?
         done
     done
@@ -304,5 +306,5 @@ firewall_reconcile_cloudflare_docker_ingress() {
         log_error "Docker Cloudflare ingress gate failed final exact-state verification."
         return 1
     fi
-    log_success "Docker-published TCP 80/443 restricted to current Cloudflare IPv4 ranges without ACCEPT shortcuts"
+    log_success "Project Caddy TCP 80/443 restricted to current Cloudflare IPv4 ranges without ACCEPT shortcuts"
 }

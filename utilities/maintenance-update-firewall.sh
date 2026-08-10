@@ -205,9 +205,9 @@ update_firewall_ranges() {
         if grep -Eq '^Status:[[:space:]]+inactive' <<< "$verbose_status" && [[ -r "$defaults_file" ]]; then
             policy="$(awk -F= '
                 $1 ~ /^[[:space:]]*DEFAULT_INPUT_POLICY[[:space:]]*$/ {
-                    gsub(/[[:space:]\"'\''
-]/, "", $2)
-                    print toupper($2)
+                    value=$2
+                    gsub(/^[[:space:]\"]+|[[:space:]\"]+$/, "", value)
+                    print toupper(value)
                     exit
                 }
             ' "$defaults_file")"

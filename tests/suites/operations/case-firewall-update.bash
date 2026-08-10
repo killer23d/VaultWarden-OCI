@@ -611,6 +611,7 @@ assert_file_contains "$LOG_FILE" 'SSH port 443/tcp conflicts with managed Cloudf
 ! grep -Eq 'apt(-get)? .*install.*iptables-persistent|apt(-get)? .*install.*netfilter-persistent' "$SETUP_FIREWALL" \
     || fail "runtime firewall reconciliation installs persistence packages"
 assert_file_contains "$FIREWALL_LIB" 'VW_CF_DOCKER_CHAIN="VW-CF-INGRESS"'
+assert_file_contains "$FIREWALL_LIB" 'VW_CADDY_EXTERNAL_CIDR="172.22.0.0/28"'
 assert_file_contains "$FIREWALL_LIB" '--ctorigdstport'
 assert_file_contains "$FIREWALL_LIB" '-j RETURN'
 assert_file_contains "$FIREWALL_LIB" '-j DROP'
@@ -621,6 +622,7 @@ assert_file_contains "$UPDATER" 'firewall_reconcile_cloudflare_docker_ingress "$
 compose_file="$ROOT/docker-compose.yml.example"
 assert_file_contains "$compose_file" '"0.0.0.0:80:80"'
 assert_file_contains "$compose_file" '"0.0.0.0:443:443"'
+assert_file_contains "$compose_file" 'subnet: 172.22.0.0/28'
 for cidr in 172.21.0.0/28 172.22.0.0/28 172.23.0.0/28; do
     assert_file_contains "$compose_file" "subnet: $cidr"
 done
@@ -879,11 +881,15 @@ mutation_line="$(grep -nE 'iptables -t filter -(N|I|D) ' "$IPT_CALL_LOG" | cut -
     || fail "Docker ingress mutation occurred before rollback snapshot"
 [[ "$(head -n1 "$IPT_DU_FILE")" == '-A DOCKER-USER -j VW-CF-INGRESS' ]] \
     || fail "Cloudflare gate is not the first DOCKER-USER rule"
-assert_file_contains "$IPT_CF_FILE" '-s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport 80 -j RETURN'
-assert_file_contains "$IPT_CF_FILE" '-s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport 443 -j RETURN'
-assert_file_contains "$IPT_CF_FILE" '-p tcp -m conntrack --ctorigdstport 80 -j DROP'
-assert_file_contains "$IPT_CF_FILE" '-p tcp -m conntrack --ctorigdstport 443 -j DROP'
+assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport 80 -j RETURN'
+assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport 443 -j RETURN'
+assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 80 -j DROP'
+assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP'
 ! grep -Fq -- '-j ACCEPT' "$IPT_CF_FILE" || fail "Cloudflare gate bypasses Docker isolation with ACCEPT"
+while IFS= read -r managed_rule; do
+    [[ "$managed_rule" == *'--ctorigdstport '* ]] || continue
+    [[ "$managed_rule" == *'-d 172.22.0.0/28 '* ]]         || fail "managed Docker web rule is not scoped to caddy_external: $managed_rule"
+done < "$IPT_CF_FILE"
 
 : > "$IPT_CALL_LOG"
 run_iptables_probe
@@ -909,7 +915,7 @@ run_iptables_probe
 ! grep -Eq 'iptables -t filter -(N|I|D) ' "$IPT_CALL_LOG" || fail "iptables mutated after snapshot failure"
 
 run_iptables_case mutation-failure
-export IPT_FAIL_MATCH='VW-CF-INGRESS 1 -p tcp -m conntrack --ctorigdstport 443 -j DROP'
+export IPT_FAIL_MATCH='VW-CF-INGRESS 1 -d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP'
 export IPT_MUTATE_RC=49
 run_iptables_probe
 [[ "$IPT_RC" -eq 49 ]] || fail "Docker gate mutation failure returned $IPT_RC instead of 49"
