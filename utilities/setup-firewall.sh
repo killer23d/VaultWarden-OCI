@@ -462,14 +462,24 @@ _phase_iptables() {
 
     _restore_snapshot() {
         local restore_rc=0
+        [[ -n "${backup_v4:-}" && -f "$backup_v4" ]] || return 0
         log_rollback "Restoring iptables rules from rollback snapshot"
         iptables-restore < "$backup_v4" || restore_rc=$?
         rm -f "$backup_v4"
+        backup_v4=""
         if (( restore_rc != 0 )); then
             log_error "CRITICAL: iptables rollback restore failed (exit ${restore_rc})"
         fi
     }
 
+    _iptables_signal_rollback() {
+        local signal_rc="$1"
+        _restore_snapshot
+        exit "$signal_rc"
+    }
+    trap '_iptables_signal_rollback 130' INT
+    trap '_iptables_signal_rollback 129' HUP
+    trap '_iptables_signal_rollback 143' TERM
     if _iptables_delete_all_exact filter FORWARD "OCI default FORWARD REJECT rule" \
         -j REJECT --reject-with icmp-host-prohibited; then
         :
@@ -500,6 +510,10 @@ _phase_iptables() {
     done
 
     rm -f "$backup_v4"
+    backup_v4=""
+    trap 'operation_release 130; exit 130' INT
+    trap 'operation_release 129; exit 129' HUP
+    trap 'operation_release 143; exit 143' TERM
     log_success "Docker firewall runtime reconciled without project forwarding exceptions"
 }
 
