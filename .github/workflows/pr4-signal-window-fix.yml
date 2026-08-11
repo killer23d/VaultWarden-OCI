@@ -1,0 +1,43 @@
+name: PR4 post-iptables signal safety
+
+on:
+  push:
+    branches:
+      - pr4-firewall-exactness
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ !contains(github.event.head_commit.message, '[skip pr4-signal-window]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Apply signal safety fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --rebase origin pr4-firewall-exactness
+          python3 .pr4-signal-window-fix.py
+      - name: Validate signal safety fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n utilities/setup-firewall.sh tests/suites/operations/case-firewall-update.bash
+          shellcheck -x --severity=warning utilities/setup-firewall.sh tests/suites/operations/case-firewall-update.bash
+          bash tests/suites/operations/case-firewall-update.bash
+          ./tests/run-tests.sh operations
+          git diff --check
+      - name: Commit validated signal safety fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add utilities/setup-firewall.sh tests/suites/operations/case-firewall-update.bash
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'firewall: keep signals fail-closed through runtime normalization [skip pr4-signal-window]'
+          git push origin HEAD:pr4-firewall-exactness
