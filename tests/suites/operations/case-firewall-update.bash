@@ -1372,6 +1372,13 @@ run_iptables_probe() {
 run_iptables_case initial-gate
 run_iptables_probe
 [[ "$IPT_RC" -eq 0 ]] || fail "initial Docker Cloudflare gate reconciliation returned $IPT_RC"
+sentinel80_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 80 -j DROP' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+sentinel443_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+jump_line="$(grep -n 'iptables -t filter -I DOCKER-USER 1 -j VW-CF-INGRESS' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+allow_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 2 -d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+[[ -n "$sentinel80_line" && -n "$sentinel443_line" && -n "$established_line" && -n "$jump_line" && -n "$allow_line" ]]     || fail "initial Docker gate mutation-order probe missed sentinel/established/jump/allow calls"
+[[ "$sentinel80_line" -lt "$established_line" && "$sentinel443_line" -lt "$established_line" && "$established_line" -lt "$jump_line" && "$jump_line" -lt "$allow_line" ]]     || fail "initial Docker gate did not preserve established replies and attach fail-closed before Cloudflare RETURN rules"
 save_line="$(grep -n '^save$' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 mutation_line="$(grep -nE 'iptables -t filter -(N|I|D) ' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 [[ -n "$save_line" && -n "$mutation_line" && "$save_line" -lt "$mutation_line" ]] \
@@ -1385,6 +1392,17 @@ assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -m conntrack --ctstate EST
     || fail "established/related Caddy return traffic is not ahead of ingress DROP rules"
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 80 -j DROP'
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP'
+
+run_iptables_case orphan-stale-chain
+printf '%s
+' '-A VW-CF-INGRESS -j ACCEPT' > "$IPT_CF_FILE"
+run_iptables_probe
+[[ "$IPT_RC" -eq 0 ]] || fail "orphan stale Docker gate reconciliation returned $IPT_RC"
+stale_delete_line="$(grep -n 'iptables -t filter -D VW-CF-INGRESS 3' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+jump_line="$(grep -n 'iptables -t filter -I DOCKER-USER 1 -j VW-CF-INGRESS' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+[[ -n "$stale_delete_line" && -n "$established_line" && -n "$jump_line" && "$stale_delete_line" -lt "$established_line" && "$established_line" -lt "$jump_line" ]]     || fail "orphan stale project-chain rules were activated before cleanup"
+! grep -Fq -- '-A VW-CF-INGRESS -j ACCEPT' "$IPT_CF_FILE" || fail "orphan stale ACCEPT survived reconciliation"
 ! grep -Fq -- '-j ACCEPT' "$IPT_CF_FILE" || fail "Cloudflare gate bypasses Docker isolation with ACCEPT"
 while IFS= read -r managed_rule; do
     [[ "$managed_rule" == *'--ctorigdstport '* ]] || continue

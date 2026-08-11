@@ -396,31 +396,31 @@ firewall_reconcile_cloudflare_docker_ingress() {
         return 1
     }
 
-    local cidr port
-    # RETURN, never ACCEPT: permitted Cloudflare packets continue through
-    # Docker's own forwarding/isolation rules instead of bypassing them.
-    for cidr in "${cidrs[@]}"; do
-        for port in 80 443; do
-            iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
-                -d "$VW_CADDY_EXTERNAL_CIDR" -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN \
-                || return $?
-        done
-    done
+    # Preserve replies to Caddy-initiated connections before attaching the new
+    # fail-closed gate. NEW non-Cloudflare web traffic still falls through this
+    # rule into the two DROP sentinels.
+    iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1         -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN         || return $?
 
-    # This must remain ahead of the source DROP rules: Caddy-initiated HTTP,
-    # HTTPS, DNS, and related reply traffic is not new public ingress. RETURN
-    # keeps Docker authoritative for the eventual forwarding decision.
-    iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
-        -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \
-        || return $?
-
-    # Install a new first-rule jump before deleting older duplicate jumps, so
-    # an existing gate is never removed before its replacement is active.
+    # The chain now contains only known-safe project rules: established replies
+    # plus the two web DROP sentinels. Attach it before adding Cloudflare RETURNs
+    # so first-time migration is fail-closed without activating orphaned stale
+    # rules for unrelated Docker traffic.
     iptables -t filter -I DOCKER-USER 1 -j "$VW_CF_DOCKER_CHAIN" || return $?
     _firewall_delete_duplicate_parent_jumps || {
         log_error "Could not normalize the DOCKER-USER jump to ${VW_CF_DOCKER_CHAIN}."
         return 1
     }
+
+    local cidr port
+    # RETURN, never ACCEPT: permitted Cloudflare packets continue through
+    # Docker's own forwarding/isolation rules instead of bypassing them.
+    for cidr in "${cidrs[@]}"; do
+        for port in 80 443; do
+            iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 2 \
+                -d "$VW_CADDY_EXTERNAL_CIDR" -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN \
+                || return $?
+        done
+    done
 
     if ! firewall_docker_ingress_is_exact "${cidrs[@]}"; then
         log_error "Docker Cloudflare ingress gate failed final exact-state verification."
