@@ -22,6 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           git pull --rebase origin pr4-firewall-exactness
+          python3 .pr4-pass1-helper-fix.py
           python3 .pr4-pass1-batch.py
       - name: Validate pass1 batch
         shell: bash
