@@ -768,7 +768,11 @@ assert_file_contains "$FIREWALL_LIB" '--ctorigdstport'
 assert_file_contains "$FIREWALL_LIB" '-j RETURN'
 assert_file_contains "$FIREWALL_LIB" '-j DROP'
 assert_file_contains "$FIREWALL_LIB" 'firewall_fail_closed_stop_caddy()'
+assert_file_contains "$FIREWALL_LIB" 'firewall_normalize_caddy_runtime_contract()'
 assert_file_contains "$SETUP_FIREWALL" 'firewall_fail_closed_stop_caddy || stop_rc=$?'
+assert_file_contains "$SETUP_FIREWALL" 'firewall_normalize_caddy_runtime_contract || rc=$?'
+assert_file_contains "$SETUP_FIREWALL" '_setup_firewall_signal_fail_closed 130'
+assert_file_contains "$SETUP_FIREWALL" 'firewall_fail_closed_stop_caddy || log_error "CRITICAL: signal rollback'
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 130' INT"
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 143' TERM"
 assert_file_contains "$UPDATER" 'firewall_reconcile_cloudflare_docker_ingress "${current_ipv4_cidrs[@]}"'
@@ -982,6 +986,68 @@ export FAIL_CLOSED_INSPECT_RC=1 FAIL_CLOSED_EXISTS=false
 "$BASH" "$FAIL_CLOSED_PROBE"
 ! grep -Fq 'stop --time' "$FAIL_CLOSED_DOCKER_LOG" || fail "missing Caddy container triggered an unnecessary stop"
 unset FAIL_CLOSED_INSPECT_RC FAIL_CLOSED_EXISTS
+
+RUNTIME_DOCKER="$TMP/runtime-contract-docker"
+cat > "$RUNTIME_DOCKER" <<'EOF_RUNTIME_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${RUNTIME_DOCKER_LOG:?}"
+case "${1:-}" in
+    ps)
+        printf 'vaultwarden_caddy\n'
+        exit 0
+        ;;
+    inspect)
+        if [[ "$*" == *'RestartPolicy.Name'* ]]; then
+            printf '%s\n' "${RUNTIME_POLICY:-unless-stopped}"
+        elif [[ "$*" == *'PortBindings'* ]]; then
+            printf '%s\n' "${RUNTIME_BINDINGS:?}"
+        else
+            exit 2
+        fi
+        exit 0
+        ;;
+    update|stop|rm)
+        exit 0
+        ;;
+esac
+exit 2
+EOF_RUNTIME_DOCKER
+chmod 0755 "$RUNTIME_DOCKER"
+RUNTIME_PROBE="$TMP/runtime-contract-probe.bash"
+cat > "$RUNTIME_PROBE" <<'EOF_RUNTIME_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+DRY_RUN=false
+log_info(){ printf 'INFO: %s\n' "$*" >> "${RUNTIME_LOG:?}"; }
+log_warn(){ printf 'WARN: %s\n' "$*" >> "${RUNTIME_LOG:?}"; }
+log_error(){ printf 'ERROR: %s\n' "$*" >> "${RUNTIME_LOG:?}"; }
+docker(){ "${RUNTIME_DOCKER:?}" "$@"; }
+EOF_RUNTIME_PROBE
+extract_func "$FIREWALL_LIB" firewall_normalize_caddy_runtime_contract >> "$RUNTIME_PROBE"
+cat >> "$RUNTIME_PROBE" <<'EOF_RUNTIME_PROBE'
+firewall_normalize_caddy_runtime_contract
+EOF_RUNTIME_PROBE
+chmod 0755 "$RUNTIME_PROBE"
+RUNTIME_DOCKER_LOG="$TMP/runtime-contract-docker.log"
+RUNTIME_LOG="$TMP/runtime-contract.log"
+export RUNTIME_DOCKER RUNTIME_DOCKER_LOG RUNTIME_LOG
+
+: > "$RUNTIME_DOCKER_LOG"; : > "$RUNTIME_LOG"
+export RUNTIME_BINDINGS='{"80/tcp":[{"HostIp":"0.0.0.0","HostPort":"80"}],"443/tcp":[{"HostIp":"0.0.0.0","HostPort":"443"}]}'
+export RUNTIME_POLICY=unless-stopped
+"$BASH" "$RUNTIME_PROBE"
+assert_file_contains "$RUNTIME_DOCKER_LOG" 'update --restart on-failure vaultwarden_caddy'
+! grep -Fq 'rm -f vaultwarden_caddy' "$RUNTIME_DOCKER_LOG" || fail "safe IPv4 Caddy binding was unnecessarily removed"
+
+: > "$RUNTIME_DOCKER_LOG"; : > "$RUNTIME_LOG"
+export RUNTIME_BINDINGS='{"80/tcp":[{"HostIp":"","HostPort":"80"}],"443/tcp":[{"HostIp":"0.0.0.0","HostPort":"443"}]}'
+export RUNTIME_POLICY=unless-stopped
+"$BASH" "$RUNTIME_PROBE"
+assert_file_contains "$RUNTIME_DOCKER_LOG" 'stop --time 30 vaultwarden_caddy'
+assert_file_contains "$RUNTIME_DOCKER_LOG" 'rm -f vaultwarden_caddy'
+assert_file_contains "$RUNTIME_LOG" 'legacy/non-IPv4-only published web bindings'
+unset RUNTIME_BINDINGS RUNTIME_POLICY
 
 # Behavioral backend detection: active dockerd argv/config wins over stale chain existence.
 PRE_PROBE="$TMP/docker-preflight-probe.bash"

@@ -567,6 +567,7 @@ _phase_iptables() {
     _iptables_signal_rollback() {
         local signal_rc="$1"
         _restore_snapshot
+        firewall_fail_closed_stop_caddy || log_error "CRITICAL: signal rollback could not confirm fail-closed Caddy shutdown."
         exit "$signal_rc"
     }
     trap '_iptables_signal_rollback 130' INT
@@ -624,6 +625,13 @@ _phase_iptables() {
     log_success "Docker firewall runtime reconciled with Cloudflare-only published web ingress and no ACCEPT isolation shortcuts"
 }
 
+_setup_firewall_signal_fail_closed() {
+    local signal_rc="$1"
+    firewall_fail_closed_stop_caddy || log_error "CRITICAL: interrupted firewall setup could not confirm fail-closed Caddy shutdown."
+    operation_release "$signal_rc"
+    exit "$signal_rc"
+}
+
 main() {
     require_root "${ORIGINAL_ARGS[@]}"
     if [[ "$DRY_RUN" != "true" ]]; then
@@ -638,8 +646,8 @@ main() {
             return "$exit_rc"
         }
         trap _setup_firewall_cleanup EXIT
-        trap 'operation_release 130; exit 130' INT
-        trap 'operation_release 143; exit 143' HUP TERM
+        trap '_setup_firewall_signal_fail_closed 130' INT
+        trap '_setup_firewall_signal_fail_closed 143' HUP TERM
         operation_set_phase "firewall" "Firewall setup"
     fi
 
@@ -658,6 +666,10 @@ main() {
             fi
             ;;
     esac
+
+    if (( rc == 0 )) && [[ "$DRY_RUN" != "true" ]] && [[ "$PHASE" != "ufw" ]]; then
+        firewall_normalize_caddy_runtime_contract || rc=$?
+    fi
 
     if (( rc != 0 )) && [[ "$DRY_RUN" != "true" ]]; then
         firewall_fail_closed_stop_caddy || stop_rc=$?

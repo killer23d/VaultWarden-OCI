@@ -183,6 +183,71 @@ firewall_fail_closed_stop_caddy() {
     return 0
 }
 
+firewall_normalize_caddy_runtime_contract() {
+    local container="${VW_CADDY_CONTAINER_NAME:-vaultwarden_caddy}"
+    local listed="" policy="" bindings="" binding_ok=false
+    [[ "${DRY_RUN:-false}" != "true" ]] || return 0
+
+    command -v docker >/dev/null 2>&1 || {
+        log_error "Docker is unavailable; cannot verify the existing Caddy runtime contract."
+        return 1
+    }
+    listed="$(docker ps -a --filter "name=^/${container}$" --format '{{.Names}}' 2>/dev/null)" || {
+        log_error "Docker could not query the existing Caddy container."
+        return 1
+    }
+    [[ "$listed" == "$container" ]] || return 0
+
+    policy="$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null)" || {
+        log_error "Could not inspect ${container} restart policy."
+        return 1
+    }
+    bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$container" 2>/dev/null)" || {
+        log_error "Could not inspect ${container} published-port bindings."
+        return 1
+    }
+
+    if python3 - "$bindings" <<'PY'
+import json
+import sys
+try:
+    bindings = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+for port in ("80/tcp", "443/tcp"):
+    entries = bindings.get(port)
+    if not isinstance(entries, list) or len(entries) != 1:
+        raise SystemExit(1)
+    entry = entries[0]
+    if entry.get("HostIp") != "0.0.0.0" or entry.get("HostPort") != port.split("/", 1)[0]:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+    then
+        binding_ok=true
+    fi
+
+    if [[ "$binding_ok" != "true" ]]; then
+        log_warn "Existing ${container} has legacy/non-IPv4-only published web bindings; removing the ephemeral container after firewall reconciliation."
+        log_warn "Run the normal startup workflow to recreate Caddy from the current Compose contract."
+        docker stop --time 30 "$container" >/dev/null 2>&1 || true
+        if ! docker rm -f "$container" >/dev/null; then
+            log_error "Could not remove unsafe legacy ${container} runtime."
+            return 1
+        fi
+        return 0
+    fi
+
+    if [[ "$policy" != "on-failure" ]]; then
+        log_info "Updating ${container} restart policy to on-failure for Docker lifecycle safety."
+        if ! docker update --restart on-failure "$container" >/dev/null; then
+            log_error "Could not update ${container} restart policy."
+            return 1
+        fi
+    fi
+    return 0
+}
+
 firewall_load_cached_cloudflare_ipv4() {
     local out_name="$1"
     local -n out_ref="$out_name"
