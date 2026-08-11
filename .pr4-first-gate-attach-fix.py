@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 def replace_once(path, old, new, label):
@@ -9,9 +10,9 @@ def replace_once(path, old, new, label):
     p.write_text(text.replace(old, new, 1))
 
 
-replace_once(
-    'lib/firewall.sh',
-    '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
+p = Path('lib/firewall.sh')
+t = p.read_text()
+old = '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
         iptables -t filter -D "$VW_CF_DOCKER_CHAIN" 3 || return $?
         count=$((count - 1))
     done
@@ -21,8 +22,8 @@ replace_once(
     }
 
     local cidr port
-''',
-    '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
+'''
+new = '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
         iptables -t filter -D "$VW_CF_DOCKER_CHAIN" 3 || return $?
         count=$((count - 1))
     done
@@ -49,30 +50,22 @@ replace_once(
     }
 
     local cidr port
-''',
-    'safe parent attachment after stale cleanup',
+'''
+if old not in t:
+    raise SystemExit('safe parent attachment anchor missing in lib/firewall.sh')
+t = t.replace(old, new, 1)
+pattern = re.compile(
+    r'    # This must remain ahead of the source DROP rules:.*?'
+    r'    _firewall_delete_duplicate_parent_jumps \|\| \{\n'
+    r'        log_error "Could not normalize the DOCKER-USER jump to \$\{VW_CF_DOCKER_CHAIN\}\."\n'
+    r'        return 1\n'
+    r'    \}\n\n',
+    re.S,
 )
-replace_once(
-    'lib/firewall.sh',
-    '''    # This must remain ahead of the source DROP rules: Caddy-initiated HTTP,
-    # HTTPS, DNS, and related reply traffic is not new public ingress. RETURN
-    # keeps Docker authoritative for the eventual forwarding decision.
-    iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
-        -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \
-        || return $?
-
-    # Install a new first-rule jump before deleting older duplicate jumps, so
-    # an existing gate is never removed before its replacement is active.
-    iptables -t filter -I DOCKER-USER 1 -j "$VW_CF_DOCKER_CHAIN" || return $?
-    _firewall_delete_duplicate_parent_jumps || {
-        log_error "Could not normalize the DOCKER-USER jump to ${VW_CF_DOCKER_CHAIN}."
-        return 1
-    }
-
-''',
-    '',
-    'late established/jump block removal',
-)
+t, count = pattern.subn('', t, count=1)
+if count != 1:
+    raise SystemExit(f'late established/jump regex matched {count} blocks')
+p.write_text(t)
 
 p = Path('tests/suites/operations/case-firewall-update.bash')
 t = p.read_text()
