@@ -1,0 +1,59 @@
+name: PR5 follow-up patch
+
+on:
+  push:
+    branches:
+      - agent/recovery-kit-schema-truth
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: agent/recovery-kit-schema-truth
+          fetch-depth: 0
+
+      - name: Align recovery exporter messages
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('utilities/secrets-export-recovery-kit.sh')
+          text = path.read_text()
+          changes = [
+              ('    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, and\n    publishes a protected plaintext recovery document in the\n',
+               '    Decrypts secrets.yaml, validates required and conditionally required\n    secrets against the authoritative schema, and publishes a protected\n    plaintext recovery document in the\n'),
+              ('# Decrypt first and block export when placeholder values remain.\n',
+               '# Decrypt first and enforce the authoritative recovery schema contract.\n'),
+              ('    log_success "No placeholder values detected — proceeding with export"\n',
+               '    log_success "Required recovery secrets validated — proceeding with export"\n'),
+          ]
+          for old, new in changes:
+              if text.count(old) != 1:
+                  raise SystemExit(f'expected exactly one message match: {old!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
+      - name: Validate follow-up
+        shell: bash
+        run: |
+          git diff --check
+          bash -n utilities/secrets-export-recovery-kit.sh
+          shellcheck -x --severity=warning utilities/secrets-export-recovery-kit.sh
+          VW_TEST_CASE_MODE=recovery-kit tests/suites/security/case-secrets.bash
+
+      - name: Commit validated follow-up
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add utilities/secrets-export-recovery-kit.sh
+          git diff --cached --check
+          git commit -m 'docs: align recovery export schema messaging'
+          git push origin HEAD:agent/recovery-kit-schema-truth
