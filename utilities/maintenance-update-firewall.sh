@@ -190,6 +190,8 @@ update_firewall_ranges() {
     }
 
     _ufw_validate_safety() {
+        declare -F firewall_ufw_status >/dev/null || \
+            source "${VW_TEST_REPO_ROOT:-${PROJECT_ROOT:?}}/lib/firewall-ufw.sh"
         local verbose_status numbered_status
         verbose_status="$(firewall_ufw_status verbose)" || return $?
         if ! grep -q '^Status: active' <<< "$verbose_status"; then
