@@ -304,7 +304,7 @@ update_firewall_ranges() {
         fi
     done
 
-    local backup_v4="" mutation_rc=0
+    local backup_v4="" mutation_rc=0 cache_tmp="" cache_commit_started=false
 
     _update_firewall_restore_ufw() {
         local restore_rc=0 file
@@ -344,8 +344,10 @@ update_firewall_ranges() {
 
     _update_firewall_rollback_all() {
         local rollback_rc=0
-        _update_firewall_restore_iptables || rollback_rc=$?
+        # UFW reload rewrites netfilter state, so restore its managed files first
+        # and make the full iptables snapshot the final firewall write.
         _update_firewall_restore_ufw || rollback_rc=$?
+        _update_firewall_restore_iptables || rollback_rc=$?
         return "$rollback_rc"
     }
 
@@ -358,7 +360,13 @@ update_firewall_ranges() {
 
     _update_firewall_signal_rollback() {
         local signal_rc="$1"
-        _update_firewall_rollback_all || true
+        # The atomic cache rename is the transaction commit point. Bash defers
+        # traps until a foreground command returns, so a signal delivered while
+        # mv succeeds sees the temp path gone and must not roll back the already
+        # committed firewall generation.
+        if [[ "$cache_commit_started" != "true" || -z "$cache_tmp" || -e "$cache_tmp" ]]; then
+            _update_firewall_rollback_all || true
+        fi
         operation_release "$signal_rc"
         perform_cleanup
         exit "$signal_rc"
@@ -458,7 +466,7 @@ update_firewall_ranges() {
     # Publish the new CIDR generation atomically only after both firewall
     # layers verify. Keep rollback snapshots until the cache commit succeeds.
     local cf_cidr_cache="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache"
-    local cache_dir cache_tmp=""
+    local cache_dir
     cache_dir="$(dirname "$cf_cidr_cache")"
     mkdir -p "$cache_dir" || {
         log_error "Could not create Cloudflare CIDR cache directory: ${cache_dir}"
@@ -476,8 +484,16 @@ update_firewall_ranges() {
         _update_firewall_fail 1
         return $?
     fi
-    if ! chmod 640 "$cache_tmp" || ! mv -f -- "$cache_tmp" "$cf_cidr_cache"; then
+    if ! chmod 640 "$cache_tmp"; then
+        log_error "Could not set Cloudflare CIDR cache permissions."
+        rm -f "$cache_tmp"
+        _update_firewall_fail 1
+        return $?
+    fi
+    cache_commit_started=true
+    if ! mv -f -- "$cache_tmp" "$cf_cidr_cache"; then
         log_error "Could not publish Cloudflare CIDR cache update."
+        cache_commit_started=false
         rm -f "$cache_tmp"
         _update_firewall_fail 1
         return $?

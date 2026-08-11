@@ -83,6 +83,7 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${UFW_CALL_LOG:?}"
 
 if [[ "${1:-}" == "reload" ]]; then
+    printf 'ufw-reload\n' >> "${TXN_CALL_LOG:?}"
     exit "${UFW_RELOAD_RC:-0}"
 fi
 
@@ -224,6 +225,7 @@ reset_case() {
     UFW_DEFAULTS_FILE="$CASE_DIR/ufw-defaults"
     UFW_CALL_LOG="$CASE_DIR/ufw-calls"
     FW_CALL_LOG="$CASE_DIR/firewall-calls"
+    TXN_CALL_LOG="$CASE_DIR/transaction-calls"
     LOG_FILE="$CASE_DIR/log"
     CASE_OUTPUT="$CASE_DIR/output"
     UFW_CONFIG_DIR="$CASE_DIR/ufw-config"
@@ -239,6 +241,7 @@ reset_case() {
     printf 'baseline-v6\n' > "$UFW_CONFIG_DIR/user6.rules"
     : > "$UFW_CALL_LOG"
     : > "$FW_CALL_LOG"
+    : > "$TXN_CALL_LOG"
     : > "$LOG_FILE"
 
     unset UFW_STATUS_RC UFW_STATUS_OUTPUT UFW_NUMBERED_RC UFW_NUMBERED_OUTPUT
@@ -248,7 +251,7 @@ reset_case() {
     unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC SSHD_PORT
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
-    export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_CONFIG_DIR UFW_CALL_LOG FW_CALL_LOG LOG_FILE
+    export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_CONFIG_DIR UFW_CALL_LOG FW_CALL_LOG TXN_CALL_LOG LOG_FILE
 }
 
 run_case() {
@@ -641,6 +644,8 @@ assert_file_contains "$FIREWALL_LIB" '-j DROP'
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 130' INT"
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 143' TERM"
 assert_file_contains "$UPDATER" 'firewall_reconcile_cloudflare_docker_ingress "${current_ipv4_cidrs[@]}"'
+assert_file_contains "$UPDATER" 'cache_commit_started=true'
+assert_file_contains "$UPDATER" 'cache_commit_started" != "true"'
 
 compose_file="$ROOT/docker-compose.yml.example"
 assert_file_contains "$compose_file" '"0.0.0.0:80:80"'
@@ -781,6 +786,7 @@ cat > "$TMP/bin/iptables-restore" <<'EOF_IPTABLES_RESTORE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'restore\n' >> "${IPT_CALL_LOG:?}"
+printf 'iptables-restore\n' >> "${TXN_CALL_LOG:-/dev/null}"
 cat >/dev/null
 exit "${IPT_RESTORE_RC:-0}"
 EOF_IPTABLES_RESTORE
@@ -966,6 +972,10 @@ run_case
 [[ "$CASE_RC" -eq 55 ]] || fail "periodic Docker ingress failure returned $CASE_RC instead of 55"
 assert_file_contains "$IPT_CALL_LOG" 'restore'
 assert_call 'reload'
+ufw_restore_line="$(grep -n '^ufw-reload$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
+iptables_restore_line="$(grep -n '^iptables-restore$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
+[[ -n "$ufw_restore_line" && -n "$iptables_restore_line" && "$ufw_restore_line" -lt "$iptables_restore_line" ]] \
+    || fail "rollback did not make iptables-restore the final firewall write"
 [[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]]     || fail "Docker ingress failure left UFW managed rules partially updated"
 [[ ! -e "$CASE_DIR/state/cf-cidrs.cache" ]] || fail "failed Docker ingress refresh published a new CIDR cache"
 
