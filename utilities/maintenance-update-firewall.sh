@@ -22,6 +22,8 @@ unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 # shellcheck source=../lib/firewall.sh
 source "$PROJECT_ROOT/lib/firewall.sh"
+# shellcheck source=../lib/firewall-ufw.sh
+source "$PROJECT_ROOT/lib/firewall-ufw.sh"
 
 UPDATE_FIREWALL=true
 DRY_RUN=false
@@ -187,171 +189,18 @@ update_firewall_ranges() {
         return $?
     }
 
-    _ufw_status() {
-        local mode="${1:-normal}" output rc=0
-        case "$mode" in
-            numbered) output="$(ufw status numbered 2>&1)" || rc=$? ;;
-            verbose)  output="$(ufw status verbose 2>&1)" || rc=$? ;;
-            normal)   output="$(ufw status 2>&1)" || rc=$? ;;
-            *) return 2 ;;
-        esac
-        if (( rc != 0 )); then
-            log_error "Unable to read UFW status (exit ${rc}): ${output:-no output}"
-            return "$rc"
-        fi
-        printf '%s
-' "$output"
-    }
-
-    _ufw_has_range_port() {
-        local status="$1" cidr="$2" port="$3" line token i
-        local -a fields=()
-
-        while IFS= read -r line; do
-            fields=()
-            read -ra fields <<< "$line"
-            (( ${#fields[@]} >= 3 )) || continue
-            [[ "${fields[0]}" == "${port}/tcp" ]] || continue
-
-            i=1
-            if [[ "${fields[$i]:-}" == "(v6)" ]]; then
-                i=$((i + 1))
-            fi
-            if [[ "${fields[$i]:-}" == "on" ]]; then
-                i=$((i + 2))
-            fi
-            [[ "${fields[$i]:-}" == "ALLOW" ]] || continue
-            i=$((i + 1))
-            case "${fields[$i]:-}" in
-                OUT|FWD) continue ;;
-                IN) i=$((i + 1)) ;;
-            esac
-
-            for (( ; i<${#fields[@]}; i++ )); do
-                token="${fields[$i]}"
-                [[ "$token" == \#* ]] && break
-                token="${token%#*}"
-                [[ "$token" == "$cidr" ]] && return 0
-            done
-        done <<< "$status"
-        return 1
-    }
-
-    _ufw_line_cidr() {
-        local line="$1" word
-        local -a words=()
-        read -ra words <<< "$line"
-        for word in "${words[@]}"; do
-            [[ "$word" == \#* ]] && break
-            word="${word%\#*}"
-            if [[ "$word" =~ ^[0-9]+(\.[0-9]+){3}/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
-                printf '%s
-' "$word"
-                return 0
-            fi
-        done
-        return 1
-    }
-
-    _ufw_collect_conflicts() {
-        local numbered_status="$1"
-        shift
-        local -a desired=("$@")
-        local line rule_num cidr keep desired_cidr action
-        while IFS= read -r line; do
-            local body="${line%%#*}"
-            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(OUT|FWD)([[:space:]]|$) ]] && continue
-            [[ "$body" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
-            rule_num="${BASH_REMATCH[1]}"
-            action="${BASH_REMATCH[6]}"
-            if [[ -z "${BASH_REMATCH[3]}" || "$action" != "ALLOW" ]]; then
-                printf '%s
-' "$rule_num"
-                continue
-            fi
-            cidr="$(_ufw_line_cidr "$line" || true)"
-            keep=false
-            if [[ -n "$cidr" ]]; then
-                for desired_cidr in "${desired[@]}"; do
-                    [[ "$desired_cidr" == "$cidr" ]] && { keep=true; break; }
-                done
-            fi
-            [[ "$keep" == "true" ]] || printf '%s
-' "$rule_num"
-        done <<< "$numbered_status"
-    }
-
-    _ufw_default_incoming_fail_closed() {
-        local verbose_status="$1" defaults_file="${UFW_DEFAULTS_FILE:-/etc/default/ufw}" policy=""
-        if grep -Eqi '^Default:[[:space:]]+(deny|reject)[[:space:]]+\(incoming\)' <<< "$verbose_status"; then
-            return 0
-        fi
-        if grep -Eq '^Status:[[:space:]]+inactive' <<< "$verbose_status" && [[ -r "$defaults_file" ]]; then
-            policy="$(awk -F= '
-                $1 ~ /^[[:space:]]*DEFAULT_INPUT_POLICY[[:space:]]*$/ {
-                    value=$2
-                    gsub(/^[[:space:]\"]+|[[:space:]\"]+$/, "", value)
-                    print toupper(value)
-                    exit
-                }
-            ' "$defaults_file")"
-            [[ "$policy" == "DROP" || "$policy" == "REJECT" ]] && return 0
-        fi
-        log_error "UFW default incoming policy is not provably fail-closed (deny/reject)."
-        log_error "Remediation: sudo ufw default deny incoming; then review 'sudo ufw status verbose'."
-        return 1
-    }
-
-    _ufw_reject_ambiguous_inbound_allows() {
-        local numbered_status="$1" line rule_num body
-        while IFS= read -r line; do
-            [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]] || continue
-            rule_num="${BASH_REMATCH[1]}"
-            body="${BASH_REMATCH[2]}"
-            body="${body%%#*}"
-            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)([[:space:]]|$) ]] || continue
-            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+OUT([[:space:]]|$) ]] && continue
-            if [[ "$body" =~ ^[0-9]+/(tcp|udp)([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]]; then
-                continue
-            fi
-            log_error "Ambiguous inbound UFW allow rule ${rule_num}: ${body}"
-            log_error "Use explicit single-port/protocol rules; remove profiles, ranges, multi-port, all-port, or routed allows before retrying."
-            return 1
-        done <<< "$numbered_status"
-    }
-
     _ufw_validate_safety() {
+        declare -F firewall_ufw_status >/dev/null || \
+            source "${VW_TEST_REPO_ROOT:-${PROJECT_ROOT:?}}/lib/firewall-ufw.sh"
         local verbose_status numbered_status
-        verbose_status="$(_ufw_status verbose)" || return $?
+        verbose_status="$(firewall_ufw_status verbose)" || return $?
         if ! grep -q '^Status: active' <<< "$verbose_status"; then
             log_error "UFW is inactive; refusing periodic firewall mutation."
             log_error "Enable and verify UFW first, then rerun the Cloudflare firewall update."
             return 1
         fi
-        numbered_status="$(_ufw_status numbered)" || return $?
-        _ufw_default_incoming_fail_closed "$verbose_status" || return $?
-        _ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
-    }
-
-    _ufw_allow_range() {
-        local cidr="$1" label="$2" status output rc=0
-        status="$(_ufw_status normal)" || return $?
-        if ! _ufw_has_range_port "$status" "$cidr" 80; then
-            output="$(ufw allow proto tcp from "$cidr" to any port 80 comment "$label" 2>&1)" || rc=$?
-            if (( rc != 0 )); then
-                log_error "Failed to add UFW port 80 rule for ${cidr} (exit ${rc}): ${output:-no output}"
-                return "$rc"
-            fi
-        fi
-        status="$(_ufw_status normal)" || return $?
-        if ! _ufw_has_range_port "$status" "$cidr" 443; then
-            rc=0
-            output="$(ufw allow proto tcp from "$cidr" to any port 443 comment "$label" 2>&1)" || rc=$?
-            if (( rc != 0 )); then
-                log_error "Failed to add UFW port 443 rule for ${cidr} (exit ${rc}): ${output:-no output}"
-                return "$rc"
-            fi
-        fi
+        numbered_status="$(firewall_ufw_status numbered)" || return $?
+        firewall_ufw_validate_common_safety "$verbose_status" "$numbered_status" || return $?
     }
 
     _ufw_validate_safety || {
@@ -366,7 +215,7 @@ update_firewall_ranges() {
     local ufw_config_dir="${UFW_CONFIG_DIR:-/etc/ufw}"
     local ufw_snapshot_dir="" ufw_was_active=false rules_file
     local pre_mutation_verbose
-    pre_mutation_verbose="$(_ufw_status verbose)" || {
+    pre_mutation_verbose="$(firewall_ufw_status verbose)" || {
         local pretransaction_rc=$?
         _update_firewall_pretransaction_fail "$pretransaction_rc"
         return $?
@@ -502,7 +351,7 @@ update_firewall_ranges() {
     for cidr in "${current_cidrs[@]}"; do
         label="CF-IPv4"
         [[ "$cidr" == *:* ]] && label="CF-IPv6"
-        _ufw_allow_range "$cidr" "$label" || {
+        firewall_ufw_allow_range "$cidr" "$label" || {
             mutation_rc=$?
             _update_firewall_fail "$mutation_rc"
             return $?
@@ -510,13 +359,13 @@ update_firewall_ranges() {
     done
 
     local numbered_status ufw_rc=0
-    numbered_status="$(_ufw_status numbered)" || {
+    numbered_status="$(firewall_ufw_status numbered)" || {
         mutation_rc=$?
         _update_firewall_fail "$mutation_rc"
         return $?
     }
     local -a old_rule_nums=()
-    mapfile -t old_rule_nums < <(_ufw_collect_conflicts "$numbered_status" "${current_cidrs[@]}")
+    mapfile -t old_rule_nums < <(firewall_ufw_collect_web_conflicts "$numbered_status" "${current_cidrs[@]}")
     if (( ${#old_rule_nums[@]} > 0 )); then
         mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | awk 'NF && !seen[$0]++' | sort -rn)
         local rule_num ufw_output
@@ -537,28 +386,28 @@ update_firewall_ranges() {
         return $?
     }
     local final_status final_numbered
-    final_status="$(_ufw_status normal)" || {
+    final_status="$(firewall_ufw_status normal)" || {
         mutation_rc=$?
         _update_firewall_fail "$mutation_rc"
         return $?
     }
-    final_numbered="$(_ufw_status numbered)" || {
+    final_numbered="$(firewall_ufw_status numbered)" || {
         mutation_rc=$?
         _update_firewall_fail "$mutation_rc"
         return $?
     }
-    if [[ -n "$(_ufw_collect_conflicts "$final_numbered" "${current_cidrs[@]}")" ]]; then
+    if [[ -n "$(firewall_ufw_collect_web_conflicts "$final_numbered" "${current_cidrs[@]}")" ]]; then
         log_error "Non-Cloudflare UFW 80/443 rule remains after reconciliation."
         _update_firewall_fail 1
         return $?
     fi
     for cidr in "${current_cidrs[@]}"; do
-        _ufw_has_range_port "$final_status" "$cidr" 80 || {
+        firewall_ufw_has_range_port "$final_status" "$cidr" 80 || {
             log_error "Final UFW verification missing ${cidr} -> 80/tcp"
             _update_firewall_fail 1
             return $?
         }
-        _ufw_has_range_port "$final_status" "$cidr" 443 || {
+        firewall_ufw_has_range_port "$final_status" "$cidr" 443 || {
             log_error "Final UFW verification missing ${cidr} -> 443/tcp"
             _update_firewall_fail 1
             return $?

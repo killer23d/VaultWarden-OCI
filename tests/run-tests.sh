@@ -85,6 +85,7 @@ OPERATIONS_CASES=(
     "lifecycle-core|tests/suites/operations/case-lifecycle.bash|core|120"
     "startup-hardening|tests/suites/operations/case-lifecycle.bash|startup-hardening|120"
     "operator-ui|tests/suites/operations/case-operator-ui.bash|all|120"
+    "firewall-ufw-shared|tests/suites/operations/case-firewall-ufw-shared.bash|all|120"
     "firewall-update|tests/suites/operations/case-firewall-update.bash|all|120"
     "crowdsec|tests/suites/operations/case-crowdsec.bash|all|120"
     "crowdsec-notifications|tests/suites/operations/case-crowdsec-notifications.bash|all|120"
