@@ -31,9 +31,17 @@ replace_once(
         return 1
     }
 
-    # Only the two project-scoped DROP sentinels remain. Attach them before
-    # adding any RETURN rules so first-time migration is fail-closed, while an
-    # orphaned stale chain can never make unrelated legacy rules live.
+    # Preserve replies to Caddy-initiated connections before attaching the new
+    # fail-closed gate. NEW non-Cloudflare web traffic still falls through this
+    # rule into the two DROP sentinels.
+    iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
+        -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \
+        || return $?
+
+    # The chain now contains only known-safe project rules: established replies
+    # plus the two web DROP sentinels. Attach it before adding Cloudflare RETURNs
+    # so first-time migration is fail-closed without activating orphaned stale
+    # rules for unrelated Docker traffic.
     iptables -t filter -I DOCKER-USER 1 -j "$VW_CF_DOCKER_CHAIN" || return $?
     _firewall_delete_duplicate_parent_jumps || {
         log_error "Could not normalize the DOCKER-USER jump to ${VW_CF_DOCKER_CHAIN}."
@@ -42,11 +50,18 @@ replace_once(
 
     local cidr port
 ''',
-    'fail-closed parent attachment after stale cleanup',
+    'safe parent attachment after stale cleanup',
 )
 replace_once(
     'lib/firewall.sh',
-    '''    # Install a new first-rule jump before deleting older duplicate jumps, so
+    '''    # This must remain ahead of the source DROP rules: Caddy-initiated HTTP,
+    # HTTPS, DNS, and related reply traffic is not new public ingress. RETURN
+    # keeps Docker authoritative for the eventual forwarding decision.
+    iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
+        -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \
+        || return $?
+
+    # Install a new first-rule jump before deleting older duplicate jumps, so
     # an existing gate is never removed before its replacement is active.
     iptables -t filter -I DOCKER-USER 1 -j "$VW_CF_DOCKER_CHAIN" || return $?
     _firewall_delete_duplicate_parent_jumps || {
@@ -56,7 +71,7 @@ replace_once(
 
 ''',
     '',
-    'late parent attachment removal',
+    'late established/jump block removal',
 )
 
 p = Path('tests/suites/operations/case-firewall-update.bash')
@@ -67,12 +82,13 @@ run_iptables_probe
 '''
 replacement = anchor + '''sentinel80_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 80 -j DROP' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 sentinel443_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 jump_line="$(grep -n 'iptables -t filter -I DOCKER-USER 1 -j VW-CF-INGRESS' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 allow_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
-[[ -n "$sentinel80_line" && -n "$sentinel443_line" && -n "$jump_line" && -n "$allow_line" ]] \
-    || fail "initial Docker gate mutation-order probe missed sentinel/jump/allow calls"
-[[ "$sentinel80_line" -lt "$jump_line" && "$sentinel443_line" -lt "$jump_line" && "$jump_line" -lt "$allow_line" ]] \
-    || fail "initial Docker gate was not attached fail-closed before Cloudflare RETURN rules were built"
+[[ -n "$sentinel80_line" && -n "$sentinel443_line" && -n "$established_line" && -n "$jump_line" && -n "$allow_line" ]] \
+    || fail "initial Docker gate mutation-order probe missed sentinel/established/jump/allow calls"
+[[ "$sentinel80_line" -lt "$established_line" && "$sentinel443_line" -lt "$established_line" && "$established_line" -lt "$jump_line" && "$jump_line" -lt "$allow_line" ]] \
+    || fail "initial Docker gate did not preserve established replies and attach fail-closed before Cloudflare RETURN rules"
 '''
 if anchor not in t:
     raise SystemExit('initial gate behavior anchor missing')
@@ -86,8 +102,9 @@ printf '%s\n' '-A VW-CF-INGRESS -j ACCEPT' > "$IPT_CF_FILE"
 run_iptables_probe
 [[ "$IPT_RC" -eq 0 ]] || fail "orphan stale Docker gate reconciliation returned $IPT_RC"
 stale_delete_line="$(grep -n 'iptables -t filter -D VW-CF-INGRESS 3' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 jump_line="$(grep -n 'iptables -t filter -I DOCKER-USER 1 -j VW-CF-INGRESS' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
-[[ -n "$stale_delete_line" && -n "$jump_line" && "$stale_delete_line" -lt "$jump_line" ]] \
+[[ -n "$stale_delete_line" && -n "$established_line" && -n "$jump_line" && "$stale_delete_line" -lt "$established_line" && "$established_line" -lt "$jump_line" ]] \
     || fail "orphan stale project-chain rules were activated before cleanup"
 ! grep -Fq -- '-A VW-CF-INGRESS -j ACCEPT' "$IPT_CF_FILE" || fail "orphan stale ACCEPT survived reconciliation"
 '''
