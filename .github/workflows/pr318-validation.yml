@@ -1,0 +1,51 @@
+name: PR 318 Validation
+
+on:
+  push:
+    branches:
+      - pr-318-shared-ufw-policy
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Syntax
+        run: |
+          bash -n \
+            lib/firewall.sh \
+            lib/firewall-ufw.sh \
+            utilities/setup-firewall.sh \
+            utilities/maintenance-update-firewall.sh \
+            tests/suites/operations/case-firewall-ufw-shared.bash \
+            tests/suites/operations/case-firewall-update.bash \
+            tests/run-tests.sh
+
+      - name: ShellCheck
+        run: |
+          shellcheck \
+            lib/firewall.sh \
+            lib/firewall-ufw.sh \
+            utilities/setup-firewall.sh \
+            utilities/maintenance-update-firewall.sh \
+            tests/suites/operations/case-firewall-ufw-shared.bash \
+            tests/suites/operations/case-firewall-update.bash \
+            tests/run-tests.sh
+
+      - name: Focused UFW policy
+        run: bash tests/suites/operations/case-firewall-ufw-shared.bash
+
+      - name: Firewall regression suite
+        run: bash tests/suites/operations/case-firewall-update.bash
+
+      - name: Full repository suite
+        run: ./tests/run-tests.sh all
+
+      - name: Diff check
+        run: git diff --check origin/delta...HEAD
