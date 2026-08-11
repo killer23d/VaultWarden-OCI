@@ -601,15 +601,11 @@ main() {
       _phase_failed 5 "Required UFW firewall configuration failed"
     fi
 
-    # Apply iptables rules on a best-effort basis.
-    if [[ -x "${SCRIPT_DIR}/utilities/setup-firewall.sh" ]]; then
-        echo "INFO: Applying VaultWarden iptables rules..."
-        if "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase iptables; then
-            echo "OK: VaultWarden iptables rules applied"
-        else
-            echo "WARN: utilities/setup-firewall.sh --phase iptables did not complete successfully" >&2
-            echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
-        fi
+    if ! "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase iptables \
+      "${_auto[@]}" "${_dry[@]}" "${_force[@]}"; then
+      _phase_failed 5 "Required Docker/OCI firewall reconciliation failed" \
+        "Check Docker's firewall backend and the FORWARD/DOCKER-USER chains." \
+        "Re-run: sudo ./utilities/setup-firewall.sh --phase iptables --auto"
     fi
 
     if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then

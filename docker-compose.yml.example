@@ -140,7 +140,11 @@ services:
         # after changing CADDY_VERSION in .env to rebuild both stages.
         # Do NOT set CADDY_VERSION=latest — xcaddy builds must be pinned.
         CADDY_VERSION: ${CADDY_VERSION:-2.11.4}
-    restart: unless-stopped
+    # Caddy is started by vaultwarden-startup.service only after the Docker
+    # packet-path firewall gate has reconciled. on-failure recovers an
+    # independent Caddy crash but does not auto-start the listener when dockerd
+    # itself restarts, so the firewall/startup ordering remains authoritative.
+    restart: on-failure
     user: "2000:2000"
 
     entrypoint: /scripts/entrypoint.sh
@@ -166,8 +170,8 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy
 
     ports:
-      - "80:80"
-      - "443:443"
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
       - "127.0.0.1:8080:8080"
 
     networks:
@@ -353,8 +357,8 @@ networks:
   # public requests arrive on ports 80/443, and Caddy also makes outbound calls
   # (ACME/Let's Encrypt, Cloudflare DNS-01). Intentionally separate from
   # vaultwarden_egress so the two services' internet paths remain air-gapped.
-  # Pinned subnet keeps this network deterministic and within RFC1918 space
-  # already allowed by the DOCKER-USER catch-all in setup-iptables.sh.
+  # Pinned subnet keeps this network deterministic. Public TCP 80/443 is
+  # filtered by the VW-CF-INGRESS DOCKER-USER gate before Docker forwarding.
   caddy_external:
     name: caddy_external_network
     driver: bridge

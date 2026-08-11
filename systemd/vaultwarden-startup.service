@@ -1,7 +1,9 @@
 [Unit]
 Description=VaultWarden-OCI startup - recreate runtime secrets and reconcile containers
-Requires=docker.service
-After=local-fs.target docker.service network-online.target
+Requires=vaultwarden-iptables.service
+BindsTo=docker.service
+PartOf=docker.service
+After=local-fs.target docker.service network-online.target vaultwarden-iptables.service
 Wants=network-online.target
 RequiresMountsFor=@PROJECT_STATE_DIR@
 

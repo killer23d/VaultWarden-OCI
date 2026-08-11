@@ -36,6 +36,7 @@ ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
 STARTUP_SERVICE="vaultwarden-startup.service"
 NOTIFY_FAILURE_TEMPLATE="vaultwarden-notify-failure@.service"
+DOCKER_RUNTIME_DROPIN="${UNIT_DEST_DIR}/docker.service.d/20-vaultwarden-runtime.conf"
 SETUP_SYSTEMD_GUARD_HELD=false
 
 TIMERS=(
@@ -102,14 +103,11 @@ STARTUP_RUNTIME_EXECUTABLE_PATHS=(
     caddy/entrypoint.sh
 )
 
-# Timers skip identity checks, while iptables skips data-volume drop-ins.
+# Timers skip identity checks. All managed units receive data-volume mount
+# ordering; vaultwarden-iptables.service is read-only and is special-cased below
+# so it does not receive a state-directory write grant.
 _ROOT_REQUIRED_UNITS=("${COPIED_SERVICES[@]}" "$STARTUP_SERVICE")
-_VW_DROPIN_UNITS=()
-for unit in "${COPIED_SERVICES[@]}"; do
-    [[ "$unit" == "vaultwarden-iptables.service" ]] || _VW_DROPIN_UNITS+=("$unit")
-done
-_VW_DROPIN_UNITS+=("${TIMERS[@]}")
-unset unit
+_VW_DROPIN_UNITS=("${COPIED_SERVICES[@]}" "${TIMERS[@]}")
 
 _setup_systemd_acquire_guard() {
     local label="$1" phase="$2"
@@ -204,8 +202,9 @@ WHAT install DOES:
     5. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     7. systemctl daemon-reload
-    8. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
-    9. If timers were started now, verifies all managed timers are active and have a next trigger
+    8. Installs a Docker lifecycle drop-in so firewall reconciliation and startup rerun after dockerd restarts
+    9. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
+   10. If timers were started now, verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install
@@ -448,7 +447,7 @@ _install_rwpaths_dropin() {
 After=${_mount_unit}
 DROPIN
 
-        if [[ "$unit" == *.service ]]; then
+        if [[ "$unit" == *.service && "$unit" != "vaultwarden-iptables.service" ]]; then
             cat >> "$dropin_file" << DROPIN
 # [Service] ReadWritePaths= — grants write access to DATA_VOLUME_MOUNT under
 #                             ProtectSystem=strict (without this, all writes to
@@ -460,6 +459,79 @@ DROPIN
         chmod 644 "$dropin_file"
         log_success "Installed state-dir drop-in: $dropin_file"
     done
+}
+
+_render_docker_runtime_dropin() {
+    cat <<'DROPIN'
+# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
+# Caddy uses restart: on-failure, which does not auto-start on dockerd restart.
+[Unit]
+Wants=vaultwarden-iptables.service vaultwarden-startup.service
+DROPIN
+}
+
+_install_docker_runtime_dropin() {
+    local dropin_dir tmp
+    dropin_dir="$(dirname "$DOCKER_RUNTIME_DROPIN")"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would install Docker runtime owner drop-in: $DOCKER_RUNTIME_DROPIN"
+        return 0
+    fi
+    mkdir -p "$dropin_dir" || {
+        log_error "Cannot create Docker systemd drop-in directory: $dropin_dir"
+        return 1
+    }
+    tmp="$(mktemp -p "$dropin_dir" .20-vaultwarden-runtime.XXXXXXXXXX)" || return 1
+    _render_docker_runtime_dropin > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
+    chown root:root "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f -- "$tmp" "$DOCKER_RUNTIME_DROPIN" || { rm -f "$tmp"; return 1; }
+    log_success "Installed Docker runtime owner drop-in: $DOCKER_RUNTIME_DROPIN"
+}
+
+_validate_docker_runtime_dropin() {
+    local expected owner group mode rc=0
+    if [[ ! -f "$DOCKER_RUNTIME_DROPIN" ]]; then
+        log_error "  MISSING: $DOCKER_RUNTIME_DROPIN"
+        log_error "  Docker restarts would not re-run firewall reconciliation/startup."
+        log_error "  Fix: sudo utilities/setup-systemd.sh install"
+        return 1
+    fi
+
+    expected="$(mktemp)" || return 1
+    _render_docker_runtime_dropin > "$expected" || { rm -f "$expected"; return 1; }
+    if ! cmp -s "$expected" "$DOCKER_RUNTIME_DROPIN"; then
+        log_error "  DRIFT: $DOCKER_RUNTIME_DROPIN does not match the managed Docker lifecycle contract"
+        log_error "  Fix: sudo utilities/setup-systemd.sh install"
+        rc=1
+    fi
+    rm -f "$expected"
+
+    owner="$(stat -c '%U' "$DOCKER_RUNTIME_DROPIN" 2>/dev/null || echo unknown)"
+    group="$(stat -c '%G' "$DOCKER_RUNTIME_DROPIN" 2>/dev/null || echo unknown)"
+    mode="$(stat -c '%a' "$DOCKER_RUNTIME_DROPIN" 2>/dev/null || echo unknown)"
+    if [[ "$owner" != root || "$group" != root || "$mode" != 644 ]]; then
+        log_error "  PERMISSIONS: $DOCKER_RUNTIME_DROPIN is ${owner}:${group} mode ${mode} (expected root:root 644)"
+        log_error "  Fix: sudo utilities/setup-systemd.sh install"
+        rc=1
+    fi
+    [[ "$rc" -eq 0 ]] && log_success "  OK: $DOCKER_RUNTIME_DROPIN"
+    return "$rc"
+}
+
+_remove_docker_runtime_dropin() {
+    local dropin_dir
+    dropin_dir="$(dirname "$DOCKER_RUNTIME_DROPIN")"
+    if [[ -f "$DOCKER_RUNTIME_DROPIN" ]]; then
+        _run rm -f "$DOCKER_RUNTIME_DROPIN"
+        log_success "Removed Docker runtime owner drop-in: $DOCKER_RUNTIME_DROPIN"
+    elif [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would remove Docker runtime owner drop-in if present: $DOCKER_RUNTIME_DROPIN"
+    fi
+    if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+        _run rmdir "$dropin_dir"
+        log_success "Removed empty Docker drop-in directory: $dropin_dir"
+    fi
 }
 
 _sync_runtime_environment_files() {
@@ -702,6 +774,7 @@ install_units() {
 
     _render_startup_service || return 1
 
+    _install_docker_runtime_dropin || return 1
     _install_rwpaths_dropin
     _cleanup_stale_identity_dropins
 
@@ -846,6 +919,8 @@ remove_units() {
             log_success "Removed: $dest"
         fi
     done
+
+    _remove_docker_runtime_dropin
 
     # Clean up per-unit ReadWritePaths drop-in directories written by
     # _install_rwpaths_dropin (separate-volume mode). Leaving stale .d/
@@ -1079,6 +1154,9 @@ validate_installation() {
     fi
 
     log_info "[4/9] Checking systemd drop-in files ..."
+    if ! _validate_docker_runtime_dropin; then
+        (( errors++ )) || true
+    fi
     for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
         local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
         [[ -d "$dropin_dir" ]] || continue

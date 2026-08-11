@@ -20,6 +20,8 @@ source "$PROJECT_ROOT/lib/secrets.sh"
 SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
 unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
+# shellcheck source=../lib/firewall.sh
+source "$PROJECT_ROOT/lib/firewall.sh"
 
 UPDATE_FIREWALL=true
 DRY_RUN=false
@@ -33,9 +35,9 @@ USAGE:
     sudo ./maintenance.sh update-firewall [OPTIONS]
 
 DESCRIPTION:
-    Fetches the current Cloudflare IP ranges (IPv4 + IPv6) and adds any new
-    ranges to UFW as allow rules for ports 80 and 443.  Removes stale rules
-    for ranges Cloudflare has retired.
+    Fetches current Cloudflare IP ranges, reconciles defence-in-depth UFW
+    rules, and refreshes the Docker DOCKER-USER gate for published TCP 80/443.
+    Ambiguous host-firewall policy fails closed instead of being guessed.
 
     Skipped automatically when CLOUDFLARE_PROXY_ENABLED is not "true".
 
@@ -54,7 +56,7 @@ EOF
 # shellcheck disable=SC2120  # $@ is forwarded to require_root; callers pass no args intentionally
 update_firewall_ranges() {
     if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
-    if [[ "$DRY_RUN"         == "true" ]]; then log_info "[DRY RUN] Would safely update Cloudflare IP ranges in firewall"; return 0; fi
+    if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would safely update Cloudflare firewall ranges"; return 0; fi
     if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" != "true" ]]; then
         log_info "Skipping Cloudflare IP range firewall update (CLOUDFLARE_PROXY_ENABLED is not 'true')"
         return 0
@@ -62,184 +64,558 @@ update_firewall_ranges() {
 
     require_root "$@"
 
-    log_info "Safely updating Cloudflare IP ranges in firewall..."
-    local cf_ipv4_file cf_ipv6_file
-    cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)
-    cf_ipv6_file=$(mktemp -t cf_ipv6.XXXXXXXXXX)
+    local ssh_port
+    ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port="$(awk '/^Port[[:space:]]/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null || true)"
+    fi
+    ssh_port="${ssh_port:-22}"
+    if [[ "$ssh_port" == "80" || "$ssh_port" == "443" ]]; then
+        log_error "SSH port ${ssh_port}/tcp conflicts with managed Cloudflare web ingress."
+        log_error "Move SSH to a dedicated non-web port before updating firewall rules."
+        return 1
+    fi
+
+    # Until the current Docker backend and cached generation are proven safe,
+    # an interrupt must not leave Caddy serving behind an unverified gate.
+    local pre_update_docker_gate_exact=false
+    _update_firewall_pretransaction_signal() {
+        local signal_rc="$1"
+        if [[ "$pre_update_docker_gate_exact" != "true" ]]; then
+            if ! firewall_fail_closed_stop_caddy; then
+                log_error "CRITICAL: firewall validation was interrupted and Caddy shutdown could not be confirmed."
+            fi
+        fi
+        operation_release "$signal_rc"
+        perform_cleanup
+        exit "$signal_rc"
+    }
+    trap '_update_firewall_pretransaction_signal 130' INT
+    trap '_update_firewall_pretransaction_signal 143' HUP TERM
+
+    # Refuse all mutations if the running Docker daemon is using an unsupported
+    # backend. A stale DOCKER-USER chain alone is not proof of the active mode.
+    local docker_preflight_rc=0
+    firewall_docker_backend_preflight || docker_preflight_rc=$?
+    if (( docker_preflight_rc != 0 )); then
+        if ! firewall_fail_closed_stop_caddy; then
+            log_error "CRITICAL: Docker firewall backend preflight failed and Caddy shutdown could not be confirmed."
+        fi
+        return "$docker_preflight_rc"
+    fi
+
+    # Prove whether rollback would return to a known-safe Docker ingress
+    # generation. A normal Cloudflare range change may make the gate non-exact
+    # for the newly fetched set while it is still exact for the valid cached
+    # generation. Only the latter is safe to restore without stopping Caddy.
+    local -a pre_update_ipv4_cidrs=()
+    if firewall_load_cached_cloudflare_ipv4 pre_update_ipv4_cidrs >/dev/null 2>&1 && \
+       firewall_docker_ingress_is_exact "${pre_update_ipv4_cidrs[@]}"; then
+        pre_update_docker_gate_exact=true
+    else
+        log_warn "Pre-update Docker ingress gate is not provably exact against a valid cached Cloudflare generation."
+        log_warn "If this transaction cannot commit safely, Caddy will be stopped after rollback."
+    fi
+
+    _update_firewall_fail_closed_after_unproven_prior_gate() {
+        if ! firewall_fail_closed_stop_caddy; then
+            log_error "CRITICAL: pre-update Docker ingress gate was not provably exact and Caddy shutdown could not be confirmed."
+        fi
+    }
+
+    _update_firewall_pretransaction_fail() {
+        local fail_rc="$1"
+        if [[ "$pre_update_docker_gate_exact" != "true" ]]; then
+            _update_firewall_fail_closed_after_unproven_prior_gate
+        fi
+        return "$fail_rc"
+    }
+
+    log_info "Safely updating Cloudflare IP ranges in UFW and Docker ingress filtering..."
+    local cf_ipv4_file="" cf_ipv6_file="" allocation_rc=0
+    cf_ipv4_file="$(mktemp -t cf_ipv4.XXXXXXXXXX)" || allocation_rc=$?
+    if (( allocation_rc != 0 )); then
+        log_error "Could not allocate Cloudflare IPv4 range download file."
+        _update_firewall_pretransaction_fail "$allocation_rc"
+        return $?
+    fi
+    allocation_rc=0
+    cf_ipv6_file="$(mktemp -t cf_ipv6.XXXXXXXXXX)" || allocation_rc=$?
+    if (( allocation_rc != 0 )); then
+        log_error "Could not allocate Cloudflare IPv6 range download file."
+        rm -f "$cf_ipv4_file"
+        _update_firewall_pretransaction_fail "$allocation_rc"
+        return $?
+    fi
     register_cleanup rm -f "$cf_ipv4_file" "$cf_ipv6_file"
     if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
        retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
         log_success "Successfully fetched current Cloudflare IP ranges"
     else
-        log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"; return 1
+        log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"
+        _update_firewall_pretransaction_fail 1
+        return $?
     fi
 
-    _ufw_allow_range() {
-        local range="$1" label="$2"
-        _ufw_result=false
-
-        local ufw_status ufw_rc=0
-        ufw_status="$(ufw status 2>&1)" || ufw_rc=$?
-        if (( ufw_rc != 0 )); then
-            log_error "Unable to read UFW status for ${range} (exit ${ufw_rc}): ${ufw_status:-no output}"
-            return "$ufw_rc"
+    local -a current_cidrs=() current_ipv4_cidrs=()
+    local range
+    while IFS= read -r range; do
+        [[ -z "$range" ]] && continue
+        if [[ "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+            current_cidrs+=("$range")
+            current_ipv4_cidrs+=("$range")
+        else
+            log_error "Invalid Cloudflare IPv4 CIDR: ${range}"
+            _update_firewall_pretransaction_fail 1
+            return $?
         fi
-
-        local escaped_range
-        escaped_range=$(printf '%s' "$range" | sed 's/\./\\./g')
-        local has_80=false has_443=false
-        grep -qE "^80(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" <<< "$ufw_status" && has_80=true
-        grep -qE "^443(/tcp)?([[:space:]]+\(v6\))?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" <<< "$ufw_status" && has_443=true
-        if [[ "$has_80" == "true" && "$has_443" == "true" ]]; then return 0; fi
-
-        local ufw_output
-        if [[ "$has_80" != "true" ]]; then
-            ufw_rc=0
-            ufw_output="$(ufw allow proto tcp from "$range" to any port 80 comment "$label" 2>&1)" || ufw_rc=$?
-            if (( ufw_rc != 0 )); then
-                log_error "Failed to add UFW port 80 rule for ${range} (exit ${ufw_rc}): ${ufw_output:-no output}"
-                return "$ufw_rc"
-            fi
+    done < "$cf_ipv4_file"
+    while IFS= read -r range; do
+        [[ -z "$range" ]] && continue
+        if [[ "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
+            current_cidrs+=("$range")
+        else
+            log_error "Invalid Cloudflare IPv6 CIDR: ${range}"
+            _update_firewall_pretransaction_fail 1
+            return $?
         fi
-        if [[ "$has_443" != "true" ]]; then
-            ufw_rc=0
-            ufw_output="$(ufw allow proto tcp from "$range" to any port 443 comment "$label" 2>&1)" || ufw_rc=$?
-            if (( ufw_rc != 0 )); then
-                log_error "Failed to add UFW port 443 rule for ${range} (exit ${ufw_rc}): ${ufw_output:-no output}"
-                return "$ufw_rc"
-            fi
-        fi
-        _ufw_result=true
+    done < "$cf_ipv6_file"
+
+    (( ${#current_cidrs[@]} > 0 && ${#current_ipv4_cidrs[@]} > 0 )) || {
+        log_error "No valid Cloudflare CIDRs were fetched; refusing firewall changes."
+        _update_firewall_pretransaction_fail 1
+        return $?
     }
 
-    local ranges_added=false
-    local _ufw_result=false
-    local -a current_cidrs=()
-    local -a cached_cidrs=()
-    local cf_cidr_cache="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache"
+    _ufw_status() {
+        local mode="${1:-normal}" output rc=0
+        case "$mode" in
+            numbered) output="$(ufw status numbered 2>&1)" || rc=$? ;;
+            verbose)  output="$(ufw status verbose 2>&1)" || rc=$? ;;
+            normal)   output="$(ufw status 2>&1)" || rc=$? ;;
+            *) return 2 ;;
+        esac
+        if (( rc != 0 )); then
+            log_error "Unable to read UFW status (exit ${rc}): ${output:-no output}"
+            return "$rc"
+        fi
+        printf '%s
+' "$output"
+    }
 
-    if [[ -f "$cf_cidr_cache" ]]; then
-        while IFS= read -r cidr; do
-            [[ -n "$cidr" ]] && cached_cidrs+=("$cidr")
-        done < "$cf_cidr_cache"
-    fi
+    _ufw_has_range_port() {
+        local status="$1" cidr="$2" port="$3" line token i
+        local -a fields=()
 
-    if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
-        log_info "Adding new Cloudflare IPv4 ranges..."
-        while IFS= read -r range; do
-            if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-                current_cidrs+=("$range")
-                _ufw_allow_range "$range" "CF-IPv4" || return $?
-                if [[ "$_ufw_result" == "true" ]]; then
-                    ranges_added=true
-                    log_debug "Added IPv4 range: $range"
-                fi
+        while IFS= read -r line; do
+            fields=()
+            read -ra fields <<< "$line"
+            (( ${#fields[@]} >= 3 )) || continue
+            [[ "${fields[0]}" == "${port}/tcp" ]] || continue
+
+            i=1
+            if [[ "${fields[$i]:-}" == "(v6)" ]]; then
+                i=$((i + 1))
             fi
-        done < "$cf_ipv4_file"
-    fi
-
-    if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
-        log_info "Adding new Cloudflare IPv6 ranges..."
-        while IFS= read -r range; do
-            if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
-                current_cidrs+=("$range")
-                _ufw_allow_range "$range" "CF-IPv6" || return $?
-                if [[ "$_ufw_result" == "true" ]]; then
-                    ranges_added=true
-                    log_debug "Added IPv6 range: $range"
-                fi
+            if [[ "${fields[$i]:-}" == "on" ]]; then
+                i=$((i + 2))
             fi
-        done < "$cf_ipv6_file"
-    fi
+            [[ "${fields[$i]:-}" == "ALLOW" ]] || continue
+            i=$((i + 1))
+            case "${fields[$i]:-}" in
+                OUT|FWD) continue ;;
+                IN) i=$((i + 1)) ;;
+            esac
 
-    if [[ "$ranges_added" == "true" ]]; then
-        log_success "New Cloudflare IP ranges added successfully"
-    else
-        log_info "No new IP ranges needed to be added"
-    fi
-
-    log_info "Removing outdated Cloudflare IP ranges..."
-    local removed_count=0
-    local -a old_rule_nums=()
-    local ufw_status ufw_rc=0
-    ufw_status="$(ufw status numbered 2>&1)" || ufw_rc=$?
-    if (( ufw_rc != 0 )); then
-        log_error "Unable to read numbered UFW rules (exit ${ufw_rc}): ${ufw_status:-no output}"
-        return "$ufw_rc"
-    fi
-
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\] ]]; then
-            local rule_num="${BASH_REMATCH[1]}"
-            local is_managed=false
-            local cidr=""
-
-            if [[ "$line" =~ CF-IPv[46] ]]; then
-                is_managed=true
-            fi
-
-            local -a words
-            read -ra words <<< "$line"
-            local word
-            for word in "${words[@]}"; do
-                if [[ "$word" =~ ^[0-9a-fA-F:\.]+/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:\.]+$ ]]; then
-                    cidr="$word"
-                    break
-                fi
+            for (( ; i<${#fields[@]}; i++ )); do
+                token="${fields[$i]}"
+                [[ "$token" == \#* ]] && break
+                token="${token%#*}"
+                [[ "$token" == "$cidr" ]] && return 0
             done
+        done <<< "$status"
+        return 1
+    }
 
-            if [[ "$is_managed" == "false" && -n "$cidr" ]]; then
-                local c
-                for c in "${cached_cidrs[@]}"; do
-                    if [[ "$c" == "$cidr" ]]; then
-                        is_managed=true
-                        break
-                    fi
+    _ufw_line_cidr() {
+        local line="$1" word
+        local -a words=()
+        read -ra words <<< "$line"
+        for word in "${words[@]}"; do
+            [[ "$word" == \#* ]] && break
+            word="${word%\#*}"
+            if [[ "$word" =~ ^[0-9]+(\.[0-9]+){3}/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+                printf '%s
+' "$word"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    _ufw_collect_conflicts() {
+        local numbered_status="$1"
+        shift
+        local -a desired=("$@")
+        local line rule_num cidr keep desired_cidr action
+        while IFS= read -r line; do
+            local body="${line%%#*}"
+            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(OUT|FWD)([[:space:]]|$) ]] && continue
+            [[ "$body" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
+            rule_num="${BASH_REMATCH[1]}"
+            action="${BASH_REMATCH[6]}"
+            if [[ -z "${BASH_REMATCH[3]}" || "$action" != "ALLOW" ]]; then
+                printf '%s
+' "$rule_num"
+                continue
+            fi
+            cidr="$(_ufw_line_cidr "$line" || true)"
+            keep=false
+            if [[ -n "$cidr" ]]; then
+                for desired_cidr in "${desired[@]}"; do
+                    [[ "$desired_cidr" == "$cidr" ]] && { keep=true; break; }
                 done
             fi
+            [[ "$keep" == "true" ]] || printf '%s
+' "$rule_num"
+        done <<< "$numbered_status"
+    }
 
-            if [[ "$is_managed" == "true" ]]; then
-                local keep=false
-                if [[ -n "$cidr" ]]; then
-                    local c
-                    for c in "${current_cidrs[@]}"; do
-                        if [[ "$c" == "$cidr" ]]; then
-                            keep=true
-                            break
-                        fi
-                    done
-                fi
+    _ufw_default_incoming_fail_closed() {
+        local verbose_status="$1" defaults_file="${UFW_DEFAULTS_FILE:-/etc/default/ufw}" policy=""
+        if grep -Eqi '^Default:[[:space:]]+(deny|reject)[[:space:]]+\(incoming\)' <<< "$verbose_status"; then
+            return 0
+        fi
+        if grep -Eq '^Status:[[:space:]]+inactive' <<< "$verbose_status" && [[ -r "$defaults_file" ]]; then
+            policy="$(awk -F= '
+                $1 ~ /^[[:space:]]*DEFAULT_INPUT_POLICY[[:space:]]*$/ {
+                    value=$2
+                    gsub(/^[[:space:]\"]+|[[:space:]\"]+$/, "", value)
+                    print toupper(value)
+                    exit
+                }
+            ' "$defaults_file")"
+            [[ "$policy" == "DROP" || "$policy" == "REJECT" ]] && return 0
+        fi
+        log_error "UFW default incoming policy is not provably fail-closed (deny/reject)."
+        log_error "Remediation: sudo ufw default deny incoming; then review 'sudo ufw status verbose'."
+        return 1
+    }
 
-                if [[ "$keep" == "false" ]]; then
-                    old_rule_nums+=("$rule_num")
-                fi
+    _ufw_reject_ambiguous_inbound_allows() {
+        local numbered_status="$1" line rule_num body
+        while IFS= read -r line; do
+            [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]] || continue
+            rule_num="${BASH_REMATCH[1]}"
+            body="${BASH_REMATCH[2]}"
+            body="${body%%#*}"
+            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)([[:space:]]|$) ]] || continue
+            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+OUT([[:space:]]|$) ]] && continue
+            if [[ "$body" =~ ^[0-9]+/(tcp|udp)([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]]; then
+                continue
+            fi
+            log_error "Ambiguous inbound UFW allow rule ${rule_num}: ${body}"
+            log_error "Use explicit single-port/protocol rules; remove profiles, ranges, multi-port, all-port, or routed allows before retrying."
+            return 1
+        done <<< "$numbered_status"
+    }
+
+    _ufw_validate_safety() {
+        local verbose_status numbered_status
+        verbose_status="$(_ufw_status verbose)" || return $?
+        if ! grep -q '^Status: active' <<< "$verbose_status"; then
+            log_error "UFW is inactive; refusing periodic firewall mutation."
+            log_error "Enable and verify UFW first, then rerun the Cloudflare firewall update."
+            return 1
+        fi
+        numbered_status="$(_ufw_status numbered)" || return $?
+        _ufw_default_incoming_fail_closed "$verbose_status" || return $?
+        _ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
+    }
+
+    _ufw_allow_range() {
+        local cidr="$1" label="$2" status output rc=0
+        status="$(_ufw_status normal)" || return $?
+        if ! _ufw_has_range_port "$status" "$cidr" 80; then
+            output="$(ufw allow proto tcp from "$cidr" to any port 80 comment "$label" 2>&1)" || rc=$?
+            if (( rc != 0 )); then
+                log_error "Failed to add UFW port 80 rule for ${cidr} (exit ${rc}): ${output:-no output}"
+                return "$rc"
             fi
         fi
-    done <<< "$ufw_status"
+        status="$(_ufw_status normal)" || return $?
+        if ! _ufw_has_range_port "$status" "$cidr" 443; then
+            rc=0
+            output="$(ufw allow proto tcp from "$cidr" to any port 443 comment "$label" 2>&1)" || rc=$?
+            if (( rc != 0 )); then
+                log_error "Failed to add UFW port 443 rule for ${cidr} (exit ${rc}): ${output:-no output}"
+                return "$rc"
+            fi
+        fi
+    }
 
+    _ufw_validate_safety || {
+        local pretransaction_rc=$?
+        _update_firewall_pretransaction_fail "$pretransaction_rc"
+        return $?
+    }
+
+    # UFW's managed rules live in these files. Snapshot them before the first
+    # mutation so a later UFW/Docker/cache failure can restore one coherent
+    # firewall generation instead of leaving the defence layers drifted.
+    local ufw_config_dir="${UFW_CONFIG_DIR:-/etc/ufw}"
+    local ufw_snapshot_dir="" ufw_was_active=false rules_file
+    local pre_mutation_verbose
+    pre_mutation_verbose="$(_ufw_status verbose)" || {
+        local pretransaction_rc=$?
+        _update_firewall_pretransaction_fail "$pretransaction_rc"
+        return $?
+    }
+    grep -q '^Status: active' <<< "$pre_mutation_verbose" && ufw_was_active=true
+    [[ -d "$ufw_config_dir" && -w "$ufw_config_dir" ]] || {
+        log_error "UFW configuration directory is not writable: ${ufw_config_dir}"
+        _update_firewall_pretransaction_fail 1
+        return $?
+    }
+    ufw_snapshot_dir="$(mktemp -d -t vaultwarden-ufw.XXXXXXXXXX)" || {
+        log_error "Could not allocate UFW rollback snapshot."
+        _update_firewall_pretransaction_fail 1
+        return $?
+    }
+    register_cleanup rm -rf "$ufw_snapshot_dir"
+    for rules_file in user.rules user6.rules; do
+        if [[ -e "$ufw_config_dir/$rules_file" || -L "$ufw_config_dir/$rules_file" ]]; then
+            cp -a -- "$ufw_config_dir/$rules_file" "$ufw_snapshot_dir/$rules_file" || {
+                log_error "Could not snapshot UFW managed rules: ${rules_file}"
+                rm -rf "$ufw_snapshot_dir"
+                _update_firewall_pretransaction_fail 1
+                return $?
+            }
+        fi
+    done
+
+    local backup_v4="" mutation_rc=0 snapshot_rc=0 cache_tmp="" cache_commit_started=false
+
+    backup_v4="$(mktemp -t vaultwarden-firewall.XXXXXXXXXX)" || {
+        log_error "Could not allocate firewall rollback snapshot."
+        rm -rf "$ufw_snapshot_dir"
+        _update_firewall_pretransaction_fail 1
+        return $?
+    }
+    register_cleanup rm -f "$backup_v4"
+    iptables-save > "$backup_v4" || snapshot_rc=$?
+    if (( snapshot_rc != 0 )); then
+        log_error "Could not snapshot pre-update iptables state; refusing all firewall mutation."
+        rm -f "$backup_v4"
+        backup_v4=""
+        rm -rf "$ufw_snapshot_dir"
+        ufw_snapshot_dir=""
+        _update_firewall_pretransaction_fail "$snapshot_rc"
+        return $?
+    fi
+
+    _update_firewall_restore_ufw() {
+        local restore_rc=0 file
+        [[ -n "${ufw_snapshot_dir:-}" && -d "$ufw_snapshot_dir" ]] || return 0
+        log_warn "Restoring UFW managed rules from rollback snapshot"
+        for file in user.rules user6.rules; do
+            if [[ -e "$ufw_snapshot_dir/$file" || -L "$ufw_snapshot_dir/$file" ]]; then
+                cp -a -- "$ufw_snapshot_dir/$file" "$ufw_config_dir/$file" || restore_rc=$?
+            else
+                rm -f -- "$ufw_config_dir/$file" || restore_rc=$?
+            fi
+        done
+        if [[ "$ufw_was_active" == "true" ]]; then
+            ufw reload >/dev/null 2>&1 || restore_rc=$?
+        fi
+        if (( restore_rc != 0 )); then
+            log_error "CRITICAL: UFW rollback restore failed (exit ${restore_rc})"
+        fi
+        return "$restore_rc"
+    }
+
+    _update_firewall_restore_iptables() {
+        local restore_rc=0
+        [[ -n "${backup_v4:-}" && -f "$backup_v4" ]] || return 0
+        log_warn "Restoring iptables state after firewall update failure"
+        iptables-restore < "$backup_v4" || restore_rc=$?
+        if (( restore_rc != 0 )); then
+            log_error "CRITICAL: iptables rollback restore failed (exit ${restore_rc})"
+        fi
+        return "$restore_rc"
+    }
+
+    _update_firewall_restore_outer_traps() {
+        trap 'operation_release 130; perform_cleanup; exit 130' INT
+        trap 'operation_release 143; perform_cleanup; exit 143' HUP TERM
+    }
+
+    _update_firewall_rollback_all() {
+        local rollback_rc=0
+        # UFW reload rewrites netfilter state, so restore its managed files first
+        # and make the full iptables snapshot the final firewall write.
+        _update_firewall_restore_ufw || rollback_rc=$?
+        _update_firewall_restore_iptables || rollback_rc=$?
+        return "$rollback_rc"
+    }
+
+    _update_firewall_fail_closed_after_rollback_error() {
+        if ! firewall_fail_closed_stop_caddy; then
+            log_error "CRITICAL: firewall rollback failed and Caddy shutdown could not be confirmed."
+        fi
+    }
+
+    _update_firewall_fail() {
+        local fail_rc="$1" rollback_rc=0
+        _update_firewall_rollback_all || rollback_rc=$?
+        if (( rollback_rc != 0 )); then
+            _update_firewall_fail_closed_after_rollback_error
+        elif [[ "$pre_update_docker_gate_exact" != "true" ]]; then
+            _update_firewall_fail_closed_after_unproven_prior_gate
+        fi
+        _update_firewall_restore_outer_traps
+        return "$fail_rc"
+    }
+
+    _update_firewall_signal_rollback() {
+        local signal_rc="$1" rollback_rc=0
+        # The atomic cache rename is the transaction commit point. Bash defers
+        # traps until a foreground command returns, so a signal delivered while
+        # mv succeeds sees the temp path gone and must not roll back the already
+        # committed firewall generation.
+        if [[ "$cache_commit_started" != "true" || -z "$cache_tmp" || -e "$cache_tmp" ]]; then
+            _update_firewall_rollback_all || rollback_rc=$?
+            if (( rollback_rc != 0 )); then
+                _update_firewall_fail_closed_after_rollback_error
+            elif [[ "$pre_update_docker_gate_exact" != "true" ]]; then
+                _update_firewall_fail_closed_after_unproven_prior_gate
+            fi
+        fi
+        operation_release "$signal_rc"
+        perform_cleanup
+        exit "$signal_rc"
+    }
+    trap '_update_firewall_signal_rollback 130' INT
+    trap '_update_firewall_signal_rollback 143' HUP TERM
+
+    local cidr label
+    for cidr in "${current_cidrs[@]}"; do
+        label="CF-IPv4"
+        [[ "$cidr" == *:* ]] && label="CF-IPv6"
+        _ufw_allow_range "$cidr" "$label" || {
+            mutation_rc=$?
+            _update_firewall_fail "$mutation_rc"
+            return $?
+        }
+    done
+
+    local numbered_status ufw_rc=0
+    numbered_status="$(_ufw_status numbered)" || {
+        mutation_rc=$?
+        _update_firewall_fail "$mutation_rc"
+        return $?
+    }
+    local -a old_rule_nums=()
+    mapfile -t old_rule_nums < <(_ufw_collect_conflicts "$numbered_status" "${current_cidrs[@]}")
     if (( ${#old_rule_nums[@]} > 0 )); then
-        mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | sort -rn)
+        mapfile -t old_rule_nums < <(printf '%s\n' "${old_rule_nums[@]}" | awk 'NF && !seen[$0]++' | sort -rn)
         local rule_num ufw_output
         for rule_num in "${old_rule_nums[@]}"; do
-            [[ -n "$rule_num" ]] || continue
             ufw_rc=0
             ufw_output="$(ufw --force delete "$rule_num" 2>&1)" || ufw_rc=$?
             if (( ufw_rc != 0 )); then
                 log_error "Failed to delete UFW rule ${rule_num} (exit ${ufw_rc}): ${ufw_output:-no output}"
-                return "$ufw_rc"
+                _update_firewall_fail "$ufw_rc"
+                return $?
             fi
-            removed_count=$((removed_count + 1))
         done
     fi
-    [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count outdated firewall rules"
 
-    if (( ${#current_cidrs[@]} > 0 )); then
-        mkdir -p "$(dirname "$cf_cidr_cache")" 2>/dev/null || true
-        printf '%s\n' "${current_cidrs[@]}" > "$cf_cidr_cache" 2>/dev/null || true
-        chmod 640 "$cf_cidr_cache" 2>/dev/null || true
+    _ufw_validate_safety || {
+        mutation_rc=$?
+        _update_firewall_fail "$mutation_rc"
+        return $?
+    }
+    local final_status final_numbered
+    final_status="$(_ufw_status normal)" || {
+        mutation_rc=$?
+        _update_firewall_fail "$mutation_rc"
+        return $?
+    }
+    final_numbered="$(_ufw_status numbered)" || {
+        mutation_rc=$?
+        _update_firewall_fail "$mutation_rc"
+        return $?
+    }
+    if [[ -n "$(_ufw_collect_conflicts "$final_numbered" "${current_cidrs[@]}")" ]]; then
+        log_error "Non-Cloudflare UFW 80/443 rule remains after reconciliation."
+        _update_firewall_fail 1
+        return $?
+    fi
+    for cidr in "${current_cidrs[@]}"; do
+        _ufw_has_range_port "$final_status" "$cidr" 80 || {
+            log_error "Final UFW verification missing ${cidr} -> 80/tcp"
+            _update_firewall_fail 1
+            return $?
+        }
+        _ufw_has_range_port "$final_status" "$cidr" 443 || {
+            log_error "Final UFW verification missing ${cidr} -> 443/tcp"
+            _update_firewall_fail 1
+            return $?
+        }
+    done
+
+    if ! firewall_docker_ingress_is_exact "${current_ipv4_cidrs[@]}"; then
+        firewall_reconcile_cloudflare_docker_ingress "${current_ipv4_cidrs[@]}" || mutation_rc=$?
+        if (( mutation_rc != 0 )); then
+            _update_firewall_fail "$mutation_rc"
+            return $?
+        fi
     fi
 
-    log_success "Firewall IP ranges updated safely"
+    # Publish the new CIDR generation atomically only after both firewall
+    # layers verify. Keep rollback snapshots until the cache commit succeeds.
+    local cf_cidr_cache="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache"
+    local cache_dir
+    cache_dir="$(dirname "$cf_cidr_cache")"
+    mkdir -p "$cache_dir" || {
+        log_error "Could not create Cloudflare CIDR cache directory: ${cache_dir}"
+        _update_firewall_fail 1
+        return $?
+    }
+    cache_tmp="$(mktemp -p "$cache_dir" .cf-cidrs.XXXXXXXXXX)" || {
+        log_error "Could not allocate Cloudflare CIDR cache update."
+        _update_firewall_fail 1
+        return $?
+    }
+    if ! printf '%s\n' "${current_cidrs[@]}" > "$cache_tmp"; then
+        log_error "Could not write Cloudflare CIDR cache update."
+        rm -f "$cache_tmp"
+        _update_firewall_fail 1
+        return $?
+    fi
+    if ! chmod 640 "$cache_tmp"; then
+        log_error "Could not set Cloudflare CIDR cache permissions."
+        rm -f "$cache_tmp"
+        _update_firewall_fail 1
+        return $?
+    fi
+    cache_commit_started=true
+    if ! mv -f -- "$cache_tmp" "$cf_cidr_cache"; then
+        log_error "Could not publish Cloudflare CIDR cache update."
+        cache_commit_started=false
+        rm -f "$cache_tmp"
+        _update_firewall_fail 1
+        return $?
+    fi
+
+    rm -f "$backup_v4"
+    backup_v4=""
+    rm -rf "$ufw_snapshot_dir"
+    ufw_snapshot_dir=""
+    _update_firewall_restore_outer_traps
+
+    log_success "Cloudflare UFW defence and Docker-published web ingress updated and verified"
     return 0
 }
 

@@ -14,6 +14,8 @@ bash -n "$U"
 ! grep -q 'uninstall-vaultwarden-core' "$U" || fail "entrypoint/core split reference returned"
 ! grep -q 'umount -l' "$U" || fail "lazy unmount returned"
 ! grep -Eq 'apt-get (remove|autoremove).*purge|apt-get autoremove' "$U" || fail "shared package purge returned"
+grep -Fq '20-vaultwarden-runtime.conf' "$U" || fail "uninstaller does not own the Docker runtime drop-in"
+grep -Fq 'VW-CF-INGRESS' "$U" || fail "uninstaller does not own the project Docker ingress chain"
 
 set -- run --dry-run
 # shellcheck source=../../../utilities/uninstall-vaultwarden.sh
@@ -56,6 +58,49 @@ mkdir -p "$(dirname "$MOUNT_GUARD")"
 printf '# Managed by VaultWarden-OCI setup.sh\n[Unit]\nRequiresMountsFor=/mnt/old-vw-data\n' > "$MOUNT_GUARD"
 PROJECT_STATE_DIR="$T/custom-state"; DATA_VOLUME_MOUNT=''; DATA_VOLUME_DEVICE=''; FSTAB="$T/no-fstab"
 storage_ambiguous || fail "managed mount guard did not expose partial storage config"
+
+# The Docker lifecycle drop-in is positively owned only when it matches the
+# exact setup-systemd managed contract. Foreign content is preserved.
+DOCKER_RUNTIME_DROPIN="$SYSTEMD/docker.service.d/20-vaultwarden-runtime.conf"
+cat > "$DOCKER_RUNTIME_DROPIN" <<'EOF_RUNTIME_DROPIN'
+# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
+# Caddy uses restart: on-failure, which does not auto-start on dockerd restart.
+[Unit]
+Wants=vaultwarden-iptables.service vaultwarden-startup.service
+EOF_RUNTIME_DROPIN
+docker_runtime_dropin_managed || fail "exact managed Docker runtime drop-in was not recognized"
+remove_docker_runtime_dropin || fail "managed Docker runtime drop-in could not be removed"
+[[ ! -e "$DOCKER_RUNTIME_DROPIN" ]] || fail "managed Docker runtime drop-in remained"
+mkdir -p "$(dirname "$DOCKER_RUNTIME_DROPIN")"
+printf '%s\n' '# operator-owned Docker drop-in' '[Unit]' 'Wants=example.service' > "$DOCKER_RUNTIME_DROPIN"
+if docker_runtime_dropin_managed; then fail "foreign Docker runtime drop-in was classified as managed"; fi
+remove_docker_runtime_dropin || fail "foreign Docker runtime drop-in preservation returned failure"
+[[ -f "$DOCKER_RUNTIME_DROPIN" ]] || fail "foreign Docker runtime drop-in was removed"
+rm -f "$DOCKER_RUNTIME_DROPIN"
+
+# The uniquely named project chain and its exact DOCKER-USER jump are removed
+# without touching unrelated raw iptables state.
+IPT_GATE_DIR="$T/iptables-gate"; mkdir -p "$IPT_GATE_DIR"
+IPT_GATE_JUMP="$IPT_GATE_DIR/jump"; IPT_GATE_CHAIN="$IPT_GATE_DIR/chain"; IPT_GATE_CALLS="$IPT_GATE_DIR/calls"
+printf 'present\n' > "$IPT_GATE_JUMP"; printf 'present\n' > "$IPT_GATE_CHAIN"; : > "$IPT_GATE_CALLS"
+iptables(){
+  printf '%s\n' "$*" >> "$IPT_GATE_CALLS"
+  case "$*" in
+    '-t filter -C DOCKER-USER -j VW-CF-INGRESS') [[ -e "$IPT_GATE_JUMP" ]] ;;
+    '-t filter -D DOCKER-USER -j VW-CF-INGRESS') rm -f "$IPT_GATE_JUMP" ;;
+    '-t filter -S VW-CF-INGRESS') [[ -e "$IPT_GATE_CHAIN" ]] && printf '%s\n' '-N VW-CF-INGRESS' ;;
+    '-t filter -F VW-CF-INGRESS') [[ -e "$IPT_GATE_CHAIN" ]] ;;
+    '-t filter -X VW-CF-INGRESS') rm -f "$IPT_GATE_CHAIN" ;;
+    '-t filter -S DOCKER-USER') [[ -e "$IPT_GATE_JUMP" ]] && printf '%s\n' '-A DOCKER-USER -j VW-CF-INGRESS' ;;
+    *) return 1 ;;
+  esac
+}
+remove_vaultwarden_docker_gate || fail "managed Docker ingress gate cleanup failed"
+[[ ! -e "$IPT_GATE_JUMP" && ! -e "$IPT_GATE_CHAIN" ]] || fail "managed Docker ingress gate remained"
+grep -Fq -- '-D DOCKER-USER -j VW-CF-INGRESS' "$IPT_GATE_CALLS" || fail "managed DOCKER-USER jump was not removed"
+grep -Fq -- '-F VW-CF-INGRESS' "$IPT_GATE_CALLS" || fail "managed ingress chain was not flushed"
+grep -Fq -- '-X VW-CF-INGRESS' "$IPT_GATE_CALLS" || fail "managed ingress chain was not deleted"
+unset -f iptables
 
 # A mounted custom state root is separate-volume evidence even when persisted
 # device/mount fields and other wiring are missing; destructive uninstall must

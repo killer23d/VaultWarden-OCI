@@ -31,6 +31,8 @@ ETC_DIR="${VW_UNINSTALL_ETC_DIR:-/etc/vaultwarden}"
 SWAPFILE="${VW_UNINSTALL_SWAPFILE:-/swapfile}"
 UNIVERSE_SOURCE="${VW_UNINSTALL_UNIVERSE_SOURCE:-/etc/apt/sources.list.d/ubuntu-universe.list}"
 MOUNT_GUARD="$SYSTEMD/docker.service.d/10-vaultwarden-data-volume.conf"
+DOCKER_RUNTIME_DROPIN="$SYSTEMD/docker.service.d/20-vaultwarden-runtime.conf"
+VW_CF_DOCKER_CHAIN="VW-CF-INGRESS"
 CS_DIR="${VW_UNINSTALL_CROWDSEC_DIR:-/etc/crowdsec}"
 CS_EMAIL="$CS_DIR/notifications/vaultwarden-email.yaml"
 CS_PROFILES="$CS_DIR/profiles.yaml.local"
@@ -199,6 +201,30 @@ remove_fstab(){
 guard_managed(){ [[ -f "$MOUNT_GUARD" && ! -L "$MOUNT_GUARD" ]] && grep -Fq 'Managed by VaultWarden-OCI setup.sh' "$MOUNT_GUARD"; }
 remove_guard(){ if [[ -e "$MOUNT_GUARD" || -L "$MOUNT_GUARD" ]]; then guard_managed || { warn "Preserving unmarked Docker mount guard: $MOUNT_GUARD"; return 1; }; rm -f "$MOUNT_GUARD"; rmdir "$(dirname "$MOUNT_GUARD")" 2>/dev/null || true; fi; has systemctl && systemctl daemon-reload 2>/dev/null || true; }
 
+docker_runtime_dropin_managed(){
+  [[ -f "$DOCKER_RUNTIME_DROPIN" && ! -L "$DOCKER_RUNTIME_DROPIN" ]] || return 1
+  local expected
+  expected="$(cat <<'DROPIN'
+# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
+# Caddy uses restart: on-failure, which does not auto-start on dockerd restart.
+[Unit]
+Wants=vaultwarden-iptables.service vaultwarden-startup.service
+DROPIN
+)"
+  [[ "$(cat "$DOCKER_RUNTIME_DROPIN")" == "$expected" ]]
+}
+
+remove_docker_runtime_dropin(){
+  [[ -e "$DOCKER_RUNTIME_DROPIN" || -L "$DOCKER_RUNTIME_DROPIN" ]] || return 0
+  if ! docker_runtime_dropin_managed; then
+    warn "Preserving unrecognized Docker runtime drop-in: $DOCKER_RUNTIME_DROPIN"
+    return 0
+  fi
+  rm -f -- "$DOCKER_RUNTIME_DROPIN" || return 1
+  rmdir "$(dirname "$DOCKER_RUNTIME_DROPIN")" 2>/dev/null || true
+  ok "Removed managed Docker runtime owner drop-in."
+}
+
 storage_ambiguous(){
   [[ -z "$DATA_VOLUME_DEVICE" ]] || return 1
   mountpoint -q "$PROJECT_STATE_DIR" 2>/dev/null && return 0
@@ -288,6 +314,7 @@ disable_units(){
     done
   fi
   for u in "${TIMERS[@]}" "${SERVICES[@]}"; do rm -f "$SYSTEMD/$u"; d="$SYSTEMD/$u.d"; rm -f "$d"/{10-state-dir.conf,20-identity.conf,30-run-as-root.conf} 2>/dev/null || true; rmdir "$d" 2>/dev/null || true; done
+  remove_docker_runtime_dropin || die "Could not remove the managed Docker runtime owner drop-in."
   if has systemctl; then
     for u in "${SERVICES[@]}"; do [[ "$u" == *'@.'* ]] || systemctl reset-failed "$u" 2>/dev/null || true; done
     systemctl daemon-reload 2>/dev/null || true
@@ -376,7 +403,32 @@ crowdsec_cleanup(){
 }
 
 ufw_numbers(){ has ufw || return 0; ufw status numbered 2>/dev/null | awk '$0~/#[[:space:]]*CF-IPv[46]([[:space:]-]|$)/{x=$0;sub(/^\[[[:space:]]*/,"",x);sub(/\].*/,"",x);gsub(/[[:space:]]/,"",x);if(x~/^[0-9]+$/)print x}' | sort -rn; }
-firewall_cleanup(){ local n; if has ufw; then while read -r n; do [[ -n "$n" ]] && ufw --force delete "$n" >/dev/null 2>&1 || true; done < <(ufw_numbers); fi; warn "Preserving unmarked UFW and raw iptables/ip6tables rules."; }
+
+vaultwarden_docker_gate_present(){
+  has iptables || return 1
+  iptables -t filter -S "$VW_CF_DOCKER_CHAIN" >/dev/null 2>&1 && return 0
+  iptables -t filter -S DOCKER-USER 2>/dev/null | grep -Fxq -- "-A DOCKER-USER -j $VW_CF_DOCKER_CHAIN"
+}
+
+remove_vaultwarden_docker_gate(){
+  has iptables || return 0
+  while iptables -t filter -C DOCKER-USER -j "$VW_CF_DOCKER_CHAIN" >/dev/null 2>&1; do
+    iptables -t filter -D DOCKER-USER -j "$VW_CF_DOCKER_CHAIN" || return $?
+  done
+  if iptables -t filter -S "$VW_CF_DOCKER_CHAIN" >/dev/null 2>&1; then
+    iptables -t filter -F "$VW_CF_DOCKER_CHAIN" || return $?
+    iptables -t filter -X "$VW_CF_DOCKER_CHAIN" || return $?
+    ok "Removed managed Docker Cloudflare ingress chain."
+  fi
+  return 0
+}
+
+firewall_cleanup(){
+  local n
+  remove_vaultwarden_docker_gate || die "Could not remove the managed Docker Cloudflare ingress gate."
+  if has ufw; then while read -r n; do [[ -n "$n" ]] && ufw --force delete "$n" >/dev/null 2>&1 || true; done < <(ufw_numbers); fi
+  warn "Preserving unmarked UFW and non-VaultWarden raw iptables/ip6tables rules."
+}
 
 test_reset_host(){
   [[ "$TEST_RESET" == true ]] || { [[ -e "$SWAPFILE" ]] && warn "Preserving ambiguous $SWAPFILE"; return 0; }
@@ -419,6 +471,8 @@ verify(){
     while IFS= read -r u; do [[ -n "$u" ]] && unit_is_live "$u" && { warn "RESIDUAL: active notification unit $u"; bad=$((bad+1)); }; done < <(notify_units)
   fi
   guard_managed && { warn "RESIDUAL: managed Docker mount guard $MOUNT_GUARD"; bad=$((bad+1)); } || true
+  docker_runtime_dropin_managed && { warn "RESIDUAL: managed Docker runtime owner drop-in $DOCKER_RUNTIME_DROPIN"; bad=$((bad+1)); } || true
+  vaultwarden_docker_gate_present && { warn "RESIDUAL: managed Docker Cloudflare ingress gate $VW_CF_DOCKER_CHAIN"; bad=$((bad+1)); } || true
   for u in "$OPT_DIR" "$ETC_DIR" "$RUNTIME"; do [[ ! -e "$u" && ! -L "$u" ]] || { warn "RESIDUAL: $u"; bad=$((bad+1)); }; done
   [[ -z "$(handoffs)" ]] || { warn "RESIDUAL: managed recovery handoff(s)"; bad=$((bad+1)); }
   [[ -z "$(at_jobs)" ]] || { warn "RESIDUAL: scheduled recovery cleanup at job(s)"; bad=$((bad+1)); }
