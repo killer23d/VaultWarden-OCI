@@ -2444,6 +2444,8 @@ check_recovery_kit_schema_truth() {
     export SECRETS_FILE="$work/secrets.yaml"
     export RECOVERY_KIT_DIR="$work/recovery"
     export RECOVERY_KIT_REPO_URL="https://example.invalid/VaultWarden-OCI.git"
+    export CLOUDFLARE_PROXY_ENABLED=false
+    [[ "$scenario" != "conditional-required" ]] || export CLOUDFLARE_PROXY_ENABLED=true
     printf 'fixture\n' >"$SECRETS_FILE"
     printf 'AGE-SECRET-KEY-1TESTFIXTURE00000000000000000000000000000000000000000000000\n' >"$work/age-key.txt"
     chmod 0600 "$work/age-key.txt"
@@ -2456,6 +2458,13 @@ check_recovery_kit_schema_truth() {
     log_debug() { :; }
     log_success() { :; }
     resolve_age_key_path() { printf '%s\n' "$work/age-key.txt"; }
+    has_command() {
+      if [[ "$1" == "age" ]]; then
+        [[ "$scenario" != "missing-age" ]]
+        return
+      fi
+      command -v "$1" >/dev/null 2>&1
+    }
     check_age_key() { [[ "$scenario" != "invalid-age" ]]; }
     _derive_age_public_key() { printf '%s\n' 'age1testfixture000000000000000000000000000000000000000000000000000'; }
     ensure_sops_env() { return 0; }
@@ -2465,6 +2474,11 @@ check_recovery_kit_schema_truth() {
       return 0
     }
     schema_keys() { printf '%s\n' required_key optional_key; }
+    schema_required_keys() { printf '%s\n' required_key; }
+    schema_keys_for_conditional_group() {
+      [[ "$1" == "cloudflare_proxy" ]] || return 1
+      printf '%s\n' optional_key
+    }
     schema_field() {
       local key="$1" field="$2"
       case "$field:$key" in
@@ -2487,6 +2501,8 @@ check_recovery_kit_schema_truth() {
         [[ "$scenario" != "sops-failure" ]] || return 42
         if [[ "$scenario" == "optional-unset" ]]; then
           printf ''
+        elif [[ "$scenario" == "conditional-required" ]]; then
+          printf '%s' 'CHANGE_ME_OPTIONAL'
         else
           printf '%s' 'optional-secret'
         fi
@@ -2495,11 +2511,46 @@ check_recovery_kit_schema_truth() {
       return 2
     }
 
+    if [[ "$scenario" == "render-write-failure" ]]; then
+      _grk_append() {
+        local output_file="$1"
+        shift
+        if [[ "${1:-}" == "printf" && "${2:-}" == '%s\n\n' && "${3:-}" == "optional-secret" ]]; then
+          grep -Fqx '[Optional Test Secret]' "$output_file" || return 97
+          : >"$work/render-write-failure-injected"
+          return 74
+        fi
+        "$@" >>"$output_file"
+      }
+    fi
+
+    if [[ "$scenario" == "post-link-unlink-failure" ]]; then
+      rm() {
+        if [[ "$*" == *'.vaultwarden-recovery-kit.'* && ! -e "$work/post-link-unlink-failed" ]]; then
+          : >"$work/post-link-unlink-failed"
+          return 1
+        fi
+        command rm "$@"
+      }
+    fi
+
     local target="$work/recovery/kit.txt"
     case "$scenario" in
-      missing-schema|broken-tooling|sops-failure|invalid-age)
+      missing-schema|broken-tooling|sops-failure|invalid-age|missing-age|conditional-required)
         ! _ork_generate_and_secure "$target" || exit 1
         [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ;;
+      render-write-failure)
+        ! _ork_generate_and_secure "$target" || exit 1
+        [[ -e "$work/render-write-failure-injected" ]] || exit 1
+        [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+        ;;
+      post-link-unlink-failure)
+        ! _ork_generate_and_secure "$target" || exit 1
+        [[ -e "$work/post-link-unlink-failed" ]] || exit 1
+        [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
         ;;
       optional-unset)
         _ork_generate_and_secure "$target"
@@ -2527,6 +2578,10 @@ check_recovery_kit_schema_truth() {
   recovery_case broken-tooling || fail 'broken schema tooling must abort before publication'
   recovery_case sops-failure || fail 'SOPS extraction failure must abort before publication'
   recovery_case invalid-age || fail 'invalid Age private identity must abort before publication'
+  recovery_case missing-age || fail 'missing age binary must abort cryptographic identity validation'
+  recovery_case conditional-required || fail 'runtime-required conditional secret must not render as optional unset'
+  recovery_case render-write-failure || fail 'render write failure after field header must abort before publication'
+  recovery_case post-link-unlink-failure || fail 'post-link staging unlink failure must roll back both publication names'
   recovery_case optional-unset || fail 'optional unset value must render explicitly'
   recovery_case valid || fail 'valid complete recovery kit must publish exactly once per field'
   recovery_case cleanup-failure || fail 'cleanup scheduler failure must remove newly published plaintext'

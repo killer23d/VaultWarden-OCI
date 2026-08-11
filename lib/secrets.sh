@@ -1455,6 +1455,15 @@ _grk_sops_extract() {
     unset _val
 }
 
+_grk_append() {
+    local output_file="$1"
+    shift
+    if ! "$@" >> "$output_file"; then
+        log_error "generate_recovery_kit: failed to append recovery document"
+        return 1
+    fi
+}
+
 _validate_recovery_kit_document() {
     local recovery_file="$1" expected_labels="$2"
     local label count
@@ -1488,7 +1497,7 @@ generate_recovery_kit() {
     local age_key
     local secrets_file="${SECRETS_FILE}"
     local env_file="${PROJECT_ROOT:-.}/.env"
-    local _schema_key_list
+    local _schema_key_list _runtime_required_key_list _required_key
 
     if ! schema_validate; then
         log_error "generate_recovery_kit: secrets-schema.yaml validation failed"
@@ -1502,6 +1511,16 @@ generate_recovery_kit() {
         log_error "generate_recovery_kit: secrets-schema.yaml contains no managed secrets"
         return 1
     }
+    if ! _runtime_required_key_list=$(_schema_required_runtime_keys); then
+        log_error "generate_recovery_kit: failed to determine runtime-required recovery secrets"
+        return 1
+    fi
+    declare -A _grk_runtime_required=()
+    while IFS= read -r _required_key; do
+        [[ -z "$_required_key" ]] && continue
+        _grk_runtime_required["$_required_key"]=1
+    done <<< "$_runtime_required_key_list"
+
     if [[ ! -f "$secrets_file" ]]; then
         log_error "generate_recovery_kit: secrets file not found: $secrets_file"
         return 1
@@ -1509,6 +1528,10 @@ generate_recovery_kit() {
     age_key=$(resolve_age_key_path) || return 1
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key not found: $age_key"
+        return 1
+    fi
+    if ! has_command age; then
+        log_error "generate_recovery_kit: 'age' is required to cryptographically validate the Age private identity"
         return 1
     fi
     if ! check_age_key "$age_key"; then
@@ -1557,7 +1580,7 @@ generate_recovery_kit() {
     if ! ensure_sops_env; then return 1; fi
     trap 'cleanup_secrets_environment' RETURN
 
-    local _rk_key _rk_value _rk_required _rk_placeholder _rk_label
+    local _rk_key _rk_value _rk_placeholder _rk_label
     while IFS= read -r _rk_key; do
         [[ -z "$_rk_key" ]] && continue
 
@@ -1578,32 +1601,19 @@ generate_recovery_kit() {
         fi
         _grk_seen_labels["$_rk_label"]=1
 
-        if ! _rk_required=$(schema_field "$_rk_key" required); then
-            log_error "generate_recovery_kit: failed to read required flag for schema key '$_rk_key'"
-            unset priv_key
-            return 1
-        fi
         if ! _rk_placeholder=$(schema_field "$_rk_key" placeholder); then
             log_error "generate_recovery_kit: failed to read placeholder for schema key '$_rk_key'"
             unset priv_key
             return 1
         fi
-        case "$_rk_required" in
-            true|false) ;;
-            *)
-                log_error "generate_recovery_kit: invalid required flag for schema key '$_rk_key': $_rk_required"
-                unset priv_key
-                return 1
-                ;;
-        esac
 
         if ! _rk_value=$(_grk_sops_extract "$_rk_key" "$secrets_file"); then
             unset priv_key
             return 1
         fi
         if _secret_value_is_inactive "$_rk_value" "$_rk_placeholder"; then
-            if [[ "$_rk_required" == "true" ]]; then
-                log_error "generate_recovery_kit: required secret '$_rk_key' is unset or placeholder"
+            if [[ -n "${_grk_runtime_required[$_rk_key]+set}" ]]; then
+                log_error "generate_recovery_kit: runtime-required secret '$_rk_key' is unset or placeholder"
                 unset _rk_value priv_key
                 return 1
             fi
@@ -1630,9 +1640,9 @@ generate_recovery_kit() {
     # $2y would be silently dropped by shell expansion in an unquoted heredoc,
     # producing a garbled hash that cannot be used for Caddy auth recovery.
     # All dynamic values are injected after the static block with printf.
-    # The heredoc-interspersed structure prevents full { } >> grouping here.
-    # shellcheck disable=SC2129
-    cat >> "$output_file" << 'EOF'
+    # Every append is explicitly checked because callers invoke this function
+    # from guarded boolean contexts where Bash errexit is not reliable.
+    _grk_append "$output_file" cat << 'EOF' || return 1
 ██████╗ ███████╗ ██████╗ ██████╗██╗   ██╗███████╗██████╗ ██╗   ██╗
 ██╔══██╗██╔════╝██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝
 ██████╔╝█████╗  ██║     ██║   ██║██║   ██║█████╗  ██████╔╝ ╚████╔╟ 
@@ -1651,15 +1661,15 @@ EOF
 
     # Inject all dynamic values explicitly so that $ characters in secrets
     # (e.g. bcrypt hashes: $2y$12$...) are written verbatim.
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" cat << 'EOF' || return 1
 ═══════════════════════════════════════════════════════════════════════
                         🚨 CRITICAL SECURITY DOCUMENT 🚨
 ═══════════════════════════════════════════════════════════════════════
 EOF
-    printf 'Created: %s\n' "$date_val"      >> "$output_file"
-    printf 'Server:  %s\n' "$hostname_val" >> "$output_file"
-    printf 'Domain:  %s\n' "$domain"       >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" printf 'Created: %s\n' "$date_val" || return 1
+    _grk_append "$output_file" printf 'Server:  %s\n' "$hostname_val" || return 1
+    _grk_append "$output_file" printf 'Domain:  %s\n' "$domain" || return 1
+    _grk_append "$output_file" cat << 'EOF' || return 1
 
 WARNING: This file contains highly sensitive UNENCRYPTED secrets.
 1. Save this to your Password Manager (Secure Note) IMMEDIATELY.
@@ -1673,13 +1683,13 @@ If you lose this key, your backups are FOREVER USELESS.
 
 [AGE PRIVATE KEY]
 EOF
-    printf '%s\n' "$priv_key" >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" printf '%s\n' "$priv_key" || return 1
+    _grk_append "$output_file" cat << 'EOF' || return 1
 
 [AGE PUBLIC KEY]
 EOF
-    printf '%s\n' "$pub_key" >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" printf '%s\n' "$pub_key" || return 1
+    _grk_append "$output_file" cat << 'EOF' || return 1
 
 ════════════════════════════════════════════════════════════════════════
 SECTION 2: SERVER SECRETS (DECRYPTED)
@@ -1692,13 +1702,13 @@ EOF
     local _kit_key
     while IFS= read -r _kit_key; do
         [[ -z "$_kit_key" ]] && continue
-        printf '[%s]\n' "${_grk_labels[$_kit_key]}" >> "$output_file"
-        printf '%s\n\n' "${_grk_values[$_kit_key]}" >> "$output_file"
+        _grk_append "$output_file" printf '[%s]\n' "${_grk_labels[$_kit_key]}" || return 1
+        _grk_append "$output_file" printf '%s\n\n' "${_grk_values[$_kit_key]}" || return 1
     done <<< "$_schema_key_list"
 
-    unset _grk_values _grk_labels _grk_seen_labels
+    unset _grk_values _grk_labels _grk_seen_labels _grk_runtime_required
 
-        cat >> "$output_file" << 'EOF'
+        _grk_append "$output_file" cat << 'EOF' || return 1
 
 ════════════════════════════════════════════════════════════════════════
 SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
@@ -1710,16 +1720,14 @@ TO RESTORE THIS SERVER ON NEW HARDWARE:
    [ ] Install Git, Docker, SOPS, Age, and required restore tools on the new server.
    [ ] Clone the repository:
 EOF
-    printf '       git clone %s\n' "$repo_clone_url" >> "$output_file"
+    _grk_append "$output_file" printf '       git clone %s\n' "$repo_clone_url" || return 1
     local repo_basename
     repo_basename=$(basename "$repo_clone_url" .git)
-    {
-        printf '       cd %s\n' "$repo_basename"
-        printf '\n'
-        printf '   [ ] For a fresh install only, run setup:\n'
-        printf '       sudo ./setup.sh install --domain %s --email %s\n' "$domain" "$admin_email"
-    } >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" printf '       cd %s\n' "$repo_basename" || return 1
+    _grk_append "$output_file" printf '\n' || return 1
+    _grk_append "$output_file" printf '   [ ] For a fresh install only, run setup:\n' || return 1
+    _grk_append "$output_file" printf '       sudo ./setup.sh install --domain %s --email %s\n' "$domain" "$admin_email" || return 1
+    _grk_append "$output_file" cat << 'EOF' || return 1
 
 2. PRIMARY RECOVERY PATH: EXISTING STATE DIRECTORY OR ATTACHED DATA/BLOCK VOLUME
    Use this when /var/lib/vaultwarden or the dedicated VaultWarden data volume is available.
@@ -1808,7 +1816,10 @@ EOF
         _remove_sensitive_file "$output_file" 2>/dev/null || rm -f -- "$output_file"
         return 1
     fi
-    chmod 600 "$output_file"
+    if ! chmod 600 "$output_file"; then
+        log_error "generate_recovery_kit: failed to enforce mode 0600 on staged recovery document"
+        return 1
+    fi
 }
 
 _ork_generate_and_secure() {
@@ -1827,8 +1838,15 @@ _ork_generate_and_secure() {
   }
   umask "$old_umask"
   (
-    local published=false
-    trap '[[ "$published" == "true" ]] || _remove_sensitive_file "$temp_file" 2>/dev/null || true' EXIT
+    local linked=false completed=false
+    _ork_rollback_incomplete_publication() {
+      [[ "$completed" == "true" ]] && return 0
+      if [[ "$linked" == "true" ]]; then
+        _remove_sensitive_file "$output_file" 2>/dev/null || true
+      fi
+      _remove_sensitive_file "$temp_file" 2>/dev/null || true
+    }
+    trap _ork_rollback_incomplete_publication EXIT
     trap 'exit 130' INT; trap 'exit 129' HUP; trap 'exit 143' TERM
     generate_recovery_kit "$temp_file" || exit 1
     [[ -s "$temp_file" ]] || exit 1
@@ -1840,8 +1858,9 @@ _ork_generate_and_secure() {
     fi
     # Hard-link publication is atomic and fails when the destination exists.
     ln -- "$temp_file" "$output_file" || exit 1
+    linked=true
     rm -f -- "$temp_file" || exit 1
-    published=true
+    completed=true
   ) || return 1
   return 0
 }
