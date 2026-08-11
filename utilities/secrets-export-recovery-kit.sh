@@ -18,8 +18,9 @@ USAGE:
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
-    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, and
-    publishes a protected plaintext recovery document in the
+    Decrypts secrets.yaml, validates required and conditionally required
+    secrets against the authoritative schema, and publishes a protected
+    plaintext recovery document in the
     recovery directory /root/vaultwarden-recovery.
 
     The recovery directory is owned by root:root with mode 0700, and the
@@ -119,7 +120,7 @@ check_prerequisites() {
     return 0
 }
 
-# Decrypt first and block export when placeholder values remain.
+# Decrypt first and enforce the authoritative recovery schema contract.
 # Recovery kit export enforces mode 0600.
 _export_recovery_kit_safe() {
     log_info "Validating secrets before recovery kit export..."
@@ -154,7 +155,7 @@ _export_recovery_kit_safe() {
         return 1
     fi
 
-    log_success "No placeholder values detected — proceeding with export"
+    log_success "Required recovery secrets validated — proceeding with export"
 
     local old_umask; old_umask=$(umask)
     umask 0177
