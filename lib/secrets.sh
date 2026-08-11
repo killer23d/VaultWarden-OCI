@@ -353,10 +353,8 @@ _schema_required_runtime_keys() {
 
     _email_mode="${EMAIL_MODE:-auto}"
     case "$_email_mode" in
-        smtp|direct|host) _runtime_groups+=("email_smtp") ;;
-        api)              _runtime_groups+=("email_api") ;;
-        auto)             : ;;
-        "") ;;
+        auto|smtp|direct|host) _runtime_groups+=("email_smtp") ;;
+        api)                   _runtime_groups+=("email_smtp" "email_api") ;;
         *)
             log_error "validate_required_secrets: unsupported EMAIL_MODE '${_email_mode}' while determining runtime-required secrets"
             return 1
@@ -376,59 +374,6 @@ _schema_required_runtime_keys() {
     done
 }
 
-_schema_group_all_values_active() {
-    local group="$1" secrets_file="$2"
-    local _group_keys _key _value _placeholder
-
-    if ! _group_keys=$(schema_keys_for_conditional_group "$group" 2>/dev/null); then
-        return 2
-    fi
-    [[ -n "$_group_keys" ]] || return 2
-
-    while IFS= read -r _key; do
-        [[ -z "$_key" ]] && continue
-        # Command-substitution assignments can include the resulting plaintext in
-        # Bash xtrace output. Disable tracing before any auto-email secret read.
-        { set +x; } 2>/dev/null
-        if ! _value=$(sops -d --extract "[\"$_key\"]" "$secrets_file" 2>/dev/null); then
-            unset _value
-            return 2
-        fi
-        if ! _placeholder=$(schema_placeholder_for_key "$_key" 2>/dev/null); then
-            unset _value
-            return 2
-        fi
-        if _secret_value_is_inactive "$_value" "$_placeholder"; then
-            unset _value
-            return 1
-        fi
-        unset _value
-    done <<< "$_group_keys"
-
-    return 0
-}
-
-_validate_auto_email_any_of() {
-    local secrets_file="$1" context="${2:-email-auto-validation}"
-    local _api_rc=0 _smtp_rc=0
-
-    [[ "${EMAIL_MODE:-auto}" == "auto" ]] || return 0
-
-    _schema_group_all_values_active "email_api" "$secrets_file" || _api_rc=$?
-    _schema_group_all_values_active "email_smtp" "$secrets_file" || _smtp_rc=$?
-
-    if (( _api_rc == 2 || _smtp_rc == 2 )); then
-        log_error "${context}: failed to read the auto-mode email credential groups from secrets-schema.yaml/secrets.yaml"
-        return 1
-    fi
-    if (( _api_rc == 0 || _smtp_rc == 0 )); then
-        return 0
-    fi
-
-    log_error "${context}: EMAIL_MODE=auto requires at least one configured email path (API token or SMTP password)"
-    return 1
-}
-
 validate_required_secrets() {
     local secrets_file="${1:-$SECRETS_FILE}"
 
@@ -439,10 +384,6 @@ validate_required_secrets() {
     fi
 
     if ! ensure_sops_env; then return 1; fi
-    if ! _validate_auto_email_any_of "$secrets_file" "validate_required_secrets"; then
-        cleanup_secrets_environment
-        return 1
-    fi
 
     local missing_secrets=()
     local inactive_secrets=()
@@ -499,10 +440,6 @@ check_placeholder_values() {
     fi
 
     if ! ensure_sops_env; then return 1; fi
-    if ! _validate_auto_email_any_of "$secrets_file" "check_placeholder_values"; then
-        cleanup_secrets_environment
-        return 1
-    fi
     local placeholder_secrets=()
     local unreadable_secrets=()
     declare -A _seen_required=()
@@ -1662,9 +1599,6 @@ generate_recovery_kit() {
 
     if ! ensure_sops_env; then return 1; fi
     trap 'cleanup_secrets_environment' RETURN
-    if ! _validate_auto_email_any_of "$secrets_file" "generate_recovery_kit"; then
-        return 1
-    fi
 
     local _rk_key _rk_value _rk_placeholder _rk_label
     while IFS= read -r _rk_key; do

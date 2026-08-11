@@ -2484,6 +2484,7 @@ check_recovery_kit_schema_truth() {
       case "$1" in
         cloudflare_proxy) printf '%s\n' optional_key ;;
         email_api) printf '%s\n' required_key ;;
+        email_smtp) printf '%s\n' required_key ;;
         *) return 1 ;;
       esac
     }
@@ -2627,9 +2628,9 @@ check_recovery_kit_schema_truth() {
         [[ "$scenario" == "push-disabled" ]] || export PUSH_ENABLED=true
         ;;
       integrity-required) export REQUIRE_AUTHENTICATED_INTEGRITY=true ;;
-      email-api-required) export EMAIL_MODE=api ;;
+      email-api-required|email-api-smtp-required) export EMAIL_MODE=api ;;
       email-smtp-required) export EMAIL_MODE=smtp ;;
-      email-auto-api-only|email-auto-smtp-only|email-auto-none|email-auto-xtrace) export EMAIL_MODE=auto ;;
+      email-auto-api-only|email-auto-smtp-only|email-auto-none) export EMAIL_MODE=auto ;;
       email-default-smtp-only) unset EMAIL_MODE ;;
       *) exit 2 ;;
     esac
@@ -2658,7 +2659,7 @@ check_recovery_kit_schema_truth() {
       case "$scenario" in
         push-required|push-disabled) printf '%s\n' push_installation_id push_installation_key ;;
         integrity-required) printf '%s\n' file_integrity_hmac_key ;;
-        push-group-empty|email-api-required|email-smtp-required|email-auto-api-only|email-auto-smtp-only|email-auto-none|email-auto-xtrace|email-default-smtp-only) ;;
+        push-group-empty|email-api-required|email-api-smtp-required|email-smtp-required|email-auto-api-only|email-auto-smtp-only|email-auto-none|email-default-smtp-only) ;;
       esac
     }
     schema_keys_for_conditional_group() {
@@ -2700,13 +2701,12 @@ check_recovery_kit_schema_truth() {
         *email_api_token*)
           case "$scenario" in
             email-api-required|email-auto-smtp-only|email-auto-none|email-default-smtp-only) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
-            email-auto-xtrace) printf '%s' AUTO_EMAIL_XTRACE_SECRET_DO_NOT_LEAK ;;
             *) printf '%s' configured-email-api-token ;;
           esac
           ;;
         *smtp_password*)
           case "$scenario" in
-            email-smtp-required|email-auto-api-only|email-auto-none) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+            email-api-smtp-required|email-smtp-required|email-auto-api-only|email-auto-none) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
             *) printf '%s' configured-smtp-password ;;
           esac
           ;;
@@ -2715,17 +2715,6 @@ check_recovery_kit_schema_truth() {
     }
 
     local target="$work/recovery/kit.txt"
-    if [[ "$scenario" == "email-auto-xtrace" ]]; then
-      local trace_output trace_rc
-      set +e
-      trace_output="$({ set -x; _validate_auto_email_any_of "$SECRETS_FILE" "xtrace-regression"; } 2>&1)"
-      trace_rc=$?
-      set -e
-      [[ "$trace_rc" == 0 ]] || exit 1
-      [[ "$trace_output" != *'AUTO_EMAIL_XTRACE_SECRET_DO_NOT_LEAK'* ]] || exit 1
-      return 0
-    fi
-
     case "$scenario" in
       push-disabled)
         _ork_generate_and_secure "$target" || exit 1
@@ -2735,7 +2724,7 @@ check_recovery_kit_schema_truth() {
         [[ "$optional_count" == 2 ]] || exit 1
         return 0
         ;;
-      email-auto-api-only|email-auto-smtp-only|email-default-smtp-only)
+      email-auto-smtp-only|email-default-smtp-only)
         _ork_generate_and_secure "$target" || exit 1
         [[ -f "$target" ]] || exit 1
         [[ "$(grep -Fxc '[Email API Token]' "$target")" == 1 ]] || exit 1
@@ -2757,12 +2746,12 @@ check_recovery_kit_schema_truth() {
   runtime_required_case push-group-empty || fail 'active runtime requirement group must not silently resolve to zero schema keys'
   runtime_required_case integrity-required || fail 'authenticated-integrity policy must reject an inactive HMAC key before publication'
   runtime_required_case email-api-required || fail 'EMAIL_MODE=api must reject an inactive API token before publication'
+  runtime_required_case email-api-smtp-required || fail 'EMAIL_MODE=api must still require the canonical Postfix SMTP secret before publication'
   runtime_required_case email-smtp-required || fail 'EMAIL_MODE=smtp must reject an inactive SMTP password before publication'
-  runtime_required_case email-auto-api-only || fail 'EMAIL_MODE=auto must allow an API-only configured credential path'
-  runtime_required_case email-auto-smtp-only || fail 'EMAIL_MODE=auto must allow an SMTP-only configured credential path'
-  runtime_required_case email-auto-none || fail 'EMAIL_MODE=auto must reject recovery publication when neither email credential path is configured'
-  runtime_required_case email-auto-xtrace || fail 'auto-email any-of validation must not expose credential plaintext through Bash xtrace'
-  runtime_required_case email-default-smtp-only || fail 'missing EMAIL_MODE must inherit auto any-of semantics rather than an AND requirement'
+  runtime_required_case email-auto-api-only || fail 'EMAIL_MODE=auto must reject API-only recovery state because the canonical stack still starts Postfix'
+  runtime_required_case email-auto-smtp-only || fail 'EMAIL_MODE=auto must allow SMTP-only recovery state with the API credential optional'
+  runtime_required_case email-auto-none || fail 'EMAIL_MODE=auto must reject recovery publication when the stack-level SMTP secret is inactive'
+  runtime_required_case email-default-smtp-only || fail 'missing EMAIL_MODE must inherit auto semantics with the stack-level SMTP secret required'
 
   (
     set -euo pipefail
@@ -2773,6 +2762,15 @@ check_recovery_kit_schema_truth() {
     [[ "$(schema_keys_for_conditional_group email_api)" == 'email_api_token' ]]
     [[ "$(schema_keys_for_conditional_group email_smtp)" == 'smtp_password' ]]
   ) || fail 'configured recovery requirement membership must remain schema-owned'
+
+  grep -Fq 'RELAYHOST_PASSWORD_FILE=/run/secrets/smtp_password' "$ROOT/docker-compose.yml.example" \
+    || fail 'canonical Postfix service no longer consumes the smtp_password file secret'
+  grep -Fq 'file: /run/vaultwarden-oci/secrets/smtp_password' "$ROOT/docker-compose.yml.example" \
+    || fail 'canonical Compose smtp_password file mapping changed'
+  grep -Fq 'cp "$compose_template" "$temp_compose"' "$ROOT/utilities/setup-env.sh" \
+    || fail 'setup-env no longer installs the canonical Compose template as-is'
+  grep -Fq 'docker compose "${compose_args[@]}"' "$ROOT/startup.sh" \
+    || fail 'startup no longer starts the full canonical Compose service set'
 
   (
     set -euo pipefail

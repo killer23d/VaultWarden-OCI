@@ -142,10 +142,10 @@ Current groups are:
 | `cloudflare_proxy` | `cf_worker_bouncer_token`, `cloudflare_zone_id`, `cf_account_id` | all required when `CLOUDFLARE_PROXY_ENABLED=true` |
 | `push` | `push_installation_id`, `push_installation_key` | both required when `PUSH_ENABLED=true` |
 | `authenticated_integrity` | `file_integrity_hmac_key` | required when `REQUIRE_AUTHENTICATED_INTEGRITY=true` |
-| `email_api` | `email_api_token` | required for `EMAIL_MODE=api`; one alternative in `auto` |
-| `email_smtp` | `smtp_password` | required for `EMAIL_MODE=smtp`, `direct`, or `host`; one alternative in `auto` |
+| `email_api` | `email_api_token` | additionally required for `EMAIL_MODE=api` |
+| `email_smtp` | `smtp_password` | stack-level requirement for every supported `EMAIL_MODE` because the canonical Compose stack always starts Postfix with this file secret |
 
-`EMAIL_MODE=auto` is a fallback chain, not an AND requirement. Recovery/required-secret validation accepts `auto` when at least one complete email credential group (`email_api` or `email_smtp`) is configured; the other group's inactive placeholder remains genuinely optional in that mode. An omitted `EMAIL_MODE` uses the same effective `auto` semantics.
+`EMAIL_MODE=auto` still controls operational email dispatch as an API-to-SMTP fallback chain, but recovery completeness covers the full appliance rather than only `lib/email.sh`. The canonical Compose template always declares the Postfix service and its `smtp_password` file secret, and startup starts the full service set. Therefore `smtp_password` must be configured in `auto` even when an API token is available; `email_api_token` remains optional in `auto`. An omitted `EMAIL_MODE` uses the same effective `auto` semantics.
 
 This lets runtime/setup/recovery validation distinguish configuration-dependent requirements without turning `required: false` into either "always optional" or "always required."
 
@@ -202,7 +202,7 @@ admin_basic_auth_hash
 caddy_cloudflare_dns_token
 ```
 
-Other keys may become operationally required by the configured feature path, such as Cloudflare proxy/Workers integration, authenticated backup integrity, push, or an explicit email mode. In `EMAIL_MODE=auto`, the API and SMTP groups are alternatives: at least one configured path is required, not both.
+Other keys may become operationally required by the configured feature path, such as Cloudflare proxy/Workers integration, authenticated backup integrity, push, or email mode. Under the canonical full-stack startup contract, `smtp_password` is required for every supported email mode because Postfix is always part of the generated Compose stack; `EMAIL_MODE=api` additionally requires `email_api_token`.
 
 The supported golden production path requires the Cloudflare Workers and SMTP credentials described in [DEPLOYMENT.md](DEPLOYMENT.md), even when a base schema field is represented as conditional/not universally required.
 
