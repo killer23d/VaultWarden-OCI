@@ -643,11 +643,29 @@ main() {
         operation_set_phase "firewall" "Firewall setup"
     fi
 
+    local rc=0 stop_rc=0
     case "$PHASE" in
-        ufw)      _phase_ufw ;;
-        iptables) _phase_iptables ;;
-        all)      _phase_ufw; _phase_iptables ;;
+        ufw)
+            _phase_ufw || rc=$?
+            ;;
+        iptables)
+            _phase_iptables || rc=$?
+            ;;
+        all)
+            _phase_ufw || rc=$?
+            if (( rc == 0 )); then
+                _phase_iptables || rc=$?
+            fi
+            ;;
     esac
+
+    if (( rc != 0 )) && [[ "$DRY_RUN" != "true" ]]; then
+        firewall_fail_closed_stop_caddy || stop_rc=$?
+        if (( stop_rc != 0 )); then
+            log_error "CRITICAL: firewall setup failed and fail-closed Caddy shutdown could not be confirmed."
+        fi
+    fi
+    return "$rc"
 }
 
 main

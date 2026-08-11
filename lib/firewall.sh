@@ -153,6 +153,34 @@ PY
     fi
 }
 
+firewall_fail_closed_stop_caddy() {
+    local container="${VW_CADDY_CONTAINER_NAME:-vaultwarden_caddy}" running="" rc=0
+    [[ "${DRY_RUN:-false}" != "true" ]] || return 0
+    command -v docker >/dev/null 2>&1 || {
+        log_error "CRITICAL: firewall reconciliation failed and Docker is unavailable; cannot confirm ${container} is stopped."
+        return 1
+    }
+
+    running="$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" || rc=$?
+    if (( rc != 0 )); then
+        # Missing container is safe; an unqueryable Docker daemon is not.
+        if docker container inspect "$container" >/dev/null 2>&1; then
+            log_error "CRITICAL: firewall reconciliation failed and ${container} running state could not be determined."
+            return 1
+        fi
+        return 0
+    fi
+    [[ "$running" == "true" ]] || return 0
+
+    log_warn "Firewall reconciliation failed; stopping ${container} to keep published web ingress fail-closed."
+    if ! docker stop --time 30 "$container" >/dev/null; then
+        log_error "CRITICAL: could not stop ${container} after firewall failure."
+        return 1
+    fi
+    log_warn "${container} is stopped. Fix the firewall error, then start the stack normally."
+    return 0
+}
+
 firewall_load_cached_cloudflare_ipv4() {
     local out_name="$1"
     local -n out_ref="$out_name"

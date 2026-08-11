@@ -767,6 +767,8 @@ assert_file_contains "$FIREWALL_LIB" 'VW_CADDY_EXTERNAL_CIDR="172.22.0.0/28"'
 assert_file_contains "$FIREWALL_LIB" '--ctorigdstport'
 assert_file_contains "$FIREWALL_LIB" '-j RETURN'
 assert_file_contains "$FIREWALL_LIB" '-j DROP'
+assert_file_contains "$FIREWALL_LIB" 'firewall_fail_closed_stop_caddy()'
+assert_file_contains "$SETUP_FIREWALL" 'firewall_fail_closed_stop_caddy || stop_rc=$?'
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 130' INT"
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 143' TERM"
 assert_file_contains "$UPDATER" 'firewall_reconcile_cloudflare_docker_ingress "${current_ipv4_cidrs[@]}"'
@@ -918,6 +920,49 @@ cat >/dev/null
 exit "${IPT_RESTORE_RC:-0}"
 EOF_IPTABLES_RESTORE
 chmod 0755 "$TMP/bin/docker" "$TMP/bin/iptables" "$TMP/bin/iptables-save" "$TMP/bin/iptables-restore"
+
+FAIL_CLOSED_DOCKER="$TMP/fail-closed-docker"
+cat > "$FAIL_CLOSED_DOCKER" <<'EOF_FAIL_CLOSED_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAIL_CLOSED_DOCKER_LOG:?}"
+case "${1:-}" in
+    inspect)
+        printf 'true\n'
+        exit 0
+        ;;
+    stop)
+        exit "${FAIL_CLOSED_STOP_RC:-0}"
+        ;;
+    container)
+        exit 0
+        ;;
+esac
+exit 2
+EOF_FAIL_CLOSED_DOCKER
+chmod 0755 "$FAIL_CLOSED_DOCKER"
+FAIL_CLOSED_PROBE="$TMP/fail-closed-caddy-probe.bash"
+cat > "$FAIL_CLOSED_PROBE" <<'EOF_FAIL_CLOSED_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+DRY_RUN=false
+log_warn(){ printf 'WARN: %s\n' "$*" >> "${FAIL_CLOSED_LOG:?}"; }
+log_error(){ printf 'ERROR: %s\n' "$*" >> "${FAIL_CLOSED_LOG:?}"; }
+docker(){ "${FAIL_CLOSED_DOCKER:?}" "$@"; }
+EOF_FAIL_CLOSED_PROBE
+extract_func "$FIREWALL_LIB" firewall_fail_closed_stop_caddy >> "$FAIL_CLOSED_PROBE"
+cat >> "$FAIL_CLOSED_PROBE" <<'EOF_FAIL_CLOSED_PROBE'
+firewall_fail_closed_stop_caddy
+EOF_FAIL_CLOSED_PROBE
+chmod 0755 "$FAIL_CLOSED_PROBE"
+FAIL_CLOSED_DOCKER_LOG="$TMP/fail-closed-docker.log"
+FAIL_CLOSED_LOG="$TMP/fail-closed.log"
+: > "$FAIL_CLOSED_DOCKER_LOG"; : > "$FAIL_CLOSED_LOG"
+export FAIL_CLOSED_DOCKER FAIL_CLOSED_DOCKER_LOG FAIL_CLOSED_LOG
+"$BASH" "$FAIL_CLOSED_PROBE"
+assert_file_contains "$FAIL_CLOSED_DOCKER_LOG" 'inspect --format {{.State.Running}} vaultwarden_caddy'
+assert_file_contains "$FAIL_CLOSED_DOCKER_LOG" 'stop --time 30 vaultwarden_caddy'
+assert_file_contains "$FAIL_CLOSED_LOG" 'Firewall reconciliation failed; stopping vaultwarden_caddy'
 
 # Behavioral backend detection: active dockerd argv/config wins over stale chain existence.
 PRE_PROBE="$TMP/docker-preflight-probe.bash"
