@@ -965,7 +965,9 @@ assert_file_contains "$LOG_FILE" 'SSH port 443/tcp conflicts with managed Cloudf
 assert_file_contains "$FIREWALL_LIB" 'VW_CF_DOCKER_CHAIN="VW-CF-INGRESS"'
 assert_file_contains "$FIREWALL_LIB" 'VW_CADDY_EXTERNAL_CIDR="172.22.0.0/28"'
 assert_file_contains "$FIREWALL_LIB" '--ctorigdstport'
-assert_file_contains "$FIREWALL_LIB" '--ctstate ESTABLISHED,RELATED -j RETURN'
+assert_file_contains "$FIREWALL_LIB" '--ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN'
+! grep -Fq -- '--ctstate ESTABLISHED,RELATED -j RETURN' "$FIREWALL_LIB" \
+    || fail "Docker gate still has a directionless established-state ingress bypass"
 assert_file_contains "$FIREWALL_LIB" '_firewall_managed_chain_order_is_safe || return 1'
 assert_file_contains "$SETUP_FIREWALL" 'if ! _ufw_has_admin_port "$status" "$ssh_port"; then'
 ! grep -Fq '_ufw_has_broad_admin_port' "$SETUP_FIREWALL" || fail "setup still requires broad SSH exposure"
@@ -1374,7 +1376,7 @@ run_iptables_probe
 [[ "$IPT_RC" -eq 0 ]] || fail "initial Docker Cloudflare gate reconciliation returned $IPT_RC"
 sentinel80_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 80 -j DROP' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 sentinel443_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
-established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 jump_line="$(grep -n 'iptables -t filter -I DOCKER-USER 1 -j VW-CF-INGRESS' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 allow_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 2 -d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 [[ -n "$sentinel80_line" && -n "$sentinel443_line" && -n "$established_line" && -n "$jump_line" && -n "$allow_line" ]]     || fail "initial Docker gate mutation-order probe missed sentinel/established/jump/allow calls"
@@ -1387,8 +1389,8 @@ mutation_line="$(grep -nE 'iptables -t filter -(N|I|D) ' "$IPT_CALL_LOG" | cut -
     || fail "Cloudflare gate is not the first DOCKER-USER rule"
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport 80 -j RETURN'
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport 443 -j RETURN'
-assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN'
-[[ "$(head -n1 "$IPT_CF_FILE")" == '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' ]] \
+assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN'
+[[ "$(head -n1 "$IPT_CF_FILE")" == '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN' ]] \
     || fail "established/related Caddy return traffic is not ahead of ingress DROP rules"
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 80 -j DROP'
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP'
@@ -1399,7 +1401,7 @@ printf '%s
 run_iptables_probe
 [[ "$IPT_RC" -eq 0 ]] || fail "orphan stale Docker gate reconciliation returned $IPT_RC"
 stale_delete_line="$(grep -n 'iptables -t filter -D VW-CF-INGRESS 3' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
-established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 jump_line="$(grep -n 'iptables -t filter -I DOCKER-USER 1 -j VW-CF-INGRESS' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 [[ -n "$stale_delete_line" && -n "$established_line" && -n "$jump_line" && "$stale_delete_line" -lt "$established_line" && "$established_line" -lt "$jump_line" ]]     || fail "orphan stale project-chain rules were activated before cleanup"
 ! grep -Fq -- '-A VW-CF-INGRESS -j ACCEPT' "$IPT_CF_FILE" || fail "orphan stale ACCEPT survived reconciliation"
@@ -1416,6 +1418,22 @@ run_iptables_probe
 ! grep -Eq 'iptables -t filter -(N|I|D) ' "$IPT_CALL_LOG" || fail "already-reconciled firewall mutated iptables"
 assert_file_contains "$IPT_LOG_FILE" 'skipping mutation'
 
+# A directionless ESTABLISHED/RELATED RETURN is not exact: ORIGINAL-direction
+# packets from a direct connection established before cutover could otherwise
+# continue toward Caddy. Reconciliation must replace it with REPLY-only state.
+sed '1s/ --ctdir REPLY//' "$IPT_CF_FILE" > "$IPT_CF_FILE.tmp"
+mv "$IPT_CF_FILE.tmp" "$IPT_CF_FILE"
+[[ "$(head -n1 "$IPT_CF_FILE")" == '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' ]] \
+    || fail "directionless established-state fixture was not created"
+: > "$IPT_CALL_LOG"
+run_iptables_probe
+[[ "$IPT_RC" -eq 0 ]] || fail "directionless established-state reconciliation returned $IPT_RC"
+grep -qx 'save' "$IPT_CALL_LOG" || fail "directionless established-state rule was incorrectly treated as exact"
+[[ "$(head -n1 "$IPT_CF_FILE")" == '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN' ]] \
+    || fail "reconciliation did not restore reply-direction-only established handling"
+! grep -Fxq -- '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' "$IPT_CF_FILE" \
+    || fail "directionless established-state bypass survived reconciliation"
+
 # Exact-state verification must reject a chain whose DROP precedes any RETURN.
 # Otherwise a manually reordered chain can be misclassified as safe and break
 # Cloudflare ingress or Caddy-initiated outbound replies.
@@ -1431,7 +1449,7 @@ mv "$IPT_CF_FILE.tmp" "$IPT_CF_FILE"
 run_iptables_probe
 [[ "$IPT_RC" -eq 0 ]] || fail "misordered Docker gate reconciliation returned $IPT_RC"
 grep -qx 'save' "$IPT_CALL_LOG" || fail "misordered Docker gate was incorrectly treated as exact"
-[[ "$(head -n1 "$IPT_CF_FILE")" == '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' ]] \
+[[ "$(head -n1 "$IPT_CF_FILE")" == '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN' ]] \
     || fail "misordered Docker gate did not restore RETURN-before-DROP ordering"
 
 : > "$IPT_REJECT_MARKER"

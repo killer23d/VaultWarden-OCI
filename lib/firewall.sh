@@ -327,7 +327,7 @@ firewall_docker_ingress_is_exact() {
     # Replies to connections initiated by Caddy must return to Docker's normal
     # forwarding path instead of being mistaken for new public web ingress.
     iptables -t filter -C "$VW_CF_DOCKER_CHAIN" \
-        -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \
+        -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN \
         >/dev/null 2>&1 || return 1
 
     for cidr in "${cidrs[@]}"; do
@@ -399,7 +399,7 @@ firewall_reconcile_cloudflare_docker_ingress() {
     # Preserve replies to Caddy-initiated connections before attaching the new
     # fail-closed gate. NEW non-Cloudflare web traffic still falls through this
     # rule into the two DROP sentinels.
-    iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1         -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN         || return $?
+    iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1         -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN         || return $?
 
     # The chain now contains only known-safe project rules: established replies
     # plus the two web DROP sentinels. Attach it before adding Cloudflare RETURNs
