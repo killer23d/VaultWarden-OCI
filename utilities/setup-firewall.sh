@@ -126,9 +126,8 @@ _ufw_has_range_port() {
         fi
         [[ "${fields[$i]:-}" == "ALLOW" ]] || continue
         i=$((i + 1))
-        if [[ "${fields[$i]:-}" == "IN" ]]; then
-            i=$((i + 1))
-        fi
+        [[ "${fields[$i]:-}" == "IN" ]] || continue
+        i=$((i + 1))
 
         for (( ; i<${#fields[@]}; i++ )); do
             token="${fields[$i]}"
@@ -144,7 +143,7 @@ _ufw_has_admin_port() {
     local status="$1" port="$2"
     # Preserve any explicit single-port TCP administrator rule, including a
     # source-restricted ALLOW/LIMIT. PR4 must not widen an operator's SSH ACL.
-    grep -qE "^${port}/tcp([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?[[:space:]]+[^[:space:]#]+([[:space:]]|$)" <<< "$status"
+    grep -qE "^${port}/tcp([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN[[:space:]]+[^[:space:]#]+([[:space:]]|$)" <<< "$status"
 }
 
 _ufw_line_cidr() {
@@ -169,7 +168,7 @@ _ufw_collect_conflicts() {
     local line rule_num cidr keep desired_cidr action
 
     while IFS= read -r line; do
-        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
+        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN([[:space:]]|$) ]] || continue
         rule_num="${BASH_REMATCH[1]}"
         action="${BASH_REMATCH[6]}"
         if [[ -z "${BASH_REMATCH[3]}" || "$action" != "ALLOW" ]]; then

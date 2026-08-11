@@ -155,9 +155,8 @@ update_firewall_ranges() {
             fi
             [[ "${fields[$i]:-}" == "ALLOW" ]] || continue
             i=$((i + 1))
-            if [[ "${fields[$i]:-}" == "IN" ]]; then
-                i=$((i + 1))
-            fi
+            [[ "${fields[$i]:-}" == "IN" ]] || continue
+            i=$((i + 1))
 
             for (( ; i<${#fields[@]}; i++ )); do
                 token="${fields[$i]}"
@@ -191,7 +190,7 @@ update_firewall_ranges() {
         local -a desired=("$@")
         local line rule_num cidr keep desired_cidr action
         while IFS= read -r line; do
-            [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
+            [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN([[:space:]]|$) ]] || continue
             rule_num="${BASH_REMATCH[1]}"
             action="${BASH_REMATCH[6]}"
             if [[ -z "${BASH_REMATCH[3]}" || "$action" != "ALLOW" ]]; then
