@@ -2630,7 +2630,7 @@ check_recovery_kit_schema_truth() {
       integrity-required) export REQUIRE_AUTHENTICATED_INTEGRITY=true ;;
       email-api-required|email-api-smtp-required) export EMAIL_MODE=api ;;
       email-smtp-required) export EMAIL_MODE=smtp ;;
-      email-auto-api-only|email-auto-smtp-only|email-auto-none) export EMAIL_MODE=auto ;;
+      email-auto-api-only|email-auto-smtp-only|email-auto-none|validator-xtrace) export EMAIL_MODE=auto ;;
       email-default-smtp-only) unset EMAIL_MODE ;;
       *) exit 2 ;;
     esac
@@ -2659,7 +2659,7 @@ check_recovery_kit_schema_truth() {
       case "$scenario" in
         push-required|push-disabled) printf '%s\n' push_installation_id push_installation_key ;;
         integrity-required) printf '%s\n' file_integrity_hmac_key ;;
-        push-group-empty|email-api-required|email-api-smtp-required|email-smtp-required|email-auto-api-only|email-auto-smtp-only|email-auto-none|email-default-smtp-only) ;;
+        push-group-empty|email-api-required|email-api-smtp-required|email-smtp-required|email-auto-api-only|email-auto-smtp-only|email-auto-none|validator-xtrace|email-default-smtp-only) ;;
       esac
     }
     schema_keys_for_conditional_group() {
@@ -2707,6 +2707,7 @@ check_recovery_kit_schema_truth() {
         *smtp_password*)
           case "$scenario" in
             email-api-smtp-required|email-smtp-required|email-auto-api-only|email-auto-none) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+            validator-xtrace) printf '%s' REQUIRED_VALIDATOR_XTRACE_SECRET_DO_NOT_LEAK ;;
             *) printf '%s' configured-smtp-password ;;
           esac
           ;;
@@ -2715,6 +2716,17 @@ check_recovery_kit_schema_truth() {
     }
 
     local target="$work/recovery/kit.txt"
+    if [[ "$scenario" == "validator-xtrace" ]]; then
+      local trace_output trace_rc
+      set +e
+      trace_output="$({ set -x; validate_required_secrets "$SECRETS_FILE"; } 2>&1)"
+      trace_rc=$?
+      set -e
+      [[ "$trace_rc" == 0 ]] || exit 1
+      [[ "$trace_output" != *'REQUIRED_VALIDATOR_XTRACE_SECRET_DO_NOT_LEAK'* ]] || exit 1
+      return 0
+    fi
+
     case "$scenario" in
       push-disabled)
         _ork_generate_and_secure "$target" || exit 1
@@ -2751,6 +2763,7 @@ check_recovery_kit_schema_truth() {
   runtime_required_case email-auto-api-only || fail 'EMAIL_MODE=auto must reject API-only recovery state because the canonical stack still starts Postfix'
   runtime_required_case email-auto-smtp-only || fail 'EMAIL_MODE=auto must allow SMTP-only recovery state with the API credential optional'
   runtime_required_case email-auto-none || fail 'EMAIL_MODE=auto must reject recovery publication when the stack-level SMTP secret is inactive'
+  runtime_required_case validator-xtrace || fail 'required-secret validation must not expose decrypted values through Bash xtrace'
   runtime_required_case email-default-smtp-only || fail 'missing EMAIL_MODE must inherit auto semantics with the stack-level SMTP secret required'
 
   (

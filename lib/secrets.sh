@@ -396,6 +396,8 @@ validate_required_secrets() {
         local sops_stderr rc=0
         local value placeholder
         sops_stderr=$(mktemp)
+        # Prevent decrypted assignment values from appearing in caller xtrace output.
+        { set +x; } 2>/dev/null
         value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>"$sops_stderr") || rc=$?
         if [[ $rc -ne 0 ]]; then
             log_error "validate_required_secrets: required secret '$secret' is missing or unreadable"
