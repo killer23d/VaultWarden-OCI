@@ -245,6 +245,7 @@ _ufw_reject_ambiguous_inbound_allows() {
         [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]] || continue
         rule_num="${BASH_REMATCH[1]}"
         body="${BASH_REMATCH[2]}"
+        body="${body%%#*}"
         [[ "$body" =~ [[:space:]](ALLOW|LIMIT)([[:space:]]|$) ]] || continue
         [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+OUT([[:space:]]|$) ]] && continue
 
