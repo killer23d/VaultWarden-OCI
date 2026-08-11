@@ -120,6 +120,34 @@ update_firewall_ranges() {
     # backend. A stale DOCKER-USER chain alone is not proof of the active mode.
     firewall_docker_backend_preflight || return $?
 
+    # Prove whether rollback would return to a known-safe Docker ingress
+    # generation. A normal Cloudflare range change may make the gate non-exact
+    # for the newly fetched set while it is still exact for the valid cached
+    # generation. Only the latter is safe to restore without stopping Caddy.
+    local pre_update_docker_gate_exact=false
+    local -a pre_update_ipv4_cidrs=()
+    if firewall_load_cached_cloudflare_ipv4 pre_update_ipv4_cidrs >/dev/null 2>&1 && \
+       firewall_docker_ingress_is_exact "${pre_update_ipv4_cidrs[@]}"; then
+        pre_update_docker_gate_exact=true
+    else
+        log_warn "Pre-update Docker ingress gate is not provably exact against a valid cached Cloudflare generation."
+        log_warn "If this transaction cannot commit safely, Caddy will be stopped after rollback."
+    fi
+
+    _update_firewall_fail_closed_after_unproven_prior_gate() {
+        if ! firewall_fail_closed_stop_caddy; then
+            log_error "CRITICAL: pre-update Docker ingress gate was not provably exact and Caddy shutdown could not be confirmed."
+        fi
+    }
+
+    _update_firewall_pretransaction_fail() {
+        local fail_rc="$1"
+        if [[ "$pre_update_docker_gate_exact" != "true" ]]; then
+            _update_firewall_fail_closed_after_unproven_prior_gate
+        fi
+        return "$fail_rc"
+    }
+
     _ufw_status() {
         local mode="${1:-normal}" output rc=0
         case "$mode" in
@@ -287,7 +315,11 @@ update_firewall_ranges() {
         fi
     }
 
-    _ufw_validate_safety || return $?
+    _ufw_validate_safety || {
+        local pretransaction_rc=$?
+        _update_firewall_pretransaction_fail "$pretransaction_rc"
+        return $?
+    }
 
     # UFW's managed rules live in these files. Snapshot them before the first
     # mutation so a later UFW/Docker/cache failure can restore one coherent
@@ -295,15 +327,21 @@ update_firewall_ranges() {
     local ufw_config_dir="${UFW_CONFIG_DIR:-/etc/ufw}"
     local ufw_snapshot_dir="" ufw_was_active=false rules_file
     local pre_mutation_verbose
-    pre_mutation_verbose="$(_ufw_status verbose)" || return $?
+    pre_mutation_verbose="$(_ufw_status verbose)" || {
+        local pretransaction_rc=$?
+        _update_firewall_pretransaction_fail "$pretransaction_rc"
+        return $?
+    }
     grep -q '^Status: active' <<< "$pre_mutation_verbose" && ufw_was_active=true
     [[ -d "$ufw_config_dir" && -w "$ufw_config_dir" ]] || {
         log_error "UFW configuration directory is not writable: ${ufw_config_dir}"
-        return 1
+        _update_firewall_pretransaction_fail 1
+        return $?
     }
     ufw_snapshot_dir="$(mktemp -d -t vaultwarden-ufw.XXXXXXXXXX)" || {
         log_error "Could not allocate UFW rollback snapshot."
-        return 1
+        _update_firewall_pretransaction_fail 1
+        return $?
     }
     register_cleanup rm -rf "$ufw_snapshot_dir"
     for rules_file in user.rules user6.rules; do
@@ -311,7 +349,8 @@ update_firewall_ranges() {
             cp -a -- "$ufw_config_dir/$rules_file" "$ufw_snapshot_dir/$rules_file" || {
                 log_error "Could not snapshot UFW managed rules: ${rules_file}"
                 rm -rf "$ufw_snapshot_dir"
-                return 1
+                _update_firewall_pretransaction_fail 1
+                return $?
             }
         fi
     done
@@ -321,7 +360,8 @@ update_firewall_ranges() {
     backup_v4="$(mktemp -t vaultwarden-firewall.XXXXXXXXXX)" || {
         log_error "Could not allocate firewall rollback snapshot."
         rm -rf "$ufw_snapshot_dir"
-        return 1
+        _update_firewall_pretransaction_fail 1
+        return $?
     }
     register_cleanup rm -f "$backup_v4"
     iptables-save > "$backup_v4" || snapshot_rc=$?
@@ -331,7 +371,8 @@ update_firewall_ranges() {
         backup_v4=""
         rm -rf "$ufw_snapshot_dir"
         ufw_snapshot_dir=""
-        return "$snapshot_rc"
+        _update_firewall_pretransaction_fail "$snapshot_rc"
+        return $?
     fi
 
     _update_firewall_restore_ufw() {
@@ -390,6 +431,8 @@ update_firewall_ranges() {
         _update_firewall_rollback_all || rollback_rc=$?
         if (( rollback_rc != 0 )); then
             _update_firewall_fail_closed_after_rollback_error
+        elif [[ "$pre_update_docker_gate_exact" != "true" ]]; then
+            _update_firewall_fail_closed_after_unproven_prior_gate
         fi
         _update_firewall_restore_outer_traps
         return "$fail_rc"
@@ -405,6 +448,8 @@ update_firewall_ranges() {
             _update_firewall_rollback_all || rollback_rc=$?
             if (( rollback_rc != 0 )); then
                 _update_firewall_fail_closed_after_rollback_error
+            elif [[ "$pre_update_docker_gate_exact" != "true" ]]; then
+                _update_firewall_fail_closed_after_unproven_prior_gate
             fi
         fi
         operation_release "$signal_rc"

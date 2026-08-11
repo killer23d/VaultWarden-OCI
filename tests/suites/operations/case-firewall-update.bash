@@ -229,7 +229,23 @@ log_debug(){ printf 'DEBUG: %s\n' "$*" >> "${LOG_FILE:?}"; }
 operation_release(){ :; }
 perform_cleanup(){ :; }
 firewall_docker_backend_preflight(){ printf 'preflight\n' >> "${FW_CALL_LOG:?}"; return "${FW_PREFLIGHT_RC:-0}"; }
-firewall_docker_ingress_is_exact(){ return "${FW_EXACT_RC:-0}"; }
+firewall_load_cached_cloudflare_ipv4(){
+    local out_name="$1" cache_file="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache" line
+    local -n out_ref="$out_name"
+    out_ref=()
+    [[ -s "$cache_file" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] && out_ref+=("$line")
+    done < "$cache_file"
+    (( ${#out_ref[@]} > 0 ))
+}
+firewall_docker_ingress_is_exact(){
+    printf 'exact %s\n' "$*" >> "${FW_CALL_LOG:?}"
+    if [[ -n "${FW_EXACT_SAFE_CIDR:-}" && "$*" == "$FW_EXACT_SAFE_CIDR" ]]; then
+        return 0
+    fi
+    return "${FW_EXACT_RC:-0}"
+}
 firewall_reconcile_cloudflare_docker_ingress(){ printf 'reconcile %s\n' "$*" >> "${FW_CALL_LOG:?}"; return "${FW_RECONCILE_RC:-0}"; }
 firewall_fail_closed_stop_caddy(){ printf 'stop-caddy\n' >> "${FW_CALL_LOG:?}"; return "${FW_STOP_CADDY_RC:-0}"; }
 EOF_PROBE
@@ -282,7 +298,7 @@ reset_case() {
     unset UFW_VERBOSE_RC UFW_VERBOSE_OUTPUT UFW_ADDED_RC UFW_ADDED_OUTPUT
     unset UFW_ALLOW80_RC UFW_ALLOW80_OUTPUT UFW_ALLOW443_RC UFW_ALLOW443_OUTPUT
     unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE UFW_RELOAD_RC
-    unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC FW_STOP_CADDY_RC SSHD_PORT
+    unset FW_PREFLIGHT_RC FW_EXACT_RC FW_EXACT_SAFE_CIDR FW_RECONCILE_RC FW_STOP_CADDY_RC SSHD_PORT
     unset IPT_SAVE_RC IPT_RESTORE_RC
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
@@ -342,7 +358,8 @@ run_case
 assert_file_contains "$LOG_FILE" 'UFW is inactive; refusing periodic firewall mutation'
 assert_no_call ' allow '
 assert_no_call '--force delete'
-[[ ! -s "$FW_CALL_LOG" || "$(cat "$FW_CALL_LOG")" == 'preflight' ]]     || fail "inactive UFW caused Docker firewall mutation"
+assert_file_contains "$FW_CALL_LOG" 'stop-caddy'
+! grep -Fq 'reconcile ' "$FW_CALL_LOG" || fail "inactive UFW caused Docker firewall reconciliation"
 
 reset_case default-incoming-allow
 write_ipv4_status true true
@@ -352,6 +369,13 @@ run_case
 assert_file_contains "$LOG_FILE" 'default incoming policy is not provably fail-closed'
 assert_no_call ' allow '
 assert_no_call '--force delete'
+
+reset_case unsafe-prior-gate-pretransaction-failure
+write_ipv4_status true true
+printf 'Status: active\nDefault: allow (incoming), allow (outgoing), disabled (routed)\n' > "$UFW_VERBOSE_FILE"
+run_case
+[[ "$CASE_RC" -ne 0 ]] || fail "unsafe prior gate survived a pre-transaction UFW failure"
+assert_file_contains "$FW_CALL_LOG" 'stop-caddy'
 
 reset_case ambiguous-application-profile
 write_ipv4_status true true
@@ -987,6 +1011,10 @@ assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 143' TER
 assert_file_contains "$UPDATER" 'firewall_reconcile_cloudflare_docker_ingress "${current_ipv4_cidrs[@]}"'
 assert_file_contains "$UPDATER" 'cache_commit_started=true'
 assert_file_contains "$UPDATER" 'cache_commit_started" != "true"'
+assert_file_contains "$UPDATER" 'pre_update_docker_gate_exact=false'
+assert_file_contains "$UPDATER" '_update_firewall_pretransaction_fail()'
+[[ "$(grep -Fc 'pre_update_docker_gate_exact" != "true"' "$UPDATER")" -ge 3 ]] \
+    || fail "pre-transaction, normal rollback, and signal rollback paths do not all fail closed for an unproven prior Docker gate"
 
 compose_file="$ROOT/docker-compose.yml.example"
 assert_file_contains "$compose_file" '"0.0.0.0:80:80"'
@@ -1492,6 +1520,7 @@ export FW_EXACT_RC=1 FW_RECONCILE_RC=55
 run_case
 [[ "$CASE_RC" -eq 55 ]] || fail "periodic Docker ingress failure returned $CASE_RC instead of 55"
 assert_file_contains "$IPT_CALL_LOG" 'restore'
+assert_file_contains "$FW_CALL_LOG" 'stop-caddy'
 assert_call 'reload'
 ufw_restore_line="$(grep -n '^ufw-reload$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
 iptables_restore_line="$(grep -n '^iptables-restore$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
@@ -1499,6 +1528,18 @@ iptables_restore_line="$(grep -n '^iptables-restore$' "$TXN_CALL_LOG" | cut -d: 
     || fail "rollback did not make iptables-restore the final firewall write"
 [[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]]     || fail "Docker ingress failure left UFW managed rules partially updated"
 [[ ! -e "$CASE_DIR/state/cf-cidrs.cache" ]] || fail "failed Docker ingress refresh published a new CIDR cache"
+
+reset_case updater-safe-prior-generation-rollback
+write_ipv4_status true false
+printf '198.51.100.0/24\n' > "$CASE_DIR/state/cf-cidrs.cache"
+IPT_CALL_LOG="$CASE_DIR/ipt-calls"; : > "$IPT_CALL_LOG"; export IPT_CALL_LOG
+export FW_EXACT_SAFE_CIDR=198.51.100.0/24 FW_EXACT_RC=1 FW_RECONCILE_RC=55
+run_case
+[[ "$CASE_RC" -eq 55 ]] || fail "safe-prior rollback returned $CASE_RC instead of 55"
+assert_file_contains "$IPT_CALL_LOG" 'restore'
+! grep -Fq 'stop-caddy' "$FW_CALL_LOG" || fail "proven-safe prior Docker generation was stopped after successful rollback"
+[[ "$(cat "$CASE_DIR/state/cf-cidrs.cache")" == '198.51.100.0/24' ]] \
+    || fail "safe-prior rollback replaced the previous CIDR cache"
 
 reset_case updater-rollback-restore-failure-stops-caddy
 write_ipv4_status true false
