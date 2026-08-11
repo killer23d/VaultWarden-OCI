@@ -37,6 +37,8 @@ jobs:
           set -euo pipefail
           git pull --rebase origin pr4-firewall-exactness
           chmod 0755 tests/suites/operations/case-firewall-update.bash
+          test "$(stat -c '%a' tests/suites/operations/case-firewall-update.bash)" = 755
+          git add tests/suites/operations/case-firewall-update.bash
           test "$(git ls-files -s tests/suites/operations/case-firewall-update.bash | awk '{print $1}')" = 100755
 
       - name: Validate focused and complete suites
