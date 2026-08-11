@@ -19,7 +19,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply exact-source patch
-        run: python3 .github/pr5_recovery_patcher.py
+        run: |
+          python3 .github/pr5_patcher_fix.py
+          python3 .github/pr5_recovery_patcher.py
 
       - name: Focused validation
         shell: bash
