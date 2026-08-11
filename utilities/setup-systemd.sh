@@ -464,7 +464,7 @@ DROPIN
 _render_docker_runtime_dropin() {
     cat <<'DROPIN'
 # Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
-# Caddy has restart: "no" so dockerd cannot publish it before this sequence.
+# Caddy uses restart: on-failure, which does not auto-start on dockerd restart.
 [Unit]
 Wants=vaultwarden-iptables.service vaultwarden-startup.service
 DROPIN

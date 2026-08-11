@@ -779,8 +779,8 @@ assert_file_contains "$compose_file" '"0.0.0.0:443:443"'
 assert_file_contains "$compose_file" 'subnet: 172.22.0.0/28'
 caddy_block="$TMP/caddy-compose-block.txt"
 awk '/^  caddy:/{p=1} p{print} /^  postfix:/{exit}' "$compose_file" > "$caddy_block"
-assert_file_contains "$caddy_block" 'restart: "no"'
-! grep -Fq 'restart: unless-stopped' "$caddy_block"     || fail "Caddy can auto-restart before Docker firewall reconciliation"
+assert_file_contains "$caddy_block" 'restart: on-failure'
+! grep -Eq 'restart:[[:space:]]+(always|unless-stopped)' "$caddy_block"     || fail "Caddy can auto-start on dockerd restart before firewall reconciliation"
 for cidr in 172.21.0.0/28 172.22.0.0/28 172.23.0.0/28; do
     assert_file_contains "$compose_file" "subnet: $cidr"
 done
