@@ -373,21 +373,33 @@ update_firewall_ranges() {
         return "$rollback_rc"
     }
 
+    _update_firewall_fail_closed_after_rollback_error() {
+        if ! firewall_fail_closed_stop_caddy; then
+            log_error "CRITICAL: firewall rollback failed and Caddy shutdown could not be confirmed."
+        fi
+    }
+
     _update_firewall_fail() {
-        local fail_rc="$1"
-        _update_firewall_rollback_all || true
+        local fail_rc="$1" rollback_rc=0
+        _update_firewall_rollback_all || rollback_rc=$?
+        if (( rollback_rc != 0 )); then
+            _update_firewall_fail_closed_after_rollback_error
+        fi
         _update_firewall_restore_outer_traps
         return "$fail_rc"
     }
 
     _update_firewall_signal_rollback() {
-        local signal_rc="$1"
+        local signal_rc="$1" rollback_rc=0
         # The atomic cache rename is the transaction commit point. Bash defers
         # traps until a foreground command returns, so a signal delivered while
         # mv succeeds sees the temp path gone and must not roll back the already
         # committed firewall generation.
         if [[ "$cache_commit_started" != "true" || -z "$cache_tmp" || -e "$cache_tmp" ]]; then
-            _update_firewall_rollback_all || true
+            _update_firewall_rollback_all || rollback_rc=$?
+            if (( rollback_rc != 0 )); then
+                _update_firewall_fail_closed_after_rollback_error
+            fi
         fi
         operation_release "$signal_rc"
         perform_cleanup

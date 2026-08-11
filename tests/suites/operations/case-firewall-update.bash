@@ -231,6 +231,7 @@ perform_cleanup(){ :; }
 firewall_docker_backend_preflight(){ printf 'preflight\n' >> "${FW_CALL_LOG:?}"; return "${FW_PREFLIGHT_RC:-0}"; }
 firewall_docker_ingress_is_exact(){ return "${FW_EXACT_RC:-0}"; }
 firewall_reconcile_cloudflare_docker_ingress(){ printf 'reconcile %s\n' "$*" >> "${FW_CALL_LOG:?}"; return "${FW_RECONCILE_RC:-0}"; }
+firewall_fail_closed_stop_caddy(){ printf 'stop-caddy\n' >> "${FW_CALL_LOG:?}"; return "${FW_STOP_CADDY_RC:-0}"; }
 EOF_PROBE
 extract_func "$UPDATER" update_firewall_ranges >> "$PROBE"
 cat >> "$PROBE" <<'EOF_PROBE'
@@ -281,7 +282,7 @@ reset_case() {
     unset UFW_VERBOSE_RC UFW_VERBOSE_OUTPUT UFW_ADDED_RC UFW_ADDED_OUTPUT
     unset UFW_ALLOW80_RC UFW_ALLOW80_OUTPUT UFW_ALLOW443_RC UFW_ALLOW443_OUTPUT
     unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE UFW_RELOAD_RC
-    unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC SSHD_PORT
+    unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC FW_STOP_CADDY_RC SSHD_PORT
     unset IPT_SAVE_RC IPT_RESTORE_RC
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
@@ -1315,6 +1316,26 @@ iptables_restore_line="$(grep -n '^iptables-restore$' "$TXN_CALL_LOG" | cut -d: 
     || fail "rollback did not make iptables-restore the final firewall write"
 [[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]]     || fail "Docker ingress failure left UFW managed rules partially updated"
 [[ ! -e "$CASE_DIR/state/cf-cidrs.cache" ]] || fail "failed Docker ingress refresh published a new CIDR cache"
+
+reset_case updater-rollback-restore-failure-stops-caddy
+write_ipv4_status true false
+IPT_CALL_LOG="$CASE_DIR/ipt-calls"; : > "$IPT_CALL_LOG"; export IPT_CALL_LOG
+export FW_EXACT_RC=1 FW_RECONCILE_RC=55 IPT_RESTORE_RC=66
+run_case
+[[ "$CASE_RC" -eq 55 ]] || fail "rollback-restore failure changed original updater error: $CASE_RC"
+assert_file_contains "$IPT_CALL_LOG" 'restore'
+assert_file_contains "$FW_CALL_LOG" 'stop-caddy'
+assert_file_contains "$LOG_FILE" 'CRITICAL: iptables rollback restore failed (exit 66)'
+[[ ! -e "$CASE_DIR/state/cf-cidrs.cache" ]] || fail "rollback-restore failure published a new CIDR cache"
+
+reset_case updater-rollback-and-caddy-stop-failure
+write_ipv4_status true false
+IPT_CALL_LOG="$CASE_DIR/ipt-calls"; : > "$IPT_CALL_LOG"; export IPT_CALL_LOG
+export FW_EXACT_RC=1 FW_RECONCILE_RC=55 IPT_RESTORE_RC=66 FW_STOP_CADDY_RC=67
+run_case
+[[ "$CASE_RC" -eq 55 ]] || fail "double fail-closed failure changed original updater error: $CASE_RC"
+assert_file_contains "$FW_CALL_LOG" 'stop-caddy'
+assert_file_contains "$LOG_FILE" 'CRITICAL: firewall rollback failed and Caddy shutdown could not be confirmed.'
 
 health_unit="$ROOT/systemd/vaultwarden-health.service"
 maintenance_unit="$ROOT/systemd/vaultwarden-maintenance.service"
