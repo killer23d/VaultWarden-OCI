@@ -2,17 +2,15 @@ from pathlib import Path
 import re
 
 
-def replace_once(path, old, new, label):
-    p = Path(path)
-    text = p.read_text()
+def replace_once_text(text, old, new, label):
     if old not in text:
-        raise SystemExit(f"{label} anchor missing in {path}")
-    p.write_text(text.replace(old, new, 1))
+        raise SystemExit(f"{label} anchor missing")
+    return text.replace(old, new, 1)
 
 
 p = Path('lib/firewall.sh')
 t = p.read_text()
-old = '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
+t = replace_once_text(t, '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
         iptables -t filter -D "$VW_CF_DOCKER_CHAIN" 3 || return $?
         count=$((count - 1))
     done
@@ -22,8 +20,7 @@ old = '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
     }
 
     local cidr port
-'''
-new = '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
+''', '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
         iptables -t filter -D "$VW_CF_DOCKER_CHAIN" 3 || return $?
         count=$((count - 1))
     done
@@ -50,10 +47,7 @@ new = '''    while [[ "$count" =~ ^[0-9]+$ ]] && (( count > 2 )); do
     }
 
     local cidr port
-'''
-if old not in t:
-    raise SystemExit('safe parent attachment anchor missing in lib/firewall.sh')
-t = t.replace(old, new, 1)
+''', 'safe parent attachment')
 pattern = re.compile(
     r'    # This must remain ahead of the source DROP rules:.*?'
     r'    _firewall_delete_duplicate_parent_jumps \|\| \{\n'
@@ -65,6 +59,11 @@ pattern = re.compile(
 t, count = pattern.subn('', t, count=1)
 if count != 1:
     raise SystemExit(f'late established/jump regex matched {count} blocks')
+t = replace_once_text(t, '''            iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
+                -d "$VW_CADDY_EXTERNAL_CIDR" -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN \
+''', '''            iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 2 \
+                -d "$VW_CADDY_EXTERNAL_CIDR" -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN \
+''', 'Cloudflare RETURN insertion position')
 p.write_text(t)
 
 p = Path('tests/suites/operations/case-firewall-update.bash')
@@ -77,7 +76,7 @@ replacement = anchor + '''sentinel80_line="$(grep -n 'iptables -t filter -I VW-C
 sentinel443_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 established_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 jump_line="$(grep -n 'iptables -t filter -I DOCKER-USER 1 -j VW-CF-INGRESS' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
-allow_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 1 -d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
+allow_line="$(grep -n 'iptables -t filter -I VW-CF-INGRESS 2 -d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport' "$IPT_CALL_LOG" | cut -d: -f1 | head -1)"
 [[ -n "$sentinel80_line" && -n "$sentinel443_line" && -n "$established_line" && -n "$jump_line" && -n "$allow_line" ]] \
     || fail "initial Docker gate mutation-order probe missed sentinel/established/jump/allow calls"
 [[ "$sentinel80_line" -lt "$established_line" && "$sentinel443_line" -lt "$established_line" && "$established_line" -lt "$jump_line" && "$jump_line" -lt "$allow_line" ]] \
