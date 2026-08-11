@@ -581,6 +581,20 @@ prepare_systemd_validation_fixture() {
         "$ROOT/systemd/vaultwarden-startup.service" > "$unit_dir/vaultwarden-startup.service"
     chmod 644 "$unit_dir/vaultwarden-startup.service"
 
+    mkdir -p "$unit_dir/docker.service.d"
+    cat > "$unit_dir/docker.service.d/20-vaultwarden-runtime.conf" <<'EOF_DOCKER_RUNTIME'
+# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
+# Caddy uses restart: on-failure, which does not auto-start on dockerd restart.
+[Unit]
+Wants=vaultwarden-iptables.service vaultwarden-startup.service
+EOF_DOCKER_RUNTIME
+    chmod 644 "$unit_dir/docker.service.d/20-vaultwarden-runtime.conf"
+    if (( EUID == 0 )); then
+        chown root:root "$unit_dir/docker.service.d/20-vaultwarden-runtime.conf"
+    else
+        sudo -n chown root:root "$unit_dir/docker.service.d/20-vaultwarden-runtime.conf"
+    fi
+
     cat > "$env_dir/vaultwarden.env" <<EOF_ENV
 PROJECT_STATE_DIR=$state_dir
 DATA_VOLUME_DEVICE=
@@ -688,6 +702,36 @@ test_systemd_validation_fails_on_stale_installed_runtime() {
         || { cat "$stale_out" >&2; fail "stale vaultwarden-db-backup.service was not named"; }
     cp "$ROOT/systemd/vaultwarden-db-backup.service" "$installed"
     chmod 644 "$installed"
+
+    installed="$unit_dir/docker.service.d/20-vaultwarden-runtime.conf"
+    if (( EUID == 0 )); then
+        printf '
+# stale Docker lifecycle fixture
+' >> "$installed"
+    else
+        printf '
+# stale Docker lifecycle fixture
+' | sudo -n tee -a "$installed" >/dev/null
+    fi
+    stale_out="$TMP/validate-stale-docker-runtime.out"
+    ! run_systemd_validate_fixture "$stale_out" "$bin" "$unit_dir" "$opt_dir" "$env_dir" "$state_dir"         || fail "validate succeeded with stale Docker runtime owner drop-in"
+    grep -Fq "DRIFT: $installed does not match the managed Docker lifecycle contract" "$stale_out"         || { cat "$stale_out" >&2; fail "stale Docker runtime owner drop-in was not named"; }
+    if (( EUID == 0 )); then
+        cat > "$installed" <<'EOF_DOCKER_RUNTIME'
+# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
+# Caddy uses restart: on-failure, which does not auto-start on dockerd restart.
+[Unit]
+Wants=vaultwarden-iptables.service vaultwarden-startup.service
+EOF_DOCKER_RUNTIME
+    else
+        sudo -n tee "$installed" >/dev/null <<'EOF_DOCKER_RUNTIME'
+# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
+# Caddy uses restart: on-failure, which does not auto-start on dockerd restart.
+[Unit]
+Wants=vaultwarden-iptables.service vaultwarden-startup.service
+EOF_DOCKER_RUNTIME
+    fi
+    chmod 644 "$installed" 2>/dev/null || sudo -n chmod 644 "$installed"
 
     installed="$unit_dir/vaultwarden-startup.service"
     printf '\n# stale rendered startup unit fixture\n' >> "$installed"

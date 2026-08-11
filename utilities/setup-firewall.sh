@@ -140,9 +140,11 @@ _ufw_has_range_port() {
     return 1
 }
 
-_ufw_has_broad_admin_port() {
+_ufw_has_admin_port() {
     local status="$1" port="$2"
-    grep -qE "^${port}/tcp([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?[[:space:]]+Anywhere([[:space:]]|$)" <<< "$status"
+    # Preserve any explicit single-port TCP administrator rule, including a
+    # source-restricted ALLOW/LIMIT. PR4 must not widen an operator's SSH ACL.
+    grep -qE "^${port}/tcp([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?[[:space:]]+[^[:space:]#]+([[:space:]]|$)" <<< "$status"
 }
 
 _ufw_line_cidr() {
@@ -325,8 +327,8 @@ _ufw_verify_exact() {
     _ufw_default_incoming_fail_closed "$verbose_status" || return $?
     _ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
 
-    _ufw_has_broad_admin_port "$status" "$ssh_port" || {
-        log_error "Broad UFW SSH rule for ${ssh_port}/tcp is missing after reconciliation."
+    _ufw_has_admin_port "$status" "$ssh_port" || {
+        log_error "Explicit UFW SSH ALLOW/LIMIT rule for ${ssh_port}/tcp is missing after reconciliation."
         return 1
     }
 
@@ -423,7 +425,17 @@ _phase_ufw() {
     status="$(_ufw_status normal)" || return $?
     grep -q '^Status: active' <<< "$status" && ufw_active=true
 
-    ufw allow "${ssh_port}/tcp" >/dev/null
+    if ! _ufw_has_admin_port "$status" "$ssh_port"; then
+        local ssh_output ssh_rc=0
+        ssh_output="$(ufw allow "${ssh_port}/tcp" 2>&1)" || ssh_rc=$?
+        if (( ssh_rc != 0 )); then
+            log_error "Failed to add default UFW SSH rule for ${ssh_port}/tcp (exit ${ssh_rc}): ${ssh_output:-no output}"
+            return "$ssh_rc"
+        fi
+        log_info "Added default UFW SSH rule for ${ssh_port}/tcp because no explicit SSH rule existed."
+    else
+        log_info "Preserving existing explicit UFW SSH rule for ${ssh_port}/tcp."
+    fi
 
     numbered_status="$(_ufw_status numbered)" || return $?
     local -a conflicts=()

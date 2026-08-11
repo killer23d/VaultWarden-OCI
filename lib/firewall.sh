@@ -308,9 +308,15 @@ firewall_docker_ingress_is_exact() {
     _firewall_parent_jump_is_exact || return 1
     iptables -t filter -S "$VW_CF_DOCKER_CHAIN" >/dev/null 2>&1 || return 1
 
-    local expected_count=$(( ${#cidrs[@]} * 2 + 2 )) actual_count cidr port
+    local expected_count=$(( ${#cidrs[@]} * 2 + 3 )) actual_count cidr port
     actual_count="$(_firewall_chain_rule_count "$VW_CF_DOCKER_CHAIN")"
     [[ "$actual_count" =~ ^[0-9]+$ && "$actual_count" -eq "$expected_count" ]] || return 1
+
+    # Replies to connections initiated by Caddy must return to Docker's normal
+    # forwarding path instead of being mistaken for new public web ingress.
+    iptables -t filter -C "$VW_CF_DOCKER_CHAIN" \
+        -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \
+        >/dev/null 2>&1 || return 1
 
     for cidr in "${cidrs[@]}"; do
         for port in 80 443; do
@@ -388,6 +394,13 @@ firewall_reconcile_cloudflare_docker_ingress() {
                 || return $?
         done
     done
+
+    # This must remain ahead of the source DROP rules: Caddy-initiated HTTP,
+    # HTTPS, DNS, and related reply traffic is not new public ingress. RETURN
+    # keeps Docker authoritative for the eventual forwarding decision.
+    iptables -t filter -I "$VW_CF_DOCKER_CHAIN" 1 \
+        -d "$VW_CADDY_EXTERNAL_CIDR" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \
+        || return $?
 
     # Install a new first-rule jump before deleting older duplicate jumps, so
     # an existing gate is never removed before its replacement is active.

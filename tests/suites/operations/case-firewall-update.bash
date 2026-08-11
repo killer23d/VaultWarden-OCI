@@ -549,7 +549,7 @@ log_dry_run(){ :; }
 EOF_SETUP_UFW
 extract_func "$SETUP_FIREWALL" _ufw_status >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_has_range_port >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_has_broad_admin_port >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_has_admin_port >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_line_cidr >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_collect_conflicts >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_default_incoming_fail_closed >> "$SETUP_UFW_PROBE"
@@ -662,8 +662,8 @@ set +e
 PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
 SETUP_UFW_RC=$?
 set -e
-[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "setup final verification accepted source-restricted SSH as broad administrator access"
-assert_file_contains "$LOG_FILE" 'Broad UFW SSH rule for 22/tcp is missing'
+[[ "$SETUP_UFW_RC" -eq 0 ]] || fail "setup final verification rejected an existing source-restricted SSH rule"
+! grep -Fq 'Broad UFW SSH rule' "$LOG_FILE" || fail "restricted SSH was still treated as invalid administrator access"
 
 reset_case setup-non-tcp-readiness
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
@@ -765,6 +765,9 @@ assert_file_contains "$LOG_FILE" 'SSH port 443/tcp conflicts with managed Cloudf
 assert_file_contains "$FIREWALL_LIB" 'VW_CF_DOCKER_CHAIN="VW-CF-INGRESS"'
 assert_file_contains "$FIREWALL_LIB" 'VW_CADDY_EXTERNAL_CIDR="172.22.0.0/28"'
 assert_file_contains "$FIREWALL_LIB" '--ctorigdstport'
+assert_file_contains "$FIREWALL_LIB" '--ctstate ESTABLISHED,RELATED -j RETURN'
+assert_file_contains "$SETUP_FIREWALL" 'if ! _ufw_has_admin_port "$status" "$ssh_port"; then'
+! grep -Fq '_ufw_has_broad_admin_port' "$SETUP_FIREWALL" || fail "setup still requires broad SSH exposure"
 assert_file_contains "$FIREWALL_LIB" '-j RETURN'
 assert_file_contains "$FIREWALL_LIB" '-j DROP'
 assert_file_contains "$FIREWALL_LIB" 'firewall_fail_closed_stop_caddy()'
@@ -1176,6 +1179,9 @@ mutation_line="$(grep -nE 'iptables -t filter -(N|I|D) ' "$IPT_CALL_LOG" | cut -
     || fail "Cloudflare gate is not the first DOCKER-USER rule"
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport 80 -j RETURN'
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -s 203.0.113.0/24 -p tcp -m conntrack --ctorigdstport 443 -j RETURN'
+assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN'
+[[ "$(head -n1 "$IPT_CF_FILE")" == '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' ]] \
+    || fail "established/related Caddy return traffic is not ahead of ingress DROP rules"
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 80 -j DROP'
 assert_file_contains "$IPT_CF_FILE" '-d 172.22.0.0/28 -p tcp -m conntrack --ctorigdstport 443 -j DROP'
 ! grep -Fq -- '-j ACCEPT' "$IPT_CF_FILE" || fail "Cloudflare gate bypasses Docker isolation with ACCEPT"
