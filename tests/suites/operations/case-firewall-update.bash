@@ -142,6 +142,7 @@ if [[ "$command_line" == *" allow "* && "$command_line" == *" port 80 "* ]]; the
         fi
     fi
     printf 'mutation\n' >> "${UFW_CONFIG_DIR:?}/user.rules"
+    printf 'ufw-mutation\n' >> "${TXN_CALL_LOG:?}"
     printf 'Rule added\n'
     exit 0
 fi
@@ -164,6 +165,7 @@ if [[ "$command_line" == *" allow "* && "$command_line" == *" port 443 "* ]]; th
         fi
     fi
     printf 'mutation\n' >> "${UFW_CONFIG_DIR:?}/user.rules"
+    printf 'ufw-mutation\n' >> "${TXN_CALL_LOG:?}"
     printf 'Rule added\n'
     exit 0
 fi
@@ -182,6 +184,7 @@ if [[ "${1:-}" == "--force" && "${2:-}" == "delete" ]]; then
         mv "${UFW_NUMBERED_FILE}.tmp" "$UFW_NUMBERED_FILE"
     fi
     printf 'mutation\n' >> "${UFW_CONFIG_DIR:?}/user.rules"
+    printf 'ufw-mutation\n' >> "${TXN_CALL_LOG:?}"
     printf 'Rule deleted\n'
     exit 0
 fi
@@ -190,6 +193,23 @@ printf 'unexpected ufw invocation: %s\n' "$*" >&2
 exit 2
 EOF_UFW
 chmod 0755 "$TMP/bin/curl" "$TMP/bin/ufw"
+cat > "$TMP/bin/iptables-save" <<'EOF_UPDATER_IPTABLES_SAVE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'save\n' >> "${IPT_CALL_LOG:?}"
+printf 'iptables-save\n' >> "${TXN_CALL_LOG:?}"
+if (( ${IPT_SAVE_RC:-0} != 0 )); then exit "$IPT_SAVE_RC"; fi
+printf '*filter\nCOMMIT\n'
+EOF_UPDATER_IPTABLES_SAVE
+cat > "$TMP/bin/iptables-restore" <<'EOF_UPDATER_IPTABLES_RESTORE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'restore\n' >> "${IPT_CALL_LOG:?}"
+printf 'iptables-restore\n' >> "${TXN_CALL_LOG:?}"
+cat >/dev/null
+exit "${IPT_RESTORE_RC:-0}"
+EOF_UPDATER_IPTABLES_RESTORE
+chmod 0755 "$TMP/bin/iptables-save" "$TMP/bin/iptables-restore"
 
 PROBE="$TMP/firewall-probe.bash"
 cat > "$PROBE" <<'EOF_PROBE'
@@ -235,6 +255,7 @@ reset_case() {
     UFW_ADDED_FILE="$CASE_DIR/ufw-added"
     UFW_CALL_LOG="$CASE_DIR/ufw-calls"
     FW_CALL_LOG="$CASE_DIR/firewall-calls"
+    IPT_CALL_LOG="$CASE_DIR/ipt-calls"
     TXN_CALL_LOG="$CASE_DIR/transaction-calls"
     LOG_FILE="$CASE_DIR/log"
     CASE_OUTPUT="$CASE_DIR/output"
@@ -252,6 +273,7 @@ reset_case() {
     printf 'baseline-v6\n' > "$UFW_CONFIG_DIR/user6.rules"
     : > "$UFW_CALL_LOG"
     : > "$FW_CALL_LOG"
+    : > "$IPT_CALL_LOG"
     : > "$TXN_CALL_LOG"
     : > "$LOG_FILE"
 
@@ -260,9 +282,10 @@ reset_case() {
     unset UFW_ALLOW80_RC UFW_ALLOW80_OUTPUT UFW_ALLOW443_RC UFW_ALLOW443_OUTPUT
     unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE UFW_RELOAD_RC
     unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC SSHD_PORT
+    unset IPT_SAVE_RC IPT_RESTORE_RC
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
-    export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_ADDED_FILE UFW_CONFIG_DIR UFW_CALL_LOG FW_CALL_LOG TXN_CALL_LOG LOG_FILE
+    export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_ADDED_FILE UFW_CONFIG_DIR UFW_CALL_LOG FW_CALL_LOG IPT_CALL_LOG TXN_CALL_LOG LOG_FILE
 }
 
 run_case() {
@@ -359,6 +382,20 @@ run_case
 [[ "$CASE_RC" -eq 0 ]] || fail "port 80-only convergence failed with $CASE_RC"
 assert_no_call 'port 80 comment'
 assert_call 'port 443 comment CF-IPv4'
+save_line="$(grep -n '^iptables-save$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
+ufw_mutation_line="$(grep -n '^ufw-mutation$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
+[[ -n "$save_line" && -n "$ufw_mutation_line" && "$save_line" -lt "$ufw_mutation_line" ]] \
+    || fail "full iptables rollback snapshot was not captured before first UFW mutation"
+
+reset_case updater-pre-mutation-snapshot-failure
+export IPT_SAVE_RC=47
+run_case
+[[ "$CASE_RC" -eq 47 ]] || fail "pre-mutation iptables snapshot failure returned $CASE_RC instead of 47"
+assert_file_contains "$LOG_FILE" 'Could not snapshot pre-update iptables state'
+assert_no_call ' allow '
+assert_no_call '--force delete'
+[[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]] \
+    || fail "snapshot failure changed UFW managed rules"
 
 reset_case only-port-443
 write_ipv4_status false true
@@ -427,6 +464,19 @@ EOF_RULES
 run_case
 [[ "$CASE_RC" -eq 0 ]] || fail "public ingress conflict reconciliation failed with $CASE_RC"
 assert_call '--force delete 5'
+assert_call '--force delete 4'
+
+reset_case comment-cidr-false-positive
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+80/tcp ALLOW IN Anywhere # 203.0.113.0/24
+443/tcp ALLOW IN 203.0.113.0/24
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 4] 80/tcp ALLOW IN Anywhere # 203.0.113.0/24
+EOF_RULES
+run_case
+[[ "$CASE_RC" -eq 0 ]] || fail "comment-CIDR conflict reconciliation failed with $CASE_RC"
+assert_call 'port 80 comment CF-IPv4'
 assert_call '--force delete 4'
 
 reset_case restricted-ingress-conflict
@@ -499,6 +549,7 @@ log_dry_run(){ :; }
 EOF_SETUP_UFW
 extract_func "$SETUP_FIREWALL" _ufw_status >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_has_range_port >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_has_broad_admin_port >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_line_cidr >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_collect_conflicts >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_default_incoming_fail_closed >> "$SETUP_UFW_PROBE"
@@ -556,6 +607,25 @@ set -e
 [[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted broad public port 80 ingress"
 assert_file_contains "$LOG_FILE" 'Conflicting UFW 80/443 rules remain'
 
+reset_case setup-comment-cidr-false-positive
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+Status: active
+22/tcp ALLOW IN Anywhere
+80/tcp ALLOW IN Anywhere # 203.0.113.0/24
+443/tcp ALLOW IN 203.0.113.0/24
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 1] 22/tcp ALLOW IN Anywhere
+[ 2] 80/tcp ALLOW IN Anywhere # 203.0.113.0/24
+[ 3] 443/tcp ALLOW IN 203.0.113.0/24
+EOF_RULES
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "setup verifier trusted desired CIDR found only in a UFW comment"
+assert_file_contains "$LOG_FILE" 'Conflicting UFW 80/443 rules remain'
+
 reset_case setup-restricted-readiness
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
 Status: active
@@ -575,6 +645,25 @@ SETUP_UFW_RC=$?
 set -e
 [[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted restricted non-Cloudflare ingress"
 assert_file_contains "$LOG_FILE" 'Conflicting UFW 80/443 rules remain'
+
+reset_case setup-restricted-ssh-final-proof
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+Status: active
+22/tcp ALLOW IN 198.51.100.10/32
+80/tcp ALLOW IN 203.0.113.0/24
+443/tcp ALLOW IN 203.0.113.0/24
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 1] 22/tcp ALLOW IN 198.51.100.10/32
+[ 2] 80/tcp ALLOW IN 203.0.113.0/24
+[ 3] 443/tcp ALLOW IN 203.0.113.0/24
+EOF_RULES
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "setup final verification accepted source-restricted SSH as broad administrator access"
+assert_file_contains "$LOG_FILE" 'Broad UFW SSH rule for 22/tcp is missing'
 
 reset_case setup-non-tcp-readiness
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
@@ -816,6 +905,7 @@ cat > "$TMP/bin/iptables-save" <<'EOF_IPTABLES_SAVE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'save\n' >> "${IPT_CALL_LOG:?}"
+printf 'iptables-save\n' >> "${TXN_CALL_LOG:-/dev/null}"
 if (( ${IPT_SAVE_RC:-0} != 0 )); then exit "$IPT_SAVE_RC"; fi
 printf '*filter\nCOMMIT\n'
 EOF_IPTABLES_SAVE

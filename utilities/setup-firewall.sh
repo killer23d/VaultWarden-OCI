@@ -132,6 +132,7 @@ _ufw_has_range_port() {
 
         for (( ; i<${#fields[@]}; i++ )); do
             token="${fields[$i]}"
+            [[ "$token" == \#* ]] && break
             token="${token%#*}"
             [[ "$token" == "$cidr" ]] && return 0
         done
@@ -139,11 +140,17 @@ _ufw_has_range_port() {
     return 1
 }
 
+_ufw_has_broad_admin_port() {
+    local status="$1" port="$2"
+    grep -qE "^${port}/tcp([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?[[:space:]]+Anywhere([[:space:]]|$)" <<< "$status"
+}
+
 _ufw_line_cidr() {
     local line="$1" word
     local -a words=()
     read -ra words <<< "$line"
     for word in "${words[@]}"; do
+        [[ "$word" == \#* ]] && break
         word="${word%\#*}"
         if [[ "$word" =~ ^[0-9]+(\.[0-9]+){3}/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
             printf '%s\n' "$word"
@@ -318,8 +325,8 @@ _ufw_verify_exact() {
     _ufw_default_incoming_fail_closed "$verbose_status" || return $?
     _ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
 
-    grep -qE "^${ssh_port}/tcp([[:space:]]+\\(v6\\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?" <<< "$status" || {
-        log_error "UFW SSH rule for ${ssh_port}/tcp is missing after reconciliation."
+    _ufw_has_broad_admin_port "$status" "$ssh_port" || {
+        log_error "Broad UFW SSH rule for ${ssh_port}/tcp is missing after reconciliation."
         return 1
     }
 

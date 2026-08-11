@@ -161,6 +161,7 @@ update_firewall_ranges() {
 
             for (( ; i<${#fields[@]}; i++ )); do
                 token="${fields[$i]}"
+                [[ "$token" == \#* ]] && break
                 token="${token%#*}"
                 [[ "$token" == "$cidr" ]] && return 0
             done
@@ -173,6 +174,7 @@ update_firewall_ranges() {
         local -a words=()
         read -ra words <<< "$line"
         for word in "${words[@]}"; do
+            [[ "$word" == \#* ]] && break
             word="${word%\#*}"
             if [[ "$word" =~ ^[0-9]+(\.[0-9]+){3}/[0-9]+$ || "$word" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
                 printf '%s
@@ -309,7 +311,23 @@ update_firewall_ranges() {
         fi
     done
 
-    local backup_v4="" mutation_rc=0 cache_tmp="" cache_commit_started=false
+    local backup_v4="" mutation_rc=0 snapshot_rc=0 cache_tmp="" cache_commit_started=false
+
+    backup_v4="$(mktemp -t vaultwarden-firewall.XXXXXXXXXX)" || {
+        log_error "Could not allocate firewall rollback snapshot."
+        rm -rf "$ufw_snapshot_dir"
+        return 1
+    }
+    register_cleanup rm -f "$backup_v4"
+    iptables-save > "$backup_v4" || snapshot_rc=$?
+    if (( snapshot_rc != 0 )); then
+        log_error "Could not snapshot pre-update iptables state; refusing all firewall mutation."
+        rm -f "$backup_v4"
+        backup_v4=""
+        rm -rf "$ufw_snapshot_dir"
+        ufw_snapshot_dir=""
+        return "$snapshot_rc"
+    fi
 
     _update_firewall_restore_ufw() {
         local restore_rc=0 file
@@ -447,20 +465,6 @@ update_firewall_ranges() {
     done
 
     if ! firewall_docker_ingress_is_exact "${current_ipv4_cidrs[@]}"; then
-        backup_v4="$(mktemp -t vaultwarden-firewall.XXXXXXXXXX)" || {
-            log_error "Could not allocate Docker firewall rollback snapshot."
-            _update_firewall_fail 1
-            return $?
-        }
-        register_cleanup rm -f "$backup_v4"
-        if ! iptables-save > "$backup_v4"; then
-            log_error "Could not snapshot iptables state; refusing Docker ingress mutation."
-            rm -f "$backup_v4"
-            backup_v4=""
-            _update_firewall_fail 1
-            return $?
-        fi
-
         firewall_reconcile_cloudflare_docker_ingress "${current_ipv4_cidrs[@]}" || mutation_rc=$?
         if (( mutation_rc != 0 )); then
             _update_firewall_fail "$mutation_rc"

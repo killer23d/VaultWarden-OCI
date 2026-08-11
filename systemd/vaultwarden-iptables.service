@@ -1,6 +1,7 @@
 # Reconcile runtime OCI/Docker firewall state after Docker starts.
-# Docker owns bridge forwarding, isolation, and container NAT. This unit only
-# removes the OCI FORWARD reject and obsolete VaultWarden exceptions.
+# Docker owns bridge forwarding, isolation, and container NAT. This unit
+# enforces the project-scoped Cloudflare web gate, removes the OCI FORWARD reject,
+# and removes obsolete VaultWarden forwarding/NAT exceptions.
 
 [Unit]
 Description=VaultWarden Docker firewall runtime reconciliation
