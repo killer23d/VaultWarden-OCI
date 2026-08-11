@@ -2534,6 +2534,15 @@ check_recovery_kit_schema_truth() {
       }
     fi
 
+    if [[ "$scenario" == "signal-after-link" ]]; then
+      ln() {
+        command ln "$@" || return
+        : >"$work/signal-after-link-injected"
+        kill -TERM "$BASHPID"
+        return 0
+      }
+    fi
+
     local target="$work/recovery/kit.txt"
     case "$scenario" in
       missing-schema|broken-tooling|sops-failure|invalid-age|missing-age|conditional-required)
@@ -2549,6 +2558,12 @@ check_recovery_kit_schema_truth() {
       post-link-unlink-failure)
         ! _ork_generate_and_secure "$target" || exit 1
         [[ -e "$work/post-link-unlink-failed" ]] || exit 1
+        [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+        ;;
+      signal-after-link)
+        ! _ork_generate_and_secure "$target" || exit 1
+        [[ -e "$work/signal-after-link-injected" ]] || exit 1
         [[ ! -e "$target" && ! -L "$target" ]] || exit 1
         ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
         ;;
@@ -2582,6 +2597,7 @@ check_recovery_kit_schema_truth() {
   recovery_case conditional-required || fail 'runtime-required conditional secret must not render as optional unset'
   recovery_case render-write-failure || fail 'render write failure after field header must abort before publication'
   recovery_case post-link-unlink-failure || fail 'post-link staging unlink failure must roll back both publication names'
+  recovery_case signal-after-link || fail 'signal immediately after hard-link publication must roll back both names'
   recovery_case optional-unset || fail 'optional unset value must render explicitly'
   recovery_case valid || fail 'valid complete recovery kit must publish exactly once per field'
   recovery_case cleanup-failure || fail 'cleanup scheduler failure must remove newly published plaintext'

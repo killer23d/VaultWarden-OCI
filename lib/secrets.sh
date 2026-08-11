@@ -1841,7 +1841,10 @@ _ork_generate_and_secure() {
     local linked=false completed=false
     _ork_rollback_incomplete_publication() {
       [[ "$completed" == "true" ]] && return 0
-      if [[ "$linked" == "true" ]]; then
+      # linked covers failures after state is recorded. The same-inode check
+      # closes the signal window after ln succeeds but before linked=true.
+      if [[ "$linked" == "true" ]] \
+          || { [[ -e "$output_file" && -e "$temp_file" ]] && [[ "$output_file" -ef "$temp_file" ]]; }; then
         _remove_sensitive_file "$output_file" 2>/dev/null || true
       fi
       _remove_sensitive_file "$temp_file" 2>/dev/null || true
