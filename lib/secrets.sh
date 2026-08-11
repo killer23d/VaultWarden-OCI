@@ -498,6 +498,9 @@ list_secret_keys() {
     local keys
     local sops_stderr
     local rc=0
+    # The full decrypted YAML is assigned below; suppress xtrace before it can
+    # expose values from an otherwise names-only operation.
+    { set +x; } 2>/dev/null
     # Decrypt once into a variable; parse from that in-memory copy
     # rather than calling sops -d a second time (avoids double I/O and TOCTOU).
     local yaml_content _sops_err_file

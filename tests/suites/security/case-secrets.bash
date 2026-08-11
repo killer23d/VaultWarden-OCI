@@ -2768,6 +2768,27 @@ check_recovery_kit_schema_truth() {
 
   (
     set -euo pipefail
+    export PROJECT_ROOT="$ROOT" SECRETS_FILE="$TMP/list-keys-xtrace.yaml"
+    printf 'fixture\n' >"$SECRETS_FILE"
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    log_warn() { :; }
+    log_debug() { :; }
+    ensure_sops_env() { return 0; }
+    cleanup_secrets_environment() { return 0; }
+    sops() { printf '%s\n' 'visible_key: LIST_KEYS_XTRACE_SECRET_DO_NOT_LEAK'; }
+    local trace_output trace_rc
+    set +e
+    trace_output="$({ set -x; list_secret_keys "$SECRETS_FILE"; } 2>&1)"
+    trace_rc=$?
+    set -e
+    [[ "$trace_rc" == 0 ]]
+    [[ "$trace_output" == *'visible_key'* ]]
+    [[ "$trace_output" != *'LIST_KEYS_XTRACE_SECRET_DO_NOT_LEAK'* ]]
+  ) || fail 'list_secret_keys must not expose decrypted values through Bash xtrace'
+
+  (
+    set -euo pipefail
     export PROJECT_ROOT="$ROOT"
     source "$ROOT/lib/schema.sh"
     [[ "$(schema_keys_for_conditional_group push)" == $'push_installation_id\npush_installation_key' ]]
