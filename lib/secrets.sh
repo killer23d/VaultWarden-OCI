@@ -351,7 +351,7 @@ _schema_required_runtime_keys() {
     [[ "${PUSH_ENABLED:-false}" == "true" ]] && _runtime_groups+=("push")
     [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]] && _runtime_groups+=("authenticated_integrity")
 
-    _email_mode="${EMAIL_MODE:-}"
+    _email_mode="${EMAIL_MODE:-auto}"
     case "$_email_mode" in
         smtp|direct|host) _runtime_groups+=("email_smtp") ;;
         api)              _runtime_groups+=("email_api") ;;

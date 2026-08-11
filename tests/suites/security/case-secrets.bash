@@ -2445,6 +2445,7 @@ check_recovery_kit_schema_truth() {
     export RECOVERY_KIT_DIR="$work/recovery"
     export RECOVERY_KIT_REPO_URL="https://example.invalid/VaultWarden-OCI.git"
     export CLOUDFLARE_PROXY_ENABLED=false
+    export EMAIL_MODE=api
     [[ "$scenario" != "conditional-required" ]] || export CLOUDFLARE_PROXY_ENABLED=true
     printf 'fixture\n' >"$SECRETS_FILE"
     printf 'AGE-SECRET-KEY-1TESTFIXTURE00000000000000000000000000000000000000000000000\n' >"$work/age-key.txt"
@@ -2480,8 +2481,11 @@ check_recovery_kit_schema_truth() {
     schema_keys() { printf '%s\n' required_key optional_key; }
     schema_required_keys() { printf '%s\n' required_key; }
     schema_keys_for_conditional_group() {
-      [[ "$1" == "cloudflare_proxy" ]] || return 1
-      printf '%s\n' optional_key
+      case "$1" in
+        cloudflare_proxy) printf '%s\n' optional_key ;;
+        email_api) printf '%s\n' required_key ;;
+        *) return 1 ;;
+      esac
     }
     schema_field() {
       local key="$1" field="$2"
@@ -2617,7 +2621,7 @@ check_recovery_kit_schema_truth() {
     export CLOUDFLARE_PROXY_ENABLED=false
     export PUSH_ENABLED=false
     export REQUIRE_AUTHENTICATED_INTEGRITY=false
-    export EMAIL_MODE=""
+    export EMAIL_MODE=api
     case "$scenario" in
       push-required|push-disabled|push-group-empty)
         [[ "$scenario" == "push-disabled" ]] || export PUSH_ENABLED=true
@@ -2625,6 +2629,7 @@ check_recovery_kit_schema_truth() {
       integrity-required) export REQUIRE_AUTHENTICATED_INTEGRITY=true ;;
       email-api-required) export EMAIL_MODE=api ;;
       email-smtp-required) export EMAIL_MODE=smtp ;;
+      email-default-required) unset EMAIL_MODE ;;
       *) exit 2 ;;
     esac
     printf 'fixture\n' >"$SECRETS_FILE"
@@ -2648,13 +2653,11 @@ check_recovery_kit_schema_truth() {
     schema_validate() { return 0; }
     schema_required_keys() { printf '%s\n' required_key; }
     schema_keys() {
-      printf '%s\n' required_key
+      printf '%s\n' required_key email_api_token smtp_password
       case "$scenario" in
         push-required|push-disabled) printf '%s\n' push_installation_id push_installation_key ;;
         integrity-required) printf '%s\n' file_integrity_hmac_key ;;
-        email-api-required) printf '%s\n' email_api_token ;;
-        email-smtp-required) printf '%s\n' smtp_password ;;
-        push-group-empty) ;;
+        push-group-empty|email-api-required|email-smtp-required|email-default-required) ;;
       esac
     }
     schema_keys_for_conditional_group() {
@@ -2692,8 +2695,19 @@ check_recovery_kit_schema_truth() {
         *push_installation_id*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
         *push_installation_key*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
         *file_integrity_hmac_key*) printf '%s' CHANGE_ME_FILE_INTEGRITY_HMAC_KEY ;;
-        *email_api_token*) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
-        *smtp_password*) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+        *email_api_token*)
+          if [[ "$scenario" == "email-api-required" ]]; then
+            printf '%s' PLACEHOLDER_NOT_CONFIGURED
+          else
+            printf '%s' configured-email-api-token
+          fi
+          ;;
+        *smtp_password*)
+          case "$scenario" in
+            email-smtp-required|email-default-required) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+            *) printf '%s' configured-smtp-password ;;
+          esac
+          ;;
         *) return 2 ;;
       esac
     }
@@ -2719,6 +2733,7 @@ check_recovery_kit_schema_truth() {
   runtime_required_case integrity-required || fail 'authenticated-integrity policy must reject an inactive HMAC key before publication'
   runtime_required_case email-api-required || fail 'EMAIL_MODE=api must reject an inactive API token before publication'
   runtime_required_case email-smtp-required || fail 'EMAIL_MODE=smtp must reject an inactive SMTP password before publication'
+  runtime_required_case email-default-required || fail 'missing EMAIL_MODE must follow the effective auto-mode requirement contract'
 
   (
     set -euo pipefail
