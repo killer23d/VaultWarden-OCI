@@ -461,8 +461,17 @@ DROPIN
     done
 }
 
+_render_docker_runtime_dropin() {
+    cat <<'DROPIN'
+# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
+# Caddy has restart: "no" so dockerd cannot publish it before this sequence.
+[Unit]
+Wants=vaultwarden-iptables.service vaultwarden-startup.service
+DROPIN
+}
+
 _install_docker_runtime_dropin() {
-    local dropin_dir
+    local dropin_dir tmp
     dropin_dir="$(dirname "$DOCKER_RUNTIME_DROPIN")"
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would install Docker runtime owner drop-in: $DOCKER_RUNTIME_DROPIN"
@@ -472,14 +481,42 @@ _install_docker_runtime_dropin() {
         log_error "Cannot create Docker systemd drop-in directory: $dropin_dir"
         return 1
     }
-    cat > "$DOCKER_RUNTIME_DROPIN" <<'DROPIN'
-# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
-# Caddy has restart: "no" so dockerd cannot publish it before this sequence.
-[Unit]
-Wants=vaultwarden-iptables.service vaultwarden-startup.service
-DROPIN
-    chmod 0644 "$DOCKER_RUNTIME_DROPIN"
+    tmp="$(mktemp -p "$dropin_dir" .20-vaultwarden-runtime.XXXXXXXXXX)" || return 1
+    _render_docker_runtime_dropin > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
+    chown root:root "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f -- "$tmp" "$DOCKER_RUNTIME_DROPIN" || { rm -f "$tmp"; return 1; }
     log_success "Installed Docker runtime owner drop-in: $DOCKER_RUNTIME_DROPIN"
+}
+
+_validate_docker_runtime_dropin() {
+    local expected owner group mode rc=0
+    if [[ ! -f "$DOCKER_RUNTIME_DROPIN" ]]; then
+        log_error "  MISSING: $DOCKER_RUNTIME_DROPIN"
+        log_error "  Docker restarts would not re-run firewall reconciliation/startup."
+        log_error "  Fix: sudo utilities/setup-systemd.sh install"
+        return 1
+    fi
+
+    expected="$(mktemp)" || return 1
+    _render_docker_runtime_dropin > "$expected" || { rm -f "$expected"; return 1; }
+    if ! cmp -s "$expected" "$DOCKER_RUNTIME_DROPIN"; then
+        log_error "  DRIFT: $DOCKER_RUNTIME_DROPIN does not match the managed Docker lifecycle contract"
+        log_error "  Fix: sudo utilities/setup-systemd.sh install"
+        rc=1
+    fi
+    rm -f "$expected"
+
+    owner="$(stat -c '%U' "$DOCKER_RUNTIME_DROPIN" 2>/dev/null || echo unknown)"
+    group="$(stat -c '%G' "$DOCKER_RUNTIME_DROPIN" 2>/dev/null || echo unknown)"
+    mode="$(stat -c '%a' "$DOCKER_RUNTIME_DROPIN" 2>/dev/null || echo unknown)"
+    if [[ "$owner" != root || "$group" != root || "$mode" != 644 ]]; then
+        log_error "  PERMISSIONS: $DOCKER_RUNTIME_DROPIN is ${owner}:${group} mode ${mode} (expected root:root 644)"
+        log_error "  Fix: sudo utilities/setup-systemd.sh install"
+        rc=1
+    fi
+    [[ "$rc" -eq 0 ]] && log_success "  OK: $DOCKER_RUNTIME_DROPIN"
+    return "$rc"
 }
 
 _remove_docker_runtime_dropin() {
@@ -1117,6 +1154,9 @@ validate_installation() {
     fi
 
     log_info "[4/9] Checking systemd drop-in files ..."
+    if ! _validate_docker_runtime_dropin; then
+        (( errors++ )) || true
+    fi
     for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
         local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
         [[ -d "$dropin_dir" ]] || continue

@@ -87,6 +87,15 @@ if [[ "${1:-}" == "reload" ]]; then
     exit "${UFW_RELOAD_RC:-0}"
 fi
 
+if [[ "${1:-}" == "show" && "${2:-}" == "added" ]]; then
+    if (( ${UFW_ADDED_RC:-0} != 0 )); then
+        printf '%s\n' "${UFW_ADDED_OUTPUT:-show added failed}" >&2
+        exit "$UFW_ADDED_RC"
+    fi
+    cat "${UFW_ADDED_FILE:?}"
+    exit 0
+fi
+
 if [[ "${1:-}" == "status" && "${2:-}" == "numbered" ]]; then
     if (( ${UFW_NUMBERED_RC:-0} != 0 )); then
         printf '%s\n' "${UFW_NUMBERED_OUTPUT:-numbered status failed}" >&2
@@ -223,6 +232,7 @@ reset_case() {
     UFW_NUMBERED_FILE="$CASE_DIR/status-numbered"
     UFW_VERBOSE_FILE="$CASE_DIR/status-verbose"
     UFW_DEFAULTS_FILE="$CASE_DIR/ufw-defaults"
+    UFW_ADDED_FILE="$CASE_DIR/ufw-added"
     UFW_CALL_LOG="$CASE_DIR/ufw-calls"
     FW_CALL_LOG="$CASE_DIR/firewall-calls"
     TXN_CALL_LOG="$CASE_DIR/transaction-calls"
@@ -237,6 +247,7 @@ reset_case() {
     : > "$UFW_NUMBERED_FILE"
     printf 'Status: active\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n' > "$UFW_VERBOSE_FILE"
     printf 'DEFAULT_INPUT_POLICY="DROP"\n' > "$UFW_DEFAULTS_FILE"
+    : > "$UFW_ADDED_FILE"
     printf 'baseline-v4\n' > "$UFW_CONFIG_DIR/user.rules"
     printf 'baseline-v6\n' > "$UFW_CONFIG_DIR/user6.rules"
     : > "$UFW_CALL_LOG"
@@ -245,13 +256,13 @@ reset_case() {
     : > "$LOG_FILE"
 
     unset UFW_STATUS_RC UFW_STATUS_OUTPUT UFW_NUMBERED_RC UFW_NUMBERED_OUTPUT
-    unset UFW_VERBOSE_RC UFW_VERBOSE_OUTPUT
+    unset UFW_VERBOSE_RC UFW_VERBOSE_OUTPUT UFW_ADDED_RC UFW_ADDED_OUTPUT
     unset UFW_ALLOW80_RC UFW_ALLOW80_OUTPUT UFW_ALLOW443_RC UFW_ALLOW443_OUTPUT
     unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE UFW_RELOAD_RC
     unset FW_PREFLIGHT_RC FW_EXACT_RC FW_RECONCILE_RC SSHD_PORT
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
-    export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_CONFIG_DIR UFW_CALL_LOG FW_CALL_LOG TXN_CALL_LOG LOG_FILE
+    export UFW_VERBOSE_FILE UFW_DEFAULTS_FILE UFW_ADDED_FILE UFW_CONFIG_DIR UFW_CALL_LOG FW_CALL_LOG TXN_CALL_LOG LOG_FILE
 }
 
 run_case() {
@@ -298,6 +309,16 @@ run_case
 [[ "$CASE_RC" -eq 60 ]] || fail "Docker preflight failure returned $CASE_RC instead of 60"
 assert_no_call ' allow '
 assert_no_call '--force delete'
+
+reset_case updater-inactive-ufw
+write_ipv4_status true true
+printf 'Status: inactive\n' > "$UFW_VERBOSE_FILE"
+run_case
+[[ "$CASE_RC" -ne 0 ]] || fail "periodic updater accepted inactive UFW"
+assert_file_contains "$LOG_FILE" 'UFW is inactive; refusing periodic firewall mutation'
+assert_no_call ' allow '
+assert_no_call '--force delete'
+[[ ! -s "$FW_CALL_LOG" || "$(cat "$FW_CALL_LOG")" == 'preflight' ]]     || fail "inactive UFW caused Docker firewall mutation"
 
 reset_case default-incoming-allow
 write_ipv4_status true true
@@ -481,6 +502,7 @@ extract_func "$SETUP_FIREWALL" _ufw_has_range_port >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_line_cidr >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_collect_conflicts >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_default_incoming_fail_closed >> "$SETUP_UFW_PROBE"
+extract_func "$SETUP_FIREWALL" _ufw_reject_hidden_inactive_permissive_rules >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_reject_ambiguous_inbound_allows >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_validate_safety >> "$SETUP_UFW_PROBE"
 extract_func "$SETUP_FIREWALL" _ufw_delete_rules >> "$SETUP_UFW_PROBE"
@@ -494,10 +516,25 @@ case "${SETUP_UFW_CASE:?}" in
     ensure)
         _ufw_ensure_range 203.0.113.0/24 CF-IPv4
         ;;
+    safety)
+        _ufw_validate_safety
+        ;;
     *) exit 2 ;;
 esac
 EOF_SETUP_UFW
 chmod 0755 "$SETUP_UFW_PROBE"
+
+reset_case setup-inactive-hidden-permissive-rule
+printf 'Status: inactive\n' > "$UFW_VERBOSE_FILE"
+printf 'Status: inactive\n' > "$UFW_NUMBERED_FILE"
+printf 'ufw allow Nginx Full\n' > "$UFW_ADDED_FILE"
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=safety "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "inactive UFW hid a preconfigured permissive application rule"
+assert_file_contains "$LOG_FILE" 'Inactive UFW has preconfigured permissive rules'
+[[ ! -s "$UFW_CALL_LOG" || "$(cat "$UFW_CALL_LOG")" == $'status verbose\nstatus numbered\nshow added' ]]     || fail "inactive setup safety proof mutated UFW"
 
 reset_case setup-public-readiness
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
@@ -1055,15 +1092,35 @@ _run(){ "$@"; }
 log_info(){ :; }
 log_success(){ :; }
 log_error(){ printf 'ERROR: %s\n' "$*" >&2; }
+# The real installer is root-only. This isolated probe runs unprivileged, so
+# model the root ownership that setup-systemd.sh establishes in production.
+chown(){ :; }
+stat(){
+    if [[ "${1:-}" == "-c" && "${3:-}" == "$DOCKER_RUNTIME_DROPIN" ]]; then
+        case "${2:-}" in
+            %U) printf 'root\n' ;;
+            %G) printf 'root\n' ;;
+            %a) printf '644\n' ;;
+            *) command stat "$@" ;;
+        esac
+    else
+        command stat "$@"
+    fi
+}
 EOF_DOCKER_DROPIN
+extract_func "$SYSTEMD_SETUP" _render_docker_runtime_dropin >> "$DOCKER_DROPIN_PROBE"
 extract_func "$SYSTEMD_SETUP" _install_docker_runtime_dropin >> "$DOCKER_DROPIN_PROBE"
+extract_func "$SYSTEMD_SETUP" _validate_docker_runtime_dropin >> "$DOCKER_DROPIN_PROBE"
 cat >> "$DOCKER_DROPIN_PROBE" <<'EOF_DOCKER_DROPIN'
 _install_docker_runtime_dropin
+_validate_docker_runtime_dropin
 EOF_DOCKER_DROPIN
 chmod 0755 "$DOCKER_DROPIN_PROBE"
 DROPIN_ROOT="$TMP/docker-dropin-root" "$BASH" "$DOCKER_DROPIN_PROBE"
 docker_runtime_dropin="$TMP/docker-dropin-root/units/docker.service.d/20-vaultwarden-runtime.conf"
 assert_file_contains "$docker_runtime_dropin" 'Wants=vaultwarden-iptables.service vaultwarden-startup.service'
+assert_file_contains "$SYSTEMD_SETUP" '_validate_docker_runtime_dropin'
+assert_file_contains "$SYSTEMD_SETUP" 'Docker restarts would not re-run firewall reconciliation/startup.'
 
 # Separate-volume installs must order the boot firewall owner after the mount,
 # but the runtime-only iptables unit must not receive state-directory write access.

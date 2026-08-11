@@ -93,6 +93,7 @@ _ufw_status() {
     case "$mode" in
         true|numbered) output="$(ufw status numbered 2>&1)" || rc=$? ;;
         verbose)       output="$(ufw status verbose 2>&1)" || rc=$? ;;
+        added)         output="$(ufw show added 2>&1)" || rc=$? ;;
         false|normal)  output="$(ufw status 2>&1)" || rc=$? ;;
         *)
             log_error "Unknown UFW status mode: ${mode}"
@@ -226,11 +227,29 @@ _ufw_reject_ambiguous_inbound_allows() {
     done <<< "$numbered_status"
 }
 
+_ufw_reject_hidden_inactive_permissive_rules() {
+    local verbose_status="$1" added line
+    grep -Eq '^Status:[[:space:]]+inactive' <<< "$verbose_status" || return 0
+
+    added="$(_ufw_status added)" || return $?
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*ufw[[:space:]]+ ]] || continue
+        if [[ "$line" =~ (^|[[:space:]])(allow|limit)([[:space:]]|$) ]] || \
+           [[ "$line" =~ (^|[[:space:]])route[[:space:]]+(allow|limit)([[:space:]]|$) ]]; then
+            log_error "Inactive UFW has preconfigured permissive rules that cannot be safely proven before enablement: ${line}"
+            log_error "Review 'sudo ufw show added'; enable/review UFW manually or reset the stale rules before retrying setup."
+            return 1
+        fi
+    done <<< "$added"
+    return 0
+}
+
 _ufw_validate_safety() {
     local verbose_status numbered_status
     verbose_status="$(_ufw_status verbose)" || return $?
     numbered_status="$(_ufw_status numbered)" || return $?
     _ufw_default_incoming_fail_closed "$verbose_status" || return $?
+    _ufw_reject_hidden_inactive_permissive_rules "$verbose_status" || return $?
     _ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
 }
 

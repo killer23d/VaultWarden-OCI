@@ -249,6 +249,11 @@ update_firewall_ranges() {
     _ufw_validate_safety() {
         local verbose_status numbered_status
         verbose_status="$(_ufw_status verbose)" || return $?
+        if ! grep -q '^Status: active' <<< "$verbose_status"; then
+            log_error "UFW is inactive; refusing periodic firewall mutation."
+            log_error "Enable and verify UFW first, then rerun the Cloudflare firewall update."
+            return 1
+        fi
         numbered_status="$(_ufw_status numbered)" || return $?
         _ufw_default_incoming_fail_closed "$verbose_status" || return $?
         _ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
