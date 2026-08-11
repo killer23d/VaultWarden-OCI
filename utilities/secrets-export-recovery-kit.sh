@@ -155,7 +155,7 @@ _export_recovery_kit_safe() {
         return 1
     fi
 
-    log_success "Required recovery secrets validated — proceeding with export"
+    log_success "Baseline schema preflight passed — proceeding to authoritative recovery generation"
 
     local old_umask; old_umask=$(umask)
     umask 0177

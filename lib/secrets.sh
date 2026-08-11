@@ -342,16 +342,38 @@ _managed_secrets_manifest_path() {
 }
 
 _schema_required_runtime_keys() {
+    local _group _group_keys _email_mode
+    local -a _runtime_groups=()
+
     schema_required_keys || return 1
 
-    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
-        local _cf_keys
-        if ! _cf_keys=$(schema_keys_for_conditional_group "cloudflare_proxy" 2>/dev/null); then
-            log_error "validate_required_secrets: failed to read Cloudflare conditional keys from secrets-schema.yaml"
+    [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]] && _runtime_groups+=("cloudflare_proxy")
+    [[ "${PUSH_ENABLED:-false}" == "true" ]] && _runtime_groups+=("push")
+    [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]] && _runtime_groups+=("authenticated_integrity")
+
+    _email_mode="${EMAIL_MODE:-}"
+    case "$_email_mode" in
+        smtp|direct|host) _runtime_groups+=("email_smtp") ;;
+        api)              _runtime_groups+=("email_api") ;;
+        auto)             _runtime_groups+=("email_api" "email_smtp") ;;
+        "") ;;
+        *)
+            log_error "validate_required_secrets: unsupported EMAIL_MODE '${_email_mode}' while determining runtime-required secrets"
+            return 1
+            ;;
+    esac
+
+    for _group in "${_runtime_groups[@]}"; do
+        if ! _group_keys=$(schema_keys_for_conditional_group "$_group" 2>/dev/null); then
+            log_error "validate_required_secrets: failed to read conditional group '${_group}' from secrets-schema.yaml"
             return 1
         fi
-        printf '%s\n' "$_cf_keys"
-    fi
+        if [[ -z "$_group_keys" ]]; then
+            log_error "validate_required_secrets: active conditional group '${_group}' has no keys in secrets-schema.yaml"
+            return 1
+        fi
+        printf '%s\n' "$_group_keys"
+    done
 }
 
 validate_required_secrets() {

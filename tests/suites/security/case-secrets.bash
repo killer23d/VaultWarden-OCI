@@ -442,8 +442,8 @@ cf_keys="$(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") 
 grep -Fq 'legacy_keys = {"backup_passphrase"}' "$ROOT/lib/secrets.sh" \
     || fail "legacy backup_passphrase must remain manageable in existing secrets files"
 
-grep -Fq 'schema_keys_for_conditional_group "cloudflare_proxy"' "$ROOT/lib/secrets.sh" \
-    || fail "validate_required_secrets must use the schema conditional-group accessor"
+grep -Fq 'schema_keys_for_conditional_group "$_group"' "$ROOT/lib/secrets.sh" \
+    || fail "runtime-required secret validation must use the generic schema conditional-group accessor"
 
 write_minimal_schema() {
     local file="$1"
@@ -2605,6 +2605,130 @@ check_recovery_kit_schema_truth() {
   recovery_case optional-unset || fail 'optional unset value must render explicitly'
   recovery_case valid || fail 'valid complete recovery kit must publish exactly once per field'
   recovery_case cleanup-failure || fail 'cleanup scheduler failure must remove newly published plaintext'
+
+  runtime_required_case() (
+    set -euo pipefail
+    local scenario="$1"
+    local work="$TMP/runtime-$scenario"
+    mkdir -p "$work/recovery"
+    export PROJECT_ROOT="$ROOT"
+    export SECRETS_FILE="$work/secrets.yaml"
+    export RECOVERY_KIT_REPO_URL="https://example.invalid/VaultWarden-OCI.git"
+    export CLOUDFLARE_PROXY_ENABLED=false
+    export PUSH_ENABLED=false
+    export REQUIRE_AUTHENTICATED_INTEGRITY=false
+    export EMAIL_MODE=""
+    case "$scenario" in
+      push-required|push-disabled|push-group-empty)
+        [[ "$scenario" == "push-disabled" ]] || export PUSH_ENABLED=true
+        ;;
+      integrity-required) export REQUIRE_AUTHENTICATED_INTEGRITY=true ;;
+      email-api-required) export EMAIL_MODE=api ;;
+      email-smtp-required) export EMAIL_MODE=smtp ;;
+      *) exit 2 ;;
+    esac
+    printf 'fixture\n' >"$SECRETS_FILE"
+    printf 'AGE-SECRET-KEY-1TESTFIXTURE00000000000000000000000000000000000000000000000\n' >"$work/age-key.txt"
+    chmod 0600 "$work/age-key.txt"
+
+    # shellcheck source=../../../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    log_warn() { :; }
+    log_info() { :; }
+    log_debug() { :; }
+    log_success() { :; }
+    resolve_age_key_path() { printf '%s\n' "$work/age-key.txt"; }
+    has_command() { [[ "$1" == age ]] || command -v "$1" >/dev/null 2>&1; }
+    check_age_key() { return 0; }
+    _derive_age_public_key() { printf '%s\n' 'age1testfixture000000000000000000000000000000000000000000000000000'; }
+    ensure_sops_env() { return 0; }
+    cleanup_secrets_environment() { return 0; }
+    _schedule_recovery_cleanup() { _RECOVERY_CLEANUP_SCHEDULER=systemd; return 0; }
+    schema_validate() { return 0; }
+    schema_required_keys() { printf '%s\n' required_key; }
+    schema_keys() {
+      printf '%s\n' required_key
+      case "$scenario" in
+        push-required|push-disabled) printf '%s\n' push_installation_id push_installation_key ;;
+        integrity-required) printf '%s\n' file_integrity_hmac_key ;;
+        email-api-required) printf '%s\n' email_api_token ;;
+        email-smtp-required) printf '%s\n' smtp_password ;;
+        push-group-empty) ;;
+      esac
+    }
+    schema_keys_for_conditional_group() {
+      case "$1" in
+        push)
+          [[ "$scenario" != "push-group-empty" ]] || return 0
+          printf '%s\n' push_installation_id push_installation_key
+          ;;
+        authenticated_integrity) printf '%s\n' file_integrity_hmac_key ;;
+        email_api) printf '%s\n' email_api_token ;;
+        email_smtp) printf '%s\n' smtp_password ;;
+        *) return 1 ;;
+      esac
+    }
+    schema_field() {
+      local key="$1" field="$2"
+      case "$field:$key" in
+        label:required_key) printf '%s' 'Required Test Secret' ;;
+        label:push_installation_id) printf '%s' 'Push Installation ID' ;;
+        label:push_installation_key) printf '%s' 'Push Installation Key' ;;
+        label:file_integrity_hmac_key) printf '%s' 'Backup Integrity HMAC Key' ;;
+        label:email_api_token) printf '%s' 'Email API Token' ;;
+        label:smtp_password) printf '%s' 'SMTP Password' ;;
+        placeholder:required_key) printf '%s' CHANGE_ME_REQUIRED ;;
+        placeholder:push_installation_id|placeholder:push_installation_key) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
+        placeholder:file_integrity_hmac_key) printf '%s' CHANGE_ME_FILE_INTEGRITY_HMAC_KEY ;;
+        placeholder:email_api_token|placeholder:smtp_password) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+        *) return 1 ;;
+      esac
+    }
+    sops() {
+      local joined="$*"
+      case "$joined" in
+        *required_key*) printf '%s' required-secret ;;
+        *push_installation_id*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
+        *push_installation_key*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
+        *file_integrity_hmac_key*) printf '%s' CHANGE_ME_FILE_INTEGRITY_HMAC_KEY ;;
+        *email_api_token*) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+        *smtp_password*) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+        *) return 2 ;;
+      esac
+    }
+
+    local target="$work/recovery/kit.txt"
+    if [[ "$scenario" == "push-disabled" ]]; then
+      _ork_generate_and_secure "$target" || exit 1
+      [[ -f "$target" ]] || exit 1
+      local optional_count
+      optional_count=$(grep -Fxc '<not set: optional>' "$target" 2>/dev/null || true)
+      [[ "$optional_count" == 2 ]] || exit 1
+      return 0
+    fi
+
+    ! _ork_generate_and_secure "$target" || exit 1
+    [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+    ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+  )
+
+  runtime_required_case push-required || fail 'PUSH_ENABLED=true must reject inactive push credentials before publication'
+  runtime_required_case push-disabled || fail 'disabled push credentials must remain genuinely optional'
+  runtime_required_case push-group-empty || fail 'active runtime requirement group must not silently resolve to zero schema keys'
+  runtime_required_case integrity-required || fail 'authenticated-integrity policy must reject an inactive HMAC key before publication'
+  runtime_required_case email-api-required || fail 'EMAIL_MODE=api must reject an inactive API token before publication'
+  runtime_required_case email-smtp-required || fail 'EMAIL_MODE=smtp must reject an inactive SMTP password before publication'
+
+  (
+    set -euo pipefail
+    export PROJECT_ROOT="$ROOT"
+    source "$ROOT/lib/schema.sh"
+    [[ "$(schema_keys_for_conditional_group push)" == $'push_installation_id\npush_installation_key' ]]
+    [[ "$(schema_keys_for_conditional_group authenticated_integrity)" == 'file_integrity_hmac_key' ]]
+    [[ "$(schema_keys_for_conditional_group email_api)" == 'email_api_token' ]]
+    [[ "$(schema_keys_for_conditional_group email_smtp)" == 'smtp_password' ]]
+  ) || fail 'configured recovery requirement membership must remain schema-owned'
 
   (
     set -euo pipefail
