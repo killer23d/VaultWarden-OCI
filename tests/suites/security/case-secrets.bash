@@ -2629,7 +2629,8 @@ check_recovery_kit_schema_truth() {
       integrity-required) export REQUIRE_AUTHENTICATED_INTEGRITY=true ;;
       email-api-required) export EMAIL_MODE=api ;;
       email-smtp-required) export EMAIL_MODE=smtp ;;
-      email-default-required) unset EMAIL_MODE ;;
+      email-auto-api-only|email-auto-smtp-only|email-auto-none) export EMAIL_MODE=auto ;;
+      email-default-smtp-only) unset EMAIL_MODE ;;
       *) exit 2 ;;
     esac
     printf 'fixture\n' >"$SECRETS_FILE"
@@ -2657,7 +2658,7 @@ check_recovery_kit_schema_truth() {
       case "$scenario" in
         push-required|push-disabled) printf '%s\n' push_installation_id push_installation_key ;;
         integrity-required) printf '%s\n' file_integrity_hmac_key ;;
-        push-group-empty|email-api-required|email-smtp-required|email-default-required) ;;
+        push-group-empty|email-api-required|email-smtp-required|email-auto-api-only|email-auto-smtp-only|email-auto-none|email-default-smtp-only) ;;
       esac
     }
     schema_keys_for_conditional_group() {
@@ -2688,6 +2689,7 @@ check_recovery_kit_schema_truth() {
         *) return 1 ;;
       esac
     }
+    schema_placeholder_for_key() { schema_field "$1" placeholder; }
     sops() {
       local joined="$*"
       case "$joined" in
@@ -2696,15 +2698,14 @@ check_recovery_kit_schema_truth() {
         *push_installation_key*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
         *file_integrity_hmac_key*) printf '%s' CHANGE_ME_FILE_INTEGRITY_HMAC_KEY ;;
         *email_api_token*)
-          if [[ "$scenario" == "email-api-required" ]]; then
-            printf '%s' PLACEHOLDER_NOT_CONFIGURED
-          else
-            printf '%s' configured-email-api-token
-          fi
+          case "$scenario" in
+            email-api-required|email-auto-smtp-only|email-auto-none|email-default-smtp-only) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+            *) printf '%s' configured-email-api-token ;;
+          esac
           ;;
         *smtp_password*)
           case "$scenario" in
-            email-smtp-required|email-default-required) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+            email-smtp-required|email-auto-api-only|email-auto-none) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
             *) printf '%s' configured-smtp-password ;;
           esac
           ;;
@@ -2713,14 +2714,26 @@ check_recovery_kit_schema_truth() {
     }
 
     local target="$work/recovery/kit.txt"
-    if [[ "$scenario" == "push-disabled" ]]; then
-      _ork_generate_and_secure "$target" || exit 1
-      [[ -f "$target" ]] || exit 1
-      local optional_count
-      optional_count=$(grep -Fxc '<not set: optional>' "$target" 2>/dev/null || true)
-      [[ "$optional_count" == 2 ]] || exit 1
-      return 0
-    fi
+    case "$scenario" in
+      push-disabled)
+        _ork_generate_and_secure "$target" || exit 1
+        [[ -f "$target" ]] || exit 1
+        local optional_count
+        optional_count=$(grep -Fxc '<not set: optional>' "$target" 2>/dev/null || true)
+        [[ "$optional_count" == 2 ]] || exit 1
+        return 0
+        ;;
+      email-auto-api-only|email-auto-smtp-only|email-default-smtp-only)
+        _ork_generate_and_secure "$target" || exit 1
+        [[ -f "$target" ]] || exit 1
+        [[ "$(grep -Fxc '[Email API Token]' "$target")" == 1 ]] || exit 1
+        [[ "$(grep -Fxc '[SMTP Password]' "$target")" == 1 ]] || exit 1
+        local email_optional_count
+        email_optional_count=$(grep -Fxc '<not set: optional>' "$target" 2>/dev/null || true)
+        [[ "$email_optional_count" == 1 ]] || exit 1
+        return 0
+        ;;
+    esac
 
     ! _ork_generate_and_secure "$target" || exit 1
     [[ ! -e "$target" && ! -L "$target" ]] || exit 1
@@ -2733,7 +2746,10 @@ check_recovery_kit_schema_truth() {
   runtime_required_case integrity-required || fail 'authenticated-integrity policy must reject an inactive HMAC key before publication'
   runtime_required_case email-api-required || fail 'EMAIL_MODE=api must reject an inactive API token before publication'
   runtime_required_case email-smtp-required || fail 'EMAIL_MODE=smtp must reject an inactive SMTP password before publication'
-  runtime_required_case email-default-required || fail 'missing EMAIL_MODE must follow the effective auto-mode requirement contract'
+  runtime_required_case email-auto-api-only || fail 'EMAIL_MODE=auto must allow an API-only configured credential path'
+  runtime_required_case email-auto-smtp-only || fail 'EMAIL_MODE=auto must allow an SMTP-only configured credential path'
+  runtime_required_case email-auto-none || fail 'EMAIL_MODE=auto must reject recovery publication when neither email credential path is configured'
+  runtime_required_case email-default-smtp-only || fail 'missing EMAIL_MODE must inherit auto any-of semantics rather than an AND requirement'
 
   (
     set -euo pipefail
