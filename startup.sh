@@ -178,10 +178,10 @@ warn_plaintext_secret_overrides() {
   fi
 }
 
-# Cross-check EMAIL_MODE against the required secret so operators get an
-# actionable warning at startup instead of a silent failure on first email
-# send. This remains a warning because email is not required for the stack to
-# start.
+# Cross-check EMAIL_MODE after stack-level secret validation so operators get
+# delivery-specific diagnostics before the first email send. The unconditional
+# Postfix smtp_password requirement is already enforced by prepare_docker_secrets()
+# through validate_required_secrets(); this later check is advisory only.
 #
 # Valid modes are declared in _VW_DEFAULT_EMAIL_MODES (lib/defaults.sh).
 # Add a new mode there; no edit to this function is needed.
