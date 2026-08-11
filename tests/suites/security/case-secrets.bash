@@ -2469,6 +2469,10 @@ check_recovery_kit_schema_truth() {
     _derive_age_public_key() { printf '%s\n' 'age1testfixture000000000000000000000000000000000000000000000000000'; }
     ensure_sops_env() { return 0; }
     cleanup_secrets_environment() { return 0; }
+    _schedule_recovery_cleanup() {
+      _RECOVERY_CLEANUP_SCHEDULER=systemd
+      return 0
+    }
     schema_validate() {
       case "$scenario" in missing-schema|broken-tooling) return 1 ;; esac
       return 0

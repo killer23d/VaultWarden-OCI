@@ -1850,7 +1850,12 @@ _ork_generate_and_secure() {
       _remove_sensitive_file "$temp_file" 2>/dev/null || true
     }
     trap _ork_rollback_incomplete_publication EXIT
-    trap 'exit 130' INT; trap 'exit 129' HUP; trap 'exit 143' TERM
+    # A signal means publication did not complete from the caller's point of
+    # view. Force rollback even if it lands after cleanup was accepted but
+    # before this subshell returns success.
+    trap 'completed=false; exit 130' INT
+    trap 'completed=false; exit 129' HUP
+    trap 'completed=false; exit 143' TERM
     generate_recovery_kit "$temp_file" || exit 1
     [[ -s "$temp_file" ]] || exit 1
     grep -Fq 'END OF RECOVERY KIT' "$temp_file" || exit 1
@@ -1863,6 +1868,13 @@ _ork_generate_and_secure() {
     ln -- "$temp_file" "$output_file" || exit 1
     linked=true
     rm -f -- "$temp_file" || exit 1
+    # Cleanup acceptance is part of publication success. Keeping it inside
+    # this transaction removes the handoff window where a valid plaintext
+    # document existed but no cleanup job had yet been accepted.
+    if ! _schedule_recovery_cleanup "$output_file" "30m"; then
+      log_error "Recovery-kit cleanup could not be scheduled; rolling back published plaintext."
+      exit 1
+    fi
     completed=true
   ) || return 1
   return 0
@@ -1891,17 +1903,7 @@ offer_recovery_kit_export() {
   log_success "Recovery Kit saved: $recovery_file"
   log_info "Owner: root:root; permissions: 0600; document validation: passed"
   log_info "The recovery-kit body was not written to terminal output."
-
-  if ! _schedule_recovery_cleanup "$recovery_file" "30m"; then
-    log_error "Recovery-kit cleanup could not be scheduled; export is failing closed."
-    if ! _remove_sensitive_file "$recovery_file" || [[ -e "$recovery_file" || -L "$recovery_file" ]]; then
-      log_error "Recovery-kit cleanup scheduling failed and the plaintext file could not be removed: $recovery_file"
-      return 1
-    fi
-    log_info "Unscheduled plaintext recovery kit removed: $recovery_file"
-    return 1
-  fi
-  log_info "Primary plaintext cleanup accepted by ${_RECOVERY_CLEANUP_SCHEDULER} for approximately 30 minutes: $recovery_file"
+  log_info "Primary plaintext cleanup was accepted for approximately 30 minutes: $recovery_file"
   log_info "Routine maintenance also removes eligible leftovers that are at least 30 minutes old."
 
   _offer_email_recovery_kit "$recovery_file" || email_rc=$?
@@ -1917,13 +1919,13 @@ offer_recovery_kit_export() {
       ;;
     2)
       log_info "Encrypted email declined; protected plaintext remains temporarily at: $recovery_file"
-      log_info "Primary cleanup is scheduled for approximately 30 minutes (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "Primary cleanup is scheduled for approximately 30 minutes."
       log_info "If it survives that cleanup, the next routine maintenance run removes eligible leftovers."
       return 0
       ;;
     *)
       log_error "Encrypted email was requested but failed; protected plaintext remains temporarily at: $recovery_file"
-      log_info "Primary cleanup is scheduled for approximately 30 minutes (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "Primary cleanup is scheduled for approximately 30 minutes."
       log_info "If it survives that cleanup, the next routine maintenance run removes eligible leftovers."
       return "$email_rc"
       ;;
