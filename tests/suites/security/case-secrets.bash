@@ -2,7 +2,7 @@
 # Consolidated secrets regression suite.
 set -euo pipefail
 MODE="${VW_TEST_CASE_MODE:-all}"
-case "$MODE" in core|sensitive-cleanup|all) ;; *) printf 'FAIL: unknown VW_TEST_CASE_MODE for case-secrets.bash: %s\n' "$MODE" >&2; exit 2 ;; esac
+case "$MODE" in core|sensitive-cleanup|recovery-kit|all) ;; *) printf 'FAIL: unknown VW_TEST_CASE_MODE for case-secrets.bash: %s\n' "$MODE" >&2; exit 2 ;; esac
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
@@ -2429,8 +2429,148 @@ else
 fi
 )
 
+check_recovery_kit_schema_truth() {
+  local ROOT="$VW_TEST_REPO_ROOT"
+  local TMP
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' RETURN
+
+  recovery_case() (
+    set -euo pipefail
+    local scenario="$1"
+    local work="$TMP/$scenario"
+    mkdir -p "$work/recovery"
+    export PROJECT_ROOT="$ROOT"
+    export SECRETS_FILE="$work/secrets.yaml"
+    export RECOVERY_KIT_DIR="$work/recovery"
+    export RECOVERY_KIT_REPO_URL="https://example.invalid/VaultWarden-OCI.git"
+    printf 'fixture\n' >"$SECRETS_FILE"
+    printf 'AGE-SECRET-KEY-1TESTFIXTURE00000000000000000000000000000000000000000000000\n' >"$work/age-key.txt"
+    chmod 0600 "$work/age-key.txt"
+
+    # shellcheck source=../../../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    log_warn() { :; }
+    log_info() { :; }
+    log_debug() { :; }
+    log_success() { :; }
+    resolve_age_key_path() { printf '%s\n' "$work/age-key.txt"; }
+    check_age_key() { [[ "$scenario" != "invalid-age" ]]; }
+    _derive_age_public_key() { printf '%s\n' 'age1testfixture000000000000000000000000000000000000000000000000000'; }
+    ensure_sops_env() { return 0; }
+    cleanup_secrets_environment() { return 0; }
+    schema_validate() {
+      case "$scenario" in missing-schema|broken-tooling) return 1 ;; esac
+      return 0
+    }
+    schema_keys() { printf '%s\n' required_key optional_key; }
+    schema_field() {
+      local key="$1" field="$2"
+      case "$field:$key" in
+        label:required_key) printf '%s' 'Required Test Secret' ;;
+        label:optional_key) printf '%s' 'Optional Test Secret' ;;
+        required:required_key) printf '%s' true ;;
+        required:optional_key) printf '%s' false ;;
+        placeholder:required_key) printf '%s' CHANGE_ME_REQUIRED ;;
+        placeholder:optional_key) printf '%s' CHANGE_ME_OPTIONAL ;;
+        *) return 1 ;;
+      esac
+    }
+    sops() {
+      local joined="$*"
+      if [[ "$joined" == *'required_key'* ]]; then
+        printf '%s' 'required-secret'
+        return 0
+      fi
+      if [[ "$joined" == *'optional_key'* ]]; then
+        [[ "$scenario" != "sops-failure" ]] || return 42
+        if [[ "$scenario" == "optional-unset" ]]; then
+          printf ''
+        else
+          printf '%s' 'optional-secret'
+        fi
+        return 0
+      fi
+      return 2
+    }
+
+    local target="$work/recovery/kit.txt"
+    case "$scenario" in
+      missing-schema|broken-tooling|sops-failure|invalid-age)
+        ! _ork_generate_and_secure "$target" || exit 1
+        [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ;;
+      optional-unset)
+        _ork_generate_and_secure "$target"
+        grep -Fqx '<not set: optional>' "$target"
+        [[ "$(grep -Fxc '[Required Test Secret]' "$target")" == 1 ]]
+        [[ "$(grep -Fxc '[Optional Test Secret]' "$target")" == 1 ]]
+        ;;
+      valid)
+        _ork_generate_and_secure "$target"
+        [[ "$(stat -c '%a' "$target")" == 600 ]]
+        [[ "$(grep -Fxc '[Required Test Secret]' "$target")" == 1 ]]
+        [[ "$(grep -Fxc '[Optional Test Secret]' "$target")" == 1 ]]
+        ;;
+      cleanup-failure)
+        _schedule_recovery_cleanup() { return 1; }
+        _offer_email_recovery_kit() { return 99; }
+        ! offer_recovery_kit_export true || exit 1
+        ! find "$work/recovery" -maxdepth 1 -name 'vaultwarden-recovery-kit-*.txt' -print -quit | grep -q .
+        ;;
+      *) exit 2 ;;
+    esac
+  )
+
+  recovery_case missing-schema || fail 'missing schema must abort before publication'
+  recovery_case broken-tooling || fail 'broken schema tooling must abort before publication'
+  recovery_case sops-failure || fail 'SOPS extraction failure must abort before publication'
+  recovery_case invalid-age || fail 'invalid Age private identity must abort before publication'
+  recovery_case optional-unset || fail 'optional unset value must render explicitly'
+  recovery_case valid || fail 'valid complete recovery kit must publish exactly once per field'
+  recovery_case cleanup-failure || fail 'cleanup scheduler failure must remove newly published plaintext'
+
+  (
+    set -euo pipefail
+    export PROJECT_ROOT="$ROOT" SECRETS_FILE="$TMP/secrets.yaml"
+    printf 'fixture\n' >"$SECRETS_FILE"
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    schema_required_keys() { printf '%s\n' required_key; }
+    schema_keys_for_conditional_group() { return 1; }
+    CLOUDFLARE_PROXY_ENABLED=true
+    ! _schema_required_runtime_keys
+  ) || fail 'authoritative schema conditional accessor failure must be fatal'
+
+  (
+    set -euo pipefail
+    export PROJECT_ROOT="$ROOT" SECRETS_FILE="$TMP/secrets.yaml"
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    local duplicate="$TMP/duplicate.txt" missing="$TMP/missing.txt"
+    cat >"$duplicate" <<'EOF'
+AGE-SECRET-KEY-1TEST
+[Required Test Secret]
+[Required Test Secret]
+[Optional Test Secret]
+END OF RECOVERY KIT
+EOF
+    cat >"$missing" <<'EOF'
+AGE-SECRET-KEY-1TEST
+[Required Test Secret]
+END OF RECOVERY KIT
+EOF
+    ! _validate_recovery_kit_document "$duplicate" $'Required Test Secret\nOptional Test Secret'
+    ! _validate_recovery_kit_document "$missing" $'Required Test Secret\nOptional Test Secret'
+  ) || fail 'duplicate/missing rendered recovery fields must fail validation'
+
+  pass 'recovery-kit schema truth and fail-closed publication'
+}
+
 case "$MODE" in
     core)
+        check_recovery_kit_schema_truth
         check_secrets_cli_help
         check_schema_dependency_contracts
         check_crowdsec_worker_post_edit_apply
@@ -2438,10 +2578,14 @@ case "$MODE" in
         check_key_rotate_live_generation_transaction
         check_key_rotate_full_entrypoint_cleanup_contract
         ;;
+    recovery-kit)
+        check_recovery_kit_schema_truth
+        ;;
     sensitive-cleanup)
         check_sensitive_cleanup_contracts
         ;;
     all)
+        check_recovery_kit_schema_truth
         check_secrets_cli_help
         check_schema_dependency_contracts
         check_crowdsec_worker_post_edit_apply
