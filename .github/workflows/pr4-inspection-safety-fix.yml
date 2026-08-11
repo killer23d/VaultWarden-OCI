@@ -23,6 +23,7 @@ jobs:
           set -euo pipefail
           git pull --rebase origin pr4-firewall-exactness
           python3 .pr4-inspection-safety-fix.py
+          python3 .pr4-inspection-probe-fix.py
       - name: Install generated-doc dependency
         shell: bash
         run: |
