@@ -1603,8 +1603,9 @@ WHAT install DOES:
     5. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     7. systemctl daemon-reload
-    8. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
-    9. If timers were started now, verifies all managed timers are active and have a next trigger
+    8. Installs a Docker lifecycle drop-in so firewall reconciliation and startup rerun after dockerd restarts
+    9. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
+   10. If timers were started now, verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install

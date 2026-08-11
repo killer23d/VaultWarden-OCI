@@ -140,7 +140,10 @@ services:
         # after changing CADDY_VERSION in .env to rebuild both stages.
         # Do NOT set CADDY_VERSION=latest — xcaddy builds must be pinned.
         CADDY_VERSION: ${CADDY_VERSION:-2.11.4}
-    restart: unless-stopped
+    # Caddy is started by vaultwarden-startup.service only after the
+    # Docker packet-path firewall gate has reconciled. Do not let dockerd
+    # auto-restart this public listener before that gate exists.
+    restart: "no"
     user: "2000:2000"
 
     entrypoint: /scripts/entrypoint.sh

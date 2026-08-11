@@ -6,7 +6,8 @@
 Description=VaultWarden Docker firewall runtime reconciliation
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=network-online.target docker.service
-Wants=docker.service
+BindsTo=docker.service
+PartOf=docker.service
 Wants=network-online.target
 StartLimitIntervalSec=60s
 StartLimitBurst=3

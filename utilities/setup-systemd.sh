@@ -36,6 +36,7 @@ ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
 STARTUP_SERVICE="vaultwarden-startup.service"
 NOTIFY_FAILURE_TEMPLATE="vaultwarden-notify-failure@.service"
+DOCKER_RUNTIME_DROPIN="${UNIT_DEST_DIR}/docker.service.d/20-vaultwarden-runtime.conf"
 SETUP_SYSTEMD_GUARD_HELD=false
 
 TIMERS=(
@@ -201,8 +202,9 @@ WHAT install DOES:
     5. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
     6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     7. systemctl daemon-reload
-    8. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
-    9. If timers were started now, verifies all managed timers are active and have a next trigger
+    8. Installs a Docker lifecycle drop-in so firewall reconciliation and startup rerun after dockerd restarts
+    9. Enables vaultwarden-startup.service and enables timers; starts timers only according to start policy
+   10. If timers were started now, verifies all managed timers are active and have a next trigger
 
 EXAMPLES:
     sudo utilities/setup-systemd.sh install
@@ -459,6 +461,42 @@ DROPIN
     done
 }
 
+_install_docker_runtime_dropin() {
+    local dropin_dir
+    dropin_dir="$(dirname "$DOCKER_RUNTIME_DROPIN")"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would install Docker runtime owner drop-in: $DOCKER_RUNTIME_DROPIN"
+        return 0
+    fi
+    mkdir -p "$dropin_dir" || {
+        log_error "Cannot create Docker systemd drop-in directory: $dropin_dir"
+        return 1
+    }
+    cat > "$DOCKER_RUNTIME_DROPIN" <<'DROPIN'
+# Managed by VaultWarden-OCI setup-systemd.sh — do not edit by hand.
+# Caddy has restart: "no" so dockerd cannot publish it before this sequence.
+[Unit]
+Wants=vaultwarden-iptables.service vaultwarden-startup.service
+DROPIN
+    chmod 0644 "$DOCKER_RUNTIME_DROPIN"
+    log_success "Installed Docker runtime owner drop-in: $DOCKER_RUNTIME_DROPIN"
+}
+
+_remove_docker_runtime_dropin() {
+    local dropin_dir
+    dropin_dir="$(dirname "$DOCKER_RUNTIME_DROPIN")"
+    if [[ -f "$DOCKER_RUNTIME_DROPIN" ]]; then
+        _run rm -f "$DOCKER_RUNTIME_DROPIN"
+        log_success "Removed Docker runtime owner drop-in: $DOCKER_RUNTIME_DROPIN"
+    elif [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would remove Docker runtime owner drop-in if present: $DOCKER_RUNTIME_DROPIN"
+    fi
+    if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+        _run rmdir "$dropin_dir"
+        log_success "Removed empty Docker drop-in directory: $dropin_dir"
+    fi
+}
+
 _sync_runtime_environment_files() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would run utilities/env-edit.sh sync to regenerate install.env and $ENV_FILE"
@@ -699,6 +737,7 @@ install_units() {
 
     _render_startup_service || return 1
 
+    _install_docker_runtime_dropin || return 1
     _install_rwpaths_dropin
     _cleanup_stale_identity_dropins
 
@@ -843,6 +882,8 @@ remove_units() {
             log_success "Removed: $dest"
         fi
     done
+
+    _remove_docker_runtime_dropin
 
     # Clean up per-unit ReadWritePaths drop-in directories written by
     # _install_rwpaths_dropin (separate-volume mode). Leaving stale .d/

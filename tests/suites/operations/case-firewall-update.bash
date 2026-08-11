@@ -646,6 +646,10 @@ compose_file="$ROOT/docker-compose.yml.example"
 assert_file_contains "$compose_file" '"0.0.0.0:80:80"'
 assert_file_contains "$compose_file" '"0.0.0.0:443:443"'
 assert_file_contains "$compose_file" 'subnet: 172.22.0.0/28'
+caddy_block="$TMP/caddy-compose-block.txt"
+awk '/^  caddy:/{p=1} p{print} /^  postfix:/{exit}' "$compose_file" > "$caddy_block"
+assert_file_contains "$caddy_block" 'restart: "no"'
+! grep -Fq 'restart: unless-stopped' "$caddy_block"     || fail "Caddy can auto-restart before Docker firewall reconciliation"
 for cidr in 172.21.0.0/28 172.22.0.0/28 172.23.0.0/28; do
     assert_file_contains "$compose_file" "subnet: $cidr"
 done
@@ -1014,17 +1018,42 @@ assert_file_contains "$iptables_unit" 'ProtectSystem=strict'
 assert_file_contains "$iptables_unit" 'NoNewPrivileges=yes'
 assert_file_contains "$iptables_unit" 'Environment=TMPDIR=/run/vaultwarden-iptables'
 assert_file_contains "$iptables_unit" 'EnvironmentFile=-/etc/vaultwarden/vaultwarden.env'
+assert_file_contains "$iptables_unit" 'BindsTo=docker.service'
+assert_file_contains "$iptables_unit" 'PartOf=docker.service'
 assert_file_contains "$iptables_unit" 'ReadWritePaths=/run/xtables.lock /run/lock /run/vaultwarden-oci /run/vaultwarden-iptables'
 assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/touch /run/xtables.lock'
 assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/chown root:root /run/xtables.lock'
 assert_file_contains "$iptables_unit" 'ExecStartPre=+/usr/bin/chmod 0600 /run/xtables.lock'
 ! grep -Eq 'netfilter-persistent|apt(-get)?|/etc/iptables|/etc/ufw' "$iptables_unit" \
     || fail "vaultwarden-iptables.service retains persistence/package ownership"
-assert_file_contains "$startup_unit" 'Requires=docker.service vaultwarden-iptables.service'
+assert_file_contains "$startup_unit" 'Requires=vaultwarden-iptables.service'
+assert_file_contains "$startup_unit" 'BindsTo=docker.service'
+assert_file_contains "$startup_unit" 'PartOf=docker.service'
 assert_file_contains "$startup_unit" 'After=local-fs.target docker.service network-online.target vaultwarden-iptables.service'
 assert_file_contains "$dns_timer" 'OnCalendar=*-*-* *:00:00'
 assert_file_contains "$firewall_timer" 'OnCalendar=Sat *-*-* 04:00:00'
 
+
+DOCKER_DROPIN_PROBE="$TMP/docker-runtime-dropin-probe.bash"
+cat > "$DOCKER_DROPIN_PROBE" <<'EOF_DOCKER_DROPIN'
+#!/usr/bin/env bash
+set -euo pipefail
+DRY_RUN=false
+UNIT_DEST_DIR="${DROPIN_ROOT:?}/units"
+DOCKER_RUNTIME_DROPIN="${UNIT_DEST_DIR}/docker.service.d/20-vaultwarden-runtime.conf"
+_run(){ "$@"; }
+log_info(){ :; }
+log_success(){ :; }
+log_error(){ printf 'ERROR: %s\n' "$*" >&2; }
+EOF_DOCKER_DROPIN
+extract_func "$SYSTEMD_SETUP" _install_docker_runtime_dropin >> "$DOCKER_DROPIN_PROBE"
+cat >> "$DOCKER_DROPIN_PROBE" <<'EOF_DOCKER_DROPIN'
+_install_docker_runtime_dropin
+EOF_DOCKER_DROPIN
+chmod 0755 "$DOCKER_DROPIN_PROBE"
+DROPIN_ROOT="$TMP/docker-dropin-root" "$BASH" "$DOCKER_DROPIN_PROBE"
+docker_runtime_dropin="$TMP/docker-dropin-root/units/docker.service.d/20-vaultwarden-runtime.conf"
+assert_file_contains "$docker_runtime_dropin" 'Wants=vaultwarden-iptables.service vaultwarden-startup.service'
 
 # Separate-volume installs must order the boot firewall owner after the mount,
 # but the runtime-only iptables unit must not receive state-directory write access.
