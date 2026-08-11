@@ -1149,8 +1149,9 @@ USAGE:
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
-    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, and
-    publishes a protected plaintext recovery document in the
+    Decrypts secrets.yaml, validates required and conditionally required
+    secrets against the authoritative schema, and publishes a protected
+    plaintext recovery document in the
     recovery directory /root/vaultwarden-recovery.
 
     The recovery directory is owned by root:root with mode 0700, and the
@@ -1175,8 +1176,8 @@ DESCRIPTION:
     document remains under /root/vaultwarden-recovery. Recovery content is
     never printed to terminal output.
 
-    This is the canonical standalone entry point for recovery kit export.
-    setup-secrets.sh delegates its post-setup export prompt here.
+    This is the canonical standalone entry point for manual recovery kit export.
+    setup-secrets.sh uses the same lib/secrets.sh publication path after setup.
 
 FLAGS:
     --help, -h    Show this help
