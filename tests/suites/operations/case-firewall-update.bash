@@ -497,6 +497,15 @@ run_case
 assert_call '--force delete 5'
 assert_call '--force delete 4'
 
+reset_case public-ingress-comment-cannot-spoof-direction
+write_ipv4_status true true
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 4] 80/tcp ALLOW Anywhere # operator note: ALLOW OUT is unrelated
+EOF_RULES
+run_case
+[[ "$CASE_RC" -eq 0 ]] || fail "commented public ingress conflict reconciliation failed with $CASE_RC"
+assert_call '--force delete 4'
+
 reset_case comment-cidr-false-positive
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
 80/tcp ALLOW IN Anywhere # 203.0.113.0/24
@@ -636,6 +645,27 @@ PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_O
 SETUP_UFW_RC=$?
 set -e
 [[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted broad public port 80 ingress"
+assert_file_contains "$LOG_FILE" 'Conflicting UFW 80/443 rules remain'
+
+reset_case setup-public-comment-cannot-spoof-direction
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+Status: active
+22/tcp ALLOW 198.51.100.10/32
+80/tcp ALLOW 203.0.113.0/24
+443/tcp ALLOW 203.0.113.0/24
+80/tcp ALLOW Anywhere # operator note: ALLOW OUT is unrelated
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 1] 22/tcp ALLOW 198.51.100.10/32
+[ 2] 80/tcp ALLOW 203.0.113.0/24
+[ 3] 443/tcp ALLOW 203.0.113.0/24
+[ 4] 80/tcp ALLOW Anywhere # operator note: ALLOW OUT is unrelated
+EOF_RULES
+set +e
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
+SETUP_UFW_RC=$?
+set -e
+[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "comment text hid broad inbound web exposure"
 assert_file_contains "$LOG_FILE" 'Conflicting UFW 80/443 rules remain'
 
 reset_case setup-comment-cidr-false-positive

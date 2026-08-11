@@ -192,8 +192,9 @@ update_firewall_ranges() {
         local -a desired=("$@")
         local line rule_num cidr keep desired_cidr action
         while IFS= read -r line; do
-            [[ "$line" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(OUT|FWD)([[:space:]]|$) ]] && continue
-            [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
+            local body="${line%%#*}"
+            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(OUT|FWD)([[:space:]]|$) ]] && continue
+            [[ "$body" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
             rule_num="${BASH_REMATCH[1]}"
             action="${BASH_REMATCH[6]}"
             if [[ -z "${BASH_REMATCH[3]}" || "$action" != "ALLOW" ]]; then
