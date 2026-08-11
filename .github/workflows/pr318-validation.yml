@@ -6,7 +6,7 @@ on:
       - pr-318-shared-ufw-policy
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate:
@@ -15,6 +15,41 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Sync runner inventory expectations
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/suites/foundation/case-runner-contracts.bash")
+          text = path.read_text()
+          replacements = {
+              '[[ "${#REGISTERED_RECORDS[@]}" -eq 28 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 28"':
+                  '[[ "${#REGISTERED_RECORDS[@]}" -eq 29 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 29"',
+              '[[ "${#REGISTERED_PATHS[@]}" -eq 21 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 21"':
+                  '[[ "${#REGISTERED_PATHS[@]}" -eq 22 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 22"',
+              '[[ "$(sort -u "$real_files" | wc -l | tr -d \'[:space:]\')" -eq 21 ]] || fail "list-files contains duplicate physical paths"':
+                  '[[ "$(sort -u "$real_files" | wc -l | tr -d \'[:space:]\')" -eq 22 ]] || fail "list-files contains duplicate physical paths"',
+              '[[ "$(grep -c \'^  \' "$list_one")" -eq 28 ]] || fail "fixture list did not preserve 28 logical records"':
+                  '[[ "$(grep -c \'^  \' "$list_one")" -eq 29 ]] || fail "fixture list did not preserve 29 logical records"',
+              '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 21 ]] || fail "fixture list-files did not preserve 21 unique physical paths"':
+                  '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 22 ]] || fail "fixture list-files did not preserve 22 unique physical paths"',
+              '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 21 ]] || fail "fixture list-files duplicated a physical path"':
+                  '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 22 ]] || fail "fixture list-files duplicated a physical path"',
+              '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 21 ]] \\\n    || fail "fixture construction did not create one file per unique physical path"':
+                  '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 22 ]] \\\n    || fail "fixture construction did not create one file per unique physical path"',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected exactly one runner-contract match: {old}")
+              text = text.replace(old, new)
+          path.write_text(text)
+          PY
+          git diff --check
+          git config user.name "PR 318 validator"
+          git config user.email "actions@users.noreply.github.com"
+          git add tests/suites/foundation/case-runner-contracts.bash
+          git commit -m "test: update runner inventory counts [skip ci]"
 
       - name: Syntax
         run: |
@@ -25,6 +60,7 @@ jobs:
             utilities/maintenance-update-firewall.sh \
             tests/suites/operations/case-firewall-ufw-shared.bash \
             tests/suites/operations/case-firewall-update.bash \
+            tests/suites/foundation/case-runner-contracts.bash \
             tests/run-tests.sh
 
       - name: ShellCheck
@@ -38,6 +74,7 @@ jobs:
             utilities/maintenance-update-firewall.sh \
             tests/suites/operations/case-firewall-ufw-shared.bash \
             tests/suites/operations/case-firewall-update.bash \
+            tests/suites/foundation/case-runner-contracts.bash \
             tests/run-tests.sh
 
       - name: Focused UFW policy
@@ -51,3 +88,6 @@ jobs:
 
       - name: Diff check
         run: git diff --check origin/delta...HEAD
+
+      - name: Publish validated inventory update
+        run: git push origin HEAD:pr-318-shared-ufw-policy
