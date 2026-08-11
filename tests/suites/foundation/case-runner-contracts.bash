@@ -59,7 +59,7 @@ capture "$real_list_repeat" "$RUNNER" list
 assert_status 0 "real runner list repeat"
 cmp -s "$real_list" "$real_list_repeat" || fail "logical list output is not deterministic"
 mapfile -t REGISTERED_RECORDS < <(sed -n 's/^  //p' "$real_list")
-[[ "${#REGISTERED_RECORDS[@]}" -eq 28 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 28"
+[[ "${#REGISTERED_RECORDS[@]}" -eq 29 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 29"
 
 real_files="$TMP_ROOT/real-files.out"
 real_files_repeat="$TMP_ROOT/real-files-repeat.out"
@@ -69,8 +69,8 @@ capture "$real_files_repeat" "$RUNNER" list-files
 assert_status 0 "real runner list-files repeat"
 cmp -s "$real_files" "$real_files_repeat" || fail "list-files output is not deterministic"
 mapfile -t REGISTERED_PATHS < "$real_files"
-[[ "${#REGISTERED_PATHS[@]}" -eq 21 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 21"
-[[ "$(sort -u "$real_files" | wc -l | tr -d '[:space:]')" -eq 21 ]] || fail "list-files contains duplicate physical paths"
+[[ "${#REGISTERED_PATHS[@]}" -eq 22 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 22"
+[[ "$(sort -u "$real_files" | wc -l | tr -d '[:space:]')" -eq 22 ]] || fail "list-files contains duplicate physical paths"
 
 declare -A SEEN_IDS=() SEEN_PATH_MODES=()
 for record in "${REGISTERED_RECORDS[@]}"; do
@@ -120,7 +120,7 @@ list_one="$TMP_ROOT/list-one.out"; list_two="$TMP_ROOT/list-two.out"
 capture "$list_one" "${fixture_env[@]}" "$RUNNER" list; assert_status 0 "fixture list first pass"
 capture "$list_two" "${fixture_env[@]}" "$RUNNER" list; assert_status 0 "fixture list second pass"
 cmp -s "$list_one" "$list_two" || fail "fixture logical list output is not stable"
-[[ "$(grep -c '^  ' "$list_one")" -eq 28 ]] || fail "fixture list did not preserve 28 logical records"
+[[ "$(grep -c '^  ' "$list_one")" -eq 29 ]] || fail "fixture list did not preserve 29 logical records"
 for record in "${REGISTERED_RECORDS[@]}"; do
     IFS='|' read -r logical_id physical_path mode timeout <<<"$record"
     mapped="$FIXTURE_TESTS/${physical_path#tests/}"
@@ -131,13 +131,13 @@ files_one="$TMP_ROOT/files-one.out"; files_two="$TMP_ROOT/files-two.out"
 capture "$files_one" "${fixture_env[@]}" "$RUNNER" list-files; assert_status 0 "fixture list-files first pass"
 capture "$files_two" "${fixture_env[@]}" "$RUNNER" list-files; assert_status 0 "fixture list-files second pass"
 cmp -s "$files_one" "$files_two" || fail "fixture list-files output is not stable"
-[[ "$(wc -l < "$files_one" | tr -d '[:space:]')" -eq 21 ]] || fail "fixture list-files did not preserve 21 unique physical paths"
-[[ "$(sort -u "$files_one" | wc -l | tr -d '[:space:]')" -eq 21 ]] || fail "fixture list-files duplicated a physical path"
+[[ "$(wc -l < "$files_one" | tr -d '[:space:]')" -eq 22 ]] || fail "fixture list-files did not preserve 22 unique physical paths"
+[[ "$(sort -u "$files_one" | wc -l | tr -d '[:space:]')" -eq 22 ]] || fail "fixture list-files duplicated a physical path"
 for physical_path in "${REGISTERED_PATHS[@]}"; do
     mapped="$FIXTURE_TESTS/${physical_path#tests/}"
     grep -Fqx "$mapped" "$files_one" || fail "fixture list-files omitted rewritten physical path: $mapped"
 done
-[[ "$(find "$FIXTURE_TESTS/suites" -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 21 ]] \
+[[ "$(find "$FIXTURE_TESTS/suites" -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 22 ]] \
     || fail "fixture construction did not create one file per unique physical path"
 
 # Fixture hook is a complete record and is forbidden outside fixture mode.
