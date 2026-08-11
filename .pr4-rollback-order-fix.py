@@ -148,23 +148,17 @@ if old not in t:
     raise SystemExit('iptables restore mock anchor missing')
 t = t.replace(old, new, 1)
 
-old = '''assert_file_contains "$IPT_CALL_LOG" 'restore'
+rollback_start = t.index('reset_case updater-docker-rollback\n')
+insert_anchor = '''assert_file_contains "$IPT_CALL_LOG" 'restore'
 assert_call 'reload'
-[[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]] \\
-    || fail "Docker ingress failure left UFW managed rules partially updated"
 '''
-new = '''assert_file_contains "$IPT_CALL_LOG" 'restore'
-assert_call 'reload'
-ufw_restore_line="$(grep -n '^ufw-reload$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
+insert_at = t.index(insert_anchor, rollback_start) + len(insert_anchor)
+ordering_assertions = '''ufw_restore_line="$(grep -n '^ufw-reload$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
 iptables_restore_line="$(grep -n '^iptables-restore$' "$TXN_CALL_LOG" | cut -d: -f1 | head -1)"
 [[ -n "$ufw_restore_line" && -n "$iptables_restore_line" && "$ufw_restore_line" -lt "$iptables_restore_line" ]] \\
     || fail "rollback did not make iptables-restore the final firewall write"
-[[ "$(cat "$UFW_CONFIG_DIR/user.rules")" == 'baseline-v4' ]] \\
-    || fail "Docker ingress failure left UFW managed rules partially updated"
 '''
-if old not in t:
-    raise SystemExit('Docker rollback ordering assertion anchor missing')
-t = t.replace(old, new, 1)
+t = t[:insert_at] + ordering_assertions + t[insert_at:]
 
 anchor = '''assert_file_contains "$UPDATER" 'firewall_reconcile_cloudflare_docker_ingress "${current_ipv4_cidrs[@]}"'
 '''
