@@ -619,9 +619,11 @@ _phase_iptables() {
 
     rm -f "$backup_v4"
     backup_v4=""
-    trap 'operation_release 130; exit 130' INT
-    trap 'operation_release 129; exit 129' HUP
-    trap 'operation_release 143; exit 143' TERM
+    # Keep fail-closed signal handling active through the post-iptables
+    # Caddy runtime normalization performed by main().
+    trap '_setup_firewall_signal_fail_closed 130' INT
+    trap '_setup_firewall_signal_fail_closed 129' HUP
+    trap '_setup_firewall_signal_fail_closed 143' TERM
     log_success "Docker firewall runtime reconciled with Cloudflare-only published web ingress and no ACCEPT isolation shortcuts"
 }
 
@@ -647,7 +649,8 @@ main() {
         }
         trap _setup_firewall_cleanup EXIT
         trap '_setup_firewall_signal_fail_closed 130' INT
-        trap '_setup_firewall_signal_fail_closed 143' HUP TERM
+        trap '_setup_firewall_signal_fail_closed 129' HUP
+        trap '_setup_firewall_signal_fail_closed 143' TERM
         operation_set_phase "firewall" "Firewall setup"
     fi
 

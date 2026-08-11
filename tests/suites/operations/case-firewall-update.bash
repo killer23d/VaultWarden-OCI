@@ -771,8 +771,11 @@ assert_file_contains "$FIREWALL_LIB" 'firewall_fail_closed_stop_caddy()'
 assert_file_contains "$FIREWALL_LIB" 'firewall_normalize_caddy_runtime_contract()'
 assert_file_contains "$SETUP_FIREWALL" 'firewall_fail_closed_stop_caddy || stop_rc=$?'
 assert_file_contains "$SETUP_FIREWALL" 'firewall_normalize_caddy_runtime_contract || rc=$?'
-assert_file_contains "$SETUP_FIREWALL" '_setup_firewall_signal_fail_closed 130'
+assert_file_contains "$SETUP_FIREWALL" "trap '_setup_firewall_signal_fail_closed 130' INT"
+assert_file_contains "$SETUP_FIREWALL" "trap '_setup_firewall_signal_fail_closed 129' HUP"
+assert_file_contains "$SETUP_FIREWALL" "trap '_setup_firewall_signal_fail_closed 143' TERM"
 assert_file_contains "$SETUP_FIREWALL" 'firewall_fail_closed_stop_caddy || log_error "CRITICAL: signal rollback'
+! grep -Fq "trap 'operation_release 130; exit 130' INT" "$SETUP_FIREWALL"     || fail "post-iptables signal handling can bypass fail-closed Caddy shutdown"
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 130' INT"
 assert_file_contains "$SETUP_FIREWALL" "trap '_iptables_signal_rollback 143' TERM"
 assert_file_contains "$UPDATER" 'firewall_reconcile_cloudflare_docker_ingress "${current_ipv4_cidrs[@]}"'
