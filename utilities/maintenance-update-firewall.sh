@@ -76,6 +76,23 @@ update_firewall_ranges() {
         return 1
     fi
 
+    # Until the current Docker backend and cached generation are proven safe,
+    # an interrupt must not leave Caddy serving behind an unverified gate.
+    local pre_update_docker_gate_exact=false
+    _update_firewall_pretransaction_signal() {
+        local signal_rc="$1"
+        if [[ "$pre_update_docker_gate_exact" != "true" ]]; then
+            if ! firewall_fail_closed_stop_caddy; then
+                log_error "CRITICAL: firewall validation was interrupted and Caddy shutdown could not be confirmed."
+            fi
+        fi
+        operation_release "$signal_rc"
+        perform_cleanup
+        exit "$signal_rc"
+    }
+    trap '_update_firewall_pretransaction_signal 130' INT
+    trap '_update_firewall_pretransaction_signal 143' HUP TERM
+
     # Refuse all mutations if the running Docker daemon is using an unsupported
     # backend. A stale DOCKER-USER chain alone is not proof of the active mode.
     local docker_preflight_rc=0
@@ -91,7 +108,6 @@ update_firewall_ranges() {
     # generation. A normal Cloudflare range change may make the gate non-exact
     # for the newly fetched set while it is still exact for the valid cached
     # generation. Only the latter is safe to restore without stopping Caddy.
-    local pre_update_docker_gate_exact=false
     local -a pre_update_ipv4_cidrs=()
     if firewall_load_cached_cloudflare_ipv4 pre_update_ipv4_cidrs >/dev/null 2>&1 && \
        firewall_docker_ingress_is_exact "${pre_update_ipv4_cidrs[@]}"; then
