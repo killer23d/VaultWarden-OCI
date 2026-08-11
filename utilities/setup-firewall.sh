@@ -114,7 +114,7 @@ _ufw_has_range_port() {
     while IFS= read -r line; do
         fields=()
         read -ra fields <<< "$line"
-        (( ${#fields[@]} >= 4 )) || continue
+        (( ${#fields[@]} >= 3 )) || continue
         [[ "${fields[0]}" == "${port}/tcp" ]] || continue
 
         i=1
@@ -126,8 +126,10 @@ _ufw_has_range_port() {
         fi
         [[ "${fields[$i]:-}" == "ALLOW" ]] || continue
         i=$((i + 1))
-        [[ "${fields[$i]:-}" == "IN" ]] || continue
-        i=$((i + 1))
+        case "${fields[$i]:-}" in
+            OUT|FWD) continue ;;
+            IN) i=$((i + 1)) ;;
+        esac
 
         for (( ; i<${#fields[@]}; i++ )); do
             token="${fields[$i]}"
@@ -140,10 +142,30 @@ _ufw_has_range_port() {
 }
 
 _ufw_has_admin_port() {
-    local status="$1" port="$2"
-    # Preserve any explicit single-port TCP administrator rule, including a
-    # source-restricted ALLOW/LIMIT. PR4 must not widen an operator's SSH ACL.
-    grep -qE "^${port}/tcp([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN[[:space:]]+[^[:space:]#]+([[:space:]]|$)" <<< "$status"
+    local status="$1" port="$2" line i action
+    local -a fields=()
+    # UFW status omits a direction token for normal inbound rules. Preserve any
+    # explicit single-port TCP administrator rule unless it is OUT/FWD.
+    while IFS= read -r line; do
+        fields=()
+        read -ra fields <<< "$line"
+        (( ${#fields[@]} >= 3 )) || continue
+        [[ "${fields[0]}" == "${port}/tcp" ]] || continue
+        i=1
+        [[ "${fields[$i]:-}" == "(v6)" ]] && i=$((i + 1))
+        if [[ "${fields[$i]:-}" == "on" ]]; then
+            i=$((i + 2))
+        fi
+        action="${fields[$i]:-}"
+        [[ "$action" == "ALLOW" || "$action" == "LIMIT" ]] || continue
+        i=$((i + 1))
+        case "${fields[$i]:-}" in
+            OUT|FWD) continue ;;
+            IN) i=$((i + 1)) ;;
+        esac
+        [[ -n "${fields[$i]:-}" && "${fields[$i]}" != \#* ]] && return 0
+    done <<< "$status"
+    return 1
 }
 
 _ufw_line_cidr() {
@@ -168,7 +190,8 @@ _ufw_collect_conflicts() {
     local line rule_num cidr keep desired_cidr action
 
     while IFS= read -r line; do
-        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN([[:space:]]|$) ]] || continue
+        [[ "$line" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(OUT|FWD)([[:space:]]|$) ]] && continue
+        [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
         rule_num="${BASH_REMATCH[1]}"
         action="${BASH_REMATCH[6]}"
         if [[ -z "${BASH_REMATCH[3]}" || "$action" != "ALLOW" ]]; then
@@ -221,11 +244,12 @@ _ufw_reject_ambiguous_inbound_allows() {
         [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]] || continue
         rule_num="${BASH_REMATCH[1]}"
         body="${BASH_REMATCH[2]}"
-        [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(IN|FWD)([[:space:]]|$) ]] || continue
+        [[ "$body" =~ [[:space:]](ALLOW|LIMIT)([[:space:]]|$) ]] || continue
+        [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+OUT([[:space:]]|$) ]] && continue
 
         # A single numeric port with an explicit protocol is unambiguous. Literal
         # web-port rows are handled separately by _ufw_collect_conflicts.
-        if [[ "$body" =~ ^[0-9]+/(tcp|udp)([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN([[:space:]]|$) ]]; then
+        if [[ "$body" =~ ^[0-9]+/(tcp|udp)([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]]; then
             continue
         fi
 

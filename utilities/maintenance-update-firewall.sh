@@ -143,7 +143,7 @@ update_firewall_ranges() {
         while IFS= read -r line; do
             fields=()
             read -ra fields <<< "$line"
-            (( ${#fields[@]} >= 4 )) || continue
+            (( ${#fields[@]} >= 3 )) || continue
             [[ "${fields[0]}" == "${port}/tcp" ]] || continue
 
             i=1
@@ -155,8 +155,10 @@ update_firewall_ranges() {
             fi
             [[ "${fields[$i]:-}" == "ALLOW" ]] || continue
             i=$((i + 1))
-            [[ "${fields[$i]:-}" == "IN" ]] || continue
-            i=$((i + 1))
+            case "${fields[$i]:-}" in
+                OUT|FWD) continue ;;
+                IN) i=$((i + 1)) ;;
+            esac
 
             for (( ; i<${#fields[@]}; i++ )); do
                 token="${fields[$i]}"
@@ -190,7 +192,8 @@ update_firewall_ranges() {
         local -a desired=("$@")
         local line rule_num cidr keep desired_cidr action
         while IFS= read -r line; do
-            [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN([[:space:]]|$) ]] || continue
+            [[ "$line" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(OUT|FWD)([[:space:]]|$) ]] && continue
+            [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(80|443)(/tcp)?([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]] || continue
             rule_num="${BASH_REMATCH[1]}"
             action="${BASH_REMATCH[6]}"
             if [[ -z "${BASH_REMATCH[3]}" || "$action" != "ALLOW" ]]; then
@@ -237,8 +240,9 @@ update_firewall_ranges() {
             [[ "$line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]] || continue
             rule_num="${BASH_REMATCH[1]}"
             body="${BASH_REMATCH[2]}"
-            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+(IN|FWD)([[:space:]]|$) ]] || continue
-            if [[ "$body" =~ ^[0-9]+/(tcp|udp)([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)[[:space:]]+IN([[:space:]]|$) ]]; then
+            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)([[:space:]]|$) ]] || continue
+            [[ "$body" =~ [[:space:]](ALLOW|LIMIT)[[:space:]]+OUT([[:space:]]|$) ]] && continue
+            if [[ "$body" =~ ^[0-9]+/(tcp|udp)([[:space:]]+\(v6\))?([[:space:]]+on[[:space:]]+[^[:space:]]+)?[[:space:]]+(ALLOW|LIMIT)([[:space:]]+IN)?([[:space:]]|$) ]]; then
                 continue
             fi
             log_error "Ambiguous inbound UFW allow rule ${rule_num}: ${body}"

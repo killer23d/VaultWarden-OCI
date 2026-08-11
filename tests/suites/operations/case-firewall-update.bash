@@ -405,6 +405,22 @@ run_case
 assert_call 'port 80 comment CF-IPv4'
 assert_no_call 'port 443 comment'
 
+reset_case implicit-inbound-status
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+80/tcp ALLOW 203.0.113.0/24
+443/tcp ALLOW 203.0.113.0/24
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 9] 80/tcp ALLOW 203.0.113.0/24
+[10] 443/tcp ALLOW 203.0.113.0/24
+EOF_RULES
+run_case
+[[ "$CASE_RC" -eq 0 ]] || fail "implicit inbound UFW status failed convergence with $CASE_RC"
+assert_no_call 'port 80 comment'
+assert_no_call 'port 443 comment'
+assert_no_call '--force delete 9'
+assert_no_call '--force delete 10'
+
 reset_case outbound-web-not-ingress
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
 80/tcp ALLOW OUT 203.0.113.0/24
@@ -679,6 +695,20 @@ SETUP_UFW_RC=$?
 set -e
 [[ "$SETUP_UFW_RC" -eq 0 ]] || fail "setup final verification rejected an existing source-restricted SSH rule"
 ! grep -Fq 'Broad UFW SSH rule' "$LOG_FILE" || fail "restricted SSH was still treated as invalid administrator access"
+
+reset_case setup-implicit-inbound-readiness
+cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
+Status: active
+22/tcp ALLOW 198.51.100.10/32
+80/tcp ALLOW 203.0.113.0/24
+443/tcp ALLOW 203.0.113.0/24
+EOF_STATUS
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 1] 22/tcp ALLOW 198.51.100.10/32
+[ 2] 80/tcp ALLOW 203.0.113.0/24
+[ 3] 443/tcp ALLOW 203.0.113.0/24
+EOF_RULES
+PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1     || fail "setup rejected normal implicit-inbound UFW status output"
 
 reset_case setup-outbound-ssh-not-admin
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
