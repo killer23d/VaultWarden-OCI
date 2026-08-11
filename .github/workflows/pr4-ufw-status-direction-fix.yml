@@ -37,6 +37,7 @@ jobs:
           set -euo pipefail
           git pull --rebase origin pr4-firewall-exactness
           python3 .pr4-ufw-status-direction-fix.py
+          python3 .pr4-ufw-status-fieldcount-fix.py
           DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
 
       - name: Validate focused and complete suites
