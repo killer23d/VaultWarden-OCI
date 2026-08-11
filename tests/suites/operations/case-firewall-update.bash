@@ -71,8 +71,8 @@ while (( $# > 0 )); do
 done
 [[ -n "$out" && -n "$url" ]] || exit 2
 case "$url" in
-    *ips-v4) cat "${CF_IPV4_FILE:?}" > "$out" ;;
-    *ips-v6) cat "${CF_IPV6_FILE:?}" > "$out" ;;
+    *ips-v4) [[ "${CURL_FAIL_V4:-false}" == "true" ]] && exit 22; cat "${CF_IPV4_FILE:?}" > "$out" ;;
+    *ips-v6) [[ "${CURL_FAIL_V6:-false}" == "true" ]] && exit 22; cat "${CF_IPV6_FILE:?}" > "$out" ;;
     *) exit 2 ;;
 esac
 EOF_CURL
@@ -299,6 +299,7 @@ reset_case() {
     unset UFW_ALLOW80_RC UFW_ALLOW80_OUTPUT UFW_ALLOW443_RC UFW_ALLOW443_OUTPUT
     unset UFW_DELETE_FAIL_RULE UFW_DELETE_RC UFW_DELETE_OUTPUT UFW_NO_MUTATE UFW_RELOAD_RC
     unset FW_PREFLIGHT_RC FW_EXACT_RC FW_EXACT_SAFE_CIDR FW_RECONCILE_RC FW_STOP_CADDY_RC SSHD_PORT
+    unset CURL_FAIL_V4 CURL_FAIL_V6
     unset IPT_SAVE_RC IPT_RESTORE_RC
 
     export CASE_DIR CF_IPV4_FILE CF_IPV6_FILE UFW_STATUS_FILE UFW_NUMBERED_FILE
@@ -347,8 +348,26 @@ reset_case docker-preflight-failure
 export FW_PREFLIGHT_RC=60
 run_case
 [[ "$CASE_RC" -eq 60 ]] || fail "Docker preflight failure returned $CASE_RC instead of 60"
+assert_file_contains "$FW_CALL_LOG" 'stop-caddy'
 assert_no_call ' allow '
 assert_no_call '--force delete'
+
+reset_case unsafe-prior-gate-fetch-failure
+export CURL_FAIL_V4=true
+run_case
+[[ "$CASE_RC" -ne 0 ]] || fail "Cloudflare fetch failure with unproven prior gate returned success"
+assert_file_contains "$LOG_FILE" 'Failed to fetch Cloudflare IP ranges'
+assert_file_contains "$FW_CALL_LOG" 'stop-caddy'
+assert_no_call ' allow '
+
+reset_case safe-prior-gate-fetch-failure
+printf '198.51.100.0/24\n' > "$CASE_DIR/state/cf-cidrs.cache"
+export FW_EXACT_SAFE_CIDR=198.51.100.0/24 CURL_FAIL_V4=true
+run_case
+[[ "$CASE_RC" -ne 0 ]] || fail "safe-prior Cloudflare fetch failure returned success"
+assert_file_contains "$FW_CALL_LOG" 'exact 198.51.100.0/24'
+! grep -Fq 'stop-caddy' "$FW_CALL_LOG" || fail "proven-safe prior gate was stopped on fetch failure"
+assert_no_call ' allow '
 
 reset_case updater-inactive-ufw
 write_ipv4_status true true
@@ -1013,6 +1032,11 @@ assert_file_contains "$UPDATER" 'cache_commit_started=true'
 assert_file_contains "$UPDATER" 'cache_commit_started" != "true"'
 assert_file_contains "$UPDATER" 'pre_update_docker_gate_exact=false'
 assert_file_contains "$UPDATER" '_update_firewall_pretransaction_fail()'
+assert_file_contains "$UPDATER" 'firewall_docker_backend_preflight || docker_preflight_rc=$?'
+preflight_line="$(grep -n 'firewall_docker_backend_preflight || docker_preflight_rc=' "$UPDATER" | cut -d: -f1 | head -1)"
+fetch_line="$(grep -n 'Successfully fetched current Cloudflare IP ranges' "$UPDATER" | cut -d: -f1 | head -1)"
+[[ -n "$preflight_line" && -n "$fetch_line" && "$preflight_line" -lt "$fetch_line" ]] \
+    || fail "Docker/prior-gate safety proof does not run before Cloudflare network refresh"
 [[ "$(grep -Fc 'pre_update_docker_gate_exact" != "true"' "$UPDATER")" -ge 3 ]] \
     || fail "pre-transaction, normal rollback, and signal rollback paths do not all fail closed for an unproven prior Docker gate"
 

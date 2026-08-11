@@ -76,49 +76,16 @@ update_firewall_ranges() {
         return 1
     fi
 
-    log_info "Safely updating Cloudflare IP ranges in UFW and Docker ingress filtering..."
-    local cf_ipv4_file cf_ipv6_file
-    cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)
-    cf_ipv6_file=$(mktemp -t cf_ipv6.XXXXXXXXXX)
-    register_cleanup rm -f "$cf_ipv4_file" "$cf_ipv6_file"
-    if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
-       retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
-        log_success "Successfully fetched current Cloudflare IP ranges"
-    else
-        log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"
-        return 1
-    fi
-
-    local -a current_cidrs=() current_ipv4_cidrs=()
-    local range
-    while IFS= read -r range; do
-        [[ -z "$range" ]] && continue
-        if [[ "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-            current_cidrs+=("$range")
-            current_ipv4_cidrs+=("$range")
-        else
-            log_error "Invalid Cloudflare IPv4 CIDR: ${range}"
-            return 1
-        fi
-    done < "$cf_ipv4_file"
-    while IFS= read -r range; do
-        [[ -z "$range" ]] && continue
-        if [[ "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
-            current_cidrs+=("$range")
-        else
-            log_error "Invalid Cloudflare IPv6 CIDR: ${range}"
-            return 1
-        fi
-    done < "$cf_ipv6_file"
-
-    (( ${#current_cidrs[@]} > 0 && ${#current_ipv4_cidrs[@]} > 0 )) || {
-        log_error "No valid Cloudflare CIDRs were fetched; refusing firewall changes."
-        return 1
-    }
-
     # Refuse all mutations if the running Docker daemon is using an unsupported
     # backend. A stale DOCKER-USER chain alone is not proof of the active mode.
-    firewall_docker_backend_preflight || return $?
+    local docker_preflight_rc=0
+    firewall_docker_backend_preflight || docker_preflight_rc=$?
+    if (( docker_preflight_rc != 0 )); then
+        if ! firewall_fail_closed_stop_caddy; then
+            log_error "CRITICAL: Docker firewall backend preflight failed and Caddy shutdown could not be confirmed."
+        fi
+        return "$docker_preflight_rc"
+    fi
 
     # Prove whether rollback would return to a known-safe Docker ingress
     # generation. A normal Cloudflare range change may make the gate non-exact
@@ -146,6 +113,62 @@ update_firewall_ranges() {
             _update_firewall_fail_closed_after_unproven_prior_gate
         fi
         return "$fail_rc"
+    }
+
+    log_info "Safely updating Cloudflare IP ranges in UFW and Docker ingress filtering..."
+    local cf_ipv4_file="" cf_ipv6_file="" allocation_rc=0
+    cf_ipv4_file="$(mktemp -t cf_ipv4.XXXXXXXXXX)" || allocation_rc=$?
+    if (( allocation_rc != 0 )); then
+        log_error "Could not allocate Cloudflare IPv4 range download file."
+        _update_firewall_pretransaction_fail "$allocation_rc"
+        return $?
+    fi
+    allocation_rc=0
+    cf_ipv6_file="$(mktemp -t cf_ipv6.XXXXXXXXXX)" || allocation_rc=$?
+    if (( allocation_rc != 0 )); then
+        log_error "Could not allocate Cloudflare IPv6 range download file."
+        rm -f "$cf_ipv4_file"
+        _update_firewall_pretransaction_fail "$allocation_rc"
+        return $?
+    fi
+    register_cleanup rm -f "$cf_ipv4_file" "$cf_ipv6_file"
+    if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
+       retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
+        log_success "Successfully fetched current Cloudflare IP ranges"
+    else
+        log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"
+        _update_firewall_pretransaction_fail 1
+        return $?
+    fi
+
+    local -a current_cidrs=() current_ipv4_cidrs=()
+    local range
+    while IFS= read -r range; do
+        [[ -z "$range" ]] && continue
+        if [[ "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+            current_cidrs+=("$range")
+            current_ipv4_cidrs+=("$range")
+        else
+            log_error "Invalid Cloudflare IPv4 CIDR: ${range}"
+            _update_firewall_pretransaction_fail 1
+            return $?
+        fi
+    done < "$cf_ipv4_file"
+    while IFS= read -r range; do
+        [[ -z "$range" ]] && continue
+        if [[ "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
+            current_cidrs+=("$range")
+        else
+            log_error "Invalid Cloudflare IPv6 CIDR: ${range}"
+            _update_firewall_pretransaction_fail 1
+            return $?
+        fi
+    done < "$cf_ipv6_file"
+
+    (( ${#current_cidrs[@]} > 0 && ${#current_ipv4_cidrs[@]} > 0 )) || {
+        log_error "No valid Cloudflare CIDRs were fetched; refusing firewall changes."
+        _update_firewall_pretransaction_fail 1
+        return $?
     }
 
     _ufw_status() {
