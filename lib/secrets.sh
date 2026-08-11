@@ -387,6 +387,9 @@ _schema_group_all_values_active() {
 
     while IFS= read -r _key; do
         [[ -z "$_key" ]] && continue
+        # Command-substitution assignments can include the resulting plaintext in
+        # Bash xtrace output. Disable tracing before any auto-email secret read.
+        { set +x; } 2>/dev/null
         if ! _value=$(sops -d --extract "[\"$_key\"]" "$secrets_file" 2>/dev/null); then
             unset _value
             return 2
