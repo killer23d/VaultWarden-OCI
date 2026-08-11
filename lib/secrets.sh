@@ -342,17 +342,15 @@ _managed_secrets_manifest_path() {
 }
 
 _schema_required_runtime_keys() {
-    local _required_keys
     schema_required_keys || return 1
 
     if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
         local _cf_keys
-        if _cf_keys=$(schema_keys_for_conditional_group "cloudflare_proxy" 2>/dev/null); then
-            printf '%s\n' "$_cf_keys"
-        else
-            printf '%s\n' "cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token"
-            log_warn "validate_required_secrets: schema conditional-group lookup unavailable — using static Cloudflare fallback"
+        if ! _cf_keys=$(schema_keys_for_conditional_group "cloudflare_proxy" 2>/dev/null); then
+            log_error "validate_required_secrets: failed to read Cloudflare conditional keys from secrets-schema.yaml"
+            return 1
         fi
+        printf '%s\n' "$_cf_keys"
     fi
 }
 
@@ -1441,15 +1439,56 @@ auto_generate_secret_field() {
 }
 
 _grk_sops_extract() {
-    local _key="$1"
-    local _secrets_file="$2"
-    local _val
+    local _key="$1" _secrets_file="$2"
+    local _val _err_file _rc=0
+
+    _err_file=$(mktemp) || {
+        log_error "generate_recovery_kit: failed to allocate SOPS error capture"
+        return 1
+    }
     # Suppress xtrace to prevent plaintext secret appearing in debug logs.
     { set +x; } 2>/dev/null
-    _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>/dev/null) \
-        && printf '%s' "$_val" \
-        || printf '%s' "Not Set"
+    _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>"$_err_file") || _rc=$?
+    if (( _rc != 0 )); then
+        log_error "generate_recovery_kit: failed to extract schema key '${_key}' (sops exit ${_rc})"
+        if [[ -s "$_err_file" ]]; then
+            log_debug "generate_recovery_kit: sops error for '${_key}': $(cat "$_err_file")"
+        fi
+        rm -f -- "$_err_file"
+        unset _val
+        return 1
+    fi
+    rm -f -- "$_err_file"
+    printf '%s' "$_val"
     unset _val
+}
+
+_validate_recovery_kit_document() {
+    local recovery_file="$1" expected_labels="$2"
+    local label count
+
+    [[ -s "$recovery_file" ]] || {
+        log_error "Recovery-kit validation failed: staged document is empty"
+        return 1
+    }
+    [[ "$(grep -Fxc 'END OF RECOVERY KIT' "$recovery_file" 2>/dev/null || true)" == "1" ]] || {
+        log_error "Recovery-kit validation failed: completion marker is missing or duplicated"
+        return 1
+    }
+    [[ "$(grep -c '^AGE-SECRET-KEY-1' "$recovery_file" 2>/dev/null || true)" == "1" ]] || {
+        log_error "Recovery-kit validation failed: expected exactly one Age private identity"
+        return 1
+    }
+
+    while IFS= read -r label; do
+        [[ -n "$label" ]] || continue
+        count=$(grep -Fxc "[$label]" "$recovery_file" 2>/dev/null || true)
+        if [[ "$count" != "1" ]]; then
+            log_error "Recovery-kit validation failed: field '$label' rendered ${count} times (expected once)"
+            return 1
+        fi
+    done <<< "$expected_labels"
+    return 0
 }
 
 generate_recovery_kit() {
@@ -1458,9 +1497,30 @@ generate_recovery_kit() {
     age_key=$(resolve_age_key_path) || return 1
     local secrets_file="${SECRETS_FILE}"
     local env_file="${PROJECT_ROOT:-.}/.env"
+    local _schema_key_list
 
+    if ! schema_validate; then
+        log_error "generate_recovery_kit: secrets-schema.yaml validation failed"
+        return 1
+    fi
+    if ! _schema_key_list=$(schema_keys); then
+        log_error "generate_recovery_kit: failed to enumerate secrets-schema.yaml"
+        return 1
+    fi
+    [[ -n "$_schema_key_list" ]] || {
+        log_error "generate_recovery_kit: secrets-schema.yaml contains no managed secrets"
+        return 1
+    }
+    if [[ ! -f "$secrets_file" ]]; then
+        log_error "generate_recovery_kit: secrets file not found: $secrets_file"
+        return 1
+    fi
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key not found: $age_key"
+        return 1
+    fi
+    if ! check_age_key "$age_key"; then
+        log_error "generate_recovery_kit: Age private identity validation failed"
         return 1
     fi
 
@@ -1476,7 +1536,10 @@ generate_recovery_kit() {
     fi
     # Suppress xtrace before reading the private key to prevent it appearing in debug logs.
     { set +x; } 2>/dev/null
-    priv_key=$(cat "$age_key")
+    if ! priv_key=$(cat "$age_key"); then
+        log_error "generate_recovery_kit: failed to read Age private identity"
+        return 1
+    fi
 
     local domain="Not Configured"
     local admin_email="Not Configured"
@@ -1496,26 +1559,73 @@ generate_recovery_kit() {
 
     log_info "Decrypting secrets for export..."
 
-    declare -A _grk_values=()
+    declare -A _grk_values=() _grk_labels=() _grk_seen_labels=()
+    local expected_labels=""
 
-    if [[ -f "$secrets_file" ]]; then
-        if ! ensure_sops_env; then return 1; fi
-        trap 'cleanup_secrets_environment' RETURN
+    if ! ensure_sops_env; then return 1; fi
+    trap 'cleanup_secrets_environment' RETURN
 
-        local _schema_key_list
-        if ! _schema_key_list=$(schema_keys 2>/dev/null); then
-            log_warn "generate_recovery_kit: schema_keys unavailable — recovery kit may be incomplete"
-            # Degrade gracefully: continue with an empty map rather than aborting.
-            _schema_key_list=""
+    local _rk_key _rk_value _rk_required _rk_placeholder _rk_label
+    while IFS= read -r _rk_key; do
+        [[ -z "$_rk_key" ]] && continue
+
+        if ! _rk_label=$(schema_field "$_rk_key" label); then
+            log_error "generate_recovery_kit: failed to read label for schema key '$_rk_key'"
+            unset priv_key
+            return 1
+        fi
+        if [[ -z "$_rk_label" || "$_rk_label" == *$'\n'* || "$_rk_label" == *$'\r'* ]]; then
+            log_error "generate_recovery_kit: invalid recovery label for schema key '$_rk_key'"
+            unset priv_key
+            return 1
+        fi
+        if [[ -n "${_grk_seen_labels[$_rk_label]+set}" ]]; then
+            log_error "generate_recovery_kit: duplicate recovery label in schema: $_rk_label"
+            unset priv_key
+            return 1
+        fi
+        _grk_seen_labels["$_rk_label"]=1
+
+        if ! _rk_required=$(schema_field "$_rk_key" required); then
+            log_error "generate_recovery_kit: failed to read required flag for schema key '$_rk_key'"
+            unset priv_key
+            return 1
+        fi
+        if ! _rk_placeholder=$(schema_field "$_rk_key" placeholder); then
+            log_error "generate_recovery_kit: failed to read placeholder for schema key '$_rk_key'"
+            unset priv_key
+            return 1
+        fi
+        case "$_rk_required" in
+            true|false) ;;
+            *)
+                log_error "generate_recovery_kit: invalid required flag for schema key '$_rk_key': $_rk_required"
+                unset priv_key
+                return 1
+                ;;
+        esac
+
+        if ! _rk_value=$(_grk_sops_extract "$_rk_key" "$secrets_file"); then
+            unset priv_key
+            return 1
+        fi
+        if _secret_value_is_inactive "$_rk_value" "$_rk_placeholder"; then
+            if [[ "$_rk_required" == "true" ]]; then
+                log_error "generate_recovery_kit: required secret '$_rk_key' is unset or placeholder"
+                unset _rk_value priv_key
+                return 1
+            fi
+            _rk_value="<not set: optional>"
         fi
 
-        while IFS= read -r _rk_key; do
-            [[ -z "$_rk_key" ]] && continue
-            _grk_values["$_rk_key"]=$(_grk_sops_extract "$_rk_key" "$secrets_file")
-        done <<< "$_schema_key_list"
-    else
-        log_warn "secrets.yaml not found"
-    fi
+        _grk_labels["$_rk_key"]="$_rk_label"
+        _grk_values["$_rk_key"]="$_rk_value"
+        [[ -z "$expected_labels" ]] || expected_labels+=$'\n'
+        expected_labels+="$_rk_label"
+        unset _rk_value
+    done <<< "$_schema_key_list"
+
+    cleanup_secrets_environment
 
     if ! install -m 600 /dev/null "$output_file"; then
         log_error "Failed to create output file with secure permissions: $output_file"
@@ -1585,24 +1695,16 @@ SECTION 2: SERVER SECRETS (DECRYPTED)
 
 EOF
 
-    # Emit each secret with its human-readable label from the schema.
-    # New keys appear automatically without editing this function.
-    local _schema_keys_for_kit
-    _schema_keys_for_kit=$(schema_keys 2>/dev/null) || _schema_keys_for_kit=""
-
+    # Render the same schema inventory collected above. No fallback or second
+    # enumeration is permitted once generation begins.
+    local _kit_key
     while IFS= read -r _kit_key; do
         [[ -z "$_kit_key" ]] && continue
-        local _kit_label
-        _kit_label=$(schema_field_safe "$_kit_key" "label") || _kit_label="$_kit_key"
-        [[ -z "$_kit_label" ]] && _kit_label="$_kit_key"
+        printf '[%s]\n' "${_grk_labels[$_kit_key]}" >> "$output_file"
+        printf '%s\n\n' "${_grk_values[$_kit_key]}" >> "$output_file"
+    done <<< "$_schema_key_list"
 
-        local _kit_value="${_grk_values[$_kit_key]:-Not Set}"
-
-        printf '[%s]\n' "$_kit_label"       >> "$output_file"
-        printf '%s\n\n' "$_kit_value"       >> "$output_file"
-    done <<< "$_schema_keys_for_kit"
-
-    unset _grk_values
+    unset _grk_values _grk_labels _grk_seen_labels
 
         cat >> "$output_file" << 'EOF'
 
@@ -1710,6 +1812,10 @@ EOF
     # the heredoc that wrote it to the output file.
     unset priv_key
 
+    if ! _validate_recovery_kit_document "$output_file" "$expected_labels"; then
+        _remove_sensitive_file "$output_file" 2>/dev/null || rm -f -- "$output_file"
+        return 1
+    fi
     chmod 600 "$output_file"
 }
 
@@ -2005,20 +2111,11 @@ PYEOF
 
 _validate_no_placeholders() {
     local plain_yaml="$1"
-
-    local offending
-    local _py_rc=0
-    offending=$(_run_yaml_nodupcheck "$plain_yaml" placeholders 2>/dev/null) || _py_rc=$?
-
-    if [[ $_py_rc -ne 0 ]]; then
-        log_error "Recovery kit contains unconfigured placeholder values for:"
-        while IFS= read -r key; do
-            log_error "  - $key"
-        done <<< "$offending"
-        log_error "Run 'sudo ./setup.sh secrets' or 'sudo ./edit-secrets.sh rotate <field>' to configure these fields first."
+    if ! validate_plaintext_secrets_schema_contract "$plain_yaml"; then
+        log_error "Recovery-kit secret preflight failed the authoritative schema contract."
+        log_error "Configure required values before exporting; optional unset values are allowed and rendered explicitly."
         return 1
     fi
-
     return 0
 }
 
