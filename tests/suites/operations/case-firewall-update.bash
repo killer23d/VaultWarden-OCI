@@ -766,6 +766,7 @@ assert_file_contains "$FIREWALL_LIB" 'VW_CF_DOCKER_CHAIN="VW-CF-INGRESS"'
 assert_file_contains "$FIREWALL_LIB" 'VW_CADDY_EXTERNAL_CIDR="172.22.0.0/28"'
 assert_file_contains "$FIREWALL_LIB" '--ctorigdstport'
 assert_file_contains "$FIREWALL_LIB" '--ctstate ESTABLISHED,RELATED -j RETURN'
+assert_file_contains "$FIREWALL_LIB" '_firewall_managed_chain_order_is_safe || return 1'
 assert_file_contains "$SETUP_FIREWALL" 'if ! _ufw_has_admin_port "$status" "$ssh_port"; then'
 ! grep -Fq '_ufw_has_broad_admin_port' "$SETUP_FIREWALL" || fail "setup still requires broad SSH exposure"
 assert_file_contains "$FIREWALL_LIB" '-j RETURN'
@@ -1196,6 +1197,24 @@ run_iptables_probe
 ! grep -Fq '^save$' "$IPT_CALL_LOG" || fail "already-reconciled firewall took an unnecessary rollback snapshot"
 ! grep -Eq 'iptables -t filter -(N|I|D) ' "$IPT_CALL_LOG" || fail "already-reconciled firewall mutated iptables"
 assert_file_contains "$IPT_LOG_FILE" 'skipping mutation'
+
+# Exact-state verification must reject a chain whose DROP precedes any RETURN.
+# Otherwise a manually reordered chain can be misclassified as safe and break
+# Cloudflare ingress or Caddy-initiated outbound replies.
+drop_rule="$(grep -F -- '-p tcp -m conntrack --ctorigdstport 80 -j DROP' "$IPT_CF_FILE" | head -1)"
+[[ -n "$drop_rule" ]] || fail "could not locate managed port-80 DROP for order-drift test"
+{
+    printf '%s\n' "$drop_rule"
+    grep -Fvx -- "$drop_rule" "$IPT_CF_FILE"
+} > "$IPT_CF_FILE.tmp"
+mv "$IPT_CF_FILE.tmp" "$IPT_CF_FILE"
+[[ "$(head -n1 "$IPT_CF_FILE")" == *'-j DROP' ]] || fail "order-drift fixture did not move a DROP ahead of RETURN rules"
+: > "$IPT_CALL_LOG"
+run_iptables_probe
+[[ "$IPT_RC" -eq 0 ]] || fail "misordered Docker gate reconciliation returned $IPT_RC"
+grep -qx 'save' "$IPT_CALL_LOG" || fail "misordered Docker gate was incorrectly treated as exact"
+[[ "$(head -n1 "$IPT_CF_FILE")" == '-A VW-CF-INGRESS -d 172.22.0.0/28 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN' ]] \
+    || fail "misordered Docker gate did not restore RETURN-before-DROP ordering"
 
 : > "$IPT_REJECT_MARKER"
 : > "$IPT_CALL_LOG"

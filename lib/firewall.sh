@@ -301,6 +301,17 @@ _firewall_parent_jump_is_exact() {
     [[ "$first_rule" == "-A DOCKER-USER -j ${VW_CF_DOCKER_CHAIN}" && "$jump_count" -eq 1 ]]
 }
 
+_firewall_managed_chain_order_is_safe() {
+    iptables -t filter -S "$VW_CF_DOCKER_CHAIN" 2>/dev/null |
+        awk -v chain="$VW_CF_DOCKER_CHAIN" '
+            $1 == "-A" && $2 == chain {
+                if ($NF == "RETURN" && seen_drop) bad=1
+                if ($NF == "DROP") seen_drop=1
+            }
+            END { exit bad ? 1 : 0 }
+        '
+}
+
 firewall_docker_ingress_is_exact() {
     local -a cidrs=("$@")
     (( ${#cidrs[@]} > 0 )) || return 1
@@ -311,6 +322,7 @@ firewall_docker_ingress_is_exact() {
     local expected_count=$(( ${#cidrs[@]} * 2 + 3 )) actual_count cidr port
     actual_count="$(_firewall_chain_rule_count "$VW_CF_DOCKER_CHAIN")"
     [[ "$actual_count" =~ ^[0-9]+$ && "$actual_count" -eq "$expected_count" ]] || return 1
+    _firewall_managed_chain_order_is_safe || return 1
 
     # Replies to connections initiated by Caddy must return to Docker's normal
     # forwarding path instead of being mistaken for new public web ingress.
