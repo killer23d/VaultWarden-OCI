@@ -143,9 +143,8 @@ firewall_ufw_default_incoming_fail_closed() {
     if grep -Eq '^Status:[[:space:]]+inactive' <<< "$verbose_status" && [[ -r "$defaults_file" ]]; then
         policy="$(awk -F= '
             $1 ~ /^[[:space:]]*DEFAULT_INPUT_POLICY[[:space:]]*$/ {
-                value=$2
-                gsub(/^[[:space:]\"]+|[[:space:]\"\r]+$/, "", value)
-                print toupper(value)
+                gsub(/[[:space:]\"'"'"'\r]/, "", $2)
+                print toupper($2)
                 exit
             }
         ' "$defaults_file")"
