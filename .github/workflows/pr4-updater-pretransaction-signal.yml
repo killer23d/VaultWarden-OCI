@@ -1,0 +1,59 @@
+name: PR4 updater pretransaction signal safety
+
+on:
+  push:
+    branches:
+      - pr4-firewall-exactness
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ !contains(github.event.head_commit.message, '[skip pr4-pretx-signal]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+
+      - name: Install repository test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Apply updater pretransaction signal safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --rebase origin pr4-firewall-exactness
+          python3 .pr4-updater-pretransaction-signal.py
+
+      - name: Validate focused and complete suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n utilities/maintenance-update-firewall.sh tests/suites/operations/case-firewall-update.bash
+          shellcheck -x --severity=warning utilities/maintenance-update-firewall.sh tests/suites/operations/case-firewall-update.bash
+          bash tests/suites/operations/case-firewall-update.bash
+          ./tests/run-tests.sh all
+          git diff --check
+
+      - name: Commit validated updater pretransaction signal safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add utilities/maintenance-update-firewall.sh tests/suites/operations/case-firewall-update.bash
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'firewall: fail closed on pretransaction update signals [skip pr4-pretx-signal]'
+          git push origin HEAD:pr4-firewall-exactness
