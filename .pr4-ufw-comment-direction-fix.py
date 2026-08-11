@@ -27,35 +27,38 @@ for path, indent in (
 
 p = Path('tests/suites/operations/case-firewall-update.bash')
 t = p.read_text()
-anchor = '''reset_case broad-conflict
+anchor = '''reset_case public-ingress-conflict
 write_ipv4_status true true
-printf '%s\n' '[ 9] 80/tcp ALLOW IN Anywhere' >> "$UFW_NUMBERED_FILE"
-printf '%s\n' '80/tcp ALLOW IN Anywhere' >> "$UFW_STATUS_FILE"
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 4] 80/tcp ALLOW IN Anywhere
+[ 5] 443/tcp ALLOW IN Anywhere
+EOF_RULES
 run_case
-[[ "$CASE_RC" -eq 0 ]] || fail "broad conflict reconciliation failed with $CASE_RC"
-assert_call '--force delete 9'
+[[ "$CASE_RC" -eq 0 ]] || fail "public ingress conflict reconciliation failed with $CASE_RC"
+assert_call '--force delete 5'
+assert_call '--force delete 4'
 
 '''
-block = anchor + '''reset_case broad-conflict-comment-cannot-spoof-direction
+block = anchor + '''reset_case public-ingress-comment-cannot-spoof-direction
 write_ipv4_status true true
-printf '%s\n' '[ 9] 80/tcp ALLOW Anywhere # operator note: ALLOW OUT is unrelated' >> "$UFW_NUMBERED_FILE"
-printf '%s\n' '80/tcp ALLOW Anywhere # operator note: ALLOW OUT is unrelated' >> "$UFW_STATUS_FILE"
+cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
+[ 4] 80/tcp ALLOW Anywhere # operator note: ALLOW OUT is unrelated
+EOF_RULES
 run_case
-[[ "$CASE_RC" -eq 0 ]] || fail "commented broad conflict reconciliation failed with $CASE_RC"
-assert_call '--force delete 9'
+[[ "$CASE_RC" -eq 0 ]] || fail "commented public ingress conflict reconciliation failed with $CASE_RC"
+assert_call '--force delete 4'
 
 '''
 if anchor not in t:
-    raise SystemExit('updater broad-conflict test anchor missing')
+    raise SystemExit('updater public-ingress test anchor missing')
 t = t.replace(anchor, block, 1)
 
-anchor = '''reset_case setup-broad-conflict
+anchor = '''reset_case setup-public-readiness
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
 Status: active
 22/tcp ALLOW IN Anywhere
 80/tcp ALLOW IN 203.0.113.0/24
 443/tcp ALLOW IN 203.0.113.0/24
-80/tcp ALLOW IN Anywhere
 EOF_STATUS
 cat > "$UFW_NUMBERED_FILE" <<'EOF_RULES'
 [ 1] 22/tcp ALLOW IN Anywhere
@@ -67,11 +70,11 @@ set +e
 PATH="$TMP/bin:$PATH" SETUP_UFW_CASE=verify "$BASH" "$SETUP_UFW_PROBE" >"$CASE_OUTPUT" 2>&1
 SETUP_UFW_RC=$?
 set -e
-[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "setup final verification accepted broad public ingress"
+[[ "$SETUP_UFW_RC" -ne 0 ]] || fail "initial UFW readiness accepted broad public port 80 ingress"
 assert_file_contains "$LOG_FILE" 'Conflicting UFW 80/443 rules remain'
 
 '''
-block = anchor + '''reset_case setup-broad-conflict-comment-cannot-spoof-direction
+block = anchor + '''reset_case setup-public-comment-cannot-spoof-direction
 cat > "$UFW_STATUS_FILE" <<'EOF_STATUS'
 Status: active
 22/tcp ALLOW 198.51.100.10/32
@@ -94,5 +97,5 @@ assert_file_contains "$LOG_FILE" 'Conflicting UFW 80/443 rules remain'
 
 '''
 if anchor not in t:
-    raise SystemExit('setup broad-conflict test anchor missing')
+    raise SystemExit('setup public-ingress test anchor missing')
 p.write_text(t.replace(anchor, block, 1))
