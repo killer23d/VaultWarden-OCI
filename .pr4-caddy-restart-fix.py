@@ -38,13 +38,4 @@ new = '''assert_file_contains "$caddy_block" 'restart: on-failure'
 '''
 if old not in t:
     raise SystemExit('Caddy restart-policy test anchor missing')
-t = t.replace(old, new, 1)
-
-old = '''# Caddy has restart: "no" so dockerd cannot publish it before this sequence.
-'''
-new = '''# Caddy uses restart: on-failure, which does not auto-start on dockerd restart.
-'''
-if old not in t:
-    raise SystemExit('Docker drop-in fixture comment anchor missing')
-t = t.replace(old, new, 1)
-p.write_text(t)
+p.write_text(t.replace(old, new, 1))
