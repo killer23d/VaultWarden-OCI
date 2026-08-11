@@ -45,8 +45,8 @@ DESCRIPTION:
     document remains under /root/vaultwarden-recovery. Recovery content is
     never printed to terminal output.
 
-    This is the canonical standalone entry point for recovery kit export.
-    setup-secrets.sh delegates its post-setup export prompt here.
+    This is the canonical standalone entry point for manual recovery kit export.
+    setup-secrets.sh uses the same lib/secrets.sh publication path after setup.
 
 FLAGS:
     --help, -h    Show this help

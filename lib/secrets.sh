@@ -1440,25 +1440,17 @@ auto_generate_secret_field() {
 
 _grk_sops_extract() {
     local _key="$1" _secrets_file="$2"
-    local _val _err_file _rc=0
+    local _val _rc=0
 
-    _err_file=$(mktemp) || {
-        log_error "generate_recovery_kit: failed to allocate SOPS error capture"
-        return 1
-    }
-    # Suppress xtrace to prevent plaintext secret appearing in debug logs.
+    # Suppress xtrace and SOPS stderr so recovery diagnostics cannot expose
+    # plaintext-adjacent context. The key name and exit status are sufficient.
     { set +x; } 2>/dev/null
-    _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>"$_err_file") || _rc=$?
+    _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>/dev/null) || _rc=$?
     if (( _rc != 0 )); then
         log_error "generate_recovery_kit: failed to extract schema key '${_key}' (sops exit ${_rc})"
-        if [[ -s "$_err_file" ]]; then
-            log_debug "generate_recovery_kit: sops error for '${_key}': $(cat "$_err_file")"
-        fi
-        rm -f -- "$_err_file"
         unset _val
         return 1
     fi
-    rm -f -- "$_err_file"
     printf '%s' "$_val"
     unset _val
 }
@@ -1494,7 +1486,6 @@ _validate_recovery_kit_document() {
 generate_recovery_kit() {
     local output_file="$1"
     local age_key
-    age_key=$(resolve_age_key_path) || return 1
     local secrets_file="${SECRETS_FILE}"
     local env_file="${PROJECT_ROOT:-.}/.env"
     local _schema_key_list
@@ -1515,6 +1506,7 @@ generate_recovery_kit() {
         log_error "generate_recovery_kit: secrets file not found: $secrets_file"
         return 1
     fi
+    age_key=$(resolve_age_key_path) || return 1
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key not found: $age_key"
         return 1
