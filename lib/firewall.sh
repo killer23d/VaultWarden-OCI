@@ -163,12 +163,14 @@ firewall_fail_closed_stop_caddy() {
 
     running="$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" || rc=$?
     if (( rc != 0 )); then
-        # Missing container is safe; an unqueryable Docker daemon is not.
-        if docker container inspect "$container" >/dev/null 2>&1; then
-            log_error "CRITICAL: firewall reconciliation failed and ${container} running state could not be determined."
+        local listed=""
+        if ! listed="$(docker ps -a --filter "name=^/${container}$" --format '{{.Names}}' 2>/dev/null)"; then
+            log_error "CRITICAL: firewall reconciliation failed and Docker could not confirm whether ${container} exists."
             return 1
         fi
-        return 0
+        [[ "$listed" != "$container" ]] && return 0
+        log_error "CRITICAL: firewall reconciliation failed and ${container} running state could not be determined."
+        return 1
     fi
     [[ "$running" == "true" ]] || return 0
 

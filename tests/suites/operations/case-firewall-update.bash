@@ -928,14 +928,17 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${FAIL_CLOSED_DOCKER_LOG:?}"
 case "${1:-}" in
     inspect)
-        printf 'true\n'
+        if (( ${FAIL_CLOSED_INSPECT_RC:-0} != 0 )); then exit "$FAIL_CLOSED_INSPECT_RC"; fi
+        printf '%s\n' "${FAIL_CLOSED_RUNNING:-true}"
+        exit 0
+        ;;
+    ps)
+        if (( ${FAIL_CLOSED_PS_RC:-0} != 0 )); then exit "$FAIL_CLOSED_PS_RC"; fi
+        [[ "${FAIL_CLOSED_EXISTS:-true}" == "true" ]] && printf 'vaultwarden_caddy\n'
         exit 0
         ;;
     stop)
         exit "${FAIL_CLOSED_STOP_RC:-0}"
-        ;;
-    container)
-        exit 0
         ;;
 esac
 exit 2
@@ -963,6 +966,22 @@ export FAIL_CLOSED_DOCKER FAIL_CLOSED_DOCKER_LOG FAIL_CLOSED_LOG
 assert_file_contains "$FAIL_CLOSED_DOCKER_LOG" 'inspect --format {{.State.Running}} vaultwarden_caddy'
 assert_file_contains "$FAIL_CLOSED_DOCKER_LOG" 'stop --time 30 vaultwarden_caddy'
 assert_file_contains "$FAIL_CLOSED_LOG" 'Firewall reconciliation failed; stopping vaultwarden_caddy'
+
+: > "$FAIL_CLOSED_DOCKER_LOG"; : > "$FAIL_CLOSED_LOG"
+export FAIL_CLOSED_INSPECT_RC=1 FAIL_CLOSED_PS_RC=1
+set +e
+"$BASH" "$FAIL_CLOSED_PROBE"
+FAIL_CLOSED_RC=$?
+set -e
+[[ "$FAIL_CLOSED_RC" -ne 0 ]] || fail "unqueryable Docker daemon was mistaken for an absent Caddy container"
+assert_file_contains "$FAIL_CLOSED_LOG" 'Docker could not confirm whether vaultwarden_caddy exists'
+unset FAIL_CLOSED_INSPECT_RC FAIL_CLOSED_PS_RC
+
+: > "$FAIL_CLOSED_DOCKER_LOG"; : > "$FAIL_CLOSED_LOG"
+export FAIL_CLOSED_INSPECT_RC=1 FAIL_CLOSED_EXISTS=false
+"$BASH" "$FAIL_CLOSED_PROBE"
+! grep -Fq 'stop --time' "$FAIL_CLOSED_DOCKER_LOG" || fail "missing Caddy container triggered an unnecessary stop"
+unset FAIL_CLOSED_INSPECT_RC FAIL_CLOSED_EXISTS
 
 # Behavioral backend detection: active dockerd argv/config wins over stale chain existence.
 PRE_PROBE="$TMP/docker-preflight-probe.bash"
