@@ -578,6 +578,62 @@ run_case
 [[ "$CASE_RC" -eq 0 ]] || fail "existing IPv4+IPv6 rules failed with $CASE_RC"
 assert_no_call ' allow '
 
+# Initial setup cache publication must fail explicitly and preserve the old
+# cache generation when a pre-rename step fails. This protects --phase all
+# from feeding stale CIDRs into the Docker gate after UFW changed.
+CACHE_PUBLISH_PROBE="$TMP/setup-cache-publish-probe.bash"
+cat > "$CACHE_PUBLISH_PROBE" <<'EOF_CACHE_PUBLISH'
+#!/usr/bin/env bash
+set -euo pipefail
+log_error(){ printf 'ERROR: %s\n' "$*" >> "${CACHE_PUBLISH_LOG:?}"; }
+EOF_CACHE_PUBLISH
+extract_func "$SETUP_FIREWALL" _ufw_publish_cidr_cache >> "$CACHE_PUBLISH_PROBE"
+cat >> "$CACHE_PUBLISH_PROBE" <<'EOF_CACHE_PUBLISH'
+case "${CACHE_PUBLISH_CASE:?}" in
+    success)
+        _ufw_publish_cidr_cache "${CACHE_PUBLISH_FILE:?}" 203.0.113.0/24 2001:db8::/32
+        ;;
+    chmod-fail)
+        chmod(){ return 73; }
+        _ufw_publish_cidr_cache "${CACHE_PUBLISH_FILE:?}" 198.51.100.0/24
+        ;;
+    bad-parent)
+        _ufw_publish_cidr_cache "${CACHE_PUBLISH_FILE:?}" 198.51.100.0/24
+        ;;
+    *) exit 2 ;;
+esac
+EOF_CACHE_PUBLISH
+chmod 0755 "$CACHE_PUBLISH_PROBE"
+CACHE_PUBLISH_LOG="$TMP/cache-publish.log"
+CACHE_PUBLISH_DIR="$TMP/cache-publish"
+mkdir -p "$CACHE_PUBLISH_DIR"
+CACHE_PUBLISH_FILE="$CACHE_PUBLISH_DIR/cf-cidrs.cache"
+export CACHE_PUBLISH_LOG CACHE_PUBLISH_FILE
+: > "$CACHE_PUBLISH_LOG"
+CACHE_PUBLISH_CASE=success "$BASH" "$CACHE_PUBLISH_PROBE"
+[[ "$(cat "$CACHE_PUBLISH_FILE")" == $'203.0.113.0/24\n2001:db8::/32' ]] || fail "atomic setup cache publisher wrote the wrong CIDR generation"
+[[ "$(stat -c '%a' "$CACHE_PUBLISH_FILE")" == 640 ]] || fail "atomic setup cache publisher used the wrong mode"
+
+printf 'old-generation\n' > "$CACHE_PUBLISH_FILE"
+set +e
+CACHE_PUBLISH_CASE=chmod-fail "$BASH" "$CACHE_PUBLISH_PROBE"
+CACHE_PUBLISH_RC=$?
+set -e
+[[ "$CACHE_PUBLISH_RC" -ne 0 ]] || fail "setup cache publisher hid chmod failure"
+[[ "$(cat "$CACHE_PUBLISH_FILE")" == 'old-generation' ]] || fail "failed setup cache publish replaced the prior generation"
+assert_file_contains "$CACHE_PUBLISH_LOG" 'Could not set Cloudflare CIDR cache permissions'
+
+BAD_PARENT="$TMP/cache-parent-file"
+printf 'not-a-directory\n' > "$BAD_PARENT"
+CACHE_PUBLISH_FILE="$BAD_PARENT/cf-cidrs.cache"
+export CACHE_PUBLISH_FILE
+set +e
+CACHE_PUBLISH_CASE=bad-parent "$BASH" "$CACHE_PUBLISH_PROBE"
+CACHE_PUBLISH_RC=$?
+set -e
+[[ "$CACHE_PUBLISH_RC" -ne 0 ]] || fail "setup cache publisher hid directory creation failure"
+assert_file_contains "$CACHE_PUBLISH_LOG" 'Could not create Cloudflare CIDR cache directory'
+
 # Initial setup UFW acceptance checks use the same stateful UFW mock.
 SETUP_UFW_PROBE="$TMP/setup-ufw-probe.bash"
 cat > "$SETUP_UFW_PROBE" <<'EOF_SETUP_UFW'

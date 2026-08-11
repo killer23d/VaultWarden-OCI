@@ -374,6 +374,38 @@ _ufw_verify_exact() {
     return 0
 }
 
+_ufw_publish_cidr_cache() {
+    local cache_file="$1"
+    shift
+    local cache_dir cache_tmp=""
+    cache_dir="$(dirname "$cache_file")"
+
+    if ! mkdir -p "$cache_dir"; then
+        log_error "Could not create Cloudflare CIDR cache directory: ${cache_dir}"
+        return 1
+    fi
+    cache_tmp="$(mktemp -p "$cache_dir" .cf-cidrs.cache.XXXXXX)" || {
+        log_error "Could not allocate a temporary Cloudflare CIDR cache in ${cache_dir}."
+        return 1
+    }
+    if ! printf '%s\n' "$@" > "$cache_tmp"; then
+        log_error "Could not write temporary Cloudflare CIDR cache: ${cache_tmp}"
+        rm -f -- "$cache_tmp"
+        return 1
+    fi
+    if ! chmod 0640 "$cache_tmp"; then
+        log_error "Could not set Cloudflare CIDR cache permissions on ${cache_tmp}."
+        rm -f -- "$cache_tmp"
+        return 1
+    fi
+    if ! mv -f -- "$cache_tmp" "$cache_file"; then
+        log_error "Could not publish Cloudflare CIDR cache atomically: ${cache_file}"
+        rm -f -- "$cache_tmp"
+        return 1
+    fi
+    return 0
+}
+
 _phase_ufw() {
     local ssh_port
     ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
@@ -475,9 +507,7 @@ _phase_ufw() {
     [[ "$ufw_active" == "true" ]] || ufw --force enable >/dev/null
     _ufw_verify_exact "$ssh_port" "${validated_cidrs[@]}" || return $?
 
-    mkdir -p "$(dirname "$cf_cidr_cache")"
-    printf '%s\n' "${validated_cidrs[@]}" > "$cf_cidr_cache"
-    chmod 640 "$cf_cidr_cache"
+    _ufw_publish_cidr_cache "$cf_cidr_cache" "${validated_cidrs[@]}" || return $?
 
     log_success "UFW reconciled: 80/443 are restricted to ${#validated_cidrs[@]} Cloudflare CIDRs"
 }
