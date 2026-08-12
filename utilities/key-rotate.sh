@@ -302,7 +302,7 @@ operation_acquire \
 operation_set_phase "1" "Validating current Age key"
 _key_rotate_cleanup() {
     local rc=$?
-    local rollback_rc=0
+    local rollback_rc=0 cleanup_rc=0
     if [[ "$_KEY_ROTATE_COMMITTED" != "true" && "$_KEY_ROTATE_PROMOTION_STARTED" == "true" ]]; then
         _key_rotate_rollback_live_generation || rollback_rc=$?
         if (( rollback_rc != 0 )); then
@@ -312,8 +312,14 @@ _key_rotate_cleanup() {
             (( rc == 0 )) && rc=1
         fi
     fi
+    if [[ -n "${workdir:-}" ]]; then
+        remove_sensitive_workspace "$workdir" || cleanup_rc=$?
+        if (( cleanup_rc != 0 )); then
+            log_error "Failed to remove the Age-key rotation sensitive workspace: $workdir"
+            (( rc == 0 )) && rc="$cleanup_rc"
+        fi
+    fi
     operation_release "$rc"
-    [[ -n "${workdir:-}" ]] && remove_sensitive_workspace "$workdir"
     return "$rc"
 }
 trap _key_rotate_cleanup EXIT

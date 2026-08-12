@@ -1479,6 +1479,48 @@ printf 'Key rotation live-generation rollback and retry tests passed.\n'
 )
 
 
+check_key_rotate_cleanup_failure_status() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+cd "$ROOT"
+fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+cleanup_source="$(sed -n '/^_key_rotate_cleanup() {$/,/^}$/p' utilities/key-rotate.sh)"
+[[ -n "$cleanup_source" ]] || fail 'key-rotation cleanup helper could not be extracted'
+
+KEY_ROTATE_CLEANUP_SOURCE="$cleanup_source" bash -s <<'KEY_ROTATE_CLEANUP_STATUS_TEST' \
+  || fail 'key-rotation cleanup failure status regression failed'
+set -euo pipefail
+_KEY_ROTATE_COMMITTED=true
+_KEY_ROTATE_PROMOTION_STARTED=true
+workdir=/dev/shm/vw-age-rotate.cleanup-status
+backup_dir=/root/unused
+release_marker="$(mktemp)"
+trap '/bin/rm -f -- "$release_marker"' EXIT
+log_error(){ :; }
+_key_rotate_rollback_live_generation(){ return 99; }
+remove_sensitive_workspace(){ return 73; }
+operation_release(){ printf '%s' "$1" > "$release_marker"; }
+eval "$KEY_ROTATE_CLEANUP_SOURCE"
+set +e
+true
+_key_rotate_cleanup
+rc=$?
+set -e
+[[ "$rc" == 73 ]]
+[[ "$(cat "$release_marker")" == 73 ]]
+
+# Existing failure/signal status remains authoritative even if cleanup also fails.
+set +e
+false
+_key_rotate_cleanup
+rc=$?
+set -e
+[[ "$rc" == 1 ]]
+[[ "$(cat "$release_marker")" == 1 ]]
+KEY_ROTATE_CLEANUP_STATUS_TEST
+)
+
 check_key_rotate_full_entrypoint_cleanup_contract() (
 set -euo pipefail
 
@@ -3207,7 +3249,8 @@ case "$MODE" in
         check_crowdsec_worker_post_edit_apply
         check_runtime_secret_reconciliation
         check_key_rotate_live_generation_transaction
-        check_key_rotate_full_entrypoint_cleanup_contract
+        check_key_rotate_cleanup_failure_status
+check_key_rotate_full_entrypoint_cleanup_contract
         ;;
     recovery-kit)
         check_recovery_kit_schema_truth
