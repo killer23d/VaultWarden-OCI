@@ -15,30 +15,12 @@ _CW_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/common.sh"
 [[ -n "${VAULTWARDEN_STORAGE_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/storage.sh"
 declare -F decrypt_secret >/dev/null 2>&1 || source "${_CW_LIB_DIR}/secrets.sh"
+[[ -n "${VW_CROWDSEC_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/crowdsec.sh"
 unset _CW_LIB_DIR
 
 crowdsec_worker_service_exists() {
     [[ -f "/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service" ]] || \
     [[ -f "/lib/systemd/system/crowdsec-cloudflare-worker-bouncer.service" ]]
-}
-
-crowdsec_resolve_lapi_port() {
-    local config_file="${1:-${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}/config.yaml}"
-    local -a matches=()
-    [[ -r "$config_file" ]] || {
-        log_error "CrowdSec LAPI config is missing or unreadable: $config_file"
-        return 1
-    }
-    mapfile -t matches < <(
-        sed -nE 's/^[[:space:]]*listen_uri:[[:space:]]*127\.0\.0\.1:([0-9]+)[[:space:]]*$/\1/p' "$config_file"
-    )
-    if (( ${#matches[@]} != 1 )) \
-        || [[ ! "${matches[0]}" =~ ^[0-9]+$ ]] \
-        || (( matches[0] < 1 || matches[0] > 65535 )); then
-        log_error "CrowdSec LAPI config must contain exactly one valid loopback listen_uri: $config_file"
-        return 1
-    fi
-    printf '%s\n' "${matches[0]}"
 }
 
 _crowdsec_worker_resolve_lapi_port() {
@@ -176,6 +158,7 @@ crowdsec_worker_apply_config() {
     local lapi_port worker_route account_email bouncer_bin render_rc=0
     lapi_port="$(_crowdsec_worker_resolve_lapi_port)" || {
         rm -f "$tmp_config"
+        log_error "CrowdSec LAPI listen_uri is missing or invalid; fix /etc/crowdsec/config.yaml before applying the Worker config."
         return 1
     }
     worker_route="${domain_name}/*"
