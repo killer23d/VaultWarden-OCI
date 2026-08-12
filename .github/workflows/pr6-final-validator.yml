@@ -22,142 +22,95 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          runner = Path('tests/suites/foundation/case-runner-contracts.bash')
-          lines = runner.read_text().splitlines(keepends=True)
-          changed = 0
-          rules = (
-              ('${#REGISTERED_RECORDS[@]}', '-eq 29', '-eq 30', 'expected 29', 'expected 30'),
-              ('${#REGISTERED_PATHS[@]}', '-eq 22', '-eq 23', 'expected 22', 'expected 23'),
-              ('sort -u "$real_files"', '-eq 22', '-eq 23', None, None),
-              ('grep -c \'^  \' "$list_one"', '-eq 29', '-eq 30', 'preserve 29', 'preserve 30'),
-              ('wc -l < "$files_one"', '-eq 22', '-eq 23', 'preserve 22', 'preserve 23'),
-              ('sort -u "$files_one"', '-eq 22', '-eq 23', None, None),
-              ('find "$FIXTURE_TESTS/suites"', '-eq 22', '-eq 23', None, None),
-          )
-          for i, line in enumerate(lines):
-              for marker, old_num, new_num, old_msg, new_msg in rules:
-                  if marker not in line:
-                      continue
-                  if old_num not in line:
-                      raise SystemExit(f'runner count marker already changed or malformed: {marker}')
-                  line = line.replace(old_num, new_num, 1)
-                  if old_msg is not None:
-                      if old_msg not in line:
-                          raise SystemExit(f'runner count message missing: {marker}')
-                      line = line.replace(old_msg, new_msg, 1)
-                  lines[i] = line
-                  changed += 1
-                  break
-          if changed != 7:
-              raise SystemExit(f'runner count update expected 7 lines, changed {changed}')
-          runner.write_text(''.join(lines))
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {text.count(old)}')
+              p.write_text(text.replace(old, new, 1))
 
-          crowdsec = Path('tests/suites/operations/case-crowdsec.bash')
-          text = crowdsec.read_text()
-          old = 'cf_bouncer_install_block="$(awk \'/Attempting apt install of crowdsec-cloudflare-worker-bouncer/,/Installed crowdsec-cloudflare-worker-bouncer via apt/\' "$setup_script")"'
-          new = 'cf_bouncer_install_block="$(awk \'/Installing Cloudflare Workers bouncer from the configured CrowdSec package repository/,/Installed crowdsec-cloudflare-worker-bouncer via the CrowdSec package repository/\' "$setup_script")"'
-          if text.count(old) != 1:
-              raise SystemExit('CrowdSec package-install block marker was not found exactly once')
-          crowdsec.write_text(text.replace(old, new, 1))
+          runner = 'tests/suites/foundation/case-runner-contracts.bash'
+          for old, new, label in (
+              ('[[ "${#REGISTERED_RECORDS[@]}" -eq 29 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 29"', '[[ "${#REGISTERED_RECORDS[@]}" -eq 30 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 30"', 'runner logical records'),
+              ('[[ "${#REGISTERED_PATHS[@]}" -eq 22 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 22"', '[[ "${#REGISTERED_PATHS[@]}" -eq 23 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 23"', 'runner physical cases'),
+              ('[[ "$(sort -u "$real_files" | wc -l | tr -d \'[:space:]\')" -eq 22 ]] || fail "list-files contains duplicate physical paths"', '[[ "$(sort -u "$real_files" | wc -l | tr -d \'[:space:]\')" -eq 23 ]] || fail "list-files contains duplicate physical paths"', 'runner unique paths'),
+              ('[[ "$(grep -c \'^  \' "$list_one")" -eq 29 ]] || fail "fixture list did not preserve 29 logical records"', '[[ "$(grep -c \'^  \' "$list_one")" -eq 30 ]] || fail "fixture list did not preserve 30 logical records"', 'fixture logical records'),
+              ('[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 22 ]] || fail "fixture list-files did not preserve 22 unique physical paths"', '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 23 ]] || fail "fixture list-files did not preserve 23 unique physical paths"', 'fixture physical paths'),
+              ('[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 22 ]] || fail "fixture list-files duplicated a physical path"', '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 23 ]] || fail "fixture list-files duplicated a physical path"', 'fixture unique paths'),
+              ('[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 22 ]] \\\n    || fail "fixture construction did not create one file per unique physical path"', '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 23 ]] \\\n    || fail "fixture construction did not create one file per unique physical path"', 'fixture constructed cases'),
+          ):
+              replace_once(runner, old, new, label)
 
-          text = crowdsec.read_text()
+          crowdsec = 'tests/suites/operations/case-crowdsec.bash'
+          replace_once(
+              crowdsec,
+              'cf_bouncer_install_block="$(awk \'/Attempting apt install of crowdsec-cloudflare-worker-bouncer/,/Installed crowdsec-cloudflare-worker-bouncer via apt/\' "$setup_script")"',
+              'cf_bouncer_install_block="$(awk \'/Installing Cloudflare Workers bouncer from the configured CrowdSec package repository/,/Installed crowdsec-cloudflare-worker-bouncer via the CrowdSec package repository/\' "$setup_script")"',
+              'CrowdSec package block marker')
           fixture_anchor = 'export CF_ACCOUNT_EMAIL="ops@example.test"\nexport CF_FREE_PLAN=true\n'
-          fixture_insert = fixture_anchor + '\n'.join([
-              'export VW_CROWDSEC_ETC_DIR="$TMP/etc-crowdsec"',
-              'mkdir -p "$VW_CROWDSEC_ETC_DIR"',
-              'printf \'api:\\n  server:\\n    listen_uri: 127.0.0.1:8097\\n\' > "$VW_CROWDSEC_ETC_DIR/config.yaml"',
-              '',
-          ])
-          if text.count(fixture_anchor) != 1:
-              raise SystemExit('CrowdSec worker fixture anchor was not found exactly once')
-          text = text.replace(fixture_anchor, fixture_insert, 1)
+          fixture_insert = fixture_anchor + 'export VW_CROWDSEC_ETC_DIR="$TMP/etc-crowdsec"\nmkdir -p "$VW_CROWDSEC_ETC_DIR"\nprintf \'api:\\n  server:\\n    listen_uri: 127.0.0.1:8097\\n\' > "$VW_CROWDSEC_ETC_DIR/config.yaml"\n'
+          replace_once(crowdsec, fixture_anchor, fixture_insert, 'CrowdSec LAPI fixture')
           lapi_anchor = 'grep -Fq \'NEW_LAPI_KEY\' "$TMP/rendered.yaml" || fail "rendered config missing LAPI key"\n'
-          lapi_insert = lapi_anchor + 'grep -Fq \'http://127.0.0.1:8097/\' "$TMP/rendered.yaml" || fail "rendered config did not use the resolved LAPI port"\n'
-          if text.count(lapi_anchor) != 1:
-              raise SystemExit('CrowdSec worker LAPI assertion anchor was not found exactly once')
-          crowdsec.write_text(text.replace(lapi_anchor, lapi_insert, 1))
+          replace_once(crowdsec, lapi_anchor, lapi_anchor + 'grep -Fq \'http://127.0.0.1:8097/\' "$TMP/rendered.yaml" || fail "rendered config did not use the resolved LAPI port"\n', 'CrowdSec resolved LAPI assertion')
 
-          readiness = Path('tests/suites/operations/case-readiness.bash')
-          text = readiness.read_text()
-          marker = '\ncheck_shared_resolver_contract() {\n'
+          readiness = 'tests/suites/operations/case-readiness.bash'
+          behavior = r'''check_port_exhaustion_behavior() (
+    set -euo pipefail
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+    extract_function _cs_find_free_port "$SETUP_CROWDSEC" > "$tmpdir/find-free-port.sh"
+    [[ -s "$tmpdir/find-free-port.sh" ]] || fail "could not extract _cs_find_free_port"
+    mkdir -p "$tmpdir/bin"
+    cat > "$tmpdir/bin/ss" <<'EOF_SS'
+#!/usr/bin/env bash
+printf '%s\n' 'LISTEN 0 4096 127.0.0.1:65535 0.0.0.0:* users:(("occupied",pid=1,fd=1))'
+EOF_SS
+    chmod +x "$tmpdir/bin/ss"
+    PATH="$tmpdir/bin:$PATH"
+    export PATH
+    log_error() { :; }
+    # shellcheck disable=SC1090
+    source "$tmpdir/find-free-port.sh"
+    set +e
+    output="$(_cs_find_free_port 65535)"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 1 ]] || fail "exhausted CrowdSec port search must fail, got $rc"
+    [[ -z "$output" ]] || fail "exhausted CrowdSec port search must not guess a port: $output"
+)
+
+check_tls_failure_behavior() (
+    set -euo pipefail
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+    extract_function check_tls_certificate "$SMOKE" > "$tmpdir/tls-check.sh"
+    [[ -s "$tmpdir/tls-check.sh" ]] || fail "could not extract check_tls_certificate"
+    export QUIET=true
+    export DOMAIN="https://wrong-host.example.invalid"
+    TLS_RESULT=""
+    _require_project_environment() { return 0; }
+    _check_fail() { TLS_RESULT="FAIL|$1|$2"; }
+    curl() { return 60; }
+    # shellcheck disable=SC1090
+    source "$tmpdir/tls-check.sh"
+    check_tls_certificate
+    [[ "$TLS_RESULT" == FAIL\|tls-verified\|certificate\ trust\ or\ hostname\ verification\ failed* ]] \
+        || fail "certificate/hostname verification failure must fail smoke readiness: $TLS_RESULT"
+)
+
+'''
+          marker = 'check_shared_resolver_contract() {\n'
+          p = Path(readiness)
+          text = p.read_text()
           if text.count(marker) != 1:
-              raise SystemExit('readiness behavior insertion marker is not unique')
-          additions = '\n'.join([
-              'check_port_exhaustion_behavior() (',
-              '    set -euo pipefail',
-              '    tmpdir="$(mktemp -d)"',
-              "    trap 'rm -rf \"$tmpdir\"' EXIT",
-              '    extract_function _cs_find_free_port "$SETUP_CROWDSEC" > "$tmpdir/find-free-port.sh"',
-              '    [[ -s "$tmpdir/find-free-port.sh" ]] || fail "could not extract _cs_find_free_port"',
-              '',
-              '    mkdir -p "$tmpdir/bin"',
-              '    cat > "$tmpdir/bin/ss" <<\'EOF_SS\'',
-              '#!/usr/bin/env bash',
-              "printf '%s\\n' 'LISTEN 0 4096 127.0.0.1:65535 0.0.0.0:* users:((\"occupied\",pid=1,fd=1))'",
-              'EOF_SS',
-              '    chmod +x "$tmpdir/bin/ss"',
-              '    PATH="$tmpdir/bin:$PATH"',
-              '    export PATH',
-              '    log_error() { :; }',
-              '    # shellcheck disable=SC1090',
-              '    source "$tmpdir/find-free-port.sh"',
-              '',
-              '    set +e',
-              '    output="$(_cs_find_free_port 65535)"',
-              '    rc=$?',
-              '    set -e',
-              '    [[ "$rc" -eq 1 ]] || fail "exhausted CrowdSec port search must fail, got $rc"',
-              '    [[ -z "$output" ]] || fail "exhausted CrowdSec port search must not guess a port: $output"',
-              ')',
-              '',
-              'check_tls_failure_behavior() (',
-              '    set -euo pipefail',
-              '    tmpdir="$(mktemp -d)"',
-              "    trap 'rm -rf \"$tmpdir\"' EXIT",
-              '    extract_function check_tls_certificate "$SMOKE" > "$tmpdir/tls-check.sh"',
-              '    [[ -s "$tmpdir/tls-check.sh" ]] || fail "could not extract check_tls_certificate"',
-              '',
-              '    QUIET=true',
-              '    DOMAIN="https://wrong-host.example.invalid"',
-              '    TLS_RESULT=""',
-              '    _require_project_environment() { return 0; }',
-              '    _check_fail() { TLS_RESULT="FAIL|$1|$2"; }',
-              '    curl() { return 60; }',
-              '    # shellcheck disable=SC1090',
-              '    source "$tmpdir/tls-check.sh"',
-              '',
-              '    check_tls_certificate',
-              '    [[ "$TLS_RESULT" == FAIL\\|tls-verified\\|certificate\\ trust\\ or\\ hostname\\ verification\\ failed* ]] \\',
-              '        || fail "certificate/hostname verification failure must fail smoke readiness: $TLS_RESULT"',
-              ')',
-              '',
-          ]) + '\n'
-          readiness.write_text(text.replace(marker, '\n' + additions + marker.lstrip('\n'), 1))
-
-          text = readiness.read_text()
-          old_calls = '\n'.join([
-              'check_update_transaction',
-              'check_crowdsec_readiness',
-              'check_tls_contract',
-              'check_port_exhaustion_and_installer_contract',
-              'check_shared_resolver_contract',
-              '',
-          ])
-          new_calls = '\n'.join([
-              'check_update_transaction',
-              'check_crowdsec_readiness',
-              'check_tls_contract',
-              'check_tls_failure_behavior',
-              'check_port_exhaustion_and_installer_contract',
-              'check_port_exhaustion_behavior',
-              'check_shared_resolver_contract',
-              '',
-          ])
-          if text.count(old_calls) != 1:
-              raise SystemExit('readiness behavior call block was not found exactly once')
-          readiness.write_text(text.replace(old_calls, new_calls, 1))
+              raise SystemExit('readiness insertion marker not unique')
+          p.write_text(text.replace(marker, behavior + marker, 1))
+          replace_once(
+              readiness,
+              'check_update_transaction\ncheck_crowdsec_readiness\ncheck_tls_contract\ncheck_port_exhaustion_and_installer_contract\ncheck_shared_resolver_contract\n',
+              'check_update_transaction\ncheck_crowdsec_readiness\ncheck_tls_contract\ncheck_tls_failure_behavior\ncheck_port_exhaustion_and_installer_contract\ncheck_port_exhaustion_behavior\ncheck_shared_resolver_contract\n',
+              'readiness behavior calls')
           PY
-
           bash tests/suites/operations/case-readiness.bash
           VW_TEST_CASE_MODE=core bash tests/suites/foundation/case-runner-contracts.bash
           bash tests/suites/operations/case-crowdsec.bash
