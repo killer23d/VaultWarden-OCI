@@ -17,9 +17,142 @@ jobs:
       - name: Build corrected clean commit locally
         run: |
           set -euo pipefail
-          printf '%s' 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgojIHV0aWxpdGllcy9zZXR1cC1zZWNyZXRzLnNoOiBmaXggZXhwaXJ5IG91dHB1dCBhbmQgbWFrZSByZW1vdmFsL3JvbGxiYWNrIHRydXRoZnVsLgpwID0gUGF0aCgidXRpbGl0aWVzL3NldHVwLXNlY3JldHMuc2giKQp0ID0gcC5yZWFkX3RleHQoKQpsaW5lcyA9IHQuc3BsaXRsaW5lcyhrZWVwZW5kcz1UcnVlKQpmaXhlZCA9IEZhbHNlCm91dCA9IFtdCmkgPSAwCndoaWxlIGkgPCBsZW4obGluZXMpOgogICAgaWYgKGxpbmVzW2ldID09ICIgICAgICAgIHByaW50ZiAnJWJcXFxcbiIgYW5kIGkgKyAxIDwgbGVuKGxpbmVzKQogICAgICAgICAgICBhbmQgbGluZXNbaSArIDFdLnN0YXJ0c3dpdGgoIicgXCIiRXhwaXJ5OiIpKToKICAgICAgICBvdXQuYXBwZW5kKCIgICAgICAgIHByaW50ZiAnJWJcXG4nICIgKyBsaW5lc1tpICsgMV1bMjpdKQogICAgICAgIGZpeGVkID0gVHJ1ZQogICAgICAgIGkgKz0gMgogICAgICAgIGNvbnRpbnVlCiAgICBvdXQuYXBwZW5kKGxpbmVzW2ldKQogICAgaSArPSAxCmlmIG5vdCBmaXhlZDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIm1hbGZvcm1lZCBicmVhay1nbGFzcyBleHBpcnkgcHJpbnRmIG5vdCBmb3VuZCIpCnQgPSAiIi5qb2luKG91dCkKCnN0YXJ0ID0gdC5pbmRleCgiICAgIHJlbW92ZV9icmVha2dsYXNzX3VzZXIoKSB7XG4iKQplbmQgPSB0LmluZGV4KCIgICAgcmVzZXRfYnJlYWtnbGFzc19wYXNzd29yZCgpIHtcbiIsIHN0YXJ0KQpuZXdfcmVtb3ZlID0gcicnJyAgICByZW1vdmVfYnJlYWtnbGFzc191c2VyKCkgewogICAgICAgIGxvY2FsIGZvcmNlX3JlbW92ZT1mYWxzZSByZW1vdmFsX2ZhaWxlZD1mYWxzZSB1c2VyX3ByZXNlbnQ9dHJ1ZQogICAgICAgIFtbICIkezE6LX0iID09ICItLWZvcmNlIiBdXSAmJiBmb3JjZV9yZW1vdmU9dHJ1ZQoKICAgICAgICBpZiBbWyAiJERSWV9SVU4iID09ICJ0cnVlIiBdXTsgdGhlbgogICAgICAgICAgICBsb2dfaW5mbyAiW0RSWSBSVU5dIFdvdWxkIHJlbW92ZSBicmVhay1nbGFzcyB1c2VyOiAkQlJFQUtHTEFTU19VU0VSIgogICAgICAgICAgICByZXR1cm4gMAogICAgICAgIGZpCgogICAgICAgIGxvZ19pbmZvICJSZW1vdmluZyBicmVhay1nbGFzcyBhZG1pbiB1c2VyOiAkQlJFQUtHTEFTU19VU0VSIgoKICAgICAgICBpZiAhIGNoZWNrX3VzZXJfZXhpc3RzOyB0aGVuCiAgICAgICAgICAgIHVzZXJfcHJlc2VudD1mYWxzZQogICAgICAgICAgICBsb2dfaW5mbyAiVXNlciBkb2VzIG5vdCBleGlzdDogJEJSRUFLR0xBU1NfVVNFUjsgY2xlYW5pbmcgYW55IHN0YWxlIGJyZWFrLWdsYXNzIGFydGlmYWN0cyIKICAgICAgICBmaQoKICAgICAgICBpZiBbWyAiJHVzZXJfcHJlc2VudCIgPT0gInRydWUiICYmICIkRk9SQ0UiICE9ICJ0cnVlIiAmJiAiJGZvcmNlX3JlbW92ZSIgIT0gInRydWUiIF1dOyB0aGVuCiAgICAgICAgICAgIGVjaG8gIiIKICAgICAgICAgICAgbG9nX3dhcm4gIlRoaXMgd2lsbCBwZXJtYW5lbnRseSByZW1vdmUgdGhlIGJyZWFrLWdsYXNzIGFkbWluIGFjY291bnQuIgogICAgICAgICAgICBsb2dfd2FybiAiWW91IHdpbGwgbG9zZSBlbWVyZ2VuY3kgY29uc29sZSBhY2Nlc3MgY2FwYWJpbGl0eS4iCiAgICAgICAgICAgIGVjaG8gIiIKICAgICAgICAgICAgcmVhZCAtciAtcCAiQ29udGludWUgd2l0aCByZW1vdmFsPyBbeWVzL25vXSAoZGVmYXVsdDogbm8pOiAiIGNvbmZpcm0KICAgICAgICAgICAgaWYgW1sgIiRjb25maXJtIiAhPSAieWVzIiBdXTsgdGhlbgogICAgICAgICAgICAgICAgbG9nX2luZm8gIlJlbW92YWwgY2FuY2VsbGVkIGJ5IHVzZXIiCiAgICAgICAgICAgICAgICByZXR1cm4gMAogICAgICAgICAgICBmaQogICAgICAgIGZpCgogICAgICAgIGxvY2FsIHN1ZG9lcnNfZmlsZT0iL2V0Yy9zdWRvZXJzLmQvdnctZW1lcmdlbmN5IgogICAgICAgIGlmIFtbIC1mICIkc3Vkb2Vyc19maWxlIiBdXTsgdGhlbgogICAgICAgICAgICBpZiBybSAtZiAiJHN1ZG9lcnNfZmlsZSI7IHRoZW4KICAgICAgICAgICAgICAgIGxvZ19pbmZvICJSZW1vdmVkIHRhcmdldGVkIHN1ZG9lcnM6ICRzdWRvZXJzX2ZpbGUiCiAgICAgICAgICAgIGVsc2UKICAgICAgICAgICAgICAgIGxvZ19lcnJvciAiRmFpbGVkIHRvIHJlbW92ZSBzdWRvZXJzIGZpbGU6ICRzdWRvZXJzX2ZpbGUg4oCUI G1hbnVhbCByZW1vdmFsIHJlcXVpcmVkIgogICAgICAgICAgICAgICAgcmVtb3ZhbF9mYWlsZWQ9dHJ1ZQogICAgICAgICAgICBmaQogICAgICAgIGZpCgogICAgICAgIGlmIHN5c3RlbWN0bCBpcy1hY3RpdmUgLS1xdWlldCB2dy1icmVha2dsYXNzLWNsZWFudXAudGltZXIgMj4vZGV2L251bGw7IHRoZW4KICAgICAgICAgICAgaWYgc3lzdGVtY3RsIHN0b3AgdnctYnJlYWtnbGFzcy1jbGVhbnVwLnRpbWVyID4vZGV2L251bGwgMj4mMTsgdGhlbgogICAgICAgICAgICAgICAgbG9nX2luZm8gIlN0b3BwZWQgcGVuZGluZyBzeXN0ZW1kIHRyYW5zaWVudCBjbGVhbnVwIHRpbWVyICh2dy1icmVha2dsYXNzLWNsZWFudXApIgogICAgICAgICAgICBlbHNlCiAgICAgICAgICAgICAgICBsb2dfZXJyb3IgIkZhaWxlZCB0byBzdG9wIHBlbmRpbmcgYnJlYWstZ2xhc3MgY2xlYW51cCB0aW1lciIKICAgICAgICAgICAgICAgIHJlbW92YWxfZmFpbGVkPXRydWUKICAgICAgICAgICAgZmkKICAgICAgICBmaQogICAgICAgIGlmIHN5c3RlbWN0bCBpcy1hY3RpdmUgLS1xdWlldCB2dy1icmVha2dsYXNzLWNsZWFudXAuc2VydmljZSAyPi9kZXYvbnVsbDsgdGhlbgogICAgICAgICAgICBpZiAhIHN5c3RlbWN0bCBzdG9wIHZ3LWJyZWFrZ2xhc3MtY2xlYW51cC5zZXJ2aWNlID4vZGV2L251bGwgMj4mMTsgdGhlbgogICAgICAgICAgICAgICAgbG9nX2Vycm9yICJGYWlsZWQgdG8gc3RvcCBhY3RpdmUgYnJlYWstZ2xhc3MgY2xlYW51cCBzZXJ2aWNlIgogICAgICAgICAgICAgICAgcmVtb3ZhbF9mYWlsZWQ9dHJ1ZQogICAgICAgICAgICBmaQogICAgICAgIGZpCgogICAgICAgIGlmIFtbICIkdXNlcl9wcmVzZW50IiA9PSAidHJ1ZSIgXV07IHRoZW4KICAgICAgICAgICAgaWYgdXNlcmRlbCAtciAiJEJSRUFLR0xBU1NfVVNFUiIgMj4vZGV2L251bGw7IHRoZW4KICAgICAgICAgICAgICAgIGxvZ19zdWNjZXNzICJVc2VyIHJlbW92ZWQ6ICRCUkVBS0dMQVNTX1VTRVIiCiAgICAgICAgICAgIGVsc2UKICAgICAgICAgICAgICAgIGxvZ19lcnJvciAiRmFpbGVkIHRvIHJlbW92ZSBicmVhay1nbGFzcyB1c2VyOiAkQlJFQUtHTEFTU19VU0VSIgogICAgICAgICAgICAgICAgcmVtb3ZhbF9mYWlsZWQ9dHJ1ZQogICAgICAgICAgICBmaQogICAgICAgIGZpCgogICAgICAgIGlmIFtbICIkcmVtb3ZhbF9mYWlsZWQiID09ICJ0cnVlIiBdXTsgdGhlbgogICAgICAgICAgICBsb2dfZXJyb3IgIkJyZWFrLWdsYXNzIGFkbWluIHJlbW92YWwgaXMgaW5jb21wbGV0ZTsgbWFudWFsIHJlbWVkaWF0aW9uIGlzIHJlcXVpcmVkLiIKICAgICAgICAgICAgX25vdGlmeV9icmVha2dsYXNzX2V2ZW50ICJSRU1PVkVfRkFJTEVEIiAiQXV0b21hdGljIHJlbW92YWwgb2YgJEJSRUFLR0xBU1NfVVNFUiBvciBpdHMgYnJlYWstZ2xhc3MgYXJ0aWZhY3RzIHdhcyBpbmNvbXBsZXRlIiAiQ1JJVElDQUwiCiAgICAgICAgICAgIHJldHVybiAxCiAgICAgICAgZmkKCiAgICAgICAgbG9nX3N1Y2Nlc3MgIkJyZWFrLWdsYXNzIGFkbWluIHJlbW92YWwgY29tcGxldGVkIgogICAgICAgIF9ub3RpZnlfYnJlYWtnbGFzc19ldmVudCAiUkVNT1ZFRCIgIlVzZXIgJEJSRUFLR0xBU1NfVVNFUiBhbmQgc3Vkb2VycyBmaWxlIC9ldGMvc3Vkb2Vycy5kL3Z3LWVtZXJnZW5jeSByZW1vdmVkIiAiSU5GTyIKICAgICAgICByZXR1cm4gMAogICAgfQoKJycnCnQgPSB0WzpzdGFydF0gKyBuZXdfcmVtb3ZlICsgdFtlbmQ6XQpwLndyaXRlX3RleHQodCkKCiMgbGliL3NlY3JldHMuc2g6IHJlbW92ZSBsYXN0IG9ic29sZXRlIDd6LXZzLTd6eiBjb21wYXRpYmlsaXR5IHdvcmRpbmcuCnAgPSBQYXRoKCJsaWIvc2VjcmV0cy5zaCIpCnQgPSBwLnJlYWRfdGV4dCgpCm9sZCA9ICIjIGF2b2lkaW5nIHRoZSBub24tVFRZIC1wIGJlaGF2aW9yIHRoYXQgZGlmZmVycyBiZXR3ZWVuIDd6IGFuZCB1cHN0cmVhbSA3enouXG4iCm5ldyA9ICIjIGF2b2lkaW5nIG5vbi1UVFkgLXAgYmVoYXZpb3Igd2hpbGUga2VlcGluZyBwYXNzcGhyYXNlcyBvdXQgb2YgcHJvY2VzcyBhcmd2LlxuIgppZiBvbGQgbm90IGluIHQ6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJzdGFsZSA3eiBiZWhhdmlvciBjb21tZW50IG5vdCBmb3VuZCIpCnAud3JpdGVfdGV4dCh0LnJlcGxhY2Uob2xkLCBuZXcsIDEpKQoKIyB1dGlsaXRpZXMvc2VjcmV0cy1lZGl0LnNoOiByZW1vdmUgdW51c2VkIGVkaXRvciByZWdpc3RyeSBhbmQgY29ycmVjdCBjb21tZW50LgpwID0gUGF0aCgidXRpbGl0aWVzL3NlY3JldC1lZGl0LnNoIikKdCA9IHAucmVhZF90ZXh0KCkKZGVhZCA9ICcnJyMgS25vd24gZm9ya2luZyBlZGl0b3JzIHRoYXQgcmV0dXJuIGJlZm9yZSB0aGUgdXNlciBoYXMgc2F2ZWQuCl9GT1JLSU5HX0VESVRPUlM9KCJndmltIiAibXZpbSIgImNvZGUiICJhdG9tIiAic3VibCIgInN1YmxpbWVfdGV4dCIgImdlZGl0IiAia2F0ZSIgIm1vdXNlcGFkIikKCicnJwppZiBkZWFkIG5vdCBpbiB0OgogICAgcmFpc2UgU3lzdGVtRXhpdCgiZGVhZCBlZGl0b3IgcmVnaXN0cnkgbm90IGZvdW5kIikKdCA9IHQucmVwbGFjZShkZWFkLCAiIiwgMSkKdCA9IHQucmVwbGFjZSgKICAgICIjIFdhcm4gd2hlbiB0aGUgc2VsZWN0ZWQgZWRpdG9yIGlzIGtub3duIHRvIGZvcmsuXG4iLAogICAgIiMgUmVqZWN0IGtub3duIEdVSSBlZGl0b3JzIHVubGVzcyBjb25maWd1cmVkIHRvIGJsb2NrIHVudGlsIHNhdmUvY2xvc2UuXG4iLAogICAgMSwKKQpwLndyaXRlX3RleHQodCkKCiMgdXRpbGl0aWVzL2tleS1yb3RhdGUuc2g6IHJlbW92ZSBoZWxwZXIgbWFkZSBkZWFkIGJ5IHNoYXJlZCB3b3Jrc3BhY2UgY2xlYW51cC4KcCA9IFBhdGgoInV0aWxpdGllcy9rZXktcm90YXRlLnNoIikKdCA9IHAucmVhZF90ZXh0KCkKZGVhZCA9ICcnJ19zZWN1cmVfcm0oKSB7CiAgICBsb2NhbCBwYXRoPSIkMSIKICAgIFtbIC1lICIkcGF0aCIgXV0gfHwgcmV0dXJuIDAKICAgIGlmIGNvbW1hbmQgLXYgc2hyZWQgPi9kZXYvbnVsbCAyPiYxICYmIFtbIC1mICIkcGF0aCIgXV07IHRoZW4KICAgICAgICBzaHJlZCAtZnV6ICIkcGF0aCIgMj4vZGV2L251bGwgfHwgcm0gLWYgIiRwYXRoIgogICAgZWxzZQogICAgICAgIHJtIC1yZiAiJHBhdGgiCiAgICBmaQp9CgonJycKaWYgZGVhZCBub3QgaW4gdDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoImRlYWQga2V5LXJvdGF0aW9uIGNsZWFudXAgaGVscGVyIG5vdCBmb3VuZCIpCnAud3JpdGVfdGV4dCh0LnJlcGxhY2UoZGVhZCwgIiIsIDEpKQoKIyBQZXJtYW5lbnQgcmVncmVzc2lvbiBjb3ZlcmFnZS4KcCA9IFBhdGgoInRlc3RzL3N1aXRlcy9zZWN1cml0eS9jYXNlLXNlY3JldHMuYmFzaCIpCnQgPSBwLnJlYWRfdGV4dCgpCnNvdXJjZV9hbmNob3IgPSAnJychIGdyZXAgLUZxICdQcm9jZWVkaW5nIGFueXdheScgdXRpbGl0aWVzL3NlY3JldHMtZWRpdC5zaCB8fCBmYWlsICJmb3JraW5nIGVkaXRvciBzdGlsbCB3YXJucyBhbmQgY29udGludWVzIgonJycKc291cmNlX2NoZWNrcyA9ICcnJyEgZ3JlcCAtRnEgJ19GT1JLSU5HX0VESVRPUlM9JyB1dGlsaXRpZXMvc2VjcmV0cy1lZGl0LnNoIHx8IGZhaWwgImRlYWQgZm9ya2luZy1lZGl0b3IgcmVnaXN0cnkgcmVtYWlucyIKI  ...' | base64 -d > /tmp/pr7-pass1-fix.py
-          python3 /tmp/pr7-pass1-fix.py
-          rm -f /tmp/pr7-pass1-fix.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {text.count(old)}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Fix the accidental physical newline inside the printf format string.
+          replace_once(
+              "utilities/setup-secrets.sh",
+              "        printf '%b\\\n' \"Expiry:",
+              "        printf '%b\\n' \"Expiry:",
+              "break-glass expiry printf",
+          )
+
+          # Removal is now part of creation rollback, so every real cleanup failure
+          # must propagate instead of being followed by a false success receipt.
+          replace_once(
+              "utilities/setup-secrets.sh",
+              "        local force_remove=false\n",
+              "        local force_remove=false removal_failed=false\n",
+              "break-glass removal state",
+          )
+          replace_once(
+              "utilities/setup-secrets.sh",
+              "                log_warn \"Failed to remove sudoers file: $sudoers_file — manual removal required\"\n",
+              "                log_error \"Failed to remove sudoers file: $sudoers_file — manual removal required\"\n                removal_failed=true\n",
+              "sudoers removal failure",
+          )
+          replace_once(
+              "utilities/setup-secrets.sh",
+              "            systemctl stop vw-breakglass-cleanup.timer 2>/dev/null || true\n            log_info \"Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)\"\n",
+              "            if systemctl stop vw-breakglass-cleanup.timer >/dev/null 2>&1; then\n                log_info \"Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)\"\n            else\n                log_error \"Failed to stop pending break-glass cleanup timer\"\n                removal_failed=true\n            fi\n",
+              "break-glass timer stop failure",
+          )
+          replace_once(
+              "utilities/setup-secrets.sh",
+              "            log_warn \"User removal may have had issues (user might not have had home directory)\"\n",
+              "            log_error \"Failed to remove break-glass user: $BREAKGLASS_USER\"\n            removal_failed=true\n",
+              "break-glass userdel failure",
+          )
+          replace_once(
+              "utilities/setup-secrets.sh",
+              "        log_success \"Break-glass admin removal completed\"\n        _notify_breakglass_event \"REMOVED\" \"User $BREAKGLASS_USER and sudoers file /etc/sudoers.d/vw-emergency removed\" \"INFO\"\n",
+              "        if [[ \"$removal_failed\" == \"true\" ]]; then\n            log_error \"Break-glass admin removal is incomplete; manual remediation is required.\"\n            _notify_breakglass_event \"REMOVE_FAILED\" \"Automatic removal of $BREAKGLASS_USER or its break-glass artifacts was incomplete\" \"CRITICAL\"\n            return 1\n        fi\n\n        log_success \"Break-glass admin removal completed\"\n        _notify_breakglass_event \"REMOVED\" \"User $BREAKGLASS_USER and sudoers file /etc/sudoers.d/vw-emergency removed\" \"INFO\"\n",
+              "truthful break-glass removal receipt",
+          )
+
+          replace_once(
+              "lib/secrets.sh",
+              "# avoiding the non-TTY -p behavior that differs between 7z and upstream 7zz.\n",
+              "# avoiding non-TTY -p behavior while keeping passphrases out of process argv.\n",
+              "retired 7z compatibility comment",
+          )
+          replace_once(
+              "utilities/secrets-edit.sh",
+              "# Known forking editors that return before the user has saved.\n_FORKING_EDITORS=(\"gvim\" \"mvim\" \"code\" \"atom\" \"subl\" \"sublime_text\" \"gedit\" \"kate\" \"mousepad\")\n\n",
+              "",
+              "dead editor registry",
+          )
+          replace_once(
+              "utilities/secrets-edit.sh",
+              "# Warn when the selected editor is known to fork.\n",
+              "# Reject known GUI editors unless configured to block until save/close.\n",
+              "editor gate comment",
+          )
+
+          p = Path("utilities/key-rotate.sh")
+          text = p.read_text()
+          start = text.index("_secure_rm() {\n")
+          end = text.index("_join_recipients_csv() {\n", start)
+          p.write_text(text[:start] + text[end:])
+
+          p = Path("tests/suites/security/case-secrets.bash")
+          text = p.read_text()
+          source_anchor = "! grep -Fq 'Proceeding anyway' utilities/secrets-edit.sh || fail \"forking editor still warns and continues\"\n"
+          source_add = (
+              "! grep -Fq '_FORKING_EDITORS=' utilities/secrets-edit.sh || fail \"dead forking-editor registry remains\"\n"
+              "! grep -Fq '_secure_rm()' utilities/key-rotate.sh || fail \"dead key-rotation secure-rm helper remains\"\n"
+              "! grep -Fq 'differs between 7z and upstream 7zz' lib/secrets.sh || fail \"retired 7z compatibility wording remains\"\n"
+              "grep -Fq \"printf '%b\\\\n' \\\"Expiry:\" utilities/setup-secrets.sh || fail \"break-glass expiry output format is malformed\"\n"
+          )
+          if text.count(source_anchor) != 1:
+              raise SystemExit("source regression anchor not unique")
+          text = text.replace(source_anchor, source_anchor + source_add, 1)
+
+          behavior_anchor = "BREAKGLASS_ROLLBACK_TEST\n\n# Direct configure uses its installed TERM trap to clean the owned workspace.\n"
+          behavior_lines = [
+              "BREAKGLASS_ROLLBACK_TEST",
+              "",
+              "# Removal must report a real failure when the account cannot be deleted; creation",
+              "# rollback relies on this status to avoid claiming emergency access was removed.",
+              "breakglass_remove_source=\"$(",
+              "  sed -n '/^    remove_breakglass_user() {$/,/^    }$/p' utilities/setup-secrets.sh \\",
+              "    | sed 's/^    //'",
+              ")\"",
+              "[[ -n \"$breakglass_remove_source\" ]] || fail \"break-glass removal helper could not be extracted\"",
+              "BREAKGLASS_REMOVE_SOURCE=\"$breakglass_remove_source\" bash -s <<'BREAKGLASS_REMOVE_FAILURE_TEST' \\",
+              "  || fail \"break-glass removal failure truthfulness regression failed\"",
+              "set -euo pipefail",
+              "DRY_RUN=false",
+              "FORCE=true",
+              "BREAKGLASS_USER=vw-test",
+              "log_info() { :; }",
+              "log_warn() { :; }",
+              "log_error() { :; }",
+              "log_success() { :; }",
+              "_notify_breakglass_event() { :; }",
+              "check_user_exists() { return 0; }",
+              "systemctl() { return 1; }",
+              "userdel() { return 73; }",
+              "rm() {",
+              "  [[ \" $* \" == *' /etc/sudoers.d/vw-emergency '* ]] && return 0",
+              "  command rm \"$@\"",
+              "}",
+              "eval \"$BREAKGLASS_REMOVE_SOURCE\"",
+              "set +e",
+              "remove_breakglass_user --force >/dev/null 2>&1",
+              "rc=$?",
+              "set -e",
+              "(( rc != 0 ))",
+              "BREAKGLASS_REMOVE_FAILURE_TEST",
+              "",
+              "# Direct configure uses its installed TERM trap to clean the owned workspace.",
+              "",
+          ]
+          behavior_add = "\n".join(behavior_lines)
+          if text.count(behavior_anchor) != 1:
+              raise SystemExit("behavior regression anchor not unique")
+          text = text.replace(behavior_anchor, behavior_add, 1)
+          p.write_text(text)
+          PY
+
           git rm .github/workflows/pr7-pass1-finalize.yml
           git diff --check
           git config user.name 'github-actions[bot]'
