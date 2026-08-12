@@ -28,22 +28,13 @@ jobs:
           rm -f .github/pr7-preprocess.py .github/pr7-postfix.py .github/pr7-testfix.py .github/pr7-direct-tests.py .github/pr7-testfix2.py .github/pr7-testfix3.py .github/pr7-editorfix.py .github/pr7-workspacefix.py .github/pr7-runtimefixture.py .github/workflows/pr7-apply-validate.yml .github/workflows/pr7-runner.yml
       - name: Install validation dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip
-      - name: Syntax validation
+      - name: Diagnose non-root recovery fixture
         run: |
-          set -euo pipefail
-          for f in lib/crypto.sh lib/secrets.sh lib/defaults.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash; do bash -n "$f"; done
-      - name: ShellCheck
-        run: shellcheck -e SC1090,SC1091,SC2016,SC2153,SC2317 lib/crypto.sh lib/secrets.sh lib/defaults.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
-      - name: Focused security tests
-        run: |
-          sudo env VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
-          sudo env VW_TEST_CASE_MODE=core bash tests/suites/security/case-secrets.bash
-      - name: Full suite
-        run: ./tests/run-tests.sh all
-      - name: Commit validated changes
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git commit -m "secrets: fail closed on sensitive workspaces and SOPS replacement"
-          git push origin HEAD:pr7-sensitive-workspace-sops-hardening
+          set +e
+          export VW_TEST_CASE_MODE=core
+          export PS4='+${FUNCNAME[0]:-main}:${LINENO}: '
+          bash -x tests/suites/security/case-secrets.bash > /tmp/pr7-core.trace 2>&1
+          rc=$?
+          grep -n -C 25 'Sensitive workspaces require root privileges' /tmp/pr7-core.trace || true
+          tail -n 160 /tmp/pr7-core.trace
+          exit "$rc"
