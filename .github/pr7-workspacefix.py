@@ -105,4 +105,31 @@ t = t.replace(anchor, checks + anchor, 1)
 # than a plaintext staging file. Retarget only those dot-file fixture patterns.
 t = t.replace("*'.vaultwarden-recovery-kit.'*", "*'.vaultwarden-recovery-publish.'*", 1)
 t = t.replace("-name '.vaultwarden-recovery-kit.*'", "-name '.vaultwarden-recovery-publish.*'")
+
+# The repository-wide suite intentionally runs secrets-core as an ordinary
+# user. Its recovery transaction fixture tests publication logic, not the
+# production root/backing verifier, so provide a fixture-local volatile
+# workspace implementation. Root enforcement remains covered by focused tests.
+fixture_anchor = '''    log_debug() { :; }
+    log_success() { :; }
+    resolve_age_key_path() { printf '%s\\
+' "$work/age-key.txt"; }
+'''
+fixture_replacement = '''    log_debug() { :; }
+    log_success() { :; }
+    create_sensitive_workspace() {
+      local purpose="${1:-sensitive}" dir="$work/volatile-${1:-sensitive}"
+      rm -rf -- "$dir"
+      mkdir -p "$dir"
+      chmod 0700 "$dir"
+      printf '%s\\
+' "$dir"
+    }
+    remove_sensitive_workspace() { rm -rf -- "$1"; }
+    resolve_age_key_path() { printf '%s\\
+' "$work/age-key.txt"; }
+'''
+if fixture_anchor not in t:
+    raise SystemExit('recovery transaction fixture anchor missing')
+t = t.replace(fixture_anchor, fixture_replacement, 1)
 p.write_text(t)
