@@ -15,6 +15,7 @@ _CW_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/common.sh"
 [[ -n "${VAULTWARDEN_STORAGE_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/storage.sh"
 declare -F decrypt_secret >/dev/null 2>&1 || source "${_CW_LIB_DIR}/secrets.sh"
+[[ -n "${VW_CROWDSEC_LIB_LOADED:-}" ]] || source "${_CW_LIB_DIR}/crowdsec.sh"
 unset _CW_LIB_DIR
 
 crowdsec_worker_service_exists() {
@@ -23,14 +24,7 @@ crowdsec_worker_service_exists() {
 }
 
 _crowdsec_worker_resolve_lapi_port() {
-    if declare -F _cs_resolve_lapi_port >/dev/null 2>&1; then
-        _cs_resolve_lapi_port
-        return
-    fi
-    grep -oP '(?<=listen_uri:\s{0,10}127\.0\.0\.1:)\d+' \
-        /etc/crowdsec/config.yaml 2>/dev/null \
-        | head -1 \
-        || echo "8090"
+    crowdsec_resolve_lapi_port "${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}/config.yaml"
 }
 
 _crowdsec_worker_value_is_active() {
@@ -162,7 +156,11 @@ crowdsec_worker_apply_config() {
     chown root:root "$tmp_config" || { rm -f "$tmp_config"; return 1; }
 
     local lapi_port worker_route account_email bouncer_bin render_rc=0
-    lapi_port="$(_crowdsec_worker_resolve_lapi_port)"
+    lapi_port="$(_crowdsec_worker_resolve_lapi_port)" || {
+        rm -f "$tmp_config"
+        log_error "CrowdSec LAPI listen_uri is missing or invalid; fix /etc/crowdsec/config.yaml before applying the Worker config."
+        return 1
+    }
     worker_route="${domain_name}/*"
     account_email="${CF_ACCOUNT_EMAIL:-CHANGE_ME_CF_ACCOUNT_EMAIL}"
     bouncer_bin="${_CF_WORKER_BOUNCER_BIN:-/usr/local/bin/crowdsec-cloudflare-worker-bouncer}"

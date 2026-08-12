@@ -15,6 +15,7 @@ source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
+source "$SCRIPT_DIR/lib/crowdsec.sh"
 
 QUIET=false
 JSON_OUTPUT=false
@@ -100,7 +101,12 @@ _check_skip() { local name="$1" detail="${2:-}"; _record "$name" SKIP "$detail"
     return 0; }
 
 _http_status() {
-    curl -sk --max-time 10 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo "000"
+    local status
+    if ! status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null)"; then
+        printf '000\n'
+        return 0
+    fi
+    printf '%s\n' "$status"
 }
 
 _container_running() {
@@ -133,6 +139,8 @@ check_domain_configured() {
     local domain="${DOMAIN:-}"
     if [[ -z "$domain" || "$domain" == *"example.com"* ]]; then
         _check_fail "domain-configured" "DOMAIN is unset or still set to example.com"
+    elif [[ "$domain" != https://* ]]; then
+        _check_fail "domain-configured" "normal production readiness requires an https:// DOMAIN"
     else
         _check_pass "domain-configured" "$domain"
     fi
@@ -197,8 +205,18 @@ check_tls_certificate() {
     _require_project_environment "tls-cert" || return 0
     local domain="${DOMAIN:-}"
     [[ -z "$domain" ]] && { _check_skip "tls-cert" "DOMAIN not set"; return; }
+    if [[ "$domain" != https://* ]]; then
+        _check_fail "tls-verified" "DOMAIN is not HTTPS"
+        return
+    fi
+    if ! curl -sS --max-time 10 -o /dev/null "${domain%/}/" 2>/dev/null; then
+        _check_fail "tls-verified" "certificate trust or hostname verification failed for ${domain%/}"
+        return
+    fi
+    _check_pass "tls-verified" "certificate chain and hostname verified"
+
     local host="${domain#https://}"
-    host="${host%/*}"
+    host="${host%%/*}"
 
     # expiry_date_str holds the raw notAfter date string (e.g. "Jun 15 12:00:00 2026 GMT")
     local expiry_date_str
@@ -415,6 +433,7 @@ check_systemd_automation() {
 
 check_crowdsec() {
     [[ "$QUIET" == false ]] && log_info "Checking CrowdSec..."
+    _require_project_environment "crowdsec" || return 0
     if ! has_command cscli; then
         _check_fail "crowdsec" "cscli not installed"
         return
@@ -423,17 +442,32 @@ check_crowdsec() {
         _check_fail "crowdsec" "systemctl not available"
         return
     fi
-    if systemctl is-active --quiet crowdsec 2>/dev/null; then
-        local decisions_output decisions
-        if ! decisions_output="$(cscli decisions list -o raw 2>&1)"; then
-            _check_fail "crowdsec" "cscli decisions query failed"
-            return
-        fi
-        decisions="$(printf '%s\n' "$decisions_output" | tail -n +2 | grep -c . || true)"
-        _check_pass "crowdsec" "active (${decisions} decision(s) in effect)"
-    else
+    if ! systemctl is-active --quiet crowdsec 2>/dev/null; then
         _check_fail "crowdsec" "crowdsec service not running"
+        return
     fi
+
+    local decisions_output decisions
+    if ! decisions_output="$(cscli decisions list -o raw 2>&1)"; then
+        _check_fail "crowdsec" "cscli decisions query failed"
+        return
+    fi
+    decisions="$(printf '%s\n' "$decisions_output" | tail -n +2 | grep -c . || true)"
+    _check_pass "crowdsec" "active (${decisions} decision(s) in effect)"
+
+    local readiness_rc=0
+    crowdsec_worker_readiness || readiness_rc=$?
+    case "$readiness_rc" in
+        0)
+            _check_pass "crowdsec-edge-bouncer" "$CROWDSEC_READINESS_DETAIL"
+            ;;
+        10)
+            _check_skip "crowdsec-edge-bouncer" "$CROWDSEC_READINESS_DETAIL; not normal production readiness"
+            ;;
+        *)
+            _check_fail "crowdsec-edge-bouncer" "$CROWDSEC_READINESS_DETAIL"
+            ;;
+    esac
 }
 
 check_disk_space() {

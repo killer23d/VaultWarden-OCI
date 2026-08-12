@@ -90,6 +90,14 @@ sudo ./edit-secrets.sh rotate cf_account_id
 sudo ./edit-secrets.sh rotate smtp_password
 ```
 
+Configure the required CrowdSec enforcement path after the Cloudflare secrets are set:
+
+```bash
+sudo ./utilities/setup-crowdsec.sh
+```
+
+With `CLOUDFLARE_PROXY_ENABLED=true`, this daemon-backed Workers bouncer path is the normal production golden path. Explicit proxy-disabled or autonomous modes remain advanced alternatives and are not reported as normal production readiness.
+
 ### 5. Start and verify the live stack
 
 ```bash
