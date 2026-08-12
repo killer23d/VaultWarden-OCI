@@ -59,7 +59,7 @@ capture "$real_list_repeat" "$RUNNER" list
 assert_status 0 "real runner list repeat"
 cmp -s "$real_list" "$real_list_repeat" || fail "logical list output is not deterministic"
 mapfile -t REGISTERED_RECORDS < <(sed -n 's/^  //p' "$real_list")
-[[ "${#REGISTERED_RECORDS[@]}" -eq 30 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 30"
+[[ "${#REGISTERED_RECORDS[@]}" -eq 31 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 31"
 
 real_files="$TMP_ROOT/real-files.out"
 real_files_repeat="$TMP_ROOT/real-files-repeat.out"
@@ -69,8 +69,8 @@ capture "$real_files_repeat" "$RUNNER" list-files
 assert_status 0 "real runner list-files repeat"
 cmp -s "$real_files" "$real_files_repeat" || fail "list-files output is not deterministic"
 mapfile -t REGISTERED_PATHS < "$real_files"
-[[ "${#REGISTERED_PATHS[@]}" -eq 23 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 23"
-[[ "$(sort -u "$real_files" | wc -l | tr -d '[:space:]')" -eq 23 ]] || fail "list-files contains duplicate physical paths"
+[[ "${#REGISTERED_PATHS[@]}" -eq 24 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 24"
+[[ "$(sort -u "$real_files" | wc -l | tr -d '[:space:]')" -eq 24 ]] || fail "list-files contains duplicate physical paths"
 
 declare -A SEEN_IDS=() SEEN_PATH_MODES=()
 for record in "${REGISTERED_RECORDS[@]}"; do
@@ -120,7 +120,7 @@ list_one="$TMP_ROOT/list-one.out"; list_two="$TMP_ROOT/list-two.out"
 capture "$list_one" "${fixture_env[@]}" "$RUNNER" list; assert_status 0 "fixture list first pass"
 capture "$list_two" "${fixture_env[@]}" "$RUNNER" list; assert_status 0 "fixture list second pass"
 cmp -s "$list_one" "$list_two" || fail "fixture logical list output is not stable"
-[[ "$(grep -c '^  ' "$list_one")" -eq 30 ]] || fail "fixture list did not preserve 30 logical records"
+[[ "$(grep -c '^  ' "$list_one")" -eq 31 ]] || fail "fixture list did not preserve 31 logical records"
 for record in "${REGISTERED_RECORDS[@]}"; do
     IFS='|' read -r logical_id physical_path mode timeout <<<"$record"
     mapped="$FIXTURE_TESTS/${physical_path#tests/}"
@@ -131,13 +131,13 @@ files_one="$TMP_ROOT/files-one.out"; files_two="$TMP_ROOT/files-two.out"
 capture "$files_one" "${fixture_env[@]}" "$RUNNER" list-files; assert_status 0 "fixture list-files first pass"
 capture "$files_two" "${fixture_env[@]}" "$RUNNER" list-files; assert_status 0 "fixture list-files second pass"
 cmp -s "$files_one" "$files_two" || fail "fixture list-files output is not stable"
-[[ "$(wc -l < "$files_one" | tr -d '[:space:]')" -eq 23 ]] || fail "fixture list-files did not preserve 23 unique physical paths"
-[[ "$(sort -u "$files_one" | wc -l | tr -d '[:space:]')" -eq 23 ]] || fail "fixture list-files duplicated a physical path"
+[[ "$(wc -l < "$files_one" | tr -d '[:space:]')" -eq 24 ]] || fail "fixture list-files did not preserve 24 unique physical paths"
+[[ "$(sort -u "$files_one" | wc -l | tr -d '[:space:]')" -eq 24 ]] || fail "fixture list-files duplicated a physical path"
 for physical_path in "${REGISTERED_PATHS[@]}"; do
     mapped="$FIXTURE_TESTS/${physical_path#tests/}"
     grep -Fqx "$mapped" "$files_one" || fail "fixture list-files omitted rewritten physical path: $mapped"
 done
-[[ "$(find "$FIXTURE_TESTS/suites" -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 23 ]] \
+[[ "$(find "$FIXTURE_TESTS/suites" -type f -name 'case-*.bash' | wc -l | tr -d '[:space:]')" -eq 24 ]] \
     || fail "fixture construction did not create one file per unique physical path"
 
 # Fixture hook is a complete record and is forbidden outside fixture mode.
@@ -255,12 +255,13 @@ mode_log="$TMP_ROOT/modes.log"; : > "$mode_log"
 capture "$run_output" env "VAULTWARDEN_TEST_RUNNER_TESTS_DIR=$FIXTURE_TESTS" "FIXTURE_MODE_LOG=$mode_log" "$RUNNER" foundation
 assert_status 0 "foundation mode propagation"
 assert_matches "^PASS    $probe_id \\([0-9]+\\.[0-9]{2}s\\) \\[$probe_mapped\\]$" "$run_output" "success duration diagnostic"
-[[ "$(wc -l < "$mode_log" | tr -d '[:space:]')" -eq 10 ]] || fail "foundation did not execute 10 logical records"
+[[ "$(wc -l < "$mode_log" | tr -d '[:space:]')" -eq 11 ]] || fail "foundation did not execute 11 logical records"
 for expected in \
     "host-architecture|$FIXTURE_TESTS/suites/foundation/case-storage-setup.bash" \
     "core|$FIXTURE_TESTS/suites/foundation/case-runner-contracts.bash" \
     "repository-interface|$FIXTURE_TESTS/suites/foundation/case-runner-contracts.bash" \
     "core|$FIXTURE_TESTS/suites/foundation/case-config-env.bash" \
+    "all|$FIXTURE_TESTS/suites/foundation/case-runtime-authority.bash" \
     "all|$FIXTURE_TESTS/suites/foundation/case-compose-project.bash" \
     "ci-dev-setup|$FIXTURE_TESTS/suites/foundation/case-config-env.bash"; do
     grep -Fqx "$expected" "$mode_log" || fail "missing propagated mode: $expected"
