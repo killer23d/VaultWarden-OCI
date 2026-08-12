@@ -32,7 +32,7 @@ jobs:
           PY
           bash -n tests/suites/foundation/case-config-env.bash
           shellcheck -x --severity=warning tests/suites/foundation/case-config-env.bash
-          sudo env VW_TEST_CASE_MODE=core bash tests/suites/foundation/case-config-env.bash
+          env VW_TEST_CASE_MODE=core bash tests/suites/foundation/case-config-env.bash
       - name: Commit fix and remove helper workflow
         shell: bash
         run: |
