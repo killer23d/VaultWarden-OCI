@@ -342,18 +342,36 @@ _managed_secrets_manifest_path() {
 }
 
 _schema_required_runtime_keys() {
-    local _required_keys
+    local _group _group_keys _email_mode
+    local -a _runtime_groups=()
+
     schema_required_keys || return 1
 
-    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
-        local _cf_keys
-        if _cf_keys=$(schema_keys_for_conditional_group "cloudflare_proxy" 2>/dev/null); then
-            printf '%s\n' "$_cf_keys"
-        else
-            printf '%s\n' "cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token"
-            log_warn "validate_required_secrets: schema conditional-group lookup unavailable — using static Cloudflare fallback"
+    [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]] && _runtime_groups+=("cloudflare_proxy")
+    [[ "${PUSH_ENABLED:-false}" == "true" ]] && _runtime_groups+=("push")
+    [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]] && _runtime_groups+=("authenticated_integrity")
+
+    _email_mode="${EMAIL_MODE:-auto}"
+    case "$_email_mode" in
+        auto|smtp|direct|host) _runtime_groups+=("email_smtp") ;;
+        api)                   _runtime_groups+=("email_smtp" "email_api") ;;
+        *)
+            log_error "validate_required_secrets: unsupported EMAIL_MODE '${_email_mode}' while determining runtime-required secrets"
+            return 1
+            ;;
+    esac
+
+    for _group in "${_runtime_groups[@]}"; do
+        if ! _group_keys=$(schema_keys_for_conditional_group "$_group" 2>/dev/null); then
+            log_error "validate_required_secrets: failed to read conditional group '${_group}' from secrets-schema.yaml"
+            return 1
         fi
-    fi
+        if [[ -z "$_group_keys" ]]; then
+            log_error "validate_required_secrets: active conditional group '${_group}' has no keys in secrets-schema.yaml"
+            return 1
+        fi
+        printf '%s\n' "$_group_keys"
+    done
 }
 
 validate_required_secrets() {
@@ -378,6 +396,8 @@ validate_required_secrets() {
         local sops_stderr rc=0
         local value placeholder
         sops_stderr=$(mktemp)
+        # Prevent decrypted assignment values from appearing in caller xtrace output.
+        { set +x; } 2>/dev/null
         value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>"$sops_stderr") || rc=$?
         if [[ $rc -ne 0 ]]; then
             log_error "validate_required_secrets: required secret '$secret' is missing or unreadable"
@@ -478,6 +498,9 @@ list_secret_keys() {
     local keys
     local sops_stderr
     local rc=0
+    # The full decrypted YAML is assigned below; suppress xtrace before it can
+    # expose values from an otherwise names-only operation.
+    { set +x; } 2>/dev/null
     # Decrypt once into a variable; parse from that in-memory copy
     # rather than calling sops -d a second time (avoids double I/O and TOCTOU).
     local yaml_content _sops_err_file
@@ -1441,26 +1464,103 @@ auto_generate_secret_field() {
 }
 
 _grk_sops_extract() {
-    local _key="$1"
-    local _secrets_file="$2"
-    local _val
-    # Suppress xtrace to prevent plaintext secret appearing in debug logs.
+    local _key="$1" _secrets_file="$2"
+    local _val _rc=0
+
+    # Suppress xtrace and SOPS stderr so recovery diagnostics cannot expose
+    # plaintext-adjacent context. The key name and exit status are sufficient.
     { set +x; } 2>/dev/null
-    _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>/dev/null) \
-        && printf '%s' "$_val" \
-        || printf '%s' "Not Set"
+    _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>/dev/null) || _rc=$?
+    if (( _rc != 0 )); then
+        log_error "generate_recovery_kit: failed to extract schema key '${_key}' (sops exit ${_rc})"
+        unset _val
+        return 1
+    fi
+    printf '%s' "$_val"
     unset _val
+}
+
+_grk_append() {
+    local output_file="$1"
+    shift
+    if ! "$@" >> "$output_file"; then
+        log_error "generate_recovery_kit: failed to append recovery document"
+        return 1
+    fi
+}
+
+_validate_recovery_kit_document() {
+    local recovery_file="$1" expected_labels="$2"
+    local label count
+
+    [[ -s "$recovery_file" ]] || {
+        log_error "Recovery-kit validation failed: staged document is empty"
+        return 1
+    }
+    [[ "$(grep -Fxc 'END OF RECOVERY KIT' "$recovery_file" 2>/dev/null || true)" == "1" ]] || {
+        log_error "Recovery-kit validation failed: completion marker is missing or duplicated"
+        return 1
+    }
+    [[ "$(grep -c '^AGE-SECRET-KEY-1' "$recovery_file" 2>/dev/null || true)" == "1" ]] || {
+        log_error "Recovery-kit validation failed: expected exactly one Age private identity"
+        return 1
+    }
+
+    while IFS= read -r label; do
+        [[ -n "$label" ]] || continue
+        count=$(grep -Fxc "[$label]" "$recovery_file" 2>/dev/null || true)
+        if [[ "$count" != "1" ]]; then
+            log_error "Recovery-kit validation failed: field '$label' rendered ${count} times (expected once)"
+            return 1
+        fi
+    done <<< "$expected_labels"
+    return 0
 }
 
 generate_recovery_kit() {
     local output_file="$1"
     local age_key
-    age_key=$(resolve_age_key_path) || return 1
     local secrets_file="${SECRETS_FILE}"
     local env_file="${PROJECT_ROOT:-.}/.env"
+    local _schema_key_list _runtime_required_key_list _required_key
 
+    if ! schema_validate; then
+        log_error "generate_recovery_kit: secrets-schema.yaml validation failed"
+        return 1
+    fi
+    if ! _schema_key_list=$(schema_keys); then
+        log_error "generate_recovery_kit: failed to enumerate secrets-schema.yaml"
+        return 1
+    fi
+    [[ -n "$_schema_key_list" ]] || {
+        log_error "generate_recovery_kit: secrets-schema.yaml contains no managed secrets"
+        return 1
+    }
+    if ! _runtime_required_key_list=$(_schema_required_runtime_keys); then
+        log_error "generate_recovery_kit: failed to determine runtime-required recovery secrets"
+        return 1
+    fi
+    declare -A _grk_runtime_required=()
+    while IFS= read -r _required_key; do
+        [[ -z "$_required_key" ]] && continue
+        _grk_runtime_required["$_required_key"]=1
+    done <<< "$_runtime_required_key_list"
+
+    if [[ ! -f "$secrets_file" ]]; then
+        log_error "generate_recovery_kit: secrets file not found: $secrets_file"
+        return 1
+    fi
+    age_key=$(resolve_age_key_path) || return 1
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key not found: $age_key"
+        return 1
+    fi
+    if ! has_command age; then
+        log_error "generate_recovery_kit: 'age' is required to cryptographically validate the Age private identity"
+        return 1
+    fi
+    if ! check_age_key "$age_key"; then
+        log_error "generate_recovery_kit: Age private identity validation failed"
         return 1
     fi
 
@@ -1476,7 +1576,10 @@ generate_recovery_kit() {
     fi
     # Suppress xtrace before reading the private key to prevent it appearing in debug logs.
     { set +x; } 2>/dev/null
-    priv_key=$(cat "$age_key")
+    if ! priv_key=$(cat "$age_key"); then
+        log_error "generate_recovery_kit: failed to read Age private identity"
+        return 1
+    fi
 
     local domain="Not Configured"
     local admin_email="Not Configured"
@@ -1496,26 +1599,60 @@ generate_recovery_kit() {
 
     log_info "Decrypting secrets for export..."
 
-    declare -A _grk_values=()
+    declare -A _grk_values=() _grk_labels=() _grk_seen_labels=()
+    local expected_labels=""
 
-    if [[ -f "$secrets_file" ]]; then
-        if ! ensure_sops_env; then return 1; fi
-        trap 'cleanup_secrets_environment' RETURN
+    if ! ensure_sops_env; then return 1; fi
+    trap 'cleanup_secrets_environment' RETURN
 
-        local _schema_key_list
-        if ! _schema_key_list=$(schema_keys 2>/dev/null); then
-            log_warn "generate_recovery_kit: schema_keys unavailable — recovery kit may be incomplete"
-            # Degrade gracefully: continue with an empty map rather than aborting.
-            _schema_key_list=""
+    local _rk_key _rk_value _rk_placeholder _rk_label
+    while IFS= read -r _rk_key; do
+        [[ -z "$_rk_key" ]] && continue
+
+        if ! _rk_label=$(schema_field "$_rk_key" label); then
+            log_error "generate_recovery_kit: failed to read label for schema key '$_rk_key'"
+            unset priv_key
+            return 1
+        fi
+        if [[ -z "$_rk_label" || "$_rk_label" == *$'\n'* || "$_rk_label" == *$'\r'* ]]; then
+            log_error "generate_recovery_kit: invalid recovery label for schema key '$_rk_key'"
+            unset priv_key
+            return 1
+        fi
+        if [[ -n "${_grk_seen_labels[$_rk_label]+set}" ]]; then
+            log_error "generate_recovery_kit: duplicate recovery label in schema: $_rk_label"
+            unset priv_key
+            return 1
+        fi
+        _grk_seen_labels["$_rk_label"]=1
+
+        if ! _rk_placeholder=$(schema_field "$_rk_key" placeholder); then
+            log_error "generate_recovery_kit: failed to read placeholder for schema key '$_rk_key'"
+            unset priv_key
+            return 1
         fi
 
-        while IFS= read -r _rk_key; do
-            [[ -z "$_rk_key" ]] && continue
-            _grk_values["$_rk_key"]=$(_grk_sops_extract "$_rk_key" "$secrets_file")
-        done <<< "$_schema_key_list"
-    else
-        log_warn "secrets.yaml not found"
-    fi
+        if ! _rk_value=$(_grk_sops_extract "$_rk_key" "$secrets_file"); then
+            unset priv_key
+            return 1
+        fi
+        if _secret_value_is_inactive "$_rk_value" "$_rk_placeholder"; then
+            if [[ -n "${_grk_runtime_required[$_rk_key]+set}" ]]; then
+                log_error "generate_recovery_kit: runtime-required secret '$_rk_key' is unset or placeholder"
+                unset _rk_value priv_key
+                return 1
+            fi
+            _rk_value="<not set: optional>"
+        fi
+
+        _grk_labels["$_rk_key"]="$_rk_label"
+        _grk_values["$_rk_key"]="$_rk_value"
+        [[ -z "$expected_labels" ]] || expected_labels+=$'\n'
+        expected_labels+="$_rk_label"
+        unset _rk_value
+    done <<< "$_schema_key_list"
+
+    cleanup_secrets_environment
 
     if ! install -m 600 /dev/null "$output_file"; then
         log_error "Failed to create output file with secure permissions: $output_file"
@@ -1528,9 +1665,9 @@ generate_recovery_kit() {
     # $2y would be silently dropped by shell expansion in an unquoted heredoc,
     # producing a garbled hash that cannot be used for Caddy auth recovery.
     # All dynamic values are injected after the static block with printf.
-    # The heredoc-interspersed structure prevents full { } >> grouping here.
-    # shellcheck disable=SC2129
-    cat >> "$output_file" << 'EOF'
+    # Every append is explicitly checked because callers invoke this function
+    # from guarded boolean contexts where Bash errexit is not reliable.
+    _grk_append "$output_file" cat << 'EOF' || return 1
 ██████╗ ███████╗ ██████╗ ██████╗██╗   ██╗███████╗██████╗ ██╗   ██╗
 ██╔══██╗██╔════╝██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝
 ██████╔╝█████╗  ██║     ██║   ██║██║   ██║█████╗  ██████╔╝ ╚████╔╟ 
@@ -1549,15 +1686,15 @@ EOF
 
     # Inject all dynamic values explicitly so that $ characters in secrets
     # (e.g. bcrypt hashes: $2y$12$...) are written verbatim.
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" cat << 'EOF' || return 1
 ═══════════════════════════════════════════════════════════════════════
                         🚨 CRITICAL SECURITY DOCUMENT 🚨
 ═══════════════════════════════════════════════════════════════════════
 EOF
-    printf 'Created: %s\n' "$date_val"      >> "$output_file"
-    printf 'Server:  %s\n' "$hostname_val" >> "$output_file"
-    printf 'Domain:  %s\n' "$domain"       >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" printf 'Created: %s\n' "$date_val" || return 1
+    _grk_append "$output_file" printf 'Server:  %s\n' "$hostname_val" || return 1
+    _grk_append "$output_file" printf 'Domain:  %s\n' "$domain" || return 1
+    _grk_append "$output_file" cat << 'EOF' || return 1
 
 WARNING: This file contains highly sensitive UNENCRYPTED secrets.
 1. Save this to your Password Manager (Secure Note) IMMEDIATELY.
@@ -1571,13 +1708,13 @@ If you lose this key, your backups are FOREVER USELESS.
 
 [AGE PRIVATE KEY]
 EOF
-    printf '%s\n' "$priv_key" >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" printf '%s\n' "$priv_key" || return 1
+    _grk_append "$output_file" cat << 'EOF' || return 1
 
 [AGE PUBLIC KEY]
 EOF
-    printf '%s\n' "$pub_key" >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" printf '%s\n' "$pub_key" || return 1
+    _grk_append "$output_file" cat << 'EOF' || return 1
 
 ════════════════════════════════════════════════════════════════════════
 SECTION 2: SERVER SECRETS (DECRYPTED)
@@ -1585,26 +1722,18 @@ SECTION 2: SERVER SECRETS (DECRYPTED)
 
 EOF
 
-    # Emit each secret with its human-readable label from the schema.
-    # New keys appear automatically without editing this function.
-    local _schema_keys_for_kit
-    _schema_keys_for_kit=$(schema_keys 2>/dev/null) || _schema_keys_for_kit=""
-
+    # Render the same schema inventory collected above. No fallback or second
+    # enumeration is permitted once generation begins.
+    local _kit_key
     while IFS= read -r _kit_key; do
         [[ -z "$_kit_key" ]] && continue
-        local _kit_label
-        _kit_label=$(schema_field_safe "$_kit_key" "label") || _kit_label="$_kit_key"
-        [[ -z "$_kit_label" ]] && _kit_label="$_kit_key"
+        _grk_append "$output_file" printf '[%s]\n' "${_grk_labels[$_kit_key]}" || return 1
+        _grk_append "$output_file" printf '%s\n\n' "${_grk_values[$_kit_key]}" || return 1
+    done <<< "$_schema_key_list"
 
-        local _kit_value="${_grk_values[$_kit_key]:-Not Set}"
+    unset _grk_values _grk_labels _grk_seen_labels _grk_runtime_required
 
-        printf '[%s]\n' "$_kit_label"       >> "$output_file"
-        printf '%s\n\n' "$_kit_value"       >> "$output_file"
-    done <<< "$_schema_keys_for_kit"
-
-    unset _grk_values
-
-        cat >> "$output_file" << 'EOF'
+        _grk_append "$output_file" cat << 'EOF' || return 1
 
 ════════════════════════════════════════════════════════════════════════
 SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
@@ -1616,16 +1745,14 @@ TO RESTORE THIS SERVER ON NEW HARDWARE:
    [ ] Install Git, Docker, SOPS, Age, and required restore tools on the new server.
    [ ] Clone the repository:
 EOF
-    printf '       git clone %s\n' "$repo_clone_url" >> "$output_file"
+    _grk_append "$output_file" printf '       git clone %s\n' "$repo_clone_url" || return 1
     local repo_basename
     repo_basename=$(basename "$repo_clone_url" .git)
-    {
-        printf '       cd %s\n' "$repo_basename"
-        printf '\n'
-        printf '   [ ] For a fresh install only, run setup:\n'
-        printf '       sudo ./setup.sh install --domain %s --email %s\n' "$domain" "$admin_email"
-    } >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+    _grk_append "$output_file" printf '       cd %s\n' "$repo_basename" || return 1
+    _grk_append "$output_file" printf '\n' || return 1
+    _grk_append "$output_file" printf '   [ ] For a fresh install only, run setup:\n' || return 1
+    _grk_append "$output_file" printf '       sudo ./setup.sh install --domain %s --email %s\n' "$domain" "$admin_email" || return 1
+    _grk_append "$output_file" cat << 'EOF' || return 1
 
 2. PRIMARY RECOVERY PATH: EXISTING STATE DIRECTORY OR ATTACHED DATA/BLOCK VOLUME
    Use this when /var/lib/vaultwarden or the dedicated VaultWarden data volume is available.
@@ -1710,7 +1837,14 @@ EOF
     # the heredoc that wrote it to the output file.
     unset priv_key
 
-    chmod 600 "$output_file"
+    if ! _validate_recovery_kit_document "$output_file" "$expected_labels"; then
+        _remove_sensitive_file "$output_file" 2>/dev/null || rm -f -- "$output_file"
+        return 1
+    fi
+    if ! chmod 600 "$output_file"; then
+        log_error "generate_recovery_kit: failed to enforce mode 0600 on staged recovery document"
+        return 1
+    fi
 }
 
 _ork_generate_and_secure() {
@@ -1729,9 +1863,24 @@ _ork_generate_and_secure() {
   }
   umask "$old_umask"
   (
-    local published=false
-    trap '[[ "$published" == "true" ]] || _remove_sensitive_file "$temp_file" 2>/dev/null || true' EXIT
-    trap 'exit 130' INT; trap 'exit 129' HUP; trap 'exit 143' TERM
+    local linked=false completed=false
+    _ork_rollback_incomplete_publication() {
+      [[ "$completed" == "true" ]] && return 0
+      # linked covers failures after state is recorded. The same-inode check
+      # closes the signal window after ln succeeds but before linked=true.
+      if [[ "$linked" == "true" ]] \
+          || { [[ -e "$output_file" && -e "$temp_file" ]] && [[ "$output_file" -ef "$temp_file" ]]; }; then
+        _remove_sensitive_file "$output_file" 2>/dev/null || true
+      fi
+      _remove_sensitive_file "$temp_file" 2>/dev/null || true
+    }
+    trap _ork_rollback_incomplete_publication EXIT
+    # A signal means publication did not complete from the caller's point of
+    # view. Force rollback even if it lands after cleanup was accepted but
+    # before this subshell returns success.
+    trap 'completed=false; exit 130' INT
+    trap 'completed=false; exit 129' HUP
+    trap 'completed=false; exit 143' TERM
     generate_recovery_kit "$temp_file" || exit 1
     [[ -s "$temp_file" ]] || exit 1
     grep -Fq 'END OF RECOVERY KIT' "$temp_file" || exit 1
@@ -1742,8 +1891,16 @@ _ork_generate_and_secure() {
     fi
     # Hard-link publication is atomic and fails when the destination exists.
     ln -- "$temp_file" "$output_file" || exit 1
+    linked=true
     rm -f -- "$temp_file" || exit 1
-    published=true
+    # Cleanup acceptance is part of publication success. Keeping it inside
+    # this transaction removes the handoff window where a valid plaintext
+    # document existed but no cleanup job had yet been accepted.
+    if ! _schedule_recovery_cleanup "$output_file" "30m"; then
+      log_error "Recovery-kit cleanup could not be scheduled; rolling back published plaintext."
+      exit 1
+    fi
+    completed=true
   ) || return 1
   return 0
 }
@@ -1771,17 +1928,7 @@ offer_recovery_kit_export() {
   log_success "Recovery Kit saved: $recovery_file"
   log_info "Owner: root:root; permissions: 0600; document validation: passed"
   log_info "The recovery-kit body was not written to terminal output."
-
-  if ! _schedule_recovery_cleanup "$recovery_file" "30m"; then
-    log_error "Recovery-kit cleanup could not be scheduled; export is failing closed."
-    if ! _remove_sensitive_file "$recovery_file" || [[ -e "$recovery_file" || -L "$recovery_file" ]]; then
-      log_error "Recovery-kit cleanup scheduling failed and the plaintext file could not be removed: $recovery_file"
-      return 1
-    fi
-    log_info "Unscheduled plaintext recovery kit removed: $recovery_file"
-    return 1
-  fi
-  log_info "Primary plaintext cleanup accepted by ${_RECOVERY_CLEANUP_SCHEDULER} for approximately 30 minutes: $recovery_file"
+  log_info "Primary plaintext cleanup was accepted for approximately 30 minutes: $recovery_file"
   log_info "Routine maintenance also removes eligible leftovers that are at least 30 minutes old."
 
   _offer_email_recovery_kit "$recovery_file" || email_rc=$?
@@ -1797,13 +1944,13 @@ offer_recovery_kit_export() {
       ;;
     2)
       log_info "Encrypted email declined; protected plaintext remains temporarily at: $recovery_file"
-      log_info "Primary cleanup is scheduled for approximately 30 minutes (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "Primary cleanup is scheduled for approximately 30 minutes."
       log_info "If it survives that cleanup, the next routine maintenance run removes eligible leftovers."
       return 0
       ;;
     *)
       log_error "Encrypted email was requested but failed; protected plaintext remains temporarily at: $recovery_file"
-      log_info "Primary cleanup is scheduled for approximately 30 minutes (${_RECOVERY_CLEANUP_SCHEDULER})."
+      log_info "Primary cleanup is scheduled for approximately 30 minutes."
       log_info "If it survives that cleanup, the next routine maintenance run removes eligible leftovers."
       return "$email_rc"
       ;;
@@ -2005,20 +2152,11 @@ PYEOF
 
 _validate_no_placeholders() {
     local plain_yaml="$1"
-
-    local offending
-    local _py_rc=0
-    offending=$(_run_yaml_nodupcheck "$plain_yaml" placeholders 2>/dev/null) || _py_rc=$?
-
-    if [[ $_py_rc -ne 0 ]]; then
-        log_error "Recovery kit contains unconfigured placeholder values for:"
-        while IFS= read -r key; do
-            log_error "  - $key"
-        done <<< "$offending"
-        log_error "Run 'sudo ./setup.sh secrets' or 'sudo ./edit-secrets.sh rotate <field>' to configure these fields first."
+    if ! validate_plaintext_secrets_schema_contract "$plain_yaml"; then
+        log_error "Recovery-kit secret preflight failed the authoritative schema contract."
+        log_error "Configure required values before exporting; optional unset values are allowed and rendered explicitly."
         return 1
     fi
-
     return 0
 }
 

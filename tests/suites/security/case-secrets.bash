@@ -2,7 +2,7 @@
 # Consolidated secrets regression suite.
 set -euo pipefail
 MODE="${VW_TEST_CASE_MODE:-all}"
-case "$MODE" in core|sensitive-cleanup|all) ;; *) printf 'FAIL: unknown VW_TEST_CASE_MODE for case-secrets.bash: %s\n' "$MODE" >&2; exit 2 ;; esac
+case "$MODE" in core|sensitive-cleanup|recovery-kit|all) ;; *) printf 'FAIL: unknown VW_TEST_CASE_MODE for case-secrets.bash: %s\n' "$MODE" >&2; exit 2 ;; esac
 
 # shellcheck source=../../lib/test-root.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
@@ -442,8 +442,8 @@ cf_keys="$(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") 
 grep -Fq 'legacy_keys = {"backup_passphrase"}' "$ROOT/lib/secrets.sh" \
     || fail "legacy backup_passphrase must remain manageable in existing secrets files"
 
-grep -Fq 'schema_keys_for_conditional_group "cloudflare_proxy"' "$ROOT/lib/secrets.sh" \
-    || fail "validate_required_secrets must use the schema conditional-group accessor"
+grep -Fq 'schema_keys_for_conditional_group "$_group"' "$ROOT/lib/secrets.sh" \
+    || fail "runtime-required secret validation must use the generic schema conditional-group accessor"
 
 write_minimal_schema() {
     local file="$1"
@@ -2429,8 +2429,423 @@ else
 fi
 )
 
+check_recovery_kit_schema_truth() {
+  local ROOT="$VW_TEST_REPO_ROOT"
+  local TMP
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' RETURN
+
+  recovery_case() (
+    set -euo pipefail
+    local scenario="$1"
+    local work="$TMP/$scenario"
+    mkdir -p "$work/recovery"
+    export PROJECT_ROOT="$ROOT"
+    export SECRETS_FILE="$work/secrets.yaml"
+    export RECOVERY_KIT_DIR="$work/recovery"
+    export RECOVERY_KIT_REPO_URL="https://example.invalid/VaultWarden-OCI.git"
+    export CLOUDFLARE_PROXY_ENABLED=false
+    export EMAIL_MODE=api
+    [[ "$scenario" != "conditional-required" ]] || export CLOUDFLARE_PROXY_ENABLED=true
+    printf 'fixture\n' >"$SECRETS_FILE"
+    printf 'AGE-SECRET-KEY-1TESTFIXTURE00000000000000000000000000000000000000000000000\n' >"$work/age-key.txt"
+    chmod 0600 "$work/age-key.txt"
+
+    # shellcheck source=../../../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    log_warn() { :; }
+    log_info() { :; }
+    log_debug() { :; }
+    log_success() { :; }
+    resolve_age_key_path() { printf '%s\n' "$work/age-key.txt"; }
+    has_command() {
+      if [[ "$1" == "age" ]]; then
+        [[ "$scenario" != "missing-age" ]]
+        return
+      fi
+      command -v "$1" >/dev/null 2>&1
+    }
+    check_age_key() { [[ "$scenario" != "invalid-age" ]]; }
+    _derive_age_public_key() { printf '%s\n' 'age1testfixture000000000000000000000000000000000000000000000000000'; }
+    ensure_sops_env() { return 0; }
+    cleanup_secrets_environment() { return 0; }
+    _schedule_recovery_cleanup() {
+      _RECOVERY_CLEANUP_SCHEDULER=systemd
+      return 0
+    }
+    schema_validate() {
+      case "$scenario" in missing-schema|broken-tooling) return 1 ;; esac
+      return 0
+    }
+    schema_keys() { printf '%s\n' required_key optional_key; }
+    schema_required_keys() { printf '%s\n' required_key; }
+    schema_keys_for_conditional_group() {
+      case "$1" in
+        cloudflare_proxy) printf '%s\n' optional_key ;;
+        email_api) printf '%s\n' required_key ;;
+        email_smtp) printf '%s\n' required_key ;;
+        *) return 1 ;;
+      esac
+    }
+    schema_field() {
+      local key="$1" field="$2"
+      case "$field:$key" in
+        label:required_key) printf '%s' 'Required Test Secret' ;;
+        label:optional_key) printf '%s' 'Optional Test Secret' ;;
+        required:required_key) printf '%s' true ;;
+        required:optional_key) printf '%s' false ;;
+        placeholder:required_key) printf '%s' CHANGE_ME_REQUIRED ;;
+        placeholder:optional_key) printf '%s' CHANGE_ME_OPTIONAL ;;
+        *) return 1 ;;
+      esac
+    }
+    sops() {
+      local joined="$*"
+      if [[ "$joined" == *'required_key'* ]]; then
+        printf '%s' 'required-secret'
+        return 0
+      fi
+      if [[ "$joined" == *'optional_key'* ]]; then
+        [[ "$scenario" != "sops-failure" ]] || return 42
+        if [[ "$scenario" == "optional-unset" ]]; then
+          printf ''
+        elif [[ "$scenario" == "conditional-required" ]]; then
+          printf '%s' 'CHANGE_ME_OPTIONAL'
+        else
+          printf '%s' 'optional-secret'
+        fi
+        return 0
+      fi
+      return 2
+    }
+
+    if [[ "$scenario" == "render-write-failure" ]]; then
+      _grk_append() {
+        local output_file="$1"
+        shift
+        if [[ "${1:-}" == "printf" && "${2:-}" == '%s\n\n' && "${3:-}" == "optional-secret" ]]; then
+          grep -Fqx '[Optional Test Secret]' "$output_file" || return 97
+          : >"$work/render-write-failure-injected"
+          return 74
+        fi
+        "$@" >>"$output_file"
+      }
+    fi
+
+    if [[ "$scenario" == "post-link-unlink-failure" ]]; then
+      rm() {
+        if [[ "$*" == *'.vaultwarden-recovery-kit.'* && ! -e "$work/post-link-unlink-failed" ]]; then
+          : >"$work/post-link-unlink-failed"
+          return 1
+        fi
+        command rm "$@"
+      }
+    fi
+
+    if [[ "$scenario" == "signal-after-link" ]]; then
+      ln() {
+        command ln "$@" || return
+        : >"$work/signal-after-link-injected"
+        kill -TERM "$BASHPID"
+        return 0
+      }
+    fi
+
+    local target="$work/recovery/kit.txt"
+    case "$scenario" in
+      missing-schema|broken-tooling|sops-failure|invalid-age|missing-age|conditional-required)
+        ! _ork_generate_and_secure "$target" || exit 1
+        [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ;;
+      render-write-failure)
+        ! _ork_generate_and_secure "$target" || exit 1
+        [[ -e "$work/render-write-failure-injected" ]] || exit 1
+        [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+        ;;
+      post-link-unlink-failure)
+        ! _ork_generate_and_secure "$target" || exit 1
+        [[ -e "$work/post-link-unlink-failed" ]] || exit 1
+        [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+        ;;
+      signal-after-link)
+        ! _ork_generate_and_secure "$target" || exit 1
+        [[ -e "$work/signal-after-link-injected" ]] || exit 1
+        [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+        ;;
+      optional-unset)
+        _ork_generate_and_secure "$target"
+        grep -Fqx '<not set: optional>' "$target"
+        [[ "$(grep -Fxc '[Required Test Secret]' "$target")" == 1 ]]
+        [[ "$(grep -Fxc '[Optional Test Secret]' "$target")" == 1 ]]
+        ;;
+      valid)
+        _ork_generate_and_secure "$target"
+        [[ "$(stat -c '%a' "$target")" == 600 ]]
+        [[ "$(grep -Fxc '[Required Test Secret]' "$target")" == 1 ]]
+        [[ "$(grep -Fxc '[Optional Test Secret]' "$target")" == 1 ]]
+        ;;
+      cleanup-failure)
+        _schedule_recovery_cleanup() { return 1; }
+        _offer_email_recovery_kit() { return 99; }
+        ! offer_recovery_kit_export true || exit 1
+        ! find "$work/recovery" -maxdepth 1 -name 'vaultwarden-recovery-kit-*.txt' -print -quit | grep -q .
+        ;;
+      *) exit 2 ;;
+    esac
+  )
+
+  recovery_case missing-schema || fail 'missing schema must abort before publication'
+  recovery_case broken-tooling || fail 'broken schema tooling must abort before publication'
+  recovery_case sops-failure || fail 'SOPS extraction failure must abort before publication'
+  recovery_case invalid-age || fail 'invalid Age private identity must abort before publication'
+  recovery_case missing-age || fail 'missing age binary must abort cryptographic identity validation'
+  recovery_case conditional-required || fail 'runtime-required conditional secret must not render as optional unset'
+  recovery_case render-write-failure || fail 'render write failure after field header must abort before publication'
+  recovery_case post-link-unlink-failure || fail 'post-link staging unlink failure must roll back both publication names'
+  recovery_case signal-after-link || fail 'signal immediately after hard-link publication must roll back both names'
+  recovery_case optional-unset || fail 'optional unset value must render explicitly'
+  recovery_case valid || fail 'valid complete recovery kit must publish exactly once per field'
+  recovery_case cleanup-failure || fail 'cleanup scheduler failure must remove newly published plaintext'
+
+  runtime_required_case() (
+    set -euo pipefail
+    local scenario="$1"
+    local work="$TMP/runtime-$scenario"
+    mkdir -p "$work/recovery"
+    export PROJECT_ROOT="$ROOT"
+    export SECRETS_FILE="$work/secrets.yaml"
+    export RECOVERY_KIT_REPO_URL="https://example.invalid/VaultWarden-OCI.git"
+    export CLOUDFLARE_PROXY_ENABLED=false
+    export PUSH_ENABLED=false
+    export REQUIRE_AUTHENTICATED_INTEGRITY=false
+    export EMAIL_MODE=api
+    case "$scenario" in
+      push-required|push-disabled|push-group-empty)
+        [[ "$scenario" == "push-disabled" ]] || export PUSH_ENABLED=true
+        ;;
+      integrity-required) export REQUIRE_AUTHENTICATED_INTEGRITY=true ;;
+      email-api-required|email-api-smtp-required) export EMAIL_MODE=api ;;
+      email-smtp-required) export EMAIL_MODE=smtp ;;
+      email-auto-api-only|email-auto-smtp-only|email-auto-none|validator-xtrace) export EMAIL_MODE=auto ;;
+      email-default-smtp-only) unset EMAIL_MODE ;;
+      *) exit 2 ;;
+    esac
+    printf 'fixture\n' >"$SECRETS_FILE"
+    printf 'AGE-SECRET-KEY-1TESTFIXTURE00000000000000000000000000000000000000000000000\n' >"$work/age-key.txt"
+    chmod 0600 "$work/age-key.txt"
+
+    # shellcheck source=../../../lib/secrets.sh
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    log_warn() { :; }
+    log_info() { :; }
+    log_debug() { :; }
+    log_success() { :; }
+    resolve_age_key_path() { printf '%s\n' "$work/age-key.txt"; }
+    has_command() { [[ "$1" == age ]] || command -v "$1" >/dev/null 2>&1; }
+    check_age_key() { return 0; }
+    _derive_age_public_key() { printf '%s\n' 'age1testfixture000000000000000000000000000000000000000000000000000'; }
+    ensure_sops_env() { return 0; }
+    cleanup_secrets_environment() { return 0; }
+    _schedule_recovery_cleanup() { _RECOVERY_CLEANUP_SCHEDULER=systemd; return 0; }
+    schema_validate() { return 0; }
+    schema_required_keys() { printf '%s\n' required_key; }
+    schema_keys() {
+      printf '%s\n' required_key email_api_token smtp_password
+      case "$scenario" in
+        push-required|push-disabled) printf '%s\n' push_installation_id push_installation_key ;;
+        integrity-required) printf '%s\n' file_integrity_hmac_key ;;
+        push-group-empty|email-api-required|email-api-smtp-required|email-smtp-required|email-auto-api-only|email-auto-smtp-only|email-auto-none|validator-xtrace|email-default-smtp-only) ;;
+      esac
+    }
+    schema_keys_for_conditional_group() {
+      case "$1" in
+        push)
+          [[ "$scenario" != "push-group-empty" ]] || return 0
+          printf '%s\n' push_installation_id push_installation_key
+          ;;
+        authenticated_integrity) printf '%s\n' file_integrity_hmac_key ;;
+        email_api) printf '%s\n' email_api_token ;;
+        email_smtp) printf '%s\n' smtp_password ;;
+        *) return 1 ;;
+      esac
+    }
+    schema_field() {
+      local key="$1" field="$2"
+      case "$field:$key" in
+        label:required_key) printf '%s' 'Required Test Secret' ;;
+        label:push_installation_id) printf '%s' 'Push Installation ID' ;;
+        label:push_installation_key) printf '%s' 'Push Installation Key' ;;
+        label:file_integrity_hmac_key) printf '%s' 'Backup Integrity HMAC Key' ;;
+        label:email_api_token) printf '%s' 'Email API Token' ;;
+        label:smtp_password) printf '%s' 'SMTP Password' ;;
+        placeholder:required_key) printf '%s' CHANGE_ME_REQUIRED ;;
+        placeholder:push_installation_id|placeholder:push_installation_key) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
+        placeholder:file_integrity_hmac_key) printf '%s' CHANGE_ME_FILE_INTEGRITY_HMAC_KEY ;;
+        placeholder:email_api_token|placeholder:smtp_password) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+        *) return 1 ;;
+      esac
+    }
+    schema_placeholder_for_key() { schema_field "$1" placeholder; }
+    sops() {
+      local joined="$*"
+      case "$joined" in
+        *required_key*) printf '%s' required-secret ;;
+        *push_installation_id*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
+        *push_installation_key*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
+        *file_integrity_hmac_key*) printf '%s' CHANGE_ME_FILE_INTEGRITY_HMAC_KEY ;;
+        *email_api_token*)
+          case "$scenario" in
+            email-api-required|email-auto-smtp-only|email-auto-none|email-default-smtp-only) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+            *) printf '%s' configured-email-api-token ;;
+          esac
+          ;;
+        *smtp_password*)
+          case "$scenario" in
+            email-api-smtp-required|email-smtp-required|email-auto-api-only|email-auto-none) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
+            validator-xtrace) printf '%s' REQUIRED_VALIDATOR_XTRACE_SECRET_DO_NOT_LEAK ;;
+            *) printf '%s' configured-smtp-password ;;
+          esac
+          ;;
+        *) return 2 ;;
+      esac
+    }
+
+    local target="$work/recovery/kit.txt"
+    if [[ "$scenario" == "validator-xtrace" ]]; then
+      local trace_output trace_rc
+      set +e
+      trace_output="$({ set -x; validate_required_secrets "$SECRETS_FILE"; } 2>&1)"
+      trace_rc=$?
+      set -e
+      [[ "$trace_rc" == 0 ]] || exit 1
+      [[ "$trace_output" != *'REQUIRED_VALIDATOR_XTRACE_SECRET_DO_NOT_LEAK'* ]] || exit 1
+      return 0
+    fi
+
+    case "$scenario" in
+      push-disabled)
+        _ork_generate_and_secure "$target" || exit 1
+        [[ -f "$target" ]] || exit 1
+        local optional_count
+        optional_count=$(grep -Fxc '<not set: optional>' "$target" 2>/dev/null || true)
+        [[ "$optional_count" == 2 ]] || exit 1
+        return 0
+        ;;
+      email-auto-smtp-only|email-default-smtp-only)
+        _ork_generate_and_secure "$target" || exit 1
+        [[ -f "$target" ]] || exit 1
+        [[ "$(grep -Fxc '[Email API Token]' "$target")" == 1 ]] || exit 1
+        [[ "$(grep -Fxc '[SMTP Password]' "$target")" == 1 ]] || exit 1
+        local email_optional_count
+        email_optional_count=$(grep -Fxc '<not set: optional>' "$target" 2>/dev/null || true)
+        [[ "$email_optional_count" == 1 ]] || exit 1
+        return 0
+        ;;
+    esac
+
+    ! _ork_generate_and_secure "$target" || exit 1
+    [[ ! -e "$target" && ! -L "$target" ]] || exit 1
+    ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+  )
+
+  runtime_required_case push-required || fail 'PUSH_ENABLED=true must reject inactive push credentials before publication'
+  runtime_required_case push-disabled || fail 'disabled push credentials must remain genuinely optional'
+  runtime_required_case push-group-empty || fail 'active runtime requirement group must not silently resolve to zero schema keys'
+  runtime_required_case integrity-required || fail 'authenticated-integrity policy must reject an inactive HMAC key before publication'
+  runtime_required_case email-api-required || fail 'EMAIL_MODE=api must reject an inactive API token before publication'
+  runtime_required_case email-api-smtp-required || fail 'EMAIL_MODE=api must still require the canonical Postfix SMTP secret before publication'
+  runtime_required_case email-smtp-required || fail 'EMAIL_MODE=smtp must reject an inactive SMTP password before publication'
+  runtime_required_case email-auto-api-only || fail 'EMAIL_MODE=auto must reject API-only recovery state because the canonical stack still starts Postfix'
+  runtime_required_case email-auto-smtp-only || fail 'EMAIL_MODE=auto must allow SMTP-only recovery state with the API credential optional'
+  runtime_required_case email-auto-none || fail 'EMAIL_MODE=auto must reject recovery publication when the stack-level SMTP secret is inactive'
+  runtime_required_case validator-xtrace || fail 'required-secret validation must not expose decrypted values through Bash xtrace'
+  runtime_required_case email-default-smtp-only || fail 'missing EMAIL_MODE must inherit auto semantics with the stack-level SMTP secret required'
+
+  (
+    set -euo pipefail
+    export PROJECT_ROOT="$ROOT" SECRETS_FILE="$TMP/list-keys-xtrace.yaml"
+    printf 'fixture\n' >"$SECRETS_FILE"
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    log_warn() { :; }
+    log_debug() { :; }
+    ensure_sops_env() { return 0; }
+    cleanup_secrets_environment() { return 0; }
+    sops() { printf '%s\n' 'visible_key: LIST_KEYS_XTRACE_SECRET_DO_NOT_LEAK'; }
+    local trace_output trace_rc
+    set +e
+    trace_output="$({ set -x; list_secret_keys "$SECRETS_FILE"; } 2>&1)"
+    trace_rc=$?
+    set -e
+    [[ "$trace_rc" == 0 ]]
+    [[ "$trace_output" == *'visible_key'* ]]
+    [[ "$trace_output" != *'LIST_KEYS_XTRACE_SECRET_DO_NOT_LEAK'* ]]
+  ) || fail 'list_secret_keys must not expose decrypted values through Bash xtrace'
+
+  (
+    set -euo pipefail
+    export PROJECT_ROOT="$ROOT"
+    source "$ROOT/lib/schema.sh"
+    [[ "$(schema_keys_for_conditional_group push)" == $'push_installation_id\npush_installation_key' ]]
+    [[ "$(schema_keys_for_conditional_group authenticated_integrity)" == 'file_integrity_hmac_key' ]]
+    [[ "$(schema_keys_for_conditional_group email_api)" == 'email_api_token' ]]
+    [[ "$(schema_keys_for_conditional_group email_smtp)" == 'smtp_password' ]]
+  ) || fail 'configured recovery requirement membership must remain schema-owned'
+
+  grep -Fq 'RELAYHOST_PASSWORD_FILE=/run/secrets/smtp_password' "$ROOT/docker-compose.yml.example" \
+    || fail 'canonical Postfix service no longer consumes the smtp_password file secret'
+  grep -Fq 'file: /run/vaultwarden-oci/secrets/smtp_password' "$ROOT/docker-compose.yml.example" \
+    || fail 'canonical Compose smtp_password file mapping changed'
+  grep -Fq 'cp "$compose_template" "$temp_compose"' "$ROOT/utilities/setup-env.sh" \
+    || fail 'setup-env no longer installs the canonical Compose template as-is'
+  grep -Fq 'docker compose "${compose_args[@]}"' "$ROOT/startup.sh" \
+    || fail 'startup no longer starts the full canonical Compose service set'
+
+  (
+    set -euo pipefail
+    export PROJECT_ROOT="$ROOT" SECRETS_FILE="$TMP/secrets.yaml"
+    printf 'fixture\n' >"$SECRETS_FILE"
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    schema_required_keys() { printf '%s\n' required_key; }
+    schema_keys_for_conditional_group() { return 1; }
+    CLOUDFLARE_PROXY_ENABLED=true
+    ! _schema_required_runtime_keys
+  ) || fail 'authoritative schema conditional accessor failure must be fatal'
+
+  (
+    set -euo pipefail
+    export PROJECT_ROOT="$ROOT" SECRETS_FILE="$TMP/secrets.yaml"
+    source "$ROOT/lib/secrets.sh"
+    log_error() { :; }
+    local duplicate="$TMP/duplicate.txt" missing="$TMP/missing.txt"
+    cat >"$duplicate" <<'EOF'
+AGE-SECRET-KEY-1TEST
+[Required Test Secret]
+[Required Test Secret]
+[Optional Test Secret]
+END OF RECOVERY KIT
+EOF
+    cat >"$missing" <<'EOF'
+AGE-SECRET-KEY-1TEST
+[Required Test Secret]
+END OF RECOVERY KIT
+EOF
+    ! _validate_recovery_kit_document "$duplicate" $'Required Test Secret\nOptional Test Secret'
+    ! _validate_recovery_kit_document "$missing" $'Required Test Secret\nOptional Test Secret'
+  ) || fail 'duplicate/missing rendered recovery fields must fail validation'
+
+  pass 'recovery-kit schema truth and fail-closed publication'
+}
+
 case "$MODE" in
     core)
+        check_recovery_kit_schema_truth
         check_secrets_cli_help
         check_schema_dependency_contracts
         check_crowdsec_worker_post_edit_apply
@@ -2438,10 +2853,14 @@ case "$MODE" in
         check_key_rotate_live_generation_transaction
         check_key_rotate_full_entrypoint_cleanup_contract
         ;;
+    recovery-kit)
+        check_recovery_kit_schema_truth
+        ;;
     sensitive-cleanup)
         check_sensitive_cleanup_contracts
         ;;
     all)
+        check_recovery_kit_schema_truth
         check_secrets_cli_help
         check_schema_dependency_contracts
         check_crowdsec_worker_post_edit_apply
