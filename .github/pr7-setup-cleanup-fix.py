@@ -65,6 +65,78 @@ if anchor not in t:
     raise SystemExit('runtime workspace test anchor not found')
 t = t.replace(anchor, anchor + checks, 1)
 
+behavior_anchor = '''# Direct configure uses its installed TERM trap to clean the owned workspace.\n'''
+behavior_checks = r'''# Known GUI editors must refuse unsafe forking invocations and accept only
+# editor-specific blocking flags. Unknown foreground editors remain allowed.
+editor_helper_source="$(sed -n '/^_check_editor_forks() {$/,/^}$/p' utilities/secrets-edit.sh)"
+[[ -n "$editor_helper_source" ]] || fail "editor wait helper could not be extracted"
+EDITOR_HELPER_SOURCE="$editor_helper_source" bash -s <<'EDITOR_WAIT_TEST' \
+  || fail "editor blocking behavior regression failed"
+set -euo pipefail
+log_error() { :; }
+eval "$EDITOR_HELPER_SOURCE"
+EDITOR_CMD=(code)
+! _check_editor_forks
+EDITOR_CMD=(code -f)
+! _check_editor_forks
+EDITOR_CMD=(code --wait)
+_check_editor_forks
+EDITOR_CMD=(kate -f)
+! _check_editor_forks
+EDITOR_CMD=(kate --block)
+_check_editor_forks
+EDITOR_CMD=(gvim --nofork)
+_check_editor_forks
+EDITOR_CMD=(vim)
+_check_editor_forks
+EDITOR_WAIT_TEST
+
+# Break-glass creation must roll the new account back non-interactively when
+# expiry scheduling fails. This isolates the creation function and mocks all
+# host mutations while retaining the production rollback branch.
+breakglass_create_source="$(
+  sed -n '/^    create_breakglass_user() {$/,/^    }$/p' utilities/setup-secrets.sh \
+    | sed 's/^    //'
+)"
+[[ -n "$breakglass_create_source" ]] || fail "break-glass creation helper could not be extracted"
+BREAKGLASS_CREATE_SOURCE="$breakglass_create_source" bash -s <<'BREAKGLASS_ROLLBACK_TEST' \
+  || fail "break-glass scheduling-failure rollback regression failed"
+set -euo pipefail
+fixture="$(mktemp -d)"
+trap '/bin/rm -rf -- "$fixture"' EXIT
+rollback_marker="$fixture/rollback.arg"
+DRY_RUN=false
+FORCE=false
+BREAKGLASS_USER=vw-test
+BREAKGLASS_AUTO_EXPIRY_HOURS=2
+PROJECT_ROOT=/tmp
+COLOR_RED="" COLOR_RESET="" COLOR_YELLOW="" COLOR_GREEN=""
+log_info() { :; }
+log_warn() { :; }
+log_error() { :; }
+log_success() { :; }
+check_user_exists() { return 1; }
+generate_secure_random() { printf '%s' 'test-password-value'; }
+useradd() { return 0; }
+chpasswd() { cat >/dev/null; return 0; }
+create_sudoers_config() { return 0; }
+create_secure_file() { return 0; }
+schedule_auto_cleanup() { return 1; }
+remove_breakglass_user() { printf '%s' "${1:-}" > "$rollback_marker"; return 0; }
+eval "$BREAKGLASS_CREATE_SOURCE"
+set +e
+create_breakglass_user >/dev/null 2>&1
+rc=$?
+set -e
+(( rc != 0 ))
+[[ "$(cat "$rollback_marker")" == '--force' ]]
+BREAKGLASS_ROLLBACK_TEST
+
+'''
+if behavior_anchor not in t:
+    raise SystemExit('behavioral test insertion anchor not found')
+t = t.replace(behavior_anchor, behavior_checks + behavior_anchor, 1)
+
 t = t.replace(
 '''direct_signal_marker="$direct_signal_fixture/workspace.path"\ndirect_runtime_tmp="$direct_signal_fixture/runtime-tmp"\n''',
 '''direct_signal_marker="$direct_signal_fixture/workspace.path"\ndirect_shared_marker="$direct_signal_fixture/shared-workspace.path"\ndirect_runtime_tmp="$direct_signal_fixture/runtime-tmp"\n''',
