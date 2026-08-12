@@ -4,7 +4,7 @@ from pathlib import Path
 def replace_function(path, name, body):
     p = Path(path)
     lines = p.read_text().splitlines(True)
-    start = next((i for i, line in enumerate(lines)) if line.startswith(name + '() {'))
+    start = next(i for i, line in enumerate(lines) if line.startswith(name + '() {'))
     end = next(i for i in range(start + 1, len(lines)) if lines[i].rstrip('\n') == '}')
     lines[start:end + 1] = [body.rstrip() + '\n']
     p.write_text(''.join(lines))
