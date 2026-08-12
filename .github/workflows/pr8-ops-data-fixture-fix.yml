@@ -51,6 +51,14 @@ jobs:
               raise SystemExit(f'startup-hardening Docker stub expected once, got {text.count(old_stub)}')
           p.write_text(text.replace(old_stub, new_stub))
 
+          p = Path('tests/suites/operations/case-email-queue.bash')
+          text = p.read_text()
+          old = "if [[ \"${1:-}\" == compose && \"${2:-}\" == version ]]; then\n    printf 'Docker Compose version test\\n'\n    exit 0\nfi\n"
+          new = "if [[ \"${1:-}\" == compose && \"${2:-}\" == version ]]; then\n    if [[ \"${3:-}\" == --short ]]; then\n        printf '2.39.2\\n'\n    else\n        printf 'Docker Compose version v2.39.2\\n'\n    fi\n    exit 0\nfi\n"
+          if text.count(old) != 1:
+              raise SystemExit(f'email queue Compose version fake expected once, got {text.count(old)}')
+          p.write_text(text.replace(old, new))
+
           p = Path('tests/suites/data-protection/case-backup.bash')
           text = p.read_text()
           old = 'SOPS_AGE_KEY_FILE=$age_key\n'
@@ -64,8 +72,8 @@ jobs:
               raise SystemExit(f'backup effective exclusion comparison expected once, got {text.count(old)}')
           p.write_text(text.replace(old, new))
           PY
-          bash -n tests/suites/operations/case-lifecycle.bash tests/suites/data-protection/case-backup.bash
-          shellcheck -x --severity=warning tests/suites/operations/case-lifecycle.bash tests/suites/data-protection/case-backup.bash
+          bash -n tests/suites/operations/case-lifecycle.bash tests/suites/operations/case-email-queue.bash tests/suites/data-protection/case-backup.bash
+          shellcheck -x --severity=warning tests/suites/operations/case-lifecycle.bash tests/suites/operations/case-email-queue.bash tests/suites/data-protection/case-backup.bash
           ./tests/run-tests.sh operations
           ./tests/run-tests.sh data-protection
       - name: Commit fixture updates and remove helper workflow
