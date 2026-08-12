@@ -16,7 +16,8 @@ jobs:
       - name: Apply scoped patch
         run: |
           sed -i 's/            _run install -m 600 -o root -g root/            install -m 600 -o root -g root/' .github/pr8_apply.py
-          sed -i 's/log_success \\"Installed age key: \$AGE_KEY_DEST\\"/log_success \\"Installed age key: \$AGE_KEY_DEST (root:root 600)\\"/' .github/pr8_apply.py
+          sed -i '/^[[:space:]]*fix_known_path_permissions "$AGE_KEY_DEST"$/d' utilities/setup-systemd.sh
+          sed -i 's/Installed age key: $AGE_KEY_DEST (root:root 600)/Installed age key: $AGE_KEY_DEST/' utilities/setup-systemd.sh
           python3 .github/pr8_apply.py
           rm -f .github/workflows/pr8-apply-2.yml
       - name: Validate changed shell syntax
