@@ -159,10 +159,17 @@ _CS_LAPI_COHORT_UIDS=()
 _CS_LAPI_COHORT_GIDS=()
 
 _cs_resolve_lapi_port() {
-    grep -oP '(?<=listen_uri:\s{0,10}127\.0\.0\.1:)\d+' \
-        "${_CS_LAPI_COHORT_ROOT}/config.yaml" 2>/dev/null \
-        | head -1 \
-        || echo "8090"
+    local port
+    if port="$(crowdsec_resolve_lapi_port "${_CS_LAPI_COHORT_ROOT}/config.yaml")"; then
+        printf '%s\n' "$port"
+        return 0
+    fi
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        printf '%s\n' "8090"
+        return 0
+    fi
+    log_error "CrowdSec LAPI listen_uri is missing or invalid: ${_CS_LAPI_COHORT_ROOT}/config.yaml"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -172,14 +179,19 @@ _cs_resolve_lapi_port() {
 _cs_find_free_port() {
     local base_port="${1:-8090}"
     local port="$base_port"
-    while ss -tlnp 2>/dev/null | grep -q ":${port}[[:space:]]"; do
-        (( port++ ))
-        if (( port > 65000 )); then
-            echo "8090"   # safety fallback — should never happen
-            return
+    if [[ ! "$base_port" =~ ^[0-9]+$ ]] || (( base_port < 1 || base_port > 65535 )); then
+        log_error "Invalid CrowdSec LAPI base port: ${base_port}"
+        return 1
+    fi
+    while (( port <= 65535 )); do
+        if ! ss -tlnp 2>/dev/null | grep -q ":${port}[[:space:]]"; then
+            printf '%s\n' "$port"
+            return 0
         fi
+        (( port++ )) || true
     done
-    echo "$port"
+    log_error "No free TCP port is available on 127.0.0.1 from ${base_port} through 65535."
+    return 1
 }
 
 _cs_lapi_member_port() {
@@ -415,7 +427,10 @@ _cs_start_service() {
         log_warn "Pre-flight: port ${_lapi_port} is already in use before CrowdSec start."
         _cs_diagnose_port "${_lapi_port}"
         local _new_port
-        _new_port="$(_cs_find_free_port 8090)"
+        if ! _new_port="$(_cs_find_free_port 8090)"; then
+            log_error "No free CrowdSec LAPI port is available; refusing to guess."
+            return 1
+        fi
         _cs_fix_port_conflict "${_lapi_port}" "${_new_port}" || return 1
         _lapi_port="$_new_port"
         log_info "Pre-flight port reassignment complete: LAPI will use ${_lapi_port}."
@@ -437,7 +452,10 @@ _cs_start_service() {
         _cs_diagnose_port "${_lapi_port}"
 
         local _new_port
-        _new_port="$(_cs_find_free_port 8090)"
+        if ! _new_port="$(_cs_find_free_port 8090)"; then
+            log_error "No free CrowdSec LAPI port is available; refusing to guess."
+            return 1
+        fi
         _cs_fix_port_conflict "${_lapi_port}" "${_new_port}" || return 1
 
         systemctl reset-failed crowdsec 2>/dev/null || true
@@ -1850,14 +1868,14 @@ if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
     log_warn "Skipping crowdsec-cloudflare-worker-bouncer setup — CLOUDFLARE_PROXY_ENABLED is not 'true'."
     log_warn "Set CLOUDFLARE_PROXY_ENABLED=true in .env and re-run this script to enable the Cloudflare Workers bouncer."
 elif [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would install crowdsec-cloudflare-worker-bouncer (apt -> tarball -> go source fallback)"
+    log_info "[DRY RUN] Would install crowdsec-cloudflare-worker-bouncer from the configured CrowdSec package repository"
 else
     if ! cscli bouncers list 2>/dev/null | grep -q 'cloudflare-worker-bouncer' || [[ "$FORCE" == "true" ]]; then
         log_info "Updating CrowdSec hub..."
         cscli hub update || true
         log_info "Cloudflare Workers bouncer registration will be reconciled with its configured key in Phase 5."
     else
-        log_info "CrowdSec Cloudflare Workers bouncer already registered — skipping."
+        log_info "CrowdSec Cloudflare Workers bouncer already registered — skipping registration changes."
     fi
 
     if [[ ! -x "$_CF_WORKER_BOUNCER_BIN" ]] || [[ "$FORCE" == "true" ]]; then
@@ -1865,18 +1883,13 @@ else
     fi
 
     if [[ "$_CF_WORKER_BOUNCER_NEEDS_INSTALL" == "true" ]]; then
-        log_info "Cloudflare Workers bouncer binary not found — attempting installation..."
+        log_info "Installing Cloudflare Workers bouncer from the configured CrowdSec package repository..."
 
-        _installed_via_deb=false
-
-        # Pre-create a minimal stub config so the package postinst script does
-        # not abort trying to open a non-existent config file. Phase 6 overwrites
-        # this with the real values.
         if [[ ! -f /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml ]]; then
             mkdir -p /etc/crowdsec/bouncers
-            cat > /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml <<'STUB'
+            cat > /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml <<STUB
 crowdsec_config:
-  lapi_url: "http://127.0.0.1:8090/"
+  lapi_url: "http://127.0.0.1:${_LAPI_PORT}/"
   lapi_key: "STUB_KEY"
 update_frequency: "10s"
 log_mode: "stdout"
@@ -1885,144 +1898,33 @@ STUB
             log_info "Wrote stub CF bouncer config to satisfy dpkg postinst."
         fi
 
-        log_info "Attempting apt install of crowdsec-cloudflare-worker-bouncer..."
-        if operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        _worker_pkg="crowdsec-cloudflare-worker-bouncer"
+        if [[ -n "$CF_WORKER_BOUNCER_VERSION" ]]; then
+            _worker_pkg="${_worker_pkg}=${CF_WORKER_BOUNCER_VERSION#v}"
+            log_info "CF Workers bouncer package version pinned: ${CF_WORKER_BOUNCER_VERSION#v}"
+        else
+            log_info "CF Workers bouncer package version: using configured CrowdSec repository candidate"
+        fi
+
+        if ! operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
             -o Dpkg::Options::=--force-confdef \
             -o Dpkg::Options::=--force-confold \
-            crowdsec-cloudflare-worker-bouncer; then
-            log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
-            _installed_via_deb=true
-            _apt_bin="$(command -v crowdsec-cloudflare-worker-bouncer 2>/dev/null || true)"
-            if [[ -n "$_apt_bin" && "$_apt_bin" != "$_CF_WORKER_BOUNCER_BIN" ]]; then
-                ln -sf "$_apt_bin" "$_CF_WORKER_BOUNCER_BIN"
-                log_info "Symlinked ${_apt_bin} -> ${_CF_WORKER_BOUNCER_BIN} for path consistency."
-            fi
-        else
-            log_warn "apt install failed — falling back to GitHub release tarball."
+            "$_worker_pkg"; then
+            log_error "Failed to install crowdsec-cloudflare-worker-bouncer from the configured CrowdSec package repository."
+            log_error "Resolve the package repository/version issue and re-run this setup; no archive/source fallback is attempted."
+            exit 1
         fi
 
-        if [[ "$_installed_via_deb" == "false" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
-            _host_arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-            if ! _arch="$(_cf_worker_bouncer_release_arch "$_host_arch")"; then
-                log_warn "No GitHub release tarball mapping for architecture '${_host_arch}' — skipping tarball fallback."
-                _arch=""
-            fi
+        _apt_bin="$(command -v crowdsec-cloudflare-worker-bouncer 2>/dev/null || true)"
+        if [[ -z "$_apt_bin" ]]; then
+            log_error "crowdsec-cloudflare-worker-bouncer package installed but its executable was not found in PATH."
+            exit 1
         fi
-
-        if [[ "$_installed_via_deb" == "false" && -n "${_arch:-}" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
-            if [[ -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
-                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/latest"
-                log_info "CF Workers bouncer version: fetching latest from GitHub."
-            else
-                _ver="${CF_WORKER_BOUNCER_VERSION#v}"   # strip leading 'v' if present
-                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/tags/v${_ver}"
-                log_info "CF Workers bouncer version pinned: v${_ver}"
-            fi
-
-            _release_json="$(curl -fsSL "$_gh_api" 2>/dev/null)" || {
-                log_warn "Failed to query GitHub releases for cs-cloudflare-worker-bouncer."
-                _release_json=""
-            }
-
-            if [[ -n "$_release_json" ]]; then
-                _download_url="$(printf '%s' "$_release_json" | \
-                    grep -oP '"browser_download_url":\s*"\K[^"]+' | \
-                    grep "linux-${_arch}" | \
-                    grep '\.tgz$' | \
-                    grep -v '\.sha256' | \
-                    head -1 || true)"
-                _sha256_url="$(printf '%s' "$_release_json" | \
-                    grep -oP '"browser_download_url":\s*"\K[^"]+' | \
-                    grep "linux-${_arch}" | \
-                    grep '\.tgz\.sha256$' | \
-                    head -1 || true)"
-
-                if [[ -n "$_download_url" ]]; then
-                    _tmpdir="$(mktemp -d -p /tmp cs-cf-worker.XXXXXX)"
-                    _tmptar="${_tmpdir}/bouncer.tgz"
-
-                    log_info "Downloading: $_download_url"
-                    if curl -fsSL "$_download_url" -o "$_tmptar"; then
-                        if [[ -n "$_sha256_url" ]]; then
-                            _expected_sha="$(curl -fsSL "$_sha256_url" 2>/dev/null | awk '{print $1}' || true)"
-                            _actual_sha="$(sha256sum "$_tmptar" | awk '{print $1}')"
-                            if [[ -n "$_expected_sha" && "$_actual_sha" != "$_expected_sha" ]]; then
-                                log_error "SHA256 mismatch — aborting tarball install."
-                                rm -rf "$_tmpdir"
-                                _tmpdir=""
-                            fi
-                        fi
-
-                        if [[ -n "$_tmpdir" && -f "$_tmptar" ]]; then
-                            tar xzf "$_tmptar" -C "$_tmpdir"
-                            rm -f "$_tmptar"
-
-                            _install_sh="$(find "$_tmpdir" -maxdepth 2 -name 'install.sh' | head -1 || true)"
-
-                            if [[ -n "$_install_sh" && -f "$_install_sh" ]]; then
-                                _install_dir="$(dirname "$_install_sh")"
-                                log_info "Running bundled installer from: $_install_dir"
-                                if (cd "$_install_dir" && bash install.sh); then
-                                    log_success "Installed cs-cloudflare-worker-bouncer via tarball install.sh."
-                                else
-                                    log_warn "Bundled install.sh failed — attempting manual binary extraction."
-                                    _bin_path="$(find "$_tmpdir" -maxdepth 3 -type f \
-                                        -name 'crowdsec-cloudflare-worker-bouncer' \
-                                        ! -name '*.sh' | head -1 || true)"
-                                    if [[ -x "$_bin_path" ]]; then
-                                        install -m 755 -o root -g root "$_bin_path" "$_CF_WORKER_BOUNCER_BIN"
-                                        log_success "Copied binary to ${_CF_WORKER_BOUNCER_BIN} (manual fallback)."
-                                    fi
-                                fi
-                            else
-                                log_warn "No install.sh found in tarball — extracting binary directly."
-                                _bin_path="$(find "$_tmpdir" -maxdepth 3 -type f \
-                                    -name 'crowdsec-cloudflare-worker-bouncer' \
-                                    ! -name '*.sh' | head -1 || true)"
-                                if [[ -x "$_bin_path" ]]; then
-                                    install -m 755 -o root -g root "$_bin_path" "$_CF_WORKER_BOUNCER_BIN"
-                                    log_success "Copied binary to ${_CF_WORKER_BOUNCER_BIN}."
-                                fi
-                            fi
-                        fi
-
-                        [[ -n "${_tmpdir:-}" ]] && rm -rf "$_tmpdir"
-                    else
-                        log_warn "Failed to download tarball from GitHub."
-                        rm -rf "$_tmpdir"
-                    fi
-                else
-                    log_warn "No linux-${_arch} tarball asset found in latest GitHub release."
-                fi
-            fi
+        if [[ "$_apt_bin" != "$_CF_WORKER_BOUNCER_BIN" ]]; then
+            ln -sf "$_apt_bin" "$_CF_WORKER_BOUNCER_BIN"
+            log_info "Symlinked ${_apt_bin} -> ${_CF_WORKER_BOUNCER_BIN} for path consistency."
         fi
-
-        if [[ "$_installed_via_deb" == "false" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
-            if command -v go >/dev/null 2>&1; then
-                log_info "Attempting Go source build for crowdsec-cloudflare-worker-bouncer..."
-                if [[ -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
-                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@latest"
-                else
-                    _ver="${CF_WORKER_BOUNCER_VERSION#v}"
-                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@v${_ver}"
-                fi
-                _tmpgobin="$(mktemp -d -p /tmp cs-cf-worker-go.XXXXXX)"
-                if GOBIN="$_tmpgobin" go install "$_go_pkg_ref" 2>/dev/null; then
-                    if [[ -x "$_tmpgobin/crowdsec-cloudflare-worker-bouncer" ]]; then
-                        install -m 755 -o root -g root \
-                            "$_tmpgobin/crowdsec-cloudflare-worker-bouncer" \
-                            "$_CF_WORKER_BOUNCER_BIN"
-                        log_success "Built and installed crowdsec-cloudflare-worker-bouncer from source."
-                    fi
-                else
-                    log_warn "Go source build failed for crowdsec-cloudflare-worker-bouncer."
-                fi
-                rm -rf "$_tmpgobin"
-            else
-                log_warn "Go toolchain not installed; cannot build from source."
-            fi
-        fi
-
+        log_success "Installed crowdsec-cloudflare-worker-bouncer via the CrowdSec package repository."
     else
         log_info "Cloudflare Workers bouncer binary already present at ${_CF_WORKER_BOUNCER_BIN}."
     fi
