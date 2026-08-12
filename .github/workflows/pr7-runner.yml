@@ -36,7 +36,7 @@ jobs:
           sudo env VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
           sudo env VW_TEST_CASE_MODE=core bash tests/suites/security/case-secrets.bash
       - name: Full suite
-        run: sudo ./tests/run-tests.sh all
+        run: ./tests/run-tests.sh all
       - name: Commit validated changes
         run: |
           git config user.name github-actions[bot]
