@@ -1,0 +1,191 @@
+name: PR7 clean-pass follow-up
+on:
+  pull_request:
+    branches:
+      - delta
+permissions:
+  contents: write
+jobs:
+  finalize:
+    if: github.head_ref == 'pr7-sensitive-workspace-sops-hardening'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pr7-sensitive-workspace-sops-hardening
+          fetch-depth: 0
+      - name: Build corrected clean commit locally
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Accurate runtime-secret hardening documentation.
+          replace_once(
+              'lib/secrets.sh',
+              '''#   1. SOPS decryption is written to a mktemp cache inside docker_dir (mode\n#      700, not world-listable /tmp) to eliminate the TOCTOU window on\n#      shared hosts.\n''',
+              '''#   1. SOPS decryption is written only inside a verified volatile root-only\n#      workspace, never into docker_dir or a generic disk-backed /tmp path.\n''',
+              'runtime export hardening comment',
+          )
+
+          p = Path('utilities/setup-secrets.sh')
+          t = p.read_text()
+
+          # After useradd succeeds, every later creation failure must use the same
+          # truthful forced rollback path instead of unchecked userdel calls.
+          replace_old = '''        if ! chpasswd <<< "${BREAKGLASS_USER}:${password}"; then\n            log_error "Failed to set user password"\n            userdel -r "$BREAKGLASS_USER" 2>/dev/null || true\n            return 1\n        fi\n\n        if ! create_sudoers_config; then\n            log_error "Failed to install sudoers configuration"\n            userdel -r "$BREAKGLASS_USER" 2>/dev/null || true\n            return 1\n        fi\n'''
+          replace_new = '''        if ! chpasswd <<< "${BREAKGLASS_USER}:${password}"; then\n            log_error "Failed to set user password; rolling back the newly created account"\n            if ! remove_breakglass_user --force >/dev/null 2>&1; then\n                log_error "CRITICAL: password setup failed and automatic account rollback also failed."\n            fi\n            return 1\n        fi\n\n        if ! create_sudoers_config; then\n            log_error "Failed to install sudoers configuration; rolling back the newly created account"\n            if ! remove_breakglass_user --force >/dev/null 2>&1; then\n                log_error "CRITICAL: sudoers setup failed and automatic account rollback also failed."\n            fi\n            return 1\n        fi\n'''
+          if t.count(replace_old) != 1:
+              raise SystemExit('post-useradd rollback block not found exactly once')
+          t = t.replace(replace_old, replace_new, 1)
+
+          # Removal must still clean stale break-glass artifacts if the Unix account
+          # was already removed out of band.
+          old = '''        if ! check_user_exists; then\n            log_info "User does not exist: $BREAKGLASS_USER"\n            return 0\n        fi\n\n        if [[ "$FORCE" != "true" && "$force_remove" != "true" ]]; then\n'''
+          new = '''        local user_present=true\n        if ! check_user_exists; then\n            user_present=false\n            log_info "User does not exist: $BREAKGLASS_USER; cleaning any stale break-glass artifacts"\n        fi\n\n        if [[ "$user_present" == "true" && "$FORCE" != "true" && "$force_remove" != "true" ]]; then\n'''
+          if t.count(old) != 1:
+              raise SystemExit('break-glass early-return block not found exactly once')
+          t = t.replace(old, new, 1)
+
+          old = '''        if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then\n            log_success "User removed: $BREAKGLASS_USER"\n        else\n            log_error "Failed to remove break-glass user: $BREAKGLASS_USER"\n            removal_failed=true\n        fi\n'''
+          new = '''        if [[ "$user_present" == "true" ]]; then\n            if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then\n                log_success "User removed: $BREAKGLASS_USER"\n            else\n                log_error "Failed to remove break-glass user: $BREAKGLASS_USER"\n                removal_failed=true\n            fi\n        fi\n'''
+          if t.count(old) != 1:
+              raise SystemExit('break-glass userdel block not found exactly once')
+          t = t.replace(old, new, 1)
+          p.write_text(t)
+
+          # Permanent behavioral regressions.
+          p = Path('tests/suites/security/case-secrets.bash')
+          t = p.read_text()
+          anchor = '''BREAKGLASS_REMOVE_FAILURE_TEST\n\n# Direct configure uses its installed TERM trap to clean the owned workspace.\n'''
+          addition = r'''BREAKGLASS_REMOVE_FAILURE_TEST
+
+# An already-absent Unix account must not short-circuit stale break-glass timer
+# cleanup. It must not attempt userdel when no account exists.
+BREAKGLASS_REMOVE_SOURCE="$breakglass_remove_source" bash -s <<'BREAKGLASS_ABSENT_CLEANUP_TEST' \
+  || fail "break-glass absent-account cleanup regression failed"
+set -euo pipefail
+fixture="$(mktemp -d)"
+trap '/bin/rm -rf -- "$fixture"' EXIT
+stop_marker="$fixture/timer-stopped"
+DRY_RUN=false
+FORCE=true
+BREAKGLASS_USER=vw-test
+log_info() { :; }
+log_warn() { :; }
+log_error() { :; }
+log_success() { :; }
+_notify_breakglass_event() { :; }
+check_user_exists() { return 1; }
+systemctl() {
+  case "${1:-}" in
+    is-active) return 0 ;;
+    stop) printf '%s' stopped > "$stop_marker"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+userdel() { return 99; }
+eval "$BREAKGLASS_REMOVE_SOURCE"
+remove_breakglass_user --force >/dev/null 2>&1
+[[ -s "$stop_marker" ]]
+BREAKGLASS_ABSENT_CLEANUP_TEST
+
+# Failures after useradd must route through the forced rollback helper rather
+# than leaving the new login account behind on an unchecked userdel failure.
+BREAKGLASS_CREATE_SOURCE="$breakglass_create_source" bash -s <<'BREAKGLASS_POST_USERADD_ROLLBACK_TEST' \
+  || fail "break-glass post-useradd rollback regression failed"
+set -euo pipefail
+fixture="$(mktemp -d)"
+trap '/bin/rm -rf -- "$fixture"' EXIT
+rollback_marker="$fixture/rollback.arg"
+DRY_RUN=false
+FORCE=false
+BREAKGLASS_USER=vw-test
+BREAKGLASS_AUTO_EXPIRY_HOURS=2
+PROJECT_ROOT=/tmp
+COLOR_RED="" COLOR_RESET="" COLOR_YELLOW="" COLOR_GREEN=""
+log_info() { :; }
+log_warn() { :; }
+log_error() { :; }
+log_success() { :; }
+check_user_exists() { return 1; }
+generate_secure_random() { printf '%s' 'test-password-value'; }
+useradd() { return 0; }
+chpasswd() { cat >/dev/null; return 71; }
+create_sudoers_config() { return 0; }
+remove_breakglass_user() { printf '%s' "${1:-}" > "$rollback_marker"; return 0; }
+eval "$BREAKGLASS_CREATE_SOURCE"
+set +e
+create_breakglass_user >/dev/null 2>&1
+rc=$?
+set -e
+(( rc != 0 ))
+[[ "$(cat "$rollback_marker")" == '--force' ]]
+BREAKGLASS_POST_USERADD_ROLLBACK_TEST
+
+# Direct configure uses its installed TERM trap to clean the owned workspace.
+'''
+          if t.count(anchor) != 1:
+              raise SystemExit('behavior insertion anchor not found exactly once')
+          t = t.replace(anchor, addition, 1)
+
+          source_anchor = '''grep -Fq 'register_cleanup "remove_sensitive_workspace" "$_eds_tmpdir"' lib/secrets.sh || fail "runtime secret export workspace is not registered for caller signal cleanup"\n'''
+          source_add = '''! grep -Fq 'mktemp cache inside docker_dir' lib/secrets.sh || fail "runtime export comment still describes retired disk-side plaintext staging"\ngrep -Fq 'cleaning any stale break-glass artifacts' utilities/setup-secrets.sh || fail "break-glass removal still short-circuits when the account is absent"\n'''
+          if t.count(source_anchor) != 1:
+              raise SystemExit('source assertion anchor not found exactly once')
+          t = t.replace(source_anchor, source_anchor + source_add, 1)
+          p.write_text(t)
+          PY
+
+          git rm .github/workflows/pr7-cleanpass-followup.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/secrets.sh utilities/setup-secrets.sh tests/suites/security/case-secrets.bash
+          git commit -m 'fix: complete break-glass rollback cleanup'
+          test -z "$(git status --porcelain)"
+          git diff --check origin/delta...HEAD
+      - name: Install validation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip age sqlite3 coreutils tar
+      - name: Validate exact clean HEAD
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          git diff --check origin/delta...HEAD
+          for f in lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash; do bash -n "$f"; done
+          shellcheck -e SC1090,SC1091,SC2016,SC2153,SC2317 lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
+      - name: Focused security tests on exact HEAD
+        run: |
+          sudo env VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
+          sudo env VW_TEST_CASE_MODE=core bash tests/suites/security/case-secrets.bash
+      - name: Full suite on exact HEAD
+        run: ./tests/run-tests.sh all
+      - name: Noble transient timer acceptance
+        run: |
+          set -euo pipefail
+          unit="vw-pr7-cleanpass-${GITHUB_RUN_ID}"
+          marker="/run/${unit}.done"
+          cleanup() {
+            sudo systemctl stop "${unit}.timer" "${unit}.service" >/dev/null 2>&1 || true
+            sudo rm -f -- "$marker"
+          }
+          trap cleanup EXIT
+          sudo systemd-run --quiet --collect --on-active=3s --unit="$unit" \
+            --description='VaultWarden PR7 transient timer acceptance' \
+            -- /usr/bin/env bash -c "umask 077; printf '%s\\n' fired > '$marker'"
+          sudo systemctl is-active --quiet "${unit}.timer"
+          for _ in $(seq 1 20); do sudo test -f "$marker" && break; sleep 1; done
+          sudo grep -Fxq fired "$marker"
+      - name: Push only validated final head
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          git push origin HEAD:pr7-sensitive-workspace-sops-hardening
