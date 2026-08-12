@@ -1,0 +1,40 @@
+name: PR8 startup remediation test fix
+on:
+  push:
+    branches: [pr8-runtime-authority-age-custody]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: pr8-runtime-authority-age-custody
+          fetch-depth: 0
+      - name: Replace removed checkout-key remediation assertions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/suites/security/case-security-privileges.bash')
+          text = p.read_text()
+          old = '''grep -Fq 'sudo install -d -m 700 -o root -g root /etc/vaultwarden' startup.sh || fail "startup.sh missing root-owned /etc/vaultwarden install remediation"\ngrep -Fq 'sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}' startup.sh || fail "startup.sh missing root-owned age key install remediation"\ngrep -Fq 'sudo make key-health' startup.sh || fail "startup.sh key verification guidance must use sudo make key-health"\npass "startup key remediation stays root-owned"\n'''
+          new = '''grep -Fq 'Age key health check FAILED: ${canonical_key}' startup.sh || fail "startup.sh does not name canonical Age key failure"\ngrep -Fq 'Restore the operational Age private key at ${canonical_key}, then run: sudo make key-health' startup.sh || fail "startup.sh lacks canonical Age key recovery guidance"\n! grep -Fq 'repo_local_key' startup.sh || fail "startup.sh still advertises checkout Age-key remediation"\npass "startup key remediation stays canonical and root-operated"\n'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'legacy startup remediation assertion block expected once, got {count}')
+          p.write_text(text.replace(old, new))
+          PY
+          bash -n tests/suites/security/case-security-privileges.bash
+          shellcheck -x --severity=warning tests/suites/security/case-security-privileges.bash
+          bash tests/suites/security/case-security-privileges.bash
+      - name: Commit fix and remove helper workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/pr8-security-remediation-test-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'test: assert canonical startup key remediation'
+          git push origin HEAD:pr8-runtime-authority-age-custody
