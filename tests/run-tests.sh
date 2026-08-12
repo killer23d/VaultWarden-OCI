@@ -80,6 +80,7 @@ SECURITY_CASES=(
 
 OPERATIONS_CASES=(
     "operations|tests/suites/operations/case-operations.bash|all|120"
+    "readiness|tests/suites/operations/case-readiness.bash|all|120"
     "health-alerts|tests/suites/operations/case-health-alerts.bash|core|120"
     "health-locking|tests/suites/operations/case-health-alerts.bash|locking|120"
     "lifecycle-core|tests/suites/operations/case-lifecycle.bash|core|120"
