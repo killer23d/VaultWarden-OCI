@@ -99,4 +99,10 @@ if anchor not in t:
     raise SystemExit('sensitive cleanup assertion anchor missing')
 checks = '''grep -Fq 'create_sensitive_workspace recovery-kit' lib/secrets.sh || fail "recovery-kit temporary plaintext is not volatile"\ngrep -Fq 'create_sensitive_workspace runtime-secrets' lib/secrets.sh || fail "runtime secret export staging is not volatile"\n! grep -Fq 'mktemp -d -t vaultwarden-secrets.' lib/secrets.sh || fail "runtime secret export still stages plaintext in generic tmp"\n! grep -Fq 'mktemp "${output_dir}/.vaultwarden-recovery-kit.' lib/secrets.sh || fail "recovery kit still stages plaintext beside its persistent output"\n'''
 t = t.replace(anchor, checks + anchor, 1)
+
+# Recovery publication still exercises the same unlink and signal rollback
+# windows, but the same-directory artifact is now an empty publish stub rather
+# than a plaintext staging file. Retarget only those dot-file fixture patterns.
+t = t.replace("*'.vaultwarden-recovery-kit.'*", "*'.vaultwarden-recovery-publish.'*", 1)
+t = t.replace("-name '.vaultwarden-recovery-kit.*'", "-name '.vaultwarden-recovery-publish.*'")
 p.write_text(t)
