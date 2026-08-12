@@ -72,4 +72,37 @@ if firewall_ufw_default_incoming_fail_closed \
     fail "default allow incoming was accepted"
 fi
 
+if firewall_ufw_status true >/dev/null 2>&1; then
+    fail "boolean UFW status alias true was still accepted"
+else
+    rc=$?
+    [[ "$rc" -eq 2 ]] || fail "unknown UFW status mode returned $rc instead of 2"
+fi
+if firewall_ufw_status false >/dev/null 2>&1; then
+    fail "boolean UFW status alias false was still accepted"
+fi
+
+UFW_TEST_CALLS="$(mktemp)"
+trap 'rm -f "$UFW_TEST_CALLS"' EXIT
+ufw() {
+    printf '%s\n' "$*" >> "$UFW_TEST_CALLS"
+    if [[ "${1:-}" == "status" && $# -eq 1 ]]; then
+        printf '80/tcp ALLOW IN 203.0.113.0/24\n'
+        return 0
+    fi
+    if [[ "${1:-}" == "allow" ]]; then
+        return 0
+    fi
+    return 2
+}
+
+firewall_ufw_ensure_web_range 203.0.113.0/24 CF-IPv4 \
+    || fail "web range reconciliation failed"
+[[ "$(grep -c '^status$' "$UFW_TEST_CALLS")" -eq 1 ]] \
+    || fail "web range reconciliation read UFW status more than once"
+! grep -Fq 'port 80 ' "$UFW_TEST_CALLS" \
+    || fail "existing port 80 rule was added again"
+grep -Fq 'port 443 comment CF-IPv4' "$UFW_TEST_CALLS" \
+    || fail "missing port 443 rule was not added"
+
 printf 'PASS: shared UFW policy ownership and parsing contracts\n'
