@@ -1,8 +1,8 @@
 name: PR7 runner
 on:
-  push:
+  pull_request:
     branches:
-      - pr7-sensitive-workspace-sops-hardening
+      - delta
 permissions:
   contents: write
 jobs:
