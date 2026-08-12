@@ -127,6 +127,44 @@ replace_once('utilities/secrets-rotate.sh', '''    if ! mv "$temp_enc" "$SECRETS
     fi
 ''')
 
+# Keep plaintext entirely inside the verified volatile workspace. The same-directory
+# disk staging files are populated only after the volatile file has been encrypted
+# and round-trip validated.
+replace_once('utilities/secrets-edit.sh', '    cp "$temp_file" "$encrypted_temp"\n', '')
+replace_once('utilities/secrets-edit.sh', '''    if ! encrypt_sops_file "$encrypted_temp" "$_age_key_path"; then
+        log_error "Failed to encrypt secrets"
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+''', '''    if ! encrypt_sops_file "$temp_file" "$_age_key_path"; then
+        log_error "Failed to encrypt secrets"
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+    if ! cp -- "$temp_file" "$encrypted_temp"; then
+        log_error "Failed to stage encrypted secrets"
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+''')
+replace_once('utilities/secrets-rotate.sh', '    cp "$temp_patched" "$temp_enc"\n', '')
+replace_once('utilities/secrets-rotate.sh', '''    if ! encrypt_sops_file "$temp_enc" "$_age_key_path"; then
+        log_error "Failed to re-encrypt secrets"
+        rm -f "$temp_enc"
+        return 1
+    fi
+''', '''    if ! encrypt_sops_file "$temp_patched" "$_age_key_path"; then
+        log_error "Failed to re-encrypt secrets"
+        rm -f "$temp_enc"
+        return 1
+    fi
+    if ! cp -- "$temp_patched" "$temp_enc"; then
+        log_error "Failed to stage encrypted secrets"
+        rm -f "$temp_enc"
+        return 1
+    fi
+''')
+
 replace_function('utilities/setup-secrets.sh', '_ss_make_plaintext_temp', r'''_ss_make_plaintext_temp() {
     local dir tmp
     if [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]]; then
