@@ -141,7 +141,7 @@ jobs:
           PY
 
           bash -n utilities/maintenance-update.sh utilities/maintenance-health.sh utilities/smoke-test.sh utilities/setup-crowdsec.sh lib/crowdsec.sh lib/crowdsec-worker.sh tests/suites/operations/case-readiness.bash tests/run-tests.sh
-          ./tests/suites/operations/case-readiness.bash
+          bash tests/suites/operations/case-readiness.bash
           if command -v shellcheck >/dev/null 2>&1; then
             shellcheck -x --severity=warning utilities/maintenance-update.sh utilities/maintenance-health.sh utilities/smoke-test.sh utilities/setup-crowdsec.sh lib/crowdsec.sh lib/crowdsec-worker.sh tests/suites/operations/case-readiness.bash tests/run-tests.sh
           fi
