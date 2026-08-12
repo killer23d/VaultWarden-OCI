@@ -1,4 +1,4 @@
-# Final full validation after keeping the direct-auto alternate Age path fixture-only.
+# Full validation after operations and backup fixtures were aligned with runtime authority.
 name: PR8 full Noble validation
 on:
   push:
