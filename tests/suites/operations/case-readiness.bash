@@ -119,6 +119,36 @@ check_update_transaction() (
     [[ "$RECREATE_CALLS" -eq 1 ]] || fail "failed image restoration must not recreate a mixed set"
 )
 
+check_pre_update_baseline() (
+    set -euo pipefail
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+    extract_function check_image_update_preflight "$UPDATE" > "$tmpdir/preflight.sh"
+    [[ -s "$tmpdir/preflight.sh" ]] || fail "could not extract check_image_update_preflight"
+    log_error() { :; }
+    READY_RESULT=0
+    READY_CALLS=0
+    check_update_readiness() {
+        (( READY_CALLS++ )) || true
+        return "$READY_RESULT"
+    }
+    # shellcheck disable=SC1090
+    source "$tmpdir/preflight.sh"
+
+    check_image_update_preflight || fail "clean pre-update baseline should pass"
+    [[ "$READY_CALLS" -eq 1 ]] || fail "pre-update baseline must run readiness once"
+
+    READY_RESULT=1 READY_CALLS=0
+    set +e; check_image_update_preflight; rc=$?; set -e
+    [[ "$rc" -eq 1 && "$READY_CALLS" -eq 1 ]] || fail "unclean baseline must abort"
+
+    preflight_line="$(grep -n '^[[:space:]]*check_image_update_preflight || exit 1$' "$UPDATE" | cut -d: -f1)"
+    system_line="$(grep -n '^[[:space:]]*update_system_packages$' "$UPDATE" | tail -1 | cut -d: -f1)"
+    snapshot_line="$(grep -n '^[[:space:]]*snapshot_image_digests$' "$UPDATE" | tail -1 | cut -d: -f1)"
+    [[ -n "$preflight_line" && -n "$system_line" && -n "$snapshot_line" ]] || fail "could not locate update ordering"
+    (( preflight_line < system_line && preflight_line < snapshot_line )) || fail "baseline must run before package/image mutation"
+)
+
 check_crowdsec_readiness() (
     set -euo pipefail
     tmpdir="$(mktemp -d)"
@@ -154,8 +184,15 @@ EOF_SYSTEMCTL
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${CSCLI_QUERY_OK:-true}" != true ]]; then exit 1; fi
-if [[ "${1:-}" == bouncers && "${2:-}" == list ]]; then
-    printf '%s\n' "${CSCLI_BOUNCERS-cloudflare-worker-bouncer 127.0.0.1 valid}"
+if [[ "${1:-}" == bouncers && "${2:-}" == inspect && "${3:-}" == cloudflare-worker-bouncer ]]; then
+    [[ "${CSCLI_BOUNCER_PRESENT:-true}" == true ]] || exit 1
+    if [[ -n "${CSCLI_LAST_PULL:-}" ]]; then
+        printf '{"name":"cloudflare-worker-bouncer","revoked":%s,"last_pull":"%s"}\n' \
+            "${CSCLI_REVOKED:-false}" "$CSCLI_LAST_PULL"
+    else
+        printf '{"name":"cloudflare-worker-bouncer","revoked":%s,"last_pull":null}\n' \
+            "${CSCLI_REVOKED:-false}"
+    fi
     exit 0
 fi
 exit 2
@@ -165,7 +202,9 @@ EOF_CSCLI
     export PATH SYSTEMCTL_UNIT SYSTEMCTL_ACTIVE
     export VW_CROWDSEC_ETC_DIR="$tmpdir/etc"
     export CLOUDFLARE_PROXY_ENABLED=true CF_AUTONOMOUS_MODE=false
-    export CSCLI_QUERY_OK=true CSCLI_BOUNCERS="cloudflare-worker-bouncer 127.0.0.1 valid"
+    export CSCLI_QUERY_OK=true CSCLI_BOUNCER_PRESENT=true CSCLI_REVOKED=false
+    CSCLI_LAST_PULL="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    export CSCLI_LAST_PULL
     # shellcheck disable=SC1090
     source "$CROWDSEC_LIB"
 
@@ -192,10 +231,29 @@ crowdsec_config:
   lapi_url: "http://127.0.0.1:8097/"
   lapi_key: "test-key"
 EOF_BOUNCER
-    CSCLI_BOUNCERS=""
-    export CSCLI_BOUNCERS
+    CSCLI_BOUNCER_PRESENT=false
+    export CSCLI_BOUNCER_PRESENT
     set +e; crowdsec_worker_readiness; rc=$?; set -e
     [[ "$rc" -eq 1 ]] || fail "unregistered bouncer must be NOT READY"
+
+    CSCLI_BOUNCER_PRESENT=true CSCLI_REVOKED=true
+    export CSCLI_BOUNCER_PRESENT CSCLI_REVOKED
+    set +e; crowdsec_worker_readiness; rc=$?; set -e
+    [[ "$rc" -eq 1 ]] || fail "revoked/invalid bouncer must be NOT READY"
+
+    CSCLI_REVOKED=false CSCLI_LAST_PULL=""
+    export CSCLI_REVOKED CSCLI_LAST_PULL
+    set +e; crowdsec_worker_readiness; rc=$?; set -e
+    [[ "$rc" -eq 1 ]] || fail "bouncer with no successful LAPI pull must be NOT READY"
+
+    CSCLI_LAST_PULL="$(date -u -d '10 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    export CSCLI_LAST_PULL
+    set +e; crowdsec_worker_readiness; rc=$?; set -e
+    [[ "$rc" -eq 1 ]] || fail "bouncer with stale LAPI pull must be NOT READY"
+
+    CSCLI_LAST_PULL="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    export CSCLI_LAST_PULL
+    crowdsec_worker_readiness || fail "recent valid LAPI pull should restore readiness: $CROWDSEC_READINESS_DETAIL"
 
     CLOUDFLARE_PROXY_ENABLED=false
     export CLOUDFLARE_PROXY_ENABLED
@@ -283,6 +341,8 @@ check_shared_resolver_contract() {
         "Workers helper must not duplicate LAPI parsing or fallback guessing"
     require 'crowdsec_resolve_lapi_port' "$SETUP_CROWDSEC" \
         "CrowdSec setup must reuse the shared LAPI resolver"
+    require 'crowdsec_worker_wait_ready[[:space:]]+30' "$SETUP_CROWDSEC" \
+        "CrowdSec setup must wait for a valid recent LAPI pull after activation"
 }
 
 check_health_contract() {
@@ -300,6 +360,7 @@ check_docs_contract() {
 }
 
 check_update_transaction
+check_pre_update_baseline
 check_crowdsec_readiness
 check_tls_contract
 check_tls_failure_behavior

@@ -329,8 +329,9 @@ apply_update_stack() {
 }
 
 check_update_readiness() {
+    local context="${1:-post-update}"
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would wait for critical services and run health --quick"
+        log_info "[DRY RUN] Would wait for critical services and run health --quick (${context})"
         return 0
     fi
     if [[ ! "$UPDATE_READINESS_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
@@ -341,22 +342,31 @@ check_update_readiness() {
     local service
     for service in "${_VW_DEFAULT_CRITICAL_SERVICES[@]}"; do
         if ! wait_for_service_ready "$service" "$UPDATE_READINESS_TIMEOUT"; then
-            log_error "Critical service did not become ready after update: $service"
+            log_error "Critical service did not become ready during ${context}: $service"
             return 1
         fi
     done
 
     if ! VAULTWARDEN_INTERNAL_HEALTH_CHECK=true \
         "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quick --quiet; then
-        log_error "Bounded post-update health profile failed"
+        log_error "Bounded ${context} health profile failed"
         return 1
     fi
-    log_success "Post-update readiness gate passed"
+    log_success "${context} readiness gate passed"
     return 0
 }
 
+check_image_update_preflight() {
+    if check_update_readiness "pre-update baseline"; then
+        return 0
+    fi
+    log_error "Pre-update readiness is not clean; refusing to mutate packages or images."
+    log_error "Resolve existing health warnings/failures first so they cannot be mistaken for an image regression."
+    return 1
+}
+
 run_image_update_transaction() {
-    if recreate_update_stack && check_update_readiness; then
+    if recreate_update_stack && check_update_readiness "post-update"; then
         log_success "Image update healthy"
         return 0
     fi
@@ -372,7 +382,7 @@ run_image_update_transaction() {
         return 2
     fi
 
-    if check_update_readiness; then
+    if check_update_readiness "rollback"; then
         log_warn "Update failed, rollback healthy. The previous image set is serving traffic."
         return 1
     fi
@@ -442,14 +452,19 @@ main() {
     check_age_key_health_for_update
     operation_set_phase "2" "Pre-update safety backup"
     run_pre_update_backup || exit 1
+
+    local image_transaction=false
+    if [[ "$UPDATE_IMAGES" == "true" ]] || [[ "$FORCE" == "true" ]]; then
+        image_transaction=true
+        check_image_update_preflight || exit 1
+    fi
+
     if [[ "$UPDATE_SYSTEM" == "true" ]]; then
         operation_set_phase "3" "System package update"
         update_system_packages
     fi
 
-    local image_transaction=false
-    if [[ "$UPDATE_IMAGES" == "true" ]] || [[ "$FORCE" == "true" ]]; then
-        image_transaction=true
+    if [[ "$image_transaction" == "true" ]]; then
         operation_set_phase "4" "Container image update"
         snapshot_image_digests
         local pull_rc=0
@@ -503,7 +518,7 @@ main() {
             exit "$transaction_rc"
         fi
     else
-        if ! apply_update_stack || ! check_update_readiness; then
+        if ! apply_update_stack || ! check_update_readiness "post-system-update"; then
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                 local subject="[VaultWarden] Update FAILED"
                 local body

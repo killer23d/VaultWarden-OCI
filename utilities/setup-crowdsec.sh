@@ -2189,7 +2189,11 @@ _cs_activate_required_services() {
         log_error "Required crowdsec-cloudflare-worker-bouncer did not become active."
         return 1
     fi
-    log_success "crowdsec-cloudflare-worker-bouncer enabled and started."
+    if ! crowdsec_worker_wait_ready 30; then
+        log_error "Required crowdsec-cloudflare-worker-bouncer did not establish a valid recent LAPI pull: ${CROWDSEC_READINESS_DETAIL}"
+        return 1
+    fi
+    log_success "crowdsec-cloudflare-worker-bouncer is active, valid, and pulling from CrowdSec LAPI."
 }
 
 # ---------------------------------------------------------------------------
