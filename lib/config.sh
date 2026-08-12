@@ -2,7 +2,7 @@
 # lib/config.sh — Environment and configuration loading helpers for VaultWarden-OCI.
 #
 # Provides:
-#   Load    : load_env_file, load_project_environment
+#   Load    : load_env_file, load_authoring_environment, load_project_environment
 #   Query   : get_config_value, require_config
 #   Helpers : _get_file_perms, _set_env_var, _read_env_value, resolve_secrets_file
 #
@@ -22,6 +22,7 @@ readonly VW_CONFIG_LIB_LOADED=1
 # Reassert this after loading any env file so directory names and stale/custom
 # COMPOSE_PROJECT_NAME entries cannot split one host into two Compose projects.
 readonly _VW_CANONICAL_COMPOSE_PROJECT_NAME="vaultwarden-oci"
+readonly _VW_CANONICAL_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
 COMPOSE_PROJECT_NAME="$_VW_CANONICAL_COMPOSE_PROJECT_NAME"
 export COMPOSE_PROJECT_NAME
 
@@ -29,7 +30,6 @@ if [[ -z "${_VW_CALLER_OVERRIDES_CAPTURED:-}" ]]; then
     _VW_CALLER_PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-}"
     _VW_CALLER_DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
     _VW_CALLER_DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-}"
-    _VW_CALLER_SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-}"
     _VW_CALLER_BACKUP_DIR="${BACKUP_DIR:-}"
     _VW_CALLER_TZ="${TZ:-}"
     _VW_CALLER_RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-}"
@@ -83,8 +83,66 @@ _config_env_candidate_state() {
     return 2
 }
 
+_validate_runtime_env_file() {
+    local env_file="$1"
+    local line key raw_value lineno=0 malformed=false
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        (( lineno++ )) || true
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+        if [[ "$line" != *=* ]]; then
+            log_error "Malformed runtime environment ${env_file}:${lineno}: expected KEY=value"
+            malformed=true
+            continue
+        fi
+
+        key="${line%%=*}"
+        raw_value="${line#*=}"
+        if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            log_error "Malformed runtime environment ${env_file}:${lineno}: invalid variable name '${key}'"
+            malformed=true
+            continue
+        fi
+
+        case "$key" in
+            PATH|LD_PRELOAD|LD_LIBRARY_PATH|IFS|BASH_ENV|ENV|CDPATH|PS4)
+                log_error "Malformed runtime environment ${env_file}:${lineno}: forbidden variable '${key}'"
+                malformed=true
+                continue
+                ;;
+        esac
+
+        if [[ "$raw_value" == \"* && "$raw_value" != *\" ]] \
+            || [[ "$raw_value" == \'* && "$raw_value" != *\' ]] \
+            || [[ "$raw_value" != \"* && "$raw_value" == *\" ]] \
+            || [[ "$raw_value" != \'* && "$raw_value" == *\' ]]; then
+            log_error "Malformed runtime environment ${env_file}:${lineno}: unmatched quote for '${key}'"
+            malformed=true
+            continue
+        fi
+
+        # shellcheck disable=SC2016
+        if [[ "$raw_value" == *'`'* || "$raw_value" == *'$('* ]]; then
+            log_error "Malformed runtime environment ${env_file}:${lineno}: command-substitution syntax is not allowed for '${key}'"
+            malformed=true
+        fi
+    done < "$env_file" || {
+        log_error "Environment file could not be read: $env_file"
+        return 1
+    }
+
+    if [[ "$malformed" == "true" ]]; then
+        log_error "Runtime environment authority is invalid: $env_file"
+        log_hint "Fix the runtime environment with: sudo make sync-env"
+        return 1
+    fi
+    return 0
+}
+
 load_env_file() {
     local env_file="${1:-}"
+    local mode="${2:-authoring}"
 
     if [[ -z "$env_file" ]]; then
         load_project_environment
@@ -100,6 +158,10 @@ load_env_file() {
         log_error "Environment file is not readable: $env_file"
         (( EUID != 0 )) && log_hint "Re-run the command with sudo to read the installed configuration."
         return 1
+    fi
+
+    if [[ "$mode" == "runtime" ]]; then
+        _validate_runtime_env_file "$env_file" || return 1
     fi
 
     local file_perms
@@ -141,6 +203,7 @@ load_env_file() {
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         if [[ "$line" != *=* ]]; then
+            [[ "$mode" == "runtime" ]] || malformed_lines+=("line ${lineno}: ${line}")
             continue
         fi
 
@@ -163,17 +226,13 @@ load_env_file() {
         # Injection guard: only $( and ` are genuine risks here because we use
         # printf -v (not eval) for assignment. Bare $, |, <, >, and \ are
         # inert in this context and must be allowed for strong passwords.
-        # shellcheck disable=SC2016  # single quotes are intentional: checking for literal $( and `
+        # shellcheck disable=SC2016
         if [[ "$value" == *'`'* || "$value" == *'$('* ]]; then
             log_error "load_env_file: line ${lineno}: value for '${key}' contains" \
                       "shell command-substitution syntax (\`...\` or \$(...))" \
                       "— aborting load of '${env_file}'. Quote or escape the value."
             return 1
         fi
-        # Refuse to overwrite security-sensitive shell internals.
-        # PATH, LD_PRELOAD, LD_LIBRARY_PATH, and IFS can be weaponised by a
-        # malicious or misconfigured .env to hijack the shell's execution
-        # environment. These variables must never come from an untrusted file.
         case "$key" in
             PATH|LD_PRELOAD|LD_LIBRARY_PATH|IFS|BASH_ENV|ENV|CDPATH|PS4)
                 log_error "load_env_file: line ${lineno}: refusing to overwrite dangerous variable '${key}'" \
@@ -187,7 +246,7 @@ load_env_file() {
         fi
 
         printf -v "$key" '%s' "$value"
-        # shellcheck disable=SC2163  # export "$key" exports the variable whose name is in $key
+        # shellcheck disable=SC2163
         export "$key"
 
     done < "$env_file"; then
@@ -205,8 +264,6 @@ load_env_file() {
         log_hint "Common mistakes: spaces around '=', an 'export ' prefix, or invalid variable names."
     fi
 
-    # COMPOSE_PROJECT_NAME is an appliance identity, not an operator setting.
-    # Keep it stable even if a legacy/custom env file contains another value.
     COMPOSE_PROJECT_NAME="$_VW_CANONICAL_COMPOSE_PROJECT_NAME"
     export COMPOSE_PROJECT_NAME
 
@@ -249,47 +306,54 @@ resolve_secrets_file() {
     export SECRETS_FILE
 }
 
+_read_project_state_dir_from_env() {
+    local file="$1"
+    [[ -f "$file" && -r "$file" ]] || return 0
+    awk -F= -v sq="'" '$1 == "PROJECT_STATE_DIR" {
+        value = substr($0, index($0, "=") + 1)
+        gsub("^[\"" sq "]|[\"" sq "]$", "", value)
+        if (value != "") found = value
+    }
+    END { if (found != "") print found }' "$file"
+}
+
+load_authoring_environment() {
+    local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    local repo_env="${root}/.env"
+
+    _config_env_candidate_state "$repo_env" || {
+        local status=$?
+        (( status == 2 )) && log_error "Authoring environment not found: $repo_env"
+        return 1
+    }
+    load_env_file "$repo_env" authoring || return 1
+    resolve_secrets_file
+}
+
+# Production/runtime authority is installed state only. The checkout .env is an
+# authoring input consumed by env-edit.sh sync; it is never a production fallback.
 load_project_environment() {
     local override_state="${_VW_CALLER_PROJECT_STATE_DIR:-}"
     local override_device="${_VW_CALLER_DATA_VOLUME_DEVICE:-}"
     local override_mount="${_VW_CALLER_DATA_VOLUME_MOUNT:-}"
-    local override_key="${_VW_CALLER_SOPS_AGE_KEY_FILE:-}"
     local override_backup="${_VW_CALLER_BACKUP_DIR:-}"
     local override_tz="${_VW_CALLER_TZ:-}"
     local override_remote="${_VW_CALLER_RCLONE_REMOTE_NAME:-}"
     local override_remote_path="${_VW_CALLER_RCLONE_REMOTE_PATH:-}"
     local override_rclone_config="${_VW_CALLER_RCLONE_CONFIG:-}"
 
-    local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
-    local repo_env="${root}/.env"
-    local installed_env="/etc/vaultwarden/vaultwarden.env"
-    installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-$installed_env}"
-    local bootstrap_state="$default_state_dir"
+    local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
+    local bootstrap_state="${override_state:-$default_state_dir}"
+    local installed_state=""
 
-    local _read_project_state_dir
-    _read_project_state_dir() {
-        local file="$1"
-        [[ -f "$file" && -r "$file" ]] || return 0
-        awk -F= -v sq="'" '$1 == "PROJECT_STATE_DIR" {
-            value = substr($0, index($0, "=") + 1)
-            gsub("^[\"" sq "]|[\"" sq "]$", "", value)
-            if (value != "") found = value
-        }
-        END { if (found != "") print found }' "$file"
-    }
-
-    if [[ -n "$override_state" ]]; then
-        bootstrap_state="$override_state"
+    if _config_env_candidate_state "$installed_env"; then
+        _validate_runtime_env_file "$installed_env" || return 1
+        installed_state="$(_read_project_state_dir_from_env "$installed_env")"
+        [[ -n "$override_state" ]] || bootstrap_state="${installed_state:-$bootstrap_state}"
     else
-        local repo_state installed_state
-        repo_state="$(_read_project_state_dir "$repo_env")"
-        installed_state="$(_read_project_state_dir "$installed_env")"
-        if [[ -n "$repo_state" ]]; then
-            bootstrap_state="$repo_state"
-        elif [[ -n "$installed_state" ]]; then
-            bootstrap_state="$installed_state"
-        fi
+        local candidate_status=$?
+        (( candidate_status == 1 )) && return 1
     fi
 
     PROJECT_STATE_DIR="$bootstrap_state"
@@ -297,7 +361,6 @@ load_project_environment() {
 
     local persistent_env="${PROJECT_STATE_DIR}/config/install.env"
     local selected_env="" candidate_status
-
     if _config_env_candidate_state "$installed_env"; then
         selected_env="$installed_env"
     else
@@ -315,32 +378,28 @@ load_project_environment() {
     fi
 
     if [[ -z "$selected_env" ]]; then
-        if _config_env_candidate_state "$repo_env"; then
-            selected_env="$repo_env"
-            log_warn "Using repository .env — migrate to ${persistent_env} for production use"
-        else
-            candidate_status=$?
-            (( candidate_status == 1 )) && return 1
-        fi
-    fi
-
-    if [[ -z "$selected_env" ]]; then
-        log_error "No project environment found. Expected ${persistent_env}, ${repo_env}, or ${installed_env}."
+        log_error "Runtime environment authority is missing."
+        log_error "Expected ${installed_env} or ${persistent_env}."
+        log_hint "Run: sudo make sync-env"
         return 2
     fi
 
-    load_env_file "$selected_env" || return 1
+    load_env_file "$selected_env" runtime || return 1
 
     [[ -n "$override_state" ]] && PROJECT_STATE_DIR="$override_state"
     [[ -n "$override_device" ]] && DATA_VOLUME_DEVICE="$override_device"
     [[ -n "$override_mount" ]] && DATA_VOLUME_MOUNT="$override_mount"
-    [[ -n "$override_key" ]] && SOPS_AGE_KEY_FILE="$override_key"
     [[ -n "$override_backup" ]] && BACKUP_DIR="$override_backup"
     [[ -n "$override_tz" ]] && TZ="$override_tz"
     [[ -n "$override_remote" ]] && RCLONE_REMOTE_NAME="$override_remote"
     [[ -n "$override_remote_path" ]] && RCLONE_REMOTE_PATH="$override_remote_path"
     [[ -n "$override_rclone_config" ]] && RCLONE_CONFIG="$override_rclone_config"
-    export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE
+
+    # Operational private-key custody is fixed; runtime environment data may not
+    # redirect production decryption to a checkout or another implicit location.
+    SOPS_AGE_KEY_FILE="$_VW_CANONICAL_AGE_KEY_FILE"
+    AGE_KEY_FILE="$_VW_CANONICAL_AGE_KEY_FILE"
+    export PROJECT_STATE_DIR DATA_VOLUME_DEVICE DATA_VOLUME_MOUNT SOPS_AGE_KEY_FILE AGE_KEY_FILE
     export BACKUP_DIR TZ RCLONE_REMOTE_NAME RCLONE_REMOTE_PATH RCLONE_CONFIG
 
     resolve_secrets_file
@@ -417,7 +476,6 @@ _set_env_var() (
         return 1
     fi
 
-    # chown can clear special mode bits, so restore ownership before mode.
     chown "${uid}:${gid}" "$tmp_file" || return 1
     chmod "$mode" "$tmp_file" || return 1
 
@@ -432,18 +490,14 @@ _read_env_value() {
         | tail -1 | cut -d= -f2- | tr -d "\"'" || true
 }
 
-export -f load_env_file get_config_value require_config resolve_secrets_file load_project_environment
+export -f load_env_file load_authoring_environment load_project_environment
+export -f get_config_value require_config resolve_secrets_file
 export -f _get_file_perms _set_env_var _read_env_value
 
 # ---------------------------------------------------------------------------
 # Canonical compile-time fallbacks — sourced once here so every script that
 # sources config.sh gets safe defaults under `set -u` even when .env is absent
 # or these variables are not present in the loaded file.
-#
-# Rules:
-#  • Persistent secret paths are derived from PROJECT_STATE_DIR only.
-#  • SOPS_AGE_KEY_FILE may remain blank until the crypto boundary resolves the
-#    canonical operational key.
 # ---------------------------------------------------------------------------
 
 AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
