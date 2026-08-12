@@ -1,0 +1,26 @@
+name: PR7 committed-state validation
+on:
+  pull_request:
+    branches:
+      - delta
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pr7-sensitive-workspace-sops-hardening
+      - name: Install validation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip age sqlite3 coreutils tar
+      - name: Validate syntax and lint
+        run: |
+          set -euo pipefail
+          git diff --check origin/delta...HEAD || true
+          for f in lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash; do bash -n "$f"; done
+          shellcheck -e SC1090,SC1091,SC2016,SC2153,SC2317 lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
+      - name: Focused security tests
+        run: |
+          sudo env VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
+          sudo env VW_TEST_CASE_MODE=core bash tests/suites/security/case-secrets.bash
+      - name: Full suite
+        run: ./tests/run-tests.sh all
