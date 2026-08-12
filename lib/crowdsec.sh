@@ -9,8 +9,12 @@ fi
 [[ -n "${VW_CROWDSEC_LIB_LOADED:-}" ]] && return 0
 readonly VW_CROWDSEC_LIB_LOADED=1
 
+# Callers read this after crowdsec_worker_readiness returns.
+# shellcheck disable=SC2034
 CROWDSEC_READINESS_DETAIL=""
 
+# The optional config path is supplied by setup/worker callers in other sourced files.
+# shellcheck disable=SC2120
 crowdsec_resolve_lapi_port() {
     local config_file="${1:-${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}/config.yaml}"
     local -a matches=()
