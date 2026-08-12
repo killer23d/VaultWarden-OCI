@@ -128,7 +128,10 @@ crowdsec_worker_readiness() {
     fi
 
     local bouncer_state state pull_age last_pull
-    bouncer_state="$(_crowdsec_bouncer_state)"
+    if ! bouncer_state="$(_crowdsec_bouncer_state)"; then
+        CROWDSEC_READINESS_DETAIL="failed to parse structured CrowdSec state for cloudflare-worker-bouncer"
+        return 1
+    fi
     IFS=$'\t' read -r state pull_age last_pull <<< "$bouncer_state"
     case "$state" in
         ok)
