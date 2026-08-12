@@ -60,26 +60,17 @@ GLOBAL OPTIONS:
 EXAMPLES:
   sudo ./startup.sh               # Start with existing local images
   sudo ./startup.sh --force       # Recreate containers after explicit env sync
-  sudo ./startup.sh --background  # Start in daemon mode
-  sudo ./startup.sh stop          # Stop all services
+  sudo ./startup.sh --background  # Start services in background
+  sudo ./startup.sh stop          # Stop services
 EOF
 }
 
-
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    stop)
-      DO_DOWN=true; shift
-      ;;
-    help|--help|-h)
-      show_help; exit 0
-      ;;
-    --version|-V)
-      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"
-      exit 0
-      ;;
-    --*)
-      ;;
+    stop) DO_DOWN=true; shift ;;
+    help|--help|-h) show_help; exit 0 ;;
+    --version|-V) print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
+    --*) ;;
     *)
       log_error "Unknown subcommand: '$1'"
       log_error "Valid subcommands: stop"
@@ -92,27 +83,25 @@ fi
 while [[ $# -gt 0 ]]; do
   if [[ "$DO_DOWN" == "true" ]]; then
     case $1 in
-      --help|-h)         show_help; exit 0 ;;
-      --version|-V)      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
+      --help|-h) show_help; exit 0 ;;
+      --version|-V) print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
       *) log_error "Unknown option for 'stop': '$1'"; log_error "Usage: sudo ./startup.sh stop"; show_help; exit 1 ;;
     esac
   else
     case $1 in
-      --force)           FORCE_RESTART=true;   shift ;;
-      --skip-health)     SKIP_HEALTH_CHECK=true; shift ;;
-      --skip-pull)       shift ;;
-      --background)      BACKGROUND=true;       shift ;;
+      --force) FORCE_RESTART=true; shift ;;
+      --skip-health) SKIP_HEALTH_CHECK=true; shift ;;
+      --skip-pull) shift ;;
+      --background) BACKGROUND=true; shift ;;
       --skip-egress-fix) shift ;;
-      --dry-run)         DRY_RUN=true;          shift ;;
-      --help|-h)         show_help; exit 0 ;;
-      --version|-V)      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
+      --dry-run) DRY_RUN=true; shift ;;
+      --help|-h) show_help; exit 0 ;;
+      --version|-V) print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
       *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac
   fi
 done
 
-# Real startup/stop operations are root-operated. Keep harmless metadata/help
-# paths above this guard so users can inspect usage/version without sudo.
 if [[ "${DRY_RUN}" != "true" || "${DO_DOWN}" == "true" ]]; then
   require_root "${ORIGINAL_ARGS[@]}"
 fi
@@ -157,9 +146,6 @@ if [[ "$DO_DOWN" == "true" ]]; then
   exit 0
 fi
 
-
-# Warn about split-brain secret configuration when plaintext EMAIL_API_TOKEN or
-# SMTP_PASSWORD values override SOPS-managed secrets. This is advisory only.
 warn_plaintext_secret_overrides() {
   local warned=false
 
@@ -178,15 +164,7 @@ warn_plaintext_secret_overrides() {
   fi
 }
 
-# Cross-check EMAIL_MODE after stack-level secret validation so operators get
-# delivery-specific diagnostics before the first email send. The unconditional
-# Postfix smtp_password requirement is already enforced by prepare_docker_secrets()
-# through validate_required_secrets(); this later check is advisory only.
-#
-# Valid modes are declared in _VW_DEFAULT_EMAIL_MODES (lib/defaults.sh).
-# Add a new mode there; no edit to this function is needed.
 check_email_config_consistency() {
-  # VWOCI-PRR-PATCH-03: canonical modes are declared in lib/defaults.sh.
   local email_mode="${EMAIL_MODE:-auto}"
   local secrets_dir="$DOCKER_SECRETS_DIR"
   case "$email_mode" in
@@ -209,8 +187,7 @@ check_email_config_consistency() {
         log_warn "Fix: ./utilities/secrets-rotate.sh smtp_password"
       fi
       ;;
-    auto)
-      ;;
+    auto) ;;
     *)
       local valid_modes
       valid_modes="$(IFS='|'; echo "${_VW_DEFAULT_EMAIL_MODES[*]}")"
@@ -285,13 +262,10 @@ load_environment() {
   log_info "Note: changes to compose/.env values are applied to containers only when they are recreated."
 }
 
-# Required commands are declared in _VW_DEFAULT_REQUIRED_COMMANDS (lib/defaults.sh).
-# Add a new dependency there; no edit to this function is needed.
 validate_prerequisites() {
   log_info "Validating prerequisites..."
 
   local missing_commands=()
-
   for cmd in "${_VW_DEFAULT_REQUIRED_COMMANDS[@]}"; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_commands+=("$cmd")
@@ -311,6 +285,11 @@ validate_prerequisites() {
 
   if ! check_docker_available; then
     log_error "Docker daemon is not running or not accessible"
+    return 1
+  fi
+  if ! check_compose_available; then
+    log_error "Docker Compose v2 plugin is not available"
+    log_error "Install with: sudo apt install docker-compose-plugin"
     return 1
   fi
 
@@ -346,115 +325,30 @@ validate_runtime_permissions() {
   return 1
 }
 
-
-# Run check_age_key_health() before any SOPS invocation so a corrupt,
-# missing, or wrong-permissions Age key produces a clear actionable error
-# instead of an opaque decryption failure.
-#
-# If the configured key path does not exist but the repo-local key is present
-# and healthy, override the key path for this process only and print a
-# prominent advisory so the operator fixes .env before the next restart.
 check_age_key_health_preflight() {
-  local configured_key="${SOPS_AGE_KEY_FILE:-}"
+  local canonical_key="/etc/vaultwarden/age-key.txt"
 
-  if [[ -z "$configured_key" ]]; then
-    configured_key="${HOME:-/root}/.config/sops/age/keys.txt"
-  fi
-
-  if check_age_key_health "$configured_key" 2>/dev/null; then
-    return 0
-  fi
-
-  local repo_local_key="${SCRIPT_DIR}/secrets/keys/age-key.txt"
-
-  # canonical_key resolves from AGE_KEY_FILE (set by lib/config.sh compile-time
-  # defaults). Changing AGE_KEY_FILE in .env therefore propagates to every
-  # advisory message below automatically — no script edit required.
-  local canonical_key="${AGE_KEY_FILE}"
-
-  if [[ -f "$repo_local_key" ]] && check_age_key_health "$repo_local_key" 2>/dev/null; then
-    log_warn "=========================================================="
-    log_warn "ACTION REQUIRED — Age key path mismatch detected"
-    log_warn "=========================================================="
-    log_warn "Configured path (SOPS_AGE_KEY_FILE in .env): ${configured_key}"
-    log_warn "That file does not exist or failed the health check."
-    log_warn ""
-    log_warn "A healthy repo-local key was found at: ${repo_local_key}"
-    log_warn "Using it for THIS startup only (process-scoped override)."
-    log_warn ""
-    log_warn "This is a temporary workaround. Before the next restart, do ONE of:"
-    log_warn ""
-    log_warn "  Option A — Install key to canonical system path (recommended for production):"
-    log_warn "    sudo install -d -m 700 -o root -g root /etc/vaultwarden"
-    log_warn "    sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}"
-    log_warn "    # Verify: sudo make key-health"
-    log_warn ""
-    log_warn "  Option B — Update .env to point at the repo-local key (local/dev only):"
-    log_warn "    sed -i 's|^SOPS_AGE_KEY_FILE=.*|SOPS_AGE_KEY_FILE=${repo_local_key}|' .env"
-    log_warn "    # Verify: sudo make key-health"
-    log_warn ""
-    log_warn "  Option C — Run setup again to reinstall everything cleanly:"
-    log_warn "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
-    log_warn "=========================================================="
-
-    export SOPS_AGE_KEY_FILE="$repo_local_key"
-    return 0
-  fi
-
-  log_error "Age key health check FAILED for configured path: ${configured_key}"
-  log_error ""
-  log_error "SOPS cannot decrypt secrets without a valid Age private key."
-  log_error ""
-
-  if [[ "$configured_key" == "$canonical_key" ]]; then
-    log_error "Remediation:"
-    log_error "  The canonical key file does not exist or is not readable."
-    log_error "  Re-run setup to install it:"
-    log_error "    sudo ./setup.sh install --domain <your-domain> --email <your-email>"
-    if [[ -f "$repo_local_key" ]]; then
-      log_error ""
-      log_warn "  A repo-local key was detected at: ${repo_local_key}"
-      log_warn "  If this is the correct production key, install it with:"
-      log_warn "    sudo install -d -m 700 -o root -g root /etc/vaultwarden"
-      log_warn "    sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}"
-      log_warn "  Then run: sudo make key-health to verify before retrying startup."
-    fi
+  if [[ "${SOPS_AGE_KEY_FILE:-$canonical_key}" != "$canonical_key" ]]; then
+    log_error "Runtime Age key authority must be: $canonical_key"
+    log_error "Run: sudo make sync-env"
     return 1
   fi
 
-  log_error "  Configured key path (from .env):  ${configured_key}"
-  log_error "  Canonical production path:         ${canonical_key}"
-  log_error ""
-
-  if [[ -f "$canonical_key" ]]; then
-    log_warn "  A key exists at the canonical production path (${canonical_key})."
-    log_warn "  .env currently points elsewhere. To fix:"
-    log_warn "    1. Update SOPS_AGE_KEY_FILE in .env to: ${canonical_key}"
-    log_warn "    2. Verify with: sudo make key-health"
-    log_warn "    3. Retry: sudo make up  (or sudo ./startup.sh)"
-  else
-    log_error "  No key was found at any known path. Run: sudo ./setup.sh install --domain <your-domain> --email <your-email>"
+  if check_age_key_health "$canonical_key" 2>/dev/null; then
+    export SOPS_AGE_KEY_FILE="$canonical_key"
+    return 0
   fi
 
-  log_error ""
-  log_error "Run 'sudo make key-health' for a detailed key status report."
+  log_error "Age key health check FAILED: ${canonical_key}"
+  log_error "Restore the operational Age private key at ${canonical_key}, then run: sudo make key-health"
   return 1
 }
 
-# #38 — prepare_docker_secrets() skips all SOPS/filesystem operations under
-# --dry-run. Previously only the service-start function was gated; this
-# function still ran full SOPS decryption and secret-file writes even in
-# dry-run mode, which could fail on machines without a configured Age key and
-# misrepresented what "dry-run" means.
-#
-# Under --dry-run we log the two operations that would occur so the operator
-# sees the full plan, then return 0 without touching the filesystem or
-# invoking SOPS/age.
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets from SOPS..."
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would run: check_age_key_health_preflight (verify/locate Age key)"
+    log_info "[DRY RUN] Would verify canonical Age key: /etc/vaultwarden/age-key.txt"
     log_info "[DRY RUN] Would run: export_docker_secrets ${DOCKER_SECRETS_DIR} (SOPS decrypt → secret files)"
     return 0
   fi
@@ -502,20 +396,10 @@ validate_local_images() {
   return 0
 }
 
-# Honour FORCE_RESTART and DRY_RUN here.
-# Pass --force-recreate when FORCE_RESTART=true so containers are re-created
-# even if the image digest has not changed.
 _startup_start_services() {
   log_info "Starting VaultWarden services with existing local images..."
 
-  local compose_args=(
-    up
-    -d
-    --pull
-    never
-    --no-build
-  )
-
+  local compose_args=(up -d --pull never --no-build)
   if [[ "$FORCE_RESTART" == "true" ]]; then
     compose_args+=(--force-recreate)
     log_info "Force restart requested; Docker Compose will recreate existing containers."
@@ -535,15 +419,11 @@ _startup_start_services() {
   return 0
 }
 
-
-# Critical services to health-wait are declared in _VW_DEFAULT_CRITICAL_SERVICES
-# (lib/defaults.sh). Add a new sidecar there — not here — when the stack grows.
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
 
   local timeout="${CRITICAL_SERVICE_STARTUP_TIMEOUT:-90}"
   local service
-
   for service in "${_VW_DEFAULT_CRITICAL_SERVICES[@]}"; do
     wait_for_service_ready "$service" "$timeout" || return 1
   done
@@ -572,9 +452,7 @@ wait_for_optional_service_health() {
       "$container_id" 2>/dev/null || true)
 
     case "$status" in
-      healthy|running)
-        return 0
-        ;;
+      healthy|running) return 0 ;;
       unhealthy|exited|dead)
         log_warn "Optional service '${service}' entered state '${status}'"
         return 1
@@ -594,7 +472,6 @@ wait_for_optional_services() {
   local timeout="${POSTFIX_STARTUP_TIMEOUT:-60}"
 
   log_info "Waiting up to ${timeout}s for optional service '${service}' to become ready..."
-
   if wait_for_optional_service_health "$service" "$timeout"; then
     log_success "Optional service '${service}' is ready"
     return 0
@@ -605,10 +482,8 @@ wait_for_optional_services() {
     " Vaultwarden remains available, but email delivery may be delayed."
     " Fix: docker logs vaultwarden_postfix --tail=100"
   )
-
   return 0
 }
-
 
 run_health_check() {
   if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
@@ -625,14 +500,10 @@ run_health_check() {
   fi
 
   log_info "Running post-start health check..."
-
-  # Disable errexit around the health check so its exit code can be captured
-  # cleanly.
   log_info "Invoking: ${_health_script} health"
   local health_exit=0
   local health_attempt=1
   local health_max_attempts=3
-  # Internal root/systemd path; direct health commands still refuse root.
   VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health || health_exit=$?
 
   while (( health_exit == 75 && health_attempt < health_max_attempts )); do
@@ -644,20 +515,14 @@ run_health_check() {
   done
 
   case "$health_exit" in
-    0)
-      log_success "Health check passed — all checks healthy"
-      ;;
-    1)
-      log_warn "Health check completed with warnings — review output above"
-      ;;
+    0) log_success "Health check passed — all checks healthy" ;;
+    1) log_warn "Health check completed with warnings — review output above" ;;
     75)
       log_error "Post-start health is unknown: the health check remained contended after ${health_max_attempts} attempts."
       log_error "Startup cannot confirm service health until the active health check completes."
       return 75
       ;;
     *)
-      # Exit 2 means one or more critical failures; exit 3+ means the health
-      # script crashed.
       log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
       log_error "Startup aborted. Investigate the failures above, then re-run sudo ./startup.sh"
       log_error "To skip this gate during recovery: ./startup.sh --skip-health"
@@ -668,19 +533,11 @@ run_health_check() {
   return 0
 }
 
-
 show_status() {
   log_info "Current service status:"
   docker compose ps || true
 }
 
-# #26 — Emit the accumulated warnings banner unconditionally so it is always
-# the last thing printed, regardless of --background or --dry-run mode.
-# Previously the banner lived inside the `BACKGROUND != true` gate and was
-# silently swallowed on background-mode startups.
-#
-# Called as the very last statement in main() so every upstream function has
-# had the opportunity to append to _STARTUP_WARNINGS before we display them.
 _show_startup_warnings() {
   if [[ ${#_STARTUP_WARNINGS[@]} -eq 0 ]]; then
     return 0
@@ -694,12 +551,9 @@ _show_startup_warnings() {
   log_warn "============================================================"
 }
 
-
 main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
 
-  # Add INT/TERM traps so cleanup still runs and the exit code correctly
-  # reflects termination (130 for INT, 143 for TERM).
   trap 'operation_release 130; exit 130' INT
   trap 'operation_release 143; exit 143' HUP TERM
 
@@ -710,25 +564,16 @@ main() {
   validate_runtime_permissions || exit 1
   prepare_docker_secrets || exit 1
   prepare_push_secret_placeholders || exit 1
-  check_email_config_consistency || true # Warn only; never block startup.
+  check_email_config_consistency || true
   warn_plaintext_secret_overrides || true
   validate_local_images || exit 1
   _startup_start_services || exit 1
 
-  # Post-start: service readiness poll + health check.
-  # Skipped in --background mode because the caller manages orchestration.
   if [[ "$BACKGROUND" != "true" && "$DRY_RUN" != "true" ]]; then
     local readiness_rc=0
     local health_rc=0
-
-    # Preserve the readiness result, but still run the comprehensive health
-    # check so a failed startup includes actionable diagnostics.
     wait_for_services || readiness_rc=$?
-
-    # Postfix is optional for core availability. Give its Docker health check a
-    # bounded grace period before running the comprehensive health report.
     wait_for_optional_services || true
-
     run_health_check || health_rc=$?
 
     if (( readiness_rc != 0 )); then
@@ -740,8 +585,7 @@ main() {
 
     if (( health_rc != 0 )); then
       log_error "Startup tip: if the failure is key-related, run: sudo make key-health"
-      log_error "Canonical production key path: ${AGE_KEY_FILE}"
-      # Emit warnings before exiting so operators see them even on failure.
+      log_error "Canonical production key path: /etc/vaultwarden/age-key.txt"
       _show_startup_warnings
       exit "$health_rc"
     fi
@@ -749,24 +593,7 @@ main() {
     show_status || true
   fi
 
-  # Re-emit the key-health advisory immediately before the final success line
-  # so it is not missed in the log stream.
-  if [[ "${SOPS_AGE_KEY_FILE:-}" == "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
-    local cfg_key
-    cfg_key=$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2- || echo "(unknown)")
-    if [[ "$cfg_key" != "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
-      log_warn "=========================================================="
-      log_warn "REMINDER: SOPS_AGE_KEY_FILE in .env (${cfg_key}) was overridden"
-      log_warn "at runtime by the repo-local key. Update .env or install"
-      log_warn "the key to ${AGE_KEY_FILE} before next restart."
-      log_warn "=========================================================="
-    fi
-  fi
-
   log_success "VaultWarden-OCI startup completed"
-
-  # #26 — Always the absolute last output, regardless of --background or
-  # --dry-run, so accumulated warnings are never silently swallowed.
   _show_startup_warnings
 }
 
