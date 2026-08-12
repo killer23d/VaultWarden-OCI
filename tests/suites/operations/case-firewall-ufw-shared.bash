@@ -41,7 +41,7 @@ for legacy in \
         || fail "duplicated UFW policy helper remains: ${legacy}"
 done
 
-obsolete_range_helper="firewall_ufw_"'"'"'allow_range'"'"'
+obsolete_range_helper="firewall_ufw_"'allow_range'
 ! grep -Eq "^${obsolete_range_helper}\(\)" "$UFW_LIB" \
     || fail "obsolete UFW range compatibility helper remains"
 
