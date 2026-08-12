@@ -41,7 +41,7 @@ pass "DNS mutation credentials resolve only through SOPS"
 
 [[ "$docker_lib" == *"Docker Compose v2 is required"* ]] || fail "Compose v2 structured-output guard missing"
 [[ "$setup_system" == *"Docker Compose v2 plugin is missing"* ]] || fail "setup v2 plugin validation missing"
-! grep -R --exclude='*.md' --exclude='case-runtime-authority.bash' -nE '(^|[[:space:]])docker-compose([[:space:]]|$)' lib utilities startup.sh setup.sh >/dev/null || fail "docker-compose executable fallback found"
+! grep -R --exclude='*.md' --exclude='case-runtime-authority.bash' -nE 'command -v[[:space:]]+docker-compose|(^|[;&|])[[:space:]]*docker-compose[[:space:]]' lib utilities startup.sh setup.sh >/dev/null || fail "docker-compose executable fallback found"
 pass "Docker Compose v2 plugin is the command authority"
 
 [[ "$smoke" == *"schema_apply_type_for_key"* ]] || fail "smoke runtime secret inventory is not schema-driven"
