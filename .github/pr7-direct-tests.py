@@ -20,20 +20,28 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=../../../lib/crypto.sh
 source "$ROOT/lib/crypto.sh"
 
-# A verified volatile location is mandatory: path names alone are insufficient.
-_sensitive_backing_is_volatile() { return 1; }
-if create_sensitive_workspace refusal-test >/dev/null 2>&1; then
-    fail 'sensitive workspace succeeded when all backing verification was forced to fail'
-fi
+# Production sensitive workspaces are root-only. The focused root run verifies
+# backing refusal and real root:root mode/cleanup; the ordinary-user full suite
+# verifies that the root boundary itself fails closed.
+if (( EUID == 0 )); then
+    _sensitive_backing_is_volatile() { return 1; }
+    if create_sensitive_workspace refusal-test >/dev/null 2>&1; then
+        fail 'sensitive workspace succeeded when all backing verification was forced to fail'
+    fi
 
-# The source guard prevents re-sourcing; restore an accepting verifier explicitly
-# for the cleanup-only assertion below.
-_sensitive_backing_is_volatile() { return 0; }
-workspace="$(create_sensitive_workspace test-cleanup)" || fail 'could not create verified volatile workspace on Noble runner'
-[[ "$(stat -c '%u:%g:%a' "$workspace")" == '0:0:700' ]] || fail 'sensitive workspace is not root:root mode 0700'
-printf 'sensitive sentinel\n' >"$workspace/plaintext"
-remove_sensitive_workspace "$workspace" || fail 'sensitive workspace cleanup failed'
-[[ ! -e "$workspace" ]] || fail 'sensitive workspace remained after cleanup'
+    # The source guard prevents re-sourcing; restore an accepting verifier
+    # explicitly for the cleanup-only assertion below.
+    _sensitive_backing_is_volatile() { return 0; }
+    workspace="$(create_sensitive_workspace test-cleanup)" || fail 'could not create verified volatile workspace on Noble runner'
+    [[ "$(stat -c '%u:%g:%a' "$workspace")" == '0:0:700' ]] || fail 'sensitive workspace is not root:root mode 0700'
+    printf 'sensitive sentinel\n' >"$workspace/plaintext"
+    remove_sensitive_workspace "$workspace" || fail 'sensitive workspace cleanup failed'
+    [[ ! -e "$workspace" ]] || fail 'sensitive workspace remained after cleanup'
+else
+    if create_sensitive_workspace nonroot-test >/dev/null 2>&1; then
+        fail 'sensitive workspace unexpectedly allowed non-root allocation'
+    fi
+fi
 
 key="$TMP/age-key.txt"
 printf 'dummy-key\n' >"$key"
