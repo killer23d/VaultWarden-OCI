@@ -1,3 +1,4 @@
+# Rerun after updating the runner inventory contract for the new authority case.
 name: PR8 full Noble validation
 on:
   push:
