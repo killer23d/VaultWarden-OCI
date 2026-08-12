@@ -29,40 +29,20 @@ jobs:
               p.write_text(text.replace(old, new, 1))
 
           update = 'utilities/maintenance-update.sh'
-          old = '''    if [[ "$UPDATE_SYSTEM" == "true" ]]; then
-              operation_set_phase "3" "System package update"
-              update_system_packages
-          fi
-
-          if [[ "$image_transaction" == "true" ]]; then
-          '''
-          new = '''    if [[ "$UPDATE_SYSTEM" == "true" ]]; then
-              operation_set_phase "3" "System package update"
-              update_system_packages
-              if [[ "$image_transaction" == "true" ]]; then
-                  check_update_readiness "post-system-update pre-image baseline" || exit 1
-              fi
-          fi
-
-          if [[ "$image_transaction" == "true" ]]; then
-          '''
-          replace_once(update, old, new, 'combined update baseline')
+          needle = '        update_system_packages\n'
+          insertion = needle + '        if [[ "$image_transaction" == "true" ]]; then\n            check_update_readiness "post-system-update pre-image baseline" || exit 1\n        fi\n'
+          replace_once(update, needle, insertion, 'post-system pre-image baseline')
 
           test = 'tests/suites/operations/case-readiness.bash'
-          old = '''    system_line="$(grep -n '^[[:space:]]*update_system_packages$' "$UPDATE" | tail -1 | cut -d: -f1)"
-              snapshot_line="$(grep -n '^[[:space:]]*snapshot_image_digests$' "$UPDATE" | tail -1 | cut -d: -f1)"
-              [[ -n "$preflight_line" && -n "$system_line" && -n "$snapshot_line" ]] || fail "could not locate update ordering"
-              (( preflight_line < system_line && preflight_line < snapshot_line )) || fail "baseline must run before package/image mutation"
-          '''
-          new = '''    system_line="$(grep -n '^[[:space:]]*update_system_packages$' "$UPDATE" | tail -1 | cut -d: -f1)"
-              post_system_line="$(grep -n 'check_update_readiness "post-system-update pre-image baseline" || exit 1' "$UPDATE" | cut -d: -f1)"
-              snapshot_line="$(grep -n '^[[:space:]]*snapshot_image_digests$' "$UPDATE" | tail -1 | cut -d: -f1)"
-              [[ -n "$preflight_line" && -n "$system_line" && -n "$post_system_line" && -n "$snapshot_line" ]] \\
-                  || fail "could not locate update ordering"
-              (( preflight_line < system_line && system_line < post_system_line && post_system_line < snapshot_line )) \\
-                  || fail "combined update must re-establish a clean baseline after system packages and before image mutation"
-          '''
-          replace_once(test, old, new, 'combined update ordering regression')
+          system_line = '    system_line="$(grep -n \'^[[:space:]]*update_system_packages$\' "$UPDATE" | tail -1 | cut -d: -f1)"\n'
+          replace_once(
+              test,
+              system_line,
+              system_line + '    post_system_line="$(grep -n \'check_update_readiness "post-system-update pre-image baseline" || exit 1\' "$UPDATE" | cut -d: -f1)"\n',
+              'post-system test locator')
+          old_check = '    [[ -n "$preflight_line" && -n "$system_line" && -n "$snapshot_line" ]] || fail "could not locate update ordering"\n    (( preflight_line < system_line && preflight_line < snapshot_line )) || fail "baseline must run before package/image mutation"\n'
+          new_check = '    [[ -n "$preflight_line" && -n "$system_line" && -n "$post_system_line" && -n "$snapshot_line" ]] \\\n        || fail "could not locate update ordering"\n    (( preflight_line < system_line && system_line < post_system_line && post_system_line < snapshot_line )) \\\n        || fail "combined update must re-establish a clean baseline after system packages and before image mutation"\n'
+          replace_once(test, old_check, new_check, 'combined update ordering regression')
           PY
           bash -n utilities/maintenance-update.sh tests/suites/operations/case-readiness.bash lib/crowdsec.sh
           shellcheck -x --severity=warning utilities/maintenance-update.sh tests/suites/operations/case-readiness.bash lib/crowdsec.sh
