@@ -42,19 +42,13 @@ OPTIONS:
     --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
-SECRET SOURCE PRIORITY:
-    caddy_cloudflare_dns_token — resolved in order:
-        1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. Host file: $CF_TOKEN_FILE or /run/vaultwarden-oci/secrets/caddy_cloudflare_dns_token
-        3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
+SECRET SOURCE:
+    caddy_cloudflare_dns_token and cloudflare_zone_id are resolved only from
+    canonical encrypted $SECRETS_FILE through decrypt_secret().
 
     DNS_UPDATE_REQUIRED=true or --require-dns makes missing config fail.
     UPDATE_DNS=false skips cleanly. When UPDATE_DNS is unset, missing or
     placeholder Cloudflare config logs a warning and exits 0.
-
-    cloudflare_zone_id — resolved in order:
-        1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. Legacy CLOUDFLARE_ZONE_ID shell variable fallback (do not add to .env)
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully
@@ -64,74 +58,27 @@ EOF
 }
 
 # _resolve_cf_token
-# Priority: decrypt_secret → host secret file → Caddy container secret.
+# Cloudflare mutation credentials have one authority: encrypted SOPS state.
 _resolve_cf_token() {
     local token
-
-    # 1. Encrypted secrets file (preferred — no plaintext on disk).
     if token=$(decrypt_secret "caddy_cloudflare_dns_token" 2>/dev/null) && [[ -n "$token" ]]; then
-        log_debug "Cloudflare token loaded via decrypt_secret"
         printf '%s' "$token"
         return 0
     fi
-
-    # 2. Host-side Docker secret file.
-    local token_file
-    token_file="${CF_TOKEN_FILE:-/run/vaultwarden-oci/secrets/caddy_cloudflare_dns_token}"
-    if [[ -f "$token_file" ]]; then
-        local token_perms
-        token_perms=$(stat -c%a "$token_file" 2>/dev/null \
-                   || stat -f%Lp "$token_file" 2>/dev/null \
-                   || echo "")
-        case "$token_perms" in
-            444|400|600|640)
-                log_debug "Cloudflare token file permissions OK ($token_perms)"
-                ;;
-            "")
-                log_warn "Cannot determine permissions on $token_file — proceeding with caution"
-                ;;
-            *)
-                log_error "Cloudflare token file has insecure permissions ($token_perms): $token_file"
-                log_error "Expected 444 (docker secret) or 400/600. Fix with: chmod 444 '$token_file'"
-                return 1
-                ;;
-        esac
-        token=$(cat "$token_file") \
-            || { log_error "Cannot read Cloudflare API token from host secret file"; return 1; }
-        log_debug "Cloudflare token loaded from host secret file: $token_file"
-        printf '%s' "$token"
-        return 0
-    fi
-
-    # 3. Caddy container secret (fallback when host file is absent).
-    token=$(docker compose exec -T caddy \
-        cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
-        || { log_error "Cannot read Cloudflare API token (host file: $token_file not found, Caddy container may be stopped)"; return 1; }
-    log_debug "Cloudflare token loaded from Caddy container secret"
-    printf '%s' "$token"
-    return 0
+    log_error "caddy_cloudflare_dns_token could not be resolved from canonical SOPS state"
+    log_error "Fix: ./edit-secrets.sh rotate caddy_cloudflare_dns_token"
+    return 1
 }
 
 # _resolve_zone_id
-# Priority: decrypt_secret → legacy CLOUDFLARE_ZONE_ID shell variable fallback.
+# Cloudflare mutation credentials have one authority: encrypted SOPS state.
 _resolve_zone_id() {
     local zone_id
-
-    # 1. Encrypted secrets file (preferred).
     if zone_id=$(decrypt_secret "cloudflare_zone_id" 2>/dev/null) && [[ -n "$zone_id" ]]; then
-        log_debug "Cloudflare zone_id loaded via decrypt_secret"
         printf '%s' "$zone_id"
         return 0
     fi
-
-    # 2. Legacy shell environment variable fallback; do not add it to .env for new installs.
-    if [[ -n "${CLOUDFLARE_ZONE_ID:-}" ]]; then
-        log_debug "Cloudflare zone_id loaded from CLOUDFLARE_ZONE_ID environment variable"
-        printf '%s' "${CLOUDFLARE_ZONE_ID}"
-        return 0
-    fi
-
-    log_error "cloudflare_zone_id not found in encrypted secrets (legacy CLOUDFLARE_ZONE_ID shell fallback also empty)"
+    log_error "cloudflare_zone_id could not be resolved from canonical SOPS state"
     log_error "Fix: ./edit-secrets.sh rotate cloudflare_zone_id"
     return 1
 }

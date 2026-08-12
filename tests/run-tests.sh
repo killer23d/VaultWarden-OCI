@@ -63,6 +63,7 @@ FOUNDATION_CASES=(
     "runner-contracts-core|tests/suites/foundation/case-runner-contracts.bash|core|120"
     "repository-interface|tests/suites/foundation/case-runner-contracts.bash|repository-interface|120"
     "config-env-core|tests/suites/foundation/case-config-env.bash|core|120"
+    "runtime-authority|tests/suites/foundation/case-runtime-authority.bash|all|120"
     "compose-project|tests/suites/foundation/case-compose-project.bash|all|120"
     "ci-dev-setup|tests/suites/foundation/case-config-env.bash|ci-dev-setup|120"
     "permissions|tests/suites/foundation/case-permissions.bash|all|120"

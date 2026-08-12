@@ -124,7 +124,7 @@ SUBCOMMANDS:
 
     After the backup is selected you will be prompted for the Age private
     key that decrypts the selected backup. Press Enter to use the operational
-    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+    Age key at /etc/vaultwarden/age-key.txt.
 
     Before overwrite, restore creates a pre-restore emergency snapshot unless
     --no-backup is used. If that snapshot is passphrase-sealed, its emergency
@@ -1432,10 +1432,10 @@ ROTATED_KIT_FILE=""
 _rotate_age_key() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would generate a new age key pair and install to:"
-        log_info "  $PROJECT_ROOT/secrets/keys/age-key.txt"
+        log_info "  /etc/vaultwarden/age-key.txt"
         [[ -f "/etc/vaultwarden/age-key.txt" ]] && \
             log_info "  /etc/vaultwarden/age-key.txt"
-        log_info "  SOPS_AGE_KEY_FILE updated in .env"
+        log_info "  runtime SOPS authority remains canonical"
         return 0
     fi
 
@@ -3088,7 +3088,7 @@ main() {
     # that have not explicitly set BACKUP_DIR still resolve to the correct volume.
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${STATE_DIR}/backups")"
-    local OPERATIONAL_SOPS_AGE_KEY_FILE; OPERATIONAL_SOPS_AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
+    local OPERATIONAL_SOPS_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
     RESTORE_DECRYPT_AGE_KEY_FILE=""
     RESTORE_REKEY_SOURCE_AGE_KEY_FILE=""
     local PUID PGID

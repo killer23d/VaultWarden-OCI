@@ -474,8 +474,13 @@ require_supported_host_preflight() {
 # Install Docker CE from the official apt repository with GPG key verification.
 install_docker() {
     if command -v docker &>/dev/null && docker info &>/dev/null; then
-        log_info "setup" "Docker already installed: $(docker --version)"
-        return 0
+        local compose_version=""
+        compose_version="$(docker compose version --short 2>/dev/null || true)"
+        if [[ "$compose_version" =~ ^v?2\. ]]; then
+            log_info "setup" "Docker already installed: $(docker --version); Compose ${compose_version}"
+            return 0
+        fi
+        log_info "setup" "Docker is present but Docker Compose v2 plugin is missing; installing required plugin"
     fi
 
     require_supported_host_preflight || return 1
@@ -545,7 +550,16 @@ EOF
     fi
 
     systemctl enable --now docker
-    log_success "setup" "Docker installed: $(docker --version)"
+    local compose_version
+    compose_version="$(docker compose version --short 2>/dev/null)" || {
+        log_error "setup" "Docker Compose v2 plugin is unavailable after installation"
+        return 1
+    }
+    [[ "$compose_version" =~ ^v?2\. ]] || {
+        log_error "setup" "Docker Compose v2 is required; found: ${compose_version}"
+        return 1
+    }
+    log_success "setup" "Docker installed: $(docker --version); Compose ${compose_version}"
 }
 
 # Verify minimum free space on the project root, Docker data root, and an existing data mount.

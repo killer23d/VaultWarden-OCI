@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/lib/log.sh"
 source "$SCRIPT_DIR/lib/defaults.sh"
 source "$SCRIPT_DIR/lib/config.sh"
+source "$SCRIPT_DIR/lib/schema.sh"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
@@ -280,7 +281,7 @@ check_age_key() {
     _require_project_environment "age-key" || return 0
     # check_age_key_health reads AGE_KEY_FILE, so pass it the key path resolved
     # by the canonical project environment.
-    local key_file="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
+    local key_file="/etc/vaultwarden/age-key.txt"
     if [[ ! -f "$key_file" ]]; then
         _check_fail "age-key" "key file not found: $key_file"
         return
@@ -304,7 +305,7 @@ check_secrets_decryptable() {
     [[ "$QUIET" == false ]] && log_info "Checking secrets decryptable..."
     _require_project_environment "secrets-decryptable" || return 0
     local secrets_file="${SECRETS_FILE:-}"
-    local key_file="${SOPS_AGE_KEY_FILE:-}"
+    local key_file="/etc/vaultwarden/age-key.txt"
     if [[ ! -f "$secrets_file" ]]; then
         _check_fail "secrets-file" "secrets file not found: $secrets_file"
         return
@@ -324,15 +325,15 @@ check_secrets_decryptable() {
 check_docker_secrets_materialized() {
     [[ "$QUIET" == false ]] && log_info "Checking Docker secrets materialized..."
     local secrets_dir="${DOCKER_SECRETS_DIR:-/run/vaultwarden-oci/secrets}"
-    # All secrets defined in the compose 'secrets:' top-level block.
-    local required_secrets=(
-        admin_token
-        admin_basic_auth_hash
-        smtp_password
-        caddy_cloudflare_dns_token
-        push_installation_id
-        push_installation_key
-    )
+    local required_secrets=() key
+    if ! schema_validate; then
+        _check_fail "runtime-secret-inventory" "secrets schema validation failed"
+        return
+    fi
+    while IFS= read -r key; do
+        [[ "$(schema_apply_type_for_key "$key")" == "compose_restart" ]] || continue
+        required_secrets+=("$key")
+    done < <(schema_keys)
 
     if [[ ! -d "$secrets_dir" ]]; then
         if [[ -f /etc/systemd/system/vaultwarden-startup.service ]]; then

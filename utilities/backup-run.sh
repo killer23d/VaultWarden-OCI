@@ -319,28 +319,7 @@ _acquire_backup_guard() {
 
 
 _resolve_age_key() {
-    local candidates=(
-        "${SOPS_AGE_KEY_FILE:-}"
-        "/etc/vaultwarden/age-key.txt"
-        "$SCRIPT_DIR/secrets/keys/age-key.txt"
-    )
-    for candidate in "${candidates[@]}"; do
-        [[ -z "$candidate" ]] && continue
-        [[ "$candidate" != /* && ! -f "$candidate" ]] && continue
-        if [[ -f "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-    for candidate in "${candidates[@]}"; do
-        [[ -z "$candidate" ]] && continue
-        if [[ "$candidate" == /* ]]; then
-            echo "$candidate"
-            return 1
-        fi
-    done
-    echo "/etc/vaultwarden/age-key.txt"
-    return 1
+    resolve_age_key_path
 }
 
 _default_backup_dir() { vw_default_backup_dir; }
