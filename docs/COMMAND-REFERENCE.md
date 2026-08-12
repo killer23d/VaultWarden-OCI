@@ -291,7 +291,7 @@ SUBCOMMANDS:
 
     After the backup is selected you will be prompted for the Age private
     key that decrypts the selected backup. Press Enter to use the operational
-    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+    Age key at /etc/vaultwarden/age-key.txt.
 
     Before overwrite, restore creates a pre-restore emergency snapshot unless
     --no-backup is used. If that snapshot is passphrase-sealed, its emergency
@@ -848,19 +848,13 @@ OPTIONS:
     --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
-SECRET SOURCE PRIORITY:
-    caddy_cloudflare_dns_token — resolved in order:
-        1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. Host file: $CF_TOKEN_FILE or /run/vaultwarden-oci/secrets/caddy_cloudflare_dns_token
-        3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
+SECRET SOURCE:
+    caddy_cloudflare_dns_token and cloudflare_zone_id are resolved only from
+    canonical encrypted $SECRETS_FILE through decrypt_secret().
 
     DNS_UPDATE_REQUIRED=true or --require-dns makes missing config fail.
     UPDATE_DNS=false skips cleanly. When UPDATE_DNS is unset, missing or
     placeholder Cloudflare config logs a warning and exits 0.
-
-    cloudflare_zone_id — resolved in order:
-        1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. Legacy CLOUDFLARE_ZONE_ID shell variable fallback (do not add to .env)
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully
@@ -1015,7 +1009,7 @@ SUBCOMMANDS:
 
     After the backup is selected you will be prompted for the Age private
     key that decrypts the selected backup. Press Enter to use the operational
-    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+    Age key at /etc/vaultwarden/age-key.txt.
 
     Before overwrite, restore creates a pre-restore emergency snapshot unless
     --no-backup is used. If that snapshot is passphrase-sealed, its emergency
@@ -1600,8 +1594,8 @@ WHAT install DOES:
          caddy/entrypoint.sh                                                    (root:root 755)
        Private secrets are not copied into this code bundle.
     4. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
-       using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
-    5. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
+       using ${PROJECT_STATE_DIR}/config/install.env or the installed runtime authority.
+    5. Requires the operational Age key at /etc/vaultwarden/age-key.txt
     6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     7. systemctl daemon-reload
     8. Installs a Docker lifecycle drop-in so firewall reconciliation and startup rerun after dockerd restarts

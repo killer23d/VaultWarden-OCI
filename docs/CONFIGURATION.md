@@ -26,13 +26,9 @@ The runtime loader first discovers `PROJECT_STATE_DIR` from:
 3. `/etc/vaultwarden/vaultwarden.env`;
 4. the default `/var/lib/vaultwarden`.
 
-After the state directory is known, one complete runtime environment is loaded in this order:
+Production runtime loads one installed authority: `/etc/vaultwarden/vaultwarden.env` when present, otherwise `${PROJECT_STATE_DIR}/config/install.env`. Repository `.env` is authoring input only and is never a production fallback. Missing or malformed runtime authority is fatal; repair it with `sudo make sync-env`.
 
-1. `/etc/vaultwarden/vaultwarden.env`, when installed;
-2. `${PROJECT_STATE_DIR}/config/install.env`;
-3. repository `.env` as the bootstrap/legacy fallback.
-
-Explicit caller overrides for state directory, data device, data mount, and the SOPS Age key path are reapplied after loading.
+Explicit caller overrides for state directory, data device, and data mount are reapplied after loading. The operational Age private key is always `/etc/vaultwarden/age-key.txt`.
 
 The authoring/sync workflow is intentionally different from runtime precedence:
 
