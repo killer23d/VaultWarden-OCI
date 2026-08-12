@@ -1,0 +1,35 @@
+name: PR8 scoped patch application retry
+on:
+  push:
+    branches:
+      - pr8-runtime-authority-age-custody
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: pr8-runtime-authority-age-custody
+          fetch-depth: 0
+      - name: Apply scoped patch
+        run: |
+          sed -i 's/            _run install -m 600 -o root -g root/            install -m 600 -o root -g root/' .github/pr8_apply.py
+          sed -i 's/log_success \\"Installed age key: \$AGE_KEY_DEST\\"/log_success \\"Installed age key: \$AGE_KEY_DEST (root:root 600)\\"/' .github/pr8_apply.py
+          python3 .github/pr8_apply.py
+          rm -f .github/workflows/pr8-apply-2.yml
+      - name: Validate changed shell syntax
+        run: |
+          git diff --name-only --diff-filter=ACM | while read -r file; do
+            case "$file" in
+              *.sh|*.bash) bash -n "$file" ;;
+            esac
+          done
+      - name: Commit patch and remove helpers
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'runtime: canonicalize authority and Age custody'
+          git push origin HEAD:pr8-runtime-authority-age-custody
