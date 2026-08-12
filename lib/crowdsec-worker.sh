@@ -63,12 +63,11 @@ crowdsec_worker_apply_config() {
         return 1
     fi
 
-    if declare -F load_project_environment >/dev/null 2>&1; then
-        load_project_environment || return 1
-    elif [[ -f "${PROJECT_ROOT:-$(pwd)}/.env" ]] && declare -F load_env_file >/dev/null 2>&1; then
-        load_env_file "${PROJECT_ROOT:-$(pwd)}/.env" || true
-        declare -F resolve_secrets_file >/dev/null 2>&1 && resolve_secrets_file
+    if ! declare -F load_project_environment >/dev/null 2>&1; then
+        log_error "Canonical runtime environment loader is unavailable."
+        return 1
     fi
+    load_project_environment || return 1
     [[ -z "${DATA_VOLUME_DEVICE:-}" ]] || require_project_state_ready || return 1
 
     local project_root="${PROJECT_ROOT:-$(pwd)}"

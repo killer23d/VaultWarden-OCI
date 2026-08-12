@@ -305,7 +305,7 @@ _is_operator_permission_path() {
     path="$(_canonical_permission_path "$1")"
     state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     case "$path" in
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
             return 0 ;;
         *) return 1 ;;
     esac
@@ -321,7 +321,7 @@ expected_owner_for_path() {
         /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|/run/vaultwarden-oci/managed-secrets|\
         "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             printf 'root' ;;
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
             _operator_user_group | cut -d: -f1 ;;
         *) return 1 ;;
     esac
@@ -337,7 +337,7 @@ expected_group_for_path() {
         /run/vaultwarden-oci/secrets|/run/vaultwarden-oci/secrets/*|/run/vaultwarden-oci/managed-secrets|\
         "$state_dir"/secrets|"$state_dir"/secrets/secrets.yaml)
             printf 'root' ;;
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets"|"$PROJECT_ROOT/.sops.yaml"|"$PROJECT_ROOT/secrets/secrets.yaml")
             _operator_user_group | cut -d: -f2 ;;
         *) return 1 ;;
     esac
@@ -358,7 +358,7 @@ expected_mode_for_path() {
         "$PROJECT_ROOT/.sops.yaml") printf '644' ;;
         /etc/vaultwarden/age-key.txt|/etc/vaultwarden/vaultwarden.env|/etc/vaultwarden/rclone.conf|\
         "$state_dir"/config/install.env|"$state_dir"/config/dr-manifest.env|\
-        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets/keys/age-key.txt"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
+        "$PROJECT_ROOT/.env"|"$PROJECT_ROOT/secrets/secrets.yaml"|\
         "$state_dir"/secrets/secrets.yaml)
             printf '600' ;;
         *) return 1 ;;
