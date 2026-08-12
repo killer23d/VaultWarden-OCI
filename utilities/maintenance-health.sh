@@ -19,6 +19,7 @@ source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
 source "$PROJECT_ROOT/lib/secrets.sh"
 source "$PROJECT_ROOT/lib/storage.sh"
+source "$PROJECT_ROOT/lib/crowdsec.sh"
 
 # Default path helpers mirror maintenance.sh, and storage.sh provides vw_default_backup_dir.
 _default_backup_dir()     { vw_default_backup_dir; }
@@ -335,7 +336,7 @@ STANDARD CHECKS:
     - SSL certificate validity and expiry
     - VaultWarden /alive liveness probe (internal + external HTTPS)
     - VaultWarden /api/config readiness probe (requires live DB connection)
-    - CrowdSec integration check (systemd service + bouncer)
+    - CrowdSec integration check (systemd service + golden-path edge bouncer)
     - Disk space utilization
     - Memory utilization
     - Network connectivity
@@ -711,32 +712,19 @@ _check_crowdsec() {
         log_warn "CrowdSec LAPI metrics unavailable without non-interactive root access; skipping optional cscli check."
     fi
 
-    # Bouncer check priority: prefer crowdsec-firewall-bouncer, then
-    # crowdsec-cloudflare-worker-bouncer. Warn when a bouncer unit is installed but not
-    # running, and pass with an install note when no bouncer is installed.
-    local _bouncer_active=false
-    local _bouncer_name=""
-
-    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
-        _bouncer_active=true
-        _bouncer_name="crowdsec-firewall-bouncer"
-    elif systemctl is-active --quiet crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
-        _bouncer_active=true
-        _bouncer_name="crowdsec-cloudflare-worker-bouncer"
-    fi
-
-    if [[ "$_bouncer_active" == "true" ]]; then
-        _pass "crowdsec:bouncer" "CrowdSec ${_bouncer_name} is active"
-    elif systemctl list-unit-files 2>/dev/null \
-            | grep -qE 'crowdsec-(firewall|cloudflare)-bouncer\.service'; then
-        # A bouncer unit is installed but not running, so flag it.
-        _warn "crowdsec:bouncer" \
-            "CrowdSec bouncer is installed but not active — check: sudo systemctl status crowdsec-firewall-bouncer"
-    else
-        # No bouncer is installed, which is optional, so keep this as pass.
-        _pass "crowdsec:bouncer" \
-            "No CrowdSec bouncer installed (optional — install crowdsec-firewall-bouncer or crowdsec-cloudflare-worker-bouncer)"
-    fi
+    local readiness_rc=0
+    crowdsec_worker_readiness || readiness_rc=$?
+    case "$readiness_rc" in
+        0)
+            _pass "crowdsec:bouncer" "CrowdSec Workers bouncer ${CROWDSEC_READINESS_DETAIL}"
+            ;;
+        10)
+            _warn "crowdsec:bouncer" "${CROWDSEC_READINESS_DETAIL}; this is not normal production readiness"
+            ;;
+        *)
+            _fail "crowdsec:bouncer" "${CROWDSEC_READINESS_DETAIL} — run: sudo ./utilities/setup-crowdsec.sh"
+            ;;
+    esac
 
     if $COMPREHENSIVE; then
         local decision_count
@@ -1267,8 +1255,6 @@ _generate_report() {
     find "$REPORT_DIR" -name 'health_*.txt' \
         -mtime +"$REPORT_RETENTION_DAYS" -delete 2>/dev/null || true
 }
-
-
 
 _print_results_json() {
     local overall="pass"
