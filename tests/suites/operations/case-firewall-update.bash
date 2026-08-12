@@ -9,6 +9,7 @@ ROOT="$VW_TEST_REPO_ROOT"
 UPDATER="$ROOT/utilities/maintenance-update-firewall.sh"
 SETUP_FIREWALL="$ROOT/utilities/setup-firewall.sh"
 FIREWALL_LIB="$ROOT/lib/firewall.sh"
+UFW_LIB="$ROOT/lib/firewall-ufw.sh"
 SYSTEMD_SETUP="$ROOT/utilities/setup-systemd.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -249,7 +250,10 @@ firewall_docker_ingress_is_exact(){
 firewall_reconcile_cloudflare_docker_ingress(){ printf 'reconcile %s\n' "$*" >> "${FW_CALL_LOG:?}"; return "${FW_RECONCILE_RC:-0}"; }
 firewall_fail_closed_stop_caddy(){ printf 'stop-caddy\n' >> "${FW_CALL_LOG:?}"; return "${FW_STOP_CADDY_RC:-0}"; }
 EOF_PROBE
-extract_func "$UPDATER" update_firewall_ranges >> "$PROBE"
+{
+    printf 'source %q\n' "$UFW_LIB"
+    extract_func "$UPDATER" update_firewall_ranges
+} >> "$PROBE"
 cat >> "$PROBE" <<'EOF_PROBE'
 set +e
 update_firewall_ranges
@@ -741,25 +745,20 @@ DRY_RUN=false
 log_error(){ printf 'ERROR: %s\n' "$*" >> "${LOG_FILE:?}"; }
 log_dry_run(){ :; }
 EOF_SETUP_UFW
-extract_func "$SETUP_FIREWALL" _ufw_status >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_has_range_port >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_has_admin_port >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_line_cidr >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_collect_conflicts >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_default_incoming_fail_closed >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_reject_hidden_inactive_permissive_rules >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_reject_ambiguous_inbound_allows >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_validate_safety >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_delete_rules >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_ensure_range >> "$SETUP_UFW_PROBE"
-extract_func "$SETUP_FIREWALL" _ufw_verify_exact >> "$SETUP_UFW_PROBE"
+{
+    printf 'source %q\n' "$UFW_LIB"
+    extract_func "$SETUP_FIREWALL" _ufw_reject_hidden_inactive_permissive_rules
+    extract_func "$SETUP_FIREWALL" _ufw_validate_safety
+    extract_func "$SETUP_FIREWALL" _ufw_delete_rules
+    extract_func "$SETUP_FIREWALL" _ufw_verify_exact
+} >> "$SETUP_UFW_PROBE"
 cat >> "$SETUP_UFW_PROBE" <<'EOF_SETUP_UFW'
 case "${SETUP_UFW_CASE:?}" in
     verify)
         _ufw_verify_exact 22 203.0.113.0/24
         ;;
     ensure)
-        _ufw_ensure_range 203.0.113.0/24 CF-IPv4
+        firewall_ufw_ensure_web_range 203.0.113.0/24 CF-IPv4
         ;;
     safety)
         _ufw_validate_safety
@@ -1057,7 +1056,7 @@ assert_file_contains "$FIREWALL_LIB" '--ctstate ESTABLISHED,RELATED --ctdir REPL
 ! grep -Fq -- '--ctstate ESTABLISHED,RELATED -j RETURN' "$FIREWALL_LIB" \
     || fail "Docker gate still has a directionless established-state ingress bypass"
 assert_file_contains "$FIREWALL_LIB" '_firewall_managed_chain_order_is_safe || return 1'
-assert_file_contains "$SETUP_FIREWALL" 'if ! _ufw_has_admin_port "$status" "$ssh_port"; then'
+assert_file_contains "$SETUP_FIREWALL" 'if ! firewall_ufw_has_admin_port "$status" "$ssh_port"; then'
 ! grep -Fq '_ufw_has_broad_admin_port' "$SETUP_FIREWALL" || fail "setup still requires broad SSH exposure"
 assert_file_contains "$FIREWALL_LIB" '-j RETURN'
 assert_file_contains "$FIREWALL_LIB" '-j DROP'

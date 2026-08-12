@@ -11,10 +11,10 @@ readonly VW_FIREWALL_UFW_LIB_LOADED=1
 firewall_ufw_status() {
     local mode="${1:-normal}" output rc=0
     case "$mode" in
-        true|numbered) output="$(ufw status numbered 2>&1)" || rc=$? ;;
-        verbose)       output="$(ufw status verbose 2>&1)" || rc=$? ;;
-        added)         output="$(ufw show added 2>&1)" || rc=$? ;;
-        false|normal)  output="$(ufw status 2>&1)" || rc=$? ;;
+        numbered) output="$(ufw status numbered 2>&1)" || rc=$? ;;
+        verbose)  output="$(ufw status verbose 2>&1)" || rc=$? ;;
+        added)    output="$(ufw show added 2>&1)" || rc=$? ;;
+        normal)   output="$(ufw status 2>&1)" || rc=$? ;;
         *)
             log_error "Unknown UFW status mode: ${mode}"
             return 2
@@ -186,34 +186,23 @@ firewall_ufw_validate_common_safety() {
     firewall_ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
 }
 
-firewall_ufw_allow_range() {
-    local cidr="$1" label="$2" status output rc=0
+firewall_ufw_ensure_web_range() {
+    local cidr="$1" label="$2" status output port rc=0
     local dry_run="${3:-false}"
 
     status="$(firewall_ufw_status normal)" || return $?
-    if ! firewall_ufw_has_range_port "$status" "$cidr" 80; then
+    for port in 80 443; do
+        firewall_ufw_has_range_port "$status" "$cidr" "$port" && continue
         if [[ "$dry_run" == "true" ]]; then
-            log_dry_run "Would allow Cloudflare ${cidr} to 80/tcp"
-        else
-            output="$(ufw allow proto tcp from "$cidr" to any port 80 comment "$label" 2>&1)" || rc=$?
-            if (( rc != 0 )); then
-                log_error "Failed to add UFW port 80 rule for ${cidr} (exit ${rc}): ${output:-no output}"
-                return "$rc"
-            fi
+            log_dry_run "Would allow Cloudflare ${cidr} to ${port}/tcp"
+            continue
         fi
-    fi
 
-    status="$(firewall_ufw_status normal)" || return $?
-    if ! firewall_ufw_has_range_port "$status" "$cidr" 443; then
-        if [[ "$dry_run" == "true" ]]; then
-            log_dry_run "Would allow Cloudflare ${cidr} to 443/tcp"
-        else
-            rc=0
-            output="$(ufw allow proto tcp from "$cidr" to any port 443 comment "$label" 2>&1)" || rc=$?
-            if (( rc != 0 )); then
-                log_error "Failed to add UFW port 443 rule for ${cidr} (exit ${rc}): ${output:-no output}"
-                return "$rc"
-            fi
+        rc=0
+        output="$(ufw allow proto tcp from "$cidr" to any port "$port" comment "$label" 2>&1)" || rc=$?
+        if (( rc != 0 )); then
+            log_error "Failed to add UFW port ${port} rule for ${cidr} (exit ${rc}): ${output:-no output}"
+            return "$rc"
         fi
-    fi
+    done
 }
