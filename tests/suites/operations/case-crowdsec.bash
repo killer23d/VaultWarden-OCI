@@ -85,7 +85,7 @@ assert_file_contains "$acquis_file" 'avoid'
 assert_file_contains "$compose_example" 'LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S.%3f%z"'
 assert_file_contains "$compose_example" 'IP_HEADER: ${IP_HEADER:-CF-Connecting-IP}'
 
-cf_bouncer_install_block="$(awk '/Attempting apt install of crowdsec-cloudflare-worker-bouncer/,/Installed crowdsec-cloudflare-worker-bouncer via apt/' "$setup_script")"
+cf_bouncer_install_block="$(awk '/Installing Cloudflare Workers bouncer from the configured CrowdSec package repository/,/Installed crowdsec-cloudflare-worker-bouncer via the CrowdSec package repository/' "$setup_script")"
 grep -Fq 'Dpkg::Options::=--force-confdef' <<< "$cf_bouncer_install_block" \
     || fail "Cloudflare Workers bouncer apt install must include --force-confdef"
 grep -Fq 'Dpkg::Options::=--force-confold' <<< "$cf_bouncer_install_block" \
@@ -291,6 +291,9 @@ export DOMAIN_NAME="vault.example.test"
 export CROWDSEC_CF_BOUNCER_API_KEY="NEW_LAPI_KEY"
 export CF_ACCOUNT_EMAIL="ops@example.test"
 export CF_FREE_PLAN=true
+export VW_CROWDSEC_ETC_DIR="$TMP/etc-crowdsec"
+mkdir -p "$VW_CROWDSEC_ETC_DIR"
+printf 'api:\n  server:\n    listen_uri: 127.0.0.1:8097\n' > "$VW_CROWDSEC_ETC_DIR/config.yaml"
 
 # shellcheck source=../lib/log.sh
 source "$PROJECT_ROOT/lib/log.sh"
@@ -315,6 +318,7 @@ grep -Fq 'NEW_WORKER_TOKEN' "$TMP/rendered.yaml" || fail "rendered config missin
 grep -Fq 'NEW_ZONE_ID' "$TMP/rendered.yaml" || fail "rendered config missing new zone id"
 grep -Fq 'NEW_ACCOUNT_ID' "$TMP/rendered.yaml" || fail "rendered config missing new account id"
 grep -Fq 'NEW_LAPI_KEY' "$TMP/rendered.yaml" || fail "rendered config missing LAPI key"
+grep -Fq 'http://127.0.0.1:8097/' "$TMP/rendered.yaml" || fail "rendered config did not use the resolved LAPI port"
 ! grep -Eq '%%[^%]+%%' "$TMP/rendered.yaml" || fail "rendered config contains unresolved template variables"
 
 cp "$PROJECT_ROOT/crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example" "$TMP/unresolved.yaml"

@@ -232,6 +232,50 @@ check_port_exhaustion_and_installer_contract() {
         "Workers bouncer install must use the canonical package source"
 }
 
+check_port_exhaustion_behavior() (
+    set -euo pipefail
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+    extract_function _cs_find_free_port "$SETUP_CROWDSEC" > "$tmpdir/find-free-port.sh"
+    [[ -s "$tmpdir/find-free-port.sh" ]] || fail "could not extract _cs_find_free_port"
+    mkdir -p "$tmpdir/bin"
+    cat > "$tmpdir/bin/ss" <<'EOF_SS'
+#!/usr/bin/env bash
+printf '%s\n' 'LISTEN 0 4096 127.0.0.1:65535 0.0.0.0:* users:(("occupied",pid=1,fd=1))'
+EOF_SS
+    chmod +x "$tmpdir/bin/ss"
+    PATH="$tmpdir/bin:$PATH"
+    export PATH
+    log_error() { :; }
+    # shellcheck disable=SC1090
+    source "$tmpdir/find-free-port.sh"
+    set +e
+    output="$(_cs_find_free_port 65535)"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 1 ]] || fail "exhausted CrowdSec port search must fail, got $rc"
+    [[ -z "$output" ]] || fail "exhausted CrowdSec port search must not guess a port: $output"
+)
+
+check_tls_failure_behavior() (
+    set -euo pipefail
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+    extract_function check_tls_certificate "$SMOKE" > "$tmpdir/tls-check.sh"
+    [[ -s "$tmpdir/tls-check.sh" ]] || fail "could not extract check_tls_certificate"
+    export QUIET=true
+    export DOMAIN="https://wrong-host.example.invalid"
+    TLS_RESULT=""
+    _require_project_environment() { return 0; }
+    _check_fail() { TLS_RESULT="FAIL|$1|$2"; }
+    curl() { return 60; }
+    # shellcheck disable=SC1090
+    source "$tmpdir/tls-check.sh"
+    check_tls_certificate
+    [[ "$TLS_RESULT" == FAIL\|tls-verified\|certificate\ trust\ or\ hostname\ verification\ failed* ]] \
+        || fail "certificate/hostname verification failure must fail smoke readiness: $TLS_RESULT"
+)
+
 check_shared_resolver_contract() {
     require 'source .*crowdsec\.sh' "$WORKER_LIB" \
         "Workers helper must source the shared CrowdSec resolver"
@@ -258,7 +302,9 @@ check_docs_contract() {
 check_update_transaction
 check_crowdsec_readiness
 check_tls_contract
+check_tls_failure_behavior
 check_port_exhaustion_and_installer_contract
+check_port_exhaustion_behavior
 check_shared_resolver_contract
 check_health_contract
 check_docs_contract
