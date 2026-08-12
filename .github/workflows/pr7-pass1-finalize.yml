@@ -1,0 +1,247 @@
+name: PR7 post-review finalize
+on:
+  pull_request:
+    branches:
+      - delta
+permissions:
+  contents: write
+jobs:
+  finalize:
+    if: github.head_ref == 'pr7-sensitive-workspace-sops-hardening'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pr7-sensitive-workspace-sops-hardening
+          fetch-depth: 0
+      - name: Build corrected clean commit locally
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          # utilities/setup-secrets.sh: fix expiry output and make removal/rollback truthful.
+          p = Path('utilities/setup-secrets.sh')
+          t = p.read_text()
+          lines = t.splitlines(keepends=True)
+          fixed = False
+          out = []
+          i = 0
+          while i < len(lines):
+              if (lines[i] == "        printf '%b\\\n" and i + 1 < len(lines)
+                      and lines[i + 1].startswith("' \"Expiry:")):
+                  out.append("        printf '%b\\n' " + lines[i + 1][2:])
+                  fixed = True
+                  i += 2
+                  continue
+              out.append(lines[i])
+              i += 1
+          if not fixed:
+              raise SystemExit('malformed break-glass expiry printf not found')
+          t = ''.join(out)
+
+          start = t.index('    remove_breakglass_user() {\n')
+          end = t.index('    reset_breakglass_password() {\n', start)
+          new_remove = r'''    remove_breakglass_user() {
+              local force_remove=false removal_failed=false user_present=true
+              [[ "${1:-}" == "--force" ]] && force_remove=true
+
+              if [[ "$DRY_RUN" == "true" ]]; then
+                  log_info "[DRY RUN] Would remove break-glass user: $BREAKGLASS_USER"
+                  return 0
+              fi
+
+              log_info "Removing break-glass admin user: $BREAKGLASS_USER"
+
+              if ! check_user_exists; then
+                  user_present=false
+                  log_info "User does not exist: $BREAKGLASS_USER; cleaning any stale break-glass artifacts"
+              fi
+
+              if [[ "$user_present" == "true" && "$FORCE" != "true" && "$force_remove" != "true" ]]; then
+                  echo ""
+                  log_warn "This will permanently remove the break-glass admin account."
+                  log_warn "You will lose emergency console access capability."
+                  echo ""
+                  read -r -p "Continue with removal? [yes/no] (default: no): " confirm
+                  if [[ "$confirm" != "yes" ]]; then
+                      log_info "Removal cancelled by user"
+                      return 0
+                  fi
+              fi
+
+              local sudoers_file="/etc/sudoers.d/vw-emergency"
+              if [[ -f "$sudoers_file" ]]; then
+                  if rm -f "$sudoers_file"; then
+                      log_info "Removed targeted sudoers: $sudoers_file"
+                  else
+                      log_error "Failed to remove sudoers file: $sudoers_file — manual removal required"
+                      removal_failed=true
+                  fi
+              fi
+
+              if systemctl is-active --quiet vw-breakglass-cleanup.timer 2>/dev/null; then
+                  if systemctl stop vw-breakglass-cleanup.timer >/dev/null 2>&1; then
+                      log_info "Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)"
+                  else
+                      log_error "Failed to stop pending break-glass cleanup timer"
+                      removal_failed=true
+                  fi
+              fi
+              if systemctl is-active --quiet vw-breakglass-cleanup.service 2>/dev/null; then
+                  if ! systemctl stop vw-breakglass-cleanup.service >/dev/null 2>&1; then
+                      log_error "Failed to stop active break-glass cleanup service"
+                      removal_failed=true
+                  fi
+              fi
+
+              if [[ "$user_present" == "true" ]]; then
+                  if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
+                      log_success "User removed: $BREAKGLASS_USER"
+                  else
+                      log_error "Failed to remove break-glass user: $BREAKGLASS_USER"
+                      removal_failed=true
+                  fi
+              fi
+
+              if [[ "$removal_failed" == "true" ]]; then
+                  log_error "Break-glass admin removal is incomplete; manual remediation is required."
+                  _notify_breakglass_event "REMOVE_FAILED" "Automatic removal of $BREAKGLASS_USER or its break-glass artifacts was incomplete" "CRITICAL"
+                  return 1
+              fi
+
+              log_success "Break-glass admin removal completed"
+              _notify_breakglass_event "REMOVED" "User $BREAKGLASS_USER and sudoers file /etc/sudoers.d/vw-emergency removed" "INFO"
+              return 0
+          }
+
+'''
+          t = t[:start] + new_remove + t[end:]
+          p.write_text(t)
+
+          # lib/secrets.sh: remove the last obsolete 7z-vs-7zz compatibility wording.
+          p = Path('lib/secrets.sh')
+          t = p.read_text()
+          old = "# avoiding the non-TTY -p behavior that differs between 7z and upstream 7zz.\n"
+          new = "# avoiding non-TTY -p behavior while keeping passphrases out of process argv.\n"
+          if old not in t:
+              raise SystemExit('stale 7z behavior comment not found')
+          p.write_text(t.replace(old, new, 1))
+
+          # utilities/secrets-edit.sh: remove now-unused editor registry and correct comment.
+          p = Path('utilities/secrets-edit.sh')
+          t = p.read_text()
+          dead = '''# Known forking editors that return before the user has saved.\n_FORKING_EDITORS=("gvim" "mvim" "code" "atom" "subl" "sublime_text" "gedit" "kate" "mousepad")\n\n'''
+          if dead not in t:
+              raise SystemExit('dead editor registry not found')
+          t = t.replace(dead, '', 1)
+          t = t.replace('# Warn when the selected editor is known to fork.\n',
+                        '# Reject known GUI editors unless configured to block until save/close.\n', 1)
+          p.write_text(t)
+
+          # utilities/key-rotate.sh: remove helper made dead by shared workspace cleanup.
+          p = Path('utilities/key-rotate.sh')
+          t = p.read_text()
+          dead = '''_secure_rm() {\n    local path="$1"\n    [[ -e "$path" ]] || return 0\n    if command -v shred >/dev/null 2>&1 && [[ -f "$path" ]]; then\n        shred -fuz "$path" 2>/dev/null || rm -f "$path"\n    else\n        rm -rf "$path"\n    fi\n}\n\n'''
+          if dead not in t:
+              raise SystemExit('dead key-rotation cleanup helper not found')
+          p.write_text(t.replace(dead, '', 1))
+
+          # Permanent regression coverage.
+          p = Path('tests/suites/security/case-secrets.bash')
+          t = p.read_text()
+          source_anchor = '''! grep -Fq 'Proceeding anyway' utilities/secrets-edit.sh || fail "forking editor still warns and continues"\n'''
+          source_checks = '''! grep -Fq '_FORKING_EDITORS=' utilities/secrets-edit.sh || fail "dead forking-editor registry remains"\n! grep -Fq '_secure_rm()' utilities/key-rotate.sh || fail "dead key-rotation secure-rm helper remains"\n! grep -Fq 'differs between 7z and upstream 7zz' lib/secrets.sh || fail "retired 7z compatibility wording remains"\ngrep -Fq "printf '%b\\\\n' \"Expiry:" utilities/setup-secrets.sh || fail "break-glass expiry output format is malformed"\n'''
+          if source_anchor not in t:
+              raise SystemExit('source assertion anchor not found')
+          t = t.replace(source_anchor, source_anchor + source_checks, 1)
+
+          behavior_anchor = "BREAKGLASS_ROLLBACK_TEST\n\n# Direct configure uses its installed TERM trap to clean the owned workspace.\n"
+          behavior = r'''BREAKGLASS_ROLLBACK_TEST
+
+# Removal must report a real failure when the account cannot be deleted; creation
+# rollback relies on this status to avoid claiming emergency access was removed.
+breakglass_remove_source="$(
+  sed -n '/^    remove_breakglass_user() {$/,/^    }$/p' utilities/setup-secrets.sh \
+    | sed 's/^    //'
+)"
+[[ -n "$breakglass_remove_source" ]] || fail "break-glass removal helper could not be extracted"
+BREAKGLASS_REMOVE_SOURCE="$breakglass_remove_source" bash -s <<'BREAKGLASS_REMOVE_FAILURE_TEST' \
+  || fail "break-glass removal failure truthfulness regression failed"
+set -euo pipefail
+DRY_RUN=false
+FORCE=true
+BREAKGLASS_USER=vw-test
+log_info() { :; }
+log_warn() { :; }
+log_error() { :; }
+log_success() { :; }
+_notify_breakglass_event() { :; }
+check_user_exists() { return 0; }
+systemctl() { return 1; }
+userdel() { return 73; }
+rm() {
+  [[ " $* " == *' /etc/sudoers.d/vw-emergency '* ]] && return 0
+  command rm "$@"
+}
+eval "$BREAKGLASS_REMOVE_SOURCE"
+set +e
+remove_breakglass_user --force >/dev/null 2>&1
+rc=$?
+set -e
+(( rc != 0 ))
+BREAKGLASS_REMOVE_FAILURE_TEST
+
+# Direct configure uses its installed TERM trap to clean the owned workspace.
+'''
+          if behavior_anchor not in t:
+              raise SystemExit('break-glass behavioral insertion anchor not found')
+          t = t.replace(behavior_anchor, behavior, 1)
+          p.write_text(t)
+          PY
+
+          git rm .github/workflows/pr7-pass1-finalize.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add utilities/setup-secrets.sh lib/secrets.sh utilities/secrets-edit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash
+          git commit -m 'fix: make break-glass cleanup failures truthful'
+          test -z "$(git status --porcelain)"
+          git diff --check origin/delta...HEAD
+      - name: Install validation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip age sqlite3 coreutils tar
+      - name: Validate exact clean HEAD
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          git diff --check origin/delta...HEAD
+          for f in lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash; do bash -n "$f"; done
+          shellcheck -e SC1090,SC1091,SC2016,SC2153,SC2317 lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
+      - name: Focused security tests on exact HEAD
+        run: |
+          sudo env VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
+          sudo env VW_TEST_CASE_MODE=core bash tests/suites/security/case-secrets.bash
+      - name: Full suite on exact HEAD
+        run: ./tests/run-tests.sh all
+      - name: Noble systemd acceptance
+        run: |
+          set -euo pipefail
+          unit="vw-pr7-pass1-${GITHUB_RUN_ID}"
+          marker="/run/${unit}.done"
+          cleanup() {
+            sudo systemctl stop "${unit}.timer" "${unit}.service" >/dev/null 2>&1 || true
+            sudo rm -f -- "$marker"
+          }
+          trap cleanup EXIT
+          sudo systemd-run --quiet --collect --on-active=3s --unit="$unit" \
+            --description='VaultWarden PR7 post-review timer acceptance' \
+            -- /usr/bin/env bash -c "umask 077; printf '%s\\n' fired > '$marker'"
+          sudo systemctl is-active --quiet "${unit}.timer"
+          for _ in $(seq 1 20); do sudo test -f "$marker" && break; sleep 1; done
+          sudo grep -Fxq fired "$marker"
+      - name: Push only validated final head
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          git push origin HEAD:pr7-sensitive-workspace-sops-hardening
