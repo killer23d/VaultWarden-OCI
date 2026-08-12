@@ -1,0 +1,69 @@
+name: PR8 setup key authority fix
+on:
+  push:
+    branches: [pr8-runtime-authority-age-custody]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: pr8-runtime-authority-age-custody
+          fetch-depth: 0
+      - name: Canonicalize setup Age-key custody
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('utilities/setup-secrets.sh')
+          text = p.read_text()
+          old = '''    local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+    if [[ "$AGE_KEY_FILE" != /* ]]; then
+        log_error "AGE_KEY_FILE must be an absolute path: $AGE_KEY_FILE"
+        return 1
+    fi
+'''
+          new = '''    local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'setup-secrets configure key block expected once, got {text.count(old)}')
+          text = text.replace(old, new)
+          old_comment = '''    # Repo .env must stay blank so the resolver can pick the correct readable
+    # key path depending on caller context.
+'''
+          new_comment = '''    # Repo .env stays authoring-only; operational Age-key custody is fixed at
+    # /etc/vaultwarden/age-key.txt.
+'''
+          if text.count(old_comment) != 1:
+              raise SystemExit(f'setup-secrets bootstrap comment expected once, got {text.count(old_comment)}')
+          p.write_text(text.replace(old_comment, new_comment))
+
+          p = Path('tests/suites/foundation/case-runtime-authority.bash')
+          text = p.read_text()
+          anchor = 'setup_system="$(cat utilities/setup-system.sh)"\n'
+          insert = anchor + 'setup_secrets="$(cat utilities/setup-secrets.sh)"\n'
+          if text.count(anchor) != 1:
+              raise SystemExit('runtime authority setup-system anchor mismatch')
+          text = text.replace(anchor, insert)
+          anchor = '[[ "$systemd_setup" == *"/etc/vaultwarden/age-key.txt"* ]] || fail "systemd canonical key missing"\n'
+          insert = anchor + '''[[ "$setup_secrets" == *'local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"'* ]] || fail "normal secrets setup does not pin canonical Age key"\n[[ "$setup_secrets" != *'local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"'* ]] || fail "normal secrets setup still accepts an alternate operational Age key"\n'''
+          if text.count(anchor) != 1:
+              raise SystemExit('runtime authority age assertion anchor mismatch')
+          p.write_text(text.replace(anchor, insert))
+          PY
+          bash -n utilities/setup-secrets.sh tests/suites/foundation/case-runtime-authority.bash
+          shellcheck -x --severity=warning utilities/setup-secrets.sh tests/suites/foundation/case-runtime-authority.bash
+          bash tests/suites/foundation/case-runtime-authority.bash
+          bash utilities/setup-secrets.sh --help >/dev/null
+      - name: Commit fix and remove helper workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/pr8-setup-key-authority-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'secrets: pin setup to canonical Age key'
+          git push origin HEAD:pr8-runtime-authority-age-custody
