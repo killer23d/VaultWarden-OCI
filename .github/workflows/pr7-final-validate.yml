@@ -10,12 +10,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: pr7-sensitive-workspace-sops-hardening
+          fetch-depth: 0
       - name: Install validation dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip age sqlite3 coreutils tar
-      - name: Validate syntax and lint
+      - name: Validate diff, syntax and lint
         run: |
           set -euo pipefail
-          git diff --check origin/delta...HEAD || true
+          git diff --check origin/delta...HEAD
           for f in lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash; do bash -n "$f"; done
           shellcheck -e SC1090,SC1091,SC2016,SC2153,SC2317 lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
       - name: Focused security tests
