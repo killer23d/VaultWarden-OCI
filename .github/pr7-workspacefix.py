@@ -64,7 +64,7 @@ replace_function('lib/secrets.sh', '_ork_generate_and_secure', r'''_ork_generate
       chown root:root -- "$temp_file" || exit 1
     fi
 
-    # Reserve the final path without placing plaintext in a disk-backed temp.
+    # Reserve the final path without placing plaintext in a persistent temp.
     ln -- "$publish_stub" "$output_file" || exit 1
     linked=true
     rm -f -- "$publish_stub" || exit 1
