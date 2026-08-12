@@ -172,34 +172,9 @@ decrypt_sops_file() {
     SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt "$file" 2>/dev/null
 }
 
-# Encrypts to a mktemp staging file and atomically renames it over the
-# original only on success, preventing truncation/destruction of the target
-# file on any error (malformed YAML, invalid recipient, SOPS failure, etc.).
-#
-# chmod 600 is applied to the staging file immediately after mktemp, before
-# any content is written, to eliminate the world-readable race window between
-# mktemp (creates at process umask) and the subsequent SOPS write.
-#
-# Always passes --input-type yaml --output-type yaml so SOPS does not try to
-# infer the format from the staging file's extension, preventing failures when
-# the staging filename has no recognised extension.
-#
-# sops stderr is captured and emitted via log_error on failure instead of
-# being silently swallowed.
-#
-# After the atomic mv, a sops -d round-trip verifies the ciphertext is
-# readable with the current Age key. Encryption passes the derived recipient
-# explicitly, while the generated .sops.yaml supports operator-run SOPS commands
-# and independent recipient health checks.
-#   1. Before mv, write a pre-write backup (install -m 600) of the original
-#      plaintext staging file.
-#   2. After mv succeeds, run `sops -d <live_file> > /dev/null`.
-#   3. On success: remove the backup, return 0.
-#   4. On failure: restore the original file from the backup, remove the
-#      backup, emit a clear diagnostic including the Age key path and
-#      .sops.yaml location, return 1.
-# Create a root-only workspace only on verified volatile storage.
-# Callers own lifecycle registration so existing signal/operation traps remain authoritative.
+# Sensitive plaintext/private-key workspace helpers. Production callers are
+# root-only and may use only verified volatile backing. Callers own lifecycle
+# registration so existing signal/operation traps remain authoritative.
 _sensitive_backing_is_volatile() {
     local path="$1" fs_type
     [[ -d "$path" && ! -L "$path" ]] || return 1
@@ -220,11 +195,24 @@ create_sensitive_workspace() {
     fi
 
     for base in /run/vaultwarden-oci /dev/shm; do
-        if [[ "$base" == "/run/vaultwarden-oci" && ! -e "$base" ]]; then
-            _sensitive_backing_is_volatile /run || continue
-            install -d -m 0700 -o root -g root "$base" 2>/dev/null || continue
-        fi
+        case "$base" in
+            /run/vaultwarden-oci)
+                _sensitive_backing_is_volatile /run || continue
+                if [[ ! -e "$base" ]]; then
+                    install -d -m 0700 -o root -g root "$base" 2>/dev/null || continue
+                fi
+                [[ -d "$base" && ! -L "$base" ]] || continue
+                metadata="$(stat -c '%u:%g:%a' -- "$base" 2>/dev/null)" || continue
+                [[ "$metadata" == "0:0:700" ]] || continue
+                ;;
+            /dev/shm)
+                _sensitive_backing_is_volatile "$base" || continue
+                metadata="$(stat -c '%u:%g:%a' -- "$base" 2>/dev/null)" || continue
+                [[ "$metadata" == "0:0:1777" ]] || continue
+                ;;
+        esac
         _sensitive_backing_is_volatile "$base" || continue
+
         old_umask="$(umask)"
         umask 077
         workspace="$(mktemp -d -p "$base" "vw-${purpose}.XXXXXXXXXX" 2>/dev/null)" || {
@@ -254,11 +242,15 @@ create_sensitive_workspace() {
 
 remove_sensitive_workspace() {
     local workspace="${1:-}" file
-    [[ -n "$workspace" && ! -L "$workspace" && -d "$workspace" ]] || return 1
+    [[ -n "$workspace" ]] || return 1
     case "$workspace" in
         /run/vaultwarden-oci/vw-*|/dev/shm/vw-*) ;;
         *) return 1 ;;
     esac
+    if [[ ! -e "$workspace" && ! -L "$workspace" ]]; then
+        return 0
+    fi
+    [[ ! -L "$workspace" && -d "$workspace" ]] || return 1
     while IFS= read -r -d '' file; do
         if declare -F secure_delete >/dev/null 2>&1; then
             secure_delete "$file" 2>/dev/null || rm -f -- "$file" 2>/dev/null || true
@@ -317,12 +309,20 @@ promote_sops_ciphertext() {
 }
 
 encrypt_sops_file() {
-    local file="$1" age_key_file="${2:-}" file_dir file_base tmp_file old_umask
+    # The caller supplies a plaintext staging file. Encrypt a private same-directory
+    # copy, validate that ciphertext with the operational identity, then atomically
+    # replace only the caller's staging file. Live ciphertext promotion is handled
+    # separately by promote_sops_ciphertext().
+    local file="$1" age_key_file="${2:-}" age_public_key file_dir file_base tmp_file old_umask
     [[ -f "$file" ]] || { log_error "encrypt_sops_file: file not found: $file"; return 1; }
     if [[ -z "$age_key_file" ]]; then
         age_key_file="$(resolve_age_key_path)" || return 1
     fi
     [[ -f "$age_key_file" ]] || { log_error "encrypt_sops_file: Age key not found: $age_key_file"; return 1; }
+    age_public_key="$(_derive_age_public_key "$age_key_file")" || {
+        log_error "encrypt_sops_file: could not derive the Age recipient from $age_key_file"
+        return 1
+    }
 
     file_dir="$(dirname -- "$file")"
     file_base="$(basename -- "$file")"
@@ -332,12 +332,19 @@ encrypt_sops_file() {
     chmod 0600 "$tmp_file" || { rm -f -- "$tmp_file"; return 1; }
     cp -- "$file" "$tmp_file" || { rm -f -- "$tmp_file"; return 1; }
 
-    if ! SOPS_AGE_KEY_FILE="$age_key_file" sops --encrypt --in-place "$tmp_file"; then
+    if ! SOPS_AGE_KEY_FILE="$age_key_file" sops --encrypt \
+            --age "$age_public_key" \
+            --input-type yaml \
+            --output-type yaml \
+            --in-place "$tmp_file"; then
         log_error "encrypt_sops_file: SOPS encryption failed"
         rm -f -- "$tmp_file"
         return 1
     fi
-    if ! SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt "$tmp_file" >/dev/null 2>&1; then
+    if ! SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt \
+            --input-type yaml \
+            --output-type yaml \
+            "$tmp_file" >/dev/null 2>&1; then
         log_error "encrypt_sops_file: encrypted staging file failed round-trip validation"
         rm -f -- "$tmp_file"
         return 1

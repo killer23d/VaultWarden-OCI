@@ -1157,6 +1157,10 @@ HELP
         chmod 700 "$secrets_dir" || return 1
 
         local temp_file=""
+        if ! _setup_secrets_create_workdir; then
+            log_error "Failed to initialize protected plaintext workspace"
+            return 1
+        fi
         temp_file="$(_ss_make_plaintext_temp)" || {
             log_error "Failed to create protected plaintext staging file"
             return 1
@@ -1707,6 +1711,15 @@ EOF
             log_warn "Failed to create instructions file securely"
         fi
 
+        if ! schedule_auto_cleanup; then
+            log_error "Break-glass expiry could not be scheduled; removing the newly created account."
+            remove_breakglass_user --force >/dev/null 2>&1 || {
+                log_error "CRITICAL: break-glass expiry failed and automatic account rollback also failed."
+                return 1
+            }
+            return 1
+        fi
+
         log_success "Break-glass admin created successfully"
 
         _notify_breakglass_event "CREATED" "User $BREAKGLASS_USER created with targeted sudoers (/etc/sudoers.d/vw-emergency)" "INFO"
@@ -1752,15 +1765,6 @@ EOF
         press_enter_to_continue " Press [Enter] to clear the visible screen and finish..."
         clear
 
-        if ! schedule_auto_cleanup; then
-            log_error "Break-glass expiry could not be scheduled; removing the newly created account."
-            remove_breakglass_user --force >/dev/null 2>&1 || {
-                log_error "CRITICAL: break-glass expiry failed and automatic account rollback also failed."
-                return 1
-            }
-            return 1
-        fi
-
         return 0
     }
 
@@ -1801,25 +1805,6 @@ EOF
         if systemctl is-active --quiet vw-breakglass-cleanup.timer 2>/dev/null; then
             systemctl stop vw-breakglass-cleanup.timer 2>/dev/null || true
             log_info "Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)"
-        fi
-
-        if groups "$BREAKGLASS_USER" 2>/dev/null | grep -qw "sudo"; then
-            if command -v gpasswd >/dev/null 2>&1; then
-                if gpasswd -d "$BREAKGLASS_USER" sudo 2>/dev/null; then
-                    log_info "Removed $BREAKGLASS_USER from sudo group via gpasswd (legacy cleanup)"
-                else
-                    log_warn "gpasswd -d reported an error removing $BREAKGLASS_USER from sudo group"
-                fi
-            elif command -v deluser >/dev/null 2>&1; then
-                if deluser "$BREAKGLASS_USER" sudo 2>/dev/null; then
-                    log_info "Removed $BREAKGLASS_USER from sudo group via deluser (legacy cleanup)"
-                else
-                    log_warn "deluser reported an error removing $BREAKGLASS_USER from sudo group"
-                fi
-            else
-                log_warn "Could not remove $BREAKGLASS_USER from sudo group automatically."
-                log_warn "Manual remediation: edit /etc/group and remove '$BREAKGLASS_USER' from the sudo line."
-            fi
         fi
 
         if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
@@ -1953,7 +1938,7 @@ EOF
                 timer_left=$(systemctl show vw-breakglass-cleanup.timer -p NextElapseUSecRealtime 2>/dev/null | cut -d= -f2 || echo "unknown")
                 echo "  Auto-cleanup timer: ✅ Pending via systemd (vw-breakglass-cleanup) [next: ${timer_left}]"
             else
-                echo "  Auto-cleanup timer: ℹ️  Not active via systemd (may be scheduled via 'at')"
+                echo "  Auto-cleanup timer: ❌ Not active; break-glass expiry is not verified"
             fi
 
         else
@@ -2149,7 +2134,10 @@ _ss_make_plaintext_temp() {
         _ss_prepare_plain_tmp_dir || return 1
         dir="$(_ss_plain_tmp_dir)"
     else
-        _setup_secrets_create_workdir || return 1
+        [[ -n "${SETUP_SECRETS_OWNED_WORKDIR:-}" && -d "$SETUP_SECRETS_OWNED_WORKDIR" ]] || {
+            log_error "Protected setup-secrets workspace was not initialized by the owning shell."
+            return 1
+        }
         dir="$SETUP_SECRETS_OWNED_WORKDIR"
     fi
     tmp=$(mktemp -p "$dir" vwsecrets.XXXXXXXXXX.yaml) || return 1
@@ -2580,6 +2568,7 @@ EOF
     fi
     
     local tmp_secrets=""
+    _setup_secrets_create_workdir || return 1
     tmp_secrets="$(_ss_make_plaintext_temp)" || return 1
     # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"" RETURN

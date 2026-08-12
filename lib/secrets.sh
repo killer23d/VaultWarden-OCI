@@ -1189,7 +1189,7 @@ BODY
   return 0
 }
 
-validate_cloudflare_token() {
+validate_cloudflare_token() (
     
     local token="$1"
     local token_type="$2"
@@ -1218,14 +1218,21 @@ validate_cloudflare_token() {
         *)        log_error "Invalid token type: $token_type"; return 1 ;;
     esac
 
-    local curl_cfg curl_workspace
+    local curl_cfg="" curl_workspace=""
+    trap '[[ -z "${curl_workspace:-}" ]] || remove_sensitive_workspace "$curl_workspace" >/dev/null 2>&1 || true' EXIT
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+    trap 'exit 143' TERM
     curl_workspace="$(create_sensitive_workspace cloudflare-token)" || return 1
     curl_cfg="${curl_workspace}/curl.conf"
     if ! install -m 600 /dev/null "$curl_cfg"; then
         remove_sensitive_workspace "$curl_workspace" 2>/dev/null || true
         return 1
     fi
-    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$curl_cfg"
+    if ! printf 'header = "Authorization: Bearer %s"\n' "$token" > "$curl_cfg"; then
+        log_error "Cloudflare token validation: failed to write protected curl configuration"
+        return 1
+    fi
 
     local result=0
     if curl -sf --max-time 10 --config "$curl_cfg" "$endpoint" \
@@ -1234,9 +1241,13 @@ validate_cloudflare_token() {
     else
         result=1
     fi
-    rm -f "$curl_cfg" 2>/dev/null || true
+    if ! remove_sensitive_workspace "$curl_workspace"; then
+        log_error "Cloudflare token validation: failed to clean sensitive workspace"
+        return 1
+    fi
+    curl_workspace=""
     return "$result"
-}
+)
 
 prompt_password_with_confirmation() {
     local prompt_text="$1"

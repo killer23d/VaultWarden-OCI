@@ -237,14 +237,13 @@ source "$ROOT/lib/crypto.sh"
 # backing refusal and real root:root mode/cleanup; the ordinary-user full suite
 # verifies that the root boundary itself fails closed.
 if (( EUID == 0 )); then
+    original_backing_verifier="$(declare -f _sensitive_backing_is_volatile)"
     _sensitive_backing_is_volatile() { return 1; }
     if create_sensitive_workspace refusal-test >/dev/null 2>&1; then
         fail 'sensitive workspace succeeded when all backing verification was forced to fail'
     fi
 
-    # The source guard prevents re-sourcing; restore an accepting verifier
-    # explicitly for the cleanup-only assertion below.
-    _sensitive_backing_is_volatile() { return 0; }
+    eval "$original_backing_verifier"
     workspace="$(create_sensitive_workspace test-cleanup)" || fail 'could not create verified volatile workspace on Noble runner'
     [[ "$(stat -c '%u:%g:%a' "$workspace")" == '0:0:700' ]] || fail 'sensitive workspace is not root:root mode 0700'
     printf 'sensitive sentinel\n' >"$workspace/plaintext"
@@ -270,7 +269,7 @@ sops() {
         *' --decrypt '*)
             [[ "$(cat "$last")" != *BAD-CIPHERTEXT* ]]
             ;;
-        *' --encrypt --in-place '*)
+        *' --encrypt '*)
             printf 'GOOD-CIPHERTEXT\n' >"$last"
             ;;
         *) return 1 ;;
@@ -314,10 +313,11 @@ promote_sops_ciphertext "$staged" "$dest" "$key" || fail 'valid staged ciphertex
 # encrypt_sops_file validates the encrypted temporary result before replacing its plaintext staging input.
 plain="$TMP/plain.yaml"
 printf 'PLAINTEXT\n' >"$plain"
+_derive_age_public_key() { printf '%s\n' 'age1testrecipient0000000000000000000000000000000000000000000000'; }
 sops() {
     local last="${!#}"
     case " $* " in
-        *' --encrypt --in-place '*) printf 'GOOD-CIPHERTEXT\n' >"$last" ;;
+        *' --encrypt '*) printf 'GOOD-CIPHERTEXT\n' >"$last" ;;
         *' --decrypt '*) [[ "$(cat "$last")" == 'GOOD-CIPHERTEXT' ]] ;;
         *) return 1 ;;
     esac
@@ -2165,11 +2165,25 @@ grep -Fq "EDITOR='mousepad --disable-server'" utilities/secrets-edit.sh || fail 
 ! grep -Fq '.managed-secrets' lib/secrets.sh || fail "legacy managed-secrets migration remains"
 ! grep -Fq 'systemd-run() {' lib/defaults.sh || fail "global systemd-run workaround remains in defaults"
 grep -Fq 'systemd_cleanup_body' lib/secrets.sh || fail "recovery-owned systemd workaround is missing"
+grep -Fq -- '--age "$age_public_key"' lib/crypto.sh || fail "SOPS encryption no longer pins the derived Age recipient"
+grep -Fq -- '--input-type yaml' lib/crypto.sh || fail "SOPS encryption no longer pins YAML input type"
+grep -Fq -- '--output-type yaml' lib/crypto.sh || fail "SOPS encryption no longer pins YAML output type"
+grep -Fq '[[ "$metadata" == "0:0:1777" ]]' lib/crypto.sh || fail "/dev/shm ownership/mode is not verified"
+grep -Fq 'validate_cloudflare_token() (' lib/secrets.sh || fail "Cloudflare token validation lacks isolated cleanup scope"
+grep -Fq 'failed to clean sensitive workspace' lib/secrets.sh || fail "Cloudflare token workspace cleanup is not enforced"
 ! grep -Eq 'setsid .*sleep|command -v at.*breakglass|falling back to background sleep' utilities/setup-secrets.sh \
   || fail "break-glass expiry retains an unverifiable fallback scheduler"
 grep -Fq 'systemctl is-active --quiet "${unit_name}.timer"' utilities/setup-secrets.sh \
   || fail "break-glass systemd timer is not verified active"
 ! grep -Fq 'legacy full-root configuration' utilities/setup-secrets.sh || fail "legacy sudo-group break-glass status remains"
+! grep -Fq 'gpasswd -d "$BREAKGLASS_USER" sudo' utilities/setup-secrets.sh || fail "legacy sudo-group break-glass cleanup remains"
+! grep -Fq 'deluser "$BREAKGLASS_USER" sudo' utilities/setup-secrets.sh || fail "legacy sudo-group break-glass cleanup remains"
+! grep -Fq 'may be scheduled via' utilities/setup-secrets.sh || fail "break-glass status still advertises a removed scheduler fallback"
+schedule_line="$(grep -nF 'if ! schedule_auto_cleanup; then' utilities/setup-secrets.sh | head -1 | cut -d: -f1)"
+success_line="$(grep -nF 'Break-glass admin created successfully' utilities/setup-secrets.sh | head -1 | cut -d: -f1)"
+[[ -n "$schedule_line" && -n "$success_line" && "$schedule_line" -lt "$success_line" ]] || fail "break-glass reports success before expiry is verified"
+plain_helper_source="$(awk '/^_ss_make_plaintext_temp[(][)]/ {p=1} p {print} p && /^}/ {exit}' utilities/setup-secrets.sh)"
+[[ "$plain_helper_source" != *'_setup_secrets_create_workdir'* ]] || fail "plaintext temp helper creates owned workspace inside command substitution"
 
 pass "recovery fallback and sensitive cleanup contracts"
 

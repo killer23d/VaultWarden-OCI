@@ -774,8 +774,8 @@ install_sops() {
     log_success "Installed SOPS: ${final_sops_ver}"
 }
 
-# Ubuntu installs package 7zip, while usable command names vary by source.
-# Keep detection centralized so both 7zz and 7z remain valid.
+# Ubuntu 24.04 installs the supported 7zip package with the 7zz command.
+# Keep the executable check centralized and fail closed if 7zz is unavailable.
 _resolve_7zip_command() {
     command -v 7zz >/dev/null 2>&1 || return 1
     printf '%s\n' 7zz
