@@ -14,6 +14,14 @@ for i, line in enumerate(lines):
 else:
     raise SystemExit('plaintext matcher line not found')
 
+# Remove a patch-script-only unused local before validation.
+for i, line in enumerate(lines):
+    if 'local file_dir file_base tmp_file rollback_file old_umask rc=0' in line:
+        lines[i] = line.replace(' old_umask rc=0', ' old_umask')
+        break
+else:
+    raise SystemExit('encrypt_sops_file local declaration not found')
+
 # Current delta rotate creates its two plaintext files in separate blocks.
 rotate_start = next(i for i, line in enumerate(lines) if "p=Path('utilities/secrets-rotate.sh')" in line)
 rotate_end = next(i for i in range(rotate_start, len(lines)) if "p.write_text(t[:m.start()]+new+t[m.end():])" in lines[i])
