@@ -21,9 +21,15 @@ jobs:
           python3 - <<'PYFIX'
           from pathlib import Path
           p=Path('/tmp/pr7_patch.py')
-          s=p.read_text()
-          s=s.replace(r'--suffix=\.yaml ', r'(?:--suffix=\.yaml )?')
-          p.write_text(s)
+          lines=p.read_text().splitlines(True)
+          for i,line in enumerate(lines):
+              if "local (temp_plain|temp_file)" in line and "pat=re.compile" in line:
+                  indent=line[:len(line)-len(line.lstrip())]
+                  lines[i]=indent + "pat=re.compile(r'(?ms)^(\\s*)local (temp_plain|temp_file)\\n\\1\\2=\\$\\(mktemp -p /dev/shm(?: --suffix=\\.yaml)? 2>/dev/null \\|\\| mktemp(?: --suffix=\\.yaml)?\\)\\n.*?\\1register_cleanup \"_remove_sensitive_file\" \"\\$\\2\"\\n')\n"
+                  break
+          else:
+              raise SystemExit('plaintext matcher line not found in extracted patch')
+          p.write_text(''.join(lines))
           PYFIX
           python3 /tmp/pr7_patch.py
           rm -f .github/workflows/pr7-apply-validate.yml .github/workflows/pr7-runner.yml
