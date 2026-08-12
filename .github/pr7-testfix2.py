@@ -11,6 +11,8 @@ new = '''# Switch the verifier test double to "acceptable" for the cleanup-only 
 _sensitive_backing_is_volatile() { return 0; }
 workspace="$(create_sensitive_workspace test-cleanup)" || fail 'could not create root-only workspace for cleanup regression'
 '''
-if old not in t:
-    raise SystemExit('workspace test reset block not found')
-p.write_text(t.replace(old, new, 1))
+if old in t:
+    t = t.replace(old, new, 1)
+elif '_sensitive_backing_is_volatile() { return 0; }' not in t:
+    raise SystemExit('workspace test reset contract not found')
+p.write_text(t)
