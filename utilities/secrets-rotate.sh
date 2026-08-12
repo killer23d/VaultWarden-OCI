@@ -296,18 +296,11 @@ do_rotate() {
     log_info "Rotating secret: $actual_field"
     echo ""
 
-    local temp_plain
-    temp_plain=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
-    if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
-        rm -f "$temp_plain"
-        log_error "Failed to secure temp file: $temp_plain"
-        return 1
-    fi
-    if [[ -n "$temp_plain" && "$temp_plain" != /dev/shm/* ]]; then
-        log_warn "rotate: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_plain"
-        log_warn "        Ensure full-disk encryption is active on this host."
-    fi
-    register_cleanup "_remove_sensitive_file" "$temp_plain"
+    local temp_plain sensitive_workspace
+    sensitive_workspace="$(create_sensitive_workspace secrets-rotate)" || return 1
+    register_cleanup "remove_sensitive_workspace" "$sensitive_workspace"
+    temp_plain="${sensitive_workspace}/secrets.yaml"
+    install -m 600 /dev/null "$temp_plain" || return 1
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
@@ -367,17 +360,8 @@ PYEOF
     fi
 
     local temp_patched
-    temp_patched=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
-    if ! install -m 600 /dev/null "$temp_patched" 2>/dev/null; then
-        rm -f "$temp_patched"
-        log_error "Failed to secure temp file: $temp_patched"
-        return 1
-    fi
-    if [[ -n "$temp_patched" && "$temp_patched" != /dev/shm/* ]]; then
-        log_warn "rotate: /dev/shm unavailable — patched temp file is disk-backed: $temp_patched"
-        log_warn "        Ensure full-disk encryption is active on this host."
-    fi
-    register_cleanup "_remove_sensitive_file" "$temp_patched"
+    temp_patched="${sensitive_workspace}/secrets-patched.yaml"
+    install -m 600 /dev/null "$temp_patched" || return 1
 
     local _patch_rc=0
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?
@@ -446,7 +430,6 @@ PYEOF
         log_error "Failed to secure temp file: $temp_enc"
         return 1
     fi
-    cp "$temp_patched" "$temp_enc"
 
     local _age_key_path
     if ! _age_key_path=$(resolve_age_key_path 2>/dev/null); then
@@ -454,8 +437,13 @@ PYEOF
         rm -f "$temp_enc"
         return 1
     fi
-    if ! encrypt_sops_file "$temp_enc" "$_age_key_path"; then
+    if ! encrypt_sops_file "$temp_patched" "$_age_key_path"; then
         log_error "Failed to re-encrypt secrets"
+        rm -f "$temp_enc"
+        return 1
+    fi
+    if ! cp -- "$temp_patched" "$temp_enc"; then
+        log_error "Failed to stage encrypted secrets"
         rm -f "$temp_enc"
         return 1
     fi
@@ -471,8 +459,8 @@ PYEOF
         return 1
     fi
 
-    if ! mv "$temp_enc" "$SECRETS_FILE"; then
-        log_error "Atomic mv failed — encrypted output in: $temp_enc"
+    if ! promote_sops_ciphertext "$temp_enc" "$SECRETS_FILE" "$_age_key_path"; then
+        log_error "Failed to promote rotated secrets; previous ciphertext was preserved or restored"
         return 1
     fi
 

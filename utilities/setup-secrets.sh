@@ -23,22 +23,14 @@ _setup_secrets_cleanup_warn() {
 }
 
 _setup_secrets_create_workdir() {
-    local old_umask create_status workdir_parent
-
     [[ -z "${SETUP_SECRETS_OWNED_WORKDIR:-}" ]] || return 0
-
-    _ss_prepare_plain_tmp_dir || return 1
-    workdir_parent="$(_ss_plain_tmp_dir)"
-
-    old_umask="$(umask)"
-    umask 077
-    TMP_WORKDIR="$(mktemp -d -p "$workdir_parent" vw-setup-secrets.XXXXXXXXXX)" || {
-        create_status=$?
-        umask "$old_umask" || true
-        return "$create_status"
-    }
-    umask "$old_umask"
-    chmod 0700 "$TMP_WORKDIR" || { rm -rf "$TMP_WORKDIR"; return 1; }
+    if [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]]; then
+        _ss_prepare_plain_tmp_dir || return 1
+        TMP_WORKDIR="$(mktemp -d -p "$(_ss_plain_tmp_dir)" vw-setup-secrets.XXXXXXXXXX)" || return 1
+        chmod 0700 "$TMP_WORKDIR" || { rm -rf "$TMP_WORKDIR"; return 1; }
+    else
+        TMP_WORKDIR="$(create_sensitive_workspace setup-secrets)" || return 1
+    fi
     SETUP_SECRETS_OWNED_WORKDIR="$TMP_WORKDIR"
 }
 
@@ -80,8 +72,19 @@ _ss_perform_cleanup() {
         fi
     fi
 
+    # Drain the shared cleanup stack as part of this script's custom signal/exit
+    # path when the caller initialized that stack. This covers volatile workspaces
+    # registered by shared helpers such as export_docker_secrets().
+    if declare -F perform_cleanup >/dev/null 2>&1 \
+            && declare -p CLEANUP_ACTIONS >/dev/null 2>&1; then
+        if ! perform_cleanup; then
+            _setup_secrets_cleanup_warn "Shared sensitive cleanup reported a failure"
+            cleanup_status=1
+        fi
+    fi
+
     if [[ -n "$workspace" ]]; then
-        if rm -rf -- "$workspace"; then
+        if { [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]] && rm -rf -- "$workspace"; } || remove_sensitive_workspace "$workspace"; then
             SETUP_SECRETS_OWNED_WORKDIR=""
             unset TMP_WORKDIR
         else
@@ -1165,6 +1168,10 @@ HELP
         chmod 700 "$secrets_dir" || return 1
 
         local temp_file=""
+        if ! _setup_secrets_create_workdir; then
+            log_error "Failed to initialize protected plaintext workspace"
+            return 1
+        fi
         temp_file="$(_ss_make_plaintext_temp)" || {
             log_error "Failed to create protected plaintext staging file"
             return 1
@@ -1411,12 +1418,9 @@ GLOBAL OPTIONS:
 ENVIRONMENT:
     BREAKGLASS_MAX_AGE_HOURS     Hours before status warns account is too old (default: 72)
     BREAKGLASS_AUTO_EXPIRY_HOURS Hours after creation before the account is auto-removed
-                                 (default: 2). Scheduler priority:
-                                   1. `at` + atd running
-                                   2. `at` present (tries on-demand activation)
-                                   3. systemd-run transient timer (survives reboots)
-                                   4. background sleep subshell (lost on reboot)
-                                 Set to 0 to disable auto-expiry entirely.
+                                 (default: 2; must be a positive integer).
+                                 Expiry requires a systemd transient timer that
+                                 is verified active before creation succeeds.
 
 EXAMPLES:
     sudo utilities/setup-secrets.sh breakglass create         # Create emergency admin
@@ -1578,19 +1582,21 @@ EOF
         local expiry_hours="$BREAKGLASS_AUTO_EXPIRY_HOURS"
         local bg_user="$BREAKGLASS_USER"
 
-        if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would schedule auto-cleanup in ${expiry_hours}h"
-            return 0
+        if ! [[ "$expiry_hours" =~ ^[1-9][0-9]*$ ]]; then
+            log_error "BREAKGLASS_AUTO_EXPIRY_HOURS must be a positive integer; account creation is aborted."
+            return 1
         fi
 
-        if (( expiry_hours == 0 )); then
-            log_warn "Auto-expiry disabled (BREAKGLASS_AUTO_EXPIRY_HOURS=0) — remember to run 'breakglass remove' manually"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would schedule verified systemd auto-cleanup in ${expiry_hours}h"
             return 0
         fi
 
         local script_abs
-        script_abs=$(readlink -f "$0")
-        local cleanup_cmd="${script_abs} breakglass remove --user ${bg_user} --force"
+        script_abs=$(readlink -f "$0") || {
+            log_error "Could not resolve the break-glass cleanup command path; account creation is aborted."
+            return 1
+        }
         local expiry_epoch=$(( $(date +%s) + expiry_hours * 3600 ))
         local expiry_human
         expiry_human=$(date -d "@${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
@@ -1598,52 +1604,27 @@ EOF
             || date -u -d "${expiry_hours} hours" '+%Y-%m-%d %H:%M UTC' 2>/dev/null \
             || echo "in ${expiry_hours} hour(s)")
 
-        if command -v at >/dev/null 2>&1 && systemctl is-active --quiet atd 2>/dev/null; then
-            if echo "${cleanup_cmd}" | at now + "${expiry_hours}" hours 2>/dev/null; then
-                log_success "Auto-cleanup scheduled via 'at' at ${expiry_human}"
-                return 0
-            else
-                log_warn "'at' scheduling failed — trying next tier"
-            fi
-        elif command -v at >/dev/null 2>&1; then
-            if echo "${cleanup_cmd}" | at now + "${expiry_hours}" hours 2>/dev/null; then
-                log_success "Auto-cleanup scheduled via 'at' at ${expiry_human}"
-                return 0
-            else
-                log_warn "'at' available but scheduling failed — trying next tier"
-            fi
-        fi
-
-        if command -v systemd-run >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-            if systemd-run \
-                    --on-active="${expiry_hours}h" \
-                    --unit="vw-breakglass-cleanup" \
-                    --description="VaultWarden breakglass auto-cleanup for ${bg_user}" \
-                    -- bash -c "${cleanup_cmd}" 2>/dev/null; then
-                log_success "Auto-cleanup scheduled via systemd transient timer at ${expiry_human} (reboot-safe)"
-                return 0
-            else
-                log_warn "systemd-run scheduling failed — falling back to background sleep"
-            fi
-        fi
-
-        local sleep_seconds=$(( expiry_hours * 3600 ))
-        log_error "WARNING: All reliable schedulers (at, systemd-run) are unavailable."
-        log_error "  Auto-expiry cannot be guaranteed across a reboot on this system."
-        log_error "  The breakglass account would persist indefinitely if the host reboots."
-        log_warn  "  To proceed anyway (NOT reboot-safe), re-run with --force."
-        log_warn  "  Mandatory: run 'sudo $0 breakglass remove' manually when done."
-        if [[ "${FORCE}" != "true" ]]; then
-            log_error "Aborting: pass --force to use the unreliable background-subshell fallback."
+        local unit_name="vw-breakglass-cleanup"
+        if ! command -v systemd-run >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then
+            log_error "Break-glass expiry requires systemd-run and systemctl; account creation is aborted."
             return 1
         fi
-        setsid bash -c "sleep ${sleep_seconds} && ${cleanup_cmd}" \
-            </dev/null >/dev/null 2>&1 &
-        disown
-        log_warn "Fallback auto-cleanup background job started (NOT reboot-safe) — target: ${expiry_human}"
+        if ! systemd-run --quiet --collect \
+                --on-active="${expiry_hours}h" \
+                --unit="$unit_name" \
+                --description="VaultWarden breakglass auto-cleanup for ${bg_user}" \
+                -- /usr/bin/env bash "$script_abs" breakglass remove --user "$bg_user" --force 2>/dev/null; then
+            log_error "Could not schedule break-glass expiry with systemd; account creation is aborted."
+            return 1
+        fi
+        if ! systemctl is-active --quiet "${unit_name}.timer"; then
+            systemctl stop "${unit_name}.timer" "${unit_name}.service" >/dev/null 2>&1 || true
+            log_error "Break-glass expiry timer could not be verified active; account creation is aborted."
+            return 1
+        fi
+        log_success "Auto-cleanup scheduled and verified via systemd at ${expiry_human}"
         return 0
     }
-
     create_breakglass_user() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would create break-glass admin user: $BREAKGLASS_USER"
@@ -1678,14 +1659,18 @@ EOF
         fi
 
         if ! chpasswd <<< "${BREAKGLASS_USER}:${password}"; then
-            log_error "Failed to set user password"
-            userdel -r "$BREAKGLASS_USER" 2>/dev/null || true
+            log_error "Failed to set user password; rolling back the newly created account"
+            if ! remove_breakglass_user --force >/dev/null 2>&1; then
+                log_error "CRITICAL: password setup failed and automatic account rollback also failed."
+            fi
             return 1
         fi
 
         if ! create_sudoers_config; then
-            log_error "Failed to install sudoers configuration"
-            userdel -r "$BREAKGLASS_USER" 2>/dev/null || true
+            log_error "Failed to install sudoers configuration; rolling back the newly created account"
+            if ! remove_breakglass_user --force >/dev/null 2>&1; then
+                log_error "CRITICAL: sudoers setup failed and automatic account rollback also failed."
+            fi
             return 1
         fi
 
@@ -1739,6 +1724,15 @@ EOF
             log_warn "Failed to create instructions file securely"
         fi
 
+        if ! schedule_auto_cleanup; then
+            log_error "Break-glass expiry could not be scheduled; removing the newly created account."
+            remove_breakglass_user --force >/dev/null 2>&1 || {
+                log_error "CRITICAL: break-glass expiry failed and automatic account rollback also failed."
+                return 1
+            }
+            return 1
+        fi
+
         log_success "Break-glass admin created successfully"
 
         _notify_breakglass_event "CREATED" "User $BREAKGLASS_USER created with targeted sudoers (/etc/sudoers.d/vw-emergency)" "INFO"
@@ -1765,11 +1759,7 @@ EOF
 
         printf '%b\n' "Username:  ${COLOR_GREEN}${BREAKGLASS_USER}${COLOR_RESET}"
         printf '%b\n' "Password:  ${COLOR_GREEN}${password}${COLOR_RESET}"
-        if (( BREAKGLASS_AUTO_EXPIRY_HOURS > 0 )); then
-            printf '%b\n' "Expiry:    ${COLOR_YELLOW}${expiry_human} (auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
-        else
-            printf '%b\n' "Expiry:    ${COLOR_CYAN}None — auto-expiry disabled. Remove manually with: sudo $0 breakglass remove${COLOR_RESET}"
-        fi
+        printf '%b\n' "Expiry:    ${COLOR_YELLOW}${expiry_human} (verified auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
 
         printf '\nTo test this:\n'
         printf '1. Go to Oracle Cloud Console > Compute > Instance > Console Connection\n'
@@ -1784,12 +1774,13 @@ EOF
         press_enter_to_continue " Press [Enter] to clear the visible screen and finish..."
         clear
 
-        schedule_auto_cleanup
-
         return 0
     }
 
     remove_breakglass_user() {
+        local force_remove=false removal_failed=false
+        [[ "${1:-}" == "--force" ]] && force_remove=true
+
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would remove break-glass user: $BREAKGLASS_USER"
             return 0
@@ -1797,12 +1788,13 @@ EOF
 
         log_info "Removing break-glass admin user: $BREAKGLASS_USER"
 
+        local user_present=true
         if ! check_user_exists; then
-            log_info "User does not exist: $BREAKGLASS_USER"
-            return 0
+            user_present=false
+            log_info "User does not exist: $BREAKGLASS_USER; cleaning any stale break-glass artifacts"
         fi
 
-        if [[ "$FORCE" != "true" ]]; then
+        if [[ "$user_present" == "true" && "$FORCE" != "true" && "$force_remove" != "true" ]]; then
             echo ""
             log_warn "This will permanently remove the break-glass admin account."
             log_warn "You will lose emergency console access capability."
@@ -1819,38 +1811,33 @@ EOF
             if rm -f "$sudoers_file"; then
                 log_info "Removed targeted sudoers: $sudoers_file"
             else
-                log_warn "Failed to remove sudoers file: $sudoers_file — manual removal required"
+                log_error "Failed to remove sudoers file: $sudoers_file — manual removal required"
+                removal_failed=true
             fi
         fi
 
         if systemctl is-active --quiet vw-breakglass-cleanup.timer 2>/dev/null; then
-            systemctl stop vw-breakglass-cleanup.timer 2>/dev/null || true
-            log_info "Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)"
-        fi
-
-        if groups "$BREAKGLASS_USER" 2>/dev/null | grep -qw "sudo"; then
-            if command -v gpasswd >/dev/null 2>&1; then
-                if gpasswd -d "$BREAKGLASS_USER" sudo 2>/dev/null; then
-                    log_info "Removed $BREAKGLASS_USER from sudo group via gpasswd (legacy cleanup)"
-                else
-                    log_warn "gpasswd -d reported an error removing $BREAKGLASS_USER from sudo group"
-                fi
-            elif command -v deluser >/dev/null 2>&1; then
-                if deluser "$BREAKGLASS_USER" sudo 2>/dev/null; then
-                    log_info "Removed $BREAKGLASS_USER from sudo group via deluser (legacy cleanup)"
-                else
-                    log_warn "deluser reported an error removing $BREAKGLASS_USER from sudo group"
-                fi
+            if systemctl stop vw-breakglass-cleanup.timer >/dev/null 2>&1; then
+                log_info "Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)"
             else
-                log_warn "Could not remove $BREAKGLASS_USER from sudo group automatically."
-                log_warn "Manual remediation: edit /etc/group and remove '$BREAKGLASS_USER' from the sudo line."
+                log_error "Failed to stop pending break-glass cleanup timer"
+                removal_failed=true
             fi
         fi
 
-        if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
-            log_success "User removed: $BREAKGLASS_USER"
-        else
-            log_warn "User removal may have had issues (user might not have had home directory)"
+        if [[ "$user_present" == "true" ]]; then
+            if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
+                log_success "User removed: $BREAKGLASS_USER"
+            else
+                log_error "Failed to remove break-glass user: $BREAKGLASS_USER"
+                removal_failed=true
+            fi
+        fi
+
+        if [[ "$removal_failed" == "true" ]]; then
+            log_error "Break-glass admin removal is incomplete; manual remediation is required."
+            _notify_breakglass_event "REMOVE_FAILED" "Automatic removal of $BREAKGLASS_USER or its break-glass artifacts was incomplete" "CRITICAL"
+            return 1
         fi
 
         log_success "Break-glass admin removal completed"
@@ -1963,8 +1950,6 @@ EOF
             local sudoers_file="/etc/sudoers.d/vw-emergency"
             if [[ -f "$sudoers_file" ]] && grep -q "^${BREAKGLASS_USER} " "$sudoers_file" 2>/dev/null; then
                 echo "  Sudo access: ✅ Configured (targeted /etc/sudoers.d/vw-emergency)"
-            elif groups "$BREAKGLASS_USER" 2>/dev/null | grep -q -w "sudo"; then
-                echo "  Sudo access: ⚠️  Member of 'sudo' group (legacy full-root configuration)"
             else
                 echo "  Sudo access: ❌ NOT configured"
             fi
@@ -1980,7 +1965,7 @@ EOF
                 timer_left=$(systemctl show vw-breakglass-cleanup.timer -p NextElapseUSecRealtime 2>/dev/null | cut -d= -f2 || echo "unknown")
                 echo "  Auto-cleanup timer: ✅ Pending via systemd (vw-breakglass-cleanup) [next: ${timer_left}]"
             else
-                echo "  Auto-cleanup timer: ℹ️  Not active via systemd (may be scheduled via 'at')"
+                echo "  Auto-cleanup timer: ❌ Not active; break-glass expiry is not verified"
             fi
 
         else
@@ -2172,8 +2157,16 @@ _ss_prepare_plain_tmp_dir() {
 
 _ss_make_plaintext_temp() {
     local dir tmp
-    _ss_prepare_plain_tmp_dir || return 1
-    dir="$(_ss_plain_tmp_dir)"
+    if [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]]; then
+        _ss_prepare_plain_tmp_dir || return 1
+        dir="$(_ss_plain_tmp_dir)"
+    else
+        [[ -n "${SETUP_SECRETS_OWNED_WORKDIR:-}" && -d "$SETUP_SECRETS_OWNED_WORKDIR" ]] || {
+            log_error "Protected setup-secrets workspace was not initialized by the owning shell."
+            return 1
+        }
+        dir="$SETUP_SECRETS_OWNED_WORKDIR"
+    fi
     tmp=$(mktemp -p "$dir" vwsecrets.XXXXXXXXXX.yaml) || return 1
     chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
     printf '%s' "$tmp"
@@ -2602,6 +2595,7 @@ EOF
     fi
     
     local tmp_secrets=""
+    _setup_secrets_create_workdir || return 1
     tmp_secrets="$(_ss_make_plaintext_temp)" || return 1
     # shellcheck disable=SC2064  # intentional — $tmp_secrets must expand NOW
     trap "rm -f \"${tmp_secrets}\"" RETURN

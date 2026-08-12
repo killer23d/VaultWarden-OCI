@@ -774,27 +774,19 @@ install_sops() {
     log_success "Installed SOPS: ${final_sops_ver}"
 }
 
-# Ubuntu installs package 7zip, while usable command names vary by source.
-# Keep detection centralized so both 7zz and 7z remain valid.
+# Ubuntu 24.04 installs the supported 7zip package with the 7zz command.
+# Keep the executable check centralized and fail closed if 7zz is unavailable.
 _resolve_7zip_command() {
-    local candidate
-    for candidate in 7zz 7z; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-    return 1
+    command -v 7zz >/dev/null 2>&1 || return 1
+    printf '%s\n' 7zz
 }
 _require_7zip_command() {
-    local archive_tool
-    if ! archive_tool="$(_resolve_7zip_command)"; then
-        log_error "Missing required 7-Zip command: expected 7zz (preferred) or 7z (compatibility fallback)."
+    if ! _resolve_7zip_command >/dev/null; then
+        log_error "Missing required Ubuntu 7zz command."
         log_info "Install hint: sudo apt-get install -y 7zip"
         return 1
     fi
-    log_debug "Resolved 7-Zip command: $archive_tool"
-    return 0
+    log_debug "Resolved 7-Zip command: 7zz"
 }
 # Install the required system packages, Docker, and SOPS.
 # NOTE: CrowdSec is intentionally NOT installed here. It is an optional
