@@ -18,6 +18,13 @@ jobs:
         run: |
           set -euo pipefail
           awk '/python3 <<'"'"'PY'"'"'/{capture=1; next} capture && /^          PY$/{exit} capture{sub(/^          /, ""); print}' .github/workflows/pr7-apply-validate.yml > /tmp/pr7_patch.py
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          p=Path('/tmp/pr7_patch.py')
+          s=p.read_text()
+          s=s.replace(r'--suffix=\.yaml ', r'(?:--suffix=\.yaml )?')
+          p.write_text(s)
+          PYFIX
           python3 /tmp/pr7_patch.py
           rm -f .github/workflows/pr7-apply-validate.yml .github/workflows/pr7-runner.yml
       - name: Install validation dependencies
