@@ -1,4 +1,4 @@
-# Rerun after updating the runner inventory contract for the new authority case.
+# Rerun after replacing the removed operational Age-key override compatibility assertion.
 name: PR8 full Noble validation
 on:
   push:
