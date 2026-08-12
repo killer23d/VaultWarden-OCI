@@ -313,6 +313,21 @@ recreate_update_stack() {
     return 0
 }
 
+apply_update_stack() {
+    log_info "Applying stack configuration without forcing container recreation..."
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would run: docker compose up -d --remove-orphans"
+        return 0
+    fi
+    ensure_caddy_entrypoint_executable || return 1
+    if ! docker compose up -d --remove-orphans; then
+        log_error "Failed to apply stack configuration"
+        return 1
+    fi
+    log_success "Stack configuration applied"
+    return 0
+}
+
 check_update_readiness() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would wait for critical services and run health --quick"
@@ -488,7 +503,7 @@ main() {
             exit "$transaction_rc"
         fi
     else
-        if ! recreate_update_stack || ! check_update_readiness; then
+        if ! apply_update_stack || ! check_update_readiness; then
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                 local subject="[VaultWarden] Update FAILED"
                 local body
