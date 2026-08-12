@@ -1,0 +1,80 @@
+name: PR6 combined-update baseline fix
+on:
+  push:
+    branches:
+      - agent/pr6-update-crowdsec-readiness
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: agent/pr6-update-crowdsec-readiness
+      - name: Apply and validate combined-update baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f'{label}: expected one match, found {text.count(old)}')
+              p.write_text(text.replace(old, new, 1))
+
+          update = 'utilities/maintenance-update.sh'
+          old = '''    if [[ "$UPDATE_SYSTEM" == "true" ]]; then
+              operation_set_phase "3" "System package update"
+              update_system_packages
+          fi
+
+          if [[ "$image_transaction" == "true" ]]; then
+          '''
+          new = '''    if [[ "$UPDATE_SYSTEM" == "true" ]]; then
+              operation_set_phase "3" "System package update"
+              update_system_packages
+              if [[ "$image_transaction" == "true" ]]; then
+                  check_update_readiness "post-system-update pre-image baseline" || exit 1
+              fi
+          fi
+
+          if [[ "$image_transaction" == "true" ]]; then
+          '''
+          replace_once(update, old, new, 'combined update baseline')
+
+          test = 'tests/suites/operations/case-readiness.bash'
+          old = '''    system_line="$(grep -n '^[[:space:]]*update_system_packages$' "$UPDATE" | tail -1 | cut -d: -f1)"
+              snapshot_line="$(grep -n '^[[:space:]]*snapshot_image_digests$' "$UPDATE" | tail -1 | cut -d: -f1)"
+              [[ -n "$preflight_line" && -n "$system_line" && -n "$snapshot_line" ]] || fail "could not locate update ordering"
+              (( preflight_line < system_line && preflight_line < snapshot_line )) || fail "baseline must run before package/image mutation"
+          '''
+          new = '''    system_line="$(grep -n '^[[:space:]]*update_system_packages$' "$UPDATE" | tail -1 | cut -d: -f1)"
+              post_system_line="$(grep -n 'check_update_readiness "post-system-update pre-image baseline" || exit 1' "$UPDATE" | cut -d: -f1)"
+              snapshot_line="$(grep -n '^[[:space:]]*snapshot_image_digests$' "$UPDATE" | tail -1 | cut -d: -f1)"
+              [[ -n "$preflight_line" && -n "$system_line" && -n "$post_system_line" && -n "$snapshot_line" ]] \\
+                  || fail "could not locate update ordering"
+              (( preflight_line < system_line && system_line < post_system_line && post_system_line < snapshot_line )) \\
+                  || fail "combined update must re-establish a clean baseline after system packages and before image mutation"
+          '''
+          replace_once(test, old, new, 'combined update ordering regression')
+          PY
+          bash -n utilities/maintenance-update.sh tests/suites/operations/case-readiness.bash lib/crowdsec.sh
+          shellcheck -x --severity=warning utilities/maintenance-update.sh tests/suites/operations/case-readiness.bash lib/crowdsec.sh
+          bash tests/suites/operations/case-readiness.bash
+          git diff --check
+      - name: Publish and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add utilities/maintenance-update.sh tests/suites/operations/case-readiness.bash
+          git rm .github/workflows/pr6-combined-baseline-fix.yml
+          git commit -m 'fix: recheck readiness before image mutation'
+          git push origin HEAD:agent/pr6-update-crowdsec-readiness
