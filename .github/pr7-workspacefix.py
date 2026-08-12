@@ -4,20 +4,16 @@ from pathlib import Path
 def replace_function(path, name, body):
     p = Path(path)
     lines = p.read_text().splitlines(True)
-    start = next((i for i, line in enumerate(lines) if line.startswith(name + '() {')), None)
-    if start is None:
-        raise SystemExit(f'{path}: {name} not found')
-    end = next((i for i in range(start + 1, len(lines)) if lines[i].rstrip('\n') == '}'), None)
-    if end is None:
-        raise SystemExit(f'{path}: {name} end not found')
+    start = next((i for i, line in enumerate(lines)) if line.startswith(name + '() {'))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].rstrip('\n') == '}')
     lines[start:end + 1] = [body.rstrip() + '\n']
     p.write_text(''.join(lines))
 
 
 replace_function('lib/secrets.sh', '_ork_generate_and_secure', r'''_ork_generate_and_secure() {
   # Render and validate plaintext only in a verified volatile workspace. The
-  # persistent pathname is created exclusively from an empty same-directory
-  # stub, then populated as the intentional final plaintext recovery artifact.
+  # persistent pathname is reserved using an empty same-directory stub; only
+  # the intentional final recovery artifact ever contains plaintext on disk.
   local output_file="$1" output_dir sensitive_workspace temp_file publish_stub old_umask
   output_dir="$(dirname -- "$output_file")"
   [[ -d "$output_dir" && ! -L "$output_dir" ]] || return 1
@@ -68,14 +64,11 @@ replace_function('lib/secrets.sh', '_ork_generate_and_secure', r'''_ork_generate
       chown root:root -- "$temp_file" || exit 1
     fi
 
-    # Atomically reserve the final pathname without putting plaintext in a
-    # same-directory temporary file. The output directory is root-only.
+    # Reserve the final path without placing plaintext in a disk-backed temp.
     ln -- "$publish_stub" "$output_file" || exit 1
     linked=true
     rm -f -- "$publish_stub" || exit 1
-    if ! cat -- "$temp_file" > "$output_file"; then
-      exit 1
-    fi
+    cat -- "$temp_file" > "$output_file" || exit 1
     chmod 0600 -- "$output_file" || exit 1
     if (( EUID == 0 )); then
       chown root:root -- "$output_file" || exit 1
@@ -97,56 +90,13 @@ replace_function('lib/secrets.sh', '_ork_generate_and_secure', r'''_ork_generate
   return 0
 }''')
 
-p = Path('lib/secrets.sh')
-t = p.read_text()
-old = '''    local _eds_tmpdir _eds_cache
-    _eds_tmpdir=$(mktemp -d -t vaultwarden-secrets.XXXXXXXXXX) || {
-        log_error "export_docker_secrets: failed to create secure staging directory"
-        return 1
-    }
-    chmod 0700 "$_eds_tmpdir" || {
-        log_error "export_docker_secrets: failed to secure staging directory"
-        rm -rf "$_eds_tmpdir"
-        return 1
-    }
-    _eds_cache="${_eds_tmpdir}/secrets.yaml"
-    install -m 600 /dev/null "$_eds_cache" 2>/dev/null || true
-
-    # shellcheck disable=SC2064  # intentional: temp path is captured for RETURN cleanup
-    trap "{ rm -rf '$_eds_tmpdir' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
-'''
-new = '''    local _eds_tmpdir _eds_cache
-    _eds_tmpdir="$(create_sensitive_workspace docker-secrets)" || {
-        log_error "export_docker_secrets: no verified volatile staging workspace is available"
-        return 1
-    }
-    _eds_cache="${_eds_tmpdir}/secrets.yaml"
-    if ! install -m 600 /dev/null "$_eds_cache"; then
-        remove_sensitive_workspace "$_eds_tmpdir" 2>/dev/null || true
-        return 1
-    fi
-
-    # shellcheck disable=SC2064  # intentional: temp path is captured for RETURN cleanup
-    trap "{ remove_sensitive_workspace '$_eds_tmpdir' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
-'''
-if old not in t:
-    raise SystemExit('export_docker_secrets staging block not found')
-t = t.replace(old, new, 1)
-# Keep the explanatory comment accurate.
-t = t.replace('''#   1. SOPS decryption is written to a mktemp cache inside docker_dir (mode
-#      700, not world-listable /tmp) to eliminate the TOCTOU window on
-#      shared hosts.
-''', '''#   1. SOPS decryption is staged only inside a verified volatile root-only
-#      workspace, never in ordinary disk-backed /tmp storage.
-''', 1)
-p.write_text(t)
-
-# Assert the equivalent plaintext workspaces stay under the shared helper.
+# The main candidate already moves the runtime-decryption cache under the
+# shared volatile helper. Assert both equivalent plaintext workspaces here.
 p = Path('tests/suites/security/case-secrets.bash')
 t = p.read_text()
 anchor = 'grep -Fq \'_check_editor_forks || return 1\' utilities/secrets-edit.sh || fail "known forking editor refusal is not enforced"\n'
 if anchor not in t:
     raise SystemExit('sensitive cleanup assertion anchor missing')
-checks = '''grep -Fq 'create_sensitive_workspace recovery-kit' lib/secrets.sh || fail "recovery-kit temporary plaintext is not volatile"\ngrep -Fq 'create_sensitive_workspace docker-secrets' lib/secrets.sh || fail "runtime secret export staging is not volatile"\n! grep -Fq 'mktemp -d -t vaultwarden-secrets.' lib/secrets.sh || fail "runtime secret export still stages plaintext in generic tmp"\n! grep -Fq 'mktemp "${output_dir}/.vaultwarden-recovery-kit.' lib/secrets.sh || fail "recovery kit still stages plaintext beside its persistent output"\n'''
+checks = '''grep -Fq 'create_sensitive_workspace recovery-kit' lib/secrets.sh || fail "recovery-kit temporary plaintext is not volatile"\ngrep -Fq 'create_sensitive_workspace runtime-secrets' lib/secrets.sh || fail "runtime secret export staging is not volatile"\n! grep -Fq 'mktemp -d -t vaultwarden-secrets.' lib/secrets.sh || fail "runtime secret export still stages plaintext in generic tmp"\n! grep -Fq 'mktemp "${output_dir}/.vaultwarden-recovery-kit.' lib/secrets.sh || fail "recovery kit still stages plaintext beside its persistent output"\n'''
 t = t.replace(anchor, checks + anchor, 1)
 p.write_text(t)
