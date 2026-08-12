@@ -17,42 +17,32 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path('utilities/setup-secrets.sh')
           text = p.read_text()
-          old = '''    local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
-    if [[ "$AGE_KEY_FILE" != /* ]]; then
-        log_error "AGE_KEY_FILE must be an absolute path: $AGE_KEY_FILE"
-        return 1
-    fi
-'''
-          new = '''    local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
-'''
-          if text.count(old) != 1:
-              raise SystemExit(f'setup-secrets configure key block expected once, got {text.count(old)}')
+          old = '    local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"\n    if [[ "$AGE_KEY_FILE" != /* ]]; then\n        log_error "AGE_KEY_FILE must be an absolute path: $AGE_KEY_FILE"\n        return 1\n    fi\n'
+          new = '    local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"\n'
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'setup-secrets configure key block expected once, got {count}')
           text = text.replace(old, new)
-          old_comment = '''    # Repo .env must stay blank so the resolver can pick the correct readable
-    # key path depending on caller context.
-'''
-          new_comment = '''    # Repo .env stays authoring-only; operational Age-key custody is fixed at
-    # /etc/vaultwarden/age-key.txt.
-'''
-          if text.count(old_comment) != 1:
-              raise SystemExit(f'setup-secrets bootstrap comment expected once, got {text.count(old_comment)}')
+          old_comment = '    # Repo .env must stay blank so the resolver can pick the correct readable\n    # key path depending on caller context.\n'
+          new_comment = '    # Repo .env stays authoring-only; operational Age-key custody is fixed at\n    # /etc/vaultwarden/age-key.txt.\n'
+          count = text.count(old_comment)
+          if count != 1:
+              raise SystemExit(f'setup-secrets bootstrap comment expected once, got {count}')
           p.write_text(text.replace(old_comment, new_comment))
 
           p = Path('tests/suites/foundation/case-runtime-authority.bash')
           text = p.read_text()
           anchor = 'setup_system="$(cat utilities/setup-system.sh)"\n'
-          insert = anchor + 'setup_secrets="$(cat utilities/setup-secrets.sh)"\n'
           if text.count(anchor) != 1:
               raise SystemExit('runtime authority setup-system anchor mismatch')
-          text = text.replace(anchor, insert)
+          text = text.replace(anchor, anchor + 'setup_secrets="$(cat utilities/setup-secrets.sh)"\n')
           anchor = '[[ "$systemd_setup" == *"/etc/vaultwarden/age-key.txt"* ]] || fail "systemd canonical key missing"\n'
-          insert = anchor + '''[[ "$setup_secrets" == *'local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"'* ]] || fail "normal secrets setup does not pin canonical Age key"\n[[ "$setup_secrets" != *'local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"'* ]] || fail "normal secrets setup still accepts an alternate operational Age key"\n'''
+          assertions = '[[ "$setup_secrets" == *\'local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"\'* ]] || fail "normal secrets setup does not pin canonical Age key"\n[[ "$setup_secrets" != *\'local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"\'* ]] || fail "normal secrets setup still accepts an alternate operational Age key"\n'
           if text.count(anchor) != 1:
               raise SystemExit('runtime authority age assertion anchor mismatch')
-          p.write_text(text.replace(anchor, insert))
+          p.write_text(text.replace(anchor, anchor + assertions))
           PY
           bash -n utilities/setup-secrets.sh tests/suites/foundation/case-runtime-authority.bash
           shellcheck -x --severity=warning utilities/setup-secrets.sh tests/suites/foundation/case-runtime-authority.bash
