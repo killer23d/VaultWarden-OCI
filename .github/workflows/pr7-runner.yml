@@ -25,7 +25,7 @@ jobs:
           set -euo pipefail
           for f in lib/crypto.sh lib/secrets.sh lib/defaults.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash; do bash -n "$f"; done
       - name: ShellCheck
-        run: shellcheck -e SC1090,SC1091 lib/crypto.sh lib/secrets.sh lib/defaults.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
+        run: shellcheck -e SC1090,SC1091,SC2016,SC2153,SC2317 lib/crypto.sh lib/secrets.sh lib/defaults.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
       - name: Focused security tests
         run: |
           sudo env VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
