@@ -108,28 +108,21 @@ t = t.replace("-name '.vaultwarden-recovery-kit.*'", "-name '.vaultwarden-recove
 
 # The repository-wide suite intentionally runs secrets-core as an ordinary
 # user. Its recovery transaction fixture tests publication logic, not the
-# production root/backing verifier, so provide a fixture-local volatile
-# workspace implementation. Root enforcement remains covered by focused tests.
-fixture_anchor = '''    log_debug() { :; }
-    log_success() { :; }
-    resolve_age_key_path() { printf '%s\\
-' "$work/age-key.txt"; }
-'''
-fixture_replacement = '''    log_debug() { :; }
-    log_success() { :; }
-    create_sensitive_workspace() {
-      local purpose="${1:-sensitive}" dir="$work/volatile-${1:-sensitive}"
+# production root/backing verifier. Insert a fixture-local workspace mock only
+# in recovery_case; root enforcement remains covered by focused tests.
+lines = t.splitlines(True)
+section = next(i for i, line in enumerate(lines) if line.startswith('check_recovery_kit_schema_truth()'))
+case_start = next(i for i in range(section, len(lines)) if lines[i].lstrip().startswith('recovery_case() ('))
+case_end = next(i for i in range(case_start + 1, len(lines)) if lines[i].startswith('  )'))
+insert_at = next(i for i in range(case_start, case_end) if lines[i].strip() == 'log_success() { :; }') + 1
+fixture_mock = '''    create_sensitive_workspace() {
+      local dir="$work/volatile-${1:-sensitive}"
       rm -rf -- "$dir"
       mkdir -p "$dir"
       chmod 0700 "$dir"
-      printf '%s\\
-' "$dir"
+      printf '%s\\n' "$dir"
     }
     remove_sensitive_workspace() { rm -rf -- "$1"; }
-    resolve_age_key_path() { printf '%s\\
-' "$work/age-key.txt"; }
 '''
-if fixture_anchor not in t:
-    raise SystemExit('recovery transaction fixture anchor missing')
-t = t.replace(fixture_anchor, fixture_replacement, 1)
-p.write_text(t)
+lines[insert_at:insert_at] = [fixture_mock]
+p.write_text(''.join(lines))
