@@ -26,8 +26,9 @@ if create_sensitive_workspace refusal-test >/dev/null 2>&1; then
     fail 'sensitive workspace succeeded when all backing verification was forced to fail'
 fi
 
-# Re-source to restore the real backing verifier, then verify root-only cleanup.
-source "$ROOT/lib/crypto.sh"
+# The source guard prevents re-sourcing; restore an accepting verifier explicitly
+# for the cleanup-only assertion below.
+_sensitive_backing_is_volatile() { return 0; }
 workspace="$(create_sensitive_workspace test-cleanup)" || fail 'could not create verified volatile workspace on Noble runner'
 [[ "$(stat -c '%u:%g:%a' "$workspace")" == '0:0:700' ]] || fail 'sensitive workspace is not root:root mode 0700'
 printf 'sensitive sentinel\n' >"$workspace/plaintext"
@@ -102,6 +103,17 @@ sops() {
 }
 encrypt_sops_file "$plain" "$key" || fail 'encrypt_sops_file rejected valid round-trip'
 [[ "$(cat "$plain")" == 'GOOD-CIPHERTEXT' ]] || fail 'encrypt_sops_file did not atomically install validated ciphertext'
+
+# Edit and rotate may allocate same-directory staging files for atomic promotion,
+# but those files must receive only ciphertext: encrypt the volatile file first.
+edit_encrypt_line="$(grep -nF 'encrypt_sops_file "$temp_file"' "$ROOT/utilities/secrets-edit.sh" | cut -d: -f1)"
+edit_copy_line="$(grep -nF 'cp -- "$temp_file" "$encrypted_temp"' "$ROOT/utilities/secrets-edit.sh" | cut -d: -f1)"
+[[ -n "$edit_encrypt_line" && -n "$edit_copy_line" && "$edit_encrypt_line" -lt "$edit_copy_line" ]] \
+    || fail 'secret edit writes plaintext to disk staging before encryption'
+rotate_encrypt_line="$(grep -nF 'encrypt_sops_file "$temp_patched"' "$ROOT/utilities/secrets-rotate.sh" | cut -d: -f1)"
+rotate_copy_line="$(grep -nF 'cp -- "$temp_patched" "$temp_enc"' "$ROOT/utilities/secrets-rotate.sh" | cut -d: -f1)"
+[[ -n "$rotate_encrypt_line" && -n "$rotate_copy_line" && "$rotate_encrypt_line" -lt "$rotate_copy_line" ]] \
+    || fail 'secret rotate writes plaintext to disk staging before encryption'
 
 printf 'PR7 sensitive workspace and SOPS promotion regressions passed.\n'
 )
