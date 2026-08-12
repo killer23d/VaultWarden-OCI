@@ -19,7 +19,8 @@ jobs:
           python3 /tmp/pr7_patch.py
           python3 .github/pr7-postfix.py
           python3 .github/pr7-testfix.py
-          rm -f .github/pr7-preprocess.py .github/pr7-postfix.py .github/pr7-testfix.py .github/workflows/pr7-apply-validate.yml .github/workflows/pr7-runner.yml
+          python3 .github/pr7-direct-tests.py
+          rm -f .github/pr7-preprocess.py .github/pr7-postfix.py .github/pr7-testfix.py .github/pr7-direct-tests.py .github/workflows/pr7-apply-validate.yml .github/workflows/pr7-runner.yml
       - name: Install validation dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip
       - name: Syntax validation
