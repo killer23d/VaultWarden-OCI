@@ -677,34 +677,16 @@ install_units() {
 
     # The operational Age key is provisioned directly at its canonical path.
     log_info "Checking canonical age key at $AGE_KEY_DEST ..."
-    local age_key_src="$AGE_KEY_DEST"
-    if [[ "$DRY_RUN" == "true" ]]; then
-        if [[ -f "$age_key_src" ]]; then
-            log_info "[DRY RUN] Would copy $age_key_src -> $AGE_KEY_DEST (600 root:root)"
-            log_info "[DRY RUN] sync-env would set SOPS_AGE_KEY_FILE=$AGE_KEY_DEST in generated runtime env files"
+    if [[ -f "$AGE_KEY_DEST" ]]; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would validate root:root 600 on $AGE_KEY_DEST"
         else
-            log_warn "[DRY RUN] Age key source not found: $age_key_src"
-            if [[ -f "$AGE_KEY_DEST" ]]; then
-                log_info "[DRY RUN] Key already at $AGE_KEY_DEST -- sync-env would correct SOPS_AGE_KEY_FILE"
-            else
-                log_warn "[DRY RUN] Install the key, then run sync-env to refresh generated runtime env files."
-            fi
-        fi
-    else
-        if [[ -f "$age_key_src" ]]; then
             fix_known_path_permissions "$AGE_KEY_DEST"
             log_success "Canonical age key present: $AGE_KEY_DEST"
-        else
-            log_warn "Age key source not found: $age_key_src"
-            if [[ -f "$AGE_KEY_DEST" ]]; then
-                log_info "  Key already present at $AGE_KEY_DEST -- no copy needed."
-            else
-                log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
-                log_warn "After placing your age-key.txt, run:"
-                log_warn "  sudo install -m 600 -o root -g root /path/to/age-key.txt $AGE_KEY_DEST"
-                log_warn "  sudo utilities/setup-systemd.sh install"
-            fi
         fi
+    else
+        log_warn "Canonical Age key is missing: $AGE_KEY_DEST"
+        log_warn "Install the correct operational key there, then rerun this command."
     fi
 
     local rclone_dest="$ENV_DIR/rclone.conf"

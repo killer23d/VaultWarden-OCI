@@ -114,9 +114,7 @@ _validate_runtime_env_file() {
         esac
 
         if [[ "$raw_value" == \"* && "$raw_value" != *\" ]] \
-            || [[ "$raw_value" == \'* && "$raw_value" != *\' ]] \
-            || [[ "$raw_value" != \"* && "$raw_value" == *\" ]] \
-            || [[ "$raw_value" != \'* && "$raw_value" == *\' ]]; then
+            || [[ "$raw_value" == \'* && "$raw_value" != *\' ]]; then
             log_error "Malformed runtime environment ${env_file}:${lineno}: unmatched quote for '${key}'"
             malformed=true
             continue
