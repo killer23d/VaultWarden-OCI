@@ -26,19 +26,7 @@ jobs:
       - name: Keep alternate key path test-only
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('tests/suites/security/case-secrets.bash')
-          text = p.read_text()
-          anchor = '''  tar --exclude='./.git' --exclude='./test-results' --exclude='./vw_tmp.*' \\
-    -cf - . | tar -xf - -C "$direct_fixture"\n\n  direct_bin="$direct_tmp/bin"\n'''
-          replacement = '''  tar --exclude='./.git' --exclude='./test-results' --exclude='./vw_tmp.*' \\
-    -cf - . | tar -xf - -C "$direct_fixture"\n\n  # This fixture exercises protected-handoff orchestration, not production key\n  # path selection. Redirect only the copied script so the test never writes\n  # a synthetic identity into the runner's real /etc/vaultwarden directory.\n  python3 - "$direct_fixture/utilities/setup-secrets.sh" <<'PY_DIRECT_KEY_PATH'\nfrom pathlib import Path\nimport sys\npath = Path(sys.argv[1])\ntext = path.read_text()\nold = '    local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"\\n'\nnew = '    local AGE_KEY_FILE="${VW_TEST_AGE_KEY_FILE:?}"\\n'\nif text.count(old) != 1:\n    raise SystemExit(f'copied setup-secrets canonical key declaration expected once, got {text.count(old)}')\npath.write_text(text.replace(old, new))\nPY_DIRECT_KEY_PATH\n\n  direct_bin="$direct_tmp/bin"\n'''
-          count = text.count(anchor)
-          if count != 1:
-              raise SystemExit(f'direct-auto fixture anchor expected once, got {count}')
-          p.write_text(text.replace(anchor, replacement))
-          PY
+          python3 -c 'from pathlib import Path; p=Path("tests/suites/security/case-secrets.bash"); t=p.read_text(); n="  direct_bin=\"$direct_tmp/bin\"\n"; assert t.count(n)==1, t.count(n); i="  # Protected-handoff fixture only: redirect the copied setup script so this test never writes a synthetic key into the runner real /etc.\n  direct_setup=\"$direct_fixture/utilities/setup-secrets.sh\"\n  grep -Fxq '\''    local AGE_KEY_FILE=\"/etc/vaultwarden/age-key.txt\"'\'' \"$direct_setup\" || fail \"copied setup-secrets canonical key declaration missing\"\n  sed -i '\''s|^    local AGE_KEY_FILE=\"/etc/vaultwarden/age-key.txt\"$|    local AGE_KEY_FILE=\"${VW_TEST_AGE_KEY_FILE:?}\"|'\'' \"$direct_setup\"\n\n"; p.write_text(t.replace(n,i+n))'
           bash -n tests/suites/security/case-secrets.bash
           shellcheck -x --severity=warning tests/suites/security/case-secrets.bash
           VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
