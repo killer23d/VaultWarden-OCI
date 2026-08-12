@@ -22,15 +22,27 @@ crowdsec_worker_service_exists() {
     [[ -f "/lib/systemd/system/crowdsec-cloudflare-worker-bouncer.service" ]]
 }
 
-_crowdsec_worker_resolve_lapi_port() {
-    if declare -F _cs_resolve_lapi_port >/dev/null 2>&1; then
-        _cs_resolve_lapi_port
-        return
+crowdsec_resolve_lapi_port() {
+    local config_file="${1:-${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}/config.yaml}"
+    local -a matches=()
+    [[ -r "$config_file" ]] || {
+        log_error "CrowdSec LAPI config is missing or unreadable: $config_file"
+        return 1
+    }
+    mapfile -t matches < <(
+        sed -nE 's/^[[:space:]]*listen_uri:[[:space:]]*127\.0\.0\.1:([0-9]+)[[:space:]]*$/\1/p' "$config_file"
+    )
+    if (( ${#matches[@]} != 1 )) \
+        || [[ ! "${matches[0]}" =~ ^[0-9]+$ ]] \
+        || (( matches[0] < 1 || matches[0] > 65535 )); then
+        log_error "CrowdSec LAPI config must contain exactly one valid loopback listen_uri: $config_file"
+        return 1
     fi
-    grep -oP '(?<=listen_uri:\s{0,10}127\.0\.0\.1:)\d+' \
-        /etc/crowdsec/config.yaml 2>/dev/null \
-        | head -1 \
-        || echo "8090"
+    printf '%s\n' "${matches[0]}"
+}
+
+_crowdsec_worker_resolve_lapi_port() {
+    crowdsec_resolve_lapi_port "${VW_CROWDSEC_ETC_DIR:-/etc/crowdsec}/config.yaml"
 }
 
 _crowdsec_worker_value_is_active() {
@@ -162,7 +174,10 @@ crowdsec_worker_apply_config() {
     chown root:root "$tmp_config" || { rm -f "$tmp_config"; return 1; }
 
     local lapi_port worker_route account_email bouncer_bin render_rc=0
-    lapi_port="$(_crowdsec_worker_resolve_lapi_port)"
+    lapi_port="$(_crowdsec_worker_resolve_lapi_port)" || {
+        rm -f "$tmp_config"
+        return 1
+    }
     worker_route="${domain_name}/*"
     account_email="${CF_ACCOUNT_EMAIL:-CHANGE_ME_CF_ACCOUNT_EMAIL}"
     bouncer_bin="${_CF_WORKER_BOUNCER_BIN:-/usr/local/bin/crowdsec-cloudflare-worker-bouncer}"
