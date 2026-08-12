@@ -125,18 +125,11 @@ check_prerequisites() {
 _export_recovery_kit_safe() {
     log_info "Validating secrets before recovery kit export..."
 
-    local temp_plain
-    temp_plain=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
-    if [[ -n "$temp_plain" && "$temp_plain" != /dev/shm/* ]]; then
-        log_warn "export-recovery-kit: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_plain"
-        log_warn "                     Ensure full-disk encryption is active on this host."
-    fi
-    if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
-        rm -f "$temp_plain"
-        log_error "Failed to secure temp file: $temp_plain"
-        return 1
-    fi
-    register_cleanup "_remove_sensitive_file" "$temp_plain"
+    local temp_plain sensitive_workspace
+    sensitive_workspace="$(create_sensitive_workspace recovery-export)" || return 1
+    register_cleanup "remove_sensitive_workspace" "$sensitive_workspace"
+    temp_plain="${sensitive_workspace}/secrets.yaml"
+    install -m 600 /dev/null "$temp_plain" || return 1
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"

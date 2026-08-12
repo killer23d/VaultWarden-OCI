@@ -850,13 +850,18 @@ fi
 ! /bin/test -e "$target" && ! /bin/test -L "$target"
 '
 
+  local systemd_cleanup_body="$cleanup_body"
+  systemd_cleanup_body="${systemd_cleanup_body#$'\n'}"
+  systemd_cleanup_body="${systemd_cleanup_body%$'\n'}"
+  systemd_cleanup_body="${systemd_cleanup_body//$'\n'/; }"
+  systemd_cleanup_body="${systemd_cleanup_body//then; /then }"
   systemd_run="$(command -v systemd-run 2>/dev/null || true)"
   if [[ -n "$systemd_run" ]] && "$systemd_run" \
       --quiet \
       --collect \
       --unit="$unit_name" \
       --on-active="$delay" \
-      /bin/sh -c "$cleanup_body" sh "$absolute_file"; then
+      /bin/sh -c "$systemd_cleanup_body" sh "$absolute_file"; then
     _RECOVERY_CLEANUP_SCHEDULER="systemd"
     _RECOVERY_CLEANUP_DELAY="$delay"
     return 0
@@ -895,14 +900,11 @@ _check_recovery_kit_email_deps() {
     log_error "recovery-kit email: SMTP attachment helper is unavailable."
     return 1
   }
-  local candidate
-  for candidate in 7zz 7z; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  log_warn "recovery-kit email: an AES-ZIP capable 7-Zip command is required."
+  if command -v 7zz >/dev/null 2>&1; then
+    printf '%s\n' 7zz
+    return 0
+  fi
+  log_warn "recovery-kit email: Ubuntu 7zz is required."
   log_warn "Install on Ubuntu 24.04 with: sudo apt-get install -y 7zip"
   return 1
 }
@@ -986,7 +988,7 @@ _encrypt_recovery_kit_attachment() {
     log_error "Recovery-kit plaintext file is missing or empty."
     return 1
   }
-  case "${tool##*/}" in 7z|7zz) ;; *)
+  case "${tool##*/}" in 7zz) ;; *)
     log_error "Unsupported recovery ZIP tool: $tool"
     return 1
     ;;
@@ -1168,7 +1170,7 @@ It is a ZIP archive encrypted with AES-256. The attachment passphrase is indepen
 Extraction:
 - Windows: use 7-Zip or another AES-ZIP-capable application.
 - macOS: use an AES-ZIP-capable application; the built-in Archive Utility may not support this archive.
-- Linux: run `7z x important-documents-YYYYMMDD.zip` and enter the attachment passphrase.
+- Linux: run `7zz x important-documents-YYYYMMDD.zip` and enter the attachment passphrase.
 
 Store the extracted recovery document securely and delete plaintext copies after use.
 BODY
@@ -1216,9 +1218,11 @@ validate_cloudflare_token() {
         *)        log_error "Invalid token type: $token_type"; return 1 ;;
     esac
 
-    local curl_cfg
-    if ! curl_cfg=$(mktemp) || ! install -m 600 /dev/null "$curl_cfg"; then
-        rm -f "$curl_cfg" 2>/dev/null || true
+    local curl_cfg curl_workspace
+    curl_workspace="$(create_sensitive_workspace cloudflare-token)" || return 1
+    curl_cfg="${curl_workspace}/curl.conf"
+    if ! install -m 600 /dev/null "$curl_cfg"; then
+        remove_sensitive_workspace "$curl_workspace" 2>/dev/null || true
         return 1
     fi
     printf 'header = "Authorization: Bearer %s"\n' "$token" > "$curl_cfg"
@@ -1848,39 +1852,50 @@ EOF
 }
 
 _ork_generate_and_secure() {
-  # VWOCI-PRR-PATCH-02: render to a randomized same-directory temporary file,
-  # validate, then publish atomically without ever printing the body.
-  local output_file="$1" output_dir temp_file old_umask
+  # Render and validate plaintext only in a verified volatile workspace. The
+  # persistent pathname is reserved using an empty same-directory stub; only
+  # the intentional final recovery artifact ever contains plaintext on disk.
+  local output_file="$1" output_dir sensitive_workspace temp_file publish_stub old_umask
   output_dir="$(dirname -- "$output_file")"
   [[ -d "$output_dir" && ! -L "$output_dir" ]] || return 1
   [[ ! -e "$output_file" && ! -L "$output_file" ]] || {
     log_error "Refusing to overwrite recovery kit: $output_file"
     return 1
   }
+
+  sensitive_workspace="$(create_sensitive_workspace recovery-kit)" || return 1
+  temp_file="${sensitive_workspace}/recovery-kit.txt"
   old_umask="$(umask)"; umask 077
-  temp_file="$(mktemp "${output_dir}/.vaultwarden-recovery-kit.XXXXXXXX")" || {
-    umask "$old_umask"; return 1;
+  publish_stub="$(mktemp "${output_dir}/.vaultwarden-recovery-publish.XXXXXXXX")" || {
+    umask "$old_umask"
+    remove_sensitive_workspace "$sensitive_workspace" 2>/dev/null || true
+    return 1
   }
   umask "$old_umask"
+  chmod 0600 -- "$publish_stub" || {
+    rm -f -- "$publish_stub"
+    remove_sensitive_workspace "$sensitive_workspace" 2>/dev/null || true
+    return 1
+  }
+
   (
     local linked=false completed=false
     _ork_rollback_incomplete_publication() {
       [[ "$completed" == "true" ]] && return 0
-      # linked covers failures after state is recorded. The same-inode check
-      # closes the signal window after ln succeeds but before linked=true.
+      # The same-inode check closes the signal window after ln succeeds but
+      # before linked=true. The disk-side stub is empty and never holds secrets.
       if [[ "$linked" == "true" ]] \
-          || { [[ -e "$output_file" && -e "$temp_file" ]] && [[ "$output_file" -ef "$temp_file" ]]; }; then
+          || { [[ -e "$output_file" && -e "$publish_stub" ]] && [[ "$output_file" -ef "$publish_stub" ]]; }; then
         _remove_sensitive_file "$output_file" 2>/dev/null || true
       fi
-      _remove_sensitive_file "$temp_file" 2>/dev/null || true
+      rm -f -- "$publish_stub" 2>/dev/null || true
+      remove_sensitive_workspace "$sensitive_workspace" 2>/dev/null || true
     }
     trap _ork_rollback_incomplete_publication EXIT
-    # A signal means publication did not complete from the caller's point of
-    # view. Force rollback even if it lands after cleanup was accepted but
-    # before this subshell returns success.
     trap 'completed=false; exit 130' INT
     trap 'completed=false; exit 129' HUP
     trap 'completed=false; exit 143' TERM
+
     generate_recovery_kit "$temp_file" || exit 1
     [[ -s "$temp_file" ]] || exit 1
     grep -Fq 'END OF RECOVERY KIT' "$temp_file" || exit 1
@@ -1889,13 +1904,24 @@ _ork_generate_and_secure() {
     if (( EUID == 0 )); then
       chown root:root -- "$temp_file" || exit 1
     fi
-    # Hard-link publication is atomic and fails when the destination exists.
-    ln -- "$temp_file" "$output_file" || exit 1
+
+    # Reserve the final path without placing plaintext in a persistent temp.
+    ln -- "$publish_stub" "$output_file" || exit 1
     linked=true
-    rm -f -- "$temp_file" || exit 1
-    # Cleanup acceptance is part of publication success. Keeping it inside
-    # this transaction removes the handoff window where a valid plaintext
-    # document existed but no cleanup job had yet been accepted.
+    rm -f -- "$publish_stub" || exit 1
+    cat -- "$temp_file" > "$output_file" || exit 1
+    chmod 0600 -- "$output_file" || exit 1
+    if (( EUID == 0 )); then
+      chown root:root -- "$output_file" || exit 1
+    fi
+    cmp -s -- "$temp_file" "$output_file" || exit 1
+    grep -Fq 'END OF RECOVERY KIT' "$output_file" || exit 1
+    grep -Fq 'AGE-SECRET-KEY-1' "$output_file" || exit 1
+
+    if ! remove_sensitive_workspace "$sensitive_workspace"; then
+      log_error "Recovery-kit volatile plaintext cleanup failed; rolling back publication."
+      exit 1
+    fi
     if ! _schedule_recovery_cleanup "$output_file" "30m"; then
       log_error "Recovery-kit cleanup could not be scheduled; rolling back published plaintext."
       exit 1
@@ -2113,13 +2139,13 @@ schema = load(schema_path, "schema")
 entries = schema.get("secrets") or []
 schema_by_key = {entry.get("key"): entry for entry in entries if isinstance(entry, dict)}
 schema_keys = set(schema_by_key)
-legacy_keys = {"backup_passphrase"}
+legacy_keys = set()
 errors = []
 
 for key in plain:
     if key == "sops":
         continue
-    if key not in schema_keys and key not in legacy_keys:
+    if key not in schema_keys:
         errors.append(f"{key}: unknown secret key not declared in schema")
 
 for key, entry in schema_by_key.items():
@@ -2229,20 +2255,15 @@ export_docker_secrets() {
     fi
 
     local _eds_tmpdir _eds_cache
-    _eds_tmpdir=$(mktemp -d -t vaultwarden-secrets.XXXXXXXXXX) || {
-        log_error "export_docker_secrets: failed to create secure staging directory"
-        return 1
-    }
-    chmod 0700 "$_eds_tmpdir" || {
-        log_error "export_docker_secrets: failed to secure staging directory"
-        rm -rf "$_eds_tmpdir"
+    _eds_tmpdir="$(create_sensitive_workspace runtime-secrets)" || {
+        log_error "export_docker_secrets: no verified volatile plaintext staging directory is available"
         return 1
     }
     _eds_cache="${_eds_tmpdir}/secrets.yaml"
     install -m 600 /dev/null "$_eds_cache" 2>/dev/null || true
 
     # shellcheck disable=SC2064  # intentional: temp path is captured for RETURN cleanup
-    trap "{ rm -rf '$_eds_tmpdir' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
+    trap "{ remove_sensitive_workspace '$_eds_tmpdir' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
 
     if ! ensure_sops_env; then
         log_error "export_docker_secrets: failed to set up SOPS environment"
@@ -2364,24 +2385,16 @@ PYEOF
 
     local _manifest
     _manifest="$(_managed_secrets_manifest_path "$docker_dir")"
-    local _legacy_manifest="${docker_dir}/.managed-secrets"
     local _manifest_tmp="${_eds_tmpdir}/managed-secrets"
     declare -A _eds_remove_keys=()
 
     for _key in "${!_eds_inactive_keys[@]}"; do
         _eds_remove_keys["$_key"]=1
     done
-    local -a _retired_runtime_keys=(backup_passphrase)
-    local _retired_runtime_key
-    for _retired_runtime_key in "${_retired_runtime_keys[@]}"; do
-        _eds_remove_keys["$_retired_runtime_key"]=1
-    done
 
     local _previous_manifest=""
     if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -f "$_manifest"; then
         _previous_manifest=$(VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo cat "$_manifest" 2>/dev/null || true)
-    elif VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -f "$_legacy_manifest"; then
-        _previous_manifest=$(VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo cat "$_legacy_manifest" 2>/dev/null || true)
     fi
     while IFS= read -r _key; do
         [[ -z "$_key" ]] && continue
@@ -2406,13 +2419,6 @@ PYEOF
     for _key in "${!_eds_active_keys[@]}"; do
         printf '%s\n' "$_key" >> "$_manifest_tmp"
     done
-    if VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo test -e "$_legacy_manifest"; then
-        if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo rm -f "$_legacy_manifest"; then
-            log_error "export_docker_secrets: failed to remove legacy managed manifest ${_legacy_manifest}"
-            return 1
-        fi
-    fi
-
     if ! VAULTWARDEN_NONINTERACTIVE_SUDO=true _maybe_sudo install -d -m 0700 -o root -g root "$(dirname "$_manifest")"; then
         log_error "export_docker_secrets: failed to prepare managed runtime metadata directory: $(dirname "$_manifest")"
         return 1

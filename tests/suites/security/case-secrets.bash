@@ -187,8 +187,6 @@ grep -Fq "$exact16" "$transport_log" \
 real_tool=""
 if command -v 7zz >/dev/null 2>&1; then
     real_tool=7zz
-elif command -v 7z >/dev/null 2>&1; then
-    real_tool=7z
 fi
 if [[ -n "$real_tool" ]]; then
     smoke_dir="$TMP/smoke"
@@ -214,7 +212,7 @@ if [[ -n "$real_tool" ]]; then
     cmp "$smoke_dir/recovery-kit.txt" "$smoke_dir/out/recovery-kit.txt" \
         || fail 'real AES-256 ZIP extracted content mismatch'
 else
-    printf 'Real AES-256 ZIP stdin smoke test skipped: 7z/7zz unavailable.\n'
+    printf 'Real AES-256 ZIP stdin smoke test skipped: 7zz unavailable.\n'
 fi
 
 printf 'Recovery-kit passphrase transport contract tests passed.\n'
@@ -222,6 +220,127 @@ printf 'Recovery-kit passphrase transport contract tests passed.\n'
 
 if [[ "$MODE" == "core" || "$MODE" == "all" ]]; then
     check_recovery_kit_attachment_passphrase_contract
+fi
+
+
+check_pr7_sensitive_workspace_and_sops_promotion() (
+set -euo pipefail
+ROOT="$VW_TEST_REPO_ROOT"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+# shellcheck source=../../../lib/crypto.sh
+source "$ROOT/lib/crypto.sh"
+
+# Production sensitive workspaces are root-only. The focused root run verifies
+# backing refusal and real root:root mode/cleanup; the ordinary-user full suite
+# verifies that the root boundary itself fails closed.
+if (( EUID == 0 )); then
+    _sensitive_backing_is_volatile() { return 1; }
+    if create_sensitive_workspace refusal-test >/dev/null 2>&1; then
+        fail 'sensitive workspace succeeded when all backing verification was forced to fail'
+    fi
+
+    # The source guard prevents re-sourcing; restore an accepting verifier
+    # explicitly for the cleanup-only assertion below.
+    _sensitive_backing_is_volatile() { return 0; }
+    workspace="$(create_sensitive_workspace test-cleanup)" || fail 'could not create verified volatile workspace on Noble runner'
+    [[ "$(stat -c '%u:%g:%a' "$workspace")" == '0:0:700' ]] || fail 'sensitive workspace is not root:root mode 0700'
+    printf 'sensitive sentinel\n' >"$workspace/plaintext"
+    remove_sensitive_workspace "$workspace" || fail 'sensitive workspace cleanup failed'
+    [[ ! -e "$workspace" ]] || fail 'sensitive workspace remained after cleanup'
+else
+    if create_sensitive_workspace nonroot-test >/dev/null 2>&1; then
+        fail 'sensitive workspace unexpectedly allowed non-root allocation'
+    fi
+fi
+
+key="$TMP/age-key.txt"
+printf 'dummy-key\n' >"$key"
+dest="$TMP/secrets.yaml"
+staged="$TMP/staged.yaml"
+printf 'OLD-CIPHERTEXT\n' >"$dest"
+printf 'GOOD-CIPHERTEXT\n' >"$staged"
+
+# Mock only the SOPS validity oracle; file operations remain real.
+sops() {
+    local last="${!#}"
+    case " $* " in
+        *' --decrypt '*)
+            [[ "$(cat "$last")" != *BAD-CIPHERTEXT* ]]
+            ;;
+        *' --encrypt --in-place '*)
+            printf 'GOOD-CIPHERTEXT\n' >"$last"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# The rollback copy is a hard precondition: a failed copy must not replace live ciphertext.
+cp() { return 42; }
+if promote_sops_ciphertext "$staged" "$dest" "$key" >/dev/null 2>&1; then
+    fail 'SOPS promotion succeeded despite rollback-copy failure'
+fi
+[[ "$(cat "$dest")" == 'OLD-CIPHERTEXT' ]] || fail 'rollback-copy failure modified live ciphertext'
+[[ -f "$staged" ]] || fail 'rollback-copy failure consumed staged ciphertext'
+unset -f cp
+
+# A promoted file that fails post-move validation must restore the previous ciphertext.
+printf 'BAD-CIPHERTEXT\n' >"$staged"
+sops() {
+    local last="${!#}"
+    case " $* " in
+        *' --decrypt '*)
+            if [[ "$last" == "$staged" ]]; then return 0; fi
+            [[ "$(cat "$last")" != *BAD-CIPHERTEXT* ]]
+            ;;
+        *) return 1 ;;
+    esac
+}
+if promote_sops_ciphertext "$staged" "$dest" "$key" >/dev/null 2>&1; then
+    fail 'SOPS promotion succeeded despite failed post-promotion round-trip'
+fi
+[[ "$(cat "$dest")" == 'OLD-CIPHERTEXT' ]] || fail 'failed promoted ciphertext was not rolled back'
+! compgen -G "$TMP/.secrets.yaml.rollback.*" >/dev/null || fail 'successful rollback left a rollback artifact'
+
+# Successful promotion removes its rollback only after validation.
+printf 'GOOD-CIPHERTEXT\n' >"$staged"
+sops() { return 0; }
+promote_sops_ciphertext "$staged" "$dest" "$key" || fail 'valid staged ciphertext did not promote'
+[[ "$(cat "$dest")" == 'GOOD-CIPHERTEXT' ]] || fail 'valid staged ciphertext was not installed'
+! compgen -G "$TMP/.secrets.yaml.rollback.*" >/dev/null || fail 'successful promotion left a rollback artifact'
+
+# encrypt_sops_file validates the encrypted temporary result before replacing its plaintext staging input.
+plain="$TMP/plain.yaml"
+printf 'PLAINTEXT\n' >"$plain"
+sops() {
+    local last="${!#}"
+    case " $* " in
+        *' --encrypt --in-place '*) printf 'GOOD-CIPHERTEXT\n' >"$last" ;;
+        *' --decrypt '*) [[ "$(cat "$last")" == 'GOOD-CIPHERTEXT' ]] ;;
+        *) return 1 ;;
+    esac
+}
+encrypt_sops_file "$plain" "$key" || fail 'encrypt_sops_file rejected valid round-trip'
+[[ "$(cat "$plain")" == 'GOOD-CIPHERTEXT' ]] || fail 'encrypt_sops_file did not atomically install validated ciphertext'
+
+# Edit and rotate may allocate same-directory staging files for atomic promotion,
+# but those files must receive only ciphertext: encrypt the volatile file first.
+edit_encrypt_line="$(grep -nF 'encrypt_sops_file "$temp_file"' "$ROOT/utilities/secrets-edit.sh" | cut -d: -f1)"
+edit_copy_line="$(grep -nF 'cp -- "$temp_file" "$encrypted_temp"' "$ROOT/utilities/secrets-edit.sh" | cut -d: -f1)"
+[[ -n "$edit_encrypt_line" && -n "$edit_copy_line" && "$edit_encrypt_line" -lt "$edit_copy_line" ]] \
+    || fail 'secret edit writes plaintext to disk staging before encryption'
+rotate_encrypt_line="$(grep -nF 'encrypt_sops_file "$temp_patched"' "$ROOT/utilities/secrets-rotate.sh" | cut -d: -f1)"
+rotate_copy_line="$(grep -nF 'cp -- "$temp_patched" "$temp_enc"' "$ROOT/utilities/secrets-rotate.sh" | cut -d: -f1)"
+[[ -n "$rotate_encrypt_line" && -n "$rotate_copy_line" && "$rotate_encrypt_line" -lt "$rotate_copy_line" ]] \
+    || fail 'secret rotate writes plaintext to disk staging before encryption'
+
+printf 'PR7 sensitive workspace and SOPS promotion regressions passed.\n'
+)
+
+if [[ "$MODE" == "sensitive-cleanup" || "$MODE" == "all" ]]; then
+    check_pr7_sensitive_workspace_and_sops_promotion
 fi
 
 check_secrets_cli_help() (
@@ -439,8 +558,8 @@ cf_keys="$(yq -r '.secrets[] | select(.conditional_group == "cloudflare_proxy") 
     || fail "systemd/CrowdSec apply targets must not be exposed as compose services"
 ! yq -e '.secrets[] | select(.key == "backup_passphrase")' "$ROOT/secrets-schema.yaml" >/dev/null \
     || fail "backup_passphrase must be retired from active schema"
-grep -Fq 'legacy_keys = {"backup_passphrase"}' "$ROOT/lib/secrets.sh" \
-    || fail "legacy backup_passphrase must remain manageable in existing secrets files"
+! grep -Fq 'backup_passphrase' "$ROOT/lib/secrets.sh" \
+    || fail "retired backup_passphrase compatibility remains in secret handling"
 
 grep -Fq 'schema_keys_for_conditional_group "$_group"' "$ROOT/lib/secrets.sh" \
     || fail "runtime-required secret validation must use the generic schema conditional-group accessor"
@@ -790,6 +909,15 @@ source "$ROOT/lib/crypto.sh"
 # shellcheck source=../lib/secrets.sh
 source "$ROOT/lib/secrets.sh"
 
+create_sensitive_workspace() {
+    local dir="$TMP/volatile-${1:-sensitive}"
+    rm -rf -- "$dir"
+    mkdir -p "$dir"
+    chmod 0700 "$dir"
+    printf '%s\n' "$dir"
+}
+remove_sensitive_workspace() { rm -rf -- "$1"; }
+
 ensure_sops_env() { return 0; }
 cleanup_secrets_environment() { return 0; }
 _maybe_sudo() {
@@ -826,7 +954,6 @@ write_secret_yaml() {
 smtp_password: "${smtp_value}"
 push_installation_id: "${push_id}"
 push_installation_key: "${push_key}"
-backup_passphrase: "legacy-encrypted-state-value"
 YAML
 }
 
@@ -870,13 +997,6 @@ export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
 [[ ! -e "$TMP/runtime/retired_schema_key" ]] \
     || fail "manifest-managed retired key was not removed"
 [[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file removed during stale cleanup"
-
-rm -f "$TMP/managed-secrets"
-printf 'old backup passphrase\n' > "$TMP/runtime/backup_passphrase"
-export_docker_secrets "$TMP/runtime" "$SECRETS_FILE" >/dev/null
-[[ ! -e "$TMP/runtime/backup_passphrase" ]] \
-    || fail "pre-manifest legacy backup_passphrase runtime file was not removed"
-[[ -f "$TMP/runtime/operator_file" ]] || fail "unknown operator file removed during legacy cleanup"
 
 PUSH_ENABLED=true
 export PUSH_ENABLED
@@ -985,6 +1105,7 @@ source_helpers() {
     export SETUP_SECRETS_TRANSACTION_TESTING=source-only
     export PROJECT_STATE_DIR="$TMP/state"
     export VW_SETUP_SECRETS_TMP_DIR="$TMP/run-tmp"
+    export VW_TEST_MODE=true
     mkdir -p "$PROJECT_STATE_DIR/config" "$PROJECT_STATE_DIR/secrets"
     # shellcheck source=../utilities/setup-secrets.sh
     source "$ROOT/utilities/setup-secrets.sh"
@@ -1418,6 +1539,13 @@ MOCK_OPERATIONS
 cat > "$repo/lib/crypto.sh" <<'MOCK_CRYPTO'
 resolve_age_key_path(){ printf '%s\n' "${VW_TEST_ROOT:?}/etc/vaultwarden/age-key.txt"; }
 check_age_key(){ [[ -s "$1" ]]; }
+create_sensitive_workspace(){
+    local workdir="${VW_TEST_ROOT:?}/workdir"
+    rm -rf "$workdir"; mkdir -p "$workdir"
+    printf '%s\n' "$workdir" > "${VW_TEST_WORKDIR_RECORD:?}"
+    printf '%s\n' "$workdir"
+}
+remove_sensitive_workspace(){ rm -rf -- "$1"; }
 MOCK_CRYPTO
 cat > "$repo/lib/setup-credentials.sh" <<'MOCK_SETUP_CREDENTIALS'
 # Minimal functional mock for the full-entrypoint transaction fixture.  The
@@ -1801,6 +1929,7 @@ set +e
 DIRECT_WORKSPACE_HELPERS="$direct_workspace_helpers" \
 DIRECT_SIGNAL_MARKER="$direct_signal_marker" \
 VW_SETUP_SECRETS_TMP_DIR="$direct_runtime_tmp" \
+VW_TEST_MODE=true \
 PROJECT_ROOT="$direct_signal_fixture" \
 bash -s <<'DIRECT_SIGNAL_TEST' >/dev/null 2>&1
 set -euo pipefail
@@ -1843,6 +1972,8 @@ TMPDIR="$fixture/tmp"
 mkdir -p "$TMPDIR"
 log_warn() { printf 'WARN %s\n' "$*" >&2; }
 operation_release() { return 0; }
+create_sensitive_workspace() { local d="$fixture/vw_setup.shared"; mkdir -p "$d"; chmod 700 "$d"; printf '%s\n' "$d"; }
+remove_sensitive_workspace() { rm -rf -- "$1"; }
 eval "$SETUP_WORKSPACE_HELPERS"
 trap - EXIT INT HUP TERM
 
@@ -1893,6 +2024,8 @@ bash -s <<'TOP_LEVEL_SIGNAL_TEST' >/dev/null 2>&1
 set -euo pipefail
 log_warn() { printf 'WARN %s\n' "$*" >&2; }
 operation_release() { return 0; }
+create_sensitive_workspace() { local d="$TMPDIR/vw_setup.signal"; mkdir -p "$d"; chmod 700 "$d"; printf '%s\n' "$d"; }
+remove_sensitive_workspace() { rm -rf -- "$1"; }
 eval "$SETUP_WORKSPACE_HELPERS"
 _setup_create_sensitive_workspace
 printf '%s' "$TMP_WORKDIR" > "$TOP_LEVEL_SIGNAL_MARKER"
@@ -1948,16 +2081,17 @@ grep -Fq '"dnsutils" "rsync" "python3" "python3-argon2"' utilities/setup-system.
   || fail "dependency list contains a concatenated rsync/python3 package token"
 ! grep -Eq '^[[:space:]]*\[7zip\]=' utilities/setup-system.sh \
   || fail "generic dependency map must not claim one guaranteed 7-Zip executable"
-grep -Fq 'for candidate in 7zz 7z; do' utilities/setup-system.sh \
-  || fail "setup dependency resolver does not prefer 7zz with 7z fallback"
+! sed -n '/^_resolve_7zip_command()/,/^}/p' utilities/setup-system.sh \
+  | grep -Eq 'command -v[[:space:]]+7z([[:space:]]|$)' \
+  || fail "setup dependency resolver retains 7z executable fallback"
 grep -Fq '_require_7zip_command || return 1' utilities/setup-system.sh \
   || fail "--skip-deps verification does not require a usable 7-Zip executable"
 grep -Fq 'Install hint: sudo apt-get install -y 7zip' utilities/setup-system.sh \
   || fail "setup-system 7zip installation guidance is incorrect"
 grep -Fq 'sudo apt-get install -y docker.io age sops 7zip python3-argon2 python3-bcrypt' setup.sh \
   || fail "top-level setup phase guidance omits 7zip"
-grep -Fq 'for candidate in 7zz 7z; do' lib/secrets.sh \
-  || fail "recovery ZIP helper does not prefer 7zz with 7z fallback"
+grep -Fq 'command -v 7zz' lib/secrets.sh \
+  || fail "recovery ZIP helper does not require 7zz"
 grep -Fq 'a -tzip -mem=AES256' lib/secrets.sh \
   || fail "recovery artifact is no longer an AES-256 encrypted ZIP"
 resolver_block="$(sed -n '/^_resolve_7zip_command() {/,/^# Install the required system packages/p' utilities/setup-system.sh | sed '$d')"
@@ -1988,8 +2122,8 @@ make_cmd "$both" 7z
 PATH="$both" _require_7zip_command
 fallback="$fixture/fallback"
 make_cmd "$fallback" 7z
-[[ "$(PATH="$fallback" _resolve_7zip_command)" == 7z ]]
-PATH="$fallback" _require_7zip_command
+! PATH="$fallback" _resolve_7zip_command
+! PATH="$fallback" _require_7zip_command >/dev/null 2>&1
 empty="$fixture/empty"
 mkdir -p -- "$empty"
 set +e
@@ -1997,7 +2131,7 @@ missing_output="$(PATH="$empty" _require_7zip_command 2>&1)"
 missing_rc=$?
 set -e
 (( missing_rc != 0 ))
-[[ "$missing_output" == *"expected 7zz (preferred) or 7z"* ]]
+[[ "$missing_output" == *"Missing required Ubuntu 7zz command"* ]]
 [[ "$missing_output" == *"sudo apt-get install -y 7zip"* ]]
 /bin/rm -rf -- "$fixture"
 trap - EXIT
@@ -2011,6 +2145,31 @@ assert setup.index('_setup_remove_sensitive_workspace 0', start) < setup.index('
 start = secrets.index('_ss_publish_auto_handoff || return 1')
 assert secrets.index('_ss_perform_cleanup 0', start) < secrets.index('Secrets Setup Complete!', start)
 PY_ORDER
+
+grep -Fq 'create_sensitive_workspace()' lib/crypto.sh || fail "shared sensitive workspace helper missing"
+grep -Fq 'findmnt -n -T "$path" -o FSTYPE' lib/crypto.sh || fail "sensitive workspace backing is not verified"
+grep -Fq 'No verified volatile root-only workspace' lib/crypto.sh || fail "volatile workspace refusal is not fail-closed"
+! grep -R -nE 'mktemp .*\/dev\/shm.*\|\| mktemp|disk-backed' utilities/secrets-*.sh utilities/key-rotate.sh setup.sh lib/secrets.sh >/dev/null \
+  || fail "sensitive plaintext/private-key path still has disk fallback"
+grep -Fq 'create_sensitive_workspace recovery-kit' lib/secrets.sh || fail "recovery-kit temporary plaintext is not volatile"
+grep -Fq 'create_sensitive_workspace runtime-secrets' lib/secrets.sh || fail "runtime secret export staging is not volatile"
+! grep -Fq 'mktemp -d -t vaultwarden-secrets.' lib/secrets.sh || fail "runtime secret export still stages plaintext in generic tmp"
+! grep -Fq 'mktemp "${output_dir}/.vaultwarden-recovery-kit.' lib/secrets.sh || fail "recovery kit still stages plaintext beside its persistent output"
+grep -Fq '_check_editor_forks || return 1' utilities/secrets-edit.sh || fail "known forking editor refusal is not enforced"
+grep -Fq "EDITOR='code --wait'" utilities/secrets-edit.sh || fail "VS Code wait remediation missing"
+grep -Fq "EDITOR='kate --block'" utilities/secrets-edit.sh || fail "Kate block remediation missing"
+grep -Fq "EDITOR='mousepad --disable-server'" utilities/secrets-edit.sh || fail "Mousepad foreground remediation missing"
+! grep -Fq 'case "$_editor_str"' utilities/secrets-edit.sh || fail "generic editor flag acceptance remains"
+! grep -Fq 'Proceeding anyway' utilities/secrets-edit.sh || fail "forking editor still warns and continues"
+! grep -Fq 'backup_passphrase' lib/secrets.sh || fail "backup_passphrase compatibility remains"
+! grep -Fq '.managed-secrets' lib/secrets.sh || fail "legacy managed-secrets migration remains"
+! grep -Fq 'systemd-run() {' lib/defaults.sh || fail "global systemd-run workaround remains in defaults"
+grep -Fq 'systemd_cleanup_body' lib/secrets.sh || fail "recovery-owned systemd workaround is missing"
+! grep -Eq 'setsid .*sleep|command -v at.*breakglass|falling back to background sleep' utilities/setup-secrets.sh \
+  || fail "break-glass expiry retains an unverifiable fallback scheduler"
+grep -Fq 'systemctl is-active --quiet "${unit_name}.timer"' utilities/setup-secrets.sh \
+  || fail "break-glass systemd timer is not verified active"
+! grep -Fq 'legacy full-root configuration' utilities/setup-secrets.sh || fail "legacy sudo-group break-glass status remains"
 
 pass "recovery fallback and sensitive cleanup contracts"
 
@@ -2381,6 +2540,7 @@ PY_DIRECT_PTY
         "VW_TEST_REAL_INSTALL=$(command -v install)" \
         "VW_TEST_WORKSPACE_MODE_FILE=$workspace_mode_file" \
         "VW_SETUP_SECRETS_TMP_DIR=$direct_tmp/plaintext-stage" \
+        "VW_TEST_MODE=true" \
         bash -x "$direct_fixture/utilities/setup-secrets.sh" configure --auto
     direct_rc=$?
     set -e
@@ -2458,6 +2618,14 @@ check_recovery_kit_schema_truth() {
     log_info() { :; }
     log_debug() { :; }
     log_success() { :; }
+    create_sensitive_workspace() {
+      local dir="$work/volatile-${1:-sensitive}"
+      rm -rf -- "$dir"
+      mkdir -p "$dir"
+      chmod 0700 "$dir"
+      printf '%s\n' "$dir"
+    }
+    remove_sensitive_workspace() { rm -rf -- "$1"; }
     resolve_age_key_path() { printf '%s\n' "$work/age-key.txt"; }
     has_command() {
       if [[ "$1" == "age" ]]; then
@@ -2535,7 +2703,7 @@ check_recovery_kit_schema_truth() {
 
     if [[ "$scenario" == "post-link-unlink-failure" ]]; then
       rm() {
-        if [[ "$*" == *'.vaultwarden-recovery-kit.'* && ! -e "$work/post-link-unlink-failed" ]]; then
+        if [[ "$*" == *'.vaultwarden-recovery-publish.'* && ! -e "$work/post-link-unlink-failed" ]]; then
           : >"$work/post-link-unlink-failed"
           return 1
         fi
@@ -2562,19 +2730,19 @@ check_recovery_kit_schema_truth() {
         ! _ork_generate_and_secure "$target" || exit 1
         [[ -e "$work/render-write-failure-injected" ]] || exit 1
         [[ ! -e "$target" && ! -L "$target" ]] || exit 1
-        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-publish.*' -print -quit | grep -q .
         ;;
       post-link-unlink-failure)
         ! _ork_generate_and_secure "$target" || exit 1
         [[ -e "$work/post-link-unlink-failed" ]] || exit 1
         [[ ! -e "$target" && ! -L "$target" ]] || exit 1
-        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-publish.*' -print -quit | grep -q .
         ;;
       signal-after-link)
         ! _ork_generate_and_secure "$target" || exit 1
         [[ -e "$work/signal-after-link-injected" ]] || exit 1
         [[ ! -e "$target" && ! -L "$target" ]] || exit 1
-        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+        ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-publish.*' -print -quit | grep -q .
         ;;
       optional-unset)
         _ork_generate_and_secure "$target"
@@ -2645,6 +2813,14 @@ check_recovery_kit_schema_truth() {
     log_info() { :; }
     log_debug() { :; }
     log_success() { :; }
+    create_sensitive_workspace() {
+      local dir="$work/volatile-${1:-sensitive}"
+      rm -rf -- "$dir"
+      mkdir -p "$dir"
+      chmod 0700 "$dir"
+      printf '%s\n' "$dir"
+    }
+    remove_sensitive_workspace() { rm -rf -- "$1"; }
     resolve_age_key_path() { printf '%s\n' "$work/age-key.txt"; }
     has_command() { [[ "$1" == age ]] || command -v "$1" >/dev/null 2>&1; }
     check_age_key() { return 0; }
@@ -2750,7 +2926,7 @@ check_recovery_kit_schema_truth() {
 
     ! _ork_generate_and_secure "$target" || exit 1
     [[ ! -e "$target" && ! -L "$target" ]] || exit 1
-    ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-kit.*' -print -quit | grep -q .
+    ! find "$work/recovery" -maxdepth 1 -name '.vaultwarden-recovery-publish.*' -print -quit | grep -q .
   )
 
   runtime_required_case push-required || fail 'PUSH_ENABLED=true must reject inactive push credentials before publication'

@@ -130,18 +130,11 @@ do_view() {
         return 1
     fi
 
-    local temp_file
-    temp_file=$(mktemp -p /dev/shm 2>/dev/null || mktemp)
-    if [[ -n "$temp_file" && "$temp_file" != /dev/shm/* ]]; then
-        log_warn "view: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_file"
-        log_warn "      Ensure full-disk encryption is active on this host."
-    fi
-    if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
-        rm -f "$temp_file"
-        log_error "Failed to secure temp file: $temp_file"
-        return 1
-    fi
-    register_cleanup "_remove_sensitive_file" "$temp_file"
+    local temp_file sensitive_workspace
+    sensitive_workspace="$(create_sensitive_workspace secrets-view)" || return 1
+    register_cleanup "remove_sensitive_workspace" "$sensitive_workspace"
+    temp_file="${sensitive_workspace}/secrets.yaml"
+    install -m 600 /dev/null "$temp_file" || return 1
 
     local sops_rc=0
     sops -d "$SECRETS_FILE" > "$temp_file" || sops_rc=$?

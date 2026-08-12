@@ -23,22 +23,14 @@ _setup_secrets_cleanup_warn() {
 }
 
 _setup_secrets_create_workdir() {
-    local old_umask create_status workdir_parent
-
     [[ -z "${SETUP_SECRETS_OWNED_WORKDIR:-}" ]] || return 0
-
-    _ss_prepare_plain_tmp_dir || return 1
-    workdir_parent="$(_ss_plain_tmp_dir)"
-
-    old_umask="$(umask)"
-    umask 077
-    TMP_WORKDIR="$(mktemp -d -p "$workdir_parent" vw-setup-secrets.XXXXXXXXXX)" || {
-        create_status=$?
-        umask "$old_umask" || true
-        return "$create_status"
-    }
-    umask "$old_umask"
-    chmod 0700 "$TMP_WORKDIR" || { rm -rf "$TMP_WORKDIR"; return 1; }
+    if [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]]; then
+        _ss_prepare_plain_tmp_dir || return 1
+        TMP_WORKDIR="$(mktemp -d -p "$(_ss_plain_tmp_dir)" vw-setup-secrets.XXXXXXXXXX)" || return 1
+        chmod 0700 "$TMP_WORKDIR" || { rm -rf "$TMP_WORKDIR"; return 1; }
+    else
+        TMP_WORKDIR="$(create_sensitive_workspace setup-secrets)" || return 1
+    fi
     SETUP_SECRETS_OWNED_WORKDIR="$TMP_WORKDIR"
 }
 
@@ -81,7 +73,7 @@ _ss_perform_cleanup() {
     fi
 
     if [[ -n "$workspace" ]]; then
-        if rm -rf -- "$workspace"; then
+        if { [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]] && rm -rf -- "$workspace"; } || remove_sensitive_workspace "$workspace"; then
             SETUP_SECRETS_OWNED_WORKDIR=""
             unset TMP_WORKDIR
         else
@@ -1598,51 +1590,27 @@ EOF
             || date -u -d "${expiry_hours} hours" '+%Y-%m-%d %H:%M UTC' 2>/dev/null \
             || echo "in ${expiry_hours} hour(s)")
 
-        if command -v at >/dev/null 2>&1 && systemctl is-active --quiet atd 2>/dev/null; then
-            if echo "${cleanup_cmd}" | at now + "${expiry_hours}" hours 2>/dev/null; then
-                log_success "Auto-cleanup scheduled via 'at' at ${expiry_human}"
-                return 0
-            else
-                log_warn "'at' scheduling failed — trying next tier"
-            fi
-        elif command -v at >/dev/null 2>&1; then
-            if echo "${cleanup_cmd}" | at now + "${expiry_hours}" hours 2>/dev/null; then
-                log_success "Auto-cleanup scheduled via 'at' at ${expiry_human}"
-                return 0
-            else
-                log_warn "'at' available but scheduling failed — trying next tier"
-            fi
-        fi
-
-        if command -v systemd-run >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-            if systemd-run \
-                    --on-active="${expiry_hours}h" \
-                    --unit="vw-breakglass-cleanup" \
-                    --description="VaultWarden breakglass auto-cleanup for ${bg_user}" \
-                    -- bash -c "${cleanup_cmd}" 2>/dev/null; then
-                log_success "Auto-cleanup scheduled via systemd transient timer at ${expiry_human} (reboot-safe)"
-                return 0
-            else
-                log_warn "systemd-run scheduling failed — falling back to background sleep"
-            fi
-        fi
-
-        local sleep_seconds=$(( expiry_hours * 3600 ))
-        log_error "WARNING: All reliable schedulers (at, systemd-run) are unavailable."
-        log_error "  Auto-expiry cannot be guaranteed across a reboot on this system."
-        log_error "  The breakglass account would persist indefinitely if the host reboots."
-        log_warn  "  To proceed anyway (NOT reboot-safe), re-run with --force."
-        log_warn  "  Mandatory: run 'sudo $0 breakglass remove' manually when done."
-        if [[ "${FORCE}" != "true" ]]; then
-            log_error "Aborting: pass --force to use the unreliable background-subshell fallback."
-            return 1
-        fi
-        setsid bash -c "sleep ${sleep_seconds} && ${cleanup_cmd}" \
-            </dev/null >/dev/null 2>&1 &
-        disown
-        log_warn "Fallback auto-cleanup background job started (NOT reboot-safe) — target: ${expiry_human}"
-        return 0
-    }
+        local unit_name="vw-breakglass-cleanup"
+    if ! command -v systemd-run >/dev/null 2>&1 || ! systemctl is-system-running >/dev/null 2>&1; then
+        log_error "Break-glass expiry requires a running systemd host; account creation is aborted."
+        return 1
+    fi
+    if ! systemd-run --quiet --collect \
+            --on-active="${expiry_hours}h" \
+            --unit="$unit_name" \
+            --description="VaultWarden breakglass auto-cleanup for ${bg_user}" \
+            -- bash -c "${cleanup_cmd}" 2>/dev/null; then
+        log_error "Could not schedule break-glass expiry with systemd; account creation is aborted."
+        return 1
+    fi
+    if ! systemctl is-active --quiet "${unit_name}.timer"; then
+        systemctl stop "${unit_name}.timer" "${unit_name}.service" >/dev/null 2>&1 || true
+        log_error "Break-glass expiry timer could not be verified active; account creation is aborted."
+        return 1
+    fi
+    log_success "Auto-cleanup scheduled and verified via systemd at ${expiry_human}"
+    return 0
+}
 
     create_breakglass_user() {
         if [[ "$DRY_RUN" == "true" ]]; then
@@ -1784,7 +1752,14 @@ EOF
         press_enter_to_continue " Press [Enter] to clear the visible screen and finish..."
         clear
 
-        schedule_auto_cleanup
+        if ! schedule_auto_cleanup; then
+            log_error "Break-glass expiry could not be scheduled; removing the newly created account."
+            remove_breakglass_user --force >/dev/null 2>&1 || {
+                log_error "CRITICAL: break-glass expiry failed and automatic account rollback also failed."
+                return 1
+            }
+            return 1
+        fi
 
         return 0
     }
@@ -1963,8 +1938,6 @@ EOF
             local sudoers_file="/etc/sudoers.d/vw-emergency"
             if [[ -f "$sudoers_file" ]] && grep -q "^${BREAKGLASS_USER} " "$sudoers_file" 2>/dev/null; then
                 echo "  Sudo access: ✅ Configured (targeted /etc/sudoers.d/vw-emergency)"
-            elif groups "$BREAKGLASS_USER" 2>/dev/null | grep -q -w "sudo"; then
-                echo "  Sudo access: ⚠️  Member of 'sudo' group (legacy full-root configuration)"
             else
                 echo "  Sudo access: ❌ NOT configured"
             fi
@@ -2172,8 +2145,13 @@ _ss_prepare_plain_tmp_dir() {
 
 _ss_make_plaintext_temp() {
     local dir tmp
-    _ss_prepare_plain_tmp_dir || return 1
-    dir="$(_ss_plain_tmp_dir)"
+    if [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]]; then
+        _ss_prepare_plain_tmp_dir || return 1
+        dir="$(_ss_plain_tmp_dir)"
+    else
+        _setup_secrets_create_workdir || return 1
+        dir="$SETUP_SECRETS_OWNED_WORKDIR"
+    fi
     tmp=$(mktemp -p "$dir" vwsecrets.XXXXXXXXXX.yaml) || return 1
     chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
     printf '%s' "$tmp"

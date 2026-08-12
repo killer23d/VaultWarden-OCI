@@ -37,19 +37,8 @@ _setup_cleanup_warn() {
 }
 
 _setup_create_sensitive_workspace() {
-    local old_umask create_status
-
     [[ -z "${TMP_WORKDIR:-}" ]] || return 0
-
-    old_umask="$(umask)"
-    umask 077
-    TMP_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/vw_setup.XXXXXXXXXX")" || {
-        create_status=$?
-        umask "$old_umask" || true
-        return "$create_status"
-    }
-    umask "$old_umask"
-
+    TMP_WORKDIR="$(create_sensitive_workspace setup)" || return 1
     export VW_ADMIN_PLAIN_FILE="${TMP_WORKDIR}/vw_admin_plain"
     export VW_ADMIN_HASH_FILE="${TMP_WORKDIR}/vw_admin_hash"
     export CADDY_PLAIN_FILE="${TMP_WORKDIR}/caddy_plain"
@@ -62,7 +51,7 @@ _setup_remove_sensitive_workspace() {
 
     { set +x; } 2>/dev/null
     if [[ -n "$workspace" ]]; then
-        if rm -rf -- "$workspace"; then
+        if remove_sensitive_workspace "$workspace"; then
             unset TMP_WORKDIR
             unset VW_ADMIN_PLAIN_FILE VW_ADMIN_HASH_FILE CADDY_PLAIN_FILE CADDY_HASH_FILE
         else

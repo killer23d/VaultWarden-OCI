@@ -198,134 +198,151 @@ decrypt_sops_file() {
 #   4. On failure: restore the original file from the backup, remove the
 #      backup, emit a clear diagnostic including the Age key path and
 #      .sops.yaml location, return 1.
-encrypt_sops_file() {
-    local file="$1"
-    local age_key_file
-    if [[ -n "${2:-}" ]]; then
-        age_key_file="$2"
-    else
-        age_key_file=$(resolve_age_key_path) || return 1
-    fi
+# Create a root-only workspace only on verified volatile storage.
+# Callers own lifecycle registration so existing signal/operation traps remain authoritative.
+_sensitive_backing_is_volatile() {
+    local path="$1" fs_type
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    command -v findmnt >/dev/null 2>&1 || return 1
+    fs_type="$(findmnt -n -T "$path" -o FSTYPE 2>/dev/null)" || return 1
+    [[ "$fs_type" == "tmpfs" || "$fs_type" == "ramfs" ]]
+}
 
-    if [[ ! -f "$file" ]]; then
-        log_error "File to encrypt not found: $file"
-        return 1
-    fi
-
-    if [[ ! -f "$age_key_file" ]]; then
-        log_error "Age key file not found: $age_key_file"
-        return 1
-    fi
-
-    if ! has_command sops; then
-        log_error "sops command not available"
-        return 1
-    fi
-
-    local age_public_key
-    if ! age_public_key=$(_derive_age_public_key "$age_key_file"); then
-        log_error "Failed to extract public key from: $age_key_file"
-        return 1
-    fi
-
-    local tmp_file
-    tmp_file=$(mktemp "${file%.*}.sops.XXXXXX.yaml") || {
-        log_error "Failed to create temp file for SOPS encryption: $file"
+create_sensitive_workspace() {
+    local purpose="${1:-sensitive}" base workspace old_umask metadata
+    [[ "$purpose" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+        log_error "Sensitive workspace purpose is invalid: $purpose"
         return 1
     }
-
-    install -m 600 /dev/null "$tmp_file"
-
-    if ! cp -- "$file" "$tmp_file"; then
-        rm -f "$tmp_file"
-        log_error "Failed to copy file for SOPS encryption: $file"
+    if (( EUID != 0 )); then
+        log_error "Sensitive workspaces require root privileges."
         return 1
     fi
 
-    local sops_stderr
-    local sops_rc=0
-    sops_stderr=$(sops --encrypt \
-        --age "$age_public_key" \
-        --input-type yaml \
-        --output-type yaml \
-        --in-place "$tmp_file" 2>&1) || sops_rc=$?
-
-    if [[ $sops_rc -ne 0 ]]; then
-        rm -f "$tmp_file"
-        log_error "Failed to encrypt file with SOPS: $file"
-        if [[ -n "$sops_stderr" ]]; then
-            log_error "sops error: $sops_stderr"
+    for base in /run/vaultwarden-oci /dev/shm; do
+        if [[ "$base" == "/run/vaultwarden-oci" && ! -e "$base" ]]; then
+            _sensitive_backing_is_volatile /run || continue
+            install -d -m 0700 -o root -g root "$base" 2>/dev/null || continue
         fi
-        return 1
-    fi
-
-    local pre_write_backup
-    pre_write_backup=$(mktemp "${file%.*}.pre-enc.XXXXXX") || {
-        # Backup creation failure is non-fatal for the encrypt path itself,
-        # but we must skip the round-trip check because we have no restore
-        # point. Log a warning and proceed without validation.
-        log_warn "encrypt_sops_file: could not create pre-write backup for round-trip check; skipping validation"
-        if ! mv -- "$tmp_file" "$file"; then
-            rm -f "$tmp_file"
-            log_error "Failed to atomically replace file after SOPS encryption: $file"
-            return 1
+        _sensitive_backing_is_volatile "$base" || continue
+        old_umask="$(umask)"
+        umask 077
+        workspace="$(mktemp -d -p "$base" "vw-${purpose}.XXXXXXXXXX" 2>/dev/null)" || {
+            umask "$old_umask" || true
+            continue
+        }
+        umask "$old_umask"
+        if ! chmod 0700 "$workspace" 2>/dev/null; then
+            rm -rf -- "$workspace" 2>/dev/null || true
+            continue
         fi
+        metadata="$(stat -c '%u:%g:%a' -- "$workspace" 2>/dev/null)" || {
+            rm -rf -- "$workspace" 2>/dev/null || true
+            continue
+        }
+        if [[ "$metadata" != "0:0:700" ]] || ! _sensitive_backing_is_volatile "$workspace"; then
+            rm -rf -- "$workspace" 2>/dev/null || true
+            continue
+        fi
+        printf '%s\n' "$workspace"
         return 0
-    }
-    # Register a RETURN trap immediately so the plaintext backup is always
-    # cleaned up even if the process is killed between the mktemp and the
-    # final rm -f at the success path.
-    # shellcheck disable=SC2064  # intentional: expand $pre_write_backup now
-    trap "rm -f '$pre_write_backup'" RETURN
-    install -m 600 /dev/null "$pre_write_backup"
-    cp -- "$file" "$pre_write_backup"
+    done
 
-    if ! mv -- "$tmp_file" "$file"; then
-        rm -f "$tmp_file"
-        log_error "Failed to atomically replace file after SOPS encryption: $file"
+    log_error "No verified volatile root-only workspace is available under /run/vaultwarden-oci or /dev/shm."
+    return 1
+}
+
+remove_sensitive_workspace() {
+    local workspace="${1:-}" file
+    [[ -n "$workspace" && ! -L "$workspace" && -d "$workspace" ]] || return 1
+    case "$workspace" in
+        /run/vaultwarden-oci/vw-*|/dev/shm/vw-*) ;;
+        *) return 1 ;;
+    esac
+    while IFS= read -r -d '' file; do
+        if declare -F secure_delete >/dev/null 2>&1; then
+            secure_delete "$file" 2>/dev/null || rm -f -- "$file" 2>/dev/null || true
+        elif command -v shred >/dev/null 2>&1; then
+            shred -fuz -- "$file" 2>/dev/null || rm -f -- "$file" 2>/dev/null || true
+        else
+            rm -f -- "$file" 2>/dev/null || true
+        fi
+    done < <(find -P "$workspace" -type f -print0 2>/dev/null)
+    rm -rf -- "$workspace"
+}
+
+
+promote_sops_ciphertext() {
+    local staged="$1" destination="$2" age_key_file="${3:-}" dest_dir dest_base rollback old_umask
+    [[ -f "$staged" && -f "$destination" ]] || {
+        log_error "promote_sops_ciphertext: staged and existing destination files are required"
+        return 1
+    }
+    if [[ -z "$age_key_file" ]]; then
+        age_key_file="$(resolve_age_key_path)" || return 1
+    fi
+    SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt "$staged" >/dev/null 2>&1 || {
+        log_error "promote_sops_ciphertext: staged ciphertext is not decryptable"
+        return 1
+    }
+
+    dest_dir="$(dirname -- "$destination")"
+    dest_base="$(basename -- "$destination")"
+    old_umask="$(umask)"; umask 077
+    rollback="$(mktemp "${dest_dir}/.${dest_base}.rollback.XXXXXXXXXX")" || { umask "$old_umask"; return 1; }
+    umask "$old_umask"
+    if ! cp -a -- "$destination" "$rollback"; then
+        rm -f -- "$rollback"
+        log_error "promote_sops_ciphertext: rollback copy failed; ciphertext was not replaced"
         return 1
     fi
 
-    local rt_stderr
-    local rt_rc=0
-    { set +x; } 2>/dev/null
-    # Capture stderr first (2>&1), then discard stdout (>/dev/null).
-    # Redirect stderr to the $() pipe before changing stdout to /dev/null:
-    #   2>&1     → fd 2 = current fd 1 = $() pipe  (stderr is captured)
-    #   >/dev/null → fd 1 = /dev/null               (stdout is discarded)
-    # Order matters: if reversed (>/dev/null 2>&1) both streams go to /dev/null
-    # and rt_stderr is always empty.
-    rt_stderr=$(SOPS_AGE_KEY_FILE="$age_key_file" \
-                sops --decrypt \
-                --input-type yaml \
-                --output-type yaml \
-                "$file" 2>&1 >/dev/null) || rt_rc=$?
-
-    if [[ $rt_rc -ne 0 ]]; then
-        log_error "encrypt_sops_file: SOPS round-trip validation FAILED for: $file"
-        log_error "  The ciphertext was written successfully but cannot be decrypted."
-        log_error "  The ciphertext recipient does not match the private key at: $age_key_file"
-        log_error "  Also check the generated .sops.yaml before running SOPS manually."
-        log_error "  Check: age-keygen -y $age_key_file   (derive the current public key)"
-        if [[ -n "${rt_stderr:-}" ]]; then
-            log_error "  sops decrypt error: $rt_stderr"
-        fi
-        log_error "  Restoring original file from pre-write backup..."
-        if cp -- "$pre_write_backup" "$file"; then
-            log_info "  Original file restored successfully."
-        else
-            log_error "  CRITICAL: failed to restore original file from backup: $pre_write_backup"
-            log_error "  Manual recovery required. Backup is at: $pre_write_backup"
-            trap - RETURN
+    if ! mv -- "$staged" "$destination"; then
+        rm -f -- "$rollback"
+        log_error "promote_sops_ciphertext: atomic ciphertext promotion failed"
+        return 1
+    fi
+    if ! SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt "$destination" >/dev/null 2>&1; then
+        log_error "promote_sops_ciphertext: promoted ciphertext failed validation; restoring previous ciphertext"
+        if mv -f -- "$rollback" "$destination"; then
             return 1
         fi
+        log_error "promote_sops_ciphertext: CRITICAL: rollback restore failed; previous ciphertext remains at $rollback"
         return 1
     fi
+    rm -f -- "$rollback" || {
+        log_warn "promote_sops_ciphertext: valid ciphertext promoted, but rollback copy remains at $rollback"
+        return 1
+    }
+}
 
-    rm -f "$pre_write_backup"
-    trap - RETURN
-    log_debug "encrypt_sops_file: round-trip validation passed for: $file"
-    return 0
+encrypt_sops_file() {
+    local file="$1" age_key_file="${2:-}" file_dir file_base tmp_file old_umask
+    [[ -f "$file" ]] || { log_error "encrypt_sops_file: file not found: $file"; return 1; }
+    if [[ -z "$age_key_file" ]]; then
+        age_key_file="$(resolve_age_key_path)" || return 1
+    fi
+    [[ -f "$age_key_file" ]] || { log_error "encrypt_sops_file: Age key not found: $age_key_file"; return 1; }
+
+    file_dir="$(dirname -- "$file")"
+    file_base="$(basename -- "$file")"
+    old_umask="$(umask)"; umask 077
+    tmp_file="$(mktemp "${file_dir}/.${file_base}.encrypt.XXXXXXXXXX")" || { umask "$old_umask"; return 1; }
+    umask "$old_umask"
+    chmod 0600 "$tmp_file" || { rm -f -- "$tmp_file"; return 1; }
+    cp -- "$file" "$tmp_file" || { rm -f -- "$tmp_file"; return 1; }
+
+    if ! SOPS_AGE_KEY_FILE="$age_key_file" sops --encrypt --in-place "$tmp_file"; then
+        log_error "encrypt_sops_file: SOPS encryption failed"
+        rm -f -- "$tmp_file"
+        return 1
+    fi
+    if ! SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt "$tmp_file" >/dev/null 2>&1; then
+        log_error "encrypt_sops_file: encrypted staging file failed round-trip validation"
+        rm -f -- "$tmp_file"
+        return 1
+    fi
+    mv -- "$tmp_file" "$file" || { rm -f -- "$tmp_file"; return 1; }
 }
 
 

@@ -172,29 +172,56 @@ create_backup() {
 
 # Warn when the selected editor is known to fork.
 _check_editor_forks() {
-    local _editor_str="${EDITOR_CMD[*]}"
-    case "$_editor_str" in
-        *--wait*|*--nofork*|-f|*\ -f\ *|*\ -f) return 0 ;;
-    esac
+    local editor_bin arg
+    local has_wait=false has_foreground=false has_block=false has_disable_server=false
 
-    local editor_bin
     editor_bin="$(basename "${EDITOR_CMD[0]}")"
-
-    local forking
-    for forking in "${_FORKING_EDITORS[@]}"; do
-        if [[ "$editor_bin" == "$forking" ]]; then
-            log_warn "EDITOR '$editor_bin' is known to fork and return immediately."
-            log_warn "The script may re-encrypt before you save your changes."
-            case "$editor_bin" in
-                code)      log_warn "Use:  EDITOR='code --wait' ./edit-secrets.sh" ;;
-                gvim|mvim) log_warn "Use:  EDITOR='gvim --nofork' ./edit-secrets.sh" ;;
-                atom)      log_warn "Use:  EDITOR='atom --wait' ./edit-secrets.sh" ;;
-                *)         log_warn "Pass a '--wait' or '--nofork' flag to your editor." ;;
-            esac
-            log_warn "Proceeding anyway — verify your changes are saved before this script exits."
-            return 0
-        fi
+    for arg in "${EDITOR_CMD[@]:1}"; do
+        case "$arg" in
+            --wait|-w) has_wait=true ;;
+            --nofork|-f) has_foreground=true ;;
+            --block|-b) has_block=true ;;
+            --disable-server) has_disable_server=true ;;
+        esac
     done
+
+    case "$editor_bin" in
+        code)
+            [[ "$has_wait" == "true" ]] && return 0
+            log_error "EDITOR 'code' must wait for save. Use: EDITOR='code --wait' sudo ./edit-secrets.sh edit"
+            return 1
+            ;;
+        gvim|mvim)
+            [[ "$has_foreground" == "true" ]] && return 0
+            log_error "EDITOR '$editor_bin' must stay in the foreground. Use: EDITOR='$editor_bin --nofork' sudo ./edit-secrets.sh edit"
+            return 1
+            ;;
+        atom)
+            [[ "$has_wait" == "true" ]] && return 0
+            log_error "EDITOR 'atom' must wait for save. Use: EDITOR='atom --wait' sudo ./edit-secrets.sh edit"
+            return 1
+            ;;
+        subl|sublime_text)
+            [[ "$has_wait" == "true" ]] && return 0
+            log_error "EDITOR '$editor_bin' must wait for save. Use: EDITOR='$editor_bin --wait' sudo ./edit-secrets.sh edit"
+            return 1
+            ;;
+        gedit)
+            [[ "$has_wait" == "true" ]] && return 0
+            log_error "EDITOR 'gedit' must wait for save. Use: EDITOR='gedit --wait' sudo ./edit-secrets.sh edit"
+            return 1
+            ;;
+        kate)
+            [[ "$has_block" == "true" ]] && return 0
+            log_error "EDITOR 'kate' must block until the file is closed. Use: EDITOR='kate --block' sudo ./edit-secrets.sh edit"
+            return 1
+            ;;
+        mousepad)
+            [[ "$has_disable_server" == "true" ]] && return 0
+            log_error "EDITOR 'mousepad' must run without its background server. Use: EDITOR='mousepad --disable-server' sudo ./edit-secrets.sh edit"
+            return 1
+            ;;
+    esac
     return 0
 }
 
@@ -386,20 +413,13 @@ do_edit() {
     fi
     log_info "Opening secrets with: ${EDITOR_CMD[*]}"
 
-    _check_editor_forks
+    _check_editor_forks || return 1
 
-    local temp_file
-    temp_file=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
-    if [[ -n "$temp_file" && "$temp_file" != /dev/shm/* ]]; then
-        log_warn "edit: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_file"
-        log_warn "      Ensure full-disk encryption is active on this host."
-    fi
-    if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
-        rm -f "$temp_file"
-        log_error "Failed to secure temp file: $temp_file"
-        return 1
-    fi
-    register_cleanup "_remove_sensitive_file" "$temp_file"
+    local temp_file sensitive_workspace
+    sensitive_workspace="$(create_sensitive_workspace secrets-edit)" || return 1
+    register_cleanup "remove_sensitive_workspace" "$sensitive_workspace"
+    temp_file="${sensitive_workspace}/secrets.yaml"
+    install -m 600 /dev/null "$temp_file" || return 1
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
@@ -519,7 +539,6 @@ do_edit() {
         log_error "Failed to secure temp file: $encrypted_temp"
         return 1
     fi
-    cp "$temp_file" "$encrypted_temp"
 
     local _age_key_path
     if ! _age_key_path=$(resolve_age_key_path 2>/dev/null); then
@@ -527,8 +546,13 @@ do_edit() {
         rm -f "$encrypted_temp"
         return 1
     fi
-    if ! encrypt_sops_file "$encrypted_temp" "$_age_key_path"; then
+    if ! encrypt_sops_file "$temp_file" "$_age_key_path"; then
         log_error "Failed to encrypt secrets"
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+    if ! cp -- "$temp_file" "$encrypted_temp"; then
+        log_error "Failed to stage encrypted secrets"
         rm -f "$encrypted_temp"
         return 1
     fi
@@ -543,8 +567,8 @@ do_edit() {
         rm -f "$encrypted_temp"
         return 1
     fi
-    if ! mv "$encrypted_temp" "$SECRETS_FILE"; then
-        log_error "Atomic mv failed — encrypted output left at: $encrypted_temp"
+    if ! promote_sops_ciphertext "$encrypted_temp" "$SECRETS_FILE" "$_age_key_path"; then
+        log_error "Failed to promote encrypted secrets; previous ciphertext was preserved or restored"
         return 1
     fi
 

@@ -313,7 +313,7 @@ _key_rotate_cleanup() {
         fi
     fi
     operation_release "$rc"
-    [[ -n "${workdir:-}" ]] && _secure_rm "$workdir"
+    [[ -n "${workdir:-}" ]] && remove_sensitive_workspace "$workdir"
     return "$rc"
 }
 trap _key_rotate_cleanup EXIT
@@ -333,7 +333,10 @@ if [[ "$ASSUME_YES" != "true" ]]; then
 fi
 
 ts="$(date +%Y%m%d-%H%M%S)"
-workdir="$(mktemp -d -p /dev/shm vw-age-rotate.XXXXXXXX 2>/dev/null || mktemp -d -t vw-age-rotate.XXXXXXXX)"
+workdir="$(create_sensitive_workspace age-rotate)" || {
+    log_error "Unable to create a verified volatile Age-key rotation workspace."
+    exit 1
+}
 operation_set_phase "2" "Generating and installing new Age key"
 
 backup_dir="/root/vw-age-rotation-backups/${ts}"
