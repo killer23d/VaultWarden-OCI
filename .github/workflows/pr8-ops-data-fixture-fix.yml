@@ -44,7 +44,12 @@ jobs:
           old_key = "  cat > \"$repo/secrets/keys/age-key.txt\" <<'EOF_KEY'\n# public key: age1systemdpolicy000000000000000000000000000000000000000000\nAGE-SECRET-KEY-1SYSTEMDPOLICY\nEOF_KEY\n  chmod 600 \"$repo/secrets/keys/age-key.txt\"\n"
           if text.count(old_key) != 1:
               raise SystemExit(f'lifecycle checkout key fixture expected once, got {text.count(old_key)}')
-          p.write_text(text.replace(old_key, ''))
+          text = text.replace(old_key, '')
+          old_stub = 'check_docker_available(){ return 0; }\nwait_for_service_ready(){ return 0; }\n'
+          new_stub = 'check_docker_available(){ return 0; }\ncheck_compose_available(){ return 0; }\nwait_for_service_ready(){ return 0; }\n'
+          if text.count(old_stub) != 1:
+              raise SystemExit(f'startup-hardening Docker stub expected once, got {text.count(old_stub)}')
+          p.write_text(text.replace(old_stub, new_stub))
 
           p = Path('tests/suites/data-protection/case-backup.bash')
           text = p.read_text()
