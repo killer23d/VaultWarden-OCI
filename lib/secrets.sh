@@ -2270,6 +2270,13 @@ export_docker_secrets() {
         log_error "export_docker_secrets: no verified volatile plaintext staging directory is available"
         return 1
     }
+    if declare -F register_cleanup >/dev/null 2>&1             && declare -p CLEANUP_ACTIONS >/dev/null 2>&1; then
+        if ! register_cleanup "remove_sensitive_workspace" "$_eds_tmpdir"; then
+            remove_sensitive_workspace "$_eds_tmpdir" 2>/dev/null || true
+            log_error "export_docker_secrets: failed to register volatile workspace cleanup"
+            return 1
+        fi
+    fi
     _eds_cache="${_eds_tmpdir}/secrets.yaml"
     install -m 600 /dev/null "$_eds_cache" 2>/dev/null || true
 
