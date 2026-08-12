@@ -1407,11 +1407,9 @@ GLOBAL OPTIONS:
 ENVIRONMENT:
     BREAKGLASS_MAX_AGE_HOURS     Hours before status warns account is too old (default: 72)
     BREAKGLASS_AUTO_EXPIRY_HOURS Hours after creation before the account is auto-removed
-                                 (default: 2). Scheduler priority:
-                                   1. `at` + atd running
-                                   2. `at` present (tries on-demand activation)
-                                   3. systemd-run transient timer (survives reboots)
-                                   4. background sleep subshell (lost on reboot)
+                                 (default: 2; must be a positive integer).
+                                 Expiry requires a systemd transient timer that
+                                 is verified active before creation succeeds.
                                  Set to 0 to disable auto-expiry entirely.
 
 EXAMPLES:
@@ -1574,19 +1572,21 @@ EOF
         local expiry_hours="$BREAKGLASS_AUTO_EXPIRY_HOURS"
         local bg_user="$BREAKGLASS_USER"
 
-        if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would schedule auto-cleanup in ${expiry_hours}h"
-            return 0
+        if ! [[ "$expiry_hours" =~ ^[1-9][0-9]*$ ]]; then
+            log_error "BREAKGLASS_AUTO_EXPIRY_HOURS must be a positive integer; account creation is aborted."
+            return 1
         fi
 
-        if (( expiry_hours == 0 )); then
-            log_warn "Auto-expiry disabled (BREAKGLASS_AUTO_EXPIRY_HOURS=0) — remember to run 'breakglass remove' manually"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would schedule verified systemd auto-cleanup in ${expiry_hours}h"
             return 0
         fi
 
         local script_abs
-        script_abs=$(readlink -f "$0")
-        local cleanup_cmd="${script_abs} breakglass remove --user ${bg_user} --force"
+        script_abs=$(readlink -f "$0") || {
+            log_error "Could not resolve the break-glass cleanup command path; account creation is aborted."
+            return 1
+        }
         local expiry_epoch=$(( $(date +%s) + expiry_hours * 3600 ))
         local expiry_human
         expiry_human=$(date -d "@${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
@@ -1595,27 +1595,26 @@ EOF
             || echo "in ${expiry_hours} hour(s)")
 
         local unit_name="vw-breakglass-cleanup"
-    if ! command -v systemd-run >/dev/null 2>&1 || ! systemctl is-system-running >/dev/null 2>&1; then
-        log_error "Break-glass expiry requires a running systemd host; account creation is aborted."
-        return 1
-    fi
-    if ! systemd-run --quiet --collect \
-            --on-active="${expiry_hours}h" \
-            --unit="$unit_name" \
-            --description="VaultWarden breakglass auto-cleanup for ${bg_user}" \
-            -- bash -c "${cleanup_cmd}" 2>/dev/null; then
-        log_error "Could not schedule break-glass expiry with systemd; account creation is aborted."
-        return 1
-    fi
-    if ! systemctl is-active --quiet "${unit_name}.timer"; then
-        systemctl stop "${unit_name}.timer" "${unit_name}.service" >/dev/null 2>&1 || true
-        log_error "Break-glass expiry timer could not be verified active; account creation is aborted."
-        return 1
-    fi
-    log_success "Auto-cleanup scheduled and verified via systemd at ${expiry_human}"
-    return 0
-}
-
+        if ! command -v systemd-run >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then
+            log_error "Break-glass expiry requires systemd-run and systemctl; account creation is aborted."
+            return 1
+        fi
+        if ! systemd-run --quiet --collect \
+                --on-active="${expiry_hours}h" \
+                --unit="$unit_name" \
+                --description="VaultWarden breakglass auto-cleanup for ${bg_user}" \
+                -- /usr/bin/env bash "$script_abs" breakglass remove --user "$bg_user" --force 2>/dev/null; then
+            log_error "Could not schedule break-glass expiry with systemd; account creation is aborted."
+            return 1
+        fi
+        if ! systemctl is-active --quiet "${unit_name}.timer"; then
+            systemctl stop "${unit_name}.timer" "${unit_name}.service" >/dev/null 2>&1 || true
+            log_error "Break-glass expiry timer could not be verified active; account creation is aborted."
+            return 1
+        fi
+        log_success "Auto-cleanup scheduled and verified via systemd at ${expiry_human}"
+        return 0
+    }
     create_breakglass_user() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would create break-glass admin user: $BREAKGLASS_USER"
@@ -1746,11 +1745,8 @@ EOF
 
         printf '%b\n' "Username:  ${COLOR_GREEN}${BREAKGLASS_USER}${COLOR_RESET}"
         printf '%b\n' "Password:  ${COLOR_GREEN}${password}${COLOR_RESET}"
-        if (( BREAKGLASS_AUTO_EXPIRY_HOURS > 0 )); then
-            printf '%b\n' "Expiry:    ${COLOR_YELLOW}${expiry_human} (auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
-        else
-            printf '%b\n' "Expiry:    ${COLOR_CYAN}None — auto-expiry disabled. Remove manually with: sudo $0 breakglass remove${COLOR_RESET}"
-        fi
+        printf '%b\
+' "Expiry:    ${COLOR_YELLOW}${expiry_human} (verified auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
 
         printf '\nTo test this:\n'
         printf '1. Go to Oracle Cloud Console > Compute > Instance > Console Connection\n'
@@ -1769,6 +1765,9 @@ EOF
     }
 
     remove_breakglass_user() {
+        local force_remove=false
+        [[ "${1:-}" == "--force" ]] && force_remove=true
+
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would remove break-glass user: $BREAKGLASS_USER"
             return 0
@@ -1781,7 +1780,7 @@ EOF
             return 0
         fi
 
-        if [[ "$FORCE" != "true" ]]; then
+        if [[ "$FORCE" != "true" && "$force_remove" != "true" ]]; then
             echo ""
             log_warn "This will permanently remove the break-glass admin account."
             log_warn "You will lose emergency console access capability."
