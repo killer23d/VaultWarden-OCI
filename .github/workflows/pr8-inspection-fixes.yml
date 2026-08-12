@@ -1,0 +1,83 @@
+name: PR8 remaining first-pass authority fixes
+on:
+  push:
+    branches: [pr8-runtime-authority-age-custody]
+permissions:
+  contents: write
+jobs:
+  fix:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: pr8-runtime-authority-age-custody
+          fetch-depth: 0
+      - name: Apply authority cleanup
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def rx(path, pattern, replacement, label):
+              p=Path(path); text=p.read_text()
+              new,count=re.subn(pattern,replacement,text,count=1,flags=re.M|re.S)
+              if count != 1: raise SystemExit(f"{path}: {label}: expected 1, got {count}")
+              p.write_text(new)
+
+          # Health uses the same canonical resolver as backup/startup.
+          rx('utilities/maintenance-health.sh', r'^_resolve_age_key\(\) \{.*?^\}', '_resolve_age_key() {\n    resolve_age_key_path\n}', 'health key resolver')
+
+          # Production CrowdSec worker must never fall back to checkout .env.
+          rx('lib/crowdsec-worker.sh', r'''    if declare -F load_project_environment >/dev/null 2>&1; then\n        load_project_environment \|\| return 1\n    elif \[\[ -f "\$\{PROJECT_ROOT:-\$\(pwd\)\}/\.env" \]\] && declare -F load_env_file >/dev/null 2>&1; then\n        load_env_file "\$\{PROJECT_ROOT:-\$\(pwd\)\}/\.env" \|\| true\n        declare -F resolve_secrets_file >/dev/null 2>&1 && resolve_secrets_file\n    fi''', '''    if ! declare -F load_project_environment >/dev/null 2>&1; then
+        log_error "Canonical runtime environment loader is unavailable."
+        return 1
+    fi
+    load_project_environment || return 1''', 'crowdsec runtime env')
+
+          # OnFailure notifier uses runtime authority only; absence is actionable/fatal.
+          rx('utilities/notify-failure.sh', r'^_load_notify_env\(\) \{.*?^\}', '''_load_notify_env() {
+    if load_project_environment 2>/dev/null; then
+        return 0
+    fi
+    log_error "Runtime environment authority is unavailable."
+    log_error "Run: sudo make sync-env"
+    return 1
+}''', 'notify runtime env')
+          p=Path('utilities/notify-failure.sh'); text=p.read_text()
+          text=text.replace('    _load_notify_env || log_warn "Could not load /etc/vaultwarden/vaultwarden.env; continuing with defaults."', '    _load_notify_env || return 1', 1)
+          p.write_text(text)
+
+          # Permission contracts no longer manage a checkout private key.
+          for path in ['lib/common.sh','lib/runtime-permissions.sh']:
+              p=Path(path); text=p.read_text()
+              text=text.replace('|"$PROJECT_ROOT/secrets/keys/age-key.txt"','')
+              text=text.replace('"$PROJECT_ROOT/secrets/keys/age-key.txt"|','')
+              text=text.replace('            "$project_root/secrets/keys/age-key.txt" \\\n','')
+              p.write_text(text)
+
+          # Uninstall removes only the canonical operational private key; do not infer/delete historical paths.
+          rx('utilities/uninstall-vaultwarden.sh', r'''  AGE_KEYS=\(\)\n  for p in .*?\n  done\n  mapfile -t AGE_KEYS < <\(printf '%s\\n' "\$\{AGE_KEYS\[@\]\}" \| uniq\)''', '''  AGE_KEYS=("$ETC_DIR/age-key.txt")''', 'uninstall key candidates')
+          PY
+          rm -f .github/workflows/pr8-inspection-fixes.yml
+      - name: Validate first-pass fixes
+        shell: bash
+        run: |
+          bash -n utilities/maintenance-health.sh lib/crowdsec-worker.sh utilities/notify-failure.sh lib/common.sh lib/runtime-permissions.sh utilities/uninstall-vaultwarden.sh
+          bash tests/suites/foundation/case-runtime-authority.bash
+          echo '--- remaining checkout Age-key references outside docs/tests ---'
+          refs="$(grep -R -n --exclude-dir=.git --exclude-dir=tests --exclude='*.md' 'secrets/keys/age-key.txt' . || true)"
+          printf '%s\n' "$refs"
+          unexpected="$(printf '%s\n' "$refs" | grep -v 'utilities/backup-run.sh' || true)"
+          [[ -z "$unexpected" ]] || { echo "Unexpected checkout private-key contract remains" >&2; exit 1; }
+          echo '--- production repo env fallback scan ---'
+          ! grep -R -n --include='*.sh' --include='*.bash' -E 'load_env_file .*PROJECT_ROOT.*\.env|load_env_file .*\/\.env' lib utilities/maintenance-*.sh utilities/notify-failure.sh startup.sh backup.sh restore.sh 2>/dev/null | grep -vE 'setup-|migrate' 
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'runtime: remove remaining legacy authority paths'
+          git push origin HEAD:pr8-runtime-authority-age-custody
