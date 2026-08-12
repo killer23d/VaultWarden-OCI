@@ -63,4 +63,3 @@ readonly -a _VW_DEFAULT_REQUIRED_COMMANDS=(
     python3
 )
 readonly _VW_DEFAULT_LOG_SERVICES
-
