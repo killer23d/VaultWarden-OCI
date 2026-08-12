@@ -1,30 +1,115 @@
-name: PR7 setup cleanup validation
+name: PR7 apply validated cleanup
 on:
   pull_request:
     branches:
       - delta
+permissions:
+  contents: write
 jobs:
-  validate:
+  apply:
+    if: github.head_ref == 'pr7-sensitive-workspace-sops-hardening'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: pr7-sensitive-workspace-sops-hardening
           fetch-depth: 0
-      - name: Apply staged fix
-        run: python3 .github/pr7-setup-cleanup-fix.py
-      - name: Install validation dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip age sqlite3 coreutils tar
-      - name: Validate diff, syntax and lint
+      - name: Build exact final commit locally
         run: |
           set -euo pipefail
-          git diff --check origin/delta...HEAD
+          python3 .github/pr7-setup-cleanup-fix.py
+          git rm .github/pr7-setup-cleanup-fix.py .github/workflows/pr7-setup-cleanup-validate.yml
           git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/secrets.sh utilities/setup-secrets.sh tests/suites/security/case-secrets.bash
+          git commit -m 'fix: finalize sensitive workspace cleanup contracts'
+          test -z "$(git status --porcelain)"
+          git diff --check origin/delta...HEAD
+      - name: Install validation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip age sqlite3 coreutils tar
+      - name: Validate exact clean HEAD
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          git diff --check origin/delta...HEAD
           for f in lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash; do bash -n "$f"; done
           shellcheck -e SC1090,SC1091,SC2016,SC2153,SC2317 lib/crypto.sh lib/secrets.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
-      - name: Focused security tests
+      - name: Focused security tests on exact HEAD
         run: |
           sudo env VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
           sudo env VW_TEST_CASE_MODE=core bash tests/suites/security/case-secrets.bash
-      - name: Full suite
+      - name: Full suite on exact HEAD
         run: ./tests/run-tests.sh all
+      - name: Noble systemd break-glass acceptance
+        run: |
+          set -euo pipefail
+          unit="vw-pr7-timer-${GITHUB_RUN_ID}"
+          marker="/run/${unit}.done"
+          cleanup_timer() {
+            sudo systemctl stop "${unit}.timer" "${unit}.service" >/dev/null 2>&1 || true
+            sudo rm -f -- "$marker"
+          }
+          trap cleanup_timer EXIT
+          sudo systemd-run --quiet --collect \
+            --on-active=3s \
+            --unit="$unit" \
+            --description='VaultWarden PR7 transient timer acceptance' \
+            -- /usr/bin/env bash -c "umask 077; printf '%s\\n' fired > '$marker'"
+          sudo systemctl is-active --quiet "${unit}.timer"
+          fired=false
+          for _ in $(seq 1 20); do
+            if sudo test -f "$marker"; then
+              fired=true
+              break
+            fi
+            sleep 1
+          done
+          [[ "$fired" == true ]]
+          sudo grep -Fxq fired "$marker"
+
+          rollback_source="$(mktemp)"
+          {
+            sed -n '/^    create_breakglass_user() {$/,/^    }$/p' utilities/setup-secrets.sh | sed 's/^    //'
+            sed -n '/^    remove_breakglass_user() {$/,/^    }$/p' utilities/setup-secrets.sh | sed 's/^    //'
+          } > "$rollback_source"
+          smoke_user="vwpr7rb${GITHUB_RUN_ID: -6}"
+          sudo env BREAKGLASS_ROLLBACK_SOURCE="$rollback_source" BREAKGLASS_SMOKE_USER="$smoke_user" bash -s <<'ROLLBACK_SMOKE'
+          set -euo pipefail
+          source "$BREAKGLASS_ROLLBACK_SOURCE"
+          BREAKGLASS_USER="$BREAKGLASS_SMOKE_USER"
+          DRY_RUN=false
+          FORCE=false
+          BREAKGLASS_AUTO_EXPIRY_HOURS=2
+          PROJECT_ROOT=/tmp
+          COLOR_RED='' COLOR_RESET='' COLOR_YELLOW='' COLOR_GREEN=''
+          log_info() { :; }
+          log_warn() { :; }
+          log_error() { :; }
+          log_success() { :; }
+          _notify_breakglass_event() { :; }
+          check_user_exists() { id "$BREAKGLASS_USER" >/dev/null 2>&1; }
+          generate_secure_random() { printf '%s' 'Pr7RollbackSmokePassphrase123!'; }
+          create_sudoers_config() { return 0; }
+          create_secure_file() { return 0; }
+          schedule_auto_cleanup() { return 1; }
+          rm() {
+            if [[ " $* " == *' /etc/sudoers.d/vw-emergency '* ]]; then
+              return 0
+            fi
+            command rm "$@"
+          }
+          trap 'id "$BREAKGLASS_USER" >/dev/null 2>&1 && userdel -r "$BREAKGLASS_USER" >/dev/null 2>&1 || true' EXIT
+          set +e
+          create_breakglass_user >/dev/null 2>&1
+          rc=$?
+          set -e
+          (( rc != 0 ))
+          ! id "$BREAKGLASS_USER" >/dev/null 2>&1
+          ROLLBACK_SMOKE
+          rm -f -- "$rollback_source"
+      - name: Push only validated final head
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          git push origin HEAD:pr7-sensitive-workspace-sops-hardening
