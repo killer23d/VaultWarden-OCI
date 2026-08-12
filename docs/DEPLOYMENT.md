@@ -85,7 +85,7 @@ sudo ./edit-secrets.sh rotate smtp_password
 Configure CrowdSec enforcement after those Cloudflare secrets are available:
 
 ```bash
-sudo ./utilities/setup-crowdsec.sh --use-latest
+sudo ./utilities/setup-crowdsec.sh
 ```
 
 With `CLOUDFLARE_PROXY_ENABLED=true`, the daemon-backed Cloudflare Workers bouncer is part of normal production readiness. Proxy-disabled and autonomous modes remain explicit advanced alternatives; smoke/health do not label them as the normal production-ready path.
