@@ -1,0 +1,53 @@
+name: PR8 direct auto fixture fix
+on:
+  push:
+    branches: [pr8-runtime-authority-age-custody]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: pr8-runtime-authority-age-custody
+          fetch-depth: 0
+      - name: Install focused test dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml shellcheck
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+      - name: Keep alternate key path test-only
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/suites/security/case-secrets.bash')
+          text = p.read_text()
+          anchor = '''  tar --exclude='./.git' --exclude='./test-results' --exclude='./vw_tmp.*' \\
+    -cf - . | tar -xf - -C "$direct_fixture"\n\n  direct_bin="$direct_tmp/bin"\n'''
+          replacement = '''  tar --exclude='./.git' --exclude='./test-results' --exclude='./vw_tmp.*' \\
+    -cf - . | tar -xf - -C "$direct_fixture"\n\n  # This fixture exercises protected-handoff orchestration, not production key\n  # path selection. Redirect only the copied script so the test never writes\n  # a synthetic identity into the runner's real /etc/vaultwarden directory.\n  python3 - "$direct_fixture/utilities/setup-secrets.sh" <<'PY_DIRECT_KEY_PATH'\nfrom pathlib import Path\nimport sys\npath = Path(sys.argv[1])\ntext = path.read_text()\nold = '    local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"\\n'\nnew = '    local AGE_KEY_FILE="${VW_TEST_AGE_KEY_FILE:?}"\\n'\nif text.count(old) != 1:\n    raise SystemExit(f'copied setup-secrets canonical key declaration expected once, got {text.count(old)}')\npath.write_text(text.replace(old, new))\nPY_DIRECT_KEY_PATH\n\n  direct_bin="$direct_tmp/bin"\n'''
+          count = text.count(anchor)
+          if count != 1:
+              raise SystemExit(f'direct-auto fixture anchor expected once, got {count}')
+          p.write_text(text.replace(anchor, replacement))
+          PY
+          bash -n tests/suites/security/case-secrets.bash
+          shellcheck -x --severity=warning tests/suites/security/case-secrets.bash
+          VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
+      - name: Commit fix and remove helper workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/pr8-direct-auto-fixture-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'test: keep direct-auto Age path override fixture-only'
+          git push origin HEAD:pr8-runtime-authority-age-custody
