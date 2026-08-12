@@ -27,11 +27,13 @@ jobs:
               '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 23 ]] || fail "fixture list-files did not preserve 23 unique physical paths"': '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 24 ]] || fail "fixture list-files did not preserve 24 unique physical paths"',
               '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 23 ]] || fail "fixture list-files duplicated a physical path"': '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 24 ]] || fail "fixture list-files duplicated a physical path"',
               '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 23 ]]': '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 24 ]]',
+              '[[ "$(wc -l < "$mode_log" | tr -d \'[:space:]\')" -eq 10 ]] || fail "foundation did not execute 10 logical records"': '[[ "$(wc -l < "$mode_log" | tr -d \'[:space:]\')" -eq 11 ]] || fail "foundation did not execute 11 logical records"',
+              '    "core|$FIXTURE_TESTS/suites/foundation/case-config-env.bash" \\\n    "all|$FIXTURE_TESTS/suites/foundation/case-compose-project.bash" \\': '    "core|$FIXTURE_TESTS/suites/foundation/case-config-env.bash" \\\n    "all|$FIXTURE_TESTS/suites/foundation/case-runtime-authority.bash" \\\n    "all|$FIXTURE_TESTS/suites/foundation/case-compose-project.bash" \\',
           }
           for old, new in replacements.items():
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f'expected one match, got {count}: {old[:80]}')
+                  raise SystemExit(f'expected one match, got {count}: {old[:90]}')
               text = text.replace(old, new)
           p.write_text(text)
           PY
