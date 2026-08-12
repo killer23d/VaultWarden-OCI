@@ -1,0 +1,46 @@
+name: PR6 pinned CrowdSec golden path docs
+on:
+  push:
+    branches:
+      - agent/pr6-update-crowdsec-readiness
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: agent/pr6-update-crowdsec-readiness
+      - name: Use configured pins in golden-path docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('README.md', 'docs/DEPLOYMENT.md'):
+              path = Path(name)
+              text = path.read_text()
+              old = 'sudo ./utilities/setup-crowdsec.sh --use-latest'
+              new = 'sudo ./utilities/setup-crowdsec.sh'
+              if text.count(old) != 1:
+                  raise SystemExit(f'{name}: expected one golden-path --use-latest command, found {text.count(old)}')
+              path.write_text(text.replace(old, new, 1))
+          PY
+          grep -Fq 'sudo ./utilities/setup-crowdsec.sh' README.md
+          grep -Fq 'sudo ./utilities/setup-crowdsec.sh' docs/DEPLOYMENT.md
+          ! grep -Fq 'sudo ./utilities/setup-crowdsec.sh --use-latest' README.md
+          ! grep -Fq 'sudo ./utilities/setup-crowdsec.sh --use-latest' docs/DEPLOYMENT.md
+          git diff --check
+      - name: Publish and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md docs/DEPLOYMENT.md
+          git rm .github/workflows/pr6-golden-pin-docs.yml
+          git commit -m 'docs: use pinned CrowdSec golden path'
+          git push origin HEAD:agent/pr6-update-crowdsec-readiness
