@@ -8,6 +8,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 _SAVE_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/log.sh"
+source "$PROJECT_ROOT/lib/defaults.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
@@ -30,6 +31,7 @@ FORCE=false
 DRY_RUN=false
 SKIP_BACKUP=false
 EMAIL_NOTIFY=false
+UPDATE_READINESS_TIMEOUT="${UPDATE_READINESS_TIMEOUT:-90}"
 
 show_help() {
     cat << 'EOF'
@@ -175,7 +177,8 @@ rollback_image_digests() {
         local pre_id="${_PRE_PULL_IDS[$image]}"
         local cur_id; cur_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
         if [[ -z "$pre_id" ]]; then
-            log_info "  Skipping rollback for $image (was not present before pull)"
+            log_error "  Rollback FAILED for $image: no pre-pull image ID was captured."
+            (( ++rollback_failed )) || true
             continue
         fi
         if [[ "$cur_id" == "$pre_id" ]]; then
@@ -295,19 +298,73 @@ verify_image_digests() {
     return $failed
 }
 
-apply_updates_and_restart() {
-    log_info "Applying updates and restarting services..."
+recreate_update_stack() {
+    log_info "Recreating services on the selected image set..."
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would run: docker compose up -d --remove-orphans"
+        log_info "[DRY RUN] Would run: docker compose up -d --force-recreate --remove-orphans"
         return 0
     fi
     ensure_caddy_entrypoint_executable || return 1
-    if ! docker compose up -d --remove-orphans; then
-        log_error "Failed to restart services"
+    if ! recreate_services; then
+        log_error "Failed to recreate services"
         return 1
     fi
-    log_success "Services restarted successfully"
+    log_success "Services recreated"
     return 0
+}
+
+check_update_readiness() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would wait for critical services and run health --quick"
+        return 0
+    fi
+    if [[ ! "$UPDATE_READINESS_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "UPDATE_READINESS_TIMEOUT must be a positive integer, got: ${UPDATE_READINESS_TIMEOUT}"
+        return 1
+    fi
+
+    local service
+    for service in "${_VW_DEFAULT_CRITICAL_SERVICES[@]}"; do
+        if ! wait_for_service_ready "$service" "$UPDATE_READINESS_TIMEOUT"; then
+            log_error "Critical service did not become ready after update: $service"
+            return 1
+        fi
+    done
+
+    if ! VAULTWARDEN_INTERNAL_HEALTH_CHECK=true \
+        "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quick --quiet; then
+        log_error "Bounded post-update health profile failed"
+        return 1
+    fi
+    log_success "Post-update readiness gate passed"
+    return 0
+}
+
+run_image_update_transaction() {
+    if recreate_update_stack && check_update_readiness; then
+        log_success "Image update healthy"
+        return 0
+    fi
+
+    log_error "Updated image set failed readiness; restoring the pre-update image set."
+    if ! rollback_image_digests; then
+        log_error "Update and rollback unhealthy/manual recovery required: previous image set could not be restored."
+        return 2
+    fi
+
+    if ! recreate_update_stack; then
+        log_error "Update and rollback unhealthy/manual recovery required: previous image set could not be recreated."
+        return 2
+    fi
+
+    if check_update_readiness; then
+        log_warn "Update failed, rollback healthy. The previous image set is serving traffic."
+        return 1
+    fi
+
+    log_error "Update and rollback unhealthy/manual recovery required."
+    log_error "Inspect: docker compose ps && docker compose logs --tail=100"
+    return 2
 }
 
 run_pre_update_backup() {
@@ -374,14 +431,20 @@ main() {
         operation_set_phase "3" "System package update"
         update_system_packages
     fi
+
+    local image_transaction=false
     if [[ "$UPDATE_IMAGES" == "true" ]] || [[ "$FORCE" == "true" ]]; then
+        image_transaction=true
         operation_set_phase "4" "Container image update"
         snapshot_image_digests
         local pull_rc=0
         check_image_updates || pull_rc=$?
         if (( pull_rc == 2 )); then
             log_error "Partial image pull detected (UPDATE-2): rolling back to prevent a split-version stack."
-            rollback_image_digests || true
+            if ! rollback_image_digests; then
+                log_error "Partial pull rollback was incomplete; manual recovery required before any stack recreation."
+                exit 2
+            fi
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                 local subject="[VaultWarden] Update ABORTED: partial image pull"
                 local body
@@ -403,16 +466,40 @@ main() {
         fi
         verify_image_digests || log_warn "Digest verification had issues"
     fi
-    apply_updates_and_restart || {
-        if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-            local subject="[VaultWarden] Update FAILED"
-            local body
-            body="$(printf 'Update failed on host: %s\nTime: %s\n\nCheck logs for details.\n' \
-                "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
-            send_notification_email "$subject" "$body" 2>/dev/null || true
+
+    operation_set_phase "5" "Recreate and readiness gate"
+    if [[ "$image_transaction" == "true" ]]; then
+        local transaction_rc=0
+        run_image_update_transaction || transaction_rc=$?
+        if (( transaction_rc != 0 )); then
+            if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                local subject body
+                if (( transaction_rc == 1 )); then
+                    subject="[VaultWarden] Update failed; rollback healthy"
+                    body="$(printf 'The new image set failed readiness on host: %s\nTime: %s\n\nThe previous image set was restored, recreated, and passed the bounded health gate.\n' \
+                        "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
+                else
+                    subject="[VaultWarden] Update and rollback unhealthy"
+                    body="$(printf 'The new image set and rollback did not reach a healthy state on host: %s\nTime: %s\n\nManual recovery is required. Inspect docker compose ps and recent service logs.\n' \
+                        "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
+                fi
+                send_notification_email "$subject" "$body" 2>/dev/null || true
+            fi
+            exit "$transaction_rc"
         fi
-        exit 1
-    }
+    else
+        if ! recreate_update_stack || ! check_update_readiness; then
+            if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                local subject="[VaultWarden] Update FAILED"
+                local body
+                body="$(printf 'Update failed readiness on host: %s\nTime: %s\n\nCheck logs for details.\n' \
+                    "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
+                send_notification_email "$subject" "$body" 2>/dev/null || true
+            fi
+            exit 1
+        fi
+    fi
+
     if [[ "$EMAIL_NOTIFY" == "true" ]]; then
         local subject="[VaultWarden] Update completed"
         local body
@@ -424,7 +511,7 @@ main() {
         send_notification_email "$subject" "$body" 2>/dev/null || \
             log_warn "Email notification failed (update still succeeded)"
     fi
-    log_success "Update completed successfully"
+    log_success "Update completed successfully: appliance readiness passed"
     exit 0
 }
 
