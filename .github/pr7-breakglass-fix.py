@@ -68,7 +68,7 @@ schedule = r'''    schedule_auto_cleanup() {
         return 0
     }
 '''
-pattern = re.compile(r'^    schedule_auto_cleanup\(\) \{\n.*?\n\}\n(?=\n    create_breakglass_user\(\) \{)', re.M | re.S)
+pattern = re.compile(r'^    schedule_auto_cleanup\(\) \{\n.*?^\}\n(?=\n    create_breakglass_user\(\) \{)', re.M | re.S)
 t, n = pattern.subn(schedule.rstrip('\n'), t, count=1)
 if n != 1:
     raise SystemExit('breakglass schedule_auto_cleanup function not found')
@@ -97,20 +97,16 @@ if old_prompt not in t:
     raise SystemExit('remove_breakglass_user prompt gate not found')
 t = t.replace(old_prompt, new_prompt, 1)
 
-old_expiry_display = '''        if (( BREAKGLASS_AUTO_EXPIRY_HOURS > 0 )); then
-            printf '%b\\
-' "Expiry:    ${COLOR_YELLOW}${expiry_human} (auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
-        else
-            printf '%b\\
-' "Expiry:    ${COLOR_CYAN}None — auto-expiry disabled. Remove manually with: sudo $0 breakglass remove${COLOR_RESET}"
-        fi
-'''
-new_expiry_display = '''        printf '%b\\
+expiry_pattern = re.compile(
+    r'^        if \(\( BREAKGLASS_AUTO_EXPIRY_HOURS > 0 \)\); then\n.*?^        fi\n',
+    re.M | re.S,
+)
+expiry_replacement = '''        printf '%b\\
 ' "Expiry:    ${COLOR_YELLOW}${expiry_human} (verified auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
 '''
-if old_expiry_display not in t:
+t, n = expiry_pattern.subn(expiry_replacement, t, count=1)
+if n != 1:
     raise SystemExit('breakglass expiry display block not found')
-t = t.replace(old_expiry_display, new_expiry_display, 1)
 p.write_text(t)
 
 p = Path('tests/suites/security/case-secrets.bash')
