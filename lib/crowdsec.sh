@@ -24,9 +24,15 @@ crowdsec_resolve_lapi_port() {
     printf '%s\n' "${matches[0]}"
 }
 
-crowdsec_worker_golden_path_required() {
-    [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]] || return 1
-    [[ "${CF_AUTONOMOUS_MODE:-${AUTONOMOUS_MODE:-false}}" != "true" ]]
+_crowdsec_bouncers_list_raw() {
+    if cscli bouncers list -o raw 2>/dev/null; then
+        return 0
+    fi
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+        sudo -n cscli bouncers list -o raw 2>/dev/null
+        return $?
+    fi
+    return 1
 }
 
 crowdsec_worker_readiness() {
@@ -59,7 +65,7 @@ crowdsec_worker_readiness() {
     fi
 
     local bouncers_output
-    if ! bouncers_output="$(cscli bouncers list -o raw 2>/dev/null)"; then
+    if ! bouncers_output="$(_crowdsec_bouncers_list_raw)"; then
         CROWDSEC_READINESS_DETAIL="cscli bouncers query failed"
         return 1
     fi
