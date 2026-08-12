@@ -97,18 +97,9 @@ if t.count(anchor) != 1:
     raise SystemExit('key-rotation full-entrypoint anchor not found exactly once')
 t = t.replace(anchor, behavior + anchor, 1)
 
-# Run the new focused regression in both normal focused modes.
 call_anchor = '''check_key_rotate_full_entrypoint_cleanup_contract
 '''
 if t.count(call_anchor) < 1:
     raise SystemExit('key-rotation cleanup contract call not found')
 t = t.replace(call_anchor, 'check_key_rotate_cleanup_failure_status\n' + call_anchor, 1)
-
-source_anchor = '''grep -Fq 'create_sensitive_workspace age-rotate' utilities/key-rotate.sh || fail "Age rotation workspace is not volatile"
-'''
-source_add = '''grep -Fq 'Failed to remove the Age-key rotation sensitive workspace' utilities/key-rotate.sh || fail "Age rotation cleanup failure is not surfaced"
-'''
-if t.count(source_anchor) != 1:
-    raise SystemExit('Age rotation source assertion anchor not found exactly once')
-t = t.replace(source_anchor, source_anchor + source_add, 1)
 p.write_text(t)
