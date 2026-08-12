@@ -1,4 +1,4 @@
-# Final full validation after removing the last Compose-v1 fallback and stale key-test compatibility.
+# Final full validation after keeping the direct-auto alternate Age path fixture-only.
 name: PR8 full Noble validation
 on:
   push:
