@@ -1,4 +1,4 @@
-# Rerun after pinning normal secrets setup to the canonical operational Age key.
+# Rerun after updating systemd behavioral fixtures to use canonical runtime authority.
 name: PR8 full Noble validation
 on:
   push:
