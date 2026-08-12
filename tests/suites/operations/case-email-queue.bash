@@ -146,7 +146,11 @@ if [[ "${1:-}" == info ]]; then
     exit 0
 fi
 if [[ "${1:-}" == compose && "${2:-}" == version ]]; then
-    printf 'Docker Compose version test\n'
+    if [[ "${3:-}" == --short ]]; then
+        printf '2.39.2\n'
+    else
+        printf 'Docker Compose version v2.39.2\n'
+    fi
     exit 0
 fi
 if [[ "${1:-}" == compose && "${2:-}" == ps && "${3:-}" == --services \
