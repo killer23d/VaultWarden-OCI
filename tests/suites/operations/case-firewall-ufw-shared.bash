@@ -22,20 +22,28 @@ for caller in "$SETUP" "$UPDATER"; do
         || fail "$(basename "$caller") does not use shared UFW status parsing"
     grep -Fq 'firewall_ufw_collect_web_conflicts' "$caller" \
         || fail "$(basename "$caller") does not use shared web-rule classification"
+    grep -Fq 'firewall_ufw_ensure_web_range' "$caller" \
+        || fail "$(basename "$caller") does not use canonical shared web-range reconciliation"
 done
 
-# Common parser/policy implementations belong in one place. Setup keeps only
-# two thin compatibility aliases used by the older extraction-based test case.
+# Common parser/policy implementations belong in one place. Production callers
+# should not carry compatibility aliases for the extraction-based test harness.
 for legacy in \
     _ufw_status \
     _ufw_has_range_port \
+    _ufw_has_admin_port \
     _ufw_line_cidr \
     _ufw_collect_conflicts \
     _ufw_default_incoming_fail_closed \
-    _ufw_reject_ambiguous_inbound_allows; do
+    _ufw_reject_ambiguous_inbound_allows \
+    _ufw_ensure_range; do
     ! grep -Eq "^[[:space:]]*${legacy}\\(\\)" "$SETUP" "$UPDATER" \
         || fail "duplicated UFW policy helper remains: ${legacy}"
 done
+
+obsolete_range_helper="firewall_ufw_"'"'"'allow_range'"'"'
+! grep -Eq "^${obsolete_range_helper}\(\)" "$UFW_LIB" \
+    || fail "obsolete UFW range compatibility helper remains"
 
 log_error() { :; }
 log_dry_run() { :; }

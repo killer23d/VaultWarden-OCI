@@ -206,9 +206,3 @@ firewall_ufw_ensure_web_range() {
         fi
     done
 }
-
-# Compatibility shim for existing callers. New code should use the name that
-# describes the managed 80/443 policy explicitly.
-firewall_ufw_allow_range() {
-    firewall_ufw_ensure_web_range "$@"
-}

@@ -90,19 +90,6 @@ case "$PHASE" in
     *) log_error "--phase must be ufw|iptables|all (got: '$PHASE')"; exit 1 ;;
 esac
 
-# Thin aliases retained for the focused extraction-based regression probes.
-# The shared library remains the only implementation of these decisions.
-_ufw_has_admin_port() {
-    declare -F firewall_ufw_has_admin_port >/dev/null || \
-        source "${VW_TEST_REPO_ROOT:-${PROJECT_ROOT:?}}/lib/firewall-ufw.sh"
-    firewall_ufw_has_admin_port "$@"
-}
-
-_ufw_ensure_range() {
-    declare -F firewall_ufw_allow_range >/dev/null || \
-        source "${VW_TEST_REPO_ROOT:-${PROJECT_ROOT:?}}/lib/firewall-ufw.sh"
-    firewall_ufw_allow_range "$1" "$2" "${DRY_RUN:-false}"
-}
 
 _ufw_reject_hidden_inactive_permissive_rules() {
     local verbose_status="$1" added line
@@ -122,8 +109,6 @@ _ufw_reject_hidden_inactive_permissive_rules() {
 }
 
 _ufw_validate_safety() {
-    declare -F firewall_ufw_status >/dev/null || \
-        source "${VW_TEST_REPO_ROOT:-${PROJECT_ROOT:?}}/lib/firewall-ufw.sh"
     local verbose_status numbered_status
     verbose_status="$(firewall_ufw_status verbose)" || return $?
     numbered_status="$(firewall_ufw_status numbered)" || return $?
@@ -152,8 +137,6 @@ _ufw_delete_rules() {
 }
 
 _ufw_verify_exact() {
-    declare -F firewall_ufw_status >/dev/null || \
-        source "${VW_TEST_REPO_ROOT:-${PROJECT_ROOT:?}}/lib/firewall-ufw.sh"
     local ssh_port="$1"
     shift
     local -a desired=("$@")
@@ -169,7 +152,7 @@ _ufw_verify_exact() {
     firewall_ufw_default_incoming_fail_closed "$verbose_status" || return $?
     firewall_ufw_reject_ambiguous_inbound_allows "$numbered_status" || return $?
 
-    _ufw_has_admin_port "$status" "$ssh_port" || {
+    firewall_ufw_has_admin_port "$status" "$ssh_port" || {
         log_error "Explicit UFW SSH ALLOW/LIMIT rule for ${ssh_port}/tcp is missing after reconciliation."
         return 1
     }
@@ -299,7 +282,7 @@ _phase_ufw() {
     status="$(firewall_ufw_status normal)" || return $?
     grep -q '^Status: active' <<< "$status" && ufw_active=true
 
-    if ! _ufw_has_admin_port "$status" "$ssh_port"; then
+    if ! firewall_ufw_has_admin_port "$status" "$ssh_port"; then
         local ssh_output ssh_rc=0
         ssh_output="$(ufw allow "${ssh_port}/tcp" 2>&1)" || ssh_rc=$?
         if (( ssh_rc != 0 )); then
@@ -319,7 +302,7 @@ _phase_ufw() {
     for cidr in "${validated_cidrs[@]}"; do
         local label="CF-IPv4"
         [[ "$cidr" == *:* ]] && label="CF-IPv6"
-        _ufw_ensure_range "$cidr" "$label" || return $?
+        firewall_ufw_ensure_web_range "$cidr" "$label" "$DRY_RUN" || return $?
     done
 
     [[ "$ufw_active" == "true" ]] || ufw --force enable >/dev/null

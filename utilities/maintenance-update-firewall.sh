@@ -190,8 +190,6 @@ update_firewall_ranges() {
     }
 
     _ufw_validate_safety() {
-        declare -F firewall_ufw_status >/dev/null || \
-            source "${VW_TEST_REPO_ROOT:-${PROJECT_ROOT:?}}/lib/firewall-ufw.sh"
         local verbose_status numbered_status
         verbose_status="$(firewall_ufw_status verbose)" || return $?
         if ! grep -q '^Status: active' <<< "$verbose_status"; then
@@ -351,7 +349,7 @@ update_firewall_ranges() {
     for cidr in "${current_cidrs[@]}"; do
         label="CF-IPv4"
         [[ "$cidr" == *:* ]] && label="CF-IPv6"
-        firewall_ufw_allow_range "$cidr" "$label" || {
+        firewall_ufw_ensure_web_range "$cidr" "$label" || {
             mutation_rc=$?
             _update_firewall_fail "$mutation_rc"
             return $?
