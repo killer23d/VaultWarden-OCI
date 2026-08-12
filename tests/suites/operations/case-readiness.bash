@@ -155,7 +155,7 @@ EOF_SYSTEMCTL
 set -euo pipefail
 if [[ "${CSCLI_QUERY_OK:-true}" != true ]]; then exit 1; fi
 if [[ "${1:-}" == bouncers && "${2:-}" == list ]]; then
-    printf '%s\n' "${CSCLI_BOUNCERS:-cloudflare-worker-bouncer 127.0.0.1 valid}"
+    printf '%s\n' "${CSCLI_BOUNCERS-cloudflare-worker-bouncer 127.0.0.1 valid}"
     exit 0
 fi
 exit 2
