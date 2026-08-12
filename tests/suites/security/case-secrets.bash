@@ -1978,6 +1978,16 @@ rc=$?
 set -e
 (( rc != 0 ))
 [[ "$(cat "$rollback_marker")" == '--force' ]]
+
+/bin/rm -f -- "$rollback_marker"
+chpasswd() { cat >/dev/null; return 71; }
+schedule_auto_cleanup() { return 0; }
+set +e
+create_breakglass_user >/dev/null 2>&1
+rc=$?
+set -e
+(( rc != 0 ))
+[[ "$(cat "$rollback_marker")" == '--force' ]]
 BREAKGLASS_ROLLBACK_TEST
 
 # Removal must report a real failure when the account cannot be deleted; creation
@@ -2011,6 +2021,21 @@ remove_breakglass_user --force >/dev/null 2>&1
 rc=$?
 set -e
 (( rc != 0 ))
+
+absent_stop_marker="$(mktemp)"
+/bin/rm -f -- "$absent_stop_marker"
+check_user_exists() { return 1; }
+systemctl() {
+  case "${1:-}" in
+    is-active) return 0 ;;
+    stop) printf '%s' stopped > "$absent_stop_marker"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+userdel() { return 99; }
+remove_breakglass_user --force >/dev/null 2>&1
+[[ -s "$absent_stop_marker" ]]
+/bin/rm -f -- "$absent_stop_marker"
 BREAKGLASS_REMOVE_FAILURE_TEST
 
 # Direct configure uses its installed TERM trap to clean the owned workspace.
@@ -2276,6 +2301,8 @@ grep -Fq 'create_sensitive_workspace recovery-kit' lib/secrets.sh || fail "recov
 grep -Fq 'create_sensitive_workspace runtime-secrets' lib/secrets.sh || fail "runtime secret export staging is not volatile"
 grep -Fq 'declare -p CLEANUP_ACTIONS' lib/secrets.sh || fail "runtime secret export does not verify caller cleanup-stack initialization"
 grep -Fq 'register_cleanup "remove_sensitive_workspace" "$_eds_tmpdir"' lib/secrets.sh || fail "runtime secret export workspace is not registered for caller signal cleanup"
+! grep -Fq 'mktemp cache inside docker_dir' lib/secrets.sh || fail "runtime export comment still describes retired disk-side plaintext staging"
+grep -Fq 'cleaning any stale break-glass artifacts' utilities/setup-secrets.sh || fail "break-glass removal still short-circuits when the account is absent"
 grep -Fq 'declare -p CLEANUP_ACTIONS' utilities/setup-secrets.sh || fail "setup-secrets does not verify shared cleanup-stack initialization"
 grep -Fq 'if ! perform_cleanup; then' utilities/setup-secrets.sh || fail "setup-secrets custom signal cleanup does not drain shared sensitive cleanup actions"
 grep -Fq 'Shared sensitive cleanup reported a failure' utilities/setup-secrets.sh || fail "setup-secrets does not surface shared cleanup failures"
@@ -2315,7 +2342,7 @@ grep -Fq 'systemctl is-active --quiet "${unit_name}.timer"' utilities/setup-secr
 ! grep -Fq 'Auto-expiry disabled' utilities/setup-secrets.sh || fail "break-glass still allows expiry to be disabled"
 grep -Fq '[[ "$expiry_hours" =~ ^[1-9][0-9]*$ ]]' utilities/setup-secrets.sh || fail "break-glass expiry does not require a positive integer"
 grep -Fq 'local force_remove=false' utilities/setup-secrets.sh || fail "break-glass rollback lacks an internal force-removal path"
-grep -Fq '[[ "$FORCE" != "true" && "$force_remove" != "true" ]]' utilities/setup-secrets.sh || fail "break-glass internal rollback can still prompt"
+grep -Fq '[[ "$user_present" == "true" && "$FORCE" != "true" && "$force_remove" != "true" ]]' utilities/setup-secrets.sh || fail "break-glass internal rollback can still prompt"
 grep -Fq -- '-- /usr/bin/env bash "$script_abs" breakglass remove --user "$bg_user" --force' utilities/setup-secrets.sh || fail "break-glass systemd cleanup is not passed as direct argv"
 ! grep -Fq 'systemctl is-system-running' utilities/setup-secrets.sh || fail "break-glass expiry rejects usable degraded systemd hosts before scheduling"
 schedule_line="$(grep -nF 'if ! schedule_auto_cleanup; then' utilities/setup-secrets.sh | head -1 | cut -d: -f1)"

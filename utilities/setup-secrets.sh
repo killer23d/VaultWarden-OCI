@@ -1659,14 +1659,18 @@ EOF
         fi
 
         if ! chpasswd <<< "${BREAKGLASS_USER}:${password}"; then
-            log_error "Failed to set user password"
-            userdel -r "$BREAKGLASS_USER" 2>/dev/null || true
+            log_error "Failed to set user password; rolling back the newly created account"
+            if ! remove_breakglass_user --force >/dev/null 2>&1; then
+                log_error "CRITICAL: password setup failed and automatic account rollback also failed."
+            fi
             return 1
         fi
 
         if ! create_sudoers_config; then
-            log_error "Failed to install sudoers configuration"
-            userdel -r "$BREAKGLASS_USER" 2>/dev/null || true
+            log_error "Failed to install sudoers configuration; rolling back the newly created account"
+            if ! remove_breakglass_user --force >/dev/null 2>&1; then
+                log_error "CRITICAL: sudoers setup failed and automatic account rollback also failed."
+            fi
             return 1
         fi
 
@@ -1784,12 +1788,13 @@ EOF
 
         log_info "Removing break-glass admin user: $BREAKGLASS_USER"
 
+        local user_present=true
         if ! check_user_exists; then
-            log_info "User does not exist: $BREAKGLASS_USER"
-            return 0
+            user_present=false
+            log_info "User does not exist: $BREAKGLASS_USER; cleaning any stale break-glass artifacts"
         fi
 
-        if [[ "$FORCE" != "true" && "$force_remove" != "true" ]]; then
+        if [[ "$user_present" == "true" && "$FORCE" != "true" && "$force_remove" != "true" ]]; then
             echo ""
             log_warn "This will permanently remove the break-glass admin account."
             log_warn "You will lose emergency console access capability."
@@ -1820,11 +1825,13 @@ EOF
             fi
         fi
 
-        if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
-            log_success "User removed: $BREAKGLASS_USER"
-        else
-            log_error "Failed to remove break-glass user: $BREAKGLASS_USER"
-            removal_failed=true
+        if [[ "$user_present" == "true" ]]; then
+            if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
+                log_success "User removed: $BREAKGLASS_USER"
+            else
+                log_error "Failed to remove break-glass user: $BREAKGLASS_USER"
+                removal_failed=true
+            fi
         fi
 
         if [[ "$removal_failed" == "true" ]]; then

@@ -2239,9 +2239,8 @@ _warn_if_stack_unavailable() {
 # schema-managed runtime file.
 #
 # Hardening (consolidated from startup.sh::prepare_docker_secrets):
-#   1. SOPS decryption is written to a mktemp cache inside docker_dir (mode
-#      700, not world-listable /tmp) to eliminate the TOCTOU window on
-#      shared hosts.
+#   1. SOPS decryption is written only inside a verified volatile root-only
+#      workspace; no persistent plaintext staging location is permitted.
 #   2. After distributing per-key files, every output file is scanned for a
 #      leading "ENC[" string. Any hit means SOPS silently produced ciphertext
 #      instead of plaintext; the bad files are shredded and the function
