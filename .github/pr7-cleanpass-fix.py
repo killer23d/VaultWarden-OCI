@@ -145,6 +145,14 @@ if t.count(anchor) != 1:
     raise SystemExit("remove failure test anchor not found exactly once")
 t = t.replace(anchor, addition, 1)
 
+old_assert = """grep -Fq '[[ \"$FORCE\" != \"true\" && \"$force_remove\" != \"true\" ]]' utilities/setup-secrets.sh || fail \"break-glass internal rollback can still prompt\"
+"""
+new_assert = """grep -Fq '[[ \"$user_present\" == \"true\" && \"$FORCE\" != \"true\" && \"$force_remove\" != \"true\" ]]' utilities/setup-secrets.sh || fail \"break-glass internal rollback can still prompt\"
+"""
+if t.count(old_assert) != 1:
+    raise SystemExit("break-glass prompt-guard assertion not found exactly once")
+t = t.replace(old_assert, new_assert, 1)
+
 source_anchor = """grep -Fq 'register_cleanup "remove_sensitive_workspace" "$_eds_tmpdir"' lib/secrets.sh || fail "runtime secret export workspace is not registered for caller signal cleanup"
 """
 source_add = """! grep -Fq 'mktemp cache inside docker_dir' lib/secrets.sh || fail "runtime export comment still describes retired disk-side plaintext staging"
