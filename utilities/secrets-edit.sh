@@ -123,9 +123,6 @@ read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
 SKIP_BACKUP=false
 readonly MAX_EDIT_ATTEMPTS=5
 
-# Known forking editors that return before the user has saved.
-_FORKING_EDITORS=("gvim" "mvim" "code" "atom" "subl" "sublime_text" "gedit" "kate" "mousepad")
-
 check_prerequisites() {
     local missing=()
     if ! resolve_age_key_path 2>/dev/null; then
@@ -170,7 +167,7 @@ create_backup() {
     return 0
 }
 
-# Warn when the selected editor is known to fork.
+# Reject known GUI editors unless configured to block until save/close.
 _check_editor_forks() {
     local editor_bin arg
     local has_wait=false has_foreground=false has_block=false has_disable_server=false

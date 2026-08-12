@@ -1980,6 +1980,39 @@ set -e
 [[ "$(cat "$rollback_marker")" == '--force' ]]
 BREAKGLASS_ROLLBACK_TEST
 
+# Removal must report a real failure when the account cannot be deleted; creation
+# rollback relies on this status to avoid claiming emergency access was removed.
+breakglass_remove_source="$(
+  sed -n '/^    remove_breakglass_user() {$/,/^    }$/p' utilities/setup-secrets.sh \
+    | sed 's/^    //'
+)"
+[[ -n "$breakglass_remove_source" ]] || fail "break-glass removal helper could not be extracted"
+BREAKGLASS_REMOVE_SOURCE="$breakglass_remove_source" bash -s <<'BREAKGLASS_REMOVE_FAILURE_TEST' \
+  || fail "break-glass removal failure truthfulness regression failed"
+set -euo pipefail
+DRY_RUN=false
+FORCE=true
+BREAKGLASS_USER=vw-test
+log_info() { :; }
+log_warn() { :; }
+log_error() { :; }
+log_success() { :; }
+_notify_breakglass_event() { :; }
+check_user_exists() { return 0; }
+systemctl() { return 1; }
+userdel() { return 73; }
+rm() {
+  [[ " $* " == *' /etc/sudoers.d/vw-emergency '* ]] && return 0
+  command rm "$@"
+}
+eval "$BREAKGLASS_REMOVE_SOURCE"
+set +e
+remove_breakglass_user --force >/dev/null 2>&1
+rc=$?
+set -e
+(( rc != 0 ))
+BREAKGLASS_REMOVE_FAILURE_TEST
+
 # Direct configure uses its installed TERM trap to clean the owned workspace.
 direct_workspace_helpers="$(
   sed -n \
@@ -2257,6 +2290,9 @@ grep -Fq "EDITOR='kate --block'" utilities/secrets-edit.sh || fail "Kate block r
 grep -Fq "EDITOR='mousepad --disable-server'" utilities/secrets-edit.sh || fail "Mousepad foreground remediation missing"
 ! grep -Fq 'case "$_editor_str"' utilities/secrets-edit.sh || fail "generic editor flag acceptance remains"
 ! grep -Fq 'Proceeding anyway' utilities/secrets-edit.sh || fail "forking editor still warns and continues"
+! grep -Fq '_FORKING_EDITORS=' utilities/secrets-edit.sh || fail "dead forking-editor registry remains"
+! grep -Fq 'differs between 7z and upstream 7zz' lib/secrets.sh || fail "retired 7z compatibility wording remains"
+grep -Fq "printf '%b\\n' \"Expiry:" utilities/setup-secrets.sh || fail "break-glass expiry output format is malformed"
 ! grep -Fq 'backup_passphrase' lib/secrets.sh || fail "backup_passphrase compatibility remains"
 ! grep -Fq '.managed-secrets' lib/secrets.sh || fail "legacy managed-secrets migration remains"
 ! grep -Fq 'systemd-run() {' lib/defaults.sh || fail "global systemd-run workaround remains in defaults"

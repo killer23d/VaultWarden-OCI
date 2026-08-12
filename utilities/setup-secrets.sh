@@ -1755,8 +1755,7 @@ EOF
 
         printf '%b\n' "Username:  ${COLOR_GREEN}${BREAKGLASS_USER}${COLOR_RESET}"
         printf '%b\n' "Password:  ${COLOR_GREEN}${password}${COLOR_RESET}"
-        printf '%b\
-' "Expiry:    ${COLOR_YELLOW}${expiry_human} (verified auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
+        printf '%b\n' "Expiry:    ${COLOR_YELLOW}${expiry_human} (verified auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
 
         printf '\nTo test this:\n'
         printf '1. Go to Oracle Cloud Console > Compute > Instance > Console Connection\n'
@@ -1775,7 +1774,7 @@ EOF
     }
 
     remove_breakglass_user() {
-        local force_remove=false
+        local force_remove=false removal_failed=false
         [[ "${1:-}" == "--force" ]] && force_remove=true
 
         if [[ "$DRY_RUN" == "true" ]]; then
@@ -1807,19 +1806,31 @@ EOF
             if rm -f "$sudoers_file"; then
                 log_info "Removed targeted sudoers: $sudoers_file"
             else
-                log_warn "Failed to remove sudoers file: $sudoers_file — manual removal required"
+                log_error "Failed to remove sudoers file: $sudoers_file — manual removal required"
+                removal_failed=true
             fi
         fi
 
         if systemctl is-active --quiet vw-breakglass-cleanup.timer 2>/dev/null; then
-            systemctl stop vw-breakglass-cleanup.timer 2>/dev/null || true
-            log_info "Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)"
+            if systemctl stop vw-breakglass-cleanup.timer >/dev/null 2>&1; then
+                log_info "Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)"
+            else
+                log_error "Failed to stop pending break-glass cleanup timer"
+                removal_failed=true
+            fi
         fi
 
         if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
             log_success "User removed: $BREAKGLASS_USER"
         else
-            log_warn "User removal may have had issues (user might not have had home directory)"
+            log_error "Failed to remove break-glass user: $BREAKGLASS_USER"
+            removal_failed=true
+        fi
+
+        if [[ "$removal_failed" == "true" ]]; then
+            log_error "Break-glass admin removal is incomplete; manual remediation is required."
+            _notify_breakglass_event "REMOVE_FAILED" "Automatic removal of $BREAKGLASS_USER or its break-glass artifacts was incomplete" "CRITICAL"
+            return 1
         fi
 
         log_success "Break-glass admin removal completed"

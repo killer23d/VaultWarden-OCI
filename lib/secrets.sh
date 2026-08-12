@@ -915,7 +915,7 @@ _check_recovery_kit_email_deps() {
 # creation/update, a standalone -p switch enables encryption and the confirmed
 # passphrase is supplied twice. For read operations, standalone -p is removed:
 # an encrypted archive causes 7-Zip to request the password from stdin, while
-# avoiding the non-TTY -p behavior that differs between 7z and upstream 7zz.
+# avoiding non-TTY -p behavior while keeping passphrases out of process argv.
 # Inline -pPASSWORD arguments are rejected so secrets never enter argv.
 # ---------------------------------------------------------------------------
 _run_7zip_with_passphrase() {
