@@ -1,4 +1,4 @@
-# Rerun after updating systemd behavioral fixtures to use canonical runtime authority.
+# Final full validation after removing the last Compose-v1 fallback and stale key-test compatibility.
 name: PR8 full Noble validation
 on:
   push:
