@@ -8,10 +8,8 @@ pass() { echo "PASS runtime-authority: $*"; }
 
 config="$(cat lib/config.sh)"
 startup="$(cat startup.sh)"
-backup="$(cat utilities/backup-run.sh)"
 dns="$(cat utilities/maintenance-update-dns.sh)"
 systemd_setup="$(cat utilities/setup-systemd.sh)"
-restore="$(cat utilities/restore-run.sh)"
 docker_lib="$(cat lib/docker.sh)"
 setup_system="$(cat utilities/setup-system.sh)"
 repair_permissions="$(cat utilities/repair-permissions.sh)"
