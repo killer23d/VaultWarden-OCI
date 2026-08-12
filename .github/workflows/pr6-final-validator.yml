@@ -60,6 +60,23 @@ jobs:
               raise SystemExit('CrowdSec package-install block marker was not found exactly once')
           crowdsec.write_text(text.replace(old, new, 1))
 
+          text = crowdsec.read_text()
+          fixture_anchor = 'export CF_ACCOUNT_EMAIL="ops@example.test"\nexport CF_FREE_PLAN=true\n'
+          fixture_insert = fixture_anchor + '\n'.join([
+              'export VW_CROWDSEC_ETC_DIR="$TMP/etc-crowdsec"',
+              'mkdir -p "$VW_CROWDSEC_ETC_DIR"',
+              'printf \'api:\\n  server:\\n    listen_uri: 127.0.0.1:8097\\n\' > "$VW_CROWDSEC_ETC_DIR/config.yaml"',
+              '',
+          ])
+          if text.count(fixture_anchor) != 1:
+              raise SystemExit('CrowdSec worker fixture anchor was not found exactly once')
+          text = text.replace(fixture_anchor, fixture_insert, 1)
+          lapi_anchor = 'grep -Fq \'NEW_LAPI_KEY\' "$TMP/rendered.yaml" || fail "rendered config missing LAPI key"\n'
+          lapi_insert = lapi_anchor + 'grep -Fq \'http://127.0.0.1:8097/\' "$TMP/rendered.yaml" || fail "rendered config did not use the resolved LAPI port"\n'
+          if text.count(lapi_anchor) != 1:
+              raise SystemExit('CrowdSec worker LAPI assertion anchor was not found exactly once')
+          crowdsec.write_text(text.replace(lapi_anchor, lapi_insert, 1))
+
           readiness = Path('tests/suites/operations/case-readiness.bash')
           text = readiness.read_text()
           marker = '\ncheck_shared_resolver_contract() {\n'
