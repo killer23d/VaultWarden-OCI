@@ -15,7 +15,10 @@ jobs:
           ref: pr8-runtime-authority-age-custody
           fetch-depth: 0
       - name: Apply scoped patch
-        run: python3 .github/pr8_apply.py
+        run: |
+          sed -i 's/            _run install -m 600 -o root -g root/            install -m 600 -o root -g root/' .github/pr8_apply.py
+          sed -i 's/log_success \\"Installed age key: \$AGE_KEY_DEST\\"/log_success \\"Installed age key: \$AGE_KEY_DEST (root:root 600)\\"/' .github/pr8_apply.py
+          python3 .github/pr8_apply.py
       - name: Validate changed shell syntax
         run: |
           git diff --name-only --diff-filter=ACM | while read -r file; do
