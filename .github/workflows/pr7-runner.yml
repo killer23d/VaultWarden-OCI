@@ -1,0 +1,48 @@
+name: PR7 runner
+on:
+  push:
+    branches:
+      - pr7-sensitive-workspace-sops-hardening
+permissions:
+  contents: write
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pr7-sensitive-workspace-sops-hardening
+          fetch-depth: 0
+      - name: Extract and apply patch script
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '/python3 <<'"'"'PY'"'"'/{capture=1; next} capture && /^          PY$/{exit} capture{sub(/^          /, ""); print}' .github/workflows/pr7-apply-validate.yml > /tmp/pr7_patch.py
+          python3 /tmp/pr7_patch.py
+          rm -f .github/workflows/pr7-apply-validate.yml .github/workflows/pr7-runner.yml
+      - name: Install validation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck python3-yaml 7zip
+      - name: Syntax validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in lib/crypto.sh lib/secrets.sh lib/defaults.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh tests/suites/security/case-secrets.bash; do bash -n "$f"; done
+      - name: ShellCheck
+        shell: bash
+        run: shellcheck -x lib/crypto.sh lib/secrets.sh lib/defaults.sh setup.sh utilities/setup-secrets.sh utilities/setup-system.sh utilities/secrets-edit.sh utilities/secrets-view.sh utilities/secrets-rotate.sh utilities/secrets-export-recovery-kit.sh utilities/key-rotate.sh
+      - name: Focused security tests
+        shell: bash
+        run: |
+          sudo env VW_TEST_CASE_MODE=sensitive-cleanup bash tests/suites/security/case-secrets.bash
+          sudo env VW_TEST_CASE_MODE=core bash tests/suites/security/case-secrets.bash
+      - name: Full suite
+        shell: bash
+        run: sudo ./tests/run-tests.sh all
+      - name: Commit validated changes
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "secrets: fail closed on sensitive workspaces and SOPS replacement"
+          git push origin HEAD:pr7-sensitive-workspace-sops-hardening
