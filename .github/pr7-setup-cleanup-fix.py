@@ -35,20 +35,26 @@ if old not in t:
     raise SystemExit('setup-secrets cleanup insertion anchor not found')
 t = t.replace(old, new, 1)
 t = t.replace('''                                 Set to 0 to disable auto-expiry entirely.\n''', '', 1)
+if 'Set to 0 to disable auto-expiry entirely.' in t:
+    raise SystemExit('stale break-glass zero-expiry help remains')
 p.write_text(t)
 
 p = Path('lib/secrets.sh')
 t = p.read_text()
 t = t.replace(
-    "# and an archiver are available. Prefer upstream 7zz from Ubuntu's 7zip\n# package, with legacy 7z retained as a compatibility fallback.\n",
-    "# and the required 7zz archiver from Ubuntu's 7zip package are available.\n",
-    1,
+    "Prefer upstream 7zz from Ubuntu's 7zip\n# package, with legacy 7z retained as a compatibility fallback.",
+    "Require upstream 7zz from Ubuntu's 7zip package; no legacy executable fallback is supported.",
 )
 t = t.replace(
-    "# encountered. Supplying one line on stdin is portable across upstream 7zz\n# and the retained legacy 7z fallback.\n",
-    "# encountered. Supplying one line on stdin is the supported 7zz transport.\n",
-    1,
+    "portable across upstream 7zz\n  # and the retained legacy 7z fallback.",
+    "the supported 7zz transport.",
 )
+t = t.replace(
+    "portable across upstream 7zz\n# and the retained legacy 7z fallback.",
+    "the supported 7zz transport.",
+)
+if 'legacy 7z' in t:
+    raise SystemExit('stale legacy 7z compatibility wording remains')
 p.write_text(t)
 
 p = Path('tests/suites/security/case-secrets.bash')
@@ -58,4 +64,32 @@ checks = '''grep -Fq 'declare -p CLEANUP_ACTIONS' utilities/setup-secrets.sh || 
 if anchor not in t:
     raise SystemExit('runtime workspace test anchor not found')
 t = t.replace(anchor, anchor + checks, 1)
+
+t = t.replace(
+'''direct_signal_marker="$direct_signal_fixture/workspace.path"\ndirect_runtime_tmp="$direct_signal_fixture/runtime-tmp"\n''',
+'''direct_signal_marker="$direct_signal_fixture/workspace.path"\ndirect_shared_marker="$direct_signal_fixture/shared-workspace.path"\ndirect_runtime_tmp="$direct_signal_fixture/runtime-tmp"\n''',
+1,
+)
+t = t.replace(
+'''DIRECT_SIGNAL_MARKER="$direct_signal_marker" \\\nVW_SETUP_SECRETS_TMP_DIR="$direct_runtime_tmp" \\\n''',
+'''DIRECT_SIGNAL_MARKER="$direct_signal_marker" \\\nDIRECT_SHARED_MARKER="$direct_shared_marker" \\\nVW_SETUP_SECRETS_TMP_DIR="$direct_runtime_tmp" \\\n''',
+1,
+)
+t = t.replace(
+'''cleanup_secrets_environment() { return 0; }\noperation_release() { return 0; }\n_ss_plain_tmp_dir() { printf '%s' "$VW_SETUP_SECRETS_TMP_DIR"; }\n''',
+'''cleanup_secrets_environment() { return 0; }\noperation_release() { return 0; }\nremove_sensitive_workspace() { /bin/rm -rf -- "$1"; }\n_CLEANUP_SEP=$'\\x1f'\ndeclare -a CLEANUP_ACTIONS=()\nperform_cleanup() {\n  local entry fn target\n  for entry in "${CLEANUP_ACTIONS[@]}"; do\n    IFS="$_CLEANUP_SEP" read -r fn target <<< "$entry"\n    "$fn" "$target"\n  done\n  CLEANUP_ACTIONS=()\n}\n_ss_plain_tmp_dir() { printf '%s' "$VW_SETUP_SECRETS_TMP_DIR"; }\n''',
+1,
+)
+t = t.replace(
+'''printf '%s' 'DIRECT-SIGNAL-SECRET' > "$SETUP_SECRETS_OWNED_WORKDIR/capture"\nkill -TERM "$BASHPID"\n''',
+'''printf '%s' 'DIRECT-SIGNAL-SECRET' > "$SETUP_SECRETS_OWNED_WORKDIR/capture"\nshared_workspace="$VW_SETUP_SECRETS_TMP_DIR/shared-runtime"\nmkdir -p "$shared_workspace"\nchmod 0700 "$shared_workspace"\nprintf '%s' 'DIRECT-SHARED-RUNTIME-SECRET' > "$shared_workspace/secrets.yaml"\nprintf '%s' "$shared_workspace" > "$DIRECT_SHARED_MARKER"\nCLEANUP_ACTIONS+=("remove_sensitive_workspace${_CLEANUP_SEP}${shared_workspace}")\nkill -TERM "$BASHPID"\n''',
+1,
+)
+t = t.replace(
+'''direct_signal_workspace="$(cat "$direct_signal_marker")"\n[[ "$direct_signal_rc" == 143 ]] \\\n  || fail "direct TERM path returned $direct_signal_rc instead of 143"\n[[ ! -e "$direct_signal_workspace" ]] \\\n  || fail "direct TERM path left the sensitive workspace behind"\n''',
+'''direct_signal_workspace="$(cat "$direct_signal_marker")"\ndirect_shared_workspace="$(cat "$direct_shared_marker")"\n[[ "$direct_signal_rc" == 143 ]] \\\n  || fail "direct TERM path returned $direct_signal_rc instead of 143"\n[[ ! -e "$direct_signal_workspace" ]] \\\n  || fail "direct TERM path left the sensitive workspace behind"\n[[ ! -e "$direct_shared_workspace" ]] \\\n  || fail "direct TERM path left a shared runtime-secret workspace behind"\n''',
+1,
+)
+if 'direct_shared_workspace=' not in t:
+    raise SystemExit('direct TERM shared cleanup regression was not inserted')
 p.write_text(t)
