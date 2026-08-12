@@ -888,8 +888,7 @@ fi
 # _check_recovery_kit_email_deps
 #
 # Prints the AES-ZIP tool name when the secure prompt, SMTP attachment helper,
-# and an archiver are available. Prefer upstream 7zz from Ubuntu's 7zip
-# package, with legacy 7z retained as a compatibility fallback.
+# and an archiver are available. Require upstream 7zz from Ubuntu's 7zip package; no legacy executable fallback is supported.
 # ---------------------------------------------------------------------------
 _check_recovery_kit_email_deps() {
   declare -F prompt_password_with_confirmation >/dev/null 2>&1 || {
@@ -963,8 +962,7 @@ _run_7zip_with_passphrase() {
   fi
 
   # Test/extract/list operations prompt automatically when encrypted content is
-  # encountered. Supplying one line on stdin is portable across upstream 7zz
-  # and the retained legacy 7z fallback.
+  # encountered. Supplying one line on stdin is the supported 7zz transport.
   if printf '%s\n' "$passphrase" | "$tool" "${safe_argv[@]}"; then
     return 0
   else

@@ -72,6 +72,17 @@ _ss_perform_cleanup() {
         fi
     fi
 
+    # Drain the shared cleanup stack as part of this script's custom signal/exit
+    # path when the caller initialized that stack. This covers volatile workspaces
+    # registered by shared helpers such as export_docker_secrets().
+    if declare -F perform_cleanup >/dev/null 2>&1 \
+            && declare -p CLEANUP_ACTIONS >/dev/null 2>&1; then
+        if ! perform_cleanup; then
+            _setup_secrets_cleanup_warn "Shared sensitive cleanup reported a failure"
+            cleanup_status=1
+        fi
+    fi
+
     if [[ -n "$workspace" ]]; then
         if { [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]] && rm -rf -- "$workspace"; } || remove_sensitive_workspace "$workspace"; then
             SETUP_SECRETS_OWNED_WORKDIR=""
@@ -1410,7 +1421,6 @@ ENVIRONMENT:
                                  (default: 2; must be a positive integer).
                                  Expiry requires a systemd transient timer that
                                  is verified active before creation succeeds.
-                                 Set to 0 to disable auto-expiry entirely.
 
 EXAMPLES:
     sudo utilities/setup-secrets.sh breakglass create         # Create emergency admin

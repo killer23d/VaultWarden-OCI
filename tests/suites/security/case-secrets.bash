@@ -1914,6 +1914,72 @@ else
   printf 'SKIP root-owned recovery fixture: passwordless sudo unavailable\n'
 fi
 
+# Known GUI editors must refuse unsafe forking invocations and accept only
+# editor-specific blocking flags. Unknown foreground editors remain allowed.
+editor_helper_source="$(sed -n '/^_check_editor_forks() {$/,/^}$/p' utilities/secrets-edit.sh)"
+[[ -n "$editor_helper_source" ]] || fail "editor wait helper could not be extracted"
+EDITOR_HELPER_SOURCE="$editor_helper_source" bash -s <<'EDITOR_WAIT_TEST' \
+  || fail "editor blocking behavior regression failed"
+set -euo pipefail
+log_error() { :; }
+eval "$EDITOR_HELPER_SOURCE"
+EDITOR_CMD=(code)
+! _check_editor_forks
+EDITOR_CMD=(code -f)
+! _check_editor_forks
+EDITOR_CMD=(code --wait)
+_check_editor_forks
+EDITOR_CMD=(kate -f)
+! _check_editor_forks
+EDITOR_CMD=(kate --block)
+_check_editor_forks
+EDITOR_CMD=(gvim --nofork)
+_check_editor_forks
+EDITOR_CMD=(vim)
+_check_editor_forks
+EDITOR_WAIT_TEST
+
+# Break-glass creation must roll the new account back non-interactively when
+# expiry scheduling fails. This isolates the creation function and mocks all
+# host mutations while retaining the production rollback branch.
+breakglass_create_source="$(
+  sed -n '/^    create_breakglass_user() {$/,/^    }$/p' utilities/setup-secrets.sh \
+    | sed 's/^    //'
+)"
+[[ -n "$breakglass_create_source" ]] || fail "break-glass creation helper could not be extracted"
+BREAKGLASS_CREATE_SOURCE="$breakglass_create_source" bash -s <<'BREAKGLASS_ROLLBACK_TEST' \
+  || fail "break-glass scheduling-failure rollback regression failed"
+set -euo pipefail
+fixture="$(mktemp -d)"
+trap '/bin/rm -rf -- "$fixture"' EXIT
+rollback_marker="$fixture/rollback.arg"
+DRY_RUN=false
+FORCE=false
+BREAKGLASS_USER=vw-test
+BREAKGLASS_AUTO_EXPIRY_HOURS=2
+PROJECT_ROOT=/tmp
+COLOR_RED="" COLOR_RESET="" COLOR_YELLOW="" COLOR_GREEN=""
+log_info() { :; }
+log_warn() { :; }
+log_error() { :; }
+log_success() { :; }
+check_user_exists() { return 1; }
+generate_secure_random() { printf '%s' 'test-password-value'; }
+useradd() { return 0; }
+chpasswd() { cat >/dev/null; return 0; }
+create_sudoers_config() { return 0; }
+create_secure_file() { return 0; }
+schedule_auto_cleanup() { return 1; }
+remove_breakglass_user() { printf '%s' "${1:-}" > "$rollback_marker"; return 0; }
+eval "$BREAKGLASS_CREATE_SOURCE"
+set +e
+create_breakglass_user >/dev/null 2>&1
+rc=$?
+set -e
+(( rc != 0 ))
+[[ "$(cat "$rollback_marker")" == '--force' ]]
+BREAKGLASS_ROLLBACK_TEST
+
 # Direct configure uses its installed TERM trap to clean the owned workspace.
 direct_workspace_helpers="$(
   sed -n \
@@ -1924,10 +1990,12 @@ direct_workspace_helpers="$(
   || fail "direct sensitive-workspace helpers could not be extracted"
 direct_signal_fixture="$(mktemp -d)"
 direct_signal_marker="$direct_signal_fixture/workspace.path"
+direct_shared_marker="$direct_signal_fixture/shared-workspace.path"
 direct_runtime_tmp="$direct_signal_fixture/runtime-tmp"
 set +e
 DIRECT_WORKSPACE_HELPERS="$direct_workspace_helpers" \
 DIRECT_SIGNAL_MARKER="$direct_signal_marker" \
+DIRECT_SHARED_MARKER="$direct_shared_marker" \
 VW_SETUP_SECRETS_TMP_DIR="$direct_runtime_tmp" \
 VW_TEST_MODE=true \
 PROJECT_ROOT="$direct_signal_fixture" \
@@ -1936,6 +2004,17 @@ set -euo pipefail
 log_warn() { printf 'WARN %s\n' "$*" >&2; }
 cleanup_secrets_environment() { return 0; }
 operation_release() { return 0; }
+remove_sensitive_workspace() { /bin/rm -rf -- "$1"; }
+_CLEANUP_SEP=$'\x1f'
+declare -a CLEANUP_ACTIONS=()
+perform_cleanup() {
+  local entry fn target
+  for entry in "${CLEANUP_ACTIONS[@]}"; do
+    IFS="$_CLEANUP_SEP" read -r fn target <<< "$entry"
+    "$fn" "$target"
+  done
+  CLEANUP_ACTIONS=()
+}
 _ss_plain_tmp_dir() { printf '%s' "$VW_SETUP_SECRETS_TMP_DIR"; }
 _ss_prepare_plain_tmp_dir() { mkdir -p "$VW_SETUP_SECRETS_TMP_DIR"; chmod 0700 "$VW_SETUP_SECRETS_TMP_DIR"; }
 eval "$DIRECT_WORKSPACE_HELPERS"
@@ -1943,16 +2022,25 @@ _setup_secrets_create_workdir
 [[ "$SETUP_SECRETS_OWNED_WORKDIR" == "$VW_SETUP_SECRETS_TMP_DIR"/* ]]
 printf '%s' "$SETUP_SECRETS_OWNED_WORKDIR" > "$DIRECT_SIGNAL_MARKER"
 printf '%s' 'DIRECT-SIGNAL-SECRET' > "$SETUP_SECRETS_OWNED_WORKDIR/capture"
+shared_workspace="$VW_SETUP_SECRETS_TMP_DIR/shared-runtime"
+mkdir -p "$shared_workspace"
+chmod 0700 "$shared_workspace"
+printf '%s' 'DIRECT-SHARED-RUNTIME-SECRET' > "$shared_workspace/secrets.yaml"
+printf '%s' "$shared_workspace" > "$DIRECT_SHARED_MARKER"
+CLEANUP_ACTIONS+=("remove_sensitive_workspace${_CLEANUP_SEP}${shared_workspace}")
 kill -TERM "$BASHPID"
 exit 99
 DIRECT_SIGNAL_TEST
 direct_signal_rc=$?
 set -e
 direct_signal_workspace="$(cat "$direct_signal_marker")"
+direct_shared_workspace="$(cat "$direct_shared_marker")"
 [[ "$direct_signal_rc" == 143 ]] \
   || fail "direct TERM path returned $direct_signal_rc instead of 143"
 [[ ! -e "$direct_signal_workspace" ]] \
   || fail "direct TERM path left the sensitive workspace behind"
+[[ ! -e "$direct_shared_workspace" ]] \
+  || fail "direct TERM path left a shared runtime-secret workspace behind"
 /bin/rm -rf -- "$direct_signal_fixture"
 
 # Top-level setup creates one private workspace only when credential capture starts.
@@ -2155,6 +2243,11 @@ grep -Fq 'create_sensitive_workspace recovery-kit' lib/secrets.sh || fail "recov
 grep -Fq 'create_sensitive_workspace runtime-secrets' lib/secrets.sh || fail "runtime secret export staging is not volatile"
 grep -Fq 'declare -p CLEANUP_ACTIONS' lib/secrets.sh || fail "runtime secret export does not verify caller cleanup-stack initialization"
 grep -Fq 'register_cleanup "remove_sensitive_workspace" "$_eds_tmpdir"' lib/secrets.sh || fail "runtime secret export workspace is not registered for caller signal cleanup"
+grep -Fq 'declare -p CLEANUP_ACTIONS' utilities/setup-secrets.sh || fail "setup-secrets does not verify shared cleanup-stack initialization"
+grep -Fq 'if ! perform_cleanup; then' utilities/setup-secrets.sh || fail "setup-secrets custom signal cleanup does not drain shared sensitive cleanup actions"
+grep -Fq 'Shared sensitive cleanup reported a failure' utilities/setup-secrets.sh || fail "setup-secrets does not surface shared cleanup failures"
+! grep -Fq 'Set to 0 to disable auto-expiry entirely.' utilities/setup-secrets.sh || fail "break-glass help still claims mandatory expiry can be disabled"
+! grep -Fq 'legacy 7z' lib/secrets.sh || fail "recovery-kit comments still describe the retired legacy 7z fallback"
 grep -Fq 'failed to register volatile workspace cleanup' lib/secrets.sh || fail "runtime secret export does not fail closed when cleanup registration fails"
 ! grep -Fq 'mktemp -d -t vaultwarden-secrets.' lib/secrets.sh || fail "runtime secret export still stages plaintext in generic tmp"
 ! grep -Fq 'mktemp "${output_dir}/.vaultwarden-recovery-kit.' lib/secrets.sh || fail "recovery kit still stages plaintext beside its persistent output"
