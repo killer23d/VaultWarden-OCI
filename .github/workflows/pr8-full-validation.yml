@@ -1,0 +1,96 @@
+name: PR8 full Noble validation
+on:
+  push:
+    branches: [pr8-runtime-authority-age-custody]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: pr8-runtime-authority-age-custody
+          fetch-depth: 0
+      - name: Install validation dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils 7zip python3-argon2 python3-bcrypt python3-yaml shellcheck
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo 'fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq' | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
+          echo '154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops' | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+      - name: Diff and changed-shell validation
+        shell: bash
+        run: |
+          git fetch --no-tags origin delta:refs/remotes/origin/delta
+          git diff --check origin/delta...HEAD
+          mapfile -t changed_shell < <(git diff --name-only --diff-filter=ACM origin/delta...HEAD | grep -E '\.(sh|bash)$' || true)
+          printf 'Changed shell files:\n%s\n' "${changed_shell[*]}"
+          for file in "${changed_shell[@]}"; do bash -n "$file"; done
+          if ((${#changed_shell[@]})); then shellcheck -x --severity=warning "${changed_shell[@]}"; fi
+      - name: Focused runtime authority suite
+        run: bash tests/suites/foundation/case-runtime-authority.bash
+      - name: Permission repair no-mutation probe
+        shell: bash
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/state/data"
+          printf 'sentinel\n' > "$tmp/state/data/probe"
+          chmod 0777 "$tmp/state/data/probe"
+          before="$(stat -c '%a:%u:%g:%s' "$tmp/state/data/probe")"
+          set +e
+          sudo env PROJECT_STATE_DIR="$tmp/state" VW_CONFIG_INSTALLED_ENV_FILE="$tmp/missing-vaultwarden.env" ./utilities/repair-permissions.sh >/tmp/pr8-repair.out 2>&1
+          rc=$?
+          set -e
+          cat /tmp/pr8-repair.out
+          [[ "$rc" -ne 0 ]]
+          after="$(stat -c '%a:%u:%g:%s' "$tmp/state/data/probe")"
+          [[ "$before" == "$after" ]]
+      - name: DNS SOPS failure probe
+        shell: bash
+        run: |
+          decrypt_secret() { return 1; }
+          log_error() { :; }
+          eval "$(awk '/^_resolve_cf_token\(\)/,/^}/' utilities/maintenance-update-dns.sh)"
+          eval "$(awk '/^_resolve_zone_id\(\)/,/^}/' utilities/maintenance-update-dns.sh)"
+          ! _resolve_cf_token
+          ! _resolve_zone_id
+      - name: Compose rendering
+        shell: bash
+        run: |
+          docker compose version
+          docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
+          docker compose --env-file .env.example -f docker-compose.yml.example -f docker-compose.override.dev.yml.example config --quiet
+      - name: Systemd and generated docs validation
+        shell: bash
+        run: |
+          REQUIRED_DIRECTIVES=(PrivateTmp ProtectSystem ProtectHome NoNewPrivileges)
+          for unit in systemd/vaultwarden-*.service; do
+            [[ "$unit" == *template* ]] && continue
+            for directive in "${REQUIRED_DIRECTIVES[@]}"; do
+              [[ "$unit" == *iptables* && "$directive" == NoNewPrivileges ]] && continue
+              grep -q "^${directive}=" "$unit"
+            done
+          done
+          cp docs/COMMAND-REFERENCE.md /tmp/command-reference.before
+          DOCKER_PROJECT_LABEL=ci bash utilities/write-command-reference.sh
+          diff -u /tmp/command-reference.before docs/COMMAND-REFERENCE.md
+          git checkout -- docs/COMMAND-REFERENCE.md
+      - name: Full test suite
+        shell: bash
+        run: ./tests/run-tests.sh all
+      - name: Remove validation workflow and commit cleanup
+        shell: bash
+        run: |
+          rm -f .github/workflows/pr8-full-validation.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --quiet || git commit -m 'chore: remove PR8 validation workflow'
+          git push origin HEAD:pr8-runtime-authority-age-custody
