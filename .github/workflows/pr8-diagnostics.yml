@@ -1,0 +1,19 @@
+name: PR8 diagnostics
+on:
+  push:
+    branches: [pr8-runtime-authority-age-custody]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: pr8-runtime-authority-age-custody
+      - name: Focused behavior test
+        run: bash tests/suites/foundation/case-runtime-authority.bash
+      - name: Authority documentation references
+        shell: bash
+        run: |
+          grep -R -n -E 'secrets/keys/age-key\.txt|SOPS_AGE_KEY_FILE|repository \.env|repo \.env|fallback.*\.env|docker-compose executable|docker-compose v1|Compose v1' docs README.md RUNBOOK.md .env.example 2>/dev/null || true
