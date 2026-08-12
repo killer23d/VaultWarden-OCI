@@ -9,12 +9,157 @@ jobs:
   validate:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: agent/pr6-update-crowdsec-readiness
           fetch-depth: 0
+      - name: Apply narrow regression fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          runner = 'tests/suites/foundation/case-runner-contracts.bash'
+          replacements = [
+              (
+                  '[[ "${#REGISTERED_RECORDS[@]}" -eq 29 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 29"',
+                  '[[ "${#REGISTERED_RECORDS[@]}" -eq 30 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 30"',
+                  'runner logical record count',
+              ),
+              (
+                  '[[ "${#REGISTERED_PATHS[@]}" -eq 22 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 22"',
+                  '[[ "${#REGISTERED_PATHS[@]}" -eq 23 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 23"',
+                  'runner physical case count',
+              ),
+              (
+                  '[[ "$(sort -u "$real_files" | wc -l | tr -d \'[:space:]\')" -eq 22 ]] || fail "list-files contains duplicate physical paths"',
+                  '[[ "$(sort -u "$real_files" | wc -l | tr -d \'[:space:]\')" -eq 23 ]] || fail "list-files contains duplicate physical paths"',
+                  'runner unique physical count',
+              ),
+              (
+                  '[[ "$(grep -c \'^  \' "$list_one")" -eq 29 ]] || fail "fixture list did not preserve 29 logical records"',
+                  '[[ "$(grep -c \'^  \' "$list_one")" -eq 30 ]] || fail "fixture list did not preserve 30 logical records"',
+                  'fixture logical record count',
+              ),
+              (
+                  '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 22 ]] || fail "fixture list-files did not preserve 22 unique physical paths"',
+                  '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 23 ]] || fail "fixture list-files did not preserve 23 unique physical paths"',
+                  'fixture physical count',
+              ),
+              (
+                  '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 22 ]] || fail "fixture list-files duplicated a physical path"',
+                  '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 23 ]] || fail "fixture list-files duplicated a physical path"',
+                  'fixture unique physical count',
+              ),
+              (
+                  '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 22 ]] \\\n    || fail "fixture construction did not create one file per unique physical path"',
+                  '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 23 ]] \\\n    || fail "fixture construction did not create one file per unique physical path"',
+                  'fixture constructed file count',
+              ),
+          ]
+          for old, new, label in replacements:
+              replace_once(runner, old, new, label)
+
+          replace_once(
+              'tests/suites/operations/case-crowdsec.bash',
+              'cf_bouncer_install_block="$(awk \'/Attempting apt install of crowdsec-cloudflare-worker-bouncer/,/Installed crowdsec-cloudflare-worker-bouncer via apt/\' "$setup_script")"',
+              'cf_bouncer_install_block="$(awk \'/Installing Cloudflare Workers bouncer from the configured CrowdSec package repository/,/Installed crowdsec-cloudflare-worker-bouncer via the CrowdSec package repository/\' "$setup_script")"',
+              'CrowdSec package-install block marker',
+          )
+
+          readiness = Path('tests/suites/operations/case-readiness.bash')
+          text = readiness.read_text()
+          marker = '\ncheck_shared_resolver_contract() {\n'
+          if text.count(marker) != 1:
+              raise SystemExit('readiness behavior insertion marker is not unique')
+          additions = r'''
+check_port_exhaustion_behavior() (
+    set -euo pipefail
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+    extract_function _cs_find_free_port "$SETUP_CROWDSEC" > "$tmpdir/find-free-port.sh"
+    [[ -s "$tmpdir/find-free-port.sh" ]] || fail "could not extract _cs_find_free_port"
+
+    mkdir -p "$tmpdir/bin"
+    cat > "$tmpdir/bin/ss" <<'EOF_SS'
+#!/usr/bin/env bash
+printf '%s\n' 'LISTEN 0 4096 127.0.0.1:65535 0.0.0.0:* users:(("occupied",pid=1,fd=1))'
+EOF_SS
+    chmod +x "$tmpdir/bin/ss"
+    PATH="$tmpdir/bin:$PATH"
+    export PATH
+    log_error() { :; }
+    # shellcheck disable=SC1090
+    source "$tmpdir/find-free-port.sh"
+
+    set +e
+    output="$(_cs_find_free_port 65535)"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 1 ]] || fail "exhausted CrowdSec port search must fail, got $rc"
+    [[ -z "$output" ]] || fail "exhausted CrowdSec port search must not guess a port: $output"
+)
+
+check_tls_failure_behavior() (
+    set -euo pipefail
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+    extract_function check_tls_certificate "$SMOKE" > "$tmpdir/tls-check.sh"
+    [[ -s "$tmpdir/tls-check.sh" ]] || fail "could not extract check_tls_certificate"
+
+    QUIET=true
+    DOMAIN="https://wrong-host.example.invalid"
+    TLS_RESULT=""
+    _require_project_environment() { return 0; }
+    _check_fail() { TLS_RESULT="FAIL|$1|$2"; }
+    curl() { return 60; }
+    # shellcheck disable=SC1090
+    source "$tmpdir/tls-check.sh"
+
+    check_tls_certificate
+    [[ "$TLS_RESULT" == FAIL\|tls-verified\|certificate\ trust\ or\ hostname\ verification\ failed* ]] \
+        || fail "certificate/hostname verification failure must fail smoke readiness: $TLS_RESULT"
+)
+'''
+          readiness.write_text(text.replace(marker, '\n' + additions + marker.lstrip('\n'), 1))
+
+          old_calls = '''check_update_transaction
+check_crowdsec_readiness
+check_tls_contract
+check_port_exhaustion_and_installer_contract
+check_shared_resolver_contract
+'''
+          new_calls = '''check_update_transaction
+check_crowdsec_readiness
+check_tls_contract
+check_tls_failure_behavior
+check_port_exhaustion_and_installer_contract
+check_port_exhaustion_behavior
+check_shared_resolver_contract
+'''
+          replace_once(
+              'tests/suites/operations/case-readiness.bash',
+              old_calls,
+              new_calls,
+              'readiness behavior calls',
+          )
+          PY
+
+          bash tests/suites/operations/case-readiness.bash
+          VW_TEST_CASE_MODE=core bash tests/suites/foundation/case-runner-contracts.bash
+          bash tests/suites/operations/case-crowdsec.bash
+          git diff --check
       - name: Install test dependencies
         shell: bash
         run: |
@@ -43,12 +188,13 @@ jobs:
           bash utilities/write-command-reference.sh
           diff -u /tmp/COMMAND-REFERENCE.committed.md docs/COMMAND-REFERENCE.md
           ./tests/run-tests.sh all
-      - name: Remove validator from final tree
+      - name: Publish fixes and remove validator
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/suites/foundation/case-runner-contracts.bash tests/suites/operations/case-crowdsec.bash tests/suites/operations/case-readiness.bash
           git rm .github/workflows/pr6-final-validator.yml
-          git commit -m 'chore: remove PR6 validation workflow'
+          git commit -m 'tests: close PR6 readiness regressions'
           git push origin HEAD:agent/pr6-update-crowdsec-readiness
