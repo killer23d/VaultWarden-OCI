@@ -26,17 +26,12 @@ jobs:
               if count != 1: raise SystemExit(f"{path}: {label}: expected 1, got {count}")
               p.write_text(new)
 
-          # Health uses the same canonical resolver as backup/startup.
           rx('utilities/maintenance-health.sh', r'^_resolve_age_key\(\) \{.*?^\}', '_resolve_age_key() {\n    resolve_age_key_path\n}', 'health key resolver')
-
-          # Production CrowdSec worker must never fall back to checkout .env.
           rx('lib/crowdsec-worker.sh', r'''    if declare -F load_project_environment >/dev/null 2>&1; then\n        load_project_environment \|\| return 1\n    elif \[\[ -f "\$\{PROJECT_ROOT:-\$\(pwd\)\}/\.env" \]\] && declare -F load_env_file >/dev/null 2>&1; then\n        load_env_file "\$\{PROJECT_ROOT:-\$\(pwd\)\}/\.env" \|\| true\n        declare -F resolve_secrets_file >/dev/null 2>&1 && resolve_secrets_file\n    fi''', '''    if ! declare -F load_project_environment >/dev/null 2>&1; then
         log_error "Canonical runtime environment loader is unavailable."
         return 1
     fi
     load_project_environment || return 1''', 'crowdsec runtime env')
-
-          # OnFailure notifier uses runtime authority only; absence is actionable/fatal.
           rx('utilities/notify-failure.sh', r'^_load_notify_env\(\) \{.*?^\}', '''_load_notify_env() {
     if load_project_environment 2>/dev/null; then
         return 0
@@ -49,16 +44,16 @@ jobs:
           text=text.replace('    _load_notify_env || log_warn "Could not load /etc/vaultwarden/vaultwarden.env; continuing with defaults."', '    _load_notify_env || return 1', 1)
           p.write_text(text)
 
-          # Permission contracts no longer manage a checkout private key.
-          for path in ['lib/common.sh','lib/runtime-permissions.sh']:
-              p=Path(path); text=p.read_text()
-              text=text.replace('|"$PROJECT_ROOT/secrets/keys/age-key.txt"','')
-              text=text.replace('"$PROJECT_ROOT/secrets/keys/age-key.txt"|','')
-              text=text.replace('            "$project_root/secrets/keys/age-key.txt" \\\n','')
-              p.write_text(text)
+          p=Path('lib/common.sh'); text=p.read_text()
+          text=text.replace('|"$PROJECT_ROOT/secrets/keys/age-key.txt"','')
+          text=text.replace('"$PROJECT_ROOT/secrets/keys/age-key.txt"|','')
+          p.write_text(text)
 
-          # Uninstall removes only the canonical operational private key; do not infer/delete historical paths.
-          rx('utilities/uninstall-vaultwarden.sh', r'''  AGE_KEYS=\(\)\n  for p in .*?\n  done\n  mapfile -t AGE_KEYS < <\(printf '%s\\n' "\$\{AGE_KEYS\[@\]\}" \| uniq\)''', '''  AGE_KEYS=("$ETC_DIR/age-key.txt")''', 'uninstall key candidates')
+          p=Path('lib/runtime-permissions.sh'); text=p.read_text()
+          text=re.sub(r'^\s*"\$project_root/secrets/keys/age-key\.txt" \\\n', '', text, count=1, flags=re.M)
+          p.write_text(text)
+
+          rx('utilities/uninstall-vaultwarden.sh', r'''  AGE_KEYS=\(\)\n  for p in .*?\n  done\n  mapfile -t AGE_KEYS < <\(printf '%s\\n' "\$\{AGE_KEYS\[@\]\}" \| uniq\)''', '  AGE_KEYS=("$ETC_DIR/age-key.txt")', 'uninstall key candidates')
           PY
           rm -f .github/workflows/pr8-inspection-fixes.yml
       - name: Validate first-pass fixes
@@ -72,7 +67,9 @@ jobs:
           unexpected="$(printf '%s\n' "$refs" | grep -v 'utilities/backup-run.sh' || true)"
           [[ -z "$unexpected" ]] || { echo "Unexpected checkout private-key contract remains" >&2; exit 1; }
           echo '--- production repo env fallback scan ---'
-          ! grep -R -n --include='*.sh' --include='*.bash' -E 'load_env_file .*PROJECT_ROOT.*\.env|load_env_file .*\/\.env' lib utilities/maintenance-*.sh utilities/notify-failure.sh startup.sh backup.sh restore.sh 2>/dev/null | grep -vE 'setup-|migrate' 
+          matches="$(grep -R -n --include='*.sh' --include='*.bash' -E 'load_env_file .*PROJECT_ROOT.*\.env|load_env_file .*\/\.env' lib utilities/maintenance-*.sh utilities/notify-failure.sh startup.sh backup.sh restore.sh 2>/dev/null | grep -vE 'setup-|migrate' || true)"
+          printf '%s\n' "$matches"
+          [[ -z "$matches" ]]
       - name: Commit fixes
         shell: bash
         run: |
