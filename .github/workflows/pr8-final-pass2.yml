@@ -19,9 +19,9 @@ jobs:
           git fetch --no-tags origin delta:refs/remotes/origin/delta
 
           echo '--- validated-tree drift ---'
-          drift="$(git diff --name-only 23ac05bfe146d97f0e1447051757ffbe1ece6835 HEAD -- | grep -v '^.github/workflows/pr8-final-pass2.yml$' || true)"
+          drift="$(git diff --name-only f2770e9fe2504bdec24ae917ac7980f39ddcadc4 HEAD -- | grep -v '^.github/workflows/pr8-final-pass2.yml$' || true)"
           printf '%s\n' "$drift"
-          [[ -z "$drift" ]] || { echo 'Product tree changed after the successful full validation' >&2; exit 1; }
+          [[ -z "$drift" ]] || { echo 'Product tree changed after the successful cleaned validation' >&2; exit 1; }
 
           echo '--- controlled SQLite offline fallback ---'
           grep -Fq 'SQLite Online Backup API failed — attempting safe offline fallback' utilities/backup-run.sh
