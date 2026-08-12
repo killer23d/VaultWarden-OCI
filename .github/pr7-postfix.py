@@ -57,7 +57,6 @@ anchor = '\nremove_sensitive_workspace() {'
 idx = text.find(anchor)
 if idx < 0:
     raise SystemExit('lib/crypto.sh: workspace cleanup anchor missing')
-# Insert promotion helper after remove_sensitive_workspace, using function parser boundary.
 lines = text.splitlines(True)
 start = next(i for i, line in enumerate(lines) if line.startswith('remove_sensitive_workspace() {'))
 end = next(i for i in range(start + 1, len(lines)) if lines[i].rstrip('\n') == '}')
@@ -119,7 +118,7 @@ replace_once('utilities/secrets-edit.sh', '''    if ! mv "$encrypted_temp" "$SEC
     fi
 ''')
 replace_once('utilities/secrets-rotate.sh', '''    if ! mv "$temp_enc" "$SECRETS_FILE"; then
-        log_error "Atomic mv failed — encrypted output left at: $temp_enc"
+        log_error "Atomic mv failed — encrypted output in: $temp_enc"
         return 1
     fi
 ''', '''    if ! promote_sops_ciphertext "$temp_enc" "$SECRETS_FILE" "$_age_key_path"; then
@@ -128,7 +127,6 @@ replace_once('utilities/secrets-rotate.sh', '''    if ! mv "$temp_enc" "$SECRETS
     fi
 ''')
 
-# Reuse the single owned setup-secrets workspace instead of allocating one per plaintext file.
 replace_function('utilities/setup-secrets.sh', '_ss_make_plaintext_temp', r'''_ss_make_plaintext_temp() {
     local dir tmp
     if [[ "${VW_TEST_MODE:-false}" == "true" && -n "${VW_SETUP_SECRETS_TMP_DIR:-}" ]]; then
@@ -143,7 +141,6 @@ replace_function('utilities/setup-secrets.sh', '_ss_make_plaintext_temp', r'''_s
     printf '%s' "$tmp"
 }''')
 
-# Cloudflare bearer token curl config is plaintext secret material too.
 p = Path('lib/secrets.sh')
 t = p.read_text()
 old = '''    local curl_cfg
@@ -170,7 +167,6 @@ t = t.replace('''    rm -f "$curl_cfg"
 }''', 1)
 p.write_text(t)
 
-# If break-glass expiry cannot be verified, remove the account immediately.
 p = Path('utilities/setup-secrets.sh')
 t = p.read_text()
 old = '''        schedule_auto_cleanup
@@ -193,7 +189,6 @@ if old not in t:
 t = t.replace(old, new, 1)
 p.write_text(t)
 
-# Update the recovery export operator comment to match the fail-closed workspace contract.
 p = Path('utilities/secrets-export-recovery-kit.sh')
 t = p.read_text().replace('temporary plaintext may use /dev/shm', 'temporary plaintext uses verified volatile storage')
 p.write_text(t)
