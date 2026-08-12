@@ -441,10 +441,10 @@ pass "live startup/health paths use /run runtime secrets"
 # Startup key remediation must preserve the root-operated Age key contract.
 ! grep -Eq 'chown[[:space:]].*/etc/vaultwarden/age-key\.txt|chgrp[[:space:]].*/etc/vaultwarden|chmod[[:space:]]+750[[:space:]]+/etc/vaultwarden|install[[:space:]]+-d[[:space:]]+-m[[:space:]]+750[[:space:]]+/etc/vaultwarden' startup.sh \
     || fail "startup.sh contains stale non-root Age key remediation"
-grep -Fq 'sudo install -d -m 700 -o root -g root /etc/vaultwarden' startup.sh || fail "startup.sh missing root-owned /etc/vaultwarden install remediation"
-grep -Fq 'sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}' startup.sh || fail "startup.sh missing root-owned age key install remediation"
-grep -Fq 'sudo make key-health' startup.sh || fail "startup.sh key verification guidance must use sudo make key-health"
-pass "startup key remediation stays root-owned"
+grep -Fq 'Age key health check FAILED: ${canonical_key}' startup.sh || fail "startup.sh does not name canonical Age key failure"
+grep -Fq 'Restore the operational Age private key at ${canonical_key}, then run: sudo make key-health' startup.sh || fail "startup.sh lacks canonical Age key recovery guidance"
+! grep -Fq 'repo_local_key' startup.sh || fail "startup.sh still advertises checkout Age-key remediation"
+pass "startup key remediation stays canonical and root-operated"
 
 # Encrypted secret authoring leaf utilities are root-operated. The top-level
 # edit-secrets.sh dispatcher stays metadata-friendly and delegates to these
@@ -489,7 +489,7 @@ grep -Fq 'resolve_age_key_path >/dev/null 2>&1' utilities/secrets-view.sh || fai
 pass "secrets prerequisite checks use active Age key resolver and canonical diagnostics"
 
 grep -Fq '"/etc/vaultwarden/age-key.txt"' lib/crypto.sh || fail "Age key resolver does not include installed canonical path"
-grep -Fq '"/etc/vaultwarden/vaultwarden.env"' lib/config.sh || fail "environment loader does not include installed env path"
+grep -Fq 'VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env' lib/config.sh || fail "environment loader does not include installed env authority"
 pass "root execution can resolve installed Age key and env defaults"
 
 # setup-secrets bootstrap must preserve repo .env owner/group/mode across atomic replacement.
@@ -498,8 +498,8 @@ grep -Fq 'env_mode=$(stat -c '\''%a'\'' "$env_file"' utilities/setup-secrets.sh 
 grep -Fq 'chown "$env_uid:$env_gid" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env owner/group on temp file"
 grep -Fq 'chmod "$env_mode" "$temp_env"' utilities/setup-secrets.sh || fail "setup-secrets does not restore .env mode"
 grep -Fq 'local age_key_file="/etc/vaultwarden/age-key.txt"' utilities/setup-secrets.sh || fail "setup-secrets bootstrap does not own the canonical Age key"
-grep -Fq 'local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"' utilities/setup-secrets.sh || fail "setup-secrets configure does not default to the canonical Age key"
-grep -Fq 'AGE_KEY_FILE must be an absolute path' utilities/setup-secrets.sh || fail "setup-secrets configure does not reject relative Age key overrides"
+grep -Fq 'local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"' utilities/setup-secrets.sh || fail "setup-secrets configure does not pin the canonical Age key"
+! grep -Fq 'local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"' utilities/setup-secrets.sh || fail "setup-secrets configure still accepts alternate operational Age key custody"
 ! grep -Fq 'local age_key_file="${PROJECT_ROOT}/secrets/keys/age-key.txt"' utilities/setup-secrets.sh || fail "setup-secrets bootstrap still owns a repo-local Age key"
 pass "setup-secrets bootstrap preserves .env metadata and canonical Age key custody"
 
@@ -763,6 +763,11 @@ KEY_ENV="$KEY_TMP/installed.env"
 mkdir -p "$KEY_REPO/secrets/keys" "$KEY_REPO/lib" "$KEY_BIN" "$KEY_TMP/home" "$KEY_TMP/state"
 cp Makefile "$KEY_REPO/Makefile"
 cp -a lib/. "$KEY_REPO/lib/"
+cat >> "$KEY_REPO/lib/crypto.sh" <<'EOF_KEY_RESOLVER'
+# Test-only: make canonical resolution unavailable so these target contracts
+# prove they fail closed rather than accepting either override decoy below.
+resolve_age_key_path() { return 1; }
+EOF_KEY_RESOLVER
 PROD_KEY="$KEY_TMP/prod-age-key.txt"
 REPO_KEY="$KEY_REPO/secrets/keys/age-key.txt"
 PROD_RECIPIENT="age1prod000000000000000000000000000000000000000000000000000000"
@@ -819,29 +824,37 @@ run_key_make() {
 
 KEY_SHOW_OUT="$KEY_TMP/key-show.out"
 run_key_make key-show "$KEY_SHOW_OUT" || { cat "$KEY_SHOW_OUT" >&2; fail "key-show target failed"; }
-grep -Fq "$PROD_KEY" "$KEY_SHOW_OUT" || { cat "$KEY_SHOW_OUT" >&2; fail "key-show did not report production active key"; }
-grep -Fq "$PROD_RECIPIENT" "$KEY_SHOW_OUT" || { cat "$KEY_SHOW_OUT" >&2; fail "key-show did not derive production public recipient"; }
+grep -Fq 'Key file : <not resolved>' "$KEY_SHOW_OUT" || { cat "$KEY_SHOW_OUT" >&2; fail "key-show did not report unresolved canonical key"; }
+grep -Fq 'Restore the offline Age identity to /etc/vaultwarden/age-key.txt' "$KEY_SHOW_OUT" || { cat "$KEY_SHOW_OUT" >&2; fail "key-show lacks canonical recovery guidance"; }
+! grep -Fq "$PROD_KEY" "$KEY_SHOW_OUT" || fail "key-show accepted the installed-env Age-key override decoy"
 ! grep -Fq "$REPO_KEY" "$KEY_SHOW_OUT" || fail "key-show fell back to repo-local key"
 
 KEY_HEALTH_OUT="$KEY_TMP/key-health.out"
-run_key_make key-health "$KEY_HEALTH_OUT" || { cat "$KEY_HEALTH_OUT" >&2; fail "key-health target failed"; }
-grep -Fq "$PROD_KEY" "$KEY_HEALTH_OUT" || { cat "$KEY_HEALTH_OUT" >&2; fail "key-health did not resolve production active key"; }
-grep -Fq 'Age key is healthy' "$KEY_HEALTH_OUT" || { cat "$KEY_HEALTH_OUT" >&2; fail "key-health did not complete active-key health check"; }
+if run_key_make key-health "$KEY_HEALTH_OUT"; then
+    cat "$KEY_HEALTH_OUT" >&2
+    fail "key-health succeeded without canonical key resolution"
+fi
+! grep -Fq "$PROD_KEY" "$KEY_HEALTH_OUT" || fail "key-health accepted the installed-env Age-key override decoy"
+! grep -Fq "$REPO_KEY" "$KEY_HEALTH_OUT" || fail "key-health fell back to repo-local key"
 
 KEY_BACKUP_OUT="$KEY_TMP/key-backup.out"
-run_key_make key-backup "$KEY_BACKUP_OUT" || { cat "$KEY_BACKUP_OUT" >&2; fail "key-backup target failed"; }
-backup_copy="$(find "$KEY_TMP/home" -name 'age-key-backup-*.txt' -type f -print | head -1)"
-[[ -n "$backup_copy" ]] || fail "key-backup did not create a transfer copy"
-grep -Fq 'PRODUCTION-ACTIVE-KEY' "$backup_copy" || fail "key-backup copied repo-local key instead of production active key"
-! grep -Fq 'REPO-LOCAL-KEY' "$backup_copy" || fail "key-backup transfer copy contains repo-local key"
+if run_key_make key-backup "$KEY_BACKUP_OUT"; then
+    cat "$KEY_BACKUP_OUT" >&2
+    fail "key-backup succeeded without canonical key resolution"
+fi
+[[ -z "$(find "$KEY_TMP/home" -name 'age-key-backup-*.txt' -type f -print -quit)" ]] || fail "key-backup created a copy without canonical key resolution"
+! grep -Fq "$PROD_KEY" "$KEY_BACKUP_OUT" || fail "key-backup accepted the installed-env Age-key override decoy"
+! grep -Fq "$REPO_KEY" "$KEY_BACKUP_OUT" || fail "key-backup fell back to repo-local key"
 
 KEY_ESCROW_OUT="$KEY_TMP/key-escrow.out"
-run_key_make key-escrow "$KEY_ESCROW_OUT" || { cat "$KEY_ESCROW_OUT" >&2; fail "key-escrow target failed"; }
-escrow_copy="$(find "$KEY_TMP/home" -name 'age-key-escrow-*.txt' -type f -print | head -1)"
-[[ -n "$escrow_copy" ]] || { cat "$KEY_ESCROW_OUT" >&2; fail "key-escrow did not create an escrow file"; }
-grep -Fq 'PRODUCTION-ACTIVE-KEY' "$escrow_copy" || fail "key-escrow wrote escrow from the wrong key"
-! grep -Fq 'REPO-LOCAL-KEY' "$escrow_copy" || fail "key-escrow escrow contains repo-local key"
-pass "retained key targets use the production key and ignore the repo-local decoy"
+if run_key_make key-escrow "$KEY_ESCROW_OUT"; then
+    cat "$KEY_ESCROW_OUT" >&2
+    fail "key-escrow succeeded without canonical key resolution"
+fi
+[[ -z "$(find "$KEY_TMP/home" -name 'age-key-escrow-*.txt' -type f -print -quit)" ]] || fail "key-escrow created escrow without canonical key resolution"
+! grep -Fq "$PROD_KEY" "$KEY_ESCROW_OUT" || fail "key-escrow accepted the installed-env Age-key override decoy"
+! grep -Fq "$REPO_KEY" "$KEY_ESCROW_OUT" || fail "key-escrow fell back to repo-local key"
+pass "retained key targets fail closed without canonical key resolution and ignore both override decoys"
 
 STATUS_SNIP="$(mktemp -t vw-status-contract.XXXXXXXXXX)"
 extract_make_target status Makefile > "$STATUS_SNIP" || fail "could not extract status target"

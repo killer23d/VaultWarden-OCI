@@ -41,7 +41,7 @@ NC     := \033[0m
 PROJECT_ROOT         ?= $(shell pwd)
 COMPOSE_FILE         ?= docker-compose.yml
 COMPOSE_PROJECT_NAME ?= vaultwarden-oci
-DOCKER_COMP          ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+DOCKER_COMP          := docker compose
 SECRETS_FILE         ?=
 export SECRETS_FILE
 
