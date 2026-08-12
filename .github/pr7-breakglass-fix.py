@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 p = Path('utilities/setup-secrets.sh')
 t = p.read_text()
@@ -19,21 +20,11 @@ if old_help not in t:
     raise SystemExit('breakglass help scheduler block not found')
 t = t.replace(old_help, new_help, 1)
 
-old_schedule_prefix = '''        if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would schedule auto-cleanup in ${expiry_hours}h"
-            return 0
-        fi
+schedule = r'''    schedule_auto_cleanup() {
+        local expiry_hours="$BREAKGLASS_AUTO_EXPIRY_HOURS"
+        local bg_user="$BREAKGLASS_USER"
 
-        if (( expiry_hours == 0 )); then
-            log_warn "Auto-expiry disabled (BREAKGLASS_AUTO_EXPIRY_HOURS=0) — remember to run 'breakglass remove' manually"
-            return 0
-        fi
-
-        local script_abs
-        script_abs=$(readlink -f "$0")
-        local cleanup_cmd="${script_abs} breakglass remove --user ${bg_user} --force"
-'''
-new_schedule_prefix = '''        if ! [[ "$expiry_hours" =~ ^[1-9][0-9]*$ ]]; then
+        if ! [[ "$expiry_hours" =~ ^[1-9][0-9]*$ ]]; then
             log_error "BREAKGLASS_AUTO_EXPIRY_HOURS must be a positive integer; account creation is aborted."
             return 1
         fi
@@ -48,34 +39,14 @@ new_schedule_prefix = '''        if ! [[ "$expiry_hours" =~ ^[1-9][0-9]*$ ]]; th
             log_error "Could not resolve the break-glass cleanup command path; account creation is aborted."
             return 1
         }
-'''
-if old_schedule_prefix not in t:
-    raise SystemExit('breakglass scheduling prefix not found')
-t = t.replace(old_schedule_prefix, new_schedule_prefix, 1)
+        local expiry_epoch=$(( $(date +%s) + expiry_hours * 3600 ))
+        local expiry_human
+        expiry_human=$(date -d "@${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+            || date -r "${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+            || date -u -d "${expiry_hours} hours" '+%Y-%m-%d %H:%M UTC' 2>/dev/null \
+            || echo "in ${expiry_hours} hour(s)")
 
-old_systemd = '''        local unit_name="vw-breakglass-cleanup"
-    if ! command -v systemd-run >/dev/null 2>&1 || ! systemctl is-system-running >/dev/null 2>&1; then
-        log_error "Break-glass expiry requires a running systemd host; account creation is aborted."
-        return 1
-    fi
-    if ! systemd-run --quiet --collect \
-            --on-active="${expiry_hours}h" \
-            --unit="$unit_name" \
-            --description="VaultWarden breakglass auto-cleanup for ${bg_user}" \
-            -- bash -c "${cleanup_cmd}" 2>/dev/null; then
-        log_error "Could not schedule break-glass expiry with systemd; account creation is aborted."
-        return 1
-    fi
-    if ! systemctl is-active --quiet "${unit_name}.timer"; then
-        systemctl stop "${unit_name}.timer" "${unit_name}.service" >/dev/null 2>&1 || true
-        log_error "Break-glass expiry timer could not be verified active; account creation is aborted."
-        return 1
-    fi
-    log_success "Auto-cleanup scheduled and verified via systemd at ${expiry_human}"
-    return 0
-}
-'''
-new_systemd = '''        local unit_name="vw-breakglass-cleanup"
+        local unit_name="vw-breakglass-cleanup"
         if ! command -v systemd-run >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then
             log_error "Break-glass expiry requires systemd-run and systemctl; account creation is aborted."
             return 1
@@ -97,9 +68,10 @@ new_systemd = '''        local unit_name="vw-breakglass-cleanup"
         return 0
     }
 '''
-if old_systemd not in t:
-    raise SystemExit('breakglass systemd block not found')
-t = t.replace(old_systemd, new_systemd, 1)
+pattern = re.compile(r'^    schedule_auto_cleanup\(\) \{\n.*?\n\}\n(?=\n    create_breakglass_user\(\) \{)', re.M | re.S)
+t, n = pattern.subn(schedule.rstrip('\n'), t, count=1)
+if n != 1:
+    raise SystemExit('breakglass schedule_auto_cleanup function not found')
 
 old_remove = '''    remove_breakglass_user() {
         if [[ "$DRY_RUN" == "true" ]]; then
@@ -113,13 +85,17 @@ new_remove = '''    remove_breakglass_user() {
 if old_remove not in t:
     raise SystemExit('remove_breakglass_user start not found')
 t = t.replace(old_remove, new_remove, 1)
-t = t.replace('''        if [[ "$FORCE" != "true" ]]; then
+old_prompt = '''        if [[ "$FORCE" != "true" ]]; then
             echo ""
             log_warn "This will permanently remove the break-glass admin account."
-''', '''        if [[ "$FORCE" != "true" && "$force_remove" != "true" ]]; then
+'''
+new_prompt = '''        if [[ "$FORCE" != "true" && "$force_remove" != "true" ]]; then
             echo ""
             log_warn "This will permanently remove the break-glass admin account."
-''', 1)
+'''
+if old_prompt not in t:
+    raise SystemExit('remove_breakglass_user prompt gate not found')
+t = t.replace(old_prompt, new_prompt, 1)
 
 old_expiry_display = '''        if (( BREAKGLASS_AUTO_EXPIRY_HOURS > 0 )); then
             printf '%b\\
