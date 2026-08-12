@@ -39,6 +39,8 @@ _crowdsec_bouncers_list_raw() {
     return 1
 }
 
+# This function communicates operator detail through CROWDSEC_READINESS_DETAIL.
+# shellcheck disable=SC2034
 crowdsec_worker_readiness() {
     CROWDSEC_READINESS_DETAIL=""
 
