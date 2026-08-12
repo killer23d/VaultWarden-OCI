@@ -1,0 +1,49 @@
+name: PR8 runner inventory fix
+on:
+  push:
+    branches: [pr8-runtime-authority-age-custody]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: pr8-runtime-authority-age-custody
+          fetch-depth: 0
+      - name: Update runner inventory contract
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/suites/foundation/case-runner-contracts.bash')
+          text = p.read_text()
+          replacements = {
+              '[[ "${#REGISTERED_RECORDS[@]}" -eq 30 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 30"': '[[ "${#REGISTERED_RECORDS[@]}" -eq 31 ]] || fail "real runner listed ${#REGISTERED_RECORDS[@]} records; expected 31"',
+              '[[ "${#REGISTERED_PATHS[@]}" -eq 23 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 23"': '[[ "${#REGISTERED_PATHS[@]}" -eq 24 ]] || fail "real runner listed ${#REGISTERED_PATHS[@]} unique physical cases; expected 24"',
+              '[[ "$(sort -u "$real_files" | wc -l | tr -d \'[:space:]\')" -eq 23 ]] || fail "list-files contains duplicate physical paths"': '[[ "$(sort -u "$real_files" | wc -l | tr -d \'[:space:]\')" -eq 24 ]] || fail "list-files contains duplicate physical paths"',
+              '[[ "$(grep -c \'^  \' "$list_one")" -eq 30 ]] || fail "fixture list did not preserve 30 logical records"': '[[ "$(grep -c \'^  \' "$list_one")" -eq 31 ]] || fail "fixture list did not preserve 31 logical records"',
+              '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 23 ]] || fail "fixture list-files did not preserve 23 unique physical paths"': '[[ "$(wc -l < "$files_one" | tr -d \'[:space:]\')" -eq 24 ]] || fail "fixture list-files did not preserve 24 unique physical paths"',
+              '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 23 ]] || fail "fixture list-files duplicated a physical path"': '[[ "$(sort -u "$files_one" | wc -l | tr -d \'[:space:]\')" -eq 24 ]] || fail "fixture list-files duplicated a physical path"',
+              '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 23 ]]': '[[ "$(find "$FIXTURE_TESTS/suites" -type f -name \'case-*.bash\' | wc -l | tr -d \'[:space:]\')" -eq 24 ]]',
+          }
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one match, got {count}: {old[:80]}')
+              text = text.replace(old, new)
+          p.write_text(text)
+          PY
+          bash -n tests/suites/foundation/case-runner-contracts.bash
+          shellcheck -x --severity=warning tests/suites/foundation/case-runner-contracts.bash
+          VW_TEST_CASE_MODE=core bash tests/suites/foundation/case-runner-contracts.bash
+      - name: Commit fix and remove helper workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/pr8-runner-count-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'test: update runner inventory for runtime authority case'
+          git push origin HEAD:pr8-runtime-authority-age-custody
