@@ -144,9 +144,12 @@ check_pre_update_baseline() (
 
     preflight_line="$(grep -n '^[[:space:]]*check_image_update_preflight || exit 1$' "$UPDATE" | cut -d: -f1)"
     system_line="$(grep -n '^[[:space:]]*update_system_packages$' "$UPDATE" | tail -1 | cut -d: -f1)"
+    post_system_line="$(grep -n 'check_update_readiness "post-system-update pre-image baseline" || exit 1' "$UPDATE" | cut -d: -f1)"
     snapshot_line="$(grep -n '^[[:space:]]*snapshot_image_digests$' "$UPDATE" | tail -1 | cut -d: -f1)"
-    [[ -n "$preflight_line" && -n "$system_line" && -n "$snapshot_line" ]] || fail "could not locate update ordering"
-    (( preflight_line < system_line && preflight_line < snapshot_line )) || fail "baseline must run before package/image mutation"
+    [[ -n "$preflight_line" && -n "$system_line" && -n "$post_system_line" && -n "$snapshot_line" ]] \
+        || fail "could not locate update ordering"
+    (( preflight_line < system_line && system_line < post_system_line && post_system_line < snapshot_line )) \
+        || fail "combined update must re-establish a clean baseline after system packages and before image mutation"
 )
 
 check_crowdsec_readiness() (

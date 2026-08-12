@@ -462,6 +462,9 @@ main() {
     if [[ "$UPDATE_SYSTEM" == "true" ]]; then
         operation_set_phase "3" "System package update"
         update_system_packages
+        if [[ "$image_transaction" == "true" ]]; then
+            check_update_readiness "post-system-update pre-image baseline" || exit 1
+        fi
     fi
 
     if [[ "$image_transaction" == "true" ]]; then
