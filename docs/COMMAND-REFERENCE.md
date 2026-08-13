@@ -291,7 +291,7 @@ SUBCOMMANDS:
 
     After the backup is selected you will be prompted for the Age private
     key that decrypts the selected backup. Press Enter to use the operational
-    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+    Age key at /etc/vaultwarden/age-key.txt.
 
     Before overwrite, restore creates a pre-restore emergency snapshot unless
     --no-backup is used. If that snapshot is passphrase-sealed, its emergency
@@ -848,19 +848,13 @@ OPTIONS:
     --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
-SECRET SOURCE PRIORITY:
-    caddy_cloudflare_dns_token — resolved in order:
-        1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. Host file: $CF_TOKEN_FILE or /run/vaultwarden-oci/secrets/caddy_cloudflare_dns_token
-        3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
+SECRET SOURCE:
+    caddy_cloudflare_dns_token and cloudflare_zone_id are resolved only from
+    canonical encrypted $SECRETS_FILE through decrypt_secret().
 
     DNS_UPDATE_REQUIRED=true or --require-dns makes missing config fail.
     UPDATE_DNS=false skips cleanly. When UPDATE_DNS is unset, missing or
     placeholder Cloudflare config logs a warning and exits 0.
-
-    cloudflare_zone_id — resolved in order:
-        1. decrypt_secret() from encrypted $SECRETS_FILE
-        2. Legacy CLOUDFLARE_ZONE_ID shell variable fallback (do not add to .env)
 
 EXIT CODES:
     0 — DNS record up to date or updated successfully
@@ -1015,7 +1009,7 @@ SUBCOMMANDS:
 
     After the backup is selected you will be prompted for the Age private
     key that decrypts the selected backup. Press Enter to use the operational
-    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+    Age key at /etc/vaultwarden/age-key.txt.
 
     Before overwrite, restore creates a pre-restore emergency snapshot unless
     --no-backup is used. If that snapshot is passphrase-sealed, its emergency
@@ -1583,7 +1577,9 @@ START POLICY SAFETY:
     --version, -V Print the VaultWarden-OCI version and exit
 
 WHAT install DOES:
-    1. Copies executable scripts to /opt/vaultwarden-scripts/ (root:root 700):
+    1. Requires and validates the operational Age key at /etc/vaultwarden/age-key.txt
+       before copying scripts, creating install paths, syncing runtime env files, or installing units.
+    2. Copies executable scripts to /opt/vaultwarden-scripts/ (root:root 700):
          startup.sh  maintenance.sh  backup.sh  restore.sh
          utilities/setup-firewall.sh
          utilities/maintenance-run.sh      utilities/maintenance-health.sh
@@ -1593,15 +1589,14 @@ WHAT install DOES:
          utilities/backup-run.sh           utilities/restore-run.sh
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
-    2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-    3. Copies public startup runtime assets under /opt/vaultwarden-scripts/:
+    3. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
+    4. Copies public startup runtime assets under /opt/vaultwarden-scripts/:
          docker-compose.yml  docker-compose.yml.example  secrets-schema.yaml  VERSION
          caddy/Caddyfile  caddy/Caddyfile.degraded  caddy/Dockerfile       (root:root 644)
          caddy/entrypoint.sh                                                    (root:root 755)
        Private secrets are not copied into this code bundle.
-    4. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
-       using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
-    5. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
+    5. Runs utilities/env-edit.sh sync, using repository .env as authoring input to regenerate
+       ${PROJECT_STATE_DIR}/config/install.env and /etc/vaultwarden/vaultwarden.env (root:root 600).
     6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     7. systemctl daemon-reload
     8. Installs a Docker lifecycle drop-in so firewall reconciliation and startup rerun after dockerd restarts

@@ -124,7 +124,7 @@ SUBCOMMANDS:
 
     After the backup is selected you will be prompted for the Age private
     key that decrypts the selected backup. Press Enter to use the operational
-    Age key already configured in .env (SOPS_AGE_KEY_FILE).
+    Age key at /etc/vaultwarden/age-key.txt.
 
     Before overwrite, restore creates a pre-restore emergency snapshot unless
     --no-backup is used. If that snapshot is passphrase-sealed, its emergency
@@ -1392,37 +1392,11 @@ _prompt_age_key() {
 }
 
 #
-# Prune old Age private key backups — keep only 2 most recent.
-# Old key material has no operational value once a new key is active and
-# backed up; retaining it indefinitely increases exposure if the secrets/keys/
-# directory is ever compromised.
-_prune_old_age_keys() {
-    local keys_dir="$1"
-    [[ -d "$keys_dir" ]] || return 0
-    local -a old_keys
-    mapfile -t old_keys < <(find "$keys_dir" -maxdepth 1 -name "age-key.txt.pre-rotate-*" -type f \
-        | sort)
-    local count=${#old_keys[@]}
-    if (( count > 2 )); then
-        local delete_count=$(( count - 2 ))
-        for (( i=0; i<delete_count; i++ )); do
-            log_info "Pruning old Age key backup: $(basename "${old_keys[$i]}")"
-            rm -f "${old_keys[$i]}" 2>/dev/null || log_warn "Failed to prune: ${old_keys[$i]}"
-        done
-    fi
-}
-
+# Generates a fresh age key pair and promotes it to the canonical operational
+# path. Runtime env authorities are staged in the same transaction so they
+# continue to name that canonical key. Checkout .env is never mutated.
 #
-# Generates a fresh age key pair and installs it to every configured location
-# so the stack is immediately usable with the new key after the restore.
-#
-# Install locations (in order):
-#   1. secrets/keys/age-key.txt  (project-local copy; required for all modes)
-#   2. /etc/vaultwarden/age-key.txt  (systemd canonical; if it already exists)
-#   3. SOPS_AGE_KEY_FILE in .env updated to the canonical path
-#   4. SOPS_AGE_KEY_FILE in /etc/vaultwarden/vaultwarden.env (if present)
-#
-# Writes atomically: generates to a temp file, validates, then moves.
+# Writes atomically: generates to a temp file, validates, then promotes.
 # Returns 0 on success, 1 on any failure.
 # Sets ROTATED_KEY_FILE and ROTATED_PUB_KEY for display.
 ROTATED_KEY_FILE=""
@@ -1432,10 +1406,8 @@ ROTATED_KIT_FILE=""
 _rotate_age_key() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would generate a new age key pair and install to:"
-        log_info "  $PROJECT_ROOT/secrets/keys/age-key.txt"
-        [[ -f "/etc/vaultwarden/age-key.txt" ]] && \
-            log_info "  /etc/vaultwarden/age-key.txt"
-        log_info "  SOPS_AGE_KEY_FILE updated in .env"
+        log_info "  /etc/vaultwarden/age-key.txt"
+        log_info "  runtime SOPS authority remains canonical"
         return 0
     fi
 
@@ -1471,18 +1443,15 @@ _rotate_age_key() {
     _require_sops_for_rekey || return 1
 
     local secrets_file="${STATE_DIR}/secrets/secrets.yaml"
-    local local_key_dir="$PROJECT_ROOT/secrets/keys"
-    local local_key_file="$local_key_dir/age-key.txt"
     local systemd_key="/etc/vaultwarden/age-key.txt"
     local canonical_key="$systemd_key"
-    local env_file="$PROJECT_ROOT/.env"
     local systemd_env="/etc/vaultwarden/vaultwarden.env"
     local install_env="${STATE_DIR}/config/install.env"
     local sops_policy_file="${PROJECT_ROOT}/.sops.yaml"
     local staged_dir="$CONTROL_WORKSPACE/age-rotation-staged"
     local backup_dir="$CONTROL_WORKSPACE/age-rotation-backups"
     local new_recipient="" offline_recipient="" policy_tmp="" cipher_tmp=""
-    local staged_local_key="" staged_systemd_key="" staged_env="" staged_systemd_env="" staged_install_env=""
+    local staged_systemd_key="" staged_systemd_env="" staged_install_env=""
     local promoted_any=false rotation_committed=false
 
     _restore_rotation_backup() {
@@ -1500,8 +1469,6 @@ _rotate_age_key() {
         _restore_rotation_backup "$backup_dir/secrets.exists" "$backup_dir/secrets.yaml" "$secrets_file"
         _restore_rotation_backup "$backup_dir/policy.exists" "$backup_dir/sops.yaml" "$sops_policy_file"
         _restore_rotation_backup "$backup_dir/systemd-key.exists" "$backup_dir/systemd-age-key.txt" "$systemd_key"
-        _restore_rotation_backup "$backup_dir/local-key.exists" "$backup_dir/local-age-key.txt" "$local_key_file"
-        _restore_rotation_backup "$backup_dir/repo-env.exists" "$backup_dir/repo.env" "$env_file"
         _restore_rotation_backup "$backup_dir/systemd-env.exists" "$backup_dir/vaultwarden.env" "$systemd_env"
         _restore_rotation_backup "$backup_dir/install-env.exists" "$backup_dir/install.env" "$install_env"
         auto_fix_critical_permissions "$PROJECT_ROOT" || true
@@ -1569,43 +1536,23 @@ _rotate_age_key() {
         cipher_tmp=""
     fi
 
-    staged_local_key="$staged_dir/local-age-key.txt"
     staged_systemd_key="$staged_dir/systemd-age-key.txt"
-    staged_env="$staged_dir/repo.env"
     staged_systemd_env="$staged_dir/vaultwarden.env"
     staged_install_env="$staged_dir/install.env"
 
-    install -d -m 700 "$local_key_dir" || { log_error "Failed to prepare repo-local key directory."; return 1; }
     install -d -m 700 -o root -g root "$(dirname "$systemd_key")" || { log_error "Failed to prepare /etc/vaultwarden."; return 1; }
-    install -m 600 "$new_key_tmp" "$staged_local_key" || { log_error "Failed to stage repo-local key."; return 1; }
     install -m 600 -o root -g root "$new_key_tmp" "$staged_systemd_key" || { log_error "Failed to stage root-operated key."; return 1; }
-    _stage_env_with_key "$env_file" "$staged_env" "$canonical_key" || { log_error "Failed to stage repo .env update."; return 1; }
     _stage_env_with_key "$systemd_env" "$staged_systemd_env" "$canonical_key" || { log_error "Failed to stage /etc/vaultwarden/vaultwarden.env update."; return 1; }
     _stage_env_with_key "$install_env" "$staged_install_env" "$canonical_key" || { log_error "Failed to stage install.env update."; return 1; }
 
     [[ -f "$secrets_file" ]] && { cp -f "$secrets_file" "$backup_dir/secrets.yaml" || return 1; : > "$backup_dir/secrets.exists"; }
     [[ -f "$sops_policy_file" ]] && { cp -f "$sops_policy_file" "$backup_dir/sops.yaml" || return 1; : > "$backup_dir/policy.exists"; }
     [[ -f "$systemd_key" ]] && { cp -f "$systemd_key" "$backup_dir/systemd-age-key.txt" || return 1; : > "$backup_dir/systemd-key.exists"; }
-    [[ -f "$local_key_file" ]] && { cp -f "$local_key_file" "$backup_dir/local-age-key.txt" || return 1; : > "$backup_dir/local-key.exists"; }
-    [[ -f "$env_file" ]] && { cp -f "$env_file" "$backup_dir/repo.env" || return 1; : > "$backup_dir/repo-env.exists"; }
     [[ -f "$systemd_env" ]] && { cp -f "$systemd_env" "$backup_dir/vaultwarden.env" || return 1; : > "$backup_dir/systemd-env.exists"; }
     [[ -f "$install_env" ]] && { cp -f "$install_env" "$backup_dir/install.env" || return 1; : > "$backup_dir/install-env.exists"; }
 
-    if [[ -f "$local_key_file" ]]; then
-        local backup_ts; backup_ts=$(date +%Y%m%d-%H%M%S)
-        if cp -f "$local_key_file" "${local_key_file}.pre-rotate-${backup_ts}"; then
-            chmod 600 "${local_key_file}.pre-rotate-${backup_ts}" 2>/dev/null || true
-            log_info "  Previous key backed up: age-key.txt.pre-rotate-${backup_ts}"
-        else
-            log_warn "  Could not create pre-rotate repo-local key backup; transactional rollback backup is still staged."
-        fi
-    fi
-
-    if ! cp -f "$staged_local_key" "$local_key_file"; then _rollback_rotation; return 1; fi
     promoted_any=true
-    chmod 600 "$local_key_file" 2>/dev/null || true
     if ! install -m 600 -o root -g root "$staged_systemd_key" "$systemd_key"; then _rollback_rotation; return 1; fi
-    if [[ -f "$staged_env" ]] && ! cp -f "$staged_env" "$env_file"; then _rollback_rotation; return 1; fi
     if [[ -f "$staged_systemd_env" ]] && ! install -m 600 -o root -g root "$staged_systemd_env" "$systemd_env"; then _rollback_rotation; return 1; fi
     if [[ -f "$staged_install_env" ]] && ! install -m 600 -o root -g root "$staged_install_env" "$install_env"; then _rollback_rotation; return 1; fi
     if [[ -n "$cipher_tmp" ]] && ! install -m 600 -o root -g root "$cipher_tmp" "$secrets_file"; then _rollback_rotation; return 1; fi
@@ -1616,14 +1563,12 @@ _rotate_age_key() {
         return 1
     fi
     rotation_committed=true
-    log_success "  New key installed: $local_key_file"
     log_success "  New key installed: $systemd_key"
-    [[ -f "$staged_env" ]] && log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to .env"
     [[ -f "$staged_systemd_env" ]] && log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to $systemd_env"
     [[ -f "$staged_install_env" ]] && log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to $install_env"
     [[ -n "$cipher_tmp" ]] && log_success "  Restored secrets rekeyed for the new operational key."
 
-    ROTATED_KEY_FILE="$local_key_file"
+    ROTATED_KEY_FILE="$systemd_key"
 
     # Write a local recovery-kit file so the operator has a copy
     # that survives independently of secrets/keys/
@@ -1638,15 +1583,13 @@ _rotate_age_key() {
     log_warn "Copy it offline, verify it, then delete the host copy."
 
     # 6. Derive public key for display
-    ROTATED_PUB_KEY=$(grep -m1 '^# public key:' "$local_key_file" | sed 's/^# public key: //' || true)
+    ROTATED_PUB_KEY=$(grep -m1 '^# public key:' "$systemd_key" | sed 's/^# public key: //' || true)
     if [[ -z "$ROTATED_PUB_KEY" ]]; then
-        ROTATED_PUB_KEY=$(age-keygen -y "$local_key_file" 2>/dev/null || true)
+        ROTATED_PUB_KEY=$(age-keygen -y "$systemd_key" 2>/dev/null || true)
     fi
 
     log_success "Key rotation complete."
 
-    # 7. Prune old Age private key backups — keep only 2 most recent
-    _prune_old_age_keys "$local_key_dir"
 
     return 0
 }
@@ -3088,7 +3031,7 @@ main() {
     # that have not explicitly set BACKUP_DIR still resolve to the correct volume.
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${STATE_DIR}/backups")"
-    local OPERATIONAL_SOPS_AGE_KEY_FILE; OPERATIONAL_SOPS_AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
+    local OPERATIONAL_SOPS_AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
     RESTORE_DECRYPT_AGE_KEY_FILE=""
     RESTORE_REKEY_SOURCE_AGE_KEY_FILE=""
     local PUID PGID

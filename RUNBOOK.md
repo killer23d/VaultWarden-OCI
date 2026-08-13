@@ -232,7 +232,7 @@ ${PROJECT_STATE_DIR}/config/install.env
 /etc/vaultwarden/vaultwarden.env
 ```
 
-For runtime loading, `/etc/vaultwarden/vaultwarden.env` is preferred when installed, then persistent `install.env`, then repository `.env` as a bootstrap/legacy fallback.
+At runtime, `/etc/vaultwarden/vaultwarden.env` is authoritative when installed; otherwise `${PROJECT_STATE_DIR}/config/install.env` is used. Repository `.env` is authoring input only and is never a production fallback. Missing or malformed runtime authority must be repaired with `sudo make sync-env`. The operational Age private key is `/etc/vaultwarden/age-key.txt`.
 
 Do not hand-edit installed runtime environment files as a normal configuration workflow.
 

@@ -63,8 +63,14 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-if ! load_project_environment >/dev/null 2>&1; then
-    log_warn "repair-permissions: could not load project environment; using configured defaults"
+if ! load_project_environment; then
+    if [[ "$MODE" == "check" ]]; then
+        log_warn "repair-permissions: runtime environment authority unavailable; live installation state cannot be resolved"
+        exit 1
+    fi
+    log_error "repair-permissions: refusing live repair without canonical runtime environment authority"
+    log_hint "Run: sudo make sync-env"
+    exit 1
 fi
 
 PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"

@@ -1220,7 +1220,7 @@ assert_canonical_backup_exclusion symlinked-descendant "$symlink_backup"
 cat > "$state/config/install.env" <<EOF_ENV
 PROJECT_STATE_DIR=$state
 BACKUP_DIR=$dotdot_backup
-SOPS_AGE_KEY_FILE=$age_key
+SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt
 EOF_ENV
 chmod 600 "$state/config/install.env"
 manifest="$TMP/manifest"
@@ -1238,7 +1238,7 @@ if (( ${#manifest_runner[@]} > 0 )); then
         VW_CONFIG_INSTALLED_ENV_FILE="$TMP/no-system-env" \
         "$ROOT/backup.sh" manifest > "$manifest"
     sed -n 's/^  - //p' "$manifest" > "$TMP/manifest.excludes"
-    mapfile -t manifest_effective < <(backup_archive_exclusions "$ROOT" "$state" "$dotdot_backup" "$age_key")
+    mapfile -t manifest_effective < <(backup_archive_exclusions "$ROOT" "$state" "$dotdot_backup" "/etc/vaultwarden/age-key.txt")
     printf '%s\n' "${manifest_effective[@]}" > "$TMP/effective.excludes"
     cmp -s "$TMP/effective.excludes" "$TMP/manifest.excludes" \
         || { diff -u "$TMP/effective.excludes" "$TMP/manifest.excludes" >&2 || true; fail "manifest differs from effective tar exclusion owner"; }

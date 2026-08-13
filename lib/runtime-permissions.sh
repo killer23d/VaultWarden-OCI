@@ -333,7 +333,6 @@ manage_runtime_state_permissions() {
             "$project_root/.env" \
             "$project_root/.sops.yaml" \
             "$project_root/secrets" \
-            "$project_root/secrets/keys/age-key.txt" \
             "$project_root/secrets/secrets.yaml"; do
             _vw_runtime_apply_known_path "$operation" "$path" "repository configuration path" || status=1
         done

@@ -79,7 +79,9 @@ check_docker_available() {
 }
 
 check_compose_available() {
-    docker compose version >/dev/null 2>&1
+    local version
+    version="$(docker compose version --short 2>/dev/null)" || return 1
+    [[ "$version" =~ ^v?2\. ]] || return 1
 }
 
 require_docker() {
@@ -126,11 +128,9 @@ get_service_status() {
     local raw_json
     raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
 
-    # Guard against non-JSON output (Compose v1, plain-text mode)
     if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
-        log_debug "get_service_status: non-JSON output from docker compose ps for '$service'; falling back to not_found"
-        echo "not_found"
-        return 0
+        log_error "docker compose ps did not return structured JSON for '$service'; Docker Compose v2 is required"
+        return 1
     fi
 
     local status
@@ -169,11 +169,9 @@ get_service_health() {
     local raw_json
     raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
 
-    # Guard against non-JSON output (Compose v1, plain-text mode)
     if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
-        log_debug "get_service_health: non-JSON output from docker compose ps for '$service'; falling back to none"
-        echo "none"
-        return 0
+        log_error "docker compose ps did not return structured JSON for '$service'; Docker Compose v2 is required"
+        return 1
     fi
 
     local health

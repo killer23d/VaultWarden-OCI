@@ -257,12 +257,30 @@ for arg in "$@"; do
 done
 exec /bin/chmod "$@"
 CHMOD
+  cat > "$bin/age" <<'AGE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-r" ]]; then
+  out=""
+  while (($#)); do
+    case "$1" in -o) out="${2:-}"; shift 2 ;; *) shift ;; esac
+  done
+  [[ -n "$out" ]] || exit 2
+  cat > "$out"
+  exit 0
+fi
+if [[ "${1:-}" == "-d" ]]; then
+  cat "${@: -1}"
+  exit 0
+fi
+exit 2
+AGE
   chmod +x "$bin"/*
 }
 
 copy_systemd_install_repo(){
   local repo="$1" state="$2"
-  mkdir -p "$repo/secrets/keys"
+  mkdir -p "$repo" "$state/config"
   cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$ROOT/caddy" "$repo/"
   cp "$ROOT/startup.sh" "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" \
      "$ROOT/docker-compose.yml.example" "$ROOT/secrets-schema.yaml" "$ROOT/VERSION" "$repo/"
@@ -276,17 +294,26 @@ DATA_VOLUME_MOUNT=$state
 SOPS_AGE_KEY_FILE=
 EOF_ENV
   chmod 600 "$repo/.env"
-  cat > "$repo/secrets/keys/age-key.txt" <<'EOF_KEY'
-# public key: age1systemdpolicy000000000000000000000000000000000000000000
-AGE-SECRET-KEY-1SYSTEMDPOLICY
-EOF_KEY
-  chmod 600 "$repo/secrets/keys/age-key.txt"
+  cat > "$state/config/install.env" <<EOF_RUNTIME
+DOMAIN=https://systemd-policy.example.test
+ADMIN_EMAIL=admin@example.test
+PROJECT_STATE_DIR=$state
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=$state
+SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt
+EOF_RUNTIME
+  chmod 600 "$state/config/install.env"
 }
 
 run_systemd_install_fixture(){
   local out="$1" repo="$2" bin="$3" unit_dir="$4" opt_dir="$5" env_dir="$6" state="$7" mode="$8"
   shift 8
   mkdir -p "$unit_dir" "$opt_dir" "$env_dir" "$state" "$TMP/run-locks"
+  cat > "$env_dir/age-key.txt" <<'EOF_KEY'
+# public key: age1systemdpolicy00000000000000000000000000000000000000000000000
+AGE-SECRET-KEY-1SYSTEMDPOLICY
+EOF_KEY
+  chmod 600 "$env_dir/age-key.txt"
   run_root_env_capture "$out" \
     PATH="$bin:$PATH" \
     SYSTEMCTL_LOG="$TMP/systemctl-install.log" \
@@ -926,6 +953,7 @@ _maybe_sudo(){ "$@"; }
 EOF_LIB
   cat > "$repo/lib/docker.sh" <<'EOF_LIB'
 check_docker_available(){ return 0; }
+check_compose_available(){ return 0; }
 wait_for_service_ready(){ return 0; }
 cleanup_docker_system(){ printf 'CLEANUP_DOCKER\n' >> "${CALL_LOG:?}"; return 0; }
 EOF_LIB

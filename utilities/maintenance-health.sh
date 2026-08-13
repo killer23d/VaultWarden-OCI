@@ -35,30 +35,7 @@ _default_report_dir() {
 }
 
 _resolve_age_key() {
-    local candidates=(
-        "${SOPS_AGE_KEY_FILE:-}"
-        "/etc/vaultwarden/age-key.txt"
-        "${PROJECT_ROOT}/secrets/keys/age-key.txt"
-    )
-    local candidate
-    for candidate in "${candidates[@]}"; do
-        [[ -z "$candidate" ]] && continue
-        if [[ "$candidate" != /* ]]; then
-            if [[ -f "$PROJECT_ROOT/$candidate" ]]; then
-                echo "$PROJECT_ROOT/$candidate"
-                return 0
-            fi
-            [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
-            continue
-        fi
-        [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
-    done
-    # Mirror backup-run fallback behavior for diagnostics.
-    for candidate in "${candidates[@]}"; do
-        [[ -n "$candidate" && "$candidate" == /* ]] && { echo "$candidate"; return 1; }
-    done
-    echo "/etc/vaultwarden/age-key.txt"
-    return 1
+    resolve_age_key_path
 }
 
 _resolve_backup_base_dir() {

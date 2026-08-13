@@ -163,11 +163,7 @@ resolve(){
     fi
   fi
 
-  AGE_KEYS=()
-  for p in "$(read_env SOPS_AGE_KEY_FILE "$CONFIG_SOURCE")" "$(read_env AGE_KEY_FILE "$CONFIG_SOURCE")" "$ETC_DIR/age-key.txt" "$ROOT/secrets/keys/age-key.txt"; do
-    [[ -n "$p" ]] || continue; [[ "$p" == /* ]] || p="$ROOT/$p"; AGE_KEYS+=("$p")
-  done
-  mapfile -t AGE_KEYS < <(printf '%s\n' "${AGE_KEYS[@]}" | uniq)
+  AGE_KEYS=("$ETC_DIR/age-key.txt")
 }
 
 uuid(){ has blkid && blkid -o value -s UUID "$1" 2>/dev/null | head -1; }

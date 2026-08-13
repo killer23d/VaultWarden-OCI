@@ -313,6 +313,11 @@ validate_prerequisites() {
     log_error "Docker daemon is not running or not accessible"
     return 1
   fi
+  if ! check_compose_available; then
+    log_error "Docker Compose v2 plugin is not available"
+    log_error "Install with: sudo apt install docker-compose-plugin"
+    return 1
+  fi
 
   if [ ! -f "docker-compose.yml" ]; then
     log_error "docker-compose.yml not found"
@@ -348,96 +353,16 @@ validate_runtime_permissions() {
 
 
 # Run check_age_key_health() before any SOPS invocation so a corrupt,
-# missing, or wrong-permissions Age key produces a clear actionable error
-# instead of an opaque decryption failure.
-#
-# If the configured key path does not exist but the repo-local key is present
-# and healthy, override the key path for this process only and print a
-# prominent advisory so the operator fixes .env before the next restart.
+# missing, or wrong-permissions canonical key produces an actionable error.
 check_age_key_health_preflight() {
-  local configured_key="${SOPS_AGE_KEY_FILE:-}"
-
-  if [[ -z "$configured_key" ]]; then
-    configured_key="${HOME:-/root}/.config/sops/age/keys.txt"
-  fi
-
-  if check_age_key_health "$configured_key" 2>/dev/null; then
+  local canonical_key="/etc/vaultwarden/age-key.txt"
+  if check_age_key_health "$canonical_key" 2>/dev/null; then
+    SOPS_AGE_KEY_FILE="$canonical_key"
+    export SOPS_AGE_KEY_FILE
     return 0
   fi
-
-  local repo_local_key="${SCRIPT_DIR}/secrets/keys/age-key.txt"
-
-  # canonical_key resolves from AGE_KEY_FILE (set by lib/config.sh compile-time
-  # defaults). Changing AGE_KEY_FILE in .env therefore propagates to every
-  # advisory message below automatically — no script edit required.
-  local canonical_key="${AGE_KEY_FILE}"
-
-  if [[ -f "$repo_local_key" ]] && check_age_key_health "$repo_local_key" 2>/dev/null; then
-    log_warn "=========================================================="
-    log_warn "ACTION REQUIRED — Age key path mismatch detected"
-    log_warn "=========================================================="
-    log_warn "Configured path (SOPS_AGE_KEY_FILE in .env): ${configured_key}"
-    log_warn "That file does not exist or failed the health check."
-    log_warn ""
-    log_warn "A healthy repo-local key was found at: ${repo_local_key}"
-    log_warn "Using it for THIS startup only (process-scoped override)."
-    log_warn ""
-    log_warn "This is a temporary workaround. Before the next restart, do ONE of:"
-    log_warn ""
-    log_warn "  Option A — Install key to canonical system path (recommended for production):"
-    log_warn "    sudo install -d -m 700 -o root -g root /etc/vaultwarden"
-    log_warn "    sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}"
-    log_warn "    # Verify: sudo make key-health"
-    log_warn ""
-    log_warn "  Option B — Update .env to point at the repo-local key (local/dev only):"
-    log_warn "    sed -i 's|^SOPS_AGE_KEY_FILE=.*|SOPS_AGE_KEY_FILE=${repo_local_key}|' .env"
-    log_warn "    # Verify: sudo make key-health"
-    log_warn ""
-    log_warn "  Option C — Run setup again to reinstall everything cleanly:"
-    log_warn "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
-    log_warn "=========================================================="
-
-    export SOPS_AGE_KEY_FILE="$repo_local_key"
-    return 0
-  fi
-
-  log_error "Age key health check FAILED for configured path: ${configured_key}"
-  log_error ""
-  log_error "SOPS cannot decrypt secrets without a valid Age private key."
-  log_error ""
-
-  if [[ "$configured_key" == "$canonical_key" ]]; then
-    log_error "Remediation:"
-    log_error "  The canonical key file does not exist or is not readable."
-    log_error "  Re-run setup to install it:"
-    log_error "    sudo ./setup.sh install --domain <your-domain> --email <your-email>"
-    if [[ -f "$repo_local_key" ]]; then
-      log_error ""
-      log_warn "  A repo-local key was detected at: ${repo_local_key}"
-      log_warn "  If this is the correct production key, install it with:"
-      log_warn "    sudo install -d -m 700 -o root -g root /etc/vaultwarden"
-      log_warn "    sudo install -m 600 -o root -g root ${repo_local_key} ${canonical_key}"
-      log_warn "  Then run: sudo make key-health to verify before retrying startup."
-    fi
-    return 1
-  fi
-
-  log_error "  Configured key path (from .env):  ${configured_key}"
-  log_error "  Canonical production path:         ${canonical_key}"
-  log_error ""
-
-  if [[ -f "$canonical_key" ]]; then
-    log_warn "  A key exists at the canonical production path (${canonical_key})."
-    log_warn "  .env currently points elsewhere. To fix:"
-    log_warn "    1. Update SOPS_AGE_KEY_FILE in .env to: ${canonical_key}"
-    log_warn "    2. Verify with: sudo make key-health"
-    log_warn "    3. Retry: sudo make up  (or sudo ./startup.sh)"
-  else
-    log_error "  No key was found at any known path. Run: sudo ./setup.sh install --domain <your-domain> --email <your-email>"
-  fi
-
-  log_error ""
-  log_error "Run 'sudo make key-health' for a detailed key status report."
+  log_error "Age key health check FAILED: ${canonical_key}"
+  log_error "Restore the operational Age private key at ${canonical_key}, then run: sudo make key-health"
   return 1
 }
 
@@ -749,19 +674,6 @@ main() {
     show_status || true
   fi
 
-  # Re-emit the key-health advisory immediately before the final success line
-  # so it is not missed in the log stream.
-  if [[ "${SOPS_AGE_KEY_FILE:-}" == "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
-    local cfg_key
-    cfg_key=$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2- || echo "(unknown)")
-    if [[ "$cfg_key" != "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
-      log_warn "=========================================================="
-      log_warn "REMINDER: SOPS_AGE_KEY_FILE in .env (${cfg_key}) was overridden"
-      log_warn "at runtime by the repo-local key. Update .env or install"
-      log_warn "the key to ${AGE_KEY_FILE} before next restart."
-      log_warn "=========================================================="
-    fi
-  fi
 
   log_success "VaultWarden-OCI startup completed"
 

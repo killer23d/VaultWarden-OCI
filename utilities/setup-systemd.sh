@@ -16,6 +16,9 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+# shellcheck disable=SC1091
+# shellcheck source=../lib/crypto.sh
+source "${PROJECT_ROOT}/lib/crypto.sh"
 # shellcheck source=../lib/operations.sh
 source "${PROJECT_ROOT}/lib/operations.sh"
 
@@ -181,7 +184,9 @@ START POLICY SAFETY:
     --version, -V Print the VaultWarden-OCI version and exit
 
 WHAT install DOES:
-    1. Copies executable scripts to /opt/vaultwarden-scripts/ (root:root 700):
+    1. Requires and validates the operational Age key at /etc/vaultwarden/age-key.txt
+       before copying scripts, creating install paths, syncing runtime env files, or installing units.
+    2. Copies executable scripts to /opt/vaultwarden-scripts/ (root:root 700):
          startup.sh  maintenance.sh  backup.sh  restore.sh
          utilities/setup-firewall.sh
          utilities/maintenance-run.sh      utilities/maintenance-health.sh
@@ -191,15 +196,14 @@ WHAT install DOES:
          utilities/backup-run.sh           utilities/restore-run.sh
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
-    2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-    3. Copies public startup runtime assets under /opt/vaultwarden-scripts/:
+    3. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
+    4. Copies public startup runtime assets under /opt/vaultwarden-scripts/:
          docker-compose.yml  docker-compose.yml.example  secrets-schema.yaml  VERSION
          caddy/Caddyfile  caddy/Caddyfile.degraded  caddy/Dockerfile       (root:root 644)
          caddy/entrypoint.sh                                                    (root:root 755)
        Private secrets are not copied into this code bundle.
-    4. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
-       using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
-    5. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
+    5. Runs utilities/env-edit.sh sync, using repository .env as authoring input to regenerate
+       ${PROJECT_STATE_DIR}/config/install.env and /etc/vaultwarden/vaultwarden.env (root:root 600).
     6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     7. systemctl daemon-reload
     8. Installs a Docker lifecycle drop-in so firewall reconciliation and startup rerun after dockerd restarts
@@ -534,6 +538,22 @@ _remove_docker_runtime_dropin() {
     fi
 }
 
+_preflight_canonical_age_key() {
+    log_info "Preflighting canonical Age key at $AGE_KEY_DEST ..."
+    if [[ ! -f "$AGE_KEY_DEST" || ! -r "$AGE_KEY_DEST" ]]; then
+        log_error "Canonical Age key is missing or unreadable: $AGE_KEY_DEST"
+        log_error "Install the operational key at /etc/vaultwarden/age-key.txt, then rerun this command."
+        return 1
+    fi
+    if ! check_age_key "$AGE_KEY_DEST"; then
+        log_error "Canonical Age key failed validation: $AGE_KEY_DEST"
+        log_error "Restore a valid operational key at /etc/vaultwarden/age-key.txt, then rerun this command."
+        return 1
+    fi
+    log_success "Canonical Age key preflight passed: $AGE_KEY_DEST"
+    return 0
+}
+
 _sync_runtime_environment_files() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would run utilities/env-edit.sh sync to regenerate install.env and $ENV_FILE"
@@ -598,6 +618,8 @@ install_units() {
             return 1
         fi
     done
+
+    _preflight_canonical_age_key || return 1
 
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
     _run mkdir -p "$OPT_SCRIPTS_DIR"
@@ -675,39 +697,14 @@ install_units() {
         chmod 755 "$OPT_SCRIPTS_DIR"
     fi
 
-    # Install the age key into /etc/vaultwarden/age-key.txt because
-    # ProtectHome=yes makes /home/ubuntu/ inaccessible to service processes.
-    log_info "Installing age key to $AGE_KEY_DEST ..."
-    local age_key_src="$PROJECT_ROOT/secrets/keys/age-key.txt"
+    # The read-only preflight above proved the operational identity before
+    # any install-path mutation. Preserve the existing ownership repair only after
+    # that safety boundary has passed.
     if [[ "$DRY_RUN" == "true" ]]; then
-        if [[ -f "$age_key_src" ]]; then
-            log_info "[DRY RUN] Would copy $age_key_src -> $AGE_KEY_DEST (600 root:root)"
-            log_info "[DRY RUN] sync-env would set SOPS_AGE_KEY_FILE=$AGE_KEY_DEST in generated runtime env files"
-        else
-            log_warn "[DRY RUN] Age key source not found: $age_key_src"
-            if [[ -f "$AGE_KEY_DEST" ]]; then
-                log_info "[DRY RUN] Key already at $AGE_KEY_DEST -- sync-env would correct SOPS_AGE_KEY_FILE"
-            else
-                log_warn "[DRY RUN] Install the key, then run sync-env to refresh generated runtime env files."
-            fi
-        fi
+        log_info "[DRY RUN] Would validate root:root 600 on $AGE_KEY_DEST"
     else
-        if [[ -f "$age_key_src" ]]; then
-            install -m 600 -o root -g root "$age_key_src" "$AGE_KEY_DEST"
-            fix_known_path_permissions "$AGE_KEY_DEST"
-            log_success "Installed age key: $AGE_KEY_DEST (root:root 600)"
-        else
-            log_warn "Age key source not found: $age_key_src"
-            if [[ -f "$AGE_KEY_DEST" ]]; then
-                fix_known_path_permissions "$AGE_KEY_DEST"
-                log_info "  Key already present at $AGE_KEY_DEST -- no copy needed."
-            else
-                log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
-                log_warn "After placing your age-key.txt, run:"
-                log_warn "  sudo install -m 600 -o root -g root /path/to/age-key.txt $AGE_KEY_DEST"
-                log_warn "  sudo utilities/setup-systemd.sh install"
-            fi
-        fi
+        fix_known_path_permissions "$AGE_KEY_DEST"
+        log_success "Canonical age key present: $AGE_KEY_DEST"
     fi
 
     local rclone_dest="$ENV_DIR/rclone.conf"
@@ -883,7 +880,7 @@ install_units() {
     log_info "  Test run:  sudo systemctl start vaultwarden-health.service"
     log_info "  View logs: journalctl -u vaultwarden-health.service -n 50"
     log_info "  Env file:  $ENV_FILE  (add EMAIL_PROVIDER credentials here)"
-    log_info "  Age key:   $AGE_KEY_DEST  (copied from secrets/keys/age-key.txt)"
+    log_info "  Age key:   $AGE_KEY_DEST  (canonical operational key)"
 }
 
 remove_units() {
@@ -1253,7 +1250,7 @@ validate_installation() {
     if [[ ! -f "$AGE_KEY_DEST" ]]; then
         log_error "  MISSING: $AGE_KEY_DEST"
         log_error "  Backup/health services cannot encrypt/decrypt without this key."
-        log_error "  Fix: sudo utilities/setup-systemd.sh install  (requires secrets/keys/age-key.txt)"
+        log_error "  Fix: restore the operational key at $AGE_KEY_DEST, then rerun install"
         (( errors++ )) || true
     else
         _validate_root_owned_path "$AGE_KEY_DEST" "600" "file"

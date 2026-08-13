@@ -319,28 +319,7 @@ _acquire_backup_guard() {
 
 
 _resolve_age_key() {
-    local candidates=(
-        "${SOPS_AGE_KEY_FILE:-}"
-        "/etc/vaultwarden/age-key.txt"
-        "$SCRIPT_DIR/secrets/keys/age-key.txt"
-    )
-    for candidate in "${candidates[@]}"; do
-        [[ -z "$candidate" ]] && continue
-        [[ "$candidate" != /* && ! -f "$candidate" ]] && continue
-        if [[ -f "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-    for candidate in "${candidates[@]}"; do
-        [[ -z "$candidate" ]] && continue
-        if [[ "$candidate" == /* ]]; then
-            echo "$candidate"
-            return 1
-        fi
-    done
-    echo "/etc/vaultwarden/age-key.txt"
-    return 1
+    resolve_age_key_path
 }
 
 _default_backup_dir() { vw_default_backup_dir; }
@@ -1986,7 +1965,7 @@ main() {
         local age_key_file
         age_key_file=$(_resolve_age_key) || {
             log_error "Age key file not found at: ${age_key_file:-/etc/vaultwarden/age-key.txt}"
-            log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
+            log_error "Restore the operational Age key at /etc/vaultwarden/age-key.txt, then re-run the backup."
             exit 1
         }
 
@@ -2131,7 +2110,7 @@ main() {
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
         log_error "Age key file not found at: ${age_key_file:-/etc/vaultwarden/age-key.txt}"
-        log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
+        log_error "Restore the operational Age key at /etc/vaultwarden/age-key.txt, then re-run the backup."
         exit 1
     }
 

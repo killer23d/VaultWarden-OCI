@@ -403,7 +403,7 @@ PROBE
 )
     grep -q "PROJECT_STATE_DIR=$override_state" <<< "$output" || fail "caller PROJECT_STATE_DIR override lost: $output"
     grep -q 'DATA_VOLUME_MOUNT=/caller-mount' <<< "$output" || fail "caller DATA_VOLUME_MOUNT override lost: $output"
-    grep -q 'SOPS_AGE_KEY_FILE=/caller/key.txt' <<< "$output" || fail "caller SOPS_AGE_KEY_FILE override lost: $output"
+    grep -q 'SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt' <<< "$output" || fail "caller SOPS_AGE_KEY_FILE redirected canonical operational key: $output"
     grep -q 'BACKUP_DIR=/caller/backups' <<< "$output" || fail "caller BACKUP_DIR override lost: $output"
     grep -q 'TZ=America/Vancouver' <<< "$output" || fail "caller TZ override lost: $output"
     grep -q 'RCLONE_REMOTE_NAME=caller-remote' <<< "$output" || fail "caller RCLONE_REMOTE_NAME override lost: $output"
@@ -586,7 +586,7 @@ test_dns_optional_and_strict_modes() {
 }
 
 run_test 'repo .env without PROJECT_STATE_DIR falls through to installed environment' test_config_falls_through_empty_repo_state
-run_test 'supported caller overrides survive while SECRETS_FILE remains canonical' test_config_caller_overrides_keep_canonical_secrets_path
+run_test 'supported caller overrides survive while Age and secrets paths remain canonical' test_config_caller_overrides_keep_canonical_secrets_path
 run_test 'unreadable repository .env does not block installed runtime configuration' test_unreadable_repo_allows_installed_environment
 run_test 'unreadable selected canonical environment fails explicitly' test_unreadable_selected_environment_fails
 run_test 'Make, dashboard, and backup CLI share installed configuration' test_operator_interfaces_share_installed_configuration

@@ -417,7 +417,7 @@ run_root_env_capture() {
 
 prepare_systemd_install_repo() {
     local repo="$1" state="$2"
-    mkdir -p "$repo/secrets/keys"
+    mkdir -p "$repo" "$state/config"
     cp -a "$ROOT/lib" "$ROOT/utilities" "$ROOT/systemd" "$ROOT/caddy" "$repo/"
     cp "$ROOT/startup.sh" "$ROOT/maintenance.sh" "$ROOT/backup.sh" "$ROOT/restore.sh" \
        "$ROOT/docker-compose.yml.example" "$ROOT/secrets-schema.yaml" "$ROOT/VERSION" "$repo/"
@@ -431,11 +431,74 @@ DATA_VOLUME_MOUNT=$state
 SOPS_AGE_KEY_FILE=
 EOF_ENV
     chmod 600 "$repo/.env"
-    cat > "$repo/secrets/keys/age-key.txt" <<'EOF_KEY'
-# public key: age1systemdinventory0000000000000000000000000000000000000
-AGE-SECRET-KEY-1SYSTEMDINVENTORY
+    cat > "$state/config/install.env" <<EOF_RUNTIME
+DOMAIN=https://systemd-inventory.example.test
+ADMIN_EMAIL=admin@example.test
+PROJECT_STATE_DIR=$state
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=$state
+SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt
+EOF_RUNTIME
+    chmod 600 "$state/config/install.env"
+}
+
+write_fake_age_contract() {
+    local key_file="$1" bin="$2"
+    mkdir -p "$(dirname "$key_file")" "$bin"
+    cat > "$key_file" <<'EOF_KEY'
+# public key: age1systemdtest000000000000000000000000000000000000000000000000
+AGE-SECRET-KEY-1SYSTEMDTEST
 EOF_KEY
-    chmod 600 "$repo/secrets/keys/age-key.txt"
+    chmod 600 "$key_file"
+    cat > "$bin/age" <<'EOF_AGE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-r" ]]; then
+    out=""
+    while (($#)); do
+        case "$1" in
+            -o) out="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [[ -n "$out" ]] || exit 2
+    cat > "$out"
+    exit 0
+fi
+if [[ "${1:-}" == "-d" ]]; then
+    cat "${@: -1}"
+    exit 0
+fi
+exit 2
+EOF_AGE
+    chmod +x "$bin/age"
+}
+
+test_systemd_missing_canonical_age_key_fails_before_install_mutation() {
+    if ! can_run_systemd_behavioral_tests; then
+        printf 'SKIP: systemd missing-key install test requires Linux root or passwordless sudo\n'
+        return 0
+    fi
+
+    local repo="$TMP/missing-key-repo" state="$TMP/missing-key-state"
+    local unit_dir="$TMP/missing-key-units" opt_dir="$TMP/missing-key-opt" env_dir="$TMP/missing-key-etc"
+    local out="$TMP/missing-key.out"
+    prepare_systemd_install_repo "$repo" "$state"
+
+    if run_root_env_capture "$out" \
+        PROJECT_STATE_DIR="$state" \
+        VW_CONFIG_INSTALLED_ENV_FILE="$env_dir/vaultwarden.env" \
+        VW_SYSTEMD_UNIT_DEST_DIR="$unit_dir" \
+        VW_SYSTEMD_OPT_SCRIPTS_DIR="$opt_dir" \
+        VW_SYSTEMD_ENV_DIR="$env_dir" \
+        bash "$repo/utilities/setup-systemd.sh" install --no-enable-now; then
+        fail "systemd install succeeded without the canonical Age key"
+    fi
+
+    grep -Fq "Canonical Age key is missing or unreadable: $env_dir/age-key.txt" "$out" \
+        || { cat "$out" >&2; fail "missing canonical Age key was not reported"; }
+    [[ ! -e "$unit_dir" && ! -e "$opt_dir" && ! -e "$env_dir" ]] \
+        || fail "missing-key preflight mutated install paths"
 }
 
 test_systemd_missing_source_and_dry_run_behavior() {
@@ -465,7 +528,10 @@ test_systemd_missing_source_and_dry_run_behavior() {
         || fail "missing-source preflight mutated installation paths"
 
     cp "$ROOT/utilities/backup-run.sh" "$repo/utilities/backup-run.sh"
+    local age_bin="$TMP/inventory-age-bin"
+    write_fake_age_contract "$env_dir/age-key.txt" "$age_bin"
     run_root_env_capture "$dry_out" \
+        PATH="$age_bin:$PATH" \
         PROJECT_STATE_DIR="$state" \
         VW_CONFIG_INSTALLED_ENV_FILE="$env_dir/vaultwarden.env" \
         VW_SYSTEMD_UNIT_DEST_DIR="$unit_dir" \
@@ -494,8 +560,10 @@ test_systemd_missing_source_and_dry_run_behavior() {
         || fail "template unit was directly enabled or started"
     grep -Fq 'Boot-only mode — skipping per-unit ReadWritePaths drop-ins.' "$dry_out" \
         || fail "boot-only install behavior changed"
-    [[ ! -e "$unit_dir" && ! -e "$opt_dir" && ! -e "$env_dir" ]] \
-        || fail "dry-run mutated installation paths"
+    [[ ! -e "$unit_dir" && ! -e "$opt_dir" ]] \
+        || fail "dry-run mutated unit or /opt installation paths"
+    [[ -f "$env_dir/age-key.txt" && "$(find "$env_dir" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1 ]] \
+        || fail "dry-run mutated the pre-existing canonical-key directory"
 }
 
 write_healthy_systemctl_mock() {
@@ -751,9 +819,10 @@ run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dro
 run_test 'systemd inventories are canonical and keep explicit exceptions' test_systemd_inventories_are_canonical
 run_test 'startup service uses root-owned installed runtime bundle' test_startup_runtime_bundle_contract
 run_test 'background priority applies only to heavy scheduled services' test_background_priority_contract
+run_test 'systemd missing canonical Age key fails before install mutation' test_systemd_missing_canonical_age_key_fails_before_install_mutation
 run_test 'systemd missing source fails before mutation and dry-run stays read-only' test_systemd_missing_source_and_dry_run_behavior
 run_test 'systemd validation fails on stale installed runtime artifacts' test_systemd_validation_fails_on_stale_installed_runtime
-[[ "$TESTS_RUN" -eq 11 ]] || fail "expected 11 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 12 ]] || fail "expected 12 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
 
 )

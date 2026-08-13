@@ -2535,6 +2535,11 @@ if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   tar --exclude='./.git' --exclude='./test-results' --exclude='./vw_tmp.*' \
     -cf - . | tar -xf - -C "$direct_fixture"
 
+  # Protected-handoff fixture only: redirect the copied setup script so this test never writes a synthetic key into the runner real /etc.
+  direct_setup="$direct_fixture/utilities/setup-secrets.sh"
+  grep -Fxq '    local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"' "$direct_setup" || fail "copied setup-secrets canonical key declaration missing"
+  sed -i 's|^    local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"$|    local AGE_KEY_FILE="${VW_TEST_AGE_KEY_FILE:?}"|' "$direct_setup"
+
   direct_bin="$direct_tmp/bin"
   direct_state="$direct_tmp/state"
   success_dir="$direct_tmp/recovery-success"

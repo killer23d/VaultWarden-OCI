@@ -21,15 +21,9 @@ _load_notify_env() {
     if load_project_environment 2>/dev/null; then
         return 0
     fi
-
-    if load_env_file /etc/vaultwarden/vaultwarden.env 2>/dev/null; then
-        resolve_secrets_file
-        return 0
-    fi
-
-    log_warn "No VaultWarden environment file found; using process environment only."
-    resolve_secrets_file
-    return 0
+    log_error "Runtime environment authority is unavailable."
+    log_error "Run: sudo make sync-env"
+    return 1
 }
 
 _sanitize_unit_name() {
@@ -46,7 +40,7 @@ _write_delivery_sentinel() {
 
 main() {
     require_root "$@"
-    _load_notify_env || log_warn "Could not load /etc/vaultwarden/vaultwarden.env; continuing with defaults."
+    _load_notify_env || return 1
 
     PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-}"
     if [[ -z "$PROJECT_STATE_DIR" ]]; then

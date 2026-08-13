@@ -560,11 +560,7 @@ HELP
 
     _ss_prepare_auto_handoff || return 1
 
-    local AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
-    if [[ "$AGE_KEY_FILE" != /* ]]; then
-        log_error "AGE_KEY_FILE must be an absolute path: $AGE_KEY_FILE"
-        return 1
-    fi
+    local AGE_KEY_FILE="/etc/vaultwarden/age-key.txt"
 
     ensure_prerequisites() {
         log_info "Checking prerequisites..."
@@ -2512,8 +2508,8 @@ EOF
     # The canonical path (/etc/vaultwarden/age-key.txt) belongs in the
     # installed runtime config at ${PROJECT_STATE_DIR}/config/install.env,
     # which setup-env.sh refresh_state_artifacts writes during environment setup.
-    # Repo .env must stay blank so the resolver can pick the correct readable
-    # key path depending on caller context.
+    # Repo .env stays authoring-only; operational Age-key custody is fixed at
+    # /etc/vaultwarden/age-key.txt.
     local env_file="${PROJECT_ROOT}/.env"
     if [[ -f "$env_file" ]]; then
         local temp_env env_uid env_gid env_mode real_user real_group
