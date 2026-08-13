@@ -18,9 +18,7 @@ jobs:
           fetch-depth: 0
 
       - name: Apply bounded review fixes
-        run: |
-          sed -i 's/text.count(stale) != 2/text.count(stale) != 1/' .github/pr8_review_patch.py
-          python3 .github/pr8_review_patch.py
+        run: python3 .github/pr8_review_patch2.py
 
       - name: Install test dependencies
         run: |
@@ -83,6 +81,6 @@ jobs:
       - name: Remove temporary helpers
         if: success()
         run: |
-          git rm .github/workflows/pr8-review-fixes.yml .github/pr8_review_patch.py
+          git rm .github/workflows/pr8-review-fixes.yml .github/pr8_review_patch.py .github/pr8_review_patch2.py
           git commit -m "chore: remove PR8 review helpers"
           git push origin HEAD:pr8-runtime-authority-age-custody
