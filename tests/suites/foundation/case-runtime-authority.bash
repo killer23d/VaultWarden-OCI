@@ -62,7 +62,6 @@ chmod 600 "$tmp/state/config/install.env"
     [[ "${RUNTIME_ONLY:-}" == "installed-ok" ]]
     [[ "${SOPS_AGE_KEY_FILE:-}" == "/etc/vaultwarden/age-key.txt" ]]
 ) || fail "persistent runtime authority or canonical Age-key override failed"
-\
 pass "authoring and strict runtime environment behavior"
 
 custom_state="$tmp/custom-state"
