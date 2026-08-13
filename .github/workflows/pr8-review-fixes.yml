@@ -20,28 +20,7 @@ jobs:
       - name: Apply bounded review fixes
         run: |
           python3 .github/pr8_review_patch2.py
-          sed -i '/^setup_storage=/d' tests/suites/foundation/case-runtime-authority.bash
-          sed -i '/^DOMAIN=https:\/\/dns-authority\.example\.test$/a PUID=1000\nPGID=1000' tests/suites/foundation/case-runtime-authority.bash
-          sed -i 's#Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt#Restore the operational Age key at /etc/vaultwarden/age-key.txt, then re-run the backup.#g' utilities/backup-run.sh
-          sed -i 's/_ss_load_runtime_environment/_ss_load_environment/g' tests/suites/foundation/case-storage-setup.bash
-          sed -i 's/"$metadata_line" -lt "$load_line" && "$load_line" -lt "$outer_parse_line"/"$metadata_line" -lt "$outer_parse_line" \&\& "$outer_parse_line" -lt "$load_line"/' tests/suites/foundation/case-storage-setup.bash
-          sed -i 's/"$outer_parse_line" -lt "$parse_line"/"$load_line" -lt "$parse_line"/' tests/suites/foundation/case-storage-setup.bash
-          sed -i 's/dispatch metadata, load env defaults, parse outer CLI/dispatch metadata, parse outer CLI, load mode-appropriate env defaults/' tests/suites/foundation/case-storage-setup.bash
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('tests/suites/foundation/case-storage-setup.bash')
-          lines = p.read_text().splitlines()
-          swaps = 0
-          for i in range(len(lines) - 2):
-              if (lines[i].startswith('_ss_dispatch_metadata ')
-                      and lines[i + 1] == '_ss_load_environment'
-                      and lines[i + 2].startswith('_parse_outer_args ')):
-                  lines[i + 1], lines[i + 2] = lines[i + 2], lines[i + 1]
-                  swaps += 1
-          if swaps != 3:
-              raise SystemExit(f'case-storage-setup: expected 3 precedence probe swaps, found {swaps}')
-          p.write_text('\n'.join(lines) + '\n')
-          PY
+          python3 .github/pr8_review_patch3.py
 
       - name: Install test dependencies
         run: |
@@ -107,6 +86,6 @@ jobs:
       - name: Remove temporary helpers
         if: success()
         run: |
-          git rm .github/workflows/pr8-review-fixes.yml .github/pr8_review_patch.py .github/pr8_review_patch2.py
+          git rm .github/workflows/pr8-review-fixes.yml .github/pr8_review_patch.py .github/pr8_review_patch2.py .github/pr8_review_patch3.py
           git commit -m "chore: remove PR8 review helpers"
           git push origin HEAD:pr8-runtime-authority-age-custody
