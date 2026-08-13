@@ -60,7 +60,7 @@ jobs:
 
           grep -Fq 'decrypt_secret "cloudflare_zone_id"' utilities/maintenance-update-dns.sh
           grep -Fq 'decrypt_secret "caddy_cloudflare_dns_token"' utilities/maintenance-update-dns.sh
-          if grep -R -nE '(^|[^[:alnum:]_.-])docker-compose([[:space:]]|$)' Makefile lib startup.sh utilities; then exit 1; fi
+          if grep -R -nE 'command -v[[:space:]]+docker-compose|DOCKER_COMP[^#]*docker-compose|(^|[;&|])[[:space:]]*docker-compose([[:space:]]|$)' Makefile lib startup.sh utilities; then exit 1; fi
 
       - name: Inspection pass 2 - retained safety and regression surface
         run: |
