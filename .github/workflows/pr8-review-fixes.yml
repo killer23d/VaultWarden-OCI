@@ -23,36 +23,10 @@ jobs:
           sed -i '/^setup_storage=/d' tests/suites/foundation/case-runtime-authority.bash
           sed -i '/^DOMAIN=https:\/\/dns-authority\.example\.test$/a PUID=1000\nPGID=1000' tests/suites/foundation/case-runtime-authority.bash
           sed -i 's#Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt#Restore the operational Age key at /etc/vaultwarden/age-key.txt, then re-run the backup.#g' utilities/backup-run.sh
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('tests/suites/foundation/case-storage-setup.bash')
-          text = p.read_text()
-          old = '''metadata_line="$(grep -n '^[[:space:]]*_ss_dispatch_metadata ' utilities/setup-storage.sh | cut -d: -f1)"
-          load_line="$(grep -n '^[[:space:]]*_ss_load_runtime_environment$' utilities/setup-storage.sh | cut -d: -f1)"
-          outer_parse_line="$(grep -n '^[[:space:]]*_parse_outer_args ' utilities/setup-storage.sh | cut -d: -f1)"
-          parse_line="$(grep -n '^[[:space:]]*_mv_parse_args ' utilities/setup-storage.sh | cut -d: -f1)"
-          resolve_line="$(grep -n '^[[:space:]]*_mv_resolve_args$' utilities/setup-storage.sh | cut -d: -f1)"
-          execute_line="$(grep -n '^[[:space:]]*migrate_mode_main$' utilities/setup-storage.sh | cut -d: -f1)"
-          [[ -n "$metadata_line" && -n "$load_line" && -n "$outer_parse_line" && -n "$resolve_line" && -n "$execute_line" \
-              && "$metadata_line" -lt "$load_line" && "$load_line" -lt "$outer_parse_line" \
-              && "$outer_parse_line" -lt "$parse_line" && "$parse_line" -lt "$resolve_line" && "$resolve_line" -lt "$execute_line" ]] \
-              || fail 'setup-storage must dispatch metadata, load env defaults, parse outer CLI, parse migration once, resolve, then execute'
-          '''
-          new = '''metadata_line="$(grep -n '^[[:space:]]*_ss_dispatch_metadata ' utilities/setup-storage.sh | cut -d: -f1)"
-          outer_parse_line="$(grep -n '^[[:space:]]*_parse_outer_args ' utilities/setup-storage.sh | cut -d: -f1)"
-          load_line="$(grep -n '^[[:space:]]*_ss_load_environment$' utilities/setup-storage.sh | cut -d: -f1)"
-          parse_line="$(grep -n '^[[:space:]]*_mv_parse_args ' utilities/setup-storage.sh | cut -d: -f1)"
-          resolve_line="$(grep -n '^[[:space:]]*_mv_resolve_args$' utilities/setup-storage.sh | cut -d: -f1)"
-          execute_line="$(grep -n '^[[:space:]]*migrate_mode_main$' utilities/setup-storage.sh | cut -d: -f1)"
-          [[ -n "$metadata_line" && -n "$load_line" && -n "$outer_parse_line" && -n "$resolve_line" && -n "$execute_line" \
-              && "$metadata_line" -lt "$outer_parse_line" && "$outer_parse_line" -lt "$load_line" \
-              && "$load_line" -lt "$parse_line" && "$parse_line" -lt "$resolve_line" && "$resolve_line" -lt "$execute_line" ]] \
-              || fail 'setup-storage must dispatch metadata, parse outer CLI, load mode-appropriate env defaults, parse migration once, resolve, then execute'
-          '''
-          if text.count(old) != 1:
-              raise SystemExit(f'case-storage-setup: expected one old ordering block, found {text.count(old)}')
-          p.write_text(text.replace(old, new, 1))
-          PY
+          sed -i 's/_ss_load_runtime_environment\$/_ss_load_environment\$/' tests/suites/foundation/case-storage-setup.bash
+          sed -i 's/"$metadata_line" -lt "$load_line" && "$load_line" -lt "$outer_parse_line"/"$metadata_line" -lt "$outer_parse_line" \&\& "$outer_parse_line" -lt "$load_line"/' tests/suites/foundation/case-storage-setup.bash
+          sed -i 's/"$outer_parse_line" -lt "$parse_line"/"$load_line" -lt "$parse_line"/' tests/suites/foundation/case-storage-setup.bash
+          sed -i 's/dispatch metadata, load env defaults, parse outer CLI/dispatch metadata, parse outer CLI, load mode-appropriate env defaults/' tests/suites/foundation/case-storage-setup.bash
 
       - name: Install test dependencies
         run: |
