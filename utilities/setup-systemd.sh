@@ -184,7 +184,9 @@ START POLICY SAFETY:
     --version, -V Print the VaultWarden-OCI version and exit
 
 WHAT install DOES:
-    1. Copies executable scripts to /opt/vaultwarden-scripts/ (root:root 700):
+    1. Requires and validates the operational Age key at /etc/vaultwarden/age-key.txt
+       before copying scripts, creating install paths, syncing runtime env files, or installing units.
+    2. Copies executable scripts to /opt/vaultwarden-scripts/ (root:root 700):
          startup.sh  maintenance.sh  backup.sh  restore.sh
          utilities/setup-firewall.sh
          utilities/maintenance-run.sh      utilities/maintenance-health.sh
@@ -194,15 +196,14 @@ WHAT install DOES:
          utilities/backup-run.sh           utilities/restore-run.sh
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
-    2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-    3. Copies public startup runtime assets under /opt/vaultwarden-scripts/:
+    3. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
+    4. Copies public startup runtime assets under /opt/vaultwarden-scripts/:
          docker-compose.yml  docker-compose.yml.example  secrets-schema.yaml  VERSION
          caddy/Caddyfile  caddy/Caddyfile.degraded  caddy/Dockerfile       (root:root 644)
          caddy/entrypoint.sh                                                    (root:root 755)
        Private secrets are not copied into this code bundle.
-    4. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
-       using ${PROJECT_STATE_DIR}/config/install.env or the installed runtime authority.
-    5. Requires the operational Age key at /etc/vaultwarden/age-key.txt
+    5. Runs utilities/env-edit.sh sync, using repository .env as authoring input to regenerate
+       ${PROJECT_STATE_DIR}/config/install.env and /etc/vaultwarden/vaultwarden.env (root:root 600).
     6. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
     7. systemctl daemon-reload
     8. Installs a Docker lifecycle drop-in so firewall reconciliation and startup rerun after dockerd restarts

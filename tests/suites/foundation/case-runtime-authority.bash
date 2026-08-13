@@ -62,7 +62,31 @@ chmod 600 "$tmp/state/config/install.env"
     [[ "${RUNTIME_ONLY:-}" == "installed-ok" ]]
     [[ "${SOPS_AGE_KEY_FILE:-}" == "/etc/vaultwarden/age-key.txt" ]]
 ) || fail "persistent runtime authority or canonical Age-key override failed"
+\
 pass "authoring and strict runtime environment behavior"
+
+custom_state="$tmp/custom-state"
+mkdir -p "$custom_state/config"
+printf 'PROJECT_STATE_DIR=%s\nCUSTOM_RUNTIME_ONLY=custom-state-ok\n' "$custom_state" > "$custom_state/config/install.env"
+chmod 600 "$custom_state/config/install.env"
+(
+    export PROJECT_ROOT="$tmp/repo"
+    unset PROJECT_STATE_DIR
+    export VW_CONFIG_INSTALLED_ENV_FILE="$tmp/missing-custom-installed.env"
+    source "$ROOT/lib/config.sh"
+    if load_project_environment >/dev/null 2>&1; then exit 1; fi
+    [[ -z "${CUSTOM_RUNTIME_ONLY:-}" ]]
+) || fail "runtime loader auto-discovered a non-default persistent state path without an explicit locator"
+(
+    export PROJECT_ROOT="$tmp/repo"
+    export PROJECT_STATE_DIR="$custom_state"
+    export VW_CONFIG_INSTALLED_ENV_FILE="$tmp/missing-custom-installed.env"
+    source "$ROOT/lib/config.sh"
+    load_project_environment >/dev/null
+    [[ "${PROJECT_STATE_DIR:-}" == "$custom_state" ]]
+    [[ "${CUSTOM_RUNTIME_ONLY:-}" == "custom-state-ok" ]]
+) || fail "explicit PROJECT_STATE_DIR did not recover custom persistent runtime authority when installed env was missing"
+pass "custom persistent runtime fallback requires an explicit state locator when installed env is missing"
 
 [[ "$config" == *"load_authoring_environment()"* ]] || fail "authoring loader missing"
 [[ "$config" == *"Runtime environment authority is missing."* ]] || fail "runtime missing-authority failure missing"
