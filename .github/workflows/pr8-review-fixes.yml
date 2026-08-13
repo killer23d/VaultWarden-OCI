@@ -21,6 +21,7 @@ jobs:
         run: |
           python3 .github/pr8_review_patch2.py
           sed -i '/^setup_storage=/d' tests/suites/foundation/case-runtime-authority.bash
+          sed -i '/^DOMAIN=https:\/\/dns-authority\.example\.test$/a PUID=1000\nPGID=1000' tests/suites/foundation/case-runtime-authority.bash
 
       - name: Install test dependencies
         run: |
