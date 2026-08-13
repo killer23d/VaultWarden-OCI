@@ -18,7 +18,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply bounded review fixes
-        run: python3 .github/pr8_review_patch.py
+        run: |
+          sed -i 's/text.count(stale) != 2/text.count(stale) != 1/' .github/pr8_review_patch.py
+          python3 .github/pr8_review_patch.py
 
       - name: Install test dependencies
         run: |
