@@ -18,7 +18,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply bounded review fixes
-        run: python3 .github/pr8_review_patch2.py
+        run: |
+          python3 .github/pr8_review_patch2.py
+          sed -i '/^setup_storage=/d' tests/suites/foundation/case-runtime-authority.bash
 
       - name: Install test dependencies
         run: |
