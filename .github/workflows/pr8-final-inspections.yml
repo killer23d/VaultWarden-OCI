@@ -69,7 +69,7 @@ jobs:
           git diff --quiet "$REVIEW_BASE" HEAD -- caddy/entrypoint.sh lib/operations.sh utilities/restore-run.sh utilities/setup-secrets.sh utilities/maintenance-health.sh utilities/maintenance-update-dns.sh
 
           grep -Fq 'SQLite Online Backup API failed' utilities/backup-run.sh
-          grep -Fq '_restart_vaultwarden_after_offline_fallback' utilities/backup-run.sh
+          grep -Fq '_db_snapshot_restart_if_needed' utilities/backup-run.sh
           grep -Fq 'CADDY_DEGRADED=true' caddy/entrypoint.sh
           grep -Fq 'Caddyfile.degraded' caddy/entrypoint.sh
           grep -Fq 'flock -n -E 75' lib/operations.sh
