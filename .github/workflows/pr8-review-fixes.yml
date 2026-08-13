@@ -1,4 +1,5 @@
 name: PR8 review fixes
+# Temporary validation helper; self-removes only after the full gate passes.
 
 on:
   push:
