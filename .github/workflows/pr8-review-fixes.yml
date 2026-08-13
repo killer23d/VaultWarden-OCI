@@ -22,6 +22,7 @@ jobs:
           python3 .github/pr8_review_patch2.py
           sed -i '/^setup_storage=/d' tests/suites/foundation/case-runtime-authority.bash
           sed -i '/^DOMAIN=https:\/\/dns-authority\.example\.test$/a PUID=1000\nPGID=1000' tests/suites/foundation/case-runtime-authority.bash
+          sed -i 's#Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt#Restore the operational Age key at /etc/vaultwarden/age-key.txt, then re-run the backup.#g' utilities/backup-run.sh
 
       - name: Install test dependencies
         run: |
