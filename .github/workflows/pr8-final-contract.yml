@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   patch-validate:
-    if: github.event.head_commit.message != 'docs: correct runtime authority recovery contract'
+    if: "${{ github.event.head_commit.message != 'docs: correct runtime authority recovery contract' }}"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
