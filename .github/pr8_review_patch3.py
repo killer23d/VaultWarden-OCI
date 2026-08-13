@@ -10,8 +10,8 @@ def replace_once(path, old, new):
     p.write_text(text.replace(old, new, 1))
 
 
-# The mode-only metadata pass already establishes _SS_MODE without loading env.
-# Keep environment defaults before the full CLI parse so explicit CLI values win.
+# The metadata-only pass establishes _SS_MODE without loading environment data.
+# Load defaults next, then parse the full CLI so explicit operator values win.
 replace_once(
     "utilities/setup-storage.sh",
     '''main() {
@@ -34,36 +34,34 @@ replace_once(
 p = Path("tests/suites/foundation/case-runtime-authority.bash")
 text = p.read_text()
 text = text.replace('setup_storage="$(cat utilities/setup-storage.sh)"\n', '', 1)
-replace = '''DOMAIN=https://dns-authority.example.test
+old_dns = '''DOMAIN=https://dns-authority.example.test
 UPDATE_DNS=true
 DNS_UPDATE_REQUIRED=true
 '''
-replacement = '''DOMAIN=https://dns-authority.example.test
+new_dns = '''DOMAIN=https://dns-authority.example.test
 PUID=1000
 PGID=1000
 UPDATE_DNS=true
 DNS_UPDATE_REQUIRED=true
 '''
-if text.count(replace) != 1:
-    raise SystemExit(f"case-runtime-authority: DNS env marker count {text.count(replace)}")
-text = text.replace(replace, replacement, 1)
-old_order = '''storage_parse_pos="$(grep -n '    _parse_outer_args "$@"' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
-storage_load_pos="$(grep -n '    _ss_load_environment' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
-[[ -n "$storage_parse_pos" && -n "$storage_load_pos" && "$storage_parse_pos" -lt "$storage_load_pos" ]] \
-    || fail "setup-storage must resolve setup/runtime mode before choosing an environment loader"
-pass "setup-storage first-install path uses authoring authority without runtime fallback noise"
-'''
-new_order = '''storage_metadata_pos="$(grep -n '    _ss_dispatch_metadata "$@"' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
-storage_load_pos="$(grep -n '    _ss_load_environment' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
-storage_parse_pos="$(grep -n '    _parse_outer_args "$@"' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
-[[ -n "$storage_metadata_pos" && -n "$storage_load_pos" && -n "$storage_parse_pos" \
-    && "$storage_metadata_pos" -lt "$storage_load_pos" && "$storage_load_pos" -lt "$storage_parse_pos" ]] \
-    || fail "setup-storage must resolve mode metadata, load mode-appropriate defaults, then let CLI parsing win"
-pass "setup-storage first-install path uses authoring authority without runtime fallback noise"
-'''
-if text.count(old_order) != 1:
-    raise SystemExit(f"case-runtime-authority: storage ordering marker count {text.count(old_order)}")
-p.write_text(text.replace(old_order, new_order, 1))
+if text.count(old_dns) != 1:
+    raise SystemExit(f"case-runtime-authority: DNS env marker count {text.count(old_dns)}")
+text = text.replace(old_dns, new_dns, 1)
+
+lines = text.splitlines()
+try:
+    start = next(i for i, line in enumerate(lines) if line.startswith('storage_parse_pos='))
+    end = next(i for i in range(start, len(lines)) if lines[i] == 'pass "setup-storage first-install path uses authoring authority without runtime fallback noise"')
+except StopIteration as exc:
+    raise SystemExit("case-runtime-authority: storage ordering block not found") from exc
+lines[start:end + 1] = [
+    'storage_metadata_pos="$(grep -n \'    _ss_dispatch_metadata "$@"\' utilities/setup-storage.sh | head -1 | cut -d: -f1)"',
+    'storage_load_pos="$(grep -n \'    _ss_load_environment\' utilities/setup-storage.sh | head -1 | cut -d: -f1)"',
+    'storage_parse_pos="$(grep -n \'    _parse_outer_args "$@"\' utilities/setup-storage.sh | head -1 | cut -d: -f1)"',
+    '[[ -n "$storage_metadata_pos" && -n "$storage_load_pos" && -n "$storage_parse_pos" && "$storage_metadata_pos" -lt "$storage_load_pos" && "$storage_load_pos" -lt "$storage_parse_pos" ]] || fail "setup-storage must resolve mode metadata, load mode-appropriate defaults, then let CLI parsing win"',
+    'pass "setup-storage first-install path uses authoring authority without runtime fallback noise"',
+]
+p.write_text('\n'.join(lines) + '\n')
 
 # Both backup branches must use canonical-key remediation. patch2 fixes one exact
 # indentation variant; replace any remaining copy regardless of indentation.
