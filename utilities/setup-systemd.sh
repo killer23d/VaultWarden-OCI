@@ -16,6 +16,9 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+# shellcheck disable=SC1091
+# shellcheck source=../lib/crypto.sh
+source "${PROJECT_ROOT}/lib/crypto.sh"
 # shellcheck source=../lib/operations.sh
 source "${PROJECT_ROOT}/lib/operations.sh"
 
@@ -534,6 +537,22 @@ _remove_docker_runtime_dropin() {
     fi
 }
 
+_preflight_canonical_age_key() {
+    log_info "Preflighting canonical Age key at $AGE_KEY_DEST ..."
+    if [[ ! -f "$AGE_KEY_DEST" || ! -r "$AGE_KEY_DEST" ]]; then
+        log_error "Canonical Age key is missing or unreadable: $AGE_KEY_DEST"
+        log_error "Install the operational key at /etc/vaultwarden/age-key.txt, then rerun this command."
+        return 1
+    fi
+    if ! check_age_key "$AGE_KEY_DEST"; then
+        log_error "Canonical Age key failed validation: $AGE_KEY_DEST"
+        log_error "Restore a valid operational key at /etc/vaultwarden/age-key.txt, then rerun this command."
+        return 1
+    fi
+    log_success "Canonical Age key preflight passed: $AGE_KEY_DEST"
+    return 0
+}
+
 _sync_runtime_environment_files() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would run utilities/env-edit.sh sync to regenerate install.env and $ENV_FILE"
@@ -598,6 +617,8 @@ install_units() {
             return 1
         fi
     done
+
+    _preflight_canonical_age_key || return 1
 
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
     _run mkdir -p "$OPT_SCRIPTS_DIR"
@@ -675,18 +696,14 @@ install_units() {
         chmod 755 "$OPT_SCRIPTS_DIR"
     fi
 
-    # The operational Age key is provisioned directly at its canonical path.
-    log_info "Checking canonical age key at $AGE_KEY_DEST ..."
-    if [[ -f "$AGE_KEY_DEST" ]]; then
-        if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would validate root:root 600 on $AGE_KEY_DEST"
-        else
-            fix_known_path_permissions "$AGE_KEY_DEST"
-            log_success "Canonical age key present: $AGE_KEY_DEST"
-        fi
+    # The read-only preflight above proved the operational identity before
+    # any install-path mutation. Preserve the existing ownership repair only after
+    # that safety boundary has passed.
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would validate root:root 600 on $AGE_KEY_DEST"
     else
-        log_warn "Canonical Age key is missing: $AGE_KEY_DEST"
-        log_warn "Install the correct operational key there, then rerun this command."
+        fix_known_path_permissions "$AGE_KEY_DEST"
+        log_success "Canonical age key present: $AGE_KEY_DEST"
     fi
 
     local rclone_dest="$ENV_DIR/rclone.conf"

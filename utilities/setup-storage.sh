@@ -50,16 +50,24 @@ _ss_cleanup() {
 }
 trap '_ss_cleanup' EXIT
 
-_ss_load_runtime_environment() {
+_ss_load_environment() {
     local installed_env="${VW_CONFIG_INSTALLED_ENV_FILE:-/etc/vaultwarden/vaultwarden.env}"
-    if [[ -f "${PROJECT_ROOT}/.env" || -f "${installed_env}" || -f "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env" ]]; then
-        load_project_environment || {
-            # setup-storage also supports first-run bootstrapping before runtime env exists.
+    local persistent_env="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env"
+
+    case "${_SS_MODE}" in
+        setup)
+            # First-install storage deliberately consumes the authoring input.
+            # Do not probe runtime authority and then fall back to repo .env.
             if [[ -f "${PROJECT_ROOT}/.env" ]]; then
-                load_env_file "${PROJECT_ROOT}/.env" || true
+                load_authoring_environment || return 1
             fi
-        }
-    fi
+            ;;
+        verify|migrate)
+            if [[ -f "${installed_env}" || -f "${persistent_env}" ]]; then
+                load_project_environment || return 1
+            fi
+            ;;
+    esac
 
     if [[ "${_SS_DATA_DEVICE_PROVIDED}" != "true" ]]; then
         _SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-${_SS_DATA_DEVICE:-}}"
@@ -550,7 +558,7 @@ _parse_setup_args() {
 
 main() {
     _ss_dispatch_metadata "$@"
-    _ss_load_runtime_environment
+    _ss_load_environment
     _parse_outer_args "$@"
 
     if [[ "${_SS_MODE}" == "migrate" ]]; then

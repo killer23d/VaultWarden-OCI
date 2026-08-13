@@ -705,7 +705,6 @@ key-escrow: ## Generate password-manager Age key escrow file
 
 key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 	$(call require-root)
-	$(call check-env-readable)
 	@./utilities/key-rotate.sh
 
 # ===========================================================================

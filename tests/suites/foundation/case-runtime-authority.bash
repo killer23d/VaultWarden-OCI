@@ -89,6 +89,71 @@ pass "normal operational Age custody is canonical"
 [[ "$dns" == *'decrypt_secret "caddy_cloudflare_dns_token"'* ]] || fail "DNS token does not use canonical SOPS resolver"
 pass "DNS mutation credentials resolve only through SOPS"
 
+
+can_run_root_fixture() {
+    (( EUID == 0 )) && return 0
+    command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1
+}
+
+run_root_fixture() {
+    if (( EUID == 0 )); then
+        env "$@"
+    else
+        sudo -n env "$@"
+    fi
+}
+
+if can_run_root_fixture; then
+    dns_repo="$tmp/dns-repo"
+    dns_state="$tmp/dns-state"
+    dns_bin="$tmp/dns-bin"
+    dns_out="$tmp/dns-broken-sops.out"
+    dns_curl_log="$tmp/dns-curl.log"
+    mkdir -p "$dns_repo/utilities" "$dns_state/config" "$dns_bin"
+    cp -a "$ROOT/lib" "$dns_repo/"
+    cp "$ROOT/utilities/maintenance-update-dns.sh" "$dns_repo/utilities/"
+    cat > "$dns_state/config/install.env" <<EOF_DNS_ENV
+PROJECT_STATE_DIR=$dns_state
+DOMAIN=https://dns-authority.example.test
+PUID=1000
+PGID=1000
+UPDATE_DNS=true
+DNS_UPDATE_REQUIRED=true
+EOF_DNS_ENV
+    chmod 600 "$dns_state/config/install.env"
+    cat > "$dns_bin/curl" <<'EOF_CURL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${DNS_CURL_LOG:?}"
+exit 99
+EOF_CURL
+    chmod +x "$dns_bin/curl"
+    : > "$dns_curl_log"
+
+    if run_root_fixture \
+        PATH="$dns_bin:$PATH" \
+        DNS_CURL_LOG="$dns_curl_log" \
+        AGE_KEY_FILE="$dns_state/missing-age-key.txt" \
+        PROJECT_STATE_DIR="$dns_state" \
+        VW_CONFIG_INSTALLED_ENV_FILE="$dns_state/config/install.env" \
+        UPDATE_DNS=true \
+        DNS_UPDATE_REQUIRED=true \
+        bash "$dns_repo/utilities/maintenance-update-dns.sh" --require-dns \
+        >"$dns_out" 2>&1; then
+        cat "$dns_out" >&2
+        fail "DNS updater succeeded when canonical SOPS resolution was broken"
+    fi
+    grep -Eq 'cloudflare_zone_id is not configured|DNS update is required' "$dns_out" \
+        || { cat "$dns_out" >&2; fail "DNS broken-SOPS failure was not operator-visible"; }
+    [[ ! -s "$dns_curl_log" ]] \
+        || { cat "$dns_curl_log" >&2; fail "DNS updater attempted a network/Cloudflare request after SOPS resolution failed"; }
+    if (( EUID != 0 )); then
+        sudo -n rm -rf "$dns_repo" "$dns_state" 2>/dev/null || true
+    fi
+    pass "DNS mutation fails before any request when canonical SOPS resolution is broken"
+else
+    echo "SKIP runtime-authority: DNS broken-SOPS behavioral proof requires root or passwordless sudo"
+fi
+
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/docker" <<'EOF_DOCKER'
 #!/usr/bin/env bash
@@ -130,3 +195,22 @@ pass "permission repair resolves authority before mutation"
 [[ "$smoke_inventory" == *'required_secrets+=("$key")'* ]] || fail "smoke inventory does not collect schema-derived keys"
 [[ "$smoke_inventory" == *'done < <(schema_keys)'* ]] || fail "smoke inventory does not enumerate schema keys"
 pass "runtime secret inventory derives from schema ownership"
+
+
+! grep -Fq 'Set SOPS_AGE_KEY_FILE in .env' utilities/backup-run.sh \
+    || fail "backup remediation still points operators at repo .env for the Age key"
+key_rotate_recipe="$(awk '/^key-rotate:/{p=1; next} p && /^[^[:space:]#].*:/{exit} p{print}' Makefile)"
+[[ "$key_rotate_recipe" != *"check-env-readable"* ]] \
+    || fail "key-rotate still depends on the repo .env readability guard"
+pass "backup and key-rotation guidance no longer leak authoring authority"
+
+storage_loader="$(awk '/^_ss_load_environment\(\)/,/^}/' utilities/setup-storage.sh)"
+[[ "$storage_loader" == *"load_authoring_environment"* ]] \
+    || fail "setup-storage setup path does not use the explicit authoring loader"
+[[ "$storage_loader" != *'load_env_file "${PROJECT_ROOT}/.env"'* ]] \
+    || fail "setup-storage still directly falls back to repo .env through load_env_file"
+storage_metadata_pos="$(grep -n '    _ss_dispatch_metadata "$@"' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
+storage_load_pos="$(grep -n '    _ss_load_environment' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
+storage_parse_pos="$(grep -n '    _parse_outer_args "$@"' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
+[[ -n "$storage_metadata_pos" && -n "$storage_load_pos" && -n "$storage_parse_pos" && "$storage_metadata_pos" -lt "$storage_load_pos" && "$storage_load_pos" -lt "$storage_parse_pos" ]] || fail "setup-storage must resolve mode metadata, load mode-appropriate defaults, then let CLI parsing win"
+pass "setup-storage first-install path uses authoring authority without runtime fallback noise"

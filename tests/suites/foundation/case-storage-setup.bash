@@ -154,7 +154,7 @@ migrate_main_body="$(extract_func lib/migrate.sh migrate_mode_main)"
 [[ "$(grep -c '_mv_parse_args' utilities/setup-storage.sh)" == "1" ]] \
     || fail 'setup-storage migration entry path must call _mv_parse_args exactly once'
 metadata_line="$(grep -n '^[[:space:]]*_ss_dispatch_metadata ' utilities/setup-storage.sh | cut -d: -f1)"
-load_line="$(grep -n '^[[:space:]]*_ss_load_runtime_environment$' utilities/setup-storage.sh | cut -d: -f1)"
+load_line="$(grep -n '^[[:space:]]*_ss_load_environment$' utilities/setup-storage.sh | cut -d: -f1)"
 outer_parse_line="$(grep -n '^[[:space:]]*_parse_outer_args ' utilities/setup-storage.sh | cut -d: -f1)"
 parse_line="$(grep -n '^[[:space:]]*_mv_parse_args ' utilities/setup-storage.sh | cut -d: -f1)"
 resolve_line="$(grep -n '^[[:space:]]*_mv_resolve_args$' utilities/setup-storage.sh | cut -d: -f1)"
@@ -162,7 +162,7 @@ execute_line="$(grep -n '^[[:space:]]*migrate_mode_main$' utilities/setup-storag
 [[ -n "$metadata_line" && -n "$load_line" && -n "$outer_parse_line" && -n "$resolve_line" && -n "$execute_line" \
     && "$metadata_line" -lt "$load_line" && "$load_line" -lt "$outer_parse_line" \
     && "$outer_parse_line" -lt "$parse_line" && "$parse_line" -lt "$resolve_line" && "$resolve_line" -lt "$execute_line" ]] \
-    || fail 'setup-storage must dispatch metadata, load env defaults, parse outer CLI, parse migration once, resolve, then execute'
+    || fail 'setup-storage must dispatch metadata, load mode-appropriate env defaults, parse outer CLI, parse migration once, resolve, then execute'
 pass 'migration parse/resolve/execute ownership is explicit'
 
 out=$(bash <<'PROBE'
@@ -736,7 +736,7 @@ _require_cli_value(){
     fi
 }
 eval "$(awk '
-  /^_ss_load_runtime_environment\(\)/ {p=1}
+  /^_ss_load_environment\(\)/ {p=1}
   /^_MV_SCRIPT_NAME=/ {p=0}
   p {print}
 ' "$REPO_ROOT/utilities/setup-storage.sh")"
@@ -747,7 +747,7 @@ eval "$(awk '
 ' "$REPO_ROOT/utilities/setup-storage.sh")"
 
 _ss_dispatch_metadata migrate status
-_ss_load_runtime_environment
+_ss_load_environment
 _parse_outer_args migrate status
 _mv_parse_args "${_SS_MIGRATE_ARGS[@]}"
 printf 'migrate-status mode=%s sub=%s args=%s\n' \
@@ -769,7 +769,7 @@ DATA_VOLUME_DEVICE=/dev/disk/by-id/env-default
 DATA_VOLUME_MOUNT=/mnt/env-default
 EOF_ENV
 _ss_dispatch_metadata migrate run --target /mnt/vw-data --dry-run --direction block-to-boot --force --yes
-_ss_load_runtime_environment
+_ss_load_environment
 _parse_outer_args migrate run --target /mnt/vw-data --dry-run --direction block-to-boot --force --yes
 _mv_parse_args "${_SS_MIGRATE_ARGS[@]}"
 printf 'migrate mode=%s sub=%s dry=%s direction=%s force=%s yes=%s target=%s\n' \
@@ -792,7 +792,7 @@ DATA_VOLUME_DEVICE=/dev/disk/by-id/env-default
 DATA_VOLUME_MOUNT=/mnt/env-default
 EOF_ENV
 _ss_dispatch_metadata setup --data-device /dev/disk/by-id/cli-device --data-mount /mnt/cli --dry-run --auto --force
-_ss_load_runtime_environment
+_ss_load_environment
 _parse_outer_args setup --data-device /dev/disk/by-id/cli-device --data-mount /mnt/cli --dry-run --auto --force
 _parse_setup_args
 printf 'setup mode=%s dry=%s auto=%s force=%s device=%s mount=%s\n' \

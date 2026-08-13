@@ -1965,7 +1965,7 @@ main() {
         local age_key_file
         age_key_file=$(_resolve_age_key) || {
             log_error "Age key file not found at: ${age_key_file:-/etc/vaultwarden/age-key.txt}"
-            log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
+            log_error "Restore the operational Age key at /etc/vaultwarden/age-key.txt, then re-run the backup."
             exit 1
         }
 
@@ -2110,7 +2110,7 @@ main() {
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
         log_error "Age key file not found at: ${age_key_file:-/etc/vaultwarden/age-key.txt}"
-        log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
+        log_error "Restore the operational Age key at /etc/vaultwarden/age-key.txt, then re-run the backup."
         exit 1
     }
 
