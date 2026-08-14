@@ -98,7 +98,7 @@ jobs:
               FAIL=1
             fi
           done
-          if grep -Fn -- 'init-permissions' utilities/pre-production-drill.sh docker-compose.yml.example; then
+          if grep -Fn -- 'init-permissions' utilities/pre-production-drill.sh docker-compose.yml.example caddy/Dockerfile; then
             echo "STALE COMPOSE SERVICE FOUND: init-permissions"
             FAIL=1
           fi
@@ -130,30 +130,92 @@ jobs:
           check_flag utilities/maintenance-update.sh "--system"     || FAIL=1
           check_flag utilities/maintenance-update.sh "--all"        || FAIL=1
           check_flag setup.sh "--force"                             || FAIL=1
+          check_flag setup.sh "--use-latest"                        || FAIL=1
+          check_flag utilities/setup-system.sh "--use-latest"      || FAIL=1
+          check_flag utilities/setup-env.sh "--use-latest"         || FAIL=1
+          check_flag utilities/setup-crowdsec.sh "--use-latest"    || FAIL=1
           check_flag utilities/uninstall-vaultwarden.sh "--dry-run" || FAIL=1
           [[ $FAIL -eq 0 ]] || exit 1
 
       - name: Check pinned production version contract
         run: |
           FAIL=0
-          if grep -RFn -- '--use-latest' setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh; then
-            echo "UNPINNED: mutable --use-latest production setup mode is forbidden"
+
+          # Normal/golden operation is source-pinned. --use-latest is retained only
+          # as an explicit operator override on the four intended setup surfaces.
+          for latest_surface in \
+            setup.sh \
+            utilities/setup-system.sh \
+            utilities/setup-env.sh \
+            utilities/setup-crowdsec.sh; do
+            if ! grep -Fq -- '--use-latest' "$latest_surface"; then
+              echo "MISSING OVERRIDE: --use-latest absent from $latest_surface"
+              FAIL=1
+            fi
+          done
+          while IFS=: read -r path line rest; do
+            [[ -n "$path" ]] || continue
+            case "$path" in
+              setup.sh|utilities/setup-system.sh|utilities/setup-env.sh|utilities/setup-crowdsec.sh) ;;
+              *)
+                echo "UNSCOPED OVERRIDE: --use-latest found at ${path}:${line}:${rest}"
+                FAIL=1
+                ;;
+            esac
+          done < <(grep -RFn --include='*.sh' -- '--use-latest' setup.sh utilities/ lib/ 2>/dev/null || true)
+
+          latest_release_matches=$(grep -RFn --include='*.sh' -- '/releases/latest' setup.sh utilities/ lib/ 2>/dev/null || true)
+          unexpected_latest_release=$(printf '%s\n' "$latest_release_matches" | grep -v '^utilities/setup-system.sh:' || true)
+          if [[ -n "$unexpected_latest_release" ]]; then
+            echo "UNSCOPED LATEST RESOLUTION: /releases/latest is only allowed in setup-system's explicit SOPS override"
+            echo "$unexpected_latest_release"
             FAIL=1
           fi
-          if grep -RFn --include='*.sh' -- '/releases/latest' setup.sh utilities/ lib/ 2>/dev/null; then
-            echo "UNPINNED: production shell code must not resolve mutable GitHub latest releases"
+          if ! grep -Fq 'https://api.github.com/repos/${repo}/releases/latest' utilities/setup-system.sh; then
+            echo "MISSING OVERRIDE: setup-system must retain explicit GitHub latest resolution"
+            FAIL=1
+          fi
+          if ! awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq 'if [[ "$USE_LATEST" == "true" ]]'; then
+            echo "UNSCOPED LATEST RESOLUTION: SOPS latest lookup must be gated by --use-latest"
             FAIL=1
           fi
           if grep -RFn --include='*.sh' -- '@latest' setup.sh utilities/ lib/ 2>/dev/null; then
             echo "UNPINNED: mutable @latest reference found in production shell code"
             FAIL=1
           fi
-          if ! grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.2"' utilities/setup-system.sh; then
-            echo "UNPINNED: setup-system.sh must define the pinned SOPS default"
+
+          for sops_surface in setup.sh utilities/setup-system.sh; do
+            if ! grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' "$sops_surface"; then
+              echo "STALE PIN: ${sops_surface} must define SOPS v3.13.3 as the normal default"
+              FAIL=1
+            fi
+          done
+
+          expected_pins=(
+            'VAULTWARDEN_VERSION=1.37.1'
+            'CADDY_VERSION=2.11.4'
+            'POSTFIX_VERSION=5.1.0'
+            'BUSYBOX_VERSION=1.38.0'
+            'CROWDSEC_VERSION=1.7.8'
+            'CF_WORKER_BOUNCER_VERSION=v0.0.18'
+            'FIREWALL_BOUNCER_VERSION=0.0.36'
+          )
+          for expected_pin in "${expected_pins[@]}"; do
+            if ! grep -Fxq "$expected_pin" .env.example; then
+              echo "STALE PIN: .env.example missing ${expected_pin}"
+              FAIL=1
+            fi
+          done
+          if grep -Eq '^(VAULTWARDEN_VERSION|CADDY_VERSION|POSTFIX_VERSION|BUSYBOX_VERSION|CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
+            echo "UNPINNED: golden-path component version in .env.example"
             FAIL=1
           fi
-          if grep -Eq '^(VAULTWARDEN_VERSION|CADDY_VERSION|POSTFIX_VERSION|BUSYBOX_VERSION|CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
-            echo "UNPINNED: production component version in .env.example"
+          if ! grep -Fq 'ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.37.1}' docker-compose.yml.example; then
+            echo "STALE PIN: Compose Vaultwarden fallback must match .env.example"
+            FAIL=1
+          fi
+          if ! grep -Fq 'ARG CADDY_VERSION=2.11.4' caddy/Dockerfile; then
+            echo "STALE PIN: Caddy Dockerfile default must match .env.example"
             FAIL=1
           fi
           if grep -En '^[[:space:]]*--with[[:space:]]+github.com/[^[:space:]@]+([[:space:]\\]|$)' caddy/Dockerfile; then
@@ -265,8 +327,8 @@ jobs:
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
           echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.2/sops-v3.13.2.linux.amd64 -o /tmp/sops
-          echo "154dfe4cd70554bdd82b98e4cd4acf191d43d01ead6f00a73477aa44c4ac42ef  /tmp/sops" | sha256sum --check --status
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64 -o /tmp/sops
+          echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
       - name: Run ${{ matrix.suite }} suite
