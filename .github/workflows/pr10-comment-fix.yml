@@ -1,0 +1,28 @@
+name: PR10 comment cleanup
+
+on:
+  push:
+    branches:
+      - agent/pr10-platform-simplification
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: agent/pr10-platform-simplification
+      - shell: bash
+        run: |
+          python3 -c 'from pathlib import Path; p=Path("lib/secrets.sh"); s=p.read_text(); old="  # published only under /root/vaultwarden-recovery (or an explicit test override)."; new="  # Publish only under /root/vaultwarden-recovery (or an explicit test override)."; assert old in s; p.write_text(s.replace(old,new,1))'
+          bash -n lib/secrets.sh
+          shellcheck -x --severity=warning lib/secrets.sh
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add lib/secrets.sh
+          git commit -m "docs: clarify recovery kit publication comment"
+          git push origin HEAD:agent/pr10-platform-simplification
