@@ -71,6 +71,15 @@ def fix_health(text):
 edit('lib/health-alerts.sh', fix_health)
 
 
+def fix_operations(text):
+    old = """_operation_open_file_identity() {\n    local pid=\"$1\" fd=\"$2\"\n    if [[ -e \"/proc/${pid}/fd/${fd}\" ]]; then\n        stat -Lc '%d:%i' \"/proc/${pid}/fd/${fd}\" 2>/dev/null\n    else\n        stat -f '%d:%i' \"/dev/fd/${fd}\" 2>/dev/null\n    fi\n}\n"""
+    new = """_operation_open_file_identity() {\n    local pid=\"$1\" fd=\"$2\"\n    [[ -e \"/proc/${pid}/fd/${fd}\" ]] || return 1\n    stat -Lc '%d:%i' \"/proc/${pid}/fd/${fd}\" 2>/dev/null\n}\n"""
+    return replace_once(text, old, new, "operation fd identity")
+
+
+edit('lib/operations.sh', fix_operations)
+
+
 def fix_crypto(text):
     return text.replace('log_error "  Oracle/RHEL/CentOS: sudo dnf install httpd-tools"', 'log_error "  Ubuntu 24.04: sudo apt-get install apache2-utils"')
 
@@ -90,7 +99,23 @@ edit('utilities/setup-systemd.sh', fix_systemd)
 def fix_backup_run(text):
     text = text.replace('if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then', 'if ! command -v sha256sum >/dev/null 2>&1; then')
     text = text.replace('log_error "Neither sha256sum nor shasum is available for checksum generation."', 'log_error "Required GNU sha256sum command is unavailable."')
-    return text
+    old = """    local _stat_cmd=()\n    if stat --version 2>/dev/null | grep -q GNU; then\n        _stat_cmd=(stat -c '%Y')\n    else\n        _stat_cmd=(stat -f '%m')\n    fi\n"""
+    new = "    local _stat_cmd=(stat -c '%Y')\n"
+    return replace_once(text, old, new, "backup GNU stat command")
 
 
 edit('utilities/backup-run.sh', fix_backup_run)
+
+
+def fix_restore(text):
+    old = """            local mtime_str; mtime_str=$(stat -c \"%y\" \"$f\" 2>/dev/null | cut -c1-19 || \\
+                                         stat -f \"%Sm\" -t \"%Y-%m-%d %H:%M:%S\" \"$f\" 2>/dev/null || echo \"unknown\")\n"""
+    new = """            local mtime_str; mtime_str=$(stat -c \"%y\" \"$f\" 2>/dev/null | cut -c1-19 || echo \"unknown\")\n"""
+    text = replace_once(text, old, new, "restore mtime")
+    old = """    kit_perms=$(stat -c \"%a\" \"$canonical_kit\" 2>/dev/null || \\
+                stat -f \"%Lp\" \"$canonical_kit\" 2>/dev/null || echo \"644\")\n"""
+    new = "    kit_perms=$(stat -c \"%a\" \"$canonical_kit\" 2>/dev/null || echo \"644\")\n"
+    return replace_once(text, old, new, "restore kit permissions")
+
+
+edit('utilities/restore-run.sh', fix_restore)
