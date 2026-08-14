@@ -1,0 +1,49 @@
+name: PR10 validated replay
+
+on:
+  push:
+    branches:
+      - agent/pr10-platform-simplification
+
+permissions:
+  contents: write
+
+jobs:
+  replay:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: agent/pr10-platform-simplification
+          fetch-depth: 0
+      - name: Replay validated implementation and self-clean
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import subprocess, yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(Path('.github/workflows/pr10-apply.yml').read_text())
+          steps = wf['jobs']['apply']['steps']
+          run_steps = [step for step in steps if 'run' in step]
+          if len(run_steps) != 4:
+              raise SystemExit(f'expected 4 run steps, got {len(run_steps)}')
+
+          for index, step in enumerate(run_steps):
+              script = step['run']
+              env = None
+              if index == 2:
+                  env = {'DOCKER_PROJECT_LABEL': 'ci'}
+              if index == 3:
+                  script = script.replace(
+                      'git rm .github/workflows/pr10-apply.yml',
+                      'git rm -f .github/workflows/pr10-apply.yml .github/workflows/pr10-replay.yml'
+                  )
+              proc_env = None
+              if env:
+                  import os
+                  proc_env = os.environ.copy()
+                  proc_env.update(env)
+              subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], check=True, env=proc_env)
+          PY
