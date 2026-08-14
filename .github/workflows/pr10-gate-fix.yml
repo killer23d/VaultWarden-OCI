@@ -1,0 +1,37 @@
+name: PR10 Noble gate completion
+
+on:
+  push:
+    branches:
+      - agent/pr10-platform-simplification
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: agent/pr10-platform-simplification
+          fetch-depth: 0
+      - name: Complete Noble-only drift gate
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/doc-drift.yml')
+          s = p.read_text()
+          old = "          for term in 'stat -f' 'shasum' 'dnf' 'yum'; do\n"
+          new = "          for term in 'stat -f' 'stat -Lf' 'date -j' 'shasum' 'dnf' 'yum' 'pacman'; do\n"
+          if s.count(old) != 1:
+              raise SystemExit('Noble-only term loop not found exactly once')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/doc-drift.yml
+          git commit -m 'ci: enforce full Noble-only portability contract'
+          git push origin HEAD:agent/pr10-platform-simplification
