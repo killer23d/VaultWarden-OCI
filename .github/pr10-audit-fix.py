@@ -11,71 +11,34 @@ def replace_once(path, old, new, label):
 
 
 replace_once(
-    'lib/operations.sh',
-    '''    current_mode="$(stat -c '%a' "$lock_path" 2>/dev/null \\\n || true)"\n''',
-    '''    current_mode="$(stat -c '%a' "$lock_path" 2>/dev/null || true)"\n''',
-    'operation lock mode',
+    'lib/backup-utils.sh',
+    '''# Uses a portable awk approach because POSIX df guarantees available blocks\n# in column 4 on both GNU and BSD implementations.\n''',
+    '''# Use POSIX df output and sum the available-blocks column.\n''',
+    'backup disk-space comment',
 )
 replace_once(
-    'lib/operations.sh',
-    '''    current_owner="$(stat -c '%U:%G' "$lock_path" 2>/dev/null \\\n || true)"\n''',
-    '''    current_owner="$(stat -c '%U:%G' "$lock_path" 2>/dev/null || true)"\n''',
-    'operation lock owner',
+    'lib/backup-utils.sh',
+    '''    local ts_epoch\n    ts_epoch=$(date -d "$ts_str" +%s 2>/dev/null) || \\\n    ts_epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$ts_str" +%s 2>/dev/null) || true\n''',
+    '''    local ts_epoch\n    ts_epoch=$(date -d "$ts_str" +%s 2>/dev/null) || true\n''',
+    'backup timestamp parsing',
 )
 replace_once(
-    'lib/operations.sh',
-    '''    mode="$(stat -c '%a' "$file" 2>/dev/null \\\n || true)"\n    owner_uid="$(stat -c '%u' "$file" 2>/dev/null \\\n || true)"\n''',
-    '''    mode="$(stat -c '%a' "$file" 2>/dev/null || true)"\n    owner_uid="$(stat -c '%u' "$file" 2>/dev/null || true)"\n''',
-    'operation state trust stats',
+    'lib/backup-utils.sh',
+    '''# find -exec stat -c%s {} + is GNU-only. On macOS stat -c%s\n# errors and awk sums to 0, reporting all backup sizes as 0 MB.\n#\n# Replaced with a find | while loop using _stat_file_size() (exported by\n# lib/crypto.sh) which selects the correct stat format per platform.\n#\n''',
+    '''# Sum backup sizes through the shared GNU-stat helper when available.\n#\n''',
+    'backup statistics comment',
 )
+
 replace_once(
-    'lib/operations.sh',
-    '''    stat -Lc '%d:%i' "$path" 2>/dev/null \\\n\n''',
-    '''    stat -Lc '%d:%i' "$path" 2>/dev/null\n''',
-    'operation path identity',
-)
-replace_once(
-    'lib/operations.sh',
-    '''    mode="$(stat -c '%a' "$path" 2>/dev/null \\\n || true)"\n    owner_uid="$(stat -c '%u' "$path" 2>/dev/null \\\n || true)"\n''',
-    '''    mode="$(stat -c '%a' "$path" 2>/dev/null || true)"\n    owner_uid="$(stat -c '%u' "$path" 2>/dev/null || true)"\n''',
-    'operation lock validation stats',
-)
-replace_once(
-    'lib/operations.sh',
-    '''    if [[ -e "/proc/${pid}/fd/${fd}" ]]; then\n        [[ "$path_identity" == "$fd_identity" ]]\n    else\n        [[ "${path_identity#*:}" == "${fd_identity#*:}" ]]\n    fi\n''',
-    '''    [[ "$path_identity" == "$fd_identity" ]]\n''',
-    'operation proc identity comparison',
+    'utilities/smoke-test.sh',
+    '''    expiry_epoch=$(date -d "$expiry_date_str" +%s 2>/dev/null \\\n        || date -j -f '%b %d %T %Y %Z' "$expiry_date_str" +%s 2>/dev/null || echo 0)\n''',
+    '''    expiry_epoch=$(date -d "$expiry_date_str" +%s 2>/dev/null || echo 0)\n''',
+    'smoke certificate expiry',
 )
 
 replace_once(
     'utilities/maintenance-health.sh',
-    '''    owner_uid="$(stat -c '%u' "$lock_path" 2>/dev/null \\\n || true)"\n''',
-    '''    owner_uid="$(stat -c '%u' "$lock_path" 2>/dev/null || true)"\n''',
-    'health lock owner',
-)
-replace_once(
-    'utilities/maintenance-health.sh',
-    '''    open_owner_uid="$(stat -Lc '%u' "/proc/${BASHPID}/fd/${fd}" 2>/dev/null \\\n || true)"\n''',
-    '''    open_owner_uid="$(stat -Lc '%u' "/proc/${BASHPID}/fd/${fd}" 2>/dev/null || true)"\n''',
-    'health opened lock owner',
-)
-
-replace_once(
-    'utilities/restore-run.sh',
-    '''    stat -c '%d:%i:%u:%a' "$1" 2>/dev/null \\\n\n''',
-    '''    stat -c '%d:%i:%u:%a' "$1" 2>/dev/null\n''',
-    'restore workspace identity',
-)
-
-replace_once(
-    'lib/health-alerts.sh',
-    '''    identity="$(stat -Lc '%d:%i' -- "$path" 2>/dev/null \\\n        || stat -Lf '%d:%i' "$path" 2>/dev/null)" || return 1\n''',
-    '''    identity="$(stat -Lc '%d:%i' -- "$path" 2>/dev/null)" || return 1\n''',
-    'health state file identity',
-)
-replace_once(
-    'lib/health-alerts.sh',
-    '''    if [[ -e "/proc/${shell_pid}/fd/${fd}" ]]; then\n        path_identity="$(_state_file_identity "$path")" || return 1\n        fd_identity="$(_state_file_identity "/proc/${shell_pid}/fd/${fd}")" || return 1\n    elif [[ -e "/dev/fd/${fd}" ]]; then\n        # Development fallback for BSD hosts. The supported Ubuntu runtime\n        # uses the device-and-inode comparison above through /proc.\n        path_identity="$(stat -c '%i' -- "$path" 2>/dev/null)" || return 1\n        fd_identity="$(stat -Lf '%i' "/dev/fd/${fd}" 2>/dev/null)" || return 1\n    else\n        return 1\n    fi\n''',
-    '''    [[ -e "/proc/${shell_pid}/fd/${fd}" ]] || return 1\n    path_identity="$(_state_file_identity "$path")" || return 1\n    fd_identity="$(_state_file_identity "/proc/${shell_pid}/fd/${fd}")" || return 1\n''',
-    'health state proc identity',
+    '''    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || date -jf "%b %e %T %Y %Z" "$expiry_date" +%s 2>/dev/null || echo 0)\n''',
+    '''    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || echo 0)\n''',
+    'health certificate expiry',
 )
