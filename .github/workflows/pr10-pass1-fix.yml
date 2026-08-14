@@ -1,9 +1,13 @@
 name: PR10 pass1 fix
+
 on:
   push:
-    branches: [agent/pr10-platform-simplification]
+    branches:
+      - agent/pr10-platform-simplification
+
 permissions:
   contents: write
+
 jobs:
   fix:
     if: github.actor != 'github-actions[bot]'
@@ -12,30 +16,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: agent/pr10-platform-simplification
-      - shell: bash
+      - name: Restore checksum diagnostics
+        shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('lib/crypto.sh')
-          s=p.read_text()
-          old='''    local checksum
-    checksum=$(sha256sum -- "$file" | cut -d' ' -f1) || return 1
-    printf '%s\\n' "$checksum"
-}
-verify_sha256() {'''
-          new='''    local checksum
-    if ! checksum=$(sha256sum -- "$file" | cut -d' ' -f1); then
-        log_error "Failed to calculate SHA256 checksum: $file"
-        return 1
-    fi
-    printf '%s\\n' "$checksum"
-}
-
-verify_sha256() {'''
-          if old not in s:
-              raise SystemExit('checksum block not found')
-          p.write_text(s.replace(old,new,1))
-          PY
+          python3 -c 'from pathlib import Path; p=Path("lib/crypto.sh"); s=p.read_text(); old="    local checksum\n    checksum=$(sha256sum -- \"$file\" | cut -d\x27 \x27 -f1) || return 1\n    printf \x27%s\\n\x27 \"$checksum\"\n}\nverify_sha256() {"; new="    local checksum\n    if ! checksum=$(sha256sum -- \"$file\" | cut -d\x27 \x27 -f1); then\n        log_error \"Failed to calculate SHA256 checksum: $file\"\n        return 1\n    fi\n    printf \x27%s\\n\x27 \"$checksum\"\n}\n\nverify_sha256() {"; assert old in s; p.write_text(s.replace(old,new,1))'
           bash -n lib/crypto.sh
           shellcheck -x --severity=warning lib/crypto.sh
           git config user.name github-actions[bot]
