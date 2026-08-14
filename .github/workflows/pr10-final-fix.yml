@@ -1,0 +1,42 @@
+name: PR10 final guidance cleanup
+
+on:
+  push:
+    branches:
+      - agent/pr10-platform-simplification
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: agent/pr10-platform-simplification
+          fetch-depth: 0
+      - name: Normalize supported-host guidance
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/crypto.sh')
+          s = p.read_text()
+          old = '''        log_error "htpasswd not available. Install the appropriate package for your distribution:"\n        log_error "  Debian/Ubuntu : sudo apt install apache2-utils"\n        log_error "  Ubuntu 24.04: sudo apt-get install apache2-utils"\n        log_error "  Arch          : sudo pacman -S apache"\n'''
+          new = '''        log_error "htpasswd not available. Install it on Ubuntu 24.04:"\n        log_error "  sudo apt-get install apache2-utils"\n'''
+          if s.count(old) != 1:
+              raise SystemExit('expected htpasswd guidance block not found exactly once')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          bash -n lib/crypto.sh
+          shellcheck -x --severity=warning lib/crypto.sh
+          echo 'Potential unsupported-distro operator guidance:'
+          grep -REn --include='*.sh' 'Debian/|RHEL|CentOS|Fedora|Oracle|pacman|Homebrew|brew install|dnf install|yum install' \
+            setup.sh startup.sh maintenance.sh backup.sh restore.sh recover.sh lib/ utilities/ || true
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add lib/crypto.sh
+          git commit -m 'cleanup: keep package guidance Noble-only'
+          git push origin HEAD:agent/pr10-platform-simplification
