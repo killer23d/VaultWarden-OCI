@@ -1,0 +1,58 @@
+name: PR10 latest-version override refresh
+
+on:
+  push:
+    branches:
+      - agent/pr10-platform-simplification
+
+permissions:
+  contents: write
+
+jobs:
+  apply-refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply requested override and current pins
+        run: python3 .github/pr10-refresh-use-latest.py
+
+      - name: Regenerate command reference
+        run: bash utilities/write-command-reference.sh
+
+      - name: Focused syntax and contract validation
+        run: |
+          bash -n setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh
+          grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' setup.sh
+          grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' utilities/setup-system.sh
+          grep -Fq 'VAULTWARDEN_VERSION=1.37.1' .env.example
+          grep -Fq 'BUSYBOX_VERSION=1.38.0' .env.example
+          grep -Fq 'FIREWALL_BOUNCER_VERSION=0.0.36' .env.example
+          for f in setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh; do
+            grep -Fq -- '--use-latest' "$f"
+          done
+          ./tests/run-tests.sh foundation
+          git diff --check
+
+      - name: Commit product changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            .env.example \
+            caddy/Dockerfile \
+            docker-compose.yml.example \
+            docs/COMMAND-REFERENCE.md \
+            docs/PROJECT-BOUNDARY.md \
+            setup.sh \
+            tests/suites/foundation/case-runner-contracts.bash \
+            tests/suites/foundation/case-storage-setup.bash \
+            utilities/setup-crowdsec.sh \
+            utilities/setup-env.sh \
+            utilities/setup-system.sh
+          git diff --cached --check
+          git commit -m 'fix: retain explicit latest-version override'
+          git push origin HEAD:agent/pr10-platform-simplification
