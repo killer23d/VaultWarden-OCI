@@ -1,4 +1,4 @@
-name: PR10 pass1 fix
+name: PR10 pass1 fixes
 
 on:
   push:
@@ -16,14 +16,53 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: agent/pr10-platform-simplification
-      - name: Restore checksum diagnostics
+      - name: Apply pass 1 fixes
         shell: bash
         run: |
-          python3 -c 'from pathlib import Path; p=Path("lib/crypto.sh"); s=p.read_text(); old="    local checksum\n    checksum=$(sha256sum -- \"$file\" | cut -d\x27 \x27 -f1) || return 1\n    printf \x27%s\\n\x27 \"$checksum\"\n}\nverify_sha256() {"; new="    local checksum\n    if ! checksum=$(sha256sum -- \"$file\" | cut -d\x27 \x27 -f1); then\n        log_error \"Failed to calculate SHA256 checksum: $file\"\n        return 1\n    fi\n    printf \x27%s\\n\x27 \"$checksum\"\n}\n\nverify_sha256() {"; assert old in s; p.write_text(s.replace(old,new,1))'
-          bash -n lib/crypto.sh
-          shellcheck -x --severity=warning lib/crypto.sh
+          python3 <<'PY'
+          from pathlib import Path
+
+          crypto = Path('lib/crypto.sh')
+          lines = crypto.read_text().splitlines()
+          needle = '    checksum=$(sha256sum -- "$file" | cut -d\' \' -f1) || return 1'
+          try:
+              i = lines.index(needle)
+          except ValueError:
+              raise SystemExit('checksum assignment not found')
+          lines[i:i+1] = [
+              '    if ! checksum=$(sha256sum -- "$file" | cut -d\' \' -f1); then',
+              '        log_error "Failed to calculate SHA256 checksum: $file"',
+              '        return 1',
+              '    fi',
+          ]
+          for j in range(i + 4, min(i + 10, len(lines))):
+              if lines[j] == 'verify_sha256() {' and lines[j-1] != '':
+                  lines.insert(j, '')
+                  break
+          crypto.write_text('\n'.join(lines) + '\n')
+
+          test = Path('tests/suites/foundation/case-storage-setup.bash')
+          text = test.read_text()
+          start = text.index('if ! bash "$setup_system" --use-latest --sops-version v3.13.2')
+          end_marker = 'rm -f /tmp/vw-sops-ambiguous.$$\n'
+          end = text.index(end_marker, start) + len(end_marker)
+          replacement = '''for removed_latest_surface in \\
+    "$PROJECT_ROOT/setup.sh" \\
+    "$setup_system" \\
+    "$PROJECT_ROOT/utilities/setup-env.sh" \\
+    "$setup_crowdsec"; do
+    if grep -Fq -- '--use-latest' "$removed_latest_surface"; then
+        fail "removed --use-latest production contract remains in $removed_latest_surface"
+    fi
+done
+pass 'production setup surfaces no longer expose --use-latest'\n'''
+          test.write_text(text[:start] + replacement + text[end:])
+          PY
+          bash -n lib/crypto.sh tests/suites/foundation/case-storage-setup.bash
+          shellcheck -x --severity=warning lib/crypto.sh tests/suites/foundation/case-storage-setup.bash
+          VW_TEST_CASE_MODE=host-architecture bash tests/suites/foundation/case-storage-setup.bash
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add lib/crypto.sh
-          git commit -m "fix: preserve checksum failure diagnostics"
+          git add lib/crypto.sh tests/suites/foundation/case-storage-setup.bash
+          git commit -m "test: assert pinned production setup contract"
           git push origin HEAD:agent/pr10-platform-simplification
