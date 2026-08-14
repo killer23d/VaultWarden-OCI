@@ -4,12 +4,14 @@ on:
   push:
     branches:
       - agent/pr10-platform-simplification
+    paths:
+      - '.github/workflows/doc-drift.yml'
 
 permissions:
   contents: write
 
 jobs:
-  validate-continuation:
+  finalize-contract:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     steps:
@@ -17,29 +19,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply CrowdSec continuation audit fix
-        run: python3 .github/pr10-fix-crowdsec-guidance.py
+      - name: Align repository-interface version assertions
+        run: python3 .github/pr10-finalize-version-contract.py
 
-      - name: Regenerate command reference
-        run: bash utilities/write-command-reference.sh
-
-      - name: Validate changed setup contract
+      - name: Validate foundation contract
         run: |
-          bash -n setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh
-          grep -Fq '[[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"' setup.sh
-          grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' setup.sh
-          grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' utilities/setup-system.sh
-          grep -Fq 'VAULTWARDEN_VERSION=1.37.1' .env.example
-          grep -Fq 'BUSYBOX_VERSION=1.38.0' .env.example
-          grep -Fq 'FIREWALL_BOUNCER_VERSION=0.0.36' .env.example
+          bash -n tests/suites/foundation/case-runner-contracts.bash
           ./tests/run-tests.sh foundation
           git diff --check
 
-      - name: Commit audit fix
+      - name: Commit permanent test contract
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add setup.sh docs/COMMAND-REFERENCE.md
+          git add tests/suites/foundation/case-runner-contracts.bash
           git diff --cached --check
-          git commit -m 'fix: carry latest override into CrowdSec guidance'
+          git commit -m 'test: enforce scoped latest-version override'
           git push origin HEAD:agent/pr10-platform-simplification
