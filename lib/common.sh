@@ -58,8 +58,7 @@ _command_to_package_hint() {
 }
 
 _package_manager_hint() {
-    printf '%s
-' 'sudo apt-get install'
+    printf '%s\n' 'sudo apt-get install'
 }
 
 require_commands() {

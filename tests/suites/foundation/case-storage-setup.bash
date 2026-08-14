@@ -949,7 +949,6 @@ for removed_latest_surface in \
         fail "removed --use-latest production contract remains in $removed_latest_surface"
     fi
 done
-pass 'production setup surfaces no longer expose --use-latest'
 
 make_yq_stub() {
     local path="$1" mode="$2" version="${3:-v4.53.3}"

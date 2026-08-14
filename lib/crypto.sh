@@ -64,10 +64,7 @@ readonly SECURITY_MAX_FAILED_ATTEMPTS=3
 readonly SECURITY_LOCKOUT_DURATION=300  # 5 minutes
 
 # ---------------------------------------------------------------------------
-# Portable stat helpers
-#
-# GNU stat and BSD stat use different format strings.
-# We detect which is present at call time rather than relying on a global flag.
+# GNU stat helpers for the supported Ubuntu Noble production host.
 # ---------------------------------------------------------------------------
 _stat_octal_perms() { stat -c '%a' -- "$1" 2>/dev/null; }
 
@@ -687,8 +684,7 @@ calculate_sha256() {
         log_error "Failed to calculate SHA256 checksum: $file"
         return 1
     fi
-    printf '%s
-' "$checksum"
+    printf '%s\n' "$checksum"
 }
 
 verify_sha256() {
