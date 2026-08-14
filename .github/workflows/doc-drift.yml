@@ -195,7 +195,6 @@ jobs:
             'VAULTWARDEN_VERSION=1.37.1'
             'CADDY_VERSION=2.11.4'
             'POSTFIX_VERSION=5.1.0'
-            'BUSYBOX_VERSION=1.38.0'
             'CROWDSEC_VERSION=1.7.8'
             'CF_WORKER_BOUNCER_VERSION=v0.0.18'
             'FIREWALL_BOUNCER_VERSION=0.0.36'
@@ -206,8 +205,16 @@ jobs:
               FAIL=1
             fi
           done
-          if grep -Eq '^(VAULTWARDEN_VERSION|CADDY_VERSION|POSTFIX_VERSION|BUSYBOX_VERSION|CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
+          if grep -Eq '^(VAULTWARDEN_VERSION|CADDY_VERSION|POSTFIX_VERSION|CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
             echo "UNPINNED: golden-path component version in .env.example"
+            FAIL=1
+          fi
+          if grep -RFn -- 'BUSYBOX_VERSION' .env.example setup.sh lib/ docker-compose.yml.example; then
+            echo "STALE CONFIG: BUSYBOX_VERSION remains on an active production surface"
+            FAIL=1
+          fi
+          if grep -Fn -- 'BUSYBOX_VERSION=latest' utilities/setup-env.sh; then
+            echo "STALE CONFIG: setup-env still renders or requires mutable BusyBox state"
             FAIL=1
           fi
           if ! grep -Fq 'ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.37.1}' docker-compose.yml.example; then
