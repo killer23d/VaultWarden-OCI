@@ -47,6 +47,19 @@ sudo ./setup.sh install \
 
 The normal production lifecycle is root-operated. A Docker-group re-login is not a required deployment phase for the supported operator path.
 
+### Optional mutable-version override
+
+Normal production setup uses the repository-pinned versions. `--use-latest` is an explicit operator opt-in outside the golden path:
+
+```bash
+sudo ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --use-latest
+```
+
+This override is intentionally persistent for supported image and CrowdSec version fields: environment generation writes literal `latest` values into `.env`, so later image pulls or CrowdSec setup can resolve newer versions until those fields are restored to exact pins. Caddy and yq remain exact-pinned. SOPS resolves the latest stable release only for the setup-system invocation. `--auto` does not imply `--use-latest`.
+
 ## Phase 3 — Configure non-secret values and external credentials
 
 Edit non-secret configuration through the environment workflow:

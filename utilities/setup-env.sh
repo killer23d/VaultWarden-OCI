@@ -80,9 +80,10 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Explicit override: set supported component versions to latest;
-                          Caddy remains pinned because xcaddy builder tags require
-                          an explicit version.
+    --use-latest          Explicit override: write supported image/CrowdSec version fields
+                          as 'latest' in .env. This persists across later pulls until
+                          those fields are re-pinned. Caddy remains pinned because
+                          xcaddy builder tags require an explicit version.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: @DEFAULT_DATA_MOUNT@)
     --force               Overwrite existing .env/docker-compose.yml
@@ -286,6 +287,7 @@ create_env_file() {
     ' "$env_template" > "$temp_env" || { rm -f "$temp_env"; return 1; }
 
     if [[ "$USE_LATEST" == "true" ]]; then
+        log_warn "--use-latest is writing persistent mutable version tags to .env; re-pin those fields to return to reproducible updates."
         local temp2
         temp2=$(_make_owned_temp "$env_dir" "$real_user" "$real_group") \
             || { rm -f "$temp_env"; return 1; }

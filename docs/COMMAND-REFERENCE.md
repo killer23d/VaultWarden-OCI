@@ -129,8 +129,10 @@ FULL SETUP OPTIONS (used after install):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Explicit override: use current live upstream component versions
-                      for this run instead of the repository-pinned normal defaults.
+  --use-latest        Explicit override: opt into mutable upstream component versions.
+                      Environment generation writes supported image/CrowdSec version
+                      fields as 'latest' in .env; later pulls remain mutable until
+                      those fields are re-pinned. SOPS resolves latest for setup.
                       Caddy remains pinned because xcaddy builds require a version tag.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
@@ -1317,9 +1319,10 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Explicit override: set supported component versions to latest;
-                          Caddy remains pinned because xcaddy builder tags require
-                          an explicit version.
+    --use-latest          Explicit override: write supported image/CrowdSec version fields
+                          as 'latest' in .env. This persists across later pulls until
+                          those fields are re-pinned. Caddy remains pinned because
+                          xcaddy builder tags require an explicit version.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --force               Overwrite existing .env/docker-compose.yml

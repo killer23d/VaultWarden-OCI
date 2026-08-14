@@ -6,7 +6,8 @@ set -euo pipefail
 
 # Set SOPS_VERSION to use a specific release. When unset or blank, setup uses
 # the repository-pinned production default. Pass --use-latest only when an
-# operator explicitly wants mutable upstream versions for this run.
+# operator explicitly wants mutable upstream versions. Environment generation
+# persists supported mutable image/CrowdSec tags in .env until they are re-pinned.
 #
 # Examples:
 #   SOPS_VERSION="v3.9.4"
@@ -182,8 +183,10 @@ FULL SETUP OPTIONS (used after install):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Explicit override: use current live upstream component versions
-                      for this run instead of the repository-pinned normal defaults.
+  --use-latest        Explicit override: opt into mutable upstream component versions.
+                      Environment generation writes supported image/CrowdSec version
+                      fields as 'latest' in .env; later pulls remain mutable until
+                      those fields are re-pinned. SOPS resolves latest for setup.
                       Caddy remains pinned because xcaddy builds require a version tag.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
@@ -539,6 +542,7 @@ main() {
 
     if [[ "$USE_LATEST" == "true" ]]; then
         log_info "SOPS version: will resolve latest from GitHub because --use-latest was requested"
+        log_warn "--use-latest also persists mutable supported image/CrowdSec version tags in .env until they are re-pinned."
     elif [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
         log_info "SOPS version requested: ${SOPS_VERSION}"
     else

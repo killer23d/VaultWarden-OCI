@@ -470,8 +470,18 @@ grep -Fq 'Production setup uses repository-pinned component/tool versions by def
     || fail 'operator docs must state that normal production setup is source-pinned'
 grep -Fq 'The explicit `--use-latest` override remains available for operator-requested live-version runs and is outside the normal/golden path.' docs/SCRIPTS.md \
     || fail 'operator docs must retain the explicit --use-latest override contract'
+grep -Fq 'writes literal `latest` values into the generated `.env`; later pulls therefore remain mutable until the operator re-pins those fields.' docs/SCRIPTS.md \
+    || fail 'operator docs must explain that latest image/CrowdSec state persists in .env'
 ! grep -Fq 'mutable latest-version resolution is not part of the operator interface' docs/SCRIPTS.md \
     || fail 'operator docs must not deny the supported --use-latest override'
+! grep -Fq 'for this run instead of the repository-pinned normal defaults' setup.sh \
+    || fail 'setup help must not describe persistent latest tags as run-local'
+grep -Fq "fields as 'latest' in .env; later pulls remain mutable until" setup.sh \
+    || fail 'setup help must disclose persistent mutable .env tags'
+grep -Fq "as 'latest' in .env. This persists across later pulls until" utilities/setup-env.sh \
+    || fail 'setup-env help must disclose persistent mutable .env tags'
+grep -Fq 'run: ./tests/run-tests.sh all' .github/workflows/canonical-tests.yml \
+    || fail 'CI must execute the canonical permanent test entrypoint exactly'
 
 grep -Fq '"python3-yaml"' utilities/setup-system.sh \
     || fail 'setup-system must explicitly own python3-yaml'
