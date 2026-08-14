@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  apply-refresh:
+  validate-continuation:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     steps:
@@ -17,44 +17,49 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply requested override and current pins
+      - name: Keep CrowdSec continuation consistent with latest override
         run: |
-          python3 .github/pr10-refresh-use-latest.py
-          python3 .github/pr10-refresh-fix-tests.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('setup.sh')
+          text = p.read_text()
+          old = '''    if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
+'''
+          new = '''    local _crowdsec_setup_cmd="sudo ./utilities/setup-crowdsec.sh"
+    [[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"
+
+    if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one CrowdSec prompt block, found {text.count(old)}')
+          text = text.replace(old, new, 1)
+          old_cmd = '        log_info "  sudo ./utilities/setup-crowdsec.sh"'
+          if text.count(old_cmd) != 2:
+              raise SystemExit(f'expected two CrowdSec command lines, found {text.count(old_cmd)}')
+          text = text.replace(old_cmd, '        log_info "  ${_crowdsec_setup_cmd}"')
+          p.write_text(text)
+          PY
 
       - name: Regenerate command reference
         run: bash utilities/write-command-reference.sh
 
-      - name: Focused syntax and contract validation
+      - name: Validate complete repository contract
         run: |
-          bash -n setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh
+          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n 1 bash -n
+          grep -Fq '[[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"' setup.sh
           grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' setup.sh
           grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' utilities/setup-system.sh
           grep -Fq 'VAULTWARDEN_VERSION=1.37.1' .env.example
           grep -Fq 'BUSYBOX_VERSION=1.38.0' .env.example
           grep -Fq 'FIREWALL_BOUNCER_VERSION=0.0.36' .env.example
-          for f in setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh; do
-            grep -Fq -- '--use-latest' "$f"
-          done
-          ./tests/run-tests.sh foundation
+          ./tests/run-tests.sh all
           git diff --check
 
-      - name: Commit product changes
+      - name: Commit audit fix
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            .env.example \
-            caddy/Dockerfile \
-            docker-compose.yml.example \
-            docs/COMMAND-REFERENCE.md \
-            docs/PROJECT-BOUNDARY.md \
-            setup.sh \
-            tests/suites/foundation/case-runner-contracts.bash \
-            tests/suites/foundation/case-storage-setup.bash \
-            utilities/setup-crowdsec.sh \
-            utilities/setup-env.sh \
-            utilities/setup-system.sh
+          git add setup.sh docs/COMMAND-REFERENCE.md
           git diff --cached --check
-          git commit -m 'fix: retain explicit latest-version override'
+          git commit -m 'fix: carry latest override into CrowdSec guidance'
           git push origin HEAD:agent/pr10-platform-simplification
