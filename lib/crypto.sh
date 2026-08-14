@@ -644,10 +644,8 @@ generate_bcrypt_hash() {
     [[ -z "$password" ]] && return 1
 
     if ! has_command htpasswd; then
-        log_error "htpasswd not available. Install the appropriate package for your distribution:"
-        log_error "  Debian/Ubuntu : sudo apt install apache2-utils"
-        log_error "  Ubuntu 24.04: sudo apt-get install apache2-utils"
-        log_error "  Arch          : sudo pacman -S apache"
+        log_error "htpasswd not available. Install it on Ubuntu 24.04:"
+        log_error "  sudo apt-get install apache2-utils"
         return 1
     fi
 
