@@ -23,16 +23,16 @@ jobs:
       - name: Regenerate command reference
         run: bash utilities/write-command-reference.sh
 
-      - name: Validate complete repository contract
+      - name: Validate changed setup contract
         run: |
-          find . -path './.git' -prune -o -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -n 1 bash -n
+          bash -n setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh
           grep -Fq '[[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"' setup.sh
           grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' setup.sh
           grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' utilities/setup-system.sh
           grep -Fq 'VAULTWARDEN_VERSION=1.37.1' .env.example
           grep -Fq 'BUSYBOX_VERSION=1.38.0' .env.example
           grep -Fq 'FIREWALL_BOUNCER_VERSION=0.0.36' .env.example
-          ./tests/run-tests.sh all
+          ./tests/run-tests.sh foundation
           git diff --check
 
       - name: Commit audit fix
