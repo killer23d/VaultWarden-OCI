@@ -364,8 +364,7 @@ RESTORE_PREVENT_AUTOSTART=false
 : "${RESTORE_SAVED_ACK_ATTEMPTS:=3}"
 
 _restore_workspace_identity() {
-    stat -c '%d:%i:%u:%a' "$1" 2>/dev/null \
-        || stat -f '%d:%i:%u:%Lp' "$1" 2>/dev/null
+    stat -c '%d:%i:%u:%a' "$1" 2>/dev/null
 }
 
 _restore_workspace_is_owned() {
@@ -905,7 +904,7 @@ pull_remote_backup() {
 
     RESTORE_TYPE="$btype"
     local pulled_size
-    pulled_size=$(stat -c%s "$local_file" 2>/dev/null || stat -f%z "$local_file" 2>/dev/null || echo 0)
+    pulled_size=$(stat -c%s "$local_file" 2>/dev/null || echo 0)
     log_info "Downloaded $(basename "$local_file") ($(( pulled_size / 1024 )) KiB)"
 
     BACKUP_FILE="$local_file"
@@ -1005,15 +1004,14 @@ list_all_backups_interactive() {
         for f in "${files[@]}"; do
             (( ++i ))
             local size_str="?"
-            local sz; sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
+            local sz; sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
             if [[ "$sz" =~ ^[0-9]+$ ]]; then
                 if   (( sz >= 1073741824 )); then size_str="$(( sz / 1073741824 ))G"
                 elif (( sz >= 1048576    )); then size_str="$(( sz / 1048576    ))M"
                 elif (( sz >= 1024       )); then size_str="$(( sz / 1024       ))K"
                 else size_str="${sz}B"; fi
             fi
-            local mtime_str; mtime_str=$(stat -c "%y" "$f" 2>/dev/null | cut -c1-19 || \
-                                         stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$f" 2>/dev/null || echo "unknown")
+            local mtime_str; mtime_str=$(stat -c "%y" "$f" 2>/dev/null | cut -c1-19 || echo "unknown")
             printf '  [%3d]  %-10s  %6s  %s  %s\n' \
                 "$i" "($t)" "$size_str" "$mtime_str" "$(basename "$f")"
             _LOCAL_FILES+=("$f")
@@ -1174,8 +1172,7 @@ _load_recovery_kit() {
 
     # Reject world-readable kit files — they should be owner-read-only.
     local kit_perms
-    kit_perms=$(stat -c "%a" "$canonical_kit" 2>/dev/null || \
-                stat -f "%Lp" "$canonical_kit" 2>/dev/null || echo "644")
+    kit_perms=$(stat -c "%a" "$canonical_kit" 2>/dev/null || echo "644")
     if (( (8#$kit_perms & 8#044) != 0 )); then
         log_warn "Recovery kit file has broad permissions (${kit_perms}): $canonical_kit"
         log_warn "Recommended: chmod 600 '$canonical_kit'"
@@ -1587,7 +1584,6 @@ _rotate_age_key() {
 # would show on first install.  Requires the operator to press Enter to
 # acknowledge before services start (unless --force is passed).
 _display_new_key() {
-  # VWOCI-PRR-PATCH-01: keep the existing acknowledgement/startup safety gate,
   # but hand off the private identity only through the protected root file.
   [[ "$DRY_RUN" == "true" ]] && return 0
   [[ -z "$ROTATED_KEY_FILE" ]] && return 0
@@ -1903,7 +1899,7 @@ _restore_payload_parent() {
 
 _restore_create_control_workspace() {
     local parent="/dev/shm" fs_type
-    fs_type="$(stat -f -c '%T' /dev/shm 2>/dev/null || true)"
+    fs_type="$(stat --file-system --format='%T' /dev/shm 2>/dev/null || true)"
     if [[ "$fs_type" != "tmpfs" ]]; then
         parent="${TMPDIR:-/tmp}"
         log_warn "/dev/shm tmpfs is unavailable; small restore control files will use: $parent"
@@ -1936,7 +1932,7 @@ _restore_create_payload_workspace() {
 }
 
 _restore_file_size_bytes() {
-    stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null
+    stat -c '%s' "$1" 2>/dev/null
 }
 
 _restore_require_available_bytes() {

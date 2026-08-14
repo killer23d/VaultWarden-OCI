@@ -47,6 +47,19 @@ sudo ./setup.sh install \
 
 The normal production lifecycle is root-operated. A Docker-group re-login is not a required deployment phase for the supported operator path.
 
+### Optional mutable-version override
+
+Normal production setup uses the repository-pinned versions. `--use-latest` is an explicit operator opt-in outside the golden path:
+
+```bash
+sudo ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --use-latest
+```
+
+This override is intentionally persistent for supported image and CrowdSec version fields: environment generation writes literal `latest` values into `.env`, so later image pulls or CrowdSec setup can resolve newer versions until those fields are restored to exact pins. Caddy and yq remain exact-pinned. SOPS resolves the latest stable release only for the setup-system invocation. `--auto` does not imply `--use-latest`.
+
 ## Phase 3 — Configure non-secret values and external credentials
 
 Edit non-secret configuration through the environment workflow:
@@ -237,6 +250,5 @@ These features are supported where implemented but should not complicate a first
 
 ## Automatic setup credential handoff
 
-<!-- VWOCI-PRR-PATCH-04 -->
 
 Both `sudo ./setup.sh install --domain DOMAIN --email EMAIL --auto` and the documented direct command `sudo ./utilities/setup-secrets.sh configure --auto` keep generated credential values out of terminal output. After successful atomic publication, the command displays the root-only handoff path under `/root/vaultwarden-recovery/`, its `root:root` ownership and `0700` directory/`0600` file permissions, and the three included groups: SOPS Age identity, Vaultwarden administrator password, and Caddy administrator password. Automatic configuration fails without a completion summary if the handoff cannot be published. Required UFW and automatic secret-configuration failures also terminate top-level setup before its completion summary. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

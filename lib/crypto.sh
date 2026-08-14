@@ -64,46 +64,15 @@ readonly SECURITY_MAX_FAILED_ATTEMPTS=3
 readonly SECURITY_LOCKOUT_DURATION=300  # 5 minutes
 
 # ---------------------------------------------------------------------------
-# Portable stat helpers
-#
-# GNU stat and BSD stat use different format strings.
-# We detect which is present at call time rather than relying on a global flag.
+# GNU stat helpers for the supported Ubuntu Noble production host.
 # ---------------------------------------------------------------------------
-_stat_octal_perms() {
-    local path="$1"
-    if stat --version >/dev/null 2>&1; then
-        stat -c '%a' "$path" 2>/dev/null   # GNU coreutils (Linux)
-    else
-        stat -f '%OLp' "$path" 2>/dev/null  # BSD / macOS
-    fi
-}
+_stat_octal_perms() { stat -c '%a' -- "$1" 2>/dev/null; }
 
-_stat_file_size() {
-    local path="$1"
-    if stat --version >/dev/null 2>&1; then
-        stat -c '%s' "$path" 2>/dev/null   # GNU
-    else
-        stat -f '%z' "$path" 2>/dev/null   # BSD / macOS
-    fi
-}
+_stat_file_size() { stat -c '%s' -- "$1" 2>/dev/null; }
 
-_stat_owner() {
-    local path="$1"
-    if stat --version >/dev/null 2>&1; then
-        stat -c '%U' "$path" 2>/dev/null
-    else
-        stat -f '%Su' "$path" 2>/dev/null
-    fi
-}
+_stat_owner() { stat -c '%U' -- "$1" 2>/dev/null; }
 
-_stat_group() {
-    local path="$1"
-    if stat --version >/dev/null 2>&1; then
-        stat -c '%G' "$path" 2>/dev/null
-    else
-        stat -f '%Sg' "$path" 2>/dev/null
-    fi
-}
+_stat_group() { stat -c '%G' -- "$1" 2>/dev/null; }
 
 _derive_age_public_key() {
     local key_file="$1"
@@ -675,10 +644,8 @@ generate_bcrypt_hash() {
     [[ -z "$password" ]] && return 1
 
     if ! has_command htpasswd; then
-        log_error "htpasswd not available. Install the appropriate package for your distribution:"
-        log_error "  Debian/Ubuntu : sudo apt install apache2-utils"
-        log_error "  Oracle/RHEL/CentOS: sudo dnf install httpd-tools"
-        log_error "  Arch          : sudo pacman -S apache"
+        log_error "htpasswd not available. Install it on Ubuntu 24.04:"
+        log_error "  sudo apt-get install apache2-utils"
         return 1
     fi
 
@@ -705,24 +672,17 @@ calculate_sha256() {
         return 1
     fi
 
-    local checksum
-    if has_command sha256sum; then
-        if ! checksum=$(sha256sum "$file" | cut -d' ' -f1); then
-            log_error "Failed to calculate SHA256 checksum: $file"
-            return 1
-        fi
-    elif has_command shasum; then
-        if ! checksum=$(shasum -a 256 "$file" | cut -d' ' -f1); then
-            log_error "Failed to calculate SHA256 checksum: $file"
-            return 1
-        fi
-    else
-        log_error "No SHA256 calculator available (tried sha256sum and shasum)"
+    if ! has_command sha256sum; then
+        log_error "Required GNU sha256sum command is unavailable"
         return 1
     fi
 
+    local checksum
+    if ! checksum=$(sha256sum -- "$file" | cut -d' ' -f1); then
+        log_error "Failed to calculate SHA256 checksum: $file"
+        return 1
+    fi
     printf '%s\n' "$checksum"
-    return 0
 }
 
 verify_sha256() {

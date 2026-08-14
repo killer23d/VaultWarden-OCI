@@ -129,9 +129,11 @@ FULL SETUP OPTIONS (used after install):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Use live upstream container and CrowdSec versions in .env,
-                      and resolve the latest SOPS release instead of the pinned
-                      production default.
+  --use-latest        Explicit override: opt into mutable upstream component versions.
+                      Environment generation writes supported image/CrowdSec version
+                      fields as 'latest' in .env; later pulls remain mutable until
+                      those fields are re-pinned. SOPS resolves latest for setup.
+                      Caddy remains pinned because xcaddy builds require a version tag.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       The existing operational Age key is retained, but current
@@ -1266,8 +1268,8 @@ OPTIONS:
     --reconcile-email    Reconcile only the managed email notification files.
     --dry-run            Print what would happen without changing files.
     --force              Re-run all phases even if already applied.
-    --use-latest         Override version pins and use the current live upstream
-                         release of each component.
+    --use-latest         Explicit override: install current repository candidates
+                         instead of the source-controlled component pins.
     --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
     --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
                          allowlist.
@@ -1311,18 +1313,20 @@ USAGE:
 
 DESCRIPTION:
     Creates or updates .env and docker-compose.yml from project templates.
-    Safe to re-run (idempotent) — existing files are not overwritten unless
-    --force is passed. Called automatically by setup.sh during phase 3.
+    Safe to re-run (idempotent): matching .env and valid Compose are left
+    unchanged. Changed domain/email/storage/version intent regenerates .env;
+    --force forces .env and Compose regeneration. Called by setup.sh phase 3.
 
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Set compatible mutable image/component versions to 'latest';
-                          Caddy remains pinned because xcaddy builder tags do not
-                          support caddy:latest-builder.
+    --use-latest          Explicit override: write supported image/CrowdSec version fields
+                          as 'latest' in .env. This persists across later pulls until
+                          those fields are re-pinned. Caddy remains pinned because
+                          xcaddy builder tags require an explicit version.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
-    --force               Overwrite existing .env/docker-compose.yml
+    --force               Force regeneration of .env and docker-compose.yml
     --dry-run             Preview actions without executing
     --help, -h            Show this help
     --version, -V         Print the VaultWarden-OCI version and exit
@@ -1491,8 +1495,8 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --use-latest          Resolve the latest SOPS release instead of the pinned default
-    --sops-version VER    Use a specific SOPS version (default: v3.13.2)
+    --use-latest          Explicit override: resolve the latest SOPS release
+    --sops-version VER    Use a specific SOPS version (default: v3.13.3)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --data-device DEV     Data volume device path
@@ -1656,7 +1660,7 @@ VaultWarden-OCI Command Reference Writer
 
 USAGE:
     bash utilities/write-command-reference.sh [--help|-h]
-    bash utilities/generate-command-ref.sh
+    bash utilities/write-command-reference.sh
     make docs
 
 DESCRIPTION:

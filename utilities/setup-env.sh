@@ -74,18 +74,20 @@ USAGE:
 
 DESCRIPTION:
     Creates or updates .env and docker-compose.yml from project templates.
-    Safe to re-run (idempotent) — existing files are not overwritten unless
-    --force is passed. Called automatically by setup.sh during phase 3.
+    Safe to re-run (idempotent): matching .env and valid Compose are left
+    unchanged. Changed domain/email/storage/version intent regenerates .env;
+    --force forces .env and Compose regeneration. Called by setup.sh phase 3.
 
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Set compatible mutable image/component versions to 'latest';
-                          Caddy remains pinned because xcaddy builder tags do not
-                          support caddy:latest-builder.
+    --use-latest          Explicit override: write supported image/CrowdSec version fields
+                          as 'latest' in .env. This persists across later pulls until
+                          those fields are re-pinned. Caddy remains pinned because
+                          xcaddy builder tags require an explicit version.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: @DEFAULT_DATA_MOUNT@)
-    --force               Overwrite existing .env/docker-compose.yml
+    --force               Force regeneration of .env and docker-compose.yml
     --dry-run             Preview actions without executing
     --help, -h            Show this help
     --version, -V         Print the VaultWarden-OCI version and exit
@@ -153,24 +155,7 @@ _parse_args() {
 }
 
 detect_ssh_log_path() {
-    local ssh_log_path="/var/log/secure"
-
-    if [[ -f /etc/os-release ]]; then
-        local os_id
-        os_id=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr -d "'")
-        case "$os_id" in
-            ol|rhel|centos|rocky|almalinux|fedora) ssh_log_path="/var/log/secure"  ;;
-            ubuntu|debian)                         ssh_log_path="/var/log/auth.log" ;;
-            *)
-                if [[ -f "/var/log/secure" ]]; then
-                    ssh_log_path="/var/log/secure"
-                else
-                    ssh_log_path="/var/log/auth.log"
-                fi
-                ;;
-        esac
-    fi
-    printf '%s\n' "$ssh_log_path"
+    printf '%s\n' '/var/log/auth.log'
 }
 
 _make_owned_temp() {
@@ -226,23 +211,22 @@ create_env_file() {
     # Idempotency compares the same effective storage identity that rendering
     # uses, so an explicit storage change cannot be mistaken for a no-op.
     if [[ -f "$env_file" ]] && [[ "$FORCE" != "true" ]]; then
-        local domain_matches=false email_matches=false latest_matches=false storage_matches=false
+        local domain_matches=false email_matches=false versions_match=false storage_matches=false
         grep -qF "DOMAIN=$domain_with_protocol" "$env_file" && domain_matches=true
         grep -qF "ADMIN_EMAIL=$ADMIN_EMAIL"      "$env_file" && email_matches=true
 
         if [[ "$USE_LATEST" == "true" ]]; then
             if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
                grep -qE '^POSTFIX_VERSION=latest'     "$env_file" && \
-               grep -qE '^BUSYBOX_VERSION=latest'     "$env_file" && \
                ! grep -qE '^CADDY_VERSION=latest'     "$env_file" && \
                grep -qE '^CROWDSEC_VERSION=latest'    "$env_file" && \
                grep -qE '^CF_WORKER_BOUNCER_VERSION=latest' "$env_file" && \
                grep -qE '^FIREWALL_BOUNCER_VERSION=latest'  "$env_file"; then
-                latest_matches=true
+                versions_match=true
             fi
         else
-            grep -qE '^(VAULTWARDEN|CADDY|POSTFIX|BUSYBOX)_VERSION=latest' "$env_file" \
-                || latest_matches=true
+            grep -qE '^(VAULTWARDEN|CADDY|POSTFIX|CROWDSEC|CF_WORKER_BOUNCER|FIREWALL_BOUNCER)_VERSION=latest' "$env_file" \
+                || versions_match=true
         fi
 
         if [[ "$(_read_env_value DATA_VOLUME_DEVICE "$env_file")" == "${DATA_VOLUME_DEVICE:-}" &&
@@ -253,7 +237,7 @@ create_env_file() {
 
         if [[ "$domain_matches"  == "true" ]] && \
            [[ "$email_matches"   == "true" ]] && \
-           [[ "$latest_matches"  == "true" ]] && \
+           [[ "$versions_match" == "true" ]] && \
            [[ "$storage_matches" == "true" ]]; then
             log_info ".env is already up-to-date — skipping (use --force to overwrite)"
             return 0
@@ -303,6 +287,7 @@ create_env_file() {
     ' "$env_template" > "$temp_env" || { rm -f "$temp_env"; return 1; }
 
     if [[ "$USE_LATEST" == "true" ]]; then
+        log_warn "--use-latest is writing persistent mutable version tags to .env; re-pin those fields to return to reproducible updates."
         local temp2
         temp2=$(_make_owned_temp "$env_dir" "$real_user" "$real_group") \
             || { rm -f "$temp_env"; return 1; }
@@ -310,7 +295,6 @@ create_env_file() {
         awk '{
             sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
             sub(/^POSTFIX_VERSION=.*/,     "POSTFIX_VERSION=latest");
-            sub(/^BUSYBOX_VERSION=.*/,     "BUSYBOX_VERSION=latest");
             sub(/^CROWDSEC_VERSION=.*/,    "CROWDSEC_VERSION=latest");
             sub(/^CF_WORKER_BOUNCER_VERSION=.*/, "CF_WORKER_BOUNCER_VERSION=latest");
             sub(/^FIREWALL_BOUNCER_VERSION=.*/,  "FIREWALL_BOUNCER_VERSION=latest");

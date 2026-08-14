@@ -173,14 +173,10 @@ services:
         max-file: "3"
 
   # =============================================================================
-  # Mailpit - Email capture during development (replaces abandoned mailhog)
+  # Mailpit - development email capture
   # =============================================================================
-  # mailhog/mailhog was last updated in 2022 and has known unfixed CVEs.
-  # axllent/mailpit is the actively maintained, ARM64-native drop-in replacement.
-  # Port mapping is identical — no workflow changes required.
   # Web UI:  http://localhost:8025
   # SMTP:    localhost:1026 on the host, 1025 inside the mailpit container
-  # Version is sourced from MAILPIT_VERSION in .env.example with the same inline fallback.
   # =============================================================================
   mailpit:
     image: axllent/mailpit:${MAILPIT_VERSION:-v1.21.6}

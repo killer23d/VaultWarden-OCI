@@ -5,14 +5,15 @@
 set -euo pipefail
 
 # Set SOPS_VERSION to use a specific release. When unset or blank, setup uses
-# the repository-pinned production default. Pass --use-latest to intentionally
-# resolve the current SOPS release from GitHub during dependency installation.
+# the repository-pinned production default. Pass --use-latest only when an
+# operator explicitly wants mutable upstream versions. Environment generation
+# persists supported mutable image/CrowdSec tags in .env until they are re-pinned.
 #
 # Examples:
 #   SOPS_VERSION="v3.9.4"
 #   SOPS_VERSION=""
 #
-SOPS_DEFAULT_VERSION="v3.13.2"
+SOPS_DEFAULT_VERSION="v3.13.3"
 SOPS_VERSION_ENV_SET=false
 if [[ -n "${SOPS_VERSION+x}" && -n "${SOPS_VERSION:-}" ]]; then
     SOPS_VERSION_ENV_SET=true
@@ -182,9 +183,11 @@ FULL SETUP OPTIONS (used after install):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Use live upstream container and CrowdSec versions in .env,
-                      and resolve the latest SOPS release instead of the pinned
-                      production default.
+  --use-latest        Explicit override: opt into mutable upstream component versions.
+                      Environment generation writes supported image/CrowdSec version
+                      fields as 'latest' in .env; later pulls remain mutable until
+                      those fields are re-pinned. SOPS resolves latest for setup.
+                      Caddy remains pinned because xcaddy builds require a version tag.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       The existing operational Age key is retained, but current
@@ -414,7 +417,6 @@ if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid
 
 
 show_post_install_summary() {
-  # VWOCI-PRR-PATCH-01: publish generated values once, never print them.
   local mode="${1:-interactive}"
   if [[ "${DRY_RUN:-false}" == "true" ]]; then
     log_info "[DRY RUN] Would publish a root-only setup credential handoff after all required phases pass."
@@ -540,12 +542,12 @@ main() {
 
     if [[ "$USE_LATEST" == "true" ]]; then
         log_info "SOPS version: will resolve latest from GitHub because --use-latest was requested"
+        log_warn "--use-latest also persists mutable supported image/CrowdSec version tags in .env until they are re-pinned."
     elif [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
         log_info "SOPS version requested: ${SOPS_VERSION}"
     else
         log_info "SOPS version pinned default: ${SOPS_VERSION}"
     fi
-
 
     local _dry=() _force=() _auto=() _skip_deps=() _use_latest=()
     [[ "$DRY_RUN"   == "true" ]] && _dry=(--dry-run)
@@ -605,6 +607,9 @@ main() {
         "Re-run: sudo ./utilities/setup-firewall.sh --phase iptables --auto"
     fi
 
+    local _crowdsec_setup_cmd="sudo ./utilities/setup-crowdsec.sh"
+    [[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"
+
     if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
         log_info ""
         log_info "════════════════════════════════════════════════"
@@ -618,7 +623,7 @@ main() {
         log_info ""
         log_info "Then run the CrowdSec setup:"
         log_info ""
-        log_info "  sudo ./utilities/setup-crowdsec.sh"
+        log_info "  ${_crowdsec_setup_cmd}"
         log_info ""
         press_enter_to_continue " Press [Enter] to continue with the post-install summary, or Ctrl-C to exit now..."
         _cs_prompt_ack=""
@@ -628,7 +633,7 @@ main() {
         log_info "  sudo ./edit-secrets.sh rotate cloudflare_zone_id"
         log_info "  sudo ./edit-secrets.sh rotate cf_account_id"
         log_info "  sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
-        log_info "  sudo ./utilities/setup-crowdsec.sh"
+        log_info "  ${_crowdsec_setup_cmd}"
     fi
 
     export SETUP_SECRETS_PREEXISTED=false

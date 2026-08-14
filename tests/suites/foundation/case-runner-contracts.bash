@@ -438,7 +438,7 @@ done <<EOF_TESTS
 $(find tests -maxdepth 1 -type f -name 'test-*.sh' -print | sort)
 EOF_TESTS
 
-grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.2"' utilities/setup-system.sh \
+grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' utilities/setup-system.sh \
     || fail 'setup-system must pin the normal SOPS default'
 grep -Fq 'SOPS_VERSION="$1"' utilities/setup-system.sh \
     || fail 'setup-system must retain explicit --sops-version overrides'
@@ -460,6 +460,34 @@ awk '/verify_dependencies\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '_vali
     || fail 'verify_dependencies must validate the existing sops interface for --skip-deps'
 ! grep -Fq 'SOPS_VERSION not pinned' utilities/setup-system.sh \
     || fail 'normal setup must not resolve latest merely because SOPS_VERSION is blank'
+grep -Fq '[[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"' setup.sh \
+    || fail 'setup.sh must carry explicit latest mode into CrowdSec continuation guidance'
+for latest_surface in setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh; do
+    grep -Fq -- '--use-latest' "$latest_surface" \
+        || fail "explicit --use-latest override missing from $latest_surface"
+done
+grep -Fq 'Production setup uses repository-pinned component/tool versions by default.' docs/SCRIPTS.md \
+    || fail 'operator docs must state that normal production setup is source-pinned'
+grep -Fq 'The explicit `--use-latest` override remains available for operator-requested live-version runs and is outside the normal/golden path.' docs/SCRIPTS.md \
+    || fail 'operator docs must retain the explicit --use-latest override contract'
+grep -Fq 'writes literal `latest` values into the generated `.env`; later pulls therefore remain mutable until the operator re-pins those fields.' docs/SCRIPTS.md \
+    || fail 'operator docs must explain that latest image/CrowdSec state persists in .env'
+! grep -Fq 'mutable latest-version resolution is not part of the operator interface' docs/SCRIPTS.md \
+    || fail 'operator docs must not deny the supported --use-latest override'
+! grep -Fq 'for this run instead of the repository-pinned normal defaults' setup.sh \
+    || fail 'setup help must not describe persistent latest tags as run-local'
+grep -Fq "fields as 'latest' in .env; later pulls remain mutable until" setup.sh \
+    || fail 'setup help must disclose persistent mutable .env tags'
+grep -Fq "as 'latest' in .env. This persists across later pulls until" utilities/setup-env.sh \
+    || fail 'setup-env help must disclose persistent mutable .env tags'
+! grep -Fq 'BUSYBOX_VERSION' .env.example \
+    || fail 'dead BusyBox production version surface must stay absent from .env.example'
+! grep -Fq 'BUSYBOX_VERSION' utilities/setup-env.sh \
+    || fail 'setup-env must not own the removed BusyBox production version surface'
+! grep -Fq 'existing files are not overwritten unless' utilities/setup-env.sh \
+    || fail 'setup-env help must not deny idempotent regeneration when requested intent changes'
+grep -Fq 'run: ./tests/run-tests.sh all' .github/workflows/canonical-tests.yml \
+    || fail 'CI must execute the canonical permanent test entrypoint exactly'
 
 grep -Fq '"python3-yaml"' utilities/setup-system.sh \
     || fail 'setup-system must explicitly own python3-yaml'
@@ -498,7 +526,9 @@ grep -Fq "YQ_VERSION=\"${yq_version}\"" .github/workflows/doc-drift.yml \
     || fail 'CI yq version must match production setup'
 grep -Fq "$yq_sha_amd64" .github/workflows/doc-drift.yml \
     || fail 'CI yq checksum must match production amd64 setup pin'
-grep -Fq 'v3.13.2/sops-v3.13.2.linux.amd64' .github/workflows/doc-drift.yml \
+sops_default="$(sed -n 's/^SOPS_DEFAULT_VERSION="\([^"]*\)"/\1/p' utilities/setup-system.sh)"
+[[ -n "$sops_default" ]] || fail 'setup-system SOPS default missing'
+grep -Fq "${sops_default}/sops-${sops_default}.linux.amd64" .github/workflows/doc-drift.yml \
     || fail 'CI SOPS binary must match the production SOPS default version'
 
 if grep -En '^[[:space:]]*--with[[:space:]]+github.com/[^[:space:]@]+([[:space:]\\]|$)' caddy/Dockerfile >/tmp/vw-xcaddy-unpinned.$$; then

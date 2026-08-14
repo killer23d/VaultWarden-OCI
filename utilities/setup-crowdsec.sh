@@ -1430,8 +1430,8 @@ OPTIONS:
     --reconcile-email    Reconcile only the managed email notification files.
     --dry-run            Print what would happen without changing files.
     --force              Re-run all phases even if already applied.
-    --use-latest         Override version pins and use the current live upstream
-                         release of each component.
+    --use-latest         Explicit override: install current repository candidates
+                         instead of the source-controlled component pins.
     --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
     --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
                          allowlist.
@@ -1503,12 +1503,18 @@ if [[ "$USE_LATEST" == "true" ]]; then
     CROWDSEC_VERSION=""
     CF_WORKER_BOUNCER_VERSION=""
     FIREWALL_BOUNCER_VERSION=""
-    log_info "Version pins cleared by --use-latest; all components will use current upstream releases."
+    log_warn "--use-latest requested: CrowdSec component pins are bypassed for this run."
+else
+    for _version_var in CROWDSEC_VERSION CF_WORKER_BOUNCER_VERSION FIREWALL_BOUNCER_VERSION; do
+        _version_value="${!_version_var:-}"
+        if [[ -z "$_version_value" || "$_version_value" == "latest" ]]; then
+            log_error "${_version_var} must be pinned to a source-controlled version in .env for normal operation."
+            log_error "Pass --use-latest only for an explicit live-version override."
+            exit 1
+        fi
+    done
+    unset _version_var _version_value
 fi
-
-[[ "${CROWDSEC_VERSION:-}"          == "latest" ]] && CROWDSEC_VERSION=""
-[[ "${CF_WORKER_BOUNCER_VERSION:-}" == "latest" ]] && CF_WORKER_BOUNCER_VERSION=""
-[[ "${FIREWALL_BOUNCER_VERSION:-}"  == "latest" ]] && FIREWALL_BOUNCER_VERSION=""
 
 _cs_previous_state=""
 _cs_previous_phase=""
@@ -1564,7 +1570,7 @@ if [[ "$FORCE" == "true" && -n "$_cs_previous_state" && "$_cs_previous_state" !=
         log_warn "Last recorded phase: ${_cs_previous_phase:-?}${_cs_previous_phase_name:+ - }${_cs_previous_phase_name}"
     fi
     log_warn "A normal re-run can inspect and reconcile the existing installation."
-    log_warn "Recommended: sudo ./utilities/setup-crowdsec.sh --use-latest"
+    log_warn "Recommended: sudo ./utilities/setup-crowdsec.sh"
     log_warn "--force will reset CrowdSec state again."
     if [[ ! -t 0 ]]; then
         log_error "Refusing non-interactive --force after an incomplete CrowdSec setup record."
@@ -1664,11 +1670,11 @@ else
     rm -f "$_repo_script"
 
     _cs_pkg="crowdsec"
-    if [[ -n "$CROWDSEC_VERSION" ]]; then
+    if [[ "$USE_LATEST" == "true" ]]; then
+        log_warn "CrowdSec --use-latest override: installing current packagecloud candidate"
+    else
         _cs_pkg="crowdsec=${CROWDSEC_VERSION}"
         log_info "CrowdSec version pinned: ${CROWDSEC_VERSION}"
-    else
-        log_info "CrowdSec version: installing latest from packagecloud repository"
     fi
 
     log_info "Installing CrowdSec engine package first..."
@@ -1681,12 +1687,12 @@ else
         log_info "iptables detected — installing crowdsec-firewall-bouncer-iptables."
     fi
 
-    if [[ -n "${FIREWALL_BOUNCER_VERSION:-}" ]]; then
+    _fw_pkg="${_fw_base}-${_fw_suffix}"
+    if [[ "$USE_LATEST" == "true" ]]; then
+        log_warn "Firewall bouncer --use-latest override: installing current packagecloud candidate"
+    else
         _fw_pkg="${_fw_base}-${_fw_suffix}=${FIREWALL_BOUNCER_VERSION}"
         log_info "Firewall bouncer version pinned: ${FIREWALL_BOUNCER_VERSION}"
-    else
-        _fw_pkg="${_fw_base}-${_fw_suffix}"
-        log_info "Firewall bouncer version: installing latest from packagecloud repository"
     fi
 
     operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y "$_cs_pkg"
@@ -1893,11 +1899,11 @@ STUB
         fi
 
         _worker_pkg="crowdsec-cloudflare-worker-bouncer"
-        if [[ -n "$CF_WORKER_BOUNCER_VERSION" ]]; then
+        if [[ "$USE_LATEST" == "true" ]]; then
+            log_warn "CF Workers bouncer --use-latest override: installing current configured-repository candidate"
+        else
             _worker_pkg="${_worker_pkg}=${CF_WORKER_BOUNCER_VERSION#v}"
             log_info "CF Workers bouncer package version pinned: ${CF_WORKER_BOUNCER_VERSION#v}"
-        else
-            log_info "CF Workers bouncer package version: using configured CrowdSec repository candidate"
         fi
 
         if ! operation_package_run env DEBIAN_FRONTEND=noninteractive apt-get install -y \

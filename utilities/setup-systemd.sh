@@ -352,11 +352,7 @@ _report_unhealthy_managed_timers() {
 
 # Print the sha256 digest of a file.
 _sha256() {
-    if command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        shasum -a 256 "$1" | awk '{print $1}'
-    fi
+    sha256sum -- "$1" | awk '{print $1}'
 }
 
 
@@ -1020,7 +1016,7 @@ validate_installation() {
         local bad_perm_files=()
         while IFS= read -r -d '' libfile; do
             local fmode
-            fmode=$(stat -c '%a' "$libfile" 2>/dev/null || stat -f '%Lp' "$libfile" 2>/dev/null || echo "000")
+            fmode=$(stat -c '%a' "$libfile" 2>/dev/null || echo "000")
             local other_bit="${fmode: -1}"
             if (( other_bit < 4 )); then
                 bad_perm_files+=("$libfile ($fmode)")

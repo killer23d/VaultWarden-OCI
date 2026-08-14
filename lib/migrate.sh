@@ -86,7 +86,6 @@ _mv_du_bytes() {
     find "$path" -type f -exec sh -c '
         for file do
             stat -c %s "$file" 2>/dev/null \
-                || stat -f %z "$file" 2>/dev/null \
                 || printf "0\n"
         done
     ' sh {} + | awk '{sum += $1} END {printf "%.0f\n", sum}'

@@ -122,8 +122,7 @@ _acquire_health_lock() {
         log_error "Health coordination lock is not a regular file: $lock_path"
         return 3
     fi
-    owner_uid="$(stat -c '%u' "$lock_path" 2>/dev/null \
-        || stat -f '%u' "$lock_path" 2>/dev/null || true)"
+    owner_uid="$(stat -c '%u' "$lock_path" 2>/dev/null || true)"
     if [[ "$owner_uid" != "$EUID" ]]; then
         log_error "Health coordination lock owner UID is ${owner_uid:-unknown}, expected ${EUID}: $lock_path"
         return 3
@@ -136,8 +135,7 @@ _acquire_health_lock() {
         log_error "Cannot open health coordination lock: $lock_path"
         return 3
     fi
-    open_owner_uid="$(stat -Lc '%u' "/proc/${BASHPID}/fd/${fd}" 2>/dev/null \
-        || stat -f '%u' "/dev/fd/${fd}" 2>/dev/null || true)"
+    open_owner_uid="$(stat -Lc '%u' "/proc/${BASHPID}/fd/${fd}" 2>/dev/null || true)"
     if [[ "$open_owner_uid" != "$EUID" ]]; then
         { eval "exec ${fd}>&-"; } 2>/dev/null || true
         log_error "Opened health coordination lock owner UID is ${open_owner_uid:-unknown}, expected ${EUID}: $lock_path"
@@ -503,7 +501,7 @@ _check_ssl() {
     }
     local expiry_date expiry_epoch now_epoch days_remaining
     expiry_date="${expiry_output#notAfter=}"
-    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || date -jf "%b %e %T %Y %Z" "$expiry_date" +%s 2>/dev/null || echo 0)
+    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || echo 0)
     now_epoch=$(date +%s)
     days_remaining=$(( (expiry_epoch - now_epoch) / 86400 ))
     if [[ $days_remaining -le 0 ]]; then
@@ -1030,7 +1028,7 @@ _check_backup_ages() {
             continue
         fi
         any_found=true
-        mtime=$(stat -c %Y "$latest_file" 2>/dev/null || stat -f %m "$latest_file" 2>/dev/null || echo 0)
+        mtime=$(stat -c %Y "$latest_file" 2>/dev/null || echo 0)
         age_h=$(( (now_epoch - mtime) / 3600 ))
         if (( age_h > max_age_hours[$btype] )); then
             _warn "backup:${btype}" "$btype backup is ${age_h}h old (threshold: ${max_age_hours[$btype]}h): $(basename "$latest_file") (path: $type_dir)"

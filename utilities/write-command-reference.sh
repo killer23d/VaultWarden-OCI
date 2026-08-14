@@ -34,7 +34,7 @@ VaultWarden-OCI Command Reference Writer
 
 USAGE:
     bash utilities/write-command-reference.sh [--help|-h]
-    bash utilities/generate-command-ref.sh
+    bash utilities/write-command-reference.sh
     make docs
 
 DESCRIPTION:

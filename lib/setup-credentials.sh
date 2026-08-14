@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # lib/setup-credentials.sh — root-only atomic credential handoffs.
-# VWOCI-PRR-PATCH-01
 #
 # This library deliberately does not set shell options. Entry points own them.
 # The audited delta schema has no canonical backup_passphrase field; therefore

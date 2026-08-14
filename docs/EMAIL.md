@@ -539,7 +539,6 @@ Git updates the checkout; systemd failure notifications use the managed installe
 
 ## Recovery-kit attachment
 
-<!-- VWOCI-PRR-PATCH-04 -->
 
 `EMAIL_MODE=direct` is the supported direct-SMTP mode and requires the runtime `smtp_password` secret.
 

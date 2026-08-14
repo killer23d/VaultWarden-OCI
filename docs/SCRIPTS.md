@@ -56,7 +56,7 @@ sudo ./setup.sh install \
   --email admin@example.com
 ```
 
-`setup-system.sh` fails closed outside Ubuntu 24.04 LTS Noble and outside amd64/arm64.
+`setup-system.sh` fails closed outside Ubuntu 24.04 LTS Noble and outside amd64/arm64. Production setup uses repository-pinned component/tool versions by default. The explicit `--use-latest` override remains available for operator-requested live-version runs and is outside the normal/golden path. For supported image/CrowdSec fields, that override writes literal `latest` values into the generated `.env`; later pulls therefore remain mutable until the operator re-pins those fields. Caddy and yq stay exact-pinned; SOPS resolves its latest stable release only for the setup-system invocation.
 
 ### `startup.sh`
 

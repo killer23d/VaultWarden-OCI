@@ -9,7 +9,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SUPPORTED_UBUNTU_VERSION_ID="24.04"
 SUPPORTED_UBUNTU_CODENAME="noble"
 SUPPORTED_HOST_MESSAGE="VaultWarden-OCI supports Ubuntu 24.04 LTS Noble only."
-SOPS_DEFAULT_VERSION="v3.13.2"
+SOPS_DEFAULT_VERSION="v3.13.3"
 YQ_VERSION="v4.53.3"
 YQ_SHA256_AMD64="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
 YQ_SHA256_ARM64="578648e463a11c1b6db6010cbf41eafed6bee79466fcffa1bb446672cf7945ea"
@@ -352,8 +352,8 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --use-latest          Resolve the latest SOPS release instead of the pinned default
-    --sops-version VER    Use a specific SOPS version (default: v3.13.2)
+    --use-latest          Explicit override: resolve the latest SOPS release
+    --sops-version VER    Use a specific SOPS version (default: v3.13.3)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --data-device DEV     Data volume device path
@@ -424,31 +424,28 @@ _parse_args() {
     fi
 }
 
-# Resolve the latest release tag from the GitHub API.
+# Resolve the latest stable release tag from the GitHub API for an explicit override.
 resolve_github_latest() {
     local repo="$1"
-    local tag
+    local tag api_tmpfile
 
-    local api_tmpfile
     api_tmpfile=$(mktemp -p "$TMP_WORKDIR" gh-latest.XXXXXXXXXX.json)
-
     if ! curl -fsSL --max-time 30 \
             "https://api.github.com/repos/${repo}/releases/latest" \
             -o "$api_tmpfile" 2>/dev/null; then
         log_error "Could not fetch release info for ${repo} from GitHub API."
-        log_error "Set SOPS_VERSION=vX.Y.Z via --sops-version or the environment to bypass."
+        log_error "Use --sops-version vX.Y.Z or SOPS_VERSION=vX.Y.Z to stay pinned."
         return 1
     fi
 
-    tag=$(jq -r '.tag_name // empty' "$api_tmpfile")
-
+    tag=$(jq -r ".tag_name // empty" "$api_tmpfile")
     if [[ -z "$tag" ]] || ! _validate_sops_version_format "$tag"; then
-        log_error "Could not resolve a valid release tag for ${repo}."
-        log_error "Set SOPS_VERSION=vX.Y.Z via --sops-version or the environment to bypass."
+        log_error "Could not resolve a valid stable release tag for ${repo}."
+        log_error "Use --sops-version vX.Y.Z or SOPS_VERSION=vX.Y.Z to stay pinned."
         return 1
     fi
 
-    echo "$tag"
+    printf "%s\n" "$tag"
 }
 
 validate_supported_host_preflight() {
@@ -701,7 +698,7 @@ install_yq() {
 install_sops() {
     local sops_ver="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
     if [[ "$USE_LATEST" == "true" ]]; then
-        log_info "SOPS --use-latest requested — resolving latest release from GitHub..."
+        log_info "SOPS --use-latest requested — resolving latest stable release from GitHub..."
         sops_ver=$(resolve_github_latest "getsops/sops") || return 1
     elif [[ -n "$sops_ver" ]]; then
         log_info "Using SOPS version: ${sops_ver}"

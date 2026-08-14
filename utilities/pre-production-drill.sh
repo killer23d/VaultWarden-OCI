@@ -135,7 +135,7 @@ drill_secrets() {
     _step_pass "age-key-exists: $key_file"
 
     local perms
-    perms=$(stat -c '%a' "$key_file" 2>/dev/null || stat -f '%OLp' "$key_file" 2>/dev/null || echo "???")
+    perms=$(stat -c '%a' "$key_file" 2>/dev/null || echo "???")
     if [[ "$perms" == "600" ]]; then
         _step_pass "age-key-perms: mode 600"
     else
@@ -307,10 +307,8 @@ drill_stack_restart_sequence() {
     fi
 
     log_info "  Checking all expected services are defined in compose file..."
-    # init-permissions has restart:"no" so it won't be running, but it must be
-    # defined. The 'docker compose config --services' output lists all defined
-    # services regardless of restart policy.
-    local expected_services=(vaultwarden caddy postfix init-permissions)
+    # These are the current production services in docker-compose.yml.example.
+    local expected_services=(vaultwarden caddy postfix)
     local defined_services
     defined_services=$(docker compose config --services 2>/dev/null || true)
     for svc in "${expected_services[@]}"; do

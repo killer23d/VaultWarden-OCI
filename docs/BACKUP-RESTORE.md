@@ -423,7 +423,6 @@ See [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md).
 
 ## Recovery artifacts and full-backup isolation
 
-<!-- VWOCI-PRR-PATCH-04 -->
 
 Setup credential handoffs and full recovery-kit documents live under `/root/vaultwarden-recovery/`, outside the project and normal state backup inputs. As defence in depth, one exclusion producer supplies both tar and `sudo make backup-manifest`. The manifest target executes the normal `backup.sh manifest` command, loads canonical installed configuration, and fails rather than printing default paths when that configuration cannot be read. The exclusions include configured backup/staging paths, live DB/WAL/SHM, runtime decrypted secrets, operational private keys inside archive source roots, restore scratch state, current and legacy recovery-kit names, setup-credential names, and `important-documents-*.zip`. The final archive-listing validator rejects forbidden recovery artifacts that still appear. The emergency tier keeps its separately documented key-bearing contract.
 

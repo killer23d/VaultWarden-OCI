@@ -149,8 +149,7 @@ _operation_prepare_lock_file() {
         umask "$old_umask"
     fi
 
-    current_mode="$(stat -c '%a' "$lock_path" 2>/dev/null \
-        || stat -f '%Lp' "$lock_path" 2>/dev/null || true)"
+    current_mode="$(stat -c '%a' "$lock_path" 2>/dev/null || true)"
     if [[ "$current_mode" != 660 ]]; then
         if ! chmod 0660 "$lock_path" 2>/dev/null; then
             _operation_log error "Cannot set operation lock mode 0660: ${lock_path}"
@@ -160,8 +159,7 @@ _operation_prepare_lock_file() {
     fi
 
     desired_owner="root:${desired_group}"
-    current_owner="$(stat -c '%U:%G' "$lock_path" 2>/dev/null \
-        || stat -f '%Su:%Sg' "$lock_path" 2>/dev/null || true)"
+    current_owner="$(stat -c '%U:%G' "$lock_path" 2>/dev/null || true)"
     if [[ "$current_owner" == "$desired_owner" ]]; then
         ownership_applied=true
     elif chown "$desired_owner" "$lock_path" 2>/dev/null; then
@@ -198,10 +196,8 @@ _operation_state_get() {
 _operation_state_file_is_trusted() {
     local file="$1" mode owner_uid
     [[ -f "$file" && ! -L "$file" ]] || return 1
-    mode="$(stat -c '%a' "$file" 2>/dev/null \
-        || stat -f '%Lp' "$file" 2>/dev/null || true)"
-    owner_uid="$(stat -c '%u' "$file" 2>/dev/null \
-        || stat -f '%u' "$file" 2>/dev/null || true)"
+    mode="$(stat -c '%a' "$file" 2>/dev/null || true)"
+    owner_uid="$(stat -c '%u' "$file" 2>/dev/null || true)"
     [[ "$mode" == "600" && "$owner_uid" == "$EUID" ]]
 }
 
@@ -278,17 +274,14 @@ _operation_lock_is_held() {
 _operation_path_identity() {
     local path="$1"
     [[ -f "$path" && ! -L "$path" ]] || return 1
-    stat -Lc '%d:%i' "$path" 2>/dev/null \
-        || stat -f '%d:%i' "$path" 2>/dev/null
+    stat -Lc '%d:%i' "$path" 2>/dev/null
 }
 
 _operation_lock_path_is_valid() {
     local path="$1" mode owner_uid
     [[ -f "$path" && ! -L "$path" ]] || return 1
-    mode="$(stat -c '%a' "$path" 2>/dev/null \
-        || stat -f '%Lp' "$path" 2>/dev/null || true)"
-    owner_uid="$(stat -c '%u' "$path" 2>/dev/null \
-        || stat -f '%u' "$path" 2>/dev/null || true)"
+    mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+    owner_uid="$(stat -c '%u' "$path" 2>/dev/null || true)"
     [[ "$mode" == "660" && "$owner_uid" =~ ^[0-9]+$ ]] || return 1
     if (( EUID == 0 )); then
         [[ "$owner_uid" == "0" ]] || return 1
@@ -297,11 +290,8 @@ _operation_lock_path_is_valid() {
 
 _operation_open_file_identity() {
     local pid="$1" fd="$2"
-    if [[ -e "/proc/${pid}/fd/${fd}" ]]; then
-        stat -Lc '%d:%i' "/proc/${pid}/fd/${fd}" 2>/dev/null
-    else
-        stat -f '%d:%i' "/dev/fd/${fd}" 2>/dev/null
-    fi
+    [[ -e "/proc/${pid}/fd/${fd}" ]] || return 1
+    stat -Lc '%d:%i' "/proc/${pid}/fd/${fd}" 2>/dev/null
 }
 
 _operation_open_file_matches_path() {
@@ -310,11 +300,7 @@ _operation_open_file_matches_path() {
     _operation_lock_path_is_valid "$path" || return 1
     path_identity="$(_operation_path_identity "$path")" || return 1
     fd_identity="$(_operation_open_file_identity "$pid" "$fd")" || return 1
-    if [[ -e "/proc/${pid}/fd/${fd}" ]]; then
-        [[ "$path_identity" == "$fd_identity" ]]
-    else
-        [[ "${path_identity#*:}" == "${fd_identity#*:}" ]]
-    fi
+    [[ "$path_identity" == "$fd_identity" ]]
 }
 
 _operation_lock_holder() {

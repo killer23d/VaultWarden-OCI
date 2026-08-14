@@ -86,13 +86,13 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Hardened data-volume, restore, and uninstall paths to fail closed when mount identity, migration state, archive requirements, or database integrity cannot be safely established.
 - Hardened backup encryption/verification metadata and emergency backup policy so archives containing operational key material cannot rely solely on that same operational Age recipient for protection.
 
----
 
-## [1.0.0] — 2026-03-26
+### Pre-release baseline
 
-### Added
+VaultWarden-OCI has not had a public release yet. The entries below describe the initial pre-release repository baseline.
 
-- Initial public release of VaultWarden-OCI.
+
+- Initial VaultWarden-OCI repository baseline.
 - Docker Compose stack: VaultWarden, Caddy, and Postfix.
 - SOPS and Age encryption for secrets at rest.
 - Automated backup system with database and full backups.
@@ -104,6 +104,3 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `pre-production-drill.sh` go-live readiness checker.
 - `restore-run.sh` interactive disaster-recovery tool.
 - `edit-secrets.sh` SOPS-backed secrets management CLI.
-
-[1.0.0]: https://github.com/killer23d/VaultWarden-OCI/releases/tag/v1.0.0
-[Unreleased]: https://github.com/killer23d/VaultWarden-OCI/compare/v1.0.0...HEAD

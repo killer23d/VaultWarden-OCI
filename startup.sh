@@ -182,7 +182,6 @@ warn_plaintext_secret_overrides() {
 # Valid modes are declared in _VW_DEFAULT_EMAIL_MODES (lib/defaults.sh).
 # Add a new mode there; no edit to this function is needed.
 check_email_config_consistency() {
-  # VWOCI-PRR-PATCH-03: canonical modes are declared in lib/defaults.sh.
   local email_mode="${EMAIL_MODE:-auto}"
   local secrets_dir="$DOCKER_SECRETS_DIR"
   case "$email_mode" in

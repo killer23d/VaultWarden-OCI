@@ -45,7 +45,6 @@ unset _VW_CONFIG_LIB_DIR
 
 _get_file_perms() {
     stat -c '%a' "$1" 2>/dev/null \
-        || stat -f '%OLp' "$1" 2>/dev/null \
         || printf 'unknown'
 }
 
@@ -440,11 +439,7 @@ _set_env_var() (
     trap 'exit 129' HUP
     trap 'exit 143' TERM
 
-    if metadata="$(stat -c '%a:%u:%g' -- "$file" 2>/dev/null)"; then
-        :
-    elif metadata="$(stat -f '%Lp:%u:%g' "$file" 2>/dev/null)"; then
-        :
-    else
+    if ! metadata="$(stat -c '%a:%u:%g' -- "$file" 2>/dev/null)"; then
         return 1
     fi
     IFS=: read -r mode uid gid <<< "$metadata"
