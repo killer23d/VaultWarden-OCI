@@ -74,8 +74,9 @@ USAGE:
 
 DESCRIPTION:
     Creates or updates .env and docker-compose.yml from project templates.
-    Safe to re-run (idempotent) — existing files are not overwritten unless
-    --force is passed. Called automatically by setup.sh during phase 3.
+    Safe to re-run (idempotent): matching .env and valid Compose are left
+    unchanged. Changed domain/email/storage/version intent regenerates .env;
+    --force forces .env and Compose regeneration. Called by setup.sh phase 3.
 
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
@@ -86,7 +87,7 @@ OPTIONS:
                           xcaddy builder tags require an explicit version.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: @DEFAULT_DATA_MOUNT@)
-    --force               Overwrite existing .env/docker-compose.yml
+    --force               Force regeneration of .env and docker-compose.yml
     --dry-run             Preview actions without executing
     --help, -h            Show this help
     --version, -V         Print the VaultWarden-OCI version and exit

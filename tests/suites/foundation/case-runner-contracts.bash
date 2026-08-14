@@ -480,6 +480,8 @@ grep -Fq "fields as 'latest' in .env; later pulls remain mutable until" setup.sh
     || fail 'setup help must disclose persistent mutable .env tags'
 grep -Fq "as 'latest' in .env. This persists across later pulls until" utilities/setup-env.sh \
     || fail 'setup-env help must disclose persistent mutable .env tags'
+! grep -Fq 'existing files are not overwritten unless' utilities/setup-env.sh \
+    || fail 'setup-env help must not deny idempotent regeneration when requested intent changes'
 grep -Fq 'run: ./tests/run-tests.sh all' .github/workflows/canonical-tests.yml \
     || fail 'CI must execute the canonical permanent test entrypoint exactly'
 
