@@ -18,7 +18,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply requested override and current pins
-        run: python3 .github/pr10-refresh-use-latest.py
+        run: |
+          python3 .github/pr10-refresh-use-latest.py
+          python3 .github/pr10-refresh-fix-tests.py
 
       - name: Regenerate command reference
         run: bash utilities/write-command-reference.sh
