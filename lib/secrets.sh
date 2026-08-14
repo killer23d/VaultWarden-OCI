@@ -1940,7 +1940,7 @@ _ork_generate_and_secure() {
 }
 
 offer_recovery_kit_export() {
-  # published only under /root/vaultwarden-recovery (or an explicit test override).
+  # Publish only under /root/vaultwarden-recovery (or an explicit test override).
   local auto_export="${1:-false}" recovery_dir stamp short_id recovery_file email_rc=0
   recovery_dir="$(_prepare_recovery_dir)" || return 1
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
