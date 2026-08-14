@@ -43,4 +43,4 @@ These decisions are intentional and should not be reopened as generic cleanup wo
 
 ## Version and host policy
 
-The project is pre-release. `VERSION` is a development identifier until the first real release. Production setup consumes source-controlled version pins and does not offer a mutable `--use-latest` mode. Runtime host code targets Ubuntu 24.04 LTS Noble on amd64/arm64 and may use its GNU toolchain directly.
+The project is pre-release. `VERSION` is a development identifier until the first real release. Production setup consumes source-controlled version pins by default. An explicit `--use-latest` override remains available for operator-requested live-version runs, but it is outside the normal/golden path. Runtime host code targets Ubuntu 24.04 LTS Noble on amd64/arm64 and may use its GNU toolchain directly.

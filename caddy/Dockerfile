@@ -24,8 +24,8 @@ FROM caddy:${CADDY_VERSION}-alpine
 
 # Dedicated non-root user for the Caddy runtime.
 # UID/GID 2000 is reserved for Caddy across this project; do not reuse for
-# other services. init-permissions chowns /data/caddy, /config/caddy, and
-# the log files to this UID before Caddy starts.
+# other services. Host-side startup/setup prepares the persistent Caddy
+# data, config, and log ownership for this UID before Caddy starts.
 RUN addgroup -g 2000 caddy && \
     adduser -D -u 2000 -G caddy caddy
 

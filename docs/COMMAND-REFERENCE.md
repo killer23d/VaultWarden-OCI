@@ -128,7 +128,10 @@ FULL SETUP OPTIONS (used after install):
   --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
-                      to rotate them.
+                      to rotate them. Does NOT imply --use-latest.
+  --use-latest        Explicit override: use current live upstream component versions
+                      for this run instead of the repository-pinned normal defaults.
+                      Caddy remains pinned because xcaddy builds require a version tag.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       The existing operational Age key is retained, but current
@@ -1263,6 +1266,8 @@ OPTIONS:
     --reconcile-email    Reconcile only the managed email notification files.
     --dry-run            Print what would happen without changing files.
     --force              Re-run all phases even if already applied.
+    --use-latest         Explicit override: install current repository candidates
+                         instead of the source-controlled component pins.
     --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
     --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
                          allowlist.
@@ -1312,6 +1317,9 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
+    --use-latest          Explicit override: set supported component versions to latest;
+                          Caddy remains pinned because xcaddy builder tags require
+                          an explicit version.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --force               Overwrite existing .env/docker-compose.yml
@@ -1483,7 +1491,8 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --sops-version VER    Use a specific SOPS version (default: v3.13.2)
+    --use-latest          Explicit override: resolve the latest SOPS release
+    --sops-version VER    Use a specific SOPS version (default: v3.13.3)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --data-device DEV     Data volume device path

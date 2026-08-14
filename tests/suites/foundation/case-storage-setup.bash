@@ -882,7 +882,7 @@ assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-asse
 assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-asset s390x
 assert_fails env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" yq-release-asset unknown
 
-assert_output "v3.13.2" \
+assert_output "v3.13.3" \
     env VAULTWARDEN_TEST_ARCH_HELPERS=1 "$setup_system" sops-default-version
 
 write_os_release() {
@@ -940,15 +940,13 @@ deps_line="$(awk '/^[[:space:]]*install_dependencies$/{print NR; exit}' "$setup_
 (( preflight_line < deps_line )) \
     || fail "supported-host preflight must run before install_dependencies"
 
-for removed_latest_surface in \
-    "$PROJECT_ROOT/setup.sh" \
-    "$setup_system" \
-    "$PROJECT_ROOT/utilities/setup-env.sh" \
-    "$setup_crowdsec"; do
-    if grep -Fq -- '--use-latest' "$removed_latest_surface"; then
-        fail "removed --use-latest production contract remains in $removed_latest_surface"
-    fi
-done
+if ! bash "$setup_system" --use-latest --sops-version v3.13.3 >/tmp/vw-sops-ambiguous.$$ 2>&1; then
+    grep -Fq "cannot be combined" /tmp/vw-sops-ambiguous.$$ \
+        || fail "ambiguous --use-latest + --sops-version failure message missing"
+else
+    fail "ambiguous --use-latest + --sops-version unexpectedly succeeded"
+fi
+rm -f /tmp/vw-sops-ambiguous.$$
 
 make_yq_stub() {
     local path="$1" mode="$2" version="${3:-v4.53.3}"

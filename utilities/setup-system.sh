@@ -9,7 +9,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SUPPORTED_UBUNTU_VERSION_ID="24.04"
 SUPPORTED_UBUNTU_CODENAME="noble"
 SUPPORTED_HOST_MESSAGE="VaultWarden-OCI supports Ubuntu 24.04 LTS Noble only."
-SOPS_DEFAULT_VERSION="v3.13.2"
+SOPS_DEFAULT_VERSION="v3.13.3"
 YQ_VERSION="v4.53.3"
 YQ_SHA256_AMD64="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
 YQ_SHA256_ARM64="578648e463a11c1b6db6010cbf41eafed6bee79466fcffa1bb446672cf7945ea"
@@ -317,9 +317,15 @@ source "${PROJECT_ROOT}/lib/operations.sh"
 # shellcheck source=../lib/defaults.sh
 source "${PROJECT_ROOT}/lib/defaults.sh"
 
+_SOPS_VERSION_ENV_SET=false
+if [[ -n "${SOPS_VERSION+x}" && -n "${SOPS_VERSION:-}" ]]; then
+    _SOPS_VERSION_ENV_SET=true
+fi
 SOPS_VERSION="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
+SOPS_VERSION_CLI_SET=false
 SKIP_DEPS=false
 AUTO_MODE=false
+USE_LATEST=false
 DRY_RUN=false
 FORCE=false
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
@@ -329,7 +335,7 @@ SUPPORTED_HOST_ARCH=""
 SUPPORTED_HOST_ARCHIVE_URL=""
 
 # Exported so that any sub-scripts invoked later can inherit these flags.
-export FORCE
+export USE_LATEST FORCE
 
 show_help() {
     cat <<'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
@@ -346,7 +352,8 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --sops-version VER    Use a specific SOPS version (default: v3.13.2)
+    --use-latest          Explicit override: resolve the latest SOPS release
+    --sops-version VER    Use a specific SOPS version (default: v3.13.3)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --data-device DEV     Data volume device path
@@ -374,6 +381,7 @@ _parse_args() {
         case "$1" in
             --skip-deps)    SKIP_DEPS=true ;;
             --auto)         AUTO_MODE=true ;;
+            --use-latest)   USE_LATEST=true ;;
             --dry-run)      DRY_RUN=true ;;
             --force)        FORCE=true ;;
             --version|-V)
@@ -384,6 +392,7 @@ _parse_args() {
                 shift
                 _require_cli_value "--sops-version" "${1-}"
                 SOPS_VERSION="$1"
+                SOPS_VERSION_CLI_SET=true
                 ;;
             --data-device)
                 shift
@@ -405,8 +414,39 @@ _parse_args() {
         shift
     done
 
+    if [[ "$USE_LATEST" == "true" && "$SOPS_VERSION_CLI_SET" == "true" ]]; then
+        log_error "--use-latest cannot be combined with --sops-version; choose one SOPS version source."
+        exit 1
+    fi
+    if [[ "$USE_LATEST" == "true" && "$_SOPS_VERSION_ENV_SET" == "true" ]]; then
+        log_error "--use-latest cannot be combined with SOPS_VERSION from the environment; choose one SOPS version source."
+        exit 1
+    fi
 }
 
+# Resolve the latest stable release tag from the GitHub API for an explicit override.
+resolve_github_latest() {
+    local repo="$1"
+    local tag api_tmpfile
+
+    api_tmpfile=$(mktemp -p "$TMP_WORKDIR" gh-latest.XXXXXXXXXX.json)
+    if ! curl -fsSL --max-time 30 \
+            "https://api.github.com/repos/${repo}/releases/latest" \
+            -o "$api_tmpfile" 2>/dev/null; then
+        log_error "Could not fetch release info for ${repo} from GitHub API."
+        log_error "Use --sops-version vX.Y.Z or SOPS_VERSION=vX.Y.Z to stay pinned."
+        return 1
+    fi
+
+    tag=$(jq -r ".tag_name // empty" "$api_tmpfile")
+    if [[ -z "$tag" ]] || ! _validate_sops_version_format "$tag"; then
+        log_error "Could not resolve a valid stable release tag for ${repo}."
+        log_error "Use --sops-version vX.Y.Z or SOPS_VERSION=vX.Y.Z to stay pinned."
+        return 1
+    fi
+
+    printf "%s\n" "$tag"
+}
 
 validate_supported_host_preflight() {
     local result
@@ -657,7 +697,10 @@ install_yq() {
 
 install_sops() {
     local sops_ver="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
-    if [[ -n "$sops_ver" ]]; then
+    if [[ "$USE_LATEST" == "true" ]]; then
+        log_info "SOPS --use-latest requested — resolving latest stable release from GitHub..."
+        sops_ver=$(resolve_github_latest "getsops/sops") || return 1
+    elif [[ -n "$sops_ver" ]]; then
         log_info "Using SOPS version: ${sops_ver}"
     else
         log_error "Internal error: SOPS version is empty; expected pinned default ${SOPS_DEFAULT_VERSION}."

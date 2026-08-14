@@ -438,12 +438,16 @@ done <<EOF_TESTS
 $(find tests -maxdepth 1 -type f -name 'test-*.sh' -print | sort)
 EOF_TESTS
 
-grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.2"' utilities/setup-system.sh \
+grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.3"' utilities/setup-system.sh \
     || fail 'setup-system must pin the normal SOPS default'
 grep -Fq 'SOPS_VERSION="$1"' utilities/setup-system.sh \
     || fail 'setup-system must retain explicit --sops-version overrides'
+grep -Fq 'SOPS_VERSION_CLI_SET=true' utilities/setup-system.sh \
+    || fail 'setup-system must track explicit --sops-version ownership'
 grep -Fq '[[ "$SOPS_VERSION_ENV_SET" == "true" ]] && _sops_flags=(--sops-version "$SOPS_VERSION")' setup.sh \
     || fail 'setup.sh must pass explicit SOPS_VERSION overrides to setup-system'
+awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq 'if [[ "$USE_LATEST" == "true" ]]' \
+    || fail 'SOPS latest resolution must be owned by explicit --use-latest'
 awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '_sops_resolved_version' \
     || fail 'install_sops must inspect the actual installed SOPS version before reuse'
 awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '[[ "$installed_sops_ver" == "$sops_ver" ]]' \

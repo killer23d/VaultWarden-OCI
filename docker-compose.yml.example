@@ -19,7 +19,7 @@ services:
   # -------------------- Core service: VaultWarden --------------------
   vaultwarden:
     container_name: vaultwarden_app
-    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.36.0}
+    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.37.1}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     # memswap_limit equal to mem_limit disables swap for this container, preventing

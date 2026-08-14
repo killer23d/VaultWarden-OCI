@@ -5,13 +5,14 @@
 set -euo pipefail
 
 # Set SOPS_VERSION to use a specific release. When unset or blank, setup uses
-# the repository-pinned production default.
+# the repository-pinned production default. Pass --use-latest only when an
+# operator explicitly wants mutable upstream versions for this run.
 #
 # Examples:
 #   SOPS_VERSION="v3.9.4"
 #   SOPS_VERSION=""
 #
-SOPS_DEFAULT_VERSION="v3.13.2"
+SOPS_DEFAULT_VERSION="v3.13.3"
 SOPS_VERSION_ENV_SET=false
 if [[ -n "${SOPS_VERSION+x}" && -n "${SOPS_VERSION:-}" ]]; then
     SOPS_VERSION_ENV_SET=true
@@ -145,6 +146,7 @@ source "${SCRIPT_DIR}/lib/storage.sh"
 DOMAIN=""
 ADMIN_EMAIL=""
 AUTO_MODE=false
+USE_LATEST=false
 SKIP_DEPS=false
 FORCE=false
 DRY_RUN=false
@@ -179,7 +181,10 @@ FULL SETUP OPTIONS (used after install):
   --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
-                      to rotate them.
+                      to rotate them. Does NOT imply --use-latest.
+  --use-latest        Explicit override: use current live upstream component versions
+                      for this run instead of the repository-pinned normal defaults.
+                      Caddy remains pinned because xcaddy builds require a version tag.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       The existing operational Age key is retained, but current
@@ -286,6 +291,7 @@ while [[ $# -gt 0 ]]; do
         --domain)       _require_cli_value "$1" "${2-}"; DOMAIN="$2";              shift 2 ;;
         --email)        _require_cli_value "$1" "${2-}"; ADMIN_EMAIL="$2";         shift 2 ;;
         --auto)         AUTO_MODE=true;            shift ;;
+        --use-latest)   USE_LATEST=true;           shift ;;
         --skip-deps)    SKIP_DEPS=true;            shift ;;
         --force)        FORCE=true;                shift ;;
         --dry-run)      DRY_RUN=true;              shift ;;
@@ -297,6 +303,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$USE_LATEST" == "true" && "$SOPS_VERSION_ENV_SET" == "true" ]]; then
+    log_error "--use-latest cannot be combined with SOPS_VERSION from the environment; choose one SOPS version source."
+    exit 1
+fi
 
 
 # ---------------------------------------------------------------------------
@@ -527,17 +537,20 @@ main() {
 
     _verify_required_utilities
 
-    if [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
+    if [[ "$USE_LATEST" == "true" ]]; then
+        log_info "SOPS version: will resolve latest from GitHub because --use-latest was requested"
+    elif [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
         log_info "SOPS version requested: ${SOPS_VERSION}"
     else
         log_info "SOPS version pinned default: ${SOPS_VERSION}"
     fi
 
-    local _dry=() _force=() _auto=() _skip_deps=()
+    local _dry=() _force=() _auto=() _skip_deps=() _use_latest=()
     [[ "$DRY_RUN"   == "true" ]] && _dry=(--dry-run)
     [[ "$FORCE"     == "true" ]] && _force=(--force)
     [[ "$AUTO_MODE" == "true" ]] && _auto=(--auto)
     [[ "$SKIP_DEPS" == "true" ]] && _skip_deps=(--skip-deps)
+    [[ "$USE_LATEST" == "true" ]] && _use_latest=(--use-latest)
 
     local _dev_flags=()
     [[ "$DATA_VOLUME_DEVICE_EXPLICIT" == "true" ]] && _dev_flags+=(--data-device "$DATA_VOLUME_DEVICE")
@@ -549,7 +562,7 @@ main() {
     operation_set_phase "1" "System setup"
     log_phase 1 6 "System setup"
     "${SCRIPT_DIR}/utilities/setup-system.sh" \
-        "${_auto[@]}" "${_skip_deps[@]}" "${_dry[@]}" "${_force[@]}" \
+        "${_auto[@]}" "${_skip_deps[@]}" "${_use_latest[@]}" "${_dry[@]}" "${_force[@]}" \
         "${_dev_flags[@]}" "${_sops_flags[@]}" \
         || _phase_failed 1 "System setup"             "Check missing packages: sudo apt-get update && sudo apt-get install -y docker.io age sops 7zip python3-argon2 python3-bcrypt"             "Re-run this phase: sudo ./utilities/setup-system.sh"             "If dependencies are already installed, re-run setup with --skip-deps"
 
@@ -563,7 +576,7 @@ main() {
     log_phase 3 6 "Environment configuration"
     "${SCRIPT_DIR}/utilities/setup-env.sh" \
         --domain "$DOMAIN" --email "$ADMIN_EMAIL" \
-        "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
+        "${_use_latest[@]}" "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
         || _phase_failed 3 "Environment configuration"             "Verify domain/email values and .env permissions."             "Re-run this phase: sudo ./utilities/setup-env.sh --domain ${DOMAIN} --email ${ADMIN_EMAIL}"
 
     operation_set_phase "4" "Secrets bootstrap"
