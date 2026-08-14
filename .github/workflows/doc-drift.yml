@@ -213,8 +213,8 @@ jobs:
             echo "STALE CONFIG: BUSYBOX_VERSION remains on an active production surface"
             FAIL=1
           fi
-          if grep -Fn -- 'BUSYBOX_VERSION=latest' utilities/setup-env.sh; then
-            echo "STALE CONFIG: setup-env still renders or requires mutable BusyBox state"
+          if grep -Fn -- 'BUSYBOX_VERSION' utilities/setup-env.sh; then
+            echo "STALE CONFIG: setup-env still owns the removed BusyBox version surface"
             FAIL=1
           fi
           if ! grep -Fq 'ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.37.1}' docker-compose.yml.example; then
