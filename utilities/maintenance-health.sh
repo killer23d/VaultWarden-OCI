@@ -122,8 +122,7 @@ _acquire_health_lock() {
         log_error "Health coordination lock is not a regular file: $lock_path"
         return 3
     fi
-    owner_uid="$(stat -c '%u' "$lock_path" 2>/dev/null \
- || true)"
+    owner_uid="$(stat -c '%u' "$lock_path" 2>/dev/null || true)"
     if [[ "$owner_uid" != "$EUID" ]]; then
         log_error "Health coordination lock owner UID is ${owner_uid:-unknown}, expected ${EUID}: $lock_path"
         return 3
@@ -136,8 +135,7 @@ _acquire_health_lock() {
         log_error "Cannot open health coordination lock: $lock_path"
         return 3
     fi
-    open_owner_uid="$(stat -Lc '%u' "/proc/${BASHPID}/fd/${fd}" 2>/dev/null \
- || true)"
+    open_owner_uid="$(stat -Lc '%u' "/proc/${BASHPID}/fd/${fd}" 2>/dev/null || true)"
     if [[ "$open_owner_uid" != "$EUID" ]]; then
         { eval "exec ${fd}>&-"; } 2>/dev/null || true
         log_error "Opened health coordination lock owner UID is ${open_owner_uid:-unknown}, expected ${EUID}: $lock_path"

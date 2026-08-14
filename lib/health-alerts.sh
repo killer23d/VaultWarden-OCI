@@ -83,8 +83,7 @@ _state_owner_uid() {
 _state_file_identity() {
     local path="$1" identity
 
-    identity="$(stat -Lc '%d:%i' -- "$path" 2>/dev/null \
-        || stat -Lf '%d:%i' "$path" 2>/dev/null)" || return 1
+    identity="$(stat -Lc '%d:%i' -- "$path" 2>/dev/null)" || return 1
     [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
     printf '%s' "$identity"
 }
@@ -95,17 +94,9 @@ _state_open_file_matches_path() {
     # $$ remains the parent shell PID inside Bash subshells; BASHPID identifies
     # the process that actually owns the dynamically opened descriptor.
     shell_pid="${BASHPID:-$$}"
-    if [[ -e "/proc/${shell_pid}/fd/${fd}" ]]; then
-        path_identity="$(_state_file_identity "$path")" || return 1
-        fd_identity="$(_state_file_identity "/proc/${shell_pid}/fd/${fd}")" || return 1
-    elif [[ -e "/dev/fd/${fd}" ]]; then
-        # Development fallback for BSD hosts. The supported Ubuntu runtime
-        # uses the device-and-inode comparison above through /proc.
-        path_identity="$(stat -c '%i' -- "$path" 2>/dev/null)" || return 1
-        fd_identity="$(stat -Lf '%i' "/dev/fd/${fd}" 2>/dev/null)" || return 1
-    else
-        return 1
-    fi
+    [[ -e "/proc/${shell_pid}/fd/${fd}" ]] || return 1
+    path_identity="$(_state_file_identity "$path")" || return 1
+    fd_identity="$(_state_file_identity "/proc/${shell_pid}/fd/${fd}")" || return 1
     [[ -n "$path_identity" && "$path_identity" == "$fd_identity" ]]
 }
 

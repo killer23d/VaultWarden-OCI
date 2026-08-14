@@ -364,8 +364,7 @@ RESTORE_PREVENT_AUTOSTART=false
 : "${RESTORE_SAVED_ACK_ATTEMPTS:=3}"
 
 _restore_workspace_identity() {
-    stat -c '%d:%i:%u:%a' "$1" 2>/dev/null \
-
+    stat -c '%d:%i:%u:%a' "$1" 2>/dev/null
 }
 
 _restore_workspace_is_owned() {
