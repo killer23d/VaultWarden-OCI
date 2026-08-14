@@ -1,55 +1,51 @@
-name: PR10 normalize checksum branch
+name: PR10 normalize checksum
+
 on:
   push:
-    branches: [agent/pr10-platform-simplification]
+    branches:
+      - agent/pr10-platform-simplification
+
 permissions:
   contents: write
+
 jobs:
   normalize:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: agent/pr10-platform-simplification
-      - shell: bash
+      - name: Normalize checksum function
+        shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
-          p=Path('lib/crypto.sh')
-          s=p.read_text()
-          old='''    local checksum
-    if has_command sha256sum; then
-        if ! checksum=$(sha256sum "$file" | cut -d' ' -f1); then
-            log_error "Failed to calculate SHA256 checksum: $file"
-            return 1
-        fi
-    elif has_command shasum; then
-        if ! checksum=$(shasum -a 256 "$file" | cut -d' ' -f1); then
-            log_error "Failed to calculate SHA256 checksum: $file"
-            return 1
-        fi
-    else
-        log_error "No SHA256 calculator available (tried sha256sum and shasum)"
-        return 1
-    fi
+          p = Path('lib/crypto.sh')
+          s = p.read_text()
+          a = s.index('calculate_sha256() {')
+          b = s.index('\nverify_sha256() {', a)
+          body = """calculate_sha256() {
+              local file=\"$1\"
 
-    printf '%s\\n' "$checksum"
-    return 0'''
-          new='''    local checksum
-    if has_command sha256sum; then
-        checksum=$(sha256sum "$file" | cut -d' ' -f1)
-    elif has_command shasum; then
-        checksum=$(shasum -a 256 "$file" | cut -d' ' -f1)
-    else
-        log_error "No SHA256 utility available (sha256sum or shasum)"
-        return 1
-    fi
+              if [[ ! -f \"$file\" ]]; then
+                  log_error \"File not found for checksum: $file\"
+                  return 1
+              fi
 
-    printf '%s\\n' "$checksum"'''
-          if old not in s:
-              raise SystemExit('current checksum block not found')
-          p.write_text(s.replace(old,new,1))
+              local checksum
+              if has_command sha256sum; then
+                  checksum=$(sha256sum \"$file\" | cut -d' ' -f1)
+              elif has_command shasum; then
+                  checksum=$(shasum -a 256 \"$file\" | cut -d' ' -f1)
+              else
+                  log_error \"No SHA256 utility available (sha256sum or shasum)\"
+                  return 1
+              fi
+
+              printf '%s\\n' \"$checksum\"
+          }
+          """
+          p.write_text(s[:a] + body + s[b+1:])
           PY
           git rm .github/workflows/pr10-normalize-crypto.yml
           git config user.name github-actions[bot]
