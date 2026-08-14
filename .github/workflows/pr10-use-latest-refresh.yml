@@ -17,28 +17,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Keep CrowdSec continuation consistent with latest override
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('setup.sh')
-          text = p.read_text()
-          old = '''    if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
-'''
-          new = '''    local _crowdsec_setup_cmd="sudo ./utilities/setup-crowdsec.sh"
-    [[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"
-
-    if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
-'''
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one CrowdSec prompt block, found {text.count(old)}')
-          text = text.replace(old, new, 1)
-          old_cmd = '        log_info "  sudo ./utilities/setup-crowdsec.sh"'
-          if text.count(old_cmd) != 2:
-              raise SystemExit(f'expected two CrowdSec command lines, found {text.count(old_cmd)}')
-          text = text.replace(old_cmd, '        log_info "  ${_crowdsec_setup_cmd}"')
-          p.write_text(text)
-          PY
+      - name: Apply CrowdSec continuation audit fix
+        run: python3 .github/pr10-fix-crowdsec-guidance.py
 
       - name: Regenerate command reference
         run: bash utilities/write-command-reference.sh
