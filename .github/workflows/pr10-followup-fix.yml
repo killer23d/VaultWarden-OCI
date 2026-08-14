@@ -1,0 +1,75 @@
+name: PR10 Follow-up Fix
+
+on:
+  push:
+    branches:
+      - agent/pr10-platform-simplification
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: agent/pr10-platform-simplification
+          fetch-depth: 0
+
+      - name: Align operator docs and regression contract
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          docs = Path('docs/SCRIPTS.md')
+          text = docs.read_text()
+          old = "`setup-system.sh` fails closed outside Ubuntu 24.04 LTS Noble and outside amd64/arm64. Production setup uses repository-pinned component/tool versions; mutable latest-version resolution is not part of the operator interface."
+          new = "`setup-system.sh` fails closed outside Ubuntu 24.04 LTS Noble and outside amd64/arm64. Production setup uses repository-pinned component/tool versions by default. The explicit `--use-latest` override remains available for operator-requested live-version runs and is outside the normal/golden path."
+          if text.count(old) != 1:
+              raise SystemExit('expected exactly one stale docs/SCRIPTS.md version-policy sentence')
+          docs.write_text(text.replace(old, new, 1))
+
+          test = Path('tests/suites/foundation/case-runner-contracts.bash')
+          text = test.read_text()
+          marker = """for latest_surface in setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh; do
+              grep -Fq -- '--use-latest' \"$latest_surface\" \\
+                  || fail \"explicit --use-latest override missing from $latest_surface\"
+          done
+
+          grep -Fq '\"python3-yaml\"' utilities/setup-system.sh \\
+          """
+          replacement = """for latest_surface in setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh; do
+              grep -Fq -- '--use-latest' \"$latest_surface\" \\
+                  || fail \"explicit --use-latest override missing from $latest_surface\"
+          done
+          grep -Fq 'Production setup uses repository-pinned component/tool versions by default.' docs/SCRIPTS.md \\
+              || fail 'operator docs must state that normal production setup is source-pinned'
+          grep -Fq 'The explicit `--use-latest` override remains available for operator-requested live-version runs and is outside the normal/golden path.' docs/SCRIPTS.md \\
+              || fail 'operator docs must retain the explicit --use-latest override contract'
+          ! grep -Fq 'mutable latest-version resolution is not part of the operator interface' docs/SCRIPTS.md \\
+              || fail 'operator docs must not deny the supported --use-latest override'
+
+          grep -Fq '\"python3-yaml\"' utilities/setup-system.sh \\
+          """
+          if text.count(marker) != 1:
+              raise SystemExit('expected exactly one latest-surface repository-interface marker')
+          test.write_text(text.replace(marker, replacement, 1))
+          PY
+
+      - name: Validate focused repository interface
+        shell: bash
+        run: |
+          VW_TEST_CASE_MODE=repository-interface bash tests/suites/foundation/case-runner-contracts.bash
+
+      - name: Commit correction
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/SCRIPTS.md tests/suites/foundation/case-runner-contracts.bash
+          git diff --cached --check
+          git commit -m 'docs: align use-latest operator policy'
+          git push origin HEAD:agent/pr10-platform-simplification
