@@ -603,6 +603,9 @@ main() {
         "Re-run: sudo ./utilities/setup-firewall.sh --phase iptables --auto"
     fi
 
+    local _crowdsec_setup_cmd="sudo ./utilities/setup-crowdsec.sh"
+    [[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"
+
     if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
         log_info ""
         log_info "════════════════════════════════════════════════"
@@ -616,7 +619,7 @@ main() {
         log_info ""
         log_info "Then run the CrowdSec setup:"
         log_info ""
-        log_info "  sudo ./utilities/setup-crowdsec.sh"
+        log_info "  ${_crowdsec_setup_cmd}"
         log_info ""
         press_enter_to_continue " Press [Enter] to continue with the post-install summary, or Ctrl-C to exit now..."
         _cs_prompt_ack=""
@@ -626,7 +629,7 @@ main() {
         log_info "  sudo ./edit-secrets.sh rotate cloudflare_zone_id"
         log_info "  sudo ./edit-secrets.sh rotate cf_account_id"
         log_info "  sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
-        log_info "  sudo ./utilities/setup-crowdsec.sh"
+        log_info "  ${_crowdsec_setup_cmd}"
     fi
 
     export SETUP_SECRETS_PREEXISTED=false
