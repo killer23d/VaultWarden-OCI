@@ -1,0 +1,31 @@
+name: PR10 strip setup mutable status
+on:
+  push:
+    branches: [agent/pr10-platform-simplification]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: agent/pr10-platform-simplification
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('setup.sh')
+          s=p.read_text()
+          marker='    if [[ "$USE_LATEST" == "true" ]]; then\n        log_info "SOPS version: will resolve latest from GitHub because --use-latest was requested"\n'
+          a=s.index(marker)
+          b=s.index('\n\n    local _dry=', a)
+          replacement='    if [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then\n        log_info "SOPS version requested: ${SOPS_VERSION}"\n    else\n        log_info "SOPS version pinned default: ${SOPS_VERSION}"\n    fi'
+          p.write_text(s[:a]+replacement+s[b:])
+          PY
+          git rm .github/workflows/pr10-strip-setup-status.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "cleanup: drop mutable latest setup status path"
+          git push origin HEAD:agent/pr10-platform-simplification
