@@ -317,12 +317,7 @@ source "${PROJECT_ROOT}/lib/operations.sh"
 # shellcheck source=../lib/defaults.sh
 source "${PROJECT_ROOT}/lib/defaults.sh"
 
-_SOPS_VERSION_ENV_SET=false
-if [[ -n "${SOPS_VERSION+x}" && -n "${SOPS_VERSION:-}" ]]; then
-    _SOPS_VERSION_ENV_SET=true
-fi
 SOPS_VERSION="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
-SOPS_VERSION_CLI_SET=false
 SKIP_DEPS=false
 AUTO_MODE=false
 DRY_RUN=false
@@ -389,7 +384,6 @@ _parse_args() {
                 shift
                 _require_cli_value "--sops-version" "${1-}"
                 SOPS_VERSION="$1"
-                SOPS_VERSION_CLI_SET=true
                 ;;
             --data-device)
                 shift

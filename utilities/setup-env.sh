@@ -148,8 +148,7 @@ _parse_args() {
 }
 
 detect_ssh_log_path() {
-    printf '%s
-' '/var/log/auth.log'
+    printf '%s\n' '/var/log/auth.log'
 }
 
 _make_owned_temp() {
