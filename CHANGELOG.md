@@ -104,6 +104,5 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `pre-production-drill.sh` go-live readiness checker.
 - `restore-run.sh` interactive disaster-recovery tool.
 - `edit-secrets.sh` SOPS-backed secrets management CLI.
-
 [1.0.0]: https://github.com/killer23d/VaultWarden-OCI/releases/tag/v1.0.0
 [Unreleased]: https://github.com/killer23d/VaultWarden-OCI/compare/v1.0.0...HEAD
