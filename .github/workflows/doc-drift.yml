@@ -86,7 +86,6 @@ jobs:
             "--puid"
             "--pgid"
             "simple_verify_age_key"
-            "init-permissions"
             "utilities/generate-command-ref.sh"
             "VWOCI-PRR-PATCH"
           )
@@ -99,6 +98,10 @@ jobs:
               FAIL=1
             fi
           done
+          if grep -Fn -- 'init-permissions' utilities/pre-production-drill.sh docker-compose.yml.example; then
+            echo "STALE COMPOSE SERVICE FOUND: init-permissions"
+            FAIL=1
+          fi
           [[ $FAIL -eq 0 ]] || exit 1
 
       - name: Verify Makefile targets referenced in docs exist
