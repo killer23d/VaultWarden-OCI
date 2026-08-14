@@ -1,0 +1,42 @@
+name: PR10 product-only replay
+
+on:
+  push:
+    branches:
+      - agent/pr10-platform-simplification
+
+permissions:
+  contents: write
+
+jobs:
+  replay:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: agent/pr10-platform-simplification
+          fetch-depth: 0
+      - name: Replay product changes only
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('.github/workflows/pr10-apply.yml').read_text())
+          run_steps = [step for step in wf['jobs']['apply']['steps'] if 'run' in step]
+          if len(run_steps) != 4:
+              raise SystemExit(f'expected 4 run steps, got {len(run_steps)}')
+          for index, step in enumerate(run_steps[:3]):
+              env = os.environ.copy()
+              if index == 2:
+                  env['DOCKER_PROJECT_LABEL'] = 'ci'
+              subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], check=True, env=env)
+          PY
+          # Workflow changes are published separately through the GitHub connector.
+          git restore --staged --worktree .github/workflows
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "cleanup: narrow production platform and refresh operator contract"
+          git push origin HEAD:agent/pr10-platform-simplification
