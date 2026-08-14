@@ -629,7 +629,7 @@ _preflight_backup_payload_capacity() {
     fi
 
     local shm_type etc_mb=0 file bytes
-    shm_type="$(stat -f -c '%T' /dev/shm 2>/dev/null || true)"
+    shm_type="$(stat --file-system --format='%T' /dev/shm 2>/dev/null || true)"
     [[ "$shm_type" == tmpfs ]] || {
         log_error "Emergency backup requires tmpfs staging at /dev/shm; detected: ${shm_type:-unavailable}." >&2
         log_error "Refusing to place an unencrypted secret-bearing emergency archive on persistent disk." >&2

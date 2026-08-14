@@ -1900,7 +1900,7 @@ _restore_payload_parent() {
 
 _restore_create_control_workspace() {
     local parent="/dev/shm" fs_type
-    fs_type="$(stat -f -c '%T' /dev/shm 2>/dev/null || true)"
+    fs_type="$(stat --file-system --format='%T' /dev/shm 2>/dev/null || true)"
     if [[ "$fs_type" != "tmpfs" ]]; then
         parent="${TMPDIR:-/tmp}"
         log_warn "/dev/shm tmpfs is unavailable; small restore control files will use: $parent"
