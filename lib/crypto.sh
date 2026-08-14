@@ -707,24 +707,16 @@ calculate_sha256() {
 
     local checksum
     if has_command sha256sum; then
-        if ! checksum=$(sha256sum "$file" | cut -d' ' -f1); then
-            log_error "Failed to calculate SHA256 checksum: $file"
-            return 1
-        fi
+        checksum=$(sha256sum "$file" | cut -d' ' -f1)
     elif has_command shasum; then
-        if ! checksum=$(shasum -a 256 "$file" | cut -d' ' -f1); then
-            log_error "Failed to calculate SHA256 checksum: $file"
-            return 1
-        fi
+        checksum=$(shasum -a 256 "$file" | cut -d' ' -f1)
     else
-        log_error "No SHA256 calculator available (tried sha256sum and shasum)"
+        log_error "No SHA256 utility available (sha256sum or shasum)"
         return 1
     fi
 
     printf '%s\n' "$checksum"
-    return 0
 }
-
 verify_sha256() {
     local file="$1"
     local expected_checksum="$2"
