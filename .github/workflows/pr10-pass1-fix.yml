@@ -19,45 +19,8 @@ jobs:
       - name: Apply pass 1 fixes
         shell: bash
         run: |
-          python3 <<'PY'
-          from pathlib import Path
-
-          crypto = Path('lib/crypto.sh')
-          lines = crypto.read_text().splitlines()
-          needle = '    checksum=$(sha256sum -- "$file" | cut -d\' \' -f1) || return 1'
-          try:
-              i = lines.index(needle)
-          except ValueError:
-              raise SystemExit('checksum assignment not found')
-          lines[i:i+1] = [
-              '    if ! checksum=$(sha256sum -- "$file" | cut -d\' \' -f1); then',
-              '        log_error "Failed to calculate SHA256 checksum: $file"',
-              '        return 1',
-              '    fi',
-          ]
-          for j in range(i + 4, min(i + 10, len(lines))):
-              if lines[j] == 'verify_sha256() {' and lines[j-1] != '':
-                  lines.insert(j, '')
-                  break
-          crypto.write_text('\n'.join(lines) + '\n')
-
-          test = Path('tests/suites/foundation/case-storage-setup.bash')
-          text = test.read_text()
-          start = text.index('if ! bash "$setup_system" --use-latest --sops-version v3.13.2')
-          end_marker = 'rm -f /tmp/vw-sops-ambiguous.$$\n'
-          end = text.index(end_marker, start) + len(end_marker)
-          replacement = '''for removed_latest_surface in \\
-    "$PROJECT_ROOT/setup.sh" \\
-    "$setup_system" \\
-    "$PROJECT_ROOT/utilities/setup-env.sh" \\
-    "$setup_crowdsec"; do
-    if grep -Fq -- '--use-latest' "$removed_latest_surface"; then
-        fail "removed --use-latest production contract remains in $removed_latest_surface"
-    fi
-done
-pass 'production setup surfaces no longer expose --use-latest'\n'''
-          test.write_text(text[:start] + replacement + text[end:])
-          PY
+          python3 -c 'from pathlib import Path; p=Path("lib/crypto.sh"); lines=p.read_text().splitlines(); i=next(i for i,x in enumerate(lines) if x.strip().startswith("checksum=$(sha256sum -- \"$file\"")); lines[i:i+1]=["    if ! checksum=$(sha256sum -- \"$file\" | cut -d\x27 \x27 -f1); then","        log_error \"Failed to calculate SHA256 checksum: $file\"","        return 1","    fi"]; j=next(j for j in range(i+4,min(i+12,len(lines))) if lines[j]=="verify_sha256() {"); lines.insert(j,"") if lines[j-1] else None; p.write_text("\n".join(lines)+"\n")'
+          python3 -c 'from pathlib import Path; p=Path("tests/suites/foundation/case-storage-setup.bash"); s=p.read_text(); a=s.index("if ! bash \"$setup_system\" --use-latest --sops-version v3.13.2"); marker="rm -f /tmp/vw-sops-ambiguous.$$\n"; b=s.index(marker,a)+len(marker); r="for removed_latest_surface in \\\n    \"$PROJECT_ROOT/setup.sh\" \\\n    \"$setup_system\" \\\n    \"$PROJECT_ROOT/utilities/setup-env.sh\" \\\n    \"$setup_crowdsec\"; do\n    if grep -Fq -- \x27--use-latest\x27 \"$removed_latest_surface\"; then\n        fail \"removed --use-latest production contract remains in $removed_latest_surface\"\n    fi\ndone\npass \x27production setup surfaces no longer expose --use-latest\x27\n"; p.write_text(s[:a]+r+s[b:])'
           bash -n lib/crypto.sh tests/suites/foundation/case-storage-setup.bash
           shellcheck -x --severity=warning lib/crypto.sh tests/suites/foundation/case-storage-setup.bash
           VW_TEST_CASE_MODE=host-architecture bash tests/suites/foundation/case-storage-setup.bash
