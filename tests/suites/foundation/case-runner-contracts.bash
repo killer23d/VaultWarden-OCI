@@ -460,6 +460,12 @@ awk '/verify_dependencies\(\)/,/^}/' utilities/setup-system.sh | grep -Fq '_vali
     || fail 'verify_dependencies must validate the existing sops interface for --skip-deps'
 ! grep -Fq 'SOPS_VERSION not pinned' utilities/setup-system.sh \
     || fail 'normal setup must not resolve latest merely because SOPS_VERSION is blank'
+grep -Fq '[[ "$USE_LATEST" == "true" ]] && _crowdsec_setup_cmd+=" --use-latest"' setup.sh \
+    || fail 'setup.sh must carry explicit latest mode into CrowdSec continuation guidance'
+for latest_surface in setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh; do
+    grep -Fq -- '--use-latest' "$latest_surface" \
+        || fail "explicit --use-latest override missing from $latest_surface"
+done
 
 grep -Fq '"python3-yaml"' utilities/setup-system.sh \
     || fail 'setup-system must explicitly own python3-yaml'
@@ -498,7 +504,9 @@ grep -Fq "YQ_VERSION=\"${yq_version}\"" .github/workflows/doc-drift.yml \
     || fail 'CI yq version must match production setup'
 grep -Fq "$yq_sha_amd64" .github/workflows/doc-drift.yml \
     || fail 'CI yq checksum must match production amd64 setup pin'
-grep -Fq 'v3.13.2/sops-v3.13.2.linux.amd64' .github/workflows/doc-drift.yml \
+sops_default="$(sed -n 's/^SOPS_DEFAULT_VERSION="\([^"]*\)"/\1/p' utilities/setup-system.sh)"
+[[ -n "$sops_default" ]] || fail 'setup-system SOPS default missing'
+grep -Fq "${sops_default}/sops-${sops_default}.linux.amd64" .github/workflows/doc-drift.yml \
     || fail 'CI SOPS binary must match the production SOPS default version'
 
 if grep -En '^[[:space:]]*--with[[:space:]]+github.com/[^[:space:]@]+([[:space:]\\]|$)' caddy/Dockerfile >/tmp/vw-xcaddy-unpinned.$$; then
