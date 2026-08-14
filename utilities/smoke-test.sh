@@ -231,8 +231,7 @@ check_tls_certificate() {
     fi
 
     local expiry_epoch days_left
-    expiry_epoch=$(date -d "$expiry_date_str" +%s 2>/dev/null \
-        || date -j -f '%b %d %T %Y %Z' "$expiry_date_str" +%s 2>/dev/null || echo 0)
+    expiry_epoch=$(date -d "$expiry_date_str" +%s 2>/dev/null || echo 0)
     days_left=$(( (expiry_epoch - $(date +%s)) / 86400 ))
 
     if (( days_left < 14 )); then

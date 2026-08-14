@@ -365,8 +365,7 @@ get_backup_size() {
     return 0
 }
 
-# Uses a portable awk approach because POSIX df guarantees available blocks
-# in column 4 on both GNU and BSD implementations.
+# Use POSIX df output and sum the available-blocks column.
 check_backup_disk_space() {
     local target_dir="$1"
     local required_space_mb="${2:-1000}"
@@ -466,8 +465,7 @@ _backup_filename_timestamp_epoch() {
     ts_str="${ts_date:0:4}-${ts_date:4:2}-${ts_date:6:2} ${ts_time:0:2}:${ts_time:2:2}:${ts_time:4:2}"
 
     local ts_epoch
-    ts_epoch=$(date -d "$ts_str" +%s 2>/dev/null) || \
-    ts_epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$ts_str" +%s 2>/dev/null) || true
+    ts_epoch=$(date -d "$ts_str" +%s 2>/dev/null) || true
 
     if [[ -z "$ts_epoch" || ! "$ts_epoch" =~ ^[0-9]+$ ]]; then
         echo ""
@@ -658,11 +656,7 @@ cleanup_old_backups() {
     return 0
 }
 
-# find -exec stat -c%s {} + is GNU-only. On macOS stat -c%s
-# errors and awk sums to 0, reporting all backup sizes as 0 MB.
-#
-# Replaced with a find | while loop using _stat_file_size() (exported by
-# lib/crypto.sh) which selects the correct stat format per platform.
+# Sum backup sizes through the shared GNU-stat helper when available.
 #
 # get_backup_statistics BACKUP_BASE_DIR [JSON_OUTPUT]
 #

@@ -501,7 +501,7 @@ _check_ssl() {
     }
     local expiry_date expiry_epoch now_epoch days_remaining
     expiry_date="${expiry_output#notAfter=}"
-    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || date -jf "%b %e %T %Y %Z" "$expiry_date" +%s 2>/dev/null || echo 0)
+    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || echo 0)
     now_epoch=$(date +%s)
     days_remaining=$(( (expiry_epoch - now_epoch) / 86400 ))
     if [[ $days_remaining -le 0 ]]; then
