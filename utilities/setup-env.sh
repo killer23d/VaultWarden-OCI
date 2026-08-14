@@ -218,7 +218,6 @@ create_env_file() {
         if [[ "$USE_LATEST" == "true" ]]; then
             if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
                grep -qE '^POSTFIX_VERSION=latest'     "$env_file" && \
-               ! grep -qE '^BUSYBOX_VERSION='         "$env_file" && \
                ! grep -qE '^CADDY_VERSION=latest'     "$env_file" && \
                grep -qE '^CROWDSEC_VERSION=latest'    "$env_file" && \
                grep -qE '^CF_WORKER_BOUNCER_VERSION=latest' "$env_file" && \
@@ -226,10 +225,8 @@ create_env_file() {
                 versions_match=true
             fi
         else
-            if ! grep -qE '^(VAULTWARDEN|CADDY|POSTFIX|CROWDSEC|CF_WORKER_BOUNCER|FIREWALL_BOUNCER)_VERSION=latest' "$env_file" && \
-               ! grep -qE '^BUSYBOX_VERSION=' "$env_file"; then
-                versions_match=true
-            fi
+            grep -qE '^(VAULTWARDEN|CADDY|POSTFIX|CROWDSEC|CF_WORKER_BOUNCER|FIREWALL_BOUNCER)_VERSION=latest' "$env_file" \
+                || versions_match=true
         fi
 
         if [[ "$(_read_env_value DATA_VOLUME_DEVICE "$env_file")" == "${DATA_VOLUME_DEVICE:-}" &&
