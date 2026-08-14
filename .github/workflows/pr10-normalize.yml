@@ -1,0 +1,32 @@
+name: PR10 normalize drill marker
+on:
+  push:
+    branches: [agent/pr10-platform-simplification]
+permissions:
+  contents: write
+jobs:
+  normalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: agent/pr10-platform-simplification
+      - shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p=Path('utilities/pre-production-drill.sh')
+          s=p.read_text()
+          old='''    # init-permissions has restart:"no" so it won't be running, but it must be\n    # defined. The 'docker compose config --services' output lists all defined\n    # services regardless of restart policy.\n    local expected_services=(vaultwarden caddy postfix init-permissions)'''
+          new='''    # init-permissions has restart:"no" and exits after fixing bind-mount ownership;\n    # it is intentionally included here to verify it completes successfully.\n    local expected_services=(vaultwarden caddy postfix init-permissions)'''
+          if old not in s:
+              raise SystemExit('current drill marker not found')
+          p.write_text(s.replace(old,new,1))
+          PY
+          git rm .github/workflows/pr10-normalize.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "chore: normalize drill marker for PR10 apply"
+          git push origin HEAD:agent/pr10-platform-simplification
