@@ -287,7 +287,7 @@ check_age_key() {
         return
     fi
     local perms
-    perms=$(stat -c '%a' "$key_file" 2>/dev/null || stat -f '%OLp' "$key_file" 2>/dev/null || echo "unknown")
+    perms=$(stat -c '%a' "$key_file" 2>/dev/null || echo "unknown")
     if [[ "$perms" != "600" ]]; then
         _check_fail "age-key-perms" "key file permissions are ${perms}, expected 600"
     else
@@ -348,7 +348,6 @@ check_docker_secrets_materialized() {
 
     local dir_stat
     dir_stat=$(stat -c '%U:%G %a' "$secrets_dir" 2>/dev/null \
-        || stat -f '%Su:%Sg %OLp' "$secrets_dir" 2>/dev/null \
         || echo "unknown")
     if [[ "$dir_stat" == "root:root 700" ]]; then
         _check_pass "runtime-secrets-dir" "$secrets_dir (root:root mode 0700)"
@@ -370,7 +369,6 @@ check_docker_secrets_materialized() {
 
         local file_stat
         file_stat=$(stat -c '%U:%G %a' "$secret_file" 2>/dev/null \
-            || stat -f '%Su:%Sg %OLp' "$secret_file" 2>/dev/null \
             || echo "unknown")
         if [[ "$file_stat" == "root:root 444" ]]; then
             _check_pass "secret-$secret-permissions" \

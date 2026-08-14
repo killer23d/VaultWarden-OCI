@@ -42,7 +42,7 @@ _VW_SCHEMA_VALIDATED_MTIME=""
 
 _schema_file_mtime() {
     local schema_file="$1"
-    stat -c '%Y' "$schema_file" 2>/dev/null || stat -f '%m' "$schema_file" 2>/dev/null || printf '0'
+    stat -c '%Y' "$schema_file" 2>/dev/null || printf '0'
 }
 
 _schema_validate_semantics() {

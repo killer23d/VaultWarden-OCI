@@ -67,7 +67,7 @@ _state_file_ends_with_newline() {
 _state_mode() {
     local path="$1" mode
 
-    mode="$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null)" || return 1
+    mode="$(stat -c '%a' "$path" 2>/dev/null)" || return 1
     [[ "$mode" =~ ^[0-9]+$ ]] || return 1
     printf '%s' "$mode"
 }
@@ -75,7 +75,7 @@ _state_mode() {
 _state_owner_uid() {
     local path="$1" owner_uid
 
-    owner_uid="$(stat -c '%u' "$path" 2>/dev/null || stat -f '%u' "$path" 2>/dev/null)" || return 1
+    owner_uid="$(stat -c '%u' "$path" 2>/dev/null)" || return 1
     [[ "$owner_uid" =~ ^[0-9]+$ ]] || return 1
     printf '%s' "$owner_uid"
 }
@@ -101,7 +101,7 @@ _state_open_file_matches_path() {
     elif [[ -e "/dev/fd/${fd}" ]]; then
         # Development fallback for BSD hosts. The supported Ubuntu runtime
         # uses the device-and-inode comparison above through /proc.
-        path_identity="$(stat -f '%i' "$path" 2>/dev/null)" || return 1
+        path_identity="$(stat -c '%i' -- "$path" 2>/dev/null)" || return 1
         fd_identity="$(stat -Lf '%i' "/dev/fd/${fd}" 2>/dev/null)" || return 1
     else
         return 1

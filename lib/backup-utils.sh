@@ -158,10 +158,10 @@ list_backups() {
             [[ -d "$type_dir" ]] || continue
             while IFS= read -r -d '' backup_file; do
                 fname=$(basename "$backup_file")
-                size_bytes=$(stat -c '%s' "$backup_file" 2>/dev/null || stat -f '%z' "$backup_file" 2>/dev/null || echo 0)
+                size_bytes=$(stat -c '%s' "$backup_file" 2>/dev/null || echo 0)
                 age_days=$(_backup_filename_age_days "$backup_file" 2>/dev/null || echo "")
                 [[ "$age_days" =~ ^[0-9]+$ ]] || age_days=-1
-                mtime=$(stat -c '%Y' "$backup_file" 2>/dev/null || stat -f '%m' "$backup_file" 2>/dev/null || echo 0)
+                mtime=$(stat -c '%Y' "$backup_file" 2>/dev/null || echo 0)
                 [[ "$first" == "true" ]] && first=false || printf ','
                 printf '{"type":"%s","file":"%s","path":"%s","size_bytes":%s,"age_days":%s,"mtime_epoch":%s}' \
                     "$backup_type" "$(_json_escape "$fname")" "$(_json_escape "$backup_file")" \
@@ -354,7 +354,6 @@ get_backup_size() {
 
     local size_bytes
     size_bytes=$(stat -c%s "$backup_file" 2>/dev/null \
-        || stat -f%z "$backup_file" 2>/dev/null \
         || echo "")
 
     if [[ -z "$size_bytes" || ! "$size_bytes" =~ ^[0-9]+$ ]]; then
@@ -522,7 +521,7 @@ _backup_newest_timestamped_archive() {
 _backup_ctime_age_days() {
     local file="$1"
     local ctime_epoch now_epoch
-    ctime_epoch=$(stat -c%Z "$file" 2>/dev/null || stat -f%c "$file" 2>/dev/null || echo "")
+    ctime_epoch=$(stat -c%Z "$file" 2>/dev/null || echo "")
     if [[ -z "$ctime_epoch" || ! "$ctime_epoch" =~ ^[0-9]+$ ]]; then
         # Cannot determine ctime; treat as 0 days old (do not delete).
         echo "0"
@@ -708,7 +707,7 @@ get_backup_statistics() {
                 if declare -f _stat_file_size &>/dev/null; then
                     fsz=$(_stat_file_size "$f" 2>/dev/null || echo 0)
                 else
-                    fsz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
+                    fsz=$(stat -c%s "$f" 2>/dev/null || echo 0)
                 fi
                 [[ -z "$fsz" || ! "$fsz" =~ ^[0-9]+$ ]] && fsz=0
                 size_bytes=$(( size_bytes + fsz ))
@@ -922,7 +921,7 @@ validate_rclone_config_path() {
         return 1
     fi
     local file_perms
-    file_perms=$(stat -c "%a" "$canonical" 2>/dev/null || stat -f "%Lp" "$canonical" 2>/dev/null || echo "777")
+    file_perms=$(stat -c "%a" "$canonical" 2>/dev/null || echo "777")
     if (( (8#$file_perms & 8#002) != 0 )); then
         log_error "RCLONE_CONFIG is world-writable — refusing to use: $canonical" >&2
         return 1
@@ -930,7 +929,7 @@ validate_rclone_config_path() {
 
     if [[ "$is_root_rclone_config" == "true" ]]; then
         local file_uid
-        file_uid=$(stat -c "%u" "$canonical" 2>/dev/null || stat -f "%u" "$canonical" 2>/dev/null || echo "")
+        file_uid=$(stat -c "%u" "$canonical" 2>/dev/null || echo "")
         if [[ "$file_uid" != "0" ]]; then
             log_error "RCLONE_CONFIG root fallback must be owned by root: $canonical" >&2
             return 1

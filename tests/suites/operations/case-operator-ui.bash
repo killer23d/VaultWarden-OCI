@@ -584,7 +584,7 @@ scan_prompt_pattern() {
     grep -nF -I -- "$pattern" "${targets[@]}"
 }
 
-TMP_PROMPT_PROSE="$(mktemp "$ROOT/reports/operator-ui-prose.XXXXXX.md")"
+TMP_PROMPT_PROSE="$(mktemp "${TMPDIR:-/tmp}/operator-ui-prose.XXXXXX.md")"
 printf 'Historical prose may mention Continue? [y/N] without being a runtime prompt.\n' > "$TMP_PROMPT_PROSE"
 if scan_prompt_pattern "[y""/N]" | grep -Fq "$(basename "$TMP_PROMPT_PROSE")"; then
     echo "FAIL: prompt scan must not inspect reports prose" >&2

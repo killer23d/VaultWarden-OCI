@@ -231,7 +231,7 @@ PENDING_BACKUP_CANDIDATE=""
 PENDING_BACKUP_FINAL=""
 
 _workspace_identity() {
-    stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null
+    stat -c '%d:%i' "$1" 2>/dev/null
 }
 
 _remove_owned_workspace() {
@@ -400,7 +400,7 @@ auto_determine_backup_type() {
     fi
 
     local db_mtime current_time age_hours
-    db_mtime=$(stat -c %Y "$db_file" 2>/dev/null || stat -f %m "$db_file" 2>/dev/null || echo "0")
+    db_mtime=$(stat -c %Y "$db_file" 2>/dev/null || echo "0")
     current_time=$(date +%s)
     age_hours=$(( (current_time - db_mtime) / 3600 ))
 
@@ -408,12 +408,7 @@ auto_determine_backup_type() {
     local auto_base_dir
     auto_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     full_backup_dir="$auto_base_dir/full"
-    local _stat_cmd=()
-    if stat --version 2>/dev/null | grep -q GNU; then
-        _stat_cmd=(stat -c '%Y')
-    else
-        _stat_cmd=(stat -f '%m')
-    fi
+    local _stat_cmd=(stat -c '%Y')
     last_full=$(find "$full_backup_dir" -name "*.age" -type f 2>/dev/null \
                 | while IFS= read -r _f; do
                     printf '%s %s\n' "$("${_stat_cmd[@]}" "$_f" 2>/dev/null || echo 0)" "$_f"
@@ -421,7 +416,7 @@ auto_determine_backup_type() {
                 | sort -n | tail -1 | cut -d' ' -f2- || true)
     if [[ -n "$last_full" ]]; then
         local full_mtime
-        full_mtime=$(stat -c %Y "$last_full" 2>/dev/null || stat -f %m "$last_full" 2>/dev/null || echo "0")
+        full_mtime=$(stat -c %Y "$last_full" 2>/dev/null || echo "0")
         full_age_days=$(( (current_time - full_mtime) / 86400 ))
     fi
 
@@ -676,7 +671,7 @@ _validate_created_backup_cohort() {
         files+=("${archive}${suffix}")
     done < <(backup_required_cohort_suffixes)
     for file in "${files[@]}"; do
-        mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || true)"
+        mode="$(stat -c '%a' "$file" 2>/dev/null || true)"
         [[ -f "$file" && ! -L "$file" && -s "$file" && "$mode" == 600 ]] || {
             log_error "Backup candidate member is invalid or not mode 600: $file" >&2
             return 1
@@ -1068,7 +1063,7 @@ verify_backup_full() {
             backup_log_info "Streaming decryption into archive listing validation..."
             _verify_encrypted_archive_stream "$enc_file" "$backup_type" "$encryption_mode" "$age_key_file" || return 1
             local size
-            size=$(stat -c%s "$enc_file" 2>/dev/null || stat -f%z "$enc_file" 2>/dev/null || echo 0)
+            size=$(stat -c%s "$enc_file" 2>/dev/null || echo 0)
             if (( size < 10240 )); then
                 log_error "Full verification FAILED: encrypted archive suspiciously small (${size} bytes)" >&2
                 return 1
@@ -1857,7 +1852,7 @@ _check_backup_deps() {
     local missing_hard=() missing_soft=()
     for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
     for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
-    if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    if ! command -v sha256sum >/dev/null 2>&1; then
         missing_hard+=(sha256sum)
     fi
     if [[ ${#missing_hard[@]} -gt 0 ]]; then
@@ -1882,7 +1877,7 @@ _log_backup_size() {
         return 0
     fi
     local size_bytes size_human
-    size_bytes=$(stat -c '%s' "$backup_file" 2>/dev/null || stat -f '%z' "$backup_file" 2>/dev/null || echo 0)
+    size_bytes=$(stat -c '%s' "$backup_file" 2>/dev/null || echo 0)
     size_human="$(_format_bytes_human "$size_bytes")"
     backup_log_success "Backup created: $(basename "$backup_file") (${size_human})"
     if [[ "$size_bytes" =~ ^[0-9]+$ ]] && (( size_bytes < 4096 )); then
@@ -1970,7 +1965,7 @@ main() {
             [[ -d "$type_dir" ]] || continue
             while IFS= read -r -d '' f; do
                 local f_mtime
-                f_mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+                f_mtime=$(stat -c %Y "$f" 2>/dev/null || echo 0)
                 if (( f_mtime > latest_mtime )); then
                     latest_mtime=$f_mtime
                     latest_file="$f"

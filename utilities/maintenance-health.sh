@@ -123,7 +123,7 @@ _acquire_health_lock() {
         return 3
     fi
     owner_uid="$(stat -c '%u' "$lock_path" 2>/dev/null \
-        || stat -f '%u' "$lock_path" 2>/dev/null || true)"
+ || true)"
     if [[ "$owner_uid" != "$EUID" ]]; then
         log_error "Health coordination lock owner UID is ${owner_uid:-unknown}, expected ${EUID}: $lock_path"
         return 3
@@ -137,7 +137,7 @@ _acquire_health_lock() {
         return 3
     fi
     open_owner_uid="$(stat -Lc '%u' "/proc/${BASHPID}/fd/${fd}" 2>/dev/null \
-        || stat -f '%u' "/dev/fd/${fd}" 2>/dev/null || true)"
+ || true)"
     if [[ "$open_owner_uid" != "$EUID" ]]; then
         { eval "exec ${fd}>&-"; } 2>/dev/null || true
         log_error "Opened health coordination lock owner UID is ${open_owner_uid:-unknown}, expected ${EUID}: $lock_path"
@@ -1030,7 +1030,7 @@ _check_backup_ages() {
             continue
         fi
         any_found=true
-        mtime=$(stat -c %Y "$latest_file" 2>/dev/null || stat -f %m "$latest_file" 2>/dev/null || echo 0)
+        mtime=$(stat -c %Y "$latest_file" 2>/dev/null || echo 0)
         age_h=$(( (now_epoch - mtime) / 3600 ))
         if (( age_h > max_age_hours[$btype] )); then
             _warn "backup:${btype}" "$btype backup is ${age_h}h old (threshold: ${max_age_hours[$btype]}h): $(basename "$latest_file") (path: $type_dir)"
