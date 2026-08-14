@@ -63,8 +63,7 @@ jobs:
       # lib/schema.sh. Keep this pin in sync with utilities/setup-system.sh.
       - name: Install yq
         run: |
-          # Pinned to v4.53.3 -- do NOT change to /releases/latest (violates
-          # the unpinned-version check this same workflow enforces).
+          # Pinned to v4.53.3; mutable release discovery is intentionally not used.
           # To upgrade: update YQ_VERSION and YQ_SHA256 together.
           # SHA-256 source: https://github.com/mikefarah/yq/releases/tag/v4.53.3
           # (asset: yq_linux_amd64, digest field)
@@ -87,10 +86,13 @@ jobs:
             "--puid"
             "--pgid"
             "simple_verify_age_key"
+            "init-permissions"
+            "utilities/generate-command-ref.sh"
+            "VWOCI-PRR-PATCH"
           )
           FAIL=0
           for term in "${STALE_TERMS[@]}"; do
-            matches=$(grep -rn "$term" docs/ README.md RUNBOOK.md 2>/dev/null || true)
+            matches=$(grep -rn -- "$term" docs/ README.md RUNBOOK.md 2>/dev/null || true)
             if [[ -n "$matches" ]]; then
               echo "STALE TERM FOUND: $term"
               echo "$matches"
@@ -128,31 +130,27 @@ jobs:
           check_flag utilities/uninstall-vaultwarden.sh "--dry-run" || FAIL=1
           [[ $FAIL -eq 0 ]] || exit 1
 
-      - name: Check for unpinned version references
+      - name: Check pinned production version contract
         run: |
           FAIL=0
-          # setup-crowdsec.sh may use @latest only when --use-latest clears the
-          # configured pin. All other shell scripts must remain reproducible.
-          if grep -rn '@latest' utilities/ lib/ --include='*.sh' \
-               | grep -v 'utilities/setup-crowdsec.sh'; then
-            echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"
+          if grep -RFn -- '--use-latest' setup.sh utilities/setup-system.sh utilities/setup-env.sh utilities/setup-crowdsec.sh; then
+            echo "UNPINNED: mutable --use-latest production setup mode is forbidden"
             FAIL=1
           fi
-          # Guard against unintended /releases/latest calls. setup-system.sh
-          # may resolve SOPS latest only behind explicit --use-latest;
-          # setup-crowdsec.sh has its own explicit latest-mode contract.
-          if grep -rn '/releases/latest' setup.sh utilities/ lib/ --include='*.sh' 2>/dev/null \
-               | grep -v 'utilities/setup-system.sh:' \
-               | grep -v 'utilities/setup-crowdsec.sh:'; then
-            echo "UNPINNED: unexpected /releases/latest GitHub API call"
+          if grep -RFn --include='*.sh' -- '/releases/latest' setup.sh utilities/ lib/ 2>/dev/null; then
+            echo "UNPINNED: production shell code must not resolve mutable GitHub latest releases"
+            FAIL=1
+          fi
+          if grep -RFn --include='*.sh' -- '@latest' setup.sh utilities/ lib/ 2>/dev/null; then
+            echo "UNPINNED: mutable @latest reference found in production shell code"
             FAIL=1
           fi
           if ! grep -Fq 'SOPS_DEFAULT_VERSION="v3.13.2"' utilities/setup-system.sh; then
             echo "UNPINNED: setup-system.sh must define the pinned SOPS default"
             FAIL=1
           fi
-          if ! awk '/install_sops\(\)/,/^}/' utilities/setup-system.sh | grep -Fq 'USE_LATEST'; then
-            echo "UNPINNED: SOPS latest resolution must be owned by explicit --use-latest"
+          if grep -Eq '^(VAULTWARDEN_VERSION|CADDY_VERSION|POSTFIX_VERSION|BUSYBOX_VERSION|CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
+            echo "UNPINNED: production component version in .env.example"
             FAIL=1
           fi
           if grep -En '^[[:space:]]*--with[[:space:]]+github.com/[^[:space:]@]+([[:space:]\\]|$)' caddy/Dockerfile; then
@@ -163,10 +161,19 @@ jobs:
             echo "UNPINNED: direct xcaddy module uses a mutable ref"
             FAIL=1
           fi
-          if grep -Eq '^(CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
-            echo "UNPINNED: CrowdSec component version in .env.example"
-            FAIL=1
-          fi
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Check Noble-only production host assumptions
+        run: |
+          FAIL=0
+          for term in 'stat -f' 'shasum' 'dnf' 'yum'; do
+            matches=$(grep -RFn --include='*.sh' -- "$term" setup.sh startup.sh maintenance.sh backup.sh restore.sh recover.sh lib/ utilities/ 2>/dev/null || true)
+            if [[ -n "$matches" ]]; then
+              echo "UNSUPPORTED HOST FALLBACK FOUND: $term"
+              echo "$matches"
+              FAIL=1
+            fi
+          done
           [[ $FAIL -eq 0 ]] || exit 1
 
       - name: Systemd unit hardening check
