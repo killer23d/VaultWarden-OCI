@@ -466,7 +466,6 @@ update_firewall_ranges() {
     return 0
 }
 
-[[ "${1:-}" == "update-firewall" ]] && shift
 
 while [[ $# -gt 0 ]]; do
     case $1 in

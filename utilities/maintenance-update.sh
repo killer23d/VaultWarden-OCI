@@ -414,7 +414,6 @@ run_pre_update_backup() {
     return 1
 }
 
-[[ "${1:-}" == "update" ]] && shift
 
 while [[ $# -gt 0 ]]; do
     case $1 in

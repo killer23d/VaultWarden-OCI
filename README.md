@@ -202,7 +202,7 @@ Interactive restores use an operator-controlled start policy. Keep services stop
 ```bash
 sudo ./restore.sh interactive --remote --start-policy ask
 sudo utilities/repair-permissions.sh
-sudo ./startup.sh --skip-pull
+sudo ./startup.sh
 sudo ./maintenance.sh health
 ```
 

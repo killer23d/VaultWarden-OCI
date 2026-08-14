@@ -14,7 +14,6 @@ VaultWarden Secrets — rotate subcommand
 
 USAGE:
     sudo ./utilities/secrets-rotate.sh FIELD [OPTIONS]
-    sudo ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
     sudo ./edit-secrets.sh rotate FIELD [OPTIONS]
 
 DESCRIPTION:
@@ -31,7 +30,6 @@ EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
     EMAIL_MODE=smtp   — Postfix sidecar → direct SMTP (rotate: smtp_password)
     EMAIL_MODE=direct — direct SMTP only (rotate: smtp_password)
-    EMAIL_MODE=host   — deprecated alias for direct (rotate: smtp_password)
     EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
         → selects which HTTP driver is used at runtime;
           the token is always stored as "email_api_token" in secrets.yaml.
@@ -525,7 +523,6 @@ PYEOF
 }
 
 main() {
-    if [[ "${1:-}" == "rotate" ]]; then shift; fi
 
     local rotate_field=""
 

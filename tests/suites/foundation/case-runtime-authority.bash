@@ -235,5 +235,5 @@ storage_loader="$(awk '/^_ss_load_environment\(\)/,/^}/' utilities/setup-storage
 storage_metadata_pos="$(grep -n '    _ss_dispatch_metadata "$@"' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
 storage_load_pos="$(grep -n '    _ss_load_environment' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
 storage_parse_pos="$(grep -n '    _parse_outer_args "$@"' utilities/setup-storage.sh | head -1 | cut -d: -f1)"
-[[ -n "$storage_metadata_pos" && -n "$storage_load_pos" && -n "$storage_parse_pos" && "$storage_metadata_pos" -lt "$storage_load_pos" && "$storage_load_pos" -lt "$storage_parse_pos" ]] || fail "setup-storage must resolve mode metadata, load mode-appropriate defaults, then let CLI parsing win"
+[[ -n "$storage_metadata_pos" && -n "$storage_load_pos" && -n "$storage_parse_pos" && "$storage_metadata_pos" -lt "$storage_parse_pos" && "$storage_parse_pos" -lt "$storage_load_pos" ]] || fail "setup-storage must resolve metadata, parse the explicit mode, then load mode-appropriate authority"
 pass "setup-storage first-install path uses authoring authority without runtime fallback noise"

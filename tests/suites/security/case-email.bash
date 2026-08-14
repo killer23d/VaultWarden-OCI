@@ -161,7 +161,7 @@ require_root(){ :; }
 HARNESS
 extract_function "$DIAGNOSTIC" _require_cli_value >>"$TMP/run-email-cli.bash"
 extract_function "$DIAGNOSTIC" _validate_transport >>"$TMP/run-email-cli.bash"
-sed -n '/^\[\[ "${1:-}" == "test-email" \]\] && shift$/,/^: "${VERBOSE}"$/p' \
+sed -n '/^while \[\[ \$# -gt 0 \]\]; do$/,/^: "${VERBOSE}"$/p' \
     "$DIAGNOSTIC" >>"$TMP/run-email-cli.bash"
 assert_cli_rc() {
     local expected="$1" description="$2" rc=0
@@ -241,12 +241,13 @@ run_case 'api failure does not attempt SMTP' "$routing_prelude; EMAIL_MODE=api A
 run_case 'smtp sidecar success does not resolve smtp_password' "$routing_prelude; EMAIL_MODE=smtp SIDE_RC=0 RESOLVE_MARK=1; send_email admin@example.com subj body; [[ \"\$TRACE\" != *secret:smtp_password* ]]"
 run_case 'smtp sidecar failure -> direct' "$routing_prelude; EMAIL_MODE=smtp SIDE_RC=1 DIRECT_RC=0; send_email admin@example.com subj body; [[ \"\$TRACE\" == *direct* ]]"
 run_case 'direct does not probe API or sidecar' "$routing_prelude; EMAIL_MODE=direct; send_email admin@example.com subj body; [[ \"\$TRACE\" == *direct* && \"\$TRACE\" != *api:* && \"\$TRACE\" != *sidecar* ]]"
-run_case 'host warns and behaves as direct' "$routing_prelude; EMAIL_MODE=host; send_email admin@example.com subj body; [[ \"\$TRACE\" == *deprecated* && \"\$TRACE\" == *direct* ]]"
+run_case 'removed host mode is rejected' "$routing_prelude; EMAIL_MODE=host; ! send_email x@example.com subj body"
+run_case 'removed host mode is absent from operational email helpers' "! grep -Eq 'direct[|]host|direct host|smtp direct host|deprecated alias for direct' utilities/maintenance-email.sh utilities/setup-secrets.sh docs/EMAIL.md docs/SECURE-CREDENTIAL-HANDOFFS.md"
 run_case 'unknown mode fails' "$routing_prelude; EMAIL_MODE=bogus; ! send_email admin@example.com subj body; [[ \"\$TRACE\" == *Unknown* ]]"
 run_case 'unknown provider fails in api mode' "$routing_prelude; EMAIL_MODE=api EMAIL_PROVIDER=bogus; ! send_email admin@example.com subj body; [[ \"\$TRACE\" == *Unknown* ]]"
 run_case 'unknown provider falls back in auto' "$routing_prelude; EMAIL_PROVIDER=bogus SIDE_RC=0; send_email admin@example.com subj body; [[ \"\$TRACE\" == *sidecar* ]]"
 run_case 'every provider receives TO explicitly' "$routing_prelude; for p in mailersend sendgrid mailgun postmark resend cyberpersons; do reset_env; EMAIL_PROVIDER=\$p; send_email explicit@example.com subj body; [[ \"\$TRACE\" == *explicit@example.com* ]]; done"
-run_case 'cyber aliases resolve identically' "$routing_prelude; for p in cyberpersons cyberperson cyberpanel; do [[ \"\$(_email_driver_lookup \"\$p\")\" == cyberpersons ]]; done"
+run_case 'removed cyber aliases are rejected' "$routing_prelude; [[ \"\$(_email_driver_lookup cyberpersons)\" == cyberpersons ]]; ! _email_driver_lookup cyberperson; ! _email_driver_lookup cyberpanel"
 run_case 'API sends include delivery metadata' "$routing_prelude; EMAIL_PROVIDER=mailgun; send_email admin@example.com subj body; [[ \"\$CAPTURED\" == *'Email delivery metadata:'* && \"\$CAPTURED\" == *'Method:    HTTP API provider mailgun'* ]]"
 run_case 'SMTP sends include delivery metadata' "$routing_prelude; EMAIL_MODE=smtp SIDE_RC=0; send_email admin@example.com subj body; [[ \"\$CAPTURED\" == *'Email delivery metadata:'* && \"\$CAPTURED\" == *'Method:    SMTP fallback chain'* ]]"
 run_case 'direct sends include delivery metadata' "$routing_prelude; EMAIL_MODE=direct; send_email admin@example.com subj body; [[ \"\$CAPTURED\" == *'Email delivery metadata:'* && \"\$CAPTURED\" == *'Method:    Direct upstream SMTP'* ]]"

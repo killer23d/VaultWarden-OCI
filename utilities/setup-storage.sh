@@ -29,7 +29,7 @@ source "${PROJECT_ROOT}/lib/migrate.sh"
 
 export DRY_RUN=false   # overridden by arg parsing; exported for lib functions
 
-_SS_MODE="setup"
+_SS_MODE=""
 _SS_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"
 _SS_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 _SS_DATA_DEVICE_PROVIDED=false
@@ -320,7 +320,6 @@ USAGE:
     sudo utilities/setup-storage.sh setup [OPTIONS]
     sudo utilities/setup-storage.sh verify [OPTIONS]
     sudo utilities/setup-storage.sh migrate <subcommand> [OPTIONS]
-    sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]  # compatibility
 
 DESCRIPTION:
     Configures persistent storage directories, optional data-volume
@@ -332,12 +331,11 @@ DESCRIPTION:
     behavior when no DATA_VOLUME_DEVICE is set.
 
 MODES:
-    setup    Create and configure storage directories (default)
+    setup    Create and configure storage directories
     migrate  Migrate from boot volume to data volume (interactive)
     verify   Re-check layout and permissions only (no changes, safe for cron)
 
 OPTIONS:
-    --mode MODE           Compatibility alias for setup|migrate|verify
     --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
     --data-mount PATH     Mount point for data volume (default: @DEFAULT_DATA_MOUNT@)
     --auto                Non-interactive mode; suppresses the storage assistant and
@@ -413,34 +411,6 @@ _ss_dispatch_metadata() {
                     ;;
             esac
             ;;
-        --mode)
-            case "${2-}" in
-                setup|verify)
-                    case "${3-}" in
-                        --help|-h|help)
-                            show_help
-                            exit 0
-                            ;;
-                        --version|-V)
-                            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
-                            exit 0
-                            ;;
-                    esac
-                    ;;
-                migrate)
-                    case "${3-}" in
-                        --help|-h|help)
-                            _mv_usage
-                            exit 0
-                            ;;
-                        --version|-V)
-                            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
-                            exit 0
-                            ;;
-                    esac
-                    ;;
-            esac
-            ;;
     esac
 }
 
@@ -464,20 +434,8 @@ _parse_outer_args() {
                 mode_seen=true
                 shift
                 ;;
-            --mode)
-                _require_cli_value "$1" "${2-}"
-                if [[ "$mode_seen" == "true" || ${#remaining[@]} -gt 0 ]]; then
-                    log_error "Exactly one setup-storage mode is allowed: setup | verify | migrate"
-                    show_help
-                    exit 2
-                fi
-                _SS_MODE="$2"
-                mode_seen=true
-                shift 2
-                ;;
             --help|-h)
-                # When --mode migrate has already been parsed, forward --help
-                # to the migrate sub-parser so _mv_usage is shown, not show_help.
+                # Forward migrate help to the migrate sub-parser.
                 if [[ "${_SS_MODE}" == "migrate" ]]; then
                     remaining+=("$1")
                 else
@@ -503,6 +461,11 @@ _parse_outer_args() {
 
     case "${_SS_MODE}" in
         setup|verify|migrate) ;;
+        "")
+            log_error "A storage subcommand is required: setup | verify | migrate"
+            show_help
+            exit 2
+            ;;
         *)
             log_error "Unknown mode: ${_SS_MODE}. Valid modes: setup|migrate|verify"
             show_help
@@ -558,8 +521,8 @@ _parse_setup_args() {
 
 main() {
     _ss_dispatch_metadata "$@"
-    _ss_load_environment
     _parse_outer_args "$@"
+    _ss_load_environment
 
     if [[ "${_SS_MODE}" == "migrate" ]]; then
         _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"

@@ -56,6 +56,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 _TASK="${1}"
+shift
 
 case "$_TASK" in
     edit)

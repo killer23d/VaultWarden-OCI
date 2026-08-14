@@ -9,7 +9,7 @@ This document defines the bounded production-readiness remediation for credentia
 Both supported automatic entry points use the same protected handoff contract:
 
 ```bash
-sudo ./setup.sh --domain DOMAIN --email EMAIL --auto
+sudo ./setup.sh install --domain DOMAIN --email EMAIL --auto
 sudo ./utilities/setup-secrets.sh configure --auto
 ```
 
@@ -72,7 +72,7 @@ Normal `full` backups explicitly exclude current and legacy setup/recovery docum
 
 Startup enforces log directories as `0750`, regular log files as `0640`, and canonical numeric `PUID:PGID` ownership. Permission failures are fatal; dry-run does not mutate files.
 
-`EMAIL_MODE=direct` is canonical. `host` remains a deprecated compatibility alias. `smtp`, `direct`, and `host` all require the runtime `smtp_password` secret.
+`EMAIL_MODE=direct` is canonical. `smtp` and `direct` require the runtime `smtp_password` secret.
 
 ## Backup protection terminology
 

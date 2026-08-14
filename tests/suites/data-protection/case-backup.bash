@@ -15,6 +15,17 @@ fail(){ echo "FAIL: $*" >&2; exit 1; }
 require(){ local pat="$1" file="$2" msg="$3"; grep -Eq -- "$pat" "$file" || fail "$msg"; }
 reject(){ local pat="$1" file="$2" msg="$3"; ! grep -Eq -- "$pat" "$file" || fail "$msg"; }
 
+reject '\\$FORCE([^A-Za-z0-9_]|$)' "$BACKUP" 'backup-run retains removed FORCE compatibility state'
+for removed_flag in --force --skip-full-verification; do
+  set +e
+  removed_output="$(bash "$ROOT/backup.sh" run db "$removed_flag" 2>&1)"
+  removed_rc=$?
+  set -e
+  [[ "$removed_rc" -eq 2 ]] || fail "removed backup flag $removed_flag returned $removed_rc instead of 2"
+  grep -Fq "Unknown option for run: $removed_flag" <<< "$removed_output" \
+    || fail "removed backup flag $removed_flag was not rejected explicitly"
+done
+
 require 'local basic_packages=\(.*"zstd".*\)' "$SETUP" 'normal setup must install zstd'
 require '^[[:space:]]*\[zstd\]=zstd$' "$SETUP" 'normal setup must map zstd package to zstd command'
 require 'local required_commands=\(.*"zstd".*\)' "$SETUP" 'final setup dependency verification must require zstd'
@@ -200,7 +211,6 @@ CONTROL_WORKSPACE="$TMP/work"
 mkdir -p "\$CONTROL_WORKSPACE"
 FAIL_SUFFIX="\${FAIL_SUFFIX:-}"
 META_CASE="\${META_CASE:-age-passphrase}"
-REQUIRE_AUTHENTICATED_INTEGRITY="\${REQUIRE_AUTHENTICATED_INTEGRITY:-false}"
 backup_log_info(){ printf 'INFO %s\\n' "\$*"; }
 log_warn(){ printf 'WARN %s\\n' "\$*"; }
 log_error(){ printf 'ERROR %s\\n' "\$*"; }
@@ -243,9 +253,7 @@ case "\$META_CASE" in
   *) exit 90 ;;
 esac
 printf checksum > "\${archive}.sha256"
-if [[ "\$REQUIRE_AUTHENTICATED_INTEGRITY" == true ]]; then
-  printf hmac > "\${archive}.sha256.hmac"
-fi
+printf hmac > "\${archive}.sha256.hmac"
 rc=0
 sync_to_rclone "\$archive" emergency || rc=\$?
 printf 'RC=%s\\n' "\$rc"
@@ -267,7 +275,7 @@ grep -q '^RC=1$' "$TMP/sha-fail.out" || { cat "$TMP/sha-fail.out" >&2; fail '.sh
   || fail '.sha256 upload failure must not report a complete remote recovery point'
 
 : > "$TMP/rclone-copy.calls"
-REQUIRE_AUTHENTICATED_INTEGRITY=true FAIL_SUFFIX=.sha256.hmac \
+FAIL_SUFFIX=.sha256.hmac \
   bash "$TMP/sync-probe.sh" >"$TMP/hmac-fail.out" 2>&1 || fail 'HMAC sidecar upload probe crashed'
 grep -q '^RC=1$' "$TMP/hmac-fail.out" \
   || { cat "$TMP/hmac-fail.out" >&2; fail '.sha256.hmac upload failure must make offsite delivery incomplete'; }
@@ -307,7 +315,6 @@ done
 
 cat > "$TMP/verify-metadata-probe.sh" <<EOF_PROBE
 set -uo pipefail
-REQUIRE_AUTHENTICATED_INTEGRITY=false
 EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""
 backup_log_info(){ printf 'INFO %s\\n' "\$*"; }
 backup_log_warn(){ printf 'WARN %s\\n' "\$*"; }
@@ -357,6 +364,7 @@ mkdir -p "\$BASE_DIR/emergency"
 archive="\$BASE_DIR/emergency/emergency-retained-20260710-120000.tar.zst.age"
 printf archive > "\$archive"
 printf checksum > "\${archive}.sha256"
+printf hmac > "\${archive}.sha256.hmac"
 case "\$BATCH_META_CASE" in
   zero) : > "\${archive}.meta" ;;
   valid) printf 'encryption_mode=age-recipient\\n' > "\${archive}.meta" ;;
@@ -1328,7 +1336,6 @@ SCRIPT_DIR="$project"
 DRY_RUN=false
 QUIET=true
 FILE_INTEGRITY_HMAC_KEY=""
-REQUIRE_AUTHENTICATED_INTEGRITY=false
 CONTROL_WORKSPACE="$TMP/control"
 PAYLOAD_WORKSPACE="$backup_base/.vaultwarden-backup.fixture"
 PENDING_BACKUP_CANDIDATE=""
@@ -1364,7 +1371,8 @@ mountpoint(){ return 1; }
 verify_file_integrity(){ return 0; }
 write_file_integrity(){
     printf 'checksum  %s\n' "$1" > "${1}.sha256"
-    chmod 600 "${1}.sha256"
+    printf 'hmac\n' > "${1}.sha256.hmac"
+    chmod 600 "${1}.sha256" "${1}.sha256.hmac"
 }
 create_backup_metadata(){
     local enc="$1" type="$2"
@@ -1974,8 +1982,6 @@ chmod 600 "$candidate"
 sha256sum "$candidate" | awk '{print $1}' > "$candidate.sha256"
 printf 'backup_type=full\narchive_format=relative\nversion=2\nencryption_mode=age-recipient\n' > "$candidate.meta"
 chmod 600 "$candidate.sha256" "$candidate.meta"
-REQUIRE_AUTHENTICATED_INTEGRITY=false
-export REQUIRE_AUTHENTICATED_INTEGRITY
 
 verify_backup_full "$candidate" full "" || fail "real Age-to-zstd/tar streaming verification failed"
 printf 'PASS: real Age-to-zstd/tar full archive verification\n'
@@ -2466,8 +2472,7 @@ source "$ROOT/lib/crypto.sh"
 source "$ROOT/lib/backup-utils.sh"
 has_command(){ command -v "$1" >/dev/null 2>&1; }
 FILE_INTEGRITY_HMAC_KEY='cohort-test-key'
-REQUIRE_AUTHENTICATED_INTEGRITY=true
-export FILE_INTEGRITY_HMAC_KEY REQUIRE_AUTHENTICATED_INTEGRITY
+export FILE_INTEGRITY_HMAC_KEY
 mapfile -t suffixes < <(backup_required_cohort_suffixes)
 [[ "${suffixes[*]}" == ' .sha256 .sha256.hmac .meta' ]] || fail 'strict cohort definition drifted'
 for backup_type in db full; do

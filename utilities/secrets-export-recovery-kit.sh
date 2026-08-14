@@ -14,7 +14,6 @@ VaultWarden Secrets — export-recovery-kit subcommand
 
 USAGE:
     sudo ./utilities/secrets-export-recovery-kit.sh [OPTIONS]
-    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]  # alias
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
@@ -63,7 +62,6 @@ show_version() {
 }
 
 dispatch_information_request() {
-    if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
     case "${1:-}" in
         --help|-h) show_help; exit 0 ;;
         --version|-V) show_version; exit 0 ;;
@@ -159,7 +157,6 @@ _export_recovery_kit_safe() {
 }
 
 main() {
-  if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
   case "${1:-}" in
     --help|-h) show_help; exit 0 ;;
     --version|-V) show_version; exit 0 ;;

@@ -14,7 +14,6 @@ VaultWarden Secrets — list subcommand
 
 USAGE:
     sudo ./utilities/secrets-list.sh [OPTIONS]
-    sudo ./utilities/secrets-list.sh list [OPTIONS]  # 'list' accepted as alias
     sudo ./edit-secrets.sh list
 
 DESCRIPTION:
@@ -35,7 +34,6 @@ show_version() {
 }
 
 dispatch_information_request() {
-    if [[ "${1:-}" == "list" ]]; then shift; fi
     case "${1:-}" in
         --help|-h) show_help; exit 0 ;;
         --version|-V) show_version; exit 0 ;;
@@ -124,7 +122,6 @@ check_prerequisites() {
 }
 
 main() {
-    if [[ "${1:-}" == "list" ]]; then shift; fi
 
     case "${1:-}" in
         --help|-h) show_help; exit 0 ;;

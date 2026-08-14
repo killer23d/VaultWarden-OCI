@@ -20,10 +20,10 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Added a canonical CrowdSec Cloudflare Workers configuration apply helper and an explicit timed `yes`/`no` prompt after relevant secrets edits so operators can immediately re-render and verify the installed bouncer configuration.
 - Added machine-readable JSON output for backup listing and maintenance health status.
 - Added `utilities/crowdsec-email.sh` as a transaction-safe root-operated controller for enabling, disabling, inspecting, and testing the optional CrowdSec security-event email integration.
-- Added root-operated Postfix queue summary, inspection, targeted retry/deletion, bounded log filtering, and confirmation-gated snapshot purge workflows across the utility, Makefile, dashboard, tests, and operator documentation. The deprecated clear alias now uses the same snapshot-only deletion path.
+- Added root-operated Postfix queue summary, inspection, targeted retry/deletion, bounded log filtering, and confirmation-gated snapshot purge workflows across the utility, Makefile, dashboard, tests, and operator documentation.
 - Hardened snapshot purge against Postfix queue-ID reuse with stable identity verification, a host mutation lock, hold/release rollback, fixed-count queue inventories, exact-ID batching, and long queue IDs as defence in depth.
 - Closed the targeted-delete confirmation race by holding the selected queue ID, revalidating its stable identity, preserving reused IDs, and rolling back only newly introduced holds after failures or handled signals.
-- Made effective `enable_long_queue_ids=yes` a fail-closed prerequisite for targeted deletion, snapshot purge, and deprecated clear; legitimate duplicate queue-list records are now normalized safely while conflicting identities block mutation.
+- Made effective `enable_long_queue_ids=yes` a fail-closed prerequisite for targeted deletion and snapshot purge; legitimate duplicate queue-list records are now normalized safely while conflicting identities block mutation.
 
 ### Changed
 
@@ -45,7 +45,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Rclone configuration resolution now narrowly accepts the canonical root fallback at `/root/.config/rclone/rclone.conf` only when the resolved file satisfies the required ownership and permission checks.
 - Restore and recovery flows now use bounded prompts, staged and validated Age keys, explicit restore plans, pre-destructive confirmation, database integrity gates before automatic restart, configurable health waits, and truthful post-restore/recovery status messaging.
 - Operator CLI contracts were normalized across public scripts: metadata paths are root-free where appropriate, unsupported option combinations and trailing arguments fail clearly, missing option values are checked before shifting, and explicit CLI values take precedence over loaded storage/migration defaults.
-- `setup-storage.sh` now supports canonical `setup`, `verify`, and `migrate` modes while retaining compatibility aliases; migration parsing and runtime-derived argument resolution are separately owned and explicit CLI mode/options win over environment defaults.
+- `setup-storage.sh` now requires the explicit canonical `setup`, `verify`, or `migrate` subcommand; migration parsing and runtime-derived argument resolution are separately owned and explicit CLI options win over environment defaults.
 - Secrets runtime export now reconciles schema-managed files, revokes stale or inactive schema-managed runtime secret files, and preserves operator-owned files outside the schema contract.
 - The operator `Makefile` was simplified by removing redundant developer test/lint wrappers. `./tests/run-tests.sh all` is the canonical permanent regression entry point.
 - Permanent regression cases were organized under four public domain suites and now execute directly at their registered `tests/suites/<suite>/case-*.bash` paths without creating compatibility links in the checkout.

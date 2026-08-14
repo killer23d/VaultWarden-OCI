@@ -43,7 +43,7 @@ CS_PROFILE_BEGIN="# BEGIN VaultWarden-OCI CrowdSec email notifications"
 CS_PROFILE_END="# END VaultWarden-OCI CrowdSec email notifications"
 
 TIMERS=(vaultwarden-maintenance.timer vaultwarden-db-backup.timer vaultwarden-full-backup.timer vaultwarden-health.timer vaultwarden-dns-update.timer vaultwarden-firewall-update.timer)
-SERVICES=(vaultwarden-maintenance.service vaultwarden-db-backup.service vaultwarden-full-backup.service vaultwarden-health.service vaultwarden-dns-update.service vaultwarden-firewall-update.service vaultwarden-notify-failure.service vaultwarden-notify-failure@.service vaultwarden-iptables.service vaultwarden-startup.service)
+SERVICES=(vaultwarden-maintenance.service vaultwarden-db-backup.service vaultwarden-full-backup.service vaultwarden-health.service vaultwarden-dns-update.service vaultwarden-firewall-update.service vaultwarden-notify-failure@.service vaultwarden-iptables.service vaultwarden-startup.service)
 KNOWN_CONTAINERS=(vaultwarden_app vaultwarden_caddy vaultwarden_postfix)
 
 help(){ cat <<'EOH'
@@ -309,7 +309,7 @@ disable_units(){
       unit_is_live "$u" && die "Managed systemd unit is still active after stop: $u. Refusing persistent-state removal."
     done
   fi
-  for u in "${TIMERS[@]}" "${SERVICES[@]}"; do rm -f "$SYSTEMD/$u"; d="$SYSTEMD/$u.d"; rm -f "$d"/{10-state-dir.conf,20-identity.conf,30-run-as-root.conf} 2>/dev/null || true; rmdir "$d" 2>/dev/null || true; done
+  for u in "${TIMERS[@]}" "${SERVICES[@]}"; do rm -f "$SYSTEMD/$u"; d="$SYSTEMD/$u.d"; rm -f "$d"/10-state-dir.conf 2>/dev/null || true; rmdir "$d" 2>/dev/null || true; done
   remove_docker_runtime_dropin || die "Could not remove the managed Docker runtime owner drop-in."
   if has systemctl; then
     for u in "${SERVICES[@]}"; do [[ "$u" == *'@.'* ]] || systemctl reset-failed "$u" 2>/dev/null || true; done
@@ -452,12 +452,12 @@ remove_checkout(){ [[ "$TEST_RESET" == true ]] && return 0; checkout_recognized 
 remove_runtime(){ [[ ! -e "$RUNTIME" && ! -L "$RUNTIME" ]] || safe_rm "$RUNTIME" || die "Could not remove VaultWarden runtime state: $RUNTIME"; }
 
 verify(){
-  local bad=0 u ids
+  local bad=0 u ids state_dropin
   for u in "${TIMERS[@]}" "${SERVICES[@]}"; do
     [[ ! -e "$SYSTEMD/$u" ]] || { warn "RESIDUAL: $SYSTEMD/$u"; bad=$((bad+1)); }
-    for d in 10-state-dir.conf 20-identity.conf 30-run-as-root.conf; do
-      [[ ! -e "$SYSTEMD/$u.d/$d" && ! -L "$SYSTEMD/$u.d/$d" ]] || { warn "RESIDUAL: $SYSTEMD/$u.d/$d"; bad=$((bad+1)); }
-    done
+    state_dropin="$SYSTEMD/$u.d/10-state-dir.conf"
+    [[ ! -e "$state_dropin" && ! -L "$state_dropin" ]] \
+      || { warn "RESIDUAL: $state_dropin"; bad=$((bad+1)); }
   done
   if has systemctl; then
     for u in "${TIMERS[@]}" vaultwarden-startup.service; do

@@ -394,7 +394,6 @@ sudo make health
 Current `.env.example` defaults include:
 
 ```bash
-REQUIRE_AUTHENTICATED_INTEGRITY=true
 
 BACKUP_RETENTION_DAYS=30
 BACKUP_RETENTION_DB_DAYS=14

@@ -276,7 +276,6 @@ Do not remove Postfix merely because `EMAIL_MODE=api` works for one operational 
 Current configurable defaults are:
 
 ```bash
-REQUIRE_AUTHENTICATED_INTEGRITY=true
 BACKUP_RETENTION_DAYS=30
 BACKUP_RETENTION_DB_DAYS=14
 BACKUP_RETENTION_FULL_DAYS=30

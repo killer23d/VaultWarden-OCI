@@ -58,7 +58,6 @@ COPIED_SERVICES=(
     vaultwarden-health.service
     vaultwarden-dns-update.service
     vaultwarden-firewall-update.service
-    vaultwarden-notify-failure.service
     "$NOTIFY_FAILURE_TEMPLATE"
     vaultwarden-iptables.service
 )
@@ -360,40 +359,6 @@ _sha256() {
     fi
 }
 
-_cleanup_stale_identity_dropins() {
-    local unit dropin_dir dropin_file
-
-    local -a stale_files=(
-        "vaultwarden-db-backup.service.d/30-run-as-root.conf"
-        "vaultwarden-full-backup.service.d/30-run-as-root.conf"
-    )
-    local stale_rel
-    for stale_rel in "${stale_files[@]}"; do
-        dropin_file="${UNIT_DEST_DIR}/${stale_rel}"
-        dropin_dir="$(dirname "$dropin_file")"
-        if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
-            log_success "Removed stale root identity drop-in: $dropin_file"
-        fi
-        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
-            log_success "Removed empty drop-in dir: $dropin_dir"
-        fi
-    done
-
-    for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
-        dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
-        dropin_file="${dropin_dir}/20-identity.conf"
-        if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
-            log_success "Removed stale identity drop-in from root-required unit: $dropin_file"
-        fi
-        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
-            log_success "Removed empty drop-in dir: $dropin_dir"
-        fi
-    done
-}
 
 # so that ProtectSystem=strict allows writes to DATA_VOLUME_MOUNT. Without
 # this drop-in, any write to DATA_VOLUME_MOUNT (backup files, health cooldown
@@ -773,8 +738,6 @@ install_units() {
 
     _install_docker_runtime_dropin || return 1
     _install_rwpaths_dropin
-    _cleanup_stale_identity_dropins
-
     log_info "Reloading systemd daemon ..."
     _run systemctl daemon-reload
 
@@ -935,22 +898,6 @@ remove_units() {
         # Remove the .d/ dir only if it is now empty (preserve any
         # drop-ins installed by other tools, e.g. Docker or the OS).
         if [[ -d "$dropin_dir" ]] && [[ -z "$(ls -A "$dropin_dir" 2>/dev/null)" ]]; then
-            _run rmdir "$dropin_dir"
-            log_success "Removed empty drop-in dir: $dropin_dir"
-        fi
-    done
-
-    # Clean up service identity drop-ins written by historical setup versions.
-    # Remove only the managed 20-identity.conf file and leave OS accounts and
-    # group memberships untouched.
-    for unit in "${_ROOT_REQUIRED_UNITS[@]}"; do
-        local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
-        local dropin_file="$dropin_dir/20-identity.conf"
-        if [[ -f "$dropin_file" ]]; then
-            _run rm -f "$dropin_file"
-            log_success "Removed identity drop-in: $dropin_file"
-        fi
-        if [[ -d "$dropin_dir" ]] && [[ -z "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
             _run rmdir "$dropin_dir"
             log_success "Removed empty drop-in dir: $dropin_dir"
         fi

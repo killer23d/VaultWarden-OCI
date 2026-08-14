@@ -260,15 +260,21 @@ test_notify_failure_helper_loads_secret_resolution() {
     (( secrets_line < email_line )) || fail "notify helper must source secrets before email"
 }
 
-test_stale_root_dropin_cleanup_preserves_state_dir() {
-    grep -q 'vaultwarden-db-backup.service.d/30-run-as-root.conf' "$ROOT/utilities/setup-systemd.sh" \
-        || fail "db backup stale root drop-in cleanup missing"
-    grep -q 'vaultwarden-full-backup.service.d/30-run-as-root.conf' "$ROOT/utilities/setup-systemd.sh" \
-        || fail "full backup stale root drop-in cleanup missing"
-    grep -q '10-state-dir.conf' "$ROOT/utilities/setup-systemd.sh" \
-        || fail "10-state-dir.conf handling unexpectedly missing"
-    ! grep -q '30-run-as-root.conf.*10-state-dir.conf' "$ROOT/utilities/setup-systemd.sh" \
-        || fail "stale root cleanup appears to target 10-state-dir.conf"
+
+test_historical_identity_dropins_are_absent() {
+    local installer="$ROOT/utilities/setup-systemd.sh" uninstaller="$ROOT/utilities/uninstall-vaultwarden.sh"
+    local verify_block
+    ! grep -Eq '30-run-as-root\.conf|20-identity\.conf' "$installer" "$uninstaller" \
+        || fail "historical systemd identity/root drop-in cleanup remains"
+    grep -Fq '10-state-dir.conf' "$uninstaller" \
+        || fail "current state-dir drop-in uninstall handling was removed"
+    verify_block="$(awk '/^verify\(\)\{/,/^}/' "$uninstaller")"
+    grep -Fq 'state_dropin="$SYSTEMD/$u.d/10-state-dir.conf"' <<< "$verify_block" \
+        || fail "uninstall verification no longer checks the canonical state-dir drop-in"
+    grep -Fq '[[ ! -e "$state_dropin" && ! -L "$state_dropin" ]]' <<< "$verify_block" \
+        || fail "uninstall verification must reject residual canonical state-dir files or symlinks"
+    ! grep -Eq '30-run-as-root\.conf|20-identity\.conf' <<< "$verify_block" \
+        || fail "uninstall verification restored historical identity/root drop-in compatibility checks"
 }
 
 test_systemd_inventories_are_canonical() {
@@ -287,7 +293,6 @@ test_systemd_inventories_are_canonical() {
         vaultwarden-health.service \
         vaultwarden-dns-update.service \
         vaultwarden-firewall-update.service \
-        vaultwarden-notify-failure.service \
         vaultwarden-iptables.service; do
         grep -Fxq "    $unit" <<< "$services" || fail "copied service inventory missing $unit"
     done
@@ -814,8 +819,8 @@ run_test 'systemd remove requests startup disable and daemon reload' test_system
 run_test 'notify-failure systemd uses helper and no root cooldown path' test_notify_failure_systemd_uses_helper
 run_test 'notify-failure helper defaults PROJECT_STATE_DIR safely' test_notify_failure_helper_defaults_state_dir
 run_test 'notify-failure helper loads encrypted-secret resolution before email' test_notify_failure_helper_loads_secret_resolution
-run_test 'stale 30-run-as-root cleanup preserves 10-state-dir handling' test_stale_root_dropin_cleanup_preserves_state_dir
 run_test 'state-dir drop-ins match service and timer schemas' test_state_dir_dropins_match_unit_type
+run_test 'historical systemd identity/root drop-ins are absent' test_historical_identity_dropins_are_absent
 run_test 'systemd inventories are canonical and keep explicit exceptions' test_systemd_inventories_are_canonical
 run_test 'startup service uses root-owned installed runtime bundle' test_startup_runtime_bundle_contract
 run_test 'background priority applies only to heavy scheduled services' test_background_priority_contract
@@ -882,7 +887,7 @@ fail(){ printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 unit_count="$(find "$ROOT/systemd" -maxdepth 1 -type f -name '*.service' | wc -l | tr -d ' ')"
 timer_count="$(find "$ROOT/systemd" -maxdepth 1 -type f -name '*.timer' | wc -l | tr -d ' ')"
-[[ "$unit_count" == "10" && "$timer_count" == "6" ]] \
+[[ "$unit_count" == "9" && "$timer_count" == "6" ]] \
     || fail "notification work added or removed a managed unit/timer (${unit_count} services, ${timer_count} timers)"
 health_unit="$ROOT/systemd/vaultwarden-health.service"
 grep -Fxq 'ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden-oci' "$health_unit" \

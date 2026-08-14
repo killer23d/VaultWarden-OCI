@@ -326,8 +326,8 @@ require 'operation_release 143; exit 143' "$CROWDSEC_APPLY" \
     "standalone CrowdSec Worker apply must release on HUP/TERM"
 require 'require_root "\$@"' "$CROWDSEC_APPLY" \
     "standalone CrowdSec Worker apply must preserve root-only mutation behavior"
-require '--force does not bypass active VaultWarden operation guards' "$BACKUP" \
-    "backup --force must not bypass operation guards"
+reject '\$FORCE([^A-Za-z0-9_]|$)|--force|--skip-full-verification' "$BACKUP" \
+    "backup must not retain removed force/full-verification compatibility state"
 reject 'FORCE.*flock|flock.*FORCE|SKIP_OPS_LOCK|--skip-ops-lock' "$BACKUP" \
     "backup must not retain force/skip lock bypass logic"
 

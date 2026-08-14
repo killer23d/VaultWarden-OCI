@@ -221,7 +221,6 @@ run_deep_db_maintenance() {
     [[ "$maintenance_successful" == "true" ]]
 }
 
-[[ "${1:-}" == "db-maint" ]] && shift
 
 while [[ $# -gt 0 ]]; do
     case $1 in

@@ -14,7 +14,6 @@ VaultWarden Secrets — edit subcommand
 
 USAGE:
     sudo ./utilities/secrets-edit.sh [OPTIONS]
-    sudo ./utilities/secrets-edit.sh edit [OPTIONS]  # 'edit' accepted as alias
     sudo ./edit-secrets.sh edit [OPTIONS]
 
 DESCRIPTION:
@@ -594,7 +593,6 @@ do_edit() {
 }
 
 main() {
-    if [[ "${1:-}" == "edit" ]]; then shift; fi
 
     while [[ $# -gt 0 ]]; do
         case "$1" in

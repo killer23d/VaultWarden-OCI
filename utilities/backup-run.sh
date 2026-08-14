@@ -24,7 +24,6 @@ BACKUP_TYPE="auto"    # Backup mode: auto, db, full, or emergency.
 DRY_RUN=false
 KEEP_DAYS=""
 QUIET=false
-FORCE=false
 EMAIL_NOTIFY=false   # Set by --email; send_notification_email() runs on completion.
 LIST_ONLY=false      # Set by the list subcommand; prints backups and exits without root.
 RCLONE_SYNC=false    # Set by --rclone; syncs the encrypted backup after creation.
@@ -56,11 +55,9 @@ SUBCOMMANDS:
 RUN OPTIONS (used after 'run'):
     --keep N                 Override configured retention for this run
     --quiet                  Suppress non-error output
-    --force                  Compatibility flag; does not bypass operation guards
     --email                  Send email notification on completion/failure
     --rclone                 Sync encrypted backup to rclone remote after creation
     --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
-    --skip-full-verification Fast checksum only — explicit default
     --dry-run                Show what would be done without executing
 
 SYNC / ROTATE OPTIONS:
@@ -136,11 +133,9 @@ case "$_SUBCMD" in
             case $1 in
                 --keep)                   _require_cli_value "$1" "${2-}"; KEEP_DAYS="$2"; shift 2 ;;
                 --quiet)                  QUIET=true;        shift ;;
-                --force)                  FORCE=true;        shift ;;
                 --email)                  EMAIL_NOTIFY=true; shift ;;
                 --rclone)                 RCLONE_SYNC=true;  shift ;;
                 --full-verification)      FULL_VERIFY=true;  shift ;;
-                --skip-full-verification) FULL_VERIFY=false; shift ;;
                 --dry-run)                DRY_RUN=true;      shift ;;
                 --help|-h)                show_help; exit 0 ;;
                 --version|-V)             print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
@@ -383,14 +378,9 @@ _load_integrity_hmac_key() {
     if [[ $pipeline_rc -ne 0 || -z "$raw_value" || "$raw_value" == CHANGE_ME* ]]; then
         unset FILE_INTEGRITY_HMAC_KEY
 
-        if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
-            log_error "Authenticated backup integrity is required, but file_integrity_hmac_key is unavailable."
-            log_error "Run: ./edit-secrets.sh rotate file_integrity_hmac_key"
-            return 1
-        fi
-
-        backup_log_warn "Backup integrity HMAC key is unavailable; legacy SHA-256-only mode remains active."
-        return 0
+        log_error "Authenticated backup integrity requires file_integrity_hmac_key."
+        log_error "Run: ./edit-secrets.sh rotate file_integrity_hmac_key"
+        return 1
     fi
 
     FILE_INTEGRITY_HMAC_KEY="$raw_value"
@@ -685,9 +675,6 @@ _validate_created_backup_cohort() {
     while IFS= read -r suffix; do
         files+=("${archive}${suffix}")
     done < <(backup_required_cohort_suffixes)
-    if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" != "true" && -e "${archive}.sha256.hmac" ]]; then
-        files+=("${archive}.sha256.hmac")
-    fi
     for file in "${files[@]}"; do
         mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || true)"
         [[ -f "$file" && ! -L "$file" && -s "$file" && "$mode" == 600 ]] || {
@@ -1014,14 +1001,11 @@ verify_backup_full() {
 
     backup_log_info "Running full verification (decrypt + integrity check)..."
 
-    if [[ -f "${enc_file}.sha256" ]]; then
-        verify_file_integrity "$enc_file" || return 1
-    elif [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
+    if [[ ! -f "${enc_file}.sha256" ]]; then
         log_error "Full verification FAILED: required integrity sidecar is missing for $enc_file" >&2
         return 1
-    else
-        backup_log_warn "No SHA256 sidecar found — authenticated file check skipped"
     fi
+    verify_file_integrity "$enc_file" || return 1
 
     local encryption_mode=""
     if [[ "$backup_type" == "emergency" ]]; then
@@ -1241,9 +1225,6 @@ sync_to_rclone() {
     local -a required_suffixes=() upload_suffixes=()
     mapfile -t required_suffixes < <(backup_required_cohort_suffixes)
     upload_suffixes=("${required_suffixes[@]}")
-    if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" != "true" && -s "${enc_file}.sha256.hmac" ]]; then
-        upload_suffixes+=(".sha256.hmac")
-    fi
     for suffix in "${required_suffixes[@]}"; do
         local_member="${enc_file}${suffix}"
         [[ -f "$local_member" && ! -L "$local_member" && -s "$local_member" ]] || {
@@ -2088,7 +2069,6 @@ main() {
 
     _check_backup_deps
 
-    [[ "$FORCE" == "true" ]] && backup_log_warn "--force does not bypass active VaultWarden operation guards."
     _acquire_backup_guard
     operation_set_phase "run" "Creating ${BACKUP_TYPE} backup"
     _create_owned_workspace CONTROL_WORKSPACE CONTROL_WORKSPACE_ID /dev/shm vw-backup-control true || exit 1

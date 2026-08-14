@@ -121,8 +121,7 @@ prefers `hold` when queue names differ, and otherwise chooses a deterministic
 queue name. Conflicting identities for one ID reject the inventory. Reused IDs
 are skipped, pre-existing holds are preserved, and newly introduced holds are
 rolled back after failures or handled signals when possible. Direct external
-Postfix administration is outside this utility lock. The deprecated `clear`
-interface uses the snapshot workflow and never a live all-queue deletion.
+Postfix administration is outside this utility lock.
 
 ### `backup.sh`
 

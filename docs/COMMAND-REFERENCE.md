@@ -30,7 +30,6 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make email-queue-delete` |  Delete one exact QUEUE_ID; requires verified long IDs |
 | `make email-queue-logs` |  Show Postfix logs (QUEUE_ID optional, EMAIL_QUEUE_TAIL default 200) |
 | `make email-queue-purge` |  Purge identity matches; requires verified long IDs |
-| `make email-queue-clear` |  Deprecated long-ID-gated alias for snapshot purge |
 | `make up` |  Start all services (runs startup.sh for health checks; root required) |
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully (root required) |
@@ -115,19 +114,17 @@ VaultWarden-OCI Setup Tool — Security Hardened Edition
 
 USAGE:
     sudo ./setup.sh install --domain DOMAIN --email EMAIL [OPTIONS]  # Full setup
-    sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]          # Full setup (legacy)
     sudo ./setup.sh secrets [OPTIONS]                                # Secrets phase only
     sudo ./setup.sh systemd <install|remove|validate|status> [OPTIONS]  # Systemd phase
 
 SUBCOMMANDS:
-    install    Run the full setup workflow. This is the recommended explicit
-               entry point; legacy top-level --domain/--email flags still work.
+    install    Run the full setup workflow.
     secrets    Configure encrypted secrets (admin password, API tokens, SMTP, etc.)
                Run this after editing .env with your Cloudflare zone / email settings.
     systemd    Install, validate, or remove VaultWarden systemd timers.
                Sub-actions: install | remove | validate | status
 
-FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
+FULL SETUP OPTIONS (used after install):
   --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
@@ -193,9 +190,7 @@ SUBCOMMANDS:
 STARTUP OPTIONS:
   --force          Recreate containers to apply current Compose and runtime environment values
   --skip-health    Skip post-startup health check
-  --skip-pull      Compatibility option; startup never pulls images
   --background     Start services in background (daemon mode)
-  --skip-egress-fix  Compatibility option; startup never repairs firewall/NAT
   --dry-run        Show what would be done without executing
 
 GLOBAL OPTIONS:
@@ -235,11 +230,9 @@ SUBCOMMANDS:
 RUN OPTIONS (used after 'run'):
     --keep N                 Override configured retention for this run
     --quiet                  Suppress non-error output
-    --force                  Compatibility flag; does not bypass operation guards
     --email                  Send email notification on completion/failure
     --rclone                 Sync encrypted backup to rclone remote after creation
     --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
-    --skip-full-verification Fast checksum only — explicit default
     --dry-run                Show what would be done without executing
 
 SYNC / ROTATE OPTIONS:
@@ -317,7 +310,6 @@ OPTIONS (used after a subcommand):
     --no-backup             Skip pre-restore emergency snapshot. Use only when
                             current local state is disposable, such as a fresh
                             VM restoring a remote DB backup.
-    --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
     --inspect               Non-destructive inspect mode (same as inspect subcommand)
@@ -338,7 +330,6 @@ GLOBAL OPTIONS:
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
                                        (default: $PROJECT_STATE_DIR/backups)
-    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
     RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
     RCLONE_REMOTE_NAME                 Read from .env when available
@@ -510,11 +501,9 @@ SUBCOMMANDS:
 RUN OPTIONS (used after 'run'):
     --keep N                 Override configured retention for this run
     --quiet                  Suppress non-error output
-    --force                  Compatibility flag; does not bypass operation guards
     --email                  Send email notification on completion/failure
     --rclone                 Sync encrypted backup to rclone remote after creation
     --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
-    --skip-full-verification Fast checksum only — explicit default
     --dry-run                Show what would be done without executing
 
 SYNC / ROTATE OPTIONS:
@@ -587,7 +576,6 @@ USAGE:
     sudo utilities/email-queue.sh delete QUEUE_ID
     sudo utilities/email-queue.sh logs [QUEUE_ID] [--tail N]
     sudo utilities/email-queue.sh purge --snapshot
-    sudo utilities/email-queue.sh clear
 
 COMMANDS:
     status                  Show the human-readable Postfix queue. This is the
@@ -610,13 +598,11 @@ COMMANDS:
     purge --snapshot        Require verified long queue IDs, capture stable
                             identities, hold eligible snapshot messages, and
                             delete only held identity matches.
-    clear                   Deprecated alias for purge --snapshot.
 
 AUTOMATION CONFIRMATION:
     VW_EMAIL_QUEUE_CONFIRM=retry-all
     VW_EMAIL_QUEUE_CONFIRM=delete:QUEUE_ID
     VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
-    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1   Deprecated; accepted only by clear.
 
 CONFIRMATION TOKENS:
     retry --all             RETRY ALL
@@ -1035,7 +1021,6 @@ OPTIONS (used after a subcommand):
     --no-backup             Skip pre-restore emergency snapshot. Use only when
                             current local state is disposable, such as a fresh
                             VM restoring a remote DB backup.
-    --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
     --inspect               Non-destructive inspect mode (same as inspect subcommand)
@@ -1056,7 +1041,6 @@ GLOBAL OPTIONS:
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
                                        (default: $PROJECT_STATE_DIR/backups)
-    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
     RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
     RCLONE_REMOTE_NAME                 Read from .env when available
@@ -1113,7 +1097,6 @@ VaultWarden Secrets — edit subcommand
 
 USAGE:
     sudo ./utilities/secrets-edit.sh [OPTIONS]
-    sudo ./utilities/secrets-edit.sh edit [OPTIONS]  # 'edit' accepted as alias
     sudo ./edit-secrets.sh edit [OPTIONS]
 
 DESCRIPTION:
@@ -1139,7 +1122,6 @@ VaultWarden Secrets — export-recovery-kit subcommand
 
 USAGE:
     sudo ./utilities/secrets-export-recovery-kit.sh [OPTIONS]
-    sudo ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]  # alias
     sudo ./edit-secrets.sh export-recovery-kit [OPTIONS]
 
 DESCRIPTION:
@@ -1189,7 +1171,6 @@ VaultWarden Secrets — list subcommand
 
 USAGE:
     sudo ./utilities/secrets-list.sh [OPTIONS]
-    sudo ./utilities/secrets-list.sh list [OPTIONS]  # 'list' accepted as alias
     sudo ./edit-secrets.sh list
 
 DESCRIPTION:
@@ -1211,7 +1192,6 @@ VaultWarden Secrets — rotate subcommand
 
 USAGE:
     sudo ./utilities/secrets-rotate.sh FIELD [OPTIONS]
-    sudo ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
     sudo ./edit-secrets.sh rotate FIELD [OPTIONS]
 
 DESCRIPTION:
@@ -1228,7 +1208,6 @@ EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
     EMAIL_MODE=smtp   — Postfix sidecar → direct SMTP (rotate: smtp_password)
     EMAIL_MODE=direct — direct SMTP only (rotate: smtp_password)
-    EMAIL_MODE=host   — deprecated alias for direct (rotate: smtp_password)
     EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
         → selects which HTTP driver is used at runtime;
           the token is always stored as "email_api_token" in secrets.yaml.
@@ -1253,7 +1232,6 @@ VaultWarden Secrets — view subcommand
 
 USAGE:
     sudo ./utilities/secrets-view.sh [OPTIONS]
-    sudo ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
     sudo ./edit-secrets.sh view [OPTIONS]
 
 DESCRIPTION:
@@ -1450,7 +1428,6 @@ USAGE:
     sudo utilities/setup-storage.sh setup [OPTIONS]
     sudo utilities/setup-storage.sh verify [OPTIONS]
     sudo utilities/setup-storage.sh migrate <subcommand> [OPTIONS]
-    sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]  # compatibility
 
 DESCRIPTION:
     Configures persistent storage directories, optional data-volume
@@ -1462,12 +1439,11 @@ DESCRIPTION:
     behavior when no DATA_VOLUME_DEVICE is set.
 
 MODES:
-    setup    Create and configure storage directories (default)
+    setup    Create and configure storage directories
     migrate  Migrate from boot volume to data volume (interactive)
     verify   Re-check layout and permissions only (no changes, safe for cron)
 
 OPTIONS:
-    --mode MODE           Compatibility alias for setup|migrate|verify
     --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
     --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
     --auto                Non-interactive mode; suppresses the storage assistant and

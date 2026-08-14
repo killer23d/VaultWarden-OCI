@@ -1637,12 +1637,6 @@ fi
 operation_set_phase "1" "CrowdSec base installation" 2>/dev/null || true
 log_info "=== PHASE 1: CrowdSec base installation ==="
 
-_legacy_notify_unit="/etc/systemd/system/vaultwarden-notify-failure.service"
-if [[ -f "$_legacy_notify_unit" ]] && grep -q "Review failed units with:" "$_legacy_notify_unit" 2>/dev/null; then
-    log_warn "Detected legacy vaultwarden-notify-failure.service payload; normalizing for CrowdSec compatibility."
-    sed -i 's/Review failed units with:\\n  systemctl --failed\\n/Run: systemctl --failed/g' "$_legacy_notify_unit" 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-fi
 
 if command -v cscli >/dev/null 2>&1 && [[ "$FORCE" != "true" ]]; then
     log_info "CrowdSec already installed — skipping base install."

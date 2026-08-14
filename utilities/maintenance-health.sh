@@ -1395,8 +1395,6 @@ EOF
 [[ $# -gt 0 && ( "$1" == "--help" || "$1" == "-h" || "$1" == "help" ) ]] && { show_help; exit 0; }
 [[ $# -gt 0 && ( "$1" == "--version" || "$1" == "-V" ) ]] && { print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0; }
 
-# Strip the leading 'health' token when the dispatcher prepends the subcommand.
-[[ "${1:-}" == "health" ]] && shift
 if [[ "${VAULTWARDEN_INTERNAL_HEALTH_CHECK:-false}" != "true" ]]; then
     true # root is allowed for direct/internal health checks under the root-operated contract
 fi

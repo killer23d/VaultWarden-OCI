@@ -511,7 +511,7 @@ NOTES:
         sudo ./edit-secrets.sh export-recovery-kit
 
     The intended standalone order is:
-        1. sudo ./setup.sh --domain DOMAIN --email EMAIL
+        1. sudo ./setup.sh install --domain DOMAIN --email EMAIL
         2. nano .env           (set EMAIL_MODE, EMAIL_PROVIDER,
                                 SMTP_HOST, etc.)
         3. sudo utilities/setup-secrets.sh configure
@@ -819,6 +819,13 @@ HELP
         fi
         _email_mode="${_email_mode:-auto}"
         _email_provider="${_email_provider:-mailersend}"
+        case "$_email_mode" in
+            auto|api|smtp|direct) ;;
+            *)
+                log_error "Unsupported EMAIL_MODE='${_email_mode}'. Valid values: auto api smtp direct"
+                return 1
+                ;;
+        esac
         local _push_enabled
         _push_enabled=$(_read_dotenv_value "PUSH_ENABLED" .env)
         _push_enabled="${_push_enabled:-false}"
@@ -921,7 +928,7 @@ HELP
             # placeholder and not empty) so downstream consumers can distinguish
             # "not applicable" from "not configured".
             smtp_password)
-                if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" || "$_email_mode" == "direct" || "$_email_mode" == "host" ]]; then
+                if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" || "$_email_mode" == "direct" ]]; then
                     echo ""
                     log_info " Tier 2 — SMTP Relay Password"
                     log_info "  Secrets key: smtp_password"
@@ -967,7 +974,6 @@ HELP
                 log_info "  auto  — try API → Postfix sidecar → direct upstream SMTP in order (recommended)"
                 log_info "  api   — HTTP API only   (requires email_api_token in secrets)"
                 log_info "  smtp  — Postfix sidecar → direct SMTP (requires smtp_password for direct fallback)"
-                log_info "  host  — deprecated alias for direct (smtp_password required)"
                 echo ""
                 log_info "One token key (email_api_token) works for ALL providers."
                 log_info "To switch providers: change EMAIL_PROVIDER in .env only."
@@ -1344,7 +1350,6 @@ HELP
             echo "   auto  — API → Postfix sidecar → direct upstream SMTP fallback chain (recommended)"
             echo "   api   — HTTP API only  (set EMAIL_PROVIDER + rotate email_api_token)"
             echo "   smtp  — Postfix sidecar → direct SMTP (rotate smtp_password)"
-            echo "   host  — deprecated alias for direct (smtp_password required)"
             echo ""
             log_info "Generated administrator passwords were not printed; automatic mode uses a protected setup credential handoff."
             echo ""

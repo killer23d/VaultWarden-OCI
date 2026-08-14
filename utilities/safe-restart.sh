@@ -37,7 +37,7 @@ EOF
 
 _safe_restart_rollback_result() {
     local rollback_health_rc=0
-    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" health \
+    VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" \
         || rollback_health_rc=$?
 
     case "$rollback_health_rc" in
@@ -133,9 +133,9 @@ while IFS= read -r image_ref; do
 done < <(docker compose config --images | sort -u)
 chmod 600 "$image_snapshot"
 
-log_info "Restarting with the existing image set (--skip-pull)..."
+log_info "Restarting with the existing local image set..."
 operation_set_phase "startup" "Running guarded startup"
-if "${PROJECT_ROOT}/startup.sh" --force --skip-pull; then
+if "${PROJECT_ROOT}/startup.sh" --force; then
     log_success "Safe restart completed successfully."
     exit 0
 fi

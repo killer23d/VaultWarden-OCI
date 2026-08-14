@@ -81,9 +81,7 @@ FORCE=false
 NO_PRE_BACKUP=false
 START_POLICY=""
 ROTATE_AGE_KEY_POLICY=""
-SKIP_VERIFICATION=false
 RESTORE_ENV=true
-RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
 RESTORE_SNAPSHOT_RESULT="not-run"
 RESTORE_FULL_PROMOTION_COMMITTED=false
 USE_REMOTE=false
@@ -150,7 +148,6 @@ OPTIONS (used after a subcommand):
     --no-backup             Skip pre-restore emergency snapshot. Use only when
                             current local state is disposable, such as a fresh
                             VM restoring a remote DB backup.
-    --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
     --inspect               Non-destructive inspect mode (same as inspect subcommand)
@@ -171,7 +168,6 @@ GLOBAL OPTIONS:
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
                                        (default: $PROJECT_STATE_DIR/backups)
-    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
     RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
     RCLONE_REMOTE_NAME                 Read from .env when available
@@ -288,9 +284,6 @@ while [[ $# -gt 0 ]]; do
             [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
             [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
             NO_PRE_BACKUP=true;       shift ;;
-        --skip-verification)
-            [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
-            SKIP_VERIFICATION=true;   shift ;;
         --skip-env)
             [[ "$LIST_ONLY" == "true" ]] && _reject_restore_option list "$1"
             [[ "$INSPECT_ONLY" == "true" ]] && _reject_restore_option inspect "$1"
@@ -503,7 +496,7 @@ _restore_print_manual_start_checklist() {
     log_info "  2. Verify /etc/vaultwarden/*"
     log_info "  3. Verify mounted storage"
     log_info "  4. Verify Cloudflare/DNS and firewall state"
-    log_info "  5. sudo ./startup.sh --skip-pull"
+    log_info "  5. sudo ./startup.sh"
     log_info "  6. docker compose ps"
     log_info "  7. docker compose logs --tail=100"
     log_info "  8. sudo ./maintenance.sh health"
@@ -1226,9 +1219,9 @@ _load_recovery_kit() {
     integrity_key="${integrity_key//$'\r'/}"
     if [[ -n "$integrity_key" && "$integrity_key" != CHANGE_ME* && "$integrity_key" != "Not Set" ]]; then
         RECOVERY_KIT_INTEGRITY_HMAC_KEY="$integrity_key"
-    elif [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-true}" == "true" ]]; then
-        log_error "Recovery kit is missing the historical backup integrity HMAC key required by the active policy."
-        log_error "Use the recovery kit that belongs to this backup generation, or restore the matching integrity key first."
+    else
+        log_error "Recovery kit is missing the backup integrity HMAC key."
+        log_error "Use the recovery kit that belongs to this backup generation."
         return 1
     fi
 
@@ -1265,13 +1258,9 @@ _load_restore_integrity_hmac_key() {
     fi
 
     unset FILE_INTEGRITY_HMAC_KEY
-    if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-true}" == "true" ]]; then
-        log_error "Authenticated restore integrity is required, but file_integrity_hmac_key is unavailable."
-        log_error "For replacement-host DR, use --from-recovery-kit with the kit from the backup generation."
-        return 1
-    fi
-    log_warn "Backup integrity HMAC key unavailable; legacy SHA-256-only restore policy is active."
-    return 0
+    log_error "Authenticated restore integrity is required, but file_integrity_hmac_key is unavailable."
+    log_error "For replacement-host DR, use --from-recovery-kit with the kit from the backup generation."
+    return 1
 }
 
 #
@@ -2157,7 +2146,7 @@ _stage_db_restore_for_preflight() {
         fi
         chmod 0600 "$dec_db" || return 1
     fi
-    [[ "$SKIP_VERIFICATION" == "true" ]] || verify_sqlite "$dec_db" || return 1
+    verify_sqlite "$dec_db" || return 1
     local schema_count
     schema_count="$(sqlite3 "$dec_db" "SELECT count(*) FROM sqlite_master;" 2>/dev/null || echo 0)"
     if [[ "$schema_count" =~ ^[0-9]+$ ]] && (( schema_count == 0 )); then
@@ -2168,16 +2157,15 @@ _stage_db_restore_for_preflight() {
 }
 
 _restore_inspect_archive_layout() {
-    local dec_tar="$1" archive_format="$3"
+    local dec_tar="$1"
     local filter; filter="$(_tar_filter_for_file "$dec_tar")"
     local -a filter_args=()
     [[ -n "$filter" ]] && read -r -a filter_args <<< "$filter"
     RESTORE_PREFLIGHT_MEMBERS="$(tar "${filter_args[@]}" -tf "$dec_tar")" || return 1
     RESTORE_PREFLIGHT_FIRST30="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | head -30)"
     local normalized_members
-    # Normalize archive member names only for layout analysis.  Legacy v1
-    # archives retain absolute member grammar, but the derived source root is
-    # always reconstructed below with exactly one leading slash.
+    # Normalize member names only for layout analysis after the strict
+    # current-format metadata gate and traversal validation.
     normalized_members="$(printf '%s\n' "$RESTORE_PREFLIGHT_MEMBERS" | sed -e 's#^\./##' -e 's#^/*##')"
     mapfile -t RESTORE_PREFLIGHT_LIVE_DBS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)data/db\.sqlite3$' | grep -Ev '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
     mapfile -t RESTORE_PREFLIGHT_SNAPSHOT_DBS < <(printf '%s\n' "$normalized_members" | grep -E '(^|/)\.pre-restore-[^/]*/data/db\.sqlite3$' || true)
@@ -2196,7 +2184,6 @@ _restore_inspect_archive_layout() {
     RESTORE_PREFLIGHT_SOURCE_MODE="$(_detect_storage_mode "$RESTORE_PREFLIGHT_SOURCE_ROOT" "" "")"
     RESTORE_PREFLIGHT_SOURCE_MOUNT=""
     [[ "$RESTORE_PREFLIGHT_SOURCE_MODE" == "block" ]] && RESTORE_PREFLIGHT_SOURCE_MOUNT="$RESTORE_PREFLIGHT_SOURCE_ROOT"
-    [[ "$archive_format" == "absolute" ]] && RESTORE_PREFLIGHT_SOURCE_MODE="unknown"
     return 0
 }
 
@@ -2247,7 +2234,7 @@ _restore_prepare_block_target() {
 
 restore_full_preflight() {
     local backup_file="$1" dec_tar="$2" state_dir="$3" puid="$4" pgid="$5" archive_format="$6" archive_version="$7"
-    _restore_inspect_archive_layout "$dec_tar" "$state_dir" "$archive_format" || { log_error "Cannot inspect archive members."; return 1; }
+    _restore_inspect_archive_layout "$dec_tar" || { log_error "Cannot inspect archive members."; return 1; }
     local target_mount="${DATA_VOLUME_MOUNT:-$(get_config_value "DATA_VOLUME_MOUNT" "")}"
     local target_device="${DATA_VOLUME_DEVICE:-$(get_config_value "DATA_VOLUME_DEVICE" "")}"
     local state_is_mountpoint="no"; _path_is_mountpoint "$state_dir" && state_is_mountpoint="yes"
@@ -2264,9 +2251,9 @@ restore_full_preflight() {
     elif [[ "$RESTORE_PREFLIGHT_SOURCE_MODE" == "block" && "$target_mode" == "boot" ]]; then
         compatible=false; verdict="Storage mismatch: backup appears to be from block storage, but this VM is currently targeting boot storage."
         recommended="Attach/mount/configure block storage first, or restore the latest DB backup if only Vaultwarden data is needed."
-    elif [[ "$RESTORE_PREFLIGHT_SOURCE_MODE" == "repo-local" && "$FORCE" != "true" ]]; then
-        compatible=false; verdict="Legacy repo-local source detected; explicit --force confirmation is required."
-        recommended="Re-run with --force only after confirming this legacy archive is intended."
+    elif [[ "$RESTORE_PREFLIGHT_SOURCE_MODE" == "repo-local" ]]; then
+        compatible=false; verdict="Unsupported legacy repo-local archive layout detected."
+        recommended="Restore a current relative-format backup created from the supported state directory."
     fi
     if [[ "$target_mode" == "block" && "$compatible" == "true" ]]; then
         if ! _path_is_mountpoint "$state_dir"; then
@@ -2427,25 +2414,15 @@ create_pre_restore_snapshot() {
             RESTORE_SNAPSHOT_RESULT="created"
             return 0
         fi
-        if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
-            log_error "Pre-restore snapshot FAILED (hard-fail)."
-            log_error "Use --no-backup only if current local state is disposable, or set RESTORE_SNAPSHOT_HARD_FAIL=false to continue."
-            return 1
-        fi
-        RESTORE_SNAPSHOT_RESULT="soft-failed"
-        log_warn "Pre-restore snapshot failed (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
-        return 0
+        log_error "Pre-restore snapshot FAILED."
+        log_error "Use --no-backup only if current local state is disposable."
+        return 1
     fi
 
     local msg="backup-run.sh not executable — cannot create pre-restore snapshot"
-    if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
-        log_error "$msg"
-        log_error "Use --no-backup only if current local state is disposable, or set RESTORE_SNAPSHOT_HARD_FAIL=false to continue."
-        return 1
-    fi
-    RESTORE_SNAPSHOT_RESULT="soft-failed"
-    log_warn "$msg (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
-    return 0
+    log_error "$msg"
+    log_error "Use --no-backup only if current local state is disposable."
+    return 1
 }
 
 _set_snapshot_operation_phase() {
@@ -2455,9 +2432,6 @@ _set_snapshot_operation_phase() {
             ;;
         skipped)
             operation_set_phase "snapshot" "Pre-restore snapshot skipped"
-            ;;
-        soft-failed)
-            operation_set_phase "snapshot" "Pre-restore snapshot soft-failed; continuing by policy"
             ;;
         *)
             log_error "Unexpected pre-restore snapshot result: ${RESTORE_SNAPSHOT_RESULT:-unset}"
@@ -2492,7 +2466,7 @@ restore_db() {
         _stage_db_restore_for_preflight "$backup_file" "$age_key_file" "$state_dir" || return 1
     fi
     log_info "Using preflight-validated database payload from target-filesystem staging."
-    [[ "$SKIP_VERIFICATION" != "true" ]] && { verify_sqlite "$dec_db" || return 1; }
+    verify_sqlite "$dec_db" || return 1
 
     local db_dir="$state_dir/data" db_path
     db_path="$db_dir/db.sqlite3"
@@ -2574,7 +2548,7 @@ _stage_emergency_private_key_in_control_workspace() {
 }
 
 restore_full() {
-    local backup_file="$1" age_key_file="$2" state_dir="$3" puid="$4" pgid="$5" tmpdir="$6" archive_format="$7"
+    local backup_file="$1" age_key_file="$2" state_dir="$3" puid="$4" pgid="$5" tmpdir="$6"
 
     local inner_name="${backup_file%.age}"
     case "$inner_name" in
@@ -2600,21 +2574,10 @@ restore_full() {
         fi
     fi
 
-    if [[ "$SKIP_VERIFICATION" != "true" ]]; then
-        log_info "Verifying archive structure..."
-        # shellcheck disable=SC2086
-        tar $tar_filter -tf "$dec_tar" >/dev/null || { log_error "Archive is corrupt or invalid"; return 1; }
-    fi
-
-    if [[ "$archive_format" == "absolute" ]]; then
-        log_warn "Legacy archive format detected (version=1, absolute paths). Using staged extraction before live promotion."
-        # Always run traversal check regardless of SKIP_VERIFICATION.
-        # Legacy member grammar permits leading '/', so do not apply the relative-member validator here.
-        check_traversal_only "$dec_tar" || return 1
-        log_success "Archive traversal check passed (legacy format)."
-    elif [[ "$SKIP_VERIFICATION" != "true" ]]; then
-        tar_validate_members "$dec_tar" || return 1
-    fi
+    log_info "Verifying archive structure..."
+    # shellcheck disable=SC2086
+    tar $tar_filter -tf "$dec_tar" >/dev/null || { log_error "Archive is corrupt or invalid"; return 1; }
+    tar_validate_members "$dec_tar" || return 1
 
     [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would extract archive into secure staging and promote the selected state/config paths."; return 0; }
 
@@ -2945,12 +2908,6 @@ main() {
             fi
         fi
         check_dependencies
-        REQUIRE_AUTHENTICATED_INTEGRITY="$(get_config_value "REQUIRE_AUTHENTICATED_INTEGRITY" "true")"
-        [[ "$REQUIRE_AUTHENTICATED_INTEGRITY" == "true" || "$REQUIRE_AUTHENTICATED_INTEGRITY" == "false" ]] || {
-            log_error "REQUIRE_AUTHENTICATED_INTEGRITY must be true or false."
-            exit 1
-        }
-        export REQUIRE_AUTHENTICATED_INTEGRITY
 
         local _early_state_dir
         _early_state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
@@ -2991,12 +2948,6 @@ main() {
     fi
 
     check_dependencies
-    REQUIRE_AUTHENTICATED_INTEGRITY="$(get_config_value "REQUIRE_AUTHENTICATED_INTEGRITY" "true")"
-    [[ "$REQUIRE_AUTHENTICATED_INTEGRITY" == "true" || "$REQUIRE_AUTHENTICATED_INTEGRITY" == "false" ]] || {
-        log_error "REQUIRE_AUTHENTICATED_INTEGRITY must be true or false."
-        exit 1
-    }
-    export REQUIRE_AUTHENTICATED_INTEGRITY
 
     if [[ "$DRY_RUN" != "true" && "$INSPECT_ONLY" != "true" ]]; then
         operation_acquire \
@@ -3098,46 +3049,29 @@ main() {
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    if [[ "$SKIP_VERIFICATION" == "true" && "$REQUIRE_AUTHENTICATED_INTEGRITY" == "true" ]]; then
-        log_error "--skip-verification cannot bypass authenticated integrity while REQUIRE_AUTHENTICATED_INTEGRITY=true."
-        log_error "Restore the complete cohort and matching integrity key, then retry."
-        exit 1
-    fi
     _load_restore_integrity_hmac_key "$OPERATIONAL_SOPS_AGE_KEY_FILE" || exit 1
     local sha256_sidecar="${BACKUP_FILE}.sha256"
-    if [[ "$SKIP_VERIFICATION" == "true" ]]; then
-        log_warn "--skip-verification: legacy non-authenticated sidecar check bypassed."
-    elif [[ -f "$sha256_sidecar" ]]; then
-        log_info "Authenticating backup integrity before decryption..."
-        verify_file_integrity "$BACKUP_FILE" || {
-            log_error "Backup integrity verification failed before destructive restore work."
-            exit 1
-        }
-        log_success "Backup integrity authenticated: $(basename "$BACKUP_FILE")"
-    elif [[ "$REQUIRE_AUTHENTICATED_INTEGRITY" == "true" ]]; then
+    if [[ ! -f "$sha256_sidecar" ]]; then
         log_error "Required backup integrity sidecar is missing: $sha256_sidecar"
         exit 1
-    else
-        log_warn "No .sha256 sidecar found — legacy non-authenticated restore will continue without a checksum."
     fi
+    log_info "Authenticating backup integrity before decryption..."
+    verify_file_integrity "$BACKUP_FILE" || {
+        log_error "Backup integrity verification failed before destructive restore work."
+        exit 1
+    }
+    log_success "Backup integrity authenticated: $(basename "$BACKUP_FILE")"
 
     local meta_file="${BACKUP_FILE}.meta"
     local archive_version; archive_version="$(read_meta_field "$meta_file" "version" "")"
     local archive_format;  archive_format="$(read_meta_field  "$meta_file" "archive_format" "")"
     local backup_encryption_mode; backup_encryption_mode="$(read_meta_field "$meta_file" "encryption_mode" "")"
 
-    if [[ -z "$archive_format" ]]; then
-        if   [[ "$BACKUP_FILE" == *.tar.zst.age || "$BACKUP_FILE" == *.zst.age ]]; then
-            archive_format="relative"
-            log_info "archive_format inferred 'relative' from .zst extension."
-        elif [[ "$archive_version" == "2" ]]; then archive_format="relative"
-        elif [[ "$archive_version" == "1" ]]; then archive_format="absolute"
-        else
-            archive_format="relative"
-            log_warn "archive_format absent from .meta; defaulting to 'relative'."
-        fi
+    if [[ "$archive_format" != "relative" || "$archive_version" != "2" ]]; then
+        log_error "Unsupported backup archive format: ${archive_format:-missing} v${archive_version:-missing}."
+        log_error "Restore requires current metadata with archive_format=relative and version=2."
+        exit 1
     fi
-    [[ -z "$archive_version" ]] && archive_version="unknown"
 
     if [[ "$RESTORE_TYPE" == "emergency" ]]; then
         if [[ ! -s "$meta_file" ]]; then
@@ -3206,11 +3140,7 @@ main() {
         _preflight_tar="$(_decrypt_restore_archive_for_preflight \
             "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" \
             "$PAYLOAD_WORKSPACE" "$CONTROL_WORKSPACE")" || exit 1
-        if [[ "$archive_format" == "absolute" ]]; then
-            check_traversal_only "$_preflight_tar" || exit 1
-        else
-            tar_validate_members "$_preflight_tar" || exit 1
-        fi
+        tar_validate_members "$_preflight_tar" || exit 1
         restore_full_preflight "$BACKUP_FILE" "$_preflight_tar" "$STATE_DIR" "$PUID" "$PGID" "$archive_format" "$archive_version" || exit 1
         _restore_preflight_archive_expansion_capacity "$_preflight_tar" || exit 1
         if [[ "$INSPECT_ONLY" == "true" ]]; then
@@ -3281,8 +3211,8 @@ main() {
                 elif [[ "${START_POLICY:-auto}" == "auto" ]]; then
                     if _can_safe_restart; then
                         log_warn "Integrity check passed — attempting one service restart..."
-                        bash "${PROJECT_ROOT}/startup.sh" --skip-pull 2>/dev/null || \
-                            log_error "CRITICAL: Service restart failed. Manual: sudo ./startup.sh --skip-pull"
+                        bash "${PROJECT_ROOT}/startup.sh" 2>/dev/null || \
+                            log_error "CRITICAL: Service restart failed. Manual: sudo ./startup.sh"
                     else
                         log_error "Restore state is not eligible for automatic safety restart."
                         log_error "DB restores require an integrity-valid live DB; full/emergency restores also require committed promotion and rekey state."
@@ -3326,7 +3256,7 @@ main() {
         full|emergency)
             RESTORE_DESTRUCTIVE_PHASE_STARTED=true
             operation_set_phase "restore-full" "Restoring full application state"
-            restore_full "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$PAYLOAD_WORKSPACE" "$archive_format"
+            restore_full "$BACKUP_FILE" "$RESTORE_DECRYPT_AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$PAYLOAD_WORKSPACE"
             ;;
         *)
             log_error "Unknown restore type: $RESTORE_TYPE"; exit 1 ;;
@@ -3451,7 +3381,7 @@ main() {
             return 0
         fi
         log_info "Starting services..."
-        if ! bash "${PROJECT_ROOT}/startup.sh" --skip-pull; then
+        if ! bash "${PROJECT_ROOT}/startup.sh"; then
             log_error "Failed to start services after restore."
             log_error "Investigate with: docker compose logs --tail=50"
             exit 1

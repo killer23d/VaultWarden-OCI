@@ -33,7 +33,6 @@ USAGE:
     sudo utilities/email-queue.sh delete QUEUE_ID
     sudo utilities/email-queue.sh logs [QUEUE_ID] [--tail N]
     sudo utilities/email-queue.sh purge --snapshot
-    sudo utilities/email-queue.sh clear
 
 COMMANDS:
     status                  Show the human-readable Postfix queue. This is the
@@ -56,13 +55,11 @@ COMMANDS:
     purge --snapshot        Require verified long queue IDs, capture stable
                             identities, hold eligible snapshot messages, and
                             delete only held identity matches.
-    clear                   Deprecated alias for purge --snapshot.
 
 AUTOMATION CONFIRMATION:
     VW_EMAIL_QUEUE_CONFIRM=retry-all
     VW_EMAIL_QUEUE_CONFIRM=delete:QUEUE_ID
     VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
-    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1   Deprecated; accepted only by clear.
 
 CONFIRMATION TOKENS:
     retry --all             RETRY ALL
@@ -951,7 +948,7 @@ PY_COUNT_HELD
 }
 
 _purge_snapshot() {
-    local legacy_clear="${1:-false}" purge_dir snapshot_raw snapshot_tsv
+    local purge_dir snapshot_raw snapshot_tsv
     local after_hold_raw after_hold_tsv after_delete_raw after_delete_tsv
     local final_raw final_tsv to_hold preheld eligible absent_ids mismatch_ids
     local hold_failed_ids release_mismatch newly_held rollback_pending rollback_ids
@@ -985,11 +982,7 @@ _purge_snapshot() {
         "$count" "$to_hold_count" "$preheld_count"
     printf '%s\n' 'Only messages whose arrival time, size, sender, and recipients still match will be deleted.'
     expected_token="PURGE $count"
-    if [[ "$legacy_clear" == true && "${VW_EMAIL_QUEUE_CLEAR_CONFIRMED:-}" == "1" ]]; then
-        :
-    else
-        _confirm_exact "$expected_token" "purge-snapshot" "Snapshot purge" || return 1
-    fi
+    _confirm_exact "$expected_token" "purge-snapshot" "Snapshot purge" || return 1
     # The host lock serializes this utility. Holding prevents normal Postfix delivery
     # from removing a verified item between the post-hold inventory and batch delete.
     # Administrators invoking Postfix directly are outside this lock and must not
@@ -1101,7 +1094,7 @@ main() {
             show_help
             return 0
             ;;
-        status|summary|inspect|retry|delete|logs|purge|clear) ;;
+        status|summary|inspect|retry|delete|logs|purge) ;;
         *) _usage_error "Unknown command: $command" || return $? ;;
     esac
 
@@ -1157,11 +1150,6 @@ main() {
                 _usage_error "purge requires exactly --snapshot." || return $?
             fi
             ;;
-        clear)
-            if [[ $# -ne 0 ]]; then
-                _usage_error "clear does not accept operands." || return $?
-            fi
-            ;;
         logs)
             while [[ $# -gt 0 ]]; do
                 option="$1"
@@ -1197,7 +1185,7 @@ main() {
     require_docker || return 1
     _require_postfix_service || return 1
     case "$command" in
-        retry|delete|purge|clear) _acquire_mutation_lock || return 1 ;;
+        retry|delete|purge) _acquire_mutation_lock || return 1 ;;
     esac
 
     case "$command" in
@@ -1212,11 +1200,7 @@ main() {
             fi
             ;;
         delete) _delete_one "$queue_id" ;;
-        purge) _purge_snapshot false ;;
-        clear)
-            log_warn "'clear' is deprecated; use 'purge --snapshot'."
-            _purge_snapshot true
-            ;;
+        purge) _purge_snapshot ;;
         logs) _logs "$queue_id" "$tail_lines" ;;
     esac
 }

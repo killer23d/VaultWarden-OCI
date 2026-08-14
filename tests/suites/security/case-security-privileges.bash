@@ -86,7 +86,6 @@ assert_fails _bcrypt_format_ok "\$2y\$12\$$(printf '!%.0s' {1..53})"
 integrity_file="${TEST_TMP}/payload.txt"
 printf 'vaultwarden integrity test\n' > "$integrity_file"
 export FILE_INTEGRITY_HMAC_KEY="test-only-hmac-key"
-export REQUIRE_AUTHENTICATED_INTEGRITY=true
 write_file_integrity "$integrity_file" || fail "write_file_integrity failed"
 verify_file_integrity "$integrity_file" || fail "verify_file_integrity failed"
 printf 'tampered\n' > "${integrity_file}.sha256.hmac"
@@ -279,8 +278,8 @@ assert_root_free() {
         || fail "$label unexpectedly reached the root gate"
 }
 
-assert_hint 'sudo ./startup.sh --skip-pull --background' "$ROOT" 'startup flags' \
-    "$BASH" startup.sh --skip-pull --background
+assert_hint 'sudo ./startup.sh --background' "$ROOT" 'startup flags' \
+    "$BASH" startup.sh --background
 assert_hint 'sudo ./startup.sh stop' "$ROOT" 'startup stop' \
     "$BASH" startup.sh stop
 
@@ -371,19 +370,19 @@ extract_shell_function() {
 
 # Root-operated lifecycle contract.
 grep -Eq '^ROOT_ALLOWED_TARGETS :=([[:space:]]|\|$)' Makefile || fail "ROOT_ALLOWED_TARGETS missing"
-for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear health-email diagnose systemd-status prune key-show info dry-run; do
+for target in up down start stop restart health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge health-email diagnose systemd-status prune key-show info dry-run; do
     grep -Eq "(^|[[:space:]])${target}([[:space:]]|\|$)" Makefile || fail "${target} is not root-allowed"
 done
 pass "root-supported lifecycle/day-2 targets are allowed under sudo make"
 
-for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear diagnose systemd-status prune key-show; do
+for target in health health-quick health-report status logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec crowdsec-status crowdsec-alerts security-report edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge diagnose systemd-status prune key-show; do
     _snip="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
     extract_make_target "$target" Makefile > "$_snip" || fail "could not extract make ${target} target"
     grep -Fq '$(call require-root)' "$_snip" || { cat "$_snip" >&2; rm -f "$_snip"; fail "make ${target} does not require root"; }
     rm -f "$_snip"
 done
 pass "health/status/logs/CrowdSec security targets enforce the root-operated policy"
-for target in email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear; do
+for target in email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge; do
     QUEUE_TARGET_SNIP="$(mktemp -t vw-priv-${target}.XXXXXXXXXX)"
     extract_make_target "$target" Makefile > "$QUEUE_TARGET_SNIP" \
         || fail "could not extract make ${target} target"
@@ -428,7 +427,7 @@ pass "no hidden sudo self-reexec remains"
 grep -Fq 'VAULTWARDEN_INTERNAL_HEALTH_CHECK' utilities/maintenance-health.sh || fail "health internal flag missing"
 grep -Fq 'VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "$_health_script" health' startup.sh || fail "startup does not mark internal health check"
 grep -Fq 'VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quiet' lib/maintenance-utils.sh || fail "maintenance validation does not mark internal health check"
-grep -Fq 'VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh" health' utilities/safe-restart.sh || fail "safe-restart does not mark internal health check"
+grep -Fq 'VAULTWARDEN_INTERNAL_HEALTH_CHECK=true "${PROJECT_ROOT}/utilities/maintenance-health.sh"' utilities/safe-restart.sh || fail "safe-restart does not mark internal health check"
 pass "internal root health checks use explicit bypass"
 
 # Live runtime paths must not use repo-local decoded secret caches.
@@ -457,16 +456,27 @@ grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-view.sh" "$@"' edit-secrets.sh || 
 grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-list.sh" "$@"' edit-secrets.sh || fail "edit dispatcher does not delegate to root-enforcing list utility"
 grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-rotate.sh" "$@"' edit-secrets.sh || fail "edit dispatcher does not delegate to root-enforcing rotate utility"
 grep -Fq 'exec "$SCRIPT_DIR/utilities/secrets-export-recovery-kit.sh" "$@"' edit-secrets.sh || fail "edit dispatcher does not delegate to root-enforcing export utility"
+for _leaf_token in \
+    "utilities/secrets-edit.sh:edit" \
+    "utilities/secrets-view.sh:view" \
+    "utilities/secrets-list.sh:list" \
+    "utilities/secrets-rotate.sh:rotate" \
+    "utilities/secrets-export-recovery-kit.sh:export-recovery-kit"; do
+    _leaf="${_leaf_token%%:*}"
+    _token="${_leaf_token#*:}"
+    ! grep -Fq "\"\${1:-}\" == \"${_token}\"" "$_leaf" \
+        || fail "$_leaf still accepts duplicated dispatcher token $_token"
+done
 pass "encrypted secret authoring utilities require root and dispatcher delegates"
 
 
 if (( EUID == 0 )) && command -v runuser >/dev/null 2>&1; then
     for cmd in \
-        "utilities/secrets-list.sh list" \
-        "utilities/secrets-view.sh view" \
-        "utilities/secrets-edit.sh edit" \
-        "utilities/secrets-rotate.sh rotate email_api_token --dry-run" \
-        "utilities/secrets-export-recovery-kit.sh export-recovery-kit"; do
+        "utilities/secrets-list.sh" \
+        "utilities/secrets-view.sh" \
+        "utilities/secrets-edit.sh" \
+        "utilities/secrets-rotate.sh email_api_token --dry-run" \
+        "utilities/secrets-export-recovery-kit.sh"; do
         _out="$(mktemp -t vw-nonroot-secret.XXXXXXXXXX)"
         if runuser -u nobody -- bash -c "cd '$ROOT' && bash $cmd" >"$_out" 2>&1; then
             cat "$_out" >&2
@@ -971,7 +981,7 @@ run_non_tty() {
         VW_TEST_MODE=true \
         VW_SETUP_TEST_FORCE_ACK_ONLY=true \
         VW_FORCE_ACK="$token" \
-        bash "$SETUP" "$@" </dev/null 2>&1)
+        bash "$SETUP" install "$@" </dev/null 2>&1)
     FORCE_STATUS=$?
     set -e
 }
@@ -998,7 +1008,7 @@ action = sys.argv[2]
 setup_args = sys.argv[3:]
 pid, master = pty.fork()
 if pid == 0:
-    os.execvp("bash", ["bash", setup, *setup_args])
+    os.execvp("bash", ["bash", setup, "install", *setup_args])
 
 os.set_blocking(master, False)
 output = bytearray()
@@ -1068,10 +1078,6 @@ run_tty I_UNDERSTAND_OVERWRITING_CURRENT_STATE none --force
 [[ "$FORCE_OUTPUT" != *"Type YES to confirm"* ]] || fail "TTY token acknowledgement prompted"
 pass "TTY exact token is accepted without prompting"
 
-run_non_tty I_UNDERSTAND_LOSING_OLD_BACKUPS --force
-[[ "$FORCE_STATUS" -eq 0 ]] || fail "legacy non-TTY token acknowledgement failed: $FORCE_OUTPUT"
-pass "legacy force acknowledgement token remains accepted"
-
 run_tty "" yes --force
 [[ "$FORCE_STATUS" -eq 0 ]] || fail "TTY YES acknowledgement failed: $FORCE_OUTPUT"
 [[ "$FORCE_OUTPUT" == *"Type YES to confirm"* ]] || fail "TTY YES acknowledgement did not prompt"
@@ -1133,12 +1139,31 @@ validate_email(){ return 0; }
 EOF_VALIDATE
 cat >"$GUARD_ROOT/lib/common.sh" <<'EOF_COMMON'
 init_common_lib(){ :; }
-is_root(){ return 0; }
+is_root(){
+    [[ -n "${VW_TEST_ROOT_MARKER:-}" ]] && : > "$VW_TEST_ROOT_MARKER"
+    return 0
+}
 EOF_COMMON
 cat >"$GUARD_ROOT/lib/operations.sh" <<'EOF_OPERATIONS'
 operation_acquire(){ printf '%s\n' "$*" >"${VW_TEST_GUARD_MARKER:?}"; return 75; }
 EOF_OPERATIONS
 printf '_VW_DEFAULT_DATA_MOUNT=/mnt/vw-data\n' >"$GUARD_ROOT/lib/defaults.sh"
+
+bare_guard_marker="$TMP/guard-bare"
+bare_root_marker="$TMP/root-bare"
+set +e
+VW_TEST_GUARD_MARKER="$bare_guard_marker" VW_TEST_ROOT_MARKER="$bare_root_marker" \
+    bash "$GUARD_ROOT/setup.sh" </dev/null >"$TMP/bare.out" 2>&1
+bare_rc=$?
+set -e
+[[ "$bare_rc" -ne 0 ]] || fail "bare setup unexpectedly succeeded"
+[[ ! -e "$bare_root_marker" ]] || fail "bare setup reached the root check"
+[[ ! -e "$bare_guard_marker" ]] || fail "bare setup reached operation_acquire"
+grep -Fq "Full setup requires the 'install' subcommand." "$TMP/bare.out" \
+    || fail "bare setup did not explain the explicit install requirement"
+grep -Fq 'sudo ./setup.sh install --domain DOMAIN --email EMAIL' "$TMP/bare.out" \
+    || fail "bare setup did not print canonical install usage"
+pass "bare setup fails before root and operation guard"
 
 for mode in normal force; do
     marker="$TMP/guard-$mode"
@@ -1146,7 +1171,7 @@ for mode in normal force; do
     env_args=(VW_TEST_GUARD_MARKER="$marker")
     if [[ "$mode" == force ]]; then
         args+=(--force)
-        env_args+=(VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS)
+        env_args+=(VW_FORCE_ACK=I_UNDERSTAND_OVERWRITING_CURRENT_STATE)
     fi
     set +e
     env "${env_args[@]}" bash "$GUARD_ROOT/setup.sh" "${args[@]}" </dev/null >"$TMP/$mode.out" 2>&1

@@ -51,7 +51,6 @@ readonly -a _VW_DEFAULT_EMAIL_MODES=(
     api
     smtp
     direct
-    host
 )
 
 # System commands required before startup.sh can proceed.

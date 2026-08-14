@@ -39,7 +39,7 @@ require '--no-start' "$RESTORE" 'restore --no-start missing'
 require '_restore_should_start_services' "$RESTORE" 'restore start-policy gate missing'
 require 'START_POLICY:-auto.*auto|START_POLICY.*== "auto"' "$RESTORE" 'restore safety net must respect auto policy'
 require 'Services may be stopped\. Review state before starting' "$RESTORE" 'restore manual recovery warning missing'
-require 'sudo ./startup\.sh --skip-pull' "$RESTORE" 'restore manual checklist missing startup command'
+require 'sudo ./startup\.sh' "$RESTORE" 'restore manual checklist missing startup command'
 require 'docker compose logs --tail=100' "$RESTORE" 'restore manual checklist missing log command'
 require '--rotate-age-key' "$RESTORE" 'restore rotate-age-key flag missing'
 require '--no-rotate-age-key' "$RESTORE" 'restore no-rotate-age-key flag missing'
@@ -569,7 +569,7 @@ $(_extract_func "$ROOT/utilities/restore-run.sh" _restore_should_start_services)
 if _restore_should_start_services; then exit 1; fi
 EOF_PROBE
 bash "$TMP/restore-nostart-probe.sh" || fail 'restore --no-start/manual policy did not skip startup gate'
-grep -q 'sudo ./startup.sh --skip-pull' "$TMP/restore-nostart.log" || fail 'restore manual start policy did not print startup command'
+grep -q 'sudo ./startup.sh' "$TMP/restore-nostart.log" || fail 'restore manual start policy did not print startup command'
 
 )
 
@@ -862,10 +862,10 @@ restart_block=$(awk '
 
 assert_contains "$restart_block" '$(call check-docker)' \
   "restart must verify Docker availability"
-assert_contains "$restart_block" './startup.sh --force --skip-pull' \
+assert_contains "$restart_block" './startup.sh --force' \
   "restart must preserve the existing compatibility caller"
-assert_not_contains "$restart_block" './startup.sh --force ||' \
-  "restart must not use a distinct image-updating startup path"
+assert_not_contains "$restart_block" '--skip-pull' \
+  "restart must not use removed startup compatibility flags"
 
 assert_not_contains "$startup" 'docker compose rm -sf' \
   "startup must not remove working containers before Compose recreation"
@@ -930,7 +930,7 @@ EOF_LIB
   cat > "$repo/lib/defaults.sh" <<'EOF_LIB'
 _VW_DEFAULT_REQUIRED_COMMANDS=()
 _VW_DEFAULT_CRITICAL_SERVICES=()
-_VW_DEFAULT_EMAIL_MODES=(auto api direct smtp host)
+_VW_DEFAULT_EMAIL_MODES=(auto api direct smtp)
 AGE_KEY_FILE=/etc/vaultwarden/age-key.txt
 SECRETS_FILE=secrets.yaml
 EOF_LIB

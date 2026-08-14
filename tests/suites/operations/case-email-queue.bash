@@ -325,7 +325,6 @@ run_queue() {
         "VW_EMAIL_QUEUE_LOCK_FILE=$LOCK_FILE" \
         "TMPDIR=$QUEUE_TMP" \
         "VW_EMAIL_QUEUE_CONFIRM=${VW_EMAIL_QUEUE_CONFIRM:-}" \
-        "VW_EMAIL_QUEUE_CLEAR_CONFIRMED=${VW_EMAIL_QUEUE_CLEAR_CONFIRMED:-}" \
         "VW_TEST_MODE=1" \
         "VAULTWARDEN_TEST_ALLOW_NON_ROOT=1" \
         bash "$FIXTURE/utilities/email-queue.sh" "$@"
@@ -430,7 +429,7 @@ run_hardening_tests() {
         VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL \
         VW_TEST_BLOCK_AFTER_HOLD_MARKER VW_TEST_BLOCK_AFTER_HOLD_RELEASE \
         VW_TEST_BLOCK_DOCKER_MARKER VW_TEST_BLOCK_DOCKER_RELEASE \
-        VW_TEST_LOG_OUTPUT VW_EMAIL_QUEUE_CONFIRM VW_EMAIL_QUEUE_CLEAR_CONFIRMED
+        VW_TEST_LOG_OUTPUT VW_EMAIL_QUEUE_CONFIRM
     rm -f "${INVENTORY}.hold-event"
     : >"$CALLS"
     : >"$INVENTORY_CALLS"
@@ -518,20 +517,17 @@ base_inventory
 VW_TEST_LONG_QUEUE_IDS=no
 VW_TEST_POSTCONF_FAIL=false
 export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL
-for blocked_command in delete purge clear; do
+for blocked_command in delete purge; do
     rm -f "${INVENTORY}.hold-event"
     base_inventory
     : >"$CALLS"
     VW_EMAIL_QUEUE_CONFIRM=delete:AbC-123
-    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=
     [[ "$blocked_command" == purge ]] && VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
-    [[ "$blocked_command" == clear ]] && VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1
-    export VW_EMAIL_QUEUE_CONFIRM VW_EMAIL_QUEUE_CLEAR_CONFIRMED
+    export VW_EMAIL_QUEUE_CONFIRM
     set +e
     case "$blocked_command" in
         delete) run_queue delete AbC-123 </dev/null >"$TMP/long-no-delete.out" 2>&1 ;;
         purge) run_queue purge --snapshot </dev/null >"$TMP/long-no-purge.out" 2>&1 ;;
-        clear) run_queue clear </dev/null >"$TMP/long-no-clear.out" 2>&1 ;;
     esac
     blocked_rc=$?
     set -e
@@ -547,20 +543,17 @@ pass 'destructive operations require enable_long_queue_ids=yes'
 VW_TEST_LONG_QUEUE_IDS=yes
 VW_TEST_POSTCONF_FAIL=true
 export VW_TEST_LONG_QUEUE_IDS VW_TEST_POSTCONF_FAIL
-for blocked_command in delete purge clear; do
+for blocked_command in delete purge; do
     rm -f "${INVENTORY}.hold-event"
     base_inventory
     : >"$CALLS"
     VW_EMAIL_QUEUE_CONFIRM=delete:AbC-123
-    VW_EMAIL_QUEUE_CLEAR_CONFIRMED=
     [[ "$blocked_command" == purge ]] && VW_EMAIL_QUEUE_CONFIRM=purge-snapshot
-    [[ "$blocked_command" == clear ]] && VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1
-    export VW_EMAIL_QUEUE_CONFIRM VW_EMAIL_QUEUE_CLEAR_CONFIRMED
+    export VW_EMAIL_QUEUE_CONFIRM
     set +e
     case "$blocked_command" in
         delete) run_queue delete AbC-123 </dev/null >"$TMP/postconf-fail-delete.out" 2>&1 ;;
         purge) run_queue purge --snapshot </dev/null >"$TMP/postconf-fail-purge.out" 2>&1 ;;
-        clear) run_queue clear </dev/null >"$TMP/postconf-fail-clear.out" 2>&1 ;;
     esac
     blocked_rc=$?
     set -e
@@ -779,7 +772,6 @@ base_inventory
         "VW_EMAIL_QUEUE_LOCK_FILE=$LOCK_FILE" \
         "TMPDIR=$fd_queue_tmp" \
         "VW_EMAIL_QUEUE_CONFIRM=retry-all" \
-        "VW_EMAIL_QUEUE_CLEAR_CONFIRMED=" \
         "VW_TEST_MODE=1" \
         "VAULTWARDEN_TEST_ALLOW_NON_ROOT=1" \
         bash "$FIXTURE/utilities/email-queue.sh" retry --all
@@ -1051,20 +1043,13 @@ if find "$QUEUE_TMP" -mindepth 1 -print -quit | grep -q .; then
 fi
 pass 'private queue temporary files are cleaned'
 
-rm -f "${INVENTORY}.hold-event"
 base_inventory
-VW_EMAIL_QUEUE_CONFIRM=
-VW_EMAIL_QUEUE_CLEAR_CONFIRMED=true
-export VW_EMAIL_QUEUE_CONFIRM VW_EMAIL_QUEUE_CLEAR_CONFIRMED
-if run_queue clear </dev/null >"$TMP/clear-wrong.out" 2>&1; then
-    fail 'deprecated clear accepted non-exact legacy marker'
+if run_queue clear </dev/null >"$TMP/clear.out" 2>&1; then
+    fail 'removed clear command was still accepted'
 fi
-VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1
-export VW_EMAIL_QUEUE_CLEAR_CONFIRMED
-run_queue clear </dev/null >"$TMP/clear.out"
-grep -Fqi 'deprecated' "$TMP/clear.out" "$TMP/clear-wrong.out" || fail 'clear deprecation warning missing'
-! grep -Fq '<postsuper> <-d> <ALL>' "$CALLS" || fail 'clear alias used ALL deletion'
-pass 'deprecated clear uses identity-verified snapshot behavior'
+grep -Fq 'Unknown command: clear' "$TMP/clear.out" || fail 'removed clear command lacks normal invalid-usage error'
+! grep -Fq 'VW_EMAIL_QUEUE_CLEAR_CONFIRMED' "$FIXTURE/utilities/email-queue.sh" || fail 'removed clear confirmation environment variable remains in queue utility'
+pass 'removed clear interface is rejected'
 
 base_inventory
 VW_TEST_LOG_OUTPUT='Jul 28 postfix literal.ABC[123] result'
@@ -1113,7 +1098,6 @@ export VW_EMAIL_QUEUE_CONFIRM VW_TEST_BLOCK_AFTER_HOLD_MARKER VW_TEST_BLOCK_AFTE
         "VW_EMAIL_QUEUE_LOCK_FILE=$LOCK_FILE" \
         "TMPDIR=$QUEUE_TMP" \
         "VW_EMAIL_QUEUE_CONFIRM=delete:SIGNAL-NEW" \
-        "VW_EMAIL_QUEUE_CLEAR_CONFIRMED=" \
         "VW_TEST_MODE=1" \
         "VAULTWARDEN_TEST_ALLOW_NON_ROOT=1" \
         bash "$FIXTURE/utilities/email-queue.sh" delete SIGNAL-NEW

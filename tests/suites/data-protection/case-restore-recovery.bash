@@ -31,7 +31,7 @@ require_pattern "trap '_restore_safety_net \\$\?' ERR" 'restore-run must arm its
 require_pattern "trap '_restore_safety_net 129' HUP" 'restore-run must preserve HUP status in the destructive safety net'
 require_pattern "trap '_restore_safety_net 130' INT" 'restore-run must preserve INT status in the destructive safety net'
 require_pattern "trap '_restore_safety_net 143' TERM" 'restore-run must preserve TERM status in the destructive safety net'
-require_pattern 'bash "\$\{PROJECT_ROOT\}/startup.sh" --skip-pull' 'restore-run must invoke startup.sh --skip-pull'
+require_pattern 'bash "\$\{PROJECT_ROOT\}/startup.sh"' 'restore-run must invoke startup.sh'
 reject_pattern 'docker compose up -d --remove-orphans' 'restore-run must not directly start docker compose'
 pass 'restore-run invokes startup path instead of direct docker compose up'
 pass 'restore-run enables safety-net restart path for restore function failures'
@@ -172,7 +172,7 @@ log_info(){ :; }; log_warn(){ :; }; log_error(){ echo "$*" >&2; }; log_hint(){ :
 get_config_value(){ case "$1" in DATA_VOLUME_MOUNT) printf '%s' "${TEST_DATA_VOLUME_MOUNT:-}";; DATA_VOLUME_DEVICE) printf '%s' "${TEST_DATA_VOLUME_DEVICE:-}";; *) printf '%s' "${2:-}";; esac; }
 purge_wal_shm(){ :; }; tar_validate_members(){ :; }; check_traversal_only(){ :; }
 SCRIPT_DIR="/home/ubuntu/VaultWarden-OCI"; PROJECT_ROOT="/home/ubuntu/VaultWarden-OCI"
-RESTORE_TYPE="full"; FORCE="false"; INSPECT_ONLY="false"; SKIP_VERIFICATION="true"; RESTORE_ENV="false"; DRY_RUN="false"; DATA_VOLUME_MOUNT="${TEST_DATA_VOLUME_MOUNT:-}"; DATA_VOLUME_DEVICE="${TEST_DATA_VOLUME_DEVICE:-}"; PUID="$(id -u)"; PGID="$(id -g)"
+RESTORE_TYPE="full"; FORCE="false"; INSPECT_ONLY="false"; RESTORE_ENV="false"; DRY_RUN="false"; DATA_VOLUME_MOUNT="${TEST_DATA_VOLUME_MOUNT:-}"; DATA_VOLUME_DEVICE="${TEST_DATA_VOLUME_DEVICE:-}"; PUID="$(id -u)"; PGID="$(id -g)"
 HARNESS
 {
     sed -n '/^_tar_filter_for_file()/,/^tar_validate_members()/p' "$RESTORE" | sed '$d'
@@ -389,7 +389,6 @@ CONTROL_WORKSPACE="$TMP/key-control"; mkdir -m 700 -p "\$CONTROL_WORKSPACE"
 RECOVERY_KIT_FILE="$TMP/recovery-kit.txt"; RESTORE_RECOVERY_KIT_FILE=""
 KEY_FILE_ARG=""; RESTORE_AGE_KEY_FILE=""; RESTORE_DECRYPT_AGE_KEY_FILE=""
 DRY_RUN=false
-REQUIRE_AUTHENTICATED_INTEGRITY=false
 RAW_KEY='AGE-SECRET-KEY-1PRIVATEKEYMATERIAL'
 PUBLIC_KEY='age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'
 log_info(){ printf 'INFO %s\n' "\$*"; }; log_warn(){ printf 'WARN %s\n' "\$*"; }; log_error(){ printf 'ERROR %s\n' "\$*" >&2; }; log_success(){ printf 'SUCCESS %s\n' "\$*"; }; log_debug(){ :; }
@@ -426,7 +425,7 @@ assert_normalized(){
 
 case "\${1:-kit}" in
   kit)
-    printf '%s\n' "\$RAW_KEY" > "\$RECOVERY_KIT_FILE"; chmod 600 "\$RECOVERY_KIT_FILE"
+    printf '%s\n[%s]\n%s\n' "\$RAW_KEY" 'Backup integrity HMAC key (auto-generated)' 'test-integrity-key' > "\$RECOVERY_KIT_FILE"; chmod 600 "\$RECOVERY_KIT_FILE"
     _load_recovery_kit
     [[ "\$KEY_FILE_ARG" == "\$CONTROL_WORKSPACE/kit_stage/recovery-kit-age-key.txt" ]]
     assert_normalized "\$KEY_FILE_ARG"
@@ -452,7 +451,7 @@ cat > "$TMP/payload-flow-probe.sh" <<EOF_PROBE
 set -euo pipefail
 PAYLOAD_WORKSPACE="$TMP/payload"; CONTROL_WORKSPACE="$TMP/control"; mkdir -p "\$PAYLOAD_WORKSPACE" "\$CONTROL_WORKSPACE"
 RCLONE_CONFIG_ARG=(); BACKUP_FILE=""; RESTORE_TYPE=""; STATE_DIR="$TMP/state"; mkdir -p "\$STATE_DIR/data"
-SKIP_VERIFICATION=false; EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""; RESTORE_EMERGENCY_STAGED_KEY_FILE=""
+EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""; RESTORE_EMERGENCY_STAGED_KEY_FILE=""
 log_info(){ :; }; log_error(){ printf 'ERROR %s\\n' "\$*" >&2; }; log_hint(){ :; }; log_warn(){ :; }
 check_archive_dependencies(){ return 0; }; _restore_require_available_bytes(){ return 0; }
 verify_sqlite(){ return 0; }; _restore_preflight_db_commit_capacity(){ return 0; }
@@ -478,7 +477,6 @@ _age_decrypt_restore_backup(){ printf archive > "\$3"; printf '%s\\n' "\$1" >> "
 _restore_age_no_identity_guidance(){ :; }
 
 rm -rf "\$PAYLOAD_WORKSPACE/remote_pull"
-REQUIRE_AUTHENTICATED_INTEGRITY=true
 backup_required_cohort_suffixes(){ printf '%s\n' '' .sha256 .sha256.hmac .meta; }
 for kind in db full; do
   pull_remote_backup "mock:backups/\$kind/\$kind.tar.zst.age" "\$kind"
@@ -665,13 +663,17 @@ stop_line="$(grep -nF 'docker compose stop --timeout 30' "$RESTORE" | head -1 | 
 # RDR-04: inspect-only reaches the real archive preflight without sops, service stop, key rotation, or startup.
 inspect_state="$TMP/inspect-state"
 inspect_project="$TMP/inspect-project"
-inspect_archive="$TMP/inspect-legacy.tar.gz"
-inspect_backup="$TMP/inspect-legacy.tar.gz.age"
-mkdir -p "$inspect_state/data" "$inspect_project"
+inspect_archive="$TMP/inspect-relative.tar.gz"
+inspect_backup="$TMP/inspect-relative.tar.gz.age"
+inspect_archive_root="$TMP/inspect-archive-root"
+mkdir -p "$inspect_state/data" "$inspect_project" "$inspect_archive_root/var/lib/vaultwarden/data"
 printf inspect-db > "$inspect_state/data/db.sqlite3"
-tar -czPf "$inspect_archive" "$inspect_state"
+printf inspect-db > "$inspect_archive_root/var/lib/vaultwarden/data/db.sqlite3"
+tar -czf "$inspect_archive" -C "$inspect_archive_root" var/lib/vaultwarden
 : > "$inspect_backup"
-printf 'version=1\narchive_format=absolute\n' > "$inspect_backup.meta"
+printf 'checksum\n' > "$inspect_backup.sha256"
+printf 'hmac\n' > "$inspect_backup.sha256.hmac"
+printf 'version=2\narchive_format=relative\n' > "$inspect_backup.meta"
 cat > "$inspect_project/startup.sh" <<EOF_STARTUP
 #!/usr/bin/env bash
 : > "$TMP/inspect-startup.called"
@@ -691,8 +693,6 @@ BACKUP_FILE="$inspect_backup"
 ROTATE_AGE_KEY_POLICY="\${TEST_ROTATE_POLICY:-}"
 START_POLICY=auto
 RESTORE_ENV=true
-SKIP_VERIFICATION=true
-REQUIRE_AUTHENTICATED_INTEGRITY=false
 DATA_VOLUME_MOUNT=""
 DATA_VOLUME_DEVICE=""
 CONTROL_WORKSPACE=""
@@ -729,7 +729,8 @@ create_pre_restore_snapshot(){
 }
 _set_snapshot_operation_phase(){ return 0; }
 _load_recovery_kit(){ return 0; }
-_load_restore_integrity_hmac_key(){ return 0; }
+_load_restore_integrity_hmac_key(){ FILE_INTEGRITY_HMAC_KEY=test; return 0; }
+verify_file_integrity(){ return 0; }
 resolve_backup_file(){ return 0; }
 _print_restore_plan_summary(){ return 0; }
 _prompt_age_key(){ RESTORE_DECRYPT_AGE_KEY_FILE=unused; return 0; }
@@ -755,7 +756,6 @@ get_config_value(){
     BACKUP_DIR) printf '%s' "$TMP" ;;
     SOPS_AGE_KEY_FILE) printf '%s' "$TMP/inspect-age-key.txt" ;;
     DATA_VOLUME_DEVICE) printf '%s' "\${TEST_DATA_VOLUME_DEVICE:-}" ;;
-    REQUIRE_AUTHENTICATED_INTEGRITY) printf '%s' false ;;
     PUID|PGID) printf '%s' 1000 ;;
     *) printf '%s' "\${2:-}" ;;
   esac
@@ -778,7 +778,7 @@ $(_extract_func "$RESTORE" main)
 main
 EOF_PROBE
 if ! bash "$TMP/inspect-main-probe.sh" >"$TMP/inspect-main.out" 2>&1; then cat "$TMP/inspect-main.out" >&2; fail 'inspect-only main path unexpectedly failed without sops'; fi
-grep -Fq "Source state root:  $inspect_state" "$TMP/inspect-main.out" || fail 'inspect-only path did not reach real archive preflight'
+grep -Fq "Source state root:  /var/lib/vaultwarden" "$TMP/inspect-main.out" || fail 'inspect-only path did not reach real relative-archive preflight'
 grep -q 'Inspect mode complete — no services stopped, no files restored, no key rotation, no health check.' "$TMP/inspect-main.out" || fail 'inspect-only path did not preserve non-destructive completion'
 [[ ! -e "$TMP/inspect-docker-stop.called" ]] || fail 'inspect-only main path invoked docker'
 [[ ! -e "$TMP/inspect-rotate.called" ]] || fail 'inspect-only main path attempted key rotation'
@@ -843,7 +843,6 @@ cat > "\$PROJECT_ROOT/utilities/backup-run.sh" <<'BACKUP_MOCK'
 exit "\${MOCK_BACKUP_RC:-0}"
 BACKUP_MOCK
 chmod +x "\$PROJECT_ROOT/utilities/backup-run.sh"
-RESTORE_SNAPSHOT_HARD_FAIL=false
 RESTORE_SNAPSHOT_RESULT=not-run
 RESTORE_TYPE=full
 DRY_RUN=false
@@ -874,11 +873,10 @@ _set_snapshot_operation_phase || exit 46
 printf db > "\$STATE_DIR/data/db.sqlite3"
 MOCK_BACKUP_RC=9
 export MOCK_BACKUP_RC
-create_pre_restore_snapshot "\$OPERATIONAL_SOPS_AGE_KEY_FILE" full || exit 48
-[[ "\$RESTORE_SNAPSHOT_RESULT" == soft-failed ]] || exit 49
-_set_snapshot_operation_phase || exit 50
+if create_pre_restore_snapshot "\$OPERATIONAL_SOPS_AGE_KEY_FILE" full; then exit 48; fi
+[[ "\$RESTORE_SNAPSHOT_RESULT" == failed ]] || exit 49
+if _set_snapshot_operation_phase; then exit 50; fi
 ! grep -q 'Created pre-restore snapshot' "$TMP/snapshot.phase" || exit 51
-grep -q 'soft-failed' "$TMP/snapshot.phase" || exit 52
 
 MOCK_BACKUP_RC=0
 export MOCK_BACKUP_RC
@@ -950,7 +948,6 @@ PROJECT_ROOT="$TEST_PROJECT_ROOT"
 RESTORE_TYPE=full
 FORCE=false
 INSPECT_ONLY=false
-SKIP_VERIFICATION=true
 RESTORE_ENV=true
 DRY_RUN=false
 DATA_VOLUME_MOUNT=""
@@ -1089,71 +1086,16 @@ grep -q 'Removing incomplete canonical state created by the failed promotion att
 grep -q 'Restore promotion rollback succeeded' "$TMP/rollback.out" || fail 'successful same-layout rollback was not reported truthfully'
 ! grep -q 'Full restore promotion completed' "$TMP/rollback.out" || fail 'failed same-layout promotion printed successful restore completion'
 
-# RDR-05: legacy absolute archives are always staged; extraction failures/signals leave live generation unchanged.
-legacy_state="$TMP/legacy-state"
-legacy_work="$TMP/legacy-work"
-legacy_project="$TMP/legacy-project"
-mkdir -p "$legacy_state/data" "$legacy_work" "$legacy_project"
-printf new > "$legacy_state/generation"
-printf db > "$legacy_state/data/db.sqlite3"
-tar -czPf "$TMP/legacy.tar.gz" "$legacy_state"
-printf old > "$legacy_state/generation"
-printf olddb > "$legacy_state/data/db.sqlite3"
-cp "$TMP/legacy.tar.gz" "$legacy_work/legacy.tar.gz"
-: > "$TMP/legacy.tar.gz.age"
-cat > "$TMP/legacy-valid-probe.sh" <<EOF_PROBE
-source "$RESTORE_HARNESS"
-check_traversal_only(){ : > "$TMP/legacy-traversal.called"; }
-_tar_extract_archive(){
-  printf '%s\\n' "\$2" > "$TMP/legacy-extract.dest"
-  command tar -z -xf "\$1" -C "\$2" --no-same-owner --no-same-permissions
-}
-mv(){
-  if [[ "\${1:-}" == "$legacy_state".restore-workspace.*/state && "\${2:-}" == "$legacy_state" ]]; then
-    printf '%s\\n' "\$1" > "$TMP/legacy-promotion-source"
-  fi
-  command mv "\$@"
-}
-_restore_inspect_archive_layout "$TMP/legacy.tar.gz" "$legacy_state" absolute
-printf '%s\\n' "\$RESTORE_PREFLIGHT_SOURCE_ROOT" > "$TMP/legacy-source-root"
-restore_full "$TMP/legacy.tar.gz.age" unused "$legacy_state" "\$PUID" "\$PGID" "$legacy_work" absolute
-EOF_PROBE
-TEST_PROJECT_ROOT="$legacy_project" bash "$TMP/legacy-valid-probe.sh" >"$TMP/legacy-valid.out" 2>&1 || { cat "$TMP/legacy-valid.out" >&2; fail 'valid staged legacy archive did not reach promotion path'; }
-[[ "$(cat "$TMP/legacy-source-root")" == "$legacy_state" ]] || fail 'legacy absolute preflight did not derive the canonical same-layout source root'
-[[ "$(cat "$TMP/legacy-extract.dest")" == "$legacy_work/stage" ]] || fail 'legacy archive extraction destination was not secure staging'
-[[ "$(cat "$TMP/legacy-extract.dest")" != / ]] || fail 'legacy archive was extracted directly to root'
-[[ -f "$TMP/legacy-traversal.called" ]] || fail 'legacy traversal check must run even with skip verification'
-grep -qx new "$legacy_state/generation" || fail 'valid staged legacy archive did not promote restored generation'
-legacy_promotion_source="$(cat "$TMP/legacy-promotion-source")"
-[[ "$(dirname "$(dirname "$legacy_promotion_source")")" == "$(dirname "$legacy_state")" ]] || fail 'same-layout promotion source was not on the target filesystem'
-[[ "$legacy_promotion_source" == "$legacy_state".restore-workspace.*/state ]] || fail 'same-layout promotion did not use a target-filesystem restore workspace'
-[[ "$legacy_promotion_source" != "$legacy_work/stage/${legacy_state#/}" ]] || fail 'same-layout promotion reused generic restore staging as rename source'
-! grep -q 'Cross-layout restore' "$TMP/legacy-valid.out" || fail 'same-layout legacy archive was incorrectly sent through cross-layout promotion'
-
-reset_legacy_live(){ rm -rf "$legacy_state" "$legacy_work/stage"; mkdir -p "$legacy_state/data"; printf old > "$legacy_state/generation"; printf olddb > "$legacy_state/data/db.sqlite3"; }
-reset_legacy_live
-cat > "$TMP/legacy-fail-probe.sh" <<EOF_PROBE
-source "$RESTORE_HARNESS"
-_tar_extract_archive(){ printf '%s\\n' "\$2" > "$TMP/legacy-fail.dest"; return 55; }
-_restore_inspect_archive_layout "$TMP/legacy.tar.gz" "$legacy_state" absolute
-restore_full "$TMP/legacy.tar.gz.age" unused "$legacy_state" "\$PUID" "\$PGID" "$legacy_work" absolute
-EOF_PROBE
-if TEST_PROJECT_ROOT="$legacy_project" bash "$TMP/legacy-fail-probe.sh" >"$TMP/legacy-fail.out" 2>&1; then fail 'legacy staged extraction failure unexpectedly succeeded'; fi
-grep -qx old "$legacy_state/generation" || fail 'legacy staged extraction failure changed live generation'
-[[ "$(cat "$TMP/legacy-fail.dest")" != / ]] || fail 'legacy failed extraction targeted root'
-
-for sig in INT TERM; do
-  reset_legacy_live
-  cat > "$TMP/legacy-signal-probe.sh" <<EOF_PROBE
-source "$RESTORE_HARNESS"
-_tar_extract_archive(){ printf '%s\\n' "\$2" > "$TMP/legacy-$sig.dest"; kill -$sig \$\$; }
-_restore_inspect_archive_layout "$TMP/legacy.tar.gz" "$legacy_state" absolute
-restore_full "$TMP/legacy.tar.gz.age" unused "$legacy_state" "\$PUID" "\$PGID" "$legacy_work" absolute
-EOF_PROBE
-  if TEST_PROJECT_ROOT="$legacy_project" bash "$TMP/legacy-signal-probe.sh" >"$TMP/legacy-$sig.out" 2>&1; then fail "legacy staged extraction $sig unexpectedly succeeded"; fi
-  grep -qx old "$legacy_state/generation" || fail "legacy staged extraction $sig changed live generation"
-  [[ "$(cat "$TMP/legacy-$sig.dest")" != / ]] || fail "legacy staged extraction $sig targeted root"
-done
+# PR9: unreleased v1 absolute archives and repo-local layouts are rejected.
+! grep -Fq 'Legacy archive format detected' "$RESTORE" || fail 'legacy absolute restore branch remains'
+grep -Fq 'Unsupported backup archive format' "$RESTORE" || fail 'restore lacks explicit current-format rejection'
+grep -Fq 'Unsupported legacy repo-local archive layout detected.' "$RESTORE" || fail 'repo-local layout is not rejected clearly'
+if grep -Eq '\[\[ .*archive_format.*== .*absolute' "$RESTORE"; then
+  fail 'restore still contains an absolute-archive execution branch'
+fi
+! grep -Fq 'archive_format="relative"' "$RESTORE" || fail 'restore still infers relative archive format when metadata is absent'
+grep -Fq 'archive_version" != "2' "$RESTORE" || fail 'restore does not require current archive metadata version 2'
+pass 'removed v1 absolute and repo-local restore formats fail closed'
 
 # RDR-02: real promotion boundaries with a valid new DB never start services before full commit.
 transaction_source="$TMP/transaction-source"
@@ -2433,7 +2375,6 @@ source "$ROOT/lib/crypto.sh"
 archive="$TMP/restore-guard.age"
 printf 'encrypted-restore-payload' > "$archive"
 FILE_INTEGRITY_HMAC_KEY='restore-guard-key'
-REQUIRE_AUTHENTICATED_INTEGRITY=true
 write_file_integrity "$archive" || fail 'could not create restore-guard integrity sidecars'
 run_destructive_guard(){
     verify_file_integrity "$archive" || return 1
@@ -2491,14 +2432,13 @@ RECOVERY_KIT_FILE="$TMP/recovery-kit.txt"
 RESTORE_RECOVERY_KIT_FILE=""
 KEY_FILE_ARG=""
 RECOVERY_KIT_INTEGRITY_HMAC_KEY=""
-REQUIRE_AUTHENTICATED_INTEGRITY=true
 DRY_RUN=false
 RESTORE_TYPE=full
 EMERGENCY_BACKUP_AGE_IDENTITY_FILE=""
 SECRETS_FILE="$TMP/missing-secrets.yaml"
 STATE_DIR="$TMP/state"
 PROJECT_ROOT="$ROOT"
-export RESTORE_RECOVERY_KIT_FILE RECOVERY_KIT_INTEGRITY_HMAC_KEY REQUIRE_AUTHENTICATED_INTEGRITY RESTORE_TYPE EMERGENCY_BACKUP_AGE_IDENTITY_FILE SECRETS_FILE PROJECT_ROOT
+export RESTORE_RECOVERY_KIT_FILE RECOVERY_KIT_INTEGRITY_HMAC_KEY RESTORE_TYPE EMERGENCY_BACKUP_AGE_IDENTITY_FILE SECRETS_FILE PROJECT_ROOT
 mkdir -p "$STATE_DIR"
 
 historical_age_key="$TMP/historical-age-key.txt"
@@ -2514,7 +2454,7 @@ RECOVERY_KIT_FILE="$age_only_kit"
 if _load_recovery_kit >"$TMP/age-only.out" 2>&1; then
     fail 'strict recovery accepted an Age-only recovery kit without historical HMAC key'
 fi
-grep -Fq 'missing the historical backup integrity HMAC key' "$TMP/age-only.out" \
+grep -Fq 'Recovery kit is missing the backup integrity HMAC key.' "$TMP/age-only.out" \
     || fail 'strict Age-only recovery-kit refusal was not actionable'
 
 historical_hmac_key='historical-cohort-hmac-key'
@@ -2579,7 +2519,6 @@ source "$ROOT/lib/backup-utils.sh"
 _SESSION_RCLONE_REMOTE_NAME=mock
 _SESSION_RCLONE_REMOTE_PATH=backups
 _REMOTE_FILES=(); _REMOTE_TYPES=()
-REQUIRE_AUTHENTICATED_INTEGRITY=true
 get_config_value(){ printf '%s\n' "${2:-}"; }
 rclone(){
   local cmd="${1:-}"; shift || true

@@ -463,15 +463,6 @@ _mv_prompt_target() {
         default_mount="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     else
         default_mount="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
-        # A repo .env from the legacy boot-volume layout may still contain
-        # DATA_VOLUME_MOUNT=/opt/vaultwarden/data even though the operator is
-        # performing the first boot-to-block migration from /var/lib/vaultwarden.
-        # Do not carry that stale legacy value into the prompt default. Explicit
-        # --target has already returned above, so it still wins.
-        if [[ "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}" == "${_VW_DEFAULT_STATE_DIR}" ]] \
-                && { [[ -z "${DATA_VOLUME_MOUNT:-}" ]] || [[ "${DATA_VOLUME_MOUNT}" == "/opt/vaultwarden/data" ]]; }; then
-            default_mount="${_VW_DEFAULT_DATA_MOUNT}"
-        fi
     fi
 
     printf '\n'
@@ -657,7 +648,6 @@ VaultWarden-OCI Volume Migration (via setup-storage.sh migrate)
 
 USAGE:
   sudo utilities/setup-storage.sh migrate <subcommand> [OPTIONS]
-  sudo utilities/setup-storage.sh --mode migrate <subcommand> [OPTIONS]  # compatibility
 
 SUBCOMMANDS:
   run      Execute the full migration pipeline (default)
@@ -1553,7 +1543,7 @@ _mv_step_start() {
     case "${_MV_START_POLICY:-auto}" in
         manual)
             _mv_log warn "Start policy manual: not starting VaultWarden stack after migration."
-            _mv_log info "Manual command: sudo ./startup.sh --skip-pull"
+            _mv_log info "Manual command: sudo ./startup.sh"
             return 0
             ;;
         ask)
@@ -1562,7 +1552,7 @@ _mv_step_start() {
             case "$_answer" in
                 n|N|no|NO)
                     _mv_log warn "Operator chose not to start VaultWarden stack after migration."
-                    _mv_log info "Manual command: sudo ./startup.sh --skip-pull"
+                    _mv_log info "Manual command: sudo ./startup.sh"
                     _MV_START_POLICY="manual"
                     return 0
                     ;;

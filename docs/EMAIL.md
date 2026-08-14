@@ -137,7 +137,6 @@ sudo utilities/email-queue.sh delete AbC-123
 sudo utilities/email-queue.sh logs
 sudo utilities/email-queue.sh logs AbC-123 --tail 500
 sudo utilities/email-queue.sh purge --snapshot
-sudo utilities/email-queue.sh clear
 ```
 
 `email-queue` preserves the human-readable `postqueue -p` listing and never
@@ -226,12 +225,6 @@ sudo env VW_EMAIL_QUEUE_CONFIRM='delete:AbC-123' \
 sudo env VW_EMAIL_QUEUE_CONFIRM=purge-snapshot make email-queue-purge
 ```
 
-`clear` and `sudo make email-queue-clear` remain deprecated compatibility
-aliases. They use the same snapshot purge implementation and never perform a
-live `ALL` deletion. The old `VW_EMAIL_QUEUE_CLEAR_CONFIRMED=1` marker is
-accepted only by this deprecated alias and should be migrated to
-`VW_EMAIL_QUEUE_CONFIRM=purge-snapshot`.
-
 Exit status is `0` for success (including an empty queue, an already-absent
 selected original, or no matching log lines), `1` for operational failure,
 cancellation, identity mismatch, unverifiable long queue IDs, or partial
@@ -264,7 +257,6 @@ Current route modes are:
 | `auto` | configured HTTP API provider first, then the SMTP fallback chain |
 | `api` | configured HTTP API provider only; no SMTP fallback |
 | `direct` | direct upstream SMTP only |
-| `host` | deprecated compatibility alias that behaves like `direct` |
 
 The repository template defaults to:
 
@@ -331,8 +323,6 @@ postmark
 resend
 cyberpersons
 ```
-
-Compatibility aliases for the CyberPersons driver are also accepted by the current helper.
 
 Provider plans, trial allowances, and commercial quotas change independently of this repository. Check the selected provider's current account terms instead of relying on a copied free-tier table in project documentation.
 
@@ -551,6 +541,6 @@ Git updates the checkout; systemd failure notifications use the managed installe
 
 <!-- VWOCI-PRR-PATCH-04 -->
 
-`EMAIL_MODE=direct` is a supported direct-SMTP mode and requires the runtime `smtp_password` secret. `host` remains a deprecated compatibility alias.
+`EMAIL_MODE=direct` is the supported direct-SMTP mode and requires the runtime `smtp_password` secret.
 
 Recovery-kit email attaches only an AES-256 encrypted ZIP created by the Ubuntu 24.04 `7zip` package. The independently entered attachment passphrase is not included in the message and is not reused from any stored project credential. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

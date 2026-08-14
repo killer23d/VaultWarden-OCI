@@ -349,11 +349,11 @@ _schema_required_runtime_keys() {
 
     [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]] && _runtime_groups+=("cloudflare_proxy")
     [[ "${PUSH_ENABLED:-false}" == "true" ]] && _runtime_groups+=("push")
-    [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]] && _runtime_groups+=("authenticated_integrity")
+    _runtime_groups+=("authenticated_integrity")
 
     _email_mode="${EMAIL_MODE:-auto}"
     case "$_email_mode" in
-        auto|smtp|direct|host) _runtime_groups+=("email_smtp") ;;
+        auto|smtp|direct) _runtime_groups+=("email_smtp") ;;
         api)                   _runtime_groups+=("email_smtp" "email_api") ;;
         *)
             log_error "validate_required_secrets: unsupported EMAIL_MODE '${_email_mode}' while determining runtime-required secrets"
@@ -1435,7 +1435,7 @@ auto_generate_secret_field() {
     case "$field" in
         admin_token|admin_basic_auth_hash)
             log_error "Automatic administrator credential generation requires protected capture and publication." >&2
-            log_error "Use: sudo ./setup.sh --auto" >&2
+            log_error "Use: sudo ./setup.sh install --auto" >&2
             log_error "Direct interactive configuration remains available without --auto." >&2
             return 1
             ;;

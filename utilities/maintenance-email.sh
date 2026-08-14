@@ -244,7 +244,7 @@ _preflight_configured() {
         api)
             _preflight_api || return 1
             ;;
-        direct|host)
+        direct)
             _preflight_direct || return 1
             ;;
         smtp)
@@ -268,7 +268,7 @@ _preflight_configured() {
             fi
             ;;
         *)
-            log_error "❌ Unknown EMAIL_MODE='${mode}'. Valid: auto api smtp direct host"
+            log_error "❌ Unknown EMAIL_MODE='${mode}'. Valid: auto api smtp direct"
             return 1
             ;;
     esac
@@ -368,7 +368,6 @@ run_email_diagnostics() {
     return 0
 }
 
-[[ "${1:-}" == "test-email" ]] && shift
 
 while [[ $# -gt 0 ]]; do
     case $1 in

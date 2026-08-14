@@ -323,7 +323,6 @@ DNS record updated automatically."; then
     fi
 }
 
-[[ "${1:-}" == "update-dns" ]] && shift
 
 while [[ $# -gt 0 ]]; do
     case $1 in

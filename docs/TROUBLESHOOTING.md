@@ -424,8 +424,8 @@ by default; use `EMAIL_QUEUE_BODY=true` only when the sensitive content is
 needed for diagnosis. An empty queue is not proof of successful recipient
 delivery, so correlate the queue state with Postfix and upstream relay evidence.
 
-If targeted deletion, snapshot purge, or deprecated clear reports that long
-queue IDs cannot be verified, set `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run
+If targeted deletion or snapshot purge reports that long queue IDs cannot be
+verified, set `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run
 `sudo make up` so Postfix is recreated or updated, and confirm:
 
 ```bash

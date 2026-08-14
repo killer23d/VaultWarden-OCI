@@ -800,19 +800,24 @@ sys.stdout.write(hmac.new(key, message, hashlib.sha256).hexdigest())
 # ---------------------------------------------------------------------------
 # write_file_integrity FILE
 #
-# Writes two sidecar files:
-#   FILE.sha256       — plain SHA-256 hex digest (for legacy callers)
-#   FILE.sha256.hmac  — HMAC-SHA256 of the digest using FILE_INTEGRITY_HMAC_KEY
-#                       (written only when the env var is set)
+# Writes the mandatory authenticated-integrity cohort:
+#   FILE.sha256       — plain SHA-256 corruption-evidence digest
+#   FILE.sha256.hmac  — HMAC-SHA256 authenticating that digest with
+#                       FILE_INTEGRITY_HMAC_KEY
 #
-# Callers should set FILE_INTEGRITY_HMAC_KEY to a secret random string and
-# store it separately from the monitored files (e.g. in SOPS secrets).
+# FILE_INTEGRITY_HMAC_KEY is required and must be stored separately from the
+# monitored files (for example, in SOPS secrets).
 # ---------------------------------------------------------------------------
 write_file_integrity() {
     local file="$1"
 
     if [[ ! -f "$file" ]]; then
         log_error "write_file_integrity: file not found: $file"
+        return 1
+    fi
+
+    if [[ -z "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
+        log_error "write_file_integrity: FILE_INTEGRITY_HMAC_KEY is required for authenticated integrity"
         return 1
     fi
 
@@ -832,21 +837,17 @@ write_file_integrity() {
         return 1
     }
 
-    if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
-        local hmac
-        hmac=$(_calculate_hmac_sha256 "$checksum") || return 1
-        if ! install -m 600 /dev/null "${file}.sha256.hmac" 2>/dev/null; then
-            log_error "write_file_integrity: failed to create ${file}.sha256.hmac with restricted permissions"
-            return 1
-        fi
-        printf '%s\n' "$hmac" > "${file}.sha256.hmac" || {
-            log_error "write_file_integrity: failed to write ${file}.sha256.hmac"
-            return 1
-        }
-        log_debug "write_file_integrity: wrote plain SHA-256 and HMAC sidecar for: $file"
-    else
-        log_debug "write_file_integrity: wrote plain SHA-256 sidecar for: $file (no HMAC key set)"
+    local hmac
+    hmac=$(_calculate_hmac_sha256 "$checksum") || return 1
+    if ! install -m 600 /dev/null "${file}.sha256.hmac" 2>/dev/null; then
+        log_error "write_file_integrity: failed to create ${file}.sha256.hmac with restricted permissions"
+        return 1
     fi
+    printf '%s\n' "$hmac" > "${file}.sha256.hmac" || {
+        log_error "write_file_integrity: failed to write ${file}.sha256.hmac"
+        return 1
+    }
+    log_debug "write_file_integrity: wrote plain SHA-256 and HMAC sidecar for: $file"
 
     return 0
 }
@@ -877,46 +878,29 @@ verify_file_integrity() {
     # awk '{print $1}' handles both bare-digest and full sha256sum output formats.
     stored_checksum=$(awk '{print $1}' <<< "$stored_checksum")
 
-    if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
-        local hmac_file="${checksum_file}.hmac"
-        local stored_hmac=""
-        if [[ ! -f "$hmac_file" ]]; then
-            if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
-                log_error "verify_file_integrity: authenticated integrity is required but HMAC sidecar is missing: $hmac_file"
-                return 1
-            fi
-            log_warn "verify_file_integrity: HMAC sidecar missing for legacy file: $hmac_file"
-            log_warn "  Falling back to plain SHA-256 because REQUIRE_AUTHENTICATED_INTEGRITY is not true."
-        else
-            stored_hmac=$(cat "$hmac_file") || {
-                log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
-                return 1
-            }
-            stored_hmac=$(awk '{print $1}' <<< "$stored_hmac")
-        fi
-
-        if [[ -n "$stored_hmac" ]]; then
-            local expected_hmac
-            expected_hmac=$(_calculate_hmac_sha256 "$stored_checksum") || return 1
-
-            if [[ "$expected_hmac" != "$stored_hmac" ]]; then
-                log_error "verify_file_integrity: HMAC verification FAILED for sidecar: $checksum_file"
-                log_error "  Sidecar may have been tampered with alongside the monitored file."
-                return 1
-            fi
-            log_debug "verify_file_integrity: HMAC sidecar authenticated for: $file"
-        fi
-    else
-        if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
-            log_error "verify_file_integrity: authenticated integrity is required but FILE_INTEGRITY_HMAC_KEY is not set"
-            return 1
-        fi
-        log_warn "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is not set; sidecar is unauthenticated."
-        log_warn "  An attacker who replaces both the file and its .sha256 sidecar will pass this check."
-        log_warn "  Set FILE_INTEGRITY_HMAC_KEY and use write_file_integrity() to enable authenticated checking."
+    if [[ -z "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
+        log_error "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is required for authenticated integrity"
+        return 1
     fi
+    local hmac_file="${checksum_file}.hmac"
+    if [[ ! -f "$hmac_file" ]]; then
+        log_error "verify_file_integrity: authenticated integrity HMAC sidecar is missing: $hmac_file"
+        return 1
+    fi
+    local stored_hmac expected_hmac
+    stored_hmac=$(cat "$hmac_file") || {
+        log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
+        return 1
+    }
+    stored_hmac=$(awk '{print $1}' <<< "$stored_hmac")
+    expected_hmac=$(_calculate_hmac_sha256 "$stored_checksum") || return 1
+    if [[ "$expected_hmac" != "$stored_hmac" ]]; then
+        log_error "verify_file_integrity: HMAC verification FAILED for sidecar: $checksum_file"
+        return 1
+    fi
+    log_debug "verify_file_integrity: HMAC sidecar authenticated for: $file"
 
-    # Verification pipeline — both steps must pass when HMAC is available:
+    # Verification pipeline — both mandatory steps must pass:
     #   1. HMAC-SHA256 (above): authenticates the .sha256 sidecar content.
     #      An attacker who replaces both the backup file and its .sha256 sidecar
     #      still fails here — they cannot forge the HMAC without the key.

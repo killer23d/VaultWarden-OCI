@@ -474,12 +474,12 @@ for option in --help -h; do
     assert_help edit-secrets.sh "VaultWarden-OCI Secrets Editor" "$option"
 done
 
-assert_help secrets-view.sh "VaultWarden Secrets — view subcommand" view --help
-assert_help secrets-list.sh "VaultWarden Secrets — list subcommand" list --help
-assert_help secrets-rotate.sh "VaultWarden Secrets — rotate subcommand" rotate --help
+assert_help secrets-view.sh "VaultWarden Secrets — view subcommand" --help
+assert_help secrets-list.sh "VaultWarden Secrets — list subcommand" --help
+assert_help secrets-rotate.sh "VaultWarden Secrets — rotate subcommand" --help
 assert_help secrets-export-recovery-kit.sh \
-    "VaultWarden Secrets — export-recovery-kit subcommand" export-recovery-kit --help
-assert_help secrets-edit.sh "VaultWarden Secrets — edit subcommand" edit --help
+    "VaultWarden Secrets — export-recovery-kit subcommand" --help
+assert_help secrets-edit.sh "VaultWarden Secrets — edit subcommand" --help
 assert_help edit-secrets.sh "VaultWarden-OCI Secrets Editor" help
 
 for option in --version -V; do
@@ -498,7 +498,7 @@ done
 
 assert_failure_contains "Unknown option: '--bogus'" "${ISOLATED_ROOT}/utilities/secrets-list.sh" --bogus
 assert_failure_contains "Unknown option: '--bogus'" "${ISOLATED_ROOT}/utilities/secrets-export-recovery-kit.sh" --bogus
-assert_failure_contains "Unknown option: '--bogus'" "${ISOLATED_ROOT}/utilities/secrets-edit.sh" edit --bogus
+assert_failure_contains "Unknown option: '--bogus'" "${ISOLATED_ROOT}/utilities/secrets-edit.sh" --bogus
 assert_failure_contains "'rotate' requires a FIELD argument" "${ISOLATED_ROOT}/utilities/secrets-rotate.sh" --dry-run
 assert_failure_contains "--editor requires an argument" "${ISOLATED_ROOT}/utilities/secrets-edit.sh" --editor --help
 
@@ -2880,6 +2880,7 @@ check_recovery_kit_schema_truth() {
         cloudflare_proxy) printf '%s\n' optional_key ;;
         email_api) printf '%s\n' required_key ;;
         email_smtp) printf '%s\n' required_key ;;
+        authenticated_integrity) printf '%s\n' required_key ;;
         *) return 1 ;;
       esac
     }
@@ -3016,13 +3017,12 @@ check_recovery_kit_schema_truth() {
     export RECOVERY_KIT_REPO_URL="https://example.invalid/VaultWarden-OCI.git"
     export CLOUDFLARE_PROXY_ENABLED=false
     export PUSH_ENABLED=false
-    export REQUIRE_AUTHENTICATED_INTEGRITY=false
     export EMAIL_MODE=api
     case "$scenario" in
       push-required|push-disabled|push-group-empty)
         [[ "$scenario" == "push-disabled" ]] || export PUSH_ENABLED=true
         ;;
-      integrity-required) export REQUIRE_AUTHENTICATED_INTEGRITY=true ;;
+      integrity-required) : ;;
       email-api-required|email-api-smtp-required) export EMAIL_MODE=api ;;
       email-smtp-required) export EMAIL_MODE=smtp ;;
       email-auto-api-only|email-auto-smtp-only|email-auto-none|validator-xtrace) export EMAIL_MODE=auto ;;
@@ -3058,10 +3058,10 @@ check_recovery_kit_schema_truth() {
     schema_validate() { return 0; }
     schema_required_keys() { printf '%s\n' required_key; }
     schema_keys() {
-      printf '%s\n' required_key email_api_token smtp_password
+      printf '%s\n' required_key email_api_token smtp_password file_integrity_hmac_key
       case "$scenario" in
         push-required|push-disabled) printf '%s\n' push_installation_id push_installation_key ;;
-        integrity-required) printf '%s\n' file_integrity_hmac_key ;;
+        integrity-required) : ;;
         push-group-empty|email-api-required|email-api-smtp-required|email-smtp-required|email-auto-api-only|email-auto-smtp-only|email-auto-none|validator-xtrace|email-default-smtp-only) ;;
       esac
     }
@@ -3100,7 +3100,9 @@ check_recovery_kit_schema_truth() {
         *required_key*) printf '%s' required-secret ;;
         *push_installation_id*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
         *push_installation_key*) printf '%s' CHANGE_ME_OR_LEAVE_EMPTY ;;
-        *file_integrity_hmac_key*) printf '%s' CHANGE_ME_FILE_INTEGRITY_HMAC_KEY ;;
+        *file_integrity_hmac_key*)
+          [[ "$scenario" == integrity-required ]] && printf '%s' CHANGE_ME_FILE_INTEGRITY_HMAC_KEY || printf '%s' configured-integrity-key
+          ;;
         *email_api_token*)
           case "$scenario" in
             email-api-required|email-auto-smtp-only|email-auto-none|email-default-smtp-only) printf '%s' PLACEHOLDER_NOT_CONFIGURED ;;
@@ -3159,7 +3161,7 @@ check_recovery_kit_schema_truth() {
   runtime_required_case push-required || fail 'PUSH_ENABLED=true must reject inactive push credentials before publication'
   runtime_required_case push-disabled || fail 'disabled push credentials must remain genuinely optional'
   runtime_required_case push-group-empty || fail 'active runtime requirement group must not silently resolve to zero schema keys'
-  runtime_required_case integrity-required || fail 'authenticated-integrity policy must reject an inactive HMAC key before publication'
+  runtime_required_case integrity-required || fail 'authenticated integrity must reject an inactive HMAC key before publication'
   runtime_required_case email-api-required || fail 'EMAIL_MODE=api must reject an inactive API token before publication'
   runtime_required_case email-api-smtp-required || fail 'EMAIL_MODE=api must still require the canonical Postfix SMTP secret before publication'
   runtime_required_case email-smtp-required || fail 'EMAIL_MODE=smtp must reject an inactive SMTP password before publication'

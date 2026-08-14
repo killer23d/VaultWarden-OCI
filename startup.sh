@@ -48,9 +48,7 @@ SUBCOMMANDS:
 STARTUP OPTIONS:
   --force          Recreate containers to apply current Compose and runtime environment values
   --skip-health    Skip post-startup health check
-  --skip-pull      Compatibility option; startup never pulls images
   --background     Start services in background (daemon mode)
-  --skip-egress-fix  Compatibility option; startup never repairs firewall/NAT
   --dry-run        Show what would be done without executing
 
 GLOBAL OPTIONS:
@@ -100,9 +98,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
       --force)           FORCE_RESTART=true;   shift ;;
       --skip-health)     SKIP_HEALTH_CHECK=true; shift ;;
-      --skip-pull)       shift ;;
       --background)      BACKGROUND=true;       shift ;;
-      --skip-egress-fix) shift ;;
       --dry-run)         DRY_RUN=true;          shift ;;
       --help|-h)         show_help; exit 0 ;;
       --version|-V)      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
@@ -198,11 +194,8 @@ check_email_config_consistency() {
         log_warn "Fix: ./utilities/secrets-rotate.sh email_api_token"
       fi
       ;;
-    smtp|direct|host)
+    smtp|direct)
       local pw_file="${secrets_dir}/smtp_password"
-      if [[ "$email_mode" == "host" ]]; then
-        log_warn "EMAIL_MODE=host is a deprecated compatibility alias; use EMAIL_MODE=direct."
-      fi
       if [[ ! -s "$pw_file" ]]; then
         log_warn "EMAIL_MODE=${email_mode} requires '${pw_file}', but it is absent or empty."
         log_warn "Direct SMTP authentication will fail on first send."

@@ -159,15 +159,9 @@ _apply_runtime_env_overrides() {
 }
 
 _print_effective_email_sender() {
-  local env_file="$1" name from deprecated
+  local env_file="$1" name from
   name="$(_read_env_value SMTP_FROM_NAME "$env_file")"
   from="$(_read_env_value SMTP_FROM "$env_file")"
-  deprecated="$(_read_env_value SMTP_FROM_EMAIL "$env_file")"
-
-  if [[ -z "$from" && -n "$deprecated" ]]; then
-    log_warn "SMTP_FROM is empty but deprecated SMTP_FROM_EMAIL is set; update repo .env to use SMTP_FROM."
-  fi
-
   printf 'Effective email sender: %s <%s>\n' "${name:-}" "${from:-}"
 }
 

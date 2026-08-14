@@ -14,7 +14,6 @@ VaultWarden Secrets — view subcommand
 
 USAGE:
     sudo ./utilities/secrets-view.sh [OPTIONS]
-    sudo ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
     sudo ./edit-secrets.sh view [OPTIONS]
 
 DESCRIPTION:
@@ -154,7 +153,6 @@ do_view() {
 }
 
 main() {
-    if [[ "${1:-}" == "view" ]]; then shift; fi
 
     while [[ $# -gt 0 ]]; do
         case "$1" in

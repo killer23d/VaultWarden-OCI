@@ -141,7 +141,7 @@ Current groups are:
 | :-- | :-- | :-- |
 | `cloudflare_proxy` | `cf_worker_bouncer_token`, `cloudflare_zone_id`, `cf_account_id` | all required when `CLOUDFLARE_PROXY_ENABLED=true` |
 | `push` | `push_installation_id`, `push_installation_key` | both required when `PUSH_ENABLED=true` |
-| `authenticated_integrity` | `file_integrity_hmac_key` | required when `REQUIRE_AUTHENTICATED_INTEGRITY=true` |
+| `authenticated_integrity` | `file_integrity_hmac_key` | always required for trusted backup/restore integrity |
 | `email_api` | `email_api_token` | additionally required for `EMAIL_MODE=api` |
 | `email_smtp` | `smtp_password` | stack-level requirement for every supported `EMAIL_MODE` because the canonical Compose stack always starts Postfix with this file secret |
 

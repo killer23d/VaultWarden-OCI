@@ -167,19 +167,17 @@ VaultWarden-OCI Setup Tool — Security Hardened Edition
 
 USAGE:
     sudo ./setup.sh install --domain DOMAIN --email EMAIL [OPTIONS]  # Full setup
-    sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]          # Full setup (legacy)
     sudo ./setup.sh secrets [OPTIONS]                                # Secrets phase only
     sudo ./setup.sh systemd <install|remove|validate|status> [OPTIONS]  # Systemd phase
 
 SUBCOMMANDS:
-    install    Run the full setup workflow. This is the recommended explicit
-               entry point; legacy top-level --domain/--email flags still work.
+    install    Run the full setup workflow.
     secrets    Configure encrypted secrets (admin password, API tokens, SMTP, etc.)
                Run this after editing .env with your Cloudflare zone / email settings.
     systemd    Install, validate, or remove VaultWarden systemd timers.
                Sub-actions: install | remove | validate | status
 
-FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
+FULL SETUP OPTIONS (used after install):
   --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
@@ -232,7 +230,7 @@ EXAMPLES:
 EOF
 }
 
-# `install` and legacy top-level --domain/--email use the same setup parser.
+# Full setup is available only through the explicit `install` subcommand.
 _require_cli_value() {
     local opt="$1" value="${2-}"
     if [[ -z "$value" || "$value" == --* ]]; then
@@ -241,6 +239,13 @@ _require_cli_value() {
         exit 1
     fi
 }
+
+if [[ $# -eq 0 ]]; then
+    log_error "Full setup requires the 'install' subcommand."
+    log_error "Use: sudo ./setup.sh install --domain DOMAIN --email EMAIL [OPTIONS]"
+    show_help
+    exit 1
+fi
 
 if [[ $# -gt 0 ]]; then
     case "$1" in
@@ -266,7 +271,10 @@ if [[ $# -gt 0 ]]; then
             printf 'VaultWarden-OCI %s\n' "$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "unknown")"
             exit 0
             ;;
-        --domain|--email|--auto|--use-latest|--skip-deps|--force|--dry-run|--data-device|--data-mount)
+        --*)
+            log_error "Full setup requires the 'install' subcommand."
+            log_error "Use: sudo ./setup.sh install --domain DOMAIN --email EMAIL [OPTIONS]"
+            exit 1
             ;;
         *)
             log_error "Unknown subcommand: '$1'"
@@ -356,7 +364,7 @@ _confirm_force_acknowledgement() {
     [[ "$FORCE" == "true" && "$DRY_RUN" != "true" ]] || return 0
 
     case "${VW_FORCE_ACK:-}" in
-        I_UNDERSTAND_OVERWRITING_CURRENT_STATE|I_UNDERSTAND_LOSING_OLD_BACKUPS)
+        I_UNDERSTAND_OVERWRITING_CURRENT_STATE)
             return 0
             ;;
     esac

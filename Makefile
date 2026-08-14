@@ -56,7 +56,7 @@ DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help help-all \
-        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear \
+        setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge \
         up down restart start stop safe-restart status operations \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
@@ -87,7 +87,7 @@ DATA_DEVICE ?=
 # Recursive make calls are exempt so root-required targets can safely call helper
 # targets internally, for example `sudo make key-rotate` calling `make key-health`.
 ROOT_ALLOWED_TARGETS := \
-	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge email-queue-clear health-email up down start stop restart safe-restart status operations \
+	setup sync-env edit-env init-secrets edit-secrets test-secrets test-email email-queue email-queue-summary email-queue-inspect email-queue-retry email-queue-retry-all email-queue-delete email-queue-logs email-queue-purge health-email up down start stop restart safe-restart status operations \
 	health health-quick health-report logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec fix-permissions \
 	backup backup-full backup-emergency list-backups backup-status \
 	restore restore-preflight restore-db restore-remote \
@@ -323,10 +323,6 @@ email-queue-purge: ## Purge identity matches; requires verified long IDs
 	$(call require-root)
 	@./utilities/email-queue.sh purge --snapshot
 
-email-queue-clear: ## Deprecated long-ID-gated alias for snapshot purge
-	$(call require-root)
-	@./utilities/email-queue.sh clear
-
 # ===========================================================================
 ##@ Normal Admin + Dashboard Stable API — Service Management
 # ===========================================================================
@@ -379,7 +375,7 @@ restart: ## Recreate all services using locally installed images (root required)
 	$(call require-root)
 	$(call check-docker)
 	@echo "$(BLUE)Restarting VaultWarden services without pulling images...$(NC)"
-	@./startup.sh --force --skip-pull || { \
+	@./startup.sh --force || { \
 		echo "$(RED)Restart failed!$(NC)"; \
 		$(MAKE) status; \
 		echo "$(YELLOW)If restart failed due to a key issue, run: sudo make key-health$(NC)"; \

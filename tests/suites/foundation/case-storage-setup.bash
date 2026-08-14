@@ -79,8 +79,8 @@ _mv_prompt_target <<< ''
 printf '%s\n' "$_MV_TARGET"
 PROBE
 )
-grep -Fxq "/mnt/vw-data" <<< "$out" || fail "legacy target default was not /mnt/vw-data: $out"
-pass 'boot-to-block legacy DATA_VOLUME_MOUNT defaults target to /mnt/vw-data'
+grep -Fxq "/opt/vaultwarden/data" <<< "$out" || fail "configured migration target was not honored literally: $out"
+pass 'boot-to-block honors explicit DATA_VOLUME_MOUNT without historical path inference'
 
 out=$(bash <<'PROBE'
 set -euo pipefail
@@ -160,9 +160,9 @@ parse_line="$(grep -n '^[[:space:]]*_mv_parse_args ' utilities/setup-storage.sh 
 resolve_line="$(grep -n '^[[:space:]]*_mv_resolve_args$' utilities/setup-storage.sh | cut -d: -f1)"
 execute_line="$(grep -n '^[[:space:]]*migrate_mode_main$' utilities/setup-storage.sh | cut -d: -f1)"
 [[ -n "$metadata_line" && -n "$load_line" && -n "$outer_parse_line" && -n "$resolve_line" && -n "$execute_line" \
-    && "$metadata_line" -lt "$load_line" && "$load_line" -lt "$outer_parse_line" \
-    && "$outer_parse_line" -lt "$parse_line" && "$parse_line" -lt "$resolve_line" && "$resolve_line" -lt "$execute_line" ]] \
-    || fail 'setup-storage must dispatch metadata, load mode-appropriate env defaults, parse outer CLI, parse migration once, resolve, then execute'
+    && "$metadata_line" -lt "$outer_parse_line" && "$outer_parse_line" -lt "$load_line" \
+    && "$load_line" -lt "$parse_line" && "$parse_line" -lt "$resolve_line" && "$resolve_line" -lt "$execute_line" ]] \
+    || fail 'setup-storage must dispatch metadata, parse the explicit mode, load mode-appropriate env defaults, parse migration once, resolve, then execute'
 pass 'migration parse/resolve/execute ownership is explicit'
 
 out=$(bash <<'PROBE'
@@ -641,15 +641,18 @@ run_storage() {
 run_storage setup --help
 [[ "$status" -eq 0 && "$out" == *'sudo utilities/setup-storage.sh setup [OPTIONS]'* ]] \
     || fail "canonical setup help failed: $out"
+run_storage --mode setup
+[[ "$status" -ne 0 && "$out" != *'This script must be run as root'* ]] \
+    || fail "removed --mode compatibility parser was still accepted: $out"
+run_storage
+[[ "$status" -ne 0 && "$out" == *'A storage subcommand is required: setup | verify | migrate'* ]] \
+    || fail "no-argument storage execution did not require an explicit mutation verb: $out"
 run_storage verify --help
 [[ "$status" -eq 0 && "$out" == *'sudo utilities/setup-storage.sh verify [OPTIONS]'* ]] \
     || fail "canonical verify help failed: $out"
 run_storage migrate --help
 [[ "$status" -eq 0 && "$out" == *'setup-storage.sh migrate <subcommand>'* ]] \
     || fail "canonical migrate help failed: $out"
-run_storage --mode migrate --help
-[[ "$status" -eq 0 && "$out" == *'setup-storage.sh migrate <subcommand>'* ]] \
-    || fail "compatibility --mode migrate help failed: $out"
 expected_version="VaultWarden-OCI $(tr -d '[:space:]' < "$ROOT/VERSION")"
 run_storage migrate --version
 [[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
@@ -657,12 +660,6 @@ run_storage migrate --version
 run_storage migrate -V
 [[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
     || fail "canonical migrate -V failed: $out"
-run_storage --mode migrate --version
-[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
-    || fail "compatibility --mode migrate --version failed: $out"
-run_storage --mode migrate -V
-[[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
-    || fail "compatibility --mode migrate -V failed: $out"
 run_storage setup verify
 [[ "$status" -ne 0 && "$out" == *'Exactly one setup-storage mode is allowed'* ]] \
     || fail "setup-storage accepted multiple modes: $out"
@@ -672,9 +669,6 @@ run_storage setup --data-mount --force
 run_storage migrate status --target /tmp/foo
 [[ "$status" -ne 0 && "$out" == *"Unknown option for 'status': --target"* && "$out" != *'This script must be run as root'* ]] \
     || fail "migrate status accepted --target: $out"
-run_storage --mode migrate status --target /tmp/foo
-[[ "$status" -ne 0 && "$out" == *"Unknown option for 'status': --target"* && "$out" != *'This script must be run as root'* ]] \
-    || fail "compatibility migrate status accepted --target before parser contract: $out"
 run_storage migrate status --force
 [[ "$status" -ne 0 && "$out" == *"Unknown option for 'status': --force"* ]] \
     || fail "migrate status accepted --force: $out"
@@ -687,9 +681,6 @@ run_storage migrate verify --direction block-to-boot
 run_storage migrate resume --force-format --dry-run
 [[ "$status" -ne 0 && "$out" != *'Unknown option'* && ( "$out" == *'This script must be run as root'* || "$out" == *'No state file found. Cannot resume.'* ) ]] \
     || fail "migrate resume rejected legitimate resume options before root/state guard: $out"
-run_storage --mode migrate resume --force-format --dry-run
-[[ "$status" -ne 0 && "$out" != *'Unknown option'* && ( "$out" == *'This script must be run as root'* || "$out" == *'No state file found. Cannot resume.'* ) ]] \
-    || fail "compatibility --mode migrate rejected legitimate resume options before root/state guard: $out"
 
 out=$(bash <<'PROBE'
 set -euo pipefail
@@ -816,18 +807,18 @@ run_storage migrate --help
 run_storage setup --version
 [[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
     || fail "setup metadata loaded runtime environment: $out"
-run_storage --mode setup --help
+run_storage setup --help
 [[ "$status" -eq 0 && "$out" == *'MODES:'* && "$out" != *'refusing to overwrite dangerous variable'* ]] \
     || fail "compatibility setup metadata loaded runtime environment: $out"
-run_storage --mode migrate --version
+run_storage migrate --version
 [[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
     || fail "compatibility migrate metadata loaded runtime environment: $out"
-run_storage --mode verify -V
+run_storage verify -V
 [[ "$status" -eq 0 && "$out" == "$expected_version" ]] \
     || fail "compatibility verify metadata loaded runtime environment: $out"
 rm -f "$ROOT/.env"
 metadata_env_created=false
-pass 'setup-storage canonical and compatibility CLI grammar is enforced'
+pass 'setup-storage canonical CLI grammar is enforced and removed compatibility grammar is rejected'
 
 )
 

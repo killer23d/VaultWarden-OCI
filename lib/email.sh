@@ -18,8 +18,6 @@ declare -Ar _EMAIL_PROVIDER_ALIASES=(
     [postmark]=postmark
     [resend]=resend
     [cyberpersons]=cyberpersons
-    [cyberperson]=cyberpersons
-    [cyberpanel]=cyberpersons
 )
 
 _email_has_control() {
@@ -75,12 +73,7 @@ resolve_email_sender() {
         printf '%s' "$SMTP_FROM"
         return 0
     fi
-    if [[ -n "${SMTP_FROM_EMAIL:-}" ]]; then
-        log_warn "SMTP_FROM_EMAIL is deprecated; set SMTP_FROM instead."
-        printf '%s' "$SMTP_FROM_EMAIL"
-        return 0
-    fi
-    log_error "SMTP_FROM is required; SMTP_FROM_EMAIL is only a deprecated compatibility alias."
+    log_error "SMTP_FROM is required."
     return 1
 }
 
@@ -681,8 +674,8 @@ send_email() {
     local driver fn from message_file msgid metadata_body rate_dir rate_file rc=1
     local host timestamp
     case "$mode" in
-        auto|api|smtp|direct|host) ;;
-        *) log_error "Unknown EMAIL_MODE='${mode}'. Valid values: auto api smtp direct host"; return 1 ;;
+        auto|api|smtp|direct) ;;
+        *) log_error "Unknown EMAIL_MODE='${mode}'. Valid values: auto api smtp direct"; return 1 ;;
     esac
 
     host=$(_email_host)
@@ -735,10 +728,6 @@ send_email() {
             metadata_body=$(_build_email_metadata_body \
                 "$body" "$host" "$timestamp" "$mode" "$provider" "Direct upstream SMTP")
             ;;
-        host)
-            metadata_body=$(_build_email_metadata_body \
-                "$body" "$host" "$timestamp" "$mode" "$provider" "Direct upstream SMTP (host alias)")
-            ;;
         api)
             rc=1
             ;;
@@ -755,12 +744,6 @@ send_email() {
             rc=$?
             ;;
         direct)
-            _smtp_upload_direct "$message_file" "$from" "$to"
-            rc=$?
-            (( rc == 0 )) && log_info "Email sent via direct upstream SMTP"
-            ;;
-        host)
-            log_warn "EMAIL_MODE=host is deprecated; behaving exactly as EMAIL_MODE=direct."
             _smtp_upload_direct "$message_file" "$from" "$to"
             rc=$?
             (( rc == 0 )) && log_info "Email sent via direct upstream SMTP"

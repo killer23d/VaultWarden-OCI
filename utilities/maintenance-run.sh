@@ -75,7 +75,6 @@ EOF
 }
 
 
-[[ "${1:-}" == "run" ]] && shift
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -148,12 +147,12 @@ main() {
         operation_set_phase "3" "Security and network maintenance"
         log_header "Phase 3/4 — Security and network maintenance"
         if [[ "$UPDATE_FIREWALL" == "true" ]]; then
-            local _fw_args=("${PROJECT_ROOT}/utilities/maintenance-update-firewall.sh" update-firewall)
+            local _fw_args=("${PROJECT_ROOT}/utilities/maintenance-update-firewall.sh")
             [[ "$DRY_RUN" == "true" ]] && _fw_args+=("--dry-run")
             "${_fw_args[@]}" && firewall_update_result=0 || firewall_update_result=$?
         fi
         if [[ "$UPDATE_DNS" == "true" ]]; then
-            local _dns_args=("${PROJECT_ROOT}/utilities/maintenance-update-dns.sh" update-dns)
+            local _dns_args=("${PROJECT_ROOT}/utilities/maintenance-update-dns.sh")
             [[ "$EMAIL_NOTIFY" == "true" ]] && _dns_args+=("--email")
             [[ "$DRY_RUN" == "true" ]]     && _dns_args+=("--dry-run")
             "${_dns_args[@]}" && dns_update_result=0 || dns_update_result=$?
