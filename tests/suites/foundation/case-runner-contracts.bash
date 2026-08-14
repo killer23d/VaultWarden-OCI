@@ -466,6 +466,12 @@ for latest_surface in setup.sh utilities/setup-system.sh utilities/setup-env.sh 
     grep -Fq -- '--use-latest' "$latest_surface" \
         || fail "explicit --use-latest override missing from $latest_surface"
 done
+grep -Fq 'Production setup uses repository-pinned component/tool versions by default.' docs/SCRIPTS.md \
+    || fail 'operator docs must state that normal production setup is source-pinned'
+grep -Fq 'The explicit `--use-latest` override remains available for operator-requested live-version runs and is outside the normal/golden path.' docs/SCRIPTS.md \
+    || fail 'operator docs must retain the explicit --use-latest override contract'
+! grep -Fq 'mutable latest-version resolution is not part of the operator interface' docs/SCRIPTS.md \
+    || fail 'operator docs must not deny the supported --use-latest override'
 
 grep -Fq '"python3-yaml"' utilities/setup-system.sh \
     || fail 'setup-system must explicitly own python3-yaml'

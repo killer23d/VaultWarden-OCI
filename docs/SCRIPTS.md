@@ -56,7 +56,7 @@ sudo ./setup.sh install \
   --email admin@example.com
 ```
 
-`setup-system.sh` fails closed outside Ubuntu 24.04 LTS Noble and outside amd64/arm64. Production setup uses repository-pinned component/tool versions; mutable latest-version resolution is not part of the operator interface.
+`setup-system.sh` fails closed outside Ubuntu 24.04 LTS Noble and outside amd64/arm64. Production setup uses repository-pinned component/tool versions by default. The explicit `--use-latest` override remains available for operator-requested live-version runs and is outside the normal/golden path.
 
 ### `startup.sh`
 
