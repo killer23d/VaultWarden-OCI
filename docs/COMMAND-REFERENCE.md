@@ -128,10 +128,7 @@ FULL SETUP OPTIONS (used after install):
   --auto              Non-interactive install. Auto-generates administrator passwords;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
-                      to rotate them. Does NOT imply --use-latest.
-  --use-latest        Use live upstream container and CrowdSec versions in .env,
-                      and resolve the latest SOPS release instead of the pinned
-                      production default.
+                      to rotate them.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       The existing operational Age key is retained, but current
@@ -1266,8 +1263,6 @@ OPTIONS:
     --reconcile-email    Reconcile only the managed email notification files.
     --dry-run            Print what would happen without changing files.
     --force              Re-run all phases even if already applied.
-    --use-latest         Override version pins and use the current live upstream
-                         release of each component.
     --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
     --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
                          allowlist.
@@ -1317,9 +1312,6 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Set compatible mutable image/component versions to 'latest';
-                          Caddy remains pinned because xcaddy builder tags do not
-                          support caddy:latest-builder.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --force               Overwrite existing .env/docker-compose.yml
@@ -1491,7 +1483,6 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --use-latest          Resolve the latest SOPS release instead of the pinned default
     --sops-version VER    Use a specific SOPS version (default: v3.13.2)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
@@ -1656,7 +1647,7 @@ VaultWarden-OCI Command Reference Writer
 
 USAGE:
     bash utilities/write-command-reference.sh [--help|-h]
-    bash utilities/generate-command-ref.sh
+    bash utilities/write-command-reference.sh
     make docs
 
 DESCRIPTION:

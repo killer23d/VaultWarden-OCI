@@ -247,6 +247,5 @@ A file existing in a password manager or offline disk is not proof that it can d
 
 ## Root-only Age key handoffs
 
-<!-- VWOCI-PRR-PATCH-04 -->
 
 Setup, key rotation, and restore publish private Age identity material only to protected root-owned files under `/root/vaultwarden-recovery/`. Terminal output may show the public recipient and protected path, never the private identity. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

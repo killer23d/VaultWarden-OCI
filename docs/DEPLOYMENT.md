@@ -237,6 +237,5 @@ These features are supported where implemented but should not complicate a first
 
 ## Automatic setup credential handoff
 
-<!-- VWOCI-PRR-PATCH-04 -->
 
 Both `sudo ./setup.sh install --domain DOMAIN --email EMAIL --auto` and the documented direct command `sudo ./utilities/setup-secrets.sh configure --auto` keep generated credential values out of terminal output. After successful atomic publication, the command displays the root-only handoff path under `/root/vaultwarden-recovery/`, its `root:root` ownership and `0700` directory/`0600` file permissions, and the three included groups: SOPS Age identity, Vaultwarden administrator password, and Caddy administrator password. Automatic configuration fails without a completion summary if the handoff cannot be published. Required UFW and automatic secret-configuration failures also terminate top-level setup before its completion summary. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

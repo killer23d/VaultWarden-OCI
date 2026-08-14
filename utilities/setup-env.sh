@@ -32,7 +32,6 @@ source "${PROJECT_ROOT}/lib/operations.sh"
 
 DOMAIN=""
 ADMIN_EMAIL=""
-USE_LATEST=false
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
 DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 DATA_VOLUME_DEVICE_EXPLICIT=false
@@ -80,9 +79,6 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Set compatible mutable image/component versions to 'latest';
-                          Caddy remains pinned because xcaddy builder tags do not
-                          support caddy:latest-builder.
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: @DEFAULT_DATA_MOUNT@)
     --force               Overwrite existing .env/docker-compose.yml
@@ -125,7 +121,6 @@ _parse_args() {
                 _require_cli_value "--email" "${1-}"
                 ADMIN_EMAIL="$1"
                 ;;
-            --use-latest)   USE_LATEST=true ;;
             --force)        FORCE=true ;;
             --dry-run)      DRY_RUN=true ;;
             --data-device)
@@ -153,24 +148,8 @@ _parse_args() {
 }
 
 detect_ssh_log_path() {
-    local ssh_log_path="/var/log/secure"
-
-    if [[ -f /etc/os-release ]]; then
-        local os_id
-        os_id=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr -d "'")
-        case "$os_id" in
-            ol|rhel|centos|rocky|almalinux|fedora) ssh_log_path="/var/log/secure"  ;;
-            ubuntu|debian)                         ssh_log_path="/var/log/auth.log" ;;
-            *)
-                if [[ -f "/var/log/secure" ]]; then
-                    ssh_log_path="/var/log/secure"
-                else
-                    ssh_log_path="/var/log/auth.log"
-                fi
-                ;;
-        esac
-    fi
-    printf '%s\n' "$ssh_log_path"
+    printf '%s
+' '/var/log/auth.log'
 }
 
 _make_owned_temp() {
@@ -226,24 +205,12 @@ create_env_file() {
     # Idempotency compares the same effective storage identity that rendering
     # uses, so an explicit storage change cannot be mistaken for a no-op.
     if [[ -f "$env_file" ]] && [[ "$FORCE" != "true" ]]; then
-        local domain_matches=false email_matches=false latest_matches=false storage_matches=false
+        local domain_matches=false email_matches=false versions_match=false storage_matches=false
         grep -qF "DOMAIN=$domain_with_protocol" "$env_file" && domain_matches=true
         grep -qF "ADMIN_EMAIL=$ADMIN_EMAIL"      "$env_file" && email_matches=true
 
-        if [[ "$USE_LATEST" == "true" ]]; then
-            if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
-               grep -qE '^POSTFIX_VERSION=latest'     "$env_file" && \
-               grep -qE '^BUSYBOX_VERSION=latest'     "$env_file" && \
-               ! grep -qE '^CADDY_VERSION=latest'     "$env_file" && \
-               grep -qE '^CROWDSEC_VERSION=latest'    "$env_file" && \
-               grep -qE '^CF_WORKER_BOUNCER_VERSION=latest' "$env_file" && \
-               grep -qE '^FIREWALL_BOUNCER_VERSION=latest'  "$env_file"; then
-                latest_matches=true
-            fi
-        else
-            grep -qE '^(VAULTWARDEN|CADDY|POSTFIX|BUSYBOX)_VERSION=latest' "$env_file" \
-                || latest_matches=true
-        fi
+        grep -qE '^(VAULTWARDEN|CADDY|POSTFIX|BUSYBOX|CROWDSEC|CF_WORKER_BOUNCER|FIREWALL_BOUNCER)_VERSION=latest' "$env_file" \
+            || versions_match=true
 
         if [[ "$(_read_env_value DATA_VOLUME_DEVICE "$env_file")" == "${DATA_VOLUME_DEVICE:-}" &&
               "$(_read_env_value DATA_VOLUME_MOUNT "$env_file")" == "$DATA_VOLUME_MOUNT" &&
@@ -253,7 +220,7 @@ create_env_file() {
 
         if [[ "$domain_matches"  == "true" ]] && \
            [[ "$email_matches"   == "true" ]] && \
-           [[ "$latest_matches"  == "true" ]] && \
+           [[ "$versions_match" == "true" ]] && \
            [[ "$storage_matches" == "true" ]]; then
             log_info ".env is already up-to-date — skipping (use --force to overwrite)"
             return 0
@@ -302,24 +269,6 @@ create_env_file() {
         }
     ' "$env_template" > "$temp_env" || { rm -f "$temp_env"; return 1; }
 
-    if [[ "$USE_LATEST" == "true" ]]; then
-        local temp2
-        temp2=$(_make_owned_temp "$env_dir" "$real_user" "$real_group") \
-            || { rm -f "$temp_env"; return 1; }
-
-        awk '{
-            sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
-            sub(/^POSTFIX_VERSION=.*/,     "POSTFIX_VERSION=latest");
-            sub(/^BUSYBOX_VERSION=.*/,     "BUSYBOX_VERSION=latest");
-            sub(/^CROWDSEC_VERSION=.*/,    "CROWDSEC_VERSION=latest");
-            sub(/^CF_WORKER_BOUNCER_VERSION=.*/, "CF_WORKER_BOUNCER_VERSION=latest");
-            sub(/^FIREWALL_BOUNCER_VERSION=.*/,  "FIREWALL_BOUNCER_VERSION=latest");
-            print;
-        }' "$temp_env" > "$temp2" || { rm -f "$temp_env" "$temp2"; return 1; }
-
-        rm -f "$temp_env"
-        temp_env="$temp2"
-    fi
 
     if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
         local current_backup_dir

@@ -1112,7 +1112,6 @@ _encrypt_recovery_kit_attachment() {
 # when email was requested but preparation or delivery failed.
 # ---------------------------------------------------------------------------
 _offer_email_recovery_kit() {
-  # VWOCI-PRR-PATCH-02: only an independently encrypted AES-256 ZIP may be sent.
   local plaintext_file="$1" tool yn
   printf '\nEmail an AES-256 encrypted ZIP copy via SMTP? [yes/no] (default: no): ' >/dev/tty
   read -r -t 30 yn </dev/tty || yn="no"
@@ -1941,7 +1940,6 @@ _ork_generate_and_secure() {
 }
 
 offer_recovery_kit_export() {
-  # VWOCI-PRR-PATCH-02: the full kit is separate from setup credentials and is
   # published only under /root/vaultwarden-recovery (or an explicit test override).
   local auto_export="${1:-false}" recovery_dir stamp short_id recovery_file email_rc=0
   recovery_dir="$(_prepare_recovery_dir)" || return 1

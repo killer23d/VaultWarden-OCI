@@ -1587,7 +1587,6 @@ _rotate_age_key() {
 # would show on first install.  Requires the operator to press Enter to
 # acknowledge before services start (unless --force is passed).
 _display_new_key() {
-  # VWOCI-PRR-PATCH-01: keep the existing acknowledgement/startup safety gate,
   # but hand off the private identity only through the protected root file.
   [[ "$DRY_RUN" == "true" ]] && return 0
   [[ -z "$ROTATED_KEY_FILE" ]] && return 0

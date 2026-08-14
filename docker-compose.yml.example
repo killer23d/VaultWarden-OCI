@@ -1,5 +1,5 @@
 # VaultWarden-OCI Production Compose
-# Core flow: host permission preparation -> vaultwarden + caddy -> postfix
+# Core services: vaultwarden + caddy + postfix
 # Fill .env mandatory section first, then run setup secrets.
 
 # ─── Storage mode note ─────────────────────────────────────────────────────────────────────────────────

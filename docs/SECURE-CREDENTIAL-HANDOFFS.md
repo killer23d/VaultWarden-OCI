@@ -1,6 +1,5 @@
 # Secure credential and recovery handoffs
 
-<!-- VWOCI-PRR-PATCH-04 -->
 
 This document defines the bounded production-readiness remediation for credential output, recovery exports, backups, runtime log permissions, and email mode validation.
 

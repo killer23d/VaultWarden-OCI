@@ -325,7 +325,6 @@ SOPS_VERSION="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
 SOPS_VERSION_CLI_SET=false
 SKIP_DEPS=false
 AUTO_MODE=false
-USE_LATEST=false
 DRY_RUN=false
 FORCE=false
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
@@ -335,7 +334,7 @@ SUPPORTED_HOST_ARCH=""
 SUPPORTED_HOST_ARCHIVE_URL=""
 
 # Exported so that any sub-scripts invoked later can inherit these flags.
-export USE_LATEST FORCE
+export FORCE
 
 show_help() {
     cat <<'EOF' | sed "s|@DEFAULT_DATA_MOUNT@|${_VW_DEFAULT_DATA_MOUNT}|g"
@@ -352,7 +351,6 @@ DESCRIPTION:
 OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
-    --use-latest          Resolve the latest SOPS release instead of the pinned default
     --sops-version VER    Use a specific SOPS version (default: v3.13.2)
     --dry-run             Preview actions without executing
     --force               Skip confirmations
@@ -381,7 +379,6 @@ _parse_args() {
         case "$1" in
             --skip-deps)    SKIP_DEPS=true ;;
             --auto)         AUTO_MODE=true ;;
-            --use-latest)   USE_LATEST=true ;;
             --dry-run)      DRY_RUN=true ;;
             --force)        FORCE=true ;;
             --version|-V)
@@ -414,42 +411,8 @@ _parse_args() {
         shift
     done
 
-    if [[ "$USE_LATEST" == "true" && "$SOPS_VERSION_CLI_SET" == "true" ]]; then
-        log_error "--use-latest cannot be combined with --sops-version; choose one SOPS version source."
-        exit 1
-    fi
-    if [[ "$USE_LATEST" == "true" && "$_SOPS_VERSION_ENV_SET" == "true" ]]; then
-        log_error "--use-latest cannot be combined with SOPS_VERSION from the environment; choose one SOPS version source."
-        exit 1
-    fi
 }
 
-# Resolve the latest release tag from the GitHub API.
-resolve_github_latest() {
-    local repo="$1"
-    local tag
-
-    local api_tmpfile
-    api_tmpfile=$(mktemp -p "$TMP_WORKDIR" gh-latest.XXXXXXXXXX.json)
-
-    if ! curl -fsSL --max-time 30 \
-            "https://api.github.com/repos/${repo}/releases/latest" \
-            -o "$api_tmpfile" 2>/dev/null; then
-        log_error "Could not fetch release info for ${repo} from GitHub API."
-        log_error "Set SOPS_VERSION=vX.Y.Z via --sops-version or the environment to bypass."
-        return 1
-    fi
-
-    tag=$(jq -r '.tag_name // empty' "$api_tmpfile")
-
-    if [[ -z "$tag" ]] || ! _validate_sops_version_format "$tag"; then
-        log_error "Could not resolve a valid release tag for ${repo}."
-        log_error "Set SOPS_VERSION=vX.Y.Z via --sops-version or the environment to bypass."
-        return 1
-    fi
-
-    echo "$tag"
-}
 
 validate_supported_host_preflight() {
     local result
@@ -700,10 +663,7 @@ install_yq() {
 
 install_sops() {
     local sops_ver="${SOPS_VERSION:-$SOPS_DEFAULT_VERSION}"
-    if [[ "$USE_LATEST" == "true" ]]; then
-        log_info "SOPS --use-latest requested — resolving latest release from GitHub..."
-        sops_ver=$(resolve_github_latest "getsops/sops") || return 1
-    elif [[ -n "$sops_ver" ]]; then
+    if [[ -n "$sops_ver" ]]; then
         log_info "Using SOPS version: ${sops_ver}"
     else
         log_error "Internal error: SOPS version is empty; expected pinned default ${SOPS_DEFAULT_VERSION}."

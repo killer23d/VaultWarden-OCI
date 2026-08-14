@@ -58,15 +58,8 @@ _command_to_package_hint() {
 }
 
 _package_manager_hint() {
-    if has_command apt-get; then
-        printf 'sudo apt install'
-    elif has_command dnf; then
-        printf 'sudo dnf install'
-    elif has_command yum; then
-        printf 'sudo yum install'
-    else
-        printf 'Install required packages using your system package manager'
-    fi
+    printf '%s
+' 'sudo apt-get install'
 }
 
 require_commands() {
@@ -273,17 +266,9 @@ operator_next_steps() {
 
 # Best-effort remediation for common operational file permission drift.
 # This is intentionally non-fatal and safe to call repeatedly.
-_common_stat_mode() {
-    if stat --version >/dev/null 2>&1; then stat -c '%a' "$1" 2>/dev/null; else stat -f '%OLp' "$1" 2>/dev/null; fi
-}
-
-_common_stat_owner() {
-    if stat --version >/dev/null 2>&1; then stat -c '%U' "$1" 2>/dev/null; else stat -f '%Su' "$1" 2>/dev/null; fi
-}
-
-_common_stat_group() {
-    if stat --version >/dev/null 2>&1; then stat -c '%G' "$1" 2>/dev/null; else stat -f '%Sg' "$1" 2>/dev/null; fi
-}
+_common_stat_mode() { stat -c '%a' "$1" 2>/dev/null; }
+_common_stat_owner() { stat -c '%U' "$1" 2>/dev/null; }
+_common_stat_group() { stat -c '%G' "$1" 2>/dev/null; }
 
 _canonical_permission_path() {
     local path="$1"
