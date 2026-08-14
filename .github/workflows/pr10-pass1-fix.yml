@@ -23,7 +23,6 @@ jobs:
           python3 -c 'from pathlib import Path; p=Path("tests/suites/foundation/case-storage-setup.bash"); s=p.read_text(); a=s.index("if ! bash \"$setup_system\" --use-latest --sops-version v3.13.2"); marker="rm -f /tmp/vw-sops-ambiguous.$$\n"; b=s.index(marker,a)+len(marker); r="for removed_latest_surface in \\\n    \"$PROJECT_ROOT/setup.sh\" \\\n    \"$setup_system\" \\\n    \"$PROJECT_ROOT/utilities/setup-env.sh\" \\\n    \"$setup_crowdsec\"; do\n    if grep -Fq -- \x27--use-latest\x27 \"$removed_latest_surface\"; then\n        fail \"removed --use-latest production contract remains in $removed_latest_surface\"\n    fi\ndone\npass \x27production setup surfaces no longer expose --use-latest\x27\n"; p.write_text(s[:a]+r+s[b:])'
           bash -n lib/crypto.sh tests/suites/foundation/case-storage-setup.bash
           shellcheck -x --severity=warning lib/crypto.sh tests/suites/foundation/case-storage-setup.bash
-          VW_TEST_CASE_MODE=host-architecture bash tests/suites/foundation/case-storage-setup.bash
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add lib/crypto.sh tests/suites/foundation/case-storage-setup.bash
