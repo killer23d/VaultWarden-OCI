@@ -169,7 +169,7 @@ jobs:
       - name: Check Noble-only production host assumptions
         run: |
           FAIL=0
-          for term in 'stat -f' 'shasum' 'dnf' 'yum'; do
+          for term in 'stat -f' 'stat -Lf' 'date -j' 'shasum' 'dnf' 'yum' 'pacman'; do
             matches=$(grep -RFn --include='*.sh' -- "$term" setup.sh startup.sh maintenance.sh backup.sh restore.sh recover.sh lib/ utilities/ 2>/dev/null || true)
             if [[ -n "$matches" ]]; then
               echo "UNSUPPORTED HOST FALLBACK FOUND: $term"
