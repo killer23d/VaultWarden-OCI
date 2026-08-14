@@ -21,8 +21,8 @@ jobs:
         run: |
           python3 .github/pr10-audit-fix.py
           git diff --check
-          bash -n lib/operations.sh lib/health-alerts.sh utilities/maintenance-health.sh utilities/restore-run.sh
-          shellcheck -x --severity=warning lib/operations.sh lib/health-alerts.sh utilities/maintenance-health.sh utilities/restore-run.sh
+          bash -n lib/backup-utils.sh utilities/smoke-test.sh utilities/maintenance-health.sh
+          shellcheck -x --severity=warning lib/backup-utils.sh utilities/smoke-test.sh utilities/maintenance-health.sh
           echo 'Remaining portability markers in production runtime:'
           grep -REn --include='*.sh' 'stat[[:space:]]+-L?f([[:space:]]|%)|shasum|(^|[[:space:]])(dnf|yum)([[:space:]]|$)|date[[:space:]]+-(j|v)' \
             setup.sh startup.sh maintenance.sh backup.sh restore.sh recover.sh lib/ utilities/ || true
@@ -31,7 +31,7 @@ jobs:
             setup.sh startup.sh maintenance.sh backup.sh restore.sh recover.sh lib/ utilities/ || true
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add lib/operations.sh lib/health-alerts.sh utilities/maintenance-health.sh utilities/restore-run.sh
+          git add lib/backup-utils.sh utilities/smoke-test.sh utilities/maintenance-health.sh
           git diff --cached --quiet && exit 0
-          git commit -m 'cleanup: finish Noble-only safety paths'
+          git commit -m 'cleanup: finish Noble-only date contract'
           git push origin HEAD:agent/pr10-platform-simplification
