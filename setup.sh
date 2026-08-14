@@ -538,14 +538,11 @@ main() {
 
     _verify_required_utilities
 
-    if [[ "$USE_LATEST" == "true" ]]; then
-        log_info "SOPS version: will resolve latest from GitHub because --use-latest was requested"
-    elif [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
+    if [[ "$SOPS_VERSION_ENV_SET" == "true" ]]; then
         log_info "SOPS version requested: ${SOPS_VERSION}"
     else
         log_info "SOPS version pinned default: ${SOPS_VERSION}"
     fi
-
 
     local _dry=() _force=() _auto=() _skip_deps=() _use_latest=()
     [[ "$DRY_RUN"   == "true" ]] && _dry=(--dry-run)
