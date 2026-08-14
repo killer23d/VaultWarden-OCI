@@ -683,10 +683,14 @@ calculate_sha256() {
     fi
 
     local checksum
-    checksum=$(sha256sum -- "$file" | cut -d' ' -f1) || return 1
+    if ! checksum=$(sha256sum -- "$file" | cut -d' ' -f1); then
+        log_error "Failed to calculate SHA256 checksum: $file"
+        return 1
+    fi
     printf '%s
 ' "$checksum"
 }
+
 verify_sha256() {
     local file="$1"
     local expected_checksum="$2"
