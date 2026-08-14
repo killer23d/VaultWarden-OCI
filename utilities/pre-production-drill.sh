@@ -307,9 +307,8 @@ drill_stack_restart_sequence() {
     fi
 
     log_info "  Checking all expected services are defined in compose file..."
-    # init-permissions has restart:"no" so it won't be running, but it must be
-    # defined. The 'docker compose config --services' output lists all defined
-    # services regardless of restart policy.
+    # init-permissions has restart:"no" and exits after fixing bind-mount ownership;
+    # it is intentionally included here to verify it completes successfully.
     local expected_services=(vaultwarden caddy postfix init-permissions)
     local defined_services
     defined_services=$(docker compose config --services 2>/dev/null || true)
