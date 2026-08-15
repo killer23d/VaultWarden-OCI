@@ -94,9 +94,11 @@ CROWDSEC_EMAIL_GROUP_WAIT=30s
 CROWDSEC_EMAIL_GROUP_THRESHOLD=10
 ```
 
-`CROWDSEC_EMAIL_EVENT_POLICY=all` preserves the normal automatic event behavior: enabling notifications installs both the email plugin and the automatic event profile. If the policy setting is absent, it defaults to `all`.
-
-Set the policy to `none` for a quiet small-team preset that keeps explicit delivery verification available without emailing each matching CrowdSec event:
+`CROWDSEC_EMAIL_EVENT_POLICY=all` preserves the original behavior: enabling
+notifications installs both the email plugin and the automatic event profile.
+If the policy setting is absent, it also defaults to `all` for compatibility.
+Set the policy to `none` for a quiet small-team preset that keeps explicit
+delivery tests available without emailing each matching CrowdSec event:
 
 ```bash
 CROWDSEC_EMAIL_NOTIFICATIONS=true
@@ -105,37 +107,35 @@ CROWDSEC_EMAIL_GROUP_WAIT=30s
 CROWDSEC_EMAIL_GROUP_THRESHOLD=10
 ```
 
-With `none`, reconciliation installs the managed plugin but removes the managed automatic profile. Manual delivery remains available through:
+With `none`, reconciliation installs the managed plugin but removes the managed
+automatic profile. `sudo ./utilities/crowdsec-email.sh test` and
+`sudo cscli notifications test vaultwarden_email` remain valid. Setting
+`CROWDSEC_EMAIL_NOTIFICATIONS=false` removes both managed components regardless
+of policy.
 
-```bash
-sudo ./utilities/crowdsec-email.sh test
-sudo cscli notifications test vaultwarden_email
-```
+The batching values apply to the plugin in either enabled policy. Group wait
+must be a positive integer followed by `s`, `m`, or `h`; group threshold must
+be a positive integer. The policy must be exactly `all` or `none`. Invalid or
+duplicate values fail before managed CrowdSec files are changed.
 
-Setting `CROWDSEC_EMAIL_NOTIFICATIONS=false` removes both managed components regardless of policy.
-
-The batching values apply to the plugin in either enabled policy. Group wait must be a positive integer followed by `s`, `m`, or `h`; group threshold must be a positive integer. The policy must be exactly `all` or `none`. Invalid or duplicate values fail before managed CrowdSec files are changed.
-
-Enable and inspect the feature through the dedicated controller:
+To enable it, edit the normal non-secret environment and run the existing
+root-operated CrowdSec reconciliation path:
 
 ```bash
 sudo ./utilities/crowdsec-email.sh enable
 sudo ./utilities/crowdsec-email.sh status
 ```
 
-The control command updates `CROWDSEC_EMAIL_NOTIFICATIONS` transactionally and delegates to the existing setup reconciliation. The full `sudo ./utilities/setup-crowdsec.sh` path remains valid for initial installation and broader CrowdSec maintenance.
+The control command updates `CROWDSEC_EMAIL_NOTIFICATIONS` transactionally and
+delegates to the existing setup reconciliation. The full
+`sudo ./utilities/setup-crowdsec.sh` path remains valid for initial installation
+and broader CrowdSec maintenance.
 
-`crowdsec-email.sh status` reports the `.env` enablement flag, event policy, and VaultWarden-OCI managed marker state. After manual operator changes, reconcile the feature and run:
-
-```bash
-sudo crowdsec -t
-```
-
-Then verify delivery:
-
-```bash
-sudo ./utilities/crowdsec-email.sh test
-```
+`crowdsec-email.sh status` reports whether the `.env` enablement flag, event
+policy, and VaultWarden-OCI managed marker files are structurally consistent.
+It recognizes the plugin-only `none` state as valid. After manual operator
+changes, reconcile the feature, run `sudo crowdsec -t`, and verify delivery with
+the explicit notification command below.
 
 The delivery route is deliberately narrow:
 
@@ -146,25 +146,47 @@ CrowdSec host service
         -> authenticated/TLS upstream SMTP relay
 ```
 
-The generated `/etc/crowdsec/notifications/vaultwarden-email.yaml` uses `SMTP_FROM` and `ADMIN_EMAIL` only as addressing values. It contains no SMTP password, upstream relay credential, or email API token. The unauthenticated, unencrypted submission hop is permitted only on the existing loopback-only Postfix publication; do not expose port 587 on a public interface.
+The generated `/etc/crowdsec/notifications/vaultwarden-email.yaml` uses
+`SMTP_FROM` and `ADMIN_EMAIL` only as addressing values. It contains no SMTP
+password, upstream relay credential, or email API token. The unauthenticated,
+unencrypted submission hop is permitted only on the existing loopback-only
+Postfix publication; do not expose port 587 on a public interface.
 
-Before enabling, reconciliation fails closed unless the domain in `SMTP_FROM` exactly matches one space-separated entry in `ALLOWED_SENDER_DOMAINS`. It also refuses a second notification YAML with `name: vaultwarden_email` or an unmanaged CrowdSec profile that already references that notification name. These checks avoid Postfix sender rejection, CrowdSec's duplicate-name overwrite behavior, and duplicate event delivery.
+Before enabling, reconciliation now fails closed unless the domain in
+`SMTP_FROM` exactly matches one space-separated entry in
+`ALLOWED_SENDER_DOMAINS`. It also refuses a second notification YAML with
+`name: vaultwarden_email` or an unmanaged CrowdSec profile that already
+references that notification name. These checks avoid Postfix sender rejection,
+CrowdSec's duplicate-name overwrite behavior, and duplicate event delivery.
 
-The project-owned notification file is installed as `root:root` mode `0640`. Operator-owned metadata on `profiles.yaml.local` is preserved. The email body is minimal HTML because CrowdSec 1.7.8 sends notification content as `text/html`; dynamic alert fields are escaped and wrapped in a preformatted block.
+The project-owned notification file is installed as `root:root` mode `0640`.
+Operator-owned metadata on `profiles.yaml.local` is preserved. The email body is
+minimal HTML because CrowdSec 1.7.8 sends notification content as `text/html`;
+dynamic alert fields are escaped and wrapped in a preformatted block.
 
-Setup writes only the marked plugin file and, for the `all` policy, the marked VaultWarden-OCI block in `/etc/crowdsec/profiles.yaml.local`. Operator content outside that block is retained. The `none` policy removes only the managed block. Static configuration validation uses:
+Setup writes only the marked plugin file and, for the `all` policy, the marked
+VaultWarden-OCI block in `/etc/crowdsec/profiles.yaml.local`. Operator content
+outside that block is retained. The `none` policy removes only the managed
+block. Static configuration validation uses the
+CrowdSec 1.7-supported command before the service restart:
 
 ```bash
 sudo crowdsec -t
 ```
 
-After the application stack is up, verify security-event delivery with:
+After the application stack is up, send an explicit notification:
+
+```bash
+sudo cscli notifications test vaultwarden_email
+```
+
+The equivalent control command is:
 
 ```bash
 sudo ./utilities/crowdsec-email.sh test
 ```
 
-Confirm the message arrives. If it does not, inspect:
+After dispatch, confirm receipt. If the message does not arrive, inspect:
 
 ```bash
 sudo cscli notifications inspect vaultwarden_email
@@ -173,19 +195,33 @@ sudo docker compose logs --tail=100 postfix
 sudo make health
 ```
 
-Health reports disabled, policy-disabled, missing-plugin, missing-profile, invalid, configured, and statically valid states separately. Disabled notifications and a valid `none` policy are healthy states and do not generate a warning.
+Health reports disabled, policy-disabled, missing-plugin, missing-profile,
+invalid, configured, and statically valid states separately. Disabled
+notifications and a valid `none` policy are healthy states and do not generate
+a warning.
 
-To disable the feature:
+To disable the feature, set the option back to `false` and reconcile again:
 
 ```bash
 sudo ./utilities/crowdsec-email.sh disable
 ```
 
-Only marked VaultWarden-OCI content is removed. An unmarked file at the managed plugin path is treated as an operator conflict and is neither overwritten nor deleted.
+Only marked VaultWarden-OCI content is removed. An unmarked file at the managed
+plugin path is treated as an operator conflict and is neither overwritten nor
+deleted.
 
-Postfix's queue remains intentionally transient in the default Compose profile. Mail accepted shortly before a Postfix container recreation can be lost. This is a documented small-team tradeoff rather than a durable security-event queue; do not use email as the only alerting or incident-response signal.
+Postfix's queue remains intentionally transient in the default Compose profile.
+Mail accepted shortly before a Postfix container recreation can be lost. This is
+a documented small-team tradeoff rather than a durable security-event queue; do
+not use email as the only alerting or incident-response signal.
 
-`CROWDSEC_EMAIL_EVENT_POLICY=all` sends the configured automatic CrowdSec event notifications. `CROWDSEC_EMAIL_EVENT_POLICY=none` disables those automatic event notifications while keeping manual delivery verification and operational health checks available. `none` is a reasonable small-team choice when routine messages for events that CrowdSec has already remediated are not useful.
+`CROWDSEC_EMAIL_EVENT_POLICY=all` sends the configured automatic CrowdSec event
+notifications. `CROWDSEC_EMAIL_EVENT_POLICY=none` disables those automatic event
+notifications without removing manual delivery tests or operational health
+checks. `none` is a reasonable small-team choice when routine messages for events
+that CrowdSec has already remediated are not useful. Health monitoring remains an
+operational check; it does not promise to identify every security event that may
+need operator action.
 
 ## Secret source
 
