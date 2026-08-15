@@ -1,7 +1,8 @@
 # Secure credential and recovery handoffs
 
+This guide explains how VaultWarden-OCI hands generated credentials and recovery material to the operator without printing sensitive values into normal terminal output.
 
-This document defines the bounded production-readiness remediation for credential output, recovery exports, backups, runtime log permissions, and email mode validation.
+Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md) · [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [EMAIL.md](EMAIL.md)
 
 ## Setup credentials
 
@@ -22,7 +23,7 @@ The directory is `root:root` mode `0700`; the file is `root:root` mode `0600`. P
 
 After successful publication, the command displays the protected path, the credential group names, the ownership and permission contract, and a statement that no credential values were printed. Automatic configuration fails if the handoff cannot be published; it does not print a completion summary after publication failure.
 
-The remediation intentionally does **not** label `file_integrity_hmac_key` as a backup passphrase. The audited branch has no canonical backup-passphrase generator/consumer contract. Adding a fourth credential requires a separate design that defines where it is generated, stored, consumed by backup/restore, rotated, and tested.
+`file_integrity_hmac_key` is backup-integrity material, not a backup passphrase, and is managed through the secret schema and recovery-kit workflow rather than the setup-credential handoff.
 
 After storing the handoff offline, remove it explicitly:
 
@@ -30,13 +31,19 @@ After storing the handoff offline, remove it explicitly:
 sudo rm -f /root/vaultwarden-recovery/vaultwarden-setup-credentials-<UTC_TIMESTAMP>.txt
 ```
 
-Required UFW failure, automatic secrets failure, or protected-handoff failure now makes setup fail rather than print a successful completion.
+Required UFW failure, automatic secrets failure, or protected-handoff failure makes setup fail rather than print a successful completion.
 
-Age-key rotation and restore completion output now identify only the protected handoff/public status; the private identity is never repeated in terminal output.
+Age-key rotation and restore completion output identify only the protected handoff/public status; the private identity is never repeated in terminal output.
 
 ## Full recovery kit
 
-The full recovery kit remains a later, separate operation:
+The full recovery kit is a later, separate operation:
+
+```bash
+sudo ./utilities/secrets-export-recovery-kit.sh
+```
+
+The equivalent dispatcher form is:
 
 ```bash
 sudo ./edit-secrets.sh export-recovery-kit
@@ -67,12 +74,16 @@ sudo apt-get install -y 7zip
 
 ## Full backup and runtime contracts
 
-Normal `full` backups explicitly exclude current and legacy setup/recovery documents, staging names, and emailed ZIPs, then reject any such member discovered in the final archive listing. Emergency backup key-bearing behavior remains separate.
+Normal `full` backups explicitly exclude setup/recovery documents, staging names, and emailed ZIPs, then reject any such member discovered in the final archive listing. Emergency backup key-bearing behavior remains separate and is documented in [BACKUP-RESTORE.md](BACKUP-RESTORE.md).
 
 Startup enforces log directories as `0750`, regular log files as `0640`, and canonical numeric `PUID:PGID` ownership. Permission failures are fatal; dry-run does not mutate files.
 
-`EMAIL_MODE=direct` is canonical. `smtp` and `direct` require the runtime `smtp_password` secret.
+Normal production email uses `EMAIL_MODE=smtp`: operational mail submits to the Postfix sidecar first and uses direct authenticated SMTP as the fallback path. `EMAIL_MODE=direct` remains an explicit direct-SMTP option. The runtime stack requires the SOPS-managed `smtp_password` secret; see [EMAIL.md](EMAIL.md).
 
 ## Backup protection terminology
 
-Normal `db`, `full`, and `emergency` backups remain encrypted by the operational Age identity. `file_integrity_hmac_key` authenticates checksum sidecars and is not a password or backup passphrase. The active schema has no `backup_passphrase` secret or backup/restore consumer. The emailed recovery-kit ZIP uses a separate, ephemeral attachment passphrase that is never stored in project secrets.
+Normal `db` and `full` backups are Age-encrypted under the project backup-recipient model. `file_integrity_hmac_key` authenticates checksum sidecars and is not a password or backup passphrase. There is no `backup_passphrase` secret in the active schema.
+
+Emergency backups are different: because they may contain operational key/config material, they are independently sealed with an emergency passphrase or `EMERGENCY_BACKUP_AGE_RECIPIENT`.
+
+The emailed recovery-kit ZIP uses a separate, ephemeral attachment passphrase that is never stored in project secrets.
