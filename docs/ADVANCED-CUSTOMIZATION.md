@@ -152,7 +152,7 @@ sudo make health
 sudo ./utilities/smoke-test.sh
 ```
 
-For architecture-sensitive module changes, verify the pinned build chain on both amd64 and arm64. A multi-architecture Caddy base image does not prove every pinned xcaddy module builds on both supported architectures.
+For architecture-sensitive module changes, verify the pinned build chain on both amd64 and arm64.
 
 ### Caddy configuration files
 
@@ -476,7 +476,7 @@ Host setup owns pinned/default versions for architecture-sensitive downloaded to
 The current setup-system defaults include:
 
 ```text
-SOPS v3.13.2
+SOPS v3.13.3
 yq v4.53.3
 ```
 
@@ -589,5 +589,3 @@ docker compose \
   -f docker-compose.override.dev.yml.example \
   config --quiet
 ```
-
-For destructive storage/systemd/recovery behavior, a real Noble production-host acceptance test may be required. Do not claim that macOS parser tests or repository CI prove Linux `/proc`, `flock`, systemd, apt/dpkg, iptables, or block-device behavior.
