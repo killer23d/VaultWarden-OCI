@@ -488,9 +488,9 @@ sudo make restart
 sudo make health
 ```
 
-Repository `.env` is the operator-editable source. Persistent `install.env` and `/etc/vaultwarden/vaultwarden.env` are managed runtime copies and should not be hand-edited as the normal configuration workflow.
+Repository `.env` is the operator-editable authoring source. Persistent `install.env` and `/etc/vaultwarden/vaultwarden.env` are managed runtime copies and should not be hand-edited as the normal configuration workflow.
 
-Runtime environment loading prefers installed `/etc/vaultwarden/vaultwarden.env`, then persistent `install.env`, then repository `.env` as bootstrap/legacy fallback.
+Runtime environment loading uses `/etc/vaultwarden/vaultwarden.env` when it exists; otherwise it uses `${PROJECT_STATE_DIR}/config/install.env`. Repository `.env` is never a production runtime fallback. A missing, unreadable, or malformed selected runtime authority fails explicitly and should be repaired through the supported sync/recovery workflow. See [CONFIGURATION.md](CONFIGURATION.md#environment-precedence).
 
 ---
 
@@ -569,8 +569,9 @@ held following failure. Snapshot purge applies the same identity principle to
 its captured set with bounded inventories. Metadata comparison is defence in
 depth, not a replacement for long queue IDs. Equivalent duplicate
 `postqueue -j` records are counted once, while conflicting identities for one
+queue ID fail closed before mutation.
 
-Normal production mail is Postfix-first. Vaultwarden talks to the internal Postfix sidecar; Postfix owns upstream SMTP TLS/authentication/queueing. A successful queue retry or an empty queue does not prove final recipient delivery.
+Normal production mail is Postfix-first. Vaultwarden talks to the internal Postfix sidecar; Postfix owns upstream SMTP TLS/authentication/queueing. Confirm final recipient delivery through Postfix/upstream-provider evidence when a message matters.
 
 Optional HTTP API email providers apply to the operational script alert path. Keep SMTP/Postfix configured for Vaultwarden mail and attachment-based recovery-kit delivery.
 
@@ -626,13 +627,12 @@ sudo ./utilities/crowdsec-email.sh disable
 `enable` and `disable` update `CROWDSEC_EMAIL_NOTIFICATIONS` transactionally and
 delegate to the established CrowdSec reconciliation path. `status` checks the
 environment flag, `CROWDSEC_EMAIL_EVENT_POLICY`, and managed markers. The
-`none` policy keeps the plugin available for `test` while omitting automatic
-event delivery; `all` is the default. `test` confirms plugin dispatch through
-the loopback Postfix route but does not prove mailbox receipt.
+`none` policy keeps manual delivery verification available while omitting automatic
+event delivery; `all` is the default. After `test`, confirm the message arrives
+through the configured Postfix relay and use [EMAIL.md](EMAIL.md) if delivery needs troubleshooting.
 
 This is separate from health-check incident mail and generic systemd
-unit-failure mail. Normal CrowdSec setup performs static validation but no live
-email test.
+unit-failure mail.
 
 See [CROWDSEC.md](CROWDSEC.md).
 
@@ -751,4 +751,4 @@ sudo ./backup.sh verify
 sudo ./utilities/secrets-export-recovery-kit.sh
 ```
 
-The final production-ready decision should reflect live host behavior, installed automation consistency, backup/recovery evidence, and current operator access—not merely a green repository CI result.
+The final production-ready decision should reflect live host behavior, installed automation consistency, backup/recovery evidence, and current operator access.
