@@ -84,7 +84,7 @@ When backup metadata records an exact Git SHA needed by the recovery procedure, 
 git checkout <recorded-git-sha>
 ```
 
-Do not assume `delta`, `main`, or another moving branch is equivalent to the code that created the retained recovery material.
+Do not assume a moving branch is equivalent to the exact code that created the retained recovery material.
 
 ### 3. Prepare host dependencies
 
@@ -202,18 +202,18 @@ Before changing production DNS/proxy routing:
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/alive" \
   -o /dev/null \
   -w "local HTTPS /alive: HTTP %{http_code}\n"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/api/config" \
   -o /dev/null \
   -w "local HTTPS /api/config: HTTP %{http_code}\n"
 ```
 
-Expected healthy origin endpoints return HTTP `200`.
+Expected healthy origin endpoints return HTTP `200` with normal certificate and hostname verification.
 
 ### 10. Activate and validate systemd automation
 
