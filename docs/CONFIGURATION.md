@@ -177,19 +177,18 @@ For moving existing production state, use [VOLUME-MIGRATION.md](VOLUME-MIGRATION
 The authoritative defaults are in `.env.example`. Current repository pins are:
 
 ```bash
-VAULTWARDEN_VERSION=1.36.0
+VAULTWARDEN_VERSION=1.37.1
 CADDY_VERSION=2.11.4
 POSTFIX_VERSION=5.1.0
-BUSYBOX_VERSION=1.36.1
 
 CROWDSEC_VERSION=1.7.8
 CF_WORKER_BOUNCER_VERSION=v0.0.18
-FIREWALL_BOUNCER_VERSION=0.0.34
+FIREWALL_BOUNCER_VERSION=0.0.36
 ```
 
-Host setup also owns pinned/default tool contracts for SOPS and Mike Farah `yq`.
+Host setup also owns pinned/default tool contracts for SOPS `v3.13.3` and Mike Farah `yq` `v4.53.3`.
 
-Keep production pins explicit. Use repository upgrade procedures and validation rather than changing production images to mutable `latest` tags.
+Normal production uses the repository's exact pins. If you intentionally want mutable upstream versions, use the documented `setup.sh install --use-latest` override rather than hand-editing image tags. That advanced opt-in keeps supported image/CrowdSec fields mutable until they are re-pinned; Caddy and yq remain exact-pinned. See [DEPLOYMENT.md](DEPLOYMENT.md#optional-mutable-version-override).
 
 ---
 
@@ -304,7 +303,7 @@ sudo ./utilities/crowdsec-email.sh test
 sudo ./utilities/crowdsec-email.sh disable
 ```
 
-`enable` and `disable` update the option transactionally and delegate to the established CrowdSec reconciliation path. After changing `ADMIN_EMAIL`, `SMTP_FROM`, or `ALLOWED_SENDER_DOMAINS`, rerun `enable` to regenerate and validate the managed configuration. `status` checks the environment flag and managed markers; `test` confirms plugin dispatch but not mailbox receipt. The broader `sudo ./utilities/setup-crowdsec.sh` path remains valid for initial installation and general CrowdSec maintenance.
+`enable` and `disable` update the option transactionally and delegate to the established CrowdSec reconciliation path. After changing `ADMIN_EMAIL`, `SMTP_FROM`, or `ALLOWED_SENDER_DOMAINS`, rerun `enable` to regenerate and validate the managed configuration. Use `status` to inspect the configured state, then run `test` and confirm delivery through the configured mail path. See [EMAIL.md](EMAIL.md) for delivery checks and troubleshooting. The broader `sudo ./utilities/setup-crowdsec.sh` path remains valid for initial installation and general CrowdSec maintenance.
 
 Optional API-first operational alert mode:
 
