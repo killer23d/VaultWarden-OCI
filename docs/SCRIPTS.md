@@ -213,7 +213,7 @@ utilities/env-edit.sh status
 
 `sync` writes the current accepted operator environment into persistent runtime configuration. `setup-systemd.sh install` installs the current accepted environment into `/etc/vaultwarden/vaultwarden.env` for managed automation.
 
-Runtime environment loading prefers the installed environment when present, then persistent `install.env`, then repository `.env` as bootstrap/legacy fallback.
+Runtime environment loading uses `/etc/vaultwarden/vaultwarden.env` when it exists; otherwise it uses `${PROJECT_STATE_DIR}/config/install.env`. Repository `.env` is authoring input only and is never a production runtime fallback. See [CONFIGURATION.md](CONFIGURATION.md#environment-precedence) for the full state-directory and failure contract.
 
 ## Storage utility
 
@@ -288,8 +288,7 @@ The DB backup, full backup, and routine maintenance services use soft process/I/
 
 Owns CrowdSec, the host firewall bouncer, the Cloudflare Workers bouncer, and
 the opt-in marked CrowdSec email-plugin/profile reconciliation path. The email
-plugin uses the existing host-loopback Postfix relay and performs static
-CrowdSec validation without making live mail delivery part of normal setup.
+plugin uses the existing host-loopback Postfix relay. After setup, use the dedicated email controller below when you want to verify security-event delivery.
 
 ### `utilities/crowdsec-email.sh`
 
@@ -302,7 +301,7 @@ sudo ./utilities/crowdsec-email.sh test
 sudo ./utilities/crowdsec-email.sh disable
 ```
 
-`enable` and `disable` update the non-secret environment transactionally and delegate to the established CrowdSec reconciliation path. `status` checks the enablement flag and VaultWarden-OCI managed markers; `test` dispatches through the installed plugin but does not prove mailbox receipt.
+`enable` and `disable` update the non-secret environment transactionally and delegate to the established CrowdSec reconciliation path. `status` checks the enablement flag and VaultWarden-OCI managed markers; after `test`, confirm the message arrives through the configured Postfix relay and use [EMAIL.md](EMAIL.md) for delivery troubleshooting.
 
 ### `utilities/crowdsec-worker-apply.sh`
 
