@@ -57,7 +57,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
-- Refreshed user-facing documentation to remove stale `delta`-branch guidance, repository `.env` runtime fallback language, the removed email-provider alias, obsolete GnuPG recovery-kit packaging text, and insecure `curl -k` recovery examples. Recovery-kit email is documented consistently as AES-256 ZIP delivery through the SMTP path.
+- Refreshed user-facing documentation to remove stale pre-merge branch guidance, repository `.env` runtime fallback language, the removed email-provider alias, obsolete GnuPG recovery-kit packaging text, and insecure `curl -k` recovery examples. Recovery-kit email is documented consistently as AES-256 ZIP delivery through the SMTP path.
 - Corrected the systemd health contract: the five-minute service runs `health --quick --fix`, treats only `0`, `1`, and `75` as successful, and reports exits `2`, `3`, and `4` as real failures. Exit `3` is a critical prerequisite/execution failure, not a new-install success state.
 - Routine maintenance now treats health status `1` as successful completion with warnings and `75` as a visible successful skip while preserving genuine health failures as maintenance failures.
 - Fixed operation-lock lifetime so one owner-bound holder owns the global and operation-specific descriptors and releases both when the guarded shell exits, even if an arbitrary workload child remains alive.
