@@ -112,17 +112,17 @@ Symptoms:
 - local HTTPS to the origin fails;
 - Caddy logs mention permission failures for `/data`, `/config`, `/var/log/caddy`, certificate keys, storage locks, or autosave.
 
-Diagnosis:
+Diagnosis with normal certificate and hostname verification:
 
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/alive" \
   -o /dev/null \
   -w "local HTTPS /alive: HTTP %{http_code}\n"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/api/config" \
   -o /dev/null \
   -w "local HTTPS /api/config: HTTP %{http_code}\n"
@@ -421,8 +421,7 @@ sudo make email-queue-logs EMAIL_QUEUE_TAIL=120
 For one current message, copy its case-sensitive queue ID from the listing and
 run `sudo make email-queue-inspect QUEUE_ID=AbC-123`. Message bodies are omitted
 by default; use `EMAIL_QUEUE_BODY=true` only when the sensitive content is
-needed for diagnosis. An empty queue is not proof of successful recipient
-delivery, so correlate the queue state with Postfix and upstream relay evidence.
+needed for diagnosis. Confirm final recipient delivery using Postfix and upstream relay evidence.
 
 If targeted deletion or snapshot purge reports that long queue IDs cannot be
 verified, set `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run
@@ -678,4 +677,4 @@ Never include:
 - backup emergency passphrases;
 - plaintext password-manager exports.
 
-When reporting a repository defect, include the exact branch/commit, failing command, exit code, concise relevant logs, and whether the failure occurred on a real Noble amd64/arm64 host or only in a mocked/local environment.
+When reporting a repository defect, include the exact commit, failing command, exit code, concise relevant logs, and supported-host details needed to reproduce the problem.
