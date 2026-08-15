@@ -100,7 +100,7 @@ Postfix provides queueing/retry behavior for the normal appliance mail path.
 - Keep `ALLOWED_SENDER_DOMAINS` narrow; do not use `*` as a convenience default.
 - Do not expose the Postfix service publicly. It is an internal relay to the configured upstream provider.
 - Restrict Docker control/socket access to trusted administrators. A user who can control Docker can inspect container state and therefore must be treated as highly privileged.
-- Preserve the capabilities in the current `docker-compose.yml.example` unless a tested image/runtime change proves a smaller set works. Mail spool/ownership operations depend on the current container contract.
+- Preserve the capabilities in the current `docker-compose.yml.example` unless a verified image/runtime change proves a smaller set works. Mail spool/ownership operations depend on the current container contract.
 - Keep upstream relay authentication in SOPS-backed `smtp_password`, not repository configuration.
 
 ### Safe Postfix queue operations
@@ -242,9 +242,8 @@ Within the utility's host lock, Postfix hold prevents normal delivery from
 reopening the verified-ID window for targeted deletion and snapshot purge.
 Direct `postsuper`, `postqueue`, or other administrative actions that bypass the
 utility are outside that lock and must not run concurrently with destructive
-queue work. An empty queue does not by itself prove the mail path is healthy.
-Postfix acceptance or a requested retry also does not prove final recipient
-delivery; use the logs and the upstream provider's delivery evidence.
+queue work. Confirm final recipient delivery using the Postfix logs and the upstream provider's delivery evidence when a message matters.
+
 ## Operational alert routing
 
 Repository operational email uses `lib/email.sh`.
@@ -321,7 +320,6 @@ sendgrid
 mailgun
 postmark
 resend
-cyberpersons
 ```
 
 Provider plans, trial allowances, and commercial quotas change independently of this repository. Check the selected provider's current account terms instead of relying on a copied free-tier table in project documentation.
@@ -360,7 +358,7 @@ When `MAILGUN_DOMAIN` is blank, the driver derives the sending domain from `SMTP
 
 Messages with attachments bypass the HTTP API provider path and use the SMTP fallback chain.
 
-The recovery-kit export workflow may offer attachment delivery through this SMTP path. The current recovery-kit email packaging uses an independently passphrase-protected GnuPG attachment created by the recovery-kit workflow.
+The recovery-kit export workflow may offer attachment delivery through this SMTP path. The attachment is an independently passphrase-protected AES-256 ZIP created with the Ubuntu `7zip` package and contains the recovery-kit text file.
 
 That attachment passphrase is separate from:
 
@@ -372,7 +370,7 @@ That attachment passphrase is separate from:
 
 Treat a recovery-kit attachment as extremely sensitive even while encrypted. Store the received material in the intended password manager/offline recovery location and remove temporary decrypted copies from the trusted workstation after verification.
 
-Do not redesign attachment delivery around a provider API driver unless the repository implements and tests attachment support for that driver. The current generic API email route is text-message oriented.
+Attachment delivery uses the SMTP path. The generic API email route remains text-message oriented.
 
 ## Secret ownership
 
@@ -394,7 +392,7 @@ sudo ./edit-secrets.sh rotate email_api_token
 
 Do not maintain provider-specific plaintext API token variables in `.env` for the normal project secret lifecycle.
 
-## Testing the email path
+## Verifying the email path
 
 The default diagnostic exercises the configured production routing policy:
 
@@ -403,8 +401,8 @@ sudo make test-email
 sudo make test-email EMAIL_TEST_TRANSPORT=configured
 ```
 
-Exact transport diagnostics bypass production fallback and test each transport
-directly. `all` tests the API provider, Postfix sidecar, and direct upstream
+Exact transport diagnostics bypass production fallback and exercise each transport
+directly. `all` exercises the API provider, Postfix sidecar, and direct upstream
 SMTP independently, and can therefore send three messages:
 
 ```bash
@@ -429,9 +427,7 @@ sudo ./maintenance.sh test-email \
 back to another transport. Their preflight checks are scoped to the requested
 transport, while CrowdSec status is supplemental information only.
 
-A successful sidecar test proves that Postfix accepted the message. It does not
-independently prove final delivery by the upstream relay or recipient. Check the
-Postfix logs and queue when diagnosing relay delivery:
+After a sidecar diagnostic is accepted by Postfix, confirm final delivery through the recipient/upstream provider and use the local queue/logs when troubleshooting:
 
 ```bash
 docker compose logs postfix --tail=100
@@ -538,7 +534,6 @@ Git updates the checkout; systemd failure notifications use the managed installe
 - Treat recovery-kit attachment delivery as a high-sensitivity path and use the independent attachment passphrase according to the recovery-kit workflow.
 
 ## Recovery-kit attachment
-
 
 `EMAIL_MODE=direct` is the supported direct-SMTP mode and requires the runtime `smtp_password` secret.
 
