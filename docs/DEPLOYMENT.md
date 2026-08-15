@@ -101,7 +101,7 @@ Configure CrowdSec enforcement after those Cloudflare secrets are available:
 sudo ./utilities/setup-crowdsec.sh
 ```
 
-With `CLOUDFLARE_PROXY_ENABLED=true`, the daemon-backed Cloudflare Workers bouncer is part of normal production readiness. Proxy-disabled and autonomous modes remain explicit advanced alternatives; smoke/health do not label them as the normal production-ready path.
+With `CLOUDFLARE_PROXY_ENABLED=true`, the daemon-backed Cloudflare Workers bouncer is part of the normal production path. Proxy-disabled and autonomous modes remain explicit advanced alternatives outside the normal production path.
 
 `cloudflare_zone_id` is a SOPS secret. Do not create a second `CLOUDFLARE_ZONE_ID` `.env` source for the normal deployment path.
 
