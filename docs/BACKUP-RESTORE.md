@@ -182,7 +182,7 @@ Current full/emergency archives require metadata `version=2` and `archive_format
 
 Full/emergency restore extracts portable archive content without trusting stale owners/modes and then applies the target-host permission contract. See [RESTORE-RUNTIME-PERMISSIONS.md](RESTORE-RUNTIME-PERMISSIONS.md).
 
-Automated shell tests cover workspace placement and permissions, local/remote DB and full payload paths, emergency decrypt dispatch, initial and post-snapshot pre-stop capacity failure, exact cleanup and signal status, promotion allowlists, rollback, rekey, and start policy. Actual mount/device identity, filesystem free-space behavior under load, systemd service transitions, and end-to-end interruption on Ubuntu 24.04 remain host-only validation; container or mocked results do not replace a disposable-host restore rehearsal.
+For operator recovery practice, use the replacement-host rehearsal in [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md#dr-rehearsal). Keep destructive rehearsal away from the only live production state.
 
 ---
 
@@ -377,12 +377,12 @@ For local Caddy/TLS symptoms:
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/alive" \
   -o /dev/null \
   -w "local HTTPS /alive: HTTP %{http_code}\n"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/api/config" \
   -o /dev/null \
   -w "local HTTPS /api/config: HTTP %{http_code}\n"
@@ -422,7 +422,6 @@ See [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md).
 - Before go-live or after major DR: `systemd validate` and smoke test pass without required checks skipped.
 
 ## Recovery artifacts and full-backup isolation
-
 
 Setup credential handoffs and full recovery-kit documents live under `/root/vaultwarden-recovery/`, outside the project and normal state backup inputs. As defence in depth, one exclusion producer supplies both tar and `sudo make backup-manifest`. The manifest target executes the normal `backup.sh manifest` command, loads canonical installed configuration, and fails rather than printing default paths when that configuration cannot be read. The exclusions include configured backup/staging paths, live DB/WAL/SHM, runtime decrypted secrets, operational private keys inside archive source roots, restore scratch state, current and legacy recovery-kit names, setup-credential names, and `important-documents-*.zip`. The final archive-listing validator rejects forbidden recovery artifacts that still appear. The emergency tier keeps its separately documented key-bearing contract.
 
