@@ -27,6 +27,9 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- Current production defaults pin Vaultwarden `1.37.1`, Caddy `2.11.4`, Postfix `5.1.0`, CrowdSec `1.7.8`, Cloudflare Workers bouncer `v0.0.18`, and firewall bouncer `0.0.36`; host-tool defaults use SOPS `v3.13.3` and Mike Farah `yq` `v4.53.3`. The unused BusyBox production version surface was removed.
+- Normal production setup remains source-pinned and reproducible. The explicit `--use-latest` option is retained as an advanced operator opt-in for supported mutable image/CrowdSec fields; Caddy and yq remain exact-pinned.
+- Operator documentation now follows the post-merge `main` workflow, keeps first-install/CrowdSec/startup/systemd steps in one logical sequence, and uses the runbook as the junior-administrator day-to-day quick reference.
 - Scheduled daily maintenance now runs the routine path with email reporting; DNS and firewall reconciliation remain owned by their dedicated timers. Routine SQLite work stays online with `PRAGMA optimize` and passive WAL checkpointing, while the separate deep database-maintenance workflow owns backup, integrity checks, service stop/start, and `VACUUM`.
 - Backup retention now uses one precedence chain: explicit nonempty `--keep`, matching `BACKUP_RETENTION_*_DAYS`, shared `BACKUP_RETENTION_DAYS`, then the per-tier fallback. A missing remote tier may be empty, but an actual remote listing failure skips pruning for that tier and makes a requested rotate/prune operation fail.
 - Ordinary database/full backup payloads now stage on the configured backup filesystem with small control material isolated separately; emergency plaintext remains on verified, capacity-checked tmpfs. Full verification streams decryption into archive inspection instead of creating another plaintext full archive.
@@ -54,6 +57,7 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- Refreshed user-facing documentation to remove stale `delta`-branch guidance, repository `.env` runtime fallback language, the removed email-provider alias, obsolete GnuPG recovery-kit packaging text, and insecure `curl -k` recovery examples. Recovery-kit email is documented consistently as AES-256 ZIP delivery through the SMTP path.
 - Corrected the systemd health contract: the five-minute service runs `health --quick --fix`, treats only `0`, `1`, and `75` as successful, and reports exits `2`, `3`, and `4` as real failures. Exit `3` is a critical prerequisite/execution failure, not a new-install success state.
 - Routine maintenance now treats health status `1` as successful completion with warnings and `75` as a visible successful skip while preserving genuine health failures as maintenance failures.
 - Fixed operation-lock lifetime so one owner-bound holder owns the global and operation-specific descriptors and releases both when the guarded shell exits, even if an arbitrary workload child remains alive.
