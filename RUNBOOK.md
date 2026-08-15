@@ -4,6 +4,8 @@ Quick reference for common production operations. Commands assume you are in the
 
 The normal production lifecycle is root-operated. Use the `sudo` forms shown here.
 
+For a first installation with explanations and prerequisites, use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Use this runbook as the day-to-day command reference after setup.
+
 ---
 
 ## First-Time Deployment
@@ -29,7 +31,13 @@ The normal production lifecycle is root-operated. Use the `sudo` forms shown her
    sudo ./edit-secrets.sh rotate smtp_password
    ```
 
-4. Start and verify the live stack:
+4. Configure the normal CrowdSec enforcement path after the Cloudflare secrets are available:
+
+   ```bash
+   sudo ./utilities/setup-crowdsec.sh
+   ```
+
+5. Start and verify the live stack:
 
    ```bash
    sudo make up
@@ -37,7 +45,7 @@ The normal production lifecycle is root-operated. Use the `sudo` forms shown her
    sudo ./maintenance.sh test-email --verbose
    ```
 
-5. When the host is ready for scheduled work, activate and validate systemd automation:
+6. When the host is ready for scheduled work, activate and validate systemd automation:
 
    ```bash
    sudo ./setup.sh systemd install --enable-now
@@ -45,13 +53,13 @@ The normal production lifecycle is root-operated. Use the `sudo` forms shown her
    sudo ./utilities/smoke-test.sh
    ```
 
-6. Export recovery material:
+7. Export recovery material:
 
    ```bash
    sudo ./utilities/secrets-export-recovery-kit.sh
    ```
 
-7. After the CrowdSec Workers bouncer has deployed its route, set the Cloudflare Worker route request-limit failure mode to **Fail open** as described in [docs/CROWDSEC.md](docs/CROWDSEC.md).
+8. After the CrowdSec Workers bouncer has deployed its route, set the Cloudflare Worker route request-limit failure mode to **Fail open** as described in [docs/CROWDSEC.md](docs/CROWDSEC.md).
 
 A Docker-group re-login is not part of the production golden path. The production lifecycle uses root-operated commands.
 
@@ -298,10 +306,10 @@ CrowdSec runs as a host service. The firewall bouncer enforces CrowdSec decision
 | Security report | `sudo make security-report` |
 | Enable security-event email | `sudo ./utilities/crowdsec-email.sh enable` |
 | Inspect email integration | `sudo ./utilities/crowdsec-email.sh status` |
-| Test email plugin dispatch | `sudo ./utilities/crowdsec-email.sh test` |
+| Verify email delivery | `sudo ./utilities/crowdsec-email.sh test` |
 | Disable security-event email | `sudo ./utilities/crowdsec-email.sh disable` |
 
-The optional security-event email controller updates the environment and managed CrowdSec configuration through the established reconciliation path. Its test confirms plugin dispatch; confirm mailbox receipt separately.
+The optional security-event email controller updates the environment and managed CrowdSec configuration through the established reconciliation path. After enabling it, run the delivery test and confirm the message arrives through the configured Postfix relay. See [docs/EMAIL.md](docs/EMAIL.md) if delivery needs troubleshooting.
 
 To remove a ban:
 
@@ -353,7 +361,7 @@ sudo make uninstall-dry-run
 sudo ./utilities/uninstall-vaultwarden.sh run --test-reset --dry-run
 ```
 
-For repeated acceptance testing on the same VM while preserving the Git checkout:
+For repeated acceptance runs on the same VM while preserving the Git checkout:
 
 ```bash
 sudo ./utilities/uninstall-vaultwarden.sh run \
@@ -370,7 +378,7 @@ sudo ./utilities/uninstall-vaultwarden.sh run \
   --i-have-saved-my-recovery-kit
 ```
 
-Use `--force` only for deliberately disposable test state after recovery material has been verified outside the host.
+Use `--force` only for deliberately disposable state after recovery material has been verified outside the host.
 
 ---
 
