@@ -53,12 +53,12 @@ Examples:
 curl -fsS https://vault.example.com/alive
 ```
 
-Local origin check with SNI:
+Local origin check with SNI and normal certificate verification:
 
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/alive"
 ```
 
@@ -76,10 +76,10 @@ Repository operators should rely on the currently deployed Vaultwarden version a
 
 The repository intentionally does not maintain a hand-copied endpoint catalog because that would become a second, stale Vaultwarden API reference.
 
-Current application image pin is owned by `.env.example`, for example:
+Current application image pin is owned by `.env.example`:
 
 ```bash
-VAULTWARDEN_VERSION=1.36.0
+VAULTWARDEN_VERSION=1.37.1
 ```
 
 When changing the pin, validate the supported clients/integrations against the new deployed Vaultwarden version.
@@ -93,7 +93,7 @@ Example local origin check:
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/api/config" \
   -o /dev/null \
   -w "HTTP %{http_code}\n"
@@ -293,15 +293,15 @@ docker compose logs vaultwarden --tail=120
 Probe the canonical readiness endpoint:
 
 ```bash
-curl -vk https://vault.example.com/alive
+curl -fsS https://vault.example.com/alive
 ```
 
-Probe local origin routing:
+Probe local origin routing with normal certificate verification:
 
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" \
   "https://$DOMAIN/alive"
 ```
 
