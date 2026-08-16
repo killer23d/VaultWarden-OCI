@@ -66,15 +66,15 @@ If Caddy storage is restored as `root:root` or with overly restrictive modes, th
 - Local SNI HTTPS probe to `127.0.0.1` fails or returns HTTP `000`.
 - Caddy logs mention permission errors for `/data/caddy`, `/config/caddy`, `/var/log/caddy`, certificate keys, autosave, or storage locks.
 
-Quick validation:
+Quick validation with normal certificate and hostname verification:
 
 ```bash
 DOMAIN="vault.example.com"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/alive" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/alive" \
   -o /dev/null -w "local HTTPS /alive: HTTP %{http_code}\n"
 
-curl -vk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/config" \
+curl -fsS -v --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/config" \
   -o /dev/null -w "local HTTPS /api/config: HTTP %{http_code}\n"
 
 sudo docker logs vaultwarden_caddy --tail=120 2>&1 \

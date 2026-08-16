@@ -1,10 +1,10 @@
 # VaultWarden-OCI
 
-**Production-ready VaultWarden for small teams on Ubuntu 24.04 LTS Noble.**
+**Security-first VaultWarden appliance for small teams on Ubuntu 24.04 LTS Noble.**
 
-VaultWarden-OCI is an opinionated, security-first deployment for teams of roughly 10 or fewer users. It combines Vaultwarden, Caddy, Cloudflare DNS/proxy/WAF, CrowdSec, a Postfix SMTP relay, SOPS/Age secrets, encrypted backups, rclone offsite sync, and systemd automation into a small-team appliance.
+VaultWarden-OCI is an opinionated deployment for teams of roughly 10 or fewer users. It combines Vaultwarden, Caddy, Cloudflare DNS/proxy/WAF, CrowdSec, a Postfix SMTP relay, SOPS/Age secrets, encrypted backups, rclone offsite sync, and systemd automation into a small-team appliance.
 
-> New here? Start with [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Before production, also read [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md), [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md), and [docs/SECURITY.md](docs/SECURITY.md).
+> New here? Start with [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). After setup, keep [RUNBOOK.md](RUNBOOK.md) as the day-to-day quick reference. Before recovery work, read [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) and [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md). The security boundary is in [docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 
@@ -96,7 +96,7 @@ Configure the required CrowdSec enforcement path after the Cloudflare secrets ar
 sudo ./utilities/setup-crowdsec.sh
 ```
 
-With `CLOUDFLARE_PROXY_ENABLED=true`, this daemon-backed Workers bouncer path is the normal production golden path. Explicit proxy-disabled or autonomous modes remain advanced alternatives and are not reported as normal production readiness.
+With `CLOUDFLARE_PROXY_ENABLED=true`, this daemon-backed Workers bouncer path is the normal production golden path. Explicit proxy-disabled or autonomous modes remain advanced alternatives outside the normal production path.
 
 ### 5. Start and verify the live stack
 
@@ -239,6 +239,7 @@ See [docs/RESTORE-RUNTIME-PERMISSIONS.md](docs/RESTORE-RUNTIME-PERMISSIONS.md).
 | Doc | Contents |
 | :-- | :-- |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Supported production deployment walkthrough |
+| [RUNBOOK.md](RUNBOOK.md) | Day-to-day junior-admin quick reference |
 | [PROJECT-BOUNDARY.md](docs/PROJECT-BOUNDARY.md) | Supported production and non-goal boundary |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | State, environment, secrets, runtime, and recovery architecture |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Environment and SOPS configuration |
@@ -252,6 +253,7 @@ See [docs/RESTORE-RUNTIME-PERMISSIONS.md](docs/RESTORE-RUNTIME-PERMISSIONS.md).
 | [RECOVERY-CARD.md](docs/RECOVERY-CARD.md) | Printable recovery procedure template |
 | [BOOTSTRAP_KEY_RECOVERY.md](docs/BOOTSTRAP_KEY_RECOVERY.md) | Offline Age key and recovery material guidance |
 | [RESTORE-RUNTIME-PERMISSIONS.md](docs/RESTORE-RUNTIME-PERMISSIONS.md) | Post-restore permission contract |
+| [SECURE-CREDENTIAL-HANDOFFS.md](docs/SECURE-CREDENTIAL-HANDOFFS.md) | Protected setup and recovery handoffs |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and fixes |
 | [MIGRATION.md](docs/MIGRATION.md) | Data migration into VaultWarden-OCI |
 | [VOLUME-MIGRATION.md](docs/VOLUME-MIGRATION.md) | Boot/block storage migration |
@@ -267,6 +269,5 @@ See [docs/RESTORE-RUNTIME-PERMISSIONS.md](docs/RESTORE-RUNTIME-PERMISSIONS.md).
 MIT License — see [LICENSE](LICENSE).
 
 ## Secure credential handoffs
-
 
 Automatic setup writes generated credentials to a protected root-only handoff instead of printing them. The separate full recovery kit is exported under `/root/vaultwarden-recovery/` and can be emailed only as an AES-256 encrypted ZIP. See [Secure credential and recovery handoffs](docs/SECURE-CREDENTIAL-HANDOFFS.md).

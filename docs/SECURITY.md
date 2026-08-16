@@ -496,18 +496,16 @@ See [EMAIL.md](EMAIL.md).
 
 ## Production readiness security gate
 
-Repository CI is necessary but does not prove the state of an installed production host.
-
 For an existing healthy host after managed repository changes:
 
 ```bash
-git pull --ff-only
+git pull --ff-only origin main
 sudo ./setup.sh systemd install --enable-now
 sudo ./setup.sh systemd validate
 sudo ./utilities/smoke-test.sh
 ```
 
-The smoke test must not return production-ready success when a required check was skipped.
+The smoke test must complete without required checks being skipped.
 
 After major deployment/recovery changes also verify:
 
@@ -518,7 +516,7 @@ sudo ./backup.sh run full --full-verification
 sudo ./backup.sh verify
 ```
 
-Production readiness is a property of the actual host, installed automation, recovery points, and operator access—not merely a green GitHub Actions run.
+Production readiness is a property of the actual host, installed automation, recovery points, and operator access.
 
 ---
 
@@ -562,6 +560,5 @@ When reviewing a change, ask:
 Prefer the smallest coherent fix that preserves a truthful production contract.
 
 ## Protected credential output
-
 
 Setup, Age-key rotation, restore, and recovery export do not print private identities or generated plaintext credentials. New setup credentials and key handoffs are root-only files under `/root/vaultwarden-recovery/`; operators must move them offline and explicitly remove the host copy. The setup handoff is not emailed. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).

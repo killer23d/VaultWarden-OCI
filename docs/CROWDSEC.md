@@ -69,7 +69,7 @@ sudo ./edit-secrets.sh rotate cloudflare_zone_id
 sudo ./edit-secrets.sh rotate cf_account_id
 ```
 
-The normal setup path installs/reconciles CrowdSec. To run the CrowdSec installer directly:
+Configure the normal CrowdSec enforcement path after those secrets are available:
 
 ```bash
 sudo ./utilities/setup-crowdsec.sh
@@ -133,10 +133,9 @@ and broader CrowdSec maintenance.
 
 `crowdsec-email.sh status` reports whether the `.env` enablement flag, event
 policy, and VaultWarden-OCI managed marker files are structurally consistent.
-It recognizes the plugin-only `none` state as valid. It is not a complete
-validation of all CrowdSec or Postfix configuration. After manual
-operator changes, reconcile the feature and run `sudo crowdsec -t`; mailbox
-receipt still requires the explicit notification test below.
+It recognizes the plugin-only `none` state as valid. After manual operator
+changes, reconcile the feature, run `sudo crowdsec -t`, and verify delivery with
+the explicit notification command below.
 
 The delivery route is deliberately narrow:
 
@@ -175,9 +174,7 @@ CrowdSec 1.7-supported command before the service restart:
 sudo crowdsec -t
 ```
 
-Normal setup does not attempt live mail delivery and does not require Postfix
-to be running. After the application stack is up, send an explicit test
-notification:
+After the application stack is up, send an explicit notification:
 
 ```bash
 sudo cscli notifications test vaultwarden_email
@@ -189,10 +186,7 @@ The equivalent control command is:
 sudo ./utilities/crowdsec-email.sh test
 ```
 
-CrowdSec 1.7.8 dispatches the test to the plugin but does not wait for or report
-SMTP delivery completion. A zero exit status confirms that the plugin was found
-and the test was dispatched; it is not proof that the message reached the
-mailbox. Confirm receipt and inspect the local services when it does not arrive:
+After dispatch, confirm receipt. If the message does not arrive, inspect:
 
 ```bash
 sudo cscli notifications inspect vaultwarden_email
@@ -204,7 +198,7 @@ sudo make health
 Health reports disabled, policy-disabled, missing-plugin, missing-profile,
 invalid, configured, and statically valid states separately. Disabled
 notifications and a valid `none` policy are healthy states and do not generate
-a warning. Health does not send a live notification test on every run.
+a warning.
 
 To disable the feature, set the option back to `false` and reconcile again:
 
@@ -547,7 +541,7 @@ Do not disable CrowdSec permanently as the first recovery step.
 
 CrowdSec and both bouncer versions are pinned in the repository environment template.
 
-The setup path supports explicit version/update behavior documented by its current `--help`. Do not change the production pins to mutable `latest` values in `.env` as a generic update method.
+The setup path supports explicit version/update behavior documented by its current `--help`. Normal production uses the repository pins; use the documented `--use-latest` override only when intentionally opting into mutable upstream versions.
 
 After intentional CrowdSec/bouncer changes:
 

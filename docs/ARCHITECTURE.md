@@ -6,21 +6,36 @@ This document describes the current state, configuration, secret, automation, an
 
 The project separates the operator-editable repository environment from persistent and installed runtime copies:
 
-- repository `.env` is edited through `sudo make edit-env` / `utilities/env-edit.sh`;
+- repository `.env` is edited through `sudo make edit-env` / `utilities/env-edit.sh` and is the authoring source only;
 - `${PROJECT_STATE_DIR}/config/install.env` is the persistent root-owned runtime configuration stored with project state;
 - `/etc/vaultwarden/vaultwarden.env` is the installed systemd environment used by managed automation.
 
-`load_project_environment` first resolves the bootstrap state directory from an explicit caller override, then repository `.env`, then the installed systemd environment, with `/var/lib/vaultwarden` as the default.
+`load_project_environment` starts from an explicit caller `PROJECT_STATE_DIR` when one is supplied; otherwise it uses `/var/lib/vaultwarden`. When no caller override is supplied and `/etc/vaultwarden/vaultwarden.env` exists, a valid `PROJECT_STATE_DIR` recorded there can establish the installed state path.
 
-After the state directory is known, one complete runtime environment is loaded in this order:
+Production runtime then loads exactly one runtime authority:
 
-1. `/etc/vaultwarden/vaultwarden.env`, when installed;
-2. `${PROJECT_STATE_DIR}/config/install.env`;
-3. repository `.env` as the legacy/bootstrap fallback.
+1. `/etc/vaultwarden/vaultwarden.env`, when it exists;
+2. otherwise `${PROJECT_STATE_DIR}/config/install.env` under the resolved state directory.
 
-Explicit caller overrides for state directory, data device, data mount, and SOPS Age key path are reapplied after loading.
+Repository `.env` is never a production runtime fallback. An installed environment that exists but is unreadable or malformed fails explicitly rather than falling through to another source. If the installed environment is missing and a non-default persistent state directory is in use, the recovery caller must supply that `PROJECT_STATE_DIR` so its `config/install.env` can be found.
 
-This ordering is deliberate: installed systemd jobs use the root-owned installed environment, normal persistent state survives repository replacement, and repository `.env` remains the authoring/bootstrap surface rather than a second live production environment.
+Explicit caller overrides for state directory, data device, and data mount are reapplied after loading. The operational Age private key remains canonical at `/etc/vaultwarden/age-key.txt`.
+
+The normal authoring/sync flow is:
+
+```text
+repository .env
+        |
+        | sudo make sync-env / sudo make edit-env
+        v
+${PROJECT_STATE_DIR}/config/install.env
+        |
+        | setup-systemd install / env-edit sync
+        v
+/etc/vaultwarden/vaultwarden.env
+```
+
+This keeps repository editing, persistent recovery state, and installed systemd runtime as separate, explicit responsibilities.
 
 ## Persistent state layout
 
