@@ -248,12 +248,16 @@ manual_systemd_install_check() {
 }
 
 post_uninstall_check() {
+    local etc_dir="${1:-/etc/vaultwarden}"
+    local runtime_dir="${2:-/run/vaultwarden-oci}"
+    local checkout_root="${3:-$ROOT}"
+    local compose_project="${4:-vaultwarden-oci}"
     read_original_state_path
-    [[ ! -e /etc/vaultwarden ]] || return 1
-    [[ ! -e /run/vaultwarden-oci ]] || return 1
+    [[ ! -e "$etc_dir" ]] || return 1
+    [[ ! -e "$runtime_dir" ]] || return 1
     [[ ! -e "$PROJECT_STATE_PATH" ]] || return 1
-    [[ ! -e "$ROOT/.env" ]] || return 1
-    [[ -z "$(docker ps -aq --filter label=com.docker.compose.project=vaultwarden-oci 2>/dev/null)" ]] || return 1
+    [[ ! -e "$checkout_root/.env" ]] || return 1
+    [[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$compose_project" 2>/dev/null)" ]] || return 1
 }
 
 verify_reboot_transition() {
