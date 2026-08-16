@@ -1,75 +1,90 @@
 # Noble Host Acceptance and Same-Host DR
 
-`utilities/noble-host-acceptance.sh` is a release-acceptance controller for a real Ubuntu 24.04 LTS Noble host. It complements, rather than replaces, the permanent Bash test inventory.
+`utilities/noble-host-acceptance.sh` is a release/DR acceptance controller for a real Ubuntu 24.04 LTS Noble host. It complements the permanent Bash test inventory; it does not replace `./tests/run-tests.sh all` or reimplement backup, restore, uninstall, storage, systemd, smoke, or drill logic.
 
-## What it covers
+Use this workflow periodically on a disposable acceptance host or snapshot, not as a routine day-to-day health check. A full pass is intentionally destructive.
 
-A full run orchestrates the repository's existing owners for:
+## Full-certification boundary
 
-1. `./tests/run-tests.sh all`
-2. live health and email delivery
-3. the non-destructive pre-production drill
-4. production smoke testing with no skipped checks
-5. DB and full backups with rclone delivery
-6. full-backup verification and remote inventory
-7. managed systemd validation
-8. one manual start of each managed recurring job
-9. Docker daemon restart followed by smoke testing
-10. an external application-level E2E hook before DR
-11. a real host reboot checkpoint and post-reboot readiness checks
-12. the canonical `--test-reset` uninstall path
-13. explicit post-uninstall residual checks
-14. a full restore from the rclone remote using an external recovery kit
-15. permission repair, startup, systemd reinstall, smoke and email checks
-16. the application-level E2E hook again after restore
-17. fresh DB and full offsite backups after DR
+A full run proves the repository's supported Noble host path by orchestrating:
 
-The controller records logs and its current phase under `/var/tmp/vaultwarden-noble-acceptance` by default. It stores no recovery-kit content, rclone credentials, or application credentials there.
+1. the canonical permanent Bash suites;
+2. live health, email, pre-production drill, and smoke checks;
+3. DB and full backups with rclone delivery, verification, sync, and remote inventory;
+4. installed systemd validation and one foreground start of each managed recurring job;
+5. Docker daemon restart followed by smoke testing;
+6. an external application E2E hook before DR;
+7. a real reboot, verified by Linux boot ID;
+8. canonical `--test-reset` uninstall plus independent residual assertions;
+9. full restore from rclone using an external recovery kit and `--start-policy manual`;
+10. post-restore health, email, drill, and application E2E while recurring timers remain inactive;
+11. durable custody of the newly rotated recovery kit on a non-root mounted recovery medium;
+12. only then, activation and canonical validation of systemd automation;
+13. smoke testing with active automation; and
+14. fresh DB and fully verified full rclone recovery points encrypted to the new operational recipient.
 
-## Host boundary
+`FULL ACCEPTANCE PASSED` is reachable only after the real-reboot, destructive-DR, rotated-recovery-custody, automation, and final-backup gates succeed.
 
-The destructive same-host DR phase intentionally supports **boot-volume project state only**.
+## Checkpoint integrity
 
-The canonical uninstaller preserves the contents of a positively identified attached data volume and only removes its host wiring. That is the correct production safety behavior. It also means an attached-volume same-host reset is not a clean replacement-host simulation: the restored stack could accidentally observe old state. The acceptance controller therefore fails closed when `DATA_VOLUME_DEVICE` or an attached `/mnt/vw-data` state layout is detected.
+The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. It binds a run to:
 
-For attached-volume acceptance, use a fresh replacement host or a disposable replacement block volume and test that path separately. Do not weaken the uninstaller to erase a production data disk merely to simplify a test.
+- the exact Git commit SHA;
+- the host machine identity;
+- the original and pre-reboot Linux boot IDs;
+- the rclone remote name, config path, and config digest;
+- the pre-DR recovery-kit path and digest;
+- the application E2E hook path and digest;
+- destructive/non-destructive mode;
+- the reboot policy; and
+- for destructive runs, the canonical project-state path.
 
-## Prerequisites
+`resume` fails if any bound input changes. The controller compares `/proc/sys/kernel/random/boot_id` with the saved pre-reboot value, so rerunning `resume` without rebooting cannot satisfy the reboot gate.
 
-Run the workflow on a disposable acceptance host, or on a host whose destruction is explicitly approved. For clean-install certification, start with a fresh Noble VM/snapshot and complete the repository's normal golden-path installation first.
+`--skip-reboot` exists only for controller development. A run started with it is permanently non-certifying and terminates at the `incomplete` phase. Re-running without the flag is rejected as checkpoint drift.
 
-Before the destructive phase, prepare two files outside all VaultWarden-managed paths:
+## Host/storage boundary
 
-- a root-owned `0600`/`0400` recovery kit;
-- a root-owned `0600`/`0400` rclone configuration.
+Destructive same-host DR intentionally supports **boot-volume project state only**.
 
-Both files must survive `utilities/uninstall-vaultwarden.sh run --test-reset`.
+The controller does not maintain a parallel storage detector. Before destructive work it sources the canonical uninstaller in dry-run mode, calls its `resolve` path, and applies the same `DATA_VOLUME_DEVICE` and `storage_ambiguous` checks used by destructive uninstall. This catches explicitly configured attached storage as well as incompletely described custom mounts, managed mount guards, and other ambiguous separate-volume evidence.
 
-The application E2E hook must be a root-owned executable file. It should use disposable test data and exit non-zero on any failed assertion.
+The production uninstaller correctly preserves separately attached data-volume contents. Therefore an attached-volume same-host reset is not a clean replacement-host simulation and is rejected. Test attached-volume DR on a fresh replacement host or with a disposable replacement block volume instead of weakening uninstall safety.
+
+## Required external inputs
+
+Before starting, prepare:
+
+- a root-owned `0400` or `0600` pre-DR recovery kit outside all managed VaultWarden paths;
+- a root-owned `0400` or `0600` rclone configuration outside all managed VaultWarden paths; and
+- a root-owned executable application E2E hook that is not group- or world-writable.
+
+The pre-DR recovery kit and rclone config must survive `utilities/uninstall-vaultwarden.sh run --test-reset`.
+
+The E2E hook is executed as root. The controller rejects symlinks, non-root ownership, non-executable files, and group/world-writable hooks. Its path and digest are bound to the checkpoint.
 
 ## Application E2E contract
 
-The hook is intentionally external because the repository does not own a browser/client automation framework. For full certification, the hook should prove at least:
+The hook is external because this repository does not own a browser/client automation framework. It must exit non-zero on any failed assertion and should use disposable acceptance identities/data. At minimum prove:
 
 - user login;
 - vault item create/read/update/delete;
-- organization membership or sharing;
+- organization membership/sharing;
 - attachment upload/download;
 - Send creation/readback/removal;
 - logout/login persistence;
 - supported client sync;
-- WebSocket/live-update behavior where applicable;
-- admin endpoint remains protected.
+- WebSocket/live-update behavior where applicable; and
+- admin endpoint protection.
 
-Create a unique canary such as `NOBLE-DR-CANARY-<run-id>` before DR and require the same canary after the rclone restore. This turns the post-restore application pass into evidence that the restored data is the intended recovery point rather than merely a healthy empty service.
+Create a unique canary such as `NOBLE-DR-CANARY-<run-id>` before DR and require the same canary after the rclone restore. This prevents a healthy but empty restored service from producing a false pass.
 
-## Full run
-
-Example:
+## Start a full run
 
 ```bash
 sudo install -o root -g root -m 0600 /secure/recovery-kit.txt /root/vw-acceptance-recovery-kit.txt
 sudo install -o root -g root -m 0600 /secure/rclone.conf /root/vw-acceptance-rclone.conf
+sudo install -o root -g root -m 0700 /secure/vw-application-e2e.sh /root/vw-application-e2e.sh
 
 sudo env VW_NOBLE_TEST_DESTRUCTIVE=YES \
   utilities/noble-host-acceptance.sh run \
@@ -80,7 +95,11 @@ sudo env VW_NOBLE_TEST_DESTRUCTIVE=YES \
   --application-e2e /root/vw-application-e2e.sh
 ```
 
-When the controller reaches the reboot checkpoint it exits with status `75` after saving `post-reboot`. Reboot the host yourself, verify that the original checkout is still present, then rerun the same options with `resume`:
+The destructive path requires **both** `--destructive` and `VW_NOBLE_TEST_DESTRUCTIVE=YES`.
+
+## Reboot checkpoint
+
+At the reboot phase the controller saves the current boot ID, changes its checkpoint to `post-reboot`, and exits `75`. Reboot the host, verify the same checkout is present, then rerun exactly the same bound options:
 
 ```bash
 sudo env VW_NOBLE_TEST_DESTRUCTIVE=YES \
@@ -92,11 +111,11 @@ sudo env VW_NOBLE_TEST_DESTRUCTIVE=YES \
   --application-e2e /root/vw-application-e2e.sh
 ```
 
-`--skip-reboot` exists only for controller development. A run that omits destructive DR or the physical reboot must not be treated as full production-host certification.
+The resume fails unless the host boot ID changed and all checkpoint-bound inputs still match.
 
-## Uninstall is part of the DR assertion
+## Uninstall assertion
 
-The controller does not implement teardown itself. It calls:
+The controller delegates teardown to the canonical owner:
 
 ```bash
 sudo utilities/uninstall-vaultwarden.sh run \
@@ -105,33 +124,66 @@ sudo utilities/uninstall-vaultwarden.sh run \
   --force
 ```
 
-The uninstaller remains responsible for its ownership checks, operation guard, systemd cleanup, Docker cleanup, runtime cleanup, firewall/CrowdSec cleanup, state removal, and residual verification. The controller adds a small independent postcondition check for `/etc/vaultwarden`, `/run/vaultwarden-oci`, boot-volume state, generated checkout `.env`, and Compose-labelled containers before allowing restore to begin.
+Before uninstall, it resolves the boot-state scope again and requires the same project-state path recorded at run start. After uninstall returns success, the controller independently requires the original project-state path, `/etc/vaultwarden`, `/run/vaultwarden-oci`, generated checkout `.env`, and Compose-labelled project containers to be absent.
 
-If uninstall returns non-zero or any residual assertion fails, the DR run stops before restore. Do not manually delete the failed residuals and then mark the run as passed; fix the owning uninstall behavior and repeat the acceptance run from a known-good snapshot.
+If uninstall or a residual assertion fails, stop. Do not manually delete the failed residual and continue the same certification run; fix the owning uninstall behavior and repeat from a known-good disposable snapshot.
 
-## Restore boundary
+## Restore and automation ordering
 
-The restore phase uses the project's canonical full-restore path with:
+The full restore uses:
 
-- the rclone remote explicitly supplied to the process;
-- the external recovery kit;
-- `--start-policy manual`;
-- `--force` only for non-interactive confirmation, not to bypass project safety guards.
+```text
+--remote
+--from-recovery-kit <pre-DR-kit>
+--no-backup
+--start-policy manual
+--force
+```
 
-After restore, the controller repairs known permissions, starts through `startup.sh`, reinstalls the managed systemd runtime, validates it, runs the smoke suite and email test, then requires the application E2E hook to pass again.
+After restore the controller repairs permissions, starts the stack through `startup.sh`, and installs systemd automation with `--no-enable-now`. It verifies each managed timer is enabled for the next boot but inactive now. It then runs health, email, the pre-production drill, and the application E2E hook **before** recurring jobs are allowed to start.
+
+Only after restored data and services pass those checks and new recovery custody is proven does the controller run `setup-systemd.sh install --enable-now`, canonical `setup-systemd.sh validate`, and the smoke test.
+
+## Rotated recovery custody is mandatory
+
+A successful canonical full restore rotates to a new operational Age key. Future backups therefore require the **new** recovery material; the pre-DR kit used to enter the drill is not sufficient custody for the recovery points created afterward.
+
+At `recovery-custody` the controller stops until the newly generated recovery handoff is copied to durable off-host storage. Copy the new kit to a separate mounted recovery medium (for example a mounted removable or dedicated recovery filesystem) and resume with:
+
+```bash
+sudo env VW_NOBLE_TEST_DESTRUCTIVE=YES \
+  utilities/noble-host-acceptance.sh resume \
+  --destructive \
+  --recovery-kit /root/vw-acceptance-recovery-kit.txt \
+  --rclone-remote myremote \
+  --rclone-config /root/vw-acceptance-rclone.conf \
+  --application-e2e /root/vw-application-e2e.sh \
+  --post-restore-recovery-kit /mnt/recovery/vaultwarden-recovery-kit-<timestamp>.txt
+```
+
+The supplied post-restore kit must:
+
+- be a root-owned `0400`/`0600` regular file, not a symlink;
+- be outside managed VaultWarden paths;
+- reside on a mounted filesystem whose device differs from the root filesystem;
+- be newer than the completed restore;
+- contain the canonical recovery-kit completion marker and exactly one Age private identity; and
+- have a digest different from the pre-DR recovery kit.
+
+This is an enforceable custody gate, not proof of the wider durability policy of the chosen recovery medium. Retain the copied kit according to your normal off-host/offline recovery policy.
 
 ## Evidence to retain
 
-For a release/commit being certified, retain:
+For the release/commit being certified, retain:
 
-- exact Git SHA;
-- host OS/architecture and block-device inventory;
-- controller logs;
-- pre-DR and post-DR smoke output;
+- exact Git SHA and host inventory;
+- controller checkpoint metadata and logs;
+- pre- and post-DR smoke output;
 - backup verification and rclone inventory output;
-- uninstall output and residual assertion result;
+- pre-DR and post-restore application E2E logs;
+- uninstall output and residual result;
 - restore output;
-- application E2E logs before and after DR;
-- post-DR backup verification.
+- evidence of the newly rotated recovery-kit custody; and
+- final DB/full rclone backup verification.
 
-A browser login alone is not sufficient evidence of disaster-recovery success.
+The PR/commit is not real-host certified until one full destructive run on a disposable supported Noble host completes with retained evidence. CI and mocked contract tests cannot substitute for that run.
