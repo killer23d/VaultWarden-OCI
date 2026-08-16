@@ -173,7 +173,7 @@ run_phases(){
       step uninstall-residuals post_uninstall_check
       save_phase restore;;
     restore)
-      step remote-full-restore env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh latest full --remote --from-recovery-kit "$RECOVERY_KIT" --no-backup --start-policy manual --force
+      step remote-full-restore env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh latest full --remote --from-recovery-kit "$RECOVERY_KIT" --start-policy manual --force
       step repair-permissions bash ./utilities/repair-permissions.sh
       step startup bash ./startup.sh
       step systemd-reinstall bash ./utilities/setup-systemd.sh install --enable-now
