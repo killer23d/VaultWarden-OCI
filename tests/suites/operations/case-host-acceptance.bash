@@ -16,21 +16,22 @@ source "$A"
 
 # A real reboot is proved by boot ID. --skip-reboot is explicitly
 # non-certifying rather than a shortcut to destructive phases.
-META_FILE="$T/reboot.meta"
-printf 'REBOOT_FROM_BOOT_ID=boot-a\n' > "$META_FILE"
-SKIP_REBOOT=false
-boot_id(){ printf 'boot-b\n'; }
-verify_reboot_transition || fail "changed boot ID was rejected"
-boot_id(){ printf 'boot-a\n'; }
-if ( verify_reboot_transition ) >/dev/null 2>&1; then fail "same boot ID was accepted as a reboot"; fi
-SKIP_REBOOT=true
-set +e
-verify_reboot_transition >/dev/null 2>&1
-reboot_rc=$?
-set -e
-[[ $reboot_rc -eq 2 ]] || fail "--skip-reboot did not return the non-certifying result"
+(
+  META_FILE="$T/reboot.meta"
+  printf 'REBOOT_FROM_BOOT_ID=boot-a\n' > "$META_FILE"
+  SKIP_REBOOT=false
+  boot_id(){ printf 'boot-b\n'; }
+  verify_reboot_transition || fail "changed boot ID was rejected"
+  boot_id(){ printf 'boot-a\n'; }
+  if verify_reboot_transition >/dev/null 2>&1; then fail "same boot ID was accepted as a reboot"; fi
+  SKIP_REBOOT=true
+  set +e
+  verify_reboot_transition >/dev/null 2>&1
+  reboot_rc=$?
+  set -e
+  [[ $reboot_rc -eq 2 ]] || fail "--skip-reboot did not return the non-certifying result"
+)
 grep -Fq 'save_phase incomplete' "$A" || fail "non-certifying terminal phase is missing"
-unset -f boot_id
 
 # Reuse the canonical uninstaller's authoritative environment precedence and
 # storage_ambiguous checks rather than a parallel environment-only detector.
@@ -59,33 +60,34 @@ if ( PATH="$AT/bin:$PATH" VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" VW_UNIN
 fi
 
 # Run/resume metadata binds exact code, host identity, and operator inputs.
-AT="$T/binding"
-mkdir -p "$AT"
-RECOVERY_KIT="$AT/recovery-kit"
-RCLONE_CONFIG_PATH="$AT/rclone.conf"
-APPLICATION_E2E="$AT/e2e.sh"
-RCLONE_REMOTE=acceptance
-printf 'old recovery\n' > "$RECOVERY_KIT"
-printf '[acceptance]\ntype = local\n' > "$RCLONE_CONFIG_PATH"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
-chmod 0755 "$APPLICATION_E2E"
-META_FILE="$AT/metadata"
-DESTRUCTIVE=false
-SKIP_REBOOT=false
-current_sha(){ printf 'sha-a\n'; }
-machine_id_hash(){ printf 'host-a\n'; }
-boot_id(){ printf 'boot-a\n'; }
-init_metadata
-verify_metadata || fail "fresh checkpoint metadata was rejected"
-printf '# drift\n' >> "$APPLICATION_E2E"
-if ( verify_metadata ) >/dev/null 2>&1; then fail "E2E hook content drift was accepted"; fi
-printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
-current_sha(){ printf 'sha-b\n'; }
-if ( verify_metadata ) >/dev/null 2>&1; then fail "Git SHA drift was accepted"; fi
-current_sha(){ printf 'sha-a\n'; }
-RCLONE_REMOTE=other
-if ( verify_metadata ) >/dev/null 2>&1; then fail "rclone remote drift was accepted"; fi
-unset -f current_sha machine_id_hash boot_id
+(
+  AT="$T/binding"
+  mkdir -p "$AT"
+  RECOVERY_KIT="$AT/recovery-kit"
+  RCLONE_CONFIG_PATH="$AT/rclone.conf"
+  APPLICATION_E2E="$AT/e2e.sh"
+  RCLONE_REMOTE=acceptance
+  printf 'old recovery\n' > "$RECOVERY_KIT"
+  printf '[acceptance]\ntype = local\n' > "$RCLONE_CONFIG_PATH"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+  chmod 0755 "$APPLICATION_E2E"
+  META_FILE="$AT/metadata"
+  DESTRUCTIVE=false
+  SKIP_REBOOT=false
+  current_sha(){ printf 'sha-a\n'; }
+  machine_id_hash(){ printf 'host-a\n'; }
+  boot_id(){ printf 'boot-a\n'; }
+  init_metadata
+  verify_metadata || fail "fresh checkpoint metadata was rejected"
+  printf '# drift\n' >> "$APPLICATION_E2E"
+  if verify_metadata >/dev/null 2>&1; then fail "E2E hook content drift was accepted"; fi
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+  current_sha(){ printf 'sha-b\n'; }
+  if verify_metadata >/dev/null 2>&1; then fail "Git SHA drift was accepted"; fi
+  current_sha(){ printf 'sha-a\n'; }
+  RCLONE_REMOTE=other
+  if verify_metadata >/dev/null 2>&1; then fail "rclone remote drift was accepted"; fi
+)
 
 # Destructive mode requires both CLI state and the explicit environment
 # acknowledgement. Stub file trust only so the consent gate remains real.
