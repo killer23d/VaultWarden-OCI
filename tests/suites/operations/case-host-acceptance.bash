@@ -73,6 +73,7 @@ fi
   chmod 0755 "$APPLICATION_E2E"
   META_FILE="$AT/metadata"
   DESTRUCTIVE=false
+  # shellcheck disable=SC2034 # consumed by sourced acceptance metadata helpers
   SKIP_REBOOT=false
   current_sha(){ printf 'sha-a\n'; }
   machine_id_hash(){ printf 'host-a\n'; }
@@ -97,8 +98,10 @@ fi
   RECOVERY_KIT="$T/recovery-kit"
   RCLONE_CONFIG_PATH="$T/rclone.conf"
   APPLICATION_E2E="$T/e2e.sh"
+  # shellcheck disable=SC2034 # consumed by sourced validate_inputs()
   RCLONE_REMOTE=acceptance
   : > "$RECOVERY_KIT"; : > "$RCLONE_CONFIG_PATH"; : > "$APPLICATION_E2E"
+  # shellcheck disable=SC2034 # consumed by sourced validate_inputs()
   DESTRUCTIVE=true
   unset VW_NOBLE_TEST_DESTRUCTIVE || true
   if ( validate_inputs ) >/dev/null 2>&1; then fail "destructive acceptance bypassed environment acknowledgement"; fi
