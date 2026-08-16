@@ -904,6 +904,35 @@ EXAMPLES:
     sudo ./maintenance.sh update --all --email   # Full update with email notification
 ```
 
+### noble-host-acceptance.sh
+
+```
+VaultWarden-OCI Noble host acceptance
+
+Usage:
+  sudo utilities/noble-host-acceptance.sh run OPTIONS
+  sudo utilities/noble-host-acceptance.sh resume OPTIONS
+  sudo utilities/noble-host-acceptance.sh status
+
+Required options:
+  --recovery-kit FILE      External root-owned recovery kit (0400/0600)
+  --rclone-remote NAME     rclone remote containing acceptance backups
+  --rclone-config FILE     External root-owned rclone.conf (0400/0600)
+  --application-e2e FILE   Root-owned executable application E2E hook
+
+Full DR options:
+  --destructive            Run same-host uninstall and full rclone restore
+                           (also requires VW_NOBLE_TEST_DESTRUCTIVE=YES)
+  --post-restore-recovery-kit FILE
+                           On recovery-custody resume, point to the newly rotated
+                           recovery kit copied to a non-root mounted recovery medium
+  --skip-reboot            Development-only. This can never produce FULL ACCEPTANCE.
+
+The destructive DR phase is intentionally limited to boot-volume project state.
+Attached or ambiguously mounted project state is rejected through the canonical
+uninstaller's own scope resolver and storage-ambiguity checks.
+```
+
 ### operations-status.sh
 
 ```
