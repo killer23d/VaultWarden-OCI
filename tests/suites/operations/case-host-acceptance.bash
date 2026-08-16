@@ -23,7 +23,7 @@ source "$A"
   boot_id(){ printf 'boot-b\n'; }
   verify_reboot_transition || fail "changed boot ID was rejected"
   boot_id(){ printf 'boot-a\n'; }
-  if verify_reboot_transition >/dev/null 2>&1; then fail "same boot ID was accepted as a reboot"; fi
+  if ( verify_reboot_transition ) >/dev/null 2>&1; then fail "same boot ID was accepted as a reboot"; fi
   SKIP_REBOOT=true
   set +e
   verify_reboot_transition >/dev/null 2>&1
@@ -80,13 +80,13 @@ fi
   init_metadata
   verify_metadata || fail "fresh checkpoint metadata was rejected"
   printf '# drift\n' >> "$APPLICATION_E2E"
-  if verify_metadata >/dev/null 2>&1; then fail "E2E hook content drift was accepted"; fi
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "E2E hook content drift was accepted"; fi
   printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
   current_sha(){ printf 'sha-b\n'; }
-  if verify_metadata >/dev/null 2>&1; then fail "Git SHA drift was accepted"; fi
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "Git SHA drift was accepted"; fi
   current_sha(){ printf 'sha-a\n'; }
   RCLONE_REMOTE=other
-  if verify_metadata >/dev/null 2>&1; then fail "rclone remote drift was accepted"; fi
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "rclone remote drift was accepted"; fi
 )
 
 # Destructive mode requires both CLI state and the explicit environment
@@ -101,7 +101,7 @@ fi
   : > "$RECOVERY_KIT"; : > "$RCLONE_CONFIG_PATH"; : > "$APPLICATION_E2E"
   DESTRUCTIVE=true
   unset VW_NOBLE_TEST_DESTRUCTIVE || true
-  if validate_inputs >/dev/null 2>&1; then fail "destructive acceptance bypassed environment acknowledgement"; fi
+  if ( validate_inputs ) >/dev/null 2>&1; then fail "destructive acceptance bypassed environment acknowledgement"; fi
   VW_NOBLE_TEST_DESTRUCTIVE=YES validate_inputs >/dev/null || fail "double destructive consent was rejected"
 )
 
@@ -118,7 +118,7 @@ fi
       *) "$real_stat" "$@" ;;
     esac
   }
-  if validate_e2e_hook >/dev/null 2>&1; then fail "group-writable root E2E hook was accepted"; fi
+  if ( validate_e2e_hook ) >/dev/null 2>&1; then fail "group-writable root E2E hook was accepted"; fi
 )
 
 # Canonical uninstall success is not trusted blindly: the independently saved
