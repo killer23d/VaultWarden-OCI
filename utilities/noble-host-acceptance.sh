@@ -753,7 +753,7 @@ run_phases() {
                 step dr-source-download download_bound_backup DR_SOURCE restore-source
                 step exact-full-restore run_with_sensitive_tmp env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
                     RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh interactive --remote --file "$BOUND_BACKUP_FILE" \
-                    --from-recovery-kit "$RECOVERY_KIT" --no-backup --start-policy manual --force
+                    --from-recovery-kit "$RECOVERY_KIT" --start-policy manual --force
                 meta_add RESTORE_COMPLETED_EPOCH "$(date +%s)"
                 meta_add RESTORED_BACKUP_BASENAME "$(meta_get DR_SOURCE_BACKUP_BASENAME)"
                 meta_add RESTORED_BACKUP_ARCHIVE_SHA256 "$(meta_get DR_SOURCE_BACKUP_ARCHIVE_SHA256)"

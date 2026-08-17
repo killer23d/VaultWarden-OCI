@@ -4,6 +4,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
 ROOT_REPO="$VW_TEST_REPO_ROOT"
 A="$ROOT_REPO/utilities/noble-host-acceptance.sh"
+RESTORE="$ROOT_REPO/utilities/restore-run.sh"
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 fail(){ echo "FAIL: $*" >&2; exit 1; }
@@ -313,6 +314,16 @@ final_decrypt_line="$(grep -n 'post-dr-recovery-kit-inspect verify_bound_backup_
    && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \
   || fail "post-restore full-kit-export/custody/automation/final-backup sequencing regressed"
 ! grep -Fq 'restore.sh latest full --remote' "$A" || fail "controller still restores an unbound remote latest backup"
+! grep -Fq -- '--no-backup --start-policy manual --force' "$A" \
+  || fail "fresh full DR restore still bypasses canonical snapshot policy with --no-backup"
+grep -Fq '&& [[ "$USE_REMOTE" == "true" ]]' "$RESTORE" \
+  || fail "canonical restore no longer admits missing-environment remote bootstrap mode"
+explicit_file_line="$(grep -Fn 'if [[ -n "$BACKUP_FILE" ]]' "$RESTORE" | head -1 | cut -d: -f1)"
+source_select_line="$(grep -Fn 'select_backup_source || return 1' "$RESTORE" | head -1 | cut -d: -f1)"
+[[ "$explicit_file_line" =~ ^[0-9]+$ && "$source_select_line" =~ ^[0-9]+$ ]] \
+  || fail "canonical exact-file/remote-source selection contract could not be located"
+(( explicit_file_line < source_select_line )) \
+  || fail "canonical restore no longer gives explicit --file precedence over remote source selection"
 grep -Fq 'POST_RESTORE_AGE_RECIPIENT_HASH' "$A" || fail "rotated Age recipient is not checkpointed"
 grep -Fq 'POST_RESTORE_EXPORTED_KIT_SHA256' "$A" || fail "canonical full recovery-kit export is not digest-bound"
 grep -Fq 'does not match the exact canonical full kit exported by this acceptance run' "$A" \

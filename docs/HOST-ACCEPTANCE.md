@@ -136,7 +136,7 @@ The resume fails unless the host boot ID changed and all checkpoint-bound inputs
 The destructive restore sequence is:
 
 1. exact checkpoint-bound remote cohort download and digest verification;
-2. canonical `restore.sh interactive --remote --file <staged-full-backup> --from-recovery-kit ... --no-backup --start-policy manual --force`; the local file is still the exact restore source while `--remote` enables the supported missing-environment bootstrap path;
+2. canonical `restore.sh interactive --remote --file <staged-full-backup> --from-recovery-kit ... --start-policy manual --force`; the local file is still the exact restore source while `--remote` enables the supported missing-environment bootstrap path. The controller does not force `--no-backup`; canonical full restore already skips the snapshot on a genuinely fresh target with no live database and retains its normal snapshot policy otherwise;
 3. record restore completion and the restored backup identity; and
 4. **immediately checkpoint `post-restore-validation`**.
 
