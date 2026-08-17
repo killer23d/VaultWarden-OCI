@@ -98,6 +98,8 @@ The hook is external because this repository does not own a browser/client autom
 
 On the pre-DR invocation, create/record a unique canary such as `NOBLE-DR-CANARY-<run-id>`. **Only after that hook succeeds** does the controller create the full DR source backup. It snapshots the full-backup inventory before/after that command and requires exactly one newly published full backup. That backup's exact basename, archive digest, cohort digest, creation time, and remote object identity are checkpointed.
 
+Before any reboot/uninstall destructive transition, the controller re-downloads that exact bound remote source and performs an `age` decrypt probe with the external **pre-DR recovery kit**. This proves that the retained kit supplied to the drill can actually decrypt the exact offsite recovery point that will be used after reset; a wrong or stale kit fails while the original host is still intact.
+
 After uninstall, the controller does not call `restore.sh latest`. It downloads the four required members of that exact remote cohort (`.age`, `.sha256`, `.sha256.hmac`, `.meta`) into the root-only acceptance state area, verifies the archive and cohort digests against the checkpoint, and calls canonical restore with `--file` on that staged full backup. The post-restore E2E invocation must find the same canary.
 
 ## Start a full run
@@ -172,6 +174,7 @@ For the release/commit being certified, retain:
 - pre- and post-DR smoke output;
 - pre-DR E2E/canary output;
 - the exact bound DR source backup basename, archive SHA-256, cohort digest, and rclone location;
+- the pre-DR external recovery kit's successful decrypt probe against that exact offsite source;
 - uninstall output and residual result;
 - exact-source restore output and the immediate post-restore checkpoint;
 - post-restore E2E proof of the same canary;

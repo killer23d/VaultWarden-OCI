@@ -210,17 +210,36 @@ fi
     fail "modified copy of the old Age identity was accepted as rotated custody"
   fi
 
-  recipient="$(age-keygen -y "$AT/new.key")"
-  printf 'bound remote payload\n' | age -r "$recipient" -o "$AT/post-dr-full.age"
+  old_recipient="$(age-keygen -y "$AT/old.key")"
+  new_recipient="$(age-keygen -y "$AT/new.key")"
+  printf 'bound DR source payload\n' | age -r "$old_recipient" -o "$AT/dr-source-full.age"
+  printf 'bound post-DR payload\n' | age -r "$new_recipient" -o "$AT/post-dr-full.age"
   META_FILE="$AT/metadata"
   : > "$META_FILE"
+  meta_add DR_SOURCE_BACKUP_BASENAME full_backup_source_fixture.tar.zst.age
+  meta_add DR_SOURCE_BACKUP_ARCHIVE_SHA256 "$(sha_file "$AT/dr-source-full.age")"
+  meta_add DR_SOURCE_BACKUP_COHORT_SHA256 "$(printf '0%.0s' {1..64})"
   meta_add POST_DR_BACKUP_BASENAME full_backup_fixture.tar.zst.age
   meta_add POST_DR_BACKUP_ARCHIVE_SHA256 "$(sha_file "$AT/post-dr-full.age")"
   meta_add POST_DR_BACKUP_COHORT_SHA256 "$(printf '0%.0s' {1..64})"
   download_bound_backup(){
-  # shellcheck disable=SC2034 # consumed by sourced verify_bound_backup_with_kit()
-  BOUND_BACKUP_FILE="$AT/post-dr-full.age"
-}
+    case "$1" in
+      DR_SOURCE)
+        # shellcheck disable=SC2034 # consumed by sourced verify_bound_backup_with_kit()
+        BOUND_BACKUP_FILE="$AT/dr-source-full.age"
+        ;;
+      POST_DR)
+        # shellcheck disable=SC2034 # consumed by sourced verify_bound_backup_with_kit()
+        BOUND_BACKUP_FILE="$AT/post-dr-full.age"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  verify_bound_backup_with_kit DR_SOURCE "$AT/old.kit" \
+    || fail "pre-DR recovery kit could not decrypt the bound DR source backup"
+  if ( verify_bound_backup_with_kit DR_SOURCE "$AT/other.kit" ) >/dev/null 2>&1; then
+    fail "unrelated pre-DR recovery kit decrypted the bound DR source backup"
+  fi
   verify_bound_backup_with_kit POST_DR "$AT/new.kit" \
     || fail "copied rotated recovery kit could not decrypt bound post-DR backup"
 )
@@ -229,6 +248,7 @@ fi
 # must download that exact cohort and use --file, never remote 'latest'.
 canary_line="$(grep -n 'application-before-dr' "$A" | cut -d: -f1)"
 source_backup_line="$(grep -n 'dr-full-backup run_and_bind_full_backup DR_SOURCE' "$A" | cut -d: -f1)"
+source_kit_decrypt_line="$(grep -n 'pre-dr-recovery-kit-decrypt verify_bound_backup_with_kit DR_SOURCE' "$A" | cut -d: -f1)"
 source_download_line="$(grep -n 'dr-source-download download_bound_backup DR_SOURCE restore-source' "$A" | cut -d: -f1)"
 exact_restore_line="$(grep -n 'bash ./restore.sh interactive --file \"\$BOUND_BACKUP_FILE\"' "$A" | cut -d: -f1)"
 restore_checkpoint_line="$(grep -n 'save_phase post-restore-validation' "$A" | cut -d: -f1)"
@@ -238,8 +258,9 @@ custody_line="$(grep -n 'validate_post_restore_recovery_kit' "$A" | tail -1 | cu
 activate_line="$(grep -n 'systemd-activate bash ./utilities/setup-systemd.sh install --enable-now' "$A" | cut -d: -f1)"
 final_backup_line="$(grep -n 'post-dr-full run_and_bind_full_backup POST_DR' "$A" | cut -d: -f1)"
 final_decrypt_line="$(grep -n 'post-dr-recovery-kit-decrypt verify_bound_backup_with_kit POST_DR' "$A" | cut -d: -f1)"
-(( canary_line < source_backup_line && source_backup_line < source_download_line && source_download_line < exact_restore_line )) \
-  || fail "canary/bound-backup/exact-restore sequencing regressed"
+(( canary_line < source_backup_line && source_backup_line < source_kit_decrypt_line \
+   && source_kit_decrypt_line < source_download_line && source_download_line < exact_restore_line )) \
+  || fail "canary/bound-backup/pre-DR-kit-proof/exact-restore sequencing regressed"
 (( exact_restore_line < restore_checkpoint_line && restore_checkpoint_line < repair_line && repair_line < e2e_line )) \
   || fail "successful restore is not checkpointed before post-restore validation"
 (( e2e_line < custody_line && custody_line < activate_line && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \

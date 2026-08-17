@@ -596,6 +596,7 @@ run_phases() {
                     RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./backup.sh sync
                 step remote-list env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
                     RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh list --remote
+                step pre-dr-recovery-kit-decrypt verify_bound_backup_with_kit DR_SOURCE "$RECOVERY_KIT"
                 save_phase automation
                 ;;
             automation)
