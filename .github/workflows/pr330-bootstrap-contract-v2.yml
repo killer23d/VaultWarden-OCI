@@ -1,5 +1,8 @@
 name: PR330 exact bootstrap contract v2
-on: [pull_request]
+on:
+  push:
+    branches:
+      - test/noble-host-acceptance
 
 permissions:
   contents: write
