@@ -2,7 +2,7 @@
 
 `utilities/noble-host-acceptance.sh` is a release/DR acceptance controller for a real Ubuntu 24.04 LTS Noble host. It complements the permanent Bash test inventory; it does not replace `./tests/run-tests.sh all` or reimplement backup, restore, uninstall, storage, systemd, smoke, or drill logic.
 
-Use this workflow periodically on a disposable acceptance host or snapshot, not as a routine day-to-day health check. A full pass is intentionally destructive and can make real external DNS changes, so use a dedicated acceptance hostname/zone and credentials.
+Use this workflow periodically on a disposable acceptance host or snapshot, not as a routine day-to-day health check. A full pass is intentionally destructive and can perform real external DNS changes, so use a dedicated acceptance hostname/zone and credentials.
 
 ## Full-certification boundary
 
