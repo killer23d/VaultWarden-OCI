@@ -1,0 +1,265 @@
+name: PR330 bootstrap and recovery hardening
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: github.event.pull_request.head.ref == 'test/noble-host-acceptance'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Apply bootstrap, recovery, volatile-secret, and systemd hardening
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, found {count}')
+              return text.replace(old, new, 1)
+
+          def sub_once(text, pattern, repl, label):
+              new_text, count = re.subn(pattern, repl, text, count=1, flags=re.M | re.S)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one regex match, found {count}')
+              return new_text
+
+          controller = Path('utilities/noble-host-acceptance.sh')
+          text = controller.read_text()
+
+          text = replace_once(
+              text,
+              'cd "$ROOT"\nSTATE_ROOT=',
+              'cd "$ROOT"\n# Reuse the canonical volatile sensitive-workspace abstraction for all\n# acceptance-owned private-key staging and delegated restore TMPDIR fallback.\n# shellcheck source=../lib/crypto.sh\nsource "$ROOT/lib/crypto.sh"\nSTATE_ROOT=',
+              'source crypto abstraction',
+          )
+
+          text = replace_once(
+              text,
+              '  --post-restore-recovery-kit FILE\n                           On recovery-custody resume, point to the newly rotated\n                           recovery kit copied to a non-root mounted recovery medium\n',
+              '  --post-restore-recovery-kit FILE\n                           On recovery-custody resume, point to the canonical full\n                           recovery kit exported after restore and copied to a\n                           non-root mounted recovery medium\n',
+              'post-restore kit help',
+          )
+
+          identity_marker = '''write_recovery_kit_identity() {\n    local kit="$1" output="$2"\n    awk '/^AGE-SECRET-KEY-1/{print; count++} END { exit(count == 1 ? 0 : 1) }' "$kit" > "$output"\n}\n\n'''
+          identity_replacement = identity_marker + '''recovery_kit_has_integrity_hmac() {\n    local kit="$1"\n    awk '\n        $0 == "[Backup integrity HMAC key (auto-generated)]" {\n            count++\n            if ((getline value) > 0 && value != "" && value !~ /^</) valid++\n        }\n        END { exit(count == 1 && valid == 1 ? 0 : 1) }\n    ' "$kit"\n}\n\nrun_with_sensitive_tmp() (\n    local workspace=""\n    workspace="$(create_sensitive_workspace acceptance-restore)" || return 1\n    trap '[[ -z "${workspace:-}" ]] || remove_sensitive_workspace "$workspace" >/dev/null 2>&1 || true' EXIT\n    TMPDIR="$workspace" "$@"\n)\n\n'''
+          text = replace_once(text, identity_marker, identity_replacement, 'recovery helpers insertion')
+
+          verify_repl = '''verify_bound_backup_with_recovery_kit() {\n    local prefix="$1" kit="$2" verify_root archive_digest\n    verify_root="$STATE_ROOT/verify-${prefix,,}"\n    download_bound_backup "$prefix" "verify-${prefix,,}"\n    if ! run_with_sensitive_tmp env \\\n            RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \\\n            RCLONE_CONFIG="$RCLONE_CONFIG_PATH" \\\n            bash ./restore.sh inspect --remote --file "$BOUND_BACKUP_FILE" \\\n            --from-recovery-kit "$kit"; then\n        rm -rf -- "$verify_root"\n        return 1\n    fi\n    archive_digest="$(sha_file "$BOUND_BACKUP_FILE")"\n    meta_add "${prefix}_RECOVERY_KIT_INSPECT_VERIFIED_SHA256" "$archive_digest"\n    rm -rf -- "$verify_root"\n}\n\nvalidate_dns_mutation_scope()'''
+          text = sub_once(
+              text,
+              r'^verify_bound_backup_with_kit\(\) \{\n.*?^\}\n\nvalidate_dns_mutation_scope\(\)',
+              verify_repl,
+              'canonical recovery inspect helper',
+          )
+
+          systemd_repl = '''systemd_job_execution_succeeded() {\n    local unit="$1" before_start="$2" after_start result status\n    after_start="$(systemctl show "$unit" --property=ExecMainStartTimestampMonotonic --value 2>/dev/null || true)"\n    result="$(systemctl show "$unit" --property=Result --value 2>/dev/null || true)"\n    status="$(systemctl show "$unit" --property=ExecMainStatus --value 2>/dev/null || true)"\n\n    [[ "$after_start" =~ ^[0-9]+$ && "$after_start" != "0" && "$after_start" != "$before_start" ]] || {\n        log "Managed job did not record a new ExecStart invocation: $unit"\n        return 1\n    }\n    [[ "$result" == "success" ]] || {\n        log "Managed job result is not success: $unit result=${result:-unknown}"\n        return 1\n    }\n    case "$unit" in\n        vaultwarden-health.service)\n            [[ "$status" == "0" || "$status" == "1" ]] || {\n                log "Health job did not execute to an accepted real result: $unit status=${status:-unknown}"\n                return 1\n            }\n            ;;\n        *)\n            [[ "$status" == "0" ]] || {\n                if [[ "$status" == "75" ]]; then\n                    log "Managed job skipped because of operation-lock contention; certification requires a real execution: $unit"\n                else\n                    log "Managed job did not execute successfully: $unit status=${status:-unknown}"\n                fi\n                return 1\n            }\n            ;;\n    esac\n}\n\nsystemd_jobs() {\n    local unit before_start\n    for unit in \\\n        vaultwarden-health.service \\\n        vaultwarden-db-backup.service \\\n        vaultwarden-full-backup.service \\\n        vaultwarden-maintenance.service \\\n        vaultwarden-dns-update.service \\\n        vaultwarden-firewall-update.service; do\n        if [[ "$unit" == "vaultwarden-dns-update.service" ]]; then\n            validate_dns_mutation_scope\n        fi\n        before_start="$(systemctl show "$unit" --property=ExecMainStartTimestampMonotonic --value 2>/dev/null || true)"\n        systemctl start "$unit"\n        systemd_job_execution_succeeded "$unit" "$before_start" || return 1\n    done\n}\n\nmanual_systemd_install_check()'''
+          text = sub_once(
+              text,
+              r'^systemd_jobs\(\) \{\n.*?^\}\n\nmanual_systemd_install_check\(\)',
+              systemd_repl,
+              'systemd execution proof',
+          )
+
+          recipient_repl = '''recovery_kit_recipient() (\n    local kit="$1" workspace="" key_file recipient\n    workspace="$(create_sensitive_workspace acceptance-recovery-key)" || return 1\n    trap '[[ -z "${workspace:-}" ]] || remove_sensitive_workspace "$workspace" >/dev/null 2>&1 || true' EXIT\n    key_file="$workspace/recovery-kit-age-key.txt"\n    install -m 0600 /dev/null "$key_file" || return 1\n    write_recovery_kit_identity "$kit" "$key_file" || return 1\n    recipient="$(age-keygen -y "$key_file" 2>/dev/null)" || return 1\n    [[ "$recipient" == age1* ]] || return 1\n    remove_sensitive_workspace "$workspace" || return 1\n    workspace=""\n    printf '%s\\n' "$recipient"\n)\n\nvalidate_recovery_recipient_binding()'''
+          text = sub_once(
+              text,
+              r'^recovery_kit_recipient\(\) \{\n.*?^\}\n\nvalidate_recovery_recipient_binding\(\)',
+              recipient_repl,
+              'volatile recipient derivation',
+          )
+
+          export_funcs = '''recovery_kit_inventory() {\n    local recovery_dir="/root/vaultwarden-recovery"\n    [[ -d "$recovery_dir" ]] || return 0\n    find "$recovery_dir" -maxdepth 1 -type f -name 'vaultwarden-recovery-kit-*.txt' -print 2>/dev/null \\\n        | LC_ALL=C sort\n}\n\nexport_post_restore_full_recovery_kit() {\n    local before after kit restore_epoch mtime digest\n    local -a new_kits=()\n    before="$STATE_ROOT/post-restore-kit-before.list"\n    after="$STATE_ROOT/post-restore-kit-after.list"\n    recovery_kit_inventory > "$before"\n    log 'Exporting the canonical full post-restore recovery kit. If prompted about encrypted email, answer no so the protected local file remains available for the custody copy.'\n    bash ./utilities/secrets-export-recovery-kit.sh\n    recovery_kit_inventory > "$after"\n    mapfile -t new_kits < <(comm -13 "$before" "$after")\n    [[ ${#new_kits[@]} -eq 1 ]] || {\n        log "Expected exactly one newly published full recovery kit; found ${#new_kits[@]}."\n        log 'If encrypted email removed the local plaintext copy, resume this phase and decline email delivery so the exact exported kit can be copied to the recovery medium.'\n        return 1\n    }\n    kit="${new_kits[0]}"\n    [[ -f "$kit" && ! -L "$kit" ]] || return 1\n    restore_epoch="$(meta_get RESTORE_COMPLETED_EPOCH)"\n    mtime="$(stat -c '%Y' "$kit")"\n    [[ "$restore_epoch" =~ ^[0-9]+$ && "$mtime" =~ ^[0-9]+$ ]] || return 1\n    (( mtime >= restore_epoch )) || {\n        log 'Canonical full recovery kit predates the completed restore.'\n        return 1\n    }\n    recovery_kit_has_integrity_hmac "$kit" || {\n        log 'Canonical full recovery kit is missing a usable backup-integrity HMAC field.'\n        return 1\n    }\n    digest="$(sha_file "$kit")"\n    meta_add POST_RESTORE_EXPORTED_KIT_BASENAME "$(basename "$kit")"\n    meta_add POST_RESTORE_EXPORTED_KIT_SHA256 "$digest"\n    log "Canonical full post-restore recovery kit exported: $kit"\n    log 'Copy this exact file to the non-root mounted recovery medium, then resume with --post-restore-recovery-kit FILE.'\n}\n\n'''
+          text = replace_once(
+              text,
+              'validate_post_restore_recovery_kit() {\n',
+              export_funcs + 'validate_post_restore_recovery_kit() {\n',
+              'post-restore full-kit export helpers',
+          )
+
+          text = replace_once(
+              text,
+              '    local path root_dev kit_dev kit_target restore_epoch mtime old_digest new_digest\n',
+              '    local path root_dev kit_dev kit_target restore_epoch mtime old_digest new_digest exported_digest exported_basename\n',
+              'post-restore validation locals',
+          )
+
+          old_missing = '''    [[ -n "$POST_RESTORE_RECOVERY_KIT" ]] || {\n        log 'Copy the newly rotated recovery handoff to a durable off-host mounted recovery medium.'\n        find /root/vaultwarden-recovery -maxdepth 1 -type f -name 'vaultwarden-recovery-kit-*' -print 2>/dev/null || true\n        die 'Resume with --post-restore-recovery-kit FILE after the off-host copy is secured.'\n    }\n'''
+          new_missing = '''    [[ -n "$POST_RESTORE_RECOVERY_KIT" ]] || {\n        exported_basename="$(meta_get POST_RESTORE_EXPORTED_KIT_BASENAME)"\n        log 'Canonical restore also publishes vaultwarden-age-key-rotation-*.txt; that file is only an Age-rotation handoff and is NOT a full recovery kit.'\n        if [[ -n "$exported_basename" ]]; then\n            log "Copy the exact canonical full kit exported by this run: /root/vaultwarden-recovery/$exported_basename"\n        else\n            log 'No canonical full recovery-kit export is checkpointed; resume the recovery-export phase first.'\n        fi\n        die 'Resume with --post-restore-recovery-kit FILE after that exact full kit is secured on the external recovery medium.'\n    }\n'''
+          text = replace_once(text, old_missing, new_missing, 'handoff/full-kit distinction')
+
+          old_digests = '''    old_digest="$(meta_get RECOVERY_KIT_SHA256)"\n    new_digest="$(sha_file "$path")"\n    [[ "$new_digest" != "$old_digest" ]] || die 'Post-restore recovery kit matches the pre-DR kit; rotated custody was not proven.'\n'''
+          new_digests = '''    recovery_kit_has_integrity_hmac "$path" \\\n        || die 'Post-restore recovery kit is missing a usable backup-integrity HMAC field.'\n    old_digest="$(meta_get RECOVERY_KIT_SHA256)"\n    new_digest="$(sha_file "$path")"\n    exported_digest="$(meta_get POST_RESTORE_EXPORTED_KIT_SHA256)"\n    [[ "$exported_digest" =~ ^[0-9a-f]{64}$ ]] \\\n        || die 'Canonical post-restore full recovery-kit export digest is missing.'\n    [[ "$new_digest" == "$exported_digest" ]] \\\n        || die 'Post-restore recovery kit does not match the exact canonical full kit exported by this acceptance run.'\n    [[ "$new_digest" != "$old_digest" ]] || die 'Post-restore recovery kit matches the pre-DR kit; rotated custody was not proven.'\n'''
+          text = replace_once(text, old_digests, new_digests, 'exact exported kit binding')
+
+          text = text.replace('verify_bound_backup_with_kit', 'verify_bound_backup_with_recovery_kit')
+          text = text.replace('pre-dr-recovery-kit-decrypt', 'pre-dr-recovery-kit-inspect')
+          text = text.replace('post-dr-recovery-kit-decrypt', 'post-dr-recovery-kit-inspect')
+
+          text = replace_once(
+              text,
+              'step exact-full-restore env RCLONE_REMOTE_NAME="$RCLONE_REMOTE"',
+              'step exact-full-restore run_with_sensitive_tmp env RCLONE_REMOTE_NAME="$RCLONE_REMOTE"',
+              'volatile exact restore wrapper',
+          )
+          text = replace_once(
+              text,
+              'bash ./restore.sh interactive --file "$BOUND_BACKUP_FILE"',
+              'bash ./restore.sh interactive --remote --file "$BOUND_BACKUP_FILE"',
+              'bootstrap exact file restore',
+          )
+
+          old_phase = '''                step application-after-dr "$APPLICATION_E2E"\n                save_phase recovery-custody\n                ;;\n            recovery-custody)\n'''
+          new_phase = '''                step application-after-dr "$APPLICATION_E2E"\n                save_phase recovery-export\n                ;;\n            recovery-export)\n                step post-restore-full-kit-export export_post_restore_full_recovery_kit\n                save_phase recovery-custody\n                ;;\n            recovery-custody)\n'''
+          text = replace_once(text, old_phase, new_phase, 'recovery export phase')
+
+          controller.write_text(text)
+
+          test = Path('tests/suites/operations/case-host-acceptance.bash')
+          t = test.read_text()
+
+          age_pattern = r'''# Rotated recovery custody is tied to the active operational Age recipient,\n# not merely to a different whole-file digest\.\n\(\n.*?\n\)\n\n# Canary creation must precede the specifically bound full backup\. Restore'''
+          age_repl = '''# Rotated recovery custody is tied to the active operational Age recipient,\n# not merely to a different whole-file digest. Acceptance-owned private-key\n# staging is forced through the canonical volatile-workspace abstraction.\n(\n  AT="$T/age-binding"\n  mkdir -p "$AT/state"\n  # shellcheck disable=SC2034 # consumed by sourced recovery helpers\n  STATE_ROOT="$AT/state"\n  create_sensitive_workspace(){\n    local ws="$AT/volatile"\n    rm -rf -- "$ws"\n    mkdir -m 0700 "$ws"\n    printf '%s\\n' "$ws"\n  }\n  remove_sensitive_workspace(){ rm -rf -- "$1"; }\n  age-keygen -o "$AT/old.key" >/dev/null 2>&1\n  age-keygen -o "$AT/new.key" >/dev/null 2>&1\n  age-keygen -o "$AT/other.key" >/dev/null 2>&1\n  cat "$AT/old.key" > "$AT/old.kit"; printf 'END OF RECOVERY KIT\\n' >> "$AT/old.kit"\n  cat "$AT/new.key" > "$AT/new.kit"; printf 'END OF RECOVERY KIT\\n' >> "$AT/new.kit"\n  cat "$AT/other.key" > "$AT/other.kit"; printf 'END OF RECOVERY KIT\\n' >> "$AT/other.kit"\n  RECOVERY_KIT="$AT/old.kit"\n  validate_recovery_recipient_binding "$AT/new.kit" "$AT/new.key" \\\n    || fail "matching rotated recovery identity was rejected"\n  if ( validate_recovery_recipient_binding "$AT/other.kit" "$AT/new.key" ) >/dev/null 2>&1; then\n    fail "unrelated valid recovery identity was accepted"\n  fi\n  cp "$AT/old.kit" "$AT/modified-old.kit"\n  printf '# digest-only change\\n' >> "$AT/modified-old.kit"\n  if ( validate_recovery_recipient_binding "$AT/modified-old.kit" "$AT/old.key" ) >/dev/null 2>&1; then\n    fail "modified copy of the old Age identity was accepted as rotated custody"\n  fi\n\n  {\n    cat "$AT/new.key"\n    printf '[Backup integrity HMAC key (auto-generated)]\\nfixture-integrity-key\\nEND OF RECOVERY KIT\\n'\n  } > "$AT/full.kit"\n  recovery_kit_has_integrity_hmac "$AT/full.kit" \\\n    || fail "full recovery kit HMAC field was rejected"\n  if recovery_kit_has_integrity_hmac "$AT/new.kit"; then\n    fail "Age-only handoff was accepted as a full recovery kit"\n  fi\n)\n\n# Recovery-point proof delegates to canonical read-only restore inspect, so the\n# historical recovery-kit HMAC and Age identity are both validated.\ninspect_function="$(sed -n '/^verify_bound_backup_with_recovery_kit()/,/^}/p' "$A")"\ngrep -Fq 'restore.sh inspect --remote --file "$BOUND_BACKUP_FILE"' <<< "$inspect_function" \\\n  || fail "recovery proof does not use canonical inspect on the exact file"\ngrep -Fq -- '--from-recovery-kit "$kit"' <<< "$inspect_function" \\\n  || fail "canonical inspect does not receive the recovery kit"\n! grep -Fq 'age -d' <<< "$inspect_function" \\\n  || fail "acceptance recovery proof still performs a custom Age-only decrypt"\ngrep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \\\n  || fail "delegated restore fallback is not forced through volatile sensitive storage"\n! grep -Fq 'mktemp "$STATE_ROOT/.verify-age-key' "$A" \\\n  || fail "acceptance still stages a private Age identity under persistent STATE_ROOT"\n! grep -Fq 'mktemp "$STATE_ROOT/.recovery-kit-age-key' "$A" \\\n  || fail "recipient derivation still stages a private Age identity under persistent STATE_ROOT"\n\n# The foreground systemd acceptance must reject exit 75 contention skips and\n# require a new ExecStart timestamp for the invocation being certified.\n(\n  MOCK_STATUS=0\n  MOCK_START=200\n  MOCK_RESULT=success\n  systemctl(){\n    case "$*" in\n      *ExecMainStartTimestampMonotonic*) printf '%s\\n' "$MOCK_START" ;;\n      *--property=Result*) printf '%s\\n' "$MOCK_RESULT" ;;\n      *--property=ExecMainStatus*) printf '%s\\n' "$MOCK_STATUS" ;;\n      *) return 1 ;;\n    esac\n  }\n  systemd_job_execution_succeeded vaultwarden-full-backup.service 100 \\\n    || fail "real systemd job execution result was rejected"\n  MOCK_STATUS=75\n  if systemd_job_execution_succeeded vaultwarden-full-backup.service 100 >/dev/null 2>&1; then\n    fail "systemd contention skip exit 75 was accepted as certification"\n  fi\n  MOCK_STATUS=1\n  systemd_job_execution_succeeded vaultwarden-health.service 100 \\\n    || fail "health advisory exit 1 should count as a real health execution"\n  if systemd_job_execution_succeeded vaultwarden-db-backup.service 100 >/dev/null 2>&1; then\n    fail "nonzero DB backup result was accepted"\n  fi\n  MOCK_STATUS=0\n  MOCK_START=100\n  if systemd_job_execution_succeeded vaultwarden-full-backup.service 100 >/dev/null 2>&1; then\n    fail "stale systemd execution timestamp was accepted"\n  fi\n)\n\n# Canary creation must precede the specifically bound full backup. Restore'''
+          t, n = re.subn(age_pattern, age_repl, t, count=1, flags=re.M | re.S)
+          if n != 1:
+              raise SystemExit(f'host-acceptance Age block: expected one match, found {n}')
+
+          t = replace_once(
+              t,
+              'source_kit_decrypt_line="$(grep -n \'pre-dr-recovery-kit-decrypt verify_bound_backup_with_kit DR_SOURCE\' "$A" | cut -d: -f1)"',
+              'source_kit_decrypt_line="$(grep -n \'pre-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit DR_SOURCE\' "$A" | cut -d: -f1)"',
+              'source inspect ordering probe',
+          )
+          t = replace_once(
+              t,
+              'exact_restore_line="$(grep -n \'bash ./restore.sh interactive --file \\\"\\$BOUND_BACKUP_FILE\\\"\' "$A" | cut -d: -f1)"',
+              'exact_restore_line="$(grep -n \'bash ./restore.sh interactive --remote --file \\\"\\$BOUND_BACKUP_FILE\\\"\' "$A" | cut -d: -f1)"',
+              'bootstrap exact restore ordering probe',
+          )
+          t = replace_once(
+              t,
+              'e2e_line="$(grep -n \'application-after-dr\' "$A" | cut -d: -f1)"\n',
+              'e2e_line="$(grep -n \'application-after-dr\' "$A" | cut -d: -f1)"\nexport_line="$(grep -n \'post-restore-full-kit-export export_post_restore_full_recovery_kit\' "$A" | cut -d: -f1)"\n',
+              'recovery export ordering probe',
+          )
+          t = replace_once(
+              t,
+              'final_decrypt_line="$(grep -n \'post-dr-recovery-kit-decrypt verify_bound_backup_with_kit POST_DR\' "$A" | cut -d: -f1)"',
+              'final_decrypt_line="$(grep -n \'post-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit POST_DR\' "$A" | cut -d: -f1)"',
+              'final inspect ordering probe',
+          )
+          t = replace_once(
+              t,
+              '(( e2e_line < custody_line && custody_line < activate_line && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \\\n  || fail "post-restore custody/automation/final-backup sequencing regressed"',
+              '(( e2e_line < export_line && export_line < custody_line && custody_line < activate_line \\\n   && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \\\n  || fail "post-restore full-kit-export/custody/automation/final-backup sequencing regressed"',
+              'post-restore ordering assertion',
+          )
+
+          final_assertions = '''grep -Fq 'POST_RESTORE_AGE_RECIPIENT_HASH' "$A" || fail "rotated Age recipient is not checkpointed"\n'''
+          final_replacement = final_assertions + '''grep -Fq 'POST_RESTORE_EXPORTED_KIT_SHA256' "$A" || fail "canonical full recovery-kit export is not digest-bound"\ngrep -Fq 'does not match the exact canonical full kit exported by this acceptance run' "$A" \\\n  || fail "external recovery custody is not bound to the exact canonical export"\ngrep -Fq 'secrets-export-recovery-kit.sh' "$A" \\\n  || fail "controller never invokes the canonical full recovery-kit exporter"\n'''
+          t = replace_once(t, final_assertions, final_replacement, 'full-kit assertions')
+          test.write_text(t)
+
+          doc = Path('docs/HOST-ACCEPTANCE.md')
+          d = doc.read_text()
+          replacements = [
+              (
+                  '5. installed systemd validation and one foreground start of each managed recurring job, with the DNS updater protected by an explicit external-mutation gate;',
+                  '5. installed systemd validation and one proven foreground execution of each managed recurring job, rejecting operation-lock exit `75` skips, with the DNS updater protected by an explicit external-mutation gate;',
+              ),
+              (
+                  '9. exact re-download of the checkpoint-bound full backup cohort from rclone and restore of that staged file using the external pre-DR recovery kit and `--start-policy manual`;',
+                  '9. exact re-download of the checkpoint-bound full backup cohort from rclone and bootstrap restore of that staged local file using canonical `--remote --file`, the external pre-DR recovery kit, and `--start-policy manual`; `--remote` enables the supported missing-environment bootstrap path but does not replace the exact `--file` selection;',
+              ),
+              (
+                  '12. durable custody of the newly rotated recovery kit on a non-root mounted recovery medium, with its Age identity proven to match the live rotated operational key and to differ from the pre-DR identity;',
+                  '12. canonical export of a new **full recovery kit** after Age rotation, followed by an exact-digest copy of that exported kit to a non-root mounted recovery medium, with its Age identity proven to match the live rotated operational key and to differ from the pre-DR identity;',
+              ),
+              (
+                  '15. exact re-download of that final full backup and an `age` decrypt probe using the **copied post-restore recovery kit itself**.',
+                  '15. exact re-download of that final full backup and canonical read-only `restore.sh inspect` authentication/decrypt preflight using the **copied post-restore recovery kit itself**, proving both its backup-integrity HMAC and Age identity.',
+              ),
+              (
+                  '- after restore, the copied rotated recovery-kit path/digest and recipient binding.',
+                  '- after restore, the exact canonical full recovery-kit export digest plus the copied external kit path/digest and recipient binding.',
+              ),
+              (
+                  'Before any reboot/uninstall destructive transition, the controller re-downloads that exact bound remote source and performs an `age` decrypt probe with the external **pre-DR recovery kit**. This proves that the retained kit supplied to the drill can actually decrypt the exact offsite recovery point that will be used after reset; a wrong or stale kit fails while the original host is still intact.',
+                  'Before any reboot/uninstall destructive transition, the controller re-downloads that exact bound remote source and runs canonical read-only `restore.sh inspect --remote --file ... --from-recovery-kit ...`. Canonical inspect loads the recovery kit\'s historical backup-integrity HMAC key, authenticates the `.sha256.hmac` cohort, decrypts the archive with its Age identity, and performs restore preflight without stopping services or modifying live state. A wrong, stale, or Age-only kit therefore fails while the original host is still intact.',
+              ),
+              (
+                  'After uninstall, the controller does not call `restore.sh latest`. It downloads the four required members of that exact remote cohort (`.age`, `.sha256`, `.sha256.hmac`, `.meta`) into the root-only acceptance state area, verifies the archive and cohort digests against the checkpoint, and calls canonical restore with `--file` on that staged full backup. The post-restore E2E invocation must find the same canary.',
+                  'After uninstall, the controller does not call `restore.sh latest`. It downloads the four required members of that exact remote cohort (`.age`, `.sha256`, `.sha256.hmac`, `.meta`) into the root-only acceptance state area, verifies the archive and cohort digests against the checkpoint, and calls canonical restore with `--remote --file` on that staged full backup. The explicit local `--file` remains authoritative; `--remote` is present only to enter canonical bare-metal/bootstrap mode after `--test-reset` removed the runtime environment. The post-restore E2E invocation must find the same canary.',
+              ),
+              (
+                  '2. canonical `restore.sh interactive --file <staged-full-backup> --from-recovery-kit ... --no-backup --start-policy manual --force`;',
+                  '2. canonical `restore.sh interactive --remote --file <staged-full-backup> --from-recovery-kit ... --no-backup --start-policy manual --force`; the local file is still the exact restore source while `--remote` enables the supported missing-environment bootstrap path;',
+              ),
+              (
+                  'At `recovery-custody` the controller stops until the newly generated recovery handoff is copied to durable off-host storage. Resume with the same bound options plus:',
+                  'After post-restore E2E succeeds, the controller enters `recovery-export` and invokes the canonical `utilities/secrets-export-recovery-kit.sh`. This is deliberately separate from the automatic `vaultwarden-age-key-rotation-<timestamp>.txt` handoff: that handoff contains the rotated Age identity only and ends with `END OF AGE KEY ROTATION HANDOFF`; it is **not** a full recovery kit and does not carry the backup-integrity HMAC required for authenticated restore.\n\nWhen the canonical exporter asks whether to email an encrypted ZIP, answer **no** for this drill so the root-owned `vaultwarden-recovery-kit-<timestamp>-<id>.txt` remains temporarily under `/root/vaultwarden-recovery` for the custody copy. The controller checkpoints the exact exported full-kit digest, then enters `recovery-custody`. Copy that exact file to durable off-host storage and resume with the same bound options plus:',
+              ),
+              (
+                  '- contain the canonical recovery-kit completion marker and exactly one Age private identity;\n- have a digest different from the pre-DR recovery kit;',
+                  '- contain the canonical recovery-kit completion marker, exactly one Age private identity, and a populated `Backup integrity HMAC key (auto-generated)` field;\n- have a digest exactly equal to the canonical full recovery kit exported and checkpointed by this run;\n- have a digest different from the pre-DR recovery kit;',
+              ),
+              (
+                  'After automation is activated, the final full backup is created with full verification and rclone delivery. The controller binds that exact backup, re-downloads the exact encrypted archive from rclone, extracts the Age identity from the copied post-restore kit into a root-only temporary file, and performs an `age -d ... -o /dev/null` decrypt probe. A run cannot reach `FULL ACCEPTANCE PASSED` merely because the kit looks valid; the copied retained identity must actually decrypt the final offsite ciphertext.',
+                  'After automation is activated, the final full backup is created with full verification and rclone delivery. The controller binds that exact backup, re-downloads its authenticated cohort, and runs canonical read-only `restore.sh inspect --remote --file ... --from-recovery-kit ...` with the copied post-restore full kit. This validates the kit\'s HMAC against the final cohort and its Age identity against the ciphertext. Acceptance-owned key staging and the delegated restore TMPDIR fallback both use the repository\'s verified volatile sensitive-workspace abstraction rather than persistent `/var/tmp`.',
+              ),
+              (
+                  '- the pre-DR external recovery kit\'s successful decrypt probe against that exact offsite source;',
+                  '- the pre-DR external recovery kit\'s successful canonical authenticated inspect of that exact offsite source;',
+              ),
+              (
+                  '- evidence that the copied rotated recovery kit\'s recipient matches the live rotated key;',
+                  '- the canonical post-restore full recovery-kit export digest, proof that the external copy matches it exactly, and evidence that its recipient matches the live rotated key;',
+              ),
+              (
+                  '- the copied recovery kit\'s successful decrypt probe against the exact final offsite full backup.',
+                  '- the copied full recovery kit\'s successful canonical authenticated inspect against the exact final offsite full backup.',
+              ),
+          ]
+          for old, new in replacements:
+              d = replace_once(d, old, new, f'doc replacement: {old[:50]}')
+          doc.write_text(d)
+          PY
+
+          bash -n utilities/noble-host-acceptance.sh
+          bash -n tests/suites/operations/case-host-acceptance.bash
+          git diff --check
+
+      - name: Install focused dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age shellcheck
+          YQ_VERSION="v4.53.3"
+          YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /tmp/yq
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+
+      - name: Validate focused contracts and regenerate docs
+        run: |
+          bash tests/suites/operations/case-host-acceptance.bash
+          shellcheck -x --severity=warning utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash
+          make docs
+          git diff --check
+          bash tests/suites/operations/case-host-acceptance.bash
+
+      - name: Commit hardened implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash docs/HOST-ACCEPTANCE.md docs/COMMAND-REFERENCE.md
+          git diff --cached --quiet && { echo 'No changes to commit'; exit 1; }
+          git commit -m "test: harden bootstrap and recovery acceptance"
+          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
