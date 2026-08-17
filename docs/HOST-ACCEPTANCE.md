@@ -12,17 +12,17 @@ A full run proves the repository's supported Noble host path by orchestrating:
 2. live health, email, pre-production drill, and smoke checks;
 3. the external application E2E hook, which creates/records the DR canary;
 4. an explicit DB backup plus a **new full backup created after the canary**, with that full backup's exact basename, archive SHA-256, authenticated cohort digest, and rclone location checkpoint-bound;
-5. installed systemd validation and one foreground start of each managed recurring job, with the DNS updater protected by an explicit external-mutation gate;
+5. installed systemd validation and one proven foreground execution of each managed recurring job, rejecting operation-lock exit `75` skips, with the DNS updater protected by an explicit external-mutation gate;
 6. Docker daemon restart followed by smoke testing;
 7. a real reboot, verified by Linux boot ID;
 8. canonical `--test-reset` uninstall plus independent residual assertions;
-9. exact re-download of the checkpoint-bound full backup cohort from rclone and restore of that staged file using the external pre-DR recovery kit and `--start-policy manual`;
+9. exact re-download of the checkpoint-bound full backup cohort from rclone and bootstrap restore of that staged local file using canonical `--remote --file`, the external pre-DR recovery kit, and `--start-policy manual`; `--remote` enables the supported missing-environment bootstrap path but does not replace the exact `--file` selection;
 10. an immediate post-restore checkpoint **before** permission repair, startup, health, email, drill, or E2E validation, so a later validation failure cannot repeat a successful destructive restore;
 11. post-restore health, email, drill, and application E2E while recurring timers remain inactive, including assertion of the same pre-DR canary;
-12. durable custody of the newly rotated recovery kit on a non-root mounted recovery medium, with its Age identity proven to match the live rotated operational key and to differ from the pre-DR identity;
+12. canonical export of a new **full recovery kit** after Age rotation, followed by an exact-digest copy of that exported kit to a non-root mounted recovery medium, with its Age identity proven to match the live rotated operational key and to differ from the pre-DR identity;
 13. only then, activation and canonical validation of systemd automation, protected again by the DNS mutation scope gate;
 14. fresh DB and fully verified full rclone recovery points encrypted to the new operational recipient; and
-15. exact re-download of that final full backup and an `age` decrypt probe using the **copied post-restore recovery kit itself**.
+15. exact re-download of that final full backup and canonical read-only `restore.sh inspect` authentication/decrypt preflight using the **copied post-restore recovery kit itself**, proving both its backup-integrity HMAC and Age identity.
 
 `FULL ACCEPTANCE PASSED` is reachable only after the real-reboot, exact-source destructive DR, rotated-recovery-custody, external-mutation, automation, final-backup, and copied-kit remote-decrypt gates succeed.
 
@@ -41,7 +41,7 @@ The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-nob
 - the reboot policy;
 - for destructive runs, the canonical project-state path;
 - the exact canary-inclusive DR source full-backup identity and digests; and
-- after restore, the copied rotated recovery-kit path/digest and recipient binding.
+- after restore, the exact canonical full recovery-kit export digest plus the copied external kit path/digest and recipient binding.
 
 `resume` fails if any bound operator input changes. The controller compares `/proc/sys/kernel/random/boot_id` with the saved pre-reboot value, so rerunning `resume` without rebooting cannot satisfy the reboot gate.
 
@@ -98,9 +98,9 @@ The hook is external because this repository does not own a browser/client autom
 
 On the pre-DR invocation, create/record a unique canary such as `NOBLE-DR-CANARY-<run-id>`. **Only after that hook succeeds** does the controller create the full DR source backup. It snapshots the full-backup inventory before/after that command and requires exactly one newly published full backup. That backup's exact basename, archive digest, cohort digest, creation time, and remote object identity are checkpointed.
 
-Before any reboot/uninstall destructive transition, the controller re-downloads that exact bound remote source and performs an `age` decrypt probe with the external **pre-DR recovery kit**. This proves that the retained kit supplied to the drill can actually decrypt the exact offsite recovery point that will be used after reset; a wrong or stale kit fails while the original host is still intact.
+Before any reboot/uninstall destructive transition, the controller re-downloads that exact bound remote source and runs canonical read-only `restore.sh inspect --remote --file ... --from-recovery-kit ...`. Canonical inspect loads the recovery kit's historical backup-integrity HMAC key, authenticates the `.sha256.hmac` cohort, decrypts the archive with its Age identity, and performs restore preflight without stopping services or modifying live state. A wrong, stale, or Age-only kit therefore fails while the original host is still intact.
 
-After uninstall, the controller does not call `restore.sh latest`. It downloads the four required members of that exact remote cohort (`.age`, `.sha256`, `.sha256.hmac`, `.meta`) into the root-only acceptance state area, verifies the archive and cohort digests against the checkpoint, and calls canonical restore with `--file` on that staged full backup. The post-restore E2E invocation must find the same canary.
+After uninstall, the controller does not call `restore.sh latest`. It downloads the four required members of that exact remote cohort (`.age`, `.sha256`, `.sha256.hmac`, `.meta`) into the root-only acceptance state area, verifies the archive and cohort digests against the checkpoint, and calls canonical restore with `--remote --file` on that staged full backup. The explicit local `--file` remains authoritative; `--remote` is present only to enter canonical bare-metal/bootstrap mode after `--test-reset` removed the runtime environment. The post-restore E2E invocation must find the same canary.
 
 ## Start a full run
 
@@ -136,7 +136,7 @@ The resume fails unless the host boot ID changed and all checkpoint-bound inputs
 The destructive restore sequence is:
 
 1. exact checkpoint-bound remote cohort download and digest verification;
-2. canonical `restore.sh interactive --file <staged-full-backup> --from-recovery-kit ... --no-backup --start-policy manual --force`;
+2. canonical `restore.sh interactive --remote --file <staged-full-backup> --from-recovery-kit ... --no-backup --start-policy manual --force`; the local file is still the exact restore source while `--remote` enables the supported missing-environment bootstrap path;
 3. record restore completion and the restored backup identity; and
 4. **immediately checkpoint `post-restore-validation`**.
 
@@ -146,7 +146,9 @@ Only the next phase performs permission repair, startup, manual systemd installa
 
 A successful canonical full restore rotates to a new operational Age key. Future backups therefore require the **new** recovery material; the pre-DR kit used to enter the drill is not sufficient custody for the recovery points created afterward.
 
-At `recovery-custody` the controller stops until the newly generated recovery handoff is copied to durable off-host storage. Resume with the same bound options plus:
+After post-restore E2E succeeds, the controller enters `recovery-export` and invokes the canonical `utilities/secrets-export-recovery-kit.sh`. This is deliberately separate from the automatic `vaultwarden-age-key-rotation-<timestamp>.txt` handoff: that handoff contains the rotated Age identity only and ends with `END OF AGE KEY ROTATION HANDOFF`; it is **not** a full recovery kit and does not carry the backup-integrity HMAC required for authenticated restore.
+
+When the canonical exporter asks whether to email an encrypted ZIP, answer **no** for this drill so the root-owned `vaultwarden-recovery-kit-<timestamp>-<id>.txt` remains temporarily under `/root/vaultwarden-recovery` for the custody copy. The controller checkpoints the exact exported full-kit digest, then enters `recovery-custody`. Copy that exact file to durable off-host storage and resume with the same bound options plus:
 
 ```text
 --post-restore-recovery-kit /mnt/recovery/vaultwarden-recovery-kit-<timestamp>.txt
@@ -158,12 +160,13 @@ The supplied post-restore kit must:
 - be outside managed VaultWarden paths;
 - reside on a mounted filesystem whose device differs from the root filesystem;
 - be newer than the completed restore;
-- contain the canonical recovery-kit completion marker and exactly one Age private identity;
+- contain the canonical recovery-kit completion marker, exactly one Age private identity, and a populated `Backup integrity HMAC key (auto-generated)` field;
+- have a digest exactly equal to the canonical full recovery kit exported and checkpointed by this run;
 - have a digest different from the pre-DR recovery kit;
 - derive the **same Age recipient as the live `/etc/vaultwarden/age-key.txt`**; and
 - derive a recipient different from the pre-DR recovery kit.
 
-After automation is activated, the final full backup is created with full verification and rclone delivery. The controller binds that exact backup, re-downloads the exact encrypted archive from rclone, extracts the Age identity from the copied post-restore kit into a root-only temporary file, and performs an `age -d ... -o /dev/null` decrypt probe. A run cannot reach `FULL ACCEPTANCE PASSED` merely because the kit looks valid; the copied retained identity must actually decrypt the final offsite ciphertext.
+After automation is activated, the final full backup is created with full verification and rclone delivery. The controller binds that exact backup, re-downloads its authenticated cohort, and runs canonical read-only `restore.sh inspect --remote --file ... --from-recovery-kit ...` with the copied post-restore full kit. This validates the kit's HMAC against the final cohort and its Age identity against the ciphertext. Acceptance-owned key staging and the delegated restore TMPDIR fallback both use the repository's verified volatile sensitive-workspace abstraction rather than persistent `/var/tmp`.
 
 ## Evidence to retain
 
@@ -174,13 +177,13 @@ For the release/commit being certified, retain:
 - pre- and post-DR smoke output;
 - pre-DR E2E/canary output;
 - the exact bound DR source backup basename, archive SHA-256, cohort digest, and rclone location;
-- the pre-DR external recovery kit's successful decrypt probe against that exact offsite source;
+- the pre-DR external recovery kit's successful canonical authenticated inspect of that exact offsite source;
 - uninstall output and residual result;
 - exact-source restore output and the immediate post-restore checkpoint;
 - post-restore E2E proof of the same canary;
-- evidence that the copied rotated recovery kit's recipient matches the live rotated key;
+- the canonical post-restore full recovery-kit export digest, proof that the external copy matches it exactly, and evidence that its recipient matches the live rotated key;
 - DNS mutation-scope checks for the dedicated acceptance hostname;
 - final DB/full rclone backup verification; and
-- the copied recovery kit's successful decrypt probe against the exact final offsite full backup.
+- the copied full recovery kit's successful canonical authenticated inspect against the exact final offsite full backup.
 
 The PR/commit is not real-host certified until one full destructive run on a disposable supported Noble host completes with retained evidence. CI and mocked contract tests cannot substitute for that run.

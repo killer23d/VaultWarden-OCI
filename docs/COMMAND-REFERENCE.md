@@ -928,8 +928,9 @@ Full DR options:
   --destructive            Run same-host uninstall and exact full rclone restore
                            (also requires VW_NOBLE_TEST_DESTRUCTIVE=YES)
   --post-restore-recovery-kit FILE
-                           On recovery-custody resume, point to the newly rotated
-                           recovery kit copied to a non-root mounted recovery medium
+                           On recovery-custody resume, point to the canonical full
+                           recovery kit exported after restore and copied to a
+                           non-root mounted recovery medium
   --skip-reboot            Development-only. This can never produce FULL ACCEPTANCE.
 
 DNS mutation requires --allow-dns-mutation together with

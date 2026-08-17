@@ -186,18 +186,30 @@ fi
 )
 
 # Rotated recovery custody is tied to the active operational Age recipient,
-# not merely to a different whole-file digest.
+# not merely to a different whole-file digest. Acceptance-owned private-key
+# staging is forced through the canonical volatile-workspace abstraction.
 (
   AT="$T/age-binding"
   mkdir -p "$AT/state"
   # shellcheck disable=SC2034 # consumed by sourced recovery helpers
   STATE_ROOT="$AT/state"
+  create_sensitive_workspace(){
+    local ws="$AT/volatile"
+    rm -rf -- "$ws"
+    mkdir -m 0700 "$ws"
+    printf '%s
+' "$ws"
+  }
+  remove_sensitive_workspace(){ rm -rf -- "$1"; }
   age-keygen -o "$AT/old.key" >/dev/null 2>&1
   age-keygen -o "$AT/new.key" >/dev/null 2>&1
   age-keygen -o "$AT/other.key" >/dev/null 2>&1
-  cat "$AT/old.key" > "$AT/old.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/old.kit"
-  cat "$AT/new.key" > "$AT/new.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/new.kit"
-  cat "$AT/other.key" > "$AT/other.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/other.kit"
+  cat "$AT/old.key" > "$AT/old.kit"; printf 'END OF RECOVERY KIT
+' >> "$AT/old.kit"
+  cat "$AT/new.key" > "$AT/new.kit"; printf 'END OF RECOVERY KIT
+' >> "$AT/new.kit"
+  cat "$AT/other.key" > "$AT/other.kit"; printf 'END OF RECOVERY KIT
+' >> "$AT/other.kit"
   RECOVERY_KIT="$AT/old.kit"
   validate_recovery_recipient_binding "$AT/new.kit" "$AT/new.key" \
     || fail "matching rotated recovery identity was rejected"
@@ -205,68 +217,108 @@ fi
     fail "unrelated valid recovery identity was accepted"
   fi
   cp "$AT/old.kit" "$AT/modified-old.kit"
-  printf '# digest-only change\n' >> "$AT/modified-old.kit"
+  printf '# digest-only change
+' >> "$AT/modified-old.kit"
   if ( validate_recovery_recipient_binding "$AT/modified-old.kit" "$AT/old.key" ) >/dev/null 2>&1; then
     fail "modified copy of the old Age identity was accepted as rotated custody"
   fi
 
-  old_recipient="$(age-keygen -y "$AT/old.key")"
-  new_recipient="$(age-keygen -y "$AT/new.key")"
-  printf 'bound DR source payload\n' | age -r "$old_recipient" -o "$AT/dr-source-full.age"
-  printf 'bound post-DR payload\n' | age -r "$new_recipient" -o "$AT/post-dr-full.age"
-  META_FILE="$AT/metadata"
-  : > "$META_FILE"
-  meta_add DR_SOURCE_BACKUP_BASENAME full_backup_source_fixture.tar.zst.age
-  meta_add DR_SOURCE_BACKUP_ARCHIVE_SHA256 "$(sha_file "$AT/dr-source-full.age")"
-  meta_add DR_SOURCE_BACKUP_COHORT_SHA256 "$(printf '0%.0s' {1..64})"
-  meta_add POST_DR_BACKUP_BASENAME full_backup_fixture.tar.zst.age
-  meta_add POST_DR_BACKUP_ARCHIVE_SHA256 "$(sha_file "$AT/post-dr-full.age")"
-  meta_add POST_DR_BACKUP_COHORT_SHA256 "$(printf '0%.0s' {1..64})"
-  download_bound_backup(){
-    case "$1" in
-      DR_SOURCE)
-        # shellcheck disable=SC2034 # consumed by sourced verify_bound_backup_with_kit()
-        BOUND_BACKUP_FILE="$AT/dr-source-full.age"
-        ;;
-      POST_DR)
-        # shellcheck disable=SC2034 # consumed by sourced verify_bound_backup_with_kit()
-        BOUND_BACKUP_FILE="$AT/post-dr-full.age"
-        ;;
+  {
+    cat "$AT/new.key"
+    printf '[Backup integrity HMAC key (auto-generated)]
+fixture-integrity-key
+END OF RECOVERY KIT
+'
+  } > "$AT/full.kit"
+  recovery_kit_has_integrity_hmac "$AT/full.kit" \
+    || fail "full recovery kit HMAC field was rejected"
+  if recovery_kit_has_integrity_hmac "$AT/new.kit"; then
+    fail "Age-only handoff was accepted as a full recovery kit"
+  fi
+)
+
+# Recovery-point proof delegates to canonical read-only restore inspect, so the
+# historical recovery-kit HMAC and Age identity are both validated.
+inspect_function="$(sed -n '/^verify_bound_backup_with_recovery_kit()/,/^}/p' "$A")"
+grep -Fq 'restore.sh inspect --remote --file "$BOUND_BACKUP_FILE"' <<< "$inspect_function" \
+  || fail "recovery proof does not use canonical inspect on the exact file"
+grep -Fq -- '--from-recovery-kit "$kit"' <<< "$inspect_function" \
+  || fail "canonical inspect does not receive the recovery kit"
+! grep -Fq 'age -d' <<< "$inspect_function" \
+  || fail "acceptance recovery proof still performs a custom Age-only decrypt"
+grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
+  || fail "delegated restore fallback is not forced through volatile sensitive storage"
+! grep -Fq 'mktemp "$STATE_ROOT/.verify-age-key' "$A" \
+  || fail "acceptance still stages a private Age identity under persistent STATE_ROOT"
+! grep -Fq 'mktemp "$STATE_ROOT/.recovery-kit-age-key' "$A" \
+  || fail "recipient derivation still stages a private Age identity under persistent STATE_ROOT"
+
+# The foreground systemd acceptance must reject exit 75 contention skips and
+# require a new ExecStart timestamp for the invocation being certified.
+(
+  MOCK_STATUS=0
+  MOCK_START=200
+  MOCK_RESULT=success
+  systemctl(){
+    case "$*" in
+      *ExecMainStartTimestampMonotonic*) printf '%s
+' "$MOCK_START" ;;
+      *--property=Result*) printf '%s
+' "$MOCK_RESULT" ;;
+      *--property=ExecMainStatus*) printf '%s
+' "$MOCK_STATUS" ;;
       *) return 1 ;;
     esac
   }
-  verify_bound_backup_with_kit DR_SOURCE "$AT/old.kit" \
-    || fail "pre-DR recovery kit could not decrypt the bound DR source backup"
-  if ( verify_bound_backup_with_kit DR_SOURCE "$AT/other.kit" ) >/dev/null 2>&1; then
-    fail "unrelated pre-DR recovery kit decrypted the bound DR source backup"
+  systemd_job_execution_succeeded vaultwarden-full-backup.service 100 \
+    || fail "real systemd job execution result was rejected"
+  MOCK_STATUS=75
+  if systemd_job_execution_succeeded vaultwarden-full-backup.service 100 >/dev/null 2>&1; then
+    fail "systemd contention skip exit 75 was accepted as certification"
   fi
-  verify_bound_backup_with_kit POST_DR "$AT/new.kit" \
-    || fail "copied rotated recovery kit could not decrypt bound post-DR backup"
+  MOCK_STATUS=1
+  systemd_job_execution_succeeded vaultwarden-health.service 100 \
+    || fail "health advisory exit 1 should count as a real health execution"
+  if systemd_job_execution_succeeded vaultwarden-db-backup.service 100 >/dev/null 2>&1; then
+    fail "nonzero DB backup result was accepted"
+  fi
+  MOCK_STATUS=0
+  MOCK_START=100
+  if systemd_job_execution_succeeded vaultwarden-full-backup.service 100 >/dev/null 2>&1; then
+    fail "stale systemd execution timestamp was accepted"
+  fi
 )
 
 # Canary creation must precede the specifically bound full backup. Restore
 # must download that exact cohort and use --file, never remote 'latest'.
 canary_line="$(grep -n 'application-before-dr' "$A" | cut -d: -f1)"
 source_backup_line="$(grep -n 'dr-full-backup run_and_bind_full_backup DR_SOURCE' "$A" | cut -d: -f1)"
-source_kit_decrypt_line="$(grep -n 'pre-dr-recovery-kit-decrypt verify_bound_backup_with_kit DR_SOURCE' "$A" | cut -d: -f1)"
+source_kit_decrypt_line="$(grep -n 'pre-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit DR_SOURCE' "$A" | cut -d: -f1)"
 source_download_line="$(grep -n 'dr-source-download download_bound_backup DR_SOURCE restore-source' "$A" | cut -d: -f1)"
-exact_restore_line="$(grep -n 'bash ./restore.sh interactive --file \"\$BOUND_BACKUP_FILE\"' "$A" | cut -d: -f1)"
+exact_restore_line="$(grep -n 'bash ./restore.sh interactive --remote --file \"\$BOUND_BACKUP_FILE\"' "$A" | cut -d: -f1)"
 restore_checkpoint_line="$(grep -n 'save_phase post-restore-validation' "$A" | cut -d: -f1)"
 repair_line="$(grep -n 'repair-permissions bash ./utilities/repair-permissions.sh' "$A" | cut -d: -f1)"
 e2e_line="$(grep -n 'application-after-dr' "$A" | cut -d: -f1)"
+export_line="$(grep -n 'post-restore-full-kit-export export_post_restore_full_recovery_kit' "$A" | cut -d: -f1)"
 custody_line="$(grep -n 'validate_post_restore_recovery_kit' "$A" | tail -1 | cut -d: -f1)"
 activate_line="$(grep -n 'systemd-activate bash ./utilities/setup-systemd.sh install --enable-now' "$A" | cut -d: -f1)"
 final_backup_line="$(grep -n 'post-dr-full run_and_bind_full_backup POST_DR' "$A" | cut -d: -f1)"
-final_decrypt_line="$(grep -n 'post-dr-recovery-kit-decrypt verify_bound_backup_with_kit POST_DR' "$A" | cut -d: -f1)"
+final_decrypt_line="$(grep -n 'post-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit POST_DR' "$A" | cut -d: -f1)"
 (( canary_line < source_backup_line && source_backup_line < source_kit_decrypt_line \
    && source_kit_decrypt_line < source_download_line && source_download_line < exact_restore_line )) \
   || fail "canary/bound-backup/pre-DR-kit-proof/exact-restore sequencing regressed"
 (( exact_restore_line < restore_checkpoint_line && restore_checkpoint_line < repair_line && repair_line < e2e_line )) \
   || fail "successful restore is not checkpointed before post-restore validation"
-(( e2e_line < custody_line && custody_line < activate_line && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \
-  || fail "post-restore custody/automation/final-backup sequencing regressed"
+(( e2e_line < export_line && export_line < custody_line && custody_line < activate_line \
+   && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \
+  || fail "post-restore full-kit-export/custody/automation/final-backup sequencing regressed"
 ! grep -Fq 'restore.sh latest full --remote' "$A" || fail "controller still restores an unbound remote latest backup"
 grep -Fq 'POST_RESTORE_AGE_RECIPIENT_HASH' "$A" || fail "rotated Age recipient is not checkpointed"
+grep -Fq 'POST_RESTORE_EXPORTED_KIT_SHA256' "$A" || fail "canonical full recovery-kit export is not digest-bound"
+grep -Fq 'does not match the exact canonical full kit exported by this acceptance run' "$A" \
+  || fail "external recovery custody is not bound to the exact canonical export"
+grep -Fq 'secrets-export-recovery-kit.sh' "$A" \
+  || fail "controller never invokes the canonical full recovery-kit exporter"
 grep -Fq 'dns-mutation-scope-after-restore validate_dns_mutation_scope' "$A" \
   || fail "post-restore timer activation is not protected by the DNS mutation gate"
 

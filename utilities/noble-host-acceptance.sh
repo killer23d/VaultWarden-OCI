@@ -4,6 +4,10 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# Reuse the canonical volatile sensitive-workspace abstraction for all
+# acceptance-owned private-key staging and delegated restore TMPDIR fallback.
+# shellcheck source=../lib/crypto.sh
+source "$ROOT/lib/crypto.sh"
 STATE_ROOT="${VW_ACCEPTANCE_STATE_ROOT:-/var/tmp/vaultwarden-noble-acceptance}"
 STATE_FILE="$STATE_ROOT/state"
 META_FILE="$STATE_ROOT/metadata"
@@ -47,8 +51,9 @@ Full DR options:
   --destructive            Run same-host uninstall and exact full rclone restore
                            (also requires VW_NOBLE_TEST_DESTRUCTIVE=YES)
   --post-restore-recovery-kit FILE
-                           On recovery-custody resume, point to the newly rotated
-                           recovery kit copied to a non-root mounted recovery medium
+                           On recovery-custody resume, point to the canonical full
+                           recovery kit exported after restore and copied to a
+                           non-root mounted recovery medium
   --skip-reboot            Development-only. This can never produce FULL ACCEPTANCE.
 
 DNS mutation requires --allow-dns-mutation together with
@@ -344,25 +349,38 @@ write_recovery_kit_identity() {
     awk '/^AGE-SECRET-KEY-1/{print; count++} END { exit(count == 1 ? 0 : 1) }' "$kit" > "$output"
 }
 
-verify_bound_backup_with_kit() {
-    local prefix="$1" kit="$2" verify_root key_file archive_digest
+recovery_kit_has_integrity_hmac() {
+    local kit="$1"
+    awk '
+        $0 == "[Backup integrity HMAC key (auto-generated)]" {
+            count++
+            if ((getline value) > 0 && value != "" && value !~ /^</) valid++
+        }
+        END { exit(count == 1 && valid == 1 ? 0 : 1) }
+    ' "$kit"
+}
+
+run_with_sensitive_tmp() (
+    local workspace=""
+    workspace="$(create_sensitive_workspace acceptance-restore)" || return 1
+    trap '[[ -z "${workspace:-}" ]] || remove_sensitive_workspace "$workspace" >/dev/null 2>&1 || true' EXIT
+    TMPDIR="$workspace" "$@"
+)
+
+verify_bound_backup_with_recovery_kit() {
+    local prefix="$1" kit="$2" verify_root archive_digest
     verify_root="$STATE_ROOT/verify-${prefix,,}"
     download_bound_backup "$prefix" "verify-${prefix,,}"
-    key_file="$(mktemp "$STATE_ROOT/.verify-age-key.XXXXXX")" || return 1
-    chmod 0600 "$key_file"
-    if ! write_recovery_kit_identity "$kit" "$key_file"; then
-        rm -f -- "$key_file"
+    if ! run_with_sensitive_tmp env \
+            RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
+            RCLONE_CONFIG="$RCLONE_CONFIG_PATH" \
+            bash ./restore.sh inspect --remote --file "$BOUND_BACKUP_FILE" \
+            --from-recovery-kit "$kit"; then
         rm -rf -- "$verify_root"
         return 1
     fi
-    if ! age -d -i "$key_file" -o /dev/null "$BOUND_BACKUP_FILE" 2>/dev/null; then
-        rm -f -- "$key_file"
-        rm -rf -- "$verify_root"
-        return 1
-    fi
-    rm -f -- "$key_file"
     archive_digest="$(sha_file "$BOUND_BACKUP_FILE")"
-    meta_add "${prefix}_RECOVERY_KIT_DECRYPT_VERIFIED_SHA256" "$archive_digest"
+    meta_add "${prefix}_RECOVERY_KIT_INSPECT_VERIFIED_SHA256" "$archive_digest"
     rm -rf -- "$verify_root"
 }
 
@@ -378,8 +396,42 @@ validate_dns_mutation_scope() {
         || die "Configured runtime DOMAIN '$configured_domain' does not match the acknowledged DNS mutation domain '$DNS_MUTATION_DOMAIN'."
 }
 
+systemd_job_execution_succeeded() {
+    local unit="$1" before_start="$2" after_start result status
+    after_start="$(systemctl show "$unit" --property=ExecMainStartTimestampMonotonic --value 2>/dev/null || true)"
+    result="$(systemctl show "$unit" --property=Result --value 2>/dev/null || true)"
+    status="$(systemctl show "$unit" --property=ExecMainStatus --value 2>/dev/null || true)"
+
+    [[ "$after_start" =~ ^[0-9]+$ && "$after_start" != "0" && "$after_start" != "$before_start" ]] || {
+        log "Managed job did not record a new ExecStart invocation: $unit"
+        return 1
+    }
+    [[ "$result" == "success" ]] || {
+        log "Managed job result is not success: $unit result=${result:-unknown}"
+        return 1
+    }
+    case "$unit" in
+        vaultwarden-health.service)
+            [[ "$status" == "0" || "$status" == "1" ]] || {
+                log "Health job did not execute to an accepted real result: $unit status=${status:-unknown}"
+                return 1
+            }
+            ;;
+        *)
+            [[ "$status" == "0" ]] || {
+                if [[ "$status" == "75" ]]; then
+                    log "Managed job skipped because of operation-lock contention; certification requires a real execution: $unit"
+                else
+                    log "Managed job did not execute successfully: $unit status=${status:-unknown}"
+                fi
+                return 1
+            }
+            ;;
+    esac
+}
+
 systemd_jobs() {
-    local unit
+    local unit before_start
     for unit in \
         vaultwarden-health.service \
         vaultwarden-db-backup.service \
@@ -390,8 +442,9 @@ systemd_jobs() {
         if [[ "$unit" == "vaultwarden-dns-update.service" ]]; then
             validate_dns_mutation_scope
         fi
+        before_start="$(systemctl show "$unit" --property=ExecMainStartTimestampMonotonic --value 2>/dev/null || true)"
         systemctl start "$unit"
-        ! systemctl --quiet is-failed "$unit" || return 1
+        systemd_job_execution_succeeded "$unit" "$before_start" || return 1
     done
 }
 
@@ -436,22 +489,20 @@ verify_reboot_transition() {
     return 0
 }
 
-recovery_kit_recipient() {
-    local kit="$1" key_file recipient
-    key_file="$(mktemp "$STATE_ROOT/.recovery-kit-age-key.XXXXXX")" || return 1
-    chmod 0600 "$key_file"
-    if ! write_recovery_kit_identity "$kit" "$key_file"; then
-        rm -f -- "$key_file"
-        return 1
-    fi
-    if ! recipient="$(age-keygen -y "$key_file" 2>/dev/null)"; then
-        rm -f -- "$key_file"
-        return 1
-    fi
-    rm -f -- "$key_file"
+recovery_kit_recipient() (
+    local kit="$1" workspace="" key_file recipient
+    workspace="$(create_sensitive_workspace acceptance-recovery-key)" || return 1
+    trap '[[ -z "${workspace:-}" ]] || remove_sensitive_workspace "$workspace" >/dev/null 2>&1 || true' EXIT
+    key_file="$workspace/recovery-kit-age-key.txt"
+    install -m 0600 /dev/null "$key_file" || return 1
+    write_recovery_kit_identity "$kit" "$key_file" || return 1
+    recipient="$(age-keygen -y "$key_file" 2>/dev/null)" || return 1
     [[ "$recipient" == age1* ]] || return 1
-    printf '%s\n' "$recipient"
-}
+    remove_sensitive_workspace "$workspace" || return 1
+    workspace=""
+    printf '%s
+' "$recipient"
+)
 
 validate_recovery_recipient_binding() {
     local path="$1" live_key="${2:-/etc/vaultwarden/age-key.txt}"
@@ -471,12 +522,59 @@ validate_recovery_recipient_binding() {
     VALIDATED_RECOVERY_RECIPIENT="$new_recipient"
 }
 
+recovery_kit_inventory() {
+    local recovery_dir="/root/vaultwarden-recovery"
+    [[ -d "$recovery_dir" ]] || return 0
+    find "$recovery_dir" -maxdepth 1 -type f -name 'vaultwarden-recovery-kit-*.txt' -print 2>/dev/null \
+        | LC_ALL=C sort
+}
+
+export_post_restore_full_recovery_kit() {
+    local before after kit restore_epoch mtime digest
+    local -a new_kits=()
+    before="$STATE_ROOT/post-restore-kit-before.list"
+    after="$STATE_ROOT/post-restore-kit-after.list"
+    recovery_kit_inventory > "$before"
+    log 'Exporting the canonical full post-restore recovery kit. If prompted about encrypted email, answer no so the protected local file remains available for the custody copy.'
+    bash ./utilities/secrets-export-recovery-kit.sh
+    recovery_kit_inventory > "$after"
+    mapfile -t new_kits < <(comm -13 "$before" "$after")
+    [[ ${#new_kits[@]} -eq 1 ]] || {
+        log "Expected exactly one newly published full recovery kit; found ${#new_kits[@]}."
+        log 'If encrypted email removed the local plaintext copy, resume this phase and decline email delivery so the exact exported kit can be copied to the recovery medium.'
+        return 1
+    }
+    kit="${new_kits[0]}"
+    [[ -f "$kit" && ! -L "$kit" ]] || return 1
+    restore_epoch="$(meta_get RESTORE_COMPLETED_EPOCH)"
+    mtime="$(stat -c '%Y' "$kit")"
+    [[ "$restore_epoch" =~ ^[0-9]+$ && "$mtime" =~ ^[0-9]+$ ]] || return 1
+    (( mtime >= restore_epoch )) || {
+        log 'Canonical full recovery kit predates the completed restore.'
+        return 1
+    }
+    recovery_kit_has_integrity_hmac "$kit" || {
+        log 'Canonical full recovery kit is missing a usable backup-integrity HMAC field.'
+        return 1
+    }
+    digest="$(sha_file "$kit")"
+    meta_add POST_RESTORE_EXPORTED_KIT_BASENAME "$(basename "$kit")"
+    meta_add POST_RESTORE_EXPORTED_KIT_SHA256 "$digest"
+    log "Canonical full post-restore recovery kit exported: $kit"
+    log 'Copy this exact file to the non-root mounted recovery medium, then resume with --post-restore-recovery-kit FILE.'
+}
+
 validate_post_restore_recovery_kit() {
-    local path root_dev kit_dev kit_target restore_epoch mtime old_digest new_digest
+    local path root_dev kit_dev kit_target restore_epoch mtime old_digest new_digest exported_digest exported_basename
     [[ -n "$POST_RESTORE_RECOVERY_KIT" ]] || {
-        log 'Copy the newly rotated recovery handoff to a durable off-host mounted recovery medium.'
-        find /root/vaultwarden-recovery -maxdepth 1 -type f -name 'vaultwarden-recovery-kit-*' -print 2>/dev/null || true
-        die 'Resume with --post-restore-recovery-kit FILE after the off-host copy is secured.'
+        exported_basename="$(meta_get POST_RESTORE_EXPORTED_KIT_BASENAME)"
+        log 'Canonical restore also publishes vaultwarden-age-key-rotation-*.txt; that file is only an Age-rotation handoff and is NOT a full recovery kit.'
+        if [[ -n "$exported_basename" ]]; then
+            log "Copy the exact canonical full kit exported by this run: /root/vaultwarden-recovery/$exported_basename"
+        else
+            log 'No canonical full recovery-kit export is checkpointed; resume the recovery-export phase first.'
+        fi
+        die 'Resume with --post-restore-recovery-kit FILE after that exact full kit is secured on the external recovery medium.'
     }
     path="$(external_file "$POST_RESTORE_RECOVERY_KIT" 'post-restore recovery kit')"
     command -v findmnt >/dev/null 2>&1 || die 'findmnt is required to verify recovery-kit custody.'
@@ -493,8 +591,15 @@ validate_post_restore_recovery_kit() {
         || die 'Post-restore recovery kit is missing the canonical completion marker.'
     [[ "$(grep -c '^AGE-SECRET-KEY-1' "$path" 2>/dev/null || true)" == "1" ]] \
         || die 'Post-restore recovery kit does not contain exactly one Age private identity.'
+    recovery_kit_has_integrity_hmac "$path" \
+        || die 'Post-restore recovery kit is missing a usable backup-integrity HMAC field.'
     old_digest="$(meta_get RECOVERY_KIT_SHA256)"
     new_digest="$(sha_file "$path")"
+    exported_digest="$(meta_get POST_RESTORE_EXPORTED_KIT_SHA256)"
+    [[ "$exported_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || die 'Canonical post-restore full recovery-kit export digest is missing.'
+    [[ "$new_digest" == "$exported_digest" ]] \
+        || die 'Post-restore recovery kit does not match the exact canonical full kit exported by this acceptance run.'
     [[ "$new_digest" != "$old_digest" ]] || die 'Post-restore recovery kit matches the pre-DR kit; rotated custody was not proven.'
     validate_recovery_recipient_binding "$path"
     POST_RESTORE_RECOVERY_KIT="$path"
@@ -596,7 +701,7 @@ run_phases() {
                     RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./backup.sh sync
                 step remote-list env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
                     RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh list --remote
-                step pre-dr-recovery-kit-decrypt verify_bound_backup_with_kit DR_SOURCE "$RECOVERY_KIT"
+                step pre-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit DR_SOURCE "$RECOVERY_KIT"
                 save_phase automation
                 ;;
             automation)
@@ -646,8 +751,8 @@ run_phases() {
                 ;;
             restore)
                 step dr-source-download download_bound_backup DR_SOURCE restore-source
-                step exact-full-restore env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
-                    RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh interactive --file "$BOUND_BACKUP_FILE" \
+                step exact-full-restore run_with_sensitive_tmp env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
+                    RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh interactive --remote --file "$BOUND_BACKUP_FILE" \
                     --from-recovery-kit "$RECOVERY_KIT" --no-backup --start-policy manual --force
                 meta_add RESTORE_COMPLETED_EPOCH "$(date +%s)"
                 meta_add RESTORED_BACKUP_BASENAME "$(meta_get DR_SOURCE_BACKUP_BASENAME)"
@@ -663,6 +768,10 @@ run_phases() {
                 step email-after-restore bash ./maintenance.sh test-email --verbose
                 step pre-production-after-restore bash ./utilities/pre-production-drill.sh
                 step application-after-dr "$APPLICATION_E2E"
+                save_phase recovery-export
+                ;;
+            recovery-export)
+                step post-restore-full-kit-export export_post_restore_full_recovery_kit
                 save_phase recovery-custody
                 ;;
             recovery-custody)
@@ -681,7 +790,7 @@ run_phases() {
                     RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./backup.sh run db --rclone
                 step post-dr-full run_and_bind_full_backup POST_DR
                 step post-dr-verify bash ./backup.sh verify
-                step post-dr-recovery-kit-decrypt verify_bound_backup_with_kit POST_DR "$POST_RESTORE_RECOVERY_KIT"
+                step post-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit POST_DR "$POST_RESTORE_RECOVERY_KIT"
                 save_phase complete
                 ;;
             complete)
