@@ -28,7 +28,7 @@ A full run proves the repository's supported Noble host path by orchestrating:
 
 ## Checkpoint integrity
 
-The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. If `VW_ACCEPTANCE_STATE_ROOT` is overridden for a destructive run, it must be an absolute dedicated directory path outside the canonical uninstall survival scope; the controller rejects a symlink, a top-level host directory, or any state root that the drill could remove or make inaccessible. The checkpoint binds a run to:
+The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. If `VW_ACCEPTANCE_STATE_ROOT` is overridden for a destructive run, it must be an absolute dedicated directory path outside the canonical uninstall survival scope; the controller rejects a symlink, a top-level host directory, or any state root that the drill could remove or render inaccessible. The checkpoint binds a run to:
 
 - the exact Git commit SHA;
 - the host machine identity;
