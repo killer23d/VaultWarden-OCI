@@ -78,23 +78,84 @@ if ( PATH="$AT/bin:$PATH" VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" VW_UNIN
   fail "ambiguously mounted project state was accepted"
 fi
 
-# A destructive pre-DR recovery kit may not live in the canonical uninstaller's
-# recovery-handoff directory, because --test-reset can remove or reject files there.
+# Every dependency needed after --test-reset must live outside the canonical
+# resolved destructive scope. This covers custom boot-volume state, managed
+# installed trees, recovery handoffs, rclone credentials, E2E code, and the
+# controller checkpoint itself.
 (
-  AT="$T/recovery-survival"
-  mkdir -p "$AT/managed-recovery" "$AT/external"
-  managed="$AT/managed-recovery/vaultwarden-recovery-kit-20260816T010203Z-abcdef.txt"
-  external="$AT/external/recovery-kit.txt"
-  : > "$managed"
-  : > "$external"
-  if ( VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" validate_recovery_kit_survival "$managed" ) >/dev/null 2>&1; then
-    fail "pre-DR kit inside canonical uninstall recovery directory was accepted"
+  AT="$T/destructive-survival"
+  mkdir -p \
+    "$AT/project-state" "$AT/managed-opt" "$AT/managed-etc" \
+    "$AT/managed-runtime" "$AT/managed-recovery" "$AT/systemd" "$AT/external"
+  : > "$AT/fstab"
+  printf 'PROJECT_STATE_DIR=%s\n' "$AT/project-state" > "$AT/installed.env"
+
+  external_kit="$AT/external/recovery-kit.txt"
+  external_rclone="$AT/external/rclone.conf"
+  external_e2e="$AT/external/e2e.sh"
+  : > "$external_kit"
+  : > "$external_rclone"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$external_e2e"
+  chmod 0755 "$external_e2e"
+
+  RECOVERY_KIT="$external_kit"
+  RCLONE_CONFIG_PATH="$external_rclone"
+  APPLICATION_E2E="$external_e2e"
+  STATE_ROOT="$AT/external/acceptance-state"
+
+  run_survival_check() {
+    VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" \
+    VW_UNINSTALL_FSTAB="$AT/fstab" \
+    VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" \
+    VW_UNINSTALL_OPT_DIR="$AT/managed-opt" \
+    VW_UNINSTALL_ETC_DIR="$AT/managed-etc" \
+    VW_UNINSTALL_RUNTIME_DIR="$AT/managed-runtime" \
+    VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" \
+      validate_destructive_survival
+  }
+
+  run_survival_check || fail "external destructive dependencies were rejected"
+
+  RECOVERY_KIT="$AT/project-state/recovery-kit.txt"
+  : > "$RECOVERY_KIT"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "pre-DR kit inside custom boot-volume PROJECT_STATE_DIR was accepted"
   fi
-  VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" validate_recovery_kit_survival "$external" \
-    || fail "external pre-DR kit outside uninstall recovery directory was rejected"
+  RECOVERY_KIT="$external_kit"
+
+  RCLONE_CONFIG_PATH="$AT/project-state/rclone.conf"
+  : > "$RCLONE_CONFIG_PATH"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "rclone config inside custom boot-volume PROJECT_STATE_DIR was accepted"
+  fi
+  RCLONE_CONFIG_PATH="$external_rclone"
+
+  APPLICATION_E2E="$AT/managed-opt/e2e.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+  chmod 0755 "$APPLICATION_E2E"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "E2E hook inside canonical managed OPT_DIR was accepted"
+  fi
+  APPLICATION_E2E="$external_e2e"
+
+  STATE_ROOT="$AT/project-state/acceptance-state"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "VW_ACCEPTANCE_STATE_ROOT inside custom boot-volume PROJECT_STATE_DIR was accepted"
+  fi
+  STATE_ROOT="$AT/external/acceptance-state"
+
+  RECOVERY_KIT="$AT/managed-recovery/vaultwarden-recovery-kit-20260816T010203Z-abcdef.txt"
+  : > "$RECOVERY_KIT"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "pre-DR kit inside canonical recovery-handoff directory was accepted"
+  fi
 )
-[[ "$(grep -Fc 'validate_recovery_kit_survival "$RECOVERY_KIT"' "$A")" -ge 2 ]] \
-  || fail "recovery-kit survival is not checked at input validation and immediately before uninstall"
+grep -Fq 'emit_scope tree "$PROJECT_STATE_DIR"' "$A" \
+  || fail "canonical destructive survival scope does not include PROJECT_STATE_DIR"
+grep -Fq 'for path in "$OPT_DIR" "$ETC_DIR" "$RUNTIME" "$RECOVERY_DIR"; do' "$A" \
+  || fail "canonical destructive survival scope does not include resolved managed trees"
+[[ "$(grep -Ec '^[[:space:]]+validate_destructive_survival$' "$A")" -ge 2 ]] \
+  || fail "destructive survival is not checked at input validation and immediately before uninstall"
 
 # Run/resume metadata binds exact code, host identity, rclone location,
 # DNS mutation scope, recovery inputs, and E2E code.

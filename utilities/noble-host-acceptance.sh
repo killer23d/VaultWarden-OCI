@@ -144,26 +144,108 @@ external_file() {
     printf '%s\n' "$path"
 }
 
-canonical_uninstall_recovery_dir() (
-    set -- run --dry-run
-    # Source the canonical uninstaller so this boundary follows its configured
-    # recovery-handoff directory instead of duplicating the default path.
+canonical_destructive_survival_scope() (
+    local path unit volume_id volume_mount
+    set -- run --dry-run --test-reset --i-have-saved-my-recovery-kit --force
+    # Source the exact canonical destructive owner, then resolve its current
+    # configured paths. Acceptance intentionally over-approximates managed trees:
+    # a dependency must not merely be likely to survive; it must be outside every
+    # resolved tree or exact file that this test-reset can remove, rewrite, or
+    # unmount before the later restore/E2E phases need it.
     # shellcheck disable=SC1091
     source "$ROOT/utilities/uninstall-vaultwarden.sh"
-    canon "$RECOVERY_DIR"
+    resolve
+
+    emit_scope() {
+        local kind="$1" raw="$2" resolved
+        [[ -n "$raw" ]] || return 0
+        resolved="$(canon "$raw")" || exit 43
+        [[ "$resolved" == /* ]] || exit 43
+        printf '%s\t%s\n' "$kind" "$resolved"
+    }
+
+    # Recursive/removal or accessibility-loss roots. ROOT is conservative for
+    # --test-reset checkout cleanup; RECOVERY_DIR is conservative because only
+    # canonical handoff names are normally removed there.
+    emit_scope tree "$ROOT"
+    if [[ -z "$DATA_VOLUME_DEVICE" ]]; then
+        emit_scope tree "$PROJECT_STATE_DIR"
+    elif [[ -n "$DATA_VOLUME_MOUNT" ]]; then
+        emit_scope tree "$DATA_VOLUME_MOUNT"
+    fi
+    for path in "$OPT_DIR" "$ETC_DIR" "$RUNTIME" "$RECOVERY_DIR"; do
+        emit_scope tree "$path"
+    done
+
+    # Test-reset and managed-host files that are removed or rewritten exactly.
+    for path in \
+        "$SWAPFILE" "$UNIVERSE_SOURCE" "$FSTAB" "$SYSCTL" \
+        "$MOUNT_GUARD" "$DOCKER_RUNTIME_DROPIN" \
+        "$CS_EMAIL" "$CS_PROFILES" "$CS_WORKER" "$CS_WORKER_UNIT"; do
+        emit_scope exact "$path"
+    done
+    for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do
+        emit_scope exact "$SYSTEMD/$unit"
+        emit_scope exact "$SYSTEMD/$unit.d/10-state-dir.conf"
+    done
+
+    # Canonical uninstall also removes compose-labelled Docker volumes. Their
+    # host mountpoints are dynamic rather than resolve() variables, so include
+    # them when the daemon can be inspected. If Docker is unavailable, canonical
+    # live uninstall itself fails before persistent-state deletion.
+    if has docker && docker info >/dev/null 2>&1; then
+        while IFS= read -r volume_id; do
+            [[ -n "$volume_id" ]] || continue
+            volume_mount="$(docker volume inspect --format '{{.Mountpoint}}' "$volume_id" 2>/dev/null || true)"
+            [[ -n "$volume_mount" ]] && emit_scope tree "$volume_mount"
+        done < <(docker volume ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" 2>/dev/null || true)
+    fi
 )
 
-validate_recovery_kit_survival() {
-    local path="$1" recovery_dir
-    recovery_dir="$(canonical_uninstall_recovery_dir)" \
-        || die 'Cannot resolve the canonical uninstall recovery-handoff directory.'
-    [[ "$recovery_dir" == /* ]] \
-        || die 'Canonical uninstall recovery-handoff directory did not resolve to an absolute path.'
-    case "$path" in
-        "$recovery_dir"|"$recovery_dir"/*)
-            die "Pre-DR recovery kit is inside the canonical uninstall recovery-handoff directory ($recovery_dir) and may be removed by --test-reset. Copy it to a root-owned path outside that directory before destructive acceptance."
+validate_destructive_survival() {
+    local scope_output kind scope_path candidate label i state_candidate
+    local -a candidates labels
+
+    [[ "$STATE_ROOT" == /* ]] || die 'VW_ACCEPTANCE_STATE_ROOT must be an absolute path.'
+    [[ ! -L "$STATE_ROOT" ]] || die 'VW_ACCEPTANCE_STATE_ROOT must not be a symlink.'
+    [[ ! -e "$STATE_ROOT" || -d "$STATE_ROOT" ]] \
+        || die 'VW_ACCEPTANCE_STATE_ROOT must be a directory path.'
+    state_candidate="$(realpath -m -- "$STATE_ROOT")" \
+        || die 'Cannot canonicalize VW_ACCEPTANCE_STATE_ROOT.'
+    case "$state_candidate" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var|/var/lib)
+            die 'VW_ACCEPTANCE_STATE_ROOT must be a dedicated subdirectory, not a top-level host path.'
             ;;
     esac
+
+    candidates[0]="$(realpath -e -- "$RECOVERY_KIT")" \
+        || die 'Cannot re-resolve the pre-DR recovery kit for destructive survival.'
+    candidates[1]="$(realpath -e -- "$RCLONE_CONFIG_PATH")" \
+        || die 'Cannot re-resolve the rclone config for destructive survival.'
+    candidates[2]="$(realpath -e -- "$APPLICATION_E2E")" \
+        || die 'Cannot re-resolve the application E2E hook for destructive survival.'
+    candidates[3]="$state_candidate"
+    labels=('Pre-DR recovery kit' 'rclone config' 'application E2E hook' 'acceptance state root')
+
+    scope_output="$(canonical_destructive_survival_scope)" \
+        || die 'Cannot resolve the canonical --test-reset destructive survival scope.'
+    while IFS=$'\t' read -r kind scope_path; do
+        [[ -n "$kind" && -n "$scope_path" ]] || continue
+        case "$kind" in tree|exact) ;; *) die 'Canonical destructive survival scope returned an invalid record.' ;; esac
+        for i in "${!candidates[@]}"; do
+            candidate="${candidates[$i]}"
+            label="${labels[$i]}"
+            if [[ "$kind" == tree ]]; then
+                case "$candidate" in
+                    "$scope_path"|"$scope_path"/*)
+                        die "$label is inside canonical --test-reset removal/access-loss scope: $scope_path"
+                        ;;
+                esac
+            elif [[ "$candidate" == "$scope_path" ]]; then
+                die "$label is a canonical --test-reset managed file and will not safely survive: $scope_path"
+            fi
+        done
+    done <<< "$scope_output"
 }
 
 acquire_controller_lock() {
@@ -729,7 +811,7 @@ validate_inputs() {
         POST_RESTORE_RECOVERY_KIT="$(external_file "$POST_RESTORE_RECOVERY_KIT" 'post-restore recovery kit')"
     fi
     if [[ "$DESTRUCTIVE" == "true" ]]; then
-        validate_recovery_kit_survival "$RECOVERY_KIT"
+        validate_destructive_survival
         [[ "${VW_NOBLE_TEST_DESTRUCTIVE:-}" == "YES" ]] \
             || die 'Set VW_NOBLE_TEST_DESTRUCTIVE=YES together with --destructive.'
     fi
@@ -824,7 +906,7 @@ run_phases() {
                     || die 'Project state path changed before destructive reset.'
                 [[ "$(meta_get PROJECT_STATE_PATH_HASH)" == "$(hash_text "$PROJECT_STATE_PATH")" ]] \
                     || die 'Original project-state checkpoint changed before destructive reset.'
-                validate_recovery_kit_survival "$RECOVERY_KIT"
+                validate_destructive_survival
                 step uninstall-reset bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit --force
                 step uninstall-residuals post_uninstall_check
                 save_phase restore

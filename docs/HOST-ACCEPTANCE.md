@@ -28,7 +28,7 @@ A full run proves the repository's supported Noble host path by orchestrating:
 
 ## Checkpoint integrity
 
-The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. It binds a run to:
+The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. If `VW_ACCEPTANCE_STATE_ROOT` is overridden for a destructive run, it must be an absolute dedicated directory path outside the canonical uninstall survival scope; the controller rejects a symlink, a top-level host directory, or any state root that the drill could remove or make inaccessible. The checkpoint binds a run to:
 
 - the exact Git commit SHA;
 - the host machine identity;
@@ -63,13 +63,15 @@ The production uninstaller correctly preserves separately attached data-volume c
 
 Before starting, prepare:
 
-- a root-owned `0400` or `0600` pre-DR recovery kit outside all managed VaultWarden paths **and outside the canonical uninstaller recovery-handoff directory** (default `/root/vaultwarden-recovery`);
-- a root-owned `0400` or `0600` rclone configuration outside all managed VaultWarden paths;
+- a root-owned `0400` or `0600` pre-DR recovery kit outside the canonical destructive uninstall survival scope;
+- a root-owned `0400` or `0600` rclone configuration outside that same survival scope;
 - the exact rclone subpath used for the acceptance backups;
-- a root-owned executable application E2E hook that is not group- or world-writable; and
+- a root-owned executable application E2E hook that is not group- or world-writable **and is outside that survival scope**; and
 - a dedicated acceptance hostname/zone whose configured runtime `DOMAIN` you explicitly authorize the drill to mutate.
 
-The pre-DR recovery kit and rclone config must survive `utilities/uninstall-vaultwarden.sh run --test-reset`. For destructive runs the controller sources the canonical uninstaller in dry-run mode, resolves its configured `RECOVERY_DIR` (including `VW_UNINSTALL_RECOVERY_DIR` overrides), and rejects a pre-DR kit anywhere inside that directory before destructive acceptance and again immediately before uninstall. A kit in the normal `/root/vaultwarden-recovery/vaultwarden-recovery-kit-*` handoff location is therefore intentionally rejected; copy it first to a separate root-owned path such as `/root/vw-acceptance-recovery-kit.txt`.
+The pre-DR recovery kit, rclone config, application E2E hook, and acceptance checkpoint must all remain available after `utilities/uninstall-vaultwarden.sh run --test-reset`. For destructive runs the controller sources that canonical uninstaller with the test-reset policy, calls its `resolve`, and builds a conservative survival boundary from the resolved boot-volume `PROJECT_STATE_DIR`, `OPT_DIR`, `ETC_DIR`, `RUNTIME`, `RECOVERY_DIR`, checkout, any attached data mount, exact managed/test-reset files, and compose-labelled Docker volume mountpoints when Docker can be inspected. A candidate under a recursive removal/unmount root or equal to an exact managed file is rejected.
+
+This validation runs once before destructive acceptance state is initialized and again immediately before uninstall, so later configuration drift cannot move an input into the deletion scope. In particular, a normal `/root/vaultwarden-recovery/vaultwarden-recovery-kit-*` handoff, a credential under a custom boot-volume state such as `/srv/vaultwarden`, an E2E hook under the managed `/opt/vaultwarden-scripts` tree, or a `VW_ACCEPTANCE_STATE_ROOT` beneath the resolved project state is intentionally rejected. Copy external dependencies to separate root-owned paths first.
 
 The E2E hook is executed as root. The controller rejects symlinks, non-root ownership, non-executable files, and group/world-writable hooks. Its path and digest are bound to the checkpoint.
 
