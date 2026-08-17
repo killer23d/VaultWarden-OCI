@@ -1,0 +1,103 @@
+name: Temporary PR330 canonical survival-scope hardening
+
+on:
+  pull_request:
+    branches:
+      - delta
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: github.event.pull_request.head.ref == 'test/noble-host-acceptance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Apply canonical destructive-survival patch
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement target, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          def replace_count(path, old, new, expected):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} replacement targets, found {count}")
+              p.write_text(text.replace(old, new))
+
+          controller = Path("utilities/noble-host-acceptance.sh")
+          tests = Path("tests/suites/operations/case-host-acceptance.bash")
+          docs = Path("docs/HOST-ACCEPTANCE.md")
+
+          replace_once(
+              controller,
+              '''canonical_uninstall_recovery_dir() (\n    set -- run --dry-run\n    # Source the canonical uninstaller so this boundary follows its configured\n    # recovery-handoff directory instead of duplicating the default path.\n    # shellcheck disable=SC1091\n    source "$ROOT/utilities/uninstall-vaultwarden.sh"\n    canon "$RECOVERY_DIR"\n)\n\nvalidate_recovery_kit_survival() {\n    local path="$1" recovery_dir\n    recovery_dir="$(canonical_uninstall_recovery_dir)" \\\n        || die 'Cannot resolve the canonical uninstall recovery-handoff directory.'\n    [[ "$recovery_dir" == /* ]] \\\n        || die 'Canonical uninstall recovery-handoff directory did not resolve to an absolute path.'\n    case "$path" in\n        "$recovery_dir"|"$recovery_dir"/*)\n            die "Pre-DR recovery kit is inside the canonical uninstall recovery-handoff directory ($recovery_dir) and may be removed by --test-reset. Copy it to a root-owned path outside that directory before destructive acceptance."\n            ;;\n    esac\n}\n''',
+              '''canonical_destructive_survival_scope() (\n    local path unit volume_id volume_mount\n    set -- run --dry-run --test-reset --i-have-saved-my-recovery-kit --force\n    # Source the exact canonical destructive owner, then resolve its current\n    # configured paths. Acceptance intentionally over-approximates managed trees:\n    # a dependency must not merely be likely to survive; it must be outside every\n    # resolved tree or exact file that this test-reset can remove, rewrite, or\n    # unmount before the later restore/E2E phases need it.\n    # shellcheck disable=SC1091\n    source "$ROOT/utilities/uninstall-vaultwarden.sh"\n    resolve\n\n    emit_scope() {\n        local kind="$1" raw="$2" resolved\n        [[ -n "$raw" ]] || return 0\n        resolved="$(canon "$raw")" || exit 43\n        [[ "$resolved" == /* ]] || exit 43\n        printf '%s\\t%s\\n' "$kind" "$resolved"\n    }\n\n    # Recursive/removal or accessibility-loss roots. ROOT is conservative for\n    # --test-reset checkout cleanup; RECOVERY_DIR is conservative because only\n    # canonical handoff names are normally removed there.\n    emit_scope tree "$ROOT"\n    if [[ -z "$DATA_VOLUME_DEVICE" ]]; then\n        emit_scope tree "$PROJECT_STATE_DIR"\n    elif [[ -n "$DATA_VOLUME_MOUNT" ]]; then\n        emit_scope tree "$DATA_VOLUME_MOUNT"\n    fi\n    for path in "$OPT_DIR" "$ETC_DIR" "$RUNTIME" "$RECOVERY_DIR"; do\n        emit_scope tree "$path"\n    done\n\n    # Test-reset and managed-host files that are removed or rewritten exactly.\n    for path in \\\n        "$SWAPFILE" "$UNIVERSE_SOURCE" "$FSTAB" "$SYSCTL" \\\n        "$MOUNT_GUARD" "$DOCKER_RUNTIME_DROPIN" \\\n        "$CS_EMAIL" "$CS_PROFILES" "$CS_WORKER" "$CS_WORKER_UNIT"; do\n        emit_scope exact "$path"\n    done\n    for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do\n        emit_scope exact "$SYSTEMD/$unit"\n        emit_scope exact "$SYSTEMD/$unit.d/10-state-dir.conf"\n    done\n\n    # Canonical uninstall also removes compose-labelled Docker volumes. Their\n    # host mountpoints are dynamic rather than resolve() variables, so include\n    # them when the daemon can be inspected. If Docker is unavailable, canonical\n    # live uninstall itself fails before persistent-state deletion.\n    if has docker && docker info >/dev/null 2>&1; then\n        while IFS= read -r volume_id; do\n            [[ -n "$volume_id" ]] || continue\n            volume_mount="$(docker volume inspect --format '{{.Mountpoint}}' "$volume_id" 2>/dev/null || true)"\n            [[ -n "$volume_mount" ]] && emit_scope tree "$volume_mount"\n        done < <(docker volume ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" 2>/dev/null || true)\n    fi\n)\n\nvalidate_destructive_survival() {\n    local scope_output kind scope_path candidate label i state_candidate\n    local -a candidates labels\n\n    [[ "$STATE_ROOT" == /* ]] || die 'VW_ACCEPTANCE_STATE_ROOT must be an absolute path.'\n    [[ ! -L "$STATE_ROOT" ]] || die 'VW_ACCEPTANCE_STATE_ROOT must not be a symlink.'\n    [[ ! -e "$STATE_ROOT" || -d "$STATE_ROOT" ]] \\\n        || die 'VW_ACCEPTANCE_STATE_ROOT must be a directory path.'\n    state_candidate="$(realpath -m -- "$STATE_ROOT")" \\\n        || die 'Cannot canonicalize VW_ACCEPTANCE_STATE_ROOT.'\n    case "$state_candidate" in\n        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var|/var/lib)\n            die 'VW_ACCEPTANCE_STATE_ROOT must be a dedicated subdirectory, not a top-level host path.'\n            ;;\n    esac\n\n    candidates[0]="$(realpath -e -- "$RECOVERY_KIT")" \\\n        || die 'Cannot re-resolve the pre-DR recovery kit for destructive survival.'\n    candidates[1]="$(realpath -e -- "$RCLONE_CONFIG_PATH")" \\\n        || die 'Cannot re-resolve the rclone config for destructive survival.'\n    candidates[2]="$(realpath -e -- "$APPLICATION_E2E")" \\\n        || die 'Cannot re-resolve the application E2E hook for destructive survival.'\n    candidates[3]="$state_candidate"\n    labels=('Pre-DR recovery kit' 'rclone config' 'application E2E hook' 'acceptance state root')\n\n    scope_output="$(canonical_destructive_survival_scope)" \\\n        || die 'Cannot resolve the canonical --test-reset destructive survival scope.'\n    while IFS=$'\\t' read -r kind scope_path; do\n        [[ -n "$kind" && -n "$scope_path" ]] || continue\n        case "$kind" in tree|exact) ;; *) die 'Canonical destructive survival scope returned an invalid record.' ;; esac\n        for i in "${!candidates[@]}"; do\n            candidate="${candidates[$i]}"\n            label="${labels[$i]}"\n            if [[ "$kind" == tree ]]; then\n                case "$candidate" in\n                    "$scope_path"|"$scope_path"/*)\n                        die "$label is inside canonical --test-reset removal/access-loss scope: $scope_path"\n                        ;;\n                esac\n            elif [[ "$candidate" == "$scope_path" ]]; then\n                die "$label is a canonical --test-reset managed file and will not safely survive: $scope_path"\n            fi\n        done\n    done <<< "$scope_output"\n}\n'''
+          )
+
+          replace_count(
+              controller,
+              'validate_recovery_kit_survival "$RECOVERY_KIT"',
+              'validate_destructive_survival',
+              2,
+          )
+
+          old_test = '''# A destructive pre-DR recovery kit may not live in the canonical uninstaller's\n# recovery-handoff directory, because --test-reset can remove or reject files there.\n(\n  AT="$T/recovery-survival"\n  mkdir -p "$AT/managed-recovery" "$AT/external"\n  managed="$AT/managed-recovery/vaultwarden-recovery-kit-20260816T010203Z-abcdef.txt"\n  external="$AT/external/recovery-kit.txt"\n  : > "$managed"\n  : > "$external"\n  if ( VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" validate_recovery_kit_survival "$managed" ) >/dev/null 2>&1; then\n    fail "pre-DR kit inside canonical uninstall recovery directory was accepted"\n  fi\n  VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" validate_recovery_kit_survival "$external" \\\n    || fail "external pre-DR kit outside uninstall recovery directory was rejected"\n)\n[[ "$(grep -Fc 'validate_recovery_kit_survival "$RECOVERY_KIT"' "$A")" -ge 2 ]] \\\n  || fail "recovery-kit survival is not checked at input validation and immediately before uninstall"\n'''
+          new_test = '''# Every dependency needed after --test-reset must live outside the canonical\n# resolved destructive scope. This covers custom boot-volume state, managed\n# installed trees, recovery handoffs, rclone credentials, E2E code, and the\n# controller checkpoint itself.\n(\n  AT="$T/destructive-survival"\n  mkdir -p \\\n    "$AT/project-state" "$AT/managed-opt" "$AT/managed-etc" \\\n    "$AT/managed-runtime" "$AT/managed-recovery" "$AT/systemd" "$AT/external"\n  : > "$AT/fstab"\n  printf 'PROJECT_STATE_DIR=%s\\n' "$AT/project-state" > "$AT/installed.env"\n\n  external_kit="$AT/external/recovery-kit.txt"\n  external_rclone="$AT/external/rclone.conf"\n  external_e2e="$AT/external/e2e.sh"\n  : > "$external_kit"\n  : > "$external_rclone"\n  printf '#!/usr/bin/env bash\\nexit 0\\n' > "$external_e2e"\n  chmod 0755 "$external_e2e"\n\n  RECOVERY_KIT="$external_kit"\n  RCLONE_CONFIG_PATH="$external_rclone"\n  APPLICATION_E2E="$external_e2e"\n  STATE_ROOT="$AT/external/acceptance-state"\n\n  run_survival_check() {\n    VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" \\\n    VW_UNINSTALL_FSTAB="$AT/fstab" \\\n    VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" \\\n    VW_UNINSTALL_OPT_DIR="$AT/managed-opt" \\\n    VW_UNINSTALL_ETC_DIR="$AT/managed-etc" \\\n    VW_UNINSTALL_RUNTIME_DIR="$AT/managed-runtime" \\\n    VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" \\\n      validate_destructive_survival\n  }\n\n  run_survival_check || fail "external destructive dependencies were rejected"\n\n  RECOVERY_KIT="$AT/project-state/recovery-kit.txt"\n  : > "$RECOVERY_KIT"\n  if run_survival_check >/dev/null 2>&1; then\n    fail "pre-DR kit inside custom boot-volume PROJECT_STATE_DIR was accepted"\n  fi\n  RECOVERY_KIT="$external_kit"\n\n  RCLONE_CONFIG_PATH="$AT/project-state/rclone.conf"\n  : > "$RCLONE_CONFIG_PATH"\n  if run_survival_check >/dev/null 2>&1; then\n    fail "rclone config inside custom boot-volume PROJECT_STATE_DIR was accepted"\n  fi\n  RCLONE_CONFIG_PATH="$external_rclone"\n\n  APPLICATION_E2E="$AT/managed-opt/e2e.sh"\n  printf '#!/usr/bin/env bash\\nexit 0\\n' > "$APPLICATION_E2E"\n  chmod 0755 "$APPLICATION_E2E"\n  if run_survival_check >/dev/null 2>&1; then\n    fail "E2E hook inside canonical managed OPT_DIR was accepted"\n  fi\n  APPLICATION_E2E="$external_e2e"\n\n  STATE_ROOT="$AT/project-state/acceptance-state"\n  if run_survival_check >/dev/null 2>&1; then\n    fail "VW_ACCEPTANCE_STATE_ROOT inside custom boot-volume PROJECT_STATE_DIR was accepted"\n  fi\n  STATE_ROOT="$AT/external/acceptance-state"\n\n  RECOVERY_KIT="$AT/managed-recovery/vaultwarden-recovery-kit-20260816T010203Z-abcdef.txt"\n  : > "$RECOVERY_KIT"\n  if run_survival_check >/dev/null 2>&1; then\n    fail "pre-DR kit inside canonical recovery-handoff directory was accepted"\n  fi\n)\nfor resolved_tree in '$PROJECT_STATE_DIR' '$OPT_DIR' '$ETC_DIR' '$RUNTIME' '$RECOVERY_DIR'; do\n  grep -Fq "emit_scope tree \\"$resolved_tree\\"" "$A" \\\n    || fail "canonical destructive survival scope does not include $resolved_tree"\ndone\n[[ "$(grep -Ec '^[[:space:]]+validate_destructive_survival$' "$A")" -ge 2 ]] \\\n  || fail "destructive survival is not checked at input validation and immediately before uninstall"\n'''
+          replace_once(tests, old_test, new_test)
+
+          replace_once(
+              docs,
+              '''The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. It binds a run to:''',
+              '''The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. If `VW_ACCEPTANCE_STATE_ROOT` is overridden for a destructive run, it must be an absolute dedicated directory path outside the canonical uninstall survival scope; the controller rejects a symlink, a top-level host directory, or any state root that the drill could remove or make inaccessible. The checkpoint binds a run to:'''
+          )
+
+          replace_once(
+              docs,
+              '''- a root-owned `0400` or `0600` pre-DR recovery kit outside all managed VaultWarden paths **and outside the canonical uninstaller recovery-handoff directory** (default `/root/vaultwarden-recovery`);\n- a root-owned `0400` or `0600` rclone configuration outside all managed VaultWarden paths;\n- the exact rclone subpath used for the acceptance backups;\n- a root-owned executable application E2E hook that is not group- or world-writable; and\n- a dedicated acceptance hostname/zone whose configured runtime `DOMAIN` you explicitly authorize the drill to mutate.\n\nThe pre-DR recovery kit and rclone config must survive `utilities/uninstall-vaultwarden.sh run --test-reset`. For destructive runs the controller sources the canonical uninstaller in dry-run mode, resolves its configured `RECOVERY_DIR` (including `VW_UNINSTALL_RECOVERY_DIR` overrides), and rejects a pre-DR kit anywhere inside that directory before destructive acceptance and again immediately before uninstall. A kit in the normal `/root/vaultwarden-recovery/vaultwarden-recovery-kit-*` handoff location is therefore intentionally rejected; copy it first to a separate root-owned path such as `/root/vw-acceptance-recovery-kit.txt`.\n\nThe E2E hook is executed as root. The controller rejects symlinks, non-root ownership, non-executable files, and group/world-writable hooks. Its path and digest are bound to the checkpoint.''',
+              '''- a root-owned `0400` or `0600` pre-DR recovery kit outside the canonical destructive uninstall survival scope;\n- a root-owned `0400` or `0600` rclone configuration outside that same survival scope;\n- the exact rclone subpath used for the acceptance backups;\n- a root-owned executable application E2E hook that is not group- or world-writable **and is outside that survival scope**; and\n- a dedicated acceptance hostname/zone whose configured runtime `DOMAIN` you explicitly authorize the drill to mutate.\n\nThe pre-DR recovery kit, rclone config, application E2E hook, and acceptance checkpoint must all remain available after `utilities/uninstall-vaultwarden.sh run --test-reset`. For destructive runs the controller sources that canonical uninstaller with the test-reset policy, calls its `resolve`, and builds a conservative survival boundary from the resolved boot-volume `PROJECT_STATE_DIR`, `OPT_DIR`, `ETC_DIR`, `RUNTIME`, `RECOVERY_DIR`, checkout, any attached data mount, exact managed/test-reset files, and compose-labelled Docker volume mountpoints when Docker can be inspected. A candidate under a recursive removal/unmount root or equal to an exact managed file is rejected.\n\nThis validation runs once before destructive acceptance state is initialized and again immediately before uninstall, so later configuration drift cannot move an input into the deletion scope. In particular, a normal `/root/vaultwarden-recovery/vaultwarden-recovery-kit-*` handoff, a credential under a custom boot-volume state such as `/srv/vaultwarden`, an E2E hook under the managed `/opt/vaultwarden-scripts` tree, or a `VW_ACCEPTANCE_STATE_ROOT` beneath the resolved project state is intentionally rejected. Copy external dependencies to separate root-owned paths first.\n\nThe E2E hook is executed as root. The controller rejects symlinks, non-root ownership, non-executable files, and group/world-writable hooks. Its path and digest are bound to the checkpoint.'''
+          )
+
+          # Ensure the runbook's completion boundary remains explicit.
+          assert 'full destructive run' in docs.read_text().lower() or 'full run' in docs.read_text().lower()
+          PY
+
+          git diff --check
+          bash -n utilities/noble-host-acceptance.sh
+          bash -n tests/suites/operations/case-host-acceptance.bash
+
+      - name: Install focused dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age shellcheck
+
+      - name: Run host-acceptance contract
+        run: bash tests/suites/operations/case-host-acceptance.bash
+
+      - name: Run repository-policy ShellCheck
+        run: shellcheck -x --severity=warning utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash
+
+      - name: Commit validated product changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash docs/HOST-ACCEPTANCE.md
+          git diff --cached --check
+          git diff --cached --quiet && { echo 'No product changes to commit'; exit 1; }
+          git commit -m 'fix: bind destructive acceptance inputs to uninstall scope'
+          git push origin HEAD:test/noble-host-acceptance
