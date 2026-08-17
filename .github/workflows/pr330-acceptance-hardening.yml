@@ -1,0 +1,1038 @@
+name: PR330 acceptance hardening
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: github.event.pull_request.head.ref == 'test/noble-host-acceptance'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Apply acceptance hardening
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          controller = Path('utilities/noble-host-acceptance.sh')
+          text = controller.read_text()
+
+          def replace_once(old, new):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one match, found {count}: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+
+          def replace_section(start, end, new):
+              global text
+              i = text.find(start)
+              if i < 0:
+                  raise SystemExit(f'missing section start: {start!r}')
+              j = text.find(end, i)
+              if j < 0:
+                  raise SystemExit(f'missing section end: {end!r}')
+              text = text[:i] + new + text[j:]
+
+          replace_once(
+          '''RECOVERY_KIT=""
+          RCLONE_REMOTE=""
+          RCLONE_CONFIG_PATH=""
+          APPLICATION_E2E=""
+          POST_RESTORE_RECOVERY_KIT=""
+          DESTRUCTIVE=false
+          SKIP_REBOOT=false
+          PROJECT_STATE_PATH=""
+          ''',
+          '''RECOVERY_KIT=""
+          RCLONE_REMOTE=""
+          RCLONE_REMOTE_PATH=""
+          RCLONE_CONFIG_PATH=""
+          APPLICATION_E2E=""
+          POST_RESTORE_RECOVERY_KIT=""
+          DNS_MUTATION_DOMAIN=""
+          ALLOW_DNS_MUTATION=false
+          DESTRUCTIVE=false
+          SKIP_REBOOT=false
+          PROJECT_STATE_PATH=""
+          BOUND_BACKUP_FILE=""
+          VALIDATED_RECOVERY_RECIPIENT=""
+          ''')
+
+          replace_section('Required options:\n', '\nThe destructive DR phase', '''Required options:
+            --recovery-kit FILE      External root-owned recovery kit (0400/0600)
+            --rclone-remote NAME     rclone remote containing acceptance backups
+            --rclone-path PATH       Bound rclone subpath containing acceptance backups
+            --rclone-config FILE     External root-owned rclone.conf (0400/0600)
+            --application-e2e FILE   Root-owned executable application E2E hook
+            --dns-mutation-domain HOSTNAME
+                                     Exact dedicated acceptance hostname configured as DOMAIN
+            --allow-dns-mutation     Acknowledge foreground/timer DNS mutation for that hostname
+
+          Full DR options:
+            --destructive            Run same-host uninstall and exact full rclone restore
+                                     (also requires VW_NOBLE_TEST_DESTRUCTIVE=YES)
+            --post-restore-recovery-kit FILE
+                                     On recovery-custody resume, point to the newly rotated
+                                     recovery kit copied to a non-root mounted recovery medium
+            --skip-reboot            Development-only. This can never produce FULL ACCEPTANCE.
+
+          DNS mutation requires --allow-dns-mutation together with
+          VW_NOBLE_TEST_DNS_MUTATION=YES. The configured runtime DOMAIN must exactly match
+          --dns-mutation-domain before the DNS service or timers may run.
+          ''')
+
+          replace_once(
+          '''current_sha() { git rev-parse HEAD; }
+
+          ensure_state_dirs() {
+          ''',
+          '''current_sha() { git rev-parse HEAD; }
+
+          runtime_config_value() (
+              local key="$1" default="${2:-}"
+              export RCLONE_REMOTE_NAME="$RCLONE_REMOTE"
+              export RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH"
+              export RCLONE_CONFIG="$RCLONE_CONFIG_PATH"
+              # shellcheck disable=SC1091
+              source "$ROOT/lib/config.sh"
+              load_project_environment >/dev/null
+              get_config_value "$key" "$default"
+          )
+
+          ensure_state_dirs() {
+          ''')
+
+          replace_section('init_metadata() {', 'step() {', r'''init_metadata() {
+              : > "$META_FILE"
+              chmod 0600 "$META_FILE"
+              meta_add RUN_SHA "$(current_sha)"
+              meta_add HOST_MACHINE_ID_HASH "$(machine_id_hash)"
+              meta_add INITIAL_BOOT_ID "$(boot_id)"
+              meta_add RCLONE_REMOTE_HASH "$(hash_text "$RCLONE_REMOTE")"
+              meta_add RCLONE_REMOTE_PATH_HASH "$(hash_text "$RCLONE_REMOTE_PATH")"
+              meta_add RCLONE_CONFIG_PATH_HASH "$(hash_text "$RCLONE_CONFIG_PATH")"
+              meta_add RCLONE_CONFIG_SHA256 "$(sha_file "$RCLONE_CONFIG_PATH")"
+              meta_add RECOVERY_KIT_PATH_HASH "$(hash_text "$RECOVERY_KIT")"
+              meta_add RECOVERY_KIT_SHA256 "$(sha_file "$RECOVERY_KIT")"
+              meta_add E2E_PATH_HASH "$(hash_text "$APPLICATION_E2E")"
+              meta_add E2E_SHA256 "$(sha_file "$APPLICATION_E2E")"
+              meta_add DNS_MUTATION_DOMAIN_HASH "$(hash_text "$DNS_MUTATION_DOMAIN")"
+              meta_add ALLOW_DNS_MUTATION "$ALLOW_DNS_MUTATION"
+              meta_add DESTRUCTIVE "$DESTRUCTIVE"
+              meta_add SKIP_REBOOT "$SKIP_REBOOT"
+              if [[ "$DESTRUCTIVE" == "true" ]]; then
+                  validate_boot_volume
+                  write_original_state_path
+                  meta_add PROJECT_STATE_PATH_HASH "$(hash_text "$PROJECT_STATE_PATH")"
+              fi
+          }
+
+          verify_metadata() {
+              local post_restore_digest
+              [[ -f "$META_FILE" ]] || die 'Acceptance metadata is missing.'
+              [[ "$(meta_get RUN_SHA)" == "$(current_sha)" ]] || die 'Checkout SHA changed since the acceptance run started.'
+              [[ "$(meta_get HOST_MACHINE_ID_HASH)" == "$(machine_id_hash)" ]] || die 'Host identity changed since the acceptance run started.'
+              [[ "$(meta_get RCLONE_REMOTE_HASH)" == "$(hash_text "$RCLONE_REMOTE")" ]] || die 'rclone remote changed since run start.'
+              [[ "$(meta_get RCLONE_REMOTE_PATH_HASH)" == "$(hash_text "$RCLONE_REMOTE_PATH")" ]] || die 'rclone path changed since run start.'
+              [[ "$(meta_get RCLONE_CONFIG_PATH_HASH)" == "$(hash_text "$RCLONE_CONFIG_PATH")" ]] || die 'rclone config path changed since run start.'
+              [[ "$(meta_get RCLONE_CONFIG_SHA256)" == "$(sha_file "$RCLONE_CONFIG_PATH")" ]] || die 'rclone config content changed since run start.'
+              [[ "$(meta_get RECOVERY_KIT_PATH_HASH)" == "$(hash_text "$RECOVERY_KIT")" ]] || die 'Recovery-kit path changed since run start.'
+              [[ "$(meta_get RECOVERY_KIT_SHA256)" == "$(sha_file "$RECOVERY_KIT")" ]] || die 'Recovery-kit content changed since run start.'
+              [[ "$(meta_get E2E_PATH_HASH)" == "$(hash_text "$APPLICATION_E2E")" ]] || die 'Application E2E hook path changed since run start.'
+              [[ "$(meta_get E2E_SHA256)" == "$(sha_file "$APPLICATION_E2E")" ]] || die 'Application E2E hook content changed since run start.'
+              [[ "$(meta_get DNS_MUTATION_DOMAIN_HASH)" == "$(hash_text "$DNS_MUTATION_DOMAIN")" ]] || die 'DNS mutation domain changed since run start.'
+              [[ "$(meta_get ALLOW_DNS_MUTATION)" == "$ALLOW_DNS_MUTATION" ]] || die 'DNS mutation acknowledgement changed since run start.'
+              [[ "$(meta_get DESTRUCTIVE)" == "$DESTRUCTIVE" ]] || die 'Destructive mode changed since run start.'
+              [[ "$(meta_get SKIP_REBOOT)" == "$SKIP_REBOOT" ]] || die 'Reboot policy changed since run start.'
+              if [[ "$DESTRUCTIVE" == "true" ]]; then
+                  read_original_state_path
+                  [[ "$(meta_get PROJECT_STATE_PATH_HASH)" == "$(hash_text "$PROJECT_STATE_PATH")" ]] \
+                      || die 'Original project-state checkpoint changed.'
+              fi
+              post_restore_digest="$(meta_get POST_RESTORE_RECOVERY_KIT_SHA256)"
+              if [[ -n "$post_restore_digest" ]]; then
+                  [[ -n "$POST_RESTORE_RECOVERY_KIT" ]] \
+                      || die 'Post-restore recovery kit is checkpoint-bound; pass it again on resume.'
+                  [[ "$(meta_get POST_RESTORE_RECOVERY_KIT_PATH_HASH)" == "$(hash_text "$POST_RESTORE_RECOVERY_KIT")" ]] \
+                      || die 'Post-restore recovery-kit path changed after custody was proven.'
+                  [[ "$post_restore_digest" == "$(sha_file "$POST_RESTORE_RECOVERY_KIT")" ]] \
+                      || die 'Post-restore recovery-kit content changed after custody was proven.'
+              fi
+          }
+
+          ''')
+
+          replace_section('systemd_jobs() {', 'manual_systemd_install_check() {', r'''full_backup_inventory() {
+              command -v yq >/dev/null 2>&1 || die 'yq is required to bind the exact full backup.'
+              bash ./backup.sh list --json \
+                  | yq -r '.backups[] | select(.type == "full") | .path' \
+                  | LC_ALL=C sort -u
+          }
+
+          backup_cohort_digest() {
+              local archive="$1" suffix member material=""
+              for suffix in '' '.sha256' '.sha256.hmac' '.meta'; do
+                  member="${archive}${suffix}"
+                  [[ -f "$member" && ! -L "$member" && -s "$member" ]] || return 1
+                  material+="${suffix}:$(sha_file "$member")"$'\n'
+              done
+              hash_text "$material"
+          }
+
+          run_and_bind_full_backup() {
+              local prefix="$1" before after archive cohort_digest archive_digest canary_epoch mtime
+              local -a new_backups=()
+              before="$STATE_ROOT/${prefix,,}-full-before.list"
+              after="$STATE_ROOT/${prefix,,}-full-after.list"
+              full_backup_inventory > "$before"
+              env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
+                  RCLONE_CONFIG="$RCLONE_CONFIG_PATH" \
+                  bash ./backup.sh run full --full-verification --rclone
+              full_backup_inventory > "$after"
+              mapfile -t new_backups < <(comm -13 "$before" "$after")
+              [[ ${#new_backups[@]} -eq 1 ]] || {
+                  log "Expected exactly one newly published full backup; found ${#new_backups[@]}."
+                  return 1
+              }
+              archive="${new_backups[0]}"
+              [[ "$(basename "$archive")" == full_backup_*.tar.zst.age ]] || return 1
+              archive_digest="$(sha_file "$archive")"
+              cohort_digest="$(backup_cohort_digest "$archive")" || return 1
+              mtime="$(stat -c '%Y' "$archive")"
+              [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
+              if [[ "$prefix" == "DR_SOURCE" ]]; then
+                  canary_epoch="$(meta_get PRE_DR_E2E_COMPLETED_EPOCH)"
+                  [[ "$canary_epoch" =~ ^[0-9]+$ ]] || die 'Missing pre-DR E2E completion checkpoint.'
+                  (( mtime >= canary_epoch )) \
+                      || die 'Bound DR source backup predates the successful pre-DR E2E/canary step.'
+              fi
+              meta_add "${prefix}_BACKUP_BASENAME" "$(basename "$archive")"
+              meta_add "${prefix}_BACKUP_ARCHIVE_SHA256" "$archive_digest"
+              meta_add "${prefix}_BACKUP_COHORT_SHA256" "$cohort_digest"
+              meta_add "${prefix}_BACKUP_CREATED_EPOCH" "$mtime"
+              meta_add "${prefix}_BACKUP_REMOTE_OBJECT_HASH" \
+                  "$(hash_text "${RCLONE_REMOTE}:${RCLONE_REMOTE_PATH}/full/$(basename "$archive")")"
+              log "Bound ${prefix} full backup: $(basename "$archive") sha256=$archive_digest"
+          }
+
+          download_bound_backup() {
+              local prefix="$1" stage_name="$2" basename expected_archive expected_cohort
+              local stage_dir remote_member suffix member actual_cohort
+              basename="$(meta_get "${prefix}_BACKUP_BASENAME")"
+              expected_archive="$(meta_get "${prefix}_BACKUP_ARCHIVE_SHA256")"
+              expected_cohort="$(meta_get "${prefix}_BACKUP_COHORT_SHA256")"
+              [[ -n "$basename" && "$basename" != */* && "$basename" == full_backup_*.tar.zst.age ]] \
+                  || die "Missing or unsafe ${prefix} backup identity."
+              [[ "$expected_archive" =~ ^[0-9a-f]{64}$ && "$expected_cohort" =~ ^[0-9a-f]{64}$ ]] \
+                  || die "Missing ${prefix} backup digest checkpoint."
+              stage_dir="$STATE_ROOT/$stage_name/full"
+              rm -rf -- "$STATE_ROOT/$stage_name"
+              install -d -m 0700 "$stage_dir"
+              for suffix in '' '.sha256' '.sha256.hmac' '.meta'; do
+                  remote_member="${RCLONE_REMOTE}:${RCLONE_REMOTE_PATH}/full/${basename}${suffix}"
+                  rclone copy --config "$RCLONE_CONFIG_PATH" "$remote_member" "$stage_dir/" \
+                      --checksum --contimeout 15s --timeout 60s
+                  member="$stage_dir/${basename}${suffix}"
+                  [[ -f "$member" && ! -L "$member" && -s "$member" ]] \
+                      || die "Exact remote cohort member is missing after download: ${basename}${suffix}"
+              done
+              BOUND_BACKUP_FILE="$stage_dir/$basename"
+              [[ "$(sha_file "$BOUND_BACKUP_FILE")" == "$expected_archive" ]] \
+                  || die "Downloaded ${prefix} archive digest differs from the bound source."
+              actual_cohort="$(backup_cohort_digest "$BOUND_BACKUP_FILE")" || die 'Downloaded backup cohort is incomplete.'
+              [[ "$actual_cohort" == "$expected_cohort" ]] \
+                  || die "Downloaded ${prefix} cohort digest differs from the bound source."
+          }
+
+          write_recovery_kit_identity() {
+              local kit="$1" output="$2"
+              awk '/^AGE-SECRET-KEY-1/{print; count++} END { exit(count == 1 ? 0 : 1) }' "$kit" > "$output"
+          }
+
+          verify_bound_backup_with_kit() {
+              local prefix="$1" kit="$2" verify_root key_file archive_digest
+              verify_root="$STATE_ROOT/verify-${prefix,,}"
+              download_bound_backup "$prefix" "verify-${prefix,,}"
+              key_file="$(mktemp "$STATE_ROOT/.verify-age-key.XXXXXX")" || return 1
+              chmod 0600 "$key_file"
+              if ! write_recovery_kit_identity "$kit" "$key_file"; then
+                  rm -f -- "$key_file"
+                  rm -rf -- "$verify_root"
+                  return 1
+              fi
+              if ! age -d -i "$key_file" -o /dev/null "$BOUND_BACKUP_FILE" 2>/dev/null; then
+                  rm -f -- "$key_file"
+                  rm -rf -- "$verify_root"
+                  return 1
+              fi
+              rm -f -- "$key_file"
+              archive_digest="$(sha_file "$BOUND_BACKUP_FILE")"
+              meta_add "${prefix}_RECOVERY_KIT_DECRYPT_VERIFIED_SHA256" "$archive_digest"
+              rm -rf -- "$verify_root"
+          }
+
+          validate_dns_mutation_scope() {
+              local configured_domain
+              [[ "$ALLOW_DNS_MUTATION" == "true" ]] || die 'DNS mutation is not explicitly allowed for this run.'
+              [[ "${VW_NOBLE_TEST_DNS_MUTATION:-}" == "YES" ]] \
+                  || die 'Set VW_NOBLE_TEST_DNS_MUTATION=YES before testing the managed DNS updater.'
+              configured_domain="$(runtime_config_value DOMAIN "")" \
+                  || die 'Cannot load the installed runtime DOMAIN before DNS mutation.'
+              configured_domain="$(printf '%s' "$configured_domain" | tr '[:upper:]' '[:lower:]')"
+              [[ "$configured_domain" == "$DNS_MUTATION_DOMAIN" ]] \
+                  || die "Configured runtime DOMAIN '$configured_domain' does not match the acknowledged DNS mutation domain '$DNS_MUTATION_DOMAIN'."
+          }
+
+          systemd_jobs() {
+              local unit
+              for unit in \
+                  vaultwarden-health.service \
+                  vaultwarden-db-backup.service \
+                  vaultwarden-full-backup.service \
+                  vaultwarden-maintenance.service \
+                  vaultwarden-dns-update.service \
+                  vaultwarden-firewall-update.service; do
+                  if [[ "$unit" == "vaultwarden-dns-update.service" ]]; then
+                      validate_dns_mutation_scope
+                  fi
+                  systemctl start "$unit"
+                  ! systemctl --quiet is-failed "$unit" || return 1
+              done
+          }
+
+          ''')
+
+          replace_section('validate_post_restore_recovery_kit() {', 'parse() {', r'''recovery_kit_recipient() {
+              local kit="$1" key_file recipient
+              key_file="$(mktemp "$STATE_ROOT/.recovery-kit-age-key.XXXXXX")" || return 1
+              chmod 0600 "$key_file"
+              if ! write_recovery_kit_identity "$kit" "$key_file"; then
+                  rm -f -- "$key_file"
+                  return 1
+              fi
+              if ! recipient="$(age-keygen -y "$key_file" 2>/dev/null)"; then
+                  rm -f -- "$key_file"
+                  return 1
+              fi
+              rm -f -- "$key_file"
+              [[ "$recipient" == age1* ]] || return 1
+              printf '%s\n' "$recipient"
+          }
+
+          validate_recovery_recipient_binding() {
+              local path="$1" live_key="${2:-/etc/vaultwarden/age-key.txt}"
+              local old_recipient new_recipient live_recipient
+              old_recipient="$(recovery_kit_recipient "$RECOVERY_KIT")" \
+                  || die 'Pre-DR recovery kit does not contain a usable Age identity.'
+              new_recipient="$(recovery_kit_recipient "$path")" \
+                  || die 'Post-restore recovery kit does not contain a usable Age identity.'
+              [[ -f "$live_key" && ! -L "$live_key" ]] \
+                  || die 'Active operational Age key is unavailable for rotated-custody verification.'
+              live_recipient="$(age-keygen -y "$live_key" 2>/dev/null)" \
+                  || die 'Active operational Age key cannot derive its recipient.'
+              [[ "$new_recipient" == "$live_recipient" ]] \
+                  || die 'Post-restore recovery kit Age identity does not match the active rotated operational key.'
+              [[ "$new_recipient" != "$old_recipient" ]] \
+                  || die 'Post-restore Age identity matches the pre-DR identity; key rotation/custody was not proven.'
+              VALIDATED_RECOVERY_RECIPIENT="$new_recipient"
+          }
+
+          validate_post_restore_recovery_kit() {
+              local path root_dev kit_dev kit_target restore_epoch mtime old_digest new_digest
+              [[ -n "$POST_RESTORE_RECOVERY_KIT" ]] || {
+                  log 'Copy the newly rotated recovery handoff to a durable off-host mounted recovery medium.'
+                  find /root/vaultwarden-recovery -maxdepth 1 -type f -name 'vaultwarden-recovery-kit-*' -print 2>/dev/null || true
+                  die 'Resume with --post-restore-recovery-kit FILE after the off-host copy is secured.'
+              }
+              path="$(external_file "$POST_RESTORE_RECOVERY_KIT" 'post-restore recovery kit')"
+              command -v findmnt >/dev/null 2>&1 || die 'findmnt is required to verify recovery-kit custody.'
+              root_dev="$(findmnt -n -o MAJ:MIN --target /)"
+              kit_dev="$(findmnt -n -o MAJ:MIN --target "$path")"
+              kit_target="$(findmnt -n -o TARGET --target "$path")"
+              [[ -n "$kit_dev" && "$kit_dev" != "$root_dev" && "$kit_target" != "/" ]] \
+                  || die 'Post-restore recovery kit must be on a non-root mounted recovery medium.'
+              restore_epoch="$(meta_get RESTORE_COMPLETED_EPOCH)"
+              [[ "$restore_epoch" =~ ^[0-9]+$ ]] || die 'Missing restore completion timestamp.'
+              mtime="$(stat -c '%Y' "$path")"
+              (( mtime >= restore_epoch )) || die 'Post-restore recovery kit predates the successful restore.'
+              [[ "$(grep -Fxc 'END OF RECOVERY KIT' "$path" 2>/dev/null || true)" == "1" ]] \
+                  || die 'Post-restore recovery kit is missing the canonical completion marker.'
+              [[ "$(grep -c '^AGE-SECRET-KEY-1' "$path" 2>/dev/null || true)" == "1" ]] \
+                  || die 'Post-restore recovery kit does not contain exactly one Age private identity.'
+              old_digest="$(meta_get RECOVERY_KIT_SHA256)"
+              new_digest="$(sha_file "$path")"
+              [[ "$new_digest" != "$old_digest" ]] || die 'Post-restore recovery kit matches the pre-DR kit; rotated custody was not proven.'
+              validate_recovery_recipient_binding "$path"
+              POST_RESTORE_RECOVERY_KIT="$path"
+              meta_add POST_RESTORE_RECOVERY_KIT_PATH_HASH "$(hash_text "$path")"
+              meta_add POST_RESTORE_RECOVERY_KIT_SHA256 "$new_digest"
+              meta_add POST_RESTORE_AGE_RECIPIENT_HASH "$(hash_text "$VALIDATED_RECOVERY_RECIPIENT")"
+          }
+
+          ''')
+
+          replace_section('parse() {', 'validate_inputs() {', r'''parse() {
+              while (($#)); do
+                  case "$1" in
+                      --recovery-kit) [[ $# -ge 2 ]] || die '--recovery-kit requires a value.'; RECOVERY_KIT="$2"; shift 2 ;;
+                      --rclone-remote) [[ $# -ge 2 ]] || die '--rclone-remote requires a value.'; RCLONE_REMOTE="$2"; shift 2 ;;
+                      --rclone-path) [[ $# -ge 2 ]] || die '--rclone-path requires a value.'; RCLONE_REMOTE_PATH="$2"; shift 2 ;;
+                      --rclone-config) [[ $# -ge 2 ]] || die '--rclone-config requires a value.'; RCLONE_CONFIG_PATH="$2"; shift 2 ;;
+                      --application-e2e) [[ $# -ge 2 ]] || die '--application-e2e requires a value.'; APPLICATION_E2E="$2"; shift 2 ;;
+                      --post-restore-recovery-kit) [[ $# -ge 2 ]] || die '--post-restore-recovery-kit requires a value.'; POST_RESTORE_RECOVERY_KIT="$2"; shift 2 ;;
+                      --dns-mutation-domain) [[ $# -ge 2 ]] || die '--dns-mutation-domain requires a value.'; DNS_MUTATION_DOMAIN="$2"; shift 2 ;;
+                      --allow-dns-mutation) ALLOW_DNS_MUTATION=true; shift ;;
+                      --destructive) DESTRUCTIVE=true; shift ;;
+                      --skip-reboot) SKIP_REBOOT=true; shift ;;
+                      -h|--help) usage; exit 0 ;;
+                      *) die "Unknown option: $1" ;;
+                  esac
+              done
+          }
+
+          ''')
+
+          replace_section('validate_inputs() {', 'capture_inventory() {', r'''validate_inputs() {
+              [[ -n "$RECOVERY_KIT" && -n "$RCLONE_REMOTE" && -n "$RCLONE_REMOTE_PATH" \
+                  && -n "$RCLONE_CONFIG_PATH" && -n "$APPLICATION_E2E" && -n "$DNS_MUTATION_DOMAIN" ]] \
+                  || die 'Recovery kit, rclone remote/path/config, application E2E hook, and DNS mutation domain are required.'
+              [[ "$RCLONE_REMOTE" =~ ^[A-Za-z0-9_-]+$ ]] || die 'Invalid rclone remote name.'
+              RCLONE_REMOTE_PATH="${RCLONE_REMOTE_PATH#/}"
+              RCLONE_REMOTE_PATH="${RCLONE_REMOTE_PATH%/}"
+              [[ -n "$RCLONE_REMOTE_PATH" && "$RCLONE_REMOTE_PATH" != *".."* \
+                  && "$RCLONE_REMOTE_PATH" =~ ^[A-Za-z0-9_./-]+$ ]] \
+                  || die 'Invalid rclone path; use a relative path without .. or unsafe characters.'
+              DNS_MUTATION_DOMAIN="$(printf '%s' "$DNS_MUTATION_DOMAIN" | tr '[:upper:]' '[:lower:]')"
+              [[ "$DNS_MUTATION_DOMAIN" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
+                  || die 'Invalid DNS mutation domain.'
+              [[ "$ALLOW_DNS_MUTATION" == "true" ]] \
+                  || die 'Pass --allow-dns-mutation for the named dedicated acceptance hostname.'
+              [[ "${VW_NOBLE_TEST_DNS_MUTATION:-}" == "YES" ]] \
+                  || die 'Set VW_NOBLE_TEST_DNS_MUTATION=YES together with --allow-dns-mutation.'
+              RECOVERY_KIT="$(external_file "$RECOVERY_KIT" 'recovery kit')"
+              RCLONE_CONFIG_PATH="$(external_file "$RCLONE_CONFIG_PATH" 'rclone config')"
+              validate_e2e_hook
+              if [[ -n "$POST_RESTORE_RECOVERY_KIT" ]]; then
+                  POST_RESTORE_RECOVERY_KIT="$(external_file "$POST_RESTORE_RECOVERY_KIT" 'post-restore recovery kit')"
+              fi
+              if [[ "$DESTRUCTIVE" == "true" ]]; then
+                  [[ "${VW_NOBLE_TEST_DESTRUCTIVE:-}" == "YES" ]] \
+                      || die 'Set VW_NOBLE_TEST_DESTRUCTIVE=YES together with --destructive.'
+              fi
+          }
+
+          ''')
+
+          replace_section('run_phases() {', 'main() {', r'''run_phases() {
+              while true; do
+                  case "$PHASE" in
+                      inventory)
+                          capture_inventory
+                          save_phase contracts
+                          ;;
+                      contracts)
+                          step contract-tests bash ./tests/run-tests.sh all
+                          save_phase live
+                          ;;
+                      live)
+                          step make-health make health
+                          step email-test bash ./maintenance.sh test-email --verbose
+                          step pre-production-drill bash ./utilities/pre-production-drill.sh
+                          step smoke-before-dr bash ./utilities/smoke-test.sh
+                          save_phase canary
+                          ;;
+                      canary)
+                          step application-before-dr "$APPLICATION_E2E"
+                          meta_add PRE_DR_E2E_COMPLETED_EPOCH "$(date +%s)"
+                          save_phase backups
+                          ;;
+                      backups)
+                          step db-backup-rclone env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
+                              RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./backup.sh run db --rclone
+                          step dr-full-backup run_and_bind_full_backup DR_SOURCE
+                          step backup-verify bash ./backup.sh verify
+                          step backup-sync env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
+                              RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./backup.sh sync
+                          step remote-list env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
+                              RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh list --remote
+                          save_phase automation
+                          ;;
+                      automation)
+                          step systemd-validate bash ./utilities/setup-systemd.sh validate
+                          step dns-mutation-scope validate_dns_mutation_scope
+                          step systemd-jobs systemd_jobs
+                          step docker-restart systemctl restart docker.service
+                          step smoke-after-docker-restart bash ./utilities/smoke-test.sh
+                          save_phase reboot
+                          ;;
+                      reboot)
+                          meta_add REBOOT_FROM_BOOT_ID "$(boot_id)"
+                          save_phase post-reboot
+                          if [[ "$SKIP_REBOOT" == "true" ]]; then
+                              log 'Reboot skipped for development. This run is permanently non-certifying.'
+                          else
+                              log 'Checkpoint saved. Reboot the host now, then rerun the same options with resume.'
+                              exit 75
+                          fi
+                          ;;
+                      post-reboot)
+                          if verify_reboot_transition; then
+                              step systemd-after-reboot bash ./utilities/setup-systemd.sh validate
+                              step smoke-after-reboot bash ./utilities/smoke-test.sh
+                              if [[ "$DESTRUCTIVE" == "true" ]]; then
+                                  save_phase uninstall
+                              else
+                                  save_phase incomplete
+                              fi
+                          else
+                              step systemd-without-reboot bash ./utilities/setup-systemd.sh validate
+                              step smoke-without-reboot bash ./utilities/smoke-test.sh
+                              save_phase incomplete
+                          fi
+                          ;;
+                      uninstall)
+                          validate_boot_volume
+                          local current_state_path="$PROJECT_STATE_PATH"
+                          read_original_state_path
+                          [[ "$current_state_path" == "$PROJECT_STATE_PATH" ]] \
+                              || die 'Project state path changed before destructive reset.'
+                          [[ "$(meta_get PROJECT_STATE_PATH_HASH)" == "$(hash_text "$PROJECT_STATE_PATH")" ]] \
+                              || die 'Original project-state checkpoint changed before destructive reset.'
+                          step uninstall-reset bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit --force
+                          step uninstall-residuals post_uninstall_check
+                          save_phase restore
+                          ;;
+                      restore)
+                          step dr-source-download download_bound_backup DR_SOURCE restore-source
+                          step exact-full-restore env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
+                              RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh interactive --file "$BOUND_BACKUP_FILE" \
+                              --from-recovery-kit "$RECOVERY_KIT" --no-backup --start-policy manual --force
+                          meta_add RESTORE_COMPLETED_EPOCH "$(date +%s)"
+                          meta_add RESTORED_BACKUP_BASENAME "$(meta_get DR_SOURCE_BACKUP_BASENAME)"
+                          meta_add RESTORED_BACKUP_ARCHIVE_SHA256 "$(meta_get DR_SOURCE_BACKUP_ARCHIVE_SHA256)"
+                          save_phase post-restore-validation
+                          rm -rf -- "$STATE_ROOT/restore-source" || true
+                          ;;
+                      post-restore-validation)
+                          step repair-permissions bash ./utilities/repair-permissions.sh
+                          step startup bash ./startup.sh
+                          step systemd-install-manual manual_systemd_install_check
+                          step make-health-after-restore make health
+                          step email-after-restore bash ./maintenance.sh test-email --verbose
+                          step pre-production-after-restore bash ./utilities/pre-production-drill.sh
+                          step application-after-dr "$APPLICATION_E2E"
+                          save_phase recovery-custody
+                          ;;
+                      recovery-custody)
+                          validate_post_restore_recovery_kit
+                          save_phase activate-automation
+                          ;;
+                      activate-automation)
+                          step dns-mutation-scope-after-restore validate_dns_mutation_scope
+                          step systemd-activate bash ./utilities/setup-systemd.sh install --enable-now
+                          step systemd-after-restore bash ./utilities/setup-systemd.sh validate
+                          step smoke-after-restore bash ./utilities/smoke-test.sh
+                          save_phase final-backup
+                          ;;
+                      final-backup)
+                          step post-dr-db env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
+                              RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./backup.sh run db --rclone
+                          step post-dr-full run_and_bind_full_backup POST_DR
+                          step post-dr-verify bash ./backup.sh verify
+                          step post-dr-recovery-kit-decrypt verify_bound_backup_with_kit POST_DR "$POST_RESTORE_RECOVERY_KIT"
+                          save_phase complete
+                          ;;
+                      complete)
+                          log "FULL ACCEPTANCE PASSED: $(current_sha)"
+                          log "DR source: $(meta_get DR_SOURCE_BACKUP_BASENAME) $(meta_get DR_SOURCE_BACKUP_ARCHIVE_SHA256)"
+                          log "Post-DR full: $(meta_get POST_DR_BACKUP_BASENAME) $(meta_get POST_DR_BACKUP_ARCHIVE_SHA256)"
+                          return 0
+                          ;;
+                      incomplete)
+                          die 'Run is non-certifying. Full acceptance requires destructive mode and a verified real reboot.'
+                          ;;
+                      *) die "Unknown phase: $PHASE" ;;
+                  esac
+              done
+          }
+
+          ''')
+
+          controller.write_text(text)
+
+          test = Path('tests/suites/operations/case-host-acceptance.bash')
+          test.write_text(r'''#!/usr/bin/env bash
+          # Contract checks for the destructive Noble host acceptance controller.
+          set -euo pipefail
+          source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+          ROOT_REPO="$VW_TEST_REPO_ROOT"
+          A="$ROOT_REPO/utilities/noble-host-acceptance.sh"
+          T="$(mktemp -d)"
+          trap 'rm -rf "$T"' EXIT
+          fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+          bash -n "$A" || fail "host acceptance controller has invalid Bash syntax"
+          [[ -x "$A" ]] || fail "host acceptance controller is not executable"
+
+          # shellcheck source=../../../utilities/noble-host-acceptance.sh
+          source "$A"
+
+          # A real reboot is proved by boot ID. --skip-reboot is explicitly
+          # non-certifying rather than a shortcut to destructive phases.
+          (
+            META_FILE="$T/reboot.meta"
+            printf 'REBOOT_FROM_BOOT_ID=boot-a\n' > "$META_FILE"
+            SKIP_REBOOT=false
+            boot_id(){ printf 'boot-b\n'; }
+            verify_reboot_transition || fail "changed boot ID was rejected"
+            boot_id(){ printf 'boot-a\n'; }
+            if ( verify_reboot_transition ) >/dev/null 2>&1; then fail "same boot ID was accepted as a reboot"; fi
+            SKIP_REBOOT=true
+            set +e
+            verify_reboot_transition >/dev/null 2>&1
+            reboot_rc=$?
+            set -e
+            [[ $reboot_rc -eq 2 ]] || fail "--skip-reboot did not return the non-certifying result"
+          )
+          grep -Fq 'save_phase incomplete' "$A" || fail "non-certifying terminal phase is missing"
+
+          # Reuse the canonical uninstaller's authoritative environment precedence and
+          # storage_ambiguous checks rather than a parallel environment-only detector.
+          AT="$T/storage"
+          mkdir -p "$AT/systemd"
+          : > "$AT/fstab"
+          printf 'PROJECT_STATE_DIR=%s\n' "$AT/state" > "$AT/installed.env"
+          VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" \
+          VW_UNINSTALL_FSTAB="$AT/fstab" \
+          VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" \
+            validate_boot_volume
+          [[ "$PROJECT_STATE_PATH" == "$AT/state" ]] || fail "canonical boot-volume state path was not resolved"
+          printf 'PROJECT_STATE_DIR=%s\nDATA_VOLUME_DEVICE=/dev/mock\nDATA_VOLUME_MOUNT=%s\n' "$AT/state" "$AT/state" > "$AT/installed.env"
+          if ( VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" VW_UNINSTALL_FSTAB="$AT/fstab" VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" validate_boot_volume ) >/dev/null 2>&1; then
+            fail "explicit attached volume was accepted"
+          fi
+          printf 'PROJECT_STATE_DIR=%s\n' "$AT/mounted-state" > "$AT/installed.env"
+          mkdir -p "$AT/mounted-state" "$AT/bin"
+          cat > "$AT/bin/mountpoint" <<EOF_MOUNTPOINT
+          #!/usr/bin/env bash
+          [[ "\${1:-}" == -q && "\${2:-}" == "$AT/mounted-state" ]]
+          EOF_MOUNTPOINT
+          chmod 0755 "$AT/bin/mountpoint"
+          if ( PATH="$AT/bin:$PATH" VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" VW_UNINSTALL_FSTAB="$AT/fstab" VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" validate_boot_volume ) >/dev/null 2>&1; then
+            fail "ambiguously mounted project state was accepted"
+          fi
+
+          # Run/resume metadata binds exact code, host identity, rclone location,
+          # DNS mutation scope, recovery inputs, and E2E code.
+          (
+            AT="$T/binding"
+            mkdir -p "$AT"
+            RECOVERY_KIT="$AT/recovery-kit"
+            RCLONE_CONFIG_PATH="$AT/rclone.conf"
+            APPLICATION_E2E="$AT/e2e.sh"
+            RCLONE_REMOTE=acceptance
+            RCLONE_REMOTE_PATH=vaultwarden_acceptance
+            DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+            ALLOW_DNS_MUTATION=true
+            printf 'old recovery\n' > "$RECOVERY_KIT"
+            printf '[acceptance]\ntype = local\n' > "$RCLONE_CONFIG_PATH"
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+            chmod 0755 "$APPLICATION_E2E"
+            META_FILE="$AT/metadata"
+            DESTRUCTIVE=false
+            # shellcheck disable=SC2034 # consumed by sourced acceptance metadata helpers
+            SKIP_REBOOT=false
+            current_sha(){ printf 'sha-a\n'; }
+            machine_id_hash(){ printf 'host-a\n'; }
+            boot_id(){ printf 'boot-a\n'; }
+            init_metadata
+            verify_metadata || fail "fresh checkpoint metadata was rejected"
+            printf '# drift\n' >> "$APPLICATION_E2E"
+            if ( verify_metadata ) >/dev/null 2>&1; then fail "E2E hook content drift was accepted"; fi
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+            current_sha(){ printf 'sha-b\n'; }
+            if ( verify_metadata ) >/dev/null 2>&1; then fail "Git SHA drift was accepted"; fi
+            current_sha(){ printf 'sha-a\n'; }
+            RCLONE_REMOTE=other
+            if ( verify_metadata ) >/dev/null 2>&1; then fail "rclone remote drift was accepted"; fi
+            RCLONE_REMOTE=acceptance
+            RCLONE_REMOTE_PATH=other-path
+            if ( verify_metadata ) >/dev/null 2>&1; then fail "rclone path drift was accepted"; fi
+            RCLONE_REMOTE_PATH=vaultwarden_acceptance
+            DNS_MUTATION_DOMAIN=other.example.com
+            if ( verify_metadata ) >/dev/null 2>&1; then fail "DNS mutation scope drift was accepted"; fi
+          )
+
+          # Destructive mode and DNS mutation both require explicit two-part consent.
+          (
+            external_file(){ printf '%s\n' "$1"; }
+            validate_e2e_hook(){ :; }
+            RECOVERY_KIT="$T/recovery-kit"
+            RCLONE_CONFIG_PATH="$T/rclone.conf"
+            APPLICATION_E2E="$T/e2e.sh"
+            RCLONE_REMOTE=acceptance
+            RCLONE_REMOTE_PATH=vaultwarden_acceptance
+            DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+            ALLOW_DNS_MUTATION=true
+            : > "$RECOVERY_KIT"; : > "$RCLONE_CONFIG_PATH"; : > "$APPLICATION_E2E"
+            DESTRUCTIVE=true
+            VW_NOBLE_TEST_DNS_MUTATION=YES
+            unset VW_NOBLE_TEST_DESTRUCTIVE || true
+            if ( validate_inputs ) >/dev/null 2>&1; then fail "destructive acceptance bypassed environment acknowledgement"; fi
+            VW_NOBLE_TEST_DESTRUCTIVE=YES validate_inputs >/dev/null || fail "double destructive consent was rejected"
+            unset VW_NOBLE_TEST_DNS_MUTATION
+            if ( VW_NOBLE_TEST_DESTRUCTIVE=YES validate_inputs ) >/dev/null 2>&1; then fail "DNS mutation bypassed environment acknowledgement"; fi
+          )
+
+          # The external DNS mutation gate requires both consent and an exact runtime
+          # DOMAIN match, so a production hostname cannot be mutated accidentally by
+          # merely running the foreground systemd-job phase.
+          (
+            DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+            ALLOW_DNS_MUTATION=true
+            runtime_config_value(){ printf 'vw-acceptance.example.com\n'; }
+            unset VW_NOBLE_TEST_DNS_MUTATION || true
+            if ( validate_dns_mutation_scope ) >/dev/null 2>&1; then fail "DNS mutation ran without environment consent"; fi
+            VW_NOBLE_TEST_DNS_MUTATION=YES validate_dns_mutation_scope >/dev/null \
+              || fail "matching dedicated DNS mutation scope was rejected"
+            runtime_config_value(){ printf 'vault.example.com\n'; }
+            if ( VW_NOBLE_TEST_DNS_MUTATION=YES validate_dns_mutation_scope ) >/dev/null 2>&1; then
+              fail "mismatched runtime DOMAIN was accepted for DNS mutation"
+            fi
+          )
+
+          # Root-executed E2E hooks may not be writable by group/other.
+          (
+            APPLICATION_E2E="$T/e2e-trust.sh"
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+            chmod 0755 "$APPLICATION_E2E"
+            real_stat="$(command -v stat)"
+            stat(){
+              case "$*" in
+                '-c %u:%g '*) printf '0:0\n' ;;
+                '-c %a '*) printf '775\n' ;;
+                *) "$real_stat" "$@" ;;
+              esac
+            }
+            if ( validate_e2e_hook ) >/dev/null 2>&1; then fail "group-writable root E2E hook was accepted"; fi
+          )
+
+          # Canonical uninstall success is not trusted blindly: the independently saved
+          # project-state path and Compose runtime must also be absent before restore.
+          (
+            AT="$T/residual"
+            mkdir -p "$AT/repo"
+            ROOT="$AT/repo"
+            STATE_PATH_FILE="$AT/original-state"
+            printf '%s\n' "$AT/state" > "$STATE_PATH_FILE"
+            docker(){ return 0; }
+            post_uninstall_check "$AT/no-etc" "$AT/no-run" "$ROOT" acceptance \
+              || fail "clean post-uninstall fixture was rejected"
+            mkdir -p "$AT/state"
+            if post_uninstall_check "$AT/no-etc" "$AT/no-run" "$ROOT" acceptance; then
+              fail "residual managed project state was accepted"
+            fi
+          )
+
+          # Rotated recovery custody is tied to the active operational Age recipient,
+          # not merely to a different whole-file digest.
+          (
+            AT="$T/age-binding"
+            mkdir -p "$AT/state"
+            STATE_ROOT="$AT/state"
+            age-keygen -o "$AT/old.key" >/dev/null 2>&1
+            age-keygen -o "$AT/new.key" >/dev/null 2>&1
+            age-keygen -o "$AT/other.key" >/dev/null 2>&1
+            cat "$AT/old.key" > "$AT/old.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/old.kit"
+            cat "$AT/new.key" > "$AT/new.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/new.kit"
+            cat "$AT/other.key" > "$AT/other.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/other.kit"
+            RECOVERY_KIT="$AT/old.kit"
+            validate_recovery_recipient_binding "$AT/new.kit" "$AT/new.key" \
+              || fail "matching rotated recovery identity was rejected"
+            if ( validate_recovery_recipient_binding "$AT/other.kit" "$AT/new.key" ) >/dev/null 2>&1; then
+              fail "unrelated valid recovery identity was accepted"
+            fi
+            cp "$AT/old.kit" "$AT/modified-old.kit"
+            printf '# digest-only change\n' >> "$AT/modified-old.kit"
+            if ( validate_recovery_recipient_binding "$AT/modified-old.kit" "$AT/old.key" ) >/dev/null 2>&1; then
+              fail "modified copy of the old Age identity was accepted as rotated custody"
+            fi
+
+            recipient="$(age-keygen -y "$AT/new.key")"
+            printf 'bound remote payload\n' | age -r "$recipient" -o "$AT/post-dr-full.age"
+            META_FILE="$AT/metadata"
+            : > "$META_FILE"
+            meta_add POST_DR_BACKUP_BASENAME full_backup_fixture.tar.zst.age
+            meta_add POST_DR_BACKUP_ARCHIVE_SHA256 "$(sha_file "$AT/post-dr-full.age")"
+            meta_add POST_DR_BACKUP_COHORT_SHA256 "$(printf '0%.0s' {1..64})"
+            download_bound_backup(){ BOUND_BACKUP_FILE="$AT/post-dr-full.age"; }
+            verify_bound_backup_with_kit POST_DR "$AT/new.kit" \
+              || fail "copied rotated recovery kit could not decrypt bound post-DR backup"
+          )
+
+          # Canary creation must precede the specifically bound full backup. Restore
+          # must download that exact cohort and use --file, never remote 'latest'.
+          canary_line="$(grep -n 'application-before-dr' "$A" | cut -d: -f1)"
+          source_backup_line="$(grep -n 'dr-full-backup run_and_bind_full_backup DR_SOURCE' "$A" | cut -d: -f1)"
+          source_download_line="$(grep -n 'dr-source-download download_bound_backup DR_SOURCE restore-source' "$A" | cut -d: -f1)"
+          exact_restore_line="$(grep -n 'bash ./restore.sh interactive --file \"\$BOUND_BACKUP_FILE\"' "$A" | cut -d: -f1)"
+          restore_checkpoint_line="$(grep -n 'save_phase post-restore-validation' "$A" | cut -d: -f1)"
+          repair_line="$(grep -n 'repair-permissions bash ./utilities/repair-permissions.sh' "$A" | cut -d: -f1)"
+          e2e_line="$(grep -n 'application-after-dr' "$A" | cut -d: -f1)"
+          custody_line="$(grep -n 'validate_post_restore_recovery_kit' "$A" | tail -1 | cut -d: -f1)"
+          activate_line="$(grep -n 'systemd-activate bash ./utilities/setup-systemd.sh install --enable-now' "$A" | cut -d: -f1)"
+          final_backup_line="$(grep -n 'post-dr-full run_and_bind_full_backup POST_DR' "$A" | cut -d: -f1)"
+          final_decrypt_line="$(grep -n 'post-dr-recovery-kit-decrypt verify_bound_backup_with_kit POST_DR' "$A" | cut -d: -f1)"
+          (( canary_line < source_backup_line && source_backup_line < source_download_line && source_download_line < exact_restore_line )) \
+            || fail "canary/bound-backup/exact-restore sequencing regressed"
+          (( exact_restore_line < restore_checkpoint_line && restore_checkpoint_line < repair_line && repair_line < e2e_line )) \
+            || fail "successful restore is not checkpointed before post-restore validation"
+          (( e2e_line < custody_line && custody_line < activate_line && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \
+            || fail "post-restore custody/automation/final-backup sequencing regressed"
+          ! grep -Fq 'restore.sh latest full --remote' "$A" || fail "controller still restores an unbound remote latest backup"
+          grep -Fq 'POST_RESTORE_AGE_RECIPIENT_HASH' "$A" || fail "rotated Age recipient is not checkpointed"
+          grep -Fq 'dns-mutation-scope-after-restore validate_dns_mutation_scope' "$A" \
+            || fail "post-restore timer activation is not protected by the DNS mutation gate"
+
+          echo 'case-host-acceptance: ok'
+          ''')
+
+          doc = Path('docs/HOST-ACCEPTANCE.md')
+          doc.write_text(r'''# Noble Host Acceptance and Same-Host DR
+
+          `utilities/noble-host-acceptance.sh` is a release/DR acceptance controller for a real Ubuntu 24.04 LTS Noble host. It complements the permanent Bash test inventory; it does not replace `./tests/run-tests.sh all` or reimplement backup, restore, uninstall, storage, systemd, smoke, or drill logic.
+
+          Use this workflow periodically on a disposable acceptance host or snapshot, not as a routine day-to-day health check. A full pass is intentionally destructive and can make real external DNS changes, so use a dedicated acceptance hostname/zone and credentials.
+
+          ## Full-certification boundary
+
+          A full run proves the repository's supported Noble host path by orchestrating:
+
+          1. the canonical permanent Bash suites;
+          2. live health, email, pre-production drill, and smoke checks;
+          3. the external application E2E hook, which creates/records the DR canary;
+          4. an explicit DB backup plus a **new full backup created after the canary**, with that full backup's exact basename, archive SHA-256, authenticated cohort digest, and rclone location checkpoint-bound;
+          5. installed systemd validation and one foreground start of each managed recurring job, with the DNS updater protected by an explicit external-mutation gate;
+          6. Docker daemon restart followed by smoke testing;
+          7. a real reboot, verified by Linux boot ID;
+          8. canonical `--test-reset` uninstall plus independent residual assertions;
+          9. exact re-download of the checkpoint-bound full backup cohort from rclone and restore of that staged file using the external pre-DR recovery kit and `--start-policy manual`;
+          10. an immediate post-restore checkpoint **before** permission repair, startup, health, email, drill, or E2E validation, so a later validation failure cannot repeat a successful destructive restore;
+          11. post-restore health, email, drill, and application E2E while recurring timers remain inactive, including assertion of the same pre-DR canary;
+          12. durable custody of the newly rotated recovery kit on a non-root mounted recovery medium, with its Age identity proven to match the live rotated operational key and to differ from the pre-DR identity;
+          13. only then, activation and canonical validation of systemd automation, protected again by the DNS mutation scope gate;
+          14. fresh DB and fully verified full rclone recovery points encrypted to the new operational recipient; and
+          15. exact re-download of that final full backup and an `age` decrypt probe using the **copied post-restore recovery kit itself**.
+
+          `FULL ACCEPTANCE PASSED` is reachable only after the real-reboot, exact-source destructive DR, rotated-recovery-custody, external-mutation, automation, final-backup, and copied-kit remote-decrypt gates succeed.
+
+          ## Checkpoint integrity
+
+          The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. It binds a run to:
+
+          - the exact Git commit SHA;
+          - the host machine identity;
+          - the original and pre-reboot Linux boot IDs;
+          - the rclone remote name, subpath, config path, and config digest;
+          - the pre-DR recovery-kit path and digest;
+          - the application E2E hook path and digest;
+          - the explicitly acknowledged DNS mutation hostname;
+          - destructive/non-destructive mode and DNS-mutation consent;
+          - the reboot policy;
+          - for destructive runs, the canonical project-state path;
+          - the exact canary-inclusive DR source full-backup identity and digests; and
+          - after restore, the copied rotated recovery-kit path/digest and recipient binding.
+
+          `resume` fails if any bound operator input changes. The controller compares `/proc/sys/kernel/random/boot_id` with the saved pre-reboot value, so rerunning `resume` without rebooting cannot satisfy the reboot gate.
+
+          `--skip-reboot` exists only for controller development. A run started with it is permanently non-certifying and terminates at the `incomplete` phase. Re-running without the flag is rejected as checkpoint drift.
+
+          ## Host/storage boundary
+
+          Destructive same-host DR intentionally supports **boot-volume project state only**.
+
+          The controller does not maintain a parallel storage detector. Before destructive work it sources the canonical uninstaller in dry-run mode, calls its `resolve` path, and applies the same `DATA_VOLUME_DEVICE` and `storage_ambiguous` checks used by destructive uninstall. This catches explicitly configured attached storage as well as incompletely described custom mounts, managed mount guards, and other ambiguous separate-volume evidence.
+
+          The production uninstaller correctly preserves separately attached data-volume contents. Therefore an attached-volume same-host reset is not a clean replacement-host simulation and is rejected. Test attached-volume DR on a fresh replacement host or with a disposable replacement block volume instead of weakening uninstall safety.
+
+          ## Required external inputs
+
+          Before starting, prepare:
+
+          - a root-owned `0400` or `0600` pre-DR recovery kit outside all managed VaultWarden paths;
+          - a root-owned `0400` or `0600` rclone configuration outside all managed VaultWarden paths;
+          - the exact rclone subpath used for the acceptance backups;
+          - a root-owned executable application E2E hook that is not group- or world-writable; and
+          - a dedicated acceptance hostname/zone whose configured runtime `DOMAIN` you explicitly authorize the drill to mutate.
+
+          The pre-DR recovery kit and rclone config must survive `utilities/uninstall-vaultwarden.sh run --test-reset`.
+
+          The E2E hook is executed as root. The controller rejects symlinks, non-root ownership, non-executable files, and group/world-writable hooks. Its path and digest are bound to the checkpoint.
+
+          ## External DNS mutation safety
+
+          `vaultwarden-dns-update.service` can issue a real Cloudflare update for the configured `DOMAIN`. A disposable VM is therefore **not** enough isolation if it carries production DNS credentials and the production hostname.
+
+          Full acceptance requires all of the following:
+
+          - `--dns-mutation-domain <dedicated-acceptance-hostname>`;
+          - `--allow-dns-mutation`;
+          - `VW_NOBLE_TEST_DNS_MUTATION=YES`; and
+          - immediately before the foreground DNS job and again before post-restore timer activation, the installed runtime `DOMAIN` must exactly equal the acknowledged hostname.
+
+          The controller deliberately does not guess whether a hostname is "production". The operator must use a dedicated acceptance hostname/zone and explicitly name the record that may be changed. If the restored runtime environment points at a different hostname, the run stops before DNS mutation/timer activation.
+
+          ## Application E2E and exact DR source contract
+
+          The hook is external because this repository does not own a browser/client automation framework. It must exit non-zero on any failed assertion and should use disposable acceptance identities/data. At minimum prove:
+
+          - user login;
+          - vault item create/read/update/delete;
+          - organization membership/sharing;
+          - attachment upload/download;
+          - Send creation/readback/removal;
+          - logout/login persistence;
+          - supported client sync;
+          - WebSocket/live-update behavior where applicable; and
+          - admin endpoint protection.
+
+          On the pre-DR invocation, create/record a unique canary such as `NOBLE-DR-CANARY-<run-id>`. **Only after that hook succeeds** does the controller create the full DR source backup. It snapshots the full-backup inventory before/after that command and requires exactly one newly published full backup. That backup's exact basename, archive digest, cohort digest, creation time, and remote object identity are checkpointed.
+
+          After uninstall, the controller does not call `restore.sh latest`. It downloads the four required members of that exact remote cohort (`.age`, `.sha256`, `.sha256.hmac`, `.meta`) into the root-only acceptance state area, verifies the archive and cohort digests against the checkpoint, and calls canonical restore with `--file` on that staged full backup. The post-restore E2E invocation must find the same canary.
+
+          ## Start a full run
+
+          ```bash
+          sudo install -o root -g root -m 0600 /secure/recovery-kit.txt /root/vw-acceptance-recovery-kit.txt
+          sudo install -o root -g root -m 0600 /secure/rclone.conf /root/vw-acceptance-rclone.conf
+          sudo install -o root -g root -m 0700 /secure/vw-application-e2e.sh /root/vw-application-e2e.sh
+
+          sudo env \
+            VW_NOBLE_TEST_DESTRUCTIVE=YES \
+            VW_NOBLE_TEST_DNS_MUTATION=YES \
+            utilities/noble-host-acceptance.sh run \
+            --destructive \
+            --recovery-kit /root/vw-acceptance-recovery-kit.txt \
+            --rclone-remote myremote \
+            --rclone-path vaultwarden_acceptance \
+            --rclone-config /root/vw-acceptance-rclone.conf \
+            --application-e2e /root/vw-application-e2e.sh \
+            --dns-mutation-domain vw-acceptance.example.com \
+            --allow-dns-mutation
+          ```
+
+          The destructive path requires **both** `--destructive` and `VW_NOBLE_TEST_DESTRUCTIVE=YES`. External DNS mutation separately requires `--allow-dns-mutation` and `VW_NOBLE_TEST_DNS_MUTATION=YES`.
+
+          ## Reboot checkpoint
+
+          At the reboot phase the controller saves the current boot ID, changes its checkpoint to `post-reboot`, and exits `75`. Reboot the host, verify the same checkout is present, then rerun exactly the same bound options and environment acknowledgements with `resume`.
+
+          The resume fails unless the host boot ID changed and all checkpoint-bound inputs still match.
+
+          ## Restore checkpoint and resumability
+
+          The destructive restore sequence is:
+
+          1. exact checkpoint-bound remote cohort download and digest verification;
+          2. canonical `restore.sh interactive --file <staged-full-backup> --from-recovery-kit ... --no-backup --start-policy manual --force`;
+          3. record restore completion and the restored backup identity; and
+          4. **immediately checkpoint `post-restore-validation`**.
+
+          Only the next phase performs permission repair, startup, manual systemd installation, health, email, pre-production drill, and post-DR application E2E. If any of those checks fail, `resume` restarts `post-restore-validation`; it does not repeat the already successful restore or rotate the Age key again.
+
+          ## Rotated recovery custody is mandatory
+
+          A successful canonical full restore rotates to a new operational Age key. Future backups therefore require the **new** recovery material; the pre-DR kit used to enter the drill is not sufficient custody for the recovery points created afterward.
+
+          At `recovery-custody` the controller stops until the newly generated recovery handoff is copied to durable off-host storage. Resume with the same bound options plus:
+
+          ```text
+          --post-restore-recovery-kit /mnt/recovery/vaultwarden-recovery-kit-<timestamp>.txt
+          ```
+
+          The supplied post-restore kit must:
+
+          - be a root-owned `0400`/`0600` regular file, not a symlink;
+          - be outside managed VaultWarden paths;
+          - reside on a mounted filesystem whose device differs from the root filesystem;
+          - be newer than the completed restore;
+          - contain the canonical recovery-kit completion marker and exactly one Age private identity;
+          - have a digest different from the pre-DR recovery kit;
+          - derive the **same Age recipient as the live `/etc/vaultwarden/age-key.txt`**; and
+          - derive a recipient different from the pre-DR recovery kit.
+
+          After automation is activated, the final full backup is created with full verification and rclone delivery. The controller binds that exact backup, re-downloads the exact encrypted archive from rclone, extracts the Age identity from the copied post-restore kit into a root-only temporary file, and performs an `age -d ... -o /dev/null` decrypt probe. A run cannot reach `FULL ACCEPTANCE PASSED` merely because the kit looks valid; the copied retained identity must actually decrypt the final offsite ciphertext.
+
+          ## Evidence to retain
+
+          For the release/commit being certified, retain:
+
+          - exact Git SHA and host inventory;
+          - controller checkpoint metadata and logs;
+          - pre- and post-DR smoke output;
+          - pre-DR E2E/canary output;
+          - the exact bound DR source backup basename, archive SHA-256, cohort digest, and rclone location;
+          - uninstall output and residual result;
+          - exact-source restore output and the immediate post-restore checkpoint;
+          - post-restore E2E proof of the same canary;
+          - evidence that the copied rotated recovery kit's recipient matches the live rotated key;
+          - DNS mutation-scope checks for the dedicated acceptance hostname;
+          - final DB/full rclone backup verification; and
+          - the copied recovery kit's successful decrypt probe against the exact final offsite full backup.
+
+          The PR/commit is not real-host certified until one full destructive run on a disposable supported Noble host completes with retained evidence. CI and mocked contract tests cannot substitute for that run.
+          ''')
+
+          for path in (controller, test, doc):
+              data = path.read_text()
+              lines = data.splitlines()
+              # The raw strings above are indented for YAML readability; remove the
+              # common ten-space Python-heredoc indentation from generated files.
+              if lines and all((not line) or line.startswith('          ') for line in lines):
+                  data = '\n'.join(line[10:] if line else '' for line in lines) + '\n'
+                  path.write_text(data)
+
+          controller.chmod(0o755)
+          test.chmod(0o755)
+          PY
+
+          bash -n utilities/noble-host-acceptance.sh
+          bash -n tests/suites/operations/case-host-acceptance.bash
+          git diff --check
+
+      - name: Install focused test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age
+          YQ_VERSION="v4.53.3"
+          YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /tmp/yq
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+
+      - name: Run focused controller contracts
+        run: |
+          bash tests/suites/operations/case-host-acceptance.bash
+          shellcheck -x --severity=warning utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash
+
+      - name: Regenerate command reference
+        env:
+          DOCKER_PROJECT_LABEL: ci
+        run: |
+          bash utilities/write-command-reference.sh
+          git diff --check
+
+      - name: Commit hardened acceptance design
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/pr330-acceptance-hardening.yml
+          git add utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash docs/HOST-ACCEPTANCE.md docs/COMMAND-REFERENCE.md
+          git commit -m "test: bind Noble DR evidence and external mutations"
+          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
