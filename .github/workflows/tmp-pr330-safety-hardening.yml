@@ -1,0 +1,158 @@
+name: Temporary PR330 destructive safety hardening
+
+on:
+  pull_request:
+    branches:
+      - delta
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: github.event.pull_request.head.ref == 'test/noble-host-acceptance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Apply focused safety patch
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement target, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          controller = "utilities/noble-host-acceptance.sh"
+          tests = "tests/suites/operations/case-host-acceptance.bash"
+          docs = "docs/HOST-ACCEPTANCE.md"
+
+          replace_once(
+              controller,
+              'VALIDATED_RECOVERY_RECIPIENT=""\n\nusage() {',
+              'VALIDATED_RECOVERY_RECIPIENT=""\nACCEPTANCE_LOCK_FILE="/run/lock/vaultwarden-noble-acceptance.lock"\nACCEPTANCE_LOCK_FD=""\n\nusage() {'
+          )
+
+          replace_once(
+              controller,
+              '''    printf '%s\\n' "$path"\n}\n\nvalidate_e2e_hook() {''',
+              '''    printf '%s\\n' "$path"\n}\n\ncanonical_uninstall_recovery_dir() (\n    set -- run --dry-run\n    # Source the canonical uninstaller so this boundary follows its configured\n    # recovery-handoff directory instead of duplicating the default path.\n    # shellcheck disable=SC1091\n    source "$ROOT/utilities/uninstall-vaultwarden.sh"\n    canon "$RECOVERY_DIR"\n)\n\nvalidate_recovery_kit_survival() {\n    local path="$1" recovery_dir\n    recovery_dir="$(canonical_uninstall_recovery_dir)" \\\n        || die 'Cannot resolve the canonical uninstall recovery-handoff directory.'\n    [[ "$recovery_dir" == /* ]] \\\n        || die 'Canonical uninstall recovery-handoff directory did not resolve to an absolute path.'\n    case "$path" in\n        "$recovery_dir"|"$recovery_dir"/*)\n            die "Pre-DR recovery kit is inside the canonical uninstall recovery-handoff directory ($recovery_dir) and may be removed by --test-reset. Copy it to a root-owned path outside that directory before destructive acceptance."\n            ;;\n    esac\n}\n\nacquire_controller_lock() {\n    local lock_dir\n    command -v flock >/dev/null 2>&1 || die 'flock is required for the acceptance controller lock.'\n    [[ "$ACCEPTANCE_LOCK_FILE" == /* ]] || die 'Acceptance controller lock path must be absolute.'\n    lock_dir="$(dirname -- "$ACCEPTANCE_LOCK_FILE")"\n    [[ -d "$lock_dir" && ! -L "$lock_dir" ]] || die "Acceptance lock directory is unavailable or unsafe: $lock_dir"\n    [[ ! -L "$ACCEPTANCE_LOCK_FILE" ]] || die 'Acceptance controller lock file must not be a symlink.'\n    [[ ! -e "$ACCEPTANCE_LOCK_FILE" || -f "$ACCEPTANCE_LOCK_FILE" ]] \\\n        || die 'Acceptance controller lock path exists but is not a regular file.'\n    umask 077\n    unset ACCEPTANCE_LOCK_FD\n    exec {ACCEPTANCE_LOCK_FD}>"$ACCEPTANCE_LOCK_FILE" \\\n        || die 'Cannot open acceptance controller lock file.'\n    chmod 0600 "$ACCEPTANCE_LOCK_FILE" \\\n        || die 'Cannot secure acceptance controller lock file.'\n    flock -n "$ACCEPTANCE_LOCK_FD" \\\n        || die 'Another Noble host acceptance run/resume process is already active.'\n}\n\nvalidate_e2e_hook() {'''
+          )
+
+          replace_once(
+              controller,
+              '''manual_systemd_install_check() {\n    local timer\n    bash ./utilities/setup-systemd.sh install --no-enable-now\n    for timer in \\\n        vaultwarden-maintenance.timer \\\n        vaultwarden-db-backup.timer \\\n        vaultwarden-full-backup.timer \\\n        vaultwarden-health.timer \\\n        vaultwarden-dns-update.timer \\\n        vaultwarden-firewall-update.timer; do\n        systemctl is-enabled --quiet "$timer" || return 1\n        ! systemctl is-active --quiet "$timer" || return 1\n    done\n    systemctl is-enabled --quiet vaultwarden-startup.service\n}\n''',
+              '''manual_systemd_install_check() {\n    local timer\n    local -a timers=(\n        vaultwarden-maintenance.timer\n        vaultwarden-db-backup.timer\n        vaultwarden-full-backup.timer\n        vaultwarden-health.timer\n        vaultwarden-dns-update.timer\n        vaultwarden-firewall-update.timer\n    )\n    bash ./utilities/setup-systemd.sh install --no-enable-now\n    for timer in "${timers[@]}"; do\n        systemctl is-enabled --quiet "$timer" || return 1\n        ! systemctl is-active --quiet "$timer" || return 1\n    done\n    systemctl is-enabled --quiet vaultwarden-startup.service || return 1\n\n    # Manual install enables timers for future boots. Certification must remain\n    # custody-gated even across an unexpected reboot, so disable them again after\n    # proving the canonical install state. activate-automation is the only place\n    # that may re-enable/start recurring automation.\n    systemctl disable --now "${timers[@]}"\n    for timer in "${timers[@]}"; do\n        ! systemctl is-enabled --quiet "$timer" || return 1\n        ! systemctl is-active --quiet "$timer" || return 1\n    done\n}\n'''
+          )
+
+          replace_once(
+              controller,
+              '''    RECOVERY_KIT="$(external_file "$RECOVERY_KIT" 'recovery kit')"\n    RCLONE_CONFIG_PATH="$(external_file "$RCLONE_CONFIG_PATH" 'rclone config')"''',
+              '''    RECOVERY_KIT="$(external_file "$RECOVERY_KIT" 'recovery kit')"\n    RCLONE_CONFIG_PATH="$(external_file "$RCLONE_CONFIG_PATH" 'rclone config')"'''
+          )
+
+          replace_once(
+              controller,
+              '''    if [[ "$DESTRUCTIVE" == "true" ]]; then\n        [[ "${VW_NOBLE_TEST_DESTRUCTIVE:-}" == "YES" ]] \\\n            || die 'Set VW_NOBLE_TEST_DESTRUCTIVE=YES together with --destructive.'\n    fi\n''',
+              '''    if [[ "$DESTRUCTIVE" == "true" ]]; then\n        validate_recovery_kit_survival "$RECOVERY_KIT"\n        [[ "${VW_NOBLE_TEST_DESTRUCTIVE:-}" == "YES" ]] \\\n            || die 'Set VW_NOBLE_TEST_DESTRUCTIVE=YES together with --destructive.'\n    fi\n'''
+          )
+
+          replace_once(
+              controller,
+              '''                [[ "$(meta_get PROJECT_STATE_PATH_HASH)" == "$(hash_text "$PROJECT_STATE_PATH")" ]] \\\n                    || die 'Original project-state checkpoint changed before destructive reset.'\n                step uninstall-reset bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit --force''',
+              '''                [[ "$(meta_get PROJECT_STATE_PATH_HASH)" == "$(hash_text "$PROJECT_STATE_PATH")" ]] \\\n                    || die 'Original project-state checkpoint changed before destructive reset.'\n                validate_recovery_kit_survival "$RECOVERY_KIT"\n                step uninstall-reset bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit --force'''
+          )
+
+          replace_once(
+              controller,
+              '''    require_root\n    parse "$@"\n    validate_host''',
+              '''    require_root\n    acquire_controller_lock\n    parse "$@"\n    validate_host'''
+          )
+
+          replace_once(
+              tests,
+              '''# shellcheck source=../../../utilities/noble-host-acceptance.sh\nsource "$A"\n\n# A real reboot is proved by boot ID.''',
+              '''# shellcheck source=../../../utilities/noble-host-acceptance.sh\nsource "$A"\n\n# run/resume are single-instance for the lifetime of each controller process.\n# The intentional reboot checkpoint exits the process and releases the flock;\n# resume must acquire it again.\n(\n  ACCEPTANCE_LOCK_FILE="$T/controller.lock"\n  exec 8>"$ACCEPTANCE_LOCK_FILE"\n  flock -n 8 || fail "could not hold controller lock fixture"\n  if ( exec 8>&-; acquire_controller_lock ) >/dev/null 2>&1; then\n    fail "controller accepted a concurrent run/resume lock acquisition"\n  fi\n  flock -u 8\n  exec 8>&-\n  acquire_controller_lock || fail "controller lock was not acquirable after release"\n)\nmain_function="$(sed -n '/^main()/,/^}/p' "$A")"\ngrep -Fq 'acquire_controller_lock' <<< "$main_function" \\\n  || fail "main does not acquire the controller-wide lock"\n\n# A real reboot is proved by boot ID.'''
+          )
+
+          replace_once(
+              tests,
+              '''fi\n\n# Run/resume metadata binds exact code, host identity, rclone location,''',
+              '''fi\n\n# A destructive pre-DR recovery kit may not live in the canonical uninstaller's\n# recovery-handoff directory, because --test-reset can remove or reject files there.\n(\n  AT="$T/recovery-survival"\n  mkdir -p "$AT/managed-recovery" "$AT/external"\n  managed="$AT/managed-recovery/vaultwarden-recovery-kit-20260816T010203Z-abcdef.txt"\n  external="$AT/external/recovery-kit.txt"\n  : > "$managed"\n  : > "$external"\n  if ( VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" validate_recovery_kit_survival "$managed" ) >/dev/null 2>&1; then\n    fail "pre-DR kit inside canonical uninstall recovery directory was accepted"\n  fi\n  VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" validate_recovery_kit_survival "$external" \\\n    || fail "external pre-DR kit outside uninstall recovery directory was rejected"\n)\n[[ "$(grep -Fc 'validate_recovery_kit_survival "$RECOVERY_KIT"' "$A")" -ge 2 ]] \\\n  || fail "recovery-kit survival is not checked at input validation and immediately before uninstall"\n\n# Run/resume metadata binds exact code, host identity, rclone location,'''
+          )
+
+          replace_once(
+              tests,
+              ''')\n\n# Canary creation must precede the specifically bound full backup. Restore''',
+              ''')\n\n# Post-restore manual systemd validation must leave every recurring timer disabled,\n# not merely inactive, so an unexpected reboot cannot cross the custody gate.\n(\n  timers_disabled=false\n  # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check\n  bash(){ [[ "$*" == "./utilities/setup-systemd.sh install --no-enable-now" ]]; }\n  # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check\n  systemctl(){\n    case "$1" in\n      is-enabled)\n        [[ "${3:-}" == "vaultwarden-startup.service" ]] && return 0\n        [[ "$timers_disabled" == "false" ]]\n        ;;\n      is-active) return 1 ;;\n      disable)\n        [[ "${2:-}" == "--now" ]] || return 1\n        timers_disabled=true\n        return 0\n        ;;\n      *) return 1 ;;\n    esac\n  }\n  manual_systemd_install_check || fail "manual systemd validation/disable sequence failed"\n  [[ "$timers_disabled" == "true" ]] || fail "manual systemd validation left timers enabled for reboot"\n)\n\n# Canary creation must precede the specifically bound full backup. Restore'''
+          )
+
+          replace_once(
+              docs,
+              '''11. post-restore health, email, drill, and application E2E while recurring timers remain inactive, including assertion of the same pre-DR canary;''',
+              '''11. post-restore health, email, drill, and application E2E while recurring timers remain non-running; the canonical manual install is verified and then every managed recurring timer is disabled again so an unexpected reboot cannot cross the custody gate, including assertion of the same pre-DR canary;'''
+          )
+
+          replace_once(
+              docs,
+              '''- a root-owned `0400` or `0600` pre-DR recovery kit outside all managed VaultWarden paths;''',
+              '''- a root-owned `0400` or `0600` pre-DR recovery kit outside all managed VaultWarden paths **and outside the canonical uninstaller recovery-handoff directory** (default `/root/vaultwarden-recovery`);'''
+          )
+
+          replace_once(
+              docs,
+              '''The pre-DR recovery kit and rclone config must survive `utilities/uninstall-vaultwarden.sh run --test-reset`.''',
+              '''The pre-DR recovery kit and rclone config must survive `utilities/uninstall-vaultwarden.sh run --test-reset`. For destructive runs the controller sources the canonical uninstaller in dry-run mode, resolves its configured `RECOVERY_DIR` (including `VW_UNINSTALL_RECOVERY_DIR` overrides), and rejects a pre-DR kit anywhere inside that directory before destructive acceptance and again immediately before uninstall. A kit in the normal `/root/vaultwarden-recovery/vaultwarden-recovery-kit-*` handoff location is therefore intentionally rejected; copy it first to a separate root-owned path such as `/root/vw-acceptance-recovery-kit.txt`.'''
+          )
+
+          replace_once(
+              docs,
+              '''`--skip-reboot` exists only for controller development. A run started with it is permanently non-certifying and terminates at the `incomplete` phase. Re-running without the flag is rejected as checkpoint drift.\n\n## Host/storage boundary''',
+              '''`--skip-reboot` exists only for controller development. A run started with it is permanently non-certifying and terminates at the `incomplete` phase. Re-running without the flag is rejected as checkpoint drift.\n\n## Single-instance controller lock\n\nEvery `run` and `resume` invocation takes a non-blocking exclusive `flock` on `/run/lock/vaultwarden-noble-acceptance.lock` before parsing inputs or touching checkpoint state. A second root invocation fails closed instead of interleaving metadata, phase changes, logs, uninstall, or restore work. The lock is process-lifetime only: the intentional reboot checkpoint exits `75`, the kernel releases the lock, and the post-reboot `resume` must acquire it again. `status` remains read-only and does not take the destructive controller lock.\n\n## Host/storage boundary'''
+          )
+
+          replace_once(
+              docs,
+              '''Only the next phase performs permission repair, startup, manual systemd installation, health, email, pre-production drill, and post-DR application E2E. If any of those checks fail, `resume` restarts `post-restore-validation`; it does not repeat the already successful restore or rotate the Age key again.''',
+              '''Only the next phase performs permission repair, startup, manual systemd installation, health, email, pre-production drill, and post-DR application E2E. The manual systemd step first proves the canonical install produced enabled-but-inactive timers, then explicitly disables all managed recurring timers before continuing. This keeps the custody boundary reboot-safe: an unexpected reboot before `activate-automation` cannot start backup, maintenance, DNS, health, or firewall timers. If any of those checks fail, `resume` restarts `post-restore-validation`; it does not repeat the already successful restore or rotate the Age key again.'''
+          )
+
+          replace_once(
+              docs,
+              '''After post-restore E2E succeeds, the controller enters `recovery-export` and invokes the canonical `utilities/secrets-export-recovery-kit.sh`.''',
+              '''After post-restore E2E succeeds, the controller enters `recovery-export` and invokes the canonical `utilities/secrets-export-recovery-kit.sh`. All managed recurring timers are still disabled at this point and remain disabled throughout export/copy/custody, including across an unexpected reboot.'''
+          )
+          PY
+
+          git diff --check
+          bash -n utilities/noble-host-acceptance.sh
+          bash -n tests/suites/operations/case-host-acceptance.bash
+
+      - name: Install focused test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age shellcheck
+
+      - name: Run host-acceptance contract
+        run: bash tests/suites/operations/case-host-acceptance.bash
+
+      - name: Run focused strict ShellCheck
+        run: shellcheck -x utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash
+
+      - name: Commit validated product changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash docs/HOST-ACCEPTANCE.md
+          git diff --cached --quiet && { echo 'No product changes to commit'; exit 1; }
+          git commit -m 'fix: harden destructive acceptance boundaries'
+          git push origin HEAD:test/noble-host-acceptance
