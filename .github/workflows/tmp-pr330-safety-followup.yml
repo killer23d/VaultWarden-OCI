@@ -1,0 +1,81 @@
+name: Temporary PR330 timer failure cleanup
+
+on:
+  pull_request:
+    branches:
+      - delta
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.event.pull_request.head.ref == 'test/noble-host-acceptance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Patch installer failure cleanup contract
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f"{path}: expected one target, found {n}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'utilities/noble-host-acceptance.sh',
+              '''    bash ./utilities/setup-systemd.sh install --no-enable-now\n    trap cleanup_pre_custody_timers EXIT\n    for timer in "${timers[@]}"; do''',
+              '''    trap cleanup_pre_custody_timers EXIT\n    bash ./utilities/setup-systemd.sh install --no-enable-now || return 1\n    for timer in "${timers[@]}"; do'''
+          )
+
+          replace_once(
+              'tests/suites/operations/case-host-acceptance.bash',
+              '''  VALIDATION_FAIL=false\n  # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check\n  bash(){ [[ "$*" == "./utilities/setup-systemd.sh install --no-enable-now" ]]; }''',
+              '''  VALIDATION_FAIL=false\n  INSTALL_FAIL=false\n  # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check\n  bash(){\n    [[ "$*" == "./utilities/setup-systemd.sh install --no-enable-now" ]] || return 1\n    [[ "$INSTALL_FAIL" != "true" ]]\n  }'''
+          )
+
+          replace_once(
+              'tests/suites/operations/case-host-acceptance.bash',
+              '''  [[ -e "$AT/disabled" ]] || fail "failed manual validation did not disable timers before returning"\n)\n\n# Canary creation''',
+              '''  [[ -e "$AT/disabled" ]] || fail "failed manual validation did not disable timers before returning"\n  rm -f "$AT/disabled"\n  VALIDATION_FAIL=false\n  INSTALL_FAIL=true\n  if manual_systemd_install_check >/dev/null 2>&1; then\n    fail "failed canonical manual installer unexpectedly passed"\n  fi\n  [[ -e "$AT/disabled" ]] || fail "installer failure did not trigger pre-custody timer disable cleanup"\n)\n\n# Canary creation'''
+          )
+
+          replace_once(
+              'docs/HOST-ACCEPTANCE.md',
+              '''The manual systemd step first proves the canonical install produced enabled-but-inactive timers, while an EXIT cleanup immediately disables all managed recurring timers before the step can return on either success or failure.''',
+              '''The manual systemd step arms its EXIT cleanup before invoking the canonical installer, then proves the install produced enabled-but-inactive timers; the cleanup disables all managed recurring timers before the step can return on installer failure, validation failure, or success.'''
+          )
+          PY
+          git diff --check
+          bash -n utilities/noble-host-acceptance.sh
+          bash -n tests/suites/operations/case-host-acceptance.bash
+
+      - name: Install focused dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age shellcheck
+
+      - name: Run host-acceptance contract
+        run: bash tests/suites/operations/case-host-acceptance.bash
+
+      - name: Run repository-policy ShellCheck
+        run: shellcheck -x --severity=warning utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash
+
+      - name: Commit validated follow-up
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash docs/HOST-ACCEPTANCE.md
+          git diff --cached --quiet && { echo 'No follow-up changes'; exit 1; }
+          git commit -m 'fix: disable timers when manual install fails'
+          git push origin HEAD:test/noble-host-acceptance
