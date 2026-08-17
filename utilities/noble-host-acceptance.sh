@@ -493,9 +493,14 @@ run_with_sensitive_tmp() (
 )
 
 verify_bound_backup_with_recovery_kit() {
-    local prefix="$1" kit="$2" verify_root archive_digest
-    verify_root="$STATE_ROOT/verify-${prefix,,}"
-    download_bound_backup "$prefix" "verify-${prefix,,}"
+    local prefix="$1" kit="$2"
+    local stage_name="${3:-verify-${prefix,,}}" retain_stage="${4:-false}"
+    local verify_root archive_digest verified_epoch
+    [[ "$stage_name" =~ ^[A-Za-z0-9_.-]+$ ]] || die 'Invalid recovery verification stage name.'
+    [[ "$retain_stage" == "true" || "$retain_stage" == "false" ]] \
+        || die 'Recovery verification retain flag must be true or false.'
+    verify_root="$STATE_ROOT/$stage_name"
+    download_bound_backup "$prefix" "$stage_name"
     if ! run_with_sensitive_tmp env \
             RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
             RCLONE_CONFIG="$RCLONE_CONFIG_PATH" \
@@ -505,8 +510,29 @@ verify_bound_backup_with_recovery_kit() {
         return 1
     fi
     archive_digest="$(sha_file "$BOUND_BACKUP_FILE")"
+    verified_epoch="$(date +%s)"
     meta_add "${prefix}_RECOVERY_KIT_INSPECT_VERIFIED_SHA256" "$archive_digest"
-    rm -rf -- "$verify_root"
+    meta_add "${prefix}_RECOVERY_KIT_INSPECT_VERIFIED_EPOCH" "$verified_epoch"
+    if [[ "$retain_stage" == "true" ]]; then
+        meta_add "${prefix}_RECOVERY_CACHE_ARCHIVE_SHA256" "$archive_digest"
+        meta_add "${prefix}_RECOVERY_CACHE_PATH_HASH" "$(hash_text "$BOUND_BACKUP_FILE")"
+        meta_add "${prefix}_RECOVERY_CACHE_VERIFIED_EPOCH" "$verified_epoch"
+        log "Retained exact authenticated ${prefix} recovery cache until restore completes: $BOUND_BACKUP_FILE"
+    else
+        rm -rf -- "$verify_root"
+    fi
+}
+
+pre_uninstall_recovery_gate() {
+    # STATE_ROOT and every external dependency must survive the canonical reset
+    # before we create the retained safety copy. Recheck after the authenticated
+    # download/inspect too so the final action before uninstall is still the
+    # canonical destructive-survival boundary.
+    validate_destructive_survival
+    verify_bound_backup_with_recovery_kit \
+        DR_SOURCE "$RECOVERY_KIT" pre-uninstall-recovery-cache true
+    validate_destructive_survival
+    log 'Fresh post-reboot authenticated DR-source proof passed immediately before destructive reset.'
 }
 
 validate_dns_mutation_scope() {
@@ -611,10 +637,13 @@ manual_systemd_install_check() (
         exit "$cleanup_rc"
     }
 
-    # Canonical manual install intentionally enables timers for future boots.
-    # From this point onward an EXIT cleanup always disables them again, even if
-    # one of the validation assertions below fails. activate-automation is the
-    # only phase allowed to re-enable/start recurring automation.
+    # Canonical manual install enables timers for future boots before it returns.
+    # EXIT cleanup covers ordinary success/failure and catchable termination and
+    # leaves timers disabled after this helper returns, but it cannot eliminate
+    # the narrow abrupt power-loss/SIGKILL window while the canonical installer
+    # itself is enabling them. Operators must not reboot/power-cycle during this
+    # validation step. activate-automation is the only later controller phase
+    # allowed to intentionally re-enable/start recurring automation.
     trap cleanup_pre_custody_timers EXIT
     bash ./utilities/setup-systemd.sh install --no-enable-now || return 1
     for timer in "${timers[@]}"; do
@@ -906,12 +935,13 @@ run_phases() {
                     || die 'Project state path changed before destructive reset.'
                 [[ "$(meta_get PROJECT_STATE_PATH_HASH)" == "$(hash_text "$PROJECT_STATE_PATH")" ]] \
                     || die 'Original project-state checkpoint changed before destructive reset.'
-                validate_destructive_survival
+                step pre-uninstall-recovery-gate pre_uninstall_recovery_gate
                 step uninstall-reset bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit --force
                 step uninstall-residuals post_uninstall_check
                 save_phase restore
                 ;;
             restore)
+                log 'Certification requires a fresh post-reset remote download. If it fails, the retained pre-uninstall authenticated cache remains under STATE_ROOT for emergency non-certifying recovery; do not treat that fallback as acceptance evidence.'
                 step dr-source-download download_bound_backup DR_SOURCE restore-source
                 step exact-full-restore run_with_sensitive_tmp env RCLONE_REMOTE_NAME="$RCLONE_REMOTE" RCLONE_REMOTE_PATH="$RCLONE_REMOTE_PATH" \
                     RCLONE_CONFIG="$RCLONE_CONFIG_PATH" bash ./restore.sh interactive --remote --file "$BOUND_BACKUP_FILE" \
@@ -920,7 +950,7 @@ run_phases() {
                 meta_add RESTORED_BACKUP_BASENAME "$(meta_get DR_SOURCE_BACKUP_BASENAME)"
                 meta_add RESTORED_BACKUP_ARCHIVE_SHA256 "$(meta_get DR_SOURCE_BACKUP_ARCHIVE_SHA256)"
                 save_phase post-restore-validation
-                rm -rf -- "$STATE_ROOT/restore-source" || true
+                rm -rf -- "$STATE_ROOT/restore-source" "$STATE_ROOT/pre-uninstall-recovery-cache" || true
                 ;;
             post-restore-validation)
                 step repair-permissions bash ./utilities/repair-permissions.sh

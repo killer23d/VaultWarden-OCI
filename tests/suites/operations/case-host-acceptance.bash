@@ -154,8 +154,8 @@ grep -Fq 'emit_scope tree "$PROJECT_STATE_DIR"' "$A" \
   || fail "canonical destructive survival scope does not include PROJECT_STATE_DIR"
 grep -Fq 'for path in "$OPT_DIR" "$ETC_DIR" "$RUNTIME" "$RECOVERY_DIR"; do' "$A" \
   || fail "canonical destructive survival scope does not include resolved managed trees"
-[[ "$(grep -Ec '^[[:space:]]+validate_destructive_survival$' "$A")" -ge 2 ]] \
-  || fail "destructive survival is not checked at input validation and immediately before uninstall"
+[[ "$(grep -Ec '^[[:space:]]+validate_destructive_survival$' "$A")" -ge 3 ]] \
+  || fail "destructive survival is not checked before state init and around the final pre-uninstall recovery gate"
 
 # Run/resume metadata binds exact code, host identity, rclone location,
 # DNS mutation scope, recovery inputs, and E2E code.
@@ -344,6 +344,12 @@ grep -Fq -- '--from-recovery-kit "$kit"' <<< "$inspect_function" \
   || fail "canonical inspect does not receive the recovery kit"
 ! grep -Fq 'age -d' <<< "$inspect_function" \
   || fail "acceptance recovery proof still performs a custom Age-only decrypt"
+grep -Fq 'DR_SOURCE "$RECOVERY_KIT" pre-uninstall-recovery-cache true' "$A" \
+  || fail "post-reboot pre-uninstall authenticated source re-proof is missing or not retained"
+grep -Fq 'RECOVERY_CACHE_VERIFIED_EPOCH' "$A" \
+  || fail "retained authenticated recovery cache verification time is not checkpointed"
+grep -Fq 'pre_uninstall_recovery_gate' "$A" \
+  || fail "destructive reset is not guarded by a dedicated post-reboot recovery gate"
 grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
   || fail "delegated restore fallback is not forced through volatile sensitive storage"
 ! grep -Fq 'mktemp "$STATE_ROOT/.verify-age-key' "$A" \
@@ -387,8 +393,9 @@ grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
   fi
 )
 
-# Post-restore manual systemd validation must leave every recurring timer disabled,
-# not merely inactive, and must do so even when a validation assertion fails.
+# Post-restore manual systemd validation must leave every recurring timer disabled
+# after ordinary success/failure. The canonical installer still has a documented
+# abrupt-reboot window while it enables timers for future boots before returning.
 (
   AT="$T/timer-custody"
   mkdir -p "$AT"
@@ -419,7 +426,7 @@ grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
     esac
   }
   manual_systemd_install_check || fail "successful manual systemd validation/disable sequence failed"
-  [[ -e "$AT/disabled" ]] || fail "successful manual validation left timers enabled for reboot"
+  [[ -e "$AT/disabled" ]] || fail "successful manual validation did not leave timers disabled after return"
   rm -f "$AT/disabled"
   VALIDATION_FAIL=true
   if manual_systemd_install_check >/dev/null 2>&1; then
@@ -440,9 +447,14 @@ grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
 canary_line="$(grep -n 'application-before-dr' "$A" | cut -d: -f1)"
 source_backup_line="$(grep -n 'dr-full-backup run_and_bind_full_backup DR_SOURCE' "$A" | cut -d: -f1)"
 source_kit_decrypt_line="$(grep -n 'pre-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit DR_SOURCE' "$A" | cut -d: -f1)"
+reboot_line="$(grep -n 'save_phase post-reboot' "$A" | cut -d: -f1)"
+post_reboot_check_line="$(grep -n 'systemd-after-reboot bash ./utilities/setup-systemd.sh validate' "$A" | cut -d: -f1)"
+pre_uninstall_reproof_line="$(grep -n 'pre-uninstall-recovery-gate pre_uninstall_recovery_gate' "$A" | cut -d: -f1)"
+uninstall_reset_line="$(grep -n 'uninstall-reset bash ./utilities/uninstall-vaultwarden.sh run --test-reset' "$A" | cut -d: -f1)"
 source_download_line="$(grep -n 'dr-source-download download_bound_backup DR_SOURCE restore-source' "$A" | cut -d: -f1)"
 exact_restore_line="$(grep -n 'bash ./restore.sh interactive --remote --file \"\$BOUND_BACKUP_FILE\"' "$A" | cut -d: -f1)"
 restore_checkpoint_line="$(grep -n 'save_phase post-restore-validation' "$A" | cut -d: -f1)"
+cache_cleanup_line="$(grep -n 'rm -rf -- \"\$STATE_ROOT/restore-source\" \"\$STATE_ROOT/pre-uninstall-recovery-cache\"' "$A" | cut -d: -f1)"
 repair_line="$(grep -n 'repair-permissions bash ./utilities/repair-permissions.sh' "$A" | cut -d: -f1)"
 e2e_line="$(grep -n 'application-after-dr' "$A" | cut -d: -f1)"
 export_line="$(grep -n 'post-restore-full-kit-export export_post_restore_full_recovery_kit' "$A" | cut -d: -f1)"
@@ -451,10 +463,14 @@ activate_line="$(grep -n 'systemd-activate bash ./utilities/setup-systemd.sh ins
 final_backup_line="$(grep -n 'post-dr-full run_and_bind_full_backup POST_DR' "$A" | cut -d: -f1)"
 final_decrypt_line="$(grep -n 'post-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit POST_DR' "$A" | cut -d: -f1)"
 (( canary_line < source_backup_line && source_backup_line < source_kit_decrypt_line \
-   && source_kit_decrypt_line < source_download_line && source_download_line < exact_restore_line )) \
-  || fail "canary/bound-backup/pre-DR-kit-proof/exact-restore sequencing regressed"
-(( exact_restore_line < restore_checkpoint_line && restore_checkpoint_line < repair_line && repair_line < e2e_line )) \
-  || fail "successful restore is not checkpointed before post-restore validation"
+   && source_kit_decrypt_line < reboot_line && reboot_line < post_reboot_check_line \
+   && post_reboot_check_line < pre_uninstall_reproof_line \
+   && pre_uninstall_reproof_line < uninstall_reset_line \
+   && uninstall_reset_line < source_download_line && source_download_line < exact_restore_line )) \
+  || fail "canary/early-proof/reboot/pre-uninstall-reproof/reset/fresh-download/restore sequencing regressed"
+(( exact_restore_line < restore_checkpoint_line && restore_checkpoint_line < cache_cleanup_line \
+   && cache_cleanup_line < repair_line && repair_line < e2e_line )) \
+  || fail "successful restore/cache-cleanup is not checkpointed before post-restore validation"
 (( e2e_line < export_line && export_line < custody_line && custody_line < activate_line \
    && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \
   || fail "post-restore full-kit-export/custody/automation/final-backup sequencing regressed"
