@@ -144,7 +144,7 @@ The destructive restore sequence is:
 3. record restore completion and the restored backup identity; and
 4. **immediately checkpoint `post-restore-validation`**.
 
-Only the next phase performs permission repair, startup, manual systemd installation, health, email, pre-production drill, and post-DR application E2E. The manual systemd step first proves the canonical install produced enabled-but-inactive timers, while an EXIT cleanup immediately disables all managed recurring timers before the step can return on either success or failure. This keeps the custody boundary reboot-safe: an unexpected reboot before `activate-automation` cannot start backup, maintenance, DNS, health, or firewall timers. If any of those checks fail, `resume` restarts `post-restore-validation`; it does not repeat the already successful restore or rotate the Age key again.
+Only the next phase performs permission repair, startup, manual systemd installation, health, email, pre-production drill, and post-DR application E2E. The manual systemd step arms its EXIT cleanup before invoking the canonical installer, then proves the install produced enabled-but-inactive timers; the cleanup disables all managed recurring timers before the step can return on installer failure, validation failure, or success. This keeps the custody boundary reboot-safe: an unexpected reboot before `activate-automation` cannot start backup, maintenance, DNS, health, or firewall timers. If any of those checks fail, `resume` restarts `post-restore-validation`; it does not repeat the already successful restore or rotate the Age key again.
 
 ## Rotated recovery custody is mandatory
 

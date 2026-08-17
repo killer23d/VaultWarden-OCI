@@ -332,8 +332,12 @@ grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
   AT="$T/timer-custody"
   mkdir -p "$AT"
   VALIDATION_FAIL=false
+  INSTALL_FAIL=false
   # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check
-  bash(){ [[ "$*" == "./utilities/setup-systemd.sh install --no-enable-now" ]]; }
+  bash(){
+    [[ "$*" == "./utilities/setup-systemd.sh install --no-enable-now" ]] || return 1
+    [[ "$INSTALL_FAIL" != "true" ]]
+  }
   # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check
   systemctl(){
     case "$1" in
@@ -361,6 +365,13 @@ grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
     fail "timer validation failure unexpectedly passed"
   fi
   [[ -e "$AT/disabled" ]] || fail "failed manual validation did not disable timers before returning"
+  rm -f "$AT/disabled"
+  VALIDATION_FAIL=false
+  INSTALL_FAIL=true
+  if manual_systemd_install_check >/dev/null 2>&1; then
+    fail "failed canonical manual installer unexpectedly passed"
+  fi
+  [[ -e "$AT/disabled" ]] || fail "installer failure did not trigger pre-custody timer disable cleanup"
 )
 
 # Canary creation must precede the specifically bound full backup. Restore

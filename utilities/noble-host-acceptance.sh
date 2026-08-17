@@ -533,8 +533,8 @@ manual_systemd_install_check() (
     # From this point onward an EXIT cleanup always disables them again, even if
     # one of the validation assertions below fails. activate-automation is the
     # only phase allowed to re-enable/start recurring automation.
-    bash ./utilities/setup-systemd.sh install --no-enable-now
     trap cleanup_pre_custody_timers EXIT
+    bash ./utilities/setup-systemd.sh install --no-enable-now || return 1
     for timer in "${timers[@]}"; do
         systemctl is-enabled --quiet "$timer" || return 1
         ! systemctl is-active --quiet "$timer" || return 1
