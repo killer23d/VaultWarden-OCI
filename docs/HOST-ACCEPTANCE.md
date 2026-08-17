@@ -18,7 +18,7 @@ A full run proves the repository's supported Noble host path by orchestrating:
 8. canonical `--test-reset` uninstall plus independent residual assertions;
 9. exact re-download of the checkpoint-bound full backup cohort from rclone and bootstrap restore of that staged local file using canonical `--remote --file`, the external pre-DR recovery kit, and `--start-policy manual`; `--remote` enables the supported missing-environment bootstrap path but does not replace the exact `--file` selection;
 10. an immediate post-restore checkpoint **before** permission repair, startup, health, email, drill, or E2E validation, so a later validation failure cannot repeat a successful destructive restore;
-11. post-restore health, email, drill, and application E2E while recurring timers remain inactive, including assertion of the same pre-DR canary;
+11. post-restore health, email, drill, and application E2E while recurring timers remain non-running; the canonical manual install is verified and an exit-safe cleanup then leaves every managed recurring timer disabled even if validation fails, so an unexpected reboot cannot cross the custody gate, including assertion of the same pre-DR canary;
 12. canonical export of a new **full recovery kit** after Age rotation, followed by an exact-digest copy of that exported kit to a non-root mounted recovery medium, with its Age identity proven to match the live rotated operational key and to differ from the pre-DR identity;
 13. only then, activation and canonical validation of systemd automation, protected again by the DNS mutation scope gate;
 14. fresh DB and fully verified full rclone recovery points encrypted to the new operational recipient; and
@@ -47,6 +47,10 @@ The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-nob
 
 `--skip-reboot` exists only for controller development. A run started with it is permanently non-certifying and terminates at the `incomplete` phase. Re-running without the flag is rejected as checkpoint drift.
 
+## Single-instance controller lock
+
+Every `run` and `resume` invocation takes a non-blocking exclusive `flock` on `/run/lock/vaultwarden-noble-acceptance.lock` before parsing inputs or touching checkpoint state. A second root invocation fails closed instead of interleaving metadata, phase changes, logs, uninstall, or restore work. The lock is process-lifetime only: the intentional reboot checkpoint exits `75`, the kernel releases the lock, and the post-reboot `resume` must acquire it again. `status` remains read-only and does not take the destructive controller lock.
+
 ## Host/storage boundary
 
 Destructive same-host DR intentionally supports **boot-volume project state only**.
@@ -59,13 +63,13 @@ The production uninstaller correctly preserves separately attached data-volume c
 
 Before starting, prepare:
 
-- a root-owned `0400` or `0600` pre-DR recovery kit outside all managed VaultWarden paths;
+- a root-owned `0400` or `0600` pre-DR recovery kit outside all managed VaultWarden paths **and outside the canonical uninstaller recovery-handoff directory** (default `/root/vaultwarden-recovery`);
 - a root-owned `0400` or `0600` rclone configuration outside all managed VaultWarden paths;
 - the exact rclone subpath used for the acceptance backups;
 - a root-owned executable application E2E hook that is not group- or world-writable; and
 - a dedicated acceptance hostname/zone whose configured runtime `DOMAIN` you explicitly authorize the drill to mutate.
 
-The pre-DR recovery kit and rclone config must survive `utilities/uninstall-vaultwarden.sh run --test-reset`.
+The pre-DR recovery kit and rclone config must survive `utilities/uninstall-vaultwarden.sh run --test-reset`. For destructive runs the controller sources the canonical uninstaller in dry-run mode, resolves its configured `RECOVERY_DIR` (including `VW_UNINSTALL_RECOVERY_DIR` overrides), and rejects a pre-DR kit anywhere inside that directory before destructive acceptance and again immediately before uninstall. A kit in the normal `/root/vaultwarden-recovery/vaultwarden-recovery-kit-*` handoff location is therefore intentionally rejected; copy it first to a separate root-owned path such as `/root/vw-acceptance-recovery-kit.txt`.
 
 The E2E hook is executed as root. The controller rejects symlinks, non-root ownership, non-executable files, and group/world-writable hooks. Its path and digest are bound to the checkpoint.
 
@@ -140,13 +144,13 @@ The destructive restore sequence is:
 3. record restore completion and the restored backup identity; and
 4. **immediately checkpoint `post-restore-validation`**.
 
-Only the next phase performs permission repair, startup, manual systemd installation, health, email, pre-production drill, and post-DR application E2E. If any of those checks fail, `resume` restarts `post-restore-validation`; it does not repeat the already successful restore or rotate the Age key again.
+Only the next phase performs permission repair, startup, manual systemd installation, health, email, pre-production drill, and post-DR application E2E. The manual systemd step first proves the canonical install produced enabled-but-inactive timers, while an EXIT cleanup immediately disables all managed recurring timers before the step can return on either success or failure. This keeps the custody boundary reboot-safe: an unexpected reboot before `activate-automation` cannot start backup, maintenance, DNS, health, or firewall timers. If any of those checks fail, `resume` restarts `post-restore-validation`; it does not repeat the already successful restore or rotate the Age key again.
 
 ## Rotated recovery custody is mandatory
 
 A successful canonical full restore rotates to a new operational Age key. Future backups therefore require the **new** recovery material; the pre-DR kit used to enter the drill is not sufficient custody for the recovery points created afterward.
 
-After post-restore E2E succeeds, the controller enters `recovery-export` and invokes the canonical `utilities/secrets-export-recovery-kit.sh`. This is deliberately separate from the automatic `vaultwarden-age-key-rotation-<timestamp>.txt` handoff: that handoff contains the rotated Age identity only and ends with `END OF AGE KEY ROTATION HANDOFF`; it is **not** a full recovery kit and does not carry the backup-integrity HMAC required for authenticated restore.
+After post-restore E2E succeeds, the controller enters `recovery-export` and invokes the canonical `utilities/secrets-export-recovery-kit.sh`. All managed recurring timers are still disabled at this point and remain disabled throughout export/copy/custody, including across an unexpected reboot. This is deliberately separate from the automatic `vaultwarden-age-key-rotation-<timestamp>.txt` handoff: that handoff contains the rotated Age identity only and ends with `END OF AGE KEY ROTATION HANDOFF`; it is **not** a full recovery kit and does not carry the backup-integrity HMAC required for authenticated restore.
 
 When the canonical exporter asks whether to email an encrypted ZIP, answer **no** for this drill so the root-owned `vaultwarden-recovery-kit-<timestamp>-<id>.txt` remains temporarily under `/root/vaultwarden-recovery` for the custody copy. The controller checkpoints the exact exported full-kit digest, then enters `recovery-custody`. Copy that exact file to durable off-host storage and resume with the same bound options plus:
 

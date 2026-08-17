@@ -27,6 +27,8 @@ SKIP_REBOOT=false
 PROJECT_STATE_PATH=""
 BOUND_BACKUP_FILE=""
 VALIDATED_RECOVERY_RECIPIENT=""
+ACCEPTANCE_LOCK_FILE="/run/lock/vaultwarden-noble-acceptance.lock"
+ACCEPTANCE_LOCK_FD=""
 
 usage() {
     cat <<'EOF_USAGE'
@@ -140,6 +142,47 @@ external_file() {
     [[ "$owner" == "0:0" && ( "$mode" == "600" || "$mode" == "400" ) ]] \
         || die "$label must be root:root mode 0600/0400"
     printf '%s\n' "$path"
+}
+
+canonical_uninstall_recovery_dir() (
+    set -- run --dry-run
+    # Source the canonical uninstaller so this boundary follows its configured
+    # recovery-handoff directory instead of duplicating the default path.
+    # shellcheck disable=SC1091
+    source "$ROOT/utilities/uninstall-vaultwarden.sh"
+    canon "$RECOVERY_DIR"
+)
+
+validate_recovery_kit_survival() {
+    local path="$1" recovery_dir
+    recovery_dir="$(canonical_uninstall_recovery_dir)" \
+        || die 'Cannot resolve the canonical uninstall recovery-handoff directory.'
+    [[ "$recovery_dir" == /* ]] \
+        || die 'Canonical uninstall recovery-handoff directory did not resolve to an absolute path.'
+    case "$path" in
+        "$recovery_dir"|"$recovery_dir"/*)
+            die "Pre-DR recovery kit is inside the canonical uninstall recovery-handoff directory ($recovery_dir) and may be removed by --test-reset. Copy it to a root-owned path outside that directory before destructive acceptance."
+            ;;
+    esac
+}
+
+acquire_controller_lock() {
+    local lock_dir
+    command -v flock >/dev/null 2>&1 || die 'flock is required for the acceptance controller lock.'
+    [[ "$ACCEPTANCE_LOCK_FILE" == /* ]] || die 'Acceptance controller lock path must be absolute.'
+    lock_dir="$(dirname -- "$ACCEPTANCE_LOCK_FILE")"
+    [[ -d "$lock_dir" && ! -L "$lock_dir" ]] || die "Acceptance lock directory is unavailable or unsafe: $lock_dir"
+    [[ ! -L "$ACCEPTANCE_LOCK_FILE" ]] || die 'Acceptance controller lock file must not be a symlink.'
+    [[ ! -e "$ACCEPTANCE_LOCK_FILE" || -f "$ACCEPTANCE_LOCK_FILE" ]] \
+        || die 'Acceptance controller lock path exists but is not a regular file.'
+    umask 077
+    unset ACCEPTANCE_LOCK_FD
+    exec {ACCEPTANCE_LOCK_FD}>"$ACCEPTANCE_LOCK_FILE" \
+        || die 'Cannot open acceptance controller lock file.'
+    chmod 0600 "$ACCEPTANCE_LOCK_FILE" \
+        || die 'Cannot secure acceptance controller lock file.'
+    flock -n "$ACCEPTANCE_LOCK_FD" \
+        || die 'Another Noble host acceptance run/resume process is already active.'
 }
 
 validate_e2e_hook() {
@@ -448,21 +491,56 @@ systemd_jobs() {
     done
 }
 
-manual_systemd_install_check() {
-    local timer
+manual_systemd_install_check() (
+    local timer cleanup_rc
+    local -a timers=(
+        vaultwarden-maintenance.timer
+        vaultwarden-db-backup.timer
+        vaultwarden-full-backup.timer
+        vaultwarden-health.timer
+        vaultwarden-dns-update.timer
+        vaultwarden-firewall-update.timer
+    )
+
+    disable_timers_until_custody() {
+        local managed_timer
+        for managed_timer in "${timers[@]}"; do
+            systemctl disable --now "$managed_timer" >/dev/null 2>&1 || true
+        done
+        for managed_timer in "${timers[@]}"; do
+            if systemctl is-enabled --quiet "$managed_timer"; then
+                log "Managed timer is still enabled before recovery custody: $managed_timer"
+                return 1
+            fi
+            if systemctl is-active --quiet "$managed_timer"; then
+                log "Managed timer is still active before recovery custody: $managed_timer"
+                return 1
+            fi
+        done
+    }
+
+    cleanup_pre_custody_timers() {
+        cleanup_rc=$?
+        trap - EXIT
+        if ! disable_timers_until_custody; then
+            log 'Could not leave all managed timers disabled before recovery custody.'
+            exit 1
+        fi
+        exit "$cleanup_rc"
+    }
+
+    # Canonical manual install intentionally enables timers for future boots.
+    # From this point onward an EXIT cleanup always disables them again, even if
+    # one of the validation assertions below fails. activate-automation is the
+    # only phase allowed to re-enable/start recurring automation.
     bash ./utilities/setup-systemd.sh install --no-enable-now
-    for timer in \
-        vaultwarden-maintenance.timer \
-        vaultwarden-db-backup.timer \
-        vaultwarden-full-backup.timer \
-        vaultwarden-health.timer \
-        vaultwarden-dns-update.timer \
-        vaultwarden-firewall-update.timer; do
+    trap cleanup_pre_custody_timers EXIT
+    for timer in "${timers[@]}"; do
         systemctl is-enabled --quiet "$timer" || return 1
         ! systemctl is-active --quiet "$timer" || return 1
     done
     systemctl is-enabled --quiet vaultwarden-startup.service
-}
+)
 
 post_uninstall_check() {
     local etc_dir="${1:-/etc/vaultwarden}"
@@ -651,6 +729,7 @@ validate_inputs() {
         POST_RESTORE_RECOVERY_KIT="$(external_file "$POST_RESTORE_RECOVERY_KIT" 'post-restore recovery kit')"
     fi
     if [[ "$DESTRUCTIVE" == "true" ]]; then
+        validate_recovery_kit_survival "$RECOVERY_KIT"
         [[ "${VW_NOBLE_TEST_DESTRUCTIVE:-}" == "YES" ]] \
             || die 'Set VW_NOBLE_TEST_DESTRUCTIVE=YES together with --destructive.'
     fi
@@ -745,6 +824,7 @@ run_phases() {
                     || die 'Project state path changed before destructive reset.'
                 [[ "$(meta_get PROJECT_STATE_PATH_HASH)" == "$(hash_text "$PROJECT_STATE_PATH")" ]] \
                     || die 'Original project-state checkpoint changed before destructive reset.'
+                validate_recovery_kit_survival "$RECOVERY_KIT"
                 step uninstall-reset bash ./utilities/uninstall-vaultwarden.sh run --test-reset --i-have-saved-my-recovery-kit --force
                 step uninstall-residuals post_uninstall_check
                 save_phase restore
@@ -821,6 +901,7 @@ main() {
     esac
 
     require_root
+    acquire_controller_lock
     parse "$@"
     validate_host
     validate_inputs

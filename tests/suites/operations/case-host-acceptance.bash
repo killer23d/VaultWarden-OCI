@@ -15,6 +15,24 @@ bash -n "$A" || fail "host acceptance controller has invalid Bash syntax"
 # shellcheck source=../../../utilities/noble-host-acceptance.sh
 source "$A"
 
+# run/resume are single-instance for the lifetime of each controller process.
+# The intentional reboot checkpoint exits the process and releases the flock;
+# resume must acquire it again.
+(
+  ACCEPTANCE_LOCK_FILE="$T/controller.lock"
+  exec 8>"$ACCEPTANCE_LOCK_FILE"
+  flock -n 8 || fail "could not hold controller lock fixture"
+  if ( exec 8>&-; acquire_controller_lock ) >/dev/null 2>&1; then
+    fail "controller accepted a concurrent run/resume lock acquisition"
+  fi
+  flock -u 8
+  exec 8>&-
+  acquire_controller_lock || fail "controller lock was not acquirable after release"
+)
+main_function="$(sed -n '/^main()/,/^}/p' "$A")"
+grep -Fq 'acquire_controller_lock' <<< "$main_function" \
+  || fail "main does not acquire the controller-wide lock"
+
 # A real reboot is proved by boot ID. --skip-reboot is explicitly
 # non-certifying rather than a shortcut to destructive phases.
 (
@@ -59,6 +77,24 @@ chmod 0755 "$AT/bin/mountpoint"
 if ( PATH="$AT/bin:$PATH" VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" VW_UNINSTALL_FSTAB="$AT/fstab" VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" validate_boot_volume ) >/dev/null 2>&1; then
   fail "ambiguously mounted project state was accepted"
 fi
+
+# A destructive pre-DR recovery kit may not live in the canonical uninstaller's
+# recovery-handoff directory, because --test-reset can remove or reject files there.
+(
+  AT="$T/recovery-survival"
+  mkdir -p "$AT/managed-recovery" "$AT/external"
+  managed="$AT/managed-recovery/vaultwarden-recovery-kit-20260816T010203Z-abcdef.txt"
+  external="$AT/external/recovery-kit.txt"
+  : > "$managed"
+  : > "$external"
+  if ( VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" validate_recovery_kit_survival "$managed" ) >/dev/null 2>&1; then
+    fail "pre-DR kit inside canonical uninstall recovery directory was accepted"
+  fi
+  VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" validate_recovery_kit_survival "$external" \
+    || fail "external pre-DR kit outside uninstall recovery directory was rejected"
+)
+[[ "$(grep -Fc 'validate_recovery_kit_survival "$RECOVERY_KIT"' "$A")" -ge 2 ]] \
+  || fail "recovery-kit survival is not checked at input validation and immediately before uninstall"
 
 # Run/resume metadata binds exact code, host identity, rclone location,
 # DNS mutation scope, recovery inputs, and E2E code.
@@ -288,6 +324,43 @@ grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
   if systemd_job_execution_succeeded vaultwarden-full-backup.service 100 >/dev/null 2>&1; then
     fail "stale systemd execution timestamp was accepted"
   fi
+)
+
+# Post-restore manual systemd validation must leave every recurring timer disabled,
+# not merely inactive, and must do so even when a validation assertion fails.
+(
+  AT="$T/timer-custody"
+  mkdir -p "$AT"
+  VALIDATION_FAIL=false
+  # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check
+  bash(){ [[ "$*" == "./utilities/setup-systemd.sh install --no-enable-now" ]]; }
+  # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check
+  systemctl(){
+    case "$1" in
+      is-enabled)
+        [[ "${3:-}" == "vaultwarden-startup.service" ]] && return 0
+        [[ -e "$AT/disabled" ]] && return 1
+        if [[ "$VALIDATION_FAIL" == "true" && "${3:-}" == "vaultwarden-db-backup.timer" ]]; then
+          return 1
+        fi
+        return 0
+        ;;
+      is-active) return 1 ;;
+      disable)
+        : > "$AT/disabled"
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  manual_systemd_install_check || fail "successful manual systemd validation/disable sequence failed"
+  [[ -e "$AT/disabled" ]] || fail "successful manual validation left timers enabled for reboot"
+  rm -f "$AT/disabled"
+  VALIDATION_FAIL=true
+  if manual_systemd_install_check >/dev/null 2>&1; then
+    fail "timer validation failure unexpectedly passed"
+  fi
+  [[ -e "$AT/disabled" ]] || fail "failed manual validation did not disable timers before returning"
 )
 
 # Canary creation must precede the specifically bound full backup. Restore
