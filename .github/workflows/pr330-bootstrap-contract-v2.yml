@@ -1,19 +1,18 @@
 name: PR330 exact bootstrap contract v2
 on:
-  push:
-    branches:
-      - test/noble-host-acceptance
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
   validate:
+    if: github.event.pull_request.head.ref == 'test/noble-host-acceptance'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: test/noble-host-acceptance
+          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Patch exact bootstrap contract
         shell: bash
@@ -78,4 +77,4 @@ jobs:
           git add utilities/noble-host-acceptance.sh tests/suites/operations/case-host-acceptance.bash docs/HOST-ACCEPTANCE.md
           git diff --cached --quiet && { echo 'No changes to commit'; exit 1; }
           git commit -m "test: lock exact bootstrap restore contract"
-          git push origin HEAD:test/noble-host-acceptance
+          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
