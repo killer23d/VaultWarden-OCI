@@ -38,11 +38,18 @@ jobs:
           s = s.replace(old, new, 1)
 
           marker = '! grep -Fq \'restore.sh latest full --remote\' "$A" || fail "controller still restores an unbound remote latest backup"\n'
-          addition = marker + '''! grep -Fq -- '--no-backup --start-policy manual --force' "$A" \\
-  || fail "fresh full DR restore still bypasses canonical snapshot policy with --no-backup"\ngrep -Fq '&& [[ "$USE_REMOTE" == "true" ]]' "$RESTORE" \\
-  || fail "canonical restore no longer admits missing-environment remote bootstrap mode"\nexplicit_file_line="$(grep -Fn 'if [[ -n "$BACKUP_FILE" ]]' "$RESTORE" | head -1 | cut -d: -f1)"\nsource_select_line="$(grep -Fn 'select_backup_source || return 1' "$RESTORE" | head -1 | cut -d: -f1)"\n[[ "$explicit_file_line" =~ ^[0-9]+$ && "$source_select_line" =~ ^[0-9]+$ ]] \\
-  || fail "canonical exact-file/remote-source selection contract could not be located"\n(( explicit_file_line < source_select_line )) \\
-  || fail "canonical restore no longer gives explicit --file precedence over remote source selection"\n'''
+          addition = marker + (
+              '! grep -Fq -- \'--no-backup --start-policy manual --force\' "$A" \\\n'
+              '  || fail "fresh full DR restore still bypasses canonical snapshot policy with --no-backup"\n'
+              'grep -Fq \'&& [[ "$USE_REMOTE" == "true" ]]\' "$RESTORE" \\\n'
+              '  || fail "canonical restore no longer admits missing-environment remote bootstrap mode"\n'
+              'explicit_file_line="$(grep -Fn \'if [[ -n "$BACKUP_FILE" ]]\' "$RESTORE" | head -1 | cut -d: -f1)"\n'
+              'source_select_line="$(grep -Fn \'select_backup_source || return 1\' "$RESTORE" | head -1 | cut -d: -f1)"\n'
+              '[[ "$explicit_file_line" =~ ^[0-9]+$ && "$source_select_line" =~ ^[0-9]+$ ]] \\\n'
+              '  || fail "canonical exact-file/remote-source selection contract could not be located"\n'
+              '(( explicit_file_line < source_select_line )) \\\n'
+              '  || fail "canonical restore no longer gives explicit --file precedence over remote source selection"\n'
+          )
           if s.count(marker) != 1:
               raise SystemExit(f'test bootstrap marker count={s.count(marker)}')
           test.write_text(s.replace(marker, addition, 1))
