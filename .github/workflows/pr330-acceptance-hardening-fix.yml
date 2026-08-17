@@ -17,28 +17,50 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
+
           path = Path('.github/workflows/pr330-acceptance-hardening.yml')
           text = path.read_text()
 
-          replacements = [
-              ('rm -rf -- "$STATE_ROOT/$stage_name"',
-               'rm -rf -- "${STATE_ROOT:?}/${stage_name:?}"'),
-              ('  RCLONE_REMOTE=acceptance\n  RCLONE_REMOTE_PATH=vaultwarden_acceptance\n  DNS_MUTATION_DOMAIN=vw-acceptance.example.com\n  ALLOW_DNS_MUTATION=true\n  : > "$RECOVERY_KIT"; : > "$RCLONE_CONFIG_PATH"; : > "$APPLICATION_E2E"\n  DESTRUCTIVE=true\n  VW_NOBLE_TEST_DNS_MUTATION=YES',
-               '  # shellcheck disable=SC2034 # consumed by sourced validate_inputs()\n  RCLONE_REMOTE=acceptance\n  # shellcheck disable=SC2034 # consumed by sourced validate_inputs()\n  RCLONE_REMOTE_PATH=vaultwarden_acceptance\n  DNS_MUTATION_DOMAIN=vw-acceptance.example.com\n  ALLOW_DNS_MUTATION=true\n  : > "$RECOVERY_KIT"; : > "$RCLONE_CONFIG_PATH"; : > "$APPLICATION_E2E"\n  # shellcheck disable=SC2034 # consumed by sourced validate_inputs()\n  DESTRUCTIVE=true\n  # shellcheck disable=SC2034 # consumed by sourced validate_inputs()\n  VW_NOBLE_TEST_DNS_MUTATION=YES'),
-              ('  DNS_MUTATION_DOMAIN=vw-acceptance.example.com\n  ALLOW_DNS_MUTATION=true\n  runtime_config_value(){ printf \'vw-acceptance.example.com\\n\'; }',
-               '  # shellcheck disable=SC2034 # consumed by sourced validate_dns_mutation_scope()\n  DNS_MUTATION_DOMAIN=vw-acceptance.example.com\n  # shellcheck disable=SC2034 # consumed by sourced validate_dns_mutation_scope()\n  ALLOW_DNS_MUTATION=true\n  runtime_config_value(){ printf \'vw-acceptance.example.com\\n\'; }'),
-              ('  STATE_ROOT="$AT/state"\n  age-keygen -o "$AT/old.key"',
-               '  # shellcheck disable=SC2034 # consumed by sourced recovery helpers\n  STATE_ROOT="$AT/state"\n  age-keygen -o "$AT/old.key"'),
-              ('  download_bound_backup(){ BOUND_BACKUP_FILE="$AT/post-dr-full.age"; }',
-               '  download_bound_backup(){\n    # shellcheck disable=SC2034 # consumed by sourced verify_bound_backup_with_kit()\n    BOUND_BACKUP_FILE="$AT/post-dr-full.age"\n  }'),
-          ]
+          old_cleanup = 'rm -rf -- "$STATE_ROOT/$stage_name"'
+          if text.count(old_cleanup) != 1:
+              raise SystemExit(f'expected one unsafe cleanup expression, found {text.count(old_cleanup)}')
+          text = text.replace(old_cleanup, 'rm -rf -- "${STATE_ROOT:?}/${stage_name:?}"', 1)
 
-          for old, new in replacements:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'expected exactly one lint-fix match, found {count}: {old!r}')
-              text = text.replace(old, new, 1)
+          start = text.index("test.write_text(r'''#!/usr/bin/env bash")
+          end = text.index("\n          ''')", start)
+          block = text[start:end]
 
+          annotations = {
+              'RCLONE_REMOTE=acceptance': 'consumed by sourced acceptance helpers',
+              'RCLONE_REMOTE_PATH=vaultwarden_acceptance': 'consumed by sourced acceptance helpers',
+              'DNS_MUTATION_DOMAIN=vw-acceptance.example.com': 'consumed by sourced acceptance helpers',
+              'ALLOW_DNS_MUTATION=true': 'consumed by sourced acceptance helpers',
+              'DESTRUCTIVE=true': 'consumed by sourced acceptance helpers',
+              'VW_NOBLE_TEST_DNS_MUTATION=YES': 'consumed by sourced acceptance helpers',
+              'STATE_ROOT="$AT/state"': 'consumed by sourced recovery helpers',
+          }
+
+          for assignment, reason in annotations.items():
+              pattern = re.compile(r'(?m)^(\s*)' + re.escape(assignment) + r'$')
+              matches = list(pattern.finditer(block))
+              if not matches:
+                  raise SystemExit(f'expected at least one generated test assignment: {assignment}')
+              block = pattern.sub(
+                  lambda m: f'{m.group(1)}# shellcheck disable=SC2034 # {reason}\n{m.group(1)}{assignment}',
+                  block,
+              )
+
+          old_stub = '            download_bound_backup(){ BOUND_BACKUP_FILE="$AT/post-dr-full.age"; }'
+          new_stub = '''            download_bound_backup(){
+              # shellcheck disable=SC2034 # consumed by sourced verify_bound_backup_with_kit()
+              BOUND_BACKUP_FILE="$AT/post-dr-full.age"
+            }'''
+          if block.count(old_stub) != 1:
+              raise SystemExit(f'expected one generated download stub, found {block.count(old_stub)}')
+          block = block.replace(old_stub, new_stub, 1)
+
+          text = text[:start] + block + text[end:]
           path.write_text(text)
           PY
           git diff --check
