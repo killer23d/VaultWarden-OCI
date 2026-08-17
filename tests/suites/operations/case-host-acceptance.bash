@@ -59,14 +59,22 @@ if ( PATH="$AT/bin:$PATH" VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" VW_UNIN
   fail "ambiguously mounted project state was accepted"
 fi
 
-# Run/resume metadata binds exact code, host identity, and operator inputs.
+# Run/resume metadata binds exact code, host identity, rclone location,
+# DNS mutation scope, recovery inputs, and E2E code.
 (
   AT="$T/binding"
   mkdir -p "$AT"
   RECOVERY_KIT="$AT/recovery-kit"
   RCLONE_CONFIG_PATH="$AT/rclone.conf"
   APPLICATION_E2E="$AT/e2e.sh"
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
   RCLONE_REMOTE=acceptance
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE_PATH=vaultwarden_acceptance
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  ALLOW_DNS_MUTATION=true
   printf 'old recovery\n' > "$RECOVERY_KIT"
   printf '[acceptance]\ntype = local\n' > "$RCLONE_CONFIG_PATH"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
@@ -88,24 +96,60 @@ fi
   current_sha(){ printf 'sha-a\n'; }
   RCLONE_REMOTE=other
   if ( verify_metadata ) >/dev/null 2>&1; then fail "rclone remote drift was accepted"; fi
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE=acceptance
+  RCLONE_REMOTE_PATH=other-path
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "rclone path drift was accepted"; fi
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE_PATH=vaultwarden_acceptance
+  DNS_MUTATION_DOMAIN=other.example.com
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "DNS mutation scope drift was accepted"; fi
 )
 
-# Destructive mode requires both CLI state and the explicit environment
-# acknowledgement. Stub file trust only so the consent gate remains real.
+# Destructive mode and DNS mutation both require explicit two-part consent.
 (
   external_file(){ printf '%s\n' "$1"; }
   validate_e2e_hook(){ :; }
   RECOVERY_KIT="$T/recovery-kit"
   RCLONE_CONFIG_PATH="$T/rclone.conf"
   APPLICATION_E2E="$T/e2e.sh"
-  # shellcheck disable=SC2034 # consumed by sourced validate_inputs()
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
   RCLONE_REMOTE=acceptance
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE_PATH=vaultwarden_acceptance
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  ALLOW_DNS_MUTATION=true
   : > "$RECOVERY_KIT"; : > "$RCLONE_CONFIG_PATH"; : > "$APPLICATION_E2E"
-  # shellcheck disable=SC2034 # consumed by sourced validate_inputs()
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
   DESTRUCTIVE=true
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  VW_NOBLE_TEST_DNS_MUTATION=YES
   unset VW_NOBLE_TEST_DESTRUCTIVE || true
   if ( validate_inputs ) >/dev/null 2>&1; then fail "destructive acceptance bypassed environment acknowledgement"; fi
   VW_NOBLE_TEST_DESTRUCTIVE=YES validate_inputs >/dev/null || fail "double destructive consent was rejected"
+  unset VW_NOBLE_TEST_DNS_MUTATION
+  if ( VW_NOBLE_TEST_DESTRUCTIVE=YES validate_inputs ) >/dev/null 2>&1; then fail "DNS mutation bypassed environment acknowledgement"; fi
+)
+
+# The external DNS mutation gate requires both consent and an exact runtime
+# DOMAIN match, so a production hostname cannot be mutated accidentally by
+# merely running the foreground systemd-job phase.
+(
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  ALLOW_DNS_MUTATION=true
+  runtime_config_value(){ printf 'vw-acceptance.example.com\n'; }
+  unset VW_NOBLE_TEST_DNS_MUTATION || true
+  if ( validate_dns_mutation_scope ) >/dev/null 2>&1; then fail "DNS mutation ran without environment consent"; fi
+  VW_NOBLE_TEST_DNS_MUTATION=YES validate_dns_mutation_scope >/dev/null \
+    || fail "matching dedicated DNS mutation scope was rejected"
+  runtime_config_value(){ printf 'vault.example.com\n'; }
+  if ( VW_NOBLE_TEST_DNS_MUTATION=YES validate_dns_mutation_scope ) >/dev/null 2>&1; then
+    fail "mismatched runtime DOMAIN was accepted for DNS mutation"
+  fi
 )
 
 # Root-executed E2E hooks may not be writable by group/other.
@@ -141,14 +185,68 @@ fi
   fi
 )
 
-# Restore stays manual until health/E2E and rotated recovery custody complete;
-# only then may timers activate and fresh offsite recovery points be created.
-manual_line="$(grep -n 'systemd-install-manual manual_systemd_install_check' "$A" | cut -d: -f1)"
+# Rotated recovery custody is tied to the active operational Age recipient,
+# not merely to a different whole-file digest.
+(
+  AT="$T/age-binding"
+  mkdir -p "$AT/state"
+  # shellcheck disable=SC2034 # consumed by sourced recovery helpers
+  STATE_ROOT="$AT/state"
+  age-keygen -o "$AT/old.key" >/dev/null 2>&1
+  age-keygen -o "$AT/new.key" >/dev/null 2>&1
+  age-keygen -o "$AT/other.key" >/dev/null 2>&1
+  cat "$AT/old.key" > "$AT/old.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/old.kit"
+  cat "$AT/new.key" > "$AT/new.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/new.kit"
+  cat "$AT/other.key" > "$AT/other.kit"; printf 'END OF RECOVERY KIT\n' >> "$AT/other.kit"
+  RECOVERY_KIT="$AT/old.kit"
+  validate_recovery_recipient_binding "$AT/new.kit" "$AT/new.key" \
+    || fail "matching rotated recovery identity was rejected"
+  if ( validate_recovery_recipient_binding "$AT/other.kit" "$AT/new.key" ) >/dev/null 2>&1; then
+    fail "unrelated valid recovery identity was accepted"
+  fi
+  cp "$AT/old.kit" "$AT/modified-old.kit"
+  printf '# digest-only change\n' >> "$AT/modified-old.kit"
+  if ( validate_recovery_recipient_binding "$AT/modified-old.kit" "$AT/old.key" ) >/dev/null 2>&1; then
+    fail "modified copy of the old Age identity was accepted as rotated custody"
+  fi
+
+  recipient="$(age-keygen -y "$AT/new.key")"
+  printf 'bound remote payload\n' | age -r "$recipient" -o "$AT/post-dr-full.age"
+  META_FILE="$AT/metadata"
+  : > "$META_FILE"
+  meta_add POST_DR_BACKUP_BASENAME full_backup_fixture.tar.zst.age
+  meta_add POST_DR_BACKUP_ARCHIVE_SHA256 "$(sha_file "$AT/post-dr-full.age")"
+  meta_add POST_DR_BACKUP_COHORT_SHA256 "$(printf '0%.0s' {1..64})"
+  download_bound_backup(){
+  # shellcheck disable=SC2034 # consumed by sourced verify_bound_backup_with_kit()
+  BOUND_BACKUP_FILE="$AT/post-dr-full.age"
+}
+  verify_bound_backup_with_kit POST_DR "$AT/new.kit" \
+    || fail "copied rotated recovery kit could not decrypt bound post-DR backup"
+)
+
+# Canary creation must precede the specifically bound full backup. Restore
+# must download that exact cohort and use --file, never remote 'latest'.
+canary_line="$(grep -n 'application-before-dr' "$A" | cut -d: -f1)"
+source_backup_line="$(grep -n 'dr-full-backup run_and_bind_full_backup DR_SOURCE' "$A" | cut -d: -f1)"
+source_download_line="$(grep -n 'dr-source-download download_bound_backup DR_SOURCE restore-source' "$A" | cut -d: -f1)"
+exact_restore_line="$(grep -n 'bash ./restore.sh interactive --file \"\$BOUND_BACKUP_FILE\"' "$A" | cut -d: -f1)"
+restore_checkpoint_line="$(grep -n 'save_phase post-restore-validation' "$A" | cut -d: -f1)"
+repair_line="$(grep -n 'repair-permissions bash ./utilities/repair-permissions.sh' "$A" | cut -d: -f1)"
 e2e_line="$(grep -n 'application-after-dr' "$A" | cut -d: -f1)"
 custody_line="$(grep -n 'validate_post_restore_recovery_kit' "$A" | tail -1 | cut -d: -f1)"
 activate_line="$(grep -n 'systemd-activate bash ./utilities/setup-systemd.sh install --enable-now' "$A" | cut -d: -f1)"
-final_backup_line="$(grep -n 'post-dr-db' "$A" | cut -d: -f1)"
-(( manual_line < e2e_line && e2e_line < custody_line && custody_line < activate_line && activate_line < final_backup_line )) \
-  || fail "post-restore automation/custody/final-backup sequencing regressed"
+final_backup_line="$(grep -n 'post-dr-full run_and_bind_full_backup POST_DR' "$A" | cut -d: -f1)"
+final_decrypt_line="$(grep -n 'post-dr-recovery-kit-decrypt verify_bound_backup_with_kit POST_DR' "$A" | cut -d: -f1)"
+(( canary_line < source_backup_line && source_backup_line < source_download_line && source_download_line < exact_restore_line )) \
+  || fail "canary/bound-backup/exact-restore sequencing regressed"
+(( exact_restore_line < restore_checkpoint_line && restore_checkpoint_line < repair_line && repair_line < e2e_line )) \
+  || fail "successful restore is not checkpointed before post-restore validation"
+(( e2e_line < custody_line && custody_line < activate_line && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \
+  || fail "post-restore custody/automation/final-backup sequencing regressed"
+! grep -Fq 'restore.sh latest full --remote' "$A" || fail "controller still restores an unbound remote latest backup"
+grep -Fq 'POST_RESTORE_AGE_RECIPIENT_HASH' "$A" || fail "rotated Age recipient is not checkpointed"
+grep -Fq 'dns-mutation-scope-after-restore validate_dns_mutation_scope' "$A" \
+  || fail "post-restore timer activation is not protected by the DNS mutation gate"
 
 echo 'case-host-acceptance: ok'
