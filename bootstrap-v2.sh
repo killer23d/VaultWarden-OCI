@@ -28,4 +28,5 @@ case "$(uname -m)" in
     ;;
 esac
 
-exec python3 -m vaultwarden_oci.install --source "$repo_root"
+exec env PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m vaultwarden_oci.install --source "$repo_root"
