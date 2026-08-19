@@ -1,406 +1,323 @@
 # VaultWarden-OCI V2 Documentation Audit
 
 Date: 2026-08-18
+Revision: post-rescan documentation model.
 
-## Executive assessment
+## Executive conclusion
 
-V1 documentation is unusually thorough for a small-team infrastructure project. Its weakness is not missing documentation; it is that the documentation surface mirrors the implementation surface too closely.
+V1 documentation is unusually thorough, but its size mirrors the implementation complexity. The current repository documents many public scripts, Make targets, backup tiers, recovery modes, storage migration, advanced email paths, dashboard behavior, systemd synchronization, CrowdSec internals and compatibility rules.
 
-A junior administrator currently has to navigate separate material for deployment, architecture, configuration, operations, security, backups, disaster recovery, bootstrap-key recovery, runtime permissions, credential handoffs, CrowdSec, email, migration, volume migration, scripts, host acceptance, troubleshooting, API behavior, customization, a runbook, and a generated command reference.
+For V2, the documentation objective is not to rewrite all V1 documents. It is to **delete the need for most of them** by shrinking the product surface.
 
-That is appropriate documentation for a complex platform, but V2 should be a simpler appliance.
-
-The V2 documentation strategy should therefore be **subtractive**: reduce implementation concepts, then document fewer stable workflows.
-
----
-
-# 1. Current strengths
-
-## Clear product boundary
-
-The current project explicitly states:
-
-- Ubuntu 24.04 LTS Noble;
-- amd64/arm64;
-- Cloudflare-first normal path;
-- Caddy;
-- CrowdSec;
-- SOPS/Age;
-- rclone/offsite backup;
-- systemd automation;
-- cloud-provider-neutral runtime.
-
-It also clearly places `--use-latest` outside the normal production/golden path.
-
-This clarity should be preserved in V2.
-
-## Security documentation is substantive
-
-The security documentation describes real trust boundaries rather than presenting a generic hardening checklist. It explains:
-
-- Cloudflare-origin restrictions;
-- Docker packet-filter interaction;
-- CrowdSec edge enforcement;
-- root-operated lifecycle;
-- secret lifetimes;
-- recovery-key custody;
-- backup verification;
-- restore destructive boundaries;
-- runtime permissions;
-- systemd/container hardening.
-
-V2 should retain this style but document a smaller architecture.
-
-## Recovery is treated as an operator workflow
-
-Backup/recovery documentation is detailed enough that the project clearly considers restore correctness part of the product. Preserve the recovery-first attitude.
-
-## Documentation drift is already recognized
-
-The repository contains a documentation-drift workflow and generated command-reference tooling. This is a good engineering instinct. V2 should retain automated drift detection but reduce the amount of generated operator material.
+A junior administrator should have one obvious install path, one command namespace, one configuration file, one diagnostic command and one recovery procedure.
 
 ---
 
-# 2. Main documentation problem: fragmentation
+# 1. Problems identified in V1
 
-The current documentation tree includes at least:
+## DOC-01 — documentation is an API map for too many APIs
 
-- `README.md`
-- `RUNBOOK.md`
-- `docs/ADVANCED-CUSTOMIZATION.md`
-- `docs/API.md`
-- `docs/ARCHITECTURE.md`
-- `docs/BACKUP-RESTORE.md`
-- `docs/BOOTSTRAP_KEY_RECOVERY.md`
-- `docs/COMMAND-REFERENCE.md`
-- `docs/CONFIGURATION.md`
-- `docs/CROWDSEC.md`
-- `docs/DEPLOYMENT.md`
-- `docs/DISASTER-RECOVERY.md`
-- `docs/EMAIL.md`
-- `docs/HOST-ACCEPTANCE.md`
-- `docs/MIGRATION.md`
-- `docs/OPERATIONS.md`
-- `docs/PROJECT-BOUNDARY.md`
-- `docs/RECOVERY-CARD.md`
-- `docs/RESTORE-RUNTIME-PERMISSIONS.md`
-- `docs/SCRIPTS.md`
-- `docs/SECRETS-SCHEMA.md`
-- `docs/SECURE-CREDENTIAL-HANDOFFS.md`
-- `docs/SECURITY.md`
-- `docs/TROUBLESHOOTING.md`
-- `docs/VOLUME-MIGRATION.md`
-- `utilities/README.md`
-- `tests/README.md`
-- `AGENTS.md`
-- `CHANGELOG.md`
+V1 has operator behavior spread across:
 
-The issue is not simply the count. Several topics represent separate operator concepts that V2 can eliminate entirely.
+- `setup.sh`;
+- `Makefile`;
+- top-level wrapper scripts;
+- `maintenance.sh`;
+- `edit-secrets.sh`;
+- many `utilities/*.sh` entrypoints;
+- dashboard menu actions;
+- systemd-installed copies;
+- generated command reference.
+
+The documentation has to explain and keep all of these aligned.
+
+### V2 decision
+
+One operator API: `vwctl`.
+
+Documentation should explain task-oriented commands rather than script ownership.
+
+## DOC-02 — generated exhaustive command reference is a symptom
+
+`docs/COMMAND-REFERENCE.md` is large because the executable command surface is large. Maintaining a generator and CI drift checks for such a reference adds another source/test/doc cycle.
+
+### V2 decision
+
+Do not generate an exhaustive command-reference document for beta.
+
+`vwctl --help` and subcommand help are the exact command grammar. Handwritten docs describe workflows and link to `--help` for flags.
+
+## DOC-03 — implementation internals leak into junior-admin docs
+
+V1 necessarily explains installed-runtime copies, repository/runtime split-brain, multiple configuration authorities, three backup tiers, operation guards, queue IDs and complex restore key distinctions.
+
+These are difficult to simplify editorially because they are real implementation contracts.
+
+### V2 decision
+
+Simplify the implementation first. Documentation then describes:
+
+- one config path;
+- one secrets path;
+- one backup command;
+- one restore command;
+- one status/doctor interface;
+- a small number of systemd timers.
+
+## DOC-04 — V1 migration documentation should not be carried forward
+
+V2 is explicitly fresh-install only.
+
+### V2 decision
+
+Do not create V2 migration or volume-migration guides. If operators need to move V2 state between disks/hosts, document backup -> fresh install -> restore rather than a stateful migration subsystem.
+
+## DOC-05 — agent instructions are documentation too
+
+Current `AGENTS.md` encodes V1 architectural commitments. If left unchanged on the V2 development branch, it will push coding agents toward retaining V1 mechanisms.
+
+### V2 decision
+
+V2 `AGENTS.md` is a critical architecture artifact. It must be rewritten before runtime implementation and kept concise enough that constraints are obvious.
+
+It should contain:
+
+- product boundary;
+- security invariants;
+- Python/Bash boundary;
+- simplicity/non-goals;
+- test policy;
+- phase/scope discipline;
+- rule that V1 is reference behavior, not compatibility API.
+
+It should **not** become a running audit log or copy every implementation detail.
 
 ---
 
-# 3. Documents that should not be ported as V2 operator docs
+# 2. Proposed V2 documentation set
 
-## `MIGRATION.md`
-
-Do not port. V2 is a fresh-start release by product decision.
-
-If migration from another password manager is useful, link to upstream Vaultwarden/Bitwarden import guidance rather than building project-state migration machinery.
-
-## `VOLUME-MIGRATION.md`
-
-Do not port as a first-class V2 document. A greenfield install should choose its state root before deployment. If later movement of a data volume is required, document it as an advanced maintenance recipe only after a real need appears.
-
-## `RESTORE-RUNTIME-PERMISSIONS.md`
-
-Do not keep as a standalone operator document. Correct permission repair should be owned by `vwctl restore` / `vwctl doctor`. The exact permission contract belongs in developer/security documentation.
-
-## `SCRIPTS.md`
-
-Do not port as operator documentation. V2 should have one public CLI; internal module ownership belongs in `DEVELOPMENT.md`.
-
-## Giant `COMMAND-REFERENCE.md`
-
-Do not make this a primary document. Exact CLI grammar should be generated from `vwctl --help` and optionally rendered to a compact reference page.
-
-## `HOST-ACCEPTANCE.md`
-
-Fold normal checks into `vwctl doctor` and the release test contract. Operators should not manually reproduce a large acceptance procedure for routine installs.
-
-## Separate secure-handoff documents
-
-`BOOTSTRAP_KEY_RECOVERY.md`, `SECURE-CREDENTIAL-HANDOFFS.md`, and `RECOVERY-CARD.md` can be consolidated into the V2 recovery/security model. The offline key/recovery kit still matters; it does not require several normal-path documents.
-
----
-
-# 4. Proposed V2 documentation set
+Keep the permanent operator documentation intentionally small.
 
 ## `README.md`
 
-Audience: evaluator/new administrator.
+Purpose:
 
-Target length: concise.
+- what the project is;
+- supported host/CPU matrix;
+- two-minute architecture overview;
+- prerequisites;
+- link to installation;
+- high-level security model;
+- current release status.
 
-Contents:
-
-1. What VaultWarden-OCI V2 is.
-2. Supported boundary.
-3. Architecture diagram.
-4. Security model in five bullets.
-5. Requirements.
-6. Three-command quick start or link to install.
-7. Core `vwctl` commands.
-8. Links to the five detailed docs.
-
-Avoid operational edge cases here.
+Target: concise enough to read before choosing the project.
 
 ## `docs/INSTALL.md`
 
-Audience: junior admin performing first deployment.
+One golden path only:
 
-Golden path only at the top:
+1. prepare Ubuntu 24.04 host;
+2. prepare Cloudflare DNS/token and provider ingress prerequisites;
+3. install V2;
+4. edit/validate config;
+5. configure secrets;
+6. start;
+7. run `vwctl doctor`;
+8. create recovery kit and first backup;
+9. enable/check timers.
 
-1. Prepare Ubuntu 24.04 host.
-2. Configure provider firewall/SSH prerequisites.
-3. Prepare Cloudflare domain/token.
-4. Run installer.
-5. Edit config/secrets.
-6. Start.
-7. Run `vwctl doctor`.
-8. Confirm backup destination.
-9. Export offline recovery material.
-
-Advanced direct mode goes at the bottom or in development/advanced section.
-
-Installation docs should never require reading architecture docs to complete normal setup.
+Do not mix alternate edge modes into this guide.
 
 ## `docs/OPERATIONS.md`
 
-Audience: day-to-day junior admin.
+Day-2 junior-admin tasks:
 
-Task-oriented headings:
+- status;
+- doctor;
+- logs;
+- start/stop/restart;
+- edit config;
+- rotate secrets;
+- backup;
+- update;
+- timers;
+- common symptom -> command mapping.
 
-- Check status.
-- Run diagnostics.
-- Restart safely.
-- View logs.
-- Edit configuration.
-- Rotate a secret.
-- Test email.
-- Check CrowdSec/edge status.
-- Check backups.
-- Update V2.
-- Handle disk pressure.
-- Handle a failed timer/service.
-
-Each task should use `vwctl`, not internal helpers.
+This replaces a large part of V1's Runbook + Operations + Scripts + command reference surface.
 
 ## `docs/SECURITY.md`
 
-Audience: administrator + reviewer.
+Describe security properties and trust boundaries, not implementation archaeology:
 
-Contents:
+- Cloudflare -> host ingress -> Caddy -> Vaultwarden;
+- CrowdSec edge/host roles;
+- secret custody;
+- root mutation model;
+- container hardening;
+- direct SMTP trust boundary;
+- backup/recovery identity separation;
+- what the project does not protect against.
 
-- threat model and non-goals;
-- trust boundaries;
-- Cloudflare mode vs direct mode;
-- host firewall/Docker assumption;
-- CrowdSec purpose;
-- container privilege model;
-- secrets and Age key custody;
-- backup/recovery trust model;
-- update/supply-chain policy;
-- `--use-latest` explicitly excluded from production guidance.
-
-Do not document removed V1 mechanisms.
+Keep exact credential scopes/paths where an operator needs them.
 
 ## `docs/RECOVERY.md`
 
-Audience: operator under stress.
+One recovery model:
 
-Contents:
+- what the normal encrypted recovery point contains;
+- what the offline recovery kit contains;
+- how to verify both before an incident;
+- fresh-host recovery steps;
+- start policy;
+- post-restore doctor check.
 
-- what the normal backup contains;
-- where backups live;
-- where offline recovery material must be stored;
-- restore on same host;
-- rebuild on replacement Ubuntu 24.04 host;
-- verification after restore;
-- periodic recovery drill checklist.
-
-This document should be printable/useful without following links during an incident.
+Do not document V1 backup tiers or formats.
 
 ## `docs/DEVELOPMENT.md`
 
-Audience: maintainers/contributors.
-
-Contents:
+Maintainer-only material:
 
 - source layout;
-- architecture rationale;
-- tests;
-- build/install dev workflow;
-- version manifest;
-- how pins are updated;
-- `--use-latest` behavior;
-- release process;
-- security invariants asserted by tests;
-- OCI A1 Flex reference testing.
-
-Implementation details belong here rather than in operator docs.
+- Python/Bash boundary;
+- local test/lint commands;
+- versions manifest;
+- `--use-latest` development policy;
+- disposable host acceptance process;
+- how to add a supported config field or doctor check;
+- explicit instruction not to add framework/compatibility layers without an ADR.
 
 ---
 
-# 5. `--use-latest` documentation contract
+# 3. Documentation that should not exist in V2 beta
 
-The flag should appear prominently in `DEVELOPMENT.md`, not in the production quick-start examples.
+Do not recreate separate permanent documents for:
 
-Recommended language:
+- script ownership/reference;
+- generated command grammar;
+- V1 migration;
+- volume migration;
+- three backup tiers;
+- Postfix queue administration;
+- dashboard menus;
+- alternate email API providers;
+- multiple TLS modes;
+- multiple firewall backends;
+- installed-copy synchronization;
+- V1 bootstrap key compatibility;
+- large advanced-customization catalogs.
 
-> `--use-latest` is a compatibility/testing mode. It resolves the newest compatible upstream component releases for the current test invocation and records the exact resolved set. It is not the supported production version policy. Production installs consume the version pins shipped by the V2 release.
-
-The command should print the same warning so documentation and runtime agree.
-
-Documentation should explain how the latest compatibility CI probe uses this flag without modifying production pins.
-
----
-
-# 6. Cloud and CPU wording
-
-Avoid vague claims such as "runs everywhere" or "CPU agnostic."
-
-Recommended support wording:
-
-> V2 is cloud-provider neutral and contains no required OCI/AWS/Azure/GCP runtime integration. Releases are tested on Ubuntu 24.04 LTS for amd64 and arm64. OCI A1 Flex is maintained as an ARM64 reference deployment.
-
-This is precise, testable, and still communicates portability.
+If an advanced capability is not in the beta product, there should not be a placeholder guide promising it.
 
 ---
 
-# 7. OCI documentation
+# 4. Documentation style for a junior admin
 
-Do not make OCI part of the main install instructions.
+Every operator procedure should answer four questions:
 
-Provide a small reference section/appendix in `INSTALL.md` or a later `docs/REFERENCE-OCI.md` only if needed. It should cover provider-side prerequisites without changing runtime behavior:
-
-- Ubuntu 24.04 ARM64 instance;
-- A1 Flex sizing example;
-- NSG/security list ingress;
-- block-volume stable device identification;
-- Cloudflare DNS/proxy setup.
-
-The same structure can later support AWS/Azure/GCP examples without branching the installer.
-
----
-
-# 8. Documentation style guide for junior admins
-
-Every normal task should answer, in order:
-
-1. **When would I do this?**
+1. **Why am I doing this?**
 2. **What command do I run?**
 3. **What does success look like?**
-4. **What do I run if it fails?**
+4. **What command diagnoses failure?**
 
-Prefer:
+Prefer examples such as:
 
 ```text
+sudo vwctl backup
 sudo vwctl doctor
 ```
 
-Then show a short representative result and remediation.
+over multi-layer implementation explanations.
 
-Avoid sending the operator through chains such as:
+For destructive operations, explicitly state:
+
+- what changes;
+- what does not change;
+- what prerequisite/recovery point is required;
+- what failure leaves behind;
+- whether services are started afterward.
+
+Avoid requiring the operator to know which Python module, shell script or systemd helper owns the behavior.
+
+---
+
+# 5. `vwctl doctor` changes the troubleshooting model
+
+A strong diagnostic interface lets documentation become much smaller.
+
+Troubleshooting should primarily map symptoms to stable diagnostic check IDs:
 
 ```text
-README -> RUNBOOK -> ARCHITECTURE -> SCRIPT REFERENCE -> helper script
+Problem: site unavailable
+Run: sudo vwctl doctor
+Relevant checks: docker.*, caddy.*, vaultwarden.alive, firewall.*, cloudflare.*
 ```
 
-for a routine task.
+The JSON form can support issue reports and automated acceptance without requiring exact human output to remain frozen.
+
+Avoid creating a separate troubleshooting command for every subsystem.
 
 ---
 
-# 9. Generated documentation and drift control
+# 6. Version/update documentation
 
-Keep automated drift prevention, but constrain what is generated.
+Production docs should never instruct operators to use floating latest versions.
 
-Generate/check:
+Document:
 
-- CLI reference from `vwctl` command definitions;
-- configuration key reference from the typed schema;
-- version table from `versions.yaml`;
-- links;
-- example configuration validity;
-- architecture/support statements against constants/tests where feasible.
+```text
+vwctl versions
+vwctl update check
+vwctl update apply
+```
 
-Do not generate narrative operating procedures. Human-written task workflows should remain reviewable prose.
+`--use-latest` belongs only in `DEVELOPMENT.md` and should be labeled clearly as a test/development override that resolves and records exact versions for that run.
 
-CI should fail when:
-
-- documented public commands do not exist;
-- example config contains unknown/invalid keys;
-- docs claim a different supported Ubuntu/architecture set than code;
-- docs contain stale production version numbers that should come from generated references.
+This prevents the testing escape hatch from appearing as a production recommendation.
 
 ---
 
-# 10. Troubleshooting strategy
+# 7. Cloud/provider neutrality documentation
 
-A large troubleshooting encyclopedia should not be the first diagnostic layer.
+Describe the runtime as:
 
-Use this order:
+> Ubuntu 24.04 LTS on tested amd64 or arm64 hosts. The runtime is cloud-provider neutral; OCI A1 Flex is a reference deployment, not a dependency.
 
-1. `vwctl doctor` identifies subsystem and remediation.
-2. `docs/OPERATIONS.md` gives common fixes.
-3. A compact troubleshooting section covers known non-obvious cases.
-4. GitHub issues/discussions capture rare incidents until they justify stable documentation.
-
-This avoids permanently documenting implementation accidents that disappear during V2 evolution.
+The installation guide should describe provider firewall/security-group work generically, with optional short provider examples where useful. Do not introduce provider API automation into core docs merely to make examples uniform.
 
 ---
 
-# 11. Release documentation
+# 8. Documentation tests
 
-For V2 releases:
+Documentation validation should be minimal.
 
-- `CHANGELOG.md` should describe operator-visible/security-impacting changes, not internal refactor detail;
-- release notes should state the supported Ubuntu/architectures and version-policy behavior;
-- because V2 is fresh-start, release notes must clearly state that it is not an in-place V1 upgrade/migration path;
-- future V2.x compatibility/migration promises should be stated only after the new state schema is stable.
+Keep only high-value automated checks such as:
+
+- internal Markdown link check if it can be implemented cheaply;
+- examples that are generated directly from one canonical config/template only when drift would be dangerous;
+- CLI help smoke execution;
+- `docker compose config` against the committed example/default config.
+
+Do not rebuild V1's large workflow of grep-based stale-term lists, Make-target discovery, flag discovery and duplicated version-pin assertions. The application/config validator should own those contracts.
+
+Exact prose is not a test target.
 
 ---
 
-# 12. Documentation acceptance checklist
+# 9. Documentation acceptance criteria for beta
 
-Before V2.0, test the docs with a person who did not implement the feature.
+A new administrator should be able to answer, from the five operator docs:
 
-They should be able to answer without source-code reading:
-
-- Which Ubuntu version is supported?
-- Which CPU architectures are tested?
-- Is OCI required?
-- Which public ports are expected?
-- Where is configuration?
-- Where are secrets?
-- How do I run a health check?
-- How do I diagnose a failure?
+- Is my host supported?
+- What Cloudflare/provider preparation is required?
+- How do I install?
+- Where is configuration stored?
+- How do I change a secret safely?
+- How do I check whether the system is healthy?
+- How do I read logs?
+- How do I back up?
+- Where is the offline recovery material?
+- How do I recover onto a new host?
 - How do I update?
-- What does `--use-latest` mean?
-- How do I make a backup?
-- What do I need if the server is lost?
-- How do I restore on a new host?
-- Where do I find CrowdSec/Cloudflare status?
+- Which scheduled jobs should be running?
 
-If the answer requires understanding multiple internal scripts, the V2 interface or documentation is still too complex.
-
----
-
-# Final documentation recommendation
-
-V1 proves that the project can document complex behavior carefully. V2 should use that capability to document a **smaller product**, not to preserve every historical concept.
-
-The documentation objective is:
-
-> One obvious install path, one obvious daily operations guide, one security model, one recovery guide, and one maintainer guide.
-
-Reducing the documentation surface is not a loss of rigor when the underlying architecture is also reduced. It is a measurable sign that V2 succeeded in becoming easier to operate.
+If the answer requires `docs/SCRIPTS.md`, a generated command encyclopedia or knowledge of internal file synchronization, the V2 implementation has become too complicated.
