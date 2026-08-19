@@ -50,6 +50,73 @@ class Phase2InstallTests(unittest.TestCase):
             with self.assertRaises(install.InstallError):
                 install.validate_host(os_release=noble, machine="ppc64le")
 
+    def test_bootstrap_anchors_python_to_repository(self) -> None:
+        try:
+            install.validate_host()
+        except install.InstallError as exc:
+            self.skipTest(f"bootstrap host preflight is not supported here: {exc}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            foreign = root / "foreign"
+            trusted_package = trusted / "vaultwarden_oci"
+            shadow_package = foreign / "vaultwarden_oci"
+            trusted_package.mkdir(parents=True)
+            shadow_package.mkdir(parents=True)
+
+            shutil.copy2(ROOT / "bootstrap-v2.sh", trusted / "bootstrap-v2.sh")
+            (trusted_package / "__init__.py").write_text("", encoding="utf-8")
+            (trusted_package / "install.py").write_text(
+                "import os\n"
+                "if 'PYTHONPATH' in os.environ:\n"
+                "    raise SystemExit('inherited PYTHONPATH reached trusted Python')\n"
+                "print('trusted-repository-package')\n",
+                encoding="utf-8",
+            )
+            (shadow_package / "__init__.py").write_text("", encoding="utf-8")
+            (shadow_package / "install.py").write_text(
+                "raise SystemExit('shadow-package-executed')\n",
+                encoding="utf-8",
+            )
+
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(foreign)
+            command = ["/bin/bash", str(trusted / "bootstrap-v2.sh")]
+            if os.geteuid() != 0:
+                sudo = shutil.which("sudo")
+                if sudo is None:
+                    self.skipTest("root bootstrap regression requires root or passwordless sudo")
+                probe = subprocess.run(
+                    [sudo, "-n", "/usr/bin/true"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if probe.returncode != 0:
+                    self.skipTest("passwordless sudo is unavailable for bootstrap regression")
+                command = [
+                    sudo,
+                    "-n",
+                    "/usr/bin/env",
+                    f"PYTHONPATH={foreign}",
+                    "/bin/bash",
+                    str(trusted / "bootstrap-v2.sh"),
+                ]
+                env.pop("PYTHONPATH", None)
+
+            result = subprocess.run(
+                command,
+                cwd=foreign,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertEqual(result.stdout.strip(), "trusted-repository-package")
+            self.assertNotIn("shadow-package-executed", result.stderr)
+
     def test_temp_root_install_layout_permissions_and_idempotency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
