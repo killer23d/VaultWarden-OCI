@@ -39,6 +39,7 @@ SYSTEMD_TARGET = """[Unit]\nDescription=VaultWarden-OCI lifecycle target\nDocume
 _RELEASE_FILES = ("vwctl", "versions.toml")
 _RELEASE_DIRS = ("vaultwarden_oci",)
 _OPTIONAL_RELEASE_RESOURCES = ("email-providers.toml",)
+_RELEASE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
 class InstallError(RuntimeError):
@@ -98,6 +99,14 @@ def validate_host(*, os_release: Path = Path("/etc/os-release"), machine: str | 
 def _assert_root(layout: Layout) -> None:
     if layout.root == Path("/") and os.geteuid() != 0:
         raise InstallError("installation into / requires root privileges")
+
+
+def _validate_release_name(release: str) -> str:
+    if release in {".", ".."} or not release or any(char not in _RELEASE_NAME_CHARS for char in release):
+        raise InstallError(
+            f"unsafe release version {release!r}; use only letters, digits, '.', '_', and '-'"
+        )
+    return release
 
 
 def _owned_by_installer(path: Path) -> bool:
@@ -221,9 +230,10 @@ def _ensure_symlink(path: Path, target: Path) -> None:
             raise InstallError(f"expected symlink at {path}")
         if not _owned_by_installer(path):
             raise InstallError(f"incompatible ownership at {path}: expected uid {os.geteuid()}")
-        if Path(os.readlink(path)) == target:
+        actual = Path(os.readlink(path))
+        if actual == target:
             return
-        path.unlink()
+        raise InstallError(f"existing symlink {path} points to {actual}, expected {target}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.symlink_to(target)
 
@@ -233,7 +243,7 @@ def install_layout(source_root: Path, *, root: Path = Path("/"), systemd_reload:
     layout = Layout(root.resolve())
     _assert_root(layout)
     manifest = load_versions(source_root / "versions.toml")
-    release = manifest.version
+    release = _validate_release_name(manifest.version)
 
     release_dir = _install_release(source_root, layout, release)
 
