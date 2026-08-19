@@ -3,9 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from vaultwarden_oci import install
 
@@ -98,12 +102,46 @@ class Phase2InstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install.install_layout(ROOT, root=root, systemd_reload=False)
-            installed = root / "opt/vaultwarden-oci/releases/0.1.0-dev/versions.toml"
-            os.chmod(installed.parent, 0o755)
+            release_dir = root / "opt/vaultwarden-oci/releases/0.1.0-dev"
+            installed = release_dir / "versions.toml"
+
+            os.chmod(release_dir, 0o755)
             os.chmod(installed, 0o644)
-            installed.write_text('schema_version = 1\n[vaultwarden_oci]\nversion = "changed"\n', encoding="utf-8")
-            with self.assertRaises(install.InstallError):
+            installed.write_text(
+                'schema_version = 1\n[vaultwarden_oci]\nversion = "changed"\n',
+                encoding="utf-8",
+            )
+            os.chmod(installed, 0o444)
+            os.chmod(release_dir, 0o555)
+
+            with self.assertRaisesRegex(install.InstallError, "different content"):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
+
+    def test_same_release_with_mode_drift_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install.install_layout(ROOT, root=root, systemd_reload=False)
+            installed = root / "opt/vaultwarden-oci/releases/0.1.0-dev/versions.toml"
+            os.chmod(installed, 0o644)
+            with self.assertRaisesRegex(install.InstallError, "incompatible mode"):
+                install.install_layout(ROOT, root=root, systemd_reload=False)
+
+    def test_immutable_release_resource_stays_out_of_operator_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.write_release_source(root, "0.1.0-resource-test")
+            catalog = source / "email-providers.toml"
+            catalog.write_text('schema_version = 1\n', encoding="utf-8")
+
+            release_dir = Path(
+                install.install_layout(source, root=root / "target", systemd_reload=False)
+            )
+            installed_catalog = release_dir / "email-providers.toml"
+            self.assertEqual(installed_catalog.read_text(encoding="utf-8"), 'schema_version = 1\n')
+            self.assertEqual(stat.S_IMODE(installed_catalog.stat().st_mode), 0o444)
+            self.assertFalse(
+                (root / "target/etc/vaultwarden-oci/email-providers.toml").exists()
+            )
 
     def test_incompatible_path_type_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -114,6 +152,16 @@ class Phase2InstallTests(unittest.TestCase):
             with self.assertRaisesRegex(install.InstallError, "expected directory"):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
 
+    def test_incompatible_managed_ownership_fails_clearly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime_root = root / "run/vaultwarden-oci"
+            runtime_root.mkdir(parents=True, mode=0o700)
+            fake_uid = os.geteuid() + 1
+            with mock.patch.object(install.os, "geteuid", return_value=fake_uid):
+                with self.assertRaisesRegex(install.InstallError, "incompatible ownership"):
+                    install.install_layout(ROOT, root=root, systemd_reload=False)
+
     def test_unsafe_release_name_cannot_escape_releases(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -122,7 +170,7 @@ class Phase2InstallTests(unittest.TestCase):
                 install.install_layout(source, root=root / "target", systemd_reload=False)
             self.assertFalse((root / "escape").exists())
 
-    def test_existing_current_symlink_is_not_retargeted(self) -> None:
+    def test_existing_current_symlink_is_not_retargeted_or_promoted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             current = root / "opt/vaultwarden-oci/current"
@@ -131,6 +179,56 @@ class Phase2InstallTests(unittest.TestCase):
             with self.assertRaisesRegex(install.InstallError, "existing symlink"):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
             self.assertEqual(os.readlink(current), "releases/older")
+            self.assertFalse(
+                (root / "opt/vaultwarden-oci/releases/0.1.0-dev").exists()
+            )
+
+    def test_install_refuses_when_global_mutation_lock_is_held(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path = root / "run/vaultwarden-oci/lock"
+            lock_path.parent.mkdir(parents=True, mode=0o700)
+            lock_path.touch(mode=0o600)
+
+            holder_code = textwrap.dedent(
+                """
+                import sys
+                import time
+                from pathlib import Path
+                from vaultwarden_oci.cli import mutation_lock
+
+                with mutation_lock(Path(sys.argv[1])):
+                    print("locked", flush=True)
+                    time.sleep(30)
+                """
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT)
+            holder = subprocess.Popen(
+                [sys.executable, "-c", holder_code, str(lock_path)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                self.assertIsNotNone(holder.stdout)
+                self.assertEqual(holder.stdout.readline().strip(), "locked")
+                with self.assertRaises(install.LockBusyError):
+                    install.install_layout(ROOT, root=root, systemd_reload=False)
+                self.assertFalse((root / "opt/vaultwarden-oci").exists())
+            finally:
+                holder.terminate()
+                try:
+                    holder.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    holder.kill()
+                    holder.wait(timeout=5)
+                if holder.stdout is not None:
+                    holder.stdout.close()
+                if holder.stderr is not None:
+                    holder.stderr.close()
 
 
 if __name__ == "__main__":
