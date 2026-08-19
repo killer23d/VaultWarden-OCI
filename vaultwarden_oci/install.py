@@ -100,11 +100,15 @@ def _assert_root(layout: Layout) -> None:
         raise InstallError("installation into / requires root privileges")
 
 
+def _owned_by_installer(path: Path) -> bool:
+    return path.lstat().st_uid == os.geteuid()
+
+
 def _ensure_directory(path: Path, mode: int) -> None:
     if path.exists() or path.is_symlink():
         if path.is_symlink() or not path.is_dir():
             raise InstallError(f"expected directory at {path}")
-        if path.stat().st_uid != os.geteuid():
+        if not _owned_by_installer(path):
             raise InstallError(f"incompatible ownership at {path}: expected uid {os.geteuid()}")
     else:
         path.mkdir(parents=True, mode=mode)
@@ -115,7 +119,7 @@ def _ensure_regular_file(path: Path, content: str, mode: int, *, preserve_existi
     if path.exists() or path.is_symlink():
         if path.is_symlink() or not path.is_file():
             raise InstallError(f"expected regular file at {path}")
-        if path.stat().st_uid != os.geteuid():
+        if not _owned_by_installer(path):
             raise InstallError(f"incompatible ownership at {path}: expected uid {os.geteuid()}")
         if preserve_existing:
             os.chmod(path, mode)
@@ -159,12 +163,33 @@ def _make_release_immutable(release_dir: Path) -> None:
     os.chmod(release_dir, 0o555)
 
 
+def _tree_entries(root: Path) -> list[Path]:
+    return [Path(".")] + sorted(path.relative_to(root) for path in root.rglob("*"))
+
+
 def _same_tree(left: Path, right: Path) -> bool:
-    left_entries = sorted(p.relative_to(left) for p in left.rglob("*") if not p.is_dir())
-    right_entries = sorted(p.relative_to(right) for p in right.rglob("*") if not p.is_dir())
+    left_entries = _tree_entries(left)
+    right_entries = _tree_entries(right)
     if left_entries != right_entries:
         return False
-    return all((left / rel).read_bytes() == (right / rel).read_bytes() for rel in left_entries)
+    for relative in left_entries:
+        left_path = left if relative == Path(".") else left / relative
+        right_path = right if relative == Path(".") else right / relative
+        if right_path.is_symlink() or left_path.is_symlink():
+            return False
+        if left_path.is_dir() != right_path.is_dir():
+            return False
+        if not _owned_by_installer(right_path):
+            raise InstallError(f"incompatible ownership inside immutable release: {right_path}")
+        left_mode = stat.S_IMODE(left_path.stat().st_mode)
+        right_mode = stat.S_IMODE(right_path.stat().st_mode)
+        if left_mode != right_mode:
+            raise InstallError(
+                f"incompatible mode inside immutable release: {right_path} is {right_mode:04o}, expected {left_mode:04o}"
+            )
+        if left_path.is_file() and left_path.read_bytes() != right_path.read_bytes():
+            return False
+    return True
 
 
 def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
@@ -194,6 +219,8 @@ def _ensure_symlink(path: Path, target: Path) -> None:
     if path.exists() or path.is_symlink():
         if not path.is_symlink():
             raise InstallError(f"expected symlink at {path}")
+        if not _owned_by_installer(path):
+            raise InstallError(f"incompatible ownership at {path}: expected uid {os.geteuid()}")
         if Path(os.readlink(path)) == target:
             return
         path.unlink()
