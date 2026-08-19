@@ -110,14 +110,14 @@ That product decision has now changed explicitly for V2: **CyberPanel Email / Cy
 - `400` invalid-request and `403` domain/account/permission failures as configuration/permanent failures;
 - separate SMTP credentials at `mail.cyberpersons.com:587` with required STARTTLS.
 
-V2 should use canonical provider ID `cyberpersons` and accept `cyberpanel` as an alias to the same definition, not maintain two copies.
+V2 uses canonical provider ID `cyberpersons` and accepts `cyberpanel` as an alias to the same definition, not as a second provider implementation.
 
 The actual V2 product still has two mail use cases:
 
 - Vaultwarden application mail;
 - project operational notifications.
 
-**V2 implication:** Vaultwarden uses direct authenticated SMTP. Project operational notifications support six explicit built-ins: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, and `cyberpersons`/`cyberpanel` alias. The operator selects one and supplies the API token/configuration. Direct authenticated SMTP is the bounded fallback for clearly transient API failures. Do not recreate Postfix/local queue machinery.
+**V2 implication:** Vaultwarden uses direct authenticated SMTP. Project operational notifications support six explicit built-ins: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, and `cyberpersons` (`cyberpanel` alias). The operator selects one and supplies the API token/configuration. Direct authenticated SMTP is the bounded fallback for clearly transient API failures. Do not recreate Postfix/local queue machinery.
 
 ### Provider-maintenance lesson
 
