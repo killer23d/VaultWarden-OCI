@@ -8,6 +8,12 @@ These prompts are intended to be run **one phase at a time**, after the previous
 
 They deliberately constrain scope. V1 grew complex partly because reasonable local improvements accumulated into permanent frameworks, compatibility layers, tests and documentation. These prompts instruct the coding agent to complete one narrow contract and stop.
 
+Codex uses repository instruction files such as `AGENTS.md`; Phase 0 therefore changes the repository-level V2 contract before runtime implementation. Keep the V2 `AGENTS.md` concise and durable, while keeping phase-specific requirements in these bounded task prompts.
+
+OpenAI references:
+- https://openai.com/index/unrolling-the-codex-agent-loop/
+- https://openai.com/index/harness-engineering/
+
 ## How to use these prompts
 
 - Create/use a dedicated long-lived `v2` development branch for V2 work.
