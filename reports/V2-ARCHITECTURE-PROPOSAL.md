@@ -1,27 +1,27 @@
 # VaultWarden-OCI V2 Architecture Proposal
 
 Date: 2026-08-18
-Revision: consolidated after V2 branch creation and later secrets/rclone/notification decisions.
+Status: V2 target architecture supporting the authoritative Codex prompts.
 
-> **Agent-execution precedence:** `reports/V2-CODEX-PROMPTS.md` is the authoritative V2 agent execution contract. This document explains the target architecture. If wording here conflicts with the prompt contract, the prompt contract wins and this document should be corrected.
+> **Authority:** `reports/V2-CODEX-PROMPTS.md` is the agent execution contract. This file describes the target architecture and rationale. If they conflict, implementation agents follow the pasted Codex prompt and report the inconsistency.
 
-## 1. Design objective
+## 1. Product objective
 
-V2 is a greenfield fresh-install security appliance for a small team, not a compatibility release of V1.
+V2 is a greenfield, fresh-install Vaultwarden appliance for a small team of roughly 10 users and a junior administrator. It is not a compatibility release of V1.
 
 Optimize for:
 
 1. clear security boundaries;
-2. junior-admin diagnosability;
-3. small project-owned code surface;
-4. reproducible production installs;
-5. straightforward verified recovery;
-6. amd64/arm64 portability on Ubuntu 24.04;
+2. predictable recovery;
+3. junior-admin diagnosability;
+4. a small project-owned code and file surface;
+5. reproducible production installs;
+6. Ubuntu 24.04 LTS on amd64 and arm64;
 7. low ongoing test and maintenance cost.
 
-The design should delegate specialized work to mature tools rather than recreate them inside the project.
+The governing design rule is: **delegate specialized work to mature tools, and keep project code focused on orchestration, validation, diagnostics, and safe state transitions.**
 
-## 2. Fixed product boundary
+## 2. Supported beta boundary
 
 V2 beta supports:
 
@@ -32,161 +32,141 @@ V2 beta supports:
 - Cloudflare-first production ingress;
 - CrowdSec;
 - Vaultwarden + Caddy containers;
+- Python 3.12 stdlib-first project logic;
 - SOPS + Age secrets;
 - rclone offsite recovery workflows;
-- one operational HTTPS email API plus SMTP transient fallback;
-- one normal encrypted V2 recovery format;
+- Vaultwarden direct authenticated SMTP;
+- one concrete HTTPS email API for project operational notifications, with authenticated SMTP fallback for clearly transient primary failures;
+- one encrypted V2 recovery format plus separate offline recovery material;
 - systemd lifecycle/timers;
-- explicit pinned updates and dev/test-only `--use-latest`.
+- exact production version pins and dev/test-only `--use-latest`.
 
-V2 beta does not implement:
+V2 beta intentionally does **not** support:
 
-- V1 migration/import/archive compatibility;
-- V1 command/layout compatibility;
+- V1 state, archive, backup-format, migration, command, or runtime-layout compatibility;
 - Kubernetes, Swarm, HA, or distributed coordination;
-- generic cloud, firewall, storage, notification, or secrets-provider frameworks;
+- generic cloud, storage, notification, secrets, or firewall provider frameworks;
 - a dashboard/TUI;
-- a Postfix sidecar/local MTA requirement;
+- a mandatory Postfix/local-MTA container;
 - a project-built durable notification queue;
 - multiple public backup tiers;
-- a custom test runner;
+- a custom test runner/inventory;
 - unattended auto-update daemons.
 
-## 3. Language architecture
+## 3. Language and file-surface model
 
 ### Python owns structured logic
 
-Use Ubuntu 24.04's Python 3.12 and prefer the standard library at runtime.
+Use Ubuntu 24.04's Python 3.12 and prefer the standard library at runtime. Python owns structured/stateful behavior such as:
 
-Python owns:
-
-- `vwctl` CLI parsing/dispatch;
-- TOML config and versions parsing;
-- validation and normalized errors;
-- subprocess execution without shell interpolation;
+- `vwctl` CLI parsing and dispatch;
+- TOML config/version parsing and validation;
+- normalized errors and subprocess execution;
 - architecture mapping;
 - `fcntl.flock` mutation locking;
-- status and doctor JSON;
+- status/doctor JSON;
 - SOPS/Age orchestration;
-- HTTPS notification delivery and SMTP fallback;
-- backup metadata, retention decisions, rclone orchestration;
+- notification HTTPS/SMTP delivery classification;
+- backup metadata, recovery validation, retention decisions, and rclone orchestration;
 - restore preflight/promotion;
-- Cloudflare CIDR validation;
+- Cloudflare CIDR policy;
 - structured systemd/template generation where useful.
 
-Do not introduce a framework, dependency injection system, plugin registry, ORM, async framework, daemon, generic provider layer, or internal workflow engine.
+Do not introduce a framework, dependency-injection system, plugin registry, ORM, event bus, workflow engine, daemon, generic provider layer, or speculative extension architecture.
 
 ### Bash is minimal glue
 
-Bash is acceptable for:
+Bash is acceptable only for:
 
 - the smallest bootstrap needed before `vwctl` is installed;
 - very small host glue where shell is materially clearer;
-- container entrypoint behavior required by upstream images.
+- container entrypoint behavior required by an upstream image.
 
-If a shell file begins owning config parsing, state machines, complex locks, structured data, retries, or broad mocks, move that logic to Python instead.
+If shell begins owning config parsing, structured data, state machines, retry policy, complex locking, or broad mocks, that logic belongs in Python.
 
-### Dependencies
+### Prefer fewer cohesive files
 
-Runtime starts stdlib-first. Development may use pytest, ruff, and ShellCheck. Add any new runtime dependency only for a demonstrated requirement.
+Reducing first-party file count is a **design preference, not a quota**.
 
-## 4. Installed filesystem contract
+- Reuse an existing owning file when a new behavior naturally belongs there.
+- Avoid one-function modules, one-action wrapper scripts, duplicate config fragments, empty placeholders, and future-facing extension files.
+- Delete obsolete V1 surfaces on the V2 branch when they are no longer required.
+- Do not game the preference by creating giant catch-all files or mixing unrelated responsibilities. Security boundaries, readability, and testability take priority.
+
+## 4. Runtime authorities and filesystem
+
+V2 should have one clear authority for each class of state:
 
 ```text
 /opt/vaultwarden-oci/
-  releases/<release>/
-  current -> releases/<release>/
+  releases/<release>/       immutable installed application release
+  current -> releases/...   active release
 
 /etc/vaultwarden-oci/
-  config.toml
-  age-key.txt
+  config.toml               sole installed non-secret config
+  age-key.txt               root-only operational Age private identity
 
 /var/lib/vaultwarden-oci/
-  data/
-  caddy/
-  backups/
-  state/                 # only small project state that is truly persistent
+  data/                     Vaultwarden persistent data
+  caddy/                    Caddy persistent state
+  backups/                  encrypted local V2 recovery points
+  state/                    only small persistent project state that is truly needed
 
 /run/vaultwarden-oci/
-  secrets/
-  transient/
-  lock
+  secrets/                  decrypted ephemeral secret material
+  transient/                other bounded volatile state
+  lock                      global mutating lock
 ```
 
-The SOPS-encrypted secrets document should live in the persistent root-owned state chosen by the implementation contract, with one canonical path and no duplicate operator-editable representation. The prompt contract currently requires one structured SOPS-encrypted document; Phase 0/3 ADRs should lock its exact installed path before runtime implementation.
+Use one source-controlled `versions.toml` for production component versions.
 
-A dedicated data volume, if used, mounts at the existing persistent-state root rather than introducing a second configurable application root.
+Phase 0/3 must establish one canonical installed path for the structured SOPS-encrypted secrets document. There must never be two operator-editable representations of the same secret/config state.
 
-## 5. Configuration model
+If a dedicated data volume is used, mount the persistent-state root at the same runtime path instead of creating a second configurable application root.
 
-Use `/etc/vaultwarden-oci/config.toml` as the only installed non-secret configuration authority. Python `tomllib` reads it.
+## 5. Operator interface and diagnostics
 
-Illustrative categories:
+Expose one public production CLI: `vwctl`.
 
-```toml
-[site]
-domain = "vault.example.com"
-timezone = "UTC"
+Expected public surface remains intentionally small:
 
-[cloudflare]
-proxy_enabled = true
-
-[vaultwarden.smtp]
-host = "smtp.example.com"
-port = 587
-security = "starttls"
-username = "vaultwarden@example.com"
-from_address = "vaultwarden@example.com"
-
-[notifications]
-enabled = true
-# Concrete HTTPS API provider is selected by ADR before Phase 6.
-
-[notifications.smtp_fallback]
-host = "smtp.example.com"
-port = 587
-security = "starttls"
-username = "ops@example.com"
-from_address = "ops@example.com"
-
-[backup]
-rclone_remote = "remote:vaultwarden"
-retention_days = 30
+```text
+vwctl install
+vwctl start|stop|restart|status
+vwctl logs [SERVICE]
+vwctl doctor [--json]
+vwctl config show|validate|edit
+vwctl secrets edit|rotate|check
+vwctl backup
+vwctl restore
+vwctl update check|apply
+vwctl versions
 ```
 
-Secrets such as passwords/tokens do not belong in TOML.
+Only add nested component troubleshooting commands when an operator need is demonstrated.
 
-Normal config operations should be a small set such as `vwctl config show|validate|edit`, with validated replacement of the one file.
+`vwctl doctor` is read-only by default and emits stable check IDs with PASS/WARN/FAIL/SKIP plus optional JSON. Human prose is not an API. Do not turn doctor into a broad automatic-repair framework.
 
-## 6. Secrets: SOPS + Age stays
+## 6. Secrets: SOPS + Age
 
-Retain SOPS + Age because it gives structured encrypted secrets without requiring a cloud KMS or always-on secrets service.
+Keep SOPS + Age. The improvement over V1 is smaller project-owned orchestration, not a different cryptosystem.
 
-V2 contract:
+Contract:
 
 - one structured SOPS-encrypted secrets document;
-- one root-only operational Age private identity on the host;
-- offline recovery material/recipient whose private recovery key is not persisted on the server;
-- decrypted runtime material only under a root-owned volatile directory;
-- project code validates/orchestrates but does not implement cryptography;
-- no secrets-provider/KMS abstraction.
+- one operational Age private identity stored root-only on the host;
+- separate offline recovery material/recipient whose private recovery key is not persisted on the server;
+- decrypted runtime material only in a root-owned volatile directory;
+- SOPS and Age remain external cryptographic tools;
+- no project-built cryptography, secrets server, cloud-KMS abstraction, or provider registry.
 
-Expected secret classes may include:
+Secrets may include Vaultwarden admin material, Cloudflare/CrowdSec credentials, SMTP credentials, the operational notification API token, and rclone credentials when not kept in a separately root-protected rclone configuration.
 
-- Vaultwarden admin secret/token/hash;
-- Cloudflare DNS/API material;
-- CrowdSec/Cloudflare integration credentials;
-- Vaultwarden SMTP password;
-- operational notification HTTPS API token;
-- operational SMTP fallback password;
-- optional Vaultwarden push credentials;
-- rclone credentials if the deployment does not keep them in a separately root-protected rclone configuration.
-
-Never place plaintext secrets in TOML, process arguments, ordinary logs, persistent temporary files, or notification diagnostic state.
+Never place plaintext secrets in `config.toml`, process arguments, normal logs, persistent temporary files, or notification diagnostic state.
 
 ## 7. Core runtime
 
-Normal Compose stack starts with only:
+The normal Compose stack starts with only:
 
 1. Vaultwarden;
 2. Caddy.
@@ -204,169 +184,144 @@ Retain useful container hardening where compatible:
 
 Vaultwarden application email uses Vaultwarden's own direct authenticated SMTP support. No Postfix container is required.
 
-## 8. Operational notifications
+## 8. Project operational notifications
 
-Operational notifications are separate from Vaultwarden application mail.
-
-Target flow:
+Project notifications are separate from Vaultwarden application mail.
 
 ```text
-vwctl/systemd task
-      |
-      v
+vwctl/systemd operation
+        |
+        v
 one concrete HTTPS email API
-      |
-      | clearly transient failure after small bounded retry
-      v
+        |
+        | clearly transient failure after small bounded retry
+        v
 direct authenticated SMTP fallback
 ```
 
-The concrete HTTPS API provider must be named in a Phase 0 ADR before Phase 6 implementation. Do not hide an undecided provider behind a generic provider interface.
+The concrete HTTPS provider must be named by ADR before Phase 6. If it is still undecided, Phase 6 stops for that product decision; it must not hide uncertainty behind a generic provider interface.
 
-Fallback classification:
+Fallback is appropriate for clearly transient delivery-path failure such as network/DNS timeout, HTTP `429` after bounded retry, service-side `5xx`, and only other conditions explicitly documented as transient by the selected provider.
 
-- eligible examples: DNS/network timeout, HTTP 429 after bounded retry, service-side 5xx, and other conditions explicitly documented as transient by the selected provider;
-- normally not eligible: representative 400/401/403, malformed request/config, permanent rejection;
-- TLS certificate/hostname validation failure is a security/configuration failure and must remain visible, not be silently masked by SMTP success.
+Representative `400`/`401`/`403`, malformed configuration/request, permanent rejection, unsupported provider behavior, and TLS certificate/hostname validation failure remain visible and are not silently masked by SMTP success.
 
-SMTP uses a normal validating SSL context with implicit TLS or required STARTTLS + authentication. No plaintext downgrade.
+SMTP uses normal certificate/hostname validation with implicit TLS or required STARTTLS plus authentication. No plaintext downgrade.
 
-If both transports fail, preserve only a small secret-free result such as event id/time, transport attempts, outcome/category, and safe diagnostic text so `vwctl status`/`doctor` can expose the failure.
+If both transports fail, persist only a small secret-free result for `status`/`doctor`: transport attempts, outcome/category, safe diagnostic text, and event/time identifiers as useful.
 
-Do not build:
+Do not build Postfix/local MTA state, spool files, persistent retry scheduling, dead-letter handling, or a provider registry.
 
-- Postfix/local MTA;
-- spool files;
-- a persistent queue;
-- retry scheduler;
-- dead-letter processing;
-- generic notification provider registry.
+## 9. rclone and recovery
 
-## 9. rclone stays first-class
-
-rclone remains a deliberate V2 dependency for cloud-neutral offsite backup/recovery. It avoids project-owned storage-provider APIs.
+rclone remains first-class because it keeps offsite storage cloud-neutral without project-owned storage-provider APIs.
 
 Small wrapper responsibilities:
 
 - prerequisite/config diagnostics;
-- connectivity test;
+- remote connectivity;
 - upload/publication;
-- remote listing;
-- remote verification;
+- remote listing and verification;
 - download/staging for restore;
 - explicit retention/pruning;
 - status/doctor visibility.
 
-Normal publication is:
+Normal offsite publication is:
 
 ```text
-create recovery point
--> verify local
+create candidate recovery point
+-> verify local database/archive/encryption/integrity
 -> rclone copy/copyto-style publication
--> verify required remote cohort
--> report offsite success
+-> verify required remote recovery cohort
+-> report success
 ```
 
-Remote deletion is a separate explicit retention/pruning operation. Normal publication must not use destructive sync semantics that can remove remote recovery points just because a local file disappeared.
+Remote deletion is a separate explicit retention/pruning operation. Normal publication must not use destructive `rclone sync` semantics that can remove remote recovery points merely because a local file disappeared.
 
-Do not build a generic storage/provider framework around rclone.
+Expose one normal V2 recovery product. A recovery point contains a consistent SQLite snapshot, required persistent app/config material, a format-versioned manifest and checksums, and encryption before publication. The operational Age private key is excluded from ordinary backup artifacts; offline recovery material is separate.
 
-## 10. Diagnostics
+Restore supports V2 format only and validates/decrypts/checks/stages before live mutation. It validates free space/target state, stops services only after preflight, promotes through a small explicit transaction boundary, restores permissions, and health-gates any requested restart.
 
-`vwctl doctor` is read-only by default and emits stable check IDs with PASS/WARN/FAIL/SKIP plus optional JSON.
+## 10. Cloudflare ingress and CrowdSec
 
-Candidate checks include:
+V2 beta supports exactly one production ingress model: Cloudflare-proxied HTTPS with Caddy.
 
-- Ubuntu/architecture;
-- required binaries;
-- config/versions validity;
-- SOPS decryptability/Age identity permissions;
-- Docker/Compose/runtime health;
-- local Vaultwarden alive endpoint;
-- external HTTPS through Cloudflare;
-- Caddy runtime/certificate state;
-- ingress policy freshness/fail-closed state;
-- CrowdSec/bouncer state;
-- Vaultwarden SMTP configuration/connectivity checks when explicitly safe;
-- notification primary/fallback configuration and last safe delivery result;
-- backup age and last verified local/offsite recovery point;
-- rclone remote reachability when explicitly requested/appropriate;
-- storage free space/mount identity;
-- systemd units/timers.
-
-Do not make doctor an automatic repair framework.
-
-## 11. Concurrency
-
-Start with one global mutating lock implemented with `fcntl.flock()`.
-
-Mutating operations such as install/update/backup/restore/config replacement/secrets rotation take the lock. Read-only status/doctor/logs do not.
-
-Do not add operation-specific/distributed locking until a demonstrated need exists.
-
-## 12. Cloudflare ingress and firewall
-
-V2 beta supports one production ingress model: Cloudflare-proxied HTTPS with Caddy.
-
-- publish HTTPS only as required by the golden path;
-- validate Cloudflare IPv4/IPv6 ranges;
-- use one supported Docker Engine bridge + iptables packet path;
-- own one small project ingress chain/allowlist behavior;
-- keep last-known-good CIDRs with bounded staleness;
+- Docker Engine bridge networking;
+- Docker iptables packet-filter backend;
+- one small project-owned ingress chain/allowlist path;
+- strictly validated Cloudflare IPv4/IPv6 ranges;
+- last-known-good cache with bounded staleness;
 - fail closed when no safe policy can be established;
-- do not claim UFW INPUT rules alone secure Docker-published ports;
-- do not implement an nftables alternative/backend framework in beta.
+- do not claim UFW `INPUT` alone secures Docker-published Caddy ports;
+- no nftables/second firewall backend in beta.
 
-Provider security-group/firewall setup remains documented prerequisite work, not a cloud API integration.
+Provider security-group/firewall setup is a documented prerequisite, not a cloud API integration.
 
-## 13. CrowdSec
+Keep CrowdSec, but prefer current upstream installation/integration and own only product-specific acquisitions/config, secure credentials, selected bouncer integration, lifecycle hooks, and diagnostics. Do not port the V1 installer wholesale.
 
-Keep CrowdSec while relying on upstream installation/integration where practical.
+## 11. Concurrency, systemd, and updates
 
-Project-owned scope is limited to required acquisitions/config, secure credential handoff, selected bouncer integration, lifecycle hooks, and diagnostics.
+Start with one global mutating lock using `fcntl.flock()`. Read-only status/doctor/logs do not take it. Do not add per-operation/distributed locking without demonstrated need.
 
-Avoid porting the V1 CrowdSec installer wholesale.
-
-## 14. Backup and restore
-
-Expose one normal backup concept: `vwctl backup`.
-
-A V2 recovery point includes a verified consistent SQLite snapshot plus appropriate persistent app/config material, a format-versioned manifest, checksums, encryption before publication, and verification before success.
-
-The operational Age private key is excluded from ordinary backup artifacts. Offline recovery material is separate.
-
-Restore is V2-format-only and performs preflight before service stop/live mutation: decryption, manifest/checksum validation, free-space/target checks, staging, explicit promotion, permission restoration, and health-gated optional restart.
-
-No V1 archive detection/adapters and no permanent `db/full/emergency` public tier model.
-
-## 15. systemd
-
-Use systemd as lifecycle/scheduler. Keep the permanent unit/timer budget small: lifecycle plus only the health, backup, and maintenance timers actually needed.
-
-Units execute the installed immutable release/current path and installed config, never a random git checkout.
-
-Operational notification failures are observed state; systemd does not become a custom queue.
-
-## 16. Versions and updates
+Use systemd as the only scheduler/lifecycle manager. Keep permanent units/timers limited to lifecycle plus the health, backup, and maintenance automation actually required.
 
 Use one source-controlled `versions.toml`.
 
-Production uses exact pins. `--use-latest` is development/testing-only, resolves compatible upstream versions once, converts them to exact values for the run, records them, and passes only those exact values downstream.
+- Production install/update uses exact pins.
+- `--use-latest` is development/testing-only: resolve once, freeze exact versions/digests for the run, record them, and pass only exact values downstream.
+- Updates are explicit operator actions and should validate health, create/verify recovery according to policy, stage an immutable release, activate, restart, and health/doctor gate.
+- No unattended update daemon.
 
-Updates are explicit (`vwctl update check|apply`) and should health-check, create/verify recovery according to policy, stage a new immutable release, activate, restart, and health/doctor gate. No unattended update daemon.
+## 12. Test architecture
 
-## 17. Test architecture
-
-Use three layers only:
+Use only three validation layers:
 
 1. focused unit tests for deterministic logic;
 2. small integration tests for filesystem/subprocess/Compose/security boundaries;
 3. disposable real-host acceptance as a release gate.
 
-Avoid source-string/order tests, private-function extraction, human-prose freezing, duplicated state machines, large custom runners, and coverage quotas.
+Tests protect security, availability, recoverability, and operator truthfulness—not private source layout. Avoid source-string/order assertions, private-function extraction, prose freezing, duplicated state machines, custom runners/inventories, and coverage quotas.
 
-Backup/restore deserves disproportionate attention. Notification testing should focus on deterministic failure classification and safe fallback behavior, not a protocol simulator. rclone testing should assert command/result behavior and non-destructive publication intent, not third-party internals.
+Backup/restore deserves disproportionate attention. Notification tests focus on deterministic failure classification and safe fallback; rclone tests focus on project-owned argv/result behavior and non-destructive publication intent.
 
-## 18. Architecture review rule
+Detailed guardrails live in `reports/V2-TEST-STRATEGY.md`.
 
-When an implementation task seems to require a new abstraction, first ask whether V2 can support one concrete implementation instead. For this small-team product, a narrow well-tested path is normally safer and cheaper than a generalized framework.
+## 13. Documentation model
+
+V2 documentation should shrink because the supported product surface shrinks.
+
+Target operator/developer set:
+
+- `README.md`
+- `docs/INSTALL.md`
+- `docs/OPERATIONS.md`
+- `docs/SECURITY.md`
+- `docs/RECOVERY.md`
+- `docs/DEVELOPMENT.md`
+
+This is a target, not a quota. Combine documents when responsibilities remain clear; do not create one document per internal module.
+
+Use `vwctl --help` as executable command reference and stable doctor JSON/check IDs as machine-readable diagnostic truth. Do not recreate giant generated command-reference docs or grep-heavy documentation policy CI.
+
+V2 docs must not preserve removed V1 migration, backup-tier, Postfix-queue, dashboard, compatibility-alias, or repository/runtime synchronization procedures.
+
+## 14. Delivery sequence
+
+The detailed, copy/paste-ready execution contract is `reports/V2-CODEX-PROMPTS.md`. The intended order is:
+
+0. reset `AGENTS.md`, product boundary, and ADRs;
+1. minimal Python/`vwctl` foundation;
+2. bootstrap and immutable installed layout;
+3. Vaultwarden + Caddy core, SOPS/Age, Vaultwarden SMTP;
+4. Cloudflare ingress + CrowdSec;
+5. one recovery format + rclone + offline recovery;
+6. systemd automation + selected HTTPS notification API + transient SMTP fallback;
+7. pinned versions + explicit updates + dev/test `--use-latest`;
+8. beta docs, disposable-host acceptance, and V1 cleanup on the V2 branch.
+
+Run one phase at a time. Split a phase if reviewability requires it; never combine phases merely to reduce PR count.
+
+## 15. Architecture review rule
+
+When a task appears to need a new abstraction, first ask whether V2 can support one concrete implementation instead. For this product, a narrow well-tested path is normally safer and cheaper than a generalized framework.
+
+When a task appears to need a new file, first ask whether an existing owner can absorb the behavior cleanly. Fewer files are preferred when natural, but clear ownership and security boundaries win over a numeric count.
