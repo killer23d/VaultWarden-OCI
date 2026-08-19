@@ -1,6 +1,6 @@
 # VaultWarden-OCI V2 Test Strategy
 
-Date: 2026-08-18
+Date: 2026-08-19
 Status: supporting rationale/guardrails for the authoritative Codex prompts.
 
 > **Authority:** `reports/V2-CODEX-PROMPTS.md` controls agent execution. This file explains why V2 deliberately uses a smaller test architecture.
@@ -40,7 +40,7 @@ Use for deterministic project logic:
 - architecture normalization;
 - policy/classification functions;
 - Cloudflare CIDR validation/staleness;
-- notification response classification/fallback eligibility;
+- notification request construction and response/fallback classification;
 - backup manifest/checksum/retention decisions;
 - version-resolution policy;
 - safe result/redaction behavior.
@@ -75,7 +75,7 @@ Reserve full-system behavior for a disposable Ubuntu 24.04 host/environment:
 - Cloudflare ingress/fail-closed behavior;
 - CrowdSec/bouncer integration;
 - backup -> rclone publication -> remote verification -> download -> restore;
-- HTTPS operational notification delivery + representative transient SMTP fallback;
+- at least one configured built-in HTTPS operational provider + representative transient SMTP fallback;
 - systemd units/timers;
 - pinned update flow.
 
@@ -160,20 +160,34 @@ Do not re-test cryptographic algorithms.
 
 ### Operational notifications
 
-The important behavior is safe classification/fallback, not protocol emulation.
+V2 carries forward the documented V1 built-in API provider IDs:
 
-High-value tests include:
+- `mailersend`;
+- `sendgrid`;
+- `mailgun`;
+- `postmark`;
+- `resend`.
 
+The important behavior is safe request construction/classification/fallback, not protocol emulation or a generic provider conformance framework.
+
+High-value permanent tests include:
+
+- configured built-in provider selection rejects unknown/undocumented identifiers;
+- each built-in provider creates the expected authentication/request shape at the project-owned boundary;
+- common `email_api_token` and any provider-specific secret never appear in argv/log/result/exception structures;
+- Mailgun non-secret region/domain validation where supported;
 - API success does not invoke SMTP;
 - network/DNS timeout is transient;
 - representative `429`/`5xx` becomes fallback-eligible according to bounded retry policy;
 - representative `400`/`401`/`403` stays visible;
+- provider-specific success parsing is tested only where HTTP status alone is insufficient;
 - TLS certificate/hostname validation failure is not silently masked;
 - SMTP uses the configured secure mode at a stable mocked boundary;
-- secret values never appear in result/log/exception structures;
 - both transports failing produces stable secret-free diagnostic state.
 
-Do not build a fake MTA, queue harness, or provider conformance framework.
+Do **not** multiply every provider across every test layer. One focused request-shape/auth test per built-in provider plus shared classifier/fallback tests is normally enough. Real delivery against every commercial provider does not belong in ordinary PR CI.
+
+A future provider addition should add only the smallest focused tests needed for its request/auth/success/transient behavior. Do not create a plugin SDK, provider base-class test suite, or dynamic-provider conformance matrix merely to make additions symmetrical.
 
 ### Cloudflare / CrowdSec / firewall
 
