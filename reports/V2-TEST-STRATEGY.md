@@ -36,11 +36,11 @@ V2 does not port that architecture.
 
 Use for deterministic project logic:
 
-- TOML/config/manifest parsing;
+- TOML/config/provider-catalog/manifest parsing;
 - architecture normalization;
 - policy/classification functions;
 - Cloudflare CIDR validation/staleness;
-- notification request construction and response/fallback classification;
+- notification provider-template rendering and response/fallback classification;
 - backup manifest/checksum/retention decisions;
 - version-resolution policy;
 - safe result/redaction behavior.
@@ -59,7 +59,7 @@ Use when filesystem/process behavior is part of the risk:
 - rclone argv/result behavior at the external-command boundary;
 - backup/restore using real temporary SQLite/files/archives;
 - systemd unit rendering/installed command targets;
-- HTTP/SMTP boundary behavior only where deterministic unit classification is insufficient.
+- HTTP/SMTP boundary behavior only where deterministic catalog/classification tests are insufficient.
 
 Prefer real temporary artifacts over large mock state machines.
 
@@ -101,7 +101,7 @@ Examples:
 - lock contention -> small integration;
 - backup corruption refusal -> integration with real artifacts;
 - actual Cloudflare packet path -> release acceptance;
-- notification status classification -> unit;
+- provider-catalog validation/rendering -> unit;
 - real provider delivery -> release/manual acceptance.
 
 Do not duplicate the same behavior at several layers merely for comfort.
@@ -124,7 +124,8 @@ Do not add:
 - a coverage-percentage gate;
 - broad matrices without a concrete risk;
 - pytest plugins/frameworks without demonstrated need;
-- helper modules solely to make tests convenient when the public boundary can be tested directly.
+- helper modules solely to make tests convenient when the public boundary can be tested directly;
+- a generic provider conformance framework or one test module per email provider merely for symmetry.
 
 ## Risk-weighted focus
 
@@ -158,36 +159,46 @@ Test only project-owned responsibilities:
 
 Do not re-test cryptographic algorithms.
 
-### Operational notifications
+### Operational notifications and `email-providers.toml`
 
-V2 carries forward the documented V1 built-in API provider IDs:
+V2 beta supports these canonical built-in API providers:
 
 - `mailersend`;
 - `sendgrid`;
 - `mailgun`;
 - `postmark`;
-- `resend`.
+- `resend`;
+- `cyberpersons` (CyberPanel Email), with `cyberpanel` accepted only as an alias to the same catalog definition.
 
-The important behavior is safe request construction/classification/fallback, not protocol emulation or a generic provider conformance framework.
+The important behavior is safe catalog validation/rendering/classification/fallback, not protocol emulation or a dynamic provider framework.
 
 High-value permanent tests include:
 
-- configured built-in provider selection rejects unknown/undocumented identifiers;
-- each built-in provider creates the expected authentication/request shape at the project-owned boundary;
+- catalog parses and rejects duplicate IDs/aliases;
+- `cyberpanel` resolves to the canonical `cyberpersons` definition rather than duplicating settings;
+- unknown provider identifiers fail validation;
+- endpoint must be HTTPS and endpoint templates may use only declared non-secret substitutions;
+- operator config cannot inject arbitrary endpoint/auth/header/payload overrides;
+- unknown auth modes, request encodings, placeholders, success checks, or undeclared provider options fail closed;
+- request templates use only the closed canonical message-field set and never evaluate arbitrary code;
+- authorization-bearing requests do not silently follow cross-host redirects;
+- each built-in provider renders the expected authentication/request shape from the catalog at the project boundary;
 - common `email_api_token` and any provider-specific secret never appear in argv/log/result/exception structures;
 - Mailgun non-secret region/domain validation where supported;
 - API success does not invoke SMTP;
 - network/DNS timeout is transient;
-- representative `429`/`5xx` becomes fallback-eligible according to bounded retry policy;
+- provider-documented retry statuses become fallback-eligible only according to bounded retry policy;
 - representative `400`/`401`/`403` stays visible;
 - provider-specific success parsing is tested only where HTTP status alone is insufficient;
 - TLS certificate/hostname validation failure is not silently masked;
 - SMTP uses the configured secure mode at a stable mocked boundary;
 - both transports failing produces stable secret-free diagnostic state.
 
-Do **not** multiply every provider across every test layer. One focused request-shape/auth test per built-in provider plus shared classifier/fallback tests is normally enough. Real delivery against every commercial provider does not belong in ordinary PR CI.
+CyberPanel/CyberPersons current catalog behavior should additionally be represented by focused tests matching the verified official contract at implementation time: Bearer auth, `POST https://platform.cyberpersons.com/email/v1/send`, plain-text JSON message shape, HTTP `202` plus `success: true`, and the current documented retry/non-retry categories. If the official API changes before implementation, update the catalog and tests to the current verified contract rather than freezing this report as upstream truth.
 
-A future provider addition should add only the smallest focused tests needed for its request/auth/success/transient behavior. Do not create a plugin SDK, provider base-class test suite, or dynamic-provider conformance matrix merely to make additions symmetrical.
+Do **not** multiply every provider across every test layer. One focused catalog-render/auth/success-rule test per built-in provider plus shared classifier/fallback/security tests is normally enough. Real delivery against every commercial provider does not belong in ordinary PR CI.
+
+A routine provider settings change should normally change `email-providers.toml` plus the smallest affected tests/docs, not production Python. Add Python tests/code only if the provider truly requires a new transport capability that the closed catalog schema cannot represent.
 
 ### Cloudflare / CrowdSec / firewall
 
@@ -197,12 +208,15 @@ Unit-test parsing/policy, integration-test external-command boundaries, and rese
 
 Test stable check IDs, PASS/WARN/FAIL/SKIP classification, JSON shape, exit policy, and secret-free output. Do not freeze exact human prose.
 
+For notifications, `doctor` should distinguish at least: configured built-in provider valid/invalid, API credential present/placeholder, SMTP fallback available/unavailable, provider catalog valid/invalid, and last safe delivery result.
+
 ## File-surface guardrail for tests
 
 Test code should remain **obviously subordinate to the product**, not become a second architecture.
 
 - Prefer adding a case to an existing cohesive test module over creating a new file for one small behavior.
 - Do not create a test-helper layer that mirrors production modules one-for-one.
+- Keep the six provider definitions in one catalog rather than six provider source modules and six matching test modules unless a real ownership boundary emerges.
 - If a test module becomes difficult to understand, first ask whether the product boundary or test level is wrong before splitting it into more infrastructure.
 - No numeric LOC/coverage/file-count target is authoritative. Metrics may trigger discussion, never design gaming.
 
