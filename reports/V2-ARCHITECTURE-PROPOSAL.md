@@ -1,690 +1,587 @@
 # VaultWarden-OCI V2 Architecture Proposal
 
 Date: 2026-08-18
+Revision: post-rescan architecture.
 
-## Design objective
+## 1. Design objective
 
-V2 should be a fresh-install, security-first Vaultwarden appliance for small teams that remains easy for a junior administrator to operate.
+V2 is a **fresh-install security appliance for a small team**, not a compatibility release of V1.
 
-The architecture should optimize for:
+The design should optimize for:
 
-- Ubuntu 24.04 LTS;
-- tested amd64 and arm64 support;
-- cloud-provider-neutral host runtime;
-- OCI A1 Flex as a reference deployment, not a runtime dependency;
-- Cloudflare-first ingress and DNS;
-- CrowdSec enforcement;
-- reproducible production versions;
-- explicit `--use-latest` development/test mode;
-- minimal public command surface;
-- one authority for each class of state;
-- safe backup/recovery;
-- low cognitive and maintenance cost.
+1. clear security boundaries;
+2. junior-admin diagnosability;
+3. small code surface;
+4. reproducible production installs;
+5. straightforward recovery;
+6. amd64/arm64 portability on Ubuntu 24.04;
+7. low ongoing test and maintenance cost.
 
-V2 has no requirement to import or preserve V1 application/project state.
+The architecture should deliberately reject features that require disproportionate framework code.
+
+## 2. Non-goals
+
+V2 beta should not implement:
+
+- V1 migration or import compatibility;
+- V1 backup/archive compatibility;
+- Kubernetes, Swarm or HA;
+- a generic cloud-provider layer;
+- a generic firewall backend abstraction;
+- a plugin/provider registry;
+- a database for operation metadata;
+- an interactive dashboard/TUI;
+- a local SMTP queue/Postfix sidecar;
+- multiple public backup tiers;
+- a custom test runner;
+- a generated exhaustive command-reference document;
+- auto-update daemons;
+- support outside Ubuntu 24.04 LTS, amd64 and arm64.
+
+These can be revisited only from demonstrated operator need.
 
 ---
 
-# 1. Architectural principles
+# 3. Language architecture
 
-## 1.1 One authority per concern
+## 3.1 Python is the V2 application language
 
-| Concern | V2 authority |
-| --- | --- |
-| Installed application | `/opt/vaultwarden-oci/current` |
-| Non-secret configuration | `/etc/vaultwarden-oci/config.env` |
-| Persistent encrypted secrets | `/etc/vaultwarden-oci/secrets.yaml` |
-| Operational Age identity | `/etc/vaultwarden-oci/age-key.txt` |
-| Application state | `/var/lib/vaultwarden-oci/` or configured mounted state root |
-| Runtime decoded secrets | `/run/vaultwarden-oci/secrets/` |
-| Production dependency pins | source-controlled `versions.yaml` |
-| Service lifecycle | systemd + Docker Compose |
-| Operator interface | `vwctl` |
+Use Ubuntu 24.04's Python 3.12 as the primary implementation language.
 
-No normal production workflow should depend on the Git checkout after installation.
+Runtime Python should use the **standard library by default**. This keeps installation simple and avoids packaging a dependency graph for a small appliance.
 
-## 1.2 Golden path first
+Python should own structured or stateful logic:
 
-The default production profile is:
+- CLI parsing and command dispatch;
+- TOML configuration and version manifests;
+- validation and normalized error reporting;
+- subprocess execution;
+- platform/architecture mapping;
+- global mutation lock;
+- status and diagnostics;
+- SOPS/Age orchestration;
+- backup manifest/retention/selection logic;
+- restore preflight and promotion control;
+- Cloudflare CIDR parsing/validation;
+- systemd installation/rendering where structured generation is useful;
+- machine-readable JSON output.
+
+Do not introduce an application framework, dependency-injection layer, plugin architecture, ORM, async framework or daemon merely because Python is available.
+
+## 3.2 Bash is host glue, not the application framework
+
+Bash remains acceptable for:
+
+- one minimal bootstrap/installer entrypoint before `vwctl` is installed;
+- very small host glue where shell is clearer than Python;
+- Caddy/container entrypoint behavior required by an upstream image.
+
+A shell file that begins accumulating configuration parsing, transactions, data structures, complex locks or broad mocks is a signal that the logic belongs in Python.
+
+## 3.3 Development dependencies
+
+Development may use:
+
+- `pytest` for tests;
+- `ruff` for Python lint/format checks;
+- ShellCheck for the small remaining shell surface.
+
+Start with no pytest plugins and no runtime third-party Python packages. Add one only after a concrete need is documented.
+
+---
+
+# 4. Proposed filesystem contract
+
+Keep installed code, configuration, persistent state and runtime secrets clearly separated.
 
 ```text
-Internet
-   |
-Cloudflare DNS / Proxy / WAF / CrowdSec edge decision enforcement
-   |
-provider firewall/security group
-   |
-Ubuntu host firewall / Docker ingress gate
-   |
-Caddy :443
-   |
-Vaultwarden
+/opt/vaultwarden-oci/
+  releases/<version>/       # immutable installed application release
+  current -> releases/...   # active release symlink
+
+/etc/vaultwarden-oci/
+  config.toml               # one non-secret runtime authority
+  age-key.txt               # operational Age private identity, root-only
+  secrets.json              # SOPS-encrypted secret values
+
+/var/lib/vaultwarden-oci/
+  data/                     # Vaultwarden persistent application data
+  caddy/                    # Caddy persistent state
+  backups/                  # encrypted V2 recovery artifacts
+  logs/                     # only project-owned logs that are not journal/container logs
+
+/run/vaultwarden-oci/
+  secrets/                  # decrypted ephemeral secret files
+  lock                      # global mutating operation lock
+  transient/                # temporary runtime state if required
 ```
 
-Advanced alternatives must be explicit profiles, not hidden branches in the normal path.
+If a dedicated data volume is used, mount the persistent state root at `/var/lib/vaultwarden-oci` rather than introducing a second project-state path. The mount itself changes; the application paths do not.
 
-## 1.3 Fail closed where security state matters
-
-Failure or ambiguity in the following should block the relevant mutation:
-
-- unsupported host/architecture;
-- version resolution;
-- secret decryption;
-- storage identity;
-- firewall reconciliation before public listener activation;
-- backup verification;
-- restore archive verification;
-- destructive uninstall/data removal.
-
-Operational diagnostics, however, should distinguish `healthy`, `degraded`, `unknown`, and `failed` rather than mapping every partial condition to a hard stop.
+This removes V1's repository `.env` -> persistent `install.env` -> installed environment synchronization chain.
 
 ---
 
-# 2. Recommended service topology
+# 5. Configuration model
 
-## Required production services
+## 5.1 One non-secret authority
 
-### Vaultwarden
+Use `/etc/vaultwarden-oci/config.toml` as the sole installed non-secret configuration.
 
-- official upstream Vaultwarden container;
-- pinned release in production;
-- no public host port;
-- non-root UID/GID;
-- `cap_drop: ALL`;
-- `no-new-privileges`;
-- read-only root where upstream behavior permits;
-- persistent `/data` only;
-- transient `/tmp` and `/run` via tmpfs;
-- health check on internal `/alive`;
-- internal application network plus explicitly required egress.
-
-### Caddy
-
-- pinned Caddy + Cloudflare DNS module build;
-- only public application listener;
-- port `443` in default Cloudflare DNS-01 mode;
-- port `80` enabled only by an explicit HTTP-01/direct profile;
-- non-root UID/GID with `NET_BIND_SERVICE` only if required;
-- read-only root plus persistent Caddy state and logs;
-- Cloudflare DNS API token via runtime secret file;
-- local-only health endpoint.
-
-## Host services
-
-### CrowdSec
-
-Run CrowdSec as an Ubuntu host service unless a compelling operational reason favors a container. Host installation makes SSH/system signals natural and avoids giving a monitoring container broad host mounts.
-
-V2 should ship only the project-specific acquisitions/profiles required to parse:
-
-- SSH;
-- Caddy access/security logs;
-- Vaultwarden events/logs that are meaningful for detection.
-
-### CrowdSec Cloudflare enforcement
-
-Keep the edge enforcement model because the real web client is behind Cloudflare.
-
-Provision/configure the Cloudflare Workers/KV bouncer through a single V2 edge module. The normal admin should see only:
-
-```text
-vwctl crowdsec status
-vwctl crowdsec test
-vwctl edge status
-```
-
-The implementation details should not become normal operator workflow.
-
----
-
-# 3. Email architecture
-
-## Preferred V2 design
-
-Remove Postfix from the mandatory stack.
-
-Use:
-
-- Vaultwarden's direct authenticated SMTP configuration for application mail;
-- the same relay credentials through a small operational notification sender for maintenance/backup failure mail.
-
-This eliminates:
-
-- a privileged sidecar;
-- queue management code;
-- queue deletion semantics;
-- Postfix-specific health checks;
-- Postfix-specific tmpfs/state behavior;
-- extra capabilities;
-- sender-domain and queue documentation;
-- a significant portion of tests.
-
-## Optional fallback
-
-If real deployments demonstrate that local queueing is required, provide an optional `mail-relay` profile. Do not make it part of first-run setup until that evidence exists.
-
----
-
-# 4. Network model
-
-## 4.1 Compose networks
-
-Use the smallest topology that preserves useful isolation:
-
-```text
-frontend network:
-  Caddy <-> Vaultwarden
-  internal where feasible
-
-vaultwarden-egress network:
-  Vaultwarden -> Internet where required
-
-caddy-external network:
-  Caddy -> DNS/ACME/Cloudflare + published 443
-```
-
-Do not create a network merely because V1 had one. If Postfix is removed, its dedicated relay network disappears.
-
-## 4.2 Address allocation
-
-Do not hard-code multiple narrow RFC1918 subnets unless firewall implementation truly requires deterministic bridge addresses.
-
-If deterministic addressing is required, expose one advanced `DOCKER_NETWORK_POOL` setting and derive project networks from it. Validate overlap before creation.
-
-## 4.3 Ingress
-
-Default Cloudflare mode:
-
-- publish TCP 443 only;
-- origin 443 allowed from current Cloudflare IPv4/IPv6 ranges;
-- provider firewall mirrors the same intention where practical;
-- SSH remains restricted by operator/provider network policy;
-- Caddy obtains certificates with DNS-01.
-
-Direct mode:
-
-- explicitly selected;
-- separate firewall behavior;
-- optionally port 80 for HTTP-01;
-- docs must state that Cloudflare-origin hiding/WAF benefits no longer apply.
-
----
-
-# 5. Firewall strategy
-
-V1's custom Docker packet-path handling is security-conscious but expensive to maintain.
-
-## V2 contract
-
-Support one firewall backend combination for Ubuntu 24.04 and document it as part of the host contract.
-
-The implementation should have three small responsibilities:
-
-1. verify the supported Docker firewall backend is active;
-2. maintain the minimum project ingress allow-list for Caddy;
-3. fail closed by keeping/stopping the public Caddy listener when policy cannot be established.
-
-Avoid implementing a generic iptables/nftables/UFW abstraction layer.
-
-Cloudflare CIDRs should be:
-
-- fetched over HTTPS;
-- syntax validated;
-- atomically cached;
-- timestamped;
-- refreshed periodically;
-- never replaced by an empty/invalid set;
-- permitted to use a recent last-known-good cache within a documented maximum age;
-- treated as failed/degraded beyond that age.
-
-`vwctl doctor` should display the current CIDR source age and firewall state.
-
----
-
-# 6. Configuration model
-
-## `/etc/vaultwarden-oci/config.env`
-
-Only non-secret operator configuration belongs here.
+Python's `tomllib` reads it without a runtime dependency.
 
 Example categories:
 
-```text
-DOMAIN=
-ADMIN_EMAIL=
-TZ=UTC
-MODE=cloudflare
-STATE_DIR=/var/lib/vaultwarden-oci
-PUID=1001
-PGID=1001
-ADMIN_ALLOW_CIDR=127.0.0.1/32
-SIGNUPS_ALLOWED=false
-INVITATIONS_ALLOWED=true
-PUSH_ENABLED=false
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USERNAME=
-SMTP_FROM=
-CROWDSEC_ENABLED=true
-BACKUP_REMOTE=
+```toml
+[site]
+domain = "vault.example.com"
+timezone = "UTC"
+
+[cloudflare]
+proxy_enabled = true
+
+[email]
+host = "smtp.example.com"
+port = 587
+security = "starttls"
+username = "vaultwarden@example.com"
+from_address = "vaultwarden@example.com"
+
+[backup]
+remote = "remote:vaultwarden"
+retention_days = 30
+
+[storage]
+mode = "boot"  # or "volume"
+device = ""
 ```
 
-Secrets such as tokens/passwords never belong in this file.
+This example is illustrative, not a requirement to expose every upstream Vaultwarden option. Keep the supported V2 configuration deliberately small. Advanced Vaultwarden environment overrides should not be added until there is a real product need.
 
-## Validation
+## 5.2 Configuration lifecycle
 
-`vwctl config validate` should:
+Normal commands:
 
-- parse without shell `source` execution;
-- reject duplicate keys;
-- reject unknown production keys unless explicitly permitted for forward compatibility;
-- validate booleans/enums/CIDRs/ports/domain/email/path values;
-- report missing conditional fields based on enabled profile.
+```text
+vwctl config show
+vwctl config validate
+vwctl config edit
+```
 
-A Python parser should be used rather than sourcing arbitrary operator text as shell code.
+`config edit` should edit one file and validate it before replacing the live copy. It should not create another persistent representation.
+
+Compose environment can be produced in memory for the subprocess invocation or rendered into a root-owned volatile/runtime file. It must not become a second operator-editable authority.
 
 ---
 
-# 7. Secret model
+# 6. Secret model
 
-## Persistent
+Keep SOPS + Age, but simplify representation.
 
-```text
-/etc/vaultwarden-oci/secrets.yaml
-/etc/vaultwarden-oci/age-key.txt
-```
-
-Both root-owned; Age private key mode `0600` or stricter equivalent.
-
-## Runtime
+Recommended files:
 
 ```text
-/run/vaultwarden-oci/secrets/
+/etc/vaultwarden-oci/age-key.txt    0600 root:root
+/etc/vaultwarden-oci/secrets.json   0600 root:root, SOPS encrypted
+/run/vaultwarden-oci/secrets/       0700 root:root
 ```
 
-- directory root-owned `0700`;
-- files readable only by the intended runtime access path;
-- recreated on stack start;
-- deleted on stop where appropriate;
-- never included in backup payloads.
+Use SOPS JSON so Python can inspect structure using `json` and V2 can remove production `yq` and PyYAML requirements.
 
-## Suggested V2 secret set
+Only secrets used by the supported profile belong in the schema. Expected initial values are likely:
 
-Keep the set small and profile-driven:
+- Vaultwarden admin token/hash;
+- Caddy Cloudflare DNS token;
+- CrowdSec Cloudflare credentials required by the selected upstream integration;
+- SMTP password;
+- optional Vaultwarden push credentials;
+- optional offsite-backup credentials if not delegated to a separately protected rclone config.
 
-Core:
+Do not implement a general secret-provider framework.
 
-- Vaultwarden admin token/hash as required;
-- Cloudflare DNS token;
-- SMTP password.
-
-Cloudflare/CrowdSec profile:
-
-- Cloudflare zone ID/account ID where needed;
-- Workers/bouncer credentials.
-
-Optional push profile:
-
-- push installation ID/key.
-
-Avoid maintaining a broad generic transform engine for values that are not used by the normal V2 profiles.
+Decrypted Compose secret source files are recreated under `/run` before startup and removed/overwritten as appropriate. Never put plaintext secret values in the TOML config, process arguments or ordinary logs.
 
 ---
 
-# 8. Version architecture
+# 7. Version model and `--use-latest`
 
-## `versions.yaml`
+Use one source-controlled `versions.toml` in the release source.
 
-Example:
+Example shape:
 
-```yaml
-schema: 1
-components:
-  vaultwarden:
-    version: "1.x.y"
-    source: ghcr.io/dani-garcia/vaultwarden
-  caddy:
-    version: "2.x.y"
-  sops:
-    version: "3.x.y"
-  yq:
-    version: "4.x.y"
-  crowdsec:
-    version: "..."
+```toml
+vaultwarden = "1.x.y"
+caddy = "2.x.y"
+crowdsec = "1.x.y"
+sops = "3.x.y"
+# additional exact pins only for components actually owned by V2
 ```
 
-Checksums for downloadable architecture-specific assets should live beside the version entries.
+The version module is the only owner of upstream version resolution.
 
-## Production policy
+## Production
 
-`vwctl install` and `vwctl update` consume exact pins.
+`vwctl install` and normal update paths use exact source-controlled pins.
 
-No literal floating `latest` tag is stored as the production release lock.
+## Development/testing
 
-## `--use-latest`
+`--use-latest` remains supported and means:
 
-`vwctl install --use-latest`:
+1. explicitly opt into non-production resolution;
+2. resolve current compatible upstream releases/tags;
+3. convert them immediately into exact resolved versions;
+4. record the resolved set in a run artifact/log;
+5. use those exact values for that run.
 
-1. prints a development/test warning;
-2. resolves latest compatible versions from authoritative upstream release sources;
-3. validates architecture availability;
-4. records the exact resolved versions/checksums in a local resolution report;
-5. uses those exact values for that invocation;
-6. marks the install as `development-version-policy=latest-resolved` in status output.
+Do not spread `if use_latest` branches across installers, Compose templates and component setup scripts.
 
-This preserves the requested test behavior without sacrificing post-test reproducibility.
+Suggested interfaces:
+
+```text
+vwctl versions
+vwctl versions check
+vwctl install --use-latest
+```
+
+No background auto-updater is required.
 
 ---
 
-# 9. `vwctl` design
+# 8. Operator CLI
 
-One public administrative CLI should own the production workflow.
+V2 should expose one public production command: `vwctl`.
 
-## Core commands
+Initial command budget:
 
 ```text
-vwctl install [--use-latest]
+vwctl install
 vwctl start
 vwctl stop
 vwctl restart
 vwctl status
-vwctl health [--full]
-vwctl doctor
+vwctl doctor [--json]
 vwctl logs [SERVICE]
-
-vwctl config show
-vwctl config edit
-vwctl config validate
-
-vwctl secrets edit
-vwctl secrets rotate KEY
-vwctl secrets check
-
+vwctl config {show,validate,edit}
+vwctl secrets {edit,rotate,check}
 vwctl backup
-vwctl backup status
-vwctl restore [ARCHIVE]
+vwctl restore
+vwctl update {check,apply}
+vwctl versions
+```
 
+CrowdSec-specific troubleshooting can be nested only if required:
+
+```text
 vwctl crowdsec status
 vwctl crowdsec test
-vwctl edge status
-
-vwctl versions
-vwctl update --check
-vwctl update
-
-vwctl uninstall
 ```
 
-Do not expose internal helpers as stable CLI merely because they are executable files.
+Avoid exposing every internal helper as an operator command.
 
-## Exit code contract
-
-Keep it small:
-
-- `0` success/healthy;
-- `1` command failure/unhealthy;
-- `2` invalid usage/configuration;
-- `75` optional temporary contention if retained for scheduled jobs.
-
-Do not make junior admins memorize a broad taxonomy.
+Makefile targets, if retained, are developer conveniences such as `make test`, `make lint`, and `make compose-check`; Make is not an operator API.
 
 ---
 
-# 10. Installed release lifecycle
+# 9. Diagnostics as a first-class product surface
 
-## Installation
+`vwctl doctor` replaces much of the current health/dashboard troubleshooting surface.
 
-`install.sh` should be a short bootstrapper that:
-
-1. validates Ubuntu 24.04 and architecture;
-2. installs a minimal apt dependency set;
-3. installs the V2 application release under `/opt/vaultwarden-oci/<version>/`;
-4. points `/opt/vaultwarden-oci/current` at it atomically;
-5. installs `/usr/local/sbin/vwctl` as a stable entrypoint/symlink;
-6. creates `/etc/vaultwarden-oci` and state directories;
-7. creates initial config/secrets;
-8. renders/installs systemd units;
-9. validates configuration before first start.
-
-The Git checkout is not the production runtime.
-
-## Update
-
-`vwctl update` should:
-
-1. obtain/verify the target source release;
-2. install to a new immutable release directory;
-3. validate/render against current configuration;
-4. take a verified backup;
-5. switch `current` atomically;
-6. restart;
-7. run health checks;
-8. retain the previous application release briefly for code rollback.
-
-V2 does not need V1 data migration code, but future V2 schema migrations should be explicit, versioned, and narrowly scoped.
-
----
-
-# 11. systemd model
-
-Recommended units:
+It should be read-only by default and return stable check IDs plus a simple state:
 
 ```text
-vaultwarden-oci.service
-vaultwarden-oci-health.service
-vaultwarden-oci-health.timer
-vaultwarden-oci-backup.service
-vaultwarden-oci-backup.timer
-vaultwarden-oci-maintenance.service
-vaultwarden-oci-maintenance.timer
-vaultwarden-oci-edge-refresh.service   # only if necessary
-vaultwarden-oci-edge-refresh.timer     # only if necessary
+PASS
+WARN
+FAIL
+SKIP
 ```
 
-The main service should own the startup firewall gate and Compose lifecycle.
+Candidate checks:
 
-Scheduled units invoke `/usr/local/sbin/vwctl` and consume the same `/etc/vaultwarden-oci/config.env` authority as interactive administration.
+- supported Ubuntu version and architecture;
+- required binaries;
+- configuration validity;
+- age key and SOPS decryptability;
+- Docker daemon/Compose availability;
+- expected containers and health states;
+- local Vaultwarden `/alive`;
+- external HTTPS path through Cloudflare;
+- Caddy certificate/runtime status;
+- firewall ingress contract;
+- CrowdSec service and edge-bouncer status;
+- SMTP connectivity/authentication without sending unless explicitly requested;
+- backup age and last verified recovery point;
+- storage free space and expected mount identity;
+- systemd units/timers.
 
-No copy/sync step from repository scripts to an installed systemd tree should exist.
+`--json` should expose stable IDs and values so diagnostics can be tested without locking exact human prose.
 
----
-
-# 12. Backup/recovery architecture
-
-## Automatic backup
-
-A normal backup should contain everything needed to reconstruct application state **except** the private recovery identity that decrypts it.
-
-Suggested contents:
-
-- verified SQLite snapshot;
-- Vaultwarden attachments/sends and application state;
-- encrypted `secrets.yaml`;
-- non-secret `config.env`;
-- Caddy persistent state only if necessary for useful recovery;
-- manifest containing V2 schema, application version, component versions, timestamps, hashes, and state layout.
-
-Encrypt the archive to the operational recipient and preferably a separate offline recovery recipient.
-
-## Offline recovery kit
-
-Contains or documents the private material required to decrypt/rebuild:
-
-- Age recovery identity;
-- essential account/domain/provider identifiers as appropriate;
-- human-readable recovery instructions.
-
-It is exported explicitly and must be stored separately/offline.
-
-## Restore
-
-`vwctl restore` sequence:
-
-1. identify archive and decryption identity;
-2. verify archive metadata/hashes;
-3. verify compatible V2 backup schema;
-4. verify target disk capacity;
-5. stop application services;
-6. stage restored state;
-7. apply ownership/modes;
-8. atomically promote state where practical;
-9. optionally start;
-10. verify `/alive` and core health;
-11. report exact recovery status.
-
-No V1 archive formats need support.
+Do not initially combine `doctor` with automatic repair. A future `vwctl repair` can be introduced only for a small set of deterministic repairs after production evidence.
 
 ---
 
-# 13. Storage model
+# 10. Concurrency
 
-Default state root:
+V2 starts with one global mutating lock implemented in Python using `fcntl.flock()`.
 
-```text
-/var/lib/vaultwarden-oci
-```
+Mutating commands such as install/update/backup/restore/config replacement/secrets rotation take the lock. Read-only commands such as status/doctor/logs do not.
 
-Optional data volume:
+Requirements:
 
-- configured by a stable `/dev/disk/by-*` identifier;
-- mounted by normal systemd/fstab semantics;
-- one project sentinel identifies initialized state;
-- installer never formats a non-empty/recognized filesystem without explicit destructive authorization;
-- service has `RequiresMountsFor=` or equivalent protection so missing attached storage cannot cause writes to a boot-volume shadow directory.
+- non-blocking or bounded-wait behavior is explicit;
+- lock contention gets one defined exit code and clear owner/action message where safely available;
+- child commands do not inherit the lock descriptor;
+- lock metadata is diagnostic only, not authority.
 
-Cloud-provider device names must never be hard-coded.
+Do not implement operation-specific locks, a separate lock-holder process, process-state database or distributed locking in beta.
 
 ---
 
-# 14. Observability and `doctor`
+# 11. Core containers
 
-`vwctl doctor` is the primary diagnostic interface.
+The normal V2 Compose stack should start with only:
 
-It should produce a concise human summary and optional machine-readable JSON.
+1. Vaultwarden;
+2. Caddy.
 
-Checks:
+Retain valuable V1 hardening:
 
-- host release and architecture;
-- effective V2 version and version policy;
-- config validity;
-- encrypted secret file presence and decryptability;
-- Age key permissions;
-- state filesystem/mount identity;
-- free disk space;
-- Docker/Compose versions and daemon health;
-- Compose config validity;
-- container health;
-- public listener exposure;
-- Cloudflare CIDR cache freshness;
-- firewall rule presence;
-- DNS/domain reachability where network access is available;
-- CrowdSec daemon/bouncer health;
-- systemd service/timer state;
-- last backup time and verification status;
-- last maintenance state.
-
-Output should tell the operator what to do next, e.g.:
-
-```text
-DEGRADED: Cloudflare CIDR cache is 30h old.
-Fix: sudo vwctl edge refresh
-```
-
----
-
-# 15. Development and CI architecture
-
-## Static checks
-
-- ShellCheck for bootstrap shell;
-- Ruff or equivalent for Python formatting/linting;
-- pytest for structured application logic;
-- YAML validation;
-- Compose render/config validation.
-
-## Security contract tests
-
-Assert generated Compose has:
-
-- no Vaultwarden public port;
-- only expected Caddy public ports for selected mode;
+- explicit users;
+- `cap_drop: ALL` plus only necessary additions;
 - `no-new-privileges`;
-- expected capability drops/additions;
-- expected read-only settings;
-- no secret values embedded into environment output;
-- expected network membership.
+- read-only root filesystems where compatible;
+- tmpfs for transient writable paths;
+- bounded logs;
+- health checks;
+- reasonable memory/PID limits.
 
-## Architecture tests
+Do not duplicate the same resource limit through multiple Compose syntaxes unless both are proven active/necessary for the supported Docker Compose path.
 
-For amd64 and arm64:
+## Email
 
-- resolve/check every downloadable binary asset;
-- verify container image manifests contain target architecture;
-- test checksum mapping;
-- periodically perform a native or appropriate integration deployment on both architectures.
+Use Vaultwarden's direct authenticated SMTP support. Operational notifications use Python `smtplib` through the same relay.
 
-## Release tests
+No Postfix container or local queue tooling in V2 beta.
 
-A V2 release should require:
+## Networks
 
-1. unit/static suite;
-2. fresh Ubuntu 24.04 install test;
-3. start/health test;
-4. synthetic data backup;
-5. destructive restore into a fresh state root;
-6. post-restore health verification;
-7. uninstall non-data-destructive test.
+Avoid fixed RFC1918 subnets unless a technical requirement proves they are necessary.
 
----
+Use the fewest networks needed to preserve isolation:
 
-# 16. OCI A1 Flex reference profile
+- private backend path between Caddy and Vaultwarden;
+- explicit outbound capability where Vaultwarden/Caddy require it.
 
-OCI A1 Flex remains a useful documented reference because it is a low-cost ARM64 target, but V2 core code should not contain OCI APIs, device assumptions, metadata dependencies, or network-resource provisioning.
-
-Provide a documentation appendix/example covering:
-
-- Ubuntu 24.04 ARM64 image;
-- sensible A1 Flex OCPU/RAM sizing for a small team;
-- boot-volume sizing;
-- optional block volume using stable `/dev/disk/by-*` identity;
-- OCI NSG/security-list ingress for SSH/443;
-- Cloudflare proxy setup.
-
-Equivalent cloud-provider docs can be added later without changing the runtime.
+Do not make network names/subnets part of normal operator configuration.
 
 ---
 
-# 17. Explicit non-goals for V2
+# 12. Cloudflare ingress and host firewall
 
-V2 should not become:
+V2 beta should support **one production ingress model**: Cloudflare-proxied HTTPS with Caddy DNS-01.
 
-- Kubernetes deployment tooling;
-- multi-node/HA Vaultwarden;
-- a generic Linux distribution installer;
-- a generic firewall framework;
-- a generic secrets manager;
-- a generic backup product;
-- a cloud infrastructure provisioner;
-- a universal reverse-proxy framework;
-- a compatibility layer for V1 state/data formats;
-- an enterprise SIEM/monitoring platform.
+That means:
+
+- Caddy publishes TCP `443` only by default;
+- TCP `80` is not published for the Cloudflare DNS-01 golden path;
+- Cloudflare SSL mode is Full (Strict);
+- host/provider ingress is restricted to Cloudflare address ranges where enforceable;
+- origin cannot silently become generally reachable if Cloudflare CIDR refresh fails.
+
+Because Docker-published ports do not behave like ordinary UFW `INPUT` traffic, V2 must not pretend UFW alone protects a published Caddy port.
+
+For beta, explicitly support:
+
+- Docker Engine bridge networking;
+- Docker's iptables packet-filter backend;
+- one very small project-owned ingress chain in the Docker packet path;
+- validated Cloudflare IPv4/IPv6 sets;
+- last-known-good cache with bounded age;
+- fail-closed behavior when no safe policy can be established.
+
+Do not support an nftables alternative in the same beta implementation. Do not create a generic firewall abstraction.
+
+Provider firewall/security-group configuration remains an installation prerequisite and documentation concern, not a cloud API integration.
 
 ---
 
-# 18. Definition of architectural success
+# 13. CrowdSec
 
-V2 architecture is successful when a junior administrator can answer these questions from one page of documentation:
+Keep CrowdSec, but rely on upstream installation/integration where possible.
 
-- Where is configuration?
-- Where are encrypted secrets?
-- Where is the Age key?
-- Where is Vaultwarden data?
-- Where are backups?
-- What service is public?
-- How do I check health?
-- How do I see logs?
-- How do I update?
-- How do I restore?
-- What versions am I running?
+Intended model:
 
-The target is not the fewest lines of code. The target is the fewest **independent concepts** required to operate the system safely.
+- CrowdSec runs on the host;
+- acquisitions cover SSH and Caddy/Vaultwarden logs as appropriate;
+- host firewall bouncer is useful for host-visible attacks such as SSH;
+- Cloudflare Worker bouncer handles real proxied web-client enforcement at the edge.
+
+V2 project code should own only:
+
+- required project acquisition/profile config;
+- secure credential handoff;
+- selected bouncer configuration;
+- status/test diagnostics;
+- minimal lifecycle integration.
+
+Do not port the V1 CrowdSec installer wholesale before checking current supported upstream installation paths.
+
+---
+
+# 14. Backup and recovery
+
+V2 should expose one normal backup concept:
+
+```text
+vwctl backup
+```
+
+A backup is a complete encrypted V2 recovery point. Internally it should include a verified consistent SQLite snapshot and the persistent application/configuration material that is appropriate for recovery, excluding the operational private key.
+
+Separately provide an offline recovery kit that contains the information/operator identity needed to recover the encrypted state.
+
+Do not expose `db/full/emergency` as three permanent public products in V2 beta.
+
+## Backup requirements
+
+- consistent SQLite snapshot;
+- manifest with V2 format version and checksums;
+- encryption before publication/offsite transfer;
+- verification before success;
+- atomic publication;
+- simple retention;
+- optional rclone transfer after local verification;
+- no plaintext secret/key staging on persistent storage.
+
+## Restore requirements
+
+- V2 format only;
+- validate archive/manifest/decryption before live mutation;
+- validate free space and target storage before service stop;
+- take one optional/preconfigured safety snapshot if useful without reintroducing backup tiers;
+- stop the stack;
+- stage extracted state;
+- promote using a small, explicit transaction boundary;
+- restore permissions;
+- leave services stopped or start according to an explicit flag/prompt;
+- if started, require successful health before reporting success.
+
+No V1 format detection or compatibility adapters.
+
+---
+
+# 15. Storage
+
+Support two installation choices while keeping one runtime path:
+
+- boot volume;
+- dedicated mounted volume.
+
+The dedicated volume is mounted at `/var/lib/vaultwarden-oci`; do not relocate project state to a second configurable root.
+
+Installation may create a small ownership marker on a volume it initializes. It must fail closed before formatting/mounting a device that is not clearly authorized.
+
+No live V1 boot-to-block migration workflow in beta. A V2 operator who later wants to move state should use documented offline backup/restore onto a fresh target rather than a bespoke migration state machine.
+
+---
+
+# 16. systemd
+
+Keep systemd as the only scheduler/lifecycle manager.
+
+Target unit budget:
+
+- `vaultwarden-oci.service` — startup/lifecycle gate;
+- `vaultwarden-oci-health.timer` + service;
+- `vaultwarden-oci-backup.timer` + service;
+- `vaultwarden-oci-maintenance.timer` + service.
+
+A separate edge-refresh timer should exist only if Cloudflare CIDR refresh cannot safely be included in maintenance/health without weakening ingress freshness.
+
+Units execute `/opt/vaultwarden-oci/current/...` and consume the installed config directly. They never execute an arbitrary git checkout.
+
+No repository-to-`/opt` synchronization validator is required because releases are installed immutably.
+
+---
+
+# 17. Update/release model
+
+An update is an explicit operator action:
+
+```text
+vwctl update check
+vwctl update apply
+```
+
+Suggested safe flow:
+
+1. validate current health;
+2. create/verify recovery point according to policy;
+3. stage a new immutable application release;
+4. pull/build exact pinned container versions;
+5. switch `current` to the new release;
+6. restart;
+7. run `doctor`/health gate;
+8. roll back the application release symlink if application-code activation fails before state/schema changes.
+
+Avoid adding self-update agents or unattended container updates.
+
+---
+
+# 18. Test architecture
+
+The runtime architecture and test architecture must be designed together.
+
+V2 uses three validation layers only:
+
+1. Python unit tests for deterministic logic;
+2. small integration tests for subprocess/filesystem/Compose/security boundaries;
+3. disposable real-host acceptance for release candidates.
+
+No custom test inventory, source-text mirror suites or issue-specific permanent tests.
+
+See `V2-TEST-STRATEGY.md`.
+
+---
+
+# 19. Suggested source layout
+
+Do not create empty modules for future phases. Let modules appear as functionality is implemented.
+
+A likely mature layout is:
+
+```text
+src/vwctl/
+  __main__.py
+  cli.py
+  config.py
+  versions.py
+  runtime.py
+  security.py
+  recovery.py
+  doctor.py
+
+templates/
+  compose.yaml
+  Caddyfile
+  systemd/
+bootstrap.sh
+versions.toml
+tests/
+```
+
+This is a ceiling, not a requirement. A phase should not create a module until it owns real behavior.
+
+---
+
+# 20. Architecture acceptance test
+
+Before adding any V2 mechanism, ask:
+
+1. Does a junior admin need to understand this to recover the service?
+2. Does it protect a concrete security/data property?
+3. Can Ubuntu, Docker, systemd, SOPS/Age, Caddy, Cloudflare or CrowdSec already do it safely?
+4. Will implementing it create a second source of truth?
+5. How many permanent tests and docs will this require?
+6. Can a simpler design delete the need entirely?
+
+If the answer points toward more framework than product value, do not add it.
