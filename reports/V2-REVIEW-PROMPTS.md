@@ -26,12 +26,12 @@ Original Prompt:
 REVIEW MODE
 - Review only. Do not modify code, push commits, update the PR, or merge it.
 - Be skeptical but proportional. Do not invent work merely to produce findings.
-- Judge the PR against the original prompt, current `v2` contract, and the actual repository state—not against hypothetical enterprise requirements.
+- Judge the PR against the original prompt, current `v2` contract, and actual repository state—not hypothetical enterprise requirements.
 
 FIRST, GATHER EVIDENCE
-1. Read PR metadata, base/head refs, description, changed-file list, and the complete diff.
+1. Read PR metadata, base/head refs, description, changed-file list, and complete diff.
 2. Read existing review comments/threads and current CI/check status.
-3. Read root `AGENTS.md` and `reports/V2-CODEX-PROMPTS.md`; identify the phase/corrective contract that applies.
+3. Read root `AGENTS.md` and `reports/V2-CODEX-PROMPTS.md`; identify the applicable phase/corrective contract.
 4. Inspect surrounding base/head files when the diff alone is insufficient to understand ownership, security, or behavior.
 5. If the original prompt conflicts with the authoritative V2 contract, call that out explicitly instead of silently choosing one.
 
@@ -42,13 +42,17 @@ A. Completeness
 - Did it accidentally implement later-phase/non-goal work?
 
 B. Correctness and safety
-- Are failure paths correct and fail-closed where the contract requires it?
-- Are secrets kept out of ordinary config, argv, logs, exception text, and persistent temporary files?
+- Are failure paths correct and fail-closed where required?
+- Are secrets kept out of ordinary config, provider catalog, argv, logs, exception text, and persistent temporary files?
 - Are subprocess calls structured safely without shell interpolation where Python owns them?
 - Are file ownership/permissions, locking, atomic replacement/publication, and state transitions safe for the changed behavior?
 - For backup/restore: is recoverability real, verified before success, and protected against premature live mutation?
 - For rclone: is normal publication non-destructive (`copy`/`copyto` style), remote verification required before offsite success, and pruning separate?
-- For notifications: are supported built-in HTTPS providers handled explicitly, transient-only SMTP fallback correctly classified, TLS validation preserved, and no durable queue/provider framework introduced?
+- For notifications: are supported built-in HTTPS providers handled through the source-controlled `email-providers.toml` catalog rather than repeated hard-coded library branches where catalog data is sufficient?
+- Does the catalog include canonical `cyberpersons` / CyberPanel Email support, with `cyberpanel` only an alias to the same definition?
+- Are provider endpoints HTTPS, provider templates closed/validated, credentials excluded from the catalog, and arbitrary operator endpoint/auth/header/payload overrides rejected?
+- Are auth-bearing API requests protected from unsafe cross-host redirects?
+- Is transient-only SMTP fallback correctly classified, TLS validation preserved, and no durable queue/dynamic plugin framework introduced?
 - For Cloudflare/Docker ingress: does the supported iptables path really fail closed rather than relying on ordinary UFW INPUT assumptions?
 
 C. Fit for this product
@@ -56,12 +60,13 @@ C. Fit for this product
 - Is it understandable through `vwctl status`, `vwctl doctor`, and useful errors?
 - Is there unnecessary framework/plugin/provider/compatibility/generalization work?
 - Could the same behavior be owned by fewer cohesive files without making a giant mixed-responsibility file?
-- Did the PR introduce thin wrappers, one-function modules, duplicate config authorities, or speculative placeholders?
+- Did the PR introduce thin wrappers, one-function modules, duplicate config authorities, one source module per provider, or speculative placeholders?
 
 D. Tests and maintenance cost
 - Are tests focused on security, availability, recoverability, or operator truthfulness?
 - Are they at the smallest/highest-value layer?
 - Do tests assert observable behavior rather than private source strings/order or duplicated state machines?
+- For provider catalog changes, do focused tests cover catalog validation, rendering/auth shape, success/retry classification, redaction, and operator override restrictions without creating a generic provider conformance framework?
 - Is important behavior untested?
 - Conversely, did the PR add redundant/expensive tests that add little confidence?
 - Do not request a coverage quota, custom test runner, or broad matrix without a concrete risk.
@@ -69,13 +74,13 @@ D. Tests and maintenance cost
 E. Scope and V1 influence
 - Did the implementation copy V1 architecture when only a security property was needed?
 - Did it reintroduce V1 migration/archive compatibility, Postfix queue machinery, dashboard/TUI, multiple backup tiers, or other rejected V2 surfaces?
-- Did it preserve a V1 behavior only because it existed, rather than because the V2 prompt requires it?
+- Did it preserve a V1 behavior only because it existed, rather than because V2 requires it?
 
 F. Merge readiness
 - Is CI complete and relevant?
 - Are there unresolved review threads or known failures?
 - Is the PR small/cohesive enough to review confidently?
-- Is any missing validation acceptable to defer to release acceptance, or is it required before merge?
+- Is missing validation acceptable to defer to release acceptance, or required before merge?
 
 OUTPUT FORMAT
 Start with exactly one verdict:
@@ -118,22 +123,27 @@ REVIEW MODE
 
 GATHER EVIDENCE
 1. Read PR metadata, complete diff, changed files, review threads, and CI status.
-2. Read every changed report/instruction file completely, not just the patch hunk.
+2. Read every changed report/instruction file completely, not just patch hunks.
 3. Check root `AGENTS.md`/branch context if relevant.
 4. Search for stale references to deleted reports, old V1 requirements, superseded notification behavior, or conflicting precedence rules.
 
 REVIEW FOR
-- Internal consistency across prompts, architecture, audit, test strategy, and PR description.
+- Internal consistency across prompts, architecture, audit, test strategy, reviewer prompts, and PR description.
 - Standalone copy/paste usability of every Codex phase prompt.
 - Correct phase sequencing and prerequisites.
 - Greenfield boundary: no V1 migration/archive/runtime compatibility requirement.
 - Python 3.12 stdlib-first + minimal Bash.
 - Fewer cohesive files as a preference, not a numeric quota.
-- One `vwctl`, one TOML config authority, one `versions.toml`.
+- One `vwctl`, one operator-editable TOML config authority, one `versions.toml`.
 - SOPS + Age with operational + offline recovery identities.
 - rclone first-class, verified copy-style publication, separate prune.
-- Operational notifications: built-in documented V1 HTTPS providers (`mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`), operator-selected via config/credentials, direct authenticated SMTP transient fallback, no Postfix/custom queue/dynamic provider framework.
-- Future provider additions described as a small explicit developer template/checklist rather than runtime plugin loading.
+- Operational notifications: six explicit built-ins `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`; `cyberpanel` alias resolves to the same CyberPanel Email definition.
+- `email-providers.toml` is source-controlled immutable release metadata, not a second operator config authority and not a secret store.
+- Routine provider endpoint/auth/request/success/retry changes are catalog edits plus focused tests/docs rather than full library rewrites.
+- Catalog schema is closed to the needs of supported providers: HTTPS endpoints, closed auth modes, JSON/form request templates using a fixed canonical field set, small success rule, retry statuses, declared non-secret provider options.
+- Ordinary operator config cannot inject arbitrary endpoint/auth/header/payload values that could exfiltrate `email_api_token`.
+- No `eval`, Jinja, arbitrary scripting, cross-host auth redirects, dynamic provider loading, Python entry points, provider SDK, or generic HTTP workflow engine.
+- Direct authenticated SMTP fallback remains transient-only; no Postfix/custom durable queue.
 - Cloudflare-first/CrowdSec one-path beta edge.
 - One V2 recovery format.
 - Small risk-based test architecture; no V1-style source-coupled test burden.
@@ -167,13 +177,14 @@ REVIEW MODE
 - The expected change is intentionally narrow.
 
 CHECK
-1. Confirm the observable bug and the stable/public boundary affected.
+1. Confirm the observable bug and stable/public boundary affected.
 2. Confirm the PR changes the smallest correct owner and addresses the root cause.
 3. Check that the fix does not become an unrelated refactor/framework/compatibility expansion.
 4. Verify a regression test was added only if there was a real coverage gap and that it tests behavior, not private source layout.
 5. Check security/recovery/secret-handling implications of the specific fix.
-6. Verify current CI and any relevant focused validation.
-7. Flag new files unless there is a clear ownership/security reason they could not live in an existing cohesive owner.
+6. For email-provider fixes, ask first whether `email-providers.toml` is the correct owner. A routine provider settings change should not trigger a notification-library rewrite.
+7. Verify current CI and relevant focused validation.
+8. Flag new files unless there is a clear ownership/security reason they could not live in an existing cohesive owner.
 
 OUTPUT
 Verdict: `SAFE TO MERGE`, `NEEDS CHANGES`, or `NOT READY / INCOMPLETE`.
@@ -213,11 +224,14 @@ VERIFY END TO END
 - SOPS + Age operational/offline recovery model is usable and secret-safe.
 - Vaultwarden + Caddy hardening and Cloudflare/CrowdSec edge are coherent and fail closed where promised.
 - Recovery creates a verified encrypted V2 point, publishes with non-destructive rclone semantics, verifies remote state, downloads/stages safely, and restores only after preflight.
-- Operational HTTPS provider selection/credentials are usable; built-in providers are the documented V1 set; transient SMTP fallback is safe; no local durable queue exists.
+- Operational HTTPS selection supports the six built-ins including CyberPanel Email/CyberPersons; `cyberpanel` is an alias, not a duplicated definition.
+- `email-providers.toml` is safely maintainable: changing normal provider metadata does not require a library rewrite, but operators cannot use it/config to redirect secrets to arbitrary endpoints.
+- Provider catalog validation is strict and the release contains no dynamic plugin/HTTP-script mechanism.
+- Direct authenticated SMTP fallback is transient-only and no local durable queue exists.
 - systemd automation invokes installed immutable code/config.
 - Production versions are exact; `--use-latest` cannot silently create floating production state.
 - Obsolete V1 migration/dashboard/Postfix queue/test architecture is absent from the V2 product surface.
-- Documentation is enough for a junior admin without requiring source-code archaeology.
+- Documentation is enough for a junior admin and a maintainer updating provider settings without source-code archaeology.
 - Permanent tests are proportional; destructive/full-host checks are release acceptance rather than a giant per-PR framework.
 
 OUTPUT
