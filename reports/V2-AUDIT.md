@@ -42,9 +42,12 @@ The highest-value changes are now:
 
 ## Test footprint
 
-The tracked `tests/` tree is approximately **1.18 MB across 30 files**, including 25 physical `case-*.bash` files exposed as 32 logical cases by the custom runner. The root/lib/utility shell implementation plus Makefile is approximately **1.94 MB**. Source-byte counts are not engineering-effort measurements, but the test tree alone is therefore roughly **61% of the size of the first-party shell/Make implementation**.
+Using the tracked file sizes in the audited Git tree as a rough maintenance-footprint proxy:
 
-The effective validation footprint is larger because significant acceptance/validation code also lives outside `tests/`, including `utilities/noble-host-acceptance.sh`, `utilities/pre-production-drill.sh`, `utilities/smoke-test.sh`, and large workflow-side invariant checks.
+- the `tests/` tree is approximately **1.18 MB across 30 tracked test files**, including 25 physical `case-*.bash` files exposed as 32 logical cases by the custom runner;
+- the root/lib/utility shell implementation plus Makefile is approximately **1.94 MB**.
+
+Source-byte counts are **not** engineering-effort or logical-line measurements. They are included only as a rough corroborating signal: the tracked test tree is about **61% of the byte size of that first-party shell/Make implementation set**. The effective validation footprint is larger because significant acceptance/validation code also lives outside `tests/`, including `utilities/noble-host-acceptance.sh`, `utilities/pre-production-drill.sh`, `utilities/smoke-test.sh`, and large workflow-side invariant checks.
 
 The recent repository history also shows sustained test/CI iteration around host acceptance and exact structural validation. That is consistent with the reported experience that tests consume more than half of development effort.
 
@@ -173,7 +176,7 @@ Prefer standard-library-readable formats:
 - `versions.toml` for production pins;
 - SOPS-encrypted JSON for secret values and simple JSON/schema metadata if a separate schema is still justified.
 
-SOPS officially supports JSON input/output as well as YAML/dotenv/INI. This allows V2 to remove the runtime `yq`/PyYAML requirement entirely.
+SOPS supports JSON input/output as well as YAML/dotenv/INI. This allows V2 to remove the runtime `yq`/PyYAML requirement entirely.
 
 Reference: https://github.com/getsops/sops
 
@@ -181,7 +184,7 @@ Reference: https://github.com/getsops/sops
 
 V1's operation guard contains extensive Bash machinery to keep lock descriptors out of descendants and prove process/FD identity.
 
-Python can hold a single `fcntl.flock()` in the controlling process and launch children with descriptors closed (`subprocess` closes non-standard descriptors by default). This removes the need for a separate Bash lock-holder process and much of the `/proc` bookkeeping.
+Python can hold a single `fcntl.flock()` in the controlling process and launch children with descriptors closed. This removes the need for a separate Bash lock-holder process and much of the `/proc` bookkeeping.
 
 ### V2 decision
 
@@ -205,7 +208,7 @@ No migration framework, no old layout reader, no old backup reader, no compatibi
 
 ## Finding V2-MAIL-01 — direct SMTP should be the default
 
-Vaultwarden natively supports authenticated SMTP with `SMTP_HOST`, `SMTP_SECURITY`, credentials and standard submission ports. That makes a mandatory Postfix sidecar unnecessary for the normal small-team case.
+Vaultwarden supports authenticated SMTP with `SMTP_HOST`, security mode, credentials and standard submission ports. That makes a mandatory Postfix sidecar unnecessary for the normal small-team case.
 
 Reference: https://github.com/dani-garcia/vaultwarden/blob/main/.env.template
 
@@ -215,7 +218,7 @@ Use direct authenticated SMTP for Vaultwarden. Use Python `smtplib` for operatio
 
 ## Finding V2-EDGE-03 — reduce custom CrowdSec provisioning
 
-Current official CrowdSec documentation recommends the self-hosted installer path for the Cloudflare Worker bouncer for most users.
+Current CrowdSec documentation recommends the self-hosted installer path for the Cloudflare Worker bouncer for most users.
 
 Reference: https://docs.crowdsec.net/u/bouncers/cloudflare/
 
@@ -225,7 +228,7 @@ Before porting V1's large CrowdSec setup script, evaluate the current supported 
 
 ## Finding V2-NET-04 — correct the firewall simplification boundary
 
-Docker's own documentation states that published container traffic can bypass ordinary UFW `INPUT`/`OUTPUT` filtering because Docker diverts traffic through its NAT/forwarding path.
+Docker's documentation states that published container traffic can bypass ordinary UFW `INPUT`/`OUTPUT` filtering because Docker diverts traffic through its NAT/forwarding path.
 
 Reference: https://docs.docker.com/engine/network/packet-filtering-firewalls/
 
