@@ -73,7 +73,9 @@ The canonical test runner also became a product of its own: logical/physical inv
 
 V1 devotes substantial logic to parsing, validating, synchronizing, and reconciling environment/config/install state.
 
-**V2 implication:** one installed non-secret TOML config, one source-controlled versions manifest, one structured SOPS-encrypted secrets document, one operational Age identity, volatile decrypted runtime secrets, and immutable installed application releases. Avoid chains of repository `.env` -> installed env -> generated env and duplicate operator-editable authorities.
+**V2 implication:** one installed operator-editable non-secret TOML config, one source-controlled versions manifest, one structured SOPS-encrypted secrets document, one operational Age identity, volatile decrypted runtime secrets, immutable installed application releases, and only narrowly scoped source-controlled release metadata where it materially reduces code complexity. `email-providers.toml` is such release metadata; it is not a second operator config authority.
+
+Avoid chains of repository `.env` -> installed env -> generated env and duplicate operator-editable authorities.
 
 ## 5. Secret handling is worth keeping, but the surrounding framework is not
 
@@ -83,11 +85,11 @@ The V1 lesson is to keep the cryptographic responsibility external and shrink pr
 
 **V2 implication:** retain SOPS + Age, but do not rebuild a custom secrets manager, KMS abstraction, schema framework, or cryptography layer around it.
 
-## 6. Email: keep the useful V1 API integrations, remove the Postfix/queue product
+## 6. Email: keep useful API coverage, remove Postfix/queue complexity, move changing provider details out of code
 
 V1's Postfix sidecar brings mutable queue state, capabilities, inspection/mutation commands, health logic, retry/dead-letter concerns, tests, and documentation. That is disproportionate to the V2 beta requirement.
 
-However, the V1 HTTP API work itself is useful and already defines a small public provider surface. V1 `docs/EMAIL.md` documents these provider identifiers:
+The V1 HTTP API work itself is useful. V1 `docs/EMAIL.md` documents these public provider identifiers:
 
 - `mailersend`;
 - `sendgrid`;
@@ -95,18 +97,39 @@ However, the V1 HTTP API work itself is useful and already defines a small publi
 - `postmark`;
 - `resend`.
 
-V1 also already uses one common SOPS secret, `email_api_token`, with Mailgun-specific non-secret region/domain configuration. That is a simpler starting point than forcing V2 to select one vendor in advance.
+V1 `lib/email.sh` also contains a `cyberpersons` driver pointing at `https://platform.cyberpersons.com/email/v1/send`. It was not listed in the V1 public email docs or `.env.example`, so the earlier audit correctly treated it as undocumented rather than automatically supported.
 
-The V1 implementation contains an additional `cyberpersons` driver that is not listed in the public email documentation or `.env.example`. Treat it as undocumented/experimental rather than silently making it a V2-supported provider.
+That product decision has now changed explicitly for V2: **CyberPanel Email / CyberPersons is a supported V2 built-in.** Current official CyberPanel Email documentation verified on 2026-08-19 confirms the service and endpoint are active and documents:
 
-The actual V2 product has two mail use cases:
+- `POST https://platform.cyberpersons.com/email/v1/send`;
+- recommended Bearer API-key authentication;
+- API keys with `can_send` permission and optional domain/IP restrictions;
+- JSON `from`, `to`, `subject`, and `html` or `text` message fields;
+- HTTP `202` plus `success: true` on accepted send;
+- `429` rate-limit responses and `500`/`503` service failures as retry candidates;
+- `400` invalid-request and `403` domain/account/permission failures as configuration/permanent failures;
+- separate SMTP credentials at `mail.cyberpersons.com:587` with required STARTTLS.
+
+V2 should use canonical provider ID `cyberpersons` and accept `cyberpanel` as an alias to the same definition, not maintain two copies.
+
+The actual V2 product still has two mail use cases:
 
 - Vaultwarden application mail;
 - project operational notifications.
 
-**V2 implication:** Vaultwarden uses direct authenticated SMTP. Project operational notifications carry forward the documented V1 API-provider set as explicit built-ins; the operator selects a provider and supplies the API token/configuration. Direct authenticated SMTP is the bounded fallback for clearly transient API failures. Do not recreate Postfix/local queue machinery and do not turn the built-in provider list into a runtime plugin framework.
+**V2 implication:** Vaultwarden uses direct authenticated SMTP. Project operational notifications support six explicit built-ins: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, and `cyberpersons`/`cyberpanel` alias. The operator selects one and supplies the API token/configuration. Direct authenticated SMTP is the bounded fallback for clearly transient API failures. Do not recreate Postfix/local queue machinery.
 
-Future provider changes should follow a small developer checklist: explicit ID, endpoint/auth/request builder, success parsing when required, transient-failure mapping, focused tests, and docs. No dynamic loading/entry-point/provider-SDK architecture is needed.
+### Provider-maintenance lesson
+
+Hard-coding every provider endpoint/header/body/success/retry detail into Python would make routine upstream API changes unnecessarily expensive. At the same time, allowing arbitrary operator-defined endpoints/authentication would turn a convenience feature into a credential-exfiltration risk and a generic HTTP framework.
+
+**V2 implication:** put the six built-in definitions in one source-controlled, non-secret `email-providers.toml` shipped with the immutable release.
+
+The catalog should carry only the closed metadata the six supported providers actually need: HTTPS endpoint/template, closed auth mode, JSON/form request template using a fixed canonical message-field set, success rule, provider-documented retry statuses, aliases, and declared non-secret provider options. Secrets remain in SOPS; ordinary operator config can select a built-in and allowed options but cannot replace endpoint/auth/payload definitions arbitrarily.
+
+Routine endpoint/auth/request/success/retry changes should therefore be **catalog edits plus focused tests/docs**, not a notification-library rewrite. Python changes are justified only when a provider introduces a genuinely new transport capability that the closed catalog cannot represent safely.
+
+This static catalog is not a dynamic provider registry: no `eval`, arbitrary template language, entry-point discovery, dynamic imports, provider SDK, or arbitrary user-supplied provider code.
 
 ## 7. rclone is useful delegation, not overengineering
 
@@ -158,27 +181,28 @@ Scattered version checks and "latest" branches increase drift and make productio
 
 V1 documentation is thorough, but it must explain many scripts, Make targets, backup tiers, migration paths, Postfix queue behavior, dashboard flows, synchronization rules, and compatibility surfaces.
 
-**V2 implication:** shrink the supported product first. Keep a small operator/developer documentation set and use `vwctl --help` plus stable doctor JSON/check IDs as executable references instead of maintaining giant generated/reference documents.
+**V2 implication:** shrink the supported product first. Keep a small operator/developer documentation set and use `vwctl --help` plus stable doctor JSON/check IDs as executable references instead of maintaining giant generated/reference documents. Developer docs should explain how to safely maintain the provider catalog so ordinary upstream email API changes do not require library surgery.
 
 ## 15. File proliferation is a symptom worth watching
 
 V1 complexity is not only line count; it is also the number of public scripts, helpers, wrappers, config fragments, tests, and duplicated ownership boundaries an operator/maintainer must understand.
 
-**V2 implication:** prefer fewer cohesive first-party files when natural. Do not create one-function modules or wrapper scripts for architectural neatness. This is not a file-count quota: clear responsibility, security isolation, and readability are more important than an artificially low number.
+**V2 implication:** prefer fewer cohesive first-party files when natural. Do not create one-function modules or wrapper scripts for architectural neatness. A single provider catalog is preferable to one module/file per email provider. This is not a file-count quota: clear responsibility, security isolation, and readability are more important than an artificially low number.
 
 ## Highest-risk ways to recreate V1 complexity
 
 1. treating V1 implementation shape as a compatibility requirement;
-2. turning a small explicit built-in provider list into a generic plugin/provider architecture;
-3. letting agents add frameworks/queues for hypothetical future flexibility;
-4. coupling tests to private source structure again;
-5. multiplying config/state authorities;
-6. using destructive remote synchronization as ordinary backup publication;
-7. hiding notification configuration/security failures behind unconditional SMTP fallback;
-8. supporting several ingress/firewall modes before the golden path is stable;
-9. keeping V1 migration/archive compatibility despite the greenfield decision;
-10. adding a new file/module/script for every small behavior instead of preserving cohesive ownership;
-11. allowing supporting reports or `AGENTS.md` to become competing sources of truth.
+2. turning the static built-in email catalog into arbitrary runtime plugins or a general HTTP engine;
+3. hard-coding routine provider metadata back into many Python functions so every endpoint/settings change becomes a library rewrite;
+4. letting agents add frameworks/queues for hypothetical future flexibility;
+5. coupling tests to private source structure again;
+6. multiplying operator-editable config/state authorities;
+7. using destructive remote synchronization as ordinary backup publication;
+8. hiding notification configuration/security failures behind unconditional SMTP fallback;
+9. supporting several ingress/firewall modes before the golden path is stable;
+10. keeping V1 migration/archive compatibility despite the greenfield decision;
+11. adding a new file/module/script for every small behavior instead of preserving cohesive ownership;
+12. allowing supporting reports or `AGENTS.md` to become competing sources of truth.
 
 ## Recommendation
 
