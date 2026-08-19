@@ -1,6 +1,6 @@
 # VaultWarden-OCI V2 Greenfield Audit
 
-Date: 2026-08-18
+Date: 2026-08-19
 Audit snapshot: `main` at `16dc4c82a57234f8de8b54aa709a8ef32831f4e6`
 Status: historical/evidence report for the V2 redesign.
 
@@ -83,16 +83,30 @@ The V1 lesson is to keep the cryptographic responsibility external and shrink pr
 
 **V2 implication:** retain SOPS + Age, but do not rebuild a custom secrets manager, KMS abstraction, schema framework, or cryptography layer around it.
 
-## 6. Postfix/queue machinery is disproportionate for the beta requirement
+## 6. Email: keep the useful V1 API integrations, remove the Postfix/queue product
 
-V1's Postfix sidecar brings mutable queue state, capabilities, inspection/mutation commands, health logic, retry/dead-letter concerns, tests, and documentation.
+V1's Postfix sidecar brings mutable queue state, capabilities, inspection/mutation commands, health logic, retry/dead-letter concerns, tests, and documentation. That is disproportionate to the V2 beta requirement.
 
-The actual product has two distinct mail use cases:
+However, the V1 HTTP API work itself is useful and already defines a small public provider surface. V1 `docs/EMAIL.md` documents these provider identifiers:
+
+- `mailersend`;
+- `sendgrid`;
+- `mailgun`;
+- `postmark`;
+- `resend`.
+
+V1 also already uses one common SOPS secret, `email_api_token`, with Mailgun-specific non-secret region/domain configuration. That is a simpler starting point than forcing V2 to select one vendor in advance.
+
+The V1 implementation contains an additional `cyberpersons` driver that is not listed in the public email documentation or `.env.example`. Treat it as undocumented/experimental rather than silently making it a V2-supported provider.
+
+The actual V2 product has two mail use cases:
 
 - Vaultwarden application mail;
 - project operational notifications.
 
-**V2 implication:** Vaultwarden uses direct authenticated SMTP. Project notifications use one concrete HTTPS email API as primary and authenticated SMTP as bounded transient-failure fallback. Do not recreate a local durable queue unless production evidence later justifies a separate architecture decision.
+**V2 implication:** Vaultwarden uses direct authenticated SMTP. Project operational notifications carry forward the documented V1 API-provider set as explicit built-ins; the operator selects a provider and supplies the API token/configuration. Direct authenticated SMTP is the bounded fallback for clearly transient API failures. Do not recreate Postfix/local queue machinery and do not turn the built-in provider list into a runtime plugin framework.
+
+Future provider changes should follow a small developer checklist: explicit ID, endpoint/auth/request builder, success parsing when required, transient-failure mapping, focused tests, and docs. No dynamic loading/entry-point/provider-SDK architecture is needed.
 
 ## 7. rclone is useful delegation, not overengineering
 
@@ -155,18 +169,19 @@ V1 complexity is not only line count; it is also the number of public scripts, h
 ## Highest-risk ways to recreate V1 complexity
 
 1. treating V1 implementation shape as a compatibility requirement;
-2. letting agents add frameworks/providers/queues for hypothetical future flexibility;
-3. coupling tests to private source structure again;
-4. multiplying config/state authorities;
-5. using destructive remote synchronization as ordinary backup publication;
-6. hiding notification configuration/security failures behind unconditional SMTP fallback;
-7. supporting several ingress/firewall modes before the golden path is stable;
-8. keeping V1 migration/archive compatibility despite the greenfield decision;
-9. adding a new file/module/script for every small behavior instead of preserving cohesive ownership;
-10. allowing supporting reports or `AGENTS.md` to become competing sources of truth.
+2. turning a small explicit built-in provider list into a generic plugin/provider architecture;
+3. letting agents add frameworks/queues for hypothetical future flexibility;
+4. coupling tests to private source structure again;
+5. multiplying config/state authorities;
+6. using destructive remote synchronization as ordinary backup publication;
+7. hiding notification configuration/security failures behind unconditional SMTP fallback;
+8. supporting several ingress/firewall modes before the golden path is stable;
+9. keeping V1 migration/archive compatibility despite the greenfield decision;
+10. adding a new file/module/script for every small behavior instead of preserving cohesive ownership;
+11. allowing supporting reports or `AGENTS.md` to become competing sources of truth.
 
 ## Recommendation
 
-Merge the design reports into `v2`, then run **Prompt 0 only**. Review its concise `AGENTS.md`, product boundary, and ADRs before Phase 1 runtime work begins.
+Merge the design reports into `v2`, then run **Prompt 0 only**. Review its concise `AGENTS.md`, product boundary, and durable decisions before Phase 1 runtime work begins.
 
 The audit has served its purpose if later agents preserve V1's important security/recovery properties without importing the machinery that made those properties expensive to evolve.
