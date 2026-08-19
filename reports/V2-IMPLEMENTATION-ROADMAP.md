@@ -1,494 +1,447 @@
 # VaultWarden-OCI V2 Implementation Roadmap
 
 Date: 2026-08-18
+Revision: post-rescan roadmap with explicit scope controls for Codex/agent work.
 
-## Purpose
+## Implementation rule
 
-This roadmap converts the V2 audit into an implementation sequence suitable for a small team. It assumes a greenfield V2: no V1 project-state migration, no user/data carryover, and no requirement to preserve V1 command or internal API compatibility.
+V2 should be built as a sequence of small, reviewable PRs against a dedicated long-lived `v2` branch. V1 `main` remains reference material while V2 is being built.
 
-The priority is to reduce concepts before writing replacement code.
+Each phase has an explicit **definition of done** and **non-goals**. A coding agent must not implement later phases because doing so appears convenient.
+
+The most important process change from V1 is this:
+
+> Do not make every discovered edge case permanent code and permanent test machinery. Record out-of-scope findings and decide them deliberately in the next phase.
 
 ---
 
-# 1. Keep / simplify / replace / remove
+# Phase 0 — freeze the V2 contract before code
 
-## Keep
+## Goal
 
-These V1 ideas should survive V2 substantially intact at the policy level:
+Create the V2 product/agent contract so Codex is not instructed to preserve V1 architecture.
 
-- Ubuntu 24.04 LTS supported-host contract;
-- amd64 and arm64 as tested architectures;
-- cloud-provider-neutral runtime;
-- Cloudflare-first DNS/proxy/WAF path;
-- CrowdSec with edge-aware enforcement;
-- Caddy as the TLS/reverse-proxy endpoint;
-- SOPS + Age for persistent encrypted secrets;
-- decoded secrets only in volatile runtime storage;
-- root-operated production administration;
-- least-privilege container configuration;
-- verified encrypted backups;
-- restore verification before destructive mutation;
-- stable mounted-volume protection;
-- fail-closed behavior for ambiguous security/storage state;
-- SHA-pinned GitHub Actions and checksum verification;
-- explicit `--use-latest` development/testing support.
+## Deliverables
+
+- create long-lived `v2` branch from the agreed starting point;
+- replace/update `AGENTS.md` for V2 development;
+- create a concise V2 product boundary;
+- create ADRs for:
+  - Python-first hybrid language boundary;
+  - one config authority;
+  - Cloudflare-only beta ingress + Docker iptables packet path;
+  - direct SMTP/no Postfix for beta;
+  - one V2 recovery format/no V1 compatibility;
+  - test simplicity budget;
+- establish a tiny developer tool configuration for `pytest`/`ruff` if accepted.
+
+## Definition of done
+
+A coding agent reading only the V2 branch instructions cannot reasonably conclude that it should port the V1 Makefile, dashboard, migration engine, Postfix queue, three backup tiers, custom test runner or operation-guard architecture.
+
+## Non-goals
+
+- no runtime code;
+- no Compose stack;
+- no installer;
+- no feature porting;
+- no mass deletion of V1 files on `main`.
+
+---
+
+# Phase 1 — minimal `vwctl` foundation
+
+## Goal
+
+Build the smallest Python application skeleton that proves the language/config/test model.
+
+## Deliverables
+
+- `python3 -m vwctl` / installed `vwctl` entrypoint;
+- `vwctl --version` and `vwctl --help`;
+- `config.toml` parser/validator using `tomllib`;
+- `versions.toml` parser/validator;
+- architecture resolver for `amd64` and `arm64`;
+- small normalized subprocess helper;
+- one global mutation lock using `fcntl.flock`;
+- initial read-only `vwctl doctor` with host/platform/config checks;
+- minimal test setup.
+
+## Required tests
+
+Only tests for:
+
+- valid/invalid TOML configuration;
+- valid/invalid versions manifest;
+- amd64/arm64 mapping and unsupported architecture failure;
+- lock contention;
+- command error normalization;
+- stable `doctor --json` result shape for the implemented checks.
+
+## Definition of done
+
+All functionality runs without Docker or root mutation. The test suite is small enough to understand in one reading.
+
+## Non-goals
+
+- no installation mutation;
+- no Docker Compose generation;
+- no SOPS/Age;
+- no Cloudflare/CrowdSec;
+- no backup/restore;
+- no systemd;
+- no update command;
+- no generic command/plugin registry.
+
+---
+
+# Phase 2 — installer and immutable release layout
+
+## Goal
+
+Install V2 predictably onto a clean Ubuntu 24.04 host without building application behavior into the bootstrap script.
+
+## Deliverables
+
+- minimal `bootstrap.sh` or equivalent root entrypoint;
+- host validation for Ubuntu 24.04 and amd64/arm64;
+- installation under `/opt/vaultwarden-oci/releases/<version>`;
+- `/opt/vaultwarden-oci/current` symlink;
+- `/etc/vaultwarden-oci` and `/var/lib/vaultwarden-oci` creation with explicit ownership/modes;
+- initial config installation/edit workflow;
+- safe dedicated-volume initialization only if it fits cleanly in this phase;
+- installed `vwctl` executes from the immutable release.
+
+## Required tests
+
+- path/render logic as Python tests;
+- installer dry-run/plan output on fixtures;
+- one disposable Ubuntu host smoke install, preferably manual/on-demand rather than a permanent complex mock harness.
+
+## Definition of done
+
+A clean host can install the V2 CLI/config layout and remove/reinstall it without repository-to-runtime synchronization machinery.
+
+## Non-goals
+
+- no V1 migration;
+- no running Vaultwarden yet;
+- no live disk migration;
+- no systemd timers;
+- no recovery formats;
+- no alternate distro support.
+
+---
+
+# Phase 3 — core runtime: Vaultwarden + Caddy + secrets
+
+## Goal
+
+Bring up the minimal application securely.
+
+## Deliverables
+
+- production Compose template with Vaultwarden + Caddy only;
+- Cloudflare DNS-01 Caddy build/config inputs;
+- SOPS/Age initialization;
+- SOPS-encrypted JSON secrets;
+- transient decrypted secret files under `/run/vaultwarden-oci/secrets`;
+- `vwctl start|stop|restart|status|logs`;
+- direct Vaultwarden SMTP configuration;
+- `doctor` checks for Compose, containers, `/alive`, SOPS decryptability and file permissions.
+
+## Required tests
+
+- Compose render/config validation;
+- secret materialization permission and cleanup behavior;
+- proof that secret values do not appear in generated ordinary config/log output;
+- subprocess failure mapping;
+- status/doctor behavior with mocked command outputs at process boundaries;
+- one disposable-host/application smoke test.
+
+## Definition of done
+
+A fresh V2 host can securely start Vaultwarden behind Caddy, with direct SMTP configuration and no Postfix sidecar.
+
+## Non-goals
+
+- no CrowdSec automation yet;
+- no host ingress chain yet beyond what is necessary for isolated development validation;
+- no backup/restore;
+- no dashboard;
+- no push-provider abstraction;
+- no email queue tooling.
+
+---
+
+# Phase 4 — Cloudflare ingress + CrowdSec security
+
+## Goal
+
+Make the Cloudflare-first production boundary safe and diagnosable.
+
+## Deliverables
+
+- Cloudflare CIDR fetch/parse/validate/cache;
+- one supported Docker iptables ingress-chain implementation;
+- allow only Cloudflare ranges to published Caddy 443;
+- fail-closed behavior when safe ingress cannot be established;
+- provider-firewall prerequisite documented but not automated;
+- CrowdSec host installation/integration using current upstream-supported mechanisms where practical;
+- project-specific acquisitions/profiles only;
+- Cloudflare Worker bouncer integration using the chosen supported upstream path;
+- `vwctl crowdsec status/test` only if `doctor` alone is insufficient;
+- `doctor` verifies firewall and CrowdSec/edge state.
+
+## Required tests
+
+- Cloudflare CIDR parser and cache-expiry behavior;
+- generated iptables rules from deterministic fixtures;
+- fail-closed command behavior on fetch/validation failure;
+- no tests of iptables' own semantics beyond the project's generated contract;
+- focused CrowdSec config rendering/diagnostic tests;
+- disposable-host ingress acceptance.
+
+## Definition of done
+
+The normal production origin is not generally reachable on 443 and the diagnostic command can explain whether Cloudflare/CrowdSec enforcement is healthy.
+
+## Non-goals
+
+- no nftables backend;
+- no generic firewall abstraction;
+- no direct/non-Cloudflare production mode;
+- no Cloudflare API framework;
+- no bespoke replacement for the upstream CrowdSec installer.
+
+---
+
+# Phase 5 — one backup and restore model
+
+## Goal
+
+Implement a simple, verified V2 recovery contract.
+
+## Deliverables
+
+- `vwctl backup`;
+- verified SQLite snapshot;
+- one V2 manifest format;
+- encrypted complete recovery artifact that excludes the live operational private key;
+- optional rclone offsite transfer;
+- simple retention by verified recovery point;
+- offline recovery-kit export;
+- `vwctl restore` for V2-format backups only;
+- preflight before service stop;
+- staged extraction/promotion;
+- permission restoration;
+- explicit start policy and post-start health gate.
+
+## Required tests
+
+Focus on invariants that can lose data:
+
+- backup snapshot failure prevents publication;
+- manifest/checksum/decryption failure prevents restore mutation;
+- archive traversal/unsafe member rejection;
+- insufficient target space/layout fails before service stop;
+- promotion failure is non-zero and leaves clear recovery state;
+- restored permissions are correct;
+- successful restore followed by health is reported truthfully;
+- retention does not delete the newest valid recovery point before a replacement is verified.
+
+Use real temporary files/SQLite where cheap. Mock only external process/network boundaries.
+
+## Definition of done
+
+A disposable host can create a recovery point and restore it onto fresh V2 state using the offline recovery material.
+
+## Non-goals
+
+- no V1 backup formats;
+- no `db/full/emergency` public modes;
+- no live volume migration;
+- no generic transaction framework;
+- no backup database/catalog.
+
+---
+
+# Phase 6 — systemd automation and notifications
+
+## Goal
+
+Make the appliance set-and-forget without recreating V1's automation surface.
+
+## Deliverables
+
+- lifecycle/startup systemd service;
+- backup timer/service;
+- health/doctor timer/service;
+- maintenance timer/service;
+- optional edge-refresh timer only if technically required;
+- failure/routine notification through direct SMTP using Python `smtplib`;
+- `vwctl status` shows timers and last outcomes.
+
+## Required tests
+
+- deterministic unit rendering and command arguments;
+- `systemd-analyze verify` where available;
+- notification message construction and SMTP error handling without duplicating SMTP protocol tests;
+- on disposable Ubuntu, install/enable/run timers and confirm expected commands/exit status.
+
+## Definition of done
+
+A junior admin can understand scheduled responsibilities from `systemctl list-timers` and `vwctl status`, without installed-copy synchronization logic.
+
+## Non-goals
+
+- no second scheduler;
+- no incident database;
+- no complex alert-recovery state machine;
+- no Postfix queue;
+- no dashboard.
+
+---
+
+# Phase 7 — update/version workflow
+
+## Goal
+
+Make production updates reproducible while retaining the user's `--use-latest` development path.
+
+## Deliverables
+
+- `vwctl versions`;
+- `vwctl update check`;
+- explicit `vwctl update apply` using production pins;
+- `--use-latest` resolution for development/testing only;
+- exact resolved-version record for latest-mode runs;
+- immutable new release staging and activation;
+- basic rollback of application release activation when appropriate;
+- amd64/arm64 asset/image validation.
+
+## Required tests
+
+- pinned resolution;
+- latest resolver using mocked HTTP responses;
+- arm64/amd64 asset mapping;
+- no unsupported architecture fallback;
+- update plan without mutation;
+- activation/rollback path using temporary release directories;
+- Compose manifest/platform checks where practical.
+
+## Definition of done
+
+Production never accidentally floats to `latest`, while developers can intentionally test current upstream releases and know exactly what was resolved.
+
+## Non-goals
+
+- no auto-update daemon;
+- no unattended production upgrade;
+- no generic package manager;
+- no support for arbitrary architectures.
+
+---
+
+# Phase 8 — documentation, release acceptance and beta hardening
+
+## Goal
+
+Finish the V2 beta by proving the golden path and deleting provisional complexity.
+
+## Deliverables
+
+- minimal operator documentation set;
+- one clean-host install guide;
+- operations/doctor guide;
+- security model;
+- recovery guide;
+- development/maintainer guide;
+- disposable real-host acceptance on Ubuntu 24.04 amd64 and arm64 where infrastructure permits;
+- beta checklist for install -> configure -> secure edge -> backup -> restore -> update -> uninstall/reinstall;
+- remove dead helpers, temporary flags and test scaffolding found during phases 1-7.
+
+## Definition of done
+
+A junior admin can deploy and recover without reading implementation code, and a maintainer can understand the entire test suite without reverse-engineering a custom runner.
+
+## Non-goals
+
+- no feature expansion during hardening;
+- no dashboard/TUI;
+- no extra compatibility aliases;
+- no new advanced modes before beta feedback.
+
+---
+
+# Keep / simplify / replace / remove matrix
+
+## Keep the property
+
+- Ubuntu 24.04-only production support;
+- amd64/arm64 explicit mapping;
+- Cloudflare-first origin protection;
+- Caddy;
+- CrowdSec;
+- SOPS/Age;
+- root-operated production mutation;
+- encrypted verified recovery;
+- fail-closed storage/restore behavior;
+- systemd automation;
+- pinned/checksummed supply chain;
+- explicit `--use-latest` testing override.
 
 ## Simplify
 
-- configuration authority: three locations -> one installed config file;
-- command surface: Make targets + root scripts + utilities -> `vwctl`;
-- systemd automation: many jobs -> a small core set;
-- backup model: three operator tiers -> routine recovery backup + offline recovery kit;
-- CrowdSec provisioning: procedural setup surface -> declarative edge module;
-- health: multiple overlapping entrypoints -> `health` + `doctor`;
-- documentation: broad implementation-oriented library -> five operator docs + development doc;
-- version handling: scattered constants -> central versions manifest/resolver.
+- container networks;
+- firewall ownership;
+- systemd units;
+- backup concept;
+- config options;
+- secret schema;
+- health/diagnostics;
+- update flow;
+- documentation;
+- CI.
 
 ## Replace
 
-- large structured Bash subsystems -> tested Python modules where structured data/state is involved;
-- checkout-driven runtime -> installed immutable application release;
-- environment files parsed by shell execution -> non-executable validated configuration parser;
-- bespoke installed-script synchronization -> stable installed `vwctl` release;
-- scattered version/latest decisions -> one version resolver;
-- normal admin Makefile -> developer-only Makefile/tasks.
+- broad Bash application logic -> focused Python standard-library modules;
+- Make/operator scripts -> `vwctl`;
+- `.env`/install.env/installed-env chain -> one TOML config;
+- yq + embedded PyYAML schema validation -> TOML/JSON + Python stdlib;
+- Bash lock-holder/process identity system -> one Python `flock` lock;
+- Postfix sidecar -> direct SMTP + Python notifications;
+- three backup tiers -> one normal recovery format + offline recovery kit;
+- huge health/dashboard surfaces -> `status` + `doctor`;
+- custom Bash test runner -> pytest + direct integration tests.
 
-## Remove unless a demonstrated requirement appears
+## Remove from beta
 
-- all V1 migration/import compatibility;
-- V1 volume-migration compatibility workflows;
-- mandatory Postfix sidecar and queue-management subsystem;
-- multiple firewall backend support;
-- duplicate config/runtime authorities;
-- public implementation helper scripts;
-- generated giant command-reference as a primary operator document;
-- legacy aliases whose only purpose is V1 CLI compatibility;
-- backup modes that differ mainly because of historical recovery design rather than a V2 user need.
-
----
-
-# 2. Phase 0 — Freeze V2 product contract
-
-Before implementation, write a one-page ADR/product boundary and do not reopen these decisions casually.
-
-Required decisions:
-
-1. V2 fresh install only; V1 migration is out of scope.
-2. Ubuntu 24.04 LTS only for V2.x unless deliberately expanded later.
-3. amd64 and arm64 are the release-gated CPU targets.
-4. Cloudflare mode is the default production path.
-5. Direct/non-proxied mode is advanced and explicit.
-6. Caddy is the supported reverse proxy.
-7. CrowdSec remains part of the supported security profile.
-8. SOPS/Age remains the secrets mechanism.
-9. `--use-latest` remains development/test-only.
-10. One installed CLI is the public admin interface.
-11. One persistent non-secret config authority.
-12. Postfix is removed from the mandatory architecture unless evidence requires it.
-13. V2 does not provision cloud infrastructure.
-
-**Exit criterion:** no replacement code is written until this boundary is accepted.
+- migration pipeline;
+- V1 state/archive compatibility;
+- dashboard;
+- email queue administration;
+- generated command-reference document;
+- multiple firewall backends;
+- direct/non-Cloudflare production modes;
+- custom test inventories and source-shape regression suites.
 
 ---
 
-# 3. Phase 1 — Skeleton and state contract
-
-Build the smallest installable application before implementing Cloudflare/CrowdSec/backup sophistication.
-
-Deliverables:
-
-```text
-install.sh
-src/vwctl/
-config/config.env.example
-config/compose.yaml
-config/systemd/
-versions.yaml
-docs/INSTALL.md
-docs/DEVELOPMENT.md
-```
-
-Implement:
-
-- host OS validation;
-- architecture detection;
-- state path creation;
-- `/etc/vaultwarden-oci/config.env` parser/validator;
-- installed release under `/opt/vaultwarden-oci/<version>`;
-- `/opt/vaultwarden-oci/current` atomic pointer;
-- `vwctl --version`;
-- `vwctl config validate`;
-- `vwctl versions`.
-
-Do not implement migration code.
-
-**Tests:** Ubuntu version parsing, amd64/arm64 mapping, config parser validation, installed path ownership/modes.
-
----
-
-# 4. Phase 2 — Minimal Vaultwarden + Caddy runtime
-
-Implement only the core application path.
-
-Deliverables:
-
-- Vaultwarden service;
-- Caddy service;
-- runtime secret directory creation;
-- systemd main service;
-- `vwctl start|stop|restart|status|logs`;
-- health checks.
-
-Default networking:
-
-- Vaultwarden has no published host port;
-- Caddy is the only public application service;
-- default Cloudflare profile publishes 443 only;
-- local Caddy health endpoint remains loopback-only;
-- application/root filesystem restrictions asserted by tests.
-
-**Exit criterion:** fresh Ubuntu 24.04 host can install, start, restart, and report health without CrowdSec or backup automation enabled yet.
-
----
-
-# 5. Phase 3 — Secrets
-
-Implement SOPS/Age cleanly before external credentials proliferate.
-
-Deliverables:
-
-- operational Age key generation/install;
-- encrypted `secrets.yaml`;
-- small profile-aware secret schema;
-- `vwctl secrets edit`;
-- `vwctl secrets rotate KEY`;
-- `vwctl secrets check`;
-- transient `/run/vaultwarden-oci/secrets` materialization;
-- secret cleanup on failure/stop where appropriate.
-
-Security tests:
-
-- no plaintext secret in config output;
-- no plaintext secret in normal logs;
-- strict key/file modes;
-- runtime secret directory is volatile/private;
-- failed decrypt prevents start;
-- backup payload excludes decoded runtime secrets.
-
----
-
-# 6. Phase 4 — Cloudflare edge and firewall
-
-Implement the default production boundary as one cohesive feature rather than independent setup scripts.
-
-Deliverables:
-
-- Cloudflare DNS token integration for Caddy DNS-01;
-- validated Cloudflare CIDR fetch/cache;
-- one supported Docker/Ubuntu firewall contract;
-- public Caddy start gated on valid ingress policy;
-- `vwctl edge status`;
-- `vwctl edge refresh`;
-- `doctor` checks for CIDR age/firewall/listener mismatch.
-
-Security tests:
-
-- empty/invalid CIDR response cannot replace last-known-good policy;
-- stale cache beyond limit causes safe degraded/failure behavior;
-- Caddy cannot remain publicly exposed if the required ingress gate cannot be established;
-- direct mode cannot be entered accidentally by missing Cloudflare configuration.
-
----
-
-# 7. Phase 5 — CrowdSec
-
-Add CrowdSec after the edge/network model is stable.
-
-Deliverables:
-
-- upstream-supported CrowdSec host installation;
-- minimal project acquisition/parsers/profile config;
-- Cloudflare Worker/KV bouncer configuration for proxied-client enforcement;
-- host firewall bouncer only where its signals are meaningful;
-- `vwctl crowdsec status`;
-- `vwctl crowdsec test`;
-- `doctor` integration.
-
-Avoid exposing Worker/KV internals as routine admin commands.
-
-**Exit criterion:** a synthetic decision can be traced from detection to expected edge enforcement without manual file editing.
-
----
-
-# 8. Phase 6 — Email
-
-Start with direct SMTP.
-
-Deliverables:
-
-- Vaultwarden authenticated SMTP configuration;
-- operational notification sender using the same configured relay;
-- `vwctl mail test` or equivalent diagnostic folded into `doctor`;
-- TLS/auth validation.
-
-Do not add Postfix unless testing or production experience proves direct SMTP is insufficient.
-
-If Postfix becomes necessary, introduce it as a separately reviewed optional profile with its own explicit complexity/security justification.
-
----
-
-# 9. Phase 7 — Backup and recovery
-
-Implement one normal recovery artifact plus offline key custody.
-
-Deliverables:
-
-- consistent SQLite snapshot;
-- application state archive;
-- manifest with hashes/schema/version metadata;
-- Age encryption;
-- local retention;
-- optional rclone remote copy;
-- `vwctl backup` and `vwctl backup status`;
-- offline recovery-kit export;
-- `vwctl restore`;
-- post-restore permission and health verification.
-
-Critical tests:
-
-- corrupt archive rejected before service stop;
-- insufficient disk rejected before destructive boundary;
-- failed backup never displaces last known good recovery point;
-- decoded secrets excluded;
-- restore into empty state root reproduces synthetic data;
-- missing wrong Age identity fails safely;
-- services remain stopped when requested;
-- post-start failed health returns failure rather than success language.
-
-No V1 archive support.
-
----
-
-# 10. Phase 8 — Automation and maintenance
-
-Only after the manual operations work reliably should they be scheduled.
-
-Recommended timers:
-
-- health;
-- backup;
-- routine maintenance;
-- edge CIDR refresh only if it cannot be safely included in maintenance.
-
-Deliverables:
-
-- hardened systemd units;
-- randomized delay where appropriate;
-- consistent exit handling;
-- notification on real failure;
-- contention behavior if a global operation lock is retained.
-
-Prefer one simple lock around mutually exclusive destructive/mutating operations. Do not recreate a complex operation-management framework unless testing proves it is needed.
-
----
-
-# 11. Phase 9 — `doctor` and operator UX
-
-Treat `doctor` as a release feature, not polish.
-
-`vwctl doctor` should be the first command support asks a junior admin to run.
-
-It should verify and summarize:
-
-- host/CPU support;
-- effective installed release;
-- production vs latest-resolved version policy;
-- config and secrets;
-- Docker/Compose;
-- storage/mount;
-- containers;
-- listeners;
-- Cloudflare/firewall;
-- CrowdSec;
-- SMTP;
-- timers;
-- disk capacity;
-- backup freshness.
-
-Every failed/degraded check should include one suggested remediation command or documentation pointer.
-
-Support JSON output for issue reports and automated checking, but redact sensitive fields.
-
----
-
-# 12. Phase 10 — Update lifecycle
-
-Do not implement `update` as `git pull && rerun setup`.
-
-Deliverables:
-
-- `vwctl update --check`;
-- verified release acquisition;
-- exact version resolution from `versions.yaml`;
-- pre-update backup;
-- install into new immutable release directory;
-- config compatibility validation;
-- atomic `current` switch;
-- restart and health gate;
-- code-release rollback pointer when startup fails before a data schema commit.
-
-`--use-latest` may be accepted only on explicitly development/test update paths and must record exact resolved versions.
-
----
-
-# 13. Documentation rewrite plan
-
-Write docs alongside the feature, not after the implementation.
-
-## V2 operator docs
-
-### `README.md`
-
-Only:
-
-- purpose;
-- supported boundary;
-- architecture diagram;
-- prerequisite summary;
-- install link;
-- everyday commands;
-- support/security warning.
-
-### `docs/INSTALL.md`
-
-One golden Cloudflare path first. Advanced direct mode later.
-
-### `docs/OPERATIONS.md`
-
-- status/doctor;
-- start/restart;
-- logs;
-- users/invitation-related admin boundaries where project-relevant;
-- config/secrets edits;
-- updates;
-- timers;
-- routine troubleshooting.
-
-### `docs/SECURITY.md`
-
-- threat/trust model;
-- Cloudflare origin boundary;
-- CrowdSec role;
-- secrets/key custody;
-- root/Docker privilege model;
-- backup trust boundary;
-- supply-chain policy.
-
-### `docs/RECOVERY.md`
-
-- backup meaning;
-- recovery-key custody;
-- restore;
-- replacement host;
-- periodic restore drill.
-
-### `docs/DEVELOPMENT.md`
-
-- development setup;
-- architecture source tree;
-- tests;
-- version pin updates;
-- `--use-latest`;
-- release process.
-
-Remove V1-specific migration, volume migration, installed-script split-brain, and historical backup-tier explanations from V2 documentation.
-
----
-
-# 14. CI/release gates
-
-Every PR:
-
-- lint/static checks;
-- unit tests;
-- config/schema tests;
-- Compose generation validation;
-- security-policy assertions;
-- docs links/CLI drift checks;
-- amd64 and arm64 resolver/asset tests.
-
-Scheduled/release CI:
-
-- current Ubuntu 24.04 fresh-host integration;
-- container multi-architecture manifest validation;
-- backup/restore integration;
-- CrowdSec/edge integration where credentials/test environment permit;
-- latest-upstream compatibility probe using `--use-latest` without modifying production pins.
-
-This scheduled latest probe is an ideal use of the retained `--use-latest` contract: detect upstream incompatibility without silently advancing production.
-
----
-
-# 15. Suggested pull-request sequence for implementation
-
-Keep V2 PRs intentionally small.
-
-1. `v2: define product boundary and ADRs`
-2. `v2: add vwctl skeleton and config parser`
-3. `v2: centralize version resolver and architecture assets`
-4. `v2: install immutable runtime and systemd service`
-5. `v2: add minimal Vaultwarden/Caddy compose`
-6. `v2: add SOPS/Age secret materialization`
-7. `v2: add Cloudflare ingress/firewall gate`
-8. `v2: add CrowdSec edge enforcement`
-9. `v2: add direct SMTP notifications`
-10. `v2: add backup/restore`
-11. `v2: add maintenance timers`
-12. `v2: add doctor and support bundle`
-13. `v2: add verified update lifecycle`
-14. `v2: finalize docs and release gates`
-
-Avoid a single PR that rewrites the entire repository; that would make security review harder even though the release itself is greenfield.
-
----
-
-# 16. Definition of done for V2.0
-
-V2.0 is ready when:
-
-- a clean Ubuntu 24.04 amd64 host passes install/start/health;
-- a clean Ubuntu 24.04 arm64 host passes the same release gate;
-- OCI A1 Flex is demonstrated as a reference deployment without OCI-specific runtime code;
-- a non-OCI Ubuntu host passes the same deployment flow;
-- Cloudflare default mode exposes only the intended origin surface;
-- CrowdSec decision enforcement is demonstrably effective at the edge;
-- all persistent secrets are encrypted and runtime plaintext is volatile;
-- routine SMTP works without a mandatory local MTA;
-- backup to local/offsite storage succeeds and verifies;
-- a fresh-host restore from the V2 backup + offline recovery identity is tested;
-- `doctor` provides useful remediation from deliberately broken states;
-- normal production uses exact versions;
-- `--use-latest` is visibly development/test-only and records exact resolved versions;
-- upgrade/update performs a pre-update backup and health-gated release switch;
-- uninstall leaves data intact by default;
-- operator documentation contains one obvious golden path;
-- normal junior-admin operations require `vwctl`, not knowledge of internal scripts.
-
----
-
-# 17. Highest-value first cuts
-
-If the team wants the biggest maintainability wins early, make these cuts before porting anything else:
-
-1. **Delete V1 migration as a V2 requirement.**
-2. **Remove repository `.env` as runtime state.**
-3. **Remove `/opt` script-copy synchronization in favor of immutable releases.**
-4. **Replace Make/utility public interfaces with `vwctl`.**
-5. **Centralize every production version pin.**
-6. **Challenge/remove mandatory Postfix.**
-7. **Reduce backup concepts.**
-8. **Choose one firewall contract.**
-9. **Do not port large V1 tests until the corresponding V2 behavior exists.**
-10. **Write the golden-path docs first enough that a junior admin can validate the architecture before implementation grows.**
-
-Those decisions will prevent V2 from becoming V1 with renamed directories.
+# Scope-control rules for every implementation PR
+
+Every PR/prompt should state all of the following:
+
+1. **Files/areas allowed to change.**
+2. **Observable behavior to implement.**
+3. **Tests required and nothing broader.**
+4. **Explicit non-goals.**
+5. **No V1 compatibility unless named.**
+6. **No framework/abstraction for hypothetical future work.**
+7. **Do not create empty modules for later phases.**
+8. **Do not implement later-phase TODOs.**
+9. **If a requested design conflicts with a security boundary, stop and document the conflict rather than silently widening scope.**
+10. **Finish by reporting exact tests run and unresolved decisions.**
+
+The copy/paste-ready prompts are in `V2-CODEX-PROMPTS.md`.
