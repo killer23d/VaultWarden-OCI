@@ -81,15 +81,13 @@ Avoid chains of repository `.env` -> installed env -> generated env and duplicat
 
 SOPS + Age remains a strong fit for the V2 goals: structured encrypted secrets, offline recovery, cloud neutrality, and no always-on secrets service.
 
-The V1 lesson is to keep the cryptographic responsibility external and shrink project orchestration.
-
 **V2 implication:** retain SOPS + Age, but do not rebuild a custom secrets manager, KMS abstraction, schema framework, or cryptography layer around it.
 
-## 6. Email: keep useful API coverage, remove Postfix/queue complexity, move changing provider details out of code
+## 6. Email: keep useful API coverage, remove Postfix/queue complexity, and move changing provider metadata out of code
 
 V1's Postfix sidecar brings mutable queue state, capabilities, inspection/mutation commands, health logic, retry/dead-letter concerns, tests, and documentation. That is disproportionate to the V2 beta requirement.
 
-The V1 HTTP API work itself is useful. V1 `docs/EMAIL.md` documents these public provider identifiers:
+V1's HTTP API work is useful. V1 `docs/EMAIL.md` documents:
 
 - `mailersend`;
 - `sendgrid`;
@@ -97,53 +95,63 @@ The V1 HTTP API work itself is useful. V1 `docs/EMAIL.md` documents these public
 - `postmark`;
 - `resend`.
 
-V1 `lib/email.sh` also contains a `cyberpersons` driver pointing at `https://platform.cyberpersons.com/email/v1/send`. It was not listed in the V1 public email docs or `.env.example`, so the earlier audit correctly treated it as undocumented rather than automatically supported.
+V1 `lib/email.sh` additionally contains a `cyberpersons` driver. CyberPanel Email / CyberPersons is now an **explicitly approved V2 built-in**, with `cyberpanel` accepted only as an alias to the same definition.
 
-That product decision has now changed explicitly for V2: **CyberPanel Email / CyberPersons is a supported V2 built-in.** Current official CyberPanel Email documentation verified on 2026-08-19 confirms the service and endpoint are active and documents:
+Current official CyberPanel Email documentation verified on 2026-08-19 supports the current baseline:
 
 - `POST https://platform.cyberpersons.com/email/v1/send`;
 - recommended Bearer API-key authentication;
-- API keys with `can_send` permission and optional domain/IP restrictions;
-- JSON `from`, `to`, `subject`, and `html` or `text` message fields;
-- HTTP `202` plus `success: true` on accepted send;
-- `429` rate-limit responses and `500`/`503` service failures as retry candidates;
-- `400` invalid-request and `403` domain/account/permission failures as configuration/permanent failures;
+- `can_send` permission with optional domain/IP restrictions;
+- request fields including `from`, `to`, `subject`, and `html` or `text`;
+- HTTP `202` plus `success: true` for an accepted send;
+- HTTP `429 rate_limit_exceeded`, whose response includes a `retry_after` field;
+- HTTP `503 service_unavailable`, documented as a temporary infrastructure condition;
+- HTTP `500 send_failed`, whose troubleshooting causes include recipient rejection, invalid recipients, and blocklisted domains;
 - separate SMTP credentials at `mail.cyberpersons.com:587` with required STARTTLS.
 
-V2 uses canonical provider ID `cyberpersons` and accepts `cyberpanel` as an alias to the same definition, not as a second provider implementation.
+The earlier report wording that grouped CyberPersons `500` with clearly transient failures was too broad. **V2 must not classify CyberPersons HTTP 500 as transient by status alone.** It remains visible and does not trigger SMTP fallback merely because it is a 500. CyberPersons `429` and `503` are the currently documented retryable/transient statuses for the V2 baseline; implementation must re-verify current provider documentation before coding.
 
-The actual V2 product still has two mail use cases:
+The current docs say 429 includes `retry_after` but the reviewed material does not define enough delay semantics to require parsing it. A fixed small bounded retry schedule is acceptable. A future implementation may consume a provider body delay only through a narrowly bounded catalog capability when official docs define the field and units clearly.
+
+The V2 product has two mail use cases:
 
 - Vaultwarden application mail;
 - project operational notifications.
 
-**V2 implication:** Vaultwarden uses direct authenticated SMTP. Project operational notifications support six explicit built-ins: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, and `cyberpersons` (`cyberpanel` alias). The operator selects one and supplies the API token/configuration. Direct authenticated SMTP is the bounded fallback for clearly transient API failures. Do not recreate Postfix/local queue machinery.
+**V2 implication:** Vaultwarden uses direct authenticated SMTP. Project notifications support six explicit built-ins through one static source-controlled `email-providers.toml`; the operator selects a provider and supplies credentials through SOPS. Direct authenticated SMTP is the fallback only for failures clearly classified as transient after bounded retry. Do not recreate Postfix/local queue machinery.
 
 ### Provider-maintenance lesson
 
-Hard-coding every provider endpoint/header/body/success/retry detail into Python would make routine upstream API changes unnecessarily expensive. At the same time, allowing arbitrary operator-defined endpoints/authentication would turn a convenience feature into a credential-exfiltration risk and a generic HTTP framework.
+Hard-coding provider endpoint/header/body/success/retry details into separate Python drivers makes routine upstream changes unnecessarily expensive. Allowing arbitrary operator-defined endpoints/authentication creates the opposite problem: a credential-exfiltration surface and a generic HTTP engine.
 
-**V2 implication:** put the six built-in definitions in one source-controlled, non-secret `email-providers.toml` shipped with the immutable release.
+**V2 implication:** keep one closed source-controlled provider catalog shipped with the immutable release.
 
-The catalog should carry only the closed metadata the six supported providers actually need: HTTPS endpoint/template, closed auth mode, JSON/form request template using a fixed canonical message-field set, success rule, provider-documented retry statuses, aliases, and declared non-secret provider options. Secrets remain in SOPS; ordinary operator config can select a built-in and allowed options but cannot replace endpoint/auth/payload definitions arbitrarily.
+The canonical provider-template message context is exactly:
 
-Routine endpoint/auth/request/success/retry changes should therefore be **catalog edits plus focused tests/docs**, not a notification-library rewrite. Python changes are justified only when a provider introduces a genuinely new transport capability that the closed catalog cannot represent safely.
+```text
+from_email
+from_name
+from_header
+to_email
+subject
+text
+```
 
-This static catalog is not a dynamic provider registry: no `eval`, arbitrary template language, entry-point discovery, dynamic imports, provider SDK, or arbitrary user-supplied provider code.
+Provider templates map those values to the provider's external field names. Supporting/reviewer documents must not invent alternate canonical names.
+
+Routine endpoint/auth/request/success/retry changes should be **catalog edits plus focused tests/docs**, not a notification-library rewrite. Python changes are justified only when a provider introduces a genuinely new transport capability that the closed catalog cannot safely represent.
+
+The static catalog is not a dynamic provider registry: no `eval`, arbitrary template language, entry-point discovery, dynamic imports, provider SDK, or arbitrary user-supplied provider code.
 
 ## 7. rclone is useful delegation, not overengineering
 
-Unlike several V1 subsystems, rclone reduces project complexity by providing provider-neutral remote storage behavior without project-owned object-storage APIs.
-
-The risk is destructive synchronization semantics, not rclone itself.
+rclone reduces project complexity by providing provider-neutral remote storage behavior without project-owned object-storage APIs. The risk is destructive synchronization semantics, not rclone itself.
 
 **V2 implication:** keep rclone first-class. Publish only verified recovery points using non-destructive copy/copyto-style semantics, verify remote presence before success, and make deletion/pruning a separate explicit operation.
 
 ## 8. Backup/recovery accumulated compatibility products instead of one recovery contract
 
 V1 supports multiple backup/recovery tiers and migration/compatibility behavior. That expands code, tests, docs, and operator choices.
-
-Because V2 is greenfield, V1 archive readers and migration machinery are unnecessary product surface.
 
 **V2 implication:** one encrypted V2 recovery-point format plus separate offline recovery material. Restore validates/decrypts/checks/stages before live mutation and health-gates any requested restart. No V1 reader or permanent db/full/emergency public tier model.
 
@@ -163,13 +171,15 @@ The dashboard and large health subsystem create another UI/API/testing surface.
 
 Docker-published ports are not governed like ordinary UFW `INPUT` traffic. A design that says "UFW protects 443" without accounting for Docker's packet path is misleading.
 
-**V2 implication:** support one explicit beta model: Cloudflare-proxied Caddy, Docker bridge networking, Docker iptables packet filtering, one small project-owned ingress path, validated Cloudflare IPv4/IPv6 ranges, bounded last-known-good state, and fail-closed behavior. Do not implement multiple firewall backends in beta.
+**V2 implication:** support one explicit beta model: Cloudflare-proxied Caddy, Docker bridge networking, Docker iptables packet filtering, one small project-owned Cloudflare-source ingress path, validated Cloudflare IPv4/IPv6 ranges, bounded last-known-good state, and fail-closed behavior. Do not implement multiple firewall backends in beta.
 
-## 12. CrowdSec should be integrated, not reimplemented
+## 12. CrowdSec should be integrated at one clear beta remediation scope
 
-CrowdSec remains useful, but the large V1 setup surface shows the cost of owning too much of an upstream product's installation lifecycle.
+V1 uses both a firewall bouncer and a Cloudflare Workers bouncer. That makes sense for different traffic classes, but carrying both into V2 by default would create more installation, credentials, rules, diagnostics, and review surface than the stated beta product requires.
 
-**V2 implication:** prefer current upstream installation/integration and own only project-specific acquisitions/config, credentials, selected bouncers, lifecycle hooks, and diagnostics.
+For a Cloudflare-fronted web application, the important web-client remediation point is Cloudflare; the local origin sees Cloudflare as the network peer. Separately, the project-owned iptables path must restrict Caddy origin ingress to validated Cloudflare ranges.
+
+**V2 implication:** keep the CrowdSec Security Engine and use one current supported CrowdSec Cloudflare remediation integration for proxied web decisions. Do **not** make a CrowdSec host firewall bouncer a beta requirement. SSH/other host-visible services remain protected by provider firewall/security-group and host firewall policy. If future requirements add CrowdSec remediation for host services, make that a separate architecture decision rather than silently overlapping the web path.
 
 ## 13. Version resolution should have one owner
 
@@ -181,31 +191,39 @@ Scattered version checks and "latest" branches increase drift and make productio
 
 V1 documentation is thorough, but it must explain many scripts, Make targets, backup tiers, migration paths, Postfix queue behavior, dashboard flows, synchronization rules, and compatibility surfaces.
 
-**V2 implication:** shrink the supported product first. Keep a small operator/developer documentation set and use `vwctl --help` plus stable doctor JSON/check IDs as executable references instead of maintaining giant generated/reference documents. Developer docs should explain how to safely maintain the provider catalog so ordinary upstream email API changes do not require library surgery.
+**V2 implication:** shrink the supported product first. Keep a small operator/developer documentation set and use `vwctl --help` plus stable doctor JSON/check IDs as executable references. Developer docs should explain safe provider-catalog maintenance so ordinary upstream changes do not require library surgery.
 
-## 15. File proliferation is a symptom worth watching
+## 15. Standalone phase prompts need explicit prerequisites
 
-V1 complexity is not only line count; it is also the number of public scripts, helpers, wrappers, config fragments, tests, and duplicated ownership boundaries an operator/maintainer must understand.
+Because each implementation prompt is pasted into a fresh agent session, the top-level instruction to run phases in order is not enough by itself.
 
-**V2 implication:** prefer fewer cohesive first-party files when natural. Do not create one-function modules or wrapper scripts for architectural neatness. A single provider catalog is preferable to one module/file per email provider. This is not a file-count quota: clear responsibility, security isolation, and readability are more important than an artificially low number.
+**V2 implication:** every Phase N prompt for N > 0 explicitly verifies Phase N-1 is present. If the immediate prerequisite is missing, the agent stops and reports it rather than implementing two phases at once. In particular, Phase 5 requires Phase 4, Phase 7 requires Phase 6, and Phase 8 requires Phase 7.
+
+## 16. File proliferation is a symptom worth watching
+
+V1 complexity is not only line count; it is also the number of public scripts, helpers, wrappers, config fragments, tests, and duplicated ownership boundaries a maintainer must understand.
+
+**V2 implication:** prefer fewer cohesive first-party files when natural. Do not create one-function modules or wrapper scripts for architectural neatness. A single provider catalog is preferable to one module/file per email provider. This is not a file-count quota.
 
 ## Highest-risk ways to recreate V1 complexity
 
 1. treating V1 implementation shape as a compatibility requirement;
 2. turning the static built-in email catalog into arbitrary runtime plugins or a general HTTP engine;
-3. hard-coding routine provider metadata back into many Python functions so every endpoint/settings change becomes a library rewrite;
-4. letting agents add frameworks/queues for hypothetical future flexibility;
-5. coupling tests to private source structure again;
-6. multiplying operator-editable config/state authorities;
-7. using destructive remote synchronization as ordinary backup publication;
-8. hiding notification configuration/security failures behind unconditional SMTP fallback;
+3. hard-coding routine provider metadata into many Python functions;
+4. treating ambiguous provider failures as transient and masking them with SMTP fallback;
+5. letting agents add frameworks/queues for hypothetical future flexibility;
+6. coupling tests to private source structure again;
+7. multiplying operator-editable config/state authorities;
+8. using destructive remote synchronization as ordinary backup publication;
 9. supporting several ingress/firewall modes before the golden path is stable;
-10. keeping V1 migration/archive compatibility despite the greenfield decision;
-11. adding a new file/module/script for every small behavior instead of preserving cohesive ownership;
-12. allowing supporting reports or `AGENTS.md` to become competing sources of truth.
+10. installing multiple CrowdSec remediation planes without a product requirement;
+11. keeping V1 migration/archive compatibility despite the greenfield decision;
+12. adding a new file/module/script for every small behavior;
+13. allowing supporting reports, review prompts, or `AGENTS.md` to become competing sources of truth;
+14. relying on unstated phase ordering instead of explicit standalone prerequisites.
 
 ## Recommendation
 
-Merge the design reports into `v2`, then run **Prompt 0 only**. Review its concise `AGENTS.md`, product boundary, and durable decisions before Phase 1 runtime work begins.
+Merge the design reports into `v2` only after their independent review finds the implementation and reviewer contracts internally consistent. Then run **Prompt 0 only**. Review its concise `AGENTS.md`, product boundary, and durable decisions before Phase 1 runtime work begins.
 
 The audit has served its purpose if later agents preserve V1's important security/recovery properties without importing the machinery that made those properties expensive to evolve.
