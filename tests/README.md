@@ -17,7 +17,7 @@ tests/
     └── data-protection/
 ```
 
-Permanent executable cases live under `tests/suites/**/case-*.bash`. `tests/run-tests.sh` is the only permanent inventory and exposes **26 logical records backed by 19 physical case files**. A record has four fields:
+Permanent executable cases live under `tests/suites/**/case-*.bash`. `tests/run-tests.sh` is the only permanent inventory and exposes **32 logical records backed by 25 physical case files**. A record has four fields:
 
 ```text
 logical-id|physical-path|mode|timeout-seconds
@@ -33,11 +33,11 @@ Nested cases source `tests/lib/test-root.bash`, which derives the repository roo
 
 | Suite | Logical cases | Responsibility |
 | --- | ---: | --- |
-| `foundation` | 8 | Architecture, runner/repository contracts, configuration, permissions, storage/setup, and systemd |
+| `foundation` | 11 | Architecture, runner/repository contracts, configuration, permissions, storage/setup, and systemd |
 | `security` | 4 | Security/privilege, secrets/sensitive cleanup, and email |
-| `operations` | 11 | Operation guards, health alerts/locking, lifecycle/startup, operator UI, CrowdSec, and uninstall |
+| `operations` | 14 | Operation guards, health alerts/locking, lifecycle/startup, operator UI, CrowdSec, host acceptance, and uninstall |
 | `data-protection` | 3 | Backup and independently timed restore core/tail recovery coverage |
-| `all` | 26 | All four suites in dependency order |
+| `all` | 32 | All four suites in dependency order |
 
 ```bash
 ./tests/run-tests.sh foundation

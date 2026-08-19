@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+# Contract checks for the destructive Noble host acceptance controller.
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib/test-root.bash"
+ROOT_REPO="$VW_TEST_REPO_ROOT"
+A="$ROOT_REPO/utilities/noble-host-acceptance.sh"
+RESTORE="$ROOT_REPO/utilities/restore-run.sh"
+T="$(mktemp -d)"
+trap 'rm -rf "$T"' EXIT
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+bash -n "$A" || fail "host acceptance controller has invalid Bash syntax"
+[[ -x "$A" ]] || fail "host acceptance controller is not executable"
+
+# shellcheck source=../../../utilities/noble-host-acceptance.sh
+source "$A"
+
+# run/resume are single-instance for the lifetime of each controller process.
+# The intentional reboot checkpoint exits the process and releases the flock;
+# resume must acquire it again.
+(
+  ACCEPTANCE_LOCK_FILE="$T/controller.lock"
+  exec 8>"$ACCEPTANCE_LOCK_FILE"
+  flock -n 8 || fail "could not hold controller lock fixture"
+  if ( exec 8>&-; acquire_controller_lock ) >/dev/null 2>&1; then
+    fail "controller accepted a concurrent run/resume lock acquisition"
+  fi
+  flock -u 8
+  exec 8>&-
+  acquire_controller_lock || fail "controller lock was not acquirable after release"
+)
+main_function="$(sed -n '/^main()/,/^}/p' "$A")"
+grep -Fq 'acquire_controller_lock' <<< "$main_function" \
+  || fail "main does not acquire the controller-wide lock"
+
+# A real reboot is proved by boot ID. --skip-reboot is explicitly
+# non-certifying rather than a shortcut to destructive phases.
+(
+  META_FILE="$T/reboot.meta"
+  printf 'REBOOT_FROM_BOOT_ID=boot-a\n' > "$META_FILE"
+  SKIP_REBOOT=false
+  boot_id(){ printf 'boot-b\n'; }
+  verify_reboot_transition || fail "changed boot ID was rejected"
+  boot_id(){ printf 'boot-a\n'; }
+  if ( verify_reboot_transition ) >/dev/null 2>&1; then fail "same boot ID was accepted as a reboot"; fi
+  SKIP_REBOOT=true
+  set +e
+  verify_reboot_transition >/dev/null 2>&1
+  reboot_rc=$?
+  set -e
+  [[ $reboot_rc -eq 2 ]] || fail "--skip-reboot did not return the non-certifying result"
+)
+grep -Fq 'save_phase incomplete' "$A" || fail "non-certifying terminal phase is missing"
+
+# Reuse the canonical uninstaller's authoritative environment precedence and
+# storage_ambiguous checks rather than a parallel environment-only detector.
+AT="$T/storage"
+mkdir -p "$AT/systemd"
+: > "$AT/fstab"
+printf 'PROJECT_STATE_DIR=%s\n' "$AT/state" > "$AT/installed.env"
+VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" \
+VW_UNINSTALL_FSTAB="$AT/fstab" \
+VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" \
+  validate_boot_volume
+[[ "$PROJECT_STATE_PATH" == "$AT/state" ]] || fail "canonical boot-volume state path was not resolved"
+printf 'PROJECT_STATE_DIR=%s\nDATA_VOLUME_DEVICE=/dev/mock\nDATA_VOLUME_MOUNT=%s\n' "$AT/state" "$AT/state" > "$AT/installed.env"
+if ( VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" VW_UNINSTALL_FSTAB="$AT/fstab" VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" validate_boot_volume ) >/dev/null 2>&1; then
+  fail "explicit attached volume was accepted"
+fi
+printf 'PROJECT_STATE_DIR=%s\n' "$AT/mounted-state" > "$AT/installed.env"
+mkdir -p "$AT/mounted-state" "$AT/bin"
+cat > "$AT/bin/mountpoint" <<EOF_MOUNTPOINT
+#!/usr/bin/env bash
+[[ "\${1:-}" == -q && "\${2:-}" == "$AT/mounted-state" ]]
+EOF_MOUNTPOINT
+chmod 0755 "$AT/bin/mountpoint"
+if ( PATH="$AT/bin:$PATH" VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" VW_UNINSTALL_FSTAB="$AT/fstab" VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" validate_boot_volume ) >/dev/null 2>&1; then
+  fail "ambiguously mounted project state was accepted"
+fi
+
+# Every dependency needed after --test-reset must live outside the canonical
+# resolved destructive scope. This covers custom boot-volume state, managed
+# installed trees, recovery handoffs, rclone credentials, E2E code, and the
+# controller checkpoint itself.
+(
+  AT="$T/destructive-survival"
+  mkdir -p \
+    "$AT/project-state" "$AT/managed-opt" "$AT/managed-etc" \
+    "$AT/managed-runtime" "$AT/managed-recovery" "$AT/systemd" "$AT/external"
+  : > "$AT/fstab"
+  printf 'PROJECT_STATE_DIR=%s\n' "$AT/project-state" > "$AT/installed.env"
+
+  external_kit="$AT/external/recovery-kit.txt"
+  external_rclone="$AT/external/rclone.conf"
+  external_e2e="$AT/external/e2e.sh"
+  : > "$external_kit"
+  : > "$external_rclone"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$external_e2e"
+  chmod 0755 "$external_e2e"
+
+  RECOVERY_KIT="$external_kit"
+  RCLONE_CONFIG_PATH="$external_rclone"
+  APPLICATION_E2E="$external_e2e"
+  STATE_ROOT="$AT/external/acceptance-state"
+
+  run_survival_check() {
+    VW_UNINSTALL_INSTALLED_ENV="$AT/installed.env" \
+    VW_UNINSTALL_FSTAB="$AT/fstab" \
+    VW_UNINSTALL_SYSTEMD_DIR="$AT/systemd" \
+    VW_UNINSTALL_OPT_DIR="$AT/managed-opt" \
+    VW_UNINSTALL_ETC_DIR="$AT/managed-etc" \
+    VW_UNINSTALL_RUNTIME_DIR="$AT/managed-runtime" \
+    VW_UNINSTALL_RECOVERY_DIR="$AT/managed-recovery" \
+      validate_destructive_survival
+  }
+
+  run_survival_check || fail "external destructive dependencies were rejected"
+
+  RECOVERY_KIT="$AT/project-state/recovery-kit.txt"
+  : > "$RECOVERY_KIT"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "pre-DR kit inside custom boot-volume PROJECT_STATE_DIR was accepted"
+  fi
+  RECOVERY_KIT="$external_kit"
+
+  RCLONE_CONFIG_PATH="$AT/project-state/rclone.conf"
+  : > "$RCLONE_CONFIG_PATH"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "rclone config inside custom boot-volume PROJECT_STATE_DIR was accepted"
+  fi
+  RCLONE_CONFIG_PATH="$external_rclone"
+
+  APPLICATION_E2E="$AT/managed-opt/e2e.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+  chmod 0755 "$APPLICATION_E2E"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "E2E hook inside canonical managed OPT_DIR was accepted"
+  fi
+  APPLICATION_E2E="$external_e2e"
+
+  STATE_ROOT="$AT/project-state/acceptance-state"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "VW_ACCEPTANCE_STATE_ROOT inside custom boot-volume PROJECT_STATE_DIR was accepted"
+  fi
+  STATE_ROOT="$AT/external/acceptance-state"
+
+  RECOVERY_KIT="$AT/managed-recovery/vaultwarden-recovery-kit-20260816T010203Z-abcdef.txt"
+  : > "$RECOVERY_KIT"
+  if ( run_survival_check ) >/dev/null 2>&1; then
+    fail "pre-DR kit inside canonical recovery-handoff directory was accepted"
+  fi
+)
+grep -Fq 'emit_scope tree "$PROJECT_STATE_DIR"' "$A" \
+  || fail "canonical destructive survival scope does not include PROJECT_STATE_DIR"
+grep -Fq 'for path in "$OPT_DIR" "$ETC_DIR" "$RUNTIME" "$RECOVERY_DIR"; do' "$A" \
+  || fail "canonical destructive survival scope does not include resolved managed trees"
+[[ "$(grep -Ec '^[[:space:]]+validate_destructive_survival$' "$A")" -ge 3 ]] \
+  || fail "destructive survival is not checked before state init and around the final pre-uninstall recovery gate"
+
+# Run/resume metadata binds exact code, host identity, rclone location,
+# DNS mutation scope, recovery inputs, and E2E code.
+(
+  AT="$T/binding"
+  mkdir -p "$AT"
+  RECOVERY_KIT="$AT/recovery-kit"
+  RCLONE_CONFIG_PATH="$AT/rclone.conf"
+  APPLICATION_E2E="$AT/e2e.sh"
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE=acceptance
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE_PATH=vaultwarden_acceptance
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  ALLOW_DNS_MUTATION=true
+  printf 'old recovery\n' > "$RECOVERY_KIT"
+  printf '[acceptance]\ntype = local\n' > "$RCLONE_CONFIG_PATH"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+  chmod 0755 "$APPLICATION_E2E"
+  META_FILE="$AT/metadata"
+  DESTRUCTIVE=false
+  # shellcheck disable=SC2034 # consumed by sourced acceptance metadata helpers
+  SKIP_REBOOT=false
+  current_sha(){ printf 'sha-a\n'; }
+  machine_id_hash(){ printf 'host-a\n'; }
+  boot_id(){ printf 'boot-a\n'; }
+  init_metadata
+  verify_metadata || fail "fresh checkpoint metadata was rejected"
+  printf '# drift\n' >> "$APPLICATION_E2E"
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "E2E hook content drift was accepted"; fi
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+  current_sha(){ printf 'sha-b\n'; }
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "Git SHA drift was accepted"; fi
+  current_sha(){ printf 'sha-a\n'; }
+  RCLONE_REMOTE=other
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "rclone remote drift was accepted"; fi
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE=acceptance
+  RCLONE_REMOTE_PATH=other-path
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "rclone path drift was accepted"; fi
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE_PATH=vaultwarden_acceptance
+  DNS_MUTATION_DOMAIN=other.example.com
+  if ( verify_metadata ) >/dev/null 2>&1; then fail "DNS mutation scope drift was accepted"; fi
+)
+
+# Destructive mode and DNS mutation both require explicit two-part consent.
+(
+  external_file(){ printf '%s\n' "$1"; }
+  validate_e2e_hook(){ :; }
+  RECOVERY_KIT="$T/recovery-kit"
+  RCLONE_CONFIG_PATH="$T/rclone.conf"
+  APPLICATION_E2E="$T/e2e.sh"
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE=acceptance
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  RCLONE_REMOTE_PATH=vaultwarden_acceptance
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  ALLOW_DNS_MUTATION=true
+  : > "$RECOVERY_KIT"; : > "$RCLONE_CONFIG_PATH"; : > "$APPLICATION_E2E"
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  DESTRUCTIVE=true
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  VW_NOBLE_TEST_DNS_MUTATION=YES
+  unset VW_NOBLE_TEST_DESTRUCTIVE || true
+  if ( validate_inputs ) >/dev/null 2>&1; then fail "destructive acceptance bypassed environment acknowledgement"; fi
+  VW_NOBLE_TEST_DESTRUCTIVE=YES validate_inputs >/dev/null || fail "double destructive consent was rejected"
+  unset VW_NOBLE_TEST_DNS_MUTATION
+  if ( VW_NOBLE_TEST_DESTRUCTIVE=YES validate_inputs ) >/dev/null 2>&1; then fail "DNS mutation bypassed environment acknowledgement"; fi
+)
+
+# The external DNS mutation gate requires both consent and an exact runtime
+# DOMAIN match, so a production hostname cannot be mutated accidentally by
+# merely running the foreground systemd-job phase.
+(
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  DNS_MUTATION_DOMAIN=vw-acceptance.example.com
+  # shellcheck disable=SC2034 # consumed by sourced acceptance helpers
+  ALLOW_DNS_MUTATION=true
+  runtime_config_value(){ printf 'vw-acceptance.example.com\n'; }
+  unset VW_NOBLE_TEST_DNS_MUTATION || true
+  if ( validate_dns_mutation_scope ) >/dev/null 2>&1; then fail "DNS mutation ran without environment consent"; fi
+  VW_NOBLE_TEST_DNS_MUTATION=YES validate_dns_mutation_scope >/dev/null \
+    || fail "matching dedicated DNS mutation scope was rejected"
+  runtime_config_value(){ printf 'vault.example.com\n'; }
+  if ( VW_NOBLE_TEST_DNS_MUTATION=YES validate_dns_mutation_scope ) >/dev/null 2>&1; then
+    fail "mismatched runtime DOMAIN was accepted for DNS mutation"
+  fi
+)
+
+# Root-executed E2E hooks may not be writable by group/other.
+(
+  APPLICATION_E2E="$T/e2e-trust.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$APPLICATION_E2E"
+  chmod 0755 "$APPLICATION_E2E"
+  real_stat="$(command -v stat)"
+  stat(){
+    case "$*" in
+      '-c %u:%g '*) printf '0:0\n' ;;
+      '-c %a '*) printf '775\n' ;;
+      *) "$real_stat" "$@" ;;
+    esac
+  }
+  if ( validate_e2e_hook ) >/dev/null 2>&1; then fail "group-writable root E2E hook was accepted"; fi
+)
+
+# Canonical uninstall success is not trusted blindly: the independently saved
+# project-state path and Compose runtime must also be absent before restore.
+(
+  AT="$T/residual"
+  mkdir -p "$AT/repo"
+  ROOT="$AT/repo"
+  STATE_PATH_FILE="$AT/original-state"
+  printf '%s\n' "$AT/state" > "$STATE_PATH_FILE"
+  docker(){ return 0; }
+  post_uninstall_check "$AT/no-etc" "$AT/no-run" "$ROOT" acceptance \
+    || fail "clean post-uninstall fixture was rejected"
+  mkdir -p "$AT/state"
+  if post_uninstall_check "$AT/no-etc" "$AT/no-run" "$ROOT" acceptance; then
+    fail "residual managed project state was accepted"
+  fi
+)
+
+# Rotated recovery custody is tied to the active operational Age recipient,
+# not merely to a different whole-file digest. Acceptance-owned private-key
+# staging is forced through the canonical volatile-workspace abstraction.
+(
+  AT="$T/age-binding"
+  mkdir -p "$AT/state"
+  # shellcheck disable=SC2034 # consumed by sourced recovery helpers
+  STATE_ROOT="$AT/state"
+  create_sensitive_workspace(){
+    local ws="$AT/volatile"
+    rm -rf -- "$ws"
+    mkdir -m 0700 "$ws"
+    printf '%s
+' "$ws"
+  }
+  remove_sensitive_workspace(){ rm -rf -- "$1"; }
+  age-keygen -o "$AT/old.key" >/dev/null 2>&1
+  age-keygen -o "$AT/new.key" >/dev/null 2>&1
+  age-keygen -o "$AT/other.key" >/dev/null 2>&1
+  cat "$AT/old.key" > "$AT/old.kit"; printf 'END OF RECOVERY KIT
+' >> "$AT/old.kit"
+  cat "$AT/new.key" > "$AT/new.kit"; printf 'END OF RECOVERY KIT
+' >> "$AT/new.kit"
+  cat "$AT/other.key" > "$AT/other.kit"; printf 'END OF RECOVERY KIT
+' >> "$AT/other.kit"
+  RECOVERY_KIT="$AT/old.kit"
+  validate_recovery_recipient_binding "$AT/new.kit" "$AT/new.key" \
+    || fail "matching rotated recovery identity was rejected"
+  if ( validate_recovery_recipient_binding "$AT/other.kit" "$AT/new.key" ) >/dev/null 2>&1; then
+    fail "unrelated valid recovery identity was accepted"
+  fi
+  cp "$AT/old.kit" "$AT/modified-old.kit"
+  printf '# digest-only change
+' >> "$AT/modified-old.kit"
+  if ( validate_recovery_recipient_binding "$AT/modified-old.kit" "$AT/old.key" ) >/dev/null 2>&1; then
+    fail "modified copy of the old Age identity was accepted as rotated custody"
+  fi
+
+  {
+    cat "$AT/new.key"
+    printf '[Backup integrity HMAC key (auto-generated)]
+fixture-integrity-key
+END OF RECOVERY KIT
+'
+  } > "$AT/full.kit"
+  recovery_kit_has_integrity_hmac "$AT/full.kit" \
+    || fail "full recovery kit HMAC field was rejected"
+  if recovery_kit_has_integrity_hmac "$AT/new.kit"; then
+    fail "Age-only handoff was accepted as a full recovery kit"
+  fi
+)
+
+# Recovery-point proof delegates to canonical read-only restore inspect, so the
+# historical recovery-kit HMAC and Age identity are both validated.
+inspect_function="$(sed -n '/^verify_bound_backup_with_recovery_kit()/,/^}/p' "$A")"
+grep -Fq 'restore.sh inspect --remote --file "$BOUND_BACKUP_FILE"' <<< "$inspect_function" \
+  || fail "recovery proof does not use canonical inspect on the exact file"
+grep -Fq -- '--from-recovery-kit "$kit"' <<< "$inspect_function" \
+  || fail "canonical inspect does not receive the recovery kit"
+! grep -Fq 'age -d' <<< "$inspect_function" \
+  || fail "acceptance recovery proof still performs a custom Age-only decrypt"
+grep -Fq 'DR_SOURCE "$RECOVERY_KIT" pre-uninstall-recovery-cache true' "$A" \
+  || fail "post-reboot pre-uninstall authenticated source re-proof is missing or not retained"
+grep -Fq 'RECOVERY_CACHE_VERIFIED_EPOCH' "$A" \
+  || fail "retained authenticated recovery cache verification time is not checkpointed"
+grep -Fq 'pre_uninstall_recovery_gate' "$A" \
+  || fail "destructive reset is not guarded by a dedicated post-reboot recovery gate"
+grep -Fq 'create_sensitive_workspace acceptance-restore' "$A" \
+  || fail "delegated restore fallback is not forced through volatile sensitive storage"
+! grep -Fq 'mktemp "$STATE_ROOT/.verify-age-key' "$A" \
+  || fail "acceptance still stages a private Age identity under persistent STATE_ROOT"
+! grep -Fq 'mktemp "$STATE_ROOT/.recovery-kit-age-key' "$A" \
+  || fail "recipient derivation still stages a private Age identity under persistent STATE_ROOT"
+
+# The foreground systemd acceptance must reject exit 75 contention skips and
+# require a new ExecStart timestamp for the invocation being certified.
+(
+  MOCK_STATUS=0
+  MOCK_START=200
+  MOCK_RESULT=success
+  systemctl(){
+    case "$*" in
+      *ExecMainStartTimestampMonotonic*) printf '%s
+' "$MOCK_START" ;;
+      *--property=Result*) printf '%s
+' "$MOCK_RESULT" ;;
+      *--property=ExecMainStatus*) printf '%s
+' "$MOCK_STATUS" ;;
+      *) return 1 ;;
+    esac
+  }
+  systemd_job_execution_succeeded vaultwarden-full-backup.service 100 \
+    || fail "real systemd job execution result was rejected"
+  MOCK_STATUS=75
+  if systemd_job_execution_succeeded vaultwarden-full-backup.service 100 >/dev/null 2>&1; then
+    fail "systemd contention skip exit 75 was accepted as certification"
+  fi
+  MOCK_STATUS=1
+  systemd_job_execution_succeeded vaultwarden-health.service 100 \
+    || fail "health advisory exit 1 should count as a real health execution"
+  if systemd_job_execution_succeeded vaultwarden-db-backup.service 100 >/dev/null 2>&1; then
+    fail "nonzero DB backup result was accepted"
+  fi
+  MOCK_STATUS=0
+  MOCK_START=100
+  if systemd_job_execution_succeeded vaultwarden-full-backup.service 100 >/dev/null 2>&1; then
+    fail "stale systemd execution timestamp was accepted"
+  fi
+)
+
+# Post-restore manual systemd validation must leave every recurring timer disabled
+# after ordinary success/failure. The canonical installer still has a documented
+# abrupt-reboot window while it enables timers for future boots before returning.
+(
+  AT="$T/timer-custody"
+  mkdir -p "$AT"
+  VALIDATION_FAIL=false
+  INSTALL_FAIL=false
+  # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check
+  bash(){
+    [[ "$*" == "./utilities/setup-systemd.sh install --no-enable-now" ]] || return 1
+    [[ "$INSTALL_FAIL" != "true" ]]
+  }
+  # shellcheck disable=SC2329 # invoked by sourced manual_systemd_install_check
+  systemctl(){
+    case "$1" in
+      is-enabled)
+        [[ "${3:-}" == "vaultwarden-startup.service" ]] && return 0
+        [[ -e "$AT/disabled" ]] && return 1
+        if [[ "$VALIDATION_FAIL" == "true" && "${3:-}" == "vaultwarden-db-backup.timer" ]]; then
+          return 1
+        fi
+        return 0
+        ;;
+      is-active) return 1 ;;
+      disable)
+        : > "$AT/disabled"
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  manual_systemd_install_check || fail "successful manual systemd validation/disable sequence failed"
+  [[ -e "$AT/disabled" ]] || fail "successful manual validation did not leave timers disabled after return"
+  rm -f "$AT/disabled"
+  VALIDATION_FAIL=true
+  if manual_systemd_install_check >/dev/null 2>&1; then
+    fail "timer validation failure unexpectedly passed"
+  fi
+  [[ -e "$AT/disabled" ]] || fail "failed manual validation did not disable timers before returning"
+  rm -f "$AT/disabled"
+  VALIDATION_FAIL=false
+  INSTALL_FAIL=true
+  if manual_systemd_install_check >/dev/null 2>&1; then
+    fail "failed canonical manual installer unexpectedly passed"
+  fi
+  [[ -e "$AT/disabled" ]] || fail "installer failure did not trigger pre-custody timer disable cleanup"
+)
+
+# Canary creation must precede the specifically bound full backup. Restore
+# must download that exact cohort and use --file, never remote 'latest'.
+canary_line="$(grep -n 'application-before-dr' "$A" | cut -d: -f1)"
+source_backup_line="$(grep -n 'dr-full-backup run_and_bind_full_backup DR_SOURCE' "$A" | cut -d: -f1)"
+source_kit_decrypt_line="$(grep -n 'pre-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit DR_SOURCE' "$A" | cut -d: -f1)"
+reboot_line="$(grep -n 'save_phase post-reboot' "$A" | cut -d: -f1)"
+post_reboot_check_line="$(grep -n 'systemd-after-reboot bash ./utilities/setup-systemd.sh validate' "$A" | cut -d: -f1)"
+pre_uninstall_reproof_line="$(grep -n 'pre-uninstall-recovery-gate pre_uninstall_recovery_gate' "$A" | cut -d: -f1)"
+uninstall_reset_line="$(grep -n 'uninstall-reset bash ./utilities/uninstall-vaultwarden.sh run --test-reset' "$A" | cut -d: -f1)"
+source_download_line="$(grep -n 'dr-source-download download_bound_backup DR_SOURCE restore-source' "$A" | cut -d: -f1)"
+exact_restore_line="$(grep -n 'bash ./restore.sh interactive --remote --file \"\$BOUND_BACKUP_FILE\"' "$A" | cut -d: -f1)"
+restore_checkpoint_line="$(grep -n 'save_phase post-restore-validation' "$A" | cut -d: -f1)"
+cache_cleanup_line="$(grep -n 'rm -rf -- \"\$STATE_ROOT/restore-source\" \"\$STATE_ROOT/pre-uninstall-recovery-cache\"' "$A" | cut -d: -f1)"
+repair_line="$(grep -n 'repair-permissions bash ./utilities/repair-permissions.sh' "$A" | cut -d: -f1)"
+e2e_line="$(grep -n 'application-after-dr' "$A" | cut -d: -f1)"
+export_line="$(grep -n 'post-restore-full-kit-export export_post_restore_full_recovery_kit' "$A" | cut -d: -f1)"
+custody_line="$(grep -n 'validate_post_restore_recovery_kit' "$A" | tail -1 | cut -d: -f1)"
+activate_line="$(grep -n 'systemd-activate bash ./utilities/setup-systemd.sh install --enable-now' "$A" | cut -d: -f1)"
+final_backup_line="$(grep -n 'post-dr-full run_and_bind_full_backup POST_DR' "$A" | cut -d: -f1)"
+final_decrypt_line="$(grep -n 'post-dr-recovery-kit-inspect verify_bound_backup_with_recovery_kit POST_DR' "$A" | cut -d: -f1)"
+(( canary_line < source_backup_line && source_backup_line < source_kit_decrypt_line \
+   && source_kit_decrypt_line < reboot_line && reboot_line < post_reboot_check_line \
+   && post_reboot_check_line < pre_uninstall_reproof_line \
+   && pre_uninstall_reproof_line < uninstall_reset_line \
+   && uninstall_reset_line < source_download_line && source_download_line < exact_restore_line )) \
+  || fail "canary/early-proof/reboot/pre-uninstall-reproof/reset/fresh-download/restore sequencing regressed"
+(( exact_restore_line < restore_checkpoint_line && restore_checkpoint_line < cache_cleanup_line \
+   && cache_cleanup_line < repair_line && repair_line < e2e_line )) \
+  || fail "successful restore/cache-cleanup is not checkpointed before post-restore validation"
+(( e2e_line < export_line && export_line < custody_line && custody_line < activate_line \
+   && activate_line < final_backup_line && final_backup_line < final_decrypt_line )) \
+  || fail "post-restore full-kit-export/custody/automation/final-backup sequencing regressed"
+! grep -Fq 'restore.sh latest full --remote' "$A" || fail "controller still restores an unbound remote latest backup"
+! grep -Fq -- '--no-backup --start-policy manual --force' "$A" \
+  || fail "fresh full DR restore still bypasses canonical snapshot policy with --no-backup"
+grep -Fq '&& [[ "$USE_REMOTE" == "true" ]]' "$RESTORE" \
+  || fail "canonical restore no longer admits missing-environment remote bootstrap mode"
+explicit_file_line="$(grep -Fn 'if [[ -n "$BACKUP_FILE" ]]' "$RESTORE" | head -1 | cut -d: -f1)"
+source_select_line="$(grep -Fn 'select_backup_source || return 1' "$RESTORE" | head -1 | cut -d: -f1)"
+[[ "$explicit_file_line" =~ ^[0-9]+$ && "$source_select_line" =~ ^[0-9]+$ ]] \
+  || fail "canonical exact-file/remote-source selection contract could not be located"
+(( explicit_file_line < source_select_line )) \
+  || fail "canonical restore no longer gives explicit --file precedence over remote source selection"
+grep -Fq 'POST_RESTORE_AGE_RECIPIENT_HASH' "$A" || fail "rotated Age recipient is not checkpointed"
+grep -Fq 'POST_RESTORE_EXPORTED_KIT_SHA256' "$A" || fail "canonical full recovery-kit export is not digest-bound"
+grep -Fq 'does not match the exact canonical full kit exported by this acceptance run' "$A" \
+  || fail "external recovery custody is not bound to the exact canonical export"
+grep -Fq 'secrets-export-recovery-kit.sh' "$A" \
+  || fail "controller never invokes the canonical full recovery-kit exporter"
+grep -Fq 'dns-mutation-scope-after-restore validate_dns_mutation_scope' "$A" \
+  || fail "post-restore timer activation is not protected by the DNS mutation gate"
+
+echo 'case-host-acceptance: ok'

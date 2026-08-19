@@ -44,7 +44,7 @@ Usage: ./tests/run-tests.sh all
 Suites:
   foundation       Architecture, configuration, permissions, storage, systemd
   security         Security/privilege, secrets, and email contracts
-  operations       Operations, lifecycle, operator UI, CrowdSec, uninstall
+  operations       Operations, lifecycle, operator UI, CrowdSec, uninstall, host acceptance
   data-protection  Backup and restore/recovery contracts
   all              Run every suite in the order above
   list             Print the logical execution inventory without running it
@@ -92,6 +92,7 @@ OPERATIONS_CASES=(
     "crowdsec|tests/suites/operations/case-crowdsec.bash|all|120"
     "crowdsec-notifications|tests/suites/operations/case-crowdsec-notifications.bash|all|120"
     "email-queue|tests/suites/operations/case-email-queue.bash|all|120"
+    "host-acceptance|tests/suites/operations/case-host-acceptance.bash|all|120"
     "uninstall|tests/suites/operations/case-uninstall.bash|all|120"
 )
 
