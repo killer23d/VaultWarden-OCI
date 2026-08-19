@@ -292,9 +292,10 @@ jobs:
 
       - name: Check pull request diff
         run: |
+          base_ref="refs/remotes/pr-base/${{ github.event.pull_request.base.sha }}"
           git fetch --no-tags origin \
-            "${{ github.event.pull_request.base.sha }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}"
-          git diff --check "origin/${{ github.event.pull_request.base.ref }}...HEAD"
+            "${{ github.event.pull_request.base.sha }}:${base_ref}"
+          git diff --check "${base_ref}...HEAD"
 
       - name: Validate Bash syntax
         run: |
