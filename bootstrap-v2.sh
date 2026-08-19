@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -6,7 +6,7 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 if [[ ! -r /etc/os-release ]]; then
   echo "FAIL: cannot read /etc/os-release" >&2
@@ -20,7 +20,7 @@ if [[ ${ID:-} != "ubuntu" || ${VERSION_ID:-} != "24.04" ]]; then
   exit 1
 fi
 
-case "$(uname -m)" in
+case "$(/usr/bin/uname -m)" in
   x86_64|amd64|aarch64|arm64) ;;
   *)
     echo "FAIL: supported architectures are amd64 and arm64" >&2
@@ -28,5 +28,6 @@ case "$(uname -m)" in
     ;;
 esac
 
-exec env PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -m vaultwarden_oci.install --source "$repo_root"
+cd -- "$repo_root"
+unset PYTHONPATH
+exec /usr/bin/python3 -E -m vaultwarden_oci.install --source "$repo_root"
