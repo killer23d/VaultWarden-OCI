@@ -143,6 +143,7 @@ REVIEW FOR
 - Catalog schema is closed to the needs of supported providers: HTTPS endpoints, closed auth modes, JSON/form request templates using a fixed canonical field set, small success rule, retry statuses, declared non-secret provider options.
 - Ordinary operator config cannot inject arbitrary endpoint/auth/header/payload values that could exfiltrate `email_api_token`.
 - No `eval`, Jinja, arbitrary scripting, cross-host auth redirects, dynamic provider loading, Python entry points, provider SDK, or generic HTTP workflow engine.
+- CyberPanel current baseline is grounded in official docs and re-verification is required at Phase 6: `POST https://platform.cyberpersons.com/email/v1/send`, Bearer API key with send permission, `202` + `success:true`, currently documented `429/500/503` transient candidates, and separate SMTP credentials if using `mail.cyberpersons.com:587` STARTTLS fallback.
 - Direct authenticated SMTP fallback remains transient-only; no Postfix/custom durable queue.
 - Cloudflare-first/CrowdSec one-path beta edge.
 - One V2 recovery format.
