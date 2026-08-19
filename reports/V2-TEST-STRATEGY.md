@@ -1,311 +1,212 @@
 # VaultWarden-OCI V2 Test Strategy
 
 Date: 2026-08-18
+Revision: consolidated with the authoritative Codex contract and later SOPS/Age, rclone, and notification decisions.
+
+> **Agent-execution precedence:** `reports/V2-CODEX-PROMPTS.md` is authoritative. This file explains the testing rationale and guardrails. If it conflicts with a phase prompt, the prompt contract wins and this file should be corrected.
 
 ## Objective
 
-V2 tests exist to protect the small number of behaviors that can compromise security, availability, recoverability or operator truthfulness.
+V2 tests exist to protect the small number of behaviors that can compromise security, availability, recoverability, or operator truthfulness.
 
-They are **not** intended to model the entire implementation, preserve V1 source structure, maximize assertion count or prove third-party software internals.
+Testing is not a parallel implementation of the product. V2 intentionally rejects the V1 pattern where a large amount of test code becomes coupled to private implementation shape and consumes a disproportionate share of change effort.
 
-The test system must itself remain easy to maintain.
+## Why V2 changes the testing architecture
 
----
+The audited V1 `tests/` tree is approximately 1.18 MB across 30 tracked files and is roughly 61% of the byte size of the audited first-party shell/Make implementation set used for comparison. That is only a rough maintenance-footprint signal, not an LOC or engineering-effort metric.
 
-# 1. Test budget
+The more important finding is architectural coupling. Large V1 cases commonly:
 
-Use three layers only:
+- grep for exact private source strings;
+- assert implementation order;
+- extract private Bash functions with `awk`/`sed`;
+- build synthetic harnesses around private state;
+- duplicate complex mocked control flows.
 
-1. **unit tests** — deterministic Python logic;
-2. **small integration tests** — filesystem/subprocess/Compose/security boundaries;
-3. **real-host acceptance** — disposable Ubuntu 24.04 release-gate scenarios.
+Those tests make legitimate refactoring expensive without necessarily increasing confidence in user-visible behavior.
 
-Do not create a fourth test framework or a custom logical inventory.
+V2 does not port that test architecture.
 
-Development dependencies may be:
+## Three validation layers only
 
-- `pytest`;
-- `ruff`;
-- ShellCheck for remaining shell.
+### 1. Focused unit tests
 
-Start with no pytest plugins.
+Use for deterministic Python logic such as:
 
-## Size guardrails
+- TOML/config/manifest parsing;
+- architecture normalization;
+- pure policy/classification functions;
+- Cloudflare CIDR validation/staleness decisions;
+- notification HTTP result classification and fallback eligibility;
+- backup manifest/checksum/retention decisions;
+- version resolution policy;
+- safe result/redaction behavior.
 
-These are design-review guardrails, not CI quotas:
+Unit tests should be fast, isolated, and ordinary pytest tests.
 
-- by beta, test code should aim to remain well below the size of production code; roughly **<=35% of first-party implementation LOC** is a useful warning threshold, not a target to game;
-- a single test module approaching roughly 400 lines should trigger a design review: is the production interface too complicated, are tests coupled to implementation, or should the scenario be release acceptance instead?;
-- adding a production feature should not automatically require an equal-sized mock implementation in tests.
+### 2. Small integration tests
 
-No code-coverage percentage gate is required. Coverage can be inspected as a development aid later, but percentage targets often reward low-value tests.
+Use for boundaries where the filesystem/process behavior matters:
 
----
+- real temporary files/directories and permissions where practical;
+- subprocess wrapper behavior;
+- `fcntl.flock` contention;
+- SOPS/Age orchestration at the external command boundary;
+- Compose/runtime rendering or lifecycle boundaries;
+- rclone argv/result behavior at the external command boundary;
+- backup/restore using real temporary SQLite/files/archives;
+- systemd unit rendering/installed command targets;
+- small HTTP/SMTP boundary tests only where they add confidence beyond deterministic classification tests.
 
-# 2. What must be tested
+Prefer real temporary artifacts over large mock state machines.
 
-## 2.1 Configuration and versions
+### 3. Disposable real-host release acceptance
 
-Test:
+Use release acceptance to verify what cannot be proven economically in unit/integration tests:
 
-- valid config loads;
-- missing/invalid required fields fail clearly;
-- dangerous/unsupported values fail closed;
-- `amd64` and `arm64` mappings resolve correctly;
-- unsupported CPU/OS values do not fall back silently;
-- production uses exact version pins;
-- `--use-latest` resolver returns exact resolved values and is clearly marked non-production;
-- malformed upstream/latest responses fail instead of inventing a version.
+- clean Ubuntu 24.04 install;
+- amd64/arm64 behavior where environments are available;
+- Docker/Compose and installed filesystem/permissions;
+- SOPS/Age secret materialization without leakage;
+- Vaultwarden + Caddy health;
+- Cloudflare ingress and fail-closed rule establishment;
+- CrowdSec/bouncer integration;
+- backup -> rclone publication -> remote verification -> download -> restore;
+- HTTPS operational notification delivery and representative SMTP transient fallback;
+- systemd lifecycle/timers;
+- pinned update flow.
 
-Do not test Python `tomllib` itself.
+Acceptance is a release gate, not a reason to recreate a massive per-PR stateful controller.
 
-## 2.2 Command execution
+## Permanent PR CI
 
-Test the project wrapper around subprocesses:
+Keep permanent PR CI deliberately small:
 
-- argument arrays are passed without shell interpolation;
-- non-zero exit is preserved/normalized truthfully;
-- timeout behavior is clear where used;
-- secret values are not included in diagnostic exception text;
-- command-not-found/prerequisite failures are understandable.
+1. quality/lint/static repository checks;
+2. unit tests;
+3. small integration tests.
 
-Do not mock every Docker/systemd command in every caller. Test the wrapper once, then test callers using a few representative process results.
+Do not put full destructive host acceptance on every ordinary PR unless later evidence shows that the cost/benefit changed.
 
-## 2.3 Concurrency
+## Prohibited test patterns
 
-Test:
+Do not add permanent tests whose primary assertion is:
 
-- one mutating command can hold the global lock;
-- a second mutating command receives the intended contention result;
-- read-only diagnostics do not require the mutation lock;
-- child process execution does not keep the lock alive after the controlling process exits.
+- an exact private source string exists;
+- a private line appears before/after another private line;
+- a private helper has a specific textual implementation;
+- an internal function can be extracted from source and executed in a synthetic harness;
+- human-facing prose matches exactly when a stable ID/JSON field could be tested instead;
+- a third-party tool behaves according to its own documented internals;
+- every file touched has a dedicated test.
 
-Do not recreate V1's process/FD identity framework unless a real defect proves it necessary.
+Do not add:
 
-## 2.4 Secrets
+- a custom test runner/inventory/mode registry;
+- a coverage percentage gate;
+- broad test matrices without a concrete risk;
+- a pytest plugin ecosystem without demonstrated need.
 
-Test security properties:
+## Test ownership principle
 
-- encrypted secret structure validation;
-- required secret detection;
-- secret materialization uses the expected directory/file modes;
-- plaintext secret material is removed on normal cleanup;
-- generated command/env/log representations do not contain sentinel secret values;
-- SOPS/Age failure prevents startup/rotation success;
-- offline recovery private material is not copied into persistent host state.
+One behavior should normally have one best permanent test level.
 
-Use sentinel values and inspect process arguments/output where relevant.
+Examples:
 
-Do not test SOPS cryptography itself.
+- architecture mapping: unit;
+- lock contention: small integration;
+- backup corruption refusal: integration with real temporary artifacts;
+- Cloudflare packet path on a real host: release acceptance;
+- notification response classification: unit;
+- real provider delivery: release acceptance or explicit manual/release validation, not duplicated across unit/integration suites.
 
-## 2.5 Runtime/Compose
+Do not duplicate the same behavior at every layer for comfort.
 
-Test:
+## Risk-weighted focus
 
-- committed/default config renders valid Compose;
-- required services are Vaultwarden + Caddy for beta;
-- expected security options are present;
-- Caddy publishes only the intended production port(s);
-- secret mounts point at transient secret files;
-- direct SMTP config reaches Vaultwarden;
-- no mandatory Postfix service appears.
+### Backup/restore/rclone
 
-Prefer parsing/rendering behavior or `docker compose config`; avoid dozens of grep assertions against YAML text.
+This area deserves disproportionate testing because a false success can destroy recoverability.
 
-## 2.6 Firewall/Cloudflare
+High-value permanent tests include:
 
-Test project-owned behavior only:
+- consistent snapshot/manifest construction;
+- checksum/corruption rejection;
+- wrong-key/decryption failure before live mutation;
+- restore preflight ordering at a behavioral boundary;
+- incomplete candidate not reported as valid;
+- rclone publication command uses non-destructive copy/copyto-style semantics;
+- remote verification is required before reporting offsite success;
+- retention/pruning is separate from publication;
+- restore/download staging does not mutate live state before validation.
 
-- Cloudflare IPv4/IPv6 lists parse and validate;
-- empty/malformed lists fail closed;
-- last-known-good cache expiry is enforced;
-- intended project-owned iptables rule/restore input is generated deterministically;
-- failure to establish the supported ingress policy prevents public Caddy startup/continuation as designed.
+Avoid testing rclone's internal provider implementations.
 
-Real-host acceptance proves the packet path.
+### SOPS + Age
 
-Do not unit-test iptables, Docker NAT or Cloudflare infrastructure.
+Protect project-owned behavior only:
 
-## 2.7 CrowdSec
+- required secret keys/schema validation;
+- correct external command invocation without shell interpolation;
+- operational key/runtime file permissions;
+- plaintext not written to persistent normal config/loggable structures;
+- offline recovery material is not silently persisted as the server's operational private key.
 
-Test:
+Do not re-test SOPS/age cryptographic algorithms.
 
-- project-owned acquisition/profile/config rendering;
-- required credential validation;
-- diagnostic interpretation of representative upstream command states;
-- failed upstream installation/configuration is reported truthfully.
+### Operational notifications
 
-Do not recreate the upstream CrowdSec installer in mocks.
+The critical V2 behavior is failure classification and safe fallback, not protocol emulation.
 
-## 2.8 Diagnostics
+High-value tests:
 
-`vwctl doctor` is a stable product API and deserves focused tests.
+- API success stops without SMTP;
+- DNS/network timeout is classified transient;
+- representative `429`/`5xx` becomes fallback-eligible only after the bounded retry policy;
+- representative `400`/`401`/`403` remains visible and is not silently masked by SMTP;
+- TLS certificate/hostname validation failure is not treated as a transparent fallback condition;
+- SMTP fallback uses the configured secure mode through a stable mocked boundary;
+- secret-bearing values never appear in result/log/exception structures;
+- both transports failing yields a stable safe diagnostic result for status/doctor.
+
+Do not build a fake MTA, persistent queue test harness, or generic provider conformance suite.
+
+### Cloudflare/CrowdSec/firewall
+
+Unit-test parsing/policy decisions, integration-test external command boundaries, and reserve actual packet-path behavior for disposable-host acceptance. Do not introduce a multi-backend matrix.
+
+### `vwctl doctor`
 
 Test:
 
 - stable check IDs;
-- `PASS/WARN/FAIL/SKIP` classification;
-- overall exit policy;
-- JSON schema/shape for implemented checks;
-- representative error parsing;
-- no secrets in output.
+- PASS/WARN/FAIL/SKIP classification;
+- JSON schema/shape;
+- exit policy;
+- secret-free output.
 
-Do **not** freeze exact human-readable sentences. Human text should remain editable without rewriting large tests.
+Do not freeze exact human prose.
 
-## 2.9 Backup and restore
+## Size/design guardrails
 
-This is the highest-value test area.
+These are review signals, not CI quotas:
 
-Test behavior capable of causing data loss:
+- By beta, first-party test code should aim to remain well below production implementation size. Around 35% of first-party implementation LOC is a **warning threshold for design review**, not a target and not a hard gate.
+- A single test module approaching roughly 400 lines should trigger a design review: is it covering too many responsibilities, mocking too much, or testing implementation shape?
+- A new helper/framework added only to support tests should be challenged: could the product boundary be tested more directly instead?
 
-- SQLite snapshot failure prevents publication;
-- backup is not successful until integrity/encryption verification succeeds;
-- incomplete candidate is not selected as latest valid recovery point;
-- manifest/checksum mismatch fails;
-- unsafe archive paths fail;
-- decrypt failure fails before live mutation;
-- target storage/capacity failure occurs before service stop;
-- restore stages rather than extracting directly into live state;
-- promotion/permission failures return non-zero and preserve useful diagnosis;
-- successful restore followed by requested startup requires health success;
-- retention preserves a valid recovery point until a newer verified point exists.
+The goal is maintainability and confidence, not optimizing a metric.
 
-Use real temporary SQLite databases/files/tar archives where cheap. This provides stronger evidence with less mock code than source-pattern testing.
+## Required PR validation statement
 
-Do not test V1 archive formats or migration paths.
+Every agent/task PR should state:
 
-## 2.10 systemd
+1. behavior changed;
+2. smallest validation sufficient;
+3. highest-value permanent test layer;
+4. duplicate tests intentionally not added;
+5. tests/validation actually run;
+6. validation not run and why;
+7. out-of-scope follow-ups discovered.
 
-Test:
-
-- rendered units use expected installed `vwctl` paths;
-- required hardening/directives are generated by the owning template/model;
-- `systemd-analyze verify` passes where available;
-- timer commands match the supported `vwctl` grammar.
-
-Real-host acceptance proves enabling/execution.
-
-Avoid a large parallel test schema of every systemd directive.
-
----
-
-# 3. What should not be permanent tests
-
-Do not add permanent tests whose primary purpose is to assert:
-
-- exact source-code strings;
-- function ordering in a source file;
-- that an implementation uses a specifically named private helper;
-- old V1 aliases are absent/present;
-- a particular internal module decomposition;
-- exact prose in docs/errors;
-- internal behavior of Python stdlib, Docker, systemd, SOPS, Age, Caddy, Cloudflare or CrowdSec;
-- every issue/PR fix as a new standalone case when an existing behavioral test already protects the invariant.
-
-Static/source assertions are acceptable only when **source structure is the actual contract**, for example a generated file must exactly match its canonical source. Even then, first ask whether the generated duplicate can be deleted.
-
----
-
-# 4. Mocking policy
-
-Mocks should terminate at stable external boundaries.
-
-Good boundaries:
-
-- HTTP response from an upstream release/CIDR endpoint;
-- `docker`, `systemctl`, `iptables-restore`, `sops`, `age`, `rclone`, `cscli` subprocess results;
-- SMTP server interaction;
-- filesystem ownership/mode inspection.
-
-Bad pattern:
-
-- extracting a private production function with `awk`;
-- rebuilding half of a shell script as a test harness;
-- mocking multiple layers of internal helpers to prove implementation order;
-- duplicating a state machine in test code.
-
-If a function cannot be tested without reproducing its implementation, redesign the production boundary before expanding the test harness.
-
----
-
-# 5. CI model
-
-## Pull-request CI
-
-Keep normal PR CI fast and boring:
-
-```text
-ruff check
-pytest
-shellcheck <remaining shell files>
-docker compose config --quiet
-```
-
-Add a small static check for formatting/syntax as appropriate.
-
-A practical goal is that normal PR validation completes in roughly a couple of minutes on hosted runners when upstream network availability is not required. This is an aspiration, not a security tradeoff.
-
-PR CI should not perform destructive real-host recovery or reach production Cloudflare resources.
-
-## Scheduled/release validation
-
-Use an on-demand or release-candidate workflow/environment for real Ubuntu hosts.
-
-Target scenarios:
-
-1. clean Ubuntu 24.04 install;
-2. configure + start + `doctor`;
-3. validate Cloudflare/CrowdSec ingress on a dedicated test hostname;
-4. create verified backup;
-5. destroy/reset disposable V2 state;
-6. restore to fresh state/host;
-7. run `doctor` and application login/API smoke hook;
-8. apply a staged V2 update;
-9. verify timers;
-10. uninstall/reinstall where useful.
-
-Run on amd64 and arm64 where infrastructure permits. OCI A1 Flex is a natural arm64 acceptance target but the test must not encode OCI-specific runtime behavior.
-
-The acceptance script should be intentionally small. External orchestration may recreate/discard the VM instead of teaching the application a complex destructive acceptance state machine.
-
----
-
-# 6. Regression-test rule
-
-When a defect is fixed, ask in order:
-
-1. Is the defect already covered by a behavioral test that failed? Fix the code; do not add another test.
-2. Is there a missing reusable security/data invariant? Add one focused test at that invariant boundary.
-3. Is the bug only reproducible on a real host/integration path? Add it to release acceptance rather than building a large mock universe.
-4. Is the test only able to assert the exact previous source implementation? Prefer a design improvement or do not make it permanent.
-
-A PR is not incomplete merely because it did not add a test file. It is incomplete when a meaningful unprotected V2 invariant was changed without appropriate validation.
-
----
-
-# 7. Diagnostics are part of the testing strategy
-
-V2 should invest in diagnostics rather than trying to simulate every production state in unit tests.
-
-A stable `vwctl doctor --json` output lets:
-
-- operators diagnose real systems;
-- release acceptance assert real state;
-- support reports include trustworthy facts;
-- tests validate check classification without understanding internal implementation.
-
-This is a better long-term investment than a test harness that mocks every possible host condition.
-
----
-
-# 8. Definition of a healthy V2 test suite
-
-The V2 test suite is healthy when:
-
-- a maintainer can understand its structure quickly;
-- most tests call public or intentionally testable module boundaries;
-- test failures describe the violated behavior rather than a stale source string;
-- implementation refactors that preserve behavior usually do not require broad test rewrites;
-- backup/restore/security boundaries receive more attention than display formatting or wrapper aliases;
-- the full PR suite is cheap enough that developers run it routinely;
-- destructive real-host evidence exists, but is not implemented as another permanent application framework.
+This discipline is part of the V2 agent contract and is repeated in `V2-CODEX-PROMPTS.md` so testing scope does not silently grow phase by phase.
