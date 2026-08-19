@@ -292,9 +292,10 @@ jobs:
 
       - name: Check pull request diff
         run: |
+          base_ref="refs/remotes/pr-base/${{ github.event.pull_request.base.sha }}"
           git fetch --no-tags origin \
-            "${{ github.event.pull_request.base.sha }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}"
-          git diff --check "origin/${{ github.event.pull_request.base.ref }}...HEAD"
+            "${{ github.event.pull_request.base.sha }}:${base_ref}"
+          git diff --check "${base_ref}...HEAD"
 
       - name: Validate Bash syntax
         run: |
@@ -334,7 +335,7 @@ jobs:
           curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
           echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64 -o /tmp/sops
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux-amd64 -o /tmp/sops
           echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
