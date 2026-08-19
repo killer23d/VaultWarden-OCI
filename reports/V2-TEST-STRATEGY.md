@@ -1,212 +1,208 @@
 # VaultWarden-OCI V2 Test Strategy
 
 Date: 2026-08-18
-Revision: consolidated with the authoritative Codex contract and later SOPS/Age, rclone, and notification decisions.
+Status: supporting rationale/guardrails for the authoritative Codex prompts.
 
-> **Agent-execution precedence:** `reports/V2-CODEX-PROMPTS.md` is authoritative. This file explains the testing rationale and guardrails. If it conflicts with a phase prompt, the prompt contract wins and this file should be corrected.
+> **Authority:** `reports/V2-CODEX-PROMPTS.md` controls agent execution. This file explains why V2 deliberately uses a smaller test architecture.
 
 ## Objective
 
-V2 tests exist to protect the small number of behaviors that can compromise security, availability, recoverability, or operator truthfulness.
+Tests protect four things:
 
-Testing is not a parallel implementation of the product. V2 intentionally rejects the V1 pattern where a large amount of test code becomes coupled to private implementation shape and consumes a disproportionate share of change effort.
+1. security;
+2. availability;
+3. recoverability;
+4. operator truthfulness.
 
-## Why V2 changes the testing architecture
+Testing is not a parallel implementation of the product. A test that makes harmless internal refactoring expensive without protecting observable risk is probably at the wrong boundary.
 
-The audited V1 `tests/` tree is approximately 1.18 MB across 30 tracked files and is roughly 61% of the byte size of the audited first-party shell/Make implementation set used for comparison. That is only a rough maintenance-footprint signal, not an LOC or engineering-effort metric.
+## Why V2 changes the test model
 
-The more important finding is architectural coupling. Large V1 cases commonly:
+The audited V1 `tests/` tree is approximately 1.18 MB across 30 tracked files—roughly 61% of the byte size of the audited first-party shell/Make implementation set used for comparison. That is only a maintenance-footprint signal, not an LOC or engineering-effort metric.
 
-- grep for exact private source strings;
-- assert implementation order;
+The stronger finding is architectural coupling. Large V1 cases commonly:
+
+- grep exact private source strings;
+- assert private source ordering;
 - extract private Bash functions with `awk`/`sed`;
-- build synthetic harnesses around private state;
-- duplicate complex mocked control flows.
+- construct synthetic harnesses around private state;
+- duplicate mocked control flows.
 
-Those tests make legitimate refactoring expensive without necessarily increasing confidence in user-visible behavior.
-
-V2 does not port that test architecture.
+V2 does not port that architecture.
 
 ## Three validation layers only
 
 ### 1. Focused unit tests
 
-Use for deterministic Python logic such as:
+Use for deterministic project logic:
 
 - TOML/config/manifest parsing;
 - architecture normalization;
-- pure policy/classification functions;
-- Cloudflare CIDR validation/staleness decisions;
-- notification HTTP result classification and fallback eligibility;
+- policy/classification functions;
+- Cloudflare CIDR validation/staleness;
+- notification response classification/fallback eligibility;
 - backup manifest/checksum/retention decisions;
-- version resolution policy;
+- version-resolution policy;
 - safe result/redaction behavior.
 
-Unit tests should be fast, isolated, and ordinary pytest tests.
+Keep ordinary pytest discovery. No custom registry/modes.
 
 ### 2. Small integration tests
 
-Use for boundaries where the filesystem/process behavior matters:
+Use when filesystem/process behavior is part of the risk:
 
-- real temporary files/directories and permissions where practical;
+- real temporary files/directories and permissions;
 - subprocess wrapper behavior;
 - `fcntl.flock` contention;
-- SOPS/Age orchestration at the external command boundary;
-- Compose/runtime rendering or lifecycle boundaries;
-- rclone argv/result behavior at the external command boundary;
+- SOPS/Age orchestration at the external-command boundary;
+- Compose/runtime rendering and small lifecycle boundaries;
+- rclone argv/result behavior at the external-command boundary;
 - backup/restore using real temporary SQLite/files/archives;
 - systemd unit rendering/installed command targets;
-- small HTTP/SMTP boundary tests only where they add confidence beyond deterministic classification tests.
+- HTTP/SMTP boundary behavior only where deterministic unit classification is insufficient.
 
 Prefer real temporary artifacts over large mock state machines.
 
 ### 3. Disposable real-host release acceptance
 
-Use release acceptance to verify what cannot be proven economically in unit/integration tests:
+Reserve full-system behavior for a disposable Ubuntu 24.04 host/environment:
 
-- clean Ubuntu 24.04 install;
-- amd64/arm64 behavior where environments are available;
-- Docker/Compose and installed filesystem/permissions;
-- SOPS/Age secret materialization without leakage;
+- clean install and installed filesystem/permissions;
+- amd64/arm64 where environments are available;
+- Docker/Compose runtime;
+- SOPS/Age materialization without leakage;
 - Vaultwarden + Caddy health;
-- Cloudflare ingress and fail-closed rule establishment;
+- Cloudflare ingress/fail-closed behavior;
 - CrowdSec/bouncer integration;
 - backup -> rclone publication -> remote verification -> download -> restore;
-- HTTPS operational notification delivery and representative SMTP transient fallback;
-- systemd lifecycle/timers;
+- HTTPS operational notification delivery + representative transient SMTP fallback;
+- systemd units/timers;
 - pinned update flow.
 
-Acceptance is a release gate, not a reason to recreate a massive per-PR stateful controller.
+Acceptance is a release gate, not a reason to rebuild the V1 stateful acceptance controller on every PR.
 
 ## Permanent PR CI
 
-Keep permanent PR CI deliberately small:
+Keep permanent PR CI small:
 
-1. quality/lint/static repository checks;
-2. unit tests;
+1. quality/lint/basic repository checks;
+2. focused unit tests;
 3. small integration tests.
 
-Do not put full destructive host acceptance on every ordinary PR unless later evidence shows that the cost/benefit changed.
+Do not put destructive/full-host acceptance on every ordinary PR unless production evidence later changes the cost/benefit.
 
-## Prohibited test patterns
+## Test ownership rule
 
-Do not add permanent tests whose primary assertion is:
+**One behavior should normally have one best permanent test level.**
 
-- an exact private source string exists;
-- a private line appears before/after another private line;
+Examples:
+
+- architecture mapping -> unit;
+- lock contention -> small integration;
+- backup corruption refusal -> integration with real artifacts;
+- actual Cloudflare packet path -> release acceptance;
+- notification status classification -> unit;
+- real provider delivery -> release/manual acceptance.
+
+Do not duplicate the same behavior at several layers merely for comfort.
+
+## Prohibited patterns
+
+Do not add permanent tests whose main assertion is:
+
+- exact private source text exists;
+- one private line appears before/after another;
 - a private helper has a specific textual implementation;
-- an internal function can be extracted from source and executed in a synthetic harness;
-- human-facing prose matches exactly when a stable ID/JSON field could be tested instead;
-- a third-party tool behaves according to its own documented internals;
-- every file touched has a dedicated test.
+- a private function can be extracted from source and run in a synthetic harness;
+- human prose matches exactly when stable IDs/JSON fields exist;
+- a third-party tool behaves according to its own internals;
+- every file touched has its own test.
 
 Do not add:
 
 - a custom test runner/inventory/mode registry;
-- a coverage percentage gate;
-- broad test matrices without a concrete risk;
-- a pytest plugin ecosystem without demonstrated need.
-
-## Test ownership principle
-
-One behavior should normally have one best permanent test level.
-
-Examples:
-
-- architecture mapping: unit;
-- lock contention: small integration;
-- backup corruption refusal: integration with real temporary artifacts;
-- Cloudflare packet path on a real host: release acceptance;
-- notification response classification: unit;
-- real provider delivery: release acceptance or explicit manual/release validation, not duplicated across unit/integration suites.
-
-Do not duplicate the same behavior at every layer for comfort.
+- a coverage-percentage gate;
+- broad matrices without a concrete risk;
+- pytest plugins/frameworks without demonstrated need;
+- helper modules solely to make tests convenient when the public boundary can be tested directly.
 
 ## Risk-weighted focus
 
-### Backup/restore/rclone
+### Backup / restore / rclone
 
-This area deserves disproportionate testing because a false success can destroy recoverability.
+This deserves the strongest permanent test attention because a false success can destroy recoverability.
 
-High-value permanent tests include:
+High-value behavior includes:
 
 - consistent snapshot/manifest construction;
 - checksum/corruption rejection;
 - wrong-key/decryption failure before live mutation;
-- restore preflight ordering at a behavioral boundary;
-- incomplete candidate not reported as valid;
-- rclone publication command uses non-destructive copy/copyto-style semantics;
-- remote verification is required before reporting offsite success;
-- retention/pruning is separate from publication;
-- restore/download staging does not mutate live state before validation.
+- incomplete candidate not reported valid;
+- preflight before live mutation;
+- non-destructive rclone copy/copyto publication;
+- remote verification required before offsite success;
+- pruning separate from publication;
+- remote download/staging does not mutate live state before validation.
 
-Avoid testing rclone's internal provider implementations.
+Do not test rclone provider internals.
 
 ### SOPS + Age
 
-Protect project-owned behavior only:
+Test only project-owned responsibilities:
 
-- required secret keys/schema validation;
-- correct external command invocation without shell interpolation;
-- operational key/runtime file permissions;
-- plaintext not written to persistent normal config/loggable structures;
-- offline recovery material is not silently persisted as the server's operational private key.
+- required secret/schema validation;
+- safe external command invocation;
+- key/runtime-file permissions;
+- no plaintext leakage to normal persistent config/loggable state;
+- offline recovery private material is not persisted as the operational host key.
 
-Do not re-test SOPS/age cryptographic algorithms.
+Do not re-test cryptographic algorithms.
 
 ### Operational notifications
 
-The critical V2 behavior is failure classification and safe fallback, not protocol emulation.
+The important behavior is safe classification/fallback, not protocol emulation.
 
-High-value tests:
+High-value tests include:
 
-- API success stops without SMTP;
-- DNS/network timeout is classified transient;
-- representative `429`/`5xx` becomes fallback-eligible only after the bounded retry policy;
-- representative `400`/`401`/`403` remains visible and is not silently masked by SMTP;
-- TLS certificate/hostname validation failure is not treated as a transparent fallback condition;
-- SMTP fallback uses the configured secure mode through a stable mocked boundary;
-- secret-bearing values never appear in result/log/exception structures;
-- both transports failing yields a stable safe diagnostic result for status/doctor.
+- API success does not invoke SMTP;
+- network/DNS timeout is transient;
+- representative `429`/`5xx` becomes fallback-eligible according to bounded retry policy;
+- representative `400`/`401`/`403` stays visible;
+- TLS certificate/hostname validation failure is not silently masked;
+- SMTP uses the configured secure mode at a stable mocked boundary;
+- secret values never appear in result/log/exception structures;
+- both transports failing produces stable secret-free diagnostic state.
 
-Do not build a fake MTA, persistent queue test harness, or generic provider conformance suite.
+Do not build a fake MTA, queue harness, or provider conformance framework.
 
-### Cloudflare/CrowdSec/firewall
+### Cloudflare / CrowdSec / firewall
 
-Unit-test parsing/policy decisions, integration-test external command boundaries, and reserve actual packet-path behavior for disposable-host acceptance. Do not introduce a multi-backend matrix.
+Unit-test parsing/policy, integration-test external-command boundaries, and reserve actual packet-path behavior for disposable-host acceptance. No multi-backend matrix.
 
 ### `vwctl doctor`
 
-Test:
+Test stable check IDs, PASS/WARN/FAIL/SKIP classification, JSON shape, exit policy, and secret-free output. Do not freeze exact human prose.
 
-- stable check IDs;
-- PASS/WARN/FAIL/SKIP classification;
-- JSON schema/shape;
-- exit policy;
-- secret-free output.
+## File-surface guardrail for tests
 
-Do not freeze exact human prose.
+Test code should remain **obviously subordinate to the product**, not become a second architecture.
 
-## Size/design guardrails
-
-These are review signals, not CI quotas:
-
-- By beta, first-party test code should aim to remain well below production implementation size. Around 35% of first-party implementation LOC is a **warning threshold for design review**, not a target and not a hard gate.
-- A single test module approaching roughly 400 lines should trigger a design review: is it covering too many responsibilities, mocking too much, or testing implementation shape?
-- A new helper/framework added only to support tests should be challenged: could the product boundary be tested more directly instead?
-
-The goal is maintainability and confidence, not optimizing a metric.
+- Prefer adding a case to an existing cohesive test module over creating a new file for one small behavior.
+- Do not create a test-helper layer that mirrors production modules one-for-one.
+- If a test module becomes difficult to understand, first ask whether the product boundary or test level is wrong before splitting it into more infrastructure.
+- No numeric LOC/coverage/file-count target is authoritative. Metrics may trigger discussion, never design gaming.
 
 ## Required PR validation statement
 
-Every agent/task PR should state:
+Every V2 agent/task PR should state:
 
 1. behavior changed;
 2. smallest validation sufficient;
 3. highest-value permanent test layer;
 4. duplicate tests intentionally not added;
-5. tests/validation actually run;
+5. exact tests/validation actually run;
 6. validation not run and why;
-7. out-of-scope follow-ups discovered.
+7. new test/support files created and why they were necessary;
+8. out-of-scope follow-ups discovered.
 
-This discipline is part of the V2 agent contract and is repeated in `V2-CODEX-PROMPTS.md` so testing scope does not silently grow phase by phase.
+This keeps validation proportional to risk instead of allowing test infrastructure to expand automatically with every implementation change.
