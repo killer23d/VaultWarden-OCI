@@ -11,9 +11,12 @@ These prompts are for a **separate review agent** after a V2 PR is ready for rev
 - Copy the **entire fenced block** into a fresh review-agent session.
 - For Phase 0–8/corrective prompts, replace only `<PR_URL>`.
 - The current design/report PR prompt already contains PR #333 and can be pasted as-is.
-- No `<ORIGINAL_PROMPT>` is required: each review prompt embeds the expected phase scope and review criteria.
+- No `<ORIGINAL_PROMPT>` is required: each review prompt embeds the expected phase outcome and review criteria.
 - The review agent reviews only. It must not push commits, edit the PR, resolve threads, or merge unless a human explicitly asks afterward.
-- `reports/V2-CODEX-PROMPTS.md` remains the authoritative implementation-agent contract. These review prompts are intentionally phase-specific mirrors for independent verification.
+- `reports/V2-CODEX-PROMPTS.md` remains the authoritative implementation-agent contract.
+- These prompts are **reviewer mirrors, not a second normative specification**. The reviewer must read the applicable authoritative phase prompt from `V2-CODEX-PROMPTS.md`. If any detail here differs, the authoritative implementation prompt wins and the stale review prompt is itself a finding.
+
+Every review must inspect current PR metadata/diff, current CI/check status, and existing review threads before returning a merge verdict.
 
 ---
 
@@ -23,84 +26,84 @@ These prompts are for a **separate review agent** after a V2 PR is ready for rev
 ```text
 Review PR https://github.com/killer23d/VaultWarden-OCI/pull/333.
 
-PURPOSE OF THIS PR
-This is the V2 greenfield design/report PR targeting branch `v2`. It is documentation/design only. It establishes the authoritative Codex execution contract and supporting architecture/audit/test/review documents before Phase 0 implementation begins.
+PURPOSE
+This is the V2 greenfield design/report PR targeting `v2`. It is documentation/design only. It establishes the authoritative standalone Codex prompts plus supporting architecture/audit/test/review documents before Phase 0 implementation.
 
 REVIEW MODE
-- Review only. Do not modify code/files, push commits, update the PR, resolve threads, or merge it.
-- Be skeptical but proportional. Do not invent enterprise requirements or implementation work that is outside this documentation/design PR.
-- Treat documentation as architecture because these files will steer later independent Codex sessions.
+- Review only. Do not modify files, push commits, update the PR, resolve threads, or merge it.
+- Be skeptical but proportional. Do not invent enterprise requirements.
+- Treat the reports as architecture because they steer future independent Codex sessions.
 
-GATHER EVIDENCE FIRST
-1. Read PR metadata, base/head refs, changed-file list, complete diff, description, review submissions/threads/comments, and current CI/check status.
-2. Read every changed report completely, not only patch hunks:
+GATHER EVIDENCE
+1. Read PR metadata, base/head refs, description, changed-file list, complete diff, current CI/check status, reviews/comments/threads.
+2. Read all five reports completely:
    - `reports/V2-CODEX-PROMPTS.md`
    - `reports/V2-ARCHITECTURE-PROPOSAL.md`
    - `reports/V2-AUDIT.md`
    - `reports/V2-TEST-STRATEGY.md`
    - `reports/V2-REVIEW-PROMPTS.md`
-3. Inspect `main`/V1 files only where needed to verify claims made by the audit or provider carry-forward decisions.
-4. Search the reports for stale/superseded wording, especially old "one selected provider", "five providers", direct-SMTP-only, Postfix preservation, deleted-report precedence, V1 migration compatibility, or contradictory source-of-truth rules.
+3. Inspect V1/main only where needed to verify audit evidence.
+4. Search for stale requirements: one selected email provider, five-provider list, direct-SMTP-only operational mail, Postfix preservation, V1 migration compatibility, host-firewall-bouncer beta requirement, deleted-report precedence, or conflicting source-of-truth rules.
 
-AUTHORITATIVE DESIGN EXPECTATIONS
-- `V2-CODEX-PROMPTS.md` is explicitly the implementation-agent source of truth.
-- Phase 0–8 and corrective implementation prompts are standalone copy/paste blocks.
-- Ordinary phase agents are not allowed to rewrite the authoritative prompt contract.
-- Root `AGENTS.md` is intended to become a concise map in Phase 0, not a second architecture authority.
-- Greenfield V2: no V1 state/archive/backup-format/migration/command/runtime-layout compatibility requirement.
+AUTHORITATIVE EXPECTATIONS
+- `V2-CODEX-PROMPTS.md` is the implementation-agent source of truth.
+- Phase 0–8 and corrective prompts are standalone copy/paste blocks.
+- Every Phase N > 0 explicitly verifies Phase N-1 is present; a fresh pasted session must not depend on the top-of-file sequencing prose.
+- Ordinary phase agents cannot edit the authoritative prompt contract.
+- Root `AGENTS.md` becomes a concise V2 map in Phase 0, not another architecture authority.
+- Greenfield: no V1 state/archive/backup-format/migration/command/runtime-layout compatibility.
 - Ubuntu 24.04 LTS; amd64 + arm64; cloud-neutral runtime; OCI A1 Flex reference only.
 - Python 3.12 stdlib-first structured logic; Bash minimal glue.
-- Prefer fewer cohesive first-party files without a numeric file-count target.
+- Prefer fewer cohesive first-party files without a numeric file-count quota.
 - One `vwctl`, one operator-editable TOML config authority, one `versions.toml`.
-- SOPS + Age retained with root-only operational identity, separate offline recovery material, and volatile decrypted secret material.
-- rclone first-class: local verify -> copy/copyto-style publication -> remote verification -> success; pruning separate; no destructive sync as normal publication.
-- Vaultwarden application mail uses direct authenticated SMTP.
-- Operational notification built-ins are canonical `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`; `cyberpanel` is only an alias to the `cyberpersons` definition.
-- Phase 6 uses one source-controlled immutable `email-providers.toml` catalog so routine endpoint/auth/request/success/retry changes are catalog edits rather than notification-library rewrites.
-- The provider catalog is closed and non-secret: no arbitrary operator endpoints/auth/headers/templates, `eval`, Jinja, Python expressions, shell expansion, dynamic imports, Python entry points, provider SDK, or general HTTP workflow language.
-- Authorization-bearing requests must not silently follow unsafe cross-host redirects.
-- CyberPanel Email/CyberPersons baseline is grounded in official docs but must be re-verified during Phase 6 implementation.
-- SMTP fallback is direct authenticated TLS SMTP and only for clearly transient API failures after bounded retry; no Postfix/local MTA/custom durable queue.
-- Cloudflare-first/CrowdSec beta edge uses one Docker bridge/iptables packet path with validated Cloudflare ranges, bounded last-known-good state, and fail-closed behavior.
-- One encrypted V2 recovery format plus offline recovery material.
-- Exact production version pins; `--use-latest` development/testing only.
-- Three validation layers only: focused unit, small integration, disposable-host release acceptance; no custom V1-style runner or coverage quota.
+- SOPS + Age with root-only operational identity, separate offline recovery material, volatile decrypted secrets.
+- rclone first-class: local verify -> copy/copyto publication -> remote verify -> success; pruning separate.
+- Vaultwarden mail uses direct authenticated SMTP.
+- Operational API built-ins: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`; `cyberpanel` is an alias only.
+- Phase 6 uses one immutable source-controlled non-secret `email-providers.toml` so routine provider changes are data edits, not library rewrites.
+- Canonical provider-template message fields are exactly: `from_email`, `from_name`, `from_header`, `to_email`, `subject`, `text`.
+- Catalog/operator config cannot inject arbitrary endpoints/auth/headers/payload/success/retry behavior; no executable template language/dynamic plugin system.
+- Authorization-bearing requests do not silently follow unsafe cross-host redirects.
+- CyberPersons current baseline: 429 and 503 transient/retryable; 500 `send_failed` is not transient/fallback-eligible by HTTP status alone. Body `retry_after` is not required unless current official docs define usable delay semantics/units.
+- SMTP fallback is only for clearly transient API failure after bounded retry; no blanket all-5xx fallback, Postfix, local MTA, or durable queue.
+- Cloudflare-only origin Caddy ingress uses one Docker bridge/iptables path with validated ranges, bounded last-known-good state, fail closed.
+- CrowdSec beta uses one Cloudflare remediation scope for proxied web clients. A CrowdSec host firewall bouncer is not a beta requirement.
+- One encrypted V2 recovery format + offline recovery material.
+- Exact production pins; `--use-latest` development/testing only.
+- Three validation layers: focused unit, small integration, disposable-host release acceptance; no custom V1-style test runner or coverage quota.
 
 REVIEW QUESTIONS
-1. Are the five report files internally consistent and non-duplicative enough to maintain?
-2. Are every Phase 0–8 implementation prompt and corrective prompt genuinely standalone/copy-paste-ready?
-3. Does each phase have a clear prerequisite, scope, non-goals, tests, file-surface rule, and final-response requirement?
-4. Could a fresh agent accidentally reintroduce V1 Postfix, migration/archive compatibility, dashboard/TUI, multiple backup tiers, generic provider/plugin frameworks, multiple firewall backends, or V1 source-coupled test architecture because of ambiguous wording?
-5. Is the `email-providers.toml` design maintainable without becoming a second operator config authority or an arbitrary credential-exfiltration mechanism?
-6. Is CyberPanel/CyberPersons represented consistently across prompts, architecture, tests, reviewer instructions, and PR description?
-7. Does the design fit a small team of about 10 users and a junior administrator, or has documentation/architecture become unnecessarily elaborate?
-8. Are file/test reduction preferences clear without becoming gameable quotas?
-9. Are there any OPEN decisions that should block Phase 0 or later work but are currently hidden?
-10. Does the PR remain documentation/design only, with no accidental runtime implementation?
+1. Are all five reports internally consistent?
+2. Are all Phase 0–8 implementation prompts and the corrective prompt genuinely standalone?
+3. Does every Phase N > 0 explicitly require Phase N-1?
+4. Is the canonical provider-message vocabulary identical wherever it is repeated?
+5. Is CyberPersons 500 correctly kept out of status-only transient fallback?
+6. Does retry-delay handling stay narrowly bounded rather than becoming JSONPath/expression infrastructure?
+7. Is CrowdSec clearly one beta remediation scope rather than two ambiguous mandatory bouncers?
+8. Could a fresh agent accidentally reintroduce V1 Postfix, migration/archive compatibility, dashboard/TUI, backup tiers, generic provider plugins, multiple firewall backends, or source-coupled test architecture?
+9. Does `email-providers.toml` reduce future provider maintenance without becoming a credential-exfiltration or arbitrary-HTTP mechanism?
+10. Is the design proportionate for roughly 10 users and a junior administrator?
+11. Does the PR remain documentation/design only?
 
-MERGE READINESS
-- Check current CI, unresolved review threads, and known failures.
-- Do not return `SAFE TO MERGE` while required CI is still pending or failing; use `NOT READY / INCOMPLETE` if the content looks good but required evidence is unfinished.
-
-OUTPUT FORMAT
+OUTPUT
 Start with exactly one verdict:
 - SAFE TO MERGE
 - NEEDS CHANGES
 - NOT READY / INCOMPLETE
 
 Then provide:
-1. `Blockers`
-2. `Important findings`
-3. `Minor findings`
-4. `Cross-document conflicts / stale wording`
-5. `Agent-overengineering risks`
-6. `Small-team / complexity assessment`
-7. `Validation / CI`
-8. `What I did not verify`
+1. Blockers
+2. Important findings
+3. Minor findings
+4. Cross-document conflicts/stale wording
+5. Agent-overengineering risks
+6. Small-team/complexity assessment
+7. Validation/CI
+8. What I did not verify
 
-For each finding, cite the affected file/section and explain the concrete downstream risk to a later Codex session.
+For each finding, identify the affected file/section and observable downstream risk.
 
-End by answering explicitly:
+End by answering exactly:
 "Are these V2 reports complete, accurate, internally consistent, fit for a small team, and safe to merge into `v2` as the architecture/agent contract?"
 ```
 
@@ -109,60 +112,43 @@ End by answering explicitly:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 0 PR: contract reset and durable decisions</strong></summary>
+<summary><strong>Review Prompt — Phase 0 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 0: contract reset and durable decisions.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 0.
 
 REVIEW MODE
-- Review only. Do not modify, push, update, resolve, or merge the PR.
-- Phase 0 is documentation/agent-contract work only. Production runtime code is out of scope.
+- Review only; do not modify or merge.
+- Read the Phase 0 block in `reports/V2-CODEX-PROMPTS.md`; it is authoritative if this reviewer summary ever differs.
 
-GATHER EVIDENCE
-1. Read PR metadata/base/head, full changed-file list/diff, description, review threads/comments, and CI/check status.
-2. Read the complete Phase 0 block in `reports/V2-CODEX-PROMPTS.md`, root `AGENTS.md` from base and head, and every V2 product/decision document changed by the PR.
-3. Inspect surrounding repository files only where necessary to detect duplicate authorities or accidental runtime changes.
+GATHER
+- PR metadata/base/head/diff/CI/review threads.
+- Root `AGENTS.md` before/after.
+- V2 product/decision documents created or changed.
 
-PHASE 0 MUST DELIVER
-- Replace V1-oriented root `AGENTS.md` with a concise V2 map, not a second architecture manual.
-- Make it explicit that V2 is greenfield and V1 is security/behavior reference only, not compatibility API.
-- Point agents to the authoritative standalone Codex prompts and durable V2 decisions.
-- Record the Python-first/Bash-minimal language boundary.
-- Record one operator-editable TOML config authority and one source-controlled `versions.toml` authority.
-- Record SOPS + Age operational/offline recovery identities and one canonical encrypted-secrets-document path.
-- Record Cloudflare-only beta ingress on one Docker iptables packet path.
-- Record operational email contract: six canonical built-ins `mailersend|sendgrid|mailgun|postmark|resend|cyberpersons`, `cyberpanel` alias, common `email_api_token` model, future static `email-providers.toml`, bounded transient-only direct SMTP fallback, no Postfix/custom queue/dynamic plugin framework.
-- Record that provider catalog is maintainer-editable release data, while operator config cannot arbitrarily replace endpoints/auth/payload templates.
-- Record rclone copy-style publication + remote verification + separate pruning.
-- Record one V2 recovery format + offline recovery material + no V1 compatibility.
-- Record bounded three-layer testing.
-- Group decisions into the fewest durable documents that remain clear rather than one ADR file per bullet.
+EXPECTED PHASE 0 OUTCOME
+- Documentation/contract only; no production runtime code, Compose, installer, provider catalog implementation, or CI redesign.
+- Root `AGENTS.md` is a concise V2 map pointing agents to the authoritative standalone prompts and durable decisions.
+- Greenfield/no-V1-compatibility boundary is explicit.
+- Python-first/Bash-minimal boundary is recorded.
+- One operator TOML config authority, one versions authority, SOPS/Age operational/offline recovery model, canonical encrypted-secret path, one V2 recovery format, rclone non-destructive publication, bounded tests are recorded.
+- Edge decision: Cloudflare-only origin ingress on one Docker iptables path; CrowdSec web remediation through Cloudflare only in beta; no host firewall bouncer requirement.
+- Notification decision: six canonical providers, `cyberpanel` alias, one future `email-providers.toml`, exact canonical message fields `from_email|from_name|from_header|to_email|subject|text`, transient-only SMTP fallback, CyberPersons 500 non-transient-by-status, no Postfix/queue/dynamic plugin framework.
+- Decision docs are consolidated rather than one ADR file per bullet unless separation has a real ownership reason.
 
-PHASE 0 MUST NOT
-- Add production Python/Bash runtime implementation, Compose changes, provider catalog implementation, installer redesign, or later-phase features.
-- Create ADR tooling/generators/frameworks.
-- Preserve V1 Postfix, backup tiers, dashboard, migration, command aliases, or test architecture as requirements.
-- Create unnecessary decision-document/file proliferation.
-
-REVIEW QUESTIONS
-- Is `AGENTS.md` short enough to act as a map and clear enough that a fresh agent will follow V2 instead of V1?
-- Are there competing config/secrets/version authorities?
-- Is the provider-catalog boundary recorded without implementing it early?
-- Is the canonical SOPS path actually locked down rather than left ambiguous?
-- Did the PR accidentally split architecture decisions across too many files?
-- Did Phase 0 stay documentation-only?
-- Are Markdown/link/basic checks sufficient and honestly reported instead of running/expanding the V1 suite unnecessarily?
-
-MERGE READINESS
-- Required docs/links must be coherent and CI/checks complete as required by the repo.
-- Pending required CI means `NOT READY / INCOMPLETE`, not `SAFE TO MERGE`.
+CHECK
+1. Did Phase 0 remove V1-oriented agent instructions that would recreate V1?
+2. Are architecture decisions complete enough for Phase 1 without implementing later phases?
+3. Did it create unnecessary ADR/index/template tooling or too many documents?
+4. Are secret/config authorities singular and unambiguous?
+5. Are notification/CrowdSec decisions consistent with the authoritative prompt?
+6. Was the large V1 suite avoided unless repository enforcement required it?
 
 OUTPUT
-Start with exactly one verdict: `SAFE TO MERGE`, `NEEDS CHANGES`, or `NOT READY / INCOMPLETE`.
-Then: Blockers, Important findings, Minor findings, Phase-0 requirement coverage, Scope violations, File-surface assessment, Validation/CI, What I did not verify.
+Verdict: SAFE TO MERGE / NEEDS CHANGES / NOT READY / INCOMPLETE.
+Then: Blockers, Important findings, Scope compliance, Contract consistency, File-surface assessment, Validation/CI, What I did not verify.
 
-End by answering:
-"Does this PR completely reset the repository contract for V2, without implementing runtime work or preserving V1 architecture by accident, and is it safe to merge?"
+End: "Is this Phase 0 PR complete and safe to merge before Phase 1 starts?"
 ```
 
 </details>
@@ -170,54 +156,39 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 1 PR: minimal Python foundation</strong></summary>
+<summary><strong>Review Prompt — Phase 1 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 1: minimal Python foundation.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 1.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- Judge only the Phase 1 foundation; later Docker, secrets execution, email, rclone, firewall, recovery, systemd, and update work is out of scope.
+- Review only; do not modify or merge.
+- Read the authoritative Phase 1 prompt in `reports/V2-CODEX-PROMPTS.md`.
 
-GATHER EVIDENCE
-1. Read PR metadata, complete diff, changed files, comments/threads, CI/checks.
-2. Read root `AGENTS.md`, Phase 0 decisions, and the complete Phase 1 block in `reports/V2-CODEX-PROMPTS.md`.
-3. Inspect relevant base/head package/config/version/test files around the diff.
+PREREQUISITE CHECK
+- Verify Phase 0 is already present on the PR base: V2 `AGENTS.md`, product boundary, and durable decisions. Missing Phase 0 is a blocker; Phase 1 must not recreate it implicitly.
 
-PHASE 1 MUST DELIVER
-- Small Python 3.12 stdlib-first `vwctl` foundation.
-- Only the intended initial surface: `vwctl --help`, `--version`, small explicit config validation, `versions`, and read-only `doctor [--json]` checks for host/architecture/config/version-file concerns.
-- One `versions.toml` containing exact values needed now.
-- amd64/x86_64 and arm64/aarch64 normalization with clear unsupported-architecture failure.
-- One small subprocess helper taking argv arrays, no shell interpolation, normalizing success/nonzero/not-found.
-- One global mutation-lock primitive using `fcntl.flock`; no lock on read-only commands.
-- Stable doctor IDs and PASS/WARN/FAIL/SKIP with stable JSON shape; human prose not treated as API.
-- No pre-created later-phase modules.
+EXPECTED PHASE 1 OUTCOME
+- Small Python 3.12 stdlib-first `vwctl` foundation only.
+- Help/version, config validation, versions output, read-only doctor skeleton.
+- Exact architecture normalization for amd64/x86_64 and arm64/aarch64 with clear unsupported failure.
+- One argv-array subprocess helper; no shell interpolation.
+- One global `fcntl.flock` mutation primitive; read-only commands do not take it.
+- Stable doctor IDs + PASS/WARN/FAIL/SKIP + JSON shape.
+- No Docker/root install/SOPS execution/email/rclone/firewall/backup/systemd/update implementation.
+- No speculative later-phase modules, plugin registries, or wrapper proliferation.
 
-EXPECTED TESTS
-- valid/invalid config TOML
-- valid/invalid versions manifest
-- architecture normalization/unsupported architecture
-- subprocess success/nonzero/not-found
-- real-temp lock contention
-- doctor JSON shape/check IDs implemented now
-
-REVIEW QUESTIONS
-- Is the package/module layout the smallest cohesive ownership model, or did the PR create one-function modules/wrappers/future placeholders?
-- Is config parsing stdlib/TOML based and singular rather than reviving `.env` synchronization?
-- Are subprocess calls safe and free of command-string interpolation?
-- Is locking minimal and correct?
-- Are doctor IDs/JSON stable while prose remains flexible?
-- Are tests behavior-focused rather than source-string/private-function tests?
-- Did the PR accidentally implement Docker/root mutation/SOPS execution/email/rclone/edge/recovery/systemd/update work?
-- Did it add runtime third-party dependencies without a concrete requirement?
+CHECK
+- Is runtime stdlib-only unless a concrete dependency is justified?
+- Are TOML/version errors safe and understandable?
+- Is lock contention tested with real temporary resources?
+- Are tests behavior-based and small?
+- Did the PR create more files/modules than the ownership model needs?
 
 OUTPUT
-Verdict first: `SAFE TO MERGE`, `NEEDS CHANGES`, or `NOT READY / INCOMPLETE`.
-Then: Blockers, Important findings, Minor findings, Phase-1 requirement coverage, Scope creep, File/test-surface assessment, Validation/CI, What I did not verify.
+Verdict, Blockers, Important findings, Prompt coverage, Small-team/file assessment, Tests/CI, What I did not verify.
 
-End by answering:
-"Is this the smallest safe Python foundation for later V2 work, complete for Phase 1 and safe to merge?"
+End: "Is this Phase 1 PR complete, minimal, and safe to merge before Phase 2?"
 ```
 
 </details>
@@ -225,50 +196,38 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 2 PR: bootstrap and immutable installed layout</strong></summary>
+<summary><strong>Review Prompt — Phase 2 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 2: bootstrap and immutable installed layout.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 2.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- Phase 2 installs V2 layout/code safely but does not start Vaultwarden/Caddy or implement later runtime features.
+- Review only; do not modify or merge.
+- Read the authoritative Phase 2 prompt.
 
-GATHER EVIDENCE
-1. Read PR metadata/diff/changed files/review threads/CI.
-2. Read root `AGENTS.md`, Phase 0 decisions, Phase 1 implementation, and the complete Phase 2 Codex prompt.
-3. Inspect installer/path/permission owners in base and head.
+PREREQUISITE CHECK
+- Verify Phase 1 is on the base: `vwctl`, config/versions parsing, architecture mapping, subprocess helper, doctor skeleton, and global lock. Missing Phase 1 is a blocker.
 
-PHASE 2 MUST DELIVER
-- Minimal root bootstrap, with Bash only where pre-install/host glue is materially simpler and structured logic delegated to Python.
-- Validate Ubuntu 24.04 and amd64/arm64.
-- Create only required installed/state/runtime paths, including immutable `/opt/vaultwarden-oci/releases/<release>/`, stable `/opt/vaultwarden-oci/current`, `/etc/vaultwarden-oci/config.toml`, canonical Age/secrets paths, required `/var/lib/vaultwarden-oci/` state, and `/run/vaultwarden-oci/` volatile state.
-- Install the current Python app immutably and expose the intended stable `vwctl` path.
-- Installed release layout must be able to carry source-controlled resources later, including `email-providers.toml`, without making them operator config.
-- Create only users/groups/directories with demonstrated need.
-- Same-release/same-config rerun is safe; incompatible pre-existing ownership/state fails clearly.
-- Only minimal systemd integration needed for installed application/lifecycle addressing; permanent timers wait until Phase 6.
-- Centralized path/permission policy rather than duplicated constants.
+EXPECTED PHASE 2 OUTCOME
+- Clean Ubuntu 24.04 amd64/arm64 bootstrap + immutable installed application layout.
+- One minimal bootstrap; structured install behavior remains Python-owned.
+- `/opt/vaultwarden-oci/releases/<release>/` + `current`, `/etc/vaultwarden-oci/config.toml`, Phase 0 Age/secrets paths, required `/var/lib` state and `/run` volatile state.
+- Installed release layout can carry immutable resources such as future `email-providers.toml` without making them operator config.
+- Re-run safety and fail-visible ownership/path conflicts.
+- Only minimal lifecycle-addressing systemd integration; permanent timers remain Phase 6.
+- No runtime containers, secrets decryption, edge/CrowdSec, recovery/rclone, notifications/catalog, or updates.
 
-EXPECTED VALIDATION
-- focused path/permission/rendering tests
-- small temp-root integration where practical
-- disposable Ubuntu 24.04 install smoke check when environment supports it
-
-REVIEW QUESTIONS
-- Are root-owned paths and permissions safe and explicit?
-- Can rerun overwrite or adopt unsafe/incompatible pre-existing state?
-- Is immutable-release/current-symlink handling coherent?
-- Are scripts/wrappers proliferating unnecessarily?
-- Is `config.toml` still the one operator config authority?
-- Did the PR accidentally start containers, decrypt secrets, implement provider catalog/email, edge/CrowdSec, backup/rclone/restore, updates, or V1 migration?
-- Are tests focused on installed behavior rather than source layout?
+CHECK
+- Are permissions/ownership centralized and safe?
+- Is bootstrap thin rather than another shell application?
+- Is same-release idempotency behavior real?
+- Did it create unnecessary scripts/wrappers/path constants?
+- Are focused path/permission/temp-root tests sufficient?
 
 OUTPUT
-Verdict first, then: Blockers, Important findings, Minor findings, Phase-2 requirement coverage, Permission/idempotency assessment, Scope creep, File/test-surface assessment, Validation/CI, What I did not verify.
+Verdict, Blockers, Important findings, Prompt coverage, Install/security assessment, File/test assessment, Validation/CI, What I did not verify.
 
-End by answering:
-"Does this PR establish a safe, minimal, idempotent V2 installed layout without starting later-phase runtime work, and is it safe to merge?"
+End: "Is this Phase 2 PR a safe, minimal installed foundation for Phase 3?"
 ```
 
 </details>
@@ -276,50 +235,39 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 3 PR: Vaultwarden + Caddy, SOPS/Age, Vaultwarden SMTP</strong></summary>
+<summary><strong>Review Prompt — Phase 3 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 3: core runtime, SOPS/Age, and Vaultwarden direct SMTP.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 3.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- Phase 3 owns Vaultwarden+Caddy core, secrets orchestration, lifecycle commands, and Vaultwarden direct SMTP. Phase 4 edge enforcement, Phase 5 recovery/rclone, and Phase 6 operational notification catalog/systemd automation are out of scope.
+- Review only; do not modify or merge.
+- Read the authoritative Phase 3 prompt.
 
-GATHER EVIDENCE
-1. Read metadata/diff/changed files/reviews/CI.
-2. Read root `AGENTS.md`, durable decisions, Phase 2 installed layout, and complete Phase 3 prompt.
-3. Inspect Compose/runtime/config/secrets paths and relevant tests in base/head.
+PREREQUISITE CHECK
+- Verify Phase 2 installed layout, config path, canonical secrets/Age paths, and installed `vwctl` are already present. Missing Phase 2 is a blocker.
 
-PHASE 3 MUST DELIVER
-- Minimal Compose/runtime with Vaultwarden + Caddy only.
-- Useful hardening where compatible: explicit users, `cap_drop: ALL` plus demonstrated additions only, no-new-privileges, read-only roots/tmpfs where practical, bounded logs, health checks, reasonable PID/memory limits.
-- SOPS + Age using the canonical Phase 0 paths: one encrypted structured document, root-only operational identity, separate offline recovery recipient/material, volatile-only plaintext, required-key validation.
-- No plaintext secrets in TOML, argv, ordinary logs, exceptions, or persistent temp files.
-- `vwctl start|stop|restart|status|logs` for the core stack.
+EXPECTED PHASE 3 OUTCOME
+- Compose/runtime contains Vaultwarden + Caddy only.
+- Useful container hardening retained where compatible.
+- One SOPS-encrypted structured secret document, root-only operational Age identity, separate offline recovery recipient/material, volatile-only plaintext materialization.
+- Secrets do not leak to ordinary TOML, argv, logs, or persistent temporary files.
+- `vwctl start|stop|restart|status|logs` owns lifecycle.
 - Vaultwarden application mail uses direct authenticated SMTP; no Postfix.
-- Caddy reverse-proxy/DNS-01 path needed by Cloudflare-first architecture, but no Phase 4 host ingress enforcement/CrowdSec implementation yet.
-- Doctor checks only for behavior introduced now.
+- Caddy reverse proxy/DNS-01 setup only; Phase 4 owns ingress/CrowdSec enforcement.
+- No project notification API/catalog, backup/rclone, or update work.
 
-EXPECTED TESTS
-- config-to-runtime rendering/validation
-- SOPS/Age orchestration at stable subprocess boundary
-- plaintext-secret non-leakage
-- representative lifecycle/status integration behavior
-
-REVIEW QUESTIONS
-- Does secret material remain volatile and root-protected?
-- Are SOPS/Age treated as trusted external tools rather than reimplemented cryptography/frameworks?
-- Does Compose hardening actually work, or are constraints copied blindly from V1?
-- Is Vaultwarden SMTP direct and securely configured, without Postfix or operational-email work creeping in?
-- Are lifecycle/status commands truthful and cohesive?
-- Did the PR accidentally implement `email-providers.toml`, operational API fallback, Cloudflare CIDR enforcement, CrowdSec setup, backup/rclone/restore, or updates?
-- Did file/module count grow beyond clear runtime/secrets ownership?
+CHECK
+- Are secrets actually absent from persistent/operator-readable surfaces?
+- Are Compose capabilities/users/read-only/tmpfs/log/health constraints sensible?
+- Is lifecycle truthful on failure?
+- Did the PR avoid carrying V1 Postfix/queue architecture forward?
+- Are tests at config/render/materialization/lifecycle boundaries rather than private source layout?
 
 OUTPUT
-Verdict first, then: Blockers, Important findings, Minor findings, Phase-3 requirement coverage, Secret-handling assessment, Runtime/hardening assessment, Scope creep, File/test-surface assessment, Validation/CI, What I did not verify.
+Verdict, Blockers, Security findings, Prompt coverage, Complexity/file assessment, Validation/CI, What I did not verify.
 
-End by answering:
-"Does this PR safely establish the V2 core runtime and secrets boundary with direct Vaultwarden SMTP, without leaking secrets or implementing later phases, and is it safe to merge?"
+End: "Is this Phase 3 runtime/secrets PR safe to merge before edge enforcement is added?"
 ```
 
 </details>
@@ -327,56 +275,40 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 4 PR: Cloudflare ingress and CrowdSec</strong></summary>
+<summary><strong>Review Prompt — Phase 4 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 4: Cloudflare ingress and CrowdSec.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 4.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- Phase 4 supports exactly one beta production edge path. Do not reward extra firewall/provider modes as "flexibility".
+- Review only; do not modify or merge.
+- Read the authoritative Phase 4 prompt and current upstream CrowdSec docs relevant to the implemented Cloudflare remediation component.
 
-GATHER EVIDENCE
-1. Read metadata/diff/changed files/reviews/CI.
-2. Read root `AGENTS.md`, edge decisions, Phase 3 runtime/Caddy implementation, and complete Phase 4 prompt.
-3. Inspect packet-path/firewall/CrowdSec code around changed owners.
+PREREQUISITE CHECK
+- Verify Phase 3 Vaultwarden+Caddy runtime, secrets materialization, lifecycle commands, and direct Vaultwarden SMTP are on the base. Missing Phase 3 is a blocker.
 
-PHASE 4 MUST DELIVER
-- Cloudflare IPv4/IPv6 retrieval with strict parsing/validation.
-- Last-known-good range persistence with bounded staleness.
-- One small project-owned Docker iptables ingress path allowing published Caddy HTTPS only from validated Cloudflare ranges.
-- Fail closed when no safe current/last-known-good policy exists.
-- No claim that ordinary UFW `INPUT` alone protects Docker-published Caddy ports.
-- CrowdSec retained using upstream installation/integration where practical; project owns only needed acquisitions/config/credentials/bouncer integration/lifecycle/diagnostics.
-- `vwctl`/doctor behavior sufficient for a junior admin to diagnose edge health.
+EXPECTED PHASE 4 OUTCOME
+- One beta origin path: Cloudflare-proxied Caddy + Docker bridge + iptables.
+- Strict Cloudflare IPv4/IPv6 validation, last-known-good cache with bounded staleness, fail closed if no safe policy.
+- Project-owned packet policy correctly accounts for Docker; it does not pretend ordinary UFW INPUT alone protects published Caddy ports.
+- CrowdSec Security Engine consumes required proxied web signals.
+- Exactly one CrowdSec beta remediation scope: a current supported Cloudflare remediation integration for proxied web-client decisions.
+- **No CrowdSec host firewall bouncer is required/installed by this phase.** SSH/host services remain under provider firewall/security-group + host firewall policy.
+- Project-owned Cloudflare-source iptables allowlist and CrowdSec Cloudflare decisions are distinct controls, not overlapping bouncers.
+- No nftables/second backend/direct-ingress/cloud-firewall API/general firewall framework.
 
-EXPECTED TESTS
-- CIDR parsing/validation/staleness
-- deterministic policy/rule decisions for the one supported backend
-- fail-closed decisions
-- minimal external-command integration
-- actual packet path reserved for disposable-host/release acceptance
-
-PHASE 4 MUST NOT
-- Add nftables or a second firewall backend.
-- Add direct/non-Cloudflare beta ingress.
-- Add generic firewall/provider abstraction or cloud security-group API integration.
-- Port the V1 CrowdSec installer wholesale.
-- Implement recovery/rclone, notification, or update work.
-
-REVIEW QUESTIONS
-- Does the actual Docker packet path match the claimed security model?
-- Can stale/invalid Cloudflare ranges accidentally fail open?
-- Are IPv4 and IPv6 both handled correctly?
-- Is the project owning too much CrowdSec lifecycle instead of delegating upstream?
-- Are diagnostics truthful without becoming a dashboard/repair framework?
-- Is the implementation one cohesive edge owner rather than one wrapper per command/action?
+CHECK
+1. Does origin fail closed on absent/expired unsafe Cloudflare CIDRs?
+2. Does the Docker packet path actually protect the published port?
+3. Is CrowdSec Cloudflare remediation configured according to current upstream behavior?
+4. Did the PR accidentally install/configure the host firewall bouncer or create a second remediation plane?
+5. Is CrowdSec integration narrow rather than a wholesale V1 installer port?
+6. Are real packet/remediation behaviors reserved for disposable-host acceptance where appropriate?
 
 OUTPUT
-Verdict first, then: Blockers, Important findings, Minor findings, Phase-4 requirement coverage, Packet-path/fail-closed assessment, CrowdSec ownership assessment, Scope creep, Test/validation assessment, CI, What I did not verify.
+Verdict, Blockers, Packet-path findings, CrowdSec findings, Scope/complexity assessment, Tests/CI, What I did not verify.
 
-End by answering:
-"Does this PR implement the single supported Cloudflare/CrowdSec beta edge accurately and fail closed on the real Docker packet path, and is it safe to merge?"
+End: "Does this Phase 4 PR provide one clear fail-closed origin path and one clear CrowdSec web-remediation path without unnecessary enforcement planes?"
 ```
 
 </details>
@@ -384,54 +316,40 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 5 PR: backup, restore, rclone, offline recovery</strong></summary>
+<summary><strong>Review Prompt — Phase 5 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 5: backup, restore, rclone, and offline recovery.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 5.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- Recoverability is the highest-risk area; require evidence, but do not ask for V1 compatibility or multiple backup products.
+- Review only; do not modify or merge.
+- Read the authoritative Phase 5 prompt.
 
-GATHER EVIDENCE
-1. Read metadata/diff/changed files/reviews/CI.
-2. Read root `AGENTS.md`, recovery/rclone/SOPS decisions, current storage/runtime implementation, and complete Phase 5 prompt.
-3. Inspect all changed backup/restore/manifest/rclone code and relevant tests completely.
+PREREQUISITE CHECK
+- Verify **Phase 4 is already present on the base**, including the Phase 3 runtime it depends on. Missing Phase 4 is a blocker; the Phase 5 PR must not silently implement edge/CrowdSec work.
 
-PHASE 5 MUST DELIVER
-- Exactly one normal encrypted V2 recovery format.
-- `vwctl backup` creates a consistent SQLite snapshot, required persistent app/config material, V2 format/version metadata/checksums, encrypts before publication, and verifies before success.
-- Operational Age private key is excluded from normal recovery artifacts; offline private recovery material is not persisted on the server.
-- Incomplete local candidates are never reported valid.
-- Small rclone owner for diagnostics/connectivity/publication/listing/remote verification/download-staging/explicit pruning.
-- Offsite success sequence: local verification -> `copy`/`copyto`-style publication -> remote verification -> success.
-- Retention/pruning/deletion is separate; normal publication never uses destructive `rclone sync` semantics.
-- `vwctl restore` is V2-only: decrypt/validate/check/stage before live mutation, validate space/target, stop services only after preflight, promote through a small explicit transaction boundary, restore permissions, and health-gate any requested start.
-- `status`/`doctor` exposes last verified local/offsite recovery state without secrets.
+EXPECTED PHASE 5 OUTCOME
+- One encrypted V2 recovery format; no V1 reader/migration and no db/full/emergency public tier model.
+- Consistent SQLite snapshot + required persistent state + versioned manifest/checksums + encryption + verification before success.
+- Operational Age private key excluded; offline private recovery material not persisted on server.
+- Incomplete local candidates never reported valid.
+- rclone is first-class but small: diagnostics/connectivity/publication/list/verify/download/stage/prune.
+- Offsite success = local verify -> copy/copyto-style publication -> remote verify.
+- `rclone sync` is not normal publication; pruning/deletion separate.
+- Restore validates/decrypts/checks/free-space/stages before live mutation; services stop only after successful preflight; promotion is a small explicit transaction boundary.
+- No notification/systemd/update expansion.
 
-EXPECTED TESTS
-- representative real-temp SQLite backup/restore
-- corruption/wrong-key/incomplete-manifest/preflight failure
-- rclone argv/result classification
-- proof normal publication does not request destructive sync
-- remote verification before success
-- explicit pruning decisions
-
-REVIEW QUESTIONS
-- Can backup report success before consistency/encryption/integrity/remote verification is established?
-- Can restore mutate live state before all feasible validation/preflight completes?
-- Can a wrong key/corrupt manifest/archive partially damage live state?
-- Are file permissions/temporary staging/atomic publication boundaries safe?
-- Is the operational Age key accidentally captured?
-- Does rclone remain a delegated tool rather than a storage-provider abstraction?
-- Did the PR add V1 archive readers, db/full/emergency tiers, replication daemons, generic transactions/workflows, or notification/system redesign?
-- Is test attention high enough for recovery without recreating V1's test architecture?
+CHECK
+- Could backup ever report success before local or remote verification?
+- Could restore mutate live state before all safe preflight checks?
+- Are corruption/wrong-key/incomplete-manifest paths covered with real temp artifacts?
+- Are rclone commands non-destructive in normal publication?
+- Is recovery ownership cohesive rather than a wrapper/module explosion?
 
 OUTPUT
-Verdict first, then: Blockers, Important findings, Minor findings, Phase-5 requirement coverage, Backup integrity assessment, Restore preflight/promotion assessment, rclone non-destructive assessment, Offline-key assessment, Test/CI evidence, Complexity/file-surface assessment, What I did not verify.
+Verdict, Blockers, Recoverability findings, rclone findings, Prompt coverage, File/test assessment, Validation/CI, What I did not verify.
 
-End by answering:
-"Would I trust this PR to create and restore a real V2 recovery point without false-success or destructive-publication hazards, and is it safe to merge?"
+End: "Would I trust the recovery points produced by this Phase 5 PR before Phase 6 automation begins?"
 ```
 
 </details>
@@ -439,78 +357,63 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 6 PR: systemd and catalog-driven operational notifications</strong></summary>
+<summary><strong>Review Prompt — Phase 6 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 6: systemd automation and catalog-driven operational notifications.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 6.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- This phase must be maintainable when email-provider settings change, but must not become a runtime plugin system or arbitrary HTTP scripting engine.
+- Review only; do not modify or merge.
+- Read the authoritative Phase 6 prompt completely. It wins if this reviewer mirror ever differs.
+- Independently verify current official API documentation for provider-specific findings that affect merge safety.
 
-GATHER EVIDENCE
-1. Read metadata/diff/changed files/reviews/CI.
-2. Read root `AGENTS.md`, notification decisions, architecture/test reports, complete Phase 6 prompt, current config/secrets/status/doctor/systemd owners, and the new `email-providers.toml` completely.
-3. Inspect implementation/tests around HTTP rendering, redirects, retries/classification, SMTP, systemd units, and provider-catalog validation.
-4. Verify the PR states which current official provider documentation it checked. Spot-check current official documentation for any materially security-sensitive or questionable provider setting rather than trusting copied V1 values.
+PREREQUISITE CHECK
+- Verify **Phase 5 is already present**: V2 backup/restore and rclone interfaces required by timers. Missing Phase 5 is a blocker.
 
-PHASE 6 MUST DELIVER
-- Only permanent lifecycle/health/backup/maintenance systemd units/timers actually needed, executing installed immutable code/config rather than arbitrary checkout paths.
-- One source-controlled non-secret immutable-release `email-providers.toml` containing canonical built-ins:
-  `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`.
-- `cyberpanel` is an alias to the same `cyberpersons` definition, not duplicate provider data.
-- Operator selects provider/alias in `/etc/vaultwarden-oci/config.toml`; operator config cannot arbitrarily override endpoint/auth/header/payload/success/retry semantics.
-- Common SOPS `email_api_token` unless a provider's current requirements demonstrably need another secret; provider catalog contains no credentials.
-- Closed catalog schema sufficient for supported providers: HTTPS endpoint with declared substitutions, closed auth modes/headers, JSON/form encoding, fixed canonical message placeholders (`from_email`, `from_name`, `to_email`, `subject`, `text`), optional simple success-field check, documented retry statuses/Retry-After handling, declared non-secret options.
-- Strict validation rejects duplicate IDs/aliases, unknown fields/auth/encoding/placeholders/options/substitutions, invalid success/retry rules, and non-HTTPS endpoints.
-- Templates are data, not code: no `eval`, Jinja, Python expressions, shell expansion, dynamic imports, provider classes/modules merely for symmetry, provider SDK, or general HTTP workflow language.
-- Structured serialization prevents message data from becoming template/code syntax.
-- Authorization-bearing POSTs do not silently follow unsafe cross-host redirects.
-- One cohesive notification owner validates/loads catalog, normalizes message fields, renders request, sends using Python stdlib HTTPS with normal CA/hostname validation, interprets success rule, and applies shared bounded retry/fallback classification.
-- API success stops; SMTP is used only after bounded retry for clearly transient conditions. Configuration/auth/permanent/security failures remain visible and are not silently masked.
-- Direct SMTP uses normal certificate/hostname validation with implicit TLS or required STARTTLS + authentication; no plaintext downgrade.
-- If fallback SMTP is not configured, doctor reports it unavailable.
-- No Postfix/local MTA/spool/persistent retry queue/dead-letter system.
-- Small secret-free last-delivery state only; no full provider response bodies or secrets persisted.
-- Documentation explains catalog maintenance and operator setup.
+EXPECTED PHASE 6 OUTCOME
+- Small systemd automation surface using installed immutable code/config.
+- One source-controlled non-secret immutable `email-providers.toml` for canonical `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`; `cyberpanel` alias only.
+- One cohesive catalog renderer/notification owner, not a source module/class per provider.
+- Operator config selects provider/alias + declared non-secret options; SOPS supplies credentials.
+- Canonical provider-template message context is **exactly**:
+  `from_email`, `from_name`, `from_header`, `to_email`, `subject`, `text`.
+- Routine endpoint/auth/request/success/retry changes stay catalog-only when the closed schema can represent them.
+- Catalog schema remains closed: HTTPS endpoint/template, finite auth modes, JSON/form request template using canonical fields, success status + at most one simple top-level success check, documented retry statuses, bounded standard Retry-After, and only a narrowly declared top-level numeric body retry-delay field + fixed unit when official docs support it.
+- No arbitrary operator endpoints/auth/headers/payload/success/retry definitions; no `eval`, Jinja, Python expressions, dynamic imports, provider SDK, or general HTTP response/workflow language.
+- Authorization-bearing requests do not silently follow cross-host redirects.
+- API retry is small/bounded; SMTP fallback only for clearly transient failures after retry.
+- No blanket all-5xx fallback.
+- Direct SMTP uses validated TLS/STARTTLS + auth; no plaintext downgrade; no Postfix/local MTA/durable queue.
 
-CYBERPANEL/CYBERPERSONS MUST BE VERIFIED
-At minimum, confirm current official docs at implementation/review time for:
-- canonical V2 ID `cyberpersons`; alias `cyberpanel`;
-- `POST https://platform.cyberpersons.com/email/v1/send` if still current;
-- Bearer API-key authentication and send permission requirements;
-- required V2 plain-text fields `from`, `to`, `subject`, `text`;
-- accepted-send semantics (currently designed as HTTP 202 plus `success: true`);
-- current retryable/permanent status categories;
-- optional SMTP fallback settings if documented, with SMTP credentials separate from API key.
-If current official docs differ from the design baseline, the implementation should follow current docs and explicitly document the intentional change.
+CYBERPERSONS REVIEW BASELINE
+Re-verify against current official docs. The design baseline currently expects:
+- endpoint `POST https://platform.cyberpersons.com/email/v1/send`;
+- Bearer API key with `can_send`;
+- mapping canonical values to provider `from`, `to`, `subject`, `text`;
+- accepted HTTP 202 + JSON `success:true`;
+- HTTP 429 transient/retryable after bounded retry;
+- HTTP 503 service_unavailable transient/retryable;
+- HTTP 500 send_failed **not transient/fallback-eligible by status alone**;
+- 400/403 configuration/permanent cases visible;
+- current docs mention JSON `retry_after` on 429, but if usable units/semantics are not documented, fixed bounded retry is acceptable and no general response-expression system should be added;
+- optional CyberPanel SMTP is `mail.cyberpersons.com:587` STARTTLS with credentials separate from the API key.
 
-EXPECTED TESTS
-- catalog schema, duplicates, unknown fields, HTTPS, placeholders, aliases
-- operator config cannot override endpoint/auth/payload arbitrarily
-- one focused catalog-render/auth/success test per canonical provider
-- `cyberpanel -> cyberpersons` alias without duplicated matrix
-- current CyberPanel success/retry classification
-- Mailgun region/domain if supported
-- API success prevents SMTP
-- representative transient failures trigger SMTP only after bounded retry
-- representative config/auth/security failures remain visible
-- cross-host redirect safety
-- SMTP TLS/auth stable boundary
-- secret redaction/result shape
-- minimal systemd target/rendering validation
-
-MAINTAINABILITY REVIEW
-- A routine provider endpoint/auth/request/success/retry change should usually require changing one catalog block + focused tests/docs, not Python library rewrites.
-- Python should change only for a genuinely new transport capability that cannot safely fit the closed schema.
-- Do not accept one Python module/class per provider as an unnecessary regression.
-- Also do not accept an over-general schema that permits arbitrary HTTP requests or credential exfiltration.
+CHECK
+1. Does the implemented catalog use the exact canonical field vocabulary, including `to_email` rather than an alternate canonical `to`?
+2. Can routine provider settings change without rewriting Python?
+3. Is the catalog strict enough that operator config cannot exfiltrate `email_api_token` to an arbitrary host?
+4. Is cross-host redirect behavior safe?
+5. Are only provider-documented transient statuses fallback-eligible?
+6. Specifically, can CyberPersons HTTP 500 accidentally trigger SMTP fallback? If yes, blocker.
+7. Is 429 retry bounded without inventing a generic JSONPath/expression system?
+8. Does `doctor` truthfully report invalid catalog/provider/credential/fallback states?
+9. Are systemd units few, justified, and directly invoking installed `vwctl` rather than wrapper scripts?
+10. Are tests focused: one provider render/auth/success check per built-in + shared catalog/security/classifier/fallback behavior rather than a provider conformance framework?
 
 OUTPUT
-Verdict first, then: Blockers, Important findings, Minor findings, Phase-6 requirement coverage, Provider-catalog maintainability assessment, Catalog security assessment, CyberPanel verification, Fallback/classification assessment, systemd assessment, Tests/CI, Complexity/file-surface assessment, What I did not verify.
+Verdict, Blockers, Provider-catalog findings, CyberPersons classification findings, Secret/TLS/redirect findings, Systemd findings, Complexity/file/test assessment, Validation/CI, What I did not verify.
 
-End by answering:
-"Does this PR provide a secure, maintainable provider catalog—including CyberPanel/CyberPersons—so routine provider setting changes avoid library rewrites without creating an unsafe plugin/HTTP engine, and is it safe to merge?"
+End: "Is this Phase 6 PR maintainable when provider settings change, secure against credential redirection, and safe to merge without masking permanent email failures?"
 ```
 
 </details>
@@ -518,50 +421,39 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 7 PR: reproducible versions and explicit updates</strong></summary>
+<summary><strong>Review Prompt — Phase 7 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 7: reproducible versions and explicit updates.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 7.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- Phase 7 must preserve existing runtime/recovery/edge/notification architecture and add no unattended updater or generic component framework.
+- Review only; do not modify or merge.
+- Read the authoritative Phase 7 prompt.
 
-GATHER EVIDENCE
-1. Read metadata/diff/changed files/reviews/CI.
-2. Read root `AGENTS.md`, version/update decisions, complete Phase 7 prompt, `versions.toml`, recovery/update/runtime owners, and immutable-release layout.
-3. Inspect remote-release lookup code/tests and activation/rollback behavior.
+PREREQUISITE CHECK
+- Verify **Phase 6 is already present**, including systemd automation, notification owner, and immutable-release `email-providers.toml`. Also verify Phase 5 recovery still exists for update preflight. Missing Phase 6 is a blocker; this PR must not invent notification/catalog work.
 
-PHASE 7 MUST DELIVER
+EXPECTED PHASE 7 OUTCOME
 - `versions.toml` remains the sole source-controlled component-version authority.
-- Centralized amd64/arm64 artifact/image resolution.
-- Production install/update uses exact pins only.
-- `--use-latest` is dev/test-only, resolves once at run start, freezes exact values/digests where available, records exact set, and does not scatter live-latest checks.
-- `vwctl update check|apply` safely validates current state; creates/verifies recovery according to policy; stages immutable release; pulls/builds exact pinned runtime components; switches `current`; restarts; health/doctor gates; rolls back application-release activation where safe before incompatible state change.
-- Application code and matching source-controlled resources such as `email-providers.toml` activate as one coherent immutable release; no mixed-version provider catalog.
-- No unattended updater daemon.
+- amd64/arm64 artifact/image resolution centralized.
+- Production install/update uses exact pins.
+- `--use-latest` is dev/test-only, resolves once, freezes exact values/digests, records them, and never creates floating production state.
+- Explicit `vwctl update check|apply`: validate current state -> verified recovery according to policy -> stage immutable release -> exact runtime components -> switch current -> restart -> health/doctor gate -> safe application-release rollback where possible.
+- Application code and matching `email-providers.toml`/release resources activate as one release; no split-brain catalog.
+- No unattended updater or generic component/provider framework.
 
-EXPECTED TESTS
-- versions parsing/resolution/architecture mapping
-- `--use-latest` resolves once/freezes exact values
-- representative activation/failure/rollback decisions
-- app release and provider catalog/resources activate coherently
-- smallest stable remote-release lookup boundary
-
-REVIEW QUESTIONS
-- Can production ever run a floating `latest` value?
-- Can different update substeps independently resolve "latest" and drift?
-- Can `current` point to a partially staged or mismatched release/catalog?
-- Does update require/verify recovery appropriately before risky mutation?
-- Is rollback overpromised across incompatible data changes?
-- Did the PR create per-component resolver files/classes or a generic update-provider framework unnecessarily?
-- Did it redesign recovery/notification/edge systems instead of using existing interfaces?
+CHECK
+- Can `--use-latest` leak into production state?
+- Is resolution performed once rather than scattered?
+- Does update preflight really use the existing recovery contract?
+- Can code/catalog resources from different releases become active together?
+- Are rollback boundaries truthful and safe?
+- Did the PR introduce per-component resolver-file proliferation?
 
 OUTPUT
-Verdict first, then: Blockers, Important findings, Minor findings, Phase-7 requirement coverage, Reproducibility assessment, Activation/rollback assessment, Release-resource coherence assessment, Scope/complexity assessment, Tests/CI, What I did not verify.
+Verdict, Blockers, Reproducibility findings, Update/rollback findings, Prompt coverage, Complexity/test assessment, Validation/CI, What I did not verify.
 
-End by answering:
-"Does this PR keep production versions reproducible and updates explicit/safe, with code and provider catalog activating as one release, and is it safe to merge?"
+End: "Is this Phase 7 update model reproducible and safe to merge before beta cleanup/docs?"
 ```
 
 </details>
@@ -569,68 +461,45 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Phase 8 PR: beta docs, acceptance, and V2 cleanup</strong></summary>
+<summary><strong>Review Prompt — Phase 8 PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as VaultWarden-OCI V2 Phase 8: beta documentation, release acceptance, and V1 cleanup.
+Review PR <PR_URL> as VaultWarden-OCI V2 Phase 8 / beta readiness.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- This is final beta consolidation/readiness work, not an invitation to add new enterprise/product features.
+- Review only; do not modify or merge.
+- Read the authoritative Phase 8 prompt.
+- This is a beta-readiness review, not an invitation to add enterprise features.
 
-GATHER EVIDENCE
-1. Read metadata/diff/changed files/reviews/CI.
-2. Read root `AGENTS.md`, complete Phase 8 prompt, current architecture/test strategy, final V2 docs, current `v2` tree, and release/host acceptance evidence.
-3. Identify obsolete V1 runtime/docs/tests that remain and determine whether they are still real build/runtime inputs.
+PREREQUISITE CHECK
+- Verify **Phase 7 is already present**, and therefore the Phase 6/5/4 surfaces it depends on are not being recreated inside this PR. Missing Phase 7 is a blocker.
 
-FINAL BETA CONTRACT TO VERIFY
-- Ubuntu 24.04 LTS; amd64 + arm64; cloud-neutral/OCI-reference; Cloudflare-first/CrowdSec; no V1 compatibility.
-- Python 3.12 stdlib structured logic; Bash minimal glue.
-- One `vwctl`, one operator TOML config, one `versions.toml`, no dashboard/TUI.
-- SOPS + Age operational/offline recovery model; volatile plaintext only.
-- rclone local verify -> copy/copyto -> remote verify -> success; separate prune; no destructive sync/provider framework.
-- Vaultwarden direct authenticated SMTP.
-- Operational notifications: canonical six provider definitions in one immutable `email-providers.toml`, `cyberpanel` aliasing `cyberpersons`, common API-token model unless current provider requires otherwise, direct authenticated SMTP transient fallback, no Postfix/MTA/durable queue/dynamic plugin system.
-- Routine provider metadata changes are catalog edits + focused tests/docs; operator config cannot redirect credentials to arbitrary endpoints/auth/payloads.
-- Cloudflare/Docker-iptables fail-closed ingress + CrowdSec; no second firewall backend.
-- One encrypted V2 recovery format + offline recovery material; no V1 reader/migration.
-- Exact production pins; `--use-latest` dev/test only and resolved once.
-- No speculative framework/plugin/compatibility architecture.
+VERIFY FINAL BETA CONTRACT
+- Clean Ubuntu 24.04 install model coherent for amd64 + arm64.
+- `vwctl` is the practical operator surface; status/doctor/logs truthful.
+- Singular config/version/secret authorities.
+- SOPS + Age operational/offline recovery safe and documented.
+- Vaultwarden+Caddy hardening coherent.
+- Cloudflare origin ingress fail closed; CrowdSec proxied web remediation uses the Cloudflare scope only; no accidental host firewall-bouncer beta requirement.
+- Recovery creates/validates/encrypts one V2 format, publishes with non-destructive rclone semantics, verifies remote, downloads/stages safely, restores only after preflight.
+- Operational provider selection supports six canonical built-ins including CyberPersons; `cyberpanel` aliases the same definition.
+- `email-providers.toml` is safely maintainable without Python rewrites for ordinary metadata changes; operator config cannot redirect secrets to arbitrary endpoints.
+- Canonical message context remains exactly `from_email|from_name|from_header|to_email|subject|text`.
+- CyberPersons 500 is not masked by SMTP simply because it is 500; 429/503 behavior matches current verified provider docs.
+- Direct SMTP fallback is transient-only, TLS-validating, no durable queue/Postfix.
+- systemd invokes installed immutable code/resources.
+- Production versions exact; `--use-latest` cannot create floating production state.
+- Obsolete V1 migration/dashboard/Postfix queue/multiple backup tier/test-runner product surfaces removed from V2 when no longer needed.
+- Documentation is sufficient for a junior admin and for a maintainer updating a provider block.
+- Permanent tests are proportional; destructive/full-host validation is release acceptance rather than a giant per-PR controller.
 
-DOCUMENTATION MUST COVER
-- install/prerequisites
-- normal operations/status/doctor/logs
-- security/Cloudflare/CrowdSec/SOPS+Age
-- one recovery/rclone/offline-recovery workflow
-- built-in HTTPS provider configuration + transient SMTP fallback
-- CyberPanel/CyberPersons setup: canonical/alias naming, API-key/send permission, verified sending domain, SOPS token, separately configured SMTP credentials if using CyberPanel SMTP fallback; current official settings rechecked
-- provider-catalog maintainer workflow: routine endpoint/auth/request/success/retry changes edit catalog + focused tests/docs; Python only for genuinely new capability
-- version/update model
-- developer/test/release workflow
-- `vwctl --help` as executable command reference rather than giant generated manual
-
-ACCEPTANCE EVIDENCE SHOULD COVER AT LEAST
-- clean install/layout
-- start/status/doctor
-- SOPS/Age materialization without leakage
-- Cloudflare fail-closed path + CrowdSec
-- backup -> rclone publish -> remote verify -> download -> restore
-- one configured built-in API success + representative transient SMTP fallback
-- provider-catalog validation/security
-- systemd units/timers
-- pinned update path
-- amd64/arm64 where environments are available, with gaps explicitly stated
-
-CLEANUP REVIEW
-- Remove obsolete V1 migration/archive compatibility, dashboard/TUI, Postfix queue tooling, multiple backup-tier product surfaces, obsolete aliases/wrappers/placeholders, and V1 test architecture when no longer required.
-- Do not preserve old files just for history; `main`/git history is the reference.
-- Prefer consolidation/deletion naturally without giant mixed-responsibility files.
+CHECK ACCEPTANCE EVIDENCE
+At minimum assess evidence for clean install/layout; start/status/doctor; SOPS/Age no-leak; Cloudflare fail-closed + CrowdSec Cloudflare remediation; backup->rclone publish->verify->download->restore; one provider API success + transient SMTP fallback; provider-catalog validation; systemd; pinned update. Clearly distinguish what was actually run from what remains unverified because environments were unavailable.
 
 OUTPUT
-Verdict first, then: Release blockers, Important findings, Minor findings, Final-contract coverage, Security/recovery findings, Operator usability, Provider-catalog/CyberPanel maintainability, V1 cleanup/file-surface assessment, Acceptance/CI evidence, Safe post-beta deferrals, What I did not verify.
+Verdict, Release blockers, Security/recovery findings, Operator usability findings, Provider/CrowdSec findings, Complexity/file/test findings, Acceptance/CI evidence, Safe post-beta deferrals, What I did not verify.
 
-End by answering:
-"Would I trust this V2 beta for a small team of about 10 users, is the documentation/acceptance evidence sufficient, and is this PR safe to merge/release within the documented scope?"
+End: "Would I trust this V2 beta for a small team of about 10 users, and is it safe to merge/release within the documented scope?"
 ```
 
 </details>
@@ -638,50 +507,34 @@ End by answering:
 ---
 
 <details>
-<summary><strong>Review Prompt — Corrective PR: one observable V2 bug</strong></summary>
+<summary><strong>Review Prompt — Corrective / bug-fix PR</strong></summary>
 
 ```text
-Review PR <PR_URL> as a VaultWarden-OCI V2 corrective PR for one observable bug.
+Review PR <PR_URL> as one VaultWarden-OCI V2 corrective bug-fix PR.
 
 REVIEW MODE
-- Review only. Do not modify or merge the PR.
-- The expected change is intentionally narrow. Do not reward unrelated cleanup/refactoring as "helpful".
+- Review only; do not modify or merge.
+- Read the authoritative corrective prompt in `reports/V2-CODEX-PROMPTS.md`.
+- Expected scope is intentionally narrow.
 
-GATHER EVIDENCE
-1. Read metadata/diff/changed files/reviews/CI.
-2. Read root `AGENTS.md`, applicable durable V2 decisions, and the complete corrective prompt in `reports/V2-CODEX-PROMPTS.md`.
-3. Reproduce/understand the observable failure at the stable/public boundary where practical and inspect the smallest owning code around it.
-
-CORRECTIVE CONTRACT
-- Fix one observable bug and its root cause in the smallest correct owner.
-- Preserve current V2 architecture: Ubuntu 24.04 amd64/arm64, one CLI/operator-config/versions authority, SOPS/Age, rclone, static provider catalog + transient SMTP fallback, recovery, edge, exact versions.
-- No V1 compatibility/dashboard/Postfix/custom queue/dynamic provider registry/framework/migration engine/speculative extension point.
-- Prefer an existing owner; a new file requires a clear ownership/security reason.
-- Add one highest-value behavioral regression test only if there is a real coverage gap.
-- No source-string/order/prose-freezing/private-helper/custom-runner/coverage-quota test patterns.
-
-EMAIL-PROVIDER BUG RULE
-- First determine whether `email-providers.toml` is the correct owner.
-- If the provider changed only endpoint/auth/request/success/retry/options representable in the closed catalog, the fix should normally be catalog-only plus focused test/docs.
-- Do not rewrite notification Python or add a provider class/module for routine metadata changes.
-- Conversely, do not weaken catalog security or add arbitrary HTTP scripting merely to fit a new provider behavior.
-- If a genuinely new transport capability is required, the PR should explicitly identify the durable architecture conflict rather than silently widening it.
-
-REVIEW QUESTIONS
-- Is the reported bug actually fixed at the observable boundary?
-- Is the root cause addressed, not merely the symptom?
-- Is this the smallest coherent change?
-- Did the PR add unrelated refactoring/framework/file proliferation?
-- Is the regression test at the right layer and non-duplicative?
-- Are security/recovery/secret-handling implications covered?
-- If a provider bug: did the fix stay catalog-only where appropriate, and are official provider settings verified?
+CHECK
+1. Confirm the observable bug and stable/public boundary affected.
+2. Confirm the PR changes the smallest correct owner and addresses root cause.
+3. Ensure it did not become an unrelated refactor/framework/compatibility/later-phase expansion.
+4. Verify a regression test was added only for a real coverage gap and tests behavior, not private source layout.
+5. Check specific security/recovery/secret implications.
+6. For email-provider settings bugs, ask first whether `email-providers.toml` is the correct owner. Ordinary endpoint/auth/request/success/retry metadata changes should not trigger a Python-library rewrite.
+7. Preserve exact canonical provider-template fields: `from_email`, `from_name`, `from_header`, `to_email`, `subject`, `text`.
+8. Do not allow a provider bugfix to weaken transient-only SMTP fallback; CyberPersons 500 remains non-transient by status alone unless current official docs support an explicit contract change.
+9. Do not allow a CrowdSec bugfix to add a host firewall bouncer or second remediation plane without a separate architecture decision.
+10. Verify current CI and focused validation.
+11. Flag new files unless there is a clear ownership/security reason an existing cohesive owner is insufficient.
 
 OUTPUT
-Verdict first: `SAFE TO MERGE`, `NEEDS CHANGES`, or `NOT READY / INCOMPLETE`.
-Then: Blockers, Root-cause assessment, Correctness assessment, Regression-test assessment, Scope-creep/file-surface assessment, Provider-catalog assessment if relevant, Validation/CI, What I did not verify.
+Verdict: SAFE TO MERGE / NEEDS CHANGES / NOT READY / INCOMPLETE.
+Then: Blockers, Root-cause assessment, Regression-test assessment, Scope-creep assessment, Security/architecture preservation, Validation/CI, What I did not verify.
 
-End by answering:
-"Does this PR completely fix the stated observable bug with the smallest safe change and without widening V2 architecture unnecessarily?"
+End: "Does this PR fix the reported bug completely with the smallest safe change?"
 ```
 
 </details>
