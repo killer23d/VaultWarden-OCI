@@ -6,7 +6,8 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-repo_root=$(cd -- "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")" && pwd)
+script_path=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")
+repo_root=$(cd -- "$(/usr/bin/dirname -- "$script_path")" && pwd)
 
 if [[ ! -r /etc/os-release ]]; then
   echo "FAIL: cannot read /etc/os-release" >&2
@@ -30,4 +31,4 @@ esac
 
 cd -- "$repo_root"
 unset PYTHONPATH
-exec /usr/bin/python3 -E -m vaultwarden_oci.install --source "$repo_root"
+exec /usr/bin/python3 -B -E -m vaultwarden_oci.install --source "$repo_root"
