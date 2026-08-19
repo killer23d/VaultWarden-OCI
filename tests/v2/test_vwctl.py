@@ -151,7 +151,7 @@ class Phase1IntegrationTests(unittest.TestCase):
         self.assertIsInstance(payload["checks"], list)
         self.assertEqual(
             [check["id"] for check in payload["checks"]],
-            list(cli.DOCTOR_CHECK_IDS),
+            ["host.os", "host.architecture", "config.toml", "versions.toml"],
         )
         for check in payload["checks"]:
             self.assertEqual(set(check), {"id", "status", "message"})
