@@ -36,7 +36,8 @@ V2 beta supports:
 - SOPS + Age secrets;
 - rclone offsite recovery workflows;
 - Vaultwarden direct authenticated SMTP;
-- built-in HTTPS operational-email providers carried forward from V1's documented set: `mailersend`, `sendgrid`, `mailgun`, `postmark`, and `resend`;
+- built-in HTTPS operational-email providers: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, and `cyberpersons` (CyberPanel Email / CyberPersons; accept `cyberpanel` as an alias to the same built-in definition);
+- one source-controlled, non-secret provider catalog (`email-providers.toml`) so provider transport settings can be maintained without rewriting the notification library;
 - direct authenticated SMTP fallback for clearly transient operational-email API failures;
 - one encrypted V2 recovery format plus separate offline recovery material;
 - systemd lifecycle/timers;
@@ -47,7 +48,8 @@ V2 beta intentionally does **not** support:
 - V1 state, archive, backup-format, migration, command, or runtime-layout compatibility;
 - Kubernetes, Swarm, HA, or distributed coordination;
 - generic cloud, storage, notification, secrets, or firewall provider frameworks;
-- runtime-loaded notification plugins or Python entry-point discovery;
+- runtime-loaded notification plugins, arbitrary user-supplied provider code, or Python entry-point discovery;
+- arbitrary operator overrides of provider API endpoints/authentication that could redirect secrets;
 - a dashboard/TUI;
 - a mandatory Postfix/local-MTA container;
 - a project-built durable notification queue;
@@ -62,19 +64,19 @@ V2 beta intentionally does **not** support:
 Use Ubuntu 24.04's Python 3.12 and prefer the standard library at runtime. Python owns structured/stateful behavior such as:
 
 - `vwctl` CLI parsing and dispatch;
-- TOML config/version parsing and validation;
+- TOML config/version/provider-catalog parsing and validation;
 - normalized errors and subprocess execution;
 - architecture mapping;
 - `fcntl.flock` mutation locking;
 - status/doctor JSON;
 - SOPS/Age orchestration;
-- notification HTTPS/SMTP request construction and failure classification;
+- notification provider-template rendering, HTTPS/SMTP delivery, and failure classification;
 - backup metadata, recovery validation, retention decisions, and rclone orchestration;
 - restore preflight/promotion;
 - Cloudflare CIDR policy;
 - structured systemd/template generation where useful.
 
-Do not introduce a framework, dependency-injection system, plugin registry, ORM, event bus, workflow engine, daemon, generic provider layer, or speculative extension architecture.
+Do not introduce a framework, dependency-injection system, dynamic plugin registry, ORM, event bus, workflow engine, daemon, generic provider SDK, or speculative extension architecture.
 
 ### Bash is minimal glue
 
@@ -93,6 +95,7 @@ Reducing first-party file count is a **design preference, not a quota**.
 - Reuse an existing owning file when a new behavior naturally belongs there.
 - Avoid one-function modules, one-action wrapper scripts, duplicate config fragments, empty placeholders, and future-facing extension files.
 - Delete obsolete V1 surfaces on the V2 branch when they are no longer required.
+- `email-providers.toml` is a deliberate single-file exception because it replaces repeated provider constants/request definitions in Python and makes provider maintenance data-driven.
 - Do not game the preference by creating giant catch-all files or mixing unrelated responsibilities. Security boundaries, readability, and testability take priority.
 
 ## 4. Runtime authorities and filesystem
@@ -101,11 +104,11 @@ V2 should have one clear authority for each class of state:
 
 ```text
 /opt/vaultwarden-oci/
-  releases/<release>/       immutable installed application release
+  releases/<release>/       immutable installed application release, including provider catalog
   current -> releases/...   active release
 
 /etc/vaultwarden-oci/
-  config.toml               sole installed non-secret config
+  config.toml               sole installed operator-editable non-secret config
   age-key.txt               root-only operational Age private identity
 
 /var/lib/vaultwarden-oci/
@@ -121,6 +124,8 @@ V2 should have one clear authority for each class of state:
 ```
 
 Use one source-controlled `versions.toml` for production component versions.
+
+Use one source-controlled `email-providers.toml` for built-in operational-email transport definitions. It is **project/release data, not a second operator configuration authority**. The maintainer edits it in source and ships the changed catalog with an immutable release; ordinary operators select a provider and allowed provider-specific options through `/etc/vaultwarden-oci/config.toml`.
 
 Phase 0/3 must establish one canonical installed path for the structured SOPS-encrypted secrets document. There must never be two operator-editable representations of the same secret/config state.
 
@@ -160,11 +165,11 @@ Contract:
 - separate offline recovery material/recipient whose private recovery key is not persisted on the server;
 - decrypted runtime material only in a root-owned volatile directory;
 - SOPS and Age remain external cryptographic tools;
-- no project-built cryptography, secrets server, cloud-KMS abstraction, or provider registry.
+- no project-built cryptography, secrets server, cloud-KMS abstraction, or secrets-provider registry.
 
 Secrets may include Vaultwarden admin material, Cloudflare/CrowdSec credentials, SMTP credentials, the operational `email_api_token`, and rclone credentials when not kept in a separately root-protected rclone configuration.
 
-Never place plaintext secrets in `config.toml`, process arguments, normal logs, persistent temporary files, or notification diagnostic state.
+Never place plaintext secrets in `config.toml`, `email-providers.toml`, process arguments, normal logs, persistent temporary files, or notification diagnostic state.
 
 ## 7. Core runtime
 
@@ -205,7 +210,7 @@ direct authenticated SMTP fallback
 
 ### Built-in provider set
 
-Carry forward the **documented V1 provider identifiers**:
+V2 supports these explicit built-ins:
 
 ```text
 mailersend
@@ -213,17 +218,63 @@ sendgrid
 mailgun
 postmark
 resend
+cyberpersons   # CyberPanel Email / platform.cyberpersons.com
 ```
 
-The operator selects one provider in `config.toml` and supplies credentials through the V2 secrets mechanism. V1 already uses one common `email_api_token`; V2 should retain that simple credential model unless a provider's current official API requires a materially different secret. Mailgun may additionally require non-secret region/domain settings.
+Accept `cyberpanel` as an alias resolving to the same `cyberpersons` provider definition; do not maintain duplicate settings for the alias.
 
-V1's code also contains an undocumented `cyberpersons` driver that is not listed in V1 `docs/EMAIL.md` or `.env.example`. Do **not** silently promote undocumented/experimental providers into the V2 supported set. Adding one requires an explicit human decision.
+The operator selects one provider in `config.toml` and supplies credentials through the V2 secrets mechanism. Use one common `email_api_token` where the provider supports a single API key. Mailgun may additionally require non-secret region/domain settings.
 
-Phase 6 therefore does **not** stop waiting for a vendor selection. It implements the supported built-in set and the operator chooses one by configuration. Before coding each provider, verify its current official API documentation for endpoint, authentication, request shape, response-success semantics, and documented transient failures rather than copying V1 request details blindly.
+### CyberPanel Email / CyberPersons current contract
+
+The current official CyberPanel Email documentation (verified 2026-08-19) specifies:
+
+- REST send endpoint: `POST https://platform.cyberpersons.com/email/v1/send`;
+- recommended API authentication: `Authorization: Bearer <API key>`;
+- API key should have `can_send` permission and may be restricted by domain/IP;
+- JSON request requires `from`, `to`, `subject`, and at least one of `html` or `text`; V2 operational alerts may use the plain-text form;
+- successful submission: HTTP `202` with JSON `success: true` and a `data.message_id`;
+- documented non-transient examples: HTTP `400` invalid request and HTTP `403` domain/account/permission failures;
+- documented transient candidates: HTTP `429` rate limit (with retry information), `500` send failure, and `503` service unavailable;
+- CyberPanel's SMTP delivery service, if chosen for SMTP fallback, is `mail.cyberpersons.com:587` with required STARTTLS and authenticated SMTP credentials generated separately from the API key.
+
+Do not assume the API and SMTP credentials are interchangeable. The generic V2 SMTP fallback remains independently configured and may use CyberPanel SMTP or another authenticated SMTP service.
+
+### Editable provider catalog
+
+Provider details that commonly change must live in **one source-controlled non-secret catalog**: `email-providers.toml`.
+
+The catalog is shipped as immutable release data and is maintainable without rewriting the notification library. It should contain only what the six built-ins actually need, using a closed schema such as:
+
+- canonical provider ID and optional aliases/display name;
+- final HTTPS POST endpoint or narrowly constrained endpoint template;
+- closed authentication mode (for example bearer token, fixed token header, or basic auth with token) and required fixed non-secret auth metadata;
+- request encoding: JSON or form;
+- a declarative request template built from a closed canonical message field set such as `from_email`, `from_name`, `from_header`, `to`, `subject`, and `text`;
+- accepted success status codes and, only when needed, one small JSON success-field/value check;
+- provider-documented retryable HTTP statuses and whether `Retry-After` is honored;
+- declared provider-specific non-secret options, defaults, allowed values, and endpoint substitutions where genuinely required;
+- the SOPS secret key name used for the credential when it differs from the common `email_api_token` model.
+
+The exact TOML schema should be the **smallest schema capable of representing these six providers**, not a general HTTP workflow language.
+
+Security constraints for the catalog:
+
+- credentials/secrets never appear in the catalog;
+- provider endpoints must be HTTPS and validated;
+- operator `config.toml` may select a built-in ID/alias and declared non-secret options, but may not supply arbitrary endpoint/auth/header/payload overrides;
+- unknown provider IDs, aliases, auth modes, encodings, template placeholders, or undeclared endpoint substitutions fail validation;
+- request templates use a closed placeholder set and ordinary serialization; no `eval`, Jinja, Python expressions, shell expansion, or arbitrary code;
+- authorization-bearing POST requests do not silently follow cross-host redirects; provider endpoints are expected to be final endpoints;
+- secret-bearing response bodies are never persisted, and diagnostics remain bounded/redacted.
+
+**Maintenance rule:** if a provider changes only endpoint, auth metadata, request template, success rule, retry statuses, or declared non-secret settings, maintainers should update that provider block in `email-providers.toml` plus focused tests/docs. Python library changes are required only when a provider introduces a genuinely new transport capability not representable by the existing closed catalog schema.
+
+This is intentionally a **static provider catalog**, not a runtime plugin framework.
 
 ### Fallback policy
 
-Fallback is appropriate for clearly transient delivery-path failure such as network/DNS timeout, HTTP `429` after bounded retry, service-side `5xx`, and only other conditions explicitly documented as transient by the selected provider.
+Fallback is appropriate for clearly transient delivery-path failure such as network/DNS timeout, provider-documented rate limiting after bounded retry, and provider-documented service-side transient errors.
 
 Representative `400`/`401`/`403`, malformed configuration/request, permanent rejection, unsupported provider behavior, and TLS certificate/hostname validation failure remain visible and are not silently masked by SMTP success.
 
@@ -233,22 +284,20 @@ The SMTP fallback may reuse the same upstream authenticated SMTP configuration u
 
 If both transports fail, persist only a small secret-free result for `status`/`doctor`: transport attempts, outcome/category, safe diagnostic text, and event/time identifiers as useful.
 
-Do not build Postfix/local MTA state, spool files, persistent retry scheduling, dead-letter handling, dynamic plugin loading, or a generic provider registry.
+Do not build Postfix/local MTA state, spool files, persistent retry scheduling, dead-letter handling, dynamic plugin loading, or a provider SDK.
 
-### Future provider template
+### Future provider/update workflow
 
-Support future additions with a small **developer extension checklist**, not a runtime framework. Adding or modifying a provider should require only:
+Adding a future provider or adjusting an existing provider should follow this order:
 
-1. add/confirm one explicit provider identifier in the built-in allowlist;
-2. define the provider's endpoint/region rules and authentication method;
-3. implement its request payload/form/header construction in the existing notification owner;
-4. define provider-specific success parsing only when HTTP status alone is insufficient;
-5. map only documented transient failures into the common fallback classifier;
-6. declare any additional non-secret config fields and secret keys only when truly required;
-7. add focused behavioral tests for request construction, success classification, transient/permanent failure behavior, and secret redaction;
-8. update operator documentation.
+1. verify the provider's current official API documentation;
+2. update/add one explicit provider block in `email-providers.toml` using the existing closed schema if possible;
+3. add only declared non-secret operator settings required by that provider;
+4. add focused catalog-rendering/success/retry/redaction tests;
+5. update operator documentation;
+6. change Python only if the provider genuinely requires a transport feature the current closed schema cannot represent.
 
-Do not create Python entry points, dynamic imports, provider classes solely for symmetry, a provider package hierarchy, or a generic plugin SDK unless future product scope explicitly changes.
+Do not respond to ordinary endpoint/payload changes by creating provider classes, one module per provider, entry-point discovery, dynamic imports, a provider package hierarchy, or a generic plugin SDK.
 
 ## 9. rclone and recovery
 
@@ -320,7 +369,7 @@ Use only three validation layers:
 
 Tests protect security, availability, recoverability, and operator truthfulness—not private source layout. Avoid source-string/order assertions, private-function extraction, prose freezing, duplicated state machines, custom runners/inventories, and coverage quotas.
 
-Backup/restore deserves disproportionate attention. Notification tests focus on request construction, deterministic failure classification, safe SMTP fallback, and secret redaction for the supported built-in provider set; they do not become a generic provider conformance suite. rclone tests focus on project-owned argv/result behavior and non-destructive publication intent.
+Backup/restore deserves disproportionate attention. Notification tests focus on provider-catalog validation/rendering, deterministic failure classification, safe SMTP fallback, and secret redaction; they do not become a generic provider conformance suite. rclone tests focus on project-owned argv/result behavior and non-destructive publication intent.
 
 Detailed guardrails live in `reports/V2-TEST-STRATEGY.md`.
 
@@ -343,17 +392,19 @@ Use `vwctl --help` as executable command reference and stable doctor JSON/check 
 
 V2 docs must not preserve removed V1 migration, backup-tier, Postfix-queue, dashboard, compatibility-alias, or repository/runtime synchronization procedures.
 
+Developer documentation should explain how to update `email-providers.toml` safely when a provider changes and when a Python change is actually justified.
+
 ## 14. Delivery sequence
 
 The detailed, copy/paste-ready execution contract is `reports/V2-CODEX-PROMPTS.md`. The intended order is:
 
-0. reset `AGENTS.md`, product boundary, and durable decisions including the built-in V1-documented notification-provider allowlist/config model;
+0. reset `AGENTS.md`, product boundary, and durable decisions including the six-provider catalog/config model;
 1. minimal Python/`vwctl` foundation;
 2. bootstrap and immutable installed layout;
 3. Vaultwarden + Caddy core, SOPS/Age, Vaultwarden SMTP;
 4. Cloudflare ingress + CrowdSec;
 5. one recovery format + rclone + offline recovery;
-6. systemd automation + built-in HTTPS notification providers + transient SMTP fallback;
+6. systemd automation + `email-providers.toml` + six built-in HTTPS providers + transient SMTP fallback;
 7. pinned versions + explicit updates + dev/test `--use-latest`;
 8. beta docs, disposable-host acceptance, and V1 cleanup on the V2 branch.
 
@@ -368,5 +419,7 @@ The review agent should not modify or merge the PR unless a human explicitly tur
 ## 16. Architecture review rule
 
 When a task appears to need a new abstraction, first ask whether V2 can support a small explicit implementation instead. For this product, a narrow well-tested path is normally safer and cheaper than a generalized framework.
+
+When a provider changes ordinary endpoint/auth/request/success metadata, change the provider catalog rather than the library. When a provider requires a truly new capability, extend the closed catalog schema only as far as the supported built-in set requires; do not generalize into an arbitrary HTTP engine.
 
 When a task appears to need a new file, first ask whether an existing owner can absorb the behavior cleanly. Fewer files are preferred when natural, but clear ownership and security boundaries win over a numeric count.
