@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import tempfile
 import unittest
@@ -16,6 +17,17 @@ class Phase2InstallTests(unittest.TestCase):
         path = root / "os-release"
         path.write_text(f'ID="{distro}"\nVERSION_ID="{version}"\n', encoding="utf-8")
         return path
+
+    def write_release_source(self, root: Path, version: str) -> Path:
+        source = root / "source"
+        source.mkdir()
+        shutil.copy2(ROOT / "vwctl", source / "vwctl")
+        shutil.copytree(ROOT / "vaultwarden_oci", source / "vaultwarden_oci")
+        (source / "versions.toml").write_text(
+            f'schema_version = 1\n[vaultwarden_oci]\nversion = "{version}"\n',
+            encoding="utf-8",
+        )
+        return source
 
     def test_host_validation_accepts_noble_supported_architectures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -101,6 +113,24 @@ class Phase2InstallTests(unittest.TestCase):
             conflict.write_text("not a directory", encoding="utf-8")
             with self.assertRaisesRegex(install.InstallError, "expected directory"):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
+
+    def test_unsafe_release_name_cannot_escape_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.write_release_source(root, "../../escape")
+            with self.assertRaisesRegex(install.InstallError, "unsafe release version"):
+                install.install_layout(source, root=root / "target", systemd_reload=False)
+            self.assertFalse((root / "escape").exists())
+
+    def test_existing_current_symlink_is_not_retargeted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "opt/vaultwarden-oci/current"
+            current.parent.mkdir(parents=True)
+            current.symlink_to("releases/older")
+            with self.assertRaisesRegex(install.InstallError, "existing symlink"):
+                install.install_layout(ROOT, root=root, systemd_reload=False)
+            self.assertEqual(os.readlink(current), "releases/older")
 
 
 if __name__ == "__main__":
