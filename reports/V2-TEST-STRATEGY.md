@@ -72,8 +72,8 @@ Reserve full-system behavior for a disposable Ubuntu 24.04 host/environment:
 - Docker/Compose runtime;
 - SOPS/Age materialization without leakage;
 - Vaultwarden + Caddy health;
-- Cloudflare ingress/fail-closed behavior;
-- CrowdSec/bouncer integration;
+- Cloudflare origin ingress/fail-closed behavior;
+- CrowdSec detection plus the selected Cloudflare remediation path;
 - backup -> rclone publication -> remote verification -> download -> restore;
 - at least one configured built-in HTTPS operational provider + representative transient SMTP fallback;
 - systemd units/timers;
@@ -125,7 +125,8 @@ Do not add:
 - broad matrices without a concrete risk;
 - pytest plugins/frameworks without demonstrated need;
 - helper modules solely to make tests convenient when the public boundary can be tested directly;
-- a generic provider conformance framework or one test module per email provider merely for symmetry.
+- a generic provider conformance framework or one test module per email provider merely for symmetry;
+- a CrowdSec multi-bouncer matrix when beta has one remediation scope.
 
 ## Risk-weighted focus
 
@@ -168,47 +169,97 @@ V2 beta supports these canonical built-in API providers:
 - `mailgun`;
 - `postmark`;
 - `resend`;
-- `cyberpersons` (CyberPanel Email), with `cyberpanel` accepted only as an alias to the same catalog definition.
+- `cyberpersons` (CyberPanel Email), with `cyberpanel` only an alias to that catalog definition.
+
+The canonical provider-template message context is exactly:
+
+```text
+from_email
+from_name
+from_header
+to_email
+subject
+text
+```
+
+Tests and reviewer prompts must use this same vocabulary; they must not create alternate canonical names such as `to`.
 
 The important behavior is safe catalog validation/rendering/classification/fallback, not protocol emulation or a dynamic provider framework.
 
 High-value permanent tests include:
 
-- catalog parses and rejects duplicate IDs/aliases;
-- `cyberpanel` resolves to the canonical `cyberpersons` definition rather than duplicating settings;
+- catalog rejects duplicate canonical IDs/aliases;
+- `cyberpanel` resolves to canonical `cyberpersons` without duplicate settings;
 - unknown provider identifiers fail validation;
-- endpoint must be HTTPS and endpoint templates may use only declared non-secret substitutions;
-- operator config cannot inject arbitrary endpoint/auth/header/payload overrides;
-- unknown auth modes, request encodings, placeholders, success checks, or undeclared provider options fail closed;
-- request templates use only the closed canonical message-field set and never evaluate arbitrary code;
+- endpoints must be HTTPS and endpoint templates may use only declared non-secret substitutions;
+- operator config cannot inject arbitrary endpoint/auth/header/payload/success/retry overrides;
+- unknown auth modes, request encodings, placeholders, success checks, retry-delay declarations, or provider options fail closed;
+- request templates use only the exact canonical message-field set and never evaluate arbitrary code;
 - authorization-bearing requests do not silently follow cross-host redirects;
 - each built-in provider renders the expected authentication/request shape from the catalog at the project boundary;
-- common `email_api_token` and any provider-specific secret never appear in argv/log/result/exception structures;
+- API tokens and SMTP secrets never appear in argv/log/result/exception structures;
 - Mailgun non-secret region/domain validation where supported;
 - API success does not invoke SMTP;
 - network/DNS timeout is transient;
-- provider-documented retry statuses become fallback-eligible only according to bounded retry policy;
+- only provider-documented retry statuses become retry/fallback eligible;
 - representative `400`/`401`/`403` stays visible;
+- ambiguous/provider-semantic failures remain visible rather than being masked;
 - provider-specific success parsing is tested only where HTTP status alone is insufficient;
+- standard `Retry-After` handling is bounded;
+- an optional body retry-delay field is accepted only when the catalog names one top-level numeric field and a fixed unit; malformed/undocumented/unclear body delays fall back to the common fixed bounded retry schedule;
 - TLS certificate/hostname validation failure is not silently masked;
 - SMTP uses the configured secure mode at a stable mocked boundary;
 - both transports failing produces stable secret-free diagnostic state.
 
-CyberPanel/CyberPersons current catalog behavior should additionally be represented by focused tests matching the verified official contract at implementation time: Bearer auth, `POST https://platform.cyberpersons.com/email/v1/send`, plain-text JSON message shape, HTTP `202` plus `success: true`, and the current documented retry/non-retry categories. If the official API changes before implementation, update the catalog and tests to the current verified contract rather than freezing this report as upstream truth.
+#### CyberPanel/CyberPersons focused tests
 
-Do **not** multiply every provider across every test layer. One focused catalog-render/auth/success-rule test per built-in provider plus shared classifier/fallback/security tests is normally enough. Real delivery against every commercial provider does not belong in ordinary PR CI.
+At Phase 6 implementation time, verify current official provider documentation and then cover the project-owned contract:
 
-A routine provider settings change should normally change `email-providers.toml` plus the smallest affected tests/docs, not production Python. Add Python tests/code only if the provider truly requires a new transport capability that the closed catalog schema cannot represent.
+- Bearer authentication;
+- `POST https://platform.cyberpersons.com/email/v1/send`;
+- mapping from canonical V2 values to provider `from`, `to`, `subject`, `text`;
+- HTTP `202` plus `success: true` accepted-send behavior;
+- `429` uses a small bounded retry and can fall back only after that retry policy;
+- `503 service_unavailable` is transient/retryable under the current documented baseline;
+- `500 send_failed` is **not** retry/fallback eligible by HTTP status alone;
+- `400`/`403` remain visible;
+- if current docs still mention body `retry_after` without defining usable units/semantics, fixed bounded retry is acceptable and no provider-specific JSON response language should be invented.
+
+If official provider behavior changes before implementation, update the catalog and focused tests to the then-current verified contract rather than freezing this report as upstream truth.
+
+Do **not** multiply every provider across every test layer. One focused catalog-render/auth/success-rule test per canonical provider plus shared classifier/fallback/security tests is normally enough. Real delivery against every commercial provider does not belong in ordinary PR CI.
+
+A routine provider settings change should normally change `email-providers.toml` plus the smallest affected tests/docs, not production Python. Add Python code/tests only for a genuinely new transport capability that the closed schema cannot represent.
 
 ### Cloudflare / CrowdSec / firewall
 
-Unit-test parsing/policy, integration-test external-command boundaries, and reserve actual packet-path behavior for disposable-host acceptance. No multi-backend matrix.
+Unit-test project-owned parsing/policy and reserve actual packet-path/remediation behavior for disposable-host acceptance.
+
+The beta contract has two distinct controls, not two overlapping CrowdSec bouncers:
+
+1. project-owned iptables policy allows Caddy origin ingress only from validated Cloudflare source ranges and fails closed when no safe policy exists;
+2. CrowdSec web decisions are remediated through one current supported Cloudflare remediation component.
+
+Do not require a CrowdSec host firewall bouncer in beta tests. If a later architecture decision adds CrowdSec remediation for SSH/other host-visible services, test that separately rather than expanding the current matrix implicitly.
 
 ### `vwctl doctor`
 
 Test stable check IDs, PASS/WARN/FAIL/SKIP classification, JSON shape, exit policy, and secret-free output. Do not freeze exact human prose.
 
 For notifications, `doctor` should distinguish at least: configured built-in provider valid/invalid, API credential present/placeholder, SMTP fallback available/unavailable, provider catalog valid/invalid, and last safe delivery result.
+
+## Standalone phase prerequisite validation
+
+Implementation prompts are pasted into fresh sessions, so each Phase N for N > 0 explicitly verifies Phase N-1 exists.
+
+Review should treat a missing immediate prerequisite as a scope/completeness problem rather than allowing an agent to silently implement multiple phases. In particular:
+
+- Phase 5 requires Phase 4;
+- Phase 6 requires Phase 5;
+- Phase 7 requires Phase 6, including the provider catalog/systemd notification surface;
+- Phase 8 requires Phase 7.
+
+Do not add a test framework just to enforce document sequencing; this is an implementation/review pre-flight responsibility.
 
 ## File-surface guardrail for tests
 
