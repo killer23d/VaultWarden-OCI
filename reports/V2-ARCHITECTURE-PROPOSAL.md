@@ -1,6 +1,6 @@
 # VaultWarden-OCI V2 Architecture Proposal
 
-Date: 2026-08-18
+Date: 2026-08-19
 Status: V2 target architecture supporting the authoritative Codex prompts.
 
 > **Authority:** `reports/V2-CODEX-PROMPTS.md` is the agent execution contract. This file describes the target architecture and rationale. If they conflict, implementation agents follow the pasted Codex prompt and report the inconsistency.
@@ -36,7 +36,8 @@ V2 beta supports:
 - SOPS + Age secrets;
 - rclone offsite recovery workflows;
 - Vaultwarden direct authenticated SMTP;
-- one concrete HTTPS email API for project operational notifications, with authenticated SMTP fallback for clearly transient primary failures;
+- built-in HTTPS operational-email providers carried forward from V1's documented set: `mailersend`, `sendgrid`, `mailgun`, `postmark`, and `resend`;
+- direct authenticated SMTP fallback for clearly transient operational-email API failures;
 - one encrypted V2 recovery format plus separate offline recovery material;
 - systemd lifecycle/timers;
 - exact production version pins and dev/test-only `--use-latest`.
@@ -46,6 +47,7 @@ V2 beta intentionally does **not** support:
 - V1 state, archive, backup-format, migration, command, or runtime-layout compatibility;
 - Kubernetes, Swarm, HA, or distributed coordination;
 - generic cloud, storage, notification, secrets, or firewall provider frameworks;
+- runtime-loaded notification plugins or Python entry-point discovery;
 - a dashboard/TUI;
 - a mandatory Postfix/local-MTA container;
 - a project-built durable notification queue;
@@ -66,7 +68,7 @@ Use Ubuntu 24.04's Python 3.12 and prefer the standard library at runtime. Pytho
 - `fcntl.flock` mutation locking;
 - status/doctor JSON;
 - SOPS/Age orchestration;
-- notification HTTPS/SMTP delivery classification;
+- notification HTTPS/SMTP request construction and failure classification;
 - backup metadata, recovery validation, retention decisions, and rclone orchestration;
 - restore preflight/promotion;
 - Cloudflare CIDR policy;
@@ -160,7 +162,7 @@ Contract:
 - SOPS and Age remain external cryptographic tools;
 - no project-built cryptography, secrets server, cloud-KMS abstraction, or provider registry.
 
-Secrets may include Vaultwarden admin material, Cloudflare/CrowdSec credentials, SMTP credentials, the operational notification API token, and rclone credentials when not kept in a separately root-protected rclone configuration.
+Secrets may include Vaultwarden admin material, Cloudflare/CrowdSec credentials, SMTP credentials, the operational `email_api_token`, and rclone credentials when not kept in a separately root-protected rclone configuration.
 
 Never place plaintext secrets in `config.toml`, process arguments, normal logs, persistent temporary files, or notification diagnostic state.
 
@@ -188,18 +190,38 @@ Vaultwarden application email uses Vaultwarden's own direct authenticated SMTP s
 
 Project notifications are separate from Vaultwarden application mail.
 
+The beta flow is:
+
 ```text
 vwctl/systemd operation
         |
         v
-one concrete HTTPS email API
+operator-selected built-in HTTPS provider
         |
         | clearly transient failure after small bounded retry
         v
 direct authenticated SMTP fallback
 ```
 
-The concrete HTTPS provider must be named by ADR before Phase 6. If it is still undecided, Phase 6 stops for that product decision; it must not hide uncertainty behind a generic provider interface.
+### Built-in provider set
+
+Carry forward the **documented V1 provider identifiers**:
+
+```text
+mailersend
+sendgrid
+mailgun
+postmark
+resend
+```
+
+The operator selects one provider in `config.toml` and supplies credentials through the V2 secrets mechanism. V1 already uses one common `email_api_token`; V2 should retain that simple credential model unless a provider's current official API requires a materially different secret. Mailgun may additionally require non-secret region/domain settings.
+
+V1's code also contains an undocumented `cyberpersons` driver that is not listed in V1 `docs/EMAIL.md` or `.env.example`. Do **not** silently promote undocumented/experimental providers into the V2 supported set. Adding one requires an explicit human decision.
+
+Phase 6 therefore does **not** stop waiting for a vendor selection. It implements the supported built-in set and the operator chooses one by configuration. Before coding each provider, verify its current official API documentation for endpoint, authentication, request shape, response-success semantics, and documented transient failures rather than copying V1 request details blindly.
+
+### Fallback policy
 
 Fallback is appropriate for clearly transient delivery-path failure such as network/DNS timeout, HTTP `429` after bounded retry, service-side `5xx`, and only other conditions explicitly documented as transient by the selected provider.
 
@@ -207,9 +229,26 @@ Representative `400`/`401`/`403`, malformed configuration/request, permanent rej
 
 SMTP uses normal certificate/hostname validation with implicit TLS or required STARTTLS plus authentication. No plaintext downgrade.
 
+The SMTP fallback may reuse the same upstream authenticated SMTP configuration used by Vaultwarden when that is the operator's chosen deployment. If API delivery is configured but SMTP fallback credentials are not, `doctor` must report that fallback is unavailable rather than pretending redundancy exists.
+
 If both transports fail, persist only a small secret-free result for `status`/`doctor`: transport attempts, outcome/category, safe diagnostic text, and event/time identifiers as useful.
 
-Do not build Postfix/local MTA state, spool files, persistent retry scheduling, dead-letter handling, or a provider registry.
+Do not build Postfix/local MTA state, spool files, persistent retry scheduling, dead-letter handling, dynamic plugin loading, or a generic provider registry.
+
+### Future provider template
+
+Support future additions with a small **developer extension checklist**, not a runtime framework. Adding or modifying a provider should require only:
+
+1. add/confirm one explicit provider identifier in the built-in allowlist;
+2. define the provider's endpoint/region rules and authentication method;
+3. implement its request payload/form/header construction in the existing notification owner;
+4. define provider-specific success parsing only when HTTP status alone is insufficient;
+5. map only documented transient failures into the common fallback classifier;
+6. declare any additional non-secret config fields and secret keys only when truly required;
+7. add focused behavioral tests for request construction, success classification, transient/permanent failure behavior, and secret redaction;
+8. update operator documentation.
+
+Do not create Python entry points, dynamic imports, provider classes solely for symmetry, a provider package hierarchy, or a generic plugin SDK unless future product scope explicitly changes.
 
 ## 9. rclone and recovery
 
@@ -281,7 +320,7 @@ Use only three validation layers:
 
 Tests protect security, availability, recoverability, and operator truthfulness—not private source layout. Avoid source-string/order assertions, private-function extraction, prose freezing, duplicated state machines, custom runners/inventories, and coverage quotas.
 
-Backup/restore deserves disproportionate attention. Notification tests focus on deterministic failure classification and safe fallback; rclone tests focus on project-owned argv/result behavior and non-destructive publication intent.
+Backup/restore deserves disproportionate attention. Notification tests focus on request construction, deterministic failure classification, safe SMTP fallback, and secret redaction for the supported built-in provider set; they do not become a generic provider conformance suite. rclone tests focus on project-owned argv/result behavior and non-destructive publication intent.
 
 Detailed guardrails live in `reports/V2-TEST-STRATEGY.md`.
 
@@ -308,20 +347,26 @@ V2 docs must not preserve removed V1 migration, backup-tier, Postfix-queue, dash
 
 The detailed, copy/paste-ready execution contract is `reports/V2-CODEX-PROMPTS.md`. The intended order is:
 
-0. reset `AGENTS.md`, product boundary, and ADRs;
+0. reset `AGENTS.md`, product boundary, and durable decisions including the built-in V1-documented notification-provider allowlist/config model;
 1. minimal Python/`vwctl` foundation;
 2. bootstrap and immutable installed layout;
 3. Vaultwarden + Caddy core, SOPS/Age, Vaultwarden SMTP;
 4. Cloudflare ingress + CrowdSec;
 5. one recovery format + rclone + offline recovery;
-6. systemd automation + selected HTTPS notification API + transient SMTP fallback;
+6. systemd automation + built-in HTTPS notification providers + transient SMTP fallback;
 7. pinned versions + explicit updates + dev/test `--use-latest`;
 8. beta docs, disposable-host acceptance, and V1 cleanup on the V2 branch.
 
 Run one phase at a time. Split a phase if reviewability requires it; never combine phases merely to reduce PR count.
 
-## 15. Architecture review rule
+## 15. Review workflow
 
-When a task appears to need a new abstraction, first ask whether V2 can support one concrete implementation instead. For this product, a narrow well-tested path is normally safer and cheaper than a generalized framework.
+`reports/V2-REVIEW-PROMPTS.md` contains standalone prompts intended for a **separate review agent**. Review prompts do not supersede implementation prompts; they tell the reviewer how to audit a PR for completeness, correctness, small-team fit, complexity, validation, and merge safety.
+
+The review agent should not modify or merge the PR unless a human explicitly turns the review into a follow-up implementation task.
+
+## 16. Architecture review rule
+
+When a task appears to need a new abstraction, first ask whether V2 can support a small explicit implementation instead. For this product, a narrow well-tested path is normally safer and cheaper than a generalized framework.
 
 When a task appears to need a new file, first ask whether an existing owner can absorb the behavior cleanly. Fewer files are preferred when natural, but clear ownership and security boundaries win over a numeric count.
