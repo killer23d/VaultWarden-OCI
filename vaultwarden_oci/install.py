@@ -8,28 +8,35 @@ import os
 import platform
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from vaultwarden_oci.cli import load_versions, normalize_architecture
+from vaultwarden_oci.cli import (
+    DEFAULT_CONFIG_PATH,
+    GLOBAL_LOCK_PATH,
+    OS_RELEASE_PATH,
+    LockBusyError,
+    load_versions,
+    mutation_lock,
+    normalize_architecture,
+    run_command,
+)
 
 APP_NAME = "vaultwarden-oci"
 INSTALL_ROOT = Path("/opt/vaultwarden-oci")
 RELEASES_DIR = INSTALL_ROOT / "releases"
 CURRENT_LINK = INSTALL_ROOT / "current"
-CONFIG_DIR = Path("/etc/vaultwarden-oci")
-CONFIG_PATH = CONFIG_DIR / "config.toml"
+CONFIG_DIR = DEFAULT_CONFIG_PATH.parent
+CONFIG_PATH = DEFAULT_CONFIG_PATH
 SECRETS_PATH = CONFIG_DIR / "secrets.sops.yaml"
 AGE_KEY_PATH = CONFIG_DIR / "age-key.txt"
 STATE_ROOT = Path("/var/lib/vaultwarden-oci")
 STATE_DIR = STATE_ROOT / "state"
-RUNTIME_ROOT = Path("/run/vaultwarden-oci")
+RUNTIME_ROOT = GLOBAL_LOCK_PATH.parent
 RUNTIME_SECRETS_DIR = RUNTIME_ROOT / "secrets"
 RUNTIME_TRANSIENT_DIR = RUNTIME_ROOT / "transient"
-LOCK_PATH = RUNTIME_ROOT / "lock"
 VWCTL_LINK = Path("/usr/local/bin/vwctl")
 SYSTEMD_UNIT = Path("/etc/systemd/system/vaultwarden-oci.target")
 
@@ -78,7 +85,7 @@ def _parse_os_release(path: Path) -> dict[str, str]:
     return values
 
 
-def validate_host(*, os_release: Path = Path("/etc/os-release"), machine: str | None = None) -> HostInfo:
+def validate_host(*, os_release: Path = OS_RELEASE_PATH, machine: str | None = None) -> HostInfo:
     try:
         values = _parse_os_release(os_release)
     except OSError as exc:
@@ -114,13 +121,15 @@ def _owned_by_installer(path: Path) -> bool:
 
 
 def _ensure_directory(path: Path, mode: int) -> None:
-    if path.exists() or path.is_symlink():
-        if path.is_symlink() or not path.is_dir():
-            raise InstallError(f"expected directory at {path}")
-        if not _owned_by_installer(path):
-            raise InstallError(f"incompatible ownership at {path}: expected uid {os.geteuid()}")
-    else:
-        path.mkdir(parents=True, mode=mode)
+    try:
+        path.mkdir(parents=True, mode=mode, exist_ok=True)
+    except OSError:
+        if not (path.exists() or path.is_symlink()):
+            raise
+    if path.is_symlink() or not path.is_dir():
+        raise InstallError(f"expected directory at {path}")
+    if not _owned_by_installer(path):
+        raise InstallError(f"incompatible ownership at {path}: expected uid {os.geteuid()}")
     os.chmod(path, mode)
 
 
@@ -141,6 +150,37 @@ def _ensure_regular_file(path: Path, content: str, mode: int, *, preserve_existi
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     os.chmod(path, mode)
+
+
+def _ensure_lock_path(layout: Layout) -> Path:
+    """Create/validate the canonical lock inode before acquiring Phase 1's flock."""
+    runtime_root = layout.path(GLOBAL_LOCK_PATH.parent)
+    _ensure_directory(runtime_root, 0o700)
+    lock_path = layout.path(GLOBAL_LOCK_PATH)
+
+    while not (lock_path.exists() or lock_path.is_symlink()):
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise InstallError(f"cannot create mutation lock {lock_path}: {exc}") from exc
+        else:
+            os.close(descriptor)
+            break
+
+    if lock_path.is_symlink() or not lock_path.is_file():
+        raise InstallError(f"expected regular file at {lock_path}")
+    if not _owned_by_installer(lock_path):
+        raise InstallError(
+            f"incompatible ownership at {lock_path}: expected uid {os.geteuid()}"
+        )
+    os.chmod(lock_path, 0o600)
+    return lock_path
 
 
 def _copy_release_tree(source_root: Path, staging: Path) -> None:
@@ -229,31 +269,45 @@ def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
     return destination
 
 
-def _ensure_symlink(path: Path, target: Path) -> None:
-    if path.exists() or path.is_symlink():
-        if not path.is_symlink():
-            raise InstallError(f"expected symlink at {path}")
-        if not _owned_by_installer(path):
-            raise InstallError(f"incompatible ownership at {path}: expected uid {os.geteuid()}")
-        actual = Path(os.readlink(path))
-        if actual == target:
-            return
+def _check_symlink_compatible(path: Path, target: Path) -> bool:
+    if not (path.exists() or path.is_symlink()):
+        return False
+    if not path.is_symlink():
+        raise InstallError(f"expected symlink at {path}")
+    if not _owned_by_installer(path):
+        raise InstallError(f"incompatible ownership at {path}: expected uid {os.geteuid()}")
+    actual = Path(os.readlink(path))
+    if actual != target:
         raise InstallError(f"existing symlink {path} points to {actual}, expected {target}")
+    return True
+
+
+def _ensure_symlink(path: Path, target: Path) -> None:
+    if _check_symlink_compatible(path, target):
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.symlink_to(target)
 
 
-def install_layout(source_root: Path, *, root: Path = Path("/"), systemd_reload: bool = True) -> str:
-    source_root = source_root.resolve()
-    layout = Layout(root.resolve())
-    _assert_root(layout)
-    manifest = load_versions(source_root / "versions.toml")
-    release = _validate_release_name(manifest.version)
+def _install_layout_locked(
+    source_root: Path,
+    layout: Layout,
+    release: str,
+    *,
+    systemd_reload: bool,
+) -> str:
+    current = layout.path(CURRENT_LINK)
+    current_target = Path("releases") / release
+    vwctl = layout.path(VWCTL_LINK)
+    vwctl_target = current / "vwctl"
+
+    # Cheap hard conflicts are checked before immutable release promotion.
+    _check_symlink_compatible(current, current_target)
+    _check_symlink_compatible(vwctl, vwctl_target)
 
     release_dir = _install_release(source_root, layout, release)
 
-    config_dir = layout.path(CONFIG_DIR)
-    _ensure_directory(config_dir, 0o700)
+    _ensure_directory(layout.path(CONFIG_DIR), 0o700)
     _ensure_regular_file(layout.path(CONFIG_PATH), CONFIG_TEMPLATE, 0o600, preserve_existing=True)
     _ensure_regular_file(layout.path(SECRETS_PATH), "", 0o600, preserve_existing=True)
     _ensure_regular_file(layout.path(AGE_KEY_PATH), "", 0o600, preserve_existing=True)
@@ -263,23 +317,43 @@ def install_layout(source_root: Path, *, root: Path = Path("/"), systemd_reload:
     _ensure_directory(layout.path(RUNTIME_ROOT), 0o700)
     _ensure_directory(layout.path(RUNTIME_SECRETS_DIR), 0o700)
     _ensure_directory(layout.path(RUNTIME_TRANSIENT_DIR), 0o700)
-    _ensure_regular_file(layout.path(LOCK_PATH), "", 0o600, preserve_existing=True)
 
-    current = layout.path(CURRENT_LINK)
-    target = Path("releases") / release
-    _ensure_symlink(current, target)
-    _ensure_symlink(layout.path(VWCTL_LINK), layout.path(CURRENT_LINK) / "vwctl")
+    _ensure_symlink(current, current_target)
+    _ensure_symlink(vwctl, vwctl_target)
 
     unit_path = layout.path(SYSTEMD_UNIT)
     _ensure_regular_file(unit_path, SYSTEMD_TARGET, 0o644, preserve_existing=False)
     if layout.root == Path("/") and systemd_reload:
-        result = subprocess.run(
-            ["systemctl", "daemon-reload"], check=False, capture_output=True, text=True, shell=False
-        )
-        if result.returncode != 0:
-            raise InstallError(f"systemctl daemon-reload failed: {result.stderr.strip() or result.stdout.strip()}")
+        result = run_command(["systemctl", "daemon-reload"])
+        if not result.ok:
+            detail = result.stderr.strip() or result.stdout.strip() or result.kind
+            raise InstallError(f"systemctl daemon-reload failed: {detail}")
 
     return str(release_dir)
+
+
+def install_layout(source_root: Path, *, root: Path = Path("/"), systemd_reload: bool = True) -> str:
+    source_root = source_root.resolve()
+    layout = Layout(root.resolve())
+    _assert_root(layout)
+    manifest = load_versions(source_root / "versions.toml")
+    release = _validate_release_name(manifest.version)
+
+    lock_path = _ensure_lock_path(layout)
+    try:
+        with mutation_lock(lock_path):
+            return _install_layout_locked(
+                source_root,
+                layout,
+                release,
+                systemd_reload=systemd_reload,
+            )
+    except LockBusyError:
+        raise
+    except RuntimeError as exc:
+        if isinstance(exc, InstallError):
+            raise
+        raise InstallError(str(exc)) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -301,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
             root=args.root,
             systemd_reload=not args.skip_systemd_reload,
         )
-    except (InstallError, ValueError) as exc:
+    except (InstallError, LockBusyError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     print(f"PASS: installed immutable release at {release_dir}")
