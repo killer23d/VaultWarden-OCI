@@ -1,7 +1,7 @@
 # VaultWarden-OCI V2 — Authoritative Codex Prompts
 
 Date: 2026-08-18
-Revision: consolidated after V2 branch creation and later SOPS/Age, rclone, and notification decisions.
+Revision: consolidated after V2 branch creation and later SOPS/Age, rclone, notification, and file-surface decisions.
 
 ## Authority and precedence
 
@@ -40,11 +40,15 @@ PRODUCT BOUNDARY
 - Production ingress is Cloudflare-first; CrowdSec remains required.
 - V2 has no requirement to import V1 project state, V1 backups, V1 migration state, V1 command aliases, V1 runtime layouts, or V1 compatibility behavior.
 
-LANGUAGE AND COMPLEXITY BOUNDARY
+LANGUAGE, FILE-SURFACE, AND COMPLEXITY BOUNDARY
 - Python 3.12 standard library is the preferred runtime implementation language for structured application logic.
 - Bash is allowed only for small bootstrap/host/container glue where shell is materially simpler.
 - Do not introduce runtime third-party Python dependencies without an explicit requirement in the current task.
 - Development-only pytest and ruff are allowed; ShellCheck is allowed for remaining shell.
+- Prefer fewer, cohesive first-party files when responsibilities remain clear. Before creating a new module/script/config fragment, first consider whether the behavior naturally belongs in an existing owning file.
+- Do not split small behaviors into one-function modules, one-purpose wrapper scripts, duplicate config fragments, or speculative future-facing files merely for architectural neatness.
+- File-count reduction is a preference, not a quota. Do not merge unrelated responsibilities, create giant catch-all modules, or weaken readability/testability/security merely to reduce the number of files.
+- When a V2 implementation replaces a V1 product surface on the V2 branch, prefer deleting obsolete files over retaining wrappers, aliases, empty placeholders, or compatibility shims unless the current phase explicitly requires them.
 - Do not introduce a framework, plugin/provider registry, ORM, daemon, database, event bus, workflow engine, generic transaction framework, distributed lock, Kubernetes/Swarm/HA abstraction, generic cloud abstraction, generic storage-provider abstraction, generic notification-provider abstraction, or generic firewall-backend abstraction.
 - Do not port V1 code by default. Read V1 only to understand security properties or behavior explicitly required by the current task.
 - Prefer deleting a requirement to abstracting it.
@@ -527,7 +531,8 @@ IMPLEMENT
    - systemd timers/units;
    - pinned update path.
 5. Remove V1 implementation/docs/tests from the V2 branch once no longer required as build/runtime inputs. If historical reference is useful, rely on git history/main rather than shipping a compatibility layer.
-6. Keep permanent PR CI small: quality, unit, integration. Treat destructive/full host acceptance as a release gate rather than recreating a huge per-PR controller.
+6. Prefer deleting superseded files and consolidating genuinely related V2 responsibilities where that reduces repository surface without creating catch-all modules or weakening clarity.
+7. Keep permanent PR CI small: quality, unit, integration. Treat destructive/full host acceptance as a release gate rather than recreating a huge per-PR controller.
 
 NON-GOALS
 - no V1 compatibility layer
@@ -548,7 +553,7 @@ Read root AGENTS.md and reports/V2-CODEX-PROMPTS.md. The Common V2 contract rema
 
 1. State the observable bug and affected public/stable boundary.
 2. Inspect V1 only if it can clarify a required security property; do not port its architecture.
-3. Change the smallest owning module/config/template.
+3. Change the smallest owning module/config/template. Prefer modifying the existing cohesive owner rather than creating another file solely for the fix.
 4. Add one highest-value behavioral regression test only if the existing suite does not already protect the behavior.
 5. Do not use the bug as a reason to introduce a framework, provider registry, compatibility layer, generic abstraction, or unrelated refactor.
 6. Run the smallest validation sufficient for confidence.
@@ -565,6 +570,9 @@ Before accepting any V2 agent PR, verify:
 - `reports/V2-CODEX-PROMPTS.md` was treated as authoritative;
 - V1 implementation shape was not imported without necessity;
 - no speculative framework/provider/compatibility layer appeared;
+- new files were not created unnecessarily when an existing cohesive owner was appropriate;
+- file-count reduction was treated as a preference rather than a quota, with no unrelated catch-all modules created to game the count;
+- obsolete V2-branch files/wrappers were deleted when no longer needed instead of being retained as compatibility clutter;
 - secrets never moved into ordinary config/argv/logs;
 - rclone publication is non-destructive and pruning is separate;
 - notification API/SMTP fallback follows the failure classification contract and does not recreate a queue;
