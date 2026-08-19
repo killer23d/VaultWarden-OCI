@@ -2,296 +2,274 @@
 
 Date: 2026-08-18
 Audit snapshot: `main` at `16dc4c82a57234f8de8b54aa709a8ef32831f4e6`
-Revision: two additional repository rescans completed after the initial audit.
+Revision: two additional repository rescans plus consolidation of later SOPS/Age, rclone, notification, and `v2` branch decisions.
+
+> **Agent-execution precedence:** `reports/V2-CODEX-PROMPTS.md` is the authoritative V2 agent execution contract. This audit records findings/rationale. If it conflicts with the prompt contract, the prompt contract wins and this audit should be corrected.
 
 ## Executive conclusion
 
-The initial recommendation stands, but the rescans make it stronger: **V2 should be a greenfield reimplementation, not a V1 refactor.** V1 has strong security instincts and careful failure handling, but the project now spends too much engineering effort maintaining implementation machinery, tests that mirror that machinery, generated documentation, compatibility behavior, and installed-runtime synchronization.
+V1 contains substantial security and operational engineering, but it also accumulated a large amount of Bash application logic, compatibility behavior, state synchronization, public command surface, recovery variants, email-queue machinery, and tests coupled to internal implementation shape.
 
-V2 should preserve the security properties, not the mechanisms.
+V2 should **not** be a mechanical refactor of V1. It should be a smaller greenfield implementation that preserves the strongest security/recoverability properties while removing historical compatibility and duplicated authorities.
 
-The highest-value changes are now:
+The dedicated V2 development branch now exists as `v2`. PRs for V2 implementation should target that branch, with Phase 0 resetting the agent/product contract before runtime coding.
 
-1. make Python 3.12 the primary language for structured application logic;
-2. keep Bash only for a very small bootstrap/host-glue surface where shell is clearer;
-3. replace the broad Make/script/utility API with one `vwctl` operator CLI;
-4. adopt one installed non-secret configuration authority and one encrypted secrets authority;
-5. centralize version pins and `--use-latest` resolution;
-6. remove V1 migration and format compatibility entirely;
-7. reduce the test system to behavior that protects security, data, lifecycle, configuration and diagnostics;
-8. remove implementation-text regression tests unless source structure itself is the security contract;
-9. replace the current large host-acceptance controller with a small release-gate acceptance checklist/harness;
-10. rewrite the repository agent instructions before Codex begins V2 implementation so the agent is not instructed to recreate V1.
+## Fixed V2 assumptions
 
-## Fixed V2 product boundary
+- fresh install; no V1 data/state/archive migration requirement;
+- Ubuntu 24.04 LTS Noble only;
+- amd64 and arm64 tested targets;
+- small team of roughly 10 users and junior-admin operation;
+- runtime cloud-provider neutral;
+- OCI A1 Flex reference deployment only;
+- Cloudflare-first production ingress;
+- CrowdSec retained;
+- `--use-latest` retained only for development/testing resolution;
+- security-first but intentionally lower complexity/maintenance cost.
 
-- Ubuntu 24.04 LTS Noble.
-- Tested `amd64` and `arm64` support.
-- Cloud-provider-neutral runtime; OCI A1 Flex is a reference deployment, not a dependency.
-- Small team, roughly ten users, managed by a junior administrator.
-- Cloudflare-first edge security and CrowdSec retained.
-- Caddy retained as reverse proxy/TLS endpoint unless a later ADR deliberately changes ingress architecture.
-- SOPS + Age retained for secret custody.
-- `--use-latest` retained only for development/testing.
-- Fresh-install V2 only. No V1 project-state, backup-format or migration compatibility requirement.
-- No Kubernetes, HA, distributed state, plugin framework, generic cloud abstraction or enterprise monitoring stack.
+## Repository complexity findings
 
----
+The V1 codebase contains very large shell surfaces. Examples from the audited tree include roughly:
 
-# Rescan 1 — complexity and test-cost audit
+- `lib/secrets.sh` ~98 KB;
+- `lib/migrate.sh` ~91 KB;
+- `utilities/backup-run.sh` ~100 KB;
+- `utilities/restore-run.sh` ~157 KB;
+- `utilities/setup-secrets.sh` ~119 KB;
+- `utilities/setup-crowdsec.sh` ~102 KB;
+- `dashboard.sh` ~43 KB;
+- `maintenance-health.sh` ~58 KB;
+- a broad Makefile/operator command surface.
 
-## Test footprint
+The problem is not that Bash is intrinsically insecure; it is that structured application behavior has expanded beyond a size where shell remains the clearest/cheapest owner.
 
-Using the tracked file sizes in the audited Git tree as a rough maintenance-footprint proxy:
+V2 therefore uses Python 3.12 stdlib-first for structured application logic and keeps Bash only for minimal bootstrap/host/container glue.
 
-- the `tests/` tree is approximately **1.18 MB across 30 tracked test files**, including 25 physical `case-*.bash` files exposed as 32 logical cases by the custom runner;
-- the root/lib/utility shell implementation plus Makefile is approximately **1.94 MB**.
+## Agent-instruction finding
 
-Source-byte counts are **not** engineering-effort or logical-line measurements. They are included only as a rough corroborating signal: the tracked test tree is about **61% of the byte size of that first-party shell/Make implementation set**. The effective validation footprint is larger because significant acceptance/validation code also lives outside `tests/`, including `utilities/noble-host-acceptance.sh`, `utilities/pre-production-drill.sh`, `utilities/smoke-test.sh`, and large workflow-side invariant checks.
+The V1 root `AGENTS.md` is appropriately detailed for preserving V1 behavior, but it actively conflicts with V2 greenfield goals by instructing agents to preserve Bash-first architecture, Postfix, existing backup tiers, existing operation/test architecture, and compatibility surfaces.
 
-The recent repository history also shows sustained test/CI iteration around host acceptance and exact structural validation. That is consistent with the reported experience that tests consume more than half of development effort.
+This is why Phase 0 must run before runtime coding.
 
-## Finding V2-TEST-01 — tests duplicate implementation knowledge
+The corrected V2 model is:
 
-Several large V1 tests do more than exercise behavior. They:
+- root `AGENTS.md` becomes a concise map;
+- it directs agents to `reports/V2-CODEX-PROMPTS.md`;
+- the Codex prompt file is the authoritative agent execution contract;
+- supporting ADRs/reports explain decisions but do not become competing instruction manuals;
+- phase prompts are bounded and later phases must not be implemented opportunistically.
 
-- `grep` for exact implementation strings;
-- assert relative source-code ordering;
-- extract production functions with `awk`/`sed` into synthetic harnesses;
-- recreate fragments of production state machines;
-- mock command behavior at a level nearly as complex as the production owner;
-- validate documentation against implementation with additional textual policy logic.
+## Test/maintenance rescan
 
-These tests are understandable responses to complex Bash, but they make safe refactoring expensive. A semantically equivalent implementation change can require substantial test rewrites because the test is coupled to source shape rather than observable behavior.
+The tracked V1 `tests/` tree is approximately 1.18 MB across 30 files. Compared with the audited first-party root/lib/utilities shell + Make implementation set (~1.94 MB), the test tree is roughly 61% by byte size. Adding acceptance/validation scripts/workflows makes the validation footprint larger still.
 
-### V2 decision
+This is only a source-size/maintenance-footprint signal, not an LOC or engineering-effort metric. However it matches the qualitative finding that test maintenance consumes substantial development attention.
 
-Do not port these tests. Rewrite only the tests needed by the V2 contract.
+The deeper issue is test coupling. Large V1 cases commonly:
 
-Use the separate `V2-TEST-STRATEGY.md` as the authoritative test policy.
+- grep exact private source strings;
+- assert source ordering;
+- extract private functions via `awk`/`sed`;
+- construct synthetic Bash harnesses;
+- duplicate or mock internal state machines.
 
-## Finding V2-TEST-02 — the test runner has become a subsystem
+The canonical test runner itself maintains logical/physical inventories, modes, timeouts, compatibility handling, fixture rewrites, and registry validation. Host acceptance also grew into a large stateful controller.
 
-The V1 runner owns logical IDs, physical cases, modes, per-case timeouts, GNU/BSD compatibility behavior, fixture remapping, inventory validation, compatibility wrappers and duration reporting.
+V2 response:
 
-That is too much permanent infrastructure for this product.
+- do not port the V1 test corpus;
+- unit + small integration + disposable real-host release acceptance only;
+- no custom runner/inventory;
+- no coverage percentage gate;
+- no source-string/private-helper tests;
+- one behavior usually has one best permanent test layer;
+- backup/restore gets disproportionate attention;
+- test-size thresholds are review warnings, not targets/CI quotas.
 
-### V2 decision
+## Configuration/state finding
 
-Use ordinary Python tests for Python code. Prefer `pytest` as a development-only dependency with no plugins initially. Keep shell tests only for the few remaining shell entrypoints, using direct process invocation rather than a second test framework.
+V1 has multiple runtime authorities and substantial code devoted to safely parsing/synchronizing environment/config/install state.
 
-No custom logical test registry is required.
+V2 should have:
 
-## Finding V2-TEST-03 — CI contains duplicated product policy
+- one installed non-secret config: `/etc/vaultwarden-oci/config.toml`;
+- one source-controlled versions manifest: `versions.toml`;
+- one structured SOPS-encrypted secrets document;
+- one root-only operational Age identity;
+- volatile decrypted runtime secret files only;
+- immutable application releases under `/opt/vaultwarden-oci/releases/<release>` with a `current` symlink.
 
-The current workflow independently encodes component pins, `--use-latest` locations, host assumptions, systemd hardening requirements, stale terms, CLI flags and generated command-reference rules.
+Avoid repository `.env` -> installed env -> generated env synchronization chains and multiple operator-editable sources of truth.
 
-This duplicates policy that also exists in scripts/configuration and creates more drift surfaces.
+## SOPS + Age decision
 
-### V2 decision
+SOPS + Age remains a good fit for V2 and should be retained.
 
-CI should ask the application to validate its own declarative inputs where possible:
+The improvement is simplification:
 
-- `vwctl versions validate`
-- `vwctl config validate --example`
-- `docker compose config --quiet`
-- `pytest`
-- `ruff check`
-- ShellCheck only for remaining shell
+- SOPS/Age are external trusted tools;
+- project code owns only validation/orchestration;
+- one encrypted structured secret document;
+- one operational host identity;
+- separate offline recovery material/recipient;
+- no cloud-KMS/provider abstraction;
+- no custom cryptography;
+- plaintext exists only in root-owned volatile runtime paths when needed.
 
-Do not reproduce the product schema in workflow Bash.
+This preserves cloud neutrality and avoids the operational burden of running a separate secrets service for a ~10-user appliance.
 
-## Finding V2-TEST-04 — host acceptance should be a release gate, not everyday unit-test architecture
+## Email/notification finding and final decision
 
-The current Noble acceptance controller is sophisticated enough to manage checkpoints, destructive reset survival, recovery material, rclone, DNS mutation, reboot and full DR. It is valuable evidence, but its own safety framework has become substantial code to maintain.
+V1's Postfix sidecar, mutable queue state, queue commands, health logic, tests, capabilities, and documentation create a meaningful maintenance surface.
 
-### V2 decision
+V2 beta should remove the mandatory Postfix/local queue architecture.
 
-V2 host acceptance should cover a small number of end-to-end golden flows on disposable Ubuntu 24.04 hosts and run manually/on release candidates rather than on every ordinary code change.
+Split the two mail use cases:
 
----
+### Vaultwarden application email
 
-# Rescan 2 — architecture deletion and language-boundary audit
+Vaultwarden uses direct authenticated SMTP through its supported configuration.
 
-## Finding V2-AGENT-01 — current `AGENTS.md` will recreate V1
+### Project operational notifications
 
-Current repository agent instructions intentionally tell an agent to preserve V1 architecture: Bash orientation, Postfix, three backup tiers, the operation-guard architecture, current test architecture, installed-runtime behavior and compatibility contracts.
+Use:
 
-That is correct for V1 maintenance but directly conflicts with greenfield V2.
+`one concrete HTTPS email API -> small bounded retry -> authenticated SMTP transient fallback`
 
-### V2 decision
+The concrete HTTPS API provider must be selected by ADR before Phase 6. Do not hide an undecided provider behind a generic plugin/provider framework.
 
-The **first V2 implementation PR must reset the agent contract** on a V2 development branch before writing runtime code. It must explicitly say:
+Fallback is for clearly transient delivery-path failures such as network/DNS timeouts, `429` after bounded retry, and service-side `5xx`. Representative `400`/`401`/`403`, invalid configuration/permanent rejection, and TLS certificate/hostname validation failures should remain visible rather than being silently masked by SMTP success.
 
-- V1 is reference material, not an API compatibility target;
-- do not port code unless the V2 design requires it;
-- do not add compatibility adapters for V1;
-- runtime Python standard library is preferred for structured logic;
-- tests protect V2 behavior, not V1 source shape;
-- every phase has explicit non-goals;
-- do not implement later phases opportunistically.
+SMTP must use normal certificate/hostname validation, implicit TLS or required STARTTLS + authentication, bounded timeouts, and secrets from the V2 secret mechanism.
 
-## Finding V2-LANG-01 — Bash is doing application work
+If both transports fail, save a small secret-free diagnostic result surfaced by `vwctl status`/`doctor`.
 
-V1 Bash now implements configuration parsing, schema validation, secret workflows, version resolution, operation state, process/FD identity, backup manifests, archive selection, recovery transactions, diagnostic aggregation and terminal UI behavior.
+Do **not** build a spool, durable retry queue, dead-letter system, MTA, or provider registry. If durable local queuing later proves necessary in production, make that a new architecture decision; reconsidering a mature MTA would be preferable to recreating one in Python.
 
-This is the main cause of code/test multiplication.
+## rclone finding and final decision
 
-### V2 decision — hybrid, explicitly bounded
+rclone should remain first-class. It is not part of the V1 overengineering problem; it lets the project stay cloud-neutral without implementing storage-provider APIs.
 
-**Python 3.12 standard library should own:**
+Keep a small wrapper for:
 
-- `vwctl` CLI and argument parsing;
-- typed configuration loading/validation;
-- versions manifest and latest-version resolution;
-- architecture/platform mapping;
-- subprocess execution/error normalization;
-- operation locking and small runtime metadata;
-- diagnostics/`doctor`;
-- SOPS/Age orchestration and secret schema logic;
-- backup metadata, retention, selection and restore preflight;
-- Cloudflare CIDR parsing/validation;
-- structured status/JSON output;
-- file ownership/mode validation where practical.
+- diagnostics/connectivity;
+- upload/publication;
+- remote listing/verification;
+- download/staging;
+- explicit retention/pruning;
+- status/doctor visibility.
 
-**Bash should be limited to:**
+Normal publication should be:
 
-- an initial bootstrap script if needed before the installed application exists;
-- tiny system integration wrappers only when systemd/installer semantics are clearer in shell;
-- Caddy/container entrypoint glue only where the upstream image requires it.
+`create -> verify local -> rclone copy/copyto -> verify remote -> success`
 
-Do not add Go/Rust merely to produce a single binary. Python is already part of Ubuntu 24.04, is more readable for this team, and avoids another build/release toolchain.
+Deletion is separate. Do not use destructive `sync` semantics as the normal publication mechanism where missing local files could cause remote recovery deletion.
 
-Runtime Python should use the standard library unless a later requirement clearly justifies a dependency. Development may use `pytest` and `ruff`.
+Do not wrap rclone in a generic storage-provider framework.
 
-## Finding V2-LANG-02 — remove the YAML/yq/PyYAML triangle
+## Backup/recovery finding
 
-V1 uses a YAML secret schema, `yq` readers and embedded Python/PyYAML semantic validation. That creates multiple parsers and version pins for one small schema.
+V1's multiple backup/recovery tiers and compatibility/migration behaviors create a large code/test/documentation footprint.
 
-### V2 decision
+Because V2 is greenfield, remove:
 
-Prefer standard-library-readable formats:
+- V1 archive readers;
+- V1 migration pipeline (including the ~91 KB migration library);
+- public db/full/emergency tier model;
+- compatibility adapters.
 
-- `config.toml` for non-secret configuration, read with `tomllib`;
-- `versions.toml` for production pins;
-- SOPS-encrypted JSON for secret values and simple JSON/schema metadata if a separate schema is still justified.
+V2 exposes one encrypted recovery point format plus separate offline recovery material. Restore validates/decrypts/checks/stages before live mutation and health-gates any restart.
 
-SOPS supports JSON input/output as well as YAML/dotenv/INI. This allows V2 to remove the runtime `yq`/PyYAML requirement entirely.
+## Operation-lock finding
 
-Reference: https://github.com/getsops/sops
+V1 contains complex process/lock-holder identity and operation-specific concurrency machinery.
 
-## Finding V2-LANG-03 — Python materially simplifies locking
+V2 should begin with one global mutating lock using Python `fcntl.flock()`. Read-only commands do not take it. Do not add per-operation/distributed lock architecture without demonstrated concurrency requirements.
 
-V1's operation guard contains extensive Bash machinery to keep lock descriptors out of descendants and prove process/FD identity.
+## Dashboard/health finding
 
-Python can hold a single `fcntl.flock()` in the controlling process and launch children with descriptors closed. This removes the need for a separate Bash lock-holder process and much of the `/proc` bookkeeping.
+The V1 dashboard and health subsystem add another large public/UI/dependency surface.
 
-### V2 decision
+V2 beta should have no dashboard/TUI. Invest in:
 
-Start with **one global mutating lock**. Do not add operation-specific locks until a demonstrated need exists. Read-only `status`/`doctor` commands should not take it.
+- `vwctl status` for concise current state;
+- `vwctl doctor [--json]` for read-only stable-ID diagnostics;
+- systemd/journal/container logs for deeper investigation.
 
-## Finding V2-UX-02 — defer the dashboard
+Do not combine doctor with a broad automatic repair framework.
 
-The V1 dashboard is another large command-routing/UI surface tied to Compose, Make and numerous operational commands.
+## Cloudflare/Docker firewall finding
 
-### V2 decision
+Docker-published ports are not governed like ordinary UFW INPUT traffic. V2 must not claim UFW alone protects a published Caddy port.
 
-Do not implement an interactive dashboard in V2 beta. Make `vwctl status` and `vwctl doctor` excellent first. A TUI can be reconsidered after real operator feedback.
+Beta supports one precise path:
 
-## Finding V2-SCOPE-01 — delete migration, do not redesign it
+- Cloudflare-proxied HTTPS;
+- Docker bridge networking;
+- Docker iptables packet-filter backend;
+- one small project-owned ingress chain/allowlist;
+- validated Cloudflare IPv4/IPv6 ranges;
+- last-known-good cache with bounded staleness;
+- fail closed when no safe policy can be established.
 
-`lib/migrate.sh` alone is a large stateful migration pipeline. V2 explicitly has no V1 data migration requirement.
+Do not implement simultaneous iptables/nftables/generic firewall backends in beta. Direct/non-Cloudflare ingress is a future explicit architecture decision.
 
-### V2 decision
+## CrowdSec finding
 
-No migration framework, no old layout reader, no old backup reader, no compatibility aliases. V2 installation starts empty.
+CrowdSec remains valuable, but V2 should prefer current upstream installation/integration and own only project-specific acquisition/configuration, credentials, selected bouncer integration, and diagnostics.
 
-## Finding V2-MAIL-01 — direct SMTP should be the default
+Do not port the large V1 CrowdSec installer wholesale.
 
-Vaultwarden supports authenticated SMTP with `SMTP_HOST`, security mode, credentials and standard submission ports. That makes a mandatory Postfix sidecar unnecessary for the normal small-team case.
+## Version/update finding
 
-Reference: https://github.com/dani-garcia/vaultwarden/blob/main/.env.template
+Centralize all owned component pins in one `versions.toml`.
 
-### V2 decision
+Normal production paths use exact pins. `--use-latest` is explicitly for development/testing: resolve once, freeze exact results for the run, record them, then use those values. Do not spread live-latest conditionals across setup scripts/templates.
 
-Use direct authenticated SMTP for Vaultwarden. Use Python `smtplib` for operational notifications through the same relay. Do not implement a local mail queue in V2 beta. If real deployments later prove a queue is required, Postfix can be evaluated as an optional profile with its own ADR.
+No unattended update daemon is required.
 
-## Finding V2-EDGE-03 — reduce custom CrowdSec provisioning
+## Documentation finding
 
-Current CrowdSec documentation recommends the self-hosted installer path for the Cloudflare Worker bouncer for most users.
+V2 should shrink documentation by shrinking supported behavior.
 
-Reference: https://docs.crowdsec.net/u/bouncers/cloudflare/
+Target:
 
-### V2 decision
+- `README.md`
+- `docs/INSTALL.md`
+- `docs/OPERATIONS.md`
+- `docs/SECURITY.md`
+- `docs/RECOVERY.md`
+- `docs/DEVELOPMENT.md`
 
-Before porting V1's large CrowdSec setup script, evaluate the current supported upstream installer/configuration path. Project code should own only VaultWarden-specific configuration, credentials, validation and diagnostics.
+Use `vwctl --help` as executable command reference and stable doctor JSON/check IDs for machine-readable diagnostics. Do not preserve removed V1 surfaces in documentation.
 
-## Finding V2-NET-04 — correct the firewall simplification boundary
+## Recommended phase order
 
-Docker's documentation states that published container traffic can bypass ordinary UFW `INPUT`/`OUTPUT` filtering because Docker diverts traffic through its NAT/forwarding path.
+The detailed authoritative prompts live in `V2-CODEX-PROMPTS.md`:
 
-Reference: https://docs.docker.com/engine/network/packet-filtering-firewalls/
+0. reset agent/product contract and ADRs;
+1. minimal Python foundation;
+2. bootstrap/immutable installed layout;
+3. Vaultwarden+Caddy core, SOPS/Age, Vaultwarden direct SMTP;
+4. Cloudflare ingress + CrowdSec;
+5. one recovery format + first-class rclone;
+6. systemd + concrete HTTPS notification API + SMTP transient fallback;
+7. pinned versions/update + dev/test `--use-latest`;
+8. consolidated docs, real-host acceptance, V2 cleanup.
 
-### Revision to the initial proposal
+## Highest-risk ways to fail V2
 
-V2 must **not** rely on UFW alone for a publicly published Caddy container.
+1. letting agents treat V1 implementation shape as compatibility requirements;
+2. recreating frameworks/providers/queues for hypothetical future flexibility;
+3. allowing tests to couple to private source structure again;
+4. multiplying config/state authorities;
+5. using destructive remote synchronization as ordinary backup publication;
+6. hiding notification authentication/security/config failures behind unconditional SMTP fallback;
+7. supporting multiple firewall/network modes before the golden path is stable;
+8. keeping V1 migration/backup compatibility despite the greenfield decision.
 
-For the initial V2 architecture, choose one explicit supported model:
+## Final recommendation
 
-- Docker bridge networking with the iptables backend;
-- a very small project-owned ingress chain in the Docker packet path;
-- Cloudflare CIDR restriction for published web ports;
-- fail closed if that supported packet-path contract cannot be established.
+Merge the audit/design contract into `v2`, then run **Prompt 0 only**. Review the resulting `AGENTS.md`, product boundary, and ADRs—including the concrete HTTPS notification API provider decision—before allowing Phase 1 runtime code.
 
-Do not support both iptables and nftables backends in V2 beta. Do not build a generic firewall abstraction. A future ADR may choose Cloudflare Tunnel or host-level Caddy instead, but V2 should ship one ingress model, not several.
-
----
-
-# Security properties to preserve
-
-Keep these V1 properties even when their implementations change:
-
-- fail closed before destructive storage/restore mutation;
-- root-owned production mutation;
-- encrypted persistent secrets and volatile decrypted secret files;
-- offline recovery identity not persisted to the host;
-- container capability minimization and read-only roots where supported;
-- Cloudflare-restricted origin exposure;
-- CrowdSec edge enforcement for proxied client decisions;
-- verified database snapshot before backup publication;
-- backup integrity verification before declaring success;
-- restore preflight before service stop;
-- explicit service-start policy after restore;
-- exact non-zero failure when a required validation did not complete;
-- pinned/checksummed production dependencies.
-
-# Features that should not cross the V2 boundary by default
-
-- V1 migration pipeline;
-- V1 backup/archive compatibility;
-- three public backup tiers;
-- mandatory Postfix and queue administration;
-- dashboard/TUI;
-- generated 70+ KB command-reference document;
-- Makefile as an operator API;
-- repo `.env` as production authoring state;
-- repo-to-`/opt` script synchronization/validation machinery;
-- multi-mode custom Bash test runner;
-- source-grep regression suites;
-- multiple firewall backend support;
-- macOS production/runtime compatibility;
-- provider-specific cloud code.
-
-# Priority
-
-**P0 — before any V2 implementation:** product boundary, V2 `AGENTS.md`, language boundary, test budget, ingress model, Postfix decision, backup/recovery model.
-
-**P1 — V2 foundation:** `vwctl`, config/versions, lock, diagnostics, installed release layout, minimal Compose.
-
-**P2 — security/data:** SOPS/Age, Cloudflare/firewall, CrowdSec, backup/restore.
-
-**P3 — operations/release:** systemd, notifications, updates, release acceptance, documentation.
-
-The guiding rule remains:
-
-> V2 should be easier to understand than V1. Any new abstraction must delete more operational complexity than it introduces.
+That sequence gives future agents a narrow, explicit source of truth and is the strongest control against recreating V1 complexity under a new language.
