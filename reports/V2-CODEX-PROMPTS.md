@@ -10,7 +10,7 @@ Each prompt below is deliberately **standalone**. Expand one section, copy the e
 - Use one prompt per Codex session.
 - Run phases in order unless a human explicitly changes the plan.
 - Phase work normally starts from current `v2` and lands back into `v2` through review.
-- Do not paste a shared preamble from elsewhere; every block already contains the durable V2 contract.
+- Do not paste a shared preamble from elsewhere; every block already contains the durable V2 contract it needs.
 
 ### Authority
 
@@ -30,6 +30,8 @@ Supporting reports:
 - `reports/V2-ARCHITECTURE-PROPOSAL.md` — target architecture, documentation model, and phase sequence;
 - `reports/V2-TEST-STRATEGY.md` — testing rationale and guardrails;
 - `reports/V2-REVIEW-PROMPTS.md` — standalone prompts for a separate PR-review agent; not an implementation authority.
+
+A reviewer prompt is a mirror, not a second specification. If a future reviewer prompt contradicts this file, this file wins and the review prompt should be corrected.
 
 ---
 
@@ -58,7 +60,7 @@ NON-NEGOTIABLE V2 CONTRACT
 - Greenfield fresh install for roughly 10 users and a junior administrator.
 - Ubuntu 24.04 LTS Noble only; tested amd64 and arm64.
 - Runtime cloud-provider neutral; OCI A1 Flex reference only.
-- Cloudflare-first production ingress; CrowdSec retained.
+- Cloudflare-first production ingress; CrowdSec retained for proxied web-client remediation through Cloudflare.
 - No V1 project-state, backup-format, migration, command-alias, runtime-layout, or compatibility requirement.
 - Python 3.12 stdlib-first for structured logic; Bash only minimal bootstrap/host/container glue where materially simpler.
 - No runtime third-party Python dependency without a concrete requirement.
@@ -68,16 +70,18 @@ NON-NEGOTIABLE V2 CONTRACT
 - SOPS + Age: one structured encrypted secrets document, root-only operational Age identity, separate offline recovery material/recipient, volatile decrypted runtime secrets only. No project cryptography/KMS/secrets-provider framework.
 - rclone first-class: verified local recovery point -> copy/copyto-style publication -> remote verification -> success; pruning/deletion separate. No destructive sync as normal publication and no storage-provider framework.
 - Vaultwarden application mail uses direct authenticated SMTP.
-- Project operational notifications support exactly these canonical built-in HTTPS providers in beta: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`. Accept `cyberpanel` only as an alias to the same `cyberpersons` definition.
-- Operator selects the provider in `config.toml`; common API credential is SOPS secret `email_api_token` unless a current provider requirement demonstrably needs another secret. Mailgun may require non-secret region/domain settings.
-- Provider transport metadata will live in one source-controlled non-secret `email-providers.toml` shipped with the immutable application release. This is release metadata, not a second operator-editable config authority.
-- Routine provider endpoint/auth/request/success/retry changes must be maintainable by editing that catalog plus focused tests/docs rather than rewriting the notification library.
-- Operator config may select a built-in provider/alias and declared non-secret options; it may not supply arbitrary provider endpoints, auth modes, headers, or payload templates.
-- After a small bounded primary retry, authenticated SMTP is fallback only for clearly transient failures. Auth/config/permanent failures and TLS certificate/hostname validation failures remain visible rather than being silently masked.
-- No Postfix/local MTA requirement, durable queue, spool, dead-letter system, dynamic provider loading, arbitrary HTTP scripting, Python entry points, or provider SDK.
+- Operational notifications support canonical built-ins `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`; `cyberpanel` is only an alias to `cyberpersons`.
+- Provider transport metadata lives in one source-controlled non-secret `email-providers.toml` shipped with the immutable release. It is not operator-editable config and never contains credentials.
+- Provider-template canonical message fields are exactly: `from_email`, `from_name`, `from_header`, `to_email`, `subject`, `text`.
+- Routine provider endpoint/auth/request/success/retry changes must be catalog edits plus focused tests/docs rather than notification-library rewrites.
+- Operator config may select a built-in/alias and declared non-secret options; it may not supply arbitrary provider endpoints, auth modes, headers, payload templates, success rules, or retry rules.
+- After a small bounded API retry, authenticated SMTP fallback is used only for clearly transient failures supported by network semantics or current provider documentation. There is no blanket "all 5xx are transient" rule.
+- No Postfix/local MTA, durable queue, spool, dead-letter system, dynamic provider loading, arbitrary HTTP scripting, Python entry points, or provider SDK.
+- CyberPersons baseline: 429 and 503 are currently transient/retryable; 500 `send_failed` is not transient by status alone and must not be silently SMTP-masked.
 - One encrypted V2 recovery format plus separate offline recovery material; no V1 archive reader or public db/full/emergency tier model.
 - No dashboard/TUI in beta; operator surfaces are `vwctl status`, `vwctl doctor`, and logs.
-- Beta edge supports one Cloudflare-proxied Caddy + Docker bridge/iptables path with validated Cloudflare ranges, bounded last-known-good state, and fail-closed behavior. No second firewall backend.
+- Beta origin security uses one Cloudflare-proxied Caddy + Docker bridge/iptables path with validated Cloudflare ranges, bounded last-known-good state, and fail-closed behavior. No second firewall backend.
+- CrowdSec beta remediation is through one current supported Cloudflare remediation component for proxied web decisions. Do not make a CrowdSec host firewall bouncer a beta requirement.
 - Production versions are exact pins. `--use-latest` is development/testing-only and resolves once to exact recorded values for a run.
 - No framework, dynamic plugin/provider registry, ORM, daemon, database, event bus, workflow engine, generic transaction framework, distributed lock, HA/Kubernetes/Swarm abstraction, or speculative extension architecture.
 
@@ -85,7 +89,7 @@ FILE-SURFACE RULE
 - Prefer fewer cohesive first-party files when responsibilities remain clear.
 - Before creating a file, ask whether an existing owner can absorb the behavior cleanly.
 - Avoid one-function modules, one-action wrapper scripts, duplicate config fragments, empty placeholders, and future-facing files.
-- `email-providers.toml` is a deliberate single-file design choice because it replaces provider constants/templates that would otherwise be repeated in Python or split across provider modules.
+- `email-providers.toml` is a deliberate single-file resource because it replaces provider constants/templates that would otherwise be repeated in Python or split across provider modules.
 - File reduction is a preference, not a quota. Do not create giant mixed-responsibility files or weaken security/readability/testability just to reduce count.
 - Record architecture decisions in the fewest durable documents that remain clear; do not create one ADR file per bullet by default.
 
@@ -105,21 +109,22 @@ IMPLEMENT
    - Python-first hybrid boundary;
    - one operator TOML non-secret config authority + one versions manifest;
    - SOPS + Age operational/offline recovery identities and one canonical encrypted-secret path;
-   - Cloudflare-only beta ingress on one Docker iptables packet path;
-   - operational notifications: six built-ins `mailersend|sendgrid|mailgun|postmark|resend|cyberpersons`, `cyberpanel` alias, common `email_api_token`, static source-controlled `email-providers.toml`, transient-only SMTP fallback, no Postfix/custom queue/dynamic plugins;
-   - provider catalog is maintainer-editable source/release data; ordinary operator config cannot override endpoint/auth/payload arbitrarily;
-   - future provider/settings updates first extend/edit the closed catalog and only change Python for a genuinely new transport capability;
+   - Cloudflare-only beta origin ingress on one Docker iptables packet path;
+   - CrowdSec web remediation through Cloudflare only in beta; no host firewall bouncer requirement;
+   - operational notifications: six canonical built-ins, `cyberpanel` alias, common `email_api_token`, static `email-providers.toml`, exact canonical message fields, transient-only SMTP fallback, no Postfix/custom queue/dynamic plugins;
+   - CyberPersons `429`/`503` transient baseline and `500 send_failed` non-transient-by-status baseline, subject to Phase 6 re-verification;
+   - future provider/settings changes update the closed catalog first and Python only for a genuinely new transport capability;
    - rclone copy-style publication + remote verification + separate pruning;
    - one V2 recovery format + offline recovery material + no V1 compatibility;
    - bounded three-layer testing.
-4. Do not create runtime `email-providers.toml` in this documentation-only phase; Phase 6 implements the catalog. Record its contract now so earlier phases do not invent competing notification config.
+4. Do not create runtime `email-providers.toml` in this documentation-only phase; Phase 6 implements it.
 5. Do not add ADR tooling/generators/frameworks.
 
 ALLOWED SCOPE
 - `AGENTS.md`
 - V2 product/decision/ADR documentation
 - links needed to connect those documents
-- no production code, Compose, installer, provider catalog implementation, or CI redesign
+- no production code, Compose, installer, provider-catalog implementation, or CI redesign
 
 VALIDATION
 - Markdown/link/basic repository checks only.
@@ -153,8 +158,8 @@ AUTHORITY / WORKFLOW
 - Do not edit `reports/V2-CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
-1. Read root `AGENTS.md` and Phase 0 product/decision documents.
-2. Verify Phase 0 is present. If not, stop and report the missing prerequisite.
+1. Read root `AGENTS.md` and the Phase 0 product/decision documents.
+2. Verify Phase 0 is present: V2 `AGENTS.md`, product boundary, and durable decisions. If not, stop and report the missing prerequisite.
 3. Inspect existing files before choosing package/module layout; reuse a clear owner where possible.
 
 DURABLE V2 CONTRACT
@@ -162,8 +167,9 @@ DURABLE V2 CONTRACT
 - Python 3.12 stdlib-first; Bash minimal glue; no runtime third-party dependency without explicit need.
 - One `vwctl`, one `/etc/vaultwarden-oci/config.toml`, one `versions.toml`, no dashboard/TUI.
 - SOPS + Age remains the secret mechanism; rclone remains first-class with verified copy-style publication + separate prune.
-- Vaultwarden direct SMTP. Operational notifications later use one static source-controlled `email-providers.toml` with built-ins `mailersend|sendgrid|mailgun|postmark|resend|cyberpersons`, `cyberpanel` alias, common API token, and transient-only authenticated SMTP fallback. No Postfix/custom durable queue/dynamic provider framework.
-- One V2 recovery format + offline recovery material; one Cloudflare/Docker-iptables beta ingress path; exact production pins; `--use-latest` dev/test only.
+- Vaultwarden direct SMTP. Operational notifications later use one static `email-providers.toml` with six canonical built-ins including CyberPersons, exact canonical message fields, and transient-only authenticated SMTP fallback. No Postfix/custom durable queue/dynamic provider framework.
+- CrowdSec beta remediation is through Cloudflare for proxied web clients; no host firewall bouncer requirement.
+- One V2 recovery format + offline recovery material; one Cloudflare/Docker-iptables beta origin path; exact production pins; `--use-latest` dev/test only.
 - No framework/plugin registry/ORM/daemon/database/event bus/workflow engine/generic transaction/distributed-lock/cloud/storage/notification/firewall abstraction.
 
 FILE / TEST RULE
@@ -182,7 +188,7 @@ IMPLEMENT
 6. Add one small subprocess helper accepting argv arrays and normalizing success/nonzero/not-found without shell interpolation.
 7. Add one global mutation-lock primitive using `fcntl.flock`; do not attach it to read-only commands.
 8. Define stable doctor check IDs and PASS/WARN/FAIL/SKIP; human prose is not API-stable.
-9. Do not pre-create notification/provider catalog modules or other later-phase modules.
+9. Do not pre-create notification/provider-catalog or other later-phase modules.
 
 TESTS REQUIRED
 - valid/invalid config TOML
@@ -196,7 +202,7 @@ NON-GOALS
 - Docker/Compose/root installer work
 - SOPS/Age execution
 - HTTP/email/provider catalog/rclone
-- Cloudflare/CrowdSec/firewall
+- Cloudflare/CrowdSec/firewall implementation
 - backup/restore
 - systemd/update implementation
 - command/plugin registries
@@ -222,15 +228,16 @@ AUTHORITY / WORKFLOW
 - Do not edit `reports/V2-CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
-1. Read root `AGENTS.md`, V2 decisions, and Phase 1 implementation.
-2. Verify Phase 1 `vwctl`, config/versions parsing, architecture mapping, subprocess helper, doctor skeleton, and lock primitive exist.
+1. Read root `AGENTS.md`, V2 decisions, and the Phase 1 implementation.
+2. Verify Phase 1 is present: `vwctl`, config/versions parsing, architecture mapping, subprocess helper, doctor skeleton, and global lock primitive. If not, stop and report the missing prerequisite.
 3. Inspect installer/path owners before creating scripts/modules.
 
 DURABLE V2 CONTRACT
 - Greenfield Ubuntu 24.04 LTS amd64/arm64; cloud-neutral/OCI-reference; Cloudflare-first/CrowdSec; no V1 compatibility.
 - Python 3.12 stdlib structured logic; Bash only the smallest bootstrap/host glue.
 - One `vwctl`, one operator TOML config, one versions manifest.
-- SOPS + Age, rclone, direct Vaultwarden SMTP, later static provider catalog + transient SMTP fallback, one recovery format, one Docker-iptables edge model, and exact production pins remain fixed boundaries.
+- SOPS + Age, rclone, direct Vaultwarden SMTP, later static provider catalog + transient SMTP fallback, one recovery format, one Docker-iptables origin model, and exact production pins remain fixed boundaries.
+- CrowdSec beta remediation is through Cloudflare only; no host firewall bouncer requirement.
 - No Postfix/custom queue/dynamic provider framework/dashboard/migration engine/speculative extension architecture.
 
 FILE / TEST RULE
@@ -244,7 +251,7 @@ IMPLEMENT
 1. Add one minimal root bootstrap; prefer thin Bash for pre-install checks delegating structured work to Python.
 2. Validate Ubuntu 24.04 and amd64/arm64.
 3. Create only paths needed now: `/opt/vaultwarden-oci/releases/<release>/`, `/opt/vaultwarden-oci/current`, `/etc/vaultwarden-oci/config.toml`, Phase 0 Age-key/secrets paths, required `/var/lib/vaultwarden-oci/` state, and `/run/vaultwarden-oci/` volatile state.
-4. Install the current Python app immutably and expose the intended stable `vwctl` path. The immutable release layout must be able to carry source-controlled resource files later (including `email-providers.toml`) without making them operator config.
+4. Install the current Python app immutably and expose the stable `vwctl` path. The immutable release layout must be able to carry source-controlled resources later, including `email-providers.toml`, without making them operator config.
 5. Create only users/groups/directories with demonstrated need.
 6. Add only minimal systemd integration needed for installed application/lifecycle addressing; permanent timers belong to Phase 6.
 7. Same-release/same-config re-run is safe; incompatible ownership/state fails clearly.
@@ -257,7 +264,7 @@ VALIDATION
 NON-GOALS
 - starting Vaultwarden/Caddy
 - runtime secret decryption
-- edge/CrowdSec
+- edge/CrowdSec implementation
 - backup/rclone/restore
 - operational notifications/provider catalog
 - update engine/V1 migration
@@ -283,8 +290,8 @@ AUTHORITY / WORKFLOW
 - Do not edit `reports/V2-CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
-1. Read root `AGENTS.md`, V2 decisions, and installed-layout/foundation code.
-2. Verify Phase 2 paths and canonical SOPS/Age paths are established.
+1. Read root `AGENTS.md`, V2 decisions, and the Phase 2 installed-layout/foundation code.
+2. Verify Phase 2 is present: immutable installed application layout, config path, Age/secrets paths, and stable `vwctl` installation. If not, stop and report the missing prerequisite.
 3. Inspect runtime/config/secrets owners before creating files.
 
 DURABLE V2 CONTRACT
@@ -292,8 +299,9 @@ DURABLE V2 CONTRACT
 - Python 3.12 stdlib structured logic; Bash minimal glue; one CLI/operator-config/versions authority; no dashboard/TUI.
 - SOPS + Age: one structured encrypted document, root-only operational identity, offline recovery material, volatile plaintext only; no secrets/KMS framework.
 - rclone later remains first-class with non-destructive publication + separate prune.
-- Vaultwarden application mail is direct authenticated SMTP. Project notification delivery is Phase 6 and uses a static provider catalog for six built-ins including CyberPanel Email/CyberPersons; no Postfix/custom queue/dynamic provider registry.
-- One V2 recovery format; one Cloudflare/Docker-iptables edge path; exact production pins; `--use-latest` dev/test only.
+- Vaultwarden application mail is direct authenticated SMTP. Project notification delivery/provider catalog is Phase 6; no Postfix/custom queue/dynamic provider registry.
+- CrowdSec beta remediation is Phase 4 and uses Cloudflare for proxied web decisions, not a host firewall bouncer.
+- One V2 recovery format; one Cloudflare/Docker-iptables origin path; exact production pins; `--use-latest` dev/test only.
 
 FILE / TEST RULE
 - Prefer one clear runtime owner and one clear secrets owner; avoid adapter/wrapper layers and duplicate Compose/config fragments.
@@ -308,7 +316,7 @@ IMPLEMENT
 3. Implement SOPS + Age orchestration using canonical Phase 0 paths: validate one encrypted document, root-only operational identity, offline recovery recipient/material, volatile-only decryption, required-key validation, no plaintext in TOML/argv/logs/persistent temp files.
 4. Implement `vwctl start|stop|restart|status|logs`.
 5. Configure Vaultwarden direct authenticated SMTP. Do not add Postfix.
-6. Configure Caddy for the reverse-proxy/DNS-01 path required by the Cloudflare-first design; Phase 4 owns ingress enforcement/CrowdSec.
+6. Configure Caddy for the reverse-proxy/DNS-01 path required by the Cloudflare-first design; Phase 4 owns host ingress enforcement/CrowdSec.
 7. Add doctor checks only for behavior introduced now.
 
 TESTS REQUIRED
@@ -318,7 +326,7 @@ TESTS REQUIRED
 - representative lifecycle/status integration behavior
 
 NON-GOALS
-- project operational HTTP API/SMTP fallback module or provider catalog
+- project operational HTTP API/SMTP fallback or provider catalog
 - Postfix/mail queue
 - Cloudflare CIDR enforcement/CrowdSec setup
 - backup/restore/rclone/update
@@ -340,45 +348,53 @@ TASK: VaultWarden-OCI V2 — Phase 4: Cloudflare ingress and CrowdSec
 AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless explicitly overridden by the human.
 - Work from current `v2`; do not merge your own PR unless instructed.
-- Implement Phase 4 only; no recovery, notification, update, or generic firewall expansion.
+- Implement Phase 4 only; no recovery, notifications, updates, or generic firewall expansion.
 - Do not edit `reports/V2-CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
-1. Read root `AGENTS.md`, edge decisions, and current Caddy/runtime implementation.
-2. Verify Phase 3 runtime/Caddy is present.
+1. Read root `AGENTS.md`, V2 edge decisions, and the current Caddy/runtime implementation.
+2. Verify Phase 3 is present: Vaultwarden+Caddy runtime, V2 secrets materialization, lifecycle commands, and direct Vaultwarden SMTP. If not, stop and report the missing prerequisite.
 3. Inspect current host/network helpers before creating files.
+4. Verify current upstream CrowdSec documentation for the chosen Cloudflare remediation component before implementation; do not blindly port V1 installer behavior.
 
 DURABLE V2 CONTRACT
 - Greenfield Ubuntu 24.04 amd64/arm64; cloud-neutral/OCI-reference; no V1 compatibility.
 - Python 3.12 stdlib structured logic; Bash minimal host glue; one CLI/operator-config/versions authority.
-- SOPS/Age, rclone, direct Vaultwarden SMTP, static built-in operational-email catalog + transient SMTP fallback, one recovery format remain fixed.
-- Beta ingress is exactly Cloudflare-proxied Caddy on one Docker bridge + iptables packet-filter path.
-- Cloudflare ranges strictly validated, cached last-known-good with bounded staleness, fail closed when no safe policy exists.
-- CrowdSec retained using upstream integration where practical.
+- SOPS/Age, rclone, direct Vaultwarden SMTP, later static provider catalog + transient SMTP fallback, and one recovery format remain fixed.
+- Beta origin ingress is exactly Cloudflare-proxied Caddy on one Docker bridge + iptables packet-filter path.
+- Cloudflare ranges are strictly validated, cached last-known-good with bounded staleness, and fail closed when no safe policy exists.
+- CrowdSec beta has one remediation scope for proxied web clients: Cloudflare. Do not make a host firewall bouncer a beta requirement.
+- The project-owned iptables origin allowlist is separate from CrowdSec decisions: it allows Caddy ingress only from validated Cloudflare ranges.
+- SSH/other host-visible services remain protected by documented provider firewall/security-group and host firewall policy, not by a new CrowdSec firewall-bouncer requirement.
 - No nftables/second firewall backend, generic firewall/provider abstraction, cloud security-group API, dashboard, or framework/plugin registry.
 
 FILE / TEST RULE
-- Prefer one cohesive edge-policy owner + minimal project-specific CrowdSec glue; do not wrap every upstream action.
-- Unit-test CIDR/policy/staleness, small integration at command boundaries, real packet path in disposable-host acceptance; no multi-backend matrix.
+- Prefer one cohesive edge-policy owner plus minimal project-specific CrowdSec glue; do not wrap every upstream action.
+- Unit-test CIDR/policy/staleness, small integration at command boundaries, real packet/remediation path in disposable-host acceptance; no multi-backend or multi-bouncer matrix.
 
 GOAL
-Establish the one supported beta edge: Cloudflare-proxied Caddy with fail-closed Docker iptables ingress and CrowdSec.
+Establish the one supported beta edge: fail-closed Cloudflare-only origin ingress plus CrowdSec remediation of proxied web-client decisions at Cloudflare.
 
 IMPLEMENT
 1. Cloudflare IPv4/IPv6 retrieval, strict validation, last-known-good persistence, bounded staleness.
 2. One small project-owned Docker iptables ingress path allowing published Caddy HTTPS only from validated Cloudflare ranges.
 3. Fail closed if no safe current/last-known-good policy exists.
 4. Do not claim ordinary UFW `INPUT` alone protects Docker-published Caddy ports.
-5. Prefer current upstream CrowdSec installation/integration for required agent/acquisitions, appropriate host firewall bouncer, Cloudflare edge/Worker bouncer, and minimal project config/credentials/status/test integration.
-6. Add `vwctl`/doctor behavior needed to diagnose edge health.
+5. Install/configure the CrowdSec Security Engine using current upstream guidance and only the product-specific web acquisitions/config required.
+6. Configure one current supported CrowdSec Cloudflare remediation integration for the proxied web decision flow.
+7. Do not install/configure a CrowdSec host firewall bouncer as part of beta.
+8. Add `vwctl`/doctor behavior needed to diagnose Cloudflare CIDR policy, CrowdSec engine health, and Cloudflare remediation health without creating another dashboard.
 
 TESTS REQUIRED
 - CIDR parsing/validation/staleness
-- deterministic policy/rule decisions for one supported backend
+- deterministic policy/rule decisions for one supported iptables path
 - fail-closed behavior
 - minimal external-command integration
+- Cloudflare remediation configuration/health at the project-owned boundary
+- disposable-host acceptance for real origin packet path and representative CrowdSec->Cloudflare remediation when environment supports it
 
 NON-GOALS
+- CrowdSec host firewall bouncer
 - nftables/multiple firewall backends
 - direct/non-Cloudflare beta ingress
 - cloud firewall API
@@ -386,7 +402,7 @@ NON-GOALS
 - backup/rclone/notifications/update
 
 FINAL RESPONSE
-- State edge/security behavior, exact validation run/not run, files created/deleted with rationale, and later-phase follow-ups.
+- State edge/security behavior, exact validation run/not run, files created/deleted with rationale, exact CrowdSec remediation component/docs used, and later-phase follow-ups.
 ```
 
 </details>
@@ -407,7 +423,7 @@ AUTHORITY / WORKFLOW
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, recovery/rclone/secrets decisions, and current runtime/storage layout.
-2. Verify Phase 3 runtime/secrets exists and Phase 4 changes do not alter recovery assumptions.
+2. Verify **Phase 4 is present**, including the Phase 3 runtime/secrets it depends on: Cloudflare origin policy, CrowdSec Cloudflare remediation integration, and relevant doctor/status ownership must already exist. If Phase 4 is missing, stop and report the prerequisite instead of implementing it here.
 3. Inspect existing data/manifest/subprocess owners before creating recovery files.
 
 DURABLE V2 CONTRACT
@@ -448,6 +464,7 @@ NON-GOALS
 - multiple public backup tiers
 - storage-provider framework/background replication
 - notification/system redesign
+- Phase 4 edge/CrowdSec implementation
 
 FINAL RESPONSE
 - State recovery behavior/security properties, smallest sufficient/highest-value validation, exact validation run/not run, files created/deleted with rationale, and later-phase follow-ups.
@@ -471,88 +488,105 @@ AUTHORITY / WORKFLOW
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, notification decision(s), architecture/test reports, current config/secrets/status/doctor/systemd ownership, and V1 `docs/EMAIL.md` + `lib/email.sh` only as behavioral reference.
-2. Verify Phase 5 recovery command/interfaces required by backup timers exist.
+2. Verify **Phase 5 is present**: V2 backup/restore and rclone interfaces required by timers must already exist. If not, stop and report the missing prerequisite rather than implementing recovery here.
 3. Inspect existing owners before creating notification/systemd files.
-4. Verify the **current official API documentation** for every built-in provider before implementation: endpoint/region, authentication, request shape, successful-response semantics, rate-limit/retry behavior, redirects, and documented permanent/transient errors. Do not blindly copy V1 details if upstream changed.
+4. Verify current official API documentation for every built-in provider before implementation: endpoint/region, authentication, request shape, successful-response semantics, rate-limit/retry behavior, redirects, and documented permanent/transient errors. Do not blindly copy V1 details if upstream changed.
 
 DURABLE V2 CONTRACT
 - Greenfield Ubuntu 24.04 amd64/arm64; cloud-neutral/OCI-reference; Cloudflare-first/CrowdSec; no V1 compatibility.
 - Python 3.12 stdlib structured logic; Bash minimal glue; one CLI/operator-config/versions authority; SOPS + Age supplies secrets; rclone/recovery unchanged.
 - Vaultwarden application mail continues direct authenticated SMTP.
-- Canonical operational HTTPS provider IDs supported in beta are exactly: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`.
-- Accept `cyberpanel` as an alias to canonical `cyberpersons`; one catalog definition only.
-- Operator selects provider/alias in `/etc/vaultwarden-oci/config.toml`; provider transport mechanics are not hard-coded in operator config.
-- Use common SOPS secret `email_api_token` for built-ins unless current official provider requirements force a documented exception. Mailgun may use declared non-secret region/domain settings.
-- Provider transport definitions live in one source-controlled non-secret `email-providers.toml`, shipped inside the immutable application release. It is maintainer-editable source/release data, not an operator-editable authority and never contains credentials.
-- Routine endpoint/auth/request/success/retry/settings changes should be catalog edits plus focused tests/docs, not library rewrites.
+- Canonical operational HTTPS provider IDs are exactly: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`.
+- Accept `cyberpanel` only as an alias to canonical `cyberpersons`; one catalog definition.
+- Operator selects provider/alias in `/etc/vaultwarden-oci/config.toml`; provider transport mechanics are release data, not arbitrary operator config.
+- Use common SOPS secret `email_api_token` unless current official provider requirements force a documented exception. Mailgun may use declared non-secret region/domain settings.
+- Provider definitions live in one source-controlled non-secret `email-providers.toml`, shipped inside the immutable application release.
+- Routine endpoint/auth/request/success/retry/settings changes are catalog edits plus focused tests/docs, not library rewrites.
 - Unknown provider IDs/aliases fail validation.
-- After a small bounded API retry, direct authenticated SMTP fallback is used only for clearly transient primary failures documented by the provider or caused by network/DNS/connectivity timeout.
-- Representative 400/401/403, malformed config/request, permanent rejection, unsupported behavior, and TLS certificate/hostname validation failure remain visible and are not silently masked by SMTP.
+- After small bounded retry, direct authenticated SMTP fallback is used only for clearly transient failures documented by the provider or caused by network/DNS/connectivity timeout. There is no blanket all-5xx fallback rule.
+- Representative auth/config/permanent/ambiguous failures and TLS certificate/hostname validation failure remain visible and are not silently masked by SMTP.
 - SMTP requires normal certificate/hostname verification with implicit TLS or required STARTTLS + authentication; no plaintext downgrade.
 - If SMTP fallback is not configured, `doctor` reports fallback unavailable; do not pretend redundancy exists.
 - API/SMTP secrets never appear in provider catalog, argv, normal logs, exception text, or debug transcripts.
 - No Postfix/local MTA, spool, persistent retry scheduler/queue, dead-letter system, arbitrary provider code, Python entry points, dynamic imports, provider package/SDK, or general HTTP workflow engine.
 - systemd is the only scheduler/lifecycle manager.
 
+CANONICAL MESSAGE CONTEXT
+The provider-template fields are **exactly**:
+- `from_email`
+- `from_name`
+- `from_header`
+- `to_email`
+- `subject`
+- `text`
+
+`from_header` is safely derived from `from_name` + `from_email`. Provider templates map these canonical values to external provider field names. Do not add a competing canonical `to` name or other synonyms.
+
 CYBERPANEL EMAIL / CYBERPERSONS BASELINE
-The official CyberPanel Email documentation was verified on 2026-08-19 with this current contract; re-verify at implementation time:
-- canonical V2 ID: `cyberpersons`; accepted alias: `cyberpanel`;
-- send endpoint: `POST https://platform.cyberpersons.com/email/v1/send`;
+Official CyberPanel Email documentation was verified on 2026-08-19; re-verify it at implementation time:
+- canonical V2 ID: `cyberpersons`; alias: `cyberpanel`;
+- endpoint: `POST https://platform.cyberpersons.com/email/v1/send`;
 - recommended authentication: `Authorization: Bearer <API key>`;
 - API key must permit sending (`can_send`); provider may restrict key by domain/IP;
-- JSON fields needed by V2: `from`, `to`, `subject`, `text` (the provider also supports HTML and other optional fields, but do not expand V2 scope without a need);
-- accepted send: HTTP `202` and JSON `success: true`; capture at most a bounded safe message identifier if useful;
-- currently documented transient candidates: HTTP `429` (honor bounded retry information when safe), `500`, `503`;
-- currently documented non-transient/config examples: HTTP `400` and `403` domain/account/permission failures;
-- if the operator chooses CyberPanel SMTP as the generic fallback: `mail.cyberpersons.com`, port `587`, STARTTLS required, authenticated SMTP credentials generated separately from the API key.
-Do not assume CyberPanel API and SMTP credentials are interchangeable.
+- V2 plain-text request maps canonical values to provider `from`, `to`, `subject`, `text`;
+- accepted send: HTTP `202` and JSON `success: true`;
+- HTTP `429 rate_limit_exceeded` is transient/retryable after bounded retry;
+- HTTP `503 service_unavailable` is explicitly temporary and transient/retryable;
+- HTTP `500 send_failed` is **not transient by status alone**. It can represent recipient rejection, invalid recipient, or blocklisted-domain/reputation failures. Do not retry/fallback merely because it is 500;
+- HTTP `400` and documented `403` cases are visible configuration/permanent failures;
+- CyberPanel SMTP fallback, if selected: `mail.cyberpersons.com:587`, required STARTTLS, separate authenticated SMTP credentials.
+
+The current docs say a 429 response includes JSON `retry_after`, but the reviewed docs do not define sufficient delay semantics/units to require parsing it. A common fixed small bounded retry schedule is valid. Only consume a provider body retry delay if current official docs clearly specify a numeric delay and unit and the closed catalog declares that narrow capability.
 
 EMAIL PROVIDER CATALOG REQUIREMENT
-Create exactly one source-controlled `email-providers.toml` for all six built-ins. Keep the schema closed to capabilities actually required by these providers.
+Create exactly one source-controlled `email-providers.toml` for all six canonical built-ins. Keep the schema closed to capabilities actually required.
 
-The catalog may represent only narrowly required metadata such as:
+Allowed catalog concepts:
 - canonical ID, aliases, display name;
 - final HTTPS POST endpoint or narrowly constrained endpoint template;
-- closed auth mode: bearer token, fixed token header, or basic auth using the secret token, plus only fixed non-secret auth metadata required by a built-in;
+- finite auth mode needed by current built-ins (for example bearer, fixed token header, or basic auth using the secret token) plus fixed non-secret auth metadata;
 - request encoding: JSON or form;
-- declarative request template using a closed canonical message field set such as `from_email`, `from_name`, `from_header`, `to`, `subject`, `text`;
+- declarative request template using only the exact canonical message fields above;
 - accepted success status codes;
-- at most one simple provider-specific JSON success-field/value check when HTTP status alone is insufficient;
-- provider-documented retryable HTTP statuses and bounded `Retry-After` handling;
-- declared provider-specific non-secret options/defaults/allowed values and endpoint substitutions where genuinely required;
-- credential secret key name only if a built-in cannot use common `email_api_token`.
+- at most one simple top-level JSON success-field/value check when status alone is insufficient;
+- provider-documented retryable HTTP statuses;
+- bounded standard HTTP `Retry-After` header handling;
+- optionally one named top-level numeric JSON retry-delay field plus one fixed declared unit, but only when current official docs define it; no JSONPath/nested expressions;
+- declared provider-specific non-secret options/defaults/allowed values and narrowly constrained endpoint substitutions;
+- credential secret-key name only if a built-in cannot use `email_api_token`.
+
+If a body retry-delay field is absent, malformed, undocumented, or has unclear units, ignore it and use the common fixed bounded retry schedule. Clamp accepted provider-supplied delays to a small global maximum.
 
 CATALOG SECURITY BOUNDARY
 - Catalog contains no secret values.
 - All provider endpoints are HTTPS and validated.
-- `config.toml` may select provider/alias and declared non-secret options only. It must not override endpoint, auth mode/header, payload template, success rule, or retry classification arbitrarily.
-- Reject duplicate IDs/aliases, unknown auth modes/encodings, unknown template placeholders, undeclared endpoint substitutions/options, invalid success/retry rules, and unsupported catalog fields.
-- Request templates are data, not code. No `eval`, Jinja, Python expressions, shell expansion, dynamic imports, or arbitrary template scripting.
-- Render through ordinary structured serialization so message values cannot become code/template syntax.
-- Authorization-bearing POST requests must not silently follow cross-host redirects. Treat unexpected redirects as failure unless a same-origin behavior is explicitly verified and safely implemented.
+- `config.toml` may select provider/alias and declared non-secret options only. It cannot override endpoint, auth mode/header, payload template, success rule, or retry classification arbitrarily.
+- Reject duplicate IDs/aliases, unknown auth modes/encodings/placeholders, undeclared substitutions/options, invalid success/retry rules, and unsupported fields.
+- Request templates are data, not code: no `eval`, Jinja, Python expressions, shell expansion, dynamic imports, or arbitrary template scripting.
+- Render through structured serialization so message values cannot become code/template syntax.
+- Authorization-bearing POST requests must not silently follow cross-host redirects. Unexpected redirects fail unless same-origin behavior is explicitly verified and safely implemented.
 - Do not persist full provider response bodies; diagnostics are bounded/redacted.
-- The catalog is not a plugin registry. Do not create one provider class/module per built-in merely for symmetry.
+- The catalog is not a plugin registry. Do not create one provider class/module per built-in for symmetry.
 
-MAINTENANCE RULE / FUTURE PROVIDER TEMPLATE
+MAINTENANCE RULE
 When a provider changes or a future provider is approved:
 1. verify current official provider docs;
 2. edit/add one provider block in `email-providers.toml` using the existing closed schema if possible;
 3. add only declared non-secret operator fields truly required;
 4. update focused catalog-render/auth/success/retry/redaction tests;
 5. update operator/developer docs;
-6. change Python only if a genuinely new transport capability cannot be represented safely by the current closed schema.
-Do not respond to routine provider changes by adding provider classes, one module per provider, dynamic loading, an SDK, or a generic HTTP engine.
+6. change Python only if a genuinely new transport capability cannot be represented safely by the closed schema.
 
 FILE-SURFACE RULE
-- Prefer one cohesive notification/catalog renderer owner rather than one module/class per provider/transport/status/retry condition.
+- Prefer one cohesive notification/catalog-renderer owner rather than one module/class per provider/transport/status/retry condition.
 - `email-providers.toml` is the one provider-definition file.
 - Keep permanent unit/timer count small; call `vwctl` directly rather than creating a wrapper script per timer.
 
 TEST RULE
 - Three layers only; test deterministic catalog validation/rendering/classification/fallback at stable HTTP/SMTP boundaries.
 - One focused catalog render/auth/success-rule test per canonical built-in plus shared catalog-security/classifier/fallback tests is normally sufficient.
-- Test alias resolution (`cyberpanel` -> `cyberpersons`) without duplicating the provider test matrix.
-- Do not multiply every provider across every layer or build protocol simulators/fake MTAs/provider conformance frameworks.
+- Test alias resolution (`cyberpanel` -> `cyberpersons`) without duplicating the provider matrix.
+- Do not build protocol simulators, fake MTAs, provider conformance frameworks, or tests at every layer.
 
 GOAL
 Add a small systemd automation surface and maintainable catalog-driven operational HTTPS email delivery with safe transient SMTP fallback, without Postfix or a custom durable queue.
@@ -560,25 +594,28 @@ Add a small systemd automation surface and maintainable catalog-driven operation
 IMPLEMENT
 1. Add only permanent lifecycle/health/backup/maintenance units/timers actually needed.
 2. Units execute installed immutable release/current path and installed config, never an arbitrary git checkout.
-3. Add `email-providers.toml` containing the six verified built-in definitions and the `cyberpanel` alias.
-4. Implement one small notification owner that validates/loads the catalog, normalizes canonical message fields, renders the selected request, sends via Python stdlib HTTPS with normal CA/hostname validation, interprets the catalog success rule, and applies the shared bounded retry/fallback classifier.
-5. Keep authentication handling to the closed modes required by the six built-ins. Do not create provider-specific classes/functions unless a behavior truly cannot be expressed in the catalog.
+3. Add `email-providers.toml` containing the six verified canonical definitions and `cyberpanel` alias.
+4. Implement one small notification owner that validates/loads the catalog, normalizes the exact canonical message context, renders the selected request, sends via Python stdlib HTTPS with normal CA/hostname validation, interprets the success rule, and applies shared bounded retry/fallback classification.
+5. Keep authentication handling to the finite modes required by the built-ins. Do not create provider-specific classes/functions unless behavior genuinely cannot be expressed in the catalog.
 6. Implement direct SMTP fallback with `ssl.create_default_context()` semantics and implicit TLS or required STARTTLS + authentication.
 7. Return/persist only small secret-free state: configured/used transport, outcome, stable category/reason, event/time identifier, safe diagnostic text.
-8. If API and SMTP both fail, expose failure through `status`/`doctor`; do not persist full message bodies or secret-bearing provider responses.
-9. Add config validation/doctor checks for catalog validity, supported provider/alias, required API token, declared provider-specific non-secret fields, SMTP fallback availability, and last safe delivery result.
-10. Document how maintainers update a provider block and how operators configure CyberPanel/CyberPersons API + optional SMTP fallback without editing Python.
+8. If API and SMTP both fail, expose failure through `status`/`doctor`; do not persist full message bodies or secret-bearing responses.
+9. Add config validation/doctor checks for catalog validity, supported provider/alias, required API token, declared provider options, SMTP fallback availability, and last safe delivery result.
+10. Document provider-catalog maintenance and CyberPanel/CyberPersons API + optional SMTP setup without requiring Python edits for ordinary metadata changes.
 
 TESTS REQUIRED
 - catalog schema/duplicate/unknown-field/HTTPS/placeholder/alias validation
-- operator config cannot override endpoint/auth/payload arbitrarily
+- exact canonical message-field vocabulary
+- operator config cannot override endpoint/auth/payload/success/retry arbitrarily
 - each canonical built-in: provider selection + catalog-rendered authentication/request/success rule at project boundary
 - `cyberpanel` alias resolves to `cyberpersons` without duplicate definition
-- CyberPanel current contract baseline at implementation time, including 202 + `success:true` and current documented retry/non-retry categories
+- CyberPersons: 202+`success:true`; 429 bounded retry; 503 transient; 500 `send_failed` non-fallback by status; 400/403 visible
+- fixed bounded retry is acceptable when CyberPersons body `retry_after` lacks documented usable unit semantics
+- body retry-delay capability rejects missing unit/unknown field/malformed values and clamps accepted values
 - Mailgun region/domain validation if supported
 - API success stops without SMTP
 - representative transient cases trigger SMTP only after bounded retry
-- representative config/auth/security failures do not get masked
+- representative config/auth/security/ambiguous failures do not get masked
 - cross-host redirect safety for auth-bearing requests
 - SMTP TLS/auth behavior at stable mocked boundary
 - secret redaction/result shape
@@ -617,14 +654,14 @@ AUTHORITY / WORKFLOW
 - Do not edit `reports/V2-CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
-1. Read root `AGENTS.md`, version/update decisions, and inspect `versions.toml`, runtime, recovery, and doctor owners.
-2. Verify recovery path required for safe update preflight exists.
+1. Read root `AGENTS.md`, version/update decisions, and inspect `versions.toml`, runtime, recovery, systemd, notification, and doctor owners.
+2. Verify **Phase 6 is present**, including systemd automation, the notification owner, and the immutable-release `email-providers.toml` contract. Also verify the Phase 5 recovery path required for update preflight remains available. If Phase 6 is missing, stop and report it rather than implementing notification/systemd work here.
 3. Reuse the existing version owner; do not create one resolver module per component by default.
 
 DURABLE V2 CONTRACT
 - Greenfield Ubuntu 24.04 amd64/arm64; cloud-neutral/OCI-reference; Cloudflare-first/CrowdSec; no V1 compatibility.
 - Python 3.12 stdlib structured logic; Bash minimal glue; one `vwctl`, one operator TOML config, one `versions.toml`.
-- Existing SOPS/Age, rclone/recovery, edge, and static provider-catalog + SMTP-fallback boundaries are fixed and must not be redesigned here.
+- Existing SOPS/Age, rclone/recovery, edge, CrowdSec Cloudflare remediation, and static provider-catalog + SMTP-fallback boundaries are fixed and must not be redesigned here.
 - Immutable application releases include the matching source-controlled `email-providers.toml`; update activation must not mix application code with a provider catalog from another release.
 - Production exact pins. `--use-latest` dev/test only: resolve once at run start, freeze exact values/digests where available, record exact set, pass only exact values downstream.
 - No unattended updater daemon, provider/plugin registry, migration engine, workflow framework, or speculative component abstraction.
@@ -641,7 +678,7 @@ IMPLEMENT
 2. Centralize amd64/arm64 artifact/image resolution.
 3. Production install/update uses exact pins only.
 4. `--use-latest` resolves once, freezes exact versions/digests, records them, and never scatters live-latest checks across installers/templates.
-5. Implement `vwctl update check|apply`: validate current state; create/verify recovery according to policy; stage immutable release including its matching provider catalog/resources; pull/build exact pinned runtime components; switch `current`; restart and health/doctor gate; roll back application-release activation where safe before incompatible state changes.
+5. Implement `vwctl update check|apply`: validate current state; create/verify recovery according to policy; stage immutable release including matching provider catalog/resources; pull/build exact pinned runtime components; switch `current`; restart and health/doctor gate; roll back application-release activation where safe before incompatible state changes.
 6. No unattended auto-update.
 
 TESTS REQUIRED
@@ -653,6 +690,7 @@ TESTS REQUIRED
 
 NON-GOALS
 - unattended updates/generic update-provider framework
+- Phase 6 notification/systemd implementation
 - V1 migration machinery
 - redesign of edge/recovery/notification systems
 
@@ -678,9 +716,9 @@ AUTHORITY / WORKFLOW
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, V2 decisions, architecture, and test strategy.
-2. Inspect the complete V2 implementation/docs before creating new docs/tests/scripts.
-3. Identify obsolete V1 files no longer required as build/runtime inputs.
-4. If a required prior-phase feature is incomplete, report it rather than hiding it with docs/compatibility code.
+2. Verify **Phase 7 is present**, including reproducible version/update behavior and the intact Phase 6/5/4 surfaces it depends on. If Phase 7 is missing, stop and report it rather than documenting or implementing missing features here.
+3. Inspect the complete V2 implementation/docs before creating new docs/tests/scripts.
+4. Identify obsolete V1 files no longer required as build/runtime inputs.
 
 FINAL BETA CONTRACT
 - Ubuntu 24.04 amd64/arm64, cloud-neutral/OCI-reference, Cloudflare-first/CrowdSec, no V1 compatibility.
@@ -688,9 +726,10 @@ FINAL BETA CONTRACT
 - SOPS + Age operational/offline recovery identities; volatile plaintext only.
 - rclone: local verify -> copy/copyto -> remote verify -> success; separate prune; no destructive sync/provider framework.
 - Vaultwarden direct SMTP.
-- Operational notifications: operator selects one of canonical `mailersend|sendgrid|mailgun|postmark|resend|cyberpersons`; `cyberpanel` aliases `cyberpersons`; one source-controlled immutable `email-providers.toml`; common API-token model; direct authenticated SMTP transient fallback; configuration/security/permanent errors visible; no Postfix/MTA/durable queue/dynamic plugin registry.
-- Provider settings commonly changed by upstream are maintained in the closed catalog rather than repeated throughout Python. Operator config cannot redirect credentials to arbitrary endpoints/auth/payloads.
-- Cloudflare/Docker-iptables ingress with validated/bounded ranges + fail closed; CrowdSec; no second firewall backend.
+- Operational notifications: six canonical built-ins; `cyberpanel` aliases `cyberpersons`; one immutable `email-providers.toml`; exact canonical message fields `from_email|from_name|from_header|to_email|subject|text`; direct authenticated SMTP transient-only fallback; no Postfix/MTA/durable queue/dynamic plugin registry.
+- CyberPersons `500 send_failed` is not SMTP-fallback eligible by status alone; 429/503 are the current transient baseline, subject to current-doc re-verification.
+- Provider metadata commonly changed upstream is maintained in the closed catalog rather than repeated throughout Python. Operator config cannot redirect credentials to arbitrary endpoints/auth/payloads.
+- Cloudflare/Docker-iptables origin ingress uses validated/bounded ranges + fail closed. CrowdSec web decisions are remediated through Cloudflare only in beta; no host firewall bouncer requirement.
 - One encrypted V2 recovery format + offline recovery material; no V1 reader/migration.
 - Exact production pins; `--use-latest` dev/test only, resolved once to exact recorded values.
 - No speculative framework/plugin/compatibility architecture.
@@ -704,17 +743,18 @@ GOAL
 Make V2 understandable, acceptance-tested on disposable Ubuntu 24.04, and free of obsolete V1 product surfaces on the V2 branch.
 
 IMPLEMENT
-1. Consolidate the smallest clear operator/developer documentation covering install, operations/status/doctor/logs, security, SOPS/Age/offline recovery, one recovery/rclone workflow, built-in HTTPS provider configuration + transient SMTP fallback, `email-providers.toml` maintenance, versions/updates, and developer/test/release workflow.
-2. Document CyberPanel Email/CyberPersons setup explicitly: `cyberpersons` canonical ID / `cyberpanel` alias, API-key creation/`can_send` permission, verified sending domain, API token stored in SOPS, and independently configured SMTP credentials if CyberPanel SMTP is used for fallback. Re-check current official settings when writing final docs.
+1. Consolidate the smallest clear operator/developer documentation covering install, operations/status/doctor/logs, security, SOPS/Age/offline recovery, one recovery/rclone workflow, provider configuration + transient SMTP fallback, provider-catalog maintenance, Cloudflare/CrowdSec scope, versions/updates, and developer/test/release workflow.
+2. Document CyberPanel Email/CyberPersons setup explicitly: canonical `cyberpersons` / `cyberpanel` alias, API-key `can_send`, verified sending domain, API token in SOPS, and independent SMTP credentials if CyberPanel SMTP is used for fallback. Re-check current official settings while writing final docs.
 3. Developer docs explain: routine provider endpoint/auth/request/success/retry changes edit the provider catalog + focused tests/docs; Python changes only for a genuinely new transport capability.
 4. Use `vwctl --help` for command reference and stable doctor IDs/JSON for diagnostic truth.
 5. Create/retain a small disposable-host acceptance procedure for Ubuntu 24.04 amd64/arm64 where environments are available.
-6. Acceptance covers at least clean install/layout; start/status/doctor; SOPS/Age no-leak materialization; Cloudflare fail-closed + CrowdSec; backup -> rclone publish -> verify -> download -> restore; one configured built-in API primary success + representative transient SMTP fallback; provider catalog validation; systemd; pinned update.
+6. Acceptance covers at least clean install/layout; start/status/doctor; SOPS/Age no-leak materialization; Cloudflare origin fail-closed + CrowdSec Cloudflare remediation; backup -> rclone publish -> verify -> download -> restore; one configured built-in API success + representative transient SMTP fallback; provider-catalog validation; systemd; pinned update.
 7. Remove V1 production/docs/tests from `v2` when no longer required; rely on `main`/git history.
 8. Review first-party file surface and consolidate/delete naturally without giant mixed-responsibility owners.
 
 NON-GOALS
 - V1 compatibility/dashboard/generated command manual
+- CrowdSec host firewall bouncer unless a later explicit architecture decision added host-service remediation
 - arbitrary operator-defined provider endpoints/auth/payloads
 - dynamic provider abstractions/plugin SDK/general HTTP scripting
 - custom test-runner framework
@@ -744,11 +784,14 @@ PRE-FLIGHT
 1. Read root `AGENTS.md` and applicable V2 decisions.
 2. Reproduce/locate the observable failure at a stable/public boundary where practical.
 3. Identify the smallest existing owner before creating any file.
-4. For an email-provider settings bug, determine first whether `email-providers.toml` is the correct owner; ordinary endpoint/auth/request/success/retry updates should not trigger a Python library rewrite.
+4. For an email-provider settings bug, determine first whether `email-providers.toml` is the correct owner; ordinary endpoint/auth/request/success/retry updates should not trigger a Python-library rewrite.
 5. Inspect V1 only if it clarifies a required security property; do not port V1 architecture.
 
 DURABLE V2 CONTRACT
 - Preserve current greenfield Ubuntu 24.04 amd64/arm64, cloud-neutral, Cloudflare/CrowdSec, one-CLI/operator-config/versions, SOPS/Age, rclone, static email-provider catalog + transient-SMTP-fallback, recovery, firewall, and exact-version boundaries.
+- Preserve exact canonical provider-template fields: `from_email`, `from_name`, `from_header`, `to_email`, `subject`, `text`.
+- Preserve CyberPersons failure classification unless current official docs justify a deliberate contract change: 500 is not transient by status alone.
+- Preserve CrowdSec beta web remediation through Cloudflare; do not add a host firewall bouncer as an incidental bugfix.
 - No V1 compatibility/dashboard/Postfix/custom queue/dynamic provider registry/framework/migration engine/speculative extension point.
 - Operator config cannot define arbitrary provider endpoints/auth/payloads; credentials remain in SOPS.
 - Python 3.12 stdlib structured logic; Bash minimal glue.
@@ -765,7 +808,7 @@ METHOD
 5. Do not create an abstraction merely because a few lines look similar.
 6. Add one regression test only for a real coverage gap.
 7. Run smallest validation sufficient.
-8. If the fix requires changing a durable V2 boundary or expanding the closed provider-catalog capability set materially, stop and report conflict rather than silently widening design.
+8. If the fix requires changing a durable V2 boundary or materially expanding the provider-catalog capability set, stop and report the conflict rather than silently widening design.
 
 FINAL RESPONSE
 - State bug/root cause, smallest owner changed, exact validation run/not run, whether a file was added and why, whether a provider fix stayed catalog-only where appropriate, and out-of-scope follow-ups.
@@ -779,18 +822,17 @@ FINAL RESPONSE
 
 - Correct standalone prompt/phase was used.
 - Agent did not edit the authoritative prompt file.
-- Required previous phase was present before implementation.
+- For every Phase N > 0, Phase N-1 was verified before implementation.
 - Work stayed inside phase/bug scope.
 - V1 implementation shape was not imported without necessity.
 - No speculative framework/compatibility/queue/dynamic-provider layer appeared.
 - New files have clear ownership value; thin wrappers/one-function modules avoided.
-- `email-providers.toml` is the single source-controlled provider-definition file; provider settings are not duplicated across one module per provider.
-- Canonical built-ins include `cyberpersons`; `cyberpanel` is only an alias to the same definition.
-- Operator config cannot redirect API credentials to arbitrary endpoint/auth/payload definitions.
-- Provider templates are closed validated data, not executable templates/code; auth-bearing redirects are safe.
-- Routine provider settings changes can be handled in the catalog plus focused tests/docs without rewriting the library.
 - Secrets never moved into ordinary config/provider catalog/argv/logs.
 - rclone publication remains non-destructive and pruning separate.
-- SMTP fallback follows transient/security classification.
+- Provider templates use exactly `from_email`, `from_name`, `from_header`, `to_email`, `subject`, `text`.
+- CyberPersons 500 is not treated as transient/fallback-eligible merely because it is 500; 429/503 behavior matches implementation-time official docs.
+- Provider retry-delay handling remains bounded and does not become a response-expression language.
+- Cloudflare-only origin ingress remains fail-closed.
+- CrowdSec beta web remediation uses the selected Cloudflare path; a host firewall bouncer was not added without a new explicit requirement.
 - Tests protect observable risk rather than source layout.
 - PR is small enough to understand/review; later-phase ideas were reported, not implemented.
