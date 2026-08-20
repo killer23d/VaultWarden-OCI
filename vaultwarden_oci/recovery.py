@@ -9,14 +9,13 @@ import sqlite3
 import stat
 import tarfile
 import tempfile
-import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping, Sequence
 
-from . import runtime
+from . import runtime, secrets
 from .cli import CommandResult, DoctorCheck, mutation_lock, run_command
 
 FORMAT_VERSION = 2
@@ -144,26 +143,13 @@ def _manifest_files(payload: Path) -> list[dict[str, object]]:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode):
             raise RecoveryError(f"recovery payload contains unsupported symlink: {path}")
-        if not stat.S_ISREG(info.st_mode):
-            continue
-        files.append(
-            {
-                "path": path.relative_to(payload.parent).as_posix(),
-                "sha256": _sha256(path),
-                "size": info.st_size,
-            }
-        )
+        if stat.S_ISREG(info.st_mode):
+            files.append({"path": path.relative_to(payload.parent).as_posix(), "sha256": _sha256(path), "size": info.st_size})
     return files
 
 
 def _write_manifest(staging: Path, *, created_at: str) -> dict[str, object]:
-    payload = staging / "payload"
-    manifest: dict[str, object] = {
-        "format": "vaultwarden-oci-recovery",
-        "format_version": FORMAT_VERSION,
-        "created_at": created_at,
-        "files": _manifest_files(payload),
-    }
+    manifest: dict[str, object] = {"format": "vaultwarden-oci-recovery", "format_version": FORMAT_VERSION, "created_at": created_at, "files": _manifest_files(staging / "payload")}
     path = staging / "manifest.json"
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(path, 0o600)
@@ -201,21 +187,13 @@ def _validate_manifest(staging: Path) -> dict[str, object]:
         _ensure_regular(path, "recovery payload file")
         if path.stat().st_size != size or _sha256(path) != digest:
             raise RecoveryError(f"recovery checksum mismatch: {name}")
-    actual = {
-        path.relative_to(staging).as_posix()
-        for path in (staging / "payload").rglob("*")
-        if path.is_file()
-    }
+    actual = {path.relative_to(staging).as_posix() for path in (staging / "payload").rglob("*") if path.is_file()}
     if actual != seen:
         raise RecoveryError("recovery payload and manifest file set differ")
-    required = {
-        "payload/etc/config.toml",
-        "payload/etc/secrets.sops.yaml",
-        "payload/data/db.sqlite3",
-    }
+    required = {"payload/etc/config.toml", "payload/etc/secrets.sops.yaml", "payload/data/db.sqlite3"}
     if not required <= seen:
         raise RecoveryError("recovery manifest is incomplete")
-    if any(name.endswith("/age-key.txt") or name == "payload/etc/age-key.txt" for name in seen):
+    if any(name.endswith("/age-key.txt") for name in seen):
         raise RecoveryError("operational Age private key must not appear in recovery artifacts")
     return manifest
 
@@ -228,7 +206,6 @@ def _build_candidate(paths: RecoveryPaths, staging: Path) -> dict[str, object]:
     _ensure_directory(paths.caddy_config, "Caddy config")
     if paths.encrypted_secrets == OPERATIONAL_AGE_KEY or paths.config == OPERATIONAL_AGE_KEY:
         raise RecoveryError("operational Age private key cannot be a recovery input")
-
     payload = staging / "payload"
     etc = payload / "etc"
     etc.mkdir(parents=True)
@@ -239,16 +216,6 @@ def _build_candidate(paths: RecoveryPaths, staging: Path) -> dict[str, object]:
     _copy_tree(paths.caddy_data, payload / "caddy/data")
     _copy_tree(paths.caddy_config, payload / "caddy/config")
     return _write_manifest(staging, created_at=_utc_now())
-
-
-def _archive_candidate(staging: Path, archive: Path) -> None:
-    with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT) as tar:
-        tar.add(staging / "manifest.json", arcname="manifest.json", recursive=False)
-        tar.add(staging / "payload", arcname="payload", recursive=True)
-    with tempfile.TemporaryDirectory(prefix="vwrec-verify-", dir=str(archive.parent)) as directory:
-        extracted = Path(directory)
-        _safe_extract(archive, extracted)
-        _validate_manifest(extracted)
 
 
 def _safe_extract(archive: Path, destination: Path) -> None:
@@ -270,15 +237,22 @@ def _safe_extract(archive: Path, destination: Path) -> None:
         raise RecoveryError(f"invalid recovery archive: {exc}") from exc
 
 
+def _archive_candidate(staging: Path, archive: Path) -> None:
+    with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT) as tar:
+        tar.add(staging / "manifest.json", arcname="manifest.json", recursive=False)
+        tar.add(staging / "payload", arcname="payload", recursive=True)
+    with tempfile.TemporaryDirectory(prefix="vwrec-verify-", dir=str(archive.parent)) as directory:
+        extracted = Path(directory)
+        _safe_extract(archive, extracted)
+        _validate_manifest(extracted)
+
+
 def _verify_age_artifact(path: Path) -> None:
     _ensure_regular(path, "encrypted recovery artifact")
     if path.stat().st_size < 64:
         raise RecoveryError("encrypted recovery artifact is unexpectedly small")
-    try:
-        with path.open("rb") as handle:
-            header = handle.read(64)
-    except OSError as exc:
-        raise RecoveryError(f"cannot inspect encrypted recovery artifact: {exc}") from exc
+    with path.open("rb") as handle:
+        header = handle.read(64)
     if not header.startswith(b"age-encryption.org/v1"):
         raise RecoveryError("encrypted recovery artifact does not have an Age v1 header")
 
@@ -312,43 +286,19 @@ def _load_state(path: Path) -> dict[str, object]:
 
 def _record_local(paths: RecoveryPaths, verified: VerifiedRecovery) -> None:
     state = _load_state(paths.state_file)
-    state.update(
-        {
-            "schema_version": 1,
-            "local": {
-                "artifact": str(verified.artifact),
-                "verified_at": verified.created_at,
-                "sha256": verified.sha256,
-                "size": verified.size,
-            },
-        }
-    )
+    state.update({"schema_version": 1, "local": {"artifact": str(verified.artifact), "verified_at": verified.created_at, "sha256": verified.sha256, "size": verified.size}})
     _atomic_json(paths.state_file, state)
 
 
 def _record_offsite(paths: RecoveryPaths, *, remote_object: str, verified: VerifiedRecovery) -> None:
     state = _load_state(paths.state_file)
-    state.update(
-        {
-            "schema_version": 1,
-            "offsite": {
-                "remote_object": remote_object,
-                "verified_at": _utc_now(),
-                "sha256": verified.sha256,
-                "size": verified.size,
-            },
-        }
-    )
+    state.update({"schema_version": 1, "offsite": {"remote_object": remote_object, "verified_at": _utc_now(), "sha256": verified.sha256, "size": verified.size}})
     _atomic_json(paths.state_file, state)
 
 
-def create_recovery(
-    offline_recipient: str,
-    *,
-    paths: RecoveryPaths = RecoveryPaths(),
-    runner: Runner = run_command,
-    remote: str | None = None,
-) -> VerifiedRecovery:
+def create_recovery(offline_recipient: str, *, paths: RecoveryPaths = RecoveryPaths(), runner: Runner = run_command, remote: str | None = None) -> VerifiedRecovery:
+    if paths == RecoveryPaths() and os.geteuid() != 0:
+        raise RecoveryError("vwctl backup must run as root")
     if not offline_recipient.startswith("age1"):
         raise RecoveryError("offline recovery recipient must be an Age recipient")
     paths.backups.mkdir(parents=True, exist_ok=True)
@@ -357,7 +307,6 @@ def create_recovery(
     name = f"recovery-{stamp}-{uuid.uuid4().hex[:8]}.vwrec"
     final = paths.backups / name
     partial = paths.backups / f".{name}.partial"
-
     with mutation_lock(paths.lock):
         with tempfile.TemporaryDirectory(prefix="vwrec-build-", dir=str(paths.backups)) as directory:
             staging = Path(directory) / "staging"
@@ -366,9 +315,7 @@ def create_recovery(
             _validate_manifest(staging)
             tar_path = Path(directory) / "candidate.tar"
             _archive_candidate(staging, tar_path)
-            result = runner(
-                ["age", "--encrypt", "--recipient", offline_recipient, "--output", str(partial), str(tar_path)]
-            )
+            result = runner(["age", "--encrypt", "--recipient", offline_recipient, "--output", str(partial), str(tar_path)])
             if not result.ok:
                 partial.unlink(missing_ok=True)
                 raise _safe_error("Age encryption", result)
@@ -380,13 +327,7 @@ def create_recovery(
                 partial.unlink(missing_ok=True)
                 final.unlink(missing_ok=True)
                 raise
-
-        verified = VerifiedRecovery(
-            artifact=final,
-            sha256=_sha256(final),
-            size=final.stat().st_size,
-            created_at=str(manifest["created_at"]),
-        )
+        verified = VerifiedRecovery(final, _sha256(final), final.stat().st_size, str(manifest["created_at"]))
         _record_local(paths, verified)
         if remote:
             remote_object = publish_offsite(verified, remote, paths=paths, runner=runner)
@@ -404,11 +345,9 @@ def _remote_parts(remote: str) -> tuple[str, str]:
 
 
 def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_command) -> tuple[bool, str]:
-    version = runner(["rclone", "version"])
-    if not version.ok:
+    if not runner(["rclone", "version"]).ok:
         return False, "rclone is unavailable"
-    config = runner(["rclone", "config", "file"])
-    if not config.ok:
+    if not runner(["rclone", "config", "file"]).ok:
         return False, "rclone configuration is unavailable"
     if remote is None:
         return True, "rclone and configuration are available"
@@ -419,8 +358,7 @@ def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_comman
     configured = {line.strip().rstrip(":") for line in remotes.stdout.splitlines() if line.strip()}
     if name not in configured:
         return False, f"rclone remote {name!r} is not configured"
-    probe = runner(["rclone", "lsf", remote, "--max-depth", "1"])
-    if not probe.ok:
+    if not runner(["rclone", "lsf", f"{name}:", "--max-depth", "1"]).ok:
         return False, f"rclone remote {name!r} is not reachable"
     return True, f"rclone remote {name!r} is reachable"
 
@@ -430,15 +368,9 @@ def _remote_object(remote: str, filename: str) -> str:
     return f"{name}:{path + '/' if path else ''}{filename}"
 
 
-def publish_offsite(
-    verified: VerifiedRecovery,
-    remote: str,
-    *,
-    paths: RecoveryPaths = RecoveryPaths(),
-    runner: Runner = run_command,
-) -> str:
+def publish_offsite(verified: VerifiedRecovery, remote: str, *, paths: RecoveryPaths = RecoveryPaths(), runner: Runner = run_command) -> str:
     _verify_age_artifact(verified.artifact)
-    if _sha256(verified.artifact) != verified.sha256:
+    if verified.artifact.stat().st_size != verified.size or _sha256(verified.artifact) != verified.sha256:
         raise RecoveryError("local recovery artifact changed before offsite publication")
     ok, message = rclone_diagnostics(remote, runner=runner)
     if not ok:
@@ -496,7 +428,7 @@ def _preflight_targets(paths: RecoveryPaths, staging: Path) -> None:
         if path.exists() or path.is_symlink():
             _ensure_directory(path, "restore target")
     required = sum(path.stat().st_size for path in (staging / "payload").rglob("*") if path.is_file())
-    free = shutil.disk_usage(STATE_ROOT if STATE_ROOT.exists() else paths.data.parent).free
+    free = shutil.disk_usage(paths.data.parent if paths != RecoveryPaths() else STATE_ROOT).free
     if free < max(required * 2, required + 16 * 1024 * 1024):
         raise RecoveryError("insufficient free space for staged restore and rollback")
 
@@ -504,10 +436,7 @@ def _preflight_targets(paths: RecoveryPaths, staging: Path) -> None:
 def _copy_stage_to_target_parent(source: Path, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     candidate = target.parent / f".{target.name}.restore-{uuid.uuid4().hex[:8]}"
-    if source.is_dir():
-        shutil.copytree(source, candidate)
-    else:
-        shutil.copy2(source, candidate)
+    shutil.copytree(source, candidate) if source.is_dir() else shutil.copy2(source, candidate)
     return candidate
 
 
@@ -530,6 +459,34 @@ def _apply_permissions(path: Path, uid: int, gid: int, *, directory_mode: int = 
         os.chmod(path, file_mode)
 
 
+def _inspect_absent(result: CommandResult) -> bool:
+    if result.ok:
+        return False
+    message = (result.stderr or result.stdout).lower()
+    return "no such object" in message or "no such container" in message
+
+
+def _stop_services(runner: Runner, *, cleanup_runtime_secrets: bool) -> None:
+    if not runner(["docker", "version", "--format", "{{.Server.Version}}"]).ok:
+        raise RecoveryError("Docker Engine unavailable; restore stop state unknown")
+    existing: list[str] = []
+    for container in (runtime.NAMES["caddy"], runtime.NAMES["vaultwarden"]):
+        inspection = runner(["docker", "container", "inspect", container])
+        if inspection.ok:
+            existing.append(container)
+        elif not _inspect_absent(inspection):
+            raise RecoveryError("Docker container inspection failed; restore stop state unknown")
+    if existing and not runner(["docker", "stop", *existing]).ok:
+        raise RecoveryError("Docker stop failed during restore")
+    if existing and not runner(["docker", "rm", *existing]).ok:
+        raise RecoveryError("Docker container removal failed during restore")
+    if cleanup_runtime_secrets:
+        try:
+            secrets.cleanup()
+        except secrets.SecretsError as exc:
+            raise RecoveryError(str(exc)) from exc
+
+
 def _promote(staged: Sequence[tuple[Path, Path]]) -> None:
     rollback: list[tuple[Path, Path | None]] = []
     try:
@@ -544,10 +501,7 @@ def _promote(staged: Sequence[tuple[Path, Path]]) -> None:
         for target, previous in reversed(rollback):
             try:
                 if target.exists():
-                    if target.is_dir():
-                        shutil.rmtree(target)
-                    else:
-                        target.unlink()
+                    shutil.rmtree(target) if target.is_dir() else target.unlink()
                 if previous is not None and previous.exists():
                     os.replace(previous, target)
             except OSError:
@@ -555,21 +509,12 @@ def _promote(staged: Sequence[tuple[Path, Path]]) -> None:
         raise RecoveryError(f"restore promotion failed and rollback was attempted: {exc}") from exc
     for _, previous in rollback:
         if previous is not None and previous.exists():
-            if previous.is_dir():
-                shutil.rmtree(previous)
-            else:
-                previous.unlink()
+            shutil.rmtree(previous) if previous.is_dir() else previous.unlink()
 
 
-def restore_recovery(
-    artifact: Path,
-    identity: Path,
-    *,
-    paths: RecoveryPaths = RecoveryPaths(),
-    runner: Runner = run_command,
-    start: bool = False,
-) -> dict[str, object]:
-    if os.geteuid() != 0 and paths == RecoveryPaths():
+def restore_recovery(artifact: Path, identity: Path, *, paths: RecoveryPaths = RecoveryPaths(), runner: Runner = run_command, start: bool = False) -> dict[str, object]:
+    default_paths = paths == RecoveryPaths()
+    if default_paths and os.geteuid() != 0:
         raise RecoveryError("vwctl restore must run as root")
     paths.backups.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="vwrec-restore-", dir=str(paths.backups)) as directory:
@@ -587,24 +532,25 @@ def restore_recovery(
             (_copy_stage_to_target_parent(payload / "caddy/config", paths.caddy_config), paths.caddy_config),
         ]
         _sqlite_snapshot(staged[2][0] / _DB_NAME, root / "sqlite-proof.db")
-
+        uid, gid = (0, 0) if default_paths else (os.geteuid(), os.getegid())
+        vw_uid, vw_gid = (runtime.VAULTWARDEN_UID, runtime.VAULTWARDEN_GID) if default_paths else (uid, gid)
+        caddy_uid, caddy_gid = (runtime.CADDY_UID, runtime.CADDY_GID) if default_paths else (uid, gid)
         try:
             with mutation_lock(paths.lock):
-                runtime.stop_services(runner=runner)
+                _stop_services(runner, cleanup_runtime_secrets=default_paths)
                 _promote(staged)
-                _apply_permissions(paths.config, 0, 0)
-                _apply_permissions(paths.encrypted_secrets, 0, 0)
-                _apply_permissions(paths.data, runtime.VAULTWARDEN_UID, runtime.VAULTWARDEN_GID)
-                _apply_permissions(paths.caddy_data, runtime.CADDY_UID, runtime.CADDY_GID)
-                _apply_permissions(paths.caddy_config, runtime.CADDY_UID, runtime.CADDY_GID)
+                _apply_permissions(paths.config, uid, gid)
+                _apply_permissions(paths.encrypted_secrets, uid, gid)
+                _apply_permissions(paths.data, vw_uid, vw_gid)
+                _apply_permissions(paths.caddy_data, caddy_uid, caddy_gid)
+                _apply_permissions(paths.caddy_config, caddy_uid, caddy_gid)
         finally:
             for candidate, _ in staged:
                 if candidate.exists():
-                    if candidate.is_dir():
-                        shutil.rmtree(candidate, ignore_errors=True)
-                    else:
-                        candidate.unlink(missing_ok=True)
+                    shutil.rmtree(candidate, ignore_errors=True) if candidate.is_dir() else candidate.unlink(missing_ok=True)
     if start:
+        if not default_paths:
+            raise RecoveryError("custom-path restore cannot start production services")
         try:
             runtime.lifecycle("start")
         except Exception as exc:
@@ -615,14 +561,7 @@ def restore_recovery(
     return manifest
 
 
-def restore_from_remote(
-    remote_object: str,
-    identity: Path,
-    *,
-    paths: RecoveryPaths = RecoveryPaths(),
-    runner: Runner = run_command,
-    start: bool = False,
-) -> dict[str, object]:
+def restore_from_remote(remote_object: str, identity: Path, *, paths: RecoveryPaths = RecoveryPaths(), runner: Runner = run_command, start: bool = False) -> dict[str, object]:
     paths.backups.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="vwrec-download-", dir=str(paths.backups)) as directory:
         local = download_remote(remote_object, Path(directory) / "remote.vwrec", runner=runner)
@@ -642,33 +581,17 @@ def list_remote(remote: str, *, runner: Runner = run_command) -> list[dict[str, 
         raise RecoveryError("rclone remote listing returned invalid JSON") from exc
     if not isinstance(payload, list):
         raise RecoveryError("rclone remote listing returned invalid JSON")
-    return [
-        item for item in payload
-        if isinstance(item, dict) and isinstance(item.get("Name"), str) and item["Name"].endswith(".vwrec")
-    ]
+    return [item for item in payload if isinstance(item, dict) and isinstance(item.get("Name"), str) and item["Name"].endswith(".vwrec")]
 
 
 def pruning_decision(entries: Iterable[Mapping[str, object]], keep_last: int) -> PruneDecision:
     if keep_last < 1:
         raise RecoveryError("keep_last must be at least 1")
-    names = sorted(
-        {
-            str(item["Name"])
-            for item in entries
-            if isinstance(item.get("Name"), str) and str(item["Name"]).endswith(".vwrec")
-        },
-        reverse=True,
-    )
+    names = sorted({str(item["Name"]) for item in entries if isinstance(item.get("Name"), str) and str(item["Name"]).endswith(".vwrec")}, reverse=True)
     return PruneDecision(tuple(names[:keep_last]), tuple(names[keep_last:]))
 
 
-def prune_remote(
-    remote: str,
-    keep_last: int,
-    *,
-    confirm: bool,
-    runner: Runner = run_command,
-) -> PruneDecision:
+def prune_remote(remote: str, keep_last: int, *, confirm: bool, runner: Runner = run_command) -> PruneDecision:
     decision = pruning_decision(list_remote(remote, runner=runner), keep_last)
     if not confirm:
         return decision
@@ -685,14 +608,7 @@ def status_rows(paths: RecoveryPaths = RecoveryPaths()) -> list[dict[str, str]]:
     for key in ("local", "offsite"):
         value = state.get(key)
         if isinstance(value, dict) and isinstance(value.get("verified_at"), str):
-            rows.append(
-                {
-                    "kind": key,
-                    "state": "verified",
-                    "verified_at": str(value["verified_at"]),
-                    "location": str(value.get("artifact") or value.get("remote_object") or "-"),
-                }
-            )
+            rows.append({"kind": key, "state": "verified", "verified_at": str(value["verified_at"]), "location": str(value.get("artifact") or value.get("remote_object") or "-")})
         else:
             rows.append({"kind": key, "state": "none", "verified_at": "-", "location": "-"})
     return rows
@@ -700,19 +616,10 @@ def status_rows(paths: RecoveryPaths = RecoveryPaths()) -> list[dict[str, str]]:
 
 def doctor_checks(paths: RecoveryPaths = RecoveryPaths(), *, runner: Runner = run_command) -> list[DoctorCheck]:
     rows = {row["kind"]: row for row in status_rows(paths)}
-    local = rows["local"]
-    offsite = rows["offsite"]
+    local, offsite = rows["local"], rows["offsite"]
     rclone_ok, rclone_message = rclone_diagnostics(runner=runner)
     return [
-        DoctorCheck(
-            "recovery.local",
-            "PASS" if local["state"] == "verified" else "WARN",
-            f"last verified local recovery: {local['verified_at']}" if local["state"] == "verified" else "no verified local recovery recorded",
-        ),
-        DoctorCheck(
-            "recovery.offsite",
-            "PASS" if offsite["state"] == "verified" else "WARN",
-            f"last verified offsite recovery: {offsite['verified_at']}" if offsite["state"] == "verified" else "no verified offsite recovery recorded",
-        ),
+        DoctorCheck("recovery.local", "PASS" if local["state"] == "verified" else "WARN", f"last verified local recovery: {local['verified_at']}" if local["state"] == "verified" else "no verified local recovery recorded"),
+        DoctorCheck("recovery.offsite", "PASS" if offsite["state"] == "verified" else "WARN", f"last verified offsite recovery: {offsite['verified_at']}" if offsite["state"] == "verified" else "no verified offsite recovery recorded"),
         DoctorCheck("recovery.rclone", "PASS" if rclone_ok else "WARN", rclone_message),
     ]
