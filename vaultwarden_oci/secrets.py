@@ -124,9 +124,27 @@ def _recipients(path: Path) -> set[str]:
     return found
 
 
+def encrypted_recipients(path: Path) -> set[str]:
+    """Return the Age recipients recorded in one SOPS encrypted document."""
+    recipients = _recipients(path)
+    for recipient in recipients:
+        validate_recipient(recipient)
+    return recipients
+
+
 def _failure(label: str, result: CommandResult) -> SecretsError:
     detail = result.kind if result.returncode is None else f"exit {result.returncode}"
     return SecretsError(f"{label} failed ({detail})")
+
+
+def derive_recipient(identity: Path, *, runner: Runner = run_command) -> str:
+    """Derive and validate the public Age recipient for an identity file."""
+    result = runner(["age-keygen", "-y", str(identity)])
+    if not result.ok:
+        raise _failure("deriving Age recipient", result)
+    recipient = result.stdout.strip()
+    validate_recipient(recipient)
+    return recipient
 
 
 def validate_custody(
@@ -139,12 +157,7 @@ def validate_custody(
     validate_recipient(offline)
     _secure_file(paths.age_key, uid)
     _secure_file(paths.encrypted, uid)
-    result = runner(["age-keygen", "-y", str(paths.age_key)])
-    if not result.ok:
-        raise _failure("deriving operational Age recipient", result)
-    operational = result.stdout.strip()
-    if not _RECIPIENT.fullmatch(operational):
-        raise SecretsError("operational Age identity did not yield a valid recipient")
+    operational = derive_recipient(paths.age_key, runner=runner)
     if operational == offline:
         raise SecretsError("operational and offline recovery recipients must differ")
     recipients = _recipients(paths.encrypted)
