@@ -4,12 +4,12 @@ import hashlib
 import io
 import json
 import os
-import shutil
 import sqlite3
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from vaultwarden_oci import recovery
 from vaultwarden_oci.cli import CommandResult
@@ -56,9 +56,10 @@ def seed(paths: recovery.RecoveryPaths) -> None:
 
 
 class FakeRunner:
-    def __init__(self, *, good_identity="GOOD", remote_download_fails=False):
+    def __init__(self, *, good_identity="GOOD", remote_download_fails=False, age_encrypt_fails=False):
         self.good_identity = good_identity
         self.remote_download_fails = remote_download_fails
+        self.age_encrypt_fails = age_encrypt_fails
         self.calls: list[tuple[str, ...]] = []
         self.remote: dict[str, bytes] = {}
         self.remote_entries = [
@@ -71,6 +72,8 @@ class FakeRunner:
         call = tuple(argv)
         self.calls.append(call)
         if call[:2] == ("age", "--encrypt"):
+            if self.age_encrypt_fails:
+                return result(argv, stderr="encryption failed", code=1)
             output = Path(call[call.index("--output") + 1])
             source = Path(call[-1])
             output.write_bytes(AGE_HEADER + source.read_bytes())
@@ -195,6 +198,41 @@ class RecoveryIntegrationTests(unittest.TestCase):
             restore_calls = runner.calls[before:]
             self.assertFalse(any(call[:2] == ("docker", "version") for call in restore_calls))
 
+    def test_failed_encryption_never_publishes_local_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            seed(paths)
+            with self.assertRaisesRegex(recovery.RecoveryError, "Age encryption"):
+                recovery.create_recovery(OFFLINE, paths=paths, runner=FakeRunner(age_encrypt_fails=True))
+            self.assertFalse(any(path.name.endswith(".vwrec") for path in paths.backups.iterdir()))
+            self.assertFalse(paths.state_file.exists())
+
+    def test_mid_promotion_failure_restores_original_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current_a, current_b = root / "a", root / "b"
+            candidate_a, candidate_b = root / "new-a", root / "new-b"
+            current_a.write_text("old-a", encoding="utf-8")
+            current_b.write_text("old-b", encoding="utf-8")
+            candidate_a.write_text("new-a", encoding="utf-8")
+            candidate_b.write_text("new-b", encoding="utf-8")
+            real_replace = os.replace
+            promotion_count = 0
+
+            def failing_replace(source, destination):
+                nonlocal promotion_count
+                if Path(source) in {candidate_a, candidate_b}:
+                    promotion_count += 1
+                    if promotion_count == 2:
+                        raise OSError("forced promotion failure")
+                return real_replace(source, destination)
+
+            with mock.patch.object(recovery.os, "replace", side_effect=failing_replace):
+                with self.assertRaisesRegex(recovery.RecoveryError, "rollback was attempted"):
+                    recovery._promote(((candidate_a, current_a), (candidate_b, current_b)))
+            self.assertEqual(current_a.read_text(encoding="utf-8"), "old-a")
+            self.assertEqual(current_b.read_text(encoding="utf-8"), "old-b")
+
 
 class RcloneTests(unittest.TestCase):
     def test_publish_is_copyto_then_remote_verify_and_never_sync(self) -> None:
@@ -204,9 +242,7 @@ class RcloneTests(unittest.TestCase):
             paths.backups.mkdir(parents=True)
             artifact = paths.backups / "recovery-20260820T000000Z-a.vwrec"
             artifact.write_bytes(AGE_HEADER + b"x" * 128)
-            verified = recovery.VerifiedRecovery(
-                artifact, recovery._sha256(artifact), artifact.stat().st_size, "2026-08-20T00:00:00Z"
-            )
+            verified = recovery.VerifiedRecovery(artifact, recovery._sha256(artifact), artifact.stat().st_size, "2026-08-20T00:00:00Z")
             runner = FakeRunner()
             destination = recovery.publish_offsite(verified, "offsite:recovery", paths=paths, runner=runner)
             self.assertEqual(destination, "offsite:recovery/" + artifact.name)
@@ -219,6 +255,17 @@ class RcloneTests(unittest.TestCase):
             bad_runner = FakeRunner(remote_download_fails=True)
             with self.assertRaisesRegex(recovery.RecoveryError, "remote verification"):
                 recovery.publish_offsite(verified, "offsite:recovery", paths=paths, runner=bad_runner)
+
+    def test_offsite_state_requires_remote_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = make_paths(Path(directory))
+            seed(paths)
+            runner = FakeRunner(remote_download_fails=True)
+            with self.assertRaisesRegex(recovery.RecoveryError, "remote verification"):
+                recovery.create_recovery(OFFLINE, paths=paths, runner=runner, remote="offsite:recovery")
+            state = json.loads(paths.state_file.read_text(encoding="utf-8"))
+            self.assertIn("local", state)
+            self.assertNotIn("offsite", state)
 
     def test_explicit_pruning_plan_and_delete_argv(self) -> None:
         runner = FakeRunner()
