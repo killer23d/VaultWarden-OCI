@@ -45,9 +45,9 @@ class LockBusyError(RuntimeError):
 class VersionsManifest:
     schema_version: int
     version: str
-    vaultwarden: str
-    caddy: str
-    caddy_dns_cloudflare: str
+    vaultwarden: str = ""
+    caddy: str = ""
+    caddy_dns_cloudflare: str = ""
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,7 @@ def _pin(value: object, label: str) -> str:
     return value
 
 
-def load_versions(path: Path = DEFAULT_VERSIONS_PATH) -> VersionsManifest:
+def load_versions(path: Path = DEFAULT_VERSIONS_PATH, *, require_components: bool = False) -> VersionsManifest:
     try:
         data = _toml(path, "versions manifest")
     except ValueError as exc:
@@ -107,19 +107,18 @@ def load_versions(path: Path = DEFAULT_VERSIONS_PATH) -> VersionsManifest:
     if data.get("schema_version") != 1:
         raise VersionsError("versions manifest requires schema_version = 1")
     project = data.get("vaultwarden_oci")
-    components = data.get("components")
+    components = data.get("components", {})
     if not isinstance(project, dict) or not isinstance(components, dict):
-        raise VersionsError("versions manifest requires [vaultwarden_oci] and [components]")
+        raise VersionsError("versions manifest requires [vaultwarden_oci] and optional [components]")
     unknown = sorted(set(components) - {"vaultwarden", "caddy", "caddy_dns_cloudflare"})
     if unknown:
         raise VersionsError("unknown component pin(s): " + ", ".join(unknown))
-    return VersionsManifest(
-        1,
-        _pin(project.get("version"), "vaultwarden_oci.version"),
-        _pin(components.get("vaultwarden"), "components.vaultwarden"),
-        _pin(components.get("caddy"), "components.caddy"),
-        _pin(components.get("caddy_dns_cloudflare"), "components.caddy_dns_cloudflare"),
-    )
+    def component(key: str) -> str:
+        value = components.get(key)
+        if value is None and not require_components:
+            return ""
+        return _pin(value, f"components.{key}")
+    return VersionsManifest(1, _pin(project.get("version"), "vaultwarden_oci.version"), component("vaultwarden"), component("caddy"), component("caddy_dns_cloudflare"))
 
 
 def normalize_architecture(machine: str) -> str:
@@ -194,7 +193,7 @@ def doctor_checks(*, config_path: Path = DEFAULT_CONFIG_PATH, versions_path: Pat
         except ConfigError as exc:
             config_check = DoctorCheck("config.toml", "FAIL", str(exc))
     try:
-        manifest = load_versions(versions_path)
+        manifest = load_versions(versions_path, require_components=True)
         versions_check = DoctorCheck("versions.toml", "PASS", f"exact Phase 3 pins configured for {manifest.version}")
     except VersionsError as exc:
         versions_check = DoctorCheck("versions.toml", "FAIL", str(exc))
@@ -232,7 +231,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _versions() -> int:
     try:
-        v = load_versions()
+        v = load_versions(require_components=True)
     except VersionsError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
