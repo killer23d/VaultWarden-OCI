@@ -58,7 +58,7 @@ def validate_cloudflare_token(value: str) -> str:
     """Reject values that the pinned Caddy Cloudflare module would echo on error."""
     if not (_CLOUDFLARE_NEW_TOKEN.fullmatch(value) or _CLOUDFLARE_LEGACY_TOKEN.fullmatch(value)):
         raise SecretsError(
-            "decrypted Cloudflare token does not match the supported Cloudflare API token format"
+            "decrypted Cloudflare token does not match the supported Cloudflare provider token format"
         )
     return value
 
