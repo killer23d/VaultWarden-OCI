@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from . import secrets
-from .cli import CommandResult, DoctorCheck, LockBusyError, mutation_lock, run_command
+from .cli import CommandResult, DoctorCheck, VersionsError, load_versions, mutation_lock, run_command
 
 ETC = Path("/etc/vaultwarden-oci")
 STATE = Path("/var/lib/vaultwarden-oci")
@@ -166,14 +166,10 @@ def load_config(path: Path = CONFIG) -> RuntimeConfig:
 
 def _pins(path: Path) -> tuple[str, str, str]:
     try:
-        with path.open("rb") as handle:
-            components = tomllib.load(handle)["components"]
-        values = (components["vaultwarden"], components["caddy"], components["caddy_dns_cloudflare"])
-    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
-        raise RuntimeErrorV2(f"invalid Phase 3 component pins: {exc}") from exc
-    if not all(isinstance(v, str) and v and v.lower() not in {"latest", "stable", "main", "master"} and "*" not in v for v in values):
-        raise RuntimeErrorV2("Phase 3 components require exact pins")
-    return values
+        manifest = load_versions(path, require_components=True)
+    except VersionsError as exc:
+        raise RuntimeErrorV2(str(exc)) from exc
+    return manifest.vaultwarden, manifest.caddy, manifest.caddy_dns_cloudflare
 
 
 def _dir(path: Path, uid: int, gid: int, mode: int) -> None:
@@ -212,6 +208,8 @@ def render(config: RuntimeConfig, versions_path: Path, paths: Paths = Paths()) -
     vw, caddy, cf = _pins(versions_path)
     q = json.dumps
     signups = "true" if config.signups_allowed else "false"
+    vw_command = 'export SMTP_USERNAME="$(cat /run/vw-secrets/smtp_username)"; export SMTP_PASSWORD="$(cat /run/vw-secrets/smtp_password)"; if [ -s /run/vw-secrets/vaultwarden_admin_token ]; then export ADMIN_TOKEN="$(cat /run/vw-secrets/vaultwarden_admin_token)"; fi; exec /start.sh'
+    caddy_command = 'export CLOUDFLARE_API_TOKEN="$(cat /run/caddy-secrets/cloudflare_api_token)"; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile'
     compose = f'''name: vaultwarden-oci
 services:
   vaultwarden:
@@ -219,7 +217,7 @@ services:
     container_name: {NAMES["vaultwarden"]}
     user: "1000:1000"
     restart: unless-stopped
-    command: ["/bin/sh","-ec","export SMTP_USERNAME=\"$(cat /run/vw-secrets/smtp_username)\"; export SMTP_PASSWORD=\"$(cat /run/vw-secrets/smtp_password)\"; if [ -s /run/vw-secrets/vaultwarden_admin_token ]; then export ADMIN_TOKEN=\"$(cat /run/vw-secrets/vaultwarden_admin_token)\"; fi; exec /start.sh"]
+    command: ["/bin/sh", "-ec", {q(vw_command)}]
     environment:
       DOMAIN: {q("https://" + config.domain)}
       ROCKET_ADDRESS: "0.0.0.0"
@@ -238,7 +236,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 200
     mem_limit: 512m
-    healthcheck: {{test: ["CMD","/healthcheck.sh"], interval: 30s, timeout: 10s, retries: 5, start_period: 30s}}
+    healthcheck: {{test: ["CMD", "/healthcheck.sh"], interval: 30s, timeout: 10s, retries: 5, start_period: 30s}}
     logging: {{driver: json-file, options: {{max-size: "10m", max-file: "3"}}}}
     networks: [backend]
   caddy:
@@ -247,7 +245,7 @@ services:
     container_name: {NAMES["caddy"]}
     user: "1000:1000"
     restart: unless-stopped
-    command: ["/bin/sh","-ec","export CLOUDFLARE_API_TOKEN=\"$(cat /run/caddy-secrets/cloudflare_api_token)\"; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+    command: ["/bin/sh", "-ec", {q(caddy_command)}]
     depends_on: {{vaultwarden: {{condition: service_healthy}}}}
     environment: {{VAULTWARDEN_DOMAIN: {q(config.domain)}, ACME_EMAIL: {q(config.acme_email)}}}
     ports: ["443:443/tcp"]
@@ -259,7 +257,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 100
     mem_limit: 256m
-    healthcheck: {{test: ["CMD","caddy","validate","--config","/etc/caddy/Caddyfile","--adapter","caddyfile"], interval: 30s, timeout: 10s, retries: 3}}
+    healthcheck: {{test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"], interval: 30s, timeout: 10s, retries: 3}}
     logging: {{driver: json-file, options: {{max-size: "10m", max-file: "3"}}}}
     networks: [backend]
 networks: {{backend: {{driver: bridge}}}}
