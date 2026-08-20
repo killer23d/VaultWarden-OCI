@@ -107,8 +107,16 @@ def main() -> int:
         root = Path(directory)
         host = root / "host"
         offline_dir = root / "offline"
+        remote_dir = root / "rclone-remote"
         offline_dir.mkdir()
+        remote_dir.mkdir()
         host.mkdir()
+
+        rclone_config = root / "rclone.conf"
+        rclone_config.write_text("[offsite]\ntype = local\n", encoding="utf-8")
+        os.chmod(rclone_config, 0o600)
+        os.environ["RCLONE_CONFIG"] = str(rclone_config)
+        remote = f"offsite:{remote_dir}"
 
         offline_key = offline_dir / "recovery.age"
         operational_key = host / "etc/age-key.txt"
@@ -161,14 +169,37 @@ def main() -> int:
             offline_recipient,
             paths=paths,
             runner=runner,
+            remote=remote,
         )
         if not verified.artifact.is_file():
             raise AssertionError("verified recovery artifact missing")
+        remote_object = f"{remote}/{verified.artifact.name}"
+        if not (remote_dir / verified.artifact.name).is_file():
+            raise AssertionError("rclone publication did not create the remote recovery object")
+        state = json.loads(paths.state_file.read_text(encoding="utf-8"))
+        if "offsite" not in state:
+            raise AssertionError("offsite verification state was not recorded after real rclone verification")
 
+        stale_name = "recovery-20000101T000000Z-stale.vwrec"
+        subprocess.run(
+            ["rclone", "copyto", str(verified.artifact), f"{remote}/{stale_name}"],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        decision = recovery.prune_remote(remote, 1, confirm=True, runner=runner)
+        if stale_name not in decision.delete or (remote_dir / stale_name).exists():
+            raise AssertionError("explicit rclone prune did not delete the stale recovery object")
+        if verified.artifact.name not in decision.keep:
+            raise AssertionError("explicit rclone prune did not retain the newest recovery object")
+
+        # Replacement-host condition: local recovery copy and old server-local
+        # operational identity are gone. Recover only from rclone + offline key.
+        verified.artifact.unlink()
         operational_key.write_text("", encoding="utf-8")
         os.chmod(operational_key, 0o600)
-        recovery.restore_recovery(
-            verified.artifact,
+        recovery.restore_from_remote(
+            remote_object,
             offline_key,
             paths=paths,
             runner=runner,
@@ -193,11 +224,11 @@ def main() -> int:
 
         offline_private = offline_key.read_bytes()
         for candidate in host.rglob("*"):
-            if candidate.is_file() and candidate != verified.artifact:
+            if candidate.is_file():
                 if offline_private in candidate.read_bytes():
                     raise AssertionError(f"offline private recovery material persisted on host: {candidate}")
 
-    print("PASS: real Age/SOPS fresh-host recovery and rekey acceptance")
+    print("PASS: real Age/SOPS/rclone fresh-host recovery, verification, rekey, and prune acceptance")
     return 0
 
 
