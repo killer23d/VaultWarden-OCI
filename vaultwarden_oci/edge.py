@@ -32,6 +32,7 @@ BOUNCER_ID = "vaultwarden-oci-cloudflare"
 BOUNCER_SERVICE = "crowdsec-cloudflare-worker-bouncer.service"
 BOUNCER_BINARY = "/usr/bin/crowdsec-cloudflare-worker-bouncer"
 CROWDSEC_SERVICE = "crowdsec.service"
+DEFAULT_LAPI_URL = "http://127.0.0.1:8080"
 STATE_ROOT = Path("/var/lib/vaultwarden-oci/state")
 LKG_PATH = STATE_ROOT / "cloudflare-ranges.json"
 CADDY_LOG = Path("/var/lib/vaultwarden-oci/caddy/log/access.log")
@@ -82,7 +83,7 @@ def _safe_network(network: ipaddress._BaseNetwork) -> bool:
 
 
 def parse_cidrs(text: str, family: int) -> tuple[ipaddress._BaseNetwork, ...]:
-    """Strictly parse one Cloudflare CIDR per line for the requested IP family."""
+    """Strictly parse one canonical public Cloudflare CIDR per line."""
     if family not in {4, 6}:
         raise ValueError(family)
     if not isinstance(text, str) or not text or "\x00" in text:
@@ -154,10 +155,15 @@ def fetch_cloudflare_policy(*, now: int | None = None, fetcher: Fetcher = _http_
 
 
 def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
+    # The caller owns parent-directory policy. In particular, never chmod
+    # upstream-owned /etc/crowdsec or systemd directories from this helper.
     path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
     tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    fd = os.open(
+        tmp,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
@@ -366,11 +372,23 @@ def _write_root_file(path: Path, content: str, mode: int) -> None:
 
 
 def acquisition_text(caddy_log: Path = CADDY_LOG) -> str:
-    return f'''# Managed by VaultWarden-OCI V2 Phase 4.\nfilenames:\n  - {caddy_log}\nlabels:\n  type: caddy\n'''
+    return f'''# Managed by VaultWarden-OCI V2 Phase 4.
+filenames:
+  - {caddy_log}
+labels:
+  type: caddy
+'''
 
 
 def bouncer_dropin_text(config: Path = RUNTIME_CONFIG) -> str:
-    return f'''# Managed by VaultWarden-OCI V2 Phase 4.\n[Service]\nExecStart=\nExecStartPre=\nExecStartPre=/usr/local/bin/vwctl crowdsec prepare-remediation\nExecStartPre={BOUNCER_BINARY} -c {config} -t\nExecStart={BOUNCER_BINARY} -c {config}\n'''
+    return f'''# Managed by VaultWarden-OCI V2 Phase 4.
+[Service]
+ExecStart=
+ExecStartPre=
+ExecStartPre=/usr/local/bin/vwctl crowdsec prepare-remediation
+ExecStartPre={BOUNCER_BINARY} -c {config} -t
+ExecStart={BOUNCER_BINARY} -c {config}
+'''
 
 
 def _download_installer() -> Path:
@@ -468,6 +486,36 @@ def resolve_cloudflare_zone(domain: str, token: str) -> tuple[str, str]:
     raise EdgeError("Cloudflare remediation token cannot resolve the configured site zone")
 
 
+def _local_lapi_url(runner: Runner) -> str:
+    result = runner(["cscli", "config", "show", "-oraw", "--key", "Config.API.Server.ListenURI"])
+    raw = result.stdout.strip() if result.ok else ""
+    if not raw:
+        return DEFAULT_LAPI_URL
+    if raw.startswith(":"):
+        raw = "127.0.0.1" + raw
+    candidate = raw if "://" in raw else "http://" + raw
+    parsed = urllib.parse.urlparse(candidate)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise EdgeError("CrowdSec local API listen address is invalid") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise EdgeError("CrowdSec local API must listen on a local loopback address")
+    host = f"[{parsed.hostname}]" if parsed.hostname == "::1" else parsed.hostname
+    return f"{parsed.scheme}://{host}:{port}"
+
+
 def remediation_config_text(
     *,
     lapi_key: str,
@@ -475,9 +523,46 @@ def remediation_config_text(
     account_id: str,
     zone_id: str,
     domain: str,
+    lapi_url: str = DEFAULT_LAPI_URL,
 ) -> str:
     q = json.dumps
-    return f'''crowdsec_config:\n  lapi_key: {q(lapi_key)}\n  lapi_url: "http://127.0.0.1:8080"\n  update_frequency: 10s\n  include_scenarios_containing: []\n  exclude_scenarios_containing: []\n  only_include_decisions_from: []\n  insecure_skip_verify: false\n  key_path: ""\n  cert_path: ""\n  ca_cert_path: ""\ncloudflare_config:\n  accounts:\n    - id: {q(account_id)}\n      zones:\n        - zone_id: {q(zone_id)}\n          actions:\n            - ban\n          default_action: ban\n          routes_to_protect:\n            - {q(domain + "/*")}\n          turnstile:\n            enabled: false\n            rotate_secret_key: false\n            rotate_secret_key_every: 168h0m0s\n            mode: managed\n      token: {q(token)}\n      account_name: "vaultwarden-oci"\nlog_level: info\nlog_media: "stdout"\nlog_dir: "/var/log/"\nban_template_path: ""\nprometheus:\n  enabled: true\n  listen_addr: 127.0.0.1\n  listen_port: "2112"\n'''
+    return f'''crowdsec_config:
+  lapi_key: {q(lapi_key)}
+  lapi_url: {q(lapi_url)}
+  update_frequency: 10s
+  include_scenarios_containing: []
+  exclude_scenarios_containing: []
+  only_include_decisions_from: []
+  insecure_skip_verify: false
+  key_path: ""
+  cert_path: ""
+  ca_cert_path: ""
+cloudflare_config:
+  accounts:
+    - id: {q(account_id)}
+      zones:
+        - zone_id: {q(zone_id)}
+          actions:
+            - ban
+          default_action: ban
+          routes_to_protect:
+            - {q(domain + "/*")}
+          turnstile:
+            enabled: false
+            rotate_secret_key: false
+            rotate_secret_key_every: 168h0m0s
+            mode: managed
+      token: {q(token)}
+      account_name: "vaultwarden-oci"
+log_level: info
+log_media: "stdout"
+log_dir: "/var/log/"
+ban_template_path: ""
+prometheus:
+  enabled: true
+  listen_addr: 127.0.0.1
+  listen_port: "2112"
+'''
 
 
 def prepare_remediation(
@@ -487,9 +572,12 @@ def prepare_remediation(
     output: Path = RUNTIME_CONFIG,
     runner: Runner = run_command,
 ) -> None:
-    from .runtime import load_config
+    from .runtime import RuntimeConfigError, load_config
 
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except RuntimeConfigError as exc:
+        raise EdgeError(str(exc)) from exc
     values = secrets.load(
         config.offline_recovery_recipient,
         paths=secret_paths,
@@ -499,12 +587,13 @@ def prepare_remediation(
     token = values.get("cloudflare_remediation_token")
     if not token:
         raise EdgeError("SOPS secrets require cloudflare_remediation_token for CrowdSec Cloudflare remediation")
-    runner(["cscli", "bouncers", "delete", BOUNCER_ID])
+    runner(["cscli", "bouncers", "delete", BOUNCER_ID, "--ignore-missing"])
     created = runner(["cscli", "-oraw", "bouncers", "add", BOUNCER_ID])
     if not created.ok or not created.stdout.strip() or any(c.isspace() for c in created.stdout.strip()):
         raise EdgeError("cannot create CrowdSec LAPI credential for Cloudflare remediation")
     lapi_key = created.stdout.strip()
     account_id, zone_id = resolve_cloudflare_zone(config.domain, token)
+    lapi_url = _local_lapi_url(runner)
     try:
         _atomic_write(
             output,
@@ -514,6 +603,7 @@ def prepare_remediation(
                 account_id=account_id,
                 zone_id=zone_id,
                 domain=config.domain,
+                lapi_url=lapi_url,
             ),
             0o600,
         )
@@ -554,9 +644,13 @@ def doctor_checks(
             )
         )
     if _iptables_healthy("iptables", runner) and _iptables_healthy("ip6tables", runner):
-        checks.append(DoctorCheck("edge.cloudflare.iptables", "PASS", "Cloudflare-only Docker 443 policy is installed"))
+        checks.append(
+            DoctorCheck("edge.cloudflare.iptables", "PASS", "Cloudflare-only Docker 443 policy is installed")
+        )
     else:
-        checks.append(DoctorCheck("edge.cloudflare.iptables", "FAIL", "Cloudflare-only Docker 443 policy is incomplete"))
+        checks.append(
+            DoctorCheck("edge.cloudflare.iptables", "FAIL", "Cloudflare-only Docker 443 policy is incomplete")
+        )
 
     if _active(CROWDSEC_SERVICE, runner):
         checks.append(DoctorCheck("crowdsec.engine", "PASS", "CrowdSec Security Engine is active"))
