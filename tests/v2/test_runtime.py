@@ -318,6 +318,25 @@ class Phase3RuntimeTests(unittest.TestCase):
             self.assertEqual(uncertain, "degraded")
             self.assertTrue(all(row["state"] == "unknown" for row in uncertain_rows))
 
+    def test_stop_inspection_error_is_not_reported_as_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = temp_paths(root)
+            paths.run.mkdir(parents=True)
+
+            def runner(argv, *, env=None, cwd=None):
+                call = tuple(argv)
+                if call[:2] == ("docker", "version"):
+                    return result(argv, "28.4.0\n")
+                if call[:3] == ("docker", "container", "inspect"):
+                    return result(argv, stderr="permission denied", code=1)
+                raise AssertionError(argv)
+
+            with mock.patch.object(secrets, "cleanup") as cleanup:
+                with self.assertRaisesRegex(runtime.RuntimeErrorV2, "stop state unknown"):
+                    runtime.lifecycle("stop", paths=paths, runner=runner)
+                cleanup.assert_not_called()
+
     def test_doctor_runtime_paths_reports_real_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
