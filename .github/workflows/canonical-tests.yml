@@ -40,10 +40,27 @@ jobs:
           echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
 
-          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64 -o /tmp/sops
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux-amd64 -o /tmp/sops
           echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
       - name: Run legacy V1 canonical permanent test entrypoint
         if: github.event.pull_request.base.ref != 'v2'
         run: ./tests/run-tests.sh all
+
+  v2-edge-packet-acceptance:
+    name: V2 edge packet acceptance
+    if: github.event.pull_request.base.ref == 'v2'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Verify exact PR head checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+
+      - name: Exercise real Docker IPv4/IPv6 origin path
+        run: sudo bash tests/v2/acceptance_edge_packet.sh
