@@ -5,8 +5,13 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from vaultwarden_oci import recovery, secrets
 from vaultwarden_oci.cli import CommandResult, run_command
@@ -160,8 +165,6 @@ def main() -> int:
         if not verified.artifact.is_file():
             raise AssertionError("verified recovery artifact missing")
 
-        # Replacement-host condition: installer has created the path, but the old
-        # server-local operational identity is unavailable.
         operational_key.write_text("", encoding="utf-8")
         os.chmod(operational_key, 0o600)
         recovery.restore_recovery(
