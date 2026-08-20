@@ -27,12 +27,20 @@ class VwctlUnitTests(unittest.TestCase):
     def test_versions_manifest_exact_pins(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             valid = Path(directory) / "versions.toml"
-            valid.write_text('schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n' + COMPONENTS, encoding="utf-8")
+            valid.write_text(
+                'schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n' + COMPONENTS,
+                encoding="utf-8",
+            )
             manifest = cli.load_versions(valid, require_components=True)
             self.assertEqual(manifest.version, "0.1.0-dev")
             self.assertEqual(manifest.vaultwarden, "1.37.1")
             invalid = Path(directory) / "invalid.toml"
-            invalid.write_text('schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n[components]\nvaultwarden = "latest"\ncaddy = "2.11.4"\ncaddy_dns_cloudflare = "v0.2.4"\n', encoding="utf-8")
+            invalid.write_text(
+                'schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n'
+                '[components]\nvaultwarden = "latest"\ncaddy = "2.11.4"\n'
+                'caddy_dns_cloudflare = "v0.2.4"\n',
+                encoding="utf-8",
+            )
             with self.assertRaises(cli.VersionsError):
                 cli.load_versions(invalid, require_components=True)
 
@@ -50,28 +58,50 @@ class VwctlUnitTests(unittest.TestCase):
     def test_real_temp_lock_contention(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / "vwctl.lock"
-            code = textwrap.dedent('''
+            code = textwrap.dedent(
+                '''
                 import sys, time
                 from pathlib import Path
                 from vaultwarden_oci.cli import mutation_lock
                 with mutation_lock(Path(sys.argv[1])):
                     print("locked", flush=True)
                     time.sleep(30)
-            ''')
-            env = os.environ.copy(); env["PYTHONPATH"] = str(ROOT)
-            holder = subprocess.Popen([sys.executable, "-c", code, str(lock_path)], cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                '''
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT)
+            holder = subprocess.Popen(
+                [sys.executable, "-c", code, str(lock_path)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
             try:
+                self.assertIsNotNone(holder.stdout)
                 self.assertEqual(holder.stdout.readline().strip(), "locked")
                 with self.assertRaises(cli.LockBusyError):
                     with cli.mutation_lock(lock_path):
                         self.fail("contended lock acquired")
             finally:
-                holder.terminate(); holder.wait(timeout=5)
+                holder.terminate()
+                holder.wait(timeout=5)
+                if holder.stdout is not None:
+                    holder.stdout.close()
+                if holder.stderr is not None:
+                    holder.stderr.close()
 
 
 class VwctlIntegrationTests(unittest.TestCase):
     def run_vwctl(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([sys.executable, str(ROOT / "vwctl"), *args], cwd=ROOT, text=True, capture_output=True, check=False)
+        return subprocess.run(
+            [sys.executable, str(ROOT / "vwctl"), *args],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
     def test_public_commands_and_versions(self) -> None:
         help_result = self.run_vwctl("--help")
@@ -89,7 +119,8 @@ class VwctlIntegrationTests(unittest.TestCase):
         recipient = "age1" + "q" * 58
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.toml"
-            config.write_text(f'''schema_version = 1
+            config.write_text(
+                f'''schema_version = 1
 [site]
 domain = "vault.example.net"
 acme_email = "admin@example.net"
@@ -104,10 +135,15 @@ security = "starttls"
 from_email = "vaultwarden@example.net"
 from_name = "Vaultwarden"
 timeout_seconds = 15
-''', encoding="utf-8")
+''',
+                encoding="utf-8",
+            )
             good = self.run_vwctl("config", "validate", "--file", str(config))
             self.assertEqual(good.returncode, 0, good.stderr)
-            config.write_text(config.read_text(encoding="utf-8") + 'password = "plaintext"\n', encoding="utf-8")
+            config.write_text(
+                config.read_text(encoding="utf-8") + 'password = "plaintext"\n',
+                encoding="utf-8",
+            )
             bad = self.run_vwctl("config", "validate", "--file", str(config))
             self.assertEqual(bad.returncode, 1)
             self.assertIn("FAIL", bad.stderr)
