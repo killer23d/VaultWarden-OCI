@@ -20,8 +20,6 @@ cleanup() {
   docker rm -f "${container}" >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
-
 cleanup
 trap cleanup EXIT
 
@@ -49,7 +47,7 @@ done
 curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:443/ >/dev/null
 
 # Build a real external-client namespace. Cloudflare-range addresses are /32
-# and /128 loopback sources routed over the veth, so Docker sees them unchanged.
+# and /128 loopback sources routed through the veth peer, so Docker sees them unchanged.
 ip netns add "${netns}"
 ip link add "${host_veth}" type veth peer name "${client_veth}"
 ip link set "${client_veth}" netns "${netns}"
@@ -68,10 +66,10 @@ ip netns exec "${netns}" ip -6 addr add 2001:4860::10/128 dev lo
 ip netns exec "${netns}" ip route add default via 192.0.2.1
 ip netns exec "${netns}" ip -6 route add default via 2001:db8:ffff::1
 
-ip route add 173.245.48.10/32 dev "${host_veth}"
-ip route add 198.51.100.10/32 dev "${host_veth}"
-ip -6 route add 2400:cb00::10/128 dev "${host_veth}"
-ip -6 route add 2001:4860::10/128 dev "${host_veth}"
+ip route add 173.245.48.10/32 via 192.0.2.2 dev "${host_veth}"
+ip route add 198.51.100.10/32 via 192.0.2.2 dev "${host_veth}"
+ip -6 route add 2400:cb00::10/128 via 2001:db8:ffff::2 dev "${host_veth}"
+ip -6 route add 2001:4860::10/128 via 2001:db8:ffff::2 dev "${host_veth}"
 sysctl -q -w net.ipv6.conf.all.forwarding=1
 
 PYTHONPATH=. python3 - <<'PY'
