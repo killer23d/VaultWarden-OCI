@@ -19,6 +19,11 @@ REQUIRED = ("cloudflare_api_token", "smtp_username", "smtp_password")
 OPTIONAL = ("vaultwarden_admin_token",)
 _RECIPIENT = re.compile(r"^age1[0-9a-z]{50,70}$")
 _RECIPIENT_LINE = re.compile(r"^\s*-?\s*recipient:\s*(age1[0-9a-z]{50,70})\s*$")
+# Keep this validation aligned with pinned caddy-dns/cloudflare v0.2.4. The
+# plugin includes a rejected token in its provisioning error, so malformed
+# values must be rejected here before Caddy can log them.
+_CLOUDFLARE_LEGACY_TOKEN = re.compile(r"^[A-Za-z0-9_-]{35,50}$")
+_CLOUDFLARE_NEW_TOKEN = re.compile(r"^cf(?:ut|at)_[A-Za-z0-9_-]{32,256}$")
 
 
 class SecretsError(RuntimeError):
@@ -46,6 +51,15 @@ def validate_recipient(value: str) -> str:
     return value
 
 
+def validate_cloudflare_token(value: str) -> str:
+    """Reject values that the pinned Caddy Cloudflare module would echo on error."""
+    if not (_CLOUDFLARE_NEW_TOKEN.fullmatch(value) or _CLOUDFLARE_LEGACY_TOKEN.fullmatch(value)):
+        raise SecretsError(
+            "decrypted cloudflare_api_token does not match the pinned Cloudflare provider token format"
+        )
+    return value
+
+
 def _secure_file(path: Path, uid: int) -> None:
     try:
         info = path.lstat()
@@ -68,10 +82,17 @@ def _dir(path: Path, uid: int, gid: int, mode: int) -> None:
         raise SecretsError(f"incompatible ownership/mode at runtime secret path: {path}")
 
 
-def ensure_runtime(paths: SecretPaths, *, uid: int = 0, gid: int = 0, service_gid: int = 1000) -> None:
+def ensure_runtime(
+    paths: SecretPaths,
+    *,
+    uid: int = 0,
+    gid: int = 0,
+    vaultwarden_gid: int = 65532,
+    caddy_gid: int = 65533,
+) -> None:
     _dir(paths.root, uid, gid, 0o700)
-    _dir(paths.vaultwarden, uid, service_gid, 0o750)
-    _dir(paths.caddy, uid, service_gid, 0o750)
+    _dir(paths.vaultwarden, uid, vaultwarden_gid, 0o750)
+    _dir(paths.caddy, uid, caddy_gid, 0o750)
 
 
 def _recipients(path: Path) -> set[str]:
@@ -105,7 +126,13 @@ def _failure(label: str, result: CommandResult) -> SecretsError:
     return SecretsError(f"{label} failed ({detail})")
 
 
-def validate_custody(offline: str, *, paths: SecretPaths = SecretPaths(), runner: Runner = run_command, uid: int = 0) -> None:
+def validate_custody(
+    offline: str,
+    *,
+    paths: SecretPaths = SecretPaths(),
+    runner: Runner = run_command,
+    uid: int = 0,
+) -> None:
     validate_recipient(offline)
     _secure_file(paths.age_key, uid)
     _secure_file(paths.encrypted, uid)
@@ -127,6 +154,8 @@ def validate_custody(offline: str, *, paths: SecretPaths = SecretPaths(), runner
 def _value(key: str, value: object) -> str:
     if not isinstance(value, str) or not value or any(c in value for c in "\0\r\n"):
         raise SecretsError(f"decrypted secret {key} must be a non-empty single-line string")
+    if key == "cloudflare_api_token":
+        validate_cloudflare_token(value)
     return value
 
 
@@ -149,7 +178,13 @@ def decrypt(*, paths: SecretPaths = SecretPaths(), runner: Runner = run_command)
     return values
 
 
-def load(offline: str, *, paths: SecretPaths = SecretPaths(), runner: Runner = run_command, uid: int = 0) -> dict[str, str]:
+def load(
+    offline: str,
+    *,
+    paths: SecretPaths = SecretPaths(),
+    runner: Runner = run_command,
+    uid: int = 0,
+) -> dict[str, str]:
     validate_custody(offline, paths=paths, runner=runner, uid=uid)
     return decrypt(paths=paths, runner=runner)
 
@@ -159,7 +194,11 @@ def _write(path: Path, value: str, uid: int, gid: int) -> None:
     if path.is_symlink():
         raise SecretsError(f"refusing to replace symlink: {path}")
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o440)
+        fd = os.open(
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o440,
+        )
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(value)
             handle.flush()
@@ -174,8 +213,22 @@ def _write(path: Path, value: str, uid: int, gid: int) -> None:
         raise
 
 
-def materialize(values: Mapping[str, str], *, paths: SecretPaths = SecretPaths(), uid: int = 0, gid: int = 0, service_gid: int = 1000) -> None:
-    ensure_runtime(paths, uid=uid, gid=gid, service_gid=service_gid)
+def materialize(
+    values: Mapping[str, str],
+    *,
+    paths: SecretPaths = SecretPaths(),
+    uid: int = 0,
+    gid: int = 0,
+    vaultwarden_gid: int = 65532,
+    caddy_gid: int = 65533,
+) -> None:
+    ensure_runtime(
+        paths,
+        uid=uid,
+        gid=gid,
+        vaultwarden_gid=vaultwarden_gid,
+        caddy_gid=caddy_gid,
+    )
     missing = sorted(set(REQUIRED) - set(values))
     if missing:
         raise SecretsError("missing required secret key(s): " + ", ".join(missing))
@@ -186,7 +239,8 @@ def materialize(values: Mapping[str, str], *, paths: SecretPaths = SecretPaths()
             if key not in values:
                 path.unlink(missing_ok=True)
                 continue
-            _write(path, _value(key, values[key]), uid, service_gid)
+            secret_gid = caddy_gid if key == "cloudflare_api_token" else vaultwarden_gid
+            _write(path, _value(key, values[key]), uid, secret_gid)
             written.append(path)
     except Exception:
         for path in written:
