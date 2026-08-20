@@ -286,7 +286,7 @@ def _load_state(path: Path) -> dict[str, object]:
 
 def _record_local(paths: RecoveryPaths, verified: VerifiedRecovery) -> None:
     state = _load_state(paths.state_file)
-    state.update({"schema_version": 1, "local": {"artifact": str(verified.artifact), "verified_at": verified.created_at, "sha256": verified.sha256, "size": verified.size}})
+    state.update({"schema_version": 1, "local": {"artifact": str(verified.artifact), "created_at": verified.created_at, "verified_at": _utc_now(), "sha256": verified.sha256, "size": verified.size}})
     _atomic_json(paths.state_file, state)
 
 
@@ -299,8 +299,10 @@ def _record_offsite(paths: RecoveryPaths, *, remote_object: str, verified: Verif
 def create_recovery(offline_recipient: str, *, paths: RecoveryPaths = RecoveryPaths(), runner: Runner = run_command, remote: str | None = None) -> VerifiedRecovery:
     if paths == RecoveryPaths() and os.geteuid() != 0:
         raise RecoveryError("vwctl backup must run as root")
-    if not offline_recipient.startswith("age1"):
-        raise RecoveryError("offline recovery recipient must be an Age recipient")
+    try:
+        secrets.validate_recipient(offline_recipient)
+    except secrets.SecretsError as exc:
+        raise RecoveryError(str(exc)) from exc
     paths.backups.mkdir(parents=True, exist_ok=True)
     os.chmod(paths.backups, 0o700)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -349,13 +351,13 @@ def rclone_diagnostics(remote: str | None = None, *, runner: Runner = run_comman
         return False, "rclone is unavailable"
     if not runner(["rclone", "config", "file"]).ok:
         return False, "rclone configuration is unavailable"
-    if remote is None:
-        return True, "rclone and configuration are available"
-    name, _ = _remote_parts(remote)
     remotes = runner(["rclone", "listremotes"])
     if not remotes.ok:
         return False, "rclone remote listing failed"
     configured = {line.strip().rstrip(":") for line in remotes.stdout.splitlines() if line.strip()}
+    if remote is None:
+        return (True, "rclone and configuration are available") if configured else (False, "rclone has no configured remotes")
+    name, _ = _remote_parts(remote)
     if name not in configured:
         return False, f"rclone remote {name!r} is not configured"
     if not runner(["rclone", "lsf", f"{name}:", "--max-depth", "1"]).ok:
@@ -495,8 +497,8 @@ def _promote(staged: Sequence[tuple[Path, Path]]) -> None:
             if target.exists():
                 previous = target.parent / f".{target.name}.rollback-{uuid.uuid4().hex[:8]}"
                 os.replace(target, previous)
-            os.replace(candidate, target)
             rollback.append((target, previous))
+            os.replace(candidate, target)
     except Exception as exc:
         for target, previous in reversed(rollback):
             try:
