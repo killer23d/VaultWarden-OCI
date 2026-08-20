@@ -27,14 +27,14 @@ class VwctlUnitTests(unittest.TestCase):
     def test_versions_manifest_exact_pins(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             valid = Path(directory) / "versions.toml"
-            valid.write_text('schema_version = 1\n[vaultwarden_oci]\nversion = "0.2.0-dev"\n' + COMPONENTS, encoding="utf-8")
-            manifest = cli.load_versions(valid)
-            self.assertEqual(manifest.version, "0.2.0-dev")
+            valid.write_text('schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n' + COMPONENTS, encoding="utf-8")
+            manifest = cli.load_versions(valid, require_components=True)
+            self.assertEqual(manifest.version, "0.1.0-dev")
             self.assertEqual(manifest.vaultwarden, "1.37.1")
             invalid = Path(directory) / "invalid.toml"
-            invalid.write_text('schema_version = 1\n[vaultwarden_oci]\nversion = "0.2.0-dev"\n[components]\nvaultwarden = "latest"\ncaddy = "2.11.4"\ncaddy_dns_cloudflare = "v0.2.4"\n', encoding="utf-8")
+            invalid.write_text('schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n[components]\nvaultwarden = "latest"\ncaddy = "2.11.4"\ncaddy_dns_cloudflare = "v0.2.4"\n', encoding="utf-8")
             with self.assertRaises(cli.VersionsError):
-                cli.load_versions(invalid)
+                cli.load_versions(invalid, require_components=True)
 
     def test_architecture_and_subprocess_boundary(self) -> None:
         self.assertEqual(cli.normalize_architecture("x86_64"), "amd64")
@@ -79,7 +79,7 @@ class VwctlIntegrationTests(unittest.TestCase):
         for command in ("start", "stop", "restart", "status", "logs", "doctor", "versions"):
             self.assertIn(command, help_result.stdout)
         version = self.run_vwctl("--version")
-        self.assertEqual(version.stdout.strip(), "vwctl 0.2.0-dev")
+        self.assertEqual(version.stdout.strip(), "vwctl 0.1.0-dev")
         versions = self.run_vwctl("versions")
         self.assertEqual(versions.returncode, 0, versions.stderr)
         self.assertIn("vaultwarden 1.37.1", versions.stdout)
