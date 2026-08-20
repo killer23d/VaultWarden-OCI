@@ -235,43 +235,56 @@ def _inspect_absent(result: CommandResult) -> bool:
     return "no such object" in message or "no such container" in message
 
 
+def _resume_paused_services(paused: Sequence[str], runner: Runner) -> None:
+    failures = [
+        container
+        for container in reversed(paused)
+        if not runner(["docker", "unpause", container]).ok
+    ]
+    if failures:
+        raise RecoveryError("failed to resume quiesced recovery service(s): " + ", ".join(failures))
+
+
 def _pause_live_services(runner: Runner) -> tuple[str, ...]:
     if not runner(["docker", "version", "--format", "{{.Server.Version}}"]).ok:
         raise RecoveryError("Docker Engine unavailable; cannot prove a quiescent recovery point")
     paused: list[str] = []
-    for container in (runtime.NAMES["caddy"], runtime.NAMES["vaultwarden"]):
-        inspection = runner(
-            ["docker", "container", "inspect", "--format", "{{json .State}}", container]
-        )
-        if not inspection.ok:
-            if _inspect_absent(inspection):
+    try:
+        for container in (runtime.NAMES["caddy"], runtime.NAMES["vaultwarden"]):
+            inspection = runner(
+                ["docker", "container", "inspect", "--format", "{{json .State}}", container]
+            )
+            if not inspection.ok:
+                if _inspect_absent(inspection):
+                    continue
+                raise RecoveryError("Docker container inspection failed; backup consistency is unknown")
+            try:
+                state = json.loads(inspection.stdout)
+            except json.JSONDecodeError as exc:
+                raise RecoveryError("Docker container state was not valid JSON") from exc
+            if not isinstance(state, dict):
+                raise RecoveryError("Docker container state was not an object")
+            status = state.get("Status")
+            is_paused = state.get("Paused") is True
+            if status == "running" and not is_paused:
+                if not runner(["docker", "pause", container]).ok:
+                    raise RecoveryError(f"failed to quiesce {container} for recovery")
+                paused.append(container)
+            elif status == "running" and is_paused:
                 continue
-            raise RecoveryError("Docker container inspection failed; backup consistency is unknown")
+            elif status in {"created", "exited", "dead"}:
+                continue
+            else:
+                raise RecoveryError(
+                    f"unsupported container state for recovery consistency: {container}={status!r}"
+                )
+    except Exception as exc:
         try:
-            state = json.loads(inspection.stdout)
-        except json.JSONDecodeError as exc:
-            raise RecoveryError("Docker container state was not valid JSON") from exc
-        if not isinstance(state, dict):
-            raise RecoveryError("Docker container state was not an object")
-        status = state.get("Status")
-        is_paused = state.get("Paused") is True
-        if status == "running" and not is_paused:
-            if not runner(["docker", "pause", container]).ok:
-                raise RecoveryError(f"failed to quiesce {container} for recovery")
-            paused.append(container)
-        elif status == "running" and is_paused:
-            continue
-        elif status in {"created", "exited", "dead"}:
-            continue
-        else:
-            raise RecoveryError(f"unsupported container state for recovery consistency: {container}={status!r}")
+            _resume_paused_services(paused, runner)
+        except RecoveryError as resume_exc:
+            raise RecoveryError(f"{exc}; additionally {resume_exc}") from exc
+        raise
     return tuple(paused)
-
-
-def _resume_paused_services(paused: Sequence[str], runner: Runner) -> None:
-    failures = [container for container in reversed(paused) if not runner(["docker", "unpause", container]).ok]
-    if failures:
-        raise RecoveryError("failed to resume quiesced recovery service(s): " + ", ".join(failures))
 
 
 def _build_candidate(paths: RecoveryPaths, staging: Path) -> dict[str, object]:
@@ -328,7 +341,8 @@ def _verify_age_artifact(path: Path) -> None:
     if path.stat().st_size < 64:
         raise RecoveryError("encrypted recovery artifact is unexpectedly small")
     try:
-        header = path.read_bytes()[:64]
+        with path.open("rb") as handle:
+            header = handle.read(64)
     except OSError as exc:
         raise RecoveryError(f"cannot inspect encrypted recovery artifact: {exc}") from exc
     if not header.startswith(b"age-encryption.org/v1"):
@@ -417,6 +431,12 @@ def _validate_backup_secret_custody(
     runner: Runner,
     uid: int,
 ) -> None:
+    try:
+        config = runtime.load_config(paths.config)
+    except runtime.RuntimeConfigError as exc:
+        raise RecoveryError(f"recovery config validation failed: {exc}") from exc
+    if config.offline_recovery_recipient != offline_recipient:
+        raise RecoveryError("backup recipient does not match config.toml offline recovery recipient")
     secret_paths = _secret_paths(paths.encrypted_secrets, paths.operational_age_key)
     try:
         secrets.validate_custody(offline_recipient, paths=secret_paths, runner=runner, uid=uid)
@@ -655,7 +675,11 @@ def _preflight_targets(paths: RecoveryPaths, staging: Path) -> None:
 
 def _copy_stage_to_target_parent(source: Path, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
-    candidate = target.parent / f".{target.name}.restore-{uuid.uuid4().hex[:8]}"
+    token = uuid.uuid4().hex[:8]
+    if source.is_file() and target.suffix:
+        candidate = target.parent / f".{target.stem}.restore-{token}{target.suffix}"
+    else:
+        candidate = target.parent / f".{target.name}.restore-{token}"
     if source.is_dir():
         shutil.copytree(source, candidate)
     else:
@@ -826,7 +850,9 @@ def _rekey_staged_sops(
     except secrets.SecretsError as exc:
         raise RecoveryError(f"cannot verify restored SOPS recipients: {exc}") from exc
     if after != desired:
-        raise RecoveryError("restored SOPS document does not have exactly offline and current operational Age recipients")
+        raise RecoveryError(
+            "restored SOPS document does not have exactly offline and current operational Age recipients"
+        )
 
 
 def _prepare_operational_custody(
@@ -852,15 +878,16 @@ def _prepare_operational_custody(
         if candidate is not None:
             candidate.unlink(missing_ok=True)
         raise RecoveryError("operational and offline recovery Age identities must differ")
-    _rekey_staged_sops(
-        staged_sops,
-        offline_identity,
-        offline_recipient,
-        operational,
-        runner=runner,
-    )
-    validation_key = candidate if candidate is not None else paths.operational_age_key
     try:
+        _rekey_staged_sops(
+            staged_sops,
+            offline_identity,
+            offline_recipient,
+            operational,
+            runner=runner,
+        )
+        _apply_permissions(staged_sops, uid, gid)
+        validation_key = candidate if candidate is not None else paths.operational_age_key
         custody_paths = _secret_paths(staged_sops, validation_key)
         secrets.validate_custody(
             offline_recipient,
@@ -869,9 +896,11 @@ def _prepare_operational_custody(
             uid=uid,
         )
         secrets.decrypt(paths=custody_paths, runner=runner)
-    except secrets.SecretsError as exc:
+    except (RecoveryError, secrets.SecretsError, OSError) as exc:
         if candidate is not None:
             candidate.unlink(missing_ok=True)
+        if isinstance(exc, RecoveryError):
+            raise
         raise RecoveryError(f"replacement operational SOPS custody validation failed: {exc}") from exc
     return candidate
 
@@ -929,8 +958,6 @@ def restore_recovery(
                 uid=uid,
                 gid=gid,
             )
-            # SOPS may have rewritten the staged file during recipient rotation.
-            _apply_permissions(staged_sops, uid, gid)
             if operational_candidate is not None:
                 staged.append((operational_candidate, paths.operational_age_key))
 
