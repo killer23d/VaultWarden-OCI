@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal VaultWarden-OCI V2 command-line foundation."""
-
+"""VaultWarden-OCI V2 operator CLI and shared subprocess/lock primitives."""
 from __future__ import annotations
 
 import argparse
@@ -14,50 +13,41 @@ import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Sequence
 
 PROGRAM_NAME = "vwctl"
 DEFAULT_CONFIG_PATH = Path("/etc/vaultwarden-oci/config.toml")
 DEFAULT_VERSIONS_PATH = Path(__file__).resolve().parent.parent / "versions.toml"
 OS_RELEASE_PATH = Path("/etc/os-release")
 GLOBAL_LOCK_PATH = Path("/run/vaultwarden-oci/lock")
-
 DOCTOR_STATUSES = ("PASS", "WARN", "FAIL", "SKIP")
-DOCTOR_CHECK_IDS = (
-    "host.os",
-    "host.architecture",
-    "config.toml",
-    "versions.toml",
-)
-
-_ARCHITECTURES = {
-    "amd64": "amd64",
-    "x86_64": "amd64",
-    "arm64": "arm64",
-    "aarch64": "arm64",
-}
+DOCTOR_CHECK_IDS = ("host.os", "host.architecture", "config.toml", "versions.toml", "runtime.docker", "runtime.compose", "runtime.paths", "secrets.custody", "secrets.decrypt")
+_ARCH = {"amd64": "amd64", "x86_64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
 
 
 class ConfigError(ValueError):
-    """Raised when config.toml cannot be parsed."""
+    pass
 
 
 class VersionsError(ValueError):
-    """Raised when versions.toml is missing or invalid."""
+    pass
 
 
 class UnsupportedArchitecture(ValueError):
-    """Raised when the host architecture is outside the V2 support boundary."""
+    pass
 
 
 class LockBusyError(RuntimeError):
-    """Raised when another mutating vwctl operation owns the global lock."""
+    pass
 
 
 @dataclass(frozen=True)
 class VersionsManifest:
     schema_version: int
     version: str
+    vaultwarden: str = ""
+    caddy: str = ""
+    caddy_dns_cloudflare: str = ""
 
 
 @dataclass(frozen=True)
@@ -80,113 +70,84 @@ class DoctorCheck:
     message: str
 
     def as_dict(self) -> dict[str, str]:
-        return {
-            "id": self.check_id,
-            "status": self.status,
-            "message": self.message,
-        }
+        return {"id": self.check_id, "status": self.status, "message": self.message}
 
 
-def _load_toml(path: Path, label: str) -> dict[str, object]:
+def _toml(path: Path, label: str) -> dict[str, object]:
     try:
         with path.open("rb") as handle:
             return tomllib.load(handle)
-    except FileNotFoundError as exc:
-        raise ValueError(f"{label} not found: {path}") from exc
-    except PermissionError as exc:
-        raise ValueError(f"{label} is not readable: {path}") from exc
-    except OSError as exc:
-        raise ValueError(f"cannot read {label} {path}: {exc}") from exc
-    except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"invalid {label} TOML in {path}: {exc}") from exc
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"cannot load {label} {path}: {exc}") from exc
 
 
 def validate_config(path: Path) -> dict[str, object]:
-    """Parse the operator config without inventing later-phase schema fields."""
     try:
-        return _load_toml(path, "config")
+        data = _toml(path, "config")
+        from .runtime import parse_config
+        parse_config(data)
+        return data
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
 
-def load_versions(path: Path = DEFAULT_VERSIONS_PATH) -> VersionsManifest:
-    """Load the minimal V2 versions manifest required by Phase 1."""
+def _pin(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or value.strip() != value or any(c.isspace() for c in value):
+        raise VersionsError(f"{label} must be a non-empty exact pin")
+    if value.lower() in {"latest", "stable", "main", "master", "edge"} or "*" in value:
+        raise VersionsError(f"{label} must be an exact production pin")
+    return value
+
+
+def load_versions(path: Path = DEFAULT_VERSIONS_PATH, *, require_components: bool = False) -> VersionsManifest:
     try:
-        data = _load_toml(path, "versions manifest")
+        data = _toml(path, "versions manifest")
     except ValueError as exc:
         raise VersionsError(str(exc)) from exc
-
     if data.get("schema_version") != 1:
         raise VersionsError("versions manifest requires schema_version = 1")
-
     project = data.get("vaultwarden_oci")
-    if not isinstance(project, dict):
-        raise VersionsError("versions manifest requires [vaultwarden_oci]")
-
-    version = project.get("version")
-    if not isinstance(version, str) or not version or version.strip() != version:
-        raise VersionsError("versions manifest requires a non-empty vaultwarden_oci.version")
-    if any(character.isspace() for character in version):
-        raise VersionsError("vaultwarden_oci.version must not contain whitespace")
-
-    return VersionsManifest(schema_version=1, version=version)
+    components = data.get("components", {})
+    if not isinstance(project, dict) or not isinstance(components, dict):
+        raise VersionsError("versions manifest requires [vaultwarden_oci] and optional [components]")
+    unknown = sorted(set(components) - {"vaultwarden", "caddy", "caddy_dns_cloudflare"})
+    if unknown:
+        raise VersionsError("unknown component pin(s): " + ", ".join(unknown))
+    def component(key: str) -> str:
+        value = components.get(key)
+        if value is None and not require_components:
+            return ""
+        return _pin(value, f"components.{key}")
+    return VersionsManifest(1, _pin(project.get("version"), "vaultwarden_oci.version"), component("vaultwarden"), component("caddy"), component("caddy_dns_cloudflare"))
 
 
 def normalize_architecture(machine: str) -> str:
-    """Return the canonical V2 architecture name or fail clearly."""
-    normalized = _ARCHITECTURES.get(machine.strip().lower())
-    if normalized is None:
-        raise UnsupportedArchitecture(
-            f"unsupported architecture {machine!r}; supported aliases are "
-            "amd64/x86_64 and arm64/aarch64"
-        )
-    return normalized
+    value = _ARCH.get(machine.strip().lower())
+    if value is None:
+        raise UnsupportedArchitecture(f"unsupported architecture {machine!r}; use amd64/x86_64 or arm64/aarch64")
+    return value
 
 
-def run_command(argv: Sequence[str]) -> CommandResult:
-    """Run an argv array without shell interpolation and normalize basic outcomes."""
+def run_command(argv: Sequence[str], *, env: Mapping[str, str] | None = None, cwd: Path | None = None) -> CommandResult:
     if isinstance(argv, (str, bytes)):
-        raise TypeError("argv must be a sequence of strings, not a shell command string")
+        raise TypeError("argv must be a sequence of strings")
     args = tuple(argv)
     if not args or not all(isinstance(item, str) for item in args):
-        raise ValueError("argv must contain at least one string argument")
-
+        raise ValueError("argv must contain at least one string")
     try:
-        completed = subprocess.run(
-            list(args),
-            check=False,
-            capture_output=True,
-            text=True,
-            shell=False,
-        )
+        completed = subprocess.run(list(args), check=False, capture_output=True, text=True, shell=False, env=dict(env) if env is not None else None, cwd=str(cwd) if cwd else None)
     except FileNotFoundError as exc:
-        return CommandResult(
-            argv=args,
-            kind="not_found",
-            returncode=None,
-            stdout="",
-            stderr=str(exc),
-        )
-
-    kind = "success" if completed.returncode == 0 else "nonzero"
-    return CommandResult(
-        argv=args,
-        kind=kind,
-        returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-    )
+        return CommandResult(args, "not_found", None, "", str(exc))
+    return CommandResult(args, "success" if completed.returncode == 0 else "nonzero", completed.returncode, completed.stdout, completed.stderr)
 
 
 @contextmanager
 def mutation_lock(path: Path = GLOBAL_LOCK_PATH) -> Iterator[None]:
-    """Acquire the one V2 mutation lock; read-only commands never call this."""
     try:
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-        handle = os.fdopen(descriptor, "r+", encoding="utf-8")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        handle = os.fdopen(fd, "r+", encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"cannot open mutation lock {path}: {exc}") from exc
-
     acquired = False
     try:
         try:
@@ -201,173 +162,134 @@ def mutation_lock(path: Path = GLOBAL_LOCK_PATH) -> Iterator[None]:
         handle.close()
 
 
-def _parse_os_release(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
+def _os_release(path: Path) -> dict[str, str]:
+    values = {}
     with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-            values[key] = value
+        for raw in handle:
+            line = raw.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                values[key] = value.strip().strip("\"'")
     return values
 
 
-def _check_host_os(path: Path) -> DoctorCheck:
+def doctor_checks(*, config_path: Path = DEFAULT_CONFIG_PATH, versions_path: Path = DEFAULT_VERSIONS_PATH, os_release_path: Path = OS_RELEASE_PATH, machine: str | None = None) -> list[DoctorCheck]:
     try:
-        os_release = _parse_os_release(path)
+        release = _os_release(os_release_path)
+        os_check = DoctorCheck("host.os", "PASS" if release.get("ID") == "ubuntu" and release.get("VERSION_ID") == "24.04" else "FAIL", "Ubuntu 24.04 LTS required")
     except OSError as exc:
-        return DoctorCheck("host.os", "FAIL", f"cannot read {path}: {exc}")
-
-    distro = os_release.get("ID", "")
-    version = os_release.get("VERSION_ID", "")
-    if distro == "ubuntu" and version == "24.04":
-        return DoctorCheck("host.os", "PASS", "Ubuntu 24.04 LTS detected")
-    return DoctorCheck(
-        "host.os",
-        "FAIL",
-        f"unsupported host {distro or 'unknown'} {version or 'unknown'}; Ubuntu 24.04 is required",
-    )
-
-
-def _check_architecture(machine: str) -> DoctorCheck:
+        os_check = DoctorCheck("host.os", "FAIL", str(exc))
     try:
-        architecture = normalize_architecture(machine)
+        arch = normalize_architecture(machine if machine is not None else platform.machine())
+        arch_check = DoctorCheck("host.architecture", "PASS", f"supported architecture {arch}")
     except UnsupportedArchitecture as exc:
-        return DoctorCheck("host.architecture", "FAIL", str(exc))
-    return DoctorCheck("host.architecture", "PASS", f"supported architecture {architecture}")
-
-
-def _check_config(path: Path) -> DoctorCheck:
-    if not path.exists():
-        return DoctorCheck(
-            "config.toml",
-            "WARN",
-            f"operator config is not present yet: {path}",
-        )
+        arch_check = DoctorCheck("host.architecture", "FAIL", str(exc))
+    if not config_path.exists():
+        config_check = DoctorCheck("config.toml", "WARN", f"operator config is not present: {config_path}")
+    else:
+        try:
+            validate_config(config_path)
+            config_check = DoctorCheck("config.toml", "PASS", "config TOML is valid")
+        except ConfigError as exc:
+            config_check = DoctorCheck("config.toml", "FAIL", str(exc))
     try:
-        validate_config(path)
-    except ConfigError as exc:
-        return DoctorCheck("config.toml", "FAIL", str(exc))
-    return DoctorCheck("config.toml", "PASS", f"config TOML is valid: {path}")
-
-
-def _check_versions(path: Path) -> DoctorCheck:
-    try:
-        manifest = load_versions(path)
+        manifest = load_versions(versions_path, require_components=True)
+        versions_check = DoctorCheck("versions.toml", "PASS", f"exact Phase 3 pins configured for {manifest.version}")
     except VersionsError as exc:
-        return DoctorCheck("versions.toml", "FAIL", str(exc))
-    return DoctorCheck(
-        "versions.toml",
-        "PASS",
-        f"versions manifest is valid for {manifest.version}",
-    )
-
-
-def doctor_checks(
-    *,
-    config_path: Path = DEFAULT_CONFIG_PATH,
-    versions_path: Path = DEFAULT_VERSIONS_PATH,
-    os_release_path: Path = OS_RELEASE_PATH,
-    machine: str | None = None,
-) -> list[DoctorCheck]:
-    """Run the read-only Phase 1 diagnostic checks in stable-ID order."""
-    checks = [
-        _check_host_os(os_release_path),
-        _check_architecture(machine if machine is not None else platform.machine()),
-        _check_config(config_path),
-        _check_versions(versions_path),
-    ]
-    return checks
+        versions_check = DoctorCheck("versions.toml", "FAIL", str(exc))
+    from . import runtime
+    return [os_check, arch_check, config_check, versions_check, *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path))]
 
 
 def doctor_overall(checks: Sequence[DoctorCheck]) -> str:
     statuses = {check.status for check in checks}
-    if "FAIL" in statuses:
-        return "FAIL"
-    if "WARN" in statuses:
-        return "WARN"
-    if statuses and statuses <= {"SKIP"}:
-        return "SKIP"
-    return "PASS"
+    return "FAIL" if "FAIL" in statuses else "WARN" if "WARN" in statuses else "SKIP" if statuses and statuses <= {"SKIP"} else "PASS"
 
 
 def doctor_payload(checks: Sequence[DoctorCheck]) -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "overall": doctor_overall(checks),
-        "checks": [check.as_dict() for check in checks],
-    }
+    return {"schema_version": 1, "overall": doctor_overall(checks), "checks": [check.as_dict() for check in checks]}
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog=PROGRAM_NAME,
-        description="VaultWarden-OCI V2 operator CLI",
-    )
-    parser.add_argument(
-        "--version",
-        action="store_true",
-        help="show the vwctl version and exit",
-    )
-
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=PROGRAM_NAME, description="VaultWarden-OCI V2 operator CLI")
+    parser.add_argument("--version", action="store_true")
     commands = parser.add_subparsers(dest="command")
-
-    config = commands.add_parser("config", help="validate operator configuration")
+    config = commands.add_parser("config")
     config_commands = config.add_subparsers(dest="config_command", required=True)
-    validate = config_commands.add_parser("validate", help="validate a TOML config file")
-    validate.add_argument("--file", required=True, type=Path, help="config TOML path")
-
-    commands.add_parser("versions", help="show exact V2 version values required now")
-
-    doctor = commands.add_parser("doctor", help="run read-only host/config diagnostics")
-    doctor.add_argument("--json", action="store_true", help="emit stable structured output")
-
+    validate = config_commands.add_parser("validate")
+    validate.add_argument("--file", required=True, type=Path)
+    commands.add_parser("versions")
+    for action in ("start", "stop", "restart", "status"):
+        commands.add_parser(action)
+    logs = commands.add_parser("logs")
+    logs.add_argument("service", nargs="?", choices=("vaultwarden", "caddy"))
+    logs.add_argument("--tail", type=int, default=200)
+    doctor = commands.add_parser("doctor")
+    doctor.add_argument("--json", action="store_true")
     return parser
 
 
-def _print_versions(path: Path = DEFAULT_VERSIONS_PATH) -> int:
+def _versions() -> int:
     try:
-        manifest = load_versions(path)
+        v = load_versions(require_components=True)
     except VersionsError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print(f"vaultwarden-oci {manifest.version}")
+    print(f"vaultwarden-oci {v.version}; vaultwarden {v.vaultwarden}; caddy {v.caddy}; caddy-dns/cloudflare {v.caddy_dns_cloudflare}")
     return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
+    args = _parser().parse_args(argv)
     if args.version:
         try:
-            manifest = load_versions()
+            print(f"{PROGRAM_NAME} {load_versions().version}")
+            return 0
         except VersionsError as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
-        print(f"{PROGRAM_NAME} {manifest.version}")
-        return 0
-
     if args.command is None:
-        parser.print_help()
+        _parser().print_help()
         return 0
-
     if args.command == "config":
         try:
             validate_config(args.file)
+            print(f"PASS: valid config TOML: {args.file}")
+            return 0
         except ConfigError as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
-        print(f"PASS: valid config TOML: {args.file}")
-        return 0
-
     if args.command == "versions":
-        return _print_versions()
-
+        return _versions()
+    if args.command in {"start", "stop", "restart"}:
+        from . import runtime, secrets
+        try:
+            runtime.lifecycle(args.command)
+            print(f"PASS: {args.command} completed")
+            return 0
+        except (runtime.RuntimeConfigError, runtime.RuntimeErrorV2, secrets.SecretsError, LockBusyError, VersionsError) as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "status":
+        from . import runtime
+        overall, rows = runtime.status()
+        for row in rows:
+            print(f"{row['service']}: {row['state']} (health={row['health']})")
+        print(f"Overall: {overall}")
+        return 0 if overall in {"running", "stopped"} else 1
+    if args.command == "logs":
+        if not 1 <= args.tail <= 10000:
+            print("FAIL: --tail must be between 1 and 10000", file=sys.stderr)
+            return 2
+        from . import runtime
+        code, results = runtime.logs(args.service, tail=args.tail)
+        for name, result in results:
+            print(f"== {name} ==")
+            if result.stdout:
+                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+            if result.stderr:
+                print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+        return code
     if args.command == "doctor":
         checks = doctor_checks()
         payload = doctor_payload(checks)
@@ -378,8 +300,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"[{check.status}] {check.check_id}: {check.message}")
             print(f"Overall: {payload['overall']}")
         return 1 if payload["overall"] == "FAIL" else 0
-
-    parser.error(f"unknown command: {args.command}")
     return 2
 
 

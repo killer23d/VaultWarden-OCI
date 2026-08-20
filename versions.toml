@@ -2,3 +2,8 @@ schema_version = 1
 
 [vaultwarden_oci]
 version = "0.1.0-dev"
+
+[components]
+vaultwarden = "1.37.1"
+caddy = "2.11.4"
+caddy_dns_cloudflare = "v0.2.4"
