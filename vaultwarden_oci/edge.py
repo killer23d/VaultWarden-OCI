@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import shlex
 import stat
 import tempfile
 import time
@@ -28,6 +29,7 @@ CLOCK_SKEW_SECONDS = 5 * 60
 CHAIN = "VWOCI-CF-HTTPS"
 RULE_COMMENT = "vaultwarden-oci:cloudflare-https"
 GUARD_COMMENT = "vaultwarden-oci:cloudflare-guard"
+BRIDGE_IFACE = "vwoci0"
 BOUNCER_ID = "vaultwarden-oci-cloudflare"
 BOUNCER_SERVICE = "crowdsec-cloudflare-worker-bouncer.service"
 BOUNCER_BINARY = "/usr/bin/crowdsec-cloudflare-worker-bouncer"
@@ -42,6 +44,8 @@ BOUNCER_DROPIN = Path(
     "/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service.d/vaultwarden-oci.conf"
 )
 RUNTIME_CONFIG = Path("/run/vaultwarden-oci/transient/crowdsec-cloudflare-worker-bouncer.yaml")
+REMEDIATION_START_TOKEN = Path("/run/vaultwarden-oci/transient/crowdsec-cloudflare-start.token")
+FAIL_OPEN_CONFIRMATION = STATE_ROOT / "crowdsec-cloudflare-fail-open.json"
 
 Runner = Callable[..., CommandResult]
 Fetcher = Callable[[str, int], str]
@@ -70,6 +74,8 @@ class EdgePaths:
     bouncer_dropin: Path = BOUNCER_DROPIN
     remediation_config: Path = RUNTIME_CONFIG
     caddy_log: Path = CADDY_LOG
+    remediation_start_token: Path = REMEDIATION_START_TOKEN
+    fail_open_confirmation: Path = FAIL_OPEN_CONFIRMATION
 
 
 def _safe_network(network: ipaddress._BaseNetwork) -> bool:
@@ -248,8 +254,14 @@ def select_policy(
             ) from current_error
 
 
-def _command(runner: Runner, argv: Sequence[str], label: str) -> None:
-    result = runner(argv)
+def _command(
+    runner: Runner,
+    argv: Sequence[str],
+    label: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    result = runner(argv, env=env) if env is not None else runner(argv)
     if not result.ok:
         detail = result.kind if result.returncode is None else f"exit {result.returncode}"
         raise EdgeError(f"{label} failed ({detail})")
@@ -261,8 +273,12 @@ def _rule(binary: str, comment: str, target: str) -> list[str]:
         "-w",
         "-p",
         "tcp",
+        "-o",
+        BRIDGE_IFACE,
         "-m",
         "conntrack",
+        "--ctdir",
+        "ORIGINAL",
         "--ctorigdstport",
         "443",
         "-m",
@@ -333,7 +349,7 @@ def _rebuild_family(
 
 
 def apply_origin_policy(policy: CloudflarePolicy, *, runner: Runner = run_command) -> None:
-    """Apply both families while a temporary top-of-chain guard blocks published 443."""
+    """Apply both families while a scoped top-of-chain guard blocks published 443 ingress."""
     install_fail_closed_guard(runner=runner)
     _rebuild_family("iptables", policy.ipv4, runner)
     _rebuild_family("ip6tables", policy.ipv6, runner)
@@ -346,7 +362,7 @@ def refresh_origin_policy(
     fetcher: Fetcher = _http_text,
     runner: Runner = run_command,
 ) -> CloudflarePolicy:
-    # Guard first. A failed fetch/cache validation therefore leaves the origin closed.
+    # Guard first. A failed fetch/cache validation therefore leaves Caddy ingress closed.
     install_fail_closed_guard(runner=runner)
     policy = select_policy(path=path, now=now, fetcher=fetcher)
     apply_origin_policy(policy, runner=runner)
@@ -384,6 +400,9 @@ labels:
 def bouncer_dropin_text(config: Path = RUNTIME_CONFIG) -> str:
     return f'''# Managed by VaultWarden-OCI V2 Phase 4.
 [Service]
+Restart=no
+ExecCondition=
+ExecCondition=/usr/local/bin/vwctl crowdsec consume-start-token
 ExecStart=
 ExecStartPre=
 ExecStartPre=/usr/local/bin/vwctl crowdsec prepare-remediation
@@ -410,27 +429,19 @@ def _download_installer() -> Path:
         raise
 
 
-def _remove_acquisition_file(path: Path) -> None:
+def _has_noncomment_content(path: Path) -> bool:
     try:
-        info = path.lstat()
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return
-    except OSError as exc:
+        return False
+    except (OSError, UnicodeError) as exc:
         raise EdgeError(f"cannot inspect CrowdSec acquisition {path}: {exc}") from exc
-    if stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode):
-        try:
-            path.unlink()
-        except OSError as exc:
-            raise EdgeError(f"cannot remove CrowdSec acquisition {path}: {exc}") from exc
-        return
-    raise EdgeError(f"refusing to remove non-file CrowdSec acquisition path: {path}")
+    return any(line.strip() and not line.lstrip().startswith("#") for line in text.splitlines())
 
 
-def _clear_detected_acquisitions(paths: EdgePaths) -> None:
-    """Remove package auto-detected inputs so Caddy is the only active acquisition."""
+def _assert_acquisition_scope(paths: EdgePaths) -> None:
+    """Refuse unexpected acquisitions instead of deleting operator/upstream files."""
     directory = paths.acquisition.parent
-    if paths == EdgePaths():
-        _remove_acquisition_file(CROWDSEC_ACQUIS_MAIN)
     try:
         candidates = sorted(
             (entry for entry in directory.iterdir() if entry.suffix.lower() in {".yaml", ".yml"}),
@@ -441,8 +452,19 @@ def _clear_detected_acquisitions(paths: EdgePaths) -> None:
         candidates = []
     except OSError as exc:
         raise EdgeError(f"cannot inspect CrowdSec acquisition directory {directory}: {exc}") from exc
-    for candidate in candidates:
-        _remove_acquisition_file(candidate)
+    unexpected = [entry for entry in candidates if entry != paths.acquisition]
+    if unexpected:
+        names = ", ".join(entry.name for entry in unexpected)
+        raise EdgeError(f"unexpected CrowdSec acquisition file(s): {names}")
+    if paths == EdgePaths() and _has_noncomment_content(CROWDSEC_ACQUIS_MAIN):
+        raise EdgeError("unexpected active CrowdSec /etc/crowdsec/acquis.yaml; V2 requires Caddy-only acquisition")
+
+
+def _unlink_state(path: Path, label: str) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise EdgeError(f"cannot clear {label}: {exc}") from exc
 
 
 def setup_crowdsec(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_command) -> None:
@@ -456,18 +478,26 @@ def setup_crowdsec(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_comma
         if installer is not None:
             installer.unlink(missing_ok=True)
     _command(runner, ["apt-get", "update"], "apt metadata refresh")
+    install_env = dict(os.environ)
+    install_env["CROWDSEC_SETUP_UNATTENDED_DISABLE"] = "1"
     _command(
         runner,
         ["apt-get", "install", "-y", "crowdsec", "crowdsec-cloudflare-worker-bouncer"],
         "CrowdSec package installation",
+        env=install_env,
+    )
+    _command(
+        runner,
+        ["systemctl", "disable", "--now", BOUNCER_SERVICE],
+        "Cloudflare bouncer disable/stop",
     )
     _command(runner, ["systemctl", "stop", CROWDSEC_SERVICE], "CrowdSec stop before source restriction")
     _command(
         runner,
         ["cscli", "collections", "remove", "--all"],
-        "CrowdSec auto-detected collection reset",
+        "CrowdSec collection reset",
     )
-    _clear_detected_acquisitions(paths)
+    _assert_acquisition_scope(paths)
     _command(
         runner,
         ["cscli", "collections", "install", "crowdsecurity/caddy"],
@@ -475,10 +505,11 @@ def setup_crowdsec(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_comma
     )
     _write_root_file(paths.acquisition, acquisition_text(paths.caddy_log), 0o600)
     _write_root_file(paths.bouncer_dropin, bouncer_dropin_text(paths.remediation_config), 0o644)
+    _unlink_state(paths.remediation_start_token, "CrowdSec remediation start token")
+    _unlink_state(paths.fail_open_confirmation, "CrowdSec Fail Open confirmation")
     _command(runner, ["systemctl", "daemon-reload"], "systemd reload")
     _command(runner, ["systemctl", "enable", "--now", CROWDSEC_SERVICE], "CrowdSec enable/start")
     _command(runner, ["systemctl", "restart", CROWDSEC_SERVICE], "CrowdSec restart")
-    _command(runner, ["systemctl", "enable", "--now", BOUNCER_SERVICE], "Cloudflare bouncer enable/start")
 
 
 def _cloudflare_json(url: str, token: str) -> Mapping[str, object]:
@@ -658,12 +689,131 @@ def _active(service: str, runner: Runner) -> bool:
     return runner(["systemctl", "is-active", "--quiet", service]).ok
 
 
-def _iptables_healthy(binary: str, runner: Runner) -> bool:
-    jump = _rule(binary, RULE_COMMENT, CHAIN)
+def _disabled(service: str, runner: Runner) -> bool:
+    result = runner(["systemctl", "is-enabled", service])
+    return result.stdout.strip() == "disabled"
+
+
+def consume_remediation_start_token(
+    *,
+    path: Path = REMEDIATION_START_TOKEN,
+) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise EdgeError("CrowdSec Cloudflare remediation start was not authorized by vwctl") from exc
+    except OSError as exc:
+        raise EdgeError(f"cannot inspect CrowdSec remediation start token: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise EdgeError("CrowdSec remediation start token is not a regular file")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise EdgeError(f"cannot consume CrowdSec remediation start token: {exc}") from exc
+
+
+def start_remediation(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_command) -> None:
+    if os.geteuid() != 0 and paths == EdgePaths():
+        raise EdgeError("vwctl crowdsec remediation-start must run as root")
+    if _active(BOUNCER_SERVICE, runner):
+        raise EdgeError("CrowdSec Cloudflare remediation is already active")
+    if not _disabled(BOUNCER_SERVICE, runner):
+        raise EdgeError("CrowdSec Cloudflare bouncer must remain disabled at boot; rerun vwctl crowdsec setup")
+    _unlink_state(paths.fail_open_confirmation, "CrowdSec Fail Open confirmation")
+    try:
+        _atomic_write(paths.remediation_start_token, f"{os.getpid()}:{time.time_ns()}\n", 0o600)
+    except OSError as exc:
+        raise EdgeError(f"cannot authorize CrowdSec remediation start: {exc}") from exc
+    result = runner(["systemctl", "start", BOUNCER_SERVICE])
+    if not result.ok or not _active(BOUNCER_SERVICE, runner) or paths.remediation_start_token.exists():
+        _unlink_state(paths.remediation_start_token, "CrowdSec remediation start token")
+        detail = result.kind if result.returncode is None else f"exit {result.returncode}"
+        raise EdgeError(f"CrowdSec Cloudflare remediation start failed ({detail})")
+
+
+def _service_invocation_id(runner: Runner) -> str | None:
+    if not _active(BOUNCER_SERVICE, runner):
+        return None
+    result = runner(["systemctl", "show", BOUNCER_SERVICE, "--property=InvocationID", "--value"])
+    value = result.stdout.strip().lower() if result.ok else ""
+    if len(value) != 32 or any(char not in "0123456789abcdef" for char in value):
+        return None
+    return value
+
+
+def confirm_fail_open(
+    *,
+    paths: EdgePaths = EdgePaths(),
+    runner: Runner = run_command,
+    now: int | None = None,
+) -> None:
+    if os.geteuid() != 0 and paths == EdgePaths():
+        raise EdgeError("vwctl crowdsec confirm-fail-open must run as root")
+    invocation = _service_invocation_id(runner)
+    if invocation is None:
+        raise EdgeError("CrowdSec Cloudflare remediation is not active with a valid systemd invocation")
+    payload = {
+        "schema_version": 1,
+        "invocation_id": invocation,
+        "confirmed_at": int(time.time()) if now is None else int(now),
+    }
+    try:
+        _atomic_write(
+            paths.fail_open_confirmation,
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            0o600,
+        )
+    except OSError as exc:
+        raise EdgeError(f"cannot persist CrowdSec Fail Open confirmation: {exc}") from exc
+
+
+def _fail_open_confirmed(path: Path, invocation: str | None) -> bool:
+    if invocation is None:
+        return False
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return False
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return False
     return (
-        runner([binary, "-w", "-C", "DOCKER-USER", *jump[2:]]).ok
-        and runner([binary, "-w", "-n", "-L", CHAIN]).ok
+        isinstance(payload, dict)
+        and payload.get("schema_version") == 1
+        and payload.get("invocation_id") == invocation
+        and isinstance(payload.get("confirmed_at"), int)
+        and not isinstance(payload.get("confirmed_at"), bool)
     )
+
+
+def _iptables_healthy(
+    binary: str,
+    networks: Iterable[ipaddress._BaseNetwork],
+    runner: Runner,
+) -> bool:
+    jump = _rule(binary, RULE_COMMENT, CHAIN)
+    guard = _rule(binary, GUARD_COMMENT, "DROP")
+    if not runner([binary, "-w", "-C", "DOCKER-USER", *jump[2:]]).ok:
+        return False
+    if runner([binary, "-w", "-C", "DOCKER-USER", *guard[2:]]).ok:
+        return False
+    listing = runner([binary, "-w", "-S", CHAIN])
+    if not listing.ok:
+        return False
+    expected = [
+        ("-A", CHAIN, "-s", str(network), "-j", "RETURN")
+        for network in networks
+    ]
+    expected.append(("-A", CHAIN, "-j", "DROP"))
+    try:
+        actual = [
+            tuple(shlex.split(line))
+            for line in listing.stdout.splitlines()
+            if line.startswith(f"-A {CHAIN} ")
+        ]
+    except ValueError:
+        return False
+    return actual == expected
 
 
 def doctor_checks(
@@ -673,6 +823,7 @@ def doctor_checks(
     now: int | None = None,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
+    policy: CloudflarePolicy | None = None
     try:
         policy = load_lkg(paths.lkg, now=now)
     except EdgeError as exc:
@@ -686,13 +837,25 @@ def doctor_checks(
                 f"validated Cloudflare last-known-good policy age={max(0, age)}s",
             )
         )
-    if _iptables_healthy("iptables", runner) and _iptables_healthy("ip6tables", runner):
+    if (
+        policy is not None
+        and _iptables_healthy("iptables", policy.ipv4, runner)
+        and _iptables_healthy("ip6tables", policy.ipv6, runner)
+    ):
         checks.append(
-            DoctorCheck("edge.cloudflare.iptables", "PASS", "Cloudflare-only Docker 443 policy is installed")
+            DoctorCheck(
+                "edge.cloudflare.iptables",
+                "PASS",
+                f"Cloudflare-only ORIGINAL-direction Docker 443 policy is complete on {BRIDGE_IFACE}",
+            )
         )
     else:
         checks.append(
-            DoctorCheck("edge.cloudflare.iptables", "FAIL", "Cloudflare-only Docker 443 policy is incomplete")
+            DoctorCheck(
+                "edge.cloudflare.iptables",
+                "FAIL",
+                "Cloudflare Docker 443 policy is missing, guarded, stale, misdirected, or has unexpected rules",
+            )
         )
 
     if _active(CROWDSEC_SERVICE, runner):
@@ -700,14 +863,26 @@ def doctor_checks(
     else:
         checks.append(DoctorCheck("crowdsec.engine", "FAIL", "CrowdSec Security Engine is not active"))
 
+    active = _active(BOUNCER_SERVICE, runner)
+    disabled = _disabled(BOUNCER_SERVICE, runner)
     config_test = runner([BOUNCER_BINARY, "-c", str(paths.remediation_config), "-t"])
     bouncer = runner(["cscli", "bouncers", "inspect", BOUNCER_ID, "-o", "json"])
-    if _active(BOUNCER_SERVICE, runner) and config_test.ok and bouncer.ok:
+    invocation = _service_invocation_id(runner) if active else None
+    confirmed = _fail_open_confirmed(paths.fail_open_confirmation, invocation)
+    if active and disabled and config_test.ok and bouncer.ok and confirmed:
         checks.append(
             DoctorCheck(
                 "crowdsec.cloudflare",
                 "PASS",
-                "CrowdSec Cloudflare Worker bouncer is active with valid local configuration",
+                "Cloudflare Worker bouncer is active, boot-disabled, and Fail Open is operator-confirmed for this invocation",
+            )
+        )
+    elif active and disabled and config_test.ok and bouncer.ok:
+        checks.append(
+            DoctorCheck(
+                "crowdsec.cloudflare",
+                "FAIL",
+                "Cloudflare Worker bouncer is active but Fail Open is not confirmed for this service invocation",
             )
         )
     else:
@@ -715,7 +890,7 @@ def doctor_checks(
             DoctorCheck(
                 "crowdsec.cloudflare",
                 "FAIL",
-                "CrowdSec Cloudflare Worker bouncer configuration/service/LAPI registration is unhealthy",
+                "CrowdSec Cloudflare remediation service/config/LAPI state is unhealthy or not explicitly armed",
             )
         )
     return checks
