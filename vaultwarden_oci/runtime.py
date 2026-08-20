@@ -1,4 +1,4 @@
-"""Vaultwarden + Caddy Phase 3 runtime rendering and lifecycle."""
+"""Vaultwarden + Caddy runtime rendering and lifecycle for V2."""
 from __future__ import annotations
 
 import grp
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import secrets
+from . import edge, secrets
 from .cli import CommandResult, DoctorCheck, VersionsError, load_versions, mutation_lock, run_command
 
 ETC = Path("/etc/vaultwarden-oci")
@@ -55,6 +55,7 @@ class Paths:
     data: Path = STATE / "data"
     caddy_data: Path = STATE / "caddy/data"
     caddy_config: Path = STATE / "caddy/config"
+    caddy_log: Path = STATE / "caddy/log"
     run: Path = RUN
     transient: Path = TRANSIENT
     lock: Path = LOCK
@@ -241,6 +242,7 @@ def ensure_paths(
     _dir(paths.data, vaultwarden_uid, vaultwarden_gid, 0o700)
     _dir(paths.caddy_data, caddy_uid, caddy_gid, 0o700)
     _dir(paths.caddy_config, caddy_uid, caddy_gid, 0o700)
+    _dir(paths.caddy_log, caddy_uid, caddy_gid, 0o700)
     secrets.ensure_runtime(
         paths.secret_paths(),
         uid=uid,
@@ -269,7 +271,13 @@ def _write(path: Path, text: str, mode: int) -> None:
         raise
 
 
-def render(config: RuntimeConfig, versions_path: Path, paths: Paths = Paths()) -> None:
+def render(
+    config: RuntimeConfig,
+    versions_path: Path,
+    paths: Paths = Paths(),
+    *,
+    cloudflare_policy: edge.CloudflarePolicy | None = None,
+) -> None:
     vw, caddy, cf = _pins(versions_path)
     q = json.dumps
     signups = "true" if config.signups_allowed else "false"
@@ -322,7 +330,7 @@ services:
     depends_on: {{vaultwarden: {{condition: service_healthy}}}}
     environment: {{VAULTWARDEN_DOMAIN: {q(config.domain)}, ACME_EMAIL: {q(config.acme_email)}}}
     ports: ["443:443/tcp"]
-    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", {q(str(paths.caddy_data) + ":/data")}, {q(str(paths.caddy_config) + ":/config")}, {q(str(paths.secret_root / "caddy") + ":/run/caddy-secrets:ro")}]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", {q(str(paths.caddy_data) + ":/data")}, {q(str(paths.caddy_config) + ":/config")}, {q(str(paths.caddy_log) + ":/var/log/caddy")}, {q(str(paths.secret_root / "caddy") + ":/run/caddy-secrets:ro")}]
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777"]
     cap_drop: [ALL]
@@ -335,19 +343,29 @@ services:
     networks: [backend]
 networks: {{backend: {{driver: bridge}}}}
 '''
-    caddyfile = '''{
- email {$ACME_EMAIL}
+    proxy_block = edge.caddy_trusted_proxy_block(cloudflare_policy) if cloudflare_policy else ""
+    caddyfile = f'''{{
+ email {{$ACME_EMAIL}}
  admin 127.0.0.1:2019
  persist_config off
-}
-{$VAULTWARDEN_DOMAIN} {
- tls {
-  dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+{proxy_block}}}
+{{$VAULTWARDEN_DOMAIN}} {{
+ tls {{
+  dns cloudflare {{env.CLOUDFLARE_API_TOKEN}}
   resolvers 1.1.1.1 1.0.0.1
- }
+ }}
+ log {{
+  output file /var/log/caddy/access.log {{
+   mode 0600
+   roll_size 10MiB
+   roll_keep 5
+   roll_keep_for 168h
+  }}
+  format json
+ }}
  encode zstd gzip
  reverse_proxy vaultwarden:8080
-}
+}}
 '''
     dockerfile = '''ARG CADDY_VERSION
 FROM caddy:${CADDY_VERSION}-builder-alpine AS builder
@@ -441,7 +459,13 @@ def lifecycle(
             caddy_gid=caddy_gid,
         )
         config = load_config(paths.config)
-        render(config, versions_path, paths)
+        cloudflare_policy = None
+        if default_paths:
+            try:
+                cloudflare_policy = edge.refresh_origin_policy(runner=runner)
+            except edge.EdgeError as exc:
+                raise RuntimeErrorV2(str(exc)) from exc
+        render(config, versions_path, paths, cloudflare_policy=cloudflare_policy)
         if not _compose(["config", "--quiet"], paths, runner).ok:
             raise RuntimeErrorV2("rendered Compose validation failed")
         values = secrets.load(
@@ -462,8 +486,6 @@ def lifecycle(
         if action == "restart":
             args.append("--force-recreate")
         if not _compose(args, paths, runner).ok:
-            # Best-effort removal prevents failed/restarting containers from
-            # being left behind after their volatile secret files are removed.
             _compose(["down"], paths, runner)
             secrets.cleanup(paths.secret_paths())
             raise RuntimeErrorV2("Docker Compose lifecycle failed")
@@ -583,22 +605,23 @@ def runtime_paths_check(
         return DoctorCheck("runtime.paths", "FAIL", "; ".join(problems))
 
     secret_paths = paths.secret_paths()
-    phase3_directories = (
+    runtime_directories = (
         (paths.data, vaultwarden_uid, vaultwarden_gid, 0o700),
         (paths.caddy_data, caddy_uid, caddy_gid, 0o700),
         (paths.caddy_config, caddy_uid, caddy_gid, 0o700),
+        (paths.caddy_log, caddy_uid, caddy_gid, 0o700),
         (secret_paths.vaultwarden, uid, vaultwarden_gid, 0o750),
         (secret_paths.caddy, uid, caddy_gid, 0o750),
     )
-    present = [path.exists() or path.is_symlink() for path, *_ in phase3_directories]
+    present = [path.exists() or path.is_symlink() for path, *_ in runtime_directories]
     if not any(present):
-        return DoctorCheck("runtime.paths", "SKIP", "Phase 3 runtime paths are not materialized yet")
+        return DoctorCheck("runtime.paths", "SKIP", "runtime paths are not materialized yet")
     if not all(present):
-        return DoctorCheck("runtime.paths", "FAIL", "Phase 3 runtime paths are only partially materialized")
+        return DoctorCheck("runtime.paths", "FAIL", "runtime paths are only partially materialized")
 
     problems = [
         problem
-        for path, owner_uid, owner_gid, mode in phase3_directories
+        for path, owner_uid, owner_gid, mode in runtime_directories
         if (problem := _directory_problem(path, owner_uid, owner_gid, mode))
     ]
     rendered = (
@@ -630,7 +653,7 @@ def runtime_paths_check(
 
     if problems:
         return DoctorCheck("runtime.paths", "FAIL", "; ".join(problems))
-    return DoctorCheck("runtime.paths", "PASS", "Phase 3 runtime ownership and modes are valid")
+    return DoctorCheck("runtime.paths", "PASS", "runtime ownership and modes are valid")
 
 
 def doctor_checks(
@@ -683,11 +706,20 @@ def doctor_checks(
 
     checks.append(DoctorCheck("secrets.custody", "PASS", "Age/SOPS custody valid"))
     try:
-        secrets.decrypt(paths=secret_paths, runner=runner)
+        values = secrets.decrypt(paths=secret_paths, runner=runner)
     except secrets.SecretsError as exc:
         checks.append(DoctorCheck("secrets.decrypt", "FAIL", str(exc)))
     else:
-        checks.append(DoctorCheck("secrets.decrypt", "PASS", "required Phase 3 secrets decrypt"))
+        if "cloudflare_remediation_token" not in values:
+            checks.append(
+                DoctorCheck(
+                    "secrets.decrypt",
+                    "FAIL",
+                    "required Phase 4 cloudflare_remediation_token is missing",
+                )
+            )
+        else:
+            checks.append(DoctorCheck("secrets.decrypt", "PASS", "required Phase 3/4 secrets decrypt"))
     return checks
 
 
@@ -697,6 +729,7 @@ load_runtime_config = load_config
 DATA_DIR = STATE / "data"
 CADDY_DATA_DIR = STATE / "caddy/data"
 CADDY_CONFIG_DIR = STATE / "caddy/config"
+CADDY_LOG_DIR = STATE / "caddy/log"
 RUNTIME_ROOT = RUN
 RUNTIME_TRANSIENT_DIR = TRANSIENT
 STATE_ROOT = STATE
