@@ -35,6 +35,9 @@ DOCTOR_CHECK_IDS = (
     "edge.cloudflare.iptables",
     "crowdsec.engine",
     "crowdsec.cloudflare",
+    "recovery.local",
+    "recovery.offsite",
+    "recovery.rclone",
 )
 _ARCH = {"amd64": "amd64", "x86_64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
 
@@ -243,7 +246,7 @@ def doctor_checks(
         versions_check = DoctorCheck("versions.toml", "PASS", f"exact runtime pins configured for {manifest.version}")
     except VersionsError as exc:
         versions_check = DoctorCheck("versions.toml", "FAIL", str(exc))
-    from . import edge, runtime
+    from . import edge, recovery, runtime
 
     return [
         os_check,
@@ -252,6 +255,7 @@ def doctor_checks(
         versions_check,
         *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path)),
         *edge.doctor_checks(),
+        *recovery.doctor_checks(),
     ]
 
 
@@ -280,6 +284,21 @@ def _parser() -> argparse.ArgumentParser:
     logs.add_argument("--tail", type=int, default=200)
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
+
+    backup = commands.add_parser("backup", help="create and verify one encrypted V2 recovery point")
+    backup.add_argument("--remote", help="optional rclone REMOTE:path publication destination")
+    restore = commands.add_parser("restore", help="restore one encrypted V2 recovery point")
+    source = restore.add_mutually_exclusive_group(required=True)
+    source.add_argument("--file", type=Path, help="local .vwrec recovery artifact")
+    source.add_argument("--from-remote", help="rclone REMOTE:path/to/file.vwrec")
+    restore.add_argument("--identity", required=True, type=Path, help="offline Age private identity file")
+    restore.add_argument("--start", action="store_true", help="start and health-gate services after promotion")
+    recovery_cmd = commands.add_parser("recovery", help="explicit recovery retention operations")
+    recovery_commands = recovery_cmd.add_subparsers(dest="recovery_command", required=True)
+    prune = recovery_commands.add_parser("prune", help="plan or execute explicit remote recovery pruning")
+    prune.add_argument("--remote", required=True, help="rclone REMOTE:path containing recovery points")
+    prune.add_argument("--keep-last", required=True, type=int)
+    prune.add_argument("--confirm", action="store_true", help="execute the displayed deletion decision")
 
     edge_cmd = commands.add_parser("edge", help="Cloudflare origin edge policy")
     edge_commands = edge_cmd.add_subparsers(dest="edge_command", required=True)
@@ -347,10 +366,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "status":
-        from . import runtime
+        from . import recovery, runtime
         overall, rows = runtime.status()
         for row in rows:
             print(f"{row['service']}: {row['state']} (health={row['health']})")
+        for row in recovery.status_rows():
+            print(f"recovery-{row['kind']}: {row['state']} (verified_at={row['verified_at']})")
         print(f"Overall: {overall}")
         return 0 if overall in {"running", "stopped"} else 1
     if args.command == "logs":
@@ -366,6 +387,55 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result.stderr:
                 print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
         return code
+    if args.command == "backup":
+        from . import recovery, runtime
+        try:
+            config = runtime.load_config()
+            verified = recovery.create_recovery(config.offline_recovery_recipient, remote=args.remote)
+            print(f"PASS: verified local recovery {verified.artifact} sha256={verified.sha256}")
+            if args.remote:
+                print("PASS: offsite publication was remotely re-downloaded and checksum-verified")
+            return 0
+        except (recovery.RecoveryError, runtime.RuntimeConfigError, LockBusyError) as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "restore":
+        from . import recovery
+        try:
+            if args.file is not None:
+                manifest = recovery.restore_recovery(args.file, args.identity, start=args.start)
+            else:
+                manifest = recovery.restore_from_remote(args.from_remote, args.identity, start=args.start)
+            print(f"PASS: restored V2 recovery created {manifest['created_at']}")
+            if not args.start:
+                print("ACTION: services remain stopped; run 'vwctl start' after operational Age custody is ready")
+            return 0
+        except (recovery.RecoveryError, LockBusyError) as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "recovery":
+        from . import recovery
+        try:
+            if args.recovery_command == "prune":
+                decision = recovery.prune_remote(
+                    args.remote,
+                    args.keep_last,
+                    confirm=args.confirm,
+                )
+                print("Keep:")
+                for name in decision.keep:
+                    print(f"  {name}")
+                print("Delete:")
+                for name in decision.delete:
+                    print(f"  {name}")
+                if decision.delete and not args.confirm:
+                    print("PLAN ONLY: pass --confirm to execute these explicit deletions")
+                elif args.confirm:
+                    print("PASS: explicit remote pruning completed")
+                return 0
+        except recovery.RecoveryError as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
     if args.command == "edge":
         from . import edge
         try:
