@@ -329,7 +329,9 @@ services:
     image: {q("vaultwarden-oci/caddy:" + caddy + "-cloudflare-" + cf.removeprefix("v"))}
     container_name: {NAMES["caddy"]}
     user: "{CADDY_UID}:{CADDY_GID}"
-    restart: unless-stopped
+    # Phase 4 fail-closed rule: Docker must not republish Caddy after daemon/host
+    # restart before the project-owned DOCKER-USER policy is re-established.
+    restart: "no"
     command: ["/bin/sh", "-ec", {q(caddy_command)}]
     depends_on: {{vaultwarden: {{condition: service_healthy}}}}
     environment: {{VAULTWARDEN_DOMAIN: {q(config.domain)}, ACME_EMAIL: {q(config.acme_email)}}}
