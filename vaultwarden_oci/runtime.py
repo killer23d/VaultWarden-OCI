@@ -452,8 +452,18 @@ def lifecycle(
         if action == "restart":
             args.append("--force-recreate")
         if not _compose(args, paths, runner).ok:
+            # Best-effort removal prevents failed/restarting containers from
+            # being left behind after their volatile secret files are removed.
+            _compose(["down"], paths, runner)
             secrets.cleanup(paths.secret_paths())
             raise RuntimeErrorV2("Docker Compose lifecycle failed")
+
+
+def _inspect_is_absent(result: CommandResult) -> bool:
+    if result.ok:
+        return False
+    message = (result.stderr or result.stdout).lower()
+    return "no such object" in message or "no such container" in message
 
 
 def status(*, runner: Runner = run_command) -> tuple[str, list[dict[str, str]]]:
@@ -468,7 +478,10 @@ def status(*, runner: Runner = run_command) -> tuple[str, list[dict[str, str]]]:
             ["docker", "container", "inspect", "--format", "{{json .State}}", NAMES[name]]
         )
         if not result.ok:
-            rows.append({"service": name, "state": "absent", "health": "-"})
+            if _inspect_is_absent(result):
+                rows.append({"service": name, "state": "absent", "health": "-"})
+            else:
+                rows.append({"service": name, "state": "unknown", "health": "unknown"})
             continue
         try:
             state = json.loads(result.stdout)
@@ -637,24 +650,41 @@ def doctor_checks(
         ),
         runtime_paths_check(paths),
     ]
+
     try:
         config = load_config(config_path)
-        secret_paths = paths.secret_paths()
+    except RuntimeConfigError:
+        checks.extend(
+            [
+                DoctorCheck("secrets.custody", "SKIP", "valid runtime config is required"),
+                DoctorCheck("secrets.decrypt", "SKIP", "valid runtime config is required"),
+            ]
+        )
+        return checks
+
+    secret_paths = paths.secret_paths()
+    try:
         secrets.validate_custody(
             config.offline_recovery_recipient,
             paths=secret_paths,
             runner=runner,
         )
-        checks.append(DoctorCheck("secrets.custody", "PASS", "Age/SOPS custody valid"))
-        secrets.decrypt(paths=secret_paths, runner=runner)
-        checks.append(DoctorCheck("secrets.decrypt", "PASS", "required Phase 3 secrets decrypt"))
-    except (RuntimeConfigError, secrets.SecretsError) as exc:
+    except secrets.SecretsError as exc:
         checks.extend(
             [
                 DoctorCheck("secrets.custody", "FAIL", str(exc)),
-                DoctorCheck("secrets.decrypt", "SKIP", "custody/config validation failed"),
+                DoctorCheck("secrets.decrypt", "SKIP", "secret custody validation failed"),
             ]
         )
+        return checks
+
+    checks.append(DoctorCheck("secrets.custody", "PASS", "Age/SOPS custody valid"))
+    try:
+        secrets.decrypt(paths=secret_paths, runner=runner)
+    except secrets.SecretsError as exc:
+        checks.append(DoctorCheck("secrets.decrypt", "FAIL", str(exc)))
+    else:
+        checks.append(DoctorCheck("secrets.decrypt", "PASS", "required Phase 3 secrets decrypt"))
     return checks
 
 
