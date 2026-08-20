@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import edge, secrets
+from vaultwarden_oci import edge, runtime, secrets
 from vaultwarden_oci.cli import CommandResult
 
 V4 = "173.245.48.0/20\n103.21.244.0/22"
@@ -146,6 +146,58 @@ class OriginPolicyTests(unittest.TestCase):
             self.assertEqual(runner.guards, {"iptables", "ip6tables"})
             self.assertEqual(runner.jumps, set())
 
+    def test_caddy_render_uses_same_validated_policy_and_json_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            versions = root / "versions.toml"
+            versions.write_text(
+                '''schema_version = 1
+[vaultwarden_oci]
+version = "0.1.0-dev"
+[components]
+vaultwarden = "1.37.1"
+caddy = "2.11.4"
+caddy_dns_cloudflare = "v0.2.4"
+''',
+                encoding="utf-8",
+            )
+            paths = runtime.Paths(
+                config=root / "config.toml",
+                data=root / "state/data",
+                caddy_data=root / "state/caddy/data",
+                caddy_config=root / "state/caddy/config",
+                caddy_log=root / "state/caddy/log",
+                run=root / "run",
+                transient=root / "run/transient",
+                lock=root / "run/lock",
+                secret_root=root / "run/secrets",
+            )
+            paths.transient.mkdir(parents=True)
+            config = runtime.RuntimeConfig(
+                domain="vault.example.net",
+                acme_email="admin@example.net",
+                offline_recovery_recipient=OFFLINE,
+                signups_allowed=False,
+                smtp_host="smtp.example.net",
+                smtp_port=587,
+                smtp_security="starttls",
+                smtp_from_email="vaultwarden@example.net",
+                smtp_from_name="Vaultwarden",
+                smtp_timeout_seconds=15,
+            )
+            policy = edge.validate_policy(V4, V6, fetched_at=1000, source="test")
+            runtime.render(config, versions, paths, cloudflare_policy=policy)
+
+            caddyfile = paths.caddyfile.read_text(encoding="utf-8")
+            compose = paths.compose.read_text(encoding="utf-8")
+            self.assertIn("trusted_proxies static", caddyfile)
+            self.assertIn("173.245.48.0/20", caddyfile)
+            self.assertIn("2400:cb00::/32", caddyfile)
+            self.assertIn("client_ip_headers CF-Connecting-IP", caddyfile)
+            self.assertIn("output file /var/log/caddy/access.log", caddyfile)
+            self.assertIn(str(paths.caddy_log_path) + ":/var/log/caddy", compose)
+            self.assertIn('ports: ["443:443/tcp"]', compose)
+
 
 class CrowdSecBoundaryTests(unittest.TestCase):
     def test_product_acquisition_and_remediation_config_are_narrow(self) -> None:
@@ -196,6 +248,8 @@ timeout_seconds = 15
                 calls.append(tuple(argv))
                 if tuple(argv[:4]) == ("cscli", "-oraw", "bouncers", "add"):
                     return result(argv, "local-lapi-key\n")
+                if tuple(argv[:4]) == ("cscli", "config", "show", "-oraw"):
+                    return result(argv, "127.0.0.1:8080\n")
                 return result(argv)
 
             with mock.patch.object(
@@ -213,15 +267,22 @@ timeout_seconds = 15
             self.assertTrue(output.exists())
             self.assertEqual(oct(output.stat().st_mode & 0o777), "0o600")
             self.assertIn(TOKEN, output.read_text(encoding="utf-8"))
+            self.assertIn('lapi_url: "http://127.0.0.1:8080"', output.read_text(encoding="utf-8"))
             self.assertNotIn(TOKEN, " ".join(item for call in calls for item in call))
 
     def test_setup_uses_only_engine_caddy_collection_and_cloudflare_worker_bouncer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            acquisition_parent = root / "etc/crowdsec/acquis.d"
+            dropin_parent = root / "systemd/bouncer.d"
+            acquisition_parent.mkdir(parents=True, mode=0o755)
+            dropin_parent.mkdir(parents=True, mode=0o755)
+            os.chmod(acquisition_parent, 0o755)
+            os.chmod(dropin_parent, 0o755)
             paths = edge.EdgePaths(
                 lkg=root / "state/cloudflare.json",
-                acquisition=root / "etc/crowdsec/acquis.d/vaultwarden-oci.yaml",
-                bouncer_dropin=root / "systemd/bouncer.d/vaultwarden-oci.conf",
+                acquisition=acquisition_parent / "vaultwarden-oci.yaml",
+                bouncer_dropin=dropin_parent / "vaultwarden-oci.conf",
                 remediation_config=root / "run/bouncer.yaml",
                 caddy_log=root / "caddy/access.log",
             )
@@ -242,6 +303,12 @@ timeout_seconds = 15
             self.assertFalse(any("firewall-bouncer" in call for call in flat))
             self.assertTrue(paths.acquisition.exists())
             self.assertTrue(paths.bouncer_dropin.exists())
+            self.assertEqual(stat_mode(acquisition_parent), 0o755)
+            self.assertEqual(stat_mode(dropin_parent), 0o755)
+
+
+def stat_mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
 
 
 if __name__ == "__main__":
