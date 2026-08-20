@@ -379,6 +379,13 @@ def tools(runner: Runner = run_command) -> bool:
     )
 
 
+def _inspect_is_absent(result: CommandResult) -> bool:
+    if result.ok:
+        return False
+    message = (result.stderr or result.stdout).lower()
+    return "no such object" in message or "no such container" in message
+
+
 def lifecycle(
     action: str,
     *,
@@ -406,11 +413,14 @@ def lifecycle(
         if action == "stop":
             if not runner(["docker", "version", "--format", "{{.Server.Version}}"] ).ok:
                 raise RuntimeErrorV2("Docker Engine unavailable; stop state unknown")
-            existing = [
-                NAMES[name]
-                for name in ("caddy", "vaultwarden")
-                if runner(["docker", "container", "inspect", NAMES[name]]).ok
-            ]
+            existing: list[str] = []
+            for name in ("caddy", "vaultwarden"):
+                container = NAMES[name]
+                inspection = runner(["docker", "container", "inspect", container])
+                if inspection.ok:
+                    existing.append(container)
+                elif not _inspect_is_absent(inspection):
+                    raise RuntimeErrorV2("Docker container inspection failed; stop state unknown")
             if existing and not runner(["docker", "stop", *existing]).ok:
                 raise RuntimeErrorV2("Docker stop failed")
             removed = not existing or runner(["docker", "rm", *existing]).ok
@@ -457,13 +467,6 @@ def lifecycle(
             _compose(["down"], paths, runner)
             secrets.cleanup(paths.secret_paths())
             raise RuntimeErrorV2("Docker Compose lifecycle failed")
-
-
-def _inspect_is_absent(result: CommandResult) -> bool:
-    if result.ok:
-        return False
-    message = (result.stderr or result.stdout).lower()
-    return "no such object" in message or "no such container" in message
 
 
 def status(*, runner: Runner = run_command) -> tuple[str, list[dict[str, str]]]:
