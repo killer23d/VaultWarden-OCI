@@ -21,7 +21,21 @@ DEFAULT_VERSIONS_PATH = Path(__file__).resolve().parent.parent / "versions.toml"
 OS_RELEASE_PATH = Path("/etc/os-release")
 GLOBAL_LOCK_PATH = Path("/run/vaultwarden-oci/lock")
 DOCTOR_STATUSES = ("PASS", "WARN", "FAIL", "SKIP")
-DOCTOR_CHECK_IDS = ("host.os", "host.architecture", "config.toml", "versions.toml", "runtime.docker", "runtime.compose", "runtime.paths", "secrets.custody", "secrets.decrypt")
+DOCTOR_CHECK_IDS = (
+    "host.os",
+    "host.architecture",
+    "config.toml",
+    "versions.toml",
+    "runtime.docker",
+    "runtime.compose",
+    "runtime.paths",
+    "secrets.custody",
+    "secrets.decrypt",
+    "edge.cloudflare.cidrs",
+    "edge.cloudflare.iptables",
+    "crowdsec.engine",
+    "crowdsec.cloudflare",
+)
 _ARCH = {"amd64": "amd64", "x86_64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
 
 
@@ -113,12 +127,20 @@ def load_versions(path: Path = DEFAULT_VERSIONS_PATH, *, require_components: boo
     unknown = sorted(set(components) - {"vaultwarden", "caddy", "caddy_dns_cloudflare"})
     if unknown:
         raise VersionsError("unknown component pin(s): " + ", ".join(unknown))
+
     def component(key: str) -> str:
         value = components.get(key)
         if value is None and not require_components:
             return ""
         return _pin(value, f"components.{key}")
-    return VersionsManifest(1, _pin(project.get("version"), "vaultwarden_oci.version"), component("vaultwarden"), component("caddy"), component("caddy_dns_cloudflare"))
+
+    return VersionsManifest(
+        1,
+        _pin(project.get("version"), "vaultwarden_oci.version"),
+        component("vaultwarden"),
+        component("caddy"),
+        component("caddy_dns_cloudflare"),
+    )
 
 
 def normalize_architecture(machine: str) -> str:
@@ -135,10 +157,24 @@ def run_command(argv: Sequence[str], *, env: Mapping[str, str] | None = None, cw
     if not args or not all(isinstance(item, str) for item in args):
         raise ValueError("argv must contain at least one string")
     try:
-        completed = subprocess.run(list(args), check=False, capture_output=True, text=True, shell=False, env=dict(env) if env is not None else None, cwd=str(cwd) if cwd else None)
+        completed = subprocess.run(
+            list(args),
+            check=False,
+            capture_output=True,
+            text=True,
+            shell=False,
+            env=dict(env) if env is not None else None,
+            cwd=str(cwd) if cwd else None,
+        )
     except FileNotFoundError as exc:
         return CommandResult(args, "not_found", None, "", str(exc))
-    return CommandResult(args, "success" if completed.returncode == 0 else "nonzero", completed.returncode, completed.stdout, completed.stderr)
+    return CommandResult(
+        args,
+        "success" if completed.returncode == 0 else "nonzero",
+        completed.returncode,
+        completed.stdout,
+        completed.stderr,
+    )
 
 
 @contextmanager
@@ -173,10 +209,20 @@ def _os_release(path: Path) -> dict[str, str]:
     return values
 
 
-def doctor_checks(*, config_path: Path = DEFAULT_CONFIG_PATH, versions_path: Path = DEFAULT_VERSIONS_PATH, os_release_path: Path = OS_RELEASE_PATH, machine: str | None = None) -> list[DoctorCheck]:
+def doctor_checks(
+    *,
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    versions_path: Path = DEFAULT_VERSIONS_PATH,
+    os_release_path: Path = OS_RELEASE_PATH,
+    machine: str | None = None,
+) -> list[DoctorCheck]:
     try:
         release = _os_release(os_release_path)
-        os_check = DoctorCheck("host.os", "PASS" if release.get("ID") == "ubuntu" and release.get("VERSION_ID") == "24.04" else "FAIL", "Ubuntu 24.04 LTS required")
+        os_check = DoctorCheck(
+            "host.os",
+            "PASS" if release.get("ID") == "ubuntu" and release.get("VERSION_ID") == "24.04" else "FAIL",
+            "Ubuntu 24.04 LTS required",
+        )
     except OSError as exc:
         os_check = DoctorCheck("host.os", "FAIL", str(exc))
     try:
@@ -194,11 +240,19 @@ def doctor_checks(*, config_path: Path = DEFAULT_CONFIG_PATH, versions_path: Pat
             config_check = DoctorCheck("config.toml", "FAIL", str(exc))
     try:
         manifest = load_versions(versions_path, require_components=True)
-        versions_check = DoctorCheck("versions.toml", "PASS", f"exact Phase 3 pins configured for {manifest.version}")
+        versions_check = DoctorCheck("versions.toml", "PASS", f"exact runtime pins configured for {manifest.version}")
     except VersionsError as exc:
         versions_check = DoctorCheck("versions.toml", "FAIL", str(exc))
-    from . import runtime
-    return [os_check, arch_check, config_check, versions_check, *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path))]
+    from . import edge, runtime
+
+    return [
+        os_check,
+        arch_check,
+        config_check,
+        versions_check,
+        *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path)),
+        *edge.doctor_checks(),
+    ]
 
 
 def doctor_overall(checks: Sequence[DoctorCheck]) -> str:
@@ -226,6 +280,16 @@ def _parser() -> argparse.ArgumentParser:
     logs.add_argument("--tail", type=int, default=200)
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
+
+    edge_cmd = commands.add_parser("edge", help="Cloudflare origin edge policy")
+    edge_commands = edge_cmd.add_subparsers(dest="edge_command", required=True)
+    edge_commands.add_parser("refresh", help="refresh validated Cloudflare CIDRs and apply origin policy")
+
+    crowdsec = commands.add_parser("crowdsec", help="CrowdSec Security Engine and Cloudflare remediation")
+    crowdsec_commands = crowdsec.add_subparsers(dest="crowdsec_command", required=True)
+    crowdsec_commands.add_parser("setup", help="install/configure the supported CrowdSec beta path")
+    crowdsec_commands.add_parser("status", help="show CrowdSec engine and Cloudflare remediation health")
+    crowdsec_commands.add_parser("prepare-remediation", help=argparse.SUPPRESS)
     return parser
 
 
@@ -235,7 +299,10 @@ def _versions() -> int:
     except VersionsError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print(f"vaultwarden-oci {v.version}; vaultwarden {v.vaultwarden}; caddy {v.caddy}; caddy-dns/cloudflare {v.caddy_dns_cloudflare}")
+    print(
+        f"vaultwarden-oci {v.version}; vaultwarden {v.vaultwarden}; "
+        f"caddy {v.caddy}; caddy-dns/cloudflare {v.caddy_dns_cloudflare}"
+    )
     return 0
 
 
@@ -267,7 +334,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             runtime.lifecycle(args.command)
             print(f"PASS: {args.command} completed")
             return 0
-        except (runtime.RuntimeConfigError, runtime.RuntimeErrorV2, secrets.SecretsError, LockBusyError, VersionsError) as exc:
+        except (
+            runtime.RuntimeConfigError,
+            runtime.RuntimeErrorV2,
+            secrets.SecretsError,
+            LockBusyError,
+            VersionsError,
+        ) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "status":
@@ -290,6 +363,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result.stderr:
                 print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
         return code
+    if args.command == "edge":
+        from . import edge
+        try:
+            if args.edge_command == "refresh":
+                policy = edge.refresh_origin_policy()
+                print(
+                    f"PASS: Cloudflare edge policy source={policy.source} "
+                    f"ipv4={len(policy.ipv4)} ipv6={len(policy.ipv6)}"
+                )
+                return 0
+        except edge.EdgeError as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "crowdsec":
+        from . import edge, secrets
+        try:
+            if args.crowdsec_command == "setup":
+                edge.setup_crowdsec()
+                print("PASS: CrowdSec Security Engine and Cloudflare Worker bouncer configured")
+                print("ACTION: set each bouncer-created Cloudflare Worker Route failure mode to Fail Open")
+                return 0
+            if args.crowdsec_command == "prepare-remediation":
+                edge.prepare_remediation(config_path=DEFAULT_CONFIG_PATH)
+                return 0
+            if args.crowdsec_command == "status":
+                checks = edge.doctor_checks()
+                for check in checks:
+                    if check.check_id.startswith("crowdsec."):
+                        print(f"[{check.status}] {check.check_id}: {check.message}")
+                return 1 if any(c.status == "FAIL" and c.check_id.startswith("crowdsec.") for c in checks) else 0
+        except (edge.EdgeError, secrets.SecretsError, ConfigError, LockBusyError) as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
     if args.command == "doctor":
         checks = doctor_checks()
         payload = doctor_payload(checks)
