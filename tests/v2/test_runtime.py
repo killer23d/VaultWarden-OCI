@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from vaultwarden_oci import runtime, secrets
-from vaultwarden_oci.cli import CommandResult
+from vaultwarden_oci.cli import CommandResult, DoctorCheck
 
 OFFLINE = "age1" + "q" * 58
 OPERATIONAL = "age1" + "p" * 58
@@ -204,9 +204,11 @@ class Phase3RuntimeTests(unittest.TestCase):
             paths.config.write_text(config_text(), encoding="utf-8")
             versions = root / "versions.toml"
             versions.write_text(versions_text(), encoding="utf-8")
+            calls = []
 
             def runner(argv, *, env=None, cwd=None):
                 call = tuple(argv)
+                calls.append(call)
                 if call[:2] == ("docker", "version"):
                     return result(argv, "28.4.0\n")
                 if call[:3] == ("docker", "compose", "version"):
@@ -217,6 +219,8 @@ class Phase3RuntimeTests(unittest.TestCase):
                     return result(argv)
                 if call[:3] == ("docker", "compose", "-f") and "up" in call:
                     return result(argv, stderr="container start failed", code=1)
+                if call[:3] == ("docker", "compose", "-f") and "down" in call:
+                    return result(argv)
                 raise AssertionError(argv)
 
             with mock.patch.object(secrets, "load", return_value=VALUES):
@@ -227,6 +231,7 @@ class Phase3RuntimeTests(unittest.TestCase):
             self.assertFalse(
                 any(paths.secret_paths().file(key).exists() for key in secrets.REQUIRED + secrets.OPTIONAL)
             )
+            self.assertTrue(any("down" in call for call in calls))
 
     def test_lifecycle_status_distinguishes_clean_stop_from_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -290,15 +295,28 @@ class Phase3RuntimeTests(unittest.TestCase):
             self.assertTrue(any(call[:2] == ("docker", "rm") for call in calls))
 
             def absent_runner(argv, *, env=None, cwd=None):
-                if tuple(argv)[:2] == ("docker", "version"):
+                call = tuple(argv)
+                if call[:2] == ("docker", "version"):
                     return result(argv, "28.4.0\n")
-                if tuple(argv)[:4] == ("docker", "container", "inspect", "--format"):
-                    return result(argv, code=1)
+                if call[:4] == ("docker", "container", "inspect", "--format"):
+                    return result(argv, stderr="Error: No such object: container", code=1)
                 raise AssertionError(argv)
 
             stopped, stopped_rows = runtime.status(runner=absent_runner)
             self.assertEqual(stopped, "stopped")
             self.assertTrue(all(row["state"] == "absent" for row in stopped_rows))
+
+            def inspect_error_runner(argv, *, env=None, cwd=None):
+                call = tuple(argv)
+                if call[:2] == ("docker", "version"):
+                    return result(argv, "28.4.0\n")
+                if call[:4] == ("docker", "container", "inspect", "--format"):
+                    return result(argv, stderr="permission denied", code=1)
+                raise AssertionError(argv)
+
+            uncertain, uncertain_rows = runtime.status(runner=inspect_error_runner)
+            self.assertEqual(uncertain, "degraded")
+            self.assertTrue(all(row["state"] == "unknown" for row in uncertain_rows))
 
     def test_doctor_runtime_paths_reports_real_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -355,6 +373,43 @@ class Phase3RuntimeTests(unittest.TestCase):
                 check_service_identities=False,
             )
             self.assertEqual(drifted.status, "FAIL")
+
+    def test_doctor_keeps_custody_and_decrypt_results_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = temp_paths(root)
+            paths.config.write_text(config_text(), encoding="utf-8")
+
+            def runner(argv, *, env=None, cwd=None):
+                call = tuple(argv)
+                if call[:2] == ("docker", "version"):
+                    return result(argv, "28.4.0\n")
+                if call[:3] == ("docker", "compose", "version"):
+                    return result(argv, "2.39.1\n")
+                if call[:4] == ("docker", "compose", "up", "--help"):
+                    return result(argv, "--wait --wait-timeout\n")
+                raise AssertionError(argv)
+
+            with mock.patch.object(
+                runtime,
+                "runtime_paths_check",
+                return_value=DoctorCheck("runtime.paths", "PASS", "test fixture"),
+            ), mock.patch.object(secrets, "validate_custody"), mock.patch.object(
+                secrets,
+                "decrypt",
+                side_effect=secrets.SecretsError("SOPS decryption failed (exit 1)"),
+            ):
+                checks = runtime.doctor_checks(
+                    config_path=paths.config,
+                    paths=paths,
+                    runner=runner,
+                )
+
+            ids = [check.check_id for check in checks]
+            self.assertEqual(len(ids), len(set(ids)))
+            by_id = {check.check_id: check.status for check in checks}
+            self.assertEqual(by_id["secrets.custody"], "PASS")
+            self.assertEqual(by_id["secrets.decrypt"], "FAIL")
 
 
 if __name__ == "__main__":
