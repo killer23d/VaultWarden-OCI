@@ -347,7 +347,15 @@ services:
     healthcheck: {{test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--output", "/dev/null", "http://127.0.0.1:2019/config/"], interval: 30s, timeout: 10s, retries: 3, start_period: 10s}}
     logging: {{driver: json-file, options: {{max-size: "10m", max-file: "3"}}}}
     networks: [backend]
-networks: {{backend: {{driver: bridge}}}}
+networks:
+  backend:
+    name: vaultwarden-oci-backend
+    driver: bridge
+    enable_ipv6: true
+    driver_opts:
+      com.docker.network.bridge.name: {q(edge.BRIDGE_IFACE)}
+      com.docker.network.bridge.gateway_mode_ipv4: nat
+      com.docker.network.bridge.gateway_mode_ipv6: nat
 '''
     proxy_block = edge.caddy_trusted_proxy_block(cloudflare_policy) if cloudflare_policy else ""
     caddyfile = f'''{{
