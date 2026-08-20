@@ -55,7 +55,7 @@ class Paths:
     data: Path = STATE / "data"
     caddy_data: Path = STATE / "caddy/data"
     caddy_config: Path = STATE / "caddy/config"
-    caddy_log: Path = STATE / "caddy/log"
+    caddy_log: Path | None = None
     run: Path = RUN
     transient: Path = TRANSIENT
     lock: Path = LOCK
@@ -72,6 +72,10 @@ class Paths:
     @property
     def dockerfile(self) -> Path:
         return self.transient / "Caddy.Dockerfile"
+
+    @property
+    def caddy_log_path(self) -> Path:
+        return self.caddy_log if self.caddy_log is not None else self.caddy_data.parent / "log"
 
     def secret_paths(self) -> secrets.SecretPaths:
         return secrets.SecretPaths(
@@ -242,7 +246,7 @@ def ensure_paths(
     _dir(paths.data, vaultwarden_uid, vaultwarden_gid, 0o700)
     _dir(paths.caddy_data, caddy_uid, caddy_gid, 0o700)
     _dir(paths.caddy_config, caddy_uid, caddy_gid, 0o700)
-    _dir(paths.caddy_log, caddy_uid, caddy_gid, 0o700)
+    _dir(paths.caddy_log_path, caddy_uid, caddy_gid, 0o700)
     secrets.ensure_runtime(
         paths.secret_paths(),
         uid=uid,
@@ -330,7 +334,7 @@ services:
     depends_on: {{vaultwarden: {{condition: service_healthy}}}}
     environment: {{VAULTWARDEN_DOMAIN: {q(config.domain)}, ACME_EMAIL: {q(config.acme_email)}}}
     ports: ["443:443/tcp"]
-    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", {q(str(paths.caddy_data) + ":/data")}, {q(str(paths.caddy_config) + ":/config")}, {q(str(paths.caddy_log) + ":/var/log/caddy")}, {q(str(paths.secret_root / "caddy") + ":/run/caddy-secrets:ro")}]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", {q(str(paths.caddy_data) + ":/data")}, {q(str(paths.caddy_config) + ":/config")}, {q(str(paths.caddy_log_path) + ":/var/log/caddy")}, {q(str(paths.secret_root / "caddy") + ":/run/caddy-secrets:ro")}]
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777"]
     cap_drop: [ALL]
@@ -609,7 +613,7 @@ def runtime_paths_check(
         (paths.data, vaultwarden_uid, vaultwarden_gid, 0o700),
         (paths.caddy_data, caddy_uid, caddy_gid, 0o700),
         (paths.caddy_config, caddy_uid, caddy_gid, 0o700),
-        (paths.caddy_log, caddy_uid, caddy_gid, 0o700),
+        (paths.caddy_log_path, caddy_uid, caddy_gid, 0o700),
         (secret_paths.vaultwarden, uid, vaultwarden_gid, 0o750),
         (secret_paths.caddy, uid, caddy_gid, 0o750),
     )
