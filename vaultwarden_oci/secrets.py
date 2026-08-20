@@ -1,4 +1,4 @@
-"""SOPS/Age custody and volatile Phase 3 secret materialization."""
+"""SOPS/Age custody and volatile Phase 3+ secret materialization."""
 from __future__ import annotations
 
 import json
@@ -17,6 +17,9 @@ AGE_KEY = ETC / "age-key.txt"
 RUN = Path("/run/vaultwarden-oci/secrets")
 REQUIRED = ("cloudflare_api_token", "smtp_username", "smtp_password")
 OPTIONAL = ("vaultwarden_admin_token",)
+# Used in memory to render volatile component configuration, never materialized
+# into the Vaultwarden/Caddy secret mounts.
+TRANSIENT_ONLY = ("cloudflare_remediation_token",)
 _RECIPIENT = re.compile(r"^age1[0-9a-z]{50,70}$")
 _RECIPIENT_LINE = re.compile(r"^\s*-?\s*recipient:\s*(age1[0-9a-z]{50,70})\s*$")
 # Keep this validation aligned with pinned caddy-dns/cloudflare v0.2.4. The
@@ -55,7 +58,7 @@ def validate_cloudflare_token(value: str) -> str:
     """Reject values that the pinned Caddy Cloudflare module would echo on error."""
     if not (_CLOUDFLARE_NEW_TOKEN.fullmatch(value) or _CLOUDFLARE_LEGACY_TOKEN.fullmatch(value)):
         raise SecretsError(
-            "decrypted cloudflare_api_token does not match the pinned Cloudflare provider token format"
+            "decrypted Cloudflare token does not match the supported Cloudflare provider token format"
         )
     return value
 
@@ -154,7 +157,7 @@ def validate_custody(
 def _value(key: str, value: object) -> str:
     if not isinstance(value, str) or not value or any(c in value for c in "\0\r\n"):
         raise SecretsError(f"decrypted secret {key} must be a non-empty single-line string")
-    if key == "cloudflare_api_token":
+    if key in {"cloudflare_api_token", "cloudflare_remediation_token"}:
         validate_cloudflare_token(value)
     return value
 
@@ -172,7 +175,7 @@ def decrypt(*, paths: SecretPaths = SecretPaths(), runner: Runner = run_command)
     if not isinstance(payload, dict):
         raise SecretsError("SOPS decryption did not return a JSON object")
     values = {key: _value(key, payload.get(key)) for key in REQUIRED}
-    for key in OPTIONAL:
+    for key in OPTIONAL + TRANSIENT_ONLY:
         if payload.get(key) not in (None, ""):
             values[key] = _value(key, payload[key])
     return values
