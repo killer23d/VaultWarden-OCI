@@ -9,6 +9,7 @@ netns="vwoci-edge-client"
 host_veth="vwehost0"
 client_veth="vweclient0"
 server_pid=""
+python_image="python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31"
 
 cleanup() {
   set +e
@@ -35,7 +36,7 @@ docker run -d \
   --name "${container}" \
   --network "${network}" \
   -p 443:8080/tcp \
-  python:3.12-alpine \
+  "${python_image}" \
   python -m http.server 8080 --bind :: >/dev/null
 
 for _ in $(seq 1 30); do
