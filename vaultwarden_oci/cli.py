@@ -396,7 +396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.remote:
                 print("PASS: offsite publication was remotely re-downloaded and checksum-verified")
             return 0
-        except (recovery.RecoveryError, runtime.RuntimeConfigError, LockBusyError) as exc:
+        except (recovery.RecoveryError, runtime.RuntimeConfigError, LockBusyError, OSError) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "restore":
@@ -408,9 +408,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest = recovery.restore_from_remote(args.from_remote, args.identity, start=args.start)
             print(f"PASS: restored V2 recovery created {manifest['created_at']}")
             if not args.start:
-                print("ACTION: services remain stopped; run 'vwctl start' after operational Age custody is ready")
+                print("ACTION: services remain stopped; run 'vwctl start' when you are ready to bring the restored service online")
             return 0
-        except (recovery.RecoveryError, LockBusyError) as exc:
+        except (recovery.RecoveryError, LockBusyError, OSError) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "recovery":
@@ -433,7 +433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 elif args.confirm:
                     print("PASS: explicit remote pruning completed")
                 return 0
-        except recovery.RecoveryError as exc:
+        except (recovery.RecoveryError, OSError) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "edge":
