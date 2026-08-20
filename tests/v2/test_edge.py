@@ -197,6 +197,7 @@ caddy_dns_cloudflare = "v0.2.4"
             self.assertIn("output file /var/log/caddy/access.log", caddyfile)
             self.assertIn(str(paths.caddy_log_path) + ":/var/log/caddy", compose)
             self.assertIn('ports: ["443:443/tcp"]', compose)
+            self.assertIn('restart: "no"', compose)
 
 
 class CrowdSecBoundaryTests(unittest.TestCase):
