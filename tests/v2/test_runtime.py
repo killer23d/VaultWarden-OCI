@@ -50,21 +50,12 @@ class Phase3RuntimeTests(unittest.TestCase):
         cfg = runtime.parse_config(tomllib.loads(config_text()))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            paths = runtime.Paths(
-                config=root / "config.toml",
-                data=root / "data",
-                caddy_data=root / "caddy-data",
-                caddy_config=root / "caddy-config",
-                run=root / "run",
-                transient=root / "run/transient",
-                lock=root / "run/lock",
-                secret_root=root / "run/secrets",
-            )
+            paths = runtime.Paths(config=root / "config.toml", data=root / "data", caddy_data=root / "caddy-data", caddy_config=root / "caddy-config", run=root / "run", transient=root / "run/transient", lock=root / "run/lock", secret_root=root / "run/secrets")
             paths.transient.mkdir(parents=True)
             versions = root / "versions.toml"
             versions.write_text('''schema_version = 1
 [vaultwarden_oci]
-version = "0.2.0-dev"
+version = "0.1.0-dev"
 [components]
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
@@ -95,13 +86,7 @@ caddy_dns_cloudflare = "v0.2.4"
     def test_sops_age_boundary_materialization_and_non_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            sp = secrets.SecretPaths(
-                encrypted=root / "secrets.sops.yaml",
-                age_key=root / "age-key.txt",
-                root=root / "run",
-                vaultwarden=root / "run/vaultwarden",
-                caddy=root / "run/caddy",
-            )
+            sp = secrets.SecretPaths(encrypted=root / "secrets.sops.yaml", age_key=root / "age-key.txt", root=root / "run", vaultwarden=root / "run/vaultwarden", caddy=root / "run/caddy")
             sp.age_key.write_text("AGE-SECRET-KEY-TEST\n", encoding="utf-8")
             os.chmod(sp.age_key, 0o600)
             sp.encrypted.write_text(f'''sops:
@@ -147,11 +132,12 @@ caddy_dns_cloudflare = "v0.2.4"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths = runtime.Paths(config=root / "config.toml", data=root / "data", caddy_data=root / "caddy-data", caddy_config=root / "caddy-config", run=root / "run", transient=root / "run/transient", lock=root / "run/lock", secret_root=root / "run/secrets")
+            paths.run.mkdir(parents=True)
             paths.config.write_text(config_text(), encoding="utf-8")
             versions = root / "versions.toml"
             versions.write_text('''schema_version = 1
 [vaultwarden_oci]
-version = "0.2.0-dev"
+version = "0.1.0-dev"
 [components]
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
