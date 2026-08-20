@@ -36,6 +36,7 @@ DEFAULT_LAPI_URL = "http://127.0.0.1:8080"
 STATE_ROOT = Path("/var/lib/vaultwarden-oci/state")
 LKG_PATH = STATE_ROOT / "cloudflare-ranges.json"
 CADDY_LOG = Path("/var/lib/vaultwarden-oci/caddy/log/access.log")
+CROWDSEC_ACQUIS_MAIN = Path("/etc/crowdsec/acquis.yaml")
 ACQUIS_PATH = Path("/etc/crowdsec/acquis.d/vaultwarden-oci.yaml")
 BOUNCER_DROPIN = Path(
     "/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service.d/vaultwarden-oci.conf"
@@ -409,6 +410,41 @@ def _download_installer() -> Path:
         raise
 
 
+def _remove_acquisition_file(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise EdgeError(f"cannot inspect CrowdSec acquisition {path}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode):
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise EdgeError(f"cannot remove CrowdSec acquisition {path}: {exc}") from exc
+        return
+    raise EdgeError(f"refusing to remove non-file CrowdSec acquisition path: {path}")
+
+
+def _clear_detected_acquisitions(paths: EdgePaths) -> None:
+    """Remove package auto-detected inputs so Caddy is the only active acquisition."""
+    directory = paths.acquisition.parent
+    if paths == EdgePaths():
+        _remove_acquisition_file(CROWDSEC_ACQUIS_MAIN)
+    try:
+        candidates = sorted(
+            (entry for entry in directory.iterdir() if entry.suffix.lower() in {".yaml", ".yml"}),
+            key=lambda entry: entry.name,
+        )
+    except FileNotFoundError:
+        directory.mkdir(parents=True, exist_ok=True)
+        candidates = []
+    except OSError as exc:
+        raise EdgeError(f"cannot inspect CrowdSec acquisition directory {directory}: {exc}") from exc
+    for candidate in candidates:
+        _remove_acquisition_file(candidate)
+
+
 def setup_crowdsec(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_command) -> None:
     if os.geteuid() != 0 and paths == EdgePaths():
         raise EdgeError("vwctl crowdsec setup must run as root")
@@ -425,6 +461,13 @@ def setup_crowdsec(*, paths: EdgePaths = EdgePaths(), runner: Runner = run_comma
         ["apt-get", "install", "-y", "crowdsec", "crowdsec-cloudflare-worker-bouncer"],
         "CrowdSec package installation",
     )
+    _command(runner, ["systemctl", "stop", CROWDSEC_SERVICE], "CrowdSec stop before source restriction")
+    _command(
+        runner,
+        ["cscli", "collections", "remove", "--all"],
+        "CrowdSec auto-detected collection reset",
+    )
+    _clear_detected_acquisitions(paths)
     _command(
         runner,
         ["cscli", "collections", "install", "crowdsecurity/caddy"],
