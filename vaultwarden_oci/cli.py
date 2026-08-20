@@ -288,8 +288,11 @@ def _parser() -> argparse.ArgumentParser:
     crowdsec = commands.add_parser("crowdsec", help="CrowdSec Security Engine and Cloudflare remediation")
     crowdsec_commands = crowdsec.add_subparsers(dest="crowdsec_command", required=True)
     crowdsec_commands.add_parser("setup", help="install/configure the supported CrowdSec beta path")
+    crowdsec_commands.add_parser("remediation-start", help="explicitly start one Cloudflare remediation invocation")
+    crowdsec_commands.add_parser("confirm-fail-open", help="confirm current Worker Routes are set to Fail Open")
     crowdsec_commands.add_parser("status", help="show CrowdSec engine and Cloudflare remediation health")
     crowdsec_commands.add_parser("prepare-remediation", help=argparse.SUPPRESS)
+    crowdsec_commands.add_parser("consume-start-token", help=argparse.SUPPRESS)
     return parser
 
 
@@ -381,11 +384,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             if args.crowdsec_command == "setup":
                 edge.setup_crowdsec()
-                print("PASS: CrowdSec Security Engine and Cloudflare Worker bouncer configured")
-                print("ACTION: set each bouncer-created Cloudflare Worker Route failure mode to Fail Open")
+                print("PASS: CrowdSec Security Engine and Cloudflare remediation boundary configured")
+                print("ACTION: run 'vwctl crowdsec remediation-start' to create one explicit Worker Route invocation")
+                return 0
+            if args.crowdsec_command == "remediation-start":
+                edge.start_remediation()
+                print("PASS: CrowdSec Cloudflare remediation started for one explicit service invocation")
+                print("ACTION: set every bouncer-created Worker Route to Fail Open in Cloudflare, then run 'vwctl crowdsec confirm-fail-open'")
+                return 0
+            if args.crowdsec_command == "confirm-fail-open":
+                edge.confirm_fail_open()
+                print("PASS: Fail Open confirmation recorded for the current CrowdSec Cloudflare invocation")
                 return 0
             if args.crowdsec_command == "prepare-remediation":
                 edge.prepare_remediation(config_path=DEFAULT_CONFIG_PATH)
+                return 0
+            if args.crowdsec_command == "consume-start-token":
+                edge.consume_remediation_start_token()
                 return 0
             if args.crowdsec_command == "status":
                 checks = edge.doctor_checks()
