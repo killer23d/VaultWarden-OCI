@@ -28,6 +28,7 @@ class Phase2InstallTests(unittest.TestCase):
         shutil.copy2(ROOT / "vwctl", source / "vwctl")
         shutil.copytree(ROOT / "vaultwarden_oci", source / "vaultwarden_oci")
         shutil.copytree(ROOT / "systemd-v2", source / "systemd-v2")
+        shutil.copy2(ROOT / "email-providers.toml", source / "email-providers.toml")
         (source / "versions.toml").write_text(
             f'schema_version = 1\n[vaultwarden_oci]\nversion = "{version}"\n',
             encoding="utf-8",
@@ -163,6 +164,7 @@ class Phase2InstallTests(unittest.TestCase):
 
             self.assertEqual(stat.S_IMODE(release_dir.stat().st_mode), 0o555)
             self.assertEqual(stat.S_IMODE((release_dir / "versions.toml").stat().st_mode), 0o444)
+            self.assertEqual(stat.S_IMODE((release_dir / "email-providers.toml").stat().st_mode), 0o444)
             self.assertEqual(stat.S_IMODE((release_dir / "vwctl").stat().st_mode), 0o555)
             self.assertEqual(stat.S_IMODE((release_dir / "systemd-v2").stat().st_mode), 0o555)
             self.assertTrue((release_dir / "vaultwarden_oci/install.py").is_file())
@@ -216,6 +218,15 @@ class Phase2InstallTests(unittest.TestCase):
             self.assertFalse(
                 (root / "target/etc/vaultwarden-oci/email-providers.toml").exists()
             )
+
+    def test_missing_provider_catalog_fails_before_release_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.write_release_source(root, "0.1.0-missing-catalog")
+            (source / "email-providers.toml").unlink()
+            with self.assertRaisesRegex(install.InstallError, "required release file is missing"):
+                install.install_layout(source, root=root / "target", systemd_reload=False)
+            self.assertFalse((root / "target/opt/vaultwarden-oci/releases/0.1.0-missing-catalog").exists())
 
     def test_incompatible_path_type_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
