@@ -17,9 +17,9 @@ AGE_KEY = ETC / "age-key.txt"
 RUN = Path("/run/vaultwarden-oci/secrets")
 REQUIRED = ("cloudflare_api_token", "smtp_username", "smtp_password")
 OPTIONAL = ("vaultwarden_admin_token",)
-# Used in memory to render volatile component configuration, never materialized
-# into the Vaultwarden/Caddy secret mounts.
-TRANSIENT_ONLY = ("cloudflare_remediation_token",)
+# Used in memory to render volatile component configuration or perform host-side
+# operations; never materialized into the Vaultwarden/Caddy secret mounts.
+TRANSIENT_ONLY = ("cloudflare_remediation_token", "email_api_token")
 _RECIPIENT = re.compile(r"^age1[0-9a-z]{50,70}$")
 _RECIPIENT_LINE = re.compile(r"^\s*-?\s*recipient:\s*(age1[0-9a-z]{50,70})\s*$")
 # Keep this validation aligned with pinned caddy-dns/cloudflare v0.2.4. The
