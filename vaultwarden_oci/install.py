@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 2 host bootstrap and immutable installed-layout ownership."""
+"""Phase 2+ host bootstrap and immutable installed-layout ownership."""
 
 from __future__ import annotations
 
@@ -38,13 +38,24 @@ RUNTIME_ROOT = GLOBAL_LOCK_PATH.parent
 RUNTIME_SECRETS_DIR = RUNTIME_ROOT / "secrets"
 RUNTIME_TRANSIENT_DIR = RUNTIME_ROOT / "transient"
 VWCTL_LINK = Path("/usr/local/bin/vwctl")
-SYSTEMD_UNIT = Path("/etc/systemd/system/vaultwarden-oci.target")
+SYSTEMD_DIR = Path("/etc/systemd/system")
+SYSTEMD_SOURCE_DIR = "systemd-v2"
+SYSTEMD_UNITS = (
+    "vaultwarden-oci.target",
+    "vaultwarden-oci.service",
+    "vaultwarden-oci-health.service",
+    "vaultwarden-oci-health.timer",
+    "vaultwarden-oci-backup.service",
+    "vaultwarden-oci-backup.timer",
+    "vaultwarden-oci-maintenance.service",
+    "vaultwarden-oci-maintenance.timer",
+    "vaultwarden-oci-notify@.service",
+)
 
 CONFIG_TEMPLATE = """# VaultWarden-OCI V2 operator configuration.\n# Phase-specific settings are added by later phases.\n"""
-SYSTEMD_TARGET = """[Unit]\nDescription=VaultWarden-OCI lifecycle target\nDocumentation=https://github.com/killer23d/VaultWarden-OCI\nStopWhenUnneeded=no\n"""
 
 _RELEASE_FILES = ("vwctl", "versions.toml")
-_RELEASE_DIRS = ("vaultwarden_oci",)
+_RELEASE_DIRS = ("vaultwarden_oci", SYSTEMD_SOURCE_DIR)
 _OPTIONAL_RELEASE_RESOURCES = ("email-providers.toml",)
 _RELEASE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
@@ -289,6 +300,20 @@ def _ensure_symlink(path: Path, target: Path) -> None:
     path.symlink_to(target)
 
 
+def _install_systemd_units(release_dir: Path, layout: Layout) -> None:
+    source = release_dir / SYSTEMD_SOURCE_DIR
+    for unit in SYSTEMD_UNITS:
+        unit_source = source / unit
+        if not unit_source.is_file():
+            raise InstallError(f"required V2 systemd unit is missing from immutable release: {unit_source}")
+        _ensure_regular_file(
+            layout.path(SYSTEMD_DIR / unit),
+            unit_source.read_text(encoding="utf-8"),
+            0o644,
+            preserve_existing=False,
+        )
+
+
 def _install_layout_locked(
     source_root: Path,
     layout: Layout,
@@ -320,9 +345,8 @@ def _install_layout_locked(
 
     _ensure_symlink(current, current_target)
     _ensure_symlink(vwctl, vwctl_target)
+    _install_systemd_units(release_dir, layout)
 
-    unit_path = layout.path(SYSTEMD_UNIT)
-    _ensure_regular_file(unit_path, SYSTEMD_TARGET, 0o644, preserve_existing=False)
     if layout.root == Path("/") and systemd_reload:
         result = run_command(["systemctl", "daemon-reload"])
         if not result.ok:
