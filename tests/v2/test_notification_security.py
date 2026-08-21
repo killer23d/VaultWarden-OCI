@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +8,19 @@ from vaultwarden_oci import notification, runtime, secrets
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "email-providers.toml"
+CYBER_RETRY = '''[[providers]]
+id = "cyberpersons"
+aliases = ["cyberpanel"]
+display_name = "CyberPanel Email / CyberPersons"
+endpoint = "https://platform.cyberpersons.com/email/v1/send"
+auth_mode = "bearer"
+encoding = "json"
+request_template = ''' + "'''" + '''{"from":"{from_email}","to":"{to_email}","subject":"{subject}","text":"{text}"}''' + "'''" + '''
+success_statuses = [202]
+success_field = "success"
+success_value = true
+retry_statuses = [429, 503]
+'''
 
 
 def config_data(provider: str = "cyberpersons") -> dict[str, object]:
@@ -65,13 +77,12 @@ class NotificationSecurityTests(unittest.TestCase):
 
     def test_body_retry_delay_schema_requires_known_unit(self) -> None:
         original = CATALOG.read_text(encoding="utf-8")
-        marker = "retry_statuses = [429, 503]\n"
-        self.assertIn(marker, original)
+        self.assertIn(CYBER_RETRY, original)
         mutations = (
-            original.replace(marker, marker + 'retry_body_field = "retry_after"\n', 1),
+            original.replace(CYBER_RETRY, CYBER_RETRY + 'retry_body_field = "retry_after"\n', 1),
             original.replace(
-                marker,
-                marker + 'retry_body_field = "retry_after"\nretry_body_unit = "fortnights"\n',
+                CYBER_RETRY,
+                CYBER_RETRY + 'retry_body_field = "retry_after"\nretry_body_unit = "fortnights"\n',
                 1,
             ),
         )
@@ -84,10 +95,10 @@ class NotificationSecurityTests(unittest.TestCase):
 
     def test_declared_body_retry_delay_is_numeric_bounded_and_malformed_values_are_ignored(self) -> None:
         original = CATALOG.read_text(encoding="utf-8")
-        marker = "retry_statuses = [429, 503]\n"
+        self.assertIn(CYBER_RETRY, original)
         text = original.replace(
-            marker,
-            marker + 'retry_body_field = "retry_after"\nretry_body_unit = "seconds"\n',
+            CYBER_RETRY,
+            CYBER_RETRY + 'retry_body_field = "retry_after"\nretry_body_unit = "seconds"\n',
             1,
         )
         with tempfile.TemporaryDirectory() as directory:
