@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tomllib
@@ -31,6 +32,11 @@ DOCTOR_CHECK_IDS = (
     "runtime.paths",
     "secrets.custody",
     "secrets.decrypt",
+    "notification.catalog",
+    "notification.provider",
+    "notification.api_secret",
+    "notification.smtp_fallback",
+    "notification.last_delivery",
     "edge.cloudflare.cidrs",
     "edge.cloudflare.iptables",
     "crowdsec.engine",
@@ -40,6 +46,7 @@ DOCTOR_CHECK_IDS = (
     "recovery.rclone",
 )
 _ARCH = {"amd64": "amd64", "x86_64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
+_EVENT = re.compile(r"^[A-Za-z0-9_.@:-]{1,160}$")
 
 
 class ConfigError(ValueError):
@@ -246,7 +253,21 @@ def doctor_checks(
         versions_check = DoctorCheck("versions.toml", "PASS", f"exact runtime pins configured for {manifest.version}")
     except VersionsError as exc:
         versions_check = DoctorCheck("versions.toml", "FAIL", str(exc))
-    from . import edge, recovery, runtime
+    from . import edge, notification, recovery, runtime, secrets
+
+    config = None
+    secret_values = None
+    try:
+        config = runtime.load_config(config_path)
+    except runtime.RuntimeConfigError:
+        pass
+    else:
+        try:
+            secret_paths = runtime.Paths(config=config_path).secret_paths()
+            secrets.validate_custody(config.offline_recovery_recipient, paths=secret_paths)
+            secret_values = secrets.decrypt(paths=secret_paths)
+        except secrets.SecretsError:
+            pass
 
     return [
         os_check,
@@ -254,6 +275,7 @@ def doctor_checks(
         config_check,
         versions_check,
         *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path)),
+        *notification.doctor_checks(config=config, secret_values=secret_values),
         *edge.doctor_checks(),
         *recovery.doctor_checks(),
     ]
@@ -312,6 +334,9 @@ def _parser() -> argparse.ArgumentParser:
     crowdsec_commands.add_parser("status", help="show CrowdSec engine and Cloudflare remediation health")
     crowdsec_commands.add_parser("prepare-remediation", help=argparse.SUPPRESS)
     crowdsec_commands.add_parser("consume-start-token", help=argparse.SUPPRESS)
+
+    notify = commands.add_parser("notify", help=argparse.SUPPRESS)
+    notify.add_argument("--event", required=True)
     return parser
 
 
@@ -366,12 +391,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "status":
-        from . import recovery, runtime
+        from . import notification, recovery, runtime
         overall, rows = runtime.status()
         for row in rows:
             print(f"{row['service']}: {row['state']} (health={row['health']})")
         for row in recovery.status_rows():
             print(f"recovery-{row['kind']}: {row['state']} (verified_at={row['verified_at']})")
+        notification_row = notification.status_row()
+        print(
+            f"notification: {notification_row['state']} "
+            f"(transport={notification_row['transport']}, detail={notification_row['detail']})"
+        )
+        if notification_row["state"] == "failure" and overall in {"running", "stopped"}:
+            overall = "degraded"
         print(f"Overall: {overall}")
         return 0 if overall in {"running", "stopped"} else 1
     if args.command == "logs":
@@ -481,6 +513,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (edge.EdgeError, secrets.SecretsError, ConfigError, LockBusyError) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
+    if args.command == "notify":
+        from . import notification, runtime, secrets
+        if not _EVENT.fullmatch(args.event):
+            print("FAIL: --event must be a bounded systemd event identifier", file=sys.stderr)
+            return 2
+        try:
+            config = runtime.load_config()
+            values = secrets.load(config.offline_recovery_recipient)
+            result = notification.deliver(
+                event_id=args.event,
+                config=config,
+                secrets=values,
+                subject=f"[VaultWarden-OCI] systemd failure: {args.event}",
+                text=(
+                    f"VaultWarden-OCI systemd unit {args.event} entered a failed state.\n"
+                    f"Inspect the host journal with: journalctl -u {args.event}"
+                ),
+            )
+        except (runtime.RuntimeConfigError, secrets.SecretsError, notification.NotificationError, OSError) as exc:
+            print(f"FAIL: operational notification could not be delivered: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"{'PASS' if result.outcome == 'success' else 'FAIL'}: operational notification "
+            f"provider={result.provider} transport={result.transport} category={result.category}"
+        )
+        return 0 if result.outcome == "success" else 1
     if args.command == "doctor":
         checks = doctor_checks()
         payload = doctor_payload(checks)
