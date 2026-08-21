@@ -54,9 +54,8 @@ SYSTEMD_UNITS = (
 
 CONFIG_TEMPLATE = """# VaultWarden-OCI V2 operator configuration.\n# Phase-specific settings are added by later phases.\n"""
 
-_RELEASE_FILES = ("vwctl", "versions.toml")
+_RELEASE_FILES = ("vwctl", "versions.toml", "email-providers.toml")
 _RELEASE_DIRS = ("vaultwarden_oci", SYSTEMD_SOURCE_DIR)
-_OPTIONAL_RELEASE_RESOURCES = ("email-providers.toml",)
 _RELEASE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
@@ -205,10 +204,6 @@ def _copy_release_tree(source_root: Path, staging: Path) -> None:
         if not source.is_dir():
             raise InstallError(f"required release directory is missing: {source}")
         shutil.copytree(source, staging / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for name in _OPTIONAL_RELEASE_RESOURCES:
-        source = source_root / name
-        if source.is_file():
-            shutil.copy2(source, staging / name)
 
 
 def _make_release_immutable(release_dir: Path) -> None:
