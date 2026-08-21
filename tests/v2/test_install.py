@@ -27,6 +27,7 @@ class Phase2InstallTests(unittest.TestCase):
         source.mkdir()
         shutil.copy2(ROOT / "vwctl", source / "vwctl")
         shutil.copytree(ROOT / "vaultwarden_oci", source / "vaultwarden_oci")
+        shutil.copytree(ROOT / "systemd-v2", source / "systemd-v2")
         (source / "versions.toml").write_text(
             f'schema_version = 1\n[vaultwarden_oci]\nversion = "{version}"\n',
             encoding="utf-8",
@@ -149,6 +150,11 @@ class Phase2InstallTests(unittest.TestCase):
                 "run/vaultwarden-oci/transient": 0o700,
                 "run/vaultwarden-oci/lock": 0o600,
                 "etc/systemd/system/vaultwarden-oci.target": 0o644,
+                "etc/systemd/system/vaultwarden-oci.service": 0o644,
+                "etc/systemd/system/vaultwarden-oci-health.timer": 0o644,
+                "etc/systemd/system/vaultwarden-oci-backup.timer": 0o644,
+                "etc/systemd/system/vaultwarden-oci-maintenance.timer": 0o644,
+                "etc/systemd/system/vaultwarden-oci-notify@.service": 0o644,
             }
             for relative, expected in expected_modes.items():
                 with self.subTest(path=relative):
@@ -158,6 +164,7 @@ class Phase2InstallTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(release_dir.stat().st_mode), 0o555)
             self.assertEqual(stat.S_IMODE((release_dir / "versions.toml").stat().st_mode), 0o444)
             self.assertEqual(stat.S_IMODE((release_dir / "vwctl").stat().st_mode), 0o555)
+            self.assertEqual(stat.S_IMODE((release_dir / "systemd-v2").stat().st_mode), 0o555)
             self.assertTrue((release_dir / "vaultwarden_oci/install.py").is_file())
 
             config = root / "etc/vaultwarden-oci/config.toml"
@@ -249,6 +256,15 @@ class Phase2InstallTests(unittest.TestCase):
             self.assertFalse(
                 (root / "opt/vaultwarden-oci/releases/0.1.0-dev").exists()
             )
+
+    def test_existing_systemd_unit_drift_fails_clearly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install.install_layout(ROOT, root=root, systemd_reload=False)
+            unit = root / "etc/systemd/system/vaultwarden-oci-health.service"
+            unit.write_text("drift\n", encoding="utf-8")
+            with self.assertRaisesRegex(install.InstallError, "differs from required content"):
+                install.install_layout(ROOT, root=root, systemd_reload=False)
 
     def test_install_refuses_when_global_mutation_lock_is_held(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
