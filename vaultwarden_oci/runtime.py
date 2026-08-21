@@ -25,6 +25,7 @@ VAULTWARDEN_UID = VAULTWARDEN_GID = 65532
 CADDY_UID = CADDY_GID = 65533
 NAMES = {"vaultwarden": "vaultwarden-oci-vaultwarden", "caddy": "vaultwarden-oci-caddy"}
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_OPTION_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class RuntimeConfigError(ValueError):
@@ -47,6 +48,9 @@ class RuntimeConfig:
     smtp_from_email: str
     smtp_from_name: str
     smtp_timeout_seconds: int
+    notification_provider: str | None = None
+    notification_to_email: str | None = None
+    notification_options: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,12 +136,19 @@ def _email(value: str, label: str) -> str:
 
 
 def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
-    _unknown(data, {"schema_version", "site", "secrets", "vaultwarden", "smtp"}, "top-level")
+    _unknown(data, {"schema_version", "site", "secrets", "vaultwarden", "smtp", "notifications"}, "top-level")
     if data.get("schema_version") != 1:
         raise RuntimeConfigError("config requires schema_version = 1")
     site, secret_cfg, vw, smtp = (
         _mapping(data, key) for key in ("site", "secrets", "vaultwarden", "smtp")
     )
+    notifications_raw = data.get("notifications")
+    if notifications_raw is None:
+        notifications: Mapping[str, object] | None = None
+    elif isinstance(notifications_raw, dict):
+        notifications = notifications_raw
+    else:
+        raise RuntimeConfigError("config [notifications] must be a table")
     _unknown(site, {"domain", "acme_email"}, "site")
     _unknown(secret_cfg, {"offline_recovery_recipient"}, "secrets")
     _unknown(vw, {"signups_allowed"}, "vaultwarden")
@@ -163,17 +174,55 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         raise RuntimeConfigError("smtp.security must be 'starttls' or 'force_tls'")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 120:
         raise RuntimeConfigError("smtp.timeout_seconds must be 1..120")
+
+    notification_provider = notification_to_email = None
+    notification_options: tuple[tuple[str, str], ...] = ()
+    if notifications is not None:
+        _unknown(notifications, {"provider", "to_email", "options"}, "notifications")
+        notification_provider = _string(notifications, "provider", "notifications").lower()
+        notification_to_email = _email(
+            _string(notifications, "to_email", "notifications"),
+            "notifications.to_email",
+        )
+        options_raw = notifications.get("options", {})
+        if not isinstance(options_raw, dict):
+            raise RuntimeConfigError("notifications.options must be a table")
+        supplied: dict[str, str] = {}
+        for name, value in options_raw.items():
+            if not isinstance(name, str) or not _OPTION_NAME.fullmatch(name):
+                raise RuntimeConfigError("notifications.options keys must be lowercase provider option identifiers")
+            if (
+                not isinstance(value, str)
+                or not value
+                or value.strip() != value
+                or any(c in value for c in "\0\r\n")
+            ):
+                raise RuntimeConfigError(
+                    f"notifications.options.{name} must be a non-empty single-line string"
+                )
+            supplied[name] = value
+        from . import notification
+        try:
+            provider = notification.load_catalog().resolve(notification_provider)
+            notification.validate_provider_options(provider, supplied)
+        except notification.CatalogError as exc:
+            raise RuntimeConfigError(str(exc)) from exc
+        notification_options = tuple(sorted(supplied.items()))
+
     return RuntimeConfig(
-        _hostname(_string(site, "domain", "site"), "site.domain", fqdn=True),
-        _email(_string(site, "acme_email", "site"), "site.acme_email"),
-        offline,
-        signups,
-        _hostname(_string(smtp, "host", "smtp"), "smtp.host"),
-        port,
-        security,
-        _email(_string(smtp, "from_email", "smtp"), "smtp.from_email"),
-        _string(smtp, "from_name", "smtp"),
-        timeout,
+        domain=_hostname(_string(site, "domain", "site"), "site.domain", fqdn=True),
+        acme_email=_email(_string(site, "acme_email", "site"), "site.acme_email"),
+        offline_recovery_recipient=offline,
+        signups_allowed=signups,
+        smtp_host=_hostname(_string(smtp, "host", "smtp"), "smtp.host"),
+        smtp_port=port,
+        smtp_security=security,
+        smtp_from_email=_email(_string(smtp, "from_email", "smtp"), "smtp.from_email"),
+        smtp_from_name=_string(smtp, "from_name", "smtp"),
+        smtp_timeout_seconds=timeout,
+        notification_provider=notification_provider,
+        notification_to_email=notification_to_email,
+        notification_options=notification_options,
     )
 
 

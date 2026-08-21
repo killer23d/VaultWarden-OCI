@@ -1,0 +1,97 @@
+schema_version = 1
+
+[[providers]]
+id = "mailersend"
+aliases = []
+display_name = "MailerSend"
+endpoint = "https://api.mailersend.com/v1/email"
+auth_mode = "bearer"
+encoding = "json"
+request_template = '''{"from":{"email":"{from_email}","name":"{from_name}"},"to":[{"email":"{to_email}"}],"subject":"{subject}","text":"{text}"}'''
+success_statuses = [202]
+# 429 is intentionally excluded: MailerSend uses it for both short rate limits
+# and daily quota exhaustion, which a status-only classifier cannot distinguish.
+retry_statuses = [421]
+
+[[providers]]
+id = "sendgrid"
+aliases = []
+display_name = "Twilio SendGrid"
+endpoint = "https://api.sendgrid.com/v3/mail/send"
+auth_mode = "bearer"
+encoding = "json"
+request_template = '''{"personalizations":[{"to":[{"email":"{to_email}"}]}],"from":{"email":"{from_email}","name":"{from_name}"},"subject":"{subject}","content":[{"type":"text/plain","value":"{text}"}]}'''
+success_statuses = [202]
+retry_statuses = [429]
+
+[[providers]]
+id = "mailgun"
+aliases = []
+display_name = "Mailgun"
+endpoint = "https://{api_host}/v3/{domain}/messages"
+auth_mode = "basic"
+auth_username = "api"
+encoding = "form"
+request_template = '''{"from":"{from_header}","to":"{to_email}","subject":"{subject}","text":"{text}"}'''
+success_statuses = [200]
+retry_statuses = [429, 500]
+
+[providers.options.region]
+kind = "enum"
+default = "us"
+allowed = ["us", "eu"]
+
+[providers.options.domain]
+kind = "domain"
+
+[providers.substitutions.api_host]
+option = "region"
+values = { us = "api.mailgun.net", eu = "api.eu.mailgun.net" }
+
+[providers.substitutions.domain]
+option = "domain"
+
+[[providers]]
+id = "postmark"
+aliases = []
+display_name = "Postmark"
+endpoint = "https://api.postmarkapp.com/email"
+auth_mode = "fixed_header"
+auth_header = "X-Postmark-Server-Token"
+encoding = "json"
+request_template = '''{"From":"{from_header}","To":"{to_email}","Subject":"{subject}","TextBody":"{text}","MessageStream":"outbound"}'''
+success_statuses = [200]
+success_field = "ErrorCode"
+success_value = 0
+retry_statuses = [429, 503]
+
+[[providers]]
+id = "resend"
+aliases = []
+display_name = "Resend"
+endpoint = "https://api.resend.com/emails"
+auth_mode = "bearer"
+encoding = "json"
+request_template = '''{"from":"{from_header}","to":["{to_email}"],"subject":"{subject}","text":"{text}"}'''
+success_statuses = [200]
+# 429 is intentionally excluded: Resend uses it for both per-second rate limits
+# and daily/monthly quota exhaustion. Current docs explicitly mark 500 errors as
+# retry-later server failures, so that is the only status-only transient rule.
+retry_statuses = [500]
+
+[[providers]]
+id = "cyberpersons"
+aliases = ["cyberpanel"]
+display_name = "CyberPanel Email / CyberPersons"
+endpoint = "https://platform.cyberpersons.com/email/v1/send"
+auth_mode = "bearer"
+encoding = "json"
+request_template = '''{"from":"{from_email}","to":"{to_email}","subject":"{subject}","text":"{text}"}'''
+success_statuses = [202]
+success_field = "success"
+success_value = true
+# 429 is intentionally excluded: the same status covers per-minute, per-hour,
+# per-day, and per-month account limits. A status-only classifier cannot safely
+# distinguish short throttling from quota exhaustion. The documented response
+# body retry_after remains disabled until its units/semantics are explicit.
+retry_statuses = [503]

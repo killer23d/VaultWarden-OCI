@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -7,7 +8,9 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -91,6 +94,109 @@ class VwctlUnitTests(unittest.TestCase):
                     holder.stdout.close()
                 if holder.stderr is not None:
                     holder.stderr.close()
+
+    def test_status_notification_warning_does_not_fail_runtime_health(self) -> None:
+        from vaultwarden_oci import notification, recovery, runtime
+
+        rows = [
+            {"service": "vaultwarden", "state": "running", "health": "healthy"},
+            {"service": "caddy", "state": "running", "health": "healthy"},
+        ]
+        notification_row = {
+            "kind": "notification",
+            "state": "warning",
+            "transport": "https",
+            "detail": "provider_rejected at 2026-08-21T06:00:00Z",
+        }
+        output = io.StringIO()
+        with (
+            mock.patch.object(runtime, "status", return_value=("running", rows)),
+            mock.patch.object(recovery, "status_rows", return_value=[]),
+            mock.patch.object(notification, "status_row", return_value=notification_row),
+            redirect_stdout(output),
+        ):
+            code = cli.main(["status"])
+        self.assertEqual(code, 0)
+        self.assertIn("notification: warning", output.getvalue())
+        self.assertIn("Overall: running", output.getvalue())
+
+    def _notification_doctor_checks(self, notifications_toml: str) -> dict[str, cli.DoctorCheck]:
+        from vaultwarden_oci import edge, recovery, runtime
+
+        recipient = "age1" + "q" * 58
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.toml"
+            versions = root / "versions.toml"
+            os_release = root / "os-release"
+            config.write_text(
+                f'''schema_version = 1
+[site]
+domain = "vault.example.net"
+acme_email = "admin@example.net"
+[secrets]
+offline_recovery_recipient = "{recipient}"
+[vaultwarden]
+signups_allowed = false
+[smtp]
+host = "smtp.example.net"
+port = 587
+security = "starttls"
+from_email = "vaultwarden@example.net"
+from_name = "Vaultwarden"
+timeout_seconds = 15
+{notifications_toml}
+''',
+                encoding="utf-8",
+            )
+            versions.write_text(
+                'schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n' + COMPONENTS,
+                encoding="utf-8",
+            )
+            os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
+            with (
+                mock.patch.object(runtime, "doctor_checks", return_value=[]),
+                mock.patch.object(edge, "doctor_checks", return_value=[]),
+                mock.patch.object(recovery, "doctor_checks", return_value=[]),
+            ):
+                checks = cli.doctor_checks(
+                    config_path=config,
+                    versions_path=versions,
+                    os_release_path=os_release,
+                    machine="x86_64",
+                )
+        return {check.check_id: check for check in checks}
+
+    def test_doctor_invalid_notification_provider_is_fail_not_not_configured(self) -> None:
+        checks = self._notification_doctor_checks(
+            '''[notifications]
+provider = "unsupported-provider"
+to_email = "ops@example.net"'''
+        )
+        self.assertEqual(checks["config.toml"].status, "FAIL")
+        self.assertEqual(checks["notification.provider"].status, "FAIL")
+        self.assertIn("unsupported operational email provider", checks["notification.provider"].message)
+        self.assertNotIn("not configured", checks["notification.provider"].message)
+        for check_id in ("notification.api_secret", "notification.smtp_fallback"):
+            self.assertEqual(checks[check_id].status, "SKIP")
+            self.assertEqual(checks[check_id].message, "valid provider configuration is required")
+
+    def test_doctor_invalid_notification_option_is_fail_not_not_configured(self) -> None:
+        checks = self._notification_doctor_checks(
+            '''[notifications]
+provider = "mailgun"
+to_email = "ops@example.net"
+[notifications.options]
+region = "ap"
+domain = "mg.example.net"'''
+        )
+        self.assertEqual(checks["config.toml"].status, "FAIL")
+        self.assertEqual(checks["notification.provider"].status, "FAIL")
+        self.assertIn("notification provider option region", checks["notification.provider"].message)
+        self.assertNotIn("not configured", checks["notification.provider"].message)
+        for check_id in ("notification.api_secret", "notification.smtp_fallback"):
+            self.assertEqual(checks[check_id].status, "SKIP")
+            self.assertEqual(checks[check_id].message, "valid provider configuration is required")
 
 
 class VwctlIntegrationTests(unittest.TestCase):

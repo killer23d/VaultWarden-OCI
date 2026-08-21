@@ -1,0 +1,12 @@
+[Unit]
+Description=Run VaultWarden-OCI V2 encrypted recovery backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=15min
+AccuracySec=1min
+Unit=vaultwarden-oci-backup.service
+
+[Install]
+WantedBy=vaultwarden-oci.target
