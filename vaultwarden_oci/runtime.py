@@ -47,6 +47,10 @@ class RuntimeConfig:
     smtp_from_email: str
     smtp_from_name: str
     smtp_timeout_seconds: int
+    notification_provider: str | None = None
+    notification_to_email: str | None = None
+    notification_mailgun_region: str | None = None
+    notification_mailgun_domain: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,12 +136,19 @@ def _email(value: str, label: str) -> str:
 
 
 def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
-    _unknown(data, {"schema_version", "site", "secrets", "vaultwarden", "smtp"}, "top-level")
+    _unknown(data, {"schema_version", "site", "secrets", "vaultwarden", "smtp", "notifications"}, "top-level")
     if data.get("schema_version") != 1:
         raise RuntimeConfigError("config requires schema_version = 1")
     site, secret_cfg, vw, smtp = (
         _mapping(data, key) for key in ("site", "secrets", "vaultwarden", "smtp")
     )
+    notifications_raw = data.get("notifications")
+    if notifications_raw is None:
+        notifications: Mapping[str, object] | None = None
+    elif isinstance(notifications_raw, dict):
+        notifications = notifications_raw
+    else:
+        raise RuntimeConfigError("config [notifications] must be a table")
     _unknown(site, {"domain", "acme_email"}, "site")
     _unknown(secret_cfg, {"offline_recovery_recipient"}, "secrets")
     _unknown(vw, {"signups_allowed"}, "vaultwarden")
@@ -163,17 +174,55 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         raise RuntimeConfigError("smtp.security must be 'starttls' or 'force_tls'")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 120:
         raise RuntimeConfigError("smtp.timeout_seconds must be 1..120")
+
+    notification_provider = notification_to_email = None
+    notification_mailgun_region = notification_mailgun_domain = None
+    if notifications is not None:
+        _unknown(
+            notifications,
+            {"provider", "to_email", "mailgun_region", "mailgun_domain"},
+            "notifications",
+        )
+        notification_provider = _string(notifications, "provider", "notifications").lower()
+        notification_to_email = _email(
+            _string(notifications, "to_email", "notifications"),
+            "notifications.to_email",
+        )
+        if "mailgun_region" in notifications:
+            notification_mailgun_region = _string(notifications, "mailgun_region", "notifications").lower()
+        if "mailgun_domain" in notifications:
+            notification_mailgun_domain = _hostname(
+                _string(notifications, "mailgun_domain", "notifications"),
+                "notifications.mailgun_domain",
+                fqdn=True,
+            )
+        from . import notification
+        try:
+            provider = notification.load_catalog().resolve(notification_provider)
+            supplied: dict[str, str] = {}
+            if notification_mailgun_region is not None:
+                supplied["region"] = notification_mailgun_region
+            if notification_mailgun_domain is not None:
+                supplied["domain"] = notification_mailgun_domain
+            notification.validate_provider_options(provider, supplied)
+        except notification.CatalogError as exc:
+            raise RuntimeConfigError(str(exc)) from exc
+
     return RuntimeConfig(
-        _hostname(_string(site, "domain", "site"), "site.domain", fqdn=True),
-        _email(_string(site, "acme_email", "site"), "site.acme_email"),
-        offline,
-        signups,
-        _hostname(_string(smtp, "host", "smtp"), "smtp.host"),
-        port,
-        security,
-        _email(_string(smtp, "from_email", "smtp"), "smtp.from_email"),
-        _string(smtp, "from_name", "smtp"),
-        timeout,
+        domain=_hostname(_string(site, "domain", "site"), "site.domain", fqdn=True),
+        acme_email=_email(_string(site, "acme_email", "site"), "site.acme_email"),
+        offline_recovery_recipient=offline,
+        signups_allowed=signups,
+        smtp_host=_hostname(_string(smtp, "host", "smtp"), "smtp.host"),
+        smtp_port=port,
+        smtp_security=security,
+        smtp_from_email=_email(_string(smtp, "from_email", "smtp"), "smtp.from_email"),
+        smtp_from_name=_string(smtp, "from_name", "smtp"),
+        smtp_timeout_seconds=timeout,
+        notification_provider=notification_provider,
+        notification_to_email=notification_to_email,
+        notification_mailgun_region=notification_mailgun_region,
+        notification_mailgun_domain=notification_mailgun_domain,
     )
 
 
