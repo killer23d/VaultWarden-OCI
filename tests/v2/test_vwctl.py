@@ -177,8 +177,9 @@ to_email = "ops@example.net"'''
         self.assertEqual(checks["notification.provider"].status, "FAIL")
         self.assertIn("unsupported operational email provider", checks["notification.provider"].message)
         self.assertNotIn("not configured", checks["notification.provider"].message)
-        self.assertEqual(checks["notification.api_secret"].status, "SKIP")
-        self.assertEqual(checks["notification.smtp_fallback"].status, "SKIP")
+        for check_id in ("notification.api_secret", "notification.smtp_fallback"):
+            self.assertEqual(checks[check_id].status, "SKIP")
+            self.assertEqual(checks[check_id].message, "valid provider configuration is required")
 
     def test_doctor_invalid_notification_option_is_fail_not_not_configured(self) -> None:
         checks = self._notification_doctor_checks(
@@ -193,8 +194,9 @@ domain = "mg.example.net"'''
         self.assertEqual(checks["notification.provider"].status, "FAIL")
         self.assertIn("notification provider option region", checks["notification.provider"].message)
         self.assertNotIn("not configured", checks["notification.provider"].message)
-        self.assertEqual(checks["notification.api_secret"].status, "SKIP")
-        self.assertEqual(checks["notification.smtp_fallback"].status, "SKIP")
+        for check_id in ("notification.api_secret", "notification.smtp_fallback"):
+            self.assertEqual(checks[check_id].status, "SKIP")
+            self.assertEqual(checks[check_id].message, "valid provider configuration is required")
 
 
 class VwctlIntegrationTests(unittest.TestCase):
