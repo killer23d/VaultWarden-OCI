@@ -53,6 +53,7 @@ SYSTEMD_UNITS = (
 )
 
 CONFIG_TEMPLATE = """# VaultWarden-OCI V2 operator configuration.\n# Phase-specific settings are added by later phases.\n"""
+LEGACY_SYSTEMD_TARGET = """[Unit]\nDescription=VaultWarden-OCI lifecycle target\nDocumentation=https://github.com/killer23d/VaultWarden-OCI\nStopWhenUnneeded=no\n"""
 
 _RELEASE_FILES = ("vwctl", "versions.toml", "email-providers.toml")
 _RELEASE_DIRS = ("vaultwarden_oci", SYSTEMD_SOURCE_DIR)
@@ -301,8 +302,20 @@ def _install_systemd_units(release_dir: Path, layout: Layout) -> None:
         unit_source = source / unit
         if not unit_source.is_file():
             raise InstallError(f"required V2 systemd unit is missing from immutable release: {unit_source}")
+        destination = layout.path(SYSTEMD_DIR / unit)
+        if (
+            unit == "vaultwarden-oci.target"
+            and destination.exists()
+            and not destination.is_symlink()
+            and destination.is_file()
+            and _owned_by_installer(destination)
+            and destination.read_text(encoding="utf-8") == LEGACY_SYSTEMD_TARGET
+        ):
+            # Phase 2-5 owned this exact static target. Replace only that known
+            # content; arbitrary edits still fail through _ensure_regular_file.
+            destination.unlink()
         _ensure_regular_file(
-            layout.path(SYSTEMD_DIR / unit),
+            destination,
             unit_source.read_text(encoding="utf-8"),
             0o644,
             preserve_existing=False,
