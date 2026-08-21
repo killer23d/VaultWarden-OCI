@@ -303,16 +303,30 @@ def doctor_checks(
         except secrets.SecretsError:
             pass
 
+    notification_checks = notification.doctor_checks(
+        config=config if config is not None else notification_config,
+        secret_values=secret_values,
+    )
+    if config is None and notification_config is not None:
+        provider_check = next(
+            (check for check in notification_checks if check.check_id == "notification.provider"),
+            None,
+        )
+        if provider_check is not None and provider_check.status == "FAIL":
+            notification_checks = [
+                DoctorCheck(check.check_id, "SKIP", "valid provider configuration is required")
+                if check.check_id in {"notification.api_secret", "notification.smtp_fallback"}
+                else check
+                for check in notification_checks
+            ]
+
     return [
         os_check,
         arch_check,
         config_check,
         versions_check,
         *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path)),
-        *notification.doctor_checks(
-            config=config if config is not None else notification_config,
-            secret_values=secret_values,
-        ),
+        *notification_checks,
         *edge.doctor_checks(),
         *recovery.doctor_checks(),
     ]
