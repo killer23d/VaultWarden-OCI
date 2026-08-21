@@ -9,7 +9,9 @@ auth_mode = "bearer"
 encoding = "json"
 request_template = '''{"from":{"email":"{from_email}","name":"{from_name}"},"to":[{"email":"{to_email}"}],"subject":"{subject}","text":"{text}"}'''
 success_statuses = [202]
-retry_statuses = [429]
+# 429 is intentionally excluded: MailerSend uses it for both short rate limits
+# and daily quota exhaustion, which a status-only classifier cannot distinguish.
+retry_statuses = [421]
 
 [[providers]]
 id = "sendgrid"
@@ -32,7 +34,7 @@ auth_username = "api"
 encoding = "form"
 request_template = '''{"from":"{from_header}","to":"{to_email}","subject":"{subject}","text":"{text}"}'''
 success_statuses = [200]
-retry_statuses = [429]
+retry_statuses = [429, 500]
 
 [providers.options.region]
 kind = "enum"
@@ -61,7 +63,7 @@ request_template = '''{"From":"{from_header}","To":"{to_email}","Subject":"{subj
 success_statuses = [200]
 success_field = "ErrorCode"
 success_value = 0
-retry_statuses = [429]
+retry_statuses = [429, 503]
 
 [[providers]]
 id = "resend"
@@ -72,7 +74,10 @@ auth_mode = "bearer"
 encoding = "json"
 request_template = '''{"from":"{from_header}","to":["{to_email}"],"subject":"{subject}","text":"{text}"}'''
 success_statuses = [200]
-retry_statuses = [429]
+# 429 is intentionally excluded: Resend uses it for both per-second rate limits
+# and daily/monthly quota exhaustion. Current docs explicitly mark 500 errors as
+# retry-later server failures, so that is the only status-only transient rule.
+retry_statuses = [500]
 
 [[providers]]
 id = "cyberpersons"
