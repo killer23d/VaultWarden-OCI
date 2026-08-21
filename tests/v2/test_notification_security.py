@@ -3,24 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from vaultwarden_oci import notification, runtime, secrets
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "email-providers.toml"
-CYBER_RETRY = '''[[providers]]
-id = "cyberpersons"
-aliases = ["cyberpanel"]
-display_name = "CyberPanel Email / CyberPersons"
-endpoint = "https://platform.cyberpersons.com/email/v1/send"
-auth_mode = "bearer"
-encoding = "json"
-request_template = ''' + "'''" + '''{"from":"{from_email}","to":"{to_email}","subject":"{subject}","text":"{text}"}''' + "'''" + '''
-success_statuses = [202]
-success_field = "success"
-success_value = true
-retry_statuses = [429, 503]
-'''
 
 
 def config_data(provider: str = "cyberpersons") -> dict[str, object]:
@@ -70,19 +58,80 @@ class NotificationSecurityTests(unittest.TestCase):
         data = config_data("resend")
         notifications = data["notifications"]
         assert isinstance(notifications, dict)
-        notifications["mailgun_region"] = "eu"
-        notifications["mailgun_domain"] = "mg.example.net"
+        notifications["options"] = {"region": "eu", "domain": "mg.example.net"}
         with self.assertRaises(runtime.RuntimeConfigError):
             runtime.parse_config(data)
 
+    def test_catalog_declared_option_flows_through_config_and_delivery_without_provider_python(self) -> None:
+        original = CATALOG.read_text(encoding="utf-8")
+        text = original.replace(
+            'endpoint = "https://api.sendgrid.com/v3/mail/send"',
+            'endpoint = "https://{api_host}/v3/mail/send"',
+            1,
+        )
+        marker = 'retry_statuses = [429]\n\n[[providers]]\nid = "mailgun"'
+        self.assertIn(marker, text)
+        text = text.replace(
+            marker,
+            '''retry_statuses = [429]
+
+[providers.options.region]
+kind = "enum"
+default = "global"
+allowed = ["global", "synthetic"]
+
+[providers.substitutions.api_host]
+option = "region"
+values = { global = "api.sendgrid.com", synthetic = "api.synthetic.invalid" }
+
+[[providers]]
+id = "mailgun"''',
+            1,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = Path(directory) / "catalog.toml"
+            catalog_path.write_text(text, encoding="utf-8")
+            catalog = notification.load_catalog(catalog_path)
+            data = config_data("sendgrid")
+            notifications = data["notifications"]
+            assert isinstance(notifications, dict)
+            notifications["options"] = {"region": "synthetic"}
+            with mock.patch.object(notification, "load_catalog", return_value=catalog):
+                parsed = runtime.parse_config(data)
+            self.assertEqual(parsed.notification_options, (("region", "synthetic"),))
+
+            endpoints: list[str] = []
+
+            def api(request: notification.RenderedRequest) -> notification.AttemptResult:
+                endpoints.append(request.endpoint)
+                return notification.AttemptResult(True, False, "accepted", "HTTP 202")
+
+            result = notification.deliver(
+                event_id="synthetic-option-test",
+                config=parsed,
+                secrets={
+                    "email_api_token": "api-token",
+                    "smtp_username": "smtp-user",
+                    "smtp_password": "smtp-password",
+                },
+                subject="subject",
+                text="body",
+                catalog=catalog,
+                api_sender=api,
+                state_path=Path(directory) / "state.json",
+            )
+        self.assertEqual(endpoints, ["https://api.synthetic.invalid/v3/mail/send"])
+        self.assertEqual(result.outcome, "success")
+
     def test_body_retry_delay_schema_requires_known_unit(self) -> None:
         original = CATALOG.read_text(encoding="utf-8")
-        self.assertIn(CYBER_RETRY, original)
+        marker = "retry_statuses = [503]\n"
+        self.assertIn(marker, original)
         mutations = (
-            original.replace(CYBER_RETRY, CYBER_RETRY + 'retry_body_field = "retry_after"\n', 1),
+            original.replace(marker, marker + 'retry_body_field = "retry_after"\n', 1),
             original.replace(
-                CYBER_RETRY,
-                CYBER_RETRY + 'retry_body_field = "retry_after"\nretry_body_unit = "fortnights"\n',
+                marker,
+                marker + 'retry_body_field = "retry_after"\nretry_body_unit = "fortnights"\n',
                 1,
             ),
         )
@@ -95,30 +144,31 @@ class NotificationSecurityTests(unittest.TestCase):
 
     def test_declared_body_retry_delay_is_numeric_bounded_and_malformed_values_are_ignored(self) -> None:
         original = CATALOG.read_text(encoding="utf-8")
-        self.assertIn(CYBER_RETRY, original)
+        marker = "retry_statuses = [503]\n"
+        self.assertIn(marker, original)
         text = original.replace(
-            CYBER_RETRY,
-            CYBER_RETRY + 'retry_body_field = "retry_after"\nretry_body_unit = "seconds"\n',
+            marker,
+            marker + 'retry_body_field = "retry_after"\nretry_body_unit = "seconds"\n',
             1,
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "catalog.toml"
             path.write_text(text, encoding="utf-8")
             provider = notification.load_catalog(path).resolve("cyberpersons")
-            bounded = notification._response_result(provider, 429, {}, b'{"retry_after":999}')
-            malformed = notification._response_result(provider, 429, {}, b'{"retry_after":"soon"}')
-            missing = notification._response_result(provider, 429, {}, b'{}')
+            bounded = notification._response_result(provider, 503, {}, b'{"retry_after":999}')
+            malformed = notification._response_result(provider, 503, {}, b'{"retry_after":"soon"}')
+            missing = notification._response_result(provider, 503, {}, b'{}')
         self.assertTrue(bounded.transient)
         self.assertEqual(bounded.retry_after, 5.0)
         self.assertIsNone(malformed.retry_after)
         self.assertIsNone(missing.retry_after)
 
-    def test_current_cyberpersons_catalog_does_not_enable_undocumented_body_delay_units(self) -> None:
+    def test_current_cyberpersons_catalog_keeps_429_visible_and_body_delay_disabled(self) -> None:
         provider = notification.load_catalog(CATALOG).resolve("cyberpersons")
         self.assertIsNone(provider.retry_body_field)
         self.assertIsNone(provider.retry_body_unit)
         result = notification._response_result(provider, 429, {}, b'{"retry_after":4}')
-        self.assertTrue(result.transient)
+        self.assertFalse(result.transient)
         self.assertIsNone(result.retry_after)
 
     def test_email_api_token_is_decrypted_in_memory_but_not_materialized_for_containers(self) -> None:
