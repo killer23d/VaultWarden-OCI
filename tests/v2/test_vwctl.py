@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -7,7 +8,9 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -91,6 +94,31 @@ class VwctlUnitTests(unittest.TestCase):
                     holder.stdout.close()
                 if holder.stderr is not None:
                     holder.stderr.close()
+
+    def test_status_notification_warning_does_not_fail_runtime_health(self) -> None:
+        from vaultwarden_oci import notification, recovery, runtime
+
+        rows = [
+            {"service": "vaultwarden", "state": "running", "health": "healthy"},
+            {"service": "caddy", "state": "running", "health": "healthy"},
+        ]
+        notification_row = {
+            "kind": "notification",
+            "state": "warning",
+            "transport": "https",
+            "detail": "provider_rejected at 2026-08-21T06:00:00Z",
+        }
+        output = io.StringIO()
+        with (
+            mock.patch.object(runtime, "status", return_value=("running", rows)),
+            mock.patch.object(recovery, "status_rows", return_value=[]),
+            mock.patch.object(notification, "status_row", return_value=notification_row),
+            redirect_stdout(output),
+        ):
+            code = cli.main(["status"])
+        self.assertEqual(code, 0)
+        self.assertIn("notification: warning", output.getvalue())
+        self.assertIn("Overall: running", output.getvalue())
 
 
 class VwctlIntegrationTests(unittest.TestCase):
