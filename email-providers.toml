@@ -90,4 +90,8 @@ request_template = '''{"from":"{from_email}","to":"{to_email}","subject":"{subje
 success_statuses = [202]
 success_field = "success"
 success_value = true
-retry_statuses = [429, 503]
+# 429 is intentionally excluded: the same status covers per-minute, per-hour,
+# per-day, and per-month account limits. A status-only classifier cannot safely
+# distinguish short throttling from quota exhaustion. The documented response
+# body retry_after remains disabled until its units/semantics are explicit.
+retry_statuses = [503]
