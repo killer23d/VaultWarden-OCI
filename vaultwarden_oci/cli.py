@@ -97,6 +97,12 @@ class DoctorCheck:
         return {"id": self.check_id, "status": self.status, "message": self.message}
 
 
+@dataclass(frozen=True)
+class _NotificationDoctorConfig:
+    notification_provider: str
+    notification_options: tuple[tuple[object, object], ...]
+
+
 def _toml(path: Path, label: str) -> dict[str, object]:
     try:
         with path.open("rb") as handle:
@@ -113,6 +119,33 @@ def validate_config(path: Path) -> dict[str, object]:
         return data
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+
+
+def _notification_doctor_config(path: Path) -> _NotificationDoctorConfig | None:
+    """Retain non-secret provider/options state even when full config parsing fails."""
+    try:
+        data = _toml(path, "config")
+    except ValueError:
+        return None
+    raw = data.get("notifications")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return _NotificationDoctorConfig("__invalid_notifications_table__", ())
+    provider = raw.get("provider")
+    if (
+        not isinstance(provider, str)
+        or not provider
+        or provider.strip() != provider
+        or any(char in provider for char in "\0\r\n")
+    ):
+        provider = "__invalid_notification_provider__"
+    options_raw = raw.get("options", {})
+    if isinstance(options_raw, dict):
+        options = tuple(options_raw.items())
+    else:
+        options = (("__invalid_options__", options_raw),)
+    return _NotificationDoctorConfig(provider, options)
 
 
 def _pin(value: object, label: str) -> str:
@@ -255,6 +288,7 @@ def doctor_checks(
         versions_check = DoctorCheck("versions.toml", "FAIL", str(exc))
     from . import edge, notification, recovery, runtime, secrets
 
+    notification_config = _notification_doctor_config(config_path)
     config = None
     secret_values = None
     try:
@@ -275,7 +309,10 @@ def doctor_checks(
         config_check,
         versions_check,
         *runtime.doctor_checks(config_path=config_path, paths=runtime.Paths(config=config_path)),
-        *notification.doctor_checks(config=config, secret_values=secret_values),
+        *notification.doctor_checks(
+            config=config if config is not None else notification_config,
+            secret_values=secret_values,
+        ),
         *edge.doctor_checks(),
         *recovery.doctor_checks(),
     ]
