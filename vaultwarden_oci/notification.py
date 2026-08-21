@@ -1,9 +1,11 @@
 """Catalog-driven operational notification delivery for VaultWarden-OCI V2."""
 from __future__ import annotations
 
+import base64
 import email.utils
 import http.client
 import json
+import math
 import os
 import re
 import smtplib
@@ -14,6 +16,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -30,14 +33,18 @@ CANONICAL_FIELDS = frozenset(
 _AUTH_MODES = frozenset({"bearer", "fixed_header", "basic"})
 _ENCODINGS = frozenset({"json", "form"})
 _OPTION_KINDS = frozenset({"enum", "domain"})
+_RETRY_UNITS = {"seconds": 1.0, "milliseconds": 0.001}
 _PLACEHOLDER = re.compile(r"^\{([a-z][a-z0-9_]*)\}$")
 _ENDPOINT_PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*)\}")
+_TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _DOMAIN = re.compile(
-    r"^(?=.{1,253}\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+    r"^(?=.{1,253}\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
 )
 _FIXED_RETRY_SECONDS = (1.0, 2.0)
 _MAX_RETRY_DELAY = 5.0
 _MAX_DIAGNOSTIC = 180
+_MAX_RESPONSE = 4096
 
 
 class NotificationError(RuntimeError):
@@ -76,6 +83,8 @@ class Provider:
     success_field: str | None
     success_value: object | None
     retry_statuses: tuple[int, ...]
+    retry_body_field: str | None
+    retry_body_unit: str | None
     options: Mapping[str, OptionSpec]
     substitutions: Mapping[str, SubstitutionSpec]
 
@@ -170,16 +179,16 @@ def _int_list(value: object, label: str, *, allow_empty: bool = False) -> tuple[
     return tuple(result)
 
 
-def _walk_template(value: object, *, label: str) -> None:
+def _walk_template(value: object, label: str) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if not isinstance(key, str) or not key or any(char in key for char in "\0\r\n"):
-                raise CatalogError(f"{label} contains an invalid object key")
-            _walk_template(child, label=label)
+            if not isinstance(key, str) or not _TOKEN.fullmatch(key):
+                raise CatalogError(f"{label} contains an invalid field name")
+            _walk_template(child, label)
         return
     if isinstance(value, list):
         for child in value:
-            _walk_template(child, label=label)
+            _walk_template(child, label)
         return
     if isinstance(value, str):
         if "{" in value or "}" in value:
@@ -197,7 +206,7 @@ def _parse_options(raw: object, provider_id: str) -> dict[str, OptionSpec]:
         return {}
     if not isinstance(raw, dict):
         raise CatalogError(f"provider {provider_id} options must be a table")
-    options: dict[str, OptionSpec] = {}
+    result: dict[str, OptionSpec] = {}
     for name, item in raw.items():
         if not re.fullmatch(r"[a-z][a-z0-9_]*", name) or not isinstance(item, dict):
             raise CatalogError(f"provider {provider_id} has invalid option {name!r}")
@@ -219,8 +228,8 @@ def _parse_options(raw: object, provider_id: str) -> dict[str, OptionSpec]:
                 raise CatalogError(f"provider {provider_id} option {name} default is not allowed")
         elif allowed:
             raise CatalogError(f"provider {provider_id} domain option {name} cannot declare allowed values")
-        options[name] = OptionSpec(kind, default, allowed)
-    return options
+        result[name] = OptionSpec(kind, default, allowed)
+    return result
 
 
 def _parse_substitutions(
@@ -254,11 +263,24 @@ def _parse_substitutions(
     return result
 
 
+def _validate_endpoint_template(endpoint: str, substitutions: Mapping[str, SubstitutionSpec], provider_id: str) -> None:
+    names = set(_ENDPOINT_PLACEHOLDER.findall(endpoint))
+    if names != set(substitutions):
+        raise CatalogError(f"provider {provider_id} endpoint substitutions do not exactly match the endpoint template")
+    probe = endpoint
+    for name in names:
+        probe = probe.replace("{" + name + "}", "example")
+    parsed = urllib.parse.urlsplit(probe)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise CatalogError(f"provider {provider_id} endpoint must be an HTTPS URL without userinfo")
+
+
 def _parse_provider(raw: Mapping[str, object]) -> Provider:
     allowed = {
         "id", "aliases", "display_name", "endpoint", "auth_mode", "auth_username",
         "auth_header", "encoding", "request_template", "success_statuses", "success_field",
-        "success_value", "retry_statuses", "options", "substitutions",
+        "success_value", "retry_statuses", "retry_body_field", "retry_body_unit",
+        "options", "substitutions",
     }
     _unknown(raw, allowed, "provider")
     provider_id = _identifier(raw.get("id"), "provider.id")
@@ -268,6 +290,7 @@ def _parse_provider(raw: Mapping[str, object]) -> Provider:
     aliases = tuple(_identifier(value, f"provider {provider_id} alias") for value in aliases_raw)
     if len(set(aliases)) != len(aliases) or provider_id in aliases:
         raise CatalogError(f"provider {provider_id} aliases must be unique and not repeat the canonical ID")
+
     endpoint = _string(raw.get("endpoint"), f"provider {provider_id}.endpoint")
     auth_mode = _string(raw.get("auth_mode"), f"provider {provider_id}.auth_mode")
     if auth_mode not in _AUTH_MODES:
@@ -278,6 +301,8 @@ def _parse_provider(raw: Mapping[str, object]) -> Provider:
         auth_username = _string(auth_username, f"provider {provider_id}.auth_username")
     if auth_header is not None:
         auth_header = _string(auth_header, f"provider {provider_id}.auth_header")
+        if not _TOKEN.fullmatch(auth_header):
+            raise CatalogError(f"provider {provider_id} auth_header is not a valid HTTP field name")
     if auth_mode == "basic" and not auth_username:
         raise CatalogError(f"provider {provider_id} basic auth requires auth_username")
     if auth_mode == "fixed_header" and not auth_header:
@@ -286,6 +311,7 @@ def _parse_provider(raw: Mapping[str, object]) -> Provider:
         raise CatalogError(f"provider {provider_id} auth_username is not allowed for {auth_mode}")
     if auth_mode != "fixed_header" and auth_header is not None:
         raise CatalogError(f"provider {provider_id} auth_header is not allowed for {auth_mode}")
+
     encoding = _string(raw.get("encoding"), f"provider {provider_id}.encoding")
     if encoding not in _ENCODINGS:
         raise CatalogError(f"provider {provider_id} has unsupported encoding {encoding!r}")
@@ -296,44 +322,61 @@ def _parse_provider(raw: Mapping[str, object]) -> Provider:
         raise CatalogError(f"provider {provider_id} request_template must be JSON data") from exc
     if not isinstance(template, dict):
         raise CatalogError(f"provider {provider_id} request_template must be a JSON object")
-    _walk_template(template, label=f"provider {provider_id} request_template")
+    _walk_template(template, f"provider {provider_id} request_template")
+
     options = _parse_options(raw.get("options"), provider_id)
     substitutions = _parse_substitutions(raw.get("substitutions"), provider_id, options)
-    endpoint_names = set(_ENDPOINT_PLACEHOLDER.findall(endpoint))
-    if endpoint_names != set(substitutions):
-        raise CatalogError(f"provider {provider_id} endpoint substitutions do not exactly match the endpoint template")
-    if not endpoint_names:
-        parsed = urllib.parse.urlsplit(endpoint)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise CatalogError(f"provider {provider_id} endpoint must be an HTTPS URL without userinfo")
+    _validate_endpoint_template(endpoint, substitutions, provider_id)
     success_statuses = _int_list(raw.get("success_statuses"), f"provider {provider_id}.success_statuses")
     retry_statuses = _int_list(raw.get("retry_statuses", []), f"provider {provider_id}.retry_statuses", allow_empty=True)
     if set(success_statuses) & set(retry_statuses):
         raise CatalogError(f"provider {provider_id} success and retry statuses overlap")
+
     success_field = raw.get("success_field")
     has_success_value = "success_value" in raw
     if success_field is not None:
         success_field = _string(success_field, f"provider {provider_id}.success_field")
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", success_field) or not has_success_value:
             raise CatalogError(f"provider {provider_id} success check must name one top-level field and value")
+        if isinstance(raw.get("success_value"), (dict, list)) or raw.get("success_value") is None:
+            raise CatalogError(f"provider {provider_id} success_value must be a scalar")
     elif has_success_value:
         raise CatalogError(f"provider {provider_id} success_value requires success_field")
+
+    retry_body_field = raw.get("retry_body_field")
+    retry_body_unit = raw.get("retry_body_unit")
+    if retry_body_field is None and retry_body_unit is not None:
+        raise CatalogError(f"provider {provider_id} retry_body_unit requires retry_body_field")
+    if retry_body_field is not None:
+        retry_body_field = _string(retry_body_field, f"provider {provider_id}.retry_body_field")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", retry_body_field):
+            raise CatalogError(f"provider {provider_id} retry_body_field must be one top-level field")
+        if retry_body_unit is None:
+            raise CatalogError(f"provider {provider_id} retry_body_field requires retry_body_unit")
+        retry_body_unit = _string(retry_body_unit, f"provider {provider_id}.retry_body_unit")
+        if retry_body_unit not in _RETRY_UNITS:
+            raise CatalogError(f"provider {provider_id} has unsupported retry_body_unit {retry_body_unit!r}")
+        if not retry_statuses:
+            raise CatalogError(f"provider {provider_id} body retry delay requires at least one retry status")
+
     return Provider(
-        provider_id,
-        aliases,
-        _string(raw.get("display_name"), f"provider {provider_id}.display_name"),
-        endpoint,
-        auth_mode,
-        auth_username,
-        auth_header,
-        encoding,
-        template,
-        success_statuses,
-        success_field,
-        raw.get("success_value") if has_success_value else None,
-        retry_statuses,
-        options,
-        substitutions,
+        provider_id=provider_id,
+        aliases=aliases,
+        display_name=_string(raw.get("display_name"), f"provider {provider_id}.display_name"),
+        endpoint=endpoint,
+        auth_mode=auth_mode,
+        auth_username=auth_username,
+        auth_header=auth_header,
+        encoding=encoding,
+        request_template=template,
+        success_statuses=success_statuses,
+        success_field=success_field,
+        success_value=raw.get("success_value") if has_success_value else None,
+        retry_statuses=retry_statuses,
+        retry_body_field=retry_body_field,
+        retry_body_unit=retry_body_unit,
+        options=options,
+        substitutions=substitutions,
     )
 
 
@@ -409,8 +452,7 @@ def message_context(*, from_email: str, from_name: str, to_email: str, subject: 
     for key in ("from_email", "to_email"):
         if values[key].count("@") != 1 or any(char.isspace() for char in values[key]):
             raise NotificationError(f"notification {key} must be a simple email address")
-    from_header = email.utils.formataddr((from_name, from_email))
-    result = {**values, "from_header": from_header}
+    result = {**values, "from_header": email.utils.formataddr((from_name, from_email))}
     if set(result) != CANONICAL_FIELDS:
         raise AssertionError("canonical notification message vocabulary drift")
     return result
@@ -426,6 +468,24 @@ def _render_value(value: object, context: Mapping[str, str]) -> object:
         if match:
             return context[match.group(1)]
     return value
+
+
+def _multipart_form(fields: Mapping[str, str]) -> tuple[str, bytes]:
+    boundary = "vwoci-" + uuid.uuid4().hex
+    chunks: list[bytes] = []
+    for key, value in fields.items():
+        if not _TOKEN.fullmatch(key):
+            raise CatalogError("form template rendered an invalid field name")
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode("ascii"),
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"),
+                value.encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return boundary, b"".join(chunks)
 
 
 def render_request(
@@ -454,8 +514,9 @@ def render_request(
         or _ENDPOINT_PLACEHOLDER.search(endpoint)
     ):
         raise CatalogError(f"provider {provider.provider_id} rendered an unsafe HTTPS endpoint")
+
     rendered = _render_value(provider.request_template, context)
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", "User-Agent": "VaultWarden-OCI/2"}
     if provider.auth_mode == "bearer":
         headers["Authorization"] = "Bearer " + token
     elif provider.auth_mode == "fixed_header":
@@ -463,17 +524,19 @@ def render_request(
         headers[provider.auth_header] = token
     else:
         assert provider.auth_username is not None
-        import base64
-        credentials = base64.b64encode((provider.auth_username + ":" + token).encode()).decode("ascii")
+        credentials = base64.b64encode((provider.auth_username + ":" + token).encode("utf-8")).decode("ascii")
         headers["Authorization"] = "Basic " + credentials
+
     if provider.encoding == "json":
         headers["Content-Type"] = "application/json"
         body = json.dumps(rendered, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     else:
-        if not isinstance(rendered, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in rendered.items()):
+        if not isinstance(rendered, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in rendered.items()
+        ):
             raise CatalogError(f"provider {provider.provider_id} form template must render to flat string fields")
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        body = urllib.parse.urlencode(rendered).encode("utf-8")
+        boundary, body = _multipart_form(rendered)
+        headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
     return RenderedRequest(provider, endpoint, headers, body)
 
 
@@ -500,7 +563,28 @@ def _retry_after(headers: Mapping[str, str] | None, now: float | None = None) ->
             delay = when.timestamp() - (time.time() if now is None else now)
         except (TypeError, ValueError, OverflowError):
             return None
-    return max(0.0, min(delay, _MAX_RETRY_DELAY)) if delay is not None else None
+    if delay is None or not math.isfinite(delay):
+        return None
+    return max(0.0, min(delay, _MAX_RETRY_DELAY))
+
+
+def _body_retry_after(provider: Provider, body: bytes) -> float | None:
+    if provider.retry_body_field is None or provider.retry_body_unit is None:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(provider.retry_body_field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    if value < 0 or not math.isfinite(value):
+        return None
+    seconds = value * _RETRY_UNITS[provider.retry_body_unit]
+    return min(seconds, _MAX_RETRY_DELAY)
 
 
 def _safe_reason(text: str) -> str:
@@ -520,7 +604,10 @@ def _response_result(provider: Provider, status: int, headers: Mapping[str, str]
             return AttemptResult(False, False, "ambiguous_response", f"HTTP {status} did not satisfy the catalog success rule")
         return AttemptResult(True, False, "accepted", f"HTTP {status}")
     if status in provider.retry_statuses:
-        return AttemptResult(False, True, "provider_transient", f"HTTP {status}", _retry_after(headers))
+        delay = _retry_after(headers)
+        if delay is None:
+            delay = _body_retry_after(provider, body)
+        return AttemptResult(False, True, "provider_transient", f"HTTP {status}", delay)
     return AttemptResult(False, False, "provider_rejected", f"HTTP {status}")
 
 
@@ -560,10 +647,10 @@ def https_attempt(
         with opener.open(http_request, timeout=timeout) as response:
             status = int(response.status)
             headers = response.headers
-            body = response.read(4096)
+            body = response.read(_MAX_RESPONSE)
         return _response_result(request.provider, status, headers, body)
     except urllib.error.HTTPError as exc:
-        body = exc.read(4096)
+        body = exc.read(_MAX_RESPONSE)
         return _response_result(request.provider, exc.code, exc.headers, body)
     except (urllib.error.URLError, ssl.SSLError, socket.timeout, TimeoutError, OSError) as exc:
         return _network_result(exc)
@@ -588,13 +675,7 @@ def send_https(
     return last
 
 
-def send_smtp(
-    *,
-    config: object,
-    secrets: Mapping[str, str],
-    context: Mapping[str, str],
-    smtp_factory: Callable[..., object] | None = None,
-) -> AttemptResult:
+def send_smtp(*, config: object, secrets: Mapping[str, str], context: Mapping[str, str]) -> AttemptResult:
     username = secrets.get("smtp_username")
     password = secrets.get("smtp_password")
     if not username or not password:
@@ -611,9 +692,7 @@ def send_smtp(
     tls = ssl.create_default_context()
     client = None
     try:
-        if smtp_factory is not None:
-            client = smtp_factory(host, port, timeout, security, tls)
-        elif security == "force_tls":
+        if security == "force_tls":
             client = smtplib.SMTP_SSL(host, port, timeout=timeout, context=tls)
         elif security == "starttls":
             client = smtplib.SMTP(host, port, timeout=timeout)
@@ -671,10 +750,8 @@ def load_result(path: Path = STATE_PATH) -> DeliveryResult | None:
         return None
     except (OSError, UnicodeError, json.JSONDecodeError):
         return DeliveryResult("unknown", "unknown", "unknown", "failure", "state_invalid", "last notification state is unreadable", "unknown")
-    if not isinstance(payload, dict):
-        return DeliveryResult("unknown", "unknown", "unknown", "failure", "state_invalid", "last notification state is invalid", "unknown")
     keys = {"event_id", "provider", "transport", "outcome", "category", "reason", "recorded_at"}
-    if set(payload) != keys or not all(isinstance(payload[key], str) for key in keys):
+    if not isinstance(payload, dict) or set(payload) != keys or not all(isinstance(payload[key], str) for key in keys):
         return DeliveryResult("unknown", "unknown", "unknown", "failure", "state_invalid", "last notification state is invalid", "unknown")
     return DeliveryResult(**payload)
 
@@ -697,7 +774,6 @@ def deliver(
         raise NotificationError("operational notifications are not configured")
     catalog = catalog or load_catalog()
     provider = catalog.resolve(provider_name)
-    token = secrets.get("email_api_token", "")
     context = message_context(
         from_email=getattr(config, "smtp_from_email"),
         from_name=getattr(config, "smtp_from_name"),
@@ -712,7 +788,12 @@ def deliver(
         supplied_options["region"] = region
     if domain is not None:
         supplied_options["domain"] = domain
-    request = render_request(provider, context=context, token=token, options=supplied_options)
+    request = render_request(
+        provider,
+        context=context,
+        token=secrets.get("email_api_token", ""),
+        options=supplied_options,
+    )
     if api_sender is None:
         api_result = send_https(request)
     else:
@@ -751,7 +832,6 @@ def doctor_checks(
     catalog_path: Path = CATALOG_PATH,
     state_path: Path = STATE_PATH,
 ) -> list[DoctorCheck]:
-    checks: list[DoctorCheck] = []
     try:
         catalog = load_catalog(catalog_path)
     except CatalogError as exc:
@@ -762,7 +842,7 @@ def doctor_checks(
             DoctorCheck("notification.smtp_fallback", "SKIP", "valid provider configuration is required"),
             DoctorCheck("notification.last_delivery", "SKIP", "provider catalog is invalid"),
         ]
-    checks.append(DoctorCheck("notification.catalog", "PASS", "closed provider catalog is valid"))
+    checks = [DoctorCheck("notification.catalog", "PASS", "closed provider catalog is valid")]
     if config is None or not getattr(config, "notification_provider", None):
         checks.extend(
             [
