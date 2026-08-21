@@ -120,6 +120,82 @@ class VwctlUnitTests(unittest.TestCase):
         self.assertIn("notification: warning", output.getvalue())
         self.assertIn("Overall: running", output.getvalue())
 
+    def _notification_doctor_checks(self, notifications_toml: str) -> dict[str, cli.DoctorCheck]:
+        from vaultwarden_oci import edge, recovery, runtime
+
+        recipient = "age1" + "q" * 58
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.toml"
+            versions = root / "versions.toml"
+            os_release = root / "os-release"
+            config.write_text(
+                f'''schema_version = 1
+[site]
+domain = "vault.example.net"
+acme_email = "admin@example.net"
+[secrets]
+offline_recovery_recipient = "{recipient}"
+[vaultwarden]
+signups_allowed = false
+[smtp]
+host = "smtp.example.net"
+port = 587
+security = "starttls"
+from_email = "vaultwarden@example.net"
+from_name = "Vaultwarden"
+timeout_seconds = 15
+{notifications_toml}
+''',
+                encoding="utf-8",
+            )
+            versions.write_text(
+                'schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-dev"\n' + COMPONENTS,
+                encoding="utf-8",
+            )
+            os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
+            with (
+                mock.patch.object(runtime, "doctor_checks", return_value=[]),
+                mock.patch.object(edge, "doctor_checks", return_value=[]),
+                mock.patch.object(recovery, "doctor_checks", return_value=[]),
+            ):
+                checks = cli.doctor_checks(
+                    config_path=config,
+                    versions_path=versions,
+                    os_release_path=os_release,
+                    machine="x86_64",
+                )
+        return {check.check_id: check for check in checks}
+
+    def test_doctor_invalid_notification_provider_is_fail_not_not_configured(self) -> None:
+        checks = self._notification_doctor_checks(
+            '''[notifications]
+provider = "unsupported-provider"
+to_email = "ops@example.net"'''
+        )
+        self.assertEqual(checks["config.toml"].status, "FAIL")
+        self.assertEqual(checks["notification.provider"].status, "FAIL")
+        self.assertIn("unsupported operational email provider", checks["notification.provider"].message)
+        self.assertNotIn("not configured", checks["notification.provider"].message)
+        self.assertEqual(checks["notification.api_secret"].status, "SKIP")
+        self.assertEqual(checks["notification.smtp_fallback"].status, "SKIP")
+
+    def test_doctor_invalid_notification_option_is_fail_not_not_configured(self) -> None:
+        checks = self._notification_doctor_checks(
+            '''[notifications]
+provider = "mailgun"
+to_email = "ops@example.net"
+[notifications.options]
+region = "ap"
+domain = "mg.example.net"'''
+        )
+        self.assertEqual(checks["config.toml"].status, "FAIL")
+        self.assertEqual(checks["notification.provider"].status, "FAIL")
+        self.assertIn("notification provider option region", checks["notification.provider"].message)
+        self.assertNotIn("not configured", checks["notification.provider"].message)
+        self.assertEqual(checks["notification.api_secret"].status, "SKIP")
+        self.assertEqual(checks["notification.smtp_fallback"].status, "SKIP")
+
 
 class VwctlIntegrationTests(unittest.TestCase):
     def run_vwctl(self, *args: str) -> subprocess.CompletedProcess[str]:
