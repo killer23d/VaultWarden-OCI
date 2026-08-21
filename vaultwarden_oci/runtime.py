@@ -25,6 +25,7 @@ VAULTWARDEN_UID = VAULTWARDEN_GID = 65532
 CADDY_UID = CADDY_GID = 65533
 NAMES = {"vaultwarden": "vaultwarden-oci-vaultwarden", "caddy": "vaultwarden-oci-caddy"}
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_OPTION_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class RuntimeConfigError(ValueError):
@@ -49,8 +50,7 @@ class RuntimeConfig:
     smtp_timeout_seconds: int
     notification_provider: str | None = None
     notification_to_email: str | None = None
-    notification_mailgun_region: str | None = None
-    notification_mailgun_domain: str | None = None
+    notification_options: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -176,37 +176,38 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         raise RuntimeConfigError("smtp.timeout_seconds must be 1..120")
 
     notification_provider = notification_to_email = None
-    notification_mailgun_region = notification_mailgun_domain = None
+    notification_options: tuple[tuple[str, str], ...] = ()
     if notifications is not None:
-        _unknown(
-            notifications,
-            {"provider", "to_email", "mailgun_region", "mailgun_domain"},
-            "notifications",
-        )
+        _unknown(notifications, {"provider", "to_email", "options"}, "notifications")
         notification_provider = _string(notifications, "provider", "notifications").lower()
         notification_to_email = _email(
             _string(notifications, "to_email", "notifications"),
             "notifications.to_email",
         )
-        if "mailgun_region" in notifications:
-            notification_mailgun_region = _string(notifications, "mailgun_region", "notifications").lower()
-        if "mailgun_domain" in notifications:
-            notification_mailgun_domain = _hostname(
-                _string(notifications, "mailgun_domain", "notifications"),
-                "notifications.mailgun_domain",
-                fqdn=True,
-            )
+        options_raw = notifications.get("options", {})
+        if not isinstance(options_raw, dict):
+            raise RuntimeConfigError("notifications.options must be a table")
+        supplied: dict[str, str] = {}
+        for name, value in options_raw.items():
+            if not isinstance(name, str) or not _OPTION_NAME.fullmatch(name):
+                raise RuntimeConfigError("notifications.options keys must be lowercase provider option identifiers")
+            if (
+                not isinstance(value, str)
+                or not value
+                or value.strip() != value
+                or any(c in value for c in "\0\r\n")
+            ):
+                raise RuntimeConfigError(
+                    f"notifications.options.{name} must be a non-empty single-line string"
+                )
+            supplied[name] = value
         from . import notification
         try:
             provider = notification.load_catalog().resolve(notification_provider)
-            supplied: dict[str, str] = {}
-            if notification_mailgun_region is not None:
-                supplied["region"] = notification_mailgun_region
-            if notification_mailgun_domain is not None:
-                supplied["domain"] = notification_mailgun_domain
             notification.validate_provider_options(provider, supplied)
         except notification.CatalogError as exc:
             raise RuntimeConfigError(str(exc)) from exc
+        notification_options = tuple(sorted(supplied.items()))
 
     return RuntimeConfig(
         domain=_hostname(_string(site, "domain", "site"), "site.domain", fqdn=True),
@@ -221,8 +222,7 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         smtp_timeout_seconds=timeout,
         notification_provider=notification_provider,
         notification_to_email=notification_to_email,
-        notification_mailgun_region=notification_mailgun_region,
-        notification_mailgun_domain=notification_mailgun_domain,
+        notification_options=notification_options,
     )
 
 
