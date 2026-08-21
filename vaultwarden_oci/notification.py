@@ -435,6 +435,17 @@ def validate_provider_options(provider: Provider, supplied: Mapping[str, str]) -
     return result
 
 
+def _configured_options(config: object) -> dict[str, str]:
+    raw = getattr(config, "notification_options", ())
+    try:
+        supplied = dict(raw)
+    except (TypeError, ValueError) as exc:
+        raise NotificationError("notification provider options are malformed") from exc
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in supplied.items()):
+        raise NotificationError("notification provider options must contain string keys and values")
+    return supplied
+
+
 def message_context(*, from_email: str, from_name: str, to_email: str, subject: str, text: str) -> dict[str, str]:
     values = {
         "from_email": from_email,
@@ -781,18 +792,11 @@ def deliver(
         subject=subject,
         text=text,
     )
-    supplied_options: dict[str, str] = {}
-    region = getattr(config, "notification_mailgun_region", None)
-    domain = getattr(config, "notification_mailgun_domain", None)
-    if region is not None:
-        supplied_options["region"] = region
-    if domain is not None:
-        supplied_options["domain"] = domain
     request = render_request(
         provider,
         context=context,
         token=secrets.get("email_api_token", ""),
-        options=supplied_options,
+        options=_configured_options(config),
     )
     if api_sender is None:
         api_result = send_https(request)
@@ -817,9 +821,13 @@ def status_row(path: Path = STATE_PATH) -> dict[str, str]:
     result = load_result(path)
     if result is None:
         return {"kind": "notification", "state": "never", "transport": "-", "detail": "no delivery recorded"}
+    # Delivery history is advisory. A past notification failure must stay visible
+    # without turning an otherwise healthy periodic `vwctl status` into another
+    # systemd failure notification and creating a persistent retry loop.
+    state = "success" if result.outcome == "success" else "warning"
     return {
         "kind": "notification",
-        "state": result.outcome,
+        "state": state,
         "transport": result.transport,
         "detail": f"{result.category} at {result.recorded_at}",
     }
@@ -854,15 +862,8 @@ def doctor_checks(
     else:
         try:
             provider = catalog.resolve(getattr(config, "notification_provider"))
-            supplied: dict[str, str] = {}
-            region = getattr(config, "notification_mailgun_region", None)
-            domain = getattr(config, "notification_mailgun_domain", None)
-            if region is not None:
-                supplied["region"] = region
-            if domain is not None:
-                supplied["domain"] = domain
-            validate_provider_options(provider, supplied)
-        except CatalogError as exc:
+            validate_provider_options(provider, _configured_options(config))
+        except (CatalogError, NotificationError) as exc:
             checks.append(DoctorCheck("notification.provider", "FAIL", _safe_reason(str(exc))))
         else:
             checks.append(DoctorCheck("notification.provider", "PASS", f"configured provider resolves to {provider.provider_id}"))
@@ -884,7 +885,7 @@ def doctor_checks(
                 DoctorCheck(
                     "notification.smtp_fallback",
                     "PASS" if fallback and secure else "WARN",
-                    "authenticated TLS SMTP fallback is available" if fallback and secure else "authenticated TLS SMTP fallback is unavailable",
+                    "authenticated TLS SMTP fallback is configured" if fallback and secure else "authenticated TLS SMTP fallback is not configured",
                 )
             )
     last = load_result(state_path)
