@@ -118,9 +118,9 @@ class NotificationCatalogTests(unittest.TestCase):
         )
         self.assertTrue(notification._response_result(request.provider, 202, {}, b'{"success":true}').ok)
         self.assertFalse(notification._response_result(request.provider, 202, {}, b'{"success":false}').transient)
-        self.assertTrue(notification._response_result(request.provider, 429, {}, b'{"retry_after":2}').transient)
+        self.assertFalse(notification._response_result(request.provider, 429, {}, b'{"retry_after":2}').transient)
         self.assertTrue(notification._response_result(request.provider, 503, {}, b'{}').transient)
-        for status in (400, 403, 500):
+        for status in (400, 403, 429, 500):
             with self.subTest(status=status):
                 result = notification._response_result(request.provider, status, {}, b'{"error":"send_failed"}')
                 self.assertFalse(result.transient)
@@ -265,6 +265,23 @@ class NotificationDeliveryTests(unittest.TestCase):
             self.assertNotIn("secret-ish subject", persisted)
             self.assertNotIn("message body", persisted)
             self.assertLess(len(persisted), 1000)
+
+    def test_persisted_failure_is_advisory_status_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            failure = notification.DeliveryResult(
+                "vaultwarden-oci-health.service",
+                "cyberpersons",
+                "https",
+                "failure",
+                "provider_rejected",
+                "HTTP 403",
+                "2026-08-21T06:00:00Z",
+            )
+            notification.persist_result(failure, state)
+            row = notification.status_row(state)
+            self.assertEqual(row["state"], "warning")
+            self.assertIn("provider_rejected", row["detail"])
 
     def test_smtp_starttls_and_implicit_tls_use_default_context_and_auth(self) -> None:
         class FakeSMTP:
