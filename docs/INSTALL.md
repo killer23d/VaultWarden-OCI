@@ -34,7 +34,7 @@ Interactive setup may omit `--data-device`; it lists plausible non-boot devices 
 
 Existing ext4/xfs adoption requires interactive `YES` or `--accept-existing-filesystem`. Blank-device ext4 formatting requires independent `--confirm-format`. Unknown filesystem types, mixed/unknown signatures, the boot disk, and its parent/children fail closed. `--auto` never guesses storage and never implies either acknowledgement.
 
-Noninteractive setup therefore supplies the storage and custody decisions explicitly:
+Noninteractive setup therefore supplies the storage and custody decisions explicitly. For an existing filesystem use `--accept-existing-filesystem`; for a blank device use `--confirm-format`. If a blank-device setup is interrupted after formatting, the exact same `--confirm-format --auto` command is accepted on rerun only when the host-side identity and mounted-volume marker both prove that the now-existing filesystem is the one initialized by the prior setup attempt.
 
 ```bash
 sudo ./setup.sh install \
@@ -80,7 +80,7 @@ The host-side expected identity under `/etc` is independent of the selected data
 - the mounted UUID/type match `/etc/vaultwarden-oci/storage-identity.json`;
 - the filesystem's ownership marker matches that same host-side identity.
 
-A different initialized or cloned VaultWarden-OCI volume therefore cannot self-authenticate from its own marker.
+This prevents a different independently initialized volume from authenticating merely from its own marker. The identity is UUID/type based, so a true block-level clone that preserves the filesystem UUID and marker is not distinguishable by this mechanism; the design does not claim physical-device attestation.
 
 Provisioning reconciles an already-mounted canonical path **before** changing the host identity or `/etc/fstab`. If setup is rerun with volume A mounted but volume B selected, it fails without rewriting next-boot storage to B. Only after the selected/live filesystem agrees does setup persist the UUID mount, host identity, volume marker, and Docker guard.
 
@@ -94,7 +94,7 @@ There is no boot-to-data migration mode; this is a greenfield install path.
 
 Setup is intended to be rerun after interruption. Storage identity, fstab ownership, mount guard, immutable release, Age identity, generated config, and encrypted-secret starting state are proven before replacement. Customized operator config is not silently overwritten.
 
-If a step fails, correct the reported condition and rerun the same setup command.
+If a step fails, correct the reported condition and rerun the same setup command. Expected operational failures, including version-resolution/network errors, invalid encrypted-secret metadata, and setup lock contention, are reported through the supported `FAIL`/`ACTION` UI rather than as Python tracebacks.
 
 ## Complete external configuration
 
