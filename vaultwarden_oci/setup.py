@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from . import cli, install, secrets as secret_owner, storage
-from .update_versions import RESOLVED_STATE, frozen_versions_toml, record_frozen, resolve_latest, resolve_pinned
+from .update_versions import RESOLVED_STATE, UpdateError, frozen_versions_toml, record_frozen, resolve_latest, resolve_pinned
 
 SOPS_VERSION = "3.13.3"
 SOPS_URL = "https://github.com/getsops/sops/releases/download/v{version}/sops-v{version}.linux.{arch}"
@@ -65,7 +65,6 @@ def _must(
 ) -> subprocess.CompletedProcess[str]:
     result = _run(argv, input_text=input_text, env=env)
     if result.returncode != 0:
-        # Never include stdin in diagnostics: callers may provide generated secret plaintext there.
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
         raise SetupError(f"{label} failed: {detail}")
     return result
@@ -91,7 +90,6 @@ def _normalize(domain: str, url: str, email: str) -> tuple[str, str, str]:
 
 
 def _toml_string(value: str) -> str:
-    # JSON string escaping is valid TOML basic-string escaping for these scalar values.
     return json.dumps(value, ensure_ascii=False)
 
 
@@ -296,7 +294,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         ui.ok("operational Age identity, validated operator config, and decryptable encrypted-secrets starting point are present")
         ui.header("Next actions"); ui.action("complete external Cloudflare/SMTP/API credentials with the supported secrets editor/config workflow")
         ui.action("run: sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml"); ui.action("run: sudo vwctl doctor"); ui.action("when doctor is ready, run: sudo vwctl start"); return 0
-    except (SetupError, storage.StorageError, install.InstallError, cli.ConfigError, OSError, ValueError) as exc:
+    except (
+        SetupError,
+        storage.StorageError,
+        install.InstallError,
+        cli.ConfigError,
+        cli.LockBusyError,
+        secret_owner.SecretsError,
+        UpdateError,
+        OSError,
+        ValueError,
+    ) as exc:
         ui.fail(str(exc)); ui.action("correct the failed step above and re-run the same setup command; completed safe steps are idempotent"); return 1
 
 
