@@ -1,12 +1,13 @@
-"""Phase 7 CLI glue for explicit updates and development-only latest installs."""
+"""CLI glue for explicit updates plus the dedicated-storage runtime gate."""
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
 
-from . import cli, install, update
+from . import cli, install, storage, update
 from .update_versions import UpdateError, resolve_pinned_file
 
 
@@ -43,7 +44,48 @@ def _print_plan(plan: update.UpdatePlan) -> None:
     print("result: already active" if plan.already_active else "result: explicit update available")
 
 
+def _require_storage() -> bool:
+    try:
+        storage.verify()
+        return True
+    except storage.StorageError as exc:
+        print(f"FAIL: dedicated production storage is not ready: {exc}", file=sys.stderr)
+        print(
+            "ACTION: restore/mount the filesystem recorded by "
+            f"{storage.IDENTITY_FILE} at {storage.STATE_ROOT}, then retry.",
+            file=sys.stderr,
+        )
+        return False
+
+
+def _doctor_command(args: Sequence[str]) -> int:
+    json_mode = "--json" in args
+    checks = cli.doctor_checks()
+    try:
+        identity = storage.verify()
+    except storage.StorageError as exc:
+        checks.append(cli.DoctorCheck("storage.dedicated", "FAIL", str(exc)))
+    else:
+        checks.append(
+            cli.DoctorCheck(
+                "storage.dedicated",
+                "PASS",
+                f"dedicated state filesystem UUID={identity.uuid} mounted at {identity.mount}",
+            )
+        )
+    payload = cli.doctor_payload(checks)
+    if json_mode:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for check in checks:
+            print(f"[{check.status}] {check.check_id}: {check.message}")
+        print(f"Overall: {payload['overall']}")
+    return 1 if payload["overall"] == "FAIL" else 0
+
+
 def _update_command(argv: Sequence[str]) -> int:
+    if not _require_storage():
+        return 1
     args = _update_parser().parse_args(argv)
     try:
         plan = update.plan_update(args.source)
@@ -82,7 +124,7 @@ def _versions_command(args: Sequence[str]) -> int:
 
 def _print_top_help() -> int:
     code = cli.main([])
-    print("\nPhase 7 explicit updates:\n  update {check,apply}    check or apply a pinned immutable release")
+    print("\nExplicit updates:\n  update {check,apply}    check or apply a pinned immutable release")
     return code
 
 
@@ -90,12 +132,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args in (["--help"], ["-h"]):
         return _print_top_help()
+    if args[0] == "doctor":
+        return _doctor_command(args[1:])
     if args[0] == "update":
         return _update_command(args[1:])
     if args[0] == "install":
+        if not _require_storage():
+            return 1
         return install.main(args[1:])
     if args[0] == "versions":
         return _versions_command(args)
+    if args[0] in {"start", "restart", "backup", "restore", "recovery"} and not _require_storage():
+        return 1
     return cli.main(args)
 
 
