@@ -57,8 +57,6 @@ def _update_command(argv: Sequence[str]) -> int:
     args = _update_parser().parse_args(argv)
     try:
         plan = update.plan_update(args.source)
-        # Public production plans always carry root=Path('/'). Injected/mock plans remain a
-        # bounded unit-test seam and must not probe live host storage.
         if getattr(plan, "root", None) == Path("/") and not _require_storage(): return 1
         _print_plan(plan)
         if args.update_command == "check": return 0
@@ -85,7 +83,9 @@ def _print_top_help() -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args in (["--help"], ["-h"]): return _print_top_help()
-    if args[0] == "doctor": return _doctor_command(args[1:])
+    if args[0] == "doctor":
+        if any(flag in args[1:] for flag in ("--help", "-h")): return cli.main(args)
+        return _doctor_command(args[1:])
     if args[0] == "update": return _update_command(args[1:])
     if args[0] == "install":
         if not _require_storage(): return 1
