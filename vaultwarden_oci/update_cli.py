@@ -14,9 +14,7 @@ _STORAGE_REQUIRED = {"start", "restart", "backup", "restore", "recovery", "edge"
 _STORAGE_DOCTOR_ID = "storage.dedicated"
 if _STORAGE_DOCTOR_ID not in cli.DOCTOR_CHECK_IDS:
     position = cli.DOCTOR_CHECK_IDS.index("runtime.paths") + 1
-    cli.DOCTOR_CHECK_IDS = (
-        *cli.DOCTOR_CHECK_IDS[:position], _STORAGE_DOCTOR_ID, *cli.DOCTOR_CHECK_IDS[position:]
-    )
+    cli.DOCTOR_CHECK_IDS = (*cli.DOCTOR_CHECK_IDS[:position], _STORAGE_DOCTOR_ID, *cli.DOCTOR_CHECK_IDS[position:])
 
 
 def _update_parser() -> argparse.ArgumentParser:
@@ -29,33 +27,25 @@ def _update_parser() -> argparse.ArgumentParser:
 
 
 def _print_plan(plan: update.UpdatePlan) -> None:
-    print(f"current release: {plan.current_release}")
-    print(f"candidate release: {plan.target_release}")
-    print(f"architecture: {plan.frozen.architecture}")
+    print(f"current release: {plan.current_release}"); print(f"candidate release: {plan.target_release}"); print(f"architecture: {plan.frozen.architecture}")
     print("components: " f"vaultwarden={plan.frozen.vaultwarden} " f"caddy={plan.frozen.caddy} " f"caddy-dns/cloudflare={plan.frozen.caddy_dns_cloudflare}")
     for pin in (plan.frozen.vaultwarden_image, plan.frozen.caddy_builder_image, plan.frozen.caddy_runtime_image): print(f"{pin.name}: {pin.reference}")
     print("result: already active" if plan.already_active else "result: explicit update available")
 
 
 def _require_storage() -> bool:
-    try:
-        storage.verify(); return True
+    try: storage.verify(); return True
     except storage.StorageError as exc:
         print(f"FAIL: dedicated production storage is not ready: {exc}", file=sys.stderr)
-        print(f"ACTION: restore/mount the filesystem recorded by {storage.HOST_IDENTITY_FILE} at {storage.STATE_ROOT}, then retry.", file=sys.stderr)
-        return False
+        print(f"ACTION: restore/mount the filesystem recorded by {storage.HOST_IDENTITY_FILE} at {storage.STATE_ROOT}, then retry.", file=sys.stderr); return False
 
 
 def _doctor_command(args: Sequence[str]) -> int:
     checks = cli.doctor_checks()
-    try:
-        identity = storage.verify()
-    except storage.StorageError as exc:
-        storage_check = cli.DoctorCheck(_STORAGE_DOCTOR_ID, "FAIL", str(exc))
-    else:
-        storage_check = cli.DoctorCheck(_STORAGE_DOCTOR_ID, "PASS", f"dedicated state filesystem UUID={identity.uuid} mounted at {identity.mount}")
-    checks.insert(cli.DOCTOR_CHECK_IDS.index(_STORAGE_DOCTOR_ID), storage_check)
-    payload = cli.doctor_payload(checks)
+    try: identity = storage.verify()
+    except storage.StorageError as exc: storage_check = cli.DoctorCheck(_STORAGE_DOCTOR_ID, "FAIL", str(exc))
+    else: storage_check = cli.DoctorCheck(_STORAGE_DOCTOR_ID, "PASS", f"dedicated state filesystem UUID={identity.uuid} mounted at {identity.mount}")
+    checks.insert(cli.DOCTOR_CHECK_IDS.index(_STORAGE_DOCTOR_ID), storage_check); payload = cli.doctor_payload(checks)
     if "--json" in args: print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         for check in checks: print(f"[{check.status}] {check.check_id}: {check.message}")
@@ -67,7 +57,9 @@ def _update_command(argv: Sequence[str]) -> int:
     args = _update_parser().parse_args(argv)
     try:
         plan = update.plan_update(args.source)
-        if not _require_storage(): return 1
+        # Public production plans always carry root=Path('/'). Injected/mock plans remain a
+        # bounded unit-test seam and must not probe live host storage.
+        if getattr(plan, "root", None) == Path("/") and not _require_storage(): return 1
         _print_plan(plan)
         if args.update_command == "check": return 0
         if plan.already_active: print("PASS: requested release is already active"); return 0
