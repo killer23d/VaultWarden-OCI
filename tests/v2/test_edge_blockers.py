@@ -16,6 +16,26 @@ def result(argv, stdout="", code=0):
     return CommandResult(tuple(argv), "success" if code == 0 else "nonzero", code, stdout, "")
 
 
+def exact_versions() -> str:
+    return '''schema_version = 1
+[vaultwarden_oci]
+version = "0.1.0-dev.7"
+[components]
+vaultwarden = "1.37.1"
+caddy = "2.11.4"
+caddy_dns_cloudflare = "v0.2.4"
+[image_digests.vaultwarden]
+amd64 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+arm64 = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+[image_digests.caddy_builder]
+amd64 = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+arm64 = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+[image_digests.caddy_runtime]
+amd64 = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+arm64 = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+'''
+
+
 class ExactPolicyRunner:
     def __init__(self, policy: edge.CloudflarePolicy, *, extra_rule: bool = False) -> None:
         self.policy = policy
@@ -92,17 +112,7 @@ class Phase4BlockerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             versions = root / "versions.toml"
-            versions.write_text(
-                '''schema_version = 1
-[vaultwarden_oci]
-version = "0.1.0-dev"
-[components]
-vaultwarden = "1.37.1"
-caddy = "2.11.4"
-caddy_dns_cloudflare = "v0.2.4"
-''',
-                encoding="utf-8",
-            )
+            versions.write_text(exact_versions(), encoding="utf-8")
             paths = runtime.Paths(
                 config=root / "config.toml",
                 data=root / "state/data",

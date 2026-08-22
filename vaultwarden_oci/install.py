@@ -10,8 +10,10 @@ import shutil
 import stat
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from vaultwarden_oci.cli import (
     DEFAULT_CONFIG_PATH,
@@ -55,8 +57,12 @@ SYSTEMD_UNITS = (
 CONFIG_TEMPLATE = """# VaultWarden-OCI V2 operator configuration.\n# Phase-specific settings are added by later phases.\n"""
 LEGACY_SYSTEMD_TARGET = """[Unit]\nDescription=VaultWarden-OCI lifecycle target\nDocumentation=https://github.com/killer23d/VaultWarden-OCI\nStopWhenUnneeded=no\n"""
 
-_RELEASE_FILES = ("vwctl", "versions.toml", "email-providers.toml")
-_RELEASE_DIRS = ("vaultwarden_oci", SYSTEMD_SOURCE_DIR)
+RELEASE_FILES = ("vwctl", "versions.toml", "email-providers.toml")
+RELEASE_DIRS = ("vaultwarden_oci", SYSTEMD_SOURCE_DIR)
+# Backward-compatible internal aliases for Phase 2/6 tests; Phase 7 consumes the
+# deliberate public release boundary above rather than installer implementation details.
+_RELEASE_FILES = RELEASE_FILES
+_RELEASE_DIRS = RELEASE_DIRS
 _RELEASE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
@@ -127,6 +133,11 @@ def _validate_release_name(release: str) -> str:
     return release
 
 
+def validate_release_name(release: str) -> str:
+    """Validate a release directory name for installer/update ownership."""
+    return _validate_release_name(release)
+
+
 def _owned_by_installer(path: Path) -> bool:
     return path.lstat().st_uid == os.geteuid()
 
@@ -194,13 +205,18 @@ def _ensure_lock_path(layout: Layout) -> Path:
     return lock_path
 
 
+def ensure_lock_path(layout: Layout) -> Path:
+    """Expose the installer-owned canonical mutation-lock path to update orchestration."""
+    return _ensure_lock_path(layout)
+
+
 def _copy_release_tree(source_root: Path, staging: Path) -> None:
-    for name in _RELEASE_FILES:
+    for name in RELEASE_FILES:
         source = source_root / name
         if not source.is_file():
             raise InstallError(f"required release file is missing: {source}")
         shutil.copy2(source, staging / name)
-    for name in _RELEASE_DIRS:
+    for name in RELEASE_DIRS:
         source = source_root / name
         if not source.is_dir():
             raise InstallError(f"required release directory is missing: {source}")
@@ -276,6 +292,11 @@ def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
     return destination
 
 
+def stage_release(source_root: Path, layout: Layout, release: str) -> Path:
+    """Stage one immutable release through the installer-owned release transaction."""
+    return _install_release(source_root, layout, release)
+
+
 def _check_symlink_compatible(path: Path, target: Path) -> bool:
     if not (path.exists() or path.is_symlink()):
         return False
@@ -338,7 +359,7 @@ def _install_layout_locked(
     _check_symlink_compatible(current, current_target)
     _check_symlink_compatible(vwctl, vwctl_target)
 
-    release_dir = _install_release(source_root, layout, release)
+    release_dir = stage_release(source_root, layout, release)
 
     _ensure_directory(layout.path(CONFIG_DIR), 0o700)
     _ensure_regular_file(layout.path(CONFIG_PATH), CONFIG_TEMPLATE, 0o600, preserve_existing=True)
@@ -364,14 +385,36 @@ def _install_layout_locked(
     return str(release_dir)
 
 
-def install_layout(source_root: Path, *, root: Path = Path("/"), systemd_reload: bool = True) -> str:
+def _validate_runtime_pins(source_root: Path, *, require_all_architectures: bool) -> None:
+    from .update_versions import UpdateError, resolve_pinned_file
+
+    try:
+        resolve_pinned_file(
+            source_root / "versions.toml",
+            require_all_architectures=require_all_architectures,
+        )
+    except UpdateError as exc:
+        raise InstallError(str(exc)) from exc
+
+
+def install_layout(
+    source_root: Path,
+    *,
+    root: Path = Path("/"),
+    systemd_reload: bool = True,
+    require_all_architectures: bool = True,
+) -> str:
     source_root = source_root.resolve()
     layout = Layout(root.resolve())
     _assert_root(layout)
+    _validate_runtime_pins(
+        source_root,
+        require_all_architectures=require_all_architectures,
+    )
     manifest = load_versions(source_root / "versions.toml")
-    release = _validate_release_name(manifest.version)
+    release = validate_release_name(manifest.version)
 
-    lock_path = _ensure_lock_path(layout)
+    lock_path = ensure_lock_path(layout)
     try:
         with mutation_lock(lock_path):
             return _install_layout_locked(
@@ -388,9 +431,28 @@ def install_layout(source_root: Path, *, root: Path = Path("/"), systemd_reload:
         raise InstallError(str(exc)) from exc
 
 
+@contextmanager
+def _frozen_source(source_root: Path, versions_toml: str) -> Iterator[Path]:
+    source_root = source_root.resolve()
+    with tempfile.TemporaryDirectory(prefix="vwoci-install-source-") as directory:
+        root = Path(directory)
+        for name in RELEASE_FILES:
+            if name != "versions.toml":
+                shutil.copy2(source_root / name, root / name)
+        for name in RELEASE_DIRS:
+            shutil.copytree(
+                source_root / name,
+                root / name,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        (root / "versions.toml").write_text(versions_toml, encoding="utf-8")
+        yield root
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Install the VaultWarden-OCI V2 immutable application layout")
     parser.add_argument("--source", required=True, type=Path, help="repository/release source root")
+    parser.add_argument("--use-latest", action="store_true", help="development/testing only")
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
     parser.add_argument("--skip-host-check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-systemd-reload", action="store_true", help=argparse.SUPPRESS)
@@ -398,19 +460,44 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .update_versions import (
+        RESOLVED_STATE,
+        UpdateError,
+        frozen_versions_toml,
+        record_frozen,
+        require_development_target,
+        resolve_latest,
+        resolve_pinned,
+    )
+
     args = _build_parser().parse_args(argv)
     try:
         if not args.skip_host_check:
             validate_host()
-        release_dir = install_layout(
-            args.source,
-            root=args.root,
-            systemd_reload=not args.skip_systemd_reload,
-        )
-    except (InstallError, LockBusyError, ValueError) as exc:
+        root = args.root.resolve()
+        if args.use_latest:
+            require_development_target(root)
+            frozen = resolve_latest(args.source)
+            with _frozen_source(args.source, frozen_versions_toml(frozen)) as source:
+                release_dir = install_layout(
+                    source,
+                    root=root,
+                    systemd_reload=not args.skip_systemd_reload,
+                    require_all_architectures=False,
+                )
+        else:
+            frozen = resolve_pinned(args.source)
+            release_dir = install_layout(
+                args.source,
+                root=root,
+                systemd_reload=not args.skip_systemd_reload,
+            )
+        record_frozen(frozen, Layout(root).path(RESOLVED_STATE))
+    except (InstallError, LockBusyError, ValueError, OSError, UpdateError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print(f"PASS: installed immutable release at {release_dir}")
+    label = "frozen development" if args.use_latest else "pinned"
+    print(f"PASS: installed {label} immutable release at {release_dir}")
     return 0
 
 

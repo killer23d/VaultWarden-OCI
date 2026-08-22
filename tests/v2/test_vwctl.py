@@ -8,7 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vaultwarden_oci import cli
+from vaultwarden_oci import cli, install, update_cli, update_versions
 
 COMPONENTS = '''
 [components]
@@ -24,6 +24,24 @@ vaultwarden = "1.37.1"
 caddy = "2.11.4"
 caddy_dns_cloudflare = "v0.2.4"
 '''
+
+
+def digest(char: str) -> str:
+    return "sha256:" + char * 64
+
+
+def latest_frozen() -> update_versions.FrozenVersions:
+    return update_versions.FrozenVersions(
+        "latest",
+        "amd64",
+        "0.1.0-dev.7.latest.test",
+        "1.40.0",
+        "2.12.0",
+        "v0.3.0",
+        update_versions.ImagePin("vaultwarden", "vaultwarden/server", "1.40.0", digest("a")),
+        update_versions.ImagePin("caddy_builder", "caddy", "2.12.0-builder-alpine", digest("b")),
+        update_versions.ImagePin("caddy_runtime", "caddy", "2.12.0-alpine", digest("c")),
+    )
 
 
 class VwctlUnitTests(unittest.TestCase):
@@ -94,6 +112,93 @@ class VwctlUnitTests(unittest.TestCase):
                     holder.stdout.close()
                 if holder.stderr is not None:
                     holder.stderr.close()
+
+    def test_update_commands_reject_use_latest_before_update_planning(self) -> None:
+        for action in ("check", "apply"):
+            with self.subTest(action=action):
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(update_cli.update, "plan_update") as plan,
+                    redirect_stderr(stderr),
+                    self.assertRaises(SystemExit) as caught,
+                ):
+                    update_cli.main(["update", action, "--use-latest"])
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn("unrecognized arguments: --use-latest", stderr.getvalue())
+                plan.assert_not_called()
+
+    def test_latest_install_stays_on_isolated_install_boundary(self) -> None:
+        from vaultwarden_oci import recovery, runtime
+
+        frozen = latest_frozen()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "isolated-root"
+            output = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False),
+                mock.patch.object(update_versions, "resolve_latest", return_value=frozen),
+                mock.patch.object(
+                    install,
+                    "install_layout",
+                    return_value=str(root / "opt/vaultwarden-oci/releases" / frozen.project_version),
+                ) as install_layout,
+                mock.patch.object(update_versions, "record_frozen") as record_frozen,
+                mock.patch.object(runtime, "lifecycle") as lifecycle,
+                mock.patch.object(recovery, "create_recovery") as create_recovery,
+                redirect_stdout(output),
+            ):
+                code = install.main(
+                    [
+                        "--source",
+                        str(ROOT),
+                        "--use-latest",
+                        "--root",
+                        str(root),
+                        "--skip-host-check",
+                        "--skip-systemd-reload",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            install_layout.assert_called_once()
+            self.assertEqual(install_layout.call_args.kwargs["root"], root.resolve())
+            self.assertFalse(install_layout.call_args.kwargs["require_all_architectures"])
+            record_frozen.assert_called_once()
+            lifecycle.assert_not_called()
+            create_recovery.assert_not_called()
+
+    def test_single_arch_latest_snapshot_is_readable_but_not_a_production_manifest(self) -> None:
+        frozen = latest_frozen()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "versions.toml"
+            manifest.write_text(update_versions.frozen_versions_toml(frozen), encoding="utf-8")
+            reread = update_versions.resolve_pinned_file(manifest, machine="amd64")
+            self.assertEqual(reread.vaultwarden_image.reference, frozen.vaultwarden_image.reference)
+            self.assertEqual(reread.caddy_builder_image.reference, frozen.caddy_builder_image.reference)
+            self.assertEqual(reread.caddy_runtime_image.reference, frozen.caddy_runtime_image.reference)
+            with self.assertRaisesRegex(update_versions.UpdateError, "image_digests.vaultwarden.arm64"):
+                update_versions.resolve_pinned(root, machine="amd64")
+
+    def test_versions_command_reads_single_arch_latest_snapshot(self) -> None:
+        frozen = latest_frozen()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "vaultwarden_oci"
+            package.mkdir()
+            (root / "versions.toml").write_text(
+                update_versions.frozen_versions_toml(frozen), encoding="utf-8"
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(update_cli, "__file__", str(package / "update_cli.py")),
+                mock.patch.object(cli, "main", return_value=0),
+                redirect_stdout(output),
+            ):
+                code = update_cli._versions_command(["versions"])
+            self.assertEqual(code, 0)
+            self.assertIn(f"vaultwarden_image {frozen.vaultwarden_image.reference}", output.getvalue())
+            self.assertIn(f"caddy_builder {frozen.caddy_builder_image.reference}", output.getvalue())
+            self.assertIn(f"caddy_runtime {frozen.caddy_runtime_image.reference}", output.getvalue())
 
     def test_status_notification_warning_does_not_fail_runtime_health(self) -> None:
         from vaultwarden_oci import notification, recovery, runtime
@@ -214,12 +319,21 @@ class VwctlIntegrationTests(unittest.TestCase):
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         for command in ("start", "stop", "restart", "status", "logs", "doctor", "versions"):
             self.assertIn(command, help_result.stdout)
+        self.assertIn("update {check,apply}", help_result.stdout)
         version = self.run_vwctl("--version")
-        self.assertEqual(version.stdout.strip(), "vwctl 0.1.0-dev")
+        self.assertEqual(version.stdout.strip(), "vwctl 0.1.0-dev.7")
         versions = self.run_vwctl("versions")
         self.assertEqual(versions.returncode, 0, versions.stderr)
         self.assertIn("vaultwarden 1.37.1", versions.stdout)
         self.assertIn("caddy 2.11.4", versions.stdout)
+        self.assertIn("vaultwarden_image vaultwarden/server:1.37.1@sha256:", versions.stdout)
+
+    def test_update_cli_has_no_latest_mode(self) -> None:
+        for action in ("check", "apply"):
+            with self.subTest(action=action):
+                result = self.run_vwctl("update", action, "--use-latest")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("unrecognized arguments: --use-latest", result.stderr)
 
     def test_config_validate_rejects_plaintext_secret_fields(self) -> None:
         recipient = "age1" + "q" * 58

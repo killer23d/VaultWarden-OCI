@@ -1,9 +1,21 @@
 schema_version = 1
 
 [vaultwarden_oci]
-version = "0.1.0-dev"
+version = "0.1.0-dev.7"
 
 [components]
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
 caddy_dns_cloudflare = "v0.2.4"
+
+[image_digests.vaultwarden]
+amd64 = "sha256:ebdfe70701c60ac0c28c697e787cea767d7972940b786037b29fe0d507f821e8"
+arm64 = "sha256:ebdfe70701c60ac0c28c697e787cea767d7972940b786037b29fe0d507f821e8"
+
+[image_digests.caddy_builder]
+amd64 = "sha256:8e89605351333ad2cc2f3bcc95275a2ccc427f88914050e86a5fde0fd77a63c4"
+arm64 = "sha256:8e89605351333ad2cc2f3bcc95275a2ccc427f88914050e86a5fde0fd77a63c4"
+
+[image_digests.caddy_runtime]
+amd64 = "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
+arm64 = "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"

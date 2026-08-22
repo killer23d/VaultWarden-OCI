@@ -47,11 +47,20 @@ timeout_seconds = 15
 def versions_text() -> str:
     return '''schema_version = 1
 [vaultwarden_oci]
-version = "0.1.0-dev"
+version = "0.1.0-dev.7"
 [components]
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
 caddy_dns_cloudflare = "v0.2.4"
+[image_digests.vaultwarden]
+amd64 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+arm64 = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+[image_digests.caddy_builder]
+amd64 = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+arm64 = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+[image_digests.caddy_runtime]
+amd64 = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+arm64 = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 '''
 
 
@@ -82,9 +91,23 @@ class Phase3RuntimeTests(unittest.TestCase):
             runtime.render(cfg, versions, paths)
             compose = paths.compose.read_text(encoding="utf-8")
             caddyfile = paths.caddyfile.read_text(encoding="utf-8")
+            dockerfile = paths.dockerfile.read_text(encoding="utf-8")
 
-        self.assertIn("vaultwarden/server:1.37.1", compose)
-        self.assertIn('CADDY_VERSION: "2.11.4"', compose)
+        self.assertIn(
+            "vaultwarden/server:1.37.1@sha256:" + "a" * 64,
+            compose,
+        )
+        self.assertIn(
+            "FROM caddy:2.11.4-builder-alpine@sha256:" + "c" * 64,
+            dockerfile,
+        )
+        self.assertIn(
+            "FROM caddy:2.11.4-alpine@sha256:" + "e" * 64,
+            dockerfile,
+        )
+        self.assertIn("github.com/caddy-dns/cloudflare@v0.2.4", dockerfile)
+        self.assertNotIn("ARG CADDY_VERSION", dockerfile)
+        self.assertNotIn("CADDY_VERSION:", compose)
         self.assertIn(f'user: "{runtime.VAULTWARDEN_UID}:{runtime.VAULTWARDEN_GID}"', compose)
         self.assertIn(f'user: "{runtime.CADDY_UID}:{runtime.CADDY_GID}"', compose)
         self.assertIn("cap_drop: [ALL]", compose)
@@ -279,6 +302,25 @@ class Phase3RuntimeTests(unittest.TestCase):
                 materialize.assert_called_once()
             self.assertTrue(any("config" in call and "--quiet" in call for call in calls))
             self.assertTrue(any("up" in call and "--wait" in call for call in calls))
+
+            compose = paths.compose.read_text(encoding="utf-8")
+            dockerfile = paths.dockerfile.read_text(encoding="utf-8")
+            self.assertIn("vaultwarden/server:1.37.1@sha256:" + "a" * 64, compose)
+            self.assertIn("caddy:2.11.4-builder-alpine@sha256:" + "c" * 64, dockerfile)
+
+            with mock.patch.object(secrets, "load", return_value=VALUES), mock.patch.object(
+                secrets, "materialize"
+            ):
+                runtime.lifecycle("restart", paths=paths, versions_path=versions, runner=runner)
+            self.assertTrue(any("--force-recreate" in call for call in calls))
+            self.assertIn(
+                "vaultwarden/server:1.37.1@sha256:" + "a" * 64,
+                paths.compose.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "caddy:2.11.4-alpine@sha256:" + "e" * 64,
+                paths.dockerfile.read_text(encoding="utf-8"),
+            )
 
             overall, rows = runtime.status(runner=runner)
             self.assertEqual(overall, "running")

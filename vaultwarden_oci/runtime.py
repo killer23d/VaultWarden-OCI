@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from . import edge, secrets
-from .cli import CommandResult, DoctorCheck, VersionsError, load_versions, mutation_lock, run_command
+from .cli import CommandResult, DoctorCheck, mutation_lock, run_command
+from .update_versions import FrozenVersions, UpdateError, resolve_pinned_file
 
 ETC = Path("/etc/vaultwarden-oci")
 STATE = Path("/var/lib/vaultwarden-oci")
@@ -236,12 +237,11 @@ def load_config(path: Path = CONFIG) -> RuntimeConfig:
         raise RuntimeConfigError(f"cannot load config {path}: {exc}") from exc
 
 
-def _pins(path: Path) -> tuple[str, str, str]:
+def _pins(path: Path) -> FrozenVersions:
     try:
-        manifest = load_versions(path, require_components=True)
-    except VersionsError as exc:
+        return resolve_pinned_file(path)
+    except UpdateError as exc:
         raise RuntimeErrorV2(str(exc)) from exc
-    return manifest.vaultwarden, manifest.caddy, manifest.caddy_dns_cloudflare
 
 
 def _service_identity_error() -> str | None:
@@ -331,7 +331,7 @@ def render(
     *,
     cloudflare_policy: edge.CloudflarePolicy | None = None,
 ) -> None:
-    vw, caddy, cf = _pins(versions_path)
+    frozen = _pins(versions_path)
     q = json.dumps
     signups = "true" if config.signups_allowed else "false"
     vw_command = (
@@ -347,7 +347,7 @@ def render(
     compose = f'''name: vaultwarden-oci
 services:
   vaultwarden:
-    image: {q("vaultwarden/server:" + vw)}
+    image: {q(frozen.vaultwarden_image.reference)}
     container_name: {NAMES["vaultwarden"]}
     user: "{VAULTWARDEN_UID}:{VAULTWARDEN_GID}"
     restart: unless-stopped
@@ -374,8 +374,8 @@ services:
     logging: {{driver: json-file, options: {{max-size: "10m", max-file: "3"}}}}
     networks: [backend]
   caddy:
-    build: {{context: ., dockerfile: Caddy.Dockerfile, args: {{CADDY_VERSION: {q(caddy)}, CADDY_DNS_CLOUDFLARE_VERSION: {q(cf)}}}}}
-    image: {q("vaultwarden-oci/caddy:" + caddy + "-cloudflare-" + cf.removeprefix("v"))}
+    build: {{context: ., dockerfile: Caddy.Dockerfile}}
+    image: {q(frozen.caddy_image)}
     container_name: {NAMES["caddy"]}
     user: "{CADDY_UID}:{CADDY_GID}"
     # Phase 4 fail-closed rule: Docker must not republish Caddy after daemon/host
@@ -430,11 +430,9 @@ networks:
  reverse_proxy vaultwarden:8080
 }}
 '''
-    dockerfile = '''ARG CADDY_VERSION
-FROM caddy:${CADDY_VERSION}-builder-alpine AS builder
-ARG CADDY_DNS_CLOUDFLARE_VERSION
-RUN xcaddy build --with github.com/caddy-dns/cloudflare@${CADDY_DNS_CLOUDFLARE_VERSION}
-FROM caddy:${CADDY_VERSION}-alpine
+    dockerfile = f'''FROM {frozen.caddy_builder_image.reference} AS builder
+RUN xcaddy build --with github.com/caddy-dns/cloudflare@{frozen.caddy_dns_cloudflare}
+FROM {frozen.caddy_runtime_image.reference}
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 '''
     _write(paths.compose, compose, 0o600)

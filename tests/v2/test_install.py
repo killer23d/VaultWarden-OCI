@@ -14,6 +14,27 @@ from unittest import mock
 from vaultwarden_oci import install
 
 ROOT = Path(__file__).resolve().parents[2]
+PHASE7_VERSION = "0.1.0-dev.7"
+
+
+def exact_versions(version: str) -> str:
+    return f'''schema_version = 1
+[vaultwarden_oci]
+version = "{version}"
+[components]
+vaultwarden = "1.37.1"
+caddy = "2.11.4"
+caddy_dns_cloudflare = "v0.2.4"
+[image_digests.vaultwarden]
+amd64 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+arm64 = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+[image_digests.caddy_builder]
+amd64 = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+arm64 = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+[image_digests.caddy_runtime]
+amd64 = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+arm64 = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+'''
 
 
 class Phase2InstallTests(unittest.TestCase):
@@ -29,10 +50,7 @@ class Phase2InstallTests(unittest.TestCase):
         shutil.copytree(ROOT / "vaultwarden_oci", source / "vaultwarden_oci")
         shutil.copytree(ROOT / "systemd-v2", source / "systemd-v2")
         shutil.copy2(ROOT / "email-providers.toml", source / "email-providers.toml")
-        (source / "versions.toml").write_text(
-            f'schema_version = 1\n[vaultwarden_oci]\nversion = "{version}"\n',
-            encoding="utf-8",
-        )
+        (source / "versions.toml").write_text(exact_versions(version), encoding="utf-8")
         return source
 
     def test_host_validation_accepts_noble_supported_architectures(self) -> None:
@@ -126,11 +144,11 @@ class Phase2InstallTests(unittest.TestCase):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
             )
             self.assertTrue(release_dir.is_dir())
-            self.assertEqual(release_dir.name, "0.1.0-dev")
+            self.assertEqual(release_dir.name, PHASE7_VERSION)
 
             current = root / "opt/vaultwarden-oci/current"
             self.assertTrue(current.is_symlink())
-            self.assertEqual(os.readlink(current), "releases/0.1.0-dev")
+            self.assertEqual(os.readlink(current), f"releases/{PHASE7_VERSION}")
 
             vwctl = root / "usr/local/bin/vwctl"
             self.assertTrue(vwctl.is_symlink())
@@ -168,17 +186,34 @@ class Phase2InstallTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((release_dir / "vwctl").stat().st_mode), 0o555)
             self.assertEqual(stat.S_IMODE((release_dir / "systemd-v2").stat().st_mode), 0o555)
             self.assertTrue((release_dir / "vaultwarden_oci/install.py").is_file())
+            installed_versions = (release_dir / "versions.toml").read_text(encoding="utf-8")
+            self.assertIn("[image_digests.vaultwarden]", installed_versions)
+            self.assertIn("[image_digests.caddy_builder]", installed_versions)
+            self.assertIn("[image_digests.caddy_runtime]", installed_versions)
 
             config = root / "etc/vaultwarden-oci/config.toml"
             config.write_text('site_name = "preserved"\n', encoding="utf-8")
             install.install_layout(ROOT, root=root, systemd_reload=False)
             self.assertEqual(config.read_text(encoding="utf-8"), 'site_name = "preserved"\n')
 
+    def test_install_rejects_missing_exact_image_pins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.write_release_source(root, "0.1.0-missing-digests")
+            (source / "versions.toml").write_text(
+                'schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-missing-digests"\n'
+                '[components]\nvaultwarden = "1.37.1"\ncaddy = "2.11.4"\n'
+                'caddy_dns_cloudflare = "v0.2.4"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(install.InstallError, "image_digests"):
+                install.install_layout(source, root=root / "target", systemd_reload=False)
+
     def test_same_release_with_different_content_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install.install_layout(ROOT, root=root, systemd_reload=False)
-            release_dir = root / "opt/vaultwarden-oci/releases/0.1.0-dev"
+            release_dir = root / f"opt/vaultwarden-oci/releases/{PHASE7_VERSION}"
             installed = release_dir / "versions.toml"
 
             os.chmod(release_dir, 0o755)
@@ -197,7 +232,7 @@ class Phase2InstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install.install_layout(ROOT, root=root, systemd_reload=False)
-            installed = root / "opt/vaultwarden-oci/releases/0.1.0-dev/versions.toml"
+            installed = root / f"opt/vaultwarden-oci/releases/{PHASE7_VERSION}/versions.toml"
             os.chmod(installed, 0o644)
             with self.assertRaisesRegex(install.InstallError, "incompatible mode"):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
@@ -265,7 +300,7 @@ class Phase2InstallTests(unittest.TestCase):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
             self.assertEqual(os.readlink(current), "releases/older")
             self.assertFalse(
-                (root / "opt/vaultwarden-oci/releases/0.1.0-dev").exists()
+                (root / f"opt/vaultwarden-oci/releases/{PHASE7_VERSION}").exists()
             )
 
     def test_existing_systemd_unit_drift_fails_clearly(self) -> None:

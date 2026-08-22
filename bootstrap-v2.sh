@@ -31,4 +31,4 @@ esac
 
 cd -- "$repo_root"
 unset PYTHONPATH
-exec /usr/bin/python3 -B -E -m vaultwarden_oci.install --source "$repo_root"
+exec /usr/bin/python3 -B -E -m vaultwarden_oci.install --source "$repo_root" "$@"
