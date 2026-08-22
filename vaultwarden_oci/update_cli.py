@@ -56,7 +56,7 @@ def _update_command(argv: Sequence[str]) -> int:
         release = update.apply_update(plan)
         print(f"PASS: activated immutable release {release}")
         return 0
-    except (UpdateError, cli.LockBusyError, OSError) as exc:
+    except (UpdateError, install.InstallError, cli.LockBusyError, OSError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
 
