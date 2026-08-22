@@ -1,56 +1,68 @@
 # Recovery
 
-V2 supports one recovery format and one offsite publication model. There is no V1 backup reader, migration format, provider framework, or destructive rclone sync path.
+VaultWarden-OCI has one normal encrypted application recovery format, `.vwrec`, plus a **separate** password-protected recovery-kit ZIP for credential handoff. They solve different problems and must not be treated as interchangeable.
 
-## Recovery custody
+There is no public `db`/`full`/`emergency` application-recovery tier model and no compatibility reader for the earlier archive format.
 
-A `.vwrec` file is an Age-encrypted V2 recovery archive addressed to the offline Age recipient configured in `/etc/vaultwarden-oci/config.toml`. It contains the operator config, the still-encrypted SOPS document, a consistent Vaultwarden SQLite snapshot/data, and Caddy state needed by V2. It does **not** contain the host operational Age private key.
+## Application recovery custody
 
-Keep the offline Age private identity away from the host and test that it can decrypt a disposable recovery artifact before relying on it.
+A `.vwrec` file is the encrypted application recovery point. It contains the application/configuration state required by the supported recovery contract while excluding the server's operational Age private key.
 
-## Create a local recovery point
+The offline Age private recovery identity is kept away from the appliance. Only the public recipient needed for normal encryption/configuration is present on the server. Test the offline identity against disposable recovery material before relying on it.
+
+## Create and verify a local recovery point
+
+Use the authoritative CLI:
 
 ```bash
 sudo vwctl backup
-```
-
-The recovery owner quiesces running V2 containers as needed, creates a consistent SQLite snapshot, builds and validates the V2 manifest/archive, encrypts it with Age, verifies the resulting envelope, records its SHA-256/size, and resumes services. A failed verification is not reported as success.
-
-Check status/doctor afterward:
-
-```bash
 sudo vwctl status
 sudo vwctl doctor --json
 ```
 
+A recovery operation is successful only after the application recovery artifact has passed its required consistency, manifest/path/checksum, encryption/envelope, and relevant SQLite/SOPS custody checks. Failed verification is not success.
+
 ## Publish with rclone
 
-Configure an rclone remote independently, then:
+Where an rclone remote is configured, normal offsite publication is:
+
+```text
+create local candidate
+-> verify local candidate
+-> copy/copyto-style publication
+-> independently verify the remote object
+-> report success
+```
+
+The current explicit CLI form is:
 
 ```bash
 sudo vwctl backup --remote REMOTE:path
 ```
 
-Success means all of these completed:
+Normal publication must not use destructive `rclone sync`. Creating a new recovery point must not implicitly delete older remote recovery material.
 
-1. local V2 artifact verified;
-2. `rclone copyto` uploaded that exact object;
-3. the remote object was downloaded to a temporary local path with `rclone copyto`;
-4. the downloaded Age envelope, size, and SHA-256 matched the verified local artifact.
+## Human restore picker
 
-No `rclone sync` is used. Publication does not prune old objects.
+The supported human restore experience includes a guided local/remote picker in the useful interaction style of the earlier product. It should help the administrator choose a local `.vwrec` or a remote recovery object, surface what will be restored, and then call the same authoritative restore implementation.
 
-## Restore from a local artifact
+The picker is a human interface, not a second restore engine. Validation, staging, locking, promotion, and post-restore health behavior remain owned by the Python/`vwctl` recovery implementation.
 
-On a disposable/replacement V2 host with the offline Age private identity available as a root-readable file, invoke restore directly; **do not pre-stop the V2 service**:
+## Explicit local restore for automation
+
+Noninteractive explicit forms remain supported. For example:
 
 ```bash
-sudo vwctl restore --file /secure/path/recovery.vwrec --identity /secure/offline-age-key.txt
+sudo vwctl restore \
+  --file /secure/path/recovery.vwrec \
+  --identity /secure/offline-age-key.txt
 ```
 
-Restore deliberately performs the expensive/safety-critical work before downtime: Age decryption, archive/manifest/path/checksum validation, offline SOPS custody validation, target/free-space preflight, staging, ownership/mode preparation, SQLite integrity proof, and replacement operational Age/SOPS custody validation. Only after those checks succeed does it acquire the mutation lock, stop/remove existing V2 containers, and promote staged state. A wrong identity, corrupt artifact, insufficient space, or invalid custody should therefore fail before a running service is stopped.
+Do **not** pre-stop a healthy service merely to begin restore. The restore implementation should perform expensive/safety-critical preflight work before downtime: decryption, archive/manifest/path/checksum validation, SOPS custody validation, storage/free-space checks, staging, ownership/mode preparation, and SQLite integrity proof.
 
-By default services remain stopped after successful promotion. Inspect the restored configuration and diagnostics, then start deliberately:
+Only after those checks pass should it acquire the mutation boundary, stop/remove the running application as required, and promote staged state.
+
+After a successful promotion, inspect diagnostics and start deliberately unless the selected restore mode explicitly includes a health-gated start:
 
 ```bash
 sudo vwctl doctor --json
@@ -58,18 +70,9 @@ sudo vwctl start
 sudo vwctl status
 ```
 
-Or request post-promotion startup/health gating in the restore transaction:
+## Explicit remote restore for automation
 
-```bash
-sudo vwctl restore --file /secure/path/recovery.vwrec \
-  --identity /secure/offline-age-key.txt --start
-```
-
-Restore accepts only the V2 format, validates safe paths and exact manifest membership/checksums, rejects an embedded operational Age key, validates SQLite integrity and SOPS/Age custody, and promotes through a rollback-aware transaction.
-
-## Restore directly from rclone
-
-Again, do not stop a healthy V2 service first. Let restore complete download and preflight before it introduces downtime:
+The explicit remote form remains supported, for example:
 
 ```bash
 sudo vwctl restore \
@@ -77,41 +80,65 @@ sudo vwctl restore \
   --identity /secure/offline-age-key.txt
 ```
 
-The remote object is first downloaded to a partial local path and verified before restore processing. It is not streamed blindly into persistent state.
+The remote object is downloaded/staged and validated before promotion; it is not streamed blindly into live persistent state.
+
+## Separate recovery-kit credential handoff
+
+The recovery-kit ZIP is **not** a `.vwrec` application recovery point. It is a credential-handoff artifact intended to give the operator an independently protected copy of required recovery/credential material.
+
+Its fixed security contract is:
+
+- AES-256 encrypted ZIP;
+- passphrase entered interactively and entered again for confirmation;
+- passphrase independent of Vaultwarden/admin/SMTP/API/Age credentials already stored by the appliance;
+- passphrase never supplied through argv;
+- passphrase never supplied through environment variables;
+- passphrase never read from a file;
+- passphrase never sent by email;
+- the completed encrypted ZIP is fully verified before email is attempted;
+- failed verification blocks email/handoff success;
+- failed/declined email remains an observable handoff outcome rather than rewriting ZIP verification as failure or success.
+
+The implementation should minimize plaintext lifetime and leave no persistent server copy of the separate offline recovery private identity merely to build the kit.
 
 ## Explicit remote retention
 
-Plan first:
+Retention/deletion is separate from publication. Plan before destructive action:
 
 ```bash
 sudo vwctl recovery prune --remote REMOTE:path --keep-last 7
 ```
 
-Review the displayed keep/delete decision. Execute only with explicit confirmation:
+Then require the explicit confirmation form before deletion:
 
 ```bash
 sudo vwctl recovery prune --remote REMOTE:path --keep-last 7 --confirm
 ```
 
-Retention is deliberately separate from backup publication so creating a new recovery point cannot implicitly delete older remote recovery material.
+## Recovery acceptance
 
-## Disposable recovery acceptance
+A release gate should prove the complete path on disposable state:
 
-A release gate should prove the complete path, not merely archive creation:
+1. create known application state;
+2. create and verify a `.vwrec`;
+3. publish it to a test remote and independently verify the remote object;
+4. prove a safe preflight failure does not stop/corrupt a healthy target;
+5. restore on a clean/disposable target using only the offline Age identity for recovery decryption;
+6. start and pass `vwctl status` plus `vwctl doctor --json`;
+7. confirm known application state survived;
+8. confirm the operational Age private key was not embedded in the recovery point;
+9. separately exercise the recovery-kit ZIP handoff and verify the passphrase never appears in argv/environment/file/email/log evidence.
 
-1. create known Vaultwarden state on the disposable source host;
-2. `vwctl backup --remote REMOTE:acceptance/...`;
-3. independently confirm the remote object exists;
-4. restore/download it on a clean disposable V2 target (or after preparing disposable target state) **without pre-stopping a healthy target**;
-5. use only the offline Age identity for restore decryption;
-6. start and pass `vwctl status` + `vwctl doctor --json`;
-7. verify the known Vaultwarden state survived;
-8. verify the offline identity was not copied into `/etc/vaultwarden-oci` or the recovery artifact.
+## Update recovery boundary
 
-For a running disposable target, include one deliberate preflight-failure check (for example, a wrong offline identity) and verify `vwctl status` remains healthy afterward. This proves the documented preflight-before-stop property without requiring a destructive failure after promotion begins.
+Application updates verify a pre-update `.vwrec` before activation. If a candidate release fails before it could mutate persistent application state, the implementation may coherently restore the prior release. If candidate runtime activation may have changed persistent state, do not blindly switch binaries backward and claim the data was rolled back. The verified pre-update recovery point is the downgrade boundary.
 
-Record the artifact SHA-256, source/target architecture, V2 release version, and acceptance date. Delete acceptance-only remote artifacts explicitly when the release record no longer needs them.
+Ubuntu apt/kernel changes are outside application recovery. `.vwrec` does not pretend to roll back host package state.
 
 ## Failure handling
 
-Do not work around a failed recovery check by unpacking/promoting files manually. Preserve the failed artifact and secret-free diagnostics, correct the underlying configuration/storage/tooling problem, and repeat on disposable state. Recovery code intentionally refuses unsafe paths, symlinks/unsupported file types, incomplete manifests, checksum mismatches, invalid Age envelopes, unrecoverable SOPS custody, and insufficient/unsafe promotion conditions.
+Do not bypass failed recovery checks by unpacking/promoting files manually. Preserve the failed artifact and secret-free diagnostics, correct the underlying storage/config/tooling problem, and retry on disposable state when appropriate.
+
+## Current development-branch gaps
+
+The current development branch already implements the explicit `.vwrec` CLI recovery path and rclone publication/pruning model, but it does not yet provide the approved guided human local/remote picker or the separate approved recovery-kit ZIP workflow on this branch. Those are implementation gaps, not optional product behavior.

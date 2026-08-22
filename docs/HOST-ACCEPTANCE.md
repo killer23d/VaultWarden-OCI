@@ -1,8 +1,8 @@
 # Ubuntu 24.04 disposable-host acceptance
 
-This is a **release gate**, not a per-PR test controller. Run it on disposable Ubuntu 24.04 hosts for both `amd64` and `arm64` when those environments are available. Record unavailable architecture/provider resources as **not run**; do not replace missing real-host evidence with claims based on mocks.
+This is a release gate, not a per-PR test controller. Run it on disposable Ubuntu 24.04 hosts for both `amd64` and `arm64` when those environments are available. Record unavailable architecture/provider resources as **NOT RUN**; do not replace missing real-host evidence with claims based on mocks.
 
-Use a dedicated test domain, Cloudflare zone/tokens, notification provider account, SMTP credentials, rclone remote, and offline Age identity. Destroy/rotate test credentials after the gate as appropriate.
+Use a dedicated test domain, Cloudflare zone/tokens, notification provider account, SMTP credentials, rclone remote, dedicated storage volume/filesystem, and offline Age identity. Destroy/rotate test credentials after the gate as appropriate.
 
 ## Acceptance record
 
@@ -14,6 +14,7 @@ commit:
 versions output:
 host architecture: amd64 | arm64
 Ubuntu image/build:
+dedicated storage device/filesystem/mount:
 Docker/Compose version:
 Cloudflare test zone:
 notification provider:
@@ -27,60 +28,69 @@ notes:
 
 A release is not accepted for an architecture unless every applicable mandatory section passes.
 
-## 1. Clean host and install/layout
+## 1. Clean host, dedicated storage, and setup
 
-On a clean Ubuntu 24.04 host, follow [INSTALL.md](INSTALL.md) from its prerequisite section rather than assuming tools are preinstalled. Before bootstrap, record:
+Begin on a clean Ubuntu 24.04 host with a separate test storage filesystem/volume intended for persistent application/recovery state.
 
-```bash
-. /etc/os-release
-printf '%s %s\n' "$ID" "$VERSION_ID"
-uname -m
-python3 --version
-sudo docker version
-sudo docker compose version
-age --version
-sops --version
-rclone version
-iptables --version
-ip6tables --version
-```
-
-Then install V2:
+Run the supported first-run interface rather than substituting the low-level bootstrap:
 
 ```bash
-sudo ./bootstrap-v2.sh
-readlink -f /opt/vaultwarden-oci/current
-readlink -f /usr/local/bin/vwctl
-sudo find /etc/vaultwarden-oci -maxdepth 1 -printf '%M %u:%g %p\n'
-sudo find /var/lib/vaultwarden-oci -maxdepth 2 -printf '%M %u:%g %p\n' | sort
-systemctl cat vaultwarden-oci.service
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com
 ```
 
-Inspect `/etc/vaultwarden-oci/config.toml` before editing it. Pass when the immutable release exists under `/opt/vaultwarden-oci/releases/<version>`, `current` and `/usr/local/bin/vwctl` resolve to it, the fresh config contains the complete beta schema rather than a phase placeholder, V2 systemd units are installed, and no V1 runtime/dashboard/Postfix unit is installed by V2.
+Repeat a separate acceptance case with `--auto` where noninteractive setup support is being released. Confirm `--auto` does not imply `--use-latest`.
 
-## 2. SOPS/Age and no-leak materialization
+Pass only when:
 
-Create distinct operational and offline Age identities. Put only the operational private identity at `/etc/vaultwarden-oci/age-key.txt`; put only the offline public recipient in config. Encrypt `secrets.sops.yaml` to both recipients and configure required secrets plus test notification credentials.
+- Ubuntu 24.04 and the host architecture are accepted;
+- required dependencies are installed/validated by setup;
+- the dedicated storage filesystem is mounted and the persistent application/recovery state path resolves onto that filesystem rather than `/`;
+- removing/hiding that mount causes startup/doctor to fail safely instead of creating persistent state on the root filesystem;
+- the immutable release exists under `/opt/vaultwarden-oci/releases/<version>` and `current`/`vwctl` select it;
+- operator config and encrypted secret authorities exist under `/etc/vaultwarden-oci` with narrow ownership/modes;
+- setup leaves an explicit config/secrets -> start checkpoint rather than claiming success for an incompletely configured running service.
 
-Before start:
+Restore the dedicated mount before continuing.
+
+## 2. Explicit `--use-latest` freeze
+
+On a separate disposable install, exercise the independent override:
+
+```bash
+sudo ./setup.sh install \
+  --domain vault-latest.example.com \
+  --email admin@example.com \
+  --use-latest
+```
+
+Pass only when every mutable project/component/image boundary is resolved once to an exact immutable version/digest, the exact resolved values are recorded, and no installed config/state/image reference retains floating `latest` semantics.
+
+Do not accept a workflow that writes `latest` and relies on later pulls to resolve it again.
+
+## 3. SOPS/Age and recovery-kit custody
+
+Create distinct operational and offline Age identities. Put only the operational private identity on the appliance; keep the offline private identity off-host. Encrypt the normal SOPS document to the required recipients and configure required test credentials.
+
+Before first start:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl doctor --json
 ```
 
-Start and inspect volatile material:
+Exercise recovery-kit creation/handoff separately from `.vwrec` application recovery. Pass only when:
 
-```bash
-sudo vwctl start
-sudo find /run/vaultwarden-oci -maxdepth 3 -printf '%M %u:%g %p\n' | sort
-```
+- the recovery kit is an AES-256 encrypted ZIP;
+- its passphrase is entered and confirmed interactively;
+- that passphrase is independent of stored credentials;
+- the passphrase does not appear in argv, environment variables, files, email, logs, or captured process listings;
+- the encrypted ZIP is fully verified before email is attempted;
+- failed/declined email is reported truthfully without changing ZIP-verification truth;
+- the offline Age private identity is not persistently stored on the server.
 
-Pass when `secrets.custody` and `secrets.decrypt` pass; required component secrets exist only in the intended `/run/vaultwarden-oci/secrets` mounts; `email_api_token` and `cloudflare_remediation_token` are not materialized there; plaintext secrets are absent from `/opt/vaultwarden-oci`, `config.toml`, generated Compose/Caddy files, journal output, and recovery state JSON.
+## 4. First start, dashboard, status, doctor, and logs
 
-Use bounded searches for **known test secret values** rather than generic strings. Do not print real production secrets into a release record.
-
-## 3. Start/status/doctor/logs
+After configuration/secrets/storage checks pass:
 
 ```bash
 sudo vwctl start
@@ -89,78 +99,71 @@ sudo vwctl doctor --json | tee /tmp/vwoci-doctor.json
 sudo vwctl logs --tail 50
 ```
 
-Pass when Vaultwarden and Caddy are running/healthy and doctor has no `FAIL`. Preserve the JSON as release evidence after reviewing it for secret-free output.
+Pass when the application is healthy and doctor has no `FAIL`. Preserve secret-free doctor JSON as evidence.
 
-## 4. Cloudflare origin fail-closed and CrowdSec Cloudflare remediation
+Then launch `dashboard.sh` as the supported day-2 human interface. Confirm the useful color-coded/AMTM-style interaction is functional and that any mutation selected from the dashboard delegates to `vwctl` rather than performing a second independent state mutation.
 
-Run the bounded local packet test on the disposable host:
+A dashboard presentation must not hide or reinterpret a doctor `FAIL`.
 
-```bash
-sudo tests/v2/acceptance_edge_packet.sh
-```
+## 5. Caddy module set, real-client-IP trust, and origin firewall
 
-Then test the real edge path:
+Inspect the installed Caddy binary/module set. Pass only when the exact-pinned xcaddy build contains the required capabilities:
 
-```bash
-sudo vwctl edge refresh
-sudo iptables -w -n -L DOCKER-USER
-sudo ip6tables -w -n -L DOCKER-USER
-```
+- Cloudflare DNS;
+- Cloudflare trusted-proxy/real-client-IP support;
+- combined Cloudflare IP ranges;
+- Caddy rate limiting.
 
-From outside the origin, verify the public application works through Cloudflare. Verify a direct non-Cloudflare path to origin TCP/443 is denied. In a controlled window, invalidate/block the current Cloudflare CIDR fetch **and** make any LKG unusable; invoke refresh/start and verify it fails while published 443 remains guarded. Restore normal network/LKG state afterward.
+Inspect generated Caddy configuration. Pass only when Cloudflare client-IP trust is owned by the trusted-proxy module and there is no second generated static Cloudflare CIDR `trusted_proxies` block.
 
-Configure CrowdSec beta remediation:
+Then test the distinct host-level origin control:
 
-```bash
-sudo vwctl crowdsec setup
-sudo vwctl crowdsec remediation-start
-```
+- the `DOCKER-USER` path permits published HTTPS only from validated Cloudflare IPv4/IPv6 ranges;
+- direct non-Cloudflare origin TCP/443 is denied;
+- invalid current ranges plus unusable last-known-good state leaves origin HTTPS fail-closed;
+- restoring a safe range policy restores supported ingress.
 
-In Cloudflare, verify every Worker Route created by this invocation is **Fail Open**, then:
+The Caddy trusted-proxy test and origin-filter test are separate acceptance conditions.
 
-```bash
-sudo vwctl crowdsec confirm-fail-open
-sudo vwctl crowdsec status
-sudo vwctl doctor --json
-```
+## 6. `/admin` defense in depth
 
-Create a safe test web decision through the supported CrowdSec tooling and verify Cloudflare remediation appears/acts as expected. Pass only if remediation is Cloudflare-side and no V2 host firewall bouncer is required.
+Verify the supported lightweight stack:
 
-## 5. Notification API success and transient SMTP fallback
+- Vaultwarden admin token is required;
+- Caddy rate limiting applies to `/admin`;
+- exactly one simple outer authentication gate protects `/admin` before the application;
+- no enterprise identity stack or redundant outer gate is required for acceptance.
 
-Configure one real built-in provider. For CyberPersons use canonical `cyberpersons` (or verify the `cyberpanel` alias resolves to it), an API key with `can_send`, a verified sending domain, SOPS `email_api_token`, and independent authenticated SMTP credentials if using its SMTP fallback.
+## 7. CrowdSec Cloudflare remediation
 
-Trigger one controlled V2 notification event and confirm API delivery succeeds with no SMTP fallback. Review `vwctl status` / `vwctl doctor --json` for secret-free persisted status.
+Configure the supported CrowdSec web-remediation path and verify a safe test decision is enforced through Cloudflare.
 
-For a representative fallback test, use a disposable/test provider condition that produces a **catalog-declared transient** response without changing operator endpoint authority. For CyberPersons, the current status-only transient is `503 service_unavailable`. Confirm bounded API retries occur and authenticated TLS SMTP fallback sends once afterward.
+Pass only when proxied web-client remediation occurs at Cloudflare and no CrowdSec host firewall bouncer is required. Do not confuse the separate `DOCKER-USER` Cloudflare source-range origin filter with CrowdSec remediation.
 
-Also prove that CyberPersons `429 rate_limit_exceeded` and `500 send_failed` are **not** treated as SMTP-fallback eligible by status alone. A focused automated test is acceptable when safely forcing those provider responses is unavailable. Current provider documentation uses 429 for account-wide minute/hour/day/month limits shared by API and SMTP credentials, so do not reinterpret an arbitrary 429 as a transient acceptance condition.
+## 8. Notification API success and transient SMTP fallback
+
+Configure one real built-in provider and trigger a controlled operational notification. Confirm API delivery succeeds without SMTP fallback for a successful request.
+
+Exercise a catalog-declared transient case and confirm bounded retry plus authenticated SMTP fallback. For CyberPersons, the current status-only transient case is `503 service_unavailable`.
+
+Also prove CyberPersons `429 rate_limit_exceeded` and `500 send_failed` are **not** SMTP-fallback eligible by status alone. Focused automated injection is acceptable when safely forcing those real provider responses is impractical.
 
 Pass when permanent/auth/TLS/ambiguous outcomes remain visible and are not masked by SMTP.
 
-## 6. Provider catalog validation
+## 9. Application recovery: backup -> rclone -> verify -> restore
 
-```bash
-python3 -m unittest tests.v2.test_notification tests.v2.test_notification_security -v
-sudo vwctl doctor --json
-```
-
-Pass when the catalog has exactly the six canonical built-ins, `cyberpanel -> cyberpersons`, exact canonical message fields, HTTPS/closed endpoint authority, and configured provider/options validate. Re-check current official provider documentation used by the release when catalog metadata changed.
-
-## 7. Recovery: backup -> rclone -> verify -> download -> restore
-
-Create known test vault state before the backup.
+Create known test vault state before backup.
 
 ```bash
 sudo vwctl backup --remote 'REMOTE:vwoci-acceptance'
 sudo vwctl status
 ```
 
-Record the local artifact name/SHA-256 and independently list the remote object.
+Record the local `.vwrec` name/SHA-256 and independently confirm the remote object.
 
-If the disposable target is already running, first prove the preflight-before-stop guarantee with a deliberately wrong offline identity or other safe preflight failure. Invoke restore **without pre-stopping the service**, expect restore to fail, then verify `sudo vwctl status` still reports the running target healthy. Do not manufacture a failure after promotion begins.
+Exercise the supported guided human restore picker for both a local and a remote selection on disposable state. Confirm it delegates to the same authoritative restore implementation.
 
-For the valid restore, use a clean target host or deliberately prepared disposable V2 target state and again do **not** run `vwctl stop` first:
+Also retain explicit noninteractive CLI acceptance for automation. For a running disposable target, first prove a safe preflight failure (for example, wrong offline identity) does not stop/corrupt the healthy service. Then perform a valid restore without pre-stopping the service:
 
 ```bash
 sudo vwctl restore \
@@ -170,45 +173,65 @@ sudo vwctl status
 sudo vwctl doctor --json
 ```
 
-Pass when publication succeeded only after remote re-download/checksum verification; invalid recovery input failed before stopping a healthy running target; the valid restore preflight completed before mutation/downtime; the restored known vault state is present; the operational Age private key was not inside the artifact; and the restored service passes status/doctor.
+Pass when publication succeeded only after remote verification, invalid input failed before destructive mutation, restored known state is present, and the operational Age private key was not embedded in the recovery point.
 
-Test prune separately in plan mode before any confirmed deletion:
+Test retention separately in plan mode before confirmed deletion.
 
-```bash
-sudo vwctl recovery prune --remote 'REMOTE:vwoci-acceptance' --keep-last 1
-```
+## 10. systemd
 
-## 8. systemd
+Enable the installed lifecycle/timers only after setup/start acceptance:
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target
-systemctl is-active vaultwarden-oci.service
 systemctl list-timers 'vaultwarden-oci-*'
-systemctl cat vaultwarden-oci-health.service
-systemctl cat vaultwarden-oci-backup.service
-systemctl cat vaultwarden-oci-maintenance.service
 ```
 
-Manually invoke each oneshot where safe and inspect its journal. Pass when lifecycle plus health/backup/maintenance timers use the installed `current/vwctl` authority and failure notifications use the V2 notify template.
+Pass when services/timers use the installed authoritative CLI and do not start the application against a missing dedicated storage filesystem.
 
-## 9. Pinned update
+## 11. Operator-driven application update
 
-Prepare a trusted candidate release with a **new** `vaultwarden_oci.version` and exact `versions.toml` pins.
+Prepare or discover a trusted stable candidate application release with exact immutable component/image values.
+
+The required flow is:
+
+```text
+discover stable release
+-> stage/download/build before downtime
+-> verify pre-update recovery point
+-> activate immutable release
+-> health-gate
+-> roll back coherently when safe
+```
+
+Where the current CLI source form is still used, validate it with:
 
 ```bash
 cd /path/to/candidate
 sudo vwctl update check --source "$PWD"
 sudo vwctl update apply --source "$PWD"
-readlink -f /opt/vaultwarden-oci/current
 sudo vwctl versions
 sudo vwctl status
 sudo vwctl doctor --json
 ```
 
-Pass when update check reports exact candidate versions/digests; apply creates/gates a pre-update recovery point; the immutable release changes; activation uses exact pins; and post-update status/doctor pass. Do not use `--use-latest` for this gate.
+Pass when candidate content is prepared before downtime where possible, a verified pre-update `.vwrec` exists, activation uses exact immutable values, health gating is truthful, and rollback behavior refuses unsafe binary-only downgrade after possible persistent-state mutation.
 
-## 10. Cleanup and evidence
+Verify automatic update **check/notification** if that release includes it. Unattended update **apply** must not be enabled by default.
 
-Collect only secret-free evidence: host/architecture, commit/version, test command/result, doctor JSON, artifact hashes, and external verification notes. Remove disposable host/state and acceptance-only remote objects through explicit deletion after evidence retention requirements are met. Rotate/revoke test tokens where appropriate.
+## 12. Ubuntu package-update separation
 
-Report each architecture as PASS, FAIL, or NOT RUN. Never convert an unavailable `arm64`/external-provider run into PASS based on `amd64` or unit tests alone.
+Verify administrator documentation/tooling treats apt/kernel maintenance as a separate workflow from application updates/recovery. No application recovery claim may imply apt/kernel rollback, and no supported path may auto-reboot the host.
+
+## 13. Cleanup and evidence
+
+Collect only secret-free evidence: host/architecture, commit/version, dedicated-storage mount evidence, exact resolved version/digests where relevant, test command/result, doctor JSON, artifact hashes, and external verification notes.
+
+Remove disposable hosts/state and acceptance-only remote objects through explicit deletion after evidence retention requirements are met. Rotate/revoke test tokens where appropriate.
+
+Report each architecture as PASS, FAIL, or NOT RUN. Never convert unavailable `arm64`/external-provider evidence into PASS based on `amd64` or unit tests.
+
+## Current development-branch applicability
+
+At the time the durable contract was synchronized, the current development branch did not yet implement several mandatory acceptance surfaces: supported `setup.sh`, dedicated-storage enforcement, supported `dashboard.sh`, production `--use-latest` exact freezing, the full required Caddy module/trusted-proxy design, guided restore picker, and recovery-kit ZIP workflow.
+
+Therefore a full host release acceptance against that snapshot must report those sections as **FAIL/not yet implementable**, not silently fall back to the superseded bootstrap contract. This document defines the release gate the implementation must converge on.

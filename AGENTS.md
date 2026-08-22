@@ -1,60 +1,67 @@
-# AGENTS.md — VaultWarden-OCI V2 repository map
+# AGENTS.md — VaultWarden-OCI repository map
 
 ## Start here
 
-VaultWarden-OCI V2 is a **greenfield fresh-install product**, not a compatibility refactor of V1. The target is a small deployment of roughly 10 users operated by a junior administrator on Ubuntu 24.04 LTS Noble, tested on amd64 and arm64.
+VaultWarden-OCI is a fresh-install Vaultwarden appliance for a small team of roughly 10 users, operated by a junior administrator on Ubuntu 24.04 LTS. `amd64` and `arm64` are supported/tested targets. The runtime is cloud-provider neutral, with Cloudflare as the supported public-edge model.
 
-V1 remains useful as a **security and behavioral reference only**. Do not preserve V1 project state, backup formats, migration paths, command aliases, runtime layout, Postfix/queue machinery, dashboard behavior, test architecture, or implementation shape unless a current V2 decision explicitly requires the underlying property.
+The current development line was created as a greenfield successor to the earlier implementation, but the durable product contract is not a compatibility exercise. **The earlier UI/UX is a design reference; the earlier backend architecture is not a compatibility target.** Preserve useful operator behavior, security properties, and recovery lessons without recreating Make-based orchestration, Postfix/queues, backup tiers, migration compatibility, broad helper libraries, or the old test architecture.
 
 For each task, use this order of authority:
 
-1. explicit human instructions for the task;
-2. the complete standalone phase/corrective prompt in `reports/V2-CODEX-PROMPTS.md`;
-3. the V2 product/decision documents listed below;
-4. this file as a repository map.
+1. explicit human instructions for the current task;
+2. `docs/PROJECT-BOUNDARY.md` and `docs/V2-DECISIONS.md` as the durable product/implementation contract;
+3. the administrator manuals (`README.md`, `docs/INSTALL.md`, `docs/OPERATIONS.md`, `docs/SECURITY.md`, `docs/RECOVERY.md`);
+4. this file as the repository map;
+5. historical reports only as evidence/rationale unless the human explicitly promotes one for the task.
 
-If a supporting document conflicts with the pasted task prompt, report the conflict rather than silently changing architecture. Ordinary phase/corrective work must not edit `reports/V2-CODEX-PROMPTS.md`.
+`reports/V2-CODEX-PROMPTS.md` and `reports/V2-REVIEW-PROMPTS.md` are historical/workstream utilities, not permission to override a newer explicit product contract. Do not edit them unless explicitly instructed.
 
-## V2 documents
+## Product invariants
 
-Read the documents relevant to the task before implementation:
-
-- `reports/V2-CODEX-PROMPTS.md` — authoritative standalone implementation prompts and phase boundaries.
-- `docs/PROJECT-BOUNDARY.md` — concise supported V2 product boundary.
-- `docs/V2-DECISIONS.md` — durable Phase 0 implementation decisions and fixed authorities.
-- `reports/V2-ARCHITECTURE-PROPOSAL.md` — target architecture and rationale.
-- `reports/V2-AUDIT.md` — evidence for the greenfield reset and V1 lessons.
-- `reports/V2-TEST-STRATEGY.md` — bounded three-layer testing model.
-- `reports/V2-REVIEW-PROMPTS.md` — reviewer utility only; not an implementation authority.
+- Ubuntu 24.04 LTS only; `amd64` and `arm64` supported/tested.
+- Production persistent application state must live on a dedicated storage filesystem/volume. A root-only host is not a supported production install.
+- The normal first-run human path is `setup.sh`: validate host/storage, install dependencies and the appliance, prepopulate config from operator inputs, assist secrets/recovery custody, then leave an explicit config/secrets -> start path.
+- `setup.sh` supports interactive mode, `--auto`, and an independent explicit `--use-latest` override. `--use-latest` resolves once to exact immutable values and must never leave floating `latest` state.
+- `dashboard.sh` is a supported day-2 human interface. `vwctl` remains the implementation/mutation authority. One implementation authority does not mean one user interface.
+- Retain the useful color-coded/AMTM-style interaction conventions from the earlier product as the visual/interaction reference.
+- Python 3.12 standard-library-first owns structured config/state/validation/update/recovery logic. Bash remains thin bootstrap/UI/host glue where materially simpler.
+- One operator-editable non-secret authority under `/etc/vaultwarden-oci`, one encrypted SOPS secret document, and one source-controlled exact version manifest.
+- SOPS + Age remains the secret mechanism. The operational Age private key is root-only. The separate offline recovery identity is not persistently stored on the server.
+- A password-protected recovery-kit ZIP is a separate credential-handoff artifact from the normal encrypted `.vwrec` application recovery point.
+- Caddy remains an exact-pinned xcaddy custom build with Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP support, combined Cloudflare IP ranges, and Caddy rate limiting.
+- Caddy's Cloudflare trusted-proxy module owns real-client-IP trust. Do not also generate a static trusted-proxy CIDR block in Caddy.
+- Host-level Cloudflare-only origin protection is separate: keep one small fail-closed Docker `DOCKER-USER` path allowing published HTTPS only from validated Cloudflare ranges.
+- CrowdSec remediates proxied web-client decisions through Cloudflare; no CrowdSec host firewall bouncer is required.
+- Preserve lightweight `/admin` defense in depth: Vaultwarden admin token, Caddy-side rate limiting, and one simple outer authentication gate.
+- Vaultwarden application mail uses direct authenticated SMTP. Operational notification providers remain the closed source-controlled catalog.
+- CyberPersons current catalog behavior is authoritative unless official provider documentation is deliberately re-verified for a focused change: `503` is status-only retry/fallback eligible; `429` account-wide quota/rate-limit and `500 send_failed` are not transient by status alone.
+- One encrypted `.vwrec` application recovery format; no public db/full/emergency tier model and no compatibility reader for the earlier archive format.
+- Restore retains explicit noninteractive CLI forms and also has a guided local/remote picker for humans.
+- Recovery-kit ZIP: AES-256, passphrase entered/confirmed interactively, independent of stored credentials, never argv/env/file/email, fully verified before email is attempted.
+- Application updates are operator-driven: discover a stable project release, stage/download/build before downtime, verify a pre-update recovery point, activate an immutable release, health-gate it, and roll back coherently when safe. Automatic checking/notification is desirable; unattended apply is not the default.
+- Ubuntu package updates are separate from application updates. Application recovery does not claim to roll back apt/kernel changes. Never auto-reboot.
+- Final normal product surfaces must be release-neutral: do not leave product-generation, branch-stage, beta, or phase names in runtime/docs/file names. Genuine technical schema/archive format numbers are fine. Naming cleanup is a dedicated later workstream; do not mass-rename opportunistically.
 
 ## Implementation ownership
 
-Use Python 3.12 standard-library-first for structured logic: CLI parsing, TOML/config/version handling, validation, subprocess orchestration, locking, diagnostics, secrets orchestration, notification classification, recovery metadata, rclone orchestration, and edge policy.
+Use Python 3.12 standard-library-first for structured logic: CLI parsing, TOML/config/version handling, validation, subprocess orchestration, locking, diagnostics, secrets orchestration, notification classification, recovery metadata, rclone orchestration, update transactions, and edge policy.
 
-Use Bash only for the smallest bootstrap, host/container glue, or other cases where shell is materially simpler. Do not let Bash grow into the owner of structured configuration, state machines, retry policy, complex locking, or broad orchestration.
+Use Bash only for the smallest bootstrap, interactive operator UI, host/container glue, or cases where shell is materially simpler. Do not let Bash become the owner of structured configuration, retry policy, state machines, complex locking, or recovery/update transactions.
 
-The public operator surface is `vwctl`. The installed **operator-editable** non-secret config authority is `/etc/vaultwarden-oci/config.toml`; the source-controlled version authority is `versions.toml`. Source-controlled immutable release metadata such as the Phase 6 `email-providers.toml` catalog is not a second operator-editable config authority. Do not create alternate editable authorities.
+`vwctl` is the mutation/implementation authority. `dashboard.sh` and `setup.sh` may orchestrate or present supported human workflows, but they must call into the same authoritative implementation rather than reimplementing state mutations.
+
+The installed operator-editable non-secret config authority is under `/etc/vaultwarden-oci` (currently `config.toml`); the source-controlled version authority is `versions.toml`. `email-providers.toml` is immutable release metadata, not a second operator-editable config authority.
 
 ## Design discipline
 
-Prefer the smallest explicit implementation that satisfies the current phase. Do not add speculative frameworks, dynamic plugin/provider registries, ORMs, daemons, databases, event buses, workflow engines, generic transaction frameworks, distributed locks, HA/Kubernetes/Swarm abstractions, or cloud/storage/notification/firewall abstraction layers without an explicit product decision.
+Prefer the smallest coherent owner and fewest clear files. Do not add speculative frameworks, dynamic plugin/provider registries, ORMs, daemons, databases, event buses, workflow engines, generic transaction frameworks, distributed locks, Kubernetes/Swarm/HA abstractions, storage abstractions, updater daemons, monitoring stacks, or generic cloud/notification/firewall frameworks without an explicit product decision.
 
-Prefer fewer cohesive first-party files when responsibilities remain clear. Before adding a file, ask whether an existing owner can absorb the behavior cleanly. Avoid one-function modules, one-action wrapper scripts, duplicate config fragments, empty placeholders, and future-facing extension files. File reduction is a preference, not a quota; do not create giant mixed-responsibility files to game it. A deliberate closed metadata catalog can be appropriate when it removes duplicated provider constants/templates without creating runtime extensibility.
+Do not recreate the earlier Make orchestration, Postfix/local MTA, backup tiers, broad repair commands, generic Docker cleanup, or migration compatibility. A useful earlier UI/security behavior may be copied conceptually; its implementation shape is not required.
 
-Do not implement later phases opportunistically. Report useful out-of-scope ideas instead.
+## Testing and working rules
 
-## Testing
+Use three permanent validation layers: focused unit tests, small integration tests, and disposable real-host Ubuntu 24.04 release acceptance. Test security, availability, recoverability, and operator truthfulness rather than private source structure.
 
-V2 uses only three permanent validation layers:
+Before editing, confirm the current branch/head and inspect the existing owner of the behavior. Keep changes bounded to the assigned task. Preserve secret redaction, fail-closed security boundaries, truthful success/failure reporting, and recoverability.
 
-1. focused unit tests;
-2. small integration tests;
-3. disposable real-host release acceptance.
-
-Tests protect security, availability, recoverability, and operator truthfulness. Do not port V1's custom runner/inventory or add private source-string/order assertions, private-function extraction, prose freezing, duplicated state machines, or a coverage-percentage gate.
-
-## Working rules
-
-Before editing, inspect the current branch/ref and the existing owner of the behavior. Keep each change bounded to the assigned phase or corrective task. Preserve secret redaction, fail-closed security boundaries, truthful success/failure reporting, and recoverability.
-
-Run only validation proportional to the change and report exactly what ran and what did not. Never claim host, architecture, provider, CI, or destructive validation that was not actually performed.
+Run validation proportional to the change and report exactly what ran and what did not. Never claim host, architecture, provider, CI, destructive, or release validation that was not actually performed.

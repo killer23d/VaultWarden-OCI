@@ -1,8 +1,12 @@
 # Operations
 
-`vwctl --help` and each subcommand's `--help` output are the command reference. Keep automation tied to command behavior and stable diagnostic IDs instead of copying a generated manual into the repository.
+`vwctl` is the implementation and mutation authority. `dashboard.sh` is also a supported day-2 human interface; it presents/guides operations and delegates mutations to `vwctl` rather than owning separate state-changing logic.
+
+The useful color-coded/AMTM-style interaction conventions of the earlier product are the dashboard design reference. The earlier backend architecture is not.
 
 ## Routine lifecycle
+
+Authoritative CLI forms remain available for direct operation and automation:
 
 ```bash
 sudo vwctl start
@@ -15,20 +19,13 @@ sudo vwctl restart
 sudo vwctl stop
 ```
 
-`status` reports Vaultwarden/Caddy state plus the latest recovery and notification state. `doctor --json` is the machine-readable diagnostic truth. Its top-level schema is versioned and each check has a stable ID; scripts should key on IDs/status rather than prose messages.
+`status` reports service and relevant operational state. `doctor --json` is the machine-readable diagnostic truth; scripts should key on stable check IDs/status rather than prose messages. A doctor `FAIL` blocks acceptance. `WARN` is intentionally visible.
 
-Important current IDs include:
-
-- `runtime.docker`, `runtime.compose`, `runtime.paths`
-- `secrets.custody`, `secrets.decrypt`
-- `notification.catalog`, `notification.provider`, `notification.api_secret`, `notification.smtp_fallback`, `notification.last_delivery`
-- the `edge.*`, `crowdsec.*`, and recovery checks emitted by their owners
-
-A doctor `FAIL` blocks acceptance. `WARN` is intentionally visible and should not be rewritten to success by wrapper scripts.
+For normal human day-2 work, `dashboard.sh` may expose the same supported lifecycle, health, recovery, update, and security workflows interactively. It must not bypass `vwctl` for mutations.
 
 ## Logs
 
-Runtime container logs are available through `vwctl logs`. Systemd automation logs remain in the journal:
+Runtime container logs are available through `vwctl logs`. Systemd automation logs remain in the journal. Use the installed unit names from the active release, for example:
 
 ```bash
 journalctl -u vaultwarden-oci.service
@@ -38,11 +35,15 @@ journalctl -u vaultwarden-oci-maintenance.service
 journalctl -u 'vaultwarden-oci-notify@*'
 ```
 
-There is no V2 dashboard/TUI or alternate status script.
+## Dedicated-storage health
+
+Production persistent application/recovery state must be on the configured dedicated filesystem/volume, not the boot/root filesystem.
+
+Day-2 health/doctor checks must make a missing or wrong production storage mount observable and prevent service startup from silently writing persistent state to root. Treat any storage-invariant failure as a stop condition, not a warning to ignore.
 
 ## Systemd automation
 
-The V2 target groups lifecycle plus health, backup, and maintenance timers:
+systemd remains the lifecycle/scheduling authority. Enable the supported target/timers only after setup, configuration, secrets, storage, and first-start health have passed:
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target
@@ -50,71 +51,79 @@ systemctl status vaultwarden-oci.target
 systemctl list-timers 'vaultwarden-oci-*'
 ```
 
-The installed services invoke `/opt/vaultwarden-oci/current/vwctl` directly. The notification template handles service failures; no Postfix/local MTA, spool, durable retry queue, or application scheduler is installed.
+The installed services invoke the authoritative appliance CLI. There is no Postfix/local MTA, durable notification queue, or application scheduler to operate.
 
-## Cloudflare edge and CrowdSec
+## Cloudflare edge, Caddy, and CrowdSec
 
-Refresh the origin policy explicitly when needed:
+Real-client-IP trust and host-level origin filtering are separate controls.
+
+Caddy's exact-pinned Cloudflare trusted-proxy/real-client-IP module owns client-IP trust, with combined Cloudflare ranges. Do not maintain a generated static Cloudflare `trusted_proxies` CIDR block in Caddy as a second authority.
+
+The host separately maintains one fail-closed Docker `DOCKER-USER` origin-filter path permitting published HTTPS only from validated Cloudflare source ranges. A current range policy is preferred; only bounded validated last-known-good state may be used as fallback. If no safe policy exists, origin ingress remains blocked.
+
+CrowdSec web-client remediation is Cloudflare-side. A CrowdSec host firewall bouncer is not required.
+
+Where the current CLI exposes the existing edge/remediation operations, the authoritative forms remain:
 
 ```bash
 sudo vwctl edge refresh
 sudo vwctl crowdsec status
 ```
 
-The edge owner validates bounded public Cloudflare CIDRs and applies both IPv4 and IPv6 policy while a scoped fail-closed guard protects published port 443. A current policy is preferred; only a bounded last-known-good policy is accepted as fallback.
+## `/admin` defense in depth
 
-CrowdSec beta remediation is Cloudflare-only:
+The supported `/admin` posture is intentionally lightweight:
 
-```bash
-sudo vwctl crowdsec setup
-sudo vwctl crowdsec remediation-start
-# Verify every created Worker Route is Fail Open in Cloudflare.
-sudo vwctl crowdsec confirm-fail-open
-sudo vwctl crowdsec status
-```
+- Vaultwarden admin token;
+- Caddy-side rate limiting;
+- one simple outer authentication gate.
 
-The confirmation is deliberately explicit because Cloudflare route behavior is external state. V2 does not require or install a CrowdSec host firewall bouncer.
+Do not replace this with an enterprise identity stack or accumulate multiple redundant outer gates.
 
 ## Notifications
 
-Operational notifications use exactly six built-ins from the immutable `email-providers.toml`: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, and `cyberpersons`; `cyberpanel` resolves to `cyberpersons`.
+Operational notifications use the closed immutable `email-providers.toml` catalog. Vaultwarden application email remains direct authenticated SMTP.
 
-The provider API is attempted first with bounded retries only for catalog-declared transient responses or network/connectivity failures. Direct authenticated TLS SMTP is attempted only after an eligible transient API outcome. It is not a durable queue and it does not mask authentication, TLS verification, permanent provider, or ambiguous response failures.
+Provider API delivery uses bounded retries only for failures classified transient by network semantics or current provider documentation. Authenticated SMTP fallback follows only an eligible transient API outcome. It does not mask authentication, TLS validation, permanent provider, or ambiguous delivery failures.
 
-For CyberPersons, `503 service_unavailable` is the current status-only transient rule. `429 rate_limit_exceeded` remains visible because the provider uses the same status for account-wide minute/hour/day/month limits shared by API and SMTP credentials, so status alone cannot prove a bounded transient condition. `500 send_failed` also remains visible and is not fallback-eligible by status alone. Provider metadata is release data: re-check current official documentation before changing retry/success rules.
+For CyberPersons, current verified behavior is:
+
+- `503 service_unavailable` is status-only transient/retry/fallback eligible;
+- `429 rate_limit_exceeded` remains visible because current provider behavior includes account-wide minute/hour/day/month limits shared across API and SMTP credentials;
+- `500 send_failed` remains visible and is not fallback eligible by status alone.
+
+Do not restore older documentation that categorizes arbitrary CyberPersons 429 responses as transient.
 
 ## Recovery and rclone
 
-Create a verified local recovery point:
+Create a verified local `.vwrec` application recovery point with the authoritative CLI:
 
 ```bash
 sudo vwctl backup
 ```
 
-Publish and remotely verify in the same operation:
+Where configured, offsite publication uses non-destructive rclone copy/copyto semantics and must be remotely verified before success is reported. Pruning remains a separate explicit action.
 
-```bash
-sudo vwctl backup --remote REMOTE:path
+The human recovery experience also includes a guided local/remote restore picker. Explicit noninteractive CLI restore forms remain supported for automation. See [RECOVERY.md](RECOVERY.md).
+
+The AES-256 recovery-kit ZIP is a separate credential-handoff artifact; it is not interchangeable with `.vwrec` application recovery.
+
+## Application versions and updates
+
+Normal application updates are safe, explicit, and operator-driven:
+
+```text
+discover stable project release
+-> resolve/stage/download/build before downtime
+-> verify pre-update recovery point
+-> activate immutable exact release
+-> health-gate
+-> roll back coherently when safe
 ```
 
-Remote publication uses copy semantics, never destructive sync. Pruning is a separate plan/confirm operation:
+Automated update checking/notification is desirable. Unattended update **apply** is not the default.
 
-```bash
-sudo vwctl recovery prune --remote REMOTE:path --keep-last 7
-sudo vwctl recovery prune --remote REMOTE:path --keep-last 7 --confirm
-```
-
-See [RECOVERY.md](RECOVERY.md) before any restore.
-
-## Versions and updates
-
-Show exact active/source pins:
-
-```bash
-vwctl versions
-```
-
-Production updates are explicit and source-pinned:
+The current implementation already exposes explicit source-pinned update commands:
 
 ```bash
 cd /path/to/trusted/new-release
@@ -122,13 +131,19 @@ sudo vwctl update check --source "$PWD"
 sudo vwctl update apply --source "$PWD"
 ```
 
-The update path gates current `status` and `doctor --json`, creates a verified pre-update recovery point, validates exact image/component pins, stages a new immutable release, switches `current`, and gates the activated runtime. If release content changes, `vaultwarden_oci.version` in `versions.toml` must change as well.
+That existing implementation stages exact images/builds, verifies a pre-update recovery point, activates an immutable release, and health-gates it. If candidate runtime activation may have changed persistent state, it deliberately refuses a blind binary rollback; the verified pre-update recovery point is the safe downgrade boundary.
 
-`--use-latest` is not an operator update mode. It is allowed only with `VWOCI_DEVELOPMENT=1` and a non-production `--root`, where remote versions/digests are resolved once and recorded as exact values for that run.
+The approved product workflow additionally requires stable project-release discovery/check notification. That remains implementation work rather than a reason to broaden the update authority.
+
+`--use-latest` belongs to the explicit setup/install path, not unattended update apply. When an operator selects it during setup, resolution freezes exact immutable values once and leaves no floating `latest` state.
+
+## Ubuntu package updates
+
+Ubuntu host package updates are a separate workflow from application updates. Do not claim that `.vwrec` recovery can roll back apt/kernel changes. The appliance must never auto-reboot; any reboot remains an explicit administrator action after host maintenance.
 
 ## Configuration changes
 
-After editing `config.toml` or the SOPS document:
+After editing non-secret config or the SOPS document:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
@@ -137,4 +152,10 @@ sudo vwctl restart
 sudo vwctl status
 ```
 
-Do not create alternate wrappers that mutate the same state. The single CLI and its mutation lock are the supported authority.
+Human wrappers may guide these steps, but all mutations must converge on the same `vwctl` authority and mutation lock.
+
+## Current development-branch gaps
+
+At this synchronization point, the development branch does not yet ship the approved `dashboard.sh`, dedicated-storage enforcement, Caddy trusted-proxy/rate-limit module set, or production-supported `setup.sh --use-latest` behavior. The current source-pinned update transaction is usable implementation groundwork; the missing stable-release discovery/check-notification layer is still a follow-up.
+
+Treat these as bounded implementation gaps, not alternative product decisions.
