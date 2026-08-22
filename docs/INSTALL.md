@@ -4,24 +4,20 @@
 
 VaultWarden-OCI supports Ubuntu 24.04 LTS on `amd64` and `arm64`.
 
-Production persistent application state **must** live on a dedicated ext4/xfs filesystem separate from the boot/root filesystem. A root-only host is rejected. The canonical state mount is `/var/lib/vaultwarden-oci`; it is not a supported root-filesystem fallback.
+Production persistent application state **must** live on a dedicated ext4/xfs filesystem separate from the boot/root filesystem. A root-only host is rejected. The canonical state mount is `/var/lib/vaultwarden-oci`; it is never a supported root-filesystem fallback.
 
 ## Before setup
 
-Attach a dedicated data volume and identify it with read-only host tools:
+Attach a dedicated data volume and inspect the host with read-only tools:
 
 ```bash
 findmnt -n -o SOURCE,FSTYPE,TARGET --target /
 lsblk -p -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,UUID,MODEL
 ```
 
-Also create an offline Age identity on a separate trusted workstation and retain its private key away from the appliance. Setup needs only its public `age1...` recipient.
+Create an offline Age identity on a separate trusted workstation and keep its private key off-host. Setup receives only its public `age1...` recipient.
 
-Do not select the boot disk, its parent, or any child device containing `/`.
-
-## Normal first-run path
-
-The supported first-run interface is `setup.sh`:
+## Supported first run
 
 ```bash
 sudo ./setup.sh install \
@@ -32,33 +28,13 @@ sudo ./setup.sh install \
   --offline-recipient age1...
 ```
 
-Interactive setup may omit `--data-device`; it lists plausible non-boot block devices with size, filesystem, mount, and model information and asks the operator to choose. If no acceptable separate volume exists, setup exits without falling back to `/`.
+Interactive setup may omit `--data-device`; it lists plausible non-boot devices with size, filesystem, mount, and model information. No acceptable separate volume means setup exits without falling back to `/`.
 
-`--url` is validated against `--domain` and normalized to the runtime hostname. The URL is not persisted as a second configuration authority; `[site].domain` remains authoritative.
+`--url` is normalized/validated against `--domain`; `[site].domain` remains the single runtime authority.
 
-### Existing filesystem adoption
+Existing ext4/xfs adoption requires interactive `YES` or `--accept-existing-filesystem`. Blank-device ext4 formatting requires independent `--confirm-format`. Unknown filesystem types, mixed/unknown signatures, the boot disk, and its parent/children fail closed. `--auto` never guesses storage and never implies either acknowledgement.
 
-Existing ext4/xfs storage is never adopted silently. Interactive setup requires the exact `YES` confirmation. Noninteractive setup requires the deliberately named acknowledgement:
-
-```bash
---accept-existing-filesystem
-```
-
-Unknown filesystem types and unknown on-disk signatures fail closed.
-
-### Blank-device formatting
-
-A blank device is formatted as ext4 only after an independent destructive acknowledgement:
-
-```bash
---confirm-format
-```
-
-`--auto` never implies this acknowledgement and never authorizes disk guessing.
-
-### Noninteractive setup
-
-`--auto` permits safe locally generated/defaultable choices but still requires an explicit data device and offline recovery public recipient:
+Noninteractive setup therefore supplies the storage and custody decisions explicitly:
 
 ```bash
 sudo ./setup.sh install \
@@ -71,68 +47,58 @@ sudo ./setup.sh install \
   --auto
 ```
 
-External Cloudflare, SMTP, notification, and rclone credentials are never invented.
+`--dry-run` performs host/input/device relationship checks without formatting, mounting, package installation, or project-state writes. `--use-latest` is independent of `--auto`; it resolves mutable upstream boundaries once and freezes exact versions/digests for that install. The normal path uses repository-tested exact pins.
 
-### Dry run
+## Setup ownership
 
-`--dry-run` validates the host, operator inputs, and selected device/boot relationship without formatting, mounting, installing packages, or writing project state.
+After storage preflight, setup installs/verifies required Ubuntu packages, Docker Engine/Compose from Docker's Ubuntu repository, SOPS, Age, rclone, and 7-Zip. The downloaded SOPS binary is verified against the pinned architecture-specific SHA-256 before installation.
 
-### `--use-latest`
-
-The normal path uses repository-tested exact pins. `--use-latest` is an independent explicit override: setup resolves the supported mutable component boundaries once, freezes exact versions and image digests into the immutable installed release, records that frozen set, and never persists a floating `latest` tag.
-
-`--auto` does not imply `--use-latest`.
-
-## What setup installs
-
-After the dedicated-storage preflight succeeds, setup installs/verifies the Ubuntu dependencies used by the appliance, Docker Engine/Compose from Docker's supported Ubuntu repository, exact-pinned SOPS, Age, rclone, and 7-Zip. It then installs the immutable application release and systemd integration.
-
-The installed authorities are:
+Durable authorities include:
 
 ```text
-/opt/vaultwarden-oci/releases/<version>  immutable release content
-/opt/vaultwarden-oci/current             active-release selector
-/usr/local/bin/vwctl                     authoritative operator CLI
-/etc/vaultwarden-oci/config.toml         operator-editable non-secret config
-/etc/vaultwarden-oci/secrets.sops.yaml   encrypted secret document
-/etc/vaultwarden-oci/age-key.txt         root-only operational Age identity
-/var/lib/vaultwarden-oci                 dedicated persistent state mount
-/run/vaultwarden-oci                     volatile generated/decrypted material
+/opt/vaultwarden-oci/releases/<version>          immutable release content
+/opt/vaultwarden-oci/current                     active-release selector
+/usr/local/bin/vwctl                             authoritative operator CLI
+/etc/vaultwarden-oci/config.toml                 operator-editable non-secret config
+/etc/vaultwarden-oci/secrets.sops.yaml           encrypted secret document
+/etc/vaultwarden-oci/age-key.txt                 root-only operational Age identity
+/etc/vaultwarden-oci/storage-identity.json       host-side expected data-volume identity
+/var/lib/vaultwarden-oci                         dedicated persistent state mount
+/var/lib/vaultwarden-oci/.vaultwarden-oci-volume.json  volume ownership marker
+/run/vaultwarden-oci                             volatile generated/decrypted material
 ```
 
-Setup safely generates the operational Age identity if absent, prepopulates normal site/email configuration, and creates an encrypted SOPS starting point containing locally generated admin material. Plaintext generated secrets are passed to SOPS over stdin, not argv or ordinary logs. The offline private Age identity is never stored on the server.
+Setup validates generated TOML through the canonical runtime parser before reporting it ready. Existing nonempty SOPS state is not accepted merely because a file exists: its recipients and operational decryptability must still validate. Generated secret plaintext is supplied to SOPS through stdin, not argv.
 
-## Dedicated-storage identity and boot guard
+## Dedicated-storage proof and boot guard
 
-Setup writes the persistent mount by filesystem UUID and stores a small identity marker on the selected filesystem itself:
+The host-side expected identity under `/etc` is independent of the selected data volume. Runtime verification requires all of the following:
 
-```text
-/var/lib/vaultwarden-oci/.vaultwarden-oci-volume.json
-```
+- `/var/lib/vaultwarden-oci` is an actual mount point and differs from `/`;
+- the source is not the boot/root block family;
+- the filesystem is ext4/xfs with a stable UUID;
+- the mounted UUID/type match `/etc/vaultwarden-oci/storage-identity.json`;
+- the filesystem's ownership marker matches that same host-side identity.
 
-At runtime, `vwctl start`, `restart`, `backup`, `restore`, recovery mutation, update, and direct install entrypoints verify all of the following before proceeding:
+A different initialized or cloned VaultWarden-OCI volume therefore cannot self-authenticate from its own marker.
 
-- `/var/lib/vaultwarden-oci` is an actual mount point;
-- its filesystem differs from `/`;
-- its block device is not the boot/root device or its parent/child;
-- the filesystem is ext4/xfs and has a stable UUID;
-- the mounted UUID/type match the project identity marker.
+Provisioning reconciles an already-mounted canonical path **before** changing the host identity or `/etc/fstab`. If setup is rerun with volume A mounted but volume B selected, it fails without rewriting next-boot storage to B. Only after the selected/live filesystem agrees does setup persist the UUID mount, host identity, volume marker, and Docker guard.
 
-`vwctl doctor` reports this as the `storage.dedicated` check.
+All CLI paths that can directly or indirectly persist project state are storage-gated, including lifecycle/recovery/update plus `notify`, edge refresh, and CrowdSec operations. This prevents the systemd `OnFailure` notifier or edge LKG writers from recreating `/var/lib/vaultwarden-oci/state` on `/` when the mount is absent.
 
-Setup also installs a Docker systemd drop-in with `RequiresMountsFor=/var/lib/vaultwarden-oci` and a mount-point condition. This prevents Docker's `restart: unless-stopped` behavior from recreating Vaultwarden state paths on the boot filesystem when the dedicated mount is absent during boot.
+Docker also receives a systemd drop-in using `RequiresMountsFor=/var/lib/vaultwarden-oci` and `ConditionPathIsMountPoint=/var/lib/vaultwarden-oci`, preventing Docker's own restart policy from recreating application paths on the boot filesystem when dedicated storage is absent during boot.
 
-There is no boot-to-data migration mode. This is a fresh-install product.
+There is no boot-to-data migration mode; this is a greenfield install path.
 
-## Re-running setup
+## Safe reruns
 
-Setup is intended to be safely re-run after an interrupted first run. Dedicated storage provisioning, UUID fstab ownership, the mount guard, immutable release installation, Age identity creation, and generated starting files are checked before replacement. Existing operator configuration is not silently overwritten after it has been customized.
+Setup is intended to be rerun after interruption. Storage identity, fstab ownership, mount guard, immutable release, Age identity, generated config, and encrypted-secret starting state are proven before replacement. Customized operator config is not silently overwritten.
 
-If a step fails, correct the reported condition and re-run the same setup command; do not rebuild the VM merely to restart setup.
+If a step fails, correct the reported condition and rerun the same setup command.
 
 ## Complete external configuration
 
-Setup deliberately does not invent external credentials. Complete the supported config/secrets workflow for Cloudflare, SMTP, notification API credentials, and rclone as applicable, then validate:
+Setup does not invent Cloudflare, SMTP, notification API, or rclone credentials. Complete those through the supported config/secrets workflow, then validate:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
@@ -141,11 +107,7 @@ sudo env SOPS_AGE_KEY_FILE=/etc/vaultwarden-oci/age-key.txt \
 sudo vwctl doctor --json
 ```
 
-Treat any doctor `FAIL` as a failed acceptance condition.
-
-## First start
-
-When configuration, secret custody, and doctor checks are ready:
+Treat any doctor `FAIL` as a failed acceptance condition. When configuration and custody are ready:
 
 ```bash
 sudo vwctl start
@@ -165,4 +127,4 @@ Continue with [OPERATIONS.md](OPERATIONS.md), [RECOVERY.md](RECOVERY.md), and [H
 
 ## Intentionally separate workstreams
 
-This setup workstream does not implement the day-2 dashboard, recovery-kit email UI, boot-volume migration, or a replacement application-update workflow. Those remain separate bounded workstreams under the durable product contract.
+This workstream does not implement the day-2 dashboard, recovery-kit email UI, boot-volume migration, or a replacement application-update workflow.
