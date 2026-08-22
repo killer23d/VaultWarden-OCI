@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -8,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import cli, install, update, update_versions
+from vaultwarden_oci import cli, install, update, update_cli, update_versions
 
 
 PHASE6_VERSION = "0.1.0-dev"
@@ -207,6 +208,28 @@ class UpdateTransactionTests(unittest.TestCase):
             return command(args)
 
         return run, calls
+
+    def test_update_cli_reports_installer_failure_without_traceback(self) -> None:
+        plan = mock.Mock(already_active=False)
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(update_cli.update, "plan_update", return_value=plan),
+            mock.patch.object(update_cli, "_print_plan"),
+            mock.patch.object(
+                update_cli.update,
+                "apply_update",
+                side_effect=install.InstallError(
+                    "expected regular file at /run/vaultwarden-oci/lock"
+                ),
+            ),
+            mock.patch("sys.stderr", stderr),
+        ):
+            code = update_cli.main(["update", "apply", "--source", "."])
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "FAIL: expected regular file at /run/vaultwarden-oci/lock\n",
+        )
 
     def test_nonproduction_update_root_requires_injected_io_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
