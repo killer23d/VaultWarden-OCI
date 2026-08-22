@@ -11,10 +11,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import install
+from vaultwarden_oci import cli, install
 
 ROOT = Path(__file__).resolve().parents[2]
-PHASE7_VERSION = "0.1.0-dev.7"
+CURRENT_RELEASE_VERSION = cli.load_versions(ROOT / "versions.toml").version
 
 
 def exact_versions(version: str) -> str:
@@ -144,11 +144,11 @@ class Phase2InstallTests(unittest.TestCase):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
             )
             self.assertTrue(release_dir.is_dir())
-            self.assertEqual(release_dir.name, PHASE7_VERSION)
+            self.assertEqual(release_dir.name, CURRENT_RELEASE_VERSION)
 
             current = root / "opt/vaultwarden-oci/current"
             self.assertTrue(current.is_symlink())
-            self.assertEqual(os.readlink(current), f"releases/{PHASE7_VERSION}")
+            self.assertEqual(os.readlink(current), f"releases/{CURRENT_RELEASE_VERSION}")
 
             vwctl = root / "usr/local/bin/vwctl"
             self.assertTrue(vwctl.is_symlink())
@@ -213,7 +213,7 @@ class Phase2InstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install.install_layout(ROOT, root=root, systemd_reload=False)
-            release_dir = root / f"opt/vaultwarden-oci/releases/{PHASE7_VERSION}"
+            release_dir = root / f"opt/vaultwarden-oci/releases/{CURRENT_RELEASE_VERSION}"
             installed = release_dir / "versions.toml"
 
             os.chmod(release_dir, 0o755)
@@ -232,7 +232,7 @@ class Phase2InstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install.install_layout(ROOT, root=root, systemd_reload=False)
-            installed = root / f"opt/vaultwarden-oci/releases/{PHASE7_VERSION}/versions.toml"
+            installed = root / f"opt/vaultwarden-oci/releases/{CURRENT_RELEASE_VERSION}/versions.toml"
             os.chmod(installed, 0o644)
             with self.assertRaisesRegex(install.InstallError, "incompatible mode"):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
@@ -300,7 +300,7 @@ class Phase2InstallTests(unittest.TestCase):
                 install.install_layout(ROOT, root=root, systemd_reload=False)
             self.assertEqual(os.readlink(current), "releases/older")
             self.assertFalse(
-                (root / f"opt/vaultwarden-oci/releases/{PHASE7_VERSION}").exists()
+                (root / f"opt/vaultwarden-oci/releases/{CURRENT_RELEASE_VERSION}").exists()
             )
 
     def test_existing_systemd_unit_drift_fails_clearly(self) -> None:

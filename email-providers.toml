@@ -90,8 +90,8 @@ request_template = '''{"from":"{from_email}","to":"{to_email}","subject":"{subje
 success_statuses = [202]
 success_field = "success"
 success_value = true
-# 429 is intentionally excluded: the same status covers per-minute, per-hour,
-# per-day, and per-month account limits. A status-only classifier cannot safely
-# distinguish short throttling from quota exhaustion. The documented response
-# body retry_after remains disabled until its units/semantics are explicit.
+# Current CyberPersons docs use 429 for account-wide minute/hour/day/month
+# limits shared across API keys and SMTP credentials, so status alone cannot
+# prove a bounded transient condition. 503 is the status-only beta transient;
+# 429 and 500/send_failed remain visible and are not SMTP-fallback eligible.
 retry_statuses = [503]

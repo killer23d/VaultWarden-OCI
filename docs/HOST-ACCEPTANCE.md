@@ -1,197 +1,214 @@
-# Noble Host Acceptance and Same-Host DR
+# Ubuntu 24.04 disposable-host acceptance
 
-`utilities/noble-host-acceptance.sh` is a release/DR acceptance controller for a real Ubuntu 24.04 LTS Noble host. It complements the permanent Bash test inventory; it does not replace `./tests/run-tests.sh all` or reimplement backup, restore, uninstall, storage, systemd, smoke, or drill logic.
+This is a **release gate**, not a per-PR test controller. Run it on disposable Ubuntu 24.04 hosts for both `amd64` and `arm64` when those environments are available. Record unavailable architecture/provider resources as **not run**; do not replace missing real-host evidence with claims based on mocks.
 
-Use this workflow periodically on a disposable acceptance host or snapshot, not as a routine day-to-day health check. A full pass is intentionally destructive and can perform real external DNS changes, so use a dedicated acceptance hostname/zone and credentials.
+Use a dedicated test domain, Cloudflare zone/tokens, notification provider account, SMTP credentials, rclone remote, and offline Age identity. Destroy/rotate test credentials after the gate as appropriate.
 
-## Full-certification boundary
+## Acceptance record
 
-A full run proves the repository's supported Noble host path by orchestrating:
-
-1. the canonical permanent Bash suites;
-2. live health, email, pre-production drill, and smoke checks;
-3. the external application E2E hook, which creates/records the DR canary;
-4. an explicit DB backup plus a **new full backup created after the canary**, with that full backup's exact basename, archive SHA-256, authenticated cohort digest, and rclone location checkpoint-bound;
-5. installed systemd validation and one proven foreground execution of each managed recurring job, rejecting operation-lock exit `75` skips, with the DNS updater protected by an explicit external-mutation gate;
-6. Docker daemon restart followed by smoke testing;
-7. a real reboot, verified by Linux boot ID;
-8. canonical `--test-reset` uninstall plus independent residual assertions;
-9. exact re-download of the checkpoint-bound full backup cohort from rclone and bootstrap restore of that staged local file using canonical `--remote --file`, the external pre-DR recovery kit, and `--start-policy manual`; `--remote` enables the supported missing-environment bootstrap path but does not replace the exact `--file` selection;
-10. an immediate post-restore checkpoint **before** permission repair, startup, health, email, drill, or E2E validation, so a later validation failure cannot repeat a successful destructive restore;
-11. post-restore health, email, drill, and application E2E while recurring timers remain non-running; the canonical manual install is verified and EXIT cleanup leaves every managed recurring timer disabled after ordinary success/failure, including assertion of the same pre-DR canary; because canonical manual install enables timers for future boots before it returns, operators must avoid power loss/SIGKILL/reboot during that narrow installer window;
-12. canonical export of a new **full recovery kit** after Age rotation, followed by an exact-digest copy of that exported kit to a non-root mounted recovery medium, with its Age identity proven to match the live rotated operational key and to differ from the pre-DR identity;
-13. only then, activation and canonical validation of systemd automation, protected again by the DNS mutation scope gate;
-14. fresh DB and fully verified full rclone recovery points encrypted to the new operational recipient; and
-15. exact re-download of that final full backup and canonical read-only `restore.sh inspect` authentication/decrypt preflight using the **copied post-restore recovery kit itself**, proving both its backup-integrity HMAC and Age identity.
-
-`FULL ACCEPTANCE PASSED` is reachable only after the real-reboot, exact-source destructive DR, rotated-recovery-custody, external-mutation, automation, final-backup, and copied-kit remote-decrypt gates succeed.
-
-## Checkpoint integrity
-
-The controller stores root-only checkpoint state under `/var/tmp/vaultwarden-noble-acceptance` by default. The checkpoint contains no credential values. If `VW_ACCEPTANCE_STATE_ROOT` is overridden for a destructive run, it must be an absolute dedicated directory path outside the canonical uninstall survival scope; the controller rejects a symlink, a top-level host directory, or any state root that the drill could remove or render inaccessible. The checkpoint binds a run to:
-
-- the exact Git commit SHA;
-- the host machine identity;
-- the original and pre-reboot Linux boot IDs;
-- the rclone remote name, subpath, config path, and config digest;
-- the pre-DR recovery-kit path and digest;
-- the application E2E hook path and digest;
-- the explicitly acknowledged DNS mutation hostname;
-- destructive/non-destructive mode and DNS-mutation consent;
-- the reboot policy;
-- for destructive runs, the canonical project-state path;
-- the exact canary-inclusive DR source full-backup identity and digests; and
-- after restore, the exact canonical full recovery-kit export digest plus the copied external kit path/digest and recipient binding.
-
-`resume` fails if any bound operator input changes. The controller compares `/proc/sys/kernel/random/boot_id` with the saved pre-reboot value, so rerunning `resume` without rebooting cannot satisfy the reboot gate.
-
-`--skip-reboot` exists only for controller development. A run started with it is permanently non-certifying and terminates at the `incomplete` phase. Re-running without the flag is rejected as checkpoint drift.
-
-## Single-instance controller lock
-
-Every `run` and `resume` invocation takes a non-blocking exclusive `flock` on `/run/lock/vaultwarden-noble-acceptance.lock` before parsing inputs or touching checkpoint state. A second root invocation fails closed instead of interleaving metadata, phase changes, logs, uninstall, or restore work. The lock is process-lifetime only: the intentional reboot checkpoint exits `75`, the kernel releases the lock, and the post-reboot `resume` must acquire it again. `status` remains read-only and does not take the destructive controller lock.
-
-## Host/storage boundary
-
-Destructive same-host DR intentionally supports **boot-volume project state only**.
-
-The controller does not maintain a parallel storage detector. Before destructive work it sources the canonical uninstaller in dry-run mode, calls its `resolve` path, and applies the same `DATA_VOLUME_DEVICE` and `storage_ambiguous` checks used by destructive uninstall. This catches explicitly configured attached storage as well as incompletely described custom mounts, managed mount guards, and other ambiguous separate-volume evidence.
-
-The production uninstaller correctly preserves separately attached data-volume contents. Therefore an attached-volume same-host reset is not a clean replacement-host simulation and is rejected. Test attached-volume DR on a fresh replacement host or with a disposable replacement block volume instead of weakening uninstall safety.
-
-## Required external inputs
-
-Before starting, prepare:
-
-- a root-owned `0400` or `0600` pre-DR recovery kit outside the canonical destructive uninstall survival scope;
-- a root-owned `0400` or `0600` rclone configuration outside that same survival scope;
-- the exact rclone subpath used for the acceptance backups;
-- a root-owned executable application E2E hook that is not group- or world-writable **and is outside that survival scope**; and
-- a dedicated acceptance hostname/zone whose configured runtime `DOMAIN` you explicitly authorize the drill to mutate.
-
-The pre-DR recovery kit, rclone config, application E2E hook, and acceptance checkpoint must all remain available after `utilities/uninstall-vaultwarden.sh run --test-reset`. For destructive runs the controller sources that canonical uninstaller with the test-reset policy, calls its `resolve`, and builds a conservative survival boundary from the resolved boot-volume `PROJECT_STATE_DIR`, `OPT_DIR`, `ETC_DIR`, `RUNTIME`, `RECOVERY_DIR`, checkout, any attached data mount, exact managed/test-reset files, and compose-labelled Docker volume mountpoints when Docker can be inspected. A candidate under a recursive removal/unmount root or equal to an exact managed file is rejected.
-
-This validation runs once before destructive acceptance state is initialized and again immediately before uninstall, so later configuration drift cannot move an input into the deletion scope. In particular, a normal `/root/vaultwarden-recovery/vaultwarden-recovery-kit-*` handoff, a credential under a custom boot-volume state such as `/srv/vaultwarden`, an E2E hook under the managed `/opt/vaultwarden-scripts` tree, or a `VW_ACCEPTANCE_STATE_ROOT` beneath the resolved project state is intentionally rejected. Copy external dependencies to separate root-owned paths first.
-
-The E2E hook is executed as root. The controller rejects symlinks, non-root ownership, non-executable files, and group/world-writable hooks. Its path and digest are bound to the checkpoint.
-
-## External DNS mutation safety
-
-`vaultwarden-dns-update.service` can issue a real Cloudflare update for the configured `DOMAIN`. A disposable VM is therefore **not** enough isolation if it carries production DNS credentials and the production hostname.
-
-Full acceptance requires all of the following:
-
-- `--dns-mutation-domain <dedicated-acceptance-hostname>`;
-- `--allow-dns-mutation`;
-- `VW_NOBLE_TEST_DNS_MUTATION=YES`; and
-- immediately before the foreground DNS job and again before post-restore timer activation, the installed runtime `DOMAIN` must exactly equal the acknowledged hostname.
-
-The controller deliberately does not guess whether a hostname is "production". The operator must use a dedicated acceptance hostname/zone and explicitly name the record that may be changed. If the restored runtime environment points at a different hostname, the run stops before DNS mutation/timer activation.
-
-## Application E2E and exact DR source contract
-
-The hook is external because this repository does not own a browser/client automation framework. It must exit non-zero on any failed assertion and should use disposable acceptance identities/data. At minimum prove:
-
-- user login;
-- vault item create/read/update/delete;
-- organization membership/sharing;
-- attachment upload/download;
-- Send creation/readback/removal;
-- logout/login persistence;
-- supported client sync;
-- WebSocket/live-update behavior where applicable; and
-- admin endpoint protection.
-
-On the pre-DR invocation, create/record a unique canary such as `NOBLE-DR-CANARY-<run-id>`. **Only after that hook succeeds** does the controller create the full DR source backup. It snapshots the full-backup inventory before/after that command and requires exactly one newly published full backup. That backup's exact basename, archive digest, cohort digest, creation time, and remote object identity are checkpointed.
-
-The controller performs an early authenticated source proof before reboot, then repeats the proof at the destructive boundary. After the verified real reboot and post-reboot smoke/systemd checks, the `uninstall` phase re-downloads the exact bound remote cohort again and runs canonical read-only `restore.sh inspect --remote --file ... --from-recovery-kit ...` immediately before `uninstall-reset`. Canonical inspect loads the recovery kit's historical backup-integrity HMAC key, authenticates the `.sha256.hmac` cohort, decrypts the archive with its Age identity, and performs restore preflight without stopping services or modifying live state. A missing/corrupt/inaccessible object, stale credentials, wrong HMAC, or wrong Age identity therefore stops the drill while the original host is still intact.
-
-That post-reboot authenticated cohort is retained under the already survival-validated `STATE_ROOT/pre-uninstall-recovery-cache` until restore succeeds. It is an emergency safety copy, not certification evidence for post-reset remote availability. After uninstall, the controller still requires a **fresh** download of the same four bound remote cohort members (`.age`, `.sha256`, `.sha256.hmac`, `.meta`), re-verifies the checkpointed archive/cohort digests, and restores only from that fresh post-reset remote download. If this fresh download fails, certification stops; the retained cache remains available for emergency non-certifying host recovery. Do not resume/claim acceptance after using that fallback—recover the disposable host, investigate remote availability, and restart the drill. The controller never calls `restore.sh latest`; explicit local `--file` remains authoritative while `--remote` only enters canonical bare-metal/bootstrap mode. The post-restore E2E invocation must find the same canary.
-
-## Start a full run
-
-```bash
-sudo install -o root -g root -m 0600 /secure/recovery-kit.txt /root/vw-acceptance-recovery-kit.txt
-sudo install -o root -g root -m 0600 /secure/rclone.conf /root/vw-acceptance-rclone.conf
-sudo install -o root -g root -m 0700 /secure/vw-application-e2e.sh /root/vw-application-e2e.sh
-
-sudo env \
-  VW_NOBLE_TEST_DESTRUCTIVE=YES \
-  VW_NOBLE_TEST_DNS_MUTATION=YES \
-  utilities/noble-host-acceptance.sh run \
-  --destructive \
-  --recovery-kit /root/vw-acceptance-recovery-kit.txt \
-  --rclone-remote myremote \
-  --rclone-path vaultwarden_acceptance \
-  --rclone-config /root/vw-acceptance-rclone.conf \
-  --application-e2e /root/vw-application-e2e.sh \
-  --dns-mutation-domain vw-acceptance.example.com \
-  --allow-dns-mutation
-```
-
-The destructive path requires **both** `--destructive` and `VW_NOBLE_TEST_DESTRUCTIVE=YES`. External DNS mutation separately requires `--allow-dns-mutation` and `VW_NOBLE_TEST_DNS_MUTATION=YES`.
-
-## Reboot checkpoint
-
-At the reboot phase the controller saves the current boot ID, changes its checkpoint to `post-reboot`, and exits `75`. Reboot the host, verify the same checkout is present, then rerun exactly the same bound options and environment acknowledgements with `resume`.
-
-The resume fails unless the host boot ID changed and all checkpoint-bound inputs still match.
-
-## Restore checkpoint and resumability
-
-The destructive restore sequence is:
-
-1. exact checkpoint-bound remote cohort download and digest verification;
-2. canonical `restore.sh interactive --remote --file <staged-full-backup> --from-recovery-kit ... --start-policy manual --force`; the local file is still the exact restore source while `--remote` enables the supported missing-environment bootstrap path. The controller does not force `--no-backup`; canonical full restore already skips the snapshot on a genuinely fresh target with no live database and retains its normal snapshot policy otherwise;
-3. record restore completion and the restored backup identity; and
-4. **immediately checkpoint `post-restore-validation`**.
-
-Only the next phase performs permission repair, startup, manual systemd installation, health, email, pre-production drill, and post-DR application E2E. The manual systemd step arms its EXIT cleanup before invoking the canonical installer, then proves the install produced enabled-but-inactive timers; the cleanup disables all managed recurring timers before the step can return on installer failure, validation failure, or success. Once that helper has returned, the controller has verified the recurring timers are disabled through recovery custody. This is **not** an absolute power-loss guarantee during the installer itself: canonical `--no-enable-now`/manual mode still executes `systemctl enable` for future boots before returning, so an abrupt power loss, SIGKILL, or reboot in that narrow interval can bypass the EXIT cleanup. Do not reboot or power-cycle during `systemd-install-manual`. If any later check fails, `resume` restarts `post-restore-validation`; it does not repeat the already successful restore or rotate the Age key again.
-
-## Rotated recovery custody is mandatory
-
-A successful canonical full restore rotates to a new operational Age key. Future backups therefore require the **new** recovery material; the pre-DR kit used to enter the drill is not sufficient custody for the recovery points created afterward.
-
-After post-restore E2E succeeds, the controller enters `recovery-export` and invokes the canonical `utilities/secrets-export-recovery-kit.sh`. At this point the manual installer has returned and the controller has verified all managed recurring timers disabled; they remain disabled throughout export/copy/custody unless an external actor changes them, so a reboot **after that verification** does not activate them. This guarantee intentionally excludes the narrow abrupt-reboot window inside `systemd-install-manual` described above. This is deliberately separate from the automatic `vaultwarden-age-key-rotation-<timestamp>.txt` handoff: that handoff contains the rotated Age identity only and ends with `END OF AGE KEY ROTATION HANDOFF`; it is **not** a full recovery kit and does not carry the backup-integrity HMAC required for authenticated restore.
-
-When the canonical exporter asks whether to email an encrypted ZIP, answer **no** for this drill so the root-owned `vaultwarden-recovery-kit-<timestamp>-<id>.txt` remains temporarily under `/root/vaultwarden-recovery` for the custody copy. The controller checkpoints the exact exported full-kit digest, then enters `recovery-custody`. Copy that exact file to durable off-host storage and resume with the same bound options plus:
+Record before starting:
 
 ```text
---post-restore-recovery-kit /mnt/recovery/vaultwarden-recovery-kit-<timestamp>.txt
+release/ref:
+commit:
+versions output:
+host architecture: amd64 | arm64
+Ubuntu image/build:
+Docker/Compose version:
+Cloudflare test zone:
+notification provider:
+rclone remote/path:
+offline Age identity custody verified: yes/no
+started at:
+completed at:
+result: PASS/FAIL/NOT RUN
+notes:
 ```
 
-The supplied post-restore kit must:
+A release is not accepted for an architecture unless every applicable mandatory section passes.
 
-- be a root-owned `0400`/`0600` regular file, not a symlink;
-- be outside managed VaultWarden paths;
-- reside on a mounted filesystem whose device differs from the root filesystem;
-- be newer than the completed restore;
-- contain the canonical recovery-kit completion marker, exactly one Age private identity, and a populated `Backup integrity HMAC key (auto-generated)` field;
-- have a digest exactly equal to the canonical full recovery kit exported and checkpointed by this run;
-- have a digest different from the pre-DR recovery kit;
-- derive the **same Age recipient as the live `/etc/vaultwarden/age-key.txt`**; and
-- derive a recipient different from the pre-DR recovery kit.
+## 1. Clean host and install/layout
 
-After automation is activated, the final full backup is created with full verification and rclone delivery. The controller binds that exact backup, re-downloads its authenticated cohort, and runs canonical read-only `restore.sh inspect --remote --file ... --from-recovery-kit ...` with the copied post-restore full kit. This validates the kit's HMAC against the final cohort and its Age identity against the ciphertext. Acceptance-owned key staging and the delegated restore TMPDIR fallback both use the repository's verified volatile sensitive-workspace abstraction rather than persistent `/var/tmp`.
+On a clean Ubuntu 24.04 host, follow [INSTALL.md](INSTALL.md) from its prerequisite section rather than assuming tools are preinstalled. Before bootstrap, record:
 
-## Evidence to retain
+```bash
+. /etc/os-release
+printf '%s %s\n' "$ID" "$VERSION_ID"
+uname -m
+python3 --version
+sudo docker version
+sudo docker compose version
+age --version
+sops --version
+rclone version
+iptables --version
+ip6tables --version
+```
 
-For the release/commit being certified, retain:
+Then install V2:
 
-- exact Git SHA and host inventory;
-- controller checkpoint metadata and logs;
-- pre- and post-DR smoke output;
-- pre-DR E2E/canary output;
-- the exact bound DR source backup basename, archive SHA-256, cohort digest, and rclone location;
-- the pre-DR external recovery kit's successful early canonical authenticated inspect of that exact offsite source;
-- the **post-reboot, immediately pre-uninstall** fresh download plus canonical authenticated inspect of that exact source, including retained-cache digest/timestamp evidence;
-- the successful fresh post-reset remote re-download used as the actual restore source;
-- uninstall output and residual result;
-- exact-source restore output and the immediate post-restore checkpoint;
-- post-restore E2E proof of the same canary;
-- the canonical post-restore full recovery-kit export digest, proof that the external copy matches it exactly, and evidence that its recipient matches the live rotated key;
-- DNS mutation-scope checks for the dedicated acceptance hostname;
-- final DB/full rclone backup verification; and
-- the copied full recovery kit's successful canonical authenticated inspect against the exact final offsite full backup.
+```bash
+sudo ./bootstrap-v2.sh
+readlink -f /opt/vaultwarden-oci/current
+readlink -f /usr/local/bin/vwctl
+sudo find /etc/vaultwarden-oci -maxdepth 1 -printf '%M %u:%g %p\n'
+sudo find /var/lib/vaultwarden-oci -maxdepth 2 -printf '%M %u:%g %p\n' | sort
+systemctl cat vaultwarden-oci.service
+```
 
-The PR/commit is not real-host certified until one full destructive run on a disposable supported Noble host completes with retained evidence. CI and mocked contract tests cannot substitute for that run.
+Inspect `/etc/vaultwarden-oci/config.toml` before editing it. Pass when the immutable release exists under `/opt/vaultwarden-oci/releases/<version>`, `current` and `/usr/local/bin/vwctl` resolve to it, the fresh config contains the complete beta schema rather than a phase placeholder, V2 systemd units are installed, and no V1 runtime/dashboard/Postfix unit is installed by V2.
+
+## 2. SOPS/Age and no-leak materialization
+
+Create distinct operational and offline Age identities. Put only the operational private identity at `/etc/vaultwarden-oci/age-key.txt`; put only the offline public recipient in config. Encrypt `secrets.sops.yaml` to both recipients and configure required secrets plus test notification credentials.
+
+Before start:
+
+```bash
+sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
+sudo vwctl doctor --json
+```
+
+Start and inspect volatile material:
+
+```bash
+sudo vwctl start
+sudo find /run/vaultwarden-oci -maxdepth 3 -printf '%M %u:%g %p\n' | sort
+```
+
+Pass when `secrets.custody` and `secrets.decrypt` pass; required component secrets exist only in the intended `/run/vaultwarden-oci/secrets` mounts; `email_api_token` and `cloudflare_remediation_token` are not materialized there; plaintext secrets are absent from `/opt/vaultwarden-oci`, `config.toml`, generated Compose/Caddy files, journal output, and recovery state JSON.
+
+Use bounded searches for **known test secret values** rather than generic strings. Do not print real production secrets into a release record.
+
+## 3. Start/status/doctor/logs
+
+```bash
+sudo vwctl start
+sudo vwctl status
+sudo vwctl doctor --json | tee /tmp/vwoci-doctor.json
+sudo vwctl logs --tail 50
+```
+
+Pass when Vaultwarden and Caddy are running/healthy and doctor has no `FAIL`. Preserve the JSON as release evidence after reviewing it for secret-free output.
+
+## 4. Cloudflare origin fail-closed and CrowdSec Cloudflare remediation
+
+Run the bounded local packet test on the disposable host:
+
+```bash
+sudo tests/v2/acceptance_edge_packet.sh
+```
+
+Then test the real edge path:
+
+```bash
+sudo vwctl edge refresh
+sudo iptables -w -n -L DOCKER-USER
+sudo ip6tables -w -n -L DOCKER-USER
+```
+
+From outside the origin, verify the public application works through Cloudflare. Verify a direct non-Cloudflare path to origin TCP/443 is denied. In a controlled window, invalidate/block the current Cloudflare CIDR fetch **and** make any LKG unusable; invoke refresh/start and verify it fails while published 443 remains guarded. Restore normal network/LKG state afterward.
+
+Configure CrowdSec beta remediation:
+
+```bash
+sudo vwctl crowdsec setup
+sudo vwctl crowdsec remediation-start
+```
+
+In Cloudflare, verify every Worker Route created by this invocation is **Fail Open**, then:
+
+```bash
+sudo vwctl crowdsec confirm-fail-open
+sudo vwctl crowdsec status
+sudo vwctl doctor --json
+```
+
+Create a safe test web decision through the supported CrowdSec tooling and verify Cloudflare remediation appears/acts as expected. Pass only if remediation is Cloudflare-side and no V2 host firewall bouncer is required.
+
+## 5. Notification API success and transient SMTP fallback
+
+Configure one real built-in provider. For CyberPersons use canonical `cyberpersons` (or verify the `cyberpanel` alias resolves to it), an API key with `can_send`, a verified sending domain, SOPS `email_api_token`, and independent authenticated SMTP credentials if using its SMTP fallback.
+
+Trigger one controlled V2 notification event and confirm API delivery succeeds with no SMTP fallback. Review `vwctl status` / `vwctl doctor --json` for secret-free persisted status.
+
+For a representative fallback test, use a disposable/test provider condition that produces a **catalog-declared transient** response without changing operator endpoint authority. For CyberPersons, the current status-only transient is `503 service_unavailable`. Confirm bounded API retries occur and authenticated TLS SMTP fallback sends once afterward.
+
+Also prove that CyberPersons `429 rate_limit_exceeded` and `500 send_failed` are **not** treated as SMTP-fallback eligible by status alone. A focused automated test is acceptable when safely forcing those provider responses is unavailable. Current provider documentation uses 429 for account-wide minute/hour/day/month limits shared by API and SMTP credentials, so do not reinterpret an arbitrary 429 as a transient acceptance condition.
+
+Pass when permanent/auth/TLS/ambiguous outcomes remain visible and are not masked by SMTP.
+
+## 6. Provider catalog validation
+
+```bash
+python3 -m unittest tests.v2.test_notification tests.v2.test_notification_security -v
+sudo vwctl doctor --json
+```
+
+Pass when the catalog has exactly the six canonical built-ins, `cyberpanel -> cyberpersons`, exact canonical message fields, HTTPS/closed endpoint authority, and configured provider/options validate. Re-check current official provider documentation used by the release when catalog metadata changed.
+
+## 7. Recovery: backup -> rclone -> verify -> download -> restore
+
+Create known test vault state before the backup.
+
+```bash
+sudo vwctl backup --remote 'REMOTE:vwoci-acceptance'
+sudo vwctl status
+```
+
+Record the local artifact name/SHA-256 and independently list the remote object.
+
+If the disposable target is already running, first prove the preflight-before-stop guarantee with a deliberately wrong offline identity or other safe preflight failure. Invoke restore **without pre-stopping the service**, expect restore to fail, then verify `sudo vwctl status` still reports the running target healthy. Do not manufacture a failure after promotion begins.
+
+For the valid restore, use a clean target host or deliberately prepared disposable V2 target state and again do **not** run `vwctl stop` first:
+
+```bash
+sudo vwctl restore \
+  --from-remote 'REMOTE:vwoci-acceptance/<artifact>.vwrec' \
+  --identity /secure/offline-age-key.txt --start
+sudo vwctl status
+sudo vwctl doctor --json
+```
+
+Pass when publication succeeded only after remote re-download/checksum verification; invalid recovery input failed before stopping a healthy running target; the valid restore preflight completed before mutation/downtime; the restored known vault state is present; the operational Age private key was not inside the artifact; and the restored service passes status/doctor.
+
+Test prune separately in plan mode before any confirmed deletion:
+
+```bash
+sudo vwctl recovery prune --remote 'REMOTE:vwoci-acceptance' --keep-last 1
+```
+
+## 8. systemd
+
+```bash
+sudo systemctl enable --now vaultwarden-oci.target
+systemctl is-active vaultwarden-oci.service
+systemctl list-timers 'vaultwarden-oci-*'
+systemctl cat vaultwarden-oci-health.service
+systemctl cat vaultwarden-oci-backup.service
+systemctl cat vaultwarden-oci-maintenance.service
+```
+
+Manually invoke each oneshot where safe and inspect its journal. Pass when lifecycle plus health/backup/maintenance timers use the installed `current/vwctl` authority and failure notifications use the V2 notify template.
+
+## 9. Pinned update
+
+Prepare a trusted candidate release with a **new** `vaultwarden_oci.version` and exact `versions.toml` pins.
+
+```bash
+cd /path/to/candidate
+sudo vwctl update check --source "$PWD"
+sudo vwctl update apply --source "$PWD"
+readlink -f /opt/vaultwarden-oci/current
+sudo vwctl versions
+sudo vwctl status
+sudo vwctl doctor --json
+```
+
+Pass when update check reports exact candidate versions/digests; apply creates/gates a pre-update recovery point; the immutable release changes; activation uses exact pins; and post-update status/doctor pass. Do not use `--use-latest` for this gate.
+
+## 10. Cleanup and evidence
+
+Collect only secret-free evidence: host/architecture, commit/version, test command/result, doctor JSON, artifact hashes, and external verification notes. Remove disposable host/state and acceptance-only remote objects through explicit deletion after evidence retention requirements are met. Rotate/revoke test tokens where appropriate.
+
+Report each architecture as PASS, FAIL, or NOT RUN. Never convert an unavailable `arm64`/external-provider run into PASS based on `amd64` or unit tests alone.

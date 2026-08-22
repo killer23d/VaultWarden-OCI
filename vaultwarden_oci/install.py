@@ -54,7 +54,41 @@ SYSTEMD_UNITS = (
     "vaultwarden-oci-notify@.service",
 )
 
-CONFIG_TEMPLATE = """# VaultWarden-OCI V2 operator configuration.\n# Phase-specific settings are added by later phases.\n"""
+CONFIG_TEMPLATE = """# VaultWarden-OCI V2 beta operator configuration.
+# Replace the reserved .invalid values and offline Age recipient before first start.
+# Secrets belong in /etc/vaultwarden-oci/secrets.sops.yaml, never in this file.
+schema_version = 1
+
+[site]
+domain = "vault.invalid"
+acme_email = "admin@vault.invalid"
+
+[secrets]
+# Public recipient for a distinct offline recovery Age identity. Keep its private key off-host.
+offline_recovery_recipient = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+
+[vaultwarden]
+signups_allowed = false
+
+[smtp]
+# Direct authenticated TLS SMTP used by Vaultwarden and operational fallback.
+host = "smtp.invalid"
+port = 587
+security = "starttls"
+from_email = "vaultwarden@vault.invalid"
+from_name = "Vaultwarden"
+timeout_seconds = 15
+
+# Optional operational notifications. Uncomment this table as a unit after configuring SOPS email_api_token.
+# [notifications]
+# provider = "cyberpersons"
+# to_email = "ops@vault.invalid"
+#
+# Provider options are allowed only when declared by the immutable catalog. Mailgun example:
+# [notifications.options]
+# region = "us"
+# domain = "mg.vault.invalid"
+"""
 LEGACY_SYSTEMD_TARGET = """[Unit]\nDescription=VaultWarden-OCI lifecycle target\nDocumentation=https://github.com/killer23d/VaultWarden-OCI\nStopWhenUnneeded=no\n"""
 
 RELEASE_FILES = ("vwctl", "versions.toml", "email-providers.toml")

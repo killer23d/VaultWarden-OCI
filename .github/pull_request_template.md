@@ -1,8 +1,11 @@
-## Checklist
+## V2 pull request checklist
 
-- [ ] All changed shell scripts pass `bash -n` and `shellcheck -S warning`
-- [ ] If any `make <target>` behavior changed, `docs/SCRIPTS.md` and `docs/OPERATIONS.md` are updated
-- [ ] If any `--flag` was added or removed, all docs referencing that script are updated
-- [ ] If backup include/exclude logic changed, backup documentation is verified
-- [ ] `CHANGELOG.md` entry added under `[Unreleased]`
-- [ ] If systemd units changed, hardening directives are present (PrivateTmp, ProtectSystem, ProtectHome)
+- [ ] Change is within the V2 beta contract and does not add V1 compatibility, dashboard/TUI, Postfix/queue, arbitrary provider endpoints, or speculative plugin/framework architecture.
+- [ ] `python3 -m compileall -q vaultwarden_oci tests/v2` passes.
+- [ ] `python3 -m unittest discover -s tests/v2 -p 'test_*.py' -v` passes.
+- [ ] Changed Bash glue passes `bash -n`.
+- [ ] `vwctl --help` remains the command reference; workflow docs/tests were updated for command behavior changes.
+- [ ] Provider metadata changes were checked against current official provider documentation and kept in `email-providers.toml` unless a genuinely new transport capability required Python.
+- [ ] Immutable release-content changes include a new `[vaultwarden_oci].version` in `versions.toml`.
+- [ ] Secret handling, stable doctor IDs/JSON, recovery format, Cloudflare fail-closed behavior, and systemd ownership were reviewed where relevant.
+- [ ] Disposable Ubuntu 24.04 host acceptance was run for available `amd64`/`arm64` environments, or exact NOT RUN items are recorded in the PR/release evidence.

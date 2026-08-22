@@ -1,754 +1,140 @@
-# Operations Guide — VaultWarden-OCI
+# Operations
 
-Day-2 operations for the current root-operated VaultWarden-OCI appliance.
+`vwctl --help` and each subcommand's `--help` output are the command reference. Keep automation tied to command behavior and stable diagnostic IDs instead of copying a generated manual into the repository.
 
-Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING.md) · [CROWDSEC.md](CROWDSEC.md)
-
-## Root-operated production model
-
-Production lifecycle and privileged maintenance use root:
+## Routine lifecycle
 
 ```bash
-sudo make up
-sudo make down
-sudo make restart
-sudo make health
-sudo make backup
-sudo make restore
+sudo vwctl start
+sudo vwctl status
+sudo vwctl doctor
+sudo vwctl doctor --json
+sudo vwctl logs --tail 200
+sudo vwctl logs vaultwarden --tail 500
+sudo vwctl restart
+sudo vwctl stop
 ```
 
-The repository intentionally does not use the Docker-group/non-root operator model as the production golden path.
+`status` reports Vaultwarden/Caddy state plus the latest recovery and notification state. `doctor --json` is the machine-readable diagnostic truth. Its top-level schema is versioned and each check has a stable ID; scripts should key on IDs/status rather than prose messages.
 
-Help, version, and intentionally read-only metadata paths may remain root-free where supported by the owning command.
+Important current IDs include:
 
-## Normal status sequence
+- `runtime.docker`, `runtime.compose`, `runtime.paths`
+- `secrets.custody`, `secrets.decrypt`
+- `notification.catalog`, `notification.provider`, `notification.api_secret`, `notification.smtp_fallback`, `notification.last_delivery`
+- the `edge.*`, `crowdsec.*`, and recovery checks emitted by their owners
 
-Start with:
-
-```bash
-sudo make status
-sudo make health
-sudo make operations
-```
-
-For live services:
-
-```bash
-docker compose ps
-docker compose logs --tail=100
-```
-
-For installed automation:
-
-```bash
-sudo ./setup.sh systemd status
-sudo ./setup.sh systemd validate
-sudo make timers
-```
-
-A check that did not run is not a healthy result. Use the current `PASS`, `FAIL`, `SKIP`, `Ready`, `Not ready`, and `Unknown` states literally.
-
----
-
-## Service lifecycle
-
-### Start
-
-```bash
-sudo make up
-```
-
-`make up` delegates to `startup.sh`. Ordinary startup loads the accepted runtime environment, validates storage, prerequisites, known permissions, local images, and secret/key state, materializes transient runtime secrets, starts the existing Compose definition without pulling or building, and performs readiness/standard-health validation.
-
-Startup does **not** persistently synchronize repository `.env`, repair permissions, update images, reconcile DNS or firewall state, clean Docker resources, remove orphans, or create groups. Use `sudo make edit-env` or `sudo make sync-env` for environment synchronization, `sudo utilities/repair-permissions.sh` for explicit repair, `sudo make update` for image updates, the dedicated DNS/firewall commands for reconciliation, and `sudo ./setup.sh systemd install ...` for installed runtime activation.
-
-Do not replace the normal production start path with a bare:
-
-```bash
-docker compose up -d
-```
-
-A bare Compose start bypasses project preflight, secret materialization, storage, and operation-guard behavior.
-
-### Stop
-
-```bash
-sudo make down
-```
-
-### Restart
-
-```bash
-sudo make restart
-```
-
-### Safe restart
-
-```bash
-sudo make safe-restart
-```
-
-Use the safe-restart workflow when rollback/health semantics matter for the planned change.
-
----
-
-## Shared operation guard
-
-Conflicting mutating workflows use `lib/operations.sh` and kernel `flock` state.
-
-Inspect active/interrupted work with:
-
-```bash
-sudo make operations
-```
-
-Operation metadata may show the owning PID, owner-bound lock-holder identity, label, and current phase. The holder owns the global and operation-specific lock descriptors; ordinary workload children do not. If the owning shell exits or is killed, its private control channel closes and the holder releases both locks even when an unrelated workload child remains alive. The kernel lock is authoritative; file existence alone is not proof that an operation is active.
-
-When a command reports contention:
-
-1. run `sudo make operations`;
-2. confirm whether the owner is still active;
-3. inspect the phase and elapsed state;
-4. wait, resume, or use the guarded conflict action offered by the owning workflow.
-
-Do not delete lock files as a generic fix.
-
-The operation tooling refuses to automatically terminate package-manager work. Do not kill `apt`/`dpkg` simply because another project operation is waiting.
-
-Expected non-interactive contention uses exit `75` where the owning service contract defines a clean skip. DNS/firewall maintenance and their aggregate caller preserve that distinction. Real failures remain failures.
-
-`--force` may skip a documented confirmation; it does not silently bypass the shared operation guard.
-
-On a host using managed systemd runtime copies, refresh and validate those copies through the existing systemd setup workflow after deploying a library change; updating the checkout alone does not activate `/opt/vaultwarden-scripts`.
-
----
-
-## Health checks
-
-Standard health:
-
-```bash
-sudo make health
-```
-
-Quick health:
-
-```bash
-sudo make health-quick
-```
-
-Comprehensive health:
-
-```bash
-sudo ./maintenance.sh health --comprehensive
-```
-
-Direct standard command:
-
-```bash
-sudo ./maintenance.sh health
-```
-
-The current critical service policy is owned by `lib/defaults.sh`. Do not hard-code a separate list in operator procedures.
-
-The standard health path verifies the live runtime and includes the current Docker, HTTP/TLS, CrowdSec, host resource, network, backup, DNS, and configuration checks. Comprehensive health adds the current extended diagnostics.
-
-The quick profile is intentionally local and bounded: one Compose state snapshot, managed-container state, local Vaultwarden `/alive` and `/api/config`, critical disk/memory thresholds, newest local DB/full backup age, the configured Postfix sidecar, and notification failure/dead-letter state. It intentionally excludes external TLS, DNS, Cloudflare, CrowdSec, general outbound-network, SOPS/configuration-audit, detailed permission-traversal, and report-generation checks.
-
-Health exit contract:
-
-| Status | Meaning |
-| :-- | :-- |
-| `0` | selected checks passed |
-| `1` | advisory warnings |
-| `2` | selected checks failed |
-| `3` | a critical prerequisite prevented checks |
-| `4` | repair operation-guard or lock infrastructure failed |
-| `75` | a duplicate or contending health execution skipped cleanly |
-
-The five-minute systemd health service runs `health --quick --fix`. Its successful statuses are `0`, `1`, and `75`; exits `2`, `3`, and `4` trigger failure handling.
-
-When the existing health alert-state path is writable, unhealthy checks are
-correlated under one active incident ID. Existing per-check alert/cooldown
-behavior is unchanged. A successful recovery email summarizes the preceding
-unhealthy checks and duration, then removes only the active incident snapshot.
-If incident persistence is unavailable, health continues without correlation;
-it does not change permissions or treat missing incident context as a health
-failure.
-
-Repair behavior must be explicit. A failed/unavailable probe cannot be converted into a green status merely because the probe was skipped.
-
----
-
-## Production smoke test
-
-Run after first deployment, recovery, major storage/systemd change, or activation of new managed runtime:
-
-```bash
-sudo ./utilities/smoke-test.sh
-```
-
-The smoke test covers:
-
-- canonical project environment;
-- Docker/Compose;
-- expected critical container readiness;
-- TLS/origin behavior;
-- root HTTP and `/alive`;
-- admin protection;
-- operational Age key;
-- SOPS decryptability;
-- transient runtime secret materialization;
-- recent backup evidence;
-- canonical systemd installed-runtime/timer validation;
-- CrowdSec availability;
-- disk space.
-
-Exit `0` requires no `FAIL` and no `SKIP`.
-
-When the systemd check fails, run:
-
-```bash
-sudo ./setup.sh systemd validate
-```
-
-Then follow the exact stale/missing/timer error reported by the validator.
-
----
-
-## Repository updates and installed systemd runtime
-
-Managed systemd jobs execute installed copies under:
-
-```text
-/opt/vaultwarden-scripts/
-```
-
-Unit files live under:
-
-```text
-/etc/systemd/system/
-```
-
-The installed environment/key material is under:
-
-```text
-/etc/vaultwarden/
-```
-
-Therefore:
-
-```text
-git pull --ff-only origin main
-    !=
-systemd runtime activation
-```
-
-After pulling repository changes that affect managed scripts, libraries, or units:
-
-```bash
-git pull --ff-only origin main
-sudo ./setup.sh systemd install --enable-now
-sudo ./setup.sh systemd validate
-sudo ./utilities/smoke-test.sh
-```
-
-The validator compares expected repository-managed scripts, libraries, and units against the installed runtime and checks the six managed timers.
-
-`make update` updates container images through the maintenance path. It is not a Git update or `/opt` synchronizer.
-
----
-
-## systemd timer policy
-
-Managed timers are:
-
-```text
-vaultwarden-maintenance.timer
-vaultwarden-db-backup.timer
-vaultwarden-full-backup.timer
-vaultwarden-health.timer
-vaultwarden-dns-update.timer
-vaultwarden-firewall-update.timer
-```
-
-Install and start them now only when the host is ready for scheduled work:
-
-```bash
-sudo ./setup.sh systemd install --enable-now
-```
-
-For recovery/manual inspection:
-
-```bash
-sudo ./setup.sh systemd install --no-enable-now
-```
-
-This installs/enables units for future boot but does not start timers immediately.
-
-Validate:
-
-```bash
-sudo ./setup.sh systemd validate
-```
-
-A production-ready validation result requires the managed installed runtime to match the repository and every managed timer to be active with a next trigger.
-
-Managed services also use the project's failure-notification integration. Expected operation contention must not create a false incident; real execution failure must not be hidden as contention. The DB backup, full backup, and routine maintenance services use soft scheduling priority (`Nice=10`, best-effort I/O class, priority `7`) so background work yields more readily; these settings are not hard resource quotas.
-
----
+A doctor `FAIL` blocks acceptance. `WARN` is intentionally visible and should not be rewritten to success by wrapper scripts.
 
 ## Logs
 
-Common Make targets:
+Runtime container logs are available through `vwctl logs`. Systemd automation logs remain in the journal:
 
 ```bash
-sudo make logs-tail
-sudo make logs-vaultwarden
-sudo make logs-caddy
-sudo make logs-postfix
-sudo make logs-crowdsec
+journalctl -u vaultwarden-oci.service
+journalctl -u vaultwarden-oci-health.service
+journalctl -u vaultwarden-oci-backup.service
+journalctl -u vaultwarden-oci-maintenance.service
+journalctl -u 'vaultwarden-oci-notify@*'
 ```
 
-Compose:
+There is no V2 dashboard/TUI or alternate status script.
+
+## Systemd automation
+
+The V2 target groups lifecycle plus health, backup, and maintenance timers:
 
 ```bash
-docker compose logs --tail=100
-docker compose logs -f vaultwarden
-docker compose logs -f caddy
-docker compose logs -f postfix
+sudo systemctl enable --now vaultwarden-oci.target
+systemctl status vaultwarden-oci.target
+systemctl list-timers 'vaultwarden-oci-*'
 ```
 
-Systemd:
+The installed services invoke `/opt/vaultwarden-oci/current/vwctl` directly. The notification template handles service failures; no Postfix/local MTA, spool, durable retry queue, or application scheduler is installed.
+
+## Cloudflare edge and CrowdSec
+
+Refresh the origin policy explicitly when needed:
 
 ```bash
-journalctl -u vaultwarden-health.service -n 100 --no-pager
-journalctl -u vaultwarden-db-backup.service -n 100 --no-pager
-journalctl -u vaultwarden-full-backup.service -n 100 --no-pager
-journalctl -u vaultwarden-maintenance.service -n 100 --no-pager
-journalctl -u vaultwarden-dns-update.service -n 100 --no-pager
-journalctl -u vaultwarden-firewall-update.service -n 100 --no-pager
+sudo vwctl edge refresh
+sudo vwctl crowdsec status
 ```
 
-CrowdSec:
+The edge owner validates bounded public Cloudflare CIDRs and applies both IPv4 and IPv6 policy while a scoped fail-closed guard protects published port 443. A current policy is preferred; only a bounded last-known-good policy is accepted as fallback.
+
+CrowdSec beta remediation is Cloudflare-only:
 
 ```bash
-sudo journalctl -u crowdsec -n 100 --no-pager
-sudo journalctl -u crowdsec-firewall-bouncer -n 100 --no-pager
-sudo journalctl -u crowdsec-cloudflare-worker-bouncer -n 100 --no-pager
+sudo vwctl crowdsec setup
+sudo vwctl crowdsec remediation-start
+# Verify every created Worker Route is Fail Open in Cloudflare.
+sudo vwctl crowdsec confirm-fail-open
+sudo vwctl crowdsec status
 ```
 
-Do not paste decrypted secret values, private Age keys, recovery kits, or raw credentials into issue reports.
+The confirmation is deliberately explicit because Cloudflare route behavior is external state. V2 does not require or install a CrowdSec host firewall bouncer.
 
----
+## Notifications
 
-## Backup operations
+Operational notifications use exactly six built-ins from the immutable `email-providers.toml`: `mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, and `cyberpersons`; `cyberpanel` resolves to `cyberpersons`.
 
-Create a database backup:
+The provider API is attempted first with bounded retries only for catalog-declared transient responses or network/connectivity failures. Direct authenticated TLS SMTP is attempted only after an eligible transient API outcome. It is not a durable queue and it does not mask authentication, TLS verification, permanent provider, or ambiguous response failures.
+
+For CyberPersons, `503 service_unavailable` is the current status-only transient rule. `429 rate_limit_exceeded` remains visible because the provider uses the same status for account-wide minute/hour/day/month limits shared by API and SMTP credentials, so status alone cannot prove a bounded transient condition. `500 send_failed` also remains visible and is not fallback-eligible by status alone. Provider metadata is release data: re-check current official documentation before changing retry/success rules.
+
+## Recovery and rclone
+
+Create a verified local recovery point:
 
 ```bash
-sudo make backup
+sudo vwctl backup
 ```
 
-Create a full DR archive:
+Publish and remotely verify in the same operation:
 
 ```bash
-sudo make backup-full
+sudo vwctl backup --remote REMOTE:path
 ```
 
-Create an independently sealed emergency archive:
+Remote publication uses copy semantics, never destructive sync. Pruning is a separate plan/confirm operation:
 
 ```bash
-sudo make backup-emergency
+sudo vwctl recovery prune --remote REMOTE:path --keep-last 7
+sudo vwctl recovery prune --remote REMOTE:path --keep-last 7 --confirm
 ```
 
-Full verification:
+See [RECOVERY.md](RECOVERY.md) before any restore.
+
+## Versions and updates
+
+Show exact active/source pins:
 
 ```bash
-sudo ./backup.sh run full --full-verification
+vwctl versions
 ```
 
-Verify canonical latest selection:
+Production updates are explicit and source-pinned:
 
 ```bash
-sudo ./backup.sh verify
+cd /path/to/trusted/new-release
+sudo vwctl update check --source "$PWD"
+sudo vwctl update apply --source "$PWD"
 ```
 
-List/inventory:
+The update path gates current `status` and `doctor --json`, creates a verified pre-update recovery point, validates exact image/component pins, stages a new immutable release, switches `current`, and gates the activated runtime. If release content changes, `vaultwarden_oci.version` in `versions.toml` must change as well.
+
+`--use-latest` is not an operator update mode. It is allowed only with `VWOCI_DEVELOPMENT=1` and a non-production `--root`, where remote versions/digests are resolved once and recorded as exact values for that run.
+
+## Configuration changes
+
+After editing `config.toml` or the SOPS document:
 
 ```bash
-sudo make list-backups
-sudo make backup-status
+sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
+sudo vwctl doctor --json
+sudo vwctl restart
+sudo vwctl status
 ```
 
-Sync retained local backup sets to rclone:
-
-```bash
-sudo ./backup.sh sync
-```
-
-The backup success contract is truthful: required verification failure is not success, requested offsite protection failure/skipping is distinguished from completed offsite protection, and a failed new archive does not run normal retention/pruning as though a valid replacement recovery point exists.
-
-See [BACKUP-RESTORE.md](BACKUP-RESTORE.md).
-
----
-
-## Restore operations
-
-Preflight:
-
-```bash
-sudo ./restore.sh inspect --remote
-```
-
-Guided restore:
-
-```bash
-sudo make restore
-```
-
-Guided remote restore:
-
-```bash
-sudo ./restore.sh interactive --remote --start-policy ask
-```
-
-Database-only restore:
-
-```bash
-sudo make restore-db
-```
-
-Use `--start-policy manual`/`--no-start` when the recovered host must remain stopped for inspection.
-
-Manual start/health sequence after restore:
-
-```bash
-sudo utilities/repair-permissions.sh
-sudo ./startup.sh
-sudo ./maintenance.sh health
-```
-
-When the restored host is ready to return to automated production:
-
-```bash
-sudo ./setup.sh systemd install --enable-now
-sudo ./setup.sh systemd validate
-sudo ./utilities/smoke-test.sh
-```
-
-Do not treat successful systemd install alone as the readiness gate.
-
----
-
-## Permission repair
-
-Read-only contract check:
-
-```bash
-sudo utilities/repair-permissions.sh --check
-```
-
-Repair:
-
-```bash
-sudo utilities/repair-permissions.sh
-```
-
-The helper applies known-path contracts for:
-
-- root-operated persistent config/secrets;
-- `/etc/vaultwarden`;
-- transient runtime secrets;
-- Vaultwarden data/log ownership;
-- Caddy UID/GID `2000:2000` runtime state/logs.
-
-Do not run broad `chmod -R 777` or whole-state `chown -R 2000:2000` commands.
-
----
-
-## Environment changes
-
-Edit non-secret values:
-
-```bash
-sudo make edit-env
-```
-
-Inspect state/path drift:
-
-```bash
-utilities/env-edit.sh status
-```
-
-Restart after an ordinary environment change:
-
-```bash
-sudo make restart
-sudo make health
-```
-
-Repository `.env` is the operator-editable authoring source. Persistent `install.env` and `/etc/vaultwarden/vaultwarden.env` are managed runtime copies and should not be hand-edited as the normal configuration workflow.
-
-Runtime environment loading uses `/etc/vaultwarden/vaultwarden.env` when it exists; otherwise it uses `${PROJECT_STATE_DIR}/config/install.env`. Repository `.env` is never a production runtime fallback. A missing, unreadable, or malformed selected runtime authority fails explicitly and should be repaired through the supported sync/recovery workflow. See [CONFIGURATION.md](CONFIGURATION.md#environment-precedence).
-
----
-
-## Secret operations
-
-Edit:
-
-```bash
-sudo ./edit-secrets.sh edit
-```
-
-Rotate:
-
-```bash
-sudo ./edit-secrets.sh rotate <secret-key>
-```
-
-List key names:
-
-```bash
-sudo ./utilities/secrets-list.sh
-```
-
-Check Age key:
-
-```bash
-sudo make key-health
-```
-
-Rotate operational Age/SOPS key:
-
-```bash
-sudo make key-rotate
-```
-
-Export recovery material:
-
-```bash
-sudo ./utilities/secrets-export-recovery-kit.sh
-```
-
-The secret schema owns the transform/apply behavior for each key. See [SECRETS-SCHEMA.md](SECRETS-SCHEMA.md).
-
----
-
-## Email operations
-
-Test the operational alert path:
-
-```bash
-sudo ./maintenance.sh test-email --verbose
-```
-
-Inspect the Postfix queue through the stable root-operated Make targets:
-
-```bash
-sudo make email-queue-summary
-sudo make email-queue
-sudo make email-queue-inspect QUEUE_ID=AbC-123
-sudo make email-queue-retry QUEUE_ID=AbC-123
-sudo make email-queue-logs QUEUE_ID=AbC-123 EMAIL_QUEUE_TAIL=500
-```
-
-Use `EMAIL_QUEUE_BODY=true` only when message-body disclosure is necessary and
-safe. Targeted deletion and snapshot purge fail
-closed unless the effective Postfix setting is `enable_long_queue_ids=yes`. If
-it is disabled or cannot be read, set `POSTFIX_ENABLE_LONG_QUEUE_IDS=yes`, run
-`sudo make up` to recreate or apply Postfix, verify the effective setting, and
-retry. Retry operations remain available with a warning.
-
-Targeted deletion holds only the selected exact ID, compares its current
-identity with the pre-confirmation record, and deletes only a held match. A
-reused ID is preserved and reported; a newly introduced hold is released after
-mismatch, failure, or interruption when possible. A pre-existing hold remains
-held following failure. Snapshot purge applies the same identity principle to
-its captured set with bounded inventories. Metadata comparison is defence in
-depth, not a replacement for long queue IDs. Equivalent duplicate
-`postqueue -j` records are counted once, while conflicting identities for one
-queue ID fail closed before mutation.
-
-Normal production mail is Postfix-first. Vaultwarden talks to the internal Postfix sidecar; Postfix owns upstream SMTP TLS/authentication/queueing. Confirm final recipient delivery through Postfix/upstream-provider evidence when a message matters.
-
-Optional HTTP API email providers apply to the operational script alert path. Keep SMTP/Postfix configured for Vaultwarden mail and attachment-based recovery-kit delivery.
-
-See [EMAIL.md](EMAIL.md).
-
----
-
-## CrowdSec operations
-
-Status:
-
-```bash
-sudo systemctl status crowdsec
-sudo systemctl status crowdsec-firewall-bouncer
-sudo systemctl status crowdsec-cloudflare-worker-bouncer
-```
-
-Decisions/alerts:
-
-```bash
-sudo cscli decisions list
-sudo cscli alerts list --since 24h
-sudo cscli bouncers list
-```
-
-Remove a decision:
-
-```bash
-sudo cscli decisions delete --ip <ip-address>
-```
-
-Persistent administrator allowlist:
-
-```bash
-sudo ./utilities/setup-crowdsec.sh --admin-ip <ip-or-cidr>
-```
-
-Apply current Worker config after relevant secret rotation:
-
-```bash
-sudo ./utilities/crowdsec-worker-apply.sh
-```
-
-Manage the optional CrowdSec security-event email through its dedicated controller:
-
-```bash
-sudo ./utilities/crowdsec-email.sh enable
-sudo ./utilities/crowdsec-email.sh status
-sudo ./utilities/crowdsec-email.sh test
-sudo ./utilities/crowdsec-email.sh disable
-```
-
-`enable` and `disable` update `CROWDSEC_EMAIL_NOTIFICATIONS` transactionally and
-delegate to the established CrowdSec reconciliation path. `status` checks the
-environment flag, `CROWDSEC_EMAIL_EVENT_POLICY`, and managed markers. The
-`none` policy keeps manual delivery verification available while omitting automatic
-event delivery; `all` is the default. After `test`, confirm the message arrives
-through the configured Postfix relay and use [EMAIL.md](EMAIL.md) if delivery needs troubleshooting.
-
-This is separate from health-check incident mail and generic systemd
-unit-failure mail.
-
-See [CROWDSEC.md](CROWDSEC.md).
-
----
-
-## Maintenance and updates
-
-Routine maintenance:
-
-```bash
-sudo make maintenance
-```
-
-Comprehensive maintenance:
-
-```bash
-sudo make maintenance-full
-```
-
-Database maintenance:
-
-```bash
-sudo make db-maint
-```
-
-The daily systemd job runs routine maintenance with email reporting. Routine maintenance owns cleanup, canonical backup pruning, online SQLite `PRAGMA optimize` plus `PRAGMA wal_checkpoint(PASSIVE)`, and quick post-maintenance health. It does not own daily DNS or firewall reconciliation; the dedicated timers do. Health status `1` completes successfully with advisory warnings, status `75` completes successfully with a visible skip, and genuine health failures make maintenance fail.
-
-`sudo make maintenance-full` is the explicit operator path that adds DNS and firewall work. `sudo make db-maint` is the separate deep offline workflow that owns a safety backup, integrity checks, service stop/start, checkpoint work, and `VACUUM`.
-
-Container image update:
-
-```bash
-sudo make update
-```
-
-Host package update:
-
-```bash
-sudo make update-system
-```
-
-DNS update:
-
-```bash
-sudo make update-dns
-```
-
-The update/maintenance paths use the shared operation guard. Package-manager work is specially protected from automatic conflict termination.
-
----
-
-## Break-glass administration
-
-Create:
-
-```bash
-sudo make breakglass-create
-```
-
-Status:
-
-```bash
-sudo make breakglass-status
-```
-
-Remove after the incident:
-
-```bash
-sudo make breakglass-remove
-```
-
-Break-glass state is for emergency administration, not a permanent alternate admin path.
-
----
-
-## Same-VM test reset
-
-Preview:
-
-```bash
-sudo ./utilities/uninstall-vaultwarden.sh run --test-reset --dry-run
-```
-
-Reset the managed stack while preserving the Git checkout:
-
-```bash
-sudo ./utilities/uninstall-vaultwarden.sh run \
-  --test-reset \
-  --i-have-saved-my-recovery-kit
-```
-
-This removes known VaultWarden-OCI managed state, installed systemd integration, managed Docker resources, CrowdSec integration, and project firewall rules, then verifies managed residuals.
-
-It intentionally preserves host-wide Docker/tooling state and the Git checkout. It is not a pristine-image rebuild.
-
----
-
-## Production acceptance sequence
-
-For a healthy existing host after repository updates:
-
-```bash
-git pull --ff-only origin main
-sudo ./setup.sh systemd install --enable-now
-sudo ./setup.sh systemd validate
-sudo ./utilities/smoke-test.sh
-```
-
-For a new/recovered host, also verify:
-
-```bash
-sudo make health
-sudo ./maintenance.sh test-email --verbose
-sudo ./backup.sh run full --full-verification
-sudo ./backup.sh verify
-sudo ./utilities/secrets-export-recovery-kit.sh
-```
-
-The final production-ready decision should reflect live host behavior, installed automation consistency, backup/recovery evidence, and current operator access.
+Do not create alternate wrappers that mutate the same state. The single CLI and its mutation lock are the supported authority.

@@ -9,6 +9,7 @@ from vaultwarden_oci import notification, runtime, secrets
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "email-providers.toml"
+_PROVIDER_IDS = ("mailersend", "sendgrid", "mailgun", "postmark", "resend", "cyberpersons")
 
 
 def config_data(provider: str = "cyberpersons") -> dict[str, object]:
@@ -27,6 +28,56 @@ def config_data(provider: str = "cyberpersons") -> dict[str, object]:
         },
         "notifications": {"provider": provider, "to_email": "ops@example.net"},
     }
+
+
+def synthetic_catalog(
+    *,
+    cyber_retry_body_field: str | None = None,
+    cyber_retry_body_unit: str | None = None,
+    sendgrid_option: bool = False,
+) -> str:
+    """Build a complete structural test catalog without editing production TOML text."""
+    lines = ["schema_version = 1"]
+    for provider_id in _PROVIDER_IDS:
+        aliases = '["cyberpanel"]' if provider_id == "cyberpersons" else "[]"
+        endpoint = f"https://{provider_id}.example.invalid/send"
+        if provider_id == "sendgrid" and sendgrid_option:
+            endpoint = "https://{api_host}/v3/mail/send"
+        retry_statuses = "[503]" if provider_id == "cyberpersons" else "[]"
+        lines.extend(
+            [
+                "",
+                "[[providers]]",
+                f'id = "{provider_id}"',
+                f"aliases = {aliases}",
+                f'display_name = "Synthetic {provider_id}"',
+                f'endpoint = "{endpoint}"',
+                'auth_mode = "bearer"',
+                'encoding = "json"',
+                "request_template = '{\"to\":\"{to_email}\"}'",
+                "success_statuses = [202]",
+                f"retry_statuses = {retry_statuses}",
+            ]
+        )
+        if provider_id == "cyberpersons" and cyber_retry_body_field is not None:
+            lines.append(f'retry_body_field = "{cyber_retry_body_field}"')
+            if cyber_retry_body_unit is not None:
+                lines.append(f'retry_body_unit = "{cyber_retry_body_unit}"')
+        if provider_id == "sendgrid" and sendgrid_option:
+            lines.extend(
+                [
+                    "",
+                    "[providers.options.region]",
+                    'kind = "enum"',
+                    'default = "global"',
+                    'allowed = ["global", "synthetic"]',
+                    "",
+                    "[providers.substitutions.api_host]",
+                    'option = "region"',
+                    'values = { global = "api.sendgrid.com", synthetic = "api.synthetic.invalid" }',
+                ]
+            )
+    return "\n".join(lines) + "\n"
 
 
 class NotificationSecurityTests(unittest.TestCase):
@@ -52,7 +103,10 @@ class NotificationSecurityTests(unittest.TestCase):
             runtime.parse_config(config_data("unknown-provider"))
         parsed = runtime.parse_config(config_data("cyberpanel"))
         self.assertEqual(parsed.notification_provider, "cyberpanel")
-        self.assertEqual(notification.load_catalog(CATALOG).resolve(parsed.notification_provider).provider_id, "cyberpersons")
+        self.assertEqual(
+            notification.load_catalog(CATALOG).resolve(parsed.notification_provider).provider_id,
+            "cyberpersons",
+        )
 
     def test_provider_specific_options_cannot_leak_to_other_providers(self) -> None:
         data = config_data("resend")
@@ -63,34 +117,9 @@ class NotificationSecurityTests(unittest.TestCase):
             runtime.parse_config(data)
 
     def test_catalog_declared_option_flows_through_config_and_delivery_without_provider_python(self) -> None:
-        original = CATALOG.read_text(encoding="utf-8")
-        text = original.replace(
-            'endpoint = "https://api.sendgrid.com/v3/mail/send"',
-            'endpoint = "https://{api_host}/v3/mail/send"',
-            1,
-        )
-        marker = 'retry_statuses = [429]\n\n[[providers]]\nid = "mailgun"'
-        self.assertIn(marker, text)
-        text = text.replace(
-            marker,
-            '''retry_statuses = [429]
-
-[providers.options.region]
-kind = "enum"
-default = "global"
-allowed = ["global", "synthetic"]
-
-[providers.substitutions.api_host]
-option = "region"
-values = { global = "api.sendgrid.com", synthetic = "api.synthetic.invalid" }
-
-[[providers]]
-id = "mailgun"''',
-            1,
-        )
         with tempfile.TemporaryDirectory() as directory:
             catalog_path = Path(directory) / "catalog.toml"
-            catalog_path.write_text(text, encoding="utf-8")
+            catalog_path.write_text(synthetic_catalog(sendgrid_option=True), encoding="utf-8")
             catalog = notification.load_catalog(catalog_path)
             data = config_data("sendgrid")
             notifications = data["notifications"]
@@ -124,15 +153,11 @@ id = "mailgun"''',
         self.assertEqual(result.outcome, "success")
 
     def test_body_retry_delay_schema_requires_known_unit(self) -> None:
-        original = CATALOG.read_text(encoding="utf-8")
-        marker = "retry_statuses = [503]\n"
-        self.assertIn(marker, original)
         mutations = (
-            original.replace(marker, marker + 'retry_body_field = "retry_after"\n', 1),
-            original.replace(
-                marker,
-                marker + 'retry_body_field = "retry_after"\nretry_body_unit = "fortnights"\n',
-                1,
+            synthetic_catalog(cyber_retry_body_field="retry_after"),
+            synthetic_catalog(
+                cyber_retry_body_field="retry_after",
+                cyber_retry_body_unit="fortnights",
             ),
         )
         for text in mutations:
@@ -143,17 +168,15 @@ id = "mailgun"''',
                     notification.load_catalog(path)
 
     def test_declared_body_retry_delay_is_numeric_bounded_and_malformed_values_are_ignored(self) -> None:
-        original = CATALOG.read_text(encoding="utf-8")
-        marker = "retry_statuses = [503]\n"
-        self.assertIn(marker, original)
-        text = original.replace(
-            marker,
-            marker + 'retry_body_field = "retry_after"\nretry_body_unit = "seconds"\n',
-            1,
-        )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "catalog.toml"
-            path.write_text(text, encoding="utf-8")
+            path.write_text(
+                synthetic_catalog(
+                    cyber_retry_body_field="retry_after",
+                    cyber_retry_body_unit="seconds",
+                ),
+                encoding="utf-8",
+            )
             provider = notification.load_catalog(path).resolve("cyberpersons")
             bounded = notification._response_result(provider, 503, {}, b'{"retry_after":999}')
             malformed = notification._response_result(provider, 503, {}, b'{"retry_after":"soon"}')

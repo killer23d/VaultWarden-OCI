@@ -1,564 +1,72 @@
-# Security Model — VaultWarden-OCI
+# Security
 
-VaultWarden-OCI is a security-first appliance for a small production team. The design deliberately favors a narrow supported boundary, root-operated administration, explicit key custody, fail-closed storage/recovery behavior, truthful readiness, and a small number of understandable controls.
+V2 keeps the supported security boundary intentionally small: one Ubuntu host, immutable release code, root-owned operator configuration, SOPS/Age encrypted credentials, volatile plaintext, Cloudflare-restricted origin ingress, and closed notification/provider metadata.
 
-This is not an enterprise security platform, SIEM, multi-node HA system, or generic cloud/edge framework.
+## Trust and privilege boundaries
 
-Related docs: [PROJECT-BOUNDARY.md](PROJECT-BOUNDARY.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [CROWDSEC.md](CROWDSEC.md) · [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md)
+- Treat the V2 release/checkout and `versions.toml` as trusted release inputs.
+- `/etc/vaultwarden-oci` is root-owned configuration/credential custody; `/var/lib/vaultwarden-oci` is durable service/recovery state; `/run/vaultwarden-oci` is volatile generated material.
+- Runtime containers use fixed non-root IDs, read-only roots, dropped capabilities, `no-new-privileges`, bounded resources, and narrowly mounted data/secrets.
+- `vwctl` is the only supported mutation authority. There is no dashboard/TUI, arbitrary hook/plugin SDK, or generic HTTP scripting facility.
 
-## Security priorities
+## SOPS + Age
 
-The repository's security priorities are:
+The SOPS document must be encrypted to two different Age recipients: an operational identity kept root-only on the host and an offline recovery identity kept away from the host. Startup and doctor validate that both recipients are present and distinct.
 
-1. protect production secrets and private recovery identities;
-2. keep database and disaster-recovery paths verifiable;
-3. fail closed before destructive storage/recovery mutation when ownership or layout is ambiguous;
-4. serialize conflicting production mutations;
-5. keep operator success/readiness claims truthful;
-6. preserve a simple production path that a junior administrator can understand.
+Plaintext credentials are not written into `config.toml`, release files, Compose source, logs, or recovery archives. Required runtime values are materialized under `/run/vaultwarden-oci/secrets` with narrow ownership/modes and are removed on normal stop/failure cleanup. Host-side remediation/API tokens remain in process memory rather than runtime secret mounts.
 
-A control that reports green while the check did not run is not a security control.
+The operational Age private key is intentionally excluded from V2 recovery artifacts. A stolen recovery file alone must not provide its own decryption identity.
 
----
+## Cloudflare origin ingress
 
-## Supported boundary
+V2 obtains Cloudflare IPv4/IPv6 ranges over HTTPS, strictly validates public canonical CIDRs, bounds list sizes, rejects overlaps/unsafe ranges, and stores a time-bounded last-known-good policy. Before refresh it inserts a scoped `DOCKER-USER` guard that blocks published HTTPS toward the V2 bridge. Only after both families are rebuilt successfully is the guard removed.
 
-The supported normal production host is:
+Therefore an invalid/unavailable current policy plus an unusable cached policy fails closed. The policy is scoped to origin ingress and is not a general host firewall manager.
 
-```text
-Ubuntu 24.04 LTS Noble
-amd64 or arm64
-systemd
-Docker Engine + Docker Compose plugin
-```
+CrowdSec beta remediation sends web decisions to Cloudflare. A CrowdSec host firewall bouncer is explicitly outside the beta architecture. Cloudflare Worker Routes created for the remediation path must be checked as Fail Open and confirmed through `vwctl crowdsec confirm-fail-open` so a bouncer outage does not become an application outage.
 
-The normal edge path is Cloudflare-first:
+## Operational notifications
+
+`email-providers.toml` is immutable release data with exactly six built-ins. The parser accepts only a closed schema: fixed/narrowly substituted HTTPS endpoints, finite auth modes, JSON/form encoding, declared success/retry rules, and the exact canonical message vocabulary:
 
 ```text
-Cloudflare DNS/proxy/WAF
-        ->
-provider firewall / security group / network firewall
-        ->
-Ubuntu UFW / iptables path
-        ->
-Caddy
-        ->
-Vaultwarden
+from_email | from_name | from_header | to_email | subject | text
 ```
 
-Host runtime is cloud-provider neutral. OCI, AWS, Azure, Google Cloud, another VM provider, private virtualization, or physical hardware may be used when the supported host and networking prerequisites are met.
+Operator TOML can select a provider and declared non-secret options; it cannot supply arbitrary endpoints, auth headers/modes, request templates, success rules, or retry rules. Authorization-bearing HTTPS requests do not follow redirects. Response bodies are bounded and sensitive full responses are not persisted.
 
-The setup system fails closed on an unsupported/unresolved Ubuntu release or CPU architecture. Unknown hosts are not silently treated as Noble/amd64.
+Routine upstream endpoint/auth/request/success/retry changes belong in the closed catalog plus focused tests/docs. Python changes are reserved for a genuinely new transport capability that the existing schema cannot represent safely.
 
----
+### CyberPersons/CyberPanel
 
-## Cloudflare-first origin protection
+`cyberpersons` is canonical; `cyberpanel` is only an alias. The API credential must have `can_send` and the sending domain must be verified with the provider. The API token belongs in SOPS as `email_api_token`.
 
-The supported UFW setup fetches Cloudflare's IPv4/IPv6 CIDR lists and restricts origin ports `80`/`443` to validated Cloudflare ranges.
+If CyberPersons SMTP is used for fallback, use independent SMTP credentials in `smtp_username`/`smtp_password`; the API token is not an SMTP password. The supported CyberPersons SMTP settings are port 587 with STARTTLS.
 
-The firewall path:
+Phase 8 re-verified the provider contract on 2026-08-21. HTTP `503 service_unavailable` is the current status-only transient rule. HTTP `429 rate_limit_exceeded` is not classified transient by status alone because current provider documentation uses 429 for minute/hour/day/month account limits and says those limits are shared across API keys and SMTP credentials. HTTP `500 send_failed` also remains visible and is not SMTP-fallback eligible by status alone. Any later provider change must be re-verified against current official documentation before catalog edits.
 
-- detects the host SSH port and allows SSH;
-- fetches current Cloudflare CIDRs;
-- persists a last-known-good CIDR cache;
-- refuses to configure `80`/`443` with no valid Cloudflare CIDR data;
-- refuses an expired cached CIDR set when fresh data cannot be fetched;
-- applies Cloudflare-source rules for the web ports;
-- enables UFW when needed.
+## SMTP
 
-The provider firewall/security group remains outside the host. Configure it separately.
+Vaultwarden application mail is direct authenticated SMTP. Operational fallback uses the same configured SMTP transport only after a clearly transient API/network outcome. TLS uses the platform default trust store with either required STARTTLS or implicit TLS; there is no plaintext downgrade.
 
-Do not copy old guidance that opens origin `80`/`443` to all clients as the normal security path.
+V2 has no Postfix/local MTA, spool, durable retry/dead-letter queue, or provider-specific queue tooling. If delivery fails permanently, that failure remains observable rather than being hidden behind a local queue.
 
-### Docker/iptables boundary
+## Recovery
 
-Docker modifies iptables chains. `setup-firewall.sh` applies the host firewall after Docker installation and maintains project NAT/`DOCKER-USER` behavior.
+The only supported recovery format is V2 `.vwrec`, encrypted to the configured offline Age recipient. Restore validates the Age envelope, manifest, safe paths, complete file set, sizes/checksums, SQLite integrity, and SOPS custody before promotion. There is no V1 reader or migration path.
 
-`vaultwarden-iptables.service` re-applies the supported iptables phase after Docker-related chain resets.
+rclone publication is non-destructive: local verification, `copyto`, remote re-download, checksum verification, success. Remote pruning requires a separate explicit command and confirmation.
 
-The setup path detects an active nftables ruleset and refuses the mixed iptables/nftables state unless the operator explicitly acknowledges the risk with `--force-iptables`.
+## Exact versions
 
-Do not force the override merely to make setup continue. Verify which firewall framework owns the host first.
+Production `versions.toml` carries exact component versions and architecture-specific image digests. Production install/update never resolves mutable “latest” values. The development-only resolver is gated by `VWOCI_DEVELOPMENT=1`, refuses `/`, resolves each remote boundary once, and records exact values.
 
----
-
-## Caddy security boundary
-
-Caddy is the supported reverse proxy/TLS endpoint.
-
-Current production behavior includes:
-
-- Cloudflare-first DNS-01 certificate management;
-- restricted `/admin` exposure using the configured admin CIDR and Caddy basic-auth secret;
-- structured access/security logs under the project state directory;
-- a local health endpoint on the configured loopback path;
-- container hardening with dropped capabilities except the required bind-service capability;
-- read-only container root filesystem with explicit writable mounts/tmpfs.
-
-Caddy runs as UID/GID `2000:2000`. Runtime permission repair normalizes Caddy data, config, and log bind mounts to this identity.
-
-Do not expose `/admin` merely by setting a weak global WAF rule. The application admin token and the Caddy access boundary are separate controls.
-
----
-
-## CrowdSec enforcement architecture
-
-The current design is not the old Fail2Ban/Cloudflare-WAF-API model.
-
-CrowdSec runs on the host and consumes configured Vaultwarden/Caddy/SSH signals.
-
-Two bouncer paths are used:
-
-1. **Firewall bouncer** — enforces CrowdSec decisions at the host firewall layer.
-2. **Cloudflare Workers bouncer** — synchronizes the configured locally generated CrowdSec decisions to Cloudflare Workers KV; the deployed Worker uses KV state for edge enforcement.
-
-The Workers path is not documented as a WAF Custom Rules ruleset updater.
-
-The local firewall bouncer may also see decisions that are not useful for blocking the real proxied web client at the origin, because Cloudflare is the network peer. The Workers/KV edge path is the control that blocks the real attacker before origin for the configured web decision flow.
-
-See [CROWDSEC.md](CROWDSEC.md) for the exact setup and credential model.
-
----
-
-## Root-operated production lifecycle
-
-Production lifecycle and privileged maintenance are root-operated:
-
-```bash
-sudo make up
-sudo make down
-sudo make restart
-sudo make health
-sudo make backup
-sudo make restore
-```
-
-This matches the ownership of:
-
-```text
-/etc/vaultwarden/
-${PROJECT_STATE_DIR}/config/
-${PROJECT_STATE_DIR}/secrets/
-/run/vaultwarden-oci/secrets/
-/opt/vaultwarden-scripts/
-/etc/systemd/system/
-```
-
-Do not redesign the production model around membership in the Docker group merely because Docker supports that operating pattern.
-
-Metadata/help paths may be root-free where intentionally implemented. A root-free `--help` path does not imply a root-free production mutation path.
-
----
-
-## Persistent secret model
-
-The canonical encrypted secret file is:
-
-```text
-${PROJECT_STATE_DIR}/secrets/secrets.yaml
-```
-
-Secret key definitions, transforms, collection rules, required/conditional status, and apply behavior are owned by:
-
-```text
-secrets-schema.yaml
-```
+## Security diagnostics
 
 Use:
 
 ```bash
-sudo ./edit-secrets.sh edit
-sudo ./edit-secrets.sh rotate <secret-key>
+sudo vwctl doctor --json
 ```
 
-Do not place production passwords/tokens in repository `.env`.
-
-The repository must not:
-
-- commit plaintext secrets;
-- print production secret values into ordinary logs;
-- expose private Age keys in process arguments where avoidable;
-- persist the offline recovery private key on the server;
-- weaken root-owned key permissions for a convenience command.
-
----
-
-## Runtime secret lifetime
-
-Decoded Docker secret source files are generated under:
-
-```text
-/run/vaultwarden-oci/secrets/
-```
-
-Expected contract:
-
-```text
-runtime secret directory: root:root 0700
-decoded secret files:     root:root 0444
-```
-
-`/run` is volatile. Startup rematerializes these files from the SOPS ciphertext.
-
-Persistent project backups must not archive the decrypted `/run/vaultwarden-oci/secrets` tree.
-
-Do not "fix" runtime secret access by copying decoded values into `.env` or a persistent world-readable directory.
-
----
-
-## Age key custody
-
-The live operational Age private key is installed at:
-
-```text
-/etc/vaultwarden/age-key.txt
-```
-
-It is root-owned private state.
-
-Check it with:
-
-```bash
-sudo make key-health
-sudo make key-show
-```
-
-The SOPS policy may include a separate offline recovery Age public recipient. The matching private key stays offline.
-
-Do not confuse:
-
-- operational Age private key;
-- operational Age public recipient;
-- offline recovery Age private key;
-- offline recovery public recipient;
-- emergency backup passphrase;
-- `EMERGENCY_BACKUP_AGE_RECIPIENT`.
-
-The offline private key is used in place by `recover.sh`; recovery generates a replacement operational key for the new server.
-
----
-
-## Key rotation
-
-Rotate the operational key through:
-
-```bash
-sudo make key-rotate
-```
-
-The key-rotation path must verify the resulting ciphertext remains decryptable with the current key policy before success.
-
-After rotation:
-
-```bash
-sudo make key-health
-sudo ./utilities/secrets-export-recovery-kit.sh
-```
-
-Retain historical private identities required by retained backup generations. Operational key rotation does not retroactively re-encrypt every historical backup.
-
----
-
-## Backup security model
-
-The three backup tiers are security-relevant:
-
-| Tier | Security meaning |
-| :-- | :-- |
-| `db` | encrypted verified SQLite rollback point |
-| `full` | normal DR archive; does not include the live operational Age private key |
-| `emergency` | clone-grade secrets-bearing capsule that can include staged operational key/config material and therefore requires independent sealing |
-
-Emergency protection must be independent from the operational key the capsule may contain.
-
-Supported independent protection is:
-
-- `age -p` passphrase mode; or
-- `EMERGENCY_BACKUP_AGE_RECIPIENT` with a separate private identity.
-
-Do not put emergency passphrases in shell history, environment variables, logs, or archive metadata. Emergency plaintext can contain operational private-key material, so it remains in verified, capacity-checked tmpfs and does not fall back to persistent plaintext staging.
-
-### Backup verification truthfulness
-
-A backup that fails required verification is not a valid new recovery point.
-
-The current backup failure contract prevents a newly failed archive from:
-
-- remaining as a normal restore candidate;
-- triggering local retention that could delete older recovery points;
-- running remote pruning;
-- sending normal completion success notifications;
-- reporting verified backup success.
-
-Retention preserves the newest parseable timestamped archive even when older than the configured retention window.
-
-See [BACKUP-RESTORE.md](BACKUP-RESTORE.md).
-
----
-
-## Restore and recovery security boundaries
-
-Restore/recovery are high-risk mutations.
-
-The important contracts are:
-
-- validate storage before destructive work;
-- identify the exact archive and required decryption identity/protection;
-- keep small sensitive control material in a restrictive control workspace and large downloads/decrypted payloads on the target filesystem;
-- verify backup integrity/metadata and initial capacity before services stop;
-- take the configured pre-restore safety snapshot unless deliberately skipped;
-- repeat the required capacity check after the snapshot and before service stop/promotion;
-- leave services untouched when failure occurs before that destructive boundary;
-- stop services before broad state replacement;
-- stage/promote through the owning restore/recovery transaction;
-- repair target-host runtime ownership/modes;
-- use an explicit service start policy;
-- require `/alive`/health success where startup is part of the operation;
-- return non-zero when the state claimed by the command did not pass.
-
-Timeout/EOF at guarded confirmation and `SAVED` acknowledgement points is fail-safe. Lost SSH input must not be converted into a silent yes/no success. Restore cleanup removes only workspaces owned by the current invocation. When rollback genuinely requires retained staging, the printed path may contain sensitive material and must remain root-only until manual recovery is complete.
-
-### `recover.sh` transaction
-
-State-volume recovery stages and validates:
-
-- ciphertext;
-- replacement operational Age key;
-- SOPS policy;
-- persistent `install.env`;
-- DR manifest;
-- recovery-created sentinel state when required.
-
-Before the commit boundary, failure/signal restores the prior recovery identity/config state.
-
-After the commit boundary, startup or `/alive` failure remains non-zero but preserves the newly committed artifacts for diagnosis. The workflow does not silently roll cryptographic state back while leaving new environment references behind.
-
----
-
-## Storage safety
-
-The project supports:
-
-- boot-volume state;
-- an explicitly configured attached block/data volume.
-
-Attached-volume mode requires:
-
-- explicit device/mount configuration;
-- matching `PROJECT_STATE_DIR` and `DATA_VOLUME_MOUNT`;
-- the expected mount to be active;
-- the `.vw-data-volume` project sentinel.
-
-Storage code must fail closed before format/fstab/mount/destructive cleanup when ownership is ambiguous.
-
-Blank-device formatting is an explicit authorization. In storage migration, `--force-format` owns that consent. `--force` does not silently mean "format the disk."
-
-Prefer stable device identities such as `/dev/disk/by-id/...` or `/dev/disk/by-uuid/...`.
-
-Do not assume `/dev/sdb`, `/dev/vdb`, or provider-specific device aliases are universal.
-
----
-
-## Runtime permission contract
-
-The shared runtime repair helper applies explicit known-path contracts.
-
-Root-operated private paths include:
-
-```text
-/etc/vaultwarden/
-${PROJECT_STATE_DIR}/config/
-${PROJECT_STATE_DIR}/secrets/
-/run/vaultwarden-oci/secrets/
-```
-
-Vaultwarden application data/logs use the configured `PUID:PGID`.
-
-Caddy data/config/log bind mounts use UID/GID `2000:2000` with the defined runtime modes.
-
-Check/repair:
-
-```bash
-sudo utilities/repair-permissions.sh --check
-sudo utilities/repair-permissions.sh
-```
-
-Do not use broad permission commands such as:
-
-```bash
-sudo chmod -R 777 "$PROJECT_STATE_DIR"
-sudo chown -R 2000:2000 "$PROJECT_STATE_DIR"
-```
-
-Those commands can expose encrypted/private state or break application ownership.
-
----
-
-## Shared operation guard
-
-Conflicting mutations use `lib/operations.sh` and `flock`.
-
-Inspect status:
-
-```bash
-sudo make operations
-```
-
-Kernel lock state is authoritative; metadata is operator-facing context.
-
-The guard preserves:
-
-- global serialization where required;
-- operation-specific locks where justified;
-- verified owner PID/start identity;
-- a verified owner-bound holder that keeps lock descriptors out of workload descendants and exits when the owner control channel closes;
-- conservative stale metadata handling;
-- controlled TERM-before-KILL behavior for eligible owners;
-- refusal to automatically terminate package-manager work;
-- exit `75` for expected non-interactive contention where the owning service contract uses it.
-
-Do not delete lock files to bypass concurrency protection.
-
-Do not add a second lock framework, daemon, database, or Redis dependency for this project.
-
----
-
-## systemd hardening and installed runtime
-
-Managed units are installed under `/etc/systemd/system` and use root-owned runtime copies under `/opt/vaultwarden-scripts`.
-
-Managed services use systemd sandboxing directives appropriate to their required behavior, including combinations of:
-
-- `PrivateTmp`;
-- `ProtectSystem`;
-- `ProtectHome`;
-- `NoNewPrivileges` where compatible with the owning service.
-
-The exact writable paths and command grammar must match the current script/runtime contracts.
-
-After repository updates that change managed scripts/libraries/units:
-
-```bash
-sudo ./setup.sh systemd install --enable-now
-sudo ./setup.sh systemd validate
-sudo ./utilities/smoke-test.sh
-```
-
-`systemd validate` detects repository/installed split-brain instead of returning success with stale active runtime.
-
-Expected operation contention must not trigger false failure incidents. Real service failure must not be mapped to clean contention.
-
----
-
-## Container hardening
-
-The production Compose model uses explicit service hardening rather than a generic orchestration platform.
-
-Current patterns include:
-
-- pinned image/build versions;
-- explicit service users where required;
-- capability drops and minimal capability additions;
-- `no-new-privileges`;
-- read-only root filesystems for core containers where implemented;
-- tmpfs for temporary writable paths;
-- bounded Docker json-file logs;
-- active standalone memory/swap, CPU, PID, and memory-reservation controls where declared;
-- internal/private application networking plus explicit egress networks for components that require outbound access.
-
-The Compose cleanup removed only inactive CPU reservation declarations. It did not remove active standalone limits or container security controls.
-
-Vaultwarden is attached to the dedicated `vaultwarden_egress` network for outbound requirements such as push integration. Do not follow old instructions that tell operators to remove the main application network's isolation as the default push fix.
-
-Caddy uses a pinned xcaddy build. Do not set `CADDY_VERSION=latest` for production.
-
----
-
-## Email security boundary
-
-The normal mail architecture is Postfix-first:
-
-```text
-Vaultwarden
-    -> internal Postfix sidecar
-    -> authenticated/TLS upstream relay
-```
-
-Operational scripts may use the configured provider HTTP API path in `EMAIL_MODE=auto`/`api`, but SMTP/Postfix remains required for Vaultwarden mail and attachment-based recovery-kit delivery.
-
-Secrets such as `smtp_password` and `email_api_token` are stored in SOPS, not `.env`.
-
-`ALLOWED_SENDER_DOMAINS` limits the sidecar's sender-domain behavior. The Postfix container is a private relay to the configured upstream provider, not a public mail server.
-
-See [EMAIL.md](EMAIL.md).
-
----
-
-## Production readiness security gate
-
-For an existing healthy host after managed repository changes:
-
-```bash
-git pull --ff-only origin main
-sudo ./setup.sh systemd install --enable-now
-sudo ./setup.sh systemd validate
-sudo ./utilities/smoke-test.sh
-```
-
-The smoke test must complete without required checks being skipped.
-
-After major deployment/recovery changes also verify:
-
-```bash
-sudo make health
-sudo ./maintenance.sh test-email --verbose
-sudo ./backup.sh run full --full-verification
-sudo ./backup.sh verify
-```
-
-Production readiness is a property of the actual host, installed automation, recovery points, and operator access.
-
----
-
-## Security anti-patterns
-
-Do not:
-
-- commit plaintext secrets, `.env` credentials, Age private keys, recovery kits, or backup archives;
-- persist the offline recovery private key on the server;
-- open origin `80`/`443` to the world as the normal Cloudflare-first configuration;
-- disable the operation guard because a long-running task is inconvenient;
-- kill `apt`/`dpkg` automatically to resolve a project lock conflict;
-- use `chmod -R 777` on project state;
-- broad-chown the whole state tree to Vaultwarden or Caddy;
-- copy decoded `/run` secrets into persistent config;
-- treat an emergency backup like an ordinary encrypted DB archive;
-- destroy old Age identities before retained backups using them are retired;
-- hand-edit `/etc/vaultwarden/vaultwarden.env` to hide environment drift;
-- assume `git pull` updates the installed `/opt` systemd runtime;
-- describe a skipped readiness probe as healthy;
-- run destructive restore/recovery rehearsal on the only production state volume;
-- introduce Kubernetes, distributed locks, a new secrets manager, an operation database, or another enterprise subsystem without a demonstrated production defect that requires it.
-
----
-
-## Security review checklist
-
-When reviewing a change, ask:
-
-1. Does this expose plaintext secret/private-key material in logs, process arguments, Git, or persistent world-readable paths?
-2. Does the change alter root/non-root privilege boundaries for a supported entry point?
-3. Does it introduce a new mutating caller that bypasses `lib/operations.sh`?
-4. Can a timeout, EOF, signal, or `set -e` interaction turn a failure into success or continue after cleanup?
-5. Does backup/restore still report only verified state as successful?
-6. Does storage fail closed when device/mount/sentinel ownership is ambiguous?
-7. Do systemd installed scripts/units/environment remain synchronized with the repository contract?
-8. Does a health/readiness check become green when the probe did not actually run?
-9. Does the change work on both Noble amd64 and Noble arm64 for architecture-sensitive dependencies?
-10. Can the defect be fixed locally without adding a framework, registry, database, daemon, or second source of truth?
-
-Prefer the smallest coherent fix that preserves a truthful production contract.
-
-## Protected credential output
-
-Setup, Age-key rotation, restore, and recovery export do not print private identities or generated plaintext credentials. New setup credentials and key handoffs are root-only files under `/root/vaultwarden-recovery/`; operators must move them offline and explicitly remove the host copy. The setup handoff is not emailed. See [Secure credential and recovery handoffs](SECURE-CREDENTIAL-HANDOFFS.md).
+Treat stable check IDs and statuses as diagnostic truth. In particular, do not ignore `secrets.custody`, `secrets.decrypt`, `runtime.paths`, `notification.catalog`, Cloudflare edge checks, or CrowdSec remediation checks during release acceptance.

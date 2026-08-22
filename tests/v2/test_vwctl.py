@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from vaultwarden_oci import cli, install, update_cli, update_versions
 
+CURRENT_RELEASE_VERSION = cli.load_versions(ROOT / "versions.toml").version
 COMPONENTS = '''
 [components]
 vaultwarden = "1.37.1"
@@ -321,7 +322,7 @@ class VwctlIntegrationTests(unittest.TestCase):
             self.assertIn(command, help_result.stdout)
         self.assertIn("update {check,apply}", help_result.stdout)
         version = self.run_vwctl("--version")
-        self.assertEqual(version.stdout.strip(), "vwctl 0.1.0-dev.7")
+        self.assertEqual(version.stdout.strip(), f"vwctl {CURRENT_RELEASE_VERSION}")
         versions = self.run_vwctl("versions")
         self.assertEqual(versions.returncode, 0, versions.stderr)
         self.assertIn("vaultwarden 1.37.1", versions.stdout)
