@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 STATE_ROOT = Path("/var/lib/vaultwarden-oci")
-IDENTITY_FILE = STATE_ROOT / ".vaultwarden-oci-volume.json"
+HOST_IDENTITY_FILE = Path("/etc/vaultwarden-oci/storage-identity.json")
+VOLUME_MARKER = STATE_ROOT / ".vaultwarden-oci-volume.json"
+# Backward-compatible name for callers/tests that display the expected identity path.
+IDENTITY_FILE = HOST_IDENTITY_FILE
 DOCKER_DROPIN = Path("/etc/systemd/system/docker.service.d/10-vaultwarden-oci-storage.conf")
 FSTAB = Path("/etc/fstab")
 _ALLOWED_FS = {"ext4", "xfs"}
@@ -78,20 +81,34 @@ def _real_device(value: str) -> str:
 
 
 def root_source(*, runner: Runner = run) -> str:
-    source = _required(runner(["findmnt", "-n", "-o", "SOURCE", "--target", "/"]), "root filesystem discovery")
+    source = _required(
+        runner(["findmnt", "-n", "-o", "SOURCE", "--target", "/"]),
+        "root filesystem discovery",
+    )
     if not source.startswith("/dev/"):
         raise StorageError(f"root filesystem source is not a supported block device: {source}")
     return _real_device(source)
 
 
 def _lsblk_paths(device: str, flag: str, *, runner: Runner) -> set[str]:
-    output = _required(runner(["lsblk", flag, "-n", "-o", "PATH", device]), f"block lineage discovery for {device}")
-    return {_real_device(line.strip()) for line in output.splitlines() if line.strip().startswith("/dev/")}
+    output = _required(
+        runner(["lsblk", flag, "-n", "-o", "PATH", device]),
+        f"block lineage discovery for {device}",
+    )
+    return {
+        _real_device(line.strip())
+        for line in output.splitlines()
+        if line.strip().startswith("/dev/")
+    }
 
 
 def device_family(device: str, *, runner: Runner = run) -> set[str]:
     resolved = _real_device(device)
-    return {resolved} | _lsblk_paths(resolved, "-s", runner=runner) | _lsblk_paths(resolved, "-r", runner=runner)
+    return (
+        {resolved}
+        | _lsblk_paths(resolved, "-s", runner=runner)
+        | _lsblk_paths(resolved, "-r", runner=runner)
+    )
 
 
 def reject_boot_related(device: str, *, runner: Runner = run) -> None:
@@ -128,7 +145,11 @@ def inventory(*, runner: Runner = run) -> list[dict[str, object]]:
                         "type": kind,
                         "size": int(node.get("size") or 0),
                         "fstype": str(node.get("fstype") or ""),
-                        "mountpoints": tuple(m for m in (node.get("mountpoints") or []) if isinstance(m, str) and m),
+                        "mountpoints": tuple(
+                            m
+                            for m in (node.get("mountpoints") or [])
+                            if isinstance(m, str) and m
+                        ),
                         "uuid": str(node.get("uuid") or ""),
                         "model": str(node.get("model") or "").strip(),
                     }
@@ -149,13 +170,20 @@ def _blkid(device: str, field: str, *, runner: Runner) -> str:
 
 
 def _mounted_source(target: Path, *, runner: Runner) -> str:
-    return _required(runner(["findmnt", "-n", "-o", "SOURCE", "--target", str(target)]), f"mount discovery for {target}")
+    return _required(
+        runner(["findmnt", "-n", "-o", "SOURCE", "--target", str(target)]),
+        f"mount discovery for {target}",
+    )
 
 
 def _atomic_write(path: Path, text: str, mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    fd = os.open(
+        tmp,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -187,18 +215,18 @@ def _identity_from_mount(*, runner: Runner) -> StorageIdentity:
     return StorageIdentity(uuid=uuid, fs_type=fs_type, source=resolved)
 
 
-def load_identity(path: Path = IDENTITY_FILE) -> StorageIdentity:
+def _load_identity(path: Path, label: str) -> StorageIdentity:
     try:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise StorageError(f"storage identity marker is not a regular file: {path}")
+            raise StorageError(f"{label} is not a regular file: {path}")
         payload = json.loads(path.read_text(encoding="utf-8"))
     except StorageError:
         raise
     except (OSError, json.JSONDecodeError) as exc:
-        raise StorageError(f"cannot read storage identity marker {path}: {exc}") from exc
+        raise StorageError(f"cannot read {label} {path}: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-        raise StorageError("storage identity marker has an unsupported schema")
+        raise StorageError(f"{label} has an unsupported schema")
     try:
         identity = StorageIdentity(
             uuid=str(payload["uuid"]),
@@ -207,48 +235,92 @@ def load_identity(path: Path = IDENTITY_FILE) -> StorageIdentity:
             mount=str(payload["mount"]),
         )
     except KeyError as exc:
-        raise StorageError("storage identity marker is incomplete") from exc
-    if identity.mount != str(STATE_ROOT) or identity.fs_type not in _ALLOWED_FS or not _UUID.fullmatch(identity.uuid):
-        raise StorageError("storage identity marker is invalid")
+        raise StorageError(f"{label} is incomplete") from exc
+    if (
+        identity.mount != str(STATE_ROOT)
+        or identity.fs_type not in _ALLOWED_FS
+        or not _UUID.fullmatch(identity.uuid)
+    ):
+        raise StorageError(f"{label} is invalid")
     return identity
+
+
+def load_identity(path: Path = HOST_IDENTITY_FILE) -> StorageIdentity:
+    """Load the host-side expected identity, independent of the mounted volume."""
+    return _load_identity(path, "host storage identity")
+
+
+def load_volume_marker(path: Path = VOLUME_MARKER) -> StorageIdentity:
+    return _load_identity(path, "volume ownership marker")
+
+
+def _same_identity(left: StorageIdentity, right: StorageIdentity) -> bool:
+    return (left.uuid, left.fs_type, left.mount) == (right.uuid, right.fs_type, right.mount)
 
 
 def verify(*, runner: Runner = run, require_marker: bool = True) -> StorageIdentity:
     actual = _identity_from_mount(runner=runner)
-    if not require_marker:
-        return actual
     expected = load_identity()
-    if actual.uuid != expected.uuid or actual.fs_type != expected.fs_type:
+    if not _same_identity(actual, expected):
         raise StorageError(
             f"wrong filesystem mounted at {STATE_ROOT}: expected UUID={expected.uuid} {expected.fs_type}, "
             f"got UUID={actual.uuid} {actual.fs_type}"
         )
+    if require_marker:
+        marker = load_volume_marker()
+        if not _same_identity(marker, expected):
+            raise StorageError(
+                "mounted filesystem ownership marker does not match the host-side expected identity"
+            )
     return actual
 
 
-def write_identity(identity: StorageIdentity, path: Path = IDENTITY_FILE) -> None:
-    existing = None
+def _write_identity(path: Path, identity: StorageIdentity, label: str) -> None:
     if path.exists() or path.is_symlink():
-        existing = load_identity(path)
-    if existing is not None and (existing.uuid, existing.fs_type) != (identity.uuid, identity.fs_type):
-        raise StorageError("existing storage identity belongs to a different filesystem; refusing silent replacement")
+        existing = _load_identity(path, label)
+        if not _same_identity(existing, identity):
+            raise StorageError(f"existing {label} belongs to a different filesystem; refusing silent replacement")
+        return
     _atomic_write(path, json.dumps(identity.as_dict(), indent=2, sort_keys=True) + "\n", 0o600)
 
 
+def write_identity(identity: StorageIdentity, path: Path = HOST_IDENTITY_FILE) -> None:
+    _write_identity(path, identity, "host storage identity")
+
+
+def write_volume_marker(identity: StorageIdentity, path: Path = VOLUME_MARKER) -> None:
+    _write_identity(path, identity, "volume ownership marker")
+
+
 def _fstab_line(identity: StorageIdentity) -> str:
-    return f"UUID={identity.uuid}\t{STATE_ROOT}\t{identity.fs_type}\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2"
+    return (
+        f"UUID={identity.uuid}\t{STATE_ROOT}\t{identity.fs_type}\t"
+        "noatime,nofail,x-systemd.device-timeout=30s\t0\t2"
+    )
 
 
 def ensure_fstab(identity: StorageIdentity, *, path: Path = FSTAB) -> None:
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = text.splitlines()
     desired = _fstab_line(identity)
-    kept = [line for line in lines if not (line.strip() and not line.lstrip().startswith("#") and (f"UUID={identity.uuid}" in line or str(STATE_ROOT) in line.split()))]
+    kept = [
+        line
+        for line in lines
+        if not (
+            line.strip()
+            and not line.lstrip().startswith("#")
+            and (
+                f"UUID={identity.uuid}" in line
+                or str(STATE_ROOT) in line.split()
+            )
+        )
+    ]
     kept.append(desired)
     _atomic_write(path, "\n".join(kept) + "\n", 0o644)
 
 
 def ensure_docker_guard(identity: StorageIdentity, *, path: Path = DOCKER_DROPIN) -> None:
+    del identity  # guard is path-based; runtime identity is separately host-authoritative.
     content = (
         "[Unit]\n"
         f"RequiresMountsFor={STATE_ROOT}\n"
@@ -268,6 +340,20 @@ def _confirm(prompt: str, *, acknowledgement: bool, interactive: bool) -> None:
         raise StorageError("storage confirmation was not received")
 
 
+def _signature_types(device: str, *, runner: Runner) -> set[str]:
+    result = runner(["wipefs", "--no-act", "--all", "--output", "TYPE", "--noheadings", device])
+    if not result.ok:
+        raise StorageError("cannot prove selected-device signatures because wipefs failed")
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _selected_identity(resolved: str, fs_type: str, *, runner: Runner) -> StorageIdentity:
+    uuid = _blkid(resolved, "UUID", runner=runner)
+    if not _UUID.fullmatch(uuid):
+        raise StorageError("selected filesystem has no stable UUID")
+    return StorageIdentity(uuid=uuid, fs_type=fs_type, source=resolved)
+
+
 def provision(
     device: str,
     *,
@@ -281,21 +367,30 @@ def provision(
     probe = runner(["lsblk", "-n", "-o", "TYPE", resolved])
     if not probe.ok or not probe.stdout.strip():
         raise StorageError(f"not a usable block device: {device}")
+
     fs_type = _blkid(resolved, "TYPE", runner=runner)
     if fs_type:
         if fs_type not in _ALLOWED_FS:
-            raise StorageError(f"unknown/unsupported filesystem {fs_type!r}; only ext4/xfs may be adopted")
+            raise StorageError(
+                f"unknown/unsupported filesystem {fs_type!r}; only ext4/xfs may be adopted"
+            )
+        signatures = _signature_types(resolved, runner=runner)
+        if signatures - {fs_type}:
+            raise StorageError(
+                "selected existing filesystem has mixed/unknown signatures: "
+                + ", ".join(sorted(signatures - {fs_type}))
+            )
         _confirm(
             f"Existing {fs_type} filesystem detected on {device}; adoption requires explicit acknowledgement.",
             acknowledgement=acknowledge_existing,
             interactive=interactive,
         )
     else:
-        signatures = runner(["wipefs", "--no-act", "--all", "--parsable", resolved])
-        if not signatures.ok:
-            raise StorageError("cannot prove the selected device is blank because wipefs failed")
-        if signatures.stdout.strip():
-            raise StorageError("selected device has unknown data signatures; refusing automatic formatting")
+        signatures = _signature_types(resolved, runner=runner)
+        if signatures:
+            raise StorageError(
+                "selected device has unknown data signatures; refusing automatic formatting"
+            )
         _confirm(
             f"Blank device {device} will be formatted as ext4; destructive acknowledgement is required.",
             acknowledgement=acknowledge_format,
@@ -305,20 +400,29 @@ def provision(
         if not result.ok:
             raise StorageError("mkfs.ext4 failed")
         fs_type = "ext4"
-    uuid = _blkid(resolved, "UUID", runner=runner)
-    if not _UUID.fullmatch(uuid):
-        raise StorageError("selected filesystem has no stable UUID")
-    identity = StorageIdentity(uuid=uuid, fs_type=fs_type, source=resolved)
+
+    selected = _selected_identity(resolved, fs_type, runner=runner)
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
-    ensure_fstab(identity)
-    if not STATE_ROOT.is_mount():
-        mounted = runner(["mount", str(STATE_ROOT)])
+
+    # Re-runs must reconcile the live mount before changing fstab or host identity.
+    if STATE_ROOT.is_mount():
+        actual = _identity_from_mount(runner=runner)
+        if not _same_identity(actual, selected):
+            raise StorageError(
+                f"{STATE_ROOT} is already mounted from UUID={actual.uuid}; refusing to rewrite persistent mount state for selected UUID={selected.uuid}"
+            )
+    else:
+        mounted = runner(["mount", resolved, str(STATE_ROOT)])
         if not mounted.ok:
             raise StorageError(f"failed to mount selected filesystem at {STATE_ROOT}")
-    actual = verify(runner=runner, require_marker=False)
-    if (actual.uuid, actual.fs_type) != (identity.uuid, identity.fs_type):
-        raise StorageError("mounted filesystem does not match the selected device")
+        actual = _identity_from_mount(runner=runner)
+        if not _same_identity(actual, selected):
+            raise StorageError("mounted filesystem does not match the selected device")
+
+    # The host-side expected identity is independent of data-volume contents.
     write_identity(actual)
+    write_volume_marker(actual)
+    ensure_fstab(actual)
     ensure_docker_guard(actual)
     reload_result = runner(["systemctl", "daemon-reload"])
     if not reload_result.ok:
