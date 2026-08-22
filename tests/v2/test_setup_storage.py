@@ -63,6 +63,17 @@ class StorageContractTests(unittest.TestCase):
         with mock.patch.object(storage, "_real_device", return_value="/dev/vdb"), mock.patch.object(storage, "reject_boot_related"), mock.patch.object(storage, "_blkid", return_value=""), mock.patch.object(storage, "_signature_types", return_value=set()):
             with self.assertRaisesRegex(storage.StorageError, "acknowledgement"): storage.provision("/dev/vdb", runner=lambda argv: result(argv, "disk\n"))
 
+    def test_confirm_format_rerun_accepts_only_previously_proven_filesystem(self) -> None:
+        identity = storage.StorageIdentity("aaaa-bbbb", "ext4", "/dev/vdb")
+        with mock.patch.object(storage, "_real_device", return_value="/dev/vdb"), mock.patch.object(storage, "reject_boot_related"), mock.patch.object(storage, "_blkid", return_value="ext4"), mock.patch.object(storage, "_signature_types", return_value={"ext4"}), mock.patch.object(storage, "_selected_identity", return_value=identity), mock.patch.object(storage.Path, "mkdir"), mock.patch.object(storage.Path, "is_mount", return_value=True), mock.patch.object(storage, "load_identity", return_value=identity), mock.patch.object(storage, "load_volume_marker", return_value=identity), mock.patch.object(storage, "_identity_from_mount", return_value=identity), mock.patch.object(storage, "write_identity"), mock.patch.object(storage, "write_volume_marker"), mock.patch.object(storage, "ensure_fstab"), mock.patch.object(storage, "ensure_docker_guard"), mock.patch.object(storage, "verify", return_value=identity):
+            actual = storage.provision("/dev/vdb", acknowledge_format=True, interactive=False, runner=lambda argv: result(argv, "disk\n"))
+        self.assertEqual(actual, identity)
+
+    def test_confirm_format_cannot_adopt_unproven_existing_filesystem(self) -> None:
+        identity = storage.StorageIdentity("aaaa-bbbb", "ext4", "/dev/vdb")
+        with mock.patch.object(storage, "_real_device", return_value="/dev/vdb"), mock.patch.object(storage, "reject_boot_related"), mock.patch.object(storage, "_blkid", return_value="ext4"), mock.patch.object(storage, "_signature_types", return_value={"ext4"}), mock.patch.object(storage, "_selected_identity", return_value=identity), mock.patch.object(storage.Path, "is_mount", return_value=True), mock.patch.object(storage, "load_identity", side_effect=storage.StorageError("missing")):
+            with self.assertRaisesRegex(storage.StorageError, "acknowledgement"): storage.provision("/dev/vdb", acknowledge_format=True, interactive=False, runner=lambda argv: result(argv, "disk\n"))
+
     def test_mixed_signatures_fail_closed(self) -> None:
         with mock.patch.object(storage, "_real_device", return_value="/dev/vdb"), mock.patch.object(storage, "reject_boot_related"), mock.patch.object(storage, "_blkid", return_value="ext4"), mock.patch.object(storage, "_signature_types", return_value={"ext4", "crypto_LUKS"}):
             with self.assertRaisesRegex(storage.StorageError, "mixed/unknown"): storage.provision("/dev/vdb", acknowledge_existing=True, runner=lambda argv: result(argv, "disk\n"))
@@ -103,6 +114,16 @@ class SetupContractTests(unittest.TestCase):
             encrypted = Path(directory) / "secrets.sops.yaml"; encrypted.write_text("broken\n")
             with mock.patch.object(setup, "ENCRYPTED", encrypted), mock.patch.object(setup.secret_owner, "encrypted_recipients", side_effect=setup.secret_owner.SecretsError("bad metadata")):
                 with self.assertRaises(setup.secret_owner.SecretsError): setup._ensure_secret_start(operational, offline)
+
+    def test_supported_operational_exceptions_use_fail_action_ui(self) -> None:
+        offline = "age1" + "q" * 58
+        argv = ["install", "--domain", "example.com", "--url", "https://vault.example.com", "--email", "admin@example.com", "--data-device", "/dev/vdb", "--offline-recipient", offline, "--accept-existing-filesystem", "--auto"]
+        host = mock.Mock(architecture="amd64")
+        for exc in (setup.secret_owner.SecretsError("bad metadata"), setup.UpdateError("registry unavailable"), cli.LockBusyError("busy")):
+            with self.subTest(exc=type(exc).__name__), mock.patch.object(setup.os, "geteuid", return_value=0), mock.patch.object(setup.install, "validate_host", return_value=host), mock.patch.object(setup, "_select_storage", return_value="/dev/vdb"), mock.patch.object(setup.storage, "provision", side_effect=exc), mock.patch("builtins.print") as printer:
+                self.assertEqual(setup.main(argv), 1)
+                rendered = "\n".join(" ".join(str(value) for value in call.args) for call in printer.call_args_list)
+                self.assertIn("FAIL", rendered); self.assertIn("ACTION", rendered)
 
     def test_secret_plaintext_is_stdin_only_not_argv(self) -> None:
         offline = "age1" + "q" * 58; operational = "age1" + "p" * 58; captured = {}
