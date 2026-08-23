@@ -1,0 +1,23 @@
+name: Delete PR 346 branch
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [v2]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.event.pull_request.number == 346 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'codex/caddy-edge-admin-hardening-20260822'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: v2
+          fetch-depth: 1
+      - name: Delete PR branch
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: git push origin --delete "$HEAD_REF"
