@@ -28,6 +28,8 @@ jobs:
           ./vwctl --help >/dev/null
           ./vwctl doctor --help >/dev/null
           ./vwctl update --help >/dev/null
+          ./vwctl recovery --help >/dev/null
+          ./vwctl recovery-kit --help >/dev/null
 
   caddy-config-integration:
     runs-on: ubuntu-24.04
@@ -45,12 +47,14 @@ jobs:
       - name: Install pinned recovery tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y age rclone
+          sudo apt-get install -y age rclone 7zip
           curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64 -o /tmp/sops
           echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
       - name: Real Age SOPS rclone recovery path
         run: python3 tests/v2/acceptance_recovery_crypto.py
+      - name: Real AES-256 recovery-kit ZIP path
+        run: python3 tests/v2/acceptance_recovery_kit.py
 
   edge-packet-integration:
     runs-on: ubuntu-24.04
