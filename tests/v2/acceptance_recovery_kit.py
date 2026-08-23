@@ -9,7 +9,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vaultwarden_oci import recovery_ux
+from vaultwarden_oci import recovery_ux, sevenzip_secure
+
+recovery_ux._seven = sevenzip_secure.run
 
 
 def main() -> int:
@@ -28,7 +30,7 @@ def main() -> int:
             label="acceptance AES-256 ZIP creation",
         )
         recovery_ux.verify_zip(archive, passphrase)
-    print("PASS: real 7zz AES-256 ZIP/member/correct-password/wrong-password/empty-password/no-password verification")
+    print("PASS: real 7zz PTY AES-256 ZIP/member/correct-password/wrong-password/empty-password/no-password verification")
     return 0
 
 
