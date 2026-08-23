@@ -6,53 +6,18 @@ human custody step that must span initial setup and recovery-kit publication.
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
 from typing import Sequence
 
-from . import recovery_ux, secrets, setup, sevenzip_secure
+from . import recovery_ux, secrets, setup
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
-_ORIGINAL_SETUP_RUN = setup._run
 
 
 class SetupFrontendError(RuntimeError):
     pass
-
-
-def _setup_run_7zip_compat(argv: Sequence[str]):
-    """Let setup verify Ubuntu's 7zip package whether it exposes 7zz or 7z."""
-    command = list(argv)
-    if command and command[0] == "7zz" and shutil.which("7zz") is None:
-        seven = shutil.which("7z")
-        if seven is not None:
-            command[0] = seven
-    return _ORIGINAL_SETUP_RUN(command)
-
-
-setup._run = _setup_run_7zip_compat
-
-
-def _ensure_7zz_alias() -> None:
-    if shutil.which("7zz") is not None or os.geteuid() != 0:
-        return
-    seven = shutil.which("7z")
-    if seven is None:
-        raise SetupFrontendError("Ubuntu 7zip was installed but neither 7zz nor 7z is available")
-    alias = Path("/usr/local/bin/7zz")
-    if alias.exists() or alias.is_symlink():
-        if alias.is_symlink() and alias.resolve() == Path(seven).resolve():
-            return
-        raise SetupFrontendError(f"refusing to replace unexpected 7zz compatibility path: {alias}")
-    alias.symlink_to(seven)
-    if shutil.which("7zz") is None:
-        raise SetupFrontendError("failed to expose Ubuntu 7zip as 7zz for recovery-kit tooling")
-
-
-def _use_secure_7zip() -> None:
-    recovery_ux._seven = sevenzip_secure.run
 
 
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
@@ -62,7 +27,7 @@ def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, 
     identity = workspace / "offline-age-identity.txt"
     result = recovery_ux.recovery.run_command(["age-keygen", "-o", str(identity)])
     if not result.ok:
-        shutil.rmtree(workspace, ignore_errors=True)
+        recovery_ux._cleanup_workspace(workspace)
         raise SetupFrontendError("offline recovery Age identity generation failed")
     os.chmod(identity, 0o600)
     recipient = secrets.derive_recipient(identity)
@@ -84,20 +49,25 @@ def _should_generate(args: Sequence[str]) -> bool:
     )
 
 
+def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
+    if result.emailed:
+        return
+    print(f"ACTION Copy the verified encrypted recovery kit off-host now: {result.archive}")
+    print("ACTION Keep its ZIP passphrase separately from the archive.")
+    try:
+        answer = input("Type SAVED after the recovery-kit ZIP is in off-host operator custody: ").strip()
+    except EOFError as exc:
+        raise SetupFrontendError("off-host recovery-kit custody was not acknowledged") from exc
+    if answer != "SAVED":
+        raise SetupFrontendError("off-host recovery-kit custody was not acknowledged; the transient offline identity is being retained")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args[:1] == ["recovery-kit"]:
-        _use_secure_7zip()
         return recovery_ux.main(args)
     if not _should_generate(args):
-        code = setup.main(args)
-        if code == 0 and args[:1] == ["install"] and "--dry-run" not in args:
-            try:
-                _ensure_7zz_alias()
-            except SetupFrontendError as exc:
-                print(f"FAIL: {exc}", file=sys.stderr)
-                return 1
-        return code
+        return setup.main(args)
 
     workspace: Path | None = None
     identity: Path | None = None
@@ -114,12 +84,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return code
-        _ensure_7zz_alias()
-        _use_secure_7zip()
 
         print("\n== Initial credential recovery-kit handoff ==")
         result = recovery_ux.export_recovery_kit(identity)
         print(f"PASS Verified complete recovery kit: {result.archive}")
+        _confirm_local_handoff(result)
         _cleanup_generated(workspace)
         if workspace.exists() or identity.exists():
             raise SetupFrontendError("offline identity remained in volatile server state after successful recovery-kit handoff")
