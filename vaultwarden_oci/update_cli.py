@@ -15,7 +15,11 @@ _STORAGE_REQUIRED = {"start", "restart", "backup", "restore", "recovery", "edge"
 _STORAGE_DOCTOR_ID = "storage.dedicated"
 if _STORAGE_DOCTOR_ID not in cli.DOCTOR_CHECK_IDS:
     position = cli.DOCTOR_CHECK_IDS.index("runtime.paths") + 1
-    cli.DOCTOR_CHECK_IDS = (*cli.DOCTOR_CHECK_IDS[:position], _STORAGE_DOCTOR_ID, *cli.DOCTOR_CHECK_IDS[position:])
+    cli.DOCTOR_CHECK_IDS = (
+        *cli.DOCTOR_CHECK_IDS[:position],
+        _STORAGE_DOCTOR_ID,
+        *cli.DOCTOR_CHECK_IDS[position:],
+    )
 
 
 class UI:
@@ -28,10 +32,17 @@ class UI:
         prefix = f"\033[{code}m{label}\033[0m" if self.color else label
         print(f"{prefix} {text}")
 
-    def ok(self, text: str) -> None: self._line("PASS", text, "32")
-    def warn(self, text: str) -> None: self._line("WARN", text, "33")
-    def info(self, text: str) -> None: self._line("INFO", text, "36")
-    def action(self, text: str) -> None: self._line("ACTION", text, "34")
+    def ok(self, text: str) -> None:
+        self._line("PASS", text, "32")
+
+    def warn(self, text: str) -> None:
+        self._line("WARN", text, "33")
+
+    def info(self, text: str) -> None:
+        self._line("INFO", text, "36")
+
+    def action(self, text: str) -> None:
+        self._line("ACTION", text, "34")
 
 
 def _update_parser() -> argparse.ArgumentParser:
@@ -40,7 +51,11 @@ def _update_parser() -> argparse.ArgumentParser:
     for name in ("check", "apply"):
         command = commands.add_parser(name)
         command.add_argument("--source", type=Path, help=argparse.SUPPRESS)
-        command.add_argument("--use-latest", action="store_true", help="use one frozen snapshot of currently available upstream component/addon versions")
+        command.add_argument(
+            "--use-latest",
+            action="store_true",
+            help="use one frozen snapshot of currently available upstream component/addon versions",
+        )
         command.add_argument("--json", action="store_true", help="machine-readable uncolored output")
         if name == "check":
             command.add_argument("--timer", action="store_true", help=argparse.SUPPRESS)
@@ -51,6 +66,16 @@ def _update_parser() -> argparse.ArgumentParser:
                 type=Path,
                 help="explicitly authorize coherent .vwrec+previous-release rollback on post-start failure",
             )
+    rollback = commands.add_parser(
+        "rollback",
+        help="coherently restore a recorded pre-update .vwrec and previous immutable release",
+    )
+    rollback.add_argument("--recovery-artifact", type=Path, required=True)
+    rollback.add_argument("--recovery-sha256", required=True)
+    rollback.add_argument("--previous-release", required=True)
+    rollback.add_argument("--identity", type=Path, required=True)
+    rollback.add_argument("--yes", action="store_true")
+    rollback.add_argument("--json", action="store_true")
     return parser
 
 
@@ -76,7 +101,10 @@ def _require_storage(*, machine: bool = False) -> bool:
                     {
                         "schema_version": 1,
                         "error": f"dedicated production storage is not ready: {exc}",
-                        "action": f"restore/mount the filesystem recorded by {storage.HOST_IDENTITY_FILE} at {storage.STATE_ROOT}, then retry",
+                        "action": (
+                            f"restore/mount the filesystem recorded by {storage.HOST_IDENTITY_FILE} "
+                            f"at {storage.STATE_ROOT}, then retry"
+                        ),
                     },
                     sort_keys=True,
                 ),
@@ -123,6 +151,8 @@ def _plan_payload(prepared: update_appliance.PreparedPlan) -> dict[str, object]:
         },
         "architecture": plan.frozen.architecture,
         "use_latest": prepared.use_latest,
+        "available": prepared.available,
+        "availability_reason": prepared.availability_reason,
         "already_active": plan.already_active,
         "project_release_tag": prepared.project_release.tag if prepared.project_release else None,
     }
@@ -148,19 +178,23 @@ def _print_plan(prepared: update_appliance.PreparedPlan, ui: UI) -> None:
         marker = "=" if before == after else "->"
         print(f"  {label}: {before} {marker} {after}")
     if prepared.use_latest:
-        ui.warn("--use-latest bypasses the project's tested release pins; this exact resolved snapshot will be frozen for this update.")
-    if prepared.plan.already_active:
-        ui.ok("the selected immutable application release is already active")
-    else:
-        ui.info("rollback boundary: before candidate start, old code/systemd is restored and health-proved automatically")
-        ui.info("after candidate start, old code is never launched against possibly-new data; coherent rollback requires the verified pre-update .vwrec plus the previous immutable release")
+        ui.warn(
+            "--use-latest bypasses the project's tested release pins; this exact resolved snapshot will be frozen for this update."
+        )
+    if not prepared.available:
+        ui.ok(prepared.availability_reason)
+        return
+    ui.info("rollback boundary: before candidate start, old code/systemd is restored and health-proved automatically")
+    ui.info(
+        "after candidate start, old code is never launched against possibly-new data; coherent rollback requires the verified pre-update .vwrec plus the previous immutable release"
+    )
 
 
 def _confirm(prompt: str, *, yes: bool) -> bool:
     if yes:
         return True
     if not sys.stdin.isatty():
-        print("FAIL: noninteractive apply requires --yes", file=sys.stderr)
+        print("FAIL: noninteractive operation requires --yes", file=sys.stderr)
         return False
     try:
         return input(prompt).strip().lower() in {"y", "yes"}
@@ -252,10 +286,15 @@ def _handle_persistent_failure(
             print(f"FAIL: coherent rollback failed: {exc}", file=sys.stderr)
             return 1
     if not sys.stdin.isatty():
-        print("ACTION: no data restore was attempted noninteractively; services remain stopped/failed safe for troubleshooting.", file=sys.stderr)
+        print(
+            "ACTION: no data restore was attempted noninteractively; candidate services remain stopped/failed safe for troubleshooting.",
+            file=sys.stderr,
+        )
         return 1
     try:
-        answer = input("Candidate may have changed persistent state. [1] coherent rollback  [2] leave safely stopped for troubleshooting: ").strip()
+        answer = input(
+            "Candidate may have changed persistent state. [1] coherent rollback  [2] leave safely stopped for troubleshooting: "
+        ).strip()
     except EOFError:
         answer = "2"
     if answer != "1":
@@ -276,11 +315,55 @@ def _handle_persistent_failure(
     return 1
 
 
+def _rollback_command(args: argparse.Namespace, ui: UI) -> int:
+    if not _require_storage(machine=args.json):
+        return 1
+    if args.json and not args.yes:
+        print(
+            json.dumps(
+                {"schema_version": 1, "error": "--yes is required with --json update rollback"},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    if not args.json and not _confirm(
+        "Restore this exact pre-update .vwrec and previous immutable release now? [y/N]: ",
+        yes=args.yes,
+    ):
+        ui.action("coherent rollback cancelled before data mutation")
+        return 2
+    failure = update_appliance.reconstruct_failure(
+        args.recovery_artifact,
+        args.recovery_sha256,
+        args.previous_release,
+    )
+    update_appliance.coherent_rollback(failure, args.identity)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "result": "rolled_back",
+                    "recovery_artifact": str(args.recovery_artifact),
+                    "recovery_sha256": args.recovery_sha256,
+                    "previous_release": args.previous_release,
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        ui.ok("pre-update application state and previous immutable release restored; previous stack is healthy")
+    return 0
+
+
 def _update_command(argv: Sequence[str]) -> int:
     args = _update_parser().parse_args(argv)
     ui = UI(color=False if args.json else None)
     current_for_error = "unknown"
     try:
+        if args.update_command == "rollback":
+            return _rollback_command(args, ui)
         if not _require_storage(machine=args.json):
             return 1
         try:
@@ -302,20 +385,27 @@ def _update_command(argv: Sequence[str]) -> int:
                 if args.timer:
                     update_appliance.record_check(
                         current=prepared.plan.current_release,
-                        candidate=None if prepared.plan.already_active else prepared.plan.target_release,
+                        candidate=prepared.plan.target_release,
+                        available=prepared.available,
                         error=None,
                     )
                 return 0
-            if prepared.plan.already_active:
+            if not prepared.available:
                 return 0
+            if args.json and not args.yes:
+                print(
+                    json.dumps(
+                        {"schema_version": 1, "error": "--yes is required with --json apply"},
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
+                return 2
             if not args.json and not _confirm(
                 "Apply this exact update now? A verified .vwrec will be created before the short maintenance boundary. [y/N]: ",
                 yes=args.yes,
             ):
                 ui.action("update cancelled before mutation")
-                return 2
-            if args.json and not args.yes:
-                print(json.dumps({"schema_version": 1, "error": "--yes is required with --json apply"}, sort_keys=True), file=sys.stderr)
                 return 2
             try:
                 release = update_appliance.apply_prepared(prepared)
@@ -327,14 +417,24 @@ def _update_command(argv: Sequence[str]) -> int:
                     machine=args.json,
                 )
             if args.json:
-                print(json.dumps({"schema_version": 1, "result": "applied", "release": str(release)}, sort_keys=True))
+                print(
+                    json.dumps(
+                        {"schema_version": 1, "result": "applied", "release": str(release)},
+                        sort_keys=True,
+                    )
+                )
             else:
                 ui.ok(f"activated and health-gated immutable release {release}")
             return 0
     except (UpdateError, install.InstallError, cli.LockBusyError, storage.StorageError, OSError) as exc:
         if args.update_command == "check" and getattr(args, "timer", False):
             try:
-                update_appliance.record_check(current=current_for_error, candidate=None, error=str(exc))
+                update_appliance.record_check(
+                    current=current_for_error,
+                    candidate=None,
+                    available=False,
+                    error=str(exc),
+                )
             except Exception:
                 pass
         if args.json:
@@ -350,22 +450,40 @@ def _host_upgrade_command(argv: Sequence[str]) -> int:
     try:
         if args.host_command == "check":
             count, reboot, _ = update_appliance.host_upgrade_check()
-            payload = {"schema_version": 1, "packages_available": count, "reboot_required_now": reboot}
+            payload = {
+                "schema_version": 1,
+                "packages_available": count,
+                "reboot_required_now": reboot,
+                "package_indexes_refreshed": True,
+            }
             if args.json:
                 print(json.dumps(payload, sort_keys=True))
             else:
                 ui.info(f"Ubuntu packages available to upgrade: {count}")
                 ui.info(f"reboot currently required: {'yes' if reboot else 'no'}")
-                ui.warn("host package changes are separate from the application update transaction; .vwrec cannot roll back apt, kernel, Docker, or other system packages")
+                ui.warn(
+                    "host package changes are separate from the application update transaction; .vwrec cannot roll back apt, kernel, Docker, or other system packages"
+                )
             return 0
         if not _require_storage(machine=args.json):
             return 1
+        if args.json and not args.yes:
+            print(
+                json.dumps(
+                    {"schema_version": 1, "error": "--yes is required with --json host-upgrade apply"},
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            return 2
         if not args.json:
             ui.warn("Ubuntu host packages will be upgraded separately from VaultWarden-OCI application code.")
-            ui.warn("The verified .vwrec created first can restore application data/config only; it cannot undo apt/kernel/system package changes.")
+            ui.warn(
+                "The verified .vwrec created first can restore application data/config only; it cannot undo apt/kernel/system package changes."
+            )
             ui.info("No reboot will be performed automatically.")
-        if not _confirm("Apply conservative Ubuntu package upgrades now? [y/N]: ", yes=args.yes):
-            return 2
+            if not _confirm("Apply conservative Ubuntu package upgrades now? [y/N]: ", yes=args.yes):
+                return 2
         verified, reboot = update_appliance.host_upgrade_apply()
         payload = {
             "schema_version": 1,
@@ -378,10 +496,12 @@ def _host_upgrade_command(argv: Sequence[str]) -> int:
         if args.json:
             print(json.dumps(payload, sort_keys=True))
         else:
-            ui.ok(f"Ubuntu package upgrade completed; application recovery point: {verified.artifact} sha256={verified.sha256}")
+            ui.ok(
+                f"Ubuntu package upgrade completed; application recovery point: {verified.artifact} sha256={verified.sha256}"
+            )
             ui.info(f"reboot required: {'yes' if reboot else 'no'}; the appliance was not rebooted automatically")
         return 0
-    except (UpdateError, storage.StorageError, OSError) as exc:
+    except (UpdateError, install.InstallError, cli.LockBusyError, storage.StorageError, OSError) as exc:
         if args.json:
             print(json.dumps({"schema_version": 1, "error": str(exc)}, sort_keys=True), file=sys.stderr)
         else:
@@ -396,7 +516,11 @@ def _doctor_command(args: Sequence[str]) -> int:
     except storage.StorageError as exc:
         storage_check = cli.DoctorCheck(_STORAGE_DOCTOR_ID, "FAIL", str(exc))
     else:
-        storage_check = cli.DoctorCheck(_STORAGE_DOCTOR_ID, "PASS", f"dedicated state filesystem UUID={identity.uuid} mounted at {identity.mount}")
+        storage_check = cli.DoctorCheck(
+            _STORAGE_DOCTOR_ID,
+            "PASS",
+            f"dedicated state filesystem UUID={identity.uuid} mounted at {identity.mount}",
+        )
     checks.insert(cli.DOCTOR_CHECK_IDS.index(_STORAGE_DOCTOR_ID), storage_check)
     payload = cli.doctor_payload(checks)
     if "--json" in args:
@@ -418,21 +542,43 @@ def _versions_command(args: Sequence[str]) -> int:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     print(f"architecture {frozen.architecture}")
-    for label, pin in (("vaultwarden_image", frozen.vaultwarden_image), ("caddy_builder", frozen.caddy_builder_image), ("caddy_runtime", frozen.caddy_runtime_image)):
+    for label, pin in (
+        ("vaultwarden_image", frozen.vaultwarden_image),
+        ("caddy_builder", frozen.caddy_builder_image),
+        ("caddy_runtime", frozen.caddy_runtime_image),
+    ):
         print(f"{label} {pin.reference}")
     return 0
 
 
 def _print_top_help() -> int:
     code = cli.main([])
-    print("\nEnhanced recovery:\n  recovery {list,verify,prune}  inventory, verify, or prune recovery points\n  restore                       guided TTY picker or explicit restore\n  recovery-kit export           complete AES-256 credential handoff")
-    print("\nSafe project updates:\n  update check                  discover newest stable project release without mutation\n  update apply                  pre-stage exact runtime, verify recovery, then activate\n  update ... --use-latest       freeze currently available upstream component/addon refs")
-    print("\nSeparate Ubuntu maintenance:\n  host-upgrade {check,apply}     apt/package maintenance; never claims .vwrec can undo OS changes")
+    print(
+        "\nEnhanced recovery:\n"
+        "  recovery {list,verify,prune}  inventory, verify, or prune recovery points\n"
+        "  restore                       guided TTY picker or explicit restore\n"
+        "  recovery-kit export           complete AES-256 credential handoff"
+    )
+    print(
+        "\nSafe project updates:\n"
+        "  update check                  discover newest stable project release without mutation\n"
+        "  update apply                  pre-stage exact runtime, verify recovery, then activate\n"
+        "  update rollback               coherent recorded .vwrec + previous-release recovery\n"
+        "  update ... --use-latest       freeze currently available upstream component/addon refs"
+    )
+    print(
+        "\nSeparate Ubuntu maintenance:\n"
+        "  host-upgrade {check,apply}     apt/package maintenance; never claims .vwrec can undo OS changes"
+    )
     return code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["__update-candidate"]:
+        from . import update_candidate
+
+        return update_candidate.main(args[1:])
     if not args or args in (["--help"], ["-h"]):
         return _print_top_help()
     if args[0] == "doctor":
@@ -451,6 +597,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _versions_command(args)
     if args[0] in {"restore", "recovery", "recovery-kit"}:
         from . import recovery_ux
+
         if any(flag in args[1:] for flag in ("--help", "-h")):
             return recovery_ux.main(args)
         if args[0] in {"restore", "recovery"} and not _require_storage():
