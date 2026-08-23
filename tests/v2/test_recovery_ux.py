@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import recovery, recovery_ux, setup_frontend
+from vaultwarden_oci import recovery, recovery_ux, sevenzip_secure, setup_frontend
 from vaultwarden_oci.cli import CommandResult
 
 OFFLINE = "age1" + "q" * 58
@@ -52,6 +53,21 @@ def paths_for(root: Path) -> recovery.RecoveryPaths:
     )
 
 
+def zip_listing(archive: Path, members: list[str]) -> str:
+    sections = [
+        f"Path = {archive}\nType = zip\nPhysical Size = 123\n",
+    ]
+    for member in members:
+        sections.append(
+            f"Path = {member}\n"
+            "Size = 10\n"
+            "Packed Size = 20\n"
+            "Encrypted = +\n"
+            "Method = AES-256 Deflate\n"
+        )
+    return "\n".join(sections)
+
+
 class RecoveryInventoryTests(unittest.TestCase):
     def test_local_inventory_newest_first_and_known_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -68,7 +84,11 @@ class RecoveryInventoryTests(unittest.TestCase):
                     {
                         "schema_version": 1,
                         "verified_objects": {
-                            str(old): {"verified_at": "2026-08-20T02:00:00Z", "size": 3}
+                            str(old): {
+                                "verified_at": "2026-08-20T02:00:00Z",
+                                "size": 3,
+                                "sha256": "a" * 64,
+                            }
                         },
                     }
                 ),
@@ -77,7 +97,55 @@ class RecoveryInventoryTests(unittest.TestCase):
             points = recovery_ux.list_local(paths)
             self.assertEqual([point.name for point in points], [new.name, old.name])
             self.assertEqual(points[0].verification, "unknown")
-            self.assertEqual(points[1].verification, "verified")
+            self.assertEqual(points[1].verification, "previously-verified")
+
+    def test_same_size_post_verification_change_is_not_claimed_currently_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = paths_for(root)
+            paths.backups.mkdir(parents=True)
+            artifact = paths.backups / "recovery-20260820T010000Z-aaaa.vwrec"
+            artifact.write_bytes(b"good")
+            paths.state_file.parent.mkdir(parents=True)
+            paths.state_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "verified_objects": {
+                            str(artifact): {
+                                "verified_at": "2026-08-20T02:00:00Z",
+                                "size": 4,
+                                "sha256": recovery._sha256(artifact),
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifact.write_bytes(b"evil")
+            point = recovery_ux.list_local(paths)[0]
+            self.assertEqual(point.verification, "previously-verified")
+
+    def test_size_change_is_reported_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = paths_for(root)
+            paths.backups.mkdir(parents=True)
+            artifact = paths.backups / "recovery-20260820T010000Z-aaaa.vwrec"
+            artifact.write_bytes(b"changed")
+            paths.state_file.parent.mkdir(parents=True)
+            paths.state_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "verified_objects": {
+                            str(artifact): {"verified_at": "2026-08-20T02:00:00Z", "size": 3}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(recovery_ux.list_local(paths)[0].verification, "changed")
 
     def test_mocked_remote_inventory_newest_first_and_size(self) -> None:
         entries = [
@@ -119,7 +187,7 @@ class GuidedRestoreTests(unittest.TestCase):
     def test_guided_selection_restores_selected_point_only_after_confirmation(self) -> None:
         points = [
             recovery_ux.RecoveryPoint("local", "new.vwrec", "/backups/new.vwrec", 2, "2026-08-20T03:00:00Z", "unknown"),
-            recovery_ux.RecoveryPoint("local", "old.vwrec", "/backups/old.vwrec", 1, "2026-08-20T01:00:00Z", "verified"),
+            recovery_ux.RecoveryPoint("local", "old.vwrec", "/backups/old.vwrec", 1, "2026-08-20T01:00:00Z", "previously-verified"),
         ]
         verified = recovery.VerifiedRecovery(Path(points[1].location), "a" * 64, 1, points[1].created_at)
         answers = iter(["1", "2", "/tmp/offline.age", "RESTORE"])
@@ -137,7 +205,7 @@ class GuidedRestoreTests(unittest.TestCase):
         self.assertEqual(restore.call_args.args[0], Path(points[1].location))
 
     def test_guided_cancellation_after_preflight_never_mutates(self) -> None:
-        point = recovery_ux.RecoveryPoint("local", "one.vwrec", "/backups/one.vwrec", 1, "2026-08-20T01:00:00Z", "verified")
+        point = recovery_ux.RecoveryPoint("local", "one.vwrec", "/backups/one.vwrec", 1, "2026-08-20T01:00:00Z", "previously-verified")
         verified = recovery.VerifiedRecovery(Path(point.location), "a" * 64, 1, point.created_at)
         answers = iter(["1", "1", "/tmp/offline.age", "NO"])
         with (
@@ -160,6 +228,44 @@ class GuidedRestoreTests(unittest.TestCase):
             code = recovery_ux.main(["restore", "--file", "/tmp/a.vwrec", "--identity", "/tmp/id"])
         self.assertEqual(code, 1)
         verify.assert_not_called()
+
+    def test_explicit_remote_restore_verifies_and_restores_same_download(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = paths_for(root)
+            paths.backups.mkdir(parents=True)
+            identity = root / "offline.age"
+            identity.write_text("identity", encoding="utf-8")
+            downloaded: list[Path] = []
+
+            def fake_download(remote_object, destination, *, runner=None):
+                destination.write_bytes(b"one immutable download")
+                downloaded.append(destination)
+                return destination
+
+            def fake_verify(artifact, supplied_identity, **kwargs):
+                self.assertEqual(artifact.read_bytes(), b"one immutable download")
+                self.assertEqual(supplied_identity, identity)
+                return recovery.VerifiedRecovery(artifact, "a" * 64, artifact.stat().st_size, "2026-08-20T03:00:00Z")
+
+            def fake_restore(artifact, supplied_identity, **kwargs):
+                self.assertEqual(artifact, downloaded[0])
+                self.assertEqual(artifact.read_bytes(), b"one immutable download")
+                self.assertEqual(supplied_identity, identity)
+                return {"created_at": "2026-08-20T03:00:00Z"}
+
+            with (
+                mock.patch.object(recovery, "download_remote", side_effect=fake_download) as download,
+                mock.patch.object(recovery_ux, "verify_local", side_effect=fake_verify) as verify,
+                mock.patch.object(recovery, "restore_recovery", side_effect=fake_restore) as restore,
+            ):
+                manifest = recovery_ux.restore_remote_once(
+                    "offsite:recovery/object.vwrec", identity, paths=paths
+                )
+            self.assertEqual(manifest["created_at"], "2026-08-20T03:00:00Z")
+            download.assert_called_once()
+            verify.assert_called_once()
+            restore.assert_called_once()
 
 
 class RecoveryKitTests(unittest.TestCase):
@@ -205,7 +311,7 @@ class RecoveryKitTests(unittest.TestCase):
 
             def fake_verify(archive, passphrase, *, expected_members):
                 calls.append("verified")
-                credentials = (sensitive_candidates := list(sensitive.glob("recovery-kit-*/credentials.txt")))
+                credentials = list(sensitive.glob("recovery-kit-*/credentials.txt"))
                 self.assertEqual(len(credentials), 1)
                 text = credentials[0].read_text(encoding="utf-8")
                 self.assertIn("[Vaultwarden admin token]", text)
@@ -259,30 +365,92 @@ class RecoveryKitTests(unittest.TestCase):
                 )
             seven.assert_not_called()
 
+    def test_zip_membership_rejects_extra_ordinary_file(self) -> None:
+        archive = Path("/tmp/kit.zip")
+        listing = zip_listing(archive, [*recovery_ux.KIT_MEMBERS, "unexpected.txt"])
+        with (
+            mock.patch.object(recovery_ux, "_seven", return_value=mock.Mock(returncode=0, stdout=listing)),
+            self.assertRaisesRegex(recovery_ux.RecoveryUXError, "exactly match"),
+        ):
+            recovery_ux.verify_zip(archive, "correct horse battery staple")
+
+    def test_zip_membership_rejects_extra_zip_member(self) -> None:
+        archive = Path("/tmp/kit.zip")
+        listing = zip_listing(archive, [*recovery_ux.KIT_MEMBERS, "unexpected.zip"])
+        with (
+            mock.patch.object(recovery_ux, "_seven", return_value=mock.Mock(returncode=0, stdout=listing)),
+            self.assertRaisesRegex(recovery_ux.RecoveryUXError, "exactly match"),
+        ):
+            recovery_ux.verify_zip(archive, "correct horse battery staple")
+
+    def test_zip_membership_rejects_duplicate_expected_member(self) -> None:
+        archive = Path("/tmp/kit.zip")
+        listing = zip_listing(archive, [*recovery_ux.KIT_MEMBERS, recovery_ux.KIT_MEMBERS[0]])
+        with (
+            mock.patch.object(recovery_ux, "_seven", return_value=mock.Mock(returncode=0, stdout=listing)),
+            self.assertRaisesRegex(recovery_ux.RecoveryUXError, "exactly match"),
+        ):
+            recovery_ux.verify_zip(archive, "correct horse battery staple")
+
+    def test_empty_password_and_no_password_use_distinct_subprocess_modes(self) -> None:
+        seen: list[dict[str, object]] = []
+
+        def fake_run(argv, **kwargs):
+            seen.append(kwargs)
+            return mock.Mock(returncode=2, stdout="", stderr="")
+
+        with (
+            mock.patch.object(sevenzip_secure.shutil, "which", return_value="/usr/bin/7zz"),
+            mock.patch.object(sevenzip_secure.subprocess, "run", side_effect=fake_run),
+        ):
+            sevenzip_secure.run(["7zz", "t", "-p", "/tmp/kit.zip"], password_input="")
+            sevenzip_secure.run(["7zz", "t", "/tmp/kit.zip"], password_input=None)
+        self.assertEqual(seen[0].get("input"), "\n")
+        self.assertNotIn("stdin", seen[0])
+        self.assertEqual(seen[1].get("stdin"), subprocess.DEVNULL)
+        self.assertNotIn("input", seen[1])
+
     def test_passphrase_never_enters_7zz_argv(self) -> None:
         secret = "passphrase-never-in-argv"
         seen: list[tuple[str, ...]] = []
 
-        def fake_run(argv, *, input=None, text=None, capture_output=None, check=None, cwd=None):
+        def fake_run(argv, **kwargs):
             seen.append(tuple(argv))
             return mock.Mock(returncode=1, stdout="", stderr="")
 
-        with mock.patch.object(recovery_ux.subprocess, "run", side_effect=fake_run):
+        with (
+            mock.patch.object(sevenzip_secure.shutil, "which", return_value="/usr/bin/7zz"),
+            mock.patch.object(sevenzip_secure.subprocess, "run", side_effect=fake_run),
+        ):
             recovery_ux._seven(["7zz", "t", "-p", "/tmp/kit.zip"], password_input=secret)
         self.assertTrue(seen)
         self.assertFalse(any(secret in argument for argv in seen for argument in argv))
 
 
 class SetupRecoveryCustodyTests(unittest.TestCase):
+    def test_setup_frontend_preserves_setup_must_input_and_env_contract(self) -> None:
+        env = os.environ.copy()
+        env["VWOCI_SETUP_FRONTEND_TEST"] = "yes"
+        script = (
+            "import os,sys; "
+            "data=sys.stdin.read(); "
+            "raise SystemExit(0 if data == 'payload' and os.environ.get('VWOCI_SETUP_FRONTEND_TEST') == 'yes' else 9)"
+        )
+        result = setup_frontend.setup._must(
+            [sys.executable, "-c", script],
+            "setup frontend runner compatibility",
+            input_text="payload",
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0)
+
     def test_generated_offline_identity_is_removed_after_successful_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            identity = root / "offline.age"
-            identity.write_text("OFFLINE", encoding="utf-8")
             workspace = root / "workspace"
             workspace.mkdir()
-            identity.rename(workspace / identity.name)
-            identity = workspace / identity.name
+            identity = workspace / "offline.age"
+            identity.write_text("OFFLINE", encoding="utf-8")
             with (
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
@@ -292,11 +460,57 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
                     "export_recovery_kit",
                     return_value=recovery_ux.KitResult(root / "kit.zip", recovery_ux.KIT_MEMBERS, False),
                 ),
+                mock.patch("builtins.input", return_value="SAVED"),
             ):
                 code = setup_frontend.main(["install", "--domain", "example.net"])
             self.assertEqual(code, 0)
             self.assertFalse(workspace.exists())
             self.assertFalse(identity.exists())
+
+    def test_failed_kit_export_retains_transient_offline_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            identity = workspace / "offline.age"
+            identity.write_text("OFFLINE", encoding="utf-8")
+            with (
+                mock.patch.object(setup_frontend, "_should_generate", return_value=True),
+                mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
+                mock.patch.object(setup_frontend.setup, "main", return_value=0),
+                mock.patch.object(
+                    setup_frontend.recovery_ux,
+                    "export_recovery_kit",
+                    side_effect=recovery_ux.RecoveryUXError("ZIP verification failed"),
+                ),
+            ):
+                code = setup_frontend.main(["install", "--domain", "example.net"])
+            self.assertEqual(code, 1)
+            self.assertTrue(workspace.exists())
+            self.assertTrue(identity.exists())
+
+    def test_unacknowledged_local_handoff_retains_transient_offline_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            identity = workspace / "offline.age"
+            identity.write_text("OFFLINE", encoding="utf-8")
+            with (
+                mock.patch.object(setup_frontend, "_should_generate", return_value=True),
+                mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
+                mock.patch.object(setup_frontend.setup, "main", return_value=0),
+                mock.patch.object(
+                    setup_frontend.recovery_ux,
+                    "export_recovery_kit",
+                    return_value=recovery_ux.KitResult(root / "kit.zip", recovery_ux.KIT_MEMBERS, False),
+                ),
+                mock.patch("builtins.input", return_value="NOT YET"),
+            ):
+                code = setup_frontend.main(["install", "--domain", "example.net"])
+            self.assertEqual(code, 1)
+            self.assertTrue(workspace.exists())
+            self.assertTrue(identity.exists())
 
 
 if __name__ == "__main__":
