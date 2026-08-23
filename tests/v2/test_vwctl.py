@@ -120,19 +120,12 @@ class VwctlUnitTests(unittest.TestCase):
                 if holder.stderr is not None:
                     holder.stderr.close()
 
-    def test_update_commands_reject_use_latest_before_update_planning(self) -> None:
+    def test_update_commands_support_explicit_use_latest(self) -> None:
         for action in ("check", "apply"):
             with self.subTest(action=action):
-                stderr = io.StringIO()
-                with (
-                    mock.patch.object(update_cli.update, "plan_update") as plan,
-                    redirect_stderr(stderr),
-                    self.assertRaises(SystemExit) as caught,
-                ):
-                    update_cli.main(["update", action, "--use-latest"])
-                self.assertEqual(caught.exception.code, 2)
-                self.assertIn("unrecognized arguments: --use-latest", stderr.getvalue())
-                plan.assert_not_called()
+                args = update_cli._update_parser().parse_args([action, "--use-latest"])
+                self.assertEqual(args.update_command, action)
+                self.assertTrue(args.use_latest)
 
     def test_latest_install_stays_on_isolated_install_boundary(self) -> None:
         from vaultwarden_oci import recovery, runtime
@@ -327,7 +320,8 @@ class VwctlIntegrationTests(unittest.TestCase):
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         for command in ("start", "stop", "restart", "status", "logs", "doctor", "versions"):
             self.assertIn(command, help_result.stdout)
-        self.assertIn("update {check,apply}", help_result.stdout)
+        self.assertIn("update check", help_result.stdout)
+        self.assertIn("host-upgrade {check,apply}", help_result.stdout)
         version = self.run_vwctl("--version")
         self.assertEqual(version.stdout.strip(), f"vwctl {CURRENT_RELEASE_VERSION}")
         versions = self.run_vwctl("versions")
@@ -336,12 +330,12 @@ class VwctlIntegrationTests(unittest.TestCase):
         self.assertIn("caddy 2.11.4", versions.stdout)
         self.assertIn("vaultwarden_image vaultwarden/server:1.37.1@sha256:", versions.stdout)
 
-    def test_update_cli_has_no_latest_mode(self) -> None:
+    def test_update_cli_has_supported_latest_mode(self) -> None:
         for action in ("check", "apply"):
             with self.subTest(action=action):
-                result = self.run_vwctl("update", action, "--use-latest")
-                self.assertEqual(result.returncode, 2)
-                self.assertIn("unrecognized arguments: --use-latest", result.stderr)
+                result = self.run_vwctl("update", action, "--help")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--use-latest", result.stdout)
 
     def test_config_validate_rejects_plaintext_secret_fields(self) -> None:
         recipient = "age1" + "q" * 58
