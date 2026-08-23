@@ -1,0 +1,19 @@
+[Unit]
+Description=VaultWarden-OCI project update availability check
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=network-online.target vaultwarden-oci.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/vaultwarden-oci/current/vwctl update check --timer --json
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/vaultwarden-oci/state /run/vaultwarden-oci
+
+[Install]
+WantedBy=multi-user.target
