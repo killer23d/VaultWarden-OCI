@@ -120,6 +120,38 @@ def _selected_release_content(root: Path) -> dict[str, bytes | None]:
     return result
 
 
+def _numeric_component_version(value: str, label: str) -> tuple[int, ...]:
+    normalized = value.removeprefix("v")
+    parts = normalized.split(".")
+    if len(parts) < 2 or any(not part.isdigit() for part in parts):
+        raise UpdateError(
+            f"cannot prove {label} downgrade safety for version {value!r}; "
+            "ordinary update requires a numeric release pin"
+        )
+    return tuple(int(part) for part in parts)
+
+
+def _reject_component_downgrades(current_dir: Path, candidate: FrozenVersions) -> None:
+    try:
+        current = cli.load_versions(current_dir / "versions.toml", require_components=True)
+    except cli.VersionsError as exc:
+        raise UpdateError(f"cannot load installed component pins for downgrade safety: {exc}") from exc
+    for attribute, label in (
+        ("vaultwarden", "Vaultwarden"),
+        ("caddy", "Caddy"),
+        ("caddy_dns_cloudflare", "caddy-dns/cloudflare"),
+        ("caddy_combine_ip_ranges", "caddy-combine-ip-ranges"),
+        ("caddy_ratelimit", "caddy-ratelimit"),
+    ):
+        installed = getattr(current, attribute)
+        proposed = getattr(candidate, attribute)
+        if _numeric_component_version(proposed, label) < _numeric_component_version(installed, label):
+            raise UpdateError(
+                f"ordinary update refuses {label} downgrade: installed {installed}, candidate {proposed}; "
+                "use a separately explicit recovery-aware downgrade procedure instead"
+            )
+
+
 def plan_update(
     source_root: Path,
     *,
@@ -145,6 +177,7 @@ def plan_update(
     current_target, current_release, current_dir = _current(layout)
     _gate_current(layout, runner)
     frozen = resolve_pinned(source_root, machine=machine)
+    _reject_component_downgrades(current_dir, frozen)
     try:
         target_release = install.validate_release_name(frozen.project_version)
     except install.InstallError as exc:
