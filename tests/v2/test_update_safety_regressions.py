@@ -206,6 +206,7 @@ class LockedFailureStopTests(unittest.TestCase):
                 mock.patch.object(update, "_switch"),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
+                mock.patch.object(update_appliance.update_guard, "engage", side_effect=lambda **_kwargs: events.append("guard")),
                 mock.patch.object(update_appliance, "_start_update_timer"),
             ):
                 gate = (
@@ -227,11 +228,13 @@ class LockedFailureStopTests(unittest.TestCase):
         stopped, events = self._run_late_failure(crowdsec_failure=False)
         self.assertTrue(stopped)
         self.assertLess(events.index("candidate-stop"), events.index("lock-exit"))
+        self.assertLess(events.index("guard"), events.index("lock-exit"))
 
     def test_final_crowdsec_failure_stops_candidate_while_lock_held(self) -> None:
         stopped, events = self._run_late_failure(crowdsec_failure=True)
         self.assertTrue(stopped)
         self.assertLess(events.index("candidate-stop"), events.index("lock-exit"))
+        self.assertLess(events.index("guard"), events.index("lock-exit"))
 
 
 class CoherentRollbackLockTests(unittest.TestCase):
@@ -239,10 +242,12 @@ class CoherentRollbackLockTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             host = temp / "host"
-            previous = host / "opt/vaultwarden-oci/releases/1.0.0"
-            candidate = host / "opt/vaultwarden-oci/releases/2.0.0"
+            install_root = host / "opt/vaultwarden-oci"
+            previous = install_root / "releases/1.0.0"
+            candidate = install_root / "releases/2.0.0"
             previous.mkdir(parents=True)
             candidate.mkdir(parents=True)
+            (install_root / "current").symlink_to("releases/2.0.0")
             artifact = temp / "pre.vwrec"; artifact.write_bytes(b"verified")
             verified = recovery.VerifiedRecovery(
                 artifact, hashlib.sha256(artifact.read_bytes()).hexdigest(),
@@ -283,14 +288,16 @@ class CoherentRollbackLockTests(unittest.TestCase):
             with (
                 mock.patch.object(update_appliance.storage, "verify"),
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=verified.sha256),
-                mock.patch.object(update_appliance.update, "_current", return_value=(Path("releases/2.0.0"), "2.0.0", candidate)),
                 mock.patch.object(update_appliance.update_recovery, "prepare_restore", prepared_restore),
                 mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
                 mock.patch.object(update_appliance.cli, "mutation_lock", held_lock),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=lambda *_a: require_lock("stop-candidate", True)),
-                mock.patch.object(update_appliance.update_unit_migration, "install_units", side_effect=lambda *_a: require_lock("install-old-units", {})),
+                mock.patch.object(update_appliance.update_guard, "engage", side_effect=lambda **_k: require_lock("guard")),
+                mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_k: events.append("guard-clear")),
+                mock.patch.object(update_appliance.update_unit_migration, "converge_units", side_effect=lambda *_a: require_lock("install-old-units", {})),
                 mock.patch.object(update_appliance.update, "_switch", side_effect=lambda *_a: require_lock("switch-old-code")),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
+                mock.patch.object(update_appliance, "_start_previous_service", side_effect=lambda *_a: events.append("start-old")),
                 mock.patch.object(update_appliance, "_prove_previous"),
             ):
                 update_appliance.coherent_rollback(
@@ -299,10 +306,11 @@ class CoherentRollbackLockTests(unittest.TestCase):
                 )
 
         self.assertLess(events.index("prepare-data"), events.index("lock-enter"))
-        for name in ("stop-candidate", "promote-data", "install-old-units", "switch-old-code"):
+        for name in ("stop-candidate", "guard", "install-old-units", "switch-old-code", "promote-data"):
             self.assertLess(events.index("lock-enter"), events.index(name))
             self.assertLess(events.index(name), events.index("lock-exit"))
-        self.assertLess(events.index("promote-data"), events.index("switch-old-code"))
+        self.assertLess(events.index("lock-exit"), events.index("guard-clear"))
+        self.assertLess(events.index("guard-clear"), events.index("start-old"))
 
 
 class TimerAndHostSerializationTests(unittest.TestCase):
@@ -383,6 +391,7 @@ class TimerAndHostSerializationTests(unittest.TestCase):
     def test_json_host_apply_without_yes_is_json_only(self) -> None:
         stderr = mock.MagicMock()
         with (
+            mock.patch.object(update_cli, "_guard_error", return_value=False),
             mock.patch.object(update_cli, "_require_storage", return_value=True),
             mock.patch("sys.stderr", stderr),
         ):
