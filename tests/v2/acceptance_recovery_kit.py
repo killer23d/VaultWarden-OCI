@@ -41,7 +41,7 @@ def main() -> int:
             print(tested.stdout)
             raise RuntimeError(f"correct-password ZIP test failed with exit {tested.returncode}")
         recovery_ux.verify_zip(archive, passphrase)
-    print("PASS: real 7zz PTY AES-256 ZIP/member/correct-password/wrong-password/empty-password/no-password verification")
+    print("PASS: real 7zz stdin AES-256 ZIP/member/correct-password/wrong-password/empty-password/no-password verification")
     return 0
 
 
