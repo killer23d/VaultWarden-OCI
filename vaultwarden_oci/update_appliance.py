@@ -4,6 +4,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import tarfile
 import tempfile
@@ -12,22 +14,46 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterator, Mapping, Sequence
+from typing import Callable, Iterator, Mapping
 
-from . import cli, edge, install, notification, recovery, runtime, secrets, storage, update
+from . import (
+    cli,
+    install,
+    notification,
+    recovery,
+    runtime,
+    secrets,
+    storage,
+    update,
+    update_recovery,
+    update_unit_migration,
+)
+from .update_candidate import POSTSTART_FAILURE
 from .update_versions import (
+    DEVELOPMENT_ENV,
     RESOLVED_STATE,
     FrozenVersions,
     UpdateError,
     frozen_versions_toml,
     record_frozen,
     resolve_latest_supported,
+    resolve_pinned_file,
 )
 
-PROJECT_RELEASES_URL = "https://api.github.com/repos/killer23d/VaultWarden-OCI/releases?per_page=20"
+PROJECT_RELEASES_URL = (
+    "https://api.github.com/repos/killer23d/VaultWarden-OCI/releases?per_page=100&page={page}"
+)
+MAX_RELEASE_PAGES = 10
 UPDATE_STATE = Path("/var/lib/vaultwarden-oci/state/update-check.json")
 MAX_RELEASE_BYTES = 64 * 1024 * 1024
-MIN_FREE_BYTES = 512 * 1024 * 1024
+MIN_FREE_BYTES = 1024 * 1024 * 1024
+_UPDATE_TIMER = "vaultwarden-oci-update-check.timer"
+_LATEST_MARKER = ".latest."
+_SEMVER = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -42,6 +68,8 @@ class PreparedPlan:
     plan: update.UpdatePlan
     project_release: ProjectRelease | None
     use_latest: bool
+    available: bool = True
+    availability_reason: str = ""
 
 
 class PersistentStateFailure(UpdateError):
@@ -63,6 +91,7 @@ class PersistentStateFailure(UpdateError):
 
 Runner = Callable[..., cli.CommandResult]
 JsonGetter = Callable[[str], object]
+CandidateActivator = Callable[[Path, Path, Runner], None]
 
 
 def _detail(result: cli.CommandResult) -> str:
@@ -90,8 +119,7 @@ def _json_get(url: str) -> object:
         raise UpdateError("project release lookup returned invalid JSON") from exc
 
 
-def select_stable_release(payload: object) -> ProjectRelease:
-    """Select GitHub's newest non-draft/non-prerelease project release."""
+def _stable_from_page(payload: object) -> ProjectRelease | None:
     if not isinstance(payload, list):
         raise UpdateError("project release lookup returned an invalid release list")
     for item in payload:
@@ -106,15 +134,36 @@ def select_stable_release(payload: object) -> ProjectRelease:
             and tag.strip() == tag
             and not any(c.isspace() for c in tag)
             and isinstance(tarball, str)
-            and tarball.startswith("https://api.github.com/repos/killer23d/VaultWarden-OCI/tarball/")
+            and tarball.startswith(
+                "https://api.github.com/repos/killer23d/VaultWarden-OCI/tarball/"
+            )
             and isinstance(published, str)
         ):
             return ProjectRelease(tag, tarball, published)
-    raise UpdateError("no stable VaultWarden-OCI project release is available")
+    return None
+
+
+def select_stable_release(payload: object) -> ProjectRelease:
+    """Select the first non-draft/non-prerelease project release in one page."""
+    selected = _stable_from_page(payload)
+    if selected is None:
+        raise UpdateError("no stable VaultWarden-OCI project release is available")
+    return selected
 
 
 def latest_project_release(*, getter: JsonGetter = _json_get) -> ProjectRelease:
-    return select_stable_release(getter(PROJECT_RELEASES_URL))
+    """Find the newest stable release across bounded GitHub release pagination."""
+    for page in range(1, MAX_RELEASE_PAGES + 1):
+        payload = getter(PROJECT_RELEASES_URL.format(page=page))
+        selected = _stable_from_page(payload)
+        if selected is not None:
+            return selected
+        assert isinstance(payload, list)
+        if len(payload) < 100:
+            break
+    raise UpdateError(
+        f"no stable VaultWarden-OCI project release was found in the newest {MAX_RELEASE_PAGES * 100} releases"
+    )
 
 
 def _download(url: str) -> bytes:
@@ -156,6 +205,8 @@ def _extract_release(raw: bytes, destination: Path) -> Path:
         raise UpdateError(f"project release archive is invalid: {exc}") from exc
     root = destination / next(iter(roots))
     update._validate_source(root)
+    if not (root / "vaultwarden_oci/update_candidate.py").is_file():
+        raise UpdateError("project release is missing the candidate-owned update interface")
     return root
 
 
@@ -166,16 +217,80 @@ def candidate_source(
     getter: JsonGetter = _json_get,
     downloader: Callable[[str], bytes] = _download,
 ) -> Iterator[tuple[Path, ProjectRelease | None]]:
-    """Yield either an explicit developer source or the trusted stable project release."""
+    """Yield a trusted stable release or an explicitly development-gated source."""
     if source is not None:
+        if os.environ.get(DEVELOPMENT_ENV) != "1":
+            raise UpdateError(
+                f"--source is developer/testing-only; set {DEVELOPMENT_ENV}=1 explicitly"
+            )
         root = source.resolve()
         update._validate_source(root)
+        if not (root / "vaultwarden_oci/update_candidate.py").is_file():
+            raise UpdateError("developer source is missing the candidate-owned update interface")
         yield root, None
         return
     release = latest_project_release(getter=getter)
     raw = downloader(release.tarball_url)
     with tempfile.TemporaryDirectory(prefix="vwoci-project-release-") as directory:
         yield _extract_release(raw, Path(directory)), release
+
+
+def _base_project_version(release: str) -> str:
+    return release.split(_LATEST_MARKER, 1)[0]
+
+
+def _parse_semver(value: str) -> tuple[tuple[int, int, int], tuple[str, ...] | None]:
+    match = _SEMVER.fullmatch(value)
+    if match is None:
+        raise UpdateError(
+            f"project release version {value!r} is not comparable semantic version syntax"
+        )
+    prerelease = tuple(match.group(4).split(".")) if match.group(4) is not None else None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3))), prerelease
+
+
+def _compare_prerelease(left: tuple[str, ...] | None, right: tuple[str, ...] | None) -> int:
+    if left is None and right is None:
+        return 0
+    if left is None:
+        return 1
+    if right is None:
+        return -1
+    for one, two in zip(left, right):
+        if one == two:
+            continue
+        one_num, two_num = one.isdigit(), two.isdigit()
+        if one_num and two_num:
+            return 1 if int(one) > int(two) else -1
+        if one_num != two_num:
+            return -1 if one_num else 1
+        return 1 if one > two else -1
+    if len(left) == len(right):
+        return 0
+    return 1 if len(left) > len(right) else -1
+
+
+def compare_project_versions(left: str, right: str) -> int:
+    left_core, left_pre = _parse_semver(left)
+    right_core, right_pre = _parse_semver(right)
+    if left_core != right_core:
+        return 1 if left_core > right_core else -1
+    return _compare_prerelease(left_pre, right_pre)
+
+
+def _recommended_availability(current_release: str, candidate_version: str) -> tuple[bool, str]:
+    current_base = _base_project_version(current_release)
+    ordering = compare_project_versions(candidate_version, current_base)
+    if ordering > 0:
+        return True, "newer stable project release"
+    if ordering < 0:
+        return False, "discovered stable release is older than the installed project release; downgrade refused"
+    if _LATEST_MARKER in current_release:
+        return (
+            False,
+            "active --use-latest snapshot is based on this stable project release; returning to its tested pins would be an implicit component downgrade",
+        )
+    return False, "already at the newest stable project release"
 
 
 def prepare_plan(
@@ -187,11 +302,23 @@ def prepare_plan(
     machine: str | None = None,
     runner: Runner = cli.run_command,
 ) -> PreparedPlan:
-    """Create a source-coherent plan; --use-latest replaces pins with one frozen snapshot."""
+    """Create a coherent plan with explicit newer-release/downgrade semantics."""
     base = update.plan_update(source_root, root=root, machine=machine, runner=runner)
-    if not use_latest:
-        plan = base
-    else:
+    source_frozen = update.resolve_pinned(source_root, machine=machine)
+    source_version = source_frozen.project_version
+    if project_release is not None:
+        normalized = project_release.tag.removeprefix("v")
+        if normalized != source_version:
+            raise UpdateError(
+                f"stable project release tag {project_release.tag!r} does not match its versions.toml project version {source_version!r}"
+            )
+
+    if use_latest:
+        current_base = _base_project_version(base.current_release)
+        if compare_project_versions(source_version, current_base) < 0:
+            raise UpdateError(
+                "--use-latest candidate is based on an older project release than the installed appliance; downgrade refused"
+            )
         frozen = resolve_latest_supported(source_root, machine=machine)
         plan = update.UpdatePlan(
             source_root=source_root.resolve(),
@@ -201,14 +328,26 @@ def prepare_plan(
             target_release=frozen.project_version,
             frozen=frozen,
         )
-    if project_release is not None:
-        source_version = update.resolve_pinned(source_root, machine=machine).project_version
-        normalized = project_release.tag.removeprefix("v")
-        if normalized != source_version:
-            raise UpdateError(
-                f"stable project release tag {project_release.tag!r} does not match its versions.toml project version {source_version!r}"
-            )
-    return PreparedPlan(plan=plan, project_release=project_release, use_latest=use_latest)
+        available = plan.target_release != plan.current_release
+        reason = (
+            "new exact --use-latest snapshot"
+            if available
+            else "the exact --use-latest snapshot is already active"
+        )
+    else:
+        plan = base
+        if project_release is not None:
+            available, reason = _recommended_availability(base.current_release, source_version)
+        else:
+            available = not plan.already_active
+            reason = "developer source differs from active release" if available else "developer source is already active"
+    return PreparedPlan(
+        plan=plan,
+        project_release=project_release,
+        use_latest=use_latest,
+        available=available,
+        availability_reason=reason,
+    )
 
 
 def _tree_bytes(root: Path) -> int:
@@ -221,16 +360,28 @@ def _tree_bytes(root: Path) -> int:
     return total
 
 
-def _disk_space(source_root: Path, layout: install.Layout) -> None:
+def _existing_ancestor(path: Path) -> Path:
+    current = path
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
+
+
+def _disk_space(source_root: Path, layout: install.Layout, *, runner: Runner) -> None:
     required = max(MIN_FREE_BYTES, _tree_bytes(source_root) * 3)
     targets = {
         layout.path(install.INSTALL_ROOT).parent,
         layout.path(install.STATE_ROOT),
     }
+    docker = runner(["docker", "info", "--format", "{{.DockerRootDir}}"])
+    if not docker.ok:
+        raise UpdateError(f"cannot inspect Docker image/build storage: {_detail(docker)}")
+    docker_root = docker.stdout.strip()
+    if not docker_root or not Path(docker_root).is_absolute():
+        raise UpdateError("Docker reported an invalid image/build storage root")
+    targets.add(Path(docker_root))
     for target in targets:
-        probe = target
-        while not probe.exists() and probe != probe.parent:
-            probe = probe.parent
+        probe = _existing_ancestor(target)
         try:
             free = shutil.disk_usage(probe).free
         except OSError as exc:
@@ -241,197 +392,235 @@ def _disk_space(source_root: Path, layout: install.Layout) -> None:
             )
 
 
-def _candidate_paths(directory: Path) -> runtime.Paths:
-    transient = directory / "rendered"
-    transient.mkdir(parents=True)
-    return runtime.Paths(
-        config=runtime.CONFIG,
-        data=runtime.STATE / "data",
-        caddy_data=runtime.STATE / "caddy/data",
-        caddy_config=runtime.STATE / "caddy/config",
-        caddy_log=runtime.STATE / "caddy/log",
-        run=directory,
-        transient=transient,
-        lock=directory / "lock",
-        secret_root=runtime.RUN / "secrets",
+def _candidate_error(label: str, result: cli.CommandResult) -> UpdateError:
+    detail = _detail(result)
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+        detail = str(payload["error"])
+    return UpdateError(f"{label}: {detail}")
+
+
+def _prepare_candidate_release(exact_source: Path, render_root: Path, *, runner: Runner) -> None:
+    result = runner(
+        [
+            str(exact_source / "vwctl"),
+            "__update-candidate",
+            "prepare",
+            "--versions",
+            str(exact_source / "versions.toml"),
+            "--render-root",
+            str(render_root),
+        ],
+        cwd=exact_source,
     )
+    if not result.ok:
+        raise _candidate_error("candidate-owned pre-stage failed", result)
 
 
-def _prestage_exact_runtime(
-    frozen: FrozenVersions,
+def _activate_candidate_release(release_dir: Path, render_root: Path, runner: Runner) -> None:
+    result = runner(
+        [
+            str(release_dir / "vwctl"),
+            "__update-candidate",
+            "activate",
+            "--versions",
+            str(release_dir / "versions.toml"),
+            "--render-root",
+            str(render_root),
+        ],
+        cwd=release_dir,
+    )
+    if result.ok:
+        return
+    state_change_possible = result.returncode == POSTSTART_FAILURE
+    detail = _detail(result)
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        if isinstance(payload.get("error"), str):
+            detail = str(payload["error"])
+        if payload.get("state_change_possible") is True:
+            state_change_possible = True
+    raise update.RuntimeActivationError(detail, state_change_possible=state_change_possible)
+
+
+def _stop_candidate_locked(release_dir: Path, runner: Runner) -> bool:
+    result = runner(
+        [str(release_dir / "vwctl"), "__update-candidate", "stop"],
+        cwd=release_dir,
+    )
+    if not result.ok:
+        return False
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return True
+    return not isinstance(payload, dict) or payload.get("stopped") is True
+
+
+def _preflight(
     exact_source: Path,
+    plan: update.UpdatePlan,
+    render_root: Path,
     *,
     runner: Runner,
-) -> None:
-    """Pull, render, validate, and build while the current stack remains healthy."""
-    docker = runner(["docker", "version", "--format", "{{.Server.Version}}"])
-    if not docker.ok:
-        raise UpdateError(f"Docker Engine unavailable: {_detail(docker)}")
-    config = runtime.load_config()
-    values = secrets.load(config.offline_recovery_recipient, runner=runner)
-    admin_enabled = secrets.admin_enabled(values)
-    for pin in (frozen.vaultwarden_image, frozen.caddy_builder_image, frozen.caddy_runtime_image):
-        result = runner(["docker", "pull", pin.reference])
-        if not result.ok:
-            raise UpdateError(f"cannot pull exact {pin.name} image: {_detail(result)}")
-    with tempfile.TemporaryDirectory(prefix="vwoci-update-validate-") as directory:
-        paths = _candidate_paths(Path(directory))
-        runtime.render(config, exact_source / "versions.toml", paths, admin_enabled=admin_enabled)
-        compose = runner(["docker", "compose", "-f", str(paths.compose), "config", "--quiet"])
-        if not compose.ok:
-            raise UpdateError(f"candidate Compose validation failed: {_detail(compose)}")
-        built = runner(
-            [
-                "docker", "build", "--pull=false", "--tag", frozen.caddy_image,
-                "--file", str(paths.dockerfile), str(paths.transient),
-            ]
-        )
-        if not built.ok:
-            raise UpdateError(f"exact custom Caddy build failed: {_detail(built)}")
-        caddy = runner(
-            [
-                "docker", "run", "--rm",
-                "--env", f"VAULTWARDEN_DOMAIN={config.domain}",
-                "--env", f"ACME_EMAIL={config.acme_email}",
-                "--env", "CLOUDFLARE_API_TOKEN=validation-only",
-                "--env", "ADMIN_BASIC_AUTH_HASH=$2a$14$validationonlyvalidationonlyvalidationonlyvalidationonly",
-                "--volume", f"{paths.caddyfile}:/etc/caddy/Caddyfile:ro",
-                frozen.caddy_image,
-                "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
-            ]
-        )
-        if not caddy.ok:
-            raise UpdateError(f"candidate Caddy validation failed: {_detail(caddy)}")
-
-
-def _preflight(exact_source: Path, plan: update.UpdatePlan, *, runner: Runner) -> runtime.RuntimeConfig:
+) -> runtime.RuntimeConfig:
     if plan.root == Path("/"):
         storage.verify()
     layout = install.Layout(plan.root.resolve())
     update._gate_current(layout, runner)
     config = runtime.load_config()
     secrets.load(config.offline_recovery_recipient, runner=runner)
-    _disk_space(exact_source, layout)
-    _prestage_exact_runtime(plan.frozen, exact_source, runner=runner)
+    _disk_space(exact_source, layout, runner=runner)
+    _prepare_candidate_release(exact_source, render_root, runner=runner)
     return config
-
-
-def _stop_candidate(layout: install.Layout, runner: Runner) -> bool:
-    current = layout.path(install.CURRENT_LINK) / "vwctl"
-    result = runner([str(current), "stop"])
-    return result.ok
 
 
 def _prove_previous(layout: install.Layout, runner: Runner) -> None:
     update._gate_current(layout, runner)
 
 
+def _start_update_timer(layout: install.Layout, runner: Runner) -> None:
+    if layout.root != Path("/"):
+        return
+    started = runner(["systemctl", "start", _UPDATE_TIMER])
+    if not started.ok:
+        raise UpdateError(f"update-check timer failed to start: {_detail(started)}")
+    active = runner(["systemctl", "is-active", "--quiet", _UPDATE_TIMER])
+    if not active.ok:
+        raise UpdateError("update-check timer could not be proven active after upgrade")
+
+
 def apply_prepared(
     prepared: PreparedPlan,
     *,
     runner: Runner = cli.run_command,
-    activator: update.Activator = update._activate_runtime,
+    activator: CandidateActivator = _activate_candidate_release,
     record_path: Path | None = None,
     recovery_creator: Callable[..., recovery.VerifiedRecovery] = recovery.create_recovery,
 ) -> Path:
-    """Prepare while healthy, verify recovery, then enter the short mutation boundary."""
+    """Prepare while healthy, then mutate under one short appliance lock boundary."""
     plan = prepared.plan
     layout = install.Layout(plan.root.resolve())
-    if layout.root != Path("/") and (runner is cli.run_command or activator is update._activate_runtime):
+    if layout.root != Path("/") and (
+        runner is cli.run_command or activator is _activate_candidate_release
+    ):
         raise UpdateError("non-production update roots are test-only; inject test runner and activator")
     if layout.root == Path("/") and os.geteuid() != 0:
         raise UpdateError("vwctl update apply must run as root")
     current_target, current_release, previous_release = update._current(layout)
     if (current_target, current_release) != (plan.current_target, plan.current_release):
         raise UpdateError("current release changed since update check")
-    if plan.already_active:
+    if not prepared.available:
         return previous_release
 
     versions_text = frozen_versions_toml(plan.frozen)
     with install._frozen_source(plan.source_root, versions_text) as exact_source:
         update._validate_source(exact_source)
-        config = _preflight(exact_source, plan, runner=runner)
-        verified = recovery_creator(config.offline_recovery_recipient, runner=runner)
-        if not verified.artifact.is_file() or verified.size <= 0:
-            raise UpdateError("verified pre-update recovery did not produce a usable .vwrec artifact")
-        if recovery._sha256(verified.artifact) != verified.sha256:
-            raise UpdateError("verified pre-update recovery digest changed before mutation")
-        update._gate_current(layout, runner)
+        with tempfile.TemporaryDirectory(prefix="vwoci-update-prepared-") as render_directory:
+            render_root = Path(render_directory)
+            config = _preflight(exact_source, plan, render_root, runner=runner)
+            verified = recovery_creator(config.offline_recovery_recipient, runner=runner)
+            if not verified.artifact.is_file() or verified.size <= 0:
+                raise UpdateError("verified pre-update recovery did not produce a usable .vwrec artifact")
+            if recovery._sha256(verified.artifact) != verified.sha256:
+                raise UpdateError("verified pre-update recovery digest changed before mutation")
+            update._gate_current(layout, runner)
 
-        lock_path = install.ensure_lock_path(layout)
-        with cli.mutation_lock(lock_path):
-            if update._current(layout)[0] != current_target:
-                raise UpdateError("current release changed after pre-update recovery")
-            if plan.root == Path("/"):
-                storage.verify()
-            snapshot: dict[Path, tuple[bytes, int]] | None = None
-            switched = False
-            state_change_possible = False
-            try:
-                release_dir = install.stage_release(exact_source, layout, plan.target_release)
-                update._verify_coherent(release_dir, exact_source)
-                snapshot = update._install_units(release_dir, previous_release, layout)
-                update._switch(layout, Path("releases") / plan.target_release)
-                switched = True
-                update._daemon_reload(layout, runner)
+            lock_path = install.ensure_lock_path(layout)
+            with cli.mutation_lock(lock_path):
+                if update._current(layout)[0] != current_target:
+                    raise UpdateError("current release changed after pre-update recovery")
+                if plan.root == Path("/"):
+                    storage.verify()
+                snapshot: dict[Path, tuple[bytes, int]] | None = None
+                switched = False
+                state_change_possible = False
+                release_dir: Path | None = None
                 try:
-                    activator(plan.frozen, release_dir / "versions.toml", runner)
-                except update.RuntimeActivationError as exc:
-                    state_change_possible = exc.state_change_possible
-                    raise
-                except Exception:
-                    state_change_possible = True
-                    raise
-                else:
-                    state_change_possible = True
-                update._gate_activated(layout, runner)
-                crowdsec = runner([str(layout.path(install.CURRENT_LINK) / "vwctl"), "crowdsec", "status"])
-                if not crowdsec.ok:
-                    raise UpdateError(f"activated CrowdSec/origin gate failed: {_detail(crowdsec)}")
-                record_frozen(plan.frozen, record_path or layout.path(RESOLVED_STATE))
-                return release_dir
-            except Exception as exc:
-                if state_change_possible:
-                    stopped = _stop_candidate(layout, runner)
-                    action = (
-                        f"coherent rollback requires recovery artifact {verified.artifact} "
-                        f"sha256={verified.sha256} plus previous release {plan.current_release}"
+                    release_dir = install.stage_release(exact_source, layout, plan.target_release)
+                    update._verify_coherent(release_dir, exact_source)
+                    snapshot = update_unit_migration.install_units(
+                        release_dir,
+                        previous_release,
+                        layout,
                     )
-                    raise PersistentStateFailure(
-                        f"{exc}; old code was not auto-started against possibly-new persistent state; "
-                        f"candidate services {'were stopped' if stopped else 'could not be proven stopped'}; {action}",
-                        plan=plan,
-                        verified=verified,
-                        services_stopped=stopped,
-                    ) from exc
+                    update._switch(layout, Path("releases") / plan.target_release)
+                    switched = True
+                    update._daemon_reload(layout, runner)
+                    try:
+                        activator(release_dir, render_root, runner)
+                    except update.RuntimeActivationError as exc:
+                        state_change_possible = exc.state_change_possible
+                        raise
+                    except Exception:
+                        state_change_possible = True
+                        raise
+                    else:
+                        state_change_possible = True
+                    update._gate_activated(layout, runner)
+                    crowdsec = runner(
+                        [
+                            str(layout.path(install.CURRENT_LINK) / "vwctl"),
+                            "crowdsec",
+                            "status",
+                        ]
+                    )
+                    if not crowdsec.ok:
+                        raise UpdateError(f"activated CrowdSec/origin gate failed: {_detail(crowdsec)}")
+                    _start_update_timer(layout, runner)
+                    record_frozen(plan.frozen, record_path or layout.path(RESOLVED_STATE))
+                    return release_dir
+                except Exception as exc:
+                    if state_change_possible:
+                        stopped = (
+                            release_dir is not None
+                            and _stop_candidate_locked(release_dir, runner)
+                        )
+                        action = (
+                            f"coherent rollback requires recovery artifact {verified.artifact} "
+                            f"sha256={verified.sha256} plus previous release {plan.current_release}"
+                        )
+                        raise PersistentStateFailure(
+                            f"{exc}; old code was not auto-started against possibly-new persistent state; "
+                            f"candidate services {'were stopped and removal was proven' if stopped else 'could not be proven stopped'}; {action}",
+                            plan=plan,
+                            verified=verified,
+                            services_stopped=bool(stopped),
+                        ) from exc
 
-                rollback_errors: list[str] = []
-                if switched:
-                    try:
-                        update._switch(layout, current_target)
-                    except Exception as rollback_exc:
-                        rollback_errors.append(f"current symlink: {rollback_exc}")
-                if snapshot is not None:
-                    try:
-                        update._restore_units(snapshot)
-                    except Exception as rollback_exc:
-                        rollback_errors.append(f"systemd units: {rollback_exc}")
-                if switched:
-                    try:
-                        update._daemon_reload(layout, runner)
-                    except Exception as rollback_exc:
-                        rollback_errors.append(f"daemon-reload: {rollback_exc}")
-                if not rollback_errors and (switched or snapshot is not None):
-                    try:
-                        _prove_previous(layout, runner)
-                    except Exception as rollback_exc:
-                        rollback_errors.append(f"previous health proof: {rollback_exc}")
-                message = str(exc)
-                if rollback_errors:
-                    message += "; rollback incomplete: " + "; ".join(rollback_errors)
-                elif switched or snapshot is not None:
-                    message += "; previous release/systemd resources restored and previous stack proved healthy"
-                raise UpdateError(message) from exc
+                    rollback_errors: list[str] = []
+                    if switched:
+                        try:
+                            update._switch(layout, current_target)
+                        except Exception as rollback_exc:
+                            rollback_errors.append(f"current symlink: {rollback_exc}")
+                    if snapshot is not None:
+                        try:
+                            update_unit_migration.restore_units(snapshot)
+                        except Exception as rollback_exc:
+                            rollback_errors.append(f"systemd units: {rollback_exc}")
+                    if switched:
+                        try:
+                            update._daemon_reload(layout, runner)
+                        except Exception as rollback_exc:
+                            rollback_errors.append(f"daemon-reload: {rollback_exc}")
+                    if not rollback_errors and (switched or snapshot is not None):
+                        try:
+                            _prove_previous(layout, runner)
+                        except Exception as rollback_exc:
+                            rollback_errors.append(f"previous health proof: {rollback_exc}")
+                    message = str(exc)
+                    if rollback_errors:
+                        message += "; rollback incomplete: " + "; ".join(rollback_errors)
+                    elif switched or snapshot is not None:
+                        message += "; previous release/systemd resources restored and previous stack proved healthy"
+                    raise UpdateError(message) from exc
 
 
 def coherent_rollback(
@@ -440,36 +629,101 @@ def coherent_rollback(
     *,
     runner: Runner = cli.run_command,
 ) -> None:
-    """Restore pre-update data, then previous immutable code, then prove previous health."""
+    """Restore pre-update data and previous immutable code as one lock transaction."""
     storage.verify()
     plan = failure.plan
     layout = install.Layout(plan.root.resolve())
-    if not failure.services_stopped and not _stop_candidate(layout, runner):
-        raise UpdateError("candidate services could not be stopped; refusing destructive recovery restore")
     if recovery._sha256(failure.verified.artifact) != failure.verified.sha256:
         raise UpdateError("pre-update recovery artifact digest no longer matches the recorded verified digest")
-    recovery.restore_recovery(failure.verified.artifact, identity, start=False, runner=runner)
-    lock_path = install.ensure_lock_path(layout)
-    with cli.mutation_lock(lock_path):
-        _, _, previous_release = update._current(layout)
-        expected_previous = layout.path(install.RELEASES_DIR) / plan.current_release
-        if not expected_previous.is_dir() or expected_previous.is_symlink():
-            raise UpdateError("previous immutable application release is unavailable for coherent rollback")
-        candidate_release = previous_release
-        snapshot = update._install_units(expected_previous, candidate_release, layout)
-        del snapshot
-        update._switch(layout, plan.current_target)
-        update._daemon_reload(layout, runner)
-    start = runner([str(layout.path(install.CURRENT_LINK) / "vwctl"), "start"])
+
+    expected_previous = layout.path(install.RELEASES_DIR) / plan.current_release
+    if not expected_previous.is_dir() or expected_previous.is_symlink():
+        raise UpdateError("previous immutable application release is unavailable for coherent rollback")
+    current_target, current_release, candidate_release = update._current(layout)
+    if current_release != plan.target_release:
+        raise UpdateError(
+            f"current immutable release changed after update failure: expected {plan.target_release}, found {current_release}"
+        )
+
+    with update_recovery.prepare_restore(
+        failure.verified.artifact,
+        identity,
+        runner=runner,
+    ) as prepared_restore:
+        lock_path = install.ensure_lock_path(layout)
+        with cli.mutation_lock(lock_path):
+            now_target, now_release, now_candidate = update._current(layout)
+            if (now_target, now_release) != (current_target, current_release):
+                raise UpdateError("current release changed while coherent rollback was being prepared")
+            if plan.root == Path("/"):
+                storage.verify()
+            if not _stop_candidate_locked(now_candidate, runner):
+                raise UpdateError("candidate services could not be proven stopped; refusing destructive recovery promotion")
+            prepared_restore.promote_locked(runner=runner)
+            update_unit_migration.install_units(expected_previous, now_candidate, layout)
+            update._switch(layout, plan.current_target)
+            update._daemon_reload(layout, runner)
+
+    start = runner([str(expected_previous / "vwctl"), "start"], cwd=expected_previous)
     if not start.ok:
         raise UpdateError(f"previous release failed to start after coherent data restore: {_detail(start)}")
     _prove_previous(layout, runner)
 
 
+def reconstruct_failure(
+    artifact: Path,
+    sha256: str,
+    previous_release: str,
+    *,
+    root: Path = Path("/"),
+) -> PersistentStateFailure:
+    """Reconstruct an explicit rollback transaction after the failed apply process exits."""
+    if not _SHA256.fullmatch(sha256):
+        raise UpdateError("--recovery-sha256 must be exactly 64 lowercase hexadecimal characters")
+    layout = install.Layout(root.resolve())
+    current_target, current_release, current_dir = update._current(layout)
+    previous = install.validate_release_name(previous_release)
+    expected_previous = layout.path(install.RELEASES_DIR) / previous
+    if not expected_previous.is_dir() or expected_previous.is_symlink():
+        raise UpdateError("requested previous immutable release is unavailable")
+    if recovery._sha256(artifact) != sha256:
+        raise UpdateError("recovery artifact does not match the supplied verified SHA-256")
+    frozen = resolve_pinned_file(current_dir / "versions.toml")
+    plan = update.UpdatePlan(
+        source_root=current_dir,
+        root=layout.root,
+        current_target=Path("releases") / previous,
+        current_release=previous,
+        target_release=current_release,
+        frozen=frozen,
+    )
+    verified = recovery.VerifiedRecovery(
+        artifact=artifact,
+        sha256=sha256,
+        size=artifact.stat().st_size,
+        created_at="explicit-update-rollback",
+    )
+    return PersistentStateFailure(
+        "explicit coherent rollback requested",
+        plan=plan,
+        verified=verified,
+        services_stopped=False,
+    )
+
+
 def recovery_command(failure: PersistentStateFailure) -> str:
-    return (
-        f"vwctl restore --file {failure.verified.artifact} --identity /path/to/offline-age-identity.txt; "
-        f"then restore immutable application release {failure.plan.current_release} before starting services"
+    return " ".join(
+        (
+            "vwctl update rollback",
+            "--recovery-artifact",
+            shlex.quote(str(failure.verified.artifact)),
+            "--recovery-sha256",
+            failure.verified.sha256,
+            "--previous-release",
+            shlex.quote(failure.plan.current_release),
+            "--identity",
+            "/path/to/offline-age-identity.txt",
+        )
     )
 
 
@@ -480,10 +734,14 @@ def _atomic_state(payload: Mapping[str, object], path: Path = UPDATE_STATE) -> N
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(dict(payload), handle, indent=2, sort_keys=True)
-            handle.write("\n"); handle.flush(); os.fsync(handle.fileno())
-        os.replace(tmp, path); os.chmod(path, 0o600)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
     except Exception:
-        tmp.unlink(missing_ok=True); raise
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _load_state(path: Path = UPDATE_STATE) -> dict[str, object]:
@@ -508,7 +766,6 @@ def _notify(subject: str, text: str) -> None:
             text=text,
         )
     except Exception:
-        # Update-check truth remains in its secret-free state/journal even if notification transport fails.
         return
 
 
@@ -517,32 +774,50 @@ def record_check(
     current: str,
     candidate: str | None,
     error: str | None,
+    available: bool | None = None,
     path: Path = UPDATE_STATE,
 ) -> None:
     old = _load_state(path)
-    available = candidate is not None and candidate != current and error is None
+    resolved_available = (
+        candidate is not None and candidate != current
+        if available is None
+        else bool(available)
+    )
+    resolved_available = resolved_available and error is None
     payload = {
         "schema_version": 1,
         "checked_at": int(time.time()),
         "current": current,
         "candidate": candidate,
-        "available": available,
+        "available": resolved_available,
         "error": error,
     }
     _atomic_state(payload, path)
     if error:
         _notify("[VaultWarden-OCI] update check failed", f"Project update check failed: {error}\n")
-    elif available and (old.get("candidate") != candidate or old.get("available") is not True):
+    elif resolved_available and (
+        old.get("candidate") != candidate or old.get("available") is not True
+    ):
         _notify(
             "[VaultWarden-OCI] project update available",
             f"VaultWarden-OCI project update available: {current} -> {candidate}.\nRun: vwctl update check\n",
         )
 
 
+def _host_lock() -> Path:
+    return install.ensure_lock_path(install.Layout(Path("/")))
+
+
 def host_upgrade_check(*, runner: Runner = cli.run_command) -> tuple[int, bool, str]:
-    simulated = runner(["apt-get", "-s", "upgrade"])
-    if not simulated.ok:
-        raise UpdateError(f"Ubuntu package simulation failed: {_detail(simulated)}")
+    if os.geteuid() != 0:
+        raise UpdateError("vwctl host-upgrade check must run as root so Ubuntu indexes can be refreshed")
+    with cli.mutation_lock(_host_lock()):
+        refreshed = runner(["apt-get", "update"])
+        if not refreshed.ok:
+            raise UpdateError(f"Ubuntu package index refresh failed: {_detail(refreshed)}")
+        simulated = runner(["apt-get", "-s", "upgrade"])
+        if not simulated.ok:
+            raise UpdateError(f"Ubuntu package simulation failed: {_detail(simulated)}")
     count = sum(1 for line in simulated.stdout.splitlines() if line.startswith("Inst "))
     reboot = Path("/var/run/reboot-required").exists()
     return count, reboot, simulated.stdout
@@ -554,10 +829,12 @@ def host_upgrade_apply(*, runner: Runner = cli.run_command) -> tuple[recovery.Ve
     storage.verify()
     config = runtime.load_config()
     verified = recovery.create_recovery(config.offline_recovery_recipient, runner=runner)
-    refreshed = runner(["apt-get", "update"])
-    if not refreshed.ok:
-        raise UpdateError(f"Ubuntu package index refresh failed: {_detail(refreshed)}")
-    applied = runner(["apt-get", "-y", "upgrade"])
-    if not applied.ok:
-        raise UpdateError(f"Ubuntu package upgrade failed: {_detail(applied)}")
+    with cli.mutation_lock(_host_lock()):
+        storage.verify()
+        refreshed = runner(["apt-get", "update"])
+        if not refreshed.ok:
+            raise UpdateError(f"Ubuntu package index refresh failed: {_detail(refreshed)}")
+        applied = runner(["apt-get", "-y", "upgrade"])
+        if not applied.ok:
+            raise UpdateError(f"Ubuntu package upgrade failed: {_detail(applied)}")
     return verified, Path("/var/run/reboot-required").exists()
