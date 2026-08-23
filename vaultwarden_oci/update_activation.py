@@ -7,6 +7,15 @@ from . import edge, runtime, secrets, update
 from .update_versions import FrozenVersions, UpdateError
 
 
+def _started_failure(message: str, paths: runtime.Paths, runner: update.Runner) -> None:
+    runner(["docker", "compose", "-f", str(paths.compose), "down"])
+    try:
+        secrets.cleanup(paths.secret_paths())
+    except secrets.SecretsError:
+        pass
+    raise update.RuntimeActivationError(message, state_change_possible=True)
+
+
 def activate_runtime(frozen: FrozenVersions, versions_path: Path, runner: update.Runner) -> None:
     """Activate the prebuilt exact candidate and preserve the persistent-state boundary."""
     paths = runtime.Paths()
@@ -42,12 +51,19 @@ def activate_runtime(frozen: FrozenVersions, versions_path: Path, runner: update
         "--no-build", "--pull", "never", "--force-recreate", "--wait", "--wait-timeout", "120",
     ])
     if not result.ok:
-        runner(["docker", "compose", "-f", str(paths.compose), "down"])
-        try:
-            secrets.cleanup(paths.secret_paths())
-        except secrets.SecretsError:
-            pass
-        raise update.RuntimeActivationError(
+        _started_failure(
             "candidate Compose activation failed after runtime start was attempted",
-            state_change_possible=True,
+            paths,
+            runner,
+        )
+
+    https = runner([
+        "curl", "--fail", "--silent", "--show-error", "--output", "/dev/null",
+        "--max-time", "20", f"https://{config.domain}/",
+    ])
+    if not https.ok:
+        _started_failure(
+            "candidate public HTTPS gate failed after runtime start was attempted",
+            paths,
+            runner,
         )
