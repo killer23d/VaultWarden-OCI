@@ -809,6 +809,42 @@ def _iptables_healthy(
     return actual == expected
 
 
+def _caddy_trust_configured(caddy_text: str) -> bool:
+    return (
+        "trusted_proxies cloudflare {" in caddy_text
+        and "timeout 15s" in caddy_text
+        and "trusted_proxies_strict" in caddy_text
+        and "client_ip_headers CF-Connecting-IP" in caddy_text
+        and "trusted_proxies static" not in caddy_text
+    )
+
+
+def _caddy_admin_disabled(caddy_text: str) -> bool:
+    return "@admin path /admin*" in caddy_text and "respond @admin 404" in caddy_text
+
+
+def _caddy_admin_protected(caddy_text: str) -> bool:
+    if "@admin path /admin*" not in caddy_text:
+        return False
+    start = caddy_text.find(" handle @admin {")
+    if start < 0:
+        return False
+    end = caddy_text.find(" @auth path", start)
+    if end < 0:
+        return False
+    admin_block = caddy_text[start:end]
+    return all(
+        marker in admin_block
+        for marker in (
+            "rate_limit {",
+            "zone admin {",
+            "key {client_ip}",
+            "basic_auth {",
+            "admin {env.ADMIN_BASIC_AUTH_HASH}",
+        )
+    )
+
+
 def doctor_checks(
     *,
     paths: EdgePaths = EdgePaths(),
@@ -822,19 +858,15 @@ def doctor_checks(
         checks.append(DoctorCheck("edge.caddy.trusted_proxy", "SKIP", "rendered Caddy config is not present; service may be stopped"))
         checks.append(DoctorCheck("edge.admin.protection", "SKIP", "rendered Caddy admin policy is not present; service may be stopped"))
     else:
-        trusted = (
-            "trusted_proxies cloudflare" in caddy_text
-            and "client_ip_headers CF-Connecting-IP" in caddy_text
-            and "trusted_proxies static" not in caddy_text
-        )
+        trusted = _caddy_trust_configured(caddy_text)
         checks.append(DoctorCheck(
             "edge.caddy.trusted_proxy",
             "PASS" if trusted else "FAIL",
-            "Caddy uses the Cloudflare trusted-proxy module and CF-Connecting-IP" if trusted
-            else "Caddy trusted-proxy module/CF-Connecting-IP configuration is missing or duplicated with static CIDRs",
+            "Caddy uses strict Cloudflare trusted proxies with a bounded refresh and CF-Connecting-IP" if trusted
+            else "Caddy trusted-proxy strictness/timeout/CF-Connecting-IP configuration is missing or duplicated with static CIDRs",
         ))
-        admin_disabled = "respond @admin 404" in caddy_text
-        admin_gated = "basic_auth" in caddy_text and "rate_limit" in caddy_text
+        admin_disabled = _caddy_admin_disabled(caddy_text)
+        admin_gated = _caddy_admin_protected(caddy_text)
         if admin_disabled:
             checks.append(DoctorCheck("edge.admin.protection", "PASS", "Vaultwarden admin route is disabled at Caddy"))
         elif admin_gated and ADMIN_TOKEN_FILE.exists() and ADMIN_HASH_FILE.exists():

@@ -43,7 +43,7 @@ class CaddyEdgeAdminContractTests(unittest.TestCase):
             caddy_config=root / "caddy/config", caddy_log=root / "caddy/log", run=root / "run",
             transient=root / "run/transient", lock=root / "run/lock", secret_root=root / "run/secrets",
         )
-        paths.transient.mkdir(parents=True)
+        paths.transient.mkdir(parents=True, exist_ok=True)
         cfg = runtime.RuntimeConfig(
             domain="vault.example.net", acme_email="admin@example.net", offline_recovery_recipient=OFFLINE,
             signups_allowed=False, smtp_host="smtp.example.net", smtp_port=587, smtp_security="starttls",
@@ -85,6 +85,22 @@ class CaddyEdgeAdminContractTests(unittest.TestCase):
         self.assertIn("/api/accounts/prelogin*", caddyfile)
         self.assertIn("/api/accounts/register*", caddyfile)
         self.assertNotIn("ADMIN_ALLOW_CIDR", caddyfile)
+
+    def test_doctor_render_checks_reject_partial_trust_or_admin_drift(self):
+        caddyfile = self._render(True).caddyfile.read_text(encoding="utf-8")
+        self.assertTrue(edge._caddy_trust_configured(caddyfile))
+        self.assertFalse(edge._caddy_trust_configured(caddyfile.replace("trusted_proxies_strict\n", "", 1)))
+        self.assertFalse(edge._caddy_trust_configured(caddyfile.replace("timeout 15s", "timeout 0s", 1)))
+        self.assertTrue(edge._caddy_admin_protected(caddyfile))
+        self.assertFalse(edge._caddy_admin_protected(caddyfile.replace("zone admin {", "zone drifted {", 1)))
+        self.assertFalse(
+            edge._caddy_admin_protected(
+                caddyfile.replace("admin {env.ADMIN_BASIC_AUTH_HASH}", "admin missing-hash-source", 1)
+            )
+        )
+        disabled = self._render(False).caddyfile.read_text(encoding="utf-8")
+        self.assertTrue(edge._caddy_admin_disabled(disabled))
+        self.assertFalse(edge._caddy_admin_protected(disabled))
 
     def test_admin_disabled_is_closed_at_caddy(self):
         caddyfile = self._render(False).caddyfile.read_text(encoding="utf-8")
