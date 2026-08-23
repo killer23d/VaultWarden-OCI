@@ -11,19 +11,16 @@ import json
 import os
 import re
 import shutil
-import smtplib
-import ssl
 import stat
 import sys
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import recovery, runtime, secrets, sevenzip_secure, storage
+from . import notification, recovery, runtime, secrets, sevenzip_secure, storage
 
 PUBLICATION_DIR = Path("/root/vaultwarden-recovery")
 SENSITIVE_RUN = Path("/run/vaultwarden-oci")
@@ -35,7 +32,6 @@ KIT_MEMBERS = (
     "offline-recovery-identity.txt",
 )
 _RECOVERY_NAME = re.compile(r"recovery-(\d{8}T\d{6}Z)-[A-Za-z0-9]+\.vwrec$")
-_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _LABELS = {
     "vaultwarden_admin_token": "Vaultwarden admin token",
     "admin_basic_auth_password": "Caddy admin Basic Auth password",
@@ -570,11 +566,7 @@ def verify_zip(
     archive_records = [record for record in records if record.get("Type") == "zip"]
     if len(archive_records) != 1:
         raise RecoveryUXError("recovery-kit publication is not exactly one ZIP container")
-    member_records = [
-        record
-        for record in records
-        if record.get("Path") and record.get("Type") != "zip"
-    ]
+    member_records = [record for record in records if record.get("Path") and record.get("Type") != "zip"]
     member_paths = [record["Path"] for record in member_records]
     if Counter(member_paths) != expected_counts:
         raise RecoveryUXError("recovery-kit ZIP member multiset does not exactly match the required member set")
@@ -606,55 +598,22 @@ def _smtp_attachment(
     archive: Path,
     recipient: str,
 ) -> None:
-    username = values.get("smtp_username")
-    password = values.get("smtp_password")
-    if not username or not password:
-        raise RecoveryUXError("authenticated SMTP credentials are unavailable for recovery-kit email")
-    if not _EMAIL.fullmatch(recipient):
-        raise RecoveryUXError("recovery-kit email recipient is invalid")
-    message = EmailMessage()
-    message["From"] = f"{config.smtp_from_name} <{config.smtp_from_email}>"
-    message["To"] = recipient
-    message["Subject"] = "VaultWarden-OCI verified recovery kit"
-    message.set_content(
-        "Attached is the verified AES-256 recovery-kit ZIP.\n"
-        "The ZIP passphrase is intentionally not included in this email.\n"
+    result = notification.send_smtp_attachment(
+        config=config,
+        secrets=values,
+        to_email=recipient,
+        subject="VaultWarden-OCI verified recovery kit",
+        text=(
+            "Attached is the verified AES-256 recovery-kit ZIP.\n"
+            "The ZIP passphrase is intentionally not included in this email.\n"
+        ),
+        attachment=archive,
+        attachment_name=archive.name,
     )
-    message.add_attachment(
-        archive.read_bytes(),
-        maintype="application",
-        subtype="zip",
-        filename=archive.name,
-    )
-    context = ssl.create_default_context()
-    client: smtplib.SMTP | smtplib.SMTP_SSL | None = None
-    try:
-        if config.smtp_security == "force_tls":
-            client = smtplib.SMTP_SSL(
-                config.smtp_host,
-                config.smtp_port,
-                timeout=config.smtp_timeout_seconds,
-                context=context,
-            )
-        elif config.smtp_security == "starttls":
-            client = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=config.smtp_timeout_seconds)
-            client.ehlo()
-            client.starttls(context=context)
-            client.ehlo()
-        else:
-            raise RecoveryUXError("recovery-kit SMTP requires STARTTLS or implicit TLS")
-        client.login(username, password)
-        client.send_message(message, from_addr=config.smtp_from_email, to_addrs=[recipient])
-    except RecoveryUXError:
-        raise
-    except (OSError, smtplib.SMTPException, ssl.SSLError) as exc:
-        raise RecoveryUXError("authenticated SMTP recovery-kit delivery failed") from exc
-    finally:
-        if client is not None:
-            try:
-                client.quit()
-            except Exception:
-                pass
+    if not result.ok:
+        raise RecoveryUXError(
+            f"authenticated SMTP recovery-kit delivery failed: {result.category}: {result.reason}"
+        )
 
 
 def _cleanup_workspace(path: Path) -> None:
@@ -868,6 +827,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
     except (
         RecoveryUXError,
+        notification.NotificationError,
         recovery.RecoveryError,
         runtime.RuntimeConfigError,
         secrets.SecretsError,
