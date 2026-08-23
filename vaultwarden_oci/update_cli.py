@@ -95,8 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return install.main(args[1:])
     if args[0] == "versions": return _versions_command(args)
     if args[0] in {"restore", "recovery", "recovery-kit"}:
-        from . import recovery_ux, sevenzip_secure
-        recovery_ux._seven = sevenzip_secure.run
+        from . import recovery_ux
         if any(flag in args[1:] for flag in ("--help", "-h")):
             return recovery_ux.main(args)
         if args[0] in {"restore", "recovery"} and not _require_storage():
