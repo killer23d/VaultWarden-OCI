@@ -15,10 +15,42 @@ from typing import Sequence
 from . import recovery_ux, secrets, setup
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
+_ORIGINAL_SETUP_RUN = setup._run
 
 
 class SetupFrontendError(RuntimeError):
     pass
+
+
+def _setup_run_7zip_compat(argv: Sequence[str]):
+    """Let setup verify Ubuntu's 7zip package whether it exposes 7zz or 7z."""
+    command = list(argv)
+    if command and command[0] == "7zz" and shutil.which("7zz") is None:
+        seven = shutil.which("7z")
+        if seven is not None:
+            command[0] = seven
+    return _ORIGINAL_SETUP_RUN(command)
+
+
+# setup.py remains authoritative; this only normalizes Ubuntu's binary name at
+# its subprocess boundary. The distro package currently exposes /usr/bin/7z.
+setup._run = _setup_run_7zip_compat
+
+
+def _ensure_7zz_alias() -> None:
+    if shutil.which("7zz") is not None:
+        return
+    seven = shutil.which("7z")
+    if seven is None:
+        raise SetupFrontendError("Ubuntu 7zip was installed but neither 7zz nor 7z is available")
+    alias = Path("/usr/local/bin/7zz")
+    if alias.exists() or alias.is_symlink():
+        if alias.is_symlink() and alias.resolve() == Path(seven).resolve():
+            return
+        raise SetupFrontendError(f"refusing to replace unexpected 7zz compatibility path: {alias}")
+    alias.symlink_to(seven)
+    if shutil.which("7zz") is None:
+        raise SetupFrontendError("failed to expose Ubuntu 7zip as 7zz for recovery-kit tooling")
 
 
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
@@ -55,7 +87,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args[:1] == ["recovery-kit"]:
         return recovery_ux.main(args)
     if not _should_generate(args):
-        return setup.main(args)
+        code = setup.main(args)
+        if code == 0 and args[:1] == ["install"] and "--dry-run" not in args:
+            try:
+                _ensure_7zz_alias()
+            except SetupFrontendError as exc:
+                print(f"FAIL: {exc}", file=sys.stderr)
+                return 1
+        return code
 
     workspace: Path | None = None
     identity: Path | None = None
@@ -72,6 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return code
+        _ensure_7zz_alias()
 
         print("\n== Initial credential recovery-kit handoff ==")
         result = recovery_ux.export_recovery_kit(identity)
