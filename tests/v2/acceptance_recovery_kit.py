@@ -23,12 +23,23 @@ def main() -> int:
         archive = root / "kit.zip"
         for name in recovery_ux.KIT_MEMBERS:
             (workspace / name).write_text(f"acceptance member {name}\n", encoding="utf-8")
-        recovery_ux._seven_required(
+        created = sevenzip_secure.run(
             ["7zz", "a", "-tzip", "-mem=AES256", "-p", str(archive), *recovery_ux.KIT_MEMBERS],
             password_input=passphrase,
             cwd=workspace,
-            label="acceptance AES-256 ZIP creation",
         )
+        if created.returncode != 0:
+            print("CREATE OUTPUT (secret-redacted):")
+            print(created.stdout)
+            raise RuntimeError(f"AES-256 ZIP creation failed with exit {created.returncode}")
+        tested = sevenzip_secure.run(
+            ["7zz", "t", "-p", str(archive)],
+            password_input=passphrase,
+        )
+        if tested.returncode != 0:
+            print("TEST OUTPUT (secret-redacted):")
+            print(tested.stdout)
+            raise RuntimeError(f"correct-password ZIP test failed with exit {tested.returncode}")
         recovery_ux.verify_zip(archive, passphrase)
     print("PASS: real 7zz PTY AES-256 ZIP/member/correct-password/wrong-password/empty-password/no-password verification")
     return 0
