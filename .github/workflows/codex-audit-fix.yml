@@ -19,6 +19,8 @@ jobs:
         run: python3 .github/codex_audit_fix.py
       - name: Compile
         run: python3 -m compileall -q vaultwarden_oci tests/v2
+      - name: Keep workflow update separate
+        run: git checkout HEAD -- .github/workflows/v2-ci.yml
       - name: Remove temporary audit machinery
         run: rm -f .github/codex_audit_fix.py .github/workflows/codex-audit-fix.yml
       - name: Commit audit fixes
