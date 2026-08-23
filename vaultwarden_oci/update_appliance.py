@@ -48,6 +48,8 @@ UPDATE_STATE = Path("/var/lib/vaultwarden-oci/state/update-check.json")
 MAX_RELEASE_BYTES = 64 * 1024 * 1024
 MIN_FREE_BYTES = 1024 * 1024 * 1024
 _UPDATE_TIMER = "vaultwarden-oci-update-check.timer"
+_APPLICATION_SERVICE = "vaultwarden-oci.service"
+_QUARANTINE_TARGET = Path("recovery-required")
 _LATEST_MARKER = ".latest."
 _SEMVER = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
@@ -463,6 +465,34 @@ def _stop_candidate_locked(release_dir: Path, runner: Runner) -> bool:
     return not isinstance(payload, dict) or payload.get("stopped") is True
 
 
+def _settle_systemd_stopped(layout: install.Layout, runner: Runner) -> bool:
+    """After the updater lock is released, make systemd's service state truthful."""
+    if layout.root != Path("/"):
+        return True
+    stopped = runner(["systemctl", "stop", _APPLICATION_SERVICE])
+    active = runner(["systemctl", "is-active", "--quiet", _APPLICATION_SERVICE])
+    return stopped.ok and not active.ok
+
+
+def _start_previous_service(layout: install.Layout, previous: Path, runner: Runner) -> None:
+    if layout.root == Path("/"):
+        started = runner(["systemctl", "start", _APPLICATION_SERVICE])
+        if not started.ok:
+            raise UpdateError(f"previous release systemd start failed: {_detail(started)}")
+        active = runner(["systemctl", "is-active", "--quiet", _APPLICATION_SERVICE])
+        if not active.ok:
+            raise UpdateError("previous release systemd service could not be proven active")
+        return
+    started = runner([str(previous / "vwctl"), "start"], cwd=previous)
+    if not started.ok:
+        raise UpdateError(f"previous release failed to start after coherent data restore: {_detail(started)}")
+
+
+def _quarantine_current(layout: install.Layout) -> None:
+    """Fail closed: normal vwctl/systemd start paths resolve to no application code."""
+    update._switch(layout, _QUARANTINE_TARGET)
+
+
 def _preflight(
     exact_source: Path,
     plan: update.UpdatePlan,
@@ -533,94 +563,134 @@ def apply_prepared(
             update._gate_current(layout, runner)
 
             lock_path = install.ensure_lock_path(layout)
-            with cli.mutation_lock(lock_path):
-                if update._current(layout)[0] != current_target:
-                    raise UpdateError("current release changed after pre-update recovery")
-                if plan.root == Path("/"):
-                    storage.verify()
-                snapshot: dict[Path, tuple[bytes, int]] | None = None
-                switched = False
-                state_change_possible = False
-                release_dir: Path | None = None
-                try:
-                    release_dir = install.stage_release(exact_source, layout, plan.target_release)
-                    update._verify_coherent(release_dir, exact_source)
-                    snapshot = update_unit_migration.install_units(
-                        release_dir,
-                        previous_release,
-                        layout,
-                    )
-                    update._switch(layout, Path("releases") / plan.target_release)
-                    switched = True
-                    update._daemon_reload(layout, runner)
+            try:
+                with cli.mutation_lock(lock_path):
+                    if update._current(layout)[0] != current_target:
+                        raise UpdateError("current release changed after pre-update recovery")
+                    if plan.root == Path("/"):
+                        storage.verify()
+                    snapshot: dict[Path, tuple[bytes, int]] | None = None
+                    switched = False
+                    state_change_possible = False
+                    release_dir: Path | None = None
                     try:
-                        activator(release_dir, render_root, runner)
-                    except update.RuntimeActivationError as exc:
-                        state_change_possible = exc.state_change_possible
-                        raise
-                    except Exception:
-                        state_change_possible = True
-                        raise
-                    else:
-                        state_change_possible = True
-                    update._gate_activated(layout, runner)
-                    crowdsec = runner(
-                        [
-                            str(layout.path(install.CURRENT_LINK) / "vwctl"),
-                            "crowdsec",
-                            "status",
-                        ]
-                    )
-                    if not crowdsec.ok:
-                        raise UpdateError(f"activated CrowdSec/origin gate failed: {_detail(crowdsec)}")
-                    _start_update_timer(layout, runner)
-                    record_frozen(plan.frozen, record_path or layout.path(RESOLVED_STATE))
-                    return release_dir
-                except Exception as exc:
-                    if state_change_possible:
-                        stopped = (
-                            release_dir is not None
-                            and _stop_candidate_locked(release_dir, runner)
+                        release_dir = install.stage_release(exact_source, layout, plan.target_release)
+                        update._verify_coherent(release_dir, exact_source)
+                        snapshot = update_unit_migration.install_units(
+                            release_dir,
+                            previous_release,
+                            layout,
                         )
-                        action = (
-                            f"coherent rollback requires recovery artifact {verified.artifact} "
-                            f"sha256={verified.sha256} plus previous release {plan.current_release}"
+                        update._switch(layout, Path("releases") / plan.target_release)
+                        switched = True
+                        update._daemon_reload(layout, runner)
+                        try:
+                            activator(release_dir, render_root, runner)
+                        except update.RuntimeActivationError as exc:
+                            state_change_possible = exc.state_change_possible
+                            raise
+                        except Exception:
+                            state_change_possible = True
+                            raise
+                        else:
+                            state_change_possible = True
+                        update._gate_activated(layout, runner)
+                        crowdsec = runner(
+                            [
+                                str(layout.path(install.CURRENT_LINK) / "vwctl"),
+                                "crowdsec",
+                                "status",
+                            ]
                         )
-                        raise PersistentStateFailure(
-                            f"{exc}; old code was not auto-started against possibly-new persistent state; "
-                            f"candidate services {'were stopped and removal was proven' if stopped else 'could not be proven stopped'}; {action}",
-                            plan=plan,
-                            verified=verified,
-                            services_stopped=bool(stopped),
-                        ) from exc
+                        if not crowdsec.ok:
+                            raise UpdateError(f"activated CrowdSec/origin gate failed: {_detail(crowdsec)}")
+                        _start_update_timer(layout, runner)
+                        record_frozen(plan.frozen, record_path or layout.path(RESOLVED_STATE))
+                        return release_dir
+                    except Exception as exc:
+                        if state_change_possible:
+                            stopped = (
+                                release_dir is not None
+                                and _stop_candidate_locked(release_dir, runner)
+                            )
+                            action = (
+                                f"coherent rollback requires recovery artifact {verified.artifact} "
+                                f"sha256={verified.sha256} plus previous release {plan.current_release}"
+                            )
+                            raise PersistentStateFailure(
+                                f"{exc}; old code was not auto-started against possibly-new persistent state; "
+                                f"candidate containers {'were stopped and removal was proven' if stopped else 'could not be proven stopped'}; {action}",
+                                plan=plan,
+                                verified=verified,
+                                services_stopped=bool(stopped),
+                            ) from exc
 
-                    rollback_errors: list[str] = []
-                    if switched:
-                        try:
-                            update._switch(layout, current_target)
-                        except Exception as rollback_exc:
-                            rollback_errors.append(f"current symlink: {rollback_exc}")
-                    if snapshot is not None:
-                        try:
-                            update_unit_migration.restore_units(snapshot)
-                        except Exception as rollback_exc:
-                            rollback_errors.append(f"systemd units: {rollback_exc}")
-                    if switched:
-                        try:
-                            update._daemon_reload(layout, runner)
-                        except Exception as rollback_exc:
-                            rollback_errors.append(f"daemon-reload: {rollback_exc}")
-                    if not rollback_errors and (switched or snapshot is not None):
-                        try:
-                            _prove_previous(layout, runner)
-                        except Exception as rollback_exc:
-                            rollback_errors.append(f"previous health proof: {rollback_exc}")
-                    message = str(exc)
-                    if rollback_errors:
-                        message += "; rollback incomplete: " + "; ".join(rollback_errors)
-                    elif switched or snapshot is not None:
-                        message += "; previous release/systemd resources restored and previous stack proved healthy"
-                    raise UpdateError(message) from exc
+                        rollback_errors: list[str] = []
+                        if switched:
+                            try:
+                                update._switch(layout, current_target)
+                            except Exception as rollback_exc:
+                                rollback_errors.append(f"current symlink: {rollback_exc}")
+                        if snapshot is not None:
+                            try:
+                                update_unit_migration.restore_units(snapshot)
+                            except Exception as rollback_exc:
+                                rollback_errors.append(f"systemd units: {rollback_exc}")
+                        if switched:
+                            try:
+                                update._daemon_reload(layout, runner)
+                            except Exception as rollback_exc:
+                                rollback_errors.append(f"daemon-reload: {rollback_exc}")
+                        if not rollback_errors and (switched or snapshot is not None):
+                            try:
+                                _prove_previous(layout, runner)
+                            except Exception as rollback_exc:
+                                rollback_errors.append(f"previous health proof: {rollback_exc}")
+                        message = str(exc)
+                        if rollback_errors:
+                            message += "; rollback incomplete: " + "; ".join(rollback_errors)
+                        elif switched or snapshot is not None:
+                            message += "; previous release/systemd resources restored and previous stack proved healthy"
+                        raise UpdateError(message) from exc
+            except PersistentStateFailure as failure:
+                systemd_stopped = _settle_systemd_stopped(layout, runner)
+                fully_stopped = failure.services_stopped and systemd_stopped
+                if fully_stopped:
+                    raise PersistentStateFailure(
+                        f"{failure}; systemd application service is inactive and candidate containers are absent",
+                        plan=failure.plan,
+                        verified=failure.verified,
+                        services_stopped=True,
+                    ) from failure
+                raise PersistentStateFailure(
+                    f"{failure}; failed to prove both inactive systemd state and absent candidate containers",
+                    plan=failure.plan,
+                    verified=failure.verified,
+                    services_stopped=False,
+                ) from failure
+
+
+def _restore_candidate_selection(
+    layout: install.Layout,
+    candidate_target: Path,
+    unit_snapshot: Mapping[Path, tuple[bytes, int]] | None,
+    runner: Runner,
+) -> list[str]:
+    errors: list[str] = []
+    try:
+        update._switch(layout, candidate_target)
+    except Exception as exc:
+        errors.append(f"candidate current target: {exc}")
+    if unit_snapshot is not None:
+        try:
+            update_unit_migration.restore_units(unit_snapshot)
+        except Exception as exc:
+            errors.append(f"candidate systemd units: {exc}")
+    try:
+        update._daemon_reload(layout, runner)
+    except Exception as exc:
+        errors.append(f"daemon-reload: {exc}")
+    return errors
 
 
 def coherent_rollback(
@@ -637,36 +707,106 @@ def coherent_rollback(
         raise UpdateError("pre-update recovery artifact digest no longer matches the recorded verified digest")
 
     expected_previous = layout.path(install.RELEASES_DIR) / plan.current_release
+    candidate_path = layout.path(install.RELEASES_DIR) / plan.target_release
     if not expected_previous.is_dir() or expected_previous.is_symlink():
         raise UpdateError("previous immutable application release is unavailable for coherent rollback")
+    if not candidate_path.is_dir() or candidate_path.is_symlink():
+        raise UpdateError("failed candidate immutable application release is unavailable for coherent rollback")
     current_target, current_release, candidate_release = update._current(layout)
     if current_release != plan.target_release:
         raise UpdateError(
             f"current immutable release changed after update failure: expected {plan.target_release}, found {current_release}"
         )
 
-    with update_recovery.prepare_restore(
-        failure.verified.artifact,
-        identity,
-        runner=runner,
-    ) as prepared_restore:
-        lock_path = install.ensure_lock_path(layout)
-        with cli.mutation_lock(lock_path):
-            now_target, now_release, now_candidate = update._current(layout)
-            if (now_target, now_release) != (current_target, current_release):
-                raise UpdateError("current release changed while coherent rollback was being prepared")
-            if plan.root == Path("/"):
-                storage.verify()
-            if not _stop_candidate_locked(now_candidate, runner):
-                raise UpdateError("candidate services could not be proven stopped; refusing destructive recovery promotion")
-            prepared_restore.promote_locked(runner=runner)
-            update_unit_migration.install_units(expected_previous, now_candidate, layout)
-            update._switch(layout, plan.current_target)
-            update._daemon_reload(layout, runner)
+    completed = False
+    try:
+        with update_recovery.prepare_restore(
+            failure.verified.artifact,
+            identity,
+            runner=runner,
+        ) as prepared_restore:
+            lock_path = install.ensure_lock_path(layout)
+            with cli.mutation_lock(lock_path):
+                now_target, now_release, now_candidate = update._current(layout)
+                if (now_target, now_release) != (current_target, current_release):
+                    raise UpdateError("current release changed while coherent rollback was being prepared")
+                if plan.root == Path("/"):
+                    storage.verify()
+                if not _stop_candidate_locked(now_candidate, runner):
+                    raise UpdateError("candidate containers could not be proven stopped; refusing destructive recovery promotion")
 
-    start = runner([str(expected_previous / "vwctl"), "start"], cwd=expected_previous)
-    if not start.ok:
-        raise UpdateError(f"previous release failed to start after coherent data restore: {_detail(start)}")
+                unit_snapshot: dict[Path, tuple[bytes, int]] | None = None
+                switched_old = False
+                data_promoted = False
+                try:
+                    unit_snapshot = update_unit_migration.install_units(
+                        expected_previous,
+                        now_candidate,
+                        layout,
+                    )
+                    update._switch(layout, plan.current_target)
+                    switched_old = True
+                    prepared_restore.promote_locked(runner=runner)
+                    data_promoted = True
+                    update._daemon_reload(layout, runner)
+                except update_recovery.PromotionError as exc:
+                    if exc.rollback_complete:
+                        restore_errors = _restore_candidate_selection(
+                            layout,
+                            now_target,
+                            unit_snapshot,
+                            runner,
+                        )
+                        if restore_errors:
+                            _quarantine_current(layout)
+                            raise UpdateError(
+                                f"coherent rollback data promotion failed; original live data was restored, "
+                                f"but candidate code selection could not be fully restored; current was quarantined: "
+                                + "; ".join(restore_errors)
+                            ) from exc
+                        raise UpdateError(
+                            f"coherent rollback data promotion failed; original live data and candidate code selection were restored; services remain stopped: {exc}"
+                        ) from exc
+                    try:
+                        _quarantine_current(layout)
+                        update._daemon_reload(layout, runner)
+                    except Exception as quarantine_exc:
+                        raise UpdateError(
+                            f"coherent rollback promotion failed with unproven live-data state and current could not be quarantined: {exc}; quarantine failure: {quarantine_exc}"
+                        ) from exc
+                    raise UpdateError(
+                        f"coherent rollback promotion failed with unproven live-data state; normal current/vwctl start path was quarantined and services remain stopped: {exc}"
+                    ) from exc
+                except Exception as exc:
+                    if data_promoted:
+                        raise UpdateError(
+                            f"coherent rollback restored pre-update data and selected previous code, but final systemd reload failed; services remain stopped: {exc}"
+                        ) from exc
+                    restore_errors = _restore_candidate_selection(
+                        layout,
+                        now_target,
+                        unit_snapshot,
+                        runner,
+                    ) if (switched_old or unit_snapshot is not None) else []
+                    if restore_errors:
+                        try:
+                            _quarantine_current(layout)
+                        except Exception as quarantine_exc:
+                            restore_errors.append(f"quarantine: {quarantine_exc}")
+                        raise UpdateError(
+                            f"coherent rollback failed before data promotion and candidate selection could not be fully restored; services remain stopped: "
+                            + "; ".join(restore_errors)
+                        ) from exc
+                    raise
+                completed = True
+    except Exception:
+        if layout.root == Path("/"):
+            _settle_systemd_stopped(layout, runner)
+        raise
+
+    if not completed:
+        raise UpdateError("coherent rollback did not reach a complete data+code state")
+    _start_previous_service(layout, expected_previous, runner)
     _prove_previous(layout, runner)
 
 
@@ -674,27 +814,39 @@ def reconstruct_failure(
     artifact: Path,
     sha256: str,
     previous_release: str,
+    candidate_release: str,
     *,
     root: Path = Path("/"),
 ) -> PersistentStateFailure:
-    """Reconstruct an explicit rollback transaction after the failed apply process exits."""
+    """Reconstruct an explicit rollback even if the normal current link is quarantined."""
     if not _SHA256.fullmatch(sha256):
         raise UpdateError("--recovery-sha256 must be exactly 64 lowercase hexadecimal characters")
     layout = install.Layout(root.resolve())
-    current_target, current_release, current_dir = update._current(layout)
     previous = install.validate_release_name(previous_release)
+    candidate = install.validate_release_name(candidate_release)
     expected_previous = layout.path(install.RELEASES_DIR) / previous
+    candidate_dir = layout.path(install.RELEASES_DIR) / candidate
     if not expected_previous.is_dir() or expected_previous.is_symlink():
         raise UpdateError("requested previous immutable release is unavailable")
+    if not candidate_dir.is_dir() or candidate_dir.is_symlink():
+        raise UpdateError("requested failed candidate immutable release is unavailable")
     if recovery._sha256(artifact) != sha256:
         raise UpdateError("recovery artifact does not match the supplied verified SHA-256")
-    frozen = resolve_pinned_file(current_dir / "versions.toml")
+    try:
+        _, current_release, _ = update._current(layout)
+    except UpdateError:
+        current_release = candidate
+    if current_release != candidate:
+        raise UpdateError(
+            f"current release does not match the explicitly recorded failed candidate: {current_release} != {candidate}"
+        )
+    frozen = resolve_pinned_file(candidate_dir / "versions.toml")
     plan = update.UpdatePlan(
-        source_root=current_dir,
+        source_root=candidate_dir,
         root=layout.root,
         current_target=Path("releases") / previous,
         current_release=previous,
-        target_release=current_release,
+        target_release=candidate,
         frozen=frozen,
     )
     verified = recovery.VerifiedRecovery(
@@ -712,17 +864,23 @@ def reconstruct_failure(
 
 
 def recovery_command(failure: PersistentStateFailure) -> str:
+    layout = install.Layout(failure.plan.root.resolve())
+    candidate_vwctl = layout.path(install.RELEASES_DIR) / failure.plan.target_release / "vwctl"
     return " ".join(
         (
-            "vwctl update rollback",
+            shlex.quote(str(candidate_vwctl)),
+            "update rollback",
             "--recovery-artifact",
             shlex.quote(str(failure.verified.artifact)),
             "--recovery-sha256",
             failure.verified.sha256,
             "--previous-release",
             shlex.quote(failure.plan.current_release),
+            "--candidate-release",
+            shlex.quote(failure.plan.target_release),
             "--identity",
             "/path/to/offline-age-identity.txt",
+            "--yes",
         )
     )
 
