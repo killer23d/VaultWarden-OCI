@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import cli, install, recovery, update, update_appliance, update_unit_migration, update_versions
+from vaultwarden_oci import (
+    cli,
+    install,
+    recovery,
+    update,
+    update_appliance,
+    update_unit_migration,
+    update_versions,
+)
 
 
 def digest(char: str) -> str:
@@ -88,31 +96,75 @@ class CoherentRollbackTests(unittest.TestCase):
             services_stopped=True,
         )
 
-    def test_coherent_rollback_uses_recorded_artifact_then_previous_release(self) -> None:
+    def test_coherent_rollback_uses_recorded_artifact_and_switches_old_code_inside_same_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             failure = self._failure(temp)
             previous = Path("/opt/vaultwarden-oci/releases/1.0.0")
+            candidate = Path("/opt/vaultwarden-oci/releases/2.0.0")
             identity = temp / "offline.age"
             identity.write_text("AGE-SECRET-KEY-test\n", encoding="utf-8")
-            restore_calls: list[tuple[Path, Path, bool]] = []
-            switches: list[Path] = []
+            events: list[str] = []
+            lock_held = False
 
-            def restore(artifact, key, *, start, runner):
-                restore_calls.append((artifact, key, start))
-                return {"created_at": "2026-08-23T00:00:00Z"}
+            @contextlib.contextmanager
+            def prepared_restore(artifact, key, *, runner):
+                self.assertEqual(artifact, failure.verified.artifact)
+                self.assertEqual(key, identity)
+                events.append("prepared")
+
+                class Prepared:
+                    def promote_locked(inner_self, *, runner):
+                        self.assertTrue(lock_held)
+                        events.append("promoted")
+
+                yield Prepared()
+
+            @contextlib.contextmanager
+            def mutation_lock(_path):
+                nonlocal lock_held
+                lock_held = True
+                events.append("lock-enter")
+                try:
+                    yield
+                finally:
+                    events.append("lock-exit")
+                    lock_held = False
+
+            def stop_locked(release, _runner):
+                self.assertTrue(lock_held)
+                self.assertEqual(release, candidate)
+                events.append("stopped")
+                return True
+
+            def install_units(old_release, failed_release, _layout):
+                self.assertTrue(lock_held)
+                self.assertEqual(old_release, previous)
+                self.assertEqual(failed_release, candidate)
+                events.append("units")
+                return {}
+
+            def switch(_layout, target):
+                self.assertTrue(lock_held)
+                self.assertEqual(target, failure.plan.current_target)
+                events.append("switch")
 
             with (
                 mock.patch.object(update_appliance.storage, "verify"),
-                mock.patch.object(update_appliance.recovery, "restore_recovery", side_effect=restore),
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=failure.verified.sha256),
-                mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
-                mock.patch.object(update_appliance.cli, "mutation_lock", return_value=mock.MagicMock(__enter__=mock.Mock(return_value=None), __exit__=mock.Mock(return_value=False))),
-                mock.patch.object(update_appliance.update, "_current", return_value=(Path("releases/2.0.0"), "2.0.0", Path("/opt/vaultwarden-oci/releases/1.0.0"))),
                 mock.patch.object(Path, "is_dir", return_value=True),
                 mock.patch.object(Path, "is_symlink", return_value=False),
-                mock.patch.object(update_appliance.update, "_install_units", return_value={}) as install_units,
-                mock.patch.object(update_appliance.update, "_switch", side_effect=lambda _layout, target: switches.append(target)),
+                mock.patch.object(
+                    update_appliance.update,
+                    "_current",
+                    return_value=(Path("releases/2.0.0"), "2.0.0", candidate),
+                ),
+                mock.patch.object(update_appliance.update_recovery, "prepare_restore", prepared_restore),
+                mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
+                mock.patch.object(update_appliance.cli, "mutation_lock", mutation_lock),
+                mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
+                mock.patch.object(update_appliance.update_unit_migration, "install_units", side_effect=install_units),
+                mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_prove_previous"),
             ):
@@ -122,18 +174,24 @@ class CoherentRollbackTests(unittest.TestCase):
                     runner=lambda argv, **_kwargs: command(argv),
                 )
 
-            self.assertEqual(restore_calls, [(failure.verified.artifact, identity, False)])
-            self.assertEqual(switches, [failure.plan.current_target])
-            self.assertEqual(install_units.call_args.args[0], previous)
+            self.assertLess(events.index("prepared"), events.index("lock-enter"))
+            for item in ("stopped", "promoted", "units", "switch"):
+                self.assertLess(events.index("lock-enter"), events.index(item))
+                self.assertLess(events.index(item), events.index("lock-exit"))
+            self.assertLess(events.index("promoted"), events.index("switch"))
 
-    def test_storage_failure_blocks_data_restore(self) -> None:
+    def test_storage_failure_blocks_recovery_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             failure = self._failure(temp)
-            restore = mock.Mock()
+            prepare = mock.Mock()
             with (
-                mock.patch.object(update_appliance.storage, "verify", side_effect=update_appliance.storage.StorageError("missing dedicated storage")),
-                mock.patch.object(update_appliance.recovery, "restore_recovery", restore),
+                mock.patch.object(
+                    update_appliance.storage,
+                    "verify",
+                    side_effect=update_appliance.storage.StorageError("missing dedicated storage"),
+                ),
+                mock.patch.object(update_appliance.update_recovery, "prepare_restore", prepare),
             ):
                 with self.assertRaisesRegex(update_appliance.storage.StorageError, "missing dedicated storage"):
                     update_appliance.coherent_rollback(
@@ -141,7 +199,7 @@ class CoherentRollbackTests(unittest.TestCase):
                         temp / "identity",
                         runner=lambda argv, **_kwargs: command(argv),
                     )
-            restore.assert_not_called()
+            prepare.assert_not_called()
 
 
 if __name__ == "__main__":
