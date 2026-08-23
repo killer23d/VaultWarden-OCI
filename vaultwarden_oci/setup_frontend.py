@@ -16,7 +16,6 @@ from . import recovery_ux, secrets, setup, sevenzip_secure
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
 _ORIGINAL_SETUP_RUN = setup._run
-recovery_ux._seven = sevenzip_secure.run
 
 
 class SetupFrontendError(RuntimeError):
@@ -52,6 +51,10 @@ def _ensure_7zz_alias() -> None:
         raise SetupFrontendError("failed to expose Ubuntu 7zip as 7zz for recovery-kit tooling")
 
 
+def _use_secure_7zip() -> None:
+    recovery_ux._seven = sevenzip_secure.run
+
+
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
     recovery_ux._safe_private_dir(root)
     workspace = Path(tempfile.mkdtemp(prefix="setup-offline-recovery-", dir=str(root)))
@@ -84,6 +87,7 @@ def _should_generate(args: Sequence[str]) -> bool:
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args[:1] == ["recovery-kit"]:
+        _use_secure_7zip()
         return recovery_ux.main(args)
     if not _should_generate(args):
         code = setup.main(args)
@@ -111,6 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return code
         _ensure_7zz_alias()
+        _use_secure_7zip()
 
         print("\n== Initial credential recovery-kit handoff ==")
         result = recovery_ux.export_recovery_kit(identity)
