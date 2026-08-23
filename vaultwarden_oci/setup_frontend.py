@@ -38,7 +38,7 @@ setup._run = _setup_run_7zip_compat
 
 
 def _ensure_7zz_alias() -> None:
-    if shutil.which("7zz") is not None:
+    if shutil.which("7zz") is not None or os.geteuid() != 0:
         return
     seven = shutil.which("7z")
     if seven is None:
