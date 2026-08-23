@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
-from . import recovery_ux, secrets, setup
+from . import notification, recovery_ux, secrets, setup, sevenzip_secure
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
 _ORIGINAL_SETUP_RUN = setup._run
@@ -110,7 +110,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("PASS Offline recovery private identity removed from host-side volatile workspace after successful handoff.")
         print("ACTION Store the encrypted recovery-kit ZIP and its separately remembered passphrase off-host.")
         return 0
-    except (SetupFrontendError, recovery_ux.RecoveryUXError, secrets.SecretsError, OSError) as exc:
+    except (
+        SetupFrontendError,
+        notification.NotificationError,
+        recovery_ux.RecoveryUXError,
+        secrets.SecretsError,
+        sevenzip_secure.SevenZipError,
+        OSError,
+    ) as exc:
         print(f"FAIL: initial recovery custody handoff failed: {exc}", file=sys.stderr)
         if identity is not None and identity.exists():
             print(
