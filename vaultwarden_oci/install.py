@@ -51,6 +51,8 @@ SYSTEMD_UNITS = (
     "vaultwarden-oci-backup.timer",
     "vaultwarden-oci-maintenance.service",
     "vaultwarden-oci-maintenance.timer",
+    "vaultwarden-oci-update-check.service",
+    "vaultwarden-oci-update-check.timer",
     "vaultwarden-oci-notify@.service",
 )
 
