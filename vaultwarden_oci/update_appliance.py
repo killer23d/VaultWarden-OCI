@@ -306,7 +306,13 @@ def prepare_plan(
     runner: Runner = cli.run_command,
 ) -> PreparedPlan:
     """Create a coherent plan with explicit newer-release/downgrade semantics."""
-    base = update.plan_update(source_root, root=root, machine=machine, runner=runner)
+    base = update.plan_update(
+        source_root,
+        root=root,
+        machine=machine,
+        runner=runner,
+        enforce_component_downgrades=not use_latest,
+    )
     source_frozen = update.resolve_pinned(source_root, machine=machine)
     source_version = source_frozen.project_version
     if project_release is not None:
@@ -323,6 +329,8 @@ def prepare_plan(
                 "--use-latest candidate is based on an older project release than the installed appliance; downgrade refused"
             )
         frozen = resolve_latest_supported(source_root, machine=machine)
+        current_dir = install.Layout(base.root).path(install.INSTALL_ROOT) / base.current_target
+        update._reject_component_downgrades(current_dir, frozen)
         plan = update.UpdatePlan(
             source_root=source_root.resolve(),
             root=base.root,
