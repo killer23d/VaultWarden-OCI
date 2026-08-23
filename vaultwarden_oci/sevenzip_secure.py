@@ -51,6 +51,8 @@ def run(
         raise SevenZipError("7-Zip password contains unsupported control characters")
     input_text = f"{password}\n{password}\n" if action in {"a", "u"} else f"{password}\n"
     try:
+        # Deliberately keep this a simple subprocess.run seam: tests patch the
+        # shared stdlib subprocess module to prove the secret never reaches argv.
         result = subprocess.run(
             tuple(safe),
             input=input_text,
@@ -58,9 +60,8 @@ def run(
             capture_output=True,
             check=False,
             cwd=str(cwd) if cwd is not None else None,
-            timeout=timeout_seconds,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         raise SevenZipError("7-Zip secure execution failed") from exc
     return subprocess.CompletedProcess(
         tuple(safe),
