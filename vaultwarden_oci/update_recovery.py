@@ -11,12 +11,72 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 from . import recovery, runtime
+
+
+class PromotionError(recovery.RecoveryError):
+    """Recovery promotion failed; records whether original live state was restored."""
+
+    def __init__(self, message: str, *, rollback_complete: bool) -> None:
+        super().__init__(message)
+        self.rollback_complete = rollback_complete
+
+
+def _remove(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _promote_with_proven_rollback(staged: Sequence[tuple[Path, Path]]) -> None:
+    """Promote staged targets and prove restoration of live state on failure."""
+    rollback: list[tuple[Path, Path | None]] = []
+    try:
+        for candidate, target in staged:
+            previous: Path | None = None
+            if target.exists() or target.is_symlink():
+                previous = target.parent / f".{target.name}.rollback-{uuid.uuid4().hex[:8]}"
+                os.replace(target, previous)
+            rollback.append((target, previous))
+            os.replace(candidate, target)
+    except Exception as exc:
+        failures: list[str] = []
+        for target, previous in reversed(rollback):
+            try:
+                _remove(target)
+                if previous is not None:
+                    if not previous.exists() and not previous.is_symlink():
+                        raise OSError(f"missing rollback source {previous}")
+                    os.replace(previous, target)
+                    if not (target.exists() or target.is_symlink()):
+                        raise OSError(f"rollback target was not restored: {target}")
+                elif target.exists() or target.is_symlink():
+                    raise OSError(f"target that was originally absent still exists: {target}")
+            except OSError as rollback_exc:
+                failures.append(f"{target}: {rollback_exc}")
+        if failures:
+            raise PromotionError(
+                f"restore promotion failed and original live state could not be proven restored: {exc}; "
+                + "; ".join(failures),
+                rollback_complete=False,
+            ) from exc
+        raise PromotionError(
+            f"restore promotion failed; original live state was restored and proven: {exc}",
+            rollback_complete=True,
+        ) from exc
+
+    for _, previous in rollback:
+        if previous is not None and (previous.exists() or previous.is_symlink()):
+            _remove(previous)
 
 
 @dataclass
@@ -27,16 +87,12 @@ class PreparedRestore:
     cleanup_runtime_secrets: bool
 
     def promote_locked(self, *, runner=recovery.run_command) -> None:
-        """Stop any remaining containers and atomically promote staged data.
-
-        The caller must already own ``paths.lock``.  This method deliberately
-        does not acquire or release the mutation lock itself.
-        """
+        """Stop remaining containers and promote staged data under the caller's lock."""
         recovery._stop_services(
             runner,
             cleanup_runtime_secrets=self.cleanup_runtime_secrets,
         )
-        recovery._promote(self.staged)
+        _promote_with_proven_rollback(self.staged)
 
 
 @contextmanager
@@ -123,10 +179,15 @@ def prepare_restore(
             )
         finally:
             for candidate, _ in staged:
-                if candidate.exists():
-                    if candidate.is_dir():
-                        shutil.rmtree(candidate, ignore_errors=True)
-                    else:
-                        candidate.unlink(missing_ok=True)
-            if operational_candidate is not None and operational_candidate.exists():
-                operational_candidate.unlink(missing_ok=True)
+                if candidate.exists() or candidate.is_symlink():
+                    try:
+                        _remove(candidate)
+                    except OSError:
+                        pass
+            if operational_candidate is not None and (
+                operational_candidate.exists() or operational_candidate.is_symlink()
+            ):
+                try:
+                    _remove(operational_candidate)
+                except OSError:
+                    pass
