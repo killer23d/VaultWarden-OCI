@@ -124,4 +124,12 @@ Treat secret custody/decryption, runtime/storage paths, notification catalog/pro
 
 ## Current development-branch gaps
 
-The current development branch still renders static Cloudflare trusted-proxy CIDRs, builds only the Cloudflare DNS xcaddy module, stores state under `/var/lib/vaultwarden-oci` without dedicated-storage enforcement, and lacks the approved dashboard/setup surfaces. Those are known implementation gaps and must not be cited as a reason to change the durable security contract.
+The development branch is incremental; durable security decisions remain authoritative when later product surfaces are not implemented yet. Current Caddy trust, origin filtering, dedicated-storage enforcement, and setup behavior must be assessed from the implementation and tests rather than older gap summaries.
+
+## Caddy, Cloudflare, and admin defense
+
+Caddy uses the exact-pinned Cloudflare trusted-proxy module with `CF-Connecting-IP` to establish the real visitor IP for access logs and per-client rate limits. The project does not render Cloudflare CIDRs into a second Caddy `trusted_proxies static` list.
+
+This does not replace origin filtering. The project-owned Docker `DOCKER-USER` policy independently validates Cloudflare IPv4/IPv6 ranges, keeps a bounded last-known-good policy, and fails closed for published HTTPS when no safe policy exists. CrowdSec Cloudflare remediation remains a third, separate control plane.
+
+When Vaultwarden admin is enabled, SOPS must contain both `vaultwarden_admin_token` and `admin_basic_auth_password`. The source Basic Auth password is passed to exact-pinned Caddy `hash-password` over stdin; only the derived hash is materialized in volatile `/run` state for Caddy. `/admin*` is also rate-limited by Caddy using `{client_ip}`. Removing both admin secrets disables the admin route at Caddy.

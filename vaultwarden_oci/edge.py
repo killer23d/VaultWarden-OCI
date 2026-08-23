@@ -46,6 +46,10 @@ BOUNCER_DROPIN = Path(
 RUNTIME_CONFIG = Path("/run/vaultwarden-oci/transient/crowdsec-cloudflare-worker-bouncer.yaml")
 REMEDIATION_START_TOKEN = Path("/run/vaultwarden-oci/transient/crowdsec-cloudflare-start.token")
 FAIL_OPEN_CONFIRMATION = STATE_ROOT / "crowdsec-cloudflare-fail-open.json"
+CADDYFILE = Path("/run/vaultwarden-oci/transient/Caddyfile")
+CADDY_CONTAINER = "vaultwarden-oci-caddy"
+ADMIN_TOKEN_FILE = Path("/run/vaultwarden-oci/secrets/vaultwarden/vaultwarden_admin_token")
+ADMIN_HASH_FILE = Path("/run/vaultwarden-oci/secrets/caddy/admin_basic_auth_hash")
 
 Runner = Callable[..., CommandResult]
 Fetcher = Callable[[str, int], str]
@@ -367,17 +371,6 @@ def refresh_origin_policy(
     policy = select_policy(path=path, now=now, fetcher=fetcher)
     apply_origin_policy(policy, runner=runner)
     return policy
-
-
-def caddy_trusted_proxy_block(policy: CloudflarePolicy) -> str:
-    cidrs = " ".join(policy.cidrs)
-    return (
-        " servers {\n"
-        f"  trusted_proxies static {cidrs}\n"
-        "  trusted_proxies_strict\n"
-        "  client_ip_headers CF-Connecting-IP\n"
-        " }\n"
-    )
 
 
 def _write_root_file(path: Path, content: str, mode: int) -> None:
@@ -816,6 +809,42 @@ def _iptables_healthy(
     return actual == expected
 
 
+def _caddy_trust_configured(caddy_text: str) -> bool:
+    return (
+        "trusted_proxies cloudflare {" in caddy_text
+        and "timeout 15s" in caddy_text
+        and "trusted_proxies_strict" in caddy_text
+        and "client_ip_headers CF-Connecting-IP" in caddy_text
+        and "trusted_proxies static" not in caddy_text
+    )
+
+
+def _caddy_admin_disabled(caddy_text: str) -> bool:
+    return "@admin path /admin*" in caddy_text and "respond @admin 404" in caddy_text
+
+
+def _caddy_admin_protected(caddy_text: str) -> bool:
+    if "@admin path /admin*" not in caddy_text:
+        return False
+    start = caddy_text.find(" handle @admin {")
+    if start < 0:
+        return False
+    end = caddy_text.find(" @auth path", start)
+    if end < 0:
+        return False
+    admin_block = caddy_text[start:end]
+    return all(
+        marker in admin_block
+        for marker in (
+            "rate_limit {",
+            "zone admin {",
+            "key {client_ip}",
+            "basic_auth {",
+            "admin {env.ADMIN_BASIC_AUTH_HASH}",
+        )
+    )
+
+
 def doctor_checks(
     *,
     paths: EdgePaths = EdgePaths(),
@@ -823,6 +852,46 @@ def doctor_checks(
     now: int | None = None,
 ) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
+    try:
+        caddy_text = CADDYFILE.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        checks.append(DoctorCheck("edge.caddy.trusted_proxy", "SKIP", "rendered Caddy config is not present; service may be stopped"))
+        checks.append(DoctorCheck("edge.admin.protection", "SKIP", "rendered Caddy admin policy is not present; service may be stopped"))
+    else:
+        trusted = _caddy_trust_configured(caddy_text)
+        checks.append(DoctorCheck(
+            "edge.caddy.trusted_proxy",
+            "PASS" if trusted else "FAIL",
+            "Caddy uses strict Cloudflare trusted proxies with a bounded refresh and CF-Connecting-IP" if trusted
+            else "Caddy trusted-proxy strictness/timeout/CF-Connecting-IP configuration is missing or duplicated with static CIDRs",
+        ))
+        admin_disabled = _caddy_admin_disabled(caddy_text)
+        admin_gated = _caddy_admin_protected(caddy_text)
+        if admin_disabled:
+            checks.append(DoctorCheck("edge.admin.protection", "PASS", "Vaultwarden admin route is disabled at Caddy"))
+        elif admin_gated and ADMIN_TOKEN_FILE.exists() and ADMIN_HASH_FILE.exists():
+            checks.append(DoctorCheck("edge.admin.protection", "PASS", "admin token capability, per-client rate limit, and outer Basic Auth gate are active"))
+        else:
+            checks.append(DoctorCheck("edge.admin.protection", "FAIL", "admin route is missing Vaultwarden token capability, rate limit, or outer Basic Auth gate"))
+
+    caddy_state = runner(["docker", "container", "inspect", "--format", "{{json .State}}", CADDY_CONTAINER])
+    healthy = False
+    if caddy_state.ok:
+        try:
+            state = json.loads(caddy_state.stdout)
+            healthy = isinstance(state, dict) and state.get("Status") == "running" and (
+                not isinstance(state.get("Health"), dict) or state["Health"].get("Status") == "healthy"
+            )
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            healthy = False
+    caddy_absent = (not caddy_state.ok) and "no such" in (caddy_state.stderr + caddy_state.stdout).lower()
+    checks.append(DoctorCheck(
+        "edge.caddy.health",
+        "PASS" if healthy else "SKIP" if caddy_absent else "FAIL",
+        "Caddy container is running and healthy" if healthy
+        else "Caddy container is not present; service may be stopped" if caddy_absent
+        else "Caddy container is stopped, unhealthy, or could not be inspected",
+    ))
     policy: CloudflarePolicy | None = None
     try:
         policy = load_lkg(paths.lkg, now=now)

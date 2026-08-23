@@ -258,7 +258,11 @@ def _ensure_secret_start(operational: str, offline: str) -> None:
     if ENCRYPTED.exists() and ENCRYPTED.stat().st_size:
         _validate_existing_secrets(operational, offline); return
     admin_token = pysecrets.token_urlsafe(48)
-    plaintext = json.dumps({"vaultwarden_admin_token": admin_token}) + "\n"
+    admin_basic_auth_password = pysecrets.token_urlsafe(32)
+    plaintext = json.dumps({
+        "vaultwarden_admin_token": admin_token,
+        "admin_basic_auth_password": admin_basic_auth_password,
+    }) + "\n"
     result = _must(["sops", "--encrypt", "--age", f"{operational},{offline}", "--input-type", "json", "--output-type", "yaml", "/dev/stdin"], "initial encrypted secrets creation", input_text=plaintext)
     _write_atomic(ENCRYPTED, result.stdout); _validate_existing_secrets(operational, offline)
 

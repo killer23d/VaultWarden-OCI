@@ -24,6 +24,9 @@ version = "0.1.0-dev.7"
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
 caddy_dns_cloudflare = "v0.2.4"
+caddy_cloudflare_ip = "f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5"
+caddy_combine_ip_ranges = "v0.0.1"
+caddy_ratelimit = "v0.1.0"
 [image_digests.vaultwarden]
 amd64 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 arm64 = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -138,7 +141,7 @@ class Phase4BlockerTests(unittest.TestCase):
                 smtp_timeout_seconds=15,
             )
             policy = edge.validate_policy(V4, V6, fetched_at=1000, source="test")
-            runtime.render(config, versions, paths, cloudflare_policy=policy)
+            runtime.render(config, versions, paths)
             compose = paths.compose.read_text(encoding="utf-8")
 
         self.assertIn('ports: ["443:443/tcp"]', compose)
