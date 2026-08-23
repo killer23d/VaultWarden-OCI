@@ -3,10 +3,12 @@
 Creation/update keeps a standalone ``-p`` switch and sends the confirmed
 passphrase twice on stdin. Read/test/list operations remove standalone ``-p``;
 encrypted content then causes 7-Zip to consume one password line from stdin.
-Inline ``-pPASSWORD`` is rejected so secrets never enter argv.
+``password_input=None`` means no password input at all and connects stdin to
+``/dev/null``. Inline ``-pPASSWORD`` is rejected so secrets never enter argv.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Sequence
@@ -28,6 +30,10 @@ def run(
     command = list(argv)
     if len(command) < 2:
         raise SevenZipError("7-Zip command name is missing")
+    if command[0] == "7zz" and shutil.which("7zz") is None:
+        fallback = shutil.which("7z")
+        if fallback is not None:
+            command[0] = fallback
     action = command[1]
     safe: list[str] = []
     prompt_switch = False
@@ -46,22 +52,40 @@ def run(
     if action in {"a", "u"} and not prompt_switch:
         safe.insert(2, "-p")
 
-    password = "" if password_input is None else password_input
-    if "\n" in password or "\r" in password or "\0" in password:
-        raise SevenZipError("7-Zip password contains unsupported control characters")
-    input_text = f"{password}\n{password}\n" if action in {"a", "u"} else f"{password}\n"
-    try:
-        # Deliberately keep this a simple subprocess.run seam: tests patch the
-        # shared stdlib subprocess module to prove the secret never reaches argv.
-        result = subprocess.run(
-            tuple(safe),
-            input=input_text,
-            text=True,
-            capture_output=True,
-            check=False,
-            cwd=str(cwd) if cwd is not None else None,
+    if password_input is None:
+        if action in {"a", "u"}:
+            raise SevenZipError("7-Zip archive creation requires explicit password input")
+        input_text = None
+    else:
+        if "\n" in password_input or "\r" in password_input or "\0" in password_input:
+            raise SevenZipError("7-Zip password contains unsupported control characters")
+        input_text = (
+            f"{password_input}\n{password_input}\n"
+            if action in {"a", "u"}
+            else f"{password_input}\n"
         )
-    except OSError as exc:
+    try:
+        if input_text is None:
+            result = subprocess.run(
+                tuple(safe),
+                stdin=subprocess.DEVNULL,
+                text=True,
+                capture_output=True,
+                check=False,
+                cwd=str(cwd) if cwd is not None else None,
+                timeout=timeout_seconds,
+            )
+        else:
+            result = subprocess.run(
+                tuple(safe),
+                input=input_text,
+                text=True,
+                capture_output=True,
+                check=False,
+                cwd=str(cwd) if cwd is not None else None,
+                timeout=timeout_seconds,
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise SevenZipError("7-Zip secure execution failed") from exc
     return subprocess.CompletedProcess(
         tuple(safe),
