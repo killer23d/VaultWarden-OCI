@@ -158,7 +158,7 @@ class TransactionOrderTests(unittest.TestCase):
                 mock.patch.object(cli, "mutation_lock", return_value=contextlib.nullcontext()),
                 mock.patch.object(install, "stage_release", side_effect=stage),
                 mock.patch.object(update, "_verify_coherent"),
-                mock.patch.object(update, "_install_units", return_value={}),
+                mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
                 mock.patch.object(update, "_switch"),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update, "_gate_activated"),
@@ -207,7 +207,8 @@ class TransactionOrderTests(unittest.TestCase):
             exact = temp / "exact"; exact.mkdir()
 
             @contextlib.contextmanager
-            def exact_source(*_args, **_kwargs): yield exact
+            def exact_source(*_args, **_kwargs):
+                yield exact
 
             switches: list[Path] = []
             with (
@@ -219,9 +220,10 @@ class TransactionOrderTests(unittest.TestCase):
                 mock.patch.object(cli, "mutation_lock", return_value=contextlib.nullcontext()),
                 mock.patch.object(install, "stage_release", return_value=temp / "new"),
                 mock.patch.object(update, "_verify_coherent"),
-                mock.patch.object(update, "_install_units", return_value={}),
+                mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
                 mock.patch.object(update, "_switch", side_effect=lambda _layout, target: switches.append(target)),
                 mock.patch.object(update, "_daemon_reload"),
+                mock.patch.object(update_appliance, "_stop_candidate_locked", return_value=True),
             ):
                 with self.assertRaises(update_appliance.PersistentStateFailure):
                     update_appliance.apply_prepared(
@@ -247,13 +249,16 @@ class SchedulerAndHostTests(unittest.TestCase):
         verified = recovery.VerifiedRecovery(Path("/tmp/recovery.vwrec"), "a" * 64, 123, "2026-08-23T00:00:00Z")
 
         def runner(argv, **_kwargs):
-            calls.append(tuple(argv)); return command(argv)
+            calls.append(tuple(argv))
+            return command(argv)
 
         with (
             mock.patch.object(update_appliance.os, "geteuid", return_value=0),
             mock.patch.object(update_appliance.storage, "verify"),
             mock.patch.object(update_appliance.runtime, "load_config", return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58)),
             mock.patch.object(update_appliance.recovery, "create_recovery", return_value=verified),
+            mock.patch.object(update_appliance, "_host_lock", return_value=Path("/tmp/test-lock")),
+            mock.patch.object(update_appliance.cli, "mutation_lock", return_value=contextlib.nullcontext()),
             mock.patch.object(update_appliance.Path, "exists", return_value=False),
         ):
             result, reboot = update_appliance.host_upgrade_apply(runner=runner)
