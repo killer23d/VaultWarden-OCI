@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import cli, install, recovery, update, update_appliance, update_recovery, update_versions
+from vaultwarden_oci import (
+    cli,
+    install,
+    recovery,
+    update,
+    update_appliance,
+    update_candidate,
+    update_guard,
+    update_recovery,
+    update_versions,
+)
 
 
 def digest(char: str) -> str:
@@ -81,16 +93,17 @@ class RecoveryCommandTests(unittest.TestCase):
     def test_explicit_rollback_reconstructs_when_current_is_quarantined(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "host"
-            previous = root / "opt/vaultwarden-oci/releases/1.0.0"
-            candidate = root / "opt/vaultwarden-oci/releases/2.0.0"
+            install_root = root / "opt/vaultwarden-oci"
+            previous = install_root / "releases/1.0.0"
+            candidate = install_root / "releases/2.0.0"
             previous.mkdir(parents=True)
             candidate.mkdir(parents=True)
+            (install_root / "current").symlink_to("recovery-required")
             artifact = Path(directory) / "pre.vwrec"
             artifact.write_bytes(b"verified")
             sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
             with (
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=sha),
-                mock.patch.object(update_appliance.update, "_current", side_effect=update_versions.UpdateError("quarantined current")),
                 mock.patch.object(update_appliance, "resolve_pinned_file", return_value=frozen()),
             ):
                 rebuilt = update_appliance.reconstruct_failure(
@@ -103,6 +116,40 @@ class RecoveryCommandTests(unittest.TestCase):
         self.assertEqual(rebuilt.plan.current_release, "1.0.0")
         self.assertEqual(rebuilt.plan.target_release, "2.0.0")
         self.assertFalse(rebuilt.services_stopped)
+
+
+class CandidateResourceModeTests(unittest.TestCase):
+    def test_prevalidated_caddyfile_mode_survives_atomic_activation_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "prepared-Caddyfile"
+            destination = root / "production" / "Caddyfile"
+            source.write_text("example.invalid {}\n", encoding="utf-8")
+            os.chmod(source, 0o444)
+            update_candidate._atomic_copy(source, destination)
+            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o444)
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+
+
+class RecoveryGuardTests(unittest.TestCase):
+    def test_guard_is_secret_free_atomic_and_clearable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "guard.json"
+            update_guard.engage(
+                candidate_release="2.0.0",
+                previous_release="1.0.0",
+                recovery_artifact="/safe/pre.vwrec",
+                recovery_sha256="a" * 64,
+                path=path,
+            )
+            loaded = update_guard.load(path)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertTrue(loaded["recovery_required"])
+            self.assertEqual(loaded["candidate_release"], "2.0.0")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            update_guard.clear(path)
+            self.assertFalse(path.exists())
 
 
 class SystemdStopTruthTests(unittest.TestCase):
@@ -167,10 +214,12 @@ class QuarantineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             root = temp / "host"
-            old = root / "opt/vaultwarden-oci/releases/1.0.0"
-            candidate = root / "opt/vaultwarden-oci/releases/2.0.0"
+            install_root = root / "opt/vaultwarden-oci"
+            old = install_root / "releases/1.0.0"
+            candidate = install_root / "releases/2.0.0"
             old.mkdir(parents=True)
             candidate.mkdir(parents=True)
+            (install_root / "current").symlink_to("releases/2.0.0")
             item = failure(temp, root=root)
             lock_held = False
             switched: list[Path] = []
@@ -205,16 +254,12 @@ class QuarantineTests(unittest.TestCase):
             with (
                 mock.patch.object(update_appliance.storage, "verify"),
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=item.verified.sha256),
-                mock.patch.object(
-                    update_appliance.update,
-                    "_current",
-                    return_value=(Path("releases/2.0.0"), "2.0.0", candidate),
-                ),
                 mock.patch.object(update_appliance.update_recovery, "prepare_restore", prepared_restore),
                 mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
                 mock.patch.object(update_appliance.cli, "mutation_lock", mutation_lock),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", return_value=True),
-                mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
+                mock.patch.object(update_appliance.update_guard, "engage"),
+                mock.patch.object(update_appliance.update_unit_migration, "converge_units", return_value={}),
                 mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_settle_systemd_stopped", return_value=True),
