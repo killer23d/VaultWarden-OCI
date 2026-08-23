@@ -77,7 +77,10 @@ def _versions_command(args: Sequence[str]) -> int:
 
 
 def _print_top_help() -> int:
-    code = cli.main([]); print("\nExplicit updates:\n  update {check,apply}    check or apply a pinned immutable release"); return code
+    code = cli.main([])
+    print("\nEnhanced recovery:\n  recovery {list,verify,prune}  inventory, verify, or prune recovery points\n  restore                       guided TTY picker or explicit restore\n  recovery-kit export           complete AES-256 credential handoff")
+    print("\nExplicit updates:\n  update {check,apply}    check or apply a pinned immutable release")
+    return code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -91,6 +94,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not _require_storage(): return 1
         return install.main(args[1:])
     if args[0] == "versions": return _versions_command(args)
+    if args[0] == "recovery-kit":
+        from . import recovery_ux
+        return recovery_ux.main(args)
+    if args[0] in {"restore", "recovery"}:
+        if not _require_storage(): return 1
+        from . import recovery_ux
+        return recovery_ux.main(args)
     if args[0] in _STORAGE_REQUIRED and not _require_storage(): return 1
     return cli.main(args)
 
