@@ -348,6 +348,9 @@ def resolve_latest(
         "vaultwarden": vaultwarden,
         "caddy": caddy,
         "caddy_dns_cloudflare": plugin,
+        "caddy_cloudflare_ip": base.caddy_cloudflare_ip,
+        "caddy_combine_ip_ranges": base.caddy_combine_ip_ranges,
+        "caddy_ratelimit": base.caddy_ratelimit,
         "digests": digests,
     }
     suffix = hashlib.sha256(

@@ -128,6 +128,35 @@ class VersionResolutionTests(unittest.TestCase):
         self.assertNotIn('vaultwarden = "latest"', snapshot)
         self.assertNotIn('caddy = "latest"', snapshot)
 
+    def test_latest_snapshot_identity_includes_fixed_edge_addon_pins(self) -> None:
+        class FakeLookup:
+            def latest_release(self, component: str) -> str:
+                return {
+                    "vaultwarden": "v1.40.0",
+                    "caddy": "v2.12.0",
+                    "caddy_dns_cloudflare": "v0.3.0",
+                }[component]
+
+            def image_digest(self, repository: str, tag: str, architecture: str) -> str:
+                return digest({
+                    "vaultwarden/server": "1",
+                    "caddy": "2" if "builder" in tag else "3",
+                }[repository])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = versions_text(PHASE7_VERSION)
+            (root / "versions.toml").write_text(first, encoding="utf-8")
+            with mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False):
+                one = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
+            second = first.replace('caddy_ratelimit = "v0.1.0"', 'caddy_ratelimit = "v0.1.1"')
+            (root / "versions.toml").write_text(second, encoding="utf-8")
+            with mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False):
+                two = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
+        self.assertNotEqual(one.project_version, two.project_version)
+        self.assertEqual(one.caddy_ratelimit, "v0.1.0")
+        self.assertEqual(two.caddy_ratelimit, "v0.1.1")
+
     def test_use_latest_requires_explicit_development_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
