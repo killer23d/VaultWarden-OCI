@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from . import cli, install, storage, update, update_appliance
+from . import cli, install, storage, update, update_appliance, update_guard
 from .update_versions import UpdateError, resolve_pinned_file
 
 _STORAGE_REQUIRED = {"start", "restart", "backup", "restore", "recovery", "edge", "crowdsec", "notify"}
@@ -123,6 +123,52 @@ def _require_storage(*, machine: bool = False) -> bool:
                 file=sys.stderr,
             )
         return False
+
+
+def _guard_state() -> dict[str, object] | None:
+    try:
+        return update_guard.load()
+    except update_guard.UpdateGuardError as exc:
+        raise UpdateError(str(exc)) from exc
+
+
+def _guard_recovery_command(state: dict[str, object]) -> str | None:
+    candidate = state.get("candidate_release")
+    previous = state.get("previous_release")
+    artifact = state.get("recovery_artifact")
+    sha256 = state.get("recovery_sha256")
+    if not all(isinstance(value, str) and value for value in (candidate, previous, artifact, sha256)):
+        return None
+    return (
+        f"/opt/vaultwarden-oci/releases/{candidate}/vwctl update rollback "
+        f"--recovery-artifact {artifact} --recovery-sha256 {sha256} "
+        f"--previous-release {previous} --candidate-release {candidate} "
+        "--identity /path/to/offline-age-identity.txt --yes"
+    )
+
+
+def _guard_error(*, machine: bool) -> bool:
+    state = _guard_state()
+    if state is None:
+        return False
+    command = _guard_recovery_command(state)
+    message = "coherent update recovery is required before this mutation is allowed"
+    if machine:
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "error": message,
+            "recovery_required": True,
+        }
+        if command is not None:
+            payload["recovery_command"] = command
+        print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+    else:
+        print(f"FAIL: {message}", file=sys.stderr)
+        if command is not None:
+            print(f"ACTION: {command}", file=sys.stderr)
+        else:
+            print("ACTION: use the recorded failed-update recovery instructions before starting or restoring application state", file=sys.stderr)
+    return True
 
 
 def _current_frozen(plan: update.UpdatePlan):
@@ -374,6 +420,8 @@ def _update_command(argv: Sequence[str]) -> int:
             return _rollback_command(args, ui)
         if not _require_storage(machine=args.json):
             return 1
+        if args.update_command == "apply" and _guard_error(machine=args.json):
+            return 1
         try:
             current_for_error = update._current(install.Layout(Path("/")))[1]
         except Exception:
@@ -473,6 +521,8 @@ def _host_upgrade_command(argv: Sequence[str]) -> int:
                     "host package changes are separate from the application update transaction; .vwrec cannot roll back apt, kernel, Docker, or other system packages"
                 )
             return 0
+        if _guard_error(machine=args.json):
+            return 1
         if not _require_storage(machine=args.json):
             return 1
         if args.json and not args.yes:
@@ -597,6 +647,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _update_command(args[1:])
     if args[0] == "host-upgrade":
         return _host_upgrade_command(args[1:])
+    if args[0] in {"start", "restart", "restore", "install"} and _guard_error(machine=False):
+        return 1
     if args[0] == "install":
         if not _require_storage():
             return 1
