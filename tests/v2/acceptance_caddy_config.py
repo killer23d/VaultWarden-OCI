@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from vaultwarden_oci import runtime
 
 OFFLINE = "age1" + "q" * 58
-ROOT = Path(__file__).resolve().parents[2]
 
 
-def run(argv: list[str], *, env: dict[str, str] | None = None) -> None:
-    completed = subprocess.run(argv, check=False, text=True, capture_output=True, env=env)
+def run(argv: list[str]) -> None:
+    completed = subprocess.run(argv, check=False, text=True, capture_output=True)
     if completed.returncode:
         raise SystemExit(
             f"command failed ({completed.returncode}): {' '.join(argv)}\n"
