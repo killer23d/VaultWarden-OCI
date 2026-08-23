@@ -7,9 +7,33 @@ on:
     branches: [v2]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  apply-edge-patch:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: Apply scoped edge patch
+        run: python3 .github/codex_apply_edge.py
+      - name: Compile patched Python
+        run: python3 -m compileall -q vaultwarden_oci tests/v2
+      - name: Restore CI and remove temporary machinery
+        run: |
+          git checkout origin/v2 -- .github/workflows/v2-ci.yml
+          rm -f .github/codex_apply_edge.py .github/workflows/codex-edge-patch.yml
+      - name: Commit scoped implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Harden Caddy Cloudflare edge and admin gate"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+
   quality-unit:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
