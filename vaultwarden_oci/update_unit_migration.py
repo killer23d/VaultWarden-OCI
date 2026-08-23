@@ -12,15 +12,24 @@ ABSENT_MODE = -1
 
 
 def install_units(new_release: Path, expected_release: Path, layout: install.Layout) -> dict[Path, tuple[bytes, int]]:
+    """Move the installed owned-unit set from expected_release to new_release.
+
+    Existing project-owned units must exactly match the expected immutable
+    release. A new release may add or remove an owned unit; both transitions
+    are snapshotted so a pre-start rollback can reverse them atomically.
+    """
     snapshot: dict[Path, tuple[bytes, int]] = {}
-    replacements: list[tuple[Path, bytes]] = []
+    actions: list[tuple[Path, bytes | None]] = []
     for unit in install.SYSTEMD_UNITS:
         new = new_release / install.SYSTEMD_SOURCE_DIR / unit
         expected = expected_release / install.SYSTEMD_SOURCE_DIR / unit
         destination = layout.path(install.SYSTEMD_DIR / unit)
-        if not new.is_file():
-            raise UpdateError(f"candidate release systemd unit is missing: {unit}")
-        if expected.is_file():
+        new_exists = new.is_file()
+        expected_exists = expected.is_file()
+        if not new_exists and not expected_exists:
+            continue
+
+        if expected_exists:
             try:
                 info = destination.lstat()
             except OSError as exc:
@@ -36,10 +45,15 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
                 raise UpdateError(f"new project-owned systemd unit path already exists: {destination}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             snapshot[destination] = (b"", ABSENT_MODE)
-        replacements.append((destination, new.read_bytes()))
+
+        actions.append((destination, new.read_bytes() if new_exists else None))
+
     try:
-        for destination, content in replacements:
-            update._atomic_write(destination, content, 0o644)
+        for destination, content in actions:
+            if content is None:
+                destination.unlink(missing_ok=True)
+            else:
+                update._atomic_write(destination, content, 0o644)
     except Exception:
         restore_units(snapshot)
         raise
