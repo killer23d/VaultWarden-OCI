@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Mapping
 
 RECOVERY_REQUIRED_STATE = Path("/var/lib/vaultwarden-oci/state/update-recovery-required.json")
 
@@ -52,17 +51,39 @@ def engage(
         raise
 
 
+def _expected_owner(path: Path) -> int:
+    return 0 if path == RECOVERY_REQUIRED_STATE else os.geteuid()
+
+
 def load(path: Path = RECOVERY_REQUIRED_STATE) -> dict[str, object] | None:
     try:
         info = path.lstat()
     except FileNotFoundError:
         return None
+    except PermissionError:
+        # A non-root caller unable to inspect the root-owned guard must fail
+        # closed rather than accidentally permit a start/restart operation.
+        if os.geteuid() != 0 and path == RECOVERY_REQUIRED_STATE:
+            return {
+                "schema_version": 1,
+                "recovery_required": True,
+                "detail": "root-owned recovery guard is not readable by this caller",
+            }
+        raise
     except OSError as exc:
         raise UpdateGuardError(f"cannot inspect update recovery guard: {exc}") from exc
-    if path.is_symlink() or not path.is_file() or info.st_uid != os.geteuid():
+    if path.is_symlink() or not path.is_file() or info.st_uid != _expected_owner(path):
         raise UpdateGuardError(f"unsafe update recovery guard path: {path}")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
+    except PermissionError:
+        if os.geteuid() != 0 and path == RECOVERY_REQUIRED_STATE:
+            return {
+                "schema_version": 1,
+                "recovery_required": True,
+                "detail": "root-owned recovery guard is not readable by this caller",
+            }
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise UpdateGuardError(f"cannot load update recovery guard: {exc}") from exc
     if (
@@ -79,13 +100,13 @@ def active(path: Path = RECOVERY_REQUIRED_STATE) -> bool:
 
 
 def clear(path: Path = RECOVERY_REQUIRED_STATE) -> None:
-    """Clear only the exact regular root-owned guard after coherent recovery succeeds."""
+    """Clear only the exact regular expected-owner guard after coherent recovery succeeds."""
     try:
         info = path.lstat()
     except FileNotFoundError:
         return
     except OSError as exc:
         raise UpdateGuardError(f"cannot inspect update recovery guard: {exc}") from exc
-    if path.is_symlink() or not path.is_file() or info.st_uid != os.geteuid():
+    if path.is_symlink() or not path.is_file() or info.st_uid != _expected_owner(path):
         raise UpdateGuardError(f"unsafe update recovery guard path: {path}")
     path.unlink()
