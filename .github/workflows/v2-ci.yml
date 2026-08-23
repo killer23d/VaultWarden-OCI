@@ -29,6 +29,14 @@ jobs:
           ./vwctl doctor --help >/dev/null
           ./vwctl update --help >/dev/null
 
+  caddy-config-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Exact custom Caddy build and config validation
+        run: python3 tests/v2/acceptance_caddy_config.py
+
   recovery-crypto-integration:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
