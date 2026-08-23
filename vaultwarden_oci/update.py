@@ -158,13 +158,16 @@ def plan_update(
     root: Path = Path("/"),
     machine: str | None = None,
     runner: Runner = cli.run_command,
+    enforce_component_downgrades: bool = True,
 ) -> UpdatePlan:
     """Plan an explicit source-pinned production update.
 
     Development/test --use-latest resolution is deliberately not supported here.
     Non-production roots are an injected unit-test boundary only; the public CLI
     always updates the production root and therefore uses Phase 3-6 production
-    runtime/recovery ownership consistently.
+    runtime/recovery ownership consistently. ``enforce_component_downgrades``
+    may be disabled only by the appliance planner while it resolves the final
+    ``--use-latest`` snapshot; that final snapshot is checked before return.
     """
     resolved_root = root.resolve()
     if resolved_root != Path("/") and runner is cli.run_command:
@@ -177,7 +180,8 @@ def plan_update(
     current_target, current_release, current_dir = _current(layout)
     _gate_current(layout, runner)
     frozen = resolve_pinned(source_root, machine=machine)
-    _reject_component_downgrades(current_dir, frozen)
+    if enforce_component_downgrades:
+        _reject_component_downgrades(current_dir, frozen)
     try:
         target_release = install.validate_release_name(frozen.project_version)
     except install.InstallError as exc:
