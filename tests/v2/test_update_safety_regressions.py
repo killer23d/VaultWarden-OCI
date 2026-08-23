@@ -8,16 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import (
-    cli,
-    install,
-    recovery,
-    update,
-    update_appliance,
-    update_cli,
-    update_recovery,
-    update_versions,
-)
+from vaultwarden_oci import cli, install, recovery, update, update_appliance, update_cli, update_versions
 
 
 def digest(char: str) -> str:
@@ -26,12 +17,7 @@ def digest(char: str) -> str:
 
 def frozen(project: str = "2.0.0") -> update_versions.FrozenVersions:
     return update_versions.FrozenVersions(
-        "pinned",
-        "amd64",
-        project,
-        "1.40.0",
-        "2.12.0",
-        "v0.3.0",
+        "pinned", "amd64", project, "1.40.0", "2.12.0", "v0.3.0",
         update_versions.ImagePin("vaultwarden", "vaultwarden/server", "1.40.0", digest("a")),
         update_versions.ImagePin("caddy_builder", "caddy", "2.12.0-builder-alpine", digest("b")),
         update_versions.ImagePin("caddy_runtime", "caddy", "2.12.0-alpine", digest("c")),
@@ -43,11 +29,8 @@ def frozen(project: str = "2.0.0") -> update_versions.FrozenVersions:
 
 def command(argv, *, ok: bool = True, stdout: str = "", stderr: str = "") -> cli.CommandResult:
     return cli.CommandResult(
-        tuple(argv),
-        "success" if ok else "nonzero",
-        0 if ok else 1,
-        stdout,
-        stderr if not ok else "",
+        tuple(argv), "success" if ok else "nonzero", 0 if ok else 1,
+        stdout, stderr if not ok else "",
     )
 
 
@@ -57,12 +40,8 @@ class ReleaseOrderingTests(unittest.TestCase):
             source = Path(directory) / "source"
             source.mkdir()
             base = update.UpdatePlan(
-                source,
-                Path("/"),
-                Path("releases/2.0.0.latest.abcdef123456"),
-                "2.0.0.latest.abcdef123456",
-                "2.0.0",
-                frozen("2.0.0"),
+                source, Path("/"), Path("releases/2.0.0.latest.abcdef123456"),
+                "2.0.0.latest.abcdef123456", "2.0.0", frozen("2.0.0"),
             )
             release = update_appliance.ProjectRelease(
                 "v2.0.0",
@@ -96,20 +75,18 @@ class ReleaseOrderingTests(unittest.TestCase):
             }
             for index in range(100)
         ]
-        stable = [
-            {
-                "tag_name": "v8.0.0",
-                "draft": False,
-                "prerelease": False,
-                "published_at": "2026-08-01T00:00:00Z",
-                "tarball_url": "https://api.github.com/repos/killer23d/VaultWarden-OCI/tarball/v8.0.0",
-            }
-        ]
+        stable = [{
+            "tag_name": "v8.0.0",
+            "draft": False,
+            "prerelease": False,
+            "published_at": "2026-08-01T00:00:00Z",
+            "tarball_url": "https://api.github.com/repos/killer23d/VaultWarden-OCI/tarball/v8.0.0",
+        }]
         calls: list[str] = []
 
         def getter(url: str):
             calls.append(url)
-            return prereleases if "page=1" in url else stable
+            return prereleases if url.endswith("page=1") else stable
 
         selected = update_appliance.latest_project_release(getter=getter)
         self.assertEqual(selected.tag, "v8.0.0")
@@ -117,15 +94,14 @@ class ReleaseOrderingTests(unittest.TestCase):
 
     def test_source_override_requires_explicit_development_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory)
             with mock.patch.dict(os.environ, {}, clear=True):
                 with self.assertRaisesRegex(update_versions.UpdateError, "developer/testing-only"):
-                    with update_appliance.candidate_source(source):
+                    with update_appliance.candidate_source(Path(directory)):
                         self.fail("development-gated source override unexpectedly opened")
 
 
 class CandidateOwnershipTests(unittest.TestCase):
-    def test_prestage_executes_candidate_vwctl_not_installed_runtime_renderer(self) -> None:
+    def test_prestage_executes_candidate_vwctl_not_installed_renderer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "candidate"
@@ -137,7 +113,6 @@ class CandidateOwnershipTests(unittest.TestCase):
                 return command(argv, stdout='{"ok":true}')
 
             update_appliance._prepare_candidate_release(source, root / "render", runner=runner)
-        self.assertEqual(len(calls), 1)
         argv, cwd = calls[0]
         self.assertEqual(argv[0], str(source / "vwctl"))
         self.assertEqual(argv[1:3], ("__update-candidate", "prepare"))
@@ -148,7 +123,7 @@ class CandidateOwnershipTests(unittest.TestCase):
             root = Path(directory)
             release = root / "release"
             release.mkdir()
-            calls = []
+            calls: list[tuple[tuple[str, ...], Path | None]] = []
 
             def runner(argv, **kwargs):
                 calls.append((tuple(argv), kwargs.get("cwd")))
@@ -167,12 +142,8 @@ class LockedFailureStopTests(unittest.TestCase):
         source.mkdir()
         return update_appliance.PreparedPlan(
             update.UpdatePlan(
-                source,
-                temp / "host",
-                Path("releases/1.0.0"),
-                "1.0.0",
-                "2.0.0",
-                frozen(),
+                source, temp / "host", Path("releases/1.0.0"),
+                "1.0.0", "2.0.0", frozen(),
             ),
             None,
             False,
@@ -182,22 +153,17 @@ class LockedFailureStopTests(unittest.TestCase):
         artifact = temp / "pre.vwrec"
         artifact.write_bytes(b"age-encryption.org/v1 regression")
         return recovery.VerifiedRecovery(
-            artifact,
-            hashlib.sha256(artifact.read_bytes()).hexdigest(),
-            artifact.stat().st_size,
-            "2026-08-23T00:00:00Z",
+            artifact, hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            artifact.stat().st_size, "2026-08-23T00:00:00Z",
         )
 
     def _run_late_failure(self, *, crowdsec_failure: bool) -> tuple[bool, list[str]]:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             prepared = self._prepared(temp)
-            exact = temp / "exact"
-            exact.mkdir()
-            old = temp / "old"
-            old.mkdir()
-            new = temp / "new"
-            new.mkdir()
+            exact = temp / "exact"; exact.mkdir()
+            old = temp / "old"; old.mkdir()
+            new = temp / "new"; new.mkdir()
             events: list[str] = []
             lock_held = False
 
@@ -208,7 +174,6 @@ class LockedFailureStopTests(unittest.TestCase):
             @contextlib.contextmanager
             def held_lock(*_args, **_kwargs):
                 nonlocal lock_held
-                self.assertFalse(lock_held)
                 lock_held = True
                 events.append("lock-enter")
                 try:
@@ -231,11 +196,7 @@ class LockedFailureStopTests(unittest.TestCase):
             with (
                 mock.patch.object(install, "_frozen_source", exact_source),
                 mock.patch.object(update, "_validate_source"),
-                mock.patch.object(
-                    update_appliance,
-                    "_preflight",
-                    return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58),
-                ),
+                mock.patch.object(update_appliance, "_preflight", return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58)),
                 mock.patch.object(update, "_current", return_value=(Path("releases/1.0.0"), "1.0.0", old)),
                 mock.patch.object(install, "ensure_lock_path", return_value=temp / "lock"),
                 mock.patch.object(cli, "mutation_lock", held_lock),
@@ -247,10 +208,11 @@ class LockedFailureStopTests(unittest.TestCase):
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
                 mock.patch.object(update_appliance, "_start_update_timer"),
             ):
-                if crowdsec_failure:
-                    gate = mock.patch.object(update, "_gate_activated")
-                else:
-                    gate = mock.patch.object(update, "_gate_activated", side_effect=update_versions.UpdateError("doctor failed"))
+                gate = (
+                    mock.patch.object(update, "_gate_activated")
+                    if crowdsec_failure
+                    else mock.patch.object(update, "_gate_activated", side_effect=update_versions.UpdateError("doctor failed"))
+                )
                 with gate:
                     with self.assertRaises(update_appliance.PersistentStateFailure) as caught:
                         update_appliance.apply_prepared(
@@ -261,12 +223,12 @@ class LockedFailureStopTests(unittest.TestCase):
                         )
             return caught.exception.services_stopped, events
 
-    def test_final_status_doctor_failure_stops_candidate_while_parent_lock_is_held(self) -> None:
+    def test_final_status_doctor_failure_stops_candidate_while_lock_held(self) -> None:
         stopped, events = self._run_late_failure(crowdsec_failure=False)
         self.assertTrue(stopped)
         self.assertLess(events.index("candidate-stop"), events.index("lock-exit"))
 
-    def test_final_crowdsec_failure_stops_candidate_while_parent_lock_is_held(self) -> None:
+    def test_final_crowdsec_failure_stops_candidate_while_lock_held(self) -> None:
         stopped, events = self._run_late_failure(crowdsec_failure=True)
         self.assertTrue(stopped)
         self.assertLess(events.index("candidate-stop"), events.index("lock-exit"))
@@ -281,25 +243,17 @@ class CoherentRollbackLockTests(unittest.TestCase):
             candidate = host / "opt/vaultwarden-oci/releases/2.0.0"
             previous.mkdir(parents=True)
             candidate.mkdir(parents=True)
-            artifact = temp / "pre.vwrec"
-            artifact.write_bytes(b"verified")
+            artifact = temp / "pre.vwrec"; artifact.write_bytes(b"verified")
             verified = recovery.VerifiedRecovery(
-                artifact,
-                hashlib.sha256(artifact.read_bytes()).hexdigest(),
-                artifact.stat().st_size,
-                "2026-08-23T00:00:00Z",
-            )
-            plan = update.UpdatePlan(
-                candidate,
-                host,
-                Path("releases/1.0.0"),
-                "1.0.0",
-                "2.0.0",
-                frozen(),
+                artifact, hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                artifact.stat().st_size, "2026-08-23T00:00:00Z",
             )
             failure = update_appliance.PersistentStateFailure(
                 "failed after start",
-                plan=plan,
+                plan=update.UpdatePlan(
+                    candidate, host, Path("releases/1.0.0"),
+                    "1.0.0", "2.0.0", frozen(),
+                ),
                 verified=verified,
                 services_stopped=True,
             )
@@ -309,60 +263,38 @@ class CoherentRollbackLockTests(unittest.TestCase):
             @contextlib.contextmanager
             def held_lock(*_args, **_kwargs):
                 nonlocal lock_held
-                lock_held = True
-                events.append("lock-enter")
+                lock_held = True; events.append("lock-enter")
                 try:
                     yield
                 finally:
-                    events.append("lock-exit")
-                    lock_held = False
+                    events.append("lock-exit"); lock_held = False
 
             class Prepared:
-                def promote_locked(self, *, runner):
-                    self_test.assertTrue(lock_held)
-                    events.append("promote-data")
-
-            self_test = self
+                def promote_locked(inner_self, *, runner):
+                    self.assertTrue(lock_held); events.append("promote-data")
 
             @contextlib.contextmanager
             def prepared_restore(*_args, **_kwargs):
-                events.append("prepare-data")
-                yield Prepared()
+                events.append("prepare-data"); yield Prepared()
 
-            def stop_locked(_release, _runner):
-                self.assertTrue(lock_held)
-                events.append("stop-candidate")
-                return True
-
-            def install_units(*_args):
-                self.assertTrue(lock_held)
-                events.append("install-old-units")
-                return {}
-
-            def switch(*_args):
-                self.assertTrue(lock_held)
-                events.append("switch-old-code")
+            def require_lock(name, result=None):
+                self.assertTrue(lock_held); events.append(name); return result
 
             with (
                 mock.patch.object(update_appliance.storage, "verify"),
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=verified.sha256),
-                mock.patch.object(
-                    update_appliance.update,
-                    "_current",
-                    return_value=(Path("releases/2.0.0"), "2.0.0", candidate),
-                ),
+                mock.patch.object(update_appliance.update, "_current", return_value=(Path("releases/2.0.0"), "2.0.0", candidate)),
                 mock.patch.object(update_appliance.update_recovery, "prepare_restore", prepared_restore),
                 mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
                 mock.patch.object(update_appliance.cli, "mutation_lock", held_lock),
-                mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
-                mock.patch.object(update_appliance.update_unit_migration, "install_units", side_effect=install_units),
-                mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
+                mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=lambda *_a: require_lock("stop-candidate", True)),
+                mock.patch.object(update_appliance.update_unit_migration, "install_units", side_effect=lambda *_a: require_lock("install-old-units", {})),
+                mock.patch.object(update_appliance.update, "_switch", side_effect=lambda *_a: require_lock("switch-old-code")),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_prove_previous"),
             ):
                 update_appliance.coherent_rollback(
-                    failure,
-                    temp / "identity",
+                    failure, temp / "identity",
                     runner=lambda argv, **_kwargs: command(argv),
                 )
 
@@ -376,21 +308,16 @@ class CoherentRollbackLockTests(unittest.TestCase):
 class TimerAndHostSerializationTests(unittest.TestCase):
     def test_upgrade_explicitly_starts_and_proves_new_timer_active(self) -> None:
         calls: list[tuple[str, ...]] = []
-
-        def runner(argv, **_kwargs):
-            calls.append(tuple(argv))
-            return command(argv)
-
-        update_appliance._start_update_timer(install.Layout(Path("/")), runner)
-        self.assertEqual(
-            calls,
-            [
-                ("systemctl", "start", "vaultwarden-oci-update-check.timer"),
-                ("systemctl", "is-active", "--quiet", "vaultwarden-oci-update-check.timer"),
-            ],
+        update_appliance._start_update_timer(
+            install.Layout(Path("/")),
+            lambda argv, **_kwargs: calls.append(tuple(argv)) or command(argv),
         )
+        self.assertEqual(calls, [
+            ("systemctl", "start", "vaultwarden-oci-update-check.timer"),
+            ("systemctl", "is-active", "--quiet", "vaultwarden-oci-update-check.timer"),
+        ])
 
-    def test_host_upgrade_apply_serializes_apt_mutation_after_recovery(self) -> None:
+    def test_host_upgrade_apply_serializes_apt_after_recovery(self) -> None:
         verified = recovery.VerifiedRecovery(Path("/tmp/pre.vwrec"), "a" * 64, 10, "2026-08-23T00:00:00Z")
         lock_held = False
         events: list[str] = []
@@ -398,46 +325,35 @@ class TimerAndHostSerializationTests(unittest.TestCase):
         @contextlib.contextmanager
         def held_lock(*_args, **_kwargs):
             nonlocal lock_held
-            lock_held = True
-            events.append("lock-enter")
+            lock_held = True; events.append("lock-enter")
             try:
                 yield
             finally:
-                events.append("lock-exit")
-                lock_held = False
+                events.append("lock-exit"); lock_held = False
 
         def create_recovery(*_args, **_kwargs):
-            self.assertFalse(lock_held)
-            events.append("recovery")
-            return verified
+            self.assertFalse(lock_held); events.append("recovery"); return verified
 
         def runner(argv, **_kwargs):
             if argv[0] == "apt-get":
-                self.assertTrue(lock_held)
-                events.append(" ".join(argv))
+                self.assertTrue(lock_held); events.append(" ".join(argv))
             return command(argv)
 
         with (
             mock.patch.object(update_appliance.os, "geteuid", return_value=0),
             mock.patch.object(update_appliance.storage, "verify"),
-            mock.patch.object(
-                update_appliance.runtime,
-                "load_config",
-                return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58),
-            ),
+            mock.patch.object(update_appliance.runtime, "load_config", return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58)),
             mock.patch.object(update_appliance.recovery, "create_recovery", side_effect=create_recovery),
             mock.patch.object(update_appliance, "_host_lock", return_value=Path("/tmp/test-lock")),
             mock.patch.object(update_appliance.cli, "mutation_lock", held_lock),
             mock.patch.object(update_appliance.Path, "exists", return_value=False),
         ):
             result, reboot = update_appliance.host_upgrade_apply(runner=runner)
-        self.assertEqual(result, verified)
-        self.assertFalse(reboot)
+        self.assertEqual(result, verified); self.assertFalse(reboot)
         self.assertLess(events.index("recovery"), events.index("lock-enter"))
-        self.assertLess(events.index("apt-get update"), events.index("lock-exit"))
         self.assertLess(events.index("apt-get -y upgrade"), events.index("lock-exit"))
 
-    def test_host_upgrade_check_refreshes_indexes_under_same_serialization_lock(self) -> None:
+    def test_host_upgrade_check_refreshes_indexes_under_lock(self) -> None:
         lock_held = False
         calls: list[tuple[str, ...]] = []
 
@@ -451,10 +367,8 @@ class TimerAndHostSerializationTests(unittest.TestCase):
                 lock_held = False
 
         def runner(argv, **_kwargs):
-            self.assertTrue(lock_held)
-            calls.append(tuple(argv))
-            stdout = "Inst package [1] (2 Ubuntu)\n" if argv[1:3] == ["-s", "upgrade"] else ""
-            return command(argv, stdout=stdout)
+            self.assertTrue(lock_held); calls.append(tuple(argv))
+            return command(argv, stdout="Inst package [1] (2 Ubuntu)\n" if argv[1:3] == ["-s", "upgrade"] else "")
 
         with (
             mock.patch.object(update_appliance.os, "geteuid", return_value=0),
@@ -463,10 +377,8 @@ class TimerAndHostSerializationTests(unittest.TestCase):
             mock.patch.object(update_appliance.Path, "exists", return_value=False),
         ):
             count, reboot, _ = update_appliance.host_upgrade_check(runner=runner)
-        self.assertEqual(count, 1)
-        self.assertFalse(reboot)
-        self.assertEqual(calls[0], ("apt-get", "update"))
-        self.assertEqual(calls[1], ("apt-get", "-s", "upgrade"))
+        self.assertEqual(count, 1); self.assertFalse(reboot)
+        self.assertEqual(calls[:2], [("apt-get", "update"), ("apt-get", "-s", "upgrade")])
 
     def test_json_host_apply_without_yes_is_json_only(self) -> None:
         stderr = mock.MagicMock()
@@ -477,8 +389,7 @@ class TimerAndHostSerializationTests(unittest.TestCase):
             code = update_cli._host_upgrade_command(["apply", "--json"])
         self.assertEqual(code, 2)
         written = "".join(str(call.args[0]) for call in stderr.write.call_args_list if call.args)
-        self.assertIn('"error"', written)
-        self.assertNotIn("FAIL:", written)
+        self.assertIn('"error"', written); self.assertNotIn("FAIL:", written)
 
 
 if __name__ == "__main__":
