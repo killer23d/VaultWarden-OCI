@@ -25,6 +25,7 @@ from . import (
     secrets,
     storage,
     update,
+    update_guard,
     update_recovery,
     update_unit_migration,
 )
@@ -493,6 +494,31 @@ def _quarantine_current(layout: install.Layout) -> None:
     update._switch(layout, _QUARANTINE_TARGET)
 
 
+def _current_target(layout: install.Layout) -> Path:
+    current = layout.path(install.CURRENT_LINK)
+    if not current.is_symlink():
+        raise UpdateError(f"installed current release symlink is missing or invalid: {current}")
+    target = Path(os.readlink(current))
+    if target.is_absolute():
+        raise UpdateError(f"installed current release target is unsafe: {target}")
+    return target
+
+
+def _rollback_selection(layout: install.Layout, plan: update.UpdatePlan) -> Path:
+    """Accept only the recorded failed candidate, previous release, or quarantine."""
+    target = _current_target(layout)
+    allowed = {
+        Path("releases") / plan.target_release,
+        Path("releases") / plan.current_release,
+        _QUARANTINE_TARGET,
+    }
+    if target not in allowed:
+        raise UpdateError(
+            f"current selection changed outside the recorded update recovery set: {target}"
+        )
+    return target
+
+
 def _preflight(
     exact_source: Path,
     plan: update.UpdatePlan,
@@ -613,13 +639,28 @@ def apply_prepared(
                                 release_dir is not None
                                 and _stop_candidate_locked(release_dir, runner)
                             )
+                            guard_detail = "recovery-required start guard engaged"
+                            try:
+                                update_guard.engage(
+                                    candidate_release=plan.target_release,
+                                    previous_release=plan.current_release,
+                                    recovery_artifact=str(verified.artifact),
+                                    recovery_sha256=verified.sha256,
+                                )
+                            except Exception as guard_exc:
+                                guard_detail = f"recovery guard failed ({guard_exc}); current quarantined"
+                                try:
+                                    _quarantine_current(layout)
+                                except Exception as quarantine_exc:
+                                    guard_detail += f"; quarantine also failed ({quarantine_exc})"
                             action = (
                                 f"coherent rollback requires recovery artifact {verified.artifact} "
                                 f"sha256={verified.sha256} plus previous release {plan.current_release}"
                             )
                             raise PersistentStateFailure(
                                 f"{exc}; old code was not auto-started against possibly-new persistent state; "
-                                f"candidate containers {'were stopped and removal was proven' if stopped else 'could not be proven stopped'}; {action}",
+                                f"candidate containers {'were stopped and removal was proven' if stopped else 'could not be proven stopped'}; "
+                                f"{guard_detail}; {action}",
                                 plan=plan,
                                 verified=verified,
                                 services_stopped=bool(stopped),
@@ -663,29 +704,29 @@ def apply_prepared(
                         services_stopped=True,
                     ) from failure
                 raise PersistentStateFailure(
-                    f"{failure}; failed to prove both inactive systemd state and absent candidate containers",
+                    f"{failure}; failed to prove both inactive systemd state and absent candidate containers; normal start/restart remains guarded or current is quarantined",
                     plan=failure.plan,
                     verified=failure.verified,
                     services_stopped=False,
                 ) from failure
 
 
-def _restore_candidate_selection(
+def _restore_selection(
     layout: install.Layout,
-    candidate_target: Path,
+    target: Path,
     unit_snapshot: Mapping[Path, tuple[bytes, int]] | None,
     runner: Runner,
 ) -> list[str]:
     errors: list[str] = []
     try:
-        update._switch(layout, candidate_target)
+        update._switch(layout, target)
     except Exception as exc:
-        errors.append(f"candidate current target: {exc}")
+        errors.append(f"current target: {exc}")
     if unit_snapshot is not None:
         try:
             update_unit_migration.restore_units(unit_snapshot)
         except Exception as exc:
-            errors.append(f"candidate systemd units: {exc}")
+            errors.append(f"systemd units: {exc}")
     try:
         update._daemon_reload(layout, runner)
     except Exception as exc:
@@ -712,11 +753,7 @@ def coherent_rollback(
         raise UpdateError("previous immutable application release is unavailable for coherent rollback")
     if not candidate_path.is_dir() or candidate_path.is_symlink():
         raise UpdateError("failed candidate immutable application release is unavailable for coherent rollback")
-    current_target, current_release, candidate_release = update._current(layout)
-    if current_release != plan.target_release:
-        raise UpdateError(
-            f"current immutable release changed after update failure: expected {plan.target_release}, found {current_release}"
-        )
+    original_target = _rollback_selection(layout, plan)
 
     completed = False
     try:
@@ -727,21 +764,26 @@ def coherent_rollback(
         ) as prepared_restore:
             lock_path = install.ensure_lock_path(layout)
             with cli.mutation_lock(lock_path):
-                now_target, now_release, now_candidate = update._current(layout)
-                if (now_target, now_release) != (current_target, current_release):
-                    raise UpdateError("current release changed while coherent rollback was being prepared")
+                if _rollback_selection(layout, plan) != original_target:
+                    raise UpdateError("current selection changed while coherent rollback was being prepared")
                 if plan.root == Path("/"):
                     storage.verify()
-                if not _stop_candidate_locked(now_candidate, runner):
+                if not _stop_candidate_locked(candidate_path, runner):
                     raise UpdateError("candidate containers could not be proven stopped; refusing destructive recovery promotion")
+                update_guard.engage(
+                    candidate_release=plan.target_release,
+                    previous_release=plan.current_release,
+                    recovery_artifact=str(failure.verified.artifact),
+                    recovery_sha256=failure.verified.sha256,
+                )
 
                 unit_snapshot: dict[Path, tuple[bytes, int]] | None = None
                 switched_old = False
                 data_promoted = False
                 try:
-                    unit_snapshot = update_unit_migration.install_units(
+                    unit_snapshot = update_unit_migration.converge_units(
                         expected_previous,
-                        now_candidate,
+                        (candidate_path, expected_previous),
                         layout,
                     )
                     update._switch(layout, plan.current_target)
@@ -751,21 +793,21 @@ def coherent_rollback(
                     update._daemon_reload(layout, runner)
                 except update_recovery.PromotionError as exc:
                     if exc.rollback_complete:
-                        restore_errors = _restore_candidate_selection(
+                        restore_errors = _restore_selection(
                             layout,
-                            now_target,
+                            original_target,
                             unit_snapshot,
                             runner,
                         )
                         if restore_errors:
                             _quarantine_current(layout)
                             raise UpdateError(
-                                f"coherent rollback data promotion failed; original live data was restored, "
-                                f"but candidate code selection could not be fully restored; current was quarantined: "
+                                "coherent rollback data promotion failed; original live data was restored, "
+                                "but original code selection could not be fully restored; current was quarantined: "
                                 + "; ".join(restore_errors)
                             ) from exc
                         raise UpdateError(
-                            f"coherent rollback data promotion failed; original live data and candidate code selection were restored; services remain stopped: {exc}"
+                            f"coherent rollback data promotion failed; original live data and code selection were restored; services remain stopped: {exc}"
                         ) from exc
                     try:
                         _quarantine_current(layout)
@@ -782,19 +824,18 @@ def coherent_rollback(
                         raise UpdateError(
                             f"coherent rollback restored pre-update data and selected previous code, but final systemd reload failed; services remain stopped: {exc}"
                         ) from exc
-                    restore_errors = _restore_candidate_selection(
-                        layout,
-                        now_target,
-                        unit_snapshot,
-                        runner,
-                    ) if (switched_old or unit_snapshot is not None) else []
+                    restore_errors = (
+                        _restore_selection(layout, original_target, unit_snapshot, runner)
+                        if (switched_old or unit_snapshot is not None)
+                        else []
+                    )
                     if restore_errors:
                         try:
                             _quarantine_current(layout)
                         except Exception as quarantine_exc:
                             restore_errors.append(f"quarantine: {quarantine_exc}")
                         raise UpdateError(
-                            f"coherent rollback failed before data promotion and candidate selection could not be fully restored; services remain stopped: "
+                            "coherent rollback failed before data promotion and original selection could not be fully restored; services remain stopped: "
                             + "; ".join(restore_errors)
                         ) from exc
                     raise
@@ -806,6 +847,10 @@ def coherent_rollback(
 
     if not completed:
         raise UpdateError("coherent rollback did not reach a complete data+code state")
+    try:
+        update_guard.clear()
+    except update_guard.UpdateGuardError as exc:
+        raise UpdateError(f"coherent rollback completed but recovery guard could not be cleared: {exc}") from exc
     _start_previous_service(layout, expected_previous, runner)
     _prove_previous(layout, runner)
 
@@ -818,7 +863,7 @@ def reconstruct_failure(
     *,
     root: Path = Path("/"),
 ) -> PersistentStateFailure:
-    """Reconstruct an explicit rollback even if the normal current link is quarantined."""
+    """Reconstruct an explicit rollback from candidate/previous/quarantined selection."""
     if not _SHA256.fullmatch(sha256):
         raise UpdateError("--recovery-sha256 must be exactly 64 lowercase hexadecimal characters")
     layout = install.Layout(root.resolve())
@@ -832,14 +877,6 @@ def reconstruct_failure(
         raise UpdateError("requested failed candidate immutable release is unavailable")
     if recovery._sha256(artifact) != sha256:
         raise UpdateError("recovery artifact does not match the supplied verified SHA-256")
-    try:
-        _, current_release, _ = update._current(layout)
-    except UpdateError:
-        current_release = candidate
-    if current_release != candidate:
-        raise UpdateError(
-            f"current release does not match the explicitly recorded failed candidate: {current_release} != {candidate}"
-        )
     frozen = resolve_pinned_file(candidate_dir / "versions.toml")
     plan = update.UpdatePlan(
         source_root=candidate_dir,
@@ -849,6 +886,7 @@ def reconstruct_failure(
         target_release=candidate,
         frozen=frozen,
     )
+    _rollback_selection(layout, plan)
     verified = recovery.VerifiedRecovery(
         artifact=artifact,
         sha256=sha256,
