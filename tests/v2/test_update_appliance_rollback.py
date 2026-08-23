@@ -70,9 +70,37 @@ class UnitMigrationTests(unittest.TestCase):
                 else:
                     self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
 
+    def test_quarantine_retry_converges_only_recognized_old_or_candidate_unit_states(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = install.Layout(root / "host")
+            old = root / "old"
+            candidate = root / "candidate"
+            old_units = old / install.SYSTEMD_SOURCE_DIR
+            candidate_units = candidate / install.SYSTEMD_SOURCE_DIR
+            old_units.mkdir(parents=True)
+            candidate_units.mkdir(parents=True)
+            installed = layout.path(install.SYSTEMD_DIR)
+            installed.mkdir(parents=True)
+
+            for index, name in enumerate(install.SYSTEMD_UNITS):
+                (old_units / name).write_text(f"old-{name}\n", encoding="utf-8")
+                (candidate_units / name).write_text(f"candidate-{name}\n", encoding="utf-8")
+                source = old_units if index % 2 else candidate_units
+                (installed / name).write_bytes((source / name).read_bytes())
+
+            update_unit_migration.converge_units(old, (candidate, old), layout)
+            for name in install.SYSTEMD_UNITS:
+                self.assertEqual((installed / name).read_bytes(), (old_units / name).read_bytes())
+
+            drifted = installed / install.SYSTEMD_UNITS[0]
+            drifted.write_text("administrator drift\n", encoding="utf-8")
+            with self.assertRaisesRegex(update_versions.UpdateError, "drift blocks recovery convergence"):
+                update_unit_migration.converge_units(old, (candidate, old), layout)
+
 
 class CoherentRollbackTests(unittest.TestCase):
-    def _failure(self, temp: Path) -> update_appliance.PersistentStateFailure:
+    def _failure(self, temp: Path, root: Path) -> update_appliance.PersistentStateFailure:
         artifact = temp / "pre-update.vwrec"
         artifact.write_bytes(b"verified recovery bytes")
         verified = recovery.VerifiedRecovery(
@@ -83,7 +111,7 @@ class CoherentRollbackTests(unittest.TestCase):
         )
         plan = update.UpdatePlan(
             temp / "source",
-            Path("/"),
+            root,
             Path("releases/1.0.0"),
             "1.0.0",
             "2.0.0",
@@ -96,12 +124,17 @@ class CoherentRollbackTests(unittest.TestCase):
             services_stopped=True,
         )
 
-    def test_coherent_rollback_uses_recorded_artifact_and_switches_old_code_inside_same_lock(self) -> None:
+    def test_coherent_rollback_uses_recorded_artifact_and_keeps_data_code_switch_under_one_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            failure = self._failure(temp)
-            previous = Path("/opt/vaultwarden-oci/releases/1.0.0")
-            candidate = Path("/opt/vaultwarden-oci/releases/2.0.0")
+            root = temp / "host"
+            install_root = root / "opt/vaultwarden-oci"
+            previous = install_root / "releases/1.0.0"
+            candidate = install_root / "releases/2.0.0"
+            previous.mkdir(parents=True)
+            candidate.mkdir(parents=True)
+            (install_root / "current").symlink_to("releases/2.0.0")
+            failure = self._failure(temp, root)
             identity = temp / "offline.age"
             identity.write_text("AGE-SECRET-KEY-test\n", encoding="utf-8")
             events: list[str] = []
@@ -137,10 +170,10 @@ class CoherentRollbackTests(unittest.TestCase):
                 events.append("stopped")
                 return True
 
-            def install_units(old_release, failed_release, _layout):
+            def converge_units(old_release, allowed, _layout):
                 self.assertTrue(lock_held)
                 self.assertEqual(old_release, previous)
-                self.assertEqual(failed_release, candidate)
+                self.assertEqual(tuple(allowed), (candidate, previous))
                 events.append("units")
                 return {}
 
@@ -152,20 +185,16 @@ class CoherentRollbackTests(unittest.TestCase):
             with (
                 mock.patch.object(update_appliance.storage, "verify"),
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=failure.verified.sha256),
-                mock.patch.object(Path, "is_dir", return_value=True),
-                mock.patch.object(Path, "is_symlink", return_value=False),
-                mock.patch.object(
-                    update_appliance.update,
-                    "_current",
-                    return_value=(Path("releases/2.0.0"), "2.0.0", candidate),
-                ),
                 mock.patch.object(update_appliance.update_recovery, "prepare_restore", prepared_restore),
                 mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
                 mock.patch.object(update_appliance.cli, "mutation_lock", mutation_lock),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
-                mock.patch.object(update_appliance.update_unit_migration, "install_units", side_effect=install_units),
+                mock.patch.object(update_appliance.update_guard, "engage", side_effect=lambda **_kwargs: events.append("guard")),
+                mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_kwargs: events.append("guard-clear")),
+                mock.patch.object(update_appliance.update_unit_migration, "converge_units", side_effect=converge_units),
                 mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
+                mock.patch.object(update_appliance, "_start_previous_service", side_effect=lambda *_args: events.append("start-old")),
                 mock.patch.object(update_appliance, "_prove_previous"),
             ):
                 update_appliance.coherent_rollback(
@@ -175,15 +204,17 @@ class CoherentRollbackTests(unittest.TestCase):
                 )
 
             self.assertLess(events.index("prepared"), events.index("lock-enter"))
-            for item in ("stopped", "promoted", "units", "switch"):
+            for item in ("stopped", "guard", "units", "switch", "promoted"):
                 self.assertLess(events.index("lock-enter"), events.index(item))
                 self.assertLess(events.index(item), events.index("lock-exit"))
-            self.assertLess(events.index("promoted"), events.index("switch"))
+            self.assertLess(events.index("lock-exit"), events.index("guard-clear"))
+            self.assertLess(events.index("guard-clear"), events.index("start-old"))
 
     def test_storage_failure_blocks_recovery_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            failure = self._failure(temp)
+            root = temp / "host"
+            failure = self._failure(temp, root)
             prepare = mock.Mock()
             with (
                 mock.patch.object(
