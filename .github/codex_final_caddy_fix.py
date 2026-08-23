@@ -16,7 +16,7 @@ def replace(path: str, old: str, new: str) -> None:
 replace(
     "vaultwarden_oci/runtime.py",
     "  trusted_proxies cloudflare\n  trusted_proxies_strict\n",
-    "  trusted_proxies cloudflare {\n   timeout 15s\n  }\n  trusted_proxies_strict\n",
+    "  trusted_proxies cloudflare {{\n   timeout 15s\n  }}\n  trusted_proxies_strict\n",
 )
 
 replace(
@@ -144,7 +144,7 @@ def main() -> None:
 
         smoke = root / "RateLimit.Caddyfile"
         smoke.write_text(
-            ''' + '"""' + '''{
+            """{
  auto_https off
  admin off
 }
@@ -160,7 +160,7 @@ def main() -> None:
   respond "ok"
  }
 }
-''' + '"""' + ''',
+""",
             encoding="utf-8",
         )
         name = f"vwoci-caddy-rate-limit-{os.getpid()}"
