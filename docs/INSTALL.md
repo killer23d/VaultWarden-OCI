@@ -2,158 +2,120 @@
 
 ## Supported production host
 
-VaultWarden-OCI supports Ubuntu 24.04 LTS only, on `amd64` or `arm64`.
+VaultWarden-OCI supports Ubuntu 24.04 LTS on `amd64` and `arm64`.
 
-Production persistent application state **must** live on a dedicated filesystem/volume separate from the boot/root filesystem. A root-only host is not a supported production installation. The setup path must verify that the configured state location is backed by the intended dedicated storage and fail safely if that storage is absent or unsuitable.
+Production persistent application state **must** live on a dedicated ext4/xfs filesystem separate from the boot/root filesystem. A root-only host is rejected. The canonical state mount is `/var/lib/vaultwarden-oci`; it is never a supported root-filesystem fallback.
 
-The appliance is cloud-provider neutral. Provider firewalls/security groups remain outside this repository and must allow only the traffic you intend to expose.
+## Before setup
 
-## Normal first-run path
-
-The supported first-run interface is `setup.sh`.
-
-Its production responsibility is to:
-
-1. validate Ubuntu 24.04, architecture, and dedicated storage;
-2. install required host dependencies;
-3. install the immutable appliance release;
-4. prepopulate normal operator configuration from supplied inputs;
-5. assist operational/offline Age and secret custody plus recovery-kit handoff;
-6. leave an explicit config/secrets -> start sequence rather than silently starting an incompletely configured appliance.
-
-Interactive setup is the normal human path. `--auto` is the noninteractive setup mode. `--use-latest` is a separate explicit override and **must not** be implied by `--auto`.
-
-Example intended forms:
+Attach a dedicated data volume and inspect the host with read-only tools:
 
 ```bash
-sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
-sudo ./setup.sh install --domain vault.example.com --email admin@example.com --use-latest
+findmnt -n -o SOURCE,FSTYPE,TARGET --target /
+lsblk -p -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,UUID,MODEL
 ```
 
-When `--use-latest` is requested, setup resolves each mutable upstream/project boundary once, freezes exact immutable versions/digests, records those resolved values, and uses only those exact values downstream. It must never leave a floating `latest` tag or other mutable resolution state in the installed appliance.
+Create an offline Age identity on a separate trusted workstation and keep its private key off-host. Setup receives only its public `age1...` recipient.
 
-## Dedicated storage acceptance
+## Supported first run
 
-Before installation, identify the dedicated production filesystem/volume intended for application state. The setup implementation may choose its exact flags and mount path, but the acceptance conditions are fixed:
+```bash
+sudo ./setup.sh install \
+  --domain example.com \
+  --url https://vault.example.com \
+  --email admin@example.com \
+  --data-device /dev/disk/by-id/your-data-volume \
+  --offline-recipient age1...
+```
 
-- the persistent state location is on a mounted filesystem distinct from `/`;
-- the mount is present before application services may start;
-- a missing/wrong mount fails closed rather than allowing state to fall back onto the root filesystem;
-- ownership/modes are prepared for the appliance without widening host access;
-- recovery-state and application-state paths share this production storage invariant.
+Interactive setup may omit `--data-device`; it lists plausible non-boot devices with size, filesystem, mount, and model information. No acceptable separate volume means setup exits without falling back to `/`.
 
-A removable or ephemeral mount that can disappear during normal operation is not an acceptable production substitute.
+`--url` is normalized/validated against `--domain`; `[site].domain` remains the single runtime authority.
 
-## Installed authorities
+Existing ext4/xfs adoption requires interactive `YES` or `--accept-existing-filesystem`. Blank-device ext4 formatting requires independent `--confirm-format`. Unknown filesystem types, mixed/unknown signatures, the boot disk, and its parent/children fail closed. `--auto` never guesses storage and never implies either acknowledgement.
 
-The durable installed authorities are:
+Noninteractive setup therefore supplies the storage and custody decisions explicitly. For an existing filesystem use `--accept-existing-filesystem`; for a blank device use `--confirm-format`. If a blank-device setup is interrupted after formatting, the exact same `--confirm-format --auto` command is accepted on rerun only when the host-side identity and mounted-volume marker both prove that the now-existing filesystem is the one initialized by the prior setup attempt.
+
+```bash
+sudo ./setup.sh install \
+  --domain example.com \
+  --url https://vault.example.com \
+  --email admin@example.com \
+  --data-device /dev/disk/by-id/your-data-volume \
+  --offline-recipient age1... \
+  --accept-existing-filesystem \
+  --auto
+```
+
+`--dry-run` performs host/input/device relationship checks without formatting, mounting, package installation, or project-state writes. `--use-latest` is independent of `--auto`; it resolves mutable upstream boundaries once and freezes exact versions/digests for that install. The normal path uses repository-tested exact pins.
+
+## Setup ownership
+
+After storage preflight, setup installs/verifies required Ubuntu packages, Docker Engine/Compose from Docker's Ubuntu repository, SOPS, Age, rclone, and 7-Zip. The downloaded SOPS binary is verified against the pinned architecture-specific SHA-256 before installation.
+
+Durable authorities include:
 
 ```text
-/opt/vaultwarden-oci/releases/<version>  immutable release content
-/opt/vaultwarden-oci/current             active-release selector
-/usr/local/bin/vwctl                     authoritative operator CLI
-/etc/vaultwarden-oci/config.toml         operator-editable non-secret config
-/etc/vaultwarden-oci/secrets.sops.yaml   encrypted secret document
-/etc/vaultwarden-oci/age-key.txt         root-only operational Age identity
-/run/vaultwarden-oci                     volatile generated/decrypted material
+/opt/vaultwarden-oci/releases/<version>          immutable release content
+/opt/vaultwarden-oci/current                     active-release selector
+/usr/local/bin/vwctl                             authoritative operator CLI
+/etc/vaultwarden-oci/config.toml                 operator-editable non-secret config
+/etc/vaultwarden-oci/secrets.sops.yaml           encrypted secret document
+/etc/vaultwarden-oci/age-key.txt                 root-only operational Age identity
+/etc/vaultwarden-oci/storage-identity.json       host-side expected data-volume identity
+/var/lib/vaultwarden-oci                         dedicated persistent state mount
+/var/lib/vaultwarden-oci/.vaultwarden-oci-volume.json  volume ownership marker
+/run/vaultwarden-oci                             volatile generated/decrypted material
 ```
 
-Persistent application/recovery state belongs on the validated dedicated storage filesystem. Do not establish `/var/lib/vaultwarden-oci` on the root filesystem as a supported production fallback merely because current development code still uses that path.
+Setup validates generated TOML through the canonical runtime parser before reporting it ready. Existing nonempty SOPS state is not accepted merely because a file exists: its recipients and operational decryptability must still validate. Generated secret plaintext is supplied to SOPS through stdin, not argv.
 
-`versions.toml` is the source-controlled exact version authority. `email-providers.toml` is closed immutable release metadata, not operator configuration.
+## Dedicated-storage proof and boot guard
 
-## Operator configuration
+The host-side expected identity under `/etc` is independent of the selected data volume. Runtime verification requires all of the following:
 
-The one non-secret operator config authority is `/etc/vaultwarden-oci/config.toml`. The supported shape currently includes site, offline recovery recipient, Vaultwarden, SMTP, and optional operational-notification settings. Secrets do not belong in this file.
+- `/var/lib/vaultwarden-oci` is an actual mount point and differs from `/`;
+- the source is not the boot/root block family;
+- the filesystem is ext4/xfs with a stable UUID;
+- the mounted UUID/type match `/etc/vaultwarden-oci/storage-identity.json`;
+- the filesystem's ownership marker matches that same host-side identity.
 
-Validate before start:
+This prevents a different independently initialized volume from authenticating merely from its own marker. The identity is UUID/type based, so a true block-level clone that preserves the filesystem UUID and marker is not distinguishable by this mechanism; the design does not claim physical-device attestation.
+
+Provisioning reconciles an already-mounted canonical path **before** changing the host identity or `/etc/fstab`. If setup is rerun with volume A mounted but volume B selected, it fails without rewriting next-boot storage to B. Only after the selected/live filesystem agrees does setup persist the UUID mount, host identity, volume marker, and Docker guard.
+
+All CLI paths that can directly or indirectly persist project state are storage-gated, including lifecycle/recovery/update plus `notify`, edge refresh, and CrowdSec operations. This prevents the systemd `OnFailure` notifier or edge LKG writers from recreating `/var/lib/vaultwarden-oci/state` on `/` when the mount is absent.
+
+Docker also receives a systemd drop-in using `RequiresMountsFor=/var/lib/vaultwarden-oci` and `ConditionPathIsMountPoint=/var/lib/vaultwarden-oci`, preventing Docker's own restart policy from recreating application paths on the boot filesystem when dedicated storage is absent during boot.
+
+There is no boot-to-data migration mode; this is a greenfield install path.
+
+## Safe reruns
+
+Setup is intended to be rerun after interruption. Storage identity, fstab ownership, mount guard, immutable release, Age identity, generated config, and encrypted-secret starting state are proven before replacement. Customized operator config is not silently overwritten.
+
+If a step fails, correct the reported condition and rerun the same setup command. Expected operational failures, including version-resolution/network errors, invalid encrypted-secret metadata, and setup lock contention, are reported through the supported `FAIL`/`ACTION` UI rather than as Python tracebacks.
+
+## Complete external configuration
+
+Setup does not invent Cloudflare, SMTP, notification API, or rclone credentials. Complete those through the supported config/secrets workflow, then validate:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
-```
-
-Unknown config fields fail validation. Operator config cannot replace notification endpoints, authentication modes, headers, request payloads, success rules, or retry rules.
-
-## SOPS + Age custody
-
-Use two different Age identities:
-
-1. **Operational identity** — root-only on the appliance at `/etc/vaultwarden-oci/age-key.txt`.
-2. **Offline recovery identity** — private key kept away from the appliance; only its public Age recipient is stored in normal configuration/encryption metadata.
-
-The offline recovery private identity must not be persistently stored on the server.
-
-The SOPS document remains encrypted at rest and contains required service credentials such as Cloudflare, SMTP, and optional operational-notification tokens. Plaintext credentials must not be written into `config.toml`, release files, command arguments, ordinary logs, or persistent temporary files. Decrypted runtime material belongs only under the root-owned volatile runtime tree.
-
-After secret setup, prove host-side decryption without printing plaintext and then revalidate:
-
-```bash
 sudo env SOPS_AGE_KEY_FILE=/etc/vaultwarden-oci/age-key.txt \
   sops decrypt /etc/vaultwarden-oci/secrets.sops.yaml >/dev/null
-sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl doctor --json
 ```
 
-## Recovery-kit credential handoff
-
-The password-protected recovery-kit ZIP is separate from `.vwrec` application recovery.
-
-Its contract is strict:
-
-- AES-256 ZIP encryption;
-- passphrase entered and confirmed interactively;
-- passphrase independent of stored project credentials;
-- passphrase never supplied in argv, environment variables, files, or email;
-- the encrypted ZIP is fully verified before any email attempt;
-- email delivery is a handoff step, not proof that application recovery exists.
-
-Do not substitute the operational Age private key or a normal application recovery point for this credential-handoff artifact.
-
-## Cloudflare origin, Caddy, and CrowdSec
-
-Caddy is an exact-pinned xcaddy custom build with Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP support, combined Cloudflare IP ranges, and Caddy rate limiting.
-
-Caddy's Cloudflare trusted-proxy module owns real-client-IP trust. The generated Caddy configuration must not contain a second static Cloudflare CIDR `trusted_proxies` list.
-
-Host-level origin protection is separate. Before published HTTPS is considered ready, the appliance must establish one small fail-closed Docker `DOCKER-USER` path that permits origin TCP/443 only from validated Cloudflare IPv4/IPv6 ranges, with bounded last-known-good handling. If no safe policy is available, ingress remains blocked.
-
-CrowdSec remediates proxied web-client decisions through Cloudflare. Do not install a CrowdSec host firewall bouncer as part of the supported architecture.
-
-## CyberPersons / CyberPanel Email
-
-The canonical provider ID is `cyberpersons`; `cyberpanel` is only an alias.
-
-Before configuring it:
-
-1. verify the sending domain used by the configured SMTP/from address;
-2. create an API token with the provider's required send permission;
-3. store the API token in SOPS as `email_api_token`;
-4. use independent SMTP credentials for authenticated SMTP fallback; do not reuse the API token as an SMTP password.
-
-The closed provider catalog owns the REST endpoint/request/success/retry metadata. Current verified behavior is:
-
-- accepted REST sends use HTTP `202`;
-- HTTP `503 service_unavailable` is the status-only transient/retry/fallback case;
-- HTTP `429 rate_limit_exceeded` is **not** transient by status alone because current provider behavior includes account-wide minute/hour/day/month limits shared across API and SMTP credentials;
-- HTTP `500 send_failed` is **not** transient by status alone.
-
-Re-verify official provider documentation before changing catalog metadata; do not restore older wording that treats arbitrary 429 responses as transient.
-
-## First start
-
-Setup should leave the administrator at an explicit final configuration/secrets checkpoint. Once those are complete:
+Treat any doctor `FAIL` as a failed acceptance condition. When configuration and custody are ready:
 
 ```bash
-sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
 sudo vwctl start
 sudo vwctl status
 sudo vwctl doctor --json
 ```
 
-Treat any doctor `FAIL` as a failed acceptance condition. `WARN` remains visible diagnostic state.
-
-When healthy, enable the supported systemd lifecycle/timers as documented by the installed release:
+Then enable the supported lifecycle target/timers as appropriate:
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target
@@ -163,8 +125,6 @@ systemctl list-timers 'vaultwarden-oci-*'
 
 Continue with [OPERATIONS.md](OPERATIONS.md), [RECOVERY.md](RECOVERY.md), and [HOST-ACCEPTANCE.md](HOST-ACCEPTANCE.md).
 
-## Current development-branch gap
+## Intentionally separate workstreams
 
-At this contract-synchronization point, the current development branch still exposes `bootstrap-v2.sh` as its low-level installer, stores state under `/var/lib/vaultwarden-oci`, gates `--use-latest` behind a development boundary, and lacks the supported `setup.sh` flow. Therefore the current branch does **not yet** satisfy the supported production installation procedure above.
-
-Do not reinterpret that implementation lag as permission to weaken the product contract. `bootstrap-v2.sh` remains useful implementation/bootstrap machinery, but it is not the final supported production first-run interface.
+This workstream does not implement the day-2 dashboard, recovery-kit email UI, boot-volume migration, or a replacement application-update workflow.
