@@ -14,16 +14,16 @@ import shutil
 import smtplib
 import ssl
 import stat
-import subprocess
 import sys
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import recovery, runtime, secrets, storage
+from . import recovery, runtime, secrets, sevenzip_secure, storage
 
 PUBLICATION_DIR = Path("/root/vaultwarden-recovery")
 SENSITIVE_RUN = Path("/run/vaultwarden-oci")
@@ -134,7 +134,11 @@ def _verification_for(location: str, size: int, known: Mapping[str, Mapping[str,
     recorded_size = item.get("size")
     if isinstance(recorded_size, int) and recorded_size != size:
         return "changed"
-    return "verified"
+    # Inventory intentionally does not hash/download every artifact. A matching
+    # recorded size therefore proves only that this location was verified in the
+    # past, not that its current bytes are still identical. `recovery verify`
+    # performs the current cryptographic verification.
+    return "previously-verified"
 
 
 def list_local(paths: recovery.RecoveryPaths = recovery.RecoveryPaths()) -> list[RecoveryPoint]:
@@ -212,7 +216,7 @@ def print_inventory(points: Sequence[RecoveryPoint]) -> None:
     for index, point in enumerate(points, 1):
         print(
             f"  {index}) {point.created_at}  {_human_size(point.size):>10}  "
-            f"{point.verification:<8}  {point.location}"
+            f"{point.verification:<19}  {point.location}"
         )
 
 
@@ -291,6 +295,29 @@ def verify_remote(
         size=verified.size,
         created_at=verified.created_at,
     )
+
+
+def restore_remote_once(
+    remote_object: str,
+    identity: Path,
+    *,
+    paths: recovery.RecoveryPaths = recovery.RecoveryPaths(),
+    runner: recovery.Runner = recovery.run_command,
+    start: bool = False,
+) -> Mapping[str, object]:
+    """Download one remote object, verify it, then restore those exact bytes."""
+    paths.backups.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="vwrec-remote-restore-", dir=str(paths.backups)) as directory:
+        local = recovery.download_remote(remote_object, Path(directory) / "remote.vwrec", runner=runner)
+        verify_local(
+            local,
+            identity,
+            paths=paths,
+            runner=runner,
+            state_location=remote_object,
+            record=True,
+        )
+        return recovery.restore_recovery(local, identity, paths=paths, runner=runner, start=start)
 
 
 def _choice(prompt: str, count: int) -> int | None:
@@ -489,23 +516,9 @@ def _validate_passphrase(first: str, second: str) -> str:
     return first
 
 
-def _seven(
-    argv: Sequence[str],
-    *,
-    password_input: str | None,
-    cwd: Path | None = None,
-) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            tuple(argv),
-            input=None if password_input is None else password_input + "\n",
-            text=True,
-            capture_output=True,
-            check=False,
-            cwd=str(cwd) if cwd is not None else None,
-        )
-    except OSError as exc:
-        raise RecoveryUXError("7zz is unavailable for recovery-kit encryption") from exc
+# Subprocess-shaped seam retained for focused tests; the implementation itself
+# is the proven V1-compatible secure transport.
+_seven = sevenzip_secure.run
 
 
 def _seven_required(
@@ -514,7 +527,7 @@ def _seven_required(
     password_input: str | None,
     cwd: Path | None = None,
     label: str,
-) -> subprocess.CompletedProcess[str]:
+):
     result = _seven(argv, password_input=password_input, cwd=cwd)
     if result.returncode != 0:
         raise RecoveryUXError(f"{label} failed (7zz exit {result.returncode})")
@@ -545,7 +558,9 @@ def verify_zip(
     *,
     expected_members: Sequence[str] = KIT_MEMBERS,
 ) -> None:
-    expected = set(expected_members)
+    expected_counts = Counter(expected_members)
+    if not expected_counts or any(count != 1 for count in expected_counts.values()):
+        raise RecoveryUXError("recovery-kit expected member contract is invalid")
     listing = _seven_required(
         ["7zz", "l", "-slt", "-p", str(archive)],
         password_input=passphrase,
@@ -553,20 +568,18 @@ def verify_zip(
     )
     records = _slt_records(listing.stdout)
     archive_records = [record for record in records if record.get("Type") == "zip"]
-    if not archive_records:
-        raise RecoveryUXError("recovery-kit publication is not a ZIP container")
-    member_records = {record.get("Path", ""): record for record in records if record.get("Path") in expected}
-    if set(member_records) != expected:
-        raise RecoveryUXError("recovery-kit ZIP member set is incomplete")
-    listed_paths = {
-        record.get("Path", "")
+    if len(archive_records) != 1:
+        raise RecoveryUXError("recovery-kit publication is not exactly one ZIP container")
+    member_records = [
+        record
         for record in records
-        if record.get("Path") and record.get("Path") != str(archive) and record.get("Path") != archive.name
-    }
-    unexpected = {path for path in listed_paths if path not in expected and not path.endswith(".zip")}
-    if unexpected:
-        raise RecoveryUXError("recovery-kit ZIP contains unexpected members")
-    for name, record in member_records.items():
+        if record.get("Path") and record.get("Type") != "zip"
+    ]
+    member_paths = [record["Path"] for record in member_records]
+    if Counter(member_paths) != expected_counts:
+        raise RecoveryUXError("recovery-kit ZIP member multiset does not exactly match the required member set")
+    for record in member_records:
+        name = record["Path"]
         method = record.get("Method", "").upper()
         encrypted = record.get("Encrypted", "+")
         if "AES" not in method or "256" not in method or encrypted == "-":
@@ -581,9 +594,9 @@ def verify_zip(
     if _seven(["7zz", "t", "-p", str(archive)], password_input=wrong).returncode == 0:
         raise RecoveryUXError("recovery-kit ZIP unexpectedly accepted a deliberately wrong passphrase")
     if _seven(["7zz", "t", "-p", str(archive)], password_input="").returncode == 0:
-        raise RecoveryUXError("recovery-kit ZIP unexpectedly accepted an empty passphrase")
-    if _seven(["7zz", "t", str(archive)], password_input="").returncode == 0:
-        raise RecoveryUXError("recovery-kit ZIP unexpectedly tested successfully without a passphrase")
+        raise RecoveryUXError("recovery-kit ZIP unexpectedly accepted an explicitly empty passphrase")
+    if _seven(["7zz", "t", str(archive)], password_input=None).returncode == 0:
+        raise RecoveryUXError("recovery-kit ZIP unexpectedly tested successfully with no password input")
 
 
 def _smtp_attachment(
@@ -802,8 +815,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verify_local(args.file, args.identity)
                 manifest = recovery.restore_recovery(args.file, args.identity, start=args.start)
             else:
-                verify_remote(args.from_remote, args.identity)
-                manifest = recovery.restore_from_remote(args.from_remote, args.identity, start=args.start)
+                manifest = restore_remote_once(args.from_remote, args.identity, start=args.start)
             ui.ok(f"restored recovery point created {manifest['created_at']}")
             if not args.start:
                 ui.action("services remain stopped; run 'vwctl start' when ready")
@@ -854,7 +866,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result.emailed:
                 ui.ok("verified ZIP delivered through authenticated SMTP")
             return 0
-    except (RecoveryUXError, recovery.RecoveryError, runtime.RuntimeConfigError, secrets.SecretsError, storage.StorageError, OSError) as exc:
+    except (
+        RecoveryUXError,
+        recovery.RecoveryError,
+        runtime.RuntimeConfigError,
+        secrets.SecretsError,
+        sevenzip_secure.SevenZipError,
+        storage.StorageError,
+        OSError,
+    ) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     return 2
