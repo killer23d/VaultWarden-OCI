@@ -37,6 +37,12 @@ replace(
 
 replace(
     "tests/v2/test_caddy_edge_admin.py",
+    '''        paths.transient.mkdir(parents=True)\n''',
+    '''        paths.transient.mkdir(parents=True, exist_ok=True)\n''',
+)
+
+replace(
+    "tests/v2/test_caddy_edge_admin.py",
     '''    def test_admin_disabled_is_closed_at_caddy(self):\n''',
     '''    def test_doctor_render_checks_reject_partial_trust_or_admin_drift(self):\n        caddyfile = self._render(True).caddyfile.read_text(encoding="utf-8")\n        self.assertTrue(edge._caddy_trust_configured(caddyfile))\n        self.assertFalse(edge._caddy_trust_configured(caddyfile.replace("trusted_proxies_strict\\n", "", 1)))\n        self.assertFalse(edge._caddy_trust_configured(caddyfile.replace("timeout 15s", "timeout 0s", 1)))\n        self.assertTrue(edge._caddy_admin_protected(caddyfile))\n        self.assertFalse(edge._caddy_admin_protected(caddyfile.replace("zone admin {", "zone drifted {", 1)))\n        self.assertFalse(\n            edge._caddy_admin_protected(\n                caddyfile.replace("admin {env.ADMIN_BASIC_AUTH_HASH}", "admin missing-hash-source", 1)\n            )\n        )\n        disabled = self._render(False).caddyfile.read_text(encoding="utf-8")\n        self.assertTrue(edge._caddy_admin_disabled(disabled))\n        self.assertFalse(edge._caddy_admin_protected(disabled))\n\n    def test_admin_disabled_is_closed_at_caddy(self):\n''',
 )
