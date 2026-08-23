@@ -434,7 +434,9 @@ networks:
  persist_config off
  order rate_limit before basic_auth
  servers {{
-  trusted_proxies cloudflare
+  trusted_proxies cloudflare {{
+   timeout 15s
+  }}
   trusted_proxies_strict
   client_ip_headers CF-Connecting-IP
  }}

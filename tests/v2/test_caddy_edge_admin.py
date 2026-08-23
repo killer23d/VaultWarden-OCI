@@ -69,7 +69,8 @@ class CaddyEdgeAdminContractTests(unittest.TestCase):
             "github.com/mholt/caddy-ratelimit@v0.1.0",
         ):
             self.assertIn(pin, dockerfile)
-        self.assertIn("trusted_proxies cloudflare", caddyfile)
+        self.assertIn("trusted_proxies cloudflare {", caddyfile)
+        self.assertIn("timeout 15s", caddyfile)
         self.assertIn("client_ip_headers CF-Connecting-IP", caddyfile)
         self.assertNotIn("trusted_proxies static", caddyfile)
         self.assertNotIn("173.245.48.0/20", caddyfile)

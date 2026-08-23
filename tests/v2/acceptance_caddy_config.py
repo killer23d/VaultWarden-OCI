@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import os
+import socket
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +26,39 @@ def run(argv: list[str]) -> None:
             f"command failed ({completed.returncode}): {' '.join(argv)}\n"
             + completed.stdout + completed.stderr
         )
+
+
+def output(argv: list[str]) -> str:
+    completed = subprocess.run(argv, check=False, text=True, capture_output=True)
+    if completed.returncode:
+        raise SystemExit(
+            f"command failed ({completed.returncode}): {' '.join(argv)}\n"
+            + completed.stdout + completed.stderr
+        )
+    return completed.stdout
+
+
+def wait_for_port(host: str, port: int) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return
+        except OSError:
+            time.sleep(0.1)
+    raise SystemExit(f"Caddy rate-limit smoke listener did not become ready on {host}:{port}")
+
+
+def http_status(url: str) -> int:
+    try:
+        response = urllib.request.urlopen(url, timeout=5)
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code
+        finally:
+            exc.close()
+    with response:
+        return response.status
 
 
 def main() -> None:
@@ -65,14 +103,71 @@ def main() -> None:
             "--entrypoint", "caddy", image,
             "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
         ])
-        modules = subprocess.run(
-            ["docker", "run", "--rm", "--entrypoint", "caddy", image, "list-modules"],
-            check=True, text=True, capture_output=True,
-        ).stdout
-        for module in ("dns.providers.cloudflare", "http.ip_sources.cloudflare", "http.handlers.rate_limit"):
+        modules = output(
+            ["docker", "run", "--rm", "--entrypoint", "caddy", image, "list-modules"]
+        )
+        for module in (
+            "dns.providers.cloudflare",
+            "http.ip_sources.cloudflare",
+            "http.ip_sources.combine",
+            "http.handlers.rate_limit",
+        ):
             if module not in modules:
                 raise SystemExit(f"required Caddy module missing: {module}")
-        print("PASS: exact custom Caddy build and representative Caddyfile validated")
+
+        smoke = root / "RateLimit.Caddyfile"
+        smoke.write_text(
+            """{
+ auto_https off
+ admin off
+}
+:8080 {
+ route {
+  rate_limit {
+   zone smoke {
+    key {client_ip}
+    events 2
+    window 10m
+   }
+  }
+  respond "ok"
+ }
+}
+""",
+            encoding="utf-8",
+        )
+        name = f"vwoci-caddy-rate-limit-{os.getpid()}"
+        try:
+            run([
+                "docker", "run", "-d", "--name", name,
+                "-p", "127.0.0.1::8080",
+                "-v", f"{smoke}:/etc/caddy/Caddyfile:ro",
+                "--entrypoint", "caddy", image,
+                "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
+            ])
+            mapping = output(["docker", "port", name, "8080/tcp"]).strip()
+            if not mapping.startswith("127.0.0.1:"):
+                raise SystemExit(f"unexpected Caddy smoke port mapping: {mapping!r}")
+            port = int(mapping.rsplit(":", 1)[1])
+            wait_for_port("127.0.0.1", port)
+            statuses = [http_status(f"http://127.0.0.1:{port}/") for _ in range(3)]
+            if statuses != [200, 200, 429]:
+                logs = output(["docker", "logs", name])
+                raise SystemExit(
+                    f"rate-limit smoke expected [200, 200, 429], got {statuses}\n{logs}"
+                )
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", name],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+
+        print(
+            "PASS: exact custom Caddy build, representative Caddyfile, module set, "
+            "and rate-limit threshold validated"
+        )
 
 
 if __name__ == "__main__":
