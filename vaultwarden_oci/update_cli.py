@@ -73,6 +73,11 @@ def _update_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--recovery-artifact", type=Path, required=True)
     rollback.add_argument("--recovery-sha256", required=True)
     rollback.add_argument("--previous-release", required=True)
+    rollback.add_argument(
+        "--candidate-release",
+        required=True,
+        help="failed immutable candidate recorded by update apply",
+    )
     rollback.add_argument("--identity", type=Path, required=True)
     rollback.add_argument("--yes", action="store_true")
     rollback.add_argument("--json", action="store_true")
@@ -218,6 +223,7 @@ def _persistent_payload(
         "recovery_artifact": str(failure.verified.artifact),
         "recovery_sha256": failure.verified.sha256,
         "previous_release": failure.plan.current_release,
+        "candidate_release": failure.plan.target_release,
         "recovery_command": update_appliance.recovery_command(failure),
         "rollback_attempted": rollback_attempted,
         "rollback_succeeded": rollback_succeeded,
@@ -337,6 +343,7 @@ def _rollback_command(args: argparse.Namespace, ui: UI) -> int:
         args.recovery_artifact,
         args.recovery_sha256,
         args.previous_release,
+        args.candidate_release,
     )
     update_appliance.coherent_rollback(failure, args.identity)
     if args.json:
@@ -348,6 +355,7 @@ def _rollback_command(args: argparse.Namespace, ui: UI) -> int:
                     "recovery_artifact": str(args.recovery_artifact),
                     "recovery_sha256": args.recovery_sha256,
                     "previous_release": args.previous_release,
+                    "candidate_release": args.candidate_release,
                 },
                 sort_keys=True,
             )
