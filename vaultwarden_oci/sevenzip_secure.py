@@ -1,15 +1,17 @@
 """Secure interactive 7-Zip subprocess boundary.
 
 7-Zip deliberately reads a bare ``-p`` password from a terminal rather than a
-normal stdin pipe.  This helper supplies that prompt through a pseudo-terminal
+normal stdin pipe. This helper supplies that prompt through a pseudo-terminal
 so the password never appears in argv, environment variables, or a file.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import pty
 import select
 import subprocess
+import termios
 import time
 from pathlib import Path
 from typing import Sequence
@@ -17,6 +19,11 @@ from typing import Sequence
 
 class SevenZipError(RuntimeError):
     pass
+
+
+def _make_controlling_tty() -> None:
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
 def run(
@@ -40,6 +47,7 @@ def run(
             stderr=slave_fd,
             close_fds=True,
             cwd=str(cwd) if cwd is not None else None,
+            preexec_fn=_make_controlling_tty,
         )
         os.close(slave_fd)
         slave_fd = -1
