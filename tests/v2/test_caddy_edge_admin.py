@@ -82,6 +82,7 @@ class CaddyEdgeAdminContractTests(unittest.TestCase):
         self.assertIn("admin {env.ADMIN_BASIC_AUTH_HASH}", caddyfile)
         self.assertIn("/identity/connect/token*", caddyfile)
         self.assertIn("/api/accounts/prelogin*", caddyfile)
+        self.assertIn("/api/accounts/register*", caddyfile)
         self.assertNotIn("ADMIN_ALLOW_CIDR", caddyfile)
 
     def test_admin_disabled_is_closed_at_caddy(self):

@@ -460,7 +460,7 @@ networks:
   -Server
  }}
  encode zstd gzip
-{{admin_route}} @auth path /identity/connect/token* /api/accounts/prelogin*
+{{admin_route}} @auth path /identity/connect/token* /api/accounts/prelogin* /api/accounts/register*
  handle @auth {{
   rate_limit {{
    zone auth {{
@@ -479,9 +479,13 @@ networks:
  }}
 }}
 '''
-    dockerfile = f'''FROM {{frozen.caddy_builder_image.reference}} AS builder
-RUN xcaddy build \n    --with github.com/caddy-dns/cloudflare@{{frozen.caddy_dns_cloudflare}} \n    --with github.com/WeidiDeng/caddy-cloudflare-ip@{{frozen.caddy_cloudflare_ip}} \n    --with github.com/fvbommel/caddy-combine-ip-ranges@{{frozen.caddy_combine_ip_ranges}} \n    --with github.com/mholt/caddy-ratelimit@{{frozen.caddy_ratelimit}}
-FROM {{frozen.caddy_runtime_image.reference}}
+    dockerfile = f'''FROM {frozen.caddy_builder_image.reference} AS builder
+RUN xcaddy build \\
+    --with github.com/caddy-dns/cloudflare@{frozen.caddy_dns_cloudflare} \\
+    --with github.com/WeidiDeng/caddy-cloudflare-ip@{frozen.caddy_cloudflare_ip} \\
+    --with github.com/fvbommel/caddy-combine-ip-ranges@{frozen.caddy_combine_ip_ranges} \\
+    --with github.com/mholt/caddy-ratelimit@{frozen.caddy_ratelimit}
+FROM {frozen.caddy_runtime_image.reference}
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 '''
     _write(paths.compose, compose, 0o600)

@@ -82,6 +82,15 @@ def temp_paths(root: Path) -> runtime.Paths:
 
 
 class Phase3RuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._admin_hash = mock.patch.object(
+            secrets, "derive_admin_basic_auth_hash", return_value="$2a$14$test-admin-hash"
+        )
+        self._admin_hash.start()
+
+    def tearDown(self) -> None:
+        self._admin_hash.stop()
+
     def test_config_to_runtime_rendering_validation_and_scope(self) -> None:
         import tomllib
 
@@ -186,6 +195,7 @@ class Phase3RuntimeTests(unittest.TestCase):
 
             secrets.materialize(
                 loaded,
+                derived={"admin_basic_auth_hash": "$2a$14$test-admin-hash"},
                 paths=sp,
                 uid=os.geteuid(),
                 gid=os.getegid(),

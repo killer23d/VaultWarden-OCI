@@ -124,7 +124,7 @@ Treat secret custody/decryption, runtime/storage paths, notification catalog/pro
 
 ## Current development-branch gaps
 
-The current development branch still renders static Cloudflare trusted-proxy CIDRs, builds only the Cloudflare DNS xcaddy module, stores state under `/var/lib/vaultwarden-oci` without dedicated-storage enforcement, and lacks the approved dashboard/setup surfaces. Those are known implementation gaps and must not be cited as a reason to change the durable security contract.
+The development branch is incremental; durable security decisions remain authoritative when later product surfaces are not implemented yet. Current Caddy trust, origin filtering, dedicated-storage enforcement, and setup behavior must be assessed from the implementation and tests rather than older gap summaries.
 
 ## Caddy, Cloudflare, and admin defense
 

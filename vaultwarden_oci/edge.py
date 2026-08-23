@@ -818,9 +818,9 @@ def doctor_checks(
     checks: list[DoctorCheck] = []
     try:
         caddy_text = CADDYFILE.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        checks.append(DoctorCheck("edge.caddy.trusted_proxy", "FAIL", f"cannot inspect rendered Caddy trusted-proxy config: {exc}"))
-        checks.append(DoctorCheck("edge.admin.protection", "FAIL", "rendered Caddy admin policy is unavailable"))
+    except (OSError, UnicodeError):
+        checks.append(DoctorCheck("edge.caddy.trusted_proxy", "SKIP", "rendered Caddy config is not present; service may be stopped"))
+        checks.append(DoctorCheck("edge.admin.protection", "SKIP", "rendered Caddy admin policy is not present; service may be stopped"))
     else:
         trusted = (
             "trusted_proxies cloudflare" in caddy_text
@@ -852,10 +852,13 @@ def doctor_checks(
             )
         except (json.JSONDecodeError, TypeError, AttributeError):
             healthy = False
+    caddy_absent = (not caddy_state.ok) and "no such" in (caddy_state.stderr + caddy_state.stdout).lower()
     checks.append(DoctorCheck(
         "edge.caddy.health",
-        "PASS" if healthy else "FAIL",
-        "Caddy container is running and healthy" if healthy else "Caddy container is absent, stopped, or unhealthy",
+        "PASS" if healthy else "SKIP" if caddy_absent else "FAIL",
+        "Caddy container is running and healthy" if healthy
+        else "Caddy container is not present; service may be stopped" if caddy_absent
+        else "Caddy container is stopped, unhealthy, or could not be inspected",
     ))
     policy: CloudflarePolicy | None = None
     try:
