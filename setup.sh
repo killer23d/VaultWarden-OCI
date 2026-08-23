@@ -10,4 +10,4 @@ script_path=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")
 repo_root=$(cd -- "$(/usr/bin/dirname -- "$script_path")" && pwd)
 cd -- "$repo_root"
 unset PYTHONPATH
-exec /usr/bin/python3 -B -E -m vaultwarden_oci.setup "$@"
+exec /usr/bin/python3 -B -E -m vaultwarden_oci.setup_frontend "$@"
