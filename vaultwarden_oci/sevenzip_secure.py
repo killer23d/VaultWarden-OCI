@@ -1,29 +1,19 @@
-"""Secure interactive 7-Zip subprocess boundary.
+"""Secure 7-Zip password transport carried forward from the proven V1 path.
 
-7-Zip deliberately reads a bare ``-p`` password from a terminal rather than a
-normal stdin pipe. This helper supplies that prompt through a pseudo-terminal
-so the password never appears in argv, environment variables, or a file.
+Creation/update keeps a standalone ``-p`` switch and sends the confirmed
+passphrase twice on stdin. Read/test/list operations remove standalone ``-p``;
+encrypted content then causes 7-Zip to consume one password line from stdin.
+Inline ``-pPASSWORD`` is rejected so secrets never enter argv.
 """
 from __future__ import annotations
 
-import fcntl
-import os
-import pty
-import select
 import subprocess
-import termios
-import time
 from pathlib import Path
 from typing import Sequence
 
 
 class SevenZipError(RuntimeError):
     pass
-
-
-def _make_controlling_tty() -> None:
-    os.setsid()
-    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
 def run(
@@ -35,77 +25,52 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
     if not argv:
         raise SevenZipError("7-Zip command is empty")
-    master_fd, slave_fd = pty.openpty()
-    process: subprocess.Popen[bytes] | None = None
-    output = bytearray()
-    prompts_answered = 0
+    command = list(argv)
+    if len(command) < 2:
+        raise SevenZipError("7-Zip command name is missing")
+    action = command[1]
+    safe: list[str] = []
+    prompt_switch = False
+    for index, arg in enumerate(command):
+        if index < 2:
+            safe.append(arg)
+            continue
+        if arg == "-p":
+            if action in {"a", "u"}:
+                prompt_switch = True
+                safe.append(arg)
+            continue
+        if arg.startswith("-p") and len(arg) > 2:
+            raise SevenZipError("inline 7-Zip passwords are forbidden")
+        safe.append(arg)
+    if action in {"a", "u"} and not prompt_switch:
+        safe.insert(2, "-p")
+
+    password = "" if password_input is None else password_input
+    if "\n" in password or "\r" in password or "\0" in password:
+        raise SevenZipError("7-Zip password contains unsupported control characters")
+    input_text = f"{password}\n{password}\n" if action in {"a", "u"} else f"{password}\n"
     try:
-        process = subprocess.Popen(
-            tuple(argv),
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            close_fds=True,
+        result = subprocess.run(
+            tuple(safe),
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
             cwd=str(cwd) if cwd is not None else None,
-            preexec_fn=_make_controlling_tty,
+            timeout=timeout_seconds,
         )
-        os.close(slave_fd)
-        slave_fd = -1
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            if time.monotonic() > deadline:
-                process.kill()
-                process.wait()
-                return subprocess.CompletedProcess(tuple(argv), 124, _redact(output, password_input), "")
-            readable, _, _ = select.select([master_fd], [], [], 0.1)
-            if readable:
-                try:
-                    chunk = os.read(master_fd, 4096)
-                except OSError:
-                    chunk = b""
-                if chunk:
-                    output.extend(chunk)
-                    lower = output.lower()
-                    prompt_count = lower.count(b"enter password") + lower.count(b"verify password")
-                    while prompts_answered < prompt_count:
-                        response = "" if password_input is None else password_input
-                        os.write(master_fd, response.encode("utf-8") + b"\n")
-                        prompts_answered += 1
-            returncode = process.poll()
-            if returncode is not None:
-                while True:
-                    readable, _, _ = select.select([master_fd], [], [], 0)
-                    if not readable:
-                        break
-                    try:
-                        chunk = os.read(master_fd, 4096)
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    output.extend(chunk)
-                return subprocess.CompletedProcess(
-                    tuple(argv),
-                    returncode,
-                    _redact(output, password_input),
-                    "",
-                )
-    except OSError as exc:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait()
-        raise SevenZipError("7-Zip interactive execution failed") from exc
-    finally:
-        if slave_fd >= 0:
-            os.close(slave_fd)
-        try:
-            os.close(master_fd)
-        except OSError:
-            pass
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SevenZipError("7-Zip secure execution failed") from exc
+    return subprocess.CompletedProcess(
+        tuple(safe),
+        result.returncode,
+        _redact(result.stdout, password_input),
+        _redact(result.stderr, password_input),
+    )
 
 
-def _redact(output: bytes | bytearray, password: str | None) -> str:
-    text = bytes(output).decode("utf-8", errors="replace")
+def _redact(text: str, password: str | None) -> str:
     if password:
-        text = text.replace(password, "<redacted>")
+        return text.replace(password, "<redacted>")
     return text
