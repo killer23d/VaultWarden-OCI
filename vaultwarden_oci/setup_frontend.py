@@ -12,10 +12,11 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
-from . import recovery_ux, secrets, setup
+from . import recovery_ux, secrets, setup, sevenzip_secure
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
 _ORIGINAL_SETUP_RUN = setup._run
+recovery_ux._seven = sevenzip_secure.run
 
 
 class SetupFrontendError(RuntimeError):
@@ -32,8 +33,6 @@ def _setup_run_7zip_compat(argv: Sequence[str]):
     return _ORIGINAL_SETUP_RUN(command)
 
 
-# setup.py remains authoritative; this only normalizes Ubuntu's binary name at
-# its subprocess boundary. The distro package currently exposes /usr/bin/7z.
 setup._run = _setup_run_7zip_compat
 
 
