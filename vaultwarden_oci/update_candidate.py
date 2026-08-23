@@ -10,7 +10,7 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -196,20 +196,22 @@ def prepare(
 def _atomic_copy(source: Path, destination: Path) -> None:
     if source.is_symlink() or not source.is_file():
         raise UpdateError(f"prepared candidate resource is missing or unsafe: {source}")
+    source_info = source.stat()
+    mode = stat.S_IMODE(source_info.st_mode)
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp = destination.parent / f".{destination.name}.{os.getpid()}.tmp"
     try:
         fd = os.open(
             tmp,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
+            mode,
         )
         with os.fdopen(fd, "wb") as handle:
             handle.write(source.read_bytes())
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, destination)
-        os.chmod(destination, 0o600)
+        os.chmod(destination, mode)
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
