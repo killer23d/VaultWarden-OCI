@@ -11,6 +11,7 @@ import re
 import smtplib
 import socket
 import ssl
+import stat
 import time
 import tomllib
 import urllib.error
@@ -537,7 +538,6 @@ def render_request(
         assert provider.auth_username is not None
         credentials = base64.b64encode((provider.auth_username + ":" + token).encode("utf-8")).decode("ascii")
         headers["Authorization"] = "Basic " + credentials
-
     if provider.encoding == "json":
         headers["Content-Type"] = "application/json"
         body = json.dumps(rendered, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -686,20 +686,23 @@ def send_https(
     return last
 
 
-def send_smtp(*, config: object, secrets: Mapping[str, str], context: Mapping[str, str]) -> AttemptResult:
+def _smtp_send_message(
+    *,
+    config: object,
+    secrets: Mapping[str, str],
+    message: EmailMessage,
+    from_email: str,
+    to_email: str,
+) -> AttemptResult:
+    """Canonical direct authenticated TLS SMTP transport for V2 mail."""
     username = secrets.get("smtp_username")
     password = secrets.get("smtp_password")
     if not username or not password:
-        return AttemptResult(False, False, "smtp_unavailable", "SMTP fallback credentials are unavailable")
+        return AttemptResult(False, False, "smtp_unavailable", "SMTP credentials are unavailable")
     host = getattr(config, "smtp_host", "")
     port = getattr(config, "smtp_port", 0)
     security = getattr(config, "smtp_security", "")
     timeout = getattr(config, "smtp_timeout_seconds", 15)
-    message = EmailMessage()
-    message["From"] = context["from_header"]
-    message["To"] = context["to_email"]
-    message["Subject"] = context["subject"]
-    message.set_content(context["text"])
     tls = ssl.create_default_context()
     client = None
     try:
@@ -711,22 +714,80 @@ def send_smtp(*, config: object, secrets: Mapping[str, str], context: Mapping[st
             client.starttls(context=tls)
             client.ehlo()
         else:
-            return AttemptResult(False, False, "smtp_security", "SMTP fallback requires implicit TLS or STARTTLS")
+            return AttemptResult(False, False, "smtp_security", "SMTP requires implicit TLS or STARTTLS")
         client.login(username, password)
-        client.send_message(message, from_addr=context["from_email"], to_addrs=[context["to_email"]])
+        client.send_message(message, from_addr=from_email, to_addrs=[to_email])
         return AttemptResult(True, False, "accepted", "authenticated SMTP accepted the message")
     except ssl.SSLCertVerificationError:
         return AttemptResult(False, False, "smtp_tls_verification", "SMTP TLS certificate/hostname verification failed")
     except ssl.SSLError:
         return AttemptResult(False, False, "smtp_tls_failure", "SMTP TLS handshake/validation failed")
     except (socket.timeout, TimeoutError, socket.gaierror, ConnectionError, OSError, smtplib.SMTPException):
-        return AttemptResult(False, False, "smtp_failure", "authenticated SMTP fallback failed")
+        return AttemptResult(False, False, "smtp_failure", "authenticated SMTP delivery failed")
     finally:
         if client is not None:
             try:
                 client.quit()
             except Exception:
                 pass
+
+
+def send_smtp(*, config: object, secrets: Mapping[str, str], context: Mapping[str, str]) -> AttemptResult:
+    message = EmailMessage()
+    message["From"] = context["from_header"]
+    message["To"] = context["to_email"]
+    message["Subject"] = context["subject"]
+    message.set_content(context["text"])
+    return _smtp_send_message(
+        config=config,
+        secrets=secrets,
+        message=message,
+        from_email=context["from_email"],
+        to_email=context["to_email"],
+    )
+
+
+def send_smtp_attachment(
+    *,
+    config: object,
+    secrets: Mapping[str, str],
+    to_email: str,
+    subject: str,
+    text: str,
+    attachment: Path,
+    attachment_name: str | None = None,
+) -> AttemptResult:
+    """Send one verified file through the existing direct authenticated SMTP path."""
+    context = message_context(
+        from_email=getattr(config, "smtp_from_email", ""),
+        from_name=getattr(config, "smtp_from_name", ""),
+        to_email=to_email,
+        subject=subject,
+        text=text,
+    )
+    try:
+        info = attachment.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+            return AttemptResult(False, False, "smtp_attachment", "SMTP attachment is not a non-empty regular file")
+        payload = attachment.read_bytes()
+    except OSError:
+        return AttemptResult(False, False, "smtp_attachment", "SMTP attachment could not be read")
+    name = attachment.name if attachment_name is None else attachment_name
+    if not name or name != Path(name).name or any(char in name for char in "\0\r\n"):
+        return AttemptResult(False, False, "smtp_attachment", "SMTP attachment name is invalid")
+    message = EmailMessage()
+    message["From"] = context["from_header"]
+    message["To"] = context["to_email"]
+    message["Subject"] = context["subject"]
+    message.set_content(context["text"])
+    message.add_attachment(payload, maintype="application", subtype="zip", filename=name)
+    return _smtp_send_message(
+        config=config,
+        secrets=secrets,
+        message=message,
+        from_email=context["from_email"],
+        to_email=context["to_email"],
+    )
 
 
 def _now() -> str:
