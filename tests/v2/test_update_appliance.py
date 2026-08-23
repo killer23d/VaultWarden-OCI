@@ -224,6 +224,7 @@ class TransactionOrderTests(unittest.TestCase):
                 mock.patch.object(update, "_switch", side_effect=lambda _layout, target: switches.append(target)),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", return_value=True),
+                mock.patch.object(update_appliance.update_guard, "engage") as guard,
             ):
                 with self.assertRaises(update_appliance.PersistentStateFailure):
                     update_appliance.apply_prepared(
@@ -232,6 +233,7 @@ class TransactionOrderTests(unittest.TestCase):
                         activator=lambda *_args: (_ for _ in ()).throw(update.RuntimeActivationError("started", state_change_possible=True)),
                         recovery_creator=lambda *_args, **_kwargs: self._verified(temp),
                     )
+            guard.assert_called_once()
         self.assertEqual(switches, [Path("releases/2.0.0")])
 
 
