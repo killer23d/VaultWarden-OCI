@@ -502,6 +502,10 @@ def _quarantine_current(layout: install.Layout) -> None:
     update._switch(layout, _QUARANTINE_TARGET)
 
 
+def _guard_path(layout: install.Layout) -> Path:
+    return layout.path(update_guard.RECOVERY_REQUIRED_STATE)
+
+
 def _current_target(layout: install.Layout) -> Path:
     current = layout.path(install.CURRENT_LINK)
     if not current.is_symlink():
@@ -571,6 +575,7 @@ def apply_prepared(
     """Prepare while healthy, then mutate under one short appliance lock boundary."""
     plan = prepared.plan
     layout = install.Layout(plan.root.resolve())
+    guard_path = _guard_path(layout)
     if layout.root != Path("/") and (
         runner is cli.run_command or activator is _activate_candidate_release
     ):
@@ -654,6 +659,7 @@ def apply_prepared(
                                     previous_release=plan.current_release,
                                     recovery_artifact=str(verified.artifact),
                                     recovery_sha256=verified.sha256,
+                                    path=guard_path,
                                 )
                             except Exception as guard_exc:
                                 guard_detail = f"recovery guard failed ({guard_exc}); current quarantined"
@@ -719,44 +725,23 @@ def apply_prepared(
                 ) from failure
 
 
-def _restore_selection(
-    layout: install.Layout,
-    target: Path,
-    unit_snapshot: Mapping[Path, tuple[bytes, int]] | None,
-    runner: Runner,
-) -> list[str]:
-    errors: list[str] = []
-    try:
-        update._switch(layout, target)
-    except Exception as exc:
-        errors.append(f"current target: {exc}")
-    if unit_snapshot is not None:
-        try:
-            update_unit_migration.restore_units(unit_snapshot)
-        except Exception as exc:
-            errors.append(f"systemd units: {exc}")
-    try:
-        update._daemon_reload(layout, runner)
-    except Exception as exc:
-        errors.append(f"daemon-reload: {exc}")
-    return errors
-
-
 def coherent_rollback(
     failure: PersistentStateFailure,
     identity: Path,
     *,
     runner: Runner = cli.run_command,
 ) -> None:
-    """Restore pre-update data and previous immutable code as one lock transaction."""
+    """Restore pre-update data and previous immutable code as one crash-safe lock transaction."""
     storage.verify()
     plan = failure.plan
     layout = install.Layout(plan.root.resolve())
+    guard_path = _guard_path(layout)
     if recovery._sha256(failure.verified.artifact) != failure.verified.sha256:
         raise UpdateError("pre-update recovery artifact digest no longer matches the recorded verified digest")
 
     expected_previous = layout.path(install.RELEASES_DIR) / plan.current_release
     candidate_path = layout.path(install.RELEASES_DIR) / plan.target_release
+    candidate_target = Path("releases") / plan.target_release
     if not expected_previous.is_dir() or expected_previous.is_symlink():
         raise UpdateError("previous immutable application release is unavailable for coherent rollback")
     if not candidate_path.is_dir() or candidate_path.is_symlink():
@@ -776,77 +761,92 @@ def coherent_rollback(
                     raise UpdateError("current selection changed while coherent rollback was being prepared")
                 if plan.root == Path("/"):
                     storage.verify()
-                if not _stop_candidate_locked(candidate_path, runner):
-                    raise UpdateError("candidate containers could not be proven stopped; refusing destructive recovery promotion")
-                update_guard.engage(
-                    candidate_release=plan.target_release,
-                    previous_release=plan.current_release,
-                    recovery_artifact=str(failure.verified.artifact),
-                    recovery_sha256=failure.verified.sha256,
-                )
-
-                unit_snapshot: dict[Path, tuple[bytes, int]] | None = None
-                switched_old = False
-                data_promoted = False
                 try:
-                    unit_snapshot = update_unit_migration.converge_units(
+                    update_guard.engage(
+                        candidate_release=plan.target_release,
+                        previous_release=plan.current_release,
+                        recovery_artifact=str(failure.verified.artifact),
+                        recovery_sha256=failure.verified.sha256,
+                        path=guard_path,
+                    )
+                except Exception as guard_exc:
+                    try:
+                        _quarantine_current(layout)
+                    except Exception as quarantine_exc:
+                        raise UpdateError(
+                            f"coherent rollback recovery guard failed and current could not be quarantined: {guard_exc}; quarantine failure: {quarantine_exc}"
+                        ) from guard_exc
+                    raise UpdateError(
+                        f"coherent rollback recovery guard failed; current was quarantined before releasing the mutation lock: {guard_exc}"
+                    ) from guard_exc
+
+                if _current_target(layout) != candidate_target:
+                    try:
+                        update._switch(layout, candidate_target)
+                    except Exception as switch_exc:
+                        try:
+                            _quarantine_current(layout)
+                        except Exception as quarantine_exc:
+                            raise UpdateError(
+                                f"could not select guard-aware candidate before recovery promotion: {switch_exc}; quarantine failure: {quarantine_exc}"
+                            ) from switch_exc
+                        raise UpdateError(
+                            f"could not select guard-aware candidate before recovery promotion; current was quarantined: {switch_exc}"
+                        ) from switch_exc
+
+                if not _stop_candidate_locked(candidate_path, runner):
+                    raise UpdateError(
+                        "candidate containers could not be proven stopped; refusing destructive recovery promotion while recovery guard remains active"
+                    )
+
+                data_promoted = False
+                switched_old = False
+                try:
+                    # Keep guard-aware candidate code selected until old data is fully
+                    # promoted. A process/host crash before this returns can therefore
+                    # only reboot into candidate code that knows to honor the guard.
+                    prepared_restore.promote_locked(runner=runner)
+                    data_promoted = True
+                    update_unit_migration.converge_units(
                         expected_previous,
                         (candidate_path, expected_previous),
                         layout,
                     )
                     update._switch(layout, plan.current_target)
                     switched_old = True
-                    prepared_restore.promote_locked(runner=runner)
-                    data_promoted = True
                     update._daemon_reload(layout, runner)
                 except update_recovery.PromotionError as exc:
-                    if exc.rollback_complete:
-                        restore_errors = _restore_selection(
-                            layout,
-                            original_target,
-                            unit_snapshot,
-                            runner,
-                        )
-                        if restore_errors:
-                            _quarantine_current(layout)
-                            raise UpdateError(
-                                "coherent rollback data promotion failed; original live data was restored, "
-                                "but original code selection could not be fully restored; current was quarantined: "
-                                + "; ".join(restore_errors)
-                            ) from exc
-                        raise UpdateError(
-                            f"coherent rollback data promotion failed; original live data and code selection were restored; services remain stopped: {exc}"
-                        ) from exc
                     try:
                         _quarantine_current(layout)
-                        update._daemon_reload(layout, runner)
                     except Exception as quarantine_exc:
                         raise UpdateError(
-                            f"coherent rollback promotion failed with unproven live-data state and current could not be quarantined: {exc}; quarantine failure: {quarantine_exc}"
+                            f"coherent rollback data promotion failed and current could not be quarantined: {exc}; quarantine failure: {quarantine_exc}"
+                        ) from exc
+                    if exc.rollback_complete:
+                        raise UpdateError(
+                            f"coherent rollback data promotion failed; original live data was restored and current was quarantined for a safe retry: {exc}"
                         ) from exc
                     raise UpdateError(
-                        f"coherent rollback promotion failed with unproven live-data state; normal current/vwctl start path was quarantined and services remain stopped: {exc}"
+                        f"coherent rollback promotion failed with unproven live-data state; current was quarantined and services remain stopped: {exc}"
                     ) from exc
                 except Exception as exc:
-                    if data_promoted:
-                        raise UpdateError(
-                            f"coherent rollback restored pre-update data and selected previous code, but final systemd reload failed; services remain stopped: {exc}"
-                        ) from exc
-                    restore_errors = (
-                        _restore_selection(layout, original_target, unit_snapshot, runner)
-                        if (switched_old or unit_snapshot is not None)
-                        else []
-                    )
-                    if restore_errors:
+                    if data_promoted and not switched_old:
                         try:
                             _quarantine_current(layout)
                         except Exception as quarantine_exc:
-                            restore_errors.append(f"quarantine: {quarantine_exc}")
+                            raise UpdateError(
+                                f"pre-update data was restored but previous-code selection failed, and current could not be quarantined: {exc}; quarantine failure: {quarantine_exc}"
+                            ) from exc
                         raise UpdateError(
-                            "coherent rollback failed before data promotion and original selection could not be fully restored; services remain stopped: "
-                            + "; ".join(restore_errors)
+                            f"pre-update data was restored but previous-code selection did not complete; current was quarantined and services remain stopped: {exc}"
                         ) from exc
-                    raise
+                    if data_promoted and switched_old:
+                        raise UpdateError(
+                            f"pre-update data and previous code were selected, but final systemd reload failed; services remain stopped: {exc}"
+                        ) from exc
+                    raise UpdateError(
+                        f"coherent rollback failed before data promotion; guard-aware candidate selection remains blocked from normal start: {exc}"
+                    ) from exc
                 completed = True
     except Exception:
         if layout.root == Path("/"):
@@ -856,7 +856,7 @@ def coherent_rollback(
     if not completed:
         raise UpdateError("coherent rollback did not reach a complete data+code state")
     try:
-        update_guard.clear()
+        update_guard.clear(path=guard_path)
     except update_guard.UpdateGuardError as exc:
         raise UpdateError(f"coherent rollback completed but recovery guard could not be cleared: {exc}") from exc
     _start_previous_service(layout, expected_previous, runner)
