@@ -45,6 +45,9 @@ def latest_frozen() -> update_versions.FrozenVersions:
         update_versions.ImagePin("vaultwarden", "vaultwarden/server", "1.40.0", digest("a")),
         update_versions.ImagePin("caddy_builder", "caddy", "2.12.0-builder-alpine", digest("b")),
         update_versions.ImagePin("caddy_runtime", "caddy", "2.12.0-alpine", digest("c")),
+        caddy_cloudflare_ip="f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5",
+        caddy_combine_ip_ranges="v0.0.1",
+        caddy_ratelimit="v0.1.0",
     )
 
 
@@ -205,7 +208,7 @@ class VwctlUnitTests(unittest.TestCase):
             self.assertIn(f"caddy_runtime {frozen.caddy_runtime_image.reference}", output.getvalue())
 
     def test_status_notification_warning_does_not_fail_runtime_health(self) -> None:
-        from vaultwarden_oci import notification, recovery, runtime
+        from vaultwarden_oci import edge, notification, recovery, runtime
 
         rows = [
             {"service": "vaultwarden", "state": "running", "health": "healthy"},
@@ -222,6 +225,7 @@ class VwctlUnitTests(unittest.TestCase):
             mock.patch.object(runtime, "status", return_value=("running", rows)),
             mock.patch.object(recovery, "status_rows", return_value=[]),
             mock.patch.object(notification, "status_row", return_value=notification_row),
+            mock.patch.object(edge, "doctor_checks", return_value=[]),
             redirect_stdout(output),
         ):
             code = cli.main(["status"])

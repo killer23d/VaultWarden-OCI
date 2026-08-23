@@ -460,7 +460,7 @@ networks:
   -Server
  }}
  encode zstd gzip
-{{admin_route}} @auth path /identity/connect/token* /api/accounts/prelogin* /api/accounts/register*
+{admin_route} @auth path /identity/connect/token* /api/accounts/prelogin* /api/accounts/register*
  handle @auth {{
   rate_limit {{
    zone auth {{

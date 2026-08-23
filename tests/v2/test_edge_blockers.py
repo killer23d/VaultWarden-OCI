@@ -141,7 +141,7 @@ class Phase4BlockerTests(unittest.TestCase):
                 smtp_timeout_seconds=15,
             )
             policy = edge.validate_policy(V4, V6, fetched_at=1000, source="test")
-            runtime.render(config, versions, paths, cloudflare_policy=policy)
+            runtime.render(config, versions, paths)
             compose = paths.compose.read_text(encoding="utf-8")
 
         self.assertIn('ports: ["443:443/tcp"]', compose)
