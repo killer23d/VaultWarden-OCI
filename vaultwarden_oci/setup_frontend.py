@@ -6,6 +6,7 @@ human custody step that must span initial setup and recovery-kit publication.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -14,10 +15,24 @@ from typing import Sequence
 from . import recovery_ux, secrets, setup
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
+_ORIGINAL_SETUP_RUN = setup._run
 
 
 class SetupFrontendError(RuntimeError):
     pass
+
+
+def _setup_run_7zip_compat(argv: Sequence[str], *, input_text=None, env=None):
+    """Preserve setup._run's full call contract while accepting Ubuntu's 7z name."""
+    command = list(argv)
+    if command and command[0] == "7zz" and shutil.which("7zz") is None:
+        seven = shutil.which("7z")
+        if seven is not None:
+            command[0] = seven
+    return _ORIGINAL_SETUP_RUN(command, input_text=input_text, env=env)
+
+
+setup._run = _setup_run_7zip_compat
 
 
 def _generate_offline_identity(root: Path = SENSITIVE_RUN) -> tuple[Path, Path, str]:
