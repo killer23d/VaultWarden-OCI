@@ -1,0 +1,30 @@
+name: Apply edge hardening patch
+
+on:
+  push:
+    branches: [codex/caddy-edge-admin-hardening-20260822]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[edge-patch-applied]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: codex/caddy-edge-admin-hardening-20260822
+      - name: Apply scoped patch
+        run: python3 .github/codex_apply_edge.py
+      - name: Compile patched Python
+        run: python3 -m compileall -q vaultwarden_oci tests/v2
+      - name: Remove temporary patch machinery
+        run: rm -f .github/codex_apply_edge.py .github/workflows/codex-edge-patch.yml
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Harden Caddy Cloudflare edge and admin gate [edge-patch-applied]"
+          git push origin HEAD:codex/caddy-edge-admin-hardening-20260822
