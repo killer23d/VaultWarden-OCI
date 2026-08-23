@@ -18,14 +18,16 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
+      - name: Correct staged helper
+        run: python3 .github/codex_fix_helper.py
       - name: Apply scoped edge patch
         run: python3 .github/codex_apply_edge.py
       - name: Compile patched Python
         run: python3 -m compileall -q vaultwarden_oci tests/v2
-      - name: Restore CI and remove temporary machinery
+      - name: Remove temporary patch machinery
         run: |
           git checkout origin/v2 -- .github/workflows/v2-ci.yml
-          rm -f .github/codex_apply_edge.py .github/workflows/codex-edge-patch.yml
+          rm -f .github/codex_apply_edge.py .github/codex_fix_helper.py .github/workflows/codex-edge-patch.yml
       - name: Commit scoped implementation
         run: |
           git config user.name "github-actions[bot]"
