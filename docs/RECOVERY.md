@@ -22,7 +22,7 @@ sudo vwctl recovery verify --file /secure/path/recovery.vwrec --identity /secure
 sudo vwctl recovery verify --from-remote 'REMOTE:path/recovery-file.vwrec' --identity /secure/offline-age-key.txt
 ```
 
-Inventory is derived from the local recovery directory, rclone listing, and the existing recovery state file. It does not create a second recovery database. Entries are newest-first and show time, size, location, and verification state when known.
+Inventory is derived from the local recovery directory, rclone listing, and the existing recovery state file. It does not create a second recovery database. Entries are newest-first and show time, size, location, and verification history when known. `previously-verified` is intentionally historical: inventory does not hash every local artifact or download every remote artifact on each listing, so it never claims the current bytes are verified merely because a location and size still match a prior verification. A size change is shown as `changed`; use `recovery verify` for a current cryptographic proof.
 
 `recovery verify` is non-destructive. It decrypts and validates the `.vwrec` envelope, manifest/path/member/checksum contract and proves the supplied offline identity can decrypt the included SOPS document. A failed verification never stops services or promotes data.
 
@@ -51,7 +51,7 @@ Normal publication must not use destructive `rclone sync`. Creating a new recove
 Run `sudo vwctl restore` in a TTY. The guided flow is:
 
 1. choose local or remote recovery source;
-2. display newest-first numbered `.vwrec` recovery points with time, size, location, and known verification state;
+2. display newest-first numbered `.vwrec` recovery points with time, size, location, and known verification history;
 3. choose one recovery point;
 4. supply the offline Age private identity path;
 5. prove the dedicated production-storage mount/identity and perform non-destructive cryptographic/manifest/SOPS preflight;
@@ -77,6 +77,8 @@ sudo vwctl restore \
   --identity /secure/offline-age-key.txt
 ```
 
+For an explicit remote restore, the selected remote object is downloaded exactly once into protected local staging. That exact downloaded file is verified and then passed to the existing `recovery.py` restore transaction, preventing a mutable remote object from changing between a verification download and a separate restore download.
+
 Add `--start` only when a health-gated post-promotion start is desired. Without it, services remain stopped after successful promotion for deliberate operator review.
 
 ## Separate recovery-kit credential handoff
@@ -101,18 +103,25 @@ The fixed ZIP security contract is:
 
 - plaintext kit members exist only in a protected root-owned temporary workspace;
 - independent ZIP passphrase is entered interactively twice and must be at least 16 characters;
-- passphrase is supplied to `7zz` over stdin only, never argv, environment, a file, logs, email subject/body, or project secrets;
+- passphrase is supplied to Ubuntu `7zip`/`7zz` through stdin only, never argv, environment, a file, logs, email subject/body, or project secrets;
+- inline `-pPASSWORD` arguments are rejected;
 - Ubuntu `7zip`/`7zz` creates an AES-256 ZIP;
-- before publication/email, verification proves ZIP container type, exact member set, AES-256 encryption for every member, correct-passphrase archive test success, deliberate wrong-passphrase failure, empty-passphrase failure, and no-passphrase failure;
+- before publication/email, verification proves ZIP container type and the exact member multiset, so extra files, extra `.zip` entries, missing entries, and duplicate entries are rejected;
+- every intended member must prove AES-256 encryption;
+- correct-passphrase archive testing must succeed;
+- deliberate wrong-passphrase and explicitly empty-passphrase tests must fail;
+- a separate no-password test runs with no password input and stdin connected to `/dev/null`, and must fail;
 - only a fully verified ZIP is atomically published in the protected recovery directory;
-- email, when accepted, uses direct authenticated SMTP with the configured TLS mode and sends only the verified ZIP attachment; provider-specific HTTP attachment APIs are not used;
+- email, when accepted, uses the existing direct authenticated SMTP owner with the configured TLS mode and sends only the verified ZIP attachment; provider-specific HTTP attachment APIs are not used;
 - the ZIP passphrase is never included in email.
 
 The protected plaintext workspace is removed after publication; cleanup failure is an observable command failure.
 
 ## Initial setup offline custody
 
-Interactive first-run setup without `--offline-recipient` generates the offline Age private identity only in a root-owned volatile `/run/vaultwarden-oci/setup-offline-recovery-*` workspace. Setup receives only the derived public recipient. After setup completes, the same private identity is included in the verified complete recovery-kit ZIP. Only after that handoff succeeds is the host-side volatile private copy removed.
+Interactive first-run setup without `--offline-recipient` generates the offline Age private identity only in a root-owned volatile `/run/vaultwarden-oci/setup-offline-recovery-*` workspace. Setup receives only the derived public recipient. After setup completes, the same private identity is included in the verified complete recovery-kit ZIP.
+
+The host-side volatile private identity is removed only after an actual custody handoff. Successful authenticated SMTP delivery qualifies as a handoff. If email is declined, setup tells the operator to copy the verified encrypted ZIP off-host and requires the exact `SAVED` acknowledgement after that transfer before deleting the transient private identity. Declining or failing that acknowledgement leaves the private identity in the volatile root-only workspace and reports the path rather than falsely declaring custody complete.
 
 If setup or kit publication fails after generation, the wrapper reports the volatile path and does **not** pretend custody succeeded. The private identity is never installed as ordinary persistent server state. Noninteractive setup and setup with an explicit `--offline-recipient` keep the existing operator-supplied custody model.
 
@@ -150,7 +159,7 @@ A release gate should prove the complete path on disposable state:
 6. start and pass `vwctl status` plus `vwctl doctor --json`;
 7. confirm known application state survived;
 8. confirm the operational Age private key was not embedded in the recovery point;
-9. separately exercise the recovery-kit ZIP handoff and verify AES/member/password behavior and passphrase redaction.
+9. separately exercise the recovery-kit ZIP handoff and verify AES/exact-member/correct-password/wrong-password/empty-password/no-password behavior and passphrase redaction.
 
 ## Update recovery boundary
 
