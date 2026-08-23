@@ -25,6 +25,9 @@ version = "{version}"
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
 caddy_dns_cloudflare = "v0.2.4"
+caddy_cloudflare_ip = "f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5"
+caddy_combine_ip_ranges = "v0.0.1"
+caddy_ratelimit = "v0.1.0"
 [image_digests.vaultwarden]
 amd64 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 arm64 = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -203,7 +206,10 @@ class Phase2InstallTests(unittest.TestCase):
             (source / "versions.toml").write_text(
                 'schema_version = 1\n[vaultwarden_oci]\nversion = "0.1.0-missing-digests"\n'
                 '[components]\nvaultwarden = "1.37.1"\ncaddy = "2.11.4"\n'
-                'caddy_dns_cloudflare = "v0.2.4"\n',
+                'caddy_dns_cloudflare = "v0.2.4"\n'
+                'caddy_cloudflare_ip = "f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5"\n'
+                'caddy_combine_ip_ranges = "v0.0.1"\n'
+                'caddy_ratelimit = "v0.1.0"\n',
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(install.InstallError, "image_digests"):

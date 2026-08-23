@@ -64,11 +64,13 @@ class FrozenVersions:
     vaultwarden_image: ImagePin
     caddy_builder_image: ImagePin
     caddy_runtime_image: ImagePin
+    caddy_cloudflare_ip: str = ""
+    caddy_combine_ip_ranges: str = ""
+    caddy_ratelimit: str = ""
 
     @property
     def caddy_image(self) -> str:
-        plugin = self.caddy_dns_cloudflare.removeprefix("v")
-        return f"vaultwarden-oci/caddy:{self.caddy}-cloudflare-{plugin}"
+        return f"vaultwarden-oci/caddy:{self.caddy}-edge"
 
     def as_dict(self) -> dict[str, object]:
         images = {}
@@ -88,6 +90,9 @@ class FrozenVersions:
                 "vaultwarden": self.vaultwarden,
                 "caddy": self.caddy,
                 "caddy_dns_cloudflare": self.caddy_dns_cloudflare,
+                "caddy_cloudflare_ip": self.caddy_cloudflare_ip,
+                "caddy_combine_ip_ranges": self.caddy_combine_ip_ranges,
+                "caddy_ratelimit": self.caddy_ratelimit,
             },
             "images": images,
         }
@@ -228,6 +233,9 @@ def _freeze(
     vaultwarden: str,
     caddy: str,
     plugin: str,
+    trusted_proxy: str,
+    combine_ranges: str,
+    rate_limit: str,
     digests: Mapping[str, str],
 ) -> FrozenVersions:
     return FrozenVersions(
@@ -240,6 +248,9 @@ def _freeze(
         ImagePin("vaultwarden", "vaultwarden/server", vaultwarden, digests["vaultwarden"]),
         ImagePin("caddy_builder", "caddy", f"{caddy}-builder-alpine", digests["caddy_builder"]),
         ImagePin("caddy_runtime", "caddy", f"{caddy}-alpine", digests["caddy_runtime"]),
+        caddy_cloudflare_ip=trusted_proxy,
+        caddy_combine_ip_ranges=combine_ranges,
+        caddy_ratelimit=rate_limit,
     )
 
 
@@ -263,6 +274,9 @@ def resolve_pinned_file(
         manifest.vaultwarden,
         manifest.caddy,
         manifest.caddy_dns_cloudflare,
+        manifest.caddy_cloudflare_ip,
+        manifest.caddy_combine_ip_ranges,
+        manifest.caddy_ratelimit,
         _image_digests(
             path,
             arch,
@@ -343,7 +357,10 @@ def resolve_latest(
         project = install.validate_release_name(f"{base.version}.latest.{suffix}")
     except install.InstallError as exc:
         raise UpdateError(str(exc)) from exc
-    return _freeze("latest", arch, project, vaultwarden, caddy, plugin, digests)
+    return _freeze(
+        "latest", arch, project, vaultwarden, caddy, plugin,
+        base.caddy_cloudflare_ip, base.caddy_combine_ip_ranges, base.caddy_ratelimit, digests
+    )
 
 
 def frozen_versions_toml(frozen: FrozenVersions) -> str:
@@ -357,6 +374,9 @@ def frozen_versions_toml(frozen: FrozenVersions) -> str:
         f'vaultwarden = "{frozen.vaultwarden}"',
         f'caddy = "{frozen.caddy}"',
         f'caddy_dns_cloudflare = "{frozen.caddy_dns_cloudflare}"',
+        f'caddy_cloudflare_ip = "{frozen.caddy_cloudflare_ip}"',
+        f'caddy_combine_ip_ranges = "{frozen.caddy_combine_ip_ranges}"',
+        f'caddy_ratelimit = "{frozen.caddy_ratelimit}"',
     ]
     for pin in (frozen.vaultwarden_image, frozen.caddy_builder_image, frozen.caddy_runtime_image):
         lines.extend(("", f"[image_digests.{pin.name}]", f'{frozen.architecture} = "{pin.digest}"'))

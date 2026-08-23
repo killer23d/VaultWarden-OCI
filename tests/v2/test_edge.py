@@ -28,6 +28,9 @@ version = "0.1.0-dev.7"
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
 caddy_dns_cloudflare = "v0.2.4"
+caddy_cloudflare_ip = "f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5"
+caddy_combine_ip_ranges = "v0.0.1"
+caddy_ratelimit = "v0.1.0"
 [image_digests.vaultwarden]
 amd64 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 arm64 = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -196,14 +199,17 @@ class OriginPolicyTests(unittest.TestCase):
                 smtp_timeout_seconds=15,
             )
             policy = edge.validate_policy(V4, V6, fetched_at=1000, source="test")
-            runtime.render(config, versions, paths, cloudflare_policy=policy)
+            runtime.render(config, versions, paths, admin_enabled=True)
 
             caddyfile = paths.caddyfile.read_text(encoding="utf-8")
             compose = paths.compose.read_text(encoding="utf-8")
-            self.assertIn("trusted_proxies static", caddyfile)
-            self.assertIn("173.245.48.0/20", caddyfile)
-            self.assertIn("2400:cb00::/32", caddyfile)
+            self.assertIn("trusted_proxies cloudflare", caddyfile)
+            self.assertNotIn("trusted_proxies static", caddyfile)
+            self.assertNotIn("173.245.48.0/20", caddyfile)
+            self.assertNotIn("2400:cb00::/32", caddyfile)
             self.assertIn("client_ip_headers CF-Connecting-IP", caddyfile)
+            self.assertIn("key {client_ip}", caddyfile)
+            self.assertIn("basic_auth", caddyfile)
             self.assertIn("output file /var/log/caddy/access.log", caddyfile)
             self.assertIn(str(paths.caddy_log_path) + ":/var/log/caddy", compose)
             self.assertIn('ports: ["443:443/tcp"]', compose)

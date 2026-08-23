@@ -37,6 +37,9 @@ DOCTOR_CHECK_IDS = (
     "notification.api_secret",
     "notification.smtp_fallback",
     "notification.last_delivery",
+    "edge.caddy.trusted_proxy",
+    "edge.caddy.health",
+    "edge.admin.protection",
     "edge.cloudflare.cidrs",
     "edge.cloudflare.iptables",
     "crowdsec.engine",
@@ -72,6 +75,9 @@ class VersionsManifest:
     vaultwarden: str = ""
     caddy: str = ""
     caddy_dns_cloudflare: str = ""
+    caddy_cloudflare_ip: str = ""
+    caddy_combine_ip_ranges: str = ""
+    caddy_ratelimit: str = ""
 
 
 @dataclass(frozen=True)
@@ -167,7 +173,7 @@ def load_versions(path: Path = DEFAULT_VERSIONS_PATH, *, require_components: boo
     components = data.get("components", {})
     if not isinstance(project, dict) or not isinstance(components, dict):
         raise VersionsError("versions manifest requires [vaultwarden_oci] and optional [components]")
-    unknown = sorted(set(components) - {"vaultwarden", "caddy", "caddy_dns_cloudflare"})
+    unknown = sorted(set(components) - {"vaultwarden", "caddy", "caddy_dns_cloudflare", "caddy_cloudflare_ip", "caddy_combine_ip_ranges", "caddy_ratelimit"})
     if unknown:
         raise VersionsError("unknown component pin(s): " + ", ".join(unknown))
 
@@ -183,6 +189,9 @@ def load_versions(path: Path = DEFAULT_VERSIONS_PATH, *, require_components: boo
         component("vaultwarden"),
         component("caddy"),
         component("caddy_dns_cloudflare"),
+        component("caddy_cloudflare_ip"),
+        component("caddy_combine_ip_ranges"),
+        component("caddy_ratelimit"),
     )
 
 
@@ -399,7 +408,9 @@ def _versions() -> int:
         return 1
     print(
         f"vaultwarden-oci {v.version}; vaultwarden {v.vaultwarden}; "
-        f"caddy {v.caddy}; caddy-dns/cloudflare {v.caddy_dns_cloudflare}"
+        f"caddy {v.caddy}; caddy-dns/cloudflare {v.caddy_dns_cloudflare}; "
+        f"trusted-proxy {v.caddy_cloudflare_ip}; combine-ip-ranges {v.caddy_combine_ip_ranges}; "
+        f"rate-limit {v.caddy_ratelimit}"
     )
     return 0
 
@@ -449,11 +460,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         for row in recovery.status_rows():
             print(f"recovery-{row['kind']}: {row['state']} (verified_at={row['verified_at']})")
         notification_row = notification.status_row()
+        from . import edge
+        edge_checks = edge.doctor_checks()
+        for check in edge_checks:
+            print(f"{check.check_id}: {check.status} ({check.message})")
         print(
             f"notification: {notification_row['state']} "
             f"(transport={notification_row['transport']}, detail={notification_row['detail']})"
         )
         if notification_row["state"] == "failure" and overall in {"running", "stopped"}:
+            overall = "degraded"
+        if any(check.status == "FAIL" for check in edge_checks) and overall in {"running", "stopped"}:
             overall = "degraded"
         print(f"Overall: {overall}")
         return 0 if overall in {"running", "stopped"} else 1

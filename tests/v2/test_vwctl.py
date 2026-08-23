@@ -24,6 +24,9 @@ COMPONENTS = '''
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
 caddy_dns_cloudflare = "v0.2.4"
+caddy_cloudflare_ip = "f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5"
+caddy_combine_ip_ranges = "v0.0.1"
+caddy_ratelimit = "v0.1.0"
 '''
 
 

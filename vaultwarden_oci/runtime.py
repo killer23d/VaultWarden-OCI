@@ -329,7 +329,7 @@ def render(
     versions_path: Path,
     paths: Paths = Paths(),
     *,
-    cloudflare_policy: edge.CloudflarePolicy | None = None,
+    admin_enabled: bool = False,
 ) -> None:
     frozen = _pins(versions_path)
     q = json.dumps
@@ -342,6 +342,8 @@ def render(
     )
     caddy_command = (
         'export CLOUDFLARE_API_TOKEN="$(cat /run/caddy-secrets/cloudflare_api_token)"; '
+        'if [ -s /run/caddy-secrets/admin_basic_auth_hash ]; then '
+        'export ADMIN_BASIC_AUTH_HASH="$(cat /run/caddy-secrets/admin_basic_auth_hash)"; fi; '
         'exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile'
     )
     compose = f'''name: vaultwarden-oci
@@ -406,12 +408,37 @@ networks:
       com.docker.network.bridge.gateway_mode_ipv4: nat
       com.docker.network.bridge.gateway_mode_ipv6: nat
 '''
-    proxy_block = edge.caddy_trusted_proxy_block(cloudflare_policy) if cloudflare_policy else ""
+    admin_route = f''' @admin path /admin*
+ handle @admin {{
+  rate_limit {{
+   zone admin {{
+    key {{client_ip}}
+    events 5
+    window 5m
+   }}
+  }}
+  request_body {{
+   max_size 2MB
+  }}
+  basic_auth {{
+   admin {{env.ADMIN_BASIC_AUTH_HASH}}
+  }}
+  reverse_proxy vaultwarden:8080
+ }}
+''' if admin_enabled else ''' @admin path /admin*
+ respond @admin 404
+'''
     caddyfile = f'''{{
  email {{$ACME_EMAIL}}
  admin 127.0.0.1:2019
  persist_config off
-{proxy_block}}}
+ order rate_limit before basic_auth
+ servers {{
+  trusted_proxies cloudflare
+  trusted_proxies_strict
+  client_ip_headers CF-Connecting-IP
+ }}
+}}
 {{$VAULTWARDEN_DOMAIN}} {{
  tls {{
   dns cloudflare {{env.CLOUDFLARE_API_TOKEN}}
@@ -426,13 +453,35 @@ networks:
   }}
   format json
  }}
+ header {{
+  Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  X-Content-Type-Options "nosniff"
+  Referrer-Policy "same-origin"
+  -Server
+ }}
  encode zstd gzip
- reverse_proxy vaultwarden:8080
+{{admin_route}} @auth path /identity/connect/token* /api/accounts/prelogin*
+ handle @auth {{
+  rate_limit {{
+   zone auth {{
+    key {{client_ip}}
+    events 10
+    window 1m
+   }}
+  }}
+  request_body {{
+   max_size 512KB
+  }}
+  reverse_proxy vaultwarden:8080
+ }}
+ handle {{
+  reverse_proxy vaultwarden:8080
+ }}
 }}
 '''
-    dockerfile = f'''FROM {frozen.caddy_builder_image.reference} AS builder
-RUN xcaddy build --with github.com/caddy-dns/cloudflare@{frozen.caddy_dns_cloudflare}
-FROM {frozen.caddy_runtime_image.reference}
+    dockerfile = f'''FROM {{frozen.caddy_builder_image.reference}} AS builder
+RUN xcaddy build \n    --with github.com/caddy-dns/cloudflare@{{frozen.caddy_dns_cloudflare}} \n    --with github.com/WeidiDeng/caddy-cloudflare-ip@{{frozen.caddy_cloudflare_ip}} \n    --with github.com/fvbommel/caddy-combine-ip-ranges@{{frozen.caddy_combine_ip_ranges}} \n    --with github.com/mholt/caddy-ratelimit@{{frozen.caddy_ratelimit}}
+FROM {{frozen.caddy_runtime_image.reference}}
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 '''
     _write(paths.compose, compose, 0o600)
@@ -520,23 +569,30 @@ def lifecycle(
             caddy_gid=caddy_gid,
         )
         config = load_config(paths.config)
-        cloudflare_policy = None
         if default_paths:
             try:
-                cloudflare_policy = edge.refresh_origin_policy(runner=runner)
+                edge.refresh_origin_policy(runner=runner)
             except edge.EdgeError as exc:
                 raise RuntimeErrorV2(str(exc)) from exc
-        render(config, versions_path, paths, cloudflare_policy=cloudflare_policy)
-        if not _compose(["config", "--quiet"], paths, runner).ok:
-            raise RuntimeErrorV2("rendered Compose validation failed")
         values = secrets.load(
             config.offline_recovery_recipient,
             paths=paths.secret_paths(),
             runner=runner,
             uid=uid,
         )
+        admin_enabled = secrets.admin_enabled(values)
+        derived: dict[str, str] = {}
+        if admin_enabled:
+            frozen = _pins(versions_path)
+            derived["admin_basic_auth_hash"] = secrets.derive_admin_basic_auth_hash(
+                values["admin_basic_auth_password"], frozen.caddy_runtime_image.reference
+            )
+        render(config, versions_path, paths, admin_enabled=admin_enabled)
+        if not _compose(["config", "--quiet"], paths, runner).ok:
+            raise RuntimeErrorV2("rendered Compose validation failed")
         secrets.materialize(
             values,
+            derived=derived,
             paths=paths.secret_paths(),
             uid=uid,
             gid=gid,

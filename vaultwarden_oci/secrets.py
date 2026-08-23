@@ -5,6 +5,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
@@ -19,7 +20,8 @@ REQUIRED = ("cloudflare_api_token", "smtp_username", "smtp_password")
 OPTIONAL = ("vaultwarden_admin_token",)
 # Used in memory to render volatile component configuration or perform host-side
 # operations; never materialized into the Vaultwarden/Caddy secret mounts.
-TRANSIENT_ONLY = ("cloudflare_remediation_token", "email_api_token")
+TRANSIENT_ONLY = ("cloudflare_remediation_token", "email_api_token", "admin_basic_auth_password")
+DERIVED = ("admin_basic_auth_hash",)
 _RECIPIENT = re.compile(r"^age1[0-9a-z]{50,70}$")
 _RECIPIENT_LINE = re.compile(r"^\s*-?\s*recipient:\s*(age1[0-9a-z]{50,70})\s*$")
 # Keep this validation aligned with pinned caddy-dns/cloudflare v0.2.4. The
@@ -42,7 +44,7 @@ class SecretPaths:
     caddy: Path = RUN / "caddy"
 
     def file(self, key: str) -> Path:
-        return (self.caddy if key == "cloudflare_api_token" else self.vaultwarden) / key
+        return (self.caddy if key in {"cloudflare_api_token", "admin_basic_auth_hash"} else self.vaultwarden) / key
 
 
 Runner = Callable[..., CommandResult]
@@ -60,6 +62,36 @@ def validate_cloudflare_token(value: str) -> str:
         raise SecretsError(
             "decrypted Cloudflare token does not match the supported Cloudflare provider token format"
         )
+    return value
+
+
+def admin_enabled(values: Mapping[str, str]) -> bool:
+    token = bool(values.get("vaultwarden_admin_token"))
+    password = bool(values.get("admin_basic_auth_password"))
+    if token != password:
+        raise SecretsError(
+            "Vaultwarden admin protection requires both vaultwarden_admin_token and admin_basic_auth_password in SOPS"
+        )
+    return token
+
+
+def derive_admin_basic_auth_hash(password: str, caddy_image: str) -> str:
+    """Hash via exact-pinned Caddy; plaintext crosses stdin only, never argv/env/files."""
+    try:
+        completed = subprocess.run(
+            ["docker", "run", "--rm", "-i", "--entrypoint", "caddy", caddy_image, "hash-password", "--algorithm", "bcrypt"],
+            input=password + "\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise SecretsError("cannot derive Caddy Basic Auth hash") from exc
+    if completed.returncode != 0:
+        raise SecretsError("Caddy Basic Auth hash derivation failed")
+    value = completed.stdout.strip()
+    if not value.startswith("$2") or any(char in value for char in "\0\r\n"):
+        raise SecretsError("Caddy Basic Auth hash derivation returned an invalid hash")
     return value
 
 
@@ -232,6 +264,7 @@ def _write(path: Path, value: str, uid: int, gid: int) -> None:
 def materialize(
     values: Mapping[str, str],
     *,
+    derived: Mapping[str, str] | None = None,
     paths: SecretPaths = SecretPaths(),
     uid: int = 0,
     gid: int = 0,
@@ -245,6 +278,15 @@ def materialize(
         vaultwarden_gid=vaultwarden_gid,
         caddy_gid=caddy_gid,
     )
+    enabled = admin_enabled(values)
+    derived_values = dict(derived or {})
+    if enabled and not derived_values.get("admin_basic_auth_hash"):
+        raise SecretsError("admin protection requires a derived Caddy Basic Auth hash")
+    if not enabled and derived_values.get("admin_basic_auth_hash"):
+        raise SecretsError("refusing an outer admin hash while Vaultwarden admin is disabled")
+    unknown_derived = sorted(set(derived_values) - set(DERIVED))
+    if unknown_derived:
+        raise SecretsError("unknown derived secret key(s): " + ", ".join(unknown_derived))
     missing = sorted(set(REQUIRED) - set(values))
     if missing:
         raise SecretsError("missing required secret key(s): " + ", ".join(missing))
@@ -258,6 +300,13 @@ def materialize(
             secret_gid = caddy_gid if key == "cloudflare_api_token" else vaultwarden_gid
             _write(path, _value(key, values[key]), uid, secret_gid)
             written.append(path)
+        for key in DERIVED:
+            path = paths.file(key)
+            if key not in derived_values:
+                path.unlink(missing_ok=True)
+                continue
+            _write(path, _value(key, derived_values[key]), uid, caddy_gid)
+            written.append(path)
     except Exception:
         for path in written:
             path.unlink(missing_ok=True)
@@ -266,7 +315,7 @@ def materialize(
 
 def cleanup(paths: SecretPaths = SecretPaths()) -> None:
     errors = []
-    for key in REQUIRED + OPTIONAL:
+    for key in REQUIRED + OPTIONAL + DERIVED:
         path = paths.file(key)
         try:
             if path.is_symlink() or path.exists():

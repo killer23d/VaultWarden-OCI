@@ -18,6 +18,7 @@ VALUES = {
     "smtp_username": "mailer@example.net",
     "smtp_password": "smtp=$secret#raw",
     "vaultwarden_admin_token": "admin-secret",
+    "admin_basic_auth_password": "outer-gate-secret",
 }
 
 
@@ -52,6 +53,9 @@ version = "0.1.0-dev.7"
 vaultwarden = "1.37.1"
 caddy = "2.11.4"
 caddy_dns_cloudflare = "v0.2.4"
+caddy_cloudflare_ip = "f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5"
+caddy_combine_ip_ranges = "v0.0.1"
+caddy_ratelimit = "v0.1.0"
 [image_digests.vaultwarden]
 amd64 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 arm64 = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -106,6 +110,11 @@ class Phase3RuntimeTests(unittest.TestCase):
             dockerfile,
         )
         self.assertIn("github.com/caddy-dns/cloudflare@v0.2.4", dockerfile)
+        self.assertIn("github.com/WeidiDeng/caddy-cloudflare-ip@f53b62aa13cb7ad79c8b47aacc3f2f03989b67e5", dockerfile)
+        self.assertIn("github.com/fvbommel/caddy-combine-ip-ranges@v0.0.1", dockerfile)
+        self.assertIn("github.com/mholt/caddy-ratelimit@v0.1.0", dockerfile)
+        self.assertIn("trusted_proxies cloudflare", caddyfile)
+        self.assertNotIn("trusted_proxies static", caddyfile)
         self.assertNotIn("ARG CADDY_VERSION", dockerfile)
         self.assertNotIn("CADDY_VERSION:", compose)
         self.assertIn(f'user: "{runtime.VAULTWARDEN_UID}:{runtime.VAULTWARDEN_GID}"', compose)
