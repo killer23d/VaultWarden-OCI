@@ -65,17 +65,30 @@ def _host_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _require_storage() -> bool:
+def _require_storage(*, machine: bool = False) -> bool:
     try:
         storage.verify()
         return True
     except storage.StorageError as exc:
-        print(f"FAIL: dedicated production storage is not ready: {exc}", file=sys.stderr)
-        print(
-            f"ACTION: restore/mount the filesystem recorded by {storage.HOST_IDENTITY_FILE} "
-            f"at {storage.STATE_ROOT}, then retry.",
-            file=sys.stderr,
-        )
+        if machine:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "error": f"dedicated production storage is not ready: {exc}",
+                        "action": f"restore/mount the filesystem recorded by {storage.HOST_IDENTITY_FILE} at {storage.STATE_ROOT}, then retry",
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(f"FAIL: dedicated production storage is not ready: {exc}", file=sys.stderr)
+            print(
+                f"ACTION: restore/mount the filesystem recorded by {storage.HOST_IDENTITY_FILE} "
+                f"at {storage.STATE_ROOT}, then retry.",
+                file=sys.stderr,
+            )
         return False
 
 
@@ -155,12 +168,79 @@ def _confirm(prompt: str, *, yes: bool) -> bool:
         return False
 
 
+def _persistent_payload(
+    failure: update_appliance.PersistentStateFailure,
+    *,
+    rollback_attempted: bool,
+    rollback_succeeded: bool,
+    rollback_error: str | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "error": str(failure),
+        "possible_persistent_state_change": True,
+        "old_code_auto_started": False,
+        "services_stopped": failure.services_stopped,
+        "recovery_artifact": str(failure.verified.artifact),
+        "recovery_sha256": failure.verified.sha256,
+        "previous_release": failure.plan.current_release,
+        "recovery_command": update_appliance.recovery_command(failure),
+        "rollback_attempted": rollback_attempted,
+        "rollback_succeeded": rollback_succeeded,
+        "rollback_error": rollback_error,
+    }
+
+
 def _handle_persistent_failure(
     failure: update_appliance.PersistentStateFailure,
     *,
     identity: Path | None,
     ui: UI,
+    machine: bool = False,
 ) -> int:
+    if machine:
+        if identity is None:
+            print(
+                json.dumps(
+                    _persistent_payload(
+                        failure,
+                        rollback_attempted=False,
+                        rollback_succeeded=False,
+                    ),
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            update_appliance.coherent_rollback(failure, identity)
+        except Exception as exc:
+            print(
+                json.dumps(
+                    _persistent_payload(
+                        failure,
+                        rollback_attempted=True,
+                        rollback_succeeded=False,
+                        rollback_error=str(exc),
+                    ),
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            json.dumps(
+                _persistent_payload(
+                    failure,
+                    rollback_attempted=True,
+                    rollback_succeeded=True,
+                ),
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
     print(f"FAIL: {failure}", file=sys.stderr)
     print(f"ACTION: {update_appliance.recovery_command(failure)}", file=sys.stderr)
     if identity is not None:
@@ -201,7 +281,7 @@ def _update_command(argv: Sequence[str]) -> int:
     ui = UI(color=False if args.json else None)
     current_for_error = "unknown"
     try:
-        if not _require_storage():
+        if not _require_storage(machine=args.json):
             return 1
         try:
             current_for_error = update._current(install.Layout(Path("/")))[1]
@@ -244,6 +324,7 @@ def _update_command(argv: Sequence[str]) -> int:
                     failure,
                     identity=args.rollback_identity,
                     ui=ui,
+                    machine=args.json,
                 )
             if args.json:
                 print(json.dumps({"schema_version": 1, "result": "applied", "release": str(release)}, sort_keys=True))
@@ -277,7 +358,7 @@ def _host_upgrade_command(argv: Sequence[str]) -> int:
                 ui.info(f"reboot currently required: {'yes' if reboot else 'no'}")
                 ui.warn("host package changes are separate from the application update transaction; .vwrec cannot roll back apt, kernel, Docker, or other system packages")
             return 0
-        if not _require_storage():
+        if not _require_storage(machine=args.json):
             return 1
         if not args.json:
             ui.warn("Ubuntu host packages will be upgraded separately from VaultWarden-OCI application code.")
