@@ -1,0 +1,30 @@
+name: Apply pass-2 Caddy audit fix
+
+on:
+  pull_request:
+    branches: [v2]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: Apply pass-2 fix
+        run: python3 .github/codex_pass2_fix.py
+      - name: Run focused version tests
+        run: |
+          python3 -m compileall -q vaultwarden_oci tests/v2
+          python3 -m unittest tests.v2.test_update_phase7.VersionResolutionTests -v
+      - name: Commit implementation fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vaultwarden_oci/update_versions.py tests/v2/test_update_phase7.py
+          git commit -m "Include fixed edge addons in latest snapshot identity"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
