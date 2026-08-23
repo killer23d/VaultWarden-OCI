@@ -58,7 +58,11 @@ class StorageContractTests(unittest.TestCase):
         fstab.assert_not_called(); identity.assert_not_called()
 
     def test_existing_and_blank_require_separate_acknowledgements(self) -> None:
-        with mock.patch.object(storage, "_real_device", return_value="/dev/vdb"), mock.patch.object(storage, "reject_boot_related"), mock.patch.object(storage, "_blkid", return_value="ext4"), mock.patch.object(storage, "_signature_types", return_value={"ext4"}):
+        def existing_blkid(_device, field, *, runner):
+            del runner
+            return "ext4" if field == "TYPE" else "aaaa-bbbb"
+
+        with mock.patch.object(storage, "_real_device", return_value="/dev/vdb"), mock.patch.object(storage, "reject_boot_related"), mock.patch.object(storage, "_blkid", side_effect=existing_blkid), mock.patch.object(storage, "_signature_types", return_value={"ext4"}):
             with self.assertRaisesRegex(storage.StorageError, "acknowledgement"): storage.provision("/dev/vdb", runner=lambda argv: result(argv, "disk\n"))
         with mock.patch.object(storage, "_real_device", return_value="/dev/vdb"), mock.patch.object(storage, "reject_boot_related"), mock.patch.object(storage, "_blkid", return_value=""), mock.patch.object(storage, "_signature_types", return_value=set()):
             with self.assertRaisesRegex(storage.StorageError, "acknowledgement"): storage.provision("/dev/vdb", runner=lambda argv: result(argv, "disk\n"))
