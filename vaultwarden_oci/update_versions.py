@@ -77,7 +77,28 @@ class FrozenVersions:
 
     @property
     def caddy_image(self) -> str:
-        return f"vaultwarden-oci/caddy:{self.caddy}-edge"
+        """Name the locally built xcaddy image by its complete immutable inputs.
+
+        Caddy version alone is insufficient: two snapshots can use the same Caddy
+        release with different xcaddy addon refs or base-image digests.  A
+        snapshot-unique tag prevents pre-staging from overwriting the image used
+        by the currently active release before the appliance mutation lock is
+        acquired.
+        """
+        exact = {
+            "architecture": self.architecture,
+            "caddy": self.caddy,
+            "caddy_dns_cloudflare": self.caddy_dns_cloudflare,
+            "caddy_cloudflare_ip": self.caddy_cloudflare_ip,
+            "caddy_combine_ip_ranges": self.caddy_combine_ip_ranges,
+            "caddy_ratelimit": self.caddy_ratelimit,
+            "caddy_builder_digest": self.caddy_builder_image.digest,
+            "caddy_runtime_digest": self.caddy_runtime_image.digest,
+        }
+        suffix = hashlib.sha256(
+            json.dumps(exact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:12]
+        return f"vaultwarden-oci/caddy:{self.caddy}-edge-{suffix}"
 
     def as_dict(self) -> dict[str, object]:
         images = {}
