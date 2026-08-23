@@ -271,7 +271,7 @@ class QuarantineTests(unittest.TestCase):
                         temp / "identity",
                         runner=lambda argv, **_kwargs: result(argv),
                     )
-            self.assertEqual(switched, [Path("releases/1.0.0"), Path("recovery-required")])
+            self.assertEqual(switched, [Path("recovery-required")])
             start.assert_not_called()
 
 
