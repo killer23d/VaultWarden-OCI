@@ -94,12 +94,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not _require_storage(): return 1
         return install.main(args[1:])
     if args[0] == "versions": return _versions_command(args)
-    if args[0] == "recovery-kit":
+    if args[0] in {"restore", "recovery", "recovery-kit"}:
         from . import recovery_ux
-        return recovery_ux.main(args)
-    if args[0] in {"restore", "recovery"}:
-        if not _require_storage(): return 1
-        from . import recovery_ux
+        if any(flag in args[1:] for flag in ("--help", "-h")):
+            return recovery_ux.main(args)
+        if args[0] in {"restore", "recovery"} and not _require_storage():
+            return 1
         return recovery_ux.main(args)
     if args[0] in _STORAGE_REQUIRED and not _require_storage(): return 1
     return cli.main(args)
