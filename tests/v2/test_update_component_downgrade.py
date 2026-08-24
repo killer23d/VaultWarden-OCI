@@ -209,11 +209,13 @@ class ComponentDowngradePlanningTests(unittest.TestCase):
                 mock.patch.object(update_cli.storage, "verify"),
                 mock.patch.object(update_appliance, "candidate_source", candidate_source),
                 mock.patch.object(update_appliance, "prepare_plan", side_effect=prepare_plan),
+                mock.patch.object(update_appliance, "_load_state", return_value={}),
                 mock.patch.object(
                     update_appliance,
-                    "record_check",
-                    side_effect=lambda **kwargs: recorded.append(dict(kwargs)),
+                    "_atomic_state",
+                    side_effect=lambda payload, _path=update_appliance.UPDATE_STATE: recorded.append(dict(payload)),
                 ),
+                mock.patch.object(update_appliance, "_notify") as notify,
                 mock.patch("sys.stdout", stdout),
                 mock.patch("sys.stderr", stderr),
             ):
@@ -226,6 +228,7 @@ class ComponentDowngradePlanningTests(unittest.TestCase):
         self.assertEqual(recorded[0]["candidate"], "2.0.0")
         self.assertFalse(recorded[0]["available"])
         self.assertIsNone(recorded[0]["error"])
+        notify.assert_not_called()
 
     def test_use_latest_checks_final_snapshot_not_intermediate_tested_pins(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
