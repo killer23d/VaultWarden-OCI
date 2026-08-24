@@ -54,7 +54,7 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
                 destination.unlink(missing_ok=True)
             else:
                 update._atomic_write(destination, content, 0o644)
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         restore_units(snapshot)
         raise
     return snapshot
@@ -112,7 +112,7 @@ def converge_units(
                 destination.unlink(missing_ok=True)
             else:
                 update._atomic_write(destination, content, 0o644)
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         restore_units(snapshot)
         raise
     return snapshot
