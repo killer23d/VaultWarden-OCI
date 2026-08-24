@@ -139,9 +139,14 @@ class RollbackCrashSafetyTests(unittest.TestCase):
                 mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_kwargs: events.append("guard-clear")),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
                 mock.patch.object(update_appliance.update_unit_migration, "converge_units", side_effect=converge),
-                mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
+                mock.patch.object(update_appliance, "_switch_current", side_effect=switch),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
-                mock.patch.object(update_appliance, "_start_previous_service", side_effect=lambda *_args: events.append("start-old")),
+                mock.patch.object(
+                    update_appliance,
+                    "_activate_previous_while_guarded",
+                    side_effect=lambda *_args: events.append("start-old-guarded"),
+                ),
+                mock.patch.object(update_appliance, "_start_previous_service", side_effect=lambda *_args: events.append("systemd-start")),
                 mock.patch.object(update_appliance, "_prove_previous"),
             ):
                 update_appliance.coherent_rollback(
@@ -154,9 +159,10 @@ class RollbackCrashSafetyTests(unittest.TestCase):
             self.assertLess(events.index("switch-candidate"), events.index("promote-data"))
             self.assertLess(events.index("promote-data"), events.index("units-old"))
             self.assertLess(events.index("units-old"), events.index("switch-old"))
-            self.assertLess(events.index("switch-old"), events.index("lock-exit"))
-            self.assertLess(events.index("lock-exit"), events.index("guard-clear"))
-            self.assertLess(events.index("guard-clear"), events.index("start-old"))
+            self.assertLess(events.index("switch-old"), events.index("start-old-guarded"))
+            self.assertLess(events.index("start-old-guarded"), events.index("guard-clear"))
+            self.assertLess(events.index("guard-clear"), events.index("lock-exit"))
+            self.assertLess(events.index("lock-exit"), events.index("systemd-start"))
 
     def test_interrupt_while_guarding_or_selecting_candidate_quarantines_current(self) -> None:
         for phase in ("guard", "switch"):
@@ -226,7 +232,7 @@ class RollbackCrashSafetyTests(unittest.TestCase):
                     mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
                     mock.patch.object(update_appliance.cli, "mutation_lock", held_lock),
                     mock.patch.object(update_appliance.update_guard, "engage", side_effect=engage),
-                    mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
+                    mock.patch.object(update_appliance, "_switch_current", side_effect=switch),
                 ):
                     with self.assertRaisesRegex(update.UpdateError, "quarantined"):
                         update_appliance.coherent_rollback(
