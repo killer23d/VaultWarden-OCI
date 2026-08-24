@@ -81,6 +81,10 @@ class GuardPublicationOrderingTests(unittest.TestCase):
                 "recovery_sha256": verified.sha256,
             }
 
+            def record(_frozen, path: Path) -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+
             with (
                 mock.patch.object(install, "_frozen_source", exact_source),
                 mock.patch.object(update, "_validate_source"),
@@ -109,14 +113,14 @@ class GuardPublicationOrderingTests(unittest.TestCase):
                     side_effect=lambda *_args: events.append("units") or {},
                 ),
                 mock.patch.object(
-                    update,
-                    "_switch",
+                    update_appliance,
+                    "_switch_current",
                     side_effect=lambda *_args: events.append("switch"),
                 ),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update, "_gate_activated"),
                 mock.patch.object(update_appliance, "_start_update_timer"),
-                mock.patch.object(update_appliance, "record_frozen"),
+                mock.patch.object(update_appliance, "record_frozen", side_effect=record),
                 mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state),
                 mock.patch.object(update_appliance.update_guard, "clear"),
             ):
