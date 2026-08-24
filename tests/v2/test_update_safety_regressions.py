@@ -285,6 +285,15 @@ class CoherentRollbackLockTests(unittest.TestCase):
             def require_lock(name, result=None):
                 self.assertTrue(lock_held); events.append(name); return result
 
+            guard_state = {
+                "schema_version": 1,
+                "recovery_required": True,
+                "candidate_release": failure.plan.target_release,
+                "previous_release": failure.plan.current_release,
+                "recovery_artifact": str(verified.artifact),
+                "recovery_sha256": verified.sha256,
+            }
+
             with (
                 mock.patch.object(update_appliance.storage, "verify"),
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=verified.sha256),
@@ -293,6 +302,7 @@ class CoherentRollbackLockTests(unittest.TestCase):
                 mock.patch.object(update_appliance.cli, "mutation_lock", held_lock),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=lambda *_a: require_lock("stop-candidate", True)),
                 mock.patch.object(update_appliance.update_guard, "engage", side_effect=lambda **_k: require_lock("guard")),
+                mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state),
                 mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_k: events.append("guard-clear")),
                 mock.patch.object(update_appliance.update_unit_migration, "converge_units", side_effect=lambda *_a: require_lock("install-old-units", {})),
                 mock.patch.object(update_appliance.update, "_switch", side_effect=lambda *_a: require_lock("switch-old-code")),
