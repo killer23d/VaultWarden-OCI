@@ -51,6 +51,28 @@ def result(argv, returncode: int, *, stdout: str = "", stderr: str = "") -> cli.
     )
 
 
+def verified_recovery(root: Path) -> recovery.VerifiedRecovery:
+    artifact = root / "pre.vwrec"
+    artifact.write_bytes(b"age-encryption.org/v1 interrupt-regression")
+    return recovery.VerifiedRecovery(
+        artifact,
+        hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        artifact.stat().st_size,
+        "2026-08-24T00:00:00Z",
+    )
+
+
+def guard_state(verified: recovery.VerifiedRecovery) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "recovery_required": True,
+        "candidate_release": "2.0.0",
+        "previous_release": "1.0.0",
+        "recovery_artifact": str(verified.artifact),
+        "recovery_sha256": verified.sha256,
+    }
+
+
 class CandidateExitClassificationTests(unittest.TestCase):
     def test_only_explicit_prestart_exit_is_safe_for_old_code_rollback(self) -> None:
         release = Path("/candidate")
@@ -76,36 +98,34 @@ class CandidateExitClassificationTests(unittest.TestCase):
 
 
 class InterruptedApplyTests(unittest.TestCase):
+    @staticmethod
+    def _prepared(temp: Path) -> tuple[update_appliance.PreparedPlan, Path, Path, Path, Path]:
+        source = temp / "source"
+        exact = temp / "exact"
+        old = temp / "old"
+        new = temp / "new"
+        for path in (source, exact, old, new):
+            path.mkdir()
+        root = temp / "host"
+        prepared = update_appliance.PreparedPlan(
+            update.UpdatePlan(
+                source,
+                root,
+                Path("releases/1.0.0"),
+                "1.0.0",
+                "2.0.0",
+                frozen(),
+            ),
+            None,
+            False,
+        )
+        return prepared, exact, old, new, root
+
     def test_keyboard_interrupt_during_candidate_activation_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            source = temp / "source"
-            exact = temp / "exact"
-            old = temp / "old"
-            new = temp / "new"
-            for path in (source, exact, old, new):
-                path.mkdir()
-            root = temp / "host"
-            prepared = update_appliance.PreparedPlan(
-                update.UpdatePlan(
-                    source,
-                    root,
-                    Path("releases/1.0.0"),
-                    "1.0.0",
-                    "2.0.0",
-                    frozen(),
-                ),
-                None,
-                False,
-            )
-            artifact = temp / "pre.vwrec"
-            artifact.write_bytes(b"age-encryption.org/v1 interrupt-regression")
-            verified = recovery.VerifiedRecovery(
-                artifact,
-                hashlib.sha256(artifact.read_bytes()).hexdigest(),
-                artifact.stat().st_size,
-                "2026-08-24T00:00:00Z",
-            )
+            prepared, exact, old, new, _root = self._prepared(temp)
+            verified = verified_recovery(temp)
             switches: list[Path] = []
 
             @contextlib.contextmanager
@@ -154,8 +174,133 @@ class InterruptedApplyTests(unittest.TestCase):
                     )
 
             self.assertTrue(caught.exception.services_stopped)
-            guard.assert_called_once()
+            self.assertEqual(guard.call_count, 2)
             self.assertEqual(switches, [Path("releases/2.0.0")])
+
+    def test_guard_is_published_before_candidate_and_cleared_only_after_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            prepared, exact, old, new, _root = self._prepared(temp)
+            verified = verified_recovery(temp)
+            events: list[str] = []
+
+            @contextlib.contextmanager
+            def exact_source(*_args, **_kwargs):
+                yield exact
+
+            def runner(argv, **_kwargs):
+                return result(argv, 0)
+
+            def engage(**_kwargs):
+                events.append("guard")
+
+            def switch(_layout, target):
+                self.assertEqual(target, Path("releases/2.0.0"))
+                events.append("switch-candidate")
+
+            def activator(*_args):
+                events.append("activate")
+
+            with (
+                mock.patch.object(install, "_frozen_source", exact_source),
+                mock.patch.object(update, "_validate_source"),
+                mock.patch.object(
+                    update_appliance,
+                    "_preflight",
+                    return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58),
+                ),
+                mock.patch.object(
+                    update,
+                    "_current",
+                    return_value=(Path("releases/1.0.0"), "1.0.0", old),
+                ),
+                mock.patch.object(update, "_gate_current"),
+                mock.patch.object(install, "ensure_lock_path", return_value=temp / "lock"),
+                mock.patch.object(install, "stage_release", return_value=new),
+                mock.patch.object(update, "_verify_coherent"),
+                mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
+                mock.patch.object(update_appliance.update_guard, "engage", side_effect=engage),
+                mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state(verified)),
+                mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_kwargs: events.append("guard-clear")),
+                mock.patch.object(update, "_switch", side_effect=switch),
+                mock.patch.object(update, "_daemon_reload"),
+                mock.patch.object(update, "_gate_activated", side_effect=lambda *_args: events.append("gates")),
+                mock.patch.object(update_appliance, "_start_update_timer", side_effect=lambda *_args: events.append("timer")),
+                mock.patch.object(update_appliance, "record_frozen", side_effect=lambda *_args, **_kwargs: events.append("record")),
+            ):
+                update_appliance.apply_prepared(
+                    prepared,
+                    runner=runner,
+                    activator=activator,
+                    recovery_creator=lambda *_args, **_kwargs: verified,
+                )
+
+            self.assertLess(events.index("guard"), events.index("switch-candidate"))
+            self.assertLess(events.index("switch-candidate"), events.index("activate"))
+            self.assertLess(events.index("activate"), events.index("gates"))
+            self.assertLess(events.index("gates"), events.index("record"))
+            self.assertLess(events.index("record"), events.index("guard-clear"))
+
+    def test_interrupt_after_atomic_candidate_switch_is_detected_from_actual_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            prepared, exact, old, new, _root = self._prepared(temp)
+            verified = verified_recovery(temp)
+            current_target = Path("releases/1.0.0")
+            switches: list[Path] = []
+
+            @contextlib.contextmanager
+            def exact_source(*_args, **_kwargs):
+                yield exact
+
+            def runner(argv, **_kwargs):
+                return result(argv, 0)
+
+            def current(_layout):
+                release = "2.0.0" if current_target == Path("releases/2.0.0") else "1.0.0"
+                release_dir = new if release == "2.0.0" else old
+                return current_target, release, release_dir
+
+            def switch(_layout, target):
+                nonlocal current_target
+                current_target = target
+                switches.append(target)
+                if target == Path("releases/2.0.0"):
+                    raise KeyboardInterrupt()
+
+            with (
+                mock.patch.object(install, "_frozen_source", exact_source),
+                mock.patch.object(update, "_validate_source"),
+                mock.patch.object(
+                    update_appliance,
+                    "_preflight",
+                    return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58),
+                ),
+                mock.patch.object(update, "_current", side_effect=current),
+                mock.patch.object(update, "_gate_current"),
+                mock.patch.object(install, "ensure_lock_path", return_value=temp / "lock"),
+                mock.patch.object(install, "stage_release", return_value=new),
+                mock.patch.object(update, "_verify_coherent"),
+                mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
+                mock.patch.object(update_appliance.update_unit_migration, "restore_units"),
+                mock.patch.object(update_appliance.update_guard, "engage"),
+                mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state(verified)),
+                mock.patch.object(update_appliance.update_guard, "clear") as clear_guard,
+                mock.patch.object(update, "_switch", side_effect=switch),
+                mock.patch.object(update, "_daemon_reload"),
+                mock.patch.object(update_appliance, "_prove_previous"),
+            ):
+                with self.assertRaises(update.UpdateError):
+                    update_appliance.apply_prepared(
+                        prepared,
+                        runner=runner,
+                        activator=lambda *_args: self.fail("activation must not run after interrupted switch"),
+                        recovery_creator=lambda *_args, **_kwargs: verified,
+                    )
+
+            self.assertEqual(current_target, Path("releases/1.0.0"))
+            self.assertEqual(switches, [Path("releases/2.0.0"), Path("releases/1.0.0")])
+            clear_guard.assert_called_once()
 
 
 class InterruptedPromotionTests(unittest.TestCase):
