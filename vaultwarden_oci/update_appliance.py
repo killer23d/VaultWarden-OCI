@@ -690,22 +690,46 @@ def apply_prepared(
                             ) from exc
 
                         rollback_errors: list[str] = []
-                        if switched:
+                        candidate_target = Path("releases") / plan.target_release
+                        current_was_candidate = switched
+                        try:
+                            current_was_candidate = update._current(layout)[0] == candidate_target
+                        except Exception as rollback_exc:
+                            # If the pointer cannot be inspected, restoring the
+                            # recorded previous target is the safe pre-start action.
+                            current_was_candidate = True
+                            rollback_errors.append(f"current selection inspection: {rollback_exc}")
+                        if current_was_candidate:
                             try:
                                 update._switch(layout, current_target)
                             except Exception as rollback_exc:
                                 rollback_errors.append(f"current symlink: {rollback_exc}")
+
+                        units_touched = snapshot is not None
                         if snapshot is not None:
                             try:
                                 update_unit_migration.restore_units(snapshot)
                             except Exception as rollback_exc:
                                 rollback_errors.append(f"systemd units: {rollback_exc}")
-                        if switched:
+                        elif release_dir is not None:
+                            try:
+                                # Covers an interrupt after install_units returned
+                                # but before its snapshot was assigned to this frame.
+                                update_unit_migration.converge_units(
+                                    previous_release,
+                                    (release_dir, previous_release),
+                                    layout,
+                                )
+                                units_touched = True
+                            except Exception as rollback_exc:
+                                rollback_errors.append(f"systemd unit convergence: {rollback_exc}")
+
+                        if current_was_candidate or units_touched:
                             try:
                                 update._daemon_reload(layout, runner)
                             except Exception as rollback_exc:
                                 rollback_errors.append(f"daemon-reload: {rollback_exc}")
-                        if not rollback_errors and (switched or snapshot is not None):
+                        if not rollback_errors and (current_was_candidate or units_touched):
                             try:
                                 _prove_previous(layout, runner)
                             except Exception as rollback_exc:
@@ -713,7 +737,7 @@ def apply_prepared(
                         message = str(exc) or exc.__class__.__name__
                         if rollback_errors:
                             message += "; rollback incomplete: " + "; ".join(rollback_errors)
-                        elif switched or snapshot is not None:
+                        elif current_was_candidate or units_touched:
                             message += "; previous release/systemd resources restored and previous stack proved healthy"
                         raise UpdateError(message) from exc
             except PersistentStateFailure as failure:
