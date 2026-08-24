@@ -513,6 +513,26 @@ def _guard_path(layout: install.Layout) -> Path:
     return layout.path(update_guard.RECOVERY_REQUIRED_STATE)
 
 
+def _clear_transaction_guard(
+    plan: update.UpdatePlan,
+    verified: recovery.VerifiedRecovery,
+    path: Path,
+) -> None:
+    """Clear only this transaction's exact guard metadata."""
+    state = update_guard.load(path=path)
+    if state is None:
+        return
+    expected = {
+        "candidate_release": plan.target_release,
+        "previous_release": plan.current_release,
+        "recovery_artifact": str(verified.artifact),
+        "recovery_sha256": verified.sha256,
+    }
+    if any(state.get(key) != value for key, value in expected.items()):
+        raise UpdateError("update recovery guard changed during the transaction; refusing to clear it")
+    update_guard.clear(path=path)
+
+
 def _current_target(layout: install.Layout) -> Path:
     current = layout.path(install.CURRENT_LINK)
     if not current.is_symlink():
@@ -627,6 +647,16 @@ def apply_prepared(
                             previous_release,
                             layout,
                         )
+                        # Publish a guard before the candidate pointer can become
+                        # visible. Candidate vwctl honors this on boot, while the
+                        # internal __update-candidate activation path bypasses it.
+                        update_guard.engage(
+                            candidate_release=plan.target_release,
+                            previous_release=plan.current_release,
+                            recovery_artifact=str(verified.artifact),
+                            recovery_sha256=verified.sha256,
+                            path=guard_path,
+                        )
                         update._switch(layout, Path("releases") / plan.target_release)
                         switched = True
                         update._daemon_reload(layout, runner)
@@ -654,6 +684,7 @@ def apply_prepared(
                             raise UpdateError(f"activated CrowdSec/origin gate failed: {_detail(crowdsec)}")
                         _start_update_timer(layout, runner)
                         record_frozen(plan.frozen, record_path or layout.path(RESOLVED_STATE))
+                        _clear_transaction_guard(plan, verified, guard_path)
                         return release_dir
                     except (Exception, KeyboardInterrupt) as exc:
                         if state_change_possible:
@@ -734,6 +765,11 @@ def apply_prepared(
                                 _prove_previous(layout, runner)
                             except Exception as rollback_exc:
                                 rollback_errors.append(f"previous health proof: {rollback_exc}")
+                        if not rollback_errors:
+                            try:
+                                _clear_transaction_guard(plan, verified, guard_path)
+                            except Exception as rollback_exc:
+                                rollback_errors.append(f"recovery guard: {rollback_exc}")
                         message = str(exc) or exc.__class__.__name__
                         if rollback_errors:
                             message += "; rollback incomplete: " + "; ".join(rollback_errors)
@@ -889,7 +925,7 @@ def coherent_rollback(
     if not completed:
         raise UpdateError("coherent rollback did not reach a complete data+code state")
     try:
-        update_guard.clear(path=guard_path)
+        _clear_transaction_guard(plan, failure.verified, guard_path)
     except update_guard.UpdateGuardError as exc:
         raise UpdateError(f"coherent rollback completed but recovery guard could not be cleared: {exc}") from exc
     _start_previous_service(layout, expected_previous, runner)
