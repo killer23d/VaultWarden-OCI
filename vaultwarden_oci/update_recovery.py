@@ -31,6 +31,10 @@ def _remove(path: Path) -> None:
     durability.remove(path, missing_ok=True)
 
 
+def _present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
 def _sync_staged(staged: Sequence[tuple[Path, Path]]) -> None:
     """Make every staged restore object durable before any live target is renamed."""
     for candidate, _ in staged:
@@ -42,7 +46,7 @@ def _sync_live_targets(staged: Sequence[tuple[Path, Path]]) -> None:
     """Make the stopped pre-promotion live state durable before it becomes rollback data."""
     parents: list[Path] = []
     for _, target in staged:
-        if target.exists() or target.is_symlink():
+        if _present(target):
             durability.fsync_tree(target)
         parents.append(target.parent)
     durability.fsync_directories(parents)
@@ -61,31 +65,51 @@ def _promote_with_proven_rollback(staged: Sequence[tuple[Path, Path]]) -> None:
     _sync_staged(staged)
     _sync_live_targets(staged)
     rollback: list[tuple[Path, Path | None]] = []
+    publication_failures: list[str] = []
     try:
         for candidate, target in staged:
             previous: Path | None = None
-            if target.exists() or target.is_symlink():
+            if _present(target):
                 previous = target.parent / f".{target.name}.rollback-{uuid.uuid4().hex[:8]}"
-                durability.replace(target, previous)
+                try:
+                    durability.replace(target, previous)
+                except (Exception, KeyboardInterrupt):
+                    # replace(2) may have completed before the following
+                    # directory fsync was interrupted. Reconcile the actual
+                    # namespace before propagating so rollback never loses
+                    # custody of a live target that was already renamed aside.
+                    target_present = _present(target)
+                    previous_present = _present(previous)
+                    if previous_present and not target_present:
+                        rollback.append((target, previous))
+                    elif target_present and not previous_present:
+                        # Publication did not become visible; the original live
+                        # target is still in place and needs no rollback entry.
+                        pass
+                    else:
+                        publication_failures.append(
+                            f"{target}: interrupted live-target backup left ambiguous target/rollback state"
+                        )
+                    raise
             rollback.append((target, previous))
             durability.replace(candidate, target)
         # Explicitly finish one barrier on every affected target directory
         # before the caller is allowed to switch /opt/current to old code.
         durability.fsync_directories(target.parent for _, target in staged)
     except (Exception, KeyboardInterrupt) as exc:
-        failures: list[str] = []
+        failures: list[str] = list(publication_failures)
         for target, previous in reversed(rollback):
             try:
                 _remove(target)
                 if previous is not None:
-                    if not previous.exists() and not previous.is_symlink():
+                    if not _present(previous):
                         raise OSError(f"missing rollback source {previous}")
                     durability.replace(previous, target)
-                    if not (target.exists() or target.is_symlink()):
+                    if not _present(target):
                         raise OSError(f"rollback target was not restored: {target}")
-                elif target.exists() or target.is_symlink():
+                elif _present(target):
                     raise OSError(f"target that was originally absent still exists: {target}")
-            except OSError as rollback_exc:
+            except (Exception, KeyboardInterrupt) as rollback_exc:
                 failures.append(f"{target}: {rollback_exc}")
         if failures:
             raise PromotionError(
@@ -99,7 +123,7 @@ def _promote_with_proven_rollback(staged: Sequence[tuple[Path, Path]]) -> None:
         ) from exc
 
     for _, previous in rollback:
-        if previous is not None and (previous.exists() or previous.is_symlink()):
+        if previous is not None and _present(previous):
             _remove(previous)
 
 
@@ -207,14 +231,12 @@ def prepare_restore(
             )
         finally:
             for candidate, _ in staged:
-                if candidate.exists() or candidate.is_symlink():
+                if _present(candidate):
                     try:
                         _remove(candidate)
                     except OSError:
                         pass
-            if operational_candidate is not None and (
-                operational_candidate.exists() or operational_candidate.is_symlink()
-            ):
+            if operational_candidate is not None and _present(operational_candidate):
                 try:
                     _remove(operational_candidate)
                 except OSError:
