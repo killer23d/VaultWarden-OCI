@@ -38,7 +38,7 @@ def _remove(path: Path) -> None:
 
 
 def _promote_with_proven_rollback(staged: Sequence[tuple[Path, Path]]) -> None:
-    """Promote staged targets and prove restoration of live state on failure."""
+    """Promote staged targets and prove restoration of live state on failure or SIGINT."""
     rollback: list[tuple[Path, Path | None]] = []
     try:
         for candidate, target in staged:
@@ -48,7 +48,7 @@ def _promote_with_proven_rollback(staged: Sequence[tuple[Path, Path]]) -> None:
                 os.replace(target, previous)
             rollback.append((target, previous))
             os.replace(candidate, target)
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         failures: list[str] = []
         for target, previous in reversed(rollback):
             try:
