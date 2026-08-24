@@ -38,16 +38,28 @@ def _sync_staged(staged: Sequence[tuple[Path, Path]]) -> None:
     durability.fsync_directories(candidate.parent for candidate, _ in staged)
 
 
+def _sync_live_targets(staged: Sequence[tuple[Path, Path]]) -> None:
+    """Make the stopped pre-promotion live state durable before it becomes rollback data."""
+    parents: list[Path] = []
+    for _, target in staged:
+        if target.exists() or target.is_symlink():
+            durability.fsync_tree(target)
+        parents.append(target.parent)
+    durability.fsync_directories(parents)
+
+
 def _promote_with_proven_rollback(staged: Sequence[tuple[Path, Path]]) -> None:
     """Durably promote targets and prove restoration of live state on failure/SIGINT.
 
-    Every candidate tree is synchronized before the first live rename.  Each
-    rename/removal then synchronizes its own target directory, which matters
-    when configuration and application data live on different filesystems.
-    Returning from this function is therefore the data-durability barrier that
-    must precede publication of previous application code.
+    Every staged candidate and the stopped live target it may replace are
+    synchronized before the first rename.  Each rename/removal then
+    synchronizes its own target directory, which matters when configuration
+    and application data live on different filesystems.  Returning from this
+    function is therefore the data-durability barrier that must precede
+    publication of previous application code.
     """
     _sync_staged(staged)
+    _sync_live_targets(staged)
     rollback: list[tuple[Path, Path | None]] = []
     try:
         for candidate, target in staged:
