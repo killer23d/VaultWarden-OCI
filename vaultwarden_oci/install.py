@@ -310,8 +310,12 @@ def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
         staging = Path(temp_dir) / release
         staging.mkdir(mode=0o755)
         _copy_release_tree(source_root, staging)
+        # Freeze the complete temporary tree before it can appear at the
+        # canonical immutable release path. Rename then becomes the only
+        # publication boundary, so interruption/power loss cannot expose a
+        # partially frozen release directory.
+        _make_release_immutable(staging)
         if destination.exists() or destination.is_symlink():
-            _make_release_immutable(staging)
             if destination.is_symlink() or not destination.is_dir():
                 raise InstallError(f"release path is not a directory: {destination}")
             if not _same_tree(staging, destination):
@@ -320,11 +324,6 @@ def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
                 )
             return destination
         os.rename(staging, destination)
-        try:
-            _make_release_immutable(destination)
-        except Exception:
-            shutil.rmtree(destination, ignore_errors=True)
-            raise
     return destination
 
 
