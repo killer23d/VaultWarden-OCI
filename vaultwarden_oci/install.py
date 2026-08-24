@@ -300,18 +300,40 @@ def _same_tree(left: Path, right: Path) -> bool:
     return True
 
 
+def _remove_release_staging(staging: Path) -> None:
+    """Best-effort cleanup for a possibly read-only unpublished staging tree."""
+    if not staging.exists() and not staging.is_symlink():
+        return
+    if staging.is_symlink() or not staging.is_dir():
+        staging.unlink(missing_ok=True)
+        return
+    for path in sorted((item for item in staging.rglob("*") if item.is_dir()), reverse=True):
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+    try:
+        os.chmod(staging, 0o700)
+    except OSError:
+        pass
+    shutil.rmtree(staging, ignore_errors=True)
+
+
 def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
     releases = layout.path(RELEASES_DIR)
     _ensure_directory(layout.path(INSTALL_ROOT), 0o755)
     _ensure_directory(releases, 0o755)
     destination = releases / release
-
-    with tempfile.TemporaryDirectory(prefix=f"{APP_NAME}-release-", dir=str(releases)) as temp_dir:
-        staging = Path(temp_dir) / release
-        staging.mkdir(mode=0o755)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{APP_NAME}-release-{release}-",
+            dir=str(releases),
+        )
+    )
+    try:
         _copy_release_tree(source_root, staging)
-        # Freeze the complete temporary tree before it can appear at the
-        # canonical immutable release path. Rename then becomes the only
+        # Freeze the complete sibling staging tree before it can appear at the
+        # canonical immutable release path. The final rename is the only
         # publication boundary, so interruption/power loss cannot expose a
         # partially frozen release directory.
         _make_release_immutable(staging)
@@ -324,7 +346,9 @@ def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
                 )
             return destination
         os.rename(staging, destination)
-    return destination
+        return destination
+    finally:
+        _remove_release_staging(staging)
 
 
 def stage_release(source_root: Path, layout: Layout, release: str) -> Path:
