@@ -46,7 +46,7 @@ def engage(
             os.fsync(handle.fileno())
         os.replace(tmp, path)
         os.chmod(path, 0o600)
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         tmp.unlink(missing_ok=True)
         raise
 
