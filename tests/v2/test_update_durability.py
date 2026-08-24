@@ -218,6 +218,32 @@ class RecoveryPromotionDurabilityTests(unittest.TestCase):
             self.assertEqual(target_two.read_text(encoding="utf-8"), "new-two")
             self.assertIn("target-barrier", events)
 
+    def test_interrupted_live_backup_publication_is_reconciled_before_rollback_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate"
+            target = root / "target"
+            candidate.write_text("new", encoding="utf-8")
+            target.write_text("old", encoding="utf-8")
+            real_replace = durability.replace
+            calls = 0
+
+            def interrupt_after_rename(source: Path, destination: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    os.replace(source, destination)
+                    raise KeyboardInterrupt()
+                real_replace(source, destination)
+
+            with mock.patch.object(durability, "replace", side_effect=interrupt_after_rename):
+                with self.assertRaises(update_recovery.PromotionError) as caught:
+                    update_recovery._promote_with_proven_rollback(((candidate, target),))
+
+            self.assertTrue(caught.exception.rollback_complete)
+            self.assertEqual(target.read_text(encoding="utf-8"), "old")
+            self.assertEqual(candidate.read_text(encoding="utf-8"), "new")
+
 
 if __name__ == "__main__":
     unittest.main()
