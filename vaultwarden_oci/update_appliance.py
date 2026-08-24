@@ -305,13 +305,14 @@ def prepare_plan(
     machine: str | None = None,
     runner: Runner = cli.run_command,
 ) -> PreparedPlan:
-    """Create a coherent plan with explicit newer-release/downgrade semantics."""
+    """Create a coherent plan with explicit project applicability before downgrade checks."""
+    defer_component_check = use_latest or project_release is not None
     base = update.plan_update(
         source_root,
         root=root,
         machine=machine,
         runner=runner,
-        enforce_component_downgrades=not use_latest,
+        enforce_component_downgrades=not defer_component_check,
     )
     source_frozen = update.resolve_pinned(source_root, machine=machine)
     source_version = source_frozen.project_version
@@ -349,6 +350,9 @@ def prepare_plan(
         plan = base
         if project_release is not None:
             available, reason = _recommended_availability(base.current_release, source_version)
+            if available:
+                current_dir = install.Layout(base.root).path(install.INSTALL_ROOT) / base.current_target
+                update._reject_component_downgrades(current_dir, source_frozen)
         else:
             available = not plan.already_active
             reason = "developer source differs from active release" if available else "developer source is already active"
