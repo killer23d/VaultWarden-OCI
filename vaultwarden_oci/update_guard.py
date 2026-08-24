@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+from . import durability
+
 RECOVERY_REQUIRED_STATE = Path("/var/lib/vaultwarden-oci/state/update-recovery-required.json")
 
 
@@ -20,7 +22,13 @@ def engage(
     recovery_sha256: str | None = None,
     path: Path = RECOVERY_REQUIRED_STATE,
 ) -> None:
-    """Atomically block normal start/restart paths with secret-free recovery metadata."""
+    """Atomically and durably block normal start/restart paths.
+
+    File fsync alone is insufficient for a newly replaced directory entry.  The
+    shared durability boundary fsyncs the temporary file before publication and
+    the containing directory after ``replace`` returns, so later /etc or /opt
+    mutations cannot be reached until this guard is durable on its filesystem.
+    """
     payload: dict[str, object] = {
         "schema_version": 1,
         "recovery_required": True,
@@ -43,9 +51,9 @@ def engage(
             json.dump(payload, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()
+            os.fchmod(handle.fileno(), 0o600)
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        os.chmod(path, 0o600)
+        durability.replace(tmp, path)
     except (Exception, KeyboardInterrupt):
         tmp.unlink(missing_ok=True)
         raise
@@ -109,4 +117,7 @@ def clear(path: Path = RECOVERY_REQUIRED_STATE) -> None:
         raise UpdateGuardError(f"cannot inspect update recovery guard: {exc}") from exc
     if path.is_symlink() or not path.is_file() or info.st_uid != _expected_owner(path):
         raise UpdateGuardError(f"unsafe update recovery guard path: {path}")
-    path.unlink()
+    try:
+        durability.unlink(path)
+    except OSError as exc:
+        raise UpdateGuardError(f"cannot durably clear update recovery guard {path}: {exc}") from exc
