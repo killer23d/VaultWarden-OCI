@@ -778,7 +778,7 @@ def coherent_rollback(
                         recovery_sha256=failure.verified.sha256,
                         path=guard_path,
                     )
-                except Exception as guard_exc:
+                except (Exception, KeyboardInterrupt) as guard_exc:
                     try:
                         _quarantine_current(layout)
                     except Exception as quarantine_exc:
@@ -792,7 +792,7 @@ def coherent_rollback(
                 if _current_target(layout) != candidate_target:
                     try:
                         update._switch(layout, candidate_target)
-                    except Exception as switch_exc:
+                    except (Exception, KeyboardInterrupt) as switch_exc:
                         try:
                             _quarantine_current(layout)
                         except Exception as quarantine_exc:
@@ -891,7 +891,7 @@ def reconstruct_failure(
     if not expected_previous.is_dir() or expected_previous.is_symlink():
         raise UpdateError("requested previous immutable release is unavailable")
     if not candidate_dir.is_dir() or candidate_dir.is_symlink():
-        raise UpdateError("requested failed candidate immutable application release is unavailable")
+        raise UpdateError("requested failed candidate immutable release is unavailable")
     if recovery._sha256(artifact) != sha256:
         raise UpdateError("recovery artifact does not match the supplied verified SHA-256")
     frozen = resolve_pinned_file(candidate_dir / "versions.toml")
