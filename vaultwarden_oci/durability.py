@@ -11,12 +11,17 @@ import errno
 import os
 import shutil
 import stat
+import uuid
 from pathlib import Path
 from typing import Iterable
 
 
 def _readonly_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _temp_path(parent: Path, name: str) -> Path:
+    return parent / f".{name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"
 
 
 def fsync_file(path: Path) -> None:
@@ -103,6 +108,40 @@ def replace(source: Path, destination: Path) -> None:
     fsync_directory(destination_parent)
     if source_parent != destination_parent:
         fsync_directory(source_parent)
+
+
+def atomic_write(path: Path, content: bytes, mode: int) -> None:
+    """Write one regular file and durably publish its replacement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _temp_path(path.parent, path.name)
+    try:
+        fd = os.open(
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            mode,
+        )
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            # open(2)'s mode is affected by umask; make the requested metadata
+            # part of the fsynced temporary inode before it is published.
+            os.fchmod(handle.fileno(), mode)
+            os.fsync(handle.fileno())
+        replace(tmp, path)
+    except (Exception, KeyboardInterrupt):
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def atomic_symlink(path: Path, target: Path) -> None:
+    """Atomically replace a symlink and durably publish the parent entry."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _temp_path(path.parent, path.name)
+    try:
+        tmp.symlink_to(target)
+        replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def unlink(path: Path, *, missing_ok: bool = False) -> bool:
