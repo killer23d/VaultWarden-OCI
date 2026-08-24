@@ -203,7 +203,7 @@ class LockedFailureStopTests(unittest.TestCase):
                 mock.patch.object(install, "stage_release", return_value=new),
                 mock.patch.object(update, "_verify_coherent"),
                 mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
-                mock.patch.object(update, "_switch"),
+                mock.patch.object(update_appliance, "_switch_current"),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
                 mock.patch.object(update_appliance.update_guard, "engage", side_effect=lambda **_kwargs: events.append("guard")),
@@ -303,11 +303,12 @@ class CoherentRollbackLockTests(unittest.TestCase):
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=lambda *_a: require_lock("stop-candidate", True)),
                 mock.patch.object(update_appliance.update_guard, "engage", side_effect=lambda **_k: require_lock("guard")),
                 mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state),
-                mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_k: events.append("guard-clear")),
+                mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_k: require_lock("guard-clear")),
                 mock.patch.object(update_appliance.update_unit_migration, "converge_units", side_effect=lambda *_a: require_lock("install-old-units", {})),
-                mock.patch.object(update_appliance.update, "_switch", side_effect=lambda *_a: require_lock("switch-old-code")),
+                mock.patch.object(update_appliance, "_switch_current", side_effect=lambda *_a: require_lock("switch-old-code")),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
-                mock.patch.object(update_appliance, "_start_previous_service", side_effect=lambda *_a: events.append("start-old")),
+                mock.patch.object(update_appliance, "_activate_previous_while_guarded", side_effect=lambda *_a: require_lock("guarded-start-old")),
+                mock.patch.object(update_appliance, "_start_previous_service", side_effect=lambda *_a: events.append("systemd-start")),
                 mock.patch.object(update_appliance, "_prove_previous"),
             ):
                 update_appliance.coherent_rollback(
@@ -316,11 +317,20 @@ class CoherentRollbackLockTests(unittest.TestCase):
                 )
 
         self.assertLess(events.index("prepare-data"), events.index("lock-enter"))
-        for name in ("stop-candidate", "guard", "install-old-units", "switch-old-code", "promote-data"):
+        for name in (
+            "stop-candidate",
+            "guard",
+            "install-old-units",
+            "switch-old-code",
+            "promote-data",
+            "guarded-start-old",
+            "guard-clear",
+        ):
             self.assertLess(events.index("lock-enter"), events.index(name))
             self.assertLess(events.index(name), events.index("lock-exit"))
-        self.assertLess(events.index("lock-exit"), events.index("guard-clear"))
-        self.assertLess(events.index("guard-clear"), events.index("start-old"))
+        self.assertLess(events.index("guarded-start-old"), events.index("guard-clear"))
+        self.assertLess(events.index("guard-clear"), events.index("lock-exit"))
+        self.assertLess(events.index("lock-exit"), events.index("systemd-start"))
 
 
 class TimerAndHostSerializationTests(unittest.TestCase):
@@ -336,40 +346,49 @@ class TimerAndHostSerializationTests(unittest.TestCase):
         ])
 
     def test_host_upgrade_apply_serializes_apt_after_recovery(self) -> None:
-        verified = recovery.VerifiedRecovery(Path("/tmp/pre.vwrec"), "a" * 64, 10, "2026-08-23T00:00:00Z")
-        lock_held = False
-        events: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            artifact = temp / "pre.vwrec"
+            artifact.write_bytes(b"verified host-upgrade recovery")
+            verified = recovery.VerifiedRecovery(
+                artifact,
+                hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                artifact.stat().st_size,
+                "2026-08-23T00:00:00Z",
+            )
+            lock_held = False
+            events: list[str] = []
 
-        @contextlib.contextmanager
-        def held_lock(*_args, **_kwargs):
-            nonlocal lock_held
-            lock_held = True; events.append("lock-enter")
-            try:
-                yield
-            finally:
-                events.append("lock-exit"); lock_held = False
+            @contextlib.contextmanager
+            def held_lock(*_args, **_kwargs):
+                nonlocal lock_held
+                lock_held = True; events.append("lock-enter")
+                try:
+                    yield
+                finally:
+                    events.append("lock-exit"); lock_held = False
 
-        def create_recovery(*_args, **_kwargs):
-            self.assertFalse(lock_held); events.append("recovery"); return verified
+            def create_recovery(*_args, **_kwargs):
+                self.assertFalse(lock_held); events.append("recovery"); return verified
 
-        def runner(argv, **_kwargs):
-            if argv[0] == "apt-get":
-                self.assertTrue(lock_held); events.append(" ".join(argv))
-            return command(argv)
+            def runner(argv, **_kwargs):
+                if argv[0] == "apt-get":
+                    self.assertTrue(lock_held); events.append(" ".join(argv))
+                return command(argv)
 
-        with (
-            mock.patch.object(update_appliance.os, "geteuid", return_value=0),
-            mock.patch.object(update_appliance.storage, "verify"),
-            mock.patch.object(update_appliance.runtime, "load_config", return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58)),
-            mock.patch.object(update_appliance.recovery, "create_recovery", side_effect=create_recovery),
-            mock.patch.object(update_appliance, "_host_lock", return_value=Path("/tmp/test-lock")),
-            mock.patch.object(update_appliance.cli, "mutation_lock", held_lock),
-            mock.patch.object(update_appliance.Path, "exists", return_value=False),
-        ):
-            result, reboot = update_appliance.host_upgrade_apply(runner=runner)
-        self.assertEqual(result, verified); self.assertFalse(reboot)
-        self.assertLess(events.index("recovery"), events.index("lock-enter"))
-        self.assertLess(events.index("apt-get -y upgrade"), events.index("lock-exit"))
+            with (
+                mock.patch.object(update_appliance.os, "geteuid", return_value=0),
+                mock.patch.object(update_appliance.storage, "verify"),
+                mock.patch.object(update_appliance.runtime, "load_config", return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58)),
+                mock.patch.object(update_appliance.recovery, "create_recovery", side_effect=create_recovery),
+                mock.patch.object(update_appliance, "_host_lock", return_value=temp / "test-lock"),
+                mock.patch.object(update_appliance.cli, "mutation_lock", held_lock),
+                mock.patch.object(update_appliance.Path, "exists", return_value=False),
+            ):
+                result, reboot = update_appliance.host_upgrade_apply(runner=runner)
+            self.assertEqual(result, verified); self.assertFalse(reboot)
+            self.assertLess(events.index("recovery"), events.index("lock-enter"))
+            self.assertLess(events.index("apt-get -y upgrade"), events.index("lock-exit"))
 
     def test_host_upgrade_check_refreshes_indexes_under_lock(self) -> None:
         lock_held = False
