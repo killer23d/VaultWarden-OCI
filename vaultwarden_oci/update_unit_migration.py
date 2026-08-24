@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from . import install, update
+from . import durability, install, update
 from .update_versions import UpdateError
 
 ABSENT_MODE = -1
@@ -51,7 +51,7 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
     try:
         for destination, content in actions:
             if content is None:
-                destination.unlink(missing_ok=True)
+                durability.unlink(destination, missing_ok=True)
             else:
                 update._atomic_write(destination, content, 0o644)
     except (Exception, KeyboardInterrupt):
@@ -109,7 +109,7 @@ def converge_units(
     try:
         for destination, content in actions:
             if content is None:
-                destination.unlink(missing_ok=True)
+                durability.unlink(destination, missing_ok=True)
             else:
                 update._atomic_write(destination, content, 0o644)
     except (Exception, KeyboardInterrupt):
@@ -123,7 +123,7 @@ def restore_units(snapshot: Mapping[Path, tuple[bytes, int]]) -> None:
     for path, (content, mode) in snapshot.items():
         try:
             if mode == ABSENT_MODE:
-                path.unlink(missing_ok=True)
+                durability.unlink(path, missing_ok=True)
             else:
                 update._atomic_write(path, content, mode)
         except Exception as exc:
