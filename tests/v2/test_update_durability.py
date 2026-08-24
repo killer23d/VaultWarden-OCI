@@ -101,6 +101,28 @@ class GuardDurabilityTests(unittest.TestCase):
             self.assertLess(events.index("artifact"), events.index("guard"))
             self.assertIsNotNone(update_guard.load(path=guard))
 
+    def test_interrupted_guard_publication_is_normalized_for_fail_closed_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "pre.vwrec"
+            artifact.write_bytes(b"verified")
+            guard = root / "state" / "guard.json"
+
+            with mock.patch.object(durability, "replace", side_effect=KeyboardInterrupt()):
+                with self.assertRaisesRegex(
+                    update_guard.UpdateGuardError,
+                    "publication was interrupted",
+                ):
+                    update_guard.engage(
+                        candidate_release="2.0.0",
+                        previous_release="1.0.0",
+                        recovery_artifact=str(artifact),
+                        recovery_sha256="a" * 64,
+                        path=guard,
+                    )
+
+            self.assertFalse(guard.exists())
+
 
 class ReleasePublicationTests(unittest.TestCase):
     def test_release_tree_is_synced_before_canonical_rename(self) -> None:
