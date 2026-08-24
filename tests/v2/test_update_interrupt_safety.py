@@ -15,6 +15,7 @@ from vaultwarden_oci import (
     update_appliance,
     update_candidate,
     update_recovery,
+    update_unit_migration,
     update_versions,
 )
 
@@ -193,6 +194,92 @@ class InterruptedPromotionTests(unittest.TestCase):
             self.assertTrue(caught.exception.rollback_complete)
             self.assertEqual(target_one.read_text(encoding="utf-8"), "old-one")
             self.assertEqual(target_two.read_text(encoding="utf-8"), "old-two")
+
+
+class InterruptedUnitMigrationTests(unittest.TestCase):
+    UNITS = ("one.service", "two.service")
+
+    @staticmethod
+    def _unit_tree(root: Path, values: tuple[bytes, bytes]) -> None:
+        systemd = root / install.SYSTEMD_SOURCE_DIR
+        systemd.mkdir(parents=True)
+        for unit, value in zip(InterruptedUnitMigrationTests.UNITS, values):
+            (systemd / unit).write_bytes(value)
+
+    @staticmethod
+    def _installed(layout: install.Layout, values: tuple[bytes, bytes]) -> tuple[Path, Path]:
+        paths = tuple(layout.path(install.SYSTEMD_DIR / unit) for unit in InterruptedUnitMigrationTests.UNITS)
+        for path, value in zip(paths, values):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(value)
+        return paths  # type: ignore[return-value]
+
+    def _interrupt_second_atomic_write(self):
+        real_write = update_unit_migration.update._atomic_write
+        calls = 0
+
+        def write(path, content, mode):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt()
+            return real_write(path, content, mode)
+
+        return write
+
+    def test_install_units_interrupt_restores_exact_preupdate_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            layout = install.Layout(temp / "host")
+            previous = temp / "previous"
+            candidate = temp / "candidate"
+            old_values = (b"old-one\n", b"old-two\n")
+            new_values = (b"new-one\n", b"new-two\n")
+            self._unit_tree(previous, old_values)
+            self._unit_tree(candidate, new_values)
+            installed = self._installed(layout, old_values)
+
+            with (
+                mock.patch.object(install, "SYSTEMD_UNITS", self.UNITS),
+                mock.patch.object(
+                    update_unit_migration.update,
+                    "_atomic_write",
+                    side_effect=self._interrupt_second_atomic_write(),
+                ),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    update_unit_migration.install_units(candidate, previous, layout)
+
+            self.assertEqual(tuple(path.read_bytes() for path in installed), old_values)
+
+    def test_converge_units_interrupt_restores_exact_candidate_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            layout = install.Layout(temp / "host")
+            previous = temp / "previous"
+            candidate = temp / "candidate"
+            old_values = (b"old-one\n", b"old-two\n")
+            candidate_values = (b"candidate-one\n", b"candidate-two\n")
+            self._unit_tree(previous, old_values)
+            self._unit_tree(candidate, candidate_values)
+            installed = self._installed(layout, candidate_values)
+
+            with (
+                mock.patch.object(install, "SYSTEMD_UNITS", self.UNITS),
+                mock.patch.object(
+                    update_unit_migration.update,
+                    "_atomic_write",
+                    side_effect=self._interrupt_second_atomic_write(),
+                ),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    update_unit_migration.converge_units(
+                        previous,
+                        (candidate, previous),
+                        layout,
+                    )
+
+            self.assertEqual(tuple(path.read_bytes() for path in installed), candidate_values)
 
 
 if __name__ == "__main__":
