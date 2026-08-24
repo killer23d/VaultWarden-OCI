@@ -233,7 +233,7 @@ class TransactionOrderTests(unittest.TestCase):
                         activator=lambda *_args: (_ for _ in ()).throw(update.RuntimeActivationError("started", state_change_possible=True)),
                         recovery_creator=lambda *_args, **_kwargs: self._verified(temp),
                     )
-            guard.assert_called_once()
+            self.assertEqual(guard.call_count, 2)
         self.assertEqual(switches, [Path("releases/2.0.0")])
 
 
