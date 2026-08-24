@@ -119,6 +119,15 @@ class RollbackCrashSafetyTests(unittest.TestCase):
                 events.append("units-old")
                 return {}
 
+            guard_state = {
+                "schema_version": 1,
+                "recovery_required": True,
+                "candidate_release": "2.0.0",
+                "previous_release": "1.0.0",
+                "recovery_artifact": str(artifact),
+                "recovery_sha256": verified.sha256,
+            }
+
             with (
                 mock.patch.object(update_appliance.storage, "verify"),
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=verified.sha256),
@@ -126,6 +135,7 @@ class RollbackCrashSafetyTests(unittest.TestCase):
                 mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
                 mock.patch.object(update_appliance.cli, "mutation_lock", held_lock),
                 mock.patch.object(update_appliance.update_guard, "engage", side_effect=engage),
+                mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state),
                 mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_kwargs: events.append("guard-clear")),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
                 mock.patch.object(update_appliance.update_unit_migration, "converge_units", side_effect=converge),
