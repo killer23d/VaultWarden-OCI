@@ -282,5 +282,49 @@ class InterruptedUnitMigrationTests(unittest.TestCase):
             self.assertEqual(tuple(path.read_bytes() for path in installed), candidate_values)
 
 
+class ImmutableReleasePublicationTests(unittest.TestCase):
+    @staticmethod
+    def _source(root: Path) -> Path:
+        source = root / "source"
+        source.mkdir()
+        for name in install.RELEASE_FILES:
+            path = source / name
+            path.write_text(f"{name}\n", encoding="utf-8")
+        (source / "vwctl").chmod(0o755)
+        for name in install.RELEASE_DIRS:
+            directory = source / name
+            directory.mkdir()
+            (directory / "payload.txt").write_text(f"{name}\n", encoding="utf-8")
+        return source
+
+    def test_interrupt_after_atomic_rename_leaves_retryable_fully_immutable_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            layout = install.Layout(temp / "host")
+            source = self._source(temp)
+            destination = layout.path(install.RELEASES_DIR) / "2.0.0"
+            real_rename = install.os.rename
+
+            def rename_then_interrupt(source_path, destination_path):
+                real_rename(source_path, destination_path)
+                raise KeyboardInterrupt()
+
+            with mock.patch.object(install.os, "rename", side_effect=rename_then_interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    install.stage_release(source, layout, "2.0.0")
+
+            self.assertTrue(destination.is_dir())
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o555)
+            for path in destination.rglob("*"):
+                if path.is_dir():
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o555)
+                elif path.name == "vwctl":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o555)
+                else:
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o444)
+
+            self.assertEqual(install.stage_release(source, layout, "2.0.0"), destination)
+
+
 if __name__ == "__main__":
     unittest.main()
