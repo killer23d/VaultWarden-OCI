@@ -29,7 +29,7 @@ from . import (
     update_recovery,
     update_unit_migration,
 )
-from .update_candidate import POSTSTART_FAILURE
+from .update_candidate import PRESTART_FAILURE
 from .update_versions import (
     DEVELOPMENT_ENV,
     RESOLVED_STATE,
@@ -450,7 +450,10 @@ def _activate_candidate_release(release_dir: Path, render_root: Path, runner: Ru
     )
     if result.ok:
         return
-    state_change_possible = result.returncode == POSTSTART_FAILURE
+    # Only the candidate's explicit PRESTART code proves that runtime start was
+    # never attempted. Unknown exits (signal, OOM, crash) are conservatively
+    # treated as potentially state-changing so old code is never auto-launched.
+    state_change_possible = result.returncode != PRESTART_FAILURE
     detail = _detail(result)
     try:
         payload = json.loads(result.stdout)
@@ -632,7 +635,9 @@ def apply_prepared(
                         except update.RuntimeActivationError as exc:
                             state_change_possible = exc.state_change_possible
                             raise
-                        except Exception:
+                        except (Exception, KeyboardInterrupt):
+                            # An interrupted/abnormal candidate activation is an
+                            # unknown state boundary; fail closed as post-start.
                             state_change_possible = True
                             raise
                         else:
@@ -650,7 +655,7 @@ def apply_prepared(
                         _start_update_timer(layout, runner)
                         record_frozen(plan.frozen, record_path or layout.path(RESOLVED_STATE))
                         return release_dir
-                    except Exception as exc:
+                    except (Exception, KeyboardInterrupt) as exc:
                         if state_change_possible:
                             stopped = (
                                 release_dir is not None
@@ -705,7 +710,7 @@ def apply_prepared(
                                 _prove_previous(layout, runner)
                             except Exception as rollback_exc:
                                 rollback_errors.append(f"previous health proof: {rollback_exc}")
-                        message = str(exc)
+                        message = str(exc) or exc.__class__.__name__
                         if rollback_errors:
                             message += "; rollback incomplete: " + "; ".join(rollback_errors)
                         elif switched or snapshot is not None:
@@ -833,7 +838,7 @@ def coherent_rollback(
                     raise UpdateError(
                         f"coherent rollback promotion failed with unproven live-data state; current was quarantined and services remain stopped: {exc}"
                     ) from exc
-                except Exception as exc:
+                except (Exception, KeyboardInterrupt) as exc:
                     if data_promoted and not switched_old:
                         try:
                             _quarantine_current(layout)
@@ -852,7 +857,7 @@ def coherent_rollback(
                         f"coherent rollback failed before data promotion; guard-aware candidate selection remains blocked from normal start: {exc}"
                     ) from exc
                 completed = True
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         if layout.root == Path("/"):
             _settle_systemd_stopped(layout, runner)
         raise
@@ -886,7 +891,7 @@ def reconstruct_failure(
     if not expected_previous.is_dir() or expected_previous.is_symlink():
         raise UpdateError("requested previous immutable release is unavailable")
     if not candidate_dir.is_dir() or candidate_dir.is_symlink():
-        raise UpdateError("requested failed candidate immutable release is unavailable")
+        raise UpdateError("requested failed candidate immutable application release is unavailable")
     if recovery._sha256(artifact) != sha256:
         raise UpdateError("recovery artifact does not match the supplied verified SHA-256")
     frozen = resolve_pinned_file(candidate_dir / "versions.toml")
