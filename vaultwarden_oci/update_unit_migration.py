@@ -11,6 +11,12 @@ from .update_versions import UpdateError
 ABSENT_MODE = -1
 
 
+def _release_barrier(release: Path) -> None:
+    """Make one immutable release usable only after its tree and parent entry are durable."""
+    durability.fsync_tree(release)
+    durability.fsync_directory(release.parent)
+
+
 def install_units(new_release: Path, expected_release: Path, layout: install.Layout) -> dict[Path, tuple[bytes, int]]:
     """Move the installed owned-unit set from expected_release to new_release.
 
@@ -48,6 +54,9 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
 
         actions.append((destination, new.read_bytes() if new_exists else None))
 
+    # No boot-relevant /etc mutation may begin until the selected immutable
+    # release is fully durable under /opt (or the test root equivalent).
+    _release_barrier(new_release)
     try:
         for destination, content in actions:
             if content is None:
@@ -106,6 +115,9 @@ def converge_units(
 
         actions.append((destination, desired))
 
+    # The old immutable release must be durable before old unit files are
+    # published during coherent rollback.
+    _release_barrier(new_release)
     try:
         for destination, content in actions:
             if content is None:
