@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+from . import durability
+
 RECOVERY_REQUIRED_STATE = Path("/var/lib/vaultwarden-oci/state/update-recovery-required.json")
 
 
@@ -20,20 +22,36 @@ def engage(
     recovery_sha256: str | None = None,
     path: Path = RECOVERY_REQUIRED_STATE,
 ) -> None:
-    """Atomically block normal start/restart paths with secret-free recovery metadata."""
+    """Atomically and durably block normal start/restart paths.
+
+    File fsync alone is insufficient for a newly replaced directory entry.  The
+    shared durability boundary fsyncs the recovery artifact first, the temporary
+    guard file before publication, and the containing guard directory after
+    ``replace`` returns.  Later /etc or /opt mutations therefore cannot be
+    reached until both the rollback artifact and guard are durable on their
+    respective filesystems.
+
+    A SIGINT during this safety-critical publication is normalized to
+    ``UpdateGuardError`` so callers already performing fail-closed cleanup can
+    still quarantine or re-engage the guard instead of letting ``KeyboardInterrupt``
+    escape after an ambiguous VFS publication.
+    """
     payload: dict[str, object] = {
         "schema_version": 1,
         "recovery_required": True,
         "candidate_release": candidate_release,
         "previous_release": previous_release,
     }
-    if recovery_artifact is not None:
-        payload["recovery_artifact"] = recovery_artifact
-    if recovery_sha256 is not None:
-        payload["recovery_sha256"] = recovery_sha256
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    tmp: Path | None = None
     try:
+        if recovery_artifact is not None:
+            artifact = Path(recovery_artifact)
+            durability.fsync_file_and_parent(artifact)
+            payload["recovery_artifact"] = recovery_artifact
+        if recovery_sha256 is not None:
+            payload["recovery_sha256"] = recovery_sha256
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
         fd = os.open(
             tmp,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
@@ -43,11 +61,18 @@ def engage(
             json.dump(payload, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()
+            os.fchmod(handle.fileno(), 0o600)
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        os.chmod(path, 0o600)
-    except (Exception, KeyboardInterrupt):
-        tmp.unlink(missing_ok=True)
+        durability.replace(tmp, path)
+    except KeyboardInterrupt as exc:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+        raise UpdateGuardError(
+            "update recovery guard publication was interrupted; fail-closed cleanup is required"
+        ) from exc
+    except Exception:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
         raise
 
 
@@ -109,4 +134,7 @@ def clear(path: Path = RECOVERY_REQUIRED_STATE) -> None:
         raise UpdateGuardError(f"cannot inspect update recovery guard: {exc}") from exc
     if path.is_symlink() or not path.is_file() or info.st_uid != _expected_owner(path):
         raise UpdateGuardError(f"unsafe update recovery guard path: {path}")
-    path.unlink()
+    try:
+        durability.unlink(path)
+    except OSError as exc:
+        raise UpdateGuardError(f"cannot durably clear update recovery guard {path}: {exc}") from exc

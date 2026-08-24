@@ -157,8 +157,8 @@ class InterruptedApplyTests(unittest.TestCase):
                 mock.patch.object(update, "_verify_coherent"),
                 mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
                 mock.patch.object(
-                    update,
-                    "_switch",
+                    update_appliance,
+                    "_switch_current",
                     side_effect=lambda _layout, target: switches.append(target),
                 ),
                 mock.patch.object(update, "_daemon_reload"),
@@ -201,6 +201,11 @@ class InterruptedApplyTests(unittest.TestCase):
             def activator(*_args):
                 events.append("activate")
 
+            def record(_frozen, path: Path):
+                events.append("record")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+
             with (
                 mock.patch.object(install, "_frozen_source", exact_source),
                 mock.patch.object(update, "_validate_source"),
@@ -222,11 +227,11 @@ class InterruptedApplyTests(unittest.TestCase):
                 mock.patch.object(update_appliance.update_guard, "engage", side_effect=engage),
                 mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state(verified)),
                 mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_kwargs: events.append("guard-clear")),
-                mock.patch.object(update, "_switch", side_effect=switch),
+                mock.patch.object(update_appliance, "_switch_current", side_effect=switch),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update, "_gate_activated", side_effect=lambda *_args: events.append("gates")),
                 mock.patch.object(update_appliance, "_start_update_timer", side_effect=lambda *_args: events.append("timer")),
-                mock.patch.object(update_appliance, "record_frozen", side_effect=lambda *_args, **_kwargs: events.append("record")),
+                mock.patch.object(update_appliance, "record_frozen", side_effect=record),
             ):
                 update_appliance.apply_prepared(
                     prepared,
@@ -286,7 +291,7 @@ class InterruptedApplyTests(unittest.TestCase):
                 mock.patch.object(update_appliance.update_guard, "engage"),
                 mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state(verified)),
                 mock.patch.object(update_appliance.update_guard, "clear") as clear_guard,
-                mock.patch.object(update, "_switch", side_effect=switch),
+                mock.patch.object(update_appliance, "_switch_current", side_effect=switch),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_prove_previous"),
             ):
@@ -448,13 +453,13 @@ class ImmutableReleasePublicationTests(unittest.TestCase):
             layout = install.Layout(temp / "host")
             source = self._source(temp)
             destination = layout.path(install.RELEASES_DIR) / "2.0.0"
-            real_rename = install.os.rename
+            real_replace = install.os.replace
 
-            def rename_then_interrupt(source_path, destination_path):
-                real_rename(source_path, destination_path)
+            def replace_then_interrupt(source_path, destination_path):
+                real_replace(source_path, destination_path)
                 raise KeyboardInterrupt()
 
-            with mock.patch.object(install.os, "rename", side_effect=rename_then_interrupt):
+            with mock.patch.object(install.durability, "replace", side_effect=replace_then_interrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     install.stage_release(source, layout, "2.0.0")
 

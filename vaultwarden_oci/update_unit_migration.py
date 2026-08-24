@@ -5,10 +5,16 @@ import os
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from . import install, update
+from . import durability, install, update
 from .update_versions import UpdateError
 
 ABSENT_MODE = -1
+
+
+def _release_barrier(release: Path) -> None:
+    """Make one immutable release usable only after its tree and parent entry are durable."""
+    durability.fsync_tree(release)
+    durability.fsync_directory(release.parent)
 
 
 def install_units(new_release: Path, expected_release: Path, layout: install.Layout) -> dict[Path, tuple[bytes, int]]:
@@ -48,10 +54,13 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
 
         actions.append((destination, new.read_bytes() if new_exists else None))
 
+    # No boot-relevant /etc mutation may begin until the selected immutable
+    # release is fully durable under /opt (or the test root equivalent).
+    _release_barrier(new_release)
     try:
         for destination, content in actions:
             if content is None:
-                destination.unlink(missing_ok=True)
+                durability.unlink(destination, missing_ok=True)
             else:
                 update._atomic_write(destination, content, 0o644)
     except (Exception, KeyboardInterrupt):
@@ -106,10 +115,13 @@ def converge_units(
 
         actions.append((destination, desired))
 
+    # The old immutable release must be durable before old unit files are
+    # published during coherent rollback.
+    _release_barrier(new_release)
     try:
         for destination, content in actions:
             if content is None:
-                destination.unlink(missing_ok=True)
+                durability.unlink(destination, missing_ok=True)
             else:
                 update._atomic_write(destination, content, 0o644)
     except (Exception, KeyboardInterrupt):
@@ -123,7 +135,7 @@ def restore_units(snapshot: Mapping[Path, tuple[bytes, int]]) -> None:
     for path, (content, mode) in snapshot.items():
         try:
             if mode == ABSENT_MODE:
-                path.unlink(missing_ok=True)
+                durability.unlink(path, missing_ok=True)
             else:
                 update._atomic_write(path, content, mode)
         except Exception as exc:

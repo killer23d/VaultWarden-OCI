@@ -134,12 +134,15 @@ class CandidateResourceModeTests(unittest.TestCase):
 class RecoveryGuardTests(unittest.TestCase):
     def test_guard_is_secret_free_atomic_and_clearable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "guard.json"
+            root = Path(directory)
+            path = root / "guard.json"
+            artifact = root / "pre.vwrec"
+            artifact.write_bytes(b"verified guard recovery")
             update_guard.engage(
                 candidate_release="2.0.0",
                 previous_release="1.0.0",
-                recovery_artifact="/safe/pre.vwrec",
-                recovery_sha256="a" * 64,
+                recovery_artifact=str(artifact),
+                recovery_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 path=path,
             )
             loaded = update_guard.load(path)
@@ -260,7 +263,7 @@ class QuarantineTests(unittest.TestCase):
                 mock.patch.object(update_appliance, "_stop_candidate_locked", return_value=True),
                 mock.patch.object(update_appliance.update_guard, "engage"),
                 mock.patch.object(update_appliance.update_unit_migration, "converge_units", return_value={}),
-                mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
+                mock.patch.object(update_appliance, "_switch_current", side_effect=switch),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_settle_systemd_stopped", return_value=True),
                 mock.patch.object(update_appliance, "_start_previous_service") as start,

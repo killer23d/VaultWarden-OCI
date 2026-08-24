@@ -18,6 +18,7 @@ from typing import Callable, Iterator, Mapping
 
 from . import (
     cli,
+    durability,
     install,
     notification,
     recovery,
@@ -504,13 +505,36 @@ def _start_previous_service(layout: install.Layout, previous: Path, runner: Runn
         raise UpdateError(f"previous release failed to start after coherent data restore: {_detail(started)}")
 
 
+def _switch_current(layout: install.Layout, target: Path) -> None:
+    """Atomically and durably publish the appliance current-code selection."""
+    current = layout.path(install.CURRENT_LINK)
+    try:
+        durability.atomic_symlink(current, target)
+    except OSError as exc:
+        raise UpdateError(f"cannot durably publish current release selection {target}: {exc}") from exc
+
+
 def _quarantine_current(layout: install.Layout) -> None:
     """Fail closed: normal vwctl/systemd start paths resolve to no application code."""
-    update._switch(layout, _QUARANTINE_TARGET)
+    _switch_current(layout, _QUARANTINE_TARGET)
 
 
 def _guard_path(layout: install.Layout) -> Path:
     return layout.path(update_guard.RECOVERY_REQUIRED_STATE)
+
+
+def _engage_transaction_guard(
+    plan: update.UpdatePlan,
+    verified: recovery.VerifiedRecovery,
+    path: Path,
+) -> None:
+    update_guard.engage(
+        candidate_release=plan.target_release,
+        previous_release=plan.current_release,
+        recovery_artifact=str(verified.artifact),
+        recovery_sha256=verified.sha256,
+        path=path,
+    )
 
 
 def _clear_transaction_guard(
@@ -591,6 +615,67 @@ def _start_update_timer(layout: install.Layout, runner: Runner) -> None:
         raise UpdateError("update-check timer could not be proven active after upgrade")
 
 
+def _durable_recovery_artifact(verified: recovery.VerifiedRecovery) -> None:
+    try:
+        durability.fsync_file_and_parent(verified.artifact)
+    except OSError as exc:
+        raise UpdateError(f"cannot durably commit verified pre-update recovery artifact: {exc}") from exc
+
+
+def _durable_release(release_dir: Path) -> None:
+    try:
+        durability.fsync_tree(release_dir)
+        durability.fsync_directory(release_dir.parent)
+    except OSError as exc:
+        raise UpdateError(f"cannot durably commit immutable application release {release_dir}: {exc}") from exc
+
+
+def _activate_previous_while_guarded(
+    controller_release: Path,
+    previous_release: Path,
+    runner: Runner,
+) -> None:
+    """Start/prove the restored previous runtime without weakening normal guard checks.
+
+    The hidden candidate-owned interface is already the lock-aware update
+    controller.  It can activate the previous release's exact pins while the
+    recovery-required guard remains present; normal ``vwctl start`` and systemd
+    entrypoints remain blocked until this runtime has passed HTTPS/status/doctor.
+    """
+    with tempfile.TemporaryDirectory(prefix="vwoci-rollback-runtime-") as directory:
+        render_root = Path(directory)
+        controller = controller_release / "vwctl"
+        versions = previous_release / "versions.toml"
+        prepared = runner(
+            [
+                str(controller),
+                "__update-candidate",
+                "prepare",
+                "--versions",
+                str(versions),
+                "--render-root",
+                str(render_root),
+            ],
+            cwd=controller_release,
+        )
+        if not prepared.ok:
+            raise _candidate_error("guarded previous-runtime prepare failed", prepared)
+        activated = runner(
+            [
+                str(controller),
+                "__update-candidate",
+                "activate",
+                "--versions",
+                str(versions),
+                "--render-root",
+                str(render_root),
+            ],
+            cwd=controller_release,
+        )
+        if not activated.ok:
+            raise _candidate_error("guarded previous-runtime activation failed", activated)
+
+
 def apply_prepared(
     prepared: PreparedPlan,
     *,
@@ -624,6 +709,7 @@ def apply_prepared(
             verified = recovery_creator(config.offline_recovery_recipient, runner=runner)
             if not verified.artifact.is_file() or verified.size <= 0:
                 raise UpdateError("verified pre-update recovery did not produce a usable .vwrec artifact")
+            _durable_recovery_artifact(verified)
             if recovery._sha256(verified.artifact) != verified.sha256:
                 raise UpdateError("verified pre-update recovery digest changed before mutation")
             update._gate_current(layout, runner)
@@ -641,25 +727,18 @@ def apply_prepared(
                     release_dir: Path | None = None
                     try:
                         release_dir = install.stage_release(exact_source, layout, plan.target_release)
+                        _durable_release(release_dir)
                         update._verify_coherent(release_dir, exact_source)
-                        # Publish the exact recovery guard before any mutable
-                        # systemd/current state is changed. A reboot or process
-                        # loss anywhere after this point therefore fails closed;
-                        # recognized mixed unit state can be converged by the
-                        # explicit coherent rollback path.
-                        update_guard.engage(
-                            candidate_release=plan.target_release,
-                            previous_release=plan.current_release,
-                            recovery_artifact=str(verified.artifact),
-                            recovery_sha256=verified.sha256,
-                            path=guard_path,
-                        )
+                        # The .vwrec is durable first, then this exact guard is
+                        # durably published on /var/lib before /etc or /opt
+                        # boot-visible state can change.
+                        _engage_transaction_guard(plan, verified, guard_path)
                         snapshot = update_unit_migration.install_units(
                             release_dir,
                             previous_release,
                             layout,
                         )
-                        update._switch(layout, Path("releases") / plan.target_release)
+                        _switch_current(layout, Path("releases") / plan.target_release)
                         switched = True
                         update._daemon_reload(layout, runner)
                         try:
@@ -685,7 +764,9 @@ def apply_prepared(
                         if not crowdsec.ok:
                             raise UpdateError(f"activated CrowdSec/origin gate failed: {_detail(crowdsec)}")
                         _start_update_timer(layout, runner)
-                        record_frozen(plan.frozen, record_path or layout.path(RESOLVED_STATE))
+                        resolved_state = record_path or layout.path(RESOLVED_STATE)
+                        record_frozen(plan.frozen, resolved_state)
+                        durability.fsync_file_and_parent(resolved_state)
                         _clear_transaction_guard(plan, verified, guard_path)
                         return release_dir
                     except (Exception, KeyboardInterrupt) as exc:
@@ -696,13 +777,7 @@ def apply_prepared(
                             )
                             guard_detail = "recovery-required start guard engaged"
                             try:
-                                update_guard.engage(
-                                    candidate_release=plan.target_release,
-                                    previous_release=plan.current_release,
-                                    recovery_artifact=str(verified.artifact),
-                                    recovery_sha256=verified.sha256,
-                                    path=guard_path,
-                                )
+                                _engage_transaction_guard(plan, verified, guard_path)
                             except Exception as guard_exc:
                                 guard_detail = f"recovery guard failed ({guard_exc}); current quarantined"
                                 try:
@@ -734,7 +809,7 @@ def apply_prepared(
                             rollback_errors.append(f"current selection inspection: {rollback_exc}")
                         if current_was_candidate:
                             try:
-                                update._switch(layout, current_target)
+                                _switch_current(layout, current_target)
                             except Exception as rollback_exc:
                                 rollback_errors.append(f"current symlink: {rollback_exc}")
 
@@ -807,6 +882,7 @@ def coherent_rollback(
     plan = failure.plan
     layout = install.Layout(plan.root.resolve())
     guard_path = _guard_path(layout)
+    _durable_recovery_artifact(failure.verified)
     if recovery._sha256(failure.verified.artifact) != failure.verified.sha256:
         raise UpdateError("pre-update recovery artifact digest no longer matches the recorded verified digest")
 
@@ -820,26 +896,20 @@ def coherent_rollback(
     original_target = _rollback_selection(layout, plan)
 
     completed = False
+    lock_path = install.ensure_lock_path(layout)
     try:
         with update_recovery.prepare_restore(
             failure.verified.artifact,
             identity,
             runner=runner,
         ) as prepared_restore:
-            lock_path = install.ensure_lock_path(layout)
             with cli.mutation_lock(lock_path):
                 if _rollback_selection(layout, plan) != original_target:
                     raise UpdateError("current selection changed while coherent rollback was being prepared")
                 if plan.root == Path("/"):
                     storage.verify()
                 try:
-                    update_guard.engage(
-                        candidate_release=plan.target_release,
-                        previous_release=plan.current_release,
-                        recovery_artifact=str(failure.verified.artifact),
-                        recovery_sha256=failure.verified.sha256,
-                        path=guard_path,
-                    )
+                    _engage_transaction_guard(plan, failure.verified, guard_path)
                 except (Exception, KeyboardInterrupt) as guard_exc:
                     try:
                         _quarantine_current(layout)
@@ -853,7 +923,7 @@ def coherent_rollback(
 
                 if _current_target(layout) != candidate_target:
                     try:
-                        update._switch(layout, candidate_target)
+                        _switch_current(layout, candidate_target)
                     except (Exception, KeyboardInterrupt) as switch_exc:
                         try:
                             _quarantine_current(layout)
@@ -873,9 +943,8 @@ def coherent_rollback(
                 data_promoted = False
                 switched_old = False
                 try:
-                    # Keep guard-aware candidate code selected until old data is fully
-                    # promoted. A process/host crash before this returns can therefore
-                    # only reboot into candidate code that knows to honor the guard.
+                    # Keep guard-aware candidate code selected until old data is
+                    # durably promoted across every affected filesystem.
                     prepared_restore.promote_locked(runner=runner)
                     data_promoted = True
                     update_unit_migration.converge_units(
@@ -883,9 +952,18 @@ def coherent_rollback(
                         (candidate_path, expected_previous),
                         layout,
                     )
-                    update._switch(layout, plan.current_target)
+                    _switch_current(layout, plan.current_target)
                     switched_old = True
                     update._daemon_reload(layout, runner)
+
+                    # The recovery-required guard remains present here.  Start
+                    # the previous release only through the explicit hidden
+                    # update controller, prove HTTPS + status/doctor, then clear
+                    # the exact guard. Normal systemd/vwctl start remains blocked
+                    # until the complete rollback has been health-proven.
+                    _activate_previous_while_guarded(candidate_path, expected_previous, runner)
+                    _prove_previous(layout, runner)
+                    _clear_transaction_guard(plan, failure.verified, guard_path)
                 except update_recovery.PromotionError as exc:
                     try:
                         _quarantine_current(layout)
@@ -912,8 +990,21 @@ def coherent_rollback(
                             f"pre-update data was restored but previous-code selection did not complete; current was quarantined and services remain stopped: {exc}"
                         ) from exc
                     if data_promoted and switched_old:
+                        stopped = _stop_candidate_locked(candidate_path, runner)
+                        guard_detail = "recovery guard retained"
+                        try:
+                            # Covers failures after a clear() unlink reached the
+                            # VFS but its durability barrier failed.
+                            _engage_transaction_guard(plan, failure.verified, guard_path)
+                        except Exception as guard_exc:
+                            guard_detail = f"recovery guard could not be re-engaged ({guard_exc}); current quarantined"
+                            try:
+                                _quarantine_current(layout)
+                            except Exception as quarantine_exc:
+                                guard_detail += f"; quarantine also failed ({quarantine_exc})"
                         raise UpdateError(
-                            f"pre-update data and previous code were selected, but final systemd reload failed; services remain stopped: {exc}"
+                            f"pre-update data and previous code were durably selected, but guarded previous-runtime activation/health/guard-clear did not complete: {exc}; "
+                            f"runtime containers {'were stopped' if stopped else 'could not be proven stopped'}; {guard_detail}"
                         ) from exc
                     raise UpdateError(
                         f"coherent rollback failed before data promotion; guard-aware candidate selection remains blocked from normal start: {exc}"
@@ -926,12 +1017,29 @@ def coherent_rollback(
 
     if not completed:
         raise UpdateError("coherent rollback did not reach a complete data+code state")
+
+    # The previous runtime has already passed its guarded HTTPS/status/doctor
+    # proof. Reconcile systemd's oneshot/RemainAfterExit state after guard clear.
+    # If this final administrative step fails, restore the exact guard before
+    # returning so a later ordinary start/restart cannot bypass the failure.
     try:
-        _clear_transaction_guard(plan, failure.verified, guard_path)
-    except update_guard.UpdateGuardError as exc:
-        raise UpdateError(f"coherent rollback completed but recovery guard could not be cleared: {exc}") from exc
-    _start_previous_service(layout, expected_previous, runner)
-    _prove_previous(layout, runner)
+        _start_previous_service(layout, expected_previous, runner)
+        _prove_previous(layout, runner)
+    except (Exception, KeyboardInterrupt) as exc:
+        guard_error: Exception | None = None
+        try:
+            with cli.mutation_lock(lock_path):
+                _engage_transaction_guard(plan, failure.verified, guard_path)
+        except Exception as reengage_exc:
+            guard_error = reengage_exc
+            try:
+                _quarantine_current(layout)
+            except Exception as quarantine_exc:
+                guard_error = UpdateError(f"{reengage_exc}; quarantine also failed: {quarantine_exc}")
+        if layout.root == Path("/"):
+            _settle_systemd_stopped(layout, runner)
+        detail = f"; recovery guard re-engagement failed: {guard_error}" if guard_error else "; recovery guard was re-engaged"
+        raise UpdateError(f"previous runtime was health-proven before guard clear, but final systemd reconciliation failed: {exc}{detail}") from exc
 
 
 def reconstruct_failure(
@@ -954,6 +1062,14 @@ def reconstruct_failure(
         raise UpdateError("requested previous immutable release is unavailable")
     if not candidate_dir.is_dir() or candidate_dir.is_symlink():
         raise UpdateError("requested failed candidate immutable application release is unavailable")
+    _durable_recovery_artifact(
+        recovery.VerifiedRecovery(
+            artifact=artifact,
+            sha256=sha256,
+            size=artifact.stat().st_size,
+            created_at="explicit-update-rollback",
+        )
+    )
     if recovery._sha256(artifact) != sha256:
         raise UpdateError("recovery artifact does not match the supplied verified SHA-256")
     frozen = resolve_pinned_file(candidate_dir / "versions.toml")
@@ -1003,20 +1119,8 @@ def recovery_command(failure: PersistentStateFailure) -> str:
 
 
 def _atomic_state(payload: Mapping[str, object], path: Path = UPDATE_STATE) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(dict(payload), handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        os.chmod(path, 0o600)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    encoded = (json.dumps(dict(payload), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    durability.atomic_write(path, encoded, 0o600)
 
 
 def _load_state(path: Path = UPDATE_STATE) -> dict[str, object]:
@@ -1104,6 +1208,7 @@ def host_upgrade_apply(*, runner: Runner = cli.run_command) -> tuple[recovery.Ve
     storage.verify()
     config = runtime.load_config()
     verified = recovery.create_recovery(config.offline_recovery_recipient, runner=runner)
+    _durable_recovery_artifact(verified)
     with cli.mutation_lock(_host_lock()):
         storage.verify()
         refreshed = runner(["apt-get", "update"])

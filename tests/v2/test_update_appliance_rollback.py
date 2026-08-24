@@ -124,7 +124,7 @@ class CoherentRollbackTests(unittest.TestCase):
             services_stopped=True,
         )
 
-    def test_coherent_rollback_uses_recorded_artifact_and_keeps_data_code_switch_under_one_lock(self) -> None:
+    def test_coherent_rollback_keeps_guard_through_previous_runtime_health_proof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             root = temp / "host"
@@ -182,6 +182,9 @@ class CoherentRollbackTests(unittest.TestCase):
                 self.assertEqual(target, failure.plan.current_target)
                 events.append("switch")
 
+            def prove(_layout, _runner):
+                events.append("prove-old")
+
             guard_state = {
                 "schema_version": 1,
                 "recovery_required": True,
@@ -202,10 +205,15 @@ class CoherentRollbackTests(unittest.TestCase):
                 mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state),
                 mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_kwargs: events.append("guard-clear")),
                 mock.patch.object(update_appliance.update_unit_migration, "converge_units", side_effect=converge_units),
-                mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
+                mock.patch.object(update_appliance, "_switch_current", side_effect=switch),
                 mock.patch.object(update_appliance.update, "_daemon_reload"),
-                mock.patch.object(update_appliance, "_start_previous_service", side_effect=lambda *_args: events.append("start-old")),
-                mock.patch.object(update_appliance, "_prove_previous"),
+                mock.patch.object(
+                    update_appliance,
+                    "_activate_previous_while_guarded",
+                    side_effect=lambda *_args: events.append("guarded-start"),
+                ),
+                mock.patch.object(update_appliance, "_start_previous_service", side_effect=lambda *_args: events.append("systemd-start")),
+                mock.patch.object(update_appliance, "_prove_previous", side_effect=prove),
             ):
                 update_appliance.coherent_rollback(
                     failure,
@@ -214,11 +222,78 @@ class CoherentRollbackTests(unittest.TestCase):
                 )
 
             self.assertLess(events.index("prepared"), events.index("lock-enter"))
-            for item in ("stopped", "guard", "units", "switch", "promoted"):
+            for item in ("stopped", "guard", "units", "switch", "promoted", "guarded-start", "guard-clear"):
                 self.assertLess(events.index("lock-enter"), events.index(item))
                 self.assertLess(events.index(item), events.index("lock-exit"))
-            self.assertLess(events.index("lock-exit"), events.index("guard-clear"))
-            self.assertLess(events.index("guard-clear"), events.index("start-old"))
+            first_proof = events.index("prove-old")
+            self.assertLess(events.index("guarded-start"), first_proof)
+            self.assertLess(first_proof, events.index("guard-clear"))
+            self.assertLess(events.index("guard-clear"), events.index("lock-exit"))
+            self.assertLess(events.index("lock-exit"), events.index("systemd-start"))
+            self.assertGreater(events.index("prove-old", first_proof + 1), events.index("systemd-start"))
+
+    def test_systemd_reconciliation_failure_reengages_exact_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            root = temp / "host"
+            install_root = root / "opt/vaultwarden-oci"
+            previous = install_root / "releases/1.0.0"
+            candidate = install_root / "releases/2.0.0"
+            previous.mkdir(parents=True)
+            candidate.mkdir(parents=True)
+            (install_root / "current").symlink_to("releases/2.0.0")
+            failure = self._failure(temp, root)
+            identity = temp / "offline.age"
+            identity.write_text("AGE-SECRET-KEY-test\n", encoding="utf-8")
+            guard_calls: list[dict[str, object]] = []
+
+            @contextlib.contextmanager
+            def prepared_restore(*_args, **_kwargs):
+                class Prepared:
+                    def promote_locked(inner_self, *, runner):
+                        return None
+                yield Prepared()
+
+            guard_state = {
+                "schema_version": 1,
+                "recovery_required": True,
+                "candidate_release": failure.plan.target_release,
+                "previous_release": failure.plan.current_release,
+                "recovery_artifact": str(failure.verified.artifact),
+                "recovery_sha256": failure.verified.sha256,
+            }
+
+            with (
+                mock.patch.object(update_appliance.storage, "verify"),
+                mock.patch.object(update_appliance.recovery, "_sha256", return_value=failure.verified.sha256),
+                mock.patch.object(update_appliance.update_recovery, "prepare_restore", prepared_restore),
+                mock.patch.object(update_appliance.install, "ensure_lock_path", return_value=temp / "lock"),
+                mock.patch.object(update_appliance, "_stop_candidate_locked", return_value=True),
+                mock.patch.object(update_appliance.update_guard, "engage", side_effect=lambda **kwargs: guard_calls.append(kwargs)),
+                mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state),
+                mock.patch.object(update_appliance.update_guard, "clear"),
+                mock.patch.object(update_appliance.update_unit_migration, "converge_units", return_value={}),
+                mock.patch.object(update_appliance, "_switch_current"),
+                mock.patch.object(update_appliance.update, "_daemon_reload"),
+                mock.patch.object(update_appliance, "_activate_previous_while_guarded"),
+                mock.patch.object(update_appliance, "_prove_previous"),
+                mock.patch.object(
+                    update_appliance,
+                    "_start_previous_service",
+                    side_effect=update_versions.UpdateError("systemd start failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(update_versions.UpdateError, "guard was re-engaged"):
+                    update_appliance.coherent_rollback(
+                        failure,
+                        identity,
+                        runner=lambda argv, **_kwargs: command(argv),
+                    )
+
+            self.assertGreaterEqual(len(guard_calls), 2)
+            self.assertEqual(guard_calls[-1]["candidate_release"], failure.plan.target_release)
+            self.assertEqual(guard_calls[-1]["previous_release"], failure.plan.current_release)
+            self.assertEqual(guard_calls[-1]["recovery_sha256"], failure.verified.sha256)
 
     def test_storage_failure_blocks_recovery_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
