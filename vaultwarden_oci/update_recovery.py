@@ -9,7 +9,6 @@ systemd/current switch.
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -17,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from . import recovery, runtime
+from . import durability, recovery, runtime
 
 
 class PromotionError(recovery.RecoveryError):
@@ -29,25 +28,38 @@ class PromotionError(recovery.RecoveryError):
 
 
 def _remove(path: Path) -> None:
-    if not path.exists() and not path.is_symlink():
-        return
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    else:
-        path.unlink()
+    durability.remove(path, missing_ok=True)
+
+
+def _sync_staged(staged: Sequence[tuple[Path, Path]]) -> None:
+    """Make every staged restore object durable before any live target is renamed."""
+    for candidate, _ in staged:
+        durability.fsync_tree(candidate)
+    durability.fsync_directories(candidate.parent for candidate, _ in staged)
 
 
 def _promote_with_proven_rollback(staged: Sequence[tuple[Path, Path]]) -> None:
-    """Promote staged targets and prove restoration of live state on failure or SIGINT."""
+    """Durably promote targets and prove restoration of live state on failure/SIGINT.
+
+    Every candidate tree is synchronized before the first live rename.  Each
+    rename/removal then synchronizes its own target directory, which matters
+    when configuration and application data live on different filesystems.
+    Returning from this function is therefore the data-durability barrier that
+    must precede publication of previous application code.
+    """
+    _sync_staged(staged)
     rollback: list[tuple[Path, Path | None]] = []
     try:
         for candidate, target in staged:
             previous: Path | None = None
             if target.exists() or target.is_symlink():
                 previous = target.parent / f".{target.name}.rollback-{uuid.uuid4().hex[:8]}"
-                os.replace(target, previous)
+                durability.replace(target, previous)
             rollback.append((target, previous))
-            os.replace(candidate, target)
+            durability.replace(candidate, target)
+        # Explicitly finish one barrier on every affected target directory
+        # before the caller is allowed to switch /opt/current to old code.
+        durability.fsync_directories(target.parent for _, target in staged)
     except (Exception, KeyboardInterrupt) as exc:
         failures: list[str] = []
         for target, previous in reversed(rollback):
@@ -56,7 +68,7 @@ def _promote_with_proven_rollback(staged: Sequence[tuple[Path, Path]]) -> None:
                 if previous is not None:
                     if not previous.exists() and not previous.is_symlink():
                         raise OSError(f"missing rollback source {previous}")
-                    os.replace(previous, target)
+                    durability.replace(previous, target)
                     if not (target.exists() or target.is_symlink()):
                         raise OSError(f"rollback target was not restored: {target}")
                 elif target.exists() or target.is_symlink():
@@ -87,7 +99,7 @@ class PreparedRestore:
     cleanup_runtime_secrets: bool
 
     def promote_locked(self, *, runner=recovery.run_command) -> None:
-        """Stop remaining containers and promote staged data under the caller's lock."""
+        """Stop remaining containers and durably promote staged data under the caller's lock."""
         recovery._stop_services(
             runner,
             cleanup_runtime_secrets=self.cleanup_runtime_secrets,
@@ -171,6 +183,10 @@ def prepare_restore(
             if operational_candidate is not None:
                 staged.append((operational_candidate, paths.operational_age_key))
 
+            # Do the expensive content/metadata writeback before the mutation
+            # lock.  promote_locked() repeats the barrier defensively before it
+            # renames live targets, so no later mutation can bypass durability.
+            _sync_staged(staged)
             yield PreparedRestore(
                 manifest=manifest,
                 staged=staged,
