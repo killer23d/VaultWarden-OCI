@@ -25,9 +25,11 @@ def engage(
     """Atomically and durably block normal start/restart paths.
 
     File fsync alone is insufficient for a newly replaced directory entry.  The
-    shared durability boundary fsyncs the temporary file before publication and
-    the containing directory after ``replace`` returns, so later /etc or /opt
-    mutations cannot be reached until this guard is durable on its filesystem.
+    shared durability boundary fsyncs the recovery artifact first, the temporary
+    guard file before publication, and the containing guard directory after
+    ``replace`` returns.  Later /etc or /opt mutations therefore cannot be
+    reached until both the rollback artifact and guard are durable on their
+    respective filesystems.
     """
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -36,6 +38,8 @@ def engage(
         "previous_release": previous_release,
     }
     if recovery_artifact is not None:
+        artifact = Path(recovery_artifact)
+        durability.fsync_file_and_parent(artifact)
         payload["recovery_artifact"] = recovery_artifact
     if recovery_sha256 is not None:
         payload["recovery_sha256"] = recovery_sha256
