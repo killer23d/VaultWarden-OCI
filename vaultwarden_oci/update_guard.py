@@ -30,6 +30,11 @@ def engage(
     ``replace`` returns.  Later /etc or /opt mutations therefore cannot be
     reached until both the rollback artifact and guard are durable on their
     respective filesystems.
+
+    A SIGINT during this safety-critical publication is normalized to
+    ``UpdateGuardError`` so callers already performing fail-closed cleanup can
+    still quarantine or re-engage the guard instead of letting ``KeyboardInterrupt``
+    escape after an ambiguous VFS publication.
     """
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -37,15 +42,16 @@ def engage(
         "candidate_release": candidate_release,
         "previous_release": previous_release,
     }
-    if recovery_artifact is not None:
-        artifact = Path(recovery_artifact)
-        durability.fsync_file_and_parent(artifact)
-        payload["recovery_artifact"] = recovery_artifact
-    if recovery_sha256 is not None:
-        payload["recovery_sha256"] = recovery_sha256
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    tmp: Path | None = None
     try:
+        if recovery_artifact is not None:
+            artifact = Path(recovery_artifact)
+            durability.fsync_file_and_parent(artifact)
+            payload["recovery_artifact"] = recovery_artifact
+        if recovery_sha256 is not None:
+            payload["recovery_sha256"] = recovery_sha256
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
         fd = os.open(
             tmp,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
@@ -58,8 +64,15 @@ def engage(
             os.fchmod(handle.fileno(), 0o600)
             os.fsync(handle.fileno())
         durability.replace(tmp, path)
-    except (Exception, KeyboardInterrupt):
-        tmp.unlink(missing_ok=True)
+    except KeyboardInterrupt as exc:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+        raise UpdateGuardError(
+            "update recovery guard publication was interrupted; fail-closed cleanup is required"
+        ) from exc
+    except Exception:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
         raise
 
 
