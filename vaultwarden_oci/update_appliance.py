@@ -642,20 +642,22 @@ def apply_prepared(
                     try:
                         release_dir = install.stage_release(exact_source, layout, plan.target_release)
                         update._verify_coherent(release_dir, exact_source)
-                        snapshot = update_unit_migration.install_units(
-                            release_dir,
-                            previous_release,
-                            layout,
-                        )
-                        # Publish a guard before the candidate pointer can become
-                        # visible. Candidate vwctl honors this on boot, while the
-                        # internal __update-candidate activation path bypasses it.
+                        # Publish the exact recovery guard before any mutable
+                        # systemd/current state is changed. A reboot or process
+                        # loss anywhere after this point therefore fails closed;
+                        # recognized mixed unit state can be converged by the
+                        # explicit coherent rollback path.
                         update_guard.engage(
                             candidate_release=plan.target_release,
                             previous_release=plan.current_release,
                             recovery_artifact=str(verified.artifact),
                             recovery_sha256=verified.sha256,
                             path=guard_path,
+                        )
+                        snapshot = update_unit_migration.install_units(
+                            release_dir,
+                            previous_release,
+                            layout,
                         )
                         update._switch(layout, Path("releases") / plan.target_release)
                         switched = True
@@ -951,7 +953,7 @@ def reconstruct_failure(
     if not expected_previous.is_dir() or expected_previous.is_symlink():
         raise UpdateError("requested previous immutable release is unavailable")
     if not candidate_dir.is_dir() or candidate_dir.is_symlink():
-        raise UpdateError("requested failed candidate immutable release is unavailable")
+        raise UpdateError("requested failed candidate immutable application release is unavailable")
     if recovery._sha256(artifact) != sha256:
         raise UpdateError("recovery artifact does not match the supplied verified SHA-256")
     frozen = resolve_pinned_file(candidate_dir / "versions.toml")
