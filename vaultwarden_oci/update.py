@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
-from . import cli, install
+from . import cli, durability, install
 from .update_versions import (
     RESOLVED_STATE,
     FrozenVersions,
@@ -250,22 +250,8 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 
 
 def _atomic_write(path: Path, content: bytes, mode: int) -> None:
-    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    try:
-        fd = os.open(
-            tmp,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            mode,
-        )
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        os.chmod(path, mode)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    """Compatibility boundary for durable project-owned file replacement."""
+    durability.atomic_write(path, content, mode)
 
 
 def _install_units(
@@ -313,14 +299,8 @@ def _restore_units(snapshot: Mapping[Path, tuple[bytes, int]]) -> None:
 
 
 def _switch(layout: install.Layout, target: Path) -> None:
-    current = layout.path(install.CURRENT_LINK)
-    temp = current.parent / f".current.{os.getpid()}.tmp"
-    temp.unlink(missing_ok=True)
-    try:
-        temp.symlink_to(target)
-        os.replace(temp, current)
-    finally:
-        temp.unlink(missing_ok=True)
+    """Compatibility boundary for durable current-symlink publication."""
+    durability.atomic_symlink(layout.path(install.CURRENT_LINK), target)
 
 
 def _daemon_reload(layout: install.Layout, runner: Runner) -> None:
@@ -422,9 +402,9 @@ def apply_update(
         raise UpdateError("candidate version pins changed since update check")
 
     _gate_current(layout, runner)
-    recovery = runner([str(previous_release / "vwctl"), "backup"])
-    if not recovery.ok:
-        raise UpdateError(f"verified pre-update recovery failed: {_detail(recovery)}")
+    recovery_result = runner([str(previous_release / "vwctl"), "backup"])
+    if not recovery_result.ok:
+        raise UpdateError(f"verified pre-update recovery failed: {_detail(recovery_result)}")
     _gate_current(layout, runner)
 
     lock_path = install.ensure_lock_path(layout)
