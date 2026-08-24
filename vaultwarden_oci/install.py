@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from vaultwarden_oci import durability
 from vaultwarden_oci.cli import (
     DEFAULT_CONFIG_PATH,
     GLOBAL_LOCK_PATH,
@@ -332,11 +333,11 @@ def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
     )
     try:
         _copy_release_tree(source_root, staging)
-        # Freeze the complete sibling staging tree before it can appear at the
-        # canonical immutable release path. The final rename is the only
-        # publication boundary, so interruption/power loss cannot expose a
-        # partially frozen release directory.
+        # Freeze and synchronize the complete sibling staging tree before it
+        # can appear at the canonical immutable release path.  The durable
+        # rename plus releases-directory fsync is the publication boundary.
         _make_release_immutable(staging)
+        durability.fsync_tree(staging)
         if destination.exists() or destination.is_symlink():
             if destination.is_symlink() or not destination.is_dir():
                 raise InstallError(f"release path is not a directory: {destination}")
@@ -344,8 +345,10 @@ def _install_release(source_root: Path, layout: Layout, release: str) -> Path:
                 raise InstallError(
                     f"release {release} already exists with different content; choose a new release version"
                 )
+            durability.fsync_tree(destination)
+            durability.fsync_directory(releases)
             return destination
-        os.rename(staging, destination)
+        durability.replace(staging, destination)
         return destination
     finally:
         _remove_release_staging(staging)
