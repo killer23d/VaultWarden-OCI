@@ -182,6 +182,15 @@ class CoherentRollbackTests(unittest.TestCase):
                 self.assertEqual(target, failure.plan.current_target)
                 events.append("switch")
 
+            guard_state = {
+                "schema_version": 1,
+                "recovery_required": True,
+                "candidate_release": failure.plan.target_release,
+                "previous_release": failure.plan.current_release,
+                "recovery_artifact": str(failure.verified.artifact),
+                "recovery_sha256": failure.verified.sha256,
+            }
+
             with (
                 mock.patch.object(update_appliance.storage, "verify"),
                 mock.patch.object(update_appliance.recovery, "_sha256", return_value=failure.verified.sha256),
@@ -190,6 +199,7 @@ class CoherentRollbackTests(unittest.TestCase):
                 mock.patch.object(update_appliance.cli, "mutation_lock", mutation_lock),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", side_effect=stop_locked),
                 mock.patch.object(update_appliance.update_guard, "engage", side_effect=lambda **_kwargs: events.append("guard")),
+                mock.patch.object(update_appliance.update_guard, "load", return_value=guard_state),
                 mock.patch.object(update_appliance.update_guard, "clear", side_effect=lambda **_kwargs: events.append("guard-clear")),
                 mock.patch.object(update_appliance.update_unit_migration, "converge_units", side_effect=converge_units),
                 mock.patch.object(update_appliance.update, "_switch", side_effect=switch),
