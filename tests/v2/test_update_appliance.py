@@ -149,6 +149,11 @@ class TransactionOrderTests(unittest.TestCase):
                 release = temp / "new"; release.mkdir(exist_ok=True)
                 return release
 
+            def record(_frozen, path: Path):
+                events.append("record")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+
             with (
                 mock.patch.object(install, "_frozen_source", exact_source),
                 mock.patch.object(update, "_validate_source"),
@@ -159,10 +164,10 @@ class TransactionOrderTests(unittest.TestCase):
                 mock.patch.object(install, "stage_release", side_effect=stage),
                 mock.patch.object(update, "_verify_coherent"),
                 mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
-                mock.patch.object(update, "_switch"),
+                mock.patch.object(update_appliance, "_switch_current"),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update, "_gate_activated"),
-                mock.patch.object(update_appliance, "record_frozen"),
+                mock.patch.object(update_appliance, "record_frozen", side_effect=record),
             ):
                 update_appliance.apply_prepared(
                     prepared,
@@ -205,6 +210,8 @@ class TransactionOrderTests(unittest.TestCase):
             temp = Path(directory)
             prepared = self._prepared(temp)
             exact = temp / "exact"; exact.mkdir()
+            old = temp / "old"; old.mkdir()
+            new = temp / "new"; new.mkdir()
 
             @contextlib.contextmanager
             def exact_source(*_args, **_kwargs):
@@ -215,13 +222,13 @@ class TransactionOrderTests(unittest.TestCase):
                 mock.patch.object(install, "_frozen_source", exact_source),
                 mock.patch.object(update, "_validate_source"),
                 mock.patch.object(update_appliance, "_preflight", return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58)),
-                mock.patch.object(update, "_current", return_value=(Path("releases/1.0.0"), "1.0.0", temp / "old")),
+                mock.patch.object(update, "_current", return_value=(Path("releases/1.0.0"), "1.0.0", old)),
                 mock.patch.object(install, "ensure_lock_path", return_value=temp / "lock"),
                 mock.patch.object(cli, "mutation_lock", return_value=contextlib.nullcontext()),
-                mock.patch.object(install, "stage_release", return_value=temp / "new"),
+                mock.patch.object(install, "stage_release", return_value=new),
                 mock.patch.object(update, "_verify_coherent"),
                 mock.patch.object(update_appliance.update_unit_migration, "install_units", return_value={}),
-                mock.patch.object(update, "_switch", side_effect=lambda _layout, target: switches.append(target)),
+                mock.patch.object(update_appliance, "_switch_current", side_effect=lambda _layout, target: switches.append(target)),
                 mock.patch.object(update, "_daemon_reload"),
                 mock.patch.object(update_appliance, "_stop_candidate_locked", return_value=True),
                 mock.patch.object(update_appliance.update_guard, "engage") as guard,
@@ -247,28 +254,37 @@ class SchedulerAndHostTests(unittest.TestCase):
         self.assertNotIn("update apply", timer)
 
     def test_host_upgrade_never_reboots_and_does_not_claim_os_rollback(self) -> None:
-        calls: list[tuple[str, ...]] = []
-        verified = recovery.VerifiedRecovery(Path("/tmp/recovery.vwrec"), "a" * 64, 123, "2026-08-23T00:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            calls: list[tuple[str, ...]] = []
+            artifact = temp / "recovery.vwrec"
+            artifact.write_bytes(b"verified host-upgrade recovery")
+            verified = recovery.VerifiedRecovery(
+                artifact,
+                hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                artifact.stat().st_size,
+                "2026-08-23T00:00:00Z",
+            )
 
-        def runner(argv, **_kwargs):
-            calls.append(tuple(argv))
-            return command(argv)
+            def runner(argv, **_kwargs):
+                calls.append(tuple(argv))
+                return command(argv)
 
-        with (
-            mock.patch.object(update_appliance.os, "geteuid", return_value=0),
-            mock.patch.object(update_appliance.storage, "verify"),
-            mock.patch.object(update_appliance.runtime, "load_config", return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58)),
-            mock.patch.object(update_appliance.recovery, "create_recovery", return_value=verified),
-            mock.patch.object(update_appliance, "_host_lock", return_value=Path("/tmp/test-lock")),
-            mock.patch.object(update_appliance.cli, "mutation_lock", return_value=contextlib.nullcontext()),
-            mock.patch.object(update_appliance.Path, "exists", return_value=False),
-        ):
-            result, reboot = update_appliance.host_upgrade_apply(runner=runner)
-        self.assertEqual(result, verified)
-        self.assertFalse(reboot)
-        self.assertIn(("apt-get", "update"), calls)
-        self.assertIn(("apt-get", "-y", "upgrade"), calls)
-        self.assertFalse(any("reboot" in item for call in calls for item in call))
+            with (
+                mock.patch.object(update_appliance.os, "geteuid", return_value=0),
+                mock.patch.object(update_appliance.storage, "verify"),
+                mock.patch.object(update_appliance.runtime, "load_config", return_value=mock.Mock(offline_recovery_recipient="age1" + "a" * 58)),
+                mock.patch.object(update_appliance.recovery, "create_recovery", return_value=verified),
+                mock.patch.object(update_appliance, "_host_lock", return_value=temp / "test-lock"),
+                mock.patch.object(update_appliance.cli, "mutation_lock", return_value=contextlib.nullcontext()),
+                mock.patch.object(update_appliance.Path, "exists", return_value=False),
+            ):
+                result, reboot = update_appliance.host_upgrade_apply(runner=runner)
+            self.assertEqual(result, verified)
+            self.assertFalse(reboot)
+            self.assertIn(("apt-get", "update"), calls)
+            self.assertIn(("apt-get", "-y", "upgrade"), calls)
+            self.assertFalse(any("reboot" in item for call in calls for item in call))
 
     def test_noninteractive_poststart_failure_never_silently_restores_data(self) -> None:
         plan = update.UpdatePlan(Path("/tmp/source"), Path("/"), Path("releases/1.0.0"), "1.0.0", "2.0.0", frozen())
