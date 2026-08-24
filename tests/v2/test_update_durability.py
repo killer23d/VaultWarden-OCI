@@ -151,7 +151,7 @@ class CurrentPublicationTests(unittest.TestCase):
 
 
 class RecoveryPromotionDurabilityTests(unittest.TestCase):
-    def test_all_staged_objects_are_synced_before_first_live_rename(self) -> None:
+    def test_staged_and_live_objects_are_synced_before_first_live_rename(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             candidate_one = root / "candidate-one"
@@ -190,8 +190,8 @@ class RecoveryPromotionDurabilityTests(unittest.TestCase):
                 )
 
             first_replace = min(index for index, event in enumerate(events) if event.startswith("replace:"))
-            self.assertLess(events.index("sync:candidate-one"), first_replace)
-            self.assertLess(events.index("sync:candidate-two"), first_replace)
+            for name in ("candidate-one", "candidate-two", "target-one", "target-two"):
+                self.assertLess(events.index(f"sync:{name}"), first_replace)
             self.assertEqual(target_one.read_text(encoding="utf-8"), "new-one")
             self.assertEqual(target_two.read_text(encoding="utf-8"), "new-two")
             self.assertIn("target-barrier", events)
