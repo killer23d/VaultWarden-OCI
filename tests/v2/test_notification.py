@@ -328,6 +328,8 @@ class SystemdSurfaceTests(unittest.TestCase):
                 "vaultwarden-oci-maintenance.service",
                 "vaultwarden-oci-maintenance.timer",
                 "vaultwarden-oci-notify@.service",
+                "vaultwarden-oci-update-check.service",
+                "vaultwarden-oci-update-check.timer",
             },
         )
         for path in unit_dir.glob("*.service"):

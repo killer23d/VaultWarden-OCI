@@ -1,4 +1,4 @@
-"""Central Phase 7 freezing of exact component versions and image references."""
+"""Central freezing of exact component versions and image references."""
 from __future__ import annotations
 
 import hashlib
@@ -25,6 +25,13 @@ _RELEASE_URLS = {
     "caddy": "https://api.github.com/repos/caddyserver/caddy/releases/latest",
     "caddy_dns_cloudflare": "https://api.github.com/repos/caddy-dns/cloudflare/releases/latest",
 }
+_TAG_URLS = {
+    "caddy_combine_ip_ranges": "https://api.github.com/repos/fvbommel/caddy-combine-ip-ranges/tags?per_page=1",
+    "caddy_ratelimit": "https://api.github.com/repos/mholt/caddy-ratelimit/tags?per_page=1",
+}
+_COMMIT_URLS = {
+    "caddy_cloudflare_ip": "https://api.github.com/repos/WeidiDeng/caddy-cloudflare-ip/commits?per_page=1",
+}
 _MANIFEST_ACCEPT = ", ".join(
     (
         "application/vnd.oci.image.index.v1+json",
@@ -34,7 +41,7 @@ _MANIFEST_ACCEPT = ", ".join(
 
 
 class UpdateError(RuntimeError):
-    """Raised when a Phase 7 version/update boundary cannot be proven safe."""
+    """Raised when a version/update boundary cannot be proven safe."""
 
 
 @dataclass(frozen=True)
@@ -70,7 +77,28 @@ class FrozenVersions:
 
     @property
     def caddy_image(self) -> str:
-        return f"vaultwarden-oci/caddy:{self.caddy}-edge"
+        """Name the locally built xcaddy image by its complete immutable inputs.
+
+        Caddy version alone is insufficient: two snapshots can use the same Caddy
+        release with different xcaddy addon refs or base-image digests.  A
+        snapshot-unique tag prevents pre-staging from overwriting the image used
+        by the currently active release before the appliance mutation lock is
+        acquired.
+        """
+        exact = {
+            "architecture": self.architecture,
+            "caddy": self.caddy,
+            "caddy_dns_cloudflare": self.caddy_dns_cloudflare,
+            "caddy_cloudflare_ip": self.caddy_cloudflare_ip,
+            "caddy_combine_ip_ranges": self.caddy_combine_ip_ranges,
+            "caddy_ratelimit": self.caddy_ratelimit,
+            "caddy_builder_digest": self.caddy_builder_image.digest,
+            "caddy_runtime_digest": self.caddy_runtime_image.digest,
+        }
+        suffix = hashlib.sha256(
+            json.dumps(exact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:12]
+        return f"vaultwarden-oci/caddy:{self.caddy}-edge-{suffix}"
 
     def as_dict(self) -> dict[str, object]:
         images = {}
@@ -122,7 +150,7 @@ def _get_json(url: str, headers: Mapping[str, str] | None = None) -> object:
 
 
 class RemoteLookup:
-    """Small stable remote boundary for release tags and Docker manifest digests."""
+    """Small remote boundary for upstream refs and architecture image digests."""
 
     def __init__(self, get_json: JsonGetter = _get_json):
         self._get_json = get_json
@@ -137,6 +165,24 @@ class RemoteLookup:
         if not isinstance(tag, str) or not tag or tag.strip() != tag or any(c.isspace() for c in tag):
             raise UpdateError(f"latest release for {component} had an invalid tag")
         return tag
+
+    def latest_ref(self, component: str) -> str:
+        """Resolve one exact xcaddy addon ref once; never return a floating branch."""
+        if component in _TAG_URLS:
+            payload = self._get_json(_TAG_URLS[component], None)
+            item = payload[0] if isinstance(payload, list) and payload else None
+            value = item.get("name") if isinstance(item, dict) else None
+        elif component in _COMMIT_URLS:
+            payload = self._get_json(_COMMIT_URLS[component], None)
+            item = payload[0] if isinstance(payload, list) and payload else None
+            value = item.get("sha") if isinstance(item, dict) else None
+        else:
+            raise UpdateError(f"no latest-ref boundary for {component}")
+        if not isinstance(value, str) or not value or value.strip() != value or any(c.isspace() for c in value):
+            raise UpdateError(f"latest ref for {component} was invalid")
+        if component in _COMMIT_URLS and not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise UpdateError(f"latest commit ref for {component} was not an exact SHA")
+        return value
 
     def image_digest(self, repository: str, tag: str, architecture: str) -> str:
         arch = architecture_name(architecture)
@@ -277,11 +323,7 @@ def resolve_pinned_file(
         manifest.caddy_cloudflare_ip,
         manifest.caddy_combine_ip_ranges,
         manifest.caddy_ratelimit,
-        _image_digests(
-            path,
-            arch,
-            require_all_architectures=require_all_architectures,
-        ),
+        _image_digests(path, arch, require_all_architectures=require_all_architectures),
     )
 
 
@@ -302,7 +344,7 @@ def _require_development() -> None:
 
 
 def require_development_target(root: Path) -> None:
-    """Keep the dev/test latest resolver away from the live production root."""
+    """Legacy development boundary retained for the low-level installer CLI."""
     _require_development()
     if root.resolve() == Path("/"):
         raise UpdateError(
@@ -310,14 +352,13 @@ def require_development_target(root: Path) -> None:
         )
 
 
-def resolve_latest(
+def _latest_snapshot(
     source_root: Path,
     *,
-    machine: str | None = None,
-    lookup: RemoteLookup | None = None,
+    machine: str | None,
+    lookup: RemoteLookup | None,
+    include_all_addons: bool,
 ) -> FrozenVersions:
-    """Resolve each latest boundary once and return one exact immutable run snapshot."""
-    _require_development()
     source_root = source_root.resolve()
     try:
         base = cli.load_versions(source_root / "versions.toml", require_components=True)
@@ -329,10 +370,21 @@ def resolve_latest(
     caddy = remote.latest_release("caddy").removeprefix("v")
     plugin_tag = remote.latest_release("caddy_dns_cloudflare")
     plugin = plugin_tag if plugin_tag.startswith("v") else f"v{plugin_tag}"
+    if include_all_addons:
+        trusted_proxy = remote.latest_ref("caddy_cloudflare_ip")
+        combine_ranges = remote.latest_ref("caddy_combine_ip_ranges")
+        rate_limit = remote.latest_ref("caddy_ratelimit")
+    else:
+        trusted_proxy = base.caddy_cloudflare_ip
+        combine_ranges = base.caddy_combine_ip_ranges
+        rate_limit = base.caddy_ratelimit
     for value, label in (
         (vaultwarden, "vaultwarden"),
         (caddy, "caddy"),
         (plugin, "caddy_dns_cloudflare"),
+        (trusted_proxy, "caddy_cloudflare_ip"),
+        (combine_ranges, "caddy_combine_ip_ranges"),
+        (rate_limit, "caddy_ratelimit"),
     ):
         try:
             cli._pin(value, label)
@@ -348,9 +400,9 @@ def resolve_latest(
         "vaultwarden": vaultwarden,
         "caddy": caddy,
         "caddy_dns_cloudflare": plugin,
-        "caddy_cloudflare_ip": base.caddy_cloudflare_ip,
-        "caddy_combine_ip_ranges": base.caddy_combine_ip_ranges,
-        "caddy_ratelimit": base.caddy_ratelimit,
+        "caddy_cloudflare_ip": trusted_proxy,
+        "caddy_combine_ip_ranges": combine_ranges,
+        "caddy_ratelimit": rate_limit,
         "digests": digests,
     }
     suffix = hashlib.sha256(
@@ -362,7 +414,32 @@ def resolve_latest(
         raise UpdateError(str(exc)) from exc
     return _freeze(
         "latest", arch, project, vaultwarden, caddy, plugin,
-        base.caddy_cloudflare_ip, base.caddy_combine_ip_ranges, base.caddy_ratelimit, digests
+        trusted_proxy, combine_ranges, rate_limit, digests,
+    )
+
+
+def resolve_latest(
+    source_root: Path,
+    *,
+    machine: str | None = None,
+    lookup: RemoteLookup | None = None,
+) -> FrozenVersions:
+    """Legacy development/test latest resolver retained for compatibility."""
+    _require_development()
+    return _latest_snapshot(
+        source_root, machine=machine, lookup=lookup, include_all_addons=False
+    )
+
+
+def resolve_latest_supported(
+    source_root: Path,
+    *,
+    machine: str | None = None,
+    lookup: RemoteLookup | None = None,
+) -> FrozenVersions:
+    """Resolve every supported upstream boundary once for operator --use-latest."""
+    return _latest_snapshot(
+        source_root, machine=machine, lookup=lookup, include_all_addons=True
     )
 
 

@@ -1,7 +1,7 @@
 """First-run wrapper for transient offline recovery identity handoff.
 
-The existing setup.py remains the installation owner. This wrapper only adds the
-human custody step that must span initial setup and recovery-kit publication.
+The existing setup.py remains the installation owner. This wrapper adds the
+human custody step and the supported, explicitly confirmed --use-latest UX.
 """
 from __future__ import annotations
 
@@ -12,10 +12,15 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
-from . import notification, recovery_ux, secrets, setup, sevenzip_secure
+from . import notification, recovery_ux, secrets, setup, sevenzip_secure, update_versions
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
 _ORIGINAL_SETUP_RUN = setup._run
+
+# setup.py already freezes one snapshot into the immutable installed release.
+# Route its operator-facing --use-latest path through the supported resolver;
+# the old development resolver remains available only to low-level tests/tools.
+setup.resolve_latest = update_versions.resolve_latest_supported
 
 
 class SetupFrontendError(RuntimeError):
@@ -64,6 +69,26 @@ def _should_generate(args: Sequence[str]) -> bool:
     )
 
 
+def _confirm_use_latest(args: Sequence[str]) -> bool:
+    if not args or args[0] != "install" or "--use-latest" not in args:
+        return True
+    warning = (
+        "--use-latest bypasses the project's tested release pins. Vaultwarden, Caddy, all xcaddy addon refs, "
+        "and architecture image digests will be resolved once and frozen exactly for this install."
+    )
+    if sys.stderr.isatty() and not os.environ.get("NO_COLOR"):
+        print(f"\033[33mWARN\033[0m {warning}", file=sys.stderr)
+    else:
+        print(f"WARN {warning}", file=sys.stderr)
+    if "--auto" in args or not sys.stdin.isatty():
+        return True
+    try:
+        answer = input("Continue with this untested exact upstream snapshot? [y/N]: ").strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
 def _confirm_local_handoff(result: recovery_ux.KitResult) -> None:
     if result.emailed:
         return
@@ -81,6 +106,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args[:1] == ["recovery-kit"]:
         return recovery_ux.main(args)
+    if not _confirm_use_latest(args):
+        print("ACTION setup cancelled before installation changes", file=sys.stderr)
+        return 2
     if not _should_generate(args):
         return setup.main(args)
 
