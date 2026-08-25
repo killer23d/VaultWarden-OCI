@@ -4,6 +4,26 @@
 
 The useful color-coded/AMTM-style interaction conventions of the earlier product are the dashboard design reference. The earlier backend architecture is not.
 
+## Day-2 dashboard
+
+From a source checkout:
+
+```bash
+sudo ./dashboard.sh
+```
+
+On an installed appliance the dashboard is carried inside every immutable release and remains reachable through the stable current-release link:
+
+```bash
+sudo /opt/vaultwarden-oci/current/vaultwarden_oci/dashboard.sh
+```
+
+The main screen summarizes Vaultwarden/Caddy health, overall doctor state, dedicated-storage usage/warnings, local and offsite recovery age/state, rclone, Cloudflare/CrowdSec edge health, systemd automation, notification state, installed/update state, `/admin` protection, and reboot-required state. `NO_COLOR=1` disables dashboard color; non-TTY and JSON output are uncolored.
+
+The task-oriented menu is: Stack; Diagnostics; Backup & Recovery; Security; Config & Secrets; Recovery Kit; Email & Notifications; Updates & Host; Automation. Number keys and compact letter shortcuts are supported; `e`/`q` retain the V1 exit convention. Every state-changing action delegates to `vwctl`; the only direct non-`vwctl` dashboard operation is bounded read-only `journalctl` display. EOF exits cleanly rather than redrawing indefinitely.
+
+The dashboard presentation module does not own locks or state-changing transactions. Config editing remains owned by `runtime.py`, SOPS/Age editing and validation by `secrets.py`, CrowdSec/Cloudflare mutations by `edge.py`, notification transport by `notification.py`, recovery by the Workstream 3 owners, and update/apply by the Workstream 4 owners. The day-2 aggregation module is limited to read-only appliance status, timer inspection, and sanitized support-bundle creation.
+
 ## Routine lifecycle
 
 Authoritative CLI forms remain available for direct operation and automation:
@@ -11,6 +31,7 @@ Authoritative CLI forms remain available for direct operation and automation:
 ```bash
 sudo vwctl start
 sudo vwctl status
+sudo vwctl status --json
 sudo vwctl doctor
 sudo vwctl doctor --json
 sudo vwctl logs --tail 200
@@ -19,9 +40,9 @@ sudo vwctl restart
 sudo vwctl stop
 ```
 
-`status` reports service and relevant operational state. `doctor --json` is the machine-readable diagnostic truth; scripts should key on stable check IDs/status rather than prose messages. A doctor `FAIL` blocks acceptance. `WARN` is intentionally visible.
+`status --json` is the dashboard's stable read-only appliance summary and includes service health, doctor state, storage, recovery age/state, edge/CrowdSec checks, timers, notification state, update-check freshness/availability, admin protection, and reboot-required state. `doctor --json` remains the detailed machine-readable diagnostic truth; scripts should key on stable check IDs/status rather than prose messages. A doctor `FAIL` blocks acceptance. `WARN` is intentionally visible.
 
-For normal human day-2 work, `dashboard.sh` may expose the same supported lifecycle, health, recovery, update, and security workflows interactively. It must not bypass `vwctl` for mutations.
+For normal human day-2 work, `dashboard.sh` exposes the same supported lifecycle, health, recovery, update, and security workflows interactively. It does not bypass `vwctl` for mutations.
 
 ## Logs
 
@@ -35,23 +56,35 @@ journalctl -u vaultwarden-oci-maintenance.service
 journalctl -u 'vaultwarden-oci-notify@*'
 ```
 
+A bounded support artifact is available through:
+
+```bash
+sudo vwctl support-bundle
+```
+
+The default bundle is built in root-only volatile `/run` storage so a missing dedicated mount cannot silently create persistent appliance state on the root filesystem. It includes structured status/doctor/timer state, versions, failed systemd state, and storage usage. Bounded recent project journal output is included only when configured secret values can be loaded for exact-value redaction; otherwise journal collection is deliberately omitted. Config/secrets files themselves are never included, and collected text is redacted for configured secret values, common credential/passphrase forms, bearer material, and Age private-key text.
+
+An explicit `--output` destination must use an existing directory and never overwrites an existing path. Publication is exclusive/atomic at the destination, so a symlink or regular file appearing at the requested name is not truncated.
+
 ## Dedicated-storage health
 
 Production persistent application/recovery state must be on the configured dedicated filesystem/volume, not the boot/root filesystem.
 
-Day-2 health/doctor checks must make a missing or wrong production storage mount observable and prevent service startup from silently writing persistent state to root. Treat any storage-invariant failure as a stop condition, not a warning to ignore.
+Day-2 health/doctor checks make a missing or wrong production storage mount observable and prevent service startup from silently writing persistent state to root. Treat any storage-invariant failure as a stop condition, not a warning to ignore. The dashboard also raises a disk-usage warning before the volume reaches exhaustion.
 
 ## Systemd automation
 
-systemd remains the lifecycle/scheduling authority. Enable the supported target/timers only after setup, configuration, secrets, storage, and first-start health have passed:
+systemd remains the lifecycle/scheduling authority. Enable the supported target only after setup, configuration, secrets, storage, and first-start health have passed:
 
 ```bash
 sudo systemctl enable --now vaultwarden-oci.target
 systemctl status vaultwarden-oci.target
 systemctl list-timers 'vaultwarden-oci-*'
+vwctl timers
+vwctl timers --json
 ```
 
-The installed services invoke the authoritative appliance CLI. There is no Postfix/local MTA, durable notification queue, or application scheduler to operate.
+`vaultwarden-oci.target` is the persistent boot authority and statically `Wants=` all four project timers. `vwctl timers` therefore requires that target to be loaded, enabled, and active and requires each supported timer to be loaded and active; an individual timer's `UnitFileState` may remain `disabled` because the enabled target owns its activation. The corresponding triggered service is checked independently: systemd results such as `exit-code`, `signal`, and `timeout`, a failed service `ActiveState`, a missing/inactive timer, or a disabled/inactive target are failures rather than green status. A waiting timer therefore cannot hide a failed automation run. The installed services invoke the authoritative appliance CLI. There is no Postfix/local MTA, durable notification queue, or application scheduler to operate.
 
 ## Cloudflare edge, Caddy, and CrowdSec
 
@@ -63,12 +96,16 @@ The host separately maintains one fail-closed Docker `DOCKER-USER` origin-filter
 
 CrowdSec web-client remediation is Cloudflare-side. A CrowdSec host firewall bouncer is not required.
 
-Where the current CLI exposes the existing edge/remediation operations, the authoritative forms remain:
+The authoritative forms are:
 
 ```bash
 sudo vwctl edge refresh
 sudo vwctl crowdsec status
+sudo vwctl crowdsec decisions
+sudo vwctl crowdsec unban 203.0.113.7
 ```
+
+`crowdsec decisions` and `crowdsec unban` are public CLI surfaces over the existing `edge.py` CrowdSec owner. `crowdsec unban` accepts one syntactically valid IPv4/IPv6 address; `edge.py` owns the mutation lock and delegates the actual deletion to `cscli`. The dashboard does not implement a second decision store or CrowdSec mutation path.
 
 ## `/admin` defense in depth
 
@@ -78,7 +115,7 @@ The supported `/admin` posture is intentionally lightweight:
 - Caddy-side rate limiting;
 - one simple outer authentication gate.
 
-Do not replace this with an enterprise identity stack or accumulate multiple redundant outer gates.
+Do not replace this with an enterprise identity stack or accumulate multiple redundant outer gates. Dashboard status consumes the authoritative `edge.admin.protection` doctor result, which examines the rendered Caddy policy and required runtime material. A deliberately disabled `/admin` route is a valid closed PASS; merely having admin-related secrets present is not sufficient to claim protection.
 
 ## Notifications
 
@@ -94,6 +131,15 @@ For CyberPersons, current verified behavior is:
 
 Do not restore older documentation that categorizes arbitrary CyberPersons 429 responses as transient.
 
+Day-2 notification tests exercise the existing notification transport owner without adding Postfix or a queue:
+
+```bash
+sudo vwctl notification test
+sudo vwctl notification test --smtp
+```
+
+The first exercises the configured operational route and its existing eligible SMTP-fallback policy. The second explicitly exercises direct authenticated SMTP.
+
 ## Recovery and rclone
 
 Create a verified local `.vwrec` application recovery point with the authoritative CLI:
@@ -104,7 +150,17 @@ sudo vwctl backup
 
 Where configured, offsite publication uses non-destructive rclone copy/copyto semantics and must be remotely verified before success is reported. Pruning remains a separate explicit action.
 
-The human recovery experience also includes a guided local/remote restore picker. Explicit noninteractive CLI restore forms remain supported for automation. See [RECOVERY.md](RECOVERY.md).
+Recovery inventory, verification, and guided local/remote restore remain owned by the Workstream 3 interfaces:
+
+```bash
+sudo vwctl recovery list
+sudo vwctl recovery list --remote REMOTE:path
+sudo vwctl recovery verify --file /path/to/recovery.vwrec --identity /path/to/offline.age
+sudo vwctl recovery verify --from-remote REMOTE:path/to/recovery.vwrec --identity /path/to/offline.age
+sudo vwctl restore
+```
+
+The human recovery experience includes a guided local/remote restore picker. Explicit noninteractive CLI restore forms remain supported for automation. See [RECOVERY.md](RECOVERY.md).
 
 The AES-256 recovery-kit ZIP is a separate credential-handoff artifact; it is not interchangeable with `.vwrec` application recovery.
 
@@ -121,41 +177,57 @@ discover stable project release
 -> roll back coherently when safe
 ```
 
-Automated update checking/notification is desirable. Unattended update **apply** is not the default.
+Automated update checking/notification is supported. Unattended update **apply** is not the default.
 
-The current implementation already exposes explicit source-pinned update commands:
+The Workstream 4 public update forms are:
 
 ```bash
-cd /path/to/trusted/new-release
-sudo vwctl update check --source "$PWD"
-sudo vwctl update apply --source "$PWD"
+sudo vwctl update check
+sudo vwctl update apply
+sudo vwctl update check --use-latest
+sudo vwctl update apply --use-latest
 ```
 
-That existing implementation stages exact images/builds, verifies a pre-update recovery point, activates an immutable release, and health-gates it. If candidate runtime activation may have changed persistent state, it deliberately refuses a blind binary rollback; the verified pre-update recovery point is the safe downgrade boundary.
+The update owner stages exact images/builds, verifies a pre-update recovery point, activates an immutable release, and health-gates it. If candidate runtime activation may have changed persistent state, it deliberately refuses a blind binary rollback; the verified pre-update recovery point is the safe downgrade boundary.
 
-The approved product workflow additionally requires stable project-release discovery/check notification. That remains implementation work rather than a reason to broaden the update authority.
-
-`--use-latest` belongs to the explicit setup/install path, not unattended update apply. When an operator selects it during setup, resolution freezes exact immutable values once and leaves no floating `latest` state.
+The dashboard's update summary uses a public read-only persisted update-check view; it does not call private update-transaction helpers. The explicit `--use-latest` path freezes exact immutable values; it does not leave a floating `latest` state.
 
 ## Ubuntu package updates
 
-Ubuntu host package updates are a separate workflow from application updates. Do not claim that `.vwrec` recovery can roll back apt/kernel changes. The appliance must never auto-reboot; any reboot remains an explicit administrator action after host maintenance.
+Ubuntu host package updates are a separate workflow from application updates. Do not claim that `.vwrec` recovery can roll back apt/kernel changes. The appliance never auto-reboots; any reboot remains an explicit administrator action after host maintenance.
+
+```bash
+sudo vwctl host-upgrade check
+sudo vwctl host-upgrade apply
+```
+
+The dashboard surfaces `/var/run/reboot-required` when applicable.
 
 ## Configuration changes
 
-After editing non-secret config or the SOPS document:
+The config and encrypted SOPS authorities remain `/etc/vaultwarden-oci/config.toml` and `/etc/vaultwarden-oci/secrets.sops.yaml`.
+
+Supported day-2 helpers are:
 
 ```bash
+sudo vwctl config edit
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
+sudo vwctl secrets edit
+sudo vwctl secrets validate
+```
+
+`runtime.py` owns the validated config-edit transaction: it uses a root-only candidate beside the config authority and parses it before durable atomic replacement. `secrets.py` owns the SOPS/Age edit and validation transaction: it invokes SOPS against an encrypted root-only candidate beside the SOPS authority on the same filesystem, validates custody/decryption/admin-pairing, and only then durably replaces the installed document. Invalid edits leave the installed authority unchanged.
+
+High-value credential rotation remains an edit of the same SOPS authority rather than a second credential store. After a validated configuration or secret change:
+
+```bash
 sudo vwctl doctor --json
 sudo vwctl restart
 sudo vwctl status
 ```
 
-Human wrappers may guide these steps, but all mutations must converge on the same `vwctl` authority and mutation lock.
+Human wrappers may guide these steps, but all mutations converge on the established cohesive owner behind the same `vwctl` authority and mutation lock.
 
-## Current development-branch gaps
+## Current development-branch state
 
-At this synchronization point, the development branch does not yet ship the approved `dashboard.sh`, dedicated-storage enforcement, Caddy trusted-proxy/rate-limit module set, or production-supported `setup.sh --use-latest` behavior. The current source-pinned update transaction is usable implementation groundwork; the missing stable-release discovery/check-notification layer is still a follow-up.
-
-Treat these as bounded implementation gaps, not alternative product decisions.
+The supported `dashboard.sh`, dedicated-storage enforcement, Caddy trusted-proxy/rate-limit module set, production `setup.sh --use-latest` behavior, Workstream 3 recovery interfaces, and Workstream 4 update/check/apply interfaces are now present on this branch. The dashboard is intentionally presentation-only: it does not restore Make orchestration, Postfix queues, old backup tiers, direct Docker lifecycle mutation, or duplicate recovery/update/backup state machines.

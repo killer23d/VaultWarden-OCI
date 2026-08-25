@@ -6,11 +6,13 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
-from .cli import CommandResult, run_command
+from . import durability
+from .cli import CommandResult, GLOBAL_LOCK_PATH, mutation_lock, run_command
 
 ETC = Path("/etc/vaultwarden-oci")
 ENCRYPTED = ETC / "secrets.sops.yaml"
@@ -235,6 +237,68 @@ def load(
 ) -> dict[str, str]:
     validate_custody(offline, paths=paths, runner=runner, uid=uid)
     return decrypt(paths=paths, runner=runner)
+
+
+def validate_encrypted(
+    offline: str,
+    *,
+    paths: SecretPaths = SecretPaths(),
+    runner: Runner = run_command,
+    uid: int = 0,
+) -> dict[str, str]:
+    """Validate the complete SOPS/Age authority and admin-pairing invariant."""
+    values = load(offline, paths=paths, runner=runner, uid=uid)
+    admin_enabled(values)
+    return values
+
+
+def edit_encrypted(
+    offline: str,
+    *,
+    paths: SecretPaths = SecretPaths(),
+    editor: Sequence[str] = ("sops",),
+    lock_path: Path = GLOBAL_LOCK_PATH,
+) -> None:
+    """Edit the encrypted SOPS authority and commit only a fully validated candidate."""
+    if paths == SecretPaths() and os.geteuid() != 0:
+        raise SecretsError("vwctl secrets edit must run as root")
+    if not editor or any(not isinstance(item, str) or not item or "\x00" in item for item in editor):
+        raise SecretsError("SOPS editor command is invalid")
+    original = paths.encrypted
+    with mutation_lock(lock_path):
+        if original.is_symlink() or not original.is_file():
+            raise SecretsError(f"encrypted secrets are not a regular file: {original}")
+        descriptor, name = tempfile.mkstemp(
+            prefix=".secrets-edit-",
+            suffix=".sops.yaml",
+            dir=str(original.parent),
+        )
+        os.close(descriptor)
+        candidate = Path(name)
+        candidate_paths = SecretPaths(
+            encrypted=candidate,
+            age_key=paths.age_key,
+            root=paths.root,
+            vaultwarden=paths.vaultwarden,
+            caddy=paths.caddy,
+        )
+        try:
+            candidate.write_bytes(original.read_bytes())
+            os.chmod(candidate, 0o600)
+            env = os.environ.copy()
+            env["SOPS_AGE_KEY_FILE"] = str(paths.age_key)
+            completed = subprocess.run([*editor, str(candidate)], check=False, env=env)
+            if completed.returncode != 0:
+                raise SecretsError(
+                    f"SOPS editor exited with status {completed.returncode}; original secrets were not changed"
+                )
+            validate_encrypted(offline, paths=candidate_paths)
+            durability.fsync_file(candidate)
+            durability.replace(candidate, original)
+            os.chmod(original, 0o600)
+            durability.fsync_file_and_parent(original)
+        finally:
+            candidate.unlink(missing_ok=True)
 
 
 def _write(path: Path, value: str, uid: int, gid: int) -> None:

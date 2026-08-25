@@ -11,7 +11,7 @@ from typing import Sequence
 from . import cli, install, storage, update, update_appliance, update_guard
 from .update_versions import UpdateError, resolve_pinned_file
 
-_STORAGE_REQUIRED = {"start", "restart", "backup", "restore", "recovery", "edge", "crowdsec", "notify"}
+_STORAGE_REQUIRED = {"start", "restart", "backup", "restore", "recovery", "edge", "crowdsec", "notify", "notification"}
 _STORAGE_DOCTOR_ID = "storage.dedicated"
 if _STORAGE_DOCTOR_ID not in cli.DOCTOR_CHECK_IDS:
     position = cli.DOCTOR_CHECK_IDS.index("runtime.paths") + 1
@@ -647,6 +647,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _update_command(args[1:])
     if args[0] == "host-upgrade":
         return _host_upgrade_command(args[1:])
+
+    help_requested = any(flag in args[1:] for flag in ("--help", "-h"))
+    if help_requested:
+        if args[0] in {"restore", "recovery", "recovery-kit"}:
+            from . import recovery_ux
+
+            return recovery_ux.main(args)
+        if args[0] == "install":
+            return install.main(args[1:])
+        return cli.main(args)
+
     if args[0] in {"start", "restart", "restore", "install"} and _guard_error(machine=False):
         return 1
     if args[0] == "install":
@@ -658,11 +669,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args[0] in {"restore", "recovery", "recovery-kit"}:
         from . import recovery_ux
 
-        if any(flag in args[1:] for flag in ("--help", "-h")):
-            return recovery_ux.main(args)
         if args[0] in {"restore", "recovery"} and not _require_storage():
             return 1
         return recovery_ux.main(args)
+    if args[0] == "crowdsec" and len(args) > 1 and args[1] in {"decisions", "unban"}:
+        return cli.main(args)
     if args[0] in _STORAGE_REQUIRED and not _require_storage():
         return 1
     return cli.main(args)

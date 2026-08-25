@@ -6,13 +6,17 @@ import json
 import os
 import pwd
 import re
+import shlex
+import shutil
 import stat
+import subprocess
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import edge, secrets
+from . import durability, edge, secrets
 from .cli import CommandResult, DoctorCheck, mutation_lock, run_command
 from .update_versions import FrozenVersions, UpdateError, resolve_pinned_file
 
@@ -219,7 +223,7 @@ def parse_config(data: Mapping[str, object]) -> RuntimeConfig:
         smtp_port=port,
         smtp_security=security,
         smtp_from_email=_email(_string(smtp, "from_email", "smtp"), "smtp.from_email"),
-        smtp_from_name=_string(smtp, "from_name", "smtp"),
+        smtp_from_name=_string(smtp, "from_name", "smtp").strip(),
         smtp_timeout_seconds=timeout,
         notification_provider=notification_provider,
         notification_to_email=notification_to_email,
@@ -235,6 +239,55 @@ def load_config(path: Path = CONFIG) -> RuntimeConfig:
         raise
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise RuntimeConfigError(f"cannot load config {path}: {exc}") from exc
+
+
+def _editor_command() -> list[str]:
+    raw = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+    if not raw.strip() or any(char in raw for char in "\0\r\n"):
+        raise RuntimeConfigError("VISUAL/EDITOR is invalid")
+    command = shlex.split(raw)
+    if not command:
+        raise RuntimeConfigError("VISUAL/EDITOR is empty")
+    return command
+
+
+def edit_config(
+    path: Path = CONFIG,
+    *,
+    editor: Sequence[str] | None = None,
+    lock_path: Path = LOCK,
+) -> None:
+    """Edit the operator config and publish only a fully parsed candidate."""
+    if path == CONFIG and os.geteuid() != 0:
+        raise RuntimeConfigError("vwctl config edit must run as root")
+    command = list(editor) if editor is not None else _editor_command()
+    if not command or any(not isinstance(item, str) or not item or "\x00" in item for item in command):
+        raise RuntimeConfigError("editor command is invalid")
+    with mutation_lock(lock_path):
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeConfigError(f"operator config is not a regular file: {path}")
+        descriptor, name = tempfile.mkstemp(
+            prefix=".config-edit-",
+            suffix=".toml",
+            dir=str(path.parent),
+        )
+        os.close(descriptor)
+        candidate = Path(name)
+        try:
+            shutil.copyfile(path, candidate)
+            os.chmod(candidate, 0o600)
+            completed = subprocess.run([*command, str(candidate)], check=False)
+            if completed.returncode != 0:
+                raise RuntimeConfigError(
+                    f"editor exited with status {completed.returncode}; original config was not changed"
+                )
+            load_config(candidate)
+            durability.fsync_file(candidate)
+            durability.replace(candidate, path)
+            os.chmod(path, 0o600)
+            durability.fsync_file_and_parent(path)
+        finally:
+            candidate.unlink(missing_ok=True)
 
 
 def _pins(path: Path) -> FrozenVersions:

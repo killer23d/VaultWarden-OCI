@@ -19,7 +19,7 @@ class Phase8SurfaceTests(unittest.TestCase):
 
     def test_retired_v1_product_owners_are_absent(self) -> None:
         for relative in (
-            "CHANGELOG.md", "Makefile", "dashboard.sh", "startup.sh", "backup.sh",
+            "CHANGELOG.md", "Makefile", "startup.sh", "backup.sh",
             "restore.sh", "recover.sh", "maintenance.sh", "edit-secrets.sh", "lib",
             "utilities", "systemd", "tests/run-tests.sh", "tests/lib", "tests/suites",
             "docs/COMMAND-REFERENCE.md", "docs/MIGRATION.md", "docs/V2-NOTIFICATIONS.md",
@@ -28,7 +28,7 @@ class Phase8SurfaceTests(unittest.TestCase):
 
     def test_v2_runtime_owners_remain(self) -> None:
         for relative in (
-            "setup.sh", "bootstrap-v2.sh", "vwctl", "email-providers.toml", "versions.toml",
+            "setup.sh", "dashboard.sh", "bootstrap-v2.sh", "vwctl", "email-providers.toml", "versions.toml",
             "vaultwarden_oci", "systemd-v2", "tests/v2", "docs/V2-DECISIONS.md",
             "docs/PROJECT-BOUNDARY.md", "reports/V2-ARCHITECTURE-PROPOSAL.md",
             "reports/V2-TEST-STRATEGY.md", "reports/V2-CODEX-PROMPTS.md",

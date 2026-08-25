@@ -20,7 +20,7 @@ jobs:
       - name: Compile Python
         run: python3 -m compileall -q vaultwarden_oci tests/v2
       - name: Parse shell glue
-        run: bash -n setup.sh bootstrap-v2.sh tests/v2/acceptance_edge_packet.sh
+        run: bash -n setup.sh bootstrap-v2.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/v2/acceptance_edge_packet.sh
       - name: V2 unit and bounded integration suite
         run: python3 -m unittest discover -s tests/v2 -p 'test_*.py' -v
       - name: CLI help is authoritative
@@ -30,6 +30,7 @@ jobs:
           ./vwctl update --help >/dev/null
           ./vwctl recovery --help >/dev/null
           ./vwctl recovery-kit --help >/dev/null
+          bash ./dashboard.sh --help >/dev/null
 
   caddy-config-integration:
     runs-on: ubuntu-24.04

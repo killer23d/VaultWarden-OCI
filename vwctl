@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VaultWarden-OCI V2 operator entrypoint."""
+"""VaultWarden-OCI operator entrypoint."""
 
 from vaultwarden_oci.update_cli import main
 

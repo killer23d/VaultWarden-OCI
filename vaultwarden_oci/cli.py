@@ -354,13 +354,19 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROGRAM_NAME, description="VaultWarden-OCI V2 operator CLI")
     parser.add_argument("--version", action="store_true")
     commands = parser.add_subparsers(dest="command")
-    config = commands.add_parser("config")
+
+    config = commands.add_parser("config", help="validate or safely edit operator configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     validate = config_commands.add_parser("validate")
     validate.add_argument("--file", required=True, type=Path)
+    config_commands.add_parser("edit", help="edit the installed config and commit only a valid candidate")
+
     commands.add_parser("versions")
-    for action in ("start", "stop", "restart", "status"):
+    for action in ("start", "stop", "restart"):
         commands.add_parser(action)
+    status = commands.add_parser("status")
+    status.add_argument("--json", action="store_true", help="stable structured appliance status")
+
     logs = commands.add_parser("logs")
     logs.add_argument("service", nargs="?", choices=("vaultwarden", "caddy"))
     logs.add_argument("--tail", type=int, default=200)
@@ -392,8 +398,26 @@ def _parser() -> argparse.ArgumentParser:
     crowdsec_commands.add_parser("remediation-start", help="explicitly start one Cloudflare remediation invocation")
     crowdsec_commands.add_parser("confirm-fail-open", help="confirm current Worker Routes are set to Fail Open")
     crowdsec_commands.add_parser("status", help="show CrowdSec engine and Cloudflare remediation health")
+    crowdsec_commands.add_parser("decisions", help="list active CrowdSec decisions")
+    unban = crowdsec_commands.add_parser("unban", help="remove CrowdSec decisions for one IP")
+    unban.add_argument("ip")
     crowdsec_commands.add_parser("prepare-remediation", help=argparse.SUPPRESS)
     crowdsec_commands.add_parser("consume-start-token", help=argparse.SUPPRESS)
+
+    secrets_cmd = commands.add_parser("secrets", help="validate or safely edit the encrypted SOPS authority")
+    secrets_commands = secrets_cmd.add_subparsers(dest="secrets_command", required=True)
+    secrets_commands.add_parser("validate")
+    secrets_commands.add_parser("edit")
+
+    notification_cmd = commands.add_parser("notification", help="test supported operational email routes")
+    notification_commands = notification_cmd.add_subparsers(dest="notification_command", required=True)
+    notification_test = notification_commands.add_parser("test")
+    notification_test.add_argument("--smtp", action="store_true", help="test direct authenticated SMTP only")
+
+    timers = commands.add_parser("timers", help="show required systemd timer and triggered-service health")
+    timers.add_argument("--json", action="store_true")
+    bundle = commands.add_parser("support-bundle", help="create bounded sanitized support diagnostics")
+    bundle.add_argument("--output", type=Path)
 
     notify = commands.add_parser("notify", help=argparse.SUPPRESS)
     notify.add_argument("--event", required=True)
@@ -415,6 +439,40 @@ def _versions() -> int:
     return 0
 
 
+def _notification_test(*, smtp_only: bool) -> int:
+    from . import notification, runtime, secrets
+
+    try:
+        config = runtime.load_config()
+        values = secrets.load(config.offline_recovery_recipient)
+        recipient = config.notification_to_email or config.acme_email
+        subject = "[VaultWarden-OCI] notification test"
+        text = "VaultWarden-OCI day-2 notification test.\n"
+        if not smtp_only:
+            result = notification.deliver(
+                event_id="operator-test",
+                config=config,
+                secrets=values,
+                subject=subject,
+                text=text,
+            )
+            print(f"{'PASS' if result.outcome == 'success' else 'FAIL'}: route={result.transport} category={result.category}")
+            return 0 if result.outcome == "success" else 1
+        context = notification.message_context(
+            from_email=config.smtp_from_email,
+            from_name=config.smtp_from_name,
+            to_email=recipient,
+            subject=subject + " (direct SMTP)",
+            text=text,
+        )
+        result = notification.send_smtp(config=config, secrets=values, context=context)
+        print(f"{'PASS' if result.ok else 'FAIL'}: direct SMTP category={result.category} reason={result.reason}")
+        return 0 if result.ok else 1
+    except (runtime.RuntimeConfigError, secrets.SecretsError, notification.NotificationError, OSError) as exc:
+        print(f"FAIL: notification test failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.version:
@@ -428,11 +486,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         _parser().print_help()
         return 0
     if args.command == "config":
+        from . import runtime
         try:
-            validate_config(args.file)
-            print(f"PASS: valid config TOML: {args.file}")
+            if args.config_command == "edit":
+                runtime.edit_config()
+                print("PASS: validated config committed")
+                print("ACTION: run 'vwctl doctor' and restart when ready to apply runtime changes")
+            else:
+                validate_config(args.file)
+                print(f"PASS: valid config TOML: {args.file}")
             return 0
-        except ConfigError as exc:
+        except (ConfigError, runtime.RuntimeConfigError, LockBusyError, RuntimeError, OSError) as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "secrets":
+        from . import runtime, secrets
+        try:
+            config = runtime.load_config()
+            paths = runtime.Paths().secret_paths()
+            if args.secrets_command == "edit":
+                secrets.edit_encrypted(config.offline_recovery_recipient, paths=paths)
+                print("PASS: validated encrypted SOPS document committed")
+                print("ACTION: run 'vwctl doctor' and restart when ready to apply runtime changes")
+            else:
+                secrets.validate_encrypted(config.offline_recovery_recipient, paths=paths)
+                print("PASS: SOPS custody, decryption, required values, and admin-protection pairing are valid")
+            return 0
+        except (runtime.RuntimeConfigError, secrets.SecretsError, LockBusyError, RuntimeError, OSError) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "versions":
@@ -453,6 +533,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "status":
+        if args.json:
+            from . import day2
+            return day2.status_command()
         from . import notification, recovery, runtime
         overall, rows = runtime.status()
         for row in rows:
@@ -474,6 +557,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             overall = "degraded"
         print(f"Overall: {overall}")
         return 0 if overall in {"running", "stopped"} else 1
+    if args.command == "timers":
+        from . import day2
+        return day2.timers_command(machine=args.json)
+    if args.command == "support-bundle":
+        from . import day2
+        try:
+            day2.support_bundle(args.output)
+            return 0
+        except (day2.Day2Error, OSError) as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "notification":
+        return _notification_test(smtp_only=args.smtp)
     if args.command == "logs":
         if not 1 <= args.tail <= 10000:
             print("FAIL: --tail must be between 1 and 10000", file=sys.stderr)
@@ -578,7 +674,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if check.check_id.startswith("crowdsec."):
                         print(f"[{check.status}] {check.check_id}: {check.message}")
                 return 1 if any(c.status == "FAIL" and c.check_id.startswith("crowdsec.") for c in checks) else 0
-        except (edge.EdgeError, secrets.SecretsError, ConfigError, LockBusyError) as exc:
+            if args.crowdsec_command == "decisions":
+                result = edge.crowdsec_decisions()
+                if result.stdout:
+                    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+                if result.stderr:
+                    print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+                return 0 if result.ok else 1
+            if args.crowdsec_command == "unban":
+                address = edge.crowdsec_unban(args.ip)
+                print(f"PASS: removed CrowdSec decisions for {address}")
+                return 0
+        except (edge.EdgeError, secrets.SecretsError, ConfigError, LockBusyError, RuntimeError) as exc:
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     if args.command == "notify":
