@@ -15,6 +15,14 @@ def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: acceptance_previous_update_bridge.py CANDIDATE_SOURCE")
     candidate = Path(sys.argv[1]).resolve()
+    candidate_manifest = install.load_versions(candidate / "versions.toml")
+    predecessor_root = Path(install.__file__).resolve().parent.parent
+    predecessor_manifest = install.load_versions(predecessor_root / "versions.toml")
+    if candidate_manifest.version == predecessor_manifest.version:
+        raise SystemExit(
+            "candidate reuses the immediately preceding immutable release identity: "
+            f"{candidate_manifest.version}"
+        )
 
     # This is the exact pre-candidate-code source gate used by the predecessor
     # project updater. It must accept the release source before new code runs.
@@ -30,8 +38,7 @@ def main() -> int:
                 require_all_architectures=True,
             )
         )
-        manifest = install.load_versions(candidate / "versions.toml")
-        if installed.name != manifest.version:
+        if installed.name != candidate_manifest.version:
             raise SystemExit("predecessor updater staged the wrong immutable release identity")
         historical_units = installed / install.SYSTEMD_SOURCE_DIR
         if not historical_units.is_dir():
@@ -43,7 +50,10 @@ def main() -> int:
         if not current.is_symlink():
             raise SystemExit("predecessor updater did not publish a current release selector")
 
-    print("PASS: immediately preceding updater accepts and stages candidate source")
+    print(
+        "PASS: immediately preceding updater accepts and stages candidate source "
+        f"({predecessor_manifest.version} -> {candidate_manifest.version})"
+    )
     return 0
 
 
