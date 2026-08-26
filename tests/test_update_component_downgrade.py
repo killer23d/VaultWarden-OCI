@@ -258,7 +258,7 @@ class ComponentDowngradePlanningTests(unittest.TestCase):
             with (
                 mock.patch.object(update_appliance.update, "plan_update", side_effect=plan_update),
                 mock.patch.object(update_appliance.update, "resolve_pinned", return_value=tested),
-                mock.patch.object(update_appliance, "resolve_latest_supported", return_value=latest),
+                mock.patch.object(update_appliance, "resolve_latest", return_value=latest),
             ):
                 prepared = update_appliance.prepare_plan(
                     source,

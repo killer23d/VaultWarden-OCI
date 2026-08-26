@@ -136,6 +136,9 @@ class VersionResolutionTests(unittest.TestCase):
 
     def test_latest_snapshot_identity_includes_fixed_edge_addon_pins(self) -> None:
         class FakeLookup:
+            def __init__(self, ratelimit: str):
+                self.ratelimit = ratelimit
+
             def latest_release(self, component: str) -> str:
                 return {
                     "vaultwarden": "v1.40.0",
@@ -147,7 +150,7 @@ class VersionResolutionTests(unittest.TestCase):
                 return {
                     "caddy_cloudflare_ip": "a" * 40,
                     "caddy_combine_ip_ranges": "v0.0.2",
-                    "caddy_ratelimit": "v0.2.0",
+                    "caddy_ratelimit": self.ratelimit,
                 }[component]
 
             def image_digest(self, repository: str, tag: str, architecture: str) -> str:
@@ -158,15 +161,12 @@ class VersionResolutionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            first = versions_text(CANDIDATE_VERSION)
-            (root / "versions.toml").write_text(first, encoding="utf-8")
-            one = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
-            second = first.replace('caddy_ratelimit = "v0.1.0"', 'caddy_ratelimit = "v0.1.1"')
-            (root / "versions.toml").write_text(second, encoding="utf-8")
-            two = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
+            (root / "versions.toml").write_text(versions_text(CANDIDATE_VERSION), encoding="utf-8")
+            one = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup("v0.2.0"))
+            two = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup("v0.2.1"))
         self.assertNotEqual(one.project_version, two.project_version)
-        self.assertEqual(one.caddy_ratelimit, "v0.1.0")
-        self.assertEqual(two.caddy_ratelimit, "v0.1.1")
+        self.assertEqual(one.caddy_ratelimit, "v0.2.0")
+        self.assertEqual(two.caddy_ratelimit, "v0.2.1")
 
     def test_small_remote_lookup_boundary_normalizes_official_image_namespace(self) -> None:
         calls: list[tuple[str, dict[str, str]]] = []
@@ -268,7 +268,7 @@ class UpdateTransactionTests(unittest.TestCase):
                 update.apply_update(plan, runner=runner)
             self.assertFalse(any(call[-1:] == ("backup",) for call in calls))
 
-    def test_actual_baseline_manifest_to_phase7_transition_is_not_noop(self) -> None:
+    def test_actual_baseline_manifest_to_candidate_transition_is_not_noop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)

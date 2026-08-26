@@ -101,7 +101,7 @@ caddy_ratelimit = "v0.1.0"
             root = Path(directory)
             (root / "versions.toml").write_text(text, encoding="utf-8")
             lookup = Lookup()
-            result = update_versions.resolve_latest_supported(root, machine="amd64", lookup=lookup)
+            result = update_versions.resolve_latest(root, machine="amd64", lookup=lookup)
             snapshot = update_versions.frozen_versions_toml(result)
         self.assertEqual(lookup.releases, ["vaultwarden", "caddy", "caddy_dns_cloudflare"])
         self.assertEqual(lookup.refs, ["caddy_cloudflare_ip", "caddy_combine_ip_ranges", "caddy_ratelimit"])

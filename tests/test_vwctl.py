@@ -80,7 +80,7 @@ class VwctlUnitTests(unittest.TestCase):
         success = cli.run_command([sys.executable, "-c", "print('ok')"])
         self.assertTrue(success.ok)
         self.assertEqual(success.stdout.strip(), "ok")
-        missing = cli.run_command(["vwctl-command-that-does-not-exist-phase3"])
+        missing = cli.run_command(["vwctl-command-that-does-not-exist"])
         self.assertEqual(missing.kind, "not_found")
 
     def test_real_temp_lock_contention(self) -> None:
@@ -135,7 +135,6 @@ class VwctlUnitTests(unittest.TestCase):
             root = Path(directory) / "isolated-root"
             output = io.StringIO()
             with (
-                mock.patch.dict(os.environ, {update_appliance.SOURCE_OVERRIDE_ENV: "1"}, clear=False),
                 mock.patch.object(update_versions, "resolve_latest", return_value=frozen),
                 mock.patch.object(
                     install,
@@ -370,7 +369,7 @@ timeout_seconds = 15
             self.assertEqual(bad.returncode, 1)
             self.assertIn("FAIL", bad.stderr)
 
-    def test_doctor_json_has_phase3_stable_ids(self) -> None:
+    def test_doctor_json_has_stable_ids(self) -> None:
         result = self.run_vwctl("doctor", "--json")
         self.assertIn(result.returncode, {0, 1}, result.stderr)
         payload = json.loads(result.stdout)

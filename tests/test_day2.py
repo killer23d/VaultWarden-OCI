@@ -407,7 +407,7 @@ class DashboardBoundaryTests(unittest.TestCase):
             self.assertEqual(dashboard.main([]), 0)
         status.assert_called_once_with()
 
-    def test_v1_e_shortcut_exits_and_email_uses_n(self) -> None:
+    def test_e_shortcut_exits_and_email_uses_n(self) -> None:
         with (
             mock.patch("vaultwarden_oci.dashboard._status", return_value=self.minimal_status()),
             mock.patch("builtins.input", return_value="e"),

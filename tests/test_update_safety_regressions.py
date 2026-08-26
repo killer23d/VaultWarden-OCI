@@ -92,10 +92,10 @@ class ReleaseOrderingTests(unittest.TestCase):
         self.assertEqual(selected.tag, "v8.0.0")
         self.assertEqual(len(calls), 2)
 
-    def test_source_override_requires_explicit_development_gate(self) -> None:
+    def test_source_override_requires_explicit_override_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(os.environ, {}, clear=True):
-                with self.assertRaisesRegex(update_versions.UpdateError, "developer/testing-only"):
+                with self.assertRaisesRegex(update_versions.UpdateError, "explicit developer/test override"):
                     with update_appliance.candidate_source(Path(directory)):
                         self.fail("development-gated source override unexpectedly opened")
 
