@@ -28,6 +28,10 @@ class ReleaseSurfaceTests(unittest.TestCase):
 
     def test_superseded_legacy_owners_are_absent(self) -> None:
         for relative in (
+            "bootstrap-v2.sh", "tests/v2", "docs/V2-DECISIONS.md",
+            "reports/V2-ARCHITECTURE-PROPOSAL.md", "reports/V2-AUDIT.md",
+            "reports/V2-TEST-STRATEGY.md", "reports/V2-CODEX-PROMPTS.md",
+            "reports/V2-REVIEW-PROMPTS.md", ".github/workflows/v2-ci.yml",
             "CHANGELOG.md", "Makefile", "startup.sh", "backup.sh", "restore.sh",
             "recover.sh", "maintenance.sh", "edit-secrets.sh", "lib", "utilities",
             "tests/run-tests.sh", "tests/lib", "tests/suites", "docs/MIGRATION.md",
@@ -46,10 +50,11 @@ class ReleaseSurfaceTests(unittest.TestCase):
             self.assertEqual((canonical / unit).read_bytes(), (bridge / unit).read_bytes())
 
     def test_semantic_stage_placeholder_is_absent_from_runtime_sources(self) -> None:
+        forbidden = ("pre-release" + " implementation", "implementation" + " stage")
         for path in (ROOT / "vaultwarden_oci").glob("*.py"):
             text = path.read_text(encoding="utf-8").lower()
-            self.assertNotIn("pre-release implementation", text, path)
-            self.assertNotIn("implementation stage", text, path)
+            for phrase in forbidden:
+                self.assertNotIn(phrase, text, path)
 
     def test_fresh_install_template_matches_current_schema(self) -> None:
         parsed = runtime.parse_config(tomllib.loads(install.CONFIG_TEMPLATE))
