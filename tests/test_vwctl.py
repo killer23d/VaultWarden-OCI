@@ -135,7 +135,7 @@ class VwctlUnitTests(unittest.TestCase):
             root = Path(directory) / "isolated-root"
             output = io.StringIO()
             with (
-                mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False),
+                mock.patch.dict(os.environ, {update_appliance.SOURCE_OVERRIDE_ENV: "1"}, clear=False),
                 mock.patch.object(update_versions, "resolve_latest", return_value=frozen),
                 mock.patch.object(
                     install,

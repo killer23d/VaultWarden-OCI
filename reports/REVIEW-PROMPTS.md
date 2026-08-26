@@ -13,7 +13,7 @@ These prompts are for a **separate review agent** after a V2 PR is ready for rev
 - The current design/report PR prompt already contains PR #333 and can be pasted as-is.
 - No `<ORIGINAL_PROMPT>` is required: each review prompt embeds the expected phase outcome and review criteria.
 - The review agent reviews only. It must not push commits, edit the PR, resolve threads, or merge unless a human explicitly asks afterward.
-- `reports/V2-CODEX-PROMPTS.md` remains the authoritative implementation-agent contract.
+- `reports/CODEX-PROMPTS.md` remains the authoritative implementation-agent contract.
 - These prompts are **reviewer mirrors, not a second normative specification**. The reviewer must read the applicable authoritative phase prompt from `V2-CODEX-PROMPTS.md`. If any detail here differs, the authoritative implementation prompt wins and the stale review prompt is itself a finding.
 
 Every review must inspect current PR metadata/diff, current CI/check status, and existing review threads before returning a merge verdict.
@@ -37,11 +37,11 @@ REVIEW MODE
 GATHER EVIDENCE
 1. Read PR metadata, base/head refs, description, changed-file list, complete diff, current CI/check status, reviews/comments/threads.
 2. Read all five reports completely:
-   - `reports/V2-CODEX-PROMPTS.md`
+   - `reports/CODEX-PROMPTS.md`
    - `reports/V2-ARCHITECTURE-PROPOSAL.md`
    - `reports/V2-AUDIT.md`
-   - `reports/V2-TEST-STRATEGY.md`
-   - `reports/V2-REVIEW-PROMPTS.md`
+   - `reports/TEST-STRATEGY.md`
+   - `reports/REVIEW-PROMPTS.md`
 3. Inspect V1/main only where needed to verify audit evidence.
 4. Search for stale requirements: one selected email provider, five-provider list, direct-SMTP-only operational mail, Postfix preservation, V1 migration compatibility, host-firewall-bouncer beta requirement, deleted-report precedence, or conflicting source-of-truth rules.
 
@@ -119,7 +119,7 @@ Review PR <PR_URL> as VaultWarden-OCI V2 Phase 0.
 
 REVIEW MODE
 - Review only; do not modify or merge.
-- Read the Phase 0 block in `reports/V2-CODEX-PROMPTS.md`; it is authoritative if this reviewer summary ever differs.
+- Read the Phase 0 block in `reports/CODEX-PROMPTS.md`; it is authoritative if this reviewer summary ever differs.
 
 GATHER
 - PR metadata/base/head/diff/CI/review threads.
@@ -163,7 +163,7 @@ Review PR <PR_URL> as VaultWarden-OCI V2 Phase 1.
 
 REVIEW MODE
 - Review only; do not modify or merge.
-- Read the authoritative Phase 1 prompt in `reports/V2-CODEX-PROMPTS.md`.
+- Read the authoritative Phase 1 prompt in `reports/CODEX-PROMPTS.md`.
 
 PREREQUISITE CHECK
 - Verify Phase 0 is already present on the PR base: V2 `AGENTS.md`, product boundary, and durable decisions. Missing Phase 0 is a blocker; Phase 1 must not recreate it implicitly.
@@ -514,7 +514,7 @@ Review PR <PR_URL> as one VaultWarden-OCI V2 corrective bug-fix PR.
 
 REVIEW MODE
 - Review only; do not modify or merge.
-- Read the authoritative corrective prompt in `reports/V2-CODEX-PROMPTS.md`.
+- Read the authoritative corrective prompt in `reports/CODEX-PROMPTS.md`.
 - Expected scope is intentionally narrow.
 
 CHECK

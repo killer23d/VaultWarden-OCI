@@ -32,13 +32,12 @@ from . import (
 )
 from .update_candidate import PRESTART_FAILURE
 from .update_versions import (
-    DEVELOPMENT_ENV,
     RESOLVED_STATE,
     FrozenVersions,
     UpdateError,
     frozen_versions_toml,
     record_frozen,
-    resolve_latest_supported,
+    resolve_latest,
     resolve_pinned_file,
 )
 
@@ -53,6 +52,7 @@ _UPDATE_TIMER = "vaultwarden-oci-update-check.timer"
 _APPLICATION_SERVICE = "vaultwarden-oci.service"
 _QUARANTINE_TARGET = Path("recovery-required")
 _LATEST_MARKER = ".latest."
+SOURCE_OVERRIDE_ENV = "VWOCI_SOURCE_OVERRIDE"
 _SEMVER = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
@@ -221,11 +221,11 @@ def candidate_source(
     getter: JsonGetter = _json_get,
     downloader: Callable[[str], bytes] = _download,
 ) -> Iterator[tuple[Path, ProjectRelease | None]]:
-    """Yield a trusted stable release or an explicitly development-gated source."""
+    """Yield a trusted stable release or an explicitly source-override-gated local tree."""
     if source is not None:
-        if os.environ.get(DEVELOPMENT_ENV) != "1":
+        if os.environ.get(SOURCE_OVERRIDE_ENV) != "1":
             raise UpdateError(
-                f"--source is developer/testing-only; set {DEVELOPMENT_ENV}=1 explicitly"
+                f"--source is an explicit developer/test override; set {SOURCE_OVERRIDE_ENV}=1"
             )
         root = source.resolve()
         update._validate_source(root)
@@ -330,7 +330,7 @@ def prepare_plan(
             raise UpdateError(
                 "--use-latest candidate is based on an older project release than the installed appliance; downgrade refused"
             )
-        frozen = resolve_latest_supported(source_root, machine=machine)
+        frozen = resolve_latest(source_root, machine=machine)
         current_dir = install.Layout(base.root).path(install.INSTALL_ROOT) / base.current_target
         update._reject_component_downgrades(current_dir, frozen)
         plan = update.UpdatePlan(

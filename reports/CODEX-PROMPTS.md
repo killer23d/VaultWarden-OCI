@@ -22,14 +22,14 @@ For an implementation session:
 
 If supporting documentation conflicts with the pasted prompt, follow the pasted prompt and report the stale document.
 
-**Ordinary phase/corrective agents must not edit `reports/V2-CODEX-PROMPTS.md`.** Changing the agent contract is a separate human-authorized architecture/documentation task.
+**Ordinary phase/corrective agents must not edit `reports/CODEX-PROMPTS.md`.** Changing the agent contract is a separate human-authorized architecture/documentation task.
 
 Supporting reports:
 
 - `reports/V2-AUDIT.md` — evidence/reasons for the greenfield redesign;
 - `reports/V2-ARCHITECTURE-PROPOSAL.md` — target architecture, documentation model, and phase sequence;
-- `reports/V2-TEST-STRATEGY.md` — testing rationale and guardrails;
-- `reports/V2-REVIEW-PROMPTS.md` — standalone prompts for a separate PR-review agent; not an implementation authority.
+- `reports/TEST-STRATEGY.md` — testing rationale and guardrails;
+- `reports/REVIEW-PROMPTS.md` — standalone prompts for a separate PR-review agent; not an implementation authority.
 
 A reviewer prompt is a mirror, not a second specification. If a future reviewer prompt contradicts this file, this file wins and the review prompt should be corrected.
 
@@ -46,13 +46,13 @@ AUTHORITY / WORKFLOW
 - Work on the assigned branch/worktree based on current `v2`.
 - Do not merge your own PR unless explicitly instructed.
 - Implement Phase 0 only. No production runtime code.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 - Report useful out-of-scope ideas instead of implementing them.
 
 PRE-FLIGHT
 1. Inspect the current branch/repository before creating files.
 2. Read existing root `AGENTS.md` and identify V1 instructions that conflict with V2.
-3. Read `reports/V2-AUDIT.md`, `reports/V2-ARCHITECTURE-PROPOSAL.md`, and `reports/V2-TEST-STRATEGY.md`.
+3. Read `reports/V2-AUDIT.md`, `reports/V2-ARCHITECTURE-PROPOSAL.md`, and `reports/TEST-STRATEGY.md`.
 4. Reuse existing V2 product/architecture docs; do not create parallel authorities.
 5. If a human-approved V2 decision conflicts with this prompt, stop and report it rather than silently changing architecture.
 
@@ -155,7 +155,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless explicitly overridden by the human.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Implement Phase 1 only; report later-phase ideas rather than implementing them.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md` and the Phase 0 product/decision documents.
@@ -225,7 +225,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless the human explicitly overrides it.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Implement Phase 2 only; do not start runtime containers or later features.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, V2 decisions, and the Phase 1 implementation.
@@ -287,7 +287,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless the human explicitly overrides it.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Implement Phase 3 only. Phase 4 owns edge/CrowdSec, Phase 5 recovery/rclone, Phase 6 project notifications/systemd automation.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, V2 decisions, and the Phase 2 installed-layout/foundation code.
@@ -349,7 +349,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless explicitly overridden by the human.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Implement Phase 4 only; no recovery, notifications, updates, or generic firewall expansion.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, V2 edge decisions, and the current Caddy/runtime implementation.
@@ -419,7 +419,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless explicitly overridden by the human.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Implement Phase 5 only; do not implement Phase 6 notifications/systemd or Phase 7 updates except by calling existing interfaces.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, recovery/rclone/secrets decisions, and current runtime/storage layout.
@@ -484,7 +484,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless explicitly overridden by the human.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Implement Phase 6 only; no durable queue, dynamic provider framework, or update engine.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, notification decision(s), architecture/test reports, current config/secrets/status/doctor/systemd ownership, and V1 `docs/EMAIL.md` + `lib/email.sh` only as behavioral reference.
@@ -651,7 +651,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless explicitly overridden by the human.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Implement Phase 7 only; no unattended updater or generic component framework.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, version/update decisions, and inspect `versions.toml`, runtime, recovery, systemd, notification, and doctor owners.
@@ -712,7 +712,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless explicitly overridden by the human.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Phase 8 consolidates, validates, documents, and removes obsolete V1 surfaces. It must not invent new product features.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md`, V2 decisions, architecture, and test strategy.
@@ -778,7 +778,7 @@ AUTHORITY / WORKFLOW
 - This pasted prompt controls this session unless explicitly overridden by the human.
 - Work from current `v2`; do not merge your own PR unless instructed.
 - Fix one observable bug only; do not turn it into a refactor/architecture rewrite/cleanup campaign/later-phase implementation.
-- Do not edit `reports/V2-CODEX-PROMPTS.md`.
+- Do not edit `reports/CODEX-PROMPTS.md`.
 
 PRE-FLIGHT
 1. Read root `AGENTS.md` and applicable V2 decisions.

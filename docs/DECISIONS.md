@@ -2,7 +2,7 @@
 
 Status: accepted durable product and implementation decisions.
 
-This file complements `docs/PROJECT-BOUNDARY.md`. It intentionally consolidates the durable contract rather than creating one ADR per bullet. Historical phase/audit reports remain evidence and rationale, not competing product authority.
+This file complements `docs/PROJECT-BOUNDARY.md`. It intentionally consolidates the durable contract rather than creating one ADR per bullet. Historical audit reports remain evidence and rationale, not competing product authority.
 
 ## 1. Product and compatibility boundary
 
@@ -242,10 +242,7 @@ Keep the durable documentation set small. Update current authorities instead of 
 
 ## 18. Release-neutral naming end state
 
-**Decision:** Final normal product/repository surfaces must be release-neutral. Do not leave product-generation names, branch-stage names, `beta`, or phase labels in normal runtime/docs/file names. Genuine technical schema/archive format version numbers remain valid.
+**Decision:** Normal product/repository surfaces are release-neutral. Do not leave product-generation names, branch-stage names, preview labels, or implementation-stage labels in normal runtime/docs/file names. Genuine technical schema/archive format version numbers remain valid.
 
-Mass naming cleanup belongs to the dedicated naming workstream. Other tasks may document the end state but should not opportunistically rename the tree.
+The repository follows this release-neutral end state; future changes must not reintroduce stage-era naming into normal product surfaces.
 
-## Current implementation gaps are not new product decisions
-
-At the time this contract was synchronized, some code still reflects superseded decisions (for example development-gated `--use-latest`, root-filesystem state paths, static Caddy trusted-proxy CIDRs, a DNS-only xcaddy module set, and missing supported `setup.sh`/`dashboard.sh` surfaces on the current development branch). Those are implementation gaps to be corrected in bounded workstreams. They do not narrow this approved product contract.

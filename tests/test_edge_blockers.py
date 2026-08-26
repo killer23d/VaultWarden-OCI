@@ -102,7 +102,7 @@ class RemediationRunner:
         raise AssertionError(call)
 
 
-class Phase4BlockerTests(unittest.TestCase):
+class Release4BlockerTests(unittest.TestCase):
     def test_origin_jump_matches_only_original_packets_toward_project_bridge(self) -> None:
         rule = edge._rule("iptables", edge.RULE_COMMENT, edge.CHAIN)
         joined = " ".join(rule)

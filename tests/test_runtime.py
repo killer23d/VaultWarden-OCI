@@ -81,7 +81,7 @@ def temp_paths(root: Path) -> runtime.Paths:
     )
 
 
-class Phase3RuntimeTests(unittest.TestCase):
+class Release3RuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._admin_hash = mock.patch.object(
             secrets, "derive_admin_basic_auth_hash", return_value="$2a$14$test-admin-hash"
