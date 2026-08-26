@@ -15,7 +15,9 @@ jobs:
           ref: codex/final-operator-manual-normalization
           fetch-depth: 0
       - name: Apply bounded review fixes
-        run: python3 .github/scripts/address-pr351-review.py
+        run: |
+          python3 .github/scripts/address-pr351-review.py
+          python3 .github/scripts/address-pr351-test-fallout.py
       - name: Compile and run focused full unit suite
         run: |
           python3 -m compileall -q vaultwarden_oci tests
