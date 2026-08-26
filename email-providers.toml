@@ -1,90 +1,68 @@
-schema_version = 1
+# Built-in operational notification provider catalog.
+# This is immutable release metadata, not operator-editable transport policy.
 
-[[providers]]
-id = "mailersend"
-aliases = []
-display_name = "MailerSend"
+[providers.mailersend]
+name = "MailerSend"
 endpoint = "https://api.mailersend.com/v1/email"
 auth_mode = "bearer"
+content_type = "application/json"
 encoding = "json"
 request_template = '''{"from":{"email":"{from_email}","name":"{from_name}"},"to":[{"email":"{to_email}"}],"subject":"{subject}","text":"{text}"}'''
 success_statuses = [202]
-# 429 is intentionally excluded: MailerSend uses it for both short rate limits
-# and daily quota exhaustion, which a status-only classifier cannot distinguish.
-retry_statuses = [421]
+retry_statuses = [429, 500, 502, 503, 504]
 
-[[providers]]
-id = "sendgrid"
-aliases = []
-display_name = "Twilio SendGrid"
-endpoint = "https://api.sendgrid.com/v3/mail/send"
-auth_mode = "bearer"
-encoding = "json"
-request_template = '''{"personalizations":[{"to":[{"email":"{to_email}"}]}],"from":{"email":"{from_email}","name":"{from_name}"},"subject":"{subject}","content":[{"type":"text/plain","value":"{text}"}]}'''
-success_statuses = [202]
-retry_statuses = [429]
-
-[[providers]]
-id = "mailgun"
-aliases = []
-display_name = "Mailgun"
-endpoint = "https://{api_host}/v3/{domain}/messages"
+[providers.mailgun]
+name = "Mailgun"
+endpoint = "https://api.mailgun.net/v3/{mailgun_domain}/messages"
 auth_mode = "basic"
-auth_username = "api"
+basic_user = "api"
+content_type = "application/x-www-form-urlencoded"
 encoding = "form"
-request_template = '''{"from":"{from_header}","to":"{to_email}","subject":"{subject}","text":"{text}"}'''
+request_template = '''from={from_header}&to={to_email}&subject={subject}&text={text}'''
 success_statuses = [200]
-retry_statuses = [429, 500]
+retry_statuses = [429, 500, 502, 503, 504]
 
-[providers.options.region]
-kind = "enum"
-default = "us"
-allowed = ["us", "eu"]
+[[providers.mailgun.options]]
+name = "mailgun_domain"
+required = true
+pattern = '''^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$'''
 
-[providers.options.domain]
-kind = "domain"
-
-[providers.substitutions.api_host]
-option = "region"
-values = { us = "api.mailgun.net", eu = "api.eu.mailgun.net" }
-
-[providers.substitutions.domain]
-option = "domain"
-
-[[providers]]
-id = "postmark"
-aliases = []
-display_name = "Postmark"
+[providers.postmark]
+name = "Postmark"
 endpoint = "https://api.postmarkapp.com/email"
-auth_mode = "fixed_header"
+auth_mode = "header"
 auth_header = "X-Postmark-Server-Token"
+content_type = "application/json"
 encoding = "json"
-request_template = '''{"From":"{from_header}","To":"{to_email}","Subject":"{subject}","TextBody":"{text}","MessageStream":"outbound"}'''
+request_template = '''{"From":"{from_header}","To":"{to_email}","Subject":"{subject}","TextBody":"{text}"}'''
 success_statuses = [200]
-success_field = "ErrorCode"
-success_value = 0
-retry_statuses = [429, 503]
+retry_statuses = [429, 500, 502, 503, 504]
 
-[[providers]]
-id = "resend"
-aliases = []
-display_name = "Resend"
+[providers.resend]
+name = "Resend"
 endpoint = "https://api.resend.com/emails"
 auth_mode = "bearer"
+content_type = "application/json"
 encoding = "json"
 request_template = '''{"from":"{from_header}","to":["{to_email}"],"subject":"{subject}","text":"{text}"}'''
 success_statuses = [200]
-# 429 is intentionally excluded: Resend uses it for both per-second rate limits
-# and daily/monthly quota exhaustion. Current docs explicitly mark 500 errors as
-# retry-later server failures, so that is the only status-only transient rule.
-retry_statuses = [500]
+retry_statuses = [500, 502, 503, 504]
 
-[[providers]]
-id = "cyberpersons"
-aliases = ["cyberpanel"]
-display_name = "CyberPanel Email / CyberPersons"
-endpoint = "https://platform.cyberpersons.com/email/v1/send"
+[providers.sendgrid]
+name = "SendGrid"
+endpoint = "https://api.sendgrid.com/v3/mail/send"
 auth_mode = "bearer"
+content_type = "application/json"
+encoding = "json"
+request_template = '''{"personalizations":[{"to":[{"email":"{to_email}"}]}],"from":{"email":"{from_email}","name":"{from_name}"},"subject":"{subject}","content":[{"type":"text/plain","value":"{text}"}]}'''
+success_statuses = [202]
+retry_statuses = [429, 500, 502, 503, 504]
+
+[providers.cyberpersons]
+name = "CyberPersons"
+endpoint = "https://api.cyberpersons.com/v1/send-email"
+auth_mode = "bearer"
+content_type = "application/json"
 encoding = "json"
 request_template = '''{"from":"{from_email}","to":"{to_email}","subject":"{subject}","text":"{text}"}'''
 success_statuses = [202]
@@ -92,6 +70,9 @@ success_field = "success"
 success_value = true
 # Current CyberPersons docs use 429 for account-wide minute/hour/day/month
 # limits shared across API keys and SMTP credentials, so status alone cannot
-# prove a bounded transient condition. 503 is the status-only beta transient;
+# prove a bounded transient condition. 503 is the status-only transient case;
 # 429 and 500/send_failed remain visible and are not SMTP-fallback eligible.
 retry_statuses = [503]
+
+[aliases]
+cyberpanel = "cyberpersons"
