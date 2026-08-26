@@ -29,22 +29,48 @@ jobs:
           ./vwctl recovery --help >/dev/null
           ./vwctl recovery-kit --help >/dev/null
           bash ./dashboard.sh --help >/dev/null
-      - name: Release-neutral path check
+      - name: Release-neutral path and content audit
         run: |
-          test ! -e bootstrap-v2.sh
-          test ! -e systemd-v2
-          test ! -e tests/v2
-          test ! -e docs/V2-DECISIONS.md
-          test ! -e reports/V2-ARCHITECTURE-PROPOSAL.md
-          test ! -e reports/V2-AUDIT.md
-          test ! -e reports/V2-TEST-STRATEGY.md
-          test ! -e reports/V2-CODEX-PROMPTS.md
-          test ! -e reports/V2-REVIEW-PROMPTS.md
-          test -d systemd
-          test -f docs/DECISIONS.md
-          test -f reports/TEST-STRATEGY.md
-          test -f reports/CODEX-PROMPTS.md
-          test -f reports/REVIEW-PROMPTS.md
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          root = Path('.')
+          prompt_archives = {Path('reports/CODEX-PROMPTS.md'), Path('reports/REVIEW-PROMPTS.md')}
+          forbidden_paths = []
+          for path in root.rglob('*'):
+              if not path.is_file() or '.git' in path.parts:
+                  continue
+              low = path.as_posix().lower()
+              if re.search(r'(^|[/_.-])(v1|v2|beta)([/_.-]|$)', low) or re.search(r'phase[0-9]+', low):
+                  forbidden_paths.append(path.as_posix())
+
+          patterns = [
+              re.compile(r'\bV1\b'), re.compile(r'\bV2\b'), re.compile(r'\bbeta\b', re.I),
+              re.compile(r'\bPhase\s*[0-9]+\b'), re.compile(r'RuntimeErrorV2'),
+              re.compile(r'systemd-v2'), re.compile(r'tests/v2'), re.compile(r'bootstrap-v2\.sh'),
+              re.compile(r'VaultWarden-OCI/2'), re.compile(r'vaultwarden-oci-v2'),
+              re.compile(r'VWOCI_DEVELOPMENT'), re.compile(r'resolve_latest_supported'),
+          ]
+          violations = []
+          for path in root.rglob('*'):
+              if not path.is_file() or '.git' in path.parts or path in prompt_archives:
+                  continue
+              try:
+                  text = path.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              for number, line in enumerate(text.splitlines(), 1):
+                  if any(pattern.search(line) for pattern in patterns):
+                      violations.append(f'{path}:{number}:{line.strip()}')
+
+          if forbidden_paths or violations:
+              print('stage-labelled paths:')
+              print('\n'.join(forbidden_paths))
+              print('stage-labelled content:')
+              print('\n'.join(violations))
+              raise SystemExit(1)
+          PY
 
   caddy-config-integration:
     runs-on: ubuntu-24.04
