@@ -1,172 +1,174 @@
 # Recovery
 
-VaultWarden-OCI has one normal encrypted application recovery format, `.vwrec`, plus a **separate** password-protected recovery-kit ZIP for credential handoff. They solve different problems and must not be treated as interchangeable.
+VaultWarden-OCI has two different recovery artifacts:
 
-There is no public `db`/`full`/`emergency` application-recovery tier model and no compatibility reader for the earlier archive format.
+- `.vwrec` — encrypted application state used to verify or restore the appliance.
+- recovery-kit ZIP — a separately password-protected AES-256 credential/custody handoff used to rebuild access and secrets.
 
-## Application recovery custody
+They are not interchangeable.
 
-A `.vwrec` file is the encrypted application recovery point. It contains the coherent application/configuration state required by the supported recovery contract while excluding the server's operational Age private key.
+## What a `.vwrec` contains
 
-The offline Age private recovery identity is kept away from the appliance. Only its public recipient is normal persistent server configuration. The operational Age identity remains server-held and is regenerated/rekeyed safely during a fresh-host restore when required.
+| Included | Explicitly excluded |
+| --- | --- |
+| Canonical non-secret `config.toml` | Server operational Age private key (`age-key.txt`) |
+| Encrypted `secrets.sops.yaml` | Offline recovery private identity |
+| Vaultwarden data with a consistent SQLite snapshot | Recovery-kit ZIP and its passphrase |
+| Caddy persistent data/config required by the recovery contract | Volatile `/run/vaultwarden-oci` rendered/decrypted state |
+| Manifest with format version, member paths, sizes, and SHA-256 checksums | Ordinary logs/support bundles and the backup directory as recursive input |
 
-## Create, list, and verify recovery points
+The `.vwrec` envelope uses Age. Its manifest `format_version = 2` is a real compatibility marker and is independent of product/release naming.
 
-Use the authoritative CLI:
+## Create and verify without restoring
+
+**Prerequisite:** healthy dedicated storage and valid config/secrets. Verification also requires the offline Age private identity from secure operator custody.
 
 ```bash
 sudo vwctl backup
 sudo vwctl recovery list
-sudo vwctl recovery list --remote REMOTE:path
-sudo vwctl recovery verify --file /secure/path/recovery.vwrec --identity /secure/offline-age-key.txt
-sudo vwctl recovery verify --from-remote 'REMOTE:path/recovery-file.vwrec' --identity /secure/offline-age-key.txt
-```
-
-Inventory is derived from the local recovery directory, rclone listing, and the existing recovery state file. It does not create a second recovery database. Entries are newest-first and show time, size, location, and verification history when known. `previously-verified` is intentionally historical: inventory does not hash every local artifact or download every remote artifact on each listing, so it never claims the current bytes are verified merely because a location and size still match a prior verification. A size change is shown as `changed`; use `recovery verify` for a current cryptographic proof.
-
-`recovery verify` is non-destructive. It decrypts and validates the `.vwrec` envelope, manifest/path/member/checksum contract and proves the supplied offline identity can decrypt the included SOPS document. A failed verification never stops services or promotes data.
-
-## Publish with rclone
-
-Where an rclone remote is configured, normal offsite publication is:
-
-```text
-create local candidate
--> verify local candidate
--> copy/copyto-style publication
--> independently verify the remote object
--> report success
-```
-
-The explicit CLI form is:
-
-```bash
-sudo vwctl backup --remote REMOTE:path
-```
-
-Normal publication must not use destructive `rclone sync`. Creating a new recovery point must not implicitly delete older remote recovery material.
-
-## Guided human restore
-
-Run `sudo vwctl restore` in a TTY. The guided flow is:
-
-1. choose local or remote recovery source;
-2. display newest-first numbered `.vwrec` recovery points with time, size, location, and known verification history;
-3. choose one recovery point;
-4. supply the offline Age private identity path;
-5. prove the dedicated production-storage mount/identity and perform non-destructive cryptographic/manifest/SOPS preflight;
-6. display the live state that will be replaced;
-7. require the exact `RESTORE` confirmation;
-8. call the same authoritative `recovery.py` restore transaction used by scripted restore.
-
-Cancellation at either picker or final confirmation is safe and does not mutate live state. The picker is a human interface, not a second restore engine.
-
-The restore transaction itself finishes all knowable decryption, checksum, SOPS, free-space, staging, ownership/mode and SQLite checks before it acquires the mutation boundary and stops/removes services. The `vwctl` wrapper also refuses restore/recovery operations unless the filesystem mounted at `/var/lib/vaultwarden-oci` matches both the host storage identity and the mounted-volume ownership marker, so restored data cannot silently fall back to the boot filesystem.
-
-## Explicit restore for automation
-
-Scripted forms remain supported:
-
-```bash
-sudo vwctl restore \
-  --file /secure/path/recovery.vwrec \
-  --identity /secure/offline-age-key.txt
-
-sudo vwctl restore \
-  --from-remote 'REMOTE:path/recovery-file.vwrec' \
+sudo vwctl recovery verify \
+  --file /var/lib/vaultwarden-oci/backups/<artifact>.vwrec \
   --identity /secure/offline-age-key.txt
 ```
 
-For an explicit remote restore, the selected remote object is downloaded exactly once into protected local staging. That exact downloaded file is verified and then passed to the existing `recovery.py` restore transaction, preventing a mutable remote object from changing between a verification download and a separate restore download.
+Configured offsite publication:
 
-Add `--start` only when a health-gated post-promotion start is desired. Without it, services remain stopped after successful promotion for deliberate operator review.
+```bash
+sudo vwctl backup --remote 'REMOTE:path'
+sudo vwctl recovery list --remote 'REMOTE:path'
+sudo vwctl recovery verify \
+  --from-remote 'REMOTE:path/<artifact>.vwrec' \
+  --identity /secure/offline-age-key.txt
+```
 
-## Separate recovery-kit credential handoff
+Publication is create -> local verify -> rclone copy/copyto -> independent remote verify -> success. It never uses destructive `rclone sync` as normal publication.
 
-The recovery-kit ZIP is **not** a `.vwrec` application recovery point. It is a credential/admin custody artifact. A complete kit contains exactly:
+**Expected success:** verification proves the Age envelope, manifest/member/checksum contract, and that the supplied offline identity decrypts the included SOPS document. **On failure:** no live state is promoted; preserve the artifact, fix custody/storage/tooling, and verify again.
 
-- `README.txt` — recovery-kit purpose/custody instructions without secret values;
-- `config.toml` — canonical non-secret appliance configuration useful during rebuild;
-- `credentials.txt` — every current top-level SOPS-managed credential value, including Vaultwarden admin and Caddy admin Basic Auth credentials when configured;
-- `operational-age-identity.txt` — the server-held operational Age private identity;
-- `offline-recovery-identity.txt` — the matching offline recovery Age private identity.
+## Same-host restore
 
-Later complete export is explicit:
+Use this when the server is intact and the canonical dedicated storage identity still passes.
+
+**Prerequisites:** `/var/lib/vaultwarden-oci` is the expected dedicated mount, a verified `.vwrec` is available locally or remotely, and you have the offline Age private identity.
+
+Guided path:
+
+```bash
+sudo vwctl restore
+```
+
+1. Choose local or remote.
+2. Select the recovery point from the newest-first inventory.
+3. Supply the offline Age private identity path.
+4. Review storage/decryption/manifest/SOPS/free-space/SQLite preflight.
+5. Review the live state that will be replaced.
+6. Type the exact `RESTORE` confirmation.
+7. After promotion, start when ready if you did not request automatic start.
+
+Explicit local form:
+
+```bash
+sudo vwctl restore \
+  --file /secure/recovery.vwrec \
+  --identity /secure/offline-age-key.txt
+```
+
+Explicit remote form:
+
+```bash
+sudo vwctl restore \
+  --from-remote 'REMOTE:path/recovery.vwrec' \
+  --identity /secure/offline-age-key.txt \
+  --start
+```
+
+A remote object is downloaded once into protected staging; that exact download is verified and restored. All knowable checks run before the mutation boundary/service stop.
+
+**Expected success:** known restored state is present and `sudo vwctl status` plus `sudo vwctl doctor --json` pass after start. **On failure:** do not manually unpack/promote files. A preflight failure should leave healthy live state untouched; if promotion began, follow the reported recovery boundary.
+
+## Lost-server disaster recovery
+
+This is intentionally a different procedure from same-host restore.
+
+**Required off-host material:** a `.vwrec`, the matching offline Age private identity, and preferably the complete recovery-kit ZIP plus its separately stored passphrase. If the only `.vwrec` is on an rclone remote, you also need the credentials/config needed to retrieve it.
+
+1. Build a fresh Ubuntu 24.04 LTS host on a supported architecture and attach a **dedicated** ext4/xfs data volume. Do not restore onto root-only storage.
+2. Obtain a trusted release/source checkout and inspect storage as described in [Install](INSTALL.md).
+3. Derive the offline public recipient without making the private key persistent appliance state:
+
+   ```bash
+   age-keygen -y /secure/offline-age-key.txt
+   ```
+
+4. Run `setup.sh install` with the intended domain/URL/email, dedicated data device, and that `age1...` recipient. Complete the new host's operational setup. If you need old credentials to reach Cloudflare/SMTP/rclone, extract the recovery kit on a trusted workstation and enter needed values through `vwctl secrets edit`.
+5. Make the desired `.vwrec` available. If rclone is not configured yet, retrieve the object to a secure local path from another trusted machine rather than weakening the restore contract.
+6. Verify before restore:
+
+   ```bash
+   sudo vwctl recovery verify \
+     --file /secure/recovery.vwrec \
+     --identity /secure/offline-age-key.txt
+   ```
+
+7. Restore, then start and verify:
+
+   ```bash
+   sudo vwctl restore --file /secure/recovery.vwrec --identity /secure/offline-age-key.txt
+   sudo vwctl start
+   sudo vwctl status
+   sudo vwctl doctor --json
+   ```
+
+**Expected success:** the known vault state is healthy on the new dedicated volume and operational secrets are again server-encrypted. **On failure:** keep the original `.vwrec` and offline material unchanged, correct the fresh-host prerequisite, and retry on disposable/new state rather than modifying the artifact.
+
+## Recovery-kit export and email
+
+A complete kit contains exactly:
+
+- `README.txt`
+- `config.toml`
+- `credentials.txt` with current top-level SOPS-managed credential values
+- `operational-age-identity.txt`
+- `offline-recovery-identity.txt`
+
+Export later with:
 
 ```bash
 sudo vwctl recovery-kit export --offline-identity /secure/offline-age-key.txt
 ```
 
-The appliance cannot recreate the same offline identity later. The command derives its public recipient, requires it to match `config.toml`, proves both the operational and supplied offline identities decrypt the same current SOPS document, and refuses to label/export the kit as complete when that proof is unavailable.
+The command proves the supplied offline identity matches config, proves both operational/offline identities decrypt the same current SOPS document, prompts twice for an independent passphrase of at least 16 characters, creates AES-256 ZIP encryption, verifies the exact member set/encryption, proves correct-password success and wrong/empty/no-password failure, then atomically publishes the archive. Email, when configured/chosen, happens only after ZIP verification and sends only the encrypted ZIP through the existing authenticated SMTP owner.
 
-The fixed ZIP security contract is:
+**Password custody:** never put the ZIP passphrase in email, config, secrets, argv, environment, or a file beside the archive. Store or communicate it separately from the ZIP.
 
-- plaintext kit members exist only in a protected root-owned temporary workspace;
-- independent ZIP passphrase is entered interactively twice and must be at least 16 characters;
-- passphrase is supplied to Ubuntu `7zip`/`7zz` through stdin only, never argv, environment, a file, logs, email subject/body, or project secrets;
-- inline `-pPASSWORD` arguments are rejected;
-- Ubuntu `7zip`/`7zz` creates an AES-256 ZIP;
-- before publication/email, verification proves ZIP container type and the exact member multiset, so extra files, extra `.zip` entries, missing entries, and duplicate entries are rejected;
-- every intended member must prove AES-256 encryption;
-- correct-passphrase archive testing must succeed;
-- deliberate wrong-passphrase and explicitly empty-passphrase tests must fail;
-- a separate no-password test runs with no password input and stdin connected to `/dev/null`, and must fail;
-- only a fully verified ZIP is atomically published in the protected recovery directory;
-- email, when accepted, uses the existing direct authenticated SMTP owner with the configured TLS mode and sends only the verified ZIP attachment; provider-specific HTTP attachment APIs are not used;
-- the ZIP passphrase is never included in email.
+## Extract the AES-256 recovery kit
 
-The protected plaintext workspace is removed after publication; cleanup failure is an observable command failure.
+Use software that supports AES-encrypted ZIP archives, on a trusted workstation rather than a cloud preview/extraction service.
 
-## Initial setup offline custody
+- **Ubuntu/Linux with 7-Zip:** `7zz x recovery-kit.zip` (or `7z x recovery-kit.zip` where that is the installed command).
+- **macOS:** install 7-Zip if needed (`brew install sevenzip`), then `7zz x recovery-kit.zip`.
+- **Windows:** use current 7-Zip (`Extract...`) or `7z x recovery-kit.zip` from a terminal.
 
-Interactive first-run setup without `--offline-recipient` generates the offline Age private identity only in a root-owned volatile `/run/vaultwarden-oci/setup-offline-recovery-*` workspace. Setup receives only the derived public recipient. After setup completes, the same private identity is included in the verified complete recovery-kit ZIP.
+Enter the passphrase interactively when prompted.
 
-The host-side volatile private identity is removed only after an actual custody handoff. Successful authenticated SMTP delivery qualifies as a handoff. If email is declined, setup tells the operator to copy the verified encrypted ZIP off-host and requires the exact `SAVED` acknowledgement after that transfer before deleting the transient private identity. Declining or failing that acknowledgement leaves the private identity in the volatile root-only workspace and reports the path rather than falsely declaring custody complete.
+**Expected success:** exactly the documented members extract. **On failure:** after repeated passphrase/integrity failure, retrieve another verified custody copy; do not weaken or convert the archive in place.
 
-If setup or kit publication fails after generation, the wrapper reports the volatile path and does **not** pretend custody succeeded. The private identity is never installed as ordinary persistent server state. Noninteractive setup and setup with an explicit `--offline-recipient` keep the existing operator-supplied custody model.
+## Retention is separate
 
-The same supported export surface is reachable from setup as:
+Plan deletion first:
 
 ```bash
-sudo ./setup.sh recovery-kit export --offline-identity /secure/offline-age-key.txt
+sudo vwctl recovery prune --remote 'REMOTE:path' --keep-last 7
 ```
 
-A later dashboard may call the same public Python/`vwctl` interface; no dashboard-specific recovery engine is required.
-
-## Explicit remote retention
-
-Retention/deletion is separate from publication. Plan before destructive action:
+Execute only after review:
 
 ```bash
-sudo vwctl recovery prune --remote REMOTE:path --keep-last 7
+sudo vwctl recovery prune --remote 'REMOTE:path' --keep-last 7 --confirm
 ```
 
-Then require the explicit confirmation form before deletion:
-
-```bash
-sudo vwctl recovery prune --remote REMOTE:path --keep-last 7 --confirm
-```
-
-## Recovery acceptance
-
-A release gate should prove the complete path on disposable state:
-
-1. create known application state;
-2. create and verify a `.vwrec`;
-3. publish it to a test remote and independently verify the remote object;
-4. prove a safe preflight failure does not stop/corrupt a healthy target;
-5. restore on a clean/disposable target using only the offline Age identity for recovery decryption;
-6. start and pass `vwctl status` plus `vwctl doctor --json`;
-7. confirm known application state survived;
-8. confirm the operational Age private key was not embedded in the recovery point;
-9. separately exercise the recovery-kit ZIP handoff and verify AES/exact-member/correct-password/wrong-password/empty-password/no-password behavior and passphrase redaction.
+Creating/publishing a recovery point never implicitly prunes older offsite material.
 
 ## Update recovery boundary
 
-Application updates verify a pre-update `.vwrec` before activation. If a candidate release fails before it could mutate persistent application state, the implementation may coherently restore the prior release. If candidate runtime activation may have changed persistent state, do not blindly switch binaries backward and claim the data was rolled back. The verified pre-update recovery point is the downgrade boundary.
-
-Ubuntu apt/kernel changes are outside application recovery. `.vwrec` does not pretend to roll back host package state.
-
-## Failure handling
-
-Do not bypass failed recovery checks by unpacking/promoting files manually. Preserve the failed artifact and secret-free diagnostics, correct the underlying storage/config/tooling problem, and retry on disposable state when appropriate.
+Application update verifies a pre-update `.vwrec`. A candidate that fails before possible persistent-state mutation may permit coherent binary rollback. Once candidate runtime may have changed persistent data, the verified pre-update recovery point—not an old binary symlink—is the downgrade boundary. Ubuntu apt/kernel state is outside `.vwrec` recovery.
