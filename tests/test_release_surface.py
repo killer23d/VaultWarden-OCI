@@ -6,7 +6,7 @@ from pathlib import Path
 
 from vaultwarden_oci import install, runtime
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class Phase8SurfaceTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class Phase8SurfaceTests(unittest.TestCase):
     def test_v2_runtime_owners_remain(self) -> None:
         for relative in (
             "setup.sh", "dashboard.sh", "bootstrap-v2.sh", "vwctl", "email-providers.toml", "versions.toml",
-            "vaultwarden_oci", "systemd-v2", "tests/v2", "docs/V2-DECISIONS.md",
+            "vaultwarden_oci", "systemd", "tests", "docs/V2-DECISIONS.md",
             "docs/PROJECT-BOUNDARY.md", "reports/V2-ARCHITECTURE-PROPOSAL.md",
             "reports/V2-TEST-STRATEGY.md", "reports/V2-CODEX-PROMPTS.md",
         ):

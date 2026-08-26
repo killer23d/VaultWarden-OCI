@@ -1,5 +1,5 @@
 [Unit]
-Description=Run VaultWarden-OCI V2 health check periodically
+Description=Run VaultWarden-OCI health check periodically
 
 [Timer]
 OnBootSec=5min

@@ -1,4 +1,4 @@
-"""V1-inspired interactive presentation for the authoritative ``vwctl`` surface."""
+"""Interactive operations dashboard for the authoritative ``vwctl`` surface."""
 from __future__ import annotations
 
 import json

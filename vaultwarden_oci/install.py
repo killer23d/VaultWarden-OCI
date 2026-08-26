@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 2+ host bootstrap and immutable installed-layout ownership."""
+"""Immutable installed-layout ownership for VaultWarden-OCI."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ RUNTIME_SECRETS_DIR = RUNTIME_ROOT / "secrets"
 RUNTIME_TRANSIENT_DIR = RUNTIME_ROOT / "transient"
 VWCTL_LINK = Path("/usr/local/bin/vwctl")
 SYSTEMD_DIR = Path("/etc/systemd/system")
-SYSTEMD_SOURCE_DIR = "systemd-v2"
+SYSTEMD_SOURCE_DIR = "systemd"
 SYSTEMD_UNITS = (
     "vaultwarden-oci.target",
     "vaultwarden-oci.service",
@@ -57,7 +57,7 @@ SYSTEMD_UNITS = (
     "vaultwarden-oci-notify@.service",
 )
 
-CONFIG_TEMPLATE = """# VaultWarden-OCI V2 beta operator configuration.
+CONFIG_TEMPLATE = """# VaultWarden-OCI operator configuration.
 # Replace the reserved .invalid values and offline Age recipient before first start.
 # Secrets belong in /etc/vaultwarden-oci/secrets.sops.yaml, never in this file.
 schema_version = 1
@@ -384,7 +384,7 @@ def _install_systemd_units(release_dir: Path, layout: Layout) -> None:
     for unit in SYSTEMD_UNITS:
         unit_source = source / unit
         if not unit_source.is_file():
-            raise InstallError(f"required V2 systemd unit is missing from immutable release: {unit_source}")
+            raise InstallError(f"required systemd unit is missing from immutable release: {unit_source}")
         destination = layout.path(SYSTEMD_DIR / unit)
         if (
             unit == "vaultwarden-oci.target"
@@ -512,7 +512,7 @@ def _frozen_source(source_root: Path, versions_toml: str) -> Iterator[Path]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Install the VaultWarden-OCI V2 immutable application layout")
+    parser = argparse.ArgumentParser(description="Install the VaultWarden-OCI immutable application layout")
     parser.add_argument("--source", required=True, type=Path, help="repository/release source root")
     parser.add_argument("--use-latest", action="store_true", help="development/testing only")
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)

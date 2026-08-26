@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VaultWarden-OCI V2 operator CLI and shared subprocess/lock primitives."""
+"""VaultWarden-OCI operator CLI and shared subprocess/lock primitives."""
 from __future__ import annotations
 
 import argparse
@@ -351,7 +351,7 @@ def doctor_payload(checks: Sequence[DoctorCheck]) -> dict[str, object]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog=PROGRAM_NAME, description="VaultWarden-OCI V2 operator CLI")
+    parser = argparse.ArgumentParser(prog=PROGRAM_NAME, description="VaultWarden-OCI operator CLI")
     parser.add_argument("--version", action="store_true")
     commands = parser.add_subparsers(dest="command")
 
@@ -373,9 +373,9 @@ def _parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
 
-    backup = commands.add_parser("backup", help="create and verify one encrypted V2 recovery point")
+    backup = commands.add_parser("backup", help="create and verify one encrypted .vwrec recovery point")
     backup.add_argument("--remote", help="optional rclone REMOTE:path publication destination")
-    restore = commands.add_parser("restore", help="restore one encrypted V2 recovery point")
+    restore = commands.add_parser("restore", help="restore one encrypted .vwrec recovery point")
     source = restore.add_mutually_exclusive_group(required=True)
     source.add_argument("--file", type=Path, help="local .vwrec recovery artifact")
     source.add_argument("--from-remote", help="rclone REMOTE:path/to/file.vwrec")
@@ -394,7 +394,7 @@ def _parser() -> argparse.ArgumentParser:
 
     crowdsec = commands.add_parser("crowdsec", help="CrowdSec Security Engine and Cloudflare remediation")
     crowdsec_commands = crowdsec.add_subparsers(dest="crowdsec_command", required=True)
-    crowdsec_commands.add_parser("setup", help="install/configure the supported CrowdSec beta path")
+    crowdsec_commands.add_parser("setup", help="install/configure the supported CrowdSec path")
     crowdsec_commands.add_parser("remediation-start", help="explicitly start one Cloudflare remediation invocation")
     crowdsec_commands.add_parser("confirm-fail-open", help="confirm current Worker Routes are set to Fail Open")
     crowdsec_commands.add_parser("status", help="show CrowdSec engine and Cloudflare remediation health")
@@ -525,7 +525,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         except (
             runtime.RuntimeConfigError,
-            runtime.RuntimeErrorV2,
+            runtime.RuntimeOperationError,
             secrets.SecretsError,
             LockBusyError,
             VersionsError,
@@ -602,7 +602,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest = recovery.restore_recovery(args.file, args.identity, start=args.start)
             else:
                 manifest = recovery.restore_from_remote(args.from_remote, args.identity, start=args.start)
-            print(f"PASS: restored V2 recovery created {manifest['created_at']}")
+            print(f"PASS: restored .vwrec recovery created {manifest['created_at']}")
             if not args.start:
                 print("ACTION: services remain stopped; run 'vwctl start' when you are ready to bring the restored service online")
             return 0

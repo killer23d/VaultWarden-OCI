@@ -1,5 +1,5 @@
 [Unit]
-Description=Run VaultWarden-OCI V2 encrypted recovery backup daily
+Description=Run VaultWarden-OCI encrypted recovery backup daily
 
 [Timer]
 OnCalendar=*-*-* 03:15:00

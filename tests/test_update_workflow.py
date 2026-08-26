@@ -12,8 +12,8 @@ from unittest import mock
 from vaultwarden_oci import cli, install, update, update_cli, update_versions
 
 
-PHASE6_VERSION = "0.1.0-dev"
-PHASE7_VERSION = "0.1.0-dev.7"
+BASELINE_VERSION = "0.1.0-dev"
+CANDIDATE_VERSION = "0.1.0-dev.7"
 
 
 def digest(char: str) -> str:
@@ -48,7 +48,7 @@ arm64 = "{digest('f')}"
 '''
 
 
-def phase6_versions_text(version: str = PHASE6_VERSION) -> str:
+def baseline_versions_text(version: str = BASELINE_VERSION) -> str:
     return f'''schema_version = 1
 [vaultwarden_oci]
 version = "{version}"
@@ -76,7 +76,7 @@ class VersionResolutionTests(unittest.TestCase):
     def test_pinned_architecture_mapping_and_exact_image_refs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "versions.toml").write_text(versions_text(PHASE7_VERSION), encoding="utf-8")
+            (root / "versions.toml").write_text(versions_text(CANDIDATE_VERSION), encoding="utf-8")
             amd64 = update_versions.resolve_pinned(root, machine="x86_64")
             arm64 = update_versions.resolve_pinned(root, machine="aarch64")
         self.assertEqual(amd64.architecture, "amd64")
@@ -110,7 +110,7 @@ class VersionResolutionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "versions.toml").write_text(versions_text(PHASE7_VERSION), encoding="utf-8")
+            (root / "versions.toml").write_text(versions_text(CANDIDATE_VERSION), encoding="utf-8")
             lookup = FakeLookup()
             with mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False):
                 frozen = update_versions.resolve_latest(root, machine="x86_64", lookup=lookup)
@@ -145,7 +145,7 @@ class VersionResolutionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            first = versions_text(PHASE7_VERSION)
+            first = versions_text(CANDIDATE_VERSION)
             (root / "versions.toml").write_text(first, encoding="utf-8")
             with mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False):
                 one = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
@@ -160,7 +160,7 @@ class VersionResolutionTests(unittest.TestCase):
     def test_use_latest_requires_explicit_development_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "versions.toml").write_text(versions_text(PHASE7_VERSION), encoding="utf-8")
+            (root / "versions.toml").write_text(versions_text(CANDIDATE_VERSION), encoding="utf-8")
             with mock.patch.dict(os.environ, {}, clear=True):
                 with self.assertRaisesRegex(update.UpdateError, "development/testing-only"):
                     update_versions.resolve_latest(root, machine="amd64", lookup=mock.Mock())
@@ -197,12 +197,12 @@ class VersionResolutionTests(unittest.TestCase):
 
 
 class UpdateTransactionTests(unittest.TestCase):
-    def _source(self, parent: Path, name: str, version: str, *, phase6: bool = False) -> Path:
+    def _source(self, parent: Path, name: str, version: str, *, baseline_manifest: bool = False) -> Path:
         source = parent / name
         source.mkdir()
         (source / "vwctl").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         os.chmod(source / "vwctl", 0o755)
-        text = phase6_versions_text(version) if phase6 else versions_text(version)
+        text = baseline_versions_text(version) if baseline_manifest else versions_text(version)
         (source / "versions.toml").write_text(text, encoding="utf-8")
         (source / "email-providers.toml").write_text(f"# catalog {version}\n", encoding="utf-8")
         package = source / "vaultwarden_oci"
@@ -259,9 +259,9 @@ class UpdateTransactionTests(unittest.TestCase):
     def test_nonproduction_update_root_requires_injected_io_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            old = self._source(temp, "old-source", PHASE6_VERSION, phase6=True)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, old, PHASE6_VERSION)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, old, BASELINE_VERSION)
             with self.assertRaisesRegex(update.UpdateError, "non-production update roots are test-only"):
                 update.plan_update(candidate, root=root, machine="amd64")
             runner, calls = self._runner(root)
@@ -270,23 +270,23 @@ class UpdateTransactionTests(unittest.TestCase):
                 update.apply_update(plan, runner=runner)
             self.assertFalse(any(call[-1:] == ("backup",) for call in calls))
 
-    def test_actual_phase6_to_phase7_transition_is_not_noop(self) -> None:
+    def test_actual_baseline_manifest_to_phase7_transition_is_not_noop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            old = self._source(temp, "old-source", PHASE6_VERSION, phase6=True)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, old, PHASE6_VERSION)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, old, BASELINE_VERSION)
             runner, _ = self._runner(root)
             plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-        self.assertEqual(plan.current_release, PHASE6_VERSION)
-        self.assertEqual(plan.target_release, PHASE7_VERSION)
+        self.assertEqual(plan.current_release, BASELINE_VERSION)
+        self.assertEqual(plan.target_release, CANDIDATE_VERSION)
         self.assertFalse(plan.already_active)
 
     def test_same_release_name_with_different_content_requires_version_bump(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, candidate, PHASE7_VERSION)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, candidate, CANDIDATE_VERSION)
             (candidate / "email-providers.toml").write_text("# changed without version bump\n", encoding="utf-8")
             runner, _ = self._runner(root)
             with self.assertRaisesRegex(update.UpdateError, "bump vaultwarden_oci.version"):
@@ -295,9 +295,9 @@ class UpdateTransactionTests(unittest.TestCase):
     def test_apply_stages_coherent_release_and_activates_exact_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            old = self._source(temp, "old-source", PHASE6_VERSION, phase6=True)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, old, PHASE6_VERSION)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, old, BASELINE_VERSION)
             runner, calls = self._runner(root)
             plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
             record = temp / "resolved.json"
@@ -310,7 +310,7 @@ class UpdateTransactionTests(unittest.TestCase):
                 plan, runner=runner, activator=activate, record_path=record
             )
             current = root / "opt/vaultwarden-oci/current"
-            self.assertEqual(os.readlink(current), f"releases/{PHASE7_VERSION}")
+            self.assertEqual(os.readlink(current), f"releases/{CANDIDATE_VERSION}")
             self.assertEqual(
                 (release / "email-providers.toml").read_bytes(),
                 (candidate / "email-providers.toml").read_bytes(),
@@ -320,19 +320,19 @@ class UpdateTransactionTests(unittest.TestCase):
                 (candidate / "vaultwarden_oci/notification.py").read_bytes(),
             )
             payload = json.loads(record.read_text(encoding="utf-8"))
-            self.assertEqual(payload["project_version"], PHASE7_VERSION)
+            self.assertEqual(payload["project_version"], CANDIDATE_VERSION)
             pulls = [call for call in calls if call[:2] == ("docker", "pull")]
             self.assertEqual(len(pulls), 3)
             self.assertTrue(all("@sha256:" in call[2] for call in pulls))
             self.assertTrue(any(call[:2] == ("docker", "build") for call in calls))
-            self.assertEqual(activations, [PHASE7_VERSION])
+            self.assertEqual(activations, [CANDIDATE_VERSION])
 
-    def test_prestart_activation_failure_restores_phase6_application_and_units(self) -> None:
+    def test_prestart_activation_failure_restores_baseline_manifest_application_and_units(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            old = self._source(temp, "old-source", PHASE6_VERSION, phase6=True)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, old, PHASE6_VERSION)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, old, BASELINE_VERSION)
             runner, _calls = self._runner(root)
             plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
 
@@ -346,20 +346,20 @@ class UpdateTransactionTests(unittest.TestCase):
                     plan, runner=runner, activator=activate, record_path=temp / "resolved.json"
                 )
             current = root / "opt/vaultwarden-oci/current"
-            self.assertEqual(os.readlink(current), f"releases/{PHASE6_VERSION}")
+            self.assertEqual(os.readlink(current), f"releases/{BASELINE_VERSION}")
             for unit in install.SYSTEMD_UNITS:
                 self.assertEqual(
                     (root / "etc/systemd/system" / unit).read_text(encoding="utf-8"),
-                    f"{unit} {PHASE6_VERSION}\n",
+                    f"{unit} {BASELINE_VERSION}\n",
                 )
             self.assertFalse((temp / "resolved.json").exists())
 
     def test_poststart_failure_refuses_automatic_downgrade(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            old = self._source(temp, "old-source", PHASE6_VERSION, phase6=True)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, old, PHASE6_VERSION)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, old, BASELINE_VERSION)
             runner, _calls = self._runner(root)
             plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
 
@@ -373,20 +373,20 @@ class UpdateTransactionTests(unittest.TestCase):
                     plan, runner=runner, activator=activate, record_path=temp / "resolved.json"
                 )
             current = root / "opt/vaultwarden-oci/current"
-            self.assertEqual(os.readlink(current), f"releases/{PHASE7_VERSION}")
+            self.assertEqual(os.readlink(current), f"releases/{CANDIDATE_VERSION}")
             for unit in install.SYSTEMD_UNITS:
                 self.assertEqual(
                     (root / "etc/systemd/system" / unit).read_text(encoding="utf-8"),
-                    f"{unit} {PHASE7_VERSION}\n",
+                    f"{unit} {CANDIDATE_VERSION}\n",
                 )
             self.assertFalse((temp / "resolved.json").exists())
 
     def test_poststart_health_gate_failure_keeps_candidate_application_coherent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            old = self._source(temp, "old-source", PHASE6_VERSION, phase6=True)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, old, PHASE6_VERSION)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, old, BASELINE_VERSION)
             base_runner, _calls = self._runner(root)
             candidate_status_seen = False
             activated = False
@@ -410,19 +410,19 @@ class UpdateTransactionTests(unittest.TestCase):
             self.assertTrue(candidate_status_seen)
             self.assertEqual(
                 os.readlink(root / "opt/vaultwarden-oci/current"),
-                f"releases/{PHASE7_VERSION}",
+                f"releases/{CANDIDATE_VERSION}",
             )
 
     def test_candidate_pin_drift_blocks_recovery_and_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            old = self._source(temp, "old-source", PHASE6_VERSION, phase6=True)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, old, PHASE6_VERSION)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, old, BASELINE_VERSION)
             runner, calls = self._runner(root)
             plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
             (candidate / "versions.toml").write_text(
-                versions_text(PHASE7_VERSION, amd64="7"), encoding="utf-8"
+                versions_text(CANDIDATE_VERSION, amd64="7"), encoding="utf-8"
             )
             with self.assertRaisesRegex(update.UpdateError, "changed since update check"):
                 update.apply_update(plan, runner=runner, activator=lambda *_: None)
@@ -432,9 +432,9 @@ class UpdateTransactionTests(unittest.TestCase):
     def test_failed_recovery_blocks_staging_and_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            old = self._source(temp, "old-source", PHASE6_VERSION, phase6=True)
-            candidate = self._source(temp, "candidate", PHASE7_VERSION)
-            root = self._installed(temp, old, PHASE6_VERSION)
+            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
+            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
+            root = self._installed(temp, old, BASELINE_VERSION)
             base_runner, calls = self._runner(root)
 
             def runner(argv, **kwargs):
@@ -447,9 +447,9 @@ class UpdateTransactionTests(unittest.TestCase):
                 update.apply_update(plan, runner=runner, activator=lambda *_: None)
             self.assertEqual(
                 os.readlink(root / "opt/vaultwarden-oci/current"),
-                f"releases/{PHASE6_VERSION}",
+                f"releases/{BASELINE_VERSION}",
             )
-            self.assertFalse((root / f"opt/vaultwarden-oci/releases/{PHASE7_VERSION}").exists())
+            self.assertFalse((root / f"opt/vaultwarden-oci/releases/{CANDIDATE_VERSION}").exists())
             self.assertFalse(any(call[:2] == ("docker", "pull") for call in calls))
 
 

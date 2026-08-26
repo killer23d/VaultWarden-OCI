@@ -246,9 +246,9 @@ class TransactionOrderTests(unittest.TestCase):
 
 class SchedulerAndHostTests(unittest.TestCase):
     def test_update_check_timer_can_never_apply(self) -> None:
-        root = Path(__file__).resolve().parents[2]
-        service = (root / "systemd-v2/vaultwarden-oci-update-check.service").read_text(encoding="utf-8")
-        timer = (root / "systemd-v2/vaultwarden-oci-update-check.timer").read_text(encoding="utf-8")
+        root = Path(__file__).resolve().parents[1]
+        service = (root / "systemd/vaultwarden-oci-update-check.service").read_text(encoding="utf-8")
+        timer = (root / "systemd/vaultwarden-oci-update-check.timer").read_text(encoding="utf-8")
         self.assertIn("update check --timer --json", service)
         self.assertNotIn("update apply", service)
         self.assertNotIn("update apply", timer)

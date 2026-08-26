@@ -7,7 +7,7 @@ from unittest import mock
 
 from vaultwarden_oci import notification, runtime, secrets
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "email-providers.toml"
 _PROVIDER_IDS = ("mailersend", "sendgrid", "mailgun", "postmark", "resend", "cyberpersons")
 

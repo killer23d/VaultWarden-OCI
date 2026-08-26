@@ -266,7 +266,7 @@ class Phase3RuntimeTests(unittest.TestCase):
                 raise AssertionError(argv)
 
             with mock.patch.object(secrets, "load", return_value=VALUES):
-                with self.assertRaises(runtime.RuntimeErrorV2) as caught:
+                with self.assertRaises(runtime.RuntimeOperationError) as caught:
                     runtime.lifecycle("start", paths=paths, versions_path=versions, runner=runner)
             for value in VALUES.values():
                 self.assertNotIn(value, str(caught.exception))
@@ -394,7 +394,7 @@ class Phase3RuntimeTests(unittest.TestCase):
                 raise AssertionError(argv)
 
             with mock.patch.object(secrets, "cleanup") as cleanup:
-                with self.assertRaisesRegex(runtime.RuntimeErrorV2, "stop state unknown"):
+                with self.assertRaisesRegex(runtime.RuntimeOperationError, "stop state unknown"):
                     runtime.lifecycle("stop", paths=paths, runner=runner)
                 cleanup.assert_not_called()
 

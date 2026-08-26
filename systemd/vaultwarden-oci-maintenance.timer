@@ -1,5 +1,5 @@
 [Unit]
-Description=Run VaultWarden-OCI V2 maintenance diagnostics weekly
+Description=Run VaultWarden-OCI maintenance diagnostics weekly
 
 [Timer]
 OnCalendar=Sun *-*-* 04:10:00

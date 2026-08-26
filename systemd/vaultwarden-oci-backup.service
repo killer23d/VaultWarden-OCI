@@ -1,5 +1,5 @@
 [Unit]
-Description=VaultWarden-OCI V2 encrypted recovery backup
+Description=VaultWarden-OCI encrypted recovery backup
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=vaultwarden-oci.service
 OnFailure=vaultwarden-oci-notify@%n.service

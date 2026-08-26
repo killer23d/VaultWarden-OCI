@@ -9,7 +9,7 @@ from unittest import mock
 
 from vaultwarden_oci import notification, runtime
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "email-providers.toml"
 
 
@@ -314,7 +314,7 @@ class NotificationDeliveryTests(unittest.TestCase):
 
 class SystemdSurfaceTests(unittest.TestCase):
     def test_units_use_installed_current_vwctl_and_no_wrapper_scripts(self) -> None:
-        unit_dir = ROOT / "systemd-v2"
+        unit_dir = ROOT / "systemd"
         names = {path.name for path in unit_dir.iterdir() if path.is_file()}
         self.assertEqual(
             names,

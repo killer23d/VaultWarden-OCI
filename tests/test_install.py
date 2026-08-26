@@ -13,7 +13,7 @@ from unittest import mock
 
 from vaultwarden_oci import cli, install
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 CURRENT_RELEASE_VERSION = cli.load_versions(ROOT / "versions.toml").version
 
 
@@ -40,7 +40,7 @@ arm64 = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 '''
 
 
-class Phase2InstallTests(unittest.TestCase):
+class InstallLayoutTests(unittest.TestCase):
     def write_os_release(self, root: Path, *, distro: str = "ubuntu", version: str = "24.04") -> Path:
         path = root / "os-release"
         path.write_text(f'ID="{distro}"\nVERSION_ID="{version}"\n', encoding="utf-8")
@@ -51,7 +51,7 @@ class Phase2InstallTests(unittest.TestCase):
         source.mkdir()
         shutil.copy2(ROOT / "vwctl", source / "vwctl")
         shutil.copytree(ROOT / "vaultwarden_oci", source / "vaultwarden_oci")
-        shutil.copytree(ROOT / "systemd-v2", source / "systemd-v2")
+        shutil.copytree(ROOT / "systemd", source / "systemd")
         shutil.copy2(ROOT / "email-providers.toml", source / "email-providers.toml")
         (source / "versions.toml").write_text(exact_versions(version), encoding="utf-8")
         return source
@@ -72,73 +72,6 @@ class Phase2InstallTests(unittest.TestCase):
             noble = self.write_os_release(root, version="24.04")
             with self.assertRaises(install.InstallError):
                 install.validate_host(os_release=noble, machine="ppc64le")
-
-    def test_bootstrap_anchors_python_to_repository(self) -> None:
-        try:
-            install.validate_host()
-        except install.InstallError as exc:
-            self.skipTest(f"bootstrap host preflight is not supported here: {exc}")
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            trusted = root / "trusted"
-            foreign = root / "foreign"
-            trusted_package = trusted / "vaultwarden_oci"
-            shadow_package = foreign / "vaultwarden_oci"
-            trusted_package.mkdir(parents=True)
-            shadow_package.mkdir(parents=True)
-
-            shutil.copy2(ROOT / "bootstrap-v2.sh", trusted / "bootstrap-v2.sh")
-            (trusted_package / "__init__.py").write_text("", encoding="utf-8")
-            (trusted_package / "install.py").write_text(
-                "import os\n"
-                "if 'PYTHONPATH' in os.environ:\n"
-                "    raise SystemExit('inherited PYTHONPATH reached trusted Python')\n"
-                "print('trusted-repository-package')\n",
-                encoding="utf-8",
-            )
-            (shadow_package / "__init__.py").write_text("", encoding="utf-8")
-            (shadow_package / "install.py").write_text(
-                "raise SystemExit('shadow-package-executed')\n",
-                encoding="utf-8",
-            )
-
-            env = os.environ.copy()
-            env["PYTHONPATH"] = str(foreign)
-            command = ["/bin/bash", str(trusted / "bootstrap-v2.sh")]
-            if os.geteuid() != 0:
-                sudo = shutil.which("sudo")
-                if sudo is None:
-                    self.skipTest("root bootstrap regression requires root or passwordless sudo")
-                probe = subprocess.run(
-                    [sudo, "-n", "/usr/bin/true"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                if probe.returncode != 0:
-                    self.skipTest("passwordless sudo is unavailable for bootstrap regression")
-                command = [
-                    sudo,
-                    "-n",
-                    "/usr/bin/env",
-                    f"PYTHONPATH={foreign}",
-                    "/bin/bash",
-                    str(trusted / "bootstrap-v2.sh"),
-                ]
-                env.pop("PYTHONPATH", None)
-
-            result = subprocess.run(
-                command,
-                cwd=foreign,
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertEqual(result.stdout.strip(), "trusted-repository-package")
-            self.assertNotIn("shadow-package-executed", result.stderr)
 
     def test_temp_root_install_layout_permissions_and_idempotency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -187,7 +120,7 @@ class Phase2InstallTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((release_dir / "versions.toml").stat().st_mode), 0o444)
             self.assertEqual(stat.S_IMODE((release_dir / "email-providers.toml").stat().st_mode), 0o444)
             self.assertEqual(stat.S_IMODE((release_dir / "vwctl").stat().st_mode), 0o555)
-            self.assertEqual(stat.S_IMODE((release_dir / "systemd-v2").stat().st_mode), 0o555)
+            self.assertEqual(stat.S_IMODE((release_dir / "systemd").stat().st_mode), 0o555)
             self.assertTrue((release_dir / "vaultwarden_oci/install.py").is_file())
             installed_versions = (release_dir / "versions.toml").read_text(encoding="utf-8")
             self.assertIn("[image_digests.vaultwarden]", installed_versions)

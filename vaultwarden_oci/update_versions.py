@@ -130,7 +130,7 @@ JsonGetter = Callable[[str, Mapping[str, str] | None], object]
 
 
 def _get_json(url: str, headers: Mapping[str, str] | None = None) -> object:
-    request_headers = {"Accept": "application/vnd.github+json", "User-Agent": "vaultwarden-oci-v2"}
+    request_headers = {"Accept": "application/vnd.github+json", "User-Agent": "vaultwarden-oci"}
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(url, headers=request_headers, method="GET")

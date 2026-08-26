@@ -1,5 +1,5 @@
 [Unit]
-Description=VaultWarden-OCI V2 lifecycle
+Description=VaultWarden-OCI lifecycle
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 Wants=network-online.target
 After=network-online.target docker.service

@@ -1,4 +1,4 @@
-"""Cloudflare-only origin ingress and CrowdSec Cloudflare remediation for V2."""
+"""Cloudflare-only origin ingress and CrowdSec Cloudflare remediation."""
 from __future__ import annotations
 
 import ipaddress
@@ -137,7 +137,7 @@ def validate_policy(ipv4_text: str, ipv6_text: str, *, fetched_at: int, source: 
 def _http_text(url: str, maximum: int = MAX_RESPONSE_BYTES) -> str:
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "VaultWarden-OCI/2 cloudflare-edge-policy"},
+        headers={"User-Agent": "VaultWarden-OCI cloudflare-edge-policy"},
         method="GET",
     )
     try:
@@ -379,7 +379,7 @@ def _write_root_file(path: Path, content: str, mode: int) -> None:
 
 
 def acquisition_text(caddy_log: Path = CADDY_LOG) -> str:
-    return f'''# Managed by VaultWarden-OCI V2 Phase 4.
+    return f'''# Managed by VaultWarden-OCI.
 filenames:
   - {caddy_log}
 labels:
@@ -388,7 +388,7 @@ labels:
 
 
 def bouncer_dropin_text(config: Path = RUNTIME_CONFIG) -> str:
-    return f'''# Managed by VaultWarden-OCI V2 Phase 4.
+    return f'''# Managed by VaultWarden-OCI.
 [Service]
 Restart=no
 ExecCondition=
@@ -446,7 +446,7 @@ def _assert_acquisition_scope(paths: EdgePaths) -> None:
         names = ", ".join(entry.name for entry in unexpected)
         raise EdgeError(f"unexpected CrowdSec acquisition file(s): {names}")
     if paths == EdgePaths() and _has_noncomment_content(CROWDSEC_ACQUIS_MAIN):
-        raise EdgeError("unexpected active CrowdSec /etc/crowdsec/acquis.yaml; V2 requires Caddy-only acquisition")
+        raise EdgeError("unexpected active CrowdSec /etc/crowdsec/acquis.yaml; VaultWarden-OCI requires Caddy-only acquisition")
 
 
 def _unlink_state(path: Path, label: str) -> None:
