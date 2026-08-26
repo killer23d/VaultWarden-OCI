@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import cli, durability, install
+from . import cli, install
 from .update_versions import FrozenVersions, UpdateError, resolve_pinned
 
 
@@ -217,11 +217,6 @@ def _verify_coherent(release_dir: Path, source_root: Path) -> None:
         left, right = release_dir / relative, source_root / relative
         if not left.is_file() or not right.is_file() or left.read_bytes() != right.read_bytes():
             raise UpdateError(f"immutable release resource mismatch: {relative}")
-
-
-def _atomic_write(path: Path, content: bytes, mode: int) -> None:
-    """Compatibility boundary for durable project-owned file replacement."""
-    durability.atomic_write(path, content, mode)
 
 
 def _daemon_reload(layout: install.Layout, runner: Runner) -> None:
