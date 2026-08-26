@@ -1,0 +1,23 @@
+name: Fix unit migration durability owner
+on:
+  push:
+    branches: [codex/final-operator-manual-normalization]
+permissions:
+  contents: write
+jobs:
+  fix:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: codex/final-operator-manual-normalization
+      - run: python3 .github/scripts/fix-unit-migration-owner.py
+      - run: python3 -m unittest tests.test_update_interrupt_safety tests.test_update_appliance_rollback tests.test_update_transition -v
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/test_update_interrupt_safety.py
+          git commit -m 'Patch unit migration interruptions at durability owner'
+          git push origin HEAD:codex/final-operator-manual-normalization
