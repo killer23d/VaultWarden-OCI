@@ -1,4 +1,4 @@
-"""Secure 7-Zip password transport carried forward from the proven V1 path.
+"""Secure 7-Zip password transport for recovery-kit operations.
 
 Creation/update keeps a standalone ``-p`` switch and sends the confirmed
 passphrase twice on stdin. Read/test/list operations remove standalone ``-p``;

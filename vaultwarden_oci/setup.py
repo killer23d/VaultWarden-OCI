@@ -210,11 +210,7 @@ def _install_release(source: Path, *, use_latest: bool) -> str:
     if not use_latest:
         frozen = resolve_pinned(source); release = install.install_layout(source)
     else:
-        old = os.environ.get("VWOCI_DEVELOPMENT"); os.environ["VWOCI_DEVELOPMENT"] = "1"
-        try: frozen = resolve_latest(source)
-        finally:
-            if old is None: os.environ.pop("VWOCI_DEVELOPMENT", None)
-            else: os.environ["VWOCI_DEVELOPMENT"] = old
+        frozen = resolve_latest(source)
         with install._frozen_source(source, frozen_versions_toml(frozen)) as frozen_source:
             release = install.install_layout(frozen_source, require_all_architectures=False)
     record_frozen(frozen, RESOLVED_STATE); return release

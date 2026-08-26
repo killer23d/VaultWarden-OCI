@@ -1,4 +1,4 @@
-"""Vaultwarden + Caddy runtime rendering and lifecycle for V2."""
+"""Vaultwarden and Caddy runtime rendering and lifecycle."""
 from __future__ import annotations
 
 import grp
@@ -37,7 +37,7 @@ class RuntimeConfigError(ValueError):
     pass
 
 
-class RuntimeErrorV2(RuntimeError):
+class RuntimeOperationError(RuntimeError):
     pass
 
 
@@ -294,7 +294,7 @@ def _pins(path: Path) -> FrozenVersions:
     try:
         return resolve_pinned_file(path)
     except UpdateError as exc:
-        raise RuntimeErrorV2(str(exc)) from exc
+        raise RuntimeOperationError(str(exc)) from exc
 
 
 def _service_identity_error() -> str | None:
@@ -319,7 +319,7 @@ def _service_identity_error() -> str | None:
 def validate_service_identities() -> None:
     problem = _service_identity_error()
     if problem:
-        raise RuntimeErrorV2(problem)
+        raise RuntimeOperationError(problem)
 
 
 def _dir(path: Path, uid: int, gid: int, mode: int) -> None:
@@ -328,9 +328,9 @@ def _dir(path: Path, uid: int, gid: int, mode: int) -> None:
     os.chmod(path, mode)
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise RuntimeErrorV2(f"incompatible runtime path: {path}")
+        raise RuntimeOperationError(f"incompatible runtime path: {path}")
     if (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (uid, gid, mode):
-        raise RuntimeErrorV2(f"incompatible ownership/mode at runtime path: {path}")
+        raise RuntimeOperationError(f"incompatible ownership/mode at runtime path: {path}")
 
 
 def ensure_paths(
@@ -433,7 +433,7 @@ services:
     image: {q(frozen.caddy_image)}
     container_name: {NAMES["caddy"]}
     user: "{CADDY_UID}:{CADDY_GID}"
-    # Phase 4 fail-closed rule: Docker must not republish Caddy after daemon/host
+    # Fail closed: Docker must not republish Caddy after daemon/host
     # restart before the project-owned DOCKER-USER policy is re-established.
     restart: "no"
     command: ["/bin/sh", "-ec", {q(caddy_command)}]
@@ -584,7 +584,7 @@ def lifecycle(
         raise ValueError(action)
     default_paths = paths == Paths()
     if default_paths and os.geteuid() != 0:
-        raise RuntimeErrorV2(f"vwctl {action} must run as root")
+        raise RuntimeOperationError(f"vwctl {action} must run as root")
     versions_path = versions_path or Path(__file__).resolve().parents[1] / "versions.toml"
     if default_paths:
         validate_service_identities()
@@ -599,7 +599,7 @@ def lifecycle(
     with mutation_lock(paths.lock):
         if action == "stop":
             if not runner(["docker", "version", "--format", "{{.Server.Version}}"] ).ok:
-                raise RuntimeErrorV2("Docker Engine unavailable; stop state unknown")
+                raise RuntimeOperationError("Docker Engine unavailable; stop state unknown")
             existing: list[str] = []
             for name in ("caddy", "vaultwarden"):
                 container = NAMES[name]
@@ -607,17 +607,17 @@ def lifecycle(
                 if inspection.ok:
                     existing.append(container)
                 elif not _inspect_is_absent(inspection):
-                    raise RuntimeErrorV2("Docker container inspection failed; stop state unknown")
+                    raise RuntimeOperationError("Docker container inspection failed; stop state unknown")
             if existing and not runner(["docker", "stop", *existing]).ok:
-                raise RuntimeErrorV2("Docker stop failed")
+                raise RuntimeOperationError("Docker stop failed")
             removed = not existing or runner(["docker", "rm", *existing]).ok
             secrets.cleanup(paths.secret_paths())
             if not removed:
-                raise RuntimeErrorV2("Docker container removal failed after stop")
+                raise RuntimeOperationError("Docker container removal failed after stop")
             return
 
         if not tools(runner):
-            raise RuntimeErrorV2("Docker Engine + Compose with up --wait --wait-timeout are required")
+            raise RuntimeOperationError("Docker Engine + Compose with up --wait --wait-timeout are required")
         ensure_paths(
             paths,
             uid=uid,
@@ -632,7 +632,7 @@ def lifecycle(
             try:
                 edge.refresh_origin_policy(runner=runner)
             except edge.EdgeError as exc:
-                raise RuntimeErrorV2(str(exc)) from exc
+                raise RuntimeOperationError(str(exc)) from exc
         values = secrets.load(
             config.offline_recovery_recipient,
             paths=paths.secret_paths(),
@@ -648,7 +648,7 @@ def lifecycle(
             )
         render(config, versions_path, paths, admin_enabled=admin_enabled)
         if not _compose(["config", "--quiet"], paths, runner).ok:
-            raise RuntimeErrorV2("rendered Compose validation failed")
+            raise RuntimeOperationError("rendered Compose validation failed")
         secrets.materialize(
             values,
             derived=derived,
@@ -664,7 +664,7 @@ def lifecycle(
         if not _compose(args, paths, runner).ok:
             _compose(["down"], paths, runner)
             secrets.cleanup(paths.secret_paths())
-            raise RuntimeErrorV2("Docker Compose lifecycle failed")
+            raise RuntimeOperationError("Docker Compose lifecycle failed")
 
 
 def status(*, runner: Runner = run_command) -> tuple[str, list[dict[str, str]]]:
@@ -891,11 +891,11 @@ def doctor_checks(
                 DoctorCheck(
                     "secrets.decrypt",
                     "FAIL",
-                    "required Phase 4 cloudflare_remediation_token is missing",
+                    "required cloudflare_remediation_token is missing",
                 )
             )
         else:
-            checks.append(DoctorCheck("secrets.decrypt", "PASS", "required Phase 3/4 secrets decrypt"))
+            checks.append(DoctorCheck("secrets.decrypt", "PASS", "required appliance secrets decrypt"))
     return checks
 
 

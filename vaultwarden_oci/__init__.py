@@ -1,1 +1,1 @@
-"""VaultWarden-OCI V2 Python package."""
+"""VaultWarden-OCI Python package."""

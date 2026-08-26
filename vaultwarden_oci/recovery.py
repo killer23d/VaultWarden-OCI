@@ -1,4 +1,4 @@
-"""VaultWarden-OCI V2 encrypted recovery and rclone publication owner."""
+"""Encrypted application recovery and rclone publication owner."""
 from __future__ import annotations
 
 import hashlib
@@ -181,7 +181,7 @@ def _validate_manifest(staging: Path) -> dict[str, object]:
     if not isinstance(manifest, dict) or manifest.get("format") != "vaultwarden-oci-recovery":
         raise RecoveryError("unsupported recovery manifest")
     if manifest.get("format_version") != FORMAT_VERSION:
-        raise RecoveryError("restore supports the V2 recovery format only")
+        raise RecoveryError("restore supports .vwrec format version 2 only")
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
         raise RecoveryError("recovery manifest has no files")

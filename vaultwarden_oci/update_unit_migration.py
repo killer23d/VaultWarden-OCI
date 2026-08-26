@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from . import durability, install, update
+from . import durability, install
 from .update_versions import UpdateError
 
 ABSENT_MODE = -1
@@ -17,6 +17,17 @@ def _release_barrier(release: Path) -> None:
     durability.fsync_directory(release.parent)
 
 
+def _systemd_source(release: Path, *, allow_previous_layout: bool) -> Path:
+    canonical = release / install.SYSTEMD_SOURCE_DIR
+    if canonical.is_dir() and not canonical.is_symlink():
+        return canonical
+    if allow_previous_layout:
+        previous = release / install.PREVIOUS_SYSTEMD_SOURCE_DIR
+        if previous.is_dir() and not previous.is_symlink():
+            return previous
+    return canonical
+
+
 def install_units(new_release: Path, expected_release: Path, layout: install.Layout) -> dict[Path, tuple[bytes, int]]:
     """Move the installed owned-unit set from expected_release to new_release.
 
@@ -26,9 +37,11 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
     """
     snapshot: dict[Path, tuple[bytes, int]] = {}
     actions: list[tuple[Path, bytes | None]] = []
+    new_source = _systemd_source(new_release, allow_previous_layout=False)
+    expected_source = _systemd_source(expected_release, allow_previous_layout=True)
     for unit in install.SYSTEMD_UNITS:
-        new = new_release / install.SYSTEMD_SOURCE_DIR / unit
-        expected = expected_release / install.SYSTEMD_SOURCE_DIR / unit
+        new = new_source / unit
+        expected = expected_source / unit
         destination = layout.path(install.SYSTEMD_DIR / unit)
         new_exists = new.is_file()
         expected_exists = expected.is_file()
@@ -62,7 +75,7 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
             if content is None:
                 durability.unlink(destination, missing_ok=True)
             else:
-                update._atomic_write(destination, content, 0o644)
+                durability.atomic_write(destination, content, 0o644)
     except (Exception, KeyboardInterrupt):
         restore_units(snapshot)
         raise
@@ -70,7 +83,7 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
 
 
 def _state_for_release(release: Path, unit: str) -> bytes | None:
-    path = release / install.SYSTEMD_SOURCE_DIR / unit
+    path = _systemd_source(release, allow_previous_layout=True) / unit
     return path.read_bytes() if path.is_file() else None
 
 
@@ -123,7 +136,7 @@ def converge_units(
             if content is None:
                 durability.unlink(destination, missing_ok=True)
             else:
-                update._atomic_write(destination, content, 0o644)
+                durability.atomic_write(destination, content, 0o644)
     except (Exception, KeyboardInterrupt):
         restore_units(snapshot)
         raise
@@ -137,7 +150,7 @@ def restore_units(snapshot: Mapping[Path, tuple[bytes, int]]) -> None:
             if mode == ABSENT_MODE:
                 durability.unlink(path, missing_ok=True)
             else:
-                update._atomic_write(path, content, mode)
+                durability.atomic_write(path, content, mode)
         except Exception as exc:
             failures.append(f"{path}: {exc}")
     if failures:

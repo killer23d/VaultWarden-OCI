@@ -92,6 +92,6 @@ success_field = "success"
 success_value = true
 # Current CyberPersons docs use 429 for account-wide minute/hour/day/month
 # limits shared across API keys and SMTP credentials, so status alone cannot
-# prove a bounded transient condition. 503 is the status-only beta transient;
+# prove a bounded transient condition. 503 is the status-only transient case;
 # 429 and 500/send_failed remain visible and are not SMTP-fallback eligible.
 retry_statuses = [503]

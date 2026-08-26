@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 2+ host bootstrap and immutable installed-layout ownership."""
+"""Immutable installed-layout ownership for VaultWarden-OCI."""
 
 from __future__ import annotations
 
@@ -42,7 +42,10 @@ RUNTIME_SECRETS_DIR = RUNTIME_ROOT / "secrets"
 RUNTIME_TRANSIENT_DIR = RUNTIME_ROOT / "transient"
 VWCTL_LINK = Path("/usr/local/bin/vwctl")
 SYSTEMD_DIR = Path("/etc/systemd/system")
-SYSTEMD_SOURCE_DIR = "systemd-v2"
+SYSTEMD_SOURCE_DIR = "systemd"
+# Source-only compatibility input for the immediately preceding updater.
+# New release staging deliberately ignores this directory.
+PREVIOUS_SYSTEMD_SOURCE_DIR = "systemd-v2"
 SYSTEMD_UNITS = (
     "vaultwarden-oci.target",
     "vaultwarden-oci.service",
@@ -57,7 +60,7 @@ SYSTEMD_UNITS = (
     "vaultwarden-oci-notify@.service",
 )
 
-CONFIG_TEMPLATE = """# VaultWarden-OCI V2 beta operator configuration.
+CONFIG_TEMPLATE = """# VaultWarden-OCI operator configuration.
 # Replace the reserved .invalid values and offline Age recipient before first start.
 # Secrets belong in /etc/vaultwarden-oci/secrets.sops.yaml, never in this file.
 schema_version = 1
@@ -92,14 +95,9 @@ timeout_seconds = 15
 # region = "us"
 # domain = "mg.vault.invalid"
 """
-LEGACY_SYSTEMD_TARGET = """[Unit]\nDescription=VaultWarden-OCI lifecycle target\nDocumentation=https://github.com/killer23d/VaultWarden-OCI\nStopWhenUnneeded=no\n"""
 
 RELEASE_FILES = ("vwctl", "versions.toml", "email-providers.toml")
 RELEASE_DIRS = ("vaultwarden_oci", SYSTEMD_SOURCE_DIR)
-# Backward-compatible internal aliases for Phase 2/6 tests; Phase 7 consumes the
-# deliberate public release boundary above rather than installer implementation details.
-_RELEASE_FILES = RELEASE_FILES
-_RELEASE_DIRS = RELEASE_DIRS
 _RELEASE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
@@ -212,7 +210,7 @@ def _ensure_regular_file(path: Path, content: str, mode: int, *, preserve_existi
 
 
 def _ensure_lock_path(layout: Layout) -> Path:
-    """Create/validate the canonical lock inode before acquiring Phase 1's flock."""
+    """Create/validate the canonical lock inode before acquiring the global flock."""
     runtime_root = layout.path(GLOBAL_LOCK_PATH.parent)
     _ensure_directory(runtime_root, 0o700)
     lock_path = layout.path(GLOBAL_LOCK_PATH)
@@ -384,19 +382,8 @@ def _install_systemd_units(release_dir: Path, layout: Layout) -> None:
     for unit in SYSTEMD_UNITS:
         unit_source = source / unit
         if not unit_source.is_file():
-            raise InstallError(f"required V2 systemd unit is missing from immutable release: {unit_source}")
+            raise InstallError(f"required systemd unit is missing from immutable release: {unit_source}")
         destination = layout.path(SYSTEMD_DIR / unit)
-        if (
-            unit == "vaultwarden-oci.target"
-            and destination.exists()
-            and not destination.is_symlink()
-            and destination.is_file()
-            and _owned_by_installer(destination)
-            and destination.read_text(encoding="utf-8") == LEGACY_SYSTEMD_TARGET
-        ):
-            # Phase 2-5 owned this exact static target. Replace only that known
-            # content; arbitrary edits still fail through _ensure_regular_file.
-            destination.unlink()
         _ensure_regular_file(
             destination,
             unit_source.read_text(encoding="utf-8"),
@@ -512,9 +499,9 @@ def _frozen_source(source_root: Path, versions_toml: str) -> Iterator[Path]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Install the VaultWarden-OCI V2 immutable application layout")
+    parser = argparse.ArgumentParser(description="Install the VaultWarden-OCI immutable application layout")
     parser.add_argument("--source", required=True, type=Path, help="repository/release source root")
-    parser.add_argument("--use-latest", action="store_true", help="development/testing only")
+    parser.add_argument("--use-latest", action="store_true", help="resolve supported upstreams once and freeze exact immutable values")
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
     parser.add_argument("--skip-host-check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-systemd-reload", action="store_true", help=argparse.SUPPRESS)
@@ -527,7 +514,6 @@ def main(argv: list[str] | None = None) -> int:
         UpdateError,
         frozen_versions_toml,
         record_frozen,
-        require_development_target,
         resolve_latest,
         resolve_pinned,
     )
@@ -538,7 +524,6 @@ def main(argv: list[str] | None = None) -> int:
             validate_host()
         root = args.root.resolve()
         if args.use_latest:
-            require_development_target(root)
             frozen = resolve_latest(args.source)
             with _frozen_source(args.source, frozen_versions_toml(frozen)) as source:
                 release_dir = install_layout(
@@ -558,7 +543,7 @@ def main(argv: list[str] | None = None) -> int:
     except (InstallError, LockBusyError, ValueError, OSError, UpdateError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    label = "frozen development" if args.use_latest else "pinned"
+    label = "latest-frozen" if args.use_latest else "pinned"
     print(f"PASS: installed {label} immutable release at {release_dir}")
     return 0
 

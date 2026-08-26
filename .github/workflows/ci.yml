@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Verify Python 3.12
+        run: python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+      - name: Compile Python
+        run: python3 -m compileall -q vaultwarden_oci tests
+      - name: Parse shell glue
+        run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
+      - name: Immediate predecessor updater compatibility
+        run: |
+          git worktree add --detach /tmp/vwoci-previous 62c509cc1d711ddc6be815abca4e397e99638c74
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update_bridge.py "$PWD"
+          git worktree remove --force /tmp/vwoci-previous
+      - name: Unit and bounded integration suite
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: CLI help is authoritative
+        run: |
+          ./vwctl --help >/dev/null
+          ./vwctl doctor --help >/dev/null
+          ./vwctl update --help >/dev/null
+          ./vwctl recovery --help >/dev/null
+          ./vwctl recovery-kit --help >/dev/null
+          bash ./dashboard.sh --help >/dev/null
+      - name: Release-neutral path, content, complexity, and documentation audit
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          from vaultwarden_oci import install
+
+          root = Path('.')
+          content_exempt = {
+              Path('reports/CODEX-PROMPTS.md'),
+              Path('reports/REVIEW-PROMPTS.md'),
+              Path('.github/workflows/ci.yml'),
+          }
+          predecessor_bridge = Path(install.PREVIOUS_SYSTEMD_SOURCE_DIR)
+          forbidden_paths = []
+          for path in root.rglob('*'):
+              if not path.is_file() or '.git' in path.parts:
+                  continue
+              if predecessor_bridge in path.parents:
+                  continue
+              low = path.as_posix().lower()
+              if re.search(r'(^|[/_.-])(v1|v2|beta)([/_.-]|$)', low) or re.search(r'phase[0-9]+', low):
+                  forbidden_paths.append(path.as_posix())
+
+          # Detect product-generation/stage labels while preserving genuine
+          # protocol/API compatibility versions such as Age v1, provider /v1/,
+          # Docker Registry /v2/, OCI MIME v1/v2, and semantic tags v1.40.0.
+          generation_pattern = re.compile(r'(?i)(?:^|[^A-Za-z0-9])v[12](?:$|[^A-Za-z0-9.])')
+          technical_version_pattern = re.compile(
+              r'(?i)(?:/v[12](?:/|\b)|age-encryption\.org/v1|application/vnd\.[^\s"\']*\.v[12]\+|\bAge v1 header\b)'
+          )
+          other_patterns = [
+              re.compile(r'(?i)(?:^|[^A-Za-z0-9])phase\s*[0-9]+(?:$|[^A-Za-z0-9])'),
+              re.compile(r'\bbeta\b', re.I), re.compile(r'RuntimeErrorV2'),
+              re.compile(r'tests/v2'), re.compile(r'bootstrap-v2\.sh'),
+              re.compile(r'VaultWarden-OCI/2'), re.compile(r'vaultwarden-oci-v2'),
+              re.compile(r'VWOCI_DEVELOPMENT'), re.compile(r'resolve_latest_supported'),
+              re.compile(r'pre[- ]release implementation', re.I),
+              re.compile(r'implementation stage', re.I),
+          ]
+          violations = []
+          for path in root.rglob('*'):
+              if not path.is_file() or '.git' in path.parts or path in content_exempt:
+                  continue
+              try:
+                  text = path.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              for number, line in enumerate(text.splitlines(), 1):
+                  generation_hit = generation_pattern.search(line)
+                  if generation_hit and not technical_version_pattern.search(line):
+                      # The single historical source-dir constant is a technical
+                      # compatibility marker for the immediately preceding updater.
+                      if not (
+                          path == Path('vaultwarden_oci/install.py')
+                          and line.strip() == f'PREVIOUS_SYSTEMD_SOURCE_DIR = "{install.PREVIOUS_SYSTEMD_SOURCE_DIR}"'
+                      ):
+                          violations.append(f'{path}:{number}:{line.strip()}')
+                          continue
+                  if any(pattern.search(line) for pattern in other_patterns):
+                      violations.append(f'{path}:{number}:{line.strip()}')
+
+          bridge_errors = []
+          canonical = Path(install.SYSTEMD_SOURCE_DIR)
+          bridge = Path(install.PREVIOUS_SYSTEMD_SOURCE_DIR)
+          if install.PREVIOUS_SYSTEMD_SOURCE_DIR in install.RELEASE_DIRS:
+              bridge_errors.append('predecessor bridge must not be part of the new immutable release manifest')
+          if not canonical.is_dir() or not bridge.is_dir():
+              bridge_errors.append('canonical systemd directory or predecessor source bridge is missing')
+          else:
+              canonical_files = sorted(path.name for path in canonical.iterdir() if path.is_file())
+              bridge_files = sorted(path.name for path in bridge.iterdir() if path.is_file())
+              if canonical_files != bridge_files:
+                  bridge_errors.append('predecessor source bridge file set differs from canonical systemd')
+              else:
+                  for name in canonical_files:
+                      if (canonical / name).read_bytes() != (bridge / name).read_bytes():
+                          bridge_errors.append(f'predecessor source bridge differs from canonical systemd: {name}')
+
+          source_paths = list(Path('vaultwarden_oci').glob('*.py')) + list(Path('systemd').glob('*')) + [Path('setup.sh'), Path('dashboard.sh'), Path('vwctl')]
+          non_goals = [
+              re.compile(r'\bpostfix\b|\bpostqueue\b|\bsendmail\b', re.I),
+              re.compile(r'\bkubernetes\b|\bswarm\b|\bhigh[- ]availability\b', re.I),
+          ]
+          complexity = []
+          for path in source_paths:
+              if not path.is_file():
+                  continue
+              text = path.read_text(encoding='utf-8')
+              for number, line in enumerate(text.splitlines(), 1):
+                  if any(pattern.search(line) for pattern in non_goals):
+                      complexity.append(f'{path}:{number}:{line.strip()}')
+
+          markdown = [Path('README.md'), *Path('docs').glob('*.md'), Path('reports/TEST-STRATEGY.md')]
+          link_re = re.compile(r'\[[^\]]+\]\(([^)]+)\)')
+          broken_links = []
+          for path in markdown:
+              text = path.read_text(encoding='utf-8')
+              for raw_target in link_re.findall(text):
+                  target = raw_target.strip().split('#', 1)[0]
+                  if not target or target.startswith(('http://', 'https://', 'mailto:')):
+                      continue
+                  resolved = (path.parent / target).resolve()
+                  try:
+                      resolved.relative_to(root.resolve())
+                  except ValueError:
+                      broken_links.append(f'{path}: link escapes repository: {target}')
+                      continue
+                  if not resolved.exists():
+                      broken_links.append(f'{path}: missing local link: {target}')
+
+          if forbidden_paths or violations or bridge_errors or complexity or broken_links:
+              print('stage-labelled paths:')
+              print('\n'.join(forbidden_paths))
+              print('stage-labelled content:')
+              print('\n'.join(violations))
+              print('predecessor bridge errors:')
+              print('\n'.join(bridge_errors))
+              print('unexpected non-goal runtime references:')
+              print('\n'.join(complexity))
+              print('broken local documentation links:')
+              print('\n'.join(broken_links))
+              raise SystemExit(1)
+          PY
+
+  caddy-config-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Exact custom Caddy build and config validation
+        run: python3 tests/acceptance_caddy_config.py
+
+  recovery-crypto-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install pinned recovery tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age rclone 7zip
+          if ! command -v 7zz >/dev/null 2>&1; then sudo ln -s "$(command -v 7z)" /usr/local/bin/7zz; fi
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64 -o /tmp/sops
+          echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /tmp/sops" | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+      - name: Real Age SOPS rclone recovery path
+        run: python3 tests/acceptance_recovery_crypto.py
+      - name: Real AES-256 recovery-kit ZIP path
+        run: python3 tests/acceptance_recovery_kit.py
+
+  edge-packet-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Real Docker IPv4 IPv6 origin path
+        run: sudo bash tests/acceptance_edge_packet.sh

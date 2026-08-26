@@ -1,4 +1,4 @@
-# VaultWarden-OCI V2 text normalization and GitHub language classification.
+# VaultWarden-OCI text normalization and GitHub language classification.
 
 *.sh            linguist-language=Shell
 *.md            linguist-documentation

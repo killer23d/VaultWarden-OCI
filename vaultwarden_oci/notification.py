@@ -1,4 +1,4 @@
-"""Catalog-driven operational notification delivery for VaultWarden-OCI V2."""
+"""Catalog-driven operational notification delivery for VaultWarden-OCI."""
 from __future__ import annotations
 
 import base64
@@ -408,7 +408,7 @@ def load_catalog(path: Path = CATALOG_PATH) -> Catalog:
             aliases[alias] = provider.provider_id
     expected = {"mailersend", "sendgrid", "mailgun", "postmark", "resend", "cyberpersons"}
     if set(providers) != expected or aliases != {"cyberpanel": "cyberpersons"}:
-        raise CatalogError("catalog must define exactly the six V2 canonical providers and cyberpanel alias")
+        raise CatalogError("catalog must define exactly the six canonical providers and cyberpanel alias")
     return Catalog(providers, aliases)
 
 
@@ -528,7 +528,7 @@ def render_request(
         raise CatalogError(f"provider {provider.provider_id} rendered an unsafe HTTPS endpoint")
 
     rendered = _render_value(provider.request_template, context)
-    headers = {"Accept": "application/json", "User-Agent": "VaultWarden-OCI/2"}
+    headers = {"Accept": "application/json", "User-Agent": "VaultWarden-OCI"}
     if provider.auth_mode == "bearer":
         headers["Authorization"] = "Bearer " + token
     elif provider.auth_mode == "fixed_header":
@@ -694,7 +694,7 @@ def _smtp_send_message(
     from_email: str,
     to_email: str,
 ) -> AttemptResult:
-    """Canonical direct authenticated TLS SMTP transport for V2 mail."""
+    """Canonical direct authenticated TLS SMTP transport for appliance mail."""
     username = secrets.get("smtp_username")
     password = secrets.get("smtp_password")
     if not username or not password:

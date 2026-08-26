@@ -1,135 +1,49 @@
 # Security
 
-VaultWarden-OCI keeps the supported security boundary intentionally small: one Ubuntu 24.04 appliance host, dedicated persistent storage, immutable release code, root-owned operator configuration, SOPS/Age encrypted credentials, volatile plaintext, Cloudflare-restricted origin ingress, a closed notification catalog, and explicit recovery/update boundaries.
+VaultWarden-OCI keeps a small explicit trust boundary: one Ubuntu 24.04 appliance host, mandatory dedicated persistent storage, immutable release code, root-owned operator config, SOPS/Age encrypted credentials, volatile plaintext runtime material, Cloudflare-restricted public origin ingress, a closed notification catalog, and explicit recovery/update boundaries.
 
-## Trust and privilege boundaries
+## Secrets and privilege
 
-- Treat the trusted release and `versions.toml` as release inputs.
-- `/etc/vaultwarden-oci` is the operator configuration/credential-custody authority and remains root-owned.
-- Persistent application/recovery state must live on the validated dedicated production filesystem/volume, not solely on the boot/root filesystem.
-- `/run/vaultwarden-oci` is volatile generated/decrypted material.
-- Runtime containers remain least-privileged: fixed non-root identities where applicable, read-only roots, dropped capabilities, `no-new-privileges`, bounded resources, and narrow mounts.
-- `vwctl` is the implementation/mutation authority. `setup.sh` and `dashboard.sh` are supported human interfaces but must delegate mutations rather than create parallel state authorities.
+`/etc/vaultwarden-oci/config.toml` is non-secret operator configuration. `/etc/vaultwarden-oci/secrets.sops.yaml` is the encrypted credential authority. The root-only operational Age private identity stays on the appliance; the separate offline recovery private identity stays off-host except when explicitly supplied for a recovery operation. Plaintext credentials do not belong in config, release metadata, ordinary logs, argv, or `.vwrec` artifacts.
 
-## SOPS + Age
-
-The encrypted SOPS document uses distinct operational and offline recovery identities.
-
-The operational Age private identity is root-only on the appliance. The separate offline recovery private identity is kept away from the server and is not persistently stored there. Plaintext credentials are not written into operator config, release files, Compose/Caddy source, ordinary logs, or application recovery archives. Required runtime values are materialized only in the root-owned volatile runtime tree and removed during normal cleanup.
-
-A stolen `.vwrec` application recovery file must not contain the operational Age private key or otherwise carry its own decryption identity.
+Runtime containers use narrow mounts, fixed non-root identities where applicable, dropped capabilities/read-only roots where applicable, and `no-new-privileges`. Volatile generated/decrypted material belongs under `/run/vaultwarden-oci`.
 
 ## Dedicated-storage fail-safe
 
-Production services must not silently write persistent application/recovery state to the root filesystem if the intended dedicated storage is missing or mounted incorrectly.
+Production services are not allowed to silently write persistent application/recovery state to `/` if the intended volume is missing. Setup, mutating CLI commands, doctor, and the Docker systemd mount guard prove the dedicated storage identity. Missing or wrong storage is an availability failure, not permission to create replacement state on the boot disk.
 
-The setup/start/doctor path must validate the dedicated-storage invariant and fail safely. A missing mount is an availability failure, not permission to create replacement state directories on `/`.
+## Caddy trust versus origin filtering
 
-## Caddy real-client-IP trust
+Caddy is an exact-pinned xcaddy build with Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP support, combined Cloudflare ranges, and rate limiting. The trusted-proxy module is the single request-layer authority for trusting the real client IP; the project does not render a second static Cloudflare `trusted_proxies` CIDR list into Caddy.
 
-Caddy remains an exact-pinned xcaddy custom build with:
+The host-level `DOCKER-USER` path is separate. It allows published HTTPS only from strictly validated Cloudflare IPv4/IPv6 sources, uses bounded last-known-good data, and fails closed if no safe policy exists. Never disable this filter merely to make an origin test work.
 
-- Cloudflare DNS;
-- Cloudflare trusted-proxy/real-client-IP support;
-- combined Cloudflare IP ranges;
-- Caddy rate limiting.
+CrowdSec is separate again: it reads proxied web-client activity and remediates decisions through Cloudflare. A CrowdSec host firewall bouncer is not part of the supported architecture.
 
-Caddy's Cloudflare trusted-proxy module is the single authority for trusting `CF-Connecting-IP`/equivalent client-IP information. Do not also render a static Cloudflare CIDR `trusted_proxies` block into the Caddy configuration.
+## `/admin`
 
-This is a request-layer trust decision, not an origin firewall.
+When enabled, `/admin` has Vaultwarden's admin token, Caddy per-client rate limiting, and one outer Basic Auth gate. The source Basic Auth password is encrypted in SOPS; only its derived hash is materialized into volatile Caddy runtime state. Removing both admin secrets deliberately disables/closes the admin route.
 
-## Cloudflare-only origin ingress
+## Notification and SMTP security
 
-Host-level origin protection is separate from Caddy's trusted-proxy handling.
+Operational HTTPS providers are defined only in immutable `email-providers.toml`. Operator config can select supported IDs/options but cannot inject arbitrary endpoints, auth headers/modes, request templates, success rules, or retry rules. Authorization-bearing HTTPS requests retain TLS validation and do not silently follow unsafe credential-bearing redirects.
 
-The appliance maintains one small project-owned Docker `DOCKER-USER` path that allows published HTTPS only from strictly validated Cloudflare IPv4/IPv6 source ranges. A bounded last-known-good range set may be used; if neither live nor acceptably fresh cached policy is safe, published HTTPS remains blocked.
+Vaultwarden application mail uses authenticated encrypted SMTP. Operational SMTP fallback follows only an eligible transient API/network result. Permanent/authentication/TLS/ambiguous delivery failures remain visible; there is no local MTA, durable spool, queue, or dead-letter service.
 
-The Caddy trusted-proxy module does **not** replace this origin filter. Conversely, the origin source allowlist does not decide the end-user client identity Caddy should trust.
+## Recovery and update security
 
-CrowdSec remediates proxied web-client decisions through Cloudflare. A CrowdSec host firewall bouncer is outside the supported architecture. Do not combine the origin filter and CrowdSec into one ambiguous decision plane.
+A `.vwrec` is encrypted application state and excludes the server operational Age private key. The recovery-kit ZIP is a different credential artifact with AES-256 encryption and an independent interactively entered passphrase. The ZIP must be fully verified before email handoff.
 
-## `/admin` defense in depth
+Application updates stage exact immutable content, verify a pre-update recovery point, health-gate activation, and refuse unsafe old-binary rollback after possible persistent-state mutation. Ubuntu package changes are a separate recovery domain and the appliance never auto-reboots.
 
-Keep `/admin` deliberately simple and layered:
+## Unsupported security-expanding designs
 
-1. Vaultwarden admin token;
-2. Caddy-side rate limiting;
-3. one simple outer authentication gate.
+Do not add a second firewall backend, host CrowdSec bouncer, enterprise identity stack, arbitrary notification scripting, KMS/provider framework, dynamic plugin framework, Postfix/queue, generic repair engine, HA/Kubernetes layer, or compatibility reader for an earlier archive format without an explicit new product decision.
 
-Do not add an enterprise identity stack or stack multiple redundant outer authentication products around the admin endpoint.
-
-## Operational notifications
-
-`email-providers.toml` is immutable release data containing the closed supported provider definitions. The parser/operator config must not become a general HTTP scripting mechanism.
-
-The canonical message vocabulary remains:
-
-```text
-from_email | from_name | from_header | to_email | subject | text
-```
-
-Operator config may choose a supported provider and declared non-secret options. It may not supply arbitrary endpoints, authentication headers/modes, request templates, success rules, or retry rules. Authorization-bearing HTTPS requests must retain normal TLS verification and must not leak credentials through redirects/logs/status persistence.
-
-Routine upstream endpoint/auth/request/success/retry changes belong in the closed catalog plus focused tests/docs when the existing schema can safely express them.
-
-### CyberPersons / CyberPanel
-
-`cyberpersons` is canonical; `cyberpanel` is only an alias. API credentials belong in SOPS as `email_api_token`. If SMTP fallback uses the same vendor, use independent SMTP credentials; the API token is not an SMTP password.
-
-Current verified classification is:
-
-- HTTP `503 service_unavailable`: status-only transient/retry/fallback eligible;
-- HTTP `429 rate_limit_exceeded`: not transient by status alone because the current provider uses it for account-wide minute/hour/day/month limits shared by API and SMTP credentials;
-- HTTP `500 send_failed`: not transient by status alone and not SMTP-fallback eligible merely because it is HTTP 500.
-
-Do not reintroduce the older 429-is-always-transient assumption. Re-verify current official provider documentation before a focused catalog behavior change.
-
-## SMTP
-
-Vaultwarden application mail is direct authenticated SMTP. Operational SMTP fallback occurs only after a clearly transient API/network outcome. TLS uses the platform trust store and an authenticated encrypted transport; there is no plaintext downgrade.
-
-There is no Postfix/local MTA, durable spool, dead-letter queue, or provider-specific queue tooling. Permanent failures remain visible.
-
-## Recovery
-
-The normal application recovery format is one encrypted `.vwrec`. Restore validates/decrypts/checks/stages before promotion and retains explicit CLI forms for automation plus a guided local/remote picker for humans.
-
-The password-protected recovery-kit ZIP is a **different security artifact** used for credential handoff. It uses AES-256 ZIP encryption with a passphrase entered and confirmed interactively. That passphrase is independent of stored credentials and is never accepted through argv, environment variables, files, or email. The encrypted ZIP must be verified before any email handoff is attempted.
-
-Do not conflate possession of a recovery kit with a verified application recovery point.
-
-## Exact versions and `--use-latest`
-
-Normal installed application state is immutable and exact-pinned.
-
-`setup.sh --use-latest` is a supported, explicit operator override. Its security requirement is that every mutable upstream boundary is resolved once to an exact version/digest and those immutable values are recorded/used thereafter. No installed config, image reference, or state may remain floating on `latest`.
-
-## Application versus host updates
-
-Application update and Ubuntu package update are separate trust/recovery domains.
-
-Application update must stage/download/build before downtime where possible, verify a pre-update `.vwrec`, activate an immutable release, health-gate it, and roll back coherently only when safe. If candidate runtime state may have changed, do not pretend a binary rollback also reverted data.
-
-Ubuntu apt/kernel changes cannot be rolled back by application recovery. The appliance never auto-reboots.
-
-## Security diagnostics
-
-Use the authoritative diagnostics after install/config/security changes:
+After security or credential changes:
 
 ```bash
 sudo vwctl doctor --json
 ```
 
-Treat secret custody/decryption, runtime/storage paths, notification catalog/provider, edge/origin, CrowdSec, and recovery checks as acceptance boundaries. Human dashboard presentation may summarize them but must not hide or reinterpret a `FAIL` as success.
-
-## Current development-branch gaps
-
-The development branch is incremental; durable security decisions remain authoritative when later product surfaces are not implemented yet. Current Caddy trust, origin filtering, dedicated-storage enforcement, and setup behavior must be assessed from the implementation and tests rather than older gap summaries.
-
-## Caddy, Cloudflare, and admin defense
-
-Caddy uses the exact-pinned Cloudflare trusted-proxy module with `CF-Connecting-IP` to establish the real visitor IP for access logs and per-client rate limits. The project does not render Cloudflare CIDRs into a second Caddy `trusted_proxies static` list.
-
-This does not replace origin filtering. The project-owned Docker `DOCKER-USER` policy independently validates Cloudflare IPv4/IPv6 ranges, keeps a bounded last-known-good policy, and fails closed for published HTTPS when no safe policy exists. CrowdSec Cloudflare remediation remains a third, separate control plane.
-
-When Vaultwarden admin is enabled, SOPS must contain both `vaultwarden_admin_token` and `admin_basic_auth_password`. The source Basic Auth password is passed to exact-pinned Caddy `hash-password` over stdin; only the derived hash is materialized in volatile `/run` state for Caddy. `/admin*` is also rate-limited by Caddy using `{client_ip}`. Removing both admin secrets disables the admin route at Caddy.
+A human dashboard summary must never reinterpret a doctor `FAIL` as success.
