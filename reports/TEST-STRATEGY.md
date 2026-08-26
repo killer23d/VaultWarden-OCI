@@ -1,287 +1,45 @@
-# VaultWarden-OCI V2 Test Strategy
+# VaultWarden-OCI test strategy
 
-Date: 2026-08-19
-Status: supporting rationale/guardrails for the authoritative Codex prompts.
-
-> **Authority:** `reports/V2-CODEX-PROMPTS.md` controls agent execution. This file explains why V2 deliberately uses a smaller test architecture.
+Status: current supporting validation policy. The durable product authority remains `docs/PROJECT-BOUNDARY.md` and `docs/DECISIONS.md`.
 
 ## Objective
 
-Tests protect four things:
+Tests protect security, availability, recoverability, and operator truthfulness. Testing is not a parallel implementation of the appliance.
 
-1. security;
-2. availability;
-3. recoverability;
-4. operator truthfulness.
+## Three layers
 
-Testing is not a parallel implementation of the product. A test that makes harmless internal refactoring expensive without protecting observable risk is probably at the wrong boundary.
+### Focused unit tests
 
-## Why V2 changes the test model
+Use for deterministic project logic: TOML/config/catalog/version parsing, architecture mapping, CIDR/staleness policy, response/fallback classification, manifest/checksum/retention decisions, exact version resolution, redaction, and stable status/doctor shape.
 
-The audited V1 `tests/` tree is approximately 1.18 MB across 30 tracked files—roughly 61% of the byte size of the audited first-party shell/Make implementation set used for comparison. That is only a maintenance-footprint signal, not an LOC or engineering-effort metric.
+### Small integration tests
 
-The stronger finding is architectural coupling. Large V1 cases commonly:
+Use real temporary files/process boundaries when they are the risk: permissions/flock, SOPS/Age orchestration, Compose/Caddy rendering, rclone invocation and recovery artifacts, AES-256 recovery-kit verification, systemd unit content, and Docker packet-policy behavior. Prefer real temporary artifacts over large mocked state machines.
 
-- grep exact private source strings;
-- assert private source ordering;
-- extract private Bash functions with `awk`/`sed`;
-- construct synthetic harnesses around private state;
-- duplicate mocked control flows.
+### Disposable real-host release acceptance
 
-V2 does not port that architecture.
+Reserve full-system proof for clean Ubuntu 24.04 hosts with real dedicated storage and external test resources. Cover both `amd64` and `arm64` when available: setup/root-only refusal/boot guard, real stack/dashboard, Cloudflare origin and `/admin`, CrowdSec remediation, backup/rclone/restore, recovery-kit SMTP handoff, update/rollback/use-latest, timers, host upgrade/reboot state, and a representative notification path.
 
-## Three validation layers only
+Unavailable host/provider/architecture coverage is `NOT RUN`, never inferred from mocks or another architecture.
 
-### 1. Focused unit tests
+## Permanent CI
 
-Use for deterministic project logic:
+Keep PR CI proportional: compile/shell parsing, focused unit suite, and the small integration jobs already owned by the repository. Do not make destructive cloud/full-host acceptance an ordinary PR controller.
 
-- TOML/config/provider-catalog/manifest parsing;
-- architecture normalization;
-- policy/classification functions;
-- Cloudflare CIDR validation/staleness;
-- notification provider-template rendering and response/fallback classification;
-- backup manifest/checksum/retention decisions;
-- version-resolution policy;
-- safe result/redaction behavior.
+One behavior should normally have one best permanent test level. Avoid exact private source-string/order assertions, extracted private shell-function harnesses, prose freezing, custom test runners, coverage-percentage gates, or broad matrices without a concrete risk.
 
-Keep ordinary pytest discovery. No custom registry/modes.
+## High-risk focus
 
-### 2. Small integration tests
+Recovery deserves the strongest attention: consistent SQLite snapshot, manifest/checksum rejection, wrong-key failure before mutation, non-destructive rclone publication, independent remote verification, staging before promotion, and pruning separate from publication.
 
-Use when filesystem/process behavior is part of the risk:
+SOPS/Age tests cover project custody/invocation/permissions/leakage responsibilities, not the cryptographic algorithms themselves.
 
-- real temporary files/directories and permissions;
-- subprocess wrapper behavior;
-- `fcntl.flock` contention;
-- SOPS/Age orchestration at the external-command boundary;
-- Compose/runtime rendering and small lifecycle boundaries;
-- rclone argv/result behavior at the external-command boundary;
-- backup/restore using real temporary SQLite/files/archives;
-- systemd unit rendering/installed command targets;
-- HTTP/SMTP boundary behavior only where deterministic catalog/classification tests are insufficient.
+Notification tests cover the closed provider catalog, HTTPS/TLS/auth safety, bounded retry/fallback, redaction, and stable diagnostics. Canonical fields are exactly `from_email`, `from_name`, `from_header`, `to_email`, `subject`, `text`. Current CyberPersons policy: HTTP `503 service_unavailable` is status-only transient/retry/fallback eligible; HTTP `429 rate_limit_exceeded` and `500 send_failed` are not transient by status alone.
 
-Prefer real temporary artifacts over large mock state machines.
+Cloudflare/CrowdSec unit tests cover project parsing/policy; actual origin packets and external remediation belong to integration/real-host acceptance as appropriate. Caddy client-IP trust, host origin filtering, and CrowdSec Cloudflare remediation are distinct controls.
 
-### 3. Disposable real-host release acceptance
+`vwctl doctor` tests stable check IDs, PASS/WARN/FAIL/SKIP classification, JSON shape/exit behavior, and secret-free output rather than exact human prose.
 
-Reserve full-system behavior for a disposable Ubuntu 24.04 host/environment:
+## Required validation statement
 
-- clean install and installed filesystem/permissions;
-- amd64/arm64 where environments are available;
-- Docker/Compose runtime;
-- SOPS/Age materialization without leakage;
-- Vaultwarden + Caddy health;
-- Cloudflare origin ingress/fail-closed behavior;
-- CrowdSec detection plus the selected Cloudflare remediation path;
-- backup -> rclone publication -> remote verification -> download -> restore;
-- at least one configured built-in HTTPS operational provider + representative transient SMTP fallback;
-- systemd units/timers;
-- pinned update flow.
-
-Acceptance is a release gate, not a reason to rebuild the V1 stateful acceptance controller on every PR.
-
-## Permanent PR CI
-
-Keep permanent PR CI small:
-
-1. quality/lint/basic repository checks;
-2. focused unit tests;
-3. small integration tests.
-
-Do not put destructive/full-host acceptance on every ordinary PR unless production evidence later changes the cost/benefit.
-
-## Test ownership rule
-
-**One behavior should normally have one best permanent test level.**
-
-Examples:
-
-- architecture mapping -> unit;
-- lock contention -> small integration;
-- backup corruption refusal -> integration with real artifacts;
-- actual Cloudflare packet path -> release acceptance;
-- provider-catalog validation/rendering -> unit;
-- real provider delivery -> release/manual acceptance.
-
-Do not duplicate the same behavior at several layers merely for comfort.
-
-## Prohibited patterns
-
-Do not add permanent tests whose main assertion is:
-
-- exact private source text exists;
-- one private line appears before/after another;
-- a private helper has a specific textual implementation;
-- a private function can be extracted from source and run in a synthetic harness;
-- human prose matches exactly when stable IDs/JSON fields exist;
-- a third-party tool behaves according to its own internals;
-- every file touched has its own test.
-
-Do not add:
-
-- a custom test runner/inventory/mode registry;
-- a coverage-percentage gate;
-- broad matrices without a concrete risk;
-- pytest plugins/frameworks without demonstrated need;
-- helper modules solely to make tests convenient when the public boundary can be tested directly;
-- a generic provider conformance framework or one test module per email provider merely for symmetry;
-- a CrowdSec multi-bouncer matrix when beta has one remediation scope.
-
-## Risk-weighted focus
-
-### Backup / restore / rclone
-
-This deserves the strongest permanent test attention because a false success can destroy recoverability.
-
-High-value behavior includes:
-
-- consistent snapshot/manifest construction;
-- checksum/corruption rejection;
-- wrong-key/decryption failure before live mutation;
-- incomplete candidate not reported valid;
-- preflight before live mutation;
-- non-destructive rclone copy/copyto publication;
-- remote verification required before offsite success;
-- pruning separate from publication;
-- remote download/staging does not mutate live state before validation.
-
-Do not test rclone provider internals.
-
-### SOPS + Age
-
-Test only project-owned responsibilities:
-
-- required secret/schema validation;
-- safe external command invocation;
-- key/runtime-file permissions;
-- no plaintext leakage to normal persistent config/loggable state;
-- offline recovery private material is not persisted as the operational host key.
-
-Do not re-test cryptographic algorithms.
-
-### Operational notifications and `email-providers.toml`
-
-V2 beta supports these canonical built-in API providers:
-
-- `mailersend`;
-- `sendgrid`;
-- `mailgun`;
-- `postmark`;
-- `resend`;
-- `cyberpersons` (CyberPanel Email), with `cyberpanel` only an alias to that catalog definition.
-
-The canonical provider-template message context is exactly:
-
-```text
-from_email
-from_name
-from_header
-to_email
-subject
-text
-```
-
-Tests and reviewer prompts must use this same vocabulary; they must not create alternate canonical names such as `to`.
-
-The important behavior is safe catalog validation/rendering/classification/fallback, not protocol emulation or a dynamic provider framework.
-
-High-value permanent tests include:
-
-- catalog rejects duplicate canonical IDs/aliases;
-- `cyberpanel` resolves to canonical `cyberpersons` without duplicate settings;
-- unknown provider identifiers fail validation;
-- endpoints must be HTTPS and endpoint templates may use only declared non-secret substitutions;
-- operator config cannot inject arbitrary endpoint/auth/header/payload/success/retry overrides;
-- unknown auth modes, request encodings, placeholders, success checks, retry-delay declarations, or provider options fail closed;
-- request templates use only the exact canonical message-field set and never evaluate arbitrary code;
-- authorization-bearing requests do not silently follow cross-host redirects;
-- each built-in provider renders the expected authentication/request shape from the catalog at the project boundary;
-- API tokens and SMTP secrets never appear in argv/log/result/exception structures;
-- Mailgun non-secret region/domain validation where supported;
-- API success does not invoke SMTP;
-- network/DNS timeout is transient;
-- only provider-documented retry statuses become retry/fallback eligible;
-- representative `400`/`401`/`403` stays visible;
-- ambiguous/provider-semantic failures remain visible rather than being masked;
-- provider-specific success parsing is tested only where HTTP status alone is insufficient;
-- standard `Retry-After` handling is bounded;
-- an optional body retry-delay field is accepted only when the catalog names one top-level numeric field and a fixed unit; malformed/undocumented/unclear body delays fall back to the common fixed bounded retry schedule;
-- TLS certificate/hostname validation failure is not silently masked;
-- SMTP uses the configured secure mode at a stable mocked boundary;
-- both transports failing produces stable secret-free diagnostic state.
-
-#### CyberPanel/CyberPersons focused tests
-
-At Phase 6 implementation time, verify current official provider documentation and then cover the project-owned contract:
-
-- Bearer authentication;
-- `POST https://platform.cyberpersons.com/email/v1/send`;
-- mapping from canonical V2 values to provider `from`, `to`, `subject`, `text`;
-- HTTP `202` plus `success: true` accepted-send behavior;
-- `429` uses a small bounded retry and can fall back only after that retry policy;
-- `503 service_unavailable` is transient/retryable under the current documented baseline;
-- `500 send_failed` is **not** retry/fallback eligible by HTTP status alone;
-- `400`/`403` remain visible;
-- if current docs still mention body `retry_after` without defining usable units/semantics, fixed bounded retry is acceptable and no provider-specific JSON response language should be invented.
-
-If official provider behavior changes before implementation, update the catalog and focused tests to the then-current verified contract rather than freezing this report as upstream truth.
-
-Do **not** multiply every provider across every test layer. One focused catalog-render/auth/success-rule test per canonical provider plus shared classifier/fallback/security tests is normally enough. Real delivery against every commercial provider does not belong in ordinary PR CI.
-
-A routine provider settings change should normally change `email-providers.toml` plus the smallest affected tests/docs, not production Python. Add Python code/tests only for a genuinely new transport capability that the closed schema cannot represent.
-
-### Cloudflare / CrowdSec / firewall
-
-Unit-test project-owned parsing/policy and reserve actual packet-path/remediation behavior for disposable-host acceptance.
-
-The beta contract has two distinct controls, not two overlapping CrowdSec bouncers:
-
-1. project-owned iptables policy allows Caddy origin ingress only from validated Cloudflare source ranges and fails closed when no safe policy exists;
-2. CrowdSec web decisions are remediated through one current supported Cloudflare remediation component.
-
-Do not require a CrowdSec host firewall bouncer in beta tests. If a later architecture decision adds CrowdSec remediation for SSH/other host-visible services, test that separately rather than expanding the current matrix implicitly.
-
-### `vwctl doctor`
-
-Test stable check IDs, PASS/WARN/FAIL/SKIP classification, JSON shape, exit policy, and secret-free output. Do not freeze exact human prose.
-
-For notifications, `doctor` should distinguish at least: configured built-in provider valid/invalid, API credential present/placeholder, SMTP fallback available/unavailable, provider catalog valid/invalid, and last safe delivery result.
-
-## Standalone phase prerequisite validation
-
-Implementation prompts are pasted into fresh sessions, so each Phase N for N > 0 explicitly verifies Phase N-1 exists.
-
-Review should treat a missing immediate prerequisite as a scope/completeness problem rather than allowing an agent to silently implement multiple phases. In particular:
-
-- Phase 5 requires Phase 4;
-- Phase 6 requires Phase 5;
-- Phase 7 requires Phase 6, including the provider catalog/systemd notification surface;
-- Phase 8 requires Phase 7.
-
-Do not add a test framework just to enforce document sequencing; this is an implementation/review pre-flight responsibility.
-
-## File-surface guardrail for tests
-
-Test code should remain **obviously subordinate to the product**, not become a second architecture.
-
-- Prefer adding a case to an existing cohesive test module over creating a new file for one small behavior.
-- Do not create a test-helper layer that mirrors production modules one-for-one.
-- Keep the six provider definitions in one catalog rather than six provider source modules and six matching test modules unless a real ownership boundary emerges.
-- If a test module becomes difficult to understand, first ask whether the product boundary or test level is wrong before splitting it into more infrastructure.
-- No numeric LOC/coverage/file-count target is authoritative. Metrics may trigger discussion, never design gaming.
-
-## Required PR validation statement
-
-Every V2 agent/task PR should state:
-
-1. behavior changed;
-2. smallest validation sufficient;
-3. highest-value permanent test layer;
-4. duplicate tests intentionally not added;
-5. exact tests/validation actually run;
-6. validation not run and why;
-7. new test/support files created and why they were necessary;
-8. out-of-scope follow-ups discovered.
-
-This keeps validation proportional to risk instead of allowing test infrastructure to expand automatically with every implementation change.
+Every PR/release report states behavior changed, exact tests run, tests not run and why, real-host/provider/architecture evidence, any new test/support file and its ownership reason, and out-of-scope follow-ups. Never convert unavailable destructive/external evidence into `PASS`.
