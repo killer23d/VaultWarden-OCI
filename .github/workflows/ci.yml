@@ -29,14 +29,18 @@ jobs:
           ./vwctl recovery --help >/dev/null
           ./vwctl recovery-kit --help >/dev/null
           bash ./dashboard.sh --help >/dev/null
-      - name: Release-neutral path and content audit
+      - name: Release-neutral path, content, and complexity audit
         run: |
           python3 - <<'PY'
           import re
           from pathlib import Path
 
           root = Path('.')
-          prompt_archives = {Path('reports/CODEX-PROMPTS.md'), Path('reports/REVIEW-PROMPTS.md')}
+          content_exempt = {
+              Path('reports/CODEX-PROMPTS.md'),
+              Path('reports/REVIEW-PROMPTS.md'),
+              Path('.github/workflows/ci.yml'),
+          }
           forbidden_paths = []
           for path in root.rglob('*'):
               if not path.is_file() or '.git' in path.parts:
@@ -54,7 +58,7 @@ jobs:
           ]
           violations = []
           for path in root.rglob('*'):
-              if not path.is_file() or '.git' in path.parts or path in prompt_archives:
+              if not path.is_file() or '.git' in path.parts or path in content_exempt:
                   continue
               try:
                   text = path.read_text(encoding='utf-8')
@@ -64,11 +68,27 @@ jobs:
                   if any(pattern.search(line) for pattern in patterns):
                       violations.append(f'{path}:{number}:{line.strip()}')
 
-          if forbidden_paths or violations:
+          source_paths = list(Path('vaultwarden_oci').glob('*.py')) + list(Path('systemd').glob('*')) + [Path('setup.sh'), Path('dashboard.sh'), Path('vwctl')]
+          non_goals = [
+              re.compile(r'\bpostfix\b|\bpostqueue\b|\bsendmail\b', re.I),
+              re.compile(r'\bkubernetes\b|\bswarm\b|\bhigh[- ]availability\b', re.I),
+          ]
+          complexity = []
+          for path in source_paths:
+              if not path.is_file():
+                  continue
+              text = path.read_text(encoding='utf-8')
+              for number, line in enumerate(text.splitlines(), 1):
+                  if any(pattern.search(line) for pattern in non_goals):
+                      complexity.append(f'{path}:{number}:{line.strip()}')
+
+          if forbidden_paths or violations or complexity:
               print('stage-labelled paths:')
               print('\n'.join(forbidden_paths))
               print('stage-labelled content:')
               print('\n'.join(violations))
+              print('unexpected non-goal runtime references:')
+              print('\n'.join(complexity))
               raise SystemExit(1)
           PY
 
