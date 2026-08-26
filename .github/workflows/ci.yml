@@ -1,10 +1,8 @@
-name: V2 CI
+name: CI
 
 on:
   push:
-    branches: [v2, "codex/**"]
   pull_request:
-    branches: [v2]
 
 permissions:
   contents: read
@@ -18,11 +16,11 @@ jobs:
       - name: Verify Python 3.12
         run: python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
       - name: Compile Python
-        run: python3 -m compileall -q vaultwarden_oci tests/v2
+        run: python3 -m compileall -q vaultwarden_oci tests
       - name: Parse shell glue
-        run: bash -n setup.sh bootstrap-v2.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/v2/acceptance_edge_packet.sh
-      - name: V2 unit and bounded integration suite
-        run: python3 -m unittest discover -s tests/v2 -p 'test_*.py' -v
+        run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
+      - name: Unit and bounded integration suite
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: CLI help is authoritative
         run: |
           ./vwctl --help >/dev/null
@@ -31,6 +29,22 @@ jobs:
           ./vwctl recovery --help >/dev/null
           ./vwctl recovery-kit --help >/dev/null
           bash ./dashboard.sh --help >/dev/null
+      - name: Release-neutral path check
+        run: |
+          test ! -e bootstrap-v2.sh
+          test ! -e systemd-v2
+          test ! -e tests/v2
+          test ! -e docs/V2-DECISIONS.md
+          test ! -e reports/V2-ARCHITECTURE-PROPOSAL.md
+          test ! -e reports/V2-AUDIT.md
+          test ! -e reports/V2-TEST-STRATEGY.md
+          test ! -e reports/V2-CODEX-PROMPTS.md
+          test ! -e reports/V2-REVIEW-PROMPTS.md
+          test -d systemd
+          test -f docs/DECISIONS.md
+          test -f reports/TEST-STRATEGY.md
+          test -f reports/CODEX-PROMPTS.md
+          test -f reports/REVIEW-PROMPTS.md
 
   caddy-config-integration:
     runs-on: ubuntu-24.04
@@ -38,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Exact custom Caddy build and config validation
-        run: python3 tests/v2/acceptance_caddy_config.py
+        run: python3 tests/acceptance_caddy_config.py
 
   recovery-crypto-integration:
     runs-on: ubuntu-24.04
@@ -54,9 +68,9 @@ jobs:
           echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /tmp/sops" | sha256sum --check --status
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
       - name: Real Age SOPS rclone recovery path
-        run: python3 tests/v2/acceptance_recovery_crypto.py
+        run: python3 tests/acceptance_recovery_crypto.py
       - name: Real AES-256 recovery-kit ZIP path
-        run: python3 tests/v2/acceptance_recovery_kit.py
+        run: python3 tests/acceptance_recovery_kit.py
 
   edge-packet-integration:
     runs-on: ubuntu-24.04
@@ -64,4 +78,4 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Real Docker IPv4 IPv6 origin path
-        run: sudo bash tests/v2/acceptance_edge_packet.sh
+        run: sudo bash tests/acceptance_edge_packet.sh
