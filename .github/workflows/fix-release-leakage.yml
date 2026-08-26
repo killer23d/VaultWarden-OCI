@@ -1,0 +1,24 @@
+name: Release-neutral leakage fixes
+on:
+  push:
+    branches: [codex/final-operator-manual-normalization]
+permissions:
+  contents: write
+jobs:
+  fix:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: codex/final-operator-manual-normalization
+          fetch-depth: 0
+      - run: python3 .github/scripts/fix-release-leakage.py
+      - run: |
+          python3 -m compileall -q vaultwarden_oci tests
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add vaultwarden_oci/edge.py vaultwarden_oci/recovery_ux.py vaultwarden_oci/dashboard.py vaultwarden_oci/sevenzip_secure.py .github/pull_request_template.md
+          git commit -m 'Remove remaining stage-era product leakage'
+          git push origin HEAD:codex/final-operator-manual-normalization
