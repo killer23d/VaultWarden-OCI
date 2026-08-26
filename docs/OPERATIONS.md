@@ -69,12 +69,25 @@ The host separately owns a fail-closed Docker `DOCKER-USER` origin filter that p
 
 `/admin` uses only the intended small stack: Vaultwarden admin token, Caddy rate limiting, and one outer Basic Auth gate. A deliberately disabled admin route is a valid closed state.
 
+To **enable or rotate** admin access, edit the encrypted secret authority and set both `vaultwarden_admin_token` and `admin_basic_auth_password` together; changing either value is treated as a rotation of that layer:
+
 ```bash
+sudo vwctl secrets edit
+sudo vwctl secrets validate
+sudo vwctl restart
 sudo vwctl doctor --json
-sudo vwctl edge refresh
 ```
 
-**Expected success:** edge/trusted-proxy/admin checks pass. **On failure:** do not bypass the origin filter or remove admin protection to obtain green status; correct the range, credential, or rendered-policy problem.
+To **disable** `/admin`, run `sudo vwctl secrets edit` and remove both `vaultwarden_admin_token` and `admin_basic_auth_password`, then run the same validate/restart/doctor sequence. Do not place either plaintext value in `config.toml`.
+
+Refresh or diagnose the separate Cloudflare origin policy with:
+
+```bash
+sudo vwctl edge refresh
+sudo vwctl doctor --json
+```
+
+**Expected success:** the secrets transaction validates, restart succeeds, and edge/trusted-proxy/admin doctor checks show either protected admin access or the deliberate closed/disabled state. **On failure:** the validated editor leaves the previous authority intact; do not bypass the origin filter or remove only one admin secret to obtain green status.
 
 ## CrowdSec and Cloudflare remediation
 

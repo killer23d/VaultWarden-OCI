@@ -1,0 +1,18 @@
+[Unit]
+Description=VaultWarden-OCI encrypted recovery backup
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=vaultwarden-oci.service
+OnFailure=vaultwarden-oci-notify@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/vaultwarden-oci/current/vwctl backup
+TimeoutStartSec=1800
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vaultwarden-oci /run/vaultwarden-oci
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vaultwarden-oci-backup

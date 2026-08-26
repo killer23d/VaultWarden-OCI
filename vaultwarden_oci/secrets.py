@@ -1,4 +1,4 @@
-"""SOPS/Age custody and volatile pre-release implementation+ secret materialization."""
+"""SOPS/Age custody and volatile secret materialization."""
 from __future__ import annotations
 
 import json

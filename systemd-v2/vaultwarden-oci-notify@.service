@@ -1,0 +1,18 @@
+[Unit]
+Description=VaultWarden-OCI operational notification for %i
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/vaultwarden-oci/current/vwctl notify --event %i
+TimeoutStartSec=90
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vaultwarden-oci /run/vaultwarden-oci
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vaultwarden-oci-notify

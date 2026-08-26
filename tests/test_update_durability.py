@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaultwarden_oci import durability, install, update, update_guard, update_recovery
+from vaultwarden_oci import durability, install, update_appliance, update_guard, update_recovery
 
 
 class DurabilityPrimitiveTests(unittest.TestCase):
@@ -168,7 +168,7 @@ class CurrentPublicationTests(unittest.TestCase):
             layout = install.Layout(Path(directory))
             expected = layout.path(install.CURRENT_LINK)
             with mock.patch.object(durability, "atomic_symlink") as publish:
-                update._switch(layout, Path("releases/2.0.0"))
+                update_appliance._switch_current(layout, Path("releases/2.0.0"))
             publish.assert_called_once_with(expected, Path("releases/2.0.0"))
 
 

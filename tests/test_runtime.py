@@ -492,5 +492,31 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(by_id["secrets.decrypt"], "FAIL")
 
 
+    def test_doctor_secret_messages_are_release_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = temp_paths(root)
+            paths.config.write_text(config_text(), encoding="utf-8")
+
+            def runner(argv, *, env=None, cwd=None):
+                return result(argv, "--wait --wait-timeout\n")
+
+            healthy = dict(VALUES, cloudflare_remediation_token="R" * 40)
+            with mock.patch.object(secrets, "validate_custody"), mock.patch.object(
+                secrets, "decrypt", return_value=healthy
+            ):
+                checks = runtime.doctor_checks(config_path=paths.config, paths=paths, runner=runner)
+            decrypt = next(check for check in checks if check.check_id == "secrets.decrypt")
+            self.assertEqual(decrypt.status, "PASS")
+            self.assertEqual(decrypt.message, "required appliance secrets decrypt")
+
+            with mock.patch.object(secrets, "validate_custody"), mock.patch.object(
+                secrets, "decrypt", return_value=VALUES
+            ):
+                checks = runtime.doctor_checks(config_path=paths.config, paths=paths, runner=runner)
+            decrypt = next(check for check in checks if check.check_id == "secrets.decrypt")
+            self.assertEqual(decrypt.status, "FAIL")
+            self.assertEqual(decrypt.message, "required cloudflare_remediation_token is missing")
+
 if __name__ == "__main__":
     unittest.main()

@@ -34,6 +34,23 @@ class ReleaseSurfaceTests(unittest.TestCase):
         ):
             self.assertFalse((ROOT / relative).exists(), relative)
 
+    def test_previous_updater_bridge_is_exact_and_source_only(self) -> None:
+        canonical = ROOT / install.SYSTEMD_SOURCE_DIR
+        bridge = ROOT / install.PREVIOUS_SYSTEMD_SOURCE_DIR
+        self.assertNotIn(install.PREVIOUS_SYSTEMD_SOURCE_DIR, install.RELEASE_DIRS)
+        self.assertEqual(
+            sorted(path.name for path in canonical.iterdir() if path.is_file()),
+            sorted(path.name for path in bridge.iterdir() if path.is_file()),
+        )
+        for unit in install.SYSTEMD_UNITS:
+            self.assertEqual((canonical / unit).read_bytes(), (bridge / unit).read_bytes())
+
+    def test_semantic_stage_placeholder_is_absent_from_runtime_sources(self) -> None:
+        for path in (ROOT / "vaultwarden_oci").glob("*.py"):
+            text = path.read_text(encoding="utf-8").lower()
+            self.assertNotIn("pre-release implementation", text, path)
+            self.assertNotIn("implementation stage", text, path)
+
     def test_fresh_install_template_matches_current_schema(self) -> None:
         parsed = runtime.parse_config(tomllib.loads(install.CONFIG_TEMPLATE))
         self.assertEqual(parsed.domain, "vault.invalid")

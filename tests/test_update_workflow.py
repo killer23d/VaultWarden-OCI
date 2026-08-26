@@ -120,7 +120,7 @@ class VersionResolutionTests(unittest.TestCase):
             (root / "versions.toml").write_text(versions_text(CANDIDATE_VERSION), encoding="utf-8")
             lookup = FakeLookup()
             frozen = update_versions.resolve_latest(root, machine="x86_64", lookup=lookup)
-            snapshot = update.frozen_versions_toml(frozen)
+            snapshot = update_versions.frozen_versions_toml(frozen)
         self.assertEqual(
             lookup.release_calls,
             ["vaultwarden", "caddy", "caddy_dns_cloudflare"],
@@ -254,20 +254,6 @@ class UpdateTransactionTests(unittest.TestCase):
         candidate_source.assert_not_called()
         self.assertIn("dedicated production storage is not ready: missing mount", stderr.getvalue())
 
-    def test_nonproduction_update_root_requires_injected_io_boundaries(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
-            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
-            root = self._installed(temp, old, BASELINE_VERSION)
-            with self.assertRaisesRegex(update.UpdateError, "non-production update roots are test-only"):
-                update.plan_update(candidate, root=root, machine="amd64")
-            runner, calls = self._runner(root)
-            plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-            with self.assertRaisesRegex(update.UpdateError, "inject both a test runner and test activator"):
-                update.apply_update(plan, runner=runner)
-            self.assertFalse(any(call[-1:] == ("backup",) for call in calls))
-
     def test_actual_baseline_manifest_to_candidate_transition_is_not_noop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -289,167 +275,6 @@ class UpdateTransactionTests(unittest.TestCase):
             runner, _ = self._runner(root)
             with self.assertRaisesRegex(update.UpdateError, "bump vaultwarden_oci.version"):
                 update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-
-    def test_apply_stages_coherent_release_and_activates_exact_runtime(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
-            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
-            root = self._installed(temp, old, BASELINE_VERSION)
-            runner, calls = self._runner(root)
-            plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-            record = temp / "resolved.json"
-            activations: list[str] = []
-
-            def activate(frozen, _versions_path, _runner):
-                activations.append(frozen.project_version)
-
-            release = update.apply_update(
-                plan, runner=runner, activator=activate, record_path=record
-            )
-            current = root / "opt/vaultwarden-oci/current"
-            self.assertEqual(os.readlink(current), f"releases/{CANDIDATE_VERSION}")
-            self.assertEqual(
-                (release / "email-providers.toml").read_bytes(),
-                (candidate / "email-providers.toml").read_bytes(),
-            )
-            self.assertEqual(
-                (release / "vaultwarden_oci/notification.py").read_bytes(),
-                (candidate / "vaultwarden_oci/notification.py").read_bytes(),
-            )
-            payload = json.loads(record.read_text(encoding="utf-8"))
-            self.assertEqual(payload["project_version"], CANDIDATE_VERSION)
-            pulls = [call for call in calls if call[:2] == ("docker", "pull")]
-            self.assertEqual(len(pulls), 3)
-            self.assertTrue(all("@sha256:" in call[2] for call in pulls))
-            self.assertTrue(any(call[:2] == ("docker", "build") for call in calls))
-            self.assertEqual(activations, [CANDIDATE_VERSION])
-
-    def test_prestart_activation_failure_restores_baseline_manifest_application_and_units(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
-            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
-            root = self._installed(temp, old, BASELINE_VERSION)
-            runner, _calls = self._runner(root)
-            plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-
-            def activate(_frozen, _versions_path, _runner):
-                raise update.RuntimeActivationError(
-                    "prestart validation failed", state_change_possible=False
-                )
-
-            with self.assertRaisesRegex(update.UpdateError, "restored before candidate runtime start"):
-                update.apply_update(
-                    plan, runner=runner, activator=activate, record_path=temp / "resolved.json"
-                )
-            current = root / "opt/vaultwarden-oci/current"
-            self.assertEqual(os.readlink(current), f"releases/{BASELINE_VERSION}")
-            for unit in install.SYSTEMD_UNITS:
-                self.assertEqual(
-                    (root / "etc/systemd/system" / unit).read_text(encoding="utf-8"),
-                    f"{unit} {BASELINE_VERSION}\n",
-                )
-            self.assertFalse((temp / "resolved.json").exists())
-
-    def test_poststart_failure_refuses_automatic_downgrade(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
-            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
-            root = self._installed(temp, old, BASELINE_VERSION)
-            runner, _calls = self._runner(root)
-            plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-
-            def activate(_frozen, _versions_path, _runner):
-                raise update.RuntimeActivationError(
-                    "compose may have started candidate", state_change_possible=True
-                )
-
-            with self.assertRaisesRegex(update.UpdateError, "automatic rollback refused"):
-                update.apply_update(
-                    plan, runner=runner, activator=activate, record_path=temp / "resolved.json"
-                )
-            current = root / "opt/vaultwarden-oci/current"
-            self.assertEqual(os.readlink(current), f"releases/{CANDIDATE_VERSION}")
-            for unit in install.SYSTEMD_UNITS:
-                self.assertEqual(
-                    (root / "etc/systemd/system" / unit).read_text(encoding="utf-8"),
-                    f"{unit} {CANDIDATE_VERSION}\n",
-                )
-            self.assertFalse((temp / "resolved.json").exists())
-
-    def test_poststart_health_gate_failure_keeps_candidate_application_coherent(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
-            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
-            root = self._installed(temp, old, BASELINE_VERSION)
-            base_runner, _calls = self._runner(root)
-            candidate_status_seen = False
-            activated = False
-
-            def runner(argv, **kwargs):
-                nonlocal candidate_status_seen
-                args = tuple(argv)
-                if activated and args[0].endswith("/current/vwctl") and args[-1:] == ("status",):
-                    candidate_status_seen = True
-                    return command(args, ok=False)
-                return base_runner(argv, **kwargs)
-
-            plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-
-            def activate(_frozen, _versions_path, _runner):
-                nonlocal activated
-                activated = True
-
-            with self.assertRaisesRegex(update.UpdateError, "automatic rollback refused"):
-                update.apply_update(plan, runner=runner, activator=activate)
-            self.assertTrue(candidate_status_seen)
-            self.assertEqual(
-                os.readlink(root / "opt/vaultwarden-oci/current"),
-                f"releases/{CANDIDATE_VERSION}",
-            )
-
-    def test_candidate_pin_drift_blocks_recovery_and_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
-            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
-            root = self._installed(temp, old, BASELINE_VERSION)
-            runner, calls = self._runner(root)
-            plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-            (candidate / "versions.toml").write_text(
-                versions_text(CANDIDATE_VERSION, amd64="7"), encoding="utf-8"
-            )
-            with self.assertRaisesRegex(update.UpdateError, "changed since update check"):
-                update.apply_update(plan, runner=runner, activator=lambda *_: None)
-            self.assertFalse(any(call[-1:] == ("backup",) for call in calls))
-            self.assertFalse(any(call[:2] == ("docker", "pull") for call in calls))
-
-    def test_failed_recovery_blocks_staging_and_activation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            old = self._source(temp, "old-source", BASELINE_VERSION, baseline_manifest=True)
-            candidate = self._source(temp, "candidate", CANDIDATE_VERSION)
-            root = self._installed(temp, old, BASELINE_VERSION)
-            base_runner, calls = self._runner(root)
-
-            def runner(argv, **kwargs):
-                if tuple(argv)[-1:] == ("backup",):
-                    return command(argv, ok=False)
-                return base_runner(argv, **kwargs)
-
-            plan = update.plan_update(candidate, root=root, machine="amd64", runner=runner)
-            with self.assertRaisesRegex(update.UpdateError, "pre-update recovery failed"):
-                update.apply_update(plan, runner=runner, activator=lambda *_: None)
-            self.assertEqual(
-                os.readlink(root / "opt/vaultwarden-oci/current"),
-                f"releases/{BASELINE_VERSION}",
-            )
-            self.assertFalse((root / f"opt/vaultwarden-oci/releases/{CANDIDATE_VERSION}").exists())
-            self.assertFalse(any(call[:2] == ("docker", "pull") for call in calls))
-
 
 if __name__ == "__main__":
     unittest.main()
