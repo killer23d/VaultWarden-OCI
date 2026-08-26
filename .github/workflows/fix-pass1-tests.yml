@@ -1,10 +1,12 @@
 name: Bounded first audit test fixes
 on:
-  workflow_dispatch:
+  push:
+    branches: [codex/final-operator-manual-normalization]
 permissions:
   contents: write
 jobs:
   fix:
+    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
