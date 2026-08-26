@@ -23,6 +23,8 @@ VaultWarden-OCI favors explicit ownership over frameworks. Python 3.12 standard-
 
 Production state requires dedicated storage. `--use-latest` resolves once to exact immutable values. SOPS/Age operational/offline identities stay separate. `.vwrec` and recovery-kit ZIP stay separate. Caddy trusted-proxy trust and host origin filtering stay separate. CrowdSec remediates through Cloudflare. `/admin` keeps only the small token + rate limit + outer gate stack. Application updates remain recovery-gated/operator-driven; Ubuntu package updates are separate and never auto-reboot.
 
+One source-only predecessor systemd bridge is referenced by `install.PREVIOUS_SYSTEMD_SOURCE_DIR`. It exists solely because the immediately preceding installed updater validates and copies its historical source-directory contract before candidate code can run. The bridge must remain byte-identical to canonical `systemd/`, is deliberately excluded from `install.RELEASE_DIRS`, and is not a second runtime or installed-release owner. CI proves that the predecessor updater can validate and stage the current candidate through this bridge. Remove it only when direct update from that predecessor is no longer a supported release transition.
+
 Do not introduce a Postfix/queue, dynamic plugin/provider registry, storage abstraction, generic updater framework/daemon, broad repair engine, compatibility reader for an earlier archive format, ORM/database/event bus, HA/Kubernetes/Swarm layer, or second dashboard backend without an explicit product decision.
 
 ## Provider-catalog maintenance
@@ -60,4 +62,4 @@ Real-host acceptance is described in [HOST-ACCEPTANCE.md](HOST-ACCEPTANCE.md) an
 5. Review the complete diff for stale stage naming, duplicate logic, boot-volume fallback, and reintroduced non-goals.
 6. Open a reviewable PR; do not self-merge unless the human explicitly instructs it.
 
-Normal product/repository surfaces are release-neutral. Genuine schema, recovery-format, OCI/Docker protocol, semantic component, and immutable project release version values remain technical compatibility identifiers and must not be cosmetically rewritten.
+Normal product/repository surfaces are release-neutral. Genuine schema, recovery-format, OCI/Docker protocol, semantic component, immutable project release values, and narrowly scoped predecessor transition markers remain technical compatibility identifiers and must not be cosmetically rewritten.
