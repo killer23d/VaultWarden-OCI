@@ -1,73 +1,83 @@
 # VaultWarden-OCI
 
-VaultWarden-OCI is a small, opinionated Vaultwarden appliance for roughly 10 users, designed to be operable by a junior administrator and mostly set-and-forget. It supports Ubuntu 24.04 LTS on `amd64` and `arm64`, is cloud-provider neutral at the host/runtime layer, and uses Cloudflare as the supported public-edge model.
+VaultWarden-OCI is a small, opinionated Vaultwarden appliance for a small team. It targets Ubuntu 24.04 LTS on `amd64` and `arm64`, requires a dedicated production data filesystem, and assumes Cloudflare-proxied public access.
 
-The earlier product remains a deliberate UI/UX, security, and behavior reference. Its backend architecture is not a compatibility target.
+## What the appliance contains
 
-## Product contract
-
-- Production persistent application state lives on a dedicated filesystem/volume, never only on the boot/root filesystem.
-- `setup.sh` is the normal first-run experience: validate host/storage, install dependencies and appliance content, prepopulate operator config, assist secrets/recovery custody, then leave an explicit config/secrets -> start path.
-- `setup.sh` supports interactive mode, `--auto`, and an independent explicit `--use-latest`. When requested, `--use-latest` resolves once to exact immutable versions/digests; floating `latest` state is never retained.
-- `dashboard.sh` is a supported day-2 human interface using the useful color-coded/AMTM-style interaction conventions of the earlier product.
-- `vwctl` remains the implementation and mutation authority. Human interfaces delegate mutations to it rather than creating a second state owner.
-- Python 3.12 standard-library-first owns structured config/state/validation/update/recovery logic; Bash stays thin bootstrap/UI/host glue where materially simpler.
-- One operator-editable non-secret config authority under `/etc/vaultwarden-oci`, one encrypted SOPS secret document, and one source-controlled exact version manifest.
-- SOPS + Age protects secrets. The operational Age private key is root-only; the separate offline recovery private identity is not persistently stored on the server.
-- Vaultwarden application email uses direct authenticated SMTP. Operational notifications use the existing closed source-controlled provider catalog.
-- One encrypted `.vwrec` application recovery format is supported. A password-protected AES-256 recovery-kit ZIP is a separate credential-handoff artifact.
-- Caddy is an exact-pinned xcaddy build with Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP support, combined Cloudflare ranges, and Caddy rate limiting.
-- Caddy's Cloudflare trusted-proxy module owns real-client-IP trust. A separate small fail-closed Docker `DOCKER-USER` path restricts published HTTPS origin traffic to validated Cloudflare source ranges.
-- CrowdSec remediates proxied web-client decisions through Cloudflare; no CrowdSec host firewall bouncer is required.
-- `/admin` retains defense in depth: Vaultwarden admin token, Caddy-side rate limiting, and one simple outer authentication gate.
-- Application updates are explicit and operator-driven: discover a stable release, stage/download/build before downtime, verify a pre-update recovery point, activate an immutable exact release, health-gate, and roll back coherently when safe. Unattended apply is not the default.
-- Ubuntu package updates are a separate workflow; application recovery does not claim to roll back apt/kernel changes, and the appliance never auto-reboots.
-
-See [docs/PROJECT-BOUNDARY.md](docs/PROJECT-BOUNDARY.md) and [docs/V2-DECISIONS.md](docs/V2-DECISIONS.md) for the durable contract.
-
-## Normal administrator path
-
-The supported production path is:
+| Component | Purpose |
+| --- | --- |
+| Vaultwarden | Password-manager application and persistent vault data. |
+| Custom Caddy | TLS, reverse proxying, Cloudflare real-client-IP trust, rate limiting, and the outer `/admin` authentication gate. |
+| Cloudflare | Supported public edge and the only allowed public source for origin TCP/443. |
+| CrowdSec | Detects abusive web clients from Caddy logs and remediates them through Cloudflare. |
+| SOPS + Age | Encrypts appliance credentials while keeping operational and offline recovery identities separate. |
+| rclone | Publishes and retrieves verified `.vwrec` recovery points without destructive sync semantics. |
+| systemd | Owns boot lifecycle and health, backup, maintenance, and update-check timers. |
+| Notifications | Sends operational events through one built-in HTTPS provider, with authenticated SMTP fallback only for eligible transient failures. Vaultwarden application mail uses direct authenticated SMTP. |
 
 ```text
-prepare Ubuntu 24.04 + dedicated storage
--> run setup.sh
--> review/complete config and secrets
--> verify recovery custody
--> start with vwctl
--> operate with dashboard.sh and/or vwctl
+Internet
+   |
+   v
+Cloudflare  <----- CrowdSec decisions/remediation
+   |
+   v
+host TCP/443 origin filter (Cloudflare sources only; fail closed)
+   |
+   v
+custom Caddy (real client IP, TLS, rate limits, /admin outer auth)
+   |
+   v
+internal Vaultwarden
 ```
 
-After setup has completed and configuration/secrets are ready, the authoritative start/verification sequence is:
+Caddy's trusted-proxy logic, the host origin filter, and CrowdSec remediation are separate controls. The dashboard is also separate from backend ownership: it is a supported human interface, but every mutation delegates to `vwctl` and the existing Python owners.
+
+## Start here
+
+Production installation requires a dedicated ext4/xfs filesystem separate from `/`. There is no boot-disk fallback.
+
+```bash
+sudo ./setup.sh install \
+  --domain example.com \
+  --url https://vault.example.com \
+  --email admin@example.com
+```
+
+Interactive setup can select a suitable non-boot data device and can generate the offline recovery identity in volatile storage long enough to hand it off in a verified encrypted recovery kit. Noninteractive setup must supply its storage and custody decisions explicitly. Read [Install](docs/INSTALL.md) before changing a production host.
+
+After setup and external credentials are complete:
 
 ```bash
 sudo vwctl config validate --file /etc/vaultwarden-oci/config.toml
+sudo vwctl secrets validate
 sudo vwctl start
 sudo vwctl status
 sudo vwctl doctor --json
 ```
 
-A doctor `FAIL` is not a successful install.
+A doctor `FAIL` is not a successful installation.
 
-## Current development-branch implementation status
+For normal day-2 work:
 
-The durable contract above intentionally supersedes several older implementation decisions. At this synchronization point, the current development branch still has known implementation gaps: it exposes `bootstrap-v2.sh` rather than the approved `setup.sh` first-run flow, lacks the approved `dashboard.sh`, keeps persistent state under `/var/lib/vaultwarden-oci` without enforcing a separate storage filesystem, gates `--use-latest` as development-only, and renders static Caddy trusted-proxy CIDRs while building only the Cloudflare DNS xcaddy module.
+```bash
+sudo /opt/vaultwarden-oci/current/vaultwarden_oci/dashboard.sh
+```
 
-Those are implementation gaps for later bounded workstreams, not reasons to narrow the product contract. `bootstrap-v2.sh` remains a low-level development/implementation bootstrap until the supported setup workflow is implemented; it is not a substitute for the final production installation contract.
+From a source checkout, `sudo ./dashboard.sh` is equivalent.
 
-## Documentation
+## Administrator manual
 
-- [INSTALL](docs/INSTALL.md) — supported host/storage requirements, first-run setup contract, config, SOPS/Age custody, and edge bootstrap.
-- [OPERATIONS](docs/OPERATIONS.md) — dashboard/CLI day-2 operation, status/doctor/logs, systemd, edge, notifications, and updates.
-- [SECURITY](docs/SECURITY.md) — trust boundaries, secrets, Caddy/origin separation, `/admin`, notification security, and unsupported surfaces.
-- [RECOVERY](docs/RECOVERY.md) — `.vwrec` application recovery, guided/CLI restore, rclone publication, and separate recovery-kit custody.
-- [DEVELOPMENT](docs/DEVELOPMENT.md) — implementation ownership, provider/Caddy maintenance, tests, and release workflow.
-- [HOST ACCEPTANCE](docs/HOST-ACCEPTANCE.md) — disposable Ubuntu 24.04 release-gate procedure for `amd64` and `arm64` when environments are available.
+- [Install](docs/INSTALL.md) — blank VM, dedicated storage, `--domain`/`--url`/`--email`, interactive and `--auto`, explicit `--use-latest`, config/secrets completion, and first start.
+- [Operations](docs/OPERATIONS.md) — dashboard, lifecycle, status/doctor/logs, config/secrets, Caddy/Cloudflare/CrowdSec, notifications, timers, application updates, host upgrades, reboot-required state, troubleshooting, and file locations.
+- [Recovery](docs/RECOVERY.md) — backup contents/exclusions, verification, same-host restore, lost-server disaster recovery, rclone, and the separate recovery-kit ZIP.
+- [Security](docs/SECURITY.md) — trust boundaries, secret custody, origin protection, `/admin`, notification security, and unsupported designs.
+- [Host acceptance](docs/HOST-ACCEPTANCE.md) — disposable Ubuntu 24.04 release gate for `amd64` and `arm64`; unavailable real-host coverage must be recorded as `NOT RUN`.
 
-## Durable ownership
+Maintainer/product authorities are [Project boundary](docs/PROJECT-BOUNDARY.md), [Durable decisions](docs/DECISIONS.md), [Development](docs/DEVELOPMENT.md), and [Test strategy](reports/TEST-STRATEGY.md). The prompt archives under `reports/` are historical execution/review records, not competing product authority.
 
-The intended installed release is immutable under `/opt/vaultwarden-oci/releases/<version>` with `/opt/vaultwarden-oci/current` selecting the active release and `/usr/local/bin/vwctl` pointing to the active CLI. Operator configuration and encrypted credentials live under `/etc/vaultwarden-oci`; generated/decrypted runtime material lives under `/run/vaultwarden-oci`; persistent application/recovery state lives on the required dedicated production storage filesystem.
+## Product boundaries worth remembering
 
-`vaultwarden_oci/` owns structured runtime behavior, `email-providers.toml` owns the closed operational-notification metadata, and `versions.toml` owns exact release pins. Supported Bash interfaces stay thin and delegate structured work to these owners.
+Production state is dedicated-storage-only. There is one operator config, one encrypted SOPS secret authority, and one exact version manifest. Normal application recovery is one encrypted `.vwrec` format; the credential recovery-kit ZIP is a separate artifact. Application updates are explicit and recovery-gated. Ubuntu package updates are separate and the appliance never auto-reboots.
 
-Normal final product/repository names must be release-neutral. Existing product-generation, branch-stage, beta, and phase names are temporary implementation debt to be removed by the dedicated naming-cleanup workstream; this contract synchronization does not mass-rename them.
+There is intentionally no Postfix/local queue, public backup-tier matrix, compatibility reader for an earlier archive format, generic plugin/storage/update framework, broad repair command, HA layer, Kubernetes/Swarm layer, or second dashboard backend.
