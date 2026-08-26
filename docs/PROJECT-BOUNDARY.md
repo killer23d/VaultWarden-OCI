@@ -98,8 +98,8 @@ The dashboard must delegate mutations to `vwctl` rather than becoming a second i
 
 ## Naming end state
 
-Normal final product/repository surfaces must be release-neutral. Product-generation, branch-stage, beta, or phase labels must not remain in normal runtime/docs/file names. Genuine technical schema/archive format version numbers remain valid. The dedicated naming-cleanup workstream owns mass renaming; do not opportunistically rename the tree as part of unrelated work.
+Normal product/repository surfaces are release-neutral. Product-generation, branch-stage, preview, or implementation-stage labels must not appear in normal runtime/docs/file names. Genuine technical schema/archive/release format version values remain valid. Future changes must preserve this release-neutral state.
 
 ## Decision details
 
-`docs/V2-DECISIONS.md` records the durable implementation decisions behind this boundary. Historical audit/prompt reports remain useful evidence but do not override this current product contract unless explicitly promoted by the human for a task.
+`docs/DECISIONS.md` records the durable implementation decisions behind this boundary. Historical audit/prompt reports remain useful evidence but do not override this current product contract unless explicitly promoted by the human for a task.
