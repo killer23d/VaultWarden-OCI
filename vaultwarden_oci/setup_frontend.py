@@ -12,15 +12,11 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
-from . import notification, recovery_ux, secrets, setup, sevenzip_secure, update_versions
+from . import notification, recovery_ux, secrets, setup, sevenzip_secure
 
 SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
 _ORIGINAL_SETUP_RUN = setup._run
 
-# setup.py already freezes one snapshot into the immutable installed release.
-# Route its operator-facing --use-latest path through the supported resolver;
-# the old development resolver remains available only to low-level tests/tools.
-setup.resolve_latest = update_versions.resolve_latest_supported
 
 
 class SetupFrontendError(RuntimeError):

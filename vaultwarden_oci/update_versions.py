@@ -16,7 +16,6 @@ from typing import Callable, Mapping
 
 from . import cli, install
 
-DEVELOPMENT_ENV = "VWOCI_DEVELOPMENT"
 RESOLVED_STATE = Path("/var/lib/vaultwarden-oci/state/resolved-versions.json")
 _IMAGE_NAMES = ("vaultwarden", "caddy_builder", "caddy_runtime")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -336,22 +335,6 @@ def resolve_pinned(source_root: Path, *, machine: str | None = None) -> FrozenVe
     )
 
 
-def _require_development() -> None:
-    if os.environ.get(DEVELOPMENT_ENV) != "1":
-        raise UpdateError(
-            f"--use-latest is development/testing-only; set {DEVELOPMENT_ENV}=1 explicitly"
-        )
-
-
-def require_development_target(root: Path) -> None:
-    """Legacy development boundary retained for the low-level installer CLI."""
-    _require_development()
-    if root.resolve() == Path("/"):
-        raise UpdateError(
-            "--use-latest may not target the production root /; use an isolated --root for development/testing"
-        )
-
-
 def _latest_snapshot(
     source_root: Path,
     *,
@@ -424,20 +407,7 @@ def resolve_latest(
     machine: str | None = None,
     lookup: RemoteLookup | None = None,
 ) -> FrozenVersions:
-    """Legacy development/test latest resolver retained for compatibility."""
-    _require_development()
-    return _latest_snapshot(
-        source_root, machine=machine, lookup=lookup, include_all_addons=False
-    )
-
-
-def resolve_latest_supported(
-    source_root: Path,
-    *,
-    machine: str | None = None,
-    lookup: RemoteLookup | None = None,
-) -> FrozenVersions:
-    """Resolve every supported upstream boundary once for operator --use-latest."""
+    """Resolve every supported upstream boundary once for explicit operator --use-latest."""
     return _latest_snapshot(
         source_root, machine=machine, lookup=lookup, include_all_addons=True
     )

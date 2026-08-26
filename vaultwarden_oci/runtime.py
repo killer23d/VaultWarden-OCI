@@ -433,7 +433,7 @@ services:
     image: {q(frozen.caddy_image)}
     container_name: {NAMES["caddy"]}
     user: "{CADDY_UID}:{CADDY_GID}"
-    # Phase 4 fail-closed rule: Docker must not republish Caddy after daemon/host
+    # pre-release implementation fail-closed rule: Docker must not republish Caddy after daemon/host
     # restart before the project-owned DOCKER-USER policy is re-established.
     restart: "no"
     command: ["/bin/sh", "-ec", {q(caddy_command)}]
@@ -891,11 +891,11 @@ def doctor_checks(
                 DoctorCheck(
                     "secrets.decrypt",
                     "FAIL",
-                    "required Phase 4 cloudflare_remediation_token is missing",
+                    "required pre-release implementation cloudflare_remediation_token is missing",
                 )
             )
         else:
-            checks.append(DoctorCheck("secrets.decrypt", "PASS", "required Phase 3/4 secrets decrypt"))
+            checks.append(DoctorCheck("secrets.decrypt", "PASS", "required pre-release implementation/4 secrets decrypt"))
     return checks
 
 

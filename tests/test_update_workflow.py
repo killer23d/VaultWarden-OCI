@@ -104,6 +104,13 @@ class VersionResolutionTests(unittest.TestCase):
                     "caddy_dns_cloudflare": "v0.3.0",
                 }[component]
 
+            def latest_ref(self, component: str) -> str:
+                return {
+                    "caddy_cloudflare_ip": "a" * 40,
+                    "caddy_combine_ip_ranges": "v0.0.2",
+                    "caddy_ratelimit": "v0.2.0",
+                }[component]
+
             def image_digest(self, repository: str, tag: str, architecture: str) -> str:
                 self.image_calls.append((repository, tag, architecture))
                 return digest(str(len(self.image_calls)))
@@ -112,8 +119,7 @@ class VersionResolutionTests(unittest.TestCase):
             root = Path(directory)
             (root / "versions.toml").write_text(versions_text(CANDIDATE_VERSION), encoding="utf-8")
             lookup = FakeLookup()
-            with mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False):
-                frozen = update_versions.resolve_latest(root, machine="x86_64", lookup=lookup)
+            frozen = update_versions.resolve_latest(root, machine="x86_64", lookup=lookup)
             snapshot = update.frozen_versions_toml(frozen)
         self.assertEqual(
             lookup.release_calls,
@@ -137,6 +143,13 @@ class VersionResolutionTests(unittest.TestCase):
                     "caddy_dns_cloudflare": "v0.3.0",
                 }[component]
 
+            def latest_ref(self, component: str) -> str:
+                return {
+                    "caddy_cloudflare_ip": "a" * 40,
+                    "caddy_combine_ip_ranges": "v0.0.2",
+                    "caddy_ratelimit": "v0.2.0",
+                }[component]
+
             def image_digest(self, repository: str, tag: str, architecture: str) -> str:
                 return digest({
                     "vaultwarden/server": "1",
@@ -147,28 +160,13 @@ class VersionResolutionTests(unittest.TestCase):
             root = Path(directory)
             first = versions_text(CANDIDATE_VERSION)
             (root / "versions.toml").write_text(first, encoding="utf-8")
-            with mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False):
-                one = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
+            one = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
             second = first.replace('caddy_ratelimit = "v0.1.0"', 'caddy_ratelimit = "v0.1.1"')
             (root / "versions.toml").write_text(second, encoding="utf-8")
-            with mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False):
-                two = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
+            two = update_versions.resolve_latest(root, machine="amd64", lookup=FakeLookup())
         self.assertNotEqual(one.project_version, two.project_version)
         self.assertEqual(one.caddy_ratelimit, "v0.1.0")
         self.assertEqual(two.caddy_ratelimit, "v0.1.1")
-
-    def test_use_latest_requires_explicit_development_gate(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "versions.toml").write_text(versions_text(CANDIDATE_VERSION), encoding="utf-8")
-            with mock.patch.dict(os.environ, {}, clear=True):
-                with self.assertRaisesRegex(update.UpdateError, "development/testing-only"):
-                    update_versions.resolve_latest(root, machine="amd64", lookup=mock.Mock())
-
-    def test_use_latest_cannot_target_production_root(self) -> None:
-        with mock.patch.dict(os.environ, {update_versions.DEVELOPMENT_ENV: "1"}, clear=False):
-            with self.assertRaisesRegex(update.UpdateError, "may not target the production root"):
-                update_versions.require_development_target(Path("/"))
 
     def test_small_remote_lookup_boundary_normalizes_official_image_namespace(self) -> None:
         calls: list[tuple[str, dict[str, str]]] = []

@@ -1,4 +1,4 @@
-"""Explicit Phase 7 immutable-release update transaction."""
+"""Explicit pre-release implementation immutable-release update transaction."""
 from __future__ import annotations
 
 import os
@@ -57,7 +57,7 @@ def _validate_source(source_root: Path) -> None:
             raise UpdateError(f"candidate release directory is missing: {source_root / name}")
     for name in ("update.py", "update_versions.py", "update_cli.py"):
         if not (source_root / "vaultwarden_oci" / name).is_file():
-            raise UpdateError(f"candidate release is missing Phase 7 owner: {name}")
+            raise UpdateError(f"candidate release is missing pre-release implementation owner: {name}")
 
 
 def _current(layout: install.Layout) -> tuple[Path, str, Path]:
@@ -164,7 +164,7 @@ def plan_update(
 
     Development/test --use-latest resolution is deliberately not supported here.
     Non-production roots are an injected unit-test boundary only; the public CLI
-    always updates the production root and therefore uses Phase 3-6 production
+    always updates the production root and therefore uses pre-release implementation production
     runtime/recovery ownership consistently. ``enforce_component_downgrades``
     may be disabled only by the appliance planner while it resolves the final
     ``--use-latest`` snapshot; that final snapshot is checked before return.
