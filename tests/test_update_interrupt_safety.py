@@ -365,7 +365,7 @@ class InterruptedUnitMigrationTests(unittest.TestCase):
         return paths  # type: ignore[return-value]
 
     def _interrupt_second_atomic_write(self):
-        real_write = update_unit_migration.update._atomic_write
+        real_write = update_unit_migration.durability.atomic_write
         calls = 0
 
         def write(path, content, mode):
@@ -392,8 +392,8 @@ class InterruptedUnitMigrationTests(unittest.TestCase):
             with (
                 mock.patch.object(install, "SYSTEMD_UNITS", self.UNITS),
                 mock.patch.object(
-                    update_unit_migration.update,
-                    "_atomic_write",
+                    update_unit_migration.durability,
+                    "atomic_write",
                     side_effect=self._interrupt_second_atomic_write(),
                 ),
             ):
@@ -417,8 +417,8 @@ class InterruptedUnitMigrationTests(unittest.TestCase):
             with (
                 mock.patch.object(install, "SYSTEMD_UNITS", self.UNITS),
                 mock.patch.object(
-                    update_unit_migration.update,
-                    "_atomic_write",
+                    update_unit_migration.durability,
+                    "atomic_write",
                     side_effect=self._interrupt_second_atomic_write(),
                 ),
             ):
