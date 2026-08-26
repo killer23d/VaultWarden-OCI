@@ -29,7 +29,7 @@ jobs:
           ./vwctl recovery --help >/dev/null
           ./vwctl recovery-kit --help >/dev/null
           bash ./dashboard.sh --help >/dev/null
-      - name: Release-neutral path, content, and complexity audit
+      - name: Release-neutral path, content, complexity, and documentation audit
         run: |
           python3 - <<'PY'
           import re
@@ -49,9 +49,12 @@ jobs:
               if re.search(r'(^|[/_.-])(v1|v2|beta)([/_.-]|$)', low) or re.search(r'phase[0-9]+', low):
                   forbidden_paths.append(path.as_posix())
 
+          # Match generation/stage tokens, including lowercase and identifier forms,
+          # but do not reject genuine technical version tags such as v1.40.0/v2.12.0.
           patterns = [
-              re.compile(r'\bV1\b'), re.compile(r'\bV2\b'), re.compile(r'\bbeta\b', re.I),
-              re.compile(r'\bPhase\s*[0-9]+\b'), re.compile(r'RuntimeErrorV2'),
+              re.compile(r'(?i)(?:^|[^A-Za-z0-9])v[12](?:$|[^A-Za-z0-9.])'),
+              re.compile(r'(?i)(?:^|[^A-Za-z0-9])phase\s*[0-9]+(?:$|[^A-Za-z0-9])'),
+              re.compile(r'\bbeta\b', re.I), re.compile(r'RuntimeErrorV2'),
               re.compile(r'systemd-v2'), re.compile(r'tests/v2'), re.compile(r'bootstrap-v2\.sh'),
               re.compile(r'VaultWarden-OCI/2'), re.compile(r'vaultwarden-oci-v2'),
               re.compile(r'VWOCI_DEVELOPMENT'), re.compile(r'resolve_latest_supported'),
@@ -82,13 +85,34 @@ jobs:
                   if any(pattern.search(line) for pattern in non_goals):
                       complexity.append(f'{path}:{number}:{line.strip()}')
 
-          if forbidden_paths or violations or complexity:
+          # Validate local Markdown links in the current manual/authority set.
+          markdown = [Path('README.md'), *Path('docs').glob('*.md'), Path('reports/TEST-STRATEGY.md')]
+          link_re = re.compile(r'\[[^\]]+\]\(([^)]+)\)')
+          broken_links = []
+          for path in markdown:
+              text = path.read_text(encoding='utf-8')
+              for raw_target in link_re.findall(text):
+                  target = raw_target.strip().split('#', 1)[0]
+                  if not target or target.startswith(('http://', 'https://', 'mailto:')):
+                      continue
+                  resolved = (path.parent / target).resolve()
+                  try:
+                      resolved.relative_to(root.resolve())
+                  except ValueError:
+                      broken_links.append(f'{path}: link escapes repository: {target}')
+                      continue
+                  if not resolved.exists():
+                      broken_links.append(f'{path}: missing local link: {target}')
+
+          if forbidden_paths or violations or complexity or broken_links:
               print('stage-labelled paths:')
               print('\n'.join(forbidden_paths))
               print('stage-labelled content:')
               print('\n'.join(violations))
               print('unexpected non-goal runtime references:')
               print('\n'.join(complexity))
+              print('broken local documentation links:')
+              print('\n'.join(broken_links))
               raise SystemExit(1)
           PY
 
