@@ -513,7 +513,7 @@ def _validate_passphrase(first: str, second: str) -> str:
 
 
 # Subprocess-shaped seam retained for focused tests; the implementation itself
-# is the proven V1-compatible secure transport.
+# is the proven secure password transport.
 _seven = sevenzip_secure.run
 
 

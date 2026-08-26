@@ -356,7 +356,7 @@ def draw_main_menu() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args in (["--help"], ["-h"]):
-        print("VaultWarden-OCI Operations Dashboard\n\nUsage: dashboard.sh\n\nThin V1-inspired day-2 interface; mutations are delegated to vwctl.")
+        print("VaultWarden-OCI Operations Dashboard\n\nUsage: dashboard.sh\n\nThin day-2 interface; mutations are delegated to vwctl.")
         return 0
     if args:
         print("dashboard.sh: no positional arguments are supported", file=sys.stderr)
