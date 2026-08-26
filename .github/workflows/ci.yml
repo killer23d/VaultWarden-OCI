@@ -49,10 +49,14 @@ jobs:
               if re.search(r'(^|[/_.-])(v1|v2|beta)([/_.-]|$)', low) or re.search(r'phase[0-9]+', low):
                   forbidden_paths.append(path.as_posix())
 
-          # Match generation/stage tokens, including lowercase and identifier forms,
-          # but do not reject genuine technical version tags such as v1.40.0/v2.12.0.
-          patterns = [
-              re.compile(r'(?i)(?:^|[^A-Za-z0-9])v[12](?:$|[^A-Za-z0-9.])'),
+          # Detect product-generation/stage labels while preserving genuine
+          # protocol/API compatibility versions such as Age v1, provider /v1/,
+          # Docker Registry /v2/, OCI MIME v1/v2, and semantic tags v1.40.0.
+          generation_pattern = re.compile(r'(?i)(?:^|[^A-Za-z0-9])v[12](?:$|[^A-Za-z0-9.])')
+          technical_version_pattern = re.compile(
+              r'(?i)(?:/v[12](?:/|\b)|age-encryption\.org/v1|application/vnd\.[^\s"\']*\.v[12]\+|\bAge v1 header\b)'
+          )
+          other_patterns = [
               re.compile(r'(?i)(?:^|[^A-Za-z0-9])phase\s*[0-9]+(?:$|[^A-Za-z0-9])'),
               re.compile(r'\bbeta\b', re.I), re.compile(r'RuntimeErrorV2'),
               re.compile(r'systemd-v2'), re.compile(r'tests/v2'), re.compile(r'bootstrap-v2\.sh'),
@@ -68,7 +72,11 @@ jobs:
               except UnicodeDecodeError:
                   continue
               for number, line in enumerate(text.splitlines(), 1):
-                  if any(pattern.search(line) for pattern in patterns):
+                  generation_hit = generation_pattern.search(line)
+                  if generation_hit and not technical_version_pattern.search(line):
+                      violations.append(f'{path}:{number}:{line.strip()}')
+                      continue
+                  if any(pattern.search(line) for pattern in other_patterns):
                       violations.append(f'{path}:{number}:{line.strip()}')
 
           source_paths = list(Path('vaultwarden_oci').glob('*.py')) + list(Path('systemd').glob('*')) + [Path('setup.sh'), Path('dashboard.sh'), Path('vwctl')]
@@ -85,7 +93,6 @@ jobs:
                   if any(pattern.search(line) for pattern in non_goals):
                       complexity.append(f'{path}:{number}:{line.strip()}')
 
-          # Validate local Markdown links in the current manual/authority set.
           markdown = [Path('README.md'), *Path('docs').glob('*.md'), Path('reports/TEST-STRATEGY.md')]
           link_re = re.compile(r'\[[^\]]+\]\(([^)]+)\)')
           broken_links = []
