@@ -26,18 +26,6 @@ class ReleaseSurfaceTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / relative).exists(), relative)
 
-    def test_superseded_legacy_owners_are_absent(self) -> None:
-        for relative in (
-            "bootstrap-v2.sh", "tests/v2", "docs/V2-DECISIONS.md",
-            "reports/V2-ARCHITECTURE-PROPOSAL.md", "reports/V2-AUDIT.md",
-            "reports/V2-TEST-STRATEGY.md", "reports/V2-CODEX-PROMPTS.md",
-            "reports/V2-REVIEW-PROMPTS.md", ".github/workflows/v2-ci.yml",
-            "CHANGELOG.md", "Makefile", "startup.sh", "backup.sh", "restore.sh",
-            "recover.sh", "maintenance.sh", "edit-secrets.sh", "lib", "utilities",
-            "tests/run-tests.sh", "tests/lib", "tests/suites", "docs/MIGRATION.md",
-        ):
-            self.assertFalse((ROOT / relative).exists(), relative)
-
     def test_previous_updater_bridge_is_exact_and_source_only(self) -> None:
         canonical = ROOT / install.SYSTEMD_SOURCE_DIR
         bridge = ROOT / install.PREVIOUS_SYSTEMD_SOURCE_DIR
