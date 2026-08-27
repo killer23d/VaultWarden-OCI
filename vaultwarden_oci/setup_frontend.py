@@ -128,20 +128,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     workspace: Path | None = None
     identity: Path | None = None
     try:
-        print("\n== Offline recovery custody ==")
-        print("INFO Ensuring Age recovery tooling is available before generating custody material.")
-        setup.ensure_recovery_custody_tooling()
-        print("INFO Generating the separate offline Age identity in root-only volatile /run storage.")
-        print("INFO Its public recipient will be configured on the server; the private identity will only enter the encrypted recovery kit.")
-        workspace, identity, recipient = _generate_offline_identity()
-        code = setup.main([*args, "--offline-recipient", recipient])
+        def provide_offline_recipient() -> str:
+            nonlocal workspace, identity
+            print("INFO Generating the separate offline Age identity in root-only volatile /run storage.")
+            print("INFO Its public recipient will be configured on the server; the private identity will only enter the encrypted recovery kit.")
+            workspace, identity, recipient = _generate_offline_identity()
+            return recipient
+
+        code = setup.main(args, offline_recipient_factory=provide_offline_recipient)
         if code != 0:
-            print(
-                f"ACTION Setup did not complete. The generated offline identity remains temporarily at {identity}; "
-                "secure it before reboot if config/secrets were already written.",
-                file=sys.stderr,
-            )
+            if identity is not None and identity.exists():
+                print(
+                    f"ACTION Setup did not complete. The generated offline identity remains temporarily at {identity}; "
+                    "secure it before reboot if config/secrets were already written.",
+                    file=sys.stderr,
+                )
             return code
+        if workspace is None or identity is None:
+            raise SetupFrontendError("setup completed without producing the requested offline recovery identity")
 
         print("\n== Initial credential recovery-kit handoff ==")
         result = recovery_ux.export_recovery_kit(identity)
@@ -155,7 +159,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except (
         SetupFrontendError,
-        setup.SetupError,
         notification.NotificationError,
         recovery_ux.RecoveryUXError,
         secrets.SecretsError,
