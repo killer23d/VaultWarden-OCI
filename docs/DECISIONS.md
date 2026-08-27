@@ -57,7 +57,13 @@ It must:
 5. assist creation/custody of secrets and recovery material;
 6. leave an explicit config/secrets -> start path with truthful success/failure guidance.
 
-`setup.sh` supports interactive operation, `--auto`, and an independent explicit `--use-latest` override. `--auto` does not imply `--use-latest`.
+`setup.sh` supports interactive operation, `--auto`, and an independent explicit `--use-latest` override. `--auto` does not imply `--use-latest` and means automatic installation steps, not necessarily a fully headless recovery-custody workflow.
+
+When setup is attached to an interactive terminal and no `--offline-recipient` was supplied, both normal interactive setup and terminal-driven `--auto` may generate the separate offline Age identity only in root-owned volatile storage, pass only its public recipient into the installation owner, and require the existing verified recovery-kit handoff before deleting the private identity. The recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries even when the install steps use `--auto`.
+
+A fully headless `--auto` run has no safe private-key handoff channel, so it must require an existing public `--offline-recipient` and fail before storage provisioning or other installation mutation when that custody input is missing. An explicitly supplied recipient is authoritative and must never be silently replaced by a generated recipient.
+
+Frontend decisions about recipient presence, `--auto`, and `--use-latest` must use the authoritative setup CLI grammar/parser. Do not infer value-option presence from exact raw argv tokens in a way that can disagree with supported split, equals, or parser-accepted long-option forms.
 
 `--use-latest` is a supported explicit operator choice, not a development-only feature. It resolves each remote version/image boundary once, freezes exact immutable values/digests, and records/uses only those values. It must never leave floating `latest` state behind.
 
@@ -75,7 +81,9 @@ The dashboard may display health/state and guide operations, but mutations must 
 
 **Decision:** SOPS + Age remains the secret mechanism with one structured encrypted document and separate operational/offline identities.
 
-The operational Age private key is root-only on the server. The separate offline recovery private identity is not persistently stored on the server. Plaintext secrets do not belong in operator TOML, release metadata, argv, ordinary logs, or persistent temporary files.
+The operational Age private key is root-only on the server. The separate offline recovery private identity is never persistent server state. It normally remains off-host; the supported first-run terminal custody flow may hold a newly generated offline identity only in root-owned volatile storage until the verified recovery-kit handoff completes. After successful handoff, that transient host-side private identity must be removed. If handoff fails or is not acknowledged, setup must report the retained volatile identity truthfully so the operator can secure that exact identity before reboot.
+
+Plaintext secrets do not belong in operator TOML, release metadata, argv, ordinary logs, or persistent temporary files.
 
 SOPS/Age provide cryptography. Do not add project cryptography, a KMS abstraction, a secrets-provider framework, or a second secrets authority.
 
@@ -90,7 +98,9 @@ Recovery-kit rules:
 - passphrase independent of stored project credentials;
 - passphrase never supplied via argv, environment variable, file, or email;
 - encrypted ZIP fully verified before email is attempted;
-- email failure must not be represented as successful handoff.
+- email failure must not be represented as successful handoff;
+- first-run generated custody includes the matching offline recovery private identity plus the operational identity and current generated/SOPS-managed credential values;
+- a setup-generated offline identity is removed from host-side volatile storage only after successful handoff.
 
 Application recovery remains one encrypted `.vwrec` format. There is no public `db`/`full`/`emergency` tier model and no compatibility reader for the earlier archive format.
 
@@ -232,11 +242,13 @@ Application recovery does not claim to roll back apt/kernel changes. The project
 2. small integration tests;
 3. disposable real-host Ubuntu 24.04 release acceptance on `amd64` and `arm64` where environments are available.
 
-Tests protect security, availability, recoverability, and operator truthfulness. Do not add permanent private source-string/order assertions, prose freezing, duplicated state machines, a custom test-runner product, or a coverage-percentage gate.
+Tests protect security, availability, recoverability, and operator truthfulness. Setup/custody coverage must protect the explicit-recipient boundary, supported CLI value forms, headless fail-closed-before-mutation behavior, and transient-key cleanup after handoff. Do not add permanent private source-string/order assertions, prose freezing, duplicated state machines, a custom test-runner product, or a coverage-percentage gate.
 
 ## 17. Documentation contract
 
 **Decision:** Administrator documentation is a user manual first. It should provide exact steps, expected success, and recovery/troubleshooting guidance, while distinguishing current implementation limitations from approved product behavior.
+
+The documentation must distinguish terminal-driven `--auto` from fully headless automation: the former may still require human recovery-kit custody when setup generates the offline identity; the latter must provide a pre-existing public recipient. Do not use “noninteractive” as shorthand for both custody modes when that would obscure this security boundary.
 
 Keep the durable documentation set small. Update current authorities instead of creating a new ADR/report for every correction.
 
