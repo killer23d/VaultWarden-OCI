@@ -48,6 +48,8 @@ def _systemd_source(release: Path, *, allow_supported_predecessor: bool = False)
     canonical = release / install.SYSTEMD_SOURCE_DIR
     if canonical.is_dir() and not canonical.is_symlink():
         return canonical
+    if canonical.exists() or canonical.is_symlink():
+        raise UpdateError(f"immutable release systemd source is unsafe: {canonical}")
     if not allow_supported_predecessor or release.name != SUPPORTED_PREDECESSOR_RELEASE:
         raise UpdateError(f"immutable release systemd source is missing or unsafe: {canonical}")
 
