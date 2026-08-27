@@ -36,6 +36,44 @@ class UpdateTransitionTests(unittest.TestCase):
             for unit in install.SYSTEMD_UNITS:
                 self.assertEqual((installed_units / unit).read_bytes(), f"new {unit}\n".encode())
 
+    def test_supported_predecessor_historical_layout_is_read_for_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout = install.Layout(root / "host")
+            previous = root / update_unit_migration.SUPPORTED_PREDECESSOR_RELEASE
+            candidate = root / "0.1.0-dev.16"
+            historical_name = "systemd-" + "v" + "2"
+            previous_units = previous / historical_name
+            candidate_units = candidate / install.SYSTEMD_SOURCE_DIR
+            previous_units.mkdir(parents=True)
+            candidate_units.mkdir(parents=True)
+            installed_units = layout.path(install.SYSTEMD_DIR)
+            installed_units.mkdir(parents=True)
+
+            for unit in install.SYSTEMD_UNITS:
+                (previous_units / unit).write_text(f"previous {unit}\n", encoding="utf-8")
+                (candidate_units / unit).write_text(f"candidate {unit}\n", encoding="utf-8")
+                (installed_units / unit).write_bytes((candidate_units / unit).read_bytes())
+
+            update_unit_migration.converge_units(previous, (candidate, previous), layout)
+            for unit in install.SYSTEMD_UNITS:
+                self.assertEqual((installed_units / unit).read_bytes(), (previous_units / unit).read_bytes())
+
+    def test_historical_layout_reader_is_limited_to_supported_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unsupported = root / "0.1.0-dev.14"
+            historical_name = "systemd-" + "v" + "2"
+            historical = unsupported / historical_name
+            historical.mkdir(parents=True)
+            for unit in install.SYSTEMD_UNITS:
+                (historical / unit).write_text(unit + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(UpdateError, "systemd source is missing or unsafe"):
+                update_unit_migration._systemd_source(
+                    unsupported,
+                    allow_supported_predecessor=True,
+                )
+
     def test_release_content_requires_canonical_systemd_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

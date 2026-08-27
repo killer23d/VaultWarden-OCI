@@ -21,11 +21,16 @@ jobs:
         run: python3 -m compileall -q vaultwarden_oci tests
       - name: Parse shell glue
         run: bash -n setup.sh dashboard.sh vaultwarden_oci/dashboard.sh tests/acceptance_edge_packet.sh
-      - name: Supported predecessor updater compatibility
+      - name: Supported predecessor update and coherent rollback compatibility
         run: |
+          host_root="$(mktemp -d /tmp/vwoci-update-host.XXXXXX)"
+          state_file="$(mktemp /tmp/vwoci-update-state.XXXXXX)"
+          trap 'git worktree remove --force /tmp/vwoci-two-back >/dev/null 2>&1 || true; git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; rm -rf "$host_root" "$state_file"' EXIT
+          git worktree add --detach /tmp/vwoci-two-back 62c509cc1d711ddc6be815abca4e397e99638c74
           git worktree add --detach /tmp/vwoci-previous 63d3d2c9ec7b554cb049c47dc981eb32ba64354d
-          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py "$PWD"
-          git worktree remove --force /tmp/vwoci-previous
+          PYTHONPATH=/tmp/vwoci-two-back python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$host_root"
+          PYTHONPATH=/tmp/vwoci-previous python3 tests/acceptance_previous_update.py fail-forward-update "$PWD" "$host_root" "$state_file"
+          PYTHONPATH="$PWD" python3 tests/acceptance_previous_update.py rollback-with-candidate "$host_root" "$state_file"
       - name: Unit and bounded integration suite
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: CLI help is authoritative
@@ -48,12 +53,14 @@ jobs:
               r'(^|[/_.-])(?:' + '|'.join(generation_tokens) + r')([/_.-]|$)',
               re.I,
           )
+          stage_path_pattern = re.compile(r'(^|[/_.-])phase[0-9]+([/_.-]|$)', re.I)
           forbidden_paths = []
           for path in root.rglob('*'):
               if '.git' in path.parts:
                   continue
-              if path_pattern.search(path.as_posix()):
-                  forbidden_paths.append(path.as_posix())
+              value = path.as_posix()
+              if path_pattern.search(value) or stage_path_pattern.search(value):
+                  forbidden_paths.append(value)
 
           # Product-generation labels are forbidden. Genuine protocol/API/schema
           # versions remain valid compatibility identifiers.

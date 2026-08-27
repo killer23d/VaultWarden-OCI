@@ -9,6 +9,7 @@ from . import durability, install
 from .update_versions import UpdateError
 
 ABSENT_MODE = -1
+SUPPORTED_PREDECESSOR_RELEASE = "0.1.0-dev.15"
 
 
 def _release_barrier(release: Path) -> None:
@@ -17,8 +18,56 @@ def _release_barrier(release: Path) -> None:
     durability.fsync_directory(release.parent)
 
 
-def _systemd_source(release: Path) -> Path:
-    return release / install.SYSTEMD_SOURCE_DIR
+def _exact_unit_source(path: Path) -> bool:
+    """Return whether path is exactly one source directory for the owned unit set."""
+    if path.is_symlink() or not path.is_dir():
+        return False
+    try:
+        entries = list(path.iterdir())
+    except OSError as exc:
+        raise UpdateError(f"cannot inspect immutable systemd source candidate {path}: {exc}") from exc
+    if len(entries) != len(install.SYSTEMD_UNITS):
+        return False
+    expected = set(install.SYSTEMD_UNITS)
+    for entry in entries:
+        if entry.name not in expected or entry.is_symlink() or not entry.is_file():
+            return False
+    return True
+
+
+def _systemd_source(release: Path, *, allow_supported_predecessor: bool = False) -> Path:
+    """Resolve the systemd source for one immutable release.
+
+    New/current release trees must use canonical ``systemd/``.  The one
+    supported predecessor may have been materialized by its predecessor's
+    installer with that older installer's source-directory contract.  When
+    rolling back to that exact release, discover the historical directory by
+    its exact owned-unit file set rather than retaining a generation-named
+    source alias in the current repository.
+    """
+    canonical = release / install.SYSTEMD_SOURCE_DIR
+    if canonical.is_dir() and not canonical.is_symlink():
+        return canonical
+    if not allow_supported_predecessor or release.name != SUPPORTED_PREDECESSOR_RELEASE:
+        raise UpdateError(f"immutable release systemd source is missing or unsafe: {canonical}")
+
+    try:
+        candidates = [
+            path
+            for path in release.iterdir()
+            if path != canonical and _exact_unit_source(path)
+        ]
+    except OSError as exc:
+        raise UpdateError(f"cannot inspect supported predecessor release {release}: {exc}") from exc
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise UpdateError(
+            "supported predecessor release has no safely identifiable systemd source directory"
+        )
+    raise UpdateError(
+        "supported predecessor release has multiple possible systemd source directories; refusing ambiguous rollback"
+    )
 
 
 def install_units(new_release: Path, expected_release: Path, layout: install.Layout) -> dict[Path, tuple[bytes, int]]:
@@ -31,7 +80,7 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
     snapshot: dict[Path, tuple[bytes, int]] = {}
     actions: list[tuple[Path, bytes | None]] = []
     new_source = _systemd_source(new_release)
-    expected_source = _systemd_source(expected_release)
+    expected_source = _systemd_source(expected_release, allow_supported_predecessor=True)
     for unit in install.SYSTEMD_UNITS:
         new = new_source / unit
         expected = expected_source / unit
@@ -76,7 +125,7 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
 
 
 def _state_for_release(release: Path, unit: str) -> bytes | None:
-    path = _systemd_source(release) / unit
+    path = _systemd_source(release, allow_supported_predecessor=True) / unit
     return path.read_bytes() if path.is_file() else None
 
 

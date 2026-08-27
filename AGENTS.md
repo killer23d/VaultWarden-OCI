@@ -39,7 +39,7 @@ For each task, use this order of authority:
 - Restore retains explicit noninteractive CLI forms and also has a guided local/remote picker for humans.
 - Recovery-kit ZIP: AES-256, passphrase entered/confirmed interactively, independent of stored credentials, never argv/env/file/email, fully verified before email is attempted.
 - Application updates are operator-driven: discover a stable project release, stage/download/build before downtime, verify a pre-update recovery point, activate an immutable release, health-gate it, and roll back coherently when safe. Automatic checking/notification is supported; unattended apply is not the default.
-- Direct source-layout update compatibility is guaranteed from the immediately preceding immutable project release. Older installs update incrementally through supported releases rather than keeping generation-named repository aliases forever.
+- Direct source-layout update compatibility is guaranteed only from the explicitly tested supported predecessor release. The public updater does not offer arbitrary intermediate-release selection; do not promise undocumented incremental hops. Older unsupported development snapshots require a fresh supported install/recovery path unless a specific transition is deliberately implemented.
 - Ubuntu package updates are separate from application updates. Application recovery does not claim to roll back apt/kernel changes. Never auto-reboot.
 - Normal product surfaces are release-neutral. Do not introduce product-generation, branch-stage, preview, or implementation-stage names into runtime/docs/file names. Genuine technical schema/archive/release version values remain valid compatibility identifiers.
 
