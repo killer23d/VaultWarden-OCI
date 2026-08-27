@@ -20,7 +20,6 @@ SENSITIVE_RUN = recovery_ux.SENSITIVE_RUN
 _ORIGINAL_SETUP_RUN = setup._run
 
 
-
 class SetupFrontendError(RuntimeError):
     pass
 
@@ -130,6 +129,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     identity: Path | None = None
     try:
         print("\n== Offline recovery custody ==")
+        print("INFO Ensuring Age recovery tooling is available before generating custody material.")
+        setup.ensure_recovery_custody_tooling()
         print("INFO Generating the separate offline Age identity in root-only volatile /run storage.")
         print("INFO Its public recipient will be configured on the server; the private identity will only enter the encrypted recovery kit.")
         workspace, identity, recipient = _generate_offline_identity()
@@ -154,6 +155,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except (
         SetupFrontendError,
+        setup.SetupError,
         notification.NotificationError,
         recovery_ux.RecoveryUXError,
         secrets.SecretsError,
