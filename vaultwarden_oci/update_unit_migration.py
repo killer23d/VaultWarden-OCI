@@ -17,15 +17,8 @@ def _release_barrier(release: Path) -> None:
     durability.fsync_directory(release.parent)
 
 
-def _systemd_source(release: Path, *, allow_previous_layout: bool) -> Path:
-    canonical = release / install.SYSTEMD_SOURCE_DIR
-    if canonical.is_dir() and not canonical.is_symlink():
-        return canonical
-    if allow_previous_layout:
-        previous = release / install.PREVIOUS_SYSTEMD_SOURCE_DIR
-        if previous.is_dir() and not previous.is_symlink():
-            return previous
-    return canonical
+def _systemd_source(release: Path) -> Path:
+    return release / install.SYSTEMD_SOURCE_DIR
 
 
 def install_units(new_release: Path, expected_release: Path, layout: install.Layout) -> dict[Path, tuple[bytes, int]]:
@@ -37,8 +30,8 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
     """
     snapshot: dict[Path, tuple[bytes, int]] = {}
     actions: list[tuple[Path, bytes | None]] = []
-    new_source = _systemd_source(new_release, allow_previous_layout=False)
-    expected_source = _systemd_source(expected_release, allow_previous_layout=True)
+    new_source = _systemd_source(new_release)
+    expected_source = _systemd_source(expected_release)
     for unit in install.SYSTEMD_UNITS:
         new = new_source / unit
         expected = expected_source / unit
@@ -83,7 +76,7 @@ def install_units(new_release: Path, expected_release: Path, layout: install.Lay
 
 
 def _state_for_release(release: Path, unit: str) -> bytes | None:
-    path = _systemd_source(release, allow_previous_layout=True) / unit
+    path = _systemd_source(release) / unit
     return path.read_bytes() if path.is_file() else None
 
 

@@ -22,20 +22,18 @@ class ReleaseSurfaceTests(unittest.TestCase):
             "setup.sh", "dashboard.sh", "vwctl", "email-providers.toml", "versions.toml",
             "vaultwarden_oci", "systemd", "tests", "docs/DECISIONS.md",
             "docs/PROJECT-BOUNDARY.md", "reports/TEST-STRATEGY.md",
-            "reports/CODEX-PROMPTS.md", "reports/REVIEW-PROMPTS.md",
         ):
             self.assertTrue((ROOT / relative).exists(), relative)
 
-    def test_previous_updater_bridge_is_exact_and_source_only(self) -> None:
+    def test_release_tree_has_one_systemd_source_owner(self) -> None:
         canonical = ROOT / install.SYSTEMD_SOURCE_DIR
-        bridge = ROOT / install.PREVIOUS_SYSTEMD_SOURCE_DIR
-        self.assertNotIn(install.PREVIOUS_SYSTEMD_SOURCE_DIR, install.RELEASE_DIRS)
-        self.assertEqual(
-            sorted(path.name for path in canonical.iterdir() if path.is_file()),
-            sorted(path.name for path in bridge.iterdir() if path.is_file()),
-        )
+        self.assertEqual(install.SYSTEMD_SOURCE_DIR, "systemd")
+        self.assertIn(install.SYSTEMD_SOURCE_DIR, install.RELEASE_DIRS)
+        self.assertTrue(canonical.is_dir())
         for unit in install.SYSTEMD_UNITS:
-            self.assertEqual((canonical / unit).read_bytes(), (bridge / unit).read_bytes())
+            self.assertTrue((canonical / unit).is_file(), unit)
+        historical_name = "systemd-" + "v" + "2"
+        self.assertFalse((ROOT / historical_name).exists())
 
     def test_semantic_stage_placeholder_is_absent_from_runtime_sources(self) -> None:
         forbidden = ("pre-release" + " implementation", "implementation" + " stage")

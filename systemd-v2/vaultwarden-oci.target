@@ -1,8 +1,0 @@
-[Unit]
-Description=VaultWarden-OCI lifecycle and automation target
-Documentation=https://github.com/killer23d/VaultWarden-OCI
-Wants=vaultwarden-oci.service vaultwarden-oci-health.timer vaultwarden-oci-backup.timer vaultwarden-oci-maintenance.timer vaultwarden-oci-update-check.timer
-After=network-online.target docker.service
-
-[Install]
-WantedBy=multi-user.target
