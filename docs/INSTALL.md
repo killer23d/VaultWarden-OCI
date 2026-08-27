@@ -13,6 +13,8 @@ lsblk -p -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,UUID,MODEL
 
 For fully headless noninteractive setup, create an offline Age identity on a trusted separate workstation and keep its private key off the appliance. Pass only its `age1...` public recipient to setup. When `--auto` is run from an interactive terminal and no `--offline-recipient` is supplied, setup instead generates the offline identity transiently and hands it off through the verified encrypted recovery kit after installation. If `--offline-recipient` is supplied, that explicit recipient is authoritative and setup does not generate a replacement.
 
+On a clean Ubuntu host, terminal-generated custody does not assume `age-keygen` is already installed. Before generating the transient offline identity, setup bootstraps and verifies the Ubuntu `age` package through the setup dependency owner. This prerequisite happens before the offline private identity is created and before dedicated-storage provisioning; if the Age bootstrap fails, setup stops without generating custody material or formatting/adopting the data device.
+
 **Expected success:** a clearly separate candidate volume is visible. **On failure:** attach or correct dedicated storage before continuing; do not create application state on `/`.
 
 ## What `--domain`, `--url`, and `--email` mean
