@@ -14,7 +14,7 @@ import tempfile
 import tomllib
 import urllib.parse
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from . import cli, install, secrets as secret_owner, storage
 from .update_versions import RESOLVED_STATE, UpdateError, frozen_versions_toml, record_frozen, resolve_latest, resolve_pinned
@@ -73,7 +73,7 @@ def _must(
 
 
 def ensure_recovery_custody_tooling() -> None:
-    """Ensure age-keygen exists before the frontend creates transient custody material."""
+    """Ensure age-keygen exists before setup creates transient custody material."""
     age_keygen = shutil.which("age-keygen")
     if age_keygen is None:
         if os.geteuid() != 0:
@@ -291,7 +291,11 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    offline_recipient_factory: Callable[[], str] | None = None,
+) -> int:
     args = _parser().parse_args(argv); ui = UI(color=sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
     try:
         if os.geteuid() != 0: raise SetupError("setup must run as root; use sudo ./setup.sh install ...")
@@ -299,6 +303,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ui.header("Host and dedicated storage preflight"); ui.ok(f"Ubuntu 24.04 {host.architecture}; canonical URL {normalized_url}")
         selected = _select_storage(args, ui); ui.info(f"selected dedicated storage: {selected} -> {storage.STATE_ROOT}")
         offline = args.offline_recipient
+        if not offline and offline_recipient_factory is not None and not args.dry_run:
+            ui.header("Offline recovery custody")
+            ui.info("ensuring Age recovery tooling is available before generating custody material")
+            ensure_recovery_custody_tooling()
+            offline = offline_recipient_factory()
         if not offline and not args.auto and sys.stdin.isatty(): offline = input("Offline recovery Age recipient (public age1... value; keep its private key off-host): ").strip()
         if not offline: raise SetupError("an offline recovery public recipient is required; --auto cannot invent custody for an off-host private key")
         if not _RECIPIENT.fullmatch(offline): raise SetupError("offline recovery recipient is not a valid Age X25519 recipient")
