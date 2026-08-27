@@ -59,7 +59,6 @@ def _should_generate(args: Sequence[str]) -> bool:
         bool(args)
         and args[0] == "install"
         and "--offline-recipient" not in args
-        and "--auto" not in args
         and "--dry-run" not in args
         and sys.stdin.isatty()
     )
