@@ -44,7 +44,7 @@ sudo ./setup.sh install \
   --email admin@example.com
 ```
 
-Interactive setup can select a suitable non-boot data device and can generate the offline recovery identity in volatile storage long enough to hand it off in a verified encrypted recovery kit. Noninteractive setup must supply its storage and custody decisions explicitly. Read [Install](docs/INSTALL.md) before changing a production host.
+Interactive setup can select a suitable non-boot data device and can generate the offline recovery identity only in root-owned volatile storage long enough to hand it off in a verified encrypted recovery kit. Terminal-driven `--auto` uses the same custody flow when no `--offline-recipient` is supplied: install steps remain automatic, while the recovery-kit passphrase and final custody acknowledgement remain interactive. Fully headless `--auto` must supply its storage decisions and an existing public `--offline-recipient`. An explicitly supplied recipient is authoritative and is never replaced by a generated identity. Read [Install](docs/INSTALL.md) before changing a production host.
 
 After setup and external credentials are complete:
 
@@ -68,7 +68,7 @@ From a source checkout, `sudo ./dashboard.sh` is equivalent.
 
 ## Administrator manual
 
-- [Install](docs/INSTALL.md) — blank VM, dedicated storage, `--domain`/`--url`/`--email`, interactive and `--auto`, explicit `--use-latest`, config/secrets completion, and first start.
+- [Install](docs/INSTALL.md) — blank VM, dedicated storage, `--domain`/`--url`/`--email`, interactive and `--auto`, terminal-generated versus pre-existing offline recovery custody, explicit `--use-latest`, config/secrets completion, and first start.
 - [Operations](docs/OPERATIONS.md) — dashboard, lifecycle, status/doctor/logs, config/secrets, Caddy/Cloudflare/CrowdSec, notifications, timers, application updates, host upgrades, reboot-required state, troubleshooting, and file locations.
 - [Recovery](docs/RECOVERY.md) — backup contents/exclusions, verification, same-host restore, lost-server disaster recovery, rclone, and the separate recovery-kit ZIP.
 - [Security](docs/SECURITY.md) — trust boundaries, secret custody, origin protection, `/admin`, notification security, and unsupported designs.
@@ -78,6 +78,6 @@ Maintainer/product authorities are [Project boundary](docs/PROJECT-BOUNDARY.md),
 
 ## Product boundaries worth remembering
 
-Production state is dedicated-storage-only. There is one operator config, one encrypted SOPS secret authority, and one exact version manifest. Normal application recovery is one encrypted `.vwrec` format; the credential recovery-kit ZIP is a separate artifact. Application updates are explicit and recovery-gated. Ubuntu package updates are separate and the appliance never auto-reboots.
+Production state is dedicated-storage-only. There is one operator config, one encrypted SOPS secret authority, and one exact version manifest. Normal application recovery is one encrypted `.vwrec` format; the credential recovery-kit ZIP is a separate artifact. The offline recovery private identity is never persistent server state. Application updates are explicit and recovery-gated. Ubuntu package updates are separate and the appliance never auto-reboots.
 
 There is intentionally no Postfix/local queue, public backup-tier matrix, compatibility reader for an earlier archive format, generic plugin/storage/update framework, broad repair command, HA layer, Kubernetes/Swarm layer, or second dashboard backend.
