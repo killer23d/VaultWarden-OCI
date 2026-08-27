@@ -25,7 +25,7 @@ jobs:
         run: |
           host_root="$(mktemp -d /tmp/vwoci-update-host.XXXXXX)"
           state_file="$(mktemp /tmp/vwoci-update-state.XXXXXX)"
-          trap 'git worktree remove --force /tmp/vwoci-two-back >/dev/null 2>&1 || true; git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; rm -rf "$host_root" "$state_file"' EXIT
+          trap 'git worktree remove --force /tmp/vwoci-two-back >/dev/null 2>&1 || true; git worktree remove --force /tmp/vwoci-previous >/dev/null 2>&1 || true; chmod -R u+w "$host_root" >/dev/null 2>&1 || true; rm -rf "$host_root" "$state_file" || true' EXIT
           git worktree add --detach /tmp/vwoci-two-back 62c509cc1d711ddc6be815abca4e397e99638c74
           git worktree add --detach /tmp/vwoci-previous 63d3d2c9ec7b554cb049c47dc981eb32ba64354d
           PYTHONPATH=/tmp/vwoci-two-back python3 tests/acceptance_previous_update.py install-previous /tmp/vwoci-previous "$host_root"
