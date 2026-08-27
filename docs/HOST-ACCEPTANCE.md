@@ -16,6 +16,7 @@ Cloudflare test zone:
 notification provider:
 rclone remote/path:
 offline Age identity custody verified: yes/no
+setup custody mode: interactive | terminal-auto-generated | explicit-recipient | headless-refusal
 started at:
 completed at:
 result: PASS | FAIL | NOT RUN
@@ -24,11 +25,17 @@ notes:
 
 A release is not accepted for an architecture unless every applicable mandatory section passes.
 
-## 1. Clean install and root-only refusal
+## 1. Clean install, auto custody, and root-only refusal
 
-On a clean host with a real separate data volume, run the supported `setup.sh` path from [Install](INSTALL.md), including one interactive case and one `--auto` case. On separate disposable/root-only state, attempt setup without acceptable separate storage.
+On clean hosts with real separate data volumes, exercise the supported `setup.sh` path from [Install](INSTALL.md) with all applicable first-run custody boundaries:
 
-**PASS:** supported OS/architecture accepted; root-only production install refused; real dedicated volume is mounted at `/var/lib/vaultwarden-oci`; immutable release/current/vwctl/config/secrets exist with correct ownership; setup stops at a truthful external-config/custody checkpoint. **FAIL:** any silent persistent-state fallback to `/` or false success.
+1. one normal interactive install;
+2. one interactive-terminal `--auto` install with no `--offline-recipient`, proving setup-generated offline custody and verified recovery-kit handoff;
+3. one interactive-terminal `--auto` install with an explicit offline recipient, including at least one normal value form such as `--offline-recipient=age1...`, proving the supplied recipient is preserved and no replacement identity is generated;
+4. one fully headless `--auto` invocation without an offline recipient, proving it fails before storage provisioning or other installation mutation;
+5. on separate disposable/root-only state, attempt setup without acceptable separate storage.
+
+**PASS:** supported OS/architecture accepted; root-only production install refused; real dedicated volume is mounted at `/var/lib/vaultwarden-oci`; immutable release/current/vwctl/config/secrets exist with correct ownership; terminal-driven `--auto` without a recipient reaches the verified recovery-kit handoff and removes its transient offline identity after successful custody; an explicit recipient reaches installed config/secrets unchanged and is not replaced; fully headless `--auto` without a recipient fails before storage provisioning; setup stops at a truthful external-config/custody checkpoint. **FAIL:** any silent persistent-state fallback to `/`, explicit-recipient substitution, headless generated private identity, install mutation before missing headless custody is rejected, or false success.
 
 ## 2. Dedicated-volume identity, boot guard, and restart safety
 
@@ -38,9 +45,9 @@ Record `findmnt`, UUID/type, `/etc/vaultwarden-oci/storage-identity.json`, and t
 
 ## 3. Config/secrets and plaintext leakage
 
-Use only `vwctl config edit/validate` and `vwctl secrets edit/validate` for normal configuration. Configure distinct operational/offline Age identities and required test credentials.
+Use only `vwctl config edit/validate` and `vwctl secrets edit/validate` for normal configuration. Configure distinct operational/offline Age identities and required test credentials. For the terminal-auto-generated case, inspect root-owned volatile state before and after the recovery-kit handoff.
 
-**PASS:** encrypted authority is valid/decryptable by the operational identity, offline private identity is not persistent server state, and process listings/logs/operator config/release files contain no plaintext credential leakage.
+**PASS:** encrypted authority is valid/decryptable by the operational identity, the offline private identity is not persistent server state, a setup-generated offline identity exists only in protected volatile storage until handoff and is absent afterward, and process listings/logs/operator config/release files contain no plaintext credential leakage.
 
 ## 4. Exact custom Caddy, Cloudflare trust, and fail-closed origin
 
@@ -81,9 +88,9 @@ Record the local `.vwrec` SHA-256 and independently confirm/verify the remote ob
 
 ## 8. Complete recovery-kit AES-256 ZIP and SMTP email path
 
-Run complete export with the matching offline identity. Inspect process/log/filesystem behavior and exercise SMTP email handoff.
+Run complete export with the matching offline identity. Also exercise the first-run terminal-generated recovery-kit path from section 1. Inspect process/log/filesystem behavior and exercise SMTP email handoff where a real test account is available.
 
-**PASS:** exact documented member set, AES-256 encryption, correct-password test succeeds, wrong/empty/no-password tests fail, passphrase never appears in argv/env/file/email/logs, ZIP verification completes before SMTP, email failure is reported as email failure rather than archive-verification failure, and offline private identity is not left as normal persistent server state.
+**PASS:** exact documented member set, AES-256 encryption, correct-password test succeeds, wrong/empty/no-password tests fail, passphrase never appears in argv/env/file/email/logs, ZIP verification completes before SMTP, email failure is reported as email failure rather than archive-verification failure, the first-run generated kit contains the generated credential values plus both Age private identities, and the setup-generated offline private identity is removed from host-side volatile storage only after successful custody handoff. If handoff is deliberately declined/fails, the transient identity remains protected and setup reports truthful recovery guidance instead of claiming success.
 
 ## 9. Normal stable application update and rollback boundary
 
@@ -108,9 +115,9 @@ sudo vwctl update check --use-latest
 sudo vwctl update apply --use-latest
 ```
 
-Also exercise `setup.sh ... --use-latest` on a separate disposable blank install.
+Also exercise `setup.sh ... --use-latest` on a separate disposable blank install, including the terminal-driven `--auto` path where applicable.
 
-**PASS:** every supported mutable upstream boundary is resolved once to exact refs/digests and no installed image/config/state retains floating `latest` semantics.
+**PASS:** every supported mutable upstream boundary is resolved once to exact refs/digests and no installed image/config/state retains floating `latest` semantics. Supported long-option forms must not bypass the setup warning/confirmation semantics.
 
 ## 11. Update-check timer, host upgrade, and reboot-required handling
 
@@ -131,6 +138,6 @@ Exercise CrowdSec detection/decision with Cloudflare remediation on a safe test 
 
 ## 13. Evidence and cleanup
 
-Collect only secret-free evidence: commit/version, architecture/Ubuntu build, storage identity/mount evidence, exact resolved pins, command/result, doctor JSON, artifact hashes, and external verification notes. Remove acceptance-only hosts/remote objects explicitly and rotate test credentials as appropriate.
+Collect only secret-free evidence: commit/version, architecture/Ubuntu build, storage identity/mount evidence, exact resolved pins, command/result, doctor JSON, artifact hashes, and external verification notes. Do not record generated private identities, recovery-kit passphrases, or plaintext credentials as acceptance evidence. Remove acceptance-only hosts/remote objects explicitly and rotate test credentials as appropriate.
 
 Report each architecture and each external-provider section as `PASS`, `FAIL`, or `NOT RUN`. CI integration that builds Caddy, uses real Age/SOPS/rclone on temporary data, verifies an AES ZIP, or exercises Docker packet rules is valuable, but it is not a substitute for this disposable real-host gate.
