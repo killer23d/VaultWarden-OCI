@@ -9,6 +9,8 @@ VaultWarden-OCI favors explicit ownership over frameworks. Python 3.12 standard-
 - `vaultwarden_oci/storage.py` — dedicated-volume selection, identity, mount/boot guard.
 - `vaultwarden_oci/runtime.py` — config parsing, runtime rendering, lifecycle/status/logs.
 - `vaultwarden_oci/secrets.py` — SOPS/Age custody and volatile secret materialization.
+- `vaultwarden_oci/setup.py` — authoritative setup CLI grammar and blank-VM installation orchestration.
+- `vaultwarden_oci/setup_frontend.py` — thin first-run human wrapper for use-latest confirmation and transient offline-recovery/recovery-kit custody; it must derive custody decisions from the authoritative `setup.py` parser rather than interpreting raw argv independently.
 - `vaultwarden_oci/edge.py` — Cloudflare origin policy and CrowdSec Cloudflare remediation.
 - `vaultwarden_oci/recovery.py` / `recovery_ux.py` — `.vwrec`, rclone, guided restore, recovery-kit flow.
 - `vaultwarden_oci/notification.py` — closed provider catalog rendering/delivery and bounded SMTP fallback.
@@ -17,11 +19,13 @@ VaultWarden-OCI favors explicit ownership over frameworks. Python 3.12 standard-
 - `email-providers.toml` — immutable closed notification metadata.
 - `versions.toml` — exact release/component/image authority.
 
-`setup.sh` and `dashboard.sh` are supported human interfaces but not alternate state owners. Mutations converge on the same Python/`vwctl` owners.
+`setup.sh` and `dashboard.sh` are supported human interfaces but not alternate state owners. Mutations converge on the same Python/`vwctl` owners. The setup frontend may decide whether the supported transient custody handoff is needed, but it does not own storage, installation, SOPS, recovery-kit cryptography, or notification transport.
 
 ## Design invariants
 
 Production state requires dedicated storage. `--use-latest` resolves once to exact immutable values. SOPS/Age operational/offline identities stay separate. `.vwrec` and recovery-kit ZIP stay separate. Caddy trusted-proxy trust and host origin filtering stay separate. CrowdSec remediates through Cloudflare. `/admin` keeps only the small token + rate limit + outer gate stack. Application updates remain recovery-gated/operator-driven; Ubuntu package updates are separate and never auto-reboot.
+
+For first-run custody, `--auto` means automatic installation steps, not permission to invent unsafe headless key custody. With a TTY and no `--offline-recipient`, the frontend may generate the offline identity only in protected volatile storage and hand it off through the existing verified recovery-kit owner. With no TTY, a public recipient is required before installation mutation. Any explicitly supplied recipient is authoritative and must pass unchanged to `setup.main()`. Do not test value-option presence with exact raw-token membership: split (`--offline-recipient value`), equals (`--offline-recipient=value`), and any parser-supported long-option form must have the same meaning in frontend and installer.
 
 The release source has one systemd owner: canonical `systemd/`. Direct source-layout update compatibility is tested only against the explicitly supported predecessor release. The public updater does not expose arbitrary intermediate-release selection, so older unsupported development snapshots are not promised an incremental-hop workflow; they require a fresh supported install/recovery path unless a deliberate transition is implemented. A narrowly constrained installed-release reader may exist only when required to recover from the supported predecessor's already-materialized immutable layout; it must not reintroduce a second repository/source owner.
 
@@ -43,6 +47,8 @@ Permanent validation has three layers only:
 
 Tests protect security, availability, recoverability, and operator truthfulness rather than private source order/text. Do not create a custom runner, coverage gate, giant matrix, or duplicate test architecture.
 
+Setup/custody changes must include regression coverage for terminal `--auto` generation without a recipient, explicit-recipient preservation in both split and equals value forms, parser-supported abbreviation behavior where applicable, complete headless failure before `storage.provision()`, and transient-key cleanup only after successful recovery-kit handoff.
+
 Local core checks mirror CI:
 
 ```bash
@@ -59,7 +65,7 @@ Real-host acceptance is described in [HOST-ACCEPTANCE.md](HOST-ACCEPTANCE.md) an
 2. Change the smallest existing owner; do not create a parallel authority.
 3. Run proportional unit/integration validation and inspect secret/security boundaries.
 4. For release candidates, run disposable real-host acceptance on both supported architectures where environments are available and record unavailable coverage as `NOT RUN`.
-5. Review the complete diff for stale generation/stage naming, duplicate logic, boot-volume fallback, and reintroduced non-goals.
+5. Review the complete diff for stale generation/stage naming, duplicate logic, boot-volume fallback, parser/frontend disagreement, explicit-recipient override risk, and reintroduced non-goals.
 6. Open a reviewable PR; do not self-merge unless the human explicitly instructs it.
 
 Normal product/repository surfaces are release-neutral. Genuine schema, recovery-format, OCI/Docker protocol, semantic component, and immutable project release values remain technical compatibility identifiers and must not be cosmetically rewritten.

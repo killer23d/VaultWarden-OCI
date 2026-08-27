@@ -15,11 +15,11 @@ VaultWarden-OCI is a fresh-install Vaultwarden appliance for a small team of rou
 - `vwctl` is the implementation and mutation authority.
 - `dashboard.sh` is a supported day-2 human interface. One mutation authority does not mean one user interface.
 - The normal first-run human path is `setup.sh`: validate host/storage, install dependencies and appliance content, prepopulate config from operator inputs, assist secrets/recovery custody, then leave an explicit config/secrets -> start path.
-- `setup.sh` supports interactive operation, `--auto`, and an independent explicit `--use-latest` override. `--use-latest` resolves remote versions once to exact immutable values; no floating `latest` state may remain after resolution.
+- `setup.sh` supports interactive operation, `--auto`, and an independent explicit `--use-latest` override. Terminal-driven `--auto` may generate the offline recovery identity transiently when no `--offline-recipient` was supplied, while fully headless `--auto` requires an existing public recipient. An explicitly supplied recipient is authoritative and must not be replaced. `--use-latest` resolves remote versions once to exact immutable values; no floating `latest` state may remain after resolution.
 - One installed operator-editable non-secret config authority under `/etc/vaultwarden-oci` (currently `config.toml`).
 - One source-controlled exact version authority: `versions.toml`.
 - One structured encrypted SOPS secret document.
-- SOPS + Age uses one root-only operational Age private identity and a separate offline recovery identity whose private key is not persistently stored on the server.
+- SOPS + Age uses one root-only operational Age private identity and a separate offline recovery identity whose private key is not persistently stored on the server. During supported first-run terminal custody, that offline private identity may exist only transiently in root-owned volatile storage until verified handoff completes.
 - Vaultwarden application mail uses direct authenticated SMTP.
 - Operational notifications use the existing closed source-controlled provider catalog. Operator config may select supported providers/options but may not define arbitrary endpoints, authentication modes, request templates, success rules, or retry rules.
 - CyberPersons current verified behavior is preserved unless official provider documentation is deliberately re-verified for a focused change: `503 service_unavailable` is status-only transient/retry/fallback eligible; `429 rate_limit_exceeded` and `500 send_failed` are not transient by status alone.
@@ -49,6 +49,8 @@ Preserve lightweight `/admin` defense in depth: Vaultwarden's admin token plus C
 Normal application recovery is one encrypted `.vwrec` format. Restore must validate/decrypt/check/stage before live mutation and retain explicit noninteractive CLI forms for automation. The human restore experience also provides a guided local/remote picker in the useful style of the earlier product.
 
 The recovery-kit ZIP is not an application recovery point. It is a separate credential-handoff artifact using AES-256 ZIP encryption. Its passphrase is entered and confirmed interactively, independent of stored credentials, never supplied through argv/environment/files/email, and the encrypted ZIP must be fully verified before any email attempt.
+
+When first-run setup is attached to an interactive terminal and no `--offline-recipient` was supplied, setup may generate the offline Age identity in root-owned volatile storage, configure only its public recipient, and place the private identity into the verified recovery kit. The private identity is removed from host-side volatile storage only after successful handoff. A fully headless install requires an existing public recipient. Supplying a recipient explicitly selects pre-existing off-host custody and must never trigger generation of a replacement identity.
 
 Normal offsite recovery publication is:
 
@@ -89,12 +91,12 @@ The earlier UI/UX is a design reference; the earlier backend architecture is not
 
 The supported human/operator surfaces include:
 
-- `setup.sh` for normal first-run setup;
+- `setup.sh` for normal first-run setup, including terminal-driven automatic installation plus secure recovery custody;
 - `dashboard.sh` for supported day-2 interactive operation;
 - `vwctl` for authoritative status, diagnostics, automation, and mutations;
 - administrator documentation with exact steps, expected success, and troubleshooting/recovery guidance.
 
-The dashboard must delegate mutations to `vwctl` rather than becoming a second implementation authority.
+The dashboard must delegate mutations to `vwctl` rather than becoming a second implementation authority. The setup frontend may orchestrate first-run custody but must use the authoritative setup parser and existing installation/recovery owners.
 
 ## Naming end state
 

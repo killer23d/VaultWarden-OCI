@@ -4,13 +4,13 @@ VaultWarden-OCI keeps a small explicit trust boundary: one Ubuntu 24.04 applianc
 
 ## Secrets and privilege
 
-`/etc/vaultwarden-oci/config.toml` is non-secret operator configuration. `/etc/vaultwarden-oci/secrets.sops.yaml` is the encrypted credential authority. The root-only operational Age private identity stays on the appliance; the separate offline recovery private identity stays off-host except when explicitly supplied for a recovery operation. Plaintext credentials do not belong in config, release metadata, ordinary logs, argv, or `.vwrec` artifacts.
+`/etc/vaultwarden-oci/config.toml` is non-secret operator configuration. `/etc/vaultwarden-oci/secrets.sops.yaml` is the encrypted credential authority. The root-only operational Age private identity stays on the appliance. The separate offline recovery private identity is never persistent server state: it normally stays off-host, but terminal-driven first-run setup, including `--auto`, may generate it only in root-owned volatile `/run` storage when no `--offline-recipient` was supplied. Only its public recipient is configured; the private identity enters the verified encrypted recovery kit and is removed from host-side volatile storage only after successful custody handoff. Fully headless setup must receive an existing public recipient. If an operator supplies `--offline-recipient` explicitly, that recipient is authoritative and setup must not silently generate or substitute another identity. Plaintext credentials do not belong in config, release metadata, ordinary logs, argv, or `.vwrec` artifacts.
 
-Runtime containers use narrow mounts, fixed non-root identities where applicable, dropped capabilities/read-only roots where applicable, and `no-new-privileges`. Volatile generated/decrypted material belongs under `/run/vaultwarden-oci`.
+Runtime containers use narrow mounts, fixed non-root identities where applicable, dropped capabilities/read-only roots where applicable, and `no-new-privileges`. Volatile generated/decrypted material belongs under `/run/vaultwarden-oci`. A transient setup-generated offline identity is a narrow first-run custody exception to the usual off-host location, not permission to retain that identity under `/run` after successful handoff.
 
 ## Dedicated-storage fail-safe
 
-Production services are not allowed to silently write persistent application/recovery state to `/` if the intended volume is missing. Setup, mutating CLI commands, doctor, and the Docker systemd mount guard prove the dedicated storage identity. Missing or wrong storage is an availability failure, not permission to create replacement state on the boot disk.
+Production services are not allowed to silently write persistent application/recovery state to `/` if the intended volume is missing. Setup, mutating CLI commands, doctor, and the Docker systemd mount guard prove the dedicated storage identity. Missing or wrong storage is an availability failure, not permission to create replacement state on the boot disk. A fully headless `--auto` install that lacks an offline public recipient must fail before storage provisioning or other installation mutation; missing recovery custody is not permission to proceed and repair custody later.
 
 ## Caddy trust versus origin filtering
 
@@ -32,7 +32,7 @@ Vaultwarden application mail uses authenticated encrypted SMTP. Operational SMTP
 
 ## Recovery and update security
 
-A `.vwrec` is encrypted application state and excludes the server operational Age private key. The recovery-kit ZIP is a different credential artifact with AES-256 encryption and an independent interactively entered passphrase. The ZIP must be fully verified before email handoff.
+A `.vwrec` is encrypted application state and excludes the server operational Age private key. The recovery-kit ZIP is a different credential artifact with AES-256 encryption and an independent interactively entered passphrase. The ZIP must be fully verified before email handoff. Terminal-driven `--auto` can automate installation while still requiring this human recovery-kit passphrase/custody boundary when setup generated the offline identity; `--auto` does not weaken that boundary.
 
 Application updates stage exact immutable content, verify a pre-update recovery point, health-gate activation, and refuse unsafe old-binary rollback after possible persistent-state mutation. Ubuntu package changes are a separate recovery domain and the appliance never auto-reboots.
 
