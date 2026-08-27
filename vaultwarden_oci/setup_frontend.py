@@ -5,6 +5,8 @@ human custody step and the supported, explicitly confirmed --use-latest UX.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shutil
 import sys
@@ -54,18 +56,35 @@ def _cleanup_generated(workspace: Path) -> None:
     recovery_ux._cleanup_workspace(workspace)
 
 
+def _parse_install_args(args: Sequence[str]):
+    """Parse setup install argv with the authoritative argparse grammar.
+
+    Parsing failures are deliberately silent here because setup.main remains the
+    owner of user-facing CLI errors. This seam exists only so custody decisions
+    cannot disagree with argparse over split, equals, or abbreviated long forms.
+    """
+    if not args or args[0] != "install":
+        return None
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return setup._parser().parse_args(list(args))
+    except SystemExit:
+        return None
+
+
 def _should_generate(args: Sequence[str]) -> bool:
-    return (
-        bool(args)
-        and args[0] == "install"
-        and "--offline-recipient" not in args
-        and "--dry-run" not in args
+    parsed = _parse_install_args(args)
+    return bool(
+        parsed is not None
+        and parsed.offline_recipient is None
+        and not parsed.dry_run
         and sys.stdin.isatty()
     )
 
 
 def _confirm_use_latest(args: Sequence[str]) -> bool:
-    if not args or args[0] != "install" or "--use-latest" not in args:
+    parsed = _parse_install_args(args)
+    if parsed is None or not parsed.use_latest:
         return True
     warning = (
         "--use-latest bypasses the project's tested release pins. Vaultwarden, Caddy, all xcaddy addon refs, "
@@ -75,7 +94,7 @@ def _confirm_use_latest(args: Sequence[str]) -> bool:
         print(f"\033[33mWARN\033[0m {warning}", file=sys.stderr)
     else:
         print(f"WARN {warning}", file=sys.stderr)
-    if "--auto" in args or not sys.stdin.isatty():
+    if parsed.auto or not sys.stdin.isatty():
         return True
     try:
         answer = input("Continue with this untested exact upstream snapshot? [y/N]: ").strip().lower()
