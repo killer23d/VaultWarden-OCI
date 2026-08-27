@@ -51,14 +51,15 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
         )
         for form in forms:
             args = install_args(*form)
-            with self.subTest(form=form), (
-                mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
-                mock.patch.object(setup_frontend, "_generate_offline_identity") as generate,
-                mock.patch.object(setup_frontend.setup, "main", return_value=0) as setup_main,
-            ):
-                self.assertEqual(setup_frontend.main(args), 0)
-            generate.assert_not_called()
-            setup_main.assert_called_once_with(args)
+            with self.subTest(form=form):
+                with (
+                    mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
+                    mock.patch.object(setup_frontend, "_generate_offline_identity") as generate,
+                    mock.patch.object(setup_frontend.setup, "main", return_value=0) as setup_main,
+                ):
+                    self.assertEqual(setup_frontend.main(args), 0)
+                generate.assert_not_called()
+                setup_main.assert_called_once_with(args)
 
     def test_headless_auto_without_recipient_fails_before_storage_mutation(self) -> None:
         host = mock.Mock(architecture="amd64")
