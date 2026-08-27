@@ -61,6 +61,14 @@ The config editor parses a protected candidate before atomic replacement. The se
 
 **Expected success:** validation passes before restart. **On failure:** the original authority remains installed; correct the candidate through the same command rather than copying plaintext secrets around.
 
+## Recovery custody after setup
+
+The operational Age private identity is normal root-only appliance state. The offline recovery private identity is not. If first-run setup generated the offline identity because a terminal-driven install, including `--auto`, omitted `--offline-recipient`, that private identity exists only temporarily under root-owned volatile `/run/vaultwarden-oci` while the verified recovery-kit handoff is in progress. After successful custody acknowledgement or successful authenticated email handoff, it must be absent from the appliance.
+
+If setup reported a failed or unacknowledged handoff and displayed the transient identity path, secure that exact identity before reboot. Do not delete it and do not rerun setup in a way that creates a different offline identity for config/secrets already addressed to the original recipient. For normal later recovery-kit export, use the off-host identity already in operator custody.
+
+An install performed with an explicit `--offline-recipient` uses that existing off-host custody and does not create a replacement offline private identity. Fully headless `--auto` therefore requires an explicit public recipient.
+
 ## Caddy, Cloudflare origin protection, and `/admin`
 
 Caddy uses exact-pinned Cloudflare DNS, Cloudflare trusted-proxy/real-client-IP, combined-range, and rate-limit modules. Its trusted-proxy module is the single Caddy authority for Cloudflare client-IP trust.
@@ -167,6 +175,7 @@ Application recovery does not roll back apt/kernel changes. The appliance never 
 - **Storage FAIL / service will not start:** `findmnt --target /var/lib/vaultwarden-oci`, then compare with `/etc/vaultwarden-oci/storage-identity.json`. Restore the intended mount; never create replacement data on `/`.
 - **Caddy/origin FAIL:** run `sudo vwctl edge refresh`, then doctor. Do not expose origin 443 directly.
 - **Secrets FAIL:** use `sudo vwctl secrets validate`/`edit`; do not copy decrypted YAML into files or shell history.
+- **Recovery custody incomplete after setup:** preserve the reported transient offline identity before reboot, complete the recovery-kit handoff, and do not generate a replacement identity casually.
 - **Recovery stale/missing:** create and verify a new recovery point before depending on it.
 - **Timer failure:** inspect `vwctl timers` plus the specific service journal.
 - **Update failure:** preserve the verified pre-update recovery point and obey the reported rollback boundary.
@@ -188,4 +197,4 @@ Application recovery does not roll back apt/kernel changes. The appliance never 
 | Stable CLI | `/usr/local/bin/vwctl` |
 | Installed systemd units | `/etc/systemd/system/vaultwarden-oci*` |
 
-The offline recovery private identity and recovery-kit ZIP passphrase do **not** belong in persistent server paths.
+The offline recovery private identity and recovery-kit ZIP passphrase do **not** belong in persistent server paths. During terminal-driven first-run setup only, a generated offline identity may temporarily exist under root-only volatile `/run/vaultwarden-oci`; successful handoff must remove it.
