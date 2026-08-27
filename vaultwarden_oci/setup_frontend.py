@@ -66,7 +66,7 @@ def _parse_install_args(args: Sequence[str]):
     if not args or args[0] != "install":
         return None
     try:
-        with contextlib.redirect_stderr(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return setup._parser().parse_args(list(args))
     except SystemExit:
         return None
