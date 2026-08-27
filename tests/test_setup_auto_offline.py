@@ -85,6 +85,59 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
             self.assertFalse(setup_frontend._confirm_use_latest(args))
         prompt.assert_called_once()
 
+    def test_blank_vm_bootstraps_age_before_generated_identity(self) -> None:
+        events: list[tuple[str, ...] | str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            identity = workspace / "offline.age"
+            identity.write_text("OFFLINE", encoding="utf-8")
+
+            def fake_must(argv, label, *, input_text=None, env=None):
+                del label, input_text, env
+                events.append(tuple(argv))
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            def fake_generate():
+                events.append("generate")
+                return workspace, identity, OFFLINE
+
+            with (
+                mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
+                mock.patch.object(setup.shutil, "which", side_effect=[None, "/usr/bin/age-keygen"]),
+                mock.patch.object(setup.os, "geteuid", return_value=0),
+                mock.patch.object(setup, "_must", side_effect=fake_must),
+                mock.patch.object(setup_frontend, "_generate_offline_identity", side_effect=fake_generate),
+                mock.patch.object(setup_frontend.setup, "main", return_value=1) as setup_main,
+            ):
+                self.assertEqual(setup_frontend.main(install_args()), 1)
+
+        self.assertEqual(
+            events,
+            [
+                ("apt-get", "update"),
+                ("apt-get", "install", "-y", "age"),
+                ("/usr/bin/age-keygen", "--version"),
+                "generate",
+            ],
+        )
+        setup_main.assert_called_once_with([*install_args(), "--offline-recipient", OFFLINE])
+
+    def test_age_bootstrap_failure_does_not_generate_private_identity(self) -> None:
+        with (
+            mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
+            mock.patch.object(
+                setup_frontend.setup,
+                "ensure_recovery_custody_tooling",
+                side_effect=setup.SetupError("Age recovery tooling installation failed: apt unavailable"),
+            ),
+            mock.patch.object(setup_frontend, "_generate_offline_identity") as generate,
+            mock.patch.object(setup_frontend.setup, "main") as setup_main,
+        ):
+            self.assertEqual(setup_frontend.main(install_args()), 1)
+        generate.assert_not_called()
+        setup_main.assert_not_called()
+
     def test_auto_tty_generated_identity_enters_existing_recovery_kit_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -97,6 +150,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
             args = install_args()
             with (
                 mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
+                mock.patch.object(setup_frontend.setup, "ensure_recovery_custody_tooling") as tooling,
                 mock.patch.object(
                     setup_frontend,
                     "_generate_offline_identity",
@@ -111,6 +165,7 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
                 mock.patch("builtins.input", return_value="SAVED"),
             ):
                 self.assertEqual(setup_frontend.main(args), 0)
+            tooling.assert_called_once_with()
             setup_main.assert_called_once_with([*args, "--offline-recipient", OFFLINE])
             export.assert_called_once_with(identity)
             self.assertFalse(workspace.exists())
