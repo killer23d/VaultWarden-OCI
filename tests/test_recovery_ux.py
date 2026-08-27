@@ -428,6 +428,14 @@ class RecoveryKitTests(unittest.TestCase):
 
 
 class SetupRecoveryCustodyTests(unittest.TestCase):
+    @staticmethod
+    def _successful_generated_setup(argv, *, offline_recipient_factory=None):
+        del argv
+        if offline_recipient_factory is None:
+            raise AssertionError("generated custody callback was not supplied")
+        offline_recipient_factory()
+        return 0
+
     def test_setup_frontend_preserves_setup_must_input_and_env_contract(self) -> None:
         env = os.environ.copy()
         env["VWOCI_SETUP_FRONTEND_TEST"] = "yes"
@@ -454,7 +462,7 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
             with (
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
-                mock.patch.object(setup_frontend.setup, "main", return_value=0),
+                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
@@ -477,7 +485,7 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
             with (
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
-                mock.patch.object(setup_frontend.setup, "main", return_value=0),
+                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
@@ -499,7 +507,7 @@ class SetupRecoveryCustodyTests(unittest.TestCase):
             with (
                 mock.patch.object(setup_frontend, "_should_generate", return_value=True),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", return_value=(workspace, identity, OFFLINE)),
-                mock.patch.object(setup_frontend.setup, "main", return_value=0),
+                mock.patch.object(setup_frontend.setup, "main", side_effect=self._successful_generated_setup),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
