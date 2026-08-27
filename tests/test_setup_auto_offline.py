@@ -85,13 +85,18 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
             self.assertFalse(setup_frontend._confirm_use_latest(args))
         prompt.assert_called_once()
 
-    def test_blank_vm_bootstraps_age_before_generated_identity(self) -> None:
+    def test_blank_vm_preflights_then_bootstraps_age_before_generated_identity_and_storage(self) -> None:
         events: list[tuple[str, ...] | str] = []
+        host = mock.Mock(architecture="amd64")
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
             workspace.mkdir()
             identity = workspace / "offline.age"
             identity.write_text("OFFLINE", encoding="utf-8")
+
+            def fake_select(_args, _ui):
+                events.append("preflight")
+                return "/dev/vdb"
 
             def fake_must(argv, label, *, input_text=None, env=None):
                 del label, input_text, env
@@ -102,41 +107,53 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
                 events.append("generate")
                 return workspace, identity, OFFLINE
 
+            def stop_at_provision(*_args, **_kwargs):
+                events.append("provision")
+                raise setup.storage.StorageError("stop after ordering proof")
+
             with (
                 mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
-                mock.patch.object(setup.shutil, "which", side_effect=[None, "/usr/bin/age-keygen"]),
                 mock.patch.object(setup.os, "geteuid", return_value=0),
+                mock.patch.object(setup.install, "validate_host", return_value=host),
+                mock.patch.object(setup, "_select_storage", side_effect=fake_select),
+                mock.patch.object(setup.shutil, "which", side_effect=[None, "/usr/bin/age-keygen"]),
                 mock.patch.object(setup, "_must", side_effect=fake_must),
                 mock.patch.object(setup_frontend, "_generate_offline_identity", side_effect=fake_generate),
-                mock.patch.object(setup_frontend.setup, "main", return_value=1) as setup_main,
+                mock.patch.object(setup.storage, "provision", side_effect=stop_at_provision),
             ):
                 self.assertEqual(setup_frontend.main(install_args()), 1)
 
         self.assertEqual(
             events,
             [
+                "preflight",
                 ("apt-get", "update"),
                 ("apt-get", "install", "-y", "age"),
                 ("/usr/bin/age-keygen", "--version"),
                 "generate",
+                "provision",
             ],
         )
-        setup_main.assert_called_once_with([*install_args(), "--offline-recipient", OFFLINE])
 
-    def test_age_bootstrap_failure_does_not_generate_private_identity(self) -> None:
+    def test_age_bootstrap_failure_stops_after_preflight_before_private_identity_or_storage(self) -> None:
+        host = mock.Mock(architecture="amd64")
         with (
             mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
+            mock.patch.object(setup.os, "geteuid", return_value=0),
+            mock.patch.object(setup.install, "validate_host", return_value=host),
+            mock.patch.object(setup, "_select_storage", return_value="/dev/vdb") as select_storage,
             mock.patch.object(
-                setup_frontend.setup,
+                setup,
                 "ensure_recovery_custody_tooling",
                 side_effect=setup.SetupError("Age recovery tooling installation failed: apt unavailable"),
             ),
             mock.patch.object(setup_frontend, "_generate_offline_identity") as generate,
-            mock.patch.object(setup_frontend.setup, "main") as setup_main,
+            mock.patch.object(setup.storage, "provision") as provision,
         ):
             self.assertEqual(setup_frontend.main(install_args()), 1)
+        select_storage.assert_called_once()
         generate.assert_not_called()
-        setup_main.assert_not_called()
+        provision.assert_not_called()
 
     def test_auto_tty_generated_identity_enters_existing_recovery_kit_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -148,15 +165,22 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
             kit = root / "kit.zip"
             kit.write_bytes(b"encrypted")
             args = install_args()
+            captured: dict[str, object] = {}
+
+            def fake_setup_main(argv, *, offline_recipient_factory=None):
+                captured["argv"] = list(argv)
+                self.assertIsNotNone(offline_recipient_factory)
+                captured["recipient"] = offline_recipient_factory()
+                return 0
+
             with (
                 mock.patch.object(setup_frontend.sys.stdin, "isatty", return_value=True),
-                mock.patch.object(setup_frontend.setup, "ensure_recovery_custody_tooling") as tooling,
                 mock.patch.object(
                     setup_frontend,
                     "_generate_offline_identity",
                     return_value=(workspace, identity, OFFLINE),
                 ),
-                mock.patch.object(setup_frontend.setup, "main", return_value=0) as setup_main,
+                mock.patch.object(setup_frontend.setup, "main", side_effect=fake_setup_main),
                 mock.patch.object(
                     setup_frontend.recovery_ux,
                     "export_recovery_kit",
@@ -165,8 +189,8 @@ class AutoOfflineRecoverySetupTests(unittest.TestCase):
                 mock.patch("builtins.input", return_value="SAVED"),
             ):
                 self.assertEqual(setup_frontend.main(args), 0)
-            tooling.assert_called_once_with()
-            setup_main.assert_called_once_with([*args, "--offline-recipient", OFFLINE])
+            self.assertEqual(captured["argv"], args)
+            self.assertEqual(captured["recipient"], OFFLINE)
             export.assert_called_once_with(identity)
             self.assertFalse(workspace.exists())
             self.assertFalse(identity.exists())
