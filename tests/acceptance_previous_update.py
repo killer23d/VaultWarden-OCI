@@ -6,6 +6,8 @@ import argparse
 import contextlib
 import hashlib
 import json
+import runpy
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -179,21 +181,22 @@ def fail_forward_update(candidate_source: Path, host: Path, state_file: Path) ->
 
 
 def rollback_with_candidate(host: Path, state_file: Path) -> None:
-    """Use candidate-owned recovery to restore data, old code, units, health, and guard state."""
-    from vaultwarden_oci import (
-        cli,
-        install,
-        update,
-        update_appliance,
-        update_guard,
-        update_recovery,
-        update_unit_migration,
-    )
+    """Execute installed candidate vwctl to restore data, old code, units, health, and guard state."""
+    from vaultwarden_oci import cli, install, update, update_appliance, update_guard, update_unit_migration
 
+    layout = install.Layout(host.resolve())
     candidate_root = Path(update_appliance.__file__).resolve().parent.parent
+    expected_candidate_root = layout.path(install.RELEASES_DIR) / CANDIDATE_VERSION
+    if candidate_root != expected_candidate_root.resolve():
+        raise SystemExit(
+            f"rollback imports are not owned by installed candidate {expected_candidate_root}: {candidate_root}"
+        )
     candidate_version = cli.load_versions(candidate_root / "versions.toml").version
     if candidate_version != CANDIDATE_VERSION:
         raise SystemExit(f"expected candidate-owned rollback {CANDIDATE_VERSION}, got {candidate_version}")
+    candidate_vwctl = candidate_root / "vwctl"
+    if not candidate_vwctl.is_file():
+        raise SystemExit(f"installed candidate vwctl is missing: {candidate_vwctl}")
 
     state = json.loads(state_file.read_text(encoding="utf-8"))
     artifact = Path(state["artifact"])
@@ -226,13 +229,55 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
 
         yield Prepared()
 
+    def reconstruct(requested_artifact, requested_sha256, previous_release, candidate_release):
+        if (
+            requested_artifact != artifact
+            or requested_sha256 != state["sha256"]
+            or previous_release != state["previous"]
+            or candidate_release != state["candidate"]
+        ):
+            raise AssertionError("installed candidate vwctl changed the recorded rollback identity")
+        return failure
+
+    original_coherent_rollback = update_appliance.coherent_rollback
+
+    def coherent_rollback(recorded_failure, requested_identity):
+        if recorded_failure is not failure or requested_identity != identity:
+            raise AssertionError("installed candidate vwctl did not pass the reconstructed recovery state through")
+        return original_coherent_rollback(recorded_failure, requested_identity, runner=runner)
+
+    argv = [
+        str(candidate_vwctl),
+        "update",
+        "rollback",
+        "--recovery-artifact",
+        str(artifact),
+        "--recovery-sha256",
+        state["sha256"],
+        "--previous-release",
+        state["previous"],
+        "--candidate-release",
+        state["candidate"],
+        "--identity",
+        str(identity),
+        "--yes",
+        "--json",
+    ]
     with (
         mock.patch.object(update_appliance.storage, "verify"),
         mock.patch.object(update_appliance.update_recovery, "prepare_restore", prepared_restore),
+        mock.patch.object(update_appliance, "reconstruct_failure", side_effect=reconstruct),
+        mock.patch.object(update_appliance, "coherent_rollback", side_effect=coherent_rollback),
+        mock.patch.object(sys, "argv", argv),
     ):
-        update_appliance.coherent_rollback(failure, identity, runner=runner)
+        try:
+            runpy.run_path(str(candidate_vwctl), run_name="__main__")
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                raise SystemExit(f"installed candidate vwctl rollback failed with exit {exc.code}") from exc
+        else:
+            raise SystemExit("installed candidate vwctl did not terminate through its normal entrypoint")
 
-    layout = install.Layout(host.resolve())
     _, active_release, previous = update._current(layout)
     if active_release != PREVIOUS_VERSION:
         raise SystemExit(f"candidate-owned rollback selected {active_release}, expected {PREVIOUS_VERSION}")
@@ -254,7 +299,7 @@ def rollback_with_candidate(host: Path, state_file: Path) -> None:
         raise SystemExit("candidate-owned rollback did not health-check previous doctor state")
 
     print(
-        "PASS: candidate-owned coherent rollback restored predecessor data, release selection, systemd units, health proof, and guard state "
+        "PASS: installed candidate vwctl coherent rollback restored predecessor data, release selection, systemd units, health proof, and guard state "
         f"({CANDIDATE_VERSION} -> {PREVIOUS_VERSION})"
     )
 
