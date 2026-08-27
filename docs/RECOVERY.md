@@ -100,7 +100,7 @@ This is intentionally a different procedure from same-host restore.
    age-keygen -y /secure/offline-age-key.txt
    ```
 
-4. Run `setup.sh install` with the intended domain/URL/email, dedicated data device, and that `age1...` recipient. Complete the new host's operational setup. If you need old credentials to reach Cloudflare/SMTP/rclone, extract the recovery kit on a trusted workstation and enter needed values through `vwctl secrets edit`.
+4. Run `setup.sh install` with the intended domain/URL/email, dedicated data device, and that `age1...` recipient. Supplying the recipient explicitly tells setup to preserve this existing off-host recovery identity; setup must not generate a replacement identity. Complete the new host's operational setup. If you need old credentials to reach Cloudflare/SMTP/rclone, extract the recovery kit on a trusted workstation and enter needed values through `vwctl secrets edit`.
 5. Make the desired `.vwrec` available. If rclone is not configured yet, retrieve the object to a secure local path from another trusted machine rather than weakening the restore contract.
 6. Verify before restore:
 
@@ -121,7 +121,7 @@ This is intentionally a different procedure from same-host restore.
 
 **Expected success:** the known vault state is healthy on the new dedicated volume and operational secrets are again server-encrypted. **On failure:** keep the original `.vwrec` and offline material unchanged, correct the fresh-host prerequisite, and retry on disposable/new state rather than modifying the artifact.
 
-## Recovery-kit export and email
+## Recovery-kit export and first-run handoff
 
 A complete kit contains exactly:
 
@@ -131,7 +131,11 @@ A complete kit contains exactly:
 - `operational-age-identity.txt`
 - `offline-recovery-identity.txt`
 
-Export later with:
+During first-run setup from an interactive terminal, including terminal-driven `--auto`, omitting `--offline-recipient` asks setup to establish this recovery custody for you. Setup generates the separate offline Age private identity only under root-owned volatile `/run/vaultwarden-oci`, passes only its public recipient into the installer, creates and verifies the recovery-kit ZIP, and removes the transient private identity only after successful email handoff or the exact local off-host custody acknowledgement. The recovery-kit passphrase remains an independent interactive secret even when the installation steps use `--auto`.
+
+A fully headless `--auto` run cannot use that generated-key handoff because no operator is present to receive the private identity and passphrase. It must use a pre-existing off-host identity and pass only its public `--offline-recipient`. An explicitly supplied recipient always wins; setup does not silently generate another recovery identity.
+
+Export a later/current kit with an already-custodied offline identity:
 
 ```bash
 sudo vwctl recovery-kit export --offline-identity /secure/offline-age-key.txt
@@ -140,6 +144,8 @@ sudo vwctl recovery-kit export --offline-identity /secure/offline-age-key.txt
 The command proves the supplied offline identity matches config, proves both operational/offline identities decrypt the same current SOPS document, prompts twice for an independent passphrase of at least 16 characters, creates AES-256 ZIP encryption, verifies the exact member set/encryption, proves correct-password success and wrong/empty/no-password failure, then atomically publishes the archive. Email, when configured/chosen, happens only after ZIP verification and sends only the encrypted ZIP through the existing authenticated SMTP owner.
 
 **Password custody:** never put the ZIP passphrase in email, config, secrets, argv, environment, or a file beside the archive. Store or communicate it separately from the ZIP.
+
+**Transient-key custody:** after successful first-run handoff, the setup-generated offline private identity must no longer exist on the appliance. If setup reports a failed handoff and says that the transient identity remains in `/run`, secure that exact identity before reboot; losing it can strand recovery material already addressed to its public recipient.
 
 ## Extract the AES-256 recovery kit
 
