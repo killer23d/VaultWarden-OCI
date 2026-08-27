@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets as pysecrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,7 @@ SOPS_SHA256 = {
     "amd64": "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b",
     "arm64": "53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77",
 }
+AGE_APT_PACKAGE = "age"
 DOCKER_KEY = "https://download.docker.com/linux/ubuntu/gpg"
 DOCKER_SOURCE = Path("/etc/apt/sources.list.d/docker.sources")
 DOCKER_KEYRING = Path("/etc/apt/keyrings/docker.asc")
@@ -68,6 +70,22 @@ def _must(
         detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
         raise SetupError(f"{label} failed: {detail}")
     return result
+
+
+def ensure_recovery_custody_tooling() -> None:
+    """Ensure age-keygen exists before the frontend creates transient custody material."""
+    age_keygen = shutil.which("age-keygen")
+    if age_keygen is None:
+        if os.geteuid() != 0:
+            raise SetupError(
+                "Age recovery tooling is not installed; run setup as root so the Ubuntu age package can be installed"
+            )
+        _must(["apt-get", "update"], "apt package index refresh for Age recovery tooling")
+        _must(["apt-get", "install", "-y", AGE_APT_PACKAGE], "Age recovery tooling installation")
+        age_keygen = shutil.which("age-keygen")
+        if age_keygen is None:
+            raise SetupError("Age recovery tooling installation did not provide age-keygen")
+    _must([age_keygen, "--version"], "Age keygen verification")
 
 
 def _normalize(domain: str, url: str, email: str) -> tuple[str, str, str]:
@@ -172,7 +190,7 @@ def _sha256(path: Path) -> str:
 def _install_dependencies(host_arch: str, ui: UI) -> None:
     ui.header("Dependencies")
     _must(["apt-get", "update"], "apt package index refresh")
-    _must(["apt-get", "install", "-y", "ca-certificates", "curl", "gnupg", "age", "rclone", "7zip", "util-linux"], "Ubuntu dependency installation")
+    _must(["apt-get", "install", "-y", "ca-certificates", "curl", "gnupg", AGE_APT_PACKAGE, "rclone", "7zip", "util-linux"], "Ubuntu dependency installation")
     DOCKER_KEYRING.parent.mkdir(parents=True, exist_ok=True)
     _must(["curl", "-fsSL", DOCKER_KEY, "-o", str(DOCKER_KEYRING)], "Docker repository key download")
     os.chmod(DOCKER_KEYRING, 0o644)
