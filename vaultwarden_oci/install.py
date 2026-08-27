@@ -43,9 +43,6 @@ RUNTIME_TRANSIENT_DIR = RUNTIME_ROOT / "transient"
 VWCTL_LINK = Path("/usr/local/bin/vwctl")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 SYSTEMD_SOURCE_DIR = "systemd"
-# Source-only compatibility input for the immediately preceding updater.
-# New release staging deliberately ignores this directory.
-PREVIOUS_SYSTEMD_SOURCE_DIR = "systemd-v2"
 SYSTEMD_UNITS = (
     "vaultwarden-oci.target",
     "vaultwarden-oci.service",

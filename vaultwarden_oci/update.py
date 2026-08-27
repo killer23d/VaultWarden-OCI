@@ -83,17 +83,6 @@ def _gate_current(layout: install.Layout, runner: Runner) -> None:
         raise UpdateError(f"current doctor gate failed: {_detail(doctor)}")
 
 
-def _release_content_directory(root: Path, name: str) -> Path:
-    canonical = root / name
-    if canonical.is_dir() and not canonical.is_symlink():
-        return canonical
-    if name == install.SYSTEMD_SOURCE_DIR:
-        previous = root / install.PREVIOUS_SYSTEMD_SOURCE_DIR
-        if previous.is_dir() and not previous.is_symlink():
-            return previous
-    return canonical
-
-
 def _selected_release_content(root: Path) -> dict[str, bytes | None]:
     result: dict[str, bytes | None] = {}
     for name in install.RELEASE_FILES:
@@ -102,7 +91,7 @@ def _selected_release_content(root: Path) -> dict[str, bytes | None]:
             raise UpdateError(f"release content is missing or unsafe: {path}")
         result[name] = path.read_bytes()
     for name in install.RELEASE_DIRS:
-        base = _release_content_directory(root, name)
+        base = root / name
         if base.is_symlink() or not base.is_dir():
             raise UpdateError(f"release content is missing or unsafe: {base}")
         result[name + "/"] = None
