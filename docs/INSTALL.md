@@ -11,7 +11,7 @@ findmnt -n -o SOURCE,FSTYPE,TARGET --target /
 lsblk -p -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,UUID,MODEL
 ```
 
-For noninteractive setup, create an offline Age identity on a trusted separate workstation and keep its private key off the appliance. Pass only its `age1...` public recipient to setup.
+For fully headless noninteractive setup, create an offline Age identity on a trusted separate workstation and keep its private key off the appliance. Pass only its `age1...` public recipient to setup. When `--auto` is run from an interactive terminal and no `--offline-recipient` is supplied, setup can instead generate the offline identity transiently and hand it off through the verified encrypted recovery kit after installation.
 
 **Expected success:** a clearly separate candidate volume is visible. **On failure:** attach or correct dedicated storage before continuing; do not create application state on `/`.
 
@@ -44,7 +44,9 @@ When no `--offline-recipient` is supplied in an interactive TTY, setup generates
 
 `--auto` never guesses storage, never implies format/adoption consent, and does not imply `--use-latest`.
 
-Existing ext4/xfs filesystem:
+When `--auto` is launched from an interactive terminal, omitting `--offline-recipient` uses the same transient offline-identity and verified recovery-kit custody flow described above. The install steps remain automatic, but the recovery-kit passphrase and final custody acknowledgement remain interactive security boundaries. A fully headless `--auto` run still requires an explicit public `--offline-recipient` because there is no safe channel to hand a newly generated private identity to an absent operator.
+
+Existing ext4/xfs filesystem with a pre-existing offline recipient:
 
 ```bash
 sudo ./setup.sh install \
@@ -59,7 +61,7 @@ sudo ./setup.sh install \
 
 For a blank device that setup is allowed to format, use `--confirm-format` instead of `--accept-existing-filesystem`. An interrupted blank-device setup may accept the same `--confirm-format --auto` rerun only when the independent host identity and volume marker prove that the filesystem is the one initialized by that prior attempt.
 
-**Expected success:** the selected device is the canonical dedicated state filesystem and exact release content is installed. **On failure:** do not switch devices or confirmations casually; inspect the reported identity/mount condition first.
+**Expected success:** the selected device is the canonical dedicated state filesystem and exact release content is installed. If setup generated the offline identity, success also includes a verified encrypted recovery-kit handoff containing the generated credential values and both Age private identities. **On failure:** do not switch devices or confirmations casually; inspect the reported identity/mount condition first.
 
 ## Explicit `--use-latest`
 
